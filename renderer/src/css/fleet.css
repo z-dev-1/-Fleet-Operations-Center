@@ -1578,3 +1578,190 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 
 /* ── Empty state ─────────────────────────────────────────────── */
 .an-empty { font-size: 11px; color: var(--mut); font-style: italic; }
+
+/* =============================================================
+   Stage 14 additions — fleet.css
+   Vendor management view.
+   All rules additive — no existing rules modified.
+   ============================================================= */
+
+/* ── View shell ──────────────────────────────────────────────── */
+.view--vendors {
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── Panel (list + drill share this shell) ───────────────────── */
+.vm-panel {
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+}
+
+/* ── Header ──────────────────────────────────────────────────── */
+.vm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid var(--bdr);
+  flex-shrink: 0;
+}
+.vm-header__left    { display: flex; flex-direction: column; gap: 2px; }
+.vm-header__actions { display: flex; gap: 8px; align-items: center; }
+.vm-title           { font-size: 14px; font-weight: 700; color: var(--txt); }
+.vm-subtitle        { font-size: 10px; color: var(--mut); font-family: var(--mono); }
+
+/* ── Search input ────────────────────────────────────────────── */
+.vm-search-input {
+  height: 28px;
+  padding: 0 10px;
+  background: var(--bg);
+  border: 1px solid var(--bdr);
+  border-radius: 5px;
+  color: var(--txt);
+  font-size: 11px;
+  font-family: var(--mono);
+  width: 180px;
+  outline: none;
+  transition: border-color .15s;
+}
+.vm-search-input:focus { border-color: var(--acc); }
+.vm-search-input::placeholder { color: var(--mut); }
+
+/* ── Summary KPI strip ───────────────────────────────────────── */
+.vm-strip {
+  display: flex;
+  gap: 10px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--bdr);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.vm-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 14px;
+  background: var(--el);
+  border: 1px solid var(--bdr);
+  border-radius: 7px;
+  min-width: 90px;
+}
+.vm-kpi--warn   { border-left: 3px solid #f0a800; }
+.vm-kpi--risk   { border-left: 3px solid var(--red, #ff7b72); }
+.vm-kpi--cost   { border-left: 3px solid var(--acc); }
+.vm-kpi__val    { font-size: 20px; font-weight: 700; font-family: var(--mono); color: var(--txt); line-height: 1; }
+.vm-kpi__lbl    { font-size: 9px; color: var(--mut); font-family: var(--mono); letter-spacing: 1px; text-transform: uppercase; }
+
+/* ── Scrollable body ─────────────────────────────────────────── */
+.vm-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 20px 24px;
+}
+
+/* ── Shared table styles ─────────────────────────────────────── */
+.vm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.vm-table th {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--mut);
+  font-weight: 700;
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--bdr);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 1;
+}
+.vm-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(48,54,61,.4);
+  color: var(--txt);
+  font-size: 11px;
+  vertical-align: middle;
+}
+.vm-table tbody tr:hover td { background: rgba(255,255,255,.03); }
+
+/* ── Vendor list table ───────────────────────────────────────── */
+.vm-vendor-row {
+  cursor: pointer;
+  transition: background .1s;
+}
+.vm-vendor-row:hover td { background: rgba(88,166,255,.06) !important; }
+.vm-vendor-name {
+  font-weight: 700;
+  color: var(--acc);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* ── Drill table ─────────────────────────────────────────────── */
+.vm-drill-scroll {
+  overflow-x: auto;
+  width: 100%;
+}
+.vm-table--drill { min-width: 900px; }
+.vm-unit-id { font-family: var(--mono); font-size: 11px; font-weight: 600; }
+.vm-unit-link {
+  color: var(--acc);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.vm-unit-link:hover { opacity: .75; }
+.vm-tbl--r      { text-align: right !important; white-space: nowrap; }
+.vm-tbl--mono   { font-family: var(--mono); }
+.vm-tbl--reason { max-width: 160px; color: var(--txt2); font-size: 10px; }
+.vm-tbl--cause  { max-width: 200px; color: var(--txt2); font-size: 10px; }
+.vm-cell--warn   { color: #f0a800 !important; font-weight: 600; }
+.vm-cell--danger { color: var(--red, #ff7b72) !important; font-weight: 600; }
+.vm-cell--accent { color: var(--acc) !important; font-weight: 600; }
+.vm-cell--cost   { color: var(--grn, #3fb950) !important; font-weight: 600; }
+
+/* ── Risk badge (vendor management) ─────────────────────────── */
+.vm-risk-badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.vm-risk-badge--risk-high { background: rgba(255,123,114,.15); color: var(--red, #ff7b72); border: 1px solid rgba(255,123,114,.25); }
+.vm-risk-badge--risk-med  { background: rgba(240,168,0,.12);   color: #f0a800;             border: 1px solid rgba(240,168,0,.25); }
+.vm-risk-badge--risk-low  { background: rgba(63,185,80,.1);    color: var(--grn, #3fb950); border: 1px solid rgba(63,185,80,.2); }
+
+/* ── Lifecycle coloring (drill table) ────────────────────────── */
+.vm-table td.lc--unavailable { color: var(--red, #ff7b72); font-weight: 600; }
+.vm-table td.lc--available   { color: var(--grn, #3fb950); }
+
+/* ── External links ──────────────────────────────────────────── */
+.vm-link {
+  color: var(--acc);
+  text-decoration: none;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.vm-link:hover { text-decoration: underline; }
+
+/* ── Empty state ─────────────────────────────────────────────── */
+.vm-empty {
+  display: block;
+  padding: 24px 0;
+  font-size: 11px;
+  color: var(--mut);
+  font-style: italic;
+  text-align: center;
+}
