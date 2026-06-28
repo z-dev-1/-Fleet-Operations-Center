@@ -1096,6 +1096,20 @@ chk('S17-T1: toolbar has tb-vendors button',                 'tb-vendors' in _tb
 chk("S17-T2: toolbar emits view-change to vendors",         "to: 'vendors'" in _tb)
 chk('S18-T1: toolbar has tb-email-composer button',          'tb-email-composer' in _tb)
 chk("S18-T2: toolbar emits view-change to email-composer",   "to: 'email-composer'" in _tb)
+
+# -- Stage 19 checks (schedulers.js wired into app.js + toolbar) ----------------
+with open('/home/zilasant/fleet/version_c/renderer/src/js/app.js') as _f: _app = _f.read()
+with open('/home/zilasant/fleet/version_c/renderer/src/js/components/toolbar.js') as _f: _tb  = _f.read()
+with open('/home/zilasant/fleet/version_c/renderer/src/js/views/schedulers.js', errors='replace') as _f: _sc  = _f.read()
+
+chk('S19-1: app.js imports initSchedulers', 'initSchedulers' in _app and 'schedulers.js' in _app)
+chk('S19-2: app.js calls initSchedulers(viewsMount)', 'initSchedulers(viewsMount)' in _app)
+chk('S19-3: app.js grabs view-schedulers element', 'view-schedulers' in _app)
+chk('S19-4: app.js routes schedulers in view-change', 'schedulersView.style.display' in _app)
+chk('S19-5: schedulers.js exports init', 'export function init' in _sc or 'function init' in _sc)
+chk('S19-6: schedulers.js handles ui:view-change', 'ui:view-change' in _sc)
+chk('S19-T1: toolbar has tb-schedulers button', 'tb-schedulers' in _tb)
+chk('S19-T2: toolbar emits view-change to schedulers', "to: 'schedulers'" in _tb)
 # ── Cross-module checks ──────────────────────────────────────────────────────
 chk('fleet-bridge.js LF only',                          '\r' not in fb)
 chk('notes-bridge.js LF only',                          '\r' not in nb)

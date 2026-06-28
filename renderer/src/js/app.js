@@ -74,6 +74,7 @@ function boot() {
   const analyticsView     = document.getElementById('view-analytics');
   const vendorsView       = document.getElementById('view-vendors');
   const emailComposerView = document.getElementById('view-email-composer');
+  const schedulersView       = document.getElementById('view-schedulers');
 
   bus.on('ui:view-change', ({ to }) => {
     if (fleetView)         fleetView.style.display         = to === 'fleet'          ? 'flex' : 'none';
@@ -81,6 +82,7 @@ function boot() {
     if (analyticsView)     analyticsView.style.display     = to === 'analytics'      ? 'flex' : 'none';
     if (vendorsView)       vendorsView.style.display       = to === 'vendors'        ? 'flex' : 'none';
     if (emailComposerView) emailComposerView.style.display = to === 'email-composer' ? 'flex' : 'none';
+    if (schedulersView)       schedulersView.style.display       = to === 'schedulers'       ? 'flex' : 'none';
   });
 
   // Close detail panel when switching views
