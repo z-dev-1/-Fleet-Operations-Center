@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld('fleet', {
   onData:       (cb) => on('fleet:data', cb),
   onStatus:     (cb) => on('fleet:status', cb),
   onError:      (cb) => on('fleet:error', cb),
+  // S7: structured auth-failure payload { code, message } for session-expiry errors
+  onAuthFailure:(cb) => on('fleet:auth-failure', cb),
   signalReady:  ()  => ipcRenderer.send('renderer:ready'),
   requestSync:  ()  => ipcRenderer.send('fleet:request-sync'),
   forceSync:    ()  => ipcRenderer.invoke('fleet:force-scan'),

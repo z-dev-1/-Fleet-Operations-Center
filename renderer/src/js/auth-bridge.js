@@ -11,6 +11,7 @@
  *   A. Injects #auth-status-bar pill row into .topbar-right (before .live-ind)
  *   B. Updates .cp-st text in the Orcha AI chat panel header
  *   C. Listens on auth.onMwinitStatus for real-time mwinit progress toasts
+ *   D. (S7) fleet:auth-failure -> amber mwinit prompt banner + OS notification
  *
  * Poll interval: every 5 minutes (300 000 ms).
  * First poll: 2 s after DOMContentLoaded (non-blocking startup).
@@ -218,7 +219,120 @@
     });
   }
 
-  /* ── 7. Boot ────────────────────────────────────────────────────────── */
+    /* ── 7. fleet:auth-failure -> mwinit prompt (Stage 7) ─────────────────── */
+
+  /**
+   * Inject (or replace) a fixed amber banner at top of viewport.
+   * Includes a "Run mwinit" button that calls window.auth.runMwinit().
+   * Dismiss (x) always available. Banner auto-dismisses after mwinit completes.
+   */
+  function _showMwinitPrompt(code) {
+    var existing = document.getElementById('mwinit-prompt-bar');
+    if (existing) existing.remove();
+
+    var bar = document.createElement('div');
+    bar.id = 'mwinit-prompt-bar';
+    bar.setAttribute('data-code', code || '');
+    bar.style.cssText = [
+      'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:9999',
+      'background:#b45309', 'color:#fff',
+      'padding:8px 16px', 'font-size:13px',
+      'display:flex', 'align-items:center', 'gap:10px',
+      'box-shadow:0 2px 6px rgba(0,0,0,.4)',
+    ].join(';');
+    bar.innerHTML = [
+      '<span id="mwinit-prompt-msg">',
+        'Midway session expired — run ',
+        '<code style="background:rgba(255,255,255,.15);padding:1px 5px;border-radius:3px;">',
+          'mwinit',
+        '</code>',
+        ' to re-authenticate',
+      '</span>',
+      '<button id="mwinit-prompt-btn" style="',
+        'background:#fff;color:#b45309;border:none;border-radius:4px;',
+        'padding:3px 10px;cursor:pointer;font-size:12px;font-weight:600;',
+        'white-space:nowrap;flex-shrink:0;">Run mwinit</button>',
+      '<button id="mwinit-prompt-dismiss" style="',
+        'background:transparent;color:#fff;border:none;font-size:18px;',
+        'cursor:pointer;margin-left:auto;line-height:1;padding:0 4px;opacity:.8;">',
+        '×</button>',
+    ].join('');
+
+    document.body.prepend(bar);
+
+    document.getElementById('mwinit-prompt-btn').addEventListener('click', function () {
+      var msgEl = document.getElementById('mwinit-prompt-msg');
+      var btnEl = document.getElementById('mwinit-prompt-btn');
+      if (msgEl) msgEl.textContent =
+        'Launching mwinit — complete authentication in the terminal window…';
+      if (btnEl) { btnEl.disabled = true; btnEl.style.opacity = '.5'; }
+      if (window.auth && typeof window.auth.runMwinit === 'function') {
+        window.auth.runMwinit().catch(function () {});
+      }
+    });
+
+    document.getElementById('mwinit-prompt-dismiss').addEventListener('click', function () {
+      var b = document.getElementById('mwinit-prompt-bar');
+      if (b) b.remove();
+    });
+  }
+
+  /**
+   * Update the banner message based on mwinit progress events.
+   * Called by the auth:mwinit-status subscription below and the existing
+   * registerMwinitListener handler.
+   */
+  function _updateMwinitPrompt(status) {
+    var msgEl = document.getElementById('mwinit-prompt-msg');
+    if (!msgEl) return;
+    if (status === 'launched') {
+      msgEl.textContent = 'mwinit launched — complete auth in terminal, then click Sync Now';
+      setTimeout(function () {
+        var b = document.getElementById('mwinit-prompt-bar');
+        if (b) b.remove();
+      }, 15000);
+    } else if (status === 'complete') {
+      msgEl.textContent = 'mwinit complete — click Sync Now to retry';
+      setTimeout(function () {
+        var b = document.getElementById('mwinit-prompt-bar');
+        if (b) b.remove();
+      }, 8000);
+    } else if (typeof status === 'string' && status.startsWith('error:')) {
+      msgEl.textContent = 'mwinit failed to launch: ' + status.slice(6);
+    }
+  }
+
+  /**
+   * Wire fleet:auth-failure via window.__fleet_bus (exposed by bridge.js init()).
+   * Falls back gracefully if bus not yet set -- defers to DOMContentLoaded.
+   */
+  function registerAuthFailureHandler() {
+    function _attach(bus) {
+      bus.on('fleet:auth-failure', function (payload) {
+        _showMwinitPrompt(payload && payload.code);
+        if (window.app && typeof window.app.notify === 'function') {
+          window.app.notify(
+            'Fleet: Midway session expired',
+            'Run mwinit to re-authenticate, then click Sync Now'
+          ).catch(function () {});
+        }
+      });
+      // Update prompt banner on mwinit progress events
+      bus.on('auth:mwinit-status', function (msg) {
+        _updateMwinitPrompt(typeof msg === 'string' ? msg : (msg && msg.status));
+      });
+    }
+
+    if (window.__fleet_bus) {
+      _attach(window.__fleet_bus);
+    } else {
+      document.addEventListener('DOMContentLoaded', function () {
+        if (window.__fleet_bus) _attach(window.__fleet_bus);
+      });
+    }
+  }
+
+/* ── 8. Boot ─────────────────────────────────────────────────────────── */
   function boot() {
     if (!HAS_ANY) {
       mountDevBar();
@@ -233,6 +347,7 @@
     if (HAS_AI_TEST) setPill('orcha',  'ORCHA',  null);
 
     registerMwinitListener();
+    registerAuthFailureHandler();
 
     // First poll: slight delay so app is fully rendered
     setTimeout(function () {
@@ -250,20 +365,23 @@
       ' slack=' + HAS_SLACK + ' orcha=' + HAS_AI_TEST + ')');
   }
 
-  /* ── 8. Debug handle ────────────────────────────────────────────────── */
+  /* ── 9. Debug handle ─────────────────────────────────────────────────── */
   window._authBridge = {
-    version:    '1.0.0',
-    HAS_AUTH:    HAS_AUTH,
-    HAS_SLACK:   HAS_SLACK,
-    HAS_AI_TEST: HAS_AI_TEST,
-    state:       _state,
-    pollNow:     function () { return pollAll(); },
-    checkMidway: checkMidway,
-    checkSlack:  checkSlack,
-    checkOrcha:  checkOrcha,
+    version:            '2.0.0',
+    HAS_AUTH:            HAS_AUTH,
+    HAS_SLACK:           HAS_SLACK,
+    HAS_AI_TEST:         HAS_AI_TEST,
+    state:               _state,
+    pollNow:             function () { return pollAll(); },
+    checkMidway:         checkMidway,
+    checkSlack:          checkSlack,
+    checkOrcha:          checkOrcha,
+    // S7: test helpers
+    showMwinitPrompt:    _showMwinitPrompt,
+    updateMwinitPrompt:  _updateMwinitPrompt,
   };
 
-  /* ── 9. Start ───────────────────────────────────────────────────────── */
+  /* ── 10. Start ────────────────────────────────────────────────────────── */
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
   } else {

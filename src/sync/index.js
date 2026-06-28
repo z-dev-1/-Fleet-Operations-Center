@@ -78,6 +78,14 @@ function createSyncEngine(ctx) {
         await ctx.ensureAuthenticated(ctx.getMainWindow());
       } catch (authErr) {
         ctx.pushError('Login cancelled or timed out: ' + authErr.message);
+        // S7: fire structured auth-failure for session-expiry codes so the
+        // renderer can show the mwinit prompt. User-cancel has no .code.
+        const _isSessionErr = authErr.code === 'RELAY_SESSION_INVALID' ||
+                              authErr.code === 'MIDWAY_SESSION_INVALID';
+        if (_isSessionErr) {
+          logger.warn('[Sync] Auth session failure — code:', authErr.code);
+          ctx.pushAuthFailure({ code: authErr.code, message: authErr.message });
+        }
         ctx.isSyncing = false;
         return;
       }

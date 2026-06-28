@@ -139,6 +139,8 @@ app.whenReady().then(async () => {
     pushData:     _pushData,
     pushStatus:   _pushStatus,
     pushError:    _pushError,
+    // S7: structured auth-failure channel — carries { code, message } for session errors
+    pushAuthFailure: (payload) => _send('fleet:auth-failure', payload),
     send:         _send,
 
     // Alias expected by IPC handlers

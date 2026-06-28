@@ -38,6 +38,14 @@ export function init() {
     bus.emit('fleet:error', err);
   });
 
+  // S7: structured auth-failure — session-expiry codes (RELAY_SESSION_INVALID /
+  // MIDWAY_SESSION_INVALID) arrive here; auth-bridge.js picks up via __fleet_bus
+  if (window.fleet.onAuthFailure) {
+    window.fleet.onAuthFailure((payload) => {
+      bus.emit('fleet:auth-failure', payload);
+    });
+  }
+
   // Orcha AI progress
   window.ai.onProgress((p) => {
     const prog = state.slice('sync').orcaProgress;
@@ -75,6 +83,9 @@ export function init() {
 
   // Signal renderer ready -- triggers cached-data push from main
   window.fleet.signalReady();
+
+  // S7: expose bus for legacy non-ESM IIFEs (auth-bridge.js) that cannot import bus.js
+  window.__fleet_bus = bus;
 }
 
 // ── Fleet ──────────────────────────────────────────────────────────────────
