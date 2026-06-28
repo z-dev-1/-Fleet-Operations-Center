@@ -13,6 +13,9 @@
  *   - Issue #10: adaptive:extract BrowserWindow always closed via try/finally
  *   - Issue #17: aap:set-lifecycle uses ScraperError + safeIPC wrapper
  *   - All handlers migrated to handle() wrapper
+ *
+ * Stage 5 Step 2 hardening (2026-06-28):
+ *   - H-3: uptake:scrape + relay:scrape IPC handlers with concurrency locks
  */
 
 const { BrowserWindow, session: eSession } = require('electron');
@@ -30,6 +33,8 @@ const GEOFENCE_IPC_TIMEOUT = 90_000; // Stage 5 C-1: IPC belt -- scraper has own
 // Module-level: survive across IPC calls within the same process lifetime.
 let _wrLock       = false;   // aap:create-wr
 let _adaptiveLock = false;   // aap:adaptive
+let _uptakeLock   = false;   // H-3: uptake:scrape
+let _relayLock    = false;   // H-3: relay:scrape
 
 function registerScrapersIPC(ctx) {
   const send     = ctx.sendToWindow;
@@ -212,6 +217,51 @@ function registerScrapersIPC(ctx) {
     }
   });
 
+
+  // ── uptake:scrape ────────────────────────────────────────────────────────
+  // H-3: IPC-level concurrency guard mirrors the scraper's own _uptakeLock.
+  // Two checks in series: the IPC lock fires first (synchronous), then the
+  // scraper lock fires if a non-IPC caller (e.g. sync/index.js) has already
+  // acquired the scraper-level lock. Both return the same error shape.
+  handle('uptake:scrape', async () => {
+    if (_uptakeLock) {
+      throw new ScraperError('uptake:scrape operation already in progress', 'uptake:scrape');
+    }
+    _uptakeLock = true;
+    try {
+      const { scrapeUptake } = require('../../src/scrapers/uptake');
+      const result = await scrapeUptake();
+      return result;
+    } finally {
+      _uptakeLock = false;
+    }
+  });
+
+  // ── relay:scrape ─────────────────────────────────────────────────────────
+  // H-3: IPC-level concurrency guard mirrors the scraper's own _relayLock.
+  // aapRows + relayCache pulled from store — callers do not need to supply them.
+  handle('relay:scrape', async () => {
+    if (_relayLock) {
+      throw new ScraperError('relay:scrape operation already in progress', 'relay:scrape');
+    }
+    _relayLock = true;
+    try {
+      const { scrapeRelay } = require('../../src/scrapers/relay');
+      const store           = require('../store');
+      const relayCache      = store.load('relayCache', {});
+      const aapCache        = store.load('aapCache',   { rows: [] });
+      const aapRows         = aapCache.rows || [];
+      const logs            = [];
+      const onBatch = (batch) => { if (send) send('relay:progress', batch); };
+      const result  = await scrapeRelay(aapRows, onBatch, relayCache);
+      if (result && result.updatedCache) {
+        store.save('relayCache', result.updatedCache);
+      }
+      return result;
+    } finally {
+      _relayLock = false;
+    }
+  });
   logger.info('Scrapers IPC handlers registered');
 }
 

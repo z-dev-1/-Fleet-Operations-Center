@@ -23,6 +23,9 @@ const MAX_CONCURRENT    = 5; // 5 concurrent units (~10 BrowserViews)
 const PAGE_TIMEOUT_MS   = 35000;   // extra headroom for WO tab settle
 const PAGE_SETTLE_MS    = 3000;
 const WO_TAB_SETTLE_MS  = 4000;
+// H-3: concurrency lock — prevents duplicate batch scrapes on re-entrant calls
+let _relayLock = false;
+
 
 // ── FleetNet guard ────────────────────────────────────────────────────────────
 const SKIP_VENDOR_PATTERNS = ['fleetnet', 'fleet net'];
@@ -723,6 +726,13 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
 
 // ── Batch scrape all unavailable units ───────────────────────────────────────
 async function scrapeRelay(aapRows, onBatchDone, relayCache) {
+  // H-3: block duplicate concurrent scrapes
+  if (_relayLock) {
+    logger.warn('[Relay] scrapeRelay() already in progress — aborting duplicate call');
+    return { results: {}, updatedCache: relayCache || {}, _skipped: true };
+  }
+  _relayLock = true;
+  try {
   const targets = (aapRows || []).filter(r =>
     r.lifecycleState && r.lifecycleState.toUpperCase() === 'UNAVAILABLE' && r.equipmentId
   );
@@ -763,6 +773,9 @@ async function scrapeRelay(aapRows, onBatchDone, relayCache) {
   logger.info('[Relay] Complete:', Object.keys(results).length, '/', targets.length,
     'units |', cacheHits, 'cache hits |', skippedFleetNet, 'FleetNet skips');
   return { results, updatedCache };
+  } finally {
+    _relayLock = false;
+  }
 }
 
 // ── Merge relay data + Tier 3 saved notes into AAP rows ──────────────────────

@@ -39,7 +39,10 @@ const REALM_CALLBACK      = /#.*\bcode=/i;
 const MIDWAY_PATTERN      = /midway|signin\.aws|sso\.amazon|oidc|oauth|federate\.amazon/i;
 const PARTITION           = '';
 
-const MASTER_TIMEOUT_MS   = 180000; // Stage 5 C-2: 3 min cap (was 15 min) -- isSyncing clears promptly on hang
+const MASTER_TIMEOUT_MS   = 180000;
+// H-3: concurrency lock — prevents duplicate BrowserWindow farms on re-entrant calls
+let _uptakeLock = false;
+ // Stage 5 C-2: 3 min cap (was 15 min) -- isSyncing clears promptly on hang
 const PAGE_LOAD_TIMEOUT   = 40000;  // per-page: 40s to handle slow CB reloads
 const DOM_POLL_INTERVAL   = 800;    // ms between DOM-ready checks
 const DOM_POLL_MAX        = 50;     // max polls (~40 seconds) — asset overview pages load slowly
@@ -531,7 +534,14 @@ const SCRAPE_AFTER_READMORE = `(function() {
 
 // ─── Main scrape function ─────────────────────────────────────────────────────
 async function scrapeUptake() {
-  return new Promise((resolve) => {
+  // H-3: block duplicate concurrent scrapes
+  if (_uptakeLock) {
+    fwarn('[Uptake] scrapeUptake() already in progress — aborting duplicate call');
+    return { units: [], count: 0, scrapedAt: new Date().toISOString(), _skipped: true };
+  }
+  _uptakeLock = true;
+  try {
+  return await new Promise((resolve) => {
     let settled  = false;
     let authDone = false;
 
@@ -835,6 +845,9 @@ async function scrapeUptake() {
     flog('[Uptake] Starting auth...');
     win.loadURL(UPTAKE_LOGIN_URL);
   });
+  } finally {
+    _uptakeLock = false;
+  }
 }
 
 // ─── Merge Uptake units into AAP rows by equipment ID ────────────────────────
