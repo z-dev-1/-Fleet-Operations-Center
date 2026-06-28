@@ -46,6 +46,15 @@ export function init(container) {
       <button id="tb-schedulers" class="toolbar__btn" title="Schedulers">
         ⏱ Schedulers
       </button>
+      <button id="tb-analytics" class="toolbar__btn" title="Analytics">
+        Analytics
+      </button>
+      <button id="tb-vendors" class="toolbar__btn" title="Vendors">
+        Vendors
+      </button>
+      <button id="tb-email-composer" class="toolbar__btn" title="Email Composer">
+        Email
+      </button>
     </div>
   `;
   container.appendChild(el);
@@ -85,6 +94,21 @@ export function init(container) {
   // Schedulers button
   document.getElementById('tb-schedulers').addEventListener('click', () => {
     bus.emit('ui:view-change', { from: 'fleet', to: 'schedulers' });
+  });
+
+  // Analytics button
+  document.getElementById('tb-analytics').addEventListener('click', () => {
+    bus.emit('ui:view-change', { from: 'fleet', to: 'analytics' });
+  });
+
+  // Vendors button
+  document.getElementById('tb-vendors').addEventListener('click', () => {
+    bus.emit('ui:view-change', { from: 'fleet', to: 'vendors' });
+  });
+
+  // Email Composer button
+  document.getElementById('tb-email-composer').addEventListener('click', () => {
+    bus.emit('ui:view-change', { from: 'fleet', to: 'email-composer' });
   });
 
   // Populate domicile options from fleet data

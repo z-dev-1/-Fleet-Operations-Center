@@ -21,6 +21,9 @@ import { init as initFleetView } from './views/fleet.js';
 import { init as initUnitDetail }from './views/unit-detail.js';
 import { init as initSettings }  from './views/settings.js';
 import { init as initSchedulers } from './views/schedulers.js';
+import { init as initAnalytics }     from './views/analytics.js';
+import { init as initVendors }       from './views/vendors.js';
+import { init as initEmailComposer } from './views/email-composer.js';
 
 function boot() {
   // ── Remove loading spinner ───────────────────────────────────────────────
@@ -60,14 +63,24 @@ function boot() {
   initUnitDetail(detailMount);
   initSettings(viewsMount);
   initSchedulers(viewsMount);
+  initAnalytics(viewsMount);
+  initVendors(viewsMount);
+  initEmailComposer(viewsMount);
 
   // ── Cross-view routing ───────────────────────────────────────────────────
   const fleetView    = document.getElementById('view-fleet');
   const settingsView = document.getElementById('view-settings');
 
+  const analyticsView     = document.getElementById('view-analytics');
+  const vendorsView       = document.getElementById('view-vendors');
+  const emailComposerView = document.getElementById('view-email-composer');
+
   bus.on('ui:view-change', ({ to }) => {
-    if (fleetView)    fleetView.style.display    = to === 'fleet'    ? 'flex' : 'none';
-    if (settingsView) settingsView.style.display = to === 'settings' ? 'flex' : 'none';
+    if (fleetView)         fleetView.style.display         = to === 'fleet'          ? 'flex' : 'none';
+    if (settingsView)      settingsView.style.display      = to === 'settings'       ? 'flex' : 'none';
+    if (analyticsView)     analyticsView.style.display     = to === 'analytics'      ? 'flex' : 'none';
+    if (vendorsView)       vendorsView.style.display       = to === 'vendors'        ? 'flex' : 'none';
+    if (emailComposerView) emailComposerView.style.display = to === 'email-composer' ? 'flex' : 'none';
   });
 
   // Close detail panel when switching views
