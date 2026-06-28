@@ -46,6 +46,8 @@ let _uptakeLock = false;
 const PAGE_LOAD_TIMEOUT   = 40000;  // per-page: 40s to handle slow CB reloads
 const DOM_POLL_INTERVAL   = 800;    // ms between DOM-ready checks
 const DOM_POLL_MAX        = 50;     // max polls (~40 seconds) — asset overview pages load slowly
+const UPTAKE_READ_MORE_WAIT_MS = 3_000;   // S8: Read More expansion poll deadline (was 2500ms fixed sleep)
+const UPTAKE_READ_MORE_POLL_MS = 300;     // S8: body-length delta poll tick interval
 
 const DEBUG = process.env.UPTAKE_DEBUG === '1';
 if (DEBUG) flog('[Uptake] ⚠️  DEBUG MODE');
@@ -596,7 +598,6 @@ async function scrapeUptake() {
         // ── 1. Navigate to insights list ──────────────────────────────────
         flog('[Uptake] Navigating to insights list...');
         await navTo(UPTAKE_INSIGHTS_URL);
-        await sleep(1500);
 
         const listReady = await pollUntil(win, CHECK_LIST_READY);
         if (!listReady) { fwarn('[Uptake] Insights list did not render'); finish([], null); return; }
@@ -606,7 +607,6 @@ async function scrapeUptake() {
         if (!listResult.ready || !listResult.count) { finish([], null); return; }
 
         // ── 2. Screenshot the list ────────────────────────────────────────
-        await sleep(500);
         const listShot = await captureScreenshot(win, 'insights_list');
 
         // ── 3. Build unit map ─────────────────────────────────────────────
@@ -676,7 +676,6 @@ async function scrapeUptake() {
               continue;
             }
 
-            await sleep(2000); // extra settle — right panel needs full hydration (was 1000)
             const detail = await win.webContents.executeJavaScript(SCRAPE_INSIGHT_DETAIL);
 
             // ── Log diagnostic on insight #1 only ────────────────────────
@@ -701,7 +700,23 @@ async function scrapeUptake() {
               return btns.length;
             })()`);
 
-            await sleep(2500); // let React re-render expanded text after Read More clicks (was 1200)
+            // S8: adaptive Read More settle — sample body length before poll
+            const _bodyBefore = await win.webContents.executeJavaScript(
+              'document.body ? document.body.innerText.length : 0'
+            ).catch(() => 0);
+            const _t0_rm = Date.now();
+            let _rmReady = false;
+            while (Date.now() - _t0_rm < UPTAKE_READ_MORE_WAIT_MS) {
+              await sleep(UPTAKE_READ_MORE_POLL_MS);
+              try {
+                const _bodyNow = await win.webContents.executeJavaScript(
+                  'document.body ? document.body.innerText.length : 0'
+                );
+                if (_bodyNow > _bodyBefore + 100) { _rmReady = true; break; }
+              } catch(_) {}
+            }
+            logger.info('[Uptake] Read More settle | waited:', (Date.now() - _t0_rm) + 'ms',
+              '| signal:', _rmReady ? 'DOM' : 'timeout(3s)');
             const expanded = await win.webContents.executeJavaScript(SCRAPE_AFTER_READMORE);
 
             const finalSummary     = expanded.summary     || detail.summary     || '';
@@ -745,10 +760,9 @@ async function scrapeUptake() {
           if (win.isDestroyed() || settled) break;
           try {
             await navTo(`https://fleet.uptake.com/asset/${u.assetUuid}`);
-            await sleep(800);
             const assetReady = await pollUntil(win, CHECK_ASSET_READY, 600, 20);
             if (!assetReady) { fwarn(`[Uptake] Asset overview not ready for ${u.id}`); continue; }
-            await sleep(400);
+            flog('[Uptake] Asset overview ready for', u.id, '| signal: DOM');
             const assetData = await win.webContents.executeJavaScript(SCRAPE_ASSET_RISK);
 
             // ── Log diagnostic on first asset only ──────────────────────
