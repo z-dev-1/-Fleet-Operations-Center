@@ -5,77 +5,232 @@
  *   - Domiciles (add/remove)
  *   - Auth (run mwinit)
  *   - Orcha config (mode, host, port)
- *   - Credentials (set/delete)
+ *   - Credentials (set/delete)         ← S10
+ *   - Slack                            ← S10
+ *   - Email (SMTP)                     ← S10
+ *   - SharePoint                       ← S10
+ *   - Asana                            ← S10
+ *   - Notifications                    ← S10
+ *
+ * S10: wires all bridge-available integrations into the settings panel.
  */
 
-import bus           from '../bus.js';
-import { settings as settingsBridge, auth, credentials } from '../bridge.js';
-import toast         from '../components/toast.js';
+import bus      from '../bus.js';
+import {
+  settings  as settingsBridge,
+  auth,
+  credentials,
+  slack     as slackBridge,
+  email     as emailBridge,
+  sp        as spBridge,
+  asana     as asanaBridge,
+} from '../bridge.js';
+import toast from '../components/toast.js';
 
 let _el = null;
 
-export function init(container) {
-  _el = document.createElement('div');
-  _el.id = 'view-settings';
-  _el.className = 'view view--settings';
-  _el.style.display = 'none';
-
-  _el.innerHTML = `
+// ── HTML skeleton ──────────────────────────────────────────────────────────
+function _html() {
+  return `
     <div class="settings-wrap">
+
+      <!-- Header -->
       <div class="settings-header">
         <h2>Settings</h2>
         <button id="settings-back" class="detail-panel__btn">Back to Fleet</button>
       </div>
 
-      <section class="settings-section">
-        <h3>Domiciles</h3>
+      <!-- 1 Domiciles -->
+      <section class="settings-section" id="sect-domiciles">
+        <div class="settings-section__title">Domiciles</div>
         <p class="settings-hint">One domicile code per line (e.g. ABE40)</p>
         <textarea id="settings-domiciles" class="settings__textarea" rows="6"></textarea>
         <div class="settings-section__actions">
-          <button id="settings-save-domiciles" class="detail-panel__btn">Save</button>
+          <button id="settings-save-domiciles"  class="detail-panel__btn">Save</button>
           <button id="settings-reset-domiciles" class="detail-panel__btn detail-panel__btn--secondary">Reset to defaults</button>
         </div>
       </section>
 
-      <section class="settings-section">
-        <h3>Midway Auth</h3>
+      <!-- 2 Midway Auth -->
+      <section class="settings-section" id="sect-auth">
+        <div class="settings-section__title">Midway Auth</div>
         <div id="settings-auth-status" class="settings__status">Checking...</div>
-        <button id="settings-mwinit" class="detail-panel__btn">Run mwinit</button>
+        <div class="settings-section__actions">
+          <button id="settings-mwinit" class="detail-panel__btn">Run mwinit</button>
+          <button id="settings-recheck-auth" class="detail-panel__btn detail-panel__btn--secondary">Re-check</button>
+        </div>
       </section>
 
-      <section class="settings-section">
-        <h3>Orcha Config</h3>
-        <label>Mode
-          <select id="settings-orcha-mode" class="toolbar__select">
-            <option value="local">Local</option>
-            <option value="remote">Remote</option>
-            <option value="bedrock">Bedrock</option>
-          </select>
-        </label>
-        <label>Host <input id="settings-orcha-host" class="settings__input" type="text" placeholder="localhost" /></label>
-        <label>Port <input id="settings-orcha-port" class="settings__input" type="number" placeholder="4799" /></label>
-        <button id="settings-save-orcha" class="detail-panel__btn">Save Orcha Config</button>
+      <!-- 3 Orcha Config -->
+      <section class="settings-section" id="sect-orcha">
+        <div class="settings-section__title">Orcha Config</div>
+        <div class="settings-fields">
+          <label class="settings-label">Mode
+            <select id="settings-orcha-mode" class="settings__select">
+              <option value="local">Local</option>
+              <option value="remote">Remote</option>
+              <option value="bedrock">Bedrock</option>
+            </select>
+          </label>
+          <label class="settings-label">Host
+            <input id="settings-orcha-host" class="settings__input" type="text" placeholder="localhost" />
+          </label>
+          <label class="settings-label">Port
+            <input id="settings-orcha-port" class="settings__input" type="number" placeholder="4799" />
+          </label>
+        </div>
+        <div class="settings-section__actions">
+          <button id="settings-save-orcha" class="detail-panel__btn">Save</button>
+        </div>
       </section>
+
+      <!-- 4 Credentials (S10) -->
+      <section class="settings-section" id="sect-creds">
+        <div class="settings-section__title">Credentials</div>
+        <p class="settings-hint">Stored encrypted via Electron safeStorage. Values are write-only — cannot be read back.</p>
+        <div class="settings-fields">
+          <label class="settings-label settings-label--grow">Key
+            <input id="creds-key"   class="settings__input" type="text"     placeholder="e.g. aap-password" />
+          </label>
+          <label class="settings-label settings-label--grow">Value
+            <input id="creds-val"   class="settings__input" type="password" placeholder="secret value" />
+          </label>
+        </div>
+        <div class="settings-section__actions">
+          <button id="creds-set"    class="detail-panel__btn">Save Credential</button>
+          <button id="creds-delete" class="detail-panel__btn settings-btn--danger">Delete Key</button>
+        </div>
+        <div id="creds-list-wrap" class="settings-list-wrap">
+          <div class="settings-list-label">Stored keys</div>
+          <div id="creds-list" class="settings-key-list">Loading...</div>
+        </div>
+      </section>
+
+      <!-- 5 Slack (S10) -->
+      <section class="settings-section" id="sect-slack">
+        <div class="settings-section__title">Slack</div>
+        <div id="slack-auth-status" class="settings__status settings__status--loading">Checking...</div>
+        <div class="settings-section__actions">
+          <button id="slack-login"       class="detail-panel__btn">Sign in to Slack</button>
+          <button id="slack-recheck"     class="detail-panel__btn detail-panel__btn--secondary">Re-check</button>
+        </div>
+      </section>
+
+      <!-- 6 Email / SMTP (S10) -->
+      <section class="settings-section" id="sect-email">
+        <div class="settings-section__title">Email (SMTP)</div>
+        <div class="settings-fields">
+          <label class="settings-label">Host
+            <input id="email-host"     class="settings__input" type="text"   placeholder="smtp.corp.amazon.com" />
+          </label>
+          <label class="settings-label">Port
+            <input id="email-port"     class="settings__input" type="number" placeholder="587" />
+          </label>
+          <label class="settings-label">From address
+            <input id="email-from"     class="settings__input" type="email"  placeholder="you@amazon.com" />
+          </label>
+          <label class="settings-label">Username
+            <input id="email-user"     class="settings__input" type="text"   placeholder="LDAP / CORP\\user" />
+          </label>
+          <label class="settings-label">Password
+            <input id="email-pass"     class="settings__input" type="password" placeholder="(stored encrypted)" />
+          </label>
+          <label class="settings-label settings-label--inline">
+            <input id="email-tls"      type="checkbox" /> Use TLS
+          </label>
+        </div>
+        <div class="settings-section__actions">
+          <button id="email-save"   class="detail-panel__btn">Save</button>
+          <button id="email-test"   class="detail-panel__btn detail-panel__btn--secondary">Send test email</button>
+        </div>
+        <div id="email-test-addr-wrap" class="settings-inline-row" style="display:none">
+          <input id="email-test-addr" class="settings__input" type="email" placeholder="recipient@amazon.com" />
+          <button id="email-test-send" class="detail-panel__btn">Send</button>
+          <button id="email-test-cancel" class="detail-panel__btn detail-panel__btn--secondary">Cancel</button>
+        </div>
+      </section>
+
+      <!-- 7 SharePoint (S10) -->
+      <section class="settings-section" id="sect-sp">
+        <div class="settings-section__title">SharePoint</div>
+        <div class="settings-fields">
+          <label class="settings-label">Site URL
+            <input id="sp-site-url"   class="settings__input" type="text" placeholder="https://amazon.sharepoint.com/sites/..." />
+          </label>
+          <label class="settings-label">List name
+            <input id="sp-list-name"  class="settings__input" type="text" placeholder="Fleet Status" />
+          </label>
+          <label class="settings-label">Username
+            <input id="sp-user"       class="settings__input" type="text" placeholder="alias@amazon.com" />
+          </label>
+          <label class="settings-label">Password
+            <input id="sp-pass"       class="settings__input" type="password" placeholder="(stored encrypted)" />
+          </label>
+        </div>
+        <div class="settings-section__actions">
+          <button id="sp-save"   class="detail-panel__btn">Save</button>
+          <button id="sp-push-now" class="detail-panel__btn detail-panel__btn--secondary">Push now</button>
+        </div>
+      </section>
+
+      <!-- 8 Asana (S10) -->
+      <section class="settings-section" id="sect-asana">
+        <div class="settings-section__title">Asana</div>
+        <div id="asana-auth-status" class="settings__status settings__status--loading">Checking...</div>
+        <div class="settings-fields">
+          <label class="settings-label">Personal Access Token
+            <input id="asana-token"      class="settings__input" type="password" placeholder="0/xxxxxxxxxxxxxxxx" />
+          </label>
+          <label class="settings-label">Default workspace GID
+            <input id="asana-workspace"  class="settings__input" type="text"     placeholder="1234567890" />
+          </label>
+          <label class="settings-label">Default project GID
+            <input id="asana-project"    class="settings__input" type="text"     placeholder="1234567890" />
+          </label>
+        </div>
+        <div class="settings-section__actions">
+          <button id="asana-save"     class="detail-panel__btn">Save</button>
+          <button id="asana-verify"   class="detail-panel__btn detail-panel__btn--secondary">Verify token</button>
+        </div>
+      </section>
+
+      <!-- 9 Notifications (S10) -->
+      <section class="settings-section" id="sect-notif">
+        <div class="settings-section__title">Notifications</div>
+        <div class="settings-fields">
+          <label class="settings-label settings-label--inline">
+            <input id="notif-auth-failure" type="checkbox" checked />
+            OS notification on Midway auth failure
+          </label>
+          <label class="settings-label settings-label--inline">
+            <input id="notif-sync-complete" type="checkbox" checked />
+            OS notification on sync complete
+          </label>
+          <label class="settings-label settings-label--inline">
+            <input id="notif-sync-error" type="checkbox" checked />
+            OS notification on sync error
+          </label>
+        </div>
+        <div class="settings-section__actions">
+          <button id="notif-save" class="detail-panel__btn">Save</button>
+        </div>
+      </section>
+
     </div>
   `;
-  container.appendChild(_el);
+}
 
-  // Back button
-  document.getElementById('settings-back').addEventListener('click', () => {
-    bus.emit('ui:view-change', { from: 'settings', to: 'fleet' });
-  });
-
-  // Load current domiciles
+// ── Section: Domiciles ─────────────────────────────────────────────────────
+function _wireDomiciles() {
   settingsBridge.getDomiciles().then((d) => {
     const ta = document.getElementById('settings-domiciles');
     if (ta && d) ta.value = Array.isArray(d) ? d.join('\n') : d;
   }).catch(() => {});
 
-  // Save domiciles
   document.getElementById('settings-save-domiciles').addEventListener('click', async () => {
     const ta = document.getElementById('settings-domiciles');
     if (!ta) return;
-    const arr = ta.value.split(/[\\n,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+    const arr = ta.value.split(/[\n,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
     try {
       await settingsBridge.saveDomiciles(arr);
       toast.show('success', 'Domiciles saved');
@@ -84,7 +239,6 @@ export function init(container) {
     }
   });
 
-  // Reset domiciles
   document.getElementById('settings-reset-domiciles').addEventListener('click', async () => {
     try {
       const d = await settingsBridge.resetDomiciles();
@@ -95,43 +249,61 @@ export function init(container) {
       toast.show('error', 'Reset failed: ' + e.message);
     }
   });
+}
 
-  // Auth status
+// ── Section: Midway Auth ───────────────────────────────────────────────────
+function _checkAuth() {
+  const el = document.getElementById('settings-auth-status');
+  if (!el) return;
+  el.textContent = 'Checking...';
+  el.className = 'settings__status settings__status--loading';
   auth.checkMidway().then((result) => {
-    const el = document.getElementById('settings-auth-status');
-    if (el) el.textContent = result && result.ok
-      ? 'Midway authenticated'
-      : ('Not authenticated: ' + (result && result.reason || 'unknown'));
-  }).catch(() => {});
+    if (!el) return;
+    if (result && result.ok) {
+      el.textContent = '✓ Midway authenticated';
+      el.className = 'settings__status settings__status--ok';
+    } else {
+      el.textContent = '✗ Not authenticated: ' + (result && result.reason || 'unknown');
+      el.className = 'settings__status settings__status--error';
+    }
+  }).catch(() => {
+    if (el) { el.textContent = 'Check failed'; el.className = 'settings__status settings__status--error'; }
+  });
+}
 
-  // Run mwinit
+function _wireAuth() {
+  _checkAuth();
+
   document.getElementById('settings-mwinit').addEventListener('click', async () => {
     toast.show('info', 'Running mwinit...', 2000);
     try {
       const r = await auth.runMwinit();
       toast.show(r && r.ok ? 'success' : 'error',
-        r && r.ok ? 'mwinit succeeded' : ('mwinit failed: ' + (r && r.reason || '')),
-        5000);
+        r && r.ok ? 'mwinit succeeded' : ('mwinit failed: ' + (r && r.reason || '')), 5000);
+      if (r && r.ok) _checkAuth();
     } catch (e) {
       toast.show('error', 'mwinit error: ' + e.message);
     }
   });
 
-  // Load orcha config
+  document.getElementById('settings-recheck-auth').addEventListener('click', () => _checkAuth());
+}
+
+// ── Section: Orcha Config ──────────────────────────────────────────────────
+function _wireOrcha() {
   settingsBridge.getOrchaConfig().then((cfg) => {
     if (!cfg) return;
-    const modeEl = document.getElementById('settings-orcha-mode');
-    const hostEl = document.getElementById('settings-orcha-host');
-    const portEl = document.getElementById('settings-orcha-port');
-    if (modeEl && cfg.mode) modeEl.value = cfg.mode;
-    if (hostEl && cfg.host) hostEl.value = cfg.host;
-    if (portEl && cfg.port) portEl.value = cfg.port;
+    const m = document.getElementById('settings-orcha-mode');
+    const h = document.getElementById('settings-orcha-host');
+    const p = document.getElementById('settings-orcha-port');
+    if (m && cfg.mode) m.value = cfg.mode;
+    if (h && cfg.host) h.value = cfg.host;
+    if (p && cfg.port) p.value = cfg.port;
   }).catch(() => {});
 
-  // Save orcha config
   document.getElementById('settings-save-orcha').addEventListener('click', async () => {
     const mode = document.getElementById('settings-orcha-mode').value;
-    const host = document.getElementById('settings-orcha-host').value.trim();
+    const host = (document.getElementById('settings-orcha-host').value || '').trim();
     const port = parseInt(document.getElementById('settings-orcha-port').value, 10) || 4799;
     try {
       await settingsBridge.save('orchaConfig', { mode, host, port });
@@ -140,6 +312,327 @@ export function init(container) {
       toast.show('error', 'Save failed: ' + e.message);
     }
   });
+}
+
+// ── Section: Credentials (S10) ────────────────────────────────────────────
+function _loadCredsList() {
+  const listEl = document.getElementById('creds-list');
+  if (!listEl) return;
+  credentials.list().then((keys) => {
+    if (!listEl) return;
+    if (!keys || keys.length === 0) {
+      listEl.innerHTML = '<span class="settings-list-empty">No credentials stored.</span>';
+      return;
+    }
+    listEl.innerHTML = keys.map((k) =>
+      '<span class="settings-key-pill">' + k + '</span>'
+    ).join('');
+  }).catch(() => {
+    if (listEl) listEl.innerHTML = '<span class="settings-list-empty">Could not load keys.</span>';
+  });
+}
+
+function _wireCreds() {
+  _loadCredsList();
+
+  document.getElementById('creds-set').addEventListener('click', async () => {
+    const key = (document.getElementById('creds-key').value || '').trim();
+    const val = document.getElementById('creds-val').value || '';
+    if (!key) { toast.show('warn', 'Key name required', 3000); return; }
+    if (!val)  { toast.show('warn', 'Value required', 3000); return; }
+    try {
+      await credentials.set(key, val);
+      document.getElementById('creds-key').value = '';
+      document.getElementById('creds-val').value = '';
+      toast.show('success', 'Credential saved: ' + key);
+      _loadCredsList();
+    } catch (e) {
+      toast.show('error', 'Save failed: ' + e.message);
+    }
+  });
+
+  document.getElementById('creds-delete').addEventListener('click', async () => {
+    const key = (document.getElementById('creds-key').value || '').trim();
+    if (!key) { toast.show('warn', 'Enter the key name to delete', 3000); return; }
+    try {
+      await credentials.delete(key);
+      document.getElementById('creds-key').value = '';
+      toast.show('info', 'Deleted: ' + key);
+      _loadCredsList();
+    } catch (e) {
+      toast.show('error', 'Delete failed: ' + e.message);
+    }
+  });
+}
+
+// ── Section: Slack (S10) ──────────────────────────────────────────────────
+function _checkSlack() {
+  const el = document.getElementById('slack-auth-status');
+  if (!el) return;
+  el.textContent = 'Checking...';
+  el.className = 'settings__status settings__status--loading';
+  slackBridge.checkAuth().then((r) => {
+    if (!el) return;
+    if (r && r.authenticated) {
+      el.textContent = '✓ Slack authenticated';
+      el.className = 'settings__status settings__status--ok';
+    } else {
+      el.textContent = '✗ Not signed in';
+      el.className = 'settings__status settings__status--error';
+    }
+  }).catch(() => {
+    if (el) { el.textContent = 'Check failed'; el.className = 'settings__status settings__status--error'; }
+  });
+}
+
+function _wireSlack() {
+  _checkSlack();
+
+  document.getElementById('slack-login').addEventListener('click', async () => {
+    toast.show('info', 'Opening Slack login...', 3000);
+    try {
+      await slackBridge.login();
+      _checkSlack();
+      toast.show('success', 'Slack sign-in complete');
+    } catch (e) {
+      toast.show('error', 'Slack login failed: ' + e.message);
+    }
+  });
+
+  document.getElementById('slack-recheck').addEventListener('click', () => _checkSlack());
+}
+
+// ── Section: Email / SMTP (S10) ───────────────────────────────────────────
+function _wireEmail() {
+  emailBridge.getConfig().then((cfg) => {
+    if (!cfg) return;
+    const fields = {
+      'email-host': cfg.host,
+      'email-port': cfg.port,
+      'email-from': cfg.from,
+      'email-user': cfg.user || cfg.username,
+    };
+    Object.entries(fields).forEach(([id, val]) => {
+      const el = document.getElementById(id);
+      if (el && val) el.value = val;
+    });
+    const tlsEl = document.getElementById('email-tls');
+    if (tlsEl) tlsEl.checked = !!cfg.tls;
+  }).catch(() => {});
+
+  document.getElementById('email-save').addEventListener('click', async () => {
+    const config = {
+      host: (document.getElementById('email-host').value || '').trim(),
+      port: parseInt(document.getElementById('email-port').value, 10) || 587,
+      from: (document.getElementById('email-from').value || '').trim(),
+      user: (document.getElementById('email-user').value || '').trim(),
+      tls:  document.getElementById('email-tls').checked,
+    };
+    const pass = document.getElementById('email-pass').value;
+    if (pass) config.pass = pass; // only include if user typed a new password
+    if (!config.host) { toast.show('warn', 'SMTP host required', 3000); return; }
+    try {
+      await emailBridge.saveConfig(config);
+      document.getElementById('email-pass').value = '';
+      toast.show('success', 'Email config saved');
+    } catch (e) {
+      toast.show('error', 'Save failed: ' + e.message);
+    }
+  });
+
+  document.getElementById('email-test').addEventListener('click', () => {
+    const wrap = document.getElementById('email-test-addr-wrap');
+    if (wrap) wrap.style.display = wrap.style.display === 'none' ? 'flex' : 'none';
+  });
+
+  document.getElementById('email-test-cancel').addEventListener('click', () => {
+    const wrap = document.getElementById('email-test-addr-wrap');
+    if (wrap) wrap.style.display = 'none';
+  });
+
+  document.getElementById('email-test-send').addEventListener('click', async () => {
+    const to = (document.getElementById('email-test-addr').value || '').trim();
+    if (!to) { toast.show('warn', 'Recipient address required', 3000); return; }
+    const btn = document.getElementById('email-test-send');
+    btn.disabled = true; btn.textContent = 'Sending...';
+    try {
+      await emailBridge.send({ to, subject: 'Fleet Ops test email', body: 'Test from Fleet Ops V-C settings.' });
+      toast.show('success', 'Test email sent to ' + to, 5000);
+      document.getElementById('email-test-addr-wrap').style.display = 'none';
+    } catch (e) {
+      toast.show('error', 'Send failed: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Send';
+    }
+  });
+}
+
+// ── Section: SharePoint (S10) ─────────────────────────────────────────────
+function _wireSP() {
+  spBridge.getConfig().then((cfg) => {
+    if (!cfg) return;
+    const fields = { 'sp-site-url': cfg.siteUrl, 'sp-list-name': cfg.listName, 'sp-user': cfg.user || cfg.username };
+    Object.entries(fields).forEach(([id, val]) => {
+      const el = document.getElementById(id);
+      if (el && val) el.value = val;
+    });
+  }).catch(() => {});
+
+  document.getElementById('sp-save').addEventListener('click', async () => {
+    const config = {
+      siteUrl:  (document.getElementById('sp-site-url').value  || '').trim(),
+      listName: (document.getElementById('sp-list-name').value || '').trim(),
+      user:     (document.getElementById('sp-user').value      || '').trim(),
+    };
+    const pass = document.getElementById('sp-pass').value;
+    if (pass) config.pass = pass;
+    if (!config.siteUrl) { toast.show('warn', 'Site URL required', 3000); return; }
+    try {
+      await spBridge.saveConfig(config);
+      document.getElementById('sp-pass').value = '';
+      toast.show('success', 'SharePoint config saved');
+    } catch (e) {
+      toast.show('error', 'Save failed: ' + e.message);
+    }
+  });
+
+  document.getElementById('sp-push-now').addEventListener('click', async () => {
+    const btn = document.getElementById('sp-push-now');
+    btn.disabled = true; btn.textContent = 'Pushing...';
+    try {
+      const rows = (window.__fleet_bus && window.__fleet_state)
+        ? window.__fleet_state.rows
+        : [];
+      await spBridge.push(rows);
+      toast.show('success', 'SharePoint push triggered');
+    } catch (e) {
+      toast.show('error', 'Push failed: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Push now';
+    }
+  });
+}
+
+// ── Section: Asana (S10) ─────────────────────────────────────────────────
+function _checkAsana() {
+  const el = document.getElementById('asana-auth-status');
+  if (!el) return;
+  el.textContent = 'Checking...';
+  el.className = 'settings__status settings__status--loading';
+  asanaBridge.checkAuth().then((r) => {
+    if (!el) return;
+    if (r && r.ok) {
+      el.textContent = '✓ Asana authenticated' + (r.name ? ' (' + r.name + ')' : '');
+      el.className = 'settings__status settings__status--ok';
+    } else {
+      el.textContent = '✗ Not authenticated: ' + (r && r.reason || 'no token');
+      el.className = 'settings__status settings__status--error';
+    }
+  }).catch(() => {
+    if (el) { el.textContent = 'Check failed'; el.className = 'settings__status settings__status--error'; }
+  });
+}
+
+function _wireAsana() {
+  _checkAsana();
+
+  asanaBridge.getConfig().then((cfg) => {
+    if (!cfg) return;
+    const fields = {
+      'asana-workspace': cfg.defaultWorkspace || cfg.workspaceGid,
+      'asana-project':   cfg.defaultProject   || cfg.projectGid,
+    };
+    Object.entries(fields).forEach(([id, val]) => {
+      const el = document.getElementById(id);
+      if (el && val) el.value = val;
+    });
+  }).catch(() => {});
+
+  document.getElementById('asana-save').addEventListener('click', async () => {
+    const token = (document.getElementById('asana-token').value || '').trim();
+    const workspaceGid = (document.getElementById('asana-workspace').value || '').trim();
+    const projectGid   = (document.getElementById('asana-project').value   || '').trim();
+    const config = { workspaceGid, projectGid };
+    if (token) config.token = token;
+    if (!workspaceGid) { toast.show('warn', 'Workspace GID required', 3000); return; }
+    try {
+      await asanaBridge.saveConfig(config);
+      document.getElementById('asana-token').value = '';
+      toast.show('success', 'Asana config saved');
+      if (token) _checkAsana();
+    } catch (e) {
+      toast.show('error', 'Save failed: ' + e.message);
+    }
+  });
+
+  document.getElementById('asana-verify').addEventListener('click', async () => {
+    const btn = document.getElementById('asana-verify');
+    btn.disabled = true; btn.textContent = 'Verifying...';
+    try {
+      const me = await asanaBridge.getMe();
+      toast.show('success', 'Asana OK — ' + (me && me.name || 'authenticated'), 4000);
+      _checkAsana();
+    } catch (e) {
+      toast.show('error', 'Verify failed: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Verify token';
+    }
+  });
+}
+
+// ── Section: Notifications (S10) ─────────────────────────────────────────
+function _wireNotifications() {
+  // Load saved prefs
+  settingsBridge.getAll().then((all) => {
+    const prefs = (all && all.notifications) || {};
+    const set = (id, key, def) => {
+      const el = document.getElementById(id);
+      if (el) el.checked = key in prefs ? !!prefs[key] : def;
+    };
+    set('notif-auth-failure',  'authFailure',   true);
+    set('notif-sync-complete', 'syncComplete',  true);
+    set('notif-sync-error',    'syncError',     true);
+  }).catch(() => {});
+
+  document.getElementById('notif-save').addEventListener('click', async () => {
+    const prefs = {
+      authFailure:  document.getElementById('notif-auth-failure').checked,
+      syncComplete: document.getElementById('notif-sync-complete').checked,
+      syncError:    document.getElementById('notif-sync-error').checked,
+    };
+    try {
+      await settingsBridge.save('notifications', prefs);
+      toast.show('success', 'Notification preferences saved');
+    } catch (e) {
+      toast.show('error', 'Save failed: ' + e.message);
+    }
+  });
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+export function init(container) {
+  _el = document.createElement('div');
+  _el.id = 'view-settings';
+  _el.className = 'view view--settings';
+  _el.style.display = 'none';
+  _el.innerHTML = _html();
+  container.appendChild(_el);
+
+  // Back button
+  document.getElementById('settings-back').addEventListener('click', () => {
+    bus.emit('ui:view-change', { from: 'settings', to: 'fleet' });
+  });
+
+  // Wire all sections
+  _wireDomiciles();
+  _wireAuth();
+  _wireOrcha();
+  _wireCreds();        // S10
+  _wireSlack();        // S10
+  _wireEmail();        // S10
+  _wireSP();           // S10
+  _wireAsana();        // S10
+  _wireNotifications();// S10
 
   // Show/hide based on view
   bus.on('ui:view-change', ({ to }) => {
