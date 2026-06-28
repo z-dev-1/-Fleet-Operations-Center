@@ -13,6 +13,7 @@
 import bus           from '../bus.js';
 import state         from '../state.js';
 import { notes, ai, aap, relay } from '../bridge.js';
+import { open as openWRModal }    from './wr-modal.js';
 import toast         from '../components/toast.js';
 
 let _panel    = null;
@@ -188,27 +189,11 @@ function _wireAISuggest(unit) {
   }
 }
 
-// S9: Create WR → aap.autofill
+// S11: Create WR -> openWRModal (full modal with vendor/urgency/areas/screenshot)
 function _wireCreateWR(unit) {
   const btn = document.getElementById('dp-create-wr');
   if (!btn) return;
-  btn.addEventListener('click', async () => {
-    if (!unit.assetUrl) {
-      toast.show('warn', 'No AAP URL for this unit', 3000);
-      return;
-    }
-    const payload = {
-      equipmentId:  unit.equipmentId,
-      domicileSite: unit.domicileSite || '',
-      manufacturer: unit.manufacturer || '',
-      assetType:    unit.assetType    || '',
-    };
-    try {
-      await aap.autofill(unit.assetUrl, payload);
-    } catch (e) {
-      toast.show('error', 'WR open failed: ' + e.message);
-    }
-  });
+  btn.addEventListener('click', () => { openWRModal(unit); });
 }
 
 function _renderUnit(unit) {
