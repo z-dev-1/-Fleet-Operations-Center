@@ -15,6 +15,14 @@ const COOKIE_FILE   = P.midwayCookie;
 const SESSION_KEY   = ''; // empty = default session (no partition) to inherit AEA
 const AAP_PROBE_URL = 'https://aap-na.corp.amazon.com/v2/page/bafc8b2a-3be6-4a52-a86f-7cb2de7b5400';
 
+// M-4: targeted relay probe — validates session against /v2/service/ namespace.
+// The standard probeSession() uses a /v2/page/ URL that can be cached by CloudFront
+// after a Midway session expires; /v2/service/ hits auth middleware on every request.
+// Dummy UUID returns 'not found' page but stays on-domain when auth is valid;
+// redirects to SSO when session is stale.
+const AAP_SERVICE_PROBE_URL  = 'https://aap-na.corp.amazon.com/v2/service/00000000-0000-0000-0000-000000000000';
+const RELAY_PROBE_TIMEOUT_MS = 10_000;
+
 // ── Parse Netscape cookie file ────────────────────────────────────────────────
 // Format per line: domain \t flag \t path \t secure \t expiry \t name \t value
 // HttpOnly prefix: #HttpOnly_<domain>\t...
@@ -157,6 +165,62 @@ async function probeSession() {
   });
 }
 
+// ── M-4: relay-endpoint probe ─────────────────────────────────────────────────
+// Probes /v2/service/ (the actual relay scrape namespace) to confirm the Midway
+// session is valid for that URL space, not just the cached /v2/page/ namespace.
+// Budget: RELAY_PROBE_TIMEOUT_MS (10s) — fast enough not to block sync startup.
+// Returns true = session valid, false = SSO redirect (stale or expired).
+async function pingRelayEndpoint() {
+  return new Promise((resolve) => {
+    const probe = new BrowserWindow({
+      show: false,
+      webPreferences: { nodeIntegration: false, contextIsolation: true },
+    });
+
+    let settled = false;
+    const done = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { probe.destroy(); } catch (_) {}
+      resolve(ok);
+    };
+
+    const timer = setTimeout(() => {
+      logger.warn('[AuthManager] Relay probe timed out after', RELAY_PROBE_TIMEOUT_MS + 'ms');
+      done(false);
+    }, RELAY_PROBE_TIMEOUT_MS);
+
+    const isSSO = (url) =>
+      /midway|login\.amazon|signin|sso\.amazon|oidc|oauth|\/auth\//i.test(url) &&
+      !/aap-na\.corp\.amazon\.com/i.test(url);
+
+    // Intercept SSO redirect before any page loads
+    probe.webContents.on('will-redirect', (_, url) => {
+      logger.info('[AuthManager] Relay probe redirect:', url.slice(0, 80));
+      if (isSSO(url)) done(false);
+    });
+    probe.webContents.on('did-navigate', (_, url) => {
+      if (isSSO(url)) done(false);
+    });
+
+    probe.webContents.on('did-finish-load', () => {
+      const url = probe.webContents.getURL();
+      logger.info('[AuthManager] Relay probe landed:', url.slice(0, 80));
+      // Any landing on aap-na domain = valid (even 404 'not found' is fine)
+      done(/aap-na\.corp\.amazon\.com/i.test(url));
+    });
+
+    probe.webContents.on('did-fail-load', (_, code, desc) => {
+      if (code === -3) return; // ERR_ABORTED — redirect in flight, ignore
+      logger.warn('[AuthManager] Relay probe fail-load:', code, desc);
+      done(false);
+    });
+
+    probe.loadURL(AAP_SERVICE_PROBE_URL);
+  });
+}
+
 // ── Public: ensure session is valid, injecting Midway cookies ─────────────────
 async function ensureAuthenticated(mainWindow) {
   const send = (ch, msg) => {
@@ -211,7 +275,23 @@ async function ensureAuthenticated(mainWindow) {
     throw Object.assign(new Error(msg), { code: 'MIDWAY_SESSION_INVALID' });
   }
 
-  logger.info('[AuthManager] Session confirmed');
+  // Step 2b: probe /v2/service/ — ensures session is valid for relay scrape URLs,
+  // not just the /v2/page/ namespace that probeSession() validates.
+  // On failure: force re-inject cookies and retry once before aborting.
+  send('fleet:status', 'Verifying relay session...');
+  let relayOk = await pingRelayEndpoint();
+  if (!relayOk) {
+    logger.warn('[AuthManager] Relay probe failed — re-injecting cookies and retrying');
+    try { await injectCookies(); } catch (_) {}
+    relayOk = await pingRelayEndpoint();
+  }
+  if (!relayOk) {
+    const msg = 'AAP service endpoints rejecting session — re-run mwinit then retry';
+    send('fleet:error', msg);
+    throw Object.assign(new Error(msg), { code: 'RELAY_SESSION_INVALID' });
+  }
+
+  logger.info('[AuthManager] Session confirmed (page + service probes passed)');
   return true;
 }
 
@@ -240,4 +320,4 @@ function checkMwinit() {
   return { ok: true, ageHours: ageHours.toFixed(1) };
 }
 
-module.exports = { ensureAuthenticated, injectCookies, checkMwinit, COOKIE_FILE };
+module.exports = { ensureAuthenticated, injectCookies, checkMwinit, pingRelayEndpoint, COOKIE_FILE };
