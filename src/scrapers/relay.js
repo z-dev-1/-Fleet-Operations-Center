@@ -23,7 +23,11 @@ const AAP_GARAGE_ALL       = 'https://aap-na.corp.amazon.com/page/817ca098-8441-
 const MAX_CONCURRENT    = 5; // 5 concurrent units (~10 BrowserViews)
 const PAGE_TIMEOUT_MS   = 35000;   // extra headroom for WO tab settle
 const PAGE_SETTLE_MS    = 3000;
-const WO_TAB_SETTLE_MS  = 4000;
+// L-2: WO_TAB_MAX_WAIT_MS replaces WO_TAB_SETTLE_MS — same 4s value but now a
+// deadline for the DOM poll loop rather than a fixed unconditional sleep.
+// WO_TAB_POLL_MS: tick interval for the poll — checks every 200ms.
+const WO_TAB_MAX_WAIT_MS = 4_000;
+const WO_TAB_POLL_MS     = 200;
 // H-3: concurrency lock — prevents duplicate batch scrapes on re-entrant calls
 let _relayLock = false;
 
@@ -179,6 +183,19 @@ const RELAY_CLICK_WO_TAB_SCRIPT = String.raw`
     }
   }
   return false;
+})();
+`;
+
+// ── L-2: WO tab readiness probe ──────────────────────────────────────────────
+// Returns true once any of the known WO field labels appear in body.innerText.
+// These are static React-rendered label strings — stable across AAP CSS changes.
+// Used by the DOM poll loop that replaces the fixed WO_TAB_SETTLE_MS sleep.
+const RELAY_POLL_WO_READY_SCRIPT = String.raw`
+(function() {
+  var t = document.body ? document.body.innerText : '';
+  return /Vendor\s+Work\s+Order\s+ID/i.test(t) ||
+         /Reason\s+for\s+Repair/i.test(t)       ||
+         /Work\s+Accomplished/i.test(t);
 })();
 `;
 
@@ -658,7 +675,20 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
           let woData = {};
           try {
             await win.webContents.executeJavaScript(safewrap(RELAY_CLICK_WO_TAB_SCRIPT));
-            await new Promise(r => setTimeout(r, WO_TAB_SETTLE_MS));
+            // L-2: DOM poll — wait until WO tab content renders or WO_TAB_MAX_WAIT_MS elapses.
+            // Replaces fixed WO_TAB_SETTLE_MS sleep; fast pages resolve in ~200-1200ms.
+            const _t0_wo = Date.now();
+            let _woReady = false;
+            while (Date.now() - _t0_wo < WO_TAB_MAX_WAIT_MS) {
+              await new Promise(r => setTimeout(r, WO_TAB_POLL_MS));
+              try {
+                _woReady = await win.webContents.executeJavaScript(safewrap(RELAY_POLL_WO_READY_SCRIPT));
+              } catch (_) {}
+              if (_woReady) break;
+            }
+            logger.info('[Relay] WO settle for', equipmentId,
+              '| waited:', (Date.now() - _t0_wo) + 'ms',
+              '| signal:', _woReady ? 'DOM' : 'timeout(4s)');
             const wo = await win.webContents.executeJavaScript(safewrap(RELAY_WO_SCRIPT));
             if (wo && !wo._rendererError) woData = wo;
             else if (wo && wo._rendererError) logger.warn('[Relay] WO renderer error for', equipmentId, ':', wo._rendererError);
