@@ -161,10 +161,13 @@ export const auth = {
 
 // ── Email ──────────────────────────────────────────────────────────────────
 export const email = {
-  send:       (opts)   => window.email.send(opts),
-  getConfig:  ()       => window.email.getConfig(),
-  saveConfig: (config) => window.email.saveConfig(config),
-  preview:    (opts)   => window.email.preview(opts),
+  send:         (opts)    => window.email.send(opts),
+  getConfig:    ()        => window.email.getConfig(),
+  saveConfig:   (config)  => window.email.saveConfig(config),
+  preview:      (opts)    => window.email.preview(opts),
+  compose:      (payload) => window.email.compose(payload),
+  saveOpEmails: (data)    => window.email.saveOpEmails(data),
+  loadOpEmails: ()        => window.email.loadOpEmails(),
 };
 
 // ── Geofence ───────────────────────────────────────────────────────────────

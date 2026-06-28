@@ -125,10 +125,13 @@ contextBridge.exposeInMainWorld('geofence', {
 
 // ── Email ─────────────────────────────────────────────────────────────────────
 contextBridge.exposeInMainWorld('email', {
-  send:      (opts)    => ipcRenderer.invoke('email:send', opts),
-  getConfig: ()        => ipcRenderer.invoke('email:get-config'),
-  saveConfig:(config)  => ipcRenderer.invoke('email:save-config', config),
-  preview:   (opts)    => ipcRenderer.invoke('email:preview', opts),
+  send:         (opts)    => ipcRenderer.invoke('email:send', opts),
+  getConfig:    ()        => ipcRenderer.invoke('email:get-config'),
+  saveConfig:   (config)  => ipcRenderer.invoke('email:save-config', config),
+  preview:      (opts)    => ipcRenderer.invoke('email:preview', opts),
+  compose:      (payload) => ipcRenderer.invoke('email:compose', payload),
+  saveOpEmails: (data)    => ipcRenderer.invoke('email:save-op-emails', data),
+  loadOpEmails: ()        => ipcRenderer.invoke('email:load-op-emails'),
 });
 
 // ── Partner portal ───────────────────────────────────────────────────────────
