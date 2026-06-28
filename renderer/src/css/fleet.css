@@ -983,3 +983,335 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
   opacity: .5;
   cursor: not-allowed !important;
 }
+
+/* =============================================================
+   Stage 12 additions — fleet.css
+   Email composer: layout, slot toggle, preset list, slot btns,
+   subject row, status badge, log, result, unit count.
+   All rules additive — no existing rules modified.
+   ============================================================= */
+
+/* ── Composer outer wrap ─────────────────────────────────── */
+.view--email-composer {
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+.ec-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── Header ──────────────────────────────────────────────── */
+.ec-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid var(--bdr);
+  flex-shrink: 0;
+}
+.ec-header__left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ec-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--txt);
+}
+.ec-subtitle {
+  font-size: 10px;
+  color: var(--mut);
+  font-family: var(--mono);
+}
+
+/* ── Body (two-panel) ────────────────────────────────────── */
+.ec-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 280px;
+  overflow: hidden;
+  gap: 0;
+}
+
+/* ── Form panel (left) ───────────────────────────────────── */
+.ec-form {
+  padding: 14px 20px;
+  overflow-y: auto;
+  border-right: 1px solid var(--bdr);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ── Status panel (right) ────────────────────────────────── */
+.ec-status-panel {
+  padding: 14px 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ── Sections ────────────────────────────────────────────── */
+.ec-section {
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(48,54,61,.5);
+}
+.ec-section:last-child { border-bottom: none; }
+.ec-section__title {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--mut);
+  font-weight: 700;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ec-section__title::before {
+  content: '';
+  width: 8px;
+  height: 1px;
+  background: var(--acc);
+  flex-shrink: 0;
+}
+.ec-section__hint {
+  font-size: 9px;
+  color: var(--mut);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  font-family: var(--font);
+}
+
+/* ── Two-col layout ──────────────────────────────────────── */
+.ec-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+/* ── Slot buttons ────────────────────────────────────────── */
+.ec-slot-row {
+  display: flex;
+  gap: 8px;
+}
+.ec-slot-btn {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--bdr);
+  background: var(--el);
+  color: var(--txt2);
+  font-size: 11px;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all .15s;
+  text-align: center;
+}
+.ec-slot-btn:hover {
+  border-color: var(--acc);
+  color: var(--txt);
+}
+.ec-slot-btn--active {
+  background: rgba(88,166,255,.12) !important;
+  border-color: var(--acc) !important;
+  color: var(--acc) !important;
+  font-weight: 600;
+}
+
+/* ── Subject row ─────────────────────────────────────────── */
+.ec-subject-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.ec-subject-input { flex: 1; }
+.ec-icon-btn {
+  background: var(--el);
+  border: 1px solid var(--bdr);
+  color: var(--acc);
+  border-radius: 5px;
+  width: 28px;
+  height: 28px;
+  font-size: 15px;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .15s;
+}
+.ec-icon-btn:hover { background: rgba(88,166,255,.1); }
+
+/* ── Options row ─────────────────────────────────────────── */
+.ec-options-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* ── Preset controls ─────────────────────────────────────── */
+.ec-preset-controls {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.ec-preset-btn {
+  font-size: 9px;
+  font-family: var(--mono);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--bdr);
+  background: var(--el);
+  color: var(--acc);
+  cursor: pointer;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.ec-preset-btn:hover { border-color: var(--acc); }
+
+/* ── Actions row ─────────────────────────────────────────── */
+.ec-actions {
+  padding-top: 14px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ec-compose-btn {
+  background: var(--acc) !important;
+  color: #fff !important;
+  border-color: var(--acc) !important;
+  font-weight: 600 !important;
+}
+.ec-compose-btn:hover { background: rgba(88,166,255,.85) !important; }
+.ec-compose-btn:disabled { opacity: .5; cursor: not-allowed !important; }
+
+/* ── Status badge ────────────────────────────────────────── */
+.ec-status-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.ec-status-badge--idle    { background: var(--el); color: var(--mut); border: 1px solid var(--bdr); }
+.ec-status-badge--loading { background: rgba(88,166,255,.1); color: var(--acc); border: 1px solid rgba(88,166,255,.25); }
+.ec-status-badge--ok      { background: rgba(63,185,80,.1); color: var(--grn,#3fb950); border: 1px solid rgba(63,185,80,.25); }
+.ec-status-badge--error   { background: rgba(255,123,114,.1); color: var(--red,#ff7b72); border: 1px solid rgba(255,123,114,.25); }
+
+/* ── Log ─────────────────────────────────────────────────── */
+.ec-log-wrap { margin-bottom: 8px; }
+.ec-log {
+  background: rgba(1,4,9,.5);
+  border: 1px solid var(--bdr);
+  border-radius: 6px;
+  padding: 8px 10px;
+  max-height: 120px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--txt2);
+}
+.ec-log-line { padding: 1px 0; line-height: 1.5; }
+.ec-log-line::before { content: '› '; color: var(--acc); }
+
+/* ── Result banners ──────────────────────────────────────── */
+.ec-result { margin-bottom: 10px; }
+.ec-result--success,
+.ec-result--error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+.ec-result--success {
+  background: rgba(63,185,80,.08);
+  border: 1px solid rgba(63,185,80,.25);
+  color: var(--grn,#3fb950);
+}
+.ec-result--error {
+  background: rgba(255,123,114,.08);
+  border: 1px solid rgba(255,123,114,.25);
+  color: var(--red,#ff7b72);
+}
+.ec-result__icon { font-size: 14px; flex-shrink: 0; }
+
+/* ── Preset list ─────────────────────────────────────────── */
+.ec-preset-list-wrap { margin-top: 4px; }
+.ec-preset-list { display: flex; flex-direction: column; gap: 5px; }
+.ec-preset-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: var(--el);
+  border: 1px solid var(--bdr);
+}
+.ec-preset-op {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--acc);
+  flex-shrink: 0;
+  min-width: 60px;
+}
+.ec-preset-addr {
+  font-size: 10px;
+  color: var(--txt2);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ec-preset-load-btn {
+  font-size: 9px;
+  font-family: var(--mono);
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid rgba(88,166,255,.3);
+  background: none;
+  color: var(--acc);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ec-preset-del-btn {
+  font-size: 12px;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid rgba(255,123,114,.2);
+  background: none;
+  color: var(--red,#ff7b72);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* ── Unit count ──────────────────────────────────────────── */
+.ec-unit-count-wrap { margin-top: 4px; }
+.ec-unit-count {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--txt);
+  padding: 6px 0;
+}
+
+/* ── Empty state ─────────────────────────────────────────── */
+.ec-empty {
+  font-size: 11px;
+  color: var(--mut);
+  font-style: italic;
+}
