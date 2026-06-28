@@ -1110,6 +1110,21 @@ chk('S19-5: schedulers.js exports init', 'export function init' in _sc or 'funct
 chk('S19-6: schedulers.js handles ui:view-change', 'ui:view-change' in _sc)
 chk('S19-T1: toolbar has tb-schedulers button', 'tb-schedulers' in _tb)
 chk('S19-T2: toolbar emits view-change to schedulers', "to: 'schedulers'" in _tb)
+
+# -- Stage 20 checks (daily-notes view wired into app.js + toolbar) ---------------
+with open('/home/zilasant/fleet/version_c/renderer/src/js/app.js') as _f: _app = _f.read()
+with open('/home/zilasant/fleet/version_c/renderer/src/js/components/toolbar.js') as _f: _tb  = _f.read()
+with open('/home/zilasant/fleet/version_c/renderer/src/js/views/daily-notes.js', errors='replace') as _f: _dn  = _f.read()
+
+chk('S20-1: app.js imports initDailyNotes', 'initDailyNotes' in _app and 'daily-notes.js' in _app)
+chk('S20-2: app.js calls initDailyNotes(viewsMount)', 'initDailyNotes(viewsMount)' in _app)
+chk('S20-3: app.js grabs view-daily-notes element', 'view-daily-notes' in _app)
+chk('S20-4: app.js routes daily-notes in view-change', 'dailyNotesView.style.display' in _app)
+chk('S20-5: daily-notes.js exports init', 'export function init' in _dn)
+chk('S20-6: daily-notes.js handles ui:view-change', 'ui:view-change' in _dn)
+chk('S20-7: daily-notes.js calls getDailyNotesLog or runDailyNotes', 'getDailyNotesLog' in _dn or 'runDailyNotes' in _dn)
+chk('S20-T1: toolbar has tb-daily-notes button', 'tb-daily-notes' in _tb)
+chk('S20-T2: toolbar emits view-change to daily-notes', "to: 'daily-notes'" in _tb)
 # ── Cross-module checks ──────────────────────────────────────────────────────
 chk('fleet-bridge.js LF only',                          '\r' not in fb)
 chk('notes-bridge.js LF only',                          '\r' not in nb)

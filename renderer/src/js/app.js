@@ -24,6 +24,7 @@ import { init as initSchedulers } from './views/schedulers.js';
 import { init as initAnalytics }     from './views/analytics.js';
 import { init as initVendors }       from './views/vendors.js';
 import { init as initEmailComposer } from './views/email-composer.js';
+import { init as initDailyNotes } from './views/daily-notes.js';
 
 function boot() {
   // ── Remove loading spinner ───────────────────────────────────────────────
@@ -66,6 +67,7 @@ function boot() {
   initAnalytics(viewsMount);
   initVendors(viewsMount);
   initEmailComposer(viewsMount);
+  initDailyNotes(viewsMount);
 
   // ── Cross-view routing ───────────────────────────────────────────────────
   const fleetView    = document.getElementById('view-fleet');
@@ -75,6 +77,7 @@ function boot() {
   const vendorsView       = document.getElementById('view-vendors');
   const emailComposerView = document.getElementById('view-email-composer');
   const schedulersView       = document.getElementById('view-schedulers');
+  const dailyNotesView       = document.getElementById('view-daily-notes');
 
   bus.on('ui:view-change', ({ to }) => {
     if (fleetView)         fleetView.style.display         = to === 'fleet'          ? 'flex' : 'none';
@@ -83,6 +86,7 @@ function boot() {
     if (vendorsView)       vendorsView.style.display       = to === 'vendors'        ? 'flex' : 'none';
     if (emailComposerView) emailComposerView.style.display = to === 'email-composer' ? 'flex' : 'none';
     if (schedulersView)       schedulersView.style.display       = to === 'schedulers'       ? 'flex' : 'none';
+    if (dailyNotesView)       dailyNotesView.style.display       = to === 'daily-notes'     ? 'flex' : 'none';
   });
 
   // Close detail panel when switching views

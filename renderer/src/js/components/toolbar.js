@@ -55,6 +55,9 @@ export function init(container) {
       <button id="tb-email-composer" class="toolbar__btn" title="Email Composer">
         Email
       </button>
+      <button id='tb-daily-notes' class='toolbar__btn' title='Daily Notes'>
+        Daily Notes
+      </button>
     </div>
   `;
   container.appendChild(el);
@@ -109,6 +112,12 @@ export function init(container) {
   // Email Composer button
   document.getElementById('tb-email-composer').addEventListener('click', () => {
     bus.emit('ui:view-change', { from: 'fleet', to: 'email-composer' });
+  });
+
+
+  // Daily Notes button
+  document.getElementById('tb-daily-notes').addEventListener('click', () => {
+    bus.emit('ui:view-change', { from: 'fleet', to: 'daily-notes' });
   });
 
   // Populate domicile options from fleet data
