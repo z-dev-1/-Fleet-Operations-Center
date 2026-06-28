@@ -258,3 +258,215 @@ body {
 }
 .detail-panel__btn:hover { border-color: var(--acc); color: var(--txt); }
 .detail-panel__btn--secondary { background: var(--adim); border-color: var(--acc); color: var(--acc2); }
+
+/* =============================================================
+   Stage 9 additions — fleet.css
+   Row colors, badges, syncing overlay, detail panel sections,
+   sort indicators, empty state, AI result, lifecycle form
+   All rules are additive — no existing rules modified.
+   ============================================================= */
+
+/* ── S9: Lifecycle row coloring via data-lc on <tr> ───────── */
+tr[data-lc="lc--unavailable"] td    { background: rgba(220, 38, 38,  0.08); }
+tr[data-lc="lc--available"] td      { background: rgba(34,  197, 94,  0.06); }
+tr[data-lc="lc--decommissioned"] td { background: rgba(107, 114, 128, 0.10); }
+tr[data-lc="lc--maintenance"] td    { background: rgba(251, 191, 36,  0.10); }
+
+/* preserve hover on colored rows */
+tr[data-lc]:hover td { filter: brightness(1.15); }
+
+/* ── S9: Badges ───────────────────────────────────────────── */
+.badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.badge--risk-low    { background: rgba(126,231,135,.18); color: var(--grn); border: 1px solid rgba(126,231,135,.3); }
+.badge--risk-medium { background: rgba(255,166,87,.15);  color: var(--org); border: 1px solid rgba(255,166,87,.3);  }
+.badge--risk-high   { background: rgba(255,123,114,.15); color: var(--red); border: 1px solid rgba(255,123,114,.3); }
+.badge--wo-open     { background: rgba(88,166,255,.15);  color: var(--acc2);border: 1px solid rgba(88,166,255,.3);  }
+.badge--wo-closed   { background: rgba(72,79,88,.2);     color: var(--mut); border: 1px solid rgba(72,79,88,.3);    }
+
+/* ── S9: Syncing overlay on fleet-table-wrap ─────────────── */
+.fleet-table-wrap { position: relative; }
+
+.fleet-table-wrap.syncing::before {
+  content: 'Syncing...';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--acc), var(--pur), var(--acc));
+  background-size: 200% 100%;
+  animation: syncBar 1.8s linear infinite;
+  z-index: 20;
+  border-radius: 0;
+  font-size: 0; /* hide text, keep the bar */
+}
+
+.fleet-table-wrap.syncing::after {
+  content: 'Syncing...';
+  position: absolute;
+  top: 6px; left: 50%; transform: translateX(-50%);
+  font-size: 10px; font-weight: 700; font-family: var(--mono);
+  color: var(--acc2); letter-spacing: 1px; text-transform: uppercase;
+  z-index: 21;
+  pointer-events: none;
+}
+
+@keyframes syncBar {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── S9: Fleet empty state ────────────────────────────────── */
+.fleet-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  gap: 12px;
+  color: var(--mut);
+  font-size: 13px;
+}
+
+/* ── S9: Sort indicators on th ───────────────────────────── */
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--acc2); }
+th.sortable.sort-asc::after  { content: ' ▲'; font-size: 9px; color: var(--acc); }
+th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc); }
+
+/* ── S9: Detail panel section dividers ───────────────────── */
+.detail-panel__section {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--bdr);
+}
+.detail-panel__section:last-child { border-bottom: none; }
+.detail-panel__section h3 {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--mut);
+  font-weight: 700;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.detail-panel__section h3::before {
+  content: '';
+  width: 10px; height: 1px;
+  background: var(--acc);
+}
+
+/* ── S9: Relay WO cards ──────────────────────────────────── */
+.dp-relay-list { display: flex; flex-direction: column; gap: 6px; }
+
+.dp-relay-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--card);
+  border: 1px solid var(--bdr);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.dp-relay-card__vendor { font-weight: 600; color: var(--txt); flex: 1; min-width: 120px; }
+.dp-relay-card__desc   { color: var(--txt2); flex: 2; min-width: 160px; }
+.dp-relay-card__age    { font-family: var(--mono); font-size: 10px; color: var(--mut); white-space: nowrap; }
+
+/* ── S9: Uptake insights list ────────────────────────────── */
+.dp-insights-list { padding-left: 18px; margin: 0; }
+.dp-insight {
+  margin: 5px 0;
+  font-size: 12px;
+  color: var(--txt2);
+  line-height: 1.5;
+}
+.dp-insight__type {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--acc2);
+  margin-right: 4px;
+}
+
+/* ── S9: Empty state text (relay, insights) ──────────────── */
+.dp-empty {
+  color: var(--mut);
+  font-style: italic;
+  font-size: 12px;
+  margin: 4px 0;
+}
+
+/* ── S9: Lifecycle change form ───────────────────────────── */
+.dp-lc-form {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 10px;
+}
+.detail-panel__select,
+.detail-panel__input {
+  padding: 5px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--bdr);
+  background: var(--el);
+  color: var(--txt);
+  font-size: 11px;
+  font-family: var(--font);
+  outline: none;
+}
+.detail-panel__select:focus,
+.detail-panel__input:focus {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px rgba(88,166,255,.1);
+}
+.detail-panel__input { flex: 1; min-width: 120px; }
+
+/* ── S9: Ask Orcha row ───────────────────────────────────── */
+.dp-ai-ask-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+.dp-ai-ask-row .detail-panel__input { flex: 1; }
+
+/* ── S9: AI result card ──────────────────────────────────── */
+.detail-panel__ai-result {
+  background: var(--card);
+  border: 1px solid var(--bdr);
+  border-left: 3px solid var(--acc);
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--txt2);
+}
+.dp-ai-text  { white-space: pre-wrap; word-break: break-word; }
+.dp-ai-error { color: var(--red); font-family: var(--mono); font-size: 11px; }
+.dp-ai-spinner { color: var(--acc2); font-family: var(--mono); font-size: 11px; animation: spin .8s linear infinite; display: inline-block; }
+
+.dp-ai-copy-btn {
+  display: block;
+  margin-top: 8px;
+  font-size: 10px;
+  padding: 3px 10px;
+}
+
+/* ── S9: Quick actions row ───────────────────────────────── */
+.detail-panel__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
