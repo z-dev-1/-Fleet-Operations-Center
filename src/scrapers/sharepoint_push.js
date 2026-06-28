@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { P } = require('../config/paths');
 const logger = require('../utils/logger').createLogger('sharepoint_push');
+const { withRetry } = require('../utils/retry');    // H-1: auth + digest retry
 
 const SP_ORIGIN = 'https://amazon.sharepoint.com';
 const SP_SITE   = '/sites/AFP-FAS';
@@ -187,12 +188,16 @@ async function pushToSharePoint(units, onProgress) {
   log('Total units to push: ' + allUnits.length + ' (' + unavailCount + ' unavailable, ' + activeCount + ' active)', 'info');
 
   // Auth
-  try { await ensureSpAuth(); log('SP session authenticated.', 'ok'); }
-  catch(e) { log('Auth failed: ' + e.message, 'bad'); return { success: false, error: e.message }; }
+  try {
+    await withRetry(() => ensureSpAuth(), { attempts: 2, backoffMs: 3000, label: 'sp:auth' });
+    log('SP session authenticated.', 'ok');
+  } catch(e) { log('Auth failed: ' + e.message, 'bad'); return { success: false, error: e.message }; }
 
   let digest;
-  try { digest = await getDigest(); log('Write token acquired.', 'ok'); }
-  catch(e) { log('Digest failed: ' + e.message, 'bad'); return { success: false, error: e.message }; }
+  try {
+    digest = await withRetry(() => getDigest(), { attempts: 2, backoffMs: 3000, label: 'sp:digest' });
+    log('Write token acquired.', 'ok');
+  } catch(e) { log('Digest failed: ' + e.message, 'bad'); return { success: false, error: e.message }; }
 
   let totalPushed = 0, totalUpdated = 0, totalErrors = 0;
 

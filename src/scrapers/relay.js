@@ -10,6 +10,7 @@
 const { BrowserWindow } = require('electron');
 const { P } = require('../config/paths');
 const logger = require('../utils/logger').createLogger('relay');
+const { withRetry } = require('../utils/retry');    // H-1: per-unit retry
 // MODULE LOAD PROBE
 
 
@@ -748,7 +749,10 @@ async function scrapeRelay(aapRows, onBatchDone, relayCache) {
   for (let i = 0; i < targets.length; i += MAX_CONCURRENT) {
     const batch = targets.slice(i, i + MAX_CONCURRENT);
     const batchResults = await Promise.all(
-      batch.map(r => scrapeUnitPage(r.equipmentId, partition, relayCache).catch(e => { logger.info('[Relay] scrapeUnitPage threw for', r.equipmentId, e.message); return null; }))
+      batch.map(r => withRetry(
+        () => scrapeUnitPage(r.equipmentId, partition, relayCache),
+        { attempts: 2, backoffMs: 2000, label: `relay:${r.equipmentId}` }
+      ).catch(e => { logger.warn('[Relay] scrapeUnitPage exhausted for', r.equipmentId, e.message); return null; }))
     );
     batch.forEach((r, idx) => {
       const res = batchResults[idx];
