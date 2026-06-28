@@ -65,20 +65,38 @@ function sendOrchaPrompt(prompt) {
 // ── PERSISTENT CHAT SESSION ───────────────────────────────────────────────
 // Fleet Chat uses a single persistent session so Orcha remembers context across restarts.
 let _fleetChatSessionId = null;
+let _fleetChatSessionTs  = 0;   // S21-F: epoch ms when session loaded/created
 const FLEET_CHAT_SESSION_FILE = P.chatSessionId;
+const SESSION_MAX_AGE_MS = 8 * 60 * 60 * 1000;  // S21-F: expire after 8h
 
 function getFleetChatSessionId() {
-  if (_fleetChatSessionId) return _fleetChatSessionId;
+  // S21-F: expire in-memory session after SESSION_MAX_AGE_MS (8h)
+  if (_fleetChatSessionId) {
+    if (Date.now() - _fleetChatSessionTs > SESSION_MAX_AGE_MS) {
+      logger.warn('[Fleet Chat] Session expired (>8h) -- clearing');
+      resetFleetChatSession();
+    } else {
+      return _fleetChatSessionId;
+    }
+  }
   // Try to load saved session ID from disk (persists across restarts)
   try {
     const saved = fs.readFileSync(FLEET_CHAT_SESSION_FILE, 'utf8').trim();
     if (saved && saved.startsWith('ct_')) {
+      // S21-F: check file mtime for age
+      const stat = fs.statSync(FLEET_CHAT_SESSION_FILE);
+      if (Date.now() - stat.mtimeMs > SESSION_MAX_AGE_MS) {
+        logger.warn('[Fleet Chat] Saved session expired (>8h) -- ignoring');
+        try { fs.unlinkSync(FLEET_CHAT_SESSION_FILE); } catch (_) {}
+        return null;
+      }
       _fleetChatSessionId = saved;
+      _fleetChatSessionTs  = stat.mtimeMs;  // S21-F: stamp age
       logger.info('[Fleet Chat] Restored persistent session:', saved);
       return _fleetChatSessionId;
     }
   } catch (_) {}
-  // No saved session — return null (will create new on first chat)
+  // No saved session -- return null (will create new on first chat)
   return null;
 }
 
@@ -207,6 +225,7 @@ function sendOrchaChat(prompt) {
         case 'session_created': {
           const sid = msg.session_id;
           _fleetChatSessionId = sid;
+          _fleetChatSessionTs  = Date.now();  // S21-F: record creation time
           try { fs.writeFileSync(FLEET_CHAT_SESSION_FILE, sid); } catch (_) {}
           logger.info('[Fleet Chat] New session created:', sid);
           ws.send(JSON.stringify({ type: 'send_message', session_id: sid, message: prompt, images: [] }));

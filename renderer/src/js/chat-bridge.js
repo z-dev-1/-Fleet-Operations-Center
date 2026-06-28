@@ -18,7 +18,8 @@
   'use strict';
 
   /* ── 1. Capability detection ─────────────────────────────────────────── */
-  const HAS_AI = !!(window.ai && typeof window.ai.chat === 'function');
+  // S21-A: hasAI() checked lazily per-call (avoids load-time preload race)
+  function hasAI() { return !!(window.ai && typeof window.ai.chat === 'function'); }
 
   /* ── 2. Dev-mode canned responses (preserved from original sendMsg) ─── */
   const DEV_RESPONSES = [
@@ -41,7 +42,9 @@
       if (!uid) return '';
       const u = window.UNITS && window.UNITS[uid];
       if (!u) return '[Unit: ' + uid + '] ';
-      return (
+      // S21-B: cap context at 300 chars to prevent prompt overflow
+      const MAX_CTX = 300;
+      const raw = (
         '[Context: Unit ' + u.id +
         ' | ' + (u.year || '') + ' ' + (u.make || '') +
         ' | Op=' + (u.op || '') + ' Site=' + (u.site || '') +
@@ -52,6 +55,7 @@
         ' | SLA=' + (u.sla || '') +
         '] '
       );
+      return raw.length > MAX_CTX ? raw.slice(0, MAX_CTX) + '...] ' : raw;
     } catch (_) {
       return '';
     }
@@ -111,8 +115,15 @@
 
     return {
       el: wrap,
-      resolve: function (text) {
+      // S21-C: path param adds sub-label on AI bubble
+      resolve: function (text, path) {
         mb.textContent = text;
+        if (path) {
+          var lbl = document.createElement('div');
+          lbl.style.cssText = 'font-size:9px;color:var(--mut);margin-top:4px;opacity:.7';
+          lbl.textContent = path === 'fallback' ? '* via fallback' : '* via relay';
+          mb.appendChild(lbl);
+        }
         msgs.scrollTop = msgs.scrollHeight;
       },
     };
@@ -139,7 +150,7 @@
     _inflight = true;
 
     try {
-      if (HAS_AI) {
+      if (hasAI()) {  // S21-A: lazy check
         /* ── IPC path ── */
         const ctx    = buildUnitContext();
         const prompt = ctx ? ctx + '\n' + tx : tx;
@@ -151,17 +162,19 @@
           throw new Error('IPC error: ' + e.message);
         }
 
-        // Backend may return { ok, text } or a bare string
+        // Backend returns { ok, text, path } -- normalise (S21-C)
         let answer = '';
+        let ipcPath = null;
         if (result && typeof result === 'object' && result.text) {
-          answer = result.text;
-        } else if (typeof result === 'string') {
+          answer  = result.text;
+          ipcPath = result.path || null;  // S21-C
+        } else if  (typeof result === 'string') {
           answer = result;
         } else {
           answer = 'No response from AI.';
         }
 
-        typing.resolve(answer);
+        typing.resolve(answer, ipcPath);  // S21-C
 
       } else {
         /* ── Dev-mode path ── */
@@ -195,8 +208,8 @@
 
   /* ── 6. Debug handle ─────────────────────────────────────────────────── */
   window._chatBridge = {
-    version:         '1.0.0',
-    HAS_AI:          HAS_AI,
+    version:         '1.1.0',  // S21 hardened
+    hasAI:           hasAI,    // S21-A: lazy function
     inflight:        function () { return _inflight; },
     buildUnitContext: buildUnitContext,
     devResponses:    DEV_RESPONSES,

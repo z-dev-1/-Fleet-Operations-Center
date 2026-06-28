@@ -321,8 +321,11 @@
       for (const m of mutations) {
         if (m.type === 'attributes' && m.attributeName === 'class') {
           if (drawer.classList.contains('open')) {
-            // Small delay so openDrawerByUid has finished building drActions
-            setTimeout(_injectDrawerButton, 80);
+            // S21-E: 200ms primary + 500ms retry if drActions not ready yet
+            setTimeout(_injectDrawerButton, 200);
+            setTimeout(function() {
+              if (!document.getElementById('orcha-run-btn')) _injectDrawerButton();
+            }, 500);
           }
         }
       }
@@ -348,7 +351,7 @@
     // If drawer is already open on boot (rare), inject now
     const drawer = document.getElementById('drawer');
     if (drawer && drawer.classList.contains('open')) {
-      setTimeout(_injectDrawerButton, 80);
+      setTimeout(_injectDrawerButton, 200); // S21-E: 200ms
     }
 
     const mode = HAS_ORCHA_DEEP ? 'IPC mode' : 'dev mode';
