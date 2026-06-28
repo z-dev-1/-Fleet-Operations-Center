@@ -9,26 +9,24 @@
  *   2. Lifecycle breakdown — CSS bar chart per lifecycle state
  *   3. By-operator table   — total / unavail / high-risk / open-WR per op
  *   4. Risk distribution   — HIGH/MEDIUM/LOW tiers with mini bars
- *   5. Top vendors         — ranked vendor counts from relay cache
+ *   5. Top vendors         — ranked vendor counts from row.vendor (relay-merged)
  *   6. PM due dates        — pmB / pmX / DOT overdue/due-soon counts
  *   7. Body-type mix       — asset type distribution bar chart
  *
+ * S13-fix: vendor data derived from row.vendor (relay-merged field on every
+ * fleet row) — no relay cache IPC needed, relay bridge import removed.
+ *
  * Updates reactively on fleet:data bus events.
- * Relay cache loaded once on init; refreshed on re-enter.
  */
 
 import bus   from '../bus.js';
 import state from '../state.js';
-import { relay as relayBridge } from '../bridge.js';
 
-let _el       = null;
-let _relayMap = {};   // { [equipmentId]: { vendor, woStatus } }
+let _el = null;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const _safe = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const _pct  = (n, t) => t ? Math.round((n / t) * 100) : 0;
-
-function _q(id) { return _el ? _el.querySelector('#' + id) : null; }
 
 // ── PM field parser ────────────────────────────────────────────────────────
 // pmB / pmX / dot values come as strings: "3 days", "overdue", "0 days", "--"
@@ -79,11 +77,10 @@ function _compute(rows) {
   }
   const opSorted = Object.entries(opMap).sort((a, b) => b[1].total - a[1].total);
 
-  // — Top vendors (from relay cache) —
+  // — Top vendors — derived from row.vendor (relay-merged field on every fleet row)
   const vendMap = {};
   for (const r of rows) {
-    const rel = _relayMap[r.equipmentId] || {};
-    const v = (rel.vendor || '').trim();
+    const v = (r.vendor || '').trim();
     if (v) vendMap[v] = (vendMap[v] || 0) + 1;
   }
   const vendSorted = Object.entries(vendMap).sort((a, b) => b[1] - a[1]).slice(0, 10);
@@ -133,9 +130,9 @@ function _bar(value, max, cls) {
 // ── HTML renderers ────────────────────────────────────────────────────────
 
 function _renderSummary(c) {
-  const unavailPct = _pct(c.unavailCount, c.total);
-  const availPct   = _pct(c.availCount,   c.total);
-  const highRiskPct = _pct(c.highRisk,    c.total);
+  const unavailPct  = _pct(c.unavailCount, c.total);
+  const availPct    = _pct(c.availCount,   c.total);
+  const highRiskPct = _pct(c.highRisk,     c.total);
   const staleHtml = c.stale
     ? `<div class="an-stale-banner">⚠ Data may be stale — trigger a sync for current counts</div>`
     : '';
@@ -174,14 +171,12 @@ function _renderLifecycle(c) {
   const rows = c.lcSorted.map(([lc, count]) => {
     const lo  = lc.toLowerCase();
     const cls = lo.includes('unavailable') ? 'unavail'
-              : lo.includes('available') ? 'avail'
+              : lo.includes('available')   ? 'avail'
               : 'other';
     return `
       <div class="an-lc-row">
         <span class="an-lc-label" title="${_safe(lc)}">${_safe(lc)}</span>
-        <div class="an-lc-bar-wrap">
-          ${_bar(count, maxCount, cls)}
-        </div>
+        <div class="an-lc-bar-wrap">${_bar(count, maxCount, cls)}</div>
         <span class="an-lc-count">${count}</span>
         <span class="an-lc-pct">${_pct(count, c.total)}%</span>
       </div>`;
@@ -225,16 +220,16 @@ function _renderOperators(c) {
     <tr>
       <td class="an-op-name">${_safe(op)}</td>
       <td class="an-tbl--r">${d.total}</td>
-      <td class="an-tbl--r ${d.unavail > 0 ? 'an-cell--warn' : ''}">${d.unavail}</td>
+      <td class="an-tbl--r ${d.unavail   > 0 ? 'an-cell--warn'   : ''}">${d.unavail}</td>
       <td class="an-tbl--r">${_pct(d.unavail, d.total)}%</td>
-      <td class="an-tbl--r ${d.highRisk > 0 ? 'an-cell--danger' : ''}">${d.highRisk}</td>
-      <td class="an-tbl--r ${d.openWR > 0 ? 'an-cell--accent' : ''}">${d.openWR}</td>
+      <td class="an-tbl--r ${d.highRisk  > 0 ? 'an-cell--danger' : ''}">${d.highRisk}</td>
+      <td class="an-tbl--r ${d.openWR    > 0 ? 'an-cell--accent' : ''}">${d.openWR}</td>
     </tr>`).join('');
   return `<table class="an-table"><thead>${headerRow}</thead><tbody>${dataRows}</tbody></table>`;
 }
 
 function _renderVendors(c) {
-  if (!c.vendSorted.length) return '<span class="an-empty">No relay vendor data — run a relay sync first</span>';
+  if (!c.vendSorted.length) return '<span class="an-empty">No vendor data — run a relay sync first</span>';
   const maxCount = c.vendSorted[0][1];
   const rows = c.vendSorted.map(([vendor, count]) => `
     <div class="an-vend-row">
@@ -337,7 +332,7 @@ function _dashboardHtml() {
 
       <!-- Full-width: vendor distribution -->
       <div class="an-card">
-        <div class="an-card__title">Top Vendors (relay cache)</div>
+        <div class="an-card__title">Top Vendors</div>
         <div id="an-vendors"></div>
       </div>
 
@@ -347,15 +342,16 @@ function _dashboardHtml() {
 
 // ── Render / update ───────────────────────────────────────────────────────
 function _update(rows) {
+  if (!_el) return;
   const c = _compute(rows);
 
-  const summaryEl    = _el ? _el.querySelector('#an-summary')    : null;
-  const lifecycleEl  = _el ? _el.querySelector('#an-lifecycle')  : null;
-  const riskEl       = _el ? _el.querySelector('#an-risk')       : null;
-  const operatorsEl  = _el ? _el.querySelector('#an-operators')  : null;
-  const vendorsEl    = _el ? _el.querySelector('#an-vendors')    : null;
-  const pmEl         = _el ? _el.querySelector('#an-pm')         : null;
-  const btEl         = _el ? _el.querySelector('#an-bodytypes')  : null;
+  const summaryEl   = _el.querySelector('#an-summary');
+  const lifecycleEl = _el.querySelector('#an-lifecycle');
+  const riskEl      = _el.querySelector('#an-risk');
+  const operatorsEl = _el.querySelector('#an-operators');
+  const vendorsEl   = _el.querySelector('#an-vendors');
+  const pmEl        = _el.querySelector('#an-pm');
+  const btEl        = _el.querySelector('#an-bodytypes');
 
   if (summaryEl)   summaryEl.innerHTML   = _renderSummary(c);
   if (lifecycleEl) lifecycleEl.innerHTML = _renderLifecycle(c);
@@ -364,16 +360,6 @@ function _update(rows) {
   if (vendorsEl)   vendorsEl.innerHTML   = _renderVendors(c);
   if (pmEl)        pmEl.innerHTML        = _renderPM(c);
   if (btEl)        btEl.innerHTML        = _renderBodyTypes(c);
-}
-
-async function _loadRelayAndUpdate(rows) {
-  try {
-    const cache = await relayBridge.getCache();
-    _relayMap = (cache && cache.units) ? cache.units : {};
-  } catch (_) {
-    _relayMap = {};
-  }
-  _update(rows);
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
@@ -391,30 +377,26 @@ export function init(container) {
   });
 
   // Manual refresh
-  _el.querySelector('#an-refresh').addEventListener('click', async () => {
+  _el.querySelector('#an-refresh').addEventListener('click', () => {
     const btn = _el.querySelector('#an-refresh');
     btn.disabled = true; btn.textContent = 'Refreshing...';
-    const rows = state.slice('fleet').rows || [];
-    await _loadRelayAndUpdate(rows);
+    _update(state.slice('fleet').rows || []);
     btn.disabled = false; btn.textContent = '↺ Refresh';
   });
 
   // Reactive update on fleet data push
   bus.on('fleet:data', (data) => {
-    const rows = (data && data.rows) ? data.rows : [];
-    _loadRelayAndUpdate(rows);
+    _update((data && data.rows) ? data.rows : []);
   });
 
   // Show/hide + refresh on view change
   bus.on('ui:view-change', ({ to }) => {
     _el.style.display = to === 'analytics' ? 'flex' : 'none';
     if (to === 'analytics') {
-      const rows = state.slice('fleet').rows || [];
-      _loadRelayAndUpdate(rows);
+      _update(state.slice('fleet').rows || []);
     }
   });
 
   // Initial render (data already in state)
-  const rows = state.slice('fleet').rows || [];
-  _loadRelayAndUpdate(rows);
+  _update(state.slice('fleet').rows || []);
 }
