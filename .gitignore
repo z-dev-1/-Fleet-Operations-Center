@@ -52,6 +52,8 @@ Thumbs.db
 *.tmp
 *.bak
 *.bak[0-9]
+*.s[0-9]bak
+*.s[0-9][0-9]bak
 *.backup
 
 # DevSpace / smoke-test artefacts
