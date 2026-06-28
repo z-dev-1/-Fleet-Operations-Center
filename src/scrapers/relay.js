@@ -27,6 +27,13 @@ const WO_TAB_SETTLE_MS  = 4000;
 // H-3: concurrency lock — prevents duplicate batch scrapes on re-entrant calls
 let _relayLock = false;
 
+// M-1: cache TTL — entries younger than this are returned without re-scraping
+// 4 h default: generous enough for a full shift; short enough that stale WR
+// data (new vendor note, lifecycle change) surfaces within one sync cycle.
+// Set RELAY_CACHE_TTL_HOURS=0 in env to disable (forces full re-scrape always).
+const _TTL_HOURS         = Number(process.env.RELAY_CACHE_TTL_HOURS ?? 4);
+const RELAY_CACHE_TTL_MS = _TTL_HOURS * 60 * 60 * 1000;
+
 
 // ── FleetNet guard ────────────────────────────────────────────────────────────
 const SKIP_VENDOR_PATTERNS = ['fleetnet', 'fleet net'];
@@ -570,14 +577,29 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
     return null;
   }
 
-  // ── Live mode: always re-scrape WR page for fresh data ───────────────────
-  // UUID cache is used only to detect work-order changes (no scrape skip)
-  if (relayCache && relayCache[equipmentId]) {
-    const cached = relayCache[equipmentId];
-    if (cached._serviceUUID && cached._serviceUUID !== serviceUUID) {
-      logger.info('[Relay] UUID CHANGED for', equipmentId, '| was:', cached._serviceUUID, '-> now:', serviceUUID);
+  // ── M-1: TTL cache check ──────────────────────────────────────────────────────
+  // Return cached entry without opening a BrowserWindow if:
+  //   (a) a cache entry exists for this unit
+  //   (b) RELAY_CACHE_TTL_MS > 0 (TTL not disabled via env var)
+  //   (c) entry is younger than the TTL
+  //   (d) the _serviceUUID is unchanged (WO has not been reassigned)
+  // If UUID changed, always re-scrape regardless of age — WO reassignment
+  // means the cached WR fields are for a different work order entirely.
+  if (relayCache && relayCache[equipmentId] && RELAY_CACHE_TTL_MS > 0) {
+    const cached  = relayCache[equipmentId];
+    const ageMs   = Date.now() - (cached._cachedAt || 0);
+    const uuidOk  = !cached._serviceUUID || cached._serviceUUID === serviceUUID;
+    if (ageMs < RELAY_CACHE_TTL_MS && uuidOk) {
+      logger.info('[Relay] Cache HIT for', equipmentId,
+        '| age:', Math.round(ageMs / 60000) + 'min', '/ TTL:', Math.round(RELAY_CACHE_TTL_MS / 3600000) + 'h');
+      return { ...cached, _cacheHit: true };
+    }
+    if (!uuidOk) {
+      logger.info('[Relay] UUID CHANGED for', equipmentId,
+        '| was:', cached._serviceUUID, '-> now:', serviceUUID, '— cache bypassed');
     } else {
-      logger.info('[Relay] Re-scraping', equipmentId, '| UUID unchanged, fetching fresh WR data');
+      logger.info('[Relay] Cache STALE for', equipmentId,
+        '| age:', Math.round(ageMs / 60000) + 'min', '> TTL:', Math.round(RELAY_CACHE_TTL_MS / 3600000) + 'h');
     }
   }
   return new Promise((resolve) => {
