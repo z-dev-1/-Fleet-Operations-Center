@@ -470,3 +470,179 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
   flex-wrap: wrap;
   align-items: center;
 }
+
+/* =============================================================
+   Stage 10 additions — fleet.css
+   Settings panel: section titles, status badges, fields layout,
+   credentials key pills, inline rows, test email row.
+   All rules are additive — no existing rules modified.
+   ============================================================= */
+
+/* ── Settings layout ─────────────────────────────────────── */
+.settings-wrap {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+  overflow-y: auto;
+  height: 100%;
+  max-width: 640px;
+  gap: 0;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--bdr);
+}
+.settings-header h2 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--txt);
+}
+
+/* ── Section titles (replaces plain h3 in S9) ────────────── */
+.settings-section__title {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--mut);
+  font-weight: 700;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-section__title::before {
+  content: '';
+  width: 10px;
+  height: 1px;
+  background: var(--acc);
+  flex-shrink: 0;
+}
+
+/* ── Section dividers ────────────────────────────────────── */
+.settings-section {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--bdr);
+}
+.settings-section:last-child { border-bottom: none; }
+
+/* ── Fields grid ─────────────────────────────────────────── */
+.settings-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.settings-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--txt2);
+}
+.settings-label--grow { flex: 1; }
+.settings-label--inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--txt2);
+}
+.settings-label--inline input[type="checkbox"] {
+  accent-color: var(--acc);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+/* Select inherits same style as input */
+.settings__select {
+  padding: 5px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--bdr);
+  background: var(--el);
+  color: var(--txt);
+  font-size: 11px;
+  font-family: var(--font);
+  outline: none;
+  cursor: pointer;
+}
+.settings__select:focus {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px rgba(88,166,255,.1);
+}
+
+/* ── Actions row ─────────────────────────────────────────── */
+.settings-section__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+/* ── Danger button variant ───────────────────────────────── */
+.settings-btn--danger {
+  border-color: rgba(255,123,114,.3) !important;
+  color: var(--red) !important;
+}
+.settings-btn--danger:hover {
+  border-color: var(--red) !important;
+  background: var(--redd) !important;
+}
+
+/* ── Auth status variants ────────────────────────────────── */
+.settings__status { font-size: 11px; margin-bottom: 8px; }
+.settings__status--loading { color: var(--mut); }
+.settings__status--ok      { color: var(--grn); font-weight: 600; }
+.settings__status--error   { color: var(--red); }
+
+/* ── Credentials key list ────────────────────────────────── */
+.settings-list-wrap {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(48,54,61,.5);
+}
+.settings-list-label {
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--mut);
+  margin-bottom: 7px;
+}
+.settings-key-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.settings-key-pill {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 10px;
+  background: var(--el);
+  border: 1px solid var(--bdr);
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--txt2);
+}
+.settings-list-empty {
+  font-size: 11px;
+  color: var(--mut);
+  font-style: italic;
+}
+
+/* ── Inline test-email row ───────────────────────────────── */
+.settings-inline-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.settings-inline-row .settings__input { flex: 1; min-width: 200px; }
