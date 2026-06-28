@@ -39,7 +39,7 @@ const REALM_CALLBACK      = /#.*\bcode=/i;
 const MIDWAY_PATTERN      = /midway|signin\.aws|sso\.amazon|oidc|oauth|federate\.amazon/i;
 const PARTITION           = '';
 
-const MASTER_TIMEOUT_MS   = 900000; // 15 min — risk pass over 23 assets needs the headroom
+const MASTER_TIMEOUT_MS   = 180000; // Stage 5 C-2: 3 min cap (was 15 min) -- isSyncing clears promptly on hang
 const PAGE_LOAD_TIMEOUT   = 40000;  // per-page: 40s to handle slow CB reloads
 const DOM_POLL_INTERVAL   = 800;    // ms between DOM-ready checks
 const DOM_POLL_MAX        = 50;     // max polls (~40 seconds) — asset overview pages load slowly

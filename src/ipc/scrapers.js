@@ -19,11 +19,12 @@ const { BrowserWindow, session: eSession } = require('electron');
 const p      = require('path');
 const fs     = require('fs');
 const logger = require('../utils/logger')('ipc:scrapers');
-const { handle, requireString, requireObject, requireArrayMax } = require('./_safe');
+const { handle, timeoutAfter, requireString, requireObject, requireArrayMax } = require('./_safe');
 const { ScraperError, ConfigError } = require('../utils/errors');
 
 // ── Constants ─────────────────────────────────────────────────────────────
 const MAX_SCAN_BATCH = 50;   // Issue #3: cap unbounded BrowserWindow spawning
+const GEOFENCE_IPC_TIMEOUT = 90_000; // Stage 5 C-1: IPC belt -- scraper has own 60s timeout
 
 // ── Re-entrancy locks (Issue #9) ──────────────────────────────────────────
 // Module-level: survive across IPC calls within the same process lifetime.
@@ -42,7 +43,14 @@ function registerScrapersIPC(ctx) {
     const { scrapeGeofences } = require('../../src/scrapers/geofence_scraper');
     const logs = [];
     const log  = (msg) => { logs.push(msg); logger.info(msg); if (send) send('scan:progress', msg); };
-    const result = await scrapeGeofences(log);
+    // Stage 5 C-1: race the scraper's own 60s timeout with a 90s IPC-level cap
+    const result = await Promise.race([
+      scrapeGeofences(log),
+      new Promise(r => setTimeout(
+        () => r({ ok: false, error: 'IPC timeout', errorCode: 'IPC_TIMEOUT' }),
+        GEOFENCE_IPC_TIMEOUT
+      )),
+    ]);
     return { ...result, logs };
   });
 
