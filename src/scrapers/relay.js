@@ -1,0 +1,834 @@
+'use strict';
+// scrapers/relay.js
+// Scrapes Relay Garage service pages on AAP for full WR + WO details.
+// Tier 1: all WR label fields (operator, domicile, vin, createdBy, lifecycleReason, urgent, needBy)
+//         + offsite shop link detection (Decisiv / DTNA links on the page)
+// Tier 2: Work Orders tab click -> vendorWorkOrderId, cause, correction, totalCost
+// Tier 3: per-unit saved notes injected at merge time from fleet_notes.json (via main.js)
+// FleetNet filter: any unit whose vendor resolves to FleetNet is SKIPPED entirely.
+
+const { BrowserWindow } = require('electron');
+const { P } = require('../config/paths');
+const logger = require('../utils/logger').createLogger('relay');
+// MODULE LOAD PROBE
+
+
+
+
+const AAP_SERVICE_BASE  = 'https://aap-na.corp.amazon.com/v2/service/';
+const AAP_GARAGE_UNPLANNED = 'https://aap-na.corp.amazon.com/page/817ca098-8441-4329-a71e-6768f9d7e6c5?tab=Unplanned&ids=';
+const AAP_GARAGE_PLANNED   = 'https://aap-na.corp.amazon.com/page/817ca098-8441-4329-a71e-6768f9d7e6c5?tab=Planned&ids=';
+const AAP_GARAGE_ALL       = 'https://aap-na.corp.amazon.com/page/817ca098-8441-4329-a71e-6768f9d7e6c5?tab=All&ids=';
+const MAX_CONCURRENT    = 5; // 5 concurrent units (~10 BrowserViews)
+const PAGE_TIMEOUT_MS   = 35000;   // extra headroom for WO tab settle
+const PAGE_SETTLE_MS    = 3000;
+const WO_TAB_SETTLE_MS  = 4000;
+
+// ── FleetNet guard ────────────────────────────────────────────────────────────
+const SKIP_VENDOR_PATTERNS = ['fleetnet', 'fleet net'];
+
+function isFleetNetVendor(vendor) {
+  const v = String(vendor || '').toLowerCase().trim();
+  return SKIP_VENDOR_PATTERNS.some(p => v.includes(p));
+}
+
+// ── Phase 1 extract script: all WR-level fields ───────────────────────────────
+const RELAY_WR_SCRIPT = String.raw`
+(function() {
+  function normalize(text) {
+    return String(text || '').replace(/\r/g,'\n').replace(/[ \t]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();
+  }
+  function getLines() {
+    return normalize(document.body ? document.body.innerText : '').split('\n').map(l=>l.trim()).filter(Boolean);
+  }
+  var KNOWN_LABELS = new Set([
+    'asset id','asset type','vin','owner name','make','program',
+    'domicile site','operator','lifecycle state','lifecycle reason',
+    'last completed maintenance','vendor','state','category','last updated',
+    'work duration','created by','urgent','need by',
+    'alternative id','work request id','integrated method',
+    'issue details','created','completed'
+  ]);
+
+  function readLabel(lines, label) {
+    var target = label.toLowerCase();
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].toLowerCase() !== target) continue;
+      for (var j = i+1; j < Math.min(lines.length, i+8); j++) {
+        var v = lines[j];
+        if (!v) continue;
+        if (KNOWN_LABELS.has(v.toLowerCase())) continue;
+        return v;
+      }
+    }
+    return '';
+  }
+
+  function readAfterSection(lines, sectionLabel) {
+    var target = sectionLabel.toLowerCase(); var idx = -1;
+    for (var i = 0; i < lines.length; i++) { if (lines[i].toLowerCase() === target) { idx = i; break; } }
+    if (idx < 0) return '';
+    var stops = new Set(['areas of concern','point of contact','time table','work request',
+      'work orders','service events','service moves','documents','history','custom forms']);
+    var vals = [];
+    for (var i = idx+1; i < lines.length; i++) {
+      if (stops.has(lines[i].toLowerCase())) break;
+      if (lines[i]) vals.push(lines[i]);
+      if (vals.join(' ').length > 300) break;
+    }
+    return vals.join(' ');
+  }
+
+  function readCreated(lines) {
+    var start = -1;
+    for (var i = 0; i < lines.length; i++) { if (/^Time Table$/i.test(lines[i])) { start = i; break; } }
+    if (start < 0) return '';
+    var stop = /^(Equipment Location|Location:|ATS|SYNC|Work Request|Work Orders|Documents|History|Custom Forms)/i;
+    for (var i = start+1; i < Math.min(lines.length, start+35); i++) {
+      if (stop.test(lines[i])) break;
+      if (/^Created$/i.test(lines[i])) {
+        for (var j = i+1; j < Math.min(lines.length, i+5); j++) {
+          var v = lines[j];
+          if (!v || KNOWN_LABELS.has(v.toLowerCase())) continue;
+          return v;
+        }
+      }
+      var m = lines[i].match(/^Created\s+(.+)$/i);
+      if (m) return m[1].trim();
+    }
+    return '';
+  }
+
+  function detectOffsiteLink() {
+    var anchors = Array.from(document.querySelectorAll('a[href]'));
+    for (var a = 0; a < anchors.length; a++) {
+      var h = String(anchors[a].href || '');
+      var pac = h.match(/https?:\/\/paccarpg(?:\.asist)?\.decisiv\.net\/(?:service_requests|fleet\/estimates)\/([A-Za-z0-9_-]+)/i);
+      if (pac) return { caseNumber: pac[1].replace(/[/?#].*$/, ''), url: h.split(/[\s"'<>]/)[0] };
+      var vol = h.match(/https?:\/\/volvopg\.asist\.decisiv\.net\/(?:service_requests|fleet\/estimates)\/([A-Za-z0-9_-]+)/i);
+      if (vol) return { caseNumber: vol[1].replace(/[/?#].*$/, ''), url: h.split(/[\s"'<>]/)[0] };
+      var dtna = h.match(/https?:\/\/dtna\.my\.site\.com\/Servicetracker\/s\/case\/([A-Za-z0-9_-]+)/i);
+      if (dtna && dtna[1].toLowerCase() !== 'case') return { caseNumber: dtna[1].replace(/[/?#].*$/, ''), url: h.split(/[\s"'<>]/)[0] };
+    }
+    return null;
+  }
+
+  var lines = getLines();
+  var text  = lines.join('\n');
+
+  var altId = '';
+  var altMatch = text.match(/\b(amz-[A-Za-z0-9_-]+)\b/i);
+  if (altMatch) altId = altMatch[1];
+  var altLabel = readLabel(lines, 'Alternative ID');
+  if (altLabel && altLabel !== '--') altId = altLabel;
+
+  var offsite = detectOffsiteLink();
+
+  return {
+    equipmentId:         readLabel(lines, 'Asset ID') || (document.title.match(/Service Details for\s+([A-Za-z0-9-]+)/i)||[])[1] || '',
+    vin:                 readLabel(lines, 'VIN'),
+    make:                readLabel(lines, 'Make'),
+    assetType:           readLabel(lines, 'Asset Type'),
+    program:             readLabel(lines, 'Program'),
+    operator:            readLabel(lines, 'Operator'),
+    domicileSite:        readLabel(lines, 'Domicile Site'),
+    vendor:              readLabel(lines, 'Vendor'),
+    serviceState:        readLabel(lines, 'State'),
+    category:            readLabel(lines, 'Category'),
+    workDuration:        readLabel(lines, 'Work Duration'),
+    createdBy:           readLabel(lines, 'Created By'),
+    lifecycleState:      readLabel(lines, 'Lifecycle State'),
+    lifecycleReason:     readLabel(lines, 'Lifecycle Reason'),
+    urgent:              readLabel(lines, 'Urgent'),
+    needBy:              readLabel(lines, 'Need By'),
+    issueDetails:        readAfterSection(lines, 'Issue Details'),
+    alternativeId:       altId,
+    workRequestId:       readLabel(lines, 'Work Request ID'),
+    integratedMethod:    readLabel(lines, 'Integrated Method') || readLabel(lines, 'Integrated Method:'),
+    created:             readCreated(lines),
+    completed:           readLabel(lines, 'Completed'),
+    offsiteShopEvent:    offsite ? offsite.caseNumber : '',
+    offsiteShopEventUrl: offsite ? offsite.url : '',
+    pageUrl:             window.location.href
+  };
+})();
+`;
+
+// ── Phase 2: click Work Orders tab ───────────────────────────────────────────
+const RELAY_CLICK_WO_TAB_SCRIPT = String.raw`
+(function() {
+  var sels = ["[role='tab']", 'button', 'a', 'li', 'span', "[class*='tab']"];
+  for (var i = 0; i < sels.length; i++) {
+    var els = document.querySelectorAll(sels[i]);
+    for (var j = 0; j < els.length; j++) {
+      var txt = (els[j].textContent || '').trim().toLowerCase();
+      if (txt === 'work orders' || txt === 'work order') {
+        try { els[j].click(); return true; } catch(e) {}
+      }
+    }
+  }
+  return false;
+})();
+`;
+
+// ── Phase 2: extract WO fields after tab renders ─────────────────────────────
+const RELAY_WO_SCRIPT = String.raw`
+(function() {
+  function normalize(text) {
+    return String(text || '').replace(/\r/g,'\n').replace(/[ \t]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();
+  }
+  function getLines() {
+    return normalize(document.body ? document.body.innerText : '').split('\n').map(l=>l.trim()).filter(Boolean);
+  }
+  var WO_SKIP = new Set(['vendor work order id','reason for repair','work accomplished','total','status','date','description']);
+
+  function readLabel(lines, label) {
+    var target = label.toLowerCase();
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].toLowerCase() !== target) continue;
+      for (var j = i+1; j < Math.min(lines.length, i+8); j++) {
+        var v = lines[j];
+        if (!v) continue;
+        if (WO_SKIP.has(v.toLowerCase())) continue;
+        return v;
+      }
+    }
+    return '';
+  }
+
+  var text = getLines().join('\n');
+
+  var cause      = (text.match(/Reason\s+for\s+Repair[:\s]*([^\n]{3,200})/i)||[])[1] || '';
+  var correction = (text.match(/Work\s+Accomplished[:\s]*([^\n]{3,200})/i)||[])[1] || '';
+  var costMatch  = text.match(/Total\s*\n?\s*\$?([\d,]+\.?\d*)/i);
+
+  return {
+    vendorWorkOrderId: readLabel(getLines(), 'Vendor Work Order ID'),
+    cause:             cause.trim(),
+    correction:        correction.trim(),
+    totalCost:         costMatch ? '$' + costMatch[1] : ''
+  };
+})();
+`;
+
+// ── Wrap a script string in try-catch so renderer errors are returned, not thrown ──
+
+// Phase 3: conversation panel offsite + Salesforce link extractor
+// Phase 3a: click conversation panel open
+// Phase 3a: poll for WR page content, then click conversation panel open
+// Phase 3a: click "Toggle Comments" button to open conversation panel
+const RELAY_CLICK_CONV_SCRIPT = String.raw`
+(function() {
+  var wrTabs = ["work orders","work request","service events","documents","history","custom forms"];
+
+  function isWRLoaded() {
+    var els = document.querySelectorAll("button,[role='tab'],li,a,span");
+    for (var i = 0; i < els.length; i++) {
+      var txt = (els[i].textContent || "").trim().toLowerCase();
+      if (wrTabs.indexOf(txt) !== -1) return true;
+    }
+    return false;
+  }
+
+  function tryClickConv() {
+    var sels = ["button","[role='tab']","a","li","span"];
+    for (var s = 0; s < sels.length; s++) {
+      var els = document.querySelectorAll(sels[s]);
+      for (var e = 0; e < els.length; e++) {
+        var txt = (els[e].textContent || "").trim().toLowerCase();
+        // Match "toggle comments" with optional count suffix e.g. "toggle comments18 18"
+        if (txt === "toggle comments" || txt.indexOf("toggle comments") === 0) {
+          try { els[e].click(); return "clicked:toggle-comments"; } catch(_) {}
+        }
+        // Also try "subscribe" sibling area or direct comment icon button
+        if (txt === "comments" || txt === "toggle comment") {
+          try { els[e].click(); return "clicked:" + txt; } catch(_) {}
+        }
+      }
+    }
+    return "no-click";
+  }
+
+  if (!isWRLoaded()) return "not-loaded";
+  return tryClickConv();
+})();
+`;
+
+// Phase 3b: scan full DOM for offsite/Salesforce links after conversation panel opens
+const RELAY_CONVERSATION_SCRIPT = String.raw`
+(function() {
+  var allHrefs = Array.from(document.querySelectorAll("a[href]"))
+    .map(function(a) { return String(a.href || ""); });
+
+  var convText = "";
+  var convSels = ["[class*=conversation]","[class*=Conversation]",
+                  "[data-testid*=conversation]","[id*=conversation]",
+                  "[class*=comment]","[class*=Comment]",
+                  "[class*=activity]","[class*=Activity]",
+                  "[class*=feed]","[class*=Feed]",
+                  "[class*=toggle]","[class*=Toggle]"];
+  for (var s = 0; s < convSels.length; s++) {
+    var el = document.querySelector(convSels[s]);
+    if (el && el.innerText && el.innerText.length > 20) { convText += " " + el.innerText; }
+  }
+  if (!convText) convText = document.body ? document.body.innerText : "";
+
+  var combined = allHrefs.join(" ") + " " + convText;
+
+  var estimateLinks  = [];
+  var requestLinks   = [];
+  var dtnaLinks      = [];
+  var salesforceLinks = [];
+
+  var reEst  = new RegExp("https?://[a-z0-9.\\-]+decisiv\\.net/fleet/estimates/([A-Za-z0-9_\\-]+)", "gi");
+  var reReq  = new RegExp("https?://[a-z0-9.\\-]+decisiv\\.net/service_requests/([A-Za-z0-9_\\-]+)", "gi");
+  var reDtna = new RegExp("https?://dtna\\.my\\.site\\.com/Servicetracker/s/case/([A-Za-z0-9_\\-]+)", "gi");
+  // Salesforce case # — plain text pattern: "SaleForce Case # 00025112" or "Salesforce Case #00025112"
+  // Salesforce case # variants:
+  //   "Salesforce case #00026307" | "SF #00026307" | "SF 00026307"
+  var reSF = new RegExp("(?:(?:sales?\\s*force(?:\\s+case)?|\\bsf\\b)\\s*#?\\s*(\\d{5,12})|\\bCase\\s+(000\\d{5,9})\\b)", "gi");
+
+  var m;
+  while ((m = reEst.exec(combined)) !== null) {
+    var cn = m[1];
+    var url = m[0].split(/[\s"'<>]/)[0];
+    if (!estimateLinks.find(function(x){return x.url===url;})) estimateLinks.push({caseNumber:cn,url:url});
+  }
+  while ((m = reReq.exec(combined)) !== null) {
+    var cn = m[1].replace(/[/?#].*$/, ""), url = m[0].split(/[\s"'<>]/)[0];
+    if (!requestLinks.find(function(x){return x.url===url;})) requestLinks.push({caseNumber:cn,url:url});
+  }
+  while ((m = reDtna.exec(combined)) !== null) {
+    var cn = m[1].replace(/[/?#].*$/, "");
+    if (cn.toLowerCase() === "case") continue;
+    var url = m[0].split(/[\s"'<>]/)[0];
+    if (!dtnaLinks.find(function(x){return x.url===url;})) dtnaLinks.push({caseNumber:cn,url:url});
+  }
+  while ((m = reSF.exec(combined)) !== null) {
+    var cn = m[1] || m[2];  // group 1: salesforce/sf prefix; group 2: bare Case 000XXXXXX
+    if (!salesforceLinks.find(function(x){return x.caseNumber===cn;})) salesforceLinks.push({caseNumber:cn,url:''});
+  }
+
+  return {
+    estimateLinks:   estimateLinks,
+    requestLinks:    requestLinks,
+    dtnaLinks:       dtnaLinks,
+    salesforceLinks: salesforceLinks,
+    fullConversation: convText.substring(0, 3000),
+    convTextSnippet: salesforceLinks.length === 0 ? (function(){
+      var sfIdx = convText.search(/(?:(?:sales?\s*force(?:\s+case)?|\bsf\b)\s*#?\s*\d{5,12}|\bCase\s+000\d{5,9}\b)/i);
+      if (sfIdx > -1) return "FOUND@" + sfIdx + ":" + convText.slice(Math.max(0,sfIdx-30), sfIdx+140);
+      return "NOT_FOUND";
+    })() : "",
+  };
+})();
+`;
+
+
+
+function safewrap(script) {
+  // script must be an expression (IIFE). We wrap it to catch renderer-side throws.
+  return `(function(){try{ return ${script.trim().replace(/;$/, '')} }catch(_e){ return { _rendererError: _e.message, _rendererStack: _e.stack }; }})()`;
+}
+
+// ── Scrape a single unit (Phase 1 + Phase 2) ─────────────────────────────────
+
+// ── GARAGE_LIST_SCRIPT: extract WR rows from the Relay Garage dashboard ──
+const GARAGE_LIST_SCRIPT = String.raw`
+(function() {
+  var rows = [];
+  var anchors = Array.from(document.querySelectorAll('a[href]'));
+  anchors.forEach(function(a) {
+    var m = a.href.match(/\/v2\/service\/([a-f0-9-]{36})/i)
+        || a.href.match(/\/service\/([a-f0-9-]{36})/i)
+        || a.href.match(/[?&](?:wrId|workRequestId|id)=([a-f0-9-]{36})/i);
+    if (!m) return;
+    var uuid  = m[1];
+    var title = (a.textContent || '').trim();
+    var el = a.parentElement, vendor = '', state = '';
+    for (var d = 0; d < 8 && el; d++) {
+      var cells = el.querySelectorAll('td, [class*="cell"], [class*="column"]');
+      for (var c = 0; c < cells.length; c++) {
+        var ct = (cells[c].textContent||'').trim();
+        // Vendor detection
+        if (!vendor && /^(TA|Volvo|Amerit|Cox|PCSR|FleetNet|Fleet Net|RENTAL|UNASSIGNED|CEI|VELOCITI|RTS|CUMMINS|FREIGHTLINER|KENWORTH|PETERBILT|MACK|INTERNATIONAL|NAVISTAR|DAIMLER|PACCAR)$/i.test(ct)) {
+          vendor = ct;
+        }
+        // State badge detection
+        if (!state) {
+          var badges = cells[c].querySelectorAll('[class*="badge"],[class*="Badge"],[class*="status"],[class*="Status"],[class*="chip"],[class*="Chip"],[class*="tag"],[class*="Tag"]');
+          for (var b = 0; b < badges.length; b++) {
+            if (/^(Completed|Cancelled|Work in progress|Work order assigned|Pending assignment|Rejected|Pending verification|Pending approval|Scheduled|Created|Scheduled Created|In Progress|No Vendor Assigned)$/i.test(bt)) {
+              state = bt; break;
+
+            }
+          }
+          var ctClean = ct.replace(/\s+/g, ' ');
+          if (!state && /^(Completed|Cancelled|Work in progress|Work order assigned|Pending assignment|Rejected|Pending verification|Pending approval|Scheduled|Created|Scheduled Created|In Progress|No Vendor Assigned)$/i.test(ctClean)) {
+            state = ctClean;
+          }
+
+        }
+      }
+      if (vendor && state) break;
+      el = el.parentElement;
+    }
+    rows.push({ uuid: uuid, title: title, vendor: vendor, state: state });
+  });
+  var seen = {}, deduped = [];
+  rows.forEach(function(r) { if (!seen[r.uuid]) { seen[r.uuid]=1; deduped.push(r); } });
+  return deduped;
+})();
+`;
+
+// ── Scrape the Relay Garage list page and return WR row objects ───────────
+async function scrapeGarageList(url, equipmentId, partition) {
+  return new Promise((resolve) => {
+    logger.info('[Relay] Garage Promise created for', equipmentId);
+    let settled = false;
+    let lastUrl = '';
+    try {
+
+    const win = new BrowserWindow({
+      show:        false,
+      skipTaskbar: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, partition }
+    });
+
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { win.destroy(); } catch(_) {}
+      resolve(result);
+    };
+
+    // Master timeout — 25s to handle slow Midway redirect chains
+    const timer = setTimeout(() => {
+      logger.info('[Relay] Garage TIMEOUT 25s for', equipmentId, '| lastUrl:', lastUrl.slice(0, 80));
+      done([]);
+    }, 25000);
+
+    // Attempt extract — called after any page settles on AAP domain
+    let _pollCount = 0;
+    const tryExtract = async () => {
+      if (!win || win.isDestroyed()) return;
+      const curUrl = win.webContents.getURL();
+      lastUrl = curUrl;
+
+      if (!/aap-na\.corp\.amazon\.com/i.test(curUrl)) {
+        // Still on auth/midway — keep waiting
+        return;
+      }
+
+      _pollCount++;
+      try {
+        const rows = await win.webContents.executeJavaScript(safewrap(GARAGE_LIST_SCRIPT));
+        if (Array.isArray(rows) && rows.length > 0) {
+          logger.info('[Relay] Garage found', rows.length, 'rows for', equipmentId, 'after', _pollCount, 'polls');
+          done(rows);
+          return;
+        }
+      } catch(e) {
+        logger.info('[Relay] Garage extract error', equipmentId, e.message);
+      }
+
+      if (_pollCount >= 20) {
+        // Log what's on the page for debugging
+        try {
+          const txt = await win.webContents.executeJavaScript('document.body.innerText.slice(0,250)');
+          logger.info('[Relay] Garage gave up for', equipmentId, '| page:', String(txt).replace(/\n/g,' ').slice(0,200));
+        } catch(_) {}
+        done([]);
+        return;
+      }
+
+      setTimeout(tryExtract, 500);
+    };
+
+    // Hook all relevant load events
+    win.webContents.on('did-finish-load', () => {
+      const u = win.webContents.getURL();
+      logger.info('[Relay] Garage did-finish-load', equipmentId, '|', u.slice(0, 80));
+      // Give React 1.5s to mount the table, then start polling
+      setTimeout(tryExtract, 1500);
+    });
+
+    win.webContents.on('did-navigate', (_, navUrl) => {
+      logger.info('[Relay] Garage did-navigate', equipmentId, '|', navUrl.slice(0, 80));
+    });
+
+    win.webContents.on('did-stop-loading', () => {
+      if (win.isDestroyed()) return;
+      const u = win.webContents.getURL();
+      // Only try if we're on AAP and haven't settled yet
+      if (!settled && /aap-na\.corp\.amazon\.com/i.test(u)) {
+        setTimeout(tryExtract, 1500);
+      }
+    });
+
+    win.webContents.on('did-fail-load', (_, code, desc) => {
+      if (code !== -3) {
+        logger.info('[Relay] Garage did-fail-load', equipmentId, code, desc);
+        done([]);
+      }
+    });
+
+    logger.info('[Relay] Garage loadURL called for', equipmentId, '|', url.slice(0,80));
+    logger.info('[Relay] WR page loadURL for', equipmentId, '|', url.slice(0,80));
+    win.loadURL(url);
+    } catch(promErr) {
+      logger.info('[Relay] Garage Promise body error for', equipmentId, promErr.message);
+      try { win.destroy(); } catch(_) {}
+      resolve([]);
+    }
+  });
+}
+
+
+async function resolveServiceUUID(equipmentId, partition) {
+  logger.info('[Relay] resolveServiceUUID called for', equipmentId);
+  const tabs = [
+    AAP_GARAGE_UNPLANNED + equipmentId,
+    AAP_GARAGE_PLANNED   + equipmentId,
+    AAP_GARAGE_ALL       + equipmentId,   // fallback: catches WIPs that don't appear under Unplanned/Planned
+  ];
+  const labels = ['Unplanned', 'Planned', 'All'];
+
+  // States that mean the WR is closed — skip these and keep looking for an active one
+  const CLOSED_STATES = /^(Completed|Cancelled)$/i;
+
+  for (let t = 0; t < tabs.length; t++) {
+    const rows = await scrapeGarageList(tabs[t], equipmentId, partition);
+    if (!rows.length) continue;
+
+    // Log all rows so we can see what was considered
+    rows.forEach(r => logger.info('[Relay]', equipmentId, '  row:', r.vendor||'?', '|', r.state||'no-state', '|', (r.title||'').slice(0,40)));
+
+    // Prefer an active (non-closed, non-FleetNet) WR first
+    const active = rows.find(r => !isFleetNetVendor(r.vendor) && !CLOSED_STATES.test(r.state || ''));
+    if (active) {
+      logger.info('[Relay]', equipmentId, '->', labels[t], 'ACTIVE UUID:', active.uuid, 'vendor:', active.vendor||'?', 'state:', active.state||'?', 'title:', (active.title||'').slice(0,40));
+      return active.uuid;
+    }
+
+    // No active WR on this tab — try next tab before falling back
+    const skipReasons = rows.map(r => `${r.vendor||'?'}/${r.state||'?'}`).join(', ');
+    logger.info('[Relay]', equipmentId, '-', labels[t], rows.length, 'rows all closed/FleetNet (', skipReasons, ') — trying next tab');
+  }
+
+  // No active WR found on any tab — fall back to most recent non-FleetNet, non-Cancelled WR
+  logger.info('[Relay]', equipmentId, '— no active WR found, trying fallback (excluding Cancelled/Completed)');
+  for (let t = 0; t < tabs.length; t++) {
+    const rows = await scrapeGarageList(tabs[t], equipmentId, partition);
+    const fallback = rows.find(r => !isFleetNetVendor(r.vendor) && !CLOSED_STATES.test(r.state || ''));
+    if (fallback) {
+      logger.info('[Relay]', equipmentId, '-> FALLBACK UUID:', fallback.uuid, 'vendor:', fallback.vendor||'?', 'state:', fallback.state||'?');
+      return fallback.uuid;
+    }
+  }
+
+  // Absolute last resort: any non-FleetNet WR (even Cancelled)
+  for (let t = 0; t < tabs.length; t++) {
+    const rows = await scrapeGarageList(tabs[t], equipmentId, partition);
+    const last = rows.find(r => !isFleetNetVendor(r.vendor));
+    if (last) {
+      logger.info('[Relay]', equipmentId, '-> LAST-RESORT UUID (Cancelled?):', last.uuid, last.state);
+      return last.uuid;
+    }
+  }
+
+  logger.info('[Relay]', equipmentId, '— no valid WR found on any tab');
+  return null;
+}
+
+
+
+// Pick best offsite URL — prefer estimates over service_requests, DTNA always wins for its domain.
+// No vendor-name dependency: trigger on URL presence alone.
+function pickOffsiteFromConversation(convData) {
+  if (!convData) return null;
+  // Decisiv estimates (preferred)
+  if (convData.estimateLinks && convData.estimateLinks.length) return convData.estimateLinks[0];
+  // Decisiv service_requests (fallback)
+  if (convData.requestLinks  && convData.requestLinks.length)  return convData.requestLinks[0];
+  // DTNA Servicetracker
+  if (convData.dtnaLinks     && convData.dtnaLinks.length)     return convData.dtnaLinks[0];
+  return null;
+}
+
+async function scrapeUnitPage(equipmentId, partition, relayCache) {
+  logger.info('[Relay] scrapeUnitPage called for', equipmentId);
+  // Step 1: resolve the actual service UUID via Relay Garage dashboard
+  const serviceUUID = await resolveServiceUUID(equipmentId, partition);
+  if (!serviceUUID) {
+    logger.info('[Relay] No valid WR for unit', equipmentId, '— skipping');
+    return null;
+  }
+
+  // ── Live mode: always re-scrape WR page for fresh data ───────────────────
+  // UUID cache is used only to detect work-order changes (no scrape skip)
+  if (relayCache && relayCache[equipmentId]) {
+    const cached = relayCache[equipmentId];
+    if (cached._serviceUUID && cached._serviceUUID !== serviceUUID) {
+      logger.info('[Relay] UUID CHANGED for', equipmentId, '| was:', cached._serviceUUID, '-> now:', serviceUUID);
+    } else {
+      logger.info('[Relay] Re-scraping', equipmentId, '| UUID unchanged, fetching fresh WR data');
+    }
+  }
+  return new Promise((resolve) => {
+    const url = AAP_SERVICE_BASE + serviceUUID;
+    let settled = false;
+
+    const win = new BrowserWindow({
+      show:        false,
+      skipTaskbar: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, partition }
+    });
+
+    // Capture renderer console messages so we see the real JS error
+    // Only log real errors — suppress CSP/Report-Only/Pendo/Electron noise
+    win.webContents.on('console-message', (event, level, message) => {
+      if (level < 3) return;                                      // 3 = error only
+      if (/Report Only|pendo\.|Autofill\.enable|Content Security|unsafe-eval/i.test(message)) return;
+      console.warn(`[Relay] Renderer error (${equipmentId}):`, message.slice(0, 300));
+    });
+
+    const done = (data) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { win.destroy(); } catch(_) {}
+      resolve(data);
+    };
+
+    const timer = setTimeout(() => done(null), PAGE_TIMEOUT_MS);
+
+    win.webContents.on('did-finish-load', () => {
+      const finalUrl = win.webContents.getURL();
+      logger.info('[Relay] WR did-finish-load for', equipmentId, '|', win.webContents.getURL().slice(0,80));
+      if (!/aap-na\.corp\.amazon\.com/i.test(finalUrl)) { done(null); return; }
+
+      setTimeout(async () => {
+        try {
+          // Phase 1 — WR fields
+          const wrData = await win.webContents.executeJavaScript(safewrap(RELAY_WR_SCRIPT));
+
+          if (wrData && wrData._rendererError) {
+            logger.warn('[Relay] Renderer error for', equipmentId, ':', wrData._rendererError);
+            done(null); return;
+          }
+
+          if (!wrData || !wrData.equipmentId) { done(null); return; }
+
+          // FleetNet guard — return a sentinel so batch loop can count it separately
+          if (isFleetNetVendor(wrData.vendor)) {
+            logger.info('[Relay] Skipping FleetNet unit:', equipmentId);
+            done({ _skippedFleetNet: true });
+            return;
+          }
+
+          // Phase 2 — Work Orders tab
+          let woData = {};
+          try {
+            await win.webContents.executeJavaScript(safewrap(RELAY_CLICK_WO_TAB_SCRIPT));
+            await new Promise(r => setTimeout(r, WO_TAB_SETTLE_MS));
+            const wo = await win.webContents.executeJavaScript(safewrap(RELAY_WO_SCRIPT));
+            if (wo && !wo._rendererError) woData = wo;
+            else if (wo && wo._rendererError) logger.warn('[Relay] WO renderer error for', equipmentId, ':', wo._rendererError);
+          } catch (woErr) {
+            logger.warn('[Relay] WO tab scrape failed for', equipmentId, woErr.message);
+          }
+
+
+          // Phase 3: conversation panel — offsite link + Salesforce case (ALL units)
+          // No vendor gate — run for every unit, script returns empty arrays if nothing found.
+          let convOffsite = null;
+          let convSalesforce = null;
+          let _convData = null;   // hoisted: was const inside try-catch, caused ReferenceError at done({...})
+          try {
+            // Phase 3: poll until WR page content loaded, click conv panel, then scan
+            let _cr = 'not-loaded';
+            for (let _p = 0; _p < 8; _p++) {
+              await new Promise(r => setTimeout(r, 1000));
+              try { _cr = await win.webContents.executeJavaScript(safewrap(RELAY_CLICK_CONV_SCRIPT)); } catch(_) {}
+              if (_cr !== 'not-loaded') break;
+            }
+            logger.info('[Relay] Phase3 conv click for', equipmentId, '|', String(_cr));
+            // Poll until body text grows (comment feed renders) — up to 8s
+            const _bodyLenBefore = await win.webContents.executeJavaScript('document.body ? document.body.innerText.length : 0').catch(()=>0);
+            let _bodyGrew = false;
+            for (let _w = 0; _w < 8; _w++) {
+              await new Promise(r => setTimeout(r, 1000));
+              const _bl = await win.webContents.executeJavaScript('document.body ? document.body.innerText.length : 0').catch(()=>0);
+              if (_bl > _bodyLenBefore + 200) { _bodyGrew = true; break; }
+            }
+            logger.info('[Relay] Phase3 body grew for', equipmentId, '|', _bodyGrew ? 'yes' : 'no (timeout)');
+            _convData = await win.webContents.executeJavaScript(safewrap(RELAY_CONVERSATION_SCRIPT));
+            logger.info('[Relay] Phase3 convData received for', equipmentId, JSON.stringify(Object.keys(_convData||{})));
+            if (_convData && !_convData._rendererError) {
+              convOffsite    = pickOffsiteFromConversation(_convData);
+              convSalesforce = _convData.salesforceLinks && _convData.salesforceLinks.length
+                               ? _convData.salesforceLinks[0] : null;
+              // Build SF URL in main process using Node Buffer (not renderer btoa which may fail)
+              if (convSalesforce && convSalesforce.caseNumber && !convSalesforce.url) {
+                const _sfJson = JSON.stringify({"componentDef":"forceSearch:searchPageDesktop","attributes":{"term":convSalesforce.caseNumber,"scopeMap":{"type":"TOP_RESULTS"},"context":{"FILTERS":{},"disableIntentQuery":false,"disableSpellCorrection":false},"groupId":"DEFAULT"},"state":{}});
+                convSalesforce.url = 'https://amazonfreightpartner.lightning.force.com/one/one.app#' + Buffer.from(_sfJson).toString('base64');
+              }
+              if (convOffsite)    logger.info('[Relay] Phase3 offsite for',    equipmentId, '|', convOffsite.url ? convOffsite.url.slice(0,80) : '(no url)');
+              if (convSalesforce) logger.info('[Relay] Phase3 salesforce for', equipmentId, '|', convSalesforce.caseNumber, '| urlType:', typeof convSalesforce.url, '| urlLen:', convSalesforce.url ? convSalesforce.url.length : 0, '| url:', convSalesforce.url ? convSalesforce.url.slice(0,80) : '(no url)');
+              
+            if (!convOffsite && !convSalesforce) {
+            logger.info('[Relay] Phase3 no offsite/SF links for', equipmentId);
+            if (_convData.convTextSnippet) logger.info('[Relay] Phase3 convText for', equipmentId, '|', _convData.convTextSnippet.replace(/\n/g,' ').slice(0,300));
+          }
+            }
+          } catch (_ce) {
+            logger.info('[Relay] Phase3 CATCH for', equipmentId, _ce.message);
+            logger.warn('[Relay] Phase3 failed for', equipmentId, _ce.message);
+          }
+
+          // Phase 1 offsite link is fallback if Phase 3 found nothing
+          const _finalOffsite = convOffsite
+            || (wrData.offsiteShopEventUrl ? { caseNumber: wrData.offsiteShopEvent, url: wrData.offsiteShopEventUrl } : null);
+
+          logger.info('[Relay] done() sfCase for', equipmentId, '|', convSalesforce ? convSalesforce.caseNumber : 'null', '| urlFull:', convSalesforce && convSalesforce.url ? convSalesforce.url : 'NONE', '| urlLen:', convSalesforce && convSalesforce.url ? convSalesforce.url.length : 0);
+          done({
+            ...wrData,
+            ...woData,
+            offsiteShopEvent:    _finalOffsite    ? _finalOffsite.caseNumber    : (wrData.offsiteShopEvent    || ''),
+            offsiteShopEventUrl: _finalOffsite    ? _finalOffsite.url           : (wrData.offsiteShopEventUrl || ''),
+            salesforceCase:      convSalesforce   ? convSalesforce.caseNumber   : (wrData.salesforceCase      || ''),
+            salesforceCaseUrl:   convSalesforce   ? convSalesforce.url          : (wrData.salesforceCaseUrl   || ''),
+            fullConversation:    _convData && _convData.fullConversation ? _convData.fullConversation : '',
+            _serviceUUID:        serviceUUID,
+            _cachedAt:           Date.now(),
+          });
+
+        } catch (e) {
+          logger.warn('[Relay] Extract failed for', equipmentId, e.message);
+          done(null);
+        }
+      }, PAGE_SETTLE_MS);
+    });
+
+    win.webContents.on('did-fail-load', (_, code) => {
+      if (code !== -3) done(null);
+    });
+
+    logger.info('[Relay] WR page loadURL for', equipmentId, '|', url.slice(0,80));
+    win.loadURL(url);
+  });
+}
+
+// ── Batch scrape all unavailable units ───────────────────────────────────────
+async function scrapeRelay(aapRows, onBatchDone, relayCache) {
+  const targets = (aapRows || []).filter(r =>
+    r.lifecycleState && r.lifecycleState.toUpperCase() === 'UNAVAILABLE' && r.equipmentId
+  );
+
+  logger.info('[Relay] Scraping', targets.length, 'unavailable units... (cache entries:', relayCache ? Object.keys(relayCache).length : 0, ')');
+
+  const results = {};
+  const updatedCache = Object.assign({}, relayCache || {});
+  const partition = ''; // use default session — same as auth.js midway injection
+  let skippedFleetNet = 0;
+  let cacheHits = 0;
+
+  for (let i = 0; i < targets.length; i += MAX_CONCURRENT) {
+    const batch = targets.slice(i, i + MAX_CONCURRENT);
+    const batchResults = await Promise.all(
+      batch.map(r => scrapeUnitPage(r.equipmentId, partition, relayCache).catch(e => { logger.info('[Relay] scrapeUnitPage threw for', r.equipmentId, e.message); return null; }))
+    );
+    batch.forEach((r, idx) => {
+      const res = batchResults[idx];
+      if (res && res._skippedFleetNet) {
+        skippedFleetNet++;
+      } else if (res) {
+        results[r.equipmentId] = res;
+        // Update cache with fresh result (whether cache hit or full scrape)
+        updatedCache[r.equipmentId] = res;
+        if (res._cacheHit) cacheHits++;
+      }
+    });
+    const batchNum = Math.floor(i / MAX_CONCURRENT) + 1;
+    logger.info('[Relay] Batch', batchNum, 'done -',
+      Object.keys(results).length, 'total,', cacheHits, 'cache hits,', skippedFleetNet, 'FleetNet skips');
+    // Progressive push after each batch
+    if (typeof onBatchDone === 'function') {
+      try { onBatchDone({ results: { ...results }, done: false, batchNum }); } catch(_) {}
+    }
+  }
+
+  logger.info('[Relay] Complete:', Object.keys(results).length, '/', targets.length,
+    'units |', cacheHits, 'cache hits |', skippedFleetNet, 'FleetNet skips');
+  return { results, updatedCache };
+}
+
+// ── Merge relay data + Tier 3 saved notes into AAP rows ──────────────────────
+// notesStore = object keyed by equipmentId, loaded from fleet_notes.json in main.js
+function mergeRelayIntoRows(aapRows, relayData, notesStore) {
+  const relay = relayData || {};
+  const notes = notesStore || {};
+
+  return (aapRows || []).map(row => {
+    const r = relay[row.equipmentId] || {};
+    const n = notes[row.equipmentId] || {};
+
+    return {
+      ...row,
+
+      // Tier 1: WR label fields
+      vendor:              r.vendor            || row.vendor            || '',
+      make:                r.make              || row.make              || '',
+      assetType:           r.assetType         || row.assetType         || '',
+      program:             r.program           || row.program           || '',
+      operator:            r.operator          || row.operator          || '',
+      domicileSite:        r.domicileSite      || row.domicileSite      || '',
+      vin:                 r.vin               || row.vin               || '',
+      createdBy:           r.createdBy         || row.createdBy         || '',
+      lifecycleReason:     r.lifecycleReason   || row.lifecycleReason   || '',
+      urgent:              r.urgent            || row.urgent            || '',
+      needBy:              r.needBy            || row.needBy            || '',
+      workDuration:        r.workDuration      || row.workDuration      || '',
+      issueDetails:        r.issueDetails      || row.issueDetails      || '',
+      issueSummary:        row.issueSummary    || '',
+      repairTimeline:      row.repairTimeline  || '',
+      _orchaProcessed:     row._orchaProcessed || false,
+      alternativeId:       r.alternativeId     || row.alternativeId     || '',
+      serviceUrl:         r.pageUrl           || row.serviceUrl        || '',
+      workRequestId:       r.workRequestId     || row.workRequestId     || '',
+      salesforceCase:      r.salesforceCase     || row.salesforceCase    || '',
+      salesforceCaseUrl:   r.salesforceCaseUrl  || row.salesforceCaseUrl || '',
+      fullConversation:    r.fullConversation   || row.fullConversation  || '',
+      integratedMethod:    r.integratedMethod  || row.integratedMethod  || '',
+      serviceCategory:     r.category          || row.serviceCategory   || '',
+      created:             r.created           || row.created           || '',
+      completed:           r.completed         || row.completed         || '',
+
+      // Tier 1: offsite shop link
+      offsiteShopEvent:    r.offsiteShopEvent    || row.offsiteShopEvent    || '',
+      offsiteShopEventUrl: r.offsiteShopEventUrl || row.offsiteShopEventUrl || '',
+
+      // Tier 2: Work Orders tab fields
+      vendorWorkOrderId:   r.vendorWorkOrderId || row.vendorWorkOrderId || '',
+      cause:               r.cause             || row.cause             || '',
+      correction:          r.correction        || row.correction        || '',
+      totalCost:           r.totalCost         || row.totalCost         || '',
+
+      // Tier 3: saved notes (fleet_notes.json)
+      savedRepairStatus:      n.repairStatus        || '',
+      savedPrimaryComponent:  n.primaryComponent    || '',
+      savedSalesforceCase:    n.salesforceCase      || '',
+      savedSalesforceCaseUrl: n.salesforceCaseUrl   || '',
+      savedOffsiteEvent:      n.offsiteShopEvent    || r.offsiteShopEvent    || '',
+      savedOffsiteUrl:        n.offsiteShopEventUrl || r.offsiteShopEventUrl || '',
+      savedNotes:             n.notes               || '',
+      notesUpdatedAt:         n.updatedAt           || '',
+
+      relaySynced: Object.keys(r).length > 0,
+    };
+  });
+}
+
+module.exports = { scrapeRelay, mergeRelayIntoRows };

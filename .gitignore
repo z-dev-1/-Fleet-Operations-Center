@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Electron build
+out/
+release/
+
+# User data (never commit app data)
+*.enc
+fleet_data.json
+relay_cache.json
+uptake_hash.json
+fleet_notes.json
+aap_cache.json
+geofence_cache.json
+orcha_corrections.json
+orcha_vendor_rules.json
+daily_notes_*.json
+setup_state.json
+wr_queue.json
+sp_push_config.json
+email_config.json
+slack-config.json
+orcha_config.json
+credentials.enc
+
+# Logs
+logs/
+*.log
+
+# Screenshots
+screenshots/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Env
+.env
+.env.local
+
+# Temp
+*.tmp
+*.bak
+*.bak[0-9]
+*.backup
+
+# DevSpace / smoke-test artefacts
+_headless_prompt.txt

@@ -1,0 +1,210 @@
+/**
+ * chat-bridge.js — Module 4: AI Chat IPC Bridge
+ * Fleet Ops V-C, Stage 1
+ *
+ * Patches window.sendMsg() to route through window.ai.chat (IPC) when
+ * available. Falls back to the existing canned-response array in dev mode.
+ *
+ * Key behaviours:
+ *   - HAS_AI flag captured once at load time (never throws)
+ *   - Current unit context (_curDrawerUid / UNITS) injected into every prompt
+ *   - Typing indicator shown while IPC in flight
+ *   - IPC errors demoted to warning toast — never throw to caller
+ *   - In-flight lock prevents double-send
+ *   - window._chatBridge debug handle exposed for console inspection
+ */
+
+(function () {
+  'use strict';
+
+  /* ── 1. Capability detection ─────────────────────────────────────────── */
+  const HAS_AI = !!(window.ai && typeof window.ai.chat === 'function');
+
+  /* ── 2. Dev-mode canned responses (preserved from original sendMsg) ─── */
+  const DEV_RESPONSES = [
+    'T-7743 risk 91. Parts ETA EOD at TA Fleet.',
+    '4 offsite: T-2291 Cox, T-8821+T-5523 Amerit, T-4401 Goodyear.',
+    'SLA breach: T-5523 at 46%. Escalate to Amerit.',
+    'Can draft Slack msg, WR, or summarize trends.',
+    'Risk 75+: T-7743 T-2291 T-8821.',
+  ];
+  let _devIdx = 0;
+
+  /* ── 3. Helpers ─────────────────────────────────────────────────────── */
+  /**
+   * Build a context prefix from the currently-open drawer unit so the AI
+   * knows which unit the operator is looking at.
+   */
+  function buildUnitContext() {
+    try {
+      const uid = window._curDrawerUid;
+      if (!uid) return '';
+      const u = window.UNITS && window.UNITS[uid];
+      if (!u) return '[Unit: ' + uid + '] ';
+      return (
+        '[Context: Unit ' + u.id +
+        ' | ' + (u.year || '') + ' ' + (u.make || '') +
+        ' | Op=' + (u.op || '') + ' Site=' + (u.site || '') +
+        ' | Relay=' + (u.relay || '') +
+        ' | ATS=' + (u.ats || '') +
+        ' | Risk=' + (u.risk || '') +
+        ' | Vendor=' + (u.vendor || '') +
+        ' | SLA=' + (u.sla || '') +
+        '] '
+      );
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /**
+   * Append a message bubble to #chatMsgs and return the element.
+   * role: 'ai' | 'user'
+   */
+  function appendBubble(role, text) {
+    const msgs = document.getElementById('chatMsgs');
+    if (!msgs) return null;
+
+    const isUser = role === 'user';
+    const wrap   = document.createElement('div');
+    wrap.style.cssText = 'display:flex;gap:8px;' + (isUser ? 'flex-direction:row-reverse;' : '') + 'margin-bottom:6px';
+
+    const av = document.createElement('div');
+    av.style.cssText = isUser
+      ? 'width:22px;height:22px;border-radius:50%;background:var(--el);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0;border:1px solid var(--bdr);color:var(--txt2)'
+      : 'width:22px;height:22px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--pur));display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;flex-shrink:0';
+    av.textContent = isUser ? 'ZS' : 'O';
+
+    const mb = document.createElement('div');
+    mb.style.cssText = isUser
+      ? 'max-width:220px;padding:8px 12px;border-radius:12px;border-bottom-right-radius:3px;font-size:11px;background:var(--adim);border:1px solid var(--acc);color:var(--txt)'
+      : 'max-width:220px;padding:8px 12px;border-radius:12px;border-bottom-left-radius:3px;font-size:11px;background:var(--card);border:1px solid var(--bdr);color:var(--txt)';
+    mb.textContent = text;
+
+    wrap.appendChild(av);
+    wrap.appendChild(mb);
+    msgs.appendChild(wrap);
+    msgs.scrollTop = msgs.scrollHeight;
+    return mb;
+  }
+
+  /**
+   * Show animated typing indicator; returns {el, resolve}.
+   * resolve(text) replaces the dots with the final answer.
+   */
+  function showTyping() {
+    const msgs = document.getElementById('chatMsgs');
+    if (!msgs) return { el: null, resolve: function () {} };
+
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;gap:8px;margin-bottom:6px';
+    const av   = document.createElement('div');
+    av.style.cssText = 'width:22px;height:22px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--pur));display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;flex-shrink:0';
+    av.textContent = 'O';
+    const mb = document.createElement('div');
+    mb.style.cssText = 'max-width:220px;padding:8px 12px;border-radius:12px;border-bottom-left-radius:3px;font-size:11px;background:var(--card);border:1px solid var(--bdr);color:var(--txt)';
+    mb.innerHTML = '<div class="dots"><span></span><span></span><span></span></div>';
+    wrap.appendChild(av);
+    wrap.appendChild(mb);
+    msgs.appendChild(wrap);
+    msgs.scrollTop = msgs.scrollHeight;
+
+    return {
+      el: wrap,
+      resolve: function (text) {
+        mb.textContent = text;
+        msgs.scrollTop = msgs.scrollHeight;
+      },
+    };
+  }
+
+  /* ── 4. Core send logic ──────────────────────────────────────────────── */
+  let _inflight = false;
+
+  async function sendMsgPatched() {
+    if (_inflight) return;                           // debounce double-tap
+
+    const inp  = document.getElementById('ci');
+    const tx   = inp ? inp.value.trim() : '';
+    if (!tx) return;
+
+    // Clear input immediately
+    if (inp) inp.value = '';
+
+    // Render user bubble
+    appendBubble('user', tx);
+
+    // Show typing indicator
+    const typing = showTyping();
+    _inflight = true;
+
+    try {
+      if (HAS_AI) {
+        /* ── IPC path ── */
+        const ctx    = buildUnitContext();
+        const prompt = ctx ? ctx + '\n' + tx : tx;
+
+        let result;
+        try {
+          result = await window.ai.chat(prompt);
+        } catch (e) {
+          throw new Error('IPC error: ' + e.message);
+        }
+
+        // Backend may return { ok, text } or a bare string
+        let answer = '';
+        if (result && typeof result === 'object' && result.text) {
+          answer = result.text;
+        } else if (typeof result === 'string') {
+          answer = result;
+        } else {
+          answer = 'No response from AI.';
+        }
+
+        typing.resolve(answer);
+
+      } else {
+        /* ── Dev-mode path ── */
+        await new Promise(function (r) { setTimeout(r, 750); });
+        typing.resolve(DEV_RESPONSES[_devIdx % DEV_RESPONSES.length]);
+        _devIdx++;
+      }
+
+    } catch (err) {
+      // Replace typing dots with friendly error
+      if (typing.el) typing.el.remove();
+      appendBubble('ai', '⚠ ' + err.message);
+      if (typeof window.toast === 'function') {
+        window.toast('Chat error: ' + err.message, 'warning', 'Orcha AI');
+      }
+    } finally {
+      _inflight = false;
+    }
+  }
+
+  /* ── 5. Patch window.sendMsg ─────────────────────────────────────────── */
+  const _originalSendMsg = window.sendMsg;   // may be undefined on first load
+
+  window.sendMsg = function () {
+    // sendMsgPatched is async; original synchronous callers (onclick, onkeydown)
+    // just fire-and-forget. We swallow the returned Promise here intentionally.
+    sendMsgPatched().catch(function (e) {
+      console.error('[chat-bridge] Unhandled error in sendMsgPatched:', e);
+    });
+  };
+
+  /* ── 6. Debug handle ─────────────────────────────────────────────────── */
+  window._chatBridge = {
+    version:         '1.0.0',
+    HAS_AI:          HAS_AI,
+    inflight:        function () { return _inflight; },
+    buildUnitContext: buildUnitContext,
+    devResponses:    DEV_RESPONSES,
+    _originalSendMsg: _originalSendMsg,
+  };
+
+  /* ── 7. Boot log ─────────────────────────────────────────────────────── */
+  const mode = HAS_AI ? 'IPC (window.ai.chat)' : 'dev (canned responses)';
+  console.log('[chat-bridge] loaded — mode:', mode);
+
+})();

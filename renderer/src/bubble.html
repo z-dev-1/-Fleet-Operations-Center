@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:" />
+  <title>Fleet Bubble</title>
+  <link rel="stylesheet" href="./src/css/fleet.css" />
+  <style>
+    html, body { margin: 0; padding: 0; width: 340px; height: 500px; overflow: hidden; background: transparent; }
+    body { -webkit-app-region: no-drag; }
+  </style>
+</head>
+<body>
+  <div id="bubble-app">
+    <div class="bubble-header">
+      <span class="bubble-title">Fleet Ops</span>
+      <span id="bubble-badge" class="bubble-badge">--</span>
+    </div>
+    <div id="bubble-body" class="bubble-body">
+      <div class="bubble-empty">No alerts</div>
+    </div>
+    <div class="bubble-footer">
+      <button id="bubble-open" class="bubble-btn bubble-btn--primary">Open Fleet</button>
+      <button id="bubble-close" class="bubble-btn">Hide</button>
+    </div>
+  </div>
+  <script>
+    const badgeEl = document.getElementById('bubble-badge');
+    const bodyEl  = document.getElementById('bubble-body');
+
+    window.fleet.onData((data) => {
+      const unavail = (data.rows || []).filter(
+        r => /unavailable/i.test(r.lifecycleState || '')
+      ).length;
+      if (badgeEl) badgeEl.textContent = unavail;
+    });
+
+    if (window.fleet.onStatus) {
+      window.fleet.onStatus(() => {});
+    }
+
+    document.getElementById('bubble-open').addEventListener('click', () => {
+      if (window.ipcRenderer) window.ipcRenderer.send('bubble:clicked');
+    });
+
+    document.getElementById('bubble-close').addEventListener('click', () => {
+      if (window.ipcRenderer) window.ipcRenderer.send('bubble:clicked');
+    });
+  </script>
+</body>
+</html>

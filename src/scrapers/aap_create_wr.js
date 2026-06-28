@@ -1,0 +1,226 @@
+'use strict';
+const logger = require('../utils/logger').createLogger('aap_create_wr');
+/**
+ * AAP Create Work Request — Direct API
+ * 3-step flow: createRepair → createDriverConnection → updateWorkRequest
+ */
+
+const AAP_BASE = 'https://aap-na.corp.amazon.com/api/v1';
+
+// Known domicile coordinates
+const DOMICILE_COORDS = {
+  'ABE40': { latitude: 40.6593, longitude: -75.4902 },
+  'PHL40': { latitude: 40.7895, longitude: -74.0565 },
+  'EWR45': { latitude: 40.8468, longitude: -74.0590 },
+  'AVP40': { latitude: 41.3252, longitude: -75.7580 },
+  'AUVTE01': { latitude: 40.6593, longitude: -75.4902 }
+};
+
+// Vendor → supplierId mapping (add as discovered)
+const VENDOR_IDS = {
+  'COX':                    'ba5a6982-0897-4ddc-bebc-c5edf6b877e5',
+  'AMERIT':                 '', // TODO: capture from next WR
+  'Volvo (ASIST)':          '', // TODO
+  'Kenworth (PACCAR)':      '', // TODO
+  'Peterbilt (PACCAR)':     '', // TODO
+  'KWNE (Kenworth NE)':     '', // TODO
+  'Freightliner (DAIMLER)': '', // TODO
+  'Cummins':                '', // TODO
+  'TA':                     '', // TODO
+  'Velociti':               '', // TODO
+  'FleetNet (FLEETNET)':    '', // TODO
+  'Ryder (RENTAL)':         '', // TODO
+  'Penske (RENTAL)':        '', // TODO
+  'GOODYEAR':               '', // TODO
+  'KOONER':                 '', // TODO
+};
+
+/**
+ * Create a Work Request via AAP API
+ * @param {Object} payload - from collectPayload() in the renderer
+ * @param {Object} unit - the UNITS entry for this equipment
+ * @param {Function} log - logging callback
+ * @returns {Object} { ok, workRequestId, error }
+ */
+async function createWorkRequest(payload, unit, log) {
+  if (!log) log = console.log;
+
+  // Extract aaid from unit's assetUrl
+  const assetUrl = unit.assetUrl || '';
+  const aaid = assetUrl.includes('/v2/asset/') ? assetUrl.split('/v2/asset/')[1].split('?')[0] : '';
+  if (!aaid) {
+    return { ok: false, error: 'No AAID found for unit ' + payload.unit + '. Run a scan first.' };
+  }
+  log('[CreateWR] AAID: ' + aaid);
+
+  // Resolve location
+  const domicile = (unit.site || payload.domicile || 'ABE40').toUpperCase();
+  let currentLocation = DOMICILE_COORDS[domicile] || DOMICILE_COORDS['ABE40'];
+
+  // For tow events, use the tow destination address (would need geocoding)
+  // For now use domicile
+  currentLocation = {
+    latitude: currentLocation.latitude,
+    longitude: currentLocation.longitude,
+    yardLocation: null,
+    geofenceCode: domicile
+  };
+
+  // Resolve vendor
+  const vendorName = payload.vendor || '';
+  const supplierId = VENDOR_IDS[vendorName] || '';
+  if (!supplierId) {
+    log('[CreateWR] WARNING: No supplierId for vendor "' + vendorName + '". WR may fail or use default.');
+  }
+
+  // Build suggestedItems from areaPairs
+  const suggestedItems = (payload.areaPairs || []).map(pair => ({
+    level1: pair.area || '',
+    level2: pair.subcategory || '',
+    level3: ''
+  }));
+
+  // Build comments array
+  const comments = [];
+  if (payload.comments) {
+    comments.push({
+      text: payload.comments,
+      internalOnly: (payload.shareWith || '').toLowerCase().includes('internal'),
+      externalConsumers: []
+    });
+  }
+
+  // Timestamps
+  const now = new Date();
+  const needBy = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24h from now
+
+  // STEP 1: createRepair
+  const repairBody = {
+    aaid: aaid,
+    title: payload.title || 'Work Request',
+    damageDescription: payload.issue || payload.title || '',
+    vendor: vendorName.split(' (')[0].toUpperCase(), // "Volvo (ASIST)" → "VOLVO"
+    supplierId: supplierId || null,
+    calltype: 'OFFSITE',
+    urgent: payload.urgent === 'Yes',
+    urgencyReason: (payload.urgent === 'Yes') ? (payload.urgencyReason || 'DEA - Asset Shortage') : null,
+    severity: (payload.urgent === 'Yes') ? 'HIGH' : 'LOW',
+    suggestedItems: suggestedItems,
+    comments: comments,
+    currentLocation: currentLocation,
+    assetAvailableDateTime: now.toISOString(),
+    needByDateTime: needBy.toISOString(),
+    assetLoaded: false,
+    assetRefrigerated: false,
+    tireIssue: false,
+    arcClaimNumber: payload.arcClaim || null,
+    simNumber: payload.simNumber || null,
+    recommendationInfo: {
+      vendor: vendorName.split(' (')[0],
+      vendorOpenWRCount: null,
+      vendorDistanceToAsset: null
+    },
+    campaign: null,
+    source: null,
+    dvirId: null,
+    copiedFromWorkRequestId: null,
+    relatedAsset: null,
+    sourceNotificationIds: null,
+    vendorIntegrationType: null
+  };
+
+  log('[CreateWR] Step 1: createRepair for ' + payload.unit);
+
+  let workRequestId;
+  try {
+    const resp1 = await aapFetch('/createRepair', repairBody);
+    if (!resp1.ok) {
+      return { ok: false, error: 'createRepair failed: ' + (resp1.statusText || resp1.status) };
+    }
+    const data1 = await resp1.json();
+    workRequestId = data1.workRequestId || data1.id;
+    if (!workRequestId) {
+      return { ok: false, error: 'createRepair returned no workRequestId' };
+    }
+    log('[CreateWR] Step 1 OK: workRequestId = ' + workRequestId);
+  } catch(e) {
+    return { ok: false, error: 'createRepair error: ' + e.message };
+  }
+
+  // STEP 2: createDriverConnection (contact info)
+  const contactBody = {
+    workRequestId: workRequestId,
+    aaid: aaid,
+    driverName: payload.contactName || 'Z',
+    driverPhoneNumber: (payload.contactPhone || '').replace(/[^\d-]/g, '') || '1-7166142167'
+  };
+
+  log('[CreateWR] Step 2: createDriverConnection');
+  try {
+    const resp2 = await aapFetch('/createDriverConnection', contactBody);
+    if (!resp2.ok) {
+      log('[CreateWR] Step 2 WARNING: ' + resp2.status);
+    } else {
+      log('[CreateWR] Step 2 OK');
+    }
+  } catch(e) {
+    log('[CreateWR] Step 2 error (non-fatal): ' + e.message);
+  }
+
+  // STEP 3: updateWorkRequest (images/attachments)
+  const images = [];
+  // If we have a screenshot data URL, include it
+  if (payload.screenshotDataUrl && payload.screenshotDataUrl.startsWith('data:')) {
+    images.push(payload.screenshotDataUrl);
+  }
+
+  const updateBody = {
+    workRequestId: workRequestId,
+    images: images
+  };
+
+  log('[CreateWR] Step 3: updateWorkRequest (images: ' + images.length + ')');
+  try {
+    const resp3 = await aapFetch('/updateWorkRequest', updateBody);
+    if (!resp3.ok) {
+      log('[CreateWR] Step 3 WARNING: ' + resp3.status);
+    } else {
+      log('[CreateWR] Step 3 OK');
+    }
+  } catch(e) {
+    log('[CreateWR] Step 3 error (non-fatal): ' + e.message);
+  }
+
+  log('[CreateWR] SUCCESS — WR created: ' + workRequestId);
+  return { ok: true, workRequestId: workRequestId };
+}
+
+/**
+ * Make authenticated fetch to AAP API
+ * Uses the Electron session cookies (same auth as AAP scraper)
+ */
+async function aapFetch(endpoint, body) {
+  const { session } = require('electron');
+  const ses = session.defaultSession;
+
+  // Get cookies for aap-na.corp.amazon.com
+  const cookies = await ses.cookies.get({ url: 'https://aap-na.corp.amazon.com' });
+  const cookieStr = cookies.map(c => c.name + '=' + c.value).join('; ');
+
+  const url = AAP_BASE + endpoint;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Cookie': cookieStr,
+      'Accept': 'application/json',
+      'Origin': 'https://aap-na.corp.amazon.com',
+      'Referer': 'https://aap-na.corp.amazon.com/v2/page/891a81dc-538d-4f10-be93-441545840a24'
+    },
+    body: JSON.stringify(body)
+  });
+
+  return response;
+}
+
+module.exports = { createWorkRequest, VENDOR_IDS, DOMICILE_COORDS };
