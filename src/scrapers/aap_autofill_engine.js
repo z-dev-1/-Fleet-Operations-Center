@@ -401,10 +401,12 @@ const CreateWRAutofill = {
                      };
 
                       // Retry until the radio is actually checked
+                      // M-5: light exponential backoff — 500ms base + 100ms per attempt
+                      // prevents tight busy-loop on slow pages (was fixed 500ms every try)
                       for (let attempt = 1; attempt <= 5; attempt++) {
                           doAssetClick();
                           this.log('Asset Condition: attempt ' + attempt);
-                          await this.sleep(500);
+                          await this.sleep(500 + attempt * 100);
                           // Check if the radio is now checked (not error text which may never appear)
                           const inp = document.querySelector('LABEL.css-rzgavw INPUT[type="radio"]');
                           const unsafeLbl = Array.from(document.querySelectorAll('LABEL.css-rzgavw')).find(l => /unsafe/i.test(l.innerText || ''));

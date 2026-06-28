@@ -16,6 +16,9 @@ const { BrowserWindow } = require('electron');
 const path = require('path');
 const logger = require('../utils/logger').createLogger('aap_adaptive_agent');
 
+// L-3: named constant — was an unnamed inline 15000 in the did-finish-load timeout
+const PAGE_LOAD_TIMEOUT_MS = 15_000;
+
 // ═══════════════════════════════════════════════════════════════
 // DOM SNAPSHOT — injected into BrowserWindow to read the page
 // ═══════════════════════════════════════════════════════════════
@@ -360,7 +363,7 @@ async function runAdaptiveWR(payload, askAI, log) {
   // Wait for initial page load
   await new Promise(resolve => {
     win.webContents.on('did-finish-load', () => resolve());
-    setTimeout(resolve, 15000); // timeout fallback
+    setTimeout(resolve, PAGE_LOAD_TIMEOUT_MS); // L-3: named constant replaces magic number
   });
   await sleep(3000); // Extra wait for React to render
   

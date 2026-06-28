@@ -291,6 +291,10 @@ const AAP_COL_VALUE = JSON.stringify([
   'openUnplannedWorkRequests', 'openPlannedWorkRequests'
 ]);
 
+// H-4: named constant — was an unnamed inline literal inside pollAndScrape()
+// 45 s: fail-fast budget; scraper retries sooner on dead sessions than waiting 90 s.
+const TABLE_WAIT_MS = 45_000;
+
 async function scrapeAAP(domiciles) {
   return new Promise((resolve, reject) => {
     const win = new BrowserWindow({
@@ -460,13 +464,13 @@ async function orchaScrape(win, finish) {
 
 async function pollAndScrape(win, finish) {
   // Phase 1: wait for table rows (up to 90s — AAP React SPA can be slow to render)
-  const TABLE_WAIT = 45000; // reduced from 90s — fail faster, retry sooner
+  // H-4: TABLE_WAIT_MS now a named module-level constant (was inline 45000)
   const POLL_MS    = 200;
   const t0         = Date.now();
   let lastStatus   = '';
   let scrollDone   = false;
 
-  while (Date.now() - t0 < TABLE_WAIT) {
+  while (Date.now() - t0 < TABLE_WAIT_MS) {
     await sleep(POLL_MS);
     if (win.isDestroyed()) return;
 

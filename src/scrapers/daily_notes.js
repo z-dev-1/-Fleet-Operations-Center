@@ -30,7 +30,7 @@ function loadDecisionLog() {
     if (fs.existsSync(DECISION_LOG_FILE)) {
       return JSON.parse(fs.readFileSync(DECISION_LOG_FILE, 'utf8'));
     }
-  } catch (e) {}
+  } catch (e) { logger.warn('[DailyNotes] loadDecisionLog error:', e.message); }
   return [];
 }
 
@@ -136,7 +136,7 @@ function getGeneratedHistory(unitId) {
       const data = JSON.parse(fs.readFileSync(GENERATED_HISTORY_FILE, 'utf8'));
       return (data[unitId] || []).join('\n');
     }
-  } catch (e) {}
+  } catch (e) { logger.warn('[DailyNotes] getGeneratedHistory error:', e.message); }
   return '';
 }
 
@@ -156,7 +156,7 @@ function saveGeneratedNote(unitId, note) {
       if (data[unitId].length > 50) data[unitId] = data[unitId].slice(-50);
     }
     fs.writeFileSync(GENERATED_HISTORY_FILE, JSON.stringify(data, null, 2), 'utf8');
-  } catch (e) {}
+  } catch (e) { logger.warn('[DailyNotes] saveGeneratedNote error:', e.message); }
 }
 
 
@@ -180,7 +180,7 @@ function loadNotesLog() {
     if (fs.existsSync(NOTES_LOG_FILE)) {
       return JSON.parse(fs.readFileSync(NOTES_LOG_FILE, 'utf8'));
     }
-  } catch (e) {}
+  } catch (e) { logger.warn('[DailyNotes] loadNotesLog error:', e.message); }
   return [];
 }
 
@@ -267,7 +267,7 @@ function getRelayData(unitId) {
         };
       }
     }
-  } catch (e) {}
+  } catch (e) { logger.warn('[DailyNotes] getRelayData error:', e.message); }
   return null;
 }
 

@@ -323,7 +323,7 @@ function buildAutomationScript(targetState, targetReason) {
         try {
           var found2 = Array.from(document.querySelectorAll(OPTION_SELECTORS[si]));
           if (found2.length > 1) { options = found2; break; } // >1 means the listbox opened
-        } catch(e) {}
+        } catch(e) { console.warn('[LC] OPTION_SELECTORS loop error:', e && e.message); }
       }
 
       // Dump ALL found options for diagnosis

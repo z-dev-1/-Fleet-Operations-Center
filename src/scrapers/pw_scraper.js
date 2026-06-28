@@ -122,7 +122,7 @@ async function scrapeAAP(domiciles) {
       const opt = await page.$('[role="option"]:has-text("1000"), li:has-text("1000")');
       if (opt) { await opt.click(); await page.waitForTimeout(5000); }
     }
-  } catch(e) {}
+  } catch(e) { logger.warn('[PW] Force-1000 rows failed (non-fatal):', e.message); }
 
   // Extract
   const data = await page.evaluate(() => {
