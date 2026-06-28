@@ -20,6 +20,7 @@ import { init as initToolbar }   from './components/toolbar.js';
 import { init as initFleetView } from './views/fleet.js';
 import { init as initUnitDetail }from './views/unit-detail.js';
 import { init as initSettings }  from './views/settings.js';
+import { init as initSchedulers } from './views/schedulers.js';
 
 function boot() {
   // ── Remove loading spinner ───────────────────────────────────────────────
@@ -58,6 +59,7 @@ function boot() {
   initFleetView(viewsMount);
   initUnitDetail(detailMount);
   initSettings(viewsMount);
+  initSchedulers(viewsMount);
 
   // ── Cross-view routing ───────────────────────────────────────────────────
   const fleetView    = document.getElementById('view-fleet');

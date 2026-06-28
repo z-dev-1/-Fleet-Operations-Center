@@ -43,6 +43,9 @@ export function init(container) {
       <button id="tb-settings" class="toolbar__btn" title="Settings">
         Settings
       </button>
+      <button id="tb-schedulers" class="toolbar__btn" title="Schedulers">
+        ⏱ Schedulers
+      </button>
     </div>
   `;
   container.appendChild(el);
@@ -77,6 +80,11 @@ export function init(container) {
   // Settings button
   document.getElementById('tb-settings').addEventListener('click', () => {
     bus.emit('ui:view-change', { from: 'fleet', to: 'settings' });
+  });
+
+  // Schedulers button
+  document.getElementById('tb-schedulers').addEventListener('click', () => {
+    bus.emit('ui:view-change', { from: 'fleet', to: 'schedulers' });
   });
 
   // Populate domicile options from fleet data
