@@ -1816,6 +1816,12 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .dp-vnd-copy-btn:hover { color:var(--txt); }
 .dp-vnd-complete-link { font-size:10px; font-weight:600; color:var(--acc2); text-decoration:none; }
 .dp-vnd-complete-link:hover { text-decoration:underline; }
+.dp-vnd-error-banner { display:flex; align-items:flex-start; gap:8px; background:var(--redd); border:1px solid rgba(255,123,114,.25); border-radius:6px; padding:8px 10px; }
+.dp-vnd-error-icon { color:var(--red); font-size:14px; flex-shrink:0; margin-top:1px; }
+.dp-vnd-error-body { display:flex; flex-direction:column; gap:5px; }
+.dp-vnd-error-label { font-size:11px; font-weight:700; color:var(--red); }
+.dp-vnd-error-msg { font-size:10px; color:var(--txt2); line-height:1.4; }
+.dp-vnd-retry-btn { margin-top:2px; align-self:flex-start; }
 .dp-empty--error { color: var(--red) !important; }
 
 /* S23-10: Dealer WO review-gate modal */

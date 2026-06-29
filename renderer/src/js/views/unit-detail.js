@@ -395,6 +395,21 @@ function _renderCompleteBanner(el, p) {
   }
 }
 
+// S24-3: error banner + retry button
+function _renderErrorBanner(el, p) {
+  const msg = p.error || "Unknown error";
+  let html = "<div class=\"dp-vnd-error-banner\">";
+  html += "<span class=\"dp-vnd-error-icon\">✗</span>";
+  html += "<div class=\"dp-vnd-error-body\">";
+  html += "<span class=\"dp-vnd-error-label\">Workflow error</span>";
+  html += "<span class=\"dp-vnd-error-msg\">" + _esc(msg) + "</span>";
+  html += "<button id=\"dp-vnd-retry\" class=\"detail-panel__btn detail-panel__btn--secondary dp-vnd-retry-btn\">Retry</button>";
+  html += "</div></div>";
+  el.innerHTML = html;
+  const btn = el.querySelector("#dp-vnd-retry");
+  if (btn) btn.addEventListener("click", () => _wireVendorPanel(_unit));
+}
+
 function _wireVendorPanel(unit) {
   const sec = document.getElementById('dp-vendor-section');
   if (!sec) return;
@@ -423,7 +438,9 @@ function _wireVendorPanel(unit) {
       bus.on('vendor:error', (p) => {
         if (!sec.dataset.workflowId || p.workflowId !== sec.dataset.workflowId) return;
         _renderProgress({ ...p, step: 'error', detail: p.error || 'Unknown error' });
+        const actEl = document.getElementById('dp-vnd-actions');
         toast.show('error', 'Dealer WO error: ' + (p.error || 'unknown'));
+        if (actEl) _renderErrorBanner(actEl, p);
         _teardownVendorBus();
       }),
     );

@@ -1251,6 +1251,17 @@ chk('S24-2-I: altId rendered separately when differs from caseNumber', 'altId !=
 chk('S24-2-J: CSS dp-vnd-complete-banner rule present', '.dp-vnd-complete-banner' in _css23)
 chk('S24-2-K: CSS dp-vnd-copy-btn rule present', '.dp-vnd-copy-btn' in _css23)
 chk('S24-2-L: CSS dp-vnd-complete-link rule present', '.dp-vnd-complete-link' in _css23)
+# S24-3: vendor:error retry button
+chk('S24-3-A: _renderErrorBanner function defined', '_renderErrorBanner' in udt)
+chk('S24-3-B: vendor:error handler calls _renderErrorBanner', '_renderErrorBanner(actEl, p)' in udt)
+chk('S24-3-C: vendor:error still calls _teardownVendorBus after banner', udt.index('_renderErrorBanner(actEl, p)') < udt.index('_teardownVendorBus') or udt.count('_teardownVendorBus') >= 3)
+chk('S24-3-D: error banner renders dp-vnd-error-banner wrapper', 'dp-vnd-error-banner' in udt)
+chk('S24-3-E: error banner renders dp-vnd-error-msg with _esc(msg)', 'dp-vnd-error-msg' in udt and '_esc(msg)' in udt)
+chk('S24-3-F: retry button has id dp-vnd-retry', 'dp-vnd-retry' in udt)
+chk('S24-3-G: retry click calls _wireVendorPanel(_unit)', '_wireVendorPanel(_unit)' in udt)
+chk('S24-3-H: vendor:error handler still shows toast', 'Dealer WO error' in udt)
+chk('S24-3-I: CSS dp-vnd-error-banner rule present', '.dp-vnd-error-banner' in _css23)
+chk('S24-3-J: CSS dp-vnd-retry-btn rule present', '.dp-vnd-retry-btn' in _css23)
 # ── Report ───────────────────────────────────────────────────────────────────
 print('=' * 60)
 print('SANITY CHECK REPORT')
