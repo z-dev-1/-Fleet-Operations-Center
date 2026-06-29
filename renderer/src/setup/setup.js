@@ -86,13 +86,35 @@ const STEPS = [
     html:  `<div id="sw-confirm-summary" class="setup__summary">Loading summary...</div>`,
     afterMount: (config) => {
       const el = document.getElementById('sw-confirm-summary');
-      if (el) {
-        el.innerHTML = Object.entries(config)
-          .filter(([, v]) => v)
-          .map(([k, v]) => '<div><strong>' + k + '</strong>: ' + v + '</div>')
-          .join('');
+      if (!el) return;
+      // S25-13 fix: render objects meaningfully instead of [object Object]
+      function _displayVal(k, v) {
+        if (v === null || v === undefined || v === '') return '<em class="sw-empty">not set</em>';
+        if (typeof v !== 'object') return String(v);
+        if (k === 'profile')   return [v.userName, v.userEmail, v.userPhone].filter(Boolean).join(' | ') || '<em>empty</em>';
+        if (k === 'domiciles') return v.domiciles ? v.domiciles.replace(/\n/g, ', ') : '<em>none</em>';
+        if (k === 'midway')    return 'checked \u2713';
+        if (k === 'orcha')     return (v.orchaMode || 'local') + ' @ ' + (v.orchaHost || 'localhost') + ':' + (v.orchaPort || 4799);
+        if (k === 'confirm')   return 'ready';
+        const parts = Object.entries(v).filter(([, x]) => x && typeof x !== 'object').map(([, x]) => x);
+        return parts.length ? parts.join(' | ') : JSON.stringify(v).slice(0, 80);
       }
+      const LABELS = {
+        userName: 'Name', userEmail: 'Email', userPhone: 'Phone',
+        profile: 'Profile', domiciles: 'Domiciles', midway: 'Midway',
+        orchaMode: 'Orcha Mode', orchaHost: 'Orcha Host', orchaPort: 'Orcha Port',
+        orcha: 'Orcha', confirm: 'Status',
+      };
+      el.innerHTML = Object.entries(config)
+        .filter(([, v]) => v !== null && v !== undefined)
+        .map(([k, v]) => {
+          const label = LABELS[k] || k;
+          return '<div class="sw-review-row"><span class="sw-review-key">' + label + '</span>'
+               + '<span class="sw-review-val">' + _displayVal(k, v) + '</span></div>';
+        })
+        .join('');
     },
+    collect: () => ({}),
     collect: () => ({}),
   },
 ];
