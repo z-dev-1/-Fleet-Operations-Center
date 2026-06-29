@@ -219,4 +219,6 @@ contextBridge.exposeInMainWorld('vendor', {
   cancel:      (workflowId) => ipcRenderer.invoke('vendor:cancel',       { workflowId }),
   getStatus:   ()           => ipcRenderer.invoke('vendor:get-status'),
   openPortalUrl: (url)       => ipcRenderer.invoke('shell:open-external', url),
+  loadHistory:    ()           => ipcRenderer.invoke('vendor:history-load'),
+  saveHistory:    (history)    => ipcRenderer.invoke('vendor:history-save', { history }),
 });

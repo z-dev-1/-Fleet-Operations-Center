@@ -51,6 +51,7 @@ const REGISTRY = {
   // Bug B fix: _healthcheck now has a proper registered path instead of
   // relying on the removed absolute-path fallback.
   _healthcheck:     () => path.join(P.dataDir, '_healthcheck.json'),
+  vendorHistory:    () => P.vendorHistory,
 };
 
 function _resolvePath(name) {

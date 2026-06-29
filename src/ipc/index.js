@@ -24,6 +24,7 @@ const { registerOrchaIPC }       = require('./orcha');
 const { registerScrapersIPC }    = require('./scrapers');
 const { registerMiscIPC }        = require('./misc');
 const { registerVendorIPC }   = require('../vendors');
+const { registerVendorHistoryIPC } = require('./vendor-history');
 const { registerSetupIPC }       = require('./setup');
 const logger = require('../utils/logger')('ipc');
 
@@ -40,6 +41,7 @@ function registerAllIPC(ctx) {
   registerSetupIPC(ctx);
   registerMiscIPC(ctx);
   registerVendorIPC();
+  registerVendorHistoryIPC();
   logger.info('All IPC handlers registered');
 }
 

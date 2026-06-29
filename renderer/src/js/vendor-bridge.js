@@ -93,6 +93,10 @@ function _pushHistory(unitId, entry) {
   if (arr.length > HISTORY_MAX) arr.length = HISTORY_MAX;
   hist[unitId] = arr;
   state.update("vendor", { history: hist });
+  // S25-4: persist to disk after every history mutation
+  if (window.vendor && window.vendor.saveHistory) {
+    window.vendor.saveHistory(hist).catch(() => {});
+  }
 }
 
 function _onComplete(p) {
@@ -131,6 +135,16 @@ export function init() {
   window.vendor.onReviewReady(_onReviewReady );
   window.vendor.onComplete(   _onComplete    );
   window.vendor.onError(      _onError       );
+
+  // S25-4: rehydrate history from disk so chips survive reloads
+  if (window.vendor.loadHistory) {
+    window.vendor.loadHistory().then((res) => {
+      if (res && res.history && typeof res.history === 'object') {
+        state.update('vendor', { history: res.history });
+        console.log('[vendor-bridge] history rehydrated:', Object.keys(res.history).length, 'units');
+      }
+    }).catch((err) => console.warn('[vendor-bridge] history load failed:', err.message));
+  }
 }
 
 // ── Typed invoke wrappers ─────────────────────────────────────────────────
