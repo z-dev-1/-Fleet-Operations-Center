@@ -228,7 +228,7 @@ async function _pollForAltId(serviceUrl, timeoutMs) {
         if (!win || win.isDestroyed()) { done(""); return; }
         try {
           const raw = await win.webContents.executeJavaScript(
-            "(function(){var m=(document.body?document.body.innerText:'').match(/\\b(AMZ-[A-Za-z0-9_-]+)\\b/i),return m?m[1]:'';})()"
+            "(function(){var m=(document.body?document.body.innerText:'').match(/\\b(AMZ-[A-Za-z0-9_-]+)\\b/i);return m?m[1]:'';})()"
           );
           if (raw && raw.startsWith("AMZ-")) { done(raw); }
         } catch (_) {}
@@ -302,7 +302,7 @@ async function _scrapeWRTitleAndAltId(serviceUrl) {
       if (!/aap-na\.corp\.amazon\.com/i.test(url)) return;
       await new Promise(r => setTimeout(r, 2500));
       try {
-        const data = await win.webContents.executeJavaScript('(function(){var t=document.body?document.body.innerText:"";var title=(t.match(/Service Details for[^.\n]*\n([^\n]{3,120})/)||[])[1]||(document.title||"");var altM=t.match(/\\b(AMZ-[A-Za-z0-9_-]+)\\b/i),return {title:(title||"").trim(),altId:altM?altM[1]:""};})()');
+        const data = await win.webContents.executeJavaScript('(function(){var t=document.body?document.body.innerText:"";var title=(t.match(/Service Details for[^.\n]*\n([^\n]{3,120})/)||[])[1]||(document.title||"");var altM=t.match(/\\b(AMZ-[A-Za-z0-9_-]+)\\b/i);return {title:(title||"").trim(),altId:altM?altM[1]:""};})()');
         done(data && data.title ? data : null);
       } catch (_) { done(null); }
     });
