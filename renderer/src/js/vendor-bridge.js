@@ -217,6 +217,9 @@ export const vendor = {
    * @param {string} url
    * @returns {Promise<void>}
    */
+  enrichAsist: (srUrl) =>
+    window.vendor.enrichAsist(srUrl),
+
   openPortalUrl: (url) =>
     window.vendor.openPortalUrl(url).catch(() => {}),
 };

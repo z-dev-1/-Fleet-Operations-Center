@@ -39,6 +39,8 @@ const { handle, timeoutAfter, requireObject } = require("../ipc/_safe");
 const { ConfigError }  = require("../utils/errors");
 const { runRelayStep } = require("./base/relay-step");
 const { sendToAll, PROGRESS_CHANNEL } = require("./base/vendor-workflow");
+const { investigate }     = require("./investigation");
+const { enrichVolvoAsist } = require("../scrapers/asist_enrich");
 
 // ============================================================================
 // Constants
@@ -365,6 +367,13 @@ function registerVendorIPC() {
   handle("vendor:investigate", async (_e, payload) => {
     const unit = requireObject(payload && payload.unit, "payload.unit");
     return investigate(unit);
+  });
+  // vendor:enrich-asist -- on-demand Volvo ASIST enrichment (S25-9)
+  handle("vendor:enrich-asist", async (_e, payload) => {
+    const srUrl = String((payload && payload.srUrl) || "").trim();
+    if (!srUrl) throw new ConfigError("srUrl is required", "srUrl");
+    logger.info("vendor:enrich-asist called | url:", srUrl.slice(0, 80));
+    return enrichVolvoAsist(srUrl);
   });
   logger.info("Vendor IPC handlers registered");
 }

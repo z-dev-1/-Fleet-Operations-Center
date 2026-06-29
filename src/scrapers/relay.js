@@ -10,6 +10,7 @@
 const { BrowserWindow } = require('electron');
 const { P } = require('../config/paths');
 const logger = require('../utils/logger').createLogger('relay');
+const { enrichVolvoAsist, isUpgrade } = require('./asist_enrich');
 const { withRetry } = require('../utils/retry');    // H-1: per-unit retry
 // MODULE LOAD PROBE
 
@@ -748,12 +749,44 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
           const _finalOffsite = convOffsite
             || (wrData.offsiteShopEventUrl ? { caseNumber: wrData.offsiteShopEvent, url: wrData.offsiteShopEventUrl } : null);
 
+          // Phase 3.5: Volvo ASIST enrichment -- follow SR -> Case -> Fleet Estimate
+          // Fires when _finalOffsite is a volvopg service_request URL.
+          // Never downgrades: only replaces if enrichment is higher priority.
+          let _asistEnrich = null;
+          try {
+            const _asistUrl = _finalOffsite && _finalOffsite.url;
+            const _isVolvoSR = _asistUrl && /volvopg\.asist\.decisiv\.net\/service_requests\//i.test(_asistUrl);
+            const _prevSrc   = _finalOffsite && _finalOffsite.asistSource;
+            if (_isVolvoSR && _prevSrc !== 'estimate') {
+              logger.info('[Relay] Phase3.5 ASIST enrich for', equipmentId, '|', _asistUrl.slice(0,80));
+              _asistEnrich = await enrichVolvoAsist(_asistUrl);
+              logger.info('[Relay] Phase3.5 result | source:', _asistEnrich.source, '| url:', _asistEnrich.bestUrl.slice(0,80));
+            }
+          } catch (_ae) {
+            logger.warn('[Relay] Phase3.5 ASIST enrich CATCH for', equipmentId, _ae.message);
+          }
+          // Apply upgrade if source priority improved
+          if (_asistEnrich && _asistEnrich.ok && isUpgrade((_finalOffsite && _finalOffsite.asistSource) || 'service_request', _asistEnrich.source)) {
+            _finalOffsite = {
+              url:            _asistEnrich.bestUrl,
+              caseNumber:     _asistEnrich.caseNumber || _asistEnrich.bestLabel,
+              asistSource:    _asistEnrich.source,
+              asistLabel:     _asistEnrich.bestLabel,
+              asistSrUrl:     _asistEnrich.srUrl,
+              asistScrapedAt: _asistEnrich.scrapedAt,
+            };
+            logger.info('[Relay] Phase3.5 upgrade applied | source:', _asistEnrich.source, '| url:', _finalOffsite.url.slice(0,80));
+          }
           logger.info('[Relay] done() sfCase for', equipmentId, '|', convSalesforce ? convSalesforce.caseNumber : 'null', '| urlFull:', convSalesforce && convSalesforce.url ? convSalesforce.url : 'NONE', '| urlLen:', convSalesforce && convSalesforce.url ? convSalesforce.url.length : 0);
           done({
             ...wrData,
             ...woData,
             offsiteShopEvent:    _finalOffsite    ? _finalOffsite.caseNumber    : (wrData.offsiteShopEvent    || ''),
             offsiteShopEventUrl: _finalOffsite    ? _finalOffsite.url           : (wrData.offsiteShopEventUrl || ''),
+            asistSource:         (_finalOffsite && _finalOffsite.asistSource)    || '',
+            asistLabel:          (_finalOffsite && _finalOffsite.asistLabel)     || '',
+            asistSrUrl:          (_finalOffsite && _finalOffsite.asistSrUrl)     || '',
+            asistScrapedAt:      (_finalOffsite && _finalOffsite.asistScrapedAt) || '',
             salesforceCase:      convSalesforce   ? convSalesforce.caseNumber   : (wrData.salesforceCase      || ''),
             salesforceCaseUrl:   convSalesforce   ? convSalesforce.url          : (wrData.salesforceCaseUrl   || ''),
             fullConversation:    _convData && _convData.fullConversation ? _convData.fullConversation : '',
