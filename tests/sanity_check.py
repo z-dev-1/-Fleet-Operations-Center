@@ -1149,6 +1149,95 @@ chk('notes-bridge.js LF only',                          '\r' not in nb)
 chk('fleet-bridge calls signalReady()',                  'signalReady' in fb)
 chk('fleet-bridge exposes window._fleetBridge',          'window._fleetBridge' in fb)
 
+
+# -- Stage 23 checks (Dealer WO Engine) --
+import os as _os
+VNB  = f"{BASE}/renderer/src/js/vendor-bridge.js"
+VRM  = f"{BASE}/renderer/src/js/views/vendor-review-modal.js"
+CTX  = f"{BASE}/renderer/src/js/components/context-menu.js"
+UDT  = f"{BASE}/renderer/src/js/views/unit-detail.js"
+VNI  = f"{BASE}/src/vendors/index.js"
+INV  = f"{BASE}/src/vendors/investigation.js"
+VNPC = f"{BASE}/src/vendors/paccar/index.js"
+VNVL = f"{BASE}/src/vendors/volvo/index.js"
+vnb  = read(VNB)
+vrm  = read(VRM)
+ctx  = read(CTX)
+udt  = read(UDT)
+vni  = read(VNI)
+inv  = read(INV)
+vnpc = read(VNPC)
+vnvl = read(VNVL)
+_css23 = read(f'{BASE}/renderer/src/css/fleet.css')
+_pre23 = read(PRELD)
+
+# S23-8: preload.js vendor IPC surface
+chk('S23-P1: preload exposes window.vendor namespace', 'vendor' in _pre23 and 'contextBridge.exposeInMainWorld' in _pre23)
+chk('S23-P2: preload vendor.onProgress wires vendor:progress', 'vendor:progress' in _pre23)
+chk('S23-P3: preload vendor.onReviewReady wires vendor:review-ready', 'vendor:review-ready' in _pre23)
+chk('S23-P4: preload vendor.investigate invokes vendor:investigate', 'vendor:investigate' in _pre23)
+chk('S23-P5: preload vendor.startPaccar invokes vendor:start-paccar', 'vendor:start-paccar' in _pre23)
+chk('S23-P6: preload vendor.approve + vendor.cancel both present', 'vendor:approve' in _pre23 and 'vendor:cancel' in _pre23)
+chk('S23-VB1: vendor-bridge.js LF only', chr(13) not in vnb)
+chk('S23-VB2: vendor-bridge exports init', 'export function init(' in vnb)
+chk('S23-VB3: vendor-bridge exports vendor object', 'export const vendor' in vnb)
+chk('S23-VB4: vendor-bridge init guards window.vendor missing', 'window.vendor not found' in vnb)
+chk('S23-VB5: vendor-bridge wires all 4 push listeners', 'onProgress' in vnb and 'onReviewReady' in vnb and 'onComplete' in vnb and 'onError' in vnb)
+chk('S23-VB6: vendor-bridge stores lastComplete in state', 'lastComplete' in vnb and 'state.update' in vnb)
+chk('S23-VB7: vendor-bridge bus.emit called for vendor events', 'bus.emit' in vnb)
+
+# S23-3..7: vendors/index.js IPC router
+chk('S23-I1: vendors/index.js exports registerVendorIPC', 'registerVendorIPC' in vni)
+chk('S23-I2: registerVendorIPC called in ipc/index.js', 'registerVendorIPC' in read(f'{BASE}/src/ipc/index.js'))
+chk('S23-I3: MAX_CONCURRENT_WORKFLOWS cap defined', 'MAX_CONCURRENT_WORKFLOWS' in vni)
+chk('S23-I4: vendor:approve resolves approveSignal promise', 'vendor:approve' in vni and '_resolve' in vni)
+chk('S23-I5: vendor:cancel rejects approveSignal promise', 'vendor:cancel' in vni and '_reject' in vni)
+chk('S23-I6: vendor:start-* uses Promise.race with timeoutAfter', 'Promise.race' in vni and 'timeoutAfter' in vni)
+
+# S23-7: vendors/investigation.js
+chk('S23-V1: investigation.js defines investigate()', 'function investigate' in inv)
+chk('S23-V2: investigation.js defines ROUTABLE_STATES list', 'ROUTABLE_STATES' in inv)
+chk('S23-V3: investigation.js checks all 6 assessment points', 'unit_data' in inv and 'vendor' in inv and 'lifecycle' in inv and 'offsite_match' in inv and 'relay_wo' in inv and 'mileage' in inv)
+chk('S23-V4: investigation returns eligible boolean + blocking + warnings', 'eligible' in inv and 'blocking' in inv and 'warnings' in inv)
+chk('S23-V5: investigation detects PACCAR + Volvo Decisiv patterns', 'DECISIV_PACCAR_PATTERN' in inv and 'DECISIV_VOLVO_PATTERN' in inv)
+
+# S23-4..5: PACCAR + Volvo orchestrators
+chk('S23-OR1: PACCAR orchestrator exports class', 'module.exports' in vnpc and 'PACCARWorkflow' in vnpc)
+chk('S23-OR2: PACCAR workflow emits vendor:review-ready', 'vendor:review-ready' in vnpc)
+chk('S23-OR3: Volvo orchestrator exports class', 'module.exports' in vnvl and 'VolvoWorkflow' in vnvl)
+chk('S23-OR4: both orchestrators await approveSignal before submit', 'approveSignal' in vnpc and 'approveSignal' in vnvl)
+
+# S23-9/12/13: unit-detail.js vendor panel
+chk('S23-UD1: dp-vendor-section in panel template', 'dp-vendor-section' in udt)
+chk('S23-UD2: _wireVendorPanel defined', '_wireVendorPanel' in udt)
+chk('S23-UD3: _vendorUnsubs module-level array defined', '_vendorUnsubs = []' in udt)
+chk('S23-UD4: _teardownVendorBus function defined', '_teardownVendorBus' in udt and 'forEach' in udt)
+chk('S23-UD5: _teardownVendorBus called at _wireVendorPanel re-entry', udt.count('_teardownVendorBus') >= 3)
+chk('S23-UD6: bus listeners wrapped in _vendorUnsubs.push()', '_vendorUnsubs.push(' in udt)
+chk('S23-UD7: close() calls _teardownVendorBus after panel clear', 'innerHTML' in udt and '_teardownVendorBus' in udt)
+
+# S23-12: race guard for ui:dealer-wo-request
+chk('S23-RG1: _pendingDealerWO slot defined', '_pendingDealerWO' in udt)
+chk('S23-RG2: _tryDealerWO implements rAF retry up to 12 frames', '_tryDealerWO' in udt and '12' in udt)
+chk('S23-RG3: ui:dealer-wo-request bus listener sets _pendingDealerWO', 'ui:dealer-wo-request' in udt and '_pendingDealerWO' in udt)
+
+# S23-10: vendor-review-modal.js
+chk('S23-RM1: vendor-review-modal exports open()', 'export function open(' in vrm)
+chk('S23-RM2: vendor-review-modal exports close alias', 'export {' in vrm and 'close' in vrm)
+chk('S23-RM3: modal shows isDuplicate warning banner', 'isDuplicate' in vrm and 'vr-dup-banner' in vrm)
+chk('S23-RM4: modal Approve calls vendor.approve with workflowId + altId', 'vendor.approve' in vrm and 'workflowId' in vrm and 'altId' in vrm)
+chk('S23-RM5: unit-detail imports openVendorReview from vendor-review-modal', 'vendor-review-modal' in udt and 'openVendorReview' in udt)
+
+# S23-11: context-menu.js + fleet.js wiring
+chk('S23-CM1: context-menu exports showContextMenu', 'export function showContextMenu' in ctx)
+chk('S23-CM2: context-menu auto-closes on Escape + scroll + outside click', 'Escape' in ctx and 'scroll' in ctx and 'mousedown' in ctx)
+chk('S23-CM3: context-menu flips position near viewport edge', 'innerWidth' in ctx and 'innerHeight' in ctx)
+chk('S23-CM4: fleet.js wires contextmenu + emits ui:dealer-wo-request', 'contextmenu' in read(f'{BASE}/renderer/src/js/views/fleet.js') and 'ui:dealer-wo-request' in read(f'{BASE}/renderer/src/js/views/fleet.js'))
+
+# S23-9/10: CSS vendor panel + modal rules
+chk('S23-CSS1: fleet.css has .dp-vendor-section rule', '.dp-vendor-section' in _css23)
+chk('S23-CSS2: fleet.css has .vr-modal-overlay rule (review modal)', '.vr-modal-overlay' in _css23)
+chk('S23-CSS3: fleet.css has .ctx-menu rule (context menu)', '.ctx-menu' in _css23)
 # ── Report ───────────────────────────────────────────────────────────────────
 print('=' * 60)
 print('SANITY CHECK REPORT')
