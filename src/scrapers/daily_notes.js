@@ -81,7 +81,9 @@ function makeDecision(unit, currSnapshot, prevSnapshot, diff) {
   const conversationChanged = currConversation !== prevConversation && currConversation.length > 0;
   const issueChanged = currIssue !== prevIssue && currIssue.length > 0;
   const statusChanged = currStatus !== prevStatus;
-  const hasMeaningfulChange = conversationChanged || issueChanged || statusChanged || diff.hasChanges;
+  const ASIST_RANK_D = { estimate: 3, case: 2, service_request: 1, none: 0 };
+  const asistUpgrade = (ASIST_RANK_D[currSnapshot.asistSource]||0) > (ASIST_RANK_D[(prevSnapshot && prevSnapshot.asistSource)]||0);
+  const hasMeaningfulChange = conversationChanged || issueChanged || statusChanged || diff.hasChanges || asistUpgrade;
   
   // Check if the last note already covers the current state
   const lastNoteContent = lastNoteLine.replace(/^\d{2}\/\d{2}(\/\d{2})?\s*-?\s*/, '').toLowerCase();
@@ -117,6 +119,7 @@ function makeDecision(unit, currSnapshot, prevSnapshot, diff) {
     if (issueChanged) changeReasons.push('issue details updated');
     if (statusChanged) changeReasons.push(`status changed: ${prevStatus} → ${currStatus}`);
     if (diff.hasChanges && changeReasons.length === 0) changeReasons.push(diff.changes);
+    if (asistUpgrade) changeReasons.push('ASIST enrichment upgraded to ' + (currSnapshot.asistSource || 'unknown'));
     return { decision: 'NEW_UPDATE', reason: 'New activity: ' + changeReasons.join(', ') };
   }
   
@@ -284,6 +287,10 @@ async function buildUnitSnapshot(unit, session, log) {
     issue: unit.issue || '',
     duration: unit.duration || '',
     savedNotes: unit.savedNotes || '',
+    asistSource:    unit.asistSource    || '',
+    asistLabel:     unit.asistLabel     || '',
+    asistSrUrl:     unit.asistSrUrl     || '',
+    asistScrapedAt: unit.asistScrapedAt || '',
     timestamp: new Date().toISOString()
   };
 
@@ -328,6 +335,17 @@ function diffSnapshots(prev, curr) {
   if (curr.relayIssue && prev.relayIssue !== curr.relayIssue) {
     changes.push(`Relay issue updated: "${curr.relayIssue.substring(0, 100)}"`);
   }
+  // S25-11: detect ASIST source tier upgrade
+  const ASIST_RANK = { estimate: 3, case: 2, service_request: 1, none: 0 };
+  const prevAsistRank = ASIST_RANK[prev.asistSource] || 0;
+  const currAsistRank = ASIST_RANK[curr.asistSource] || 0;
+  if (currAsistRank > prevAsistRank && curr.asistSource) {
+    const srcLabel = curr.asistSource === 'estimate' ? 'Fleet Estimate' : curr.asistSource === 'case' ? 'ASIST Case' : 'Service Request';
+    changes.push('ASIST enriched to ' + srcLabel + (curr.asistLabel ? ': ' + curr.asistLabel.substring(0,60) : ''));
+  } else if (curr.asistLabel && prev.asistLabel !== curr.asistLabel && curr.asistRank >= prevAsistRank) {
+    changes.push('ASIST label updated: ' + curr.asistLabel.substring(0,60));
+  }
+
   
   return {
     isNew: false,
@@ -438,6 +456,17 @@ ${diff.changes || 'See conversation/issue data below'}
           aiPrompt += `CURRENT ISSUE: ${diff.currIssue.substring(0, 500)}\n\n`;
         }
 
+        // S25-11: inject ASIST offsite enrichment into AI prompt
+        if (currSnapshot.asistLabel || currSnapshot.asistSource) {
+          const _srcLabel = currSnapshot.asistSource === 'estimate' ? 'Fleet Estimate' : currSnapshot.asistSource === 'case' ? 'ASIST Case' : currSnapshot.asistSource === 'service_request' ? 'Service Request' : '(unknown)';
+          let _asistLine = 'Offsite Source: ' + _srcLabel;
+          if (currSnapshot.asistLabel) _asistLine += ' - ' + currSnapshot.asistLabel.substring(0,80);
+          if (currSnapshot.asistSrUrl)  _asistLine += ' | SR: ' + currSnapshot.asistSrUrl.substring(0,100);
+          if (currSnapshot.asistScrapedAt) _asistLine += ' (enriched ' + currSnapshot.asistScrapedAt.slice(0,10) + ')';
+          aiPrompt += 'VOLVO ASIST OFFSITE EVENT:\n' + _asistLine + '\n\n';
+        }
+
+
         // Include prior notes AND generated history
         const priorNotes = unit.savedNotes || currSnapshot.savedNotes || '';
         const generatedHistory = getGeneratedHistory(unit.id);
@@ -499,8 +528,10 @@ Reply with ONLY the note text.`;
         unitId: unit.id,
         altId: unit.altId,
         vendor: unit.vendor || '',
-        woUrl: unit.savedOffsiteEvent || unit.serviceUrl || '',
+        woUrl: unit.savedOffsiteUrl || unit.savedOffsiteEvent || unit.serviceUrl || "",
         offsiteUrl: unit.savedSalesforceCase || '',
+        asistSource: currSnapshot.asistSource || '',
+        asistLabel:  currSnapshot.asistLabel  || '',
         note: shouldAdd ? note : '',
         hasChanges: shouldAdd,
         decision: decision.decision,
