@@ -223,4 +223,19 @@ async function aapFetch(endpoint, body) {
   return response;
 }
 
-module.exports = { createWorkRequest, VENDOR_IDS, DOMICILE_COORDS };
+
+/** addConversationNote -- S25-8: post internal comment on AAP WR */
+async function addConversationNote(wrIdOrUrl,text){
+  if(!wrIdOrUrl||!text)return{ok:false,error:"missing args"};
+  var workRequestId=wrIdOrUrl;
+  var m=String(wrIdOrUrl).match(//v2/service/([a-f0-9-]{36})/i);
+  if(m)workRequestId=m[1];
+  var body={workRequestId:workRequestId,text:String(text).slice(0,2000),internalOnly:true,externalConsumers:[]};
+  try{
+    var resp=await aapFetch("/addComment",body);
+    if(!resp.ok){var e=await resp.text().catch(function(){return String(resp.status);});return{ok:false,error:"addComment HTTP "+resp.status+": "+String(e).slice(0,120)};}
+    return{ok:true};
+  }catch(e){return{ok:false,error:e.message};}
+}
+
+module.exports = { createWorkRequest, addConversationNote, VENDOR_IDS, DOMICILE_COORDS };
