@@ -98,6 +98,7 @@ function createLogger(namespace) {
 }
 
 module.exports = createLogger;
+module.exports.createLogger = createLogger; // alias: require(logger).createLogger(ns) pattern
 module.exports.setLogDir  = setLogDir;
 module.exports.setLevel   = setLevel;
 module.exports.setSilent  = setSilent;
