@@ -2024,3 +2024,9 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 /* S25-12: dealer name in history tooltip */
 .dp-vnd-hist-tt__dealer { font-size: 9px; color: #7c3aed; margin-top: 2px; display: block; }
 
+
+/* S25-13: Sub Vendor cell in vendors drill table */
+.vm-sub-vendor-pill { background:#ede9fe; color:#7c3aed; border-radius:4px; padding:1px 6px; font-size:9px; font-weight:600; white-space:nowrap; }
+.vm-sub-vendor-none { color:#bbbbbb; font-size:10px; }
+.vm-tbl--subvendor { white-space:nowrap; }
+

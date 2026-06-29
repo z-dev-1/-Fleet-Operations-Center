@@ -291,6 +291,8 @@ async function buildUnitSnapshot(unit, session, log) {
     asistLabel:     unit.asistLabel     || '',
     asistSrUrl:     unit.asistSrUrl     || '',
     asistScrapedAt: unit.asistScrapedAt || '',
+    dealerName:     unit.dealerName     || '',
+    subVendor:      unit.subVendor      || unit.dealerName || '',
     timestamp: new Date().toISOString()
   };
 
@@ -344,6 +346,11 @@ function diffSnapshots(prev, curr) {
     changes.push('ASIST enriched to ' + srcLabel + (curr.asistLabel ? ': ' + curr.asistLabel.substring(0,60) : ''));
   } else if (curr.asistLabel && prev.asistLabel !== curr.asistLabel && curr.asistRank >= prevAsistRank) {
     changes.push('ASIST label updated: ' + curr.asistLabel.substring(0,60));
+  }
+
+  // S25-13: detect Sub Vendor arrival or change
+  if (curr.subVendor && curr.subVendor !== prev.subVendor) {
+    changes.push('Sub Vendor: ' + curr.subVendor.substring(0,60) + (prev.subVendor ? ' (was ' + prev.subVendor.substring(0,40) + ')' : ''));
   }
 
   
@@ -432,6 +439,8 @@ UNIT CONTEXT:
 - Unit: ${unit.id} | Alt ID: ${unit.altId}
 - Make/Model: ${unit.model || 'N/A'}
 - Vendor: ${unit.vendor || 'N/A'}
+${currSnapshot.subVendor ? '- Sub Vendor: ' + currSnapshot.subVendor + '
+' : ''}
 - Status: ${currSnapshot.atsState || 'N/A'} | Relay: ${currSnapshot.relayStatus || 'N/A'}
 - Duration Down: ${unit.duration || 'N/A'}
 ${slaInfo ? `- ${slaInfo}\n` : ''}- Risk: ${unit.riskScore || 'N/A'} (${unit.riskTier || ''})
@@ -532,6 +541,8 @@ Reply with ONLY the note text.`;
         offsiteUrl: unit.savedSalesforceCase || '',
         asistSource: currSnapshot.asistSource || '',
         asistLabel:  currSnapshot.asistLabel  || '',
+        subVendor:   currSnapshot.subVendor   || '',
+        dealerName:  currSnapshot.dealerName  || '',
         note: shouldAdd ? note : '',
         hasChanges: shouldAdd,
         decision: decision.decision,

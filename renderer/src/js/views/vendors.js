@@ -186,6 +186,7 @@ function _renderDrillTable(units) {
       <th class="vm-tbl--r">Cost</th>
       <th>SF Case</th>
       <th>Offsite</th>
+      <th>Sub Vendor</th>
     </tr>`;
   const dataRows = units.map(r => {
     const rs      = r.riskScore || 0;
@@ -215,6 +216,7 @@ function _renderDrillTable(units) {
         <td class="vm-tbl--r ${r.totalCost ? 'vm-cell--cost' : ''}">${_safe(r.totalCost || '—')}</td>
         <td>${sfHtml}</td>
         <td>${offsiteHtml}</td>
+        <td class="vm-tbl--subvendor">${r.subVendor || r.dealerName ? `<span class="vm-sub-vendor-pill">${_safe(r.subVendor || r.dealerName)}</span>` : "<span class=\"vm-sub-vendor-none\">--</span>"}</td>
       </tr>`;
   }).join('');
   return `
