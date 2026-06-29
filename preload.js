@@ -215,7 +215,7 @@ contextBridge.exposeInMainWorld('vendor', {
   investigate: (unit)       => ipcRenderer.invoke('vendor:investigate',  { unit }),
   startPaccar: (unit)       => ipcRenderer.invoke('vendor:start-paccar', { unit }),
   startVolvo:  (unit)       => ipcRenderer.invoke('vendor:start-volvo',  { unit }),
-  approve:     (workflowId) => ipcRenderer.invoke('vendor:approve',      { workflowId }),
+  approve:     (workflowId, altId) => ipcRenderer.invoke('vendor:approve', { workflowId, altId }),
   cancel:      (workflowId) => ipcRenderer.invoke('vendor:cancel',       { workflowId }),
   getStatus:   ()           => ipcRenderer.invoke('vendor:get-status'),
 });

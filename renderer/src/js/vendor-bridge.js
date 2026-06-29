@@ -19,7 +19,7 @@
  *   INVOKE (renderer→main):
  *     vendor:start-paccar  { unit }  → { workflowId, altId }
  *     vendor:start-volvo   { unit }  → { workflowId, altId }
- *     vendor:approve       { workflowId }  → { ok }
+ *     vendor:approve       { workflowId, altId? }  → { ok }
  *     vendor:cancel        { workflowId }  → { ok }
  *     vendor:get-status    ()         → { active: [...] }
  *     vendor:investigate   { unit }   → InvestigationResult
@@ -166,10 +166,11 @@ export const vendor = {
   /**
    * Approve a workflow that is sitting at review-ready.
    * @param {string} workflowId
+   * @param {string} [altId]  Corrected Alt ID from operator (optional)
    * @returns {Promise<{ ok: boolean }>}
    */
-  approve: (workflowId) =>
-    window.vendor.approve(workflowId),
+  approve: (workflowId, altId) =>
+    window.vendor.approve(workflowId, altId),
 
   /**
    * Cancel / abort a workflow at any stage.
