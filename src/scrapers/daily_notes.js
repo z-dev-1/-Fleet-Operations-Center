@@ -439,8 +439,7 @@ UNIT CONTEXT:
 - Unit: ${unit.id} | Alt ID: ${unit.altId}
 - Make/Model: ${unit.model || 'N/A'}
 - Vendor: ${unit.vendor || 'N/A'}
-${currSnapshot.subVendor ? '- Sub Vendor: ' + currSnapshot.subVendor + '
-' : ''}
+${currSnapshot.subVendor ? `- Sub Vendor: ${currSnapshot.subVendor}` : ``}
 - Status: ${currSnapshot.atsState || 'N/A'} | Relay: ${currSnapshot.relayStatus || 'N/A'}
 - Duration Down: ${unit.duration || 'N/A'}
 ${slaInfo ? `- ${slaInfo}\n` : ''}- Risk: ${unit.riskScore || 'N/A'} (${unit.riskTier || ''})
