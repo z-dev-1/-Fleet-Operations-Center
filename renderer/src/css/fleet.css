@@ -1887,3 +1887,116 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .vr-approve-btn{background:rgba(88,166,255,.15);border-color:var(--acc);color:var(--acc2);font-weight:700}
 .vr-approve-btn:hover:not(:disabled){background:rgba(88,166,255,.28)}
 .vr-approve-btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* ── S25-3: Vendor Activity Bar ─────────────────────────────── */
+#vnd-activity-bar-mount { flex-shrink: 0; }
+#vnd-activity-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--bdr);
+  min-height: 30px;
+  overflow-x: auto;
+}
+#vnd-activity-bar::-webkit-scrollbar { height: 3px; }
+.vab__label {
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--mut);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.vab__list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+.vab__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 3px 5px;
+  border-radius: 20px;
+  background: var(--card);
+  border: 1px solid var(--bdr);
+  font-size: 10px;
+  white-space: nowrap;
+  transition: border-color .2s, background .2s, opacity .3s;
+  animation: vabPillIn .2s cubic-bezier(.22,1,.36,1) both;
+}
+@keyframes vabPillIn {
+  from { opacity: 0; transform: translateY(-4px) scale(.95); }
+  to   { opacity: 1; transform: translateY(0)   scale(1);   }
+}
+.vab__pill--complete {
+  border-color: rgba(126,231,135,.4);
+  background: var(--grnd);
+  opacity: .7;
+}
+.vab__pill--error {
+  border-color: rgba(255,123,114,.4);
+  background: var(--redd);
+  opacity: .7;
+}
+.vab__vendor { font-size: 9px; padding: 2px 7px; }
+.vab__unit {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--txt);
+}
+.vab__step {
+  font-size: 9px;
+  color: var(--txt2);
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* spinning dot for in-progress */
+.vab__pill-spinner {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  border: 1.5px solid var(--acc);
+  border-top-color: transparent;
+  animation: vabSpin .7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes vabSpin { to { transform: rotate(360deg); } }
+/* pulsing amber dot for awaiting-review */
+.vab__pill-review-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--org);
+  animation: vabPulse 1.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes vabPulse {
+  0%,100% { opacity: 1;   transform: scale(1); }
+  50%      { opacity: .45; transform: scale(1.35); }
+}
+.vab__cancel {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--bdr);
+  background: transparent;
+  color: var(--mut);
+  cursor: pointer;
+  font-size: 8px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  transition: all .15s;
+  padding: 0;
+  line-height: 1;
+}
+.vab__cancel:hover {
+  border-color: var(--red);
+  color: var(--red);
+  background: var(--redd);
+}
+.vab__cancel:disabled { opacity: .4; cursor: default; }
+/* ── end S25-3 ──────────────────────────────────────────────── */

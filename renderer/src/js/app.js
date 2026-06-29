@@ -21,6 +21,7 @@ import { init as initFleetView } from './views/fleet.js';
 import { init as initUnitDetail }from './views/unit-detail.js';
 import { init as initSettings }  from './views/settings.js';
 import { init as initSchedulers } from './views/schedulers.js';
+import { init as initVendorActivityBar } from './components/vendor-activity-bar.js';
 import { init as initAnalytics }     from './views/analytics.js';
 import { init as initVendors }       from './views/vendors.js';
 import { init as initEmailComposer } from './views/email-composer.js';
@@ -43,6 +44,7 @@ function boot() {
       <div id="status-bar-mount"></div>
       <div id="main-area">
         <div id="toolbar-mount"></div>
+      <div id="vnd-activity-bar-mount"></div>
         <div id="content-area">
           <div id="views-mount"></div>
           <div id="detail-mount"></div>
@@ -55,6 +57,7 @@ function boot() {
   initToast();   // bus-driven, no container needed
   initStatusBar(document.getElementById('status-bar-mount'));
   initToolbar(document.getElementById('toolbar-mount'));
+  initVendorActivityBar(document.getElementById('vnd-activity-bar-mount'));
 
   // ── Init views ───────────────────────────────────────────────────────────
   const viewsMount  = document.getElementById('views-mount');
