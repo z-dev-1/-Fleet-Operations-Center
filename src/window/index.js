@@ -442,7 +442,7 @@ function initWindows(ctx) {
     mainWindow.webContents.on('did-finish-load', () => {
       const url = mainWindow.webContents.getURL();
       if (url.includes('index.html') || url.startsWith('file://')) {
-        startAutoSync();
+        if (ctx.startAutoSync) ctx.startAutoSync(); else if (startAutoSync) startAutoSync();
       }
     });
 
@@ -472,7 +472,7 @@ function initWindows(ctx) {
         pushStatus('\u26A0\uFE0F  ' + mw.reason);
       }
 
-      runFullSync();
+      if (ctx.runFullSync) ctx.runFullSync();
     });
 
     // ── Live rescan timer: dedicated off-screen window every 5 min ──────────
@@ -550,7 +550,7 @@ function initWindows(ctx) {
     tray.setToolTip('Fleet Operations \u00B7 Loading...');
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: 'Open Fleet Operations',     click: () => { mainWindow.show(); mainWindow.focus(); } },
-      { label: 'Sync Now',                  click: () => runFullSync() },
+      { label: 'Sync Now', click: () => { if (ctx.runFullSync) ctx.runFullSync(); } },
       { type: 'separator' },
       { label: '\u2699 Setup AAP Columns',  click: () => openAAPSetupWindow() },
       { type: 'separator' },
@@ -609,7 +609,7 @@ function initWindows(ctx) {
 
     setupWin.on('closed', () => {
       logger.info('AAP setup window closed — column prefs saved to session');
-      setTimeout(() => runFullSync(), 1000);
+      setTimeout(() => { if (ctx.runFullSync) ctx.runFullSync(); }, 1000);
     });
   }
 
@@ -687,7 +687,7 @@ function initWindows(ctx) {
       logger.info('request-sync skipped — rescan in progress');
       return;
     }
-    runFullSync();
+    if (ctx.runFullSync) ctx.runFullSync();
   });
 
   ipcMain.handle('app:version', () => app.getVersion());
