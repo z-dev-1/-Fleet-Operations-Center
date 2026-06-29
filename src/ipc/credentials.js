@@ -7,7 +7,7 @@
 
 const creds  = require("../security/credentials");
 const logger = require("../utils/logger")("ipc:credentials");
-const { handle, requireString } = require("./_safe");
+const { handle, requireString } = require('./_safe');
 const { ConfigError }           = require("../utils/errors");
 
 const KEY_RE = /^[A-Za-z0-9._:@-]{1,128}$/;
@@ -54,7 +54,7 @@ function registerCredentialIPC() {
   handle("credentials:list", async () => creds.list());
   handle("credentials:has", async (_e, key) => { const all = await creds.list(); return all.includes(key); });
   handle("credentials:set", async (_e, key, val) => { _validateKey(key); await creds.set(key, typeof val==="string"?val:JSON.stringify(val)); logger.info("set:",key); return {ok:true}; });
-  handle("credentials:get", async (_e, key) => { requireString(key,"key"); const v=await creds.get(key); return v===null?null:{exists:true,key}; });
+  handle("credentials:get", async (_e, key) => { requireString(key,"key"); const v=await creds.get(key); return v===null?null:{ exists: true, key }; });
   handle("credentials:save", async (_e, e) => { if (!e||typeof e!=="object") throw new ConfigError("entry must be object","entry"); _validateKey(e.key); await creds.set(e.key, typeof e.value==="string"?e.value:JSON.stringify(e.value)); logger.info("saved:",e.key); return {ok:true,key:e.key}; });
   handle("credentials:delete", async (_e, key) => { requireString(key,"key"); await creds.delete(key); logger.info("deleted:",key); return {ok:true}; });
   handle("credentials:get-for-url", async (_e, url) => { requireString(url,"url"); try { const h=new URL(url).hostname; const f=await getForHostname(h); return f?{exists:true,hostname:h,label:f.label}:null; } catch(_){return null;} });

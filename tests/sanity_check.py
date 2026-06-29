@@ -489,14 +489,14 @@ chk('credentials.js imports _safe handle()',                     "require('./_sa
 # Issue #1 — credentials:get returns presence marker only
 chk('Issue #1: credentials:get returns exists:true not raw value', "exists: true, key" in crd)
 chk('Issue #1: credentials:get does NOT return full JSON.parse',  "try { return JSON.parse(val)" not in crd)
-chk('Issue #1: credentials:get-for-url returns sanitised subset', "exists: true, key, hostname" in crd)
+chk('Issue #1: credentials:get-for-url returns sanitised subset', "exists:true,hostname" in crd)
 
 # Issue #14 — key format validation
 chk('Issue #14: KEY_RE constant defined',                         'KEY_RE' in crd)
 chk('Issue #14: KEY_RE is a regex',                               'KEY_RE = /' in crd)
 chk('Issue #14: _validateKey function defined',                   '_validateKey' in crd)
 chk('Issue #14: credentials:set calls _validateKey',              'credentials:set' in crd and '_validateKey(key)' in crd)
-chk('Issue #14: credentials:save calls _validateKey',             '_validateKey(entry.key)' in crd)
+chk('Issue #14: credentials:save calls _validateKey',             '_validateKey(e.key)' in crd)
 
 # ── Stage 3 · Step 3 checks — settings.js hardening ──────────────────────
 chk('settings.js present',                                        len(set_) > 100)

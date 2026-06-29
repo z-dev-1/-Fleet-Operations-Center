@@ -21,6 +21,9 @@
   // S21-A: hasAI() checked lazily per-call (avoids load-time preload race)
   function hasAI() { return !!(window.ai && typeof window.ai.chat === 'function'); }
 
+  // S21-B: cap total prompt length to avoid oversized IPC calls
+  const MAX_CTX = 3000;
+
   /* ── 2. Dev-mode canned responses (preserved from original sendMsg) ─── */
   const DEV_RESPONSES = [
     'T-7743 risk 91. Parts ETA EOD at TA Fleet.',
@@ -200,7 +203,7 @@
       if (hasAI()) {  // S21-A: lazy check
         /* ── IPC path ── */
         const ctx    = buildUnitContext();
-        const prompt = ctx ? ctx + '\n' + tx : tx;
+        const prompt = (ctx ? ctx + '\n' + tx : tx).slice(0, MAX_CTX);
 
         let result;
         try {
