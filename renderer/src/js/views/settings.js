@@ -106,6 +106,52 @@ function _html() {
         </div>
       </section>
 
+      <!-- 4b Vendor Portal Auth (S25-5) -->
+      <section class="settings-section" id="sect-vendor-auth">
+        <div class="settings-section__title">Vendor Portal Credentials</div>
+        <p class="settings-hint">Used for automated PACCAR and Volvo portal login. Stored encrypted via safeStorage. Passwords are write-only.</p>
+
+        <!-- PACCAR -->
+        <div class="vnd-auth__card" id="vnd-auth-paccar">
+          <div class="vnd-auth__card-header">
+            <span class="vnd-auth__label">PACCAR (paccarpg.decisiv.net)</span>
+            <span class="settings__status" id="vnd-auth-paccar-status">Checking...</span>
+          </div>
+          <div class="settings-fields">
+            <label class="settings-label">Username
+              <input id="vnd-paccar-user" class="settings__input" type="text"     autocomplete="off" placeholder="portal username" />
+            </label>
+            <label class="settings-label">Password
+              <input id="vnd-paccar-pass" class="settings__input" type="password" autocomplete="new-password" placeholder="(stored encrypted)" />
+            </label>
+          </div>
+          <div class="settings-section__actions">
+            <button id="vnd-paccar-save"  class="detail-panel__btn">Save</button>
+            <button id="vnd-paccar-clear" class="detail-panel__btn settings-btn--danger">Clear</button>
+          </div>
+        </div>
+
+        <!-- Volvo -->
+        <div class="vnd-auth__card" id="vnd-auth-volvo" style="margin-top:12px">
+          <div class="vnd-auth__card-header">
+            <span class="vnd-auth__label">Volvo (volvopg.asist.decisiv.net)</span>
+            <span class="settings__status" id="vnd-auth-volvo-status">Checking...</span>
+          </div>
+          <div class="settings-fields">
+            <label class="settings-label">Username
+              <input id="vnd-volvo-user" class="settings__input" type="text"     autocomplete="off" placeholder="portal username" />
+            </label>
+            <label class="settings-label">Password
+              <input id="vnd-volvo-pass" class="settings__input" type="password" autocomplete="new-password" placeholder="(stored encrypted)" />
+            </label>
+          </div>
+          <div class="settings-section__actions">
+            <button id="vnd-volvo-save"  class="detail-panel__btn">Save</button>
+            <button id="vnd-volvo-clear" class="detail-panel__btn settings-btn--danger">Clear</button>
+          </div>
+        </div>
+      </section>
+
       <!-- 5 Slack (S10) -->
       <section class="settings-section" id="sect-slack">
         <div class="settings-section__title">Slack</div>
@@ -362,6 +408,78 @@ function _wireCreds() {
     } catch (e) {
       toast.show('error', 'Delete failed: ' + e.message);
     }
+  });
+}
+
+// ── Section: Vendor Portal Auth (S25-5) ─────────────────────────────────────
+const _VENDOR_CRED_KEYS = {
+  paccar: { user: 'vendor.paccar.username', pass: 'vendor.paccar.password' },
+  volvo:  { user: 'vendor.volvo.username',  pass: 'vendor.volvo.password'  },
+};
+
+async function _checkVendorCred(vendor) {
+  const keys = _VENDOR_CRED_KEYS[vendor];
+  const el   = document.getElementById('vnd-auth-' + vendor + '-status');
+  if (!el) return;
+  el.textContent = 'Checking...';
+  el.className   = 'settings__status settings__status--loading';
+  try {
+    const hasUser = await credentials.has(keys.user);
+    const hasPass = await credentials.has(keys.pass);
+    if (hasUser && hasPass) {
+      el.textContent = '✓ Credentials saved';
+      el.className   = 'settings__status settings__status--ok';
+    } else {
+      el.textContent = '✗ Not configured';
+      el.className   = 'settings__status settings__status--error';
+    }
+  } catch (_) {
+    el.textContent = 'Check failed';
+    el.className   = 'settings__status settings__status--error';
+  }
+}
+
+function _wireVendorAuth() {
+  ['paccar', 'volvo'].forEach((vendor) => {
+    _checkVendorCred(vendor);
+
+    document.getElementById('vnd-' + vendor + '-save').addEventListener('click', async () => {
+      const user = (document.getElementById('vnd-' + vendor + '-user').value || '').trim();
+      const pass = document.getElementById('vnd-' + vendor + '-pass').value || '';
+      if (!user) { toast.show('warn', 'Username required', 3000); return; }
+      if (!pass) { toast.show('warn', 'Password required', 3000); return; }
+      const btn = document.getElementById('vnd-' + vendor + '-save');
+      btn.disabled = true; btn.textContent = 'Saving...';
+      try {
+        const keys = _VENDOR_CRED_KEYS[vendor];
+        await credentials.set(keys.user, user);
+        await credentials.set(keys.pass, pass);
+        document.getElementById('vnd-' + vendor + '-user').value = '';
+        document.getElementById('vnd-' + vendor + '-pass').value = '';
+        toast.show('success', vendor.charAt(0).toUpperCase() + vendor.slice(1) + ' credentials saved');
+        _checkVendorCred(vendor);
+      } catch (e) {
+        toast.show('error', 'Save failed: ' + e.message);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Save';
+      }
+    });
+
+    document.getElementById('vnd-' + vendor + '-clear').addEventListener('click', async () => {
+      const btn = document.getElementById('vnd-' + vendor + '-clear');
+      btn.disabled = true; btn.textContent = 'Clearing...';
+      try {
+        const keys = _VENDOR_CRED_KEYS[vendor];
+        await credentials.delete(keys.user);
+        await credentials.delete(keys.pass);
+        toast.show('info', vendor.charAt(0).toUpperCase() + vendor.slice(1) + ' credentials cleared');
+        _checkVendorCred(vendor);
+      } catch (e) {
+        toast.show('error', 'Clear failed: ' + e.message);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Clear';
+      }
+    });
   });
 }
 
@@ -667,6 +785,8 @@ function _populate() {
   }).catch(() => {});
 
   _checkSlack();  // re-check Slack auth
+  // S25-5: re-check vendor portal cred status
+  ['paccar', 'volvo'].forEach(_checkVendorCred);
   _checkAuth();   // re-check Midway
 }
 
@@ -711,6 +831,7 @@ export function init(container) {
   _wireAuth();
   _wireOrcha();
   _wireCreds();        // S10
+  _wireVendorAuth();   // S25-5
   _wireSlack();        // S10
   _wireEmail();        // S10
   _wireSP();           // S10

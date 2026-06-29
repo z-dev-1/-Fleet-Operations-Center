@@ -602,6 +602,11 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .settings__status--ok      { color: var(--grn); font-weight: 600; }
 .settings__status--error   { color: var(--red); }
 
+/* S25-5: Vendor portal auth cards */
+.vnd-auth__card            { border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; background: var(--bg-alt, var(--bg)); }
+.vnd-auth__card-header     { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.vnd-auth__label           { font-weight: 600; font-size: 0.85rem; color: var(--fg); }
+
 /* ── Credentials key list ────────────────────────────────── */
 .settings-list-wrap {
   margin-top: 12px;
