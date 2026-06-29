@@ -450,6 +450,7 @@ function _renderHistoryStrip(unitId) {
         if (h.caseUrl) {
           ttHtml += "<a class=\"dp-vnd-hist-tt__link\" data-url=\"" + _esc(h.caseUrl) + "\" href=\"#\">Open ↗</a>";
         }
+        if (h.dealerName) ttHtml += "<span class=\"dp-vnd-hist-tt__dealer\">" + _esc(h.dealerName) + "</span>"; // S25-12
       } else {
         ttHtml += "<span class=\"dp-vnd-hist-tt__err\">" + _esc(h.error || "unknown") + "</span>";
       }
@@ -584,6 +585,17 @@ function _wireAsistPanel(unit) {
       } catch(e) { /* non-fatal */ }
       refreshBtn.disabled = false; refreshBtn.textContent = 'Re-enrich';
     });
+  }
+
+  // S25-12: staleness guard -- auto-trigger re-enrich if > 24h old
+  if (unit.asistSrUrl && unit.asistScrapedAt) {
+    const _age = Date.now() - new Date(unit.asistScrapedAt).getTime();
+    if (_age > 86400000) {
+      setTimeout(() => {
+        const _rb = document.getElementById('dp-asist-refresh');
+        if (_rb && !_rb.disabled) _rb.click();
+      }, 1500);
+    }
   }
 }
 

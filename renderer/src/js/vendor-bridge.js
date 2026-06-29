@@ -107,7 +107,7 @@ function _onComplete(p) {
   }
   const record = { ...p, ts: Date.now() };
   state.update('vendor', { lastComplete: record });
-  _pushHistory(p.unit, { workflowId: p.workflowId, vendor: p.vendor, outcome: "complete", caseNumber: p.caseNumber || "", caseUrl: p.caseUrl || "", ts: record.ts });
+  _pushHistory(p.unit, { workflowId: p.workflowId, vendor: p.vendor, outcome: "complete", caseNumber: p.caseNumber || "", caseUrl: p.caseUrl || "", dealerName: p.dealerName || "", ts: record.ts });
   bus.emit('vendor:complete', p);
 }
 

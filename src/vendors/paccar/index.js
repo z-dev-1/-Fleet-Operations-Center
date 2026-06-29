@@ -51,6 +51,18 @@ const CLICK_SUBMIT = (
   + '})()'
 );
 
+
+// S25-12: scrape servicing dealer name from Decisiv SR page (best-effort)
+const READ_DEALER_SCRIPT = (
+  '(function(){'+
+  'var b=document.body?document.body.innerText:"";'+
+  'function rf(lb){var i=b.indexOf(lb);if(i<0)return"";return b.slice(i+lb.length,i+lb.length+120).split("\n")[0].replace(/^\s*:\s/,"").trim().slice(0,80);}'+
+  'var d=rf("Dealer")||rf("Location")||rf("Service Location")||rf("Shop");'+
+  'return{dealer:d};' +
+  '})()'
+);
+
+
 class PACCARWorkflow extends VendorWorkflow {
   constructor() { super('paccar', PORTAL_URL); }
 
@@ -109,6 +121,15 @@ class PACCARWorkflow extends VendorWorkflow {
     logger.info('[paccar] SR:', srNumber, '| url:', caseUrl.slice(0, 80));
     this.progress('sr-created', { unit: eqId, srNumber, caseUrl });
 
+    // S25-12: best-effort dealer name scrape from SR page
+    let dealerName = '';
+    try {
+      if (!win.isDestroyed()) {
+        const dr = await win.webContents.executeJavaScript(READ_DEALER_SCRIPT);
+        if (dr && dr.dealer) { dealerName = dr.dealer; logger.info('[paccar] dealer:', dealerName); }
+      }
+    } catch (e) { logger.warn('[paccar] dealer scrape (non-fatal):', e.message); }
+
     // 6. Best-effort relay note
     await this._writeToRelay(unit, finalAltId, srNumber, caseUrl)
       .catch(e => logger.warn('[paccar] relay write (non-fatal):', e.message));
@@ -116,7 +137,7 @@ class PACCARWorkflow extends VendorWorkflow {
     // 7. Complete
     sendToAll('vendor:complete', {
       workflowId, vendor: 'paccar', unit: eqId,
-      altId: finalAltId, caseNumber: srNumber, caseUrl,
+      altId: finalAltId, caseNumber: srNumber, caseUrl, dealerName,
     });
     this.progress('complete', { unit: eqId, srNumber, caseUrl });
     this.close();

@@ -23,11 +23,11 @@ const ASIST_SCRAPE = String.raw`
   var caseNumbers=[],m2;reCNum.lastIndex=0;while((m2=reCNum.exec(body))!==null)if(!caseNumbers.includes(m2[1]))caseNumbers.push(m2[1]);
   var srNumbers=[];reSRN.lastIndex=0;while((m2=reSRN.exec(body))!==null)if(!srNumbers.includes(m2[1]))srNumbers.push(m2[1]);
   function rf(lb){var i=body.indexOf(lb);if(i<0)return'';return body.slice(i+lb.length,i+lb.length+120).split('\n')[0].replace(/^\s*:\s*/,'').trim().slice(0,80);}
-  return{currentUrl:location.href,estimateLinks:estimateLinks,caseLinks:caseLinks,srLinks:srLinks,caseNumbers:caseNumbers,srNumbers:srNumbers,srStatus:rf('Status'),dealer:rf('Dealer'),complaint:rf('Complaint'),assetVin:rf('VIN'),unitNumber:rf('Unit Number'),pageReady:body.length>300};
+  return{currentUrl:location.href,estimateLinks:estimateLinks,caseLinks:caseLinks,srLinks:srLinks,caseNumbers:caseNumbers,srNumbers:srNumbers,srStatus:rf('Status'),dealer:(rf('Dealer')||rf('Location')||rf('Service Location')||rf('Shop')),complaint:rf('Complaint'),assetVin:rf('VIN'),unitNumber:rf('Unit Number'),pageReady:body.length>300};
 })()
 `;
 
-function _empty(srUrl,err){return{ok:false,srUrl:srUrl||'',srNumber:'',caseNumber:'',caseUrl:'',estimateUrl:'',bestUrl:srUrl||'',bestLabel:srUrl?'Service Request':'N/A',source:srUrl?'service_request':'none',scrapedAt:new Date().toISOString(),error:err||null};}
+function _empty(srUrl,err){return{ok:false,srUrl:srUrl||'',srNumber:'',caseNumber:'',caseUrl:'',estimateUrl:'',bestUrl:srUrl||'',bestLabel:srUrl?'Service Request':'N/A',source:srUrl?'service_request':'none',scrapedAt:new Date().toISOString(),dealer:'',error:err||null};}
 
 async function pollScrape(win){for(let i=0;i<POLL_MAX;i++){await new Promise(r=>setTimeout(r,POLL_INTERVAL));if(!win||win.isDestroyed())return null;try{const d=await win.webContents.executeJavaScript('(function(){try{return '+ASIST_SCRAPE.trim()+'}catch(e){return{pageReady:false};}})()');if(d&&d.pageReady)return d;}catch(_){}}return null;}
 

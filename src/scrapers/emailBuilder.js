@@ -42,6 +42,8 @@ function buildEmail(opts) {
       offsiteShopEventUrl: u.offsiteShopEventUrl || rc.offsiteShopEventUrl || ns.savedOffsiteUrl || '',
       savedSalesforceCase: u.savedSalesforceCase || ns.savedSalesforceCase || '',
       savedSalesforceCaseUrl: u.savedSalesforceCaseUrl || ns.savedSalesforceCaseUrl || '',
+      dealerName:             u.dealerName || rc.dealerName || ns.dealerName || '',
+      subVendor:              u.subVendor || u.dealerName || rc.dealerName || ns.subVendor || ((/offsite/i.test(u.relayStatus||'')) ? (u.geofence||'') : '') || '',
     };
   });
 
@@ -197,6 +199,9 @@ function buildEmail(opts) {
       // Relay Garage
       if (vendor) {
         rgHtml = ft('#222222', '<b>' + vendor + '</b>', 'font-size:10px');
+        // S25-12: Sub Vendor line (dealer name or geofence fallback)
+        const _subV = u.subVendor || u.dealerName || '';
+        if (_subV && _subV !== vendor) rgHtml += '<br>' + ft('#7c3aed', 'Sub: ' + _subV, 'font-size:9px');
         if (u.geofence && /offsite/i.test(u.relayStatus || '')) {
           rgHtml += '<br>' + ft('#7c3aed', '\uD83D\uDCCD ' + u.geofence, 'font-size:9px');
         }

@@ -774,6 +774,7 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
               asistLabel:     _asistEnrich.bestLabel,
               asistSrUrl:     _asistEnrich.srUrl,
               asistScrapedAt: _asistEnrich.scrapedAt,
+              dealerName:     _asistEnrich.dealer || '',
             };
             logger.info('[Relay] Phase3.5 upgrade applied | source:', _asistEnrich.source, '| url:', _finalOffsite.url.slice(0,80));
           }
@@ -787,6 +788,7 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
             asistLabel:          (_finalOffsite && _finalOffsite.asistLabel)     || '',
             asistSrUrl:          (_finalOffsite && _finalOffsite.asistSrUrl)     || '',
             asistScrapedAt:      (_finalOffsite && _finalOffsite.asistScrapedAt) || '',
+            dealerName:          (_finalOffsite && _finalOffsite.dealerName)     || '',
             salesforceCase:      convSalesforce   ? convSalesforce.caseNumber   : (wrData.salesforceCase      || ''),
             salesforceCaseUrl:   convSalesforce   ? convSalesforce.url          : (wrData.salesforceCaseUrl   || ''),
             fullConversation:    _convData && _convData.fullConversation ? _convData.fullConversation : '',
@@ -915,6 +917,8 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       asistLabel:          r.asistLabel          || row.asistLabel          || '',
       asistSrUrl:          r.asistSrUrl          || row.asistSrUrl          || '',
       asistScrapedAt:      r.asistScrapedAt      || row.asistScrapedAt      || '',
+      dealerName:          r.dealerName          || row.dealerName          || '',
+      subVendor:           r.dealerName || row.dealerName || r.geofence || row.geofence || '',
 
       // Tier 2: Work Orders tab fields
       vendorWorkOrderId:   r.vendorWorkOrderId || row.vendorWorkOrderId || '',

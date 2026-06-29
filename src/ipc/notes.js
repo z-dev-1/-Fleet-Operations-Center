@@ -27,6 +27,8 @@ const NOTES_MAX_LENGTHS = {
   asistLabel:          256,
   asistSrUrl:          512,
   asistScrapedAt:      32,
+  dealerName:          128,
+  subVendor:           128,
   notes:               4096,  // free-text field — generous but bounded
 };
 
@@ -72,6 +74,8 @@ function registerNotesIPC() {
         asistLabel:          _truncateField(payload.asistLabel          !== undefined ? payload.asistLabel          : ex.asistLabel          || '', 'asistLabel'),
         asistSrUrl:          _truncateField(payload.asistSrUrl          !== undefined ? payload.asistSrUrl          : ex.asistSrUrl          || '', 'asistSrUrl'),
         asistScrapedAt:      _truncateField(payload.asistScrapedAt      !== undefined ? payload.asistScrapedAt      : ex.asistScrapedAt      || '', 'asistScrapedAt'),
+        dealerName:          _truncateField(payload.dealerName          !== undefined ? payload.dealerName          : ex.dealerName          || '', 'dealerName'),
+        subVendor:           _truncateField(payload.subVendor           !== undefined ? payload.subVendor           : ex.subVendor           || '', 'subVendor'),
         notes:               _truncateField(payload.notes               !== undefined ? payload.notes               : ex.notes              || '', 'notes'),
         updatedAt:           new Date().toISOString(),
       };

@@ -2020,3 +2020,7 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .dp-asist-empty { font-size: 11px; color: var(--mut); }
 .dp-asist-actions { margin-top: 6px; }
 
+
+/* S25-12: dealer name in history tooltip */
+.dp-vnd-hist-tt__dealer { font-size: 9px; color: #7c3aed; margin-top: 2px; display: block; }
+

@@ -19,6 +19,7 @@ const { VendorWorkflow, sendToAll } = require('../base/vendor-workflow');
 const logger   = require('../../utils/logger')('volvo');
 const { ScraperError, TimeoutError } = require('../../utils/errors');
 const { buildFillScript }  = require('./field-map');
+const { enrichVolvoAsist } = require('../../scrapers/asist_enrich'); // S25-12: dealer name
 
 const PORTAL_URL     =  'https://volvopg.asist.decisiv.net/service_requests';
 const PORTAL_HOST    = 'volvopg.asist.decisiv.net';
@@ -106,6 +107,16 @@ class VolvoWorkflow extends VendorWorkflow {
     logger.info('[volvo] case:', caseNumber, '| url:', caseUrl.slice(0, 80));
     this.progress('case-created', { unit: eqId, caseNumber, caseUrl });
 
+    // S25-12: best-effort dealer name from ASIST SR/case page
+    let dealerName = '';
+    try {
+      const _srUrl = unit.asistSrUrl || unit.offsiteShopEventUrl || '';
+      if (_srUrl) {
+        const _ae = await enrichVolvoAsist(_srUrl);
+        if (_ae && _ae.dealer) { dealerName = _ae.dealer; logger.info('[volvo] dealer:', dealerName); }
+      }
+    } catch (e) { logger.warn('[volvo] dealer scrape (non-fatal):', e.message); }
+
     // 6. Best-effort relay note
     await this._writeToRelay(unit, finalAltId, caseNumber, caseUrl)
       .catch(e => logger.warn('[volvo] relay write (non-fatal):', e.message));
@@ -113,7 +124,7 @@ class VolvoWorkflow extends VendorWorkflow {
     // 7. Complete
     sendToAll('vendor:complete', {
       workflowId, vendor: 'volvo', unit: eqId,
-      altId: finalAltId, caseNumber, caseUrl,
+      altId: finalAltId, caseNumber, caseUrl, dealerName,
     });
     this.progress('complete', { unit: eqId, caseNumber, caseUrl });
     this.close();
