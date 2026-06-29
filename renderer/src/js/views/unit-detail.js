@@ -309,8 +309,8 @@ async function _startVendorWF(unit, vendorKey) {
     const { workflowId } = await fn(unit);
     const sec = document.getElementById('dp-vendor-section');
     if (sec) sec.dataset.workflowId = workflowId;
-    _showApproveCancel(workflowId);
-    toast.show('info', 'Dealer WO workflow started', 3000);
+    // S25-6-A: do NOT call _showApproveCancel here — modal opens via vendor:review-ready bus event.
+    toast.show('info', 'Dealer WO workflow started — waiting for portal...', 3000);
   } catch (e) {
     toast.show('error', 'Failed to start workflow: ' + e.message);
     if (startBtn) { startBtn.disabled = false; startBtn.textContent = 'Retry'; }
@@ -479,6 +479,19 @@ function _wireVendorPanel(unit) {
   vendor.investigate(unit).then((result) => {
     _renderInvestigation(result);
     _renderHistoryStrip(unit.equipmentId || unit.id);
+    // S25-6-B: reconnect if a workflow is already running for this unit
+    const _eqId = unit.equipmentId || unit.id || '';
+    vendor.getStatus().then((statusResult) => {
+      const active = (statusResult && statusResult.active) || [];
+      const running = active.find((w) => w.unit === _eqId);
+      if (running && sec && !sec.dataset.workflowId) {
+        sec.dataset.workflowId = running.workflowId;
+        const progressEl = document.getElementById('dp-vnd-progress');
+        if (progressEl) { progressEl.style.display = 'block'; }
+        _renderProgress({ vendor: running.vendor, step: running.step, ts: running.startedAt,
+          detail: 'Workflow reconnected (step: ' + running.step + ')' });
+      }
+    }).catch(() => {});
     _vendorUnsubs.push(
       bus.on('vendor:progress', (p) => {
         if (!sec.dataset.workflowId || p.workflowId !== sec.dataset.workflowId) return;
