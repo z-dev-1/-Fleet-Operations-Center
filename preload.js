@@ -218,4 +218,5 @@ contextBridge.exposeInMainWorld('vendor', {
   approve:     (workflowId, altId) => ipcRenderer.invoke('vendor:approve', { workflowId, altId }),
   cancel:      (workflowId) => ipcRenderer.invoke('vendor:cancel',       { workflowId }),
   getStatus:   ()           => ipcRenderer.invoke('vendor:get-status'),
+  openPortalUrl: (url)       => ipcRenderer.invoke('shell:open-external', url),
 });

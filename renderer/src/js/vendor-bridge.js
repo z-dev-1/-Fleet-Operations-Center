@@ -196,4 +196,13 @@ export const vendor = {
   /** Return all live workflow entries as an array. */
   listActive: () =>
     Array.from(_workflows.values()),
+
+  /**
+   * Open a portal URL in the system browser.
+   * Used by vendor-review-modal for Reopen portal and View duplicate case links.
+   * @param {string} url
+   * @returns {Promise<void>}
+   */
+  openPortalUrl: (url) =>
+    window.vendor.openPortalUrl(url).catch(() => {}),
 };
