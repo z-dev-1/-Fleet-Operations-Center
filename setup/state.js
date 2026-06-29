@@ -27,7 +27,7 @@ const REQUIRED_STEPS = [
 ];
 
 const OPTIONAL_STEPS = [
-  'slack', 'sharepoint', 'email', 'orcha'
+  'slack', 'sharepoint', 'email', 'orcha', 'confirm'
 ];
 
 const ALL_STEPS = [...REQUIRED_STEPS, ...OPTIONAL_STEPS];

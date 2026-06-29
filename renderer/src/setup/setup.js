@@ -164,16 +164,30 @@ function render() {
     Object.assign(_config, collected);
     _config[step.id] = collected;
 
+    // S25-13 fix: persist each step to main process so isSetupComplete() passes
+    try {
+      if (step.id !== 'confirm') await window.setup.saveStep(step.id, collected);
+    } catch (e) {
+      console.error('saveStep failed:', step.id, e);
+    }
+
     if (_currentStep < STEPS.length - 1) {
       _currentStep++;
       render();
     } else {
-      // Complete
+      // Complete -- all steps should now be persisted
+      const btn = document.getElementById('sw-next');
+      if (btn) { btn.disabled = true; btn.textContent = 'Setting up...'; }
       try {
-        await window.setup.complete();
-        // window.index.js listens for wizard:complete and handles the rest
+        const result = await window.setup.complete();
+        if (result && !result.ok) {
+          if (btn) { btn.disabled = false; btn.textContent = 'Complete Setup'; }
+          const el = document.getElementById('sw-confirm-summary');
+          if (el) el.innerHTML += '<div class="sw-review-row sw-review-error">Setup incomplete: not all required steps saved. Check console.</div>';
+        }
       } catch (e) {
         console.error('Setup complete error:', e);
+        if (btn) { btn.disabled = false; btn.textContent = 'Complete Setup'; }
       }
     }
   });
