@@ -356,6 +356,45 @@ function _teardownVendorBus() {
   _vendorUnsubs = [];
 }
 
+// S24-2: complete banner -- caseUrl deep-link + SR copy
+function _renderCompleteBanner(el, p) {
+  const sr    = p.caseNumber || "";
+  const url   = p.caseUrl   || "";
+  const altId = p.altId     || "";
+  let html = "<div class=\"dp-vnd-complete-banner\">";
+  html += "<span class=\"dp-vnd-complete-icon\">✓</span>";
+  html += "<div class=\"dp-vnd-complete-body\">";
+  html += "<span class=\"dp-vnd-complete-label\">Dealer WO created</span>";
+  if (sr) {
+    html += "<span class=\"dp-vnd-complete-sr\">";
+    html += "<span class=\"dp-vnd-complete-sr-num\">" + _esc(sr) + "</span>";
+    html += "<button class=\"dp-vnd-copy-btn\" data-copy=\"" + _esc(sr) + "\" title=\"Copy SR\">⧉</button>";
+    html += "</span>";
+  }
+  if (altId && altId !== sr) {
+    html += "<span class=\"dp-vnd-complete-altid\">" + _esc(altId) + "<button class=\"dp-vnd-copy-btn\" data-copy=\"" + _esc(altId) + "\" title=\"Copy ID\">⧉</button></span>";
+  }
+  if (url) {
+    html += "<a class=\"dp-vnd-complete-link\" data-ext-url=\"" + _esc(url) + "\" href=\"#\">Open in portal ↗</a>";
+  }
+  html += "</div></div>";
+  el.innerHTML = html;
+  el.querySelectorAll(".dp-vnd-copy-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      navigator.clipboard.writeText(btn.dataset.copy).catch(() => {});
+      toast.show("info", "Copied", 1800);
+    });
+  });
+  if (url) {
+    const lnk = el.querySelector(".dp-vnd-complete-link");
+    if (lnk) lnk.addEventListener("click", (e) => {
+      e.preventDefault();
+      window.files.openExternal(url).catch(() => {});
+    });
+  }
+}
+
 function _wireVendorPanel(unit) {
   const sec = document.getElementById('dp-vendor-section');
   if (!sec) return;
@@ -377,7 +416,7 @@ function _wireVendorPanel(unit) {
         if (!sec.dataset.workflowId || p.workflowId !== sec.dataset.workflowId) return;
         _renderProgress({ ...p, step: 'complete', detail: 'Case: ' + (p.caseNumber || '') });
         const actEl = document.getElementById('dp-vnd-actions');
-        if (actEl) actEl.innerHTML = '<span class="dp-vnd-complete">✓ Dealer WO created' + (p.caseNumber ? ' — case ' + _esc(p.caseNumber) : '') + '</span>';
+        if (actEl) _renderCompleteBanner(actEl, p);
         toast.show('success', 'Dealer WO submitted successfully');
         _teardownVendorBus();
       }),

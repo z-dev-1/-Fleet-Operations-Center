@@ -1805,6 +1805,17 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .dp-vnd-step__label  { font-weight: 600; flex-shrink: 0; }
 .dp-vnd-step__detail { color: var(--txt2); flex: 1; }
 .dp-vnd-complete { font-size: 11px; font-weight: 700; color: var(--grn); }
+.dp-vnd-complete-banner { display:flex; align-items:flex-start; gap:8px; background:var(--grnd); border:1px solid rgba(126,231,135,.25); border-radius:6px; padding:8px 10px; }
+.dp-vnd-complete-icon { color:var(--grn); font-size:14px; flex-shrink:0; margin-top:1px; }
+.dp-vnd-complete-body { display:flex; flex-direction:column; gap:4px; }
+.dp-vnd-complete-label { font-size:11px; font-weight:700; color:var(--grn); }
+.dp-vnd-complete-sr { display:flex; align-items:center; gap:5px; }
+.dp-vnd-complete-sr-num { font-family:var(--mono); font-size:11px; font-weight:600; color:var(--txt); }
+.dp-vnd-complete-altid { font-family:var(--mono); font-size:10px; color:var(--txt2); display:flex; align-items:center; gap:5px; }
+.dp-vnd-copy-btn { background:none; border:none; color:var(--acc2); cursor:pointer; font-size:12px; padding:0 2px; line-height:1; }
+.dp-vnd-copy-btn:hover { color:var(--txt); }
+.dp-vnd-complete-link { font-size:10px; font-weight:600; color:var(--acc2); text-decoration:none; }
+.dp-vnd-complete-link:hover { text-decoration:underline; }
 .dp-empty--error { color: var(--red) !important; }
 
 /* S23-10: Dealer WO review-gate modal */
