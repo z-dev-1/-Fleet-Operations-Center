@@ -228,7 +228,7 @@ async function aapFetch(endpoint, body) {
 async function addConversationNote(wrIdOrUrl,text){
   if(!wrIdOrUrl||!text)return{ok:false,error:"missing args"};
   var workRequestId=wrIdOrUrl;
-  var m=String(wrIdOrUrl).match(//v2/service/([a-f0-9-]{36})/i);
+  var m=String(wrIdOrUrl).match(/\/v2\/service\/([a-f0-9-]{36})/i);
   if(m)workRequestId=m[1];
   var body={workRequestId:workRequestId,text:String(text).slice(0,2000),internalOnly:true,externalConsumers:[]};
   try{
