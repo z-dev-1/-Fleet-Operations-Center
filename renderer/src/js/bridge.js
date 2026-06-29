@@ -10,6 +10,7 @@
  */
 
 import bus   from './bus.js';
+import { init as initVendorBridge } from './vendor-bridge.js';
 import state from './state.js';
 
 // ── IPC listener wiring ────────────────────────────────────────────────────
@@ -80,6 +81,9 @@ export function init() {
   window.app.onNavigateUnit((unitId) => {
     bus.emit('navigate:unit', unitId);
   });
+
+  // S23-8: attach vendor push listeners
+  initVendorBridge();
 
   // Signal renderer ready -- triggers cached-data push from main
   window.fleet.signalReady();
@@ -219,6 +223,9 @@ export const asana = {
   moveTask:       (taskGid, sectGid) => window.asana.moveTask(taskGid, sectGid),
   linkUnit:       (unitId, taskId)   => window.asana.linkUnit(unitId, taskId),
 };
+
+// ── Vendor (Dealer Work Order Engine) ──
+export { vendor } from './vendor-bridge.js';
 
 // ── Partner portal ─────────────────────────────────────────────────────────
 export const partner = {

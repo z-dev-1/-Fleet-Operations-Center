@@ -36,26 +36,49 @@
    * Build a context prefix from the currently-open drawer unit so the AI
    * knows which unit the operator is looking at.
    */
-  function buildUnitContext() {
+  // S22: buildAppContext -- replaces buildUnitContext with full app awareness
+  function buildUnitContext() { return buildAppContext(); }
+
+  function buildAppContext() {
     try {
+      const parts = [];
+
+      // 1. Current view
+      const activeBtn = document.querySelector('.nav-btn.active, .toolbar-btn.active');
+      const view = (activeBtn && activeBtn.dataset.view) || 'fleet';
+      parts.push('[App Context]');
+      parts.push('View: ' + view);
+
+      // 2. Fleet summary
+      const allUnits = window.UNITS ? Object.values(window.UNITS) : [];
+      if (allUnits.length) {
+        const offsite   = allUnits.filter(u => u.ats === 'Unavailable').length;
+        const breached  = allUnits.filter(u => u.slaPct >= 90).length;
+        const risk90    = allUnits.filter(u => u.risk >= 90).length;
+        const avgRisk   = allUnits.length ? Math.round(allUnits.reduce(function(s,u){ return s+u.risk; },0)/allUnits.length) : 0;
+        parts.push('Fleet: '+allUnits.length+' units | '+offsite+' offsite | '+breached+' SLA-breach | '+risk90+' risk90+ | avgRisk='+avgRisk);
+      }
+
+      // 3. Selected unit (if open)
       const uid = window._curDrawerUid;
-      if (!uid) return '';
-      const u = window.UNITS && window.UNITS[uid];
-      if (!u) return '[Unit: ' + uid + '] ';
-      // S21-B: cap context at 300 chars to prevent prompt overflow
-      const MAX_CTX = 300;
-      const raw = (
-        '[Context: Unit ' + u.id +
-        ' | ' + (u.year || '') + ' ' + (u.make || '') +
-        ' | Op=' + (u.op || '') + ' Site=' + (u.site || '') +
-        ' | Relay=' + (u.relay || '') +
-        ' | ATS=' + (u.ats || '') +
-        ' | Risk=' + (u.risk || '') +
-        ' | Vendor=' + (u.vendor || '') +
-        ' | SLA=' + (u.sla || '') +
-        '] '
-      );
-      return raw.length > MAX_CTX ? raw.slice(0, MAX_CTX) + '...] ' : raw;
+      const u   = uid && window.UNITS && window.UNITS[uid];
+      if (u) {
+        parts.push('Selected: '+u.id+' | '+(u.year||'')+' '+(u.make||'')+' | Op='+(u.op||'--')+' Site='+(u.site||'--'));
+        parts.push('  Vendor='+(u.vendor||'--')+' | Relay='+(u.relay||'--')+' | SLA='+(u.sla||'--')+' | Risk='+(u.risk||0));
+        if (u.intel) parts.push('  AI: '+u.intel.slice(0,120));
+      }
+
+      // 4. Recent Slack messages mentioning this unit (if Slack available)
+      if (uid && window._slackInbox && window._slackInbox.recentForUnit) {
+        const slackCtx = window._slackInbox.recentForUnit(uid, 3);
+        if (slackCtx.length) {
+          parts.push('  Recent Slack ('+uid+'):');
+          slackCtx.forEach(function(m){ parts.push('    ['+m.time+'] '+m.text.slice(0,100)); });
+        }
+      }
+
+      const ctx = parts.join('\n');
+      return ctx.length > 1200 ? ctx.slice(0,1200)+'...' : ctx;
     } catch (_) {
       return '';
     }
@@ -65,6 +88,7 @@
    * Append a message bubble to #chatMsgs and return the element.
    * role: 'ai' | 'user'
    */
+
   function appendBubble(role, text) {
     const msgs = document.getElementById('chatMsgs');
     if (!msgs) return null;
@@ -142,8 +166,31 @@
     // Clear input immediately
     if (inp) inp.value = '';
 
+    // S22: /reply command -- send Slack DM directly from chat
+    if (tx.startsWith('/reply ') && window.slack && window.slack.send) {
+      appendBubble('user', tx);
+      _inflight = true;
+      const typing = showTyping();
+      try {
+        const rest = tx.slice(7).trim();
+        const spIdx = rest.indexOf(' ');
+        if (spIdx < 1) { typing.resolve('Usage: /reply @alias message'); return; }
+        const recipient = rest.slice(0, spIdx).replace(/^@/, '');
+        const message   = rest.slice(spIdx+1).trim();
+        const res = await window.slack.send({ recipient, message });
+        if (res && res.ok) {
+          typing.resolve('Slack sent to ' + recipient + '');
+        } else {
+          typing.resolve('Slack send failed: '+(res&&res.error||'unknown'));
+        }
+      } catch(e) { typing.resolve('Slack error: '+e.message); }
+      finally { _inflight = false; }
+      return;
+    }
+
     // Render user bubble
     appendBubble('user', tx);
+
 
     // Show typing indicator
     const typing = showTyping();
@@ -212,6 +259,7 @@
     hasAI:           hasAI,    // S21-A: lazy function
     inflight:        function () { return _inflight; },
     buildUnitContext: buildUnitContext,
+    buildAppContext: buildAppContext,
     devResponses:    DEV_RESPONSES,
     _originalSendMsg: _originalSendMsg,
   };

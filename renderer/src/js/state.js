@@ -10,6 +10,7 @@
  *   sync     -- sync status / in-progress flags
  *   auth     -- midway ok/reason
  *   settings -- domiciles, orcha config (loaded on demand)
+ *   vendor   -- active workflows, lastComplete, lastError
  */
 
 import bus from './bus.js';
@@ -42,6 +43,11 @@ const _state = {
     midwayReason: '',
   },
   settings: null,  // loaded lazily
+  vendor: {
+    active:       {},   // workflowId -> live workflow entry
+    lastComplete: null, // { workflowId, vendor, unit, caseNumber, caseUrl, altId, serviceUrl, ts }
+    lastError:    null, // { workflowId, vendor, unit, error, code, ts }
+  },
 };
 
 function _deepClone(obj) {

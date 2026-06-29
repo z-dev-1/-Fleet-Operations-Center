@@ -609,6 +609,89 @@ function _wireNotifications() {
   });
 }
 
+// -- S22: Populate all fields from saved config ---
+function _populate() {
+  // Orcha config
+  settingsBridge.getOrchaConfig().then((cfg) => {
+    if (!cfg) return;
+    const set = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+    set('settings-orcha-mode', cfg.mode);
+    set('settings-orcha-host', cfg.host);
+    set('settings-orcha-port', cfg.port);
+  }).catch(() => {});
+
+  // Email config -- password intentionally never populated
+  if (window.email && typeof window.email.getConfig === "function") {
+    window.email.getConfig().then((cfg) => {
+      if (!cfg) return;
+      const set = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+      set('email-host', cfg.host); set('email-port', cfg.port);
+      set('email-from', cfg.from); set('email-user', cfg.user || cfg.username);
+      const tlsEl = document.getElementById('email-tls'); if (tlsEl) tlsEl.checked = !!cfg.tls;
+    }).catch(() => {}); }
+
+  // SharePoint config
+  if (window.sp && typeof window.sp.getConfig === "function") {
+    window.sp.getConfig().then((cfg) => {
+      if (!cfg) return;
+      const set = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+      set('sp-site-url',  cfg.siteUrl || cfg.site);
+      set('sp-list-name', cfg.listName || cfg.list);
+      set('sp-user',      cfg.user || cfg.username);
+    }).catch(() => {}); }
+
+  // Asana config
+  if (window.asana && typeof window.asana.getConfig === "function") {
+    window.asana.getConfig().then((cfg) => {
+      if (!cfg) return;
+      const set = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+      set('asana-workspace', cfg.defaultWorkspace || cfg.workspaceGid);
+      set('asana-project',   cfg.defaultProject   || cfg.projectGid);
+      const tokEl = document.getElementById('asana-token');
+      if (tokEl && (cfg.token || cfg.hasToken)) tokEl.placeholder = "••••••••  (saved)";
+    }).catch(() => {}); }
+
+  // Notifications
+  settingsBridge.getAll().then((all) => {
+    const prefs = (all && all.notifications) || {};
+    const chk = (id, key, def) => { const el = document.getElementById(id); if (el) el.checked = key in prefs ? !!prefs[key] : def; };
+    chk('notif-auth-failure',  'authFailure',  true);
+    chk('notif-sync-complete', 'syncComplete', true);
+    chk('notif-sync-error',    'syncError',    true);
+  }).catch(() => {});
+
+  // Domiciles
+  settingsBridge.getDomiciles().then((d) => {
+    const ta = document.getElementById('settings-domiciles');
+    if (ta && d) ta.value = Array.isArray(d) ? d.join('\n') : d;
+  }).catch(() => {});
+
+  _checkSlack();  // re-check Slack auth
+  _checkAuth();   // re-check Midway
+}
+
+// -- S22: Section collapse/expand ---
+const _COLLAPSE_KEY = 'settings_collapsed';
+function _getCollapsed() { try { return JSON.parse(localStorage.getItem(_COLLAPSE_KEY) || '{}'); } catch (_) { return {}; } }
+function _saveCollapsed(state) { try { localStorage.setItem(_COLLAPSE_KEY, JSON.stringify(state)); } catch (_) {} }
+function _initCollapse() {
+  const state = _getCollapsed();
+  _el.querySelectorAll('.settings__section-toggle').forEach((toggle) => {
+    const sec = toggle.closest('.settings__section'); if (!sec) return;
+    const key = sec.dataset.section;
+    const body = sec.querySelector('.settings__section-body'); if (!body) return;
+    if (state[key]) { body.style.display = 'none'; toggle.setAttribute('aria-expanded', 'false'); toggle.textContent = '▶'; }
+    toggle.addEventListener('click', () => {
+      const open = body.style.display === 'none';
+      body.style.display = open ? '' : 'none';
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.textContent = open ? '▼' : '▶';
+      const cur = _getCollapsed(); if (open) { delete cur[key]; } else { cur[key] = true; } _saveCollapsed(cur);
+    });
+  });
+}
+
+
 // ── Init ───────────────────────────────────────────────────────────────────
 export function init(container) {
   _el = document.createElement('div');
@@ -634,8 +717,13 @@ export function init(container) {
   _wireAsana();        // S10
   _wireNotifications();// S10
 
-  // Show/hide based on view
+  // S22: init collapse + populate on first load
+  _initCollapse();
+  _populate();
+
+  // Show/hide; re-populate on every open (S22)
   bus.on('ui:view-change', ({ to }) => {
     _el.style.display = to === 'settings' ? 'flex' : 'none';
+    if (to === 'settings') _populate();
   });
 }

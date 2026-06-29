@@ -88,7 +88,15 @@ contextBridge.exposeInMainWorld('slack', {
   send:      (data) => ipcRenderer.invoke('slack:send', data),
   checkAuth: ()     => ipcRenderer.invoke('slack:check-auth'),
   login:     ()     => ipcRenderer.invoke('slack:login'),
+  // S22: read, channels, auto-reply
+  read:           (data) => ipcRenderer.invoke('slack:read', data),
+  readDMs:        ()     => ipcRenderer.invoke('slack:read-dms'),
+  getChannels:    ()     => ipcRenderer.invoke('slack:get-channels'),
+  getAutoReply:   ()     => ipcRenderer.invoke('slack:get-auto-reply'),
+  setAutoReply:   (r)    => ipcRenderer.invoke('slack:set-auto-reply', r),
+  onIncoming:     (cb)   => on('slack:incoming', cb),
 });
+
 
 // ── SharePoint ────────────────────────────────────────────────────────────────
 contextBridge.exposeInMainWorld('sp', {
@@ -196,4 +204,18 @@ contextBridge.exposeInMainWorld('asana', {
   addComment:    (taskGid, text)       => ipcRenderer.invoke('asana:add-comment', taskGid, text),
   moveTask:      (taskGid, sectGid)    => ipcRenderer.invoke('asana:move-task', taskGid, sectGid),
   linkUnit:      (unitId, taskId)      => ipcRenderer.invoke('asana:link-unit', unitId, taskId),
+});
+
+// -- Vendor / Dealer Work Order Engine (S23-8)
+contextBridge.exposeInMainWorld('vendor', {
+  onProgress:    (cb) => on('vendor:progress',     cb),
+  onReviewReady: (cb) => on('vendor:review-ready', cb),
+  onComplete:    (cb) => on('vendor:complete',     cb),
+  onError:       (cb) => on('vendor:error',        cb),
+  investigate: (unit)       => ipcRenderer.invoke('vendor:investigate',  { unit }),
+  startPaccar: (unit)       => ipcRenderer.invoke('vendor:start-paccar', { unit }),
+  startVolvo:  (unit)       => ipcRenderer.invoke('vendor:start-volvo',  { unit }),
+  approve:     (workflowId) => ipcRenderer.invoke('vendor:approve',      { workflowId }),
+  cancel:      (workflowId) => ipcRenderer.invoke('vendor:cancel',       { workflowId }),
+  getStatus:   ()           => ipcRenderer.invoke('vendor:get-status'),
 });

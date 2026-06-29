@@ -23,6 +23,7 @@ const { registerCredentialIPC }  = require('./credentials');
 const { registerOrchaIPC }       = require('./orcha');
 const { registerScrapersIPC }    = require('./scrapers');
 const { registerMiscIPC }        = require('./misc');
+const { registerVendorIPC }   = require('../vendors');
 const { registerSetupIPC }       = require('./setup');
 const logger = require('../utils/logger')('ipc');
 
@@ -38,6 +39,7 @@ function registerAllIPC(ctx) {
   registerScrapersIPC(ctx);
   registerSetupIPC(ctx);
   registerMiscIPC(ctx);
+  registerVendorIPC();
   logger.info('All IPC handlers registered');
 }
 

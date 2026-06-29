@@ -15,6 +15,10 @@
  *   navigate:unit        String unitId
  *   auth:mwinit-status   { ok, reason }
  *   setup:progress       { step, done, total }
+ *   vendor:progress      { vendor, step, ts, workflowId?, unit?, ...extras }
+ *   vendor:review-ready  { workflowId, vendor, unit, altId, serviceUrl, ... }
+ *   vendor:complete      { workflowId, vendor, unit, caseNumber, caseUrl, ... }
+ *   vendor:error         { workflowId, vendor, unit, error, code }
  *
  * Internal UI events:
  *   ui:view-change   { from, to }

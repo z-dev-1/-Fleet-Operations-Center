@@ -12,8 +12,9 @@
 
 import bus           from '../bus.js';
 import state         from '../state.js';
-import { notes, ai, aap, relay } from '../bridge.js';
+import { notes, ai, aap, relay, vendor } from '../bridge.js';
 import { open as openWRModal }    from './wr-modal.js';
+import { open as openVendorReview } from './vendor-review-modal.js';
 import toast         from '../components/toast.js';
 
 let _panel    = null;
@@ -196,6 +197,211 @@ function _wireCreateWR(unit) {
   btn.addEventListener('click', () => { openWRModal(unit); });
 }
 
+
+// S23-9: Dealer WO panel helpers ----------------------------------------
+
+function _checkIcon(s) { return s === 'pass' ? '✓' : s === 'warn' ? '⚠' : '✗'; }
+function _checkCls(s)  { return s === 'pass' ? 'pass' : s === 'warn' ? 'warn' : 'fail'; }
+
+function _renderInvestigation(result) {
+  const sec = document.getElementById('dp-vendor-section');
+  if (!sec) return;
+  const { eligible, vendor: v, warnings = [], blocking = [], checks = {}, existingWO } = result;
+
+  const ORDER = ['unit_data','vendor','lifecycle','offsite_match','relay_wo','mileage'];
+  const checkRows = ORDER.filter(id => checks[id]).map(id => {
+    const c = checks[id];
+    const cls = _checkCls(c.status);
+    return '<div class="dp-vnd-check dp-vnd-check--' + cls + '">' +
+      '<span class="dp-vnd-check__icon">' + _checkIcon(c.status) + '</span>' +
+      '<span class="dp-vnd-check__name">' + _esc(c.name || id) + '</span>' +
+      '<span class="dp-vnd-check__detail">' + _esc(c.detail || '') + '</span>' +
+      '</div>';
+  }).join('');
+
+  const blockHtml = blocking.length
+    ? '<div class="dp-vnd-blocking">' +
+        blocking.map(b => '<div class="dp-vnd-blocking__row">✗ ' + _esc(b) + '</div>').join('') +
+      '</div>'
+    : '';
+
+  const warnHtml = warnings.length
+    ? '<div class="dp-vnd-warnings">' +
+        warnings.map(w => '<div class="dp-vnd-warn-row">⚠ ' + _esc(w) + '</div>').join('') +
+      '</div>'
+    : '';
+
+  const existHtml = existingWO
+    ? '<div class="dp-vnd-existing">' +
+        '<span class="dp-vnd-existing__label">Existing case:</span> ' +
+        (existingWO.url
+          ? '<a class="dp-vnd-link" href="' + _esc(existingWO.url) + '" target="_blank" rel="noreferrer">' +
+              _esc(existingWO.title || existingWO.caseNumber || 'Open') + '</a>'
+          : '<span>' + _esc(existingWO.title || existingWO.caseNumber || '') + '</span>') +
+      '</div>'
+    : '';
+
+  const vendorLabel = v === 'paccar' ? 'PACCAR / Kenworth / Peterbilt'
+                    : v === 'volvo'  ? 'Volvo / ASIST'
+                    : (v || 'Unknown');
+
+  const startHtml = eligible
+    ? '<button id="dp-vnd-start" class="detail-panel__btn detail-panel__btn--vendor" data-vendor="' + _esc(v) + '">Start ' + _esc(vendorLabel) + ' Portal</button>'
+    : '<div class="dp-vnd-blocked">Cannot start Dealer WO. Resolve errors above.</div>';
+  sec.innerHTML =
+    '<div class="dp-vnd-header">' +
+      '<span class="dp-vnd-badge dp-vnd-badge--' + _esc(v || 'unknown') + '">' + _esc(vendorLabel) + '</span>' +
+      '<span class="dp-vnd-status dp-vnd-status--' + (eligible ? 'eligible' : 'blocked') + '">' +
+        (eligible ? 'Eligible' : 'Blocked') + '</span>' +
+    '</div>' +
+    '<div class="dp-vnd-checks">' + checkRows + '</div>' +
+    blockHtml + warnHtml + existHtml +
+    '<div id="dp-vnd-actions" class="dp-vnd-actions">' + startHtml + '</div>' +
+    '<div id="dp-vnd-progress" class="dp-vnd-progress" style="display:none"></div>';
+
+  if (eligible) {
+    document.getElementById('dp-vnd-start')
+      .addEventListener('click', () => _startVendorWF(result.unit || _unit, v));
+  }
+}
+
+function _renderProgress(p) {
+  const el = document.getElementById('dp-vnd-progress');
+  if (!el) return;
+  el.style.display = 'block';
+  const stepCls = (p.step || '').includes('error')    ? 'dp-vnd-step--error'
+                : (p.step || '').includes('complete')  ? 'dp-vnd-step--done'
+                : 'dp-vnd-step--active';
+  el.innerHTML += '<div class="dp-vnd-step ' + stepCls + '">' +
+    '<span class="dp-vnd-step__ts">' + new Date(p.ts || Date.now()).toLocaleTimeString() + '</span>' +
+    '<span class="dp-vnd-step__label">' + _esc(p.step || '') + '</span>' +
+    (p.detail ? '<span class="dp-vnd-step__detail">' + _esc(p.detail) + '</span>' : '') +
+    '</div>';
+  el.scrollTop = el.scrollHeight;
+}
+
+function _showApproveCancel(workflowId, reviewPayload) {
+  const payload = reviewPayload || { workflowId, unit: _unit && (_unit.id || _unit.equipmentId) || '' };
+  openVendorReview(payload, {
+    onApprove: () => {
+      const actEl = document.getElementById('dp-vnd-actions');
+      if (actEl) actEl.innerHTML = '<span class="dp-vnd-step dp-vnd-step--active">Submitting...</span>';
+    },
+    onCancel: () => {
+      const sec = document.getElementById('dp-vendor-section');
+      if (sec) sec.dataset.workflowId = '';
+      const actEl = document.getElementById('dp-vnd-actions');
+      if (actEl) {
+        actEl.innerHTML = '<button id="dp-vnd-reinvest" class="detail-panel__btn detail-panel__btn--secondary">Re-check eligibility</button>';
+        const ri = document.getElementById('dp-vnd-reinvest');
+        if (ri) ri.addEventListener('click', () => _wireVendorPanel(_unit));
+      }
+    },
+  });
+}
+async function _startVendorWF(unit, vendorKey) {
+  const startBtn = document.getElementById('dp-vnd-start');
+  if (startBtn) { startBtn.disabled = true; startBtn.textContent = 'Starting...'; }
+  const progressEl = document.getElementById('dp-vnd-progress');
+  if (progressEl) { progressEl.style.display = 'block'; progressEl.innerHTML = ''; }
+  try {
+    const fn = vendorKey === 'paccar' ? vendor.startPaccar : vendor.startVolvo;
+    const { workflowId } = await fn(unit);
+    const sec = document.getElementById('dp-vendor-section');
+    if (sec) sec.dataset.workflowId = workflowId;
+    _showApproveCancel(workflowId);
+    toast.show('info', 'Dealer WO workflow started', 3000);
+  } catch (e) {
+    toast.show('error', 'Failed to start workflow: ' + e.message);
+    if (startBtn) { startBtn.disabled = false; startBtn.textContent = 'Retry'; }
+  }
+}
+
+async function _approveWF(workflowId) {
+  const btn = document.getElementById('dp-vnd-approve');
+  if (btn) { btn.disabled = true; btn.textContent = 'Submitting...'; }
+  try {
+    await vendor.approve(workflowId);
+    toast.show('success', 'Dealer WO approved and submitted');
+  } catch (e) {
+    toast.show('error', 'Approve failed: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'Approve & Submit'; }
+  }
+}
+
+async function _cancelWF(workflowId) {
+  const btn = document.getElementById('dp-vnd-cancel');
+  if (btn) { btn.disabled = true; btn.textContent = 'Cancelling...'; }
+  try {
+    await vendor.cancel(workflowId);
+    toast.show('info', 'Dealer WO workflow cancelled');
+    const sec = document.getElementById('dp-vendor-section');
+    if (sec) sec.dataset.workflowId = '';
+    const actEl = document.getElementById('dp-vnd-actions');
+    if (actEl) {
+      actEl.innerHTML = '<button id="dp-vnd-reinvest" class="detail-panel__btn detail-panel__btn--secondary">Re-check eligibility</button>';
+      const ri = document.getElementById('dp-vnd-reinvest');
+      if (ri) ri.addEventListener('click', () => _wireVendorPanel(_unit));
+    }
+  } catch (e) {
+    toast.show('error', 'Cancel failed: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'Cancel'; }
+  }
+}
+
+// S23-13: off-fns for vendor bus listeners
+let _vendorUnsubs = [];
+function _teardownVendorBus() {
+  _vendorUnsubs.forEach((fn) => fn());
+  _vendorUnsubs = [];
+}
+
+function _wireVendorPanel(unit) {
+  const sec = document.getElementById('dp-vendor-section');
+  if (!sec) return;
+  _teardownVendorBus();
+  sec.innerHTML = '<p class="dp-empty">Checking eligibility...</p>';
+  vendor.investigate(unit).then((result) => {
+    _renderInvestigation(result);
+    _vendorUnsubs.push(
+      bus.on('vendor:progress', (p) => {
+        if (!sec.dataset.workflowId || p.workflowId !== sec.dataset.workflowId) return;
+        _renderProgress(p);
+      }),
+      bus.on('vendor:review-ready', (p) => {
+        if (!sec.dataset.workflowId || p.workflowId !== sec.dataset.workflowId) return;
+        _renderProgress({ ...p, step: 'review-ready', detail: 'Portal ready. Review then approve.' });
+        _showApproveCancel(sec.dataset.workflowId, p);
+      }),
+      bus.on('vendor:complete', (p) => {
+        if (!sec.dataset.workflowId || p.workflowId !== sec.dataset.workflowId) return;
+        _renderProgress({ ...p, step: 'complete', detail: 'Case: ' + (p.caseNumber || '') });
+        const actEl = document.getElementById('dp-vnd-actions');
+        if (actEl) actEl.innerHTML = '<span class="dp-vnd-complete">✓ Dealer WO created' + (p.caseNumber ? ' — case ' + _esc(p.caseNumber) : '') + '</span>';
+        toast.show('success', 'Dealer WO submitted successfully');
+        _teardownVendorBus();
+      }),
+      bus.on('vendor:error', (p) => {
+        if (!sec.dataset.workflowId || p.workflowId !== sec.dataset.workflowId) return;
+        _renderProgress({ ...p, step: 'error', detail: p.error || 'Unknown error' });
+        toast.show('error', 'Dealer WO error: ' + (p.error || 'unknown'));
+        _teardownVendorBus();
+      }),
+    );
+  }).catch((e) => {
+    if (sec) sec.innerHTML = '<p class="dp-empty dp-empty--error">Investigation failed: ' + _esc(e.message) + '</p>';
+  });
+}
+
+// S23-9: Dealer WO quick-action button -- scroll to vendor section
+function _wireDealerWOBtn(unit) {
+  const btn = document.getElementById('dp-dealer-wo');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const sec = document.getElementById('dp-vendor-section');
+    if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
 function _renderUnit(unit) {
   _unit = unit;
   if (!_panel) return;
@@ -263,6 +469,15 @@ function _renderUnit(unit) {
         </div>
       </div>
 
+
+      <!-- S23-9: Dealer WO Engine -->
+      <div class="detail-panel__section">
+        <h3>Dealer Work Order</h3>
+        <div id="dp-vendor-section" class="dp-vendor-section">
+          <p class="dp-empty">Loading eligibility check...</p>
+        </div>
+      </div>
+
       <!-- AI result -->
       <div id="dp-ai-result" class="detail-panel__ai-result" style="display:none"></div>
 
@@ -304,6 +519,7 @@ function _renderUnit(unit) {
   _wireLifecycleForm(unit);
   _wireAISuggest(unit);
   _wireCreateWR(unit);
+  _wireVendorPanel(unit);
 }
 
 function close() {
@@ -312,6 +528,7 @@ function close() {
     setTimeout(() => {
       if (_panel) _panel.innerHTML = '';
       _unit = null;
+      _teardownVendorBus();
     }, 300);
   }
   bus.emit('ui:unit-deselect');
@@ -331,4 +548,43 @@ export function init(container) {
   bus.on('ui:unit-deselect', () => {
     if (_panel) _panel.classList.remove('detail-panel--open');
   });
+
+
+// S23-12: Race-guarded handler for context-menu Dealer WO shortcut
+let _pendingDealerWO = null; // { unit, attempts } | null
+
+function _tryDealerWO(unit, attempts) {
+  // Guard 1: stale request — user has switched to a different unit
+  if (!_unit || (_unit.equipmentId !== unit.equipmentId && _unit.id !== unit.equipmentId)) {
+    _pendingDealerWO = null;
+    return;
+  }
+  // Guard 2: panel DOM not yet painted (sec created by _renderUnit sync, so this is very rare)
+  const sec = document.getElementById('dp-vendor-section');
+  if (!sec) {
+    if (attempts >= 12) { _pendingDealerWO = null; return; } // give up after ~200ms
+    _pendingDealerWO = { unit, attempts: attempts + 1 };
+    requestAnimationFrame(() => {
+      if (_pendingDealerWO) _tryDealerWO(_pendingDealerWO.unit, _pendingDealerWO.attempts);
+    });
+    return;
+  }
+  // Guard 3: already investigating this unit — don't re-trigger
+  if (sec.dataset.investigating === unit.equipmentId) {
+    _pendingDealerWO = null;
+    sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    return;
+  }
+  _pendingDealerWO = null;
+  sec.dataset.investigating = unit.equipmentId;
+  _wireVendorPanel(unit);
+  sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
+
+bus.on('ui:dealer-wo-request', ({ unit }) => {
+  _pendingDealerWO = { unit, attempts: 0 };
+  // Use rAF so ui:unit-select's _renderUnit (synchronous) always runs first
+  requestAnimationFrame(() => {
+    if (_pendingDealerWO) _tryDealerWO(_pendingDealerWO.unit, _pendingDealerWO.attempts);
+  });
+});

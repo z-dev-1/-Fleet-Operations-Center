@@ -1,118 +1,64 @@
 'use strict';
 /**
  * ipc/credentials.js - Site credential manager IPC handlers
- * credentials:list, credentials:has, credentials:set, credentials:get,
- * credentials:save, credentials:delete, credentials:get-for-url
- *
- * Stage 3 hardening (2026-06-28):
- *   - Issue #1  HIGH: credentials:get returns a presence-only marker — decrypted
- *                     value no longer crosses the IPC bridge to the renderer.
- *   - Issue #14 LOW:  credentials:set / credentials:save reject key names that
- *                     contain path-traversal or shell-special characters.
- *   - All handlers migrated to handle() wrapper from _safe.js
+ * S23-0 (2026-06-28): VENDOR_CRED_KEYS, _HOST_TO_VENDOR, getForHostname()
+ * BUG FIX: loadCredentials was never exported; auto-login.js was broken.
  */
 
-const creds  = require('../security/credentials');
-const logger = require('../utils/logger')('ipc:credentials');
-const { handle, requireString } = require('./_safe');
-const { ConfigError }           = require('../utils/errors');
+const creds  = require("../security/credentials");
+const logger = require("../utils/logger")("ipc:credentials");
+const { handle, requireString } = require("./_safe");
+const { ConfigError }           = require("../utils/errors");
 
-// ── Issue #14: key format validation ─────────────────────────────────────────
-// Allow alphanumerics, dots, hyphens, colons, underscores — nothing else.
-// Blocks path traversal (../ \\ /) and shell-injection chars.
 const KEY_RE = /^[A-Za-z0-9._:@-]{1,128}$/;
 
 function _validateKey(key) {
-  requireString(key, 'key');
-  if (!KEY_RE.test(key)) {
-    throw new ConfigError(
-      'credential key contains invalid characters (allowed: A-Z a-z 0-9 . _ : @ -)',
-      'key'
-    );
+  requireString(key, "key");
+  if (!KEY_RE.test(key)) throw new ConfigError("invalid key chars","key");
+}
+
+const VENDOR_CRED_KEYS = {
+  paccar: { user: "vendor.paccar.username", pass: "vendor.paccar.password" },
+  volvo:  { user: "vendor.volvo.username",  pass: "vendor.volvo.password"  },
+};
+
+const _HOST_TO_VENDOR = {
+  "paccarpg.decisiv.net":       "paccar",
+  "volvopg.asist.decisiv.net":  "volvo",
+};
+
+async function getForHostname(hostname) {
+  const vendor = _HOST_TO_VENDOR[hostname];
+  if (vendor && VENDOR_CRED_KEYS[vendor]) {
+    const keys = VENDOR_CRED_KEYS[vendor];
+    const user = await creds.get(keys.user);
+    const pass = await creds.get(keys.pass);
+    if (user && pass) { logger.info("getForHostname: hit:", vendor); return { username: user, password: pass, label: vendor }; }
+    logger.warn("getForHostname: no creds for:", vendor, "-- save via Settings > Credentials");
+    return null;
   }
+  const all = creds.list();
+  for (const key of all) {
+    const raw = await creds.get(key); if (!raw) continue;
+    try {
+      const entry = JSON.parse(raw);
+      if (entry.url && entry.username && entry.password) {
+        try { if (new URL(entry.url).hostname === hostname) return { username: entry.username, password: entry.password, label: entry.label || key }; } catch (_) {}
+      }
+    } catch (_) {}
+  }
+  logger.warn("getForHostname: no match for:", hostname); return null;
 }
 
 function registerCredentialIPC() {
-  // List all entries (keys only — values never cross the bridge)
-  handle('credentials:list', async () => {
-    return creds.list();
-  });
-
-  // Check if a credential key exists
-  handle('credentials:has', async (_e, key) => {
-    const all = await creds.list();
-    return all.includes(key);
-  });
-
-  // Set a credential
-  // Issue #14: key validated before write
-  handle('credentials:set', async (_e, key, val) => {
-    _validateKey(key);
-    const value = typeof val === 'string' ? val : JSON.stringify(val);
-    await creds.set(key, value);
-    logger.info('Credential set:', key);
-    return { ok: true };
-  });
-
-  // Issue #1: credentials:get — REDACTED.
-  // The renderer only learns whether the credential exists, not its value.
-  // All code that needs the actual secret must run in main-process via a
-  // purpose-built handler (e.g. credentials:get-for-url, slack:login, etc.).
-  handle('credentials:get', async (_e, key) => {
-    requireString(key, 'key');
-    const val = await creds.get(key);
-    if (val === null) return null;
-    // Return presence marker only — no decrypted data exposed to renderer
-    return { exists: true, key };
-  });
-
-  // Save a credential entry (structured: {key, value, url?, ...})
-  // Issue #14: key validated before write
-  handle('credentials:save', async (_e, entry) => {
-    if (!entry || typeof entry !== 'object') {
-      throw new ConfigError('entry must be a plain object', 'entry');
-    }
-    _validateKey(entry.key);
-    const value = typeof entry.value === 'string' ? entry.value : JSON.stringify(entry.value);
-    await creds.set(entry.key, value);
-    logger.info('Credential saved:', entry.key);
-    return { ok: true, key: entry.key };
-  });
-
-  // Delete a credential entry
-  handle('credentials:delete', async (_e, key) => {
-    requireString(key, 'key');
-    await creds.delete(key);
-    logger.info('Credential deleted:', key);
-    return { ok: true };
-  });
-
-  // Look up credential by URL hostname — returns entry object for main-process use.
-  // Renderer receives only the matching hostname and whether a record was found.
-  handle('credentials:get-for-url', async (_e, url) => {
-    requireString(url, 'url');
-    const all = await creds.list();
-    try {
-      const target = new URL(url).hostname;
-      for (const key of all) {
-        const raw = await creds.get(key);
-        if (!raw) continue;
-        try {
-          const entry = JSON.parse(raw);
-          if (entry.url) {
-            const eHost = new URL(entry.url).hostname;
-            if (eHost === target) {
-              // Return sanitised subset — no raw password field
-              return { exists: true, key, hostname: eHost, label: entry.label || '' };
-            }
-          }
-        } catch (_) { /* not a URL entry */ }
-      }
-    } catch (_) { /* invalid URL from renderer */ }
-    return null;
-  });
-
-  logger.info('Credentials IPC handlers registered');
+  handle("credentials:list", async () => creds.list());
+  handle("credentials:has", async (_e, key) => { const all = await creds.list(); return all.includes(key); });
+  handle("credentials:set", async (_e, key, val) => { _validateKey(key); await creds.set(key, typeof val==="string"?val:JSON.stringify(val)); logger.info("set:",key); return {ok:true}; });
+  handle("credentials:get", async (_e, key) => { requireString(key,"key"); const v=await creds.get(key); return v===null?null:{exists:true,key}; });
+  handle("credentials:save", async (_e, e) => { if (!e||typeof e!=="object") throw new ConfigError("entry must be object","entry"); _validateKey(e.key); await creds.set(e.key, typeof e.value==="string"?e.value:JSON.stringify(e.value)); logger.info("saved:",e.key); return {ok:true,key:e.key}; });
+  handle("credentials:delete", async (_e, key) => { requireString(key,"key"); await creds.delete(key); logger.info("deleted:",key); return {ok:true}; });
+  handle("credentials:get-for-url", async (_e, url) => { requireString(url,"url"); try { const h=new URL(url).hostname; const f=await getForHostname(h); return f?{exists:true,hostname:h,label:f.label}:null; } catch(_){return null;} });
+  logger.info("Credentials IPC handlers registered");
 }
 
-module.exports = { registerCredentialIPC };
+module.exports = { registerCredentialIPC, getForHostname, VENDOR_CRED_KEYS };

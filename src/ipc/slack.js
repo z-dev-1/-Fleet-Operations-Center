@@ -82,6 +82,39 @@ function registerSlackIPC() {
     return sendSlackMessage(data.recipient, data.message);
   });
 
+
+  // S22: slack:get-channels -- list accessible channels/DMs
+  handle('slack:get-channels', async () => {
+    const { getChannels } = require('../../src/scrapers/slack_send');
+    return getChannels(100);
+  });
+
+  // S22: slack:read -- fetch message history for a channel or DM
+  handle('slack:read', async (_e, data) => {
+    if (!data || !data.channelId) throw new Error('slack:read requires channelId');
+    const { readMessages } = require('../../src/scrapers/slack_send');
+    return readMessages(data.channelId, data.limit || 30);
+  });
+
+  // S22: slack:read-dms -- fetch recent DM threads
+  handle('slack:read-dms', async () => {
+    const { readDMs } = require('../../src/scrapers/slack_send');
+    return readDMs(20);
+  });
+
+  // S22: slack:auto-reply-config -- get/set auto-reply rules
+  handle('slack:get-auto-reply', async () => {
+    return store.get('slackAutoReply') || [];
+  });
+
+  handle('slack:set-auto-reply', async (_e, rules) => {
+    if (!Array.isArray(rules)) throw new Error('rules must be an array');
+    if (rules.length > 50) throw new Error('max 50 auto-reply rules');
+    store.set('slackAutoReply', rules);
+    logger.info('[Slack] auto-reply rules saved: ' + rules.length);
+    return { ok: true, count: rules.length };
+  });
+
   logger.info('Slack IPC handlers registered');
 }
 
