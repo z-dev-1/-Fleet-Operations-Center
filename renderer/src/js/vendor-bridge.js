@@ -81,6 +81,20 @@ function _onReviewReady(p) {
   bus.emit('vendor:review-ready', p);
 }
 
+
+// S24-5: accumulate per-unit workflow history (max 10 entries)
+const HISTORY_MAX = 10;
+function _pushHistory(unitId, entry) {
+  if (!unitId) return;
+  const v    = state.slice("vendor");
+  const hist = v.history || {};
+  const arr  = (hist[unitId] || []).slice();
+  arr.unshift(entry);
+  if (arr.length > HISTORY_MAX) arr.length = HISTORY_MAX;
+  hist[unitId] = arr;
+  state.update("vendor", { history: hist });
+}
+
 function _onComplete(p) {
   const id = p.workflowId;
   if (id) {
@@ -89,6 +103,7 @@ function _onComplete(p) {
   }
   const record = { ...p, ts: Date.now() };
   state.update('vendor', { lastComplete: record });
+  _pushHistory(p.unit, { workflowId: p.workflowId, vendor: p.vendor, outcome: "complete", caseNumber: p.caseNumber || "", caseUrl: p.caseUrl || "", ts: record.ts });
   bus.emit('vendor:complete', p);
 }
 
@@ -100,6 +115,7 @@ function _onError(p) {
   }
   const record = { ...p, ts: Date.now() };
   state.update('vendor', { lastError: record });
+  _pushHistory(p.unit, { workflowId: p.workflowId, vendor: p.vendor, outcome: "error", error: p.error || "", ts: record.ts });
   bus.emit('vendor:error', p);
 }
 

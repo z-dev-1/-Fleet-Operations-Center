@@ -47,6 +47,7 @@ const _state = {
     active:       {},   // workflowId -> live workflow entry
     lastComplete: null, // { workflowId, vendor, unit, caseNumber, caseUrl, altId, serviceUrl, ts }
     lastError:    null, // { workflowId, vendor, unit, error, code, ts }
+    history:      {},  // equipmentId -> [{ workflowId, vendor, outcome, caseNumber, caseUrl, error, ts }] max 10
   },
 };
 

@@ -1822,6 +1822,21 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .dp-vnd-error-label { font-size:11px; font-weight:700; color:var(--red); }
 .dp-vnd-error-msg { font-size:10px; color:var(--txt2); line-height:1.4; }
 .dp-vnd-retry-btn { margin-top:2px; align-self:flex-start; }
+.dp-vnd-history-strip { display:flex; flex-wrap:wrap; align-items:center; gap:5px; padding:5px 0 2px; min-height:0; }
+.dp-vnd-hist-label { font-size:9px; text-transform:uppercase; letter-spacing:.5px; color:var(--mut); font-weight:600; flex-shrink:0; margin-right:3px; }
+.dp-vnd-hist-chip { display:inline-flex; align-items:center; gap:3px; padding:2px 7px 2px 5px; border-radius:20px; font-size:9px; font-weight:600; cursor:pointer; border:1px solid; position:relative; background:none; }
+.dp-vnd-hist-chip--ok  { color:var(--grn); border-color:rgba(126,231,135,.3); background:var(--grnd); }
+.dp-vnd-hist-chip--err { color:var(--red); border-color:rgba(255,123,114,.3); background:var(--redd); }
+.dp-vnd-hist-chip:hover { opacity:.8; }
+.dp-vnd-hist-chip__icon  { font-size:9px; flex-shrink:0; }
+.dp-vnd-hist-chip__vendor { width:6px; height:6px; border-radius:50%; padding:0; border:none; flex-shrink:0; }
+.dp-vnd-hist-chip__label { max-width:80px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dp-vnd-hist-chip__rel   { color:var(--mut); font-size:8px; margin-left:2px; }
+.dp-vnd-hist-tooltip { position:absolute; bottom:calc(100% + 4px); left:0; z-index:200; background:var(--panel); border:1px solid var(--bdr); border-radius:6px; padding:7px 10px; min-width:140px; box-shadow:0 4px 16px rgba(0,0,0,.4); display:flex; flex-direction:column; gap:4px; }
+.dp-vnd-hist-tt__sr  { font-family:var(--mono); font-size:11px; font-weight:700; color:var(--txt); }
+.dp-vnd-hist-tt__err { font-size:10px; color:var(--red); line-height:1.4; }
+.dp-vnd-hist-tt__link { font-size:10px; font-weight:600; color:var(--acc2); text-decoration:none; }
+.dp-vnd-hist-tt__link:hover { text-decoration:underline; }
 .dp-empty--error { color: var(--red) !important; }
 
 /* S23-10: Dealer WO review-gate modal */

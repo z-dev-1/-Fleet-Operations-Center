@@ -1262,6 +1262,23 @@ chk('S24-3-G: retry click calls _wireVendorPanel(_unit)', '_wireVendorPanel(_uni
 chk('S24-3-H: vendor:error handler still shows toast', 'Dealer WO error' in udt)
 chk('S24-3-I: CSS dp-vnd-error-banner rule present', '.dp-vnd-error-banner' in _css23)
 chk('S24-3-J: CSS dp-vnd-retry-btn rule present', '.dp-vnd-retry-btn' in _css23)
+vb  = vnb  # S24-5 alias
+st_ = read(f"{BASE}/renderer/src/js/state.js")  # S24-5
+# S24-5: workflow history strip
+chk("S24-5-A: state.js vendor slice has history field", "history:      {}" in st_)
+chk("S24-5-B: vendor-bridge defines HISTORY_MAX = 10", "HISTORY_MAX = 10" in vb)
+chk("S24-5-C: vendor-bridge defines _pushHistory function", "_pushHistory" in vb and "function _pushHistory" in vb)
+chk("S24-5-D: _onComplete calls _pushHistory with outcome=complete", "outcome: \"complete\"" in vb)
+chk("S24-5-E: _onError calls _pushHistory with outcome=error", "outcome: \"error\"" in vb)
+chk("S24-5-F: unit-detail defines _relTs", "function _relTs" in udt)
+chk("S24-5-G: unit-detail defines _renderHistoryStrip", "function _renderHistoryStrip" in udt)
+chk("S24-5-H: history strip rendered on investigate resolve", "_renderHistoryStrip(unit.equipmentId || unit.id)" in udt)
+chk("S24-5-I: history strip refreshed 3x (init + complete + error)", udt.count("_renderHistoryStrip") >= 3)
+chk("S24-5-J: dp-vnd-history-strip container in HTML template", "dp-vnd-history-strip" in udt)
+chk("S24-5-K: tooltip click calls openExternal for caseUrl", "openExternal(h.caseUrl)" in udt)
+chk("S24-5-L: CSS dp-vnd-history-strip rule present", ".dp-vnd-history-strip" in _css23)
+chk("S24-5-M: CSS dp-vnd-hist-chip rule present", ".dp-vnd-hist-chip" in _css23)
+chk("S24-5-N: CSS dp-vnd-hist-tooltip rule present", ".dp-vnd-hist-tooltip" in _css23)
 # ── Report ───────────────────────────────────────────────────────────────────
 print('=' * 60)
 print('SANITY CHECK REPORT')

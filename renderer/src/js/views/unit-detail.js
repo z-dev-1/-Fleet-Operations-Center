@@ -410,6 +410,67 @@ function _renderErrorBanner(el, p) {
   if (btn) btn.addEventListener("click", () => _wireVendorPanel(_unit));
 }
 
+// S24-5: workflow history strip
+function _relTs(ts) {
+  const d = Date.now() - ts;
+  if (d < 60000)  return "just now";
+  if (d < 3600000) return Math.floor(d/60000) + "m ago";
+  if (d < 86400000) return Math.floor(d/3600000) + "h ago";
+  return Math.floor(d/86400000) + "d ago";
+}
+
+function _renderHistoryStrip(unitId) {
+  const el = document.getElementById("dp-vnd-history-strip");
+  if (!el) return;
+  const hist = (state.slice("vendor").history || {})[unitId] || [];
+  if (!hist.length) { el.innerHTML = ""; return; }
+  const chips = hist.map(function(h, i) {
+    const ok  = h.outcome === "complete";
+    const lbl = ok ? (h.caseNumber || "WO") : (h.error ? h.error.slice(0,32) : "error");
+    const rel = _relTs(h.ts || 0);
+    const vCls = h.vendor === "paccar" ? "dp-vnd-badge--paccar" : h.vendor === "volvo" ? "dp-vnd-badge--volvo" : "dp-vnd-badge--unknown";
+    const oCls = ok ? "dp-vnd-hist-chip--ok" : "dp-vnd-hist-chip--err";
+    return "<button class=\"dp-vnd-hist-chip " + oCls + " \" data-idx=\"" + i + "\"><span class=\"dp-vnd-hist-chip__icon\">" + (ok ? "✓" : "✗") + "</span><span class=\"dp-vnd-hist-chip__vendor dp-vnd-badge " + vCls + "\"></span><span class=\"dp-vnd-hist-chip__label\">" + _esc(lbl) + "</span><span class=\"dp-vnd-hist-chip__rel\">" + _esc(rel) + "</span></button>";
+  });
+  el.innerHTML = "<div class=\"dp-vnd-hist-label\">History</div>" + chips.join("");
+  el.querySelectorAll(".dp-vnd-hist-chip").forEach(function(btn) {
+    btn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.idx, 10);
+      const h   = hist[idx];
+      if (!h) return;
+      const prev = el.querySelector(".dp-vnd-hist-tooltip");
+      if (prev) prev.remove();
+      const tt = document.createElement("div");
+      tt.className = "dp-vnd-hist-tooltip";
+      const isOk = h.outcome === "complete";
+      let ttHtml = "";
+      if (isOk) {
+        ttHtml += "<span class=\"dp-vnd-hist-tt__sr\">" + _esc(h.caseNumber || "—") + "</span>";
+        if (h.caseUrl) {
+          ttHtml += "<a class=\"dp-vnd-hist-tt__link\" data-url=\"" + _esc(h.caseUrl) + "\" href=\"#\">Open ↗</a>";
+        }
+      } else {
+        ttHtml += "<span class=\"dp-vnd-hist-tt__err\">" + _esc(h.error || "unknown") + "</span>";
+      }
+      tt.innerHTML = ttHtml;
+      btn.appendChild(tt);
+      if (h.caseUrl) {
+        const lnk = tt.querySelector(".dp-vnd-hist-tt__link");
+        if (lnk) lnk.addEventListener("click", function(ev) {
+          ev.preventDefault();
+          window.files.openExternal(h.caseUrl).catch(function(){});
+        });
+      }
+      document.addEventListener("click", function _dismiss(ev) {
+        if (!tt.contains(ev.target) && ev.target !== btn) {
+          tt.remove(); document.removeEventListener("click", _dismiss);
+        }
+      }, true);
+    });
+  });
+}
+
 function _wireVendorPanel(unit) {
   const sec = document.getElementById('dp-vendor-section');
   if (!sec) return;
@@ -417,6 +478,7 @@ function _wireVendorPanel(unit) {
   sec.innerHTML = '<p class="dp-empty">Checking eligibility...</p>';
   vendor.investigate(unit).then((result) => {
     _renderInvestigation(result);
+    _renderHistoryStrip(unit.equipmentId || unit.id);
     _vendorUnsubs.push(
       bus.on('vendor:progress', (p) => {
         if (!sec.dataset.workflowId || p.workflowId !== sec.dataset.workflowId) return;
@@ -432,6 +494,7 @@ function _wireVendorPanel(unit) {
         _renderProgress({ ...p, step: 'complete', detail: 'Case: ' + (p.caseNumber || '') });
         const actEl = document.getElementById('dp-vnd-actions');
         if (actEl) _renderCompleteBanner(actEl, p);
+        _renderHistoryStrip(unit.equipmentId || unit.id);
         toast.show('success', 'Dealer WO submitted successfully');
         _teardownVendorBus();
       }),
@@ -441,6 +504,7 @@ function _wireVendorPanel(unit) {
         const actEl = document.getElementById('dp-vnd-actions');
         toast.show('error', 'Dealer WO error: ' + (p.error || 'unknown'));
         if (actEl) _renderErrorBanner(actEl, p);
+        _renderHistoryStrip(unit.equipmentId || unit.id);
         _teardownVendorBus();
       }),
     );
@@ -532,6 +596,7 @@ function _renderUnit(unit) {
         <div id="dp-vendor-section" class="dp-vendor-section">
           <p class="dp-empty">Loading eligibility check...</p>
         </div>
+        <div id="dp-vnd-history-strip" class="dp-vnd-history-strip"></div>
       </div>
 
       <!-- AI result -->
