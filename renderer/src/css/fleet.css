@@ -2005,3 +2005,18 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 }
 .vab__cancel:disabled { opacity: .4; cursor: default; }
 /* ── end S25-3 ──────────────────────────────────────────────── */
+
+/* S25-10: ASIST Offsite Event panel */
+.dp-asist-panel { padding: 4px 0; min-height: 28px; }
+.dp-asist-content { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; font-size: 12px; }
+.dp-asist-badge { font-size: 9px; font-weight: 700; padding: 2px 5px; border-radius: 3px; text-transform: uppercase; letter-spacing: .5px; }
+.dp-asist-badge--estimate { background: rgba(80,200,100,.15); color: #50c864; }
+.dp-asist-badge--case     { background: rgba(100,160,255,.15); color: var(--acc2); }
+.dp-asist-badge--service_request { background: rgba(200,200,200,.1); color: var(--mut); }
+.dp-asist-url, .dp-asist-sr-link { color: var(--acc2); text-decoration: none; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dp-asist-url:hover, .dp-asist-sr-link:hover { text-decoration: underline; }
+.dp-asist-sr-link { font-size: 10px; color: var(--mut); margin-left: 4px; }
+.dp-asist-ts  { font-size: 9px; color: var(--mut); width: 100%; }
+.dp-asist-empty { font-size: 11px; color: var(--mut); }
+.dp-asist-actions { margin-top: 6px; }
+

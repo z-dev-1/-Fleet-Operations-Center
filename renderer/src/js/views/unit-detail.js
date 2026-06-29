@@ -526,6 +526,67 @@ function _wireVendorPanel(unit) {
   });
 }
 
+
+// S25-10: Volvo ASIST Offsite Event panel
+function _renderAsistContent(unit) {
+  const url   = unit.savedOffsiteUrl || unit.offsiteShopEventUrl || '';
+  const label = unit.asistLabel || unit.savedOffsiteEvent || unit.offsiteShopEvent || '';
+  const src   = unit.asistSource || '';
+  const srUrl = unit.asistSrUrl  || '';
+  const ts    = unit.asistScrapedAt || '';
+  const srcBadge = src === 'estimate' ? 'Fleet Estimate' : src === 'case' ? 'ASIST Case' : src === 'service_request' ? 'Service Request' : '';
+  if (!url && !label) return null;
+  let html = '<div class="dp-asist-content">';
+  if (srcBadge) html += '<span class="dp-asist-badge dp-asist-badge--"+_esc(src)+'">'+_esc(srcBadge)+'</span> ';
+  if (url) {
+    const aHref = url.replace(/[']/g, '');
+    html += '<a class="dp-asist-url" href="'+ aHref +'" target="_blank" rel="noreferrer">'+_esc(label||url)+'</a>';
+  } else if (label) {
+    html += '<span class="dp-asist-label">'+_esc(label)+'</span>';
+  }
+  if (srUrl && srUrl !== url) {
+    const srHref = srUrl.replace(/[']/g, '');
+    html += ' <a class="dp-asist-sr-link" href="'+ srHref +'" target="_blank" rel="noreferrer">'+'(SR)'+'</a>';
+  }
+  if (ts) html += '<div class="dp-asist-ts">Last enriched: '+_esc(ts.slice(0,10))+'</div>';
+  html += '</div>';
+  return html;
+}
+
+function _wireAsistPanel(unit) {
+  const panel  = document.getElementById('dp-asist-panel');
+  const actEl  = document.getElementById('dp-asist-actions');
+  const secEl  = document.getElementById('dp-offsite-section');
+  if (!panel) return;
+  const html = _renderAsistContent(unit);
+  if (!html) {
+    const isVolvo = (unit.make || '').toLowerCase().includes('volvo');
+    if (!isVolvo && secEl) secEl.style.display = 'none';
+    return;
+  }
+  panel.innerHTML = html;
+  if (actEl && unit.asistSrUrl) actEl.style.removeProperty('display');
+  const refreshBtn = document.getElementById('dp-asist-refresh');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', async () => {
+      refreshBtn.disabled = true; refreshBtn.textContent = 'Enriching...';
+      try {
+        const srUrl = unit.asistSrUrl || unit.offsiteShopEventUrl;
+        if (srUrl) {
+          const res = await window.vendor.enrichAsist(srUrl);
+          if (res && res.ok) {
+            unit.asistLabel = res.bestLabel; unit.asistSource = res.source;
+            unit.asistSrUrl = res.srUrl; unit.asistScrapedAt = res.scrapedAt;
+            unit.savedOffsiteUrl = res.bestUrl; unit.savedOffsiteEvent = res.bestLabel;
+            _wireAsistPanel(unit);
+          }
+        }
+      } catch(e) { /* non-fatal */ }
+      refreshBtn.disabled = false; refreshBtn.textContent = 'Re-enrich';
+    });
+  }
+}
+
 // S23-9: Dealer WO quick-action button -- scroll to vendor section
 function _wireDealerWOBtn(unit) {
   const btn = document.getElementById('dp-dealer-wo');
@@ -603,6 +664,18 @@ function _renderUnit(unit) {
       </div>
 
 
+
+      <!-- S25-10: Volvo ASIST Offsite Event panel -->
+      <div class="detail-panel__section" id="dp-offsite-section">
+        <h3>Offsite Event</h3>
+        <div id="dp-asist-panel" class="dp-asist-panel">
+          <p class="dp-empty dp-asist-empty">No offsite event on record.</p>
+        </div>
+        <div id="dp-asist-actions" class="dp-asist-actions" style="display:none">
+          <button id="dp-asist-refresh" class="detail-panel__btn detail-panel__btn--secondary">Re-enrich</button>
+        </div>
+      </div>
+
       <!-- S23-9: Dealer WO Engine -->
       <div class="detail-panel__section">
         <h3>Dealer Work Order</h3>
@@ -654,6 +727,7 @@ function _renderUnit(unit) {
   _wireAISuggest(unit);
   _wireCreateWR(unit);
   _wireVendorPanel(unit);
+  _wireAsistPanel(unit);
 }
 
 function close() {

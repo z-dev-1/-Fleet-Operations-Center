@@ -23,6 +23,10 @@ const NOTES_MAX_LENGTHS = {
   salesforceCaseUrl:   512,
   offsiteShopEvent:    128,
   offsiteShopEventUrl: 512,
+  asistSource:         32,
+  asistLabel:          256,
+  asistSrUrl:          512,
+  asistScrapedAt:      32,
   notes:               4096,  // free-text field — generous but bounded
 };
 
@@ -64,6 +68,10 @@ function registerNotesIPC() {
         salesforceCaseUrl:   _truncateField(payload.salesforceCaseUrl   !== undefined ? payload.salesforceCaseUrl   : ex.salesforceCaseUrl   || '', 'salesforceCaseUrl'),
         offsiteShopEvent:    _truncateField(payload.offsiteShopEvent    !== undefined ? payload.offsiteShopEvent    : ex.offsiteShopEvent    || '', 'offsiteShopEvent'),
         offsiteShopEventUrl: _truncateField(payload.offsiteShopEventUrl !== undefined ? payload.offsiteShopEventUrl : ex.offsiteShopEventUrl || '', 'offsiteShopEventUrl'),
+        asistSource:         _truncateField(payload.asistSource         !== undefined ? payload.asistSource         : ex.asistSource         || '', 'asistSource'),
+        asistLabel:          _truncateField(payload.asistLabel          !== undefined ? payload.asistLabel          : ex.asistLabel          || '', 'asistLabel'),
+        asistSrUrl:          _truncateField(payload.asistSrUrl          !== undefined ? payload.asistSrUrl          : ex.asistSrUrl          || '', 'asistSrUrl'),
+        asistScrapedAt:      _truncateField(payload.asistScrapedAt      !== undefined ? payload.asistScrapedAt      : ex.asistScrapedAt      || '', 'asistScrapedAt'),
         notes:               _truncateField(payload.notes               !== undefined ? payload.notes               : ex.notes              || '', 'notes'),
         updatedAt:           new Date().toISOString(),
       };

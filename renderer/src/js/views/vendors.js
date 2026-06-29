@@ -195,9 +195,13 @@ function _renderDrillTable(units) {
     const sfHtml  = (r.savedSalesforceCaseUrl || r.salesforceCaseUrl)
       ? `<a class="vm-link" href="${_safe(r.savedSalesforceCaseUrl || r.salesforceCaseUrl)}" target="_blank" rel="noreferrer">${_safe(r.savedSalesforceCase || r.salesforceCase || 'SF')}</a>`
       : _safe(r.savedSalesforceCase || r.salesforceCase || '—');
-    const offsiteHtml = (r.savedOffsiteUrl || r.offsiteShopEventUrl)
-      ? `<a class="vm-link" href="${_safe(r.savedOffsiteUrl || r.offsiteShopEventUrl)}" target="_blank" rel="noreferrer">${_safe(r.savedOffsiteEvent || r.offsiteShopEvent || 'Link')}</a>`
-      : _safe(r.savedOffsiteEvent || r.offsiteShopEvent || '—');
+    // S25-10: prefer enriched ASIST label/URL over raw service_request URL
+    const _offUrl   = r.savedOffsiteUrl || r.offsiteShopEventUrl || '';
+    const _offLabel = r.asistLabel || r.savedOffsiteEvent || r.offsiteShopEvent || 'Link';
+    const _srcBadge = r.asistSource === 'estimate' ? ' [Est]' : r.asistSource === 'case' ? ' [Case]' : '';
+    const offsiteHtml = _offUrl
+      ? `<a class="vm-link" href="${_safe(_offUrl)}" target="_blank" rel="noreferrer">${_safe(_offLabel + _srcBadge)}</a>`
+      : _safe(r.savedOffsiteEvent || r.offsiteShopEvent || '--');
     return `
       <tr>
         <td><span class="vm-unit-id vm-unit-link" data-unit="${_safe(r.equipmentId)}">${_safe(r.equipmentId)}</span></td>

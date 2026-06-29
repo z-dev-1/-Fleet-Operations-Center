@@ -911,6 +911,10 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       // Tier 1: offsite shop link
       offsiteShopEvent:    r.offsiteShopEvent    || row.offsiteShopEvent    || '',
       offsiteShopEventUrl: r.offsiteShopEventUrl || row.offsiteShopEventUrl || '',
+      asistSource:         r.asistSource         || row.asistSource         || '',
+      asistLabel:          r.asistLabel          || row.asistLabel          || '',
+      asistSrUrl:          r.asistSrUrl          || row.asistSrUrl          || '',
+      asistScrapedAt:      r.asistScrapedAt      || row.asistScrapedAt      || '',
 
       // Tier 2: Work Orders tab fields
       vendorWorkOrderId:   r.vendorWorkOrderId || row.vendorWorkOrderId || '',
@@ -923,8 +927,8 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       savedPrimaryComponent:  n.primaryComponent    || '',
       savedSalesforceCase:    n.salesforceCase      || '',
       savedSalesforceCaseUrl: n.salesforceCaseUrl   || '',
-      savedOffsiteEvent:      n.offsiteShopEvent    || r.offsiteShopEvent    || '',
-      savedOffsiteUrl:        n.offsiteShopEventUrl || r.offsiteShopEventUrl || '',
+      savedOffsiteEvent:      r.asistLabel || n.offsiteShopEvent || r.offsiteShopEvent || '',
+      savedOffsiteUrl:        r.offsiteShopEventUrl || n.offsiteShopEventUrl || '',
       savedNotes:             n.notes               || '',
       notesUpdatedAt:         n.updatedAt           || '',
 
