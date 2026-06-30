@@ -395,10 +395,16 @@ function initWindows(ctx) {
       mainWindow.focus();
     }
 
+    let _startupScrapeStarted = false;
     mainWindow.webContents.on('did-finish-load', () => {
       const url = mainWindow.webContents.getURL();
       logger.info(`Main window loaded: ${url.substring(0, 60)}`);
-      if (url.includes('aap-na.corp.amazon.com')) {
+      // Only start the startup scrape once, and only when actually on AAP
+      // (not on midway-auth.amazon.com redirect which fires first)
+      const onAAP = url.includes('aap-na.corp.amazon.com') && !url.includes('midway-auth');
+      if (onAAP && !_startupScrapeStarted) {
+        _startupScrapeStarted = true;
+        logger.info('[startup] AAP loaded post-auth — starting scrape loop');
         _runAAPScrapeLoop(mainWindow, {
           label: 'startup', maxPolls: 45,
           onComplete: (rows) => {

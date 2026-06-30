@@ -159,33 +159,33 @@ function _renderRows(rows) {
       const unit   = filtered.find((r) => r.equipmentId === unitId);
       if (unit) bus.emit('ui:unit-select', { unit });
     });
+      tr.addEventListener('contextmenu', (e) => {
+        const unitId = tr.dataset.id;
+        const unit   = filtered.find((r) => r.equipmentId === unitId);
+        if (!unit) return;
+        showContextMenu(e, {
+          header: { title: unit.equipmentId, sub: [unit.manufacturer, unit.assetType].filter(Boolean).join(' · ') },
+          items: [
+            { icon: '🔧', label: 'Start Dealer WO', action: () => {
+                bus.emit('ui:unit-select', { unit });
+                bus.emit('ui:dealer-wo-request', { unit });
+              }
+            },
+            { sep: true },
+            { icon: '📋', label: 'Copy Equipment ID', action: () => {
+                navigator.clipboard.writeText(unit.equipmentId).catch(() => {});
+                bus.emit('ui:toast', { type: 'info', message: 'Copied: ' + unit.equipmentId, duration: 1800 });
+              }
+            },
+            { icon: '🔍', label: 'View Unit Detail', action: () => {
+                bus.emit('ui:unit-select', { unit });
+              }
+            },
+          ],
+        });
+      });
   });
 
-    tr.addEventListener('contextmenu', (e) => {
-      const unitId = tr.dataset.id;
-      const unit   = filtered.find((r) => r.equipmentId === unitId);
-      if (!unit) return;
-      showContextMenu(e, {
-        header: { title: unit.equipmentId, sub: [unit.manufacturer, unit.assetType].filter(Boolean).join(' · ') },
-        items: [
-          { icon: '🔧', label: 'Start Dealer WO', action: () => {
-              bus.emit('ui:unit-select', { unit });
-              bus.emit('ui:dealer-wo-request', { unit });
-            }
-          },
-          { sep: true },
-          { icon: '📋', label: 'Copy Equipment ID', action: () => {
-              navigator.clipboard.writeText(unit.equipmentId).catch(() => {});
-              bus.emit('ui:toast', { type: 'info', message: 'Copied: ' + unit.equipmentId, duration: 1800 });
-            }
-          },
-          { icon: '🔍', label: 'View Unit Detail', action: () => {
-              bus.emit('ui:unit-select', { unit });
-            }
-          },
-        ],
-      });
-    });
   // S9: update sort indicators in header
   _updateSortHeaders();
 }
