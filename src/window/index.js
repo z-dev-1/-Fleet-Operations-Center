@@ -326,9 +326,32 @@ function initWindows(ctx) {
           logger.warn('[' + label + '] Column config: eye button not found');
         } else {
           logger.info('[' + label + '] Column config: clicking eye button at', JSON.stringify(btnCoords));
-          // Step 2: send trusted OS-level mouse click via sendInputEvent
-          win.webContents.sendInputEvent({ type: 'mouseDown', x: btnCoords.x, y: btnCoords.y, button: 'left', clickCount: 1 });
-          win.webContents.sendInputEvent({ type: 'mouseUp',   x: btnCoords.x, y: btnCoords.y, button: 'left', clickCount: 1 });
+          // Step 2: click the button directly via JS (same as DevTools console - works)
+          await win.webContents.executeJavaScript(`(function() {
+  var btn = document.querySelector(
+    '#app-layout-content-1 > div > div > div.css-1h2w845 > div > div.css-1d7jqjm > div.css-1k6haed > div > div:nth-child(1) > div > div > div > button:nth-child(4)'
+  );
+  if (!btn) {
+    var root = document.getElementById('app-layout-content-1');
+    if (root) {
+      var allBtns = Array.from(root.querySelectorAll('button'));
+      var parentMap = new Map();
+      allBtns.forEach(function(b) {
+        var key = b.parentElement;
+        if (!parentMap.has(key)) parentMap.set(key, []);
+        parentMap.get(key).push(b);
+      });
+      parentMap.forEach(function(group) {
+        if (!btn && group.length >= 4) {
+          var r = group[3].getBoundingClientRect();
+          if (r.width > 0) btn = group[3];
+        }
+      });
+    }
+  }
+  if (btn) { btn.focus(); btn.click(); return true; }
+  return false;
+})()`);
           await new Promise(r => setTimeout(r, 2500));
           // Step 3: interact with popup
           const colRes = await win.webContents.executeJavaScript(`(async function __aapConfigCols() {
@@ -348,6 +371,8 @@ function initWindows(ctx) {
   // Find popup: check portal divs on body first (Chrome Recorder showed body>div[3])
   var popup = null;
   // Check each direct child of body for portal
+  // Portal divs: popup renders inside existing body children (div 17-19), not as new child
+  // Search all divs including deep inside portal containers
   var bodyDivs = Array.from(document.body.children);
   for (var bi = bodyDivs.length - 1; bi >= 0; bi--) {
     var t = bodyDivs[bi].textContent || '';
