@@ -270,7 +270,7 @@ function initWindows(ctx) {
           var ceiling = setTimeout(function() {
             win.webContents.removeListener('did-finish-load', arm);
             resolve();
-          }, 10000);
+          }, 20000);
           function arm() {
             clearTimeout(settled);
             settled = setTimeout(function() {
@@ -280,6 +280,7 @@ function initWindows(ctx) {
             }, 1500);
           }
           win.webContents.on('did-finish-load', arm);
+          arm(); // also arm immediately for pre-settled pages
         });
         const colRes = await win.webContents.executeJavaScript(`(async function __aapConfigCols() {
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
