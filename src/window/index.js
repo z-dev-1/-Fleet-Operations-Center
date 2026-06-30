@@ -97,6 +97,8 @@ const JS_CLICK_1000 = `(function(){
 })()`;
 
 const JS_EXTRACT_TABLE = `(function(){
+  var AAP_BASE = 'https://aap-na.corp.amazon.com';
+  var WR_HEADERS = ['Open Unplanned Work Requests', 'Open Planned Work Requests'];
   var tables = document.querySelectorAll('table');
   var t = null;
   for (var i = 0; i < tables.length; i++) {
@@ -107,19 +109,29 @@ const JS_EXTRACT_TABLE = `(function(){
   t.querySelectorAll('thead th').forEach(function(x){
     h.push((x.innerText||'').trim().replace(/[\\n\\r]+/g,' '));
   });
-  // Dig React fiber to find href/to prop — AAP mdn-link anchors have no href attr
-  function _reactHref(el) {
+  // Get href from fiber — works for both absolute and relative AAP links
+  function _getHref(el) {
     if (!el) return null;
+    // Try native href first (Electron resolves relative -> absolute via page base)
+    if (el.href && el.href.startsWith('http') && el.href !== window.location.href) return el.href;
+    // Walk fiber for href prop (catches React Router <Link> with relative path)
     try {
       var fk = Object.keys(el).find(function(k){ return k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'); });
-      if (!fk) return null;
-      var cur = el[fk];
-      for (var j = 0; j < 20; j++) {
-        if (!cur) break;
-        var p = cur.memoizedProps || cur.pendingProps;
-        if (p && p.href) return p.href;
-        if (p && p.to)   return String(p.to);
-        cur = cur.return;
+      if (fk) {
+        var cur = el[fk];
+        for (var j = 0; j < 15; j++) {
+          if (!cur) break;
+          var p = cur.memoizedProps || cur.pendingProps;
+          if (p && p.href) {
+            var h2 = String(p.href);
+            return h2.startsWith('http') ? h2 : AAP_BASE + h2;
+          }
+          if (p && p.to) {
+            var t2 = String(p.to);
+            return t2.startsWith('http') ? t2 : AAP_BASE + t2;
+          }
+          cur = cur.return;
+        }
       }
     } catch(e) {}
     return null;
@@ -132,11 +144,13 @@ const JS_EXTRACT_TABLE = `(function(){
     for (var i = 0; i < c.length; i++) {
       var header = h[i] || 'c'+i;
       o[header] = (c[i].innerText||'').trim();
-      // Extract React-resolved URL from any mdn-link anchor in this cell
-      var a = c[i].querySelector('a[mdn-link]');
-      if (a) {
-        var href = (a.href && a.href !== window.location.href ? a.href : null) || _reactHref(a);
-        if (href) o[header + '_url'] = href;
+      // Only extract URL for WR columns that have a non-zero count
+      if (WR_HEADERS.indexOf(header) !== -1 && o[header] && o[header] !== '0' && o[header] !== '--') {
+        var a = c[i].querySelector('a[mdn-link]');
+        if (a) {
+          var href = _getHref(a);
+          if (href) o[header + '_url'] = href;
+        }
       }
     }
     if (o['Equipment ID'] || o[h[1]]) r.push(o);
