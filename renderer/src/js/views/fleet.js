@@ -146,7 +146,11 @@ function _renderRows(rows) {
       const cls = c.key === 'lifecycleState' ? ' class="' + lcClass + '"' : '';
       // Equipment ID: render as clickable hyperlink opening in-app AAP asset window
       if (c.key === 'equipmentId' && row.assetUrl) {
-        content = '<a class="eq-link" href="#" data-url="' + row.assetUrl + '">' + val + '</a>';
+        content = '<a class="eq-link" href="#" data-url="' + row.assetUrl + '"' +
+          ' style="color:#8b949e;text-decoration:none;font-weight:500;border-bottom:1px solid transparent;transition:color .15s"' +
+          ' onmouseenter="this.style.color=\'#f0f6fc\';this.style.borderBottomColor=\'#444c56\'"' +
+          ' onmouseleave="this.style.color=\'#8b949e\';this.style.borderBottomColor=\'transparent\'"' +
+          '>' + val + '</a>';
       }
       return '<td' + cls + ' title="' + String(val).replace(/"/g, '&quot;') + '">' + content + '</td>';
     }).join('');
