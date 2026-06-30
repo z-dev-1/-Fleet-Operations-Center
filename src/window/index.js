@@ -396,7 +396,23 @@ function initWindows(ctx) {
     const scrapeDomiciles = getDomiciles();
     const startUrl        = buildScanURL(scrapeDomiciles);
     logger.info(`Loading AAP in main window: ${startUrl.substring(0, 80)}`);
-    mainWindow.loadURL(startUrl);
+    // ── Midway pre-flight: ensure session is valid before loading AAP ──────
+    // If cookies are stale ensureAuthenticated() shows a visible login window
+    // and waits for the user to complete Midway auth before proceeding.
+    // Prevents the infinite SSO redirect loop on startup.
+    const { ensureAuthenticated: _ensureAuth } = _getAuth();
+    _ensureAuth(mainWindow)
+      .then(() => {
+        logger.info('[startup] Midway pre-flight passed — loading AAP');
+        mainWindow.loadURL(startUrl);
+      })
+      .catch((err) => {
+        logger.error('[startup] Midway pre-flight failed:', err.message);
+        pushError('⚠️ Midway auth failed: ' + err.message + ' — run mwinit then restart');
+        pushStatus('⚠️ Midway auth required — run mwinit in terminal then restart app');
+        // Attempt load anyway — user may have just tapped their key
+        mainWindow.loadURL(startUrl);
+      });
 
     function switchToApp() {
       _appReady = true;
