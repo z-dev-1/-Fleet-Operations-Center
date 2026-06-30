@@ -280,9 +280,9 @@ function _renderProgress(p) {
   el.scrollTop = el.scrollHeight;
 }
 
-function _showApproveCancel(workflowId, reviewPayload) {
+async function _showApproveCancel(workflowId, reviewPayload) {
   const payload = reviewPayload || { workflowId, unit: _unit && (_unit.id || _unit.equipmentId) || '' };
-  openVendorReview(payload, {
+  await openVendorReview(payload, {
     onApprove: () => {
       const actEl = document.getElementById('dp-vnd-actions');
       if (actEl) actEl.innerHTML = '<span class="dp-vnd-step dp-vnd-step--active">Submitting...</span>';
@@ -498,10 +498,10 @@ function _wireVendorPanel(unit) {
         if (!sec.dataset.workflowId || p.workflowId !== sec.dataset.workflowId) return;
         _renderProgress(p);
       }),
-      bus.on('vendor:review-ready', (p) => {
+      bus.on('vendor:review-ready', async (p) => {
         if (!sec.dataset.workflowId || p.workflowId !== sec.dataset.workflowId) return;
         _renderProgress({ ...p, step: 'review-ready', detail: 'Portal ready. Review then approve.' });
-        _showApproveCancel(sec.dataset.workflowId, p);
+        await _showApproveCancel(sec.dataset.workflowId, p);
       }),
       bus.on('vendor:complete', (p) => {
         if (!sec.dataset.workflowId || p.workflowId !== sec.dataset.workflowId) return;

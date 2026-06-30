@@ -12,18 +12,24 @@
  *
  * Flow:
  *   1. Modal opens over the app with vendor badge, unit ID, instructions.
- *   2. portalUrl shown as clickable link -- re-opens vendor portal window.
+ *   2. portalUrl (Decisiv): "Open portal window" re-opens BrowserWindow.
+ *      portalFallbackUrl (non-Decisiv): "Open [Vendor] portal" opens in system browser.
+ *      Neither: portal section hidden.
  *   3. altId field pre-filled; operator can correct before approving.
  *   4. isDuplicate notice shown if payload.isDuplicate === true.
  *   5. Approve --> vendor.approve({ workflowId, altId }) --> onApprove().
  *   6. Cancel  --> vendor.cancel(workflowId)             --> onCancel().
  *   7. Escape / backdrop click --> same as Cancel.
  *
+ * S26: getPortalUrl(vendorName) fallback -- for vendors without a Decisiv
+ *      automated workflow, a portal deep-link is resolved from VENDOR_PORTAL_URLS
+ *      and shown as an external-browser link (opens in system browser, not BrowserWindow).
+ *
  * CSS classes: .vr-modal-overlay  .vr-modal  .vr-*
  */
 
-import { vendor } from '../bridge.js';
-import toast       from '../components/toast.js';
+import { vendor, getPortalUrl } from '../vendor-bridge.js';
+import toast                     from '../components/toast.js';
 
 // -- Module state
 let _overlay  = null;
@@ -40,15 +46,18 @@ const _VENDOR_META = {
 };
 function _vendorMeta(v) {
   return _VENDOR_META[(v || '').toLowerCase()] ||
-    { label: v || 'Unknown', portal: 'Vendor Portal', cls: 'unknown' };
+    { label: v || 'Unknown', portal: (v ? v + ' Portal' : 'Vendor Portal'), cls: 'unknown' };
 }
 
-function _buildHTML(p) {
+// -- Build HTML
+// portalFallbackUrl: resolved by open() from getPortalUrl() before building HTML.
+// portalUrl:         from Decisiv workflow payload (BrowserWindow reopen).
+function _buildHTML(p, portalFallbackUrl) {
   const vm    = _vendorMeta(p.vendor);
-  const hasPU = !!p.portalUrl;
-  const isDup = !!p.isDuplicate;
+  const hasPU = !!p.portalUrl;          // Decisiv window reopen
+  const hasFB = !hasPU && !!portalFallbackUrl; // non-Decisiv external link fallback
 
-  const dupBanner = isDup ? (
+  const dupBanner = p.isDuplicate ? (
     '<div class="vr-dup-banner">' +
     '<span class="vr-dup-banner__icon">&#9888;</span>' +
     '<span>Possible duplicate &mdash; case <strong>' + _safe(p.caseNumber || '') +
@@ -59,17 +68,39 @@ function _buildHTML(p) {
 
   const stubBadge = p._stubbed ? '<span class="vr-stub-badge">STUB</span>' : '';
 
-  const portalSection = hasPU ? (
-    '<div class="vr-section">' +
-    '<div class="vr-section__title">Portal</div>' +
-    '<div class="vr-portal-row">' +
-    '<span class="vr-portal-row__label">' + _safe(vm.portal) + '</span>' +
-    '<a id="vr-portal-link" href="#" class="vr-link vr-link--portal">Open portal window &#8599;</a>' +
-    '</div>' +
-    '<p class="vr-portal-hint">The vendor portal window is already open. ' +
-    'Use this link if it was closed.</p>' +
-    '</div>'
-  ) : '';
+  // Portal section -- three variants:
+  //   A) portalUrl present    -> reopen Decisiv BrowserWindow
+  //   B) fallbackUrl present  -> open in system browser (external)
+  //   C) neither              -> section omitted
+  let portalSection = '';
+  if (hasPU) {
+    portalSection = (
+      '<div class="vr-section">' +
+      '<div class="vr-section__title">Portal</div>' +
+      '<div class="vr-portal-row">' +
+      '<span class="vr-portal-row__label">' + _safe(vm.portal) + '</span>' +
+      '<a id="vr-portal-link" href="#" class="vr-link vr-link--portal">Open portal window &#8599;</a>' +
+      '</div>' +
+      '<p class="vr-portal-hint">The vendor portal window is already open. ' +
+      'Use this link if it was closed.</p>' +
+      '</div>'
+    );
+  } else if (hasFB) {
+    portalSection = (
+      '<div class="vr-section">' +
+      '<div class="vr-section__title">Portal</div>' +
+      '<div class="vr-portal-row">' +
+      '<span class="vr-portal-row__label">' + _safe(vm.portal) + '</span>' +
+      '<a id="vr-portal-link-ext" href="' + _attr(portalFallbackUrl) + '"' +
+      ' target="_blank" rel="noopener noreferrer"' +
+      ' class="vr-link vr-link--portal vr-link--external">Open ' +
+      _safe(vm.label) + ' portal &#8599;</a>' +
+      '</div>' +
+      '<p class="vr-portal-hint">Opens in your system browser. ' +
+      'This is an informational link &mdash; form submission is manual.</p>' +
+      '</div>'
+    );
+  }
 
   return (
     '<div class="vr-modal" id="vr-modal-box" role="dialog"' +
@@ -131,6 +162,9 @@ function _logProgress(msg, cls) {
   log.scrollTop = log.scrollHeight;
 }
 
+// Wire portal links.
+// Decisiv (vr-portal-link): call vendor.openPortalUrl() -- reopens BrowserWindow.
+// Fallback ext (vr-portal-link-ext): plain <a target="_blank"> -- no JS needed.
 function _wirePortalLink(p) {
   const link = _el('vr-portal-link');
   if (link && p.portalUrl) {
@@ -139,6 +173,9 @@ function _wirePortalLink(p) {
       if (vendor.openPortalUrl) vendor.openPortalUrl(p.portalUrl).catch(() => {});
     });
   }
+  // vr-portal-link-ext is a real href <a target="_blank"> -- no JS handler needed.
+  // Left as native anchor for simplicity and accessibility.
+
   const dupLink = _el('vr-dup-case-link');
   if (dupLink && p.caseUrl) {
     dupLink.addEventListener('click', (e) => {
@@ -226,17 +263,35 @@ function _closeModal() {
 
 /**
  * Open the review-gate modal.
+ *
+ * S26: Now async -- resolves VENDOR_PORTAL_URLS fallback before building HTML
+ * so non-Decisiv vendors (Amerit, TA, Cummins, etc.) get a portal section
+ * pointing to their public site.  Decisiv (PACCAR/Volvo) path unchanged.
+ *
  * @param {object} payload  - vendor:review-ready payload
  * @param {object} [cbs]    - { onApprove(data), onCancel(data) }
+ * @returns {Promise<void>}
  */
-export function open(payload, cbs = {}) {
+export async function open(payload, cbs = {}) {
   if (_overlay) _closeModal();
   _payload = payload;
   _cbs     = cbs;
+
+  // Resolve fallback portal URL for non-Decisiv vendors.
+  // getPortalUrl() is cached after first call -- no perceptible latency.
+  let portalFallbackUrl = '';
+  if (!payload.portalUrl) {
+    try {
+      portalFallbackUrl = await getPortalUrl(payload.vendor || '');
+    } catch (_) {
+      // non-fatal -- portal section will be omitted
+    }
+  }
+
   _overlay           = document.createElement('div');
   _overlay.id        = 'vr-modal-overlay';
   _overlay.className = 'vr-modal-overlay';
-  _overlay.innerHTML = _buildHTML(payload);
+  _overlay.innerHTML = _buildHTML(payload, portalFallbackUrl);
   document.body.appendChild(_overlay);
   _overlay.addEventListener('click', (e) => { if (e.target === _overlay) _doCancel(payload); });
   const closeBtn = _el('vr-close');

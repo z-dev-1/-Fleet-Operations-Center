@@ -21,15 +21,7 @@ function noop() {}
 function noopAsync() { return Promise.resolve(null); }
 
 // ── window.fleet ─────────────────────────────────────────────────────────
-window.fleet = {
-  onData: (fn) => { window.__mockFleetCb = fn; setTimeout(() => fn({ rows: MOCK_ROWS, count: MOCK_ROWS.length, syncedAt: new Date().toISOString(), stale: false }), 800); },
-  onStatus:    (fn) => setTimeout(() => fn('Synced (mock)'), 420),
-  onError:     noop,
-  signalReady: noop,
-  requestSync: noopAsync,
-  forceSync:   noopAsync,
-  getVersion:  () => Promise.resolve('3.0.0-dev'),
-};
+window.fleet=(function(){var _d=null,_s=null,_e=null;function run(){var now=new Date().toISOString();var a=MOCK_ROWS.slice(0,7);setTimeout(function(){if(_s)_s("\uD83D\uDD04 Reading AAP inventory...");},300);setTimeout(function(){if(_s)_s("AAP: 7 units loaded \u2014 syncing Uptake...");if(_d)_d({rows:a,count:a.length,aapScrapedAt:now,uptakeScrapedAt:null,uptakeCount:0,relayCount:0,syncedAt:now,stale:false,partial:"aap"});},700);setTimeout(function(){if(_s)_s("\u26A1 Syncing Uptake + Relay in parallel...");},950);var R=[72,85,34,61,0,20,48];var ur=MOCK_ROWS.slice(0,7).map(function(r,i){return Object.assign({},r,{riskScore:R[i]||0});});setTimeout(function(){if(_s)_s("\uD83D\uDD0D Uptake: 7 units enriched \u2014 Relay finishing...");if(_d)_d({rows:ur,count:ur.length,aapScrapedAt:now,uptakeScrapedAt:now,uptakeCount:7,relayCount:0,syncedAt:now,stale:false,partial:"uptake"});},1600);var b1=MOCK_ROWS.slice(0,4).map(function(r){return Object.assign({},r,{relayStatus:"In Progress",durationMs:259200000});}).concat(MOCK_ROWS.slice(4,7));setTimeout(function(){if(_s)_s("\uD83D\uDD27 Relay: 4 units detailed (batch 1)...");if(_d)_d({rows:b1,count:b1.length,aapScrapedAt:now,uptakeScrapedAt:now,uptakeCount:7,relayCount:4,syncedAt:now,stale:false,partial:"relay-batch-1"});},2400);var RL=["In Progress","Pending Parts","Available","Offsite Shop","Pending Diag","In Progress","Available","Pending Parts","Offsite Shop","Available"];var RK=[72,85,34,61,0,20,48,55,90,15];var DU=[259200000,604800000,0,172800000,0,0,86400000,345600000,777600000,0];var fr=MOCK_ROWS.map(function(r,i){return Object.assign({},r,{relayStatus:RL[i]||"Available",riskScore:RK[i]||0,durationMs:DU[i]||0,lifecycleState:(i===2||i===8)?"Unavailable":r.lifecycleState});});setTimeout(function(){var t=new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});if(_s)_s("\u2705 Live \u00B7 10 units \u00B7 7 Uptake \u00B7 10 Relay \u00B7 "+t);if(_d)_d({rows:fr,count:fr.length,aapScrapedAt:now,uptakeScrapedAt:now,uptakeCount:7,relayCount:10,syncedAt:now,stale:false});},3200);}return{onData:function(fn){_d=fn;},onStatus:function(fn){_s=fn;},onError:function(fn){_e=fn;},onAuthFailure:noop,signalReady:function(){run();},requestSync:function(){run();return Promise.resolve();},forceSync:function(){run();return Promise.resolve();},getVersion:function(){return Promise.resolve("3.0.0-dev");}};})();
 
 // ── window.auth ───────────────────────────────────────────────────────────
 window.auth = {

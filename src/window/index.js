@@ -138,6 +138,7 @@ function _mapAAPRows(rawRows) {
       const f = AAP_FIELD_MAP[k];
       if (f) m[f] = row[k];
     });
+    if (row._assetUrl) m.assetUrl = row._assetUrl;
     return m;
   }).filter(x => x.equipmentId);
 }

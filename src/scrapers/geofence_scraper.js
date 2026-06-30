@@ -19,6 +19,7 @@ const fs   = require('fs');
 const os   = require('os');
 const { P } = require('../config/paths');
 const logger = require('../utils/logger').createLogger('geofence');
+const { withRetry } = require('../utils/retry');
 
 const CACHE_FILE          = P.geofenceCache;
 const GEOFENCE_TIMEOUT_MS = 60_000;  // C-1: master timeout — prevents infinite hang
@@ -166,7 +167,7 @@ function saveGeofenceCache(cache) {
  * @returns {Promise<{ok, count?, updated?, cache?, error?, errorCode?, pageInfo?}>}
  *   errorCode values: 'TIMEOUT' | 'AUTH_REQUIRED' | 'NO_DATA' | 'SCRAPE_ERROR'
  */
-async function scrapeGeofences(log) {
+async function _scrapeGeofencesOnce(log) {
   if (!log) log = console.log;
 
   // Lazy require electron modules
@@ -360,6 +361,28 @@ async function scrapeGeofences(log) {
 
   // Race: scrape work vs master timeout
   return Promise.race([scrapeWork, timeoutRace]);
+}
+
+/**
+ * scrapeGeofences(log) -- P1-B: withRetry wrapper
+ * Wraps _scrapeGeofencesOnce: 3 attempts, 8s backoff (16s, 32s).
+ * Promotes { ok:false } soft-failures (except AUTH_REQUIRED) to throws.
+ * AUTH_REQUIRED is not retried -- requires user action.
+ */
+async function scrapeGeofences(log) {
+  if (!log) log = console.log;
+  return withRetry(async () => {
+    const result = await _scrapeGeofencesOnce(log);
+    if (result.ok) return result;
+    if (result.errorCode === 'AUTH_REQUIRED') return result;
+    throw new Error(result.error || 'Geofence scrape failed');
+  }, {
+    attempts:  3,
+    backoffMs: 8000,
+    label:     'geofence-scrape',
+  }).catch(err => ({
+    ok: false, error: err.message, errorCode: 'SCRAPE_ERROR'
+  }));
 }
 
 module.exports = { scrapeGeofences, loadGeofenceCache, saveGeofenceCache, buildFleetMonitoringUrl, FLEET_IDS };

@@ -223,3 +223,19 @@ export const vendor = {
   openPortalUrl: (url) =>
     window.vendor.openPortalUrl(url).catch(() => {}),
 };
+
+// getPortalUrl(vendorName) -- resolve fallback portal URL for non-Decisiv vendors.
+// Appended Stage 26: vendor URL map.
+// Cache the map on first call (single IPC round-trip per session).
+let _portalUrlCache = null;
+
+export async function getPortalUrl(vendorName) {
+  if (!_portalUrlCache) {
+    try {
+      _portalUrlCache = await window.vendor.getPortalUrls();
+    } catch (e) {
+      _portalUrlCache = {};
+    }
+  }
+  return (_portalUrlCache && vendorName) ? (_portalUrlCache[vendorName] || '') : '';
+}

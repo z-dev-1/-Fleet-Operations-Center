@@ -222,4 +222,5 @@ contextBridge.exposeInMainWorld('vendor', {
   enrichAsist:   (srUrl)     => ipcRenderer.invoke('vendor:enrich-asist',  { srUrl }),
   loadHistory:    ()           => ipcRenderer.invoke('vendor:history-load'),
   saveHistory:    (history)    => ipcRenderer.invoke('vendor:history-save', { history }),
+  getPortalUrls:  ()           => ipcRenderer.invoke('vendor:portal-urls'),
 });

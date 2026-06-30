@@ -16,23 +16,77 @@ const DOMICILE_COORDS = {
   'AUVTE01': { latitude: 40.6593, longitude: -75.4902 }
 };
 
-// Vendor → supplierId mapping (add as discovered)
+// Vendor -> supplierId mapping.
+// supplierIds are AAP API UUIDs -- must be captured from live createRepair responses.
+// Keys MUST match the raw vendor cell text scraped by relay.js (see line ~383 of relay.js).
+// To fill: run a real WR for each vendor and inspect the createRepair response body for supplierId.
 const VENDOR_IDS = {
-  'COX':                    'ba5a6982-0897-4ddc-bebc-c5edf6b877e5',
-  'AMERIT':                 '', // TODO: capture from next WR
-  'Volvo (ASIST)':          '', // TODO
-  'Kenworth (PACCAR)':      '', // TODO
-  'Peterbilt (PACCAR)':     '', // TODO
-  'KWNE (Kenworth NE)':     '', // TODO
-  'Freightliner (DAIMLER)': '', // TODO
-  'Cummins':                '', // TODO
-  'TA':                     '', // TODO
-  'Velociti':               '', // TODO
-  'FleetNet (FLEETNET)':    '', // TODO
-  'Ryder (RENTAL)':         '', // TODO
-  'Penske (RENTAL)':        '', // TODO
-  'GOODYEAR':               '', // TODO
-  'KOONER':                 '', // TODO
+  // -- Confirmed -----------------------------------------------------------------
+  'Cox':                    'ba5a6982-0897-4ddc-bebc-c5edf6b877e5', // confirmed live
+  'COX':                    'ba5a6982-0897-4ddc-bebc-c5edf6b877e5', // relay may produce either case
+
+  // -- Decisiv workflow keys (used by relay-step.js aapVendorName) ---------------
+  'Kenworth (PACCAR)':      '', // automated PACCAR WRs -- TODO capture supplierId
+  'Peterbilt (PACCAR)':     '', // automated PACCAR WRs -- TODO capture supplierId
+  'Volvo (ASIST)':          '', // automated Volvo WRs  -- TODO capture supplierId
+
+  // -- Raw relay.js scrape values (mixed/upper case as AAP renders them) ----------
+  'Amerit':                 '', // TODO: capture supplierId from next Amerit WR
+  'AMERIT':                 '', // alias (relay may produce either)
+  'Volvo':                  '', // generic Volvo (non-Decisiv WR)
+  'KENWORTH':               '', // raw scrape value
+  'PETERBILT':              '', // raw scrape value
+  'PACCAR':                 '', // rare -- relay usually produces brand-specific key
+  'FREIGHTLINER':           '', // raw scrape value
+  'Freightliner (DAIMLER)': '', // legacy key -- kept for backwards compat
+  'DAIMLER':                '', // alias
+  'CUMMINS':                '', // raw scrape value
+  'Cummins':                '', // alias (legacy)
+  'TA':                     '', // TravelCenters of America
+  'VELOCITI':               '', // raw scrape value
+  'Velociti':               '', // alias (legacy)
+  'FleetNet':               '', // NOTE: relay.js skips FleetNet units entirely
+  'Fleet Net':              '', // alias
+  'FleetNet (FLEETNET)':    '', // legacy key
+  'RENTAL':                 '', // Ryder/Penske rental pool
+  'Ryder (RENTAL)':         '', // legacy key
+  'Penske (RENTAL)':        '', // legacy key
+  'GOODYEAR':               '', // tire program WRs
+  'KOONER':                 '',
+  'MACK':                   '', // relay scrapes but no automated portal flow
+  'INTERNATIONAL':          '', // Navistar/International
+  'NAVISTAR':               '', // alias
+  'PCSR':                   '',
+  'CEI':                    '',
+  'RTS':                    '',
+  'KWNE (Kenworth NE)':     '', // legacy key
+};
+
+// Vendor portal URLs -- informational; surfaced in vendor review modal for
+// vendors that do NOT have an automated Decisiv workflow.
+// PACCAR + Volvo portals live in src/vendors/index.js PORTAL_URLS.
+const VENDOR_PORTAL_URLS = {
+  'Amerit':        'https://ameritfs.com/',
+  'AMERIT':        'https://ameritfs.com/',
+  'CUMMINS':       'https://cumminscare.com/',
+  'Cummins':       'https://cumminscare.com/',
+  'TA':            'https://www.ta-petro.com/fleet/fleet-services/',
+  'VELOCITI':      'https://www.velociti.com/',
+  'Velociti':      'https://www.velociti.com/',
+  'FleetNet':      'https://www.fleetnet.com/',
+  'Fleet Net':     'https://www.fleetnet.com/',
+  'GOODYEAR':      'https://commercialtire.goodyear.com/',
+  'FREIGHTLINER':  'https://dtnaparts.com/',
+  'KENWORTH':      'https://kenworth.com/owners/',
+  'PETERBILT':     'https://peterbilt.com/owners/',
+  'MACK':          'https://macktrucks.com/',
+  'INTERNATIONAL': 'https://www.internationaltrucks.com/dealers',
+  'NAVISTAR':      'https://www.internationaltrucks.com/dealers',
+  'RENTAL':        '', // account-specific portal -- no public URL
+  'KOONER':        '', // direct dispatch -- no portal
+  'PCSR':          '',
+  'CEI':           '',
+  'RTS':           '',
 };
 
 /**
@@ -238,4 +292,4 @@ async function addConversationNote(wrIdOrUrl,text){
   }catch(e){return{ok:false,error:e.message};}
 }
 
-module.exports = { createWorkRequest, addConversationNote, VENDOR_IDS, DOMICILE_COORDS };
+module.exports = { createWorkRequest, addConversationNote, VENDOR_IDS, VENDOR_PORTAL_URLS, DOMICILE_COORDS };

@@ -92,6 +92,10 @@
                      ? row.riskHistory.slice(-7)
                      : [risk, risk, risk, risk, risk, risk, risk],
       elapsedMs:   ms,
+      assetUrl:    row.assetUrl || '',
+      bodyType:    row.bodyType || row.assetType || '--',
+      fuelType:    row.fuelType || '--',
+      aapId:       (row.assetUrl || '').replace(/.*\/v2\/asset\//, '').split('?')[0] || '',
       _raw:        row
     };
   }
@@ -131,6 +135,8 @@
         + '<td style="color:' + wClr + ';font-weight:700;font-family:var(--mono)">' + u.wrs + '</td>'
         + '<td>' + u.duration + '</td>'
         + '<td>' + u.vendor + '</td>'
+        + '<td>' + u.bodyType + '</td>'
+        + '<td>' + u.fuelType + '</td>'
         + '<td>' + slaHtml + '</td>'
         + '</tr>';
     }).join('');
@@ -210,7 +216,7 @@
     if (typeof restoreFilterState === 'function') restoreFilterState();
     var brand = document.querySelector('.brand-text');
     if (brand) brand.title = 'Last sync: ' + new Date().toLocaleTimeString();
-    if (typeof toast==='function') toast(rows.length + ' units loaded','success','Fleet Sync');
+    if (typeof toast==='function'&&!window._fleetPartial) toast(rows.length+' units loaded','success','Fleet Sync');window._fleetPartial=false;
   }
 
   function patchLiveMode() {
@@ -257,10 +263,7 @@
 
     console.log('[fleet-bridge] Electron mode -- attaching IPC listeners');
 
-    window.fleet.onData(function(data) {
-      console.log('[fleet-bridge] fleet:data', (data.rows||[]).length, 'rows');
-      renderFromData(data.rows || []);
-    });
+    window.fleet.onData(function(data){var partial=data&&data.partial;console.log("[fleet-bridge] fleet:data partial="+partial+" rows="+(data.rows||[]).length);if(partial){window._fleetPartial=true;var tbody=document.querySelector("tbody");if(tbody)tbody.style.opacity="0.6";renderFromData(data.rows||[]);if(tbody)setTimeout(function(){tbody.style.opacity="1";},200);}else{window._fleetPartial=false;var tbody2=document.querySelector("tbody");if(tbody2)tbody2.style.opacity="1";renderFromData(data.rows||[]);}});
 
     window.fleet.onStatus(function(msg) {
       console.log('[fleet-bridge] fleet:status', msg);

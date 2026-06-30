@@ -1222,7 +1222,7 @@ chk('S23-RG2: _tryDealerWO implements rAF retry up to 12 frames', '_tryDealerWO'
 chk('S23-RG3: ui:dealer-wo-request bus listener sets _pendingDealerWO', 'ui:dealer-wo-request' in udt and '_pendingDealerWO' in udt)
 
 # S23-10: vendor-review-modal.js
-chk('S23-RM1: vendor-review-modal exports open()', 'export function open(' in vrm)
+chk('S23-RM1: vendor-review-modal exports open()', 'export function open(' in vrm or 'export async function open(' in vrm)
 chk('S23-RM2: vendor-review-modal exports close alias', 'export {' in vrm and 'close' in vrm)
 chk('S23-RM3: modal shows isDuplicate warning banner', 'isDuplicate' in vrm and 'vr-dup-banner' in vrm)
 chk('S23-RM4: modal Approve calls vendor.approve with workflowId + altId', 'vendor.approve' in vrm and 'workflowId' in vrm and 'altId' in vrm)
@@ -1381,6 +1381,72 @@ chk('S20-38: CSS dn-stat rule injected',                        'dn-stat{' in _d
 chk('S20-39: CSS dn-empty rule injected',                       'dn-empty{' in _dn)
 chk('S20-40: CSS dn-spin animation injected',                   'dn-spin' in _dn)
 chk('S20-41: CSS dn-result__dec variants (new/skip/err)',       'dn-result__dec--new' in _dn and 'dn-result__dec--skip' in _dn and 'dn-result__dec--err' in _dn)
+
+
+
+# ── Stage 26 — AAP fuelType fix / vendor URL map / portal fallback ────────────
+
+ACR  = f'{BASE}/src/scrapers/aap_create_wr.js'
+SCRP = f'{BASE}/src/ipc/scrapers.js'
+
+with open(ACR)  as _f: _acr  = _f.read()
+with open(SCRP) as _f: _scrp = _f.read()
+
+# S26-VID: VENDOR_IDS map
+chk('S26-VID1: VENDOR_IDS defined in aap_create_wr.js',         'const VENDOR_IDS' in _acr)
+chk('S26-VID2: Cox supplierId populated (confirmed live)',       "'Cox'" in _acr and 'ba5a6982' in _acr)
+chk('S26-VID3: COX alias present (case fallback)',               "'COX'" in _acr)
+chk('S26-VID4: Decisiv key Kenworth (PACCAR) present',          "'Kenworth (PACCAR)'" in _acr)
+chk('S26-VID5: Decisiv key Peterbilt (PACCAR) present',         "'Peterbilt (PACCAR)'" in _acr)
+chk('S26-VID6: Decisiv key Volvo (ASIST) present',              "'Volvo (ASIST)'" in _acr)
+chk('S26-VID7: raw scrape key KENWORTH present',                "'KENWORTH'" in _acr)
+chk('S26-VID8: raw scrape key FREIGHTLINER present',            "'FREIGHTLINER'" in _acr)
+chk('S26-VID9: raw scrape key CUMMINS present',                 "'CUMMINS'" in _acr)
+chk('S26-VID10: raw scrape key TA present',                     "'TA'" in _acr)
+chk('S26-VID11: raw scrape key VELOCITI present',               "'VELOCITI'" in _acr)
+chk('S26-VID12: FleetNet + alias entries present',              "'FleetNet'" in _acr and "'Fleet Net'" in _acr)
+chk('S26-VID13: GOODYEAR present',                              "'GOODYEAR'" in _acr)
+chk('S26-VID14: KOONER present',                                "'KOONER'" in _acr)
+chk('S26-VID15: Amerit + alias present',                        "'Amerit'" in _acr and "'AMERIT'" in _acr)
+
+# S26-VPU: VENDOR_PORTAL_URLS map
+chk('S26-VPU1: VENDOR_PORTAL_URLS defined',                     'const VENDOR_PORTAL_URLS' in _acr)
+chk('S26-VPU2: Amerit portal URL populated',                    'ameritfs.com' in _acr)
+chk('S26-VPU3: Cummins portal URL populated',                   'cumminscare.com' in _acr)
+chk('S26-VPU4: TA portal URL populated',                        'ta-petro.com' in _acr)
+chk('S26-VPU5: Velociti portal URL populated',                  'velociti.com' in _acr)
+chk('S26-VPU6: FleetNet portal URL populated',                  'fleetnet.com' in _acr)
+chk('S26-VPU7: Goodyear portal URL populated',                  'goodyear.com' in _acr)
+chk('S26-VPU8: VENDOR_PORTAL_URLS in module.exports',          'VENDOR_PORTAL_URLS' in _acr and 'module.exports' in _acr)
+
+# S26-IPC: vendor:portal-urls IPC handler
+chk('S26-IPC1: vendor:portal-urls handler in scrapers.js',     "vendor:portal-urls" in _scrp)
+chk('S26-IPC2: handler returns VENDOR_PORTAL_URLS',            'VENDOR_PORTAL_URLS' in _scrp)
+
+# S26-PL: preload vendor API
+chk('S26-PL1: preload exposes getPortalUrls()',                 'getPortalUrls' in _pl)
+chk('S26-PL2: preload getPortalUrls invokes vendor:portal-urls', "vendor:portal-urls" in _pl)
+
+# S26-VB: vendor-bridge getPortalUrl export
+chk('S26-VB1: vendor-bridge exports getPortalUrl',             'export async function getPortalUrl' in vnb)
+chk('S26-VB2: getPortalUrl calls window.vendor.getPortalUrls', 'window.vendor.getPortalUrls' in vnb)
+chk('S26-VB3: getPortalUrl caches result (_portalUrlCache)',    '_portalUrlCache' in vnb)
+
+# S26-RM: vendor-review-modal fallback wiring
+chk('S26-RM1: modal imports getPortalUrl from vendor-bridge',   'getPortalUrl' in vrm and 'vendor-bridge' in vrm)
+chk('S26-RM2: open() is async',                                 'export async function open(' in vrm)
+chk('S26-RM3: open() awaits getPortalUrl fallback resolve',     'await getPortalUrl' in vrm)
+chk('S26-RM4: _buildHTML accepts portalFallbackUrl param',      'portalFallbackUrl' in vrm)
+chk('S26-RM5: fallback portal section renders ext link',        'vr-portal-link-ext' in vrm)
+chk('S26-RM6: fallback link uses target _blank (system browser)','target="_blank"' in vrm)
+chk('S26-RM7: Decisiv portal path unchanged (vr-portal-link)',   'vr-portal-link' in vrm and 'openPortalUrl' in vrm)
+chk('S26-RM8: vr-link--external CSS class applied to fallback', 'vr-link--external' in vrm)
+
+# S26-UD: unit-detail async wiring
+chk('S26-UD1: _showApproveCancel is async',                     'async function _showApproveCancel' in udt)
+chk('S26-UD2: unit-detail awaits openVendorReview',             'await openVendorReview' in udt)
+chk('S26-UD3: bus.on vendor:review-ready handler is async',     "bus.on('vendor:review-ready', async" in udt)
+chk('S26-UD4: unit-detail awaits _showApproveCancel',           'await _showApproveCancel' in udt)
 
 # ── Report ───────────────────────────────────────────────────────────────────
 print('=' * 60)

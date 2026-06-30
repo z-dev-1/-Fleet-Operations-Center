@@ -4,31 +4,41 @@
 const { BrowserWindow } = require('electron');
 const { P } = require('../config/paths');
 const logger = require('../utils/logger').createLogger('aap');
+const { withRetry } = require('../utils/retry'); // P1-A: retry on transient failures
 
-// ── Default domicile list (matches TM script) ────────────────────────────────
-const DEFAULT_DOMICILES = ['ABE40', 'EWR45', 'PHL40', 'AVP40', 'AUVTE01'];
+// Hardcoded production URL (from live AAP session 2026-06-29)
+// Page UUID:  bafc8b2a-3be6-4a52-a86f-7cb2de7b5400
+// Fleets:     8 UUIDs — all operators (TUZR, SAPB, AZNG, AUVTE, ...)
+// States:     ACTIVE + UNAVAILABLE | domicileSites=[] fleet UUIDs drive scope
+// V-C extras: sortColumn, limit/pageSize=1000 force full table load
+const AAP_SCAN_URL =
+  'https://aap-na.corp.amazon.com/v2/page/bafc8b2a-3be6-4a52-a86f-7cb2de7b5400' +
+  '?tab=Unplanned' +
+  '&states=%5B%7B%22state%22%3A%22ACTIVE%22%2C%22reasons%22%3A%5B%5D%7D%2C%7B%22state%22%3A%22UNAVAILABLE%22%2C%22reasons%22%3A%5B%5D%7D%5D' +
+  '&operationalStatuses=%5B%5D' +
+  '&geofences=%7B%22type%22%3A%22ANYWHERE%22%2C%22customGeofences%22%3A%5B%5D%7D' +
+  '&stationCodes=%5B%5D' +
+  '&dspShortCodes=%5B%5D' +
+  '&domicileSites=%5B%5D' +
+  '&fleets=%5B%220bb2e249-fd34-437f-83af-d1d69150558b%22%2C%220f454f75-1e45-475f-8d8b-2334ade1f6f1%22%2C%225c19cdf7-ce2f-4593-a37a-3fe5d506e120%22%2C%227de393df-74e1-45af-9650-560ba008bc65%22%2C%22b84ddc20-589c-4330-af67-3d38f89e28af%22%2C%22b9e02fc4-2b9f-4a70-ac7c-76b30a33bcbe%22%2C%22ba97eda1-cb03-446e-a907-474084194777%22%2C%22daa83ad7-5d8f-43a4-ba9c-76c643e45e1e%22%5D' +
+  // fields=["domicileSite","fuelType","engineManufacturerName","bodyType"]
+  '&fields=%5B%22domicileSite%22%2C%22fuelType%22%2C%22engineManufacturerName%22%2C%22bodyType%22%5D' +
+  '&flags=%7B%7D' +
+  '&sortColumn=lifecycleStateReason' +
+  '&limit=1000&pageSize=1000' +
+  '&sortDirection=descending';
 
-// ── Static URL parts (everything except domicileSites) ───────────────────────
-const AAP_BASE = 'https://aap-na.corp.amazon.com/v2/page/bafc8b2a-3be6-4a52-a86f-7cb2de7b5400'
-  + '?tab=Unplanned&states=%5B%7B%22state%22%3A%22ACTIVE%22%2C%22reasons%22%3A%5B%5D%7D%2C%7B%22state%22%3A%22UNAVAILABLE%22%2C%22reasons%22%3A%5B%5D%7D%5D'
-  + '&operationalStatuses=%5B%5D'
-  + '&geofences=%7B%22type%22%3A%22ANYWHERE%22%2C%22customGeofences%22%3A%5B%5D%7D'
-  + '&stationCodes=%5B%5D&dspShortCodes=%5B%5D';
-
-const AAP_SUFFIX = '&fleets=%5B%220bb2e249-fd34-437f-83af-d1d69150558b%22%2C%220f454f75-1e45-475f-8d8b-2334ade1f6f1%22%2C%225c19cdf7-ce2f-4593-a37a-3fe5d506e120%22%2C%227de393df-74e1-45af-9650-560ba008bc65%22%2C%22b84ddc20-589c-4330-af67-3d38f89e28af%22%2C%22b9e02fc4-2b9f-4a70-ac7c-76b30a33bcbe%22%2C%22ba97eda1-cb03-446e-a907-474084194777%22%2C%22daa83ad7-5d8f-43a4-ba9c-76c643e45e1e%22%5D'
-  + '&fields=%5B%5D&flags=%7B%7D'
-  + '&sortColumn=lifecycleStateReason&limit=1000&pageSize=1000&sortDirection=descending';
-
-// ── Build the full URL for a given domicile list ─────────────────────────────
+// buildScanURL — base URL is hardcoded; appends &search= when domiciles are set in Fleet Config.
+// Examples:
+//   No filter   → AAP_SCAN_URL (all fleets, no search param)
+//   ['ABE40']   → AAP_SCAN_URL + '&search=abe40'
+//   ['ABE40','SAPB','TUZR'] → AAP_SCAN_URL + '&search=abe40+sapb+tuzr'
 function buildScanURL(domiciles) {
-  const list = (domiciles && domiciles.length) ? domiciles : DEFAULT_DOMICILES;
-  const searchParam = '&search=' + list.join('+');
-  return AAP_BASE + '&domicileSites=%5B%5D' + AAP_SUFFIX + searchParam;
+  if (!domiciles || domiciles.length === 0) return AAP_SCAN_URL;
+  const searchVal = domiciles.map(d => encodeURIComponent(d.toLowerCase())).join('+');
+  return AAP_SCAN_URL + '&search=' + searchVal;
 }
 
-
-// Keep a convenience constant for the default URL
-const AAP_SCAN_URL = buildScanURL(DEFAULT_DOMICILES);
 
 const FIELD_MAP = {
   // ── Display name → internal field (verified from Chrome localStorage 2026-06-18) ──
@@ -295,19 +305,15 @@ const AAP_COL_VALUE = JSON.stringify([
 // 45 s: fail-fast budget; scraper retries sooner on dead sessions than waiting 90 s.
 const TABLE_WAIT_MS = 45_000;
 
-async function scrapeAAP(domiciles) {
+async function _scrapeAAPOnce(domiciles) {
   return new Promise((resolve, reject) => {
     const win = new BrowserWindow({
       show:   false,
       width:  1600,
       height: 900,
-      x:      50,
-      y:      0,
       webPreferences: {
         nodeIntegration:  false,
         contextIsolation: true,
-        // partition removed - use default session to inherit AEA
-        // partition:        '',
       }
     });
 
@@ -330,17 +336,249 @@ async function scrapeAAP(domiciles) {
       finish(new Error('Page load failed: ' + desc + ' (' + code + ')'));
     });
 
-    // ── Inject localStorage BEFORE React reads it ─────────────────────────────
-    // Use CDP DOMStorage so the key is present before any page JS runs
-    win.webContents.on('did-finish-load', () => {
-      logger.info('[AAP] Page loaded - using Orcha-assisted scrape');
-      orchaScrape(win, finish);
+    // ── Step 1: inject fetch/XHR interceptor on dom-ready (before React mounts) ─
+    win.webContents.on('dom-ready', async () => {
+      logger.info('[AAP] dom-ready - injecting fetch interceptor + column config');
+      try {
+        // Inject localStorage column config
+        const colJs = 'localStorage.setItem(' + JSON.stringify(AAP_COL_KEY) + ','
+          + JSON.stringify(AAP_COL_VALUE) + ');'
+          + '"col:injected"';
+        await win.webContents.executeJavaScript(colJs);
+        logger.info('[AAP] Column config injected into localStorage');
+      } catch(e) {
+        logger.warn('[AAP] Col inject failed:', e.message);
+      }
+      try {
+        // Inject fetch/XHR interceptor
+        const interceptJs = `
+  (function() {
+    if (window.__AAP_INTERCEPT_INSTALLED__) return 'already';
+    window.__AAP_INTERCEPT_INSTALLED__ = true;
+    window.__AAP_ASSETS__ = null;
+    window.__AAP_ASSETS_RAW__ = null;
+
+    var TARGET = '/api/v2/assets/search';
+
+    // Patch fetch
+    var _origFetch = window.fetch;
+    window.fetch = function(url, opts) {
+      var urlStr = (typeof url === 'string') ? url : (url && url.url) || String(url);
+      var p = _origFetch.apply(this, arguments);
+      if (urlStr.indexOf(TARGET) !== -1) {
+        return p.then(function(resp) {
+          var clone = resp.clone();
+          clone.json().then(function(data) {
+            window.__AAP_ASSETS_RAW__ = data;
+            var items = data.assets || data.equipment || data.items || data.results || data.data || data;
+            if (Array.isArray(items) && items.length > 0) {
+              window.__AAP_ASSETS__ = items;
+              console.log('[AAP-INTERCEPT] fetch captured', items.length, 'assets');
+            } else if (data && typeof data === 'object') {
+              // Try one level deeper
+              var keys = Object.keys(data);
+              for (var i = 0; i < keys.length; i++) {
+                var v = data[keys[i]];
+                if (Array.isArray(v) && v.length > 0 && v[0] && (v[0].vehicleId || v[0].equipmentId || v[0].assetId)) {
+                  window.__AAP_ASSETS__ = v;
+                  console.log('[AAP-INTERCEPT] fetch captured (nested key=' + keys[i] + ')', v.length, 'assets');
+                  break;
+                }
+              }
+            }
+            if (!window.__AAP_ASSETS__) {
+              console.log('[AAP-INTERCEPT] fetch response captured but no asset array found. Keys:', Object.keys(data).join(','), 'raw:', JSON.stringify(data).slice(0,300));
+            }
+          }).catch(function(e){ console.log('[AAP-INTERCEPT] fetch json parse error:', e.message); });
+          return resp;
+        });
+      }
+      return p;
+    };
+
+    // Patch XHR as fallback
+    var _origOpen = XMLHttpRequest.prototype.open;
+    var _origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url) {
+      this._aapUrl = String(url || '');
+      return _origOpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function() {
+      if (this._aapUrl && this._aapUrl.indexOf(TARGET) !== -1) {
+        var xhr = this;
+        this.addEventListener('load', function() {
+          try {
+            var data = JSON.parse(xhr.responseText);
+            window.__AAP_ASSETS_RAW__ = data;
+            var items = data.assets || data.equipment || data.items || data.results || data.data || data;
+            if (Array.isArray(items) && items.length > 0) {
+              window.__AAP_ASSETS__ = items;
+              console.log('[AAP-INTERCEPT] XHR captured', items.length, 'assets');
+            }
+          } catch(e) { console.log('[AAP-INTERCEPT] XHR parse error:', e.message); }
+        });
+      }
+      return _origSend.apply(this, arguments);
+    };
+
+    return 'installed';
+  })()
+`;
+        const r = await win.webContents.executeJavaScript(interceptJs);
+        logger.info('[AAP] Fetch interceptor:', r);
+      } catch(e) {
+        logger.warn('[AAP] Fetch interceptor failed:', e.message);
+      }
     });
+
+    // ── Step 2: after page load, poll window.__AAP_ASSETS__ ──────────────────
+    win.webContents.on('did-finish-load', async () => {
+      logger.info('[AAP] Page loaded - polling for intercepted assets...');
+      const MAX_WAIT = 60000;
+      const POLL_MS  = 500;
+      const t0 = Date.now();
+      let rawStored = null;
+
+      while (Date.now() - t0 < MAX_WAIT && !done) {
+        await sleep(POLL_MS);
+        if (win.isDestroyed()) return;
+        try {
+          const check = await win.webContents.executeJavaScript(
+            '(function(){ var a=window.__AAP_ASSETS__; var r=window.__AAP_ASSETS_RAW__;'
+            + ' return { count: a ? a.length : -1, hasRaw: !!r, rawKeys: r ? Object.keys(r).join(",") : "" }; })()'
+          );
+          if ((Date.now() - t0) % 5000 < POLL_MS + 100) {
+            logger.info('[AAP] Poll:', JSON.stringify(check));
+          }
+          if (check.count > 0) {
+            logger.info('[AAP] Assets captured via __AAP_ASSETS__! count=' + check.count);
+            rawStored = await win.webContents.executeJavaScript('JSON.stringify(window.__AAP_ASSETS__)');
+            break;
+          }
+          // hasRaw=true but count=-1 means raw response present but interceptor
+          // didn't find the assets array — only bail if raw has 'assets' key
+          // (count-only response with just totalRecordCountInDB should keep waiting)
+          if (check.hasRaw && check.count === -1 && check.rawKeys.indexOf('assets') !== -1) {
+            logger.info('[AAP] Raw has assets key but __AAP_ASSETS__ not set. rawKeys:', check.rawKeys);
+            rawStored = await win.webContents.executeJavaScript('JSON.stringify(window.__AAP_ASSETS_RAW__)');
+            break;
+          }
+          if (check.hasRaw && check.count === -1) {
+            logger.info('[AAP] Partial response (count-only), still waiting... rawKeys:', check.rawKeys);
+          }
+        } catch(e) {
+          logger.warn('[AAP] Poll error:', e.message);
+        }
+      }
+
+      if (done) return;
+
+      if (rawStored) {
+        try {
+          const raw = JSON.parse(rawStored);
+          logger.info('[AAP] Raw type:', typeof raw, Array.isArray(raw) ? 'array len=' + raw.length : 'object keys=' + Object.keys(raw).join(','));
+
+          // Normalize to array
+          let items = Array.isArray(raw) ? raw
+            : raw.assets || raw.equipment || raw.items || raw.results || raw.data || [];
+
+          // If still not an array, scan one level deep
+          if (!Array.isArray(items) || items.length === 0) {
+            const keys = Object.keys(raw);
+            for (const k of keys) {
+              const v = raw[k];
+              if (Array.isArray(v) && v.length > 0 && v[0] && (v[0].vehicleId || v[0].equipmentId || v[0].assetId)) {
+                items = v;
+                logger.info('[AAP] Found asset array at key:', k, 'len:', items.length);
+                break;
+              }
+            }
+          }
+
+          logger.info('[AAP] Mapping', items.length, 'items');
+          if (items.length > 0) logger.info('[AAP] Sample item keys:', Object.keys(items[0]).join(','));
+          if (items.length > 0) logger.info('[AAP] Sample item[0].asset:', JSON.stringify(items[0].asset || {}).slice(0,500));
+          if (items.length > 0) logger.info('[AAP] Sample item[0].payload:', JSON.stringify(items[0].payload || {}).slice(0,300));
+          if (items.length > 0) logger.info('[AAP] Sample item[0].maintenanceScheduleStatuses:', JSON.stringify(items[0].maintenanceScheduleStatuses || []).slice(0,300));
+
+          const mapped = items.map(r => {
+            // Confirmed API schema (2026-06-29):
+            //   r.asset              = core asset object
+            //   r.asset.attributesText = flat kv bag (vehicleId, operator, manufacturerName, etc.)
+            //   r.payload            = { openUnplannedWorkRequestIds:[], openPlannedWorkRequestIds:[] }
+            //   r.maintenanceScheduleStatuses = [ { maintenanceType, nextDueDate, daysUntilDue, ... } ]
+            const a    = r.asset || r;
+            const attr = a.attributesText || {};
+            const pay  = r.payload || {};
+
+            // Build dueDate string from maintenanceScheduleStatuses
+            // Format: 'Overdue 5 months\n\nPM A\n\nJul 28, 2026\n\nPM B' etc.
+            const pmStatuses = Array.isArray(r.maintenanceScheduleStatuses) ? r.maintenanceScheduleStatuses : [];
+            const dueDate = pmStatuses.map(s => {
+              const days = s.daysUntilDue != null ? Number(s.daysUntilDue) : null;
+              let dateLabel = '';
+              if (s.nextDueDate) {
+                const d = new Date(s.nextDueDate);
+                dateLabel = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+              }
+              const overdueLabel = (days != null && days < 0)
+                ? 'Overdue ' + Math.abs(Math.round(days / 30)) + ' months'
+                : dateLabel;
+              const typeLabel = s.maintenanceType || '';
+              return (overdueLabel || dateLabel) + (typeLabel ? '\n\n' + typeLabel : '');
+            }).filter(Boolean).join('\n\n');
+
+            // openUnplanned / openPlanned — payload has arrays of IDs
+            const openUnplanned = String(
+              (Array.isArray(pay.openUnplannedWorkRequestIds) ? pay.openUnplannedWorkRequestIds.length : null)
+              ?? pay.openUnplannedWorkRequests ?? attr.openUnplannedWorkRequests ?? ''
+            );
+            const openPlanned = String(
+              (Array.isArray(pay.openPlannedWorkRequestIds) ? pay.openPlannedWorkRequestIds.length : null)
+              ?? pay.openPlannedWorkRequests ?? attr.openPlannedWorkRequests ?? ''
+            );
+
+            return {
+              equipmentId:      attr.vehicleId || a.displayName || a.equipmentId || r.displayName || '',
+              lifecycleState:   a.lifecycleState || '',
+              lifecycleReason:  a.lifecycleStateReason || '',
+              assetType:        a.assetType || attr.assetType || '',
+              bodyType:         attr.bodyType || a.bodyType || a.assetType || '',
+              manufacturer:     attr.manufacturerName || attr.manufacturer || '',
+              domicileSite:     attr.domicileSite || attr.domicile || a.domicileSite || '',
+              operator:         attr.operator || a.operator || '',
+              fuelType:         attr.fuelType || a.fuelType || '',
+              openUnplanned,
+              openPlanned,
+              dueDate,
+              engineManufacturer: attr.engineManufacturerName || attr.engineManufacturer || '',
+              geofence:         attr.geofence || a.geofence || r.geofence || '',
+            };
+          }).filter(r => r.equipmentId);
+
+          if (mapped.length > 0) {
+            logger.info('[AAP] SUCCESS via fetch intercept:', mapped.length, 'units');
+            if (mapped[0]) logger.info('[AAP] Sample unit:', JSON.stringify(mapped[0]));
+            finish(null, { source: 'aap', rows: mapped, count: mapped.length, scrapedAt: new Date().toISOString() });
+            return;
+          } else {
+            logger.warn('[AAP] items array present but 0 mapped (no equipmentId). Sample:', JSON.stringify(items[0]).slice(0,200));
+          }
+        } catch(e) {
+          logger.warn('[AAP] Raw parse/map failed:', e.message);
+        }
+      }
+
+      // ── Fallback: DOM-based pollAndScrape ────────────────────────────────────
+      logger.warn('[AAP] fetch intercept gave no data — falling back to pollAndScrape');
+      pollAndScrape(win, finish);
+    });
+
+    // fields= param now set in AAP_SCAN_URL — CDP diagnostic block removed (field registry confirmed)
 
     win.loadURL(buildScanURL(domiciles));
   });
 }
-
 
 async function orchaScrape(win, finish) {
   // Simple approach: wait for table, grab all text, parse rows
@@ -624,4 +862,18 @@ async function pollAndScrape(win, finish) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-module.exports = { scrapeAAP, buildScanURL, DEFAULT_DOMICILES, AAP_SCAN_URL };
+/**
+ * scrapeAAP(domiciles) -- P1-A: withRetry wrapper
+ * Wraps _scrapeAAPOnce: up to 3 attempts, 5s backoff (doubles each retry).
+ * Fresh BrowserWindow per attempt -- destroyed on error/timeout.
+ * Retries: React render timeout, 0-row extraction, load failure.
+ */
+async function scrapeAAP(domiciles) {
+  return withRetry(() => _scrapeAAPOnce(domiciles), {
+    attempts:  3,
+    backoffMs: 5000,
+    label:     'aap-scrape',
+  });
+}
+
+module.exports = { scrapeAAP, buildScanURL, AAP_SCAN_URL };

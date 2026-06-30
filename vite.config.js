@@ -15,10 +15,11 @@ export default defineConfig({
     }
   },
   server: {
+    hmr: { overlay: false },
     port: 5173,
     strictPort: true,
     host: '0.0.0.0',
-    allowedHosts: 'all'
+    allowedHosts: true
   },
   resolve: {
     alias: {

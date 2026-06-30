@@ -27,7 +27,7 @@ const { ScraperError, ConfigError } = require('../utils/errors');
 
 // ── Constants ─────────────────────────────────────────────────────────────
 const MAX_SCAN_BATCH = 50;   // Issue #3: cap unbounded BrowserWindow spawning
-const GEOFENCE_IPC_TIMEOUT = 90_000; // Stage 5 C-1: IPC belt -- scraper has own 60s timeout
+const GEOFENCE_IPC_TIMEOUT = 200_000; // Stage 5 C-1: IPC belt -- scraper has own 60s timeout
 
 // ── Re-entrancy locks (Issue #9) ──────────────────────────────────────────
 // Module-level: survive across IPC calls within the same process lifetime.
@@ -48,14 +48,7 @@ function registerScrapersIPC(ctx) {
     const { scrapeGeofences } = require('../../src/scrapers/geofence_scraper');
     const logs = [];
     const log  = (msg) => { logs.push(msg); logger.info(msg); if (send) send('scan:progress', msg); };
-    // Stage 5 C-1: race the scraper's own 60s timeout with a 90s IPC-level cap
-    const result = await Promise.race([
-      scrapeGeofences(log),
-      new Promise(r => setTimeout(
-        () => r({ ok: false, error: 'IPC timeout', errorCode: 'IPC_TIMEOUT' }),
-        GEOFENCE_IPC_TIMEOUT
-      )),
-    ]);
+    const result = await scrapeGeofences(log);
     return { ...result, logs };
   });
 
@@ -262,6 +255,12 @@ function registerScrapersIPC(ctx) {
       _relayLock = false;
     }
   });
+  // vendor:portal-urls -- expose VENDOR_PORTAL_URLS to renderer (for non-Decisiv vendors)
+  handle('vendor:portal-urls', () => {
+    const { VENDOR_PORTAL_URLS } = require('../../src/scrapers/aap_create_wr');
+    return VENDOR_PORTAL_URLS;
+  });
+
   logger.info('Scrapers IPC handlers registered');
 }
 
