@@ -1333,6 +1333,55 @@ chk('S15-35: app.js routes schedulers in ui:view-change',       'schedulersView'
 chk('S15-36: toolbar tb-schedulers button present',             'tb-schedulers' in _tb)
 chk('S15-37: toolbar emits view-change to schedulers',          "to: 'schedulers'" in _tb)
 
+# Stage 20 - Daily Notes view
+# (S20-1 through S20-7 + T1/T2 already present above via S20 wiring block)
+
+# Core structure
+chk('S20-10: view id = view-daily-notes',                       "_el.id='view-daily-notes'" in _dn)
+chk('S20-11: view class = view--daily-notes',                   'view--daily-notes' in _dn)
+chk('S20-12: CSS self-injected via _injectCss()',               '_injectCss' in _dn and 'document.head.appendChild' in _dn)
+chk('S20-13: _buildScaffold() defines HTML structure',          '_buildScaffold' in _dn)
+
+# Sections
+chk('S20-14: stats strip (dn-stats)',                           'dn-stats' in _dn and '_renderStats' in _dn)
+chk('S20-15: last-run results card (dn-lastrun-body)',          'dn-lastrun-body' in _dn and '_renderLastRun' in _dn)
+chk('S20-16: run history log card (dn-runlog-body)',            'dn-runlog-body' in _dn and '_renderRunLog' in _dn)
+chk('S20-17: decision log card (dn-declog-body)',               'dn-declog-body' in _dn and '_renderDecisionLog' in _dn)
+chk('S20-18: decision log table capped at 100 rows',            'slice(0,100)' in _dn or '.slice(0, 100)' in _dn)
+chk('S20-19: collapsible cards via _wireToggle()',              '_wireToggle' in _dn and 'dn-card__body--hidden' in _dn)
+
+# Decision labels
+chk('S20-20: NEW_UPDATE decision label',                        'NEW_UPDATE' in _dn)
+chk('S20-21: NO_ACTION_NEEDED decision label',                  'NO_ACTION_NEEDED' in _dn)
+chk('S20-22: NO_UPDATE_TODAY_NOT_LOGGED decision label',        'NO_UPDATE_TODAY_NOT_LOGGED' in _dn)
+chk('S20-23: ERROR decision label',                             "'ERROR'" in _dn)
+
+# Stats
+chk('S20-24: stat cards: Total Runs / Notes Generated / Units Last Run / Last Run', 'Total Runs' in _dn and 'Notes Generated' in _dn and 'Units Last Run' in _dn)
+chk('S20-25: header badge shows run recency (< 1h / Nh ago / warn)',                'dn-last-badge' in _dn and 'h ago' in _dn and 'dn-badge--warn' in _dn)
+chk('S20-26: _relTime() helper for relative timestamps',        '_relTime' in _dn)
+
+# IPC / data loading
+chk('S20-27: _loadLog() calls window.getDailyNotesLog',         'getDailyNotesLog' in _dn and '_loadLog' in _dn)
+chk('S20-28: _doRun() calls window.runDailyNotes(units)',       'runDailyNotes' in _dn and '_doRun' in _dn)
+chk('S20-29: _doRun guards against empty units array',          'No units loaded' in _dn or 'units.length' in _dn)
+chk('S20-30: Run Now button disabled while running',            '_running' in _dn and 'btn.disabled=true' in _dn or 'btn.disabled = true' in _dn)
+chk('S20-31: Refresh button reloads log without full run',      'dn-refresh-btn' in _dn and '_activate' in _dn)
+
+# Bus events
+chk('S20-32: ui:view-change activates view',                    "bus.on('ui:view-change'" in _dn and '_activate' in _dn)
+chk('S20-33: fleet:data triggers refresh when visible',         "bus.on('fleet:data'" in _dn)
+chk('S20-34: back button emits view-change to fleet',           "to:'fleet'" in _dn or "to: 'fleet'" in _dn)
+
+# CSS rules (self-injected)
+chk('S20-35: CSS dn-card rule injected',                        'dn-card{' in _dn)
+chk('S20-36: CSS dn-result rule injected',                      'dn-result{' in _dn)
+chk('S20-37: CSS dn-dec-table rule injected',                   'dn-dec-table{' in _dn)
+chk('S20-38: CSS dn-stat rule injected',                        'dn-stat{' in _dn)
+chk('S20-39: CSS dn-empty rule injected',                       'dn-empty{' in _dn)
+chk('S20-40: CSS dn-spin animation injected',                   'dn-spin' in _dn)
+chk('S20-41: CSS dn-result__dec variants (new/skip/err)',       'dn-result__dec--new' in _dn and 'dn-result__dec--skip' in _dn and 'dn-result__dec--err' in _dn)
+
 # ── Report ───────────────────────────────────────────────────────────────────
 print('=' * 60)
 print('SANITY CHECK REPORT')
