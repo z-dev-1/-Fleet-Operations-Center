@@ -28,6 +28,7 @@ const logger = require('../utils/logger')('window');
 const { P }  = require('../config/paths');
 const store  = require('../store');
 const { isSetupComplete } = require('../../setup/state');
+const { captureWRUrls } = require('./wr_capture');
 
 const ROOT_DIR = path.join(__dirname, '..', '..');
 
@@ -97,66 +98,46 @@ const JS_CLICK_1000 = `(function(){
 })()`;
 
 const JS_EXTRACT_TABLE = `(function(){
-  var AAP_BASE = 'https://aap-na.corp.amazon.com';
-  var WR_HEADERS = ['Open Unplanned Work Requests', 'Open Planned Work Requests'];
   var tables = document.querySelectorAll('table');
   var t = null;
   for (var i = 0; i < tables.length; i++) {
     if (tables[i].querySelector('tbody tr')) { t = tables[i]; break; }
   }
-  if (!t) return { rows:[], count:0, debug:'no_table_with_rows' };
+  if (!t) return { rows:[], count:0, debug:'no_table_with_rows', wrRows:[] };
   var h = [];
   t.querySelectorAll('thead th').forEach(function(x){
     h.push((x.innerText||'').trim().replace(/[\\n\\r]+/g,' '));
   });
-  // Get href from element — checks __reactProps$ (direct), then __reactFiber$ chain
-  function _getHref(el) {
-    if (!el) return null;
-    // 1. Native absolute href (Electron resolves relative paths via page base URL)
-    if (el.href && el.href.startsWith('http') && el.href !== window.location.href) return el.href;
-    // 2. __reactProps$ — direct props object on the DOM node (fastest, most reliable)
-    var rpKey = Object.keys(el).find(function(k){ return k.startsWith('__reactProps$'); });
-    if (rpKey) {
-      var rp = el[rpKey];
-      if (rp && rp.href) { var h2 = String(rp.href); return h2.startsWith('http') ? h2 : AAP_BASE + h2; }
-    }
-    // 3. Walk __reactFiber$ chain for href or 'to' prop
-    try {
-      var fk = Object.keys(el).find(function(k){ return k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'); });
-      if (fk) {
-        var cur = el[fk];
-        for (var j = 0; j < 20; j++) {
-          if (!cur) break;
-          var p = cur.memoizedProps || cur.pendingProps;
-          if (p && p.href) { var h3 = String(p.href); return h3.startsWith('http') ? h3 : AAP_BASE + h3; }
-          if (p && p.to)   { var t2 = String(p.to);   return t2.startsWith('http') ? t2 : AAP_BASE + t2; }
-          cur = cur.return;
-        }
-      }
-    } catch(e) {}
-    return null;
-  }
+  var colUnplanned = h.indexOf('Open Unplanned Work Requests');
+  var colPlanned   = h.indexOf('Open Planned Work Requests');
+  var colState     = h.indexOf('Lifecycle state');
   var r = [];
-  t.querySelectorAll('tbody tr').forEach(function(tr){
+  var wrRows = [];
+  t.querySelectorAll('tbody tr').forEach(function(tr, ri){
     var c = tr.querySelectorAll('td');
     if (c.length < 3) return;
     var o = {};
-    for (var i = 0; i < c.length; i++) {
-      var header = h[i] || 'c'+i;
-      o[header] = (c[i].innerText||'').trim();
-      // Extract URL only for WR columns with a non-zero count
-      // WR cells: td > span > a  (plain anchor, no mdn-link attr — confirmed via Playwright/Chrome)
-      if (WR_HEADERS.indexOf(header) !== -1 && o[header] && o[header] !== '0' && o[header] !== '--') {
-        var a = c[i].querySelector('a, button');
-        if (a) {
-          var href = _getHref(a);
-          if (href) o[header + '_url'] = href;
-        }
-      }
-    }
-    if (o['Equipment ID'] || o[h[1]]) r.push(o);
+    for (var i = 0; i < c.length; i++) { o[h[i]||'c'+i] = (c[i].innerText||'').trim(); }
+    if (!o['Equipment ID'] && !o[h[1]]) return;
+    r.push(o);
+    // Only click-capture for UNAVAILABLE units
+    if ((o['Lifecycle state']||'').toLowerCase() !== 'unavailable') return;
+    // Expired inspection -> planned column; everything else -> unplanned column
+    var reason   = (o['Lifecycle state reason']||'').toLowerCase();
+    var useCol   = /expired.{0,6}inspection/i.test(reason) ? 'planned' : 'unplanned';
+    var cidx     = useCol === 'planned' ? colPlanned : colUnplanned;
+    if (cidx < 0) return;
+    var wrCount  = (c[cidx] ? c[cidx].innerText : '').trim();
+    if (!wrCount || wrCount === '0' || wrCount === '--') return;
+    wrRows.push({
+      rowIdx:     ri,
+      eqId:       o['Equipment ID'] || '',
+      colToClick: useCol,
+      colIdx:     cidx,
+      reason:     o['Lifecycle state reason'] || ''
+    });
   });
-  return { rows:r, count:r.length, headers:h,
+  return { rows:r, count:r.length, headers:h, wrRows:wrRows,
     debug:'table class='+t.className+' trs='+t.querySelectorAll('tbody tr').length };
 })()`;
 
@@ -574,6 +555,27 @@ function initWindows(ctx) {
 
           const data = await win.webContents.executeJavaScript(JS_EXTRACT_TABLE);
           logger.info('[' + label + '] Extracted ' + data.count + ' records. ' + data.debug);
+          logger.info('[' + label + '] Unavailable units for WR capture: ' + (data.wrRows||[]).length);
+
+          // Click-capture WR URLs for unavailable units
+          // unplanned by default; planned if lifecycle reason is expired inspection
+          const wrUrlMap = (data.wrRows||[]).length > 0
+            ? await captureWRUrls(win, data.wrRows, label, logger)
+            : {};
+
+          // Inject captured URLs into raw rows before mapping
+          if (Object.keys(wrUrlMap).length > 0) {
+            (data.rows||[]).forEach(function(row) {
+              const hit = wrUrlMap[row['Equipment ID']];
+              if (hit) {
+                if (hit.col === 'planned') {
+                  row['Open Planned Work Requests_url'] = hit.url;
+                } else {
+                  row['Open Unplanned Work Requests_url'] = hit.url;
+                }
+              }
+            });
+          }
 
           const rows = _mapAAPRows(data.rows || []);
           logger.info('[' + label + '] Mapped ' + rows.length + ' units');
