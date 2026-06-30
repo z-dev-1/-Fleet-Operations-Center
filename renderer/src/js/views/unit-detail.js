@@ -768,6 +768,7 @@ export function init(container) {
   bus.on('ui:unit-deselect', () => {
     if (_panel) _panel.classList.remove('detail-panel--open');
   });
+}
 
 
 // S23-12: Race-guarded handler for context-menu Dealer WO shortcut
