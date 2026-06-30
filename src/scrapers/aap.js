@@ -22,7 +22,7 @@ const AAP_SCAN_URL =
   '&domicileSites=%5B%5D' +
   '&fleets=%5B%220bb2e249-fd34-437f-83af-d1d69150558b%22%2C%220f454f75-1e45-475f-8d8b-2334ade1f6f1%22%2C%225c19cdf7-ce2f-4593-a37a-3fe5d506e120%22%2C%227de393df-74e1-45af-9650-560ba008bc65%22%2C%22b84ddc20-589c-4330-af67-3d38f89e28af%22%2C%22b9e02fc4-2b9f-4a70-ac7c-76b30a33bcbe%22%2C%22ba97eda1-cb03-446e-a907-474084194777%22%2C%22daa83ad7-5d8f-43a4-ba9c-76c643e45e1e%22%5D' +
   // fields=["domicileSite","fuelType","engineManufacturerName","bodyType"]
-  '&fields=%5B%22domicileSite%22%2C%22fuelType%22%2C%22bodyType%22%2C%22engineManufacturerName%22%2C%22lifecycleStateReason%22%2C%22manufacturer%22%2C%22openUnplannedWorkRequests%22%2C%22openPlannedWorkRequests%22%2C%22lastGeofences%22%2C%22latLong%22%2C%22assetId%22%2C%22owner%22%5D' +
+  '&fields=%5B%22vehicleId%22%2C%22bodyType%22%2C%22domicileSite%22%2C%22operator%22%2C%22lifecycleState%22%2C%22lifecycleStateReason%22%2C%22openUnplannedWorkRequests%22%2C%22openPlannedWorkRequests%22%2C%22fuelType%22%2C%22lastGeofences%22%5D' +
   '&flags=%7B%7D' +
   '&sortColumn=lifecycleStateReason' +
   '&limit=1000&pageSize=1000' +
@@ -42,32 +42,40 @@ function buildScanURL(domiciles) {
 
 const FIELD_MAP = {
   // ── Display name → internal field (verified from Chrome localStorage 2026-06-18) ──
-  'Equipment ID':           'equipmentId',
-  'Vehicle ID':             'equipmentId',       // alternate label
-  'Asset type':             'assetType',
-  'Asset Type':             'assetType',
-  'Lifecycle state':        'lifecycleState',
-  'Lifecycle State':        'lifecycleState',
-  'Lifecycle state reason': 'lifecycleReason',   // maps to lifecycleStateReason in AAP API
-  'Lifecycle State Reason': 'lifecycleReason',
-  'Operator':               'operator',
-  'Owner':                  'operator',          // AAP 6-col default uses "Owner"
-  'Manufacturer':           'manufacturer',
-  'Manufacturer name':      'manufacturer',      // manufacturerName → display as "Manufacturer name"
-  'Body type':              'bodyType',
-  'Body Type':              'bodyType',
-  'Due date':               'dueDate',
-  'Due Date':               'dueDate',
-  'Maintenance due date':   'dueDate',
-  'Engine manufacturer':    'engineManufacturer',
-  'Engine manufacturer name': 'engineManufacturer',
-  'Domicile site':          'domicileSite',
-  'Domicile Site':          'domicileSite',
-  'Fuel type':              'fuelType',
-  'Fuel Type':              'fuelType',
-  'Open unplanned work requests': 'openUnplanned',
-  'Open Unplanned Work Requests': 'openUnplanned',
-  'Open planned work requests':   'openPlanned',
+  'Equipment ID':                   'equipmentId',
+  'Vehicle ID':                     'equipmentId',
+  'Asset type':                     'assetType',
+  'Asset Type':                     'assetType',
+  'Lifecycle state':                'lifecycleState',
+  'Lifecycle State':                'lifecycleState',
+  'Lifecycle state reason':         'lifecycleReason',
+  'Lifecycle State Reason':         'lifecycleReason',
+  'Operator':                       'operator',
+  'Owner':                          'operator',
+  'Manufacturer':                   'manufacturer',
+  'Manufacturer name':              'manufacturer',
+  'Body type':                      'bodyType',
+  'Body Type':                      'bodyType',
+  'Due date':                       'dueDate',
+  'Due Date':                       'dueDate',
+  'Maintenance due date':           'dueDate',
+  'Engine manufacturer':            'engineManufacturer',
+  'Engine manufacturer name':       'engineManufacturer',
+  'Domicile site':                  'domicileSite',
+  'Domicile Site':                  'domicileSite',
+  'Fuel type':                      'fuelType',
+  'Fuel Type':                      'fuelType',
+  'Open unplanned work requests':   'openUnplanned',
+  'Open Unplanned Work Requests':   'openUnplanned',
+  'Open planned work requests':     'openPlanned',
+  'Open Planned Work Requests':     'openPlanned',
+  'Last geofences':                 'geofence',
+  'Last Geofences':                 'geofence',
+  'Last Geofence':                  'geofence',
+  'Lat/Long':                       'latLong',
+  'Lat / Long':                     'latLong',
+  'Asset ID':                       'assetId',
+  'Vehicle ID (Asset)':             'assetId',
 };
 
 // ── Injected script — ported directly from TM autoForce1000 ──────────────────
@@ -294,12 +302,7 @@ const EXTRACT_TABLE = FIND_TABLE_FN + `(function() {
 // Key:   columns_bafc8b2a-3be6-4a52-a86f-7cb2de7b5400
 // Value: the exact field list AAP uses to render columns (verified 2026-06-18)
 const AAP_COL_KEY   = 'columns_bafc8b2a-3be6-4a52-a86f-7cb2de7b5400';
-const AAP_COL_VALUE = JSON.stringify([
-  'vehicleId', 'assetType', 'lifecycleState', 'lifecycleStateReason',
-  'operator', 'manufacturerName', 'bodyType', 'maintenanceDueDate',
-  'engineManufacturerName', 'domicileSite', 'fuelType',
-  'openUnplannedWorkRequests', 'openPlannedWorkRequests'
-]);
+const AAP_COL_VALUE = JSON.stringify(["vehicleId","bodyType","domicileSite","operator","lifecycleState","lifecycleStateReason","openUnplannedWorkRequests","openPlannedWorkRequests","fuelType","lastGeofences"]);
 
 // H-4: named constant — was an unnamed inline literal inside pollAndScrape()
 // 45 s: fail-fast budget; scraper retries sooner on dead sessions than waiting 90 s.
