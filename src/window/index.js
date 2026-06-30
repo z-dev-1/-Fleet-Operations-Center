@@ -266,21 +266,26 @@ function initWindows(ctx) {
         // Most reloads already fired. Wait for next real reload then debounce.
         // 10s ceiling: edge case where AAP is already fully settled.
         await new Promise(function(resolve) {
-          var settled;
-          var ceiling = setTimeout(function() {
-            win.webContents.removeListener('did-finish-load', arm);
-            resolve();
-          }, 20000);
-          function arm() {
-            clearTimeout(settled);
-            settled = setTimeout(function() {
-              clearTimeout(ceiling);
+          // Hard 4s delay to let the initial redirect storm start,
+          // then debounce: resolve 1.5s after the last did-finish-load.
+          // 15s ceiling from attach point as absolute safety net.
+          setTimeout(function() {
+            var settled;
+            var ceiling = setTimeout(function() {
               win.webContents.removeListener('did-finish-load', arm);
               resolve();
-            }, 1500);
-          }
-          win.webContents.on('did-finish-load', arm);
-          arm(); // also arm immediately for pre-settled pages
+            }, 15000);
+            function arm() {
+              clearTimeout(settled);
+              settled = setTimeout(function() {
+                clearTimeout(ceiling);
+                win.webContents.removeListener('did-finish-load', arm);
+                resolve();
+              }, 1500);
+            }
+            win.webContents.on('did-finish-load', arm);
+            arm(); // arm once to handle pre-settled case after the hard delay
+          }, 4000);
         });
         const colRes = await win.webContents.executeJavaScript(`(async function __aapConfigCols() {
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
