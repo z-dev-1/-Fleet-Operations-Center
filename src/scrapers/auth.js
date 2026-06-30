@@ -315,7 +315,7 @@ function checkMwinit() {
   if (!fs.existsSync(COOKIE_FILE))
     return { ok: false, reason: 'Cookie file missing — run mwinit' };
   const ageHours = (Date.now() - fs.statSync(COOKIE_FILE).mtimeMs) / 3600000;
-  if (ageHours > 12)
+  if (ageHours > 1)
     return { ok: false, reason: 'Midway cookie is ' + ageHours.toFixed(1) + 'h old — re-run mwinit' };
   return { ok: true, ageHours: ageHours.toFixed(1) };
 }
