@@ -28,7 +28,7 @@ const logger = require('../utils/logger')('window');
 const { P }  = require('../config/paths');
 const store  = require('../store');
 const { isSetupComplete } = require('../../setup/state');
-const { captureWRUrls } = require('./wr_capture');
+const { buildWRUrls, extractPageId } = require('./wr_capture');
 
 const ROOT_DIR = path.join(__dirname, '..', '..');
 
@@ -555,21 +555,21 @@ function initWindows(ctx) {
 
           const data = await win.webContents.executeJavaScript(JS_EXTRACT_TABLE);
           logger.info('[' + label + '] Extracted ' + data.count + ' records. ' + data.debug);
-          logger.info('[' + label + '] Unavailable units for WR capture: ' + (data.wrRows||[]).length);
-
-          // Click-capture WR URLs for unavailable units
-          // unplanned by default; planned if lifecycle reason is expired inspection
-          const wrUrlMap = (data.wrRows||[]).length > 0
-            ? await captureWRUrls(win, data.wrRows, label, logger)
+          // Build WR URLs from scraped data — no clicking needed
+          // URL: /v2/page/{ID}?tab={Unplanned|Planned}&states=[...]&equipmentId={eq}
+          const wrCount   = (data.wrRows||[]).length;
+          logger.info('[' + label + '] Unavailable units for WR URL build: ' + wrCount);
+          const aapPageId = extractPageId(win.webContents.getURL());
+          const wrUrlMap  = wrCount > 0
+            ? buildWRUrls(data.wrRows, data.rows, aapPageId, logger, label)
             : {};
-
-          // Inject captured URLs into raw rows before mapping
+          logger.info('[' + label + '] WR URLs built: ' + Object.keys(wrUrlMap).length);
           if (Object.keys(wrUrlMap).length > 0) {
             (data.rows||[]).forEach(function(row) {
               const hit = wrUrlMap[row['Equipment ID']];
               if (hit) {
                 if (hit.col === 'planned') {
-                  row['Open Planned Work Requests_url'] = hit.url;
+                  row['Open Planned Work Requests_url']   = hit.url;
                 } else {
                   row['Open Unplanned Work Requests_url'] = hit.url;
                 }
