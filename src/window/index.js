@@ -145,8 +145,9 @@ const JS_EXTRACT_TABLE = `(function(){
       var header = h[i] || 'c'+i;
       o[header] = (c[i].innerText||'').trim();
       // Extract URL only for WR columns with a non-zero count
+      // WR cells: td > span > a  (plain anchor, no mdn-link attr — confirmed via Playwright/Chrome)
       if (WR_HEADERS.indexOf(header) !== -1 && o[header] && o[header] !== '0' && o[header] !== '--') {
-        var a = c[i].querySelector('a[mdn-link]');
+        var a = c[i].querySelector('a, button');
         if (a) {
           var href = _getHref(a);
           if (href) o[header + '_url'] = href;
