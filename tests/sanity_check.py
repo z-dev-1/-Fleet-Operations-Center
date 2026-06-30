@@ -1448,6 +1448,27 @@ chk('S26-UD2: unit-detail awaits openVendorReview',             'await openVendo
 chk('S26-UD3: bus.on vendor:review-ready handler is async',     "bus.on('vendor:review-ready', async" in udt)
 chk('S26-UD4: unit-detail awaits _showApproveCancel',           'await _showApproveCancel' in udt)
 
+
+# ── Stage 27-1: CSS vendor badges + vr-link--external ────────────────────────
+_css = open('renderer/src/css/fleet.css', encoding='utf-8').read()
+chk('S27-CSS1: vr-badge--amerit defined',                       'vr-badge--amerit' in _css)
+chk('S27-CSS2: vr-badge--cummins defined',                      'vr-badge--cummins' in _css)
+chk('S27-CSS3: vr-badge--ta defined',                           'vr-badge--ta' in _css)
+chk('S27-CSS4: vr-badge--velociti defined',                     'vr-badge--velociti' in _css)
+chk('S27-CSS5: vr-badge--fleetnet defined',                     'vr-badge--fleetnet' in _css)
+chk('S27-CSS6: vr-badge--goodyear defined',                     'vr-badge--goodyear' in _css)
+chk('S27-CSS7: vr-link--external base rule defined',            'vr-link--external{' in _css)
+chk('S27-CSS8: vr-link--external::after glyph rule defined',    'vr-link--external::after' in _css)
+chk('S27-CSS9: vr-link--external:hover rule defined',           'vr-link--external:hover' in _css)
+
+# ── Stage 27-1: _VENDOR_META expansion in vendor-review-modal ────────────────
+chk('S27-VRM1: amerit entry in _VENDOR_META',                   "amerit:" in vrm)
+chk('S27-VRM2: cummins entry in _VENDOR_META',                  "cummins:" in vrm)
+chk('S27-VRM3: fleet net spaced-key entry in _VENDOR_META',     "'fleet net':" in vrm)
+chk('S27-VRM4: goodyear entry in _VENDOR_META',                 "goodyear:" in vrm)
+chk('S27-VRM5: freightliner entry in _VENDOR_META',             "freightliner:" in vrm)
+chk('S27-VRM6: navistar entry in _VENDOR_META',                 "navistar:" in vrm)
+
 # ── Report ───────────────────────────────────────────────────────────────────
 print('=' * 60)
 print('SANITY CHECK REPORT')

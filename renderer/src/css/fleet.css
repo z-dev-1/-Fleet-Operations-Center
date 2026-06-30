@@ -1860,7 +1860,7 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .vr-badge{padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700;border:1px solid}
 .vr-badge--paccar{background:rgba(255,166,87,.12);color:var(--org);border-color:rgba(255,166,87,.3)}
 .vr-badge--volvo{background:rgba(88,166,255,.12);color:var(--acc2);border-color:rgba(88,166,255,.3)}
-.vr-badge--unknown{background:rgba(72,79,88,.2);color:var(--txt2);border-color:var(--bdr)}
+.vr-badge--unknown{background:rgba(72,79,88,.2);color:var(--txt2);border-color:var(--bdr)}.vr-badge--amerit{background:rgba(255,166,87,.1);color:var(--org);border-color:rgba(255,166,87,.25)}.vr-badge--cummins{background:rgba(126,231,135,.1);color:var(--grn);border-color:rgba(126,231,135,.25)}.vr-badge--ta{background:rgba(88,166,255,.1);color:var(--acc2);border-color:rgba(88,166,255,.25)}.vr-badge--velociti{background:rgba(210,168,255,.1);color:var(--pur);border-color:rgba(210,168,255,.25)}.vr-badge--fleetnet{background:rgba(227,98,9,.1);color:var(--org);border-color:rgba(227,98,9,.25)}.vr-badge--goodyear{background:rgba(227,179,9,.1);color:var(--ylw);border-color:rgba(227,179,9,.25)}
 .vr-stub-badge{padding:2px 7px;border-radius:4px;font-size:9px;font-weight:700;background:var(--purd);color:var(--pur);border:1px solid rgba(210,168,255,.3)}
 .vr-unit-row{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
 .vr-unit-row__label{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--mut);flex-shrink:0}
@@ -1876,7 +1876,7 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .vr-portal-row__label{font-size:12px;color:var(--txt2)}
 .vr-link{color:var(--acc2);text-decoration:none;font-size:11px}
 .vr-link:hover{text-decoration:underline}
-.vr-link--portal{font-size:12px;font-weight:600}
+.vr-link--portal{font-size:12px;font-weight:600}.vr-link--external{color:var(--txt2);font-style:italic}.vr-link--external::after{content:" ↗";font-size:9px;font-style:normal}.vr-link--external:hover{color:var(--acc2);text-decoration:underline}
 .vr-portal-hint{font-size:10px;color:var(--mut)}
 .vr-input{width:100%;background:var(--el);border:1px solid var(--bdr);border-radius:6px;color:var(--txt);padding:7px 10px;font-size:12px;font-family:var(--mono)}
 .vr-input:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 2px rgba(88,166,255,.2)}

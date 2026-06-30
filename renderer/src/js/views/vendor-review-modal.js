@@ -41,8 +41,23 @@ const _safe = (s)  => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
 const _attr = (s)  => String(s || '').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 
 const _VENDOR_META = {
-  paccar: { label: 'PACCAR',      portal: 'PACCAR Service Portal', cls: 'paccar' },
-  volvo:  { label: 'Volvo/ASIST', portal: 'Volvo ASIST Portal',    cls: 'volvo'  },
+  // S23 originals (Decisiv window-reopen)
+  paccar:      { label: 'PACCAR',        portal: 'PACCAR Service Portal',    cls: 'paccar'   },
+  volvo:       { label: 'Volvo/ASIST',   portal: 'Volvo ASIST Portal',       cls: 'volvo'    },
+  // S27-1: non-Decisiv vendors with portal fallback URLs
+  amerit:      { label: 'Amerit',        portal: 'Amerit Fleet Solutions',   cls: 'amerit'   },
+  cummins:     { label: 'Cummins',       portal: 'Cummins Care Portal',      cls: 'cummins'  },
+  ta:          { label: 'TA Fleet',      portal: 'TA Fleet Services',        cls: 'ta'       },
+  velociti:    { label: 'Velociti',      portal: 'Velociti Services Portal', cls: 'velociti' },
+  fleetnet:    { label: 'FleetNet',      portal: 'FleetNet America Portal',  cls: 'fleetnet' },
+  'fleet net': { label: 'FleetNet',      portal: 'FleetNet America Portal',  cls: 'fleetnet' },
+  goodyear:    { label: 'Goodyear',      portal: 'Goodyear Commercial Tire', cls: 'goodyear' },
+  freightliner:{ label: 'Freightliner',  portal: 'DTNA Parts Portal',        cls: 'unknown'  },
+  kenworth:    { label: 'Kenworth',      portal: 'Kenworth Owners Portal',   cls: 'unknown'  },
+  peterbilt:   { label: 'Peterbilt',     portal: 'Peterbilt Owners Portal',  cls: 'unknown'  },
+  mack:        { label: 'Mack Trucks',   portal: 'Mack Trucks Portal',       cls: 'unknown'  },
+  international:{ label: 'International',portal: 'International Truck Dealers',cls: 'unknown'},
+  navistar:    { label: 'Navistar',      portal: 'International Truck Dealers',cls: 'unknown'},
 };
 function _vendorMeta(v) {
   return _VENDOR_META[(v || '').toLowerCase()] ||
