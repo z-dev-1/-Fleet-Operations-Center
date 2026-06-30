@@ -5,7 +5,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dev": "concurrently \"vite\" \"electron .\"",
+    "dev": "cross-env NODE_ENV=development concurrently \"vite\" \"electron .\"",
     "build:renderer": "vite build",
     "build:app": "npm run build:renderer && electron-builder --win --x64",
     "test": "node --test tests/**/*.test.js",
@@ -13,6 +13,7 @@
   },
   "devDependencies": {
     "concurrently": "^9.1.0",
+    "cross-env": "^10.1.0",
     "electron": "^42.4.1",
     "electron-builder": "^26.15.3",
     "eslint": "^9.0.0",

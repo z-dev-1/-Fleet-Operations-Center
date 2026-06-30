@@ -381,8 +381,13 @@ function initWindows(ctx) {
 
     function switchToApp() {
       logger.info('Switching to Fleet Operations app...');
-      const rendererHtml = path.join(ROOT_DIR, 'renderer', 'src', 'index.html');
-      mainWindow.loadFile(rendererHtml);
+      if (process.env.NODE_ENV === 'development') {
+        logger.info('[window] Dev mode: loading Vite dev server at http://localhost:5173');
+        mainWindow.loadURL('http://localhost:5173');
+      } else {
+        const rendererHtml = path.join(ROOT_DIR, 'renderer', 'src', 'index.html');
+        mainWindow.loadFile(rendererHtml);
+      }
       mainWindow.setMinimumSize(1200, 700);
       mainWindow.setSize(1600, 960);
       mainWindow.center();
