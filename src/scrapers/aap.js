@@ -304,6 +304,150 @@ const EXTRACT_TABLE = FIND_TABLE_FN + `(function() {
 const AAP_COL_KEY   = 'columns_bafc8b2a-3be6-4a52-a86f-7cb2de7b5400';
 const AAP_COL_VALUE = JSON.stringify(["vehicleId","bodyType","domicileSite","operator","lifecycleState","lifecycleStateReason","openUnplannedWorkRequests","openPlannedWorkRequests","fuelType","lastGeofences"]);
 
+// AAP column-configurator UI script — injected into scraper window after page load
+const AAP_COL_CLICK_JS = `(async function __aapConfigCols() {
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  function simClick(el) {
+    ['mousedown','mouseup','click'].forEach(function(ev) {
+      el.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true }));
+    });
+  }
+  var WANT = ["Domicile site","Operator","Asset type","Fuel type","Lifecycle state","Lifecycle state reason","Manufacturer","Body type","Due date","Open Unplanned Work Requests","Open Planned Work Requests","Last geofences","Lat/Long"];
+
+  // ── Find the column selector (eye) button ──────────────────────────────
+  // Primary selector from user
+  var btn = document.querySelector(
+    '#app-layout-content-1 > div > div > div.css-1h2w845 > div > div.css-1d7jqjm > div.css-1k6haed > div > div:nth-child(1) > div > div > div > button:nth-child(4)'
+  );
+  // Fallback: any button inside css-1k6haed that is 4th sibling
+  if (!btn) {
+    var wrap = document.querySelector('[class*="css-1k6haed"]');
+    if (wrap) {
+      var allBtns = wrap.querySelectorAll('button');
+      if (allBtns[3]) btn = allBtns[3];
+    }
+  }
+  if (!btn) {
+    console.log('[AAP-COLS] button not found');
+    return { ok: false, reason: 'button not found' };
+  }
+  console.log('[AAP-COLS] Clicking column button...');
+  simClick(btn);
+  await sleep(900);
+
+  // ── Find the popup ──────────────────────────────────────────────────────
+  // Primary selector from user
+  var popup = document.querySelector(
+    'body > div:nth-child(19) > div > div > div > div > div:nth-child(2) > div'
+  );
+  // Fallback: walk body children looking for the modal with "Selected columns"
+  if (!popup) {
+    var bodyKids = document.body.children;
+    for (var bi = bodyKids.length - 1; bi >= 0; bi--) {
+      if ((bodyKids[bi].textContent || '').includes('Selected columns')) {
+        popup = bodyKids[bi]; break;
+      }
+    }
+  }
+  if (!popup) {
+    // Broader fallback: any div containing both "Available Columns" and "Selected columns"
+    var divs = document.querySelectorAll('div');
+    for (var di = 0; di < divs.length; di++) {
+      var t = divs[di].textContent || '';
+      if (t.includes('Available Columns') && t.includes('Selected columns') && t.length < 5000) {
+        popup = divs[di]; break;
+      }
+    }
+  }
+  if (!popup) {
+    console.log('[AAP-COLS] popup not found');
+    return { ok: false, reason: 'popup not found' };
+  }
+  console.log('[AAP-COLS] Popup found');
+
+  // ── Remove all existing selected columns (except Equipment ID) ──────────
+  var removed = 0;
+  for (var rr = 0; rr < 25; rr++) {
+    var xBtns = Array.from(popup.querySelectorAll('button')).filter(function(b) {
+      // X/remove buttons: aria-label=Remove, or contain only an X icon, or × text
+      return b.getAttribute('aria-label') === 'Remove' ||
+             (b.closest('[class]') && (b.textContent || '').trim() === '×');
+    });
+    if (xBtns.length === 0) break;
+    // Don't remove Equipment ID row
+    var toRemove = xBtns.find(function(b) {
+      var row = b.closest('[class*="css-"]');
+      return row && !(row.textContent || '').includes('Equipment ID');
+    }) || xBtns[0];
+    simClick(toRemove);
+    removed++;
+    await sleep(180);
+  }
+  console.log('[AAP-COLS] Removed', removed, 'existing columns');
+
+  // ── Search for and add each column ──────────────────────────────────────
+  var searchInput = popup.querySelector('input[placeholder*="Search"], input[type="search"], input[type="text"]');
+  var added = [], failed = [];
+
+  for (var ci = 0; ci < WANT.length; ci++) {
+    var name = WANT[ci];
+    // Type in search box
+    if (searchInput) {
+      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(searchInput, name);
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+      await sleep(350);
+    }
+    // Find the matching available column row and click its add arrow (→)
+    var rows = Array.from(popup.querySelectorAll('[class*="css-"] button, li button'));
+    var found = false;
+    for (var ri = 0; ri < rows.length; ri++) {
+      var rowEl = rows[ri].closest('[class*="css-"]') || rows[ri];
+      var rowText = (rowEl.textContent || '').trim();
+      if (rowText === name || rowText.startsWith(name)) {
+        simClick(rows[ri]);
+        added.push(name);
+        found = true;
+        await sleep(250);
+        break;
+      }
+    }
+    if (!found) {
+      // Try a broader text match
+      var allRowDivs = Array.from(popup.querySelectorAll('[class*="css-"]'));
+      for (var ai = 0; ai < allRowDivs.length; ai++) {
+        var aText = (allRowDivs[ai].textContent || '').trim();
+        if (aText === name) {
+          var addBtn = allRowDivs[ai].querySelector('button') || allRowDivs[ai];
+          simClick(addBtn);
+          added.push(name);
+          found = true;
+          await sleep(250);
+          break;
+        }
+      }
+    }
+    if (!found) failed.push(name);
+  }
+
+  console.log('[AAP-COLS] Added:', added.join(', '));
+  if (failed.length) console.log('[AAP-COLS] Could not find:', failed.join(', '));
+
+  // ── Click Apply ──────────────────────────────────────────────────────────
+  await sleep(300);
+  var applyBtn = Array.from(document.querySelectorAll('button')).find(function(b) {
+    return (b.textContent || '').trim() === 'Apply';
+  });
+  if (applyBtn) {
+    simClick(applyBtn);
+    console.log('[AAP-COLS] Applied. AAP will re-fetch with new columns.');
+    return { ok: true, added: added, failed: failed };
+  }
+  return { ok: false, reason: 'Apply not found', added: added, failed: failed };
+})()`;
+
+
 // H-4: named constant — was an unnamed inline literal inside pollAndScrape()
 // 45 s: fail-fast budget; scraper retries sooner on dead sessions than waiting 90 s.
 const TABLE_WAIT_MS = 45_000;
@@ -436,6 +580,17 @@ async function _scrapeAAPOnce(domiciles) {
 
     // ── Step 2: after page load, poll window.__AAP_ASSETS__ ──────────────────
     win.webContents.on('did-finish-load', async () => {
+      // ── Auto-configure AAP columns via UI (eye button → select → Apply) ──
+      try {
+        await sleep(2500); // let React fully mount before clicking
+        const __colResult = await win.webContents.executeJavaScript(AAP_COL_CLICK_JS);
+        logger.info('[AAP] Column config UI result:', JSON.stringify(__colResult));
+        if (__colResult && __colResult.ok) {
+          await sleep(1500); // wait for AAP to re-fetch after Apply
+        }
+      } catch(__colErr) {
+        logger.warn('[AAP] Column config UI failed:', __colErr.message);
+      }
       logger.info('[AAP] Page loaded - polling for intercepted assets...');
       const MAX_WAIT = 60000;
       const POLL_MS  = 500;
