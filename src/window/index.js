@@ -519,7 +519,7 @@ function initWindows(ctx) {
       minWidth: 600, minHeight: 500,
       title: 'Fleet Operations \u2014 Sign in\u2026',
       backgroundColor: '#0d1117',
-      show: true,
+      show: false,
       center: true,
       webPreferences: {
         preload:          path.join(ROOT_DIR, 'preload.js'),
@@ -570,7 +570,7 @@ function initWindows(ctx) {
       logger.info('Switching to Fleet Operations app...');
       if (process.env.NODE_ENV === 'development') {
         logger.info('[window] Dev mode: loading Vite dev server at http://localhost:5173');
-        //DBG: mainWindow.loadURL('http://localhost:5173');
+        mainWindow.loadURL('http://localhost:5173');
       } else {
         mainWindow.loadFile(path.join(ROOT_DIR, 'renderer', 'src', 'index.html'));
       }

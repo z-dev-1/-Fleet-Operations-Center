@@ -9,7 +9,9 @@
     "build:renderer": "vite build",
     "build:app": "npm run build:renderer && electron-builder --win --x64",
     "test": "node --test tests/**/*.test.js",
-    "lint": "eslint src/ renderer/src/ --ext .js"
+    "lint": "eslint src/ renderer/src/ --ext .js",
+    "launch": "start /min cmd /c npm run dev",
+    "launch:hidden": "powershell -WindowStyle Hidden -Command \"npm run dev\""
   },
   "devDependencies": {
     "concurrently": "^9.1.0",
