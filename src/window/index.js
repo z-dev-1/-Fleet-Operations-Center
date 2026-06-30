@@ -289,30 +289,38 @@ function initWindows(ctx) {
         });
         // Step 1: get eye button screen coords
         const btnCoords = await win.webContents.executeJavaScript(`(function() {
-  // Find toolbar icon buttons (SVG, no text) - real app shows them at y~706
-  // Use a wide Y range and pick the rightmost one
-  var toolbarBtns = Array.from(document.querySelectorAll('button')).filter(function(b) {
-    var r = b.getBoundingClientRect();
-    var hasNoText = (b.textContent || '').trim().length === 0;
-    var hasSvg = !!b.querySelector('svg');
-    var visible = r.width > 0 && r.height > 0;
-    return hasSvg && hasNoText && visible && r.y > 650 && r.y < 750;
-  });
-  if (toolbarBtns.length === 0) {
-    // Broader fallback: any visible SVG button, pick rightmost of the group near column headers
-    toolbarBtns = Array.from(document.querySelectorAll('button')).filter(function(b) {
-      var r = b.getBoundingClientRect();
-      return !!b.querySelector('svg') && r.width > 0 && r.height > 0 && r.y > 500 && r.y < 800;
-    });
+  // Primary: full selector confirmed via Chrome DevTools console
+  // CSS class segments will rotate on AAP deploys - ID anchor + nth-child(4) is stable
+  var btn = document.querySelector(
+    '#app-layout-content-1 > div > div > div.css-1h2w845 > div > div.css-1d7jqjm > div.css-1k6haed > div > div:nth-child(1) > div > div > div > button:nth-child(4)'
+  );
+  // Fallback: ID anchor + any 4th button in a toolbar-like div container
+  if (!btn) {
+    var root = document.getElementById('app-layout-content-1');
+    if (root) {
+      // Find all groups of 3+ adjacent buttons inside root, pick 4th of the toolbar group
+      var allBtns = Array.from(root.querySelectorAll('button'));
+      // Group buttons by their direct parent
+      var parentMap = {};
+      allBtns.forEach(function(b) {
+        var key = b.parentElement;
+        if (!parentMap.has(key)) parentMap.set(key, []);
+        parentMap.get(key).push(b);
+      });
+      parentMap.forEach(function(group, parent) {
+        if (!btn && group.length >= 4) {
+          // Pick the 4th button (index 3) in this group
+          var candidate = group[3];
+          var r = candidate.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) btn = candidate;
+        }
+      });
+    }
   }
-  if (toolbarBtns.length === 0) return null;
-  // Sort by x descending, pick rightmost
-  toolbarBtns.sort(function(a,b) {
-    return b.getBoundingClientRect().x - a.getBoundingClientRect().x;
-  });
-  var btn = toolbarBtns[0];
+  if (!btn) return null;
   var r = btn.getBoundingClientRect();
-  return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2), total: toolbarBtns.length };
+  var svg = btn.querySelector('svg path');
+  return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2), path: svg ? svg.getAttribute('d').slice(0,30) : '' };
 })()`);
         if (!btnCoords) {
           logger.warn('[' + label + '] Column config: eye button not found');
@@ -321,7 +329,7 @@ function initWindows(ctx) {
           // Step 2: send trusted OS-level mouse click via sendInputEvent
           win.webContents.sendInputEvent({ type: 'mouseDown', x: btnCoords.x, y: btnCoords.y, button: 'left', clickCount: 1 });
           win.webContents.sendInputEvent({ type: 'mouseUp',   x: btnCoords.x, y: btnCoords.y, button: 'left', clickCount: 1 });
-          await new Promise(r => setTimeout(r, 1800));
+          await new Promise(r => setTimeout(r, 2500));
           // Step 3: interact with popup
           const colRes = await win.webContents.executeJavaScript(`(async function __aapConfigCols() {
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -337,12 +345,25 @@ function initWindows(ctx) {
     "Open Unplanned Work Requests","Open Planned Work Requests","Last geofences"
   ];
 
-  // Find popup: div containing both Available Columns + Selected columns headings
-  var popup = Array.from(document.querySelectorAll('div')).find(function(d) {
-    var t = d.textContent || '';
-    return t.includes('Available Columns') && t.includes('Selected columns');
-  }) || null;
-  if (!popup) return { ok: false, reason: 'popup not found' };
+  // Find popup: check portal divs on body first (Chrome Recorder showed body>div[3])
+  var popup = null;
+  // Check each direct child of body for portal
+  var bodyDivs = Array.from(document.body.children);
+  for (var bi = bodyDivs.length - 1; bi >= 0; bi--) {
+    var t = bodyDivs[bi].textContent || '';
+    if (t.includes('Available Columns') && t.includes('Selected columns')) {
+      popup = bodyDivs[bi]; break;
+    }
+  }
+  // Fallback: deep search all divs
+  if (!popup) {
+    popup = Array.from(document.querySelectorAll('div')).find(function(d) {
+      var t = d.textContent || '';
+      return t.includes('Available Columns') && t.includes('Selected columns');
+    }) || null;
+  }
+  // Log body child count and what we found
+  if (!popup) return { ok: false, reason: 'popup not found', bodyChildren: document.body.children.length, bodyText: Array.from(document.body.children).map(function(c,i){return i+':'+c.tagName+(c.textContent||'').slice(0,20);}).join('|') };
 
   // Split popup into Available (left) and Selected (right) sections by h4 headings
   var h4s = Array.from(popup.querySelectorAll('h4'));
