@@ -152,14 +152,17 @@ function _renderRows(rows) {
           ' onmouseleave="this.style.color=\'#8b949e\';this.style.borderBottomColor=\'transparent\'"' +
           '>' + val + '</a>';
       }
-      // WR counts: link to asset page (individual WR URLs are dynamic/unpredictable)
-      if ((c.key === 'openUnplanned' || c.key === 'openPlanned') && val && val !== '0' && row.assetUrl) {
-        var wrLabel = c.key === 'openUnplanned' ? 'unplanned' : 'planned';
-        content = '<a class="wr-link" href="#" data-url="' + row.assetUrl + '" data-wr="' + wrLabel + '"' +
-          ' style="color:#e3b341;text-decoration:none;font-weight:600;border-bottom:1px solid transparent;transition:color .15s"' +
-          ' onmouseenter="this.style.color=\'#f0c040\';this.style.borderBottomColor=\'#e3b341\'"' +
-          ' onmouseleave="this.style.color=\'#e3b341\';this.style.borderBottomColor=\'transparent\'"' +
-          '>' + val + '</a>';
+      // WR counts: link directly to WR list URL scraped from React fiber, fall back to asset page
+      if ((c.key === 'openUnplanned' || c.key === 'openPlanned') && val && val !== '0' && val !== '--') {
+        var wrUrlKey = c.key === 'openUnplanned' ? 'openUnplannedUrl' : 'openPlannedUrl';
+        var wrUrl    = row[wrUrlKey] || row.assetUrl || null;
+        if (wrUrl) {
+          content = '<a class="wr-link" href="#" data-url="' + wrUrl + '"' +
+            ' style="color:#e3b341;text-decoration:none;font-weight:600;border-bottom:1px solid transparent;transition:color .15s"' +
+            ' onmouseenter="this.style.color=\'#f0c040\';this.style.borderBottomColor=\'#e3b341\'"' +
+            ' onmouseleave="this.style.color=\'#e3b341\';this.style.borderBottomColor=\'transparent\'"' +
+            '>' + val + '</a>';
+        }
       }
       return '<td' + cls + ' title="' + String(val).replace(/"/g, '&quot;') + '">' + content + '</td>';
     }).join('');

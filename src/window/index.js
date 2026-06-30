@@ -44,8 +44,10 @@ const AAP_FIELD_MAP = {
   'Engine manufacturer':          'engineManufacturer',
   'Domicile site':                'domicileSite',
   'Fuel type':                    'fuelType',
-  'Open Unplanned Work Requests': 'openUnplanned',
-  'Open Planned Work Requests':   'openPlanned',
+  'Open Unplanned Work Requests':     'openUnplanned',
+  'Open Unplanned Work Requests_url': 'openUnplannedUrl',
+  'Open Planned Work Requests':       'openPlanned',
+  'Open Planned Work Requests_url':   'openPlannedUrl',
   'Last geofences':               'geofence',
   'Lat/Long':                     'latLong',
   'Owner':                        'owner',
@@ -105,12 +107,38 @@ const JS_EXTRACT_TABLE = `(function(){
   t.querySelectorAll('thead th').forEach(function(x){
     h.push((x.innerText||'').trim().replace(/[\\n\\r]+/g,' '));
   });
+  // Dig React fiber to find href/to prop — AAP mdn-link anchors have no href attr
+  function _reactHref(el) {
+    if (!el) return null;
+    try {
+      var fk = Object.keys(el).find(function(k){ return k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'); });
+      if (!fk) return null;
+      var cur = el[fk];
+      for (var j = 0; j < 20; j++) {
+        if (!cur) break;
+        var p = cur.memoizedProps || cur.pendingProps;
+        if (p && p.href) return p.href;
+        if (p && p.to)   return String(p.to);
+        cur = cur.return;
+      }
+    } catch(e) {}
+    return null;
+  }
   var r = [];
   t.querySelectorAll('tbody tr').forEach(function(tr){
     var c = tr.querySelectorAll('td');
     if (c.length < 3) return;
     var o = {};
-    for (var i = 0; i < c.length; i++) o[h[i]||'c'+i] = (c[i].innerText||'').trim();
+    for (var i = 0; i < c.length; i++) {
+      var header = h[i] || 'c'+i;
+      o[header] = (c[i].innerText||'').trim();
+      // Extract React-resolved URL from any mdn-link anchor in this cell
+      var a = c[i].querySelector('a[mdn-link]');
+      if (a) {
+        var href = (a.href && a.href !== window.location.href ? a.href : null) || _reactHref(a);
+        if (href) o[header + '_url'] = href;
+      }
+    }
     if (o['Equipment ID'] || o[h[1]]) r.push(o);
   });
   return { rows:r, count:r.length, headers:h,
