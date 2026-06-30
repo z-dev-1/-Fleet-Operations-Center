@@ -1469,6 +1469,13 @@ chk('S27-VRM4: goodyear entry in _VENDOR_META',                 "goodyear:" in v
 chk('S27-VRM5: freightliner entry in _VENDOR_META',             "freightliner:" in vrm)
 chk('S27-VRM6: navistar entry in _VENDOR_META',                 "navistar:" in vrm)
 
+
+# -- Stage 27-2: bridge.js re-exports getPortalUrl from vendor-bridge
+_brg = open('renderer/src/js/bridge.js', encoding='utf-8').read()
+chk('S27-BRG1: bridge.js re-exports vendor from vendor-bridge',         "export { vendor" in _brg and "vendor-bridge.js" in _brg)
+chk('S27-BRG2: bridge.js re-exports getPortalUrl from vendor-bridge',   "getPortalUrl" in _brg and "vendor-bridge.js" in _brg)
+chk('S27-BRG3: getPortalUrl in single export statement with vendor',     "export { vendor, getPortalUrl }" in _brg)
+
 # ── Report ───────────────────────────────────────────────────────────────────
 print('=' * 60)
 print('SANITY CHECK REPORT')

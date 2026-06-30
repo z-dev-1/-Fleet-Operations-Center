@@ -225,7 +225,7 @@ export const asana = {
 };
 
 // ── Vendor (Dealer Work Order Engine) ──
-export { vendor } from './vendor-bridge.js';
+export { vendor, getPortalUrl } from './vendor-bridge.js';
 
 // ── Partner portal ─────────────────────────────────────────────────────────
 export const partner = {
