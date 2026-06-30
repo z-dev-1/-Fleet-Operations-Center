@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 /**
  * src/window/index.js  [Version C]
  *
@@ -261,7 +261,7 @@ function initWindows(ctx) {
     // Configure columns before polling starts
     if (label === 'startup' || label === 'rescan') {
       try {
-        await new Promise(r => setTimeout(r, 2800)); // wait for React to mount
+        await new Promise(r => setTimeout(r, 4500)); // wait for React + toolbar to mount
         const colRes = await win.webContents.executeJavaScript(`(async function __aapConfigCols() {
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   function simClick(el) {
@@ -275,14 +275,51 @@ function initWindows(ctx) {
     "Open Unplanned Work Requests","Open Planned Work Requests","Last geofences"
   ];
 
-  // Find the column-selector eye button
-  var btn = document.querySelector(
-    '#app-layout-content-1 > div > div > div.css-1h2w845 > div > div.css-1d7jqjm > div.css-1k6haed > div > div:nth-child(1) > div > div > div > button:nth-child(4)'
-  );
+  // Find the column-selector button -- resilient multi-strategy (CSS classes change on AAP deploys)
+  var btn = null;
+
+  // Strategy 1: aria-label or title containing 'column'
+  var allBtns = Array.from(document.querySelectorAll('button'));
+  btn = allBtns.find(function(b) {
+    var lbl = (b.getAttribute('aria-label') || b.getAttribute('title') || '').toLowerCase();
+    return lbl.includes('column');
+  }) || null;
+
+  // Strategy 2: visible text exactly 'Columns'
   if (!btn) {
-    var wrap = document.querySelector('[class*="css-1k6haed"]');
-    if (wrap) { var allBtns = wrap.querySelectorAll('button'); if (allBtns[3]) btn = allBtns[3]; }
+    btn = allBtns.find(function(b) {
+      return (b.textContent || '').trim().toLowerCase() === 'columns';
+    }) || null;
   }
+
+  // Strategy 3: toolbar area scan -- skip known utility buttons, take first remaining icon btn
+  if (!btn) {
+    var SKIP = ['search','filter','refresh','export','download','print','density','fullscreen'];
+    var tbEl = document.querySelector('table');
+    var toolArea = (tbEl && tbEl.closest('[class]')) ? tbEl.closest('[class]').parentElement : null;
+    if (!toolArea) toolArea = document.querySelector('[id*="content"]');
+    if (toolArea) {
+      var tbBtns = Array.from(toolArea.querySelectorAll('button'));
+      btn = tbBtns.find(function(b) {
+        var t = (b.textContent || b.getAttribute('aria-label') || '').toLowerCase().trim();
+        return t.length > 0 && !SKIP.some(function(s){ return t.includes(s); }) && b.querySelector('svg') !== null;
+      }) || null;
+    }
+  }
+
+  // Strategy 4: group of 3-8 icon-only buttons -- take 4th (or 3rd)
+  if (!btn) {
+    var iconGrps = Array.from(document.querySelectorAll('div')).filter(function(d) {
+      var bs = d.querySelectorAll(':scope > button, :scope > div > button');
+      return bs.length >= 3 && bs.length <= 8 &&
+             Array.from(bs).every(function(b){ return b.querySelector('svg') || (b.textContent||'').trim().length < 3; });
+    });
+    if (iconGrps.length > 0) {
+      var grpBtns = iconGrps[0].querySelectorAll(':scope > button, :scope > div > button');
+      btn = grpBtns[3] || grpBtns[2] || null;
+    }
+  }
+
   if (!btn) return { ok: false, reason: 'button not found' };
   simClick(btn);
   await sleep(900);
