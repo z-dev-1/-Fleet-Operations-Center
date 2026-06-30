@@ -1,99 +1,97 @@
 'use strict';
-// ── WR Click-Capture ─────────────────────────────────────────────────────────
-// Clicks the WR anchor for each unavailable unit and intercepts the React Router
-// navigation to capture the real work-order list URL.
+// ── WR Click-Capture v2 ───────────────────────────────────────────────────────
+// React Router calls history.pushState() when a link is clicked —
+// Electron does NOT fire did-navigate-in-page for pushState.
+// Solution: patch history.pushState in the page before clicking,
+// capture the URL it was called with, then restore pushState and go back.
 //
 // Business rules:
 //   Unavailable + reason matches "expired inspection" → click PLANNED column
 //   Unavailable + any other reason                   → click UNPLANNED column
-//
-// Called from _runAAPScrapeLoop after JS_EXTRACT_TABLE.
-// Returns { eqId: { url, col } } map.
 
-async function captureWRUrls(win, wrRows, label, logger) {
-  if (!wrRows || wrRows.length === 0) return {};
-  const urlMap = {};
+// Script to inject into the page: patches history.pushState and clicks the anchor.
+// Returns { clickResult, capturedUrl } synchronously after the click.
+function buildCaptureScript(rowIdx, colIdx) {
+  return `(function(){
+  // 1. Patch history.pushState to intercept React Router navigation
+  var _captured = null;
+  var _origPush = history.pushState.bind(history);
+  history.pushState = function(state, title, url) {
+    _captured = url ? String(url) : null;
+    // Don't actually navigate — we only want the URL
+    // (React Router will handle its own state; we call orig to keep React happy)
+    _origPush(state, title, url);
+  };
 
-  logger.info('[' + label + '] WR click-capture start: ' + wrRows.length + ' units');
-
-  for (const wr of wrRows) {
-    try {
-      const capturedUrl = await new Promise((resolve) => {
-        const timer = setTimeout(() => {
-          win.webContents.removeListener('will-navigate',        onNav);
-          win.webContents.removeListener('did-navigate-in-page', onNavInPage);
-          logger.warn('[' + label + '] WR capture timeout eq=' + wr.eqId + ' col=' + wr.colToClick);
-          resolve(null);
-        }, 2500);
-
-        function onNav(e, url) {
-          clearTimeout(timer);
-          win.webContents.removeListener('will-navigate',        onNav);
-          win.webContents.removeListener('did-navigate-in-page', onNavInPage);
-          e.preventDefault();
-          resolve(url);
-        }
-
-        function onNavInPage(_e, url, isMain) {
-          if (!isMain) return;
-          clearTimeout(timer);
-          win.webContents.removeListener('will-navigate',        onNav);
-          win.webContents.removeListener('did-navigate-in-page', onNavInPage);
-          win.webContents.goBack();
-          resolve(url);
-        }
-
-        win.webContents.on('will-navigate',        onNav);
-        win.webContents.on('did-navigate-in-page', onNavInPage);
-
-        const clickScript = `(function(){
+  // 2. Find the table and cell
   var tables = document.querySelectorAll('table');
   var t = null;
   for (var i = 0; i < tables.length; i++) {
     if (tables[i].querySelector('tbody tr')) { t = tables[i]; break; }
   }
-  if (!t) return 'no_table';
-  var row = t.querySelectorAll('tbody tr')[${wr.rowIdx}];
-  if (!row) return 'no_row';
-  var cell = row.querySelectorAll('td')[${wr.colIdx}];
-  if (!cell) return 'no_cell';
+  if (!t) { history.pushState = _origPush; return { ok: false, reason: 'no_table' }; }
+
+  var row = t.querySelectorAll('tbody tr')[${rowIdx}];
+  if (!row) { history.pushState = _origPush; return { ok: false, reason: 'no_row' }; }
+
+  var cell = row.querySelectorAll('td')[${colIdx}];
+  if (!cell) { history.pushState = _origPush; return { ok: false, reason: 'no_cell' }; }
+
   var a = cell.querySelector('a, button');
-  if (!a) return 'no_anchor';
+  if (!a) { history.pushState = _origPush; return { ok: false, reason: 'no_anchor' }; }
+
+  // 3. Click — React Router's onClick fires synchronously -> calls history.pushState
   a.click();
-  return 'clicked';
+
+  // 4. Restore pushState
+  history.pushState = _origPush;
+
+  // 5. If pushState was called, go back to the fleet table
+  if (_captured) {
+    history.back();
+  }
+
+  return { ok: true, capturedUrl: _captured };
 })()`;
+}
 
-        win.webContents.executeJavaScript(clickScript)
-          .then(function(r) {
-            logger.info('[' + label + '] WR click eq=' + wr.eqId + ' ' + wr.colToClick + ' -> ' + r);
-            if (r !== 'clicked') {
-              clearTimeout(timer);
-              win.webContents.removeListener('will-navigate',        onNav);
-              win.webContents.removeListener('did-navigate-in-page', onNavInPage);
-              resolve(null);
-            }
-          })
-          .catch(function() {
-            clearTimeout(timer);
-            win.webContents.removeListener('will-navigate',        onNav);
-            win.webContents.removeListener('did-navigate-in-page', onNavInPage);
-            resolve(null);
-          });
-      });
+const AAP_BASE = 'https://aap-na.corp.amazon.com';
 
-      if (capturedUrl) {
-        urlMap[wr.eqId] = { url: capturedUrl, col: wr.colToClick };
+function resolveUrl(url) {
+  if (!url) return null;
+  if (url.startsWith('http')) return url;
+  return AAP_BASE + (url.startsWith('/') ? url : '/' + url);
+}
+
+async function captureWRUrls(win, wrRows, label, logger) {
+  if (!wrRows || wrRows.length === 0) return {};
+  const urlMap = {};
+
+  logger.info('[' + label + '] WR click-capture start: ' + wrRows.length + ' unavailable units');
+
+  for (const wr of wrRows) {
+    try {
+      const script = buildCaptureScript(wr.rowIdx, wr.colIdx);
+      const result = await win.webContents.executeJavaScript(script);
+
+      if (result && result.ok && result.capturedUrl) {
+        const url = resolveUrl(result.capturedUrl);
+        urlMap[wr.eqId] = { url, col: wr.colToClick };
         logger.info('[' + label + '] WR URL eq=' + wr.eqId +
-          ' (' + wr.colToClick + '): ' + capturedUrl.substring(0, 100));
+          ' (' + wr.colToClick + '): ' + url);
+      } else {
+        logger.warn('[' + label + '] WR capture miss eq=' + wr.eqId +
+          ' reason=' + (result && result.reason || 'no_pushState'));
       }
     } catch (e) {
       logger.warn('[' + label + '] WR capture error eq=' + wr.eqId + ': ' + e.message);
     }
 
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise(r => setTimeout(r, 150)); // brief pause between rows
   }
 
-  logger.info('[' + label + '] WR click-capture done: ' + Object.keys(urlMap).length + ' URLs captured');
+  logger.info('[' + label + '] WR click-capture done: ' +
+    Object.keys(urlMap).length + '/' + wrRows.length + ' captured');
   return urlMap;
 }
 
