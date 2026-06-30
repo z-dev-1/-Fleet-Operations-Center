@@ -289,27 +289,26 @@ function initWindows(ctx) {
         });
         // Step 1: get eye button screen coords
         const btnCoords = await win.webContents.executeJavaScript(`(function() {
-  // Primary: XPath using stable app-layout-content-1 ID (from Chrome Recorder)
-  var btn = null;
-  try {
-    var xr = document.evaluate(
-      '//*[@id="app-layout-content-1"]/div/div/div[2]/div/div[3]/div[1]/div/div[1]/div/div/div/button[1]',
-      document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
-    );
-    btn = xr.singleNodeValue;
-  } catch(e) {}
-  // Fallback: find button nearest to column headers row (y ~ 210-230) that has an SVG
+  // Find all toolbar icon buttons (small, no text, have SVG, y between 200-240)
+  var toolbarBtns = Array.from(document.querySelectorAll('button')).filter(function(b) {
+    var r = b.getBoundingClientRect();
+    var hasNoText = (b.textContent || '').trim().length === 0;
+    var hasSvg = !!b.querySelector('svg');
+    return hasSvg && hasNoText && r.y > 200 && r.y < 240 && r.x > 800;
+  });
+  // The column config button is the last one in the toolbar (rightmost)
+  var btn = toolbarBtns[toolbarBtns.length - 1] || null;
   if (!btn) {
-    var candidates = Array.from(document.querySelectorAll('button[data-mdn-interactive]')).filter(function(b) {
+    // Broader fallback: any SVG button in toolbar row
+    var allToolbar = Array.from(document.querySelectorAll('button')).filter(function(b) {
       var r = b.getBoundingClientRect();
-      return r.y > 200 && r.y < 240 && b.querySelector('svg');
+      return r.y > 200 && r.y < 240 && !!b.querySelector('svg');
     });
-    // Last one in the toolbar row is typically the column config button
-    btn = candidates[candidates.length - 1] || null;
+    btn = allToolbar[allToolbar.length - 1] || null;
   }
   if (!btn) return null;
   var r = btn.getBoundingClientRect();
-  return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) };
+  return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2), count: toolbarBtns.length };
 })()`);
         if (!btnCoords) {
           logger.warn('[' + label + '] Column config: eye button not found');
