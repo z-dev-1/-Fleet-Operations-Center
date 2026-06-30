@@ -53,6 +53,8 @@ contextBridge.exposeInMainWorld('settings', {
   resetDomiciles:()        => ipcRenderer.invoke('settings:reset-domiciles'),
   getAll:        ()        => ipcRenderer.invoke('settings:get-all'),
   save:          (key, val)=> ipcRenderer.invoke('settings:save', key, val),
+  getOperators:  ()        => ipcRenderer.invoke('settings:get-operators'),
+  saveOperators: (ops)     => ipcRenderer.invoke('settings:save-operators', ops),
   getOrchaConfig:()        => ipcRenderer.invoke('orcha:get-config'),
 });
 

@@ -28,6 +28,7 @@ const RESERVED_SETTINGS_KEYS = new Set([
   '_firstLaunch',
   '_lastSync',
   '_schemaVersion',
+  'operators',        // managed by settings:save-operators
 ]);
 
 const SETTINGS_KEY_RE = /^[A-Za-z0-9_:]{1,64}$/;
@@ -95,6 +96,38 @@ function registerSettingsIPC(ctx) {
     logger.info('Setting saved:', key);
     return { ok: true };
   });
+  // ── Operator configs ──────────────────────────────────────────────────────
+  // Stored under the key 'operators' in the settings store.
+  // Shape: Array<{ code: string, domicile: string, to: string, cc: string, spUrl: string, atsUrl: string }>
+  handle('settings:get-operators', () => {
+    const s = store.load('settings', {});
+    return Array.isArray(s.operators) ? s.operators : [];
+  });
+
+  handle('settings:save-operators', (_e, operators) => {
+    if (!Array.isArray(operators)) {
+      throw new ConfigError('operators must be an array', 'operators');
+    }
+    // Sanitise each entry — only allow known shape keys
+    const ALLOWED = new Set(['code', 'domicile', 'to', 'cc', 'spUrl', 'atsUrl']);
+    const clean = operators.map(function (op) {
+      if (!op || typeof op !== 'object') return null;
+      const entry = {};
+      ALLOWED.forEach(function (k) {
+        if (typeof op[k] === 'string') entry[k] = op[k].trim();
+      });
+      if (!entry.code) return null;       // skip entries with no code
+      return entry;
+    }).filter(Boolean);
+
+    const s = store.load('settings', {});
+    s.operators = clean;
+    store.save('settings', s);
+    logger.info('Operators saved:', clean.length, 'entries');
+    return { ok: true, count: clean.length };
+  });
+
+
 
   logger.info('Settings IPC handlers registered');
 }
