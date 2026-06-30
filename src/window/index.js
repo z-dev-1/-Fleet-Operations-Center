@@ -528,6 +528,7 @@ function initWindows(ctx) {
             logger.warn('[' + label + '] Force-1000 error:', e.message);
           }
 
+
           const data = await win.webContents.executeJavaScript(JS_EXTRACT_TABLE);
           logger.info('[' + label + '] Extracted ' + data.count + ' records. ' + data.debug);
 
