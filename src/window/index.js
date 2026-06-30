@@ -310,72 +310,67 @@ function initWindows(ctx) {
 
   if (!btn) return { ok: false, reason: 'button not found' };
   simClick(btn);
-  await sleep(900);
+  await sleep(1200);
 
-  // Find the column config popup
-  var popup = null;
-  for (var bi = document.body.children.length - 1; bi >= 0; bi--) {
-    if ((document.body.children[bi].textContent||'').includes('Selected columns')) {
-      popup = document.body.children[bi]; break;
-    }
-  }
-  if (!popup) {
-    var divs = document.querySelectorAll('div');
-    for (var di = 0; di < divs.length; di++) {
-      var t = divs[di].textContent || '';
-      if (t.includes('Available Columns') && t.includes('Selected columns') && t.length < 5000) {
-        popup = divs[di]; break;
-      }
-    }
-  }
+  // Find popup: div containing both Available Columns + Selected columns headings
+  var popup = Array.from(document.querySelectorAll('div')).find(function(d) {
+    var t = d.textContent || '';
+    return t.includes('Available Columns') && t.includes('Selected columns');
+  }) || null;
   if (!popup) return { ok: false, reason: 'popup not found' };
 
-  // Remove existing selected columns (keep Equipment ID)
-  for (var rr = 0; rr < 25; rr++) {
-    var xBtns = Array.from(popup.querySelectorAll('button')).filter(function(b) {
-      return b.getAttribute('aria-label') === 'Remove' ||
-             (b.closest('[class]') && (b.textContent||'').trim() === '×');
-    });
-    if (xBtns.length === 0) break;
-    var toRemove = xBtns.find(function(b) {
-      var row = b.closest('[class*="css-"]');
-      return row && !(row.textContent||'').includes('Equipment ID');
-    }) || xBtns[0];
-    simClick(toRemove);
-    await sleep(180);
+  // Split popup into Available (left) and Selected (right) sections by h4 headings
+  var h4s = Array.from(popup.querySelectorAll('h4'));
+  var availHead = h4s.find(function(h) { return (h.textContent||''). trim() === 'Available Columns'; });
+  var selHead   = h4s.find(function(h) { return (h.textContent||''). trim() === 'Selected columns'; });
+  var availSection = availHead && availHead.closest('div');
+  var selSection   = selHead   && selHead.closest('div');
+
+  // Remove all selected columns except Equipment ID
+  if (selSection) {
+    for (var rr = 0; rr < 50; rr++) {
+      var remRows = Array.from(selSection.querySelectorAll('p')).filter(function(p) {
+        return (p.textContent||''). trim() !== 'Equipment ID' && (p.textContent||''). trim().length > 0;
+      });
+      if (remRows.length === 0) break;
+      var remBtn = remRows[0].parentElement && remRows[0].parentElement.querySelector('button[data-mdn-interactive]');
+      if (remBtn) { simClick(remBtn); await sleep(200); } else break;
+    }
   }
 
-  // Add each wanted column
-  var searchInput = popup.querySelector('input[placeholder*="Search"], input[type="search"], input[type="text"]');
+  // Add each wanted column: search -> find p with exact text in availSection -> click sibling button
+  var searchInput = availSection ? availSection.querySelector('input[type="text"]') : null;
   var added = [], failed = [];
   for (var ci = 0; ci < WANT.length; ci++) {
     var name = WANT[ci];
     if (searchInput) {
-      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(searchInput, name);
+      var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      nativeSet.call(searchInput, name);
       searchInput.dispatchEvent(new Event('input', { bubbles: true }));
       searchInput.dispatchEvent(new Event('change', { bubbles: true }));
-      await sleep(350);
+      await sleep(400);
     }
-    var rows = Array.from(popup.querySelectorAll('[class*="css-"] button, li button'));
-    var found = false;
-    for (var ri = 0; ri < rows.length; ri++) {
-      var rowEl = rows[ri].closest('[class*="css-"]') || rows[ri];
-      var rowText = (rowEl.textContent||'').trim();
-      if (rowText === name || rowText.startsWith(name)) {
-        simClick(rows[ri]); added.push(name); found = true; await sleep(250); break;
-      }
+    var leaf = Array.from((availSection || popup).querySelectorAll('p')).find(function(p) {
+      return (p.textContent||''). trim() === name;
+    });
+    var addBtn = leaf && leaf.parentElement && leaf.parentElement.querySelector('button[data-mdn-interactive]');
+    if (addBtn) { simClick(addBtn); added.push(name); await sleep(250); }
+    else { failed.push(name); }
+    // Clear search after each
+    if (searchInput) {
+      var clearBtn = availSection && availSection.querySelector('button[aria-label="Clear search"]');
+      if (clearBtn) { simClick(clearBtn); await sleep(200); }
     }
-    if (!found) failed.push(name);
   }
 
-  // Apply
+  // Click Apply
   await sleep(300);
-  var applyBtn = Array.from(document.querySelectorAll('button'))
-    .find(function(b) { return (b.textContent||'').trim() === 'Apply'; });
+  var applyBtn = Array.from(document.querySelectorAll('button[data-mdn-interactive]')).find(function(b) {
+    return (b.textContent||''). trim() === 'Apply';
+  });
   if (applyBtn) { simClick(applyBtn); return { ok: true, added: added, failed: failed }; }
   return { ok: false, reason: 'Apply not found', added: added, failed: failed };
-})()`);
+        `);
         logger.info('[' + label + '] Column config:', JSON.stringify(colRes));
         if (colRes && colRes.ok) await new Promise(r => setTimeout(r, 1800));
       } catch (e) {
@@ -492,7 +487,7 @@ function initWindows(ctx) {
           (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ')');
       }
 
-      mainWindow.loadURL(startUrl);
+      mainWindow.loadURL(startUrl); mainWindow.webContents.openDevTools();
     })();
 
     function switchToApp() {
@@ -504,7 +499,7 @@ function initWindows(ctx) {
       logger.info('Switching to Fleet Operations app...');
       if (process.env.NODE_ENV === 'development') {
         logger.info('[window] Dev mode: loading Vite dev server at http://localhost:5173');
-        mainWindow.loadURL('http://localhost:5173');
+        //DBG: mainWindow.loadURL('http://localhost:5173');
       } else {
         mainWindow.loadFile(path.join(ROOT_DIR, 'renderer', 'src', 'index.html'));
       }
