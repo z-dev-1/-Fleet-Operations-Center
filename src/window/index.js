@@ -360,12 +360,12 @@ function initWindows(ctx) {
     // Start hidden at 1×1 off-screen while AAP scrapes.
     // switchToApp() moves/resizes to full size once scraping is done.
     mainWindow = new BrowserWindow({
-      width: 1, height: 1,
-      x: -9999, y: -9999,
-      minWidth: 1, minHeight: 1,
-      title: 'Fleet Operations',
+      width: 900, height: 700,
+      minWidth: 600, minHeight: 500,
+      title: 'Fleet Operations — Sign in…',
       backgroundColor: '#0d1117',
-      show: false,
+      show: true,
+      center: true,
       webPreferences: {
         preload:          path.join(ROOT_DIR, 'preload.js'),
         contextIsolation: true,
@@ -398,6 +398,7 @@ function initWindows(ctx) {
       mainWindow.setMinimumSize(1200, 700);
       mainWindow.setSize(1600, 960);
       mainWindow.center();
+      mainWindow.setTitle('Fleet Operations');
       mainWindow.show();
       mainWindow.focus();
     }
