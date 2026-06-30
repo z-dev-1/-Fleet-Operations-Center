@@ -1,13 +1,17 @@
 'use strict';
-// ── WR Click-Capture v4 ───────────────────────────────────────────────────────
-// AAP WR links are same-page query param changes (?tab=Unplanned&states=...&eqId=...).
-// They call replaceState (not pushState) and the URL changes immediately.
-// Strategy: snapshot location.href BEFORE click, read it AFTER click (synchronous),
-// then restore via replaceState back to the original URL.
+// ── WR Click-Capture v5 ───────────────────────────────────────────────────────
+// AAP WR links update location.href asynchronously (React Router defers the
+// replaceState to a microtask/setTimeout). We must:
+//   1. Click the anchor
+//   2. Wait a tick for React to flush (Promise.resolve or short setTimeout)
+//   3. Read window.location.href
+//   4. Restore via replaceState
+//
+// We do this via executeJavaScript returning a Promise so the async wait
+// happens inside the page context.
 
 function buildCaptureScript(rowIdx, colIdx) {
-  return `(function(){
-  // Snapshot the current URL
+  return `(async function(){
   var before = window.location.href;
 
   // Find table + cell
@@ -16,24 +20,26 @@ function buildCaptureScript(rowIdx, colIdx) {
   for (var i = 0; i < tables.length; i++) {
     if (tables[i].querySelector('tbody tr')) { t = tables[i]; break; }
   }
-  if (!t) return { ok: false, reason: 'no_table' };
+  if (!t) return { ok: false, reason: 'no_table', before: before };
 
   var row = t.querySelectorAll('tbody tr')[${rowIdx}];
-  if (!row) return { ok: false, reason: 'no_row' };
+  if (!row) return { ok: false, reason: 'no_row_' + ${rowIdx}, before: before };
 
   var cell = row.querySelectorAll('td')[${colIdx}];
-  if (!cell) return { ok: false, reason: 'no_cell' };
+  if (!cell) return { ok: false, reason: 'no_cell_' + ${colIdx}, before: before };
 
   var a = cell.querySelector('a, button');
-  if (!a) return { ok: false, reason: 'no_anchor' };
+  if (!a) return { ok: false, reason: 'no_anchor', before: before };
 
-  // Click — React Router mutates location synchronously via replaceState
+  // Click
   a.click();
 
-  // Read the URL immediately after click
+  // Wait for React Router's async replaceState (microtask + possible rAF)
+  await new Promise(function(r){ setTimeout(r, 80); });
+
   var after = window.location.href;
 
-  // Restore to original URL so the fleet table stays visible
+  // Restore immediately — replaceState is synchronous
   if (after !== before) {
     history.replaceState(history.state, '', before);
   }
@@ -59,34 +65,35 @@ async function captureWRUrls(win, wrRows, label, logger) {
   if (!wrRows || wrRows.length === 0) return {};
   const urlMap = {};
 
-  logger.info('[' + label + '] WR click-capture v4 start: ' + wrRows.length + ' units');
+  logger.info('[' + label + '] WR click-capture v5 start: ' + wrRows.length + ' units');
 
   for (const wr of wrRows) {
     try {
       const script = buildCaptureScript(wr.rowIdx, wr.colIdx);
       const result = await win.webContents.executeJavaScript(script);
 
-      if (result && result.ok) {
-        logger.info('[' + label + '] WR eq=' + wr.eqId +
-          ' before=' + (result.before || '').slice(0, 120) +
-          ' after='  + (result.after  || '').slice(0, 120));
-      }
+      logger.info('[' + label + '] WR eq=' + wr.eqId +
+        ' ok=' + (result && result.ok) +
+        ' url=' + (result && result.capturedUrl ? result.capturedUrl.slice(0, 200) : 'null') +
+        ' reason=' + (result && result.reason || '-') +
+        '\n  before=' + (result && result.before || '').slice(0, 200) +
+        '\n  after='  + (result && result.after  || '').slice(0, 200));
 
       if (result && result.ok && result.capturedUrl) {
         const url = resolveUrl(result.capturedUrl);
         urlMap[wr.eqId] = { url, col: wr.colToClick };
-        logger.info('[' + label + '] WR URL captured eq=' + wr.eqId +
+        logger.info('[' + label + '] ✓ WR URL eq=' + wr.eqId +
           ' (' + wr.colToClick + '): ' + url);
       } else if (result && !result.ok) {
         logger.warn('[' + label + '] WR miss eq=' + wr.eqId + ' reason=' + result.reason);
       } else {
-        logger.warn('[' + label + '] WR miss eq=' + wr.eqId + ' (before===after, url unchanged)');
+        logger.warn('[' + label + '] WR no-change eq=' + wr.eqId);
       }
     } catch (e) {
       logger.warn('[' + label + '] WR error eq=' + wr.eqId + ': ' + e.message);
     }
 
-    await new Promise(r => setTimeout(r, 150));
+    await new Promise(r => setTimeout(r, 100));
   }
 
   logger.info('[' + label + '] WR click-capture done: ' +
