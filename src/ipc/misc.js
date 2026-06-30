@@ -254,7 +254,7 @@ function registerMiscIPC(ctx) {
 
   handle('aap:open-url', async (_e, url) => {
     if (!url || !/^https?:\/\//i.test(url)) return { ok: false, error: 'invalid url' };
-    const { BrowserWindow } = require('electron');
+    const { BrowserWindow, session } = require('electron');
     const win = new BrowserWindow({
       width: 1280, height: 860,
       title: 'AAP Asset',
@@ -263,7 +263,7 @@ function registerMiscIPC(ctx) {
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
-        partition: 'persist:aap',   // reuses same Midway session as main scraper
+        session: session.defaultSession,  // same Midway cookies as the scraper window
       },
     });
     win.setMenuBarVisibility(false);
