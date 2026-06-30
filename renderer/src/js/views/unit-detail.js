@@ -538,7 +538,7 @@ function _renderAsistContent(unit) {
   const srcBadge = src === 'estimate' ? 'Fleet Estimate' : src === 'case' ? 'ASIST Case' : src === 'service_request' ? 'Service Request' : '';
   if (!url && !label) return null;
   let html = '<div class="dp-asist-content">';
-  if (srcBadge) html += '<span class="dp-asist-badge dp-asist-badge--"+_esc(src)+'">'+_esc(srcBadge)+'</span> ';
+  if (srcBadge) html += '<span class="dp-asist-badge dp-asist-badge--' + _esc(src) + '">' + _esc(srcBadge) + '</span> ';
   if (url) {
     const aHref = url.replace(/[']/g, '');
     html += '<a class="dp-asist-url" href="'+ aHref +'" target="_blank" rel="noreferrer">'+_esc(label||url)+'</a>';

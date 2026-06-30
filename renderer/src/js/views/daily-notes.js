@@ -61,8 +61,7 @@ R.push('.dn-empty{padding:40px 20px;text-align:center;color:var(--mut,#6e7681);f
 R.push('.dn-empty-icon{font-size:28px;opacity:.4}');
 R.push('@keyframes dn-spin{to{transform:rotate(360deg)}}');
 R.push('.dn-spin{display:inline-block;animation:dn-spin .8s linear infinite}');
-s.textContent=R.join('
-'); document.head.appendChild(s); }
+s.textContent=R.join('\n'); document.head.appendChild(s); }
 function _decLabel(d){
   if(!d)return '';
   if(d==='NEW_UPDATE')return'<span class=dn-result__dec dn-result__dec--new>New update</span>';
