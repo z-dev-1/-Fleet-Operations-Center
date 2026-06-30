@@ -1,57 +1,97 @@
 'use strict';
-// ── WR Click-Capture v2 ───────────────────────────────────────────────────────
-// React Router calls history.pushState() when a link is clicked —
-// Electron does NOT fire did-navigate-in-page for pushState.
-// Solution: patch history.pushState in the page before clicking,
-// capture the URL it was called with, then restore pushState and go back.
-//
-// Business rules:
-//   Unavailable + reason matches "expired inspection" → click PLANNED column
-//   Unavailable + any other reason                   → click UNPLANNED column
+// ── WR Click-Capture v3 ───────────────────────────────────────────────────────
+// Intercepts ALL history mutation methods + location.href setter before click,
+// then reads what changed after a short microtask delay.
 
-// Script to inject into the page: patches history.pushState and clicks the anchor.
-// Returns { clickResult, capturedUrl } synchronously after the click.
 function buildCaptureScript(rowIdx, colIdx) {
   return `(function(){
-  // 1. Patch history.pushState to intercept React Router navigation
   var _captured = null;
-  var _origPush = history.pushState.bind(history);
+  var _origPush    = history.pushState.bind(history);
+  var _origReplace = history.replaceState.bind(history);
+
+  // Intercept pushState
   history.pushState = function(state, title, url) {
-    _captured = url ? String(url) : null;
-    // Don't actually navigate — we only want the URL
-    // (React Router will handle its own state; we call orig to keep React happy)
+    if (url) _captured = String(url);
     _origPush(state, title, url);
   };
+  // Intercept replaceState
+  history.replaceState = function(state, title, url) {
+    if (url) _captured = String(url);
+    _origReplace(state, title, url);
+  };
+  // Intercept location.assign
+  var _origAssign = location.assign.bind(location);
+  location.assign = function(url) {
+    _captured = String(url);
+    // Don't actually navigate
+  };
 
-  // 2. Find the table and cell
+  // Snapshot URL before click
+  var beforeHref = window.location.href;
+
+  // Find table + cell
   var tables = document.querySelectorAll('table');
   var t = null;
   for (var i = 0; i < tables.length; i++) {
     if (tables[i].querySelector('tbody tr')) { t = tables[i]; break; }
   }
-  if (!t) { history.pushState = _origPush; return { ok: false, reason: 'no_table' }; }
+  if (!t) {
+    history.pushState = _origPush;
+    history.replaceState = _origReplace;
+    location.assign = _origAssign;
+    return { ok: false, reason: 'no_table' };
+  }
 
   var row = t.querySelectorAll('tbody tr')[${rowIdx}];
-  if (!row) { history.pushState = _origPush; return { ok: false, reason: 'no_row' }; }
+  if (!row) {
+    history.pushState = _origPush;
+    history.replaceState = _origReplace;
+    location.assign = _origAssign;
+    return { ok: false, reason: 'no_row' };
+  }
 
   var cell = row.querySelectorAll('td')[${colIdx}];
-  if (!cell) { history.pushState = _origPush; return { ok: false, reason: 'no_cell' }; }
+  if (!cell) {
+    history.pushState = _origPush;
+    history.replaceState = _origReplace;
+    location.assign = _origAssign;
+    return { ok: false, reason: 'no_cell' };
+  }
 
   var a = cell.querySelector('a, button');
-  if (!a) { history.pushState = _origPush; return { ok: false, reason: 'no_anchor' }; }
+  if (!a) {
+    history.pushState = _origPush;
+    history.replaceState = _origReplace;
+    location.assign = _origAssign;
+    return { ok: false, reason: 'no_anchor' };
+  }
 
-  // 3. Click — React Router's onClick fires synchronously -> calls history.pushState
+  // Click — React Router fires onClick synchronously
   a.click();
 
-  // 4. Restore pushState
+  // Restore
   history.pushState = _origPush;
+  history.replaceState = _origReplace;
+  location.assign = _origAssign;
 
-  // 5. If pushState was called, go back to the fleet table
-  if (_captured) {
+  // Check if URL changed via location.href (some routers just assign href)
+  var afterHref = window.location.href;
+  if (!_captured && afterHref !== beforeHref) {
+    _captured = afterHref;
+  }
+
+  // If we navigated, go back
+  if (_captured && afterHref !== beforeHref) {
     history.back();
   }
 
-  return { ok: true, capturedUrl: _captured };
+  return {
+    ok:         true,
+    capturedUrl: _captured,
+    beforeHref:  beforeHref.slice(0, 100),
+    afterHref:   afterHref.slice(0, 100),
+    method:      _captured ? 'intercepted' : 'none'
+  };
 })()`;
 }
 
@@ -67,27 +107,31 @@ async function captureWRUrls(win, wrRows, label, logger) {
   if (!wrRows || wrRows.length === 0) return {};
   const urlMap = {};
 
-  logger.info('[' + label + '] WR click-capture start: ' + wrRows.length + ' unavailable units');
+  logger.info('[' + label + '] WR click-capture v3 start: ' + wrRows.length + ' units');
 
   for (const wr of wrRows) {
     try {
       const script = buildCaptureScript(wr.rowIdx, wr.colIdx);
       const result = await win.webContents.executeJavaScript(script);
 
+      logger.info('[' + label + '] WR capture eq=' + wr.eqId +
+        ' ok=' + (result && result.ok) +
+        ' method=' + (result && result.method || '?') +
+        ' before=' + (result && result.beforeHref || '') +
+        ' after=' + (result && result.afterHref || '') +
+        ' url=' + (result && result.capturedUrl || 'null'));
+
       if (result && result.ok && result.capturedUrl) {
         const url = resolveUrl(result.capturedUrl);
         urlMap[wr.eqId] = { url, col: wr.colToClick };
-        logger.info('[' + label + '] WR URL eq=' + wr.eqId +
-          ' (' + wr.colToClick + '): ' + url);
-      } else {
-        logger.warn('[' + label + '] WR capture miss eq=' + wr.eqId +
-          ' reason=' + (result && result.reason || 'no_pushState'));
+      } else if (result && !result.ok) {
+        logger.warn('[' + label + '] WR capture miss eq=' + wr.eqId + ' reason=' + result.reason);
       }
     } catch (e) {
       logger.warn('[' + label + '] WR capture error eq=' + wr.eqId + ': ' + e.message);
     }
 
-    await new Promise(r => setTimeout(r, 150)); // brief pause between rows
+    await new Promise(r => setTimeout(r, 200));
   }
 
   logger.info('[' + label + '] WR click-capture done: ' +
