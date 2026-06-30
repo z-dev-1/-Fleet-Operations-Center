@@ -31,21 +31,15 @@ let _sortDir = 'asc';
 // ── Columns ───────────────────────────────────────────────────────────────
 const COLS = [
   { key: 'equipmentId',    label: 'Equipment ID',       width: '130px', sortable: true  },
-  { key: 'lifecycleState', label: 'Lifecycle State',    width: '150px', sortable: true  },
-  { key: 'assetType',      label: 'Asset Type',         width: '110px', sortable: true  },
-  { key: 'lifecycleReason',label: 'State Reason',       width: '170px', sortable: true  },
-  { key: 'owner',          label: 'Owner',              width: '130px', sortable: true  },
-  { key: 'manufacturer',   label: 'Manufacturer',       width: '130px', sortable: true  },
-  { key: 'domicileSite',   label: 'Domicile Site',      width: '110px', sortable: true  },
-  { key: 'operator',       label: 'Operator',           width: '120px', sortable: true  },
-  { key: 'openUnplanned',  label: 'Open Unplanned WRs', width: '110px', sortable: true  },
-  { key: 'openPlanned',    label: 'Open Planned WRs',   width: '110px', sortable: true  },
-  { key: 'geofence',       label: 'Last Geofence',      width: '170px', sortable: false },
-  { key: 'latLong',        label: 'Lat / Long',         width: '150px', sortable: false },
-  { key: 'fuelType',       label: 'Fuel Type',          width: '100px', sortable: true  },
   { key: 'bodyType',       label: 'Body Type',          width: '110px', sortable: true  },
-  { key: 'assetId',        label: 'Asset ID',           width: '130px', sortable: true  },
-  { key: 'dueDate',        label: 'Due Date',           width: '100px', sortable: true  },
+  { key: 'domicileSite',   label: 'Domicile Site',      width: '120px', sortable: true  },
+  { key: 'operator',       label: 'Operator',           width: '120px', sortable: true  },
+  { key: 'lifecycleState', label: 'Lifecycle State',    width: '150px', sortable: true  },
+  { key: 'lifecycleReason',label: 'State Reason',       width: '170px', sortable: true  },
+  { key: 'openUnplanned',  label: 'Open Unplanned WRs', width: '120px', sortable: true  },
+  { key: 'openPlanned',    label: 'Open Planned WRs',   width: '120px', sortable: true  },
+  { key: 'fuelType',       label: 'Fuel Type',          width: '100px', sortable: true  },
+  { key: 'geofence',       label: 'Last Geofence',      width: '180px', sortable: false },
 ];
 
 function _lifecycleClass(val) {
