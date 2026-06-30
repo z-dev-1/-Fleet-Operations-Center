@@ -261,19 +261,25 @@ function initWindows(ctx) {
     // Configure columns before polling starts
     if (label === 'startup' || label === 'rescan') {
       try {
-        // Wait for DOM to settle: hold until 1.5s passes with no further did-finish-load events
-        // This survives the AAP redirect storm (9-12 rapid reloads on first open)
+        // Wait for DOM to settle: 1.5s quiet window AFTER last did-finish-load.
+        // Do NOT arm timer immediately -- scrape starts mid-redirect-storm.
+        // Most reloads already fired. Wait for next real reload then debounce.
+        // 10s ceiling: edge case where AAP is already fully settled.
         await new Promise(function(resolve) {
           var settled;
+          var ceiling = setTimeout(function() {
+            win.webContents.removeListener('did-finish-load', arm);
+            resolve();
+          }, 10000);
           function arm() {
             clearTimeout(settled);
             settled = setTimeout(function() {
+              clearTimeout(ceiling);
               win.webContents.removeListener('did-finish-load', arm);
               resolve();
             }, 1500);
           }
           win.webContents.on('did-finish-load', arm);
-          arm(); // start the timer even if no more loads fire
         });
         const colRes = await win.webContents.executeJavaScript(`(async function __aapConfigCols() {
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
