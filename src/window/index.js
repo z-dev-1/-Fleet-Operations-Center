@@ -10,20 +10,12 @@
  *   - Setup wizard (first-launch onboarding)
  *   - Popup windows: Uptake, Relay, email preview (via IPC handlers)
  *
- * Differences from V-B window.js:
- *   - store.load/save replaces inline fs + app.getPath('userData') calls
- *   - P.* used for renderer, preload, assets, bubble HTML paths
- *   - setup/state.js isSetupComplete() replaces raw setupDoneFile existsSync check
- *   - DATA_FILE reference in tray fixed (was undefined in V-B scope) — now P.fleetData
- *   - logger replaces console.log throughout
- *   - ROOT_DIR derived from __dirname (src/window → ../../ = project root)
- *   - showBubble/hideBubble exported so app-shell / sync can call them
- *   - getBubbleWin() exported for sync engine ctx
- *
- * ctx provided by app.js must expose:
- *   pushData, pushStatus, pushError, send
- *   startAutoSync, runFullSync
- *   showBubble, hideBubble  (passed back in return value — app.js binds them)
+ * Auth strategy:
+ *   - On startup: checkMwinit() reads actual cookie expiry timestamps from
+ *     ~/.midway/cookie. If any are expired, runMwinit() spawns a visible
+ *     terminal automatically — no hardcoded hour thresholds.
+ *   - Mid-session: _authPoller detects SSO redirect loop (10+ consecutive
+ *     seconds on midway-auth.amazon.com) and triggers runMwinit() automatically.
  */
 
 const {
@@ -37,35 +29,30 @@ const { P }  = require('../config/paths');
 const store  = require('../store');
 const { isSetupComplete } = require('../../setup/state');
 
-// Project root: src/window/ -> src/ -> root
 const ROOT_DIR = path.join(__dirname, '..', '..');
 
-// ── Field map for AAP table column → camelCase property ─────────────────────
+// ── Field map: AAP table column header → camelCase property ─────────────────
 const AAP_FIELD_MAP = {
-  'Equipment ID':               'equipmentId',
-  'Asset type':                 'assetType',
-  'Lifecycle state':            'lifecycleState',
-  'Lifecycle state reason':     'lifecycleReason',
-  'Operator':                   'operator',
-  'Manufacturer':               'manufacturer',
-  'Body type':                  'bodyType',
-  'Due date':                   'dueDate',
-  'Engine manufacturer':        'engineManufacturer',
-  'Domicile site':              'domicileSite',
-  'Fuel type':                  'fuelType',
+  'Equipment ID':                 'equipmentId',
+  'Asset type':                   'assetType',
+  'Lifecycle state':              'lifecycleState',
+  'Lifecycle state reason':       'lifecycleReason',
+  'Operator':                     'operator',
+  'Manufacturer':                 'manufacturer',
+  'Body type':                    'bodyType',
+  'Due date':                     'dueDate',
+  'Engine manufacturer':          'engineManufacturer',
+  'Domicile site':                'domicileSite',
+  'Fuel type':                    'fuelType',
   'Open Unplanned Work Requests': 'openUnplanned',
-  'Open Planned Work Requests': 'openPlanned',
-  'Last geofences':             'geofence',
-  'Lat/Long':                   'latLong',
-'Owner':                      'owner',
-'Asset ID':                   'assetId',
-  'assetId':                    'assetId',
-'Open Planned Work Requests': 'openPlanned',
+  'Open Planned Work Requests':   'openPlanned',
+  'Last geofences':               'geofence',
+  'Lat/Long':                     'latLong',
+  'Owner':                        'owner',
+  'Asset ID':                     'assetId',
 };
 
-// JS snippet injected into AAP pages — forces "Results per page" to 1000.
-// Kept as a named constant so it isn't duplicated between startup scrape
-// and live rescan.
+// ── JS injected into AAP: force 1000 rows per page ───────────────────────────
 const JS_FORCE_1000_RPP = `(function(){
   function simClick(el){
     el.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true}));
@@ -77,12 +64,8 @@ const JS_FORCE_1000_RPP = `(function(){
   if (!rpp) {
     var all = document.querySelectorAll('*');
     for (var i = 0; i < all.length; i++) {
-      if (all[i].childNodes.length === 1 &&
-          (all[i].textContent||'').trim() === 'Results per page') {
-        var parent = all[i].parentElement;
-        rpp = parent.querySelector(
-          'button,select,[role="button"],[role="combobox"],[role="listbox"]'
-        );
+      if (all[i].childNodes.length === 1 && (all[i].textContent||'').trim() === 'Results per page') {
+        rpp = all[i].parentElement.querySelector('button,select,[role="button"],[role="combobox"],[role="listbox"]');
         break;
       }
     }
@@ -134,7 +117,7 @@ const JS_EXTRACT_TABLE = `(function(){
     debug:'table class='+t.className+' trs='+t.querySelectorAll('tbody tr').length };
 })()`;
 
-// Map raw AAP row objects → normalised camelCase objects, drop rows with no ID
+// ── Map raw AAP rows → normalised camelCase, drop rows with no equipmentId ───
 function _mapAAPRows(rawRows) {
   return rawRows.map(row => {
     const m = {};
@@ -147,8 +130,7 @@ function _mapAAPRows(rawRows) {
   }).filter(x => x.equipmentId);
 }
 
-// Save scraped AAP data to both aap_cache and fleetData so renderer:ready
-// gets a populated table immediately.
+// ── Save scrape results to aap_cache + fleetData ──────────────────────────────
 function _saveAAPCaches(rows) {
   const now     = new Date().toISOString();
   const payload = { rows, count: rows.length, scrapedAt: now, syncedAt: now, stale: false };
@@ -157,25 +139,21 @@ function _saveAAPCaches(rows) {
   return payload;
 }
 
-// ---------------------------------------------------------------------------
-// initWindows(ctx)  — sets up all windows and registers window-related IPC.
-// Returns an object the rest of app.js binds into its shared ctx.
-// ---------------------------------------------------------------------------
+// ── initWindows(ctx) ──────────────────────────────────────────────────────────
 function initWindows(ctx) {
   const { pushData, pushStatus, pushError, send, startAutoSync, runFullSync } = ctx;
 
-  let mainWindow       = null;
-  let tray             = null;
-  let bubbleWin        = null;
-  let _bubbleLastPos   = null;
+  let mainWindow        = null;
+  let tray              = null;
+  let bubbleWin         = null;
+  let _bubbleLastPos    = null;
   let _rescanInProgress = false;
-  let _appReady = false;
+  let _appReady         = false;
 
-  // ── Lazy-loaded scraper deps (avoid circular require at module load) ───────
+  // Lazy-load scrapers to avoid circular require at module load
   function _getAap()  { return require('../scrapers/aap'); }
   function _getAuth() { return require('../scrapers/auth'); }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
   function getDomiciles() {
     const settings = store.load('settings', {});
     return (settings.domiciles && settings.domiciles.length)
@@ -187,21 +165,15 @@ function initWindows(ctx) {
   function showBubble() {
     if (bubbleWin && !bubbleWin.isDestroyed()) return;
 
-    const display  = screen.getPrimaryDisplay();
-    const { width, height } = display.workAreaSize;
+    const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     const savedPos = _bubbleLastPos || { x: width - 360, y: height - 520 };
-
     const bubbleHtml = path.join(ROOT_DIR, 'renderer', 'bubble.html');
 
     bubbleWin = new BrowserWindow({
       width: 340, height: 500,
       x: savedPos.x, y: savedPos.y,
-      frame:       false,
-      transparent: true,
-      alwaysOnTop: true,
-      resizable:   false,
-      skipTaskbar: true,
-      hasShadow:   false,
+      frame: false, transparent: true, alwaysOnTop: true,
+      resizable: false, skipTaskbar: true, hasShadow: false,
       webPreferences: {
         preload:          path.join(ROOT_DIR, 'renderer', 'bubble-preload.js'),
         contextIsolation: true,
@@ -209,7 +181,6 @@ function initWindows(ctx) {
       },
     });
 
-    // Fall back gracefully if bubble.html doesn't exist yet (renderer not built)
     if (fs.existsSync(bubbleHtml)) {
       bubbleWin.loadFile(bubbleHtml);
     } else {
@@ -222,12 +193,11 @@ function initWindows(ctx) {
 
     bubbleWin.on('moved', () => {
       if (bubbleWin && !bubbleWin.isDestroyed()) {
-        const pos = bubbleWin.getPosition();
-        _bubbleLastPos = { x: pos[0], y: pos[1] };
+        const [x, y] = bubbleWin.getPosition();
+        _bubbleLastPos = { x, y };
       }
     });
 
-    // Send current unavailable badge count once loaded
     const lastData = store.load('fleetData', null);
     if (lastData && lastData.rows) {
       const unavail = lastData.rows.filter(
@@ -247,8 +217,6 @@ function initWindows(ctx) {
     }
   }
 
-  function getBubbleWin() { return bubbleWin; }
-
   function pushBubbleNotification(notif) {
     if (bubbleWin && !bubbleWin.isDestroyed())
       bubbleWin.webContents.send('bubble:notification', notif);
@@ -266,13 +234,11 @@ function initWindows(ctx) {
     );
   }
 
-  // ── Desktop notifications ─────────────────────────────────────────────────
   function _sendDesktopNotification(title, body, onClick) {
     if (!Notification.isSupported()) return;
     const iconPath = path.join(ROOT_DIR, 'assets', 'icon.png');
     const notif = new Notification({
-      title,
-      body,
+      title, body,
       icon: fs.existsSync(iconPath) ? iconPath : undefined,
       silent: false,
     });
@@ -283,30 +249,115 @@ function initWindows(ctx) {
     notif.show();
   }
 
-  // ── AAP scrape helpers ────────────────────────────────────────────────────
-
-  // Shared scrape logic: given a BrowserWindow already loaded with an AAP page,
-  // waits for rows, forces 1000/page, extracts, maps, and saves.
-  // onComplete(rows) is called with the mapped rows on success.
-  // onTimeout() is called if no rows appear within maxPolls * 2s.
+  // ── AAP scrape loop ───────────────────────────────────────────────────────
+  // Given a BrowserWindow already loaded with an AAP page:
+  //  1. Auto-configures AAP columns via UI injection
+  //  2. Polls for table rows every 2s
+  //  3. Forces 1000/page, extracts, maps, calls onComplete(rows)
   async function _runAAPScrapeLoop(win, { label, maxPolls = 45, onComplete, onTimeout }) {
     let done  = false;
     let polls = 0;
 
-
-    // ── Auto-configure AAP columns via UI before starting poll loop ──────────
+    // Configure columns before polling starts
     if (label === 'startup' || label === 'rescan') {
       try {
-        await new Promise(r => setTimeout(r, 2800)); // let React mount
-        const __colRes = await win.webContents.executeJavaScript("(async function __aapConfigCols() {\n  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }\n  function simClick(el) {\n    ['mousedown','mouseup','click'].forEach(function(ev) {\n      el.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true }));\n    });\n  }\n  var WANT = [\"Domicile site\",\"Operator\",\"Asset type\",\"Fuel type\",\"Lifecycle state\",\"Lifecycle state reason\",\"Manufacturer\",\"Body type\",\"Open Unplanned Work Requests\",\"Open Planned Work Requests\",\"Last geofences\"];\n\n  // Find the column-selector eye button\n  var btn = document.querySelector(\n    '#app-layout-content-1 > div > div > div.css-1h2w845 > div > div.css-1d7jqjm > div.css-1k6haed > div > div:nth-child(1) > div > div > div > button:nth-child(4)'\n  );\n  if (!btn) {\n    var wrap = document.querySelector('[class*=\"css-1k6haed\"]');\n    if (wrap) { var allBtns = wrap.querySelectorAll('button'); if (allBtns[3]) btn = allBtns[3]; }\n  }\n  if (!btn) return { ok: false, reason: 'button not found' };\n  simClick(btn);\n  await sleep(900);\n\n  var popup = document.querySelector('body > div:nth-child(19) > div > div > div > div > div:nth-child(2) > div');\n  if (!popup) {\n    for (var bi = document.body.children.length - 1; bi >= 0; bi--) {\n      if ((document.body.children[bi].textContent||'').includes('Selected columns')) { popup = document.body.children[bi]; break; }\n    }\n  }\n  if (!popup) {\n    var divs = document.querySelectorAll('div');\n    for (var di = 0; di < divs.length; di++) {\n      var t = divs[di].textContent || '';\n      if (t.includes('Available Columns') && t.includes('Selected columns') && t.length < 5000) { popup = divs[di]; break; }\n    }\n  }\n  if (!popup) return { ok: false, reason: 'popup not found' };\n\n  // Remove existing selected columns (except Equipment ID)\n  var removed = 0;\n  for (var rr = 0; rr < 25; rr++) {\n    var xBtns = Array.from(popup.querySelectorAll('button')).filter(function(b) {\n      return b.getAttribute('aria-label') === 'Remove' || (b.closest('[class]') && (b.textContent||'').trim() === '×');\n    });\n    if (xBtns.length === 0) break;\n    var toRemove = xBtns.find(function(b) {\n      var row = b.closest('[class*=\"css-\"]');\n      return row && !(row.textContent||'').includes('Equipment ID');\n    }) || xBtns[0];\n    simClick(toRemove); removed++; await sleep(180);\n  }\n\n  // Add each wanted column\n  var searchInput = popup.querySelector('input[placeholder*=\"Search\"], input[type=\"search\"], input[type=\"text\"]');\n  var added = [], failed = [];\n  for (var ci = 0; ci < WANT.length; ci++) {\n    var name = WANT[ci];\n    if (searchInput) {\n      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;\n      setter.call(searchInput, name);\n      searchInput.dispatchEvent(new Event('input', { bubbles: true }));\n      searchInput.dispatchEvent(new Event('change', { bubbles: true }));\n      await sleep(350);\n    }\n    var rows = Array.from(popup.querySelectorAll('[class*=\"css-\"] button, li button'));\n    var found = false;\n    for (var ri = 0; ri < rows.length; ri++) {\n      var rowEl = rows[ri].closest('[class*=\"css-\"]') || rows[ri];\n      var rowText = (rowEl.textContent||'').trim();\n      if (rowText === name || rowText.startsWith(name)) { simClick(rows[ri]); added.push(name); found = true; await sleep(250); break; }\n    }\n    if (!found) failed.push(name);\n  }\n\n  // Click Apply\n  await sleep(300);\n  var applyBtn = Array.from(document.querySelectorAll('button')).find(function(b) { return (b.textContent||'').trim() === 'Apply'; });\n  if (applyBtn) { simClick(applyBtn); return { ok: true, added: added, failed: failed }; }\n  return { ok: false, reason: 'Apply not found', added: added, failed: failed };\n})()");
-        logger.info('[' + label + '] Column config result:', JSON.stringify(__colRes));
-        if (__colRes && __colRes.ok) {
-          await new Promise(r => setTimeout(r, 1800)); // let AAP re-render with new columns
-        }
-      } catch(__colErr) {
-        logger.warn('[' + label + '] Column config failed:', __colErr.message);
+        await new Promise(r => setTimeout(r, 2800)); // wait for React to mount
+        const colRes = await win.webContents.executeJavaScript(`(async function __aapConfigCols() {
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  function simClick(el) {
+    ['mousedown','mouseup','click'].forEach(function(ev) {
+      el.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true }));
+    });
+  }
+  var WANT = [
+    "Domicile site","Operator","Asset type","Fuel type",
+    "Lifecycle state","Lifecycle state reason","Manufacturer","Body type",
+    "Open Unplanned Work Requests","Open Planned Work Requests","Last geofences"
+  ];
+
+  // Find the column-selector eye button
+  var btn = document.querySelector(
+    '#app-layout-content-1 > div > div > div.css-1h2w845 > div > div.css-1d7jqjm > div.css-1k6haed > div > div:nth-child(1) > div > div > div > button:nth-child(4)'
+  );
+  if (!btn) {
+    var wrap = document.querySelector('[class*="css-1k6haed"]');
+    if (wrap) { var allBtns = wrap.querySelectorAll('button'); if (allBtns[3]) btn = allBtns[3]; }
+  }
+  if (!btn) return { ok: false, reason: 'button not found' };
+  simClick(btn);
+  await sleep(900);
+
+  // Find the column config popup
+  var popup = null;
+  for (var bi = document.body.children.length - 1; bi >= 0; bi--) {
+    if ((document.body.children[bi].textContent||'').includes('Selected columns')) {
+      popup = document.body.children[bi]; break;
+    }
+  }
+  if (!popup) {
+    var divs = document.querySelectorAll('div');
+    for (var di = 0; di < divs.length; di++) {
+      var t = divs[di].textContent || '';
+      if (t.includes('Available Columns') && t.includes('Selected columns') && t.length < 5000) {
+        popup = divs[di]; break;
       }
     }
+  }
+  if (!popup) return { ok: false, reason: 'popup not found' };
+
+  // Remove existing selected columns (keep Equipment ID)
+  for (var rr = 0; rr < 25; rr++) {
+    var xBtns = Array.from(popup.querySelectorAll('button')).filter(function(b) {
+      return b.getAttribute('aria-label') === 'Remove' ||
+             (b.closest('[class]') && (b.textContent||'').trim() === '×');
+    });
+    if (xBtns.length === 0) break;
+    var toRemove = xBtns.find(function(b) {
+      var row = b.closest('[class*="css-"]');
+      return row && !(row.textContent||'').includes('Equipment ID');
+    }) || xBtns[0];
+    simClick(toRemove);
+    await sleep(180);
+  }
+
+  // Add each wanted column
+  var searchInput = popup.querySelector('input[placeholder*="Search"], input[type="search"], input[type="text"]');
+  var added = [], failed = [];
+  for (var ci = 0; ci < WANT.length; ci++) {
+    var name = WANT[ci];
+    if (searchInput) {
+      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(searchInput, name);
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+      await sleep(350);
+    }
+    var rows = Array.from(popup.querySelectorAll('[class*="css-"] button, li button'));
+    var found = false;
+    for (var ri = 0; ri < rows.length; ri++) {
+      var rowEl = rows[ri].closest('[class*="css-"]') || rows[ri];
+      var rowText = (rowEl.textContent||'').trim();
+      if (rowText === name || rowText.startsWith(name)) {
+        simClick(rows[ri]); added.push(name); found = true; await sleep(250); break;
+      }
+    }
+    if (!found) failed.push(name);
+  }
+
+  // Apply
+  await sleep(300);
+  var applyBtn = Array.from(document.querySelectorAll('button'))
+    .find(function(b) { return (b.textContent||'').trim() === 'Apply'; });
+  if (applyBtn) { simClick(applyBtn); return { ok: true, added: added, failed: failed }; }
+  return { ok: false, reason: 'Apply not found', added: added, failed: failed };
+})()`);
+        logger.info('[' + label + '] Column config:', JSON.stringify(colRes));
+        if (colRes && colRes.ok) await new Promise(r => setTimeout(r, 1800));
+      } catch (e) {
+        logger.warn('[' + label + '] Column config failed:', e.message);
+      }
+    }
+
     const iv = setInterval(async () => {
       polls++;
       if (done) { clearInterval(iv); return; }
@@ -321,9 +372,8 @@ function initWindows(ctx) {
           `document.querySelectorAll('tbody tr').length`
         );
 
-        // Diagnostic DOM probe on polls 5 and 20 (startup scrape only)
         if (label === 'startup' && (polls === 5 || polls === 20)) {
-          const domInfo = await win.webContents.executeJavaScript(`(function(){
+          const info = await win.webContents.executeJavaScript(`(function(){
             return JSON.stringify({
               tables:   document.querySelectorAll('table').length,
               tbodies:  document.querySelectorAll('tbody').length,
@@ -331,41 +381,40 @@ function initWindows(ctx) {
               bodySnip: (document.body.innerText||'').substring(0,300),
             });
           })()`);
-          logger.info(`[${label}] DOM probe poll=${polls}: ${domInfo}`);
+          logger.info('[' + label + '] DOM probe poll=' + polls + ': ' + info);
         }
 
-        logger.info(`[${label}] Poll ${polls} → ${count} rows`);
+        logger.info('[' + label + '] Poll ' + polls + ' \u2192 ' + count + ' rows');
 
         if (count > 5 && !done) {
           clearInterval(iv);
           done = true;
-          logger.info(`[${label}] Found ${count} rows — forcing 1000/page...`);
+          logger.info('[' + label + '] Found ' + count + ' rows \u2014 forcing 1000/page...');
 
           try {
-            const rppResult = await win.webContents.executeJavaScript(JS_FORCE_1000_RPP);
-            logger.info(`[${label}] RPP: ${rppResult}`);
+            const rpp = await win.webContents.executeJavaScript(JS_FORCE_1000_RPP);
+            logger.info('[' + label + '] RPP:', rpp);
             await new Promise(r => setTimeout(r, 500));
-            const clickResult = await win.webContents.executeJavaScript(JS_CLICK_1000);
-            logger.info(`[${label}] 1000-click: ${clickResult}`);
+            const c1000 = await win.webContents.executeJavaScript(JS_CLICK_1000);
+            logger.info('[' + label + '] 1000-click:', c1000);
             await new Promise(r => setTimeout(r, 8000));
             const newCount = await win.webContents.executeJavaScript(
               `document.querySelectorAll('tbody tr').length`
             );
-            logger.info(`[${label}] After 1000 force: ${newCount} rows`);
+            logger.info('[' + label + '] After 1000 force: ' + newCount + ' rows');
           } catch (e) {
-            logger.warn(`[${label}] Force-1000 error:`, e.message);
+            logger.warn('[' + label + '] Force-1000 error:', e.message);
           }
 
           const data = await win.webContents.executeJavaScript(JS_EXTRACT_TABLE);
-          logger.info(`[${label}] Extracted ${data.count} records. ${data.debug}`);
+          logger.info('[' + label + '] Extracted ' + data.count + ' records. ' + data.debug);
 
           const rows = _mapAAPRows(data.rows || []);
-          logger.info(`[${label}] Mapped ${rows.length} units`);
+          logger.info('[' + label + '] Mapped ' + rows.length + ' units');
           onComplete(rows);
         }
       } catch (e) {
-        // page still navigating — not fatal
-        logger.info(`[${label}] Scrape iteration error (poll ${polls}): ${e.message}`);
+        logger.info('[' + label + '] Poll ' + polls + ' error (page navigating): ' + e.message);
       }
     }, 2000);
   }
@@ -373,14 +422,11 @@ function initWindows(ctx) {
   // ── Main window ───────────────────────────────────────────────────────────
   function createMainWindow() {
     const { buildScanURL } = _getAap();
-    const { checkMwinit }  = _getAuth();
 
-    // Start hidden at 1×1 off-screen while AAP scrapes.
-    // switchToApp() moves/resizes to full size once scraping is done.
     mainWindow = new BrowserWindow({
       width: 900, height: 700,
       minWidth: 600, minHeight: 500,
-      title: 'Fleet Operations — Sign in…',
+      title: 'Fleet Operations \u2014 Sign in\u2026',
       backgroundColor: '#0d1117',
       show: true,
       center: true,
@@ -395,34 +441,37 @@ function initWindows(ctx) {
 
     const scrapeDomiciles = getDomiciles();
     const startUrl        = buildScanURL(scrapeDomiciles);
-    logger.info(`Loading AAP in main window: ${startUrl.substring(0, 80)}`);
-    // ── Midway pre-flight: check cookie age, run mwinit if stale ──────────
-    // Spawns a visible cmd.exe terminal running `mwinit -o` when cookies are
-    // expired. Waits for fresh cookies, then loads AAP. No more redirect loops.
+    logger.info('Loading AAP in main window: ' + startUrl.substring(0, 80));
+
+    // ── Midway pre-flight: check actual cookie expiry, run mwinit if needed ──
+    // Reads ~/.midway/cookie expiry timestamps — no hardcoded hour thresholds.
+    // Spawns a visible cmd.exe terminal automatically when any cookie is expired.
     (async function _midwayPreFlight() {
-      const { checkMwinit: _chk, runMwinit: _mwinit, injectCookies: _inject } = _getAuth();
-      const mwState = _chk();
-      if (!mwState.ok) {
-        logger.warn('[startup] ' + mwState.reason + ' — launching mwinit terminal');
-        pushStatus('🔑 Midway auth required — complete auth in the terminal window...');
+      const { checkMwinit, runMwinit, injectCookies } = _getAuth();
+      const state = checkMwinit();
+
+      if (!state.ok) {
+        logger.warn('[startup] ' + state.reason + ' \u2014 launching mwinit terminal');
+        pushStatus('\uD83D\uDD11 Midway session expired \u2014 complete auth in the terminal window...');
         try {
-          await _mwinit();
-          await _inject();
-          logger.info('[startup] mwinit done — cookies refreshed');
-          pushStatus('✅ Midway auth complete — loading AAP...');
-        } catch(mwErr) {
-          logger.error('[startup] mwinit failed:', mwErr.message);
-          pushError('⚠️ mwinit failed: ' + mwErr.message);
+          await runMwinit();
+          await injectCookies();
+          logger.info('[startup] mwinit complete \u2014 loading AAP');
+          pushStatus('\u2705 Midway auth complete \u2014 loading AAP...');
+        } catch (e) {
+          logger.error('[startup] mwinit failed:', e.message);
+          pushError('\u26A0\uFE0F mwinit failed: ' + e.message + ' \u2014 run mwinit manually then restart');
         }
       } else {
-        logger.info('[startup] Midway cookie OK (' + mwState.ageHours + 'h old) — loading AAP');
+        logger.info('[startup] Cookies valid (' + state.count + ' cookies, expires in ' +
+          (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ')');
       }
+
       mainWindow.loadURL(startUrl);
     })();
 
     function switchToApp() {
       _appReady = true;
-      // Start live rescan: first run 90s after app loads, then every 5 min
       setTimeout(() => {
         triggerLiveRescan(false);
         setInterval(() => triggerLiveRescan(false), RESCAN_INTERVAL_MS);
@@ -432,8 +481,7 @@ function initWindows(ctx) {
         logger.info('[window] Dev mode: loading Vite dev server at http://localhost:5173');
         mainWindow.loadURL('http://localhost:5173');
       } else {
-        const rendererHtml = path.join(ROOT_DIR, 'renderer', 'src', 'index.html');
-        mainWindow.loadFile(rendererHtml);
+        mainWindow.loadFile(path.join(ROOT_DIR, 'renderer', 'src', 'index.html'));
       }
       mainWindow.setMinimumSize(1200, 700);
       mainWindow.setSize(1600, 960);
@@ -445,82 +493,76 @@ function initWindows(ctx) {
 
     let _startupScrapeStarted = false;
 
-    // _onMainWindowNav: called on every navigation event for the main window.
-    // Starts the startup scrape exactly once, the first time we land on AAP
-    // after Midway SSO completes. Handles all three navigation events because
-    // the Midway -> AAP redirect chain can fire any of them depending on the
-    // auth method used (security key, OTP, cookie).
     function _onMainWindowNav(url) {
       if (!url) url = mainWindow.webContents.getURL();
-      logger.info(`Main window loaded: ${url.substring(0, 80)}`);
+      logger.info('Main window loaded: ' + url.substring(0, 80));
       const onAAP = url.includes('aap-na.corp.amazon.com') && !url.includes('midway-auth');
       if (onAAP && !_startupScrapeStarted) {
         _startupScrapeStarted = true;
-        logger.info('[startup] AAP loaded post-auth — starting scrape loop');
+        logger.info('[startup] AAP loaded \u2014 starting scrape loop');
         _runAAPScrapeLoop(mainWindow, {
           label: 'startup', maxPolls: 45,
           onComplete: (rows) => {
             const payload = _saveAAPCaches(rows);
-            logger.info(`Startup scrape: saved ${rows.length} units to aapCache + fleetData`);
+            logger.info('Startup scrape: saved ' + rows.length + ' units');
             pushData(payload);
             switchToApp();
           },
           onTimeout: () => {
-            logger.warn('Startup scrape timed out — switching to app with empty AAP cache');
+            logger.warn('Startup scrape timed out \u2014 switching to app with empty cache');
             switchToApp();
           },
         });
       }
     }
 
-    // Listen on all navigation events for the main window
-    mainWindow.webContents.on('did-finish-load',     ()        => _onMainWindowNav());
-    mainWindow.webContents.on('did-navigate',        (_e, url) => _onMainWindowNav(url));
-    mainWindow.webContents.on('did-navigate-in-page',(_e, url) => _onMainWindowNav(url));
-    mainWindow.webContents.on('dom-ready',           ()        => _onMainWindowNav());
+    mainWindow.webContents.on('did-finish-load',      ()        => _onMainWindowNav());
+    mainWindow.webContents.on('did-navigate',         (_e, url) => _onMainWindowNav(url));
+    mainWindow.webContents.on('did-navigate-in-page', (_e, url) => _onMainWindowNav(url));
+    mainWindow.webContents.on('dom-ready',            ()        => _onMainWindowNav());
 
-    // Fallback URL poller: catches JS/meta redirects that skip navigation events.
-    // Polls every 1s. If stuck on Midway SSO for > 10s, spawns mwinit terminal.
-    let _authPollSSOCount = 0;
-    let _mwinitRunning    = false;
+    // ── Auth poller: detects SSO redirect loop, auto-triggers mwinit ─────────
+    // Polls current URL every 1s. If stuck on midway-auth for 10+ consecutive
+    // seconds → cookies expired mid-session → spawns mwinit terminal automatically.
+    // Uses the same checkMwinit() expiry detection as startup (no hardcoded hours).
+    let _ssoCount      = 0;
+    let _mwinitRunning = false;
+
     const _authPoller = setInterval(async () => {
-      if (_startupScrapeStarted || mainWindow.isDestroyed()) {
+      if (_startupScrapeStarted || !mainWindow || mainWindow.isDestroyed()) {
         clearInterval(_authPoller);
         return;
       }
-      const url = mainWindow.webContents.getURL();
-      logger.info(`[auth-poll] Current URL: ${url.substring(0, 80)}`);
 
+      const url   = mainWindow.webContents.getURL();
       const isSSO = url.includes('midway-auth.amazon.com') || url.includes('/SSO/redirect');
+      logger.info('[auth-poll] ' + url.substring(0, 80));
+
       if (isSSO) {
-        _authPollSSOCount++;
-        // Stuck on SSO for 10+ consecutive seconds → cookies expired → run mwinit
-        if (_authPollSSOCount >= 10 && !_mwinitRunning) {
+        _ssoCount++;
+        if (_ssoCount >= 10 && !_mwinitRunning) {
           _mwinitRunning = true;
           clearInterval(_authPoller);
-          logger.warn('[auth-poll] SSO redirect loop detected — launching mwinit terminal');
-          pushStatus('🔑 Session expired — complete Midway auth in the terminal window...');
+          logger.warn('[auth-poll] SSO redirect loop \u2014 launching mwinit terminal');
+          pushStatus('\uD83D\uDD11 Session expired \u2014 complete Midway auth in the terminal window...');
           try {
-            const { runMwinit: _mwinit, injectCookies: _inject } = _getAuth();
-            await _mwinit();
-            await _inject();
-            logger.info('[auth-poll] mwinit done — reloading AAP');
-            pushStatus('✅ Midway auth complete — reloading AAP...');
+            const { runMwinit, injectCookies } = _getAuth();
+            await runMwinit();
+            await injectCookies();
+            logger.info('[auth-poll] mwinit done \u2014 reloading AAP');
+            pushStatus('\u2705 Midway auth complete \u2014 reloading AAP...');
             mainWindow.loadURL(startUrl);
-          } catch(mwErr) {
-            logger.error('[auth-poll] mwinit failed:', mwErr.message);
-            pushError('⚠️ mwinit failed: ' + mwErr.message + ' — run mwinit manually then restart');
+          } catch (e) {
+            logger.error('[auth-poll] mwinit failed:', e.message);
+            pushError('\u26A0\uFE0F mwinit failed: ' + e.message + ' \u2014 run mwinit manually then restart');
           }
-          return;
         }
       } else {
-        _authPollSSOCount = 0; // reset counter when not on SSO page
+        _ssoCount = 0;
+        _onMainWindowNav(url);
       }
-
-      _onMainWindowNav(url);
     }, 1000);
 
-    // F12 toggles DevTools
     mainWindow.webContents.on('before-input-event', (_event, input) => {
       if (input.key === 'F12' && input.type === 'keyDown') {
         if (mainWindow.webContents.isDevToolsOpened()) {
@@ -531,25 +573,21 @@ function initWindows(ctx) {
       }
     });
 
-    // Close → hide, show bubble
     mainWindow.on('close', e => {
       e.preventDefault();
       mainWindow.hide();
       try { showBubble(); } catch (err) { logger.error('showBubble on close:', err.message); }
     });
 
-    // Minimize → show bubble after brief delay
     mainWindow.on('minimize', () => {
       setTimeout(() => {
         try { showBubble(); } catch (err) { logger.error('showBubble on minimize:', err.message); }
       }, 300);
     });
 
-    // Restore / show → hide bubble
     mainWindow.on('restore', () => { try { hideBubble(); } catch (_) {} });
     mainWindow.on('show',    () => { try { hideBubble(); } catch (_) {} });
 
-    // did-finish-load fires for the renderer HTML — kick auto-sync timer
     mainWindow.webContents.on('did-finish-load', () => {
       const url = mainWindow.webContents.getURL();
       if (url.includes('index.html') || url.startsWith('file://')) {
@@ -557,9 +595,8 @@ function initWindows(ctx) {
       }
     });
 
-    // renderer:ready — renderer has registered IPC listeners; push cache + kick first sync
     ipcMain.on('renderer:ready', () => {
-      logger.info('renderer:ready — pushing cached data...');
+      logger.info('renderer:ready \u2014 pushing cached data...');
       const cached = store.load('fleetData', null);
       if (cached) {
         pushData({ ...cached, stale: true });
@@ -568,46 +605,29 @@ function initWindows(ctx) {
         const t      = cached.syncedAt
           ? new Date(cached.syncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
           : '?';
-        const ageStr = age !== null ? ` \u00B7 ${age < 1 ? '<1' : age}min ago` : '';
-        pushStatus(
-          `\uD83D\uDCE6 Cached data (${cached.count} units, last sync ${t}${ageStr}) \u2014 refreshing...`
-        );
+        const ageStr = age !== null ? ' \u00B7 ' + (age < 1 ? '<1' : age) + 'min ago' : '';
+        pushStatus('\uD83D\uDCE6 Cached data (' + cached.count + ' units, last sync ' + t + ageStr + ') \u2014 refreshing...');
       } else {
         pushStatus('\uD83D\uDD0C First launch \u2014 connecting to AAP...');
       }
-
-      const { checkMwinit: mwCheck } = _getAuth();
-      const mw = mwCheck();
-      if (!mw.ok) {
-        pushError('\u26A0\uFE0F  ' + mw.reason);
-        pushStatus('\u26A0\uFE0F  ' + mw.reason);
-      }
-
       if (ctx.runFullSync) ctx.runFullSync();
     });
 
-    // ── Live rescan timer: dedicated off-screen window every 5 min ──────────
-    // Runs a full fresh AAP scrape without touching the user-visible main window.
+    // ── Live rescan: off-screen BrowserWindow every 5 min ────────────────────
     const RESCAN_INTERVAL_MS = 5 * 60 * 1000;
+
     function triggerLiveRescan(force) {
-      if (!_appReady) {
-        logger.info('Rescan skipped — app not ready yet (Midway auth pending)');
-        return;
-      }
-      if (_rescanInProgress) {
-        logger.info('Rescan already in progress — skipping');
-        return;
-      }
+      if (!_appReady)         { logger.info('Rescan skipped \u2014 app not ready'); return; }
+      if (_rescanInProgress)  { logger.info('Rescan already in progress'); return; }
       if (!mainWindow || mainWindow.isDestroyed()) return;
 
       const freshUrl = buildScanURL(getDomiciles());
-      logger.info(`Rescan${force ? ' (domicile change)' : ' (timer)'}: ${freshUrl.substring(0, 60)}`);
+      logger.info('Rescan' + (force ? ' (forced)' : ' (timer)') + ': ' + freshUrl.substring(0, 60));
 
       _rescanInProgress = true;
       const scrapeWin = new BrowserWindow({
         width: 1400, height: 800,
-        show: true,
-        x: -2000, y: 0,  // off-screen
+        show: true, x: -2000, y: 0,
         webPreferences: {
           nodeIntegration:  false,
           contextIsolation: true,
@@ -626,14 +646,14 @@ function initWindows(ctx) {
           label: 'rescan', maxPolls: 40,
           onComplete: (rows) => {
             const payload = _saveAAPCaches(rows);
-            logger.info(`Rescan complete: ${rows.length} units saved`);
+            logger.info('Rescan complete: ' + rows.length + ' units saved');
             pushData(payload);
             clearTimeout(timeout);
             _rescanInProgress = false;
             try { scrapeWin.destroy(); } catch (_) {}
           },
           onTimeout: () => {
-            logger.warn('Rescan: no rows found within poll limit');
+            logger.warn('Rescan: no rows within poll limit');
             clearTimeout(timeout);
             _rescanInProgress = false;
             try { scrapeWin.destroy(); } catch (_) {}
@@ -644,44 +664,40 @@ function initWindows(ctx) {
       scrapeWin.loadURL(freshUrl);
     }
 
-    // Rescan timer is started from switchToApp() — after Midway auth completes
-
-    // Expose trigger for domicile-change forced rescan
     ipcMain.on('aap:rescan', (_e, opts) => triggerLiveRescan(!!(opts && opts.force)));
   }
 
   // ── System tray ───────────────────────────────────────────────────────────
   function createTray() {
     const iconPath = path.join(ROOT_DIR, 'assets', 'icon.png');
-    const icon     = fs.existsSync(iconPath)
+    const icon = fs.existsSync(iconPath)
       ? nativeImage.createFromPath(iconPath)
       : nativeImage.createEmpty();
 
     tray = new Tray(icon);
     tray.setToolTip('Fleet Operations \u00B7 Loading...');
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: 'Open Fleet Operations',     click: () => { mainWindow.show(); mainWindow.focus(); } },
-      { label: 'Sync Now', click: () => { if (ctx.runFullSync) ctx.runFullSync(); } },
+      { label: 'Open Fleet Operations', click: () => { mainWindow.show(); mainWindow.focus(); } },
+      { label: 'Sync Now',              click: () => { if (ctx.runFullSync) ctx.runFullSync(); } },
       { type: 'separator' },
-      { label: '\u2699 Setup AAP Columns',  click: () => openAAPSetupWindow() },
+      { label: '\u2699 Setup AAP Columns', click: () => openAAPSetupWindow() },
       { type: 'separator' },
-      { label: 'Open Data Folder',          click: () => shell.showItemInFolder(P.fleetData) },
+      { label: 'Open Data Folder', click: () => shell.showItemInFolder(P.fleetData) },
       { type: 'separator' },
-      { label: 'Quit',                      click: () => app.exit(0) },
+      { label: 'Quit', click: () => app.exit(0) },
     ]));
     tray.on('click', () => { mainWindow.show(); mainWindow.focus(); });
 
-    // Animated tray icon — 12-frame pulse cycle at ~8fps
-    const trayDir    = path.join(ROOT_DIR, 'assets', 'tray');
-    const frameCount = 12;
-    const frames     = [];
-    for (let i = 0; i < frameCount; i++) {
-      const fp = path.join(trayDir, `frame_${String(i).padStart(2, '0')}.png`);
+    // Animated tray icon — 12-frame pulse at ~8fps
+    const trayDir = path.join(ROOT_DIR, 'assets', 'tray');
+    const frames  = [];
+    for (let i = 0; i < 12; i++) {
+      const fp = path.join(trayDir, 'frame_' + String(i).padStart(2, '0') + '.png');
       frames.push(fs.existsSync(fp) ? nativeImage.createFromPath(fp) : icon);
     }
     let frameIdx = 0;
     setInterval(() => {
-      frameIdx = (frameIdx + 1) % frameCount;
+      frameIdx = (frameIdx + 1) % 12;
       try { tray.setImage(frames[frameIdx]); } catch (_) {}
     }, 120);
   }
@@ -695,7 +711,7 @@ function initWindows(ctx) {
       webPreferences: {
         nodeIntegration:  false,
         contextIsolation: true,
-        partition: '',  // same session as the scraper
+        partition:        '',
       },
     });
 
@@ -705,21 +721,17 @@ function initWindows(ctx) {
       setupWin.webContents.executeJavaScript(`
         setTimeout(function() {
           var b = document.createElement('div');
-          b.style.cssText =
-            'position:fixed;top:0;left:0;right:0;z-index:99999;' +
-            'background:#f0a800;color:#000;font-weight:bold;' +
-            'font-size:14px;padding:10px 16px;text-align:center;';
-          b.textContent =
-            '\u2699 SETUP MODE: Add the columns you want (Domicile site, ' +
-            'Manufacturer, etc.), then CLOSE this window. ' +
-            'Settings are saved automatically.';
+          b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;' +
+            'background:#f0a800;color:#000;font-weight:bold;font-size:14px;padding:10px 16px;text-align:center;';
+          b.textContent = '\u2699 SETUP MODE: Add the columns you want (Domicile site, Manufacturer, etc.),' +
+            ' then CLOSE this window. Settings are saved automatically.';
           document.body.prepend(b);
         }, 2000);
       `).catch(() => {});
     });
 
     setupWin.on('closed', () => {
-      logger.info('AAP setup window closed — column prefs saved to session');
+      logger.info('AAP setup window closed \u2014 column prefs saved to session');
       setTimeout(() => { if (ctx.runFullSync) ctx.runFullSync(); }, 1000);
     });
   }
@@ -729,10 +741,7 @@ function initWindows(ctx) {
     const wizardHtml = path.join(ROOT_DIR, 'renderer', 'src', 'setup', 'index.html');
     const wizWin = new BrowserWindow({
       width: 620, height: 580,
-      frame:     false,
-      resizable: false,
-      center:    true,
-      show:      false,
+      frame: false, resizable: false, center: true, show: false,
       webPreferences: {
         preload:          path.join(ROOT_DIR, 'preload.js'),
         contextIsolation: true,
@@ -744,10 +753,9 @@ function initWindows(ctx) {
     wizWin.once('ready-to-show', () => wizWin.show());
 
     ipcMain.once('wizard:complete', (_e, config) => {
-      logger.info('Setup wizard complete — applying config');
+      logger.info('Setup wizard complete \u2014 applying config');
       const { markStepComplete } = require('../../setup/state');
 
-      // Persist settings through the store
       const settings = store.load('settings', {});
       settings.domiciles = (config.domiciles || '')
         .split(/[\n,]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
@@ -759,50 +767,39 @@ function initWindows(ctx) {
       };
       store.save('settings', settings);
 
-      // Orcha config
       store.save('orchaConfig', {
         mode: config.orchaMode || 'local',
         host: config.orchaHost || '',
         port: config.orchaPort || 4799,
       });
 
-      // Email config
       store.save('opEmails', {
-        username: 'ANT\\' + (config.userEmail || '').split('@')[0],
-        password: '',
+        username:  'ANT\\' + (config.userEmail || '').split('@')[0],
+        password:  '',
         from:      config.userEmail || '',
         defaultTo: '',
         defaultCc: '',
       });
 
-      markStepComplete('profile',  { name: settings.profile.name });
+      markStepComplete('profile',   { name: settings.profile.name });
       markStepComplete('domiciles', { domiciles: settings.domiciles });
-      markStepComplete('orcha',    { mode: config.orchaMode || 'local' });
+      markStepComplete('orcha',     { mode: config.orchaMode || 'local' });
 
-      logger.info(
-        `Setup: domiciles=${settings.domiciles.join(',')}, ` +
-        `orchaMode=${settings.profile && config.orchaMode}`
-      );
+      logger.info('Setup: domiciles=' + settings.domiciles.join(','));
 
       wizWin.close();
       createMainWindow();
       createTray();
-      // Scheduler is started from app.js after init
     });
   }
 
-  // ── Window-related IPC handlers ───────────────────────────────────────────
-
+  // ── Window IPC handlers ───────────────────────────────────────────────────
   ipcMain.on('fleet:request-sync', () => {
-    if (_rescanInProgress) {
-      logger.info('request-sync skipped — rescan in progress');
-      return;
-    }
+    if (_rescanInProgress) { logger.info('request-sync skipped \u2014 rescan in progress'); return; }
     if (ctx.runFullSync) ctx.runFullSync();
   });
 
   ipcMain.handle('app:version', () => app.getVersion());
-
 
   ipcMain.on('bubble:clicked', () => {
     hideBubble();
@@ -821,14 +818,9 @@ function initWindows(ctx) {
   ipcMain.handle('uptake:open-url', (_e, url) => {
     if (!url || !/^https?:\/\//i.test(url)) return;
     const win = new BrowserWindow({
-      width: 1400, height: 900,
-      title: 'Uptake',
-      backgroundColor: '#0d1117',
-      autoHideMenuBar: true,
-      webPreferences: {
-        nodeIntegration: false, contextIsolation: true,
-        session: session.defaultSession,
-      },
+      width: 1400, height: 900, title: 'Uptake',
+      backgroundColor: '#0d1117', autoHideMenuBar: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, session: session.defaultSession },
     });
     win.loadURL(url);
     win.once('ready-to-show', () => win.show());
@@ -837,19 +829,13 @@ function initWindows(ctx) {
   ipcMain.handle('relay:open-url', (_e, url) => {
     if (!url || !/^https?:\/\//i.test(url)) return;
     const win = new BrowserWindow({
-      width: 1400, height: 900,
-      title: 'AAP Relay \u2013 Service Request',
-      backgroundColor: '#0d1117',
-      autoHideMenuBar: true,
-      webPreferences: {
-        nodeIntegration: false, contextIsolation: true,
-        session: session.defaultSession,
-      },
+      width: 1400, height: 900, title: 'AAP Relay \u2013 Service Request',
+      backgroundColor: '#0d1117', autoHideMenuBar: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, session: session.defaultSession },
     });
     win.loadURL(url);
     win.once('ready-to-show', () => win.show());
   });
-
 
   ipcMain.on('fleet:trigger-email', (_e, opts) => {
     send('fleet:auto-email', {
@@ -865,14 +851,12 @@ function initWindows(ctx) {
     showSetupWizard,
     showBubble,
     hideBubble,
-    getBubbleWin:              () => bubbleWin,
-    getMainWindow:             () => mainWindow,
-    getTray:                   () => tray,
+    getBubbleWin:  () => bubbleWin,
+    getMainWindow: () => mainWindow,
+    getTray:       () => tray,
     pushBubbleNotification,
     isSetupComplete,
-    triggerRescan: (force) => {
-      ipcMain.emit('aap:rescan', null, { force: !!force });
-    },
+    triggerRescan: (force) => ipcMain.emit('aap:rescan', null, { force: !!force }),
   };
 }
 
