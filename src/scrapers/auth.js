@@ -320,4 +320,40 @@ function checkMwinit() {
   return { ok: true, ageHours: ageHours.toFixed(1) };
 }
 
-module.exports = { ensureAuthenticated, injectCookies, checkMwinit, pingRelayEndpoint, COOKIE_FILE };
+
+// ── runMwinit: spawn a visible terminal and run mwinit -o ────────────────
+// Returns a Promise that resolves when the terminal closes (auth complete).
+// Rejects after 3 minutes if the user doesn't complete it.
+function runMwinit() {
+  const { spawn } = require('child_process');
+  return new Promise((resolve, reject) => {
+    logger.info('[AuthManager] Spawning mwinit terminal...');
+    // cmd /c: run mwinit -o in a new visible console window, then close
+    const child = spawn('cmd.exe', ['/c', 'start', 'cmd.exe', '/k',
+      'echo Midway auth required. Running mwinit... && mwinit -o && echo Done! This window will close. && timeout /t 3 /nobreak && exit'
+    ], { detached: true, stdio: 'ignore', shell: false });
+    child.unref();
+
+    // Poll cookie file until it's fresh (< 5 min old) or timeout
+    const started = Date.now();
+    const TIMEOUT = 3 * 60 * 1000; // 3 minutes
+    const poll = setInterval(() => {
+      try {
+        if (!fs.existsSync(COOKIE_FILE)) return;
+        const ageMs = Date.now() - fs.statSync(COOKIE_FILE).mtimeMs;
+        if (ageMs < 5 * 60 * 1000) {
+          clearInterval(poll);
+          logger.info('[AuthManager] mwinit complete — cookie refreshed (' + (ageMs/1000).toFixed(0) + 's old)');
+          resolve();
+        } else if (Date.now() - started > TIMEOUT) {
+          clearInterval(poll);
+          reject(new Error('mwinit timed out — cookie not refreshed within 3 minutes'));
+        }
+      } catch(e) {
+        // ignore FS errors during poll
+      }
+    }, 2000);
+  });
+}
+
+module.exports = { ensureAuthenticated, injectCookies, checkMwinit, runMwinit, pingRelayEndpoint, COOKIE_FILE };

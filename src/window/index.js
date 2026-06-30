@@ -396,23 +396,29 @@ function initWindows(ctx) {
     const scrapeDomiciles = getDomiciles();
     const startUrl        = buildScanURL(scrapeDomiciles);
     logger.info(`Loading AAP in main window: ${startUrl.substring(0, 80)}`);
-    // ── Midway pre-flight: ensure session is valid before loading AAP ──────
-    // If cookies are stale ensureAuthenticated() shows a visible login window
-    // and waits for the user to complete Midway auth before proceeding.
-    // Prevents the infinite SSO redirect loop on startup.
-    const { ensureAuthenticated: _ensureAuth } = _getAuth();
-    _ensureAuth(mainWindow)
-      .then(() => {
-        logger.info('[startup] Midway pre-flight passed — loading AAP');
-        mainWindow.loadURL(startUrl);
-      })
-      .catch((err) => {
-        logger.error('[startup] Midway pre-flight failed:', err.message);
-        pushError('⚠️ Midway auth failed: ' + err.message + ' — run mwinit then restart');
-        pushStatus('⚠️ Midway auth required — run mwinit in terminal then restart app');
-        // Attempt load anyway — user may have just tapped their key
-        mainWindow.loadURL(startUrl);
-      });
+    // ── Midway pre-flight: check cookie age, run mwinit if stale ──────────
+    // Spawns a visible cmd.exe terminal running `mwinit -o` when cookies are
+    // expired. Waits for fresh cookies, then loads AAP. No more redirect loops.
+    (async function _midwayPreFlight() {
+      const { checkMwinit: _chk, runMwinit: _mwinit, injectCookies: _inject } = _getAuth();
+      const mwState = _chk();
+      if (!mwState.ok) {
+        logger.warn('[startup] ' + mwState.reason + ' — launching mwinit terminal');
+        pushStatus('🔑 Midway auth required — complete auth in the terminal window...');
+        try {
+          await _mwinit();
+          await _inject();
+          logger.info('[startup] mwinit done — cookies refreshed');
+          pushStatus('✅ Midway auth complete — loading AAP...');
+        } catch(mwErr) {
+          logger.error('[startup] mwinit failed:', mwErr.message);
+          pushError('⚠️ mwinit failed: ' + mwErr.message);
+        }
+      } else {
+        logger.info('[startup] Midway cookie OK (' + mwState.ageHours + 'h old) — loading AAP');
+      }
+      mainWindow.loadURL(startUrl);
+    })();
 
     function switchToApp() {
       _appReady = true;
@@ -474,14 +480,43 @@ function initWindows(ctx) {
     mainWindow.webContents.on('dom-ready',           ()        => _onMainWindowNav());
 
     // Fallback URL poller: catches JS/meta redirects that skip navigation events.
-    // Polls every 1s until AAP is detected, then stops.
-    const _authPoller = setInterval(() => {
+    // Polls every 1s. If stuck on Midway SSO for > 10s, spawns mwinit terminal.
+    let _authPollSSOCount = 0;
+    let _mwinitRunning    = false;
+    const _authPoller = setInterval(async () => {
       if (_startupScrapeStarted || mainWindow.isDestroyed()) {
         clearInterval(_authPoller);
         return;
       }
       const url = mainWindow.webContents.getURL();
       logger.info(`[auth-poll] Current URL: ${url.substring(0, 80)}`);
+
+      const isSSO = url.includes('midway-auth.amazon.com') || url.includes('/SSO/redirect');
+      if (isSSO) {
+        _authPollSSOCount++;
+        // Stuck on SSO for 10+ consecutive seconds → cookies expired → run mwinit
+        if (_authPollSSOCount >= 10 && !_mwinitRunning) {
+          _mwinitRunning = true;
+          clearInterval(_authPoller);
+          logger.warn('[auth-poll] SSO redirect loop detected — launching mwinit terminal');
+          pushStatus('🔑 Session expired — complete Midway auth in the terminal window...');
+          try {
+            const { runMwinit: _mwinit, injectCookies: _inject } = _getAuth();
+            await _mwinit();
+            await _inject();
+            logger.info('[auth-poll] mwinit done — reloading AAP');
+            pushStatus('✅ Midway auth complete — reloading AAP...');
+            mainWindow.loadURL(startUrl);
+          } catch(mwErr) {
+            logger.error('[auth-poll] mwinit failed:', mwErr.message);
+            pushError('⚠️ mwinit failed: ' + mwErr.message + ' — run mwinit manually then restart');
+          }
+          return;
+        }
+      } else {
+        _authPollSSOCount = 0; // reset counter when not on SSO page
+      }
+
       _onMainWindowNav(url);
     }, 1000);
 
