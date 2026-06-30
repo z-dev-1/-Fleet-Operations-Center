@@ -396,11 +396,15 @@ function initWindows(ctx) {
     }
 
     let _startupScrapeStarted = false;
-    mainWindow.webContents.on('did-finish-load', () => {
-      const url = mainWindow.webContents.getURL();
-      logger.info(`Main window loaded: ${url.substring(0, 60)}`);
-      // Only start the startup scrape once, and only when actually on AAP
-      // (not on midway-auth.amazon.com redirect which fires first)
+
+    // _onMainWindowNav: called on every navigation event for the main window.
+    // Starts the startup scrape exactly once, the first time we land on AAP
+    // after Midway SSO completes. Handles all three navigation events because
+    // the Midway -> AAP redirect chain can fire any of them depending on the
+    // auth method used (security key, OTP, cookie).
+    function _onMainWindowNav(url) {
+      if (!url) url = mainWindow.webContents.getURL();
+      logger.info(`Main window loaded: ${url.substring(0, 80)}`);
       const onAAP = url.includes('aap-na.corp.amazon.com') && !url.includes('midway-auth');
       if (onAAP && !_startupScrapeStarted) {
         _startupScrapeStarted = true;
@@ -419,7 +423,14 @@ function initWindows(ctx) {
           },
         });
       }
-    });
+    }
+
+    // did-finish-load: fires for full page loads (initial AAP load, hard navigations)
+    mainWindow.webContents.on('did-finish-load', () => _onMainWindowNav());
+    // did-navigate: fires after server-side redirects (Midway SSO -> AAP)
+    mainWindow.webContents.on('did-navigate', (_e, url) => _onMainWindowNav(url));
+    // did-navigate-in-page: fires for hash/history.pushState navigations
+    mainWindow.webContents.on('did-navigate-in-page', (_e, url) => _onMainWindowNav(url));
 
     // F12 toggles DevTools
     mainWindow.webContents.on('before-input-event', (_event, input) => {
