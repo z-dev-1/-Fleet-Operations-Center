@@ -57,6 +57,10 @@ const AAP_FIELD_MAP = {
   'Open Planned Work Requests': 'openPlanned',
   'Last geofences':             'geofence',
   'Lat/Long':                   'latLong',
+'Owner':                      'owner',
+'Asset ID':                   'assetId',
+  'assetId':                    'assetId',
+'Open Planned Work Requests': 'openPlanned',
 };
 
 // JS snippet injected into AAP pages — forces "Results per page" to 1000.

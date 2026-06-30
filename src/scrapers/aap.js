@@ -22,7 +22,7 @@ const AAP_SCAN_URL =
   '&domicileSites=%5B%5D' +
   '&fleets=%5B%220bb2e249-fd34-437f-83af-d1d69150558b%22%2C%220f454f75-1e45-475f-8d8b-2334ade1f6f1%22%2C%225c19cdf7-ce2f-4593-a37a-3fe5d506e120%22%2C%227de393df-74e1-45af-9650-560ba008bc65%22%2C%22b84ddc20-589c-4330-af67-3d38f89e28af%22%2C%22b9e02fc4-2b9f-4a70-ac7c-76b30a33bcbe%22%2C%22ba97eda1-cb03-446e-a907-474084194777%22%2C%22daa83ad7-5d8f-43a4-ba9c-76c643e45e1e%22%5D' +
   // fields=["domicileSite","fuelType","engineManufacturerName","bodyType"]
-  '&fields=%5B%22domicileSite%22%2C%22fuelType%22%2C%22engineManufacturerName%22%2C%22bodyType%22%5D' +
+  '&fields=%5B%22domicileSite%22%2C%22fuelType%22%2C%22bodyType%22%2C%22engineManufacturerName%22%2C%22lifecycleStateReason%22%2C%22manufacturer%22%2C%22openUnplannedWorkRequests%22%2C%22openPlannedWorkRequests%22%2C%22lastGeofences%22%2C%22latLong%22%2C%22assetId%22%2C%22owner%22%5D' +
   '&flags=%7B%7D' +
   '&sortColumn=lifecycleStateReason' +
   '&limit=1000&pageSize=1000' +

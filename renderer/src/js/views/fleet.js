@@ -30,18 +30,22 @@ let _sortDir = 'asc';
 
 // ── Columns ───────────────────────────────────────────────────────────────
 const COLS = [
-  { key: 'equipmentId',    label: 'Equipment ID',   width: '130px' },
-  { key: 'assetType',      label: 'Type',            width: '100px' },
-  { key: 'lifecycleState', label: 'Lifecycle',       width: '140px' },
-  { key: 'lifecycleReason',label: 'Reason',          width: '160px' },
-  { key: 'domicileSite',   label: 'Domicile',        width: '100px' },
-  { key: 'operator',       label: 'Operator',        width: '120px' },
-  { key: 'manufacturer',   label: 'Manufacturer',    width: '120px' },
-  { key: 'dueDate',        label: 'Due Date',        width: '100px' },
-  { key: 'openUnplanned',  label: 'Open WRs',        width: '90px'  },
-  { key: 'geofence',       label: 'Last Geofence',   width: '160px' },
-  { key: 'relayVendor',    label: 'Vendor / WO',     width: '160px' }, // S9
-  { key: 'riskScore',      label: 'Risk',            width: '70px'  }, // S9
+  { key: 'equipmentId',    label: 'Equipment ID',       width: '130px', sortable: true  },
+  { key: 'lifecycleState', label: 'Lifecycle State',    width: '150px', sortable: true  },
+  { key: 'assetType',      label: 'Asset Type',         width: '110px', sortable: true  },
+  { key: 'lifecycleReason',label: 'State Reason',       width: '170px', sortable: true  },
+  { key: 'owner',          label: 'Owner',              width: '130px', sortable: true  },
+  { key: 'manufacturer',   label: 'Manufacturer',       width: '130px', sortable: true  },
+  { key: 'domicileSite',   label: 'Domicile Site',      width: '110px', sortable: true  },
+  { key: 'operator',       label: 'Operator',           width: '120px', sortable: true  },
+  { key: 'openUnplanned',  label: 'Open Unplanned WRs', width: '110px', sortable: true  },
+  { key: 'openPlanned',    label: 'Open Planned WRs',   width: '110px', sortable: true  },
+  { key: 'geofence',       label: 'Last Geofence',      width: '170px', sortable: false },
+  { key: 'latLong',        label: 'Lat / Long',         width: '150px', sortable: false },
+  { key: 'fuelType',       label: 'Fuel Type',          width: '100px', sortable: true  },
+  { key: 'bodyType',       label: 'Body Type',          width: '110px', sortable: true  },
+  { key: 'assetId',        label: 'Asset ID',           width: '130px', sortable: true  },
+  { key: 'dueDate',        label: 'Due Date',           width: '100px', sortable: true  },
 ];
 
 function _lifecycleClass(val) {
