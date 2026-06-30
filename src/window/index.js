@@ -109,27 +109,27 @@ const JS_EXTRACT_TABLE = `(function(){
   t.querySelectorAll('thead th').forEach(function(x){
     h.push((x.innerText||'').trim().replace(/[\\n\\r]+/g,' '));
   });
-  // Get href from fiber — works for both absolute and relative AAP links
+  // Get href from element — checks __reactProps$ (direct), then __reactFiber$ chain
   function _getHref(el) {
     if (!el) return null;
-    // Try native href first (Electron resolves relative -> absolute via page base)
+    // 1. Native absolute href (Electron resolves relative paths via page base URL)
     if (el.href && el.href.startsWith('http') && el.href !== window.location.href) return el.href;
-    // Walk fiber for href prop (catches React Router <Link> with relative path)
+    // 2. __reactProps$ — direct props object on the DOM node (fastest, most reliable)
+    var rpKey = Object.keys(el).find(function(k){ return k.startsWith('__reactProps$'); });
+    if (rpKey) {
+      var rp = el[rpKey];
+      if (rp && rp.href) { var h2 = String(rp.href); return h2.startsWith('http') ? h2 : AAP_BASE + h2; }
+    }
+    // 3. Walk __reactFiber$ chain for href or 'to' prop
     try {
-      var fk = Object.keys(el).find(function(k){ return k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'); });
+      var fk = Object.keys(el).find(function(k){ return k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'); });
       if (fk) {
         var cur = el[fk];
-        for (var j = 0; j < 15; j++) {
+        for (var j = 0; j < 20; j++) {
           if (!cur) break;
           var p = cur.memoizedProps || cur.pendingProps;
-          if (p && p.href) {
-            var h2 = String(p.href);
-            return h2.startsWith('http') ? h2 : AAP_BASE + h2;
-          }
-          if (p && p.to) {
-            var t2 = String(p.to);
-            return t2.startsWith('http') ? t2 : AAP_BASE + t2;
-          }
+          if (p && p.href) { var h3 = String(p.href); return h3.startsWith('http') ? h3 : AAP_BASE + h3; }
+          if (p && p.to)   { var t2 = String(p.to);   return t2.startsWith('http') ? t2 : AAP_BASE + t2; }
           cur = cur.return;
         }
       }
@@ -144,7 +144,7 @@ const JS_EXTRACT_TABLE = `(function(){
     for (var i = 0; i < c.length; i++) {
       var header = h[i] || 'c'+i;
       o[header] = (c[i].innerText||'').trim();
-      // Only extract URL for WR columns that have a non-zero count
+      // Extract URL only for WR columns with a non-zero count
       if (WR_HEADERS.indexOf(header) !== -1 && o[header] && o[header] !== '0' && o[header] !== '--') {
         var a = c[i].querySelector('a[mdn-link]');
         if (a) {
