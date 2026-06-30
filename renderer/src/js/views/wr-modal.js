@@ -19,7 +19,7 @@
  */
 
 import { aap, files } from '../bridge.js';
-import toast           from './toast.js';
+import toast           from '../components/toast.js';
 
 // ── Vendor list (mirrors aap_create_wr.js VENDOR_IDS) ─────────────────────
 const VENDORS = [
