@@ -316,7 +316,7 @@ function initWindows(ctx) {
 
 
   if (!btn) return { ok: false, reason: 'button not found' };
-  simClick(btn);
+  btn.click();
   await sleep(1800);
 
   // Find popup: div containing both Available Columns + Selected columns headings
