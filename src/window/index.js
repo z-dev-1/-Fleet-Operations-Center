@@ -376,6 +376,7 @@ function initWindows(ctx) {
   });
   if (applyBtn) { simClick(applyBtn); return { ok: true, added: added, failed: failed }; }
   return { ok: false, reason: 'Apply not found', added: added, failed: failed };
+})()
         `);
         logger.info('[' + label + '] Column config:', JSON.stringify(colRes));
         if (colRes && colRes.ok) await new Promise(r => setTimeout(r, 1800));
