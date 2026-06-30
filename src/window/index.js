@@ -125,7 +125,12 @@ function _mapAAPRows(rawRows) {
       const f = AAP_FIELD_MAP[k];
       if (f) m[f] = row[k];
     });
-    if (row._assetUrl) m.assetUrl = row._assetUrl;
+    // Build AAP asset URL from captured Asset ID
+    if (m.assetId && m.assetId.trim()) {
+      m.assetUrl = 'https://aap-na.corp.amazon.com/v2/asset/' + m.assetId.trim();
+    } else if (row._assetUrl) {
+      m.assetUrl = row._assetUrl;
+    }
     return m;
   }).filter(x => x.equipmentId);
 }
