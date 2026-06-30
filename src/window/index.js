@@ -281,11 +281,11 @@ function initWindows(ctx) {
                 clearTimeout(ceiling);
                 win.webContents.removeListener('did-finish-load', arm);
                 resolve();
-              }, 1500);
+              }, 2000);
             }
             win.webContents.on('did-finish-load', arm);
             arm(); // arm once to handle pre-settled case after the hard delay
-          }, 4000);
+          }, 6000);
         });
         const colRes = await win.webContents.executeJavaScript(`(async function __aapConfigCols() {
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
