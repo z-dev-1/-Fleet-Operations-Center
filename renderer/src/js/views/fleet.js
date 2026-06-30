@@ -168,13 +168,23 @@ function _renderRows(rows) {
     return '<tr class="fleet-table__row" data-id="' + row.equipmentId + '" data-lc="' + lcClass + '">' + cells + '</tr>';
   }).join('');
 
-  // Equipment ID link → open in-app AAP asset window (stop row-click propagation)
+  // Equipment ID / WR link → open in-app AAP asset window
   _tbodyEl.querySelectorAll('a.eq-link, a.wr-link').forEach((a) => {
     a.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
       const url = a.dataset.url;
-      if (url) aap.openUrl(url);
+      if (!url) return;
+      // For WR links also open the unit detail panel
+      if (a.classList.contains('wr-link')) {
+        const tr = a.closest('tr');
+        const unitId = tr && tr.dataset.id;
+        if (unitId) {
+          const unit = _allRows.find((r) => r.equipmentId === unitId);
+          if (unit) bus.emit('ui:unit-select', { unit });
+        }
+      }
+      try { aap.openUrl(url); } catch(err) { /* silent */ }
     });
   });
 
