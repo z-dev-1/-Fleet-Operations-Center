@@ -287,7 +287,30 @@ function initWindows(ctx) {
             arm(); // arm once to handle pre-settled case after the hard delay
           }, 6000);
         });
-        const colRes = await win.webContents.executeJavaScript(`(async function __aapConfigCols() {
+        // Step 1: get eye button screen coords
+        const btnCoords = await win.webContents.executeJavaScript(`(function() {
+  var btn = document.querySelector('button[data-mdn-interactive][mdn-popover-offset="-4"]');
+  if (!btn) {
+    var allBtns = Array.from(document.querySelectorAll('button'));
+    btn = allBtns.find(function(b) {
+      var sp = b.querySelector('span[aria-label]');
+      return sp && sp.getAttribute('aria-label') === 'Menu';
+    }) || null;
+  }
+  if (!btn) return null;
+  var r = btn.getBoundingClientRect();
+  return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) };
+})()`);
+        if (!btnCoords) {
+          logger.warn('[' + label + '] Column config: eye button not found');
+        } else {
+          logger.info('[' + label + '] Column config: clicking eye button at', JSON.stringify(btnCoords));
+          // Step 2: send trusted OS-level mouse click via sendInputEvent
+          win.webContents.sendInputEvent({ type: 'mouseDown', x: btnCoords.x, y: btnCoords.y, button: 'left', clickCount: 1 });
+          win.webContents.sendInputEvent({ type: 'mouseUp',   x: btnCoords.x, y: btnCoords.y, button: 'left', clickCount: 1 });
+          await new Promise(r => setTimeout(r, 1800));
+          // Step 3: interact with popup
+          const colRes = await win.webContents.executeJavaScript(`(async function __aapConfigCols() {
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   function simClick(el) {
     ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(ev) {
@@ -301,24 +324,6 @@ function initWindows(ctx) {
     "Open Unplanned Work Requests","Open Planned Work Requests","Last geofences"
   ];
 
-
-  // Find column-selector button using stable MDN framework attributes (wont rotate on AAP deploys unlike CSS hashes)
-  var btn = document.querySelector('button[data-mdn-interactive][mdn-popover-offset="-4"]') || null;
-
-
-  // Fallback: button where inner span has aria-label='Menu' (the eye icon label)
-  if (!btn) {
-    btn = Array.from(document.querySelectorAll('button')).find(function(b) {
-      var sp = b.querySelector('span[aria-label]');
-      return sp && sp.getAttribute('aria-label') === 'Menu';
-    }) || null;
-  }
-
-
-  if (!btn) return { ok: false, reason: 'button not found' };
-  btn.click();
-  await sleep(1800);
-
   // Find popup: div containing both Available Columns + Selected columns headings
   var popup = Array.from(document.querySelectorAll('div')).find(function(d) {
     var t = d.textContent || '';
@@ -328,8 +333,8 @@ function initWindows(ctx) {
 
   // Split popup into Available (left) and Selected (right) sections by h4 headings
   var h4s = Array.from(popup.querySelectorAll('h4'));
-  var availHead = h4s.find(function(h) { return (h.textContent||''). trim() === 'Available Columns'; });
-  var selHead   = h4s.find(function(h) { return (h.textContent||''). trim() === 'Selected columns'; });
+  var availHead = h4s.find(function(h) { return (h.textContent||'').trim() === 'Available Columns'; });
+  var selHead   = h4s.find(function(h) { return (h.textContent||'').trim() === 'Selected columns'; });
   var availSection = availHead && availHead.closest('div');
   var selSection   = selHead   && selHead.closest('div');
 
@@ -337,7 +342,7 @@ function initWindows(ctx) {
   if (selSection) {
     for (var rr = 0; rr < 50; rr++) {
       var remRows = Array.from(selSection.querySelectorAll('p')).filter(function(p) {
-        return (p.textContent||''). trim() !== 'Equipment ID' && (p.textContent||''). trim().length > 0;
+        return (p.textContent||'').trim() !== 'Equipment ID' && (p.textContent||'').trim().length > 0;
       });
       if (remRows.length === 0) break;
       var remBtn = remRows[0].parentElement && remRows[0].parentElement.querySelector('button[data-mdn-interactive]');
@@ -345,7 +350,7 @@ function initWindows(ctx) {
     }
   }
 
-  // Add each wanted column: search -> find p with exact text in availSection -> click sibling button
+  // Add each wanted column via search + p.parentElement button
   var searchInput = availSection ? availSection.querySelector('input[type="text"]') : null;
   var added = [], failed = [];
   for (var ci = 0; ci < WANT.length; ci++) {
@@ -358,12 +363,11 @@ function initWindows(ctx) {
       await sleep(400);
     }
     var leaf = Array.from((availSection || popup).querySelectorAll('p')).find(function(p) {
-      return (p.textContent||''). trim() === name;
+      return (p.textContent||'').trim() === name;
     });
     var addBtn = leaf && leaf.parentElement && leaf.parentElement.querySelector('button[data-mdn-interactive]');
     if (addBtn) { simClick(addBtn); added.push(name); await sleep(250); }
     else { failed.push(name); }
-    // Clear search after each
     if (searchInput) {
       var clearBtn = availSection && availSection.querySelector('button[aria-label="Clear search"]');
       if (clearBtn) { simClick(clearBtn); await sleep(200); }
@@ -373,14 +377,14 @@ function initWindows(ctx) {
   // Click Apply
   await sleep(300);
   var applyBtn = Array.from(document.querySelectorAll('button[data-mdn-interactive]')).find(function(b) {
-    return (b.textContent||''). trim() === 'Apply';
+    return (b.textContent||'').trim() === 'Apply';
   });
   if (applyBtn) { simClick(applyBtn); return { ok: true, added: added, failed: failed }; }
   return { ok: false, reason: 'Apply not found', added: added, failed: failed };
-})()
-        `);
-        logger.info('[' + label + '] Column config:', JSON.stringify(colRes));
-        if (colRes && colRes.ok) await new Promise(r => setTimeout(r, 1800));
+})()`);
+          logger.info('[' + label + '] Column config:', JSON.stringify(colRes));
+          if (colRes && colRes.ok) await new Promise(r => setTimeout(r, 1800));
+        }
       } catch (e) {
         logger.warn('[' + label + '] Column config failed:', e.message);
       }
