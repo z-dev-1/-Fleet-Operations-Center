@@ -432,12 +432,23 @@ function initWindows(ctx) {
       }
     }
 
-    // did-finish-load: fires for full page loads (initial AAP load, hard navigations)
-    mainWindow.webContents.on('did-finish-load', () => _onMainWindowNav());
-    // did-navigate: fires after server-side redirects (Midway SSO -> AAP)
-    mainWindow.webContents.on('did-navigate', (_e, url) => _onMainWindowNav(url));
-    // did-navigate-in-page: fires for hash/history.pushState navigations
-    mainWindow.webContents.on('did-navigate-in-page', (_e, url) => _onMainWindowNav(url));
+    // Listen on all navigation events for the main window
+    mainWindow.webContents.on('did-finish-load',     ()        => _onMainWindowNav());
+    mainWindow.webContents.on('did-navigate',        (_e, url) => _onMainWindowNav(url));
+    mainWindow.webContents.on('did-navigate-in-page',(_e, url) => _onMainWindowNav(url));
+    mainWindow.webContents.on('dom-ready',           ()        => _onMainWindowNav());
+
+    // Fallback URL poller: catches JS/meta redirects that skip navigation events.
+    // Polls every 1s until AAP is detected, then stops.
+    const _authPoller = setInterval(() => {
+      if (_startupScrapeStarted || mainWindow.isDestroyed()) {
+        clearInterval(_authPoller);
+        return;
+      }
+      const url = mainWindow.webContents.getURL();
+      logger.info(`[auth-poll] Current URL: ${url.substring(0, 80)}`);
+      _onMainWindowNav(url);
+    }, 1000);
 
     // F12 toggles DevTools
     mainWindow.webContents.on('before-input-event', (_event, input) => {
