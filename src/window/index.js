@@ -28,7 +28,7 @@ const logger = require('../utils/logger')('window');
 const { P }  = require('../config/paths');
 const store  = require('../store');
 const { isSetupComplete } = require('../../setup/state');
-const { buildWRUrls, extractPageId } = require('./wr_capture');
+const { buildWRUrls } = require('./wr_capture');
 
 const ROOT_DIR = path.join(__dirname, '..', '..');
 
@@ -559,9 +559,8 @@ function initWindows(ctx) {
           // URL: /v2/page/{ID}?tab={Unplanned|Planned}&states=[...]&equipmentId={eq}
           const wrCount   = (data.wrRows||[]).length;
           logger.info('[' + label + '] Unavailable units for WR URL build: ' + wrCount);
-          const aapPageId = extractPageId(win.webContents.getURL());
           const wrUrlMap  = wrCount > 0
-            ? buildWRUrls(data.wrRows, data.rows, aapPageId, logger, label)
+            ? buildWRUrls(data.wrRows, data.rows, null, logger, label)
             : {};
           logger.info('[' + label + '] WR URLs built: ' + Object.keys(wrUrlMap).length);
           if (Object.keys(wrUrlMap).length > 0) {
