@@ -245,4 +245,14 @@ export const relay = {
     }
     return Promise.resolve({ units: {} });
   },
+  // unit-detail.js calls getUnitCache(equipmentId) — derive from full cache
+  getUnitCache: (equipmentId) => {
+    const src = (window.relay && typeof window.relay.getCache === 'function')
+      ? window.relay.getCache()
+      : Promise.resolve({ units: {} });
+    return src.then(function(cache) {
+      const units = (cache && cache.units) ? cache.units : {};
+      return units[equipmentId] || { workOrders: [] };
+    });
+  },
 };

@@ -175,15 +175,6 @@ function _renderRows(rows) {
       e.preventDefault();
       const url = a.dataset.url;
       if (!url) return;
-      // For WR links also open the unit detail panel
-      if (a.classList.contains('wr-link')) {
-        const tr = a.closest('tr');
-        const unitId = tr && tr.dataset.id;
-        if (unitId) {
-          const unit = _allRows.find((r) => r.equipmentId === unitId);
-          if (unit) bus.emit('ui:unit-select', { unit });
-        }
-      }
       try { aap.openUrl(url); } catch(err) { /* silent */ }
     });
   });
