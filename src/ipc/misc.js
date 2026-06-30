@@ -267,6 +267,16 @@ function registerMiscIPC(ctx) {
       },
     });
     win.setMenuBarVisibility(false);
+    // LOG every navigation so we can capture the real WR tab URL
+    win.webContents.on('will-navigate', (_ev, navUrl) => {
+      logger.info('[aap-win] navigate -> ' + navUrl);
+    });
+    win.webContents.on('did-navigate', (_ev, navUrl) => {
+      logger.info('[aap-win] did-navigate -> ' + navUrl);
+    });
+    win.webContents.on('did-navigate-in-page', (_ev, navUrl) => {
+      logger.info('[aap-win] in-page -> ' + navUrl);
+    });
     win.loadURL(url);
     win.show();
     return { ok: true };
