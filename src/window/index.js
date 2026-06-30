@@ -287,6 +287,31 @@ function initWindows(ctx) {
             arm(); // arm once to handle pre-settled case after the hard delay
           }, 6000);
         });
+        // Pre-check: read current table headers — skip config if all columns already present
+        const headerCheck = await win.webContents.executeJavaScript(`(function() {
+  var WANT = [
+    "Domicile site","Operator","Asset type","Fuel type",
+    "Lifecycle state","Lifecycle state reason","Manufacturer","Body type",
+    "Open Unplanned Work Requests","Open Planned Work Requests","Last geofences","Asset ID"
+  ];
+  var headers = Array.from(document.querySelectorAll('th button, th[role="columnheader"]')).map(function(h) {
+    return (h.textContent || '').trim();
+  });
+  // Also check plain th text
+  Array.from(document.querySelectorAll('th')).forEach(function(th) {
+    var t = (th.textContent || '').trim();
+    if (t && !headers.includes(t)) headers.push(t);
+  });
+  var missing = WANT.filter(function(w) {
+    return !headers.some(function(h) { return h === w; });
+  });
+  return { missing: missing, headers: headers.slice(0, 20) };
+})()`);
+        logger.info('[' + label + '] Column header check: missing=' + JSON.stringify(headerCheck.missing));
+        if (headerCheck.missing.length === 0) {
+          logger.info('[' + label + '] All columns already configured — skipping column config');
+        } else {
+
         // Step 1: get eye button screen coords
         const btnCoords = await win.webContents.executeJavaScript(`(function() {
   // Primary: full selector confirmed via Chrome DevTools console
@@ -443,6 +468,7 @@ function initWindows(ctx) {
 })()`);
           logger.info('[' + label + '] Column config:', JSON.stringify(colRes));
           if (colRes && colRes.ok) await new Promise(r => setTimeout(r, 1800));
+        }
         }
       } catch (e) {
         logger.warn('[' + label + '] Column config failed:', e.message);
