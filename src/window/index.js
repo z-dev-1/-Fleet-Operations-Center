@@ -365,7 +365,7 @@ function initWindows(ctx) {
   var WANT = [
     "Domicile site","Operator","Asset type","Fuel type",
     "Lifecycle state","Lifecycle state reason","Manufacturer","Body type",
-    "Open Unplanned Work Requests","Open Planned Work Requests","Last geofences"
+    "Open Unplanned Work Requests","Open Planned Work Requests","Last geofences","Asset ID"
   ];
 
   // Find popup: check portal divs on body first (Chrome Recorder showed body>div[3])
