@@ -234,3 +234,15 @@ export const partner = {
   updateJob:    (id, update) => window.partner.updateJob(id, update),
   onNewRequest: (cb)         => window.partner.onNewRequest(cb),
 };
+
+// ── Relay cache ─────────────────────────────────────────────────────────────
+// window.relay is not yet exposed by preload — getCache() returns empty object
+// so fleet.js relay-augmentation degrades gracefully until IPC is wired.
+export const relay = {
+  getCache: () => {
+    if (window.relay && typeof window.relay.getCache === 'function') {
+      return window.relay.getCache();
+    }
+    return Promise.resolve({ units: {} });
+  },
+};
