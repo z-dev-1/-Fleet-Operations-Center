@@ -16,6 +16,7 @@ import bus          from '../bus.js';
 import state        from '../state.js';
 import { relay }    from '../bridge.js';
 import { showContextMenu } from '../components/context-menu.js';
+import { aap } from '../bridge.js';
 
 // Current filter/search applied client-side
 const _filters = {};
@@ -143,12 +144,26 @@ function _renderRows(rows) {
       }
 
       const cls = c.key === 'lifecycleState' ? ' class="' + lcClass + '"' : '';
+      // Equipment ID: render as clickable hyperlink opening in-app AAP asset window
+      if (c.key === 'equipmentId' && row.assetUrl) {
+        content = '<a class="eq-link" href="#" data-url="' + row.assetUrl + '">' + val + '</a>';
+      }
       return '<td' + cls + ' title="' + String(val).replace(/"/g, '&quot;') + '">' + content + '</td>';
     }).join('');
 
     // S9: data-lc on the <tr> for row-level coloring
     return '<tr class="fleet-table__row" data-id="' + row.equipmentId + '" data-lc="' + lcClass + '">' + cells + '</tr>';
   }).join('');
+
+  // Equipment ID link → open in-app AAP asset window (stop row-click propagation)
+  _tbodyEl.querySelectorAll('a.eq-link').forEach((a) => {
+    a.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const url = a.dataset.url;
+      if (url) aap.openUrl(url);
+    });
+  });
 
   // Row click → select unit
   _tbodyEl.querySelectorAll('.fleet-table__row').forEach((tr) => {

@@ -254,7 +254,21 @@ function registerMiscIPC(ctx) {
 
   handle('aap:open-url', async (_e, url) => {
     if (!url || !/^https?:\/\//i.test(url)) return { ok: false, error: 'invalid url' };
-    await shell.openExternal(url);
+    const { BrowserWindow } = require('electron');
+    const win = new BrowserWindow({
+      width: 1280, height: 860,
+      title: 'AAP Asset',
+      backgroundColor: '#0d1117',
+      center: true,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        partition: 'persist:aap',   // reuses same Midway session as main scraper
+      },
+    });
+    win.setMenuBarVisibility(false);
+    win.loadURL(url);
+    win.show();
     return { ok: true };
   });
 
