@@ -2030,3 +2030,404 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .vm-sub-vendor-none { color:#bbbbbb; font-size:10px; }
 .vm-tbl--subvendor { white-space:nowrap; }
 
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   NOTES & LINKS VIEW  (notes-links.js)
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* View shell */
+.view--notes-links {
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+.nl-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+}
+
+/* Header */
+.nl-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px 10px;
+  border-bottom: 1px solid rgba(57,168,255,.12);
+  flex-shrink: 0;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.nl-header__left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nl-title {
+  font-size: 15px;
+  font-weight: 900;
+  color: #d0eeff;
+  letter-spacing: .02em;
+}
+.nl-subtitle {
+  font-size: 10px;
+  color: rgba(113,184,255,.5);
+}
+.nl-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.nl-search-input {
+  height: 30px;
+  border-radius: 7px;
+  border: 1px solid rgba(57,168,255,.2);
+  background: rgba(255,255,255,.04);
+  color: #eaf8ff;
+  padding: 0 10px;
+  font-size: 11px;
+  outline: none;
+  width: 200px;
+  font-family: inherit;
+}
+.nl-search-input:focus {
+  border-color: rgba(57,168,255,.5);
+  background: rgba(57,168,255,.06);
+}
+.nl-add-btn {
+  white-space: nowrap;
+}
+
+/* Meta row */
+.nl-meta {
+  display: flex;
+  align-items: center;
+  padding: 6px 20px 4px;
+  flex-shrink: 0;
+}
+.nl-count {
+  font-size: 10px;
+  color: rgba(113,184,255,.45);
+  font-weight: 700;
+}
+
+/* Body / scroll area */
+.nl-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 20px 20px;
+}
+
+/* Site list */
+.nl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.nl-empty {
+  text-align: center;
+  color: rgba(113,184,255,.35);
+  font-size: 11px;
+  padding: 40px 20px;
+  line-height: 1.6;
+}
+.nl-empty strong {
+  color: rgba(113,184,255,.6);
+}
+
+/* Site cards */
+.nl-card {
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(113,184,255,.13);
+  border-radius: 10px;
+  padding: 11px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color .15s, background .15s;
+}
+.nl-card:hover {
+  border-color: rgba(57,168,255,.3);
+  background: rgba(255,255,255,.065);
+}
+
+/* Site header row */
+.nl-site-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.nl-favicon {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  object-fit: contain;
+  background: rgba(255,255,255,.08);
+  flex-shrink: 0;
+}
+.nl-favicon-fallback {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: rgba(57,168,255,.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 900;
+  color: #39a8ff;
+  flex-shrink: 0;
+}
+.nl-site-info {
+  flex: 1;
+  min-width: 0;
+}
+.nl-site-name {
+  font-size: 11px;
+  font-weight: 700;
+  color: #eaf7ff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nl-site-link {
+  font-size: 9px;
+  color: #39a8ff;
+  text-decoration: none;
+  word-break: break-all;
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nl-site-link:hover {
+  color: #71b8ff;
+  text-decoration: underline;
+}
+.nl-autofill-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 8px;
+  font-weight: 800;
+  color: #6bffb8;
+  background: rgba(107,255,184,.08);
+  border: 1px solid rgba(107,255,184,.2);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Credential rows */
+.nl-cred-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nl-cred-label {
+  font-size: 9px;
+  color: rgba(113,184,255,.55);
+  min-width: 68px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  flex-shrink: 0;
+}
+.nl-cred-value {
+  font-size: 10px;
+  color: #c8e6ff;
+  font-family: monospace;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nl-cred-value.nl-pw-hidden {
+  letter-spacing: .15em;
+  color: rgba(200,230,255,.4);
+}
+.nl-cred-none {
+  color: rgba(113,184,255,.3);
+  font-style: italic;
+  font-family: inherit;
+}
+
+/* Buttons in card */
+.nl-copy-btn {
+  font-size: 8px;
+  font-weight: 800;
+  background: rgba(57,168,255,.1);
+  color: #39a8ff;
+  border: 1px solid rgba(57,168,255,.2);
+  border-radius: 4px;
+  padding: 2px 7px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background .15s;
+}
+.nl-copy-btn:hover {
+  background: rgba(57,168,255,.25);
+}
+.nl-toggle-pw {
+  font-size: 10px;
+  background: transparent;
+  color: rgba(113,184,255,.5);
+  border: none;
+  cursor: pointer;
+  padding: 1px 4px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.nl-toggle-pw:hover {
+  color: #71b8ff;
+}
+.nl-card-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+.nl-edit-btn {
+  font-size: 8px;
+  font-weight: 700;
+  background: rgba(255,211,106,.08);
+  color: #ffd36a;
+  border: 1px solid rgba(255,211,106,.2);
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: background .15s;
+}
+.nl-edit-btn:hover {
+  background: rgba(255,211,106,.2);
+}
+.nl-delete-btn {
+  font-size: 8px;
+  font-weight: 700;
+  background: rgba(255,107,107,.08);
+  color: #ff9a9a;
+  border: 1px solid rgba(255,107,107,.2);
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.nl-delete-btn:hover {
+  background: rgba(255,107,107,.18);
+}
+.nl-delete-btn--confirming {
+  background: rgba(255,60,60,.22) !important;
+  border-color: rgba(255,60,60,.5) !important;
+  color: #ff7070 !important;
+}
+
+/* ── Add / Edit Modal ────────────────────────────────────────────────── */
+.nl-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.65);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.nl-modal-box {
+  background: #0f1923;
+  border: 1px solid rgba(113,184,255,.22);
+  border-radius: 13px;
+  padding: 22px 24px 18px;
+  width: min(360px, 96vw);
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  box-shadow: 0 12px 48px rgba(0,0,0,.7);
+}
+.nl-modal-title {
+  font-size: 12px;
+  font-weight: 900;
+  color: #eaf7ff;
+  letter-spacing: .06em;
+}
+.nl-modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.nl-modal-field--row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.nl-modal-label {
+  font-size: 9px;
+  color: rgba(113,184,255,.6);
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.nl-modal-label-hint {
+  font-weight: 400;
+  text-transform: none;
+  color: rgba(113,184,255,.4);
+  font-size: 8px;
+}
+.nl-modal-input {
+  background: rgba(255,255,255,.05);
+  border: 1px solid rgba(113,184,255,.2);
+  border-radius: 6px;
+  padding: 7px 10px;
+  color: #eaf7ff;
+  font-size: 11px;
+  outline: none;
+  font-family: inherit;
+  transition: border-color .15s, background .15s;
+}
+.nl-modal-input:focus {
+  border-color: rgba(57,168,255,.55);
+  background: rgba(57,168,255,.07);
+}
+.nl-modal-check-label {
+  font-size: 9px;
+  color: rgba(113,184,255,.7);
+  cursor: pointer;
+}
+.nl-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+.nl-modal-save {
+  background: rgba(57,168,255,.18);
+  color: #39a8ff;
+  border: 1px solid rgba(57,168,255,.3);
+  border-radius: 6px;
+  padding: 7px 18px;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background .15s;
+}
+.nl-modal-save:hover {
+  background: rgba(57,168,255,.32);
+}
+.nl-modal-cancel {
+  background: rgba(255,255,255,.06);
+  color: rgba(200,220,255,.6);
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 6px;
+  padding: 7px 14px;
+  font-size: 10px;
+  cursor: pointer;
+  transition: background .15s;
+}
+.nl-modal-cancel:hover {
+  background: rgba(255,255,255,.12);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   end notes-links
+   ═══════════════════════════════════════════════════════════════════ */

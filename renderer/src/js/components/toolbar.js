@@ -58,6 +58,9 @@ export function init(container) {
       <button id='tb-daily-notes' class='toolbar__btn' title='Daily Notes'>
         Daily Notes
       </button>
+      <button id="tb-notes-links" class="toolbar__btn" title="Notes &amp; Links">
+        Notes &amp; Links
+      </button>
     </div>
   `;
   container.appendChild(el);
@@ -118,6 +121,11 @@ export function init(container) {
   // Daily Notes button
   document.getElementById('tb-daily-notes').addEventListener('click', () => {
     bus.emit('ui:view-change', { from: 'fleet', to: 'daily-notes' });
+
+  // Notes & Links button
+  document.getElementById('tb-notes-links').addEventListener('click', () => {
+    bus.emit('ui:view-change', { from: 'fleet', to: 'notes-links' });
+  });
   });
 
   // Populate domicile options from fleet data
