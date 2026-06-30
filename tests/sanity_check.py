@@ -701,8 +701,8 @@ chk('S5-C2: old 900000 value removed from uptake.js',           '900000' not in 
 # ipc/scrapers.js
 chk('S5-C1: timeoutAfter imported in ipc/scrapers.js',          'timeoutAfter' in scr)
 chk('S5-C1: GEOFENCE_IPC_TIMEOUT constant in scrapers',         'GEOFENCE_IPC_TIMEOUT' in scr)
-chk('S5-C1: geofence:scrape uses Promise.race IPC belt',        'Promise.race' in scr)
-chk('S5-C1: IPC_TIMEOUT errorCode in scrapers fallback',        "errorCode: 'IPC_TIMEOUT'" in scr)
+chk('P1-B: geofence IPC calls scrapeGeofences directly', 'await scrapeGeofences(log)' in scr)
+chk('P1-B: GEOFENCE_IPC_TIMEOUT = 200_000 for retry budget', 'GEOFENCE_IPC_TIMEOUT = 200_000' in scr)
 
 
 # -- Stage 5 Step 2: concurrency locks H-3 --
@@ -1279,6 +1279,60 @@ chk("S24-5-K: tooltip click calls openExternal for caseUrl", "openExternal(h.cas
 chk("S24-5-L: CSS dp-vnd-history-strip rule present", ".dp-vnd-history-strip" in _css23)
 chk("S24-5-M: CSS dp-vnd-hist-chip rule present", ".dp-vnd-hist-chip" in _css23)
 chk("S24-5-N: CSS dp-vnd-hist-tooltip rule present", ".dp-vnd-hist-tooltip" in _css23)
+# Stage 15 - Schedulers view
+with open('/home/zilasant/fleet/version_c/renderer/src/js/views/schedulers.js', errors='replace') as _f: _sc15 = _f.read()
+
+# Core structure
+chk('S15-1:  schedulers.js exports init()',                     'export function init(' in _sc15)
+chk('S15-2:  view id = view-schedulers',                        'view-schedulers' in _sc15 and '_el.id' in _sc15)
+chk('S15-3:  view class = view--schedulers',                    'view--schedulers' in _sc15)
+chk('S15-4:  SP_SLOTS constant defined (07:30 + 15:30)',        'SP_SLOTS' in _sc15 and '07:30' in _sc15 and '15:30' in _sc15)
+chk('S15-5:  EMAIL_SLOTS constant defined (08:00 + 15:15)',     'EMAIL_SLOTS' in _sc15 and '08:00' in _sc15 and '15:15' in _sc15)
+chk('S15-6:  ALL_SLOTS merges + sorts SP and email slots',      'ALL_SLOTS' in _sc15 and 'SP_SLOTS' in _sc15 and 'EMAIL_SLOTS' in _sc15)
+
+# Bug fix verification
+chk('S15-7:  _minsUntil uses getHours() not getH/urs()',        'getH/urs()' not in _sc15 and 'getHours()' in _sc15)
+
+# Sections
+chk('S15-8:  live clock rendered (sched-clock)',                'sched-clock' in _sc15)
+chk('S15-9:  weekday badge rendered (sched-weekday-badge)',     'sched-weekday-badge' in _sc15 and '_isWd()' in _sc15)
+chk('S15-10: next-slot countdown banner',                       'sched-next-banner' in _sc15 and 'sched-next-countdown' in _sc15)
+chk('S15-11: SP Push card present',                             'sched-card-sp' in _sc15 and 'SharePoint Push' in _sc15)
+chk('S15-12: Auto Email card present',                          'sched-card-email' in _sc15 and 'Auto Email' in _sc15)
+chk('S15-13: SP progress bar + message',                        'sched-sp-progress' in _sc15 and 'sched-sp-bar' in _sc15 and 'sched-sp-msg' in _sc15)
+chk('S15-14: SP card shows last run / next / status meta',      'sched-sp-last' in _sc15 and 'sched-sp-next' in _sc15 and 'sched-sp-status' in _sc15)
+chk('S15-15: email card shows last run / next / status meta',   'sched-em-last' in _sc15 and 'sched-em-next' in _sc15 and 'sched-em-status' in _sc15)
+chk('S15-16: today timeline section',                           'sched-timeline' in _sc15 and '_slotRow(' in _sc15)
+chk('S15-17: slot rows have past/soon/upcoming/weekend states', 'sched-slot--past' in _sc15 and 'sched-slot--soon' in _sc15 and 'sched-slot--weekend' in _sc15)
+chk('S15-18: run log section (localStorage, 20 entries)',       'sched-log' in _sc15 and 'MAX_LOG' in _sc15 and 'LOG_KEY' in _sc15)
+chk('S15-19: run log persists via localStorage',                '_loadLog' in _sc15 and '_saveLog' in _sc15)
+
+# Actions
+chk('S15-20: manual SP Push button wired',                      'sched-sp-trigger' in _sc15 and '_triggerSP' in _sc15)
+chk('S15-21: Sync Only button wired',                           'sched-sp-sync' in _sc15 and '_triggerSync' in _sc15)
+chk('S15-22: Clear log button wired',                           'sched-clear-log' in _sc15)
+chk('S15-23: back-to-fleet button wired',                       'sched-back' in _sc15 and "to: 'fleet'" in _sc15)
+chk('S15-24: SP trigger disabled while running',                'btn.disabled = _spRunning' in _sc15 or 'btn) btn.disabled = _spRunning' in _sc15)
+
+# Bus / reactivity
+chk('S15-25: sp:progress bus listener',                         "bus.on('sp:progress'" in _sc15)
+chk('S15-26: fleet:status bus listener routes email/sp/sync',   "bus.on('fleet:status'" in _sc15 and 'isEm' in _sc15 and 'isSP' in _sc15)
+chk('S15-27: fleet:data bus listener logs sync',                "bus.on('fleet:data'" in _sc15)
+chk('S15-28: ui:view-change starts/stops tick timer',           "bus.on('ui:view-change'" in _sc15 and '_startTick' in _sc15 and '_stopTick' in _sc15)
+
+# CSS self-injection
+chk('S15-29: CSS self-injected via _injectCss()',               '_injectCss' in _sc15 and '_CSS' in _sc15 and 'document.head.appendChild' in _sc15)
+chk('S15-30: CSS sched-card rule injected',                     'sched-card{' in _sc15 or '.sched-card{' in _sc15)
+chk('S15-31: CSS sched-badge variants injected',                'sched-badge--ok' in _sc15 and 'sched-badge--err' in _sc15 and 'sched-badge--run' in _sc15)
+chk('S15-32: CSS sched-progress-bar with animation',            'sched-progress-bar' in _sc15 and 'sched-pulse' in _sc15)
+chk('S15-33: CSS sched-slot variants injected',                 'sched-slot--soon' in _sc15 and 'sched-slot--past' in _sc15)
+
+# Toolbar + app.js wiring (via S19 checks already present, verify vars)
+chk('S15-34: app.js imports initSchedulers',                    'initSchedulers' in _app and 'schedulers.js' in _app)
+chk('S15-35: app.js routes schedulers in ui:view-change',       'schedulersView' in _app and "to === 'schedulers'" in _app)
+chk('S15-36: toolbar tb-schedulers button present',             'tb-schedulers' in _tb)
+chk('S15-37: toolbar emits view-change to schedulers',          "to: 'schedulers'" in _tb)
+
 # ── Report ───────────────────────────────────────────────────────────────────
 print('=' * 60)
 print('SANITY CHECK REPORT')
@@ -1295,3 +1349,4 @@ if fails:
     sys.exit(1)
 else:
     print('\n[RESULT] ALL CLEAR — no blocking issues found')
+
