@@ -290,8 +290,9 @@ function initWindows(ctx) {
         const colRes = await win.webContents.executeJavaScript(`(async function __aapConfigCols() {
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   function simClick(el) {
-    ['mousedown','mouseup','click'].forEach(function(ev) {
-      el.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true }));
+    ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(ev) {
+      var Ctor = ev.startsWith('pointer') ? PointerEvent : MouseEvent;
+      el.dispatchEvent(new Ctor(ev, { bubbles: true, cancelable: true, pointerId: 1 }));
     });
   }
   var WANT = [
@@ -316,7 +317,7 @@ function initWindows(ctx) {
 
   if (!btn) return { ok: false, reason: 'button not found' };
   simClick(btn);
-  await sleep(1200);
+  await sleep(1800);
 
   // Find popup: div containing both Available Columns + Selected columns headings
   var popup = Array.from(document.querySelectorAll('div')).find(function(d) {
