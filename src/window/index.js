@@ -165,6 +165,7 @@ function initWindows(ctx) {
   let bubbleWin        = null;
   let _bubbleLastPos   = null;
   let _rescanInProgress = false;
+  let _appReady = false;
 
   // ── Lazy-loaded scraper deps (avoid circular require at module load) ───────
   function _getAap()  { return require('../scrapers/aap'); }
@@ -380,6 +381,12 @@ function initWindows(ctx) {
     mainWindow.loadURL(startUrl);
 
     function switchToApp() {
+      _appReady = true;
+      // Start live rescan: first run 90s after app loads, then every 5 min
+      setTimeout(() => {
+        triggerLiveRescan(false);
+        setInterval(() => triggerLiveRescan(false), RESCAN_INTERVAL_MS);
+      }, 90000);
       logger.info('Switching to Fleet Operations app...');
       if (process.env.NODE_ENV === 'development') {
         logger.info('[window] Dev mode: loading Vite dev server at http://localhost:5173');
@@ -502,6 +509,10 @@ function initWindows(ctx) {
     // Runs a full fresh AAP scrape without touching the user-visible main window.
     const RESCAN_INTERVAL_MS = 5 * 60 * 1000;
     function triggerLiveRescan(force) {
+      if (!_appReady) {
+        logger.info('Rescan skipped — app not ready yet (Midway auth pending)');
+        return;
+      }
       if (_rescanInProgress) {
         logger.info('Rescan already in progress — skipping');
         return;
@@ -552,11 +563,7 @@ function initWindows(ctx) {
       scrapeWin.loadURL(freshUrl);
     }
 
-    // First rescan 1 min after startup; then every 5 min
-    setTimeout(() => {
-      triggerLiveRescan(false);
-      setInterval(() => triggerLiveRescan(false), RESCAN_INTERVAL_MS);
-    }, 60000);
+    // Rescan timer is started from switchToApp() — after Midway auth completes
 
     // Expose trigger for domicile-change forced rescan
     ipcMain.on('aap:rescan', (_e, opts) => triggerLiveRescan(!!(opts && opts.force)));
