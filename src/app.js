@@ -194,9 +194,10 @@ app.whenReady().then(async () => {
   }
 
   // Back-fill sync entry points on ctx
-  _ctx.runFullSync   = _syncEngine.runFullSync;
-  _ctx.startAutoSync = _startAutoSync;
-  _ctx.triggerRescan = _windowApi.triggerRescan;
+  _ctx.runFullSync      = _syncEngine.runFullSync;
+  _ctx.startAutoSync    = _startAutoSync;
+  _ctx.triggerRescan    = _windowApi.triggerRescan;
+  _ctx.reloadSchedulers = _reloadSchedulers;   // IPC handler calls this after saving slot config
 
   // ── 5e. Register all IPC handlers ─────────────────────────────────────────
   const { registerAllIPC } = require('./ipc');
@@ -246,9 +247,28 @@ let _emailScheduleTimer = null;
 let _lastSPSlot         = '';
 let _lastEmailSlot      = '';
 
-// Slot definitions — single source of truth
-const SP_SLOTS    = [{ h: 7,  m: 30, label: '07:30' }, { h: 15, m: 30, label: '15:30' }];
-const EMAIL_SLOTS = [{ h: 8,  m: 0,  label: '08:00' }, { h: 15, m: 15, label: '15:15' }];
+// Slot defaults — used when no saved config exists
+const _DEFAULT_SP_SLOTS    = [{ h: 7,  m: 30, label: '07:30' }, { h: 15, m: 30, label: '15:30' }];
+const _DEFAULT_EMAIL_SLOTS = [{ h: 8,  m: 0,  label: '08:00' }, { h: 15, m: 15, label: '15:15' }];
+
+// Live slot arrays — mutated by _loadScheduleSlots() and reloadSchedulers()
+let SP_SLOTS    = _DEFAULT_SP_SLOTS.slice();
+let EMAIL_SLOTS = _DEFAULT_EMAIL_SLOTS.slice();
+
+// Load saved slot config from store (falls back to defaults if not set)
+function _loadScheduleSlots() {
+  try {
+    const store   = require('./store');
+    const saved   = store.load('settings', {}).schedulerSlots;
+    if (saved && Array.isArray(saved.sp) && Array.isArray(saved.email)) {
+      SP_SLOTS    = saved.sp;
+      EMAIL_SLOTS = saved.email;
+      log.info('Scheduler slots loaded from config — SP:', SP_SLOTS.map(s=>s.label), 'Email:', EMAIL_SLOTS.map(s=>s.label));
+    }
+  } catch (e) {
+    log.warn('Could not load scheduler slot config, using defaults:', e.message);
+  }
+}
 
 function _todayPrefix() {
   const n = new Date();
@@ -386,13 +406,23 @@ function _catchUpMissedSlots() {
 }
 
 function _startSchedulers() {
+  _loadScheduleSlots();
   _scheduleAutoSPPush();
   _scheduleAutoEmail();
   _catchUpMissedSlots();
-  log.info('Schedulers started (SP push: 07:30/15:30, Email: 08:00/15:15, weekdays)');
+  log.info('Schedulers started — SP:', SP_SLOTS.map(s=>s.label), 'Email:', EMAIL_SLOTS.map(s=>s.label));
 }
 
 function _stopSchedulers() {
   if (_spScheduleTimer)    { clearInterval(_spScheduleTimer);    _spScheduleTimer    = null; }
   if (_emailScheduleTimer) { clearInterval(_emailScheduleTimer); _emailScheduleTimer = null; }
+}
+
+// Called by IPC handler when user saves new slot config
+function _reloadSchedulers(newSlots) {
+  if (newSlots && newSlots.sp)    SP_SLOTS    = newSlots.sp;
+  if (newSlots && newSlots.email) EMAIL_SLOTS = newSlots.email;
+  _stopSchedulers();
+  _startSchedulers();
+  log.info('Schedulers reloaded with new slot config');
 }

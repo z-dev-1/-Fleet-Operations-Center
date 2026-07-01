@@ -106,7 +106,9 @@ export const settings = {
   getDomiciles:   ()       => window.settings.getDomiciles(),
   saveDomiciles:  (d)      => window.settings.saveDomiciles(d),
   resetDomiciles: ()       => window.settings.resetDomiciles(),
-  getOrchaConfig: ()       => window.settings.getOrchaConfig(),
+  getOrchaConfig:    ()       => window.settings.getOrchaConfig(),
+  getScheduleSlots:  ()       => window.settings.getScheduleSlots(),
+  saveScheduleSlots: (slots)  => window.settings.saveScheduleSlots(slots),
 };
 
 // ── Notes ──────────────────────────────────────────────────────────────────

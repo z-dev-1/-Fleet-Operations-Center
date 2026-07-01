@@ -127,7 +127,34 @@ function registerSettingsIPC(ctx) {
     return { ok: true, count: clean.length };
   });
 
+  // ── Scheduler slot config ─────────────────────────────────────────────────
+  // Shape: { sp: [{h,m,label},{h,m,label}], email: [{h,m,label},{h,m,label}] }
+  handle('settings:get-schedule-slots', () => {
+    const s = store.load('settings', {});
+    return s.schedulerSlots || null;   // null = caller uses defaults
+  });
 
+  handle('settings:save-schedule-slots', (_e, slots) => {
+    if (!slots || typeof slots !== 'object') throw new ConfigError('slots must be an object', 'slots');
+    const clean = { sp: [], email: [] };
+    ['sp', 'email'].forEach(type => {
+      const arr = slots[type];
+      if (!Array.isArray(arr) || arr.length !== 2) throw new ConfigError(type + ' must have exactly 2 slots', type);
+      clean[type] = arr.map((s, i) => {
+        const h = parseInt(s.h, 10), m = parseInt(s.m, 10);
+        if (isNaN(h) || h < 0 || h > 23) throw new ConfigError(type + '[' + i + '].h out of range', type);
+        if (isNaN(m) || m < 0 || m > 59) throw new ConfigError(type + '[' + i + '].m out of range', type);
+        const label = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+        return { h, m, label };
+      });
+    });
+    const s = store.load('settings', {});
+    s.schedulerSlots = clean;
+    store.save('settings', s);
+    logger.info('Scheduler slots saved:', JSON.stringify(clean));
+    if (ctx.reloadSchedulers) ctx.reloadSchedulers(clean);
+    return { ok: true, slots: clean };
+  });
 
   logger.info('Settings IPC handlers registered');
 }

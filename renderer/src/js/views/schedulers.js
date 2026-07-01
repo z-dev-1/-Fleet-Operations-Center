@@ -1,44 +1,41 @@
 /**
- * schedulers.js - Scheduler status + control view (Stage 15)
+ * schedulers.js - Scheduler status + control view (Stage 15 / S28 update)
  *
- * Surfaces backend scheduler state. No new IPC needed.
- * Mirrors src/app.js slot constants:
- *   SP Push:    07:30, 15:30  (weekdays)
- *   Auto-Email: 08:00, 15:15  (weekdays)
+ * Slot times are now user-configurable via Settings → Schedulers.
+ * Saved via settings:save-schedule-slots IPC → restarts backend schedulers live.
  *
  * Sections:
  *   1. Header + weekday badge + live clock
  *   2. Next-slot countdown banner
- *   3. SP Push card  (last run, next slot, status, manual trigger)
- *   4. Auto-Email card (last run, next slot, status, note)
+ *   3. SP Push card  (last run, next slot, status, manual trigger, time editors)
+ *   4. Auto-Email card (last run, next slot, status, time editors)
  *   5. Today's slot timeline (past/soon/upcoming/weekend badges)
  *   6. Run log (localStorage, 20 entries, type icons)
  *
- * IPC used (pre-existing):
- *   window.fleet.requestSync() - full sync
- *   window.sp.push(rows)       - manual SP push
- *
- * Bus events consumed:
- *   sp:progress    - SP progress -> log + progress bar
- *   fleet:status   - status msg  -> log (email/sp/sync routine)
- *   fleet:data     - sync note
+ * IPC used:
+ *   window.fleet.requestSync()              - full sync
+ *   window.sp.push(rows)                    - manual SP push
+ *   window.settings.getScheduleSlots()      - load saved slot config
+ *   window.settings.saveScheduleSlots(s)    - save + hot-reload backend
  */
 
-import bus   from '../bus.js';
-import state from '../state.js';
+import bus      from '../bus.js';
+import state    from '../state.js';
+import { settings as settingsBridge } from '../bridge.js';
 
-const SP_SLOTS = [
-  { h: 7,  m: 30, label: '07:30', id: 'sp-0730' },
-  { h: 15, m: 30, label: '15:30', id: 'sp-1530' },
-];
-const EMAIL_SLOTS = [
-  { h: 8,  m:  0, label: '08:00', id: 'em-0800' },
-  { h: 15, m: 15, label: '15:15', id: 'em-1515' },
-];
-const ALL_SLOTS = [
-  ...SP_SLOTS.map(s    => ({ ...s, type: 'sp'    })),
-  ...EMAIL_SLOTS.map(s => ({ ...s, type: 'email' })),
-].sort((a, b) => (a.h * 60 + a.m) - (b.h * 60 + b.m));
+// Default slots — overwritten by _loadSlots() on init
+const _DEFAULT_SP_SLOTS    = [{ h: 7,  m: 30, label: '07:30' }, { h: 15, m: 30, label: '15:30' }];
+const _DEFAULT_EMAIL_SLOTS = [{ h: 8,  m:  0, label: '08:00' }, { h: 15, m: 15, label: '15:15' }];
+
+let SP_SLOTS    = _DEFAULT_SP_SLOTS.map(s => ({ ...s }));
+let EMAIL_SLOTS = _DEFAULT_EMAIL_SLOTS.map(s => ({ ...s }));
+
+function _allSlots() {
+  return [
+    ...SP_SLOTS.map(s    => ({ ...s, type: 'sp'    })),
+    ...EMAIL_SLOTS.map(s => ({ ...s, type: 'email' })),
+  ].sort((a, b) => (a.h * 60 + a.m) - (b.h * 60 + b.m));
+}
 
 const MAX_LOG = 20;
 const LOG_KEY = 'vc_scheduler_log';
@@ -81,7 +78,7 @@ function _minsUntil(h, m) {
 }
 function _nextSlot() {
   let best = null;
-  for (const s of ALL_SLOTS) {
+  for (const s of _allSlots()) {
     const mins = _minsUntil(s.h, s.m);
     if (!best || mins < best.minsUntil) best = { slot: s, minsUntil: mins };
   }
@@ -139,7 +136,7 @@ function _viewHtml() {
 
    + '<div class="sched-card" id="sched-card-sp">'
     + '<div class="sched-card__head"><div class="sched-card__icon sched-card__icon--sp">\ud83d\udce4</div>'
-    + '<div><div class="sched-card__title">SharePoint Push</div><div class="sched-card__sub">Weekdays 07:30 \u00b7 15:30</div></div>'
+    + '<div><div class="sched-card__title">SharePoint Push</div><div class="sched-card__sub" id="sched-sp-sub">Weekdays \u2014</div></div>'
     + '<div class="sched-card__badge" id="sched-sp-badge">\u2014</div></div>'
     + '<div class="sched-card__meta">'
     + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Last run</span><span class="sched-card__meta-val" id="sched-sp-last">\u2014</span></div>'
@@ -149,6 +146,13 @@ function _viewHtml() {
     + '<div class="sched-card__progress" id="sched-sp-progress" style="display:none">'
     + '<div class="sched-progress-bar" id="sched-sp-bar"></div>'
     + '<div class="sched-progress-msg" id="sched-sp-msg">\u2014</div></div>'
+    + '<div class="sched-time-editor">'
+    + '<span class="sched-time-editor__label">AM slot</span>'
+    + '<input class="sched-time-input" type="time" id="sched-sp-am" />'
+    + '<span class="sched-time-editor__label">PM slot</span>'
+    + '<input class="sched-time-input" type="time" id="sched-sp-pm" />'
+    + '<button class="sched-btn sched-btn--save" id="sched-sp-save">\u2713 Save times</button>'
+    + '</div>'
     + '<div class="sched-card__actions">'
     + '<button class="sched-btn sched-btn--primary" id="sched-sp-trigger">\ud83d\udce4 Run SP Push Now</button>'
     + '<button class="sched-btn sched-btn--ghost" id="sched-sp-sync">\ud83d\udd04 Sync Only</button>'
@@ -156,12 +160,19 @@ function _viewHtml() {
 
     + '<div class="sched-card" id="sched-card-email">'
     + '<div class="sched-card__head"><div class="sched-card__icon sched-card__icon--email">\ud83d\udce7</div>'
-    + '<div><div class="sched-card__title">Auto Email</div><div class="sched-card__sub">Weekdays 08:00 \u00b7 15:15</div></div>'
+    + '<div><div class="sched-card__title">Auto Email</div><div class="sched-card__sub" id="sched-em-sub">Weekdays \u2014</div></div>'
     + '<div class="sched-card__badge" id="sched-em-badge">\u2014</div></div>'
     + '<div class="sched-card__meta">'
     + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Last run</span><span class="sched-card__meta-val" id="sched-em-last">\u2014</span></div>'
     + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Next</span><span class="sched-card__meta-val" id="sched-em-next">\u2014</span></div>'
     + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Status</span><span class="sched-card__meta-val" id="sched-em-status">\u2014</span></div>'
+    + '</div>'
+    + '<div class="sched-time-editor">'
+    + '<span class="sched-time-editor__label">AM slot</span>'
+    + '<input class="sched-time-input" type="time" id="sched-em-am" />'
+    + '<span class="sched-time-editor__label">PM slot</span>'
+    + '<input class="sched-time-input" type="time" id="sched-em-pm" />'
+    + '<button class="sched-btn sched-btn--save" id="sched-em-save">\u2713 Save times</button>'
     + '</div>'
     + '<div class="sched-card__note">Auto-email fires at scheduled slots \u2014 no manual trigger needed. Use the Email Composer for ad-hoc sends.</div>'
     + '</div>'
@@ -240,6 +251,13 @@ const _CSS = [
   '.sched-log-ts{font-family:var(--mono);font-size:9px;color:var(--mut);white-space:nowrap;width:80px}',
   '.sched-log-icon{font-size:12px;flex-shrink:0}',
   '.sched-log-msg{color:var(--txt2);line-height:1.4;flex:1}.sched-log-msg.ok{color:var(--grn)}.sched-log-msg.err{color:var(--red)}',
+  // Time editor
+  '.sched-time-editor{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--el);border-radius:7px;flex-wrap:wrap}',
+  '.sched-time-editor__label{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;font-weight:700}',
+  '.sched-time-input{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--txt);background:var(--card);border:1px solid var(--bdr);border-radius:5px;padding:4px 8px;width:90px}',
+  '.sched-time-input:focus{outline:none;border-color:var(--acc)}',
+  '.sched-btn--save{background:var(--adim);border-color:var(--acc);color:var(--acc2);margin-left:auto}',
+  '.sched-btn--save:hover{background:rgba(88,166,255,.2)}',
 ].join('\n');
 
 let _cssInjected = false;
@@ -290,7 +308,7 @@ function _rEmailCard() {
 function _rTimeline() {
   const tl = _q('sched-timeline');
   if (!tl) return;
-  tl.innerHTML = ALL_SLOTS.map(s => _slotRow(s, s.type === 'sp' ? _spLastRun : _emailLastRun)).join('');
+  tl.innerHTML = _allSlots().map(s => _slotRow(s, s.type === 'sp' ? _spLastRun : _emailLastRun)).join('');
 }
 function _renderLog() {
   const el = _q('sched-log');
@@ -376,6 +394,76 @@ function _stopTick() {
   if (_tickTimer) { clearInterval(_tickTimer); _tickTimer = null; }
 }
 
+
+// ── Slot config helpers ───────────────────────────────────────────────────
+async function _loadSlots() {
+  try {
+    const saved = await settingsBridge.getScheduleSlots();
+    if (saved && Array.isArray(saved.sp) && Array.isArray(saved.email)) {
+      SP_SLOTS    = saved.sp;
+      EMAIL_SLOTS = saved.email;
+    }
+  } catch (_) {}
+}
+
+function _hm(str) {
+  // Parse "HH:MM" time input value → { h, m }
+  const [h, m] = (str || '').split(':').map(Number);
+  return { h: h || 0, m: m || 0 };
+}
+
+function _pad(n) { return String(n).padStart(2, '0'); }
+function _toTimeStr(h, m) { return _pad(h) + ':' + _pad(m); }
+
+function _populateTimeInputs() {
+  const spAm = _q('sched-sp-am'), spPm = _q('sched-sp-pm');
+  const emAm = _q('sched-em-am'), emPm = _q('sched-em-pm');
+  if (spAm) spAm.value = _toTimeStr(SP_SLOTS[0].h, SP_SLOTS[0].m);
+  if (spPm) spPm.value = _toTimeStr(SP_SLOTS[1].h, SP_SLOTS[1].m);
+  if (emAm) emAm.value = _toTimeStr(EMAIL_SLOTS[0].h, EMAIL_SLOTS[0].m);
+  if (emPm) emPm.value = _toTimeStr(EMAIL_SLOTS[1].h, EMAIL_SLOTS[1].m);
+}
+
+function _updateCardSubs() {
+  const spSub = _q('sched-sp-sub');
+  const emSub = _q('sched-em-sub');
+  if (spSub) spSub.textContent = 'Weekdays ' + SP_SLOTS.map(s => s.label).join(' \u00b7 ');
+  if (emSub) emSub.textContent = 'Weekdays ' + EMAIL_SLOTS.map(s => s.label).join(' \u00b7 ');
+}
+
+async function _saveSlots(type) {
+  const amId = type === 'sp' ? 'sched-sp-am' : 'sched-em-am';
+  const pmId = type === 'sp' ? 'sched-sp-pm' : 'sched-em-pm';
+  const amEl = _q(amId), pmEl = _q(pmId);
+  if (!amEl || !pmEl) return;
+
+  const am = _hm(amEl.value), pm = _hm(pmEl.value);
+  const amLabel = _toTimeStr(am.h, am.m);
+  const pmLabel = _toTimeStr(pm.h, pm.m);
+
+  const newSlots = {
+    sp:    type === 'sp'    ? [{ ...am, label: amLabel }, { ...pm, label: pmLabel }] : SP_SLOTS,
+    email: type === 'email' ? [{ ...am, label: amLabel }, { ...pm, label: pmLabel }] : EMAIL_SLOTS,
+  };
+
+  const btn = _q(type === 'sp' ? 'sched-sp-save' : 'sched-em-save');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+
+  try {
+    const result = await settingsBridge.saveScheduleSlots(newSlots);
+    if (result && result.ok) {
+      if (type === 'sp')    SP_SLOTS    = newSlots.sp;
+      if (type === 'email') EMAIL_SLOTS = newSlots.email;
+      _updateCardSubs();
+      _pushLog({ type: 'sync', msg: (type === 'sp' ? 'SP' : 'Email') + ' schedule updated: ' + amLabel + ' · ' + pmLabel, status: 'ok' });
+    }
+  } catch (e) {
+    _pushLog({ type: 'sync', msg: 'Save failed: ' + e.message, status: 'error' });
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '\u2713 Save times'; }
+  }
+}
+
 // ── init ──────────────────────────────────────────────────────────────────
 export function init(container) {
   _injectCss();
@@ -392,10 +480,21 @@ export function init(container) {
   const sb = _q('sched-sp-trigger');
   const sy = _q('sched-sp-sync');
   const cl = _q('sched-clear-log');
+  const ss = _q('sched-sp-save');
+  const es = _q('sched-em-save');
   if (bb) bb.addEventListener('click', () => bus.emit('ui:view-change', { from: 'schedulers', to: 'fleet' }));
   if (sb) sb.addEventListener('click', _triggerSP);
   if (sy) sy.addEventListener('click', _triggerSync);
   if (cl) cl.addEventListener('click', () => { _log = []; _saveLog(); _renderLog(); });
+  if (ss) ss.addEventListener('click', () => _saveSlots('sp'));
+  if (es) es.addEventListener('click', () => _saveSlots('email'));
+
+  // Load saved slot config, populate inputs, update card subtitles
+  _loadSlots().then(() => {
+    _populateTimeInputs();
+    _updateCardSubs();
+    _rAll();
+  });
 
   bus.on('sp:progress', (p) => { if (_el && _el.style.display !== 'none') _onSpProg(p); });
   bus.on('fleet:status', (msg) => {
@@ -420,7 +519,12 @@ export function init(container) {
   bus.on('ui:view-change', ({ to }) => {
     const vis = to === 'schedulers';
     _el.style.display = vis ? 'flex' : 'none';
-    if (vis) { _rAll(); _startTick(); } else { _stopTick(); }
+    if (vis) {
+      _loadSlots().then(() => { _populateTimeInputs(); _updateCardSubs(); _rAll(); });
+      _startTick();
+    } else {
+      _stopTick();
+    }
   });
   _rAll();
 }

@@ -55,7 +55,9 @@ contextBridge.exposeInMainWorld('settings', {
   save:          (key, val)=> ipcRenderer.invoke('settings:save', key, val),
   getOperators:  ()        => ipcRenderer.invoke('settings:get-operators'),
   saveOperators: (ops)     => ipcRenderer.invoke('settings:save-operators', ops),
-  getOrchaConfig:()        => ipcRenderer.invoke('orcha:get-config'),
+  getOrchaConfig:    ()        => ipcRenderer.invoke('orcha:get-config'),
+  getScheduleSlots:  ()        => ipcRenderer.invoke('settings:get-schedule-slots'),
+  saveScheduleSlots: (slots)   => ipcRenderer.invoke('settings:save-schedule-slots', slots),
 });
 
 // ── Notes ─────────────────────────────────────────────────────────────────────
