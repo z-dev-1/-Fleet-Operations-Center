@@ -30,8 +30,7 @@ import toast    from '../components/toast.js';
 let _el        = null;
 let _opEmails  = {};    // { 'OPERATOR': { to: '', cc: '' } }
 let _spEmails  = {};    // { 'OpName__DOMCODE': { to: '', cc: '' } }  — from spConfig.emails
-let _domiciles = [];    // ['ABE40', 'PHL40', ...]
-let _operators = [];    // derived from fleet rows
+let _operators = [];    // derived live from fleet rows
 // ── Helpers ────────────────────────────────────────────────────────────────
 const _el2 = (id) => document.getElementById(id);
 const _safe = (s) => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -68,8 +67,18 @@ function _opOptions() {
   return `<option value="">-- Select operator --</option>${opts}`;
 }
 
-function _domOptions() {
-  const opts = _domiciles.map(d =>
+// Returns domiciles present in fleet state for the given operator.
+// If op is blank/empty, returns all domiciles across all operators.
+function _domicilesForOp(op) {
+  const rows = state.slice('fleet').rows || [];
+  const scoped = op
+    ? rows.filter(r => (r.op || r.operator || '').toUpperCase().trim() === op.toUpperCase().trim())
+    : rows;
+  return [...new Set(scoped.map(r => (r.domicileSite || r.domicile || '')).filter(Boolean))].sort();
+}
+
+function _domOptions(doms) {
+  const opts = (doms || []).map(d =>
     `<option value="${_safe(d)}">${_safe(d)}</option>`
   ).join('');
   return `<option value="ALL">ALL (no filter)</option>${opts}`;
@@ -106,7 +115,7 @@ function _html() {
               </label>
               <label class="settings-label">Domicile
                 <select id="ec-domicile" class="settings__select ec-select">
-                  ${_domOptions()}
+                  ${_domOptions(_domicilesForOp(''))}
                 </select>
               </label>
             </div>
@@ -226,13 +235,8 @@ function _refreshOperators() {
   _operators = ops;
 }
 
-// ── Load domiciles from settings ──────────────────────────────────────────
-async function _loadDomiciles() {
-  try {
-    const d = await settingsBridge.getDomiciles();
-    if (Array.isArray(d)) _domiciles = d;
-  } catch (_) {}
-}
+// _loadDomiciles() removed — domiciles are derived live from fleet state via _domicilesForOp()
+
 
 // ── Op-email presets ─────────────────────────────────────────────────────────
 // Source of truth is spConfig.emails (keyed "Op__DOM") saved from Settings.
@@ -585,6 +589,12 @@ function _wireScope() {
   const domSel = _el2('ec-domicile');
   if (opSel) {
     opSel.addEventListener('change', () => {
+      // Repopulate domicile select to only show domiciles for this operator
+      const op = opSel.value || '';
+      if (domSel) {
+        domSel.innerHTML = _domOptions(_domicilesForOp(op));
+        domSel.value = 'ALL';
+      }
       _updateSubject();
       _updateUnitCount();
       _autoFillRecipients();
@@ -676,8 +686,7 @@ export async function init(container) {
   _el.className = 'view view--email-composer';
   _el.style.display = 'none';
 
-  // Pre-load data before inserting HTML so selects are populated
-  await _loadDomiciles();
+  // Pre-load operators from live fleet state before rendering HTML
   _refreshOperators();
 
   _el.innerHTML = _html();
@@ -708,21 +717,41 @@ export async function init(container) {
   // Refresh operators when fleet data changes
   bus.on('fleet:data', () => {
     _refreshOperators();
-    // Re-render operator options if visible
+    // Re-render operator options, preserving current selection
     const opSel = _el2('ec-operator');
     if (opSel) {
-      const current = opSel.value;
+      const currentOp = opSel.value;
       opSel.innerHTML = _opOptions();
-      if (current) opSel.value = current;
+      if (currentOp) opSel.value = currentOp;
+      // Re-render domicile options scoped to current op
+      const domSel = _el2('ec-domicile');
+      if (domSel) {
+        const currentDom = domSel.value;
+        domSel.innerHTML = _domOptions(_domicilesForOp(currentOp));
+        domSel.value = currentDom || 'ALL';
+      }
     }
     _updateUnitCount();
   });
 
-  // Show/hide based on view
+  // Show/hide based on view — refresh selects with live data on every open
   bus.on('ui:view-change', ({ to }) => {
     _el.style.display = to === 'email-composer' ? 'flex' : 'none';
     if (to === 'email-composer') {
       _refreshOperators();
+      const opSel = _el2('ec-operator');
+      if (opSel) {
+        const currentOp = opSel.value;
+        opSel.innerHTML = _opOptions();
+        if (currentOp) opSel.value = currentOp;
+        const domSel = _el2('ec-domicile');
+        if (domSel) {
+          const currentDom = domSel.value;
+          domSel.innerHTML = _domOptions(_domicilesForOp(currentOp));
+          domSel.value = currentDom || 'ALL';
+        }
+      }
+      _updateSubject();
       _updateUnitCount();
     }
   });
