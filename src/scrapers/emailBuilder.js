@@ -197,6 +197,7 @@ function buildEmail(opts) {
       if (!caseHtml) caseHtml = ft('#bbbbbb', '\u2014', 'font-size:10px');
 
       // Relay Garage
+      let rgHtml = ft('#bbbbbb', '\u2014', 'font-size:10px');
       if (vendor) {
         rgHtml = ft('#222222', '<b>' + vendor + '</b>', 'font-size:10px');
         // S25-12: Sub Vendor line (dealer name or geofence fallback)
