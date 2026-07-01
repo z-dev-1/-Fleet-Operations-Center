@@ -29,7 +29,7 @@ const STEP_LABELS = {
   'filling-form':        'Filling form...',
   'awaiting-review':     'Awaiting review',
   'review-ready':        'Awaiting review',
-  'review-ready:stub':   'Awaiting review',
+  'review-ready:stub':   'Review (stub)',    // S27-3: distinguish stub path from real review gate
   'approved':            'Approved - submitting...',
   'submitting':          'Submitting...',
   'polling-sr-number':   'Waiting for SR #...',
@@ -80,7 +80,8 @@ function _pillHtml(p) {
   const spinner = isReview
     ? '<span class="vab__pill-review-dot" title="Awaiting operator review"></span>'
     : '<span class="vab__pill-spinner"></span>';
-  return `<div class="vab__pill" id="${pid}" data-wfid="${_esc(p.workflowId)}">` +
+  const isStub = (p.step || '').endsWith(':stub');
+  return `<div class="vab__pill${isStub ? ' vab__pill--stub' : ''}" id="${pid}" data-wfid="${_esc(p.workflowId)}">` +
     `<span class="vab__vendor dp-vnd-badge ${vCls}">${_esc(vLbl)}</span>` +
     `<span class="vab__unit">${unitId}</span>` +
     `<span class="vab__step">${_esc(step)}</span>` +

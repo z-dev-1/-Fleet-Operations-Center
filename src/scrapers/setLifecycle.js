@@ -81,18 +81,11 @@ async function setLifecycleState({ equipmentId, assetUrl, state, reason }) {
       await sleep(3000);
 
       try {
-        const fs = require('fs'), path = require('path'), os = require('os');
-        const logPath = path.join(os.homedir(), 'AppData', 'Roaming', 'fleet-status-app', 'relay-debug.log');
-
-        // BTN DUMP fires INSIDE the automation script, AFTER the Asset Details tab click,
-        // so we see exactly what's on screen when findPencilBtn() runs.
-        // The automation script logs its own post-tab-click dump via console.log.
-
+        // S27-5: removed appendFileSync + stale relay-debug.log path — logger handles all output
         const result = await win.webContents.executeJavaScript(
           buildAutomationScript(state, reason)
         );
         log('Automation result:', JSON.stringify(result));
-        fs.appendFileSync(logPath, '[SetLifecycle] Result: ' + JSON.stringify(result) + '\n');
         done(result);
       } catch(e) {
         log('executeJavaScript error:', e.message);

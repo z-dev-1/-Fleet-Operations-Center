@@ -5,6 +5,7 @@
 //         + offsite shop link detection (Decisiv / DTNA links on the page)
 // Tier 2: Work Orders tab click -> vendorWorkOrderId, cause, correction, totalCost
 // Tier 3: per-unit saved notes injected at merge time from fleet_notes.json (via main.js)
+// S27-4: appendFileSync carry-forward was stale — this file uses logger throughout, no fs.appendFileSync present.
 // FleetNet filter: any unit whose vendor resolves to FleetNet is SKIPPED entirely.
 
 const { BrowserWindow } = require('electron');
