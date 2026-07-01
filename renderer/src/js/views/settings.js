@@ -662,10 +662,9 @@ function _wireCreds() {
 
 // ── Section: Vendor Auth ─────────────────────────────────────────────────────
 function _checkVendorCred(vendor, statusId) {
-  settingsBridge.getAll().then((all) => {
+  credsBridge.has(`vendor.${vendor}.username`).then((has) => {
     const st = document.getElementById(statusId);
     if (!st) return;
-    const has = all && all[`${vendor}_user`];
     st.textContent = has ? `✅ Credentials saved` : '⚠️ Not configured';
     st.style.display = 'block';
     st.className = `settings__status settings__status--${has ? 'ok' : 'loading'}`;
@@ -675,16 +674,32 @@ function _checkVendorCred(vendor, statusId) {
 function _wireVendorAuth() {
   ['paccar', 'volvo'].forEach((v) => {
     _checkVendorCred(v, `${v}-status`);
+
+    // Load saved username back into the field (password never retrieved)
+    settingsBridge.getAll().then((all) => {
+      const userEl = document.getElementById(`${v}-user`);
+      if (userEl && all && all[`${v}_user`]) userEl.value = all[`${v}_user`];
+    }).catch(() => {});
+
     document.getElementById(`${v}-save`).addEventListener('click', async () => {
-      await settingsBridge.save(`${v}_user`, document.getElementById(`${v}-user`).value.trim());
-      await settingsBridge.save(`${v}_pass`, document.getElementById(`${v}-pass`).value);
+      const user = document.getElementById(`${v}-user`).value.trim();
+      const pass = document.getElementById(`${v}-pass`).value;
+      if (!user || !pass) return;
+      // Save to encrypted credential store (used by scrapers)
+      await credsBridge.set(`vendor.${v}.username`, user);
+      await credsBridge.set(`vendor.${v}.password`, pass);
+      // Also cache username in settings store so we can repopulate the field
+      await settingsBridge.save(`${v}_user`, user);
       document.getElementById(`${v}-pass`).value = '';
       _checkVendorCred(v, `${v}-status`);
     });
+
     document.getElementById(`${v}-clear`).addEventListener('click', async () => {
+      await credsBridge.delete(`vendor.${v}.username`);
+      await credsBridge.delete(`vendor.${v}.password`);
       await settingsBridge.save(`${v}_user`, '');
-      await settingsBridge.save(`${v}_pass`, '');
       document.getElementById(`${v}-user`).value = '';
+      document.getElementById(`${v}-pass`).value = '';
       _checkVendorCred(v, `${v}-status`);
     });
   });
