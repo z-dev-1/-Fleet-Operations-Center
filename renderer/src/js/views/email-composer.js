@@ -562,6 +562,113 @@ function _wireSMTP() {
   });
 }
 
+// ── Wire: slot toggle (AM / PM) ───────────────────────────────────────────
+function _wireSlot() {
+  const amBtn = _el2('ec-slot-am');
+  const pmBtn = _el2('ec-slot-pm');
+  if (!amBtn || !pmBtn) return;
+  amBtn.addEventListener('click', () => {
+    amBtn.classList.add('ec-slot-btn--active');
+    pmBtn.classList.remove('ec-slot-btn--active');
+    _updateSubject();
+  });
+  pmBtn.addEventListener('click', () => {
+    pmBtn.classList.add('ec-slot-btn--active');
+    amBtn.classList.remove('ec-slot-btn--active');
+    _updateSubject();
+  });
+}
+
+// ── Wire: scope (operator + domicile selects) ─────────────────────────────
+function _wireScope() {
+  const opSel  = _el2('ec-operator');
+  const domSel = _el2('ec-domicile');
+  if (opSel) {
+    opSel.addEventListener('change', () => {
+      _updateSubject();
+      _updateUnitCount();
+      _autoFillRecipients();
+    });
+  }
+  if (domSel) {
+    domSel.addEventListener('change', () => {
+      _updateSubject();
+      _updateUnitCount();
+      _autoFillRecipients();
+    });
+  }
+}
+
+// ── Update subject field ──────────────────────────────────────────────────
+function _updateSubject() {
+  const op  = _el2('ec-operator')?.value  || '';
+  const dom = _el2('ec-domicile')?.value  || '';
+  const slot = _currentSlotValue();
+  const subj = _buildSubject(op, slot, dom);
+  const subjectEl = _el2('ec-subject');
+  if (subjectEl) subjectEl.value = subj;
+}
+
+// ── Update unit count indicator ───────────────────────────────────────────
+function _updateUnitCount() {
+  const el  = _el2('ec-unit-count');
+  if (!el) return;
+  const op  = (_el2('ec-operator')?.value  || '').toUpperCase().trim();
+  const dom = (_el2('ec-domicile')?.value  || '').trim();
+  const rows = state.slice('fleet').rows || [];
+  const filtered = rows.filter(r => {
+    const rowOp  = (r.op || r.operator || '').toUpperCase().trim();
+    const rowDom = (r.domicileSite || r.domicile || '').trim();
+    const opMatch  = !op  || rowOp  === op;
+    const domMatch = !dom || dom === 'ALL' || rowDom === dom;
+    return opMatch && domMatch;
+  });
+  el.textContent = filtered.length
+    ? `${filtered.length} unit${filtered.length !== 1 ? 's' : ''} match current scope`
+    : 'No units match current scope';
+}
+
+// ── Set status badge ──────────────────────────────────────────────────────
+function _setStatus(type, text) {
+  const el = _el2('ec-status-badge');
+  if (!el) return;
+  el.className = `ec-status-badge ec-status-badge--${type}`;
+  el.textContent = text;
+}
+
+// ── Append a log line ─────────────────────────────────────────────────────
+function _logLine(msg) {
+  const el = _el2('ec-log');
+  if (!el) return;
+  const line = document.createElement('div');
+  line.className = 'ec-log__line';
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Build compose payload from form ──────────────────────────────────────
+function _buildPayload() {
+  return {
+    operator:  (_el2('ec-operator')?.value  || '').trim(),
+    domicile:  (_el2('ec-domicile')?.value  || '').trim(),
+    slot:       _currentSlotValue(),
+    to:        (_el2('ec-to')?.value        || '').trim(),
+    cc:        (_el2('ec-cc')?.value        || '').trim(),
+    subject:   (_el2('ec-subject')?.value   || '').trim(),
+    note:      (_el2('ec-note')?.value      || '').trim(),
+    testMode:   !!_el2('ec-test-mode')?.checked,
+  };
+}
+
+// ── Validate payload — returns error string or null ───────────────────────
+function _validatePayload(p) {
+  if (!p.operator)        return 'Select an operator before composing.';
+  if (!p.to)              return 'Enter at least one recipient in the To field.';
+  if (!p.subject)         return 'Subject cannot be empty.';
+  return null;
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 export async function init(container) {
   _el = document.createElement('div');
