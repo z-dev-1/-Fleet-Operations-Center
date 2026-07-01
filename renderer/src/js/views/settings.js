@@ -324,43 +324,98 @@ function _html() {
         <!-- Vendor Portal Credentials -->
         <div class="sd-section" id="sect-vendor-creds">
           <div class="sd-section-title">Vendor Portal Credentials</div>
+          <!-- PACCAR -->
           <div style="margin-bottom:10px">
             <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">PACCAR (paccarpg.decisiv.net)</div>
             <div class="sd-row">
-              <div class="sd-field">
-                <div class="sd-label">Username</div>
-                <input class="sd-input" id="paccar-user" placeholder="portal username"/>
-              </div>
-              <div class="sd-field">
-                <div class="sd-label">Password</div>
-                <input class="sd-input" id="paccar-pass" type="password" placeholder="(encrypted)"/>
-              </div>
+              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="paccar-user" placeholder="portal username"/></div>
+              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="paccar-pass" type="password" placeholder="(encrypted)"/></div>
             </div>
-            <div class="sd-btn-row">
-              <button class="sd-btn primary" id="paccar-save">Save</button>
-              <button class="sd-btn danger"  id="paccar-clear">Clear</button>
-            </div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="paccar-save">Save</button><button class="sd-btn danger" id="paccar-clear">Clear</button></div>
             <div id="paccar-status" class="settings__status" style="display:none"></div>
           </div>
-          <div>
+          <!-- Volvo -->
+          <div style="margin-bottom:10px">
             <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Volvo (volvopg.asist.decisiv.net)</div>
             <div class="sd-row">
-              <div class="sd-field">
-                <div class="sd-label">Username</div>
-                <input class="sd-input" id="volvo-user" placeholder="portal username"/>
-              </div>
-              <div class="sd-field">
-                <div class="sd-label">Password</div>
-                <input class="sd-input" id="volvo-pass" type="password" placeholder="(encrypted)"/>
-              </div>
+              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="volvo-user" placeholder="portal username"/></div>
+              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="volvo-pass" type="password" placeholder="(encrypted)"/></div>
             </div>
-            <div class="sd-btn-row">
-              <button class="sd-btn primary" id="volvo-save">Save</button>
-              <button class="sd-btn danger"  id="volvo-clear">Clear</button>
-            </div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="volvo-save">Save</button><button class="sd-btn danger" id="volvo-clear">Clear</button></div>
             <div id="volvo-status" class="settings__status" style="display:none"></div>
           </div>
+          <!-- Record360 -->
+          <div style="margin-bottom:10px">
+            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Record360 (dashboard.record360.com)</div>
+            <div class="sd-row">
+              <div class="sd-field"><div class="sd-label">Email</div><input class="sd-input" id="record360-user" placeholder="you@amazon.com"/></div>
+              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="record360-pass" type="password" placeholder="(encrypted)"/></div>
+            </div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="record360-save">Save</button><button class="sd-btn danger" id="record360-clear">Clear</button></div>
+            <div id="record360-status" class="settings__status" style="display:none"></div>
+          </div>
+          <!-- Aperia / Halo -->
+          <div style="margin-bottom:10px">
+            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Aperia / Halo Tire (amazon.aperiatech.com)</div>
+            <div class="sd-row">
+              <div class="sd-field"><div class="sd-label">Email</div><input class="sd-input" id="aperia-user" placeholder="you@amazon.com"/></div>
+              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="aperia-pass" type="password" placeholder="(encrypted)"/></div>
+            </div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="aperia-save">Save</button><button class="sd-btn danger" id="aperia-clear">Clear</button></div>
+            <div id="aperia-status" class="settings__status" style="display:none"></div>
+          </div>
+          <!-- Reach24 -->
+          <div style="margin-bottom:10px">
+            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Reach24 (amazon.reach24.net)</div>
+            <div class="sd-row">
+              <div class="sd-field"><div class="sd-label">Email</div><input class="sd-input" id="reach24-user" placeholder="you@amazon.com"/></div>
+              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="reach24-pass" type="password" placeholder="(encrypted)"/></div>
+            </div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="reach24-save">Save</button><button class="sd-btn danger" id="reach24-clear">Clear</button></div>
+            <div id="reach24-status" class="settings__status" style="display:none"></div>
+          </div>
+          <!-- DTNA -->
+          <div style="margin-bottom:10px">
+            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">DTNA Service Tracker (dtna.my.site.com)</div>
+            <div class="sd-row">
+              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="dtna-user" placeholder="portal username"/></div>
+              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="dtna-pass" type="password" placeholder="(encrypted)"/></div>
+            </div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="dtna-save">Save</button><button class="sd-btn danger" id="dtna-clear">Clear</button></div>
+            <div id="dtna-status" class="settings__status" style="display:none"></div>
+          </div>
+          <!-- Road Ready -->
+          <div style="margin-bottom:10px">
+            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Road Ready (roadready.fadv.com)</div>
+            <div class="sd-row">
+              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="roadready-user" placeholder="portal username"/></div>
+              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="roadready-pass" type="password" placeholder="(encrypted)"/></div>
+            </div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="roadready-save">Save</button><button class="sd-btn danger" id="roadready-clear">Clear</button></div>
+            <div id="roadready-status" class="settings__status" style="display:none"></div>
+          </div>
+          <!-- Velogic -->
+          <div style="margin-bottom:10px">
+            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Velogic (velogic.my.site.com)</div>
+            <div class="sd-row">
+              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="velogic-user" placeholder="portal username"/></div>
+              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="velogic-pass" type="password" placeholder="(encrypted)"/></div>
+            </div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="velogic-save">Save</button><button class="sd-btn danger" id="velogic-clear">Clear</button></div>
+            <div id="velogic-status" class="settings__status" style="display:none"></div>
+          </div>
+          <!-- Access Billing Services -->
+          <div style="margin-bottom:10px">
+            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Access Billing Services (access-billing-services.com)</div>
+            <div class="sd-row">
+              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="abs-user" placeholder="portal username"/></div>
+              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="abs-pass" type="password" placeholder="(encrypted)"/></div>
+            </div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="abs-save">Save</button><button class="sd-btn danger" id="abs-clear">Clear</button></div>
+            <div id="abs-status" class="settings__status" style="display:none"></div>
+          </div>
         </div>
+
 
         <!-- Email SMTP -->
         <div class="sd-section" id="sect-email">
@@ -672,10 +727,11 @@ function _checkVendorCred(vendor, statusId) {
 }
 
 function _wireVendorAuth() {
-  ['paccar', 'volvo'].forEach((v) => {
+  const ALL_VENDORS = ['paccar', 'volvo', 'record360', 'aperia', 'reach24', 'dtna', 'roadready', 'velogic', 'abs'];
+  ALL_VENDORS.forEach((v) => {
     _checkVendorCred(v, `${v}-status`);
 
-    // Load saved username back into the field (password never retrieved)
+    // Repopulate username field (password never retrieved — encrypted only)
     settingsBridge.getAll().then((all) => {
       const userEl = document.getElementById(`${v}-user`);
       if (userEl && all && all[`${v}_user`]) userEl.value = all[`${v}_user`];
@@ -685,10 +741,8 @@ function _wireVendorAuth() {
       const user = document.getElementById(`${v}-user`).value.trim();
       const pass = document.getElementById(`${v}-pass`).value;
       if (!user || !pass) return;
-      // Save to encrypted credential store (used by scrapers)
       await credsBridge.set(`vendor.${v}.username`, user);
       await credsBridge.set(`vendor.${v}.password`, pass);
-      // Also cache username in settings store so we can repopulate the field
       await settingsBridge.save(`${v}_user`, user);
       document.getElementById(`${v}-pass`).value = '';
       _checkVendorCred(v, `${v}-status`);

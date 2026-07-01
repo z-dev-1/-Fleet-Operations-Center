@@ -18,13 +18,27 @@ function _validateKey(key) {
 }
 
 const VENDOR_CRED_KEYS = {
-  paccar: { user: "vendor.paccar.username", pass: "vendor.paccar.password" },
-  volvo:  { user: "vendor.volvo.username",  pass: "vendor.volvo.password"  },
+  paccar:    { user: "vendor.paccar.username",    pass: "vendor.paccar.password"    },
+  volvo:     { user: "vendor.volvo.username",     pass: "vendor.volvo.password"     },
+  record360: { user: "vendor.record360.username", pass: "vendor.record360.password" },
+  aperia:    { user: "vendor.aperia.username",    pass: "vendor.aperia.password"    },
+  reach24:   { user: "vendor.reach24.username",   pass: "vendor.reach24.password"   },
+  dtna:      { user: "vendor.dtna.username",      pass: "vendor.dtna.password"      },
+  roadready: { user: "vendor.roadready.username", pass: "vendor.roadready.password" },
+  velogic:   { user: "vendor.velogic.username",   pass: "vendor.velogic.password"   },
+  abs:       { user: "vendor.abs.username",       pass: "vendor.abs.password"       },
 };
 
 const _HOST_TO_VENDOR = {
-  "paccarpg.decisiv.net":       "paccar",
-  "volvopg.asist.decisiv.net":  "volvo",
+  "paccarpg.decisiv.net":           "paccar",
+  "volvopg.asist.decisiv.net":      "volvo",
+  "dashboard.record360.com":        "record360",
+  "amazon.aperiatech.com":          "aperia",
+  "amazon.reach24.net":             "reach24",
+  "dtna.my.site.com":               "dtna",
+  "roadready.fadv.com":             "roadready",
+  "velogic.my.site.com":            "velogic",
+  "www.access-billing-services.com":"abs",
 };
 
 async function getForHostname(hostname) {
