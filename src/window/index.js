@@ -982,7 +982,9 @@ function initWindows(ctx) {
     }
   });
 
-  ipcMain.handle('uptake:open-url', (_e, url) => {
+  ipcMain.handle('uptake:open-url', async (_e, url) => {
+    // Re-inject Midway cookies so AEA passes on first load
+    try { await _getAuth().injectCookies(); } catch(e) { logger.warn('[uptake:open-url] Cookie inject skipped:', e.message); }
     if (!url || !/^https?:\/\//i.test(url)) return;
     const win = new BrowserWindow({
       width: 1400, height: 900, title: 'Uptake',
@@ -993,7 +995,9 @@ function initWindows(ctx) {
     win.once('ready-to-show', () => win.show());
   });
 
-  ipcMain.handle('relay:open-url', (_e, url) => {
+  ipcMain.handle('relay:open-url', async (_e, url) => {
+    // Re-inject Midway cookies so AEA passes on first load
+    try { await _getAuth().injectCookies(); } catch(e) { logger.warn('[relay:open-url] Cookie inject skipped:', e.message); }
     if (!url || !/^https?:\/\//i.test(url)) return;
     const win = new BrowserWindow({
       width: 1400, height: 900, title: 'AAP Relay \u2013 Service Request',

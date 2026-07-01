@@ -267,15 +267,49 @@ function registerMiscIPC(ctx) {
       },
     });
     win.setMenuBarVisibility(false);
-    // LOG every navigation so we can capture the real WR tab URL
-    win.webContents.on('will-navigate', (_ev, navUrl) => {
-      logger.info('[aap-win] navigate -> ' + navUrl);
+    // Intercept SPA pushState navigation to capture WR tab URLs
+    win.webContents.on('did-finish-load', () => {
+      win.webContents.executeJavaScript(`
+        (function() {
+          var _push = history.pushState.bind(history);
+          history.pushState = function(state, title, url) {
+            _push(state, title, url);
+            window.__orchaLogUrl && window.__orchaLogUrl(location.href);
+          };
+          var _replace = history.replaceState.bind(history);
+          history.replaceState = function(state, title, url) {
+            _replace(state, title, url);
+            window.__orchaLogUrl && window.__orchaLogUrl(location.href);
+          };
+          window.addEventListener('popstate', function() {
+            window.__orchaLogUrl && window.__orchaLogUrl(location.href);
+          });
+          // Also intercept all clicks on mdn-link anchors
+          document.addEventListener('click', function(e) {
+            var a = e.target.closest('a[mdn-link], a[data-mdn-interactive]');
+            if (a) {
+              setTimeout(function() {
+                window.__orchaLogUrl && window.__orchaLogUrl('CLICK:' + location.href);
+              }, 300);
+            }
+          }, true);
+        })()
+      `).catch(function(){});
     });
-    win.webContents.on('did-navigate', (_ev, navUrl) => {
-      logger.info('[aap-win] did-navigate -> ' + navUrl);
-    });
-    win.webContents.on('did-navigate-in-page', (_ev, navUrl) => {
-      logger.info('[aap-win] in-page -> ' + navUrl);
+    // Receive URL from injected spy via ipcRenderer is not available in AAP context,
+    // so poll location.href every 500ms for 10s after load and log changes
+    win.webContents.on('did-finish-load', () => {
+      let _lastUrl = '';
+      const _poll = setInterval(() => {
+        if (win.isDestroyed()) { clearInterval(_poll); return; }
+        win.webContents.executeJavaScript('location.href').then(function(href) {
+          if (href && href !== _lastUrl) {
+            logger.info('[aap-win] url=' + href);
+            _lastUrl = href;
+          }
+        }).catch(function(){});
+      }, 500);
+      setTimeout(function() { clearInterval(_poll); }, 30000);
     });
     win.loadURL(url);
     win.show();

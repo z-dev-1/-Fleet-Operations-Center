@@ -152,9 +152,12 @@ export const slack = {
 
 // ── SharePoint ─────────────────────────────────────────────────────────────
 export const sp = {
-  push:       (units) => window.sp.push(units),
-  getConfig:  ()      => window.sp.getConfig(),
-  saveConfig: (data)  => window.sp.saveConfig(data),
+  push:           (units)   => window.sp.push(units),
+  pushDomicile:   (payload) => window.sp.pushDomicile(payload),
+  onProgress:     (cb)      => window.sp.onProgress(cb),
+  getConfig:      ()        => window.sp.getConfig(),
+  saveConfig:     (data)    => window.sp.saveConfig(data),
+  getLists:       (siteUrl) => window.sp.getLists(siteUrl),
 };
 
 // ── Auth ───────────────────────────────────────────────────────────────────

@@ -1,850 +1,1514 @@
 /**
- * settings.js -- Settings panel view
+ * settings.js — Fleet Ops Settings Drawer (4-tab redesign)
  *
- * Sections:
- *   - Domiciles (add/remove)
- *   - Auth (run mwinit)
- *   - Orcha config (mode, host, port)
- *   - Credentials (set/delete)         ← S10
- *   - Slack                            ← S10
- *   - Email (SMTP)                     ← S10
- *   - SharePoint                       ← S10
- *   - Asana                            ← S10
- *   - Notifications                    ← S10
+ * Tabs:
+ *   1. UI & App        — themes, colors, font, layout, animations
+ *   2. Integrations    — domiciles, midway, orcha, creds, email, slack, asana
+ *   3. Operators & SP  — per-operator SharePoint config (auto-populated from sync)
+ *   4. Accounts        — flat site credentials list (auto-save)
  *
- * S10: wires all bridge-available integrations into the settings panel.
+ * Architecture:
+ *   - Drawer mounts on document.body (fixed overlay), NOT in #views-mount
+ *   - Listens for bus 'ui:view-change' → { to: 'settings' } to open
+ *   - Does NOT consume the view-change — fleet view stays mounted behind
+ *   - Close button / overlay click closes the drawer
  */
 
-import bus      from '../bus.js';
-import {
-  settings  as settingsBridge,
-  auth,
-  credentials,
-  slack     as slackBridge,
-  email     as emailBridge,
-  sp        as spBridge,
-  asana     as asanaBridge,
-} from '../bridge.js';
-import toast from '../components/toast.js';
+import bus                                         from '../bus.js';
+import { settings as settingsBridge }              from '../bridge.js';
+import { auth     as authBridge }                  from '../bridge.js';
+import { credentials as credsBridge }              from '../bridge.js';
+import { slack    as slackBridge }                 from '../bridge.js';
+import { email    as emailBridge }                 from '../bridge.js';
+import { sp       as spBridge }                    from '../bridge.js';
+import { asana    as asanaBridge }                 from '../bridge.js';
+import toast                                       from '../components/toast.js';
 
-let _el = null;
+// ── Module state ────────────────────────────────────────────────────────────
+let _drawer   = null;   // the drawer DOM element
+let _overlay  = null;   // the backdrop overlay
 
-// ── HTML skeleton ──────────────────────────────────────────────────────────
+// ── HTML ─────────────────────────────────────────────────────────────────────
 function _html() {
   return `
-    <div class="settings-wrap">
+  <!-- Overlay backdrop -->
+  <div id="sd-overlay"></div>
 
-      <!-- Header -->
-      <div class="settings-header">
-        <h2>Settings</h2>
-        <button id="settings-back" class="detail-panel__btn">Back to Fleet</button>
+  <!-- Drawer -->
+  <div class="settings-drawer" id="settings-drawer">
+
+    <!-- Header -->
+    <div class="sd-header">
+      <span style="font-size:16px">⚙</span>
+      <span class="sd-title">Settings</span>
+      <button class="sd-close" id="sd-close-btn">✕</button>
+    </div>
+
+    <!-- Tab bar -->
+    <div class="sd-tabs">
+      <button class="sd-tab active" data-pane="ui">UI &amp; App</button>
+      <button class="sd-tab"        data-pane="integrations">Integrations</button>
+      <button class="sd-tab"        data-pane="operators">Operators &amp; SP</button>
+      <button class="sd-tab"        data-pane="accounts">Accounts</button>
+    </div>
+
+    <!-- Body -->
+    <div class="sd-body">
+
+      <!-- ══ TAB 1: UI & App ══════════════════════════════════════════════ -->
+      <div id="sd-pane-ui">
+
+        <!-- Templates -->
+        <div class="sd-section">
+          <div class="sd-section-title">Templates</div>
+          <div class="sd-template-grid">
+            <div class="sd-template active" data-theme="dark">
+              <div class="sd-tpl-preview dark-prev"></div>
+              <div class="sd-tpl-info">
+                <div class="sd-tpl-name">Dark</div>
+                <div class="sd-tpl-desc">Default dark theme</div>
+              </div>
+              <span class="sd-tpl-check">✓</span>
+            </div>
+            <div class="sd-template" data-theme="light">
+              <div class="sd-tpl-preview light-prev"></div>
+              <div class="sd-tpl-info">
+                <div class="sd-tpl-name">Light</div>
+                <div class="sd-tpl-desc">Light mode</div>
+              </div>
+              <span class="sd-tpl-check" style="display:none">✓</span>
+            </div>
+            <div class="sd-template" data-theme="midnight">
+              <div class="sd-tpl-preview midnight-prev"></div>
+              <div class="sd-tpl-info">
+                <div class="sd-tpl-name">Midnight</div>
+                <div class="sd-tpl-desc">Deep black</div>
+              </div>
+              <span class="sd-tpl-check" style="display:none">✓</span>
+            </div>
+            <div class="sd-template" data-theme="ocean">
+              <div class="sd-tpl-preview ocean-prev"></div>
+              <div class="sd-tpl-info">
+                <div class="sd-tpl-name">Ocean</div>
+                <div class="sd-tpl-desc">Teal accents</div>
+              </div>
+              <span class="sd-tpl-check" style="display:none">✓</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Colors -->
+        <div class="sd-section">
+          <div class="sd-section-title">Colors</div>
+          <div class="sd-color-row">
+            <div class="sd-color-item">
+              <div class="sd-label">Accent Color</div>
+              <div class="sd-color-swatch-row">
+                <div class="sd-swatch active" style="background:#58a6ff" title="Blue"   data-var="--acc"></div>
+                <div class="sd-swatch"        style="background:#d2a8ff" title="Purple" data-var="--acc"></div>
+                <div class="sd-swatch"        style="background:#7ee787" title="Green"  data-var="--acc"></div>
+                <div class="sd-swatch"        style="background:#ffa657" title="Orange" data-var="--acc"></div>
+                <div class="sd-swatch"        style="background:#f78166" title="Red"    data-var="--acc"></div>
+                <input type="color" class="sd-color-custom" value="#58a6ff" title="Custom" data-var="--acc"/>
+              </div>
+            </div>
+            <div class="sd-color-item">
+              <div class="sd-label">Background</div>
+              <div class="sd-color-swatch-row">
+                <div class="sd-swatch active" style="background:#0d1117" title="Default" data-var="--bg"></div>
+                <div class="sd-swatch"        style="background:#080c10" title="Darker"  data-var="--bg"></div>
+                <div class="sd-swatch"        style="background:#0d1b2a" title="Navy"    data-var="--bg"></div>
+                <input type="color" class="sd-color-custom" value="#0d1117" title="Custom" data-var="--bg"/>
+              </div>
+            </div>
+            <div class="sd-color-item">
+              <div class="sd-label">Panel Color</div>
+              <div class="sd-color-swatch-row">
+                <div class="sd-swatch active" style="background:#161b22" title="Default" data-var="--panel"></div>
+                <div class="sd-swatch"        style="background:#111318" title="Darker"  data-var="--panel"></div>
+                <div class="sd-swatch"        style="background:#141a24" title="Navy"    data-var="--panel"></div>
+                <input type="color" class="sd-color-custom" value="#161b22" title="Custom" data-var="--panel"/>
+              </div>
+            </div>
+            <div class="sd-color-item">
+              <div class="sd-label">Text Color</div>
+              <div class="sd-color-swatch-row">
+                <div class="sd-swatch active" style="background:#f0f6fc;border-color:#444" title="Default" data-var="--txt"></div>
+                <div class="sd-swatch"        style="background:#e6edf3;border-color:#444" title="Soft"    data-var="--txt"></div>
+                <div class="sd-swatch"        style="background:#cdd9e5;border-color:#444" title="Muted"   data-var="--txt"></div>
+                <input type="color" class="sd-color-custom" value="#f0f6fc" title="Custom" data-var="--txt"/>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Transparency -->
+        <div class="sd-section">
+          <div class="sd-section-title">Transparency</div>
+          <div class="sd-slider-row">
+            <div class="sd-label">Panel Opacity</div>
+            <div class="sd-slider-wrap">
+              <input type="range" class="sd-slider" id="sl-opacity" min="60" max="100" value="100"/>
+              <span class="sd-slider-val" id="sl-opacity-val">100%</span>
+            </div>
+          </div>
+          <div class="sd-slider-row">
+            <div class="sd-label">Blur Intensity</div>
+            <div class="sd-slider-wrap">
+              <input type="range" class="sd-slider" id="sl-blur" min="0" max="20" value="4"/>
+              <span class="sd-slider-val" id="sl-blur-val">4px</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Layout -->
+        <div class="sd-section">
+          <div class="sd-section-title">Layout</div>
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">Compact Rows</span>
+            <input type="checkbox" id="toggle-compact"/>
+          </div>
+        </div>
+
+        <!-- Animations -->
+        <div class="sd-section">
+          <div class="sd-section-title">Animations</div>
+          <div class="sd-toggle-row"><span class="sd-toggle-label">Show Animations</span><input type="checkbox" checked/></div>
+          <div class="sd-toggle-row"><span class="sd-toggle-label">Scan Line Effect</span><input type="checkbox" checked/></div>
+          <div class="sd-toggle-row"><span class="sd-toggle-label">Row Fade-In</span><input type="checkbox" checked/></div>
+          <div class="sd-toggle-row"><span class="sd-toggle-label">KPI Pop-In</span><input type="checkbox" checked/></div>
+          <div class="sd-slider-row" style="margin-top:8px">
+            <div class="sd-label">Drawer Slide Speed</div>
+            <div class="sd-slider-wrap">
+              <input type="range" class="sd-slider" id="sl-speed" min="100" max="600" value="250"/>
+              <span class="sd-slider-val" id="sl-speed-val">250ms</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Font -->
+        <div class="sd-section">
+          <div class="sd-section-title">Font</div>
+          <div class="sd-font-row">
+            <button class="sd-font-btn active" data-font="system">System</button>
+            <button class="sd-font-btn" data-font="serif"   style="font-family:Georgia,serif">Serif</button>
+            <button class="sd-font-btn" data-font="mono"    style="font-family:monospace">Mono</button>
+            <button class="sd-font-btn" data-font="inter"   style="font-family:sans-serif">Inter</button>
+          </div>
+        </div>
+
+        <!-- Border Radius -->
+        <div class="sd-section">
+          <div class="sd-section-title">Border Radius</div>
+          <div class="sd-slider-row">
+            <div class="sd-label">Card Radius</div>
+            <div class="sd-slider-wrap">
+              <input type="range" class="sd-slider" id="sl-radius" min="0" max="20" value="10"/>
+              <span class="sd-slider-val" id="sl-radius-val">10px</span>
+            </div>
+          </div>
+        </div>
+
       </div>
+      <!-- end sd-pane-ui -->
 
-      <!-- 1 Domiciles -->
-      <section class="settings-section" id="sect-domiciles">
-        <div class="settings-section__title">Domiciles</div>
-        <p class="settings-hint">One domicile code per line (e.g. ABE40)</p>
-        <textarea id="settings-domiciles" class="settings__textarea" rows="6"></textarea>
-        <div class="settings-section__actions">
-          <button id="settings-save-domiciles"  class="detail-panel__btn">Save</button>
-          <button id="settings-reset-domiciles" class="detail-panel__btn detail-panel__btn--secondary">Reset to defaults</button>
-        </div>
-      </section>
+      <!-- ══ TAB 2: Integrations ══════════════════════════════════════════ -->
+      <div id="sd-pane-integrations" style="display:none">
 
-      <!-- 2 Midway Auth -->
-      <section class="settings-section" id="sect-auth">
-        <div class="settings-section__title">Midway Auth</div>
-        <div id="settings-auth-status" class="settings__status">Checking...</div>
-        <div class="settings-section__actions">
-          <button id="settings-mwinit" class="detail-panel__btn">Run mwinit</button>
-          <button id="settings-recheck-auth" class="detail-panel__btn detail-panel__btn--secondary">Re-check</button>
-        </div>
-      </section>
-
-      <!-- 3 Orcha Config -->
-      <section class="settings-section" id="sect-orcha">
-        <div class="settings-section__title">Orcha Config</div>
-        <div class="settings-fields">
-          <label class="settings-label">Mode
-            <select id="settings-orcha-mode" class="settings__select">
-              <option value="local">Local</option>
-              <option value="remote">Remote</option>
-              <option value="bedrock">Bedrock</option>
-            </select>
-          </label>
-          <label class="settings-label">Host
-            <input id="settings-orcha-host" class="settings__input" type="text" placeholder="localhost" />
-          </label>
-          <label class="settings-label">Port
-            <input id="settings-orcha-port" class="settings__input" type="number" placeholder="4799" />
-          </label>
-        </div>
-        <div class="settings-section__actions">
-          <button id="settings-save-orcha" class="detail-panel__btn">Save</button>
-        </div>
-      </section>
-
-      <!-- 4 Credentials (S10) -->
-      <section class="settings-section" id="sect-creds">
-        <div class="settings-section__title">Credentials</div>
-        <p class="settings-hint">Stored encrypted via Electron safeStorage. Values are write-only — cannot be read back.</p>
-        <div class="settings-fields">
-          <label class="settings-label settings-label--grow">Key
-            <input id="creds-key"   class="settings__input" type="text"     placeholder="e.g. aap-password" />
-          </label>
-          <label class="settings-label settings-label--grow">Value
-            <input id="creds-val"   class="settings__input" type="password" placeholder="secret value" />
-          </label>
-        </div>
-        <div class="settings-section__actions">
-          <button id="creds-set"    class="detail-panel__btn">Save Credential</button>
-          <button id="creds-delete" class="detail-panel__btn settings-btn--danger">Delete Key</button>
-        </div>
-        <div id="creds-list-wrap" class="settings-list-wrap">
-          <div class="settings-list-label">Stored keys</div>
-          <div id="creds-list" class="settings-key-list">Loading...</div>
-        </div>
-      </section>
-
-      <!-- 4b Vendor Portal Auth (S25-5) -->
-      <section class="settings-section" id="sect-vendor-auth">
-        <div class="settings-section__title">Vendor Portal Credentials</div>
-        <p class="settings-hint">Used for automated PACCAR and Volvo portal login. Stored encrypted via safeStorage. Passwords are write-only.</p>
-
-        <!-- PACCAR -->
-        <div class="vnd-auth__card" id="vnd-auth-paccar">
-          <div class="vnd-auth__card-header">
-            <span class="vnd-auth__label">PACCAR (paccarpg.decisiv.net)</span>
-            <span class="settings__status" id="vnd-auth-paccar-status">Checking...</span>
+        <!-- Domiciles -->
+        <div class="sd-section" id="sect-domiciles">
+          <div class="sd-section-title">Domiciles</div>
+          <div class="sd-field">
+            <div class="sd-label">Managed domiciles (comma-separated)</div>
+            <textarea id="settings-domiciles" class="settings__textarea sd-input" placeholder="ABE40, AVP40, AUVTE01..."></textarea>
           </div>
-          <div class="settings-fields">
-            <label class="settings-label">Username
-              <input id="vnd-paccar-user" class="settings__input" type="text"     autocomplete="off" placeholder="portal username" />
-            </label>
-            <label class="settings-label">Password
-              <input id="vnd-paccar-pass" class="settings__input" type="password" autocomplete="new-password" placeholder="(stored encrypted)" />
-            </label>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary" id="save-domiciles">Save</button>
+            <button class="sd-btn secondary" id="reset-domiciles">Reset defaults</button>
           </div>
-          <div class="settings-section__actions">
-            <button id="vnd-paccar-save"  class="detail-panel__btn">Save</button>
-            <button id="vnd-paccar-clear" class="detail-panel__btn settings-btn--danger">Clear</button>
+          <div id="domicile-status" class="settings__status" style="display:none"></div>
+        </div>
+
+        <!-- Midway Auth -->
+        <div class="sd-section" id="sect-auth">
+          <div class="sd-section-title">Midway Auth</div>
+          <div id="auth-status" class="sd-status warn">⏳ Checking...</div>
+          <div class="sd-btn-row" style="margin-top:8px">
+            <button class="sd-btn primary" id="auth-mwinit">Run mwinit</button>
+            <button class="sd-btn secondary" id="auth-recheck">Re-check</button>
           </div>
         </div>
 
-        <!-- Volvo -->
-        <div class="vnd-auth__card" id="vnd-auth-volvo" style="margin-top:12px">
-          <div class="vnd-auth__card-header">
-            <span class="vnd-auth__label">Volvo (volvopg.asist.decisiv.net)</span>
-            <span class="settings__status" id="vnd-auth-volvo-status">Checking...</span>
+        <!-- Orcha Config -->
+        <div class="sd-section" id="sect-orcha">
+          <div class="sd-section-title">Orcha Config</div>
+          <div class="sd-row">
+            <div class="sd-field">
+              <div class="sd-label">Mode</div>
+              <select class="sd-select" id="orcha-mode">
+                <option value="local">Local</option>
+                <option value="remote">Remote</option>
+              </select>
+            </div>
+            <div class="sd-field">
+              <div class="sd-label">Host</div>
+              <input class="sd-input" id="orcha-host" placeholder="localhost"/>
+            </div>
+            <div class="sd-field">
+              <div class="sd-label">Port</div>
+              <input class="sd-input" id="orcha-port" type="number" placeholder="4799"/>
+            </div>
           </div>
-          <div class="settings-fields">
-            <label class="settings-label">Username
-              <input id="vnd-volvo-user" class="settings__input" type="text"     autocomplete="off" placeholder="portal username" />
-            </label>
-            <label class="settings-label">Password
-              <input id="vnd-volvo-pass" class="settings__input" type="password" autocomplete="new-password" placeholder="(stored encrypted)" />
-            </label>
-          </div>
-          <div class="settings-section__actions">
-            <button id="vnd-volvo-save"  class="detail-panel__btn">Save</button>
-            <button id="vnd-volvo-clear" class="detail-panel__btn settings-btn--danger">Clear</button>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary" id="save-orcha">Save</button>
           </div>
         </div>
-      </section>
 
-      <!-- 5 Slack (S10) -->
-      <section class="settings-section" id="sect-slack">
-        <div class="settings-section__title">Slack</div>
-        <div id="slack-auth-status" class="settings__status settings__status--loading">Checking...</div>
-        <div class="settings-section__actions">
-          <button id="slack-login"       class="detail-panel__btn">Sign in to Slack</button>
-          <button id="slack-recheck"     class="detail-panel__btn detail-panel__btn--secondary">Re-check</button>
+        <!-- Notifications -->
+        <div class="sd-section" id="sect-notifications">
+          <div class="sd-section-title">Notifications</div>
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">OS notification on Midway auth failure</span>
+            <input type="checkbox" id="notif-auth-fail" checked/>
+          </div>
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">OS notification on sync complete</span>
+            <input type="checkbox" id="notif-sync-ok" checked/>
+          </div>
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">OS notification on sync error</span>
+            <input type="checkbox" id="notif-sync-err" checked/>
+          </div>
         </div>
-      </section>
 
-      <!-- 6 Email / SMTP (S10) -->
-      <section class="settings-section" id="sect-email">
-        <div class="settings-section__title">Email (SMTP)</div>
-        <div class="settings-fields">
-          <label class="settings-label">Host
-            <input id="email-host"     class="settings__input" type="text"   placeholder="smtp.corp.amazon.com" />
-          </label>
-          <label class="settings-label">Port
-            <input id="email-port"     class="settings__input" type="number" placeholder="587" />
-          </label>
-          <label class="settings-label">From address
-            <input id="email-from"     class="settings__input" type="email"  placeholder="you@amazon.com" />
-          </label>
-          <label class="settings-label">Username
-            <input id="email-user"     class="settings__input" type="text"   placeholder="LDAP / CORP\\user" />
-          </label>
-          <label class="settings-label">Password
-            <input id="email-pass"     class="settings__input" type="password" placeholder="(stored encrypted)" />
-          </label>
-          <label class="settings-label settings-label--inline">
-            <input id="email-tls"      type="checkbox" /> Use TLS
-          </label>
+        <!-- Credentials (keychain) -->
+        <div class="sd-section" id="sect-creds">
+          <div class="sd-section-title">Credentials (keychain)</div>
+          <div class="sd-row">
+            <div class="sd-field">
+              <div class="sd-label">Key</div>
+              <input class="sd-input" id="cred-key" placeholder="e.g. aap-password"/>
+            </div>
+            <div class="sd-field">
+              <div class="sd-label">Value</div>
+              <input class="sd-input" id="cred-val" type="password" placeholder="secret"/>
+            </div>
+          </div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary"    id="cred-save">Save Credential</button>
+            <button class="sd-btn danger"     id="cred-delete">Delete Key</button>
+          </div>
+          <div id="cred-status" class="settings__status" style="display:none"></div>
+          <div id="cred-list-wrap" class="settings-list-wrap" style="margin-top:10px">
+            <div class="settings-list-label">Stored keys:</div>
+            <div id="cred-list" class="settings-key-list"></div>
+          </div>
         </div>
-        <div class="settings-section__actions">
-          <button id="email-save"   class="detail-panel__btn">Save</button>
-          <button id="email-test"   class="detail-panel__btn detail-panel__btn--secondary">Send test email</button>
-        </div>
-        <div id="email-test-addr-wrap" class="settings-inline-row" style="display:none">
-          <input id="email-test-addr" class="settings__input" type="email" placeholder="recipient@amazon.com" />
-          <button id="email-test-send" class="detail-panel__btn">Send</button>
-          <button id="email-test-cancel" class="detail-panel__btn detail-panel__btn--secondary">Cancel</button>
-        </div>
-      </section>
 
-      <!-- 7 SharePoint (S10) -->
-      <section class="settings-section" id="sect-sp">
-        <div class="settings-section__title">SharePoint</div>
-        <div class="settings-fields">
-          <label class="settings-label">Site URL
-            <input id="sp-site-url"   class="settings__input" type="text" placeholder="https://amazon.sharepoint.com/sites/..." />
-          </label>
-          <label class="settings-label">List name
-            <input id="sp-list-name"  class="settings__input" type="text" placeholder="Fleet Status" />
-          </label>
-          <label class="settings-label">Username
-            <input id="sp-user"       class="settings__input" type="text" placeholder="alias@amazon.com" />
-          </label>
-          <label class="settings-label">Password
-            <input id="sp-pass"       class="settings__input" type="password" placeholder="(stored encrypted)" />
-          </label>
+        <!-- Schedulers Config -->
+        <div class="sd-section" style="border-top:1px solid var(--bdr);padding-top:14px;margin-top:4px">
+          <div class="sd-section-title">Schedulers – Config</div>
+          <div class="sd-field">
+            <div class="sd-label">Sync interval (minutes)</div>
+            <input class="sd-input" id="sched-interval" type="number" placeholder="15"/>
+          </div>
+          <div class="sd-field">
+            <div class="sd-label">Default scheduler endpoint</div>
+            <input class="sd-input" id="sched-endpoint" placeholder="https://..."/>
+          </div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary" id="save-sched">Save</button>
+          </div>
         </div>
-        <div class="settings-section__actions">
-          <button id="sp-save"   class="detail-panel__btn">Save</button>
-          <button id="sp-push-now" class="detail-panel__btn detail-panel__btn--secondary">Push now</button>
-        </div>
-      </section>
 
-      <!-- 8 Asana (S10) -->
-      <section class="settings-section" id="sect-asana">
-        <div class="settings-section__title">Asana</div>
-        <div id="asana-auth-status" class="settings__status settings__status--loading">Checking...</div>
-        <div class="settings-fields">
-          <label class="settings-label">Personal Access Token
-            <input id="asana-token"      class="settings__input" type="password" placeholder="0/xxxxxxxxxxxxxxxx" />
-          </label>
-          <label class="settings-label">Default workspace GID
-            <input id="asana-workspace"  class="settings__input" type="text"     placeholder="1234567890" />
-          </label>
-          <label class="settings-label">Default project GID
-            <input id="asana-project"    class="settings__input" type="text"     placeholder="1234567890" />
-          </label>
+        <!-- Vendor Portal Credentials -->
+        <div class="sd-section" id="sect-vendor-creds">
+          <div class="sd-section-title">Vendor Portal Credentials</div>
+          <div style="margin-bottom:10px">
+            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">PACCAR (paccarpg.decisiv.net)</div>
+            <div class="sd-row">
+              <div class="sd-field">
+                <div class="sd-label">Username</div>
+                <input class="sd-input" id="paccar-user" placeholder="portal username"/>
+              </div>
+              <div class="sd-field">
+                <div class="sd-label">Password</div>
+                <input class="sd-input" id="paccar-pass" type="password" placeholder="(encrypted)"/>
+              </div>
+            </div>
+            <div class="sd-btn-row">
+              <button class="sd-btn primary" id="paccar-save">Save</button>
+              <button class="sd-btn danger"  id="paccar-clear">Clear</button>
+            </div>
+            <div id="paccar-status" class="settings__status" style="display:none"></div>
+          </div>
+          <div>
+            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Volvo (volvopg.asist.decisiv.net)</div>
+            <div class="sd-row">
+              <div class="sd-field">
+                <div class="sd-label">Username</div>
+                <input class="sd-input" id="volvo-user" placeholder="portal username"/>
+              </div>
+              <div class="sd-field">
+                <div class="sd-label">Password</div>
+                <input class="sd-input" id="volvo-pass" type="password" placeholder="(encrypted)"/>
+              </div>
+            </div>
+            <div class="sd-btn-row">
+              <button class="sd-btn primary" id="volvo-save">Save</button>
+              <button class="sd-btn danger"  id="volvo-clear">Clear</button>
+            </div>
+            <div id="volvo-status" class="settings__status" style="display:none"></div>
+          </div>
         </div>
-        <div class="settings-section__actions">
-          <button id="asana-save"     class="detail-panel__btn">Save</button>
-          <button id="asana-verify"   class="detail-panel__btn detail-panel__btn--secondary">Verify token</button>
-        </div>
-      </section>
 
-      <!-- 9 Notifications (S10) -->
-      <section class="settings-section" id="sect-notif">
-        <div class="settings-section__title">Notifications</div>
-        <div class="settings-fields">
-          <label class="settings-label settings-label--inline">
-            <input id="notif-auth-failure" type="checkbox" checked />
-            OS notification on Midway auth failure
-          </label>
-          <label class="settings-label settings-label--inline">
-            <input id="notif-sync-complete" type="checkbox" checked />
-            OS notification on sync complete
-          </label>
-          <label class="settings-label settings-label--inline">
-            <input id="notif-sync-error" type="checkbox" checked />
-            OS notification on sync error
-          </label>
+        <!-- Email SMTP -->
+        <div class="sd-section" id="sect-email">
+          <div class="sd-section-title">Email (SMTP)</div>
+          <div class="sd-row">
+            <div class="sd-field">
+              <div class="sd-label">Host</div>
+              <input class="sd-input" id="email-host" placeholder="smtp.corp.amazon.com"/>
+            </div>
+            <div class="sd-field">
+              <div class="sd-label">Port</div>
+              <input class="sd-input" id="email-port" type="number" placeholder="587"/>
+            </div>
+          </div>
+          <div class="sd-row">
+            <div class="sd-field">
+              <div class="sd-label">From</div>
+              <input class="sd-input" id="email-from" type="email" placeholder="you@amazon.com"/>
+            </div>
+            <div class="sd-field">
+              <div class="sd-label">Username</div>
+              <input class="sd-input" id="email-user" placeholder="LDAP user"/>
+            </div>
+          </div>
+          <div class="sd-field">
+            <div class="sd-label">Password</div>
+            <input class="sd-input" id="email-pass" type="password" placeholder="(encrypted)"/>
+          </div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary"    id="email-save">Save</button>
+            <button class="sd-btn secondary"  id="email-test">Send test</button>
+          </div>
+          <div id="email-status" class="settings__status" style="display:none"></div>
         </div>
-        <div class="settings-section__actions">
-          <button id="notif-save" class="detail-panel__btn">Save</button>
+
+        <!-- Slack -->
+        <div class="sd-section" id="sect-slack">
+          <div class="sd-section-title">Slack</div>
+          <div id="slack-status" class="sd-status warn" style="margin-bottom:8px">⚠️ Not connected</div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary"   id="slack-login">Sign in to Slack</button>
+            <button class="sd-btn secondary" id="slack-recheck">Re-check</button>
+          </div>
         </div>
-      </section>
+
+        <!-- Asana -->
+        <div class="sd-section" id="sect-asana">
+          <div class="sd-section-title">Asana</div>
+          <div class="sd-field">
+            <div class="sd-label">Personal Access Token</div>
+            <input class="sd-input" id="asana-pat" type="password" placeholder="0/xxxxxxxx"/>
+          </div>
+          <div class="sd-row">
+            <div class="sd-field">
+              <div class="sd-label">Workspace GID</div>
+              <input class="sd-input" id="asana-workspace" placeholder="1234567890"/>
+            </div>
+            <div class="sd-field">
+              <div class="sd-label">Project GID</div>
+              <input class="sd-input" id="asana-project" placeholder="1234567890"/>
+            </div>
+          </div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary"   id="asana-save">Save</button>
+            <button class="sd-btn secondary" id="asana-verify">Verify token</button>
+          </div>
+          <div id="asana-status" class="settings__status" style="display:none"></div>
+        </div>
+
+      </div>
+      <!-- end sd-pane-integrations -->
+
+      <!-- ══ TAB 3: Operators & SP ═════════════════════════════════════════ -->
+      <div id="sd-pane-operators" style="display:none">
+
+        <!-- Pane header -->
+        <div class="ops-pane-header">
+          <div class="ops-pane-header-left">
+            <span class="ops-pane-title">Operators &amp; SharePoint</span>
+            <span class="ops-pane-sub" id="ops-sync-meta">Run a sync to load operators</span>
+          </div>
+          <button class="ops-sync-btn" id="ops-sync-btn">↻ Sync Now</button>
+        </div>
+
+        <!-- Global Email SMTP (in Operators tab) -->
+        <div class="sd-section">
+          <div class="sd-section-title">
+            Email – Global SMTP
+            <span class="ops-autosave-badge" id="ops-email-badge"></span>
+          </div>
+          <div class="sd-row">
+            <div class="sd-field">
+              <div class="sd-label">Host</div>
+              <input class="sd-input" id="ops-email-host" placeholder="smtp.corp.amazon.com"/>
+            </div>
+            <div class="sd-field">
+              <div class="sd-label">Port</div>
+              <input class="sd-input" id="ops-email-port" type="number" placeholder="587"/>
+            </div>
+          </div>
+          <div class="sd-row">
+            <div class="sd-field">
+              <div class="sd-label">From address</div>
+              <input class="sd-input" id="ops-email-from" type="email" placeholder="you@amazon.com"/>
+            </div>
+            <div class="sd-field">
+              <div class="sd-label">Username</div>
+              <input class="sd-input" id="ops-email-user" placeholder="LDAP / CORP\\user"/>
+            </div>
+          </div>
+          <div class="sd-row">
+            <div class="sd-field">
+              <div class="sd-label">Password</div>
+              <input class="sd-input" id="ops-email-pass" type="password" placeholder="(stored encrypted)"/>
+            </div>
+            <div class="sd-field" style="justify-content:flex-end;padding-top:18px">
+              <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--txt2);cursor:pointer">
+                <input type="checkbox" id="ops-email-tls" style="accent-color:var(--acc)"/> Use TLS
+              </label>
+            </div>
+          </div>
+          <div class="sd-btn-row" style="margin-top:4px">
+            <button class="sd-btn secondary" id="ops-email-test-btn">Send test email</button>
+            <div id="ops-email-test-form" style="display:none;gap:6px;align-items:center">
+              <input class="sd-input" id="ops-email-test-to" type="email" placeholder="recipient@amazon.com" style="width:180px"/>
+              <button class="sd-btn primary" id="ops-email-test-send">Send</button>
+              <button class="sd-btn secondary" id="ops-email-test-cancel">Cancel</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- SP section header -->
+        <div class="ops-sp-section-header">
+          <span class="ops-sp-section-label">SharePoint – Per Operator → Per Domicile</span>
+          <span class="ops-sp-section-hint">Operators and domiciles populate automatically on sync</span>
+        </div>
+
+        <!-- Operator list (dynamic) -->
+        <div class="ops-list" id="ops-list">
+          <div class="ops-empty-state" id="ops-empty-state">
+            <div class="ops-empty-icon">📋</div>
+            <div class="ops-empty-title">No operators loaded yet</div>
+            <div class="ops-empty-sub">Click <strong>↻ Sync Now</strong> above to pull operators and their domiciles from the fleet data source. SharePoint config will appear here automatically for each one.</div>
+          </div>
+        </div>
+
+      </div>
+      <!-- end sd-pane-operators -->
+
+      <!-- ══ TAB 4: Accounts ════════════════════════════════════════════════ -->
+      <div id="sd-pane-accounts" style="display:none">
+
+        <!-- Header -->
+        <div class="ops-pane-header">
+          <div class="ops-pane-header-left">
+            <span class="ops-pane-title">Accounts</span>
+            <span class="ops-pane-sub">Site credentials – click a site name to open it</span>
+          </div>
+          <button class="ops-sync-btn" id="acct-add">+ Add account</button>
+        </div>
+
+        <!-- Account rows -->
+        <div class="acct-list" id="acct-list">
+          <div class="acct-empty" id="acct-empty">
+            <span style="font-size:28px;opacity:.5">🔑</span>
+            <div class="ops-empty-title">No accounts yet</div>
+            <div class="ops-empty-sub">Click <strong>+ Add account</strong> to save a site credential.</div>
+          </div>
+        </div>
+
+      </div>
+      <!-- end sd-pane-accounts -->
 
     </div>
+    <!-- end sd-body -->
+
+  </div>
+  <!-- end settings-drawer -->
   `;
 }
 
-// ── Section: Domiciles ─────────────────────────────────────────────────────
-function _wireDomiciles() {
-  settingsBridge.getDomiciles().then((d) => {
-    const ta = document.getElementById('settings-domiciles');
-    if (ta && d) ta.value = Array.isArray(d) ? d.join('\n') : d;
-  }).catch(() => {});
-
-  document.getElementById('settings-save-domiciles').addEventListener('click', async () => {
-    const ta = document.getElementById('settings-domiciles');
-    if (!ta) return;
-    const arr = ta.value.split(/[\n,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
-    try {
-      await settingsBridge.saveDomiciles(arr);
-      toast.show('success', 'Domiciles saved');
-    } catch (e) {
-      toast.show('error', 'Save failed: ' + e.message);
-    }
-  });
-
-  document.getElementById('settings-reset-domiciles').addEventListener('click', async () => {
-    try {
-      const d = await settingsBridge.resetDomiciles();
-      const ta = document.getElementById('settings-domiciles');
-      if (ta && d) ta.value = Array.isArray(d) ? d.join('\n') : '';
-      toast.show('info', 'Domiciles reset to defaults');
-    } catch (e) {
-      toast.show('error', 'Reset failed: ' + e.message);
-    }
+// ── Tab switching ────────────────────────────────────────────────────────────
+function _wireTabSwitching() {
+  _drawer.querySelectorAll('.sd-tab').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      _drawer.querySelectorAll('.sd-tab').forEach((t) => t.classList.remove('active'));
+      btn.classList.add('active');
+      const pane = btn.dataset.pane;
+      ['ui', 'integrations', 'operators', 'accounts'].forEach((p) => {
+        const el = document.getElementById(`sd-pane-${p}`);
+        if (el) el.style.display = p === pane ? 'block' : 'none';
+      });
+    });
   });
 }
 
-// ── Section: Midway Auth ───────────────────────────────────────────────────
-function _checkAuth() {
-  const el = document.getElementById('settings-auth-status');
-  if (!el) return;
-  el.textContent = 'Checking...';
-  el.className = 'settings__status settings__status--loading';
-  auth.checkMidway().then((result) => {
-    if (!el) return;
-    if (result && result.ok) {
-      el.textContent = '✓ Midway authenticated';
-      el.className = 'settings__status settings__status--ok';
-    } else {
-      el.textContent = '✗ Not authenticated: ' + (result && result.reason || 'unknown');
-      el.className = 'settings__status settings__status--error';
-    }
-  }).catch(() => {
-    if (el) { el.textContent = 'Check failed'; el.className = 'settings__status settings__status--error'; }
+// ── Open / close ─────────────────────────────────────────────────────────────
+function _open() {
+  _drawer.classList.add('open');
+  _overlay.classList.add('open');
+  _populate();
+}
+
+function _close() {
+  _drawer.classList.remove('open');
+  _overlay.classList.remove('open');
+}
+
+// ── Section: Domiciles ───────────────────────────────────────────────────────
+function _wireDomiciles() {
+  document.getElementById('save-domiciles').addEventListener('click', async () => {
+    const raw = document.getElementById('settings-domiciles').value;
+    const codes = raw.split(',').map((s) => s.trim()).filter(Boolean);
+    await settingsBridge.save('domiciles', codes);
+    const st = document.getElementById('domicile-status');
+    st.textContent = '✓ Saved'; st.style.display = 'block';
+    setTimeout(() => { st.style.display = 'none'; }, 2000);
   });
+  document.getElementById('reset-domiciles').addEventListener('click', async () => {
+    await settingsBridge.save('domiciles', []);
+    document.getElementById('settings-domiciles').value = '';
+  });
+}
+
+// ── Section: Auth ────────────────────────────────────────────────────────────
+function _checkAuth() {
+  authBridge.checkMidway().then((ok) => {
+    const el = document.getElementById('auth-status');
+    if (!el) return;
+    if (ok) {
+      el.textContent = '✅ Authenticated';
+      el.className = 'sd-status ok';
+    } else {
+      el.textContent = '⚠️ Not authenticated';
+      el.className = 'sd-status warn';
+    }
+  }).catch(() => {});
 }
 
 function _wireAuth() {
   _checkAuth();
-
-  document.getElementById('settings-mwinit').addEventListener('click', async () => {
-    toast.show('info', 'Running mwinit...', 2000);
-    try {
-      const r = await auth.runMwinit();
-      toast.show(r && r.ok ? 'success' : 'error',
-        r && r.ok ? 'mwinit succeeded' : ('mwinit failed: ' + (r && r.reason || '')), 5000);
-      if (r && r.ok) _checkAuth();
-    } catch (e) {
-      toast.show('error', 'mwinit error: ' + e.message);
-    }
+  document.getElementById('auth-recheck').addEventListener('click', _checkAuth);
+  document.getElementById('auth-mwinit').addEventListener('click', () => {
+    authBridge.runMwinit().then(() => _checkAuth()).catch(() => {});
   });
-
-  document.getElementById('settings-recheck-auth').addEventListener('click', () => _checkAuth());
 }
 
-// ── Section: Orcha Config ──────────────────────────────────────────────────
+// ── Section: Orcha ───────────────────────────────────────────────────────────
 function _wireOrcha() {
-  settingsBridge.getOrchaConfig().then((cfg) => {
-    if (!cfg) return;
-    const m = document.getElementById('settings-orcha-mode');
-    const h = document.getElementById('settings-orcha-host');
-    const p = document.getElementById('settings-orcha-port');
-    if (m && cfg.mode) m.value = cfg.mode;
-    if (h && cfg.host) h.value = cfg.host;
-    if (p && cfg.port) p.value = cfg.port;
-  }).catch(() => {});
-
-  document.getElementById('settings-save-orcha').addEventListener('click', async () => {
-    const mode = document.getElementById('settings-orcha-mode').value;
-    const host = (document.getElementById('settings-orcha-host').value || '').trim();
-    const port = parseInt(document.getElementById('settings-orcha-port').value, 10) || 4799;
-    try {
-      await settingsBridge.save('orchaConfig', { mode, host, port });
-      toast.show('success', 'Orcha config saved');
-    } catch (e) {
-      toast.show('error', 'Save failed: ' + e.message);
-    }
+  document.getElementById('save-orcha').addEventListener('click', async () => {
+    await settingsBridge.save('orcha', {
+      mode: document.getElementById('orcha-mode').value,
+      host: document.getElementById('orcha-host').value.trim(),
+      port: parseInt(document.getElementById('orcha-port').value, 10) || 4799,
+    });
+    toast.show('success', 'Orcha config saved', 2000);
   });
 }
 
-// ── Section: Credentials (S10) ────────────────────────────────────────────
+// ── Section: Credentials ─────────────────────────────────────────────────────
 function _loadCredsList() {
-  const listEl = document.getElementById('creds-list');
-  if (!listEl) return;
-  credentials.list().then((keys) => {
-    if (!listEl) return;
-    if (!keys || keys.length === 0) {
-      listEl.innerHTML = '<span class="settings-list-empty">No credentials stored.</span>';
-      return;
-    }
-    listEl.innerHTML = keys.map((k) =>
-      '<span class="settings-key-pill">' + k + '</span>'
-    ).join('');
-  }).catch(() => {
-    if (listEl) listEl.innerHTML = '<span class="settings-list-empty">Could not load keys.</span>';
-  });
+  credsBridge.list().then((keys) => {
+    const el = document.getElementById('cred-list');
+    if (!el) return;
+    el.innerHTML = '';
+    (keys || []).forEach((k) => {
+      const pill = document.createElement('span');
+      pill.className = 'settings-key-pill';
+      pill.textContent = k;
+      el.appendChild(pill);
+    });
+    const wrap = document.getElementById('cred-list-wrap');
+    if (wrap) wrap.style.display = (keys && keys.length) ? 'block' : 'none';
+  }).catch(() => {});
 }
 
 function _wireCreds() {
   _loadCredsList();
-
-  document.getElementById('creds-set').addEventListener('click', async () => {
-    const key = (document.getElementById('creds-key').value || '').trim();
-    const val = document.getElementById('creds-val').value || '';
-    if (!key) { toast.show('warn', 'Key name required', 3000); return; }
-    if (!val)  { toast.show('warn', 'Value required', 3000); return; }
-    try {
-      await credentials.set(key, val);
-      document.getElementById('creds-key').value = '';
-      document.getElementById('creds-val').value = '';
-      toast.show('success', 'Credential saved: ' + key);
-      _loadCredsList();
-    } catch (e) {
-      toast.show('error', 'Save failed: ' + e.message);
-    }
+  document.getElementById('cred-save').addEventListener('click', async () => {
+    const k = document.getElementById('cred-key').value.trim();
+    const v = document.getElementById('cred-val').value;
+    if (!k) return;
+    await credsBridge.set(k, v);
+    document.getElementById('cred-key').value = '';
+    document.getElementById('cred-val').value = '';
+    _loadCredsList();
+    const st = document.getElementById('cred-status');
+    st.textContent = '✓ Saved'; st.style.display = 'block';
+    setTimeout(() => { st.style.display = 'none'; }, 2000);
   });
-
-  document.getElementById('creds-delete').addEventListener('click', async () => {
-    const key = (document.getElementById('creds-key').value || '').trim();
-    if (!key) { toast.show('warn', 'Enter the key name to delete', 3000); return; }
-    try {
-      await credentials.delete(key);
-      document.getElementById('creds-key').value = '';
-      toast.show('info', 'Deleted: ' + key);
-      _loadCredsList();
-    } catch (e) {
-      toast.show('error', 'Delete failed: ' + e.message);
-    }
+  document.getElementById('cred-delete').addEventListener('click', async () => {
+    const k = document.getElementById('cred-key').value.trim();
+    if (!k) return;
+    await credsBridge.delete(k);
+    document.getElementById('cred-key').value = '';
+    _loadCredsList();
   });
 }
 
-// ── Section: Vendor Portal Auth (S25-5) ─────────────────────────────────────
-const _VENDOR_CRED_KEYS = {
-  paccar: { user: 'vendor.paccar.username', pass: 'vendor.paccar.password' },
-  volvo:  { user: 'vendor.volvo.username',  pass: 'vendor.volvo.password'  },
-};
-
-async function _checkVendorCred(vendor) {
-  const keys = _VENDOR_CRED_KEYS[vendor];
-  const el   = document.getElementById('vnd-auth-' + vendor + '-status');
-  if (!el) return;
-  el.textContent = 'Checking...';
-  el.className   = 'settings__status settings__status--loading';
-  try {
-    const hasUser = await credentials.has(keys.user);
-    const hasPass = await credentials.has(keys.pass);
-    if (hasUser && hasPass) {
-      el.textContent = '✓ Credentials saved';
-      el.className   = 'settings__status settings__status--ok';
-    } else {
-      el.textContent = '✗ Not configured';
-      el.className   = 'settings__status settings__status--error';
-    }
-  } catch (_) {
-    el.textContent = 'Check failed';
-    el.className   = 'settings__status settings__status--error';
-  }
+// ── Section: Vendor Auth ─────────────────────────────────────────────────────
+function _checkVendorCred(vendor, statusId) {
+  settingsBridge.getAll().then((all) => {
+    const st = document.getElementById(statusId);
+    if (!st) return;
+    const has = all && all[`${vendor}_user`];
+    st.textContent = has ? `✅ Credentials saved` : '⚠️ Not configured';
+    st.style.display = 'block';
+    st.className = `settings__status settings__status--${has ? 'ok' : 'loading'}`;
+  }).catch(() => {});
 }
 
 function _wireVendorAuth() {
-  ['paccar', 'volvo'].forEach((vendor) => {
-    _checkVendorCred(vendor);
-
-    document.getElementById('vnd-' + vendor + '-save').addEventListener('click', async () => {
-      const user = (document.getElementById('vnd-' + vendor + '-user').value || '').trim();
-      const pass = document.getElementById('vnd-' + vendor + '-pass').value || '';
-      if (!user) { toast.show('warn', 'Username required', 3000); return; }
-      if (!pass) { toast.show('warn', 'Password required', 3000); return; }
-      const btn = document.getElementById('vnd-' + vendor + '-save');
-      btn.disabled = true; btn.textContent = 'Saving...';
-      try {
-        const keys = _VENDOR_CRED_KEYS[vendor];
-        await credentials.set(keys.user, user);
-        await credentials.set(keys.pass, pass);
-        document.getElementById('vnd-' + vendor + '-user').value = '';
-        document.getElementById('vnd-' + vendor + '-pass').value = '';
-        toast.show('success', vendor.charAt(0).toUpperCase() + vendor.slice(1) + ' credentials saved');
-        _checkVendorCred(vendor);
-      } catch (e) {
-        toast.show('error', 'Save failed: ' + e.message);
-      } finally {
-        btn.disabled = false; btn.textContent = 'Save';
-      }
+  ['paccar', 'volvo'].forEach((v) => {
+    _checkVendorCred(v, `${v}-status`);
+    document.getElementById(`${v}-save`).addEventListener('click', async () => {
+      await settingsBridge.save(`${v}_user`, document.getElementById(`${v}-user`).value.trim());
+      await settingsBridge.save(`${v}_pass`, document.getElementById(`${v}-pass`).value);
+      document.getElementById(`${v}-pass`).value = '';
+      _checkVendorCred(v, `${v}-status`);
     });
-
-    document.getElementById('vnd-' + vendor + '-clear').addEventListener('click', async () => {
-      const btn = document.getElementById('vnd-' + vendor + '-clear');
-      btn.disabled = true; btn.textContent = 'Clearing...';
-      try {
-        const keys = _VENDOR_CRED_KEYS[vendor];
-        await credentials.delete(keys.user);
-        await credentials.delete(keys.pass);
-        toast.show('info', vendor.charAt(0).toUpperCase() + vendor.slice(1) + ' credentials cleared');
-        _checkVendorCred(vendor);
-      } catch (e) {
-        toast.show('error', 'Clear failed: ' + e.message);
-      } finally {
-        btn.disabled = false; btn.textContent = 'Clear';
-      }
+    document.getElementById(`${v}-clear`).addEventListener('click', async () => {
+      await settingsBridge.save(`${v}_user`, '');
+      await settingsBridge.save(`${v}_pass`, '');
+      document.getElementById(`${v}-user`).value = '';
+      _checkVendorCred(v, `${v}-status`);
     });
   });
 }
 
-// ── Section: Slack (S10) ──────────────────────────────────────────────────
+// ── Section: Slack ───────────────────────────────────────────────────────────
 function _checkSlack() {
-  const el = document.getElementById('slack-auth-status');
-  if (!el) return;
-  el.textContent = 'Checking...';
-  el.className = 'settings__status settings__status--loading';
-  slackBridge.checkAuth().then((r) => {
+  slackBridge.checkAuth().then((ok) => {
+    const el = document.getElementById('slack-status');
     if (!el) return;
-    if (r && r.authenticated) {
-      el.textContent = '✓ Slack authenticated';
-      el.className = 'settings__status settings__status--ok';
-    } else {
-      el.textContent = '✗ Not signed in';
-      el.className = 'settings__status settings__status--error';
-    }
-  }).catch(() => {
-    if (el) { el.textContent = 'Check failed'; el.className = 'settings__status settings__status--error'; }
-  });
+    el.textContent = ok ? '✅ Connected' : '⚠️ Not connected';
+    el.className = `sd-status ${ok ? 'ok' : 'warn'}`;
+  }).catch(() => {});
 }
 
 function _wireSlack() {
   _checkSlack();
-
-  document.getElementById('slack-login').addEventListener('click', async () => {
-    toast.show('info', 'Opening Slack login...', 3000);
-    try {
-      await slackBridge.login();
-      _checkSlack();
-      toast.show('success', 'Slack sign-in complete');
-    } catch (e) {
-      toast.show('error', 'Slack login failed: ' + e.message);
-    }
+  document.getElementById('slack-recheck').addEventListener('click', _checkSlack);
+  document.getElementById('slack-login').addEventListener('click', () => {
+    slackBridge.login().then(() => _checkSlack()).catch(() => {});
   });
-
-  document.getElementById('slack-recheck').addEventListener('click', () => _checkSlack());
 }
 
-// ── Section: Email / SMTP (S10) ───────────────────────────────────────────
+// ── Section: Email ───────────────────────────────────────────────────────────
 function _wireEmail() {
-  emailBridge.getConfig().then((cfg) => {
-    if (!cfg) return;
-    const fields = {
-      'email-host': cfg.host,
-      'email-port': cfg.port,
-      'email-from': cfg.from,
-      'email-user': cfg.user || cfg.username,
-    };
-    Object.entries(fields).forEach(([id, val]) => {
-      const el = document.getElementById(id);
-      if (el && val) el.value = val;
-    });
-    const tlsEl = document.getElementById('email-tls');
-    if (tlsEl) tlsEl.checked = !!cfg.tls;
-  }).catch(() => {});
-
   document.getElementById('email-save').addEventListener('click', async () => {
-    const config = {
-      host: (document.getElementById('email-host').value || '').trim(),
+    await emailBridge.saveConfig({
+      host: document.getElementById('email-host').value.trim(),
       port: parseInt(document.getElementById('email-port').value, 10) || 587,
-      from: (document.getElementById('email-from').value || '').trim(),
-      user: (document.getElementById('email-user').value || '').trim(),
-      tls:  document.getElementById('email-tls').checked,
-    };
-    const pass = document.getElementById('email-pass').value;
-    if (pass) config.pass = pass; // only include if user typed a new password
-    if (!config.host) { toast.show('warn', 'SMTP host required', 3000); return; }
-    try {
-      await emailBridge.saveConfig(config);
-      document.getElementById('email-pass').value = '';
-      toast.show('success', 'Email config saved');
-    } catch (e) {
-      toast.show('error', 'Save failed: ' + e.message);
-    }
+      from: document.getElementById('email-from').value.trim(),
+      user: document.getElementById('email-user').value.trim(),
+      pass: document.getElementById('email-pass').value,
+    });
+    document.getElementById('email-pass').value = '';
+    const st = document.getElementById('email-status');
+    st.textContent = '✓ Saved'; st.style.display = 'block';
+    setTimeout(() => { st.style.display = 'none'; }, 2000);
   });
-
   document.getElementById('email-test').addEventListener('click', () => {
-    const wrap = document.getElementById('email-test-addr-wrap');
-    if (wrap) wrap.style.display = wrap.style.display === 'none' ? 'flex' : 'none';
-  });
-
-  document.getElementById('email-test-cancel').addEventListener('click', () => {
-    const wrap = document.getElementById('email-test-addr-wrap');
-    if (wrap) wrap.style.display = 'none';
-  });
-
-  document.getElementById('email-test-send').addEventListener('click', async () => {
-    const to = (document.getElementById('email-test-addr').value || '').trim();
-    if (!to) { toast.show('warn', 'Recipient address required', 3000); return; }
-    const btn = document.getElementById('email-test-send');
-    btn.disabled = true; btn.textContent = 'Sending...';
-    try {
-      await emailBridge.send({ to, subject: 'Fleet Ops test email', body: 'Test from Fleet Ops V-C settings.' });
-      toast.show('success', 'Test email sent to ' + to, 5000);
-      document.getElementById('email-test-addr-wrap').style.display = 'none';
-    } catch (e) {
-      toast.show('error', 'Send failed: ' + e.message);
-    } finally {
-      btn.disabled = false; btn.textContent = 'Send';
-    }
+    toast.show('info', 'Send test — not yet wired in bridge', 3000);
   });
 }
 
-// ── Section: SharePoint (S10) ─────────────────────────────────────────────
+// ── Section: SharePoint ───────────────────────────────────────────────────────
 function _wireSP() {
+  // Operators tab sync button
+  document.getElementById('ops-sync-btn').addEventListener('click', () => {
+    bus.emit('ui:toast', { type: 'info', message: 'Syncing operators...', duration: 2000 });
+    bus.emit('sp:sync-request');
+  });
+
+  // Ops email auto-save fields
+  ['ops-email-host','ops-email-port','ops-email-from','ops-email-user','ops-email-pass','ops-email-tls'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => _opsEmailAutoSave());
+    el.addEventListener('input',  () => _opsEmailAutoSave());
+  });
+
+  // Test email inline form
+  document.getElementById('ops-email-test-btn').addEventListener('click', () => {
+    document.getElementById('ops-email-test-btn').style.display = 'none';
+    document.getElementById('ops-email-test-form').style.display = 'flex';
+  });
+  document.getElementById('ops-email-test-cancel').addEventListener('click', () => {
+    document.getElementById('ops-email-test-btn').style.display = 'flex';
+    document.getElementById('ops-email-test-form').style.display = 'none';
+  });
+  document.getElementById('ops-email-test-send').addEventListener('click', () => {
+    const to = document.getElementById('ops-email-test-to').value.trim();
+    if (!to) return;
+    toast.show('info', 'Send test — not yet wired in bridge', 3000);
+  });
+
+  // Pre-populate ops-email fields from saved config
   spBridge.getConfig().then((cfg) => {
     if (!cfg) return;
-    const fields = { 'sp-site-url': cfg.siteUrl, 'sp-list-name': cfg.listName, 'sp-user': cfg.user || cfg.username };
-    Object.entries(fields).forEach(([id, val]) => {
-      const el = document.getElementById(id);
-      if (el && val) el.value = val;
-    });
+    if (cfg.emailHost) { const el = document.getElementById('ops-email-host'); if (el) el.value = cfg.emailHost; }
+    if (cfg.emailPort) { const el = document.getElementById('ops-email-port'); if (el) el.value = cfg.emailPort; }
+    if (cfg.emailFrom) { const el = document.getElementById('ops-email-from'); if (el) el.value = cfg.emailFrom; }
+    if (cfg.emailUser) { const el = document.getElementById('ops-email-user'); if (el) el.value = cfg.emailUser; }
+    if (cfg.emailTls  != null) { const el = document.getElementById('ops-email-tls');  if (el) el.checked = cfg.emailTls; }
   }).catch(() => {});
 
-  document.getElementById('sp-save').addEventListener('click', async () => {
-    const config = {
-      siteUrl:  (document.getElementById('sp-site-url').value  || '').trim(),
-      listName: (document.getElementById('sp-list-name').value || '').trim(),
-      user:     (document.getElementById('sp-user').value      || '').trim(),
-    };
-    const pass = document.getElementById('sp-pass').value;
-    if (pass) config.pass = pass;
-    if (!config.siteUrl) { toast.show('warn', 'Site URL required', 3000); return; }
-    try {
-      await spBridge.saveConfig(config);
-      document.getElementById('sp-pass').value = '';
-      toast.show('success', 'SharePoint config saved');
-    } catch (e) {
-      toast.show('error', 'Save failed: ' + e.message);
-    }
-  });
-
-  document.getElementById('sp-push-now').addEventListener('click', async () => {
-    const btn = document.getElementById('sp-push-now');
-    btn.disabled = true; btn.textContent = 'Pushing...';
-    try {
-      const rows = (window.__fleet_bus && window.__fleet_state)
-        ? window.__fleet_state.rows
-        : [];
-      await spBridge.push(rows);
-      toast.show('success', 'SharePoint push triggered');
-    } catch (e) {
-      toast.show('error', 'Push failed: ' + e.message);
-    } finally {
-      btn.disabled = false; btn.textContent = 'Push now';
-    }
+  // Listen for operators data pushed from main process
+  bus.on('state:operators', (data) => {
+    // Load SP config first, then render with saved values pre-filled
+    spBridge.getConfig().then((cfg) => {
+      _renderOperators(data, cfg || {});
+      const meta = document.getElementById('ops-sync-meta');
+      if (meta) meta.textContent = `${data.length} operator${data.length !== 1 ? 's' : ''} loaded`;
+    }).catch(() => {
+      _renderOperators(data, {});
+    });
   });
 }
 
-// ── Section: Asana (S10) ─────────────────────────────────────────────────
-function _checkAsana() {
-  const el = document.getElementById('asana-auth-status');
-  if (!el) return;
-  el.textContent = 'Checking...';
-  el.className = 'settings__status settings__status--loading';
-  asanaBridge.checkAuth().then((r) => {
-    if (!el) return;
-    if (r && r.ok) {
-      el.textContent = '✓ Asana authenticated' + (r.name ? ' (' + r.name + ')' : '');
-      el.className = 'settings__status settings__status--ok';
-    } else {
-      el.textContent = '✗ Not authenticated: ' + (r && r.reason || 'no token');
-      el.className = 'settings__status settings__status--error';
+// ── SP: ops-email auto-save ───────────────────────────────────────────────────
+const _opsEmailTimers = {};
+function _opsEmailAutoSave() {
+  const badge = document.getElementById('ops-email-badge');
+  if (badge) { badge.textContent = 'saving...'; badge.className = 'ops-autosave-badge saving'; }
+  clearTimeout(_opsEmailTimers.main);
+  _opsEmailTimers.main = setTimeout(async () => {
+    // Merge email fields into existing SP config so we don't clobber domicile entries
+    const existing = await spBridge.getConfig().catch(() => ({})) || {};
+    await spBridge.saveConfig({
+      ...existing,
+      emailHost: document.getElementById('ops-email-host').value.trim(),
+      emailPort: parseInt(document.getElementById('ops-email-port').value, 10) || 587,
+      emailFrom: document.getElementById('ops-email-from').value.trim(),
+      emailUser: document.getElementById('ops-email-user').value.trim(),
+      emailPass: document.getElementById('ops-email-pass').value,
+      emailTls:  document.getElementById('ops-email-tls').checked,
+    }).catch(() => {});
+    if (badge) {
+      badge.textContent = '✓ saved'; badge.className = 'ops-autosave-badge saved';
+      setTimeout(() => { badge.textContent = ''; badge.className = 'ops-autosave-badge'; }, 3000);
     }
-  }).catch(() => {
-    if (el) { el.textContent = 'Check failed'; el.className = 'settings__status settings__status--error'; }
+  }, 800);
+}
+
+// ── SP: per-domicile save helper ──────────────────────────────────────────────
+// cfg shape: { domiciles: { [opName_domCode]: { siteUrl, listName } }, emailHost, ... }
+async function _spSaveDomicile(opName, domCode, siteUrl, listName) {
+  const existing = await spBridge.getConfig().catch(() => ({})) || {};
+  const domiciles = existing.domiciles || {};
+  const key = `${opName}__${domCode}`;
+  domiciles[key] = { siteUrl, listName };
+  return spBridge.saveConfig({ ...existing, domiciles });
+}
+
+// ── SP: render operator accordion cards ──────────────────────────────────────
+function _renderOperators(data, spCfg) {
+  const list  = document.getElementById('ops-list');
+  const empty = document.getElementById('ops-empty-state');
+  if (!list) return;
+
+  if (!data || data.length === 0) {
+    if (empty) empty.style.display = 'flex';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  // Clear existing cards, keep empty-state node
+  [...list.querySelectorAll('.ops-card')].forEach((c) => c.remove());
+
+  const savedDoms   = (spCfg && spCfg.domiciles) ? spCfg.domiciles : {};
+  const savedEmails = (spCfg && spCfg.emails)    ? spCfg.emails    : {};
+
+  data.forEach((op) => {
+    const card = document.createElement('div');
+    card.className = 'ops-card';
+
+    // ── Header ──
+    const header = document.createElement('div');
+    header.className = 'ops-card-header';
+    header.innerHTML = `
+      <div class="ops-card-dot" style="background:var(--acc)"></div>
+      <span class="ops-card-name">${_esc(op.name)}</span>
+      <span class="ops-card-meta">${(op.domiciles || []).length} domicile(s)</span>
+      <span class="ops-card-arrow">›</span>`;
+    card.appendChild(header);
+
+    // ── Body ──
+    const body = document.createElement('div');
+    body.className = 'ops-card-body';
+    body.style.display = 'none';
+
+    (op.domiciles || []).forEach((d) => {
+      const key        = `${op.name}__${d.code}`;
+      const savedSP    = savedDoms[key]   || {};
+      const savedEmail = savedEmails[key] || {};
+
+      const siteVal    = savedSP.siteUrl  || d.spSite || '';
+      const listVal    = savedSP.listName || '';
+      const toVal      = savedEmail.to    || d.emailTo  || '';
+      const ccVal      = savedEmail.cc    || d.emailCc  || '';
+
+      const domEl = document.createElement('div');
+      domEl.className = 'ops-domicile';
+
+      // Status pills
+      const spStatusCls = siteVal ? 'ok'   : 'warn';
+      const spStatusTxt = siteVal ? '✓ SP' : '⚠ SP';
+      const emStatusCls = toVal   ? 'ok'   : 'warn';
+      const emStatusTxt = toVal   ? '✓ Email' : '⚠ Email';
+
+      domEl.innerHTML = `
+        <div class="ops-dom-header">
+          <span class="ops-dom-tag">${_esc(d.code)}</span>
+          <span class="ops-dom-count">${d.count || 0} unit(s)</span>
+          <span class="ops-dom-sp-status ${spStatusCls}" data-sp-status>${spStatusTxt}</span>
+          <span class="ops-dom-sp-status ${emStatusCls}" data-em-status style="margin-left:4px">${emStatusTxt}</span>
+        </div>
+
+        <div class="ops-sp-fields">
+          <div class="sd-section-label">SharePoint</div>
+          <div class="sd-field">
+            <div class="sd-label">Site URL</div>
+            <input class="sd-input ops-sp-site" placeholder="https://amazon.sharepoint.com/sites/..." value="${_esc(siteVal)}"/>
+          </div>
+          <div class="sd-field">
+            <div class="sd-label-row sd-label">
+              List / Sheet
+              <button class="ops-load-btn" type="button">Load lists</button>
+            </div>
+            <select class="sd-select ops-sp-list">
+              <option value="">— select list —</option>
+              ${listVal ? `<option value="${_esc(listVal)}" selected>${_esc(listVal)}</option>` : ''}
+            </select>
+          </div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary ops-sp-save" type="button">Save SP</button>
+            <button class="sd-btn secondary ops-sp-push" type="button">Push now</button>
+            <span class="ops-autosave-badge ops-sp-badge"></span>
+          </div>
+        </div>
+
+        <div class="ops-email-fields" style="margin-top:10px">
+          <div class="sd-section-label">Email recipients</div>
+          <div class="sd-field">
+            <div class="sd-label">To <span class="sd-label-hint">(semicolon-separated)</span></div>
+            <input class="sd-input ops-em-to" type="email" multiple placeholder="manager@amazon.com;dsp@email.com" value="${_esc(toVal)}"/>
+          </div>
+          <div class="sd-field">
+            <div class="sd-label">CC <span class="sd-label-hint">(optional)</span></div>
+            <input class="sd-input ops-em-cc" type="email" multiple placeholder="cc@amazon.com" value="${_esc(ccVal)}"/>
+          </div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary ops-em-save" type="button">Save email</button>
+            <span class="ops-autosave-badge ops-em-badge"></span>
+          </div>
+        </div>`;
+
+      // ── SP: Save button ──
+      domEl.querySelector('.ops-sp-save').addEventListener('click', async () => {
+        const badge    = domEl.querySelector('.ops-sp-badge');
+        const siteUrl  = domEl.querySelector('.ops-sp-site').value.trim();
+        const listName = domEl.querySelector('.ops-sp-list').value;
+        badge.textContent = 'saving...'; badge.className = 'ops-autosave-badge saving';
+        try {
+          await _spSaveDomicile(op.name, d.code, siteUrl, listName);
+          const pill = domEl.querySelector('[data-sp-status]');
+          if (pill) {
+            pill.textContent = siteUrl ? '✓ SP' : '⚠ SP';
+            pill.className   = `ops-dom-sp-status ${siteUrl ? 'ok' : 'warn'}`;
+          }
+          badge.textContent = '✓ saved'; badge.className = 'ops-autosave-badge saved';
+          setTimeout(() => { badge.textContent = ''; badge.className = 'ops-autosave-badge'; }, 2500);
+        } catch (e) {
+          badge.textContent = '✗ error'; badge.className = 'ops-autosave-badge saving';
+          setTimeout(() => { badge.textContent = ''; badge.className = 'ops-autosave-badge'; }, 3000);
+        }
+      });
+
+      // ── SP: Push now button ──
+      domEl.querySelector('.ops-sp-push').addEventListener('click', async () => {
+        const siteUrl = domEl.querySelector('.ops-sp-site').value.trim();
+        const pushBtn = domEl.querySelector('.ops-sp-push');
+        const saveBtn = domEl.querySelector('.ops-sp-save');
+        const badge   = domEl.querySelector('.ops-sp-badge');
+
+        if (!siteUrl) {
+          toast.show('warn', `${d.code}: set a SharePoint URL before pushing`, 3000);
+          return;
+        }
+
+        pushBtn.disabled = true;
+        saveBtn.disabled = true;
+        pushBtn.textContent = 'Pushing...';
+        badge.textContent = 'connecting...';
+        badge.className = 'ops-autosave-badge saving';
+
+        const unsubProgress = bus.on('sp:progress', ({ message }) => {
+          badge.textContent = message.length > 38 ? message.slice(0, 35) + '...' : message;
+        });
+
+        try {
+          const result = await spBridge.pushDomicile({ opName: op.name, domCode: d.code });
+          unsubProgress();
+          if (!result || result.ok === false) {
+            const msg = (result && result.error) || 'Push failed';
+            badge.textContent = `✗ ${msg}`; badge.className = 'ops-autosave-badge saving';
+            toast.show('error', `${d.code}: ${msg}`, 5000);
+          } else {
+            const summary = `✓ ${result.pushed || 0} new · ${result.updated || 0} updated`;
+            badge.textContent = summary; badge.className = 'ops-autosave-badge saved';
+            toast.show('info', `${d.code} pushed — ${summary.replace('✓ ', '')}`, 4000);
+          }
+          setTimeout(() => { badge.textContent = ''; badge.className = 'ops-autosave-badge'; }, 5000);
+        } catch (e) {
+          unsubProgress();
+          badge.textContent = '✗ error'; badge.className = 'ops-autosave-badge saving';
+          toast.show('error', `${d.code} push error: ${e.message || e}`, 5000);
+          setTimeout(() => { badge.textContent = ''; badge.className = 'ops-autosave-badge'; }, 5000);
+        } finally {
+          pushBtn.disabled = false;
+          saveBtn.disabled = false;
+          pushBtn.textContent = 'Push now';
+        }
+      });
+
+      // ── SP: Load lists button ──
+      domEl.querySelector('.ops-load-btn').addEventListener('click', async () => {
+        const siteUrl = domEl.querySelector('.ops-sp-site').value.trim();
+        const loadBtn = domEl.querySelector('.ops-load-btn');
+        const select  = domEl.querySelector('.ops-sp-list');
+        const curVal  = select.value;
+
+        if (!siteUrl) { toast.show('warn', 'Enter a SharePoint Site URL first', 2500); return; }
+
+        loadBtn.disabled = true;
+        loadBtn.textContent = 'Loading...';
+        try {
+          const lists = await spBridge.getLists(siteUrl);
+          if (!lists || lists.error) {
+            toast.show('error', `Could not load lists: ${(lists && lists.error) || 'unknown error'}`, 4000);
+            return;
+          }
+          if (!lists.length) { toast.show('warn', 'No lists found for this site', 3000); return; }
+          select.innerHTML = '<option value="">— select list —</option>';
+          lists.forEach(({ title }) => {
+            const opt = document.createElement('option');
+            opt.value = title; opt.textContent = title;
+            if (title === curVal) opt.selected = true;
+            select.appendChild(opt);
+          });
+          toast.show('info', `${lists.length} list${lists.length !== 1 ? 's' : ''} loaded`, 2000);
+        } catch (e) {
+          toast.show('error', `Load lists failed: ${e.message || e}`, 4000);
+        } finally {
+          loadBtn.disabled = false;
+          loadBtn.textContent = 'Load lists';
+        }
+      });
+
+      // ── SP: Site URL pill update live ──
+      domEl.querySelector('.ops-sp-site').addEventListener('input', function () {
+        const pill = domEl.querySelector('[data-sp-status]');
+        if (pill) {
+          const has = !!this.value.trim();
+          pill.textContent = has ? '✓ SP' : '⚠ SP';
+          pill.className   = `ops-dom-sp-status ${has ? 'ok' : 'warn'}`;
+        }
+      });
+
+      // ── Email: Save button ──
+      domEl.querySelector('.ops-em-save').addEventListener('click', async () => {
+        const badge = domEl.querySelector('.ops-em-badge');
+        const to    = domEl.querySelector('.ops-em-to').value.trim();
+        const cc    = domEl.querySelector('.ops-em-cc').value.trim();
+        badge.textContent = 'saving...'; badge.className = 'ops-autosave-badge saving';
+        try {
+          await _spSaveEmail(op.name, d.code, to, cc);
+          const pill = domEl.querySelector('[data-em-status]');
+          if (pill) {
+            pill.textContent = to ? '✓ Email' : '⚠ Email';
+            pill.className   = `ops-dom-sp-status ${to ? 'ok' : 'warn'}`;
+          }
+          badge.textContent = '✓ saved'; badge.className = 'ops-autosave-badge saved';
+          setTimeout(() => { badge.textContent = ''; badge.className = 'ops-autosave-badge'; }, 2500);
+        } catch (e) {
+          badge.textContent = '✗ error'; badge.className = 'ops-autosave-badge saving';
+          setTimeout(() => { badge.textContent = ''; badge.className = 'ops-autosave-badge'; }, 3000);
+        }
+      });
+
+      // ── Email: To input pill update live ──
+      domEl.querySelector('.ops-em-to').addEventListener('input', function () {
+        const pill = domEl.querySelector('[data-em-status]');
+        if (pill) {
+          const has = !!this.value.trim();
+          pill.textContent = has ? '✓ Email' : '⚠ Email';
+          pill.className   = `ops-dom-sp-status ${has ? 'ok' : 'warn'}`;
+        }
+      });
+
+      body.appendChild(domEl);
+    });
+
+    card.appendChild(body);
+
+    // ── Accordion toggle ──
+    header.addEventListener('click', () => {
+      const open = body.style.display !== 'none';
+      body.style.display = open ? 'none' : 'block';
+      header.querySelector('.ops-card-arrow').style.transform = open ? '' : 'rotate(90deg)';
+    });
+
+    list.appendChild(card);
   });
 }
 
+// ── SP: per-domicile email save helper ───────────────────────────────────────
+async function _spSaveEmail(opName, domCode, to, cc) {
+  const existing = await spBridge.getConfig().catch(() => ({})) || {};
+  const emails   = existing.emails || {};
+  const key      = `${opName}__${domCode}`;
+  emails[key]    = { to, cc };
+  return spBridge.saveConfig({ ...existing, emails });
+}
+
+
+// ── Section: Asana ───────────────────────────────────────────────────────────
 function _wireAsana() {
-  _checkAsana();
-
-  asanaBridge.getConfig().then((cfg) => {
-    if (!cfg) return;
-    const fields = {
-      'asana-workspace': cfg.defaultWorkspace || cfg.workspaceGid,
-      'asana-project':   cfg.defaultProject   || cfg.projectGid,
-    };
-    Object.entries(fields).forEach(([id, val]) => {
-      const el = document.getElementById(id);
-      if (el && val) el.value = val;
-    });
-  }).catch(() => {});
-
   document.getElementById('asana-save').addEventListener('click', async () => {
-    const token = (document.getElementById('asana-token').value || '').trim();
-    const workspaceGid = (document.getElementById('asana-workspace').value || '').trim();
-    const projectGid   = (document.getElementById('asana-project').value   || '').trim();
-    const config = { workspaceGid, projectGid };
-    if (token) config.token = token;
-    if (!workspaceGid) { toast.show('warn', 'Workspace GID required', 3000); return; }
-    try {
-      await asanaBridge.saveConfig(config);
-      document.getElementById('asana-token').value = '';
-      toast.show('success', 'Asana config saved');
-      if (token) _checkAsana();
-    } catch (e) {
-      toast.show('error', 'Save failed: ' + e.message);
-    }
+    await asanaBridge.saveConfig({
+      pat:       document.getElementById('asana-pat').value,
+      workspace: document.getElementById('asana-workspace').value.trim(),
+      project:   document.getElementById('asana-project').value.trim(),
+    });
+    document.getElementById('asana-pat').value = '';
+    const st = document.getElementById('asana-status');
+    st.textContent = '✓ Saved'; st.style.display = 'block';
+    setTimeout(() => { st.style.display = 'none'; }, 2000);
   });
-
-  document.getElementById('asana-verify').addEventListener('click', async () => {
-    const btn = document.getElementById('asana-verify');
-    btn.disabled = true; btn.textContent = 'Verifying...';
-    try {
-      const me = await asanaBridge.getMe();
-      toast.show('success', 'Asana OK — ' + (me && me.name || 'authenticated'), 4000);
-      _checkAsana();
-    } catch (e) {
-      toast.show('error', 'Verify failed: ' + e.message);
-    } finally {
-      btn.disabled = false; btn.textContent = 'Verify token';
-    }
+  document.getElementById('asana-verify').addEventListener('click', () => {
+    asanaBridge.checkAuth().then((ok) => {
+      const st = document.getElementById('asana-status');
+      st.textContent = ok ? '✅ Token valid' : '❌ Token invalid';
+      st.style.display = 'block';
+    }).catch(() => {});
   });
 }
 
-// ── Section: Notifications (S10) ─────────────────────────────────────────
+// ── Section: Notifications ───────────────────────────────────────────────────
 function _wireNotifications() {
-  // Load saved prefs
-  settingsBridge.getAll().then((all) => {
-    const prefs = (all && all.notifications) || {};
-    const set = (id, key, def) => {
-      const el = document.getElementById(id);
-      if (el) el.checked = key in prefs ? !!prefs[key] : def;
-    };
-    set('notif-auth-failure',  'authFailure',   true);
-    set('notif-sync-complete', 'syncComplete',  true);
-    set('notif-sync-error',    'syncError',     true);
-  }).catch(() => {});
-
-  document.getElementById('notif-save').addEventListener('click', async () => {
-    const prefs = {
-      authFailure:  document.getElementById('notif-auth-failure').checked,
-      syncComplete: document.getElementById('notif-sync-complete').checked,
-      syncError:    document.getElementById('notif-sync-error').checked,
-    };
-    try {
-      await settingsBridge.save('notifications', prefs);
-      toast.show('success', 'Notification preferences saved');
-    } catch (e) {
-      toast.show('error', 'Save failed: ' + e.message);
-    }
-  });
-}
-
-// -- S22: Populate all fields from saved config ---
-function _populate() {
-  // Orcha config
-  settingsBridge.getOrchaConfig().then((cfg) => {
-    if (!cfg) return;
-    const set = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
-    set('settings-orcha-mode', cfg.mode);
-    set('settings-orcha-host', cfg.host);
-    set('settings-orcha-port', cfg.port);
-  }).catch(() => {});
-
-  // Email config -- password intentionally never populated
-  if (window.email && typeof window.email.getConfig === "function") {
-    window.email.getConfig().then((cfg) => {
-      if (!cfg) return;
-      const set = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
-      set('email-host', cfg.host); set('email-port', cfg.port);
-      set('email-from', cfg.from); set('email-user', cfg.user || cfg.username);
-      const tlsEl = document.getElementById('email-tls'); if (tlsEl) tlsEl.checked = !!cfg.tls;
-    }).catch(() => {}); }
-
-  // SharePoint config
-  if (window.sp && typeof window.sp.getConfig === "function") {
-    window.sp.getConfig().then((cfg) => {
-      if (!cfg) return;
-      const set = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
-      set('sp-site-url',  cfg.siteUrl || cfg.site);
-      set('sp-list-name', cfg.listName || cfg.list);
-      set('sp-user',      cfg.user || cfg.username);
-    }).catch(() => {}); }
-
-  // Asana config
-  if (window.asana && typeof window.asana.getConfig === "function") {
-    window.asana.getConfig().then((cfg) => {
-      if (!cfg) return;
-      const set = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
-      set('asana-workspace', cfg.defaultWorkspace || cfg.workspaceGid);
-      set('asana-project',   cfg.defaultProject   || cfg.projectGid);
-      const tokEl = document.getElementById('asana-token');
-      if (tokEl && (cfg.token || cfg.hasToken)) tokEl.placeholder = "••••••••  (saved)";
-    }).catch(() => {}); }
-
-  // Notifications
-  settingsBridge.getAll().then((all) => {
-    const prefs = (all && all.notifications) || {};
-    const chk = (id, key, def) => { const el = document.getElementById(id); if (el) el.checked = key in prefs ? !!prefs[key] : def; };
-    chk('notif-auth-failure',  'authFailure',  true);
-    chk('notif-sync-complete', 'syncComplete', true);
-    chk('notif-sync-error',    'syncError',    true);
-  }).catch(() => {});
-
-  // Domiciles
-  settingsBridge.getDomiciles().then((d) => {
-    const ta = document.getElementById('settings-domiciles');
-    if (ta && d) ta.value = Array.isArray(d) ? d.join('\n') : d;
-  }).catch(() => {});
-
-  _checkSlack();  // re-check Slack auth
-  // S25-5: re-check vendor portal cred status
-  ['paccar', 'volvo'].forEach(_checkVendorCred);
-  _checkAuth();   // re-check Midway
-}
-
-// -- S22: Section collapse/expand ---
-const _COLLAPSE_KEY = 'settings_collapsed';
-function _getCollapsed() { try { return JSON.parse(localStorage.getItem(_COLLAPSE_KEY) || '{}'); } catch (_) { return {}; } }
-function _saveCollapsed(state) { try { localStorage.setItem(_COLLAPSE_KEY, JSON.stringify(state)); } catch (_) {} }
-function _initCollapse() {
-  const state = _getCollapsed();
-  _el.querySelectorAll('.settings__section-toggle').forEach((toggle) => {
-    const sec = toggle.closest('.settings__section'); if (!sec) return;
-    const key = sec.dataset.section;
-    const body = sec.querySelector('.settings__section-body'); if (!body) return;
-    if (state[key]) { body.style.display = 'none'; toggle.setAttribute('aria-expanded', 'false'); toggle.textContent = '▶'; }
-    toggle.addEventListener('click', () => {
-      const open = body.style.display === 'none';
-      body.style.display = open ? '' : 'none';
-      toggle.setAttribute('aria-expanded', String(open));
-      toggle.textContent = open ? '▼' : '▶';
-      const cur = _getCollapsed(); if (open) { delete cur[key]; } else { cur[key] = true; } _saveCollapsed(cur);
+  // No-op on change — preferences stored in _populate / settingsBridge
+  ['notif-auth-fail','notif-sync-ok','notif-sync-err'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      settingsBridge.save('notifications', {
+        authFail:  document.getElementById('notif-auth-fail').checked,
+        syncOk:    document.getElementById('notif-sync-ok').checked,
+        syncErr:   document.getElementById('notif-sync-err').checked,
+      }).catch(() => {});
     });
   });
 }
 
+// ── Section: Accounts (S11) ──────────────────────────────────────────────────
+function _wireAccounts() {
+  settingsBridge.getAll().then((all) => {
+    const rows = (all && Array.isArray(all.accounts)) ? all.accounts : [];
+    if (rows.length > 0) {
+      const empty = document.getElementById('acct-empty');
+      if (empty) empty.style.display = 'none';
+      rows.forEach((r) => _acctAddRow(r));
+    }
+  }).catch(() => {});
 
-// ── Init ───────────────────────────────────────────────────────────────────
-export function init(container) {
-  _el = document.createElement('div');
-  _el.id = 'view-settings';
-  _el.className = 'view view--settings';
-  _el.style.display = 'none';
-  _el.innerHTML = _html();
-  container.appendChild(_el);
+  document.getElementById('acct-add').addEventListener('click', () => {
+    _acctAddRow();
+    const list = document.getElementById('acct-list');
+    if (list && list.lastElementChild) {
+      const inp = list.lastElementChild.querySelector('.acct-input.acct-name');
+      if (inp) inp.focus();
+    }
+  });
+}
 
-  // Back button
-  document.getElementById('settings-back').addEventListener('click', () => {
-    bus.emit('ui:view-change', { from: 'settings', to: 'fleet' });
+function _acctAddRow(prefill = {}) {
+  const empty = document.getElementById('acct-empty');
+  if (empty) empty.style.display = 'none';
+
+  const list = document.getElementById('acct-list');
+  const id   = 'acct-' + Date.now();
+  const row  = document.createElement('div');
+  row.className = 'acct-row';
+  row.id = id;
+
+  const url  = prefill.url  || '';
+  const name = prefill.name || '';
+  const user = prefill.user || '';
+
+  row.innerHTML = `
+    <div class="acct-cell acct-cell-site">
+      <input class="acct-input acct-url"  type="url"  placeholder="https://..."     value="${_esc(url)}"  title="Site URL"/>
+      <input class="acct-input acct-name" type="text" placeholder="Site name"       value="${_esc(name)}" title="Display name"/>
+      <a class="acct-link" href="${_esc(url) || '#'}" title="Open site" style="${url ? '' : 'display:none'}" target="_blank">🔗</a>
+    </div>
+    <div class="acct-cell acct-cell-user">
+      <input class="acct-input" type="text" placeholder="username / email" value="${_esc(user)}"/>
+    </div>
+    <div class="acct-cell acct-cell-pass">
+      <input class="acct-input acct-pass" type="password" placeholder="password"/>
+      <button class="acct-eye" type="button" title="Show/hide">👁️</button>
+    </div>
+    <div class="acct-cell acct-cell-actions">
+      <span class="acct-save-badge" id="badge-${id}"></span>
+      <button class="acct-del" type="button" title="Remove">🗑</button>
+    </div>`;
+
+  row.querySelector('.acct-url').addEventListener('input', function () {
+    const link = row.querySelector('.acct-link');
+    const v = this.value.trim();
+    link.href = v || '#';
+    link.style.display = v ? '' : 'none';
+    _acctAutoSave(row);
+  });
+  row.querySelectorAll('.acct-input.acct-name, .acct-cell-user .acct-input').forEach((inp) => {
+    inp.addEventListener('input', () => _acctAutoSave(row));
+  });
+  row.querySelector('.acct-pass').addEventListener('input', () => _acctAutoSave(row));
+  row.querySelector('.acct-eye').addEventListener('click', function () {
+    const inp = row.querySelector('.acct-pass');
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+    this.textContent = inp.type === 'password' ? '👁️' : '🙈';
+  });
+  row.querySelector('.acct-del').addEventListener('click', () => {
+    row.remove();
+    if (!document.querySelectorAll('#acct-list .acct-row').length) {
+      const e = document.getElementById('acct-empty');
+      if (e) e.style.display = 'flex';
+    }
+    _acctPersist();
   });
 
-  // Wire all sections
+  list.appendChild(row);
+}
+
+const _acctTimers = {};
+function _acctAutoSave(row) {
+  const badge = row.querySelector('.acct-save-badge');
+  if (badge) { badge.textContent = 'saving...'; badge.className = 'acct-save-badge saving'; }
+  clearTimeout(_acctTimers[row.id]);
+  _acctTimers[row.id] = setTimeout(() => {
+    _acctPersist();
+    if (badge) {
+      badge.textContent = '✅'; badge.className = 'acct-save-badge saved';
+      setTimeout(() => { badge.textContent = ''; badge.className = 'acct-save-badge'; }, 2000);
+    }
+  }, 700);
+}
+
+function _acctPersist() {
+  const rows = [...document.querySelectorAll('#acct-list .acct-row')].map((r) => ({
+    name: (r.querySelector('.acct-name')?.value || '').trim(),
+    url:  (r.querySelector('.acct-url')?.value  || '').trim(),
+    user: (r.querySelector('.acct-cell-user .acct-input')?.value || '').trim(),
+  })).filter((r) => r.name || r.url || r.user);
+  settingsBridge.save('accounts', rows).catch(() => {});
+}
+
+// ── UI Tab: theme / color / font / slider wiring ─────────────────────────────
+function _wireUITab() {
+  // ── Template cards ──────────────────────────────────────────────────────
+  _drawer.querySelectorAll('.sd-template').forEach((card) => {
+    card.addEventListener('click', () => {
+      _drawer.querySelectorAll('.sd-template').forEach((c) => {
+        c.classList.remove('active');
+        c.querySelector('.sd-tpl-check').style.display = 'none';
+      });
+      card.classList.add('active');
+      card.querySelector('.sd-tpl-check').style.display = '';
+      const theme = card.dataset.theme;
+      document.body.classList.remove('light-mode','midnight-mode','ocean-mode');
+      if (theme !== 'dark') document.body.classList.add(`${theme}-mode`);
+      _saveUI();
+    });
+  });
+
+  // ── Color swatches ──────────────────────────────────────────────────────
+  _drawer.querySelectorAll('.sd-swatch').forEach((sw) => {
+    sw.addEventListener('click', () => {
+      const cssVar = sw.dataset.var;
+      if (!cssVar) return;
+      _drawer.querySelectorAll(`.sd-swatch[data-var="${cssVar}"]`).forEach((s) => s.classList.remove('active'));
+      sw.classList.add('active');
+      document.documentElement.style.setProperty(cssVar, sw.style.background);
+      _saveUI();
+    });
+  });
+
+  // ── Custom color pickers ────────────────────────────────────────────────
+  _drawer.querySelectorAll('.sd-color-custom').forEach((inp) => {
+    inp.addEventListener('input', () => {
+      if (inp.dataset.var) document.documentElement.style.setProperty(inp.dataset.var, inp.value);
+      _saveUI();
+    });
+  });
+
+  // ── Sliders ─────────────────────────────────────────────────────────────
+  const sliders = [
+    { id: 'sl-opacity', valId: 'sl-opacity-val', suffix: '%' },
+    { id: 'sl-blur',    valId: 'sl-blur-val',    suffix: 'px' },
+    { id: 'sl-speed',   valId: 'sl-speed-val',   suffix: 'ms', cssVar: '--sd-speed' },
+    { id: 'sl-radius',  valId: 'sl-radius-val',  suffix: 'px', cssVar: '--r' },
+  ];
+  sliders.forEach(({ id, valId, suffix, cssVar }) => {
+    const el = document.getElementById(id);
+    const vl = document.getElementById(valId);
+    if (!el || !vl) return;
+    el.addEventListener('input', () => {
+      vl.textContent = el.value + suffix;
+      if (cssVar) document.documentElement.style.setProperty(cssVar, el.value + suffix);
+      _saveUI();
+    });
+  });
+
+  // ── Font buttons ────────────────────────────────────────────────────────
+  _drawer.querySelectorAll('.sd-font-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      _drawer.querySelectorAll('.sd-font-btn').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      const fontMap = {
+        system: '-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+        serif:  'Georgia,serif',
+        mono:   '"SFMono-Regular",Consolas,"Liberation Mono",monospace',
+        inter:  '"Inter",sans-serif',
+      };
+      document.documentElement.style.setProperty('--font', fontMap[btn.dataset.font] || fontMap.system);
+      _saveUI();
+    });
+  });
+
+  // ── Compact toggle ──────────────────────────────────────────────────────
+  const compact = document.getElementById('toggle-compact');
+  if (compact) compact.addEventListener('change', _saveUI);
+}
+
+// ── Collect UI prefs and persist (debounced 400ms) ──────────────────────────
+let _saveUITimer = null;
+function _saveUI() {
+  clearTimeout(_saveUITimer);
+  _saveUITimer = setTimeout(() => {
+    // Theme: which body class is active
+    let theme = 'dark';
+    if (document.body.classList.contains('light-mode'))    theme = 'light';
+    if (document.body.classList.contains('midnight-mode')) theme = 'midnight';
+    if (document.body.classList.contains('ocean-mode'))    theme = 'ocean';
+
+    // Active swatch per CSS var (store the background color value)
+    const swatchVars = ['--acc', '--bg', '--panel', '--txt'];
+    const swatches = {};
+    swatchVars.forEach((v) => {
+      const active = _drawer.querySelector(`.sd-swatch.active[data-var="${v}"]`);
+      if (active) swatches[v] = active.style.background;
+    });
+
+    // Slider values
+    const sliderIds = ['sl-opacity', 'sl-blur', 'sl-speed', 'sl-radius'];
+    const sliders = {};
+    sliderIds.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) sliders[id] = el.value;
+    });
+
+    // Active font
+    const fontBtn = _drawer.querySelector('.sd-font-btn.active');
+    const font = fontBtn ? fontBtn.dataset.font : 'system';
+
+    // Compact toggle
+    const compact = document.getElementById('toggle-compact');
+    const compactRows = compact ? compact.checked : false;
+
+    settingsBridge.save('ui_prefs', { theme, swatches, sliders, font, compactRows })
+      .catch(() => {});
+  }, 400);
+}
+
+// ── Apply saved UI prefs to DOM + CSS vars ───────────────────────────────────
+function _applyUI(prefs) {
+  if (!prefs) return;
+
+  const fontMap = {
+    system: '-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+    serif:  'Georgia,serif',
+    mono:   '"SFMono-Regular",Consolas,"Liberation Mono",monospace',
+    inter:  '"Inter",sans-serif',
+  };
+
+  // Theme class on body
+  if (prefs.theme) {
+    document.body.classList.remove('light-mode','midnight-mode','ocean-mode');
+    if (prefs.theme !== 'dark') document.body.classList.add(`${prefs.theme}-mode`);
+    // Sync active card in drawer
+    _drawer.querySelectorAll('.sd-template').forEach((card) => {
+      const active = card.dataset.theme === prefs.theme;
+      card.classList.toggle('active', active);
+      card.querySelector('.sd-tpl-check').style.display = active ? '' : 'none';
+    });
+  }
+
+  // Color swatches + CSS vars
+  if (prefs.swatches) {
+    Object.entries(prefs.swatches).forEach(([cssVar, color]) => {
+      document.documentElement.style.setProperty(cssVar, color);
+      // Mark matching swatch active
+      _drawer.querySelectorAll(`.sd-swatch[data-var="${cssVar}"]`).forEach((sw) => {
+        sw.classList.toggle('active', sw.style.background === color);
+      });
+    });
+  }
+
+  // Sliders
+  if (prefs.sliders) {
+    const sliderMeta = [
+      { id: 'sl-opacity', valId: 'sl-opacity-val', suffix: '%' },
+      { id: 'sl-blur',    valId: 'sl-blur-val',    suffix: 'px' },
+      { id: 'sl-speed',   valId: 'sl-speed-val',   suffix: 'ms', cssVar: '--sd-speed' },
+      { id: 'sl-radius',  valId: 'sl-radius-val',  suffix: 'px', cssVar: '--r' },
+    ];
+    sliderMeta.forEach(({ id, valId, suffix, cssVar }) => {
+      const val = prefs.sliders[id];
+      if (val == null) return;
+      const el = document.getElementById(id);
+      const vl = document.getElementById(valId);
+      if (el) el.value = val;
+      if (vl) vl.textContent = val + suffix;
+      if (cssVar) document.documentElement.style.setProperty(cssVar, val + suffix);
+    });
+  }
+
+  // Font
+  if (prefs.font) {
+    _drawer.querySelectorAll('.sd-font-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.font === prefs.font);
+    });
+    document.documentElement.style.setProperty('--font', fontMap[prefs.font] || fontMap.system);
+  }
+
+  // Compact toggle
+  if (prefs.compactRows != null) {
+    const compact = document.getElementById('toggle-compact');
+    if (compact) compact.checked = prefs.compactRows;
+  }
+}
+
+// ── Populate fields on open ──────────────────────────────────────────────────
+function _populate() {
+  settingsBridge.getAll().then((all) => {
+    if (!all) return;
+
+    // UI prefs (theme, colors, sliders, font)
+    if (all.ui_prefs) _applyUI(all.ui_prefs);
+
+    if (all.domiciles) {
+      const el = document.getElementById('settings-domiciles');
+      if (el) el.value = Array.isArray(all.domiciles) ? all.domiciles.join(', ') : all.domiciles;
+    }
+    if (all.orcha) {
+      const o = all.orcha;
+      const mode = document.getElementById('orcha-mode');
+      const host = document.getElementById('orcha-host');
+      const port = document.getElementById('orcha-port');
+      if (mode && o.mode) mode.value = o.mode;
+      if (host && o.host) host.value = o.host;
+      if (port && o.port) port.value = o.port;
+    }
+    if (all.email) {
+      const e = all.email;
+      ['host','port','from','user'].forEach((f) => {
+        const el = document.getElementById(`email-${f}`);
+        if (el && e[f] != null) el.value = e[f];
+      });
+    }
+    if (all.asana) {
+      const a = all.asana;
+      if (a.workspace) { const el = document.getElementById('asana-workspace'); if (el) el.value = a.workspace; }
+      if (a.project)   { const el = document.getElementById('asana-project');   if (el) el.value = a.project;   }
+    }
+    if (all.notifications) {
+      const n = all.notifications;
+      const af = document.getElementById('notif-auth-fail');
+      const so = document.getElementById('notif-sync-ok');
+      const se = document.getElementById('notif-sync-err');
+      if (af && n.authFail != null) af.checked = n.authFail;
+      if (so && n.syncOk   != null) so.checked = n.syncOk;
+      if (se && n.syncErr  != null) se.checked = n.syncErr;
+    }
+  }).catch(() => {});
+}
+
+// ── Apply saved UI prefs on cold boot (before drawer ever opens) ─────────────
+export function applyBootPrefs() {
+  settingsBridge.getAll().then((all) => {
+    if (all && all.ui_prefs && _drawer) _applyUI(all.ui_prefs);
+  }).catch(() => {});
+}
+
+// ── Escape HTML attr values ──────────────────────────────────────────────────
+function _esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+}
+
+// ── Export: init ──────────────────────────────────────────────────────────────
+export function init() {
+  // Inject drawer HTML into body
+  const wrap = document.createElement('div');
+  wrap.id = 'settings-drawer-wrap';
+  wrap.innerHTML = _html();
+  document.body.appendChild(wrap);
+
+  _drawer  = document.getElementById('settings-drawer');
+  _overlay = document.getElementById('sd-overlay');
+
+  // Wire close
+  document.getElementById('sd-close-btn').addEventListener('click', _close);
+  _overlay.addEventListener('click', _close);
+
+  // Wire tabs
+  _wireTabSwitching();
+
+  // Wire UI tab controls
+  _wireUITab();
+
+  // Wire all integration sections
   _wireDomiciles();
   _wireAuth();
   _wireOrcha();
-  _wireCreds();        // S10
-  _wireVendorAuth();   // S25-5
-  _wireSlack();        // S10
-  _wireEmail();        // S10
-  _wireSP();           // S10
-  _wireAsana();        // S10
-  _wireNotifications();// S10
+  _wireCreds();
+  _wireVendorAuth();
+  _wireSlack();
+  _wireEmail();
+  _wireSP();
+  _wireAsana();
+  _wireNotifications();
+  _wireAccounts();
 
-  // S22: init collapse + populate on first load
-  _initCollapse();
-  _populate();
-
-  // Show/hide; re-populate on every open (S22)
+  // Listen for settings open request
   bus.on('ui:view-change', ({ to }) => {
-    _el.style.display = to === 'settings' ? 'flex' : 'none';
-    if (to === 'settings') _populate();
+    if (to === 'settings') _open();
   });
 }

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Fleet Operations</title>
-  <link rel="stylesheet" href="/css/fleet.css" />
+  <link rel="stylesheet" href="./css/fleet.css" />
   <style>
     #app-loading {
       position: fixed; inset: 0;
@@ -26,6 +26,31 @@
     }
     @keyframes _spin { to { transform: rotate(360deg); } }
   </style>
+
+  <!-- TEMP DEBUG: surface renderer errors to visible overlay -->
+  <script>
+    window.__bootErrors = [];
+    window.onerror = function(msg, src, line, col, err) {
+      window.__bootErrors.push({ msg, src, line, col, stack: err && err.stack });
+      _showError('[onerror] ' + msg + '\n' + (src||'') + ':' + line);
+    };
+    window.onunhandledrejection = function(e) {
+      const msg = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+      const stack = e.reason && e.reason.stack ? e.reason.stack : '';
+      window.__bootErrors.push({ msg, stack });
+      _showError('[unhandledrejection] ' + msg + '\n' + stack.split('\n').slice(0,3).join('\n'));
+    };
+    function _showError(text) {
+      let el = document.getElementById('__boot-err');
+      if (!el) {
+        el = document.createElement('pre');
+        el.id = '__boot-err';
+        el.style.cssText = 'position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow:auto;background:#1a0000;color:#ff6b6b;font-size:11px;padding:10px;z-index:99999;white-space:pre-wrap;border-top:2px solid #ff0000';
+        document.body.appendChild(el);
+      }
+      el.textContent += text + '\n---\n';
+    }
+  </script>
 </head>
 <body>
   <div id="app-loading">
@@ -33,6 +58,6 @@
     <span class="lbl">Fleet Operations</span>
   </div>
   <div id="app"></div>
-  <script type="module" src="/js/app.js"></script>
+  <script type="module" src="./js/app.js"></script>
 </body>
 </html>

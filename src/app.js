@@ -219,6 +219,7 @@ app.whenReady().then(async () => {
   log.info('Tray created');
 
   // ── 5h. Scheduler — SP push + email auto-send + missed-slot catch-up ───────
+  _ctxRef = _ctx;  // expose ctx to module-scope scheduler functions
   _startSchedulers();
 
   // ── 5i. Sleep resume → catch-up check ─────────────────────────────────────
@@ -239,6 +240,7 @@ app.whenReady().then(async () => {
 // Extracted to module scope so _stopSchedulers() can reach the timers.
 // =============================================================================
 
+let _ctxRef             = null;  // set before _startSchedulers(); bridges closure to module scope
 let _spScheduleTimer    = null;
 let _emailScheduleTimer = null;
 let _lastSPSlot         = '';
@@ -275,23 +277,23 @@ function _scheduleAutoSPPush() {
     _lastSPSlot = dateKey;
 
     log.info('Auto SP Push triggered: slot=' + slot.label);
-    _ctx.pushStatus('\uD83D\uDCE8 Auto SP Push: syncing for ' + slot.label + '...');
+    _ctxRef.pushStatus('\uD83D\uDCE8 Auto SP Push: syncing for ' + slot.label + '...');
 
-    _ctx.runFullSync().then(() => {
-      const rows = _ctx.lastData && _ctx.lastData.rows;
+    _ctxRef.runFullSync().then(() => {
+      const rows = _ctxRef.lastData && _ctxRef.lastData.rows;
       if (!rows) return;
       const { pushToSharePoint } = require('./scrapers/sharepoint_push');
-      const win = _ctx.getMainWindow();
+      const win = _ctxRef.getMainWindow();
       pushToSharePoint(rows, (msg, type) => {
         log.info('[SP Auto] ' + (type || 'info') + ' | ' + msg);
         if (win && !win.isDestroyed())
           win.webContents.send('sp:progress', { message: msg, type });
       }).then(result => {
         log.info('Auto SP Push complete (' + slot.label + '): ' + (result.ok ? 'SUCCESS' : result.error));
-        _ctx.pushStatus('\u2705 SP Push complete (' + slot.label + ')');
+        _ctxRef.pushStatus('\u2705 SP Push complete (' + slot.label + ')');
       }).catch(err => {
         log.error('Auto SP Push error:', err.message);
-        _ctx.pushStatus('\u274C SP Push failed: ' + err.message);
+        _ctxRef.pushStatus('\u274C SP Push failed: ' + err.message);
       });
     }).catch(err => {
       log.error('Auto SP Push sync failed:', err.message);
@@ -314,18 +316,18 @@ function _scheduleAutoEmail() {
     _lastEmailSlot = dateKey;
 
     log.info('Auto-email triggered: slot=' + slot.label);
-    _ctx.pushStatus('\uD83D\uDCE7 Auto-email: syncing for ' + slot.label + ' report...');
+    _ctxRef.pushStatus('\uD83D\uDCE7 Auto-email: syncing for ' + slot.label + ' report...');
 
-    _ctx.runFullSync().then(() => {
+    _ctxRef.runFullSync().then(() => {
       setTimeout(() => {
-        _ctx.send('fleet:auto-email', {
+        _ctxRef.send('fleet:auto-email', {
           slot: slot.label,
           triggeredAt: new Date().toISOString(),
         });
       }, 2000);
     }).catch(err => {
       log.warn('Auto-email sync failed:', err.message);
-      _ctx.send('fleet:auto-email', {
+      _ctxRef.send('fleet:auto-email', {
         slot: slot.label,
         triggeredAt: new Date().toISOString(),
         syncError: err.message,
@@ -350,13 +352,13 @@ function _catchUpMissedSlots() {
     if (_lastEmailSlot === dateKey) return;
     _lastEmailSlot = dateKey;
     log.info('Catch-up: missed email slot ' + slot.label + ' (' + missedBy + 'min ago)');
-    _ctx.pushStatus('\u23F0 Catch-up: sending ' + slot.label + ' email (missed ' + missedBy + 'min ago)...');
+    _ctxRef.pushStatus('\u23F0 Catch-up: sending ' + slot.label + ' email (missed ' + missedBy + 'min ago)...');
     setTimeout(() => {
       try {
-        const rows = _ctx.lastData && _ctx.lastData.rows;
+        const rows = _ctxRef.lastData && _ctxRef.lastData.rows;
         if (rows) {
           const { composeAndSendEmail } = require('./scrapers/email_sender');
-          composeAndSendEmail(rows, _ctx.getMainWindow());
+          composeAndSendEmail(rows, _ctxRef.getMainWindow());
         }
       } catch (e) { log.error('Catch-up email failed:', e.message); }
     }, 5000);
@@ -370,10 +372,10 @@ function _catchUpMissedSlots() {
     if (_lastSPSlot === dateKey) return;
     _lastSPSlot = dateKey;
     log.info('Catch-up: missed SP slot ' + slot.label + ' (' + missedBy + 'min ago)');
-    _ctx.pushStatus('\u23F0 Catch-up: SP push for ' + slot.label + ' (missed ' + missedBy + 'min ago)...');
+    _ctxRef.pushStatus('\u23F0 Catch-up: SP push for ' + slot.label + ' (missed ' + missedBy + 'min ago)...');
     setTimeout(() => {
       try {
-        const rows = _ctx.lastData && _ctx.lastData.rows;
+        const rows = _ctxRef.lastData && _ctxRef.lastData.rows;
         if (rows) {
           const { pushToSharePoint } = require('./scrapers/sharepoint_push');
           pushToSharePoint(rows, (msg) => log.info('[SP Catch-up] ' + msg));

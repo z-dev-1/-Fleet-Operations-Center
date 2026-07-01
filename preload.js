@@ -102,10 +102,12 @@ contextBridge.exposeInMainWorld('slack', {
 
 // ── SharePoint ────────────────────────────────────────────────────────────────
 contextBridge.exposeInMainWorld('sp', {
-  push:       (units)  => ipcRenderer.invoke('sp:push', units),
-  onProgress: (cb)     => on('sp:progress', cb),
-  getConfig:  ()       => ipcRenderer.invoke('sp:get-config'),
-  saveConfig: (data)   => ipcRenderer.invoke('sp:save-config', data),
+  push:           (units)   => ipcRenderer.invoke('sp:push', units),
+  pushDomicile:   (payload) => ipcRenderer.invoke('sp:push-domicile', payload),
+  onProgress:     (cb)      => on('sp:progress', cb),
+  getConfig:      ()        => ipcRenderer.invoke('sp:get-config'),
+  saveConfig:     (data)    => ipcRenderer.invoke('sp:save-config', data),
+  getLists:       (siteUrl) => ipcRenderer.invoke('sp:get-lists', siteUrl),
 });
 
 // ── Auth ─────────────────────────────────────────────────────────────────────

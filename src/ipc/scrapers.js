@@ -261,6 +261,32 @@ function registerScrapersIPC(ctx) {
     return VENDOR_PORTAL_URLS;
   });
 
+
+  // ── wo:scrape ─────────────────────────────────────────────────────────
+  // Scrapes AAP Work Order detail for a single unit via aap_wo_scraper.js
+  // Payload: { equipmentId, serviceUrl } — serviceUrl optional (resolved internally)
+  let _woLock = false;
+  handle('wo:scrape', async (_e, payload) => {
+    if (_woLock) {
+      throw new ScraperError('wo:scrape operation already in progress', 'wo:scrape');
+    }
+    requireObject(payload, 'payload');
+    requireString(payload.equipmentId, 'payload.equipmentId');
+    _woLock = true;
+    try {
+      const { scrapeWorkOrder } = require('../../src/scrapers/aap_wo_scraper');
+      const logs = [];
+      const log  = (msg) => { logs.push(msg); logger.info(msg); if (send) send('wo:progress', msg); };
+      const woOpts = {};
+      if (payload.serviceUrl) woOpts.serviceUrl = payload.serviceUrl;
+      const result = await scrapeWorkOrder(payload.equipmentId, woOpts);
+      return { ok: true, result, logs };
+    } catch(e) {
+      throw new ScraperError(e.message, 'wo:scrape', { equipmentId: payload.equipmentId });
+    } finally {
+      _woLock = false;
+    }
+  });
   logger.info('Scrapers IPC handlers registered');
 }
 

@@ -1,0 +1,348 @@
+const fs = require('fs');
+const path = require('path');
+const outPath = path.join(__dirname, 'renderer/src/js/views/unit-detail.js');
+// ── helpers ───────────────────────────────────────────────────────────────────
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function riskColor(n){return n>=70?'red':n>=40?'org':'grn';}
+function downDays(unit){const ts=unit.created;if(!ts)return null;return Math.floor((Date.now()-new Date(ts).getTime())/86400000);}
+function relTime(ts){if(!ts)return'';const d=Date.now()-new Date(ts).getTime();if(d<3600000)return Math.floor(d/60000)+'m ago';if(d<86400000)return Math.floor(d/3600000)+'h ago';return Math.floor(d/86400000)+'d ago';}
+function fmtDate(ts){if(!ts)return'';try{return new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});}catch(e){return ts;}}
+function parseConvo(raw){if(!raw||typeof raw!=='string')return[];return raw.split('\n').filter(function(l){return l.trim();}).reduce(function(acc,line){var m=line.match(/^(\d{2}\/\d{2}(?:\/\d{2,4})?)?\s*[-\u2013]?\s*(.+)$/);if(m&&m[2]&&m[2].trim().length>2){var isVendor=/amerit|freightliner|volvo|peterbilt|kenworth|ta truck|ta |tct|dealer|shop|penske|ryder/i.test(m[2]);acc.push({date:m[1]||'',text:m[2].trim(),side:isVendor?'vendor':'carrier'});}return acc;},[]);}
+function parseDuration(raw){if(!raw)return null;var m=String(raw).match(/(\d+(?:\.\d+)?)/);return m?parseFloat(m[1]):null;}
+function workDurationBar(unit){
+  var created=unit.created;
+  var durDays=parseDuration(unit.workDuration);
+  if(!created||!durDays)return'';
+  var start=new Date(created).getTime();
+  var end=start+(durDays*86400000);
+  var now=Date.now();
+  var pct=Math.min(Math.round(((now-start)/(end-start))*100),100);
+  var overdue=now>end;
+  var daysElapsed=Math.floor((now-start)/86400000);
+  var daysRemain=overdue?0:Math.ceil((end-now)/86400000);
+  var cls=overdue?'overdue':pct>75?'warn':'ok';
+  var label=overdue?('<span style="color:var(--red);font-weight:600">\u26a0 Overdue by '+Math.ceil((now-end)/86400000)+'d</span>'):(daysRemain+'d left of '+durDays+'d');
+  return '<div class="dp-etc-wrap">'+
+    '<div class="dp-etc-title"><span>Work Duration</span><span class="dp-etc-remain">'+label+'</span></div>'+
+    '<div class="dp-etc-track">'+
+      '<div class="dp-etc-fill dp-etc-fill--'+cls+'" style="width:'+pct+'%"></div>'+
+      '<div class="dp-etc-marker" style="left:'+Math.min(pct,97)+'%"></div>'+
+    '</div>'+
+    '<div class="dp-etc-labels">'+
+      '<span>Started '+fmtDate(created)+'</span>'+
+      '<span>Day '+daysElapsed+' / '+durDays+'</span>'+
+      '<span>ETC '+fmtDate(end)+'</span>'+
+    '</div>'+
+  '</div>';
+}
+
+// ── header ────────────────────────────────────────────────────────────────────
+function renderHeader(unit){
+  var isUnavail=(unit.lifecycleState||'').toLowerCase().includes('unavail');
+  var risk=parseInt(unit.riskScore,10)||0;
+  var hdrCls=isUnavail?'unavailable':risk>=60?'risk':'active';
+  var dd=downDays(unit);
+  var timerCls=dd>14?'dp-vital--red':dd>7?'dp-vital--org':'dp-vital--grn';
+  var aapUrl=esc(unit.assetUrl||'');
+  var relayUrl=esc(unit.serviceUrl||unit.savedOffsiteUrl||'');
+  var offsiteUrl=esc(unit.asistSrUrl||unit.offsiteShopEventUrl||'');
+
+  // meta row: make/model/year · type · fuel · domicile · operator
+  var make=[unit.manufacturer||unit.make,unit.model,unit.modelYear].filter(Boolean).join(' ');
+  var metaParts=[make,unit.assetType||unit.bodyType,unit.fuelType,unit.domicileSite||unit.domicile,unit.operator,unit.program].filter(Boolean).map(esc);
+  var meta=metaParts.join(' \u00b7 ');
+
+  var vitals=[
+    dd!==null?'<span class="dp-vital '+timerCls+'"><span class="dp-vital__icon">\u23f1</span>'+dd+'d down</span>':'',
+    risk?'<span class="dp-vital dp-vital--'+riskColor(risk)+'"><span class="dp-vital__icon">\u26a1</span>Risk '+risk+'</span>':'',
+    unit.openUnplanned>0?'<span class="dp-vital dp-vital--org"><span class="dp-vital__icon">\u26a0</span>'+unit.openUnplanned+' WR</span>':'',
+    unit.urgent==='Yes'||unit.urgent===true?'<span class="dp-vital dp-vital--red"><span class="dp-vital__icon">\ud83d\udd34</span>URGENT</span>':'',
+    unit.vendor?'<span class="dp-vital dp-vital--acc"><span class="dp-vital__icon">\ud83c\udfe2</span>'+esc(unit.vendor)+'</span>':'',
+    unit.workDuration?'<span class="dp-vital dp-vital--muted"><span class="dp-vital__icon">\u23f3</span>'+esc(unit.workDuration)+'</span>':'',
+  ].filter(Boolean).join('');
+
+  var launchers=[
+    aapUrl?'<button class="dp-launcher" title="Open AAP" data-aap-url="'+aapUrl+'">\ud83d\udd17 AAP</button>':'',
+    relayUrl?'<button class="dp-launcher" title="Open Relay WR" data-ext-url="'+relayUrl+'">\ud83d\udcc4 Relay</button>':'',
+    offsiteUrl?'<button class="dp-launcher" title="Open Offsite Portal" data-ext-url="'+offsiteUrl+'">\ud83c\udfe6 Portal</button>':'',
+  ].filter(Boolean).join('');
+
+  return '<div class="dp-header dp-header--'+hdrCls+'">'+
+    '<div class="dp-header__scan"></div>'+
+    '<div class="dp-header__top">'+
+      '<span class="dp-header__id">'+esc(unit.equipmentId)+'</span>'+
+      (unit.vin?'<span class="dp-header__vin">'+esc(unit.vin)+'</span>':'')+
+      '<span class="dp-header__state-badge dp-header__state-badge--'+(isUnavail?'unavailable':'active')+'">'+esc(unit.lifecycleState||'Active')+'</span>'+
+      '<div class="dp-header__launchers">'+launchers+'</div>'+
+      '<button id="dp-close" class="dp-header__close">\u00d7</button>'+
+    '</div>'+
+    (meta?'<div class="dp-header__meta">'+meta+'</div>':'')+
+    (unit.lifecycleReason?'<div class="dp-header__reason">\u2192 '+esc(unit.lifecycleReason)+'</div>':'')+
+    '<div class="dp-header__vitals">'+vitals+'</div>'+
+  '</div>';
+}
+
+// ── tabs ──────────────────────────────────────────────────────────────────────
+function renderTabs(unit){
+  var woCount=(unit.openUnplanned||0)+(unit.openPlanned||0);
+  var insCount=(unit.insightsList||[]).length;
+  function badge(n,red){return n?'<span class="dp-tab__badge'+(red?' dp-tab__badge--red':'')+'">'+n+'</span>':'';}
+  var tabs=[
+    {id:'repair',label:'Repair',b:badge(woCount,true)},
+    {id:'intel', label:'Intel', b:badge(insCount,false)},
+    {id:'actions',label:'Actions',b:''},
+    {id:'history',label:'History',b:''},
+  ];
+  var isUnavail=(unit.lifecycleState||'').toLowerCase().includes('unavail');
+  var risk=parseInt(unit.riskScore,10)||0;
+  var def=isUnavail||woCount>0?'repair':risk>=60?'intel':'repair';
+  return '<div class="dp-tabs">'+tabs.map(function(t){return'<button class="dp-tab'+(t.id===def?' active':'')+'" data-tab="'+t.id+'">'+t.label+t.b+'</button>';}).join('')+'</div>';
+}
+
+// ── repair pane ───────────────────────────────────────────────────────────────
+function renderRepairPane(unit){
+  // ── WR summary card ────────────────────────────────────────────────────────
+  var hasRelay=unit.relaySynced&&(unit.vendor||unit.issueDetails||unit.workRequestId);
+  var woCard='';
+  if(hasRelay){
+    var statusRaw=unit.serviceState||unit.status||'';
+    var statusKey=statusRaw.toLowerCase().includes('clos')?'closed':statusRaw.toLowerCase().includes('sour')?'sourcing':'open';
+    var wrAge=unit.created?Math.floor((Date.now()-new Date(unit.created).getTime())/86400000):null;
+    var stale=wrAge>3?'<span class="dp-wo-stale">\u26a0 '+wrAge+'d</span>':'';
+
+    var fields=[
+      unit.workRequestId?['WR ID',unit.workRequestId]:null,
+      unit.vendorWorkOrderId?['Vendor WO',unit.vendorWorkOrderId]:null,
+      unit.salesforceCase?['SF Case',unit.salesforceCase]:null,
+      unit.createdBy?['Created By',unit.createdBy]:null,
+      unit.needBy?['Need By',unit.needBy]:null,
+      unit.serviceCategory?['Category',unit.serviceCategory]:null,
+      unit.integratedMethod?['Method',unit.integratedMethod]:null,
+      unit.program?['Program',unit.program]:null,
+      unit.totalCost?['Total Cost',unit.totalCost]:null,
+    ].filter(Boolean);
+
+    var cause=unit.cause?'<div class="dp-wo-cause"><span class="dp-wo-cause__label">Reason:</span> '+esc(unit.cause)+'</div>':'';
+    var correction=unit.correction?'<div class="dp-wo-cause"><span class="dp-wo-cause__label">Work Done:</span> '+esc(unit.correction)+'</div>':'';
+
+    woCard='<div class="dp-wo-card">'+
+      '<div class="dp-wo-card__header">'+
+        '<span class="dp-wo-card__vendor">'+esc(unit.vendor||'Unknown Vendor')+'</span>'+
+        (unit.subVendor&&unit.subVendor!==unit.vendor?'<span class="dp-wo-card__subvendor">'+esc(unit.subVendor)+'</span>':'')+
+        '<span class="dp-wo-card__status-pill dp-wo-card__status-pill--'+statusKey+'">'+esc(statusRaw||'Open')+'</span>'+
+        stale+
+      '</div>'+
+      (unit.issueDetails?'<div class="dp-wo-card__desc">'+esc(unit.issueDetails)+'</div>':'')+
+      cause+correction+
+      (fields.length?'<div class="dp-wo-card__fields">'+fields.map(function(f){return'<span class="dp-wo-field"><span class="dp-wo-field__k">'+esc(f[0])+'</span><span class="dp-wo-field__v">'+esc(f[1])+'</span></span>';}).join('')+'</div>':'')+
+      (unit.created||unit.completed?'<div class="dp-wo-card__dates">'+
+        (unit.created?'<span>Opened '+fmtDate(unit.created)+'</span>':'')+
+        (unit.completed?'<span>Closed '+fmtDate(unit.completed)+'</span>':'')+
+      '</div>':'')+
+    '</div>';
+  } else {
+    woCard='<div class="dp-empty-state"><span class="dp-empty-state__icon">\ud83d\udcc2</span>No Relay WR data</div>';
+  }
+
+  // ── work duration bar ──────────────────────────────────────────────────────
+  var durBar=workDurationBar(unit);
+
+  // ── conversation timeline ──────────────────────────────────────────────────
+  var msgs=parseConvo(unit.fullConversation||'');
+  _allConvoMsgs=msgs;
+  var convoHtml='';
+  if(msgs.length){
+    var visible=msgs.slice(-8);
+    var hidden=msgs.length-visible.length;
+    convoHtml='<div class="dp-section-title">Conversation <span class="dp-section-count">'+msgs.length+'</span></div>'+
+      '<div class="dp-convo" id="dp-convo">'+
+        (hidden>0?'<button class="dp-convo-show-more" id="dp-convo-more">\u25b2 Show '+hidden+' earlier messages</button>':'')+
+        visible.map(function(m){
+          return '<div class="dp-convo-msg dp-convo-msg--'+m.side+'">'+
+            '<div class="dp-convo-av dp-convo-av--'+m.side+'">'+(m.side==='vendor'?'V':'C')+'</div>'+
+            '<div>'+
+              '<div class="dp-convo-bubble">'+esc(m.text)+'</div>'+
+              (m.date?'<div class="dp-convo-meta">'+esc(m.date)+'</div>':'')+
+            '</div>'+
+          '</div>';
+        }).join('')+
+      '</div>';
+  }
+
+  // ── offsite event card ─────────────────────────────────────────────────────
+  var offsiteUrl=unit.asistSrUrl||unit.savedOffsiteUrl||unit.offsiteShopEventUrl||'';
+  var offsiteLabel=unit.asistLabel||unit.savedOffsiteEvent||unit.offsiteShopEvent||offsiteUrl;
+  var src=unit.asistSource||'';
+  var scrapedAt=unit.asistScrapedAt||'';
+  var staleOffsite=scrapedAt&&(Date.now()-new Date(scrapedAt).getTime())>86400000;
+  var offsiteHtml=offsiteUrl?
+    '<div class="dp-section-title">Offsite Event</div>'+
+    '<div class="dp-offsite-card">'+
+      '<div class="dp-offsite-card__header">'+
+        (src?'<span class="dp-offsite-card__src-badge dp-offsite-card__src-badge--'+esc(src)+'">'+esc(src)+'</span>':'')+
+        '<a class="dp-offsite-card__link" href="#" data-ext-url="'+esc(offsiteUrl)+'">'+esc(offsiteLabel||offsiteUrl)+' \u2197</a>'+
+        (staleOffsite?'<span class="dp-offsite-card__stale">\u26a0 stale</span>':'')+
+      '</div>'+
+      (unit.dealerName?'<div class="dp-offsite-card__dealer">'+esc(unit.dealerName)+'</div>':'')+
+      (scrapedAt?'<div class="dp-offsite-card__ts">Enriched '+fmtDate(scrapedAt)+'</div>':'')+
+    '</div>':'';
+
+  return '<div class="dp-pane active" id="dp-pane-repair">'+
+    '<div class="dp-section-title">Work Request</div>'+woCard+durBar+convoHtml+offsiteHtml+
+  '</div>';
+}
+
+// ── intel pane ────────────────────────────────────────────────────────────────
+function renderIntelPane(unit){
+  var risk=parseInt(unit.riskScore,10)||0;
+  var rCls=risk>=70?'high':risk>=40?'medium':'low';
+
+  // risk dial SVG
+  var dialHtml='';
+  if(risk){
+    var C=(2*Math.PI*28).toFixed(1);
+    var offset=(C-(risk/100)*parseFloat(C)).toFixed(1);
+    var sc=risk>=70?'var(--red)':risk>=40?'var(--ylw)':'var(--grn)';
+    dialHtml='<div class="dp-risk-wrap">'+
+      '<div class="dp-risk-dial">'+
+        '<svg viewBox="0 0 72 72">'+
+          '<circle cx="36" cy="36" r="28" fill="none" stroke="var(--el)" stroke-width="6"/>'+
+          '<circle cx="36" cy="36" r="28" fill="none" stroke="'+sc+'" stroke-width="6" stroke-dasharray="'+C+'" stroke-dashoffset="'+offset+'" stroke-linecap="round" transform="rotate(-90 36 36)"/>'+
+        '</svg>'+
+        '<div class="dp-risk-dial__num dp-risk-dial__num--'+rCls+'">'+risk+'</div>'+
+      '</div>'+
+      '<div class="dp-risk-info">'+
+        '<div class="dp-risk-label">Uptake Risk Score</div>'+
+        '<div class="dp-risk-sub">'+(risk>=70?'High — maintenance recommended':risk>=40?'Moderate — monitor closely':'Low risk')+'</div>'+
+        (unit.riskLabel?'<div class="dp-risk-sub" style="margin-top:2px">'+esc(unit.riskLabel)+'</div>':'')+
+        (unit.lastDataDate?'<div class="dp-risk-sub" style="color:var(--mut);margin-top:4px">Data: '+fmtDate(unit.lastDataDate)+'</div>':'')+
+      '</div>'+
+    '</div>';
+  }
+
+  // subsystems
+  var subs=unit.subsystems||[];
+  var subsHtml=subs.length?
+    '<div class="dp-section-title">Subsystems</div>'+
+    subs.map(function(s){
+      var v=parseInt(s.score||s.value||s.riskScore,10)||0;
+      var c=v>=70?'var(--red)':v>=40?'var(--ylw)':'var(--grn)';
+      return '<div class="dp-subsystem-row">'+
+        '<span class="dp-subsystem-name">'+esc(s.name||s.system||s.subsystem||'')+'</span>'+
+        '<div class="dp-subsystem-bar"><div class="dp-subsystem-fill" style="width:'+v+'%;background:'+c+'"></div></div>'+
+        '<span class="dp-subsystem-val" style="color:'+c+'">'+v+'</span>'+
+      '</div>';
+    }).join(''):'' ;
+
+  // insights
+  var insights=unit.insightsList||[];
+  var insHtml=insights.length?
+    '<div class="dp-section-title">Insights <span class="dp-section-count">'+insights.length+'</span></div>'+
+    insights.map(function(ins){
+      var subsystem=ins.subsystem||'';
+      var type=ins.type||ins.insightType||'';
+      var status=ins.status||'';
+      var since=ins.firstSeen||ins.firstDetected||'';
+      var last=ins.lastSeen||ins.lastDetected||'';
+      var mf=ins.maintenanceFactor||'';
+      return '<div class="dp-insight-card">'+
+        '<div class="dp-insight-card__header">'+
+          (subsystem?'<span class="dp-insight-card__type">'+esc(subsystem)+'</span>':'')+
+          (type?'<span class="dp-insight-card__sub">'+esc(type)+'</span>':'')+
+          (status?'<span class="dp-insight-card__status dp-insight-card__status--'+esc(status.toLowerCase())+'">'+esc(status)+'</span>':'')+
+          (ins.url?'<a class="dp-offsite-card__link" href="#" data-ext-url="'+esc(ins.url)+'" style="margin-left:auto">\u2197</a>':'')+
+        '</div>'+
+        (ins.title?'<div class="dp-insight-card__title">'+esc(ins.title)+'</div>':'')+
+        (ins.summary?'<div class="dp-insight-card__summary">'+esc(ins.summary)+'</div>':'')+
+        (ins.guidance?'<div class="dp-insight-card__action">\u27a1 '+esc(ins.guidance)+'</div>':'')+
+        (ins.recommended?'<div class="dp-insight-card__action">\ud83d\udd27 '+esc(ins.recommended)+'</div>':'')+
+        ((since||last||mf)?'<div class="dp-insight-card__meta">'+
+          (since?'<span>First: '+esc(since)+'</span>':'')+
+          (last?'<span>Last: '+esc(last)+'</span>':'')+
+          (mf?'<span>Factor: '+esc(mf)+'</span>':'')+
+        '</div>':'')+
+      '</div>';
+    }).join(''):
+    '<div class="dp-empty-state"><span class="dp-empty-state__icon">\u26a1</span>No Uptake insights</div>';
+
+  // screenshot
+  var shot=(unit.screenshots||[])[0];
+  var shotHtml=shot?
+    '<div class="dp-section-title">Uptake Screenshot</div>'+
+    '<div class="dp-screenshot-wrap"><img src="'+esc(shot)+'" alt="Uptake screenshot"><div class="dp-screenshot-overlay"><span class="dp-screenshot-label">Uptake Insights</span></div></div>':'';
+
+  // ask Orcha
+  var askHtml='<div class="dp-section-title">Ask Orcha</div>'+
+    '<div class="dp-ask-chips">'+
+      '<button class="dp-ask-chip" data-q="Is the ETC realistic for this unit?">ETC realistic?</button>'+
+      '<button class="dp-ask-chip" data-q="Draft a vendor follow-up message">Draft follow-up</button>'+
+      '<button class="dp-ask-chip" data-q="Should I escalate this unit?">Escalate?</button>'+
+      '<button class="dp-ask-chip" data-q="Summarize current repair status">Summarize</button>'+
+      '<button class="dp-ask-chip" data-q="What parts are likely needed?">Parts needed?</button>'+
+    '</div>'+
+    '<div class="dp-ask-row"><input id="dp-ask-input" class="dp-ask-input" type="text" placeholder="Ask about this unit..."/><button id="dp-ask-btn" class="detail-panel__btn">Ask</button></div>'+
+    '<div id="dp-ai-result" style="display:none" class="dp-ai-result-box"></div>';
+
+  return '<div class="dp-pane" id="dp-pane-intel">'+dialHtml+subsHtml+insHtml+shotHtml+askHtml+'</div>';
+}
+
+// ── actions pane ──────────────────────────────────────────────────────────────
+function renderActionsPane(unit){
+  var isUnavail=(unit.lifecycleState||'').toLowerCase().includes('unavail');
+  return '<div class="dp-pane" id="dp-pane-actions">'+
+    '<div class="dp-section-title">Quick Actions</div>'+
+    '<div class="dp-action-grid">'+
+      '<button class="dp-action-btn dp-action-btn--primary" id="dp-act-create-wr"><span class="dp-action-btn__icon">\u2795</span>Create WR<span class="dp-action-btn__sub">AAP work request</span></button>'+
+      '<button class="dp-action-btn" id="dp-act-dealer-wo"><span class="dp-action-btn__icon">\ud83c\udfe6</span>Dealer WO<span class="dp-action-btn__sub">PACCAR / Volvo / DTNA</span></button>'+
+      '<button class="dp-action-btn" id="dp-act-aap"><span class="dp-action-btn__icon">\ud83d\udd17</span>Open AAP<span class="dp-action-btn__sub">Asset page</span></button>'+
+      '<button class="dp-action-btn" id="dp-act-lc"><span class="dp-action-btn__icon">\ud83d\udd04</span>Lifecycle<span class="dp-action-btn__sub">'+esc(unit.lifecycleState||'')+'</span></button>'+
+    '</div>'+
+    '<div id="dp-lc-form" class="dp-lc-form" style="display:none">'+
+      '<div class="dp-lc-row"><select id="dp-lc-state" class="detail-panel__select"><option value="Available">Available</option><option value="Unavailable">Unavailable</option></select>'+
+      '<input id="dp-lc-reason" class="detail-panel__input" type="text" placeholder="Reason..."/></div>'+
+      '<div class="dp-lc-row"><button id="dp-lc-confirm" class="detail-panel__btn">Confirm</button><button id="dp-lc-cancel" class="detail-panel__btn detail-panel__btn--secondary">Cancel</button></div>'+
+    '</div>'+
+    '<div class="dp-section-title" style="margin-top:10px">Dealer Work Order</div>'+
+    '<div id="dp-vendor-section" class="dp-vendor-section"><p class="dp-empty">Loading eligibility\u2026</p></div>'+
+    '<div id="dp-vnd-history-strip" class="dp-vnd-history-strip"></div>'+
+  '</div>';
+}
+
+// ── history pane ──────────────────────────────────────────────────────────────
+function renderHistoryPane(unit){
+  var sources=[
+    {label:'AAP',      ts:unit.lastDataDate,   icon:'\ud83d\udd17'},
+    {label:'Relay',    ts:unit.relaySynced?new Date().toISOString():null, icon:'\ud83d\udcc4'},
+    {label:'Uptake',   ts:unit.uptakeSynced?unit.lastDataDate:null,       icon:'\u26a1'},
+    {label:'ASIST',    ts:unit.asistScrapedAt,  icon:'\ud83c\udfe6'},
+    {label:'Notes',    ts:unit.notesUpdatedAt,  icon:'\ud83d\udcdd'},
+  ];
+  var syncRows=sources.map(function(s){
+    var age=s.ts?Date.now()-new Date(s.ts).getTime():null;
+    var cls=age===null?'none':age>86400000?'old':'ok';
+    return '<div class="dp-sync-row">'+
+      '<div class="dp-sync-dot dp-sync-dot--'+cls+'"></div>'+
+      '<span class="dp-sync-icon">'+s.icon+'</span>'+
+      '<span class="dp-sync-source">'+s.label+'</span>'+
+      '<span class="dp-sync-time">'+(s.ts?relTime(s.ts):'Never')+'</span>'+
+    '</div>';
+  }).join('');
+
+  // unit timeline summary
+  var timeline=[
+    unit.created?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--open"></span><span class="dp-tl-label">WR Opened</span><span class="dp-tl-date">'+fmtDate(unit.created)+'</span></div>':'',
+    unit.workDuration?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--etc"></span><span class="dp-tl-label">Work Duration</span><span class="dp-tl-date">'+esc(unit.workDuration)+'</span></div>':'',
+    unit.needBy?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--needby"></span><span class="dp-tl-label">Need By</span><span class="dp-tl-date">'+esc(unit.needBy)+'</span></div>':'',
+    unit.completed?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--closed"></span><span class="dp-tl-label">Completed</span><span class="dp-tl-date">'+fmtDate(unit.completed)+'</span></div>':'',
+    unit.notesUpdatedAt?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--note"></span><span class="dp-tl-label">Notes Updated</span><span class="dp-tl-date">'+relTime(unit.notesUpdatedAt)+'</span></div>':'',
+  ].filter(Boolean).join('');
+
+  return '<div class="dp-pane" id="dp-pane-history">'+
+    '<div class="dp-section-title">Data Sync</div>'+
+    '<div class="dp-sync-panel">'+syncRows+'</div>'+
+    (timeline?'<div class="dp-section-title">Timeline</div><div class="dp-timeline">'+timeline+'</div>':'')+
+    '<div class="dp-section-title">Notes</div>'+
+    '<textarea id="dp-notes" class="dp-notes-area" placeholder="Add notes...">'+esc(unit.savedNotes||'')+'</textarea>'+
+    '<div class="dp-notes-footer"><button id="dp-save-notes" class="detail-panel__btn">Save</button><span id="dp-notes-saved" class="dp-notes-saved">Saved \u2713</span></div>'+
+  '</div>';
+}
