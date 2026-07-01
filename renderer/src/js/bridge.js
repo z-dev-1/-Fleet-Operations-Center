@@ -177,6 +177,8 @@ export const email = {
   compose:      (payload) => window.email.compose(payload),
   saveOpEmails: (data)    => window.email.saveOpEmails(data),
   loadOpEmails: ()        => window.email.loadOpEmails(),
+  getTestMode:  ()        => window.email.getTestMode(),
+  setTestMode:  (enabled) => window.email.setTestMode(enabled),
 };
 
 // ── Geofence ───────────────────────────────────────────────────────────────

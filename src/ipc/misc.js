@@ -162,10 +162,26 @@ function registerMiscIPC(ctx) {
     catch (e) { return { success: false, error: e.message }; }
   });
 
+
   handle('email:load-op-emails', () => {
     try { if (fs.existsSync(P.opEmails)) return JSON.parse(fs.readFileSync(P.opEmails, 'utf8')); } catch (_) {}
     return {};
   });
+
+  // ── Email test mode ───────────────────────────────────────────────────────
+  handle('email:get-test-mode', () => {
+    const s = store.load('settings', {});
+    return !!s.emailTestMode;
+  });
+
+  handle('email:set-test-mode', (_e, enabled) => {
+    const s = store.load('settings', {});
+    s.emailTestMode = !!enabled;
+    store.save('settings', s);
+    logger.info('Email test mode:', s.emailTestMode ? 'ON' : 'OFF');
+    return { ok: true, testMode: s.emailTestMode };
+  });
+
 
   handle('shell:open-external', async (_e, url) => {
     if (url && /^https?:\/\//i.test(url)) await shell.openExternal(url);

@@ -710,6 +710,18 @@ export async function init(container) {
   await _loadPresets();
   await _loadSpEmails();
 
+  // Load + wire test mode checkbox
+  try {
+    const saved = await emailBridge.getTestMode();
+    const cb = _el2('ec-test-mode');
+    if (cb) {
+      cb.checked = !!saved;
+      cb.addEventListener('change', async () => {
+        await emailBridge.setTestMode(cb.checked).catch(() => {});
+      });
+    }
+  } catch (_) {}
+
   // Initial subject + count
   _updateSubject();
   _updateUnitCount();

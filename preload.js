@@ -146,6 +146,8 @@ contextBridge.exposeInMainWorld('email', {
   compose:      (payload) => ipcRenderer.invoke('email:compose', payload),
   saveOpEmails: (data)    => ipcRenderer.invoke('email:save-op-emails', data),
   loadOpEmails: ()        => ipcRenderer.invoke('email:load-op-emails'),
+  getTestMode:  ()        => ipcRenderer.invoke('email:get-test-mode'),
+  setTestMode:  (enabled) => ipcRenderer.invoke('email:set-test-mode', enabled),
 });
 
 // ── Partner portal ───────────────────────────────────────────────────────────
