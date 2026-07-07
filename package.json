@@ -1,0 +1,62 @@
+{
+  "name": "fleet-ops-app",
+  "version": "3.0.0",
+  "description": "Fleet Operations Platform — Version C",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "cross-env NODE_ENV=development concurrently \"vite\" \"electron .\"",
+    "build:renderer": "vite build",
+    "build:app": "npm run build:renderer && electron-builder --win --x64",
+    "test": "vitest run",
+    "lint": "eslint src/ renderer/src/ --ext .js",
+    "launch": "start /min cmd /c npm run dev",
+    "launch:hidden": "powershell -WindowStyle Hidden -Command \"npm run dev\"",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "cross-env": "^10.1.0",
+    "electron": "^42.4.1",
+    "electron-builder": "^26.15.3",
+    "eslint": "^9.0.0",
+    "png-to-ico": "^3.0.2",
+    "vite": "^6.3.5",
+    "vite-plugin-electron": "^0.29.0",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1073.0",
+    "@aws-sdk/credential-providers": "^3.1073.0",
+    "juice": "^12.1.1",
+    "nodemailer": "^9.0.1",
+    "playwright": "^1.61.1",
+    "ws": "^8.21.0"
+  },
+  "build": {
+    "appId": "com.amazon.fleet-ops",
+    "productName": "Fleet Operations",
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/icon.icns"
+    },
+    "files": [
+      "dist/",
+      "src/",
+      "scrapers/",
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets/",
+        "to": "assets/"
+      }
+    ]
+  }
+}

@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:" />
+  <title>Orcha</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 340px; height: 500px;
+      overflow: hidden;
+      background: transparent;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      color: #c9d1d9;
+      -webkit-app-region: no-drag;
+    }
+
+    #bubble-app {
+      display: flex;
+      flex-direction: column;
+      height: 500px;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.7);
+    }
+
+    /* Header */
+    .ob-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: #161b22;
+      border-bottom: 1px solid #21262d;
+      -webkit-app-region: drag;
+    }
+    .ob-header-left { display: flex; align-items: center; gap: 8px; }
+    .ob-avatar {
+      width: 28px; height: 28px; border-radius: 50%;
+      background: linear-gradient(135deg, #f0a800, #ff6b35);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; font-weight: 700; color: #0d1117;
+    }
+    .ob-title { font-size: 13px; font-weight: 700; color: #e6edf3; }
+    .ob-status { font-size: 9px; color: #3fb950; margin-top: 1px; }
+    .ob-badge {
+      min-width: 20px; height: 18px; padding: 0 5px;
+      background: #f0a800; color: #0d1117; border-radius: 9px;
+      font-size: 10px; font-weight: 700; display: flex;
+      align-items: center; justify-content: center;
+    }
+    .ob-badge--zero { background: #21262d; color: #484f58; }
+
+    /* Tabs */
+    .ob-tabs {
+      display: flex; border-bottom: 1px solid #21262d;
+      -webkit-app-region: no-drag;
+    }
+    .ob-tab {
+      flex: 1; padding: 6px; text-align: center; font-size: 10px;
+      font-weight: 600; color: #8b949e; cursor: pointer;
+      border-bottom: 2px solid transparent; transition: all 0.15s;
+      background: none; border-top: none; border-left: none; border-right: none;
+    }
+    .ob-tab.active { color: #e6edf3; border-bottom-color: #f0a800; }
+    .ob-tab:hover { color: #c9d1d9; }
+
+    /* Chat body */
+    .ob-body { flex: 1; overflow-y: auto; padding: 10px; -webkit-app-region: no-drag; }
+    .ob-body::-webkit-scrollbar { width: 3px; }
+    .ob-body::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }
+
+    .ob-msg {
+      margin-bottom: 8px; padding: 8px 10px;
+      border-radius: 8px; font-size: 12px; line-height: 1.5;
+      max-width: 85%; word-wrap: break-word;
+    }
+    .ob-msg--user {
+      background: #1f6feb; color: #fff;
+      margin-left: auto; border-bottom-right-radius: 2px;
+    }
+    .ob-msg--orcha {
+      background: #161b22; color: #c9d1d9; border: 1px solid #21262d;
+      border-bottom-left-radius: 2px;
+    }
+    .ob-msg--system {
+      background: rgba(240,168,0,0.08); color: #f0a800; border: 1px solid rgba(240,168,0,0.2);
+      font-size: 10px; text-align: center; max-width: 100%;
+    }
+
+    /* Alerts body */
+    .ob-alerts { flex: 1; overflow-y: auto; padding: 6px 0; -webkit-app-region: no-drag; }
+    .ob-alert {
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: 8px 12px; border-bottom: 1px solid #21262d; cursor: pointer;
+    }
+    .ob-alert:hover { background: #161b22; }
+    .ob-alert-dot { width: 6px; height: 6px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
+    .ob-alert-dot--critical { background: #f85149; }
+    .ob-alert-dot--warning { background: #f0a800; }
+    .ob-alert-dot--info { background: #58a6ff; }
+    .ob-alert-text { font-size: 11px; color: #c9d1d9; line-height: 1.4; }
+    .ob-alert-unit { font-weight: 600; color: #e6edf3; }
+    .ob-alert-time { font-size: 9px; color: #484f58; margin-top: 2px; }
+    .ob-empty { text-align: center; color: #484f58; padding: 40px; font-size: 11px; }
+
+    /* Input */
+    .ob-input-wrap {
+      display: flex; gap: 6px; padding: 8px 10px;
+      border-top: 1px solid #21262d; background: #161b22;
+      -webkit-app-region: no-drag;
+    }
+    .ob-input {
+      flex: 1; background: #0d1117; border: 1px solid #30363d;
+      border-radius: 6px; padding: 7px 10px; color: #c9d1d9;
+      font-size: 12px; outline: none; resize: none;
+    }
+    .ob-input:focus { border-color: #f0a800; }
+    .ob-send {
+      background: #f0a800; border: none; border-radius: 6px;
+      color: #0d1117; font-weight: 700; font-size: 12px;
+      padding: 0 12px; cursor: pointer;
+    }
+    .ob-send:hover { background: #e09700; }
+
+    /* Footer */
+    .ob-footer {
+      display: flex; gap: 6px; padding: 6px 10px;
+      border-top: 1px solid #21262d; background: #0d1117;
+      -webkit-app-region: no-drag;
+    }
+    .ob-btn {
+      flex: 1; padding: 5px 8px; border: 1px solid #30363d;
+      border-radius: 5px; background: #21262d; color: #c9d1d9;
+      font-size: 11px; font-weight: 500; cursor: pointer;
+    }
+    .ob-btn:hover { background: #2d333b; border-color: #444c56; }
+    .ob-btn--open { background: #f0a800; border-color: #f0a800; color: #0d1117; font-weight: 700; }
+    .ob-btn--open:hover { background: #e09700; }
+
+    /* Mini pill mode */
+    #bubble-app.mini {
+      width: 50px; height: 50px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; position: relative;
+      background: linear-gradient(135deg, #161b22, #1c2128);
+      border: 2px solid #f0a800;
+      box-shadow: 0 4px 20px rgba(240,168,0,0.3);
+      transition: all 0.2s;
+    }
+    #bubble-app.mini:hover { transform: scale(1.1); box-shadow: 0 6px 24px rgba(240,168,0,0.5); }
+    #bubble-app.mini .ob-header,
+    #bubble-app.mini .ob-tabs,
+    #bubble-app.mini .ob-body,
+    #bubble-app.mini .ob-alerts,
+    #bubble-app.mini .ob-input-wrap,
+    #bubble-app.mini .ob-footer { display: none !important; }
+    .mini-icon { font-size: 22px; }
+    .mini-badge {
+      position: absolute; top: -4px; right: -4px;
+      min-width: 16px; height: 16px; padding: 0 4px;
+      background: #f85149; color: #fff; border-radius: 8px;
+      font-size: 9px; font-weight: 700; display: none;
+      align-items: center; justify-content: center;
+    }
+    .mini-badge.has-alerts { display: flex; }
+    #bubble-app:not(.mini) .mini-icon,
+    #bubble-app:not(.mini) .mini-badge { display: none; }
+
+  </style>
+</head>
+<body>
+  <div id="bubble-app" class="mini">
+    <span class="mini-icon">✨</span>
+    <span class="mini-badge" id="mini-badge">0</span>
+
+    <!-- Header -->
+    <div class="ob-header">
+      <div class="ob-header-left">
+        <div class="ob-avatar">✨</div>
+        <div>
+          <div class="ob-title">Orcha</div>
+          <div class="ob-status" id="ob-status">● Online</div>
+        </div>
+      </div>
+      <span id="ob-badge" class="ob-badge ob-badge--zero">0</span>
+    </div>
+
+    <!-- Tabs -->
+    <div class="ob-tabs">
+      <button class="ob-tab active" id="tab-chat" data-tab="chat">💬 Chat</button>
+      <button class="ob-tab" id="tab-alerts" data-tab="alerts">🚨 Alerts</button>
+    </div>
+
+    <!-- Chat View -->
+    <div id="view-chat" class="ob-body">
+      <div class="ob-msg ob-msg--orcha">Hey 👋 I'm Orcha. Ask me anything about the fleet — or tell me to do something.</div>
+    </div>
+
+    <!-- Alerts View -->
+    <div id="view-alerts" class="ob-alerts" style="display:none">
+      <div class="ob-empty">No alerts — fleet is healthy ✅</div>
+    </div>
+
+    <!-- Input -->
+    <div class="ob-input-wrap">
+      <input id="ob-input" class="ob-input" type="text" placeholder="Ask Orcha anything..." autocomplete="off" />
+      <button id="ob-send" class="ob-send">➤</button>
+    </div>
+
+    <!-- Footer -->
+    <div class="ob-footer">
+      <button id="ob-open" class="ob-btn ob-btn--open">Open Fleet</button>
+      <button id="ob-hide" class="ob-btn">Hide</button>
+    </div>
+
+  </div>
+
+  <script>
+    'use strict';
+
+    // ── State ──────────────────────────────────────────────────────────────
+    let _tab = 'chat';
+    let _alerts = [];
+
+    // ── Tabs ───────────────────────────────────────────────────────────────
+    document.querySelectorAll('.ob-tab').forEach(t => {
+      t.addEventListener('click', () => {
+        _tab = t.dataset.tab;
+        document.querySelectorAll('.ob-tab').forEach(x => x.classList.remove('active'));
+        t.classList.add('active');
+        document.getElementById('view-chat').style.display = _tab === 'chat' ? '' : 'none';
+        document.getElementById('view-alerts').style.display = _tab === 'alerts' ? '' : 'none';
+      });
+    });
+
+    // ── Chat ───────────────────────────────────────────────────────────────
+    const chatBody = document.getElementById('view-chat');
+    const inputEl = document.getElementById('ob-input');
+
+    function appendMsg(cls, text) {
+      const div = document.createElement('div');
+      div.className = 'ob-msg ' + cls;
+      div.textContent = text;
+      chatBody.appendChild(div);
+      chatBody.scrollTop = chatBody.scrollHeight;
+    }
+
+    async function send() {
+      const val = inputEl.value.trim();
+      if (!val) return;
+      inputEl.value = '';
+      appendMsg('ob-msg--user', val);
+      document.getElementById('ob-status').textContent = '● Thinking...';
+
+      try {
+        const result = await window.bubble.ask(val);
+        const text = (result && result.text) || (result && result.message) || (typeof result === 'string' ? result : 'Hmm, try again.');
+        // If action triggered an event, notify
+        if (result && result.trigger) { /* main process handles triggers */ }
+        appendMsg('ob-msg--orcha', text);
+      } catch(e) {
+        appendMsg('ob-msg--orcha', '❌ ' + (e.message || 'Error'));
+      }
+      document.getElementById('ob-status').textContent = '● Online';
+    }
+
+    document.getElementById('ob-send').addEventListener('click', send);
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); send(); }
+    });
+
+    // ── Alerts ─────────────────────────────────────────────────────────────
+    function renderAlerts(alerts) {
+      _alerts = alerts || [];
+      const el = document.getElementById('view-alerts');
+      const badge = document.getElementById('ob-badge');
+      badge.textContent = _alerts.length;
+      const miniBadge = document.getElementById('mini-badge');
+      if (miniBadge) { miniBadge.textContent = _alerts.length; miniBadge.className = _alerts.length ? 'mini-badge has-alerts' : 'mini-badge'; }
+      badge.className = _alerts.length ? 'ob-badge' : 'ob-badge ob-badge--zero';
+
+      if (!_alerts.length) {
+        el.innerHTML = '<div class="ob-empty">No alerts — fleet is healthy ✅</div>';
+        return;
+      }
+      el.innerHTML = _alerts.map(a => `
+        <div class="ob-alert">
+          <div class="ob-alert-dot ob-alert-dot--${a.severity || 'info'}"></div>
+          <div>
+            <div class="ob-alert-text"><span class="ob-alert-unit">${a.unit || ''}</span> ${a.message || ''}</div>
+            <div class="ob-alert-time">${a.type || ''}</div>
+          </div>
+        </div>`).join('');
+    }
+
+    // ── IPC listeners ──────────────────────────────────────────────────────
+    if (window.bubble) {
+      if (window.bubble.onAlerts) {
+        window.bubble.onAlerts((data) => {
+          renderAlerts(data.alerts || []);
+        });
+      }
+      if (window.bubble.onNotification) {
+        window.bubble.onNotification((notif) => {
+          appendMsg('ob-msg--system', (notif.icon || '') + ' ' + (notif.title || '') + ': ' + (notif.body || ''));
+        });
+      }
+    }
+
+    // ── Footer ─────────────────────────────────────────────────────────────
+    document.getElementById('ob-open').addEventListener('click', () => {
+      if (window.bubble) window.bubble.openMain();
+    });
+    document.getElementById('ob-hide').addEventListener('click', collapse);
+
+
+    // ── Mini/Expanded toggle ───────────────────────────────────────────────
+    let _expanded = false;
+    const app = document.getElementById('bubble-app');
+    
+    app.addEventListener('click', (e) => {
+      if (!_expanded && app.classList.contains('mini')) {
+        // Expand
+        _expanded = true;
+        app.classList.remove('mini');
+        if (window.bubble && window.bubble.resize) { window.bubble.resize(340, 500); window.bubble.reposition(); }
+        inputEl.focus();
+      }
+    });
+
+    // Collapse back to mini
+    function collapse() {
+      _expanded = false;
+      app.classList.add('mini');
+      if (window.bubble && window.bubble.resize) { window.bubble.resize(56, 56); window.bubble.repositionMini(); }
+    }
+
+    // Focus input on show
+    inputEl.focus();
+  </script>
+</body>
+</html>
