@@ -186,13 +186,36 @@ app.whenReady().then(async () => {
         catch(e) { return raw; }
       }).then((results) => {
         if (results.length) {
+          // BUG FIX: this flush handler wrote straight to notesStore[id].timeline with
+          // none of the safeguards that notes:add-timeline / ai:append-timeline have:
+          // (1) no manualEntries[] tracking -> the next Orcha deep-scan rescan would
+          //     silently overwrite/drop these entries (same class of bug fixed earlier
+          //     for the '+' quick-add and chat-add paths);
+          // (2) no mirror into fleetData.rows[].repairTimeline -> the detail panel
+          //     (which reads unit.repairTimeline, not notesStore directly) would not
+          //     show the entry until an unrelated full data refresh happened to touch it;
+          // (3) no notes:updated push -> no instant UI refresh;
+          // (4) no cleanTimeline() gap-filler pass, unlike every other write path.
+          const { cleanTimeline } = require('./ipc/notes');
           const notesStore = store.load('notesStore', {});
+          const fd = store.load('fleetData', {});
+          const touchedIds = [];
           results.forEach((r) => {
             const u = notesStore[r.equipmentId] || {};
             u.timeline = u.timeline ? u.timeline + '\n' + r.rewritten : r.rewritten;
+            if (cleanTimeline) u.timeline = cleanTimeline(u.timeline);
+            u.manualEntries = Array.isArray(u.manualEntries) ? u.manualEntries : [];
+            u.manualEntries.push(r.rewritten);
             notesStore[r.equipmentId] = u;
+            if (fd.rows) {
+              const row = fd.rows.find(function (x) { return x.equipmentId === r.equipmentId; });
+              if (row) row.repairTimeline = u.timeline;
+            }
+            touchedIds.push({ unitId: r.equipmentId, timeline: u.timeline });
           });
           store.save('notesStore', notesStore);
+          if (fd.rows) store.save('fleetData', fd);
+          touchedIds.forEach(function (t) { _send('notes:updated', t); });
           _send('notes:batch-updated', { count: results.length });
         }
       }).catch(() => {});
