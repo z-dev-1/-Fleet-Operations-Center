@@ -604,4 +604,4 @@ function generateNoteSuggestion(unit, aiResult) {
   return prefix + 'Awaiting update – ' + (issueCap || 'pending diag') + '.';
 }
 
-module.exports = { suggestDropdowns, askOrcha, sendOrchaChat, resetFleetChatSession, loadOrchaConfig, saveOrchaConfig, getOrchaUrl };
+module.exports = { suggestDropdowns, askOrcha, sendOrchaChat, sendOrchaViaWS, getFleetChatSessionId, resetFleetChatSession, loadOrchaConfig, saveOrchaConfig, getOrchaUrl, localClassify, generateNoteSuggestion };

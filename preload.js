@@ -28,11 +28,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 // ── Helper: one-way listener (returns cleanup function) ─────────────────────
 function on(channel, cb) {
-  const handler = (_e, ...args) => cb(...args);
+  const handler = (_e, ...args) => { try { cb(...args); } catch(e) { console.warn("[preload] err:", channel, e.message); } };
   ipcRenderer.on(channel, handler);
   return () => ipcRenderer.removeListener(channel, handler);
 }
-
 // ── Fleet data ────────────────────────────────────────────────────────────────
 contextBridge.exposeInMainWorld('fleet', {
   onData:       (cb) => on('fleet:data', cb),
@@ -40,11 +39,41 @@ contextBridge.exposeInMainWorld('fleet', {
   onError:      (cb) => on('fleet:error', cb),
   // S7: structured auth-failure payload { code, message } for session-expiry errors
   onAuthFailure:(cb) => on('fleet:auth-failure', cb),
+  // S28: auto-email trigger from scheduler
+  onAutoEmail:  (cb) => on('fleet:auto-email', cb),
+  // S28-Sprint1: Orcha unit health monitor results
+  onMonitor:    (cb) => on('orcha:monitor', cb),
+  // S28-Sprint1: Orcha anomaly alerts
+  onAlerts:     (cb) => on('orcha:alerts', cb),
+  minimize:     () => ipcRenderer.send('win:minimize'),
+  maximize:     () => ipcRenderer.send('win:maximize'),
+  closeWindow:  () => ipcRenderer.send('win:close'),
+  onBriefing:   (cb) => on('orcha:morning-briefing', cb),
+  onConnectionStatus: (cb) => on('app:connection-status', cb),
+  onMidwayStatus: (cb) => { on('app:midway-renewing', (d) => cb({...d, status:'renewing'})); on('app:midway-renewed', (d) => cb({...d, status:'renewed'})); on('app:midway-expired', (d) => cb({...d, status:'expired'})); },
+  queueOffline: (uid, text) => ipcRenderer.invoke('offline:queue', uid, text),
+  getOfflineCount: () => ipcRenderer.invoke('offline:count'),
+  repairHistory: (uid) => ipcRenderer.invoke('fleet:repair-history', uid),
+  addTimeline:    (unitId, entry) => ipcRenderer.invoke('notes:add-timeline', unitId, entry),
+  onNotesUpdated: (cb) => on('notes:updated', cb),
+  onWrCreated:  (cb) => on('wr:created', cb),
+  onPinsUpdated:(cb) => on('pins:updated', cb),
+  onEmailCompose:(cb) => on('email:compose', cb),
+  onFleetRefresh:(cb) => on('fleet:refresh', cb),
+  // S28-Sprint1: Orcha action recommendations
+  onRecommendations: (cb) => on('orcha:recommendations', cb),
+  // S28-Sprint2: Workflow tracker results
+  onTracker:         (cb) => on('orcha:tracker', cb),
+  // S28-Sprint2: Auto-prepared drafts
+  onDrafts:          (cb) => on('orcha:drafts', cb),
+  // S28-Sprint3: System health
+  onHealth:          (cb) => on('orcha:health', cb),
   signalReady:  ()  => ipcRenderer.send('renderer:ready'),
   requestSync:  ()  => ipcRenderer.send('fleet:request-sync'),
   forceSync:    ()  => ipcRenderer.invoke('fleet:force-scan'),
   getVersion:   ()  => ipcRenderer.invoke('app:version'),
 });
+
 
 // ── Settings & Domiciles ───────────────────────────────────────────────────
 contextBridge.exposeInMainWorld('settings', {
@@ -72,12 +101,18 @@ contextBridge.exposeInMainWorld('notes', {
 contextBridge.exposeInMainWorld('ai', {
   suggest:          (unit)        => ipcRenderer.invoke('ai:suggest', unit),
   ask:              (prompt)      => ipcRenderer.invoke('ai:ask', prompt),
+  orchaAction:      (msg)         => ipcRenderer.invoke('ai:orcha-action', msg),
   chat:             (prompt)      => ipcRenderer.invoke('ai:chat', prompt),
+  appendTimeline:   (data)        => ipcRenderer.invoke('ai:append-timeline', data),
   deepProcess:      (unitIds)     => ipcRenderer.invoke('orcha:deep-process', unitIds),
   recordCorrection: (data)        => ipcRenderer.invoke('orcha:record-correction', data),
   suggestVendor:    (unit)        => ipcRenderer.invoke('orcha:suggest-vendor', unit),
   getCorrections:   (field, lim)  => ipcRenderer.invoke('orcha:get-corrections', field, lim),
   test:             ()            => ipcRenderer.invoke('orcha:test'),
+  // BUG FIX: orcha:status IPC handler (relay.getStatus() -- cheap, in-memory, no
+  // network call) has existed in src/ipc/ai.js all along but was never exposed
+  // through the context bridge, so the renderer had no way to call it at all.
+  status:           ()            => ipcRenderer.invoke('orcha:status'),
   onProgress:       (cb)          => on('orcha:progress', cb),
   runDailyNotes:    (units)       => ipcRenderer.invoke('daily-notes:run', units),
   getDailyNotesLog: ()            => ipcRenderer.invoke('daily-notes:get-log'),
@@ -85,7 +120,16 @@ contextBridge.exposeInMainWorld('ai', {
   openDailyWindows: (opts)         => ipcRenderer.invoke('daily-notes:open-windows', opts),
   saveOrchaConfig:  (config)       => ipcRenderer.invoke('orcha:save-config', config),
   refreshCreds:     ()             => ipcRenderer.invoke('orcha:refresh-creds'),
+  // S28-Sprint1: dismiss anomaly alert
+  dismissAlert:     (alertId)      => ipcRenderer.invoke('orcha:dismiss-alert', alertId),
+  // S28-Sprint3: Orchestrator execution
+  execute:          (intent)       => ipcRenderer.invoke('orcha:execute', intent),
+  getExecutionLog:  ()             => ipcRenderer.invoke('orcha:get-execution-log'),
+  exportExcel:      (data)         => ipcRenderer.invoke('orcha:export-excel', data),
+  inferRCA:         (text, ctx)    => ipcRenderer.invoke('orcha:infer-rca', text, ctx),
 });
+
+
 
 // ── Slack ─────────────────────────────────────────────────────────────────────
 contextBridge.exposeInMainWorld('slack', {
@@ -110,6 +154,7 @@ contextBridge.exposeInMainWorld('sp', {
   getConfig:      ()        => ipcRenderer.invoke('sp:get-config'),
   saveConfig:     (data)    => ipcRenderer.invoke('sp:save-config', data),
   getLists:       (siteUrl) => ipcRenderer.invoke('sp:get-lists', siteUrl),
+  discoverSheets: (url) => ipcRenderer.invoke('sp:discover-sheets', url),
 });
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
@@ -156,6 +201,14 @@ contextBridge.exposeInMainWorld('partner', {
   getQueue:      ()          => ipcRenderer.invoke('partner:get-queue'),
   updateJob:     (id, update)=> ipcRenderer.invoke('partner:update-job', id, update),
   onNewRequest:  (cb)        => on('partner:new-request', cb),
+  getReview:       ()          => ipcRenderer.invoke('partner:get-review'),
+  getScheduled:    ()          => ipcRenderer.invoke('partner:get-scheduled'),
+  pollForms:       (cfg)       => ipcRenderer.invoke('partner:poll-forms', cfg),
+  approve:         (idx)       => ipcRenderer.invoke('partner:approve', idx),
+  decline:         (idx)       => ipcRenderer.invoke('partner:decline', idx),
+  schedule:        (data)      => ipcRenderer.invoke('partner:schedule', data),
+  submitScheduled: (idx)       => ipcRenderer.invoke('partner:submit-scheduled', idx),
+  onNewRequests:   (cb)        => on('partner:new-requests', cb),
 });
 
 // ── Screenshots / files ───────────────────────────────────────────────────────
@@ -165,6 +218,12 @@ contextBridge.exposeInMainWorld('files', {
   readAsDataUrl:        (p) => ipcRenderer.invoke('file:read-dataurl', p),
   openExternal:         (u) => ipcRenderer.invoke('shell:open-external', u),
   openRelayUrl:         (u) => ipcRenderer.invoke('relay:open-url', u),
+});
+
+// ── Relay cache (S28: wiring fix — exposes relay data to renderer) ────────────
+contextBridge.exposeInMainWorld('relay', {
+  getCache:     ()   => ipcRenderer.invoke('relay:get-cache'),
+  getUnitCache: (id) => ipcRenderer.invoke('relay:get-unit-cache', id),
 });
 
 // ── Credentials (UI-facing — never returns raw values) ──────────────────────
@@ -177,11 +236,21 @@ contextBridge.exposeInMainWorld('credentials', {
 });
 
 // ── Window / app ──────────────────────────────────────────────────────────────
+contextBridge.exposeInMainWorld('contacts', {
+  getAll:   ()      => ipcRenderer.invoke('contacts:get-all'),
+  save:     (list)  => ipcRenderer.invoke('contacts:save', list),
+  add:      (c)     => ipcRenderer.invoke('contacts:add', c),
+  update:   (c)     => ipcRenderer.invoke('contacts:update', c),
+  remove:   (id)    => ipcRenderer.invoke('contacts:delete', id),
+  search:   (q)     => ipcRenderer.invoke('contacts:search', q),
+});
+
 contextBridge.exposeInMainWorld('app', {
   windowAction:   (action) => ipcRenderer.invoke('window:action', action),
   notify:         (title, body) => ipcRenderer.invoke('notify', title, body),
   onNavigateUnit: (cb)     => on('navigate:unit', cb),
   platform:       process.platform,
+  splitView:      (data) => ipcRenderer.invoke('window:split-view', data),
 });
 
 // ── Setup wizard ─────────────────────────────────────────────────────────────
