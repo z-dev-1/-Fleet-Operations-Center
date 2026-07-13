@@ -1178,12 +1178,12 @@ function renderRepairPane(unit){
     ? tlEntries.map(function(entry) {
         var m = entry.trim().match(/^(\d{2}\/\d{2})\s*[-\u2013]\s*(.+)$/);
         if (m) {
-          return '<div class="dp-tl3-item dp-tl3-dot--ai">' +
+          return '<div class="dp-tl3-item dp-tl3-dot--ai" data-entry="' + encodeURIComponent(entry.trim()) + '">' +
             '<span class="dp-tl3-date">' + esc(m[1]) + '</span>' +
             '<span class="dp-tl3-dash"> \u2014 </span>' +
-            '<span class="dp-tl3-text">' + esc(m[2]) + '</span></div>';
+            '<span class="dp-tl3-text">' + esc(m[2]) + '</span>' + '<span class="dp-tl3-actions"><button class="dp-tl3-edit-btn" title="Edit">\u270f</button><button class="dp-tl3-hide-btn" title="Hide">\u2715</button></span></div>';
         }
-        return '<div class="dp-tl3-item dp-tl3-dot--ai"><span class="dp-tl3-text">' + esc(entry.trim()) + '</span></div>';
+        return '<div class="dp-tl3-item dp-tl3-dot--ai" data-entry="' + encodeURIComponent(entry.trim()) + '"><span class="dp-tl3-text">' + esc(entry.trim()) + '</span>' + '<span class="dp-tl3-actions"><button class="dp-tl3-edit-btn" title="Edit">\u270f</button><button class="dp-tl3-hide-btn" title="Hide">\u2715</button></span></div>';
       }).join('')
     : '<div class="dp-empty-state dp-empty-state--tl"><span class="dp-empty-state__icon">\uD83E\uDDE0</span>No AI timeline yet \u2014 generates on next Orcha scan. Add a manual update below any time.</div>';
 
@@ -1226,8 +1226,8 @@ function renderRepairPane(unit){
           var entries = data.timeline.split('\n').filter(function(l){ return l.trim().length > 5; });
           tlEl.innerHTML = entries.map(function(entry) {
             var m = entry.trim().match(/^(\d{2}\/\d{2})\s*[-\u2013]\s*(.+)$/);
-            if (m) return '<div class="dp-tl3-item dp-tl3-dot--ai"><span class="dp-tl3-date">' + m[1] + '</span><span class="dp-tl3-dash"> \u2014 </span><span class="dp-tl3-text">' + m[2] + '</span></div>';
-            return '<div class="dp-tl3-item dp-tl3-dot--ai"><span class="dp-tl3-text">' + entry.trim() + '</span></div>';
+            if (m) return '<div class="dp-tl3-item dp-tl3-dot--ai" data-entry="' + encodeURIComponent(entry.trim()) + '"><span class="dp-tl3-date">' + esc(m[1]) + '</span><span class="dp-tl3-dash"> \u2014 </span><span class="dp-tl3-text">' + esc(m[2]) + '</span><span class="dp-tl3-actions"><button class="dp-tl3-edit-btn" title="Edit">\u270f</button><button class="dp-tl3-hide-btn" title="Hide">\u2715</button></span></div>';
+            return '<div class="dp-tl3-item dp-tl3-dot--ai" data-entry="' + encodeURIComponent(entry.trim()) + '"><span class="dp-tl3-text">' + esc(entry.trim()) + '</span><span class="dp-tl3-actions"><button class="dp-tl3-edit-btn" title="Edit">\u270f</button><button class="dp-tl3-hide-btn" title="Hide">\u2715</button></span></div>';
           }).join('');
           // Update count
           var countEl = document.querySelector('.dp-section-count');
@@ -1260,8 +1260,17 @@ function renderRepairPane(unit){
       
       // Save immediately (truth - user typed it). No AI call in this path, so it
       // works even when Orcha token quota is exhausted.
-      if (window.notes && window.notes.addTimeline) {
-        window.notes.addTimeline(unit.equipmentId, entry);
+      // BUG FIX: this called window.notes.addTimeline, but addTimeline has only
+      // ever been exposed on the window.fleet bridge (see preload.js) -- the
+      // guard below silently no-op'd every time, so a manually-added timeline
+      // entry was NEVER actually persisted to notesStore/fleetData. It only
+      // *looked* like it worked because the DOM is updated directly a few
+      // lines down regardless of whether the save call fired. On the next
+      // fleetData reload (sync, app restart) the "saved" entry would silently
+      // vanish, defeating the entire "manual entries are immutable truth"
+      // guarantee this feature exists to provide.
+      if (window.fleet && window.fleet.addTimeline) {
+        window.fleet.addTimeline(unit.equipmentId, entry);
       }
       
       // Show immediately in UI
@@ -1269,7 +1278,7 @@ function renderRepairPane(unit){
       if (tlEl) {
         var emptyState = tlEl.querySelector('.dp-empty-state--tl');
         if (emptyState) emptyState.remove();
-        tlEl.innerHTML += '<div class="dp-tl3-item dp-tl3-dot--ai" style="border-left-color:#f0a800"><span class="dp-tl3-date">' + dateStr + '</span><span class="dp-tl3-dash"> \u2014 </span><span class="dp-tl3-text">' + esc(raw) + '</span></div>';
+        tlEl.innerHTML += '<div class="dp-tl3-item dp-tl3-dot--ai" style="border-left-color:#f0a800" data-entry="' + encodeURIComponent(entry) + '"><span class="dp-tl3-date">' + dateStr + '</span><span class="dp-tl3-dash"> \u2014 </span><span class="dp-tl3-text">' + esc(raw) + '</span><span class="dp-tl3-actions"><button class="dp-tl3-edit-btn" title="Edit">\u270f</button><button class="dp-tl3-hide-btn" title="Hide">\u2715</button></span></div>';
       }
       var countEl = document.querySelector('.dp-section-count');
       if (countEl) countEl.textContent = ((parseInt(countEl.textContent, 10) || 0) + 1) + ' events';
@@ -1280,6 +1289,72 @@ function renderRepairPane(unit){
     
     if (submitBtn) submitBtn.addEventListener('click', doAdd);
     if (input) input.addEventListener('keydown', function(e) { if (e.key === 'Enter') doAdd(); });
+
+    // ── Hide / edit a timeline entry ──────────────────────────────────────
+    // Delegated on the container (not per-item) so it keeps working after
+    // live rebuilds (onNotesUpdated) replace tlEl.innerHTML wholesale -- a
+    // per-item listener would be silently lost on every such rebuild.
+    var tlContainerEl = document.querySelector('.dp-orcha-timeline');
+    if (tlContainerEl && !tlContainerEl._hideEditWired) {
+      tlContainerEl._hideEditWired = true;
+      tlContainerEl.addEventListener('click', function(e) {
+        var item = e.target.closest('.dp-tl3-item');
+        if (!item) return;
+        var rawEntry = decodeURIComponent(item.dataset.entry || '');
+
+        if (e.target.closest('.dp-tl3-hide-btn')) {
+          if (!window.confirm('Hide this timeline entry? This cannot be undone from the UI.')) return;
+          if (window.fleet && window.fleet.hideTimeline) {
+            window.fleet.hideTimeline(unit.equipmentId, rawEntry).catch(function(){});
+          }
+          item.remove();
+          var cEl = document.querySelector('.dp-section-count');
+          if (cEl) cEl.textContent = Math.max(0, (parseInt(cEl.textContent, 10) || 1) - 1) + ' events';
+          return;
+        }
+
+        if (e.target.closest('.dp-tl3-edit-btn')) {
+          var textEl = item.querySelector('.dp-tl3-text');
+          var currentText = textEl ? textEl.textContent : rawEntry.replace(/^\d{2}\/\d{2}\s*[-\u2013]\s*/, '');
+          item.innerHTML =
+            '<input class="dp-tl-input dp-tl3-edit-input" type="text" value="' + esc(currentText) + '"/>' +
+            '<button class="dp-tl-submit-btn dp-tl3-edit-save">Save</button>' +
+            '<button class="dp-tl-submit-btn dp-tl3-edit-cancel" style="background:transparent;color:var(--mut);margin-left:4px">Cancel</button>';
+          var inputEl = item.querySelector('.dp-tl3-edit-input');
+          if (inputEl) { inputEl.focus(); inputEl.select(); inputEl.addEventListener('keydown', function(ke){ if (ke.key === 'Enter') item.querySelector('.dp-tl3-edit-save').click(); if (ke.key === 'Escape') item.querySelector('.dp-tl3-edit-cancel').click(); }); }
+          return;
+        }
+
+        if (e.target.closest('.dp-tl3-edit-save')) {
+          var inputEl2 = item.querySelector('.dp-tl3-edit-input');
+          var newVal = inputEl2 ? inputEl2.value.trim() : '';
+          if (!newVal) return;
+          if (window.fleet && window.fleet.editTimeline) {
+            window.fleet.editTimeline(unit.equipmentId, rawEntry, newVal).catch(function(){});
+          }
+          var dm = rawEntry.match(/^(\d{2}\/\d{2})\s*[-\u2013]\s*/);
+          var nowD = new Date();
+          var todayStr = dm ? dm[1] : ((nowD.getMonth()+1).toString().padStart(2,'0') + '/' + nowD.getDate().toString().padStart(2,'0'));
+          var newFullLine = todayStr + ' - ' + newVal;
+          item.dataset.entry = encodeURIComponent(newFullLine);
+          item.innerHTML = '<span class="dp-tl3-date">' + esc(todayStr) + '</span><span class="dp-tl3-dash"> \u2014 </span><span class="dp-tl3-text">' + esc(newVal) + '</span>' +
+            '<span class="dp-tl3-actions"><button class="dp-tl3-edit-btn" title="Edit">\u270f</button><button class="dp-tl3-hide-btn" title="Hide">\u2715</button></span>';
+          return;
+        }
+
+        if (e.target.closest('.dp-tl3-edit-cancel')) {
+          var m3 = rawEntry.trim().match(/^(\d{2}\/\d{2})\s*[-\u2013]\s*(.+)$/);
+          if (m3) {
+            item.innerHTML = '<span class="dp-tl3-date">' + esc(m3[1]) + '</span><span class="dp-tl3-dash"> \u2014 </span><span class="dp-tl3-text">' + esc(m3[2]) + '</span>' +
+              '<span class="dp-tl3-actions"><button class="dp-tl3-edit-btn" title="Edit">\u270f</button><button class="dp-tl3-hide-btn" title="Hide">\u2715</button></span>';
+          } else {
+            item.innerHTML = '<span class="dp-tl3-text">' + esc(rawEntry) + '</span>' +
+              '<span class="dp-tl3-actions"><button class="dp-tl3-edit-btn" title="Edit">\u270f</button><button class="dp-tl3-hide-btn" title="Hide">\u2715</button></span>';
+          }
+          return;
+        }
+      });
+    }
   }, 200);
 
 

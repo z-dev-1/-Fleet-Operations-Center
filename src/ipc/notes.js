@@ -82,6 +82,102 @@ function registerNotesIPC() {
     return { ok: true, timeline: u.timeline };
   });
 
+  // ── Timeline hide/edit ──────────────────────────────────────────────────
+  function _stripLineFromTimeline(timeline, entryText) {
+    const sig = String(entryText || '').replace(/^\d{2}\/\d{2}\s*[-\u2013]\s*/, '').trim().toLowerCase();
+    if (!timeline || !sig) return timeline;
+    return timeline.split('\n').filter(function (line) {
+      const lineSig = line.replace(/^\d{2}\/\d{2}\s*[-\u2013]\s*/, '').trim().toLowerCase();
+      return lineSig !== sig;
+    }).join('\n');
+  }
+
+  function _mirrorTimelineToFleetData(unitId, timeline) {
+    const fd = store.load('fleetData', {});
+    if (fd.rows) {
+      const row = fd.rows.find(r => r.equipmentId === unitId);
+      if (row) row.repairTimeline = timeline;
+      store.save('fleetData', fd);
+    }
+  }
+
+  function _notifyTimelineUpdated(unitId, timeline) {
+    try {
+      const wins = require('electron').BrowserWindow.getAllWindows();
+      const main = wins.find(w => !w.isDestroyed() && w.webContents.getURL().includes('localhost:5173'));
+      if (main) main.webContents.send('notes:updated', { unitId, timeline });
+    } catch (e) {}
+  }
+
+  // notes:hide-timeline-entry -- permanently suppresses a timeline line. Removes
+  // it immediately from the live timeline + manualEntries[], and records its
+  // text signature in hiddenEntries[] so src/orcha/deep-scan.js's
+  // _filterHiddenEntries() strips any future AI-regenerated line matching the
+  // same signature (date-stripped, case-insensitive) -- otherwise a hidden
+  // AI-generated line would simply reappear verbatim on the next sync.
+  handle('notes:hide-timeline-entry', async (_e, unitId, entryText) => {
+    const ns = store.load('notesStore', {});
+    const u = ns[unitId] || {};
+    u.hiddenEntries = Array.isArray(u.hiddenEntries) ? u.hiddenEntries : [];
+    u.hiddenEntries.push(entryText);
+    u.timeline = _stripLineFromTimeline(u.timeline, entryText);
+    if (Array.isArray(u.manualEntries)) {
+      const sig = String(entryText || '').replace(/^\d{2}\/\d{2}\s*[-\u2013]\s*/, '').trim().toLowerCase();
+      u.manualEntries = u.manualEntries.filter(function (e) {
+        return String(e || '').replace(/^\d{2}\/\d{2}\s*[-\u2013]\s*/, '').trim().toLowerCase() !== sig;
+      });
+    }
+    ns[unitId] = u;
+    store.save('notesStore', ns);
+    _mirrorTimelineToFleetData(unitId, u.timeline);
+    _notifyTimelineUpdated(unitId, u.timeline);
+    return { ok: true, timeline: u.timeline };
+  });
+
+  // notes:edit-timeline-entry -- rewords a timeline line permanently. The old
+  // wording is hidden (see above) so it can never resurface from a future AI
+  // regeneration, and the new wording is stored as a manual entry so it gets
+  // the same rescan-survival guarantee as any other manually-confirmed line.
+  handle('notes:edit-timeline-entry', async (_e, unitId, oldEntryText, newEntryText) => {
+    const ns = store.load('notesStore', {});
+    const u = ns[unitId] || {};
+
+    let newLine = String(newEntryText || '').trim();
+    if (!/^\d{2}\/\d{2}\s*[-\u2013]\s*/.test(newLine)) {
+      const dateMatch = String(oldEntryText || '').match(/^(\d{2}\/\d{2})\s*[-\u2013]\s*/);
+      const now = new Date();
+      const todayStr = (now.getMonth() + 1).toString().padStart(2, '0') + '/' + now.getDate().toString().padStart(2, '0');
+      newLine = (dateMatch ? dateMatch[1] : todayStr) + ' - ' + newLine;
+    }
+
+    u.hiddenEntries = Array.isArray(u.hiddenEntries) ? u.hiddenEntries : [];
+    u.hiddenEntries.push(oldEntryText);
+
+    const oldSig = String(oldEntryText || '').replace(/^\d{2}\/\d{2}\s*[-\u2013]\s*/, '').trim().toLowerCase();
+    if (u.timeline) {
+      let replaced = false;
+      u.timeline = u.timeline.split('\n').map(function (line) {
+        const lineSig = line.replace(/^\d{2}\/\d{2}\s*[-\u2013]\s*/, '').trim().toLowerCase();
+        if (!replaced && lineSig === oldSig) { replaced = true; return newLine; }
+        return line;
+      }).join('\n');
+      if (!replaced) u.timeline = u.timeline + '\n' + newLine;
+    } else {
+      u.timeline = newLine;
+    }
+
+    u.manualEntries = Array.isArray(u.manualEntries) ? u.manualEntries.filter(function (e) {
+      return String(e || '').replace(/^\d{2}\/\d{2}\s*[-\u2013]\s*/, '').trim().toLowerCase() !== oldSig;
+    }) : [];
+    u.manualEntries.push(newLine);
+
+    ns[unitId] = u;
+    store.save('notesStore', ns);
+    _mirrorTimelineToFleetData(unitId, u.timeline);
+    _notifyTimelineUpdated(unitId, u.timeline);
+    return { ok: true, timeline: u.timeline };
+  });
+
   // Issue #7: each field is length-capped before reaching the store
   handle('notes:save-unit', (_e, payload) => {
     const id = String((payload && payload.equipmentId) || '').trim();

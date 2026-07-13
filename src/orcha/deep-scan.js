@@ -98,7 +98,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
           // AI regenerates the timeline purely from raw vendor/WO comments -- it has no
           // awareness of previously manually-added lines. Merge them back in so a rescan
           // never silently discards user-entered timeline entries (immutable truth).
-          row.repairTimeline = _mergeManualEntries(_stripCosts(val.timeline), ns.manualEntries);
+          row.repairTimeline = _filterHiddenEntries(_mergeManualEntries(_stripCosts(val.timeline), ns.manualEntries), ns.hiddenEntries);
         }
         if (val.correctedNotes)     row.savedNotes = val.correctedNotes;
         if (val.repairStatus)       row.savedRepairStatus = val.repairStatus;
@@ -122,7 +122,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
       // Save timeline + issueSummary to notesStore
       // Merge AI-regenerated timeline with prior manual entries so a rescan never
       // silently drops user-entered lines (immutable truth).
-      if (val.timeline) { ns.timeline = _mergeManualEntries(val.timeline, ns.manualEntries); isChanged = true; }
+      if (val.timeline) { ns.timeline = _filterHiddenEntries(_mergeManualEntries(val.timeline, ns.manualEntries), ns.hiddenEntries); isChanged = true; }
 
       if (val.summary) { ns.issueSummary = val.summary; isChanged = true; }
 
@@ -347,4 +347,40 @@ function _mergeManualEntries(aiTimeline, manualEntries) {
 }
 
 
-module.exports = { runOrchaDeepScan, _mergeManualEntries };
+/**
+ * _timelineEntrySignature -- normalizes a timeline line to its comparable
+ * "text body" form: date prefix stripped, trimmed, lowercased. This is the
+ * exact same normalization _mergeManualEntries() already uses for its
+ * duplicate check, extracted here so hide/edit can share one definition of
+ * "same entry" instead of drifting out of sync with two regexes.
+ */
+function _timelineEntrySignature(line) {
+  return String(line || '').replace(/^\d{2}\/\d{2}\s*[-\u2013]\s*/, '').trim().toLowerCase();
+}
+
+/**
+ * _filterHiddenEntries -- strips any timeline line whose text-body signature
+ * (date-stripped, case-insensitive) matches a signature in hiddenEntries.
+ * This is the counterpart to _mergeManualEntries(): where that function
+ * guarantees a manual line ALWAYS survives regeneration, this one guarantees
+ * a hidden line NEVER resurfaces after regeneration -- covering both a
+ * user-hidden AI-generated line (which the AI could regenerate verbatim or
+ * near-verbatim from the same underlying vendor comment next sync) and a
+ * user-hidden manual line.
+ *
+ * Must be applied to the FINAL merged timeline (i.e. after
+ * _mergeManualEntries), not just the raw AI output, so a hidden entry that
+ * also happens to be in manualEntries[] is correctly suppressed too.
+ */
+function _filterHiddenEntries(timelineText, hiddenEntries) {
+  if (!Array.isArray(hiddenEntries) || !hiddenEntries.length) return timelineText;
+  if (!timelineText) return timelineText;
+  const hiddenSigs = new Set(hiddenEntries.map(_timelineEntrySignature).filter(Boolean));
+  if (!hiddenSigs.size) return timelineText;
+  const lines = timelineText.split('\n').filter(function (line) {
+    return !hiddenSigs.has(_timelineEntrySignature(line));
+  });
+  return lines.join('\n');
+}
+
+module.exports = { runOrchaDeepScan, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature };

@@ -55,6 +55,8 @@ contextBridge.exposeInMainWorld('fleet', {
   getOfflineCount: () => ipcRenderer.invoke('offline:count'),
   repairHistory: (uid) => ipcRenderer.invoke('fleet:repair-history', uid),
   addTimeline:    (unitId, entry) => ipcRenderer.invoke('notes:add-timeline', unitId, entry),
+  hideTimeline:   (unitId, entry) => ipcRenderer.invoke('notes:hide-timeline-entry', unitId, entry),
+  editTimeline:   (unitId, oldEntry, newEntry) => ipcRenderer.invoke('notes:edit-timeline-entry', unitId, oldEntry, newEntry),
   onNotesUpdated: (cb) => on('notes:updated', cb),
   onWrCreated:  (cb) => on('wr:created', cb),
   onPinsUpdated:(cb) => on('pins:updated', cb),

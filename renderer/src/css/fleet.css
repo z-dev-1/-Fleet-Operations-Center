@@ -7950,3 +7950,60 @@ body {
   background: var(--red);
   box-shadow: 0 0 5px rgba(255,123,114,.4);
 }
+
+/* ── Timeline hide/edit action buttons ────────────────────────────────────
+   Companion feature to the timeline "+" quick-add. Hidden by default,
+   revealed on row hover -- same pattern as .pin-item:hover .drag-handle and
+   .ip-alert:hover .ip-alert__dismiss elsewhere in this file. Backed by
+   notes:hide-timeline-entry / notes:edit-timeline-entry (src/ipc/notes.js)
+   and _filterHiddenEntries (src/orcha/deep-scan.js) so a hidden/edited line
+   never resurfaces on the next Orcha rescan. ── */
+.dp-tl3-item {
+  position: relative;
+}
+.dp-tl3-actions {
+  display: none;
+  gap: 4px;
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+.dp-tl3-item:hover .dp-tl3-actions {
+  display: inline-flex;
+}
+.dp-tl3-edit-btn,
+.dp-tl3-hide-btn {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid var(--bdr);
+  background: var(--el);
+  color: var(--mut);
+  cursor: pointer;
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: all .15s;
+}
+.dp-tl3-edit-btn:hover {
+  border-color: var(--acc);
+  color: var(--acc2);
+  background: var(--adim);
+}
+.dp-tl3-hide-btn:hover {
+  border-color: var(--red);
+  color: var(--red);
+  background: var(--redd);
+}
+.dp-tl3-edit-input {
+  flex: 1;
+  background: var(--el);
+  border: 1px solid var(--acc);
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--txt);
+  outline: none;
+  min-width: 120px;
+}
