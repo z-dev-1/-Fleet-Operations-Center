@@ -347,4 +347,4 @@ function _mergeManualEntries(aiTimeline, manualEntries) {
 }
 
 
-module.exports = { runOrchaDeepScan };
+module.exports = { runOrchaDeepScan, _mergeManualEntries };
