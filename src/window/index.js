@@ -25,6 +25,7 @@ const {
 const path   = require('path');
 const fs     = require('fs');
 const logger = require('../utils/logger')('window');
+const { attachAutoLogin, partitionForUrl } = require('../orcha/auto-login');
 const { P }  = require('../config/paths');
 const store  = require('../store');
 const { isSetupComplete } = require('../../setup/state');
@@ -42,6 +43,10 @@ const AAP_FIELD_MAP = {
   'Manufacturer':                 'manufacturer',
   'Body type':                    'bodyType',
   'Due date':                     'dueDate',
+  'pmBDue':                       'pmBDue',
+  'pmXDue':                       'pmXDue',
+  'dotDue':                       'dotDue',
+  'quarterlyLiftDue':             'quarterlyLiftDue',
   'Engine manufacturer':          'engineManufacturer',
   'Domicile site':                'domicileSite',
   'Fuel type':                    'fuelType',
@@ -111,14 +116,53 @@ const JS_EXTRACT_TABLE = `(function(){
   var colUnplanned = h.indexOf('Open Unplanned Work Requests');
   var colPlanned   = h.indexOf('Open Planned Work Requests');
   var colState     = h.indexOf('Lifecycle state');
+  var dueDateIdx   = h.indexOf('Due date');
   var r = [];
   var wrRows = [];
+  // The 'Due date' cell packs multiple maintenance items into one cell as
+  // repeated <p>DATE</p><div>LABEL</div> pairs (e.g. PM A, PM B, PM X, DOT,
+  // Quarterly Lift, Wash, APU, R360 Handoff Inspection). Reading the flattened
+  // text naively pairs each label with the WRONG date (off-by-one) since the
+  // date precedes its label in the DOM. Parse the actual <p> elements and
+  // their next-sibling label instead of trusting innerText order.
+  function _parseDueDateMap(cell) {
+    var map = {};
+    if (!cell) return map;
+    var dates = cell.querySelectorAll('p');
+    for (var di = 0; di < dates.length; di++) {
+      var dateText = (dates[di].innerText||'').trim();
+      var labelEl  = dates[di].nextElementSibling;
+      var labelText = labelEl ? (labelEl.innerText||'').trim() : '';
+      if (labelText) map[labelText] = dateText;
+    }
+    return map;
+  }
+  function _pickDue(map, prefix) {
+    var keys = Object.keys(map);
+    var pfx  = prefix.toLowerCase();
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i].toLowerCase().indexOf(pfx) === 0) return map[keys[i]];
+    }
+    return null;
+  }
   t.querySelectorAll('tbody tr').forEach(function(tr, ri){
     var c = tr.querySelectorAll('td');
     if (c.length < 3) return;
     var o = {};
     for (var i = 0; i < c.length; i++) { o[h[i]||'c'+i] = (c[i].innerText||'').trim(); }
     if (!o['Equipment ID'] && !o[h[1]]) return;
+    if (dueDateIdx >= 0 && c[dueDateIdx]) {
+      var dueMap = _parseDueDateMap(c[dueDateIdx]);
+      // Precise raw values, correctly paired via DOM parsing (see
+      // _parseDueDateMap above). The renderer's short pill format
+      // ('overdue' | 'Mon D' | '--') is derived from these downstream in
+      // src/scrapers/relay.js (_parsePMDates / _formatPmDate) — do not
+      // re-derive it here to avoid two divergent implementations.
+      o['pmBDue']            = _pickDue(dueMap, 'pm b');
+      o['pmXDue']            = _pickDue(dueMap, 'pm x');
+      o['dotDue']            = _pickDue(dueMap, 'dot');
+      o['quarterlyLiftDue']  = _pickDue(dueMap, 'quarterly lift');
+    }
     r.push(o);
     // Only click-capture for UNAVAILABLE units
     if ((o['Lifecycle state']||'').toLowerCase() !== 'unavailable') return;
@@ -141,6 +185,7 @@ const JS_EXTRACT_TABLE = `(function(){
     debug:'table class='+t.className+' trs='+t.querySelectorAll('tbody tr').length };
 })()`;
 
+
 // ── Map raw AAP rows → normalised camelCase, drop rows with no equipmentId ───
 function _mapAAPRows(rawRows) {
   return rawRows.map(row => {
@@ -162,8 +207,32 @@ function _mapAAPRows(rawRows) {
 // ── Save scrape results to aap_cache + fleetData ──────────────────────────────
 function _saveAAPCaches(rows) {
   const now     = new Date().toISOString();
-  const payload = { rows, count: rows.length, scrapedAt: now, syncedAt: now, stale: false };
-  store.save('aapCache',  payload);
+  // Save raw AAP data to aap cache
+  store.save('aapCache', { rows, count: rows.length, scrapedAt: now, syncedAt: now, stale: false });
+
+  // Re-merge relay + uptake before saving to fleetData (prevents wiping enriched data)
+  let mergedRows = rows;
+  try {
+    const P = require('../config/paths').P;
+    const _fs = require('fs');
+    // Merge Uptake
+    const uptakeHash = store.load('uptakeHash', {});
+    if (uptakeHash.units && uptakeHash.units.length) {
+      const { mergeUptakeIntoRows } = require('../scrapers/uptake');
+      mergedRows = mergeUptakeIntoRows(mergedRows, uptakeHash.units);
+    }
+    // Merge Relay from cache file
+    if (_fs.existsSync(P.relayCache)) {
+      const relayData = JSON.parse(_fs.readFileSync(P.relayCache, 'utf8'));
+      const notesStore = store.load('notesStore', {});
+      const { mergeRelayIntoRows } = require('../scrapers/relay');
+      mergedRows = mergeRelayIntoRows(mergedRows, relayData, notesStore);
+    }
+  } catch (e) {
+    require('../utils/logger')('window').warn('_saveAAPCaches merge failed:', e.message);
+  }
+
+  const payload = { rows: mergedRows, count: mergedRows.length, scrapedAt: now, syncedAt: now, stale: false };
   store.save('fleetData', payload);
   return payload;
 }
@@ -195,11 +264,11 @@ function initWindows(ctx) {
     if (bubbleWin && !bubbleWin.isDestroyed()) return;
 
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
-    const savedPos = _bubbleLastPos || { x: width - 360, y: height - 520 };
+    const savedPos = _bubbleLastPos || { x: width - 70, y: height - 70 };
     const bubbleHtml = path.join(ROOT_DIR, 'renderer', 'bubble.html');
 
     bubbleWin = new BrowserWindow({
-      width: 340, height: 500,
+      width: 56, height: 56,
       x: savedPos.x, y: savedPos.y,
       frame: false, transparent: true, alwaysOnTop: true,
       resizable: false, skipTaskbar: true, hasShadow: false,
@@ -321,7 +390,7 @@ function initWindows(ctx) {
   var WANT = [
     "Domicile site","Operator","Asset type","Fuel type",
     "Lifecycle state","Lifecycle state reason","Manufacturer","Body type",
-    "Open Unplanned Work Requests","Open Planned Work Requests","Last geofences","Asset ID"
+    "Due date","Open Unplanned Work Requests","Open Planned Work Requests","Last geofences","Asset ID"
   ];
   var headers = Array.from(document.querySelectorAll('th button, th[role="columnheader"]')).map(function(h) {
     return (h.textContent || '').trim();
@@ -419,7 +488,7 @@ function initWindows(ctx) {
   var WANT = [
     "Domicile site","Operator","Asset type","Fuel type",
     "Lifecycle state","Lifecycle state reason","Manufacturer","Body type",
-    "Open Unplanned Work Requests","Open Planned Work Requests","Last geofences","Asset ID"
+    "Due date","Open Unplanned Work Requests","Open Planned Work Requests","Last geofences","Asset ID"
   ];
 
   // Find popup: check portal divs on body first (Chrome Recorder showed body>div[3])
@@ -606,6 +675,79 @@ function initWindows(ctx) {
       },
     });
 
+    // Keep all links inside the app
+    // Open external URL in a popup window with Back to Fleet button
+    function _openExternalInPopup(url) {
+      logger.info("[popup] Opening external: " + url.substring(0, 80));
+      const { BrowserWindow: BW } = require('electron');
+      const popup = new BW({
+        width: 1400, height: 900,
+        title: 'Fleet Operations - External',
+        backgroundColor: '#0d1117',
+        autoHideMenuBar: true,
+        webPreferences: { nodeIntegration: false, contextIsolation: true },
+      });
+      // Use vendor partition if available for isolated session
+      popup.loadURL(url);
+      // Auto-login: detect login pages on vendor sites and fill saved credentials
+      attachAutoLogin(popup, url); // auto-login for vendor sites
+      popup.once('ready-to-show', () => popup.show());
+    }
+
+
+    // Track navigation for back-to-fleet (no page injection)
+    let _fleetUrl = null;
+    mainWindow.webContents.on('did-navigate', (_e, url) => {
+      if (url.includes('localhost:5173') || url.includes('dist/renderer')) {
+        _fleetUrl = url;
+      }
+    });
+
+    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+      // During startup scrape (before app is ready), keep AAP/Midway navigation
+      // inside the main window instead of hijacking it into a popup — this was
+      // causing the app to get stuck showing a raw AAP popup and never switch
+      // to the Fleet Operations UI.
+      if (!_appReady && (url.includes('aap-na.corp.amazon.com') || url.includes('midway-auth.amazon.com'))) {
+        mainWindow.loadURL(url);
+        return { action: 'deny' };
+      }
+      // Open in a new window with native back-to-fleet
+      _openExternalInPopup(url);
+      return { action: 'deny' };
+    });
+
+    
+
+
+    // Keyboard shortcut: Alt+Home to return to fleet app
+    const { globalShortcut } = require('electron');
+    // Register after window is ready
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+      if (input.alt && input.key === 'Home') {
+        const currentUrl = mainWindow.webContents.getURL();
+        if (!currentUrl.includes('localhost:5173') && !currentUrl.includes('dist/renderer')) {
+          if (process.env.NODE_ENV === 'development') {
+            mainWindow.loadURL('http://localhost:5173');
+          } else {
+            mainWindow.loadFile(require('path').join(__dirname, '..', '..', 'dist', 'renderer', 'index.html'));
+          }
+        }
+      }
+    });
+
+
+    mainWindow.webContents.on('will-navigate', (event, url) => {
+      // Allow local dev server
+      if (url.includes('localhost:5173') || url.includes('dist/renderer') || url.startsWith('file://') || url.startsWith('data:')) return;
+      // During startup scrape (before app is ready), allow AAP/Midway navigation
+      // to complete in-window — don't divert the startup scrape target to a popup.
+      if (!_appReady && (url.includes('aap-na.corp.amazon.com') || url.includes('midway-auth.amazon.com'))) return;
+      // External links open in popup - main window stays on fleet
+      event.preventDefault();
+      _openExternalInPopup(url);
+    });
+
     const scrapeDomiciles = getDomiciles();
     const startUrl        = buildScanURL(scrapeDomiciles);
     logger.info('Loading AAP in main window: ' + startUrl.substring(0, 80));
@@ -633,11 +775,28 @@ function initWindows(ctx) {
         logger.info('[startup] Cookies valid (' + state.count + ' cookies, expires in ' +
           (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ')');
       }
+      // Keep window invisible during AAP scrape
+      mainWindow.setPosition(-3000, -3000);
+      // Window hidden during scrape via position
+      // Auto-login: detect login pages and fill credentials
 
-      mainWindow.loadURL(startUrl); mainWindow.webContents.openDevTools();
+      mainWindow.loadURL(startUrl);
     })();
 
     function switchToApp() {
+    // If we already have fleet data cached, load app immediately (don't wait for full scrape)
+    try {
+      const store = require('../store');
+      const cached = store.load('fleetData', null);
+      if (cached && cached.rows && cached.rows.length > 0) {
+        const cacheAge = Date.now() - (cached._ts || 0);
+        if (cacheAge < 30 * 60 * 1000) { // Less than 30 min old
+          logger.info('[switchToApp] Using cached fleet data (' + cached.rows.length + ' rows, ' + Math.round(cacheAge/60000) + 'min old)');
+          // Skip waiting for fresh scrape — show app with cached data, sync in background
+        }
+      }
+    } catch(e) {}
+
       _appReady = true;
       setTimeout(() => {
         triggerLiveRescan(false);
@@ -654,6 +813,7 @@ function initWindows(ctx) {
       mainWindow.setSize(1600, 960);
       mainWindow.center();
       mainWindow.setTitle('Fleet Operations');
+      mainWindow.center();
       mainWindow.show();
       mainWindow.focus();
     }
@@ -794,7 +954,7 @@ function initWindows(ctx) {
       _rescanInProgress = true;
       const scrapeWin = new BrowserWindow({
         width: 1400, height: 800,
-        show: true, x: -2000, y: 0,
+        show: true, x: -3000, y: -3000, skipTaskbar: true,
         webPreferences: {
           nodeIntegration:  false,
           contextIsolation: true,
@@ -966,12 +1126,35 @@ function initWindows(ctx) {
     if (ctx.runFullSync) ctx.runFullSync();
   });
 
+  ipcMain.on('win:minimize', () => { if (mainWindow) mainWindow.minimize(); });
+  ipcMain.on('win:maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
+  ipcMain.on('win:close', () => { if (mainWindow) mainWindow.close(); });
+
+
   ipcMain.handle('app:version', () => app.getVersion());
 
   ipcMain.on('bubble:clicked', () => {
     hideBubble();
     if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
   });
+
+  ipcMain.on('bubble:reposition', () => {
+    if (bubbleWin && !bubbleWin.isDestroyed()) {
+      const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+      bubbleWin.setPosition(width - 360, height - 520);
+    }
+  });
+
+  ipcMain.on('bubble:reposition-mini', () => {
+    if (bubbleWin && !bubbleWin.isDestroyed()) {
+      const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+      bubbleWin.setPosition(width - 70, height - 70);
+    }
+  });
+
+  ipcMain.on('bubble:resize', (_e, w, h) => { if (bubbleWin && !bubbleWin.isDestroyed()) bubbleWin.setSize(w, h); });
+
+  ipcMain.on('bubble:hide', () => { hideBubble(); });
 
   ipcMain.on('bubble:open-unit', (_e, unitId) => {
     hideBubble();

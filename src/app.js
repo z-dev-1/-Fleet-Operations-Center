@@ -115,10 +115,117 @@ app.whenReady().then(async () => {
       _lastPushTs = t;
     }
     _send('fleet:data',   d);
+    // Run anomaly detection on every data push
+    try {
+      const { runAnomalyDetection } = require('./orcha/anomaly');
+      const repairHistory = require('./orcha/repair-history');
+      const rows = (d && d.rows) || [];
+      if (rows.length) {
+        const result = runAnomalyDetection(rows);
+        if (result && result.alerts && result.alerts.length) {
+          _send('orcha:alerts', result);
+        // Morning briefing (first push of session)
+        if (!global._briefingSent) {
+          global._briefingSent = true;
+          // Smart reminders — check due reminders
+          const _reminderStore = store.load('reminders', []);
+          const _today = new Date().toISOString().split('T')[0];
+          const _due = _reminderStore.filter(function(r){ return r.when <= _today; });
+          if (_due.length) {
+            const reminderMsg = '\u23F0 Reminders due today:\n' + _due.map(function(r){ return '\u2022 ' + r.unit + ': ' + r.note; }).join('\n');
+            _send('orcha:morning-briefing', { text: reminderMsg, critical: 0, warnings: _due.length, isReminder: true });
+            // Remove fired reminders
+            const remaining = _reminderStore.filter(function(r){ return r.when > _today; });
+            store.save('reminders', remaining);
+          }
+          // Auto-classify: flag units needing classification
+          const needsClassify = rows.filter(function(r) {
+            return (r.lifecycleState||'').toLowerCase().includes('unavail') && !r.savedRepairStatus;
+          });
+          if (needsClassify.length) {
+            log.info('[auto-classify] ' + needsClassify.length + ' units need repair status classification');
+          }
+          const critical = (result.alerts || []).filter(function(a){ return a.severity === 'critical'; });
+          const warnings = (result.alerts || []).filter(function(a){ return a.severity === 'warning'; });
+          const briefingText = (critical.length + warnings.length) > 0
+            ? '☀️ Morning Briefing: ' + critical.length + ' critical, ' + warnings.length + ' warnings.\n' +
+              critical.slice(0,5).map(function(a){ return '🔴 ' + a.unit + ' — ' + a.message; }).join('\n') +
+              (warnings.length ? '\n' + warnings.slice(0,5).map(function(a){ return '⚠️ ' + a.unit + ' — ' + a.message; }).join('\n') : '')
+            : '☀️ Morning Briefing: Fleet is healthy — no critical issues.';
+          _send('orcha:morning-briefing', { text: briefingText, critical: critical.length, warnings: warnings.length });
+        }
+        // Generate action recommendations from alerts
+        const recs = (result.alerts || []).filter(a => a.suggestion).map(a => ({
+          unit: a.unit,
+          type: a.type,
+          action: a.suggestion,
+          severity: a.severity,
+          message: a.message
+        }));
+        if (recs.length) _send('orcha:recommendations', { recommendations: recs });
+        // Detect repair completions (unavail -> available transitions)
+        try { repairHistory.detectTransitions(rows, global._prevRows || []); } catch(e) {}
+        global._prevRows = rows;
+        _send('orcha:health', { overallScore: Math.max(0, 100 - (recs.filter(function(a){return a.severity==="critical"}).length * 5)), lastSync: new Date().toISOString(), totalUnits: (d && d.rows) ? d.rows.length : 0, unavailCount: recs.length, integrations: { relay: {status:'green',label:'Relay'}, ai: {status:'green',label:'AI'}, sp: {status:'green',label:'SharePoint'}, slack: {status:'green',label:'Slack'} } });
+        }
+      }
+    } catch(e) { /* advisory — don't block data push */ }
   }
   function _pushStatus(s) { _send('fleet:status', s); }
   function _pushError(e)  { _send('fleet:error',  e); }
 
+  // ── Offline mode monitoring ─────────────────────────────────────────────
+  const offline = require('./orcha/offline');
+  offline.startMonitoring((status) => {
+    _send('app:connection-status', { online: status === 'online' });
+    if (status === 'online') {
+      // Process queued entries with AI rewrite
+      const relay = require('./orcha/relay');
+      offline.processQueue(async (unit, raw) => {
+        try { const r = await relay.ask('Rewrite this fleet timeline entry professionally in 1 sentence (keep date prefix): ' + raw); return r || raw; }
+        catch(e) { return raw; }
+      }).then((results) => {
+        if (results.length) {
+          const notesStore = store.load('notesStore', {});
+          results.forEach((r) => {
+            const u = notesStore[r.equipmentId] || {};
+            u.timeline = u.timeline ? u.timeline + '\n' + r.rewritten : r.rewritten;
+            notesStore[r.equipmentId] = u;
+          });
+          store.save('notesStore', notesStore);
+          _send('notes:batch-updated', { count: results.length });
+        }
+      }).catch(() => {});
+    }
+  });
+
+  // ── Midway auto-refresh — check every 5 minutes, renew 15 min before expiry ──
+  const _authModule = require('./scrapers/auth');
+  let _midwayRefreshTimer = null;
+  function _midwayAutoRefresh() {
+    _midwayRefreshTimer = setInterval(async () => {
+      try {
+        const state = _authModule.checkMwinit();
+        if (state.ok && state.expiresInMin !== null && state.expiresInMin < 15) {
+          logger.info('[midway] Cookies expire in ' + state.expiresInMin + 'min — auto-renewing');
+          _send('app:midway-renewing', { expiresIn: state.expiresInMin });
+          await _authModule.runMwinit();
+          await _authModule.injectCookies();
+          logger.info('[midway] Auto-renewed successfully');
+          _send('app:midway-renewed', {});
+        } else if (!state.ok) {
+          logger.warn('[midway] Cookies expired — launching mwinit');
+          _send('app:midway-expired', {});
+          await _authModule.runMwinit();
+          await _authModule.injectCookies();
+          _send('app:midway-renewed', {});
+        }
+      } catch (e) {
+        logger.error('[midway] Auto-refresh failed: ' + e.message);
+      }
+    }, 5 * 60 * 1000); // Check every 5 minutes
+  }
+  _midwayAutoRefresh();
   // The ctx object — everything reads/writes through this
   const _ctx = {
     // ── Sync state (get/set so sync engine mutates by assignment) ───────────
@@ -203,6 +310,13 @@ app.whenReady().then(async () => {
   const { registerAllIPC } = require('./ipc');
   registerAllIPC(_ctx);
   log.info('IPC handlers registered');
+
+  // ── 5e-ii. Fleet Brain — persistent Orcha connection ───────────────────
+  try {
+    const fleetBrain = require('./orcha/fleet-brain');
+    fleetBrain.init();
+    log.info('Fleet Brain initialized — persistent Orcha session active');
+  } catch (e) { log.warn('Fleet Brain init failed (non-fatal):', e.message); }
 
   // ── 5f. Create main window (triggers AAP startup scrape) ──────────────────
   const { isSetupComplete } = require('../setup/state');
