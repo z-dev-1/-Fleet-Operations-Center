@@ -944,7 +944,12 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
 
       // Tier 1: WR label fields
       vendor:              r.vendor            || row.vendor            || '',
-      make:                r.make              || row.make              || '',
+      // DEFENSIVE FIX: fall back to row.manufacturer -- AAP's live scraper (src/window/index.js)
+      // populates 'manufacturer', never 'make'. Without this fallback, unit.make is blank for
+      // any unit Relay hasn't scraped yet (no vendor assigned), even though AAP already has the
+      // make. Every other consumer in the app (unit-detail.js, misc.js) already does
+      // manufacturer||make; this merge is now consistent with them.
+      make:                r.make              || row.make              || row.manufacturer || '',
       assetType:           r.assetType         || row.assetType         || '',
       program:             r.program           || row.program           || '',
       operator:            r.operator          || row.operator          || '',
