@@ -7,7 +7,7 @@
  * Shows: unit fields | relay WOs | Uptake insights | notes | quick actions
  *
  * S9: relay WO cards, Uptake insights, lifecycle change form,
- *     AI Suggest wired (spinner + copy), Create WR → aap.autofill
+ *     AI Suggest wired (spinner + copy), Create WR Ã¢â€ â€™ aap.autofill
  */
 
 import bus           from '../bus.js';
@@ -72,7 +72,7 @@ function _loadRelayWOs(unit) {
         : null;
       return `
         <div class="dp-relay-card">
-          <span class="dp-relay-card__vendor">${_esc(wo.vendor || '—')}</span>
+          <span class="dp-relay-card__vendor">${_esc(wo.vendor || '--')}</span>
           <span class="badge badge--${statusCls}">${_esc(wo.status || 'Open')}</span>
           <span class="dp-relay-card__desc">${_esc(wo.description || '')}</span>
           ${ageDays !== null ? '<span class="dp-relay-card__age">' + ageDays + 'd</span>' : ''}
@@ -156,7 +156,7 @@ function _wireAISuggest(unit) {
 
   async function _runSuggest(promptOverride) {
     resultEl.style.display = 'block';
-    resultEl.innerHTML = '<span class="dp-ai-spinner">⟳ Asking Orcha...</span>';
+    resultEl.innerHTML = '<span class="dp-ai-spinner">⏳ Asking Orcha...</span>';
     try {
       let result;
       if (promptOverride) {
@@ -301,6 +301,26 @@ async function _showApproveCancel(workflowId, reviewPayload) {
   });
 }
 async function _startVendorWF(unit, vendorKey) {
+  // S28: Record correction if Orcha suggested a different vendor (closes the learning loop)
+  try {
+    const aiResult = await ai.suggestVendor(unit).catch(() => null);
+    if (aiResult && aiResult.vendor && aiResult.vendor.toLowerCase() !== vendorKey.toLowerCase()) {
+      ai.recordCorrection({
+        unitId:         unit.equipmentId || unit.id || '',
+        field:          'vendor',
+        orchaSuggested: aiResult.vendor,
+        userChose:      vendorKey,
+        context: {
+          domicile:  unit.domicileSite || '',
+          vendor:    vendorKey,
+          component: unit.savedPrimaryComponent || '',
+          make:      unit.manufacturer || unit.make || '',
+          issue:     unit.issueSummary || '',
+        },
+      }).catch(() => {});
+    }
+  } catch (_) {}
+
   const startBtn = document.getElementById('dp-vnd-start');
   if (startBtn) { startBtn.disabled = true; startBtn.textContent = 'Starting...'; }
   const progressEl = document.getElementById('dp-vnd-progress');
@@ -310,8 +330,8 @@ async function _startVendorWF(unit, vendorKey) {
     const { workflowId } = await fn(unit);
     const sec = document.getElementById('dp-vendor-section');
     if (sec) sec.dataset.workflowId = workflowId;
-    // S25-6-A: do NOT call _showApproveCancel here — modal opens via vendor:review-ready bus event.
-    toast.show('info', 'Dealer WO workflow started — waiting for portal...', 3000);
+    // S25-6-A: do NOT call _showApproveCancel here -- modal opens via vendor:review-ready bus event.
+    toast.show('info', 'Dealer WO workflow started \u2014 waiting for portal...', 3000);
   } catch (e) {
     toast.show('error', 'Failed to start workflow: ' + e.message);
     if (startBtn) { startBtn.disabled = false; startBtn.textContent = 'Retry'; }
@@ -363,7 +383,7 @@ function _renderCompleteBanner(el, p) {
   const url   = p.caseUrl   || "";
   const altId = p.altId     || "";
   let html = "<div class=\"dp-vnd-complete-banner\">";
-  html += "<span class=\"dp-vnd-complete-icon\">✓</span>";
+  html += "<span class=\"dp-vnd-complete-icon\">Ã¢Å“â€œ</span>";
   html += "<div class=\"dp-vnd-complete-body\">";
   html += "<span class=\"dp-vnd-complete-label\">Dealer WO created</span>";
   if (sr) {
@@ -376,7 +396,7 @@ function _renderCompleteBanner(el, p) {
     html += "<span class=\"dp-vnd-complete-altid\">" + _esc(altId) + "<button class=\"dp-vnd-copy-btn\" data-copy=\"" + _esc(altId) + "\" title=\"Copy ID\">⧉</button></span>";
   }
   if (url) {
-    html += "<a class=\"dp-vnd-complete-link\" data-ext-url=\"" + _esc(url) + "\" href=\"#\">Open in portal ↗</a>";
+    html += "<a class=\"dp-vnd-complete-link\" data-ext-url=\"" + _esc(url) + "\" href=\"#\">Open in portal Ã¢â€ â€”</a>";
   }
   html += "</div></div>";
   el.innerHTML = html;
@@ -400,7 +420,7 @@ function _renderCompleteBanner(el, p) {
 function _renderErrorBanner(el, p) {
   const msg = p.error || "Unknown error";
   let html = "<div class=\"dp-vnd-error-banner\">";
-  html += "<span class=\"dp-vnd-error-icon\">✗</span>";
+  html += "<span class=\"dp-vnd-error-icon\">Ã¢Å“â€”</span>";
   html += "<div class=\"dp-vnd-error-body\">";
   html += "<span class=\"dp-vnd-error-label\">Workflow error</span>";
   html += "<span class=\"dp-vnd-error-msg\">" + _esc(msg) + "</span>";
@@ -431,7 +451,7 @@ function _renderHistoryStrip(unitId) {
     const rel = _relTs(h.ts || 0);
     const vCls = h.vendor === "paccar" ? "dp-vnd-badge--paccar" : h.vendor === "volvo" ? "dp-vnd-badge--volvo" : "dp-vnd-badge--unknown";
     const oCls = ok ? "dp-vnd-hist-chip--ok" : "dp-vnd-hist-chip--err";
-    return "<button class=\"dp-vnd-hist-chip " + oCls + " \" data-idx=\"" + i + "\"><span class=\"dp-vnd-hist-chip__icon\">" + (ok ? "✓" : "✗") + "</span><span class=\"dp-vnd-hist-chip__vendor dp-vnd-badge " + vCls + "\"></span><span class=\"dp-vnd-hist-chip__label\">" + _esc(lbl) + "</span><span class=\"dp-vnd-hist-chip__rel\">" + _esc(rel) + "</span></button>";
+    return "<button class=\"dp-vnd-hist-chip " + oCls + " \" data-idx=\"" + i + "\"><span class=\"dp-vnd-hist-chip__icon\">" + (ok ? "Ã¢Å“â€œ" : "Ã¢Å“â€”") + "</span><span class=\"dp-vnd-hist-chip__vendor dp-vnd-badge " + vCls + "\"></span><span class=\"dp-vnd-hist-chip__label\">" + _esc(lbl) + "</span><span class=\"dp-vnd-hist-chip__rel\">" + _esc(rel) + "</span></button>";
   });
   el.innerHTML = "<div class=\"dp-vnd-hist-label\">History</div>" + chips.join("");
   el.querySelectorAll(".dp-vnd-hist-chip").forEach(function(btn) {
@@ -447,9 +467,9 @@ function _renderHistoryStrip(unitId) {
       const isOk = h.outcome === "complete";
       let ttHtml = "";
       if (isOk) {
-        ttHtml += "<span class=\"dp-vnd-hist-tt__sr\">" + _esc(h.caseNumber || "—") + "</span>";
+        ttHtml += "<span class=\"dp-vnd-hist-tt__sr\">" + _esc(h.caseNumber || "--") + "</span>";
         if (h.caseUrl) {
-          ttHtml += "<a class=\"dp-vnd-hist-tt__link\" data-url=\"" + _esc(h.caseUrl) + "\" href=\"#\">Open ↗</a>";
+          ttHtml += "<a class=\"dp-vnd-hist-tt__link\" data-url=\"" + _esc(h.caseUrl) + "\" href=\"#\">Open Ã¢â€ â€”</a>";
         }
         if (h.dealerName) ttHtml += "<span class=\"dp-vnd-hist-tt__dealer\">" + _esc(h.dealerName) + "</span>"; // S25-12
       } else {
@@ -473,10 +493,67 @@ function _renderHistoryStrip(unitId) {
   });
 }
 
+// S28: Orcha Vendor AI Suggestion -- renders recommendation card above eligibility
+function _renderVendorAISuggest(unit) {
+  const el = document.getElementById('dp-vnd-ai-suggest');
+  if (!el) return;
+  el.innerHTML =
+    '<div class="dp-vnd-ai-card">' +
+      '<div class="dp-vnd-ai-card__header">' +
+        '<span class="dp-vnd-ai-card__icon">\uD83E\uDD16</span>' +
+        '<span class="dp-vnd-ai-card__title">Orcha Vendor Intelligence</span>' +
+        '<button id="dp-vnd-ai-run" class="dp-vnd-ai-card__btn">Analyze</button>' +
+      '</div>' +
+      '<div id="dp-vnd-ai-body" class="dp-vnd-ai-card__body">' +
+        '<span class="dp-vnd-ai-card__hint">Click Analyze for AI-powered vendor recommendation</span>' +
+      '</div>' +
+    '</div>';
+  const runBtn = document.getElementById('dp-vnd-ai-run');
+  if (runBtn) {
+    runBtn.addEventListener('click', async () => {
+      const body = document.getElementById('dp-vnd-ai-body');
+      runBtn.disabled = true;
+      runBtn.textContent = '\u2026';
+      body.innerHTML = '<span class="dp-vnd-ai-card__loading">\u26A1 Orcha analyzing vendor options\u2026</span>';
+      try {
+        const result = await ai.suggestVendor(unit);
+        const rec = result && (result.vendor || result.recommendation || result.text || '');
+        const confidence = result && result.confidence ? result.confidence : null;
+        const reasoning = result && (result.reason || result.reasoning || '');
+        const alt = result && result.alternatives ? result.alternatives : [];
+
+        let html = '';
+        if (rec) {
+          html += '<div class="dp-vnd-ai-rec">';
+          html += '<span class="dp-vnd-ai-rec__label">Recommended:</span>';
+          html += '<span class="dp-vnd-ai-rec__vendor">' + _esc(rec) + '</span>';
+          if (confidence) html += '<span class="dp-vnd-ai-rec__conf">' + confidence + '% confidence</span>';
+          html += '</div>';
+        }
+        if (reasoning) {
+          html += '<div class="dp-vnd-ai-reasoning">' + _esc(reasoning) + '</div>';
+        }
+        if (alt.length) {
+          html += '<div class="dp-vnd-ai-alts"><span class="dp-vnd-ai-alts__label">Alternatives:</span> ' +
+            alt.map(a => '<span class="dp-vnd-ai-alt-pill">' + _esc(a) + '</span>').join(' ') + '</div>';
+        }
+        if (!html) html = '<span class="dp-vnd-ai-card__hint">No recommendation available for this unit.</span>';
+        body.innerHTML = html;
+      } catch (e) {
+        body.innerHTML = '<span class="dp-vnd-ai-card__error">' + _esc(e.message || 'AI unavailable') + '</span>';
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = 'Re-analyze';
+      }
+    });
+  }
+}
+
 function _wireVendorPanel(unit) {
   const sec = document.getElementById('dp-vendor-section');
   if (!sec) return;
   _teardownVendorBus();
+  _renderVendorAISuggest(unit);  // S28: show AI suggestion card
   sec.innerHTML = '<p class="dp-empty">Checking eligibility...</p>';
   vendor.investigate(unit).then((result) => {
     _renderInvestigation(result);
@@ -610,25 +687,150 @@ function _wireDealerWOBtn(unit) {
   });
 }
 
-// ── NEW: Command Center render helpers ──────────────────────────────────────
-// ── helpers ───────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ NEW: Command Center render helpers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Ã¢â€â‚¬Ã¢â€â‚¬ helpers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function riskColor(n){return n>=70?'red':n>=40?'org':'grn';}
 function downDays(unit){const ts=unit.created;if(!ts)return null;return Math.floor((Date.now()-new Date(ts).getTime())/86400000);}
 function relTime(ts){if(!ts)return'';const d=Date.now()-new Date(ts).getTime();if(d<3600000)return Math.floor(d/60000)+'m ago';if(d<86400000)return Math.floor(d/3600000)+'h ago';return Math.floor(d/86400000)+'d ago';}
 function fmtDate(ts){if(!ts)return'';try{return new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});}catch(e){return ts;}}
-function parseConvo(raw){if(!raw||typeof raw!=='string')return[];return raw.split('\n').filter(function(l){return l.trim();}).reduce(function(acc,line){var m=line.match(/^(\d{2}\/\d{2}(?:\/\d{2,4})?)?\s*[-\u2013]?\s*(.+)$/);if(m&&m[2]&&m[2].trim().length>2){var isVendor=/amerit|freightliner|volvo|peterbilt|kenworth|ta truck|ta |tct|dealer|shop|penske|ryder/i.test(m[2]);acc.push({date:m[1]||'',text:m[2].trim(),side:isVendor?'vendor':'carrier'});}return acc;},[]);}
+function parseConvo(raw){
+  if(!raw||typeof raw!=='string')return[];
+  // Filter to non-empty lines only
+  var lines=raw.split('\n').map(function(l){return l.trim();}).filter(function(l){return l.length>0;});
+  
+  // Find where conversation section starts
+  var convoStart=-1;
+  for(var i=0;i<lines.length;i++){
+    if(lines[i]==='Conversation'||lines[i]==='Comments can not be edited.'){convoStart=i;break;}
+  }
+  
+  // Fallback: try MM/DD - text format (user-saved notes)
+  if(convoStart===-1){
+    var DATE_LINE=/^(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\s*[-\u2013]\s*(.+)$/;
+    return lines.reduce(function(acc,line){
+      var m=line.match(DATE_LINE);
+      if(m&&m[2]&&m[2].trim().length>3){
+        var isVendor=/amerit|freightliner|volvo|peterbilt|kenworth|ta truck|ta |tct|dealer|shop|penske|ryder|daimler|paccar|asist|navistar|international/i.test(m[2]);
+        acc.push({date:m[1],text:m[2].trim(),side:isVendor?'vendor':'carrier'});
+      }
+      return acc;
+    },[]);
+  }
+  
+  // Parse Relay Garage conversation format
+  var TIMESTAMP=/^((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4})\s+\d{1,2}:\d{2}(?:AM|PM)/i;
+  var JUNK=/^(Work Request|Internal Only|Shared with|Enter Comments|DO NOT enter|Add Comment|Share Comment|Recipient|Comments can not|Conversation|Add Comment To|Share Comment With)$/i;
+  var MONTH_MAP={Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};
+  
+  var results=[];
+  var i=convoStart+1;
+  while(i<lines.length){
+    var line=lines[i];
+    // Skip junk lines
+    if(JUNK.test(line)){i++;continue;}
+    // Look for timestamp pattern
+    var tsMatch=line.match(TIMESTAMP);
+    if(tsMatch){
+      var dateStr=tsMatch[1]; // "Jul 2, 2026"
+      var parts=dateStr.replace(',','').split(/\s+/);
+      var mm=MONTH_MAP[parts[0]]||'??';
+      var dd=parts[1].length<2?'0'+parts[1]:parts[1];
+      var shortDate=mm+'/'+dd;
+      
+      // Collect message lines until next timestamp or end
+      var msgLines=[];
+      i++;
+      while(i<lines.length){
+        var ml=lines[i];
+        if(JUNK.test(ml)){i++;continue;}
+        if(TIMESTAMP.test(ml))break;
+        // If this line is short (username) and next non-junk is a timestamp, stop
+        if(ml.length<25){
+          var peek=i+1;
+          while(peek<lines.length&&JUNK.test(lines[peek]))peek++;
+          if(peek<lines.length&&TIMESTAMP.test(lines[peek]))break;
+        }
+        msgLines.push(ml);
+        i++;
+      }
+      var text=(function(_raw){
+        return _raw
+          // Trailing form junk (everything after)
+          .replace(/\s*Enter Comments\.?\s*DO NOT enter[\s\S]*/i,'')
+          .replace(/\s*Share Comment With[\s\S]*/i,'')
+          .replace(/\s*Add Comment[\s\S]*/i,'')
+          // "Shared with ..." anywhere
+          .replace(/\s*Shared with (?:Carrier and Vendor|Vendor and Carrier|Vendor|Carrier)\s*/gi,' ')
+          // "Work Order #N" noise
+          .replace(/\s*Work Order (?:#?\d+|#\w+)\s*/gi,' ')
+          // Dollar amounts
+          .replace(/\$[\d,]+\.\d{2}/g,'[est]')
+          // Phone numbers
+          .replace(/(?:\+1)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?:[,\d]*)?/g,'')
+          .replace(/One-click Connect Number:\s*/gi,'')
+          // GPS coordinates
+          .replace(/\bpoc:\s*[\d.-]+,\s*[\d.-]+/gi,'')
+          .replace(/\d{1,3}\.\d{4,},\s*-?\d{1,3}\.\d{4,}/g,'')
+          // Personal names in common patterns
+          .replace(/\bs\/w\s+\w+/gi,'s/w [contact]')
+          .replace(/\bspoken with\s+\w+/gi,'spoken with [contact]')
+          .replace(/:\s*\w+\(\w+\)\s/g,': [contact] ')
+          // Street addresses
+          .replace(/\d+\s+[\w\s]+(?:St|Ave|Blvd|Rd|Dr|Ln|Way|Ct|Pl|Pkwy|Hwy),?\s*[\w\s]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?(?:,\s*United States)?/gi,'[address]')
+          // AMZ internal IDs
+          .replace(/amz-[a-z0-9]+/gi,'')
+          // Dangling "and Vendor/Carrier"
+          .replace(/\s+and (?:Vendor|Carrier)\b/gi,'')
+          // RelayGarage trailing
+          .replace(/\s*RelayG(?:arage)?\s*$/i,'')
+          // Trailing artifacts: lone periods, dashes, colons
+          .replace(/[\s.:-]+$/,'')
+          // Collapse spaces
+          .replace(/\s{2,}/g,' ')
+          .trim();
+      })(msgLines.join(' ').trim());
+      if(text.length>8 && !/^https?:\/\//i.test(text) && !/^(w\/nra|w\/chassis|wPV|Yard Location Update|est$|Tire repairs|\[phone\]|\[address\]$|\.\s*$)/i.test(text)){
+        var isVendor=/amerit|freightliner|volvo|peterbilt|kenworth|ta truck|ta |tct|dealer|shop|penske|ryder|daimler|paccar|asist|navistar|international|decisiv/i.test(text);
+        results.push({date:shortDate,text:text,side:isVendor?'vendor':'carrier'});
+      }
+    } else {
+      i++;
+    }
+  }
+  return results;
+}
 function parseDuration(raw){if(!raw)return null;var m=String(raw).match(/(\d+(?:\.\d+)?)/);return m?parseFloat(m[1]):null;}
 function workDurationBar(unit){
   var created=unit.created;
-  var durDays=parseDuration(unit.workDuration);
-  if(!created||!durDays)return'';
+  if(!created)return'';
   var start=new Date(created).getTime();
-  var end=start+(durDays*86400000);
+  if(isNaN(start))return'';
   var now=Date.now();
+  var daysElapsed=Math.floor((now-start)/86400000);
+  var durDays=parseDuration(unit.workDuration);
+
+  // No workDuration: show open-ended elapsed bar (created Ã¢â€ â€™ today)
+  if(!durDays){
+    var openCls=daysElapsed>14?'overdue':daysElapsed>7?'warn':'ok';
+    return '<div class="dp-etc-wrap">'+
+      '<div class="dp-etc-title"><span>Work Duration</span><span class="dp-etc-remain">'+daysElapsed+'d elapsed (no ETC set)</span></div>'+
+      '<div class="dp-etc-track">'+
+        '<div class="dp-etc-fill dp-etc-fill--'+openCls+'" style="width:100%"></div>'+
+        '<div class="dp-etc-marker" style="left:97%"></div>'+
+      '</div>'+
+      '<div class="dp-etc-labels">'+
+        '<span>Started '+fmtDate(created)+'</span>'+
+        '<span>Day '+daysElapsed+'</span>'+
+        '<span>Today '+fmtDate(now)+'</span>'+
+      '</div>'+
+    '</div>';
+  }
+
+  // Has workDuration: show progress bar vs ETC
+  var end=start+(durDays*86400000);
   var pct=Math.min(Math.round(((now-start)/(end-start))*100),100);
   var overdue=now>end;
-  var daysElapsed=Math.floor((now-start)/86400000);
   var daysRemain=overdue?0:Math.ceil((end-now)/86400000);
   var cls=overdue?'overdue':pct>75?'warn':'ok';
   var label=overdue?('<span style="color:var(--red);font-weight:600">\u26a0 Overdue by '+Math.ceil((now-end)/86400000)+'d</span>'):(daysRemain+'d left of '+durDays+'d');
@@ -646,7 +848,7 @@ function workDurationBar(unit){
   '</div>';
 }
 
-// ── header ────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ header Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 function renderHeader(unit){
   var isUnavail=(unit.lifecycleState||'').toLowerCase().includes('unavail');
   var risk=parseInt(unit.riskScore,10)||0;
@@ -657,9 +859,19 @@ function renderHeader(unit){
   var relayUrl=esc(unit.serviceUrl||unit.savedOffsiteUrl||'');
   var offsiteUrl=esc(unit.asistSrUrl||unit.offsiteShopEventUrl||'');
 
-  // meta row: make/model/year · type · fuel · domicile · operator
+  // meta row: make/model/year Ã‚Â· type Ã‚Â· fuel Ã‚Â· domicile Ã‚Â· operator
+  // _resolveAssetType: maps raw AAP assetType/bodyType to human-friendly label
+  function _resolveAssetType(unit) {
+    var at = (unit.assetType || '').trim().toLowerCase();
+    var bt = (unit.bodyType  || '').trim().toLowerCase();
+    if (at === 'tractor' || bt === 'tractor') {
+      return bt.includes('sleeper') ? 'Sleeper' : 'Day Cab';
+    }
+    if (at === 'standard' || bt === 'standard') return 'Box Truck';
+    return unit.assetType || unit.bodyType || '';
+  }
   var make=[unit.manufacturer||unit.make,unit.model,unit.modelYear].filter(Boolean).join(' ');
-  var metaParts=[make,unit.assetType||unit.bodyType,unit.fuelType,unit.domicileSite||unit.domicile,unit.operator,unit.program].filter(Boolean).map(esc);
+  var metaParts=[make,_resolveAssetType(unit),unit.fuelType,unit.domicileSite||unit.domicile,unit.operator,unit.program].filter(Boolean).map(esc);
   var meta=metaParts.join(' \u00b7 ');
 
   var vitals=[
@@ -692,7 +904,7 @@ function renderHeader(unit){
   '</div>';
 }
 
-// ── tabs ──────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ tabs Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 function renderTabs(unit){
   var woCount=(unit.openUnplanned||0)+(unit.openPlanned||0);
   var insCount=(unit.insightsList||[]).length;
@@ -709,9 +921,193 @@ function renderTabs(unit){
   return '<div class="dp-tabs">'+tabs.map(function(t){return'<button class="dp-tab'+(t.id===def?' active':'')+'" data-tab="'+t.id+'">'+t.label+t.b+'</button>';}).join('')+'</div>';
 }
 
-// ── repair pane ───────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ repair pane Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+function _openInlineSplit(leftUrl, rightUrl, unitId) {
+  var existing = document.getElementById('dp-split-container');
+  if (existing) existing.remove();
+  if (!leftUrl && !rightUrl) return;
+
+  var container = document.createElement('div');
+  container.id = 'dp-split-container';
+  container.className = 'dp-split-container';
+
+  var html = '<div class="dp-split-header">' +
+    '<span class="dp-split-title">' + esc(unitId) + ' \u2014 Live View</span>' +
+    '<button class="dp-split-close" id="dp-split-close">\u2715 Close</button></div>';
+
+  html += '<div class="dp-split-views">';
+  if (leftUrl) {
+    html += '<div class="dp-split-pane dp-split-pane--relay">' +
+      '<div class="dp-split-pane-label">RELAY GARAGE</div>' +
+      '<webview id="dp-wv-relay" src="' + leftUrl + '" class="dp-split-webview" allowpopups></webview></div>';
+  }
+  if (rightUrl) {
+    html += '<div class="dp-split-pane dp-split-pane--offsite">' +
+      '<div class="dp-split-pane-label">OFFSITE</div>' +
+      '<webview id="dp-wv-offsite" src="' + rightUrl + '" class="dp-split-webview" partition="persist:vendor-' + (rightUrl.indexOf("volvopg") > -1 ? 'volvo' : 'paccar') + '" allowpopups></webview></div>';
+  }
+  html += '</div>';
+
+  container.innerHTML = html;
+  document.getElementById('app').appendChild(container);
+  document.getElementById('dp-split-close').addEventListener('click', function() { container.remove(); });
+
+  var relayWv = document.getElementById('dp-wv-relay');
+  if (relayWv) {
+    relayWv.addEventListener('dom-ready', function() {
+      relayWv.executeJavaScript('setTimeout(function(){ var btns=document.querySelectorAll("button,a,[role=button]"); for(var i=0;i<btns.length;i++){if((btns[i].textContent||"").indexOf("Toggle Comments")>-1){btns[i].click();break;}} setTimeout(function(){ var h1s=document.querySelectorAll("h1"); var conv=null; for(var i=0;i<h1s.length;i++){if(h1s[i].textContent==="Conversation"){conv=h1s[i].closest("[aria-hidden]")||h1s[i].parentElement.parentElement.parentElement.parentElement;break;}} if(conv){conv.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;background:#fff;z-index:99999";var all=document.body.children;for(var j=0;j<all.length;j++){if(all[j]!==conv&&!conv.contains(all[j])&&!all[j].contains(conv)){all[j].style.display="none";}}} },2500); },1500)').catch(function(){});
+    });
+  }
+
+  var offsiteWv = document.getElementById('dp-wv-offsite');
+  if (offsiteWv) {
+    offsiteWv.addEventListener('dom-ready', function() {
+      offsiteWv.executeJavaScript('function waitForNotes(){var nb=document.querySelector("[data-testid=note-body]");var ta=document.querySelector("textarea[name=user-reply]");if(!nb){setTimeout(waitForNotes,1000);return;}var el=nb;while(el.parentElement&&el.parentElement!==document.body){el=el.parentElement;if(el.querySelector("[data-testid=note-body]")&&el.querySelector("textarea[name=user-reply]"))break;}el.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;background:#fff;z-index:99999;padding:0";var sib=el.parentElement?el.parentElement.children:[];for(var i=0;i<sib.length;i++){if(sib[i]!==el)sib[i].style.display="none";}} setTimeout(waitForNotes,2000)').catch(function(){});
+    });
+  }
+}
+
+
+function _parseComments(text) {
+  if (!text) return [];
+  var lines = text.split('\n');
+  var comments = [];
+
+  // Find "Enter Comments" marker at the end — comments are before it
+  var endMarker = -1;
+  for (var i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].indexOf('Enter Comments') > -1 || lines[i].indexOf('Add Comment') > -1) {
+      endMarker = i;
+      break;
+    }
+  }
+  if (endMarker === -1) endMarker = lines.length;
+
+  // Pattern: user, blank, date, blank, text, blank, "Work Request"/"Service Event", blank, "Internal Only"/"Vendor"
+  // Scan for date pattern to identify comment blocks
+  var dateRx = /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)s+d+,s+d{4}s+d+:d+[AP]M/;
+  
+  var i = 0;
+  while (i < endMarker) {
+    var line = (lines[i] || '').trim();
+    // Skip empty lines
+    if (!line) { i++; continue; }
+
+    // Check if next non-empty line is a date
+    var nextNonEmpty = '';
+    var nextIdx = i + 1;
+    while (nextIdx < endMarker && !(lines[nextIdx] || '').trim()) nextIdx++;
+    nextNonEmpty = (lines[nextIdx] || '').trim();
+
+    if (dateRx.test(nextNonEmpty) && line.length < 30 && /^[a-z]/i.test(line)) {
+      // This is a username
+      var user = line;
+      var date = nextNonEmpty.replace(/\s*\(.*?\)\s*$/, ''); // strip "(X days ago)"
+
+      // Skip past date to find message text
+      var j = nextIdx + 1;
+      while (j < endMarker && !(lines[j] || '').trim()) j++;
+      var msgText = (lines[j] || '').trim();
+
+      // Skip to find share type (Internal Only / Vendor)
+      var share = 'Internal Only';
+      var k = j + 1;
+      while (k < endMarker && k < j + 6) {
+        var sl = (lines[k] || '').trim();
+        if (sl === 'Internal Only' || sl === 'Vendor') { share = sl; break; }
+        k++;
+      }
+
+      if (msgText && msgText !== 'Work Request' && msgText !== 'Service Event' && msgText !== 'Internal Only') {
+        comments.push({ user: user, date: date, text: msgText, share: share });
+      }
+      i = k + 1;
+    } else {
+      i++;
+    }
+  }
+  return comments;
+}
+
+function _linkify(text) {
+  return text.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" style="color:#58a6ff">$1</a>');
+}
+
+
+function _parseRelayConvo(raw) {
+  if (!raw) return [];
+  var msgs = [];
+  // Comments are at the end, after "Toggle Comments" or near username patterns
+  // Pattern: username\ndate\ntext\nWork Request|Service Event
+  var lines = raw.split('\n');
+  var i = 0;
+  // Find start of comments section
+  var commentStart = -1;
+  for (i = 0; i < lines.length; i++) {
+    if (lines[i].match(/^\w+$/)) {
+      // Potential username - check if next line is a date
+      var nextLine = lines[i + 1] || '';
+      if (nextLine.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+,\s+\d{4}/)) {
+        commentStart = i;
+        break;
+      }
+    }
+  }
+  if (commentStart === -1) {
+    // Try finding from the end - look for "Add Comment" and work backwards
+    for (i = lines.length - 1; i > 0; i--) {
+      if (lines[i].includes('Add Comment') || lines[i].includes('Enter Comments')) {
+        break;
+      }
+    }
+    // Now scan upward to find first username+date pair
+    for (var j = Math.max(0, i - 100); j < i; j++) {
+      if (lines[j].match(/^\w+$/) && (lines[j+1] || '').match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+,\s+\d{4}/)) {
+        commentStart = j;
+        break;
+      }
+    }
+  }
+
+  if (commentStart === -1) return msgs;
+
+  // Parse messages from commentStart
+  i = commentStart;
+  while (i < lines.length) {
+    var user = (lines[i] || '').trim();
+    var date = (lines[i + 1] || '').trim();
+    if (!user || !date.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+,\s+\d{4}/)) {
+      i++;
+      continue;
+    }
+    // Collect message text (skip "Work Request", "Internal Only", "Service Event" lines)
+    var text = '';
+    var j = i + 2;
+    while (j < lines.length) {
+      var line = (lines[j] || '').trim();
+      if (line === 'Work Request' || line === 'Internal Only' || line === 'Service Event' || line === 'Vendor') {
+        j++;
+        continue;
+      }
+      // If next line looks like a new username+date, stop
+      if (line.match(/^\w+$/) && (lines[j + 1] || '').match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+,\s+\d{4}/)) {
+        break;
+      }
+      if (line === 'Enter Comments. DO NOT enter any personal information.' || line === 'Add Comment') break;
+      if (line) text += (text ? ' ' : '') + line;
+      j++;
+    }
+    if (text) {
+      msgs.push({ user: user, date: date.replace(/\s*\(.*?\)\s*$/, ''), text: text });
+    }
+    i = j;
+  }
+  return msgs;
+}
+
+
 function renderRepairPane(unit){
-  // ── WR summary card ────────────────────────────────────────────────────────
+  // Ã¢â€â‚¬Ã¢â€â‚¬ WR summary card Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   var hasRelay=unit.relaySynced&&(unit.vendor||unit.issueDetails||unit.workRequestId);
   var woCard='';
   if(hasRelay){
@@ -742,7 +1138,11 @@ function renderRepairPane(unit){
         '<span class="dp-wo-card__status-pill dp-wo-card__status-pill--'+statusKey+'">'+esc(statusRaw||'Open')+'</span>'+
         stale+
       '</div>'+
-      (unit.issueDetails?'<div class="dp-wo-card__desc">'+esc(unit.issueDetails)+'</div>':'')+
+      ((unit.savedRepairStatus||unit.savedPrimaryComponent)?'<div class="dp-wo-card__ai-tags">'+
+        (unit.savedRepairStatus?'<span class="dp-ai-tag dp-ai-tag--status">\uD83D\uDD27 '+esc(unit.savedRepairStatus)+'</span>':'')+
+        (unit.savedPrimaryComponent?'<span class="dp-ai-tag dp-ai-tag--component">\u2699\uFE0F '+esc(unit.savedPrimaryComponent)+'</span>':'')+
+      '</div>':'')+
+      ((unit.issueSummary||unit.issueDetails)?'<div class="dp-wo-card__desc">'+(unit.issueSummary?'<span class="dp-orcha-badge">\uD83E\uDDE0</span> '+esc((unit.issueSummary||'').split('TIMELINE:')[0].split('\\n')[0].substring(0,200)):esc(unit.issueDetails))+'</div>':'')+
       cause+correction+
       (fields.length?'<div class="dp-wo-card__fields">'+fields.map(function(f){return'<span class="dp-wo-field"><span class="dp-wo-field__k">'+esc(f[0])+'</span><span class="dp-wo-field__v">'+esc(f[1])+'</span></span>';}).join('')+'</div>':'')+
       (unit.created||unit.completed?'<div class="dp-wo-card__dates">'+
@@ -754,33 +1154,48 @@ function renderRepairPane(unit){
     woCard='<div class="dp-empty-state"><span class="dp-empty-state__icon">\ud83d\udcc2</span>No Relay WR data</div>';
   }
 
-  // ── work duration bar ──────────────────────────────────────────────────────
+  // Ã¢â€â‚¬Ã¢â€â‚¬ work duration bar Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   var durBar=workDurationBar(unit);
 
-  // ── conversation timeline ──────────────────────────────────────────────────
-  var msgs=parseConvo(unit.fullConversation||'');
-  _allConvoMsgs=msgs;
-  var convoHtml='';
-  if(msgs.length){
-    var visible=msgs.slice(-8);
-    var hidden=msgs.length-visible.length;
-    convoHtml='<div class="dp-section-title">Conversation <span class="dp-section-count">'+msgs.length+'</span></div>'+
-      '<div class="dp-convo" id="dp-convo">'+
-        (hidden>0?'<button class="dp-convo-show-more" id="dp-convo-more">\u25b2 Show '+hidden+' earlier messages</button>':'')+
-        visible.map(function(m){
-          return '<div class="dp-convo-msg dp-convo-msg--'+m.side+'">'+
-            '<div class="dp-convo-av dp-convo-av--'+m.side+'">'+(m.side==='vendor'?'V':'C')+'</div>'+
-            '<div>'+
-              '<div class="dp-convo-bubble">'+esc(m.text)+'</div>'+
-              (m.date?'<div class="dp-convo-meta">'+esc(m.date)+'</div>':'')+
-            '</div>'+
-          '</div>';
-        }).join('')+
-      '</div>';
-  }
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Conversation Ã¢â€ â€™ vertical timeline Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+  // parseConvo removed — AI timeline is the only source of truth
+  _allConvoMsgs = [];
+  // === ORCHA REPAIR TIMELINE (Source of Truth) ===
+  var aiTimeline = unit.repairTimeline || '';
+  var orchaNote = unit.savedNotes || '';
+  var timelineHtml = '';
 
-  // ── offsite event card ─────────────────────────────────────────────────────
+  // The add button + input row + timeline container must ALWAYS render, even when
+  // no AI timeline exists yet (e.g. Orcha deep-scan hasn't run, or an AI call failed
+  // due to a token/quota limit). Manual entries are immutable truth and must be
+  // addable at any time -- they should never be gated behind AI availability.
+  var tlEntries = aiTimeline ? aiTimeline.split('\n').filter(function(l){ return l.trim().length > 5; }) : [];
+  var tlEntriesHtml = tlEntries.length
+    ? tlEntries.map(function(entry) {
+        var m = entry.trim().match(/^(\d{2}\/\d{2})\s*[-\u2013]\s*(.+)$/);
+        if (m) {
+          return '<div class="dp-tl3-item dp-tl3-dot--ai">' +
+            '<span class="dp-tl3-date">' + esc(m[1]) + '</span>' +
+            '<span class="dp-tl3-dash"> \u2014 </span>' +
+            '<span class="dp-tl3-text">' + esc(m[2]) + '</span></div>';
+        }
+        return '<div class="dp-tl3-item dp-tl3-dot--ai"><span class="dp-tl3-text">' + esc(entry.trim()) + '</span></div>';
+      }).join('')
+    : '<div class="dp-empty-state dp-empty-state--tl"><span class="dp-empty-state__icon">\uD83E\uDDE0</span>No AI timeline yet \u2014 generates on next Orcha scan. Add a manual update below any time.</div>';
+
+  timelineHtml =
+    '<div class="dp-section-title">\uD83E\uDDE0 Repair Timeline <span class="dp-section-count">' + tlEntries.length + ' events</span><button class="dp-tl-add-btn" id="dp-tl-add" title="Add entry">+</button></div>' +
+    '<div id="dp-tl-input-row" class="dp-tl-input-row" style="display:none"><input id="dp-tl-input" class="dp-tl-input" type="text" placeholder="Type update... (saved immediately)"/><button id="dp-tl-submit" class="dp-tl-submit-btn">Add</button></div>' +
+    '<div class="dp-orcha-timeline">' + tlEntriesHtml + '</div>';
+
   var offsiteUrl=unit.asistSrUrl||unit.savedOffsiteUrl||unit.offsiteShopEventUrl||'';
+
+  // Split-view button (Relay + Offsite side by side)
+  var splitViewBtn = '';
+  var relayUrl = unit.serviceUrl || '';
+  if (relayUrl || offsiteUrl) {
+    splitViewBtn = '<div class="dp-split-view-row"><button class="dp-split-view-btn" id="dp-split-open" title="Open Relay Garage and Offsite side by side">\u{1F50D} Open Split View</button></div>';
+  }
   var offsiteLabel=unit.asistLabel||unit.savedOffsiteEvent||unit.offsiteShopEvent||offsiteUrl;
   var src=unit.asistSource||'';
   var scrapedAt=unit.asistScrapedAt||'';
@@ -797,12 +1212,89 @@ function renderRepairPane(unit){
       (scrapedAt?'<div class="dp-offsite-card__ts">Enriched '+fmtDate(scrapedAt)+'</div>':'')+
     '</div>':'';
 
+  
+  // Live timeline update: when AI or user adds to timeline, refresh instantly
+  if (window.fleet && window.fleet.onNotesUpdated) {
+    window.fleet.onNotesUpdated(function(data) {
+      if (data && data.unitId === unit.equipmentId && data.timeline) {
+        var tlEl = document.querySelector('.dp-orcha-timeline');
+        if (tlEl) {
+          var entries = data.timeline.split('\n').filter(function(l){ return l.trim().length > 5; });
+          tlEl.innerHTML = entries.map(function(entry) {
+            var m = entry.trim().match(/^(\d{2}\/\d{2})\s*[-\u2013]\s*(.+)$/);
+            if (m) return '<div class="dp-tl3-item dp-tl3-dot--ai"><span class="dp-tl3-date">' + m[1] + '</span><span class="dp-tl3-dash"> \u2014 </span><span class="dp-tl3-text">' + m[2] + '</span></div>';
+            return '<div class="dp-tl3-item dp-tl3-dot--ai"><span class="dp-tl3-text">' + entry.trim() + '</span></div>';
+          }).join('');
+          // Update count
+          var countEl = document.querySelector('.dp-section-count');
+          if (countEl) countEl.textContent = entries.length + ' events';
+        }
+      }
+    });
+  }
+
+  // Wire the + button and quick-add input
+  setTimeout(function() {
+    var addBtn = document.getElementById('dp-tl-add');
+    var inputRow = document.getElementById('dp-tl-input-row');
+    var input = document.getElementById('dp-tl-input');
+    var submitBtn = document.getElementById('dp-tl-submit');
+    
+    if (addBtn && inputRow) {
+      addBtn.addEventListener('click', function() {
+        inputRow.style.display = inputRow.style.display === 'none' ? 'flex' : 'none';
+        if (input) input.focus();
+      });
+    }
+    
+    function doAdd() {
+      if (!input || !input.value.trim()) return;
+      var raw = input.value.trim();
+      var now = new Date();
+      var dateStr = (now.getMonth()+1).toString().padStart(2,'0') + '/' + now.getDate().toString().padStart(2,'0');
+      var entry = dateStr + ' - ' + raw;
+      
+      // Save immediately (truth - user typed it). No AI call in this path, so it
+      // works even when Orcha token quota is exhausted.
+      if (window.notes && window.notes.addTimeline) {
+        window.notes.addTimeline(unit.equipmentId, entry);
+      }
+      
+      // Show immediately in UI
+      var tlEl = document.querySelector('.dp-orcha-timeline');
+      if (tlEl) {
+        var emptyState = tlEl.querySelector('.dp-empty-state--tl');
+        if (emptyState) emptyState.remove();
+        tlEl.innerHTML += '<div class="dp-tl3-item dp-tl3-dot--ai" style="border-left-color:#f0a800"><span class="dp-tl3-date">' + dateStr + '</span><span class="dp-tl3-dash"> \u2014 </span><span class="dp-tl3-text">' + esc(raw) + '</span></div>';
+      }
+      var countEl = document.querySelector('.dp-section-count');
+      if (countEl) countEl.textContent = ((parseInt(countEl.textContent, 10) || 0) + 1) + ' events';
+      
+      input.value = '';
+      inputRow.style.display = 'none';
+    }
+    
+    if (submitBtn) submitBtn.addEventListener('click', doAdd);
+    if (input) input.addEventListener('keydown', function(e) { if (e.key === 'Enter') doAdd(); });
+  }, 200);
+
+
+  // Wire split-view button — opens inline webviews in main content area
+  setTimeout(function() {
+    var btn = document.getElementById('dp-split-open');
+    if (btn) btn.addEventListener('click', function() {
+      var rUrl = unit.serviceUrl || '';
+      var oUrl = offsiteUrl || '';
+      window.__splitUnit = unit; _openInlineSplit(rUrl, oUrl, unit.equipmentId);
+    });
+  }, 100);
+
   return '<div class="dp-pane active" id="dp-pane-repair">'+
-    '<div class="dp-section-title">Work Request</div>'+woCard+durBar+convoHtml+offsiteHtml+
+    '<div class="dp-section-title">Work Request</div>'+woCard+splitViewBtn+durBar+timelineHtml+offsiteHtml+
   '</div>';
 }
 
-// ── intel pane ────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ intel pane Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 function renderIntelPane(unit){
   var risk=parseInt(unit.riskScore,10)||0;
   var rCls=risk>=70?'high':risk>=40?'medium':'low';
@@ -823,7 +1315,7 @@ function renderIntelPane(unit){
       '</div>'+
       '<div class="dp-risk-info">'+
         '<div class="dp-risk-label">Uptake Risk Score</div>'+
-        '<div class="dp-risk-sub">'+(risk>=70?'High — maintenance recommended':risk>=40?'Moderate — monitor closely':'Low risk')+'</div>'+
+        '<div class="dp-risk-sub">'+(risk>=70?'High -- maintenance recommended':risk>=40?'Moderate -- monitor closely':'Low risk')+'</div>'+
         (unit.riskLabel?'<div class="dp-risk-sub" style="margin-top:2px">'+esc(unit.riskLabel)+'</div>':'')+
         (unit.lastDataDate?'<div class="dp-risk-sub" style="color:var(--mut);margin-top:4px">Data: '+fmtDate(unit.lastDataDate)+'</div>':'')+
       '</div>'+
@@ -876,10 +1368,14 @@ function renderIntelPane(unit){
     '<div class="dp-empty-state"><span class="dp-empty-state__icon">\u26a1</span>No Uptake insights</div>';
 
   // screenshot
-  var shot=(unit.screenshots||[])[0];
-  var shotHtml=shot?
-    '<div class="dp-section-title">Uptake Screenshot</div>'+
-    '<div class="dp-screenshot-wrap"><img src="'+esc(shot)+'" alt="Uptake screenshot"><div class="dp-screenshot-overlay"><span class="dp-screenshot-label">Uptake Insights</span></div></div>':'';
+  var shot=(unit.screenshots||[])[0]; var shotHtml='';
+  if(shot){
+    shotHtml='<div class="dp-section-title">Uptake Screenshot</div>' +
+      '<div id="dp-screenshot-card" style="position:relative;width:100%;margin:8px 0;min-height:100px;background:#1c2128;border-radius:6px;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">' +
+        '<img id="dp-screenshot-img" data-shot="'+esc(shot)+'" style="width:100%;height:auto;min-height:50px;display:block;border-radius:6px;" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Uptake screenshot loading..." />' +
+        '<div style="font-size:9px;color:rgba(255,255,255,0.35);margin-top:5px;text-align:right;padding:0 8px 4px;" id="dp-screenshot-meta">Loading...</div>' +
+      '</div>';
+  }
 
   // ask Orcha
   var askHtml='<div class="dp-section-title">Ask Orcha</div>'+
@@ -896,7 +1392,7 @@ function renderIntelPane(unit){
   return '<div class="dp-pane" id="dp-pane-intel">'+dialHtml+subsHtml+insHtml+shotHtml+askHtml+'</div>';
 }
 
-// ── actions pane ──────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ actions pane Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 function renderActionsPane(unit){
   var isUnavail=(unit.lifecycleState||'').toLowerCase().includes('unavail');
   return '<div class="dp-pane" id="dp-pane-actions">'+
@@ -906,19 +1402,21 @@ function renderActionsPane(unit){
       '<button class="dp-action-btn" id="dp-act-dealer-wo"><span class="dp-action-btn__icon">\ud83c\udfe6</span>Dealer WO<span class="dp-action-btn__sub">PACCAR / Volvo / DTNA</span></button>'+
       '<button class="dp-action-btn" id="dp-act-aap"><span class="dp-action-btn__icon">\ud83d\udd17</span>Open AAP<span class="dp-action-btn__sub">Asset page</span></button>'+
       '<button class="dp-action-btn" id="dp-act-lc"><span class="dp-action-btn__icon">\ud83d\udd04</span>Lifecycle<span class="dp-action-btn__sub">'+esc(unit.lifecycleState||'')+'</span></button>'+
+      '<button class="dp-action-btn dp-action-btn--notes" id="dp-act-daily-notes"><span class="dp-action-btn__icon">\ud83d\udccb</span>Daily Notes<span class="dp-action-btn__sub">AI note + split view</span></button>'+
+      '<button class="dp-action-btn dp-action-btn--orcha" id="dp-act-orcha-deep"><span class="dp-action-btn__icon">\u26a1</span>Orcha Scan<span class="dp-action-btn__sub">AI deep analysis</span></button>'+
     '</div>'+
     '<div id="dp-lc-form" class="dp-lc-form" style="display:none">'+
       '<div class="dp-lc-row"><select id="dp-lc-state" class="detail-panel__select"><option value="Available">Available</option><option value="Unavailable">Unavailable</option></select>'+
       '<input id="dp-lc-reason" class="detail-panel__input" type="text" placeholder="Reason..."/></div>'+
       '<div class="dp-lc-row"><button id="dp-lc-confirm" class="detail-panel__btn">Confirm</button><button id="dp-lc-cancel" class="detail-panel__btn detail-panel__btn--secondary">Cancel</button></div>'+
-    '</div>'+
     '<div class="dp-section-title" style="margin-top:10px">Dealer Work Order</div>'+
+    '<div id="dp-vnd-ai-suggest" class="dp-vnd-ai-suggest"></div>'+
     '<div id="dp-vendor-section" class="dp-vendor-section"><p class="dp-empty">Loading eligibility\u2026</p></div>'+
     '<div id="dp-vnd-history-strip" class="dp-vnd-history-strip"></div>'+
   '</div>';
 }
 
-// ── history pane ──────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ history pane Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 function renderHistoryPane(unit){
   var sources=[
     {label:'AAP',      ts:unit.lastDataDate,   icon:'\ud83d\udd17'},
@@ -958,7 +1456,48 @@ function renderHistoryPane(unit){
 }
 
 
-// ── _renderUnit ──────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ _runDailyNotesForUnit Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Per-unit Daily Notes: opens split windows (Relay + Offsite) for visual review.
+// AI note generation runs automatically during sync -- no manual trigger needed.
+async function _runDailyNotesForUnit(unit) {
+  if (!unit) return;
+
+  const unitId = unit.equipmentId || unit.id || '';
+  if (!unitId) { toast.show('warn', 'No unit selected', 2500); return; }
+
+  const altId = unit.alternativeId || unit.altId || '';
+  if (!altId) { toast.show('warn', unitId + ' has no Alt ID', 3000); return; }
+
+  // Collect URLs
+  const relayUrl    = unit.serviceUrl || unit.pageUrl || '';
+  let   offsiteUrl  = unit.offsiteShopEventUrl || unit.savedOffsiteUrl || '';
+  if (!offsiteUrl && unit.offsiteShopEvent && /^\d+$/.test(String(unit.offsiteShopEvent).trim())) {
+    offsiteUrl = 'https://aap-na.corp.amazon.com/v2/offsite-events/' + unit.offsiteShopEvent.trim();
+  }
+
+  const hasRelay   = relayUrl   && relayUrl.startsWith('http');
+  const hasOffsite = offsiteUrl && offsiteUrl.startsWith('http');
+
+  if (!hasRelay && !hasOffsite) {
+    toast.show('warn', unitId + ' -- no Relay or Offsite URLs available', 3000);
+    return;
+  }
+
+  // Open split windows
+  if (window.ai && typeof window.ai.openDailyWindows === 'function') {
+    try {
+      await window.ai.openDailyWindows({ unitId, relayUrl: hasRelay ? relayUrl : '', offsiteUrl: hasOffsite ? offsiteUrl : '' });
+      toast.show('info', 'Opened ' + (hasRelay && hasOffsite ? 'Relay + Offsite' : hasRelay ? 'Relay' : 'Offsite') + ' for ' + unitId, 2500);
+    } catch (e) {
+      toast.show('error', 'Failed to open windows: ' + e.message, 3000);
+    }
+  } else {
+    toast.show('warn', 'Split view not available', 2500);
+  }
+}
+
+
+// Ã¢â€â‚¬Ã¢â€â‚¬ _renderUnit Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 function _renderUnit(unit) {
   _unit = unit;
   if (!_panel) return;
@@ -971,7 +1510,7 @@ function _renderUnit(unit) {
     renderHeader(unit) +
     '<div class="dp-status-band dp-status-band--loading" id="dp-status-band">' +
       '<span class="dp-status-band__icon">&#129504;</span>' +
-      '<span class="dp-status-band__text">Analyzing unit status…</span>' +
+      '<span class="dp-status-band__text">Analyzing unit status...</span>' +
     '</div>' +
     renderTabs(unit) +
     '<div class="dp-body">' +
@@ -981,7 +1520,7 @@ function _renderUnit(unit) {
       renderHistoryPane(unit) +
     '</div>';
 
-  // ── tab switching ──────────────────────────────────────────────────────────
+  // Ã¢â€â‚¬Ã¢â€â‚¬ tab switching Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   _panel.querySelectorAll('.dp-tab').forEach(function(btn) {
     btn.addEventListener('click', function() {
       _panel.querySelectorAll('.dp-tab').forEach(function(t){ t.classList.remove('active'); });
@@ -992,11 +1531,34 @@ function _renderUnit(unit) {
     });
   });
 
-  // ── close ──────────────────────────────────────────────────────────────────
+  // Load uptake screenshot into Intel tab
+  var _ssImg = document.getElementById('dp-screenshot-img');
+  if (_ssImg && _ssImg.dataset.shot) {
+    window.files.readAsDataUrl(_ssImg.dataset.shot).then(function(d) {
+      if (d) {
+        _ssImg.src = d;
+        _ssImg.alt = 'Uptake Insight';
+        var m = document.getElementById('dp-screenshot-meta');
+        var ts = _ssImg.dataset.shot.match(/_(\d{13,})\.png$/);
+        if (ts && m) m.textContent = 'Captured: ' + new Date(parseInt(ts[1])).toLocaleString();
+        else if (m) m.textContent = '';
+        _ssImg.onclick = function() { window.files.openUptakeScreenshot(_ssImg.dataset.shot); };
+      } else {
+        _ssImg.alt = 'Screenshot file not found';
+        var m2 = document.getElementById('dp-screenshot-meta');
+        if (m2) m2.textContent = 'File not accessible';
+      }
+    }).catch(function(e) {
+      _ssImg.alt = 'Error: ' + (e.message || e);
+    });
+  }
+
+
+  // Ã¢â€â‚¬Ã¢â€â‚¬ close Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   var closeBtn = document.getElementById('dp-close');
   if (closeBtn) closeBtn.addEventListener('click', close);
 
-  // ── external launchers ─────────────────────────────────────────────────────
+  // Ã¢â€â‚¬Ã¢â€â‚¬ external launchers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   _panel.querySelectorAll('[data-aap-url]').forEach(function(b) {
     b.addEventListener('click', function(){ var u=b.dataset.aapUrl; if(u) window.aap && window.aap.openUrl(u); });
   });
@@ -1004,25 +1566,29 @@ function _renderUnit(unit) {
     b.addEventListener('click', function(e){ e.preventDefault(); var u=b.dataset.extUrl||b.getAttribute('data-ext-url'); if(u&&window.files) window.files.openExternal(u).catch(function(){}); });
   });
 
-  // ── show all convo messages ────────────────────────────────────────────────
+  // Ã¢â€â‚¬Ã¢â€â‚¬ show all timeline entries Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   var moreBtn = document.getElementById('dp-convo-more');
   if (moreBtn) {
     moreBtn.addEventListener('click', function() {
       var el = document.getElementById('dp-convo');
       if (!el) return;
-      el.innerHTML = _allConvoMsgs.map(function(m){
-        return '<div class="dp-convo-msg dp-convo-msg--'+m.side+'">' +
-          '<div class="dp-convo-av dp-convo-av--'+m.side+'">'+(m.side==='vendor'?'V':'C')+'</div>' +
-          '<div><div class="dp-convo-bubble">'+esc(m.text)+'</div>' +
-          '<div class="dp-convo-meta">'+esc(m.date)+'</div></div></div>';
+      el.innerHTML = _allConvoMsgs.map(function(m) {
+        var isVendor = m.side === 'vendor';
+        var dotCls   = isVendor ? 'dp-tl3-dot--vendor' : 'dp-tl3-dot--carrier';
+        return '<div class="dp-tl3-item ' + dotCls + '">' +
+          (m.date ? '<span class="dp-tl3-date">' + esc(m.date) + '</span>' : '') +
+          '<span class="dp-tl3-dash"> - </span>' +
+          '<span class="dp-tl3-text">' + esc(m.text) + '</span>' +
+        '</div>';
       }).join('');
     });
   }
 
-  // ── notes ──────────────────────────────────────────────────────────────────
+
+  // Ã¢â€â‚¬Ã¢â€â‚¬ notes Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   _wireNotes(unit);
 
-  // ── action buttons (new layout IDs) ───────────────────────────────────────
+  // Ã¢â€â‚¬Ã¢â€â‚¬ action buttons (new layout IDs) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   var actCreateWR = document.getElementById('dp-act-create-wr');
   if (actCreateWR) actCreateWR.addEventListener('click', function(){ openWRModal(unit); });
 
@@ -1060,14 +1626,49 @@ function _renderUnit(unit) {
     });
   }
 
-  // ── ask Orcha (new layout IDs: dp-ask-input, dp-ask-btn, dp-ask-chip) ──────
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Daily Notes for this unit Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+  var actDailyNotes = document.getElementById('dp-act-daily-notes');
+  if (actDailyNotes) {
+    actDailyNotes.addEventListener('click', function () { _runDailyNotesForUnit(unit); });
+  }
+
+  // S28: Orcha Deep Scan button -- on-demand AI analysis for this unit
+  var actOrchaDeep = document.getElementById('dp-act-orcha-deep');
+  if (actOrchaDeep) {
+    actOrchaDeep.addEventListener('click', async function () {
+      actOrchaDeep.disabled = true;
+      actOrchaDeep.querySelector('.dp-action-btn__sub').textContent = 'Analyzing...';
+      try {
+        var result = await ai.deepProcess([unit.equipmentId]);
+        if (result && result.units && result.units.length > 0) {
+          var processed = result.units[0];
+          toast.show('success', 'Orcha analyzed ' + unit.equipmentId, 3000);
+          // Update the AI result box if present
+          var aiResult = document.getElementById('dp-ai-result');
+          if (aiResult && processed.issueSummary) {
+            aiResult.style.display = 'block';
+            aiResult.innerHTML = '<div class="dp-ai-text"><strong>Orcha Deep Scan:</strong><br/>' + _esc(processed.issueSummary) + '</div>';
+          }
+        } else {
+          toast.show('info', 'Orcha scan complete -- no new insights', 2500);
+        }
+      } catch (e) {
+        toast.show('error', 'Orcha scan failed: ' + (e.message || 'unknown'), 3000);
+      } finally {
+        actOrchaDeep.disabled = false;
+        actOrchaDeep.querySelector('.dp-action-btn__sub').textContent = 'AI deep analysis';
+      }
+    });
+  }
+
+  // Ã¢â€â‚¬Ã¢â€â‚¬ ask Orcha (new layout IDs: dp-ask-input, dp-ask-btn, dp-ask-chip) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   var askInput = document.getElementById('dp-ask-input');
   var askBtn   = document.getElementById('dp-ask-btn');
   var aiResult = document.getElementById('dp-ai-result');
   async function _runAsk(q) {
     if (!aiResult) return;
     aiResult.style.display='block';
-    aiResult.innerHTML='<span style="color:var(--mut);font-style:italic">⟳ Asking Orcha...</span>';
+    aiResult.innerHTML='<span style="color:var(--mut);font-style:italic">⏳ Asking Orcha...</span>';
     try {
       var result = await ai.ask('[Unit: '+unit.equipmentId+'] '+q);
       var text = (result&&result.text)?result.text:JSON.stringify(result,null,2);
@@ -1083,10 +1684,10 @@ function _renderUnit(unit) {
     chip.addEventListener('click',function(){if(askInput)askInput.value=chip.dataset.q||'';_runAsk(chip.dataset.q||'');});
   });
 
-  // ── vendor panel ──────────────────────────────────────────────────────────
+  // Ã¢â€â‚¬Ã¢â€â‚¬ vendor panel Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   _wireVendorPanel(unit);
 
-  // ── status band AI brief ───────────────────────────────────────────────────
+  // Ã¢â€â‚¬Ã¢â€â‚¬ status band AI brief Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
   if (window.ai && window.ai.suggest) {
     window.ai.suggest(unit).then(function(result){
       var bandEl = document.getElementById('dp-status-band');
@@ -1100,7 +1701,7 @@ function _renderUnit(unit) {
   }
 }
 
-// ── _wireNotes ────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ _wireNotes Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 function _wireNotes(unit) {
   var notesEl = document.getElementById('dp-notes');
   var savedEl = document.getElementById('dp-notes-saved');
@@ -1133,11 +1734,57 @@ function close() {
   bus.emit('ui:unit-deselect');
 }
 
+
+// Offline quick-add timeline entry
+function _injectOfflineQuickAdd(container, equipmentId) {
+  if (!container || container.querySelector('.offline-quick-add')) return;
+  const div = document.createElement('div');
+  div.className = 'offline-quick-add';
+  div.style.cssText = 'padding:8px;border-top:1px solid var(--bdr,#30363d);display:flex;gap:6px;align-items:center;';
+  const today = new Date();
+  const dateStr = String(today.getMonth()+1).padStart(2,'0') + '/' + String(today.getDate()).padStart(2,'0');
+  div.innerHTML = '<span style="font-size:10px;color:var(--mut,#484f58);font-family:monospace;">' + dateStr + ' -</span>' +
+    '<input class="offline-quick-input" placeholder="Quick note..." style="flex:1;background:var(--el,#21262d);border:1px solid var(--bdr,#30363d);border-radius:4px;padding:4px 8px;color:var(--txt,#e6edf3);font-size:11px;" />' +
+    '<button class="offline-quick-btn" style="background:var(--acc,#58a6ff);border:none;border-radius:4px;color:#fff;padding:4px 10px;font-size:11px;cursor:pointer;font-weight:600;">+</button>';
+  container.appendChild(div);
+  
+  const input = div.querySelector('.offline-quick-input');
+  const btn = div.querySelector('.offline-quick-btn');
+  
+  function submit() {
+    const text = input.value.trim();
+    if (!text) return;
+    // Always queue through AI for rewrite (works offline AND online)
+    if (window.fleet && window.fleet.queueOffline) {
+      window.fleet.queueOffline(equipmentId, text);
+    }
+    // Also add raw to local display immediately
+    const store = window._notesCache || {};
+    const u = store[equipmentId] || {};
+    u.timeline = u.timeline ? u.timeline + '\n' + dateStr + ' - ' + text : dateStr + ' - ' + text;
+    store[equipmentId] = u;
+    window._notesCache = store;
+    input.value = '';
+    // Refresh the timeline display
+    const tlEl = container.querySelector('.dp-timeline-entries');
+    if (tlEl) {
+      const entry = document.createElement('div');
+      entry.className = 'dp-tl-entry';
+      entry.style.cssText = 'font-size:11px;color:var(--txt2,#8b949e);padding:3px 0;border-left:2px solid var(--acc,#58a6ff);padding-left:8px;margin:2px 0;opacity:0.7;';
+      entry.textContent = dateStr + ' - ' + text + ' (pending AI rewrite)';
+      tlEl.appendChild(entry);
+    }
+  }
+  
+  btn.addEventListener('click', submit);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+}
+
 export function init(container) {
   _panel = document.createElement('div');
   _panel.id = 'detail-panel';
   _panel.className = 'detail-panel';
-  container.appendChild(_panel);
+  document.body.appendChild(_panel);
 
   bus.on('ui:unit-select', ({ unit }) => {
     _renderUnit(unit);
@@ -1154,7 +1801,7 @@ export function init(container) {
 let _pendingDealerWO = null; // { unit, attempts } | null
 
 function _tryDealerWO(unit, attempts) {
-  // Guard 1: stale request — user has switched to a different unit
+  // Guard 1: stale request -- user has switched to a different unit
   if (!_unit || (_unit.equipmentId !== unit.equipmentId && _unit.id !== unit.equipmentId)) {
     _pendingDealerWO = null;
     return;
@@ -1169,7 +1816,7 @@ function _tryDealerWO(unit, attempts) {
     });
     return;
   }
-  // Guard 3: already investigating this unit — don't re-trigger
+  // Guard 3: already investigating this unit -- don't re-trigger
   if (sec.dataset.investigating === unit.equipmentId) {
     _pendingDealerWO = null;
     sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' });

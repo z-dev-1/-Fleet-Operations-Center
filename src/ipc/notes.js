@@ -51,6 +51,37 @@ function registerNotesIPC() {
 
   handle('notes:get-all', () => store.load('notesStore', {}));
 
+  handle('notes:add-timeline', async (_e, unitId, entry) => {
+    const ns = store.load('notesStore', {});
+    const u = ns[unitId] || {};
+    u.timeline = u.timeline ? u.timeline + '\n' + entry : entry;
+    // Clean up gap fillers
+    if (cleanTimeline) u.timeline = cleanTimeline(u.timeline);
+    // Track as a manually-confirmed entry (immutable truth) so a later Orcha
+    // deep-scan regeneration can merge it back in instead of silently
+    // discarding it when it rebuilds the timeline from raw vendor comments.
+    u.manualEntries = Array.isArray(u.manualEntries) ? u.manualEntries : [];
+    u.manualEntries.push(entry);
+    ns[unitId] = u;
+    store.save('notesStore', ns);
+    // Mirror into fleetData row — this is the field the detail panel actually
+    // reads (unit.repairTimeline). Without this, a manual add only lived in
+    // notesStore and vanished the next time fleet data reloaded or a sync ran.
+    const fd = store.load('fleetData', {});
+    if (fd.rows) {
+      const row = fd.rows.find(r => r.equipmentId === unitId);
+      if (row) row.repairTimeline = u.timeline;
+      store.save('fleetData', fd);
+    }
+    // Notify renderer for instant refresh
+    try {
+      const wins = require('electron').BrowserWindow.getAllWindows();
+      const main = wins.find(w => !w.isDestroyed() && w.webContents.getURL().includes('localhost:5173'));
+      if (main) main.webContents.send('notes:updated', { unitId, timeline: u.timeline });
+    } catch(e) {}
+    return { ok: true, timeline: u.timeline };
+  });
+
   // Issue #7: each field is length-capped before reaching the store
   handle('notes:save-unit', (_e, payload) => {
     const id = String((payload && payload.equipmentId) || '').trim();
@@ -98,4 +129,49 @@ function registerNotesIPC() {
   logger.info('Notes IPC handlers registered');
 }
 
-module.exports = { registerNotesIPC };
+
+/**
+ * Clean timeline: remove gap fillers between real updates.
+ * Gap fillers = "[no update logged]" and "Requested repair/estimate update from vendor"
+ * Rule: once a real update exists after gap fillers, remove the fillers between the two real updates.
+ * Keep only the most recent gap fillers (after the last real update).
+ */
+function cleanTimeline(timeline) {
+  if (!timeline) return timeline;
+  const lines = timeline.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length < 2) return timeline;
+
+  const isGapFiller = (line) => {
+    const lower = line.toLowerCase();
+    return lower.includes('[no update logged]') ||
+           lower.includes('requested repair update from vendor') ||
+           lower.includes('requested estimate update from vendor') ||
+           lower.includes('requested repair status update from vendor') ||
+           lower.includes('requested estimate submission') ||
+           lower.includes('requested updated etc') ||
+           (lower.includes('requested') && lower.includes('update') && lower.includes('vendor'));
+  };
+
+  const isRealUpdate = (line) => !isGapFiller(line) && line.length > 5;
+
+  // Find the last real update
+  let lastRealIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (isRealUpdate(lines[i])) { lastRealIdx = i; break; }
+  }
+
+  if (lastRealIdx === -1) return timeline; // no real updates at all
+
+  // Remove gap fillers that are BEFORE the last real update
+  // (keep gap fillers AFTER the last real update — they're current/recent)
+  const cleaned = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (i < lastRealIdx && isGapFiller(lines[i])) continue; // skip old gap fillers
+    cleaned.push(lines[i]);
+  }
+
+  return cleaned.join('\n');
+}
+
+module.exports = {
+  cleanTimeline, registerNotesIPC };
