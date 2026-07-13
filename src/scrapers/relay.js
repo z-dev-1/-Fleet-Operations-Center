@@ -962,6 +962,12 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       alternativeId:       r.alternativeId     || row.alternativeId     || '',
       serviceUrl:         r.pageUrl           || row.serviceUrl        || '',
       workRequestId:       r.workRequestId     || row.workRequestId     || '',
+      // BUG FIX: serviceState is scraped (readLabel(lines, 'State')) above but was
+      // never carried through this merge, so unit.serviceState was always undefined
+      // on every row -- the detail panel's WO status pill always fell back to
+      // displaying "Open" regardless of the work order's real state (including
+      // work orders already marked Completed/Closed in Relay).
+      serviceState:        r.serviceState      || row.serviceState      || '',
       salesforceCase:      r.salesforceCase     || row.salesforceCase    || '',
       salesforceCaseUrl:   r.salesforceCaseUrl  || row.salesforceCaseUrl || '',
       fullConversation:    r.fullConversation   || row.fullConversation  || '',

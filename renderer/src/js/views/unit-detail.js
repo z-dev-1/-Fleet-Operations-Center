@@ -1111,8 +1111,12 @@ function renderRepairPane(unit){
   var hasRelay=unit.relaySynced&&(unit.vendor||unit.issueDetails||unit.workRequestId);
   var woCard='';
   if(hasRelay){
-    var statusRaw=unit.serviceState||unit.status||'';
-    var statusKey=statusRaw.toLowerCase().includes('clos')?'closed':statusRaw.toLowerCase().includes('sour')?'sourcing':'open';
+    var statusRaw=unit.serviceState||unit.status||(unit.completed?'Completed':'')||'';
+    // Check unit.completed too (not just the raw state text) -- Relay's "State"
+    // label doesn't always literally say "Closed"; it may say "Completed", which
+    // didn't match the old 'clos'-only substring check and always fell through
+    // to 'open' even for finished work orders.
+    var statusKey=(unit.completed||/clos|complet/i.test(statusRaw))?'closed':/sour/i.test(statusRaw)?'sourcing':'open';
     var wrAge=unit.created?Math.floor((Date.now()-new Date(unit.created).getTime())/86400000):null;
     var stale=wrAge>3?'<span class="dp-wo-stale">\u26a0 '+wrAge+'d</span>':'';
 
