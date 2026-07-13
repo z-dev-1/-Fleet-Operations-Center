@@ -1696,12 +1696,31 @@ function _renderUnit(unit) {
     window.ai.suggest(unit).then(function(result){
       var bandEl = document.getElementById('dp-status-band');
       if (!bandEl) return;
-      var text = (result && result.text) ? result.text : '';
+      // BUG FIX: suggestDropdowns() (src/scrapers/orcha_ws.js) NEVER returns a
+      // '.text' field in any code path -- success (AI JSON parsed), local
+      // fallback (localClassify when AI is unreachable), or failure. It returns
+      // primaryComponent/repairStatus/confidence/reason/noteSuggestion instead.
+      // Reading result.text here always evaluated to '', so this status band
+      // NEVER updated -- it stayed stuck on 'Analyzing unit status...' forever,
+      // 100% of the time, regardless of whether AI was available or not. This
+      // silently hid the fact that a working local/offline classifier
+      // (localClassify + generateNoteSuggestion, fully deterministic, no AI
+      // required) was already running successfully in the background.
+      var text = (result && (result.noteSuggestion || result.reason)) || '';
+      bandEl.classList.remove('dp-status-band--loading');
       if (text) {
-        bandEl.classList.remove('dp-status-band--loading');
         bandEl.innerHTML = '<span class="dp-status-band__icon">&#129504;</span><span class="dp-status-band__text">'+esc(text)+'</span>';
+      } else {
+        bandEl.innerHTML = '<span class="dp-status-band__icon">&#9888;</span><span class="dp-status-band__text">AI brief unavailable.</span>';
       }
-    }).catch(function(){});
+    }).catch(function(){
+      // AI + local fallback both failed to even return -- surface this instead
+      // of leaving the band stuck on the loading spinner indefinitely.
+      var bandEl = document.getElementById('dp-status-band');
+      if (!bandEl) return;
+      bandEl.classList.remove('dp-status-band--loading');
+      bandEl.innerHTML = '<span class="dp-status-band__icon">&#9888;</span><span class="dp-status-band__text">AI brief unavailable -- Orcha unreachable.</span>';
+    });
   }
 }
 
