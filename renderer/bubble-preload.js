@@ -26,4 +26,13 @@ contextBridge.exposeInMainWorld('bubble', {
   openMain:   ()       => ipcRenderer.send('bubble:clicked'),
   /** Navigate main window to a specific unit and hide the bubble */
   openUnit:   (unitId) => ipcRenderer.send('bubble:open-unit', unitId),
+  // ── AI Chat ──
+  ask:        (prompt) => ipcRenderer.invoke('ai:orcha-action', prompt),
+  // ── Alerts push ──
+  onAlerts:   (cb)     => on('orcha:alerts', cb),
+  // ── Hide bubble ──
+  hide:       ()       => ipcRenderer.send('bubble:hide'),
+  resize:     (w, h)   => ipcRenderer.send('bubble:resize', w, h),
+  reposition: ()       => ipcRenderer.send('bubble:reposition'),
+  repositionMini: ()   => ipcRenderer.send('bubble:reposition-mini'),
 });

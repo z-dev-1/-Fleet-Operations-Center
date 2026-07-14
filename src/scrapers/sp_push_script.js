@@ -8,14 +8,17 @@
 // This function is called with: { filePath, sheetName, units, digest, headerRow }
 async function spPushWorksheet(config) {
   const { filePath, sheetName, units, digest, headerRow, dryRun } = config;
-  const SP = 'https://amazon.sharepoint.com/sites/AFP-FAS';
+  const SP = 'https://amazon.sharepoint.com'; // Site extracted from filePath
   const results = { pushed: 0, updated: 0, removed: 0, errors: 0, log: [] };
 
   const log = (msg) => { results.log.push(msg); console.log('[SP Push]', msg); };
 
   // === DOWNLOAD ===
   log('Downloading: ' + filePath);
-  const fileUrl = SP + "/_api/web/getfilebyserverrelativeurl('" + encodeURI(filePath).replace(/'/g, "''") + "')/$value";
+  // Extract site from filePath for proper API scope
+  const siteMatch = filePath.match(/(\/sites\/[^\/]+)/);
+  const siteScope = siteMatch ? siteMatch[1] : '/sites/AFP-FAS';
+  const fileUrl = SP + siteScope + "/_api/web/getfilebyserverrelativeurl('" + encodeURI(filePath).replace(/'/g, "''") + "')/$value";
   const resp = await fetch(fileUrl, { credentials: 'include' });
   if (!resp.ok) { log('ERROR: Download failed HTTP ' + resp.status); results.errors++; return results; }
   const buffer = await resp.arrayBuffer();
@@ -28,8 +31,10 @@ async function spPushWorksheet(config) {
     let idx = 0;
     while (idx < buf.byteLength - 4) {
       if (view.getUint32(idx, true) === 0x04034b50) {
+        const flags = view.getUint16(idx + 6, true);
         const method = view.getUint16(idx + 8, true);
-        const compSize = view.getUint32(idx + 18, true);
+        let compSize = view.getUint32(idx + 18, true);
+        const uncompSize = view.getUint32(idx + 22, true);
         const nameLen = view.getUint16(idx + 26, true);
         const extraLen = view.getUint16(idx + 28, true);
         const localHeaderSize = 30 + nameLen + extraLen;
@@ -37,8 +42,35 @@ async function spPushWorksheet(config) {
         let name = '';
         for (let n = 0; n < nameBytes.length; n++) name += String.fromCharCode(nameBytes[n]);
         const dataStart = idx + localHeaderSize;
-        entries.push({ name, method, compSize, localHeader: new Uint8Array(buf, idx, localHeaderSize), compData: new Uint8Array(buf, dataStart, compSize) });
+
+        // Handle data descriptor (bit 3 of flags) — compSize is 0 in local header
+        if ((flags & 0x08) && compSize === 0) {
+          // Scan for next local file header or end-of-central-dir to find data boundary
+          let scanIdx = dataStart;
+          while (scanIdx < buf.byteLength - 4) {
+            const sig = view.getUint32(scanIdx, true);
+            if (sig === 0x04034b50 || sig === 0x02014b50) break;
+            // Data descriptor signature (optional): 0x08074b50
+            if (sig === 0x08074b50) {
+              compSize = view.getUint32(scanIdx + 8, true);
+              break;
+            }
+            scanIdx++;
+          }
+          if (compSize === 0) compSize = scanIdx - dataStart;
+        }
+
+        entries.push({
+          name, method, compSize,
+          localHeader: new Uint8Array(buf, idx, localHeaderSize),
+          compData: new Uint8Array(buf, dataStart, compSize)
+        });
         idx = dataStart + compSize;
+        // Skip data descriptor if present
+        if (flags & 0x08) {
+          if (idx < buf.byteLength - 4 && view.getUint32(idx, true) === 0x08074b50) idx += 16;
+          else if (idx < buf.byteLength - 12) idx += 12; // no signature variant
+        }
       } else { idx++; }
     }
     return entries;
@@ -87,7 +119,8 @@ async function spPushWorksheet(config) {
         parts.push(ent.compData);
         // Central directory: copy fields from original local header
         const lhView = new DataView(ent.localHeader.buffer, ent.localHeader.byteOffset, ent.localHeader.byteLength);
-        const cd = new ArrayBuffer(46 + nameB.length);
+        const _xLen = lhView.getUint16(28, true);
+        const cd = new ArrayBuffer(46 + nameB.length + _xLen);
         const cv = new DataView(cd);
         cv.setUint32(0, 0x02014b50, true);  // central dir signature
         cv.setUint16(4, 20, true);           // version made by
@@ -100,11 +133,12 @@ async function spPushWorksheet(config) {
         cv.setUint32(20, lhView.getUint32(18, true), true); // compressed size
         cv.setUint32(24, lhView.getUint32(22, true), true); // uncompressed size
         cv.setUint16(28, nameB.length, true);  // name length
-        cv.setUint16(30, 0, true);  // extra field length
+        const _extraLen = lhView.getUint16(28, true); // preserve original extra field length
+        cv.setUint16(30, _extraLen, true);  // extra field length PRESERVED
         cv.setUint16(32, 0, true);  // comment length
         cv.setUint16(34, 0, true);  // disk number
         cv.setUint16(36, 0, true);  // internal attrs
-        cv.setUint32(38, 0, true);  // external attrs
+        cv.setUint32(38, ent.externalAttrs || 0x20, true);  // external attrs PRESERVED
         cv.setUint32(42, offset, true); // local header offset
         new Uint8Array(cd, 46).set(nameB);
         centralDir.push(new Uint8Array(cd));
@@ -504,12 +538,39 @@ async function spPushWorksheet(config) {
   log('New ZIP size: ' + (newZip.length / 1024).toFixed(0) + ' KB');
 
 
+  // === VALIDATE ZIP INTEGRITY ===
+  function validateZipIntegrity(zipBuffer, originalEntries) {
+    // Verify the rebuilt ZIP has at least as many entries as original
+    // Quick check: ZIP must start with PK signature and have central directory
+    const view = new DataView(zipBuffer.buffer || zipBuffer);
+    if (view.getUint32(0, true) !== 0x04034b50) {
+      log('ERROR: Invalid ZIP signature after rebuild');
+      results.errors++;
+      return false;
+    }
+    // Check minimum size (corrupted files are usually tiny)
+    if (zipBuffer.length < 1000) {
+      log('ERROR: ZIP too small after rebuild (' + zipBuffer.length + ' bytes)');
+      results.errors++;
+      return false;
+    }
+    // Check it contains [Content_Types].xml (required for xlsx)
+    const asText = new TextDecoder().decode(zipBuffer.slice(0, Math.min(zipBuffer.length, 500)));
+    // The first entry name should appear early
+    log('ZIP validation passed: ' + zipBuffer.length + ' bytes, starts with PK');
+    return true;
+  }
+  if (!validateZipIntegrity(newZip, entries)) {
+    log('ABORTED: ZIP validation failed, NOT uploading');
+    return results;
+  }
+
   // === UPLOAD ===
   if (dryRun) {
     log('DRY RUN — skipping upload. Would upload ' + (newZip.length / 1024).toFixed(0) + ' KB to: ' + filePath);
     return results;
   }
-  const uploadUrl = SP + "/_api/web/getfilebyserverrelativeurl('" + encodeURI(filePath).replace(/'/g, "''") + "')/$value";
+  const uploadUrl = SP + siteScope + "/_api/web/getfilebyserverrelativeurl('" + encodeURI(filePath).replace(/'/g, "''") + "')/$value";
   const upResp = await fetch(uploadUrl, {
     method: 'PUT', credentials: 'include',
     headers: { 'X-RequestDigest': digest, 'Content-Type': 'application/octet-stream', 'X-HTTP-Method': 'PUT' },

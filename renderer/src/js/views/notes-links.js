@@ -50,7 +50,7 @@ const _esc = (s) =>
 function _faviconUrl(url) {
   try {
     const hostname = new URL(url).hostname;
-    return `https://www.google.com/s2/favicons?sz=32&domain=${hostname}`;
+    return `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2330363d'/%3E%3Ctext x='16' y='22' font-size='16' text-anchor='middle' fill='%238b949e'%3E${hostname[0].toUpperCase()}%3C/text%3E%3C/svg%3E`;
   } catch (_) {
     return '';
   }

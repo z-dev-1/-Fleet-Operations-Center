@@ -41,6 +41,9 @@ function buildEmail(opts) {
       offsiteShopEvent: u.offsiteShopEvent || rc.offsiteShopEvent || ns.savedOffsiteEvent || '',
       offsiteShopEventUrl: u.offsiteShopEventUrl || rc.offsiteShopEventUrl || ns.savedOffsiteUrl || '',
       savedSalesforceCase: u.savedSalesforceCase || ns.savedSalesforceCase || '',
+      issueSummary: u.issueSummary || ns.issueSummary || '',
+      repairTimeline: u.repairTimeline || ns.timeline || '',
+      savedTimeline: ns.timeline || '',
       savedSalesforceCaseUrl: u.savedSalesforceCaseUrl || ns.savedSalesforceCaseUrl || '',
       dealerName:             u.dealerName || rc.dealerName || ns.dealerName || '',
       subVendor:              u.subVendor || u.dealerName || rc.dealerName || ns.subVendor || ((/offsite/i.test(u.relayStatus||'')) ? (u.geofence||'') : '') || '',
@@ -63,10 +66,10 @@ function buildEmail(opts) {
   const site = domicile || 'ALL';
   const op = (operator || '').toUpperCase();
 
-  // Slot badge colors
-  const slotBg = slotLabel === 'AM' ? 'rgba(88,166,255,.15)' : 'rgba(240,168,0,.15)';
-  const slotBorder = slotLabel === 'AM' ? 'rgba(88,166,255,.3)' : 'rgba(240,168,0,.3)';
-  const slotColor = slotLabel === 'AM' ? '#58a6ff' : '#f0a800';
+  // Slot badge colors (solid hex — Outlook doesn't render rgba)
+  const slotBg = slotLabel === 'AM' ? '#e0eeff' : '#fff4d9';
+  const slotBorder = slotLabel === 'AM' ? '#7ab3f0' : '#e6b84d';
+  const slotColor = slotLabel === 'AM' ? '#1a56db' : '#b87a00';
   const slotIcon = slotLabel === 'AM' ? '\u2600' : '\uD83C\uDF06';
   const slotDisplayLabel = slotLabel === 'AM' ? 'SOS REPORT' : 'EOS REPORT';
 
@@ -79,7 +82,7 @@ function buildEmail(opts) {
     filteredUnits = allUnits.filter(u => (u.op || '').toUpperCase() === op);
   }
 
-  const unavailUnits = filteredUnits.filter(u => u.atsState && u.atsState.toLowerCase().indexOf('unavail') > -1);
+  const unavailUnits = filteredUnits.filter(u => (u.atsState||u.lifecycleState) && (u.atsState||u.lifecycleState).toLowerCase().indexOf('unavail') > -1);
   const totalUnits = filteredUnits.length;
   const inService = totalUnits - unavailUnits.length;
 
@@ -95,14 +98,14 @@ function buildEmail(opts) {
   // Fleet summary — split by body type (Day Cab + Sleeper side by side)
   function buildSummaryCard(title, units) {
     const total = units.length;
-    const oos = units.filter(u => u.atsState && u.atsState.toLowerCase().indexOf('unavail') > -1).length;
+    const oos = units.filter(u => (u.atsState||u.lifecycleState) && (u.atsState||u.lifecycleState).toLowerCase().indexOf('unavail') > -1).length;
     const svc = total - oos;
     const pct = total > 0 ? Math.round((svc / total) * 100) : 0;
     return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline-block;vertical-align:top;min-width:380px;margin-right:16px;margin-bottom:12px;border:1px solid #dde1e6;border-radius:6px;overflow:hidden;">
 <tr><td bgcolor="#00a3bf" style="background-color:#00a3bf;padding:7px 12px;text-align:center;">${ft('#ffffff', '<b>' + title + ' &#8212; ' + op + '</b>', 'font-size:11px;letter-spacing:0.05em')}</td></tr>
 <tr><td style="padding:0;">
 <table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;">
-<tr bgcolor="#f0f3f7">
+<tr bgcolor="#e8edf3">
 <th style="padding:5px 10px;text-align:center;border-bottom:1px solid #e0e4ea;border-right:1px solid #e8ebef;">${ft('#333333','<b>CARRIER</b>','font-size:9px')}</th>
 <th style="padding:5px 10px;text-align:center;border-bottom:1px solid #e0e4ea;border-right:1px solid #e8ebef;">${ft('#333333','<b>OUT OF SERVICE</b>','font-size:9px')}</th>
 <th style="padding:5px 10px;text-align:center;border-bottom:1px solid #e0e4ea;border-right:1px solid #e8ebef;">${ft('#333333','<b>IN SERVICE</b>','font-size:9px')}</th>
@@ -110,17 +113,17 @@ function buildEmail(opts) {
 <th style="padding:5px 10px;text-align:center;border-bottom:1px solid #e0e4ea;">${ft('#333333','<b>IN-SVC %</b>','font-size:9px')}</th>
 </tr>
 <tr>
-<td style="padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;">${ft('#222222','<b>'+op+'</b>','font-size:11px')}</td>
-<td bgcolor="#dc2626" style="background-color:#dc2626;padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;">${ft('#ffffff','<b>'+oos+'</b>','font-size:11px')}</td>
-<td bgcolor="#16a34a" style="background-color:#16a34a;padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;">${ft('#ffffff','<b>'+svc+'</b>','font-size:11px')}</td>
-<td style="padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;">${ft('#222222','<b>'+total+'</b>','font-size:11px')}</td>
+<td style="padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;">${ft('#1e2d3d','<b>'+op+'</b>','font-size:11px')}</td>
+<td bgcolor="#fecaca" style="background-color:#fecaca;padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;">${ft('#991b1b','<b>'+oos+'</b>','font-size:11px')}</td>
+<td bgcolor="#bbf7d0" style="background-color:#bbf7d0;padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;">${ft('#166534','<b>'+svc+'</b>','font-size:11px')}</td>
+<td style="padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;">${ft('#1e2d3d','<b>'+total+'</b>','font-size:11px')}</td>
 <td style="padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;">${ft('#1a56db','<b>'+pct+'%</b>','font-size:11px')}</td>
 </tr>
 <tr bgcolor="#00a3bf">
-<td style="padding:6px 10px;text-align:center;border-right:1px solid rgba(255,255,255,.2);">${ft('#ffffff','<b>Total</b>','font-size:11px')}</td>
-<td style="padding:6px 10px;text-align:center;border-right:1px solid rgba(255,255,255,.2);">${ft('#ffffff','<b>'+oos+'</b>','font-size:11px')}</td>
-<td style="padding:6px 10px;text-align:center;border-right:1px solid rgba(255,255,255,.2);">${ft('#ffffff','<b>'+svc+'</b>','font-size:11px')}</td>
-<td style="padding:6px 10px;text-align:center;border-right:1px solid rgba(255,255,255,.2);">${ft('#ffffff','<b>'+total+'</b>','font-size:11px')}</td>
+<td style="padding:6px 10px;text-align:center;border-right:1px solid #33a8cc;">${ft('#ffffff','<b>Total</b>','font-size:11px')}</td>
+<td style="padding:6px 10px;text-align:center;border-right:1px solid #33a8cc;">${ft('#ffffff','<b>'+oos+'</b>','font-size:11px')}</td>
+<td style="padding:6px 10px;text-align:center;border-right:1px solid #33a8cc;">${ft('#ffffff','<b>'+svc+'</b>','font-size:11px')}</td>
+<td style="padding:6px 10px;text-align:center;border-right:1px solid #33a8cc;">${ft('#ffffff','<b>'+total+'</b>','font-size:11px')}</td>
 <td style="padding:6px 10px;text-align:center;">${ft('#ffffff','<b>'+pct+'%</b>','font-size:11px')}</td>
 </tr>
 </table>
@@ -171,7 +174,8 @@ function buildEmail(opts) {
       const created = u.created || '';
       const duration = u.duration || '';
       const issue = u.issue || '';
-      const notes = (u.savedNotes || '\u2014').replace(/\n/g, '<br>');
+      const timeline = u.repairTimeline || u.savedTimeline || '';
+      const notes = timeline ? timeline.split('\n').filter(l => l.trim().length > 5).map(l => l.trim()).join('<br>') : (u.savedNotes || '\u2014').replace(/\n/g, '<br>');
 
       // Case / Offsite: Alt ID + Offsite Event + Salesforce Case (all hyperlinked)
       let caseHtml = '';
@@ -198,15 +202,11 @@ function buildEmail(opts) {
 
       // Relay Garage
       let rgHtml = ft('#bbbbbb', '\u2014', 'font-size:10px');
-      if (vendor) {
-        rgHtml = ft('#222222', '<b>' + vendor + '</b>', 'font-size:10px');
-        // S25-12: Sub Vendor line (dealer name or geofence fallback)
+      if (/offsite/i.test(u.relayStatus || '') && vendor) {
+        rgHtml = ft('#1e2d3d', '<b>' + vendor + '</b>', 'font-size:10px');
         const _subV = u.subVendor || u.dealerName || '';
-        if (_subV && _subV !== vendor) rgHtml += '<br>' + ft('#7c3aed', 'Sub: ' + _subV, 'font-size:9px');
-        if (u.geofence && /offsite/i.test(u.relayStatus || '')) {
-          rgHtml += '<br>' + ft('#7c3aed', '\uD83D\uDCCD ' + u.geofence, 'font-size:9px');
-        }
-        if (created) rgHtml += '<br>' + ft('#888888', created, 'font-size:9px');
+        if (_subV && _subV !== vendor) rgHtml += '<br>' + ft('#7c3aed', _subV, 'font-size:9px');
+        if (u.geofence) rgHtml += '<br>' + ft('#7c3aed', '\uD83D\uDCCD ' + u.geofence, 'font-size:9px');
         if (duration) {
           let dColor = '#16a34a';
           const dayMatch = duration.match(/(\d+)\s*day/);
@@ -217,22 +217,21 @@ function buildEmail(opts) {
           }
           rgHtml += '<br>' + ft(dColor, '<b>Down: ' + duration + '</b>', 'font-size:9px');
         }
-        if (issue) rgHtml += '<br>' + ft('#555555', '<i>' + issue + '</i>', 'font-size:9px');
+        const aiIssue = u.issueSummary || u.issue || '';
+        if (aiIssue) rgHtml += '<br>' + ft('#555555', '<i>' + aiIssue.substring(0, 120) + '</i>', 'font-size:9px');
       }
-
-
 
       const td = (content) => `<td bgcolor="${bg}" style="background-color:${bg};padding:7px 8px;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;vertical-align:top;">${content}</td>`;
 
       rows += `<tr>
-${td(ft('#222222', u.site || '--', 'font-size:10px'))}
-${td(ft('#222222', u.op || '--', 'font-size:10px'))}
+${td(ft('#1e2d3d', u.site || '--', 'font-size:10px'))}
+${td(ft('#1e2d3d', u.op || '--', 'font-size:10px'))}
 ${td(ft('#1a56db', '<b>' + (u.id || '--') + '</b>', 'font-size:11px'))}
 ${td(`<table cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="${makeBg}" style="background-color:${makeBg};padding:2px 6px;border-radius:3px;">${ft(makeColor,'<b>'+makeLbl+'</b>','font-size:9px')}</td></tr></table>`)}
 ${td(`<table cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="#dc2626" style="background-color:#dc2626;padding:2px 7px;border-radius:12px;">${ft('#ffffff','<b>UNAVAILABLE</b>','font-size:9px')}</td></tr></table>`)}
-${td(ft('#222222', u.relayStatus || '--', 'font-size:10px'))}
+${td(ft('#1e2d3d', u.relayStatus || '--', 'font-size:10px'))}
 ${td(ft(rsColor, '<b>' + repairStatus + '</b>', 'font-size:10px'))}
-${td(ft('#222222', u.savedPrimaryComponent || '--', 'font-size:10px'))}
+${td(ft('#1e2d3d', u.savedPrimaryComponent || '--', 'font-size:10px'))}
 ${td(caseHtml)}
 ${td(rgHtml)}
 <td bgcolor="${bg}" style="background-color:${bg};padding:7px 8px;border-bottom:1px solid #eaecef;vertical-align:top;"><table cellpadding="0" cellspacing="0" border="0" width="350"><tr><td width="350" style="width:350px;"><div style="background-color:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;padding:8px 10px;font-size:10px;color:#374151;line-height:1.5;width:330px;max-width:330px;word-wrap:break-word;overflow:hidden;">${notes}</div></td></tr></table></td>
@@ -259,7 +258,7 @@ ${rows}
 
     let pmRows = '';
     filteredUnits.forEach((u, i) => {
-      const isUnavail = u.atsState && u.atsState.toLowerCase().indexOf('unavail') > -1;
+      const isUnavail = (u.atsState||u.lifecycleState) && (u.atsState||u.lifecycleState).toLowerCase().indexOf('unavail') > -1;
       const bg = isUnavail ? '#fff5f5' : (i % 2 === 0 ? '#ffffff' : '#f9fbf9');
       const makeRaw = (u.model || '').toLowerCase();
       let makeBg = '#f3f4f6', makeLbl = u.model || '--', makeColor = '#374151';
@@ -292,7 +291,7 @@ ${rows}
 
       pmRows += `<tr>
 ${td(ft('#1a56db', '<b>' + (u.id || '--') + '</b>', 'font-size:11px'))}
-${td(ft('#222222', u.site || '--', 'font-size:10px'), 'center')}
+${td(ft('#1e2d3d', u.site || '--', 'font-size:10px'), 'center')}
 ${td(`<table cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="${makeBg}" style="background-color:${makeBg};padding:2px 6px;border-radius:3px;">${ft(makeColor,'<b>'+makeLbl+'</b>','font-size:9px')}</td></tr></table>`, 'center')}
 ${td(ft('#555555', bodyType, 'font-size:10px'), 'center')}
 ${td(ft(pmColor(pmB), '<b>' + pmB + '</b>', 'font-size:10px'), 'center')}
@@ -362,7 +361,7 @@ ${pmRows}
       // Auto-determine PM status
       const issueText = ((u.savedNotes || '') + ' ' + (u.issue || '')).toLowerCase();
       const hasPM = issueText.includes('predictive maintenance') || issueText.includes('predictive maint');
-      const isActive = u.atsState && u.atsState.toLowerCase() === 'available';
+      const isActive = (u.atsState||u.lifecycleState) && (u.atsState||u.lifecycleState).toLowerCase() === 'available';
       let pmStatus = u.pmStatus || '';
       if (!pmStatus) {
         if (hasPM && isActive) pmStatus = 'Completed';
@@ -378,7 +377,7 @@ ${pmRows}
 <table cellpadding="0" cellspacing="0" border="0"><tr><td style="border:2px solid ${scoreColor};border-radius:50%;padding:3px 6px;text-align:center;">${ft(scoreColor, '<b>' + score + '</b>', 'font-size:11px')}</td></tr></table>
 </td>
 <td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;">${ft('#1a56db', '<b>' + (u.id || '--') + '</b>', 'font-size:11px')}</td>
-<td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;">${ft('#222222', u.op || '--', 'font-size:10px')}</td>
+<td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;">${ft('#1e2d3d', u.op || '--', 'font-size:10px')}</td>
 <td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;">${ft('#555555', u.site || '--', 'font-size:10px')}</td>
 <td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;">${ft(tierColor, '<b>' + tier + '</b>', 'font-size:10px')}</td>
 <td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;">${ft('#333333', insight || '\u2014', 'font-size:10px')}</td>

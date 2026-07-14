@@ -317,9 +317,9 @@ ${snapshot.elements.filter(e => e.visible || e.type === 'file').map(e =>
 STEP HISTORY (what we've done so far):
 ${stepHistory.slice(-5).map(h => '- ' + h).join('\n') || '(none yet)'}
 
-WIZARD RULES:
+AAP WIZARD STEPS (in order):\n- Step 1: Equipment/Asset - type unit ID in combobox, select from dropdown\n- Step 2: Location - select "Off Site" radio button. For GeoFence/domicile combobox: type the domicile code (ABE40, AVP40, etc) and select it. If it asks for address, skip or type the domicile.\n- Step 3: Work Request Details - select Area dropdown (e.g. Engine, Brakes, Electrical, Tires). Select Subcategory. Type the Title/description. Select Urgency if shown.\n- Step 4: Vendor/Assignment - if vendor field shown, select the vendor from dropdown\n- Step 5: Review/Submit - click Submit or Save\n- After submit: success page shows WR ID\n\nWIZARD RULES:
 - This is a multi-page wizard. Fill visible fields, then click Next.
-- For combobox inputs (role="combobox"): type the value char-by-char, then wait for option to appear and click it.
+- For combobox inputs (role="combobox"): type the value using charByChar:true with charDelay:80, then use waitForOption action to wait for dropdown, then click the matching option.\n- LOCATION STEP: Always click "Off Site" radio first. Then find the GeoFence/Location combobox and type the domicile code from payload (e.g. ABE40). Wait for option then click it. Then click Next.\n- WORK REQUEST DETAILS: Find Area dropdown and select the first areaPair.area. Find Subcategory and select areaPair.subcategory. Type title in the title/description field. Then click Next.\n- If a field is already filled correctly, skip it and move on.
 - For radio buttons: use action type "radio" with the label text.
 - If a modal is visible, handle it first (e.g., click Confirm).
 - If page is loading, respond with a single "wait" action.
@@ -337,12 +337,63 @@ RESPOND WITH A JSON ARRAY OF ACTIONS. Each action is an object:
 - { "type": "wait", "duration": 2000 }
 - { "type": "DONE", "workRequestId": "WR-12345" } ← when wizard is complete
 
+PAST LESSONS FROM PREVIOUS ATTEMPTS:
+${lessonContext}
+
 RESPOND WITH ONLY THE JSON ARRAY. No explanation, no markdown, no code fences.`;
 }
 
 // ═══════════════════════════════════════════════════════════════
 // MAIN AGENT LOOP
 // ═══════════════════════════════════════════════════════════════
+
+// Watch user interactions and learn from corrections
+const WATCH_SCRIPT = `
+(function() {
+  if (window.__fleetWatching) return 'already_watching';
+  window.__fleetWatching = true;
+  window.__fleetUserActions = [];
+  
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('button, [role="button"], [role="option"], [role="radio"], input, select, a, [role="combobox"]');
+    if (!el) return;
+    const label = el.getAttribute('aria-label') || el.innerText || el.placeholder || el.id || '';
+    window.__fleetUserActions.push({
+      type: 'click',
+      tag: el.tagName.toLowerCase(),
+      label: label.trim().substring(0, 80),
+      role: el.getAttribute('role') || el.type || '',
+      id: el.id || '',
+      ts: Date.now()
+    });
+  }, true);
+  
+  document.addEventListener('input', (e) => {
+    const el = e.target;
+    if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA' && el.tagName !== 'SELECT')) return;
+    window.__fleetUserActions.push({
+      type: 'input',
+      tag: el.tagName.toLowerCase(),
+      label: el.getAttribute('aria-label') || el.placeholder || el.id || '',
+      value: el.value.substring(0, 50),
+      id: el.id || '',
+      ts: Date.now()
+    });
+  }, true);
+  
+  return 'watching';
+})();
+`;
+
+// Collect what user did
+const COLLECT_SCRIPT = `
+(function() {
+  const actions = window.__fleetUserActions || [];
+  window.__fleetUserActions = [];
+  return JSON.stringify(actions);
+})();
+`;
+
 async function runAdaptiveWR(payload, askAI, log) {
   if (!log) log = console.log;
   log('[AdaptiveWR] Starting for unit: ' + (payload.unit || payload.asset_id));
@@ -368,9 +419,19 @@ async function runAdaptiveWR(payload, askAI, log) {
   await sleep(3000); // Extra wait for React to render
   
   const stepHistory = [];
+  
+  // Load past lessons (what worked/failed before)
+  const store = require('../store');
+  const lessons = store.load('aapLessons', []);
+  const lessonContext = lessons.length > 0
+    ? '\nPAST LESSONS (what worked before on this wizard):\n' + lessons.slice(-15).map(l => '- ' + l).join('\n') + '\n'
+    : '';
   let maxSteps = 30; // Safety limit
   let step = 0;
   let result = { ok: false, error: 'Max steps reached' };
+  // Save what we got stuck on
+  lessons.push('GOT STUCK after ' + step + ' steps. Last page: ' + (stepHistory[stepHistory.length-1] || 'unknown'));
+  store.save('aapLessons', lessons);
   
   while (step < maxSteps) {
     step++;
@@ -456,6 +517,23 @@ async function runAdaptiveWR(payload, askAI, log) {
     log(`[AdaptiveWR] Results: ${summary}`);
     stepHistory.push(`Step ${step}: ${actions.map(a => a.type + (a.value ? '=' + String(a.value).substring(0, 20) : '')).join(', ')} → ${summary}`);
     
+    // Learn from results
+    const allOk = actionResults.every(r => r.ok);
+    if (allOk && actions.length > 0) {
+      const pageHint = snapshot.pageText.substring(0, 50);
+      lessons.push('On page "' + pageHint + '": ' + actions.map(a => a.type + (a.value ? '=' + String(a.value).substring(0, 30) : '')).join(', ') + ' WORKED');
+      if (lessons.length > 50) lessons.splice(0, lessons.length - 50);
+      store.save('aapLessons', lessons);
+    } else {
+      const failedActions = actionResults.filter(r => !r.ok);
+      if (failedActions.length > 0) {
+        const pageHint = snapshot.pageText.substring(0, 50);
+        lessons.push('On page "' + pageHint + '": ' + failedActions.map(r => r.action + ' FAILED: ' + (r.error || '')).join(', ') + ' - TRY DIFFERENT APPROACH');
+        if (lessons.length > 50) lessons.splice(0, lessons.length - 50);
+        store.save('aapLessons', lessons);
+      }
+    }
+    
     // 9. Wait for page to react
     await sleep(1500);
   }
@@ -465,7 +543,34 @@ async function runAdaptiveWR(payload, askAI, log) {
     if (result.ok) {
       log('[AdaptiveWR] Success! Window stays open for review.');
     } else {
-      log('[AdaptiveWR] Failed: ' + result.error + '. Window stays open.');
+      log('[AdaptiveWR] Failed: ' + result.error + '. Switching to WATCH MODE - complete the form manually and I will learn.');
+      
+      // Start watching user actions
+      try { await win.webContents.executeJavaScript(WATCH_SCRIPT); } catch(e) {}
+      
+      // Poll for user actions every 5 seconds for 3 minutes
+      let watchTime = 0;
+      const watchInterval = setInterval(async () => {
+        watchTime += 5000;
+        if (win.isDestroyed() || watchTime > 180000) {
+          clearInterval(watchInterval);
+          return;
+        }
+        try {
+          const raw = await win.webContents.executeJavaScript(COLLECT_SCRIPT);
+          const userActions = JSON.parse(raw);
+          if (userActions.length > 0) {
+            const pageText = await win.webContents.executeJavaScript('document.title + " | " + (document.querySelector("h1,h2,h3") || {}).innerText || ""');
+            userActions.forEach(action => {
+              const lesson = 'USER CORRECTION on "' + (pageText || '').substring(0, 40) + '": ' + action.type + ' ' + action.tag + ' label="' + action.label + '"' + (action.value ? ' value="' + action.value + '"' : '');
+              lessons.push(lesson);
+              log('[AdaptiveWR] Learned: ' + lesson);
+            });
+            if (lessons.length > 50) lessons.splice(0, lessons.length - 50);
+            store.save('aapLessons', lessons);
+          }
+        } catch(e) {}
+      }, 5000);
     }
   }
   

@@ -18,7 +18,7 @@ const logger = require('../utils/logger')('ipc:orcha');
 const { handle, timeoutAfter, requireString, requireArray } = require('./_safe');
 const { ConfigError, NetworkError } = require('../utils/errors');
 
-// ── Issue #4: URL allowlist for open-popup ────────────────────────────────
+// â”€â”€ Issue #4: URL allowlist for open-popup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Only these hostnames may be loaded in a managed BrowserWindow with AutoLogin.
 // Subdomain matching: any host that ENDS WITH an allowed entry is permitted.
 const POPUP_ALLOWED_HOSTS = [
@@ -55,8 +55,8 @@ function _validatePopupUrl(rawUrl) {
 function registerOrchaIPC(ctx) {
   const send = ctx.sendToWindow;
 
-  // ── orcha:deep-process ───────────────────────────────────────────────────
-  // Issue #11: 120s timeout — runOrchaDeepScan cannot hang IPC indefinitely
+  // â”€â”€ orcha:deep-process â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Issue #11: 120s timeout â€” runOrchaDeepScan cannot hang IPC indefinitely
   handle('orcha:deep-process', async (_e, unitIds) => {
     requireArray(unitIds, 'unitIds');
     // Validate each entry is a non-empty string
@@ -81,6 +81,16 @@ function registerOrchaIPC(ctx) {
       timeoutAfter(120000, 'orcha:deep-process'),
     ]);
     const notes = store.load('notesStore', {});
+        // Run anomaly detection and push alerts to renderer
+    try {
+      const { runAnomalyDetection } = require('../orcha/anomaly');
+      const fd = store.load('fleetData', {});
+      const alerts = runAnomalyDetection((fd.rows || []).concat(targets));
+      if (alerts && alerts.length && ctx.sendToWindow) {
+        ctx.sendToWindow('orcha:alerts', { alerts, counts: { critical: alerts.filter(a => a.severity === 'critical').length, warning: alerts.filter(a => a.severity === 'warning').length, info: alerts.filter(a => a.severity === 'info').length } });
+      }
+    } catch(e) { /* anomaly detection is advisory — don't block */ }
+
     return {
       processed: result.processed,
       units: targets
@@ -94,7 +104,7 @@ function registerOrchaIPC(ctx) {
     };
   });
 
-  // ── orcha:record-correction ──────────────────────────────────────────────
+  // â”€â”€ orcha:record-correction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Issue #19: validate all required fields before writing to learn store
   handle('orcha:record-correction', async (_e, correction) => {
     if (!correction || typeof correction !== 'object') {
@@ -117,19 +127,19 @@ function registerOrchaIPC(ctx) {
     return { ok: true };
   });
 
-  // ── orcha:suggest-vendor ─────────────────────────────────────────────────
+  // â”€â”€ orcha:suggest-vendor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   handle('orcha:suggest-vendor', async (_e, unit) => {
     const { suggestVendor } = require('../orcha/learn');
     return suggestVendor(unit);
   });
 
-  // ── orcha:get-corrections ────────────────────────────────────────────────
+  // â”€â”€ orcha:get-corrections â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   handle('orcha:get-corrections', async (_e, field, limit) => {
     const { getCorrectionsContext } = require('../orcha/learn');
     return getCorrectionsContext(field, limit);
   });
 
-  // ── open-popup ───────────────────────────────────────────────────────────
+  // â”€â”€ open-popup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Issue #4: URL validated against POPUP_ALLOWED_HOSTS before window creation
   handle('open-popup', async (_e, url, title) => {
     requireString(url, 'url');
@@ -151,6 +161,100 @@ function registerOrchaIPC(ctx) {
     });
     return { success: true };
   });
+
+
+  // S28-Sprint1: dismiss anomaly alert
+  handle('orcha:dismiss-alert', (_e, alertId) => {
+    requireString(alertId, 'alertId');
+    const { dismissAlert } = require('../orcha/anomaly');
+    dismissAlert(alertId);
+    return { ok: true };
+  });
+
+  // â”€â”€ S28-Sprint3: Execute recommendation via Orchestrator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Validates through Guardian, then runs the intent through the full
+  // orchestrator pipeline: validate â†’ enrich â†’ plan â†’ execute â†’ verify
+  handle('orcha:execute', async (_e, intent) => {
+    if (!intent || typeof intent !== 'object') throw new ConfigError('intent must be an object', 'intent');
+
+    const orchestrator = require('../orcha/orchestrator');
+    const guardian     = require('../orcha/guardian');
+    const context      = require('../orcha/context');
+
+    // Hydrate context with latest fleet data (so orchestrator can enrich)
+    if (ctx.lastData && ctx.lastData.rows) {
+      for (const row of ctx.lastData.rows) {
+        if (row.equipmentId) context.updateUnit(row.equipmentId, row);
+      }
+    }
+
+    // Step 1: Guardian pre-flight check
+    const guardResult = guardian.check({
+      type:   intent.type,
+      unitId: intent.unitId || intent.unit,
+      data:   intent.data || intent.payload || {},
+    });
+
+    if (!guardResult.allowed) {
+      logger.warn('Guardian BLOCKED intent:', intent.type, guardResult.issues.map(i => i.message).join('; '));
+      return {
+        success: false,
+        blocked: true,
+        issues: guardResult.issues,
+        message: 'Action blocked by safety checks: ' + guardResult.issues.map(i => i.message).join('; '),
+      };
+    }
+
+    // Step 2: Execute through orchestrator
+    logger.info('Orchestrator executing:', intent.type, 'unit:', intent.unitId || intent.unit || '(fleet-wide)');
+    const result = await orchestrator.execute({
+      type:   intent.type,
+      unitId: intent.unitId || intent.unit,
+      data:   intent.data || intent.payload || {},
+      source: 'recommendation',
+    });
+
+    // Step 3: Push execution result to renderer
+    ctx.send('orcha:execution-result', {
+      intent: intent.type,
+      unit:   intent.unitId || intent.unit,
+      result,
+      ts:     new Date().toISOString(),
+    });
+
+    return result;
+  });
+
+  // â”€â”€ S28-Sprint3: Get orchestrator execution log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  handle('orcha:get-execution-log', () => {
+    const orchestrator = require('../orcha/orchestrator');
+    return orchestrator.getLog(30);
+  });
+
+  // â”€â”€ S28: Excel Export â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  handle('orcha:export-excel', (_e, { rows, columns }) => {
+    const { generateExcel } = require('../utils/excel-export');
+    const { app } = require('electron');
+    const downloadsPath = app.getPath('downloads');
+    const date = new Date().toISOString().slice(0, 10);
+    const filename = `fleet-export-${date}.xls`;
+    const outputPath = require('path').join(downloadsPath, filename);
+    generateExcel(rows, columns, outputPath);
+    logger.info('Excel exported:', outputPath);
+    return { ok: true, path: outputPath, filename };
+  });
+
+  // â”€â”€ S28: RCA Code Auto-Inference â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  handle('orcha:infer-rca', (_e, { text, context }) => {
+    const { inferRCA } = require('../orcha/rca-infer');
+    return inferRCA(text || '', context || {});
+  });
+
+  handle('orcha:infer-rca-unit', (_e, row) => {
+    const { inferRCAForUnit } = require('../orcha/rca-infer');
+    return inferRCAForUnit(row || {});
+  });
+
 
   logger.info('Orcha IPC handlers registered');
 }

@@ -1,80 +1,94 @@
 /**
- * status-bar.js -- Top status bar component
+ * status-bar.js — Bottom status bar
  *
- * Shows: sync status text | last-sync time | auth badge | version
- *
- * Reacts to bus events -- no direct IPC.
+ * Always visible. Shows:
+ *   Left:  Last sync time · Fleet count · Sync status message
+ *   Right: AI status · Orcha connection · Version
  */
 
 import bus   from '../bus.js';
 import state from '../state.js';
-import toast              from './toast.js';
-import { fleet as fleetBridge } from '../bridge.js';
 
 let _el = null;
+let _lastSync = null;
+let _statusMsg = '';
+let _unitCount = 0;
+let _unavailCount = 0;
+let _aiConnected = false;
 
-function _fmt(isoDate) {
-  if (!isoDate) return '--';
-  const d = new Date(isoDate);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function _render() {
+  if (!_el) return;
+  const ago = _lastSync ? _timeSince(_lastSync) : 'never';
+  _el.innerHTML = `
+    <div class="sb-bar">
+      <div class="sb-left">
+        <span class="sb-item sb-sync-ago">
+          <span class="sb-dot ${_lastSync && (Date.now() - _lastSync < 600000) ? 'sb-dot--green' : 'sb-dot--amber'}"></span>
+          Last sync: ${ago}
+        </span>
+        <span class="sb-sep">│</span>
+        <span class="sb-item">${_unitCount} units</span>
+        <span class="sb-sep">│</span>
+        <span class="sb-item sb-unavail">${_unavailCount} unavailable</span>
+        ${_statusMsg ? '<span class="sb-sep">│</span><span class="sb-item sb-msg">' + _esc(_statusMsg) + '</span>' : ''}
+      </div>
+      <div class="sb-right">
+        <span class="sb-item">
+          <span class="sb-dot ${_aiConnected ? 'sb-dot--green' : 'sb-dot--red'}"></span>
+          AI: ${_aiConnected ? 'Connected' : 'Disconnected'}
+        </span>
+        <span class="sb-sep">│</span>
+        <span class="sb-item sb-version">v3.0.0</span>
+      </div>
+    </div>
+  `;
+}
+
+function _esc(s) { return String(s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+function _timeSince(ts) {
+  const sec = Math.round((Date.now() - ts) / 1000);
+  if (sec < 60) return sec + 's ago';
+  const min = Math.round(sec / 60);
+  if (min < 60) return min + 'm ago';
+  const hr = Math.round(min / 60);
+  return hr + 'h ago';
 }
 
 export function init(container) {
-  _el = document.createElement('div');
-  _el.id = 'status-bar';
-  _el.innerHTML = `
-    <div class="status-bar__left">
-      <span id="sb-status" class="status-bar__status">Connecting...</span>
-    </div>
-    <div class="status-bar__center">
-      <span id="sb-count" class="status-bar__count"></span>
-      <span id="sb-sync-time" class="status-bar__sync-time"></span>
-    </div>
-    <div class="status-bar__right">
-      <span id="sb-auth" class="status-bar__auth status-bar__auth--unknown">Auth</span>
-      <span id="sb-version" class="status-bar__version"></span>
-    </div>
-  `;
-  container.prepend(_el);
+  if (!container) {
+    _el = document.createElement('div');
+    _el.id = 'status-bar-mount';
+    document.body.appendChild(_el);
+  } else {
+    _el = container;
+  }
 
-  // Version
-  fleetBridge.getVersion().then((v) => {
-    const vEl = document.getElementById('sb-version');
-    if (vEl) vEl.textContent = 'v' + v;
-  }).catch(() => {});
+  _render();
 
-  // Bus subscriptions
-  bus.on('fleet:status', (msg) => {
-    const el = document.getElementById('sb-status');
-    if (el) el.textContent = msg;
-  });
-
-  bus.on('fleet:error', (err) => {
-    const el = document.getElementById('sb-status');
-    if (el) {
-      el.textContent = err;
-      el.classList.add('status-bar__status--error');
-    }
-    toast.show('error', err, 6000);
-  });
-
+  // Update on sync complete
   bus.on('state:fleet', (fleetSlice) => {
-    const countEl    = document.getElementById('sb-count');
-    const syncEl     = document.getElementById('sb-sync-time');
-    const statusEl   = document.getElementById('sb-status');
-    if (countEl)  countEl.textContent  = fleetSlice.count + ' units';
-    if (syncEl)   syncEl.textContent   = fleetSlice.syncedAt
-      ? ('synced ' + _fmt(fleetSlice.syncedAt) + (fleetSlice.stale ? ' (stale)' : ''))
-      : '';
-    if (statusEl) statusEl.classList.remove('status-bar__status--error');
+    _lastSync = Date.now();
+    const rows = fleetSlice.rows || [];
+    _unitCount = rows.length;
+    _unavailCount = rows.filter(r => /unavailable/i.test(r.lifecycleState || '')).length;
+    _render();
   });
 
-  bus.on('auth:mwinit-status', (s) => {
-    const el = document.getElementById('sb-auth');
-    if (!el) return;
-    el.className = 'status-bar__auth ' +
-      (s.ok ? 'status-bar__auth--ok' : 'status-bar__auth--fail');
-    el.title = s.reason || (s.ok ? 'Midway authenticated' : 'Midway auth failed');
-    el.textContent = s.ok ? 'Auth ok' : 'Auth fail';
+  // Sync status messages (from sync pipeline)
+  bus.on('sync:status', (msg) => {
+    _statusMsg = msg;
+    _render();
+    // Clear after 8s
+    setTimeout(() => { _statusMsg = ''; _render(); }, 8000);
   });
+
+  // AI connection
+  bus.on('orcha:status', (status) => {
+    _aiConnected = !!(status && status.connected);
+    _render();
+  });
+
+  // Periodic refresh (update "ago" text)
+  setInterval(_render, 30000);
 }

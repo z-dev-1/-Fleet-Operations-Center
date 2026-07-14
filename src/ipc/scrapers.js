@@ -183,7 +183,7 @@ function registerScrapersIPC(ctx) {
     requireString(equipmentId, 'equipmentId');
     requireString(assetUrl, 'assetUrl');
     requireString(state, 'state');
-    const { setLifecycleState } = require('../../src/scrapers/aap_lifecycle');
+    const { setLifecycleState } = require('../scrapers/setLifecycle');
     try {
       return await setLifecycleState({ equipmentId, assetUrl, state, reason: reason || '' });
     } catch (e) {
@@ -200,11 +200,24 @@ function registerScrapersIPC(ctx) {
     requireObject(payload, 'payload');
     _wrLock = true;
     try {
-      const { createWorkRequest } = require('../../src/scrapers/aap_create_wr');
-      const logs = [];
-      const log  = (msg) => { logs.push(msg); logger.info(msg); if (send) send('wr:progress', msg); };
-      const result = await createWorkRequest(payload, unit, log);
-      return { ...result, logs };
+      const { runAdaptiveWR } = require('../scrapers/aap_adaptive_agent');
+      const relay = require('../orcha/relay');
+      
+      async function askAI(prompt) {
+        return await relay.ask(prompt);
+      }
+      
+      const log = (msg) => {
+        logger.info(msg);
+        try {
+          const wins = require('electron').BrowserWindow.getAllWindows();
+          const main = wins.find(w => !w.isDestroyed() && w.webContents.getURL().includes('localhost:5173'));
+          if (main) main.webContents.send('wr:progress', { message: msg });
+        } catch(e) {}
+      };
+      
+      const result = await runAdaptiveWR(payload, askAI, log);
+      return result;
     } finally {
       _wrLock = false;
     }
@@ -287,6 +300,20 @@ function registerScrapersIPC(ctx) {
       _woLock = false;
     }
   });
+  // ── S28: relay:get-cache + relay:get-unit-cache ──────────────────────────────
+  // Wiring fix: exposes stored relay cache to the renderer so unit-detail can
+  // display work order cards without needing a live scrape.
+  handle('relay:get-cache', () => {
+    const store = require('../store');
+    return store.load('relayCache', {});
+  });
+
+  handle('relay:get-unit-cache', (_e, equipmentId) => {
+    const store = require('../store');
+    const cache = store.load('relayCache', {});
+    return cache[equipmentId] || { workOrders: [] };
+  });
+
   logger.info('Scrapers IPC handlers registered');
 }
 

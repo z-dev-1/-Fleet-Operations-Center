@@ -42,6 +42,10 @@ function registerAllIPC(ctx) {
   registerMiscIPC(ctx);
   registerVendorIPC();
   registerVendorHistoryIPC();
+  const { registerPartnerWRHandlers } = require("./partner-wr");
+  registerPartnerWRHandlers(ctx);
+  const { registerContactsHandlers } = require('./contacts');
+  registerContactsHandlers();
   logger.info('All IPC handlers registered');
 }
 

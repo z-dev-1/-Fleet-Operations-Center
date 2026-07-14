@@ -49,7 +49,33 @@ const _state = {
     lastError:    null, // { workflowId, vendor, unit, error, code, ts }
     history:      {},  // equipmentId -> [{ workflowId, vendor, outcome, caseNumber, caseUrl, error, ts }] max 10
   },
+  // S28-Sprint1: Orcha monitor intelligence results
+  monitor: {
+    results: [],   // per-unit health scores
+    summary: null, // fleet-wide summary
+  },
+  // S28-Sprint1: Orcha anomaly alerts
+  alerts: {
+    alerts: [],    // active alert objects
+    counts: { critical: 0, warning: 0, info: 0 },
+  },
+  // S28-Sprint1: Orcha action recommendations
+  recommendations: {
+    recommendations: [],
+    summary: { total: 0, byAction: {}, byUrgency: {} },
+  },
+  // S28-Sprint2: Workflow progress tracker
+  tracker: {
+    tracked: [],
+    stuck: [],
+    summary: { total: 0, stuck: 0, stageCounts: {}, avgProgress: 0 },
+  },
+  // S28-Sprint3: System health
+  health: {},
 };
+
+
+
 
 function _deepClone(obj) {
   return JSON.parse(JSON.stringify(obj));

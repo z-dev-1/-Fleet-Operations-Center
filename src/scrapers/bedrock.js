@@ -114,4 +114,29 @@ Reply ONLY with a single JSON object, no markdown, no explanation:
   }
 }
 
-module.exports = { suggestDropdowns };
+
+/**
+ * askBedrock(prompt) - General-purpose AI call via Bedrock Claude
+ * Returns plain text response.
+ */
+async function askBedrock(prompt) {
+  const body = JSON.stringify({
+    anthropic_version: 'bedrock-2023-05-31',
+    max_tokens: 2048,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const cmd = new InvokeModelCommand({
+    modelId: MODEL_ID,
+    contentType: 'application/json',
+    accept: 'application/json',
+    body,
+  });
+
+  const response = await client.send(cmd);
+  const raw = JSON.parse(Buffer.from(response.body).toString('utf-8'));
+  return (raw.content && raw.content[0] && raw.content[0].text) || '';
+}
+
+module.exports = {
+  askBedrock, suggestDropdowns };

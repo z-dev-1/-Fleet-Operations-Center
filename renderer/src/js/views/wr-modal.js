@@ -19,6 +19,7 @@
  */
 
 import { aap, files } from '../bridge.js';
+import bus from '../bus.js';
 import toast           from '../components/toast.js';
 
 // ── Vendor list (mirrors aap_create_wr.js VENDOR_IDS) ─────────────────────
@@ -49,10 +50,10 @@ const URGENCY_REASONS = [
   'Other',
 ];
 
-const AREA_TEMPLATES = [
-  'ENGINE', 'BRAKES', 'TIRES/WHEELS', 'ELECTRICAL',
-  'HVAC', 'FRAME/BODY', 'SUSPENSION', 'TRANSMISSION', 'FUEL SYSTEM', 'EXHAUST',
-];
+const AREA_SUBS = {"BODY":["AIR FILTERS","BATTERY BOX","BODY CAB COMPONENTS","BODY COMPONENTS","BRACKET","BULKHEAD","BUMPER ASSEMBLY","CAB","CARGO BOX","CARGO RESTRAINT","CORNER CAP ASSEMBLY","COWL ASSEMBLY","DEFLECTOR","EXTERIOR LIGHTS","EXTERIOR PANEL ASSEMBLY","FAIRINGS","FASTENERS","FLOOR ASSEMBLY","FRAME ASSEMBLY","GLASS ASSEMBLY","HOOD","INTERIOR TRIM","MIRRORS AND VISOR","MUD FLAPS","ROLL-UP DOOR","ROOF ASSEMBLY","RUNNING BOARDS","SEAT ASSEMBLY","SIDE DOOR ASSEMBLY","TAILGATE","WINDSHIELD","WIPER SYSTEM"],"BRAKES":["AIR BRAKE ASSEMBLY","AIR COMPRESSOR","AIR HOSE ASSEMBLY","AIR TANK ASSEMBLY","AIR VALVE ASSEMBLY","ANTILOCK ASSEMBLY","AXLE BRAKES","BRAKE CHAMBER","BRAKE LINES AND FITTINGS","DRAIN VALVE","ELECTRIC BRAKES ASSEMBLY","GLADHAND ASSEMBLY","HYDRAULIC BRAKE ASSEMBLY","MASTER BRAKE CYLINDER ASSEMBLY","PARKING BRAKE ASSEMBLY","PEDAL ASSEMBLY","POWER BRAKE ASSEMBLY"],"CHASSIS":["ADJUSTER","CHASSIS ASSEMBLY","IDLER","LUBRICATION ASSEMBLY","RESERVOIR AND LINES","ROLLER","TRACK","UNDERCARRIAGE","WHEEL END DISCONNECT ASSEMBLY"],"CHECK ENGINE LIGHT":["CEL AIR TEMPERATURE","CEL AMBIENT TEMPERATURE","CEL BOOST PRESSURE","CEL CAMSHAFT POSITION","CEL COOLANT TEMPERATURE","CEL CRANKCASE PRESSURE","CEL ENGINE POSITION","CEL FUEL PRESSURE","CEL FUEL TEMPERATURE","CEL IDLE","CEL MANIFOLD PRESSURE","CEL MASS AIR FLOW","CEL OIL TEMPERATURE","CEL OVERALL ISSUE","CEL OXYGEN ISSUE","CEL OXYGEN SENSOR","CEL SENSOR KNOCK","CEL SPEED"],"DEVICE INSTALLATION":["FLEETEDGE-AI BOX","GEOTAB","HALO GATEWAY","HALO SENSOR","HALO TIRE INFLATOR (GEN 1 and GEN 2)","NETRADYNE","XIRGO-HARP"],"DEVICE REMOVAL":["FLEETEDGE-AI BOX","GEOTAB","HALO GATEWAY","HALO SENSOR","HALO TIRE INFLATOR (GEN 1 and GEN 2)","NETRADYNE","XIRGO-HARP"],"DEVICE REPLACMENT":["FLEETEDGE-AI BOX","GEOTAB","HALO GATEWAY","HALO SENSOR","HALO TIRE INFLATOR (GEN 1 and GEN 2)","NETRADYNE","XIRGO-HARP"],"DOORS":["DOOR ASSEMBLY","DOOR HINGE ASSEMBLY","SODE DOOR COMPONENT"],"DRIVETRAIN":["AIR CYLINDERS","AUXILIARY ASSEMBLY","AXLE","CHAIN DRIVE","DIFFERENTIAL","DRIVETRAIN ASSEMBLY","FINAL DRIVE ASSEMBLY","GEARS AND BEARINGS","MANIFOLD","PARKING LOCK ASSEMBLY","RETARDER","SHAFT","SHAFT ASSEMBLY","TRANSFER CASE"],"ELECTRICAL":["ADAS","ALTERNATOR ASSEMBLY","BACKUP WARNING SYSTEM","BATTERIES AND CABLES","BULBS, FUSES","CHARGING SYSTEM","DISTRIBUTOR ASSEMBLY","ECU","EV CHARGING SYSTEM","ELECTRICAL SYSTEM","GPS TRACKING","HORN, ANTI-THEFT","IGNITION SYSTEM","INSTRUMENT CLUSTER","LIGHTING SYSTEM","MODULES","OIL PRESSURE WARNING","PRE-HEATER","REGULATOR","SENSOR","SENSORS","SHUTDOWN DEVICES","SOLENOID","STARTER ASSEMBLY","SURVEILLANCE SYSTEM","SWITCHES","WARNING INDICATORS","WIRE HARDNESS"],"ENGINE":["AIR CLEANER","AIR INTAKE","BATTERY ASSEMBLY","CAMSHAFT ASSEMBLY","CARBURETOR","COOLANT","COOLING SYSTEM","CRANKCASE ASSEMBLY","CRANKSHAFT ASSEMBLY","CYLINDER BLOCK ASSEMBLY","DEF ASSEMBLY","ELECTRIC MOTOR ASSEMBLY","ELECTRONIC ENGINE CONTROLS","ENGINE ASSEMBLY","ENGINE SHUTDOWN","FILTERS","FLYWHEEL","INJECTOR","OIL FILTER ASSEMBLY","OIL PAN ASSEMBLY","OIL PUMP ASSEMBLY","PISTONS AND RINGS ASSEMBLY","RADIATOR","RETARDER ASSEMBLY","SPEED CONTROL SYSTEM","THROTTLE BODY","TIMING ASSEMBLY","WATER PUMP"],"EXHAUST":["EXHAUST SYSTEM","MUFFLER EXHAUST PIPE ASSEMBLY"],"FIFTH WHEEL":["FIFTH WHEEL COMPONENTS"],"FUEL":["EVAPORATIVE CONTROL SYSTEM","FUEL PUMP","FUEL TANK SYSTEM","HEATER ASSEMBLY","INJECTORS","TANK ASSEMBLY"],"HVAC":["AIR CONDITIONING","BELTS","DEFROSTER","HVAC ASSEMBLY","HEATING"],"INTERIOR":["AIR BAGS AND INTERIOR SAFETY EQUIPMENT","CAB ACCESSORIES","DISPLAYS AND SIGNS","INSTRUMENT PANEL","INTERIOR PANELS","LIGHTS","MOLDINGS","SLEEPER COMPONENTS"],"SUSPENTION":["ACTIVE SUSPENSION ASSEMBLY","AIR SPRING ASSEMBLY","AIR SUSPENSION ASSEMBLY","FRONT SUSPENSION ASSEMBLY","REAR SUSPENSION ASSEMBLY","RIDE HEIGHT ASSEMBLY","SHOCK ABSORBERS","SLEEPER SUSPENSION","SPRINGS ASSEMBLY","STABILIZER ASSEMBLY","STRUTS ASSEMBLY","SUSPENSION ASSEMBLY","TANDEM SUSPENSION ASSEMBLY"],"TOW":["MECHANICAL ISSUE","IMPOUND","ABANDONED EQUIPMENT","ACCIDENT/RECOVERY"],"TRANSMISSION":["CVT","CLUTCH","CONVERTER","ELECTRIC VEHICLE","MANUAL TRANSMISSION","SERVO ASSEMBLY","SOLENOID ASSEMBLY","TORQUE ASSEMBLY","TRANSMISSION ASSEMBLY","TRANSMISSION BRAKE","TRANSMISSION CASE","TRANSMISSION COVER","TRANSMISSION EXTERNAL CONTROL","TRANSMISSION OIL PUMP ASSEMBLY","TRANSMISSION PUMP","TRANSMISSION SPLITTER","VALVE BIDY"]};
+const AREA_TEMPLATES = Object.keys(AREA_SUBS);
+
+
 
 // ── Module state ──────────────────────────────────────────────────────────
 let _overlay   = null;
@@ -122,10 +123,10 @@ function _buildHTML(unit) {
 
     <!-- Work Details -->
     <div class="wr-section">
-      <div class="wr-section__title">Work Details</div>
+      <div class="wr-section__title" style="display:flex;justify-content:space-between;align-items:center;">Work Details <button id="wr-ai-assist" type="button" class="detail-panel__btn detail-panel__btn--secondary" style="font-size:9px;padding:2px 8px;">✨ AI Fill</button></div>
       <label class="settings-label">WR Title
         <input id="wr-title" class="settings__input" type="text"
-          placeholder="Brief description of the issue"
+          placeholder="Type title then press Enter or click AI Fill..."
           value="${_safeAttr(unit.pmStatus || unit.issueDetails || '')}" />
       </label>
       <label class="settings-label" style="margin-top:6px">Issue Description
@@ -217,7 +218,7 @@ function _buildHTML(unit) {
 
     <!-- Screenshot -->
     <div class="wr-section">
-      <div class="wr-section__title">Screenshot Attachment</div>
+      <div id="wr-tow-wrap" class="wr-section" style="display:none">\n      <div class="wr-section__title">\uD83D\uDE9B Tow Destination (where unit goes)</div>\n      <div class="wr-two-col" style="margin-bottom:6px"><label class="settings-label" style="flex:3"><select id="wr-tow-book" class="settings__select"><option value="">Quick-fill from vendor book...</option></select></label></div>\n      <div class="wr-two-col"><label class="settings-label" style="flex:3">Street<input id="wr-tow-street" class="settings__input" placeholder="Street" /></label><label class="settings-label" style="flex:2">City<input id="wr-tow-city" class="settings__input" placeholder="City" /></label></div>\n      <div class="wr-two-col" style="margin-top:4px"><label class="settings-label">State<input id="wr-tow-state" class="settings__input" placeholder="ST" maxlength="2" style="text-transform:uppercase" /></label><label class="settings-label">ZIP<input id="wr-tow-zip" class="settings__input" placeholder="00000" /></label></div>\n      <div class="wr-section__title" style="margin-top:12px">\uD83D\uDCCD Tow Pickup (where unit is now)</div>\n      <div class="wr-two-col" style="margin-bottom:6px"><label class="settings-label" style="flex:3"><select id="wr-tow-from-book" class="settings__select"><option value="">Quick-fill pickup location...</option></select></label></div>\n      <div class="wr-two-col"><label class="settings-label" style="flex:3">Street<input id="wr-tow-from-street" class="settings__input" placeholder="Pickup street" /></label><label class="settings-label" style="flex:2">City<input id="wr-tow-from-city" class="settings__input" placeholder="City" /></label></div>\n      <div class="wr-two-col" style="margin-top:4px"><label class="settings-label">State<input id="wr-tow-from-state" class="settings__input" placeholder="ST" maxlength="2" style="text-transform:uppercase" /></label><label class="settings-label">ZIP<input id="wr-tow-from-zip" class="settings__input" placeholder="00000" /></label></div>\n    </div>\n\n    <div class="wr-section__title">Screenshot Attachment</div>
       <div class="wr-screenshot-row">
         <button id="wr-attach-screenshot" class="detail-panel__btn detail-panel__btn--secondary">Attach latest Uptake screenshot</button>
         <span id="wr-screenshot-label" class="wr-screenshot-label">None</span>
@@ -279,6 +280,8 @@ function _collectPayload() {
     simNumber:       (_el('wr-sim').value || '').trim() || null,
     screenshotDataUrl,
     domicile:        _unit.site || _unit.domicileSite || '',
+    tow: { street: (_el('wr-tow-street')||{}).value||'', city: (_el('wr-tow-city')||{}).value||'', state: (_el('wr-tow-state')||{}).value||'', zip: (_el('wr-tow-zip')||{}).value||'' },
+    towFrom: { street: (_el('wr-tow-from-street')||{}).value||'', city: (_el('wr-tow-from-city')||{}).value||'', state: (_el('wr-tow-from-state')||{}).value||'', zip: (_el('wr-tow-from-zip')||{}).value||'' },
   };
 }
 
@@ -420,7 +423,12 @@ function _wireSubmit() {
     }
   });
 
-  fallbackBtn.addEventListener('click', () => _autofillFallback(_collectPayload()));
+  fallbackBtn.addEventListener('click', async () => {
+    const payload = _collectPayload();
+    fallbackBtn.disabled = true; fallbackBtn.textContent = 'Launching AI...';
+    try { await aap.createWR(payload, _unit); } catch(e) { toast.show('error', e.message); }
+    fallbackBtn.disabled = false; fallbackBtn.textContent = 'Open in AAP (autofill)';
+  });
 }
 
 function _showError(msg) {
@@ -461,6 +469,249 @@ function _close() {
   _areaCount = 1;
 }
 
+
+// ── Tow Address Handling (uses Contact Book) ─────────────────────────────
+async function _wireTow() {
+  const towBook = _el('wr-tow-book');
+  const fromBook = _el('wr-tow-from-book');
+  if (!towBook || !fromBook || !window.contacts) return;
+
+  // Load contacts that have addresses
+  const all = await window.contacts.getAll();
+  const vendors = all.filter(c => c.type === 'vendor' && c.street);
+  const domiciles = all.filter(c => c.type === 'domicile' && c.street);
+
+  // Populate tow destination (vendors/dealers)
+  towBook.innerHTML = '<option value="">Select destination...</option>';
+  if (vendors.length) {
+    vendors.forEach(v => {
+      const o = document.createElement('option');
+      o.value = JSON.stringify(v);
+      o.textContent = v.name + ' — ' + v.street + ', ' + (v.city || '') + ' ' + (v.state || '');
+      towBook.appendChild(o);
+    });
+  }
+  // Also add domiciles as tow destination options
+  if (domiciles.length) {
+    const og = document.createElement('optgroup');
+    og.label = 'HOME YARDS';
+    domiciles.forEach(d => {
+      const o = document.createElement('option');
+      o.value = JSON.stringify(d);
+      o.textContent = d.name + ' — ' + d.street + ', ' + (d.city || '') + ' ' + (d.state || '');
+      og.appendChild(o);
+    });
+    towBook.appendChild(og);
+  }
+
+  // Populate tow pickup (domiciles + vendors)
+  fromBook.innerHTML = '<option value="">Select pickup location...</option>';
+  if (domiciles.length) {
+    const og = document.createElement('optgroup');
+    og.label = 'HOME YARDS';
+    domiciles.forEach(d => {
+      const o = document.createElement('option');
+      o.value = JSON.stringify(d);
+      o.textContent = d.name + ' — ' + d.street + ', ' + (d.city || '') + ' ' + (d.state || '');
+      og.appendChild(o);
+    });
+    fromBook.appendChild(og);
+  }
+  if (vendors.length) {
+    const og = document.createElement('optgroup');
+    og.label = 'VENDORS';
+    vendors.forEach(v => {
+      const o = document.createElement('option');
+      o.value = JSON.stringify(v);
+      o.textContent = v.name + ' — ' + v.street + ', ' + (v.city || '') + ' ' + (v.state || '');
+      og.appendChild(o);
+    });
+    fromBook.appendChild(og);
+  }
+
+  towBook.addEventListener('change', () => {
+    if (!towBook.value) return;
+    const loc = JSON.parse(towBook.value);
+    _el('wr-tow-street').value = loc.street || '';
+    _el('wr-tow-city').value = loc.city || '';
+    _el('wr-tow-state').value = loc.state || '';
+    _el('wr-tow-zip').value = loc.zip || '';
+  });
+  fromBook.addEventListener('change', () => {
+    if (!fromBook.value) return;
+    const loc = JSON.parse(fromBook.value);
+    _el('wr-tow-from-street').value = loc.street || '';
+    _el('wr-tow-from-city').value = loc.city || '';
+    _el('wr-tow-from-state').value = loc.state || '';
+    _el('wr-tow-from-zip').value = loc.zip || '';
+  });
+
+  // Show/hide tow section based on area input
+  const checkTow = () => {
+    const areaEl = _el('wr-area-0');
+    const isTow = areaEl && areaEl.value.toUpperCase() === 'TOW';
+    const wrap = _el('wr-tow-wrap');
+    if (wrap) wrap.style.display = isTow ? '' : 'none';
+  };
+  const areaEl = _el('wr-area-0');
+  if (areaEl) {
+    areaEl.addEventListener('input', checkTow);
+    areaEl.addEventListener('change', checkTow);
+  }
+
+  // Auto-fill pickup from unit domicile
+  const unit = _unit || {};
+  const site = (unit.domicileSite || unit.site || '').toUpperCase();
+  if (site && domiciles.length) {
+    const match = domiciles.find(d => (d.name || '').toUpperCase().includes(site));
+    if (match) {
+      _el('wr-tow-from-street').value = match.street || '';
+      _el('wr-tow-from-city').value = match.city || '';
+      _el('wr-tow-from-state').value = match.state || '';
+      _el('wr-tow-from-zip').value = match.zip || '';
+    }
+  }
+}
+
+// ── AI Assist — auto-fill from title ──────────────────────────────────────
+let _aiTimer = null;
+function _wireAIAssist() {
+  const titleEl = _el('wr-title');
+  const btn = _el('wr-ai-assist');
+  if (!btn || !titleEl) return;
+  btn.addEventListener('click', () => _runAIAssist());
+  titleEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); _runAIAssist(); }
+  });
+  titleEl.addEventListener('input', () => {
+    clearTimeout(_aiTimer);
+    if (titleEl.value.trim().length > 8) _aiTimer = setTimeout(_runAIAssist, 2500);
+  });
+}
+
+async function _runAIAssist() {
+  const titleEl = _el('wr-title');
+  const btn = _el('wr-ai-assist');
+  const title = (titleEl.value || '').trim();
+  if (!title) { toast.show('warn', 'Type a title first', 2000); return; }
+  btn.disabled = true; btn.textContent = '⏳ AI...';
+  
+  const unit = _unit || {};
+  const unitId = unit.id || unit.equipmentId || '';
+  const make = unit.manufacturer || '';
+  const site = unit.domicileSite || unit.site || '';
+  const notes = (unit.savedNotes || '').substring(0, 500);
+  const uptake = (unit.insightsList || []).map(i => typeof i === 'object' ? (i.summary || i.text || '') : i).join('; ');
+  
+  const areaList = Object.entries(AREA_SUBS).map(([a, s]) => a + ': ' + s.join(', ')).join('\  // Listen for address from contact book\n  bus.on("contacts:use-address", (addr) => {\n    const s=_el("wr-tow-street");if(s)s.value=addr.street||"";;\n    const ct=_el("wr-tow-city");if(ct)ct.value=addr.city||"";;\n    const st=_el("wr-tow-state");if(st)st.value=addr.state||"";;\n    const z=_el("wr-tow-zip");if(z)z.value=addr.zip||"";;\n    const tw=_el("wr-tow-wrap");if(tw)tw.style.display="";;\n  });\nn');
+  
+  // Load vendor book for AI context
+  let vendorBookCtx = '';
+  if (window.contacts) {
+    try {
+      const allContacts = await window.contacts.getAll();
+      const vendors = allContacts.filter(v => v.type === 'vendor' && v.street);
+      if (vendors.length) {
+        vendorBookCtx = '\nVENDOR BOOK (pick dealer by unit domicile + make):\n' +
+          vendors.map(v => v.name + ' | Make: ' + (v.make || 'ANY') + ' | Domiciles: ' + (v.domiciles || []).join(',') + ' | ' + v.street + ', ' + (v.city||'') + ' ' + (v.state||'')).join('\n') +
+          '\nWhen user says "send to dealer": pick the vendor from this book that matches unit make AND domicile. If no match, leave vendor empty.\n';
+      }
+    } catch(e) {}
+  }
+
+  const prompt = 'You are a fleet maintenance work request assistant for Amazon Transportation.\n\n'
+    + 'User typed this WR title: "' + title + '"\n\n'
+    + 'UNIT: ' + unitId + ' | Make: ' + make + ' | Site: ' + site + '\n'
+    + (notes ? 'Notes: ' + notes + '\n' : '')
+    + (uptake ? 'Uptake Insights: ' + uptake + '\n' : '')
+    + '\nRULES:\n'
+    + '- "Tow" = Area=TOW, sub=MECHANICAL ISSUE or ACCIDENT/RECOVERY, vendor=FleetNet (FLEETNET), urgent=true\n'
+    + '- Vendor: LEAVE EMPTY by default (AAP auto-assigns). Only fill if user says "send to dealer" or "send to [vendor name]"\n'
+    + '- If user says "send to dealer": Volvo/Mack→"Volvo (ASIST)", Kenworth→"Kenworth (PACCAR)", Peterbilt→"Peterbilt (PACCAR)", Freightliner→"Freightliner (DAIMLER)"\n'
+    + '- Safety/brakes/fire → urgent=true\n'
+    + '- For Predictive Maintenance: title must include "Predictive Maintenance", reference Uptake data in comments\n\n'
+    + 'VALID AREAS/SUBCATEGORIES (use EXACT values):\n' + areaList + '\n\n'
+    + 'Respond ONLY with valid JSON:\n'
+    + '{"title":"improved title","issue":"2-3 sentence description","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","urgent":false,"comments":"what we need from vendor"}\n'
+    + 'areaPairs can have 1-4 pairs if multiple systems are affected.\n'
+    + 'vendor: LEAVE EMPTY unless user explicitly says "send to dealer" or names a specific vendor. AAP auto-assigns default vendor.';
+
+  try {
+    const result = await window.ai.ask(prompt);
+    const text = (result && result.text) ? result.text : (result || '');
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) { toast.show('warn', 'AI returned no data', 3000); return; }
+    const ai = JSON.parse(match[0]);
+    
+    if (ai.title) titleEl.value = ai.title;
+    if (ai.issue) { const el = _el('wr-issue'); if (el) el.value = ai.issue; }
+    // Only set vendor if AI explicitly returned one (user said "send to dealer")
+    if (ai.vendor && ai.vendor.trim()) {
+      const sel = _el('wr-vendor');
+      const opt = Array.from(sel.options).find(o => o.value === ai.vendor || o.value.toUpperCase().includes((ai.vendor||'').toUpperCase()));
+      if (opt) sel.value = opt.value;
+    }
+    // Fill area/subcategory pairs (up to 4)
+    const pairs = ai.areaPairs || (ai.area ? [{ area: ai.area, subcategory: ai.subcategory }] : []);
+    const rowsContainer = _el('wr-area-rows');
+    pairs.forEach((pair, i) => {
+      if (i > 0 && rowsContainer) {
+        // Add new row if needed
+        const existing = _el('wr-area-' + i);
+        if (!existing) {
+          rowsContainer.insertAdjacentHTML('beforeend', _areaPairRow(_areaCount++, '', ''));
+        }
+      }
+      const aEl = _el('wr-area-' + i);
+      const sEl = _el('wr-sub-' + i);
+      if (aEl) aEl.value = pair.area || '';
+      // Show tow section if area is TOW
+      if (i === 0 && (pair.area || '').toUpperCase() === 'TOW') {
+        const towWrap = _el('wr-tow-wrap');
+        if (towWrap) towWrap.style.display = '';
+        // Auto-set urgent
+        _el('wr-urgent').checked = true;
+        _el('wr-urgency-reason-wrap').style.display = '';
+        _el('wr-urgency-reason').value = 'DEA - Asset Shortage';
+      }
+      if (sEl) sEl.value = pair.subcategory || '';
+    });
+    if (ai.urgent) {
+      _el('wr-urgent').checked = true;
+      _el('wr-urgency-reason-wrap').style.display = '';
+      _el('wr-urgency-reason').value = 'DEA - Asset Shortage';
+    }
+    if (ai.comments) { const el = _el('wr-comments'); if (el) el.value = ai.comments; }
+    
+    toast.show('success', '✨ AI filled — review and submit', 3000);
+  } catch(e) {
+    toast.show('error', 'AI failed: ' + e.message, 4000);
+  } finally {
+    btn.disabled = false; btn.textContent = '✨ AI Fill';
+  }
+}
+
+// ── Auto-attach Uptake screenshot for PM units ────────────────────────────
+async function _wireAutoUptake() {
+  const unit = _unit || {};
+  if (!unit.riskScore || unit.riskScore < 50) return;
+  try {
+    const result = await files.getLatestScreenshot(unit.id || unit.equipmentId);
+    if (result && result.path) {
+      const dataUrl = await files.readAsDataUrl(result.path);
+      if (dataUrl) {
+        const btn = _el('wr-attach-screenshot');
+        if (btn) btn._dataUrl = dataUrl;
+        const label = _el('wr-screenshot-label');
+        if (label) {
+          label.textContent = '📎 Uptake screenshot auto-attached (risk: ' + unit.riskScore + '%)';
+          label.className = 'wr-screenshot-label wr-screenshot-label--attached';
+        }
+      }
+    }
+  } catch(e) { /* silent */ }
+}
+
 export function open(unit) {
   if (_overlay) _close();
   _unit      = unit;
@@ -483,6 +734,9 @@ export function open(unit) {
   _wireOptional();
   _wireScreenshot();
   _wireSubmit();
+  _wireAIAssist();
+  _wireAutoUptake();
+  _wireTow();
 
   // Pre-select vendor from relay data if available
   const relayVendor = (unit.relayVendor || unit.vendor || '').toUpperCase();
@@ -491,6 +745,11 @@ export function open(unit) {
       .find(o => o.value.toUpperCase().includes(relayVendor));
     if (match) _el('wr-vendor').value = match.value;
   }
+
+  // Pre-fill contact from user profile
+  const _profile = JSON.parse(localStorage.getItem('fleet_user_profile') || '{}');
+  if (_profile.name) { const el = _el('wr-contact-name'); if (el) el.value = _profile.name; }
+  if (_profile.phone) { const el = _el('wr-contact-phone'); if (el) el.value = _profile.phone; }
 
   // Focus title field
   setTimeout(() => { const t = _el('wr-title'); if (t) t.focus(); }, 50);

@@ -134,32 +134,53 @@ const POLL_WO_LIST = FIND_WO_TABLE_FN + `(function() {
   } catch(e) { return { status: 'error', msg: e.message }; }
 })()`;
 
-// Extract the service UUID from the first WO row link
+
+// Extract the service UUID and Due date from the first WO row link
+// Due date column = "Due date" header — read cell value from first row
 const EXTRACT_WO_UUID = FIND_WO_TABLE_FN + `(function() {
   try {
     var tbl = findWOTable();
-    if (!tbl) return { uuid: null };
+    if (!tbl) return { uuid: null, dueDate: '' };
     var rows = tbl.querySelectorAll('tbody tr');
+
+    // Build header index so we can find Due date column by name
+    var ths = tbl.querySelectorAll('thead th');
+    var dueDateCol = -1;
+    for (var h = 0; h < ths.length; h++) {
+      var hText = (ths[h].textContent || ths[h].innerText || '').trim().toLowerCase();
+      if (hText === 'due date' || hText === 'due\ndate' || hText.startsWith('due date')) {
+        dueDateCol = h; break;
+      }
+    }
+
+    // Read Due date from first row
+    var dueDate = '';
+    if (rows.length > 0 && dueDateCol >= 0) {
+      var cells = rows[0].querySelectorAll('td');
+      if (cells[dueDateCol]) {
+        dueDate = (cells[dueDateCol].textContent || cells[dueDateCol].innerText || '').trim();
+      }
+    }
+
     for (var r = 0; r < rows.length; r++) {
       var links = rows[r].querySelectorAll('a[href]');
       for (var a = 0; a < links.length; a++) {
         var href = links[a].getAttribute('href') || '';
         // Match /v2/service/<uuid>
         var m = href.match(/\\/v2\\/service\\/([a-f0-9-]{36})/i);
-        if (m) return { uuid: m[1], href: href, rowIndex: r };
+        if (m) return { uuid: m[1], href: href, rowIndex: r, dueDate: dueDate };
         // Also try wrId or workRequestId query param
         var q = href.match(/[?&](?:wrId|workRequestId|id)=([a-f0-9-]{36})/i);
-        if (q) return { uuid: q[1], href: href, rowIndex: r };
+        if (q) return { uuid: q[1], href: href, rowIndex: r, dueDate: dueDate };
       }
     }
     // Fallback: click first row link and capture navigation (React Router)
     var firstLink = tbl.querySelector('tbody tr a[href]');
     if (firstLink) {
-      // Return the href for inspection
-      return { uuid: null, href: firstLink.getAttribute('href'), needsClick: true };
+      return { uuid: null, href: firstLink.getAttribute('href'), needsClick: true, dueDate: dueDate };
     }
-    return { uuid: null };
-  } catch(e) { return { uuid: null, error: e.message }; }
+    return { uuid: null, dueDate: dueDate };
+  } catch(e) { return { uuid: null, dueDate: '', error: e.message }; }
 })()`;
 
 // ── STEP 1: capture UUID via React Router click (same as wr_capture_v5.js) ──
@@ -483,10 +504,11 @@ async function resolveServiceUUID(equipmentId) {
       show: false, width: 1400, height: 800,
       webPreferences: { nodeIntegration: false, contextIsolation: true }
     });
-    const finish = (uuid) => {
+    // Returns { uuid, dueDate } — dueDate captured from list row
+    const finish = (uuid, dueDate) => {
       if (done) return; done = true;
       clearTimeout(t); try { win.destroy(); } catch(_) {}
-      resolve(uuid);
+      resolve(uuid ? { uuid, dueDate: dueDate || '' } : null);
     };
     const t = setTimeout(() => finish(null), WO_LIST_TIMEOUT_MS);
 
@@ -506,21 +528,21 @@ async function resolveServiceUUID(equipmentId) {
         if (check.status === 'error')     { finish(null); return; }
         if (check.status !== 'ready')     continue;
 
-        // Table ready — try to extract UUID from href directly
+        // Table ready — extract UUID + Due date from first row
         let extract;
         try { extract = await win.webContents.executeJavaScript(EXTRACT_WO_UUID); } catch(e) { finish(null); return; }
 
-        if (extract.uuid) { finish(extract.uuid); return; }
+        if (extract.uuid) { finish(extract.uuid, extract.dueDate); return; }
 
-        // Href exists but no UUID in it — use React Router click capture
+        // Href exists but no UUID — use React Router click capture (dueDate already read above)
         if (extract.needsClick || extract.href) {
           let clickResult;
           try { clickResult = await win.webContents.executeJavaScript(buildClickCaptureScript(0)); } catch(e) { finish(null); return; }
-          if (clickResult && clickResult.uuid) { finish(clickResult.uuid); return; }
+          if (clickResult && clickResult.uuid) { finish(clickResult.uuid, extract.dueDate); return; }
           // Try building URL from href manually
           if (extract.href) {
             const m = (AAP_BASE + extract.href).match(/\/v2\/service\/([a-f0-9-]{36})/i);
-            if (m) { finish(m[1]); return; }
+            if (m) { finish(m[1], extract.dueDate); return; }
           }
         }
 
@@ -533,6 +555,7 @@ async function resolveServiceUUID(equipmentId) {
     win.loadURL(listUrl);
   });
 }
+
 
 // ── STEP 2 Phase 4: Kooner / Cummins — Documents tab + PDF extraction ────────
 // Mirrors KoonerCumminsDocRcaScan from tampermonkey exactly.
@@ -1032,13 +1055,15 @@ async function scrapeWRDetail(equipmentId, serviceUUID) {
 async function scrapeWorkOrder(equipmentId, opts = {}) {
   console.log('[WO-Scraper] Starting full pipeline for', equipmentId);
 
-  // Step 0: resolve service UUID from WO list page
-  const serviceUUID = await resolveServiceUUID(equipmentId);
-  if (!serviceUUID) {
+  // Step 0: resolve service UUID + Due date from WO list page
+  // resolveServiceUUID now returns { uuid, dueDate } or null
+  const resolved = await resolveServiceUUID(equipmentId);
+  if (!resolved) {
     console.log('[WO-Scraper]', equipmentId, '— no open WO found');
     return { noWO: true, equipmentId, scrapedAt: new Date().toISOString() };
   }
-  console.log('[WO-Scraper]', equipmentId, '— UUID:', serviceUUID);
+  const { uuid: serviceUUID, dueDate: listDueDate } = resolved;
+  console.log('[WO-Scraper]', equipmentId, '— UUID:', serviceUUID, '| dueDate from list:', listDueDate || '(none)');
 
   // Steps 1-3: load WR detail page, scrape all phases
   const result = await scrapeWRDetail(equipmentId, serviceUUID);
@@ -1053,6 +1078,11 @@ async function scrapeWorkOrder(equipmentId, opts = {}) {
       vendor:     result.vendor,
       equipmentId,
     };
+  }
+
+  // Attach dueDate from list page (most reliable source for PM schedule data)
+  if (listDueDate && !result.dueDate) {
+    result.dueDate = listDueDate;
   }
 
   return result;

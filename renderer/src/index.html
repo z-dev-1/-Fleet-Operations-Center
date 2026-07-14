@@ -4,30 +4,70 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Fleet Operations</title>
+  <link rel="stylesheet" href="./css/nexus-theme.css" />
   <link rel="stylesheet" href="./css/fleet.css" />
   <style>
     #app-loading {
       position: fixed; inset: 0;
-      background: #0d1117;
+      background: radial-gradient(ellipse at 50% 30%, rgba(88,166,255,.04) 0%, transparent 60%),
+                  radial-gradient(ellipse at 50% 80%, rgba(210,168,255,.03) 0%, transparent 50%),
+                  #0d1117;
       display: flex; align-items: center; justify-content: center;
       z-index: 9999;
-      flex-direction: column; gap: 14px;
+      flex-direction: column; gap: 20px;
+      overflow: hidden;
     }
-    #app-loading .spin {
-      width: 32px; height: 32px;
-      border: 3px solid #30363d;
-      border-top-color: #58a6ff;
-      border-radius: 50%;
-      animation: _spin 0.7s linear infinite;
+    #app-loading .boot-logo {
+      width: 56px; height: 56px;
+      border-radius: 16px;
+      background: linear-gradient(135deg, rgba(88,166,255,.15) 0%, rgba(210,168,255,.1) 100%);
+      border: 1px solid rgba(88,166,255,.2);
+      display: flex; align-items: center; justify-content: center;
+      position: relative;
+      animation: logoPulse 2.5s ease-in-out infinite;
     }
-    #app-loading .lbl {
+    #app-loading .boot-logo svg { width: 28px; height: 28px; filter: drop-shadow(0 0 6px rgba(88,166,255,.4)); }
+    #app-loading .boot-logo::before {
+      content: '';
+      position: absolute; inset: -3px;
+      border-radius: 18px;
+      background: conic-gradient(from 0deg, transparent 0%, rgba(88,166,255,.4) 25%, transparent 50%, rgba(210,168,255,.3) 75%, transparent 100%);
+      animation: logoSpin 3s linear infinite;
+      mask: radial-gradient(circle, transparent 60%, black 62%);
+      -webkit-mask: radial-gradient(circle, transparent 60%, black 62%);
+    }
+    #app-loading .boot-title {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      font-size: 11px; color: #484f58; letter-spacing: 0.05em;
+      font-size: 15px; font-weight: 700;
+      background: linear-gradient(135deg, #58a6ff, #d2a8ff);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text; letter-spacing: -.02em;
     }
-    @keyframes _spin { to { transform: rotate(360deg); } }
+    #app-loading .boot-status {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 10px; color: rgba(139,148,158,.6);
+      letter-spacing: .08em; text-transform: uppercase;
+      animation: statusFade 1.5s ease-in-out infinite alternate;
+    }
+    #app-loading .boot-bar-wrap {
+      width: 160px; height: 2px;
+      background: rgba(48,54,61,.5);
+      border-radius: 2px; overflow: hidden;
+      margin-top: 4px;
+    }
+    #app-loading .boot-bar {
+      height: 100%; width: 40%;
+      background: linear-gradient(90deg, var(--acc, #58a6ff), var(--pur, #d2a8ff));
+      border-radius: 2px;
+      animation: barSlide 1.8s ease-in-out infinite;
+    }
+    @keyframes logoPulse { 0%,100% { box-shadow: 0 0 20px rgba(88,166,255,.1); } 50% { box-shadow: 0 0 40px rgba(88,166,255,.2); } }
+    @keyframes logoSpin { to { transform: rotate(360deg); } }
+    @keyframes statusFade { from { opacity: .4; } to { opacity: .8; } }
+    @keyframes barSlide { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
   </style>
 
-  <!-- TEMP DEBUG: surface renderer errors to visible overlay -->
+  <!-- Runtime error overlay (development only) -->
   <script>
     window.__bootErrors = [];
     window.onerror = function(msg, src, line, col, err) {
@@ -45,7 +85,7 @@
       if (!el) {
         el = document.createElement('pre');
         el.id = '__boot-err';
-        el.style.cssText = 'position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow:auto;background:#1a0000;color:#ff6b6b;font-size:11px;padding:10px;z-index:99999;white-space:pre-wrap;border-top:2px solid #ff0000';
+        el.style.cssText = 'position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow:auto;background:rgba(26,0,0,.95);color:#ff6b6b;font-size:11px;padding:10px;z-index:99999;white-space:pre-wrap;border-top:2px solid #ff0000;backdrop-filter:blur(10px)';
         document.body.appendChild(el);
       }
       el.textContent += text + '\n---\n';
@@ -53,9 +93,20 @@
   </script>
 </head>
 <body>
+  <div id="nexus-bg"></div>
   <div id="app-loading">
-    <div class="spin"></div>
-    <span class="lbl">Fleet Operations</span>
+    <div class="boot-logo">
+      <svg viewBox="0 0 16 16" fill="none">
+        <rect x="1" y="1" width="6" height="6" rx="1.5" fill="#58a6ff"/>
+        <rect x="9" y="1" width="6" height="6" rx="1.5" fill="#79c0ff" opacity=".7"/>
+        <rect x="1" y="9" width="6" height="6" rx="1.5" fill="#79c0ff" opacity=".7"/>
+        <rect x="9" y="9" width="6" height="3" rx="1.5" fill="#d2a8ff"/>
+        <circle cx="12" cy="13.5" r="1.5" fill="#7ee787"/>
+      </svg>
+    </div>
+    <span class="boot-title">Fleet Operations</span>
+    <span class="boot-status">Initializing systems</span>
+    <div class="boot-bar-wrap"><div class="boot-bar"></div></div>
   </div>
   <div id="app"></div>
   <script type="module" src="./js/app.js"></script>

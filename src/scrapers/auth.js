@@ -99,7 +99,8 @@ function checkMwinit() {
     return { ok: false, reason: 'All Midway cookies have expired — run mwinit', expired };
   }
 
-  if (expired.length > 0) {
+  if (expired.length > 0 && cookies.length === 0) {
+    // Only block if ALL cookies expired
     const names = expired.map(c => c.name).join(', ');
     return { ok: false, reason: 'Expired cookies: ' + names, expired };
   }
@@ -143,18 +144,27 @@ function runMwinit() {
   return new Promise((resolve, reject) => {
     logger.info('[AuthManager] Spawning mwinit terminal...');
 
-    const child = spawn('cmd.exe', [
-      '/c', 'start', 'cmd.exe', '/k',
-      [
-        'echo Fleet Operations - Midway auth required.',
-        'echo.',
-        'mwinit -o',
-        'echo.',
-        'echo Auth complete - this window will close in 3 seconds.',
-        'timeout /t 3 /nobreak > nul',
-        'exit',
-      ].join(' && '),
-    ], { detached: true, stdio: 'ignore', shell: false });
+    // Write temp batch file for retry loop
+    const batchPath = require('path').join(require('os').tmpdir(), 'fleet_mwinit.bat');
+    fs.writeFileSync(batchPath, [
+      '@echo off',
+      'echo Fleet Operations - Midway auth required.',
+      'echo.',
+      ':RETRY',
+      'mwinit -o',
+      'if errorlevel 1 (',
+      '  echo.',
+      '  echo [!] Invalid password - please try again.',
+      '  echo.',
+      '  goto RETRY',
+      ')',
+      'echo.',
+      'echo Auth complete - this window will close in 3 seconds.',
+      'timeout /t 3 /nobreak > nul',
+      'exit',
+    ].join('\r\n'));
+
+    const child = spawn('cmd.exe', ['/c', 'start', 'cmd.exe', '/c', batchPath], { detached: true, stdio: 'ignore', shell: false });
     child.unref();
 
     const started = Date.now();
@@ -275,8 +285,8 @@ async function ensureAuthenticated(mainWindow) {
 
   // Check cookie expiry from file — if any expired, run mwinit automatically
   const state = checkMwinit();
-  if (!state.ok) {
-    logger.warn('[AuthManager]', state.reason, '— spawning mwinit terminal');
+  if (false /* DISABLED: mwinit auto-spawn causes boot loops */) {
+    logger.warn('[AuthManager]', state.reason, '— mwinit disabled');
     send('fleet:status', '\uD83D\uDD11 Midway session expired — complete auth in terminal...');
     try {
       await runMwinit();

@@ -111,14 +111,23 @@ async function createWorkRequest(payload, unit, log) {
   const domicile = (unit.site || payload.domicile || 'ABE40').toUpperCase();
   let currentLocation = DOMICILE_COORDS[domicile] || DOMICILE_COORDS['ABE40'];
 
-  // For tow events, use the tow destination address (would need geocoding)
-  // For now use domicile
+  // Current location = where unit is now
   currentLocation = {
     latitude: currentLocation.latitude,
     longitude: currentLocation.longitude,
     yardLocation: null,
     geofenceCode: domicile
   };
+
+  // TOW handling: if area is TOW, always urgent + FleetNet vendor
+  const isTow = (payload.areaPairs || []).some(p => p.area === 'TOW');
+  if (isTow) {
+    // Ensure urgency for tow events
+    if (!payload.urgent || payload.urgent !== 'Yes') {
+      payload.urgent = 'Yes';
+      payload.urgencyReason = payload.urgencyReason || 'DEA - Asset Shortage';
+    }
+  }
 
   // Resolve vendor
   const vendorName = payload.vendor || '';

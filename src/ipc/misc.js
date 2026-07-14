@@ -30,7 +30,8 @@ function _assertAllowedFilePath(filePath) {
   const resolved    = p.resolve(filePath);
   const screensDir  = p.resolve(P.screenshotsDir);
   const dataDir     = p.resolve(P.dataDir);
-  const inScreens   = resolved.startsWith(screensDir + p.sep) || resolved === screensDir;
+  const appDataScreens = p.resolve(process.env.APPDATA || '', 'fleet-ops-app', 'screenshots');
+  const inScreens   = resolved.startsWith(screensDir + p.sep) || resolved === screensDir || resolved.startsWith(appDataScreens + p.sep) || resolved === appDataScreens;
   const inData      = resolved.startsWith(dataDir + p.sep)    || resolved === dataDir;
   if (!inScreens && !inData) {
     throw new ConfigError(
@@ -215,24 +216,32 @@ function registerMiscIPC(ctx) {
     } catch (_) { return null; }
   });
 
+  // S28: Partner portal handlers — module not yet implemented.
+  // Guarded to prevent runtime crash. Remove guard when src/services/partner.js exists.
   handle('partner:get-qr', async () => {
-    const { getQRCodeDataUrl, getPartnerUrl } = require('../../src/services/partner');
-    return { url: getPartnerUrl(), qr: await getQRCodeDataUrl() };
+    try {
+      const { getQRCodeDataUrl, getPartnerUrl } = require('../../src/services/partner');
+      return { url: getPartnerUrl(), qr: await getQRCodeDataUrl() };
+    } catch (_) { return { url: '', qr: '', error: 'Partner module not yet implemented' }; }
   });
 
   handle('partner:get-queue', () => {
-    const { loadQueue } = require('../../src/services/partner');
-    return loadQueue().filter(j => j.status === 'pending');
+    try {
+      const { loadQueue } = require('../../src/services/partner');
+      return loadQueue().filter(j => j.status === 'pending');
+    } catch (_) { return []; }
   });
 
   handle('partner:update-job', (_e, id, update) => {
-    const { loadQueue, saveQueue } = require('../../src/services/partner');
-    const queue = loadQueue();
-    const job   = queue.find(j => j.id === id);
-    if (!job) return { ok: false };
-    Object.assign(job, update);
-    saveQueue(queue);
-    return { ok: true, job };
+    try {
+      const { loadQueue, saveQueue } = require('../../src/services/partner');
+      const queue = loadQueue();
+      const job   = queue.find(j => j.id === id);
+      if (!job) return { ok: false };
+      Object.assign(job, update);
+      saveQueue(queue);
+      return { ok: true, job };
+    } catch (_) { return { ok: false, error: 'Partner module not yet implemented' }; }
   });
 
   handle('window:action', (_e, action) => {
@@ -356,6 +365,152 @@ function registerMiscIPC(ctx) {
     const { saveEmailConfig } = require('../../src/scrapers/email_sender');
     saveEmailConfig(config);
     return { ok: true };
+  });
+
+
+  // Split-view: open two URLs side by side in separate windows
+  handle('window:split-view', async (_e, data) => {
+    const { BrowserWindow, screen } = require('electron');
+    const { leftUrl, rightUrl, leftTitle, rightTitle } = data || {};
+        if (!leftUrl && !rightUrl) return { ok: false, error: 'No URLs provided' };
+
+    const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+    const halfW = Math.floor(width / 2);
+
+    const opts = (x, title) => ({
+      width: halfW, height: height, x, y: 0,
+      title: title || 'Fleet Operations',
+      webPreferences: { nodeIntegration: false, contextIsolation: true },
+    });
+
+    if (leftUrl) {
+      const left = new BrowserWindow(opts(0, leftTitle || 'Relay Garage'));
+      left.setMenuBarVisibility(false);
+      left.loadURL(leftUrl);
+    }
+    if (rightUrl) {
+      const right = new BrowserWindow(opts(halfW, rightTitle || 'Offsite Shop'));
+      right.setMenuBarVisibility(false);
+      right.loadURL(rightUrl);
+    }
+
+    return { ok: true };
+  });
+
+
+
+  
+  // ── SP Discover Sheets (from Excel URL) ──
+  handle('sp:discover-sheets', async (_e, url) => {
+    const { extractFilePath, discoverSheets } = require('../../src/scrapers/sp_discover');
+    const { BrowserWindow } = require('electron');
+    // uses existing logger from misc scope
+    
+    const parsed = extractFilePath(url);
+    if (parsed.error) return { ok: false, error: parsed.error };
+    logger.info('[SP Discover] Parsed:', JSON.stringify(parsed));
+
+    // Get or create SP window
+    let spWin = BrowserWindow.getAllWindows().find(w => 
+      w.webContents.getURL().includes('sharepoint.com')
+    );
+    
+    if (!spWin) {
+      spWin = new BrowserWindow({ show: false, width: 800, height: 600 });
+
+  // Repair history (3-month summarized)
+  handle('fleet:repair-history', async (_e, equipmentId) => {
+    const { getUnitHistory, getAllHistory } = require('../orcha/repair-history');
+    if (equipmentId) return getUnitHistory(equipmentId);
+    return getAllHistory();
+  });
+
+  // Offline queue
+  handle('offline:queue', async (_e, equipmentId, rawText) => {
+    const { queueTimelineEntry } = require('../orcha/offline');
+    queueTimelineEntry(equipmentId, rawText);
+    return { ok: true };
+  });
+
+  handle('offline:count', async () => {
+    const { getQueueCount } = require('../orcha/offline');
+    return getQueueCount();
+  });
+
+
+      await spWin.loadURL('https://amazon.sharepoint.com/sites/AFP-FAS');
+      await new Promise(r => setTimeout(r, 3000));
+    }
+
+    let filePath = parsed.filePath;
+    
+    // If we need to search for the file by name
+      // First: resolve file via sourcedoc GUID from URL
+      const guidMatch = url.match(/sourcedoc=%7B([^%}]+)/i);
+      if (guidMatch && !filePath) {
+        const guid = decodeURIComponent(guidMatch[1]).replace(/[{}]/g, '');
+        logger.info('[SP Discover] GUID lookup: ' + guid);
+        try {
+          const guidPath = await spWin.webContents.executeJavaScript(
+            'fetch("https://amazon.sharepoint.com' + parsed.site + "/_api/web/GetFileById('" + guid + "')?$select=ServerRelativeUrl" + '", ' +
+            '{ credentials: "include", headers: { "Accept": "application/json;odata=verbose" } })' +
+            '.then(r => r.ok ? r.json() : null).then(d => d && d.d ? d.d.ServerRelativeUrl : null).catch(() => null)'
+          );
+          if (guidPath) { filePath = guidPath; logger.info('[SP Discover] Resolved via GUID: ' + filePath); }
+        } catch(e) { logger.warn('[SP Discover] GUID failed: ' + e.message); }
+      }
+      
+    if (!filePath && parsed.needsSearch) {
+      logger.info('[SP Discover] Searching for: ' + parsed.fileName);
+      // Try common document library paths
+      const tryPaths = [
+        parsed.site + '/Shared Documents/' + parsed.fileName,
+        parsed.site + '/Shared Documents/AFP- POWER UNIT TRACKERS/' + parsed.fileName,
+        parsed.site + '/Shared Documents/DSP- POWER UNIT TRACKERS/' + parsed.fileName,
+      ];
+      
+      for (const tryPath of tryPaths) {
+        try {
+          const exists = await spWin.webContents.executeJavaScript(`
+            fetch("https://amazon.sharepoint.com/_api/web/getfilebyserverrelativeurl('${tryPath.replace(/'/g, "''")}')", 
+              { credentials: 'include', headers: { 'Accept': 'application/json;odata=verbose' } })
+              .then(r => r.ok)
+              .catch(() => false)
+          `);
+          if (exists) { filePath = tryPath; break; }
+        } catch(e) {}
+      }
+      
+      // If still not found, try search API
+      if (!filePath) {
+        const searchResult = await spWin.webContents.executeJavaScript(`
+          fetch("https://amazon.sharepoint.com${parsed.site}/_api/search/query?querytext='" + encodeURIComponent('${parsed.fileName}') + "'&selectproperties='Path'&rowlimit=3",
+            { credentials: 'include', headers: { 'Accept': 'application/json;odata=verbose' } })
+            .then(r => r.json())
+            .then(d => {
+              try {
+                const rows = d.d.query.PrimaryQueryResult.RelevantResults.Table.Rows.results;
+                return rows.map(r => r.Cells.results.find(c => c.Key === 'Path').Value).filter(p => p.includes('.xlsx'));
+              } catch(e) { return []; }
+            })
+            .catch(() => [])
+        `);
+        if (searchResult && searchResult.length) {
+          filePath = searchResult[0].replace('https://amazon.sharepoint.com', '');
+        }
+      }
+      
+      if (!filePath) {
+        return { ok: false, error: 'Could not find file: ' + parsed.fileName + '. Try pasting the server-relative path (e.g. /sites/AFP-FAS/Shared Documents/folder/file.xlsx)' };
+      }
+      logger.info('[SP Discover] Resolved path: ' + filePath);
+    }
+
+    const result = await discoverSheets(spWin, filePath);
+    if (result && result.ok) {
+      result.filePath = filePath; // Ensure filePath is always returned
+    }
+    return result;
   });
 
   logger.info('Misc IPC handlers registered');

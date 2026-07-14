@@ -2,19 +2,28 @@
  * dev-mock.js -- Browser mock for Electron IPC bridge
  * Injected in dev/Vite mode only. Stubs window.fleet, window.auth, etc.
  * with realistic fake data so the UI renders without Electron.
+ *
+ * SAFETY: This file must NEVER be imported in production builds.
+ * It is not referenced in index.html, vite.config.js, or app.js.
+ * Manual include only (e.g., <script src="dev-mock.js"> in dev HTML).
  */
 
+// Hard guard: abort if running inside Electron (production)
+if (typeof window !== 'undefined' && window.fleet && window.fleet.signalReady) {
+  console.warn('[dev-mock] Electron detected — aborting mock injection');
+} else {
+
 const MOCK_ROWS = [
-  { equipmentId: 'EQ-10021', assetType: 'Forklift',     lifecycleState: 'Available',      lifecycleReason: '',                  domicileSite: 'PDX1', operator: 'J. Rivera',   manufacturer: 'Toyota',  dueDate: '2026-07-15', openUnplanned: 2, geofence: 'PDX1-YARD-A' },
-  { equipmentId: 'EQ-10034', assetType: 'Pallet Jack',  lifecycleState: 'Maintenance',    lifecycleReason: 'Scheduled PM',      domicileSite: 'SEA3', operator: 'K. Nguyen',   manufacturer: 'Crown',   dueDate: '2026-07-02', openUnplanned: 0, geofence: 'SEA3-DOCK-2' },
-  { equipmentId: 'EQ-10055', assetType: 'Reach Truck',  lifecycleState: 'Unavailable',    lifecycleReason: 'Awaiting Parts',    domicileSite: 'PDX1', operator: 'M. Patel',    manufacturer: 'Raymond', dueDate: '2026-06-30', openUnplanned: 4, geofence: 'PDX1-SHOP'   },
-  { equipmentId: 'EQ-10062', assetType: 'Order Picker', lifecycleState: 'Available',      lifecycleReason: '',                  domicileSite: 'SFO5', operator: 'T. Williams', manufacturer: 'Hyster',  dueDate: '2026-08-10', openUnplanned: 1, geofence: 'SFO5-FLOOR'  },
-  { equipmentId: 'EQ-10078', assetType: 'Forklift',     lifecycleState: 'Decommissioned', lifecycleReason: 'End of Life',       domicileSite: 'SEA3', operator: '',            manufacturer: 'Toyota',  dueDate: '',           openUnplanned: 0, geofence: ''            },
-  { equipmentId: 'EQ-10091', assetType: 'Tugger',       lifecycleState: 'Available',      lifecycleReason: '',                  domicileSite: 'PDX1', operator: 'A. Kim',      manufacturer: 'Cushman', dueDate: '2026-09-01', openUnplanned: 0, geofence: 'PDX1-YARD-B' },
-  { equipmentId: 'EQ-10103', assetType: 'Reach Truck',  lifecycleState: 'Maintenance',    lifecycleReason: 'Battery Swap',      domicileSite: 'SFO5', operator: 'D. Torres',   manufacturer: 'Crown',   dueDate: '2026-07-20', openUnplanned: 1, geofence: 'SFO5-CHARGE' },
-  { equipmentId: 'EQ-10117', assetType: 'Pallet Jack',  lifecycleState: 'Available',      lifecycleReason: '',                  domicileSite: 'PDX1', operator: 'S. Chen',     manufacturer: 'Raymond', dueDate: '2026-10-05', openUnplanned: 0, geofence: 'PDX1-FLOOR'  },
-  { equipmentId: 'EQ-10129', assetType: 'Forklift',     lifecycleState: 'Unavailable',    lifecycleReason: 'Operator Incident', domicileSite: 'SEA3', operator: 'B. Johnson',  manufacturer: 'Hyster',  dueDate: '2026-07-08', openUnplanned: 3, geofence: 'SEA3-YARD'   },
-  { equipmentId: 'EQ-10142', assetType: 'Order Picker', lifecycleState: 'Available',      lifecycleReason: '',                  domicileSite: 'SFO5', operator: 'L. Garcia',   manufacturer: 'Toyota',  dueDate: '2026-08-25', openUnplanned: 0, geofence: 'SFO5-FLOOR'  },
+  { equipmentId: 'EQ-10021', bodyType: 'Box Truck',    lifecycleState: 'Available',      lifecycleReason: 'In Progress',   domicileSite: 'PDX1', operator: 'TUZR', openUnplanned: 2, openPlanned: 1, pmB: 'Aug 15', pmX: 'Jul 12',   dot: 'overdue',  quarterlyLift: 'Jul 8'   },
+  { equipmentId: 'EQ-10034', bodyType: 'Pallet Jack',  lifecycleState: 'Maintenance',    lifecycleReason: 'Pending Parts', domicileSite: 'SEA3', operator: 'SAPB', openUnplanned: 0, openPlanned: 0, pmB: 'Jul 28', pmX: 'overdue',  dot: 'Sep 5',    quarterlyLift: '--'      },
+  { equipmentId: 'EQ-10055', bodyType: 'Reach Truck',  lifecycleState: 'Unavailable',    lifecycleReason: 'Offsite Shop',  domicileSite: 'PDX1', operator: 'TUZR', openUnplanned: 4, openPlanned: 0, pmB: 'overdue',pmX: 'overdue',  dot: 'Jul 14',   quarterlyLift: 'Jul 22'  },
+  { equipmentId: 'EQ-10062', bodyType: 'Order Picker', lifecycleState: 'Available',      lifecycleReason: 'Available',     domicileSite: 'SFO5', operator: 'PENO', openUnplanned: 1, openPlanned: 2, pmB: 'Sep 30', pmX: 'Sep 10',   dot: 'Sep 20',   quarterlyLift: 'Aug 1'   },
+  { equipmentId: 'EQ-10078', bodyType: 'Forklift',     lifecycleState: 'Unavailable',    lifecycleReason: 'Pending Diag',  domicileSite: 'SEA3', operator: 'SAPB', openUnplanned: 0, openPlanned: 0, pmB: '--',     pmX: '--',       dot: '--',       quarterlyLift: '--'      },
+  { equipmentId: 'EQ-10091', bodyType: 'Tugger',       lifecycleState: 'Available',      lifecycleReason: 'Available',     domicileSite: 'PDX1', operator: 'TUZR', openUnplanned: 0, openPlanned: 1, pmB: 'Jul 8',  pmX: 'Aug 3',    dot: 'Jul 19',   quarterlyLift: 'Aug 15'  },
+  { equipmentId: 'EQ-10103', bodyType: 'Reach Truck',  lifecycleState: 'Maintenance',    lifecycleReason: 'In Progress',   domicileSite: 'SFO5', operator: 'PENO', openUnplanned: 1, openPlanned: 0, pmB: 'Sep 2',  pmX: 'Jul 5',    dot: 'Oct 8',    quarterlyLift: 'Jul 14'  },
+  { equipmentId: 'EQ-10117', bodyType: 'Pallet Jack',  lifecycleState: 'Available',      lifecycleReason: 'Available',     domicileSite: 'PDX1', operator: 'AZNG', openUnplanned: 0, openPlanned: 0, pmB: 'Nov 5',  pmX: 'Oct 10',   dot: 'Oct 1',    quarterlyLift: 'Sep 15'  },
+  { equipmentId: 'EQ-10129', bodyType: 'Forklift',     lifecycleState: 'Unavailable',    lifecycleReason: 'Offsite Shop',  domicileSite: 'SEA3', operator: 'SAPB', openUnplanned: 3, openPlanned: 1, pmB: 'Jul 3',  pmX: 'overdue',  dot: 'Jul 25',   quarterlyLift: 'overdue' },
+  { equipmentId: 'EQ-10142', bodyType: 'Order Picker', lifecycleState: 'Available',      lifecycleReason: 'Available',     domicileSite: 'SFO5', operator: 'PENO', openUnplanned: 0, openPlanned: 0, pmB: 'Dec 10', pmX: 'Nov 20',   dot: 'Oct 20',   quarterlyLift: 'Sep 25'  },
 ];
 
 function noop() {}
@@ -158,4 +167,6 @@ window.partner = {
   onNewRequest: noop,
 };
 
-console.log('[dev-mock] Electron IPC bridge mocked — browser dev mode active');
+console.log('[dev-mock] Electron IPC bridge mocked \u2014 browser dev mode active');
+
+} // end else (Electron guard)

@@ -1,5 +1,6 @@
 /** daily-notes.js -- Daily Notes view (Stage 20) */
 import bus from '../bus.js';
+import state from '../state.js';
 let _el = null; let _lastLog = []; let _running = false;
 const _safe = (s) => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 function _fmtDT(ts){ if(!ts)return'—'; const d=ts instanceof Date?ts:new Date(ts); return d.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '+d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false}); }
@@ -144,19 +145,19 @@ function _wireToggle(headId,bodyId,chevId){
 }
 async function _loadLog(){
   try{
-    const log=typeof window.getDailyNotesLog==='function'?await window.getDailyNotesLog():[];
+    const log=(window.ai && typeof window.ai.getDailyNotesLog==='function')?await window.ai.getDailyNotesLog():[];
     _lastLog=Array.isArray(log)?log.slice().reverse():[];
   }catch(e){console.warn('[daily-notes view] getDailyNotesLog error:',e);_lastLog=[];}
 }
 function _rAll(){_renderStats();_renderLastRun();_renderRunLog();_renderDecisionLog();_updateRunBtn();_updateCounts();}
-async function _activate(){ await _loadLog(); _rAll(); _updateHeaderBadge(); }
 async function _doRun(){
   if(_running)return;
-  if(typeof window.runDailyNotes!=='function'){bus.emit('ui:toast',{type:'warning',message:'runDailyNotes not available',duration:3000});return;}
-  const units=window.UNITS?Object.values(window.UNITS):[];
+  if(!window.ai || typeof window.ai.runDailyNotes!=='function'){bus.emit('ui:toast',{type:'warning',message:'runDailyNotes not available',duration:3000});return;}
+  const fleetState=state.slice('fleet');
+  const units=Array.isArray(fleetState.rows)?fleetState.rows:[];
   if(!units.length){bus.emit('ui:toast',{type:'warning',message:'No units loaded -- sync first',duration:3000});return;}
   _running=true; _updateRunBtn();
-  try{await window.runDailyNotes(units);await _loadLog();_rAll();_updateHeaderBadge();}catch(e){console.warn('[daily-notes view] run error:',e);}finally{_running=false;_updateRunBtn();}
+  try{await window.ai.runDailyNotes(units);await _loadLog();_rAll();_updateHeaderBadge();}catch(e){console.warn('[daily-notes view] run error:',e);}finally{_running=false;_updateRunBtn();}
 }
 function _buildScaffold(){
   _el.innerHTML=

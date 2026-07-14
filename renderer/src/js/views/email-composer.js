@@ -421,8 +421,9 @@ function _autoFillRecipients() {
 
   // Try Op__DOM first, then Op__ALL, then first sp preset for this operator
   const key     = dom && dom !== 'ALL' ? `${op}__${dom}` : null;
-  const anyKey  = Object.keys(_spEmails).find(k => k.startsWith(op + '__'));
-  const preset  = (key && _spEmails[key]) || (anyKey && _spEmails[anyKey]) || _opEmails[op];
+  const allKey  = op + '__ALL';
+  const anyKey  = Object.keys(_spEmails).find(k => k.startsWith(op + '__') && k !== allKey);
+  const preset  = (key && _spEmails[key]) || (_spEmails[allKey]) || (anyKey && _spEmails[anyKey]) || _opEmails[op];
   if (!preset) return;
 
   const toField = _el2('ec-to');
@@ -449,14 +450,13 @@ function _wirePreview() {
     btn.disabled = true; btn.textContent = 'Building...';
     _setStatus('loading', 'Building preview...');
     try {
-      const result = await emailBridge.compose(p);
+      const result = await emailBridge.preview(p);
       if (result && result.success === false) {
         toast.show('error', 'Build failed: ' + (result.error || 'unknown'), 5000);
         _setStatus('error', 'Build failed');
       } else {
         // compose opens OWA; for preview we call email.preview with the payload
         // The main process builds HTML via buildEmail and opens a preview window
-        await emailBridge.preview(p);
         _setStatus('ok', 'Preview opened');
         toast.show('info', 'Preview window opened', 2000);
       }
@@ -727,6 +727,18 @@ export async function init(container) {
   _updateUnitCount();
 
   // Refresh operators when fleet data changes
+  bus.on('email:compose', (data) => {
+    if (data) {
+      const toField = document.getElementById('email-to');
+      const subField = document.getElementById('email-subject');
+      const bodyField = document.getElementById('email-body');
+      if (toField) toField.value = data.to || '';
+      if (subField) subField.value = data.subject || '';
+      if (bodyField) bodyField.value = data.body || '';
+      bus.emit('ui:view-change', {to: 'email'});
+    }
+  });
+
   bus.on('fleet:data', () => {
     _refreshOperators();
     // Re-render operator options, preserving current selection
@@ -767,4 +779,62 @@ export async function init(container) {
       _updateUnitCount();
     }
   });
+
+
+  // ── S28: Auto-email handler — fires when scheduler triggers ──────────────
+  bus.on('fleet:auto-email', async (payload) => {
+    const { slot, triggeredAt, syncError } = payload || {};
+    console.log('[email-composer] Auto-email triggered: slot=' + (slot || '?') + ' at ' + (triggeredAt || 'unknown'));
+    if (syncError) console.warn('[email-composer] Auto-email sync had error:', syncError);
+
+    // Load email recipients from both sources
+    await _loadSpEmails();
+    const opData = await emailBridge.loadOpEmails() || {};
+    if (opData && typeof opData === 'object') Object.assign(_opEmails, opData);
+
+    // Build recipient list: check _opEmails (op_emails.json) and _spEmails (spConfig.emails)
+    const sendList = [];
+    // From op_emails.json (primary — keyed by operator name)
+    Object.keys(_opEmails).forEach(op => {
+      if (_opEmails[op] && _opEmails[op].to) sendList.push({ key: op, opName: op, domCode: 'ALL', ...(_opEmails[op]) });
+    });
+    // From spConfig.emails (keyed Op__DOM — only add if not already covered)
+    Object.keys(_spEmails).forEach(k => {
+      if (_spEmails[k] && _spEmails[k].to && !sendList.find(s => s.key === k)) {
+        const [opName, domCode] = k.split('__');
+        sendList.push({ key: k, opName, domCode: domCode || 'ALL', ...(_spEmails[k]) });
+      }
+    });
+
+    if (!sendList.length) {
+      console.warn('[email-composer] Auto-email: no email presets configured — skipping');
+      return;
+    }
+
+    // Send one email per recipient entry
+    for (let _i = 0; _i < sendList.length; _i++) {
+      if (_i > 0) await new Promise(r => setTimeout(r, 15000));
+      const entry = sendList[_i];
+      const { opName, domCode } = entry;
+      if (!opName) continue;
+      const recipients = entry;
+
+      try {
+        const result = await emailBridge.compose({
+          subject: _buildSubject(opName, slot || "PM", domCode),
+          operator: opName,
+          domicile: domCode || 'ALL',
+          slot: slot || 'PM',
+          to: recipients.to || '',
+          cc: recipients.cc || '',
+          emailNote: '',
+          testMode: false,
+        });
+        console.log('[email-composer] Auto-email ' + entry.key + ':', result && result.success !== false ? 'SUCCESS' : 'FAILED');
+      } catch (e) {
+        console.error('[email-composer] Auto-email compose error for ' + entry.key + ':', e);
+      }
+    }
+  });
+
 }

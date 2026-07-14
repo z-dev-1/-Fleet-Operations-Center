@@ -7,30 +7,21 @@ const logger = require('../utils/logger').createLogger('sharepoint_push');
 const { withRetry } = require('../utils/retry');    // H-1: auth + digest retry
 
 const SP_ORIGIN = 'https://amazon.sharepoint.com';
-const SP_SITE   = '/sites/AFP-FAS';
+const SP_SITE   = '/sites/AFP-FAS'; // Now overridable via config filePath
 const SP_API    = SP_ORIGIN + SP_SITE + '/_api';
 
 
 // SP Push config file — user can add/remove workbooks
 const SP_CONFIG_FILE = P.spConfig;
 
-const DEFAULT_WORKBOOKS = [
-  { name: 'AUVTE01', domicile: 'AUVTE01',
-    path: '/sites/AFP-FAS/Shared Documents/DSP- POWER UNIT TRACKERS/Z Santiago - AUVTE01.xlsx',
-    carriers: [{ code: 'AUVTE', sheet: 'sheet2' }], headerRow: 14 },
-  { name: 'ABE40', domicile: 'ABE40',
-    path: '/sites/AFP-FAS/Shared Documents/AFP- POWER UNIT TRACKERS/Z Santiago - ABE40.xlsx',
-    carriers: [{ code: 'AZNG', sheet: 'sheet2' }, { code: 'SAPB', sheet: 'sheet3' }, { code: 'TUZR', sheet: 'sheet4' }], headerRow: 16 },
-  { name: 'AVP40', domicile: 'AVP40',
-    path: '/sites/AFP-FAS/Shared Documents/AFP- POWER UNIT TRACKERS/Z Santiago - AVP40.xlsx',
-    carriers: [{ code: 'AZNG', sheet: 'sheet2' }, { code: 'PENO', sheet: 'sheet3' }], headerRow: 16 }
-];
+const DEFAULT_WORKBOOKS = []; // Configured via Settings → Operators & SP
 
 function loadWorkbooks() {
   try {
     if (fs.existsSync(SP_CONFIG_FILE)) {
       const data = JSON.parse(fs.readFileSync(SP_CONFIG_FILE, 'utf8'));
       if (Array.isArray(data) && data.length) return data;
+      if (data && Array.isArray(data.workbooks) && data.workbooks.length) return data.workbooks;
     }
   } catch(e) { logger.warn('[SP Push] Config load error:', e.message); }
   // First run — save defaults
@@ -152,13 +143,13 @@ function buildRowValues(unit) {
       unit.id || unit.equipmentId || '',                       // B: UNIT NUMBER
       (unit.bodyType || '').toUpperCase(),                     // C: BODY TYPE
       make,                                                     // D: MAKE
-    (!/unavailable/i.test(unit.atsState || '') ? 'ACTIVE' : 'UNAVAILABLE'), // E: LIFECYCLE STATE
+    (!/unavailable/i.test((unit.atsState||unit.lifecycleState) || '') ? 'ACTIVE' : 'UNAVAILABLE'), // E: LIFECYCLE STATE
       unit.savedRepairStatus || '',                             // F: REPAIR STATUS
       unit.savedPrimaryComponent || '',                         // G: PRIMARY COMPONENT
       (unit.altId && unit.altId !== '\u2014' ? unit.altId : unit.alternativeId || ''), // H: RELAY GARAGE
       unit.savedOffsiteEvent || '',                             // I: OFFSITE SHOP EVENT (display)
       unit.savedSalesforceCase || '',                           // J: SALESFORCE CASE (display)
-      unit.savedNotes || '',                                    // K: REPAIR UPDATES
+      (unit.repairTimeline || unit.savedNotes || ''),           // K: REPAIR UPDATES (timeline)
       unit.vendor || '',                                        // L: ASSIGNED VENDOR
       dateDown,                                                 // M: DATE DOWNED
       daysUnavail                                               // N: # DAYS UNAVAILABLE
@@ -182,7 +173,7 @@ async function pushToSharePoint(units, onProgress) {
 
   // Push ALL units — renderer uses atsState: 'Unavailable' or 'Available'
   const allUnits = units; // push everything, let the script decide
-  const unavailCount = allUnits.filter(u => /unavailable/i.test(u.atsState || '')).length;
+  const unavailCount = allUnits.filter(u => /unavailable/i.test((u.atsState||u.lifecycleState) || '')).length;
   const activeCount = allUnits.length - unavailCount;
 
   log('Total units to push: ' + allUnits.length + ' (' + unavailCount + ' unavailable, ' + activeCount + ' active)', 'info');
@@ -201,21 +192,20 @@ async function pushToSharePoint(units, onProgress) {
 
   let totalPushed = 0, totalUpdated = 0, totalErrors = 0;
 
-  for (const wb of WORKBOOKS) {
+  const LIVE_WORKBOOKS = loadWorkbooks();
+  for (const wb of LIVE_WORKBOOKS) {
     const wbUnits = allUnits.filter(u => {
 
       const op = (u.op || u.operator || '').toUpperCase();
       const dom = (u.site || u.domicileSite || '').toUpperCase();
       const carrierMatch = wb.carriers.some(c => c.code === op);
       if (!carrierMatch) return false;
-      // AZNG appears in both ABE40 and AVP40 — filter by domicile for shared carriers
-      // AUVTE, SAPB, TUZR, PENO are unique to one workbook — no domicile filter needed
-      const sharedCarrier = (op === 'AZNG'); // only AZNG is in multiple workbooks
-      if (sharedCarrier) {
-        return wb.domicile === 'AUVTE01' ? /auvte/i.test(dom) : dom === wb.domicile;
+      // Filter by domicile: if workbook has a domicile set, only include units from that domicile
+      if (wb.domicile) {
+        const unitDom = (u.site || u.domicileSite || u.domicile || '').toUpperCase();
+        return unitDom === wb.domicile.toUpperCase() || unitDom.includes(wb.domicile.toUpperCase());
       }
-      return true; // non-shared carriers: all domiciles go to same workbook
-    });
+          });
 
 
 
@@ -230,7 +220,7 @@ async function pushToSharePoint(units, onProgress) {
       const rowData = carrierUnits.map(u => {
         const row = buildRowValues(u);
         // When unit is ACTIVE, clear all maintenance fields
-        if (!/unavailable/i.test(u.atsState || '')) {
+        if (!/unavailable/i.test((u.atsState||u.lifecycleState) || '')) {
           row.values[5] = '';   // F: Repair Status
           row.values[6] = '';   // G: Primary Component
           row.values[7] = '';   // H: Relay Garage (Alt ID)

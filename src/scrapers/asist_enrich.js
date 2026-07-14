@@ -23,7 +23,7 @@ const ASIST_SCRAPE = String.raw`
   var caseNumbers=[],m2;reCNum.lastIndex=0;while((m2=reCNum.exec(body))!==null)if(!caseNumbers.includes(m2[1]))caseNumbers.push(m2[1]);
   var srNumbers=[];reSRN.lastIndex=0;while((m2=reSRN.exec(body))!==null)if(!srNumbers.includes(m2[1]))srNumbers.push(m2[1]);
   function rf(lb){var i=body.indexOf(lb);if(i<0)return'';return body.slice(i+lb.length,i+lb.length+120).split('\n')[0].replace(/^\s*:\s*/,'').trim().slice(0,80);}
-  return{currentUrl:location.href,estimateLinks:estimateLinks,caseLinks:caseLinks,srLinks:srLinks,caseNumbers:caseNumbers,srNumbers:srNumbers,srStatus:rf('Status'),dealer:(rf('Dealer')||rf('Location')||rf('Service Location')||rf('Shop')),complaint:rf('Complaint'),assetVin:rf('VIN'),unitNumber:rf('Unit Number'),pageReady:body.length>300};
+  return{currentUrl:location.href,estimateLinks:estimateLinks,caseLinks:caseLinks,srLinks:srLinks,caseNumbers:caseNumbers,srNumbers:srNumbers,srStatus:rf('Status'),dealer:(rf('Dealer')||rf('Location')||rf('Service Location')||rf('Shop')),complaint:rf('Complaint'),assetVin:rf('VIN'),unitNumber:rf('Unit Number'),pageText:body.substring(0,12000),pageReady:body.length>300};
 })()
 `;
 
@@ -55,7 +55,9 @@ async function enrichVolvoAsist(srUrl){
   else if(caseUrl){bUrl=caseUrl;src='case';bLabel=caseNum?'ASIST Case #'+caseNum:'ASIST Case';}
   else{bUrl=srUrl;src='service_request';bLabel=srNum?'ASIST SR '+srNum:'Service Request';}
   logger.info('[ae] DONE | src:',src,'case:',caseNum);
-  return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||''};
+  // Combine all scraped page text for timeline building
+  const offsiteText = (sr.pageText || '').trim();
+  return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',offsiteText};
 }
 
 const SOURCE_RANK={estimate:3,case:2,service_request:1,none:0};

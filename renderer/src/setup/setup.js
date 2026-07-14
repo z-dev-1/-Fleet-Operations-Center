@@ -61,6 +61,31 @@ const STEPS = [
     },
   },
   {
+    id:    'sharepoint',
+    title: 'SharePoint (Optional)',
+    html:  `
+      <p class="setup__hint">Fleet Operations can auto-push unit data to your SharePoint workbooks. You can skip this and configure later in Settings &rarr; Operators &amp; SP.</p>
+      <label>SP Site URL
+        <input id="sw-sp-site" type="text" class="setup__input" placeholder="https://amazon.sharepoint.com/sites/AFP-FAS" />
+      </label>
+      <label>Workbook Path (primary)
+        <input id="sw-sp-workbook" type="text" class="setup__input" placeholder="/sites/AFP-FAS/Shared Documents/..." />
+      </label>
+      <div id="sw-sp-status" class="setup__status setup__status--info">Optional &mdash; skip if not ready</div>
+      <button id="sw-sp-skip" class="setup__btn setup__btn--secondary" style="margin-top:8px">Skip for now</button>
+    `,
+    collect: () => ({
+      spSiteUrl:    document.getElementById('sw-sp-site').value.trim(),
+      spWorkbook:   document.getElementById('sw-sp-workbook').value.trim(),
+    }),
+    afterMount: () => {
+      document.getElementById('sw-sp-skip').addEventListener('click', () => {
+        document.getElementById('sw-sp-status').textContent = 'Skipped \u2014 configure later in Settings';
+        document.getElementById('sw-next').click();
+      });
+    },
+  },
+  {
     id:    'orcha',
     title: 'Orcha AI Config',
     html:  `
@@ -94,6 +119,7 @@ const STEPS = [
         if (k === 'profile')   return [v.userName, v.userEmail, v.userPhone].filter(Boolean).join(' | ') || '<em>empty</em>';
         if (k === 'domiciles') return v.domiciles ? v.domiciles.replace(/\n/g, ', ') : '<em>none</em>';
         if (k === 'midway')    return 'checked \u2713';
+        if (k === 'sharepoint') return v.spSiteUrl ? (v.spSiteUrl + ' \u2192 ' + (v.spWorkbook || 'not set')) : 'skipped';
         if (k === 'orcha')     return (v.orchaMode || 'local') + ' @ ' + (v.orchaHost || 'localhost') + ':' + (v.orchaPort || 4799);
         if (k === 'confirm')   return 'ready';
         const parts = Object.entries(v).filter(([, x]) => x && typeof x !== 'object').map(([, x]) => x);
@@ -102,6 +128,7 @@ const STEPS = [
       const LABELS = {
         userName: 'Name', userEmail: 'Email', userPhone: 'Phone',
         profile: 'Profile', domiciles: 'Domiciles', midway: 'Midway',
+        sharepoint: 'SharePoint', spSiteUrl: 'SP Site', spWorkbook: 'SP Workbook',
         orchaMode: 'Orcha Mode', orchaHost: 'Orcha Host', orchaPort: 'Orcha Port',
         orcha: 'Orcha', confirm: 'Status',
       };

@@ -24,6 +24,8 @@ const VENDOR_PARTITIONS = {
   "amazon.aperiatech.com":           "persist:vendor-aperia",
   "amazon.reach24.net":              "persist:vendor-reach24",
   "dtna.my.site.com":                "persist:vendor-dtna",
+  "ciam.dtna.com":                   "persist:vendor-dtna",
+  "login.dtna.com":                  "persist:vendor-dtna",
   "roadready.fadv.com":              "persist:vendor-roadready",
   "velogic.my.site.com":             "persist:vendor-velogic",
   "www.access-billing-services.com": "persist:vendor-abs",
@@ -44,6 +46,8 @@ const LOGIN_STRATEGIES = {
   "amazon.aperiatech.com":           "two-step",
   "amazon.reach24.net":              "standard",
   "dtna.my.site.com":                "standard",
+  "ciam.dtna.com":                   "standard",
+  "login.dtna.com":                  "standard",
   "roadready.fadv.com":              "standard",
   "velogic.my.site.com":             "standard",
   "www.access-billing-services.com": "iframe",
@@ -111,6 +115,7 @@ async function _loginStandard(wc, username, password) {
     'input[type="email"]',
     'input[placeholder*="mail" i]',
     'input[placeholder*="user" i]',
+    'input[placeholder="User ID"]',
     'input[type="text"]',
   ];
   const passSelectors = [
@@ -269,7 +274,7 @@ async function _loginStayIn(wc) {
 }
 
 // ── Main entry: attempt login based on hostname strategy ─────────────────────
-async function attemptAutoLogin(wc, currentUrl) {
+async function attemptAutoLogin(wc, currentUrl, overrideHostname) {
   if (!currentUrl || !currentUrl.startsWith('http')) return { filled: false, site: '' };
   let hostname;
   try { hostname = new URL(currentUrl).hostname; }
@@ -356,7 +361,8 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
 
     loginAttempts++;
     logger.info('attachAutoLogin: login page detected, attempt', loginAttempts);
-    const result = await attemptAutoLogin(win.webContents, currentUrl);
+    const targetHostname = new URL(targetUrl).hostname;
+    const result = await attemptAutoLogin(win.webContents, currentUrl, targetHostname);
     if (result.filled) {
       _loginAttempted = true;
     } else {
@@ -368,6 +374,7 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
   }
 
   win.webContents.on('did-finish-load', onLoad);
+  win.webContents.on('did-navigate', onLoad);
   logger.info('attachAutoLogin: attached for', targetUrl.slice(0, 80));
 }
 

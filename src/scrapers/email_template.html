@@ -3,6 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<!--[if gte mso 9]><xml><o:OfficeDocumentSettings><o:AllowPNG/><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]-->
+<style type="text/css">
+:root { color-scheme: light dark; supported-color-schemes: light dark; }
+[data-ogsc] td[style*="background-color:#ffffff"] { background-color: #f7f9fc !important; }
+[data-ogsc] td[style*="background-color:#f4f5f7"] { background-color: #1a2838 !important; }
+[data-ogsc] font[color="#1a2b42"], [data-ogsc] font[color="#2d3748"], [data-ogsc] font[color="#222222"] { color: #e2eaf3 !important; }
+</style>
 </head>
 <body style="margin:0;padding:0;background-color:#f4f5f7;font-family:Arial,sans-serif;">
 
@@ -11,19 +20,19 @@
 <tr><td align="center" style="padding:24px 16px;">
 
 <!-- Email container -->
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="780" style="max-width:780px;background-color:#ffffff;border:1px solid #dde1e6;border-radius:8px;overflow:hidden;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="780" style="max-width:780px;background-color:#f7f9fc;border:1px solid #d0d5dd;border-radius:8px;overflow:hidden;">
 
   <!-- Test banner (injected when testMode=true) -->
   {{TEST_BANNER}}
 
   <!-- Header -->
   <tr>
-    <td bgcolor="#0f1923" style="background-color:#0f1923;padding:18px 24px;">
+    <td bgcolor="#1e3a5f" style="background-color:#1e3a5f;padding:18px 24px;">
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
         <tr>
           <td>
             <font color="#ffffff" face="Arial,sans-serif" style="font-size:18px;font-weight:bold;letter-spacing:0.02em;"><b>Fleet Maintenance Report</b></font><br>
-            <font color="#94a3b8" face="Arial,sans-serif" style="font-size:11px;">{{DATETIME}}</font>
+            <font color="#b8d4f0" face="Arial,sans-serif" style="font-size:11px;">{{DATETIME}}</font>
           </td>
           <td align="right" valign="middle">
             <table cellpadding="0" cellspacing="0" border="0">
@@ -41,12 +50,12 @@
 
   <!-- Operator + Site badge -->
   <tr>
-    <td bgcolor="#1e293b" style="background-color:#1e293b;padding:8px 24px;">
-      <font color="#94a3b8" face="Arial,sans-serif" style="font-size:10px;letter-spacing:0.08em;">OPERATOR: </font>
-      <font color="#e2e8f0" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;"><b>{{OPERATOR}}</b></font>
+    <td bgcolor="#2d4a6f" style="background-color:#2d4a6f;padding:8px 24px;">
+      <font color="#b8d4f0" face="Arial,sans-serif" style="font-size:10px;letter-spacing:0.08em;">OPERATOR: </font>
+      <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;"><b>{{OPERATOR}}</b></font>
       &nbsp;&nbsp;
-      <font color="#94a3b8" face="Arial,sans-serif" style="font-size:10px;letter-spacing:0.08em;">SITE: </font>
-      <font color="#e2e8f0" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;"><b>{{SITE}}</b></font>
+      <font color="#b8d4f0" face="Arial,sans-serif" style="font-size:10px;letter-spacing:0.08em;">SITE: </font>
+      <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;"><b>{{SITE}}</b></font>
     </td>
   </tr>
 
@@ -55,19 +64,19 @@
 
   <!-- Greeting -->
   <tr>
-    <td style="padding:20px 24px 12px 24px;">
-      <font color="#1e293b" face="Arial,sans-serif" style="font-size:13px;"><b>{{GREETING}},</b></font><br>
-      <font color="#475569" face="Arial,sans-serif" style="font-size:12px;line-height:1.6;">{{GREETING_BODY}}</font>
+    <td style="padding:20px 24px 12px 24px;background-color:#f7f9fc;">
+      <font color="#1a2b42" face="Arial,sans-serif" style="font-size:13px;"><b>{{GREETING}},</b></font><br>
+      <font color="#2d3748" face="Arial,sans-serif" style="font-size:12px;line-height:1.6;">{{GREETING_BODY}}</font>
     </td>
   </tr>
 
   <!-- Fleet Summary Section -->
   <tr>
-    <td style="padding:0 24px 4px 24px;">
+    <td style="padding:0 24px 4px 24px;background-color:#f7f9fc;">
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
         <tr>
-          <td bgcolor="#0f1923" style="background-color:#0f1923;padding:7px 12px;border-radius:5px 5px 0 0;">
-            <font color="#e2e8f0" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.07em;"><b>&#128202; FLEET SUMMARY</b></font>
+          <td bgcolor="#1e3a5f" style="background-color:#1e3a5f;padding:7px 12px;border-radius:5px 5px 0 0;">
+            <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.07em;"><b>&#128202; FLEET SUMMARY</b></font>
           </td>
         </tr>
       </table>
@@ -78,11 +87,11 @@
 
   <!-- Unavailable Units Section -->
   <tr>
-    <td style="padding:0 24px 4px 24px;">
+    <td style="padding:0 24px 4px 24px;background-color:#f7f9fc;">
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
         <tr>
-          <td bgcolor="#475569" style="background-color:#475569;padding:7px 12px;border-radius:5px 5px 0 0;">
-            <font color="#f1f5f9" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.07em;"><b>&#128683; UNAVAILABLE UNITS &mdash; {{UNAVAIL_COUNT}}</b></font>
+          <td bgcolor="#374151" style="background-color:#374151;padding:7px 12px;border-radius:5px 5px 0 0;">
+            <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.07em;"><b>&#128683; UNAVAILABLE UNITS &mdash; {{UNAVAIL_COUNT}}</b></font>
           </td>
         </tr>
       </table>
@@ -93,11 +102,11 @@
 
   <!-- PM Due Dates Section -->
   <tr>
-    <td style="padding:0 24px 4px 24px;">
+    <td style="padding:0 24px 4px 24px;background-color:#f7f9fc;">
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
         <tr>
-          <td bgcolor="#14532d" style="background-color:#14532d;padding:7px 12px;border-radius:5px 5px 0 0;">
-            <font color="#d1fae5" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.07em;"><b>&#128197; PM DUE DATES</b></font>
+          <td bgcolor="#166534" style="background-color:#166534;padding:7px 12px;border-radius:5px 5px 0 0;">
+            <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.07em;"><b>&#128197; PM DUE DATES</b></font>
           </td>
         </tr>
       </table>
@@ -108,11 +117,11 @@
 
   <!-- Uptake Predictive Insights Section -->
   <tr>
-    <td style="padding:0 24px 4px 24px;">
+    <td style="padding:0 24px 4px 24px;background-color:#f7f9fc;">
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
         <tr>
-          <td bgcolor="#4c1d95" style="background-color:#4c1d95;padding:7px 12px;border-radius:5px 5px 0 0;">
-            <font color="#ede9fe" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.07em;"><b>&#9889; PREDICTIVE MAINTENANCE INSIGHTS (UPTAKE)</b></font>
+          <td bgcolor="#5b21b6" style="background-color:#5b21b6;padding:7px 12px;border-radius:5px 5px 0 0;">
+            <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.07em;"><b>&#9889; PREDICTIVE MAINTENANCE INSIGHTS (UPTAKE)</b></font>
           </td>
         </tr>
       </table>
@@ -123,8 +132,8 @@
 
   <!-- Footer -->
   <tr>
-    <td bgcolor="#f8fafc" style="background-color:#f8fafc;padding:14px 24px;border-top:1px solid #e2e8f0;">
-      <font color="#94a3b8" face="Arial,sans-serif" style="font-size:10px;">This report was generated automatically by Fleet Ops. Do not reply to this email.</font>
+    <td bgcolor="#f8fafc" style="background-color:#f0f4f8;padding:14px 24px;border-top:1px solid #e2e8f0;">
+      <font color="#666666" face="Arial,sans-serif" style="font-size:10px;">This report was generated automatically by Fleet Ops. Do not reply to this email.</font>
     </td>
   </tr>
 

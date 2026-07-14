@@ -58,3 +58,13 @@ Thumbs.db
 
 # DevSpace / smoke-test artefacts
 _headless_prompt.txt
+
+# S28: Additional cleanup entries
+startup.log
+electron-launch*.log
+*.monolith-backup
+*.bak_midway
+*.s28backup
+_ds_writer.js
+_old_len.txt
+_w.js

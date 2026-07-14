@@ -83,6 +83,9 @@ const P = {
   get asanaConfig()          { return path.join(getDataDir(), 'asana_config.json'); },
   get asanaAuthState()       { return path.join(getDataDir(), 'asana_auth_state.json'); },
   get vendorHistory()        { return path.join(getDataDir(), 'vendor_history.json'); },
+  get heartbeatState()       { return path.join(getDataDir(), 'heartbeat_state.json'); },
+  get rcaStore()             { return path.join(getDataDir(), 'rca_store.json'); },
+  get retentionHistory()     { return path.join(getDataDir(), 'retention_history.json'); },
 
   // ── Logs ───────────────────────────────────────────────────────────────────
   get logsDir()              { return path.join(getDataDir(), 'logs'); },

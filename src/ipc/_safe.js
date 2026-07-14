@@ -167,7 +167,30 @@ function requireObject(value, fieldName) {
 
 // ── Exports ───────────────────────────────────────────────────────────────
 
+
+// Input validation helpers
+function validateInput(data, schema) {
+  if (!schema) return { ok: true };
+  for (const [key, rule] of Object.entries(schema)) {
+    const val = data && data[key];
+    if (rule.required && (val === undefined || val === null || val === '')) {
+      return { ok: false, error: key + ' is required' };
+    }
+    if (rule.type && val !== undefined && val !== null) {
+      if (rule.type === 'string' && typeof val !== 'string') return { ok: false, error: key + ' must be a string' };
+      if (rule.type === 'number' && typeof val !== 'number') return { ok: false, error: key + ' must be a number' };
+      if (rule.type === 'array' && !Array.isArray(val)) return { ok: false, error: key + ' must be an array' };
+      if (rule.type === 'object' && (typeof val !== 'object' || Array.isArray(val))) return { ok: false, error: key + ' must be an object' };
+    }
+    if (rule.maxLen && typeof val === 'string' && val.length > rule.maxLen) {
+      return { ok: false, error: key + ' exceeds max length (' + rule.maxLen + ')' };
+    }
+  }
+  return { ok: true };
+}
+
 module.exports = {
+  validateInput,
   safeIPC,
   handle,
   timeoutAfter,

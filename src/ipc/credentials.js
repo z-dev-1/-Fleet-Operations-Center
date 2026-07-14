@@ -36,6 +36,8 @@ const _HOST_TO_VENDOR = {
   "amazon.aperiatech.com":          "aperia",
   "amazon.reach24.net":             "reach24",
   "dtna.my.site.com":               "dtna",
+  "ciam.dtna.com":                  "dtna",
+  "login.dtna.com":                 "dtna",
   "roadready.fadv.com":             "roadready",
   "velogic.my.site.com":            "velogic",
   "www.access-billing-services.com":"abs",

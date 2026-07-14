@@ -23,6 +23,7 @@ import { email    as emailBridge }                 from '../bridge.js';
 import { sp       as spBridge }                    from '../bridge.js';
 import { asana    as asanaBridge }                 from '../bridge.js';
 import toast                                       from '../components/toast.js';
+import { setPreset, setTheme, getThemeConfig, resetTheme, PRESETS } from '../nexus-theme.js';
 
 // ── Module state ────────────────────────────────────────────────────────────
 let _drawer   = null;   // the drawer DOM element
@@ -142,6 +143,33 @@ function _html() {
           </div>
         </div>
 
+        <!-- Row Colors -->
+        <div class="sd-section">
+          <div class="sd-section-title">Row Colors</div>
+          <div class="sd-color-row">
+            <div class="sd-color-item">
+              <div class="sd-label">Available Row</div>
+              <div class="sd-color-swatch-row">
+                <div class="sd-swatch active" style="background:rgba(126,231,135,.06)"  title="Subtle green" data-var="--row-avail"></div>
+                <div class="sd-swatch"        style="background:rgba(126,231,135,.14)"  title="Green"        data-var="--row-avail"></div>
+                <div class="sd-swatch"        style="background:rgba(88,166,255,.08)"   title="Blue"         data-var="--row-avail"></div>
+                <div class="sd-swatch"        style="background:transparent"            title="None"         data-var="--row-avail"></div>
+                <input type="color" class="sd-color-custom" value="#7ee787" title="Custom" data-var="--row-avail"/>
+              </div>
+            </div>
+            <div class="sd-color-item">
+              <div class="sd-label">Unavailable Row</div>
+              <div class="sd-color-swatch-row">
+                <div class="sd-swatch active" style="background:rgba(255,123,114,.06)"  title="Subtle red"   data-var="--row-unavail"></div>
+                <div class="sd-swatch"        style="background:rgba(255,123,114,.14)"  title="Red"          data-var="--row-unavail"></div>
+                <div class="sd-swatch"        style="background:rgba(255,166,87,.10)"   title="Orange"       data-var="--row-unavail"></div>
+                <div class="sd-swatch"        style="background:transparent"            title="None"         data-var="--row-unavail"></div>
+                <input type="color" class="sd-color-custom" value="#ff7b72" title="Custom" data-var="--row-unavail"/>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Transparency -->
         <div class="sd-section">
           <div class="sd-section-title">Transparency</div>
@@ -167,6 +195,21 @@ function _html() {
           <div class="sd-toggle-row">
             <span class="sd-toggle-label">Compact Rows</span>
             <input type="checkbox" id="toggle-compact"/>
+          </div>
+        </div>
+
+        <!-- Fleet Intelligence (S28) -->
+        <div class="sd-section">
+          <div class="sd-section-title">Fleet Intelligence</div>
+          <div class="sd-slider-row">
+            <div class="sd-label">SLA Target (days)</div>
+            <div class="sd-slider-wrap">
+              <input type="range" class="sd-slider" id="sl-sla-target" min="2" max="14" value="5"/>
+              <span class="sd-slider-val" id="sl-sla-target-val">5d</span>
+            </div>
+          </div>
+          <div class="sd-toggle-row" style="margin-top:4px">
+            <span class="sd-toggle-label" style="font-size:9px;color:var(--mut)">Units at vendor longer than this will trigger breach alerts</span>
           </div>
         </div>
 
@@ -197,7 +240,6 @@ function _html() {
           </div>
         </div>
 
-        <!-- Border Radius -->
         <div class="sd-section">
           <div class="sd-section-title">Border Radius</div>
           <div class="sd-slider-row">
@@ -209,8 +251,84 @@ function _html() {
           </div>
         </div>
 
+        <!-- ═══ NEXUS THEME BUILDER (Year 3030) ═══ -->
+        <div class="sd-section" id="sect-nexus-theme">
+          <div class="sd-section-title" style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:14px">🌌</span> Nexus Theme Engine
+            <span style="font-size:8px;color:var(--nx-accent,#00d4ff);font-weight:700;background:var(--nx-accent-dim,rgba(0,212,255,.1));padding:2px 6px;border-radius:8px">3030</span>
+          </div>
+
+          <!-- Presets -->
+          <div class="sd-field" style="margin-bottom:12px">
+            <div class="sd-label">Preset</div>
+            <div class="nx-preset-grid" id="nx-preset-grid">
+              <button class="nx-preset-chip nx-preset-chip--active" data-preset="default">Default</button>
+              <button class="nx-preset-chip" data-preset="void">Void</button>
+              <button class="nx-preset-chip" data-preset="solar">Solar</button>
+              <button class="nx-preset-chip" data-preset="arctic">Arctic</button>
+              <button class="nx-preset-chip" data-preset="ember">Ember</button>
+            </div>
+          </div>
+
+          <!-- Custom Accent -->
+          <div class="sd-field" style="margin-bottom:12px">
+            <div class="sd-label">Custom Accent Color</div>
+            <div style="display:flex;align-items:center;gap:10px">
+              <input type="color" id="nx-accent-picker" value="#00d4ff" class="nx-theme-builder__color"/>
+              <span id="nx-accent-hex" style="font-family:var(--nx-mono);font-size:10px;color:var(--nx-text2)">#00d4ff</span>
+              <button class="sd-btn secondary" id="nx-accent-reset" style="font-size:9px;padding:3px 8px">Reset</button>
+            </div>
+          </div>
+
+          <!-- Density -->
+          <div class="sd-field" style="margin-bottom:12px">
+            <div class="sd-label">Density</div>
+            <div style="display:flex;gap:6px">
+              <button class="nx-preset-chip" data-density="compact">Compact</button>
+              <button class="nx-preset-chip nx-preset-chip--active" data-density="default">Default</button>
+              <button class="nx-preset-chip" data-density="spacious">Spacious</button>
+            </div>
+          </div>
+
+          <!-- Blur -->
+          <div class="sd-slider-row">
+            <div class="sd-label">Glass Blur</div>
+            <div class="sd-slider-wrap">
+              <input type="range" class="sd-slider" id="nx-blur" min="0" max="40" value="20"/>
+              <span class="sd-slider-val" id="nx-blur-val">20px</span>
+            </div>
+          </div>
+
+          <!-- Animation Speed -->
+          <div class="sd-slider-row" style="margin-top:8px">
+            <div class="sd-label">Animation Speed</div>
+            <div style="display:flex;gap:6px">
+              <button class="nx-preset-chip" data-anim="off">Off</button>
+              <button class="nx-preset-chip" data-anim="fast">Fast</button>
+              <button class="nx-preset-chip nx-preset-chip--active" data-anim="default">Default</button>
+              <button class="nx-preset-chip" data-anim="slow">Slow</button>
+            </div>
+          </div>
+
+          <!-- Glow Intensity -->
+          <div class="sd-slider-row" style="margin-top:10px">
+            <div class="sd-label">Glow Intensity</div>
+            <div class="sd-slider-wrap">
+              <input type="range" class="sd-slider" id="nx-glow" min="0" max="200" value="100"/>
+              <span class="sd-slider-val" id="nx-glow-val">100%</span>
+            </div>
+          </div>
+
+          <!-- Toggles -->
+          <div style="margin-top:12px;display:flex;flex-direction:column;gap:6px">
+            <div class="sd-toggle-row"><span class="sd-toggle-label">Background Gradient</span><input type="checkbox" id="nx-bg-gradient" checked/></div>
+            <div class="sd-toggle-row"><span class="sd-toggle-label">Grid Lines</span><input type="checkbox" id="nx-grid-lines" checked/></div>
+          </div>
+        </div>
+
       </div>
       <!-- end sd-pane-ui -->
+
 
       <!-- ══ TAB 2: Integrations ══════════════════════════════════════════ -->
       <div id="sd-pane-integrations" style="display:none">
@@ -261,6 +379,10 @@ function _html() {
           </div>
           <div class="sd-btn-row">
             <button class="sd-btn primary" id="save-orcha">Save</button>
+            <button class="sd-btn secondary" id="test-orcha">Test Connection</button>
+          </div>
+          <div id="orcha-test-status" class="sd-inline-status" style="margin-top:6px;font-size:12px;"></div>
+          <div style="display:none">
           </div>
         </div>
 
@@ -461,6 +583,30 @@ function _html() {
           </div>
         </div>
 
+        <!-- Partner Forms -->
+        <div class="sd-section" id="sect-forms">
+          <div class="sd-section-title">Partner Work Request Forms</div>
+          <div class="sd-field">
+            <label class="sd-label">Google Sheets ID</label>
+            <input class="sd-input" id="forms-sheet-id" placeholder="Paste Sheet ID from URL..." />
+            <div class="sd-hint">From: docs.google.com/spreadsheets/d/<strong>[THIS ID]</strong>/edit</div>
+          </div>
+          <div class="sd-field">
+            <label class="sd-label">Poll Interval</label>
+            <select class="sd-select" id="forms-poll-interval">
+              <option value="30">Every 30 seconds</option>
+              <option value="60" selected>Every 60 seconds</option>
+              <option value="120">Every 2 minutes</option>
+              <option value="300">Every 5 minutes</option>
+            </select>
+          </div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary" id="forms-save">Save Forms Config</button>
+            <button class="sd-btn secondary" id="forms-poll-now">Poll Now</button>
+          </div>
+          <div id="forms-status" class="sd-status" style="margin-top:8px;display:none"></div>
+        </div>
+
         <!-- Asana -->
         <div class="sd-section" id="sect-asana">
           <div class="sd-section-title">Asana</div>
@@ -490,6 +636,27 @@ function _html() {
 
       <!-- ══ TAB 3: Operators & SP ═════════════════════════════════════════ -->
       <div id="sd-pane-operators" style="display:none">
+        <!-- Standalone SP Workbook Config -->
+        <div class="sd-section" id="sect-sp-workbooks">
+          <div class="sd-section-title">SharePoint Workbooks</div>
+          <div class="sd-hint" style="margin-bottom:10px">Paste a SharePoint Excel URL → Load sheets → Pick sheet + operator → Save. The app will push fleet data to these workbooks.</div>
+          <div class="sd-field">
+            <div class="sd-label">SharePoint Excel URL</div>
+            <input class="sd-input" id="sp-wb-url" placeholder="Paste SharePoint Excel file URL here..." style="width:100%" />
+          </div>
+          <div class="sd-btn-row" style="margin-top:6px">
+            <button class="sd-btn primary" id="sp-wb-discover">Load sheets</button>
+          </div>
+          <div id="sp-wb-results" style="margin-top:10px;display:none">
+            <div class="sd-field">
+              <div class="sd-label">Sheets found:</div>
+              <div id="sp-wb-sheets-list"></div>
+            </div>
+          </div>
+          <div id="sp-wb-saved" style="margin-top:12px"></div>
+        </div>
+
+
 
         <!-- Pane header -->
         <div class="ops-pane-header">
@@ -547,20 +714,6 @@ function _html() {
           </div>
         </div>
 
-        <!-- SP section header -->
-        <div class="ops-sp-section-header">
-          <span class="ops-sp-section-label">SharePoint – Per Operator → Per Domicile</span>
-          <span class="ops-sp-section-hint">Operators and domiciles populate automatically on sync</span>
-        </div>
-
-        <!-- Operator list (dynamic) -->
-        <div class="ops-list" id="ops-list">
-          <div class="ops-empty-state" id="ops-empty-state">
-            <div class="ops-empty-icon">📋</div>
-            <div class="ops-empty-title">No operators loaded yet</div>
-            <div class="ops-empty-sub">Click <strong>↻ Sync Now</strong> above to pull operators and their domiciles from the fleet data source. SharePoint config will appear here automatically for each one.</div>
-          </div>
-        </div>
 
       </div>
       <!-- end sd-pane-operators -->
@@ -619,6 +772,7 @@ function _open() {
   _populate();
 }
 
+
 function _close() {
   _drawer.classList.remove('open');
   _overlay.classList.remove('open');
@@ -629,13 +783,13 @@ function _wireDomiciles() {
   document.getElementById('save-domiciles').addEventListener('click', async () => {
     const raw = document.getElementById('settings-domiciles').value;
     const codes = raw.split(',').map((s) => s.trim()).filter(Boolean);
-    await settingsBridge.save('domiciles', codes);
+    await settingsBridge.saveDomiciles(codes);
     const st = document.getElementById('domicile-status');
     st.textContent = '✓ Saved'; st.style.display = 'block';
     setTimeout(() => { st.style.display = 'none'; }, 2000);
   });
   document.getElementById('reset-domiciles').addEventListener('click', async () => {
-    await settingsBridge.save('domiciles', []);
+    await settingsBridge.saveDomiciles([]);
     document.getElementById('settings-domiciles').value = '';
   });
 }
@@ -672,6 +826,34 @@ function _wireOrcha() {
       port: parseInt(document.getElementById('orcha-port').value, 10) || 4799,
     });
     toast.show('success', 'Orcha config saved', 2000);
+  });
+
+
+  // Test Orcha connection
+  document.getElementById('test-orcha').addEventListener('click', async () => {
+    const statusEl = document.getElementById('orcha-test-status');
+    const btn = document.getElementById('test-orcha');
+    btn.disabled = true;
+    btn.textContent = 'Testing...';
+    statusEl.textContent = '\u23F3 Connecting to Orcha...';
+    statusEl.style.color = '#94a3b8';
+    try {
+      const result = await window.ai.test();
+      if (result && result.ok) {
+        const model = (result.model || '').split('/').pop().split(':')[0];
+        statusEl.textContent = '\u2705 Connected \u2014 Response: "' + (result.response || 'OK').substring(0, 30) + '" | Model: ' + model + ' | Requests: ' + (result.requestCount || 0);
+        statusEl.style.color = '#22c55e';
+      } else {
+        statusEl.textContent = '\u274C Connection failed: ' + (result.lastError || result.status || 'No response');
+        statusEl.style.color = '#ef4444';
+      }
+    } catch (e) {
+      statusEl.textContent = '\u274C Error: ' + e.message;
+      statusEl.style.color = '#ef4444';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Test Connection';
+    }
   });
 }
 
@@ -769,17 +951,10 @@ function _checkSlack() {
   }).catch(() => {});
 }
 
-function _wireSlack() {
-  _checkSlack();
-  document.getElementById('slack-recheck').addEventListener('click', _checkSlack);
-  document.getElementById('slack-login').addEventListener('click', () => {
-    slackBridge.login().then(() => _checkSlack()).catch(() => {});
-  });
-}
-
-// ── Section: Email ───────────────────────────────────────────────────────────
 function _wireEmail() {
-  document.getElementById('email-save').addEventListener('click', async () => {
+  var saveBtn = document.getElementById('email-save');
+  var testBtn = document.getElementById('email-test');
+  if (saveBtn) saveBtn.addEventListener('click', async () => {
     await emailBridge.saveConfig({
       host: document.getElementById('email-host').value.trim(),
       port: parseInt(document.getElementById('email-port').value, 10) || 587,
@@ -788,71 +963,20 @@ function _wireEmail() {
       pass: document.getElementById('email-pass').value,
     });
     document.getElementById('email-pass').value = '';
-    const st = document.getElementById('email-status');
-    st.textContent = '✓ Saved'; st.style.display = 'block';
-    setTimeout(() => { st.style.display = 'none'; }, 2000);
   });
-  document.getElementById('email-test').addEventListener('click', () => {
-    toast.show('info', 'Send test — not yet wired in bridge', 3000);
+  if (testBtn) testBtn.addEventListener('click', () => {});
+}
+
+function _wireSlack() {
+  _checkSlack();
+  var recheckBtn = document.getElementById('slack-recheck');
+  var loginBtn = document.getElementById('slack-login');
+  if (recheckBtn) recheckBtn.addEventListener('click', _checkSlack);
+  if (loginBtn) loginBtn.addEventListener('click', () => {
+    slackBridge.login().then(() => _checkSlack()).catch(() => {});
   });
 }
 
-// ── Section: SharePoint ───────────────────────────────────────────────────────
-function _wireSP() {
-  // Operators tab sync button
-  document.getElementById('ops-sync-btn').addEventListener('click', () => {
-    bus.emit('ui:toast', { type: 'info', message: 'Syncing operators...', duration: 2000 });
-    bus.emit('sp:sync-request');
-  });
-
-  // Ops email auto-save fields
-  ['ops-email-host','ops-email-port','ops-email-from','ops-email-user','ops-email-pass','ops-email-tls'].forEach((id) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.addEventListener('change', () => _opsEmailAutoSave());
-    el.addEventListener('input',  () => _opsEmailAutoSave());
-  });
-
-  // Test email inline form
-  document.getElementById('ops-email-test-btn').addEventListener('click', () => {
-    document.getElementById('ops-email-test-btn').style.display = 'none';
-    document.getElementById('ops-email-test-form').style.display = 'flex';
-  });
-  document.getElementById('ops-email-test-cancel').addEventListener('click', () => {
-    document.getElementById('ops-email-test-btn').style.display = 'flex';
-    document.getElementById('ops-email-test-form').style.display = 'none';
-  });
-  document.getElementById('ops-email-test-send').addEventListener('click', () => {
-    const to = document.getElementById('ops-email-test-to').value.trim();
-    if (!to) return;
-    toast.show('info', 'Send test — not yet wired in bridge', 3000);
-  });
-
-  // Pre-populate ops-email fields from saved config
-  spBridge.getConfig().then((cfg) => {
-    if (!cfg) return;
-    if (cfg.emailHost) { const el = document.getElementById('ops-email-host'); if (el) el.value = cfg.emailHost; }
-    if (cfg.emailPort) { const el = document.getElementById('ops-email-port'); if (el) el.value = cfg.emailPort; }
-    if (cfg.emailFrom) { const el = document.getElementById('ops-email-from'); if (el) el.value = cfg.emailFrom; }
-    if (cfg.emailUser) { const el = document.getElementById('ops-email-user'); if (el) el.value = cfg.emailUser; }
-    if (cfg.emailTls  != null) { const el = document.getElementById('ops-email-tls');  if (el) el.checked = cfg.emailTls; }
-  }).catch(() => {});
-
-  // Listen for operators data pushed from main process
-  bus.on('state:operators', (data) => {
-    // Load SP config first, then render with saved values pre-filled
-    spBridge.getConfig().then((cfg) => {
-      _renderOperators(data, cfg || {});
-      const meta = document.getElementById('ops-sync-meta');
-      if (meta) meta.textContent = `${data.length} operator${data.length !== 1 ? 's' : ''} loaded`;
-    }).catch(() => {
-      _renderOperators(data, {});
-    });
-  });
-}
-
-// ── SP: ops-email auto-save ───────────────────────────────────────────────────
-const _opsEmailTimers = {};
 function _opsEmailAutoSave() {
   const badge = document.getElementById('ops-email-badge');
   if (badge) { badge.textContent = 'saving...'; badge.className = 'ops-autosave-badge saving'; }
@@ -878,15 +1002,42 @@ function _opsEmailAutoSave() {
 
 // ── SP: per-domicile save helper ──────────────────────────────────────────────
 // cfg shape: { domiciles: { [opName_domCode]: { siteUrl, listName } }, emailHost, ... }
-async function _spSaveDomicile(opName, domCode, siteUrl, listName) {
+async function _spSaveDomicile(opName, domCode, siteUrl, listName, headerRow) {
   const existing = await spBridge.getConfig().catch(() => ({})) || {};
   const domiciles = existing.domiciles || {};
   const key = `${opName}__${domCode}`;
-  domiciles[key] = { siteUrl, listName };
-  return spBridge.saveConfig({ ...existing, domiciles });
+  domiciles[key] = { siteUrl, listName, headerRow: headerRow || 16 };
+
+  // Update workbooks array for SP push engine
+  const workbooks = existing.workbooks || [];
+  const wbIdx = workbooks.findIndex(wb => wb.domicile === domCode);
+  if (siteUrl) {
+    const carrier = { code: opName, sheet: listName || "sheet2" };
+    if (wbIdx > -1) {
+      const wb = workbooks[wbIdx];
+      wb.path = siteUrl;
+      wb.headerRow = headerRow || wb.headerRow || 16;
+      if (!wb.carriers.find(c => c.code === opName)) wb.carriers.push(carrier);
+      else wb.carriers = wb.carriers.map(c => c.code === opName ? carrier : c);
+    } else {
+      workbooks.push({ name: domCode, domicile: domCode, path: siteUrl, carriers: [carrier], headerRow: headerRow || 16 });
+    }
+  }
+
+  return spBridge.saveConfig({ ...existing, domiciles, workbooks });
 }
 
 // ── SP: render operator accordion cards ──────────────────────────────────────
+
+// Lookup SP config from workbooks array (fallback when domiciles config is empty)
+function _wbLookup(spCfg, opName, domCode) {
+  const wbs = (spCfg && spCfg.workbooks) || [];
+  const wb = wbs.find(w => w.domicile === domCode);
+  if (!wb) return null;
+  const carrier = wb.carriers && wb.carriers.find(c => c.code === opName);
+  return { siteUrl: wb.path || "", listName: (carrier && carrier.sheet) || "", headerRow: wb.headerRow || 16 };
+}
+
 function _renderOperators(data, spCfg) {
   const list  = document.getElementById('ops-list');
   const empty = document.getElementById('ops-empty-state');
@@ -923,9 +1074,117 @@ function _renderOperators(data, spCfg) {
     body.className = 'ops-card-body';
     body.style.display = 'none';
 
+    
+    // ── "ALL" entry — email for all domiciles combined ──
+    const allKey = op.name + '__ALL';
+    const allSavedEmail = savedEmails[allKey] || {};
+    const allTo = allSavedEmail.to || '';
+    const allCc = allSavedEmail.cc || '';
+    const allEmStatus = allTo ? 'ok' : 'warn';
+    const allEmTxt = allTo ? '✓ Email' : '⚠ Email';
+
+  // ── Partner Forms (moved outside operator loop) ────────────────────────
+  const _formsSheetInput = document.getElementById('forms-sheet-id');
+  const _formsPollSelect = document.getElementById('forms-poll-interval');
+  const _formsStatus = document.getElementById('forms-status');
+  
+  // Load saved config
+  const _formsConfig = JSON.parse(localStorage.getItem('fleet_forms_config') || '{}');
+  if (_formsSheetInput && _formsConfig.sheetId) _formsSheetInput.value = _formsConfig.sheetId;
+  if (_formsPollSelect && _formsConfig.pollInterval) _formsPollSelect.value = _formsConfig.pollInterval;
+
+  document.getElementById('forms-save').addEventListener('click', () => {
+    const cfg = {
+      sheetId: (_formsSheetInput.value || '').trim(),
+      pollInterval: parseInt(_formsPollSelect.value || '60', 10)
+    };
+    bus.emit('config:forms-changed'); localStorage.setItem('fleet_forms_config', JSON.stringify(cfg));
+    // Also save to main process store
+    if (window.partner && window.partner.pollForms) {
+      window.partner.pollForms({ sheetId: cfg.sheetId }).catch(() => {});
+    }
+    if (_formsStatus) { _formsStatus.textContent = '\u2705 Saved — polling will start automatically'; _formsStatus.style.display = ''; _formsStatus.className = 'sd-status ok'; }
+  });
+
+  document.getElementById('forms-poll-now').addEventListener('click', async () => {
+    console.log('[FORMS] Poll Now clicked');
+    let rawId = (_formsSheetInput.value || '').trim();
+    console.log('[FORMS] rawId:', rawId);
+    if (!rawId) { if (_formsStatus) { _formsStatus.textContent = '\u26a0 Enter a Sheet ID first'; _formsStatus.style.display = ''; _formsStatus.className = 'sd-status warn'; } return; }
+    if (_formsStatus) { _formsStatus.textContent = '\u{1F504} Polling...'; _formsStatus.style.display = ''; _formsStatus.className = 'sd-status'; }
+    
+    // Extract gid and clean sheet ID
+    let gid = '0';
+    const gidMatch = rawId.match(/gid=(\d+)/);
+    if (gidMatch) gid = gidMatch[1];
+    let sheetId = rawId.replace(/\/edit.*$/, '').replace(/[?#].*$/, '').replace(/\/+$/, '').trim();
+    if (sheetId.includes('spreadsheets/d/')) sheetId = sheetId.split('spreadsheets/d/')[1].split('/')[0];
+    if (sheetId.includes('/')) sheetId = sheetId.split('/')[0];
+    
+    const csvUrl = gid !== '0'
+      ? 'https://docs.google.com/spreadsheets/d/' + sheetId + '/export?format=csv&gid=' + gid
+      : 'https://docs.google.com/spreadsheets/d/' + sheetId + '/gviz/tq?tqx=out:csv';
+    
+    try {
+      const resp = await fetch(csvUrl);
+      if (!resp.ok) { _formsStatus.textContent = '\u274c HTTP ' + resp.status; _formsStatus.className = 'sd-status err'; _formsStatus.style.display = ''; return; }
+      const csv = await resp.text();
+      const rows = csv.split('\n').filter(r => r.trim());
+      _formsStatus.textContent = '\u2705 Connected! ' + (rows.length - 1) + ' row(s) found';
+      _formsStatus.className = 'sd-status ok';
+      _formsStatus.style.display = '';
+      
+      // Send to main for AI processing
+      const result = await window.partner.pollForms({ csvText: csv });
+      if (result && result.newCount > 0) {
+        _formsStatus.textContent = '\u2705 ' + result.newCount + ' new request(s) — AI classifying...';
+      }
+    } catch(e) {
+      _formsStatus.textContent = '\u274c ' + e.message;
+      _formsStatus.className = 'sd-status err';
+      _formsStatus.style.display = '';
+    }
+  });
+
+
+
+    const allEl = document.createElement('div');
+    allEl.className = 'ops-domicile ops-domicile--all';
+    allEl.innerHTML = `
+      <div class="ops-dom-header">
+        <span class="ops-dom-tag" style="background:var(--acc);color:#fff;font-weight:700">ALL</span>
+        <span class="ops-dom-count">All domiciles combined</span>
+        <span class="ops-dom-sp-status ${allEmStatus}" data-em-status>${allEmTxt}</span>
+      </div>
+      <div class="ops-email-fields" style="margin-top:6px">
+        <div class="sd-section-label">Email recipients (all domiciles)</div>
+        <div class="sd-field">
+          <div class="sd-label">To <span class="sd-label-hint">(semicolon-separated)</span></div>
+          <input class="sd-input ops-em-to" type="email" multiple placeholder="manager@amazon.com" value="${_esc(allTo)}"/>
+        </div>
+        <div class="sd-field">
+          <div class="sd-label">CC</div>
+          <input class="sd-input ops-em-cc" type="email" multiple placeholder="cc@amazon.com" value="${_esc(allCc)}"/>
+        </div>
+        <div class="sd-btn-row">
+          <button class="sd-btn primary ops-em-save" type="button">Save email</button>
+        </div>
+      </div>`;
+    body.appendChild(allEl);
+
+    // Wire ALL email save
+    allEl.querySelector('.ops-em-save').addEventListener('click', async () => {
+      const to = allEl.querySelector('.ops-em-to').value.trim();
+      const cc = allEl.querySelector('.ops-em-cc').value.trim();
+      await _spSaveEmail(op.name, 'ALL', to, cc);
+      const pill = allEl.querySelector('[data-em-status]');
+      if (pill) { pill.textContent = to ? '✓ Email' : '⚠ Email'; pill.className = 'ops-dom-sp-status ' + (to ? 'ok' : 'warn'); }
+      toast.show('success', 'Email saved for ' + op.name + ' (ALL)', 2000);
+    });
+
     (op.domiciles || []).forEach((d) => {
       const key        = `${op.name}__${d.code}`;
-      const savedSP    = savedDoms[key]   || {};
+      const savedSP    = savedDoms[key]   || _wbLookup(spCfg, op.name, d.code) || {};
       const savedEmail = savedEmails[key] || {};
 
       const siteVal    = savedSP.siteUrl  || d.spSite || '';
@@ -953,13 +1212,13 @@ function _renderOperators(data, spCfg) {
         <div class="ops-sp-fields">
           <div class="sd-section-label">SharePoint</div>
           <div class="sd-field">
-            <div class="sd-label">Site URL</div>
+            <div class="sd-label">SharePoint Excel URL or Path</div>
             <input class="sd-input ops-sp-site" placeholder="https://amazon.sharepoint.com/sites/..." value="${_esc(siteVal)}"/>
           </div>
           <div class="sd-field">
             <div class="sd-label-row sd-label">
               List / Sheet
-              <button class="ops-load-btn" type="button">Load lists</button>
+              <button class="ops-load-btn" type="button">Load sheets</button>
             </div>
             <select class="sd-select ops-sp-list">
               <option value="">— select list —</option>
@@ -993,10 +1252,11 @@ function _renderOperators(data, spCfg) {
       domEl.querySelector('.ops-sp-save').addEventListener('click', async () => {
         const badge    = domEl.querySelector('.ops-sp-badge');
         const siteUrl  = domEl.querySelector('.ops-sp-site').value.trim();
-        const listName = domEl.querySelector('.ops-sp-list').value;
+        const listName = (domEl.querySelector('.ops-sp-list').value || '').trim();
         badge.textContent = 'saving...'; badge.className = 'ops-autosave-badge saving';
         try {
-          await _spSaveDomicile(op.name, d.code, siteUrl, listName);
+          const headerRow = parseInt(domEl.querySelector('.ops-sp-header')?.value || '16', 10);
+          await _spSaveDomicile(op.name, d.code, siteUrl, listName, headerRow);
           const pill = domEl.querySelector('[data-sp-status]');
           if (pill) {
             pill.textContent = siteUrl ? '✓ SP' : '⚠ SP';
@@ -1057,37 +1317,54 @@ function _renderOperators(data, spCfg) {
         }
       });
 
-      // ── SP: Load lists button ──
+      // ── SP: Load sheets from Excel URL ──
       domEl.querySelector('.ops-load-btn').addEventListener('click', async () => {
         const siteUrl = domEl.querySelector('.ops-sp-site').value.trim();
         const loadBtn = domEl.querySelector('.ops-load-btn');
         const select  = domEl.querySelector('.ops-sp-list');
         const curVal  = select.value;
 
-        if (!siteUrl) { toast.show('warn', 'Enter a SharePoint Site URL first', 2500); return; }
+        if (!siteUrl) { toast.show('warn', 'Paste a SharePoint Excel URL or path first', 2500); return; }
 
         loadBtn.disabled = true;
-        loadBtn.textContent = 'Loading...';
+        loadBtn.textContent = 'Discovering...';
         try {
-          const lists = await spBridge.getLists(siteUrl);
-          if (!lists || lists.error) {
-            toast.show('error', `Could not load lists: ${(lists && lists.error) || 'unknown error'}`, 4000);
+          const result = await spBridge.discoverSheets(siteUrl);
+          if (!result || result.error) {
+            toast.show('error', result.error || 'Could not discover sheets', 4000);
             return;
           }
-          if (!lists.length) { toast.show('warn', 'No lists found for this site', 3000); return; }
-          select.innerHTML = '<option value="">— select list —</option>';
-          lists.forEach(({ title }) => {
+          if (!result.sheets || !result.sheets.length) {
+            toast.show('warn', 'No sheets found in workbook', 3000);
+            return;
+          }
+          select.innerHTML = '<option value="">— select sheet —</option>';
+          result.sheets.forEach(({ name, headerRow }) => {
             const opt = document.createElement('option');
-            opt.value = title; opt.textContent = title;
-            if (title === curVal) opt.selected = true;
+            opt.value = name;
+            opt.textContent = name + ' (header row: ' + headerRow + ')';
+            opt.dataset.headerRow = headerRow;
+            if (name === curVal) opt.selected = true;
             select.appendChild(opt);
           });
-          toast.show('info', `${lists.length} list${lists.length !== 1 ? 's' : ''} loaded`, 2000);
+          // Auto-set header row from selected sheet
+          select.addEventListener('change', () => {
+            const sel = select.options[select.selectedIndex];
+            if (sel && sel.dataset.headerRow) {
+              const hrInput = domEl.querySelector('.ops-sp-header');
+              if (hrInput) hrInput.value = sel.dataset.headerRow;
+            }
+          });
+          // Store the file path for push
+          if (result.filePath) {
+            domEl.querySelector('.ops-sp-site').dataset.filePath = result.filePath;
+          }
+          toast.show('success', result.sheets.length + ' sheet(s) found — header rows auto-detected', 3000);
         } catch (e) {
-          toast.show('error', `Load lists failed: ${e.message || e}`, 4000);
+          toast.show('error', 'Discover failed: ' + (e.message || e), 4000);
         } finally {
           loadBtn.disabled = false;
-          loadBtn.textContent = 'Load lists';
+          loadBtn.textContent = 'Load sheets';
         }
       });
 
@@ -1159,6 +1436,8 @@ async function _spSaveEmail(opName, domCode, to, cc) {
 
 
 // ── Section: Asana ───────────────────────────────────────────────────────────
+function _wireSP() { /* SP wiring handled in operators tab */ }
+
 function _wireAsana() {
   document.getElementById('asana-save').addEventListener('click', async () => {
     await asanaBridge.saveConfig({
@@ -1198,6 +1477,7 @@ function _wireNotifications() {
 
 // ── Section: Accounts (S11) ──────────────────────────────────────────────────
 function _wireAccounts() {
+
   settingsBridge.getAll().then((all) => {
     const rows = (all && Array.isArray(all.accounts)) ? all.accounts : [];
     if (rows.length > 0) {
@@ -1215,6 +1495,7 @@ function _wireAccounts() {
       if (inp) inp.focus();
     }
   });
+
 }
 
 function _acctAddRow(prefill = {}) {
@@ -1340,10 +1621,10 @@ function _wireUITab() {
 
   // ── Sliders ─────────────────────────────────────────────────────────────
   const sliders = [
-    { id: 'sl-opacity', valId: 'sl-opacity-val', suffix: '%' },
-    { id: 'sl-blur',    valId: 'sl-blur-val',    suffix: 'px' },
-    { id: 'sl-speed',   valId: 'sl-speed-val',   suffix: 'ms', cssVar: '--sd-speed' },
-    { id: 'sl-radius',  valId: 'sl-radius-val',  suffix: 'px', cssVar: '--r' },
+    { id: 'sl-opacity', valId: 'sl-opacity-val', suffix: '%', cssVar: '--panel-opacity' },
+    { id: 'sl-blur',    valId: 'sl-blur-val',    suffix: 'px', cssVar: '--panel-blur' },
+    { id: 'sl-speed',   valId: 'sl-speed-val',   suffix: 'ms', cssVar: '--drawer-speed' },
+    { id: 'sl-radius',  valId: 'sl-radius-val',  suffix: 'px', cssVar: '--card-radius' },
   ];
   sliders.forEach(({ id, valId, suffix, cssVar }) => {
     const el = document.getElementById(id);
@@ -1356,7 +1637,23 @@ function _wireUITab() {
     });
   });
 
-  // ── Font buttons ────────────────────────────────────────────────────────
+  // ── S28: SLA Target slider ─────────────────────────────────────────────────
+  const slaSl = document.getElementById('sl-sla-target');
+  const slaVl = document.getElementById('sl-sla-target-val');
+  if (slaSl && slaVl) {
+    // Load saved value
+    const saved = parseInt(localStorage.getItem('fleet_sla_target') || '5', 10) || 5;
+    slaSl.value = saved;
+    slaVl.textContent = saved + 'd';
+    slaSl.addEventListener('input', () => {
+      const val = parseInt(slaSl.value, 10);
+      slaVl.textContent = val + 'd';
+      localStorage.setItem('fleet_sla_target', String(val));
+      bus.emit('settings:sla-target', { days: val });
+    });
+  }
+
+  // ── Font buttons ───────────────────────────────────────────────────────────
   _drawer.querySelectorAll('.sd-font-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       _drawer.querySelectorAll('.sd-font-btn').forEach((b) => b.classList.remove('active'));
@@ -1375,7 +1672,125 @@ function _wireUITab() {
   // ── Compact toggle ──────────────────────────────────────────────────────
   const compact = document.getElementById('toggle-compact');
   if (compact) compact.addEventListener('change', _saveUI);
+
+  // ── NEXUS THEME BUILDER WIRING ─────────────────────────────────────────────
+  _wireNexusThemeBuilder();
 }
+
+function _wireNexusThemeBuilder() {
+  // Uses top-level imports: setPreset, setTheme, getThemeConfig, resetTheme, PRESETS
+
+
+  // Load current config and set initial UI state
+  const cfg = getThemeConfig();
+
+  // Presets
+  const presetGrid = document.getElementById('nx-preset-grid');
+  if (presetGrid) {
+    presetGrid.querySelectorAll('.nx-preset-chip').forEach(chip => {
+      if (chip.dataset.preset === cfg.preset) chip.classList.add('nx-preset-chip--active');
+      else chip.classList.remove('nx-preset-chip--active');
+      chip.addEventListener('click', () => {
+        presetGrid.querySelectorAll('.nx-preset-chip').forEach(c => c.classList.remove('nx-preset-chip--active'));
+        chip.classList.add('nx-preset-chip--active');
+        setPreset(chip.dataset.preset);
+        // Update accent picker to match preset
+        const p = PRESETS[chip.dataset.preset];
+        if (p) {
+          const picker = document.getElementById('nx-accent-picker');
+          const hex = document.getElementById('nx-accent-hex');
+          if (picker) picker.value = p.accent;
+          if (hex) hex.textContent = p.accent;
+        }
+      });
+    });
+  }
+
+  // Accent color picker
+  const accentPicker = document.getElementById('nx-accent-picker');
+  const accentHex = document.getElementById('nx-accent-hex');
+  if (accentPicker) {
+    accentPicker.value = cfg.accent || '#00d4ff';
+    if (accentHex) accentHex.textContent = cfg.accent || '#00d4ff';
+    accentPicker.addEventListener('input', () => {
+      setTheme('accent', accentPicker.value);
+      if (accentHex) accentHex.textContent = accentPicker.value;
+    });
+  }
+  const accentReset = document.getElementById('nx-accent-reset');
+  if (accentReset) {
+    accentReset.addEventListener('click', () => {
+      const p = PRESETS[getThemeConfig().preset];
+      const color = p ? p.accent : '#00d4ff';
+      setTheme('accent', color);
+      if (accentPicker) accentPicker.value = color;
+      if (accentHex) accentHex.textContent = color;
+    });
+  }
+
+  // Density buttons
+  _drawer.querySelectorAll('[data-density]').forEach(chip => {
+    if (chip.dataset.density === cfg.density) chip.classList.add('nx-preset-chip--active');
+    else chip.classList.remove('nx-preset-chip--active');
+    chip.addEventListener('click', () => {
+      _drawer.querySelectorAll('[data-density]').forEach(c => c.classList.remove('nx-preset-chip--active'));
+      chip.classList.add('nx-preset-chip--active');
+      setTheme('density', chip.dataset.density);
+    });
+  });
+
+  // Animation speed buttons
+  _drawer.querySelectorAll('[data-anim]').forEach(chip => {
+    if (chip.dataset.anim === cfg.animSpeed) chip.classList.add('nx-preset-chip--active');
+    else chip.classList.remove('nx-preset-chip--active');
+    chip.addEventListener('click', () => {
+      _drawer.querySelectorAll('[data-anim]').forEach(c => c.classList.remove('nx-preset-chip--active'));
+      chip.classList.add('nx-preset-chip--active');
+      setTheme('animSpeed', chip.dataset.anim);
+    });
+  });
+
+  // Blur slider
+  const blurSl = document.getElementById('nx-blur');
+  const blurVal = document.getElementById('nx-blur-val');
+  if (blurSl) {
+    blurSl.value = cfg.blur || 20;
+    if (blurVal) blurVal.textContent = (cfg.blur || 20) + 'px';
+    blurSl.addEventListener('input', () => {
+      const v = parseInt(blurSl.value, 10);
+      if (blurVal) blurVal.textContent = v + 'px';
+      setTheme('blur', v);
+    });
+  }
+
+  // Glow slider
+  const glowSl = document.getElementById('nx-glow');
+  const glowVal = document.getElementById('nx-glow-val');
+  if (glowSl) {
+    glowSl.value = (cfg.glowIntensity || 1) * 100;
+    if (glowVal) glowVal.textContent = Math.round((cfg.glowIntensity || 1) * 100) + '%';
+    glowSl.addEventListener('input', () => {
+      const v = parseInt(glowSl.value, 10);
+      if (glowVal) glowVal.textContent = v + '%';
+      setTheme('glowIntensity', v / 100);
+    });
+  }
+
+  // Toggle: background gradient
+  const bgGrad = document.getElementById('nx-bg-gradient');
+  if (bgGrad) {
+    bgGrad.checked = cfg.bgGradient !== false;
+    bgGrad.addEventListener('change', () => setTheme('bgGradient', bgGrad.checked));
+  }
+
+  // Toggle: grid lines
+  const gridLines = document.getElementById('nx-grid-lines');
+  if (gridLines) {
+    gridLines.checked = cfg.gridLines !== false;
+    gridLines.addEventListener('change', () => setTheme('gridLines', gridLines.checked));
+  }
+}
+
 
 // ── Collect UI prefs and persist (debounced 400ms) ──────────────────────────
 let _saveUITimer = null;
@@ -1389,7 +1804,7 @@ function _saveUI() {
     if (document.body.classList.contains('ocean-mode'))    theme = 'ocean';
 
     // Active swatch per CSS var (store the background color value)
-    const swatchVars = ['--acc', '--bg', '--panel', '--txt'];
+    const swatchVars = ['--acc', '--bg', '--panel', '--txt', '--row-avail', '--row-unavail'];
     const swatches = {};
     swatchVars.forEach((v) => {
       const active = _drawer.querySelector(`.sd-swatch.active[data-var="${v}"]`);
@@ -1454,8 +1869,8 @@ function _applyUI(prefs) {
   // Sliders
   if (prefs.sliders) {
     const sliderMeta = [
-      { id: 'sl-opacity', valId: 'sl-opacity-val', suffix: '%' },
-      { id: 'sl-blur',    valId: 'sl-blur-val',    suffix: 'px' },
+      { id: 'sl-opacity', valId: 'sl-opacity-val', suffix: '%', cssVar: '--panel-opacity' },
+      { id: 'sl-blur',    valId: 'sl-blur-val',    suffix: 'px', cssVar: '--panel-blur' },
       { id: 'sl-speed',   valId: 'sl-speed-val',   suffix: 'ms', cssVar: '--sd-speed' },
       { id: 'sl-radius',  valId: 'sl-radius-val',  suffix: 'px', cssVar: '--r' },
     ];
@@ -1564,6 +1979,158 @@ export function init() {
   _wireUITab();
 
   // Wire all integration sections
+  
+  // ── Partner Forms (top-level, always registers) ─────────────────────────
+  (function _wireFormsTopLevel() {
+    const sheetInput = document.getElementById('forms-sheet-id');
+    const pollSelect = document.getElementById('forms-poll-interval');
+    const statusEl = document.getElementById('forms-status');
+    const savedCfg = JSON.parse(localStorage.getItem('fleet_forms_config') || '{}');
+    if (sheetInput && savedCfg.sheetId) sheetInput.value = savedCfg.sheetId;
+    if (pollSelect && savedCfg.pollInterval) pollSelect.value = savedCfg.pollInterval;
+
+    const saveBtn = document.getElementById('forms-save');
+    if (saveBtn) saveBtn.addEventListener('click', () => {
+      const cfg = { sheetId: (sheetInput.value || '').trim(), pollInterval: parseInt(pollSelect.value || '60', 10) };
+      localStorage.setItem('fleet_forms_config', JSON.stringify(cfg));
+      if (statusEl) { statusEl.textContent = '\u2705 Saved'; statusEl.style.display = ''; statusEl.className = 'sd-status ok'; }
+    });
+
+    const pollBtn = document.getElementById('forms-poll-now');
+    if (pollBtn) pollBtn.addEventListener('click', async () => {
+      let rawId = (sheetInput.value || '').trim();
+      if (!rawId) { if (statusEl) { statusEl.textContent = '\u26a0 Enter a Sheet ID first'; statusEl.style.display = ''; statusEl.className = 'sd-status warn'; } return; }
+      if (statusEl) { statusEl.textContent = '\u{1F504} Polling...'; statusEl.style.display = ''; statusEl.className = 'sd-status'; }
+      let gid = '0';
+      const gidMatch = rawId.match(/gid=(\d+)/);
+      if (gidMatch) gid = gidMatch[1];
+      let sheetId = rawId.replace(/\/edit.*$/, '').replace(/[?#].*$/, '').replace(/\/+$/, '').trim();
+      if (sheetId.includes('spreadsheets/d/')) sheetId = sheetId.split('spreadsheets/d/')[1].split('/')[0];
+      if (sheetId.includes('/')) sheetId = sheetId.split('/')[0];
+      const csvUrl = 'https://docs.google.com/spreadsheets/d/' + sheetId + '/export?format=tsv';
+      try {
+        const resp = await fetch(csvUrl);
+        if (!resp.ok) { statusEl.textContent = '\u274c HTTP ' + resp.status; statusEl.className = 'sd-status err'; statusEl.style.display = ''; return; }
+        const csv = await resp.text();
+        const rows = csv.split('\n').filter(r => r.trim());
+        statusEl.textContent = '\u2705 Connected! ' + (rows.length - 1) + ' row(s) found';
+        statusEl.className = 'sd-status ok'; statusEl.style.display = '';
+        const result = await window.partner.pollForms({ csvText: csv });
+        if (result && result.newCount > 0) { statusEl.textContent = '\u2705 ' + result.newCount + ' new request(s) — AI classifying...'; }
+      } catch(e) { statusEl.textContent = '\u274c ' + e.message; statusEl.className = 'sd-status err'; statusEl.style.display = ''; }
+    });
+  })();
+
+  // ── SP Workbook Discover ────────────────────────────────────────────────
+  document.getElementById('sp-wb-discover').addEventListener('click', async () => {
+    console.log('[SP Discover] Button clicked');
+    const urlInput = document.getElementById('sp-wb-url');
+    const url = (urlInput.value || '').trim();
+    console.log('[SP Discover] URL:', url);
+    console.log('[SP Discover] spBridge:', typeof spBridge.discoverSheets);
+    if (!url) { toast.show('warn', 'Paste a SharePoint Excel URL first', 2500); return; }
+    
+    const btn = document.getElementById('sp-wb-discover');
+    const resultsDiv = document.getElementById('sp-wb-results');
+    const sheetsDiv = document.getElementById('sp-wb-sheets-list');
+    
+    btn.disabled = true; btn.textContent = 'Discovering...';
+    try {
+      console.log('[SP Discover] Calling discoverSheets...');
+      let result;
+      try {
+        result = await spBridge.discoverSheets(url);
+      } catch(err) {
+        console.error('[SP Discover] IPC Error:', err);
+        toast.show('error', 'IPC Error: ' + (err.message || err), 4000);
+        return;
+      }
+      console.log('[SP Discover] Result:', JSON.stringify(result));
+      if (!result || !result.ok) {
+        toast.show('error', (result && result.error) || 'Could not discover sheets', 4000);
+        return;
+      }
+      resultsDiv.style.display = '';
+      sheetsDiv.innerHTML = result.sheets.map((s, i) => `
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#161b22;border:1px solid #21262d;border-radius:4px;margin-bottom:4px;">
+          <input type="checkbox" id="sp-sh-${i}" data-sheet="${s.xmlFile || s.name}" data-name="${s.name}" data-header="${s.headerRow}" />
+          <label for="sp-sh-${i}" style="font-size:11px;color:#c9d1d9;flex:1;cursor:pointer;">
+            <strong>${s.name}</strong> <span style="color:#6e7681;">(${s.xmlFile || '?'})</span> <span style="color:#8b949e;">header: ${s.headerRow}</span>
+          </label>
+          <input style="width:60px;background:#0d1117;border:1px solid #30363d;border-radius:3px;padding:3px 6px;font-size:10px;color:#c9d1d9;" placeholder="Operator" id="sp-op-${i}" />
+        </div>
+      `).join('');
+      
+      sheetsDiv.innerHTML += `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;"><input class="sd-input" id="sp-wb-domicile" placeholder="Domicile (ABE40, AVP40...)" style="width:140px;" /><button class="sd-btn primary" id="sp-wb-save">Save workbook config</button></div>`;
+      
+      // Save handler
+      document.getElementById('sp-wb-save').addEventListener('click', async () => {
+        const checks = sheetsDiv.querySelectorAll('input[type=checkbox]:checked');
+        if (!checks.length) { toast.show('warn', 'Select at least one sheet', 2000); return; }
+        
+        const carriers = [];
+        checks.forEach((cb, idx) => {
+          const sheet = cb.dataset.sheet;
+          const headerRow = parseInt(cb.dataset.header || '16');
+          const opInput = cb.closest('div').querySelector('input[placeholder="Operator"]');
+          const operator = opInput ? opInput.value.trim().toUpperCase() : '';
+          carriers.push({ code: (operator || cb.dataset.name || 'DEFAULT').toUpperCase(), sheet: sheet, sheetName: cb.dataset.name || sheet, headerRow });
+        });
+        
+        const domicileInput = document.getElementById('sp-wb-domicile');
+        const workbook = {
+          name: url.split('file=')[1] ? decodeURIComponent(url.split('file=')[1].split('&')[0]) : 'Workbook',
+          domicile: (domicileInput ? domicileInput.value.trim().toUpperCase() : '') || '',
+          path: result.filePath || url,
+          carriers,
+          headerRow: carriers[0].headerRow
+        };
+        
+        // Load existing config and add
+        const existing = await spBridge.getConfig();
+        const workbooks = (existing && existing.workbooks) || [];
+        workbooks.push(workbook);
+        await spBridge.saveConfig({ ...existing, workbooks });
+        toast.show('success', 'Workbook saved: ' + workbook.name, 3000);
+        _renderSavedWorkbooks();
+      });
+      
+      toast.show('success', result.sheets.length + ' sheet(s) found', 2500);
+    } catch(e) {
+      toast.show('error', 'Failed: ' + (e.message || e), 4000);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Load sheets';
+    }
+  });
+
+  // Render saved workbooks
+  async function _renderSavedWorkbooks() {
+    const cfg = await spBridge.getConfig();
+    const workbooks = (cfg && cfg.workbooks) || [];
+    const div = document.getElementById('sp-wb-saved');
+    if (!div) return;
+    if (!workbooks.length) { div.innerHTML = '<div style="font-size:10px;color:#484f58;">No workbooks configured yet.</div>'; return; }
+    div.innerHTML = '<div style="font-size:10px;font-weight:700;color:#8b949e;margin-bottom:6px;">SAVED WORKBOOKS</div>' +
+      workbooks.map((wb, i) => `
+        <div style="background:#161b22;border:1px solid #21262d;border-radius:4px;padding:8px 10px;margin-bottom:4px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div style="font-size:11px;font-weight:600;color:#c9d1d9;">${wb.name}</div>
+            <button onclick="window._removeWB(${i})" style="background:none;border:none;color:#f85149;cursor:pointer;font-size:11px;">✕</button>
+          </div>
+          <div style="font-size:9px;color:#6e7681;margin-top:2px;">${(wb.carriers||[]).map(c => c.code + ' → ' + (c.sheetName || c.sheet)).join(' | ')}</div>
+        </div>
+      `).join('');
+  }
+  window._removeWB = async (idx) => {
+    const cfg = await spBridge.getConfig();
+    const workbooks = (cfg && cfg.workbooks) || [];
+    workbooks.splice(idx, 1);
+    await spBridge.saveConfig({ ...cfg, workbooks });
+    _renderSavedWorkbooks();
+  };
+  _renderSavedWorkbooks();
+
+
   _wireDomiciles();
   _wireAuth();
   _wireOrcha();
@@ -1580,4 +2147,12 @@ export function init() {
   bus.on('ui:view-change', ({ to }) => {
     if (to === 'settings') _open();
   });
+
+  // ── Apply saved CSS vars immediately on startup (don't wait for drawer open) ──
+  settingsBridge.getAll().then((all) => {
+    if (!all?.ui_prefs?.swatches) return;
+    Object.entries(all.ui_prefs.swatches).forEach(([cssVar, color]) => {
+      if (color) document.documentElement.style.setProperty(cssVar, color);
+    });
+  }).catch(() => {});
 }

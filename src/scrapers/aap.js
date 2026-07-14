@@ -13,16 +13,14 @@ const { withRetry } = require('../utils/retry'); // P1-A: retry on transient fai
 // V-C extras: sortColumn, limit/pageSize=1000 force full table load
 const AAP_SCAN_URL =
   'https://aap-na.corp.amazon.com/v2/page/bafc8b2a-3be6-4a52-a86f-7cb2de7b5400' +
-  '?tab=Unplanned' +
-  '&states=%5B%7B%22state%22%3A%22ACTIVE%22%2C%22reasons%22%3A%5B%5D%7D%2C%7B%22state%22%3A%22UNAVAILABLE%22%2C%22reasons%22%3A%5B%5D%7D%5D' +
+  '?states=%5B%7B%22state%22%3A%22ACTIVE%22%2C%22reasons%22%3A%5B%5D%7D%2C%7B%22state%22%3A%22UNAVAILABLE%22%2C%22reasons%22%3A%5B%5D%7D%5D' +
   '&operationalStatuses=%5B%5D' +
   '&geofences=%7B%22type%22%3A%22ANYWHERE%22%2C%22customGeofences%22%3A%5B%5D%7D' +
   '&stationCodes=%5B%5D' +
   '&dspShortCodes=%5B%5D' +
   '&domicileSites=%5B%5D' +
   '&fleets=%5B%220bb2e249-fd34-437f-83af-d1d69150558b%22%2C%220f454f75-1e45-475f-8d8b-2334ade1f6f1%22%2C%225c19cdf7-ce2f-4593-a37a-3fe5d506e120%22%2C%227de393df-74e1-45af-9650-560ba008bc65%22%2C%22b84ddc20-589c-4330-af67-3d38f89e28af%22%2C%22b9e02fc4-2b9f-4a70-ac7c-76b30a33bcbe%22%2C%22ba97eda1-cb03-446e-a907-474084194777%22%2C%22daa83ad7-5d8f-43a4-ba9c-76c643e45e1e%22%5D' +
-  // fields=["domicileSite","fuelType","engineManufacturerName","bodyType"]
-  '&fields=%5B%22vehicleId%22%2C%22bodyType%22%2C%22domicileSite%22%2C%22operator%22%2C%22lifecycleState%22%2C%22lifecycleStateReason%22%2C%22openUnplannedWorkRequests%22%2C%22openPlannedWorkRequests%22%2C%22fuelType%22%2C%22lastGeofences%22%5D' +
+  '&fields=%5B%7B%22key%22%3A%22program%22%2C%22values%22%3A%5B%22DSP-MMBT%22%2C%22UTP%22%2C%22vupAfp%22%5D%7D%5D' +
   '&flags=%7B%7D' +
   '&sortColumn=lifecycleStateReason' +
   '&limit=1000&pageSize=1000' +
@@ -301,8 +299,7 @@ const EXTRACT_TABLE = FIND_TABLE_FN + `(function() {
 // ── AAP localStorage column config (copied from user's real Chrome session) ──────
 // Key:   columns_bafc8b2a-3be6-4a52-a86f-7cb2de7b5400
 // Value: the exact field list AAP uses to render columns (verified 2026-06-18)
-const AAP_COL_KEY   = 'columns_bafc8b2a-3be6-4a52-a86f-7cb2de7b5400';
-const AAP_COL_VALUE = JSON.stringify(["vehicleId","bodyType","domicileSite","operator","lifecycleState","lifecycleStateReason","openUnplannedWorkRequests","openPlannedWorkRequests","fuelType","lastGeofences"]);
+const AAP_COL_VALUE = JSON.stringify(["vehicleId","bodyType","domicileSite","operator","lifecycleState","lifecycleStateReason","openUnplannedWorkRequests","openPlannedWorkRequests","fuelType","lastGeofences","maintenanceScheduleStatuses"]);
 
 // AAP column-configurator UI script — injected into scraper window after page load
 const AAP_COL_CLICK_JS = `(async function __aapConfigCols() {
@@ -312,7 +309,7 @@ const AAP_COL_CLICK_JS = `(async function __aapConfigCols() {
       el.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true }));
     });
   }
-  var WANT = ["Domicile site","Operator","Asset type","Fuel type","Lifecycle state","Lifecycle state reason","Manufacturer","Body type","Due date","Open Unplanned Work Requests","Open Planned Work Requests","Last geofences","Lat/Long"];
+  var WANT = ["Domicile site","Operator","Asset type","Fuel type","Lifecycle state","Lifecycle state reason","Manufacturer","Body type","Due date","Open Unplanned Work Requests","Open Planned Work Requests","Last geofences","Asset ID"];
 
   // ── Find the column selector (eye) button ──────────────────────────────
   // Primary selector from user
@@ -455,7 +452,7 @@ const TABLE_WAIT_MS = 45_000;
 async function _scrapeAAPOnce(domiciles) {
   return new Promise((resolve, reject) => {
     const win = new BrowserWindow({
-      show:   false,
+      show:   true,
       width:  1600,
       height: 900,
       webPreferences: {

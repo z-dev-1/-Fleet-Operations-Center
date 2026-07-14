@@ -10,10 +10,32 @@
  *   🟡 WATCH   — check today
  *   🟢 ON TRACK — vendor working, no action needed
  */
-
 const STALE_DAYS       = 3;
 const CRITICAL_DAYS    = 7;
 const SLA_WARNING_DAYS = 5;
+const SLOW_VENDOR_AVG  = 6;  // if vendor's avg repair > 6 days, boost urgency
+
+// ── Pattern-aware scoring (S28-Sprint3 integration) ────────────────────────
+// Loads learned vendor performance data to boost priority for historically slow vendors.
+const fs   = require('fs');
+const path = require('path');
+let _patternsCache = null;
+let _patternsCacheTs = 0;
+
+function _getPatterns() {
+  // Cache for 60s to avoid re-reading disk every call
+  const now = Date.now();
+  if (_patternsCache && (now - _patternsCacheTs < 60000)) return _patternsCache;
+  try {
+    const { P } = require('../config/paths');
+    const stateFile = path.join(P.dataDir, 'patterns_state.json');
+    if (fs.existsSync(stateFile)) {
+      _patternsCache = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      _patternsCacheTs = now;
+    }
+  } catch (_) { _patternsCache = null; }
+  return _patternsCache;
+}
 
 /**
  * calculatePriority(unit) — returns { tier, score, reasons[] }
@@ -66,6 +88,18 @@ function calculatePriority(unit) {
   if (unit.riskScore && unit.riskScore >= 75) {
     score += 15; reasons.push(`High risk (${unit.riskScore})`);
   }
+  // Pattern boost: if vendor is historically slow, increase urgency
+  const vendorName = (unit.vendor || '').trim();
+  if (vendorName && vendorName !== '--') {
+    const patterns = _getPatterns();
+    if (patterns && patterns.vendorPerf && patterns.vendorPerf[vendorName]) {
+      const avgDays = patterns.vendorPerf[vendorName].avgDays;
+      if (avgDays && avgDays > SLOW_VENDOR_AVG) {
+        score += 10;
+        reasons.push(`Slow vendor history (avg ${Math.round(avgDays)}d)`);
+      }
+    }
+  }
   if (!unit.savedNotes && !notes) {
     score += 10; reasons.push('No notes — needs review');
   }
@@ -99,7 +133,7 @@ function calculatePriority(unit) {
  */
 function prioritizeUnits(units) {
   const unavail = (units || []).filter(u =>
-    u.lifecycleState === 'UNAVAILABLE' || (u.atsState || '').toLowerCase() === 'unavailable'
+    (u.lifecycleState || '').toLowerCase() === 'unavailable' || (u.atsState || '').toLowerCase() === 'unavailable'
   );
 
   const prioritized = unavail.map(u => {

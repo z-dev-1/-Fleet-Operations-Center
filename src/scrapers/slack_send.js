@@ -71,18 +71,16 @@ function slackWebApi(method, params = {}) {
  * Returns user ID or null
  */
 async function findUser(query) {
-  // Try enterprise people search
-  const result = await slackWebApi('search.modules', {
-    query: query,
-    module: 'people',
-    count: '5'
-  });
-
-  if (result.ok && result.items && result.items.length > 0) {
-    // Return best match
-    return result.items[0].id;
+  // If email, try lookupByEmail first
+  if (query.includes("@") && query.includes(".")) {
+    try {
+      const emailResult = await slackWebApi("users.lookupByEmail", { email: query });
+      if (emailResult.ok && emailResult.user) return emailResult.user.id;
+    } catch(e) { /* fall through */ }
   }
-
+  // Enterprise people search
+  const result = await slackWebApi("search.modules", { query: query, module: "people", count: "5" });
+  if (result.ok && result.items && result.items.length > 0) return result.items[0].id;
   return null;
 }
 
@@ -157,7 +155,7 @@ async function getChannels(limit) {
     types: 'public_channel,private_channel,mpim,im', limit: lim,
     exclude_archived: 'true'
   });
-  if (!res.ok) throw new Error('conversations.list failed: ' + res.error);
+  if (!res.ok) return []; // enterprise restricted
   return (res.channels || []).map(c => ({
     id: c.id, name: c.name || c.id,
     isIm: !!c.is_im, isMpim: !!c.is_mpim,
