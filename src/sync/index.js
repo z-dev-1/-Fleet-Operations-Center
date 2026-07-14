@@ -1,4 +1,31 @@
 'use strict';
+
+// Delta sync: only process units whose key fields changed since last sync
+function _deltaFilter(newRows, prevRows) {
+  if (!prevRows || !prevRows.length) return { changed: newRows, unchanged: [] };
+  
+  const prevMap = {};
+  prevRows.forEach(function(r) { prevMap[r.equipmentId] = r; });
+  
+  const changed = [];
+  const unchanged = [];
+  
+  newRows.forEach(function(r) {
+    const prev = prevMap[r.equipmentId];
+    if (!prev) { changed.push(r); return; }
+    
+    // Check key fields for changes
+    const fields = ['lifecycleState', 'lifecycleReason', 'vendor', 'workDuration', 'riskScore', 'etc'];
+    const hasChange = fields.some(function(f) { return String(r[f] || '') !== String(prev[f] || ''); });
+    
+    if (hasChange) changed.push(r);
+    else unchanged.push(r);
+  });
+  
+  return { changed, unchanged };
+}
+
+
 /**
  * src/sync/index.js  [Version C]
  *
@@ -233,6 +260,18 @@ function createSyncEngine(ctx) {
       if (uptakeOutcome.status === 'fulfilled') {
         uptakeResult = uptakeOutcome.value;
         logger.info(`Uptake: ${uptakeResult.count} units`);
+        // BUG FIX (2026-07-14): a "fulfilled" outcome with 0 units (e.g. the
+        // master-timeout path resolving too early, or a genuinely empty scrape)
+        // previously fell straight through to the final merge with an empty
+        // array, wiping Uptake enrichment fleet-wide. Fall back to cache here
+        // too, matching the rejected-outcome fallback added just below.
+        if (!uptakeResult.units || !uptakeResult.units.length) {
+          const _cachedUptake2 = _loadUptakeHash();
+          if (_cachedUptake2.units && _cachedUptake2.units.length) {
+            uptakeResult = { units: _cachedUptake2.units, count: _cachedUptake2.units.length, scrapedAt: _cachedUptake2.scrapedAt, _fromCache: true };
+            logger.info(`Uptake returned 0 \u2014 using ${_cachedUptake2.units.length} cached units (age since ${_cachedUptake2.scrapedAt})`);
+          }
+        }
         if (!uptakeResult._fromCache &&
             Array.isArray(uptakeResult.units) && uptakeResult.units.length) {
           const _newFp = _uptakeFingerprintOf(uptakeResult.units);
@@ -250,6 +289,19 @@ function createSyncEngine(ctx) {
         }
       } else {
         logger.warn('Uptake failed (non-fatal):', uptakeOutcome.reason && uptakeOutcome.reason.message);
+        // BUG FIX (2026-07-14): Relay already falls back to its persisted cache
+        // on failure (see relayOutcome handling below) -- Uptake had no
+        // equivalent, so a failed/timed-out scrape left uptakeResult at its
+        // {units:[], count:0} default, and the final merge below would wipe
+        // Uptake enrichment for every unit even when a perfectly good cache
+        // exists on disk. Fall back to it, same as Relay.
+        {
+          const _cachedUptake = _loadUptakeHash();
+          if (_cachedUptake.units && _cachedUptake.units.length) {
+            uptakeResult = { units: _cachedUptake.units, count: _cachedUptake.units.length, scrapedAt: _cachedUptake.scrapedAt, _fromCache: true };
+            logger.info(`Uptake failed \u2014 using ${_cachedUptake.units.length} cached units (age since ${_cachedUptake.scrapedAt})`);
+          }
+        }
       }
 
       // ── Process Relay outcome ────────────────────────────────────────────
@@ -295,9 +347,13 @@ function createSyncEngine(ctx) {
           relayData  = cachedRelay;
           relayCount = cachedCount;
           logger.info(`Relay live=0 — using ${cachedCount} cached entries`);
-          mergedRows = ctx.mergeRelayIntoRows(mergedRows, relayData, store.load('notesStore', {}));
+          try { const _rP = require('../config/paths').P; const _rRaw = require('fs').readFileSync(_rP.relayCache, 'utf8'); relayData = JSON.parse(_rRaw); logger.info('Relay: ' + Object.keys(relayData).length + ' units detailed'); } catch(_re) { logger.warn('Relay cache read failed: ' + _re.message); }
+      mergedRows = ctx.mergeRelayIntoRows(mergedRows, relayData, store.load('notesStore', {}));
         }
       }
+
+      // FORCE: Always re-merge from full relay_cache.json (live scrape may be partial)
+      try { const _fP = require('../config/paths').P; const _fRaw = require('fs').readFileSync(_fP.relayCache, 'utf8'); const _fullRelay = JSON.parse(_fRaw); const _fCount = Object.keys(_fullRelay).length; if (_fCount > Object.keys(relayData).length) { relayData = _fullRelay; relayCount = _fCount; mergedRows = ctx.mergeRelayIntoRows(mergedRows, relayData, store.load('notesStore', {})); logger.info('Relay: force-merged ' + _fCount + ' from cache (live was ' + relayCount + ')'); } } catch(_fe) { logger.warn('Relay force-read failed: ' + _fe.message); }
 
       const payload = {
         rows:            mergedRows,
@@ -337,13 +393,13 @@ function createSyncEngine(ctx) {
       logger.info(`Sync complete: ${mergedRows.length} units, ${uptakeCount} Uptake, ${relayCount} Relay`);
 
       // ── Orcha Deep Scan — non-blocking, non-fatal ────────────────────────
-      runOrchaDeepScan(mergedRows, {
+      setTimeout(() => { runOrchaDeepScan(mergedRows, {
         pushData:        ctx.pushData,
         pushStatus:      ctx.pushStatus,
         payload,
         uptakeCount,
         relayCount,
-      }).catch(e => logger.error('Orcha Deep Scan error (non-fatal):', e.message));
+      }).catch(e => logger.error('Orcha Deep Scan error (non-fatal):', e.message)); }, 15000); // Wait 15s for relay extraction to finish
 
       // ── Bubble notifications — status-change detection ───────────────────
       const prevRows = (ctx.lastData && ctx.lastData._prevRows) || [];

@@ -39,11 +39,25 @@ const REALM_CALLBACK      = /#.*\bcode=/i;
 const MIDWAY_PATTERN      = /midway|signin\.aws|sso\.amazon|oidc|oauth|federate\.amazon/i;
 const PARTITION           = '';
 
-const MASTER_TIMEOUT_MS   = 180000;
+// BUG FIX (2026-07-14): was 300000 (5 min, itself bumped up once already from 3 min).
+// Live logs show a real scrape of the fleet's current 55 flagged insights /
+// ~44 unique assets takes ~7-8 min just for the detail-page pass (observed
+// ~8s/asset) before the risk-score pass even starts -- comfortably exceeding
+// 5 min. Every run was hitting this timeout and (see the master-timeout
+// handler below) discarding ALL partial progress, returning 0 units. Because
+// sync/index.js correctly refuses to overwrite the persisted Uptake cache
+// with an empty result (a good safety guard), the cache never refreshed --
+// it was stuck 6 days stale (last successful run: 2026-07-08) while 195/210
+// fleet units silently showed no Uptake enrichment. Bumped to 15 min to give
+// real headway as the fleet's insight count grows; the master-timeout
+// handler below is ALSO fixed to salvage whatever was actually completed
+// instead of discarding it, so even if 15 min still isn't enough one day,
+// the cache gets a genuine (if incomplete) refresh instead of nothing.
+const MASTER_TIMEOUT_MS   = 900000;  // 15 min (was 5 min, was 3 min)
 // H-3: concurrency lock — prevents duplicate BrowserWindow farms on re-entrant calls
 let _uptakeLock = false;
  // Stage 5 C-2: 3 min cap (was 15 min) -- isSyncing clears promptly on hang
-const PAGE_LOAD_TIMEOUT   = 40000;  // per-page: 40s to handle slow CB reloads
+const PAGE_LOAD_TIMEOUT   = 20000;  // per-page: 20s -- stalled pages skip faster
 const DOM_POLL_INTERVAL   = 800;    // ms between DOM-ready checks
 const DOM_POLL_MAX        = 50;     // max polls (~40 seconds) — asset overview pages load slowly
 const UPTAKE_READ_MORE_WAIT_MS = 3_000;   // S8: Read More expansion poll deadline (was 2500ms fixed sleep)
@@ -330,7 +344,7 @@ const SCRAPE_INSIGHTS_LIST = `(function() {
         var a = c.querySelector('a[href]'); return a ? a.getAttribute('href') : '';
       }
       var assetText   = val(col.asset);
-      var assetId     = (assetText.match(/\\b(\\d{4,8})\\b/) || [])[1] || '';
+      var assetId     = (assetText.match(/\\b([A-Za-z]?\\d{4,8})\\b/) || [])[1] || '';
       var assetHref   = href(col.asset);
       var assetUuid   = (assetHref.match(/\\/asset\\/([0-9a-f\\-]{20,})\\//i) || [])[1] || '';
       var insightName = val(col.insight);
@@ -546,6 +560,11 @@ async function scrapeUptake() {
   return await new Promise((resolve) => {
     let settled  = false;
     let authDone = false;
+    // BUG FIX (2026-07-14): live reference to the in-progress unitMap, set once
+    // runScrape() creates it (see below). Lets the master-timeout handler
+    // salvage whatever was actually scraped so far instead of discarding all
+    // progress -- see masterTimer below.
+    let _liveUnitMap = null;
 
     // Fully background window — Electron 30 capturePage() works without being visible.
     const win = new BrowserWindow({
@@ -567,8 +586,15 @@ async function scrapeUptake() {
     }
 
     const masterTimer = setTimeout(() => {
-      fwarn('[Uptake] Master timeout — resolving empty');
-      finish([], null);
+      // BUG FIX (2026-07-14): used to hardcode finish([], null), discarding
+      // whatever had already been scraped (observed live: 36/55 detail pages
+      // successfully done, then thrown away, returning 0 units). Salvage any
+      // units that got at least one real insight recorded instead.
+      const partial = _liveUnitMap
+        ? Object.values(_liveUnitMap).filter(function(u){ return u.insightsList && u.insightsList.length; })
+        : [];
+      fwarn('[Uptake] Master timeout -- salvaging ' + partial.length + ' partially-scraped unit(s) (of ' + (_liveUnitMap ? Object.keys(_liveUnitMap).length : 0) + ' discovered)');
+      finish(partial, null);
     }, MASTER_TIMEOUT_MS);
 
     const finish = (units, screenshotPath) => {
@@ -611,6 +637,9 @@ async function scrapeUptake() {
 
         // ── 3. Build unit map ─────────────────────────────────────────────
         const unitMap     = {};
+        // BUG FIX (2026-07-14): expose this map to the master-timeout handler
+        // above so a timeout can salvage partial progress instead of losing it.
+        _liveUnitMap = unitMap;
         const insightRows = listResult.insights || [];
         insightRows.forEach(row => {
           if (!unitMap[row.assetId]) {
@@ -722,6 +751,7 @@ async function scrapeUptake() {
             const finalSummary     = expanded.summary     || detail.summary     || '';
             const finalRecommended = expanded.recommended || detail.recommended || '';
 
+            await sleep(1500);
             const shotPath = await captureScreenshot(win, `insight_${row.assetId}_${i}`);
 
             const u = unitMap[row.assetId];
