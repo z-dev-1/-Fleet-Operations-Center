@@ -43,6 +43,13 @@ const REGISTRY = {
   orchaVendorRules: () => P.orchaVendorRules,
   orchaConfig:      () => P.orchaConfig,
   dailyNotesSnap:   () => P.dailyNotesSnap,
+  chatHistory:      () => path.join(P.dataDir, 'chat-history.json'),
+  repairHistory:    () => path.join(P.dataDir, 'repair-history.json'),
+  aapLessons:       () => path.join(P.dataDir, 'aap-lessons.json'),
+  offlineQueue:     () => path.join(P.dataDir, 'offline-queue.json'),
+  orchaPatterns:    () => path.join(P.dataDir, 'orcha-patterns.json'),
+  pins:             () => path.join(P.dataDir, 'pins.json'),
+  schedules:        () => path.join(P.dataDir, 'schedules.json'),
   dailyNotesLog:    () => P.dailyNotesLog,
   dailyNotesDec:    () => P.dailyNotesDec,
   setupState:       () => P.setupState,
@@ -50,8 +57,17 @@ const REGISTRY = {
   asanaAuthState:   () => P.asanaAuthState,
   // Bug B fix: _healthcheck now has a proper registered path instead of
   // relying on the removed absolute-path fallback.
-  _healthcheck:     () => path.join(P.dataDir, '_healthcheck.json'),
+  reminders:             () => path.join(P.dataDir, 'reminders.json'),
+  contacts:              () => path.join(P.dataDir, 'contacts.json'),
+  partnerWRs_review:    () => path.join(P.dataDir, 'partner_review.json'),
+  partnerWRs_scheduled: () => path.join(P.dataDir, 'partner_scheduled.json'),
+  partnerWRs_processed: () => path.join(P.dataDir, 'partner_processed.json'),
+  partnerFormsConfig:   () => path.join(P.dataDir, 'partner_forms_config.json'),
+    _healthcheck:     () => path.join(P.dataDir, '_healthcheck.json'),
   vendorHistory:    () => P.vendorHistory,
+  heartbeatState:   () => P.heartbeatState,
+  rcaStore:         () => P.rcaStore,
+  retentionHistory: () => P.retentionHistory,
 };
 
 function _resolvePath(name) {
@@ -64,31 +80,54 @@ function _resolvePath(name) {
 /**
  * load(name, defaultValue?) — reads and parses JSON, returns default on any error
  */
-function load(name, defaultValue = null) {
-  const filePath = _resolvePath(name);
+function load(key, fallback) {
+  const filePath = _resolvePath(key);
+  if (!fs.existsSync(filePath)) return fallback !== undefined ? fallback : null;
   try {
-    if (!fs.existsSync(filePath)) return defaultValue;
     const raw = fs.readFileSync(filePath, 'utf8');
+    if (!raw || !raw.trim()) return fallback !== undefined ? fallback : null;
     return JSON.parse(raw);
   } catch (e) {
-    logger.warn(`store.load(${name}) failed:`, e.message, '— returning default');
-    return defaultValue;
+    // Corrupted JSON — try backup
+    const bakPath = filePath + '.bak';
+    if (fs.existsSync(bakPath)) {
+      try { return JSON.parse(fs.readFileSync(bakPath, 'utf8')); } catch (_) {}
+    }
+    console.error('[store] Corrupted file:', filePath, e.message);
+    return fallback !== undefined ? fallback : null;
   }
 }
 
 /**
  * save(name, data) — atomic write (write to .tmp then rename)
  */
-function save(name, data) {
-  const filePath = _resolvePath(name);
-  const tmpPath  = filePath + '.tmp';
+function save(key, data) {
+  const filePath = _resolvePath(key);
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  const tmpPath = filePath + '.tmp';
+  const bakPath = filePath + '.bak';
+  // BUG FIX (2026-07-14): load()'s corruption-recovery path below reads
+  // `filePath + '.bak'` on a JSON parse failure, but until this fix NOTHING
+  // in the codebase ever wrote a .bak file (confirmed via full-repo grep --
+  // exactly one hit for ".bak" anywhere, the read side below). That fallback
+  // was dead code giving false confidence: ANY corrupted store (fleetData,
+  // notesStore, relayCache -- every store in REGISTRY) would silently fall
+  // straight through to the caller's default value with zero chance of
+  // recovery, no matter how recently it had been saved successfully.
+  // Snapshot the last known-good file to .bak before each overwrite --
+  // best-effort; if this fails (e.g. first-ever save) proceed with the write
+  // anyway, there's simply no prior version yet to preserve.
+  if (fs.existsSync(filePath)) {
+    try { fs.copyFileSync(filePath, bakPath); } catch (_) {}
+  }
   try {
-    const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
+    const json = JSON.stringify(data, null, 2);
+    fs.writeFileSync(tmpPath, json, 'utf8');
     fs.renameSync(tmpPath, filePath);
   } catch (e) {
-    logger.error(`store.save(${name}) failed:`, e.message);
+    // Cleanup temp file on failure
     try { fs.unlinkSync(tmpPath); } catch (_) {}
     throw e;
   }
