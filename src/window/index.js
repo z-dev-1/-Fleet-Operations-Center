@@ -370,14 +370,20 @@ function initWindows(ctx) {
           setTimeout(function() {
             var settled;
             var ceiling = setTimeout(function() {
-              win.webContents.removeListener('did-finish-load', arm);
+              // BUG FIX (2026-07-14): the removeListener call below was
+              // missing a win.isDestroyed() guard. Confirmed live in
+              // errors.log: "Object has been destroyed" thrown from exactly
+              // this line (2026-07-14 08:03 EDT). The window can be destroyed
+              // by an unrelated timeout/cancel path while this 15s ceiling
+              // timer is still pending.
+              if (!win.isDestroyed()) win.webContents.removeListener('did-finish-load', arm);
               resolve();
             }, 15000);
             function arm() {
               clearTimeout(settled);
               settled = setTimeout(function() {
                 clearTimeout(ceiling);
-                win.webContents.removeListener('did-finish-load', arm);
+                if (!win.isDestroyed()) win.webContents.removeListener('did-finish-load', arm);
                 resolve();
               }, 2000);
             }

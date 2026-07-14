@@ -478,6 +478,14 @@ async function scrapeGarageList(url, equipmentId, partition) {
 
     // Hook all relevant load events
     win.webContents.on('did-finish-load', () => {
+      // BUG FIX (2026-07-14): missing the same win.isDestroyed() guard the
+      // sibling did-stop-loading handler already has a few lines below.
+      // Confirmed live in errors.log: "Object has been destroyed" thrown from
+      // the getURL() call right below repeatedly (6x in a 2s burst on
+      // 2026-07-10), crashing whatever scrape batch triggered it whenever the
+      // window is torn down (e.g. master timeout, batch cancel) while a
+      // did-finish-load event is still in flight.
+      if (win.isDestroyed()) return;
       const u = win.webContents.getURL();
       logger.info('[Relay] Garage did-finish-load', equipmentId, '|', u.slice(0, 80));
       // Give React 1.5s to mount the table, then start polling
@@ -650,6 +658,14 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
     const timer = setTimeout(() => done(null), PAGE_TIMEOUT_MS);
 
     win.webContents.on('did-finish-load', () => {
+      // BUG FIX (2026-07-14): missing the same win.isDestroyed() guard the
+      // sibling did-stop-loading handler already has a few lines below.
+      // Confirmed live in errors.log: "Object has been destroyed" thrown from
+      // the getURL() call right below repeatedly (6x in a 2s burst on
+      // 2026-07-10), crashing whatever scrape batch triggered it whenever the
+      // window is torn down (e.g. master timeout, batch cancel) while a
+      // did-finish-load event is still in flight.
+      if (win.isDestroyed()) return;
       const finalUrl = win.webContents.getURL();
       logger.info('[Relay] WR did-finish-load for', equipmentId, '|', win.webContents.getURL().slice(0,80));
       if (!/aap-na\.corp\.amazon\.com/i.test(finalUrl)) { done(null); return; }
