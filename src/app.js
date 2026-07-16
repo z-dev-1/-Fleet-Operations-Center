@@ -331,11 +331,29 @@ app.whenReady().then(async () => {
 
   // Auto-sync timer
   let _syncTimer = null;
-  function _startAutoSync() {
+  // FEATURE (2026-07-16): "Schedulers – Config → Sync interval (minutes)" in
+// Settings previously did nothing at all -- the field/button existed in the
+// HTML but nothing ever read it, and the timer below used the hardcoded
+// DEFAULTS.SYNC_INTERVAL_MS constant with no override path. This reads
+// settings.syncIntervalMinutes fresh from disk every time _startAutoSync()
+// runs, falling back to the DEFAULTS constant if unset/invalid. Bounds
+// (1-360 min) mirror the validation in the settings:save-sync-interval IPC
+// handler in src/ipc/settings.js.
+function _getSyncIntervalMs() {
+  const s    = store.load('settings', {});
+  const mins = Number(s.syncIntervalMinutes);
+  if (Number.isFinite(mins) && Number.isInteger(mins) && mins >= 1 && mins <= 360) {
+    return mins * 60 * 1000;
+  }
+  return DEFAULTS.SYNC_INTERVAL_MS;
+}
+function _startAutoSync() {
     if (_syncTimer) clearInterval(_syncTimer);
+    const ms = _getSyncIntervalMs();
+    log.info('Auto-sync interval: ' + Math.round(ms / 60000) + ' minutes');
     _syncTimer = setInterval(
       () => { if (_ctx.runFullSync) _ctx.runFullSync(); },
-      DEFAULTS.SYNC_INTERVAL_MS
+      ms
     );
   }
   function _stopAutoSync() {
@@ -347,6 +365,7 @@ app.whenReady().then(async () => {
   _ctx.startAutoSync    = _startAutoSync;
   _ctx.triggerRescan    = _windowApi.triggerRescan;
   _ctx.reloadSchedulers = _reloadSchedulers;   // IPC handler calls this after saving slot config
+  _ctx.reloadSyncInterval = _startAutoSync;    // settings:save-sync-interval calls this to apply immediately
 
   // ── 5e. Register all IPC handlers ─────────────────────────────────────────
   const { registerAllIPC } = require('./ipc');

@@ -156,6 +156,35 @@ function registerSettingsIPC(ctx) {
     return { ok: true, slots: clean };
   });
 
+  // ── Sync interval (auto-sync polling frequency) ──────────────────────────
+  // FEATURE (2026-07-16): "Schedulers – Config → Sync interval (minutes)" in
+  // Settings previously had no backend handler at all -- the field/button
+  // existed in the HTML but there was nothing to call. src/app.js's
+  // _startAutoSync() now reads settings.syncIntervalMinutes fresh on every
+  // (re)start via ctx.reloadSyncInterval, so saving here takes effect
+  // immediately with no app restart required.
+  handle('settings:get-sync-interval', () => {
+    const s = store.load('settings', {});
+    const effectiveMinutes = Math.round((DEFAULTS.SYNC_INTERVAL_MS || 300000) / 60000);
+    return {
+      minutes: (typeof s.syncIntervalMinutes === 'number') ? s.syncIntervalMinutes : null,
+      effectiveMinutes,
+    };
+  });
+
+  handle('settings:save-sync-interval', (_e, minutes) => {
+    const n = Number(minutes);
+    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1 || n > 360) {
+      throw new ConfigError('minutes must be a whole number between 1 and 360', 'minutes');
+    }
+    const s = store.load('settings', {});
+    s.syncIntervalMinutes = n;
+    store.save('settings', s);
+    logger.info('Sync interval saved:', n, 'minutes');
+    if (ctx.reloadSyncInterval) ctx.reloadSyncInterval();
+    return { ok: true, minutes: n };
+  });
+
   logger.info('Settings IPC handlers registered');
 }
 

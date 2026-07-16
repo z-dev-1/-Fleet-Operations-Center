@@ -242,6 +242,8 @@ export const settings = {
   getOrchaConfig:    ()       => window.settings.getOrchaConfig(),
   getScheduleSlots:  ()       => window.settings.getScheduleSlots(),
   saveScheduleSlots: (slots)  => window.settings.saveScheduleSlots(slots),
+  getSyncInterval:    ()      => window.settings.getSyncInterval(),
+  saveSyncInterval:   (m)     => window.settings.saveSyncInterval(m),
 };
 
 // ── Notes ──────────────────────────────────────────────────────────────────

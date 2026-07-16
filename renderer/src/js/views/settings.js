@@ -432,11 +432,13 @@ function _html() {
           <div class="sd-section-title">Schedulers – Config</div>
           <div class="sd-field">
             <div class="sd-label">Sync interval (minutes)</div>
-            <input class="sd-input" id="sched-interval" type="number" placeholder="15"/>
+            <input class="sd-input" id="sched-interval" type="number" min="1" max="360" placeholder="5"/>
+            <div id="sched-status" class="sd-inline-status" style="margin-top:4px;font-size:11px;"></div>
           </div>
           <div class="sd-field">
             <div class="sd-label">Default scheduler endpoint</div>
             <input class="sd-input" id="sched-endpoint" placeholder="https://..."/>
+            <div class="sd-hint" style="margin-top:4px">Reserved for a future remote-scheduler integration — not yet functional.</div>
           </div>
           <div class="sd-btn-row">
             <button class="sd-btn primary" id="save-sched">Save</button>
@@ -1028,6 +1030,59 @@ function _wireAutoNote() {
     await settingsBridge.save('autoEmailNoteOneShot', false);
     showStatus('Note cleared — future auto-sends will not include a note', '');
     toast.show('info', 'Auto-email note cleared', 2500);
+  });
+}
+
+// FEATURE (2026-07-16): "Schedulers – Config → Sync interval (minutes)" had
+// zero wiring anywhere -- no click handler, no IPC handler, no read path.
+// The main data sync (AAP/Uptake/Relay) ran on a hardcoded 5-minute timer
+// (DEFAULTS.SYNC_INTERVAL_MS in src/config/defaults.js) with no way to
+// change it from the UI. Now backed by settings:get-sync-interval /
+// settings:save-sync-interval (src/ipc/settings.js), which persist to the
+// settings store and immediately restart the live timer in src/app.js via
+// ctx.reloadSyncInterval -- no app restart required.
+// Note: the "Default scheduler endpoint" field in this same section maps
+// to no existing concept in the codebase and remains intentionally
+// unwired -- flagged with an in-UI hint rather than silently left broken.
+function _wireSchedulerConfig() {
+  var intervalEl = document.getElementById('sched-interval');
+  var saveBtn    = document.getElementById('save-sched');
+  var statusEl   = document.getElementById('sched-status');
+  if (!intervalEl || !saveBtn) return;
+
+  function showStatus(text, cls) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.className = 'sd-inline-status' + (cls ? ' ' + cls : '');
+    statusEl.style.color = cls === 'err' ? '#ef4444' : cls === 'warn' ? '#eab308' : cls === 'ok' ? '#22c55e' : '#8b949e';
+  }
+
+  settingsBridge.getSyncInterval().then((res) => {
+    var effective = (res && res.effectiveMinutes) || 5;
+    if (res && res.minutes) {
+      intervalEl.value = res.minutes;
+      showStatus('Currently syncing every ' + res.minutes + ' min (custom)', 'ok');
+    } else {
+      showStatus('Currently syncing every ' + effective + ' min (default)', '');
+    }
+  }).catch(() => {});
+
+  saveBtn.addEventListener('click', async () => {
+    var raw = (intervalEl.value || '').trim();
+    var minutes = parseInt(raw, 10);
+    if (!raw || isNaN(minutes)) { showStatus('⚠️ Enter a number of minutes first', 'warn'); return; }
+    try {
+      var result = await settingsBridge.saveSyncInterval(minutes);
+      if (result && result.ok) {
+        showStatus('✅ Saved — now syncing every ' + result.minutes + ' min (applied immediately)', 'ok');
+        toast.show('success', 'Sync interval updated to ' + result.minutes + ' min', 3000);
+      } else {
+        showStatus('❌ ' + ((result && result.error) || 'Save failed'), 'err');
+      }
+    } catch (e) {
+      showStatus('❌ ' + (e.message || 'Save failed'), 'err');
+      toast.show('error', 'Save failed: ' + e.message, 4000);
+    }
   });
 }
 
@@ -2203,6 +2258,7 @@ export function init() {
   _wireSlack();
   _wireEmail();
   _wireAutoNote();
+  _wireSchedulerConfig();
   _wireSP();
   _wireAsana();
   _wireNotifications();

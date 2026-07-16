@@ -71,6 +71,8 @@ window.settings = {
   saveDomiciles:  noopAsync,
   resetDomiciles: noopAsync,
   getOrchaConfig: () => Promise.resolve({}),
+  getSyncInterval:  () => Promise.resolve({ minutes: null, effectiveMinutes: 5 }),
+  saveSyncInterval: (m) => Promise.resolve({ ok: true, minutes: m }),
 };
 
 // ── window.notes ──────────────────────────────────────────────────────────

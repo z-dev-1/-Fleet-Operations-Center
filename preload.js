@@ -89,6 +89,8 @@ contextBridge.exposeInMainWorld('settings', {
   getOrchaConfig:    ()        => ipcRenderer.invoke('orcha:get-config'),
   getScheduleSlots:  ()        => ipcRenderer.invoke('settings:get-schedule-slots'),
   saveScheduleSlots: (slots)   => ipcRenderer.invoke('settings:save-schedule-slots', slots),
+  getSyncInterval:   ()        => ipcRenderer.invoke('settings:get-sync-interval'),
+  saveSyncInterval:  (minutes) => ipcRenderer.invoke('settings:save-sync-interval', minutes),
 });
 
 // ── Notes ─────────────────────────────────────────────────────────────────────
