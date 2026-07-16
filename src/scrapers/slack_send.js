@@ -284,21 +284,86 @@ async function readMessages(channelId, limit) {
 }
 
 /**
- * readDMs(limit) -- fetch most recent DM channels + last message
+ * FEATURE (2026-07-16): cache of channelId -> display name for DM senders,
+ * to avoid re-resolving conversations.info + users.info on every 30s poll
+ * for the same conversation. See readDMs() below for the full rewrite
+ * rationale (two bugs found: dead API call + shape mismatch).
+ */
+const _dmUserNameCache = new Map();
+
+async function _resolveDmSenderName(channelId) {
+  if (_dmUserNameCache.has(channelId)) return _dmUserNameCache.get(channelId);
+  try {
+    const info = await slackWebApi('conversations.info', { channel: channelId });
+    if (!info.ok || !info.channel || !info.channel.user) return null;
+    const u = await slackWebApi('users.info', { user: info.channel.user });
+    const name = (u.ok && u.user) ? (u.user.real_name || u.user.name || info.channel.user) : info.channel.user;
+    _dmUserNameCache.set(channelId, name);
+    return name;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Tracks message ts values already surfaced to the caller, so the same
+// unread DM doesn't re-notify on every subsequent poll (see readDMs below
+// for why this is needed instead of calling conversations.mark, which
+// would change the user's real Slack read-state as a side effect).
+const _dmNotifiedTs = new Set();
+
+/**
+ * readDMs(limit) -- fetch NEW unread DM messages across all direct messages.
+ *
+ * REWRITTEN 2026-07-16 (two bugs found and fixed):
+ *
+ * BUG 1 -- dead on arrival: the original implementation called
+ * conversations.list({types:'im'}), which Amazon's Enterprise Grid Slack
+ * workspace blocks outright (error: enterprise_is_restricted -- verified
+ * live against the real API with an authenticated session). This threw on
+ * every single call since this feature existed; every caller wraps it in
+ * try/catch and swallows the error silently, so DM polling has been
+ * silently non-functional the entire time -- not a sync/timing issue.
+ *
+ * BUG 2 -- shape mismatch, independent of bug 1: the original return shape
+ * was [{ channelId, userId, unread, messages: [...] }] (per-conversation,
+ * nested history). The only consumer, orcha-fab.js's _startSlackPoll(),
+ * reads msg.ts / msg.text / msg.user directly off each top-level array
+ * item. Those fields never existed at that nesting level, so even if bug 1
+ * didn't exist, every entry's msg.ts would be undefined, _lastDmTs would
+ * never advance past its initial null, and no notification would have
+ * ever correctly fired.
+ *
+ * FIX: client.counts is NOT subject to the same restriction (verified
+ * live) and returns every DM channel ID plus an accurate has_unreads flag
+ * -- the same endpoint the real Slack client uses on boot, not subject to
+ * the "listing conversations" restriction. Used to find which DMs actually
+ * have new messages, then fetch history only for those. Returns a FLAT
+ * array of message objects matching what the consumer actually reads:
+ * { ts, text, user, channelId }.
  */
 async function readDMs(limit) {
-  const lim = String(limit || 20);
-  const res = await slackWebApi('conversations.list', {
-    types: 'im', limit: lim, exclude_archived: 'true'
-  });
-  if (!res.ok) throw new Error('DM list failed: ' + res.error);
-  const dms = (res.channels || []).filter(c => c.is_im);
+  const lim = Math.min(Number(limit) || 20, 39);
+  const counts = await slackWebApi('client.counts', {});
+  if (!counts.ok) throw new Error('client.counts failed: ' + counts.error);
+  const unread = (counts.ims || []).filter(im => im.has_unreads).slice(0, lim);
+
   const results = [];
-  for (const dm of dms.slice(0, 10)) {
+  for (const im of unread) {
     try {
-      const hist = await readMessages(dm.id, 5);
-      results.push({ channelId: dm.id, userId: dm.user, unread: dm.unread_count || 0, messages: hist });
-    } catch (_) {}
+      const hist = await readMessages(im.id, 3);
+      if (!hist.length) continue;
+      const latest = hist[0]; // conversations.history returns newest-first
+      const key = im.id + ':' + latest.ts;
+      if (_dmNotifiedTs.has(key)) continue;
+      _dmNotifiedTs.add(key);
+      const senderName = await _resolveDmSenderName(im.id);
+      results.push({
+        ts: latest.ts,
+        text: latest.text,
+        user: senderName || latest.userId || 'Slack',
+        channelId: im.id
+      });
+    } catch (_) { /* one DM failing shouldn't block the others */ }
   }
   return results;
 }

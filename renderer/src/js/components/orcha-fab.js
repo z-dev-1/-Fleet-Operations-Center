@@ -230,7 +230,10 @@ async function _onFirstOpen() {
 // ── Slack polling ───────────────────────────────────────────────────────────
 async function _startSlackPoll() {
   try {
-    const auth = await slack.checkAuth();
+    // FEATURE (2026-07-16): use checkLiveAuth() for consistency with the
+    // rest of the reliability fix -- confirms the token still actually
+    // works rather than just checking a file exists on disk.
+    const auth = await slack.checkLiveAuth();
     _slackAuthed = auth && auth.authenticated;
   } catch(e) { _slackAuthed = false; }
   if (!_slackAuthed) return;
