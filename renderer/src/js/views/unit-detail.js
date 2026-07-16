@@ -133,7 +133,21 @@ function _wireLifecycleForm(unit) {
     confirmEl.disabled = true;
     confirmEl.textContent = 'Saving...';
     try {
-      await aap.setLifecycle(unit.equipmentId, unit.assetUrl, lcState, lcReason);
+      // BUG FIX (2026-07-16): setLifecycleState() (src/scrapers/setLifecycle.js)
+      // NEVER rejects/throws, even when the real AAP automation fails -- it
+      // always resolves, with { success: false, message: '...' } on failure
+      // (e.g. "Could not find lifecycle edit button", "Modal did not open",
+      // "Apply Change button is disabled"). The try/catch here only catches
+      // actual thrown errors (IPC-level failures), so a false "Lifecycle
+      // changed to X" success toast was showing UNCONDITIONALLY regardless
+      // of whether the automation actually succeeded inside AAP. Now
+      // explicitly checks result.success below before treating this as a
+      // success.
+      const lcResult = await aap.setLifecycle(unit.equipmentId, unit.assetUrl, lcState, lcReason);
+      if (!lcResult || !lcResult.success) {
+        toast.show('error', 'Lifecycle change failed: ' + ((lcResult && lcResult.message) || 'Unknown error — AAP automation did not confirm the change'));
+        return;
+      }
       toast.show('success', 'Lifecycle changed to ' + lcState);
       form.style.display = 'none';
       actionsEl.style.display = 'flex';
@@ -1484,8 +1498,18 @@ function renderActionsPane(unit){
       '<button class="dp-action-btn dp-action-btn--notes" id="dp-act-daily-notes"><span class="dp-action-btn__icon">\ud83d\udccb</span>Daily Notes<span class="dp-action-btn__sub">AI note + split view</span></button>'+
       '<button class="dp-action-btn dp-action-btn--orcha" id="dp-act-orcha-deep"><span class="dp-action-btn__icon">\u26a1</span>Orcha Scan<span class="dp-action-btn__sub">AI deep analysis</span></button>'+
     '</div>'+
-    '<div id="dp-lc-form" class="dp-lc-form" style="display:none">'+
-      '<div class="dp-lc-row"><select id="dp-lc-state" class="detail-panel__select"><option value="Available">Available</option><option value="Unavailable">Unavailable</option></select>'+
+    // BUG FIX (2026-07-16): the state dropdown below previously offered
+// "Available"/"Unavailable" as the two options. "Available" is not a real
+// AAP lifecycle state -- the actual AAP asset modal (automated by
+// setLifecycle.js) only recognizes 'Active' | 'Unavailable' | 'End of
+// Life' | 'Ordered' (confirmed via setLifecycle.js's own docstring +
+// working example call). Selecting "Available" would silently fail
+// inside the real AAP automation (no matching dropdown option to click),
+// and -- compounding with the toast bug fixed a few lines below in
+// _wireLifecycleForm -- that failure was being reported to the user as a
+// SUCCESS. Fixed to the 4 real AAP states.
+'<div id="dp-lc-form" class="dp-lc-form" style="display:none">'+
+      '<div class="dp-lc-row"><select id="dp-lc-state" class="detail-panel__select"><option value="Active">Active</option><option value="Unavailable">Unavailable</option><option value="Ordered">Ordered</option><option value="End of Life">End of Life</option></select>'+
       '<input id="dp-lc-reason" class="detail-panel__input" type="text" placeholder="Reason..."/></div>'+
       '<div class="dp-lc-row"><button id="dp-lc-confirm" class="detail-panel__btn">Confirm</button><button id="dp-lc-cancel" class="detail-panel__btn detail-panel__btn--secondary">Cancel</button></div>'+
     '<div class="dp-section-title" style="margin-top:10px">Dealer Work Order</div>'+
