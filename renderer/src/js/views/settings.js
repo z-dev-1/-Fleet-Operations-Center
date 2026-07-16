@@ -598,6 +598,7 @@ function _html() {
           <div class="sd-btn-row">
             <button class="sd-btn primary"   id="slack-login">Sign in to Slack</button>
             <button class="sd-btn secondary" id="slack-recheck">Re-check</button>
+            <button class="sd-btn secondary" id="slack-logout">Sign out</button>
           </div>
         </div>
 
@@ -961,7 +962,16 @@ function _wireVendorAuth() {
 
 // ── Section: Slack ───────────────────────────────────────────────────────────
 function _checkSlack() {
-  slackBridge.checkAuth().then((ok) => {
+  // BUG FIX (2026-07-16): was checkAuth().then((ok) => ...) — checkAuth()
+  // resolves to an OBJECT ({ authenticated: bool }), not a boolean. Since a
+  // non-null object is always truthy, `ok ? 'Connected' : 'Not connected'`
+  // showed "Connected" every single time the promise resolved, regardless
+  // of actual auth state — this status indicator has never once correctly
+  // shown "Not connected." Also switched to checkLiveAuth(), which confirms
+  // the token still actually works (Slack sessions can be revoked without
+  // the local token file changing) rather than just checking a file exists.
+  slackBridge.checkLiveAuth().then((res) => {
+    const ok = !!(res && res.authenticated);
     const el = document.getElementById('slack-status');
     if (!el) return;
     el.textContent = ok ? '✅ Connected' : '⚠️ Not connected';
@@ -1092,7 +1102,35 @@ function _wireSlack() {
   var loginBtn = document.getElementById('slack-login');
   if (recheckBtn) recheckBtn.addEventListener('click', _checkSlack);
   if (loginBtn) loginBtn.addEventListener('click', () => {
-    slackBridge.login().then(() => _checkSlack()).catch(() => {});
+    // BUG FIX (2026-07-16): was .catch(() => {}) -- swallowed every login
+    // failure silently, with no feedback at all if the popup window was
+    // closed before sign-in completed or any other error occurred.
+    loginBtn.disabled = true;
+    const originalText = loginBtn.textContent;
+    loginBtn.textContent = 'Signing in\u2026';
+    slackBridge.login().then((result) => {
+      if (result && result.ok) {
+        toast.show('success', 'Signed in to Slack', 3000);
+      } else {
+        toast.show('warn', (result && result.error) || 'Sign-in was not completed', 4000);
+      }
+      _checkSlack();
+    }).catch((e) => {
+      toast.show('error', 'Slack sign-in failed: ' + e.message, 4000);
+    }).finally(() => {
+      loginBtn.disabled = false;
+      loginBtn.textContent = originalText;
+    });
+  });
+
+  // FEATURE (2026-07-16): lets the user cleanly reset a stuck/stale Slack
+  // session instead of having no way to force a fresh sign-in.
+  var logoutBtn = document.getElementById('slack-logout');
+  if (logoutBtn) logoutBtn.addEventListener('click', () => {
+    slackBridge.logout().then(() => {
+      toast.show('info', 'Signed out of Slack', 2500);
+      _checkSlack();
+    }).catch((e) => toast.show('error', 'Sign-out failed: ' + e.message, 3000));
   });
 }
 
@@ -1570,7 +1608,12 @@ function _wireAsana() {
     setTimeout(() => { st.style.display = 'none'; }, 2000);
   });
   document.getElementById('asana-verify').addEventListener('click', () => {
-    asanaBridge.checkAuth().then((ok) => {
+    // BUG FIX (2026-07-16): identical defect to the Slack status check
+    // above -- checkAuth() resolves to an object ({ ok: bool, ... }), not a
+    // boolean, so this always showed "Token valid" once the promise
+    // resolved regardless of actual state.
+    asanaBridge.checkAuth().then((res) => {
+      const ok = !!(res && res.ok);
       const st = document.getElementById('asana-status');
       st.textContent = ok ? '✅ Token valid' : '❌ Token invalid';
       st.style.display = 'block';

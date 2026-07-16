@@ -22,6 +22,12 @@ let _pendingActions = null;
 let _contacts = []; // { id, name, type: 'user'|'channel' }
 let _acEl = null;   // autocomplete dropdown element
 
+// ── FEATURE (2026-07-16): Slack tab state (Chat / Slack tabs in this panel) ──
+let _activeTab = 'chat';
+let _slackChannels = [];       // cached channel/DM list for the Slack tab
+let _activeSlackChannel = null; // { id, name, type } — currently open thread
+let _slackTabRefreshTimer = null;
+
 // ── Conversation memory ───────────────────────────────────────────────────
 const MAX_HISTORY = 30;
 let _chatHistory = JSON.parse(localStorage.getItem('orcha_chat_history') || '[]');
@@ -124,6 +130,11 @@ function _togglePanel() {
   if (_panelOpen && !_initialized) { _initialized = true; _onFirstOpen(); }
   // Always start Slack poll (background DM check)
   if (!_pollTimer) _startSlackPoll();
+  // FEATURE (2026-07-16): stop the Slack-tab-specific refresh timer when the
+  // whole panel closes, so it doesn't keep polling in the background when
+  // the user can't even see it (separate from the always-on DM poll above).
+  if (!_panelOpen) _stopSlackTabRefresh();
+  else if (_activeTab === 'slack') _startSlackTabRefresh();
 }
 
 function _appendMsg(cls, text, meta) {
@@ -239,6 +250,222 @@ async function _startSlackPoll() {
   }, 30000);
 }
 
+// ── FEATURE (2026-07-16): Slack tab — Chat/Slack tab switching ──────────────
+function _switchTab(tab) {
+  if (tab === _activeTab) return;
+  _activeTab = tab;
+  const chatBtn  = document.getElementById('oc-tab-btn-chat');
+  const slackBtn = document.getElementById('oc-tab-btn-slack');
+  const chatPane = document.getElementById('oc-tab-chat');
+  const slackPane = document.getElementById('oc-tab-slack');
+  if (chatBtn)  chatBtn.classList.toggle('oc-tab--active', tab === 'chat');
+  if (slackBtn) slackBtn.classList.toggle('oc-tab--active', tab === 'slack');
+  if (chatPane)  chatPane.style.display  = tab === 'chat'  ? '' : 'none';
+  if (slackPane) slackPane.style.display = tab === 'slack' ? '' : 'none';
+
+  if (tab === 'slack') {
+    _refreshSlackTabState();
+    _startSlackTabRefresh();
+  } else {
+    _stopSlackTabRefresh();
+  }
+}
+
+// Only one of these three views is visible at a time within the Slack tab.
+function _showSlackView(view) {
+  const signin = document.getElementById('oc-slack-signin');
+  const list   = document.getElementById('oc-slack-list');
+  const thread = document.getElementById('oc-slack-thread');
+  if (signin) signin.style.display = view === 'signin' ? '' : 'none';
+  if (list)   list.style.display   = view === 'list'   ? '' : 'none';
+  if (thread) thread.style.display = view === 'thread' ? '' : 'none';
+}
+
+// FEATURE (2026-07-16): uses checkLiveAuth() (confirms the token still
+// actually works via Slack's auth.test) rather than just checking a token
+// file exists on disk -- see slack_send.js for the full rationale. This is
+// what makes sign-in status "reliable" instead of potentially showing
+// connected forever after a session goes stale.
+async function _refreshSlackTabState() {
+  const statusEl = document.getElementById('oc-slack-status');
+  if (statusEl) statusEl.textContent = 'Checking connection\u2026';
+  _showSlackView('signin');
+  try {
+    const res = await slack.checkLiveAuth();
+    if (res && res.authenticated) {
+      _slackAuthed = true;
+      _loadSlackChannelList();
+    } else {
+      _slackAuthed = false;
+      if (statusEl) {
+        const reason = res && res.reason;
+        statusEl.textContent = (reason && reason !== 'not_configured')
+          ? 'Not connected (' + reason + ')'
+          : 'Not connected to Slack';
+      }
+    }
+  } catch (e) {
+    _slackAuthed = false;
+    if (statusEl) statusEl.textContent = 'Connection check failed: ' + e.message;
+  }
+}
+
+async function _loadSlackChannelList() {
+  const listEl = document.getElementById('oc-slack-list');
+  if (listEl) listEl.innerHTML = '<div class="oc-slack-loading">Loading channels\u2026</div>';
+  _showSlackView('list');
+  try {
+    const channels = await slack.getChannels();
+    _slackChannels = Array.isArray(channels) ? channels : [];
+    _renderSlackList(_slackChannels);
+  } catch (e) {
+    if (listEl) listEl.innerHTML = '<div class="oc-slack-loading">Failed to load: ' + _esc(e.message) + '</div>';
+  }
+}
+
+function _renderSlackList(items) {
+  const listEl = document.getElementById('oc-slack-list');
+  if (!listEl) return;
+  if (!items.length) {
+    listEl.innerHTML = '<div class="oc-slack-loading">No channels or DMs found</div>';
+    return;
+  }
+  // DMs first, then channels, unread first within each group
+  const sorted = items.slice().sort((a, b) => {
+    const aIm = a.isIm || a.isMpim, bIm = b.isIm || b.isMpim;
+    if (aIm !== bIm) return aIm ? -1 : 1;
+    return (b.unread || 0) - (a.unread || 0);
+  });
+  listEl.innerHTML = sorted.map((c) => {
+    const icon = (c.isIm || c.isMpim) ? '@' : '#';
+    const unreadBadge = c.unread ? '<span class="oc-slack-unread">' + c.unread + '</span>' : '';
+    return '<div class="oc-slack-item" data-id="' + _esc(c.id) + '" data-name="' + _esc(c.name) + '" data-im="' + !!(c.isIm || c.isMpim) + '">' +
+      '<span class="oc-slack-item-icon">' + icon + '</span>' +
+      '<span class="oc-slack-item-name">' + _esc(c.name) + '</span>' +
+      unreadBadge +
+    '</div>';
+  }).join('');
+  listEl.querySelectorAll('.oc-slack-item').forEach((el) => {
+    el.addEventListener('click', () => {
+      _openSlackThread({ id: el.dataset.id, name: el.dataset.name, isIm: el.dataset.im === 'true' });
+    });
+  });
+}
+
+async function _openSlackThread(channel) {
+  _activeSlackChannel = channel;
+  const titleEl = document.getElementById('oc-slack-thread-title');
+  if (titleEl) titleEl.textContent = (channel.isIm ? '@' : '#') + channel.name;
+  const msgsEl = document.getElementById('oc-slack-msgs');
+  if (msgsEl) msgsEl.innerHTML = '<div class="oc-slack-loading">Loading messages\u2026</div>';
+  _showSlackView('thread');
+  await _refreshSlackThreadMessages();
+}
+
+async function _refreshSlackThreadMessages() {
+  if (!_activeSlackChannel) return;
+  const msgsEl = document.getElementById('oc-slack-msgs');
+  try {
+    const messages = await slack.read({ channelId: _activeSlackChannel.id, limit: 30 });
+    _renderSlackThreadMessages(Array.isArray(messages) ? messages : []);
+  } catch (e) {
+    if (msgsEl) msgsEl.innerHTML = '<div class="oc-slack-loading">Failed to load: ' + _esc(e.message) + '</div>';
+  }
+}
+
+function _renderSlackThreadMessages(messages) {
+  const msgsEl = document.getElementById('oc-slack-msgs');
+  if (!msgsEl) return;
+  if (!messages.length) {
+    msgsEl.innerHTML = '<div class="oc-slack-loading">No messages yet</div>';
+    return;
+  }
+  // Slack returns newest-first; display oldest-first like a normal thread.
+  const ordered = messages.slice().reverse();
+  msgsEl.innerHTML = ordered.map((m) =>
+    '<div class="oc-msg oc-msg--slack-in">' + _esc(m.text || '') + '</div>'
+  ).join('');
+  msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+
+async function _sendSlackReply() {
+  const inp = document.getElementById('oc-slack-reply-input');
+  const val = (inp && inp.value || '').trim();
+  if (!val || !_activeSlackChannel) return;
+  inp.value = '';
+  const msgsEl = document.getElementById('oc-slack-msgs');
+  if (msgsEl) {
+    const d = document.createElement('div');
+    d.className = 'oc-msg oc-msg--user';
+    d.textContent = val;
+    msgsEl.appendChild(d);
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+  }
+  try {
+    await slack.sendToChannel({ channelId: _activeSlackChannel.id, message: val });
+  } catch (e) {
+    if (msgsEl) {
+      const d = document.createElement('div');
+      d.className = 'oc-msg oc-msg--orcha';
+      d.textContent = '\u274C Failed to send: ' + e.message;
+      msgsEl.appendChild(d);
+    }
+  }
+}
+
+// Light periodic refresh while the Slack tab is actually visible — catches
+// a session going stale mid-view, and keeps an open thread reasonably live.
+// Deliberately separate from _startSlackPoll() (the always-on 30s DM->chat
+// notification poll) so this only runs while the user is looking at it.
+function _startSlackTabRefresh() {
+  if (_slackTabRefreshTimer) return;
+  _slackTabRefreshTimer = setInterval(() => {
+    if (_activeSlackChannel && document.getElementById('oc-slack-thread').style.display !== 'none') {
+      _refreshSlackThreadMessages();
+    }
+  }, 15000);
+}
+function _stopSlackTabRefresh() {
+  if (_slackTabRefreshTimer) { clearInterval(_slackTabRefreshTimer); _slackTabRefreshTimer = null; }
+}
+
+async function _slackLogin() {
+  const btn = document.getElementById('oc-slack-login-btn');
+  const statusEl = document.getElementById('oc-slack-status');
+  if (btn) { btn.disabled = true; btn.textContent = 'Signing in\u2026'; }
+  if (statusEl) statusEl.textContent = 'Complete sign-in in the popup window\u2026';
+  try {
+    const result = await slack.login();
+    if (result && result.ok) {
+      await _refreshSlackTabState();
+    } else {
+      if (statusEl) statusEl.textContent = (result && result.error) || 'Sign-in was not completed';
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = 'Sign-in failed: ' + e.message;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Sign in to Slack'; }
+  }
+}
+
+function _wireSlackTab() {
+  const chatBtn  = document.getElementById('oc-tab-btn-chat');
+  const slackBtn = document.getElementById('oc-tab-btn-slack');
+  if (chatBtn)  chatBtn.addEventListener('click', () => _switchTab('chat'));
+  if (slackBtn) slackBtn.addEventListener('click', () => _switchTab('slack'));
+
+  const loginBtn = document.getElementById('oc-slack-login-btn');
+  if (loginBtn) loginBtn.addEventListener('click', _slackLogin);
+
+  const backBtn = document.getElementById('oc-slack-back');
+  if (backBtn) backBtn.addEventListener('click', () => { _activeSlackChannel = null; _showSlackView('list'); });
+
+  const replySend = document.getElementById('oc-slack-reply-send');
+  if (replySend) replySend.addEventListener('click', _sendSlackReply);
+  const replyInput = document.getElementById('oc-slack-reply-input');
+  if (replyInput) replyInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') _sendSlackReply(); });
+}
+
 // ── Timeline writing ────────────────────────────────────────────────────────
 async function _addToTimeline(unitId, entry) {
   const today = new Date();
@@ -317,12 +544,36 @@ export function init() {
       <span class="orcha-status" id="orcha-status">\u{25CF} Ready</span>
       <button class="orcha-close" id="orcha-close">\u{25BC}</button>
     </div>
-    <div class="oc-msgs" id="orcha-msgs">
-      <div class="oc-msg oc-msg--orcha">Hey \u{1F44B} I'm Orcha — your fleet brain. Click me anytime.<br><br>I know every unit, every timeline, every vendor. Ask me anything, tell me to do something, or just vent about Kenworth's ETA.</div>
+    <div class="oc-tabs" id="oc-tabs">
+      <button class="oc-tab oc-tab--active" id="oc-tab-btn-chat" data-tab="chat">Chat</button>
+      <button class="oc-tab" id="oc-tab-btn-slack" data-tab="slack">Slack</button>
     </div>
-    <div class="oc-input-row">
-      <input class="oc-input" id="orcha-input" placeholder="Ask, command, or vent..." autocomplete="off" spellcheck="false"/>
-      <button class="oc-send" id="orcha-send">\u{27A4}</button>
+    <div class="oc-tab-content" id="oc-tab-chat">
+      <div class="oc-msgs" id="orcha-msgs">
+        <div class="oc-msg oc-msg--orcha">Hey \u{1F44B} I'm Orcha — your fleet brain. Click me anytime.<br><br>I know every unit, every timeline, every vendor. Ask me anything, tell me to do something, or just vent about Kenworth's ETA.</div>
+      </div>
+      <div class="oc-input-row">
+        <input class="oc-input" id="orcha-input" placeholder="Ask, command, or vent..." autocomplete="off" spellcheck="false"/>
+        <button class="oc-send" id="orcha-send">\u{27A4}</button>
+      </div>
+    </div>
+    <div class="oc-tab-content" id="oc-tab-slack" style="display:none">
+      <div class="oc-slack-signin" id="oc-slack-signin">
+        <div class="oc-slack-status" id="oc-slack-status">Checking connection\u{2026}</div>
+        <button class="oc-send oc-slack-login-btn" id="oc-slack-login-btn">Sign in to Slack</button>
+      </div>
+      <div class="oc-slack-list" id="oc-slack-list" style="display:none"></div>
+      <div class="oc-slack-thread" id="oc-slack-thread" style="display:none">
+        <div class="oc-slack-thread-header" id="oc-slack-thread-header">
+          <button class="oc-slack-back" id="oc-slack-back">\u{2190}</button>
+          <span class="oc-slack-thread-title" id="oc-slack-thread-title"></span>
+        </div>
+        <div class="oc-slack-msgs" id="oc-slack-msgs"></div>
+        <div class="oc-input-row">
+          <input class="oc-input" id="oc-slack-reply-input" placeholder="Message..." autocomplete="off" spellcheck="false"/>
+          <button class="oc-send" id="oc-slack-reply-send">\u{27A4}</button>
+        </div>
+      </div>
     </div>
   `;
   document.body.appendChild(panel);
@@ -340,6 +591,7 @@ export function init() {
   document.getElementById('orcha-input').addEventListener('input', _handleInputForMentions);
   document.getElementById('orcha-input').addEventListener('blur', () => setTimeout(_hideAutocomplete, 200));
   _loadContacts();
+  _wireSlackTab();
 
   // Shift panel when right drawer opens/closes
   bus.on('ui:unit-select', () => {

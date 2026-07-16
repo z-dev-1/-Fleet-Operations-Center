@@ -25,6 +25,39 @@ function isAuthenticated() {
 }
 
 /**
+ * FEATURE (2026-07-16): isAuthenticated() below only checks that a token
+ * file exists on disk -- it never confirms the token still actually works.
+ * Slack session tokens (xoxc-) can be invalidated (password reset, admin
+ * revoke, long inactivity) without the local file changing at all, which
+ * would leave the UI showing "connected" indefinitely while every real API
+ * call silently fails. checkLiveAuth() calls Slack's own auth.test endpoint
+ * to confirm the token is genuinely still valid right now.
+ */
+async function checkLiveAuth() {
+  if (!isAuthenticated()) return { authenticated: false, reason: 'not_configured' };
+  try {
+    const res = await slackWebApi('auth.test', {});
+    if (res && res.ok) {
+      return { authenticated: true, user: res.user || '', team: res.team || '' };
+    }
+    return { authenticated: false, reason: res && res.error ? res.error : 'unknown' };
+  } catch (e) {
+    return { authenticated: false, reason: e.message };
+  }
+}
+
+/**
+ * FEATURE (2026-07-16): clears stored Slack credentials so the user can
+ * cleanly re-authenticate if a session ever goes stale (see checkLiveAuth
+ * above) instead of the token being permanently stuck with no reset path.
+ */
+function logout() {
+  const existing = getConfig() || {};
+  saveConfig({ token: '', cookie: '', allCookieHeader: '', defaultRecipient: existing.defaultRecipient || '' });
+  return { ok: true };
+}
+
+/**
  * Call Slack Web API
  * Uses full cookie header (all cookies) + xoxc token in body
  */
@@ -129,6 +162,21 @@ async function sendSlackMessage(recipient, message) {
   }
 
   logger.info('[Slack] Message sent to', recipient);
+  return { ok: true, ts: result.ts };
+}
+
+// FEATURE (2026-07-16): sendSlackMessage() below resolves a recipient by
+// NAME (fuzzy search.modules / users.lookupByEmail), which is inherently a
+// little fragile and is really meant for the free-text "@mention" chat
+// flow. Once the UI already has an exact channel/DM ID in hand (from
+// getChannels()/readDMs()), re-doing a name search is both wasteful and
+// less reliable than just posting directly to the known ID. Used by the
+// new Slack tab's reply box.
+async function sendToChannel(channelId, message) {
+  if (!channelId) throw new Error('channelId required');
+  const result = await slackWebApi('chat.postMessage', { channel: channelId, text: message });
+  if (!result.ok) throw new Error(`Slack API error: ${result.error}`);
+  logger.info('[Slack] Message sent to channel', channelId);
   return { ok: true, ts: result.ts };
 }
 
@@ -249,4 +297,4 @@ async function processAutoReplies(messages, rules) {
   return sent;
 }
 
-module.exports = { isAuthenticated, sendSlackMessage, slackSaveConfig, getConfig, getChannels, readMessages, readDMs, findChannelByName, processAutoReplies };
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readDMs, findChannelByName, processAutoReplies };

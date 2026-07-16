@@ -297,6 +297,9 @@ export const slack = {
   read:         (data) => window.slack.read(data),
   readDMs:      ()     => window.slack.readDMs(),
   getChannels:  ()     => window.slack.getChannels(),
+  checkLiveAuth: ()    => window.slack.checkLiveAuth(),
+  logout:        ()    => window.slack.logout(),
+  sendToChannel: (data) => window.slack.sendToChannel(data),
   onIncoming:   (cb)   => window.slack.onIncoming(cb),
 };
 

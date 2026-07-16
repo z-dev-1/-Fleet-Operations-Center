@@ -14,6 +14,7 @@
 
 const { BrowserWindow, session: electronSession } = require('electron');
 const creds  = require('../security/credentials');
+const store  = require('../store'); // BUG FIX (2026-07-16): was missing entirely; see slack:get/set-auto-reply below
 const logger = require('../utils/logger')('ipc:slack');
 const { handle, requireStringMax } = require('./_safe');
 
@@ -22,6 +23,11 @@ const MAX_RECIPIENT_LEN = 128;    // Slack channel name / user handle
 const MAX_MESSAGE_LEN   = 8000;   // Slack API message body limit
 
 function registerSlackIPC() {
+  // FEATURE (2026-07-16): the handler below only checks that a token file
+  // exists on disk. slack:check-live-auth (added a few lines down) actually
+  // confirms the token still works via Slack's auth.test endpoint -- used
+  // by the new Slack tab in the Orcha floater so a stale/revoked session
+  // shows correctly instead of appearing permanently "connected."
   handle('slack:check-auth', async () => {
     const { isAuthenticated } = require('../../src/scrapers/slack_send');
     return { authenticated: isAuthenticated() };
@@ -70,6 +76,36 @@ function registerSlackIPC() {
     });
   });
 
+  // FEATURE (2026-07-16): see comment above slack:check-auth. Actually
+  // confirms the token still works (Slack session tokens can be revoked
+  // without the local file changing), used by the new Slack tab so a
+  // stale session shows correctly instead of appearing "connected" forever.
+  handle('slack:check-live-auth', async () => {
+    const { checkLiveAuth } = require('../../src/scrapers/slack_send');
+    return checkLiveAuth();
+  });
+
+  // FEATURE (2026-07-16): lets the user cleanly reset a stuck/stale Slack
+  // session from the UI instead of having no way to force a fresh sign-in.
+  handle('slack:logout', async () => {
+    const { logout } = require('../../src/scrapers/slack_send');
+    return logout();
+  });
+
+  // FEATURE (2026-07-16): direct send-by-ID for the Slack tab's reply box,
+  // where the channel/DM ID is already known from getChannels()/readDMs()
+  // -- more reliable than slack:send's fuzzy name-based recipient lookup.
+  handle('slack:send-to-channel', async (_e, data) => {
+    if (!data || typeof data !== 'object') {
+      const { ConfigError } = require('../utils/errors');
+      throw new ConfigError('slack:send-to-channel payload must be an object', 'data');
+    }
+    requireStringMax(data.channelId, 'channelId', MAX_RECIPIENT_LEN);
+    requireStringMax(data.message,   'message',   MAX_MESSAGE_LEN);
+    const { sendToChannel } = require('../../src/scrapers/slack_send');
+    return sendToChannel(data.channelId, data.message);
+  });
+
   // Issue #5: validate recipient + message before forwarding
   handle('slack:send', async (_e, data) => {
     if (!data || typeof data !== 'object') {
@@ -104,13 +140,21 @@ function registerSlackIPC() {
 
   // S22: slack:auto-reply-config -- get/set auto-reply rules
   handle('slack:get-auto-reply', async () => {
-    return store.get('slackAutoReply') || [];
+    // BUG FIX (2026-07-16): this called store.get(), but (1) `store` was
+    // never imported/required anywhere in this file -- would throw
+    // "store is not defined" -- and (2) even if it had been imported, the
+    // real store module (src/store/index.js) only exposes load/save/
+    // update/exists/delete, no .get()/.set(). Currently unreachable (no UI
+    // calls this yet), but would have crashed instantly the moment
+    // anything did. Fixed to use the real API + registered the
+    // 'slackAutoReply' key in store/index.js's REGISTRY.
+    return store.load('slackAutoReply', []);
   });
 
   handle('slack:set-auto-reply', async (_e, rules) => {
     if (!Array.isArray(rules)) throw new Error('rules must be an array');
     if (rules.length > 50) throw new Error('max 50 auto-reply rules');
-    store.set('slackAutoReply', rules);
+    store.save('slackAutoReply', rules);
     logger.info('[Slack] auto-reply rules saved: ' + rules.length);
     return { ok: true, count: rules.length };
   });

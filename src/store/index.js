@@ -68,6 +68,7 @@ const REGISTRY = {
   heartbeatState:   () => P.heartbeatState,
   rcaStore:         () => P.rcaStore,
   retentionHistory: () => P.retentionHistory,
+  slackAutoReply:   () => path.join(P.dataDir, 'slack_auto_reply.json'), // FEATURE (2026-07-16)
 };
 
 function _resolvePath(name) {
