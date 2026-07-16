@@ -40,6 +40,29 @@ function _currentSlot() {
   return h < 14 ? 'AM' : 'PM';
 }
 
+// BUG FIX (2026-07-16): user reported the 08:00 AM auto-send arrived
+// labeled "EOS REPORT" (End of Shift) instead of "SOS REPORT" (Start of
+// Shift). Root cause: src/app.js's scheduler passes `slot.label`, which is
+// a raw time string like "08:00" / "15:15" (see settings:save-schedule-
+// slots: `label = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0')`)
+// -- NOT the literal strings "AM"/"PM" that _buildSubject() below and
+// emailBuilder.js's slotLabel logic (`slot === 'AM' ? ... : ...`) actually
+// expect. Since "08:00" is truthy but !== 'AM', every strict-equality check
+// against 'AM' fell through to the PM/EOS branch -- meaning BOTH the AM and
+// PM auto-sends were always mislabeled as PM/EOS, every single time, for as
+// long as this scheduler path has existed. The manual Compose Email view
+// was never affected -- its AM/PM toggle (_currentSlotValue()) already
+// produces the literal "AM"/"PM" strings correctly.
+// Normalizes either an "AM"/"PM" string (manual compose) or an "HH:MM" time
+// string (scheduler) into the canonical "AM"/"PM" value used everywhere
+// downstream (subject line, template colors/icons, SOS/EOS label).
+function _normalizeSlotToAmPm(slot) {
+  if (slot === 'AM' || slot === 'PM') return slot;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(slot || '').trim());
+  if (m) return parseInt(m[1], 10) < 12 ? 'AM' : 'PM';
+  return 'PM'; // unparseable/missing — matches the pre-existing fallback behavior
+}
+
 function _buildSubject(op, slot, domicile) {
   const now   = new Date();
   const shift = slot === 'AM' ? 'AM' : 'PM';
@@ -789,7 +812,11 @@ export async function init(container) {
   // ── S28: Auto-email handler — fires when scheduler triggers ──────────────
   bus.on('fleet:auto-email', async (payload) => {
     const { slot, triggeredAt, syncError, autoEmailNote } = payload || {};
-    console.log('[email-composer] Auto-email triggered: slot=' + (slot || '?') + ' at ' + (triggeredAt || 'unknown'));
+    // BUG FIX (2026-07-16): see _normalizeSlotToAmPm() above — `slot` here is
+    // a raw "HH:MM" time string from the scheduler (e.g. "08:00"), not the
+    // literal "AM"/"PM" that _buildSubject() and the email template expect.
+    const slotAmPm = _normalizeSlotToAmPm(slot);
+    console.log('[email-composer] Auto-email triggered: slot=' + (slot || '?') + ' (' + slotAmPm + ') at ' + (triggeredAt || 'unknown'));
     if (syncError) console.warn('[email-composer] Auto-email sync had error:', syncError);
 
     // Load email recipients from both sources
@@ -826,10 +853,10 @@ export async function init(container) {
 
       try {
         const result = await emailBridge.compose({
-          subject: _buildSubject(opName, slot || "PM", domCode),
+          subject: _buildSubject(opName, slotAmPm, domCode),
           operator: opName,
           domicile: domCode || 'ALL',
-          slot: slot || 'PM',
+          slot: slotAmPm,
           to: recipients.to || '',
           cc: recipients.cc || '',
           // FEATURE (2026-07-16): "Auto-Email Note" set in Settings, threaded
