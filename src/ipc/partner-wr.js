@@ -319,4 +319,9 @@ function hashRow(str) {
   return Math.abs(h).toString(36).toUpperCase().slice(0, 8);
 }
 
-module.exports = { registerPartnerWRHandlers };
+// FEATURE (2026-07-16): exported so ai.js's Orcha-chat CREATE_WR action can
+// reuse the same AI classification pipeline instead of either (a) faking
+// success with a local queue nothing ever reads, or (b) submitting straight
+// to AAP with only {unit, issue} and no vendor/area/subcategory. See ai.js
+// for the full rationale.
+module.exports = { registerPartnerWRHandlers, classifyRequest };

@@ -325,11 +325,56 @@ function registerAIHandlers(ctx) {
           results.push('Follow-up drafts:\n' + drafts.join('\n'));
         }
         if (a.type==='CREATE_WR'&&a.unit&&a.issue) {
-          const wrQueue = store.load('wrQueue', []);
-          wrQueue.push({unit:a.unit, issue:a.issue, created:new Date().toISOString(), status:'pending'});
-          store.save('wrQueue', wrQueue);
-          try { const _w = require('electron').BrowserWindow.getAllWindows()[0]; if(_w) _w.webContents.send('wr:created',{unit:a.unit,issue:a.issue}); } catch(e){}
-          results.push('WR created for ' + a.unit + ': ' + a.issue);
+          // BUG FIX (2026-07-16): this previously pushed {unit, issue,
+          // status:'pending'} into a local 'wrQueue' store key that NOTHING
+          // ever reads back -- no background job, no UI list, nothing. It
+          // fired a 'wr:created' IPC event that zero renderer code listens
+          // for. The chat reply said "WR created for X" but nothing was
+          // ever actually created in AAP -- a complete fake-success dead
+          // end (confirmed by full codebase search: no consumer of wrQueue
+          // or wr:created exists).
+          //
+          // Fixed: routes through the SAME AI-classification + review-queue
+          // pipeline that partner-submitted WRs already use
+          // (partner-wr.js's classifyRequest + 'partnerWRs_review' store
+          // key) rather than either (a) still faking it, or (b) calling
+          // aap_create_wr.js's createWorkRequest() directly with only
+          // {unit, issue} and no vendor/area/subcategory -- the chat prompt
+          // above doesn't extract those fields, and submitting an
+          // incomplete WR straight to AAP from a casual chat message
+          // without any human review is not an acceptable substitute for a
+          // fake success. This way it gets AI-classified (title, area,
+          // vendor, urgency) exactly like a partner-submitted request, and
+          // shows up in the existing Review queue for one-click approval.
+          try {
+            const { classifyRequest } = require('./partner-wr');
+            const review = store.load('partnerWRs_review', []);
+            const reqId = 'CHAT-' + Date.now().toString(36).toUpperCase();
+            let chatReq = {
+              id: reqId, unit: a.unit, site: '', issue: a.issue,
+              reportedBy: 'Orcha Chat', phone: '', photo: '',
+              createdAt: new Date().toISOString(), status: 'classifying',
+            };
+            review.push(chatReq);
+            store.save('partnerWRs_review', review);
+            try {
+              chatReq = await classifyRequest(chatReq, relay);
+            } catch (classifyErr) {
+              chatReq.status = 'pending';
+              chatReq.aiError = classifyErr.message;
+              logger.warn('[ai:orcha-action] CREATE_WR classify failed: ' + classifyErr.message);
+            }
+            const review2 = store.load('partnerWRs_review', []);
+            const idx2 = review2.findIndex(r => r.id === reqId);
+            if (idx2 !== -1) review2[idx2] = chatReq;
+            store.save('partnerWRs_review', review2);
+            try { const _w = require('electron').BrowserWindow.getAllWindows()[0]; if(_w) _w.webContents.send('partner:new-requests', { count: review2.length }); } catch(e){}
+            results.push(chatReq.status === 'ready'
+              ? 'Added to WR review queue for ' + a.unit + ': "' + (chatReq.aiTitle || a.issue) + '" — approve in Partner Requests to submit to AAP.'
+              : 'Logged request for ' + a.unit + ' but AI classification failed — check Partner Requests review queue to fill in manually.');
+          } catch (e) {
+            results.push('Could not queue WR for ' + a.unit + ': ' + e.message);
+          }
         }
         if (a.type==='MOVE_UNIT'&&a.unit&&a.status) {
           const fd2 = store.load('fleetData', {});
