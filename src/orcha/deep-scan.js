@@ -73,7 +73,16 @@ async function runOrchaDeepScan(mergedRows, opts) {
   let improved = 0;
 
   // Process in batches of 5 with per-unit timeout
-  for (let i = 0; i < unitsToProcess.length; i += 2) {
+  // BUG FIX (2026-07-16): loop advanced by 2 but each batch below slices 5
+  // units (i, i+5) — overlapping windows caused most units to be sent to
+  // the AI 2-3x each (verified live: units 124124/39309/39351/892476/39582
+  // each processed 3x in a single 42-unit scan, several others 2x). No
+  // dedup guard exists in _processUnit(), so every repeat run re-did the
+  // full work (including a real offsite scrape + AI call) for zero
+  // benefit — the later duplicate result just silently overwrote the
+  // earlier one in notesStore. Advancing by 5 (matching the slice window)
+  // restores the non-overlapping batching the comment above intends.
+  for (let i = 0; i < unitsToProcess.length; i += 5) {
     const batch   = unitsToProcess.slice(i, i + 5);
     const results = await Promise.allSettled(
       batch.map(u => _processUnit(u, notesStore, askOrcha))
