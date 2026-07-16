@@ -143,38 +143,97 @@ function registerScrapersIPC(ctx) {
 
   // ── aap:autofill ────────────────────────────────────────────────────────
   // Issue #2: enginePath pinned — renderer cannot supply an arbitrary file path
+  // BUG FIX (2026-07-16): this handler previously resolved the
+  // ipcRenderer.invoke('aap:autofill', ...) call as soon as the
+  // BrowserWindow was CREATED -- `return { ok: true };` ran immediately,
+  // completely independent of whether the did-finish-load listener ever
+  // fired, whether the injected script found the right page, or whether
+  // CreateWRAutofill.run() actually succeeded. The renderer
+  // (_autofillFallback in wr-modal.js) just showed a static 'Opening AAP
+  // in autofill mode...' toast and moved on -- there was NO possible way
+  // for the user to ever learn whether autofill worked. This is the
+  // confirmed root cause of "I click Open in AAP (autofill) and it does
+  // nothing but open the link."
+  //
+  // Also fixed, both confirmed via a working equivalent pattern already
+  // in src/scrapers/setLifecycle.js:
+  //   1. No domain guard: did-finish-load fires on EVERY navigation
+  //      completion in that window, including an intermediate Midway/SSO
+  //      auth redirect page BEFORE the real AAP page loads. Injecting on
+  //      that intermediate page wastes the engine's entire ~10s
+  //      equipment-combobox wait budget on a page that will never have
+  //      one, then AAP finishes redirecting to the real page and NOTHING
+  //      re-triggers the fill.
+  //   2. No 'already handled' guard: since did-finish-load is a
+  //      persistent listener (not a one-shot), every subsequent
+  //      navigation in that window (including ones after the injected
+  //      script already ran) would inject and run the ENTIRE autofill
+  //      sequence again.
+  //
+  // Now: waits for the URL to actually be on aap-na.corp.amazon.com
+  // before injecting, injects at most once via a `settled` guard, and
+  // resolves the invoke() promise with the REAL result returned by
+  // CreateWRAutofill.run() (see aap_autofill_engine.js -- run() now
+  // returns a real {ok, message} object at every exit point instead of
+  // nothing) so the renderer can show accurate success/failure feedback.
   handle('aap:autofill', async (_e, url, payload) => {
     requireString(url, 'url');
-    // Resolve and pin: enginePath must equal the pre-computed ENGINE_FILE constant.
-    // We do NOT use the renderer-supplied path; we always use our own.
     if (!fs.existsSync(ENGINE_FILE)) {
       throw new ScraperError('Autofill engine not found: ' + ENGINE_FILE, 'aap:autofill');
     }
-    const aapWin = new BrowserWindow({
-      width: 1200, height: 850, title: 'AAP - Create Work Request',
-      webPreferences: { nodeIntegration: false, contextIsolation: true },
+    return new Promise((resolve) => {
+      let settled = false;
+      const aapWin = new BrowserWindow({
+        width: 1200, height: 850, title: 'AAP - Create Work Request',
+        webPreferences: { nodeIntegration: false, contextIsolation: true },
+      });
+      const done = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(maxTimer);
+        resolve(result);
+      };
+      const maxTimer = setTimeout(() => {
+        logger.warn('Autofill timed out after 90s');
+        done({ ok: false, message: 'Autofill timed out after 90 seconds -- AAP page may not have loaded, or the wizard reached an unexpected step.' });
+      }, 90000);
+      aapWin.loadURL(url);
+      aapWin.webContents.on('did-finish-load', async () => {
+        if (settled) return;
+        const curUrl = aapWin.isDestroyed() ? '' : aapWin.webContents.getURL();
+        if (!/aap-na\.corp\.amazon\.com/i.test(curUrl)) {
+          logger.info('[aap:autofill] Not on AAP yet (auth redirect?) -- waiting for next load...');
+          return; // will fire again once the redirect chain settles
+        }
+        try {
+          const engineCode  = fs.readFileSync(ENGINE_FILE, 'utf8');
+          const payloadJson = JSON.stringify(payload || {});
+          const injectable  = [
+            '(async function() {',
+            '  window.__fleetAutofillPayload = ' + payloadJson + ';',
+            '  ' + engineCode,
+            '  if (typeof CreateWRAutofill === \'undefined\' || !CreateWRAutofill.shouldRun || !CreateWRAutofill.shouldRun()) {',
+            '    return { ok: false, message: \'Autofill engine did not detect a valid unit in the payload.\' };',
+            '  }',
+            '  try {',
+            '    const r = await CreateWRAutofill.run();',
+            '    return (r && typeof r === \'object\') ? r : { ok: true, message: \'Autofill completed.\' };',
+            '  } catch (runErr) {',
+            '    return { ok: false, message: \'Autofill script error: \' + runErr.message };',
+            '  }',
+            '})();',
+          ].join('\n');
+          const result = await aapWin.webContents.executeJavaScript(injectable);
+          done(result && typeof result === 'object' ? result : { ok: true, message: 'Autofill completed.' });
+        } catch (e) {
+          logger.error('Autofill engine load error:', e.message);
+          done({ ok: false, message: 'Autofill inject error: ' + e.message });
+        }
+      });
+      aapWin.on('closed', () => {
+        done({ ok: false, message: 'AAP window was closed before autofill finished.' });
+      });
     });
-    aapWin.loadURL(url);
-    aapWin.webContents.on('did-finish-load', () => {
-      try {
-        const engineCode  = fs.readFileSync(ENGINE_FILE, 'utf8');
-        const payloadJson = JSON.stringify(payload || {});
-        const injectable  = [
-          '(async function() {',
-          '  window.__fleetAutofillPayload = ' + payloadJson + ';',
-          '  ' + engineCode,
-          '  if (typeof CreateWRAutofill !== \'undefined\' && CreateWRAutofill.shouldRun && CreateWRAutofill.shouldRun()) {',
-          '    await CreateWRAutofill.run();',
-          '  }',
-          '})();',
-        ].join('\n');
-        aapWin.webContents.executeJavaScript(injectable)
-          .catch(err => logger.warn('Autofill inject error:', err.message));
-      } catch (e) {
-        logger.error('Autofill engine load error:', e.message);
-      }
-    });
-    return { ok: true };
   });
 
   // ── aap:set-lifecycle ───────────────────────────────────────────────────

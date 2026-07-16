@@ -429,9 +429,6 @@ async function runAdaptiveWR(payload, askAI, log) {
   let maxSteps = 30; // Safety limit
   let step = 0;
   let result = { ok: false, error: 'Max steps reached' };
-  // Save what we got stuck on
-  lessons.push('GOT STUCK after ' + step + ' steps. Last page: ' + (stepHistory[stepHistory.length-1] || 'unknown'));
-  store.save('aapLessons', lessons);
   
   while (step < maxSteps) {
     step++;
@@ -543,6 +540,19 @@ async function runAdaptiveWR(payload, askAI, log) {
     if (result.ok) {
       log('[AdaptiveWR] Success! Window stays open for review.');
     } else {
+      // BUG FIX (2026-07-16): a 'GOT STUCK after 0 steps' lessons.push() used
+      // to sit right after `let step = 0;` ABOVE the while loop, firing
+      // unconditionally on EVERY single call to runAdaptiveWR -- success or
+      // failure -- always claiming "0 steps" since step hadn't incremented
+      // yet. This polluted the 'aapLessons' store (capped at 50 entries,
+      // fed directly into every future prompt as "PAST LESSONS") with a
+      // false negative signal on every run, which could crowd out real
+      // learned lessons quickly. Moved the real stuck-logging to here --
+      // the actual failure branch, with the real step count and real last
+      // page from stepHistory.
+      lessons.push('GOT STUCK after ' + step + ' steps. Last page: ' + (stepHistory[stepHistory.length - 1] || 'unknown'));
+      if (lessons.length > 50) lessons.splice(0, lessons.length - 50);
+      store.save('aapLessons', lessons);
       log('[AdaptiveWR] Failed: ' + result.error + '. Switching to WATCH MODE - complete the form manually and I will learn.');
       
       // Start watching user actions

@@ -453,11 +453,32 @@ async function _autofillFallback(payload) {
     toast.show('warn', 'No AAP URL for this unit — run a scan first', 4000);
     return;
   }
+  // BUG FIX (2026-07-16): previously showed a static 'Opening AAP in
+  // autofill mode...' info toast immediately after requesting the
+  // window open, then NEVER checked what actually happened -- the IPC
+  // call used to resolve with a hardcoded {ok:true} the instant the
+  // window was created, regardless of whether the fill script ever ran
+  // or succeeded. This was the user-facing half of "I click Open in AAP
+  // (autofill) and it does nothing but open the link" -- the backend
+  // fix (src/ipc/scrapers.js's 'aap:autofill' handler + aap_autofill_
+  // engine.js's run()) now actually waits for and returns a real
+  // {ok, message} result; this now displays it honestly instead of
+  // assuming success.
+  const fbBtn = _el('wr-autofill-fallback');
+  const fbBtnOriginalText = fbBtn ? fbBtn.textContent : '';
+  if (fbBtn) { fbBtn.disabled = true; fbBtn.textContent = 'Filling in AAP\u2026'; }
+  toast.show('info', 'Opening AAP and filling in fields \u2014 this can take up to a minute...', 4000);
   try {
-    await aap.autofill(_unit.assetUrl, payload);
-    toast.show('info', 'Opening AAP in autofill mode...', 3000);
+    const result = await aap.autofill(_unit.assetUrl, payload);
+    if (result && result.ok === false) {
+      toast.show('error', 'AAP autofill stopped: ' + (result.message || 'unknown error') + ' \u2014 finish filling manually in the AAP window.', 7000);
+    } else {
+      toast.show('success', (result && result.message) || 'AAP autofill complete \u2014 review before submitting.', 4000);
+    }
   } catch (e) {
     toast.show('error', 'Autofill launch failed: ' + e.message);
+  } finally {
+    if (fbBtn) { fbBtn.disabled = false; fbBtn.textContent = fbBtnOriginalText; }
   }
 }
 

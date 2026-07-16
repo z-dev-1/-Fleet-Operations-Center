@@ -248,7 +248,22 @@ const CreateWRAutofill = {
 
          async run() {
              const p = this.loadPayload();
-             if (!p || !p.unit) { this.log('No payload - aborting.'); return; }
+             // BUG FIX (2026-07-16): run() previously never returned ANY
+             // value -- every early-exit was a bare `return;` (implicit
+             // undefined) and even a full successful run fell through to
+             // undefined at the end. The IPC handler injecting this script
+             // (src/ipc/scrapers.js's 'aap:autofill') resolves the whole
+             // operation as soon as the window opens, WITHOUT waiting for
+             // or checking this result -- see that file for the matching
+             // fix. Combined, the user had ZERO way to know whether
+             // autofill actually worked, partially worked, or completely
+             // failed to find the equipment field (the most common
+             // failure -- e.g. injected too early, before the real AAP
+             // page finished loading past an auth redirect). This matches
+             // "I click Open in AAP (autofill) and it does nothing but
+             // open the link." Now returns a real {ok, message} result at
+             // every exit point.
+             if (!p || !p.unit) { this.log('No payload - aborting.'); return { ok: false, message: 'No autofill payload was provided (missing unit).' }; }
              this.log('Starting for unit: ' + p.unit);
 
              // STEP 1: Equipment ID  -  exact working script
@@ -256,7 +271,7 @@ const CreateWRAutofill = {
 
              // Step 1: Find combobox
              const equipInput = await this.waitFor(() => document.querySelector('input[role="combobox"]'), 10000, 80);
-             if (!equipInput) { this.log('ERROR: Equipment combobox not found'); return; }
+             if (!equipInput) { this.log('ERROR: Equipment combobox not found'); return { ok: false, message: 'Equipment ID field never appeared -- the AAP page likely had not finished loading (e.g. stuck on an auth redirect) when autofill started.' }; }
 
              equipInput.focus();
              equipInput.click();
@@ -283,7 +298,7 @@ const CreateWRAutofill = {
                  equipOpt.click();
                  this.log('Equipment ID: selected "' + equipText + '"');
              } else {
-                 this.log('ERROR: Equipment option not found for "' + equipText + '"'); return;
+                 this.log('ERROR: Equipment option not found for "' + equipText + '"'); return { ok: false, message: 'Typed unit "' + equipText + '" but AAP never showed a matching Equipment ID option.' };
              }
 
              // Wait for Next to be enabled  -  means unit data fully loaded
@@ -1018,6 +1033,7 @@ const CreateWRAutofill = {
                }                              // if (p.attachmentIds)
 
                this.log('--- COMPLETE ---');
+               return { ok: true, message: 'Autofill completed through Issue Details step -- review before submitting.' };
            },                                 // run()
 
 }; // CreateWRAutofill
