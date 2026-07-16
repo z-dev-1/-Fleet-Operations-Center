@@ -24,7 +24,6 @@ let _acEl = null;   // autocomplete dropdown element
 
 // ── FEATURE (2026-07-16): Slack tab state (Chat / Slack tabs in this panel) ──
 let _activeTab = 'chat';
-let _slackChannels = [];       // cached channel/DM list for the Slack tab
 let _activeSlackChannel = null; // { id, name, type } — currently open thread
 let _slackTabRefreshTimer = null;
 
@@ -274,10 +273,10 @@ function _switchTab(tab) {
 // Only one of these three views is visible at a time within the Slack tab.
 function _showSlackView(view) {
   const signin = document.getElementById('oc-slack-signin');
-  const list   = document.getElementById('oc-slack-list');
+  const search = document.getElementById('oc-slack-search');
   const thread = document.getElementById('oc-slack-thread');
   if (signin) signin.style.display = view === 'signin' ? '' : 'none';
-  if (list)   list.style.display   = view === 'list'   ? '' : 'none';
+  if (search) search.style.display = view === 'search' ? '' : 'none';
   if (thread) thread.style.display = view === 'thread' ? '' : 'none';
 }
 
@@ -294,7 +293,8 @@ async function _refreshSlackTabState() {
     const res = await slack.checkLiveAuth();
     if (res && res.authenticated) {
       _slackAuthed = true;
-      _loadSlackChannelList();
+      _showSlackView('search');
+      _renderSlackList([]); // shows the empty "type to search" prompt
     } else {
       _slackAuthed = false;
       if (statusEl) {
@@ -310,56 +310,66 @@ async function _refreshSlackTabState() {
   }
 }
 
-async function _loadSlackChannelList() {
-  const listEl = document.getElementById('oc-slack-list');
-  if (listEl) listEl.innerHTML = '<div class="oc-slack-loading">Loading channels\u2026</div>';
-  _showSlackView('list');
-  try {
-    const channels = await slack.getChannels();
-    _slackChannels = Array.isArray(channels) ? channels : [];
-    _renderSlackList(_slackChannels);
-  } catch (e) {
-    if (listEl) listEl.innerHTML = '<div class="oc-slack-loading">Failed to load: ' + _esc(e.message) + '</div>';
-  }
-}
+// FEATURE (2026-07-16): searchDirectory() replaces the old channel/DM
+// browse list. Amazon's Enterprise Grid Slack workspace blocks bulk
+// conversation listing (conversations.list / users.conversations both
+// return "enterprise_is_restricted" -- verified live against the real
+// API), so browsing "everything" can never work here. Individual
+// search.modules lookups (people AND channels) are NOT restricted and do
+// work, so this searches by name instead of listing.
+let _slackSearchDebounce = null;
 
 function _renderSlackList(items) {
   const listEl = document.getElementById('oc-slack-list');
   if (!listEl) return;
   if (!items.length) {
-    listEl.innerHTML = '<div class="oc-slack-loading">No channels or DMs found</div>';
+    listEl.innerHTML = '<div class="oc-slack-loading">Type a name or #channel to search</div>';
     return;
   }
-  // DMs first, then channels, unread first within each group
-  const sorted = items.slice().sort((a, b) => {
-    const aIm = a.isIm || a.isMpim, bIm = b.isIm || b.isMpim;
-    if (aIm !== bIm) return aIm ? -1 : 1;
-    return (b.unread || 0) - (a.unread || 0);
-  });
-  listEl.innerHTML = sorted.map((c) => {
-    const icon = (c.isIm || c.isMpim) ? '@' : '#';
-    const unreadBadge = c.unread ? '<span class="oc-slack-unread">' + c.unread + '</span>' : '';
-    return '<div class="oc-slack-item" data-id="' + _esc(c.id) + '" data-name="' + _esc(c.name) + '" data-im="' + !!(c.isIm || c.isMpim) + '">' +
+  listEl.innerHTML = items.map((c) => {
+    const icon = c.type === 'channel' ? '#' : '@';
+    return '<div class="oc-slack-item" data-id="' + _esc(c.id) + '" data-name="' + _esc(c.name) + '" data-type="' + _esc(c.type) + '">' +
       '<span class="oc-slack-item-icon">' + icon + '</span>' +
       '<span class="oc-slack-item-name">' + _esc(c.name) + '</span>' +
-      unreadBadge +
     '</div>';
   }).join('');
   listEl.querySelectorAll('.oc-slack-item').forEach((el) => {
     el.addEventListener('click', () => {
-      _openSlackThread({ id: el.dataset.id, name: el.dataset.name, isIm: el.dataset.im === 'true' });
+      _openSlackThread({ id: el.dataset.id, name: el.dataset.name, type: el.dataset.type });
     });
   });
 }
 
-async function _openSlackThread(channel) {
-  _activeSlackChannel = channel;
+async function _runSlackSearch(query) {
+  const listEl = document.getElementById('oc-slack-list');
+  if (!query || !query.trim()) { _renderSlackList([]); return; }
+  if (listEl) listEl.innerHTML = '<div class="oc-slack-loading">Searching\u2026</div>';
+  try {
+    const results = await slack.searchDirectory({ query: query.trim(), limit: 8 });
+    _renderSlackList(Array.isArray(results) ? results : []);
+  } catch (e) {
+    if (listEl) listEl.innerHTML = '<div class="oc-slack-loading">Search failed: ' + _esc(e.message) + '</div>';
+  }
+}
+
+// FEATURE (2026-07-16): resolves a search result (person or channel) to an
+// actual open conversation via slack:open-conversation, then loads its
+// history. Channels resolve instantly (ID passthrough); people require an
+// conversations.open call to get/create the DM -- both verified working
+// live even though bulk listing is restricted.
+async function _openSlackThread(entry) {
   const titleEl = document.getElementById('oc-slack-thread-title');
-  if (titleEl) titleEl.textContent = (channel.isIm ? '@' : '#') + channel.name;
+  if (titleEl) titleEl.textContent = (entry.type === 'channel' ? '#' : '@') + entry.name;
   const msgsEl = document.getElementById('oc-slack-msgs');
-  if (msgsEl) msgsEl.innerHTML = '<div class="oc-slack-loading">Loading messages\u2026</div>';
+  if (msgsEl) msgsEl.innerHTML = '<div class="oc-slack-loading">Opening conversation\u2026</div>';
   _showSlackView('thread');
-  await _refreshSlackThreadMessages();
+  try {
+    const opened = await slack.openConversation(entry);
+    _activeSlackChannel = { id: opened.channelId, name: entry.name, type: entry.type };
+    await _refreshSlackThreadMessages();
+  } catch (e) {
+    if (msgsEl) msgsEl.innerHTML = '<div class="oc-slack-loading">Failed to open: ' + _esc(e.message) + '</div>';
+  }
 }
 
 async function _refreshSlackThreadMessages() {
@@ -458,7 +468,16 @@ function _wireSlackTab() {
   if (loginBtn) loginBtn.addEventListener('click', _slackLogin);
 
   const backBtn = document.getElementById('oc-slack-back');
-  if (backBtn) backBtn.addEventListener('click', () => { _activeSlackChannel = null; _showSlackView('list'); });
+  if (backBtn) backBtn.addEventListener('click', () => { _activeSlackChannel = null; _showSlackView('search'); });
+
+  // FEATURE (2026-07-16): debounced search-as-you-type (300ms), replacing
+  // the old browse-list click handler that's no longer possible here.
+  const searchInput = document.getElementById('oc-slack-search-input');
+  if (searchInput) searchInput.addEventListener('input', (e) => {
+    clearTimeout(_slackSearchDebounce);
+    const q = e.target.value;
+    _slackSearchDebounce = setTimeout(() => _runSlackSearch(q), 300);
+  });
 
   const replySend = document.getElementById('oc-slack-reply-send');
   if (replySend) replySend.addEventListener('click', _sendSlackReply);
@@ -562,7 +581,12 @@ export function init() {
         <div class="oc-slack-status" id="oc-slack-status">Checking connection\u{2026}</div>
         <button class="oc-send oc-slack-login-btn" id="oc-slack-login-btn">Sign in to Slack</button>
       </div>
-      <div class="oc-slack-list" id="oc-slack-list" style="display:none"></div>
+      <div class="oc-slack-search" id="oc-slack-search" style="display:none">
+        <div class="oc-input-row">
+          <input class="oc-input" id="oc-slack-search-input" placeholder="Search people or #channels..." autocomplete="off" spellcheck="false"/>
+        </div>
+        <div class="oc-slack-list" id="oc-slack-list"></div>
+      </div>
       <div class="oc-slack-thread" id="oc-slack-thread" style="display:none">
         <div class="oc-slack-thread-header" id="oc-slack-thread-header">
           <button class="oc-slack-back" id="oc-slack-back">\u{2190}</button>

@@ -106,6 +106,32 @@ function registerSlackIPC() {
     return sendToChannel(data.channelId, data.message);
   });
 
+  // FEATURE (2026-07-16): search-based directory lookup, replacing the
+  // channel/DM browse list -- Amazon's Enterprise Grid Slack blocks bulk
+  // conversation listing (verified: conversations.list AND
+  // users.conversations both return "enterprise_is_restricted"), but
+  // individual search.modules lookups are NOT restricted. See searchDirectory
+  // in slack_send.js for full detail.
+  handle('slack:search-directory', async (_e, data) => {
+    if (!data || typeof data.query !== 'string' || !data.query.trim()) {
+      throw new Error('slack:search-directory requires a non-empty query');
+    }
+    requireStringMax(data.query, 'query', MAX_RECIPIENT_LEN);
+    const { searchDirectory } = require('../../src/scrapers/slack_send');
+    return searchDirectory(data.query.trim(), data.limit || 8);
+  });
+
+  // FEATURE (2026-07-16): resolves a search result to an open conversation
+  // ID (opens the DM if it's a person; passes through the channel ID as-is
+  // if it's a channel). See openConversation in slack_send.js.
+  handle('slack:open-conversation', async (_e, data) => {
+    if (!data || !data.id || !data.type) {
+      throw new Error('slack:open-conversation requires { id, type }');
+    }
+    const { openConversation } = require('../../src/scrapers/slack_send');
+    return { channelId: await openConversation(data) };
+  });
+
   // Issue #5: validate recipient + message before forwarding
   handle('slack:send', async (_e, data) => {
     if (!data || typeof data !== 'object') {

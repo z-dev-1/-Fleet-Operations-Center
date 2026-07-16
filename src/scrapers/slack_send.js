@@ -118,6 +118,58 @@ async function findUser(query) {
 }
 
 /**
+ * FEATURE (2026-07-16): search-based directory lookup for the Slack tab.
+ *
+ * IMPORTANT -- Amazon's Enterprise Grid Slack workspace hard-blocks bulk
+ * conversation listing (conversations.list AND users.conversations both
+ * return error: "enterprise_is_restricted" for this token type -- verified
+ * live against the real API). This is a deliberate enterprise security
+ * policy, not a bug and not a timing/sync issue -- it will never resolve on
+ * its own. HOWEVER, individual search.modules lookups (people AND channels)
+ * are NOT restricted and work fine -- also verified live. So the Slack tab
+ * cannot browse a channel/DM list, but CAN search by name and open a
+ * specific known conversation. That's what this function powers.
+ *
+ * Returns up to `limit` combined people + channel matches for `query`.
+ */
+async function searchDirectory(query, limit) {
+  const lim = String(limit || 5);
+  const results = [];
+  try {
+    const people = await slackWebApi('search.modules', { query, module: 'people', count: lim });
+    if (people.ok && people.items) {
+      people.items.forEach(p => results.push({
+        id: p.id, name: p.name || p.real_name || p.id, type: 'user'
+      }));
+    }
+  } catch (_) { /* one module failing shouldn't block the other */ }
+  try {
+    const channels = await slackWebApi('search.modules', { query, module: 'channels', count: lim });
+    if (channels.ok && channels.items) {
+      channels.items.forEach(c => results.push({
+        id: c.id, name: c.name || c.id, type: 'channel'
+      }));
+    }
+  } catch (_) { /* one module failing shouldn't block the other */ }
+  return results;
+}
+
+/**
+ * FEATURE (2026-07-16): resolves a directory result ({id, name, type} from
+ * searchDirectory above) to an actual open conversation ID. For channels,
+ * the search result ID already IS the channel ID. For users, we need to
+ * open (or reuse) the DM via conversations.open -- verified working live
+ * even though bulk listing is restricted.
+ */
+async function openConversation(entry) {
+  if (!entry || !entry.id) throw new Error('Invalid directory entry');
+  if (entry.type === 'channel') return entry.id;
+  const dm = await slackWebApi('conversations.open', { users: entry.id });
+  if (!dm.ok) throw new Error('conversations.open failed: ' + dm.error);
+  return dm.channel.id;
+}
+
+/**
  * Send a DM or channel message
  * @param {string} recipient - name, alias, or #channel
  * @param {string} message - message text (supports Slack markdown)
@@ -297,4 +349,4 @@ async function processAutoReplies(messages, rules) {
   return sent;
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readDMs, findChannelByName, processAutoReplies };
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation };

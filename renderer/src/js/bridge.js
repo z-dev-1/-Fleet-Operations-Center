@@ -300,6 +300,8 @@ export const slack = {
   checkLiveAuth: ()    => window.slack.checkLiveAuth(),
   logout:        ()    => window.slack.logout(),
   sendToChannel: (data) => window.slack.sendToChannel(data),
+  searchDirectory: (data) => window.slack.searchDirectory(data),
+  openConversation: (data) => window.slack.openConversation(data),
   onIncoming:   (cb)   => window.slack.onIncoming(cb),
 };
 

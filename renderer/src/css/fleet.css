@@ -3421,12 +3421,16 @@ td .pm-pill {
 }
 .oc-slack-status { font-size: 11px; color: var(--txt2); line-height: 1.5; }
 
+/* FEATURE (2026-07-16): search-based directory lookup, replacing the old
+   browse-all-channels list (blocked by Enterprise Grid's
+   enterprise_is_restricted policy on bulk conversation listing). */
+.oc-slack-search { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .oc-slack-list {
   flex: 1;
   overflow-y: auto;
   padding: 6px;
-  max-height: 300px;
-  min-height: 140px;
+  max-height: 260px;
+  min-height: 100px;
 }
 .oc-slack-loading {
   font-size: 11px;

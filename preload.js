@@ -147,6 +147,8 @@ contextBridge.exposeInMainWorld('slack', {
   checkLiveAuth:  ()     => ipcRenderer.invoke('slack:check-live-auth'),
   logout:         ()     => ipcRenderer.invoke('slack:logout'),
   sendToChannel:  (data) => ipcRenderer.invoke('slack:send-to-channel', data),
+  searchDirectory: (data) => ipcRenderer.invoke('slack:search-directory', data),
+  openConversation: (data) => ipcRenderer.invoke('slack:open-conversation', data),
   getAutoReply:   ()     => ipcRenderer.invoke('slack:get-auto-reply'),
   setAutoReply:   (r)    => ipcRenderer.invoke('slack:set-auto-reply', r),
   onIncoming:     (cb)   => on('slack:incoming', cb),
