@@ -14,7 +14,21 @@
 
 const store   = require('../store');
 const logger  = require('../utils/logger')('ipc:settings');
-const { DEFAULTS } = require('../config/defaults');
+// BUG FIX (2026-07-16): was `const { DEFAULTS } = require(...)`, destructuring
+// a `DEFAULTS` property that does not exist -- config/defaults.js exports its
+// constants (SYNC_INTERVAL_MS, DEFAULT_DOMICILES, etc.) directly at the top
+// level of module.exports, not nested under a `DEFAULTS` key (confirmed:
+// src/app.js correctly does `const DEFAULTS = require('./config/defaults')`
+// with no destructuring). The wrong form silently resolved to `undefined`
+// and stayed hidden for a long time because its only pre-existing usage
+// (`DEFAULTS.DEFAULT_DOMICILES` in settings:get-domiciles) sits behind a
+// `||` short-circuit that's only evaluated when s.domiciles is falsy --
+// rare once domiciles are configured. The new settings:get-sync-interval
+// handler below evaluates DEFAULTS.SYNC_INTERVAL_MS unconditionally on
+// every call, which immediately surfaced the bug as a live TypeError
+// ("Cannot read properties of undefined (reading 'SYNC_INTERVAL_MS')") on
+// every Settings panel open. Fixing the import repairs both call sites.
+const DEFAULTS = require('../config/defaults');
 const { handle, requireString } = require('./_safe');
 const { ConfigError }           = require('../utils/errors');
 
