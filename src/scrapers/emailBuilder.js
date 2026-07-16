@@ -175,7 +175,14 @@ function buildEmail(opts) {
       const duration = u.duration || '';
       const issue = u.issue || '';
       const timeline = u.repairTimeline || u.savedTimeline || '';
-      const notes = timeline ? timeline.split('\n').filter(l => l.trim().length > 5).map(l => l.trim()).join('<br>') : (u.savedNotes || '\u2014').replace(/\n/g, '<br>');
+      // BUG FIX (2026-07-16): previously fell back to u.savedNotes (the
+      // free-text "Add notes..." field on the unit detail panel -- a
+      // personal/internal scratchpad, NOT the repair timeline) whenever a
+      // unit had no timeline yet. That meant private notes could go out
+      // in the business-partner-facing status email. User confirmed:
+      // timeline content is fine to send, but savedNotes should stay
+      // internal-only, always -- never fall back to it here.
+      const notes = timeline ? timeline.split('\n').filter(l => l.trim().length > 5).map(l => l.trim()).join('<br>') : '\u2014';
 
       // Case / Offsite: Alt ID + Offsite Event + Salesforce Case (all hyperlinked)
       let caseHtml = '';
