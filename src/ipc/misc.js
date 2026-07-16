@@ -417,29 +417,77 @@ function registerMiscIPC(ctx) {
     
     if (!spWin) {
       spWin = new BrowserWindow({ show: false, width: 800, height: 600 });
+      // BUG FIX (2026-07-16): previously just loadURL() + a blind 3s sleep,
+      // with NO check that SharePoint authentication actually completed.
+      // Root cause of "Load sheets" silently returning nothing: the Midway
+      // cookie file (~/.midway/cookie, written by mwinit) contains EXACTLY
+      // ONE domain -- midway-auth.amazon.com -- not a SharePoint session
+      // cookie. SharePoint access requires following an SSO/OAuth redirect
+      // chain (same pattern Uptake/AAP already handle via their own
+      // did-finish-load "click SSO" logic), which can take longer than 3s
+      // and can also land on a login page if the chain hasn't finished --
+      // in which case the fetch() calls further down in this handler
+      // (GetFileById GUID lookup, getfilebyserverrelativeurl, /_api/search)
+      // hit an unauthenticated SharePoint endpoint and just resolve to null,
+      // which the code swallows silently and reports as "file not found."
+      // sharepoint_push.js's proven-working ensureSpAuth() waits for
+      // did-navigate to land on the real SP site (not a login/oauth
+      // intermediate) before doing anything else -- replicated here so
+      // discoverSheets() below always runs against an authenticated window.
+      // BUG FIX (2026-07-16), confirmed via diagnostic logging: the hidden
+      // window was landing on login.microsoftonline.com and getting stuck
+      // there. Console output captured mid-diagnosis:
+      //   "BSSO Telemetry": {"result":"Error","error":"bssoNotSupported",
+      //    "traces":["window.navigator.msLaunchUri is not available for
+      //    _pullBrowserSsoCookie"]}
+      // Microsoft's native Windows-broker silent-SSO (msLaunchUri) is an
+      // Edge/IE-only API that Electron's Chromium does not implement, so the
+      // silent-auth path always fails here and SharePoint falls back to
+      // requiring INTERACTIVE login (password/MFA/"Stay signed in?"). Since
+      // this window was created with show:false, that login page could never
+      // be seen or completed -- it just sat there until the timeout. Fix:
+      // reveal the window the moment we detect we've landed on a Microsoft
+      // login/OAuth page, so the user can actually complete sign-in, and
+      // extend the wait window accordingly since interactive login takes
+      // longer than a silent redirect chain. Re-hide once authenticated.
+      let shown = false;
+      spWin.webContents.on('did-navigate', (_e, navUrl) => {
+        if (!shown && /login\.microsoftonline\.com|oauth2\/authorize|midway-auth/i.test(navUrl)) {
+          shown = true;
+          logger.info('[SP Discover] Landed on a login page — showing window for interactive sign-in');
+          spWin.show();
+          spWin.focus();
+        }
+      });
 
-  // Repair history (3-month summarized)
-  handle('fleet:repair-history', async (_e, equipmentId) => {
-    const { getUnitHistory, getAllHistory } = require('../orcha/repair-history');
-    if (equipmentId) return getUnitHistory(equipmentId);
-    return getAllHistory();
-  });
-
-  // Offline queue
-  handle('offline:queue', async (_e, equipmentId, rawText) => {
-    const { queueTimelineEntry } = require('../orcha/offline');
-    queueTimelineEntry(equipmentId, rawText);
-    return { ok: true };
-  });
-
-  handle('offline:count', async () => {
-    const { getQueueCount } = require('../orcha/offline');
-    return getQueueCount();
-  });
-
-
-      await spWin.loadURL('https://amazon.sharepoint.com/sites/AFP-FAS');
-      await new Promise(r => setTimeout(r, 3000));
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          spWin.webContents.removeListener('did-navigate', onNav);
+          clearTimeout(timeoutId);
+          if (shown && !spWin.isDestroyed()) spWin.hide(); // re-hide once authenticated
+          resolve();
+        };
+        const onNav = (_e, navUrl) => {
+          if (navUrl.includes('amazon.sharepoint.com/sites/') && !navUrl.includes('login') && !navUrl.includes('oauth')) finish();
+        };
+        // Interactive login needs real time for the user to type a password /
+        // approve MFA — 3 minutes instead of the old silent-only 30s.
+        const timeoutId = setTimeout(() => {
+          if (done) return;
+          logger.warn('[SP Discover] SharePoint auth wait timed out after 180s. Final URL: ' + spWin.webContents.getURL());
+          finish();
+        }, 180000);
+        spWin.webContents.on('did-navigate', onNav);
+        spWin.webContents.on('did-fail-load', (_e, code, desc, failUrl) => {
+          if (code === -3 || done) return;
+          logger.warn('[SP Discover] SharePoint load failed: ' + desc + ' (code ' + code + ') url=' + failUrl);
+          finish();
+        });
+        spWin.loadURL('https://amazon.sharepoint.com/sites/AFP-FAS').catch((e) => logger.warn('[SP Discover][diag] loadURL rejected: ' + e.message));
+      });
     }
 
     let filePath = parsed.filePath;
@@ -511,6 +559,42 @@ function registerMiscIPC(ctx) {
       result.filePath = filePath; // Ensure filePath is always returned
     }
     return result;
+  });
+
+  // BUG FIX (2026-07-16): the three handlers below were previously spliced
+  // into the middle of the sp:discover-sheets handler's `if (!spWin) {...}`
+  // block above (a file-corruption artifact, likely from a bad edit/merge).
+  // Because they were nested inside another handler's async callback body,
+  // they were NEVER actually registered with ipcMain at app startup -- only
+  // conditionally, lazily, and incorrectly if/when sp:discover-sheets itself
+  // ran and found no existing SharePoint window. Worse: on any retry within
+  // the same app session (e.g. re-clicking "Load sheets"), re-registering
+  // 'fleet:repair-history' via ipcMain.handle() a second time throws
+  // "Attempted to register a second handler for 'fleet:repair-history'",
+  // which rejected the whole sp:discover-sheets promise -- this was the
+  // direct cause of "SharePoint not loading when I click Load Sheets" (fails
+  // reliably on any retry after the first attempt in a given session), and
+  // separately left repair-history/offline-queue features unregistered
+  // until the user happened to trigger SP discovery at least once.
+  // Restored as normal top-level handler registrations.
+
+  // Repair history (3-month summarized)
+  handle('fleet:repair-history', async (_e, equipmentId) => {
+    const { getUnitHistory, getAllHistory } = require('../orcha/repair-history');
+    if (equipmentId) return getUnitHistory(equipmentId);
+    return getAllHistory();
+  });
+
+  // Offline queue
+  handle('offline:queue', async (_e, equipmentId, rawText) => {
+    const { queueTimelineEntry } = require('../orcha/offline');
+    queueTimelineEntry(equipmentId, rawText);
+    return { ok: true };
+  });
+
+  handle('offline:count', async () => {
+    const { getQueueCount } = require('../orcha/offline');
+    return getQueueCount();
   });
 
   logger.info('Misc IPC handlers registered');
