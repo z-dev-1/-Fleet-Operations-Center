@@ -666,7 +666,12 @@ function _buildPayload() {
     to:        (_el2('ec-to')?.value        || '').trim(),
     cc:        (_el2('ec-cc')?.value        || '').trim(),
     subject:   (_el2('ec-subject')?.value   || '').trim(),
-    note:      (_el2('ec-note')?.value      || '').trim(),
+    // BUG FIX (2026-07-16): this key was `note`, but src/ipc/misc.js's
+    // email:compose handler destructures `emailNote` from the payload, and
+    // emailBuilder.js also expects `emailNote` to render the red note
+    // banner. The mismatch meant anything typed into the "Email Note"
+    // textarea was silently dropped before it reached the built email.
+    emailNote: (_el2('ec-note')?.value      || '').trim(),
     testMode:   !!_el2('ec-test-mode')?.checked,
   };
 }
