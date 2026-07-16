@@ -492,6 +492,19 @@ function _scheduleAutoEmail() {
     _lastEmailSlot = dateKey;
 
     log.info('Auto-email triggered: slot=' + slot.label);
+    // FEATURE (2026-07-16): persisted "Auto-Email Note" — set once in
+    // Settings, rides along with every scheduled auto-send until cleared.
+    // If "one-shot" is checked, capture it for THIS send then immediately
+    // clear it so it doesn't carry into the next slot. Read fresh (not
+    // cached) so edits made between slots take effect right away.
+    const _settingsNow = store.load('settings', {});
+    const autoEmailNote = _settingsNow.autoEmailNote || '';
+    if (autoEmailNote && _settingsNow.autoEmailNoteOneShot) {
+      delete _settingsNow.autoEmailNote;
+      _settingsNow.autoEmailNoteOneShot = false;
+      store.save('settings', _settingsNow);
+      log.info('Auto-email note was one-shot — cleared after capturing for this send');
+    }
     _ctxRef.pushStatus('\uD83D\uDCE7 Auto-email: syncing for ' + slot.label + ' report...');
 
     _ctxRef.runFullSync().then(() => {
@@ -499,6 +512,7 @@ function _scheduleAutoEmail() {
         _ctxRef.send('fleet:auto-email', {
           slot: slot.label,
           triggeredAt: new Date().toISOString(),
+          autoEmailNote,
         });
       }, 2000);
     }).catch(err => {
@@ -507,6 +521,7 @@ function _scheduleAutoEmail() {
         slot: slot.label,
         triggeredAt: new Date().toISOString(),
         syncError: err.message,
+        autoEmailNote,
       });
     });
   }, 30000);

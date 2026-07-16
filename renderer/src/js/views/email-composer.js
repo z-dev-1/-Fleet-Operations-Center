@@ -788,7 +788,7 @@ export async function init(container) {
 
   // ── S28: Auto-email handler — fires when scheduler triggers ──────────────
   bus.on('fleet:auto-email', async (payload) => {
-    const { slot, triggeredAt, syncError } = payload || {};
+    const { slot, triggeredAt, syncError, autoEmailNote } = payload || {};
     console.log('[email-composer] Auto-email triggered: slot=' + (slot || '?') + ' at ' + (triggeredAt || 'unknown'));
     if (syncError) console.warn('[email-composer] Auto-email sync had error:', syncError);
 
@@ -832,7 +832,10 @@ export async function init(container) {
           slot: slot || 'PM',
           to: recipients.to || '',
           cc: recipients.cc || '',
-          emailNote: '',
+          // FEATURE (2026-07-16): "Auto-Email Note" set in Settings, threaded
+          // through from the scheduler in src/app.js via the fleet:auto-email
+          // payload. Empty string if the user hasn't set one.
+          emailNote: autoEmailNote || '',
           testMode: false,
         });
         console.log('[email-composer] Auto-email ' + entry.key + ':', result && result.success !== false ? 'SUCCESS' : 'FAILED');

@@ -573,6 +573,22 @@ function _html() {
           <div id="email-status" class="settings__status" style="display:none"></div>
         </div>
 
+        <!-- Auto-Email Note -->
+        <div class="sd-section" id="sect-auto-note">
+          <div class="sd-section-title">Auto-Email Note</div>
+          <div class="sd-hint" style="margin-bottom:10px">Optional note included as a red banner at the top of every scheduled auto-send (08:00 / 15:15) until cleared.</div>
+          <textarea class="sd-input" id="auto-note-text" rows="2" placeholder="e.g. 'Units at EWR45 excluded due to site freeze'" style="width:100%;resize:vertical;"></textarea>
+          <div class="sd-toggle-row" style="margin-top:8px">
+            <span class="sd-toggle-label">Clear automatically after next auto-send</span>
+            <input type="checkbox" id="auto-note-oneshot"/>
+          </div>
+          <div class="sd-btn-row" style="margin-top:8px">
+            <button class="sd-btn primary" id="auto-note-save">Save note</button>
+            <button class="sd-btn secondary" id="auto-note-clear">Clear note</button>
+          </div>
+          <div id="auto-note-status" class="sd-status" style="display:none;margin-top:8px"></div>
+        </div>
+
         <!-- Slack -->
         <div class="sd-section" id="sect-slack">
           <div class="sd-section-title">Slack</div>
@@ -965,6 +981,54 @@ function _wireEmail() {
     document.getElementById('email-pass').value = '';
   });
   if (testBtn) testBtn.addEventListener('click', () => {});
+}
+
+// FEATURE (2026-07-16): persisted note for scheduled auto-sends (08:00 /
+// 15:15). Stored via the generic settings:save IPC under keys
+// `autoEmailNote` / `autoEmailNoteOneShot` — read fresh by the scheduler in
+// src/app.js on every fire, so edits here take effect on the very next slot.
+function _wireAutoNote() {
+  var textEl    = document.getElementById('auto-note-text');
+  var oneShotEl = document.getElementById('auto-note-oneshot');
+  var saveBtn   = document.getElementById('auto-note-save');
+  var clearBtn  = document.getElementById('auto-note-clear');
+  var statusEl  = document.getElementById('auto-note-status');
+  if (!textEl || !saveBtn) return;
+
+  function showStatus(text, cls) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.className = 'sd-status ' + (cls || '');
+    statusEl.style.display = '';
+  }
+
+  // Populate current state on load
+  settingsBridge.getAll().then((all) => {
+    var s = all || {};
+    textEl.value = s.autoEmailNote || '';
+    if (oneShotEl) oneShotEl.checked = !!s.autoEmailNoteOneShot;
+    if (s.autoEmailNote) {
+      showStatus('✅ Active — will be included in the next scheduled auto-send' + (s.autoEmailNoteOneShot ? ' (one-time only)' : ''), 'ok');
+    }
+  }).catch(() => {});
+
+  saveBtn.addEventListener('click', async () => {
+    var note = (textEl.value || '').trim();
+    if (!note) { showStatus('⚠️ Enter a note first, or use "Clear note" to remove an existing one', 'warn'); return; }
+    await settingsBridge.save('autoEmailNote', note);
+    await settingsBridge.save('autoEmailNoteOneShot', !!(oneShotEl && oneShotEl.checked));
+    showStatus('✅ Saved — will be included in the next scheduled auto-send' + (oneShotEl && oneShotEl.checked ? ' (one-time only)' : ''), 'ok');
+    toast.show('success', 'Auto-email note saved', 2500);
+  });
+
+  clearBtn.addEventListener('click', async () => {
+    textEl.value = '';
+    if (oneShotEl) oneShotEl.checked = false;
+    await settingsBridge.save('autoEmailNote', '');
+    await settingsBridge.save('autoEmailNoteOneShot', false);
+    showStatus('Note cleared — future auto-sends will not include a note', '');
+    toast.show('info', 'Auto-email note cleared', 2500);
+  });
 }
 
 function _wireSlack() {
@@ -2138,6 +2202,7 @@ export function init() {
   _wireVendorAuth();
   _wireSlack();
   _wireEmail();
+  _wireAutoNote();
   _wireSP();
   _wireAsana();
   _wireNotifications();
