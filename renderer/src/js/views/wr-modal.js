@@ -60,6 +60,7 @@ let _overlay   = null;
 let _unit      = null;
 let _areaCount = 1;
 let _progUnsub = null;
+let _towAddrUnsub = null; // BUG FIX (2026-07-16): see _wireTow() below
 
 // ── Escape helpers ────────────────────────────────────────────────────────
 const _safe     = (s) => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -463,6 +464,7 @@ async function _autofillFallback(payload) {
 // ── Open / close ──────────────────────────────────────────────────────────
 function _close() {
   if (_progUnsub) { _progUnsub(); _progUnsub = null; }
+  if (_towAddrUnsub) { _towAddrUnsub(); _towAddrUnsub = null; }
   if (_overlay && _overlay.parentNode) _overlay.parentNode.removeChild(_overlay);
   _overlay   = null;
   _unit      = null;
@@ -472,6 +474,26 @@ function _close() {
 
 // ── Tow Address Handling (uses Contact Book) ─────────────────────────────
 async function _wireTow() {
+  // BUG FIX (2026-07-16): resurrects a real listener for the Contact
+  // Book's "Use for Tow" button (components/contact-book.js,
+  // which does `bus.emit('contacts:use-address', {...})` on click). This
+  // listener previously existed ONLY as dead text accidentally pasted
+  // inside an unrelated string literal (areaList's .join() separator, a
+  // few hundred lines below in this same file) -- meaning the button has
+  // never worked: clicking it fired an event that nothing was listening
+  // for. Restored as real, executable code. Registered unconditionally
+  // (before the early-return below) since it only touches simple DOM
+  // fields and doesn't depend on window.contacts or the towBook/fromBook
+  // select elements existing.
+  _towAddrUnsub = bus.on('contacts:use-address', (addr) => {
+    const s = _el('wr-tow-street'); if (s) s.value = addr.street || '';
+    const ct = _el('wr-tow-city');  if (ct) ct.value = addr.city || '';
+    const st = _el('wr-tow-state'); if (st) st.value = addr.state || '';
+    const z = _el('wr-tow-zip');    if (z) z.value = addr.zip || '';
+    const tw = _el('wr-tow-wrap');  if (tw) tw.style.display = '';
+    toast.show('success', 'Tow address filled from contact' + (addr.name ? ': ' + addr.name : ''), 2500);
+  });
+
   const towBook = _el('wr-tow-book');
   const fromBook = _el('wr-tow-from-book');
   if (!towBook || !fromBook || !window.contacts) return;
@@ -575,13 +597,28 @@ async function _wireTow() {
 
 // ── AI Assist — auto-fill from title ──────────────────────────────────────
 let _aiTimer = null;
+let _aiRunning = false; // BUG FIX (2026-07-16): see keydown/run guard below
 function _wireAIAssist() {
   const titleEl = _el('wr-title');
   const btn = _el('wr-ai-assist');
   if (!btn || !titleEl) return;
   btn.addEventListener('click', () => _runAIAssist());
   titleEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); _runAIAssist(); }
+    // BUG FIX (2026-07-16): pressing Enter fired _runAIAssist() immediately
+    // but never cleared the debounced auto-trigger timer set up by the
+    // 'input' listener below. If the user typed a title (>8 chars) and hit
+    // Enter before the 2500ms debounce elapsed -- which is the NORMAL way
+    // someone uses this ("type title, hit Enter") -- the debounce timer
+    // kept running in the background and fired a SECOND, unrequested
+    // _runAIAssist() call ~2.5s later. Two overlapping AI calls means two
+    // async responses landing at different times, each overwriting
+    // whatever fields the OTHER one (or the user, manually editing in
+    // between) had just set -- this is almost certainly what presented as
+    // "sometimes it struggles with AI actually filling out the rest": not
+    // random model flakiness, but a real race between the Enter-triggered
+    // call and a stale debounced call the user never asked for. Fixed by
+    // clearing the pending timer whenever Enter triggers an immediate run.
+    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(_aiTimer); _runAIAssist(); }
   });
   titleEl.addEventListener('input', () => {
     clearTimeout(_aiTimer);
@@ -590,10 +627,16 @@ function _wireAIAssist() {
 }
 
 async function _runAIAssist() {
+  // BUG FIX (2026-07-16): defense-in-depth alongside the keydown fix above
+  // -- guards against ANY overlapping call (double Enter, button click
+  // mid-flight, etc.) actually executing concurrently and racing to
+  // overwrite each other's field writes.
+  if (_aiRunning) { toast.show('info', 'AI Fill already running\u2026', 1500); return; }
+  _aiRunning = true;
   const titleEl = _el('wr-title');
   const btn = _el('wr-ai-assist');
   const title = (titleEl.value || '').trim();
-  if (!title) { toast.show('warn', 'Type a title first', 2000); return; }
+  if (!title) { toast.show('warn', 'Type a title first', 2000); _aiRunning = false; return; }
   btn.disabled = true; btn.textContent = '⏳ AI...';
   
   const unit = _unit || {};
@@ -603,7 +646,23 @@ async function _runAIAssist() {
   const notes = (unit.savedNotes || '').substring(0, 500);
   const uptake = (unit.insightsList || []).map(i => typeof i === 'object' ? (i.summary || i.text || '') : i).join('; ');
   
-  const areaList = Object.entries(AREA_SUBS).map(([a, s]) => a + ': ' + s.join(', ')).join('\  // Listen for address from contact book\n  bus.on("contacts:use-address", (addr) => {\n    const s=_el("wr-tow-street");if(s)s.value=addr.street||"";;\n    const ct=_el("wr-tow-city");if(ct)ct.value=addr.city||"";;\n    const st=_el("wr-tow-state");if(st)st.value=addr.state||"";;\n    const z=_el("wr-tow-zip");if(z)z.value=addr.zip||"";;\n    const tw=_el("wr-tow-wrap");if(tw)tw.style.display="";;\n  });\nn');
+  // BUG FIX (2026-07-16): this .join(...) call's separator argument was NOT
+  // '\n' -- it was corrupted into a huge string containing a large block of
+  // UNRELATED real code as dead text (a bus.on('contacts:use-address', ...)
+  // listener that was clearly meant to be a real, separate statement
+  // elsewhere in this file -- see _wireTow() below where it's now properly
+  // restored as executable code). This meant EVERY area/subcategory list
+  // entry sent to the AI Assist prompt (the "✨ AI Fill" / Enter-key feature)
+  // was being joined with this huge garbage blob instead of a clean
+  // newline -- injecting dozens of lines of irrelevant JS source into the
+  // "VALID AREAS/SUBCATEGORIES" section of the prompt sent to the LLM on
+  // every single AI Assist call. This is the most likely root cause of the
+  // "AI struggles to fill out the rest" behavior: the model was being asked
+  // to parse a corrupted, code-polluted area list every time, which would
+  // plausibly cause inconsistent/hallucinated area+subcategory values or
+  // outright malformed JSON responses depending on how the model handled
+  // the injected noise.
+  const areaList = Object.entries(AREA_SUBS).map(([a, s]) => a + ': ' + s.join(', ')).join('\n');
   
   // Load vendor book for AI context
   let vendorBookCtx = '';
@@ -688,6 +747,7 @@ async function _runAIAssist() {
     toast.show('error', 'AI failed: ' + e.message, 4000);
   } finally {
     btn.disabled = false; btn.textContent = '✨ AI Fill';
+    _aiRunning = false;
   }
 }
 
