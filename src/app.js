@@ -567,8 +567,31 @@ function _catchUpMissedSlots() {
       try {
         const rows = _ctxRef.lastData && _ctxRef.lastData.rows;
         if (rows) {
-          const { composeAndSendEmail } = require('./scrapers/email_sender');
-          composeAndSendEmail(rows, _ctxRef.getMainWindow());
+          // BUG FIX (2026-07-16): this block previously called
+          // composeAndSendEmail(rows, win), a function that does not exist
+          // anywhere in email_sender.js's exports (confirmed exports:
+          // sendFleetEmail, loadEmailConfig, saveEmailConfig, CONFIG_FILE
+          // only). Every missed-slot catch-up email has silently failed
+          // since this code was written -- caught by the try/catch below,
+          // logged as "Catch-up email failed: ... is not a function", with
+          // no functional recovery. Fix: fire the same fleet:auto-email
+          // event the on-time scheduler uses (_scheduleAutoEmail above) so
+          // the catch-up path reuses the real, tested renderer-side compose
+          // logic (recipient lookup, OWA compose, subject building, SOS/EOS
+          // slot labeling) instead of a second, separate, broken path.
+          const _settingsNow2  = store.load('settings', {});
+          const autoEmailNote2 = _settingsNow2.autoEmailNote || '';
+          if (autoEmailNote2 && _settingsNow2.autoEmailNoteOneShot) {
+            delete _settingsNow2.autoEmailNote;
+            _settingsNow2.autoEmailNoteOneShot = false;
+            store.save('settings', _settingsNow2);
+          }
+          _ctxRef.send('fleet:auto-email', {
+            slot: slot.label,
+            triggeredAt: new Date().toISOString(),
+            autoEmailNote: autoEmailNote2,
+            catchUp: true,
+          });
         }
       } catch (e) { log.error('Catch-up email failed:', e.message); }
     }, 5000);
