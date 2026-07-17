@@ -22,6 +22,7 @@ const TAB_VIEW = {
   vendors:    'vendors',
   scheduler:  'schedulers',
   'email-composer': 'email-composer',
+  'daily-call': 'daily-call',
 };
 
 export function init(container) {
@@ -60,7 +61,7 @@ export function init(container) {
           <span class="tb-tab-icon">⏱</span> Scheduler
         </button>
         <button class="tb-tab" data-view="email-composer">
-          <span class="tb-tab-icon">📧</span> Email
+          <span class="tb-tab-icon">📧</span> Email</button><button class="tb-tab" data-view="daily-call"><span class="tb-tab-icon">📞</span> Daily Call
         </button>
       </div>
 

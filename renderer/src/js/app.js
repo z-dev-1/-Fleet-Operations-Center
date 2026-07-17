@@ -33,6 +33,7 @@ import { init as initEmailComposer }      from './views/email-composer.js';
 import { init as initDailyNotes }         from './views/daily-notes.js';
 import { init as initNotesLinks }         from './views/notes-links.js';
 import { init as initRcaQueue }           from './views/rca-queue.js';
+import { init as initDailyCall }          from './views/daily-call.js';
 
 function boot() {
   // Global error boundary — prevent white screen
@@ -105,6 +106,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
   initDailyNotes(viewsMount);
   initNotesLinks(viewsMount);
   initRcaQueue(viewsMount);
+  initDailyCall(viewsMount);
 
   // ── Settings drawer ────────────────────────────────────────────────────────
   initSettings();
@@ -119,6 +121,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
   const dailyNotesView    = document.getElementById('view-daily-notes');
   const notesLinksView    = document.getElementById('view-notes-links');
   const rcaQueueView      = document.getElementById('view-rca-queue');
+  const dailyCallView     = document.getElementById('view-daily-call');
 
   bus.on('ui:view-change', ({ to }) => {
     if (to === 'settings') return;
@@ -130,6 +133,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
     if (dailyNotesView)    dailyNotesView.style.display    = to === 'daily-notes'    ? 'flex' : 'none';
     if (notesLinksView)    notesLinksView.style.display    = to === 'notes-links'    ? 'flex' : 'none';
     if (rcaQueueView)      rcaQueueView.style.display      = to === 'rca-queue'      ? 'flex' : 'none';
+    if (dailyCallView)     dailyCallView.style.display     = to === 'daily-call'     ? 'flex' : 'none';
   });
 
   bus.on('ui:view-change', () => bus.emit('ui:unit-deselect'));
