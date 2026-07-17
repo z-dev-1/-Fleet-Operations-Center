@@ -1388,6 +1388,21 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
   overflow: hidden;
 }
 
+/* BUG FIX (2026-07-17): daily-call.js reuses the same .an-header/.an-body
+   generic classes as analytics.js, but its own .view--daily-call container
+   class was never given this flex-direction/height/overflow rule -- so it
+   fell back to the browser default flex-direction:row (the JS only sets
+   inline display:flex, not flex-direction). Result: header+buttons and
+   the two tables laid out as ROW siblings instead of stacked column,
+   causing the header to get squeezed into a random spot and the tables
+   to shove off to one side with a large dead gap -- exactly the "didn't
+   end where it was supposed to" layout the user reported via screenshot. */
+.view--daily-call {
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
 /* ── Header ──────────────────────────────────────────────────── */
 .an-header {
   display: flex;
