@@ -414,3 +414,20 @@ export const relay = {
       : Promise.resolve({ workOrders: [] });
   },
 };
+
+// -- Workflow Intelligence (Phase 8) -- recorder, library, execution --
+export const workflowIntel = {
+  startRecording:   (meta)                 => window.workflowIntel.startRecording(meta),
+  recordStep:       (sessionId, step)      => window.workflowIntel.recordStep(sessionId, step),
+  stopRecording:    (sessionId, finalMeta) => window.workflowIntel.stopRecording(sessionId, finalMeta),
+  discardRecording: (sessionId)            => window.workflowIntel.discardRecording(sessionId),
+  list:           (filter)    => window.workflowIntel.list(filter),
+  get:            (id)        => window.workflowIntel.get(id),
+  save:           (recording) => window.workflowIntel.save(recording),
+  delete:         (id)        => window.workflowIntel.delete(id),
+  toggleFavorite: (id)        => window.workflowIntel.toggleFavorite(id),
+  importWorkflow: (bundle) => window.workflowIntel.importWorkflow(bundle),
+  exportWorkflow: (id)     => window.workflowIntel.exportWorkflow(id),
+  getExecutionLog: (limit) => window.workflowIntel.getExecutionLog(limit),
+  getSuggestionForUnit: (unit) => window.workflowIntel.getSuggestionForUnit(unit),
+};

@@ -48,6 +48,8 @@ contextBridge.exposeInMainWorld('fleet', {
   minimize:     () => ipcRenderer.send('win:minimize'),
   maximize:     () => ipcRenderer.send('win:maximize'),
   closeWindow:  () => ipcRenderer.send('win:close'),
+  isMaximized:  () => ipcRenderer.invoke('win:is-maximized'),
+  onWindowStateChanged: (cb) => on('win:state-changed', cb),
   onBriefing:   (cb) => on('orcha:morning-briefing', cb),
   onConnectionStatus: (cb) => on('app:connection-status', cb),
   onMidwayStatus: (cb) => { on('app:midway-renewing', (d) => cb({...d, status:'renewing'})); on('app:midway-renewed', (d) => cb({...d, status:'renewed'})); on('app:midway-expired', (d) => cb({...d, status:'expired'})); },
@@ -309,4 +311,26 @@ contextBridge.exposeInMainWorld('vendor', {
   loadHistory:    ()           => ipcRenderer.invoke('vendor:history-load'),
   saveHistory:    (history)    => ipcRenderer.invoke('vendor:history-save', { history }),
   getPortalUrls:  ()           => ipcRenderer.invoke('vendor:portal-urls'),
+});
+
+// -- Workflow Intelligence (Phase 8) -- recorder, library, execution
+// See docs/PHASE8_WORKFLOW_INTELLIGENCE_PLAN.md for the full design.
+contextBridge.exposeInMainWorld('workflowIntel', {
+  // Recording session lifecycle
+  startRecording:   (meta)               => ipcRenderer.invoke('wi:start-recording', meta),
+  recordStep:       (sessionId, step)    => ipcRenderer.invoke('wi:record-step', sessionId, step),
+  stopRecording:    (sessionId, finalMeta) => ipcRenderer.invoke('wi:stop-recording', sessionId, finalMeta),
+  discardRecording: (sessionId)          => ipcRenderer.invoke('wi:discard-recording', sessionId),
+  // Library CRUD
+  list:           (filter)     => ipcRenderer.invoke('wi:list-workflows', filter),
+  get:            (id)         => ipcRenderer.invoke('wi:get-workflow', id),
+  save:           (recording)  => ipcRenderer.invoke('wi:save-workflow', recording),
+  delete:         (id)         => ipcRenderer.invoke('wi:delete-workflow', id),
+  toggleFavorite: (id)         => ipcRenderer.invoke('wi:toggle-favorite', id),
+  // Import / export
+  importWorkflow: (bundle) => ipcRenderer.invoke('wi:import-workflow', bundle),
+  exportWorkflow: (id)     => ipcRenderer.invoke('wi:export-workflow', id),
+  // Execution log (read-only until Phase 4 wires the execution engine)
+  getExecutionLog: (limit) => ipcRenderer.invoke('wi:get-execution-log', limit),
+  getSuggestionForUnit: (unit) => ipcRenderer.invoke('wi:get-suggestion-for-unit', unit),
 });

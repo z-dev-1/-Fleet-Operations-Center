@@ -87,21 +87,38 @@ function registerPartnerWRHandlers(ctx) {
       (async () => {
         const r = store.load('partnerWRs_review', []);
         for (let j = 0; j < r.length; j++) {
-          if (r[j].status === 'classifying') {
+          // FIX: was only `status === 'classifying'` -- once classifyRequest()
+          // threw (e.g. tonight's live "No JSON in AI response" for B62060),
+          // the request permanently dropped to status:'pending' with no
+          // .payload and was NEVER reconsidered by any future poll -- only
+          // items still 'classifying' got retried, and nothing ever puts a
+          // failed item back into 'classifying'. That request would then
+          // stay stuck for good: every future "Approve" click hits partner-
+          // wr.js's `if (!wr.payload) return { ok:false, ... }` forever,
+          // which looked exactly like "I click Approve and nothing happens."
+          // Now: also retry items that previously failed (status:'pending'
+          // with aiError set), capped at 5 attempts so a permanently-bad
+          // request (e.g. AI endpoint down) doesn't retry forever every poll.
+          const isFreshOrRetryable = r[j].status === 'classifying' ||
+            (r[j].status === 'pending' && r[j].aiError && (r[j].classifyAttempts || 0) < 5);
+          if (isFreshOrRetryable) {
             try {
               const classified = await classifyRequest(r[j], relay);
+              classified.classifyAttempts = (r[j].classifyAttempts || 0) + 1;
               r[j] = classified;
-              logger.info('[Partner] AI classified: ' + classified.unit + ' → ' + (classified.aiTitle || ''));
+              logger.info('[Partner] AI classified: ' + classified.unit + ' \u2014 ' + (classified.aiTitle || ''));
             } catch (e) {
               r[j].status = 'pending';
               r[j].aiError = e.message;
-              logger.warn('[Partner] AI classify failed: ' + r[j].unit + ' — ' + e.message);
+              r[j].classifyAttempts = (r[j].classifyAttempts || 0) + 1;
+              logger.warn('[Partner] AI classify failed (attempt ' + r[j].classifyAttempts + '): ' + r[j].unit + ' \u2014 ' + e.message);
             }
           }
         }
         store.save('partnerWRs_review', r);
         if (ctx.sendToWindow) ctx.sendToWindow('partner:new-requests', { count: r.length });
       })();
+
 
         if (ctx.sendToWindow) ctx.sendToWindow('partner:new-requests', { count: newCount });
       }
@@ -114,8 +131,34 @@ function registerPartnerWRHandlers(ctx) {
   // Approve and submit a WR
   handle('partner:approve', async (_e, idx) => {
     const review = store.load(REVIEW_KEY, []);
-    const wr = review[idx];
-    if (!wr || !wr.payload) return { ok: false, error: 'WR not found or no payload' };
+    let wr = review[idx];
+    if (!wr) return { ok: false, error: 'WR not found' };
+
+    // FIX: previously this just bailed with "WR not found or no payload"
+    // whenever wr.payload was missing -- which is exactly the state a
+    // request is left in forever once the background classifier throws
+    // (see the classify-loop fix above) or if the user clicks Approve
+    // before the background classify pass has run yet. From the user's
+    // perspective this is indistinguishable from "I click Approve and
+    // nothing happens" -- the click DID reach the backend, it just quietly
+    // refused and returned an error the UI had no strong way to surface.
+    // Now: if there's no payload, classify right here, synchronously, as
+    // part of the approve click itself -- so Approve always either submits
+    // or gives back a real, specific reason why it couldn't.
+    if (!wr.payload) {
+      try {
+        wr = await classifyRequest(wr, relay);
+        review[idx] = wr;
+        store.save(REVIEW_KEY, review);
+      } catch (e) {
+        wr.status = 'pending';
+        wr.aiError = e.message;
+        wr.classifyAttempts = (wr.classifyAttempts || 0) + 1;
+        review[idx] = wr;
+        store.save(REVIEW_KEY, review);
+        return { ok: false, error: 'Could not auto-classify this request: ' + e.message };
+      }
+    }
 
     // Find unit data
     const fd = store.load('fleetData', {});
@@ -134,7 +177,7 @@ function registerPartnerWRHandlers(ctx) {
       processed.push(wr.id);
       if (processed.length > 500) processed.splice(0, processed.length - 500);
       store.save(PROCESSED_KEY, processed);
-      logger.info('[Partner] WR approved and submitted: ' + wr.payload.unit + ' → ' + result.workRequestId);
+      logger.info('[Partner] WR approved and submitted: ' + wr.payload.unit + ' \u2014 ' + result.workRequestId);
       return { ok: true, workRequestId: result.workRequestId };
     }
     return { ok: false, error: result.error || 'Submit failed' };

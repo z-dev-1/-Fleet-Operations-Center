@@ -21,6 +21,7 @@ import { init as initContactBook }       from './components/contact-book.js';
 import { init as initDraftInbox }         from './components/draft-inbox.js';
 import { init as initTimeline }           from './components/workflow-timeline.js';
 import { init as initStatusBar }          from './components/status-bar.js';
+import { init as initWorkflowRecorderHud } from './components/workflow-recorder-hud.js';
 import { initTheme }                      from './nexus-theme.js';
 
 import { init as initFleetView }          from './views/fleet.js';
@@ -34,6 +35,7 @@ import { init as initDailyNotes }         from './views/daily-notes.js';
 import { init as initNotesLinks }         from './views/notes-links.js';
 import { init as initRcaQueue }           from './views/rca-queue.js';
 import { init as initDailyCall }          from './views/daily-call.js';
+import { init as initWorkflowIntel }      from './views/workflow-intelligence.js';
 
 function boot() {
   // Global error boundary — prevent white screen
@@ -85,6 +87,7 @@ function boot() {
   // Body-level overlays (mount on document.body)
   initNotifDropdown();
   initOrchaFab();
+  initWorkflowRecorderHud();
 initDraftInbox();
 initNexusSidebar();
   initMorningBriefing();
@@ -107,6 +110,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
   initNotesLinks(viewsMount);
   initRcaQueue(viewsMount);
   initDailyCall(viewsMount);
+  initWorkflowIntel(viewsMount);
 
   // ── Settings drawer ────────────────────────────────────────────────────────
   initSettings();
@@ -122,6 +126,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
   const notesLinksView    = document.getElementById('view-notes-links');
   const rcaQueueView      = document.getElementById('view-rca-queue');
   const dailyCallView     = document.getElementById('view-daily-call');
+  const workflowIntelView = document.getElementById('view-workflow-intel');
 
   bus.on('ui:view-change', ({ to }) => {
     if (to === 'settings') return;
@@ -134,6 +139,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
     if (notesLinksView)    notesLinksView.style.display    = to === 'notes-links'    ? 'flex' : 'none';
     if (rcaQueueView)      rcaQueueView.style.display      = to === 'rca-queue'      ? 'flex' : 'none';
     if (dailyCallView)     dailyCallView.style.display     = to === 'daily-call'     ? 'flex' : 'none';
+    if (workflowIntelView) workflowIntelView.style.display = to === 'workflow-intel' ? 'flex' : 'none';
   });
 
   bus.on('ui:view-change', () => bus.emit('ui:unit-deselect'));

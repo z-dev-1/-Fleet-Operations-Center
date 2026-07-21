@@ -87,27 +87,54 @@ async function _loadReview() {
   }
 }
 
+// FIX: this previously only ever pushed to 'ui:notif-push' -- which just
+// bumps a badge count on the bell icon (notif-dropdown.js) that the user has
+// to separately open to see. Clicking Approve gave literally zero on-screen
+// feedback either on success OR failure, which is the confirmed root cause
+// of "I approve an Incoming Work Request and nothing happens" -- it wasn't
+// that approve was silently failing every time (sometimes it was, per the
+// partner-wr.js backend fix above), it's that even a SUCCESSFUL submit was
+// invisible unless you happened to open the notification bell. Now also
+// fires a visible toast (renderer/src/js/components/toast.js, bottom-left,
+// same mechanism every other action in this app already uses) and disables
+// the button + shows "Submitting..." while the request is in flight, since
+// approve can now take a few seconds (classify-on-demand + real AAP submit).
 async function _approve(idx) {
   if (!window.partner) return;
   const wr = _reviewWRs[idx];
   if (!wr) return;
+
+  const card = _el.querySelector(`.wr-inbox-card[data-idx="${idx}"]`);
+  const btn  = card ? card.querySelector('[data-action="approve"]') : null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Submitting...'; }
+
   try {
     const result = await window.partner.approve(idx);
     if (result && result.ok) {
-      bus.emit('ui:notif-push', { icon: '✅', title: 'WR Created', body: (wr.payload && wr.payload.unit) + ' — ' + (wr.payload && wr.payload.title), time: Date.now() });
+      const label = (wr.payload && wr.payload.unit) || wr.unit || 'unit';
+      const title = (wr.payload && wr.payload.title) || wr.issue || '';
+      bus.emit('ui:toast', { type: 'success', message: `WR submitted for ${label}${result.workRequestId ? ' (' + result.workRequestId + ')' : ''} \u2014 ${title}`, duration: 5000 });
+      bus.emit('ui:notif-push', { icon: '\u2705', title: 'WR Created', body: label + ' \u2014 ' + title, time: Date.now() });
       _reviewWRs.splice(idx, 1);
       _render();
     } else {
-      bus.emit('ui:notif-push', { icon: '❌', title: 'Submit Failed', body: result.error || 'Unknown error', time: Date.now() });
+      bus.emit('ui:toast', { type: 'error', message: 'Approve failed: ' + (result && result.error || 'Unknown error'), duration: 6000 });
+      bus.emit('ui:notif-push', { icon: '\u274c', title: 'Submit Failed', body: (result && result.error) || 'Unknown error', time: Date.now() });
+      await _loadReview(); // refresh from backend (aiError/status may have changed) -- re-renders with correct button label/state
     }
   } catch (e) {
-    bus.emit('ui:notif-push', { icon: '❌', title: 'Error', body: e.message, time: Date.now() });
+    bus.emit('ui:toast', { type: 'error', message: 'Approve error: ' + e.message, duration: 6000 });
+    bus.emit('ui:notif-push', { icon: '\u274c', title: 'Error', body: e.message, time: Date.now() });
+    if (btn) { btn.disabled = false; }
+    _render();
   }
 }
 
 async function _decline(idx) {
   if (!window.partner) return;
+  const wr = _reviewWRs[idx];
   await window.partner.decline(idx);
+  bus.emit('ui:toast', { type: 'info', message: 'Declined' + (wr ? ' \u2014 ' + (wr.unit || (wr.payload && wr.payload.unit) || '') : ''), duration: 3000 });
   _reviewWRs.splice(idx, 1);
   _render();
 }

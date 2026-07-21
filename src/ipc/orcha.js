@@ -151,6 +151,21 @@ function registerOrchaIPC(ctx) {
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
     win.loadURL(safeUrl);
+
+    // Workflow Intelligence: attach capture if a recording is currently in
+    // progress (Phase 8, Phase 1.4 -- see docs/PHASE8_WORKFLOW_INTELLIGENCE_PLAN.md).
+    // Observation-only -- never clicks/fills/navigates, so this carries no
+    // execution risk regardless of recording state.
+    try {
+      const { getActiveSessionId } = require('./workflow-intel');
+      const activeSession = getActiveSessionId();
+      if (activeSession) {
+        const { attachCapture } = require('../window/action_capture');
+        attachCapture(win, activeSession);
+      }
+    } catch (e) {
+      logger.warn('Workflow Intelligence capture attach failed:', e.message);
+    }
     win.webContents.on('did-finish-load', async () => {
       try {
         const result = await attemptAutoLogin(win.webContents, win.webContents.getURL());

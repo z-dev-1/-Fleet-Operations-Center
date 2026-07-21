@@ -187,6 +187,20 @@ function registerScrapersIPC(ctx) {
         width: 1200, height: 850, title: 'AAP - Create Work Request',
         webPreferences: { nodeIntegration: false, contextIsolation: true },
       });
+
+      // Workflow Intelligence: attach capture if a recording is currently
+      // active (same gate + technique as open-popup in ipc/orcha.js).
+      // Observation-only -- never interferes with the autofill engine below.
+      try {
+        const { getActiveSessionId } = require('./workflow-intel');
+        const activeSession = getActiveSessionId();
+        if (activeSession) {
+          const { attachCapture } = require('../window/action_capture');
+          attachCapture(aapWin, activeSession);
+        }
+      } catch (e) {
+        logger.warn('Workflow Intelligence capture attach failed:', e.message);
+      }
       const done = (result) => {
         if (settled) return;
         settled = true;

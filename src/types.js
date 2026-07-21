@@ -92,3 +92,51 @@
  */
 
 module.exports = {}; // Documentation only
+
+/**
+ * Workflow Intelligence types [Phase 8] — see docs/PHASE8_WORKFLOW_INTELLIGENCE_PLAN.md
+ */
+
+/**
+ * @typedef {Object} WorkflowStep
+ * @property {string} id
+ * @property {'app_open'|'click'|'type'|'select'|'wait'|'search'|'create_wr'|
+ *             'update_notes'|'send_email'|'send_slack'|'copy'|'paste'|'navigate'|
+ *             'condition'|'loop'|'delay'} type
+ * @property {string} app - 'relay' | 'paccar' | 'asist' | 'outlook' | 'slack' | 'sharepoint' | 'internal'
+ * @property {string} [selector]
+ * @property {string} [value]
+ * @property {boolean} [sensitive] - true if this step's value was redacted (never persisted raw)
+ * @property {number} [delayMs]
+ * @property {Object} [condition]
+ * @property {Object} [loop]
+ * @property {string[]} [variables]
+ */
+
+/**
+ * @typedef {Object} WorkflowRecording
+ * @property {string} id
+ * @property {string} name
+ * @property {string} [description]
+ * @property {string[]} tags
+ * @property {string} category
+ * @property {boolean} favorite
+ * @property {WorkflowStep[]} steps
+ * @property {Object} [triggerContext]
+ * @property {Object} variables
+ * @property {string} createdAt
+ * @property {string} updatedAt
+ * @property {'recorded'|'imported'|'ai_generated'} source
+ * @property {Object} stats - { timesExecuted, timesSuggested, timesAccepted, avgDurationMs, successRate }
+ */
+
+/**
+ * @typedef {Object} WorkflowExecution
+ * @property {string} id
+ * @property {string} workflowId
+ * @property {'pending_approval'|'running'|'paused'|'completed'|'failed'|'stopped'} status
+ * @property {Array<{stepId:string, status:string, confidence:number, startedAt:string, endedAt:string, error:string}>} stepLog
+ * @property {string} startedAt
+ * @property {string} [endedAt]
+ * @property {string} [triggerUnitId]
+ */

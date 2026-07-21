@@ -69,6 +69,11 @@ const REGISTRY = {
   rcaStore:         () => P.rcaStore,
   retentionHistory: () => P.retentionHistory,
   slackAutoReply:   () => path.join(P.dataDir, 'slack_auto_reply.json'), // FEATURE (2026-07-16)
+
+  // Workflow Intelligence (Phase 8, 2026-07-19) - see docs/PHASE8_WORKFLOW_INTELLIGENCE_PLAN.md
+  workflowRecordings:   () => path.join(P.dataDir, 'workflow_recordings.json'),
+  workflowExecutionLog: () => path.join(P.dataDir, 'workflow_execution_log.json'),
+  workflowPatterns:     () => path.join(P.dataDir, 'workflow_patterns.json'),
 };
 
 function _resolvePath(name) {

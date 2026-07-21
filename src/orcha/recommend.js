@@ -35,6 +35,7 @@ const ACTION = {
   UPDATE_NOTES:  'update_notes',
   CLOSE_OUT:     'close_out',
   SCHEDULE_PM:   'schedule_pm',
+  SUGGEST_WORKFLOW: 'suggest_workflow',
 };
 
 // ── Action metadata (labels, icons, urgency) ─────────────────────────────────
@@ -45,6 +46,7 @@ const ACTION_META = {
   [ACTION.FOLLOW_UP]:     { label: 'Follow Up',        icon: '📞', urgency: 'medium' },
   [ACTION.UPDATE_NOTES]:  { label: 'Update Notes',     icon: '📝', urgency: 'low' },
   [ACTION.CLOSE_OUT]:     { label: 'Close Out',        icon: '✅', urgency: 'low' },
+  [ACTION.SUGGEST_WORKFLOW]: { label: 'Suggested Workflow', icon: '\u{1F9E0}', urgency: 'medium' },
   [ACTION.SCHEDULE_PM]:   { label: 'Schedule PM',      icon: '🔧', urgency: 'medium' },
 };
 
@@ -196,6 +198,61 @@ function _recommendForUnit(row, notesStore, vendorRules) {
  * runRecommendations(mergedRows)
  * @returns {{ recommendations: Array, summary: { total, byAction, byUrgency } }}
  */
+// --- SUGGEST WORKFLOW (Phase 8, Phase 3) ---
+// Checks whether this unit's situation matches a CONFIRMED mined pattern
+// (src/orcha/workflow-learn.js -- 3+ occurrences of the same vendor/component/
+// issue-keyword signature). If so, builds a per-step confidence breakdown
+// exactly matching the original spec's example shape:
+//   Create Relay Work Order -- 99%
+//   Send Vendor Email -- 65% (Requires Approval)
+// Email/Slack steps are ALWAYS flagged requiresApproval regardless of score
+// (locked-in decision, see docs/PHASE8_WORKFLOW_INTELLIGENCE_PLAN.md \u00a711) --
+// more conservative than the literal spec example, deliberately.
+const ALWAYS_GATE_TYPES = new Set(['send_email', 'send_slack']);
+const CONFIDENCE_THRESHOLD = 80; // default approval-gate line, per \u00a711 decision log
+
+function _suggestWorkflowForUnit(row) {
+  try {
+    const { getPatternForContext } = require('./workflow-learn');
+    const triggerContext = {
+      vendor:       row.vendor || '',
+      component:    row.savedPrimaryComponent || row.primaryComponent || '',
+      issueKeyword: row.issueSummary || row.issueDetails || '',
+    };
+    const pattern = getPatternForContext(triggerContext);
+    if (!pattern) return null;
+
+    const library    = store.load('workflowRecordings', {});
+    const workflowId = pattern.workflowIds[0];
+    const workflow   = library[workflowId];
+    if (!workflow || !Array.isArray(workflow.steps) || !workflow.steps.length) return null;
+
+    const baseConfidence = Math.min(99, Math.round(pattern.consistency * 60 + Math.min(pattern.occurrences, 10) * 4));
+
+    const steps = workflow.steps.map(s => {
+      const gated = ALWAYS_GATE_TYPES.has(s.type);
+      const confidence = gated ? Math.min(baseConfidence, 65) : baseConfidence;
+      return {
+        type: s.type,
+        label: s.label || s.selector || s.type,
+        confidence,
+        requiresApproval: gated || confidence < CONFIDENCE_THRESHOLD,
+      };
+    });
+
+    return {
+      action: ACTION.SUGGEST_WORKFLOW,
+      confidence: baseConfidence,
+      reason: `Seen this situation ${pattern.occurrences}x before (${pattern.signature.replace(/\|/g, ' / ')})`,
+      suggestion: `Run "${workflow.name}" (${steps.length} steps)`,
+      payload: { workflowId, workflowName: workflow.name, steps, patternSignature: pattern.signature },
+    };
+  } catch (e) {
+    logger.warn('workflow suggestion failed for ' + (row.equipmentId || '?') + ':', e.message);
+    return null;
+  }
+}
+
 function runRecommendations(mergedRows) {
   const notesStore = store.load('notesStore', {});
   let vendorRules = {};
@@ -206,6 +263,8 @@ function runRecommendations(mergedRows) {
   for (const row of mergedRows) {
     if (!row.equipmentId) continue;
     const recs = _recommendForUnit(row, notesStore, vendorRules);
+    const wfRec = _suggestWorkflowForUnit(row);
+    if (wfRec) recs.push(wfRec);
     for (const rec of recs) {
       recommendations.push({
         ...rec,
@@ -245,4 +304,4 @@ function runRecommendations(mergedRows) {
   };
 }
 
-module.exports = { runRecommendations, ACTION, ACTION_META };
+module.exports = { runRecommendations, ACTION, ACTION_META, suggestWorkflowForUnit: _suggestWorkflowForUnit };

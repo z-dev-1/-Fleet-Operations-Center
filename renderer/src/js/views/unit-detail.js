@@ -12,7 +12,7 @@
 
 import bus           from '../bus.js';
 import state         from '../state.js';
-import { notes, ai, aap, relay, vendor } from '../bridge.js';
+import { notes, ai, aap, relay, vendor, workflowIntel } from '../bridge.js';
 import { open as openWRModal }    from './wr-modal.js';
 import { open as openVendorReview } from './vendor-review-modal.js';
 import toast         from '../components/toast.js';
@@ -563,11 +563,63 @@ function _renderVendorAISuggest(unit) {
   }
 }
 
+// Phase 8/3: Workflow Intelligence suggestion card -- mirrors
+// _renderVendorAISuggest's card style above, but auto-checks (no manual
+// "Analyze" click needed) since the underlying check is a local pattern
+// lookup, not an AI/network call. Renders nothing if no confirmed pattern
+// matches this unit's vendor/component/issue -- no clutter for the common
+// case. "Run Workflow" is honestly labeled informational-only: Phase 4
+// (actual execution via the orchestrator) does not exist yet, so this must
+// never claim to have done something it did not do.
+function _renderWorkflowSuggest(unit) {
+  const el = document.getElementById('dp-wi-suggest');
+  if (!el) return;
+  el.innerHTML = '';
+
+  workflowIntel.getSuggestionForUnit(unit).then((suggestion) => {
+    if (!suggestion || !suggestion.payload) return;
+    const steps = suggestion.payload.steps || [];
+
+    const stepsHtml = steps.map(s =>
+      '<div class="dp-wi-step">' +
+        '<span class="dp-wi-step__label">' + _esc(s.label) + '</span>' +
+        '<span class="dp-wi-step__conf" style="color:' + (s.confidence >= 80 ? '#3fb950' : '#f0a800') + '">' +
+          s.confidence + '%' + (s.requiresApproval ? ' <em>(Requires Approval)</em>' : '') +
+        '</span>' +
+      '</div>'
+    ).join('');
+
+    el.innerHTML =
+      '<div class="dp-vnd-ai-card">' +
+        '<div class="dp-vnd-ai-card__header">' +
+          '<span class="dp-vnd-ai-card__icon">\u{1F9E0}</span>' +
+          '<span class="dp-vnd-ai-card__title">I\u2019ve seen this before</span>' +
+        '</div>' +
+        '<div class="dp-vnd-ai-card__body">' +
+          '<div class="dp-vnd-ai-reasoning">' + _esc(suggestion.reason) + '</div>' +
+          '<div class="dp-wi-steps">' + stepsHtml + '</div>' +
+          '<div class="dp-wi-actions">' +
+            '<button id="dp-wi-run" class="dp-action-btn dp-action-btn--primary" style="margin-top:8px">Run Workflow</button>' +
+            '<button id="dp-wi-dismiss" class="dp-action-btn" style="margin-top:8px">Dismiss</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+
+    const runBtn = document.getElementById('dp-wi-run');
+    if (runBtn) runBtn.addEventListener('click', () => {
+      toast.show('info', 'Workflow execution (Phase 4) is not built yet \u2014 this suggestion is informational only for now.', 4000);
+    });
+    const dismissBtn = document.getElementById('dp-wi-dismiss');
+    if (dismissBtn) dismissBtn.addEventListener('click', () => { el.innerHTML = ''; });
+  }).catch(() => { /* best-effort card -- silent on failure, never blocks the panel */ });
+}
+
 function _wireVendorPanel(unit) {
   const sec = document.getElementById('dp-vendor-section');
   if (!sec) return;
   _teardownVendorBus();
   _renderVendorAISuggest(unit);  // S28: show AI suggestion card
+  _renderWorkflowSuggest(unit);  // Phase 8/3: show mined workflow suggestion, if any
   sec.innerHTML = '<p class="dp-empty">Checking eligibility...</p>';
   vendor.investigate(unit).then((result) => {
     _renderInvestigation(result);
@@ -871,7 +923,10 @@ function renderHeader(unit){
   var timerCls=dd>14?'dp-vital--red':dd>7?'dp-vital--org':'dp-vital--grn';
   var aapUrl=esc(unit.assetUrl||'');
   var relayUrl=esc(unit.serviceUrl||unit.savedOffsiteUrl||'');
-  var offsiteUrl=esc(unit.asistSrUrl||unit.offsiteShopEventUrl||'');
+  // FIX: same stale-URL priority bug as the split-view resolver below --
+  // asistSrUrl (original SR link) must not win over offsiteShopEventUrl
+  // (enrichment's best-known link, upgraded to /fleet/estimates/ when found).
+  var offsiteUrl=esc(unit.offsiteShopEventUrl||unit.savedOffsiteUrl||unit.asistSrUrl||'');
 
   // meta row: make/model/year Ã‚Â· type Ã‚Â· fuel Ã‚Â· domicile Ã‚Â· operator
   // _resolveAssetType: maps raw AAP assetType/bodyType to human-friendly label
@@ -1206,7 +1261,15 @@ function renderRepairPane(unit){
     '<div id="dp-tl-input-row" class="dp-tl-input-row" style="display:none"><input id="dp-tl-input" class="dp-tl-input" type="text" placeholder="Type update... (saved immediately)"/><button id="dp-tl-submit" class="dp-tl-submit-btn">Add</button></div>' +
     '<div class="dp-orcha-timeline">' + tlEntriesHtml + '</div>';
 
-  var offsiteUrl=unit.asistSrUrl||unit.savedOffsiteUrl||unit.offsiteShopEventUrl||'';
+  // FIX: was `unit.asistSrUrl||unit.savedOffsiteUrl||unit.offsiteShopEventUrl` --
+  // asistSrUrl is the ORIGINAL Volvo ASIST service_request URL (e.g.
+  // .../service_requests/975426), always populated once enrichment has ever
+  // run once, and it was checked FIRST -- so Split View kept opening the
+  // stale SR page forever, no matter how well asist_enrich.js's upgrade
+  // chase worked. savedOffsiteUrl/offsiteShopEventUrl hold the enrichment's
+  // best-known link (Fleet Estimate when found) and must win. asistSrUrl is
+  // now only a last-resort fallback if nothing better was ever scraped.
+  var offsiteUrl=unit.savedOffsiteUrl||unit.offsiteShopEventUrl||unit.asistSrUrl||'';
 
   // Split-view button (Relay + Offsite side by side)
   var splitViewBtn = '';
@@ -1514,6 +1577,7 @@ function renderActionsPane(unit){
       '<div class="dp-lc-row"><button id="dp-lc-confirm" class="detail-panel__btn">Confirm</button><button id="dp-lc-cancel" class="detail-panel__btn detail-panel__btn--secondary">Cancel</button></div>'+
     '<div class="dp-section-title" style="margin-top:10px">Dealer Work Order</div>'+
     '<div id="dp-vnd-ai-suggest" class="dp-vnd-ai-suggest"></div>'+
+    '<div id="dp-wi-suggest" class="dp-vnd-ai-suggest"></div>'+
     '<div id="dp-vendor-section" class="dp-vendor-section"><p class="dp-empty">Loading eligibility\u2026</p></div>'+
     '<div id="dp-vnd-history-strip" class="dp-vnd-history-strip"></div>'+
   '</div>';

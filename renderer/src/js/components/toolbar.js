@@ -23,6 +23,7 @@ const TAB_VIEW = {
   scheduler:  'schedulers',
   'email-composer': 'email-composer',
   'daily-call': 'daily-call',
+  'workflow-intel': 'workflow-intel',
 };
 
 export function init(container) {
@@ -59,6 +60,9 @@ export function init(container) {
         </button>
         <button class="tb-tab" data-view="scheduler">
           <span class="tb-tab-icon">⏱</span> Scheduler
+        </button>
+        <button class="tb-tab" data-view="workflow-intel">
+          <span class="tb-tab-icon">&#129504;</span> Workflow AI
         </button>
         <button class="tb-tab" data-view="email-composer">
           <span class="tb-tab-icon">📧</span> Email</button><button class="tb-tab" data-view="daily-call"><span class="tb-tab-icon">📞</span> Daily Call
@@ -119,6 +123,9 @@ export function init(container) {
         <select id="tb-vendor" class="tb-select">
           <option value="">All Vendors</option>
         </select>
+        <select id="tb-operator" class="tb-select">
+          <option value="">All Operators</option>
+        </select>
       </div>
       <div class="tb-sep"></div>
       <div class="tb-pills" id="tb-pills">
@@ -128,30 +135,70 @@ export function init(container) {
         <button class="tb-pill" data-filter="high-risk">High Risk</button>
         <button class="tb-pill" data-filter="stuck">Stuck 14d+</button>
       </div>
+      <div class="tb-sep" id="tb-op-sep" style="display:none"></div>
+      <div class="tb-pills" id="tb-op-pills" style="display:none"></div>
     </div>
   `;
 
   container.appendChild(el);
 
-  // ── Nav tabs ────────────────────────────────────────────────────────────────
+  // ── Nav tabs ────────────────────────────────────────────────────────────
   el.querySelectorAll('.tb-tab').forEach((btn) => {
     btn.addEventListener('click', () => {
       el.querySelectorAll('.tb-tab').forEach((t) => t.classList.remove('active'));
       btn.classList.add('active');
       const view = TAB_VIEW[btn.dataset.view] || 'fleet';
-  
-  // Window controls (minimize, maximize, close)
-  document.getElementById('tb-win-minimize').addEventListener('click', () => {
+      bus.emit('ui:view-change', { from: 'fleet', to: view });
+    });
+  });
+
+  // ── Window controls (minimize, maximize, close) ─────────────────────────
+  // FIX: these were previously wired *inside* the nav-tab click handler
+  // above, so on a fresh launch they silently did nothing at all until the
+  // user clicked a nav tab once (that's the first moment the listeners
+  // actually got attached, and even then they'd get re-attached again on
+  // every subsequent tab click, stacking duplicates). Wired here at init
+  // time instead, so they work immediately and exactly once.
+  const winMinBtn    = document.getElementById('tb-win-minimize');
+  const winMaxBtn    = document.getElementById('tb-win-maximize');
+  const winCloseBtn  = document.getElementById('tb-win-close');
+
+  if (winMinBtn) winMinBtn.addEventListener('click', () => {
     if (window.fleet && window.fleet.minimize) window.fleet.minimize();
   });
-  document.getElementById('tb-win-maximize').addEventListener('click', () => {
+  if (winMaxBtn) winMaxBtn.addEventListener('click', () => {
     if (window.fleet && window.fleet.maximize) window.fleet.maximize();
   });
-  document.getElementById('tb-win-close').addEventListener('click', () => {
+  if (winCloseBtn) winCloseBtn.addEventListener('click', () => {
     if (window.fleet && window.fleet.closeWindow) window.fleet.closeWindow();
   });
 
-  // Connection status indicator
+  // Swap the maximize glyph to a "restore" glyph while maximized -- native
+  // titlebars do this automatically; now that the window is frameless
+  // (src/window/index.js) this custom button has to track it by hand.
+  function _setMaxIcon(maximized) {
+    if (!winMaxBtn) return;
+    winMaxBtn.innerHTML = maximized ? '&#x25A3;' : '&#x25A1;';
+    winMaxBtn.title = maximized ? 'Restore' : 'Maximize';
+  }
+  if (window.fleet && window.fleet.isMaximized) {
+    window.fleet.isMaximized().then(_setMaxIcon).catch(() => {});
+  }
+  if (window.fleet && window.fleet.onWindowStateChanged) {
+    window.fleet.onWindowStateChanged(({ maximized }) => _setMaxIcon(maximized));
+  }
+
+  // Double-click the drag region to maximize/restore -- standard OS
+  // titlebar behavior that a frameless window loses unless replicated by hand.
+  const topbarEl = document.getElementById('topbar');
+  if (topbarEl) {
+    topbarEl.addEventListener('dblclick', (e) => {
+      if (e.target.closest('button, a, input, select, .tb-window-controls')) return;
+      if (window.fleet && window.fleet.maximize) window.fleet.maximize();
+    });
+  }
+
+  // ── Connection status indicator ──────────────────────────────────────────
   if (window.fleet && window.fleet.onConnectionStatus) {
     window.fleet.onConnectionStatus((data) => {
       let dot = document.getElementById('connection-dot');
@@ -163,14 +210,10 @@ export function init(container) {
         if (syncEl) syncEl.parentNode.insertBefore(dot, syncEl.nextSibling);
       }
       dot.style.background = data.online ? '#3fb950' : '#f85149';
-      dot.title = data.online ? 'Online' : 'Offline — entries queued';
+      dot.title = data.online ? 'Online' : 'Offline \u2014 entries queued';
     });
   }
 
-
-      bus.emit('ui:view-change', { from: 'fleet', to: view });
-    });
-  });
 
   // ── Intelligence Panel toggle
   document.getElementById("tb-intel").addEventListener("click", () => {
@@ -293,6 +336,12 @@ export function init(container) {
     bus.emit('ui:filter-change', { field: 'vendor', value: e.target.value });
   });
 
+  // ── Operator filter ──────────────────────────────────────────────────────
+  document.getElementById('tb-operator').addEventListener('change', (e) => {
+    if (_suppressFilterEvents) return;
+    bus.emit('ui:filter-change', { field: 'operator', value: e.target.value });
+  });
+
   // ── KPI counts — update from fleet state ──────────────────────────────────
   bus.on('state:fleet', (fleetSlice) => {
     const rows = fleetSlice.rows || [];
@@ -300,6 +349,8 @@ export function init(container) {
     let unavail = 0, avail = 0, offsite = 0;
     const vendors = new Set();
     const domiciles = new Set();
+    const operators = new Set();
+    const operatorUnavail = {};
     rows.forEach((r) => {
       const lc = (r.lifecycleState || '').toLowerCase();
       if (lc === 'unavailable') unavail++;
@@ -307,6 +358,10 @@ export function init(container) {
       if (r.isOffsite || /offsite/i.test(r.lifecycleReason || '')) offsite++;
       if (r.vendor) vendors.add(r.vendor);
       if (r.domicileSite) domiciles.add(r.domicileSite);
+      if (r.operator) {
+        operators.add(r.operator);
+        if (lc === 'unavailable') operatorUnavail[r.operator] = (operatorUnavail[r.operator] || 0) + 1;
+      }
     });
 
     const setKpi = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
@@ -341,6 +396,74 @@ export function init(container) {
         vendorEl.appendChild(opt);
       });
     }
+
+    // Operator dropdown rebuild -- auto-populates from whichever operators
+    // are actually present in the currently synced fleet data. No hardcoded
+    // operator list to maintain -- it's always in sync with what came back
+    // from the last sync.
+    const operatorEl = document.getElementById('tb-operator');
+    if (operatorEl) {
+      const current = operatorEl.value;
+      _suppressFilterEvents = true;
+      operatorEl.innerHTML = '<option value="">All Operators</option>';
+      [...operators].sort().forEach((o) => {
+        const opt = document.createElement('option');
+        opt.value = o; opt.textContent = o;
+        if (o === current) opt.selected = true;
+        operatorEl.appendChild(opt);
+      });
+      _suppressFilterEvents = false;
+    }
+
+    // Operator quick-shortcuts -- one chip per synced operator that
+    // currently has unavailable units, labeled with a live count. Click =
+    // jump straight to "this operator's unavailable units"
+    // (lifecycleState=unavailable + operator=<name>) in one action instead
+    // of two dropdown picks. Rebuilt every sync so it never drifts from
+    // what's actually in the fleet data (no manual maintenance).
+    const opPillsEl = document.getElementById('tb-op-pills');
+    const opSepEl   = document.getElementById('tb-op-sep');
+    if (opPillsEl) {
+      const activeOperator = opPillsEl.dataset.active || '';
+      const opsWithUnavail = [...operators]
+        .filter(o => operatorUnavail[o] > 0)
+        .sort((a, b) => (operatorUnavail[b] || 0) - (operatorUnavail[a] || 0));
+
+      if (opsWithUnavail.length > 0) {
+        opPillsEl.innerHTML = opsWithUnavail.map((o) => {
+          const isActive = o === activeOperator;
+          const safe = o.replace(/"/g, '&quot;');
+          return `<button class="tb-pill${isActive ? ' active' : ''}" data-operator="${safe}" title="Show ${o}'s unavailable units">${o} (${operatorUnavail[o]})</button>`;
+        }).join('');
+        opPillsEl.style.display = 'flex';
+        if (opSepEl) opSepEl.style.display = 'block';
+
+        opPillsEl.querySelectorAll('.tb-pill').forEach((chip) => {
+          chip.addEventListener('click', () => {
+            const name = chip.dataset.operator;
+            const isReclick = opPillsEl.dataset.active === name;
+            opPillsEl.dataset.active = isReclick ? '' : name;
+            opPillsEl.querySelectorAll('.tb-pill').forEach(c => c.classList.remove('active'));
+            if (!isReclick) chip.classList.add('active');
+
+            // Deselect the standard pills row -- this is a different filter
+            // mode, never show two conflicting "active" selections at once.
+            el.querySelectorAll('#tb-pills .tb-pill').forEach(p => p.classList.remove('active'));
+
+            const lc = document.getElementById('tb-lifecycle');
+            if (lc) lc.value = isReclick ? '' : 'unavailable';
+            bus.emit('ui:filter-change', { field: 'lifecycleState', value: isReclick ? '' : 'unavailable' });
+
+            if (operatorEl) { _suppressFilterEvents = true; operatorEl.value = isReclick ? '' : name; _suppressFilterEvents = false; }
+            bus.emit('ui:filter-change', { field: 'operator', value: isReclick ? '' : name });
+          });
+        });
+      } else {
+        opPillsEl.innerHTML = '';
+        opPillsEl.style.display = 'none';
+        if (opSepEl) opSepEl.style.display = 'none';
+      }
+    }
   });
 
   // ── AI connection status ──────────────────────────────────────────────────
@@ -363,7 +486,7 @@ export function init(container) {
     if (filterBar) filterBar.style.display = (to === 'fleet' || to === 'dashboard') ? 'flex' : 'none';
   });
 
-  // ── Quick-filter pills ────────────────────────────────────────────────────
+  // ── Quick-filter pills ──────────────────────────────────────────
   el.querySelectorAll('.tb-pill').forEach(pill => {
     pill.addEventListener('click', () => {
       el.querySelectorAll('.tb-pill').forEach(p => p.classList.remove('active'));
@@ -371,7 +494,15 @@ export function init(container) {
       const f = pill.dataset.filter;
       const lc  = document.getElementById('tb-lifecycle');
       const dom = document.getElementById('tb-domicile');
+      const op  = document.getElementById('tb-operator');
       if (dom) { _suppressFilterEvents = true; dom.value = ''; _suppressFilterEvents = false; }
+      // Clicking a standard pill exits "operator shortcut" mode -- clear it
+      // so a stale active-operator flag doesn't reappear on the next
+      // state:fleet rebuild (see operator shortcut chips below).
+      if (op) { _suppressFilterEvents = true; op.value = ''; _suppressFilterEvents = false; }
+      const opPillsEl = document.getElementById('tb-op-pills');
+      if (opPillsEl) opPillsEl.dataset.active = '';
+      bus.emit('ui:filter-change', { field: 'operator', value: '' });
 
       if (f === 'all') {
         if (lc) lc.value = '';

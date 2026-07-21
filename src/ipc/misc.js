@@ -292,6 +292,19 @@ function registerMiscIPC(ctx) {
       },
     });
     win.setMenuBarVisibility(false);
+
+    // Workflow Intelligence: attach capture if a recording is currently
+    // active (same gate + technique as open-popup in ipc/orcha.js).
+    try {
+      const { getActiveSessionId } = require('./workflow-intel');
+      const activeSession = getActiveSessionId();
+      if (activeSession) {
+        const { attachCapture } = require('../window/action_capture');
+        attachCapture(win, activeSession);
+      }
+    } catch (e) {
+      logger.warn('Workflow Intelligence capture attach failed:', e.message);
+    }
     // Intercept SPA pushState navigation to capture WR tab URLs
     win.webContents.on('did-finish-load', () => {
       win.webContents.executeJavaScript(`

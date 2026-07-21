@@ -26,6 +26,7 @@ const { registerMiscIPC }        = require('./misc');
 const { registerVendorIPC }   = require('../vendors');
 const { registerVendorHistoryIPC } = require('./vendor-history');
 const { registerSetupIPC }       = require('./setup');
+const { registerWorkflowIntelIPC } = require('./workflow-intel');
 const logger = require('../utils/logger')('ipc');
 
 function registerAllIPC(ctx) {
@@ -42,6 +43,7 @@ function registerAllIPC(ctx) {
   registerMiscIPC(ctx);
   registerVendorIPC();
   registerVendorHistoryIPC();
+  registerWorkflowIntelIPC(ctx);
   const { registerPartnerWRHandlers } = require("./partner-wr");
   registerPartnerWRHandlers(ctx);
   const { registerContactsHandlers } = require('./contacts');

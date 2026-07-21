@@ -278,24 +278,35 @@ function _renderPresetList() {
   const el = _el2('ec-preset-list');
   if (!el) return;
 
-  // Build combined list: sp presets (Op__DOM) first, then legacy (Op-only)
+  // FIX: previously `legacyKeys` excluded any operator that ALSO had a
+  // matching sp key ("!spKeys.some(s => s.startsWith(k + '__'))"). That
+  // silently hid a real, still-stored legacy preset from the list the
+  // moment an sp preset existed for the same operator -- so the user could
+  // never see it, let alone delete it, from this UI. Every stored preset
+  // (sp AND legacy) is now always shown as its own row with its own
+  // delete button, so nothing is ever invisibly orphaned.
   const spKeys     = Object.keys(_spEmails).filter(k => _spEmails[k]?.to);
-  const legacyKeys = Object.keys(_opEmails).filter(k => !spKeys.some(s => s.startsWith(k + '__')));
+  const legacyKeys = Object.keys(_opEmails).filter(k => _opEmails[k]?.to || _opEmails[k]?.cc);
 
   if (!spKeys.length && !legacyKeys.length) {
-    el.innerHTML = '<span class="ec-empty">No presets — save email recipients in Settings → Operators.</span>';
+    el.innerHTML = '<span class="ec-empty">No presets \u2014 save email recipients in Settings \u2192 Operators.</span>';
     return;
   }
 
   const spRows = spKeys.map(key => {
     const [opPart, domPart] = key.split('__');
     const preset = _spEmails[key];
-    const label  = domPart ? `${_safe(opPart)} · ${_safe(domPart)}` : _safe(opPart);
+    const label  = domPart ? `${_safe(opPart)} \u00b7 ${_safe(domPart)}` : _safe(opPart);
     const addr   = (preset.to || '').slice(0, 44) + ((preset.to || '').length > 44 ? '...' : '');
+    // FIX: sp-type rows previously had NO delete button at all -- Settings
+    // -> Operators & SP is described in this file's own comments as the
+    // "source of truth" for these presets, meaning most real presets are
+    // this type, yet there was no way to remove one from the Composer.
     return `<div class="ec-preset-row" data-key="${_safe(key)}" data-type="sp">
       <span class="ec-preset-op">${label}</span>
       <span class="ec-preset-addr">${_safe(addr)}</span>
       <button class="ec-preset-load-btn" data-key="${_safe(key)}" data-type="sp">Load</button>
+      <button class="ec-preset-del-btn settings-btn--danger" data-key="${_safe(key)}" data-type="sp" title="Delete this preset">\u00d7</button>
     </div>`;
   });
 
@@ -306,7 +317,7 @@ function _renderPresetList() {
       <span class="ec-preset-op">${_safe(op)}</span>
       <span class="ec-preset-addr">${_safe(addr)}</span>
       <button class="ec-preset-load-btn" data-key="${_safe(op)}" data-type="legacy">Load</button>
-      <button class="ec-preset-del-btn settings-btn--danger" data-key="${_safe(op)}">×</button>
+      <button class="ec-preset-del-btn settings-btn--danger" data-key="${_safe(op)}" data-type="legacy" title="Delete this preset">\u00d7</button>
     </div>`;
   });
 
@@ -319,7 +330,7 @@ function _renderPresetList() {
 }
 
 function _wirePresets() {
-  // "Save preset" — writes to legacy store (op-only key) AND to spConfig.emails (Op__DOM)
+  // "Save preset" -- writes to legacy store (op-only key) AND to spConfig.emails (Op__DOM)
   _el2('ec-preset-save').addEventListener('click', async () => {
     const op  = (_el2('ec-operator').value || '').trim().toUpperCase();
     const dom = (_el2('ec-domicile').value || '').trim().toUpperCase();
@@ -331,8 +342,19 @@ function _wirePresets() {
     _opEmails[op] = { to, cc };
     try { await emailBridge.saveOpEmails(_opEmails); } catch (_) {}
 
-    // Write to spConfig.emails under Op__DOM key (if domicile is set)
-    if (dom && dom !== 'ALL') {
+    // FIX: was `if (dom && dom !== 'ALL')` -- since the domicile select's
+    // own default option IS "ALL" (see _domOptions()), `dom` is realistically
+    // NEVER falsy, but this condition specifically refused to persist an
+    // "ALL domicile" preset to spConfig.emails at all. That's the confirmed
+    // root cause of "I can't edit the saved preset" whenever the preset
+    // being edited is an Op__ALL entry (the common case for an
+    // operator-wide preset with no per-domicile override): editing To/CC
+    // and clicking Save silently updated ONLY the legacy store, while the
+    // Op__ALL sp preset -- which _autoFillRecipients()/_applyPreset() both
+    // prioritize over legacy -- was left completely untouched, so the "old"
+    // address kept reappearing every time. Op__ALL is a valid, already-read
+    // key elsewhere in this file (see _autoFillRecipients()'s `allKey`).
+    if (dom) {
       try {
         const existing = await spBridge.getConfig().catch(() => ({})) || {};
         const emails   = existing.emails || {};
@@ -343,17 +365,17 @@ function _wirePresets() {
       } catch (_) {}
     }
 
-    toast.show('success', `Preset saved — ${op}${dom && dom !== 'ALL' ? ' · ' + dom : ''}`, 2500);
+    toast.show('success', `Preset saved \u2014 ${op}${dom ? ' \u00b7 ' + dom : ''}`, 2500);
     _renderPresetList();
   });
 
-  // "Load preset" button (header shortcut — loads for currently selected op)
+  // "Load preset" button (header shortcut -- loads for currently selected op)
   _el2('ec-preset-load').addEventListener('click', () => {
     const op  = (_el2('ec-operator').value || '').trim().toUpperCase();
     const dom = (_el2('ec-domicile').value || '').trim().toUpperCase();
     if (!op) { toast.show('warn', 'Select an operator first', 3000); return; }
     // Try sp key first, fall back to legacy
-    const spKey = dom && dom !== 'ALL' ? `${op}__${dom}` : null;
+    const spKey = dom ? `${op}__${dom}` : null;
     if (spKey && _spEmails[spKey]) { _applyPreset(spKey, 'sp'); }
     else { _applyPreset(op, 'legacy'); }
   });
@@ -365,14 +387,27 @@ function _wirePresets() {
     if (loadBtn) {
       _applyPreset(loadBtn.dataset.key, loadBtn.dataset.type);
     } else if (delBtn) {
-      const op = delBtn.dataset.key;
-      delete _opEmails[op];
+      const key  = delBtn.dataset.key;
+      const type = delBtn.dataset.type;
       try {
-        await emailBridge.saveOpEmails(_opEmails);
+        if (type === 'sp') {
+          // FIX: this branch did not exist before -- sp-type presets
+          // (Settings-sourced, the primary store per this file's own
+          // comments) had NO delete path anywhere in the Composer. Deleting
+          // here removes the specific Op__DOM key from spConfig.emails.
+          const existing = await spBridge.getConfig().catch(() => ({})) || {};
+          const emails   = existing.emails || {};
+          delete emails[key];
+          await spBridge.saveConfig({ ...existing, emails });
+          _spEmails = emails;
+        } else {
+          delete _opEmails[key];
+          await emailBridge.saveOpEmails(_opEmails);
+        }
         _renderPresetList();
-        toast.show('info', 'Preset deleted: ' + op, 2000);
-      } catch (e) {
-        toast.show('error', 'Delete failed: ' + e.message);
+        toast.show('info', 'Preset deleted: ' + key.replace('__', ' \u00b7 '), 2000);
+      } catch (err) {
+        toast.show('error', 'Delete failed: ' + err.message);
       }
     }
   });
@@ -406,9 +441,13 @@ function _applyPreset(key, type) {
     if (opt) opSel.value = opt.value;
   }
 
-  // Set domicile select (sp presets only)
+  // Set domicile select (sp presets only) -- FIX: was
+  // `domCode && domCode !== 'ALL'`, which skipped setting the select back to
+  // "ALL" when loading an Op__ALL preset, leaving whatever domicile was
+  // previously selected showing on screen even though the loaded preset
+  // is actually the operator-wide one.
   const domSel = _el2('ec-domicile');
-  if (domSel && domCode && domCode !== 'ALL') {
+  if (domSel && domCode) {
     const opt = Array.from(domSel.options).find(o => o.value.toUpperCase() === domCode.toUpperCase());
     if (opt) domSel.value = opt.value;
   }
@@ -763,7 +802,15 @@ export async function init(container) {
       if (toField) toField.value = data.to || '';
       if (subField) subField.value = data.subject || '';
       if (bodyField) bodyField.value = data.body || '';
-      bus.emit('ui:view-change', {to: 'email'});
+      // FIX: was emitting {to: 'email'} -- 'email' matches no route in
+      // app.js's ui:view-change switch (it checks 'email-composer') and no
+      // tab in toolbar.js's TAB_VIEW map, so nothing ever displayed this
+      // view -- it just silently hid the dashboard's filter bar (and the
+      // fleet table itself, since app.js's router falls through to 'none'
+      // for every view it doesn't recognize) until the user re-clicked
+      // Dashboard. Use the real route name so an AI-drafted email actually
+      // surfaces for review instead of vanishing the toolbar in the background.
+      bus.emit('ui:view-change', { from: 'fleet', to: 'email-composer' });
     }
   });
 
@@ -786,10 +833,25 @@ export async function init(container) {
     _updateUnitCount();
   });
 
-  // Show/hide based on view — refresh selects with live data on every open
-  bus.on('ui:view-change', ({ to }) => {
+  // Show/hide based on view -- refresh selects with live data on every open
+  // FIX: _spEmails / _opEmails were only ever loaded ONCE at init() (app
+  // boot) and never again. This view is mounted once and just shown/hidden
+  // via display:none/flex -- it is never re-created -- so any preset
+  // deleted or edited via Settings -> Operators & SP (the primary source
+  // of these presets, per this file's own comments) was invisible to this
+  // already-running Composer instance until a full app restart. Concretely:
+  // delete a preset in Settings, come back here, change operator/domicile
+  // -> _autoFillRecipients() (wired in _wireScope()) reads the STALE
+  // in-memory copy and re-populates the "deleted" address anyway. This is
+  // the confirmed root cause of "I delete a saved preset but it still
+  // sends to the deleted preset." Re-fetching both stores fresh every time
+  // this view becomes visible closes that gap without needing a
+  // cross-view event bus wire-up.
+  bus.on('ui:view-change', async ({ to }) => {
     _el.style.display = to === 'email-composer' ? 'flex' : 'none';
     if (to === 'email-composer') {
+      await _loadSpEmails();
+      await _loadPresets();
       _refreshOperators();
       const opSel = _el2('ec-operator');
       if (opSel) {
@@ -807,6 +869,7 @@ export async function init(container) {
       _updateUnitCount();
     }
   });
+
 
 
   // ── S28: Auto-email handler — fires when scheduler triggers ──────────────

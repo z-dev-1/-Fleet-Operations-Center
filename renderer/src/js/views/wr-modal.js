@@ -160,6 +160,31 @@ function _buildHTML(unit) {
       </div>
     </div>
 
+    <!-- Asset Condition -- FIX: this field previously did not exist anywhere
+         in the payload builder. The real AAP wizard has an "Asset Condition"
+         step (Safe to Move / Unsafe to Move) that the AI autofill agent was
+         hitting completely blind -- no data, no instruction -- and guessing
+         wrong (confirmed live: picked "Safe" on a unit with a clutch
+         disengagement fault). This is a real vehicle-safety classification;
+         it must be an explicit human decision, never an AI guess, same
+         principle as the existing Urgent checkbox above. Defaults to
+         "Unsafe to Move" when Urgent is checked (mirrors partner-wr.js's
+         own existing safety-issue -> urgent=true rule) but is always
+         overridable. -->
+    <div class="wr-section">
+      <div class="wr-section__title">Asset Condition</div>
+      <div class="wr-two-col">
+        <label class="settings-label settings-label--inline">
+          <input id="wr-condition-safe" type="radio" name="wr-condition" value="Safe to Move" />
+          Safe to Move
+        </label>
+        <label class="settings-label settings-label--inline">
+          <input id="wr-condition-unsafe" type="radio" name="wr-condition" value="Unsafe to Move" />
+          Unsafe to Move
+        </label>
+      </div>
+    </div>
+
     <!-- Component Areas -->
     <div class="wr-section">
       <div class="wr-section__title">

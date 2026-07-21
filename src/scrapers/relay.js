@@ -763,7 +763,17 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
           }
 
           // Phase 1 offsite link is fallback if Phase 3 found nothing
-          const _finalOffsite = convOffsite
+          // FIX: was `const _finalOffsite` -- but the Phase 3.5 upgrade block
+          // below (line ~786) reassigns it once ASIST enrichment succeeds
+          // (`_finalOffsite = {...}`). That threw "Assignment to constant
+          // variable" every single time an upgrade actually had something to
+          // apply -- confirmed live for unit 321549 just now: enrichment
+          // correctly found the real Fleet Estimate URL
+          // (.../fleet/estimates/21059112), logged "Phase3.5 result | source:
+          // estimate", and then immediately crashed before that result could
+          // ever be written to the unit record. This is why "it synced but
+          // nothing changed" -- the enrichment worked, the save didn't.
+          let _finalOffsite = convOffsite
             || (wrData.offsiteShopEventUrl ? { caseNumber: wrData.offsiteShopEvent, url: wrData.offsiteShopEventUrl } : null);
 
           // Phase 3.5: Volvo ASIST enrichment -- follow SR -> Case -> Fleet Estimate

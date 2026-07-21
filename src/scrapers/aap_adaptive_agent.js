@@ -293,7 +293,7 @@ function buildActionScript(actions) {
 // ═══════════════════════════════════════════════════════════════
 // ORCHA PROMPT BUILDER — constructs the AI prompt for each step
 // ═══════════════════════════════════════════════════════════════
-function buildPrompt(snapshot, payload, stepHistory) {
+function buildPrompt(snapshot, payload, stepHistory, lessonContext) {
   return `You are Orcha, filling out an AAP (Amazon Asset Portal) Work Request wizard. You can see the current page state below.
 
 YOUR GOAL: Fill all fields on the current page with the correct values from the payload, then click "Next" (or "Submit" on the final page).
@@ -403,11 +403,29 @@ async function runAdaptiveWR(payload, askAI, log) {
   // Open AAP in a BrowserWindow
   const win = new BrowserWindow({
     width: 1280, height: 900,
-    title: '⚡ AAP Work Request — ' + (payload.unit || ''),
+    title: '\u{1F9E0} AAP Work Request \u2014 ' + (payload.unit || ''),
     show: true,
     webPreferences: { nodeIntegration: false, contextIsolation: true }
   });
-  
+
+  // Workflow Intelligence: attach capture if a recording is currently in
+  // progress -- this is THE window a user manually finishes a WR in after
+  // the AI loop gets stuck or picks the wrong option (confirmed real cases:
+  // wrong Asset Condition, missed Title). Capturing what the human actually
+  // did here, across a few real runs (standard repair / tow / dealer-routed),
+  // is what feeds the recorded-replay engine this is being built towards.
+  // Observation-only -- see action_capture.js's header for the safety note.
+  try {
+    const { getActiveSessionId } = require('../ipc/workflow-intel');
+    const activeSession = getActiveSessionId();
+    if (activeSession) {
+      const { attachCapture } = require('../window/action_capture');
+      attachCapture(win, activeSession);
+    }
+  } catch (e) {
+    log('[AdaptiveWR] Workflow Intelligence capture attach failed: ' + e.message);
+  }
+
   win.loadURL(aapUrl);
   log('[AdaptiveWR] AAP window opened, waiting for load...');
   
@@ -462,7 +480,14 @@ async function runAdaptiveWR(payload, askAI, log) {
     log(`[AdaptiveWR] Page has ${snapshot.elements.length} elements. Text: ${snapshot.pageText.substring(0, 100)}...`);
     
     // 4. Ask Orcha what to do
-    const prompt = buildPrompt(snapshot, payload, stepHistory);
+    // FIX: buildPrompt() references ${lessonContext} in its template but has
+    // its own function scope -- it never had access to the lessonContext
+    // computed above in runAdaptiveWR (line ~426). That threw
+    // "ReferenceError: lessonContext is not defined" on every single call,
+    // which is the root cause of "Open in AAP (autofill)" doing nothing --
+    // the whole adaptive-fill loop crashed before it ever sent a prompt to
+    // Orcha or touched the page.
+    const prompt = buildPrompt(snapshot, payload, stepHistory, lessonContext);
     let aiResponse;
     try {
       log('[AdaptiveWR] Asking Orcha...');

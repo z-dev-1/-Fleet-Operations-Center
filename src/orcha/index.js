@@ -21,4 +21,5 @@ module.exports = {
   retention:         require('./retention'),
   autoLogin:         require('./auto-login'),
   playwrightBridge:  require('./playwright_bridge'),
+  workflowLearn:     require('./workflow-learn'),
 };

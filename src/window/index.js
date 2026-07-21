@@ -672,6 +672,17 @@ function initWindows(ctx) {
       backgroundColor: '#0d1117',
       show: false,
       center: true,
+      resizable: true,
+      // Frameless -- the custom in-app toolbar (renderer/src/js/components/
+      // toolbar.js) already ships its own drag region (-webkit-app-region:
+      // drag on #topbar in fleet.css) plus its own minimize/maximize/close
+      // buttons wired to win:minimize/maximize/close below. Without
+      // `frame:false` here, Windows was ALSO drawing its own native
+      // titlebar + default File/Edit/View/Window menu on top of that --
+      // two competing, confusing sets of window chrome. autoHideMenuBar is
+      // a defensive second layer against any residual default menu.
+      frame: false,
+      autoHideMenuBar: true,
       webPreferences: {
         preload:          path.join(ROOT_DIR, 'preload.js'),
         contextIsolation: true,
@@ -680,6 +691,13 @@ function initWindows(ctx) {
         devTools:         true,
       },
     });
+    Menu.setApplicationMenu(null);
+
+    // Forward maximize/restore state to the renderer so the custom toolbar
+    // button can swap its icon -- native titlebars do this automatically;
+    // a frameless window has to do it by hand.
+    mainWindow.on('maximize',   () => { if (!mainWindow.isDestroyed()) mainWindow.webContents.send('win:state-changed', { maximized: true }); });
+    mainWindow.on('unmaximize', () => { if (!mainWindow.isDestroyed()) mainWindow.webContents.send('win:state-changed', { maximized: false }); });
 
     // Keep all links inside the app
     // Open external URL in a popup window with Back to Fleet button
@@ -1135,6 +1153,9 @@ function initWindows(ctx) {
   ipcMain.on('win:minimize', () => { if (mainWindow) mainWindow.minimize(); });
   ipcMain.on('win:maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
   ipcMain.on('win:close', () => { if (mainWindow) mainWindow.close(); });
+  // Lets the renderer sync the maximize/restore icon on first paint,
+  // before the first 'maximize'/'unmaximize' event has fired.
+  ipcMain.handle('win:is-maximized', () => !!(mainWindow && mainWindow.isMaximized()));
 
 
   ipcMain.handle('app:version', () => app.getVersion());
