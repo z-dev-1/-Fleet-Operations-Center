@@ -7,6 +7,8 @@
  */
 
 import bus from '../bus.js';
+import * as notifSounds from '../notif-sounds.js';
+import { settings as settingsBridge } from '../bridge.js';
 
 let _items = [];
 let _el    = null;
@@ -58,6 +60,20 @@ export function init() {
 
   document.getElementById('notif-clear').addEventListener('click', _markAllRead);
 
+  // FEATURE (2026-07-22): sound notifications -- load saved prefs once on
+  // init, and stay live-updated via bus event whenever the user changes
+  // the toggle/volume slider in Settings (see settings.js
+  // _wireNotifications). See notif-sounds.js for the full design writeup
+  // (synthesized tones, no audio asset files, type inferred from icon).
+  settingsBridge.getAll().then((all) => {
+    const n = (all && all.notifications) || {};
+    notifSounds.configure({
+      enabled: n.soundsEnabled !== false, // default ON if never set
+      volume: typeof n.soundVolume === 'number' ? n.soundVolume : 0.5,
+    });
+  }).catch(() => {});
+  bus.on('notif-sounds:config', (prefs) => notifSounds.configure(prefs));
+
   // Toggle open/close
   bus.on('ui:notif-toggle', () => {
     _el.classList.toggle('open');
@@ -72,6 +88,7 @@ export function init() {
     if (_items.length > 20) _items.length = 20;
     _render();
     if (_el.classList.contains('open')) _markAllRead();
+    notifSounds.playForNotification(n); // FEATURE (2026-07-22)
   });
 
   // Wire the topbar bell button

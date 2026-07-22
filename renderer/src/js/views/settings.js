@@ -15,6 +15,7 @@
  */
 
 import bus                                         from '../bus.js';
+import * as notifSounds                            from '../notif-sounds.js';
 import { settings as settingsBridge }              from '../bridge.js';
 import { auth     as authBridge }                  from '../bridge.js';
 import { credentials as credsBridge }              from '../bridge.js';
@@ -401,6 +402,22 @@ function _html() {
           <div class="sd-toggle-row">
             <span class="sd-toggle-label">OS notification on sync error</span>
             <input type="checkbox" id="notif-sync-err" checked/>
+          </div>
+          <!-- FEATURE (2026-07-22): sound notifications -- synthesized
+               tones (no audio asset files), a distinct pattern per
+               notification type, inferred automatically from each
+               notification's existing icon field. See
+               renderer/src/js/notif-sounds.js for the full design. -->
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">Sound notifications</span>
+            <input type="checkbox" id="notif-sounds-enabled" checked/>
+          </div>
+          <div class="sd-field">
+            <div class="sd-label">Volume</div>
+            <input type="range" id="notif-sounds-volume" min="0" max="100" value="50" style="width:100%"/>
+          </div>
+          <div class="sd-btn-row">
+            <button class="sd-btn secondary" id="notif-sounds-test" type="button">Test sounds</button>
           </div>
         </div>
 
@@ -1818,19 +1835,53 @@ function _wireAsana() {
 
 // ── Section: Notifications ───────────────────────────────────────────────────
 function _wireNotifications() {
-  // No-op on change — preferences stored in _populate / settingsBridge
-  ['notif-auth-fail','notif-sync-ok','notif-sync-err'].forEach((id) => {
+  // BUG-AWARE (2026-07-22): settings:save fully REPLACES whatever value
+  // is stored under a key (confirmed in src/ipc/settings.js -- `s[key] =
+  // value`, not a merge) -- so every save here must include ALL fields
+  // under 'notifications', not just the one that changed, or the other
+  // toggles would silently get wiped back to undefined.
+  function _saveAll() {
+    const soundsEnabledEl = document.getElementById('notif-sounds-enabled');
+    const volumeEl = document.getElementById('notif-sounds-volume');
+    const volume = volumeEl ? (parseInt(volumeEl.value, 10) || 0) / 100 : 0.5;
+    const soundsEnabled = soundsEnabledEl ? !!soundsEnabledEl.checked : true;
+    settingsBridge.save('notifications', {
+      authFail:     document.getElementById('notif-auth-fail').checked,
+      syncOk:       document.getElementById('notif-sync-ok').checked,
+      syncErr:      document.getElementById('notif-sync-err').checked,
+      soundsEnabled,
+      soundVolume:  volume,
+    }).catch(() => {});
+    // FEATURE (2026-07-22): live-update the already-running notif sound
+    // module immediately -- no restart needed to see/hear the change.
+    bus.emit('notif-sounds:config', { enabled: soundsEnabled, volume });
+  }
+
+  ['notif-auth-fail', 'notif-sync-ok', 'notif-sync-err', 'notif-sounds-enabled'].forEach((id) => {
     const el = document.getElementById(id);
-    if (!el) return;
-    el.addEventListener('change', () => {
-      settingsBridge.save('notifications', {
-        authFail:  document.getElementById('notif-auth-fail').checked,
-        syncOk:    document.getElementById('notif-sync-ok').checked,
-        syncErr:   document.getElementById('notif-sync-err').checked,
-      }).catch(() => {});
+    if (el) el.addEventListener('change', _saveAll);
+  });
+
+  const volumeEl = document.getElementById('notif-sounds-volume');
+  if (volumeEl) volumeEl.addEventListener('input', _saveAll);
+
+  const testBtn = document.getElementById('notif-sounds-test');
+  if (testBtn) testBtn.addEventListener('click', () => {
+    // Briefly force-enable playback for the test regardless of the
+    // current checkbox state, using whatever volume is currently set,
+    // so "Test sounds" always audibly demonstrates all 4 types even if
+    // the user is mid-way through deciding whether to enable them.
+    const volumeEl2 = document.getElementById('notif-sounds-volume');
+    const volume = volumeEl2 ? (parseInt(volumeEl2.value, 10) || 0) / 100 : 0.5;
+    const prevConfig = notifSounds.getConfig();
+    notifSounds.configure({ enabled: true, volume });
+    ['success', 'error', 'alert', 'message'].forEach((type, i) => {
+      setTimeout(() => notifSounds.play(type), i * 700);
     });
+    setTimeout(() => notifSounds.configure(prevConfig), 4 * 700 + 300);
   });
 }
+
 
 // ── Section: Accounts (S11) ──────────────────────────────────────────────────
 function _wireAccounts() {
@@ -2295,9 +2346,13 @@ function _populate() {
       const af = document.getElementById('notif-auth-fail');
       const so = document.getElementById('notif-sync-ok');
       const se = document.getElementById('notif-sync-err');
+      const sndEn = document.getElementById('notif-sounds-enabled');
+      const sndVol = document.getElementById('notif-sounds-volume');
       if (af && n.authFail != null) af.checked = n.authFail;
       if (so && n.syncOk   != null) so.checked = n.syncOk;
       if (se && n.syncErr  != null) se.checked = n.syncErr;
+      if (sndEn) sndEn.checked = n.soundsEnabled !== false; // default ON if never set
+      if (sndVol && typeof n.soundVolume === 'number') sndVol.value = Math.round(n.soundVolume * 100);
     }
   }).catch(() => {});
 }
