@@ -247,26 +247,132 @@ const CLAUDE_BIN = process.platform === 'win32'
   : path.join(os.homedir(), '.toolbox', 'bin', 'claude');
 const CLAUDE_TIMEOUT_MS = 60000;
 
+// Persistent claude-code process (stream-json) -- avoids ~13s cold-start
+// penalty on every call. First call after idle/spawn still pays startup cost;
+// subsequent calls on the same warm process take ~2s (measured).
+let _claudeProc = null;
+let _claudeBusy = false;
+let _claudeCurrentJob = null;
+const _claudeQueue = [];
+let _claudeStdoutBuf = '';
+let _claudeIdleTimer = null;
+const CLAUDE_IDLE_KILL_MS = 10 * 60 * 1000; // kill warm process after 10min idle
+
+function _resetClaudeIdleTimer() {
+  if (_claudeIdleTimer) clearTimeout(_claudeIdleTimer);
+  _claudeIdleTimer = setTimeout(() => {
+    if (_claudeProc && !_claudeBusy) {
+      logger.info('claude-code: killing idle warm process (10min inactive)');
+      _claudeProc.kill();
+      _claudeProc = null;
+    }
+  }, CLAUDE_IDLE_KILL_MS);
+}
+
+function _failClaudeQueue(err) {
+  if (_claudeCurrentJob) {
+    clearTimeout(_claudeCurrentJob._timer);
+    _claudeCurrentJob.reject(err);
+    _claudeCurrentJob = null;
+  }
+  while (_claudeQueue.length) {
+    const job = _claudeQueue.shift();
+    job.reject(err);
+  }
+  _claudeBusy = false;
+}
+
+function _ensureClaudeProcess() {
+  if (_claudeProc && !_claudeProc.killed) return;
+  if (!fs.existsSync(CLAUDE_BIN)) {
+    throw new Error('claude-code not installed — run: toolbox install claude-code');
+  }
+  logger.info('claude-code: spawning persistent process');
+  const proc = spawn(
+    CLAUDE_BIN,
+    ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json',
+     '--verbose', '--no-session-persistence'],
+    { stdio: ['pipe', 'pipe', 'pipe'] }
+  );
+  _claudeStdoutBuf = '';
+
+  proc.stdout.on('data', (chunk) => {
+    _claudeStdoutBuf += chunk.toString();
+    const lines = _claudeStdoutBuf.split('\n');
+    _claudeStdoutBuf = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let obj;
+      try { obj = JSON.parse(line); } catch (e) { continue; }
+      if (obj.type === 'result' && _claudeCurrentJob) {
+        const job = _claudeCurrentJob;
+        clearTimeout(job._timer);
+        _claudeCurrentJob = null;
+        _claudeBusy = false;
+        if (obj.is_error) {
+          job.reject(new Error('claude-code error: ' + (obj.result || 'unknown')));
+        } else {
+          const text = (obj.result || '').trim();
+          if (!text) job.reject(new Error('claude-code returned empty'));
+          else job.resolve(text);
+        }
+        _resetClaudeIdleTimer();
+        _processClaudeQueue();
+      }
+    }
+  });
+
+  proc.stderr.on('data', (d) => logger.warn('claude-code stderr: ' + d.toString().slice(0, 300)));
+
+  proc.on('exit', (code) => {
+    logger.warn('claude-code: persistent process exited (code ' + code + ')');
+    _claudeProc = null;
+    _failClaudeQueue(new Error('claude-code process exited unexpectedly'));
+  });
+
+  proc.on('error', (e) => {
+    logger.warn('claude-code: persistent process error: ' + e.message);
+    _claudeProc = null;
+    _failClaudeQueue(new Error('claude-code spawn error: ' + e.message));
+  });
+
+  _claudeProc = proc;
+  _resetClaudeIdleTimer();
+}
+
+function _processClaudeQueue() {
+  if (_claudeBusy || _claudeQueue.length === 0) return;
+  const job = _claudeQueue.shift();
+  _claudeCurrentJob = job;
+  _claudeBusy = true;
+  job._timer = setTimeout(() => {
+    _claudeCurrentJob = null;
+    _claudeBusy = false;
+    job.reject(new Error('claude-code timeout'));
+    _processClaudeQueue();
+  }, CLAUDE_TIMEOUT_MS);
+  try {
+    const msg = { type: 'user', message: { role: 'user', content: job.prompt } };
+    _claudeProc.stdin.write(JSON.stringify(msg) + '\n');
+  } catch (e) {
+    clearTimeout(job._timer);
+    _claudeCurrentJob = null;
+    _claudeBusy = false;
+    job.reject(new Error('claude-code stdin write failed: ' + e.message));
+    _processClaudeQueue();
+  }
+}
+
 function _tryClaudeCode(prompt) {
   return new Promise((resolve, reject) => {
-    if (!fs.existsSync(CLAUDE_BIN)) {
-      return reject(new Error('claude-code not installed — run: toolbox install claude-code'));
+    try {
+      _ensureClaudeProcess();
+    } catch (e) {
+      return reject(e);
     }
-    // Trim prompt to practical CLI limit
     const trimmed = prompt.length > 8000 ? prompt.slice(0, 8000) + '...[trimmed]' : prompt;
-    const timer = setTimeout(() => reject(new Error('claude-code timeout')), CLAUDE_TIMEOUT_MS);
-    execFile(
-      CLAUDE_BIN,
-      ['-p', trimmed],
-      { maxBuffer: 2 * 1024 * 1024, timeout: CLAUDE_TIMEOUT_MS },
-      (err, stdout, stderr) => {
-        clearTimeout(timer);
-        if (err) return reject(new Error('claude-code error: ' + (err.message || stderr || 'unknown')));
-        const text = (stdout || '').trim();
-        if (!text) return reject(new Error('claude-code returned empty'));
-        resolve(text);
-      }
-    );
+    _claudeQueue.push({ prompt: trimmed, resolve, reject });
+    _processClaudeQueue();
   });
 }
 
