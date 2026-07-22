@@ -148,6 +148,7 @@ function registerOrchaIPC(ctx) {
     const win = new BrowserWindow({
       width: 1200, height: 800, show: true,
       title: title ? String(title).slice(0, 60) : safeUrl.substring(0, 60),
+      icon: require('../config/app-icon').getAppIconPath(),
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
     win.loadURL(safeUrl);

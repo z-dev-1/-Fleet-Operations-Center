@@ -185,6 +185,7 @@ function registerScrapersIPC(ctx) {
       let settled = false;
       const aapWin = new BrowserWindow({
         width: 1200, height: 850, title: 'AAP - Create Work Request',
+        icon: require('../config/app-icon').getAppIconPath(),
         webPreferences: { nodeIntegration: false, contextIsolation: true },
       });
 

@@ -132,6 +132,7 @@ function registerCredentialIPC() {
     const win = new BrowserWindow({
       width: 1200, height: 800, show: true,
       title: 'Sign in \u2014 ' + vendorId,
+      icon: require('../config/app-icon').getAppIconPath(),
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,

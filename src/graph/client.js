@@ -126,6 +126,7 @@ function signInInteractive() {
     pca.getAuthCodeUrl({ scopes: SCOPES, redirectUri: REDIRECT_URI }).then((authUrl) => {
       const win = new BrowserWindow({
         width: 900, height: 700, title: 'Sign in to Outlook (Microsoft)',
+        icon: require('../config/app-icon').getAppIconPath(),
         webPreferences: { nodeIntegration: false, contextIsolation: true, partition: 'persist:graph-signin' },
       });
       win.setMenuBarVisibility(false);

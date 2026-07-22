@@ -27,6 +27,7 @@ const fs     = require('fs');
 const logger = require('../utils/logger')('window');
 const { attachAutoLogin, partitionForUrl } = require('../orcha/auto-login');
 const { P }  = require('../config/paths');
+const { getAppIconPath } = require('../config/app-icon');
 const store  = require('../store');
 const { isSetupComplete } = require('../../setup/state');
 const { buildWRUrls } = require('./wr_capture');
@@ -670,6 +671,7 @@ function initWindows(ctx) {
       width: 900, height: 700,
       minWidth: 600, minHeight: 500,
       title: 'Fleet Operations \u2014 Sign in\u2026',
+      icon: getAppIconPath(), // FEATURE (2026-07-22): real app icon instead of default Electron icon in taskbar/titlebar
       backgroundColor: '#0d1117',
       show: false,
       center: true,
@@ -708,6 +710,7 @@ function initWindows(ctx) {
       const popup = new BW({
         width: 1400, height: 900,
         title: 'Fleet Operations - External',
+        icon: getAppIconPath(),
         backgroundColor: '#0d1117',
         autoHideMenuBar: true,
         webPreferences: { nodeIntegration: false, contextIsolation: true },
@@ -1094,6 +1097,7 @@ function initWindows(ctx) {
     const setupWin = new BrowserWindow({
       width: 1400, height: 900,
       title: 'AAP Column Setup \u2014 configure columns, then close this window',
+      icon: getAppIconPath(),
       webPreferences: {
         nodeIntegration:  false,
         contextIsolation: true,
@@ -1145,6 +1149,7 @@ function initWindows(ctx) {
     wizWin = new BrowserWindow({
       width: 720, height: 720,
       minWidth: 640, minHeight: 560,
+      icon: getAppIconPath(),
       frame: false, resizable: true, center: true, show: false,
       webPreferences: {
         preload:          path.join(ROOT_DIR, 'preload.js'),
@@ -1212,6 +1217,7 @@ function initWindows(ctx) {
     if (!url || !/^https?:\/\//i.test(url)) return;
     const win = new BrowserWindow({
       width: 1400, height: 900, title: 'Uptake',
+      icon: getAppIconPath(),
       backgroundColor: '#0d1117', autoHideMenuBar: true,
       webPreferences: { nodeIntegration: false, contextIsolation: true, session: session.defaultSession },
     });
@@ -1225,6 +1231,7 @@ function initWindows(ctx) {
     if (!url || !/^https?:\/\//i.test(url)) return;
     const win = new BrowserWindow({
       width: 1400, height: 900, title: 'AAP Relay \u2013 Service Request',
+      icon: getAppIconPath(),
       backgroundColor: '#0d1117', autoHideMenuBar: true,
       webPreferences: { nodeIntegration: false, contextIsolation: true, session: session.defaultSession },
     });

@@ -53,6 +53,7 @@ function registerMiscIPC(ctx) {
     fs.writeFileSync(tmpFile, payload.html, 'utf8');
     const win = new BrowserWindow({
       width: 980, height: 860, title: 'Fleet Email Preview',
+      icon: require('../config/app-icon').getAppIconPath(),
       backgroundColor: '#f6f8fa', autoHideMenuBar: true,
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
@@ -106,7 +107,7 @@ function registerMiscIPC(ctx) {
     if (!finalHtml || finalHtml.length < 100) return { success: false, error: 'HTML too short' };
     const { session: eSession } = require('electron');
     return new Promise((resolve) => {
-      const win = new BrowserWindow({ width: 1100, height: 800, show: true, title: 'Fleet Email', backgroundColor: '#f6f8fa', autoHideMenuBar: true, webPreferences: { nodeIntegration: false, contextIsolation: true, session: eSession.defaultSession } });
+      const win = new BrowserWindow({ width: 1100, height: 800, show: true, title: 'Fleet Email', icon: require('../config/app-icon').getAppIconPath(), backgroundColor: '#f6f8fa', autoHideMenuBar: true, webPreferences: { nodeIntegration: false, contextIsolation: true, session: eSession.defaultSession } });
       const owaUrl = 'https://outlook.office365.com/mail/deeplink/compose' + '?to=' + encodeURIComponent(to||'') + '&cc=' + encodeURIComponent(cc||'') + '&subject=' + encodeURIComponent(subject||'');
       win.loadURL(owaUrl);
       let attempts = 0, done = false;
@@ -203,7 +204,7 @@ function registerMiscIPC(ctx) {
 
   handle('uptake:open-screenshot', (_e, filePath) => {
     if (!filePath || !fs.existsSync(filePath)) return { ok: false, error: 'File not found' };
-    const imgWin = new BrowserWindow({ width: 1440, height: 900, title: 'Uptake - Last Scrape', backgroundColor: '#0d1117', webPreferences: { nodeIntegration: false, contextIsolation: true } });
+    const imgWin = new BrowserWindow({ width: 1440, height: 900, title: 'Uptake - Last Scrape', icon: require('../config/app-icon').getAppIconPath(), backgroundColor: '#0d1117', webPreferences: { nodeIntegration: false, contextIsolation: true } });
     imgWin.loadFile(filePath);
     return { ok: true };
   });
@@ -297,6 +298,7 @@ function registerMiscIPC(ctx) {
     const win = new BrowserWindow({
       width: 1280, height: 860,
       title: 'AAP Asset',
+      icon: require('../config/app-icon').getAppIconPath(),
       backgroundColor: '#0d1117',
       center: true,
       webPreferences: {
@@ -434,6 +436,7 @@ function registerMiscIPC(ctx) {
     const opts = (x, title) => ({
       width: halfW, height: height, x, y: 0,
       title: title || 'Fleet Operations',
+      icon: require('../config/app-icon').getAppIconPath(),
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
 

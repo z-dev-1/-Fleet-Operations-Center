@@ -37,6 +37,7 @@ function registerSlackIPC() {
     return new Promise((resolve) => {
       const slackWin = new BrowserWindow({
         width: 900, height: 700, title: 'Sign in to Slack',
+        icon: require('../config/app-icon').getAppIconPath(),
         webPreferences: { nodeIntegration: false, contextIsolation: true, partition: 'persist:slack' },
       });
       slackWin.setMenuBarVisibility(false);

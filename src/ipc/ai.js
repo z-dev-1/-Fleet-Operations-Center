@@ -101,6 +101,7 @@ function registerAIHandlers(ctx) {
       const relayWin = new BrowserWindow({
         width: halfW, height: winH, x: 0, y: topY,
         title: 'Relay Garage - ' + (opts.unitId || ''),
+        icon: require('../config/app-icon').getAppIconPath(),
         webPreferences: { nodeIntegration: false, contextIsolation: true, session: spSes },
       });
       relayWin.loadURL(opts.relayUrl);
@@ -111,6 +112,7 @@ function registerAIHandlers(ctx) {
       const offsiteWin = new BrowserWindow({
         width: halfW, height: winH, x: halfW, y: topY,
         title: 'Offsite Event - ' + (opts.unitId || ''),
+        icon: require('../config/app-icon').getAppIconPath(),
         webPreferences: { nodeIntegration: false, contextIsolation: true, session: spSes },
       });
       offsiteWin.loadURL(opts.offsiteUrl);

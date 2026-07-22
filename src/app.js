@@ -102,6 +102,7 @@ app.whenReady().then(async () => {
       const denyWin = new BrowserWindow({
         width: 480, height: 280, resizable: false, center: true, show: false,
         title: 'Fleet Operations \u2014 Beta Access Restricted',
+        icon: require('./config/app-icon').getAppIconPath(),
         webPreferences: { contextIsolation: true, nodeIntegration: false },
       });
       const safeUser = String(currentUser || 'unknown').replace(/[<>&"]/g, '');
