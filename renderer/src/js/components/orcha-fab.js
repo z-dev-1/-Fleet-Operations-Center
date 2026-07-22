@@ -155,6 +155,138 @@ function _appendMsg(cls, text, meta) {
 
 const _esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+// FEATURE (2026-07-22): inline "Reply" affordance directly under every
+// Slack DM shown in this chat panel. Two-stage flow: type a raw draft ->
+// optionally click "Rewrite professionally" (AI polishes wording only,
+// never invents new facts/names/dates/dollar amounts) -> review/edit ->
+// Send. A human always makes the final send decision -- same principle
+// already applied elsewhere in this app: the Partner Auto-Reply engine's
+// review queue, and _addToTimeline() below (AI rewrite is cosmetic only;
+// if it fails, the raw text must still be usable, never blocked).
+//
+// Textarea auto-grows as the user types (up to a cap, then scrolls) so
+// a long draft is never silently clipped/scrolled out of view while
+// they're still writing/proofreading it.
+let _replyBoxCounter = 0;
+
+function _autoGrowTextarea(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 220) + 'px';
+}
+
+function _wireReplyBox(box, msg) {
+  const textarea  = box.querySelector('.oc-reply-textarea');
+  const rewriteBtn = box.querySelector('[data-action="rewrite"]');
+  const sendBtn    = box.querySelector('[data-action="send"]');
+  const cancelBtn  = box.querySelector('[data-action="cancel"]');
+  const statusEl   = box.querySelector('.oc-reply-status');
+
+  function _setStatus(text, kind) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.className = 'oc-reply-status' + (kind ? ' oc-reply-status--' + kind : '');
+    statusEl.style.display = text ? 'block' : 'none';
+  }
+
+  textarea.addEventListener('input', () => _autoGrowTextarea(textarea));
+
+  rewriteBtn.addEventListener('click', async () => {
+    const draft = textarea.value.trim();
+    if (!draft) { textarea.focus(); return; }
+    rewriteBtn.disabled = true; sendBtn.disabled = true;
+    const originalLabel = rewriteBtn.textContent;
+    rewriteBtn.textContent = 'Rewriting\u2026';
+    _setStatus('', null);
+    try {
+      const prompt = 'Rewrite this as a professional, concise Slack direct message reply. ' +
+        'Keep the exact same meaning and intent -- do not add new facts, names, dates, dollar ' +
+        'amounts, or commitments that were not already in the original. No markdown, no greeting ' +
+        'or signature -- just the message body as plain text, ready to send as-is:\n\n' + draft;
+      const result = await ai.chat(prompt);
+      if (result && result.text) {
+        textarea.value = result.text.trim();
+        _autoGrowTextarea(textarea);
+        _setStatus('\u2728 Rewritten -- edit freely, then Send', 'ok');
+      } else {
+        throw new Error('empty AI response');
+      }
+    } catch (e) {
+      // AI unavailable (e.g. token quota) -- draft is left untouched and
+      // fully sendable as-is. Matches _addToTimeline()'s established rule
+      // below: an AI rewrite failure must never block the human's ability
+      // to send their own message.
+      _setStatus('\u26A0\uFE0F Could not rewrite (' + e.message + ') -- you can still send your original text', 'warn');
+    } finally {
+      rewriteBtn.disabled = false; sendBtn.disabled = false;
+      rewriteBtn.textContent = originalLabel;
+    }
+  });
+
+  sendBtn.addEventListener('click', async () => {
+    const finalText = textarea.value.trim();
+    if (!finalText) { textarea.focus(); return; }
+    sendBtn.disabled = true; rewriteBtn.disabled = true;
+    const originalLabel = sendBtn.textContent;
+    sendBtn.textContent = 'Sending\u2026';
+    try {
+      await slack.sendToChannel({ channelId: msg.channelId, message: finalText });
+      _appendMsg('oc-msg--slack-out', finalText, '\u2705 You \u2192 ' + (msg.user || 'Slack'));
+      box.remove();
+    } catch (e) {
+      _setStatus('\u274C Send failed: ' + e.message, 'err');
+      sendBtn.disabled = false; rewriteBtn.disabled = false;
+      sendBtn.textContent = originalLabel;
+    }
+  });
+
+  cancelBtn.addEventListener('click', () => box.remove());
+}
+
+function _appendSlackDM(msg) {
+  const msgs = document.getElementById('orcha-msgs');
+  if (!msgs) return;
+  const replyBoxId = 'oc-dm-reply-' + (++_replyBoxCounter);
+  const hasChannel = !!msg.channelId; // defensive -- see onIncoming call site below, whose payload shape is unverified
+
+  const wrap = document.createElement('div');
+  wrap.className = 'oc-msg oc-msg--slack-in';
+  wrap.innerHTML =
+    '<div class="oc-msg-meta">\u{1F4E9} ' + _esc(msg.user || 'Slack') + '</div>' +
+    '<div class="oc-msg-text">' + _esc(msg.text || '') + '</div>' +
+    (hasChannel ? '<button class="oc-dm-reply-btn" type="button" data-reply-target="' + replyBoxId + '">Reply</button>' : '');
+  msgs.appendChild(wrap);
+
+  if (hasChannel) {
+    const box = document.createElement('div');
+    box.className = 'oc-reply-box';
+    box.id = replyBoxId;
+    box.style.display = 'none';
+    box.innerHTML =
+      '<textarea class="oc-reply-textarea" placeholder="Type your reply\u2026" rows="1"></textarea>' +
+      '<div class="oc-reply-btn-row">' +
+        '<button class="oc-reply-btn oc-reply-btn--ai" type="button" data-action="rewrite">\u2728 Rewrite professionally</button>' +
+        '<button class="oc-reply-btn oc-reply-btn--send" type="button" data-action="send">Send</button>' +
+        '<button class="oc-reply-btn oc-reply-btn--cancel" type="button" data-action="cancel">Cancel</button>' +
+      '</div>' +
+      '<div class="oc-reply-status" style="display:none"></div>';
+    msgs.appendChild(box);
+    _wireReplyBox(box, msg);
+
+    const replyBtn = wrap.querySelector('.oc-dm-reply-btn');
+    replyBtn.addEventListener('click', () => {
+      const opening = box.style.display === 'none';
+      box.style.display = opening ? 'flex' : 'none';
+      if (opening) {
+        box.querySelector('.oc-reply-textarea').focus();
+        msgs.scrollTop = msgs.scrollHeight;
+      }
+    });
+  }
+
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+
 // ── Fleet knowledge builder ─────────────────────────────────────────────────
 function _buildFullContext() {
   const fleet = state.slice('fleet');
@@ -246,7 +378,11 @@ async function _startSlackPoll() {
       dms.forEach(msg => {
         if (_lastDmTs && msg.ts <= _lastDmTs) return;
         _lastDmTs = msg.ts;
-        _appendMsg('oc-msg--slack-in', msg.text, '\u{1F4E9} ' + (msg.user || 'Slack'));
+        // FEATURE (2026-07-22): _appendSlackDM adds the inline Reply
+        // affordance -- msg.channelId comes straight from readDMs()
+        // (src/scrapers/slack_send.js), so the reply always targets the
+        // exact right DM thread.
+        _appendSlackDM(msg);
         bus.emit('ui:notif-push', { icon: '\u{1F4E9}', title: 'Slack DM', body: msg.text, time: Date.now() });
       });
     } catch(e) { /* silent */ }
@@ -763,12 +899,26 @@ export function init() {
   });
 
   // Incoming Slack
+  // NOTE (2026-07-22): confirmed via full-codebase search that nothing in
+  // the backend actually ever sends the 'slack:incoming' IPC event this
+  // listens for -- this handler is currently unreachable/dead code (the
+  // real, working Slack DM path is the readDMs() poller above). Wired to
+  // _appendSlackDM() anyway for forward-compatibility (if this is ever
+  // hooked up to a real push source), with a defensive channelId lookup
+  // since this payload's exact shape has never been verified live --
+  // _appendSlackDM() already fails safe and simply omits the Reply button
+  // if channelId ends up missing, rather than erroring.
   if (window.slack && window.slack.onIncoming) {
     window.slack.onIncoming((msg) => {
-      _appendMsg('oc-msg--slack-in', msg.text || msg.message || '', '\u{1F4E9} ' + (msg.user || msg.channel || 'Slack'));
+      _appendSlackDM({
+        text: msg.text || msg.message || '',
+        user: msg.user || msg.channel || 'Slack',
+        channelId: msg.channelId || msg.channel || null,
+      });
       bus.emit('ui:notif-push', { icon: '\u{1F4E9}', title: 'Slack: ' + (msg.user || ''), body: msg.text || '', time: Date.now() });
     });
   }
+
 
   bus.on('orcha:progress', (p) => {
     const status = document.getElementById('orcha-status');

@@ -8419,3 +8419,79 @@ body {
 }
 .setup__review-key { color: var(--mut, #8b949e); flex-shrink: 0; }
 .setup__review-val { color: var(--txt, #e6edf3); text-align: right; word-break: break-word; }
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   Orcha floater — inline Slack DM Reply (2026-07-22)
+   See renderer/src/js/components/orcha-fab.js (_appendSlackDM /
+   _wireReplyBox) for the full design writeup.
+   ══════════════════════════════════════════════════════════════════════ */
+.oc-dm-reply-btn {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 3px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #58a6ff;
+  background: rgba(88, 166, 255, .08);
+  border: 1px solid rgba(88, 166, 255, .25);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.oc-dm-reply-btn:hover { background: rgba(88, 166, 255, .16); }
+
+.oc-reply-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 88%;
+  margin: 2px 0 8px 0;
+  padding: 8px;
+  background: var(--el);
+  border: 1px solid var(--bdr);
+  border-radius: 6px;
+}
+/* Auto-grow textarea (JS sets height on input, up to 220px, then this
+   overflow kicks in) -- so a long reply draft is never silently clipped
+   or scrolled out of view while the user is still writing/proofreading. */
+.oc-reply-textarea {
+  width: 100%;
+  min-height: 32px;
+  max-height: 220px;
+  resize: none;
+  overflow-y: auto;
+  background: var(--bg, #0d1117);
+  border: 1px solid var(--bdr);
+  border-radius: 5px;
+  padding: 6px 8px;
+  color: var(--txt);
+  font-size: 11px;
+  line-height: 1.4;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+.oc-reply-textarea:focus { outline: none; border-color: #58a6ff; }
+
+.oc-reply-btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.oc-reply-btn {
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 5px;
+  border: 1px solid var(--bdr);
+  background: var(--panel, #161b22);
+  color: var(--txt);
+  cursor: pointer;
+}
+.oc-reply-btn:disabled { opacity: .5; cursor: default; }
+.oc-reply-btn--ai    { border-color: rgba(168, 85, 247, .35); color: #c4a2f7; }
+.oc-reply-btn--ai:hover    { background: rgba(168, 85, 247, .1); }
+.oc-reply-btn--send  { border-color: rgba(34, 197, 94, .35); color: #7ee787; }
+.oc-reply-btn--send:hover  { background: rgba(34, 197, 94, .1); }
+.oc-reply-btn--cancel:hover { background: rgba(248, 81, 73, .08); color: #f85149; }
+
+.oc-reply-status { font-size: 10px; padding: 2px 0; }
+.oc-reply-status--ok   { color: #7ee787; }
+.oc-reply-status--warn { color: #eab308; }
+.oc-reply-status--err  { color: #f85149; }
+
