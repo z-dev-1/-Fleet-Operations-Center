@@ -86,6 +86,43 @@ app.whenReady().then(async () => {
   log.info('Platform: ' + process.platform + ' ' + process.arch);
   log.info('Data dir: ' + P.dataDir);
 
+  // ── 5a-2. BETA GATE (2026-07-22) ─────────────────────────────────────────
+  // v3.1.0-beta.1 is restricted to an explicit allowlist of corp usernames
+  // -- see src/config/beta-gate.js for the full design + how to add/remove
+  // users or lift the gate entirely. Checked as the very first thing after
+  // the logger is ready and BEFORE any window, IPC, or sync subsystem is
+  // created, so a non-allowlisted user never sees any part of the app
+  // initialize -- just a small "Beta Access Restricted" window.
+  {
+    const { isBetaUser, getCurrentUsername, BETA_ALLOWED_USERS } = require('./config/beta-gate');
+    const currentUser = getCurrentUsername();
+    if (!isBetaUser()) {
+      log.warn('Beta gate: blocked launch for user "' + (currentUser || 'unknown') + '" -- not in allowlist: [' + BETA_ALLOWED_USERS.join(', ') + ']');
+      const { BrowserWindow } = require('electron');
+      const denyWin = new BrowserWindow({
+        width: 480, height: 280, resizable: false, center: true, show: false,
+        title: 'Fleet Operations \u2014 Beta Access Restricted',
+        webPreferences: { contextIsolation: true, nodeIntegration: false },
+      });
+      const safeUser = String(currentUser || 'unknown').replace(/[<>&"]/g, '');
+      denyWin.loadURL('data:text/html,' + encodeURIComponent(
+        '<html><body style="font-family:-apple-system,Segoe UI,sans-serif;background:#0d1117;color:#e6edf3;' +
+        'padding:28px;margin:0;box-sizing:border-box;">' +
+        '<div style="font-size:28px;margin-bottom:10px;">\u{1F512}</div>' +
+        '<h2 style="margin:0 0 12px;font-size:16px;">Beta Access Restricted</h2>' +
+        '<p style="font-size:13px;line-height:1.6;color:#8b949e;margin:0 0 10px;">' +
+        'This beta build of Fleet Operations is currently limited to a specific set of users. ' +
+        'Your account (<strong style="color:#e6edf3;">' + safeUser + '</strong>) is not on that list yet.</p>' +
+        '<p style="font-size:12px;color:#6e7681;margin:0;">Contact the app owner if you believe this is a mistake.</p>' +
+        '</body></html>'
+      ));
+      denyWin.once('ready-to-show', () => denyWin.show());
+      denyWin.on('closed', () => app.quit());
+      return; // stop bootstrap here -- no window manager, no sync, no IPC registered
+    }
+    log.info('Beta gate: launch allowed for user "' + currentUser + '"');
+  }
+
   // ── 5b. Shared ctx — one object, passed to every subsystem ───────────────
   // Mutable cells — updated by sync engine via setters, read by everyone.
   let _isSyncing = false;
