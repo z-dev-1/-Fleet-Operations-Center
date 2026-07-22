@@ -1,6 +1,6 @@
 ﻿{
   "name": "fleet-ops-app",
-  "version": "3.1.0-beta.2",
+  "version": "3.1.0-beta.3",
   "description": "Fleet Operations Platform â€” Version C",
   "main": "main.js",
   "scripts": {

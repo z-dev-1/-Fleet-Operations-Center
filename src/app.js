@@ -94,7 +94,7 @@ app.whenReady().then(async () => {
   // created, so a non-allowlisted user never sees any part of the app
   // initialize -- just a small "Beta Access Restricted" window.
   {
-    const { isBetaUser, getCurrentUsername, BETA_ALLOWED_USERS } = require('./config/beta-gate');
+    const { isBetaUser, isAdminUser, getCurrentUsername, BETA_ALLOWED_USERS } = require('./config/beta-gate');
     const currentUser = getCurrentUsername();
     if (!isBetaUser()) {
       log.warn('Beta gate: blocked launch for user "' + (currentUser || 'unknown') + '" -- not in allowlist: [' + BETA_ALLOWED_USERS.join(', ') + ']');
@@ -120,7 +120,7 @@ app.whenReady().then(async () => {
       denyWin.on('closed', () => app.quit());
       return; // stop bootstrap here -- no window manager, no sync, no IPC registered
     }
-    log.info('Beta gate: launch allowed for user "' + currentUser + '"');
+    log.info('Beta gate: launch allowed for user "' + currentUser + '" (' + (isAdminUser() ? 'admin' : 'beta tester') + ')');
   }
 
   // ── 5b. Shared ctx — one object, passed to every subsystem ───────────────

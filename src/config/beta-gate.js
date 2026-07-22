@@ -20,6 +20,16 @@
  * whichever Windows account is currently running the app -- exactly the
  * identity mwinit itself would authenticate.
  *
+ * Two tiers:
+ *   BETA_ADMIN_USERS   -- app owner/maintainer(s). ALWAYS allowed,
+ *                          regardless of BETA_GATE_ENABLED, so the admin
+ *                          never gets locked out of their own build while
+ *                          testing/maintaining it -- e.g. zilasant (2026-07-22).
+ *   BETA_ALLOWED_USERS -- the actual beta testers currently being given
+ *                          access, separate from the admin list so
+ *                          rotating testers in/out never risks touching
+ *                          admin access by mistake.
+ *
  * TO ADD/REMOVE BETA USERS: edit BETA_ALLOWED_USERS below. Lowercase, no
  * domain prefix (e.g. 'mckristh', not 'ANT\\mckristh').
  *
@@ -31,6 +41,10 @@
 const os = require('os');
 
 const BETA_GATE_ENABLED = true;
+
+const BETA_ADMIN_USERS = [
+  'zilasant',
+];
 
 const BETA_ALLOWED_USERS = [
   'mckristh',
@@ -44,11 +58,25 @@ function getCurrentUsername() {
   }
 }
 
+function isAdminUser() {
+  const current = getCurrentUsername();
+  if (!current) return false;
+  return BETA_ADMIN_USERS.some((u) => u.toLowerCase() === current);
+}
+
 function isBetaUser() {
+  if (isAdminUser()) return true; // admin always has access, gate on/off notwithstanding
   if (!BETA_GATE_ENABLED) return true;
   const current = getCurrentUsername();
   if (!current) return false;
   return BETA_ALLOWED_USERS.some((u) => u.toLowerCase() === current);
 }
 
-module.exports = { isBetaUser, getCurrentUsername, BETA_ALLOWED_USERS, BETA_GATE_ENABLED };
+module.exports = {
+  isBetaUser,
+  isAdminUser,
+  getCurrentUsername,
+  BETA_ADMIN_USERS,
+  BETA_ALLOWED_USERS,
+  BETA_GATE_ENABLED,
+};
