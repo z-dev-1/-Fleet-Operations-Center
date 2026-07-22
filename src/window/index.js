@@ -244,6 +244,7 @@ function initWindows(ctx) {
   let mainWindow        = null;
   let tray              = null;
   let bubbleWin         = null;
+  let wizWin             = null; // BUG FIX (2026-07-22): hoisted so closeSetupWizard() below can reach it
   let _bubbleLastPos    = null;
   let _rescanInProgress = false;
   let _appReady         = false;
@@ -1124,9 +1125,27 @@ function initWindows(ctx) {
   // ── Setup wizard (first launch) ───────────────────────────────────────────
   function showSetupWizard() {
     const wizardHtml = path.join(ROOT_DIR, 'renderer', 'src', 'setup', 'index.html');
-    const wizWin = new BrowserWindow({
-      width: 620, height: 580,
-      frame: false, resizable: false, center: true, show: false,
+    // BUG FIX (2026-07-22): the wizard used to collect all its data (name,
+    // domiciles, Orcha config, etc.) into a single object and hand it to a
+    // 'wizard:complete' IPC event here -- but nothing ever sent that
+    // event (confirmed dead code via a full-codebase search), so every
+    // field the user filled in was silently discarded and the app booted
+    // on defaults every time. The wizard renderer now saves each step
+    // directly through the exact same bridge calls Settings uses
+    // (window.settings / window.slack / window.email / etc. -- all
+    // already exposed via this same preload.js), so there is no longer a
+    // second, separate "apply everything" step to go stale/dead. This
+    // window only needs to exist, load, and close when told to.
+    // Enlarged + made resizable: the wizard now has real functional
+    // sections (vendor credentials, SharePoint discovery, etc.) that
+    // didn't exist when 620x580 fixed was chosen, and there was
+    // previously zero CSS anywhere for any '.setup-*' class (confirmed --
+    // 0 matches in fleet.css), so nothing ever needed to fit/scroll
+    // before. See fleet.css '#setup-app' block for the new styling.
+    wizWin = new BrowserWindow({
+      width: 720, height: 720,
+      minWidth: 640, minHeight: 560,
+      frame: false, resizable: true, center: true, show: false,
       webPreferences: {
         preload:          path.join(ROOT_DIR, 'preload.js'),
         contextIsolation: true,
@@ -1136,46 +1155,7 @@ function initWindows(ctx) {
 
     wizWin.loadFile(wizardHtml);
     wizWin.once('ready-to-show', () => wizWin.show());
-
-    ipcMain.once('wizard:complete', (_e, config) => {
-      logger.info('Setup wizard complete \u2014 applying config');
-      const { markStepComplete } = require('../../setup/state');
-
-      const settings = store.load('settings', {});
-      settings.domiciles = (config.domiciles || '')
-        .split(/[\n,]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
-      settings.profile = {
-        name:  config.userName  || '',
-        email: config.userEmail || '',
-        phone: config.userPhone || '',
-        role:  'Fleet Coordinator',
-      };
-      store.save('settings', settings);
-
-      store.save('orchaConfig', {
-        mode: config.orchaMode || 'local',
-        host: config.orchaHost || '',
-        port: config.orchaPort || 4799,
-      });
-
-      store.save('opEmails', {
-        username:  'ANT\\' + (config.userEmail || '').split('@')[0],
-        password:  '',
-        from:      config.userEmail || '',
-        defaultTo: '',
-        defaultCc: '',
-      });
-
-      markStepComplete('profile',   { name: settings.profile.name });
-      markStepComplete('domiciles', { domiciles: settings.domiciles });
-      markStepComplete('orcha',     { mode: config.orchaMode || 'local' });
-
-      logger.info('Setup: domiciles=' + settings.domiciles.join(','));
-
-      wizWin.close();
-      createMainWindow();
-      createTray();
-    });
+    wizWin.on('closed', () => { wizWin = null; });
   }
 
   // ── Window IPC handlers ───────────────────────────────────────────────────
@@ -1264,6 +1244,7 @@ function initWindows(ctx) {
     createTray,
     openAAPSetupWindow,
     showSetupWizard,
+    closeSetupWizard: () => { if (wizWin && !wizWin.isDestroyed()) wizWin.close(); },
     showBubble,
     hideBubble,
     getBubbleWin:  () => bubbleWin,

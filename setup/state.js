@@ -26,8 +26,19 @@ const REQUIRED_STEPS = [
   // slack, sharepoint, email, orcha are optional — can be configured later
 ];
 
+// EXPANDED (2026-07-22): wizard now has a real, working screen for every
+// functional (non-cosmetic) setting in the app -- see
+// renderer/src/setup/setup.js for the full step list and the reasoning
+// for what's deliberately left out (per-operator SharePoint mapping and
+// the generic Accounts bookmark list both only make sense once real
+// sync data exists; theme/appearance and the Forms Google Sheet ID are
+// stored in the renderer's own localStorage, which is NOT shared across
+// separate BrowserWindows -- putting them in this separate wizard window
+// would silently produce the exact same "looks configured, does
+// nothing" bug this whole expansion was meant to fix, so they stay in
+// Settings, in the same window as everything that actually reads them).
 const OPTIONAL_STEPS = [
-  'slack', 'sharepoint', 'email', 'orcha', 'confirm'
+  'notifications', 'orcha', 'email', 'graph', 'slack', 'sharepoint', 'asana', 'vendorcreds', 'schedulers', 'confirm'
 ];
 
 const ALL_STEPS = [...REQUIRED_STEPS, ...OPTIONAL_STEPS];

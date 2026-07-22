@@ -96,11 +96,20 @@ function registerSetupIPC(ctx) {
     markStepComplete('database', {});
     const done = isSetupComplete();
     if (done && ctx.createMainWindow) {
-      logger.info('Setup complete — opening main window');
-      setTimeout(() => ctx.createMainWindow(), 200);
+      logger.info('Setup complete - opening main window');
+      setTimeout(() => {
+        ctx.createMainWindow();
+        // BUG FIX (2026-07-22): the wizard window used to close itself
+        // from inside the (dead) 'wizard:complete' handler. Now that all
+        // real saving happens step-by-step in the renderer via the same
+        // bridges Settings uses, this is the one remaining place that
+        // needs to close the wizard window once setup is genuinely done.
+        if (ctx.closeSetupWizard) ctx.closeSetupWizard();
+      }, 200);
     }
     return { ok: done, setupComplete: done };
   });
+
 
   // Reset (dev tool / re-onboarding)
   handle('setup:reset', () => {

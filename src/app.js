@@ -339,6 +339,7 @@ app.whenReady().then(async () => {
 
   // Back-fill window factory refs on ctx
   _ctx.createMainWindow = _windowApi.createMainWindow;
+  _ctx.closeSetupWizard = _windowApi.closeSetupWizard; // BUG FIX (2026-07-22): setup:complete needs this to close the wizard window itself
 
   // ── 5d. Sync engine ────────────────────────────────────────────────────────
   const { createSyncEngine } = require('./sync');

@@ -339,8 +339,8 @@ function _html() {
         <div class="sd-section" id="sect-domiciles">
           <div class="sd-section-title">Domiciles</div>
           <div class="sd-field">
-            <div class="sd-label">Managed domiciles (comma-separated)</div>
-            <textarea id="settings-domiciles" class="settings__textarea sd-input" placeholder="ABE40, AVP40, AUVTE01..."></textarea>
+            <div class="sd-label">Managed domiciles (one per line, or comma-separated)</div>
+            <textarea id="settings-domiciles" class="settings__textarea sd-input" placeholder="ABE40&#10;AVP40&#10;AUVTE01"></textarea>
           </div>
           <div class="sd-btn-row">
             <button class="sd-btn primary" id="save-domiciles">Save</button>
@@ -857,15 +857,53 @@ function _close() {
 function _wireDomiciles() {
   document.getElementById('save-domiciles').addEventListener('click', async () => {
     const raw = document.getElementById('settings-domiciles').value;
-    const codes = raw.split(',').map((s) => s.trim()).filter(Boolean);
-    await settingsBridge.saveDomiciles(codes);
+    // BUG FIX (2026-07-22): only split on commas -- a newline-separated
+    // list (one code per line, which is how the textarea's own
+    // placeholder now shows it, and how most people naturally type a
+    // list of site codes) collapsed into ONE array entry containing
+    // literal embedded newlines, e.g. ["ABE40\nAVP40\nAUVTE01"] instead
+    // of ["ABE40","AVP40","AUVTE01"]. Confirmed live in this exact
+    // installation's real settings.json before this fix. Any code
+    // downstream that expects individual clean domicile codes (the AAP
+    // scan URL builder, the sync engine) would silently fail to match
+    // anything against a single garbled multi-line string -- producing
+    // exactly the "I entered domiciles and it did nothing" symptom.
+    // Backend settings:save-domiciles (src/ipc/settings.js) already
+    // splits on /[\n,]+/ -- this now matches it exactly.
+    const codes = raw.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
     const st = document.getElementById('domicile-status');
-    st.textContent = '✓ Saved'; st.style.display = 'block';
-    setTimeout(() => { st.style.display = 'none'; }, 2000);
+    if (!codes.length) {
+      st.textContent = '\u26A0\uFE0F Enter at least one domicile code first'; st.style.display = 'block';
+      return;
+    }
+    try {
+      await settingsBridge.saveDomiciles(codes);
+      st.textContent = '\u2705 Saved'; st.style.display = 'block';
+      setTimeout(() => { st.style.display = 'none'; }, 2000);
+    } catch (e) {
+      st.textContent = '\u274C ' + (e.message || 'Save failed'); st.style.display = 'block';
+    }
   });
   document.getElementById('reset-domiciles').addEventListener('click', async () => {
-    await settingsBridge.saveDomiciles([]);
-    document.getElementById('settings-domiciles').value = '';
+    // BUG FIX (2026-07-22): this called saveDomiciles([]) -- but the
+    // backend handler THROWS on an empty list ("domicile list cannot be
+    // empty", src/ipc/settings.js) and this had no .catch() anywhere, so
+    // "Reset defaults" has never once actually worked; it silently threw
+    // an unhandled promise rejection with zero visible feedback. The
+    // backend already has a dedicated, correct handler for exactly this
+    // (settings:reset-domiciles, returns DEFAULTS.DEFAULT_DOMICILES) --
+    // switched to that instead of trying to save an empty list.
+    try {
+      const result = await settingsBridge.resetDomiciles();
+      const codes = (result && result.domiciles) || [];
+      document.getElementById('settings-domiciles').value = codes.join('\n');
+      const st = document.getElementById('domicile-status');
+      st.textContent = '\u2705 Reset to defaults'; st.style.display = 'block';
+      setTimeout(() => { st.style.display = 'none'; }, 2000);
+    } catch (e) {
+      const st = document.getElementById('domicile-status');
+      st.textContent = '\u274C ' + (e.message || 'Reset failed'); st.style.display = 'block';
+    }
   });
 }
 
@@ -2318,7 +2356,7 @@ function _populate() {
 
     if (all.domiciles) {
       const el = document.getElementById('settings-domiciles');
-      if (el) el.value = Array.isArray(all.domiciles) ? all.domiciles.join(', ') : all.domiciles;
+      if (el) el.value = Array.isArray(all.domiciles) ? all.domiciles.join('\n') : all.domiciles;
     }
     if (all.orcha) {
       const o = all.orcha;

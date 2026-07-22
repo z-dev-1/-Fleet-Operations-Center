@@ -8252,3 +8252,170 @@ body {
   outline: none;
   min-width: 120px;
 }
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   Setup Wizard (renderer/src/setup/) -- 2026-07-22
+   BUG-AWARE: there was previously ZERO css anywhere for any '.setup-*'
+   class (confirmed: 0 matches pre-existing in this file) -- the wizard
+   had been rendering with completely unstyled browser defaults this
+   whole time. Reuses the same design tokens (--bdr/--txt/--mut/--acc)
+   already defined in :root above so it looks consistent with the rest
+   of the app, not like a separate, forgotten screen.
+   ══════════════════════════════════════════════════════════════════════ */
+#setup-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--bg, #0d1117);
+  color: var(--txt, #e6edf3);
+  font-family: -apple-system, 'Segoe UI', sans-serif;
+  -webkit-app-region: drag;
+  overflow: hidden;
+}
+
+.setup-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--bdr, #30363d);
+  flex-shrink: 0;
+}
+.setup-logo { font-weight: 700; font-size: 14px; }
+.setup-version { font-size: 12px; color: var(--mut, #8b949e); margin-left: auto; }
+
+#setup-mount {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  -webkit-app-region: no-drag;
+}
+
+.setup-step { display: flex; flex-direction: column; min-height: 100%; }
+.setup-step__body { flex: 1; }
+.setup-step__body label {
+  display: block;
+  font-size: 12px;
+  color: var(--mut, #8b949e);
+  margin-bottom: 12px;
+}
+.setup__input, .setup__textarea, .setup__select {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px 10px;
+  background: #161b22;
+  border: 1px solid var(--bdr, #30363d);
+  border-radius: 6px;
+  color: var(--txt, #e6edf3);
+  font-size: 13px;
+  box-sizing: border-box;
+}
+.setup__input:focus, .setup__textarea:focus, .setup__select:focus {
+  outline: none;
+  border-color: var(--acc, #58a6ff);
+}
+.setup__input--sm { width: 140px; flex-shrink: 0; }
+.setup__textarea { resize: vertical; font-family: inherit; }
+
+.setup__hint { font-size: 12px; color: var(--mut, #8b949e); margin-bottom: 14px; line-height: 1.5; }
+.setup__mut { color: var(--mut, #8b949e); }
+
+.setup__row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.setup__row .setup__input { margin-top: 0; }
+
+.setup__toggle-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid #21262d;
+  font-size: 12px;
+}
+.setup__toggle-row:last-of-type { border-bottom: none; }
+
+.setup__btn {
+  padding: 9px 18px;
+  border-radius: 6px;
+  border: none;
+  background: var(--acc, #58a6ff);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.setup__btn:hover { filter: brightness(1.1); }
+.setup__btn:disabled { opacity: .6; cursor: default; }
+.setup__btn--secondary {
+  background: transparent;
+  border: 1px solid var(--bdr, #30363d);
+  color: var(--txt, #e6edf3);
+}
+.setup__btn--sm { padding: 6px 12px; font-size: 12px; }
+.setup__btn-row { display: flex; gap: 8px; margin: 10px 0; }
+
+.setup__status, .setup__inline-status {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #161b22;
+  color: var(--mut, #8b949e);
+  margin-bottom: 12px;
+  display: inline-block;
+}
+.setup__inline-status.ok  { color: #3fb950; background: rgba(63,185,80,.1); }
+.setup__inline-status.err { color: #f85149; background: rgba(248,81,73,.1); }
+.setup__inline-status.warn{ color: #d29922; background: rgba(210,153,34,.1); }
+
+.setup-step__error {
+  font-size: 12px;
+  color: #f85149;
+  background: rgba(248,81,73,.1);
+  border: 1px solid rgba(248,81,73,.3);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-top: 10px;
+}
+
+.setup-step__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--bdr, #30363d);
+  flex-shrink: 0;
+}
+
+.setup__vendor-block {
+  padding: 10px 0;
+  border-bottom: 1px solid #21262d;
+  margin-bottom: 6px;
+}
+.setup__vendor-label { font-size: 12px; font-weight: 600; margin-bottom: 6px; color: var(--txt, #e6edf3); }
+
+.setup__sheet-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.setup__sheet-row label { flex: 1; margin: 0; color: var(--txt, #e6edf3); }
+
+.setup__summary { display: flex; flex-direction: column; gap: 2px; }
+.setup__review-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #21262d;
+  font-size: 12px;
+}
+.setup__review-key { color: var(--mut, #8b949e); flex-shrink: 0; }
+.setup__review-val { color: var(--txt, #e6edf3); text-align: right; word-break: break-word; }
