@@ -473,7 +473,7 @@ function _html() {
               <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="paccar-user" placeholder="portal username"/></div>
               <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="paccar-pass" type="password" placeholder="(encrypted)"/></div>
             </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="paccar-save">Save</button><button class="sd-btn danger" id="paccar-clear">Clear</button></div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="paccar-save">Save</button><button class="sd-btn secondary" id="paccar-test">Test login</button><button class="sd-btn danger" id="paccar-clear">Clear</button></div>
             <div id="paccar-status" class="settings__status" style="display:none"></div>
           </div>
           <!-- Volvo -->
@@ -483,7 +483,7 @@ function _html() {
               <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="volvo-user" placeholder="portal username"/></div>
               <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="volvo-pass" type="password" placeholder="(encrypted)"/></div>
             </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="volvo-save">Save</button><button class="sd-btn danger" id="volvo-clear">Clear</button></div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="volvo-save">Save</button><button class="sd-btn secondary" id="volvo-test">Test login</button><button class="sd-btn danger" id="volvo-clear">Clear</button></div>
             <div id="volvo-status" class="settings__status" style="display:none"></div>
           </div>
           <!-- Record360 -->
@@ -493,7 +493,7 @@ function _html() {
               <div class="sd-field"><div class="sd-label">Email</div><input class="sd-input" id="record360-user" placeholder="you@amazon.com"/></div>
               <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="record360-pass" type="password" placeholder="(encrypted)"/></div>
             </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="record360-save">Save</button><button class="sd-btn danger" id="record360-clear">Clear</button></div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="record360-save">Save</button><button class="sd-btn secondary" id="record360-test">Test login</button><button class="sd-btn danger" id="record360-clear">Clear</button></div>
             <div id="record360-status" class="settings__status" style="display:none"></div>
           </div>
           <!-- Aperia / Halo -->
@@ -503,7 +503,7 @@ function _html() {
               <div class="sd-field"><div class="sd-label">Email</div><input class="sd-input" id="aperia-user" placeholder="you@amazon.com"/></div>
               <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="aperia-pass" type="password" placeholder="(encrypted)"/></div>
             </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="aperia-save">Save</button><button class="sd-btn danger" id="aperia-clear">Clear</button></div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="aperia-save">Save</button><button class="sd-btn secondary" id="aperia-test">Test login</button><button class="sd-btn danger" id="aperia-clear">Clear</button></div>
             <div id="aperia-status" class="settings__status" style="display:none"></div>
           </div>
           <!-- Reach24 -->
@@ -513,7 +513,7 @@ function _html() {
               <div class="sd-field"><div class="sd-label">Email</div><input class="sd-input" id="reach24-user" placeholder="you@amazon.com"/></div>
               <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="reach24-pass" type="password" placeholder="(encrypted)"/></div>
             </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="reach24-save">Save</button><button class="sd-btn danger" id="reach24-clear">Clear</button></div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="reach24-save">Save</button><button class="sd-btn secondary" id="reach24-test">Test login</button><button class="sd-btn danger" id="reach24-clear">Clear</button></div>
             <div id="reach24-status" class="settings__status" style="display:none"></div>
           </div>
           <!-- DTNA -->
@@ -523,7 +523,7 @@ function _html() {
               <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="dtna-user" placeholder="portal username"/></div>
               <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="dtna-pass" type="password" placeholder="(encrypted)"/></div>
             </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="dtna-save">Save</button><button class="sd-btn danger" id="dtna-clear">Clear</button></div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="dtna-save">Save</button><button class="sd-btn secondary" id="dtna-test">Test login</button><button class="sd-btn danger" id="dtna-clear">Clear</button></div>
             <div id="dtna-status" class="settings__status" style="display:none"></div>
           </div>
           <!-- Road Ready -->
@@ -533,7 +533,7 @@ function _html() {
               <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="roadready-user" placeholder="portal username"/></div>
               <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="roadready-pass" type="password" placeholder="(encrypted)"/></div>
             </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="roadready-save">Save</button><button class="sd-btn danger" id="roadready-clear">Clear</button></div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="roadready-save">Save</button><button class="sd-btn secondary" id="roadready-test">Test login</button><button class="sd-btn danger" id="roadready-clear">Clear</button></div>
             <div id="roadready-status" class="settings__status" style="display:none"></div>
           </div>
           <!-- Velogic -->
@@ -543,7 +543,7 @@ function _html() {
               <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="velogic-user" placeholder="portal username"/></div>
               <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="velogic-pass" type="password" placeholder="(encrypted)"/></div>
             </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="velogic-save">Save</button><button class="sd-btn danger" id="velogic-clear">Clear</button></div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="velogic-save">Save</button><button class="sd-btn secondary" id="velogic-test">Test login</button><button class="sd-btn danger" id="velogic-clear">Clear</button></div>
             <div id="velogic-status" class="settings__status" style="display:none"></div>
           </div>
           <!-- Access Billing Services -->
@@ -553,8 +553,14 @@ function _html() {
               <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="abs-user" placeholder="portal username"/></div>
               <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="abs-pass" type="password" placeholder="(encrypted)"/></div>
             </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="abs-save">Save</button><button class="sd-btn danger" id="abs-clear">Clear</button></div>
+            <div class="sd-btn-row"><button class="sd-btn primary" id="abs-save">Save</button><button class="sd-btn secondary" id="abs-test">Test login</button><button class="sd-btn danger" id="abs-clear">Clear</button></div>
             <div id="abs-status" class="settings__status" style="display:none"></div>
+          </div>
+          <!-- Uptake -- Amazon SSO, no password needed (FEATURE 2026-07-22) -->
+          <div style="margin-bottom:10px">
+            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Uptake (fleet.uptake.com) -- Amazon SSO, no password needed</div>
+            <div class="sd-btn-row"><button class="sd-btn secondary" id="uptake-test">Sign in to Uptake</button></div>
+            <div id="uptake-status" class="settings__status" style="display:none"></div>
           </div>
         </div>
 
@@ -1051,6 +1057,43 @@ function _wireVendorAuth() {
       document.getElementById(`${v}-pass`).value = '';
       _checkVendorCred(v, `${v}-status`);
     });
+
+    // FEATURE (2026-07-22): opens the real vendor portal and attempts the
+    // exact same auto-login pass (src/orcha/auto-login.js) the background
+    // AAP/Relay scraper already uses in production for this host -- see
+    // src/ipc/credentials.js (credentials:test-login) for the full design.
+    const testBtn = document.getElementById(`${v}-test`);
+    if (testBtn) testBtn.addEventListener('click', async () => {
+      const st = document.getElementById(`${v}-status`);
+      if (st) { st.textContent = '\u23F3 Opening portal...'; st.style.display = 'block'; st.className = 'settings__status settings__status--loading'; }
+      try {
+        const r = await credsBridge.testLogin(v);
+        if (st) {
+          if (r && r.ok && r.attempted) { st.textContent = '\u2705 Login attempted -- check the window that opened'; st.className = 'settings__status settings__status--ok'; }
+          else if (r && r.closedByUser) { st.textContent = 'Window closed'; st.className = 'settings__status'; }
+          else { st.textContent = '\u26A0\uFE0F No saved credentials to try -- save above first'; st.className = 'settings__status settings__status--loading'; }
+        }
+      } catch (e) {
+        if (st) { st.textContent = '\u274C ' + e.message; st.className = 'settings__status settings__status--err'; st.style.display = 'block'; }
+      }
+    });
+  });
+
+  // Uptake -- Amazon SSO, no credentials to save/clear, just a sign-in test
+  const uptakeBtn = document.getElementById('uptake-test');
+  if (uptakeBtn) uptakeBtn.addEventListener('click', async () => {
+    const st = document.getElementById('uptake-status');
+    if (st) { st.textContent = '\u23F3 Opening Uptake...'; st.style.display = 'block'; st.className = 'settings__status settings__status--loading'; }
+    try {
+      const r = await credsBridge.testLogin('uptake');
+      if (st) {
+        if (r && r.ok && r.attempted) { st.textContent = '\u2705 SSO attempted -- check the window that opened'; st.className = 'settings__status settings__status--ok'; }
+        else if (r && r.closedByUser) { st.textContent = 'Window closed'; st.className = 'settings__status'; }
+        else { st.textContent = '\u26A0\uFE0F Could not sign in automatically -- requires Midway'; st.className = 'settings__status settings__status--loading'; }
+      }
+    } catch (e) {
+      if (st) { st.textContent = '\u274C ' + e.message; st.className = 'settings__status settings__status--err'; st.style.display = 'block'; }
+    }
   });
 }
 

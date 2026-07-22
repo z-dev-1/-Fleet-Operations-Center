@@ -364,7 +364,9 @@ export const credentials = {
   has:    (key)      => window.credentials.has(key),
   delete: (key)      => window.credentials.delete(key),
   list:   ()         => window.credentials.list(),
+  testLogin: (vendorId) => window.credentials.testLogin(vendorId),
 };
+
 
 // ── Files / shell ──────────────────────────────────────────────────────────
 export const files = {

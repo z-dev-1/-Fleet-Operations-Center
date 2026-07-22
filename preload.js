@@ -272,7 +272,13 @@ contextBridge.exposeInMainWorld('credentials', {
   delete: (key)      => ipcRenderer.invoke('credentials:delete', key),
   list:   ()         => ipcRenderer.invoke('credentials:list'),
   // NOTE: credentials:get is intentionally NOT exposed to renderer
+  // FEATURE (2026-07-22): opens a real vendor portal window + one real
+  // auto-login pass -- see src/ipc/credentials.js docblock for the
+  // full design/safety writeup (fixed allowlist, separate from
+  // open-popup's).
+  testLogin: (vendorId) => ipcRenderer.invoke('credentials:test-login', vendorId),
 });
+
 
 // ── Window / app ──────────────────────────────────────────────────────────────
 contextBridge.exposeInMainWorld('contacts', {

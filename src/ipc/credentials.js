@@ -1,10 +1,26 @@
-'use strict';
+﻿'use strict';
 /**
  * ipc/credentials.js - Site credential manager IPC handlers
  * S23-0 (2026-06-28): VENDOR_CRED_KEYS, _HOST_TO_VENDOR, getForHostname()
  * BUG FIX: loadCredentials was never exported; auto-login.js was broken.
+ *
+ * FEATURE (2026-07-22): credentials:test-login -- lets Setup/Settings open
+ * a REAL vendor portal window and attempt the exact same auto-login pass
+ * (src/orcha/auto-login.js) the background AAP/Relay scraper already
+ * relies on in production for these hosts -- so "Test login" here is
+ * proof the SAME credentials that power live scraping actually work, not
+ * a separate, disconnected check.
+ *
+ * Deliberately its own small, fixed allowlist (VENDOR_TEST_URLS below)
+ * rather than reusing/widening ipc/orcha.js's open-popup
+ * POPUP_ALLOWED_HOSTS -- that allowlist is scoped tight on purpose
+ * (Issue #4 hardening, internal-Amazon hosts only) and vendor portals are
+ * a deliberately separate trust boundary from it. This handler only ever
+ * opens one of the fixed hostnames already trusted by auto-login.js's own
+ * VENDOR_PARTITIONS/LOGIN_STRATEGIES maps -- never an arbitrary URL.
  */
 
+const { BrowserWindow }          = require('electron');
 const creds  = require("../security/credentials");
 const logger = require("../utils/logger")("ipc:credentials");
 const { handle, requireString } = require('./_safe');
@@ -43,6 +59,28 @@ const _HOST_TO_VENDOR = {
   "www.access-billing-services.com":"abs",
 };
 
+// FEATURE (2026-07-22): fixed set of vendor portal "landing page" URLs
+// that credentials:test-login is allowed to open -- root/entry-point URL
+// for each, not a user-specific bookmark (e.g. a saved estimate ID),
+// since this is meant to work for ANY user on a fresh install, not just
+// whoever's Accounts list happens to already have a stale deep link.
+// 'uptake' is intentionally separate from VENDOR_CRED_KEYS/_HOST_TO_VENDOR
+// above -- fleet.uptake.com uses Amazon Midway SSO (LOGIN_STRATEGIES:
+// 'sso-click' in auto-login.js), not a stored username/password, so it
+// has no credential keys and needs none.
+const VENDOR_TEST_URLS = {
+  paccar:    'https://paccarpg.decisiv.net/',
+  volvo:     'https://volvopg.asist.decisiv.net/',
+  record360: 'https://dashboard.record360.com/',
+  aperia:    'https://amazon.aperiatech.com/',
+  reach24:   'https://amazon.reach24.net/',
+  dtna:      'https://dtna.my.site.com/',
+  roadready: 'https://roadready.fadv.com/',
+  velogic:   'https://velogic.my.site.com/',
+  abs:       'https://www.access-billing-services.com/',
+  uptake:    'https://fleet.uptake.com/?realm=amzlmiddlemile',
+};
+
 async function getForHostname(hostname) {
   const vendor = _HOST_TO_VENDOR[hostname];
   if (vendor && VENDOR_CRED_KEYS[vendor]) {
@@ -74,7 +112,50 @@ function registerCredentialIPC() {
   handle("credentials:save", async (_e, e) => { if (!e||typeof e!=="object") throw new ConfigError("entry must be object","entry"); _validateKey(e.key); await creds.set(e.key, typeof e.value==="string"?e.value:JSON.stringify(e.value)); logger.info("saved:",e.key); return {ok:true,key:e.key}; });
   handle("credentials:delete", async (_e, key) => { requireString(key,"key"); await creds.delete(key); logger.info("deleted:",key); return {ok:true}; });
   handle("credentials:get-for-url", async (_e, url) => { requireString(url,"url"); try { const h=new URL(url).hostname; const f=await getForHostname(h); return f?{exists:true,hostname:h,label:f.label}:null; } catch(_){return null;} });
+
+  // FEATURE (2026-07-22): opens a real, visible vendor portal window and
+  // attempts one real auto-login pass -- see the module docblock above
+  // for why this is a separate, fixed allowlist from open-popup's.
+  // Returns as soon as the FIRST attempt completes (filled+submitted, or
+  // determined not possible) and leaves the window open so the user can
+  // see the actual result with their own eyes (dashboard vs. error page)
+  // rather than this handler guessing at success from the URL alone --
+  // deliberately not over-claiming a "verified successful login" this
+  // handler can't fully confirm without knowing every vendor's specific
+  // post-login page shape.
+  handle("credentials:test-login", async (_e, vendorId) => {
+    requireString(vendorId, "vendorId");
+    const url = VENDOR_TEST_URLS[vendorId];
+    if (!url) throw new ConfigError("unknown vendor for test-login: " + vendorId, "vendorId");
+    const { attemptAutoLogin, VENDOR_PARTITIONS } = require('../orcha/auto-login');
+    const hostname = new URL(url).hostname;
+    const win = new BrowserWindow({
+      width: 1200, height: 800, show: true,
+      title: 'Sign in \u2014 ' + vendorId,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        partition: VENDOR_PARTITIONS[hostname] || undefined,
+      },
+    });
+    win.loadURL(url);
+    return await new Promise((resolve) => {
+      let resolved = false;
+      const finish = (result) => { if (!resolved) { resolved = true; resolve(result); } };
+      win.webContents.once('did-finish-load', async () => {
+        try {
+          const result = await attemptAutoLogin(win.webContents, win.webContents.getURL());
+          logger.info('test-login:', vendorId, '-> attempted:', result.filled);
+          finish({ ok: true, attempted: result.filled, site: result.site || hostname });
+        } catch (e) {
+          logger.warn('test-login error:', vendorId, e.message);
+          finish({ ok: false, error: e.message });
+        }
+      });
+      win.on('closed', () => finish({ ok: true, attempted: false, closedByUser: true }));
+    });
+  });
   logger.info("Credentials IPC handlers registered");
 }
 
-module.exports = { registerCredentialIPC, getForHostname, VENDOR_CRED_KEYS };
+module.exports = { registerCredentialIPC, getForHostname, VENDOR_CRED_KEYS, VENDOR_TEST_URLS };

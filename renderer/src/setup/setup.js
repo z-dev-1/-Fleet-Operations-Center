@@ -389,12 +389,37 @@ const STEPS = [
     },
   },
   {
-    id: 'vendorcreds', title: 'Vendor Portal Credentials', required: false,
+    // EXPANDED (2026-07-22): added Uptake + a "Test login" button per
+    // vendor. Test login opens the REAL portal and runs the exact same
+    // auto-login pass (src/orcha/auto-login.js) the background AAP/Relay
+    // scraper already uses in production for these hosts -- so this is
+    // proof the credentials you just saved actually work, not a separate
+    // disconnected check. See src/ipc/credentials.js (credentials:test-login)
+    // for the full design.
+    id: 'vendorcreds', title: 'Vendor Portal Logins', required: false,
     html: `
-      <p class="setup__hint">Optional -- needed for automated vendor portal scraping (PACCAR, Volvo, etc). Save any you have handy now; add the rest later in Settings &rarr; Integrations.</p>
+      <p class="setup__hint">Optional -- needed for automated vendor portal scraping and login. Save credentials, then click Test login to confirm they work in a real sign-in window. Add the rest later in Settings &rarr; Integrations if you're not ready now.</p>
+      <div class="setup__vendor-block">
+        <div class="setup__vendor-label">Uptake (fleet.uptake.com) -- Amazon SSO, no password needed</div>
+        <button id="sw-v-uptake-test" class="setup__btn setup__btn--secondary setup__btn--sm" type="button">Sign in to Uptake</button>
+        <div class="setup__inline-status" id="sw-v-uptake-status" style="display:none"></div>
+      </div>
       <div id="sw-vendor-list"></div>
     `,
     afterMount: () => {
+      document.getElementById('sw-v-uptake-test').addEventListener('click', async () => {
+        _showInline('sw-v-uptake-status', 'Opening Uptake...', '');
+        try {
+          const r = await window.credentials.testLogin('uptake');
+          if (r && r.ok && r.attempted) _showInline('sw-v-uptake-status', 'SSO attempted -- check the window that opened.', 'ok');
+          else if (r && r.closedByUser) _showInline('sw-v-uptake-status', 'Window closed.', '');
+          else _showInline('sw-v-uptake-status', 'Could not sign in automatically -- requires Midway (see the Midway step).', 'warn');
+          _savedSummary.vendorcreds = (_savedSummary.vendorcreds || '') + (_savedSummary.vendorcreds ? ', ' : '') + 'Uptake tested';
+        } catch (e) {
+          _showInline('sw-v-uptake-status', 'Error: ' + e.message, 'err');
+        }
+      });
+
       const VENDORS = [
         ['paccar', 'PACCAR (paccarpg.decisiv.net)', 'Username'],
         ['volvo', 'Volvo (volvopg.asist.decisiv.net)', 'Username'],
@@ -414,12 +439,13 @@ const STEPS = [
             <input class="setup__input" id="sw-v-${id}-user" placeholder="${_esc(userLabel)}" />
             <input class="setup__input" id="sw-v-${id}-pass" type="password" placeholder="Password" />
             <button class="setup__btn setup__btn--sm" id="sw-v-${id}-save" type="button">Save</button>
+            <button class="setup__btn setup__btn--secondary setup__btn--sm" id="sw-v-${id}-test" type="button">Test login</button>
           </div>
           <div class="setup__inline-status" id="sw-v-${id}-status" style="display:none"></div>
         </div>
       `).join('');
       let savedCount = 0;
-      VENDORS.forEach(([id]) => {
+      VENDORS.forEach(([id, label]) => {
         document.getElementById(`sw-v-${id}-save`).addEventListener('click', async () => {
           const user = document.getElementById(`sw-v-${id}-user`).value.trim();
           const pass = document.getElementById(`sw-v-${id}-pass`).value;
@@ -431,6 +457,17 @@ const STEPS = [
           _showInline(`sw-v-${id}-status`, 'Saved.', 'ok');
           savedCount++;
           _savedSummary.vendorcreds = savedCount + ' vendor(s) configured';
+        });
+        document.getElementById(`sw-v-${id}-test`).addEventListener('click', async () => {
+          _showInline(`sw-v-${id}-status`, 'Opening ' + label.split(' (')[0] + '...', '');
+          try {
+            const r = await window.credentials.testLogin(id);
+            if (r && r.ok && r.attempted) _showInline(`sw-v-${id}-status`, 'Login attempted -- check the window that opened.', 'ok');
+            else if (r && r.closedByUser) _showInline(`sw-v-${id}-status`, 'Window closed.', '');
+            else _showInline(`sw-v-${id}-status`, 'No saved credentials to try -- save above first.', 'warn');
+          } catch (e) {
+            _showInline(`sw-v-${id}-status`, 'Error: ' + e.message, 'err');
+          }
         });
       });
     },
