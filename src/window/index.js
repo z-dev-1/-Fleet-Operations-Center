@@ -897,15 +897,49 @@ function initWindows(ctx) {
           logger.warn('[auth-poll] SSO redirect loop \u2014 launching mwinit terminal');
           pushStatus('\uD83D\uDD11 Session expired \u2014 complete Midway auth in the terminal window...');
           try {
-            const { runMwinit, injectCookies } = _getAuth();
+            // FIX (2026-07-21): this recovery path was calling runMwinit() +
+            // injectCookies() directly, then doing a raw mainWindow.loadURL()
+            // with NO verification and NO retry -- a materially weaker flow
+            // than src/scrapers/auth.js's ensureAuthenticated(), which does
+            // inject -> verify via a real probe-window navigation -> verify
+            // via a relay-endpoint ping -> automatically retry injection once
+            // if the relay check fails. Confirmed via logs/auth.log:
+            // 2026-07-20 (working) sessions all logged the full "nav:" /
+            // "Probe landed:" / "Relay landed:" / "Session confirmed"
+            // sequence; 2026-07-21 (broken) attempts never did, because this
+            // path never called it. Injecting cookies successfully is
+            // necessary but not sufficient for AAP to actually accept the
+            // session -- only the probe/relay checks prove that.
+            //
+            // NOT delegating to ensureAuthenticated() wholesale: its own
+            // internal mwinit auto-spawn is deliberately disabled
+            // (`if (false /* DISABLED: mwinit auto-spawn causes boot loops */)`)
+            // per a prior fix, so calling it alone would silently skip
+            // spawning mwinit here. Keeping the explicit runMwinit() call
+            // below and adding the same probeSession()/pingRelayEndpoint()
+            // verification+retry ensureAuthenticated() does, without its
+            // disabled auto-spawn branch.
+            const { runMwinit, injectCookies, probeSession, pingRelayEndpoint } = _getAuth();
             await runMwinit();
             await injectCookies();
-            logger.info('[auth-poll] mwinit done \u2014 reloading AAP');
+
+            const pageOk = await probeSession();
+            if (!pageOk) throw new Error('AAP rejected session -- run mwinit -f then restart');
+
+            let relayOk = await pingRelayEndpoint();
+            if (!relayOk) {
+              logger.warn('[auth-poll] Relay check failed -- re-injecting and retrying');
+              await injectCookies();
+              relayOk = await pingRelayEndpoint();
+            }
+            if (!relayOk) throw new Error('AAP relay rejected session -- run mwinit -f then restart');
+
+            logger.info('[auth-poll] session verified (page + relay probes passed) \u2014 reloading AAP');
             pushStatus('\u2705 Midway auth complete \u2014 reloading AAP...');
             mainWindow.loadURL(startUrl);
           } catch (e) {
-            logger.error('[auth-poll] mwinit failed:', e.message);
-            pushError('\u26A0\uFE0F mwinit failed: ' + e.message + ' \u2014 run mwinit manually then restart');
+            logger.error('[auth-poll] mwinit/verification failed:', e.message);
+            pushError('\u26A0\uFE0F ' + e.message + ' \u2014 run mwinit manually then restart');
           }
         }
       } else {

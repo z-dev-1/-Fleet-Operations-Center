@@ -254,6 +254,14 @@ export const notes = {
   deleteUnit: (id)   => window.notes.deleteUnit(id),
 };
 
+// ── Long Dwell Units (Analytics tab) ───────────────────────────────────────
+export const longDwell = {
+  getAll:     ()     => window.longDwell.getAll(),
+  getUnit:    (id)   => window.longDwell.getUnit(id),
+  saveUnit:   (data) => window.longDwell.saveUnit(data),
+  deleteUnit: (id)   => window.longDwell.deleteUnit(id),
+};
+
 // ── AI / Orcha ─────────────────────────────────────────────────────────────
 export const ai = {
   suggest:          (unit)       => window.ai.suggest(unit),
@@ -303,6 +311,15 @@ export const slack = {
   searchDirectory: (data) => window.slack.searchDirectory(data),
   openConversation: (data) => window.slack.openConversation(data),
   onIncoming:   (cb)   => window.slack.onIncoming(cb),
+  // -- Partner Auto-Reply engine (2026-07-21)
+  getChannelWatchConfig:  ()       => window.slack.getChannelWatchConfig(),
+  saveChannelWatchConfig: (config) => window.slack.saveChannelWatchConfig(config),
+  checkChannelMembership: (channelId) => window.slack.checkChannelMembership(channelId),
+  pollChannelWatch:       ()       => window.slack.pollChannelWatch(),
+  dedupeReplies:          ()       => window.slack.dedupeReplies(),
+  getReviewQueue:         ()       => window.slack.getReviewQueue(),
+  getReplyLog:            (limit)  => window.slack.getReplyLog(limit),
+  updateReviewItem:       (data)   => window.slack.updateReviewItem(data),
 };
 
 // ── SharePoint ─────────────────────────────────────────────────────────────
@@ -383,6 +400,14 @@ export const asana = {
   addComment:     (taskGid, text)    => window.asana.addComment(taskGid, text),
   moveTask:       (taskGid, sectGid) => window.asana.moveTask(taskGid, sectGid),
   linkUnit:       (unitId, taskId)   => window.asana.linkUnit(unitId, taskId),
+};
+
+// -- Microsoft Graph mail (2026-07-21) -- see src/graph/client.js
+export const graphMail = {
+  checkAuth: ()     => window.graphMail.checkAuth(),
+  signIn:    ()     => window.graphMail.signIn(),
+  signOut:   ()     => window.graphMail.signOut(),
+  send:      (data) => window.graphMail.send(data),
 };
 
 // ── Vendor (Dealer Work Order Engine) ──

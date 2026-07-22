@@ -16,7 +16,7 @@ const { BrowserWindow, session: electronSession } = require('electron');
 const creds  = require('../security/credentials');
 const store  = require('../store'); // BUG FIX (2026-07-16): was missing entirely; see slack:get/set-auto-reply below
 const logger = require('../utils/logger')('ipc:slack');
-const { handle, requireStringMax } = require('./_safe');
+const { handle, requireString, requireStringMax } = require('./_safe');
 
 // ── Issue #5: Slack field caps ───────────────────────────────────────────────
 const MAX_RECIPIENT_LEN = 128;    // Slack channel name / user handle
@@ -183,6 +183,60 @@ function registerSlackIPC() {
     store.save('slackAutoReply', rules);
     logger.info('[Slack] auto-reply rules saved: ' + rules.length);
     return { ok: true, count: rules.length };
+  });
+
+  // ── Partner Auto-Reply engine (2026-07-21) ──────────────────────────────
+  // See src/scrapers/slack_channel_watch.js for the full design/safety
+  // writeup. IPC surface: config get/save, the poll trigger (called on a
+  // timer from the renderer, same pattern as the existing DM poller), and
+  // review-queue read/update for the Orcha floater's Review tab.
+  handle('slack:get-channel-watch-config', async () => {
+    const { getWatchConfig } = require('../../src/scrapers/slack_channel_watch');
+    return getWatchConfig();
+  });
+
+  handle('slack:save-channel-watch-config', async (_e, config) => {
+    if (!config || typeof config !== 'object') throw new Error('config must be an object');
+    const { saveWatchConfig } = require('../../src/scrapers/slack_channel_watch');
+    return saveWatchConfig(config);
+  });
+
+  // FEATURE (2026-07-22): channel-add-by-ID membership check -- see
+  // checkChannelMembership() in slack_send.js for the full rationale on
+  // why ID entry + verification replaces a browsable channel list here.
+  handle('slack:check-channel-membership', async (_e, channelId) => {
+    requireString(channelId, 'channelId');
+    const { checkChannelMembership } = require('../../src/scrapers/slack_send');
+    return checkChannelMembership(channelId);
+  });
+
+  handle('slack:poll-channel-watch', async () => {
+    const { pollChannelsOnce } = require('../../src/scrapers/slack_channel_watch');
+    return pollChannelsOnce((msg) => logger.info(msg));
+  });
+
+  // BUG FIX (2026-07-22): one-time cleanup of any duplicate log entries
+  // already created before the pollChannelsOnce re-entrancy lock existed.
+  // See dedupeReplyLog() in slack_channel_watch.js for full rationale.
+  handle('slack:dedupe-replies', async () => {
+    const { dedupeReplyLog } = require('../../src/scrapers/slack_channel_watch');
+    return dedupeReplyLog();
+  });
+
+  handle('slack:get-review-queue', async () => {
+    const { getReviewQueue } = require('../../src/scrapers/slack_channel_watch');
+    return getReviewQueue();
+  });
+
+  handle('slack:get-reply-log', async (_e, limit) => {
+    const { getReplyLog } = require('../../src/scrapers/slack_channel_watch');
+    return getReplyLog(limit);
+  });
+
+  handle('slack:update-review-item', async (_e, data) => {
+    if (!data || !data.id) throw new Error('data.id required');
+    const { updateReviewItem } = require('../../src/scrapers/slack_channel_watch');
+    return updateReviewItem(data.id, data.updates || {});
   });
 
   logger.info('Slack IPC handlers registered');

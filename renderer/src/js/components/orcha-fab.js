@@ -12,6 +12,7 @@
 import bus from '../bus.js';
 import { ai, slack } from '../bridge.js';
 import state from '../state.js';
+import toast from '../components/toast.js';
 
 let _panelOpen = false;
 let _slackAuthed = false;
@@ -252,22 +253,139 @@ async function _startSlackPoll() {
   }, 30000);
 }
 
+// ── Partner Auto-Reply engine (2026-07-21) — see src/scrapers/slack_channel_watch.js
+// for the full design/safety writeup. Mirrors _startSlackPoll() above:
+// same "confirm live auth first, then interval" structure, separate timer
+// so a failure/slowdown in one poller never affects the other.
+let _channelWatchTimer = null;
+const CATEGORY_META = {
+  alert:    { icon: '\u{1F6A8}', label: 'Alerts' },
+  action:   { icon: '\u{1F4A1}', label: 'Actions' },
+  workflow: { icon: '\u{1F4CD}', label: 'Workflow' },
+};
+
+async function _startChannelWatchPoll() {
+  if (_channelWatchTimer) return;
+  _channelWatchTimer = setInterval(async () => {
+    try {
+      const result = await slack.pollChannelWatch();
+      if (result && result.escalatedCount > 0) {
+        bus.emit('ui:notif-push', {
+          icon: '\u{1F6A8}',
+          title: 'Partner AI: ' + result.escalatedCount + ' item(s) need review',
+          body: (result.items[0] && result.items[0].title) || '',
+          time: Date.now(),
+        });
+        _updateReviewBadge();
+        if (_activeTab === 'review') _refreshReviewQueue();
+      }
+    } catch (e) { /* silent -- same pattern as DM poller above */ }
+  }, 30000);
+}
+
+async function _updateReviewBadge() {
+  try {
+    const items = await slack.getReviewQueue();
+    const badge = document.getElementById('oc-review-badge');
+    if (!badge) return;
+    if (items && items.length) {
+      badge.textContent = String(items.length);
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+  } catch (e) { /* silent */ }
+}
+
+// FEATURE (2026-07-21): renders the 🚨 Alerts / 💡 Actions / 📍 Workflow
+// review queue -- items the Partner Auto-Reply AI could not confidently
+// answer on its own. A professional holding reply was already sent to the
+// partner in-channel; this view is purely for follow-up/oversight, not a
+// pending-approval gate (the reply already went out).
+async function _refreshReviewQueue() {
+  const listEl = document.getElementById('oc-review-list');
+  const emptyEl = document.getElementById('oc-review-empty');
+  if (!listEl) return;
+  let items = [];
+  try { items = await slack.getReviewQueue(); } catch (e) { items = []; }
+
+  _updateReviewBadge();
+
+  if (!items.length) {
+    listEl.innerHTML = '<div class="oc-review-empty" id="oc-review-empty">No items need review right now.</div>';
+    return;
+  }
+
+  listEl.innerHTML = items.map((item) => {
+    const meta = CATEGORY_META[item.category] || CATEGORY_META.workflow;
+    const when = _formatSlackTs(item.ts);
+    return `<div class="oc-review-item" data-id="${_escapeHtml(item.id)}">
+      <div class="oc-review-item-head">
+        <span class="oc-review-cat">${meta.icon} ${meta.label}</span>
+        <span class="oc-review-chan">#${_escapeHtml(item.channelName || '')}</span>
+        <span class="oc-review-time">${when}</span>
+      </div>
+      <div class="oc-review-question">${_escapeHtml(item.question || '')}</div>
+      <div class="oc-review-reply"><span class="oc-review-reply-label">Sent to partner:</span> ${_escapeHtml(item.reply || '')}</div>
+      <div class="oc-review-actions">
+        <button class="oc-review-btn oc-review-btn--done" data-action="done">Mark handled</button>
+        <button class="oc-review-btn oc-review-btn--dismiss" data-action="dismiss">Dismiss</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  listEl.querySelectorAll('.oc-review-item').forEach((el) => {
+    const id = el.getAttribute('data-id');
+    el.querySelectorAll('.oc-review-btn').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const action = btn.getAttribute('data-action');
+        const status = action === 'done' ? 'done' : 'dismissed';
+        try {
+          await slack.updateReviewItem({ id, updates: { status } });
+          toast.show('success', action === 'done' ? 'Marked handled' : 'Dismissed', 2000);
+          _refreshReviewQueue();
+        } catch (e) {
+          toast.show('error', 'Failed to update: ' + e.message, 3000);
+        }
+      });
+    });
+  });
+}
+
+function _formatSlackTs(ts) {
+  try {
+    const d = new Date(parseFloat(ts) * 1000);
+    return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  } catch (e) { return ''; }
+}
+
+function _escapeHtml(str) {
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 // ── FEATURE (2026-07-16): Slack tab — Chat/Slack tab switching ──────────────
 function _switchTab(tab) {
   if (tab === _activeTab) return;
   _activeTab = tab;
   const chatBtn  = document.getElementById('oc-tab-btn-chat');
   const slackBtn = document.getElementById('oc-tab-btn-slack');
+  const reviewBtn = document.getElementById('oc-tab-btn-review');
   const chatPane = document.getElementById('oc-tab-chat');
   const slackPane = document.getElementById('oc-tab-slack');
+  const reviewPane = document.getElementById('oc-tab-review');
   if (chatBtn)  chatBtn.classList.toggle('oc-tab--active', tab === 'chat');
   if (slackBtn) slackBtn.classList.toggle('oc-tab--active', tab === 'slack');
+  if (reviewBtn) reviewBtn.classList.toggle('oc-tab--active', tab === 'review');
   if (chatPane)  chatPane.style.display  = tab === 'chat'  ? '' : 'none';
   if (slackPane) slackPane.style.display = tab === 'slack' ? '' : 'none';
+  if (reviewPane) reviewPane.style.display = tab === 'review' ? '' : 'none';
 
   if (tab === 'slack') {
     _refreshSlackTabState();
     _startSlackTabRefresh();
+  } else if (tab === 'review') {
+    _stopSlackTabRefresh();
+    _refreshReviewQueue();
   } else {
     _stopSlackTabRefresh();
   }
@@ -464,8 +582,10 @@ async function _slackLogin() {
 function _wireSlackTab() {
   const chatBtn  = document.getElementById('oc-tab-btn-chat');
   const slackBtn = document.getElementById('oc-tab-btn-slack');
+  const reviewBtn = document.getElementById('oc-tab-btn-review');
   if (chatBtn)  chatBtn.addEventListener('click', () => _switchTab('chat'));
   if (slackBtn) slackBtn.addEventListener('click', () => _switchTab('slack'));
+  if (reviewBtn) reviewBtn.addEventListener('click', () => _switchTab('review'));
 
   const loginBtn = document.getElementById('oc-slack-login-btn');
   if (loginBtn) loginBtn.addEventListener('click', _slackLogin);
@@ -569,6 +689,7 @@ export function init() {
     <div class="oc-tabs" id="oc-tabs">
       <button class="oc-tab oc-tab--active" id="oc-tab-btn-chat" data-tab="chat">Chat</button>
       <button class="oc-tab" id="oc-tab-btn-slack" data-tab="slack">Slack</button>
+      <button class="oc-tab" id="oc-tab-btn-review" data-tab="review">Review<span class="oc-review-badge" id="oc-review-badge" style="display:none">0</span></button>
     </div>
     <div class="oc-tab-content" id="oc-tab-chat">
       <div class="oc-msgs" id="orcha-msgs">
@@ -600,6 +721,11 @@ export function init() {
           <input class="oc-input" id="oc-slack-reply-input" placeholder="Message..." autocomplete="off" spellcheck="false"/>
           <button class="oc-send" id="oc-slack-reply-send">\u{27A4}</button>
         </div>
+      </div>
+    </div>
+    <div class="oc-tab-content" id="oc-tab-review" style="display:none">
+      <div class="oc-review-list" id="oc-review-list">
+        <div class="oc-review-empty" id="oc-review-empty">No items need review right now.</div>
       </div>
     </div>
   `;
@@ -651,6 +777,20 @@ export function init() {
 
   // Start Slack DM polling on boot (background)
   setTimeout(() => _startSlackPoll(), 3000);
+
+  // Start Partner Auto-Reply channel watch polling on boot (background),
+  // and show the review-queue badge count immediately without waiting for
+  // the user to open the Review tab.
+  // BUG FIX (2026-07-22): run the one-time duplicate-entry cleanup FIRST,
+  // before starting the poller or reading the badge count, so any bad
+  // data from before today's re-entrancy-lock fix is already cleaned up
+  // by the time the user opens the Review tab. See dedupeReplyLog() in
+  // slack_channel_watch.js for the full rationale.
+  setTimeout(async () => {
+    try { await slack.dedupeReplies(); } catch (e) { /* non-fatal, poller still starts */ }
+    _startChannelWatchPoll();
+    _updateReviewBadge();
+  }, 4000);
 
   // Morning briefing
   if (window.fleet && window.fleet.onBriefing) {

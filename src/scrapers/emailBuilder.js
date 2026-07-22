@@ -86,10 +86,30 @@ function buildEmail(opts) {
   const totalUnits = filteredUnits.length;
   const inService = totalUnits - unavailUnits.length;
 
-  // Test banner
-  const testBanner = testMode
-    ? `<tr><td bgcolor="#b84500" style="background-color:#b84500;padding:7px 16px;text-align:center;">${ft('#ffffff', '<b>&#9888; TEST MODE &#9888; &#8212; Routing to zilasant@amazon.com ONLY</b>', 'font-size:12px')}</td></tr>`
-    : '';
+  // Accent bar text — DESIGN UPDATE (2026-07-21): the bar itself is now a
+  // permanent part of the template shell (always rendered, see
+  // email_template.html), not conditional. Only the text inside it is
+  // conditional: blank by default, "TEST" only during an actual test send.
+  const testBanner = testMode ? 'TEST' : '&nbsp;';
+
+  // KPI strip — DESIGN ADD (2026-07-21): quick-glance totals row.
+  const inServicePct = totalUnits > 0 ? Math.round((inService / totalUnits) * 100) : 0;
+  const kpiStrip = `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
+<td width="33%" style="padding:10px;text-align:center;background-color:#f3f6fa;border-radius:8px 0 0 8px;">${ft('#0f1b2d','<b>'+totalUnits+'</b>','font-size:20px')}<br>${ft('#64748a','TOTAL UNITS','font-size:9px;letter-spacing:0.05em')}</td>
+<td width="33%" style="padding:10px;text-align:center;background-color:#fdeceb;">${ft('#b91c1c','<b>'+unavailUnits.length+'</b>','font-size:20px')}<br>${ft('#64748a','UNAVAILABLE','font-size:9px;letter-spacing:0.05em')}</td>
+<td width="34%" style="padding:10px;text-align:center;background-color:#eaf7ef;border-radius:0 8px 8px 0;">${ft('#15803d','<b>'+inServicePct+'%</b>','font-size:20px')}<br>${ft('#64748a','FLEET IN-SERVICE','font-size:9px;letter-spacing:0.05em')}</td>
+</tr></table>`;
+
+  // Vendor chips — DESIGN ADD (2026-07-21): quick vendor-load-at-a-glance,
+  // counted from currently unavailable units only (active vendor workload).
+  const vendorCounts = {};
+  unavailUnits.forEach(u => { const v = (u.vendor || '').trim(); if (v) vendorCounts[v] = (vendorCounts[v] || 0) + 1; });
+  const vendorNames = Object.keys(vendorCounts);
+  let vendorChips = '';
+  if (vendorNames.length) {
+    vendorChips = ft('#64748a', 'ACTIVE VENDORS:&nbsp;', 'font-size:9px;letter-spacing:0.05em') +
+      vendorNames.map(v => `<table cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td style="background-color:#eef2f7;border-radius:10px;padding:3px 10px;">${ft('#334155','<b>'+v.toUpperCase()+': '+vendorCounts[v]+'</b>','font-size:9px')}</td></tr></table>&nbsp;`).join('');
+  }
 
   const noteBar = emailNote
     ? `<tr><td style="padding:10px 16px;"><font color="#dc2626" face="Arial,sans-serif" style="font-size:12px;font-weight:bold;">NOTE: ${emailNote.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</font></td></tr>`
@@ -342,7 +362,9 @@ ${pmRows}
   template = template.replace(/\{\{SLOT_COLOR\}\}/g, slotColor);
   template = template.replace(/\{\{SLOT_ICON\}\}/g, slotIcon);
   template = template.replace(/\{\{NOTE_BAR\}\}/g, noteBar);
+  template = template.replace(/\{\{KPI_STRIP\}\}/g, kpiStrip);
   template = template.replace(/\{\{FLEET_SUMMARY\}\}/g, fleetSummary);
+  template = template.replace(/\{\{VENDOR_CHIPS\}\}/g, vendorChips);
   template = template.replace(/\{\{UNAVAIL_COUNT\}\}/g, String(unavailUnits.length));
   template = template.replace(/\{\{UNAVAIL_TABLE\}\}/g, unavailTable);
   template = template.replace(/\{\{PM_TABLE\}\}/g, pmTable);

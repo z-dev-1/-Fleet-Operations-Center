@@ -103,6 +103,14 @@ contextBridge.exposeInMainWorld('notes', {
   deleteUnit:(id)     => ipcRenderer.invoke('notes:delete-unit', id),
 });
 
+// ── Long Dwell Units (Analytics tab) ──────────────────────────────────────
+contextBridge.exposeInMainWorld('longDwell', {
+  getAll:     ()     => ipcRenderer.invoke('long-dwell:get-all'),
+  getUnit:    (id)   => ipcRenderer.invoke('long-dwell:get-unit', id),
+  saveUnit:   (data) => ipcRenderer.invoke('long-dwell:save-unit', data),
+  deleteUnit: (id)   => ipcRenderer.invoke('long-dwell:delete-unit', id),
+});
+
 // ── AI / Orcha ────────────────────────────────────────────────────────────────
 contextBridge.exposeInMainWorld('ai', {
   suggest:          (unit)        => ipcRenderer.invoke('ai:suggest', unit),
@@ -154,6 +162,26 @@ contextBridge.exposeInMainWorld('slack', {
   getAutoReply:   ()     => ipcRenderer.invoke('slack:get-auto-reply'),
   setAutoReply:   (r)    => ipcRenderer.invoke('slack:set-auto-reply', r),
   onIncoming:     (cb)   => on('slack:incoming', cb),
+  // -- Partner Auto-Reply engine (2026-07-21) -- see src/scrapers/slack_channel_watch.js
+  getChannelWatchConfig:  ()       => ipcRenderer.invoke('slack:get-channel-watch-config'),
+  saveChannelWatchConfig: (config) => ipcRenderer.invoke('slack:save-channel-watch-config', config),
+  checkChannelMembership: (channelId) => ipcRenderer.invoke('slack:check-channel-membership', channelId),
+  pollChannelWatch:       ()       => ipcRenderer.invoke('slack:poll-channel-watch'),
+  dedupeReplies:          ()       => ipcRenderer.invoke('slack:dedupe-replies'),
+  getReviewQueue:         ()       => ipcRenderer.invoke('slack:get-review-queue'),
+  getReplyLog:            (limit)  => ipcRenderer.invoke('slack:get-reply-log', limit),
+  updateReviewItem:       (data)   => ipcRenderer.invoke('slack:update-review-item', data),
+});
+
+// -- Microsoft Graph mail (2026-07-21) -- see src/graph/client.js for the
+//    full "why": bypasses OWA compose's paste sanitizer entirely, and
+//    doesn't need VPN (unlike SMTP), unlike this app's other two send
+//    paths. Mirrors the Slack block above.
+contextBridge.exposeInMainWorld('graphMail', {
+  checkAuth: ()   => ipcRenderer.invoke('graph:check-auth'),
+  signIn:    ()   => ipcRenderer.invoke('graph:sign-in'),
+  signOut:   ()   => ipcRenderer.invoke('graph:sign-out'),
+  send:      (data) => ipcRenderer.invoke('graph:send-mail', data),
 });
 
 

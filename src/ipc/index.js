@@ -16,6 +16,7 @@
 const { registerSettingsIPC }    = require('./settings');
 const { registerNotesIPC }       = require('./notes');
 const { registerSlackIPC }       = require('./slack');
+const { registerGraphIPC }       = require('./graph');
 const { registerSharePointIPC }  = require('./sharepoint');
 const { registerAsanaIPC }       = require('./asana');
 const { registerAIHandlers }     = require('./ai');
@@ -27,12 +28,14 @@ const { registerVendorIPC }   = require('../vendors');
 const { registerVendorHistoryIPC } = require('./vendor-history');
 const { registerSetupIPC }       = require('./setup');
 const { registerWorkflowIntelIPC } = require('./workflow-intel');
+const { registerLongDwellIPC }     = require('./long-dwell');
 const logger = require('../utils/logger')('ipc');
 
 function registerAllIPC(ctx) {
   registerSettingsIPC(ctx);
   registerNotesIPC();
   registerSlackIPC();
+  registerGraphIPC();
   registerSharePointIPC(ctx);
   registerAsanaIPC();
   registerAIHandlers(ctx);
@@ -44,6 +47,7 @@ function registerAllIPC(ctx) {
   registerVendorIPC();
   registerVendorHistoryIPC();
   registerWorkflowIntelIPC(ctx);
+  registerLongDwellIPC();
   const { registerPartnerWRHandlers } = require("./partner-wr");
   registerPartnerWRHandlers(ctx);
   const { registerContactsHandlers } = require('./contacts');

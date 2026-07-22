@@ -123,11 +123,27 @@ async function injectCookies() {
 
   for (const c of cookies) {
     try {
-      await ses.cookies.set(c);
+      // FIX (2026-07-21): __Host-prefixed cookies (e.g. __Host-session) are
+      // required by spec to be host-only -- Secure + Path=/ only, with NO
+      // Domain attribute at all. This loop was always passing an explicit
+      // `domain` field to ses.cookies.set() for every cookie, which Chromium's
+      // cookie store rejects outright for any __Host- prefixed name (setting
+      // an explicit domain, even without a leading dot, violates the __Host-
+      // contract). That rejection was exactly the "Skipped: 1" seen on every
+      // single injectCookies() run -- and __Host-session is the actual
+      // Midway session credential, so silently dropping it meant the app
+      // kept bouncing back to midway-auth.amazon.com/SSO/redirect even
+      // immediately after a fully successful mwinit + "6 injected" log line.
+      // Fix: omit `domain` for __Host- cookies and let Electron derive the
+      // host-only scope from `url` instead, per the spec's own requirement.
+      const cookieToSet = c.name.startsWith('__Host-')
+        ? { url: c.url, path: c.path, name: c.name, value: c.value, secure: c.secure, httpOnly: c.httpOnly, expirationDate: c.expirationDate, sameSite: c.sameSite }
+        : c;
+      await ses.cookies.set(cookieToSet);
       injected++;
     } catch (e) {
       failed++;
-      logger.debug('[AuthManager] Skip', c.name, '@', c.domain, ':', e.message);
+      logger.warn('[AuthManager] Skip', c.name, '@', c.domain, ':', e.message);
     }
   }
 
@@ -136,30 +152,77 @@ async function injectCookies() {
   return injected;
 }
 
-// ── Spawn a visible terminal and run mwinit -o ────────────────────────────────
+// -- Spawn a visible terminal and run mwinit ---------------------------------
 // Opens a real cmd.exe window so the user can tap their security key.
 // Resolves once checkMwinit() confirms all cookies are valid.
 // Rejects after MWINIT_TIMEOUT_MS if auth is not completed.
+//
+// FIX (2026-07-21): was hardcoded to `mwinit -o`, forcing OTP mode on every
+// single auto-launch instead of letting mwinit auto-detect and use
+// WebAuthn/Windows Hello -- exactly the flag mwinit's own startup banner
+// warns against ("please avoid using the -o or --otp-auth flag... WebAuthn
+// is available on this platform"). OTP codes have a short validity window;
+// forcing this path made auth spawned by this app's own auth-poll
+// meaningfully more likely to hit a freshness/replay-window rejection
+// (surfaced as "AEA verification failed: used_too_late") than a plain
+// `mwinit` run would be -- which is exactly why manually running mwinit
+// elsewhere "worked fine" while this app's auto-launched terminal kept
+// failing. Also: the retry loop's "[!] Invalid password" message below is
+// this batch file's OWN hardcoded text on ANY non-zero mwinit exit code --
+// it is not mwinit's real error output, so it was mislabeling a
+// used_too_late timing failure as a wrong password the whole time.
+// FIX (2026-07-21): added a module-level in-flight guard. There are multiple
+// independent callers of runMwinit() in this app (app.js's 5-min auto-renewal
+// timer, window/index.js's SSO-redirect auth-poller, the orcha:mwinit IPC
+// handler, the Settings "Run mwinit" button) each with their OWN local
+// "already running" flag that only protects against that ONE caller
+// re-firing itself -- none of them knew about each other. That let two of
+// these mechanisms spawn separate, concurrent mwinit terminals at the same
+// time (confirmed live: multiple overlapping mwinit processes observed
+// piling up over a single session). Two concurrent mwinit attempts racing
+// for the same Midway session is a direct, confirmed cause of
+// "AEA verification failed: used_too_late" -- one attempt's challenge/
+// certificate timing gets invalidated by the other. Centralizing the guard
+// here, inside the one function every caller actually goes through, fixes
+// it regardless of which caller (present or future) triggers it: if a
+// renewal is already in progress, every caller just awaits that SAME
+// in-flight promise instead of spawning a second terminal.
+let _mwinitInFlight = null;
 function runMwinit() {
-  return new Promise((resolve, reject) => {
+  if (_mwinitInFlight) {
+    logger.info('[AuthManager] mwinit already in flight -- awaiting existing attempt instead of spawning another');
+    return _mwinitInFlight;
+  }
+  _mwinitInFlight = new Promise((resolve, reject) => {
     logger.info('[AuthManager] Spawning mwinit terminal...');
 
-    // Write temp batch file for retry loop
+    // FIX (2026-07-21): the ":RETRY" loop below treated ANY non-zero mwinit
+    // exit code as total failure and looped back to re-run the entire
+    // mwinit flow (PIN + WebAuthn tap) again. Confirmed live from the user's
+    // actual terminal output: mwinit's cookie step ("Successfully
+    // authenticated using WebAuthN, session cookie saved...") -- the ONLY
+    // thing this app actually reads/uses -- succeeds on every single
+    // attempt. The non-zero exit code is coming from a SEPARATE, later step
+    // ("FAILED to get certificate. Request Forbidden. AEA verification
+    // failed: used_too_late") that issues an X.509 client certificate this
+    // app never uses (checkMwinit()/parseMidwayCookies() only ever read
+    // ~/.midway/cookie, never any certificate file). So this retry loop was
+    // forcing a full second (or third, fourth...) round of PIN + WebAuthn
+    // purely because of an irrelevant cert-issuance failure, even though the
+    // cookie the app actually needed was already valid after attempt #1.
+    // The poll loop below already independently verifies real cookie
+    // validity by re-reading the file every 1.5s -- it does not depend on
+    // mwinit's exit code at all. So: run mwinit ONCE, let it exit with
+    // whatever code it wants, and let the Node-side poll be the sole
+    // arbiter of success. No more forced repeat authentication.
     const batchPath = require('path').join(require('os').tmpdir(), 'fleet_mwinit.bat');
     fs.writeFileSync(batchPath, [
       '@echo off',
       'echo Fleet Operations - Midway auth required.',
       'echo.',
-      ':RETRY',
-      'mwinit -o',
-      'if errorlevel 1 (',
-      '  echo.',
-      '  echo [!] Invalid password - please try again.',
-      '  echo.',
-      '  goto RETRY',
-      ')',
+      'mwinit',
       'echo.',
-      'echo Auth complete - this window will close in 3 seconds.',
+      'echo Auth step complete - this window will close in 3 seconds.',
       'timeout /t 3 /nobreak > nul',
       'exit',
     ].join('\r\n'));
@@ -175,7 +238,7 @@ function runMwinit() {
         const state = checkMwinit();
         if (state.ok) {
           clearInterval(poll);
-          logger.info('[AuthManager] mwinit complete — cookies valid, expires in ' +
+          logger.info('[AuthManager] mwinit complete -- cookies valid, expires in ' +
             (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session'));
           resolve();
           return;
@@ -189,6 +252,10 @@ function runMwinit() {
       }
     }, 1500);
   });
+  // Always clear the lock once settled (success or failure), regardless of
+  // which caller is awaiting it.
+  _mwinitInFlight.finally(() => { _mwinitInFlight = null; });
+  return _mwinitInFlight;
 }
 
 // ── Probe AAP session by URL (no DOM — too fragile) ──────────────────────────
@@ -209,12 +276,30 @@ async function probeSession() {
     };
 
     const timeout = setTimeout(() => { logger.info('[AuthManager] Probe timed out'); done(false); }, 25000);
-    const isAAP   = (url) => /aap-na\.corp\.amazon\.com/i.test(url);
+    // FIX (2026-07-21): isAAP() was a substring test against the WHOLE url
+    // string, not the actual hostname. Midway's own SSO redirect URL legitimately
+    // embeds the destination as a plain-text query param (dots aren't
+    // percent-encoded): .../SSO/redirect?redirect_uri=https%3A%2F%2Faap-na.corp.amazon.com%2F...
+    // That made isAAP() return true while STILL on midway-auth.amazon.com,
+    // which also broke isSSO() (defined as ssoPattern && !isAAP) at the same
+    // time -- both checks fooled by the same bug, causing probeSession() to
+    // report a false "success" while the page was still stuck on the SSO
+    // redirect. Confirmed live: 2026-07-21 probe landed on
+    // "midway-auth.amazon.com/SSO/redirect?redirect_uri=...aap-na..." and
+    // was reported as a successful AAP landing. Fix: parse the actual
+    // hostname and compare that, not the raw url string.
+    const isAAP   = (url) => { try { return /(^|\.)aap-na\.corp\.amazon\.com$/i.test(new URL(url).hostname); } catch (_) { return false; } };
     const isSSO   = (url) => /midway|login\.amazon|signin|sso\.amazon|oidc|oauth|\/auth\//i.test(url) && !isAAP(url);
 
-    probe.webContents.on('will-redirect',        (_, url) => { if (isSSO(url)) done(false); });
+    // FIX (2026-07-21): will-redirect and did-navigate-in-page were both
+    // silently calling done(false) with NO logging when they detected an SSO
+    // url -- unlike did-navigate/did-finish-load below, which both log
+    // before deciding. That total silence is exactly why "AAP rejected
+    // session" kept throwing with zero visibility into what URL was actually
+    // being rejected. Logging here now so the real blocking URL is visible.
+    probe.webContents.on('will-redirect',        (_, url) => { if (isSSO(url)) { logger.info('[AuthManager] will-redirect (SSO, rejecting):', url); done(false); } else { logger.info('[AuthManager] will-redirect (ok):', url.slice(0, 120)); } });
     probe.webContents.on('did-navigate',         (_, url) => { logger.info('[AuthManager] nav:', url); if (isSSO(url)) done(false); });
-    probe.webContents.on('did-navigate-in-page', (_, url) => { if (isSSO(url)) done(false); });
+    probe.webContents.on('did-navigate-in-page', (_, url) => { if (isSSO(url)) { logger.info('[AuthManager] did-navigate-in-page (SSO, rejecting):', url); done(false); } });
     probe.webContents.on('did-finish-load', async () => {
       const url = probe.webContents.getURL();
       logger.info('[AuthManager] Probe landed:', url);
@@ -251,9 +336,15 @@ async function pingRelayEndpoint() {
     };
 
     const timer = setTimeout(() => { logger.warn('[AuthManager] Relay probe timed out'); done(false); }, RELAY_PROBE_MS);
+    // FIX (2026-07-21): same substring-vs-hostname bug as probeSession()'s
+    // isAAP() above -- see that comment for the full writeup. Checking
+    // /aap-na\.corp\.amazon\.com/i.test(url) against the whole url string
+    // matches Midway's own SSO redirect URL too, since it legitimately
+    // embeds the destination as a plain-text redirect_uri query param.
+    const isAAPHost = (url) => { try { return /(^|\.)aap-na\.corp\.amazon\.com$/i.test(new URL(url).hostname); } catch (_) { return false; } };
     const isSSO = (url) =>
       /midway|login\.amazon|signin|sso\.amazon|oidc|oauth|\/auth\//i.test(url) &&
-      !/aap-na\.corp\.amazon\.com/i.test(url);
+      !isAAPHost(url);
 
     probe.webContents.on('will-redirect', (_, url) => {
       logger.info('[AuthManager] Relay redirect:', url.slice(0, 80));
@@ -263,7 +354,7 @@ async function pingRelayEndpoint() {
     probe.webContents.on('did-finish-load', () => {
       const url = probe.webContents.getURL();
       logger.info('[AuthManager] Relay landed:', url.slice(0, 80));
-      done(/aap-na\.corp\.amazon\.com/i.test(url));
+      done(isAAPHost(url));
     });
     probe.webContents.on('did-fail-load', (_, code, desc) => {
       if (code === -3) return;
@@ -346,6 +437,7 @@ module.exports = {
   checkMwinit,
   runMwinit,
   injectCookies,
+  probeSession, // FIX (2026-07-21): exported so callers can replicate ensureAuthenticated's verification steps without its disabled auto-spawn branch
   ensureAuthenticated,
   pingRelayEndpoint,
   COOKIE_FILE,

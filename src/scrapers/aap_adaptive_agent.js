@@ -15,6 +15,12 @@
 const { BrowserWindow } = require('electron');
 const path = require('path');
 const logger = require('../utils/logger').createLogger('aap_adaptive_agent');
+// FEATURE (2026-07-22): real Relay Garage/AAP wizard SOP (screens, field
+// rules, urgency triggers, tow-specific fields, vendor-by-scenario), given
+// directly by the user, replacing the previous generic/guessed wizard-step
+// description below. See src/orcha/aap_wizard_knowledge.js for full scope
+// notes on what's included vs deliberately excluded.
+const { WIZARD_KNOWLEDGE } = require('../orcha/aap_wizard_knowledge');
 
 // L-3: named constant — was an unnamed inline 15000 in the did-finish-load timeout
 const PAGE_LOAD_TIMEOUT_MS = 15_000;
@@ -266,10 +272,20 @@ function buildActionScript(actions) {
       }
       else if (action.type === 'waitForOption') {
         // Wait for a dropdown option to appear, then click it
+        //
+        // BUG FIX (2026-07-22): default timeout raised 5000ms -> 8000ms.
+        // Real evidence from the accumulated aapLessons store showed the
+        // EXACT SAME action (e.g. typing a domicile code, waiting for its
+        // dropdown option) both succeeding and failing across different
+        // runs -- a classic race condition against AAP's dropdown render
+        // time, not a wrong-approach problem. 5s wasn't consistently
+        // enough. The AI is now also told (see aap_wizard_knowledge.js's
+        // injected WIZARD RULES) to explicitly pass timeout:8000+ itself,
+        // but this default is raised too in case it omits one.
         const target = String(action.value).trim().toUpperCase();
         let found = null;
         const t0 = Date.now();
-        while (!found && Date.now() - t0 < (action.timeout || 5000)) {
+        while (!found && Date.now() - t0 < (action.timeout || 8000)) {
           const opts = document.querySelectorAll('[role="option"], button[role="option"]');
           for (const o of opts) {
             const ot = (o.innerText || o.textContent || o.getAttribute('aria-label') || '').trim().toUpperCase();
@@ -278,7 +294,13 @@ function buildActionScript(actions) {
           if (!found) await sleep(100);
         }
         if (found) { fullClick(found); results.push({ ok: true, action: 'waitForOption', value: action.value }); }
-        else results.push({ ok: false, action: 'waitForOption', error: 'Option not found: ' + action.value });
+        // FEATURE (2026-07-22): tag this error distinctly (timeoutLikely)
+        // so the lesson-writing code in runAdaptiveWR can give the AI
+        // accurate guidance ("probably just needed longer, retry the same
+        // approach") instead of the old blanket "TRY DIFFERENT APPROACH"
+        // message, which was actively misleading for what is usually a
+        // pure timing issue rather than a wrong strategy.
+        else results.push({ ok: false, action: 'waitForOption', error: 'Option not found: ' + action.value, timeoutLikely: true });
       }
     } catch(e) {
       results.push({ ok: false, action: action.type, error: e.message });
@@ -317,9 +339,12 @@ ${snapshot.elements.filter(e => e.visible || e.type === 'file').map(e =>
 STEP HISTORY (what we've done so far):
 ${stepHistory.slice(-5).map(h => '- ' + h).join('\n') || '(none yet)'}
 
-AAP WIZARD STEPS (in order):\n- Step 1: Equipment/Asset - type unit ID in combobox, select from dropdown\n- Step 2: Location - select "Off Site" radio button. For GeoFence/domicile combobox: type the domicile code (ABE40, AVP40, etc) and select it. If it asks for address, skip or type the domicile.\n- Step 3: Work Request Details - select Area dropdown (e.g. Engine, Brakes, Electrical, Tires). Select Subcategory. Type the Title/description. Select Urgency if shown.\n- Step 4: Vendor/Assignment - if vendor field shown, select the vendor from dropdown\n- Step 5: Review/Submit - click Submit or Save\n- After submit: success page shows WR ID\n\nWIZARD RULES:
-- This is a multi-page wizard. Fill visible fields, then click Next.
-- For combobox inputs (role="combobox"): type the value using charByChar:true with charDelay:80, then use waitForOption action to wait for dropdown, then click the matching option.\n- LOCATION STEP: Always click "Off Site" radio first. Then find the GeoFence/Location combobox and type the domicile code from payload (e.g. ABE40). Wait for option then click it. Then click Next.\n- WORK REQUEST DETAILS: Find Area dropdown and select the first areaPair.area. Find Subcategory and select areaPair.subcategory. Type title in the title/description field. Then click Next.\n- If a field is already filled correctly, skip it and move on.
+${WIZARD_KNOWLEDGE}
+
+WIZARD RULES (mechanical -- how to execute actions, applies regardless of which screen you're on):
+- This is a multi-page wizard. Fill visible fields on the CURRENT screen using the domain guidance above, then click Next.
+- For combobox inputs (role="combobox"): type the value using charByChar:true with charDelay:80, then use a waitForOption action with a generous timeout (8000ms or more -- AAP's dropdown can be slow to render, don't give up early) to wait for the dropdown, then click the matching option.
+- If a field is already filled correctly, skip it and move on.
 - For radio buttons: use action type "radio" with the label text.
 - If a modal is visible, handle it first (e.g., click Confirm).
 - If page is loading, respond with a single "wait" action.
@@ -393,6 +418,36 @@ const COLLECT_SCRIPT = `
   return JSON.stringify(actions);
 })();
 `;
+
+// FEATURE (2026-07-22): lesson-quality helpers. Real evidence pulled from
+// the accumulated aapLessons store showed two concrete quality problems:
+//   1. Page-hint bucketing used the first 50 chars of raw page text, which
+//      is dominated by generic chrome ("Dark mode | Contact us | New
+//      Unplanned Request for...") that renders IDENTICALLY on nearly every
+//      wizard screen -- so almost all lessons collapsed into one
+//      meaningless bucket, making "PAST LESSONS" barely relevant to
+//      whichever screen the agent is actually on.
+//   2. Low-information duplicate entries (bare "click WORKED" with no
+//      detail on what was clicked) filled the capped 50-slot buffer,
+//      crowding out rarer, more informative failure lessons.
+// _stepTag() matches known screen names from the real wizard SOP
+// (aap_wizard_knowledge.js) instead of blindly truncating; _describeActions
+// includes the actual click/type target text where available.
+const KNOWN_SCREEN_TAGS = [
+  'Select Equipment', 'Location', 'Work Request Details', 'Asset Condition',
+  'Issue Details', 'Comments', 'Review', 'Submit', 'Vendor',
+];
+function _stepTag(pageText) {
+  const hit = KNOWN_SCREEN_TAGS.find(tag => pageText.toUpperCase().includes(tag.toUpperCase()));
+  return hit || pageText.substring(0, 40);
+}
+function _describeActions(actions) {
+  return actions.map(a => {
+    const target = (a.target && (a.target.text || a.target.id || a.target.placeholder)) || '';
+    const val = a.value ? '=' + String(a.value).substring(0, 30) : '';
+    return a.type + (target ? ' [' + target + ']' : '') + val;
+  }).join(', ');
+}
 
 async function runAdaptiveWR(payload, askAI, log) {
   if (!log) log = console.log;
@@ -540,19 +595,38 @@ async function runAdaptiveWR(payload, askAI, log) {
     stepHistory.push(`Step ${step}: ${actions.map(a => a.type + (a.value ? '=' + String(a.value).substring(0, 20) : '')).join(', ')} → ${summary}`);
     
     // Learn from results
+    // FEATURE (2026-07-22): rewritten for lesson quality -- see the
+    // _stepTag/_describeActions helpers above for the full rationale
+    // (generic page-hint collisions + low-info duplicate entries were
+    // drowning out the few genuinely useful lessons in the capped buffer).
+    const stepTag = _stepTag(snapshot.pageText);
     const allOk = actionResults.every(r => r.ok);
     if (allOk && actions.length > 0) {
-      const pageHint = snapshot.pageText.substring(0, 50);
-      lessons.push('On page "' + pageHint + '": ' + actions.map(a => a.type + (a.value ? '=' + String(a.value).substring(0, 30) : '')).join(', ') + ' WORKED');
-      if (lessons.length > 50) lessons.splice(0, lessons.length - 50);
-      store.save('aapLessons', lessons);
+      const lesson = 'On "' + stepTag + '": ' + _describeActions(actions) + ' WORKED';
+      if (lessons[lessons.length - 1] !== lesson) { // dedup exact repeats
+        lessons.push(lesson);
+        if (lessons.length > 50) lessons.splice(0, lessons.length - 50);
+        store.save('aapLessons', lessons);
+      }
     } else {
       const failedActions = actionResults.filter(r => !r.ok);
       if (failedActions.length > 0) {
-        const pageHint = snapshot.pageText.substring(0, 50);
-        lessons.push('On page "' + pageHint + '": ' + failedActions.map(r => r.action + ' FAILED: ' + (r.error || '')).join(', ') + ' - TRY DIFFERENT APPROACH');
-        if (lessons.length > 50) lessons.splice(0, lessons.length - 50);
-        store.save('aapLessons', lessons);
+        // FEATURE (2026-07-22): if every failure is tagged timeoutLikely
+        // (see waitForOption above), the real fix is almost always "wait
+        // longer and retry the same approach" -- NOT a different
+        // approach. The old blanket "TRY DIFFERENT APPROACH" message was
+        // actively misleading for this common case, confirmed by real
+        // evidence of the same action succeeding and failing across runs.
+        const allTimeouts = failedActions.every(r => r.timeoutLikely);
+        const advice = allTimeouts
+          ? '- LIKELY JUST NEEDS A LONGER WAIT: retry the SAME approach with a longer waitForOption timeout (10000ms+), do not switch strategy'
+          : '- TRY DIFFERENT APPROACH';
+        const lesson = 'On "' + stepTag + '": ' + failedActions.map(r => r.action + ' FAILED: ' + (r.error || '')).join(', ') + ' ' + advice;
+        if (lessons[lessons.length - 1] !== lesson) {
+          lessons.push(lesson);
+          if (lessons.length > 50) lessons.splice(0, lessons.length - 50);
+          store.save('aapLessons', lessons);
+        }
       }
     }
     

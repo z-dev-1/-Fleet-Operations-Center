@@ -223,21 +223,34 @@ function getStatus() {
 }
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ MWINIT Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// FIX (2026-07-21): was hardcoded to `mwinit -o` (forces OTP mode) on both
+// platforms -- same bug as src/scrapers/auth.js's runMwinit(), see that
+// file's comment for the full root-cause writeup (OTP's short validity
+// window made auth spawned by this app meaningfully more prone to a
+// used_too_late/freshness rejection than plain `mwinit`'s default
+// WebAuthn/Hello flow). No confirmed UI path calls this specific function
+// currently, but fixing it anyway rather than leaving the same landmine
+// live in a second place.
+// FIX (2026-07-21) round 2: was an independent spawn (its own cmd.exe/bash
+// terminal), completely separate from src/scrapers/auth.js's runMwinit() and
+// its in-flight guard. Even after removing the `-o` flag above, this
+// function could still open a SECOND, unguarded mwinit terminal at the same
+// moment the app's auto-renewal timer or SSO auth-poller was already running
+// one via auth.js's guarded runMwinit() -- confirmed live: two mwinit
+// terminal windows opening at once, only one surviving. Two concurrent
+// mwinit attempts racing for the same Midway session is a direct cause of
+// "AEA verification failed: used_too_late". Delegating to the shared,
+// guarded function so every mwinit-launching path in this app -- this one,
+// misc.js's Settings button, app.js's auto-renewal timer, and
+// window/index.js's auth-poller -- now goes through the exact same lock.
 function runMwinit() {
-  return new Promise(resolve => {
-    logger.info('Launching mwinit...');
-    let child;
-    if (process.platform === 'win32') {
-      child = spawn('cmd.exe', ['/c', 'start', 'cmd', '/k', 'mwinit -o'], { detached: true, stdio: 'ignore', shell: true });
-    } else {
-      child = spawn('open', ['-a', 'Terminal', '--args', 'bash', '-c', 'mwinit -o; exec bash'], { detached: true, stdio: 'ignore' });
-    }
-    child.unref();
-    setTimeout(() => {
-      _status = 'unknown'; _lastError = null; _saveStatus();
-      logger.info('mwinit launched Ã¢â‚¬â€ client reset for fresh credentials');
-      resolve({ ok: true, message: 'mwinit launched Ã¢â‚¬â€ complete auth in terminal window' });
-    }, 2000);
+  return require('../scrapers/auth').runMwinit().then(() => {
+    _status = 'unknown'; _lastError = null; _saveStatus();
+    logger.info('mwinit launched -- client reset for fresh credentials');
+    return { ok: true, message: 'mwinit launched -- complete auth in terminal window' };
+  }).catch(e => {
+    logger.error('mwinit failed:', e.message);
+    return { ok: false, error: e.message };
   });
 }
 

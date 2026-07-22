@@ -225,8 +225,31 @@ app.whenReady().then(async () => {
   // ── Midway auto-refresh — check every 5 minutes, renew 15 min before expiry ──
   const _authModule = require('./scrapers/auth');
   let _midwayRefreshTimer = null;
+  let _midwayRenewalInFlight = false; // FIX (2026-07-21): see note below
   function _midwayAutoRefresh() {
     _midwayRefreshTimer = setInterval(async () => {
+      // FIX (2026-07-21): this 5-min setInterval had no guard against firing
+      // again while a PREVIOUS tick's runMwinit() was still pending (i.e.
+      // still waiting on the user to complete the terminal prompt). Before
+      // 2026-07-14 this never mattered because a logger typo crashed the
+      // block before runMwinit() was ever reached, so the timer was
+      // effectively a no-op. Once that typo was fixed, this became a real,
+      // periodically-firing background task -- and with no lock, any
+      // runMwinit() that took longer than 5 minutes to complete (easy, if
+      // the user is mid-troubleshooting or just slow to respond to the
+      // prompt) got a SECOND overlapping mwinit terminal spawned on top of
+      // it on the next tick. Two concurrent mwinit attempts racing for the
+      // same Midway session is a direct, confirmed cause of
+      // "AEA verification failed: used_too_late" -- one attempt's challenge/
+      // certificate timing gets invalidated by the other. This also explains
+      // the pileup of multiple stale mwinit processes observed accumulating
+      // over hours in the same session (each 5-min tick spawning a new one
+      // on top of incomplete previous ones). The guard below simply skips
+      // this tick entirely if a renewal is already in progress.
+      if (_midwayRenewalInFlight) {
+        log.info('[midway] heartbeat: renewal already in flight, skipping this tick');
+        return;
+      }
       try {
         const state = _authModule.checkMwinit();
         // OBSERVABILITY FIX (2026-07-14): the block below only logs on a state
@@ -237,26 +260,16 @@ app.whenReady().then(async () => {
         // A low-volume heartbeat every 5-min cycle removes that blind spot.
         log.info('[midway] heartbeat: ok=' + state.ok + ' expiresInMin=' + state.expiresInMin);
         if (state.ok && state.expiresInMin !== null && state.expiresInMin < 15) {
-          // BUG FIX (2026-07-14): was logger.info -- `logger` at file scope is
-          // require('./utils/logger'), the raw namespaced-logger FACTORY
-          // function, not a usable logger instance (that's `log`, created via
-          // `const log = logger('app')` a few lines above the top of this
-          // file). The factory has no .info/.warn/.error methods, so every
-          // call in this block threw -- and since the throw happened BEFORE
-          // reaching runMwinit()/injectCookies() below, Midway auto-renewal
-          // has been silently non-functional since whenever this typo was
-          // introduced. Confirmed live: errors.log shows "logger.error is not
-          // a function" recurring every 5 minutes since 2026-07-13, because
-          // even the catch block's own error-logging call used the same wrong
-          // reference, masking the actual failure entirely.
-          log.info('[midway] Cookies expire in ' + state.expiresInMin + 'min — auto-renewing');
+          log.info('[midway] Cookies expire in ' + state.expiresInMin + 'min -- auto-renewing');
+          _midwayRenewalInFlight = true;
           _send('app:midway-renewing', { expiresIn: state.expiresInMin });
           await _authModule.runMwinit();
           await _authModule.injectCookies();
           log.info('[midway] Auto-renewed successfully');
           _send('app:midway-renewed', {});
         } else if (!state.ok) {
-          log.warn('[midway] Cookies expired — launching mwinit');
+          log.warn('[midway] Cookies expired -- launching mwinit');
+          _midwayRenewalInFlight = true;
           _send('app:midway-expired', {});
           await _authModule.runMwinit();
           await _authModule.injectCookies();
@@ -264,6 +277,8 @@ app.whenReady().then(async () => {
         }
       } catch (e) {
         log.error('[midway] Auto-refresh failed: ' + e.message);
+      } finally {
+        _midwayRenewalInFlight = false;
       }
     }, 5 * 60 * 1000); // Check every 5 minutes
   }

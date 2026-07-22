@@ -8,54 +8,79 @@
 <!--[if gte mso 9]><xml><o:OfficeDocumentSettings><o:AllowPNG/><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]-->
 <style type="text/css">
 :root { color-scheme: light dark; supported-color-schemes: light dark; }
-[data-ogsc] td[style*="background-color:#ffffff"] { background-color: #f7f9fc !important; }
-[data-ogsc] td[style*="background-color:#f4f5f7"] { background-color: #1a2838 !important; }
-[data-ogsc] font[color="#1a2b42"], [data-ogsc] font[color="#2d3748"], [data-ogsc] font[color="#222222"] { color: #e2eaf3 !important; }
+body { margin:0; padding:0; }
+@media (prefers-color-scheme: dark) {
+  .bg-page   { background-color:#0a0e17 !important; }
+  .bg-shell  { background-color:#0d1420 !important; border-color:#1f2937 !important; }
+  .txt-dim   { color:#8b98ab !important; }
+  .footer-bg { background-color:#0a0e17 !important; border-color:#1f2937 !important; }
+}
+[data-ogsc] .bg-page   { background-color:#0a0e17 !important; }
+[data-ogsc] .bg-shell  { background-color:#0d1420 !important; border-color:#1f2937 !important; }
+[data-ogsc] font.txt-dim  { color:#8b98ab !important; }
+[data-ogsc] .footer-bg { background-color:#0a0e17 !important; border-color:#1f2937 !important; }
+@media only screen and (max-width:640px) {
+  .stack-td { display:block !important; width:100% !important; padding-right:0 !important; margin-bottom:12px !important; }
+}
 </style>
 </head>
-<body style="margin:0;padding:0;background-color:#f4f5f7;font-family:Arial,sans-serif;">
+<body style="margin:0;padding:0;background-color:#eef1f6;font-family:'Segoe UI',Arial,sans-serif;">
 
-<!-- Outer wrapper -->
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color:#f4f5f7;">
-<tr><td align="center" style="padding:24px 16px;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="bg-page" style="background-color:#eef1f6;">
+<tr><td align="center" style="padding:28px 16px;">
 
-<!-- Email container -->
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="780" style="max-width:780px;background-color:#f7f9fc;border:1px solid #d0d5dd;border-radius:8px;overflow:hidden;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="900" class="bg-shell" style="max-width:900px;background-color:#ffffff;border:1px solid #d8dee8;border-radius:12px;overflow:hidden;">
 
-  <!-- Test banner (injected when testMode=true) -->
-  {{TEST_BANNER}}
+  <!-- Permanent accent bar. Always renders; inner text is the ONLY conditional part (blank by default, "TEST" only during testMode sends). -->
+  <tr><td bgcolor="#b84500" style="background-color:#b84500;padding:6px 16px;text-align:center;">
+    <font color="#ffffff" face="'Segoe UI',Arial,sans-serif" style="font-size:10px;letter-spacing:0.25em;">{{TEST_BANNER}}</font>
+  </td></tr>
 
-  <!-- Header -->
+  <!-- HEADER — solid colors only. DESIGN FIX (2026-07-21): removed all
+       linear-gradient background-image usage here. Gradients don't survive
+       OWA's compose paste sanitizer at all -- when the gradient background
+       fails to paste, the sanitizer also strips the white <font color>
+       override that was paired with it, so text reverts to default BLACK
+       against whatever background remains. The original production
+       template already proved solid bgcolor + white <font color> survives
+       OWA paste fine -- this reverts to that proven-safe pattern while
+       keeping the rest of the modern styling (spacing, typography, badges,
+       rounded corners all paste/render fine; only gradients were the
+       actual risk). -->
   <tr>
-    <td bgcolor="#1e3a5f" style="background-color:#1e3a5f;padding:18px 24px;">
+    <td bgcolor="#0b1830" style="background-color:#0b1830;padding:0;">
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-        <tr>
-          <td>
-            <font color="#ffffff" face="Arial,sans-serif" style="font-size:18px;font-weight:bold;letter-spacing:0.02em;"><b>Fleet Maintenance Report</b></font><br>
-            <font color="#b8d4f0" face="Arial,sans-serif" style="font-size:11px;">{{DATETIME}}</font>
-          </td>
-          <td align="right" valign="middle">
-            <table cellpadding="0" cellspacing="0" border="0">
-              <tr>
-                <td style="border:1px solid {{SLOT_BORDER}};background-color:{{SLOT_BG}};border-radius:14px;padding:4px 12px;">
-                  <font color="{{SLOT_COLOR}}" face="Arial,sans-serif" style="font-size:11px;font-weight:bold;"><b>{{SLOT_ICON}} {{SLOT_LABEL}}</b></font>
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
+        <tr><td style="padding:22px 28px 18px 28px;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+            <tr>
+              <td valign="middle">
+                <font color="#5ee6ff" face="'Segoe UI',Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.22em;">FLEET OPERATIONS</font><br>
+                <font color="#ffffff" face="'Segoe UI',Arial,sans-serif" style="font-size:21px;font-weight:bold;"><b>Fleet Maintenance Report</b></font><br>
+                <font color="#a9c6e8" face="'Segoe UI',Arial,sans-serif" style="font-size:11px;">{{DATETIME}}</font>
+              </td>
+              <td align="right" valign="middle">
+                <table cellpadding="0" cellspacing="0" border="0"><tr>
+                  <td style="border:1px solid {{SLOT_BORDER}};background-color:{{SLOT_BG}};border-radius:16px;padding:6px 16px;">
+                    <font color="{{SLOT_COLOR}}" face="'Segoe UI',Arial,sans-serif" style="font-size:11px;font-weight:bold;"><b>{{SLOT_ICON}} {{SLOT_LABEL}}</b></font>
+                  </td>
+                </tr></table>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
       </table>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td bgcolor="#12b3c9" style="background-color:#12b3c9;height:3px;line-height:3px;font-size:1px;">&nbsp;</td></tr></table>
     </td>
   </tr>
 
-  <!-- Operator + Site badge -->
+  <!-- Operator + Site meta bar -->
   <tr>
-    <td bgcolor="#2d4a6f" style="background-color:#2d4a6f;padding:8px 24px;">
-      <font color="#b8d4f0" face="Arial,sans-serif" style="font-size:10px;letter-spacing:0.08em;">OPERATOR: </font>
-      <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;"><b>{{OPERATOR}}</b></font>
-      &nbsp;&nbsp;
-      <font color="#b8d4f0" face="Arial,sans-serif" style="font-size:10px;letter-spacing:0.08em;">SITE: </font>
-      <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;"><b>{{SITE}}</b></font>
+    <td bgcolor="#132840" style="background-color:#132840;padding:10px 28px;">
+      <font color="#7fa8cf" face="'Segoe UI',Arial,sans-serif" style="font-size:10px;letter-spacing:0.1em;">OPERATOR&nbsp;</font>
+      <font color="#ffffff" face="'Segoe UI',Arial,sans-serif" style="font-size:10px;"><b>{{OPERATOR}}</b></font>
+      &nbsp;&nbsp;&#8226;&nbsp;&nbsp;
+      <font color="#7fa8cf" face="'Segoe UI',Arial,sans-serif" style="font-size:10px;letter-spacing:0.1em;">SITE&nbsp;</font>
+      <font color="#ffffff" face="'Segoe UI',Arial,sans-serif" style="font-size:10px;"><b>{{SITE}}</b></font>
     </td>
   </tr>
 
@@ -64,85 +89,93 @@
 
   <!-- Greeting -->
   <tr>
-    <td style="padding:20px 24px 12px 24px;background-color:#f7f9fc;">
-      <font color="#1a2b42" face="Arial,sans-serif" style="font-size:13px;"><b>{{GREETING}},</b></font><br>
-      <font color="#2d3748" face="Arial,sans-serif" style="font-size:12px;line-height:1.6;">{{GREETING_BODY}}</font>
+    <td style="padding:20px 28px 14px 28px;background-color:#ffffff;">
+      <font color="#0f1b2d" face="'Segoe UI',Arial,sans-serif" style="font-size:14px;"><b>{{GREETING}},</b></font><br>
+      <font color="#3a4657" face="'Segoe UI',Arial,sans-serif" style="font-size:12px;line-height:1.6;">{{GREETING_BODY}}</font>
     </td>
   </tr>
 
-  <!-- Fleet Summary Section -->
+  <!-- KPI strip -->
   <tr>
-    <td style="padding:0 24px 4px 24px;background-color:#f7f9fc;">
+    <td style="padding:0 28px 4px 28px;background-color:#ffffff;">
+      {{KPI_STRIP}}
+    </td>
+  </tr>
+
+  <!-- FLEET SUMMARY -->
+  <tr>
+    <td style="padding:14px 28px 6px 28px;background-color:#ffffff;">
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-        <tr>
-          <td bgcolor="#1e3a5f" style="background-color:#1e3a5f;padding:7px 12px;border-radius:5px 5px 0 0;">
-            <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.07em;"><b>&#128202; FLEET SUMMARY</b></font>
-          </td>
-        </tr>
+        <tr><td bgcolor="#0b1830" style="background-color:#0b1830;padding:8px 14px;border-radius:6px 6px 0 0;">
+          <font color="#ffffff" face="'Segoe UI',Arial,sans-serif" style="font-size:10px;letter-spacing:0.09em;"><b>&#128202;&nbsp; FLEET SUMMARY</b></font>
+        </td></tr>
       </table>
       {{FLEET_SUMMARY}}
       <br>
     </td>
   </tr>
 
-  <!-- Unavailable Units Section -->
+  <!-- Vendor chip row -->
+  <tr><td style="padding:0 28px 10px 28px;background-color:#ffffff;">
+    {{VENDOR_CHIPS}}
+  </td></tr>
+
+  <!-- UNAVAILABLE UNITS -->
   <tr>
-    <td style="padding:0 24px 4px 24px;background-color:#f7f9fc;">
+    <td style="padding:8px 28px 6px 28px;background-color:#ffffff;">
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-        <tr>
-          <td bgcolor="#374151" style="background-color:#374151;padding:7px 12px;border-radius:5px 5px 0 0;">
-            <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.07em;"><b>&#128683; UNAVAILABLE UNITS &mdash; {{UNAVAIL_COUNT}}</b></font>
-          </td>
-        </tr>
+        <tr><td bgcolor="#7f1d1d" style="background-color:#7f1d1d;padding:8px 14px;border-radius:6px 6px 0 0;">
+          <font color="#ffffff" face="'Segoe UI',Arial,sans-serif" style="font-size:10px;letter-spacing:0.09em;"><b>&#128683;&nbsp; UNAVAILABLE UNITS &#8212; {{UNAVAIL_COUNT}}</b></font>
+        </td></tr>
       </table>
+      <div style="overflow-x:auto;">
       {{UNAVAIL_TABLE}}
+      </div>
       <br>
     </td>
   </tr>
 
-  <!-- PM Due Dates Section -->
+  <!-- PM DUE DATES -->
   <tr>
-    <td style="padding:0 24px 4px 24px;background-color:#f7f9fc;">
+    <td style="padding:0 28px 6px 28px;background-color:#ffffff;">
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-        <tr>
-          <td bgcolor="#166534" style="background-color:#166534;padding:7px 12px;border-radius:5px 5px 0 0;">
-            <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.07em;"><b>&#128197; PM DUE DATES</b></font>
-          </td>
-        </tr>
+        <tr><td bgcolor="#14532d" style="background-color:#14532d;padding:8px 14px;border-radius:6px 6px 0 0;">
+          <font color="#ffffff" face="'Segoe UI',Arial,sans-serif" style="font-size:10px;letter-spacing:0.09em;"><b>&#128197;&nbsp; PM DUE DATES</b></font>
+        </td></tr>
       </table>
+      <div style="overflow-x:auto;">
       {{PM_TABLE}}
+      </div>
       <br>
     </td>
   </tr>
 
-  <!-- Uptake Predictive Insights Section -->
+  <!-- UPTAKE PREDICTIVE INSIGHTS -->
   <tr>
-    <td style="padding:0 24px 4px 24px;background-color:#f7f9fc;">
+    <td style="padding:0 28px 6px 28px;background-color:#ffffff;">
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-        <tr>
-          <td bgcolor="#5b21b6" style="background-color:#5b21b6;padding:7px 12px;border-radius:5px 5px 0 0;">
-            <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.07em;"><b>&#9889; PREDICTIVE MAINTENANCE INSIGHTS (UPTAKE)</b></font>
-          </td>
-        </tr>
+        <tr><td bgcolor="#4c1d95" style="background-color:#4c1d95;padding:8px 14px;border-radius:6px 6px 0 0;">
+          <font color="#ffffff" face="'Segoe UI',Arial,sans-serif" style="font-size:10px;letter-spacing:0.09em;"><b>&#9889;&nbsp; PREDICTIVE MAINTENANCE INSIGHTS (UPTAKE)</b></font>
+        </td></tr>
       </table>
+      <div style="overflow-x:auto;">
       {{UPTAKE_TABLE}}
+      </div>
       <br>
     </td>
   </tr>
 
-  <!-- Footer -->
+  <!-- FOOTER -->
   <tr>
-    <td bgcolor="#f8fafc" style="background-color:#f0f4f8;padding:14px 24px;border-top:1px solid #e2e8f0;">
-      <font color="#666666" face="Arial,sans-serif" style="font-size:10px;">This report was generated automatically by Fleet Ops. Do not reply to this email.</font>
+    <td bgcolor="#f4f6f9" class="footer-bg" style="background-color:#f4f6f9;padding:16px 28px;border-top:1px solid #e2e8f0;">
+      <font class="txt-dim" color="#64748a" face="'Segoe UI',Arial,sans-serif" style="font-size:10px;">This report was generated automatically by Fleet Ops. Do not reply to this email.</font>
     </td>
   </tr>
 
 </table>
-<!-- /email container -->
 
 </td></tr>
 </table>
-<!-- /outer wrapper -->
 
 </body>
 </html>

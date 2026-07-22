@@ -259,17 +259,31 @@ function registerMiscIPC(ctx) {
   });
 
   handle('auth:run-mwinit', async () => {
-    const { spawn } = require('child_process');
-    logger.info('Launching mwinit...');
+    // FIX (2026-07-21): was its own independent spawn ('powershell -NoExit
+    // -Command mwinit'), completely separate from src/scrapers/auth.js's
+    // runMwinit() and its in-flight guard. This meant this Settings-button
+    // path could open a SECOND, unguarded mwinit terminal at the exact same
+    // time as the app's own auto-renewal timer or SSO auth-poller was
+    // already running one via auth.js -- two competing mwinit terminals
+    // racing for the same Midway session, which is a confirmed direct cause
+    // of "AEA verification failed: used_too_late" (one attempt's challenge/
+    // certificate timing gets invalidated by the other). Delegating to the
+    // one guarded function so every mwinit-launching path in this app now
+    // shares the exact same lock -- no more parallel spawns from here.
+    logger.info('Launching mwinit (via shared AuthManager)...');
     const sendMwStatus = (msg) => { if (send) send('auth:mwinit-status', msg); };
-    return new Promise((resolve) => {
-      sendMwStatus('running');
-      let child;
-      if (process.platform === 'win32') { child = spawn('cmd.exe', ['/c', 'start', '', 'powershell.exe', '-NoExit', '-Command', 'mwinit'], { detached: true, shell: false }); }
-      else { child = spawn('open', ['-a', 'Terminal', '--args', 'mwinit'], { detached: true, shell: false }); }
-      child.on('error', (err) => { logger.error('mwinit spawn error:', err.message); sendMwStatus('error:' + err.message); resolve({ ok: false, error: err.message }); });
-      child.on('close', () => { sendMwStatus('launched'); resolve({ ok: true }); });
-    });
+    sendMwStatus('running');
+    try {
+      const { runMwinit, injectCookies } = require('../scrapers/auth');
+      await runMwinit();
+      await injectCookies();
+      sendMwStatus('launched');
+      return { ok: true };
+    } catch (err) {
+      logger.error('mwinit failed:', err.message);
+      sendMwStatus('error:' + err.message);
+      return { ok: false, error: err.message };
+    }
   });
 
   handle('auth:check-midway', () => {
@@ -365,9 +379,36 @@ function registerMiscIPC(ctx) {
   });
 
   handle('email:send', async (_e, opts) => {
+    // FIX (2026-07-21): try Microsoft Graph FIRST when the user has signed
+    // in (Settings -> Outlook (Microsoft Graph)). Graph delivers the
+    // finished HTML directly -- no VPN needed (unlike the SMTP path below,
+    // which requires ballard.amazon.com over VPN), and no OWA compose
+    // sanitizer involved (unlike pasting into Outlook Web, which strips
+    // color styling -- see src/graph/client.js for the full writeup).
+    // Falls through to the existing SMTP path unchanged if Graph isn't
+    // configured/signed in yet, so nothing breaks for anyone who hasn't
+    // set it up -- fully backward compatible, opt-in per user.
+    try {
+      const graphClient = require('../graph/client');
+      if (await graphClient.isSignedIn()) {
+        logger.info('[Email] Sending via Microsoft Graph (signed in)...');
+        if (send) send('email:progress', '[Email] Sending via Microsoft Graph...');
+        const result = await graphClient.sendMail({
+          to: opts.to, cc: opts.cc, bcc: opts.bcc,
+          subject: opts.subject || 'Fleet Status Report',
+          htmlBody: opts.htmlBody,
+        });
+        if (send) send('email:progress', '[Email] Sent via Microsoft Graph.');
+        return result;
+      }
+    } catch (e) {
+      logger.warn('[Email] Graph send failed, falling back to SMTP:', e.message);
+      if (send) send('email:progress', '[Email] Graph send failed (' + e.message + ') -- falling back to SMTP...');
+    }
     const { sendFleetEmail } = require('../../src/scrapers/email_sender');
     return sendFleetEmail(opts, (msg) => { logger.info(msg); if (send) send('email:progress', msg); });
   });
+
 
   handle('email:get-config', () => {
     const { loadEmailConfig } = require('../../src/scrapers/email_sender');

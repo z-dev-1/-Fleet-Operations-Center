@@ -17,7 +17,7 @@ const MIDWAY_COOKIE_FILE = P.midwayCookie;
  */
 function parseMidwayCookies() {
   if (!fs.existsSync(MIDWAY_COOKIE_FILE)) {
-    throw new Error('No midway cookie — run: mwinit -o');
+    throw new Error('No midway cookie -- run: mwinit'); // FIX (2026-07-21): dropped -o, see auth.js runMwinit() comment
   }
   const text = fs.readFileSync(MIDWAY_COOKIE_FILE, 'utf8');
   const cookies = [];

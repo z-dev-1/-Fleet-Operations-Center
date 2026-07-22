@@ -515,6 +515,62 @@ async function spPushWorksheet(config) {
     log('Hyperlinks: ' + hyperlinks.length + ' added');
   }
 
+  // === FIX (2026-07-21): sync <dimension> to the sheet's real used range ===
+  // Root cause of "some sheets get layout changes / misaligned pre-header
+  // content / header text disappearing after a push": every push above
+  // inserts and/or deletes <row> elements in <sheetData>, but this script
+  // never touched the worksheet's <dimension ref="A1:N45"/> tag that
+  // declares the sheet's used range. Once row count actually changes
+  // (units added, orphans removed, dupes cleaned up), that declared range
+  // goes stale relative to what's really in the file. Excel detects the
+  // mismatch on open and runs its own silent auto-repair to reconcile it --
+  // and that repair is what resets row heights/column widths and can drop
+  // text in merged cells, typically most visible in a fancy dashboard-style
+  // header block above the data table (custom sizing + merges are exactly
+  // what Excel's repair pass reflows). This only fires on pushes where the
+  // row count changed, which matches "not all sheets, but some" exactly.
+  // Recomputing the used range directly from what's actually now in the
+  // sheet (rather than trusting anything cached) closes that gap so Excel
+  // never has a reason to invoke its repair path.
+  (function _fixDimension() {
+    const dimMatch = wsXml.match(/<dimension\s+ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"\s*\/>/);
+    if (!dimMatch) {
+      log('[DIM] No <dimension> tag found -- skipping (nothing to fix)');
+      return;
+    }
+    const [, startCol, startRowStr, origEndCol, origEndRowStr] = dimMatch;
+
+    // Real max row now present in the sheet, scanned directly from the
+    // rebuilt XML -- the only trustworthy source after inserts/deletes.
+    let actualMaxRow = parseInt(startRowStr, 10);
+    const rowScanRe = /<row\b[^>]*\br="(\d+)"/g;
+    let sm;
+    while ((sm = rowScanRe.exec(wsXml)) !== null) {
+      const rn = parseInt(sm[1], 10);
+      if (rn > actualMaxRow) actualMaxRow = rn;
+    }
+
+    // Column range: this script never writes past column N and never
+    // removes columns, so the original end column is always a safe floor --
+    // just make sure it's at least N in case the original template's
+    // dimension was somehow narrower than the data table itself.
+    function colToNum(s) { let n = 0; for (let i = 0; i < s.length; i++) n = n * 26 + (s.charCodeAt(i) - 64); return n; }
+    function numToCol(n) { let s = ''; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; }
+    const endColNum = Math.max(colToNum(origEndCol), colToNum('N'));
+    const newEndCol = numToCol(endColNum);
+
+    const origEndRow = parseInt(origEndRowStr, 10);
+    const newEndRow = Math.max(actualMaxRow, origEndRow);
+
+    const newDim = '<dimension ref="' + startCol + startRowStr + ':' + newEndCol + newEndRow + '"/>';
+    if (newDim !== dimMatch[0]) {
+      wsXml = wsXml.replace(dimMatch[0], newDim);
+      log('[DIM] Updated dimension: ' + dimMatch[0] + ' -> ' + newDim);
+    } else {
+      log('[DIM] Dimension already correct: ' + dimMatch[0]);
+    }
+  })();
+
   // === REBUILD ZIP ===
   const modifiedMap = {};
   const newWsData = new TextEncoder().encode(wsXml);

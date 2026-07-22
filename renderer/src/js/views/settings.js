@@ -22,6 +22,7 @@ import { slack    as slackBridge }                 from '../bridge.js';
 import { email    as emailBridge }                 from '../bridge.js';
 import { sp       as spBridge }                    from '../bridge.js';
 import { asana    as asanaBridge }                 from '../bridge.js';
+import { graphMail as graphMailBridge }            from '../bridge.js';
 import toast                                       from '../components/toast.js';
 import { setPreset, setTheme, getThemeConfig, resetTheme, PRESETS } from '../nexus-theme.js';
 
@@ -602,6 +603,78 @@ function _html() {
           </div>
         </div>
 
+        <!-- Outlook (Microsoft Graph) — 2026-07-21. Replaces the need for
+             SMTP (requires VPN) or pasting into OWA's compose editor
+             (strips colors via its own sanitizer -- see src/graph/client.js
+             for the full writeup). Sign in once, like Slack above; stays
+             signed in silently after that via a background token refresh. -->
+        <div class="sd-section" id="sect-graph">
+          <div class="sd-section-title">Outlook (Microsoft Graph)</div>
+          <div class="sd-hint" style="margin-bottom:8px">Sends fleet reports directly via Microsoft Graph -- no VPN needed, and colors/formatting always render correctly (unlike pasting into Outlook Web).</div>
+          <div id="graph-status" class="sd-status warn" style="margin-bottom:8px">Not connected</div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary"   id="graph-login">Sign in to Outlook</button>
+            <button class="sd-btn secondary" id="graph-recheck">Re-check</button>
+            <button class="sd-btn secondary" id="graph-logout">Sign out</button>
+          </div>
+        </div>
+
+        <!-- Partner Auto-Reply (AI) -- 2026-07-21. AI reads new messages in
+             the configured Slack Connect channels and ALWAYS replies with a
+             professional message -- the real answer if confident, or a
+             warm holding reply otherwise. Out-of-scope requests are also
+             logged to the Orcha floater's Review tab (🚨 Alerts / 💡 Actions
+             / 📍 Workflow) for follow-up. See src/scrapers/slack_channel_watch.js
+             for the full design + safety writeup. -->
+        <div class="sd-section" id="sect-partner-autoreply">
+          <div class="sd-section-title">Partner Auto-Reply (AI)</div>
+          <div class="sd-hint" style="margin-bottom:8px">AI answers partner questions automatically in the channels below. Anything it can't confidently answer still gets a professional holding reply, and is logged for your review in Orcha's Review tab.</div>
+          <div class="sd-field">
+            <div class="sd-toggle-row"><span class="sd-toggle-label">Enable Partner Auto-Reply</span><input type="checkbox" id="par-enabled"/></div>
+          </div>
+          <!-- FEATURE (2026-07-22): reply mode -- "Mentions only" (strict,
+               original behavior) vs "Occasionally involved" (AI can also
+               jump in on relevant messages that don't mention it, gated by
+               a conservative relevance check that defaults to staying
+               quiet on any doubt -- see _shouldChimeIn in
+               slack_channel_watch.js). Radio-style pair, not a plain
+               checkbox, since these are two distinct behaviors rather than
+               one on/off switch. -->
+          <div class="sd-field">
+            <div class="sd-label" style="margin-bottom:4px">Reply mode</div>
+            <label class="settings-label" style="display:flex;align-items:center;gap:6px;font-weight:400;margin-bottom:4px">
+              <input type="radio" name="par-reply-mode" id="par-mode-mentions" value="mentions" style="width:auto"/>
+              Only when @-mentioned
+            </label>
+            <label class="settings-label" style="display:flex;align-items:center;gap:6px;font-weight:400">
+              <input type="radio" name="par-reply-mode" id="par-mode-occasional" value="occasional" style="width:auto"/>
+              Occasionally involved (also chimes in on clearly relevant messages, even without a mention)
+            </label>
+          </div>
+          <!-- FEATURE (2026-07-22): add channels by ID directly, rather than
+               a browsable "all my channels" list -- Slack's own
+               conversations.list/users.conversations are hard-blocked on
+               this Enterprise Grid workspace (enterprise_is_restricted,
+               confirmed live), so a real browse list isn't possible. ID
+               entry + a live conversations.info membership check (also
+               confirmed live, unrestricted) is the safe alternative --
+               simpler than name search and avoids any name-matching
+               ambiguity/mistakes per the user's own request. -->
+          <div class="sd-field">
+            <div class="sd-two-col" style="display:flex;gap:6px;align-items:flex-end">
+              <label class="settings-label" style="flex:1">Add channel by ID
+                <input id="par-add-id" class="settings__input" type="text" placeholder="e.g. C0A8WSPA4R3" />
+              </label>
+              <button class="sd-btn secondary" id="par-add-btn" type="button">Add</button>
+            </div>
+          </div>
+          <div id="par-channel-list" class="sd-field"></div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary" id="par-save">Save</button>
+          </div>
+          <div id="par-status" class="sd-status" style="display:none;margin-top:8px"></div>
+        </div>
+
         <!-- Partner Forms -->
         <div class="sd-section" id="sect-forms">
           <div class="sd-section-title">Partner Work Request Forms</div>
@@ -685,55 +758,21 @@ function _html() {
           </div>
           <button class="ops-sync-btn" id="ops-sync-btn">↻ Sync Now</button>
         </div>
-
-        <!-- Global Email SMTP (in Operators tab) -->
-        <div class="sd-section">
-          <div class="sd-section-title">
-            Email – Global SMTP
-            <span class="ops-autosave-badge" id="ops-email-badge"></span>
-          </div>
-          <div class="sd-row">
-            <div class="sd-field">
-              <div class="sd-label">Host</div>
-              <input class="sd-input" id="ops-email-host" placeholder="smtp.corp.amazon.com"/>
-            </div>
-            <div class="sd-field">
-              <div class="sd-label">Port</div>
-              <input class="sd-input" id="ops-email-port" type="number" placeholder="587"/>
-            </div>
-          </div>
-          <div class="sd-row">
-            <div class="sd-field">
-              <div class="sd-label">From address</div>
-              <input class="sd-input" id="ops-email-from" type="email" placeholder="you@amazon.com"/>
-            </div>
-            <div class="sd-field">
-              <div class="sd-label">Username</div>
-              <input class="sd-input" id="ops-email-user" placeholder="LDAP / CORP\\user"/>
-            </div>
-          </div>
-          <div class="sd-row">
-            <div class="sd-field">
-              <div class="sd-label">Password</div>
-              <input class="sd-input" id="ops-email-pass" type="password" placeholder="(stored encrypted)"/>
-            </div>
-            <div class="sd-field" style="justify-content:flex-end;padding-top:18px">
-              <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--txt2);cursor:pointer">
-                <input type="checkbox" id="ops-email-tls" style="accent-color:var(--acc)"/> Use TLS
-              </label>
-            </div>
-          </div>
-          <div class="sd-btn-row" style="margin-top:4px">
-            <button class="sd-btn secondary" id="ops-email-test-btn">Send test email</button>
-            <div id="ops-email-test-form" style="display:none;gap:6px;align-items:center">
-              <input class="sd-input" id="ops-email-test-to" type="email" placeholder="recipient@amazon.com" style="width:180px"/>
-              <button class="sd-btn primary" id="ops-email-test-send">Send</button>
-              <button class="sd-btn secondary" id="ops-email-test-cancel">Cancel</button>
-            </div>
-          </div>
-        </div>
-
-
+        <!-- FEATURE (2026-07-22): removed the duplicate "Email — Global
+             SMTP" panel that lived here. It was 100% dead/broken: no event
+             listener ever wired the inputs or the "Send test email"
+             button, nothing populated the fields on load, and the one
+             function that referenced them (_opsEmailAutoSave) called an
+             undeclared variable (_opsEmailTimers) that would have thrown a
+             ReferenceError the instant it ran. Even setting that aside, it
+             saved into spConfig.email* fields that nothing else in the
+             codebase ever reads back -- a second, disconnected config that
+             could never actually be used to send mail.
+             The single real SMTP config is "Email (SMTP)" above (id
+             sect-email, wired by _wireEmail()) -- it writes to
+             email_config.json via emailBridge.saveConfig(), which is what
+             sendFleetEmail() (src/scrapers/email_sender.js) actually reads
+             from when sending a report over SMTP. -->
       </div>
       <!-- end sd-pane-operators -->
 
@@ -1134,29 +1173,185 @@ function _wireSlack() {
   });
 }
 
-function _opsEmailAutoSave() {
-  const badge = document.getElementById('ops-email-badge');
-  if (badge) { badge.textContent = 'saving...'; badge.className = 'ops-autosave-badge saving'; }
-  clearTimeout(_opsEmailTimers.main);
-  _opsEmailTimers.main = setTimeout(async () => {
-    // Merge email fields into existing SP config so we don't clobber domicile entries
-    const existing = await spBridge.getConfig().catch(() => ({})) || {};
-    await spBridge.saveConfig({
-      ...existing,
-      emailHost: document.getElementById('ops-email-host').value.trim(),
-      emailPort: parseInt(document.getElementById('ops-email-port').value, 10) || 587,
-      emailFrom: document.getElementById('ops-email-from').value.trim(),
-      emailUser: document.getElementById('ops-email-user').value.trim(),
-      emailPass: document.getElementById('ops-email-pass').value,
-      emailTls:  document.getElementById('ops-email-tls').checked,
-    }).catch(() => {});
-    if (badge) {
-      badge.textContent = '✓ saved'; badge.className = 'ops-autosave-badge saved';
-      setTimeout(() => { badge.textContent = ''; badge.className = 'ops-autosave-badge'; }, 3000);
+// -- Section: Microsoft Graph mail (2026-07-21) -- see src/graph/client.js
+// for the full "why" this exists. Mirrors _wireSlack()/_checkSlack() above
+// exactly -- same interactive-sign-in UX pattern, different backend.
+function _checkGraphMail() {
+  graphMailBridge.checkAuth().then((res) => {
+    const el = document.getElementById('graph-status');
+    if (!el) return;
+    if (!res || !res.configured) {
+      el.textContent = '\u26A0\uFE0F Not yet configured (needs a Client ID -- see Settings help)';
+      el.className = 'sd-status warn';
+      return;
     }
-  }, 800);
+    const ok = !!res.signedIn;
+    el.textContent = ok ? '\u2705 Connected' : '\u26A0\uFE0F Not connected';
+    el.className = `sd-status ${ok ? 'ok' : 'warn'}`;
+  }).catch(() => {});
 }
 
+function _wireGraphMail() {
+  _checkGraphMail();
+  var recheckBtn = document.getElementById('graph-recheck');
+  var loginBtn = document.getElementById('graph-login');
+  if (recheckBtn) recheckBtn.addEventListener('click', _checkGraphMail);
+  if (loginBtn) loginBtn.addEventListener('click', () => {
+    loginBtn.disabled = true;
+    const originalText = loginBtn.textContent;
+    loginBtn.textContent = 'Signing in\u2026';
+    graphMailBridge.signIn().then((result) => {
+      if (result && result.ok) {
+        toast.show('success', 'Signed in to Outlook (' + (result.account || '') + ')', 3000);
+      } else {
+        toast.show('warn', (result && result.error) || 'Sign-in was not completed', 4000);
+      }
+      _checkGraphMail();
+    }).catch((e) => {
+      toast.show('error', 'Outlook sign-in failed: ' + e.message, 4000);
+    }).finally(() => {
+      loginBtn.disabled = false;
+      loginBtn.textContent = originalText;
+    });
+  });
+
+  var logoutBtn = document.getElementById('graph-logout');
+  if (logoutBtn) logoutBtn.addEventListener('click', () => {
+    graphMailBridge.signOut().then(() => {
+      toast.show('info', 'Signed out of Outlook', 2500);
+      _checkGraphMail();
+    }).catch((e) => toast.show('error', 'Sign-out failed: ' + e.message, 3000));
+  });
+}
+
+// -- Section: Partner Auto-Reply (AI) (2026-07-21, extended 2026-07-22) --
+// see src/scrapers/slack_channel_watch.js for the full design/safety
+// writeup. Master on/off + per-channel toggles + add-by-ID.
+//
+// FEATURE (2026-07-22): channel list is no longer a fixed set of 4 --
+// users can add any channel by ID. Slack's conversations.list /
+// users.conversations are both hard-blocked on this Enterprise Grid
+// workspace (enterprise_is_restricted, confirmed live), so a real browse
+// list isn't possible here; ID entry + a live conversations.info
+// membership check (also confirmed live, unrestricted) is the safe
+// alternative -- it verifies the user is actually a member before the
+// channel is ever added to the watch list, and is simpler/less
+// error-prone than name search per the user's own request.
+function _wirePartnerAutoReply() {
+  const enabledEl = document.getElementById('par-enabled');
+  const listEl = document.getElementById('par-channel-list');
+  const saveBtn = document.getElementById('par-save');
+  const statusEl = document.getElementById('par-status');
+  const addIdEl = document.getElementById('par-add-id');
+  const addBtn = document.getElementById('par-add-btn');
+  const modeMentionsEl = document.getElementById('par-mode-mentions');
+  const modeOccasionalEl = document.getElementById('par-mode-occasional');
+  if (!enabledEl || !listEl || !saveBtn) return;
+
+  function showStatus(text, cls) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.className = 'sd-status ' + (cls || '');
+    statusEl.style.display = '';
+  }
+
+  let _currentConfig = null;
+
+  function render(config) {
+    _currentConfig = config;
+    enabledEl.checked = !!config.enabled;
+    if (modeMentionsEl && modeOccasionalEl) {
+      const mode = config.replyMode || 'mentions';
+      modeMentionsEl.checked = mode === 'mentions';
+      modeOccasionalEl.checked = mode === 'occasional';
+    }
+    const channels = config.channels || [];
+    listEl.innerHTML = channels.length ? channels.map((ch, i) =>
+      `<div class="sd-toggle-row" data-idx="${i}">
+        <span class="sd-toggle-label">#${_esc(ch.name)} <span style="color:var(--mut);font-size:10px">(${_esc(ch.id)})</span></span>
+        <span style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="par-ch-${i}" ${ch.enabled !== false ? 'checked' : ''}/>
+          <button class="sd-btn secondary par-ch-remove" data-idx="${i}" type="button" style="padding:2px 8px;font-size:10px">Remove</button>
+        </span>
+      </div>`
+    ).join('') : '<div class="sd-hint">No channels added yet — enter a channel ID above to add one.</div>';
+
+    listEl.querySelectorAll('.par-ch-remove').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.getAttribute('data-idx'), 10);
+        _currentConfig.channels.splice(idx, 1);
+        render(_currentConfig);
+        showStatus('Channel removed — click Save to confirm', '');
+      });
+    });
+  }
+
+  slackBridge.getChannelWatchConfig().then(render).catch((e) => {
+    showStatus('\u274C Failed to load config: ' + e.message, 'err');
+  });
+
+  if (addBtn && addIdEl) {
+    addBtn.addEventListener('click', async () => {
+      const id = (addIdEl.value || '').trim();
+      if (!id) { toast.show('warn', 'Enter a channel ID first', 2500); return; }
+      if (_currentConfig && _currentConfig.channels.some(ch => ch.id === id)) {
+        toast.show('warn', 'That channel is already in the list', 2500);
+        return;
+      }
+      addBtn.disabled = true;
+      const originalText = addBtn.textContent;
+      addBtn.textContent = 'Checking...';
+      try {
+        const result = await slackBridge.checkChannelMembership(id);
+        if (!result.ok) {
+          toast.show('error', 'Could not find that channel: ' + (result.error || 'unknown error'), 4000);
+          return;
+        }
+        if (!result.isMember) {
+          toast.show('error', `Found #${result.name}, but you're not a member of it — join it in Slack first, then add it here.`, 5000);
+          return;
+        }
+        if (!_currentConfig) _currentConfig = { enabled: true, channels: [] };
+        _currentConfig.channels.push({ id, name: result.name, enabled: true, lastSeenTs: null });
+        render(_currentConfig);
+        addIdEl.value = '';
+        toast.show('success', `Added #${result.name} — click Save to confirm`, 3000);
+      } catch (e) {
+        toast.show('error', 'Lookup failed: ' + e.message, 4000);
+      } finally {
+        addBtn.disabled = false;
+        addBtn.textContent = originalText;
+      }
+    });
+    addIdEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addBtn.click(); } });
+  }
+
+  saveBtn.addEventListener('click', async () => {
+    if (!_currentConfig) return;
+    const updated = {
+      enabled: !!enabledEl.checked,
+      replyMode: (modeOccasionalEl && modeOccasionalEl.checked) ? 'occasional' : 'mentions',
+      channels: _currentConfig.channels.map((ch, i) => {
+        const cb = document.getElementById('par-ch-' + i);
+        return { ...ch, enabled: cb ? !!cb.checked : ch.enabled };
+      }),
+    };
+    try {
+      await slackBridge.saveChannelWatchConfig(updated);
+      _currentConfig = updated;
+      showStatus('\u2705 Saved', 'ok');
+      toast.show('success', 'Partner Auto-Reply settings saved', 2500);
+    } catch (e) {
+      showStatus('\u274C Save failed: ' + e.message, 'err');
+      toast.show('error', 'Save failed: ' + e.message, 4000);
+    }
+  });
+}
+
+// FEATURE (2026-07-22): _opsEmailAutoSave() removed -- it was dead code
+// with no caller (its "Global SMTP" HTML panel was removed above for the
+// same reason) and would have thrown ReferenceError on _opsEmailTimers
+// (never declared anywhere in this codebase) had it ever actually run.
 // ── SP: per-domicile save helper ──────────────────────────────────────────────
 // cfg shape: { domiciles: { [opName_domCode]: { siteUrl, listName } }, emailHost, ... }
 async function _spSaveDomicile(opName, domCode, siteUrl, listName, headerRow) {
@@ -2299,6 +2494,8 @@ export function init() {
   _wireCreds();
   _wireVendorAuth();
   _wireSlack();
+  _wireGraphMail();
+  _wirePartnerAutoReply();
   _wireEmail();
   _wireAutoNote();
   _wireSchedulerConfig();

@@ -69,11 +69,16 @@ const REGISTRY = {
   rcaStore:         () => P.rcaStore,
   retentionHistory: () => P.retentionHistory,
   slackAutoReply:   () => path.join(P.dataDir, 'slack_auto_reply.json'), // FEATURE (2026-07-16)
+  longDwellStore:   () => path.join(P.dataDir, 'long_dwell.json'), // FEATURE (2026-07-20): Analytics -> Long Dwell Units tab
 
   // Workflow Intelligence (Phase 8, 2026-07-19) - see docs/PHASE8_WORKFLOW_INTELLIGENCE_PLAN.md
   workflowRecordings:   () => path.join(P.dataDir, 'workflow_recordings.json'),
   workflowExecutionLog: () => path.join(P.dataDir, 'workflow_execution_log.json'),
   workflowPatterns:     () => path.join(P.dataDir, 'workflow_patterns.json'),
+
+  // Slack Partner Auto-Reply (2026-07-21) -- see src/scrapers/slack_channel_watch.js
+  slackChannelWatchConfig: () => path.join(P.dataDir, 'slack_channel_watch_config.json'),
+  slackChannelReplies:     () => path.join(P.dataDir, 'slack_channel_replies.json'),
 };
 
 function _resolvePath(name) {

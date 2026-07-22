@@ -38,7 +38,13 @@ async function checkLiveAuth() {
   try {
     const res = await slackWebApi('auth.test', {});
     if (res && res.ok) {
-      return { authenticated: true, user: res.user || '', team: res.team || '' };
+      // FEATURE (2026-07-21): added userId (res.user_id, the actual Slack
+      // ID like U0123456) alongside the existing display-name `user` field
+      // -- needed by the Partner Auto-Reply engine to detect and skip its
+      // own previous messages when polling channel history (loop
+      // prevention). `user` alone isn't reliably comparable to a message's
+      // author ID field.
+      return { authenticated: true, user: res.user || '', userId: res.user_id || '', team: res.team || '' };
     }
     return { authenticated: false, reason: res && res.error ? res.error : 'unknown' };
   } catch (e) {
@@ -224,13 +230,21 @@ async function sendSlackMessage(recipient, message) {
 // getChannels()/readDMs()), re-doing a name search is both wasteful and
 // less reliable than just posting directly to the known ID. Used by the
 // new Slack tab's reply box.
-async function sendToChannel(channelId, message) {
+async function sendToChannel(channelId, message, threadTs) {
   if (!channelId) throw new Error('channelId required');
-  const result = await slackWebApi('chat.postMessage', { channel: channelId, text: message });
+  // FEATURE (2026-07-21): optional threadTs param, backward compatible --
+  // existing callers passing only (channelId, message) are unaffected.
+  // Added for the Slack Partner Auto-Reply engine (slack_channel_watch.js),
+  // which always replies in-thread rather than posting new top-level
+  // messages into a partner-facing channel.
+  const payload = { channel: channelId, text: message };
+  if (threadTs) payload.thread_ts = threadTs;
+  const result = await slackWebApi('chat.postMessage', payload);
   if (!result.ok) throw new Error(`Slack API error: ${result.error}`);
-  logger.info('[Slack] Message sent to channel', channelId);
+  logger.info('[Slack] Message sent to channel', channelId, threadTs ? '(threaded)' : '');
   return { ok: true, ts: result.ts };
 }
+
 
 function slackSaveConfig(data) {
   const existing = getConfig() || {};
@@ -379,6 +393,29 @@ async function findChannelByName(name) {
 }
 
 /**
+ * FEATURE (2026-07-22): verifies a Slack channel ID for the Partner
+ * Auto-Reply channel-add-by-ID flow (see slack_channel_watch.js /
+ * Settings -> Partner Auto-Reply). conversations.list and
+ * users.conversations are both hard-blocked on this Enterprise Grid
+ * workspace (enterprise_is_restricted, confirmed live) -- no real "browse
+ * all my channels" is possible. conversations.info is NOT restricted
+ * (confirmed live) and returns an accurate is_member flag, so ID entry +
+ * a membership check here is the safe, correct alternative: it prevents
+ * silently watching a channel the user was never actually a member of.
+ */
+async function checkChannelMembership(channelId) {
+  if (!channelId || typeof channelId !== 'string') throw new Error('channelId required');
+  const res = await slackWebApi('conversations.info', { channel: channelId.trim() });
+  if (!res.ok) return { ok: false, error: res.error || 'lookup failed' };
+  return {
+    ok: true,
+    isMember: !!(res.channel && res.channel.is_member),
+    name: (res.channel && res.channel.name) || channelId,
+    isPrivate: !!(res.channel && res.channel.is_private),
+  };
+}
+
+/**
  * Auto-reply engine (S22)
  * rules: [{ keyword, response, delayMs, enabled }]
  * processAutoReplies(messages, rules) -- check messages against rules, send replies
@@ -414,4 +451,4 @@ async function processAutoReplies(messages, rules) {
   return sent;
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation };
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership };
