@@ -88,6 +88,58 @@ function registerAIHandlers(ctx) {
   handle('orcha:mwinit',        async () => relay.runMwinit());
   handle('orcha:refresh-creds', () => { relay.refreshCredentials(); return { ok: true }; });
 
+  // ── AI Config (preference + per-backend config) ────────────────────────
+  // Returns full config: preference, orcha settings, claude settings + live status
+  handle('ai:get-ai-config', () => {
+    const orchaCfg = (() => {
+      try {
+        if (fs.existsSync(P.orchaConfig)) return JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
+      } catch (_) {}
+      return {};
+    })();
+    const os = require('os'), path = require('path');
+    const claudeBin = process.platform === 'win32'
+      ? path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'claude.exe')
+      : path.join(os.homedir(), '.toolbox', 'bin', 'claude');
+    return {
+      aiPreference:     relay.getPreference(),
+      mode:             orchaCfg.mode || 'local',
+      host:             orchaCfg.host || 'localhost',
+      port:             orchaCfg.port || 4799,
+      claudeBin,
+      claudeTimeoutMs:  orchaCfg.claudeTimeoutMs || 60000,
+      claudeAvailable:  require('fs').existsSync(claudeBin),
+    };
+  });
+
+  // Save AI config — persists preference + both backends, hot-applies preference
+  handle('ai:save-ai-config', (_e, config) => {
+    const existing = (() => {
+      try {
+        if (fs.existsSync(P.orchaConfig)) return JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
+      } catch (_) {}
+      return {};
+    })();
+    const merged = {
+      ...existing,
+      mode:            config.mode             || existing.mode || 'local',
+      host:            config.host             || existing.host || 'localhost',
+      port:            config.port             || existing.port || 4799,
+      aiPreference:    config.aiPreference     || 'auto',
+      claudeTimeoutMs: config.claudeTimeoutMs  || 60000,
+    };
+    const tmp = P.orchaConfig + '.tmp';
+    fs.mkdirSync(require('path').dirname(P.orchaConfig), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf8');
+    fs.renameSync(tmp, P.orchaConfig);
+    relay.setPreference(merged.aiPreference);
+    logger.info('[AI Config] Saved. preference=' + merged.aiPreference);
+    return { ok: true, preference: merged.aiPreference };
+  });
+
+  // Test the Claude Code path directly
+  handle('ai:test-claude', () => relay.testClaude());
+
   // Daily Notes - open Relay + Offsite windows side-by-side
   handle('daily-notes:open-windows', async (_e, opts) => {
     const spSes = eSession.defaultSession;

@@ -359,32 +359,75 @@ function _html() {
           </div>
         </div>
 
-        <!-- Orcha Config -->
-        <div class="sd-section" id="sect-orcha">
-          <div class="sd-section-title">Orcha Config</div>
-          <div class="sd-row">
-            <div class="sd-field">
-              <div class="sd-label">Mode</div>
-              <select class="sd-select" id="orcha-mode">
-                <option value="local">Local</option>
-                <option value="remote">Remote</option>
-              </select>
-            </div>
-            <div class="sd-field">
-              <div class="sd-label">Host</div>
-              <input class="sd-input" id="orcha-host" placeholder="localhost"/>
-            </div>
-            <div class="sd-field">
-              <div class="sd-label">Port</div>
-              <input class="sd-input" id="orcha-port" type="number" placeholder="4799"/>
-            </div>
+        <!-- AI Config -->
+        <div class="sd-section" id="sect-ai-config">
+          <div class="sd-section-title" style="display:flex;align-items:center;gap:8px">
+            🤖 AI Config
+            <span id="ai-config-live-status" style="font-size:10px;padding:2px 10px;border-radius:10px;background:#21262d;color:#8b949e;font-weight:500">⏳ checking...</span>
           </div>
+
+          <!-- Preference selector -->
+          <div class="sd-field" style="margin-bottom:14px">
+            <div class="sd-label" style="margin-bottom:8px">Active AI</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-auto">
+                <input type="radio" name="ai-pref" value="auto" style="accent-color:#58a6ff"> Auto (fallback chain)
+              </label>
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-orcha">
+                <input type="radio" name="ai-pref" value="orcha" style="accent-color:#22c55e"> Orcha only
+              </label>
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-claude">
+                <input type="radio" name="ai-pref" value="claude" style="accent-color:#818cf8"> Claude Code only
+              </label>
+            </div>
+            <div id="ai-pref-hint" style="margin-top:5px;font-size:10px;color:#6e7681;font-style:italic">Auto: tries Orcha first, falls back to Claude Code if quota is exceeded.</div>
+          </div>
+
+          <!-- Orcha subsection -->
+          <div style="border:1px solid var(--bdr);border-radius:6px;padding:10px 12px;margin-bottom:10px">
+            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">⚡ Orcha</div>
+            <div class="sd-row">
+              <div class="sd-field">
+                <div class="sd-label">Mode</div>
+                <select class="sd-select" id="orcha-mode">
+                  <option value="local">Local</option>
+                  <option value="remote">Remote</option>
+                </select>
+              </div>
+              <div class="sd-field">
+                <div class="sd-label">Host</div>
+                <input class="sd-input" id="orcha-host" placeholder="localhost"/>
+              </div>
+              <div class="sd-field">
+                <div class="sd-label">Port</div>
+                <input class="sd-input" id="orcha-port" type="number" placeholder="4799"/>
+              </div>
+            </div>
+            <div class="sd-btn-row">
+              <button class="sd-btn secondary" id="test-orcha" style="font-size:11px">Test Orcha</button>
+            </div>
+            <div id="orcha-test-status" style="margin-top:4px;font-size:11px;min-height:14px"></div>
+          </div>
+
+          <!-- Claude Code subsection -->
+          <div style="border:1px solid var(--bdr);border-radius:6px;padding:10px 12px;margin-bottom:12px">
+            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">🧠 Claude Code</div>
+            <div class="sd-field">
+              <div class="sd-label">Binary (auto-detected)</div>
+              <input class="sd-input" id="claude-bin-path" placeholder="(auto)" readonly style="color:#6e7681;font-size:10px;font-family:monospace"/>
+            </div>
+            <div class="sd-field" style="margin-top:6px">
+              <div class="sd-label">Timeout (seconds)</div>
+              <input class="sd-input" id="claude-timeout" type="number" placeholder="60" style="width:80px"/>
+            </div>
+            <div class="sd-btn-row">
+              <button class="sd-btn secondary" id="test-claude" style="font-size:11px">Test Claude</button>
+            </div>
+            <div id="claude-test-status" style="margin-top:4px;font-size:11px;min-height:14px"></div>
+          </div>
+
           <div class="sd-btn-row">
-            <button class="sd-btn primary" id="save-orcha">Save</button>
-            <button class="sd-btn secondary" id="test-orcha">Test Connection</button>
-          </div>
-          <div id="orcha-test-status" class="sd-inline-status" style="margin-top:6px;font-size:12px;"></div>
-          <div style="display:none">
+            <button class="sd-btn primary" id="save-ai-config">Save AI Config</button>
           </div>
         </div>
 
@@ -937,43 +980,134 @@ function _wireAuth() {
 }
 
 // ── Section: Orcha ───────────────────────────────────────────────────────────
-function _wireOrcha() {
-  document.getElementById('save-orcha').addEventListener('click', async () => {
-    await settingsBridge.save('orcha', {
-      mode: document.getElementById('orcha-mode').value,
-      host: document.getElementById('orcha-host').value.trim(),
-      port: parseInt(document.getElementById('orcha-port').value, 10) || 4799,
+function _wireOrcha() { _wireAIConfig(); }
+
+function _wireAIConfig() {
+  // ── Load current config into form fields ──────────────────────────────
+  async function _loadAIConfig() {
+    // Live status badge
+    if (window.ai && window.ai.status) {
+      window.ai.status().then(_updateLiveStatus).catch(() => _updateLiveStatus(null));
+    }
+    if (!window.ai || !window.ai.getAIConfig) return;
+    const cfg = await window.ai.getAIConfig().catch(() => null);
+    if (!cfg) return;
+    // Preference radio
+    const radio = document.querySelector('input[name="ai-pref"][value="' + (cfg.aiPreference || 'auto') + '"]');
+    if (radio) { radio.checked = true; _updateChipStyles(cfg.aiPreference || 'auto'); }
+    _updatePrefHint(cfg.aiPreference || 'auto');
+    // Orcha fields
+    const modeEl = document.getElementById('orcha-mode');
+    const hostEl = document.getElementById('orcha-host');
+    const portEl = document.getElementById('orcha-port');
+    if (modeEl) modeEl.value = cfg.mode || 'local';
+    if (hostEl) hostEl.value = cfg.host || '';
+    if (portEl) portEl.value = cfg.port || 4799;
+    // Claude fields
+    const binEl  = document.getElementById('claude-bin-path');
+    const toEl   = document.getElementById('claude-timeout');
+    if (binEl) binEl.value = cfg.claudeBin || '(auto)';
+    if (toEl)  toEl.value  = Math.round((cfg.claudeTimeoutMs || 60000) / 1000);
+  }
+
+  function _updateLiveStatus(st) {
+    const el = document.getElementById('ai-config-live-status');
+    if (!el) return;
+    const s = st && st.status;
+    const MAP = {
+      'connected':         { text: '🟢 Orcha connected',  bg: '#1a2f1a', color: '#22c55e' },
+      'connected-claude':  { text: '🔵 Claude active',    bg: '#1c1c30', color: '#818cf8' },
+      'connected-bedrock': { text: '🟠 Bedrock active',   bg: '#2a1e0a', color: '#f59e0b' },
+      'error':             { text: '🔴 AI offline',       bg: '#2f1a1a', color: '#f85149' },
+      'unknown':           { text: '⏳ Checking...',      bg: '#21262d', color: '#8b949e' },
+    };
+    const d = MAP[s] || MAP.unknown;
+    el.textContent = d.text; el.style.background = d.bg; el.style.color = d.color;
+  }
+
+  function _updatePrefHint(pref) {
+    const hints = {
+      auto:   'Auto: tries Orcha first, falls back to Claude Code if quota is exceeded.',
+      orcha:  'Orcha only: no Claude fallback. AI is unavailable if Orcha quota runs out.',
+      claude: 'Claude Code only: skips Orcha, uses Cecelia shared Bedrock via claude -p.',
+    };
+    const el = document.getElementById('ai-pref-hint');
+    if (el) el.textContent = hints[pref] || '';
+  }
+
+  function _updateChipStyles(pref) {
+    ['auto', 'orcha', 'claude'].forEach(p => {
+      const chip = document.getElementById('ai-chip-' + p);
+      if (!chip) return;
+      chip.style.borderColor = p === pref ? 'var(--acc)' : 'var(--bdr)';
+      chip.style.background  = p === pref ? 'rgba(88,166,255,.08)' : '';
     });
-    toast.show('success', 'Orcha config saved', 2000);
+  }
+
+  // ── Preference radio change ────────────────────────────────────────────
+  document.querySelectorAll('input[name="ai-pref"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      _updatePrefHint(radio.value);
+      _updateChipStyles(radio.value);
+    });
   });
 
+  // ── Save ──────────────────────────────────────────────────────────────
+  const saveBtn = document.getElementById('save-ai-config');
+  if (saveBtn) saveBtn.addEventListener('click', async () => {
+    const pref    = (document.querySelector('input[name="ai-pref"]:checked') || {}).value || 'auto';
+    const toSecs  = parseInt((document.getElementById('claude-timeout') || {}).value, 10) || 60;
+    await window.ai.saveAIConfig({
+      aiPreference:    pref,
+      mode:            (document.getElementById('orcha-mode') || {}).value || 'local',
+      host:            ((document.getElementById('orcha-host') || {}).value || '').trim(),
+      port:            parseInt((document.getElementById('orcha-port') || {}).value, 10) || 4799,
+      claudeTimeoutMs: toSecs * 1000,
+    });
+    toast.show('success', 'AI config saved — active: ' + pref, 2500);
+    window.ai.status().then(_updateLiveStatus).catch(() => {});
+  });
 
-  // Test Orcha connection
-  document.getElementById('test-orcha').addEventListener('click', async () => {
+  // ── Test Orcha ────────────────────────────────────────────────────────
+  const testOrchaBtn = document.getElementById('test-orcha');
+  if (testOrchaBtn) testOrchaBtn.addEventListener('click', async () => {
     const statusEl = document.getElementById('orcha-test-status');
-    const btn = document.getElementById('test-orcha');
-    btn.disabled = true;
-    btn.textContent = 'Testing...';
-    statusEl.textContent = '\u23F3 Connecting to Orcha...';
-    statusEl.style.color = '#94a3b8';
+    testOrchaBtn.disabled = true; testOrchaBtn.textContent = 'Testing...';
+    if (statusEl) { statusEl.textContent = '⏳ Connecting to Orcha...'; statusEl.style.color = '#94a3b8'; }
     try {
       const result = await window.ai.test();
       if (result && result.ok) {
         const model = (result.model || '').split('/').pop().split(':')[0];
-        statusEl.textContent = '\u2705 Connected \u2014 Response: "' + (result.response || 'OK').substring(0, 30) + '" | Model: ' + model + ' | Requests: ' + (result.requestCount || 0);
-        statusEl.style.color = '#22c55e';
+        if (statusEl) { statusEl.textContent = '✅ Connected — "' + (result.response || 'OK').slice(0, 40) + '" | ' + model; statusEl.style.color = '#22c55e'; }
       } else {
-        statusEl.textContent = '\u274C Connection failed: ' + (result.lastError || result.status || 'No response');
-        statusEl.style.color = '#ef4444';
+        if (statusEl) { statusEl.textContent = '❌ ' + (result.lastError || result.status || 'No response'); statusEl.style.color = '#ef4444'; }
       }
     } catch (e) {
-      statusEl.textContent = '\u274C Error: ' + e.message;
-      statusEl.style.color = '#ef4444';
-    } finally {
-      btn.disabled = false;
-      btn.textContent = 'Test Connection';
-    }
+      if (statusEl) { statusEl.textContent = '❌ ' + e.message; statusEl.style.color = '#ef4444'; }
+    } finally { testOrchaBtn.disabled = false; testOrchaBtn.textContent = 'Test Orcha'; }
   });
+
+  // ── Test Claude ───────────────────────────────────────────────────────
+  const testClaudeBtn = document.getElementById('test-claude');
+  if (testClaudeBtn) testClaudeBtn.addEventListener('click', async () => {
+    const statusEl = document.getElementById('claude-test-status');
+    testClaudeBtn.disabled = true; testClaudeBtn.textContent = 'Testing...';
+    if (statusEl) { statusEl.textContent = '⏳ Calling claude -p...'; statusEl.style.color = '#94a3b8'; }
+    try {
+      const result = await window.ai.testClaude();
+      if (result && result.ok) {
+        if (statusEl) { statusEl.textContent = '✅ Online — "' + (result.response || '').slice(0, 60) + '"'; statusEl.style.color = '#818cf8'; }
+      } else {
+        if (statusEl) { statusEl.textContent = '❌ ' + (result.error || 'Failed'); statusEl.style.color = '#ef4444'; }
+      }
+    } catch (e) {
+      if (statusEl) { statusEl.textContent = '❌ ' + e.message; statusEl.style.color = '#ef4444'; }
+    } finally { testClaudeBtn.disabled = false; testClaudeBtn.textContent = 'Test Claude'; }
+  });
+
+  // Load config when drawer opens
+  _loadAIConfig();
+  bus.on('ui:view-change', ({ to }) => { if (to === 'settings') setTimeout(_loadAIConfig, 150); });
 }
 
 // ── Section: Credentials ─────────────────────────────────────────────────────

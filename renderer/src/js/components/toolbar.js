@@ -271,9 +271,9 @@ export function init(container) {
     try {
       if (!window.ai || !window.ai.status) return;
       const status = await window.ai.status();
-      bus.emit('orcha:status', { connected: status && status.status === 'connected' });
+      bus.emit('orcha:status', status || { status: 'unknown' });
     } catch (e) {
-      bus.emit('orcha:status', { connected: false });
+      bus.emit('orcha:status', { status: 'error' });
     }
   }
   _pollAiStatus();
@@ -471,13 +471,17 @@ export function init(container) {
     const dot = document.getElementById('kpi-ai-dot');
     const lbl = document.getElementById('kpi-ai-label');
     if (!dot) return;
-    if (status.connected) {
-      dot.className = 'tb-kpi-dot tb-kpi-dot--green';
-      if (lbl) lbl.textContent = 'AI ✓';
-    } else {
-      dot.className = 'tb-kpi-dot tb-kpi-dot--red';
-      if (lbl) lbl.textContent = 'AI ✗';
-    }
+    const s = (status && status.status) || (status && status.connected ? 'connected' : 'unknown');
+    const MAP = {
+      'connected':         { cls: 'tb-kpi-dot--green',   label: 'AI: Orcha'   },
+      'connected-claude':  { cls: 'tb-kpi-dot--blue',    label: 'AI: Claude'  },
+      'connected-bedrock': { cls: 'tb-kpi-dot--amber',   label: 'AI: Bedrock' },
+      'error':             { cls: 'tb-kpi-dot--red',     label: 'AI: Offline' },
+      'unknown':           { cls: 'tb-kpi-dot--unknown', label: 'AI …'   },
+    };
+    const d = MAP[s] || MAP['unknown'];
+    dot.className = 'tb-kpi-dot ' + d.cls;
+    if (lbl) lbl.textContent = d.label;
   });
 
   // ── Show filter bar only on fleet/dashboard view ──────────────────────────

@@ -134,6 +134,11 @@ contextBridge.exposeInMainWorld('ai', {
   openDailyWindows: (opts)         => ipcRenderer.invoke('daily-notes:open-windows', opts),
   saveOrchaConfig:  (config)       => ipcRenderer.invoke('orcha:save-config', config),
   refreshCreds:     ()             => ipcRenderer.invoke('orcha:refresh-creds'),
+  // AI Config — preference selector + per-backend settings
+  getAIConfig:      ()             => ipcRenderer.invoke('ai:get-ai-config'),
+  saveAIConfig:     (cfg)          => ipcRenderer.invoke('ai:save-ai-config', cfg),
+  testClaude:       ()             => ipcRenderer.invoke('ai:test-claude'),
+  onAIStatusChanged:(cb)           => on('ai:status-changed', cb),
   // S28-Sprint1: dismiss anomaly alert
   dismissAlert:     (alertId)      => ipcRenderer.invoke('orcha:dismiss-alert', alertId),
   // S28-Sprint3: Orchestrator execution

@@ -8195,6 +8195,14 @@ body {
   background: var(--red);
   box-shadow: 0 0 5px rgba(255,123,114,.4);
 }
+.tb-kpi-dot--blue {
+  background: #818cf8;
+  box-shadow: 0 0 5px rgba(129,140,248,.4);
+}
+.tb-kpi-dot--amber {
+  background: #f59e0b;
+  box-shadow: 0 0 5px rgba(245,158,11,.4);
+}
 
 /* ── Timeline hide/edit action buttons ────────────────────────────────────
    Companion feature to the timeline "+" quick-add. Hidden by default,

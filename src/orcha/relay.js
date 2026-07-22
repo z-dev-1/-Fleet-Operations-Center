@@ -49,6 +49,7 @@ let _lastError    = null;
 let _status       = 'unknown'; // 'connected' | 'expired' | 'error' | 'unknown'
 let _requestCount = 0;
 let _errorCount   = 0;
+let _aiPreference = 'auto'; // 'auto' | 'orcha' | 'claude'
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ CONCURRENCY Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 const MAX_CONCURRENT = 5;
@@ -70,6 +71,21 @@ function _releaseSlot() {
 async function ask(prompt, opts = {}) {
   await _acquireSlot();
   _requestCount++;
+
+    // Preference: 'claude' -- skip Orcha entirely, go straight to Claude Code
+  if (_aiPreference === 'claude') {
+    try {
+      const ccText = await _tryClaudeCode(prompt);
+      if (ccText) {
+        _lastHealthy = Date.now(); _status = 'connected-claude'; _releaseSlot(); _saveStatus();
+        logger.info('OK via claude-code (preference=claude, ' + ccText.length + ' chars)');
+        return ccText;
+      }
+    } catch (ccErr) { logger.warn('claude-code fast-path failed: ' + ccErr.message); }
+    _lastError = 'Claude Code failed'; _status = 'error'; _errorCount++;
+    _saveStatus(); _releaseSlot();
+    throw new Error('Claude Code unavailable (preference=claude)');
+  }
 
   // PRIMARY: Route through fleet-brain (persistent session with full context)
   try {
@@ -108,7 +124,22 @@ async function ask(prompt, opts = {}) {
         _saveStatus();
         return cliText;
       }
-      // BEDROCK FALLBACK: direct Claude call
+      // Skip Claude Code fallback when preference is 'orcha'
+      if (_aiPreference !== 'orcha') {
+        // CLAUDE CODE FALLBACK: claude -p via Cecelia shared account
+        try {
+          logger.info('Trying claude-code fallback...');
+          const ccText = await _tryClaudeCode(prompt);
+          if (ccText) {
+            _lastHealthy = Date.now(); _status = 'connected-claude';
+            _saveStatus();
+            logger.info('OK via claude-code fallback (' + ccText.length + ' chars)');
+            return ccText;
+          }
+        } catch (ccErr) { logger.warn('claude-code fallback failed: ' + ccErr.message); }
+      }
+
+      // BEDROCK FALLBACK: direct Claude call via Bedrock SDK
       try {
         const { askBedrock } = require('../scrapers/bedrock');
         logger.info('Trying Bedrock fallback...');
@@ -208,6 +239,38 @@ function _tryHeadless(prompt) {
   });
 }
 
+// -- CLAUDE CODE FALLBACK ------------------------------------------------------
+// Fires when Orcha quota is exhausted. Uses claude -p (Claude Code toolbox,
+// Cecelia shared Bedrock account) — no extra credentials needed beyond Midway.
+const CLAUDE_BIN = process.platform === 'win32'
+  ? path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'claude.exe')
+  : path.join(os.homedir(), '.toolbox', 'bin', 'claude');
+const CLAUDE_TIMEOUT_MS = 60000;
+
+function _tryClaudeCode(prompt) {
+  return new Promise((resolve, reject) => {
+    if (!fs.existsSync(CLAUDE_BIN)) {
+      return reject(new Error('claude-code not installed — run: toolbox install claude-code'));
+    }
+    // Trim prompt to practical CLI limit
+    const trimmed = prompt.length > 8000 ? prompt.slice(0, 8000) + '...[trimmed]' : prompt;
+    const timer = setTimeout(() => reject(new Error('claude-code timeout')), CLAUDE_TIMEOUT_MS);
+    execFile(
+      CLAUDE_BIN,
+      ['-p', trimmed],
+      { maxBuffer: 2 * 1024 * 1024, timeout: CLAUDE_TIMEOUT_MS },
+      (err, stdout, stderr) => {
+        clearTimeout(timer);
+        if (err) return reject(new Error('claude-code error: ' + (err.message || stderr || 'unknown')));
+        const text = (stdout || '').trim();
+        if (!text) return reject(new Error('claude-code returned empty'));
+        resolve(text);
+      }
+    );
+  });
+}
+
+
 // Ã¢â€â‚¬Ã¢â€â‚¬ HEALTH Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 async function healthCheck() {
   try {
@@ -289,4 +352,31 @@ function _saveStatus() {
   } catch (_) {}
 })();
 
-module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials };
+// -- AI PREFERENCE -------------------------------------------------------
+// Runtime switch — no restart needed. Persisted to orchaConfig on save.
+function setPreference(pref) {
+  const valid = ['auto', 'orcha', 'claude'];
+  _aiPreference = valid.includes(pref) ? pref : 'auto';
+  logger.info('AI preference set to: ' + _aiPreference);
+}
+function getPreference() { return _aiPreference; }
+
+// testClaude() — direct health-check of the Claude Code path
+function testClaude() {
+  return _tryClaudeCode('Reply with exactly one word: ONLINE')
+    .then(text => ({ ok: true, response: text.trim().slice(0, 80) }))
+    .catch(e  => ({ ok: false, error: e.message }));
+}
+
+
+// Load saved AI preference from orchaConfig on startup
+(function _loadSavedPreference() {
+  try {
+    if (fs.existsSync(P.orchaConfig)) {
+      const cfg = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
+      if (cfg && cfg.aiPreference) setPreference(cfg.aiPreference);
+    }
+  } catch (_) {}
+})();
+
+module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, testClaude };

@@ -1,21 +1,58 @@
 'use strict';
 /**
  * bedrock.js — Orcha AI via Amazon Bedrock (Claude)
- * Uses the ada-backed 'zilasant-bedrock' AWS profile.
- * Called from main.js via the ai:suggest IPC handler.
+ * Credentials via Amazon-internal Claude Code toolbox (Cecelia shared account 175342148895).
+ * Falls back automatically when Orcha WS/CLI transports exhaust their quota.
  */
 
-const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
-const { fromNodeProviderChain } = require('@aws-sdk/credential-providers');
+const { BedrockRuntimeClient, InvokeModelCommand, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
+const { execFile } = require('child_process');
+const path = require('path');
+const os   = require('os');
 const logger = require('../utils/logger').createLogger('bedrock');
 
-// Use ada credential_process profile — rotates automatically with Midway
-const client = new BedrockRuntimeClient({
-  region: 'us-east-1',
-  credentials: fromNodeProviderChain({ profile: 'zilasant-bedrock' }),
-});
+// Claude Code toolbox binary — vends short-lived Cecelia Bedrock credentials
+const CLAUDE_BIN = path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'claude.exe');
+const REGION     = 'us-west-2';
+const MODEL_ID   = 'us.anthropic.claude-sonnet-4-20250514-v1:0';
 
-const MODEL_ID = 'anthropic.claude-3-5-haiku-20241022-v1:0'; // fast + cheap, perfect for classification
+// Cached credentials — refreshed 2 min before expiry
+let _cachedCreds = null;
+let _cacheExpiry = 0;
+
+function _getCredentials() {
+  return new Promise((resolve, reject) => {
+    // Return cached creds if still valid (with 2 min buffer)
+    if (_cachedCreds && Date.now() < _cacheExpiry - 120000) {
+      return resolve(_cachedCreds);
+    }
+    execFile(CLAUDE_BIN, ['default-credential-export'], { timeout: 15000 }, (err, stdout) => {
+      if (err) return reject(new Error('Claude credential export failed: ' + err.message));
+      try {
+        const parsed = JSON.parse(stdout.trim().split('\n').filter(l => l.startsWith('{'))[0] || stdout);
+        // Output wraps under "Credentials" key
+        const creds = parsed.Credentials || parsed;
+        _cachedCreds = {
+          accessKeyId:     creds.AccessKeyId,
+          secretAccessKey: creds.SecretAccessKey,
+          sessionToken:    creds.SessionToken,
+          expiration:      creds.Expiration ? new Date(creds.Expiration) : undefined,
+        };
+        _cacheExpiry = creds.Expiration ? new Date(creds.Expiration).getTime() : Date.now() + 3600000;
+        resolve(_cachedCreds);
+      } catch (e) {
+        reject(new Error('Failed to parse claude credentials: ' + e.message));
+      }
+    });
+  });
+}
+
+function _makeClient() {
+  return new BedrockRuntimeClient({
+    region: REGION,
+    credentials: _getCredentials,
+  });
+}
 
 /**
  * suggestDropdowns(unit)
@@ -78,24 +115,18 @@ Rules:
 Reply ONLY with a single JSON object, no markdown, no explanation:
 {"primaryComponent":"...","repairStatus":"...","confidence":"high|medium|low","reason":"one short sentence"}`;
 
-  const body = JSON.stringify({
-    anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 200,
-    temperature: 0,
-    messages: [{ role: 'user', content: prompt }],
-  });
+
 
   try {
-    const cmd = new InvokeModelCommand({
+    const client = _makeClient();
+    const cmd = new ConverseCommand({
       modelId: MODEL_ID,
-      contentType: 'application/json',
-      accept: 'application/json',
-      body,
+      messages: [{ role: 'user', content: [{ text: prompt }] }],
+      inferenceConfig: { maxTokens: 200, temperature: 0 },
     });
-
     const response = await client.send(cmd);
-    const raw = JSON.parse(Buffer.from(response.body).toString('utf-8'));
-    const text = (raw.content && raw.content[0] && raw.content[0].text) || '';
+    const text = (response.output && response.output.message && response.output.message.content &&
+                  response.output.message.content[0] && response.output.message.content[0].text) || '';
 
     // Extract JSON — Claude sometimes adds a tiny preamble
     const match = text.match(/\{[\s\S]*?\}/);
@@ -116,26 +147,19 @@ Reply ONLY with a single JSON object, no markdown, no explanation:
 
 
 /**
- * askBedrock(prompt) - General-purpose AI call via Bedrock Claude
- * Returns plain text response.
+ * askBedrock(prompt) — General-purpose AI call via Bedrock Claude (Cecelia shared account).
+ * Uses the Converse API which Cecelia's role permits.
  */
 async function askBedrock(prompt) {
-  const body = JSON.stringify({
-    anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 2048,
-    messages: [{ role: 'user', content: prompt }],
-  });
-
-  const cmd = new InvokeModelCommand({
+  const client = _makeClient();
+  const cmd = new ConverseCommand({
     modelId: MODEL_ID,
-    contentType: 'application/json',
-    accept: 'application/json',
-    body,
+    messages: [{ role: 'user', content: [{ text: prompt }] }],
+    inferenceConfig: { maxTokens: 2048 },
   });
-
   const response = await client.send(cmd);
-  const raw = JSON.parse(Buffer.from(response.body).toString('utf-8'));
-  return (raw.content && raw.content[0] && raw.content[0].text) || '';
+  return (response.output && response.output.message && response.output.message.content &&
+          response.output.message.content[0] && response.output.message.content[0].text) || '';
 }
 
 module.exports = {
