@@ -1164,8 +1164,100 @@ const CreateWRAutofill = {
                    }                          // end outer try/catch
                }                              // if (p.attachmentIds)
 
+               // FEATURE (2026-07-23): extends the engine past Issue Details --
+               // previously it deliberately stopped here for manual review. User
+               // confirmed they want full auto-progression through Comments and
+               // Review & Submit, including clicking the final Submit button.
+               // CAVEAT: unlike every step above, none of this has been verified
+               // against a live Comments/Review screen yet -- there was no prior
+               // ground truth to build from, so this is a best-effort first pass
+               // using the same conventions already proven elsewhere in this file
+               // (css-cmvgon comboboxes, generic Next-button detection, setVal for
+               // text fields). Expect this to need at least one more round of log-
+               // driven correction, same as every other step in this file did.
+               const findNextBtn = () => document.querySelector('button.css-mnocv9')
+                   || Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && !b.disabled && /^next$/i.test((b.innerText || b.textContent || '').trim()));
+
+               // STEP 5: Comments
+               this.log('--- STEP 5: Comments ---');
+               const issueNextBtn = findNextBtn();
+               if (issueNextBtn) {
+                   issueNextBtn.click();
+                   this.log('Issue Details: Next clicked -- moving to Comments');
+                   await this.sleep(1000);
+               } else {
+                   this.log('Issue Details: WARNING - Next button not found, cannot reach Comments');
+               }
+
+               if (p.comments) {
+                   const commentsTA = await this.waitFor(() =>
+                       document.querySelector('TEXTAREA#my-input') ||
+                       Array.from(document.querySelectorAll('TEXTAREA')).find(t => t.offsetParent && /comment/i.test(t.placeholder || t.getAttribute('aria-label') || ''))
+                   , 6000, 100);
+                   if (commentsTA) { this.setVal(commentsTA, p.comments); this.log('Comments: filled'); await this.sleep(200); }
+                   else { this.log('Comments: WARNING - textarea not found'); }
+               }
+
+               // Share-with-vendor toggle -- best-effort only, acts only if a
+               // matching checkbox/label is actually found on screen.
+               try {
+                   const shareLabel = Array.from(document.querySelectorAll('LABEL')).find(l => /internal only|share with vendor|external/i.test((l.innerText || '').trim()) && l.offsetParent);
+                   if (shareLabel) {
+                       const cb = shareLabel.querySelector('input[type="checkbox"]') || (shareLabel.getAttribute('for') ? document.getElementById(shareLabel.getAttribute('for')) : null);
+                       if (cb) {
+                           const wantInternal = p.shareWith === 'internal';
+                           if (!!cb.checked !== wantInternal) { cb.click(); }
+                           this.log('Comments: share-with set (internal=' + wantInternal + ')');
+                       }
+                   } else {
+                       this.log('Comments: share-with control not found -- leaving default');
+                   }
+               } catch (e) { this.log('Comments: share-with error: ' + e.message); }
+
+               await this.sleep(300);
+               const commentsNextBtn = findNextBtn();
+               if (commentsNextBtn) {
+                   commentsNextBtn.click();
+                   this.log('Comments: Next clicked -- moving to Review & Submit');
+                   await this.sleep(1200);
+               } else {
+                   this.log('Comments: WARNING - Next button not found, cannot reach Review & Submit');
+               }
+
+               // STEP 6: Review & Submit
+               this.log('--- STEP 6: Review & Submit ---');
+               if (p.vendor) {
+                   try {
+                       const vendorInput = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).find(el => el.offsetParent && !el.value);
+                       if (vendorInput) {
+                           try { vendorInput.focus(); } catch (e) {}
+                           this.click(vendorInput);
+                           const vs = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                           try { if (vs) vs.call(vendorInput, p.vendor); else vendorInput.value = p.vendor; } catch (e) { vendorInput.value = p.vendor; }
+                           ['input', 'change', 'keyup'].forEach(t => { try { vendorInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
+                           const vendorOpt = await this.waitForOption(p.vendor, 4000);
+                           if (vendorOpt) { this.click(vendorOpt); this.log('Vendor: clicked "' + (vendorOpt.innerText || '').trim() + '"'); await this.sleep(300); }
+                           else { this.log('Vendor: no match for "' + p.vendor + '"'); }
+                       } else {
+                           this.log('Vendor: no empty combobox found -- may already be set, or field not present on this screen');
+                       }
+                   } catch (e) { this.log('Vendor: error: ' + e.message); }
+               }
+
+               const submitBtn = await this.waitFor(() =>
+                   Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && !b.disabled && /submit request|submit/i.test((b.innerText || b.textContent || '').trim()))
+               , 6000, 100);
+               if (submitBtn) {
+                   this.log('Submit Request: button found -- clicking now');
+                   this.click(submitBtn);
+                   this.log('Submit Request: clicked');
+                   await this.sleep(500);
+               } else {
+                   this.log('Submit Request: WARNING - button not found -- stopped before submitting, review manually');
+               }
+
                this.log('--- COMPLETE ---');
-               return { ok: true, message: 'Autofill completed through Issue Details step -- review before submitting.' };
+               return { ok: true, message: 'Autofill ran all the way through Comments and Review & Submit (best-effort, first pass) -- check the app/log to confirm it actually went through correctly.' };
            },                                 // run()
 
 }; // CreateWRAutofill
