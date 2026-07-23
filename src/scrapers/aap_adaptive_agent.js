@@ -486,6 +486,15 @@ async function runAdaptiveWR(payload, askAI, log) {
     log('[AdaptiveWR] Workflow Intelligence capture attach failed: ' + e.message);
   }
 
+  // FIX (2026-07-23): if AAP's wizard form has an unsaved-changes guard,
+  // Electron's default behavior on window close is to run the page's
+  // beforeunload handler and show a native "Leave Site?" confirm dialog --
+  // which can render behind/off the visible window, making the close (X)
+  // button look like it's just not working. This is a user-initiated abort
+  // of an in-progress automation, not a real navigation with real user
+  // data at risk, so always allow the close through immediately.
+  win.webContents.on('will-prevent-unload', (event) => { event.preventDefault(); });
+
   win.loadURL(aapUrl);
   log('[AdaptiveWR] AAP window opened, waiting for load...');
   
@@ -657,7 +666,15 @@ async function runAdaptiveWR(payload, askAI, log) {
     }
     
     // 9. Wait for page to react
-    await sleep(1500);
+    // FIX (2026-07-23): a flat 1.5s wait was sometimes not enough for a
+    // wizard step transition (e.g. Asset Condition -> next step) to finish
+    // rendering before the next snapshot was taken, which could re-read the
+    // same still-settling page and effectively get the loop stuck retrying
+    // the same step. Give navigation-style clicks (Next/Continue/Save &
+    // Continue/Proceed) extra time to land.
+    const clickedNav = actions.some(a => a.type === 'click' &&
+      /\b(next|continue|proceed|save\s*&?\s*continue)\b/i.test((a.target && a.target.text) || ''));
+    await sleep(clickedNav ? 3500 : 1500);
   }
   
   // Close window after a delay (let user see confirmation)
