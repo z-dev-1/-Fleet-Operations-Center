@@ -2165,10 +2165,11 @@ function _wireNotifications() {
 // an accordion -- click a section title to open it, which closes whichever
 // other section was open. Purely a display toggle (CSS `.collapsed` hides
 // everything in a section except its title); no data/wiring changes.
-function _wireSectionAccordion() {
-  const pane = document.getElementById('sd-pane-integrations');
+function _wireSectionAccordion(paneId) {
+  const pane = document.getElementById(paneId);
   if (!pane) return;
   const sections = Array.from(pane.children).filter((el) => el.classList && el.classList.contains('sd-section'));
+  if (sections.length < 2) return; // nothing to collapse against
   sections.forEach((sec) => {
     const title = sec.querySelector('.sd-section-title');
     if (!title) return;
@@ -2864,7 +2865,9 @@ export function init() {
   _wireAsana();
   _wireNotifications();
   _wireAccounts();
-  _wireSectionAccordion();
+  _wireSectionAccordion('sd-pane-integrations');
+  _wireSectionAccordion('sd-pane-ui');
+  _wireSectionAccordion('sd-pane-operators');
 
   // Listen for settings open request
   bus.on('ui:view-change', ({ to }) => {
