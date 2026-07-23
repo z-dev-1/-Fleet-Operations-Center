@@ -754,6 +754,16 @@ const CreateWRAutofill = {
 
                       if (pair.subcategory) {
                           const allInputs2 = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent);
+                          // DIAGNOSTIC (2026-07-23): dump every visible combobox's index/placeholder/
+                          // aria-label/nearby-label-text so we can see the REAL row structure next time
+                          // this is reproduced live, instead of guessing at offsets again.
+                          if (isTires) {
+                              const snapshot = allInputs2.map((el, idx) => {
+                                  const lbl = (el.closest('label') || el.parentElement || {}).innerText || '';
+                                  return idx + ':[' + (el.getAttribute('aria-label') || '') + '|' + (lbl.trim().slice(0, 30)) + ']';
+                              }).join(' ');
+                              this.log('TIRES DIAG [' + i + ']: inputOffset=' + inputOffset + ' totalInputs=' + allInputs2.length + ' -> ' + snapshot);
+                          }
                           const subInput = allInputs2[inputOffset + 1] || null;
                           if (subInput) {
                               try { subInput.focus(); } catch (e) {}
@@ -770,7 +780,13 @@ const CreateWRAutofill = {
                                       || null;
                               }, 4000, 80);
                               if (subOpt) { this.click(subOpt); this.log('Sub Area [' + i + ']: clicked "' + (subOpt.innerText || '').trim() + '"'); await this.sleep(300); }
-                              else { this.log('Sub Area [' + i + ']: no match for "' + pair.subcategory + '"'); }
+                              else {
+                                  this.log('Sub Area [' + i + ']: no match for "' + pair.subcategory + '"');
+                                  if (isTires) {
+                                      const availOpts = Array.from(document.querySelectorAll('BUTTON[role="option"]')).map(b => (b.innerText || '').trim()).filter(Boolean);
+                                      this.log('TIRES DIAG [' + i + ']: available options after typing "' + pair.subcategory + '" -> [' + availOpts.join(' | ') + ']');
+                                  }
+                              }
                           } else { this.log('Sub Area [' + i + ']: input not found'); }
                       }
 
