@@ -142,7 +142,7 @@ function registerCredentialIPC() {
     requireString(vendorId, "vendorId");
     const url = VENDOR_TEST_URLS[vendorId];
     if (!url) throw new ConfigError("unknown vendor for test-login: " + vendorId, "vendorId");
-    const { attemptAutoLogin, isLoginPage, VENDOR_PARTITIONS } = require('../orcha/auto-login');
+    const { attemptAutoLogin, isLoginPage, VENDOR_PARTITIONS, LOGIN_STRATEGIES } = require('../orcha/auto-login');
     const hostname = new URL(url).hostname;
     const win = new BrowserWindow({
       width: 1200, height: 800, show: true,
@@ -154,6 +154,26 @@ function registerCredentialIPC() {
         partition: VENDOR_PARTITIONS[hostname] || undefined,
       },
     });
+    // FIX (2026-07-23): sso-click vendors (RoadReady, Uptake) route through
+    // Amazon Midway. Their VENDOR_PARTITIONS entry is a brand-new, isolated
+    // persist: session that has never itself completed mwinit/WebAuthn --
+    // confirmed live: RoadReady's SSO click correctly reached
+    // midway-auth.amazon.com, but landed on "AEA extension not installed"
+    // (an Amazon Enterprise Access device/browser posture-check page), a
+    // dead end with no login form, because that partition is cold. This
+    // app already holds a fully valid Midway session (the one that lets
+    // the main window load AAP -- see AuthManager/injectCookies in
+    // scrapers/auth.js). Seed the vendor's own partition with the SAME
+    // cookies before it ever loads, so it's already authenticated instead
+    // of hitting that posture-check gate cold.
+    if (LOGIN_STRATEGIES[hostname] === 'sso-click') {
+      try {
+        const { injectCookies } = require('../scrapers/auth');
+        await injectCookies(win.webContents.session);
+      } catch (e) {
+        logger.warn('test-login: could not seed Midway cookies for', vendorId, ':', e.message);
+      }
+    }
     win.loadURL(url);
     // BUG FIX (2026-07-23): this used to attempt login exactly once, on the
     // very first did-finish-load. That works fine for a single-hop site,

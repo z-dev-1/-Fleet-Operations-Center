@@ -116,8 +116,16 @@ function checkMwinit() {
 }
 
 // ── Inject cookies into the Electron session ─────────────────────────────────
-async function injectCookies() {
-  const ses             = electronSession.defaultSession;
+// FEATURE (2026-07-23): accepts an optional target session (defaults to
+// defaultSession, preserving every existing call site's behavior). Needed
+// so credentials:test-login can seed a vendor's OWN isolated partition
+// (e.g. persist:vendor-roadready) with the same already-valid Midway
+// cookies that let the main window reach AAP without ever hitting the
+// "AEA extension not installed" gate -- a brand-new partition has never
+// been through mwinit/WebAuthn itself, so it hits that gate cold even
+// though this app already holds a fully valid Midway session elsewhere.
+async function injectCookies(targetSession) {
+  const ses             = targetSession || electronSession.defaultSession;
   const { cookies }     = parseMidwayCookies();
   let injected = 0, failed = 0;
 
@@ -456,7 +464,7 @@ async function ensureAuthenticated(mainWindow) {
 module.exports = {
   checkMwinit,
   runMwinit,
-  injectCookies,
+  injectCookies, // FEATURE (2026-07-23): now accepts optional target session
   probeSession, // FIX (2026-07-21): exported so callers can replicate ensureAuthenticated's verification steps without its disabled auto-spawn branch
   ensureAuthenticated,
   pingRelayEndpoint,
