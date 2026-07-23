@@ -814,13 +814,21 @@ const CreateWRAutofill = {
                           }, 3000, 80);
                           if (sizeInput) {
                               try { sizeInput.focus(); } catch (e) {}
+                              this.click(sizeInput);
                               ['mousedown', 'focus', 'click'].forEach(t => { try { sizeInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
+                              // BUG FIX (2026-07-23, round 3): a global, unscoped option query
+                              // grabbed the first role=option/LI/listitem ANYWHERE on the page
+                              // (e.g. a nav link like "Relay Garage") whenever Size's own listbox
+                              // hadn't rendered yet. Scope strictly to Size's own listbox via its
+                              // aria-controls id, same technique already proven for the diagnostics.
                               const sizeOpt = await this.waitFor(() => {
-                                  const btns = Array.from(document.querySelectorAll('[role="option"], LI, [role="listitem"]')).filter(b => b.offsetParent);
-                                  return btns[0] || null;
+                                  const listboxId = sizeInput.getAttribute('aria-controls');
+                                  const listboxEl = listboxId ? document.getElementById(listboxId) : null;
+                                  if (!listboxEl) return null;
+                                  return listboxEl.querySelector('[role="option"], LI, [role="listitem"], BUTTON') || null;
                               }, 3000, 80);
                               if (sizeOpt) { this.click(sizeOpt); this.log('Tire Size [' + i + ']: clicked default "' + (sizeOpt.innerText || '').trim() + '"'); await this.sleep(300); }
-                              else { this.log('Tire Size [' + i + ']: dropdown did not open'); }
+                              else { this.log('Tire Size [' + i + ']: dropdown did not open (scoped to own listbox)'); }
                           } else { this.log('Tire Size [' + i + ']: 3rd combobox not found'); }
                       } else if (pair.subcategory) {
                           const allInputs2 = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent);
