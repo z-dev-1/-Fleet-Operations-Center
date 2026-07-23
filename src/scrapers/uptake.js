@@ -302,6 +302,39 @@ const CLICK_SSO_BUTTON = `(function() {
   } catch(e) { return { clicked: false, error: e.message }; }
 })()`;
 
+// FIX (2026-07-23): Uptake sometimes shows a one-time "STEP 2: USE AND
+// CONSENT" gate after SSO (checkbox + disabled Next button, no SSO button
+// at all) which CLICK_SSO_BUTTON can't find, leaving the scraper stuck on
+// login.uptake.com until MASTER_TIMEOUT_MS (15 min) kills the run with 0
+// units. These two scripts detect/handle that gate as a fallback.
+const CLICK_CONSENT_CHECKBOX = `(function() {
+  try {
+    var bodyText = (document.body.innerText || '').toLowerCase();
+    if (!/acknowledge|consent/.test(bodyText)) return { found: false };
+    var boxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+    var box = boxes.find(function(b) { return !b.checked; });
+    if (!box) return { found: false };
+    box.click();
+    return { found: true };
+  } catch(e) { return { found: false, error: e.message }; }
+})()`;
+
+const CLICK_ENABLED_NEXT_BUTTON = `(function() {
+  try {
+    var btns = Array.from(document.querySelectorAll('button,[role="button"],input[type="submit"]'));
+    for (var i = 0; i < btns.length; i++) {
+      var b = btns[i];
+      var txt = (b.textContent || b.value || '').trim().toLowerCase();
+      var disabled = b.disabled || b.getAttribute('aria-disabled') === 'true' || b.classList.contains('disabled');
+      if (!disabled && (txt.includes('next') || txt.includes('submit') || txt.includes('continue') || txt.includes('accept'))) {
+        b.click();
+        return { clicked: true, text: txt };
+      }
+    }
+    return { clicked: false };
+  } catch(e) { return { clicked: false, error: e.message }; }
+})()`;
+
 // ─── Check insights list table is ready ──────────────────────────────────────
 const CHECK_LIST_READY = `(function() {
   var rows = Array.from(document.querySelectorAll('table tbody tr, [role="row"]'));
@@ -843,6 +876,17 @@ async function scrapeUptake() {
             await sleep(2500);
             const r2 = await win.webContents.executeJavaScript(CLICK_SSO_BUTTON);
             flog('[Uptake] SSO retry:', JSON.stringify(r2));
+            if (!r2.clicked) {
+              // Consent-gate fallback: no SSO button at all means this is
+              // likely the one-time "USE AND CONSENT" checkbox step.
+              const c = await win.webContents.executeJavaScript(CLICK_CONSENT_CHECKBOX);
+              flog('[Uptake] Consent checkbox:', JSON.stringify(c));
+              if (c.found) {
+                await sleep(500);
+                const nb = await win.webContents.executeJavaScript(CLICK_ENABLED_NEXT_BUTTON);
+                flog('[Uptake] Consent next-button:', JSON.stringify(nb));
+              }
+            }
           }
         } catch(e) { fwarn('[Uptake] SSO error:', e.message); }
         return;

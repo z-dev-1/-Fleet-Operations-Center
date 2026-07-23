@@ -432,7 +432,7 @@ async function attemptAutoLogin(wc, currentUrl, overrideHostname) {
 
 // ── attachAutoLogin — attach lifecycle to a BrowserWindow ────────────────────
 function attachAutoLogin(win, targetUrl, opts = {}) {
-  const { maxRetries = 2, onDone } = opts;
+  const { maxRetries = 3, onDone } = opts;
   let loginAttempts = 0;
   let _loginAttempted = false;
   let _done = false;
@@ -452,12 +452,44 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
     if (_loginAttempted) {
       const stillLogin = await isLoginPage(win.webContents);
       if (stillLogin) {
-        logger.warn('attachAutoLogin: still on login page — bad credentials?');
-        _done = true;
-        win.webContents.removeListener('did-finish-load', onLoad);
-        if (onDone) onDone({ success: false, url: currentUrl, error: 'bad_credentials' });
+        // FIX (2026-07-23): don't bail on the first "still looks like a login
+        // page" check — sso-click vendors (RoadReady/Uptake) can show a
+        // second gate (e.g. a one-time consent checkbox) after the initial
+        // SSO click that isLoginPage() also detects. Retry the click/consent
+        // flow up to maxRetries before concluding it's actually bad creds.
+        if (loginAttempts >= maxRetries) {
+          logger.warn('attachAutoLogin: still on login page after', loginAttempts, 'attempts — bad credentials?');
+          _done = true;
+          win.webContents.removeListener('did-finish-load', onLoad);
+          if (onDone) onDone({ success: false, url: currentUrl, error: 'bad_credentials' });
+          return;
+        }
+        loginAttempts++;
+        logger.info('attachAutoLogin: still on login-like page (consent gate?) — retry', loginAttempts);
+        const targetHostname = new URL(targetUrl).hostname;
+        const retryResult = await attemptAutoLogin(win.webContents, currentUrl, targetHostname);
+        if (!retryResult.filled) {
+          logger.warn('attachAutoLogin: retry could not act on', currentUrl.slice(0, 80));
+        }
         return;
       }
+
+      // FIX (2026-07-23): don't force-navigate back to targetUrl while still
+      // mid-redirect on a different host than the target (e.g. RoadReady's
+      // amazonfreightpartner.my.salesforce.com -> midway-auth.amazon.com ->
+      // idp.federate.amazon.com -> amazonfreightpartner.lightning.force.com).
+      // Forcing a reload of the deep-linked case URL during that hop races
+      // the SSO handshake before the target site sets its own session
+      // cookie, dropping the startURL deep link and landing on the generic
+      // case list instead ("stays in Salesforce"). Just wait for the chain
+      // to finish naturally — it already carries startURL through.
+      let sameHost = false;
+      try { sameHost = new URL(currentUrl).hostname === new URL(targetUrl).hostname; } catch (_) {}
+      if (!sameHost) {
+        logger.info('attachAutoLogin: post-login, mid-redirect on', currentUrl.slice(0, 60), '— waiting for natural navigation');
+        return;
+      }
+
       logger.info('attachAutoLogin: post-login, navigating to target');
       _loginAttempted = false;
       win.loadURL(targetUrl);
