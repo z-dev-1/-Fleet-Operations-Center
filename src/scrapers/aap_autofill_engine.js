@@ -769,6 +769,19 @@ const CreateWRAutofill = {
                               const allInputsPos = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent);
                               const posInput = allInputsPos[inputOffset + 1] || null;
                               if (posInput) {
+                                  // DIAGNOSTIC (2026-07-23, round 2): click for real (not just focus)
+                                  // and dump the DEFAULT/untyped option list BEFORE typing anything --
+                                  // three guesses about what happens after typing have all been wrong,
+                                  // so capture ground truth on the natural state first.
+                                  this.click(posInput);
+                                  await this.sleep(400);
+                                  try {
+                                      const listboxId0 = posInput.getAttribute('aria-controls');
+                                      const listboxEl0 = listboxId0 ? document.getElementById(listboxId0) : null;
+                                      const anyOpts0 = Array.from(document.querySelectorAll('[role="option"], LI, [role="listitem"], BUTTON')).filter(el => el.offsetParent);
+                                      this.log('TIRES DIAG [' + i + ']: BEFORE typing -- aria-expanded=' + posInput.getAttribute('aria-expanded') + ' aria-controls=' + listboxId0 + ' listboxFound=' + !!listboxEl0 + ' listboxHTML=' + (listboxEl0 ? listboxEl0.outerHTML.slice(0, 500) : 'n/a') + ' visibleOptionLikeCount=' + anyOpts0.length + ' sample=' + anyOpts0.slice(0, 8).map(el => '[' + el.tagName + ':' + (el.getAttribute('role')||'') + ':' + (el.innerText||'').trim().slice(0,20) + ']').join(''));
+                                  } catch (e) { this.log('TIRES DIAG [' + i + ']: pre-type dump failed: ' + e.message); }
+
                                   try { posInput.focus(); } catch (e) {}
                                   const ps = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
                                   const posSearch = pair.subcategory.toLowerCase();
@@ -780,11 +793,12 @@ const CreateWRAutofill = {
                                       this.log('Tire Position [' + i + ']: no match for "' + pair.subcategory + '"');
                                       // One more diagnostic in case this guess (LI/[role=listitem] fallback)
                                       // is STILL wrong -- capture exactly what the widget's own listbox
-                                      // container holds so the next fix doesn't have to guess again.
+                                      // container holds AFTER typing too, for comparison against the
+                                      // BEFORE-typing dump above.
                                       try {
                                           const listboxId = posInput.getAttribute('aria-controls');
                                           const listboxEl = listboxId ? document.getElementById(listboxId) : null;
-                                          this.log('TIRES DIAG [' + i + ']: listbox #' + listboxId + ' -> ' + (listboxEl ? listboxEl.outerHTML.slice(0, 600) : '(not found)'));
+                                          this.log('TIRES DIAG [' + i + ']: AFTER typing -- listbox #' + listboxId + ' -> ' + (listboxEl ? listboxEl.outerHTML.slice(0, 600) : '(not found)'));
                                       } catch (e) {}
                                   }
                               } else { this.log('Tire Position [' + i + ']: input not found'); }
