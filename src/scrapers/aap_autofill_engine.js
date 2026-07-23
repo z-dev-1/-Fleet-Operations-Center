@@ -1081,16 +1081,18 @@ const CreateWRAutofill = {
                  const emailInput = Array.from(document.querySelectorAll('INPUT')).find(i => /email/i.test(i.placeholder || i.id || '') && i.offsetParent);
                  if (emailInput) { this.setVal(emailInput, p.contactEmail); }
              }
-               // STEP 7: Vault attachment upload — must happen NOW, before nextStep() destroys the upload widget
-               if (p.attachmentIds && p.attachmentIds.length > 0) {
-                   this.log('--- STEP 7: Vault Attachments (' + p.attachmentIds.length + ') ---');
+               // STEP 7: Attachment upload — must happen NOW, before nextStep() destroys the upload widget
+               // BUG FIX (2026-07-23): this used to gate on p.attachmentIds, a Vault-document
+               // id list that nothing in the app ever actually populates (the real UI's
+               // attach/screenshot flow produces p.attachments, a plain array of dataURLs --
+               // see wr-modal.js _collectPayload()). That made this entire block dead code;
+               // no file was ever injected and the "Other" category dropdown was never set.
+               if (p.attachments && p.attachments.length > 0) {
+                   this.log('--- STEP 7: Attachments (' + p.attachments.length + ') ---');
                    try {
-                       let vaultDocs = [];
-                       try {
-                           const raw = typeof GM_getValue === 'function' ? GM_getValue('zila-doc-vault-v1', null) : null;
-                           if (raw && raw.docs) vaultDocs = raw.docs;
-                       } catch(e) {}
-                       const selected = vaultDocs.filter(d => p.attachmentIds.includes(d.id) && d.dataUrl);
+                       const selected = p.attachments
+                           .map((dataUrl, di) => ({ name: 'attachment-' + (di + 1), dataUrl }))
+                           .filter(d => d.dataUrl);
                        if (selected.length > 0) {
                            const fileInput = await this.waitFor(() => {
                                const inputs = Array.from(document.querySelectorAll('INPUT[type="file"]'));
@@ -1117,7 +1119,7 @@ const CreateWRAutofill = {
                                    Object.defineProperty(fileInput, 'files', { value: dt.files, writable: false });
                                    fileInput.dispatchEvent(new Event('change', { bubbles: true }));
                                    fileInput.dispatchEvent(new Event('input',  { bubbles: true }));
-                                   this.log('Vault: ' + dt.files.length + ' file(s) injected - waiting for category dropdowns...');
+                                   this.log('Attach: ' + dt.files.length + ' file(s) injected - waiting for category dropdowns...');
 
                                    // The category dropdown trigger only appears AFTER the file finishes uploading
                                    await this.waitFor(() => {
@@ -1127,7 +1129,7 @@ const CreateWRAutofill = {
                                    }, 15000, 200);
 
                                    await this.sleep(400);
-                                   this.log('Vault: category dropdown(s) appeared - setting to Other...');
+                                   this.log('Attach: category dropdown(s) appeared - setting to Other...');
 
                                    for (let fi = 0; fi < dt.files.length; fi++) {
                                        const catTrigger = await this.waitFor(() => {
@@ -1139,7 +1141,7 @@ const CreateWRAutofill = {
                                        }, 5000, 150);
 
                                        if (!catTrigger) {
-                                           this.log('Vault: WARNING - category trigger not found for file ' + (fi+1));
+                                           this.log('Attach: WARNING - category trigger not found for file ' + (fi+1));
                                            continue;
                                        }
 
@@ -1155,14 +1157,14 @@ const CreateWRAutofill = {
                                            this.click(otherBtn);
                                            await this.sleep(300);
                                        }  // if (otherBtn)
-                                   }          // for fi (vault file loop)
+                                   }          // for fi (attachment file loop)
                                }              // if (dt.files.length > 0)
                            }                  // if (fileInput)
                        }                      // if (selected.length > 0)
-                   } catch (e) {              // outer try: vault section
-                       this.log('Vault attachment error: ' + e.message);
+                   } catch (e) {              // outer try: attachment section
+                       this.log('Attachment error: ' + e.message);
                    }                          // end outer try/catch
-               }                              // if (p.attachmentIds)
+               }                              // if (p.attachments)
 
                // FEATURE (2026-07-23): extends the engine past Issue Details --
                // previously it deliberately stopped here for manual review. User
