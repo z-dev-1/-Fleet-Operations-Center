@@ -952,6 +952,70 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
   font-weight: 600;
 }
 
+/* FEATURE (2026-07-23): drag-and-drop / manual attachment UI, added
+   alongside the auto-attach fix so uptake WRs can carry more than one
+   file and don't depend on Uptake risk-score gating anymore. */
+.wr-dropzone {
+  margin-top: 8px;
+  padding: 14px;
+  border: 1px dashed var(--bd, #3a3f4b);
+  border-radius: 6px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--mut);
+  transition: border-color 0.15s, background 0.15s;
+}
+.wr-dropzone--active {
+  border-color: var(--acc, #58a6ff);
+  background: rgba(88, 166, 255, 0.08);
+  color: var(--fg, #c9d1d9);
+}
+.wr-dropzone__browse {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--acc, #58a6ff);
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.wr-attach-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.wr-attach-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  background: var(--bg2, #21262d);
+  border: 1px solid var(--bd, #3a3f4b);
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--fg, #c9d1d9);
+  max-width: 220px;
+}
+.wr-attach-chip__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wr-attach-chip__remove {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--mut);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+.wr-attach-chip__remove:hover {
+  color: var(--red, #f85149);
+}
+
 /* ── Progress log ────────────────────────────────────────── */
 .wr-progress-wrap { margin-top: 4px; }
 .wr-progress-log {

@@ -240,8 +240,17 @@ async function createWorkRequest(payload, unit, log) {
 
   // STEP 3: updateWorkRequest (images/attachments)
   const images = [];
-  // If we have a screenshot data URL, include it
-  if (payload.screenshotDataUrl && payload.screenshotDataUrl.startsWith('data:')) {
+  // FEATURE (2026-07-23): payload.attachments now carries every file the
+  // user attached (auto Uptake screenshot + manual/drag-and-drop files) --
+  // previously only the single legacy screenshotDataUrl field was sent.
+  if (Array.isArray(payload.attachments)) {
+    for (const dataUrl of payload.attachments) {
+      if (dataUrl && dataUrl.startsWith('data:') && images.indexOf(dataUrl) === -1) images.push(dataUrl);
+    }
+  }
+  // Legacy single-field fallback, kept for backward compat with any caller
+  // still only setting screenshotDataUrl.
+  if (payload.screenshotDataUrl && payload.screenshotDataUrl.startsWith('data:') && images.indexOf(payload.screenshotDataUrl) === -1) {
     images.push(payload.screenshotDataUrl);
   }
 

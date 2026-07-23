@@ -71,6 +71,7 @@ let _unit      = null;
 let _areaCount = 1;
 let _progUnsub = null;
 let _towAddrUnsub = null; // BUG FIX (2026-07-16): see _wireTow() below
+let _attachments = []; // FEATURE (2026-07-23): [{name, dataUrl}] -- auto-attach + manual + drag-drop
 
 // ── Escape helpers ────────────────────────────────────────────────────────
 const _safe     = (s) => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -254,11 +255,16 @@ function _buildHTML(unit) {
 
     <!-- Screenshot -->
     <div class="wr-section">
-      <div id="wr-tow-wrap" class="wr-section" style="display:none">\n      <div class="wr-section__title">\uD83D\uDE9B Tow Destination (where unit goes)</div>\n      <div class="wr-two-col" style="margin-bottom:6px"><label class="settings-label" style="flex:3"><select id="wr-tow-book" class="settings__select"><option value="">Quick-fill from vendor book...</option></select></label></div>\n      <div class="wr-two-col"><label class="settings-label" style="flex:3">Street<input id="wr-tow-street" class="settings__input" placeholder="Street" /></label><label class="settings-label" style="flex:2">City<input id="wr-tow-city" class="settings__input" placeholder="City" /></label></div>\n      <div class="wr-two-col" style="margin-top:4px"><label class="settings-label">State<input id="wr-tow-state" class="settings__input" placeholder="ST" maxlength="2" style="text-transform:uppercase" /></label><label class="settings-label">ZIP<input id="wr-tow-zip" class="settings__input" placeholder="00000" /></label></div>\n      <div class="wr-section__title" style="margin-top:12px">\uD83D\uDCCD Tow Pickup (where unit is now)</div>\n      <div class="wr-two-col" style="margin-bottom:6px"><label class="settings-label" style="flex:3"><select id="wr-tow-from-book" class="settings__select"><option value="">Quick-fill pickup location...</option></select></label></div>\n      <div class="wr-two-col"><label class="settings-label" style="flex:3">Street<input id="wr-tow-from-street" class="settings__input" placeholder="Pickup street" /></label><label class="settings-label" style="flex:2">City<input id="wr-tow-from-city" class="settings__input" placeholder="City" /></label></div>\n      <div class="wr-two-col" style="margin-top:4px"><label class="settings-label">State<input id="wr-tow-from-state" class="settings__input" placeholder="ST" maxlength="2" style="text-transform:uppercase" /></label><label class="settings-label">ZIP<input id="wr-tow-from-zip" class="settings__input" placeholder="00000" /></label></div>\n    </div>\n\n    <div class="wr-section__title">Screenshot Attachment</div>
+      <div id="wr-tow-wrap" class="wr-section" style="display:none">\n      <div class="wr-section__title">\uD83D\uDE9B Tow Destination (where unit goes)</div>\n      <div class="wr-two-col" style="margin-bottom:6px"><label class="settings-label" style="flex:3"><select id="wr-tow-book" class="settings__select"><option value="">Quick-fill from vendor book...</option></select></label></div>\n      <div class="wr-two-col"><label class="settings-label" style="flex:3">Street<input id="wr-tow-street" class="settings__input" placeholder="Street" /></label><label class="settings-label" style="flex:2">City<input id="wr-tow-city" class="settings__input" placeholder="City" /></label></div>\n      <div class="wr-two-col" style="margin-top:4px"><label class="settings-label">State<input id="wr-tow-state" class="settings__input" placeholder="ST" maxlength="2" style="text-transform:uppercase" /></label><label class="settings-label">ZIP<input id="wr-tow-zip" class="settings__input" placeholder="00000" /></label></div>\n      <div class="wr-section__title" style="margin-top:12px">\uD83D\uDCCD Tow Pickup (where unit is now)</div>\n      <div class="wr-two-col" style="margin-bottom:6px"><label class="settings-label" style="flex:3"><select id="wr-tow-from-book" class="settings__select"><option value="">Quick-fill pickup location...</option></select></label></div>\n      <div class="wr-two-col"><label class="settings-label" style="flex:3">Street<input id="wr-tow-from-street" class="settings__input" placeholder="Pickup street" /></label><label class="settings-label" style="flex:2">City<input id="wr-tow-from-city" class="settings__input" placeholder="City" /></label></div>\n      <div class="wr-two-col" style="margin-top:4px"><label class="settings-label">State<input id="wr-tow-from-state" class="settings__input" placeholder="ST" maxlength="2" style="text-transform:uppercase" /></label><label class="settings-label">ZIP<input id="wr-tow-from-zip" class="settings__input" placeholder="00000" /></label></div>\n    </div>\n\n    <div class="wr-section__title">Attachments</div>
       <div class="wr-screenshot-row">
         <button id="wr-attach-screenshot" class="detail-panel__btn detail-panel__btn--secondary">Attach latest Uptake screenshot</button>
         <span id="wr-screenshot-label" class="wr-screenshot-label">None</span>
       </div>
+      <div id="wr-dropzone" class="wr-dropzone">
+        <span>Drag files here, or <button id="wr-attach-browse" type="button" class="wr-dropzone__browse">browse…</button></span>
+        <input id="wr-attach-file-input" type="file" multiple accept="image/*,.pdf" style="display:none" />
+      </div>
+      <div id="wr-attach-list" class="wr-attach-list"></div>
     </div>
 
     <!-- Progress log -->
@@ -299,8 +305,13 @@ function _collectPayload() {
     if (area || sub) areaPairs.push({ area, subcategory: sub });
   }
 
-  const attachBtn = _el('wr-attach-screenshot');
-  const screenshotDataUrl = (attachBtn && attachBtn._dataUrl) || null;
+  // FEATURE (2026-07-23): attachments are now a list (_attachments module
+  // state, populated by auto-attach, the manual Uptake-screenshot button,
+  // file browse, and drag-and-drop) instead of a single hidden _dataUrl on
+  // the button. screenshotDataUrl is kept for any older backend code that
+  // only reads that single field; attachments carries the full list.
+  const screenshotDataUrl = (_attachments[0] && _attachments[0].dataUrl) || null;
+  const attachments = _attachments.map(a => a.dataUrl);
 
   return {
     unit:            _unit.id          || _unit.equipmentId || '',
@@ -317,6 +328,7 @@ function _collectPayload() {
     arcClaim:        (_el('wr-arc').value || '').trim() || null,
     simNumber:       (_el('wr-sim').value || '').trim() || null,
     screenshotDataUrl,
+    attachments,
     domicile:        _unit.site || _unit.domicileSite || '',
     tow: { street: (_el('wr-tow-street')||{}).value||'', city: (_el('wr-tow-city')||{}).value||'', state: (_el('wr-tow-state')||{}).value||'', zip: (_el('wr-tow-zip')||{}).value||'' },
     towFrom: { street: (_el('wr-tow-from-street')||{}).value||'', city: (_el('wr-tow-from-city')||{}).value||'', state: (_el('wr-tow-from-state')||{}).value||'', zip: (_el('wr-tow-from-zip')||{}).value||'' },
@@ -383,26 +395,81 @@ function _wireOptional() {
   });
 }
 
-// ── Wire: screenshot ──────────────────────────────────────────────────────
-function _wireScreenshot() {
-  const btn   = _el('wr-attach-screenshot');
+// ── Attachments: shared add/remove/render ───────────────────────────────
+// FEATURE (2026-07-23): replaces the old single-screenshot-only flow.
+// _attachments holds every file that will go out with the WR -- the
+// auto-attached Uptake screenshot, a manually re-grabbed one, and/or
+// anything the user drags in or picks from their computer.
+function _addAttachment(name, dataUrl) {
+  if (!dataUrl) return;
+  if (_attachments.some(a => a.dataUrl === dataUrl)) return; // dedupe identical files
+  _attachments.push({ name: name || 'attachment', dataUrl });
+  _renderAttachments();
+}
+
+function _removeAttachment(index) {
+  _attachments.splice(index, 1);
+  _renderAttachments();
+}
+
+function _renderAttachments() {
+  const list = _el('wr-attach-list');
+  if (!list) return;
+  list.innerHTML = _attachments.map((a, i) => `
+    <div class="wr-attach-chip">
+      <span class="wr-attach-chip__name">${_safe(a.name)}</span>
+      <button type="button" class="wr-attach-chip__remove" data-idx="${i}" title="Remove">×</button>
+    </div>`).join('');
+  list.querySelectorAll('.wr-attach-chip__remove').forEach(btn => {
+    btn.addEventListener('click', () => _removeAttachment(Number(btn.dataset.idx)));
+  });
   const label = _el('wr-screenshot-label');
+  if (label) {
+    if (_attachments.length) {
+      label.textContent = _attachments.length + ' file' + (_attachments.length > 1 ? 's' : '') + ' attached';
+      label.className = 'wr-screenshot-label wr-screenshot-label--attached';
+    } else {
+      label.textContent = 'None';
+      label.className = 'wr-screenshot-label';
+    }
+  }
+}
+
+// Read one or more browser File objects (from <input type=file> or a drop
+// event) via FileReader -- purely renderer-side, no IPC needed.
+function _readFilesAsAttachments(fileList) {
+  Array.from(fileList || []).forEach(file => {
+    const reader = new FileReader();
+    reader.onload = () => _addAttachment(file.name, reader.result);
+    reader.onerror = () => toast.show('warn', 'Could not read "' + file.name + '"', 3000);
+    reader.readAsDataURL(file);
+  });
+}
+
+// ── Wire: screenshot / attachments ───────────────────────────────
+function _wireScreenshot() {
+  const btn = _el('wr-attach-screenshot');
   btn.addEventListener('click', async () => {
     btn.disabled = true; btn.textContent = 'Loading...';
     try {
-      const result = await files.getLatestScreenshot();
-      if (result && result.path) {
-        const dataUrl = await files.readAsDataUrl(result.path);
+      // BUG FIX (2026-07-23): previously called files.getLatestScreenshot()
+      // with NO unit argument (and that IPC ignored any argument anyway) --
+      // it just grabbed whatever PNG was newest in the whole screenshots
+      // folder, which could belong to a completely different unit than the
+      // one this WR is for. The scraper already stores each unit's own
+      // screenshot path on the unit record (screenshotPath / screenshots[]);
+      // use that directly instead of a global "latest file" guess.
+      const path = (_unit && (_unit.screenshotPath || (_unit.screenshots || [])[0])) || null;
+      if (path) {
+        const dataUrl = await files.readAsDataUrl(path);
         if (dataUrl) {
-          btn._dataUrl = dataUrl;
-          label.textContent = result.path.split(/[/\\]/).pop();
-          label.className = 'wr-screenshot-label wr-screenshot-label--attached';
+          _addAttachment(path.split(/[/\\]/).pop(), dataUrl);
           toast.show('success', 'Screenshot attached', 2000);
         } else {
           toast.show('warn', 'Could not read screenshot file', 3000);
         }
       } else {
-        toast.show('info', 'No Uptake screenshot found — run a sync first', 4000);
+        toast.show('info', 'No Uptake screenshot found for this unit — run a sync first', 4000);
       }
     } catch (e) {
       toast.show('error', 'Screenshot load failed: ' + e.message);
@@ -410,6 +477,39 @@ function _wireScreenshot() {
       btn.disabled = false; btn.textContent = 'Attach latest Uptake screenshot';
     }
   });
+
+  // Manual file picker
+  const fileInput = _el('wr-attach-file-input');
+  const browseBtn = _el('wr-attach-browse');
+  if (browseBtn && fileInput) {
+    browseBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      _readFilesAsAttachments(fileInput.files);
+      fileInput.value = '';
+    });
+  }
+
+  // Drag-and-drop
+  const dropzone = _el('wr-dropzone');
+  if (dropzone) {
+    ['dragenter', 'dragover'].forEach(evt => dropzone.addEventListener(evt, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dropzone.classList.add('wr-dropzone--active');
+    }));
+    ['dragleave', 'dragend'].forEach(evt => dropzone.addEventListener(evt, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dropzone.classList.remove('wr-dropzone--active');
+    }));
+    dropzone.addEventListener('drop', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dropzone.classList.remove('wr-dropzone--active');
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+        _readFilesAsAttachments(e.dataTransfer.files);
+      }
+    });
+  }
+
+  _renderAttachments();
 }
 
 // ── Wire: submit ──────────────────────────────────────────────────────────
@@ -843,24 +943,21 @@ async function _runAIAssist() {
 }
 
 // ── Auto-attach Uptake screenshot for PM units ────────────────────────────
+// FEATURE (2026-07-23): previously only ran for unit.riskScore >= 50, which
+// meant most normal uptake WRs never got an auto-attached screenshot at all.
+// Now it always tries -- if this specific unit has a stored screenshot from
+// its last Uptake sync, attach it; otherwise it's a silent no-op (the user
+// can still attach manually / drag one in via _wireScreenshot()).
 async function _wireAutoUptake() {
   const unit = _unit || {};
-  if (!unit.riskScore || unit.riskScore < 50) return;
   try {
-    const result = await files.getLatestScreenshot(unit.id || unit.equipmentId);
-    if (result && result.path) {
-      const dataUrl = await files.readAsDataUrl(result.path);
-      if (dataUrl) {
-        const btn = _el('wr-attach-screenshot');
-        if (btn) btn._dataUrl = dataUrl;
-        const label = _el('wr-screenshot-label');
-        if (label) {
-          label.textContent = '📎 Uptake screenshot auto-attached (risk: ' + unit.riskScore + '%)';
-          label.className = 'wr-screenshot-label wr-screenshot-label--attached';
-        }
-      }
+    const path = unit.screenshotPath || (unit.screenshots || [])[0];
+    if (!path) return;
+    const dataUrl = await files.readAsDataUrl(path);
+    if (dataUrl) {
+      _addAttachment(path.split(/[/\\]/).pop(), dataUrl);
     }
-  } catch(e) { /* silent */ }
+  } catch(e) { /* silent -- manual attach is always still available */ }
 }
 
 export function open(unit) {
