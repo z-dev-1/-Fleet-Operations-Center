@@ -95,7 +95,16 @@ async function isLoginPage(wc) {
     '(function(){' +
     'var pw=document.querySelectorAll("input[type=password]").length;' +
     'var em=document.querySelectorAll("input[type=email],input[type=text],input[placeholder*=mail i],input[placeholder*=user i]").length;' +
-    'return pw>0||em>0;' +
+    // FIX (2026-07-23): Uptake sometimes gates entry behind a one-time
+    // "Use and Consent" step (checkbox + Next) with NO username/password
+    // field at all -- confirmed live via screenshot. Without this, the
+    // checkbox+Next state looked identical to "already fully logged in"
+    // to isLoginPage, so credentials:test-login declared success and
+    // stopped watching before ever seeing it. Treat an unchecked checkbox
+    // next to consent/acknowledge language as pending too.
+    'var bodyTxt=(document.body.innerText||"").toLowerCase();' +
+    'var hasConsentGate=(bodyTxt.indexOf("acknowledge")!==-1||bodyTxt.indexOf("consent")!==-1)&&document.querySelectorAll("input[type=checkbox]:not(:checked)").length>0;' +
+    'return pw>0||em>0||hasConsentGate;' +
     '})()'
   );
   return !!r;
@@ -316,8 +325,51 @@ async function _loginSsoClick(wc) {
     const ok = await _execSafe(wc, _clickScript(sel));
     if (ok) { logger.info('SSO click: clicked', sel); return true; }
   }
+
+  // FIX (2026-07-23): Uptake sometimes shows a one-time "Use and Consent"
+  // gate after SSO succeeds -- a checkbox + Next button, no SSO link to
+  // click at all. Confirmed live via screenshot (STEP 2: USE AND CONSENT).
+  const consentOk = await _clickConsentCheckboxAndNext(wc);
+  if (consentOk) return true;
+
   logger.warn('SSO click: no SSO button found');
   return false;
+}
+
+// ── Consent gate: check an "I acknowledge/consent" checkbox, then click
+// whatever Next/Submit/Continue/Accept button is enabled ───────────────────
+async function _clickConsentCheckboxAndNext(wc) {
+  const bodyTxt = await _execSafe(wc, '(document.body.innerText||"").toLowerCase()');
+  if (!bodyTxt || (bodyTxt.indexOf('acknowledge') === -1 && bodyTxt.indexOf('consent') === -1)) return false;
+
+  const checkScript = (
+    '(function(){' +
+    'var cbs=[].slice.call(document.querySelectorAll("input[type=checkbox]"));' +
+    'for(var i=0;i<cbs.length;i++){if(!cbs[i].checked){cbs[i].click();return true;}}' +
+    'return false;' +
+    '})()'
+  );
+  const checked = await _execSafe(wc, checkScript);
+  if (!checked) return false;
+  logger.info('Consent: checked acknowledge/consent checkbox');
+
+  // Give the page a moment to re-enable Next after the checkbox state
+  // change (React/controlled-component re-render), then click it.
+  await _wait(500);
+  const nextScript = (
+    '(function(){' +
+    'var els=[].slice.call(document.querySelectorAll("button,a,input[type=submit]"));' +
+    'for(var i=0;i<els.length;i++){' +
+    '  var t=((els[i].textContent||els[i].value||"").trim().toLowerCase());' +
+    '  if((t==="next"||t==="submit"||t==="continue"||t==="accept")&&!els[i].disabled){els[i].click();return t;}' +
+    '}' +
+    'return false;' +
+    '})()'
+  );
+  const clicked = await _execSafe(wc, nextScript);
+  if (clicked) { logger.info('Consent: clicked', clicked); return true; }
+  logger.warn('Consent: checked the box but no enabled Next/Submit/Continue button yet -- will retry next settle pass');
+  return true; // checkbox state did change -- report success so the caller doesn't treat this as a dead end
 }
 
 // ── Strategy: stay-in (OWA "Stay signed in?" prompt) ─────────────────────────
