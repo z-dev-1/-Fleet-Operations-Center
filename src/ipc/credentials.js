@@ -132,7 +132,7 @@ function registerCredentialIPC() {
     requireString(vendorId, "vendorId");
     const url = VENDOR_TEST_URLS[vendorId];
     if (!url) throw new ConfigError("unknown vendor for test-login: " + vendorId, "vendorId");
-    const { attemptAutoLogin, VENDOR_PARTITIONS } = require('../orcha/auto-login');
+    const { attemptAutoLogin, isLoginPage, VENDOR_PARTITIONS } = require('../orcha/auto-login');
     const hostname = new URL(url).hostname;
     const win = new BrowserWindow({
       width: 1200, height: 800, show: true,
@@ -145,20 +145,80 @@ function registerCredentialIPC() {
       },
     });
     win.loadURL(url);
+    // BUG FIX (2026-07-23): this used to attempt login exactly once, on the
+    // very first did-finish-load. That works fine for a single-hop site,
+    // but breaks for a vendor like DTNA whose landing page
+    // (dtna.my.site.com) shows its OWN native Salesforce-style login form
+    // (with real #username/#password fields that happily get filled and
+    // submitted) before redirecting on to a completely different SSO
+    // hostname (login.na.ciam.daimlertruck.com, an Azure B2C page) for the
+    // credentials that actually matter. By the time that real page loaded,
+    // this handler had already resolved and stopped listening, so the user
+    // always ended up stuck on the SSO page unauthenticated -- looking like
+    // "auto-login doesn't work" even though the fill+submit on the first
+    // hop succeeded (confirmed in auto-login.log).
+    // Now debounced across the WHOLE redirect chain, same as the live
+    // scraper's attachAutoLogin(): every navigation resets a short settle
+    // timer; once things stop moving we check once more for a login page
+    // and try again (up to maxAttempts) instead of giving up after hop 1.
     return await new Promise((resolve) => {
       let resolved = false;
-      const finish = (result) => { if (!resolved) { resolved = true; resolve(result); } };
-      win.webContents.once('did-finish-load', async () => {
+      let attempts = 0;
+      let lastSite = hostname;
+      const maxAttempts = 3;
+      let settleTimer = null;
+      const hardTimeout = setTimeout(() => finish({ ok: true, attempted: attempts > 0, site: lastSite, timedOut: true }), 25000);
+
+      const finish = (result) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(hardTimeout);
+        clearTimeout(settleTimer);
+        win.webContents.removeListener('did-finish-load', onNav);
+        win.webContents.removeListener('did-navigate', onNav);
+        resolve(result);
+      };
+
+      async function checkSettled() {
+        if (resolved || win.isDestroyed()) return;
+        const currentUrl = win.webContents.getURL();
+        const onLoginPg = await isLoginPage(win.webContents);
+        if (!onLoginPg) {
+          // Settled somewhere that isn't a login form -- either the real
+          // target (success) or a page auto-login has no strategy for.
+          logger.info('test-login:', vendorId, 'settled, no login form present at', currentUrl.slice(0, 80));
+          finish({ ok: true, attempted: attempts > 0, site: lastSite });
+          return;
+        }
+        if (attempts >= maxAttempts) {
+          logger.warn('test-login: max attempts reached, still on a login page:', vendorId, currentUrl.slice(0, 80));
+          finish({ ok: true, attempted: attempts > 0, site: lastSite, maxAttemptsReached: true });
+          return;
+        }
+        attempts++;
         try {
-          const result = await attemptAutoLogin(win.webContents, win.webContents.getURL());
-          logger.info('test-login:', vendorId, '-> attempted:', result.filled);
-          finish({ ok: true, attempted: result.filled, site: result.site || hostname });
+          const result = await attemptAutoLogin(win.webContents, currentUrl);
+          lastSite = result.site || lastSite;
+          logger.info('test-login:', vendorId, 'attempt', attempts, '-> filled:', result.filled, 'on', currentUrl.slice(0, 80));
+          if (!result.filled) { finish({ ok: true, attempted: false, site: lastSite }); return; }
         } catch (e) {
           logger.warn('test-login error:', vendorId, e.message);
           finish({ ok: false, error: e.message });
+          return;
         }
-      });
-      win.on('closed', () => finish({ ok: true, attempted: false, closedByUser: true }));
+        // Filled + submitted -- wait for the resulting navigation, onNav
+        // below will call checkSettled() again once things quiet down.
+      }
+
+      function onNav() {
+        if (resolved) return;
+        clearTimeout(settleTimer);
+        settleTimer = setTimeout(checkSettled, 1200);
+      }
+
+      win.webContents.on('did-finish-load', onNav);
+      win.webContents.on('did-navigate', onNav);
+      win.on('closed', () => finish({ ok: true, attempted: attempts > 0, site: lastSite, closedByUser: true }));
     });
   });
   logger.info("Credentials IPC handlers registered");
