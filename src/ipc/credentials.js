@@ -197,6 +197,23 @@ function registerCredentialIPC() {
       let lastSite = hostname;
       const maxAttempts = 3;
       let settleTimer = null;
+      // FIX (2026-07-23): sso-click strategy just calls .click() on a DOM
+      // element -- the resulting navigation away is async and NOT
+      // guaranteed to have started by the time the very next
+      // did-navigate/did-finish-load fires (Salesforce Lightning in
+      // particular fires spurious same-page nav events on internal
+      // pushState transitions). Confirmed live: RoadReady's checkSettled
+      // was resolving "done" while STILL on the exact same AFP url it had
+      // just clicked "Amazon SSO" on, before ever reaching Midway or
+      // roadready.fadv.com -- so the credential fill there never ran and
+      // the user was left to sign in manually. Track the exact URL a fill
+      // was attempted on; if we're still on that same URL, don't trust
+      // "no login form present" as a real finish -- give it a few more
+      // grace checks so a genuinely stuck/interstitial page still ends
+      // via the hard timeout instead of hanging forever.
+      let urlAtLastAttempt = null;
+      let graceChecks = 0;
+      const maxGraceChecks = 5;
       const hardTimeout = setTimeout(() => finish({ ok: true, attempted: attempts > 0, site: lastSite, timedOut: true }), 25000);
 
       const finish = (result) => {
@@ -214,6 +231,15 @@ function registerCredentialIPC() {
         const currentUrl = win.webContents.getURL();
         const onLoginPg = await isLoginPage(win.webContents);
         if (!onLoginPg) {
+          if (urlAtLastAttempt && currentUrl === urlAtLastAttempt && graceChecks < maxGraceChecks) {
+            // Still on the exact page we just clicked/filled on -- the real
+            // navigation away likely hasn't started yet. Don't finish;
+            // check again shortly (bounded by maxGraceChecks, with the
+            // 25s hardTimeout above as the final backstop).
+            graceChecks++;
+            settleTimer = setTimeout(checkSettled, 1200);
+            return;
+          }
           // Settled somewhere that isn't a login form -- either the real
           // target (success) or a page auto-login has no strategy for.
           logger.info('test-login:', vendorId, 'settled, no login form present at', currentUrl.slice(0, 80));
@@ -231,6 +257,8 @@ function registerCredentialIPC() {
           lastSite = result.site || lastSite;
           logger.info('test-login:', vendorId, 'attempt', attempts, '-> filled:', result.filled, 'on', currentUrl.slice(0, 80));
           if (!result.filled) { finish({ ok: true, attempted: false, site: lastSite }); return; }
+          urlAtLastAttempt = currentUrl;
+          graceChecks = 0;
         } catch (e) {
           logger.warn('test-login error:', vendorId, e.message);
           finish({ ok: false, error: e.message });

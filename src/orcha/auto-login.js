@@ -43,6 +43,11 @@ const VENDOR_PARTITIONS = {
   "velogic.my.site.com":             "persist:vendor-velogic",
   "www.access-billing-services.com": "persist:vendor-abs",
   "fleet.uptake.com":                "persist:vendor-uptake",
+  // FIX (2026-07-23): fleet.uptake.com immediately redirects to this
+  // Keycloak realm host for the actual Amazon-SSO button -- confirmed
+  // live (auto-login.log: "No strategy for hostname: login.uptake.com").
+  // Same partition so the session carries over once authenticated.
+  "login.uptake.com":                "persist:vendor-uptake",
   "outlook.office365.com":           "persist:vendor-owa",
 };
 
@@ -68,6 +73,7 @@ const LOGIN_STRATEGIES = {
   "velogic.my.site.com":             "standard",
   "www.access-billing-services.com": "iframe",
   "fleet.uptake.com":                "sso-click",
+  "login.uptake.com":                "sso-click",
   "outlook.office365.com":           "stay-in",
 };
 
