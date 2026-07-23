@@ -221,8 +221,17 @@ function registerCredentialIPC() {
         resolved = true;
         clearTimeout(hardTimeout);
         clearTimeout(settleTimer);
-        win.webContents.removeListener('did-finish-load', onNav);
-        win.webContents.removeListener('did-navigate', onNav);
+        // FIX (2026-07-23): if the user closes the test-login popup
+        // manually before auto-login settles, win.webContents is already
+        // destroyed by the time this 'closed' listener runs --
+        // removeListener on a destroyed webContents throws "Object has
+        // been destroyed", surfacing as an uncaught exception (confirmed
+        // live in errors.log). Harmless either way since the window (and
+        // its listeners) are already gone; just don't let it throw.
+        try {
+          win.webContents.removeListener('did-finish-load', onNav);
+          win.webContents.removeListener('did-navigate', onNav);
+        } catch (_e) { /* window already destroyed -- nothing to clean up */ }
         resolve(result);
       };
 
