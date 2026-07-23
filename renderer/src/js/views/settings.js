@@ -1846,6 +1846,7 @@ function _acctAddRow(prefill = {}) {
   const url  = prefill.url  || '';
   const name = prefill.name || '';
   const user = prefill.user || '';
+  const pass = prefill.pass || '';
 
   row.innerHTML = `
     <div class="acct-cell acct-cell-site">
@@ -1857,7 +1858,7 @@ function _acctAddRow(prefill = {}) {
       <input class="acct-input" type="text" placeholder="username / email" value="${_esc(user)}"/>
     </div>
     <div class="acct-cell acct-cell-pass">
-      <input class="acct-input acct-pass" type="password" placeholder="password"/>
+      <input class="acct-input acct-pass" type="password" placeholder="password" value="${_esc(pass)}"/>
       <button class="acct-eye" type="button" title="Show/hide">👁️</button>
     </div>
     <div class="acct-cell acct-cell-actions">
@@ -1912,6 +1913,12 @@ function _acctPersist() {
     name: (r.querySelector('.acct-name')?.value || '').trim(),
     url:  (r.querySelector('.acct-url')?.value  || '').trim(),
     user: (r.querySelector('.acct-cell-user .acct-input')?.value || '').trim(),
+    // BUG FIX (2026-07-23): password was never included here, so it was
+    // never persisted -- every reload silently wiped it, which is why the
+    // eye/show-password toggle appeared "broken" (there was nothing saved
+    // to reveal). Not trimmed: leading/trailing spaces can be intentional
+    // in a password.
+    pass: (r.querySelector('.acct-pass')?.value || ''),
   })).filter((r) => r.name || r.url || r.user);
   settingsBridge.save('accounts', rows).catch(() => {});
 }
