@@ -80,7 +80,13 @@ const VENDOR_TEST_URLS = {
   aperia:    'https://amazon.aperiatech.com/',
   reach24:   'https://amazon.reach24.net/',
   dtna:      'https://dtna.my.site.com/',
-  roadready: 'https://roadready.fadv.com/',
+  // FEATURE (2026-07-23): RoadReady's real entry point is this Amazon
+  // Freight Partner Salesforce case-list URL, confirmed live by the user
+  // -- not roadready.fadv.com. Lands on a page with an 'Amazon SSO'
+  // button (see auto-login.js sso-click handling for
+  // amazonfreightpartner.my.salesforce.com), no stored credentials
+  // needed, same as Uptake.
+  roadready: 'https://amazonfreightpartner.my.salesforce.com/?ec=302&startURL=%2Fvisualforce%2Fsession%3Furl%3Dhttps%253A%252F%252Famazonfreightpartner.lightning.force.com%252Flightning%252Fo%252FCase%252Flist%253FfilterName%253DAll_AFP_Maintenance_Cases',
   velogic:   'https://velogic.my.site.com/',
   abs:       'https://www.access-billing-services.com/',
   uptake:    'https://fleet.uptake.com/?realm=amzlmiddlemile',

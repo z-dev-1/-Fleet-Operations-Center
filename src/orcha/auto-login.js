@@ -34,6 +34,12 @@ const VENDOR_PARTITIONS = {
   "login.na.ciam.daimlertruck.com":  "persist:vendor-dtna",
   "login.ciam.daimlertruck.com":     "persist:vendor-dtna",
   "roadready.fadv.com":              "persist:vendor-roadready",
+  // FEATURE (2026-07-23): RoadReady's real login destination is Amazon
+  // Freight Partner's Salesforce org (amazonfreightpartner.my.salesforce.com),
+  // reached via an "Amazon SSO" button -- not roadready.fadv.com directly.
+  // Confirmed by the user with a live URL. Same session partition as the
+  // old host since it's still logically the same vendor.
+  "amazonfreightpartner.my.salesforce.com": "persist:vendor-roadready",
   "velogic.my.site.com":             "persist:vendor-velogic",
   "www.access-billing-services.com": "persist:vendor-abs",
   "fleet.uptake.com":                "persist:vendor-uptake",
@@ -58,6 +64,7 @@ const LOGIN_STRATEGIES = {
   "login.na.ciam.daimlertruck.com":  "standard",
   "login.ciam.daimlertruck.com":     "standard",
   "roadready.fadv.com":              "standard",
+  "amazonfreightpartner.my.salesforce.com": "sso-click",
   "velogic.my.site.com":             "standard",
   "www.access-billing-services.com": "iframe",
   "fleet.uptake.com":                "sso-click",
@@ -273,6 +280,23 @@ async function _loginSsoClick(wc) {
   // Scroll to bottom in case there's an "agree" button below the fold
   await _execSafe(wc, 'window.scrollTo(0, document.body.scrollHeight)');
   await _wait(800);
+
+  // Text-based match first -- most "Amazon SSO" buttons are rendered as an
+  // <a>/<button> whose visible label says so, which no CSS selector can
+  // match on directly (href/class conventions vary per site and are easy
+  // to guess wrong).
+  const textClickScript = (
+    '(function(){' +
+    'var els=[].slice.call(document.querySelectorAll("a,button"));' +
+    'for(var i=0;i<els.length;i++){' +
+    '  var t=(els[i].textContent||"").trim().toLowerCase();' +
+    '  if(t.indexOf("amazon")!==-1){els[i].click();return t;}' +
+    '}' +
+    'return false;' +
+    '})()'
+  );
+  const textMatch = await _execSafe(wc, textClickScript);
+  if (textMatch) { logger.info('SSO click: clicked by text match:', textMatch); return true; }
 
   const ssoSelectors = [
     'a[href*="amazon"][href*="sso" i]',
