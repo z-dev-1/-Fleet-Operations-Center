@@ -522,7 +522,7 @@ const CreateWRAutofill = {
                  geofenceInput.focus();
                  geofenceInput.click();
                  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                 const text = String(p.location || '');
+                 const text = String(p.location || p.domicile || '').trim();
                  for (let i = 1; i <= text.length; i++) {
                      setter.call(geofenceInput, text.slice(0, i));
                      geofenceInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -531,8 +531,8 @@ const CreateWRAutofill = {
 
                  // Wait for options then click exact match
                  const optFound = await this.waitFor(() => {
-                     const opts = document.querySelectorAll('BUTTON[role="option"]');
-                     return Array.from(opts).find(o => o.innerText.trim().toUpperCase() === text.toUpperCase()) || null;
+                     const opts = Array.from(document.querySelectorAll('BUTTON[role="option"]'));
+                     return opts.find(o => o.innerText.trim().toUpperCase() === text.toUpperCase()) || opts.find(o => o.innerText.trim().toUpperCase().includes(text.toUpperCase())) || null;
                  }, 5000, 80);
 
                  if (optFound) {
