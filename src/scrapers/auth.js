@@ -232,11 +232,31 @@ function runMwinit() {
 
     const started = Date.now();
 
+    // FIX (2026-07-23): checkMwinit().ok only reflects whether the cookie
+    // file, AS IT SITS ON DISK RIGHT NOW, isn't expired yet -- it has no way
+    // to tell "unchanged stale file" apart from "freshly rewritten by
+    // mwinit". Every caller of runMwinit() fires precisely when the old
+    // file's local expiry hasn't quite hit zero but the server/AAP side has
+    // already rejected it, so the very first 1.5s poll tick was seeing the
+    // SAME untouched stale file, declaring victory, and re-injecting the
+    // exact cookies that just got rejected -- confirmed live in
+    // auth.log 2026-07-23T17:21:28 -> 17:21:31 ("31min" -> false "complete...
+    // 30min" 1.5s later) vs. the real refresh landing 13 minutes later at
+    // 17:34:09 ("108min") once the user actually tapped WebAuthn. Now we
+    // snapshot the cookie file's mtime before spawning mwinit and require
+    // BOTH state.ok AND a newer mtime (i.e. mwinit actually rewrote the
+    // file) before resolving, so we wait for the real WebAuthn/PIN tap
+    // instead of silently no-oping against the stale file.
+    let baselineMtimeMs = 0;
+    try { baselineMtimeMs = fs.statSync(COOKIE_FILE).mtimeMs; } catch (_) {}
+
     // Poll by re-reading the cookie file and checking actual expiry timestamps
     const poll = setInterval(() => {
       try {
         const state = checkMwinit();
-        if (state.ok) {
+        let rewritten = false;
+        try { rewritten = fs.statSync(COOKIE_FILE).mtimeMs > baselineMtimeMs; } catch (_) {}
+        if (state.ok && rewritten) {
           clearInterval(poll);
           logger.info('[AuthManager] mwinit complete -- cookies valid, expires in ' +
             (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session'));
@@ -245,7 +265,7 @@ function runMwinit() {
         }
         if (Date.now() - started > MWINIT_TIMEOUT_MS) {
           clearInterval(poll);
-          reject(new Error('mwinit timed out after 3 minutes'));
+          reject(new Error('mwinit timed out after 3 minutes -- terminal may still be waiting on WebAuthn/PIN'));
         }
       } catch (_) {
         // Ignore transient FS errors while cookie file is being written
