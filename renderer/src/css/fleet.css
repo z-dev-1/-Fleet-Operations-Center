@@ -5884,6 +5884,34 @@ body::after {
   background: linear-gradient(90deg, var(--acc, #58a6ff), var(--pur, #d2a8ff));
 }
 
+/* ── Section Accordion (Integrations tab, 2026-07-23 settings cleanup) ────── */
+.sd-section-title--toggle {
+  cursor: pointer;
+  user-select: none;
+}
+.sd-section-title--toggle:hover {
+  color: var(--txt, #c9d1d9);
+}
+.sd-chevron {
+  margin-left: auto;
+  font-size: 9px;
+  transition: transform .15s ease;
+  color: var(--mut, #484f58);
+}
+.sd-section.collapsed .sd-chevron {
+  transform: rotate(-90deg);
+}
+.sd-section.collapsed > *:not(.sd-section-title) {
+  display: none !important;
+}
+.sd-section.collapsed {
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+}
+.sd-section.collapsed .sd-section-title {
+  margin-bottom: 0;
+}
+
 /* ── Template Grid ─────────────────────────────────────────────────────────── */
 .sd-template-grid {
   display: grid;

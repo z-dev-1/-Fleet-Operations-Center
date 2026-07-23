@@ -2158,6 +2158,36 @@ function _wireNotifications() {
 }
 
 
+// ── Section Accordion (Integrations tab) ─────────────────────────────────────
+// CLEANUP (2026-07-23): the Integrations tab had grown to 15 always-expanded
+// sections (Domiciles, AI Config, Credentials, Schedulers, Vendor Portal
+// Credentials, Email, etc.) stacked in one long scroll. Collapsed them into
+// an accordion -- click a section title to open it, which closes whichever
+// other section was open. Purely a display toggle (CSS `.collapsed` hides
+// everything in a section except its title); no data/wiring changes.
+function _wireSectionAccordion() {
+  const pane = document.getElementById('sd-pane-integrations');
+  if (!pane) return;
+  const sections = Array.from(pane.children).filter((el) => el.classList && el.classList.contains('sd-section'));
+  sections.forEach((sec) => {
+    const title = sec.querySelector('.sd-section-title');
+    if (!title) return;
+    sec.classList.add('collapsed');
+    title.classList.add('sd-section-title--toggle');
+    if (!title.querySelector('.sd-chevron')) {
+      const chevron = document.createElement('span');
+      chevron.className = 'sd-chevron';
+      chevron.textContent = '\u25BE';
+      title.appendChild(chevron);
+    }
+    title.addEventListener('click', () => {
+      const wasOpen = !sec.classList.contains('collapsed');
+      sections.forEach((s) => s.classList.add('collapsed'));
+      if (!wasOpen) sec.classList.remove('collapsed');
+    });
+  });
+}
+
 // ── Section: Accounts (S11) ──────────────────────────────────────────────────
 function _wireAccounts() {
 
@@ -2834,6 +2864,7 @@ export function init() {
   _wireAsana();
   _wireNotifications();
   _wireAccounts();
+  _wireSectionAccordion();
 
   // Listen for settings open request
   bus.on('ui:view-change', ({ to }) => {
