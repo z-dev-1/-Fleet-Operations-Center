@@ -1166,29 +1166,66 @@ const CreateWRAutofill = {
 
                // FEATURE (2026-07-23): extends the engine past Issue Details --
                // previously it deliberately stopped here for manual review. User
-               // confirmed they want full auto-progression through Comments and
-               // Review & Submit, including clicking the final Submit button.
+               // confirmed they want full auto-progression through Select Vendor,
+               // Comments, and Review & Submit (including the final Submit click),
+               // and corrected the actual screen order: Issue Details -> Select
+               // Vendor -> Comments -> Review & Submit (my first pass had Vendor
+               // and Submit on the same final screen -- wrong).
                // CAVEAT: unlike every step above, none of this has been verified
-               // against a live Comments/Review screen yet -- there was no prior
-               // ground truth to build from, so this is a best-effort first pass
-               // using the same conventions already proven elsewhere in this file
-               // (css-cmvgon comboboxes, generic Next-button detection, setVal for
-               // text fields). Expect this to need at least one more round of log-
-               // driven correction, same as every other step in this file did.
+               // against live DOM for these three screens yet -- no prior ground
+               // truth to build from. Best-effort first pass using conventions
+               // already proven elsewhere in this file (css-cmvgon comboboxes,
+               // generic Next-button detection, setVal for text fields,
+               // waitForOption for matching). Expect at least one more round of
+               // log-driven correction, same as every other step in this file did.
                const findNextBtn = () => document.querySelector('button.css-mnocv9')
                    || Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && !b.disabled && /^next$/i.test((b.innerText || b.textContent || '').trim()));
 
-               // STEP 5: Comments
-               this.log('--- STEP 5: Comments ---');
+               // STEP 5: Select Vendor
+               this.log('--- STEP 5: Select Vendor ---');
                const issueNextBtn = findNextBtn();
                if (issueNextBtn) {
                    issueNextBtn.click();
-                   this.log('Issue Details: Next clicked -- moving to Comments');
+                   this.log('Issue Details: Next clicked -- moving to Select Vendor');
                    await this.sleep(1000);
                } else {
-                   this.log('Issue Details: WARNING - Next button not found, cannot reach Comments');
+                   this.log('Issue Details: WARNING - Next button not found, cannot reach Select Vendor');
                }
 
+               if (p.vendor) {
+                   try {
+                       const vendorInput = await this.waitFor(() =>
+                           Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).find(el => el.offsetParent && !el.value) || null
+                       , 5000, 100);
+                       if (vendorInput) {
+                           try { vendorInput.focus(); } catch (e) {}
+                           this.click(vendorInput);
+                           const vs = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                           try { if (vs) vs.call(vendorInput, p.vendor); else vendorInput.value = p.vendor; } catch (e) { vendorInput.value = p.vendor; }
+                           ['input', 'change', 'keyup'].forEach(t => { try { vendorInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
+                           const vendorOpt = await this.waitForOption(p.vendor, 4000);
+                           if (vendorOpt) { this.click(vendorOpt); this.log('Vendor: clicked "' + (vendorOpt.innerText || '').trim() + '"'); await this.sleep(300); }
+                           else { this.log('Vendor: no match for "' + p.vendor + '"'); }
+                       } else {
+                           this.log('Vendor: no empty combobox found on this screen');
+                       }
+                   } catch (e) { this.log('Vendor: error: ' + e.message); }
+               } else {
+                   this.log('Vendor: no vendor in payload -- leaving default/unset');
+               }
+
+               await this.sleep(300);
+               const vendorNextBtn = findNextBtn();
+               if (vendorNextBtn) {
+                   vendorNextBtn.click();
+                   this.log('Select Vendor: Next clicked -- moving to Comments');
+                   await this.sleep(1000);
+               } else {
+                   this.log('Select Vendor: WARNING - Next button not found, cannot reach Comments');
+               }
+
+               // STEP 6: Comments
+               this.log('--- STEP 6: Comments ---');
                if (p.comments) {
                    const commentsTA = await this.waitFor(() =>
                        document.querySelector('TEXTAREA#my-input') ||
@@ -1224,26 +1261,8 @@ const CreateWRAutofill = {
                    this.log('Comments: WARNING - Next button not found, cannot reach Review & Submit');
                }
 
-               // STEP 6: Review & Submit
-               this.log('--- STEP 6: Review & Submit ---');
-               if (p.vendor) {
-                   try {
-                       const vendorInput = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).find(el => el.offsetParent && !el.value);
-                       if (vendorInput) {
-                           try { vendorInput.focus(); } catch (e) {}
-                           this.click(vendorInput);
-                           const vs = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-                           try { if (vs) vs.call(vendorInput, p.vendor); else vendorInput.value = p.vendor; } catch (e) { vendorInput.value = p.vendor; }
-                           ['input', 'change', 'keyup'].forEach(t => { try { vendorInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
-                           const vendorOpt = await this.waitForOption(p.vendor, 4000);
-                           if (vendorOpt) { this.click(vendorOpt); this.log('Vendor: clicked "' + (vendorOpt.innerText || '').trim() + '"'); await this.sleep(300); }
-                           else { this.log('Vendor: no match for "' + p.vendor + '"'); }
-                       } else {
-                           this.log('Vendor: no empty combobox found -- may already be set, or field not present on this screen');
-                       }
-                   } catch (e) { this.log('Vendor: error: ' + e.message); }
-               }
-
+               // STEP 7: Review & Submit
+               this.log('--- STEP 7: Review & Submit ---');
                const submitBtn = await this.waitFor(() =>
                    Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && !b.disabled && /submit request|submit/i.test((b.innerText || b.textContent || '').trim()))
                , 6000, 100);
