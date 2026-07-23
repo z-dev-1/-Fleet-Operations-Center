@@ -33,6 +33,7 @@ const GEOFENCE_IPC_TIMEOUT = 200_000; // Stage 5 C-1: IPC belt -- scraper has ow
 // Module-level: survive across IPC calls within the same process lifetime.
 let _wrLock       = false;   // aap:create-wr
 let _adaptiveLock = false;   // aap:adaptive
+let _activeAutofillWin = null; // aap:autofill -- lets aap:autofill-stop force-close it
 let _uptakeLock   = false;   // H-3: uptake:scrape
 let _relayLock    = false;   // H-3: relay:scrape
 
@@ -202,10 +203,21 @@ function registerScrapersIPC(ctx) {
       } catch (e) {
         logger.warn('Workflow Intelligence capture attach failed:', e.message);
       }
+      _activeAutofillWin = aapWin;
+      // FIX (2026-07-23): AAP's WR wizard form has an unsaved-changes guard.
+      // Without this, clicking the native close button (or the new Stop
+      // button below) while mid-form can trigger a native "Leave Site?"
+      // confirm dialog that renders behind/off the visible window -- making
+      // close look like it silently does nothing. This is a user-initiated
+      // abort of an in-progress automation, not real data at risk, so
+      // always let the close through immediately.
+      aapWin.webContents.on('will-prevent-unload', (event) => { event.preventDefault(); });
+
       const done = (result) => {
         if (settled) return;
         settled = true;
         clearTimeout(maxTimer);
+        if (_activeAutofillWin === aapWin) _activeAutofillWin = null;
         resolve(result);
       };
       const maxTimer = setTimeout(() => {
@@ -249,6 +261,20 @@ function registerScrapersIPC(ctx) {
         done({ ok: false, message: 'AAP window was closed before autofill finished.' });
       });
     });
+  });
+
+  // FEATURE (2026-07-23): explicit Stop control for the autofill popup --
+  // requested after confirming the native close button can get stuck behind
+  // AAP's own "Leave Site?" dialog (see will-prevent-unload fix above). This
+  // gives a guaranteed way to abort mid-run regardless of that. Destroying
+  // the window fires the 'closed' handler above, which resolves the
+  // in-flight aap:autofill promise with a clean, honest failure result.
+  handle('aap:autofill-stop', async () => {
+    if (_activeAutofillWin && !_activeAutofillWin.isDestroyed()) {
+      _activeAutofillWin.destroy();
+      return { ok: true };
+    }
+    return { ok: false, message: 'No autofill window is currently open.' };
   });
 
   // ── aap:set-lifecycle ───────────────────────────────────────────────────

@@ -219,6 +219,7 @@ contextBridge.exposeInMainWorld('auth', {
 contextBridge.exposeInMainWorld('aap', {
   setLifecycle:     (id, url, state, reason) => ipcRenderer.invoke('aap:set-lifecycle', { equipmentId: id, assetUrl: url, state, reason }),
   autofill:         (url, payload)           => ipcRenderer.invoke('aap:autofill', url, payload),
+  stopAutofill:     ()                       => ipcRenderer.invoke('aap:autofill-stop'),
   runAdaptive:      (payload)                => ipcRenderer.invoke('aap:adaptive', payload),
   adaptiveExtract:  (opts)                   => ipcRenderer.invoke('adaptive:extract', opts),
   adaptiveScanBatch:(units)                  => ipcRenderer.invoke('adaptive:scan-batch', units),

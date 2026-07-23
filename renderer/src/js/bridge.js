@@ -289,6 +289,7 @@ export const ai = {
 export const aap = {
   setLifecycle:      (id, url, st, reason) => window.aap.setLifecycle(id, url, st, reason),
   autofill:          (url, payload)        => window.aap.autofill(url, payload),
+  stopAutofill:      ()                    => window.aap.stopAutofill(),
   runAdaptive:       (payload)             => window.aap.runAdaptive(payload),
   adaptiveExtract:   (opts)                => window.aap.adaptiveExtract(opts),
   adaptiveScanBatch: (units)               => window.aap.adaptiveScanBatch(units),

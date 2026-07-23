@@ -263,7 +263,9 @@ function _buildHTML(unit) {
 
     <!-- Progress log -->
     <div id="wr-progress-wrap" class="wr-progress-wrap" style="display:none">
-      <div class="wr-section__title">Progress</div>
+      <div class="wr-section__title">Progress
+        <button id="wr-stop-autofill" class="detail-panel__btn detail-panel__btn--secondary" style="display:none;float:right;padding:2px 10px">Stop</button>
+      </div>
       <div id="wr-progress-log" class="wr-progress-log"></div>
     </div>
 
@@ -418,7 +420,6 @@ function _wireSubmit() {
 
   submitBtn.addEventListener('click', async () => {
     const payload = _collectPayload();
-    if (!payload.vendor) { toast.show('warn', 'Select a vendor',  3000); return; }
     if (!payload.title)  { toast.show('warn', 'WR title required', 3000); return; }
 
     submitBtn.disabled = true; submitBtn.textContent = 'Submitting...';
@@ -515,6 +516,19 @@ async function _autofillFallback(payload) {
   const fbBtnOriginalText = fbBtn ? fbBtn.textContent : '';
   if (fbBtn) { fbBtn.disabled = true; fbBtn.textContent = 'Filling in AAP\u2026'; }
   toast.show('info', 'Opening AAP and filling in fields \u2014 this can take up to a minute...', 4000);
+  // Stop button lets the user abort a stuck/unresponsive autofill window
+  // without having to force-close the whole app.
+  const stopBtn = _el('wr-stop-autofill');
+  const onStopClick = async () => {
+    if (stopBtn) { stopBtn.disabled = true; }
+    const r = await aap.stopAutofill();
+    toast.show('info', r && r.ok ? 'Autofill stopped.' : (r && r.message) || 'Autofill stopped.', 3000);
+  };
+  if (stopBtn) {
+    stopBtn.style.display = '';
+    stopBtn.disabled = false;
+    stopBtn.addEventListener('click', onStopClick);
+  }
   try {
     // FIX (2026-07-23): was passing _unit.assetUrl (the asset's own
     // detail page) here. aap_autofill_engine.js does not read equipment
@@ -534,6 +548,7 @@ async function _autofillFallback(payload) {
     toast.show('error', 'Autofill launch failed: ' + e.message);
   } finally {
     if (fbBtn) { fbBtn.disabled = false; fbBtn.textContent = fbBtnOriginalText; }
+    if (stopBtn) { stopBtn.style.display = 'none'; stopBtn.removeEventListener('click', onStopClick); }
   }
 }
 

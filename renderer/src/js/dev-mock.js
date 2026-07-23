@@ -87,6 +87,7 @@ window.notes = {
 window.aap = {
   setLifecycle:      noopAsync,
   autofill:          noopAsync,
+  stopAutofill:      noopAsync,
   runAdaptive:       noopAsync,
   adaptiveExtract:   noopAsync,
   adaptiveScanBatch: noopAsync,
