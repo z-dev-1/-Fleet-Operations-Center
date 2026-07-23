@@ -698,25 +698,12 @@ function _html() {
           <div class="sd-field">
             <div class="sd-toggle-row"><span class="sd-toggle-label">Enable Partner Auto-Reply</span><input type="checkbox" id="par-enabled"/></div>
           </div>
-          <!-- FEATURE (2026-07-22): reply mode -- "Mentions only" (strict,
-               original behavior) vs "Occasionally involved" (AI can also
-               jump in on relevant messages that don't mention it, gated by
-               a conservative relevance check that defaults to staying
-               quiet on any doubt -- see _shouldChimeIn in
-               slack_channel_watch.js). Radio-style pair, not a plain
-               checkbox, since these are two distinct behaviors rather than
-               one on/off switch. -->
-          <div class="sd-field">
-            <div class="sd-label" style="margin-bottom:4px">Default reply mode <span style="color:var(--mut);font-weight:400;font-size:11px">(for new channels — each channel below can override this individually)</span></div>
-            <label class="settings-label" style="display:flex;align-items:center;gap:6px;font-weight:400;margin-bottom:4px">
-              <input type="radio" name="par-reply-mode" id="par-mode-mentions" value="mentions" style="width:auto"/>
-              Only when @-mentioned
-            </label>
-            <label class="settings-label" style="display:flex;align-items:center;gap:6px;font-weight:400">
-              <input type="radio" name="par-reply-mode" id="par-mode-occasional" value="occasional" style="width:auto"/>
-              Occasionally involved (also chimes in on clearly relevant messages, even without a mention)
-            </label>
-          </div>
+          <!-- CLEANUP (2026-07-23): removed the old global "default reply
+               mode" radio pair -- per-channel mode dropdowns (below, one
+               per channel row) fully replaced it as of the 2026-07-23
+               per-channel rollout. New channels now default to 'mentions'
+               (the safe, original behavior) and can be switched to
+               "Occasionally involved" individually right after adding. -->
           <!-- FEATURE (2026-07-22): add channels by ID directly, rather than
                a browsable "all my channels" list -- Slack's own
                conversations.list/users.conversations are hard-blocked on
@@ -1498,8 +1485,6 @@ function _wirePartnerAutoReply() {
   const statusEl = document.getElementById('par-status');
   const addIdEl = document.getElementById('par-add-id');
   const addBtn = document.getElementById('par-add-btn');
-  const modeMentionsEl = document.getElementById('par-mode-mentions');
-  const modeOccasionalEl = document.getElementById('par-mode-occasional');
   if (!enabledEl || !listEl || !saveBtn) return;
 
   function showStatus(text, cls) {
@@ -1514,16 +1499,11 @@ function _wirePartnerAutoReply() {
   function render(config) {
     _currentConfig = config;
     enabledEl.checked = !!config.enabled;
-    if (modeMentionsEl && modeOccasionalEl) {
-      const mode = config.replyMode || 'mentions';
-      modeMentionsEl.checked = mode === 'mentions';
-      modeOccasionalEl.checked = mode === 'occasional';
-    }
     const channels = config.channels || [];
     // FEATURE (2026-07-23): reply mode is per-channel now (see
     // slack_channel_watch.js getWatchConfig migration) -- each row gets its
-    // own mode selector instead of relying solely on the global default
-    // above, which only seeds newly-added channels.
+    // own mode selector. The old global default radio was removed in the
+    // 2026-07-23 settings cleanup; new channels just default to 'mentions'.
     listEl.innerHTML = channels.length ? channels.map((ch, i) => {
       const chMode = ch.replyMode || config.replyMode || 'mentions';
       return `<div class="sd-toggle-row" data-idx="${i}">
@@ -1575,11 +1555,10 @@ function _wirePartnerAutoReply() {
           return;
         }
         if (!_currentConfig) _currentConfig = { enabled: true, channels: [] };
-        // FEATURE (2026-07-23): seed the new channel's own replyMode from
-        // whichever default radio is currently checked, so it starts in
-        // sync with the per-row selector rendered right after this push.
-        const defaultMode = (modeOccasionalEl && modeOccasionalEl.checked) ? 'occasional' : 'mentions';
-        _currentConfig.channels.push({ id, name: result.name, enabled: true, lastSeenTs: null, replyMode: defaultMode });
+        // CLEANUP (2026-07-23): global default radio is gone -- new channels
+        // start at 'mentions' (the safe default) and can be switched to
+        // 'occasional' individually via the per-row selector right after.
+        _currentConfig.channels.push({ id, name: result.name, enabled: true, lastSeenTs: null, replyMode: 'mentions' });
         render(_currentConfig);
         addIdEl.value = '';
         toast.show('success', `Added #${result.name} — click Save to confirm`, 3000);
@@ -1597,10 +1576,10 @@ function _wirePartnerAutoReply() {
     if (!_currentConfig) return;
     const updated = {
       enabled: !!enabledEl.checked,
-      // FEATURE (2026-07-23): this is now only the DEFAULT for channels
-      // added going forward -- each channel's own replyMode (read from its
-      // row's select below) is what actually drives pollChannelsOnce.
-      replyMode: (modeOccasionalEl && modeOccasionalEl.checked) ? 'occasional' : 'mentions',
+      // CLEANUP (2026-07-23): no longer writing a global replyMode -- each
+      // channel's own replyMode (read from its row's select below) is what
+      // actually drives pollChannelsOnce. slack_channel_watch.js still
+      // tolerates a missing/legacy global replyMode via its own default.
       channels: _currentConfig.channels.map((ch, i) => {
         const cb = document.getElementById('par-ch-' + i);
         const modeSel = document.getElementById('par-ch-mode-' + i);
