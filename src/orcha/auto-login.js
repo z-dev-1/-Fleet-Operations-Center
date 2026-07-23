@@ -106,6 +106,27 @@ function _clickScript(selector) {
   );
 }
 
+// DIAGNOSTIC (2026-07-23): dumps every <input>/<iframe> actually present on
+// the page (type, id, name, placeholder, visibility) when a fill attempt
+// fails, so a real selector mismatch can be read straight from the log
+// instead of guessed at blind. Temporary aid for the PACCAR "Could not
+// fill password" investigation -- safe to keep, it only runs on failure.
+async function _dumpInputs(wc, label) {
+  const script = (
+    '(function(){' +
+    'var out=[];' +
+    'document.querySelectorAll("input").forEach(function(el){' +
+    '  var r=el.getBoundingClientRect();' +
+    '  out.push({type:el.type,id:el.id,name:el.name,placeholder:el.placeholder,visible:(r.width>0&&r.height>0)});' +
+    '});' +
+    'var frames=document.querySelectorAll("iframe,frame").length;' +
+    'return JSON.stringify({inputs:out,frames:frames,url:location.href});' +
+    '})()'
+  );
+  const dump = await _execSafe(wc, script);
+  logger.warn('DIAGNOSTIC[' + label + ']:', dump);
+}
+
 // ── Strategy: standard (user+pass on same page) ───────────────────────────────
 async function _loginStandard(wc, username, password) {
   // Salesforce uses #username / #password; generic fallback covers others
@@ -136,7 +157,11 @@ async function _loginStandard(wc, username, password) {
     const ok = await _execSafe(wc, _fillScript(sel, password));
     if (ok) { passFilled = true; logger.info('Filled password with selector:', sel); break; }
   }
-  if (!passFilled) { logger.warn('Could not fill password'); return false; }
+  if (!passFilled) {
+    logger.warn('Could not fill password');
+    await _dumpInputs(wc, 'standard-no-password-field');
+    return false;
+  }
 
   await _wait(400);
 
