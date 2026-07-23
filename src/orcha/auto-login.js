@@ -26,6 +26,13 @@ const VENDOR_PARTITIONS = {
   "dtna.my.site.com":                "persist:vendor-dtna",
   "ciam.dtna.com":                   "persist:vendor-dtna",
   "login.dtna.com":                  "persist:vendor-dtna",
+  // FEATURE (2026-07-23): DTNA/Daimler Truck migrated their login off the
+  // dtna.com domain onto daimlertruck.com (Azure B2C) -- this is the
+  // hostname the real login redirect chain lands on now, confirmed by the
+  // user from a live redirect URL. Keeping the old *.dtna.com entries
+  // above too in case any flow still resolves through them.
+  "login.na.ciam.daimlertruck.com":  "persist:vendor-dtna",
+  "login.ciam.daimlertruck.com":     "persist:vendor-dtna",
   "roadready.fadv.com":              "persist:vendor-roadready",
   "velogic.my.site.com":             "persist:vendor-velogic",
   "www.access-billing-services.com": "persist:vendor-abs",
@@ -48,6 +55,8 @@ const LOGIN_STRATEGIES = {
   "dtna.my.site.com":                "standard",
   "ciam.dtna.com":                   "standard",
   "login.dtna.com":                  "standard",
+  "login.na.ciam.daimlertruck.com":  "standard",
+  "login.ciam.daimlertruck.com":     "standard",
   "roadready.fadv.com":              "standard",
   "velogic.my.site.com":             "standard",
   "www.access-billing-services.com": "iframe",

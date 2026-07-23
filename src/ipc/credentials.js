@@ -54,6 +54,11 @@ const _HOST_TO_VENDOR = {
   "dtna.my.site.com":               "dtna",
   "ciam.dtna.com":                  "dtna",
   "login.dtna.com":                 "dtna",
+  // FEATURE (2026-07-23): real login-form hostname after DTNA/Daimler
+  // Truck's migration to daimlertruck.com (Azure B2C) -- see matching
+  // comment in src/orcha/auto-login.js VENDOR_PARTITIONS.
+  "login.na.ciam.daimlertruck.com": "dtna",
+  "login.ciam.daimlertruck.com":    "dtna",
   "roadready.fadv.com":             "roadready",
   "velogic.my.site.com":            "velogic",
   "www.access-billing-services.com":"abs",
