@@ -21,7 +21,7 @@ const { withRetry } = require('../utils/retry');    // H-1: per-unit retry
 const AAP_SERVICE_BASE  = 'https://aap-na.corp.amazon.com/v2/service/';
 const VENDOR_PARAMS = '&vendors=Amerit&vendors=CEI&vendors=COX&vendors=CUMMINS&vendors=DICKINSON&vendors=DSP_ENTERED&vendors=FIRST_ADVANTAGE&vendors=FLEETPRIDE&vendors=FREIGHTLINER&vendors=GEOTAB&vendors=GOODYEAR&vendors=H_AND_J&vendors=KENWORTH&vendors=KOONER&vendors=KWNE&vendors=OEM&vendors=PACLEASE&vendors=PENSKE&vendors=PETERBILT&vendors=RENTAL&vendors=Ryder&vendors=SAFELITE&vendors=SIEMENS&vendors=STRAIGHTLINE&vendors=TA&vendors=UNASSIGNED&vendors=VELOCITI&vendors=VOLVO&assetPrograms=DSP-MMBT&assetPrograms=UTP&assetPrograms=vupAfp';
 const AAP_GARAGE_BASE = 'https://aap-na.corp.amazon.com/v2/page/817ca098-8441-4329-a71e-6768f9d7e6c5';
-function garageUrl(tab, id) { return AAP_GARAGE_BASE + '?tab=' + tab + '&ids=' + encodeURIComponent(id) + VENDOR_PARAMS; }
+function garageUrl(tab, id) { return AAP_GARAGE_BASE + '?tab=' + tab + '&ids=' + encodeURIComponent(id); }
 const MAX_CONCURRENT    = 5; // 5 concurrent units (~10 BrowserViews)
 const PAGE_TIMEOUT_MS   = 35000;   // extra headroom for WO tab settle
 const PAGE_SETTLE_MS    = 3000;
@@ -595,6 +595,45 @@ function pickOffsiteFromConversation(convData) {
   return null;
 }
 
+// Lightweight single-UUID scrape: loads one known service-detail page and
+// extracts Phase-1 WR fields only (no WO tab, no conversation).  Used by the
+// Planned-WR second pass in scrapeRelay for PM-Failed / Expired-Inspection units.
+async function scrapeServiceByUUID(uuid, partition) {
+  return new Promise((resolve) => {
+    const url = AAP_SERVICE_BASE + uuid;
+    let settled = false;
+    const win = new BrowserWindow({
+      show: false, skipTaskbar: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, partition }
+    });
+    const done = (data) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { win.destroy(); } catch(_) {}
+      resolve(data);
+    };
+    const timer = setTimeout(() => done(null), PAGE_TIMEOUT_MS);
+    win.webContents.on('did-finish-load', () => {
+      if (win.isDestroyed()) return;
+      const finalUrl = win.webContents.getURL();
+      if (!/aap-na\.corp\.amazon\.com/i.test(finalUrl)) { done(null); return; }
+      setTimeout(async () => {
+        try {
+          const wrData = await win.webContents.executeJavaScript(safewrap(RELAY_WR_SCRIPT));
+          done({ ...wrData, _serviceUUID: uuid, _cachedAt: Date.now() });
+        } catch (e) {
+          logger.warn('[Relay] scrapeServiceByUUID failed for', uuid, e.message);
+          done(null);
+        }
+      }, PAGE_SETTLE_MS);
+    });
+    win.webContents.on('did-fail-load', (_, code) => { if (code !== -3) done(null); });
+    logger.info('[Relay] scrapeServiceByUUID loadURL', uuid.slice(0,8));
+    win.loadURL(url);
+  });
+}
+
 async function scrapeUnitPage(equipmentId, partition, relayCache) {
   logger.info('[Relay] scrapeUnitPage called for', equipmentId);
   // Step 1: resolve the actual service UUID via Relay Garage dashboard
@@ -891,6 +930,54 @@ async function scrapeRelay(aapRows, onBatchDone, relayCache) {
 
   logger.info('[Relay] Complete:', Object.keys(results).length, '/', targets.length,
     'units |', cacheHits, 'cache hits |', skippedFleetNet, 'FleetNet skips');
+
+  // Second pass: for PM Failed / Expired Inspection Unavailable units that have BOTH
+  // an open Unplanned WR (primary) AND an open Planned WR, scrape the Planned WR too.
+  // Planned WRs only apply when unit is Unavailable + PM Failed or Expired Inspection.
+  // Any non-cancelled/completed state (including 'Estimate approved') counts as open.
+  const _PM_REASONS_RE = /^(PM\s*Failed|Expired\s*Inspection)$/i;
+  const _CLOSED_PLANNED_RE = /^(Completed|Cancelled)$/i;
+  const _plannedPassTargets = targets.filter(r => {
+    const reason = (r.lifecycleReason || '').trim();
+    return _PM_REASONS_RE.test(reason) &&
+           (r.openUnplanned || 0) > 0 &&
+           (r.openPlanned   || 0) > 0 &&
+           !!results[r.equipmentId];
+  });
+  if (_plannedPassTargets.length) {
+    logger.info('[Relay] Planned-WR pass:', _plannedPassTargets.length,
+      'unit(s):', _plannedPassTargets.map(r => r.equipmentId).join(', '));
+    for (const r of _plannedPassTargets) {
+      try {
+        const _pRows = await scrapeGarageList(
+          garageUrl('Planned', r.equipmentId), r.equipmentId, partition
+        );
+        const _primaryUUID = (results[r.equipmentId] || {})._serviceUUID;
+        const _pRow = _pRows.find(pr =>
+          !isFleetNetVendor(pr.vendor) &&
+          !_CLOSED_PLANNED_RE.test(pr.state || '') &&
+          pr.uuid !== _primaryUUID
+        );
+        if (!_pRow) {
+          logger.info('[Relay] Planned pass: no open Planned WR for', r.equipmentId,
+            '| rows:', _pRows.length);
+          continue;
+        }
+        logger.info('[Relay] Planned pass: scraping', r.equipmentId,
+          '| uuid:', _pRow.uuid.slice(0,8), '| state:', _pRow.state || '?');
+        const _pData = await scrapeServiceByUUID(_pRow.uuid, partition);
+        if (_pData) {
+          results[r.equipmentId]._plannedWRData = _pData;
+          updatedCache[r.equipmentId]._plannedWRData = _pData;
+          logger.info('[Relay] Planned WR done for', r.equipmentId,
+            '| state:', _pData.serviceState || '?', '| vendor:', _pData.vendor || '?');
+        }
+      } catch (_pe) {
+        logger.warn('[Relay] Planned-WR pass failed for', r.equipmentId, _pe.message);
+      }
+    }
+  }
+
   return { results, updatedCache };
   } finally {
     _relayLock = false;
@@ -1035,6 +1122,8 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       notesUpdatedAt:         n.updatedAt           || '',
 
       relaySynced: Object.keys(r).length > 0,
+      // Planned WR for PM Failed / Expired Inspection units (secondary scrape)
+      _plannedWRData:   r._plannedWRData   || null,
     };
   });
 }

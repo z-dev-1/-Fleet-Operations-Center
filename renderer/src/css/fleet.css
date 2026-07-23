@@ -2654,6 +2654,9 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .dp-wo-card__desc{font-size:11px;color:var(--txt2);line-height:1.5}
 .dp-wo-card__meta{display:flex;gap:12px;font-size:9px;color:var(--mut);font-family:var(--mono);flex-wrap:wrap}
 .dp-wo-card__stale{color:var(--red);font-weight:700}
+/* Planned WR card (PM Failed / Expired Inspection secondary scrape) */
+.dp-wo-card--planned{border-color:rgba(88,166,255,.35);background:rgba(88,166,255,.05)}
+.dp-section-title--planned{color:var(--acc2);margin-top:12px}
 .dp-wo-card__link{font-size:10px;color:var(--acc2);text-decoration:none;margin-left:auto;flex-shrink:0}
 .dp-wo-card__link:hover{text-decoration:underline}
 

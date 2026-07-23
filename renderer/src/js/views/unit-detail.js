@@ -1228,6 +1228,39 @@ function renderRepairPane(unit){
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ work duration bar Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+  // Planned WR card: shown for PM Failed / Expired Inspection Unavailable units
+  // that also have an open Unplanned WR (primary scraped) AND an open Planned WR.
+  // unit._plannedWRData is populated by the relay.js second-pass scrape.
+  var plannedWRCard='';
+  var _pmReasonsRe=/^(PM\s*Failed|Expired\s*Inspection)$/i;
+  if(unit._plannedWRData && _pmReasonsRe.test(unit.lifecycleReason||'')){
+    var p=unit._plannedWRData;
+    var pStateRaw=p.serviceState||'';
+    var pStateKey=(p.completed||/clos|complet/i.test(pStateRaw))?'closed':/sour/i.test(pStateRaw)?'sourcing':'open';
+    var pFields=[
+      p.workRequestId?['WR ID',p.workRequestId]:null,
+      p.salesforceCase?['SF Case',p.salesforceCase]:null,
+      p.serviceCategory?['Category',p.serviceCategory]:null,
+      p.totalCost?['Total Cost',p.totalCost]:null,
+    ].filter(Boolean);
+    plannedWRCard=
+      '<div class="dp-section-title dp-section-title--planned">Planned Work Order</div>'+
+      '<div class="dp-wo-card dp-wo-card--planned">'+
+        '<div class="dp-wo-card__header">'+
+          '<span class="dp-wo-card__vendor">'+esc(p.vendor||'Unknown Vendor')+'</span>'+
+          '<span class="dp-wo-card__status-pill dp-wo-card__status-pill--'+pStateKey+'">'+esc(pStateRaw||'Open')+'</span>'+
+        '</div>'+
+        (p.issueDetails?'<div class="dp-wo-card__desc">'+esc(p.issueDetails)+'</div>':'')+
+        (pFields.length?'<div class="dp-wo-card__fields">'+pFields.map(function(f){
+          return '<span class="dp-wo-field"><span class="dp-wo-field__k">'+esc(f[0])+'</span><span class="dp-wo-field__v">'+esc(f[1])+'</span></span>';
+        }).join('')+'</div>':'')+
+        (p.created||p.completed?'<div class="dp-wo-card__dates">'+
+          (p.created?'<span>Opened '+fmtDate(p.created)+'</span>':'')+
+          (p.completed?'<span>Closed '+fmtDate(p.completed)+'</span>':'')+
+        '</div>':'')+
+      '</div>';
+  }
+
   var durBar=workDurationBar(unit);
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Conversation Ã¢â€ â€™ vertical timeline Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -1446,7 +1479,7 @@ function renderRepairPane(unit){
   }, 100);
 
   return '<div class="dp-pane active" id="dp-pane-repair">'+
-    '<div class="dp-section-title">Work Request</div>'+woCard+splitViewBtn+durBar+timelineHtml+offsiteHtml+
+    '<div class="dp-section-title">Work Request</div>'+woCard+plannedWRCard+splitViewBtn+durBar+timelineHtml+offsiteHtml+
   '</div>';
 }
 
