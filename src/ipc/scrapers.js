@@ -213,6 +213,15 @@ function registerScrapersIPC(ctx) {
       // always let the close through immediately.
       aapWin.webContents.on('will-prevent-unload', (event) => { event.preventDefault(); });
 
+      // DEBUG (2026-07-23): pipe the in-page engine's this.log() calls
+      // (console.log inside the injected script) into our persistent log
+      // file. Previously these only went to the hidden aapWin's devtools
+      // console, so diagnosing step-by-step failures (e.g. tire subcategory
+      // fields not filling) required someone to have devtools open live.
+      aapWin.webContents.on('console-message', (_event, _level, message) => {
+        logger.info('[aap-autofill-engine] ' + message);
+      });
+
       const done = (result) => {
         if (settled) return;
         settled = true;

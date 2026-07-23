@@ -418,22 +418,52 @@ const CreateWRAutofill = {
                       // Retry until the radio is actually checked
                       // M-5: light exponential backoff — 500ms base + 100ms per attempt
                       // prevents tight busy-loop on slow pages (was fixed 500ms every try)
-                      for (let attempt = 1; attempt <= 5; attempt++) {
-                          doAssetClick();
-                          this.log('Asset Condition: attempt ' + attempt);
-                          await this.sleep(500 + attempt * 100);
-                          // Check if the radio is now checked (not error text which may never appear)
-                          const inp = document.querySelector('LABEL.css-rzgavw INPUT[type="radio"]');
-                          const unsafeLbl = Array.from(document.querySelectorAll('LABEL.css-rzgavw')).find(l => /unsafe/i.test(l.innerText || ''));
-                          const unsafeInp = unsafeLbl ? unsafeLbl.querySelector('INPUT[type="radio"]') : null;
-                          if (unsafeInp && unsafeInp.checked) {
-                              this.log('Asset Condition: radio confirmed checked on attempt ' + attempt);
-                              break;
+                      // BUG FIX (2026-07-23): this loop only retried the RADIO
+                      // click, then called nextStep() unconditionally and reported
+                      // 'assetCondition' handled regardless of whether Next actually
+                      // advanced the page. If the radio never got picked up (React
+                      // fiber walk failing because the component wasn't fully
+                      // hydrated yet on first attempt), the Next button on this step
+                      // stays disabled, nextStep() times out and returns false, and
+                      // we'd still tell the caller assetCondition succeeded -- so it
+                      // waited for a Location page that never came and the whole run
+                      // silently died right there. This is exactly the "fails once,
+                      // works if you start over" symptom: a fresh page load gives the
+                      // React tree a clean mount with no race. Fix: verify the radio
+                      // is checked AND that nextStep() actually advanced (page no
+                      // longer shows the Asset Condition label) before declaring this
+                      // step handled; otherwise retry the full click+Next cycle up to
+                      // 3 times before giving up with an honest failure.
+                      let advanced = false;
+                      for (let cycle = 1; cycle <= 3 && !advanced; cycle++) {
+                          let checked = false;
+                          for (let attempt = 1; attempt <= 5; attempt++) {
+                              doAssetClick();
+                              this.log('Asset Condition: cycle ' + cycle + ' attempt ' + attempt);
+                              await this.sleep(500 + attempt * 100);
+                              const unsafeLbl = Array.from(document.querySelectorAll('LABEL.css-rzgavw')).find(l => /unsafe/i.test(l.innerText || ''));
+                              const unsafeInp = unsafeLbl ? unsafeLbl.querySelector('INPUT[type="radio"]') : null;
+                              if (unsafeInp && unsafeInp.checked) {
+                                  this.log('Asset Condition: radio confirmed checked on cycle ' + cycle + ' attempt ' + attempt);
+                                  checked = true;
+                                  break;
+                              }
+                              if (attempt < 5) this.log('Asset Condition: not checked yet, retrying...');
                           }
-                          if (attempt < 5) this.log('Asset Condition: not checked yet, retrying...');
+                          if (!checked) { this.log('Asset Condition: radio never confirmed checked this cycle -- retrying cycle'); continue; }
+                          await this.sleep(300);
+                          const nextOk = await this.nextStep();
+                          const stillOnAssetCondition = Array.from(document.querySelectorAll('LABEL.css-rzgavw')).some(l => /unsafe/i.test(l.innerText || ''));
+                          if (nextOk && !stillOnAssetCondition) {
+                              advanced = true;
+                          } else {
+                              this.log('Asset Condition: Next did not advance the page (nextOk=' + nextOk + ') -- retrying cycle');
+                          }
                       }
-                      await this.sleep(300);
-                      await this.nextStep();
+                      if (!advanced) {
+                          this.log('Asset Condition: FAILED to advance after 3 full cycles');
+                          return 'assetConditionFailed';
+                      }
                       return 'assetCondition';
                   }
 
@@ -453,6 +483,14 @@ const CreateWRAutofill = {
 
              const stepAfterEquipment = await detectAndHandleStep('post-equipment');
              this.log('After equipment next: detected "' + stepAfterEquipment + '"');
+
+             // BUG FIX (2026-07-23): propagate an honest failure instead of
+             // silently falling through to Location/Work Details steps that
+             // don't exist yet -- see detectAndHandleStep's Asset Condition
+             // branch above.
+             if (stepAfterEquipment === 'assetConditionFailed') {
+                 return { ok: false, message: 'Stuck on Asset Condition step -- could not confirm the "Unsafe to Move" selection or advance past it after 3 attempts. Try again, or finish this WR manually in the AAP window.' };
+             }
 
              // If Asset Condition was handled, now wait for Location
              if (stepAfterEquipment === 'assetCondition') {
