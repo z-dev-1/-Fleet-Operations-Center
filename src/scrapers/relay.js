@@ -20,8 +20,23 @@ const { withRetry } = require('../utils/retry');    // H-1: per-unit retry
 
 const AAP_SERVICE_BASE  = 'https://aap-na.corp.amazon.com/v2/service/';
 const VENDOR_PARAMS = '&vendors=Amerit&vendors=CEI&vendors=COX&vendors=CUMMINS&vendors=DICKINSON&vendors=DSP_ENTERED&vendors=FIRST_ADVANTAGE&vendors=FLEETPRIDE&vendors=FREIGHTLINER&vendors=GEOTAB&vendors=GOODYEAR&vendors=H_AND_J&vendors=KENWORTH&vendors=KOONER&vendors=KWNE&vendors=OEM&vendors=PACLEASE&vendors=PENSKE&vendors=PETERBILT&vendors=RENTAL&vendors=Ryder&vendors=SAFELITE&vendors=SIEMENS&vendors=STRAIGHTLINE&vendors=TA&vendors=UNASSIGNED&vendors=VELOCITI&vendors=VOLVO&assetPrograms=DSP-MMBT&assetPrograms=UTP&assetPrograms=vupAfp';
-const AAP_GARAGE_BASE = 'https://aap-na.corp.amazon.com/v2/page/817ca098-8441-4329-a71e-6768f9d7e6c5';
-function garageUrl(tab, id) { return AAP_GARAGE_BASE + '?tab=' + tab + '&ids=' + encodeURIComponent(id); }
+const AAP_GARAGE_BASE = 'https://aap-na.corp.amazon.com/page/817ca098-8441-4329-a71e-6768f9d7e6c5';
+// Open (non-terminal) AAP work-request statuses ÃƒÆ’Ã†â€™Ã¢â‚¬â€ ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ã¢â‚¬Å¡ÃƒÆ’Ã¢â‚¬Å¡Ã‚Â¢ used to filter server-side so closed/completed
+// rows never reach the client-side scraper at all (2026-07-23 fix).
+const AAP_OPEN_STATUSES = ['CREATED','ESTIMATE_APPROVED','ESTIMATE_PENDING_APPROVAL','ESTIMATE_REJECTED','IN_TRANSIT','MOVE_REQUESTED','PENDING','SCHEDULED','WORK_IN_PROGRESS','WORK_ORDER_ASSIGNED'];
+const AAP_OPEN_STATUSES_QS = AAP_OPEN_STATUSES.map(function(s){ return 'statuses=' + s; }).join('&');
+function garageUrl(tab, id) {
+  var idQS = 'ids=' + encodeURIComponent(id);
+  if (tab === 'Planned') {
+    // No tab param for Planned ÃƒÆ’Ã†â€™Ã¢â‚¬â€ ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ã¢â‚¬Å¡ÃƒÆ’Ã¢â‚¬Å¡Ã‚Â¢ open-status filter alone is the correct query (confirmed against live AAP UI).
+    return AAP_GARAGE_BASE + '?' + idQS + '&' + AAP_OPEN_STATUSES_QS;
+  }
+  if (tab === 'Unplanned') {
+    return AAP_GARAGE_BASE + '?tab=Unplanned&' + idQS + '&' + AAP_OPEN_STATUSES_QS;
+  }
+  // All other tabs (e.g. 'All' fallback): unchanged behavior, no status filter.
+  return AAP_GARAGE_BASE + '?tab=' + tab + '&' + idQS;
+}
 const MAX_CONCURRENT    = 5; // 5 concurrent units (~10 BrowserViews)
 const PAGE_TIMEOUT_MS   = 35000;   // extra headroom for WO tab settle
 const PAGE_SETTLE_MS    = 3000;
@@ -388,9 +403,9 @@ const GARAGE_LIST_SCRIPT = String.raw`
         if (!state) {
           var badges = cells[c].querySelectorAll('[class*="badge"],[class*="Badge"],[class*="status"],[class*="Status"],[class*="chip"],[class*="Chip"],[class*="tag"],[class*="Tag"]');
           for (var b = 0; b < badges.length; b++) {
+            var bt = (badges[b].textContent || '').trim();
             if (/^(Completed|Cancelled|Work in progress|Work order assigned|Pending assignment|Rejected|Pending verification|Pending approval|Scheduled|Created|Scheduled Created|In Progress|No Vendor Assigned)$/i.test(bt)) {
               state = bt; break;
-
             }
           }
           var ctClean = ct.replace(/\s+/g, ' ');
@@ -939,9 +954,11 @@ async function scrapeRelay(aapRows, onBatchDone, relayCache) {
   const _CLOSED_PLANNED_RE = /^(Completed|Cancelled)$/i;
   const _plannedPassTargets = targets.filter(r => {
     const reason = (r.lifecycleReason || '').trim();
+    // Trigger on openPlanned alone -- a unit can have an open Planned WR with
+    // zero open Unplanned WRs (e.g. Unplanned already closed out), and that
+    // Planned WR must still surface in the Repair tab.
     return _PM_REASONS_RE.test(reason) &&
-           (r.openUnplanned || 0) > 0 &&
-           (r.openPlanned   || 0) > 0 &&
+           (r.openPlanned || 0) > 0 &&
            !!results[r.equipmentId];
   });
   if (_plannedPassTargets.length) {
