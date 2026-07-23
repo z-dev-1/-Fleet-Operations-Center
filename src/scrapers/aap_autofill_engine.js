@@ -718,24 +718,6 @@ const CreateWRAutofill = {
                   // running inputOffset that advances by 2 or 3 depending on whether
                   // the row we just filled was Tires.
                   let inputOffset = 0;
-                  // Scoped lookup for TIRES-only fields: "Select Tire Position" and
-                  // "Tire Size" each have their OWN distinct placeholder text (per
-                  // confirmed live screenshot), NOT the generic "Enter a value..."
-                  // used by every other Work Area / Subcategory pair. That means they
-                  // never appear in the flat allInputs list at all -- the previous
-                  // fixed-offset approaches were typing the position value into the
-                  // NEXT row's fresh Work Area box by mistake. Find them scoped to
-                  // this row (climbing up from the Work Area input) instead.
-                  const findRowInput = (referenceEl, placeholderSubstr) => {
-                      let el = referenceEl;
-                      for (let hops = 0; hops < 8 && el; hops++) {
-                          el = el.parentElement;
-                          if (!el) break;
-                          const found = Array.from(el.querySelectorAll('input')).find(inp => (inp.placeholder || '').toLowerCase().includes(placeholderSubstr));
-                          if (found) return found;
-                      }
-                      return null;
-                  };
                   for (let i = 0; i < totalRows; i++) {
                       const pair = p.areaPairs[i];
                       if (!pair.area) continue;
@@ -761,54 +743,71 @@ const CreateWRAutofill = {
                           if (workOpt) {
                               this.click(workOpt);
                               this.log('Work Area [' + i + ']: clicked "' + (workOpt.innerText || '').trim() + '"');
-                              if (isTires) {
-                                  await this.waitFor(() => findRowInput(workInput, 'tire position'), 3000, 80);
-                              } else {
-                                  // Wait for sub dropdown to be ready after work area loads subcategories
-                                  await this.waitFor(() => {
-                                      const ins = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent);
-                                      return ins.length > inputOffset + 1 ? true : null;
-                                  }, 3000, 80);
-                              }
+                              // Wait for sub dropdown to be ready after work area loads subcategories.
+                              // Tires and every other area both reveal exactly ONE new generic
+                              // "Enter a value..." combobox at this point (Position for Tires,
+                              // Subcategory for everything else) -- Tire Size only appears later,
+                              // after Position itself is selected.
+                              await this.waitFor(() => {
+                                  const ins = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent);
+                                  return ins.length > inputOffset + 1 ? true : null;
+                              }, 3000, 80);
                               await this.sleep(300);
                           } else { this.log('Work Area [' + i + ']: no match for "' + pair.area + '"'); }
                       }
 
+                      // BUG FIX (2026-07-23, take 4): Tire Position lives at the SAME flat
+                      // index as every other area's Subcategory (inputOffset + 1) -- confirmed
+                      // via live DOM dump, its placeholder is the generic "Enter a value..."
+                      // just like every other field, NOT a distinct string as earlier guessed.
+                      // The real reason "Steer Left" never matched before is that this app's
+                      // option lists aren't always rendered as BUTTON[role="option"] -- some
+                      // (like this one) use LI/[role="listitem"] instead, same as the existing
+                      // waitForOption() helper already has to handle elsewhere in this file.
                       if (isTires) {
-                          // TIRE POSITION -- scoped to this row via its own distinct placeholder.
                           if (pair.subcategory) {
-                              const posInput = findRowInput(workInput, 'tire position');
+                              const allInputsPos = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent);
+                              const posInput = allInputsPos[inputOffset + 1] || null;
                               if (posInput) {
                                   try { posInput.focus(); } catch (e) {}
                                   const ps = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
                                   const posSearch = pair.subcategory.toLowerCase();
                                   try { if (ps) ps.call(posInput, posSearch); else posInput.value = posSearch; } catch (e) { posInput.value = posSearch; }
                                   ['input', 'change', 'keyup'].forEach(t => { try { posInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
-                                  const posOpt = await this.waitFor(() => {
-                                      const btns = Array.from(document.querySelectorAll('BUTTON[role="option"]'));
-                                      const target = pair.subcategory.toUpperCase();
-                                      return btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase() === target)
-                                          || btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase().includes(target))
-                                          || null;
-                                  }, 4000, 80);
+                                  const posOpt = await this.waitForOption(pair.subcategory, 4000);
                                   if (posOpt) { this.click(posOpt); this.log('Tire Position [' + i + ']: clicked "' + (posOpt.innerText || '').trim() + '"'); await this.sleep(300); }
-                                  else { this.log('Tire Position [' + i + ']: no match for "' + pair.subcategory + '"'); }
+                                  else {
+                                      this.log('Tire Position [' + i + ']: no match for "' + pair.subcategory + '"');
+                                      // One more diagnostic in case this guess (LI/[role=listitem] fallback)
+                                      // is STILL wrong -- capture exactly what the widget's own listbox
+                                      // container holds so the next fix doesn't have to guess again.
+                                      try {
+                                          const listboxId = posInput.getAttribute('aria-controls');
+                                          const listboxEl = listboxId ? document.getElementById(listboxId) : null;
+                                          this.log('TIRES DIAG [' + i + ']: listbox #' + listboxId + ' -> ' + (listboxEl ? listboxEl.outerHTML.slice(0, 600) : '(not found)'));
+                                      } catch (e) {}
+                                  }
                               } else { this.log('Tire Position [' + i + ']: input not found'); }
                           }
 
-                          // TIRE SIZE -- always takes its first/default option per confirmed
-                          // live guidance (aap_wizard_knowledge.js) -- no typing needed.
-                          const sizeInput = findRowInput(workInput, 'tire size');
+                          // TIRE SIZE -- appears as a 3rd generic combobox only after Position is
+                          // selected (same reveal-after-select pattern as Subcategory). Always
+                          // takes its first/default option per confirmed live guidance
+                          // (aap_wizard_knowledge.js) -- no typing needed.
+                          const sizeInput = await this.waitFor(() => {
+                              const ins = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent);
+                              return ins[inputOffset + 2] || null;
+                          }, 3000, 80);
                           if (sizeInput) {
                               try { sizeInput.focus(); } catch (e) {}
                               ['mousedown', 'focus', 'click'].forEach(t => { try { sizeInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
                               const sizeOpt = await this.waitFor(() => {
-                                  const btns = Array.from(document.querySelectorAll('BUTTON[role="option"]')).filter(b => b.offsetParent);
+                                  const btns = Array.from(document.querySelectorAll('[role="option"], LI, [role="listitem"]')).filter(b => b.offsetParent);
                                   return btns[0] || null;
                               }, 3000, 80);
                               if (sizeOpt) { this.click(sizeOpt); this.log('Tire Size [' + i + ']: clicked default "' + (sizeOpt.innerText || '').trim() + '"'); await this.sleep(300); }
                               else { this.log('Tire Size [' + i + ']: dropdown did not open'); }
-                          } else { this.log('Tire Size [' + i + ']: input not found'); }
+                          } else { this.log('Tire Size [' + i + ']: 3rd combobox not found'); }
                       } else if (pair.subcategory) {
                           const allInputs2 = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent);
                           const subInput = allInputs2[inputOffset + 1] || null;
@@ -831,11 +830,11 @@ const CreateWRAutofill = {
                           } else { this.log('Sub Area [' + i + ']: input not found'); }
                       }
 
-                      // Tires rows only ever add ONE combobox (Work Area) to the generic
-                      // flat "Enter a value..." list -- Position/Size use their own
-                      // distinct placeholders and are never in that list (see findRowInput
-                      // above), so the offset must only advance by 1 for Tires rows.
-                      inputOffset += isTires ? 1 : 2;
+                      // Tires rows end up with 3 generic "Enter a value..." comboboxes over
+                      // their lifecycle (Work Area, Position, Size -- Size reveals only after
+                      // Position is picked); every other area only ever has 2 (Work Area,
+                      // Subcategory). Advance the running offset accordingly for the next row.
+                      inputOffset += isTires ? 3 : 2;
                   }
              }
 
