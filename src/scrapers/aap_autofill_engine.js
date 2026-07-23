@@ -694,13 +694,13 @@ const CreateWRAutofill = {
                  // Phase 1: click + (totalRows-1) times, wait for each new row
                  if (totalRows > 1) {
                      for (let r = 0; r < totalRows - 1; r++) {
-                         const currentCount = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent).length;
+                         const currentCount = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
                          const addBtn = document.querySelector('BUTTON.css-1sm4msn') ||
                              Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && b.querySelector('svg') && !(b.innerText || '').trim());
                          if (addBtn) {
                              addBtn.click();
                              await this.waitFor(() => {
-                                 const now = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent).length;
+                                 const now = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
                                  return now > currentCount ? true : null;
                              }, 3000, 80);
                              await this.sleep(100);
@@ -724,7 +724,7 @@ const CreateWRAutofill = {
                       this.log('Area pair [' + i + ']: ' + pair.area + ' / ' + pair.subcategory);
                       const isTires = /^tires$/i.test(pair.area.trim());
 
-                      const allInputs = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent);
+                      const allInputs = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent);
                       const workInput = allInputs[inputOffset] || null;
                       if (workInput) {
                           try { workInput.focus(); } catch (e) {}
@@ -749,7 +749,7 @@ const CreateWRAutofill = {
                               // Subcategory for everything else) -- Tire Size only appears later,
                               // after Position itself is selected.
                               await this.waitFor(() => {
-                                  const ins = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent);
+                                  const ins = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent);
                                   return ins.length > inputOffset + 1 ? true : null;
                               }, 3000, 80);
                               await this.sleep(300);
@@ -766,7 +766,7 @@ const CreateWRAutofill = {
                       // waitForOption() helper already has to handle elsewhere in this file.
                       if (isTires) {
                           if (pair.subcategory) {
-                              const allInputsPos = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent);
+                              const allInputsPos = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent);
                               const posInput = allInputsPos[inputOffset + 1] || null;
                               if (posInput) {
                                   // DIAGNOSTIC (2026-07-23, round 2): click for real (not just focus)
@@ -809,7 +809,7 @@ const CreateWRAutofill = {
                           // takes its first/default option per confirmed live guidance
                           // (aap_wizard_knowledge.js) -- no typing needed.
                           const sizeInput = await this.waitFor(() => {
-                              const ins = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent);
+                              const ins = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent);
                               return ins[inputOffset + 2] || null;
                           }, 3000, 80);
                           if (sizeInput) {
@@ -823,7 +823,7 @@ const CreateWRAutofill = {
                               else { this.log('Tire Size [' + i + ']: dropdown did not open'); }
                           } else { this.log('Tire Size [' + i + ']: 3rd combobox not found'); }
                       } else if (pair.subcategory) {
-                          const allInputs2 = Array.from(document.querySelectorAll('INPUT[role="combobox"][placeholder="Enter a value..."]')).filter(el => el.offsetParent);
+                          const allInputs2 = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent);
                           const subInput = allInputs2[inputOffset + 1] || null;
                           if (subInput) {
                               try { subInput.focus(); } catch (e) {}
