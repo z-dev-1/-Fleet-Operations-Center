@@ -133,7 +133,15 @@ async function createWorkRequest(payload, unit, log) {
   const vendorName = payload.vendor || '';
   const supplierId = VENDOR_IDS[vendorName] || '';
   if (!supplierId) {
-    log('[CreateWR] WARNING: No supplierId for vendor "' + vendorName + '". WR may fail or use default.');
+    // FIX (2026-07-23): AAP's createRepair API rejects requests with a
+    // missing/null supplierId with 403 Forbidden -- it is a server-side
+    // entitlement check, not something retrying or omitting the field
+    // works around. Bail out BEFORE making the doomed API call and tell
+    // the caller (src/ipc/scrapers.js -> wr-modal.js) to fall back to the
+    // browser-automation autofill flow instead, which does not need a
+    // pre-captured supplierId.
+    log('[CreateWR] No supplierId on file for vendor "' + vendorName + '" -- AAP will reject this with 403. Falling back to autofill.');
+    return { ok: false, needsAutofill: true, error: 'No supplierId on file for vendor "' + vendorName + '" -- use autofill.' };
   }
 
   // Build suggestedItems from areaPairs

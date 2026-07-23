@@ -18,7 +18,7 @@ const logger = require('../utils/logger')('ipc:orcha');
 const { handle, timeoutAfter, requireString, requireArray } = require('./_safe');
 const { ConfigError, NetworkError } = require('../utils/errors');
 
-// â”€â”€ Issue #4: URL allowlist for open-popup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Issue #4: URL allowlist for open-popup ────────────────────────────────
 // Only these hostnames may be loaded in a managed BrowserWindow with AutoLogin.
 // Subdomain matching: any host that ENDS WITH an allowed entry is permitted.
 const POPUP_ALLOWED_HOSTS = [
@@ -55,8 +55,8 @@ function _validatePopupUrl(rawUrl) {
 function registerOrchaIPC(ctx) {
   const send = ctx.sendToWindow;
 
-  // â”€â”€ orcha:deep-process â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // Issue #11: 120s timeout â€” runOrchaDeepScan cannot hang IPC indefinitely
+  // ── orcha:deep-process ───────────────────────────────────────────────────
+  // Issue #11: 120s timeout — runOrchaDeepScan cannot hang IPC indefinitely
   handle('orcha:deep-process', async (_e, unitIds) => {
     requireArray(unitIds, 'unitIds');
     // Validate each entry is a non-empty string
@@ -104,7 +104,7 @@ function registerOrchaIPC(ctx) {
     };
   });
 
-  // â”€â”€ orcha:record-correction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── orcha:record-correction ──────────────────────────────────────────────
   // Issue #19: validate all required fields before writing to learn store
   handle('orcha:record-correction', async (_e, correction) => {
     if (!correction || typeof correction !== 'object') {
@@ -127,19 +127,19 @@ function registerOrchaIPC(ctx) {
     return { ok: true };
   });
 
-  // â”€â”€ orcha:suggest-vendor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── orcha:suggest-vendor ─────────────────────────────────────────────────
   handle('orcha:suggest-vendor', async (_e, unit) => {
     const { suggestVendor } = require('../orcha/learn');
     return suggestVendor(unit);
   });
 
-  // â”€â”€ orcha:get-corrections â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── orcha:get-corrections ────────────────────────────────────────────────
   handle('orcha:get-corrections', async (_e, field, limit) => {
     const { getCorrectionsContext } = require('../orcha/learn');
     return getCorrectionsContext(field, limit);
   });
 
-  // â”€â”€ open-popup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── open-popup ───────────────────────────────────────────────────────────
   // Issue #4: URL validated against POPUP_ALLOWED_HOSTS before window creation
   handle('open-popup', async (_e, url, title) => {
     requireString(url, 'url');
@@ -187,9 +187,9 @@ function registerOrchaIPC(ctx) {
     return { ok: true };
   });
 
-  // â”€â”€ S28-Sprint3: Execute recommendation via Orchestrator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── S28-Sprint3: Execute recommendation via Orchestrator ──────────────────
   // Validates through Guardian, then runs the intent through the full
-  // orchestrator pipeline: validate â†’ enrich â†’ plan â†’ execute â†’ verify
+  // orchestrator pipeline: validate → enrich → plan → execute → verify
   handle('orcha:execute', async (_e, intent) => {
     if (!intent || typeof intent !== 'object') throw new ConfigError('intent must be an object', 'intent');
 
@@ -241,13 +241,13 @@ function registerOrchaIPC(ctx) {
     return result;
   });
 
-  // â”€â”€ S28-Sprint3: Get orchestrator execution log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── S28-Sprint3: Get orchestrator execution log ────────────────────────────
   handle('orcha:get-execution-log', () => {
     const orchestrator = require('../orcha/orchestrator');
     return orchestrator.getLog(30);
   });
 
-  // â”€â”€ S28: Excel Export â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── S28: Excel Export ──────────────────────────────────────────────────────
   handle('orcha:export-excel', (_e, { rows, columns }) => {
     const { generateExcel } = require('../utils/excel-export');
     const { app } = require('electron');
@@ -260,7 +260,7 @@ function registerOrchaIPC(ctx) {
     return { ok: true, path: outputPath, filename };
   });
 
-  // â”€â”€ S28: RCA Code Auto-Inference â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── S28: RCA Code Auto-Inference ───────────────────────────────────────────
   handle('orcha:infer-rca', (_e, { text, context }) => {
     const { inferRCA } = require('../orcha/rca-infer');
     return inferRCA(text || '', context || {});

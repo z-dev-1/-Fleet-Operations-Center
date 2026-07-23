@@ -71,10 +71,17 @@ function getWatchConfig() {
     // stricter behavior) so nothing silently changes behavior for
     // existing users on upgrade.
     if (!cfg.replyMode) cfg.replyMode = 'mentions';
+    // FEATURE (2026-07-23): replyMode is now a PER-CHANNEL setting so each
+    // partner channel can independently be strict ('mentions') or loose
+    // ('occasional'). Migration for configs saved before this existed:
+    // seed each channel's replyMode from the old global cfg.replyMode so
+    // nothing silently changes behavior on upgrade. Idempotent -- once a
+    // channel has its own replyMode this is a no-op for it.
+    cfg.channels.forEach((ch) => { if (!ch.replyMode) ch.replyMode = cfg.replyMode; });
     return cfg;
   }
   // First run - seed defaults.
-  const seeded = { enabled: true, replyMode: 'mentions', channels: DEFAULT_CHANNELS.map(c => ({ ...c, lastSeenTs: null })) };
+  const seeded = { enabled: true, replyMode: 'mentions', channels: DEFAULT_CHANNELS.map(c => ({ ...c, lastSeenTs: null, replyMode: 'mentions' })) };
   store.save('slackChannelWatchConfig', seeded);
   return seeded;
 }
@@ -182,6 +189,38 @@ async function _shouldChimeIn(messageText, askOrcha) {
   } catch (e) {
     logger.warn('[SlackWatch] chime-in gate check failed, defaulting to NO:', e.message);
     return false; // safe failure mode -- never chime in on an error
+  }
+}
+
+// FEATURE (2026-07-23): 'mentions' (strict) mode gate. Runs ONLY for
+// messages in a 'mentions'-mode channel that do NOT contain the literal
+// Slack '<@USERID>' mention token. Literal-token detection alone misses
+// real phrasing that is obviously directed at the signed-in user --
+// addressed by name, a direct reply to something they said, or a
+// question with no other plausible addressee. This gate exists to catch
+// exactly that, WITHOUT loosening 'mentions' mode into 'occasional' --
+// the bar here is 'clearly addressed to this specific person', which is
+// stricter than occasional's 'clearly relevant/worth chiming in on'.
+// Same safe-failure philosophy as _shouldChimeIn: default to NO on any
+// doubt or AI error.
+function _directedAtMePrompt(myName) {
+  const who = myName ? (' named "' + myName + '"') : '';
+  return 'You are monitoring a Slack channel on behalf of a specific person' + who + '. This message does NOT contain a literal @-mention of them, but decide if it is still UNMISTAKABLY addressed to them personally -- e.g. it calls them by name, is a direct reply/response to something they just said, or is a question with no other plausible addressee in context.\n\n' +
+    'Only answer YES if a reasonable person reading the channel would say this message is clearly meant for THIS person specifically, not the channel in general.\n\n' +
+    'Answer NO for: general channel chatter, messages addressed to someone else or to no one in particular, topics that are merely relevant, or anything where you are not confident it is meant for this specific person.\n\n' +
+    'When in doubt, answer NO.\n\n' +
+    'Respond with ONLY the single word YES or NO, nothing else.\n\n' +
+    'Message: ';
+}
+
+async function _isDirectedAtMe(messageText, myName, askOrcha) {
+  try {
+    const aiResult = await askOrcha(_directedAtMePrompt(myName) + messageText);
+    const text = (aiResult && aiResult.text || '').trim().toUpperCase();
+    return text.startsWith('YES');
+  } catch (e) {
+    logger.warn('[SlackWatch] directed-at-me gate check failed, defaulting to NO:', e.message);
+    return false; // safe failure mode -- never treat as directed-at-me on an error
   }
 }
 
@@ -294,11 +333,22 @@ async function pollChannelsOnce(log) {
       const mentionToken = myUserId ? '<@' + myUserId + '>' : null;
       const isMention = (m) => !!(mentionToken && m.text && m.text.includes(mentionToken));
 
+      // FEATURE (2026-07-23): replyMode is now per-channel (ch.replyMode),
+      // falling back to the legacy global config.replyMode, then 'mentions'
+      // for channels that somehow have neither (shouldn't happen post
+      // getWatchConfig's migration, but keep the safe default anyway).
+      const chMode = ch.replyMode || config.replyMode || 'mentions';
+
       const candidateMsgs = messages
         .filter(m => parseFloat(m.ts) > parseFloat(ch.lastSeenTs))
         .filter(m => m.userId && m.userId !== myUserId); // skip our own + system/empty-author messages
 
-      const newMsgs = (config.replyMode === 'occasional' ? candidateMsgs : candidateMsgs.filter(isMention))
+      // Both modes now consider every new candidate message (capped per
+      // cycle) -- the mention/gate check happens per-message below. This
+      // lets 'mentions' mode also catch messages that don't literally
+      // @-mention the user but are clearly still meant for them (see
+      // _isDirectedAtMe below), without loosening it into 'occasional'.
+      const newMsgs = candidateMsgs
         .reverse()
         .slice(0, MAX_MESSAGES_PER_POLL);
 
@@ -325,13 +375,25 @@ async function pollChannelsOnce(log) {
         // failure -- correctly still advances lastSeenTs since the
         // message WAS considered, just declined.
         const mentioned = isMention(msg);
-        if (!mentioned && config.replyMode === 'occasional') {
+        if (!mentioned && chMode === 'occasional') {
           const shouldChime = await _shouldChimeIn(msg.text, askOrcha);
           if (!shouldChime) {
             doLog(`[SlackWatch] ${ch.name}: not mentioned, chose not to chime in on ${msg.ts}`);
             continue;
           }
           doLog(`[SlackWatch] ${ch.name}: not mentioned, but chiming in on ${msg.ts} (gate said relevant)`);
+        } else if (!mentioned && chMode === 'mentions') {
+          // FEATURE (2026-07-23): strict mode still gets one more chance --
+          // no literal @-mention token, but is this UNMISTAKABLY meant for
+          // the signed-in user anyway (addressed by name, direct reply to
+          // them, etc)? Deliberately a stricter bar than the occasional
+          // gate above (see _isDirectedAtMe comment).
+          const directedAtMe = await _isDirectedAtMe(msg.text, auth.user, askOrcha);
+          if (!directedAtMe) {
+            doLog(`[SlackWatch] ${ch.name}: not mentioned, strict mode — not clearly directed at me, skipping ${msg.ts}`);
+            continue;
+          }
+          doLog(`[SlackWatch] ${ch.name}: not mentioned, but strict-mode gate says clearly directed at me on ${msg.ts}`);
         }
 
         const draft = await _classifyAndDraft(msg.text, askOrcha);

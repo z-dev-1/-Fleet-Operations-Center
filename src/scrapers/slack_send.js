@@ -355,6 +355,33 @@ const _dmNotifiedTs = new Set();
  * array of message objects matching what the consumer actually reads:
  * { ts, text, user, channelId }.
  */
+/**
+ * listOpenDMs() -- FEATURE (2026-07-23): returns ALL open DM conversations
+ * (not just ones with Slack's has_unreads flag, unlike readDMs() above).
+ * Needed by the DM Auto-Reply engine (slack_dm_autoreply.js), which -- like
+ * the Partner Auto-Reply channel engine -- tracks its OWN persisted
+ * lastSeenTs per conversation and must check every DM thread on every poll,
+ * not just ones Slack currently considers unread (a thread can have a new
+ * message we have not replied to yet even after Slack's own unread flag is
+ * cleared by e.g. the user glancing at the Chat tab poller). Deliberately
+ * independent of readDMs()'s _dmNotifiedTs set above -- that set exists to
+ * avoid duplicate desktop-notification spam for the manual-reply Chat tab
+ * poller, and sharing it here would cause the two pollers to silently steal
+ * each other's notifications.
+ */
+async function listOpenDMs(limit) {
+  const lim = Math.min(Number(limit) || 40, 100);
+  const counts = await slackWebApi('client.counts', {});
+  if (!counts.ok) throw new Error('client.counts failed: ' + counts.error);
+  const ims = (counts.ims || []).slice(0, lim);
+  const results = [];
+  for (const im of ims) {
+    const name = await _resolveDmSenderName(im.id);
+    results.push({ channelId: im.id, name: name || im.id });
+  }
+  return results;
+}
+
 async function readDMs(limit) {
   const lim = Math.min(Number(limit) || 20, 39);
   const counts = await slackWebApi('client.counts', {});
@@ -451,4 +478,4 @@ async function processAutoReplies(messages, rules) {
   return sent;
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership };
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership };

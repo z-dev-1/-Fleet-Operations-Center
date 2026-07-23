@@ -21,7 +21,7 @@ function renderIntelPane(unit){
       '</div>'+
       '<div class="dp-risk-info">'+
         '<div class="dp-risk-label">Uptake Risk Score</div>'+
-        '<div class="dp-risk-sub">'+(risk>=70?'High Ã¢â‚¬â€ maintenance recommended':risk>=40?'Moderate Ã¢â‚¬â€ monitor closely':'Low risk')+'</div>'+
+        '<div class="dp-risk-sub">'+(risk>=70?'High — maintenance recommended':risk>=40?'Moderate — monitor closely':'Low risk')+'</div>'+
         (unit.riskLabel?'<div class="dp-risk-sub" style="margin-top:2px">'+esc(unit.riskLabel)+'</div>':'')+
         (unit.lastDataDate?'<div class="dp-risk-sub" style="color:var(--mut);margin-top:4px">Data: '+fmtDate(unit.lastDataDate)+'</div>':'')+
       '</div>'+

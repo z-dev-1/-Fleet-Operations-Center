@@ -1,20 +1,20 @@
 /**
- * analytics.js â€” Fleet KPI analytics dashboard (Stage 13)
+ * analytics.js — Fleet KPI analytics dashboard (Stage 13)
  *
  * Pure client-side computation from state.slice('fleet').rows.
- * No new IPC needed â€” all data is available in the renderer state.
+ * No new IPC needed — all data is available in the renderer state.
  *
  * Sections:
- *   1. Summary bar         â€” total, unavailable %, available %, high-risk
- *   2. Lifecycle breakdown â€” CSS bar chart per lifecycle state
- *   3. By-operator table   â€” total / unavail / high-risk / open-WR per op
- *   4. Risk distribution   â€” HIGH/MEDIUM/LOW tiers with mini bars
- *   5. Top vendors         â€” ranked vendor counts from row.vendor (relay-merged)
- *   6. PM due dates        â€” pmB / pmX / DOT overdue/due-soon counts
- *   7. Body-type mix       â€” asset type distribution bar chart
+ *   1. Summary bar         — total, unavailable %, available %, high-risk
+ *   2. Lifecycle breakdown — CSS bar chart per lifecycle state
+ *   3. By-operator table   — total / unavail / high-risk / open-WR per op
+ *   4. Risk distribution   — HIGH/MEDIUM/LOW tiers with mini bars
+ *   5. Top vendors         — ranked vendor counts from row.vendor (relay-merged)
+ *   6. PM due dates        — pmB / pmX / DOT overdue/due-soon counts
+ *   7. Body-type mix       — asset type distribution bar chart
  *
  * S13-fix: vendor data derived from row.vendor (relay-merged field on every
- * fleet row) â€” no relay cache IPC needed, relay bridge import removed.
+ * fleet row) — no relay cache IPC needed, relay bridge import removed.
  *
  * Updates reactively on fleet:data bus events.
  */
@@ -26,11 +26,11 @@ import toast from '../components/toast.js';
 
 let _el = null;
 
-// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Helpers ────────────────────────────────────────────────────────────────
 const _safe = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const _pct  = (n, t) => t ? Math.round((n / t) * 100) : 0;
 
-// â”€â”€ PM field parser â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── PM field parser ────────────────────────────────────────────────────────
 // pmB / pmX / dot values come as strings: "3 days", "overdue", "0 days", "--"
 function _pmDaysNum(s) {
   if (!s || s === '--') return null;
@@ -41,11 +41,11 @@ function _pmDaysNum(s) {
   return m ? parseInt(m[1], 10) : null;
 }
 
-// â”€â”€ Core computation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Core computation ───────────────────────────────────────────────────────
 function _compute(rows) {
   const total = rows.length;
 
-  // â€” Lifecycle buckets â€”
+  // — Lifecycle buckets —
   const lcMap = {};
   for (const r of rows) {
     const lc = (r.lifecycleState || 'Unknown').trim();
@@ -62,12 +62,12 @@ function _compute(rows) {
     return s.includes('available') && !s.includes('un');
   }).length;
 
-  // â€” Risk tiers â€”
+  // — Risk tiers —
   const highRisk = rows.filter(r => (r.riskScore || 0) >= 75).length;
   const medRisk  = rows.filter(r => { const s = r.riskScore || 0; return s >= 40 && s < 75; }).length;
   const lowRisk  = rows.filter(r => (r.riskScore || 0) < 40).length;
 
-  // â€” By operator â€”
+  // — By operator —
   const opMap = {};
   for (const r of rows) {
     const op = (r.operator || 'Unknown').toUpperCase().trim();
@@ -79,7 +79,7 @@ function _compute(rows) {
   }
   const opSorted = Object.entries(opMap).sort((a, b) => b[1].total - a[1].total);
 
-  // â€” Top vendors â€” derived from row.vendor (relay-merged field on every fleet row)
+  // — Top vendors — derived from row.vendor (relay-merged field on every fleet row)
   const vendMap = {};
   for (const r of rows) {
     const v = (r.vendor || '').trim();
@@ -87,7 +87,7 @@ function _compute(rows) {
   }
   const vendSorted = Object.entries(vendMap).sort((a, b) => b[1] - a[1]).slice(0, 10);
 
-  // â€” PM health â€”
+  // — PM health —
   let pmBOver = 0, pmBSoon = 0;
   let pmXOver = 0, pmXSoon = 0;
   let dotOver = 0, dotSoon = 0;
@@ -101,7 +101,7 @@ function _compute(rows) {
     if (d !== null) { if (d < 0) dotOver++; else if (d <= SOON_DAYS) dotSoon++; }
   }
 
-  // â€” Body-type mix â€”
+  // — Body-type mix —
   const btMap = {};
   for (const r of rows) {
     const bt = (r.assetType || r.bodyType || 'Unknown').trim();
@@ -109,7 +109,7 @@ function _compute(rows) {
   }
   const btSorted = Object.entries(btMap).sort((a, b) => b[1] - a[1]);
 
-  // â€” Sync meta â€”
+  // — Sync meta —
   const fleetState = state.slice('fleet');
   const syncedAt   = fleetState.syncedAt;
   const stale      = fleetState.stale;
@@ -123,20 +123,20 @@ function _compute(rows) {
   };
 }
 
-// â”€â”€ Bar render helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Bar render helper ─────────────────────────────────────────────────────
 function _bar(value, max, cls) {
   const pct = max ? Math.min(100, Math.round((value / max) * 100)) : 0;
   return `<div class="an-bar-track"><div class="an-bar-fill an-bar-fill--${cls}" style="width:${pct}%"></div></div>`;
 }
 
-// â”€â”€ HTML renderers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── HTML renderers ────────────────────────────────────────────────────────
 
 function _renderSummary(c) {
   const unavailPct  = _pct(c.unavailCount, c.total);
   const availPct    = _pct(c.availCount,   c.total);
   const highRiskPct = _pct(c.highRisk,     c.total);
   const staleHtml = c.stale
-    ? `<div class="an-stale-banner">âš  Data may be stale â€” trigger a sync for current counts</div>`
+    ? `<div class="an-stale-banner">⚠ Data may be stale — trigger a sync for current counts</div>`
     : '';
   const syncedStr = c.syncedAt
     ? new Date(c.syncedAt).toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' })
@@ -158,7 +158,7 @@ function _renderSummary(c) {
       </div>
       <div class="an-kpi an-kpi--risk">
         <span class="an-kpi__val">${c.highRisk} <span class="an-kpi__pct">${highRiskPct}%</span></span>
-        <span class="an-kpi__lbl">High risk (â‰¥75)</span>
+        <span class="an-kpi__lbl">High risk (≥75)</span>
       </div>
       <div class="an-kpi an-kpi--synced">
         <span class="an-kpi__val an-kpi__val--sm">${syncedStr}</span>
@@ -189,8 +189,8 @@ function _renderLifecycle(c) {
 function _renderRisk(c) {
   const total = c.total || 1;
   const items = [
-    { label: 'HIGH â‰¥75',  count: c.highRisk, cls: 'risk-high' },
-    { label: 'MED 40â€“74', count: c.medRisk,  cls: 'risk-med'  },
+    { label: 'HIGH ≥75',  count: c.highRisk, cls: 'risk-high' },
+    { label: 'MED 40–74', count: c.medRisk,  cls: 'risk-med'  },
     { label: 'LOW <40',   count: c.lowRisk,  cls: 'risk-low'  },
   ];
   return `
@@ -231,7 +231,7 @@ function _renderOperators(c) {
 }
 
 function _renderVendors(c) {
-  if (!c.vendSorted.length) return '<span class="an-empty">No vendor data â€” run a relay sync first</span>';
+  if (!c.vendSorted.length) return '<span class="an-empty">No vendor data — run a relay sync first</span>';
   const maxCount = c.vendSorted[0][1];
   const rows = c.vendSorted.map(([vendor, count]) => `
     <div class="an-vend-row">
@@ -261,7 +261,7 @@ function _renderPM(c) {
             </div>
             <div class="an-pm-row an-pm-row--soon">
               <span class="an-pm-dot an-pm-dot--soon"></span>
-              <span class="an-pm-lbl">Due â‰¤14 days</span>
+              <span class="an-pm-lbl">Due ≤14 days</span>
               <span class="an-pm-val ${item.soon > 0 ? 'an-pm-val--warn' : ''}">${item.soon}</span>
             </div>
           </div>
@@ -282,7 +282,7 @@ function _renderBodyTypes(c) {
   return `<div class="an-bt-chart">${rows}</div>`;
 }
 
-// â”€â”€ Long Dwell Units (Analytics tab, 2026-07-20) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Long Dwell Units (Analytics tab, 2026-07-20) ───────────────────────────
 // Units currently unavailable and down for an extended period. Delay reason
 // / escalation level / summary are user-entered and persisted server-side
 // via long-dwell:* IPC (src/ipc/long-dwell.js) -- NOT stored on the fleet row
@@ -850,16 +850,16 @@ function _flashSavedRow(tr) {
   setTimeout(() => tr.classList.remove('an-ld-row--saved'), 900);
 }
 
-// â”€â”€ Full dashboard HTML â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Full dashboard HTML ─────────────────────────────────────────────────────
 function _dashboardHtml() {
   return `
     <div class="an-header">
       <div class="an-header__left">
         <span class="an-title">Analytics</span>
-        <span class="an-subtitle">Fleet KPI dashboard â€” computed from current sync data</span>
+        <span class="an-subtitle">Fleet KPI dashboard — computed from current sync data</span>
       </div>
       <div class="an-header__actions">
-        <button id="an-refresh" class="detail-panel__btn detail-panel__btn--secondary">â†º Refresh</button>
+        <button id="an-refresh" class="detail-panel__btn detail-panel__btn--secondary">↺ Refresh</button>
         <button id="an-back"    class="detail-panel__btn">Back to Fleet</button>
       </div>
     </div>
@@ -928,7 +928,7 @@ function _dashboardHtml() {
   `;
 }
 
-// â”€â”€ Render / update â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Render / update ───────────────────────────────────────────────────────
 function _update(rows) {
   if (!_el) return;
   const c = _compute(rows);
@@ -950,7 +950,7 @@ function _update(rows) {
   if (btEl)        btEl.innerHTML        = _renderBodyTypes(c);
 }
 
-// â”€â”€ Init â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Init ───────────────────────────────────────────────────────────────────
 export function init(container) {
   _el = document.createElement('div');
   _el.id = 'view-analytics';

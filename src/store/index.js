@@ -79,6 +79,8 @@ const REGISTRY = {
   // Slack Partner Auto-Reply (2026-07-21) -- see src/scrapers/slack_channel_watch.js
   slackChannelWatchConfig: () => path.join(P.dataDir, 'slack_channel_watch_config.json'),
   slackChannelReplies:     () => path.join(P.dataDir, 'slack_channel_replies.json'),
+  slackDMAutoReplyConfig:  () => path.join(P.dataDir, 'slack_dm_autoreply_config.json'),
+  slackDMReplies:          () => path.join(P.dataDir, 'slack_dm_replies.json'),
 };
 
 function _resolvePath(name) {

@@ -184,6 +184,20 @@ async function _processUnit(u, notesStore, askOrcha) {
   const convoStart = fullConv.indexOf('Conversation');
   if (convoStart > 0) fullConv = fullConv.substring(convoStart);
 
+  // Second (Planned) work order: PM Failed / Expired Inspection units can have
+  // an open Unplanned WR (above, primary) AND an open Planned WR at the same
+  // time (relay.js second-pass scrape -> u._plannedWRData). Both are active
+  // repair threads with their own vendor conversations -- if we only ever feed
+  // the AI the primary conversation, the Planned WR's updates never make it
+  // into the timeline even though that work order is genuinely in progress.
+  let plannedConv = '';
+  if (u._plannedWRData && u._plannedWRData.fullConversation) {
+    plannedConv = u._plannedWRData.fullConversation;
+    const pStart = plannedConv.indexOf('Conversation');
+    if (pStart > 0) plannedConv = plannedConv.substring(pStart);
+    plannedConv = plannedConv.substring(0, 3500);
+  }
+
   // Offsite enrichment: if unit has a Decisiv URL, scrape vendor notes
   let offsiteText = '';
   const offsiteUrl = u.offsiteShopEventUrl || u.asistSrUrl || '';
@@ -262,6 +276,13 @@ async function _processUnit(u, notesStore, askOrcha) {
     '   - NEVER invent or fabricate. Only write what is supported by actual comment text.\n' +
     '   - If a comment is unclear, extract only what is factually stated.\n' +
     '   - Include the MOST RECENT comments — they are the most important for current status.\n\n' +
+    (plannedConv ?
+      '8. TWO ACTIVE WORK ORDERS:\n' +
+      '   This unit has BOTH an open Unplanned WR (conversation above) AND an open Planned WR ' +
+      '(conversation below). Produce timeline entries for BOTH -- do not drop either one. ' +
+      'Prefix every entry with which WR it belongs to, e.g. "07/15 - [Unplanned] Requested vendor repair update." ' +
+      'or "07/10 - [Planned] PM B service scheduled with Kooner." Merge entries from both WRs into ONE ' +
+      'chronological timeline sorted by date.\n\n' : '') +
     'ALSO PROVIDE:\n' +
     'REPAIR_STATUS: [current stage: Waiting for vendor | Appointment scheduled | Vehicle arrived | Under diagnosis | Diagnosis completed | Awaiting estimate | Awaiting approval | Parts ordered | Parts backordered | Parts received | Repair in progress | Road test | Quality inspection | Ready for pickup | Repair completed | Work order closed]\n' +
     'PRIMARY_COMPONENT: [exactly one: ENGINE/MOTOR SYSTEMS | CHASSIS | ELECTRICAL | CAB/CLIMATE CONTROL/INSTRUMENTATION | ACCESSORIES]\n' +
@@ -272,8 +293,9 @@ async function _processUnit(u, notesStore, askOrcha) {
     'Current Status: ' + (repairStatus || 'unknown') + ' | Component: ' + (primaryComponent || 'unknown') + '\n' +
     'WO Created: ' + (u.created || '--') + '\n' +
     (u.issueDetails ? 'Issue: ' + u.issueDetails.substring(0, 300) + '\n' : '') +
-    '\nRELAY GARAGE CONVERSATION:\n' +
+    '\nRELAY GARAGE CONVERSATION (Unplanned WR):\n' +
     (fullConv || '(no conversation)') + '\n\n' +
+    (plannedConv ? 'RELAY GARAGE CONVERSATION (Planned WR -- ' + (u._plannedWRData.vendor || 'vendor unknown') + '):\n' + plannedConv + '\n\n' : '') +
     (offsiteText ? 'OFFSITE/VENDOR NOTES (Decisiv/ASIST):\n' + offsiteText + '\n\n' : '') +
     'RESPOND IN EXACTLY THIS FORMAT (no markdown, no backticks):\n' +
     'REPAIR_STATUS: [stage]\n' +

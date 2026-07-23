@@ -267,30 +267,32 @@ function registerScrapersIPC(ctx) {
 
   // ── aap:create-wr ───────────────────────────────────────────────────────
   // Issue #9: re-entrancy lock prevents duplicate WR submissions
-  handle('aap:create-wr', async (_e, payload, unit) => {
+  // FIX (2026-07-23): commit 3c9dcf2 (an ad-hoc "backup working-tree state"
+  // commit, not a deliberate feature change) accidentally swapped this
+  // handler from the deterministic aap_create_wr.js direct-API flow over to
+  // the AI-driven runAdaptiveWR() agent -- the same agent the OTHER button
+  // ("Open in AAP (autofill)") uses. That is why Submit WR started needing
+  // AI-generated wizard steps and falling back to "fill it in yourself" when
+  // the AI response did not parse. Confirmed with Z: Submit WR is supposed to
+  // run without AI at all, via the direct 3-step AAP API flow (createRepair ->
+  // createDriverConnection -> updateWorkRequest). Reverted to that.
+  handle("aap:create-wr", async (_e, payload, unit) => {
     if (_wrLock) {
-      throw new ScraperError('aap:create-wr operation already in progress', 'aap:create-wr');
+      throw new ScraperError("aap:create-wr operation already in progress", "aap:create-wr");
     }
-    requireObject(payload, 'payload');
+    requireObject(payload, "payload");
     _wrLock = true;
     try {
-      const { runAdaptiveWR } = require('../scrapers/aap_adaptive_agent');
-      const relay = require('../orcha/relay');
-      
-      async function askAI(prompt) {
-        return await relay.ask(prompt);
-      }
-      
+      const { createWorkRequest } = require("../scrapers/aap_create_wr");
       const log = (msg) => {
         logger.info(msg);
         try {
-          const wins = require('electron').BrowserWindow.getAllWindows();
-          const main = wins.find(w => !w.isDestroyed() && w.webContents.getURL().includes('localhost:5173'));
-          if (main) main.webContents.send('wr:progress', { message: msg });
+          const wins = require("electron").BrowserWindow.getAllWindows();
+          const main = wins.find(w => !w.isDestroyed() && w.webContents.getURL().includes("localhost:5173"));
+          if (main) main.webContents.send("wr:progress", { message: msg });
         } catch(e) {}
       };
-      
-      const result = await runAdaptiveWR(payload, askAI, log);
+      const result = await createWorkRequest(payload, unit, log);
       return result;
     } finally {
       _wrLock = false;

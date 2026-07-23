@@ -320,6 +320,11 @@ function buildPrompt(snapshot, payload, stepHistory, lessonContext) {
 
 YOUR GOAL: Fill all fields on the current page with the correct values from the payload, then click "Next" (or "Submit" on the final page).
 
+CRITICAL FORMAT RULE (repeated at the end too, but stated here first in case this
+prompt ever gets truncated): your entire response must be ONLY a JSON array of
+action objects -- no explanation, no markdown, no code fences, no restating the
+task.
+
 PAYLOAD (data to fill):
 ${JSON.stringify(payload, null, 2)}
 
@@ -575,6 +580,27 @@ async function runAdaptiveWR(payload, askAI, log) {
       break;
     }
     
+    // TEMP TEST GUARD (2026-07-23): verifying the Claude Code --system-prompt
+    // fix end-to-end without ever creating a real Work Request. When
+    // AKI_DRY_RUN_WR=1 is set, any CLICK action whose target looks like the
+    // final Submit button is intercepted and logged instead of executed --
+    // proves every prior step parsed/filled correctly via real JSON from the
+    // AI, then stops one click short of a live submission. Remove this block
+    // once the fix is confirmed and Z is ready to let it submit for real.
+    if (process.env.AKI_DRY_RUN_WR === "1") {
+      const submitAction = actions.find(a => {
+        if (a.type !== "CLICK") return false;
+        const t = a.target || {};
+        const label = String(t.text || t.id || t.placeholder || "").toLowerCase();
+        return label.includes("submit");
+      });
+      if (submitAction) {
+        log("[AdaptiveWR] [DRY-RUN] Would click Submit here -- stopping without submitting. Action: " + JSON.stringify(submitAction));
+        result = { ok: true, workRequestId: "DRY-RUN-NOT-SUBMITTED", dryRun: true };
+        break;
+      }
+    }
+
     // 7. Execute actions
     log(`[AdaptiveWR] Executing ${actions.length} actions...`);
     let actionResults;

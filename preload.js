@@ -176,6 +176,13 @@ contextBridge.exposeInMainWorld('slack', {
   getReviewQueue:         ()       => ipcRenderer.invoke('slack:get-review-queue'),
   getReplyLog:            (limit)  => ipcRenderer.invoke('slack:get-reply-log', limit),
   updateReviewItem:       (data)   => ipcRenderer.invoke('slack:update-review-item', data),
+  // -- DM Auto-Reply engine (2026-07-23) -- see src/scrapers/slack_dm_autoreply.js
+  getDMAutoReplyConfig:   ()       => ipcRenderer.invoke('slack:get-dm-autoreply-config'),
+  saveDMAutoReplyConfig:  (config) => ipcRenderer.invoke('slack:save-dm-autoreply-config', config),
+  pollDMAutoReply:        ()       => ipcRenderer.invoke('slack:poll-dm-autoreply'),
+  getDMReviewQueue:       ()       => ipcRenderer.invoke('slack:get-dm-review-queue'),
+  getDMReplyLog:          (limit)  => ipcRenderer.invoke('slack:get-dm-reply-log', limit),
+  updateDMReviewItem:     (data)   => ipcRenderer.invoke('slack:update-dm-review-item', data),
 });
 
 // -- Microsoft Graph mail (2026-07-21) -- see src/graph/client.js for the

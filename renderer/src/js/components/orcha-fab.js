@@ -394,6 +394,7 @@ async function _startSlackPoll() {
 // same "confirm live auth first, then interval" structure, separate timer
 // so a failure/slowdown in one poller never affects the other.
 let _channelWatchTimer = null;
+let _dmAutoReplyTimer = null;
 const CATEGORY_META = {
   alert:    { icon: '\u{1F6A8}', label: 'Alerts' },
   action:   { icon: '\u{1F4A1}', label: 'Actions' },
@@ -419,13 +420,42 @@ async function _startChannelWatchPoll() {
   }, 30000);
 }
 
+// FEATURE (2026-07-23): DM Auto-Reply poll -- mirrors _startChannelWatchPoll
+// above but for personal Slack DMs (see slack_dm_autoreply.js). Escalations
+// merge into the same Review tab list; see _refreshReviewQueue below.
+async function _startDMAutoReplyPoll() {
+  if (_dmAutoReplyTimer) return;
+  _dmAutoReplyTimer = setInterval(async () => {
+    try {
+      const result = await slack.pollDMAutoReply();
+      if (result && result.escalatedCount > 0) {
+        bus.emit('ui:notif-push', {
+          icon: '\u{1F6A8}',
+          title: 'DM AI: ' + result.escalatedCount + ' item(s) need review',
+          body: (result.items[0] && result.items[0].title) || '',
+          time: Date.now(),
+        });
+        _updateReviewBadge();
+        if (_activeTab === 'review') _refreshReviewQueue();
+      }
+    } catch (e) { /* silent -- same pattern as channel-watch poller above */ }
+  }, 30000);
+}
+
 async function _updateReviewBadge() {
   try {
-    const items = await slack.getReviewQueue();
+    // FEATURE (2026-07-23): badge now counts both the Partner Auto-Reply
+    // (channel) queue and the new DM Auto-Reply queue -- see
+    // _refreshReviewQueue below for how the two lists get merged.
+    const [chanItems, dmItems] = await Promise.all([
+      slack.getReviewQueue().catch(() => []),
+      slack.getDMReviewQueue().catch(() => []),
+    ]);
+    const count = (chanItems ? chanItems.length : 0) + (dmItems ? dmItems.length : 0);
     const badge = document.getElementById('oc-review-badge');
     if (!badge) return;
-    if (items && items.length) {
-      badge.textContent = String(items.length);
+    if (count) {
+      badge.textContent = String(count);
       badge.style.display = '';
     } else {
       badge.style.display = 'none';
@@ -438,12 +468,25 @@ async function _updateReviewBadge() {
 // answer on its own. A professional holding reply was already sent to the
 // partner in-channel; this view is purely for follow-up/oversight, not a
 // pending-approval gate (the reply already went out).
+// FEATURE (2026-07-23): merges the Partner Auto-Reply (channel) queue and
+// the DM Auto-Reply queue into one list, tagged with `source` so the
+// Mark handled/Dismiss buttons route to the right backend
+// (updateReviewItem vs updateDMReviewItem below). Sorted newest-first so
+// the two engines interleave naturally instead of DM items always
+// trailing after channel items.
 async function _refreshReviewQueue() {
   const listEl = document.getElementById('oc-review-list');
   const emptyEl = document.getElementById('oc-review-empty');
   if (!listEl) return;
-  let items = [];
-  try { items = await slack.getReviewQueue(); } catch (e) { items = []; }
+  let chanItems = [];
+  let dmItems = [];
+  try { chanItems = await slack.getReviewQueue(); } catch (e) { chanItems = []; }
+  try { dmItems = await slack.getDMReviewQueue(); } catch (e) { dmItems = []; }
+
+  const items = [
+    ...(chanItems || []).map((it) => ({ ...it, source: 'channel' })),
+    ...(dmItems || []).map((it) => ({ ...it, source: 'dm' })),
+  ].sort((a, b) => parseFloat(b.ts || 0) - parseFloat(a.ts || 0));
 
   _updateReviewBadge();
 
@@ -455,14 +498,18 @@ async function _refreshReviewQueue() {
   listEl.innerHTML = items.map((item) => {
     const meta = CATEGORY_META[item.category] || CATEGORY_META.workflow;
     const when = _formatSlackTs(item.ts);
-    return `<div class="oc-review-item" data-id="${_escapeHtml(item.id)}">
+    const chanLabel = item.source === 'dm'
+      ? `DM: ${_escapeHtml(item.channelName || '')}`
+      : `#${_escapeHtml(item.channelName || '')}`;
+    const replyLabel = item.source === 'dm' ? 'Sent as you:' : 'Sent to partner:';
+    return `<div class="oc-review-item" data-id="${_escapeHtml(item.id)}" data-source="${item.source}">
       <div class="oc-review-item-head">
         <span class="oc-review-cat">${meta.icon} ${meta.label}</span>
-        <span class="oc-review-chan">#${_escapeHtml(item.channelName || '')}</span>
+        <span class="oc-review-chan">${chanLabel}</span>
         <span class="oc-review-time">${when}</span>
       </div>
       <div class="oc-review-question">${_escapeHtml(item.question || '')}</div>
-      <div class="oc-review-reply"><span class="oc-review-reply-label">Sent to partner:</span> ${_escapeHtml(item.reply || '')}</div>
+      <div class="oc-review-reply"><span class="oc-review-reply-label">${replyLabel}</span> ${_escapeHtml(item.reply || '')}</div>
       <div class="oc-review-actions">
         <button class="oc-review-btn oc-review-btn--done" data-action="done">Mark handled</button>
         <button class="oc-review-btn oc-review-btn--dismiss" data-action="dismiss">Dismiss</button>
@@ -472,12 +519,17 @@ async function _refreshReviewQueue() {
 
   listEl.querySelectorAll('.oc-review-item').forEach((el) => {
     const id = el.getAttribute('data-id');
+    const source = el.getAttribute('data-source');
     el.querySelectorAll('.oc-review-btn').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const action = btn.getAttribute('data-action');
         const status = action === 'done' ? 'done' : 'dismissed';
         try {
-          await slack.updateReviewItem({ id, updates: { status } });
+          if (source === 'dm') {
+            await slack.updateDMReviewItem({ id, updates: { status } });
+          } else {
+            await slack.updateReviewItem({ id, updates: { status } });
+          }
           toast.show('success', action === 'done' ? 'Marked handled' : 'Dismissed', 2000);
           _refreshReviewQueue();
         } catch (e) {
@@ -939,6 +991,7 @@ export function init() {
   setTimeout(async () => {
     try { await slack.dedupeReplies(); } catch (e) { /* non-fatal, poller still starts */ }
     _startChannelWatchPoll();
+    _startDMAutoReplyPoll();
     _updateReviewBadge();
   }, 4000);
 

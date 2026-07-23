@@ -707,7 +707,7 @@ function _html() {
                checkbox, since these are two distinct behaviors rather than
                one on/off switch. -->
           <div class="sd-field">
-            <div class="sd-label" style="margin-bottom:4px">Reply mode</div>
+            <div class="sd-label" style="margin-bottom:4px">Default reply mode <span style="color:var(--mut);font-weight:400;font-size:11px">(for new channels — each channel below can override this individually)</span></div>
             <label class="settings-label" style="display:flex;align-items:center;gap:6px;font-weight:400;margin-bottom:4px">
               <input type="radio" name="par-reply-mode" id="par-mode-mentions" value="mentions" style="width:auto"/>
               Only when @-mentioned
@@ -739,6 +739,28 @@ function _html() {
             <button class="sd-btn primary" id="par-save">Save</button>
           </div>
           <div id="par-status" class="sd-status" style="display:none;margin-top:8px"></div>
+        </div>
+
+        <!-- DM Auto-Reply (AI) -- 2026-07-23. AI reads new personal
+             Slack DMs and replies as Z, adapting tone per-message
+             (supportive, professional, casual, or helpful, depending on
+             what the message is about) rather than one fixed tone.
+             Uses live fleet context for unit/site questions. Anything it
+             can't confidently answer as Z gets a natural holding reply
+             and is logged to Orcha's Review tab for follow-up. This is
+             the same deliberate, logged exception to the "Slack always
+             requires human approval" rule as Partner Auto-Reply above --
+             see src/scrapers/slack_dm_autoreply.js for the full design. -->
+        <div class="sd-section" id="sect-dm-autoreply">
+          <div class="sd-section-title">DM Auto-Reply (AI)</div>
+          <div class="sd-hint" style="margin-bottom:8px">AI replies to your personal Slack DMs as you, adapting its tone to what the message is about (supportive, professional, casual, or helpful) and answering fleet/unit questions with live data. Anything it's not confident about still gets a natural holding reply, and is logged for your review in Orcha's Review tab.</div>
+          <div class="sd-field">
+            <div class="sd-toggle-row"><span class="sd-toggle-label">Enable DM Auto-Reply</span><input type="checkbox" id="dm-ar-enabled"/></div>
+          </div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary" id="dm-ar-save">Save</button>
+          </div>
+          <div id="dm-ar-status" class="sd-status" style="display:none;margin-top:8px"></div>
         </div>
 
         <!-- Partner Forms -->
@@ -1498,15 +1520,24 @@ function _wirePartnerAutoReply() {
       modeOccasionalEl.checked = mode === 'occasional';
     }
     const channels = config.channels || [];
-    listEl.innerHTML = channels.length ? channels.map((ch, i) =>
-      `<div class="sd-toggle-row" data-idx="${i}">
+    // FEATURE (2026-07-23): reply mode is per-channel now (see
+    // slack_channel_watch.js getWatchConfig migration) -- each row gets its
+    // own mode selector instead of relying solely on the global default
+    // above, which only seeds newly-added channels.
+    listEl.innerHTML = channels.length ? channels.map((ch, i) => {
+      const chMode = ch.replyMode || config.replyMode || 'mentions';
+      return `<div class="sd-toggle-row" data-idx="${i}">
         <span class="sd-toggle-label">#${_esc(ch.name)} <span style="color:var(--mut);font-size:10px">(${_esc(ch.id)})</span></span>
         <span style="display:flex;align-items:center;gap:8px">
+          <select id="par-ch-mode-${i}" class="settings__input" style="width:auto;font-size:11px;padding:2px 4px">
+            <option value="mentions" ${chMode === 'mentions' ? 'selected' : ''}>Only @-mentions</option>
+            <option value="occasional" ${chMode === 'occasional' ? 'selected' : ''}>Occasionally involved</option>
+          </select>
           <input type="checkbox" id="par-ch-${i}" ${ch.enabled !== false ? 'checked' : ''}/>
           <button class="sd-btn secondary par-ch-remove" data-idx="${i}" type="button" style="padding:2px 8px;font-size:10px">Remove</button>
         </span>
-      </div>`
-    ).join('') : '<div class="sd-hint">No channels added yet — enter a channel ID above to add one.</div>';
+      </div>`;
+    }).join('') : '<div class="sd-hint">No channels added yet — enter a channel ID above to add one.</div>';
 
     listEl.querySelectorAll('.par-ch-remove').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -1544,7 +1575,11 @@ function _wirePartnerAutoReply() {
           return;
         }
         if (!_currentConfig) _currentConfig = { enabled: true, channels: [] };
-        _currentConfig.channels.push({ id, name: result.name, enabled: true, lastSeenTs: null });
+        // FEATURE (2026-07-23): seed the new channel's own replyMode from
+        // whichever default radio is currently checked, so it starts in
+        // sync with the per-row selector rendered right after this push.
+        const defaultMode = (modeOccasionalEl && modeOccasionalEl.checked) ? 'occasional' : 'mentions';
+        _currentConfig.channels.push({ id, name: result.name, enabled: true, lastSeenTs: null, replyMode: defaultMode });
         render(_currentConfig);
         addIdEl.value = '';
         toast.show('success', `Added #${result.name} — click Save to confirm`, 3000);
@@ -1562,10 +1597,14 @@ function _wirePartnerAutoReply() {
     if (!_currentConfig) return;
     const updated = {
       enabled: !!enabledEl.checked,
+      // FEATURE (2026-07-23): this is now only the DEFAULT for channels
+      // added going forward -- each channel's own replyMode (read from its
+      // row's select below) is what actually drives pollChannelsOnce.
       replyMode: (modeOccasionalEl && modeOccasionalEl.checked) ? 'occasional' : 'mentions',
       channels: _currentConfig.channels.map((ch, i) => {
         const cb = document.getElementById('par-ch-' + i);
-        return { ...ch, enabled: cb ? !!cb.checked : ch.enabled };
+        const modeSel = document.getElementById('par-ch-mode-' + i);
+        return { ...ch, enabled: cb ? !!cb.checked : ch.enabled, replyMode: modeSel ? modeSel.value : ch.replyMode };
       }),
     };
     try {
@@ -1612,6 +1651,48 @@ async function _spSaveDomicile(opName, domCode, siteUrl, listName, headerRow) {
 }
 
 // ── SP: render operator accordion cards ──────────────────────────────────────
+
+function _wireDMAutoReply() {
+  const enabledEl = document.getElementById('dm-ar-enabled');
+  const saveBtn = document.getElementById('dm-ar-save');
+  const statusEl = document.getElementById('dm-ar-status');
+  if (!enabledEl || !saveBtn) return;
+
+  function showStatus(text, cls) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.className = 'sd-status ' + (cls || '');
+    statusEl.style.display = '';
+  }
+
+  // BUG FIX (2026-07-23): saveDMAutoReplyConfig returns { ok: true }, not
+  // the saved config (same as saveChannelWatchConfig above) -- so the
+  // checkbox must be driven from local state, never from the save
+  // response. Also must preserve _currentConfig.threads on every save, or
+  // Save would silently wipe the per-DM baseline tracking.
+  let _currentConfig = { enabled: false, threads: {} };
+
+  slackBridge.getDMAutoReplyConfig().then((config) => {
+    _currentConfig = config || _currentConfig;
+    enabledEl.checked = !!_currentConfig.enabled;
+  }).catch((e) => {
+    showStatus('❌ Failed to load config: ' + e.message, 'err');
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    const updated = { ..._currentConfig, enabled: !!enabledEl.checked };
+    try {
+      await slackBridge.saveDMAutoReplyConfig(updated);
+      _currentConfig = updated;
+      enabledEl.checked = !!_currentConfig.enabled;
+      showStatus('✅ Saved', 'ok');
+      toast.show('success', 'DM Auto-Reply settings saved', 2500);
+    } catch (e) {
+      showStatus('❌ Save failed: ' + e.message, 'err');
+      toast.show('error', 'Save failed: ' + e.message, 4000);
+    }
+  });
+}
 
 // Lookup SP config from workbooks array (fallback when domiciles config is empty)
 function _wbLookup(spCfg, opName, domCode) {
@@ -2766,6 +2847,7 @@ export function init() {
   _wireSlack();
   _wireGraphMail();
   _wirePartnerAutoReply();
+  _wireDMAutoReply();
   _wireEmail();
   _wireAutoNote();
   _wireSchedulerConfig();

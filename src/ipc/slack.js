@@ -240,6 +240,43 @@ function registerSlackIPC() {
     return updateReviewItem(data.id, data.updates || {});
   });
 
+  // FEATURE (2026-07-23): DM Auto-Reply (AI) -- extends the same
+  // deliberate exception documented in slack-partner-persona.js (Slack
+  // always requires human approval, EXCEPT this auto-reply engine, which
+  // is compensated by full logging + an escalation queue instead of
+  // pre-send approval) to personal Slack DMs. See slack_dm_autoreply.js.
+  handle('slack:get-dm-autoreply-config', async () => {
+    const { getDMAutoReplyConfig } = require('../../src/scrapers/slack_dm_autoreply');
+    return getDMAutoReplyConfig();
+  });
+
+  handle('slack:save-dm-autoreply-config', async (_e, config) => {
+    if (!config || typeof config !== 'object') throw new Error('config must be an object');
+    const { saveDMAutoReplyConfig } = require('../../src/scrapers/slack_dm_autoreply');
+    return saveDMAutoReplyConfig(config);
+  });
+
+  handle('slack:poll-dm-autoreply', async () => {
+    const { pollDMAutoReplyOnce } = require('../../src/scrapers/slack_dm_autoreply');
+    return pollDMAutoReplyOnce((msg) => logger.info(msg));
+  });
+
+  handle('slack:get-dm-review-queue', async () => {
+    const { getDMReviewQueue } = require('../../src/scrapers/slack_dm_autoreply');
+    return getDMReviewQueue();
+  });
+
+  handle('slack:get-dm-reply-log', async (_e, limit) => {
+    const { getDMReplyLog } = require('../../src/scrapers/slack_dm_autoreply');
+    return getDMReplyLog(limit);
+  });
+
+  handle('slack:update-dm-review-item', async (_e, data) => {
+    if (!data || !data.id) throw new Error('data.id required');
+    const { updateDMReviewItem } = require('../../src/scrapers/slack_dm_autoreply');
+    return updateDMReviewItem(data.id, data.updates || {});
+  });
+
   logger.info('Slack IPC handlers registered');
 }
 

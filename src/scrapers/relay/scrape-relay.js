@@ -5,7 +5,7 @@
 async function scrapeRelay(aapRows, onBatchDone, relayCache) {
   // H-3: block duplicate concurrent scrapes
   if (_relayLock) {
-    logger.warn('[Relay] scrapeRelay() already in progress ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â aborting duplicate call');
+    logger.warn('[Relay] scrapeRelay() already in progress — aborting duplicate call');
     return { results: {}, updatedCache: relayCache || {}, _skipped: true };
   }
   _relayLock = true;
@@ -18,7 +18,7 @@ async function scrapeRelay(aapRows, onBatchDone, relayCache) {
 
   const results = {};
   const updatedCache = Object.assign({}, relayCache || {});
-  const partition = ''; // use default session ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â same as auth.js midway injection
+  const partition = ''; // use default session — same as auth.js midway injection
   let skippedFleetNet = 0;
   let cacheHits = 0;
 

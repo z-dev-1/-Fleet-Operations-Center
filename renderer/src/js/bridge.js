@@ -320,6 +320,13 @@ export const slack = {
   getReviewQueue:         ()       => window.slack.getReviewQueue(),
   getReplyLog:            (limit)  => window.slack.getReplyLog(limit),
   updateReviewItem:       (data)   => window.slack.updateReviewItem(data),
+  // -- DM Auto-Reply engine (2026-07-23)
+  getDMAutoReplyConfig:   ()       => window.slack.getDMAutoReplyConfig(),
+  saveDMAutoReplyConfig:  (config) => window.slack.saveDMAutoReplyConfig(config),
+  pollDMAutoReply:        ()       => window.slack.pollDMAutoReply(),
+  getDMReviewQueue:       ()       => window.slack.getDMReviewQueue(),
+  getDMReplyLog:          (limit)  => window.slack.getDMReplyLog(limit),
+  updateDMReviewItem:     (data)   => window.slack.updateDMReviewItem(data),
 };
 
 // ── SharePoint ─────────────────────────────────────────────────────────────

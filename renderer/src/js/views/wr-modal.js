@@ -447,6 +447,14 @@ function _wireSubmit() {
         if (link) link.addEventListener('click', (e) => { e.preventDefault(); aap.openUrl(_unit.assetUrl); });
         toast.show('success', 'WR ' + wrId + ' created', 6000);
         setTimeout(() => _close(), 4000);
+      } else if (result && result.needsAutofill) {
+        // FIX (2026-07-23): vendor has no supplierId on file -- the direct
+        // API path can never work for it (AAP rejects with 403). Instead of
+        // showing a dead-end error, transparently fall through to the
+        // browser-automation autofill flow so 'Submit WR' still gets the
+        // user a filled-out WR regardless of vendor.
+        toast.show('info', 'No API credentials on file for this vendor — opening AAP autofill instead...', 5000);
+        await _autofillFallback(payload);
       } else {
         _showError((result && result.error) || 'Unknown error');
       }
@@ -459,11 +467,15 @@ function _wireSubmit() {
     }
   });
 
+  // FIX (2026-07-23): this handler called aap.createWR() -- the same
+  // deterministic API path as the Submit WR button -- instead of
+  // aap.autofill(). That meant clicking 'Open in AAP (autofill)' silently
+  // repeated the same createRepair call (and its Forbidden/etc. failure)
+  // with no browser window ever opening. Delegate to the same
+  // _autofillFallback() the post-error 'Try AAP autofill instead' button
+  // already uses correctly.
   fallbackBtn.addEventListener('click', async () => {
-    const payload = _collectPayload();
-    fallbackBtn.disabled = true; fallbackBtn.textContent = 'Launching AI...';
-    try { await aap.createWR(payload, _unit); } catch(e) { toast.show('error', e.message); }
-    fallbackBtn.disabled = false; fallbackBtn.textContent = 'Open in AAP (autofill)';
+    await _autofillFallback(_collectPayload());
   });
 }
 
@@ -504,7 +516,15 @@ async function _autofillFallback(payload) {
   if (fbBtn) { fbBtn.disabled = true; fbBtn.textContent = 'Filling in AAP\u2026'; }
   toast.show('info', 'Opening AAP and filling in fields \u2014 this can take up to a minute...', 4000);
   try {
-    const result = await aap.autofill(_unit.assetUrl, payload);
+    // FIX (2026-07-23): was passing _unit.assetUrl (the asset's own
+    // detail page) here. aap_autofill_engine.js does not read equipment
+    // context from the URL at all -- it types payload.unit into an empty
+    // Equipment ID combobox on AAP's generic 'New Work Request' page.
+    // Opening assetUrl landed on the wrong page entirely (no such
+    // combobox there), which is why autofill opened 'the wrong URL'.
+    // The correct fixed entry point (same one runAdaptiveWR() uses) is:
+    const NEW_WR_URL = 'https://aap-na.corp.amazon.com/v2/page/891a81dc-538d-4f10-be93-441545840a24';
+    const result = await aap.autofill(NEW_WR_URL, payload);
     if (result && result.ok === false) {
       toast.show('error', 'AAP autofill stopped: ' + (result.message || 'unknown error') + ' \u2014 finish filling manually in the AAP window.', 7000);
     } else {
