@@ -89,10 +89,11 @@ function updateDMReviewItem(id, updates) {
   return { ok: true, item: matches[0], updatedCount: matches.length };
 }
 
-// ── AI classify + draft (uses sendOrchaChat, the fleet-aware persistent
-// session, NOT the stateless askOrcha -- so unit/site questions get real
-// context instead of a generic guess) ────────────────────────────────────
-async function _classifyAndDraft(messageText, sendOrchaChat, historyMsgs) {
+// ── AI classify + draft ──────────────────────────────────────────────────
+// Uses relay.ask() -- full fallback chain (fleet-brain -> WS -> Claude Code
+// -> Bedrock). The DM persona + conversation context are carried in the
+// prompt, so no persistent session is required here.
+async function _classifyAndDraft(messageText, historyMsgs) {
   // historyMsgs: optional array of strings ("Speaker: text") from recent
   // conversation, oldest-first, to give the AI context before replying.
   let contextBlock = '';
@@ -100,9 +101,14 @@ async function _classifyAndDraft(messageText, sendOrchaChat, historyMsgs) {
     contextBlock = '\n\nRecent conversation context (for reference):\n' + historyMsgs.join('\n') + '\n';
   }
   const prompt = PERSONA_SYSTEM_PROMPT + contextBlock + '\n\nIncoming DM:\n' + messageText;
+  // FIX (2026-07-24): was using sendOrchaChat() (direct WS-only, 90s timeout,
+  // no fallback). If the Orcha WS server is not running or slow, EVERY DM call
+  // timed out and sent the canned fallback reply. Switch to relay.ask() which
+  // has the full chain: fleet-brain -> WS -> Claude Code -> Bedrock.
   let raw;
   try {
-    raw = await sendOrchaChat(prompt, 'dm'); // isolated session -- see orcha_ws.js 'dm' session key
+    const relay = require('../orcha/relay');
+    raw = await relay.ask(prompt);
   } catch (e) {
     logger.warn('[SlackDM] AI call threw:', e.message);
     raw = null;
@@ -155,7 +161,6 @@ async function pollDMAutoReplyOnce(log) {
   if (!config.enabled) { doLog('[SlackDM] Disabled — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
 
   const { listOpenDMs, readMessages, sendToChannel, checkLiveAuth } = require('./slack_send');
-  const { sendOrchaChat } = require('./orcha_ws');
 
   const auth = await checkLiveAuth();
   if (!auth || !auth.authenticated) { doLog('[SlackDM] Slack not authenticated — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
@@ -209,7 +214,7 @@ async function pollDMAutoReplyOnce(log) {
           .slice(0, 2)
           .reverse()
           .map(m => (m.userId === myUserId ? 'You' : (dm.name || 'Them')) + ': ' + (m.text || ''));
-        const draft = await _classifyAndDraft(msg.text, sendOrchaChat, historyMsgs);
+        const draft = await _classifyAndDraft(msg.text, historyMsgs);
 
         let replyTs = null;
         try {
