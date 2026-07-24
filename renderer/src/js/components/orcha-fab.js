@@ -994,8 +994,8 @@ async function _send() {
         const found = slackContacts.filter(c => c.name.toLowerCase().includes(q));
         if (found.length) { matches = found; body = words.slice(n).join(' '); break; }
       }
-      if (matches.length === 1) { inp.value = ''; _openQuickCompose(matches[0], body); return; }
-      if (matches.length > 1)  { inp.value = ''; _showContactPicker(matches, body); return; }
+      if (matches.length === 1) { inp.value = ''; inp.style.height = 'auto'; _openQuickCompose(matches[0], body); return; }
+      if (matches.length > 1)  { inp.value = ''; inp.style.height = 'auto'; _showContactPicker(matches, body); return; }
       // 0 matches — tell the user instead of silently handing it to AI
       const _nameGuess = words.slice(0, Math.min(words.length, 2)).join(' ');
       inp.value = '';
@@ -1008,7 +1008,7 @@ async function _send() {
     } catch (_) { /* fall through to AI if contact lookup errors */ }
   }
 
-  inp.value = '';
+  inp.value = ''; inp.style.height = 'auto';
   _appendMsg('oc-msg--user', val);
   _addHistory('user', val);
 
@@ -1068,7 +1068,7 @@ export function init() {
         <div class="oc-msg oc-msg--orcha">Hey \u{1F44B} I'm Orcha — your fleet brain. Click me anytime.<br><br>I know every unit, every timeline, every vendor. Ask me anything, tell me to do something, or just vent about Kenworth's ETA.</div>
       </div>
       <div class="oc-input-row">
-        <input class="oc-input" id="orcha-input" placeholder="Ask, command, or vent..." autocomplete="off" spellcheck="false"/>
+        <textarea class="oc-input oc-chat-input" id="orcha-input" placeholder="Ask, command, or vent... (Shift+Enter for newline)" autocomplete="off" spellcheck="false" rows="1"></textarea>
         <button class="oc-send" id="orcha-send">\u{27A4}</button>
       </div>
     </div>
@@ -1109,8 +1109,14 @@ export function init() {
   });
   document.getElementById('orcha-send').addEventListener('click', _send);
   document.getElementById('orcha-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { _hideAutocomplete(); _send(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); _hideAutocomplete(); _send(); }
     if (e.key === 'Escape') _hideAutocomplete();
+  });
+  // Auto-grow the chat textarea as the user types
+  document.getElementById('orcha-input').addEventListener('input', (e) => {
+    const el = e.target;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
   });
 
   document.getElementById('orcha-input').addEventListener('input', _handleInputForMentions);

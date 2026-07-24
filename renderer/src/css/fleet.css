@@ -3509,6 +3509,16 @@ td .pm-pill {
   font-family: var(--font);
 }
 .oc-input:focus { border-color: rgba(210,168,255,.4); }
+/* Chat tab main input — textarea that grows with content */
+.oc-chat-input {
+  min-height: 32px;
+  max-height: 120px;
+  resize: none;        /* grows via JS, no manual handle needed */
+  overflow-y: auto;
+  line-height: 1.45;
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
 .oc-send {
   padding: 6px 12px;
   border-radius: 7px;
