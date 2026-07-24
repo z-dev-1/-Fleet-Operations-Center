@@ -458,7 +458,21 @@ function registerAIHandlers(ctx) {
                   ? '<pre style="font-family:Courier New,monospace;font-size:12px">' + reportHtml + '</pre>'
                   : '<p>' + (a.body || '').replace(/\n/g, '<br>') + '</p>',
               });
-              results.push(emailRes.ok ? 'Email sent to ' + toAddr : 'Email failed: ' + emailRes.error);
+              if (emailRes.ok) {
+                results.push('Email sent to ' + toAddr);
+              } else {
+                // SMTP failed (e.g. no password) — open the in-app Email Composer
+                // pre-filled with the REAL report body so the user can review and send.
+                try {
+                  const _ew = require('electron').BrowserWindow.getAllWindows()[0];
+                  if (_ew) _ew.webContents.send('email:compose', {
+                    to: toAddr,
+                    subject: a.subject || autoSubject || 'Message from Fleet Operations Center',
+                    body: reportHtml || (a.body || ''),
+                  });
+                } catch (_) {}
+                results.push('Email composer opened with report for ' + toAddr + ' (SMTP: ' + emailRes.error + ')');
+              }
             }
           } catch(emailErr) { results.push('Email error: ' + emailErr.message); }
         }
@@ -570,9 +584,7 @@ function registerAIHandlers(ctx) {
           store.save('schedules', schedules);
           results.push('Scheduled: ' + a.action + ' (' + a.cron + ')');
         }
-        if (a.type==='EMAIL'&&a.to&&a.subject&&a.body) {
-          try { const _w = require('electron').BrowserWindow.getAllWindows()[0]; if(_w) _w.webContents.send('email:compose',{to:a.to,subject:a.subject,body:a.body}); results.push('Email composed to ' + a.to); } catch(e){ results.push('Email error: '+e.message); }
-        }
+        // (duplicate EMAIL handler removed — handled above with real report body)
         if (a.type==='REMIND'&&a.unit&&a.when&&a.note) {
           const reminders = store.load('reminders', []);
           reminders.push({unit:a.unit, when:a.when, note:a.note, created:new Date().toISOString()});
