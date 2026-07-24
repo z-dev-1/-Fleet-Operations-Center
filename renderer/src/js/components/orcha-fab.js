@@ -847,7 +847,7 @@ function _openQuickCompose(contact, prefill) {
       '<span>💬 <strong>' + _esc(contact.name) + '</strong></span>' +
       '<button class="oc-qc-cancel" title="Cancel">×</button>' +
     '</div>' +
-    '<textarea class="oc-reply-textarea oc-qc-textarea" placeholder="Type your message… (Ctrl+Enter to send)" rows="2">' +
+    '<textarea class="oc-reply-textarea oc-qc-textarea" placeholder="Type your message… (Ctrl+Enter to send)" rows="4">' +
       _esc(prefill || '') +
     '</textarea>' +
     '<div class="oc-qc-footer">' +
@@ -996,7 +996,16 @@ async function _send() {
       }
       if (matches.length === 1) { inp.value = ''; _openQuickCompose(matches[0], body); return; }
       if (matches.length > 1)  { inp.value = ''; _showContactPicker(matches, body); return; }
-    } catch (_) { /* fall through to AI if contact lookup fails */ }
+      // 0 matches — tell the user instead of silently handing it to AI
+      const _nameGuess = words.slice(0, Math.min(words.length, 2)).join(' ');
+      inp.value = '';
+      _appendMsg('oc-msg--user', val);
+      _appendMsg('oc-msg--orcha',
+        '💬 No Slack contact named “' + _nameGuess + '” found.\n\n' +
+        'To message them: open the Contact Book (📇 toolbar), add them via the + Add Slack Contact form, ' +
+        'then try again.\n\nIf you just restarted the app, DM contacts auto-save on the next poll cycle (30s).');
+      return;
+    } catch (_) { /* fall through to AI if contact lookup errors */ }
   }
 
   inp.value = '';

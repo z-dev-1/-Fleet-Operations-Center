@@ -8596,8 +8596,8 @@ body {
 .oc-reply-textarea {
   width: 100%;
   min-height: 32px;
-  max-height: 220px;
-  resize: none;
+  max-height: 380px;
+  resize: vertical;
   overflow-y: auto;
   background: var(--bg, #0d1117);
   border: 1px solid var(--bdr);
