@@ -937,26 +937,40 @@ function _openEmailCompose(contact, prefill) {
     polishBtn.addEventListener('click', async () => {
       const draft = textarea.value.trim();
       if (!draft) { textarea.focus(); return; }
-      // Auto-fill subject from first line of draft if the user left it blank.
-      // _doSend() returns early (silent) on empty subject -- this prevents that.
-      if (!subjectEl.value.trim()) {
-        const firstLine = draft.split('\n')[0].replace(/[^a-zA-Z0-9 ,.\x27!?-]/g, '').trim();
-        subjectEl.value = firstLine.length > 60 ? firstLine.substring(0, 57) + '\u2026' : (firstLine || 'Message');
-      }
+      // Ensure subject has at least a placeholder so _doSend() does not bail silently.
+      // The AI will replace it with a proper summary below.
+      if (!subjectEl.value.trim()) subjectEl.value = 'Message';
       polishBtn.disabled = true; sendBtn.disabled = true;
       const origLabel = polishBtn.textContent;
       polishBtn.textContent = 'Polishing\u2026';
       statusEl.textContent = '';
       statusEl.className = 'oc-reply-status oc-qc-status';
       try {
-        const prompt = 'Improve this email for clarity and professionalism. Keep the exact same ' +
-          'meaning and intent - do not add facts, names, dates, or commitments not already in the ' +
-          'original. No markdown - plain text only, ready to send:\n\n' + draft;
+        const currentSubject = subjectEl.value.trim();
+        const prompt =
+          'You are polishing a professional fleet operations email. ' +
+          'Return ONLY a JSON object (no markdown, no extra text) with exactly two keys:\n' +
+          '  "subject": a concise 5-10 word subject line summarizing what the email is about\n' +
+          '  "body": the improved email body -- same meaning and intent, no new facts/names/' +
+          'dates/commitments, plain text only, ready to send\n\n' +
+          'Current subject: ' + currentSubject + '\n' +
+          'Email body:\n' + draft;
         const result = await ai.chat(prompt);
         if (result && result.text) {
-          textarea.value = result.text.trim();
+          // Parse JSON response; fall back gracefully if AI returns plain text
+          let polishedBody = result.text.trim();
+          let polishedSubject = null;
+          try {
+            const jm = result.text.match(/\{[\s\S]*\}/);
+            if (jm) {
+              const parsed = JSON.parse(jm[0]);
+              if (parsed.body)    polishedBody    = parsed.body.trim();
+              if (parsed.subject) polishedSubject = parsed.subject.trim();
+            }
+          } catch (_) { /* AI returned plain text -- use as body, keep existing subject */ }
+          textarea.value = polishedBody;
           _autoGrowTextarea(textarea);
-          // await so the finally block does not reset button state mid-send
+          if (polishedSubject) subjectEl.value = polishedSubject;
           await _doSend();
         } else { throw new Error('empty'); }
       } catch (e) {
