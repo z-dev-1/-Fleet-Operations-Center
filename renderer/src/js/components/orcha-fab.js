@@ -206,7 +206,8 @@ function _wireReplyBox(box, msg) {
       if (result && result.text) {
         textarea.value = result.text.trim();
         _autoGrowTextarea(textarea);
-        _setStatus('\u2728 Rewritten -- edit freely, then Send', 'ok');
+        // Auto-send immediately after successful rewrite
+        sendBtn.click();
       } else {
         throw new Error('empty AI response');
       }
@@ -892,8 +893,8 @@ function _openQuickCompose(contact, prefill) {
         if (result && result.text) {
           textarea.value = result.text.trim();
           _autoGrowTextarea(textarea);
-          statusEl.textContent = '✨ Polished — edit freely, then Send';
-          statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--ok';
+          // Auto-send immediately after successful polish
+          sendBtn.click();
         } else { throw new Error('empty'); }
       } catch (e) {
         statusEl.textContent = '⚠️ Could not polish — your original is still sendable';
