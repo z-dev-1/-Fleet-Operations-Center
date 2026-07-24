@@ -309,7 +309,11 @@ export function init() {
     if (btn.dataset.action === 'delete') _delete(btn.dataset.id);
     if (btn.dataset.action === 'edit') _editContact(btn.dataset.id);
     if (btn.dataset.action === 'use-address') _useAddress(btn.dataset.id);
-    if (btn.dataset.action === 'slack-msg') bus.emit('slack:quick-compose', _contacts.find(x => x.id === btn.dataset.id));
+    if (btn.dataset.action === 'slack-msg') {
+      bus.emit('slack:quick-compose', _contacts.find(x => x.id === btn.dataset.id));
+      if (_open) _toggle(); // close the contact book so the FAB compose bubble is visible
+      return;
+    }
 
     // Live search result item
     const resultItem = e.target.closest('.cb-slack-result-item');

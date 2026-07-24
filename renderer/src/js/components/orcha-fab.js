@@ -851,6 +851,7 @@ function _openQuickCompose(contact, prefill) {
     '</textarea>' +
     '<div class="oc-qc-footer">' +
       '<span class="oc-reply-status oc-qc-status"></span>' +
+      '<button class="oc-qc-polish oc-reply-btn oc-reply-btn--ai">✨ Polish</button>' +
       '<button class="oc-qc-send oc-send">Send ➤</button>' +
     '</div>';
 
@@ -859,6 +860,7 @@ function _openQuickCompose(contact, prefill) {
 
   const textarea  = bubble.querySelector('.oc-qc-textarea');
   const sendBtn   = bubble.querySelector('.oc-qc-send');
+  const polishBtn = bubble.querySelector('.oc-qc-polish');
   const cancelBtn = bubble.querySelector('.oc-qc-cancel');
   const statusEl  = bubble.querySelector('.oc-qc-status');
 
@@ -870,6 +872,38 @@ function _openQuickCompose(contact, prefill) {
     }, 0);
   }
   textarea.focus();
+
+  // ✨ Polish: AI improves wording only — never adds facts/names/dates not already in the text.
+  // If the AI call fails, the draft is left untouched and fully sendable as-is.
+  if (polishBtn) {
+    polishBtn.addEventListener('click', async () => {
+      const draft = textarea.value.trim();
+      if (!draft) { textarea.focus(); return; }
+      polishBtn.disabled = true; sendBtn.disabled = true;
+      const origLabel = polishBtn.textContent;
+      polishBtn.textContent = 'Polishing…';
+      statusEl.textContent = '';
+      try {
+        const prompt = 'Improve this Slack message for clarity and professionalism. Keep the ' +
+          'exact same meaning and intent — do not add new facts, names, dates, dollar amounts, ' +
+          'or commitments not already in the original. No markdown, no greeting or signature — ' +
+          'just the message body as plain text, ready to send:\n\n' + draft;
+        const result = await ai.chat(prompt);
+        if (result && result.text) {
+          textarea.value = result.text.trim();
+          _autoGrowTextarea(textarea);
+          statusEl.textContent = '✨ Polished — edit freely, then Send';
+          statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--ok';
+        } else { throw new Error('empty'); }
+      } catch (e) {
+        statusEl.textContent = '⚠️ Could not polish — your original is still sendable';
+        statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--warn';
+      } finally {
+        polishBtn.disabled = false; sendBtn.disabled = false;
+        polishBtn.textContent = origLabel;
+      }
+    });
+  }
 
   cancelBtn.addEventListener('click', () => bubble.remove());
   textarea.addEventListener('keydown', (e) => {
