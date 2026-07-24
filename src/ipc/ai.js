@@ -422,7 +422,7 @@ function registerAIHandlers(ctx) {
 
     
     const d = new Date(); const dateStr = String(d.getMonth()+1).padStart(2,'0')+'/'+String(d.getDate()).padStart(2,'0'); const timeStr = String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
-    const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human — warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle_or_email,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable}), PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Send to whoever the user specifies. If user gives an email address or a name not in KNOWN SLACK CONTACTS, use it directly as recipient — the system will resolve it. NEVER refuse or ask for confirmation because someone is not in the contact list. Just attempt the send.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+fleetSummary+'\\n'+unitDetail+contactList+emailContactList+'\\nUser: '+userMsg;
+    const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human — warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nCRITICAL — SEND vs ASK:\n- "send update/report/data/notes to [person] for [site]" = YOU are DELIVERING fleet info TO them.\n  Write the message as the person SENDING the report, not asking for one.\n  Your message body is just a 1-sentence intro — the system attaches the real data automatically.\n  WRONG: "Could you provide an update on AVP40?" (that is asking them)\n  RIGHT:  "Here is the latest AVP40 fleet status and notes, as requested." (that is delivering)\n- Only generate a question/follow-up when the user explicitly says "ask", "follow up", or "check on".\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle_or_email,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable}), PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Send to whoever the user specifies. If user gives an email address or a name not in KNOWN SLACK CONTACTS, use it directly as recipient — the system will resolve it. NEVER refuse or ask for confirmation because someone is not in the contact list. Just attempt the send.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+fleetSummary+'\\n'+unitDetail+contactList+emailContactList+'\\nUser: '+userMsg;
     try {
       logger.info('[ai:orcha-action] Calling relay.ask (' + prompt.length + ' chars)...');
       const aiText = await relay.ask(prompt);
@@ -437,9 +437,22 @@ function registerAIHandlers(ctx) {
           try { require('../orcha/repair-history').addEvent(a.unit, {summary:a.entry,vendor:'',outcome:'in-progress'}); } catch(e){} }
         if (a.type==='SLACK'&&a.recipient&&a.message) {
           const { sendSlackMessage, sendToChannel, openConversation } = require('../../src/scrapers/slack_send');
-          // Build real fleet data body (falls back to AI text if no site/unit in userMsg)
-          const realReport = _buildEmailReport(userMsg, rows, notesStore);
-          const slackBody  = realReport || a.message;
+          // Build real fleet data body.
+          // If the user asked to send data for a site/operator but we have no fleet data
+          // loaded yet, do NOT fall back to the AI's invented text (which is usually a
+          // question asking the recipient for data — the opposite of what was intended).
+          const realReport  = _buildEmailReport(userMsg, rows, notesStore);
+          const _msgUp      = userMsg.toUpperCase();
+          const _knownS     = [...new Set(rows.map(r => (r.domicileSite||''). toUpperCase()).filter(Boolean))];
+          const _knownO     = [...new Set(rows.map(r => (r.operator||''). toUpperCase()).filter(Boolean))];
+          const _siteHit    = _knownS.find(s => s.length > 2 && _msgUp.includes(s))
+                           || _knownO.find(o => o.length > 2 && _msgUp.includes(o));
+          if (!realReport && _siteHit) {
+            // User asked to send data for a known site but report is empty — stop, explain
+            results.push('Slack not sent: no fleet data found for ' + _siteHit + '. Sync fleet data first.');
+            continue; // eslint-disable-line no-continue
+          }
+          const slackBody = realReport || a.message;
 
           // Resolve recipient: contact book first (exact match), then fuzzy Slack search.
           // This prevents partial names like "zila" from matching the wrong Slack user.
@@ -489,9 +502,18 @@ function registerAIHandlers(ctx) {
             if (!toAddr.includes('@')) {
               results.push('Email failed: no email address found for "' + (a.to||'') + '" — add one in Contact Book');
             } else {
-              // Build a real data report if the message references a site/unit;
-              // otherwise use the AI-generated body as-is.
-              const reportHtml = _buildEmailReport(userMsg, rows, notesStore);
+              // Build a real data report. If user asked to send data for a known
+              // site but we have nothing, stop — do not send AI's invented question.
+              const reportHtml  = _buildEmailReport(userMsg, rows, notesStore);
+              const _emMsgUp    = userMsg.toUpperCase();
+              const _emSites    = [...new Set(rows.map(r => (r.domicileSite||''). toUpperCase()).filter(Boolean))];
+              const _emOps      = [...new Set(rows.map(r => (r.operator||''). toUpperCase()).filter(Boolean))];
+              const _emSiteHit  = _emSites.find(s => s.length > 2 && _emMsgUp.includes(s))
+                               || _emOps.find(o => o.length > 2 && _emMsgUp.includes(o));
+              if (!reportHtml && _emSiteHit) {
+                results.push('Email not sent: no fleet data found for ' + _emSiteHit + '. Sync fleet data first.');
+                continue;
+              }
               const _knownSites2 = [...new Set(rows.map(function(r){ return (r.domicileSite||'').toUpperCase(); }).filter(Boolean))];
               const _knownOps2   = [...new Set(rows.map(function(r){ return (r.operator||'').toUpperCase(); }).filter(Boolean))];
               const _mu2         = userMsg.toUpperCase();
