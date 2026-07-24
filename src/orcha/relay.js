@@ -17,8 +17,12 @@ const { P }  = require('../config/paths');
 const logger = require('../utils/logger')('relay');
 
 const fleetBrain = require('./fleet-brain');
-// Initialize fleet-brain connection on module load
-// fleet-brain init disabled — direct WS is the primary transport
+// Wire fleet-brain's local fallback AFTER _tryClaudeCode is defined below.
+// setImmediate defers to end-of-tick so the function reference is valid.
+setImmediate(() => {
+  fleetBrain.setLocalAskFn((prompt) => _tryClaudeCode(prompt));
+  logger.info('fleet-brain local AI fallback wired to claude-code');
+});
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 const MODEL_ID    = 'us.anthropic.claude-sonnet-4-20250514-v1:0';
@@ -87,29 +91,24 @@ async function ask(prompt, opts = {}) {
     throw new Error('Claude Code unavailable (preference=claude)');
   }
 
-  // PRIMARY: Route through fleet-brain (persistent session with full context)
+  // PRIMARY: Route through fleet-brain (persistent session with full fleet context).
+  // fleet-brain.getStatus().ready is true in BOTH WS mode (Orcha running) AND
+  // local mode (claude-code fallback wired in). Either way fleet-brain manages
+  // the system prompt + rolling conversation history so every AI call is context-aware.
   try {
-    // Skip fleet-brain if not connected
     const _fbStatus = fleetBrain.getStatus ? fleetBrain.getStatus() : {};
-    if (!_fbStatus || !_fbStatus.connected) throw new Error("fleet-brain not connected");
+    if (!_fbStatus || !_fbStatus.ready) throw new Error('fleet-brain not ready');
     const text = await fleetBrain.ask(prompt);
     if (text) {
+      const via = _fbStatus.localMode ? 'fleet-brain/local' : 'fleet-brain/ws';
       _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
       _releaseSlot();
-      logger.info('OK via fleet-brain (' + text.length + ' chars)');
+      logger.info('OK via ' + via + ' (' + text.length + ' chars)');
       _saveStatus();
       return text;
     }
   } catch (brainErr) {
-    // 'fleet-brain not connected' is the normal/expected state when Orcha isn't running —
-    // log at INFO, not WARN, so it doesn't look alarming when the app is running fine on
-    // Claude Code / Bedrock fallbacks.
-    const expectedDown = /not connected/i.test(brainErr.message);
-    if (expectedDown) {
-      logger.info('Orcha WS not available — using fallback AI');
-    } else {
-      logger.warn('Fleet-brain failed: ' + brainErr.message);
-    }
+    logger.warn('Fleet-brain failed: ' + brainErr.message);
   }
 
   // FALLBACK: Direct WS (throwaway session, no context).

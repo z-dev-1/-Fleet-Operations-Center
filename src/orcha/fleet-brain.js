@@ -2,16 +2,19 @@
 /**
  * fleet-brain.js — Persistent Orcha Brain for Fleet Operations
  *
- * This module creates and maintains a SINGLE persistent Orcha session
- * that has full fleet context. All AI calls from the app route through here.
+ * Maintains ONE long-running AI session with full fleet context.
+ * All AI calls from the app route through here.
  *
- * Instead of throwaway sessions with zero context, this:
- *   1. Maintains ONE long-running session with Orcha
- *   2. Injects a fleet system prompt so Orcha knows the fleet state
- *   3. Accumulates context across calls (Orcha remembers prior analysis)
- *   4. Shares the session with the chat panel (same conversation thread)
+ * Two modes:
+ *   WS mode   — Orcha server is running at ws://localhost:4799.
+ *               Uses a real server-side session with streaming.
+ *   Local mode — Orcha server is absent. Simulates persistence by
+ *               injecting the fleet system context + rolling conversation
+ *               history into every prompt, then routing through whatever
+ *               AI provider relay.js has working (Claude Code, Bedrock…).
+ *               Set via setLocalAskFn() — called by relay.js at init.
  *
- * This is the difference between "dumb AI relay" and "Orcha running your fleet."
+ * The caller (relay.js) checks getStatus().ready — true in both modes.
  */
 
 const WebSocket = require('ws');
@@ -23,74 +26,126 @@ const store     = require('../store');
 const logger    = require('../utils/logger')('fleet-brain');
 
 // ─── CONFIG ─────────────────────────────────────────────────────────────────
-const TIMEOUT_MS        = 10000;  // 10s - fail fast, Bedrock fallback handles the rest  // 2 min for complex fleet analysis
-const SESSION_FILE      = P.chatSessionId;  // shared with chat panel
-const SESSION_MAX_AGE   = 8 * 60 * 60 * 1000;  // 8h before refresh
-const AGENT_ID          = 'orcha_default';  // TODO: create fleet-specific agent
+const TIMEOUT_MS        = 10000;
+const SESSION_FILE      = P.chatSessionId;
+const SESSION_MAX_AGE   = 8 * 60 * 60 * 1000;
+const AGENT_ID          = 'orcha_default';
 const RECONNECT_DELAY   = 3000;
 const MAX_QUEUE         = 50;
+// After this many consecutive WS failures, stop trying Orcha and switch to
+// local mode. Reset and retry Orcha after RETRY_WS_AFTER_MS.
+const WS_GIVE_UP_AFTER  = 6;
+const RETRY_WS_AFTER_MS = 15 * 60 * 1000; // 15 min
+
+// ─── LOCAL AI FALLBACK ───────────────────────────────────────────────────────
+// relay.js calls setLocalAskFn(fn) at startup so fleet-brain can route through
+// claude-code (or Bedrock) when Orcha WS isn't available. The fn receives a
+// fully-formed prompt string and returns a Promise<string>.
+let _localAskFn   = null;
+let _wsGaveUp     = false;        // true after WS_GIVE_UP_AFTER failures
+let _localHistory = [];           // rolling conversation history
+const MAX_HISTORY_TURNS  = 12;    // 6 exchanges
+const MAX_HISTORY_CHARS  = 8000;  // trim oldest turns if total chars exceeds this
+
+/**
+ * Wire in the fallback AI function. Called by relay.js once _tryClaudeCode
+ * is defined there, so fleet-brain doesn't need to require relay itself.
+ */
+function setLocalAskFn(fn) {
+  _localAskFn = fn;
+  logger.info('Local AI fallback registered — fleet-brain ready in local mode');
+}
+
+function _trimHistory() {
+  // Keep at most MAX_HISTORY_TURNS entries
+  while (_localHistory.length > MAX_HISTORY_TURNS) _localHistory.shift();
+  // Keep total history under MAX_HISTORY_CHARS by dropping oldest exchanges
+  while (_localHistory.length >= 2) {
+    const total = _localHistory.reduce((s, m) => s + m.content.length, 0);
+    if (total <= MAX_HISTORY_CHARS) break;
+    _localHistory.splice(0, 2); // drop oldest user+assistant pair
+  }
+}
+
+function _buildLocalPrompt(userPrompt) {
+  const sys = _buildSystemContext();
+  let hist = '';
+  if (_localHistory.length > 0) {
+    hist = '
+
+[CONVERSATION HISTORY — use for context only]
+' +
+      _localHistory
+        .map(m => (m.role === 'user' ? 'User: ' : 'Assistant: ') + m.content)
+        .join('
+');
+  }
+  return sys + hist + '
+
+[CURRENT MESSAGE]
+' + userPrompt;
+}
+
+async function _localAsk(prompt) {
+  if (!_localAskFn) throw new Error('fleet-brain: no local AI function — call setLocalAskFn() first');
+  const fullPrompt = _buildLocalPrompt(prompt);
+  const response   = await _localAskFn(fullPrompt);
+  // Accumulate history for next call
+  _localHistory.push({ role: 'user',      content: prompt   });
+  _localHistory.push({ role: 'assistant', content: response });
+  _trimHistory();
+  return response;
+}
 
 // ─── STATE ──────────────────────────────────────────────────────────────────
 let _sessionId    = null;
 let _sessionTs    = 0;
 let _ws           = null;
 let _connected    = false;
-let _ready        = false;  // true after session created/loaded
-let _queue        = [];     // pending requests while connecting
-let _activeReq    = null;   // current in-flight request
+let _ready        = false;
+let _queue        = [];
+let _activeReq    = null;
 let _requestCount = 0;
 let _lastActivity = null;
-let _failCount    = 0;        // consecutive WS failures — drives exponential backoff
+let _failCount    = 0;
 
 // ─── FLEET SYSTEM CONTEXT ───────────────────────────────────────────────────
 function _buildSystemContext() {
-  // Build a rich context from live fleet data so Orcha knows the current state
   let fleetSummary = '';
   try {
     const data = store.load('fleetData', null);
     if (data && data.rows) {
-      const total = data.rows.length;
+      const total   = data.rows.length;
       const unavail = data.rows.filter(r => /unavailable/i.test(r.atsState || r.lifecycleState || ''));
       const vendors = {};
-      unavail.forEach(r => {
-        const v = r.vendor || 'Unknown';
-        vendors[v] = (vendors[v] || 0) + 1;
-      });
-      const vendorStr = Object.entries(vendors)
-        .sort((a, b) => b[1] - a[1])
-        .map(([v, c]) => `${v}(${c})`)
-        .join(', ');
-
-      fleetSummary = `\nFLEET STATE: ${total} total units | ${unavail.length} unavailable | Vendors: ${vendorStr}`;
-      fleetSummary += `\nLast sync: ${data.syncedAt || 'unknown'}`;
+      unavail.forEach(r => { const v = r.vendor || 'Unknown'; vendors[v] = (vendors[v] || 0) + 1; });
+      const vendorStr = Object.entries(vendors).sort((a, b) => b[1] - a[1]).map(([v, c]) => v + '(' + c + ')').join(', ');
+      fleetSummary = '\nFLEET STATE: ' + total + ' total units | ' + unavail.length + ' unavailable | Vendors: ' + vendorStr;
+      fleetSummary += '\nLast sync: ' + (data.syncedAt || 'unknown');
     }
   } catch (_) {}
 
-  return `You are Orcha — the AI brain powering Fleet Operations Center v3.
-You are INTEGRATED into this fleet management app. You are not a generic assistant.
-
-YOUR ROLE:
-- You manage a CNG fleet at ABE40/EWR45/PHL40/AVP40 domiciles
-- You monitor ~160 units, track repairs, generate notes, detect issues
-- You communicate with the Fleet Asset Specialist who operates this app
-- You proactively identify problems and suggest actions
-
-YOUR RULES FOR WORK ORDER NOTES:
-- Single sentence, 18-40 words preferred, 60 max
-- Date format: MM/DD
-- Professional fleet terminology
-- NO personal names, phone numbers, emails, dollar amounts, VINs, license plates
-- Vendor names OK (Amerit, Freightliner, Volvo, PACCAR, Peterbilt, etc.)
-- "Tech" allowed instead of real names
-
-YOUR RULES FOR CLASSIFICATION:
-- Use standard VMRS codes for RCA
-- Primary Component, Technician Failure Code, Primary Cause Code, Work Accomplished Code
-- Maintenance Code: PM (preventive), UM (unscheduled), MOD (modification)
-- Controllable: Y/N
-${fleetSummary}
-
-RESPOND CONCISELY. You are an operational tool, not a chatbot. Facts over filler.`;
+  return 'You are Orcha — the AI brain powering Fleet Operations Center v3.\n' +
+    'You are INTEGRATED into this fleet management app. You are not a generic assistant.\n\n' +
+    'YOUR ROLE:\n' +
+    '- You manage a CNG fleet at ABE40/EWR45/PHL40/AVP40 domiciles\n' +
+    '- You monitor ~160 units, track repairs, generate notes, detect issues\n' +
+    '- You communicate with the Fleet Asset Specialist who operates this app\n' +
+    '- You proactively identify problems and suggest actions\n\n' +
+    'YOUR RULES FOR WORK ORDER NOTES:\n' +
+    '- Single sentence, 18-40 words preferred, 60 max\n' +
+    '- Date format: MM/DD\n' +
+    '- Professional fleet terminology\n' +
+    '- NO personal names, phone numbers, emails, dollar amounts, VINs, license plates\n' +
+    '- Vendor names OK (Amerit, Freightliner, Volvo, PACCAR, Peterbilt, etc.)\n' +
+    '- "Tech" allowed instead of real names\n\n' +
+    'YOUR RULES FOR CLASSIFICATION:\n' +
+    '- Use standard VMRS codes for RCA\n' +
+    '- Primary Component, Technician Failure Code, Primary Cause Code, Work Accomplished Code\n' +
+    '- Maintenance Code: PM (preventive), UM (unscheduled), MOD (modification)\n' +
+    '- Controllable: Y/N\n' +
+    fleetSummary + '\n\n' +
+    'RESPOND CONCISELY. You are an operational tool, not a chatbot. Facts over filler.';
 }
 
 // ─── PORT RESOLUTION ────────────────────────────────────────────────────────
@@ -98,13 +153,13 @@ function _getWsUrl() {
   try {
     if (fs.existsSync(P.orchaConfig)) {
       const cfg = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
-      if (cfg.mode === 'remote' && cfg.host) return `ws://${cfg.host}:${cfg.port || 4799}`;
+      if (cfg.mode === 'remote' && cfg.host) return 'ws://' + cfg.host + ':' + (cfg.port || 4799);
     }
   } catch (_) {}
   try {
     const raw = fs.readFileSync(P.orchaPort, 'utf8').trim();
     const port = parseInt(raw, 10);
-    if (!isNaN(port) && port > 0) return `ws://localhost:${port}`;
+    if (!isNaN(port) && port > 0) return 'ws://localhost:' + port;
   } catch (_) {}
   return 'ws://localhost:4799';
 }
@@ -138,20 +193,15 @@ function _saveSession(sid) {
 
 // ─── CONNECTION ─────────────────────────────────────────────────────────────
 function connect() {
-  if (_ws && (_ws.readyState === WebSocket.OPEN || _ws.readyState === WebSocket.CONNECTING)) {
-    return;
-  }
+  // Don't attempt WS if we already gave up — local mode handles calls until retry window
+  if (_wsGaveUp) return;
+  if (_ws && (_ws.readyState === WebSocket.OPEN || _ws.readyState === WebSocket.CONNECTING)) return;
 
   const url = _getWsUrl();
   logger.info('Connecting to Orcha at ' + url + '...');
 
-  try {
-    _ws = new WebSocket(url);
-  } catch (e) {
-    logger.warn('WS constructor error: ' + e.message);
-    _scheduleReconnect();
-    return;
-  }
+  try { _ws = new WebSocket(url); }
+  catch (e) { logger.warn('WS constructor error: ' + e.message); _scheduleReconnect(); return; }
 
   _ws.on('open', () => {
     _failCount = 0;
@@ -160,43 +210,50 @@ function connect() {
 
   _ws.on('error', (err) => {
     _failCount++;
-    // After 5 consecutive failures Orcha WS is clearly not running — log at INFO
-    // so the log stays clean while the app happily uses Claude Code / Bedrock instead.
     const logFn = _failCount <= 5 ? 'warn' : 'info';
     logger[logFn]('WS error (attempt ' + _failCount + '): ' + (err.message || 'unknown'));
     _connected = false;
-    _ready = false;
+    _ready     = false;
+
+    if (_failCount >= WS_GIVE_UP_AFTER && !_wsGaveUp) {
+      _wsGaveUp = true;
+      logger.info('[fleet-brain] Orcha WS unreachable after ' + _failCount + ' attempts — switching to local AI mode');
+      // Flush any queued items through local fallback so callers are not stranded
+      if (_localAskFn && _queue.length) {
+        logger.info('[fleet-brain] Flushing ' + _queue.length + ' queued request(s) through local AI');
+        const queued = _queue.splice(0);
+        queued.forEach(req => _localAsk(req.prompt).then(req.resolve).catch(req.reject));
+      }
+      // Schedule a retry of Orcha WS after RETRY_WS_AFTER_MS
+      setTimeout(() => {
+        logger.info('[fleet-brain] Retrying Orcha WS after ' + (RETRY_WS_AFTER_MS / 60000) + ' min pause');
+        _wsGaveUp  = false;
+        _failCount = 0;
+        connect();
+      }, RETRY_WS_AFTER_MS);
+    }
   });
 
   _ws.on('close', () => {
     logger.info('WS closed');
     _connected = false;
-    _ready = false;
-    _ws = null;
-    // Reject active request if any
-    if (_activeReq) {
-      _activeReq.reject(new Error('WS closed'));
-      _activeReq = null;
-    }
+    _ready     = false;
+    _ws        = null;
+    if (_activeReq) { _activeReq.reject(new Error('WS closed')); _activeReq = null; }
     _scheduleReconnect();
   });
 
   _ws.on('message', (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw); } catch (_) { return; }
+    let msg; try { msg = JSON.parse(raw); } catch (_) { return; }
     _handleMessage(msg);
   });
 }
 
 function _scheduleReconnect() {
-  // Exponential backoff: 3s → 6s → 12s → ... capped at 5 min.
-  // Once Orcha WS is clearly absent the app runs fine on Claude Code / Bedrock,
-  // so hammering reconnects every 3s just pollutes logs for no benefit.
+  if (_wsGaveUp) return; // don't schedule if we gave up — setTimeout in error handler handles retry
   const delay = Math.min(RECONNECT_DELAY * Math.pow(2, Math.max(0, _failCount - 1)), 5 * 60 * 1000);
   setTimeout(() => {
-    if (!_ws || _ws.readyState === WebSocket.CLOSED) {
-      connect();
-    }
+    if (!_wsGaveUp && (!_ws || _ws.readyState === WebSocket.CLOSED)) connect();
   }, delay);
 }
 
@@ -205,67 +262,42 @@ function _handleMessage(msg) {
     case 'connected':
       _connected = true;
       logger.info('Orcha server connected');
-      // Load or create session
       _sessionId = _loadSession();
       if (_sessionId) {
         _ws.send(JSON.stringify({ type: 'load_session', session_id: _sessionId }));
       } else {
-        _ws.send(JSON.stringify({
-          type: 'create_session',
-          title: 'Fleet Operations Brain',
-          agent_id: AGENT_ID,
-          system_prompt: _buildSystemContext(),
-        }));
+        _ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet Operations Brain', agent_id: AGENT_ID, system_prompt: _buildSystemContext() }));
       }
       break;
-
     case 'session_loaded':
       _sessionId = msg.session_id || _sessionId;
-      _ready = true;
+      _ready     = true;
       logger.info('Session restored: ' + _sessionId);
       _drainQueue();
       break;
-
     case 'session_created':
       _saveSession(msg.session_id || msg.sessionId);
       _ready = true;
       logger.info('New session created: ' + _sessionId);
-      // Send system context as first message so Orcha knows who it is
       if (_ws && _ws.readyState === WebSocket.OPEN) {
-        _ws.send(JSON.stringify({
-          type: 'send_message',
-          session_id: _sessionId,
-          message: '[SYSTEM CONTEXT - DO NOT RESPOND TO THIS, JUST ABSORB]\n\n' + _buildSystemContext(),
-          images: [],
-        }));
-        // Don't wait for response — it will come as message_complete, just ignore it
-        // The REAL first request will come from the queue
+        _ws.send(JSON.stringify({ type: 'send_message', session_id: _sessionId, message: '[SYSTEM CONTEXT - DO NOT RESPOND TO THIS, JUST ABSORB]\n\n' + _buildSystemContext(), images: [] }));
       }
       _drainQueue();
       break;
-
     case 'error':
       if (msg.request_type === 'load_session') {
         logger.info('Session not found — creating new');
         _sessionId = null;
-        _ws.send(JSON.stringify({
-          type: 'create_session',
-          title: 'Fleet Operations Brain',
-          agent_id: AGENT_ID,
-        }));
+        _ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet Operations Brain', agent_id: AGENT_ID }));
       } else if (_activeReq) {
         _activeReq.reject(new Error(msg.error || 'Orcha error'));
         _activeReq = null;
         _processNext();
       }
       break;
-
     case 'text_delta':
-      if (_activeReq) {
-        _activeReq.text += (msg.delta || msg.content || msg.text || '');
-      }
+      if (_activeReq) _activeReq.text += (msg.delta || msg.content || msg.text || '');
       break;
-
     case 'message_complete':
       if (_activeReq) {
         const text = _activeReq.text;
@@ -278,36 +310,23 @@ function _handleMessage(msg) {
   }
 }
 
-// ─── REQUEST QUEUE ──────────────────────────────────────────────────────────
+// ─── REQUEST QUEUE (WS mode) ─────────────────────────────────────────────────
 function _drainQueue() {
-  if (_queue.length > 0 && !_activeReq) {
-    _processNext();
-  }
+  if (_queue.length > 0 && !_activeReq) _processNext();
 }
 
 function _processNext() {
   if (_queue.length === 0 || _activeReq) return;
   if (!_ready || !_ws || _ws.readyState !== WebSocket.OPEN) return;
-
   const req = _queue.shift();
   _activeReq = req;
-
-  // Check timeout
   if (Date.now() - req.createdAt > TIMEOUT_MS) {
     req.reject(new Error('Request timed out in queue'));
     _activeReq = null;
     _processNext();
     return;
   }
-
-  _ws.send(JSON.stringify({
-    type: 'send_message',
-    session_id: _sessionId,
-    message: req.prompt,
-    images: [],
-  }));
-
-  // Set response timeout
+  _ws.send(JSON.stringify({ type: 'send_message', session_id: _sessionId, message: req.prompt, images: [] }));
   req.timer = setTimeout(() => {
     if (_activeReq === req) {
       req.reject(new Error('Response timeout'));
@@ -321,33 +340,32 @@ function _processNext() {
 
 /**
  * ask(prompt) — Send a prompt to the fleet brain, get text response.
- * Queues if not connected yet. Uses persistent session with full fleet context.
+ *
+ * Routing:
+ *   1. WS mode  — Orcha WS connected → queue over WebSocket
+ *   2. Local mode — Orcha gave up or not configured → inject context + history,
+ *                   call through _localAskFn (claude-code / Bedrock)
  */
 function ask(prompt) {
   _requestCount++;
   return new Promise((resolve, reject) => {
-    if (_queue.length >= MAX_QUEUE) {
-      return reject(new Error('Fleet brain queue full'));
+    if (_queue.length >= MAX_QUEUE) return reject(new Error('Fleet brain queue full'));
+
+    // Local mode: WS gave up OR WS not connected but local fallback is available
+    if ((_wsGaveUp || !_connected) && _localAskFn) {
+      _localAsk(prompt).then(resolve).catch(reject);
+      return;
     }
 
     const req = {
       prompt,
-      text: '',
-      timer: null,
+      text:      '',
+      timer:     null,
       createdAt: Date.now(),
-      resolve: (text) => {
-        clearTimeout(req.timer);
-        resolve(text);
-      },
-      reject: (err) => {
-        clearTimeout(req.timer);
-        reject(err);
-      },
+      resolve:   (text) => { clearTimeout(req.timer); resolve(text); },
+      reject:    (err)  => { clearTimeout(req.timer); reject(err);   },
     };
-
     _queue.push(req);
-
-    // Ensure connected
     if (!_ws || _ws.readyState !== WebSocket.OPEN) {
       connect();
     } else if (_ready) {
@@ -356,56 +374,33 @@ function ask(prompt) {
   });
 }
 
-/**
- * chat(prompt) — Same as ask() but explicitly for the chat panel.
- * Uses the same persistent session so chat and automation share context.
- */
-function chat(prompt) {
-  return ask(prompt);
-}
-
-/**
- * getSessionId() — Returns current session ID (for chat panel sync)
- */
-function getSessionId() { return _sessionId; }
-
-/**
- * getStatus() — Connection health
- */
-function getStatus() {
-  return {
-    connected: _connected,
-    ready: _ready,
-    sessionId: _sessionId,
-    queueLength: _queue.length,
-    requestCount: _requestCount,
-    lastActivity: _lastActivity,
-    wsState: _ws ? _ws.readyState : -1,
-  };
-}
-
-/**
- * resetSession() — Force new session (clear context)
- */
+function chat(prompt)     { return ask(prompt); }
+function getSessionId()   { return _sessionId; }
 function resetSession() {
-  _sessionId = null;
-  _ready = false;
+  _sessionId    = null;
+  _ready        = false;
+  _localHistory = []; // clear local context too
   try { fs.unlinkSync(SESSION_FILE); } catch (_) {}
   if (_ws && _ws.readyState === WebSocket.OPEN) {
-    _ws.send(JSON.stringify({
-      type: 'create_session',
-      title: 'Fleet Operations Brain',
-      agent_id: AGENT_ID,
-    }));
+    _ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet Operations Brain', agent_id: AGENT_ID }));
   }
   logger.info('Session reset — next call creates fresh context');
 }
 
-/**
- * init() — Start the persistent connection. Call once at app startup.
- */
-function init() {
-  connect();
+function getStatus() {
+  return {
+    connected:    _connected,
+    ready:        _ready || (_wsGaveUp && !!_localAskFn) || (!_connected && !!_localAskFn),
+    localMode:    _wsGaveUp || (!_connected && !!_localAskFn),
+    sessionId:    _sessionId,
+    queueLength:  _queue.length,
+    requestCount: _requestCount,
+    lastActivity: _lastActivity,
+    wsState:      _ws ? _ws.readyState : -1,
+    wsGaveUp:     _wsGaveUp,
+  };
 }
 
-module.exports = { init, ask, chat, getSessionId, getStatus, resetSession };
+function init() { connect(); }
+
+module.exports = { init, ask, chat, getSessionId, getStatus, resetSession, setLocalAskFn };
