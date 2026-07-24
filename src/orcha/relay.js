@@ -101,14 +101,24 @@ async function ask(prompt, opts = {}) {
       return text;
     }
   } catch (brainErr) {
-    logger.warn('Fleet-brain failed: ' + brainErr.message + ' -- falling back to direct WS');
-    logger.info('[relay] WS URL will be: ' + getOrchaUrl());
+    // 'fleet-brain not connected' is the normal/expected state when Orcha isn't running —
+    // log at INFO, not WARN, so it doesn't look alarming when the app is running fine on
+    // Claude Code / Bedrock fallbacks.
+    const expectedDown = /not connected/i.test(brainErr.message);
+    if (expectedDown) {
+      logger.info('Orcha WS not available — using fallback AI');
+    } else {
+      logger.warn('Fleet-brain failed: ' + brainErr.message);
+    }
   }
 
-  // FALLBACK: Direct WS (throwaway session, no context)
+  // FALLBACK: Direct WS (throwaway session, no context).
+  // Skip entirely if fleet-brain already confirmed the WS endpoint is unreachable —
+  // _tryWS hits the same URL and would just burn the full timeout for nothing.
+  const _fbDown = !(fleetBrain.getStatus ? fleetBrain.getStatus().connected : false);
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const text = await _tryWS(prompt).catch(() => null);
+      const text = _fbDown ? null : await _tryWS(prompt).catch(() => null);
       if (text) {
         _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
         _releaseSlot();

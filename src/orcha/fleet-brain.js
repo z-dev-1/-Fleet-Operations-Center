@@ -40,6 +40,7 @@ let _queue        = [];     // pending requests while connecting
 let _activeReq    = null;   // current in-flight request
 let _requestCount = 0;
 let _lastActivity = null;
+let _failCount    = 0;        // consecutive WS failures — drives exponential backoff
 
 // ─── FLEET SYSTEM CONTEXT ───────────────────────────────────────────────────
 function _buildSystemContext() {
@@ -153,11 +154,16 @@ function connect() {
   }
 
   _ws.on('open', () => {
+    _failCount = 0;
     logger.info('WS open — waiting for connected signal');
   });
 
   _ws.on('error', (err) => {
-    logger.warn('WS error: ' + (err.message || 'unknown'));
+    _failCount++;
+    // After 5 consecutive failures Orcha WS is clearly not running — log at INFO
+    // so the log stays clean while the app happily uses Claude Code / Bedrock instead.
+    const logFn = _failCount <= 5 ? 'warn' : 'info';
+    logger[logFn]('WS error (attempt ' + _failCount + '): ' + (err.message || 'unknown'));
     _connected = false;
     _ready = false;
   });
@@ -183,11 +189,15 @@ function connect() {
 }
 
 function _scheduleReconnect() {
+  // Exponential backoff: 3s → 6s → 12s → ... capped at 5 min.
+  // Once Orcha WS is clearly absent the app runs fine on Claude Code / Bedrock,
+  // so hammering reconnects every 3s just pollutes logs for no benefit.
+  const delay = Math.min(RECONNECT_DELAY * Math.pow(2, Math.max(0, _failCount - 1)), 5 * 60 * 1000);
   setTimeout(() => {
     if (!_ws || _ws.readyState === WebSocket.CLOSED) {
       connect();
     }
-  }, RECONNECT_DELAY);
+  }, delay);
 }
 
 function _handleMessage(msg) {
