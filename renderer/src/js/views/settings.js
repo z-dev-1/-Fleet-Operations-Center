@@ -693,58 +693,41 @@ function _html() {
              / 📍 Workflow) for follow-up. See src/scrapers/slack_channel_watch.js
              for the full design + safety writeup. -->
         <div class="sd-section" id="sect-partner-autoreply">
-          <div class="sd-section-title">Partner Auto-Reply (AI)</div>
-          <div class="sd-hint" style="margin-bottom:8px">AI answers partner questions automatically in the channels below. Anything it can't confidently answer still gets a professional holding reply, and is logged for your review in Orcha's Review tab.</div>
-          <div class="sd-field">
-            <div class="sd-toggle-row"><span class="sd-toggle-label">Enable Partner Auto-Reply</span><input type="checkbox" id="par-enabled"/></div>
+          <div class="sd-section-title">
+            <span style="font-size:11px">🤖</span> Partner Auto-Reply
+            <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">AI</span>
           </div>
-          <!-- CLEANUP (2026-07-23): removed the old global "default reply
-               mode" radio pair -- per-channel mode dropdowns (below, one
-               per channel row) fully replaced it as of the 2026-07-23
-               per-channel rollout. New channels now default to 'mentions'
-               (the safe, original behavior) and can be switched to
-               "Occasionally involved" individually right after adding. -->
-          <!-- FEATURE (2026-07-22): add channels by ID directly, rather than
-               a browsable "all my channels" list -- Slack's own
-               conversations.list/users.conversations are hard-blocked on
-               this Enterprise Grid workspace (enterprise_is_restricted,
-               confirmed live), so a real browse list isn't possible. ID
-               entry + a live conversations.info membership check (also
-               confirmed live, unrestricted) is the safe alternative --
-               simpler than name search and avoids any name-matching
-               ambiguity/mistakes per the user's own request. -->
-          <div class="sd-field">
-            <div class="sd-two-col" style="display:flex;gap:6px;align-items:flex-end">
-              <label class="settings-label" style="flex:1">Add channel by ID
-                <input id="par-add-id" class="settings__input" type="text" placeholder="e.g. C0A8WSPA4R3" />
-              </label>
+          <div class="sd-hint" style="margin-bottom:10px">Watches your Slack Connect partner channels and replies automatically — confident answer when it has one, warm holding reply otherwise. Out-of-scope messages are also logged for review in Orcha.</div>
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">Enable</span>
+            <input type="checkbox" id="par-enabled"/>
+          </div>
+          <div style="margin-top:12px">
+            <div class="sd-label" style="margin-bottom:6px">Add channel by ID</div>
+            <div style="display:flex;gap:6px">
+              <input id="par-add-id" class="sd-input" style="flex:1;font-size:11px" type="text" placeholder="e.g. C0A8WSPA4R3" />
               <button class="sd-btn secondary" id="par-add-btn" type="button">Add</button>
             </div>
           </div>
-          <div id="par-channel-list" class="sd-field"></div>
-          <div class="sd-btn-row">
+          <div id="par-channel-list" style="margin-top:10px;display:flex;flex-direction:column;gap:6px"></div>
+          <div class="sd-btn-row" style="margin-top:10px">
             <button class="sd-btn primary" id="par-save">Save</button>
           </div>
           <div id="par-status" class="sd-status" style="display:none;margin-top:8px"></div>
         </div>
 
-        <!-- DM Auto-Reply (AI) -- 2026-07-23. AI reads new personal
-             Slack DMs and replies as Z, adapting tone per-message
-             (supportive, professional, casual, or helpful, depending on
-             what the message is about) rather than one fixed tone.
-             Uses live fleet context for unit/site questions. Anything it
-             can't confidently answer as Z gets a natural holding reply
-             and is logged to Orcha's Review tab for follow-up. This is
-             the same deliberate, logged exception to the "Slack always
-             requires human approval" rule as Partner Auto-Reply above --
-             see src/scrapers/slack_dm_autoreply.js for the full design. -->
         <div class="sd-section" id="sect-dm-autoreply">
-          <div class="sd-section-title">DM Auto-Reply (AI)</div>
-          <div class="sd-hint" style="margin-bottom:8px">AI replies to your personal Slack DMs as you, adapting its tone to what the message is about (supportive, professional, casual, or helpful) and answering fleet/unit questions with live data. Anything it's not confident about still gets a natural holding reply, and is logged for your review in Orcha's Review tab.</div>
-          <div class="sd-field">
-            <div class="sd-toggle-row"><span class="sd-toggle-label">Enable DM Auto-Reply</span><input type="checkbox" id="dm-ar-enabled"/></div>
+          <div class="sd-section-title">
+            <span style="font-size:11px">💬</span> DM Auto-Reply
+            <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">AI</span>
           </div>
-          <div class="sd-btn-row">
+          <div class="sd-hint" style="margin-bottom:10px">Replies to your personal Slack DMs as you — adapts tone per-message (casual, professional, supportive), uses live fleet data for unit questions. Holds anything it's not confident about for your review in Orcha.</div>
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">Enable</span>
+            <input type="checkbox" id="dm-ar-enabled"/>
+          </div>
+          <div id="dm-ar-thread-list" style="margin-top:10px;display:flex;flex-direction:column;gap:6px"></div>
+          <div class="sd-btn-row" style="margin-top:10px">
             <button class="sd-btn primary" id="dm-ar-save">Save</button>
           </div>
           <div id="dm-ar-status" class="sd-status" style="display:none;margin-top:8px"></div>
@@ -1488,11 +1471,11 @@ function _wireGraphMail() {
 // error-prone than name search per the user's own request.
 function _wirePartnerAutoReply() {
   const enabledEl = document.getElementById('par-enabled');
-  const listEl = document.getElementById('par-channel-list');
-  const saveBtn = document.getElementById('par-save');
-  const statusEl = document.getElementById('par-status');
-  const addIdEl = document.getElementById('par-add-id');
-  const addBtn = document.getElementById('par-add-btn');
+  const listEl    = document.getElementById('par-channel-list');
+  const saveBtn   = document.getElementById('par-save');
+  const statusEl  = document.getElementById('par-status');
+  const addIdEl   = document.getElementById('par-add-id');
+  const addBtn    = document.getElementById('par-add-btn');
   if (!enabledEl || !listEl || !saveBtn) return;
 
   function showStatus(text, cls) {
@@ -1502,30 +1485,59 @@ function _wirePartnerAutoReply() {
     statusEl.style.display = '';
   }
 
+  function _relTime(ms) {
+    if (!ms) return 'never';
+    const diff = Date.now() - ms;
+    if (diff < 60000)    return 'just now';
+    if (diff < 3600000)  return Math.floor(diff / 60000) + 'm ago';
+    if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+    return Math.floor(diff / 86400000) + 'd ago';
+  }
+
   let _currentConfig = null;
+  let _replyCounts   = {};
 
   function render(config) {
     _currentConfig = config;
     enabledEl.checked = !!config.enabled;
     const channels = config.channels || [];
-    // FEATURE (2026-07-23): reply mode is per-channel now (see
-    // slack_channel_watch.js getWatchConfig migration) -- each row gets its
-    // own mode selector. The old global default radio was removed in the
-    // 2026-07-23 settings cleanup; new channels just default to 'mentions'.
-    listEl.innerHTML = channels.length ? channels.map((ch, i) => {
-      const chMode = ch.replyMode || config.replyMode || 'mentions';
-      return `<div class="sd-toggle-row" data-idx="${i}">
-        <span class="sd-toggle-label">#${_esc(ch.name)} <span style="color:var(--mut);font-size:10px">(${_esc(ch.id)})</span></span>
-        <span style="display:flex;align-items:center;gap:8px">
-          <select id="par-ch-mode-${i}" class="settings__input" style="width:auto;font-size:11px;padding:2px 4px">
-            <option value="mentions" ${chMode === 'mentions' ? 'selected' : ''}>Only @-mentions</option>
-            <option value="occasional" ${chMode === 'occasional' ? 'selected' : ''}>Occasionally involved</option>
-          </select>
+    if (!channels.length) {
+      listEl.innerHTML = '<div class="sd-hint">No channels added yet — enter a channel ID above to add one.</div>';
+      return;
+    }
+    listEl.innerHTML = channels.map((ch, i) => {
+      const chMode   = ch.replyMode || config.replyMode || 'mentions';
+      const lastSeen = _relTime(ch.lastSeenTs ? parseFloat(ch.lastSeenTs) * 1000 : 0);
+      const count    = _replyCounts[ch.id] || 0;
+      const modeDesc = chMode === 'occasional'
+        ? 'Replies to @mentions, thread follow-ups, and relevant messages'
+        : 'Replies to @mentions and messages clearly directed at you';
+      return `<div style="background:var(--el);border:1px solid var(--bdr);border-radius:8px;padding:10px 12px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-size:11px;color:var(--txt2);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+            <span style="color:var(--acc2)">#</span>${_esc(ch.name)}
+            <span style="color:var(--mut);font-size:9px;margin-left:4px">${_esc(ch.id)}</span>
+          </span>
           <input type="checkbox" id="par-ch-${i}" ${ch.enabled !== false ? 'checked' : ''}/>
-          <button class="sd-btn secondary par-ch-remove" data-idx="${i}" type="button" style="padding:2px 8px;font-size:10px">Remove</button>
-        </span>
+          <button class="sd-btn danger par-ch-remove" data-idx="${i}" type="button" style="padding:2px 8px;font-size:10px;border-radius:5px">✕</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
+          <button class="sd-font-btn par-mode-btn ${chMode === 'mentions'   ? 'active' : ''}" data-idx="${i}" data-mode="mentions"   type="button" style="font-size:9px;padding:3px 10px">Mentions</button>
+          <button class="sd-font-btn par-mode-btn ${chMode === 'occasional' ? 'active' : ''}" data-idx="${i}" data-mode="occasional" type="button" style="font-size:9px;padding:3px 10px">Occasional</button>
+          <span style="margin-left:auto;font-size:9px;color:var(--mut)">${count ? count + ' ' + (count === 1 ? 'reply' : 'replies') + ' · ' : ''}${lastSeen}</span>
+        </div>
+        <div style="font-size:9px;color:var(--mut);margin-top:6px;padding-top:5px;border-top:1px solid rgba(48,54,61,.6)">${modeDesc}</div>
       </div>`;
-    }).join('') : '<div class="sd-hint">No channels added yet — enter a channel ID above to add one.</div>';
+    }).join('');
+
+    listEl.querySelectorAll('.par-mode-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const idx  = parseInt(btn.getAttribute('data-idx'), 10);
+        const mode = btn.getAttribute('data-mode');
+        _currentConfig.channels[idx].replyMode = mode;
+        render(_currentConfig);
+      });
+    });
 
     listEl.querySelectorAll('.par-ch-remove').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -1537,8 +1549,17 @@ function _wirePartnerAutoReply() {
     });
   }
 
-  slackBridge.getChannelWatchConfig().then(render).catch((e) => {
-    showStatus('\u274C Failed to load config: ' + e.message, 'err');
+  Promise.all([
+    slackBridge.getChannelWatchConfig(),
+    slackBridge.getReplyLog(500),
+  ]).then(([config, replyLog]) => {
+    _replyCounts = {};
+    (replyLog || []).forEach((e) => {
+      _replyCounts[e.channelId] = (_replyCounts[e.channelId] || 0) + 1;
+    });
+    render(config);
+  }).catch((e) => {
+    showStatus('❌ Failed to load config: ' + e.message, 'err');
   });
 
   if (addBtn && addIdEl) {
@@ -1563,9 +1584,6 @@ function _wirePartnerAutoReply() {
           return;
         }
         if (!_currentConfig) _currentConfig = { enabled: true, channels: [] };
-        // CLEANUP (2026-07-23): global default radio is gone -- new channels
-        // start at 'mentions' (the safe default) and can be switched to
-        // 'occasional' individually via the per-row selector right after.
         _currentConfig.channels.push({ id, name: result.name, enabled: true, lastSeenTs: null, replyMode: 'mentions' });
         render(_currentConfig);
         addIdEl.value = '';
@@ -1584,23 +1602,18 @@ function _wirePartnerAutoReply() {
     if (!_currentConfig) return;
     const updated = {
       enabled: !!enabledEl.checked,
-      // CLEANUP (2026-07-23): no longer writing a global replyMode -- each
-      // channel's own replyMode (read from its row's select below) is what
-      // actually drives pollChannelsOnce. slack_channel_watch.js still
-      // tolerates a missing/legacy global replyMode via its own default.
       channels: _currentConfig.channels.map((ch, i) => {
         const cb = document.getElementById('par-ch-' + i);
-        const modeSel = document.getElementById('par-ch-mode-' + i);
-        return { ...ch, enabled: cb ? !!cb.checked : ch.enabled, replyMode: modeSel ? modeSel.value : ch.replyMode };
+        return { ...ch, enabled: cb ? !!cb.checked : ch.enabled };
       }),
     };
     try {
       await slackBridge.saveChannelWatchConfig(updated);
       _currentConfig = updated;
-      showStatus('\u2705 Saved', 'ok');
+      showStatus('✅ Saved', 'ok');
       toast.show('success', 'Partner Auto-Reply settings saved', 2500);
     } catch (e) {
-      showStatus('\u274C Save failed: ' + e.message, 'err');
+      showStatus('❌ Save failed: ' + e.message, 'err');
       toast.show('error', 'Save failed: ' + e.message, 4000);
     }
   });
@@ -1640,9 +1653,10 @@ async function _spSaveDomicile(opName, domCode, siteUrl, listName, headerRow) {
 // ── SP: render operator accordion cards ──────────────────────────────────────
 
 function _wireDMAutoReply() {
-  const enabledEl = document.getElementById('dm-ar-enabled');
-  const saveBtn = document.getElementById('dm-ar-save');
-  const statusEl = document.getElementById('dm-ar-status');
+  const enabledEl  = document.getElementById('dm-ar-enabled');
+  const saveBtn    = document.getElementById('dm-ar-save');
+  const statusEl   = document.getElementById('dm-ar-status');
+  const listEl     = document.getElementById('dm-ar-thread-list');
   if (!enabledEl || !saveBtn) return;
 
   function showStatus(text, cls) {
@@ -1652,18 +1666,58 @@ function _wireDMAutoReply() {
     statusEl.style.display = '';
   }
 
-  // BUG FIX (2026-07-23): saveDMAutoReplyConfig returns { ok: true }, not
-  // the saved config (same as saveChannelWatchConfig above) -- so the
-  // checkbox must be driven from local state, never from the save
-  // response. Also must preserve _currentConfig.threads on every save, or
-  // Save would silently wipe the per-DM baseline tracking.
+  // Preserve threads on every save — saveDMAutoReplyConfig returns { ok: true },
+  // not the saved config, so drive UI from local state only.
   let _currentConfig = { enabled: false, threads: {} };
 
-  slackBridge.getDMAutoReplyConfig().then((config) => {
+  function _relTime(ms) {
+    if (!ms) return 'never';
+    const diff = Date.now() - ms;
+    if (diff < 60000)    return 'just now';
+    if (diff < 3600000)  return Math.floor(diff / 60000)   + 'm ago';
+    if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+    return Math.floor(diff / 86400000) + 'd ago';
+  }
+
+  function _renderThreadList(config, replyLog) {
+    if (!listEl) return;
+    const threads = config.threads || {};
+    const ids = Object.keys(threads);
+    if (!ids.length) {
+      listEl.innerHTML = '<div style="color:var(--mut);font-size:10px;padding:4px 0">No monitored DM threads yet. Threads are added automatically when the poller first sees a DM.</div>';
+      return;
+    }
+
+    // Build reply-count map from log
+    const countMap = {};
+    (replyLog || []).forEach(r => {
+      if (r.channelId) countMap[r.channelId] = (countMap[r.channelId] || 0) + 1;
+    });
+
+    listEl.innerHTML = ids.map(id => {
+      const t = threads[id];
+      const name = t.name || id;
+      const count = countMap[id] || 0;
+      const lastTs = t.lastSeenTs ? t.lastSeenTs * 1000 : null;
+      const rel = _relTime(lastTs);
+
+      return `<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--el);border:1px solid var(--bdr);border-radius:6px">
+        <span style="flex:1;font-size:11px;font-weight:600;color:var(--txt2)">${name}</span>
+        ${count ? `<span style="font-size:9px;font-weight:700;color:var(--acc2);background:var(--adim);padding:1px 6px;border-radius:10px">${count} repl${count === 1 ? 'y' : 'ies'}</span>` : ''}
+        <span style="font-size:9px;color:var(--mut)">last seen ${rel}</span>
+      </div>`;
+    }).join('');
+  }
+
+  Promise.all([
+    slackBridge.getDMAutoReplyConfig(),
+    slackBridge.getDMReplyLog ? slackBridge.getDMReplyLog(200) : Promise.resolve([])
+  ]).then(([config, replyLog]) => {
     _currentConfig = config || _currentConfig;
     enabledEl.checked = !!_currentConfig.enabled;
-  }).catch((e) => {
-    showStatus('❌ Failed to load config: ' + e.message, 'err');
+    _renderThreadList(_currentConfig, replyLog);
+  }).catch(e => {
+    showStatus('Failed to load config: ' + e.message, 'err');
   });
 
   saveBtn.addEventListener('click', async () => {
@@ -1672,10 +1726,10 @@ function _wireDMAutoReply() {
       await slackBridge.saveDMAutoReplyConfig(updated);
       _currentConfig = updated;
       enabledEl.checked = !!_currentConfig.enabled;
-      showStatus('✅ Saved', 'ok');
+      showStatus('Saved', 'ok');
       toast.show('success', 'DM Auto-Reply settings saved', 2500);
     } catch (e) {
-      showStatus('❌ Save failed: ' + e.message, 'err');
+      showStatus('Save failed: ' + e.message, 'err');
       toast.show('error', 'Save failed: ' + e.message, 4000);
     }
   });
