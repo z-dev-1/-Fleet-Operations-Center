@@ -124,6 +124,85 @@ app.whenReady().then(async () => {
     log.info('Beta gate: launch allowed for user "' + currentUser + '" (' + (isAdminUser() ? 'admin' : 'beta tester') + ')');
   }
 
+  // ── 5a-3. VPN GATE — block launch until Amazon VPN is connected ────────────
+  // Internal resources (AAP, SharePoint, SMTP relay, Relay scraper) all live
+  // behind corp DNS. Launching without VPN silently fails every scrape and
+  // auth flow. This gate shows a small window and polls vpncli every 5 s;
+  // bootstrap resumes automatically the moment the tunnel comes up.
+  // Closing the gate window quits the app rather than launching in a broken state.
+  {
+    const { checkVpnState } = require('./utils/vpn');
+    const _vpnInitial = await checkVpnState();
+    log.info('[vpn-gate] Initial state: ' + _vpnInitial.status);
+
+    if (!_vpnInitial.connected) {
+      log.warn('[vpn-gate] VPN not connected — holding startup until tunnel is up');
+
+      await new Promise((resolve) => {
+        const { BrowserWindow } = require('electron');
+
+        const _vpnHtml = '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+          '<style>*{box-sizing:border-box;margin:0;padding:0}' +
+          'body{font-family:-apple-system,"Segoe UI",sans-serif;background:#0d1117;' +
+          'color:#e6edf3;padding:32px;user-select:none}' +
+          '.icon{font-size:36px;margin-bottom:14px}' +
+          'h2{font-size:16px;font-weight:600;margin-bottom:12px}' +
+          'p{font-size:13px;line-height:1.65;color:#8b949e;margin-bottom:10px}' +
+          'strong{color:#e6edf3}' +
+          '.status{margin-top:20px;font-size:12px;color:#6e7681;display:flex;' +
+          'align-items:center;gap:8px}' +
+          '.dot{width:8px;height:8px;border-radius:50%;background:#f0883e;' +
+          'animation:pulse 1.8s ease-in-out infinite;flex-shrink:0}' +
+          '@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}' +
+          '</style></head><body>' +
+          '<div class="icon">\uD83D\uDD12</div>' +
+          '<h2>VPN Required</h2>' +
+          '<p>Fleet Operations needs an active Amazon VPN connection to reach internal ' +
+          'resources\u2014AAP inventory, SharePoint, Relay, and the email relay.</p>' +
+          '<p>Connect via <strong>Cisco Secure Client</strong> and this window will ' +
+          'close automatically.</p>' +
+          '<div class="status"><div class="dot"></div>' +
+          '<span id="lbl">Checking VPN status\u2026</span></div>' +
+          '<script>var n=5;setInterval(function(){' +
+          'n=n<=1?5:n-1;' +
+          'document.getElementById("lbl").textContent=' +
+          '"Checking VPN status \u2014 next check in "+n+"s\u2026";' +
+          '},1000);<\/script>' +
+          '</body></html>';
+
+        const _vpnWin = new BrowserWindow({
+          width: 460, height: 280, resizable: false, center: true, show: false,
+          title: 'Fleet Operations \u2014 VPN Required',
+          icon: require('./config/app-icon').getAppIconPath(),
+          frame: true, autoHideMenuBar: true,
+          webPreferences: { contextIsolation: true, nodeIntegration: false, devTools: false },
+        });
+        _vpnWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(_vpnHtml));
+        _vpnWin.once('ready-to-show', () => _vpnWin.show());
+
+        // Poll vpncli every 5 s; auto-close + continue when connected
+        const _vpnPoll = setInterval(async () => {
+          const s = await checkVpnState();
+          log.info('[vpn-gate] Poll: ' + s.status);
+          if (s.connected) {
+            clearInterval(_vpnPoll);
+            if (!_vpnWin.isDestroyed()) _vpnWin.close();
+            resolve();
+          }
+        }, 5000);
+
+        // User closes window manually \u2192 quit rather than boot broken
+        _vpnWin.on('closed', () => {
+          clearInterval(_vpnPoll);
+          log.warn('[vpn-gate] Window closed by user \u2014 quitting');
+          app.quit();
+        });
+      });
+
+      log.info('[vpn-gate] VPN connected \u2014 resuming startup');
+    }
+  }
+
   // ── 5b. Shared ctx — one object, passed to every subsystem ───────────────
   // Mutable cells — updated by sync engine via setters, read by everyone.
   let _isSyncing = false;
@@ -378,6 +457,7 @@ app.whenReady().then(async () => {
   // Back-fill window factory refs on ctx
   _ctx.createMainWindow = _windowApi.createMainWindow;
   _ctx.closeSetupWizard = _windowApi.closeSetupWizard; // BUG FIX (2026-07-22): setup:complete needs this to close the wizard window itself
+  _ctx.openZoomMeetingWindow = _windowApi.openZoomMeetingWindow; // FEATURE (2026-07-23): lets ipc/zoom.js open the embedded Zoom meeting window
 
   // ── 5d. Sync engine ────────────────────────────────────────────────────────
   const { createSyncEngine } = require('./sync');
@@ -443,6 +523,11 @@ function _startAutoSync() {
     _windowApi.showSetupWizard();
     // wizard:complete IPC (in window/index.js) calls createMainWindow internally
   }
+
+  // FEATURE (2026-07-23): starts polling for upcoming Zoom meetings and
+  // firing desktop-notification reminders -- no-ops until the user has
+  // signed in via "Sign in with Zoom" (see orcha/zoom.js isSignedIn()).
+  _windowApi.startZoomReminders();
 
   // ── 5g. Create tray ────────────────────────────────────────────────────────
   _windowApi.createTray();
