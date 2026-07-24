@@ -1147,65 +1147,6 @@ async function _send() {
   const val = (inp.value || '').trim();
   if (!val) return;
 
-  // ── Email intercept: "email/mail [name] [optional body]" ────────────────────
-  const _emailMatch = val.match(/^(?:email|mail|send\s+email\s+to)\s+(.+)/i);
-  if (_emailMatch && window.contacts) {
-    const rest = _emailMatch[1].trim();
-    const words = rest.split(/\s+/);
-    try {
-      const allContacts = await window.contacts.getAll();
-      const emailCandidates = allContacts.filter(c => c.email);
-      let matches = [], body = '';
-      for (let n = Math.min(words.length, 3); n >= 1; n--) {
-        const q = words.slice(0, n).join(' ').toLowerCase();
-        const found = emailCandidates.filter(c => c.name.toLowerCase().includes(q));
-        if (found.length) { matches = found; body = words.slice(n).join(' '); break; }
-      }
-      if (matches.length === 1) { inp.value = ''; inp.style.height = 'auto'; _openEmailCompose(matches[0], body); return; }
-      if (matches.length > 1)  { inp.value = ''; inp.style.height = 'auto'; _showEmailPicker(matches, body); return; }
-      // 0 matches
-      const _eNameGuess = words.slice(0, Math.min(words.length, 2)).join(' ');
-      inp.value = ''; inp.style.height = 'auto';
-      _appendMsg('oc-msg--user', val);
-      _appendMsg('oc-msg--orcha',
-        '📧 No contact with an email address named “' + _eNameGuess + '” found.\n\n' +
-        'Add their email in Contact Book (📇 toolbar), then try again.');
-      return;
-    } catch (_) { /* fall through */ }
-  }
-
-  // ── Quick-message intercept: "message/msg/dm [name] [optional body]" ────────
-  // Tries to match the name against contacts with type:'slack'.
-  // 1 match → open compose bubble immediately.
-  // 2+ matches → show disambiguation picker.
-  // 0 matches → fall through to AI (it can still handle it naturally).
-  const _msgMatch = val.match(/^(?:message|msg|dm)\s+(.+)/i);
-  if (_msgMatch && window.contacts) {
-    const rest = _msgMatch[1].trim();
-    const words = rest.split(/\s+/);
-    try {
-      const allContacts = await window.contacts.getAll();
-      const slackContacts = allContacts.filter(c => c.type === 'slack');
-      let matches = [], body = '';
-      for (let n = Math.min(words.length, 3); n >= 1; n--) {
-        const q = words.slice(0, n).join(' ').toLowerCase();
-        const found = slackContacts.filter(c => c.name.toLowerCase().includes(q));
-        if (found.length) { matches = found; body = words.slice(n).join(' '); break; }
-      }
-      if (matches.length === 1) { inp.value = ''; inp.style.height = 'auto'; _openQuickCompose(matches[0], body); return; }
-      if (matches.length > 1)  { inp.value = ''; inp.style.height = 'auto'; _showContactPicker(matches, body); return; }
-      // 0 matches — tell the user instead of silently handing it to AI
-      const _nameGuess = words.slice(0, Math.min(words.length, 2)).join(' ');
-      inp.value = '';
-      _appendMsg('oc-msg--user', val);
-      _appendMsg('oc-msg--orcha',
-        '💬 No Slack contact named “' + _nameGuess + '” found.\n\n' +
-        'To message them: open the Contact Book (📇 toolbar), add them via the + Add Slack Contact form, ' +
-        'then try again.\n\nIf you just restarted the app, DM contacts auto-save on the next poll cycle (30s).');
-      return;
-    } catch (_) { /* fall through to AI if contact lookup errors */ }
-  }
-
   // ── Direct data-send interceptor ────────────────────────────────────────────
   // Catches "send/email/message [name] [update/data/notes] for [site]" BEFORE
   // reaching Claude. Shows a one-tap disambiguation — "Send my data" vs "Ask for data"
@@ -1333,6 +1274,66 @@ async function _send() {
       }
     } catch (_sendErr) { /* fall through to AI */ }
   }
+
+  // ── Email intercept: "email/mail [name] [optional body]" ────────────────────
+  const _emailMatch = val.match(/^(?:email|mail|send\s+email\s+to)\s+(.+)/i);
+  if (_emailMatch && window.contacts) {
+    const rest = _emailMatch[1].trim();
+    const words = rest.split(/\s+/);
+    try {
+      const allContacts = await window.contacts.getAll();
+      const emailCandidates = allContacts.filter(c => c.email);
+      let matches = [], body = '';
+      for (let n = Math.min(words.length, 3); n >= 1; n--) {
+        const q = words.slice(0, n).join(' ').toLowerCase();
+        const found = emailCandidates.filter(c => c.name.toLowerCase().includes(q));
+        if (found.length) { matches = found; body = words.slice(n).join(' '); break; }
+      }
+      if (matches.length === 1) { inp.value = ''; inp.style.height = 'auto'; _openEmailCompose(matches[0], body); return; }
+      if (matches.length > 1)  { inp.value = ''; inp.style.height = 'auto'; _showEmailPicker(matches, body); return; }
+      // 0 matches
+      const _eNameGuess = words.slice(0, Math.min(words.length, 2)).join(' ');
+      inp.value = ''; inp.style.height = 'auto';
+      _appendMsg('oc-msg--user', val);
+      _appendMsg('oc-msg--orcha',
+        '📧 No contact with an email address named “' + _eNameGuess + '” found.\n\n' +
+        'Add their email in Contact Book (📇 toolbar), then try again.');
+      return;
+    } catch (_) { /* fall through */ }
+  }
+
+  // ── Quick-message intercept: "message/msg/dm [name] [optional body]" ────────
+  // Tries to match the name against contacts with type:'slack'.
+  // 1 match → open compose bubble immediately.
+  // 2+ matches → show disambiguation picker.
+  // 0 matches → fall through to AI (it can still handle it naturally).
+  const _msgMatch = val.match(/^(?:message|msg|dm)\s+(.+)/i);
+  if (_msgMatch && window.contacts) {
+    const rest = _msgMatch[1].trim();
+    const words = rest.split(/\s+/);
+    try {
+      const allContacts = await window.contacts.getAll();
+      const slackContacts = allContacts.filter(c => c.type === 'slack');
+      let matches = [], body = '';
+      for (let n = Math.min(words.length, 3); n >= 1; n--) {
+        const q = words.slice(0, n).join(' ').toLowerCase();
+        const found = slackContacts.filter(c => c.name.toLowerCase().includes(q));
+        if (found.length) { matches = found; body = words.slice(n).join(' '); break; }
+      }
+      if (matches.length === 1) { inp.value = ''; inp.style.height = 'auto'; _openQuickCompose(matches[0], body); return; }
+      if (matches.length > 1)  { inp.value = ''; inp.style.height = 'auto'; _showContactPicker(matches, body); return; }
+      // 0 matches — tell the user instead of silently handing it to AI
+      const _nameGuess = words.slice(0, Math.min(words.length, 2)).join(' ');
+      inp.value = '';
+      _appendMsg('oc-msg--user', val);
+      _appendMsg('oc-msg--orcha',
+        '💬 No Slack contact named “' + _nameGuess + '” found.\n\n' +
+        'To message them: open the Contact Book (📇 toolbar), add them via the + Add Slack Contact form, ' +
+        'then try again.\n\nIf you just restarted the app, DM contacts auto-save on the next poll cycle (30s).');
+      return;
+    } catch (_) { /* fall through to AI if contact lookup errors */ }
+  }
+
 
   inp.value = ''; inp.style.height = 'auto';
   _appendMsg('oc-msg--user', val);
