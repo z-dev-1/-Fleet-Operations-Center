@@ -1218,33 +1218,26 @@ async function _send() {
       const _valLow = val.toLowerCase();
       const _nonDomC = allC.filter(c => c.type !== 'domicile');
       // Match contact by ANY word in their name or email prefix (handles "zila" → "zilasant@...").
-      // Falls back to the sole configured contact when no name is mentioned at all --
-      // otherwise messages like "send all data for avp40" (no name) never matched anyone
-      // and the whole disambiguation silently never showed.
       const _match  = _nonDomC.find(c => c.name && (
         c.name.toLowerCase().split(/\s+/).some(w => w.length > 2 && _valLow.includes(w)) ||
         (c.email && _valLow.includes(c.email.split('@')[0].toLowerCase()))
-      )) || (_nonDomC.length === 1 ? _nonDomC[0] : null);
-      // Default to email when the contact has no known Slack identity yet (empty slackId/
-      // channelId) even if the word "email" wasn't typed -- Slack would just fail silently.
-      const isEmail = /\bemail\b/i.test(val) ||
-        (!!_match && !_match.slackId && !_match.channelId && !!_match.email);
-      if (_match) {
-        inp.value = ''; inp.style.height = 'auto';
-        _appendMsg('oc-msg--user', val);
-        _addHistory('user', val);
+      )) || null;
 
-        // Show disambiguation — never guess intent
-        // Render INSIDE the composer (pinned above the input box), not in the
-        // scrollable chat log -- a message-log entry can end up off-screen if
-        // the user isn't scrolled to the bottom, so it looked like it never showed.
+      // Renders the actual "send my data" vs "ask them for data" prompt for a
+      // resolved contact. Shared by both the direct-match path and the
+      // pick-a-contact path below so neither one re-guesses intent.
+      const _renderDisambig = (target) => {
+        inp.value = ''; inp.style.height = 'auto';
+        const isEmail = /\bemail\b/i.test(val) ||
+          (!target.slackId && !target.channelId && !!target.email);
+
         const existingDis = document.getElementById('oc-disambig');
         if (existingDis) existingDis.remove();
         const disambig = document.createElement('div');
         disambig.id = 'oc-disambig';
         disambig.className = 'oc-quick-compose';
         disambig.innerHTML =
-          '<div style="font-size:12px;color:var(--txt2)">Are you <strong>sending data TO ' + _esc(_match.name) + '</strong>, or <strong>asking THEM for data</strong>?</div>' +
+          '<div style="font-size:12px;color:var(--txt2)">Are you <strong>sending data TO ' + _esc(target.name) + '</strong>, or <strong>asking THEM for data</strong>?</div>' +
           '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
             '<button class="oc-reply-btn oc-reply-btn--ai oc-dis-send">📤 Send my fleet data</button>' +
             '<button class="oc-reply-btn oc-dis-ask">❓ Ask them for data</button>' +
@@ -1281,11 +1274,11 @@ async function _send() {
               const subject = 'Fleet Report \u2014 ' + rr.label + ' \u2014 ' +
                 new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
               if (isEmail) {
-                _openEmailCompose(_match, rr.report, subject);
+                _openEmailCompose(target, rr.report, subject);
               } else {
-                _openQuickCompose(_match, rr.report);
+                _openQuickCompose(target, rr.report);
               }
-              _appendMsg('oc-msg--orcha', '\u2705 ' + rr.label + ' report ready for ' + _esc(_match.name) + ' — review and click Send ➤');
+              _appendMsg('oc-msg--orcha', '\u2705 ' + rr.label + ' report ready for ' + _esc(target.name) + ' — review and click Send ➤');
             } else {
               _appendMsg('oc-msg--orcha', '\u26a0\ufe0f ' + (rr && rr.error || 'Could not build report — sync fleet data first.'));
             }
@@ -1293,6 +1286,48 @@ async function _send() {
             if (st) st.textContent = '\u25CF Ready';
             _appendMsg('oc-msg--orcha', '\u274c ' + e3.message);
           }
+        });
+      };
+
+      if (_match) {
+        _appendMsg('oc-msg--user', val);
+        _addHistory('user', val);
+        _renderDisambig(_match);
+        return;
+      }
+
+      // No name/email mentioned in the message. Rather than silently doing
+      // nothing (the original bug — "send all data for avp40" matched no one
+      // and fell through to Claude unnoticed), ask which saved contact this
+      // is about. Skipped only when there's genuinely nobody to pick from.
+      if (_nonDomC.length >= 1) {
+        inp.value = ''; inp.style.height = 'auto';
+        _appendMsg('oc-msg--user', val);
+        _addHistory('user', val);
+
+        const existingDis = document.getElementById('oc-disambig');
+        if (existingDis) existingDis.remove();
+        const picker = document.createElement('div');
+        picker.id = 'oc-disambig';
+        picker.className = 'oc-quick-compose';
+        picker.innerHTML =
+          '<div style="font-size:12px;color:var(--txt2)">Who is this about?</div>' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+            _nonDomC.map((c, i) =>
+              '<button class="oc-reply-btn oc-pick-contact" data-idx="' + i + '">' + _esc(c.name) + '</button>'
+            ).join('') +
+            '<button class="oc-qc-cancel oc-dis-cancel">✕</button>' +
+          '</div>';
+        const tabChatEl  = document.getElementById('oc-tab-chat');
+        const inputRowEl  = tabChatEl && tabChatEl.querySelector('.oc-input-row');
+        if (tabChatEl) tabChatEl.insertBefore(picker, inputRowEl || null);
+
+        picker.querySelector('.oc-dis-cancel').addEventListener('click', () => picker.remove());
+        picker.querySelectorAll('.oc-pick-contact').forEach(btn => {
+          btn.addEventListener('click', () => {
+            picker.remove();
+            _renderDisambig(_nonDomC[Number(btn.dataset.idx)]);
+          });
         });
         return;
       }
