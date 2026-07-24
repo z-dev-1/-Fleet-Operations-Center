@@ -407,8 +407,43 @@ function registerMiscIPC(ctx) {
       logger.warn('[Email] Graph send failed, falling back to SMTP:', e.message);
       if (send) send('email:progress', '[Email] Graph send failed (' + e.message + ') -- falling back to SMTP...');
     }
-    const { sendFleetEmail } = require('../../src/scrapers/email_sender');
-    return sendFleetEmail(opts, (msg) => { logger.info(msg); if (send) send('email:progress', msg); });
+    const { sendFleetEmail, loadEmailConfig } = require('../../src/scrapers/email_sender');
+    const smtpResult = await sendFleetEmail(opts, (msg) => { logger.info(msg); if (send) send('email:progress', msg); });
+
+    if (smtpResult && smtpResult.ok) return smtpResult;
+
+    // SMTP failed (no password or no VPN) — open OWA compose as fallback.
+    // Copy the HTML body to clipboard so the user can paste it (Ctrl+V) into OWA.
+    logger.warn('[Email] SMTP failed (' + (smtpResult && smtpResult.error) + ') — opening OWA compose');
+    if (send) send('email:progress', '[Email] SMTP unavailable — opening OWA. Body copied to clipboard, paste with Ctrl+V.');
+    try {
+      const { clipboard, BrowserWindow, session: eSess } = require('electron');
+      const { getAppIconPath } = require('../config/app-icon');
+
+      // Copy both HTML and plain-text versions so paste works in any context
+      const plainText = (opts.htmlBody || '').replace(/<[^>]*>/g, '').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+      clipboard.write({ html: opts.htmlBody || '', text: plainText });
+
+      const cfg    = loadEmailConfig();
+      const toAddr = (opts.to || cfg.defaultTo || '').split(';')[0].trim();
+      const owaBase = (cfg.owaUrl || 'https://outlook.office365.com/mail/deeplink/compose').replace(/\/$/, '');
+      const owaUrl  = owaBase
+        + '?to='      + encodeURIComponent(toAddr)
+        + '&subject=' + encodeURIComponent(opts.subject || 'Fleet Status Report');
+
+      const owaWin = new BrowserWindow({
+        width: 1024, height: 768,
+        title: 'Send Email — ' + toAddr,
+        icon: getAppIconPath(),
+        webPreferences: { nodeIntegration: false, contextIsolation: true, session: eSess.defaultSession },
+      });
+      owaWin.setMenu(null);
+      owaWin.loadURL(owaUrl);
+      owaWin.once('ready-to-show', () => owaWin.show());
+    } catch (owaErr) {
+      logger.warn('[Email] OWA fallback failed:', owaErr.message);
+    }
+    return { ok: false, error: (smtpResult && smtpResult.error) || 'SMTP unavailable', method: 'owa-opened' };
   });
 
 
