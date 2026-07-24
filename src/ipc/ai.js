@@ -648,45 +648,52 @@ function registerAIHandlers(ctx) {
     requireStringMax(data.body, 'body', 8000);
 
     const { sendFleetEmail, loadEmailConfig } = require('../scrapers/email_sender');
-    const cfg = loadEmailConfig();
+    const cfg    = loadEmailConfig();
+    const method = cfg.emailMethod || 'auto';
+    const htmlBody = '<p>' + (data.body || '').replace(/\n/g, '<br>') + '</p>';
 
-    // Path 1: SMTP silent send (only if password is configured)
-    if (cfg.password && cfg.password.trim()) {
-      const res = await sendFleetEmail({
-        to: data.to,
-        subject: data.subject || 'Message from Fleet Operations Center',
-        htmlBody: '<p>' + (data.body || '').replace(/\n/g, '<br>') + '</p>',
-      });
-      if (res.ok) return { ok: true, method: 'smtp' };
-      logger.warn('[ai:send-email] SMTP failed (' + res.error + '), falling back to OWA');
+    // Helper: open OWA compose window
+    function openOWACompose() {
+      const { BrowserWindow, session: eSession } = require('electron');
+      const { getAppIconPath } = require('../config/app-icon');
+      const owaBase = (cfg.owaUrl || 'https://outlook.office365.com/mail/deeplink/compose').replace(/\/$/, '');
+      const owaUrl  = owaBase
+        + '?to='      + encodeURIComponent(data.to)
+        + '&subject=' + encodeURIComponent(data.subject || 'Message from Fleet Operations Center')
+        + '&body='    + encodeURIComponent(data.body || '');
+      const owaWin = new BrowserWindow({ width: 960, height: 720, title: 'Compose Email — ' + data.to, icon: getAppIconPath(), webPreferences: { nodeIntegration: false, contextIsolation: true, session: eSession.defaultSession } });
+      owaWin.setMenu(null);
+      owaWin.loadURL(owaUrl);
+      owaWin.once('ready-to-show', () => owaWin.show());
+      return { ok: true, method: 'owa' };
     }
 
-    // Path 2: OWA compose window inside the app.
-    // Build the OWA deep-link URL.  Amazon is on Office 365 so the default works;
-    // if your tenant is different, set owaUrl in emailConfig.
-    const owaBase = (cfg.owaUrl || 'https://outlook.office365.com/mail/deeplink/compose').replace(/\/$/, '');
-    const owaUrl  = owaBase
-      + '?to='      + encodeURIComponent(data.to)
-      + '&subject=' + encodeURIComponent(data.subject || 'Message from Fleet Operations Center')
-      + '&body='    + encodeURIComponent(data.body || '');
+    // ── Graph ──────────────────────────────────────────────────────────────
+    if (method === 'graph' || method === 'auto') {
+      try {
+        const graphClient = require('../graph/client');
+        if (await graphClient.isSignedIn()) {
+          const res = await graphClient.sendMail({ to: data.to, subject: data.subject || 'Message from Fleet Operations Center', htmlBody });
+          if (res.ok) return { ok: true, method: 'graph' };
+        } else if (method === 'graph') {
+          return { ok: false, error: 'Microsoft Graph: not signed in. Go to Settings -> Outlook (Microsoft Graph).' };
+        }
+      } catch (e) {
+        logger.warn('[ai:send-email] Graph failed:', e.message);
+        if (method === 'graph') return { ok: false, error: 'Graph failed: ' + e.message };
+      }
+    }
 
-    const { BrowserWindow, session: eSession } = require('electron');
-    const { getAppIconPath } = require('../config/app-icon');
-    const owaWin = new BrowserWindow({
-      width: 960, height: 720,
-      title: 'Compose Email — ' + data.to,
-      icon: getAppIconPath(),
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true,
-        // Share the default session so existing OWA login cookies are re-used.
-        session: eSession.defaultSession,
-      },
-    });
-    owaWin.setMenu(null);
-    owaWin.loadURL(owaUrl);
-    owaWin.once('ready-to-show', () => owaWin.show());
-    return { ok: true, method: 'owa' };
+    // ── SMTP ───────────────────────────────────────────────────────────────
+    if (method === 'smtp' || (method === 'auto' && (cfg.password || cfg.pass) && (cfg.password || cfg.pass).trim())) {
+      const res = await sendFleetEmail({ to: data.to, subject: data.subject || 'Message from Fleet Operations Center', htmlBody });
+      if (res.ok) return { ok: true, method: 'smtp' };
+      logger.warn('[ai:send-email] SMTP failed (' + res.error + ')' + (method === 'smtp' ? '' : ', falling back to OWA'));
+      if (method === 'smtp') return { ok: false, error: res.error || 'SMTP failed' };
+    }
+
+    // ── OWA ────────────────────────────────────────────────────────────────
+    return openOWACompose();
   });
 
   logger.info('AI IPC handlers registered');

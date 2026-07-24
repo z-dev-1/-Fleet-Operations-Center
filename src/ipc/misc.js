@@ -381,71 +381,71 @@ function registerMiscIPC(ctx) {
   });
 
   handle('email:send', async (_e, opts) => {
-    // FIX (2026-07-21): try Microsoft Graph FIRST when the user has signed
-    // in (Settings -> Outlook (Microsoft Graph)). Graph delivers the
-    // finished HTML directly -- no VPN needed (unlike the SMTP path below,
-    // which requires ballard.amazon.com over VPN), and no OWA compose
-    // sanitizer involved (unlike pasting into Outlook Web, which strips
-    // color styling -- see src/graph/client.js for the full writeup).
-    // Falls through to the existing SMTP path unchanged if Graph isn't
-    // configured/signed in yet, so nothing breaks for anyone who hasn't
-    // set it up -- fully backward compatible, opt-in per user.
-    try {
-      const graphClient = require('../graph/client');
-      if (await graphClient.isSignedIn()) {
-        logger.info('[Email] Sending via Microsoft Graph (signed in)...');
-        if (send) send('email:progress', '[Email] Sending via Microsoft Graph...');
-        const result = await graphClient.sendMail({
-          to: opts.to, cc: opts.cc, bcc: opts.bcc,
-          subject: opts.subject || 'Fleet Status Report',
-          htmlBody: opts.htmlBody,
-        });
-        if (send) send('email:progress', '[Email] Sent via Microsoft Graph.');
-        return result;
-      }
-    } catch (e) {
-      logger.warn('[Email] Graph send failed, falling back to SMTP:', e.message);
-      if (send) send('email:progress', '[Email] Graph send failed (' + e.message + ') -- falling back to SMTP...');
-    }
+    // Route to the method the user chose in Settings -> Email -> Send Method.
+    // 'auto' (default) preserves the original cascade: Graph -> SMTP -> OWA.
+    // Any explicit choice goes directly to that method with no silent fallback,
+    // so the user knows immediately when something isn't configured right.
     const { sendFleetEmail, loadEmailConfig } = require('../../src/scrapers/email_sender');
-    const smtpResult = await sendFleetEmail(opts, (msg) => { logger.info(msg); if (send) send('email:progress', msg); });
+    const cfg    = loadEmailConfig();
+    const method = cfg.emailMethod || 'auto';
+    logger.info('[Email] send method: ' + method);
 
-    if (smtpResult && smtpResult.ok) return smtpResult;
-
-    // SMTP failed (no password or no VPN) — open OWA compose as fallback.
-    // Copy the HTML body to clipboard so the user can paste it (Ctrl+V) into OWA.
-    logger.warn('[Email] SMTP failed (' + (smtpResult && smtpResult.error) + ') — opening OWA compose');
-    if (send) send('email:progress', '[Email] SMTP unavailable — opening OWA. Body copied to clipboard, paste with Ctrl+V.');
-    try {
+    // Helper: open OWA compose window (clipboard + deep-link)
+    async function openOWA() {
       const { clipboard, BrowserWindow, session: eSess } = require('electron');
       const { getAppIconPath } = require('../config/app-icon');
-
-      // Copy both HTML and plain-text versions so paste works in any context
       const plainText = (opts.htmlBody || '').replace(/<[^>]*>/g, '').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
       clipboard.write({ html: opts.htmlBody || '', text: plainText });
-
-      const cfg    = loadEmailConfig();
-      const toAddr = (opts.to || cfg.defaultTo || '').split(';')[0].trim();
+      const toAddr  = (opts.to || cfg.defaultTo || '').split(';')[0].trim();
       const owaBase = (cfg.owaUrl || 'https://outlook.office365.com/mail/deeplink/compose').replace(/\/$/, '');
-      const owaUrl  = owaBase
-        + '?to='      + encodeURIComponent(toAddr)
-        + '&subject=' + encodeURIComponent(opts.subject || 'Fleet Status Report');
-
-      const owaWin = new BrowserWindow({
-        width: 1024, height: 768,
-        title: 'Send Email — ' + toAddr,
-        icon: getAppIconPath(),
-        webPreferences: { nodeIntegration: false, contextIsolation: true, session: eSess.defaultSession },
-      });
+      const owaUrl  = owaBase + '?to=' + encodeURIComponent(toAddr) + '&subject=' + encodeURIComponent(opts.subject || 'Fleet Status Report');
+      const owaWin = new BrowserWindow({ width: 1024, height: 768, title: 'Send Email — ' + toAddr, icon: getAppIconPath(), webPreferences: { nodeIntegration: false, contextIsolation: true, session: eSess.defaultSession } });
       owaWin.setMenu(null);
       owaWin.loadURL(owaUrl);
       owaWin.once('ready-to-show', () => owaWin.show());
-    } catch (owaErr) {
-      logger.warn('[Email] OWA fallback failed:', owaErr.message);
     }
-    return { ok: false, error: (smtpResult && smtpResult.error) || 'SMTP unavailable', method: 'owa-opened' };
-  });
 
+    // ── Graph ──────────────────────────────────────────────────────────────
+    if (method === 'graph' || method === 'auto') {
+      try {
+        const graphClient = require('../graph/client');
+        if (await graphClient.isSignedIn()) {
+          logger.info('[Email] Sending via Microsoft Graph...');
+          if (send) send('email:progress', '[Email] Sending via Microsoft Graph...');
+          const result = await graphClient.sendMail({ to: opts.to, cc: opts.cc, bcc: opts.bcc, subject: opts.subject || 'Fleet Status Report', htmlBody: opts.htmlBody });
+          if (send) send('email:progress', '[Email] Sent via Microsoft Graph.');
+          return result;
+        } else if (method === 'graph') {
+          // Explicit — don't fall through, tell the user
+          return { ok: false, error: 'Microsoft Graph: not signed in. Go to Settings -> Outlook (Microsoft Graph) to sign in.' };
+        }
+      } catch (e) {
+        logger.warn('[Email] Graph send failed:', e.message);
+        if (method === 'graph') {
+          return { ok: false, error: 'Microsoft Graph failed: ' + e.message };
+        }
+        if (send) send('email:progress', '[Email] Graph failed (' + e.message + ') -- trying SMTP...');
+      }
+    }
+
+    // ── SMTP ───────────────────────────────────────────────────────────────
+    if (method === 'smtp' || method === 'auto') {
+      const smtpResult = await sendFleetEmail(opts, (msg) => { logger.info(msg); if (send) send('email:progress', msg); });
+      if (smtpResult && smtpResult.ok) return smtpResult;
+      if (method === 'smtp') {
+        // Explicit — don't fall through to OWA
+        return { ok: false, error: smtpResult.error || 'SMTP failed' };
+      }
+      logger.warn('[Email] SMTP failed (' + (smtpResult && smtpResult.error) + ') — opening OWA compose');
+      if (send) send('email:progress', '[Email] SMTP unavailable — opening OWA. Body copied to clipboard, paste with Ctrl+V.');
+    }
+
+    // ── OWA ────────────────────────────────────────────────────────────────
+    // Reached when method === 'owa', or as the auto-cascade final fallback.
+    if (send) send('email:progress', '[Email] Opening OWA compose. Body copied to clipboard — paste with Ctrl+V.');
+    try { await openOWA(); } catch (owaErr) { logger.warn('[Email] OWA failed:', owaErr.message); }
+    return { ok: false, error: 'OWA compose opened', method: 'owa-opened' };
+  });
 
   handle('email:get-config', () => {
     const { loadEmailConfig } = require('../../src/scrapers/email_sender');

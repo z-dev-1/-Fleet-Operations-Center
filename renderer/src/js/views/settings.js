@@ -665,7 +665,7 @@ function _html() {
 
         <!-- Email SMTP -->
         <div class="sd-section" id="sect-email">
-          <div class="sd-section-title">Email (SMTP)</div>
+          <div class="sd-section-title">Email</div>
           <div class="sd-row">
             <div class="sd-field">
               <div class="sd-label">Host</div>
@@ -689,6 +689,15 @@ function _html() {
           <div class="sd-field">
             <div class="sd-label">Password</div>
             <input class="sd-input" id="email-pass" type="password" placeholder="(encrypted)"/>
+          </div>
+          <div class="sd-field" style="margin-top:8px">
+            <div class="sd-label">Send Method</div>
+            <select class="sd-input" id="email-method">
+              <option value="auto">Auto (Graph → SMTP → OWA)</option>
+              <option value="graph">Microsoft Graph (no VPN needed)</option>
+              <option value="smtp">SMTP (VPN required)</option>
+              <option value="owa">OWA (in-app compose window)</option>
+            </select>
           </div>
           <div class="sd-btn-row">
             <button class="sd-btn primary"    id="email-save">Save</button>
@@ -1306,17 +1315,30 @@ function _checkSlack() {
 }
 
 function _wireEmail() {
-  var saveBtn = document.getElementById('email-save');
-  var testBtn = document.getElementById('email-test');
+  var saveBtn   = document.getElementById('email-save');
+  var testBtn   = document.getElementById('email-test');
+  var statusEl  = document.getElementById('email-status');
+  function showEmailStatus(text, cls) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.className = 'settings__status ' + (cls || '');
+    statusEl.style.display = '';
+    setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
+  }
   if (saveBtn) saveBtn.addEventListener('click', async () => {
+    const methodEl = document.getElementById('email-method');
     await emailBridge.saveConfig({
-      host: document.getElementById('email-host').value.trim(),
-      port: parseInt(document.getElementById('email-port').value, 10) || 587,
-      from: document.getElementById('email-from').value.trim(),
-      user: document.getElementById('email-user').value.trim(),
-      pass: document.getElementById('email-pass').value,
+      host:        document.getElementById('email-host').value.trim(),
+      port:        parseInt(document.getElementById('email-port').value, 10) || 587,
+      from:        document.getElementById('email-from').value.trim(),
+      user:        document.getElementById('email-user').value.trim(),
+      pass:        document.getElementById('email-pass').value,
+      emailMethod: methodEl ? methodEl.value : 'auto',
     });
     document.getElementById('email-pass').value = '';
+    const methodLabel = { auto: 'Auto', graph: 'Microsoft Graph', smtp: 'SMTP', owa: 'OWA' };
+    const sel = methodEl ? (methodLabel[methodEl.value] || methodEl.value) : 'Auto';
+    showEmailStatus('Saved — send method: ' + sel, 'ok');
   });
   if (testBtn) testBtn.addEventListener('click', () => {});
 }
@@ -2525,6 +2547,11 @@ function _populate() {
         const el = document.getElementById(`email-${f}`);
         if (el && e[f] != null) el.value = e[f];
       });
+      // Restore saved send method
+      if (e.emailMethod) {
+        const mEl = document.getElementById('email-method');
+        if (mEl) mEl.value = e.emailMethod;
+      }
     }
     if (all.asana) {
       const a = all.asana;
