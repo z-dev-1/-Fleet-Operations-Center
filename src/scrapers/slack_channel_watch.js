@@ -251,7 +251,13 @@ function _isInMentionThread(channelId, threadTs) {
 
 // ── AI classify + draft ──────────────────────────────────────────────────
 async function _classifyAndDraft(messageText, askOrcha) {
-  const prompt = PERSONA_SYSTEM_PROMPT + '\n\nPartner message:\n' + messageText;
+  // Inject local time so the AI uses the correct time-of-day greeting
+  // (morning/afternoon/evening) rather than guessing from UTC.
+  const _now = new Date();
+  const _timeStr = _now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  const _dateStr = _now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  const timeContext = '\n\nCurrent local time: ' + _timeStr + ', ' + _dateStr + '.';
+  const prompt = PERSONA_SYSTEM_PROMPT + timeContext + '\n\nPartner message:\n' + messageText;
   let aiResult;
   try {
     aiResult = await askOrcha(prompt);
