@@ -118,6 +118,7 @@ contextBridge.exposeInMainWorld('ai', {
   orchaAction:      (msg)         => ipcRenderer.invoke('ai:orcha-action', msg),
   sendEmail:   (data)   => ipcRenderer.invoke('ai:send-email', data),
   buildReport: (opts)   => ipcRenderer.invoke('ai:build-report', opts),
+  confirmSend: (item)  => ipcRenderer.invoke('ai:confirm-send', item),
   chat:             (prompt)      => ipcRenderer.invoke('ai:chat', prompt),
   appendTimeline:   (data)        => ipcRenderer.invoke('ai:append-timeline', data),
   deepProcess:      (unitIds)     => ipcRenderer.invoke('orcha:deep-process', unitIds),

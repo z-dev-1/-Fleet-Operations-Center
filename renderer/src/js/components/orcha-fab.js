@@ -1344,24 +1344,57 @@ async function _send() {
   try {
     // Route everything through smart AI action handler
     const result = await window.ai.orchaAction(val);
-    const text = (result && result.text) || 'No response';
-    
-    // Check if there are pending SLACK or EMAIL actions that need confirmation
-    if (text.includes('Slack sent to') || text.includes('Email composed to')) {
-      _appendMsg('oc-msg--orcha', text);
-      _addHistory('assistant', text);
-    } else if (text.includes('\nSending to ') || text.includes('\nEmailing ')) {
-      // Show confirmation prompt
-      _appendMsg('oc-msg--orcha', text + '\n\n✅ Sent successfully.');
-      _addHistory('assistant', text);
-    } else {
-      _appendMsg('oc-msg--orcha', text);
-      _addHistory('assistant', text);
+    const text = (result && result.text) || '';
+
+    // Show the AI's reply text if there is one
+    if (text) { _appendMsg('oc-msg--orcha', text); _addHistory('assistant', text); }
+
+    // If the AI identified a SLACK or EMAIL send, show a confirm prompt.
+    // Nothing is ever sent automatically — regardless of phrasing, every
+    // ai:orcha-action SLACK/EMAIL result lands here and waits for a click.
+    const pending = result && result.pendingConfirm;
+    if (pending && pending.length > 0) {
+      for (const item of pending) {
+        const existingDis = document.getElementById('oc-disambig');
+        if (existingDis) existingDis.remove();
+        const confirmEl = document.createElement('div');
+        confirmEl.id = 'oc-disambig';
+        confirmEl.className = 'oc-quick-compose';
+        const icon = item.channel === 'slack' ? '\uD83D\uDCAC' : '\uD83D\uDCE7';
+        const verb = item.channel === 'slack' ? 'Slack' : 'Email';
+        const dataNote = item.isRealData ? ' <span style="font-size:10px;color:#3fb950">(real fleet report)</span>' : '';
+        confirmEl.innerHTML =
+          '<div style="font-size:12px;color:var(--txt2)">Ready to ' + verb + ' <strong>' + _esc(item.recipientName) + '</strong>' + dataNote + '</div>' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+            '<button class="oc-reply-btn oc-reply-btn--ai oc-confirm-send">' + icon + '\u00A0Send</button>' +
+            '<button class="oc-qc-cancel oc-confirm-cancel">\u2715 Cancel</button>' +
+          '</div>';
+        const tabChatEl = document.getElementById('oc-tab-chat');
+        const inputRowEl = tabChatEl && tabChatEl.querySelector('.oc-input-row');
+        if (tabChatEl) tabChatEl.insertBefore(confirmEl, inputRowEl || null);
+        confirmEl.querySelector('.oc-confirm-cancel').addEventListener('click', () => confirmEl.remove());
+        confirmEl.querySelector('.oc-confirm-send').addEventListener('click', async () => {
+          confirmEl.remove();
+          const st = document.getElementById('orcha-status');
+          if (st) st.textContent = '\u25CF Sending...';
+          try {
+            const r3 = await window.ai.confirmSend(item);
+            if (r3 && r3.ok) {
+              _appendMsg('oc-msg--orcha', '\u2705 ' + (r3.message || 'Sent to ' + item.recipientName));
+            } else {
+              _appendMsg('oc-msg--orcha', '\u26a0\ufe0f ' + (r3 && r3.error || 'Send failed'));
+            }
+          } catch(e2) { _appendMsg('oc-msg--orcha', '\u274c ' + e2.message); }
+          if (st) st.textContent = '\u25CF Ready';
+        });
+      }
+    } else if (!text) {
+      _appendMsg('oc-msg--orcha', 'Done');
     }
   } catch(e) {
-    _appendMsg('oc-msg--orcha', '❌ ' + e.message);
+    _appendMsg('oc-msg--orcha', '\u274c ' + e.message);
   }
-  if (status) status.textContent = '\u{25CF} Ready';
+  if (status) status.textContent = '\u25CF Ready';
 }
 
 // ── Init ────────────────────────────────────────────────────────────────────

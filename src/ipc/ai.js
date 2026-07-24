@@ -432,11 +432,11 @@ function registerAIHandlers(ctx) {
       if (jm) try { parsed = JSON.parse(jm[0]); } catch(e) {}
       if (!parsed) return {ok:true,text:aiText,action:'chat'};
       const results = [];
+      const pendingConfirm = [];
       for (const a of (parsed.actions||[])) {
         if (a.type==='TIMELINE'&&a.unit&&a.entry) { const ns=store.load('notesStore',{}); const u=ns[a.unit]||{}; u.timeline=u.timeline?u.timeline+'\\n'+a.entry:a.entry; ns[a.unit]=u; store.save('notesStore',ns); try { const _s = require('electron').BrowserWindow.getAllWindows()[0]; if(_s) _s.webContents.send('notes:updated',{unitId:a.unit,timeline:u.timeline}); } catch(e){} results.push('Timeline:'+a.unit+' done');
           try { require('../orcha/repair-history').addEvent(a.unit, {summary:a.entry,vendor:'',outcome:'in-progress'}); } catch(e){} }
         if (a.type==='SLACK'&&a.recipient&&a.message) {
-          const { sendSlackMessage, sendToChannel, openConversation } = require('../../src/scrapers/slack_send');
           // Build real fleet data body.
           // If the user asked to send data for a site/operator but we have no fleet data
           // loaded yet, do NOT fall back to the AI's invented text (which is usually a
@@ -461,37 +461,25 @@ function registerAIHandlers(ctx) {
             ct.name && ct.name.toLowerCase().includes(rLower)
           );
 
-          let sendOk = false;
-          if (matchedContact) {
-            // Path 1: known DM channel — send directly, no API lookup needed
-            if (matchedContact.channelId) {
-              const r2 = await sendToChannel(matchedContact.channelId, slackBody);
-              sendOk = !!(r2 && r2.ok !== false);
-            }
-            // Path 2: Slack user ID — open DM channel via conversations.open
-            else if (matchedContact.slackId) {
-              const chId = await openConversation({ id: matchedContact.slackId, type: 'person' });
-              const r2   = await sendToChannel(chId, slackBody);
-              sendOk = !!(r2 && r2.ok !== false);
-            }
-            // Path 3: email only — lookupByEmail → conversations.open → send
-            else if (matchedContact.email) {
-              const r2 = await sendSlackMessage(matchedContact.email, slackBody);
-              sendOk = !!(r2 && r2.ok !== false);
-            }
-            results.push(sendOk ? 'Slack sent to ' + matchedContact.name : 'Slack failed (contact found but send failed)');
-          } else {
-            // No contact match — fall back to raw recipient (Slack name/email/handle)
-            const r2 = await sendSlackMessage(a.recipient, slackBody);
-            sendOk = !!(r2 && r2.ok !== false);
-            results.push(sendOk ? 'Slack sent to ' + a.recipient : 'Slack failed: no contact named "' + a.recipient + '" found in Contact Book');
-          }
+          // Never send automatically — regardless of how the user phrased the
+          // request, a real Slack send always needs an explicit confirm click.
+          // This is the single choke point every AI-driven SLACK action passes
+          // through, so no phrasing can bypass the confirmation prompt.
+          pendingConfirm.push({
+            id: 'pc' + Date.now() + Math.random().toString(36).slice(2, 6),
+            channel: 'slack',
+            recipientName: matchedContact ? matchedContact.name : a.recipient,
+            contact: matchedContact || null,
+            rawRecipient: a.recipient,
+            body: slackBody,
+            isRealData: !!realReport
+          });
+          results.push('Ready to send Slack message to ' + (matchedContact ? matchedContact.name : a.recipient) + ' — confirm below.');
         }
         if (a.type==='SYNC') results.push('Sync triggered');
         if (a.type==='SP_PUSH') results.push('SP push triggered');
         if (a.type==='EMAIL') {
           try {
-            const { sendFleetEmail } = require('../scrapers/email_sender');
             let toAddr = (a.to || '').trim();
             // If no @ in address, try to look up contact by name
             if (!toAddr.includes('@')) {
@@ -523,29 +511,18 @@ function registerAIHandlers(ctx) {
               const autoSubject = _label2
                 ? 'Fleet Report \u2014 ' + _label2 + ' \u2014 ' + new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})
                 : null;
-              const emailRes = await sendFleetEmail({
+              // Never send automatically — same choke point as SLACK above.
+              // Every AI-driven EMAIL action lands here and waits for confirm.
+              pendingConfirm.push({
+                id: 'pc' + Date.now() + Math.random().toString(36).slice(2, 6),
+                channel: 'email',
+                recipientName: toAddr,
                 to: toAddr,
                 subject: a.subject || autoSubject || 'Message from Fleet Operations Center',
-                // Send plain text as-is. sendFleetEmail wraps it in <pre> for SMTP
-                // so newlines/spacing are preserved without any HTML build-up.
-                htmlBody: reportHtml || (a.body ? '<p>' + a.body.replace(/\n/g, '<br>') + '</p>' : ''),
-                plainText: reportHtml || a.body || '',
+                body: reportHtml || a.body || '',
+                isRealData: !!reportHtml
               });
-              if (emailRes.ok) {
-                results.push('Email sent to ' + toAddr);
-              } else {
-                // SMTP failed (e.g. no password) — open the in-app Email Composer
-                // pre-filled with the REAL report body so the user can review and send.
-                try {
-                  const _ew = require('electron').BrowserWindow.getAllWindows()[0];
-                  if (_ew) _ew.webContents.send('email:compose', {
-                    to: toAddr,
-                    subject: a.subject || autoSubject || 'Message from Fleet Operations Center',
-                    body: reportHtml || (a.body || ''),
-                  });
-                } catch (_) {}
-                results.push('Email composer opened with report for ' + toAddr + ' (SMTP: ' + emailRes.error + ')');
-              }
+              results.push('Ready to email ' + toAddr + ' — confirm below.');
             }
           } catch(emailErr) { results.push('Email error: ' + emailErr.message); }
         }
@@ -686,8 +663,57 @@ function registerAIHandlers(ctx) {
       chatHistory.push({role:'user', text:userMsg, ts:Date.now()});
       chatHistory.push({role:'ai', text:parsed.reply||'', ts:Date.now()});
       store.save('chatHistory', chatHistory);
-      return {ok:true,text:(parsed.reply||'')+(results.length?'\\n'+results.join('\\n'):''),action:results.length?'multi':'chat'};
+      return {ok:true,text:(parsed.reply||'')+(results.length?'\n'+results.join('\n'):''),action:results.length?'multi':'chat',pendingConfirm};
     } catch(e) { return {ok:false,text:'Error:'+e.message,action:'chat'}; }
+  });
+
+  // ── Confirmed send ─────────────────────────────────────────────────────────
+  // ai:orcha-action never sends directly — it returns a pendingConfirm item
+  // (recipient + real report body) and the renderer shows Send/Cancel buttons.
+  // This handler fires ONLY after the user explicitly clicks Send. Regardless
+  // of how the original request was phrased, nothing ever goes out without it.
+  handle('ai:confirm-send', async (_e, item) => {
+    if (!item || !item.channel) return { ok: false, error: 'Nothing to send' };
+    try {
+      if (item.channel === 'slack') {
+        const { sendSlackMessage, sendToChannel, openConversation } = require('../../src/scrapers/slack_send');
+        const contact = item.contact;
+        let r2;
+        if (contact && contact.channelId) {
+          r2 = await sendToChannel(contact.channelId, item.body);
+        } else if (contact && contact.slackId) {
+          const chId = await openConversation({ id: contact.slackId, type: 'person' });
+          r2 = await sendToChannel(chId, item.body);
+        } else if (contact && contact.email) {
+          r2 = await sendSlackMessage(contact.email, item.body);
+        } else {
+          r2 = await sendSlackMessage(item.rawRecipient, item.body);
+        }
+        const sendOk = !!(r2 && r2.ok !== false);
+        return sendOk
+          ? { ok: true, message: 'Slack sent to ' + item.recipientName }
+          : { ok: false, error: 'Slack send failed' };
+      }
+      if (item.channel === 'email') {
+        const { sendFleetEmail } = require('../scrapers/email_sender');
+        const emailRes = await sendFleetEmail({
+          to: item.to,
+          subject: item.subject,
+          htmlBody: item.body ? '<pre>' + item.body.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>' : '',
+          plainText: item.body || '',
+        });
+        if (emailRes.ok) return { ok: true, message: 'Email sent to ' + item.to };
+        // SMTP failed — open the in-app composer pre-filled so the user can still send.
+        try {
+          const _ew = require('electron').BrowserWindow.getAllWindows()[0];
+          if (_ew) _ew.webContents.send('email:compose', { to: item.to, subject: item.subject, body: item.body || '' });
+        } catch (_) {}
+        return { ok: false, error: 'SMTP failed — composer opened instead' };
+      }
+      return { ok: false, error: 'Unknown channel: ' + item.channel };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
   });
 
 
