@@ -426,7 +426,17 @@ function registerAIHandlers(ctx) {
       for (const a of (parsed.actions||[])) {
         if (a.type==='TIMELINE'&&a.unit&&a.entry) { const ns=store.load('notesStore',{}); const u=ns[a.unit]||{}; u.timeline=u.timeline?u.timeline+'\\n'+a.entry:a.entry; ns[a.unit]=u; store.save('notesStore',ns); try { const _s = require('electron').BrowserWindow.getAllWindows()[0]; if(_s) _s.webContents.send('notes:updated',{unitId:a.unit,timeline:u.timeline}); } catch(e){} results.push('Timeline:'+a.unit+' done');
           try { require('../orcha/repair-history').addEvent(a.unit, {summary:a.entry,vendor:'',outcome:'in-progress'}); } catch(e){} }
-        if (a.type==='SLACK'&&a.recipient&&a.message) { const {sendSlackMessage}=require('../../src/scrapers/slack_send'); const r=await sendSlackMessage(a.recipient,a.message); results.push(r&&r.ok!==false?'Slack sent to '+a.recipient:'Slack failed'); }
+        if (a.type==='SLACK'&&a.recipient&&a.message) {
+          const {sendSlackMessage}=require('../../src/scrapers/slack_send');
+          // If user asked for site/operator details, build the real data message
+          // instead of using the AI's generic placeholder (e.g. "Here's the updated
+          // status for AVP40..."). _buildEmailReport returns a plain-text report
+          // with actual unit-level data -- same content the email path uses.
+          const realReport = _buildEmailReport(userMsg, rows, notesStore);
+          const slackBody  = realReport || a.message;
+          const r=await sendSlackMessage(a.recipient, slackBody);
+          results.push(r&&r.ok!==false?'Slack sent to '+a.recipient:'Slack failed');
+        }
         if (a.type==='SYNC') results.push('Sync triggered');
         if (a.type==='SP_PUSH') results.push('SP push triggered');
         if (a.type==='EMAIL') {
