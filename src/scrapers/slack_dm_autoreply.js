@@ -92,8 +92,14 @@ function updateDMReviewItem(id, updates) {
 // ── AI classify + draft (uses sendOrchaChat, the fleet-aware persistent
 // session, NOT the stateless askOrcha -- so unit/site questions get real
 // context instead of a generic guess) ────────────────────────────────────
-async function _classifyAndDraft(messageText, sendOrchaChat) {
-  const prompt = PERSONA_SYSTEM_PROMPT + '\n\nIncoming DM:\n' + messageText;
+async function _classifyAndDraft(messageText, sendOrchaChat, historyMsgs) {
+  // historyMsgs: optional array of strings ("Speaker: text") from recent
+  // conversation, oldest-first, to give the AI context before replying.
+  let contextBlock = '';
+  if (historyMsgs && historyMsgs.length) {
+    contextBlock = '\n\nRecent conversation context (for reference):\n' + historyMsgs.join('\n') + '\n';
+  }
+  const prompt = PERSONA_SYSTEM_PROMPT + contextBlock + '\n\nIncoming DM:\n' + messageText;
   let raw;
   try {
     raw = await sendOrchaChat(prompt, 'dm'); // isolated session -- see orcha_ws.js 'dm' session key
@@ -195,7 +201,15 @@ async function pollDMAutoReplyOnce(log) {
           continue;
         }
 
-        const draft = await _classifyAndDraft(msg.text, sendOrchaChat);
+        // Grab up to 2 messages that came before this one for context.
+        // messages[] is newest-first; filter to older ts, take first 2 (most
+        // recent before this msg), then reverse to chronological order.
+        const historyMsgs = messages
+          .filter(m => parseFloat(m.ts) < parseFloat(msg.ts))
+          .slice(0, 2)
+          .reverse()
+          .map(m => (m.userId === myUserId ? 'You' : (dm.name || 'Them')) + ': ' + (m.text || ''));
+        const draft = await _classifyAndDraft(msg.text, sendOrchaChat, historyMsgs);
 
         let replyTs = null;
         try {
