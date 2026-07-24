@@ -1206,6 +1206,47 @@ async function _send() {
     } catch (_) { /* fall through to AI if contact lookup errors */ }
   }
 
+  // ── Direct data-send interceptor ────────────────────────────────────────────
+  // Catches "send [update/data/report/notes] to [name] for [site]" and
+  // "email [name] [site] data/update/notes" BEFORE reaching Claude.
+  // Builds the real report via ai:build-report and opens the compose bubble.
+  // Claude is never involved — no risk of it generating a question.
+  const _isSendData = /\b(send|message|email|dm|slack)\b/i.test(val) &&
+    /\b(update|data|report|notes|status|info|detail)/i.test(val);
+  if (_isSendData && window.contacts && window.ai && window.ai.buildReport) {
+    try {
+      const allC = await window.contacts.getAll();
+      // Try to find a person contact whose name appears in the message
+      const _valLow = val.toLowerCase();
+      const _match  = allC.find(c => c.type !== 'domicile' && c.name &&
+        _valLow.includes(c.name.toLowerCase().split(' ')[0].toLowerCase()));
+      if (_match) {
+        inp.value = ''; inp.style.height = 'auto';
+        _appendMsg('oc-msg--user', val);
+        const status2 = document.getElementById('orcha-status');
+        if (status2) status2.textContent = '\u25CF Building report...';
+        const rr = await window.ai.buildReport({ query: val });
+        if (status2) status2.textContent = '\u25CF Ready';
+        if (rr && rr.ok) {
+          const isEmail = /\bemail\b/i.test(val);
+          const subject = 'Fleet Report \u2014 ' + rr.label + ' \u2014 ' +
+            new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+          if (isEmail) {
+            _openEmailCompose(_match, rr.report, subject);
+            _appendMsg('oc-msg--orcha', '\u2705 Report ready for ' + _match.name + ' — review and click Send.');
+          } else {
+            _openQuickCompose(_match, rr.report);
+            _appendMsg('oc-msg--orcha', '\u2705 Report ready for ' + _match.name + ' — review and click Send.');
+          }
+        } else {
+          _appendMsg('oc-msg--orcha', '\u26a0\ufe0f ' + (rr && rr.error ? rr.error : 'Could not build report — try syncing fleet data first.'));
+        }
+        _addHistory('user', val);
+        return;
+      }
+    } catch (_sendErr) { /* fall through to AI */ }
+  }
+
   inp.value = ''; inp.style.height = 'auto';
   _appendMsg('oc-msg--user', val);
   _addHistory('user', val);

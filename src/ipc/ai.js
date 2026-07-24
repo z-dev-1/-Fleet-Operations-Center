@@ -773,6 +773,29 @@ function registerAIHandlers(ctx) {
     return openOWACompose();
   });
 
+  // Build a plain-text fleet report for a site/operator/unit without calling AI.
+  // Used by the renderer's send interceptor so data sends never go through Claude.
+  handle('ai:build-report', (_e, { query }) => {
+    if (!query || typeof query !== 'string') throw new Error('query required');
+    const store      = require('../store');
+    const rows       = (store.load('fleetData', {}) || {}).rows || [];
+    const notesStore = store.load('notesStore', {}) || {};
+    const report     = _buildEmailReport(query, rows, notesStore);
+    if (!report) {
+      // Fallback: tell caller what sites are available so they can correct the query
+      const sites = [...new Set(rows.map(r => (r.domicileSite||'').toUpperCase()).filter(Boolean))].sort();
+      return { ok: false, error: 'No data found for "' + query + '". Known sites: ' + sites.slice(0, 20).join(', ') };
+    }
+    // Also extract the matched label for subject line auto-fill
+    const msgUpper   = query.toUpperCase();
+    const knownSites = [...new Set(rows.map(r => (r.domicileSite||'').toUpperCase()).filter(Boolean))];
+    const knownOps   = [...new Set(rows.map(r => (r.operator||'').toUpperCase()).filter(Boolean))];
+    const label      = knownSites.find(s => s.length > 2 && msgUpper.includes(s))
+                    || knownOps.find(o => o.length > 2 && msgUpper.includes(o))
+                    || query.toUpperCase();
+    return { ok: true, report, label };
+  });
+
   logger.info('AI IPC handlers registered');
 }
 
