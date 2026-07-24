@@ -852,7 +852,7 @@ function _showEmailPicker(matches, body) {
 
 // ── Email compose bubble (2026-07-24) ──────────────────────────────────────────
 // Opened from contact 📧 Email button or "email [name]" chat shortcut.
-function _openEmailCompose(contact, prefill) {
+function _openEmailCompose(contact, prefill, subjectPrefill) {
   if (!contact) return;
   const existing = document.getElementById('oc-email-compose');
   if (existing) existing.remove();
@@ -896,6 +896,7 @@ function _openEmailCompose(contact, prefill) {
 
   textarea.addEventListener('input', () => _autoGrowTextarea(textarea));
   if (prefill) setTimeout(() => { _autoGrowTextarea(textarea); }, 0);
+  if (subjectPrefill) subjectEl.value = subjectPrefill;
   subjectEl.focus();
 
   cancelBtn.addEventListener('click', () => bubble.remove());
@@ -1325,6 +1326,20 @@ export function init() {
   // Open compose bubble when Contact Book emits 'slack:quick-compose'
   bus.on('slack:quick-compose', (contact) => _openQuickCompose(contact));
   bus.on('contacts:quick-email', (contact) => _openEmailCompose(contact));
+
+  // AI action EMAIL fallback: main process fires this when SMTP is unavailable.
+  // Opens the compose bubble pre-filled with the real fleet report + subject.
+  bus.on('email:compose', async (data) => {
+    if (!data || !data.to) return;
+    // Find contact by email; create a synthetic one if not in book
+    let contact = null;
+    try {
+      const all = await window.contacts.getAll();
+      contact = all.find(c => c.email && c.email.toLowerCase() === data.to.toLowerCase());
+    } catch (_) {}
+    if (!contact) contact = { name: data.to, email: data.to };
+    _openEmailCompose(contact, data.body || '', data.subject || '');
+  });
 
   bus.on('ui:unit-select', () => {
     if (_panelOpen) {

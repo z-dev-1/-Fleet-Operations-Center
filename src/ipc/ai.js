@@ -34,16 +34,25 @@ const MAX_SUGGEST_KEYS      = 100;   // keys on unit object for ai:suggest (rais
 function _buildEmailReport(userMsg, rows, notesStore) {
   const today = new Date().toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' });
 
-  const siteMatch = userMsg.match(/\b([A-Z]{2,4}\d{2,3})\b/i);
-  const unitMatch = userMsg.match(/\b([A-Za-z]?\d{5,8})\b/);
-  const siteCode  = siteMatch ? siteMatch[1].toUpperCase() : null;
-  const unitId    = unitMatch ? unitMatch[1].toUpperCase() : null;
+  // Match against actual known sites/operators from the data — not a fixed regex.
+  // This catches all-letter operator codes (AGNLI, TUZR, etc.) that the old
+  // /[A-Z]{2,4}\d{2,3}/ pattern silently skipped.
+  const msgUpper    = userMsg.toUpperCase();
+  const knownSites  = [...new Set(rows.map(function(r){ return (r.domicileSite||'').toUpperCase(); }).filter(Boolean))];
+  const knownOps    = [...new Set(rows.map(function(r){ return (r.operator||'').toUpperCase(); }).filter(Boolean))];
+  const siteCode    = knownSites.find(function(s){ return s.length > 2 && msgUpper.includes(s); }) || null;
+  const opCode      = !siteCode ? (knownOps.find(function(o){ return o.length > 2 && msgUpper.includes(o); }) || null) : null;
+  const unitMatch   = userMsg.match(/\b([A-Za-z]?\d{5,8})\b/);
+  const unitId      = unitMatch ? unitMatch[1].toUpperCase() : null;
 
   let targetRows = [];
   if (siteCode) {
     targetRows = rows.filter(function(r) {
-      return (r.domicileSite||'').toUpperCase() === siteCode
-          || (r.operator||'').toUpperCase()     === siteCode;
+      return (r.domicileSite||'').toUpperCase() === siteCode;
+    });
+  } else if (opCode) {
+    targetRows = rows.filter(function(r) {
+      return (r.operator||'').toUpperCase() === opCode;
     });
   } else if (unitId) {
     const r = rows.find(function(r){ return r.equipmentId === unitId; });
@@ -51,7 +60,7 @@ function _buildEmailReport(userMsg, rows, notesStore) {
   }
   if (!targetRows.length) return null;
 
-  const label   = siteCode || unitId;
+  const label   = siteCode || opCode || unitId;
   const total   = targetRows.length;
   const unavail = targetRows.filter(function(r){ return (r.lifecycleState||'').toLowerCase().includes('unavail'); });
   const avail   = targetRows.filter(function(r){ return !(r.lifecycleState||'').toLowerCase().includes('unavail'); });
@@ -483,18 +492,22 @@ function registerAIHandlers(ctx) {
               // Build a real data report if the message references a site/unit;
               // otherwise use the AI-generated body as-is.
               const reportHtml = _buildEmailReport(userMsg, rows, notesStore);
-              const siteMatch2 = userMsg.match(/\b([A-Z]{2,4}\d{2,3})\b/i);
-              const autoSubject = siteMatch2
-                ? 'Fleet Report \u2014 ' + siteMatch2[1].toUpperCase() + ' \u2014 ' + new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})
+              const _knownSites2 = [...new Set(rows.map(function(r){ return (r.domicileSite||'').toUpperCase(); }).filter(Boolean))];
+              const _knownOps2   = [...new Set(rows.map(function(r){ return (r.operator||'').toUpperCase(); }).filter(Boolean))];
+              const _mu2         = userMsg.toUpperCase();
+              const _label2      = _knownSites2.find(function(s){ return s.length>2&&_mu2.includes(s); })
+                                || _knownOps2.find(function(o){ return o.length>2&&_mu2.includes(o); })
+                                || null;
+              const autoSubject = _label2
+                ? 'Fleet Report \u2014 ' + _label2 + ' \u2014 ' + new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})
                 : null;
               const emailRes = await sendFleetEmail({
                 to: toAddr,
                 subject: a.subject || autoSubject || 'Message from Fleet Operations Center',
-                // Plain text — wraps in <pre> for SMTP so spacing is preserved;
-                // OWA/mailto: receives it as-is (no HTML in mailto: body params).
-                htmlBody: reportHtml
-                  ? '<pre style="font-family:Courier New,monospace;font-size:12px">' + reportHtml + '</pre>'
-                  : '<p>' + (a.body || '').replace(/\n/g, '<br>') + '</p>',
+                // Send plain text as-is. sendFleetEmail wraps it in <pre> for SMTP
+                // so newlines/spacing are preserved without any HTML build-up.
+                htmlBody: reportHtml || (a.body ? '<p>' + a.body.replace(/\n/g, '<br>') + '</p>' : ''),
+                plainText: reportHtml || a.body || '',
               });
               if (emailRes.ok) {
                 results.push('Email sent to ' + toAddr);
@@ -683,12 +696,16 @@ function registerAIHandlers(ctx) {
     if (!data || !data.to || !data.body) throw new Error('to and body required');
     requireStringMax(data.to,   'to',   256);
     if (data.subject) requireStringMax(data.subject, 'subject', 256);
-    requireStringMax(data.body, 'body', 8000);
+    requireStringMax(data.body, 'body', 32000); // fleet reports can be large
 
     const { sendFleetEmail, loadEmailConfig } = require('../scrapers/email_sender');
     const cfg    = loadEmailConfig();
     const method = cfg.emailMethod || 'auto';
-    const htmlBody = '<p>' + (data.body || '').replace(/\n/g, '<br>') + '</p>';
+    // Use <pre> so plain-text fleet reports render with correct spacing on SMTP.
+    // OWA path uses data.body (plain text) in the &body= URL param — no HTML.
+    const htmlBody = '<pre style="font-family:Courier New,monospace;font-size:12px;white-space:pre-wrap">'
+      + (data.body || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      + '</pre>';
 
     // Helper: open OWA compose window
     function openOWACompose() {
