@@ -100,7 +100,13 @@ async function _classifyAndDraft(messageText, historyMsgs) {
   if (historyMsgs && historyMsgs.length) {
     contextBlock = '\n\nRecent conversation context (for reference):\n' + historyMsgs.join('\n') + '\n';
   }
-  const prompt = PERSONA_SYSTEM_PROMPT + contextBlock + '\n\nIncoming DM:\n' + messageText;
+  // Inject local time so the AI uses the correct time-of-day greeting
+  // (morning/afternoon/evening) rather than guessing from UTC.
+  const _now = new Date();
+  const _timeStr = _now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  const _dateStr = _now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  const timeContext = '\n\nCurrent local time: ' + _timeStr + ', ' + _dateStr + '.';
+  const prompt = PERSONA_SYSTEM_PROMPT + timeContext + contextBlock + '\n\nIncoming DM:\n' + messageText;
   // FIX (2026-07-24): was using sendOrchaChat() (direct WS-only, 90s timeout,
   // no fallback). If the Orcha WS server is not running or slow, EVERY DM call
   // timed out and sent the canned fallback reply. Switch to relay.ask() which
@@ -134,9 +140,21 @@ async function _classifyAndDraft(messageText, historyMsgs) {
   try {
     const parsed = JSON.parse(match[0]);
     if (typeof parsed.reply !== 'string' || !parsed.reply.trim()) throw new Error('missing reply field');
+    // GUARD: model sometimes embeds the full JSON in the reply field. Unwrap.
+    let replyText = parsed.reply;
+    const innerJson = replyText.trim().match(/^\{[\s\S]*\}$/);
+    if (innerJson) {
+      try {
+        const inner = JSON.parse(innerJson[0]);
+        if (typeof inner.reply === 'string' && inner.reply.trim()) {
+          logger.warn('[SlackDM] Model embedded JSON in reply field -- unwrapping');
+          replyText = inner.reply;
+        }
+      } catch (_) {}
+    }
     return {
       inScope: parsed.inScope === true,
-      reply: parsed.reply,
+      reply: replyText,
       category: ['alert', 'action', 'workflow'].includes(parsed.category) ? parsed.category : 'workflow',
       title: (typeof parsed.title === 'string' && parsed.title.trim()) ? parsed.title.slice(0, 60) : (messageText || '').slice(0, 60),
     };

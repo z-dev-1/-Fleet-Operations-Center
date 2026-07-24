@@ -289,9 +289,22 @@ async function _classifyAndDraft(messageText, askOrcha) {
   try {
     const parsed = JSON.parse(match[0]);
     if (typeof parsed.reply !== 'string' || !parsed.reply.trim()) throw new Error('missing reply field');
+    // GUARD: model sometimes confuses itself and embeds the full JSON response
+    // inside the reply field. Unwrap one level if that happened.
+    let replyText = parsed.reply;
+    const innerJson = replyText.trim().match(/^\{[\s\S]*\}$/);
+    if (innerJson) {
+      try {
+        const inner = JSON.parse(innerJson[0]);
+        if (typeof inner.reply === 'string' && inner.reply.trim()) {
+          logger.warn('[SlackWatch] Model embedded JSON in reply field — unwrapping');
+          replyText = inner.reply;
+        }
+      } catch (_) {}
+    }
     return {
       inScope: parsed.inScope === true,
-      reply: parsed.reply,
+      reply: replyText,
       category: ['alert', 'action', 'workflow'].includes(parsed.category) ? parsed.category : 'workflow',
       title: (typeof parsed.title === 'string' && parsed.title.trim()) ? parsed.title.slice(0, 60) : (messageText || '').slice(0, 60),
     };
