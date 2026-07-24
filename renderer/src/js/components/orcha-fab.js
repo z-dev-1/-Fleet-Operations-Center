@@ -1207,41 +1207,79 @@ async function _send() {
   }
 
   // ── Direct data-send interceptor ────────────────────────────────────────────
-  // Catches "send [update/data/report/notes] to [name] for [site]" and
-  // "email [name] [site] data/update/notes" BEFORE reaching Claude.
-  // Builds the real report via ai:build-report and opens the compose bubble.
-  // Claude is never involved — no risk of it generating a question.
+  // Catches "send/email/message [name] [update/data/notes] for [site]" BEFORE
+  // reaching Claude. Shows a one-tap disambiguation — "Send my data" vs "Ask for data"
+  // — so intent is never guessed. Claude never touches these requests.
   const _isSendData = /\b(send|message|email|dm|slack)\b/i.test(val) &&
-    /\b(update|data|report|notes|status|info|detail)/i.test(val);
+    /\b(update|data|report|notes|status|info|detail|include)/i.test(val);
   if (_isSendData && window.contacts && window.ai && window.ai.buildReport) {
     try {
-      const allC = await window.contacts.getAll();
-      // Try to find a person contact whose name appears in the message
+      const allC    = await window.contacts.getAll();
       const _valLow = val.toLowerCase();
-      const _match  = allC.find(c => c.type !== 'domicile' && c.name &&
-        _valLow.includes(c.name.toLowerCase().split(' ')[0].toLowerCase()));
+      // Match contact by ANY word in their name or email prefix (handles "zila" → "zilasant@...")
+      const _match  = allC.find(c => c.type !== 'domicile' && c.name && (
+        c.name.toLowerCase().split(/\s+/).some(w => w.length > 2 && _valLow.includes(w)) ||
+        (c.email && _valLow.includes(c.email.split('@')[0].toLowerCase()))
+      ));
+      const isEmail = /\bemail\b/i.test(val);
       if (_match) {
         inp.value = ''; inp.style.height = 'auto';
         _appendMsg('oc-msg--user', val);
-        const status2 = document.getElementById('orcha-status');
-        if (status2) status2.textContent = '\u25CF Building report...';
-        const rr = await window.ai.buildReport({ query: val });
-        if (status2) status2.textContent = '\u25CF Ready';
-        if (rr && rr.ok) {
-          const isEmail = /\bemail\b/i.test(val);
-          const subject = 'Fleet Report \u2014 ' + rr.label + ' \u2014 ' +
-            new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-          if (isEmail) {
-            _openEmailCompose(_match, rr.report, subject);
-            _appendMsg('oc-msg--orcha', '\u2705 Report ready for ' + _match.name + ' — review and click Send.');
-          } else {
-            _openQuickCompose(_match, rr.report);
-            _appendMsg('oc-msg--orcha', '\u2705 Report ready for ' + _match.name + ' — review and click Send.');
-          }
-        } else {
-          _appendMsg('oc-msg--orcha', '\u26a0\ufe0f ' + (rr && rr.error ? rr.error : 'Could not build report — try syncing fleet data first.'));
-        }
         _addHistory('user', val);
+
+        // Show disambiguation — never guess intent
+        const disambig = document.createElement('div');
+        disambig.className = 'oc-msg oc-msg--orcha';
+        disambig.innerHTML =
+          '<div style="margin-bottom:8px">Are you <strong>sending data TO ' + _esc(_match.name) + '</strong>, or <strong>asking THEM for data</strong>?</div>' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+            '<button class="sd-btn primary oc-dis-send" style="font-size:12px;padding:4px 12px">📤 Send my fleet data</button>' +
+            '<button class="sd-btn secondary oc-dis-ask" style="font-size:12px;padding:4px 12px">❓ Ask them for data</button>' +
+            '<button class="oc-dis-cancel" style="font-size:12px;padding:4px 10px;background:none;border:none;color:var(--txt2);cursor:pointer">✕</button>' +
+          '</div>';
+        const msgsEl = document.getElementById('orcha-msgs');
+        if (msgsEl) { msgsEl.appendChild(disambig); msgsEl.scrollTop = msgsEl.scrollHeight; }
+
+        disambig.querySelector('.oc-dis-cancel').addEventListener('click', () => disambig.remove());
+
+        // ── Ask path: let AI generate a question as normal
+        disambig.querySelector('.oc-dis-ask').addEventListener('click', async () => {
+          disambig.remove();
+          const st = document.getElementById('orcha-status');
+          if (st) st.textContent = '\u25CF Thinking...';
+          try {
+            const r2 = await window.ai.orchaAction(val);
+            _appendMsg('oc-msg--orcha', (r2 && r2.text) || 'Done');
+            _addHistory('assistant', (r2 && r2.text) || '');
+          } catch(e2) { _appendMsg('oc-msg--orcha', '\u274c ' + e2.message); }
+          if (st) st.textContent = '\u25CF Ready';
+        });
+
+        // ── Send path: build real fleet report, skip AI entirely
+        disambig.querySelector('.oc-dis-send').addEventListener('click', async () => {
+          disambig.remove();
+          const st = document.getElementById('orcha-status');
+          if (st) st.textContent = '\u25CF Building report...';
+          try {
+            const rr = await window.ai.buildReport({ query: val });
+            if (st) st.textContent = '\u25CF Ready';
+            if (rr && rr.ok) {
+              const subject = 'Fleet Report \u2014 ' + rr.label + ' \u2014 ' +
+                new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+              if (isEmail) {
+                _openEmailCompose(_match, rr.report, subject);
+              } else {
+                _openQuickCompose(_match, rr.report);
+              }
+              _appendMsg('oc-msg--orcha', '\u2705 ' + rr.label + ' report ready for ' + _esc(_match.name) + ' — review and click Send ➤');
+            } else {
+              _appendMsg('oc-msg--orcha', '\u26a0\ufe0f ' + (rr && rr.error || 'Could not build report — sync fleet data first.'));
+            }
+          } catch(e3) {
+            if (st) st.textContent = '\u25CF Ready';
+            _appendMsg('oc-msg--orcha', '\u274c ' + e3.message);
+          }
+        });
         return;
       }
     } catch (_sendErr) { /* fall through to AI */ }

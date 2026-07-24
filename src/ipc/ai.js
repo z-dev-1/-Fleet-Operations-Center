@@ -796,6 +796,51 @@ function registerAIHandlers(ctx) {
     return { ok: true, report, label };
   });
 
+
+  // ── ai:build-report ──────────────────────────────────────────────────────────
+  // Called by the renderer's direct data-send interceptor BEFORE the AI ever
+  // sees the message. Extracts the site/operator from the query, pulls matching
+  // rows from the fleet store, and returns the plain-text report that the compose
+  // bubble pre-fills. No AI involved — pure data retrieval.
+  handle('ai:build-report', (_e, opts) => {
+    const query = (opts && opts.query) || '';
+    const store = require('../store');
+    const fd    = store.load('fleetData', {});
+    const rows  = fd.rows || [];
+    const notesStore = store.load('notesStore', {});
+
+    if (!rows.length) {
+      return { ok: false, error: 'No fleet data loaded — sync first.' };
+    }
+
+    const report = _buildEmailReport(query, rows, notesStore);
+    if (!report) {
+      // Also try extracting a site code directly from the query and checking
+      // if it appears anywhere in the data, to give a more helpful error.
+      const msgUp = query.toUpperCase();
+      const allSites = [...new Set(rows.map(r => (r.domicileSite||'').toUpperCase()).filter(Boolean))];
+      const allOps   = [...new Set(rows.map(r => (r.operator||'').toUpperCase()).filter(Boolean))];
+      const hit = allSites.find(s => s.length > 2 && msgUp.includes(s))
+               || allOps.find(o => o.length > 2 && msgUp.includes(o));
+      return {
+        ok: false,
+        error: hit
+          ? 'No units found for ' + hit + ' in current fleet data.'
+          : 'No site or operator recognized in your message. Try including the site code (e.g. AVP40).',
+      };
+    }
+
+    // Extract site label for the subject line
+    const msgUp2   = query.toUpperCase();
+    const allSites2 = [...new Set(rows.map(r => (r.domicileSite||'').toUpperCase()).filter(Boolean))];
+    const allOps2   = [...new Set(rows.map(r => (r.operator||'').toUpperCase()).filter(Boolean))];
+    const label     = allSites2.find(s => s.length > 2 && msgUp2.includes(s))
+                   || allOps2.find(o => o.length > 2 && msgUp2.includes(o))
+                   || 'Fleet';
+
+    return { ok: true, report, label };
+  });
+
   logger.info('AI IPC handlers registered');
 }
 
