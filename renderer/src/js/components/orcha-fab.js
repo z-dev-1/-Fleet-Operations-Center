@@ -1020,7 +1020,35 @@ function _openQuickCompose(contact, prefill) {
   }
   textarea.focus();
 
-  // ✨ Polish: AI improves wording only — never adds facts/names/dates not already in the text.
+  // Extract send logic so the polish handler can await it directly.
+  // sendBtn.click() is not awaitable -- that is why polish appeared to not send.
+  async function _doSendMsg() {
+    const msg = textarea.value.trim();
+    if (!msg) { textarea.focus(); return; }
+    if (!contact.channelId) {
+      statusEl.textContent = '\u26a0\ufe0f No DM channel - this person needs to message you first';
+      statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--warn';
+      return;
+    }
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Sending\u2026';
+    statusEl.textContent = '';
+    try {
+      await slack.sendToChannel({ channelId: contact.channelId, message: msg });
+      statusEl.textContent = '\u2713 Sent';
+      statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--ok';
+      setTimeout(() => bubble.remove(), 1400);
+    } catch (e) {
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Send \u27a4';
+      statusEl.textContent = '\u274c ' + e.message;
+      statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--err';
+    }
+  }
+
+  sendBtn.addEventListener('click', _doSendMsg);
+
+  // Polish: AI improves wording only - never adds facts/names/dates not already in the text.
   // If the AI call fails, the draft is left untouched and fully sendable as-is.
   if (polishBtn) {
     polishBtn.addEventListener('click', async () => {
@@ -1028,26 +1056,25 @@ function _openQuickCompose(contact, prefill) {
       if (!draft) { textarea.focus(); return; }
       polishBtn.disabled = true; sendBtn.disabled = true;
       const origLabel = polishBtn.textContent;
-      polishBtn.textContent = 'Polishing…';
+      polishBtn.textContent = 'Polishing\u2026';
       statusEl.textContent = '';
       try {
         const prompt = 'Improve this Slack message for clarity and professionalism. Keep the ' +
-          'exact same meaning and intent — do not add new facts, names, dates, dollar amounts, ' +
-          'or commitments not already in the original. No markdown, no greeting or signature — ' +
+          'exact same meaning and intent - do not add new facts, names, dates, dollar amounts, ' +
+          'or commitments not already in the original. No markdown, no greeting or signature - ' +
           'just the message body as plain text, ready to send:\n\n' + draft;
         const result = await ai.chat(prompt);
         if (result && result.text) {
           textarea.value = result.text.trim();
           _autoGrowTextarea(textarea);
-          // Auto-send immediately after successful polish
-          sendBtn.click();
+          // await so finally does not reset button state mid-send
+          await _doSendMsg();
         } else { throw new Error('empty'); }
       } catch (e) {
-        statusEl.textContent = '⚠️ Could not polish — your original is still sendable';
-        statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--warn';
-      } finally {
         polishBtn.disabled = false; sendBtn.disabled = false;
         polishBtn.textContent = origLabel;
+        statusEl.textContent = '\u26a0\ufe0f Could not polish - your original is still sendable';
+        statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--warn';
       }
     });
   }
@@ -1056,30 +1083,6 @@ function _openQuickCompose(contact, prefill) {
   textarea.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') bubble.remove();
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendBtn.click();
-  });
-
-  sendBtn.addEventListener('click', async () => {
-    const msg = textarea.value.trim();
-    if (!msg) { textarea.focus(); return; }
-    if (!contact.channelId) {
-      statusEl.textContent = '⚠️ No DM channel — this person needs to message you first';
-      statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--warn';
-      return;
-    }
-    sendBtn.disabled = true;
-    sendBtn.textContent = 'Sending…';
-    statusEl.textContent = '';
-    try {
-      await slack.sendToChannel({ channelId: contact.channelId, message: msg });
-      statusEl.textContent = '✓ Sent';
-      statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--ok';
-      setTimeout(() => bubble.remove(), 1400);
-    } catch (e) {
-      sendBtn.disabled = false;
-      sendBtn.textContent = 'Send ➤';
-      statusEl.textContent = '❌ ' + e.message;
-      statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--err';
-    }
   });
 }
 
