@@ -916,10 +916,10 @@ function _openEmailCompose(contact, prefill) {
       const result = await window.ai.sendEmail({ to: contact.email, subject, body: msg });
       if (result && result.ok) {
         // mailto: path opens Outlook pre-filled; smtp path sends silently
-        const label = result.method === 'mailto' ? '\u2713 Opening in Outlook\u2026' : '\u2713 Sent';
+        const label = result.method === 'smtp' ? '\u2713 Sent' : '\u2713 Opening in OWA\u2026';
         statusEl.textContent = label;
         statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--ok';
-        setTimeout(() => bubble.remove(), result.method === 'mailto' ? 2200 : 1400);
+        setTimeout(() => bubble.remove(), result.method === 'smtp' ? 1400 : 2200);
       } else {
         throw new Error((result && result.error) || 'Send failed');
       }

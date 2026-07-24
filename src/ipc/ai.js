@@ -536,19 +536,20 @@ function registerAIHandlers(ctx) {
 
   // Direct email send from chat compose bubble.
   // Strategy:
-  //   1. If SMTP password is configured -> send via PowerShell SmtpClient (silent, no window)
-  //   2. Otherwise -> shell.openExternal(mailto:) opens Outlook pre-filled; user clicks Send.
-  //      This always works without any password or SMTP setup.
+  //   1. SMTP (silent) -- if password is configured in Settings -> Accounts -> Email
+  //   2. OWA in-app window -- opens an Electron BrowserWindow with the OWA compose URL
+  //      pre-filled (To, Subject, Body). Uses the existing session so auth is shared.
+  //      Defaults to Office 365 OWA; override via emailConfig.owaUrl.
   handle('ai:send-email', async (_e, data) => {
     if (!data || !data.to || !data.body) throw new Error('to and body required');
-    requireStringMax(data.to,      'to',      256);
+    requireStringMax(data.to,   'to',   256);
     if (data.subject) requireStringMax(data.subject, 'subject', 256);
-    requireStringMax(data.body,    'body',    8000);
+    requireStringMax(data.body, 'body', 8000);
 
     const { sendFleetEmail, loadEmailConfig } = require('../scrapers/email_sender');
     const cfg = loadEmailConfig();
 
-    // Path 1: SMTP (silent send) -- only if password is configured
+    // Path 1: SMTP silent send (only if password is configured)
     if (cfg.password && cfg.password.trim()) {
       const res = await sendFleetEmail({
         to: data.to,
@@ -556,18 +557,35 @@ function registerAIHandlers(ctx) {
         htmlBody: '<p>' + (data.body || '').replace(/\n/g, '<br>') + '</p>',
       });
       if (res.ok) return { ok: true, method: 'smtp' };
-      // SMTP failed -- fall through to mailto: so the message is never lost
-      logger.warn('[ai:send-email] SMTP failed ('+res.error+'), falling back to mailto');
+      logger.warn('[ai:send-email] SMTP failed (' + res.error + '), falling back to OWA');
     }
 
-    // Path 2: mailto: -- opens Outlook (or default mail client) pre-filled.
-    // subject/body are percent-encoded so special chars survive the URL.
-    const { shell } = require('electron');
-    const subj = encodeURIComponent(data.subject || 'Message from Fleet Operations Center');
-    const body = encodeURIComponent(data.body || '');
-    const mailto = 'mailto:' + encodeURIComponent(data.to) + '?subject=' + subj + '&body=' + body;
-    await shell.openExternal(mailto);
-    return { ok: true, method: 'mailto' };
+    // Path 2: OWA compose window inside the app.
+    // Build the OWA deep-link URL.  Amazon is on Office 365 so the default works;
+    // if your tenant is different, set owaUrl in emailConfig.
+    const owaBase = (cfg.owaUrl || 'https://outlook.office365.com/mail/deeplink/compose').replace(/\/$/, '');
+    const owaUrl  = owaBase
+      + '?to='      + encodeURIComponent(data.to)
+      + '&subject=' + encodeURIComponent(data.subject || 'Message from Fleet Operations Center')
+      + '&body='    + encodeURIComponent(data.body || '');
+
+    const { BrowserWindow, session: eSession } = require('electron');
+    const { getAppIconPath } = require('../config/app-icon');
+    const owaWin = new BrowserWindow({
+      width: 960, height: 720,
+      title: 'Compose Email — ' + data.to,
+      icon: getAppIconPath(),
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        // Share the default session so existing OWA login cookies are re-used.
+        session: eSession.defaultSession,
+      },
+    });
+    owaWin.setMenu(null);
+    owaWin.loadURL(owaUrl);
+    owaWin.once('ready-to-show', () => owaWin.show());
+    return { ok: true, method: 'owa' };
   });
 
   logger.info('AI IPC handlers registered');
