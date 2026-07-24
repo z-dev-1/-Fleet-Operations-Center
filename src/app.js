@@ -527,7 +527,11 @@ function _startAutoSync() {
   // FEATURE (2026-07-23): starts polling for upcoming Zoom meetings and
   // firing desktop-notification reminders -- no-ops until the user has
   // signed in via "Sign in with Zoom" (see orcha/zoom.js isSignedIn()).
-  _windowApi.startZoomReminders();
+  // Guarded: Zoom wiring in window/index.js is still WIP (no credentials yet
+  // to test end-to-end) -- skip silently until that function actually exists.
+  if (typeof _windowApi.startZoomReminders === 'function') {
+    _windowApi.startZoomReminders();
+  }
 
   // ── 5g. Create tray ────────────────────────────────────────────────────────
   _windowApi.createTray();
