@@ -1158,11 +1158,22 @@ async function _send() {
       const allC    = await window.contacts.getAll();
       const _valLow = val.toLowerCase();
       const _nonDomC = allC.filter(c => c.type !== 'domicile');
-      // Match contact by ANY word in their name or email prefix (handles "zila" → "zilasant@...").
-      const _match  = _nonDomC.find(c => c.name && (
-        c.name.toLowerCase().split(/\s+/).some(w => w.length > 2 && _valLow.includes(w)) ||
-        (c.email && _valLow.includes(c.email.split('@')[0].toLowerCase()))
-      )) || null;
+      // Match contact by any significant word in the message against their name
+      // or email prefix. Checked BOTH ways (name/email includes word, or word
+      // includes name/email) so nicknames resolve regardless of direction --
+      // e.g. "zila" is a PREFIX of contact "zilasant@amazon.com" (word contained
+      // IN the name), which the old one-directional check (name-word must be
+      // fully contained in the message) never caught.
+      const _stopWords = /^(message|msg|dm|email|mail|send|tell|notify|forward|slack|with|and|all|for|the|data|update|updates|report|notes|status|info|detail|include|unit|give|about)$/i;
+      const _msgWords = _valLow.split(/\s+/).filter(w => w.length >= 3 && !_stopWords.test(w));
+      const _match  = _nonDomC.find(c => {
+        const nameLow = (c.name || '').toLowerCase();
+        const emailLocal = c.email ? c.email.split('@')[0].toLowerCase() : '';
+        return _msgWords.some(w =>
+          (nameLow && (nameLow.includes(w) || w.includes(nameLow))) ||
+          (emailLocal && (emailLocal.includes(w) || w.includes(emailLocal)))
+        );
+      }) || null;
 
       // Renders the actual "send my data" vs "ask them for data" prompt for a
       // resolved contact. Shared by both the direct-match path and the
