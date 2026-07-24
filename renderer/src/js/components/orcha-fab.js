@@ -1216,12 +1216,19 @@ async function _send() {
     try {
       const allC    = await window.contacts.getAll();
       const _valLow = val.toLowerCase();
-      // Match contact by ANY word in their name or email prefix (handles "zila" → "zilasant@...")
-      const _match  = allC.find(c => c.type !== 'domicile' && c.name && (
+      const _nonDomC = allC.filter(c => c.type !== 'domicile');
+      // Match contact by ANY word in their name or email prefix (handles "zila" → "zilasant@...").
+      // Falls back to the sole configured contact when no name is mentioned at all --
+      // otherwise messages like "send all data for avp40" (no name) never matched anyone
+      // and the whole disambiguation silently never showed.
+      const _match  = _nonDomC.find(c => c.name && (
         c.name.toLowerCase().split(/\s+/).some(w => w.length > 2 && _valLow.includes(w)) ||
         (c.email && _valLow.includes(c.email.split('@')[0].toLowerCase()))
-      ));
-      const isEmail = /\bemail\b/i.test(val);
+      )) || (_nonDomC.length === 1 ? _nonDomC[0] : null);
+      // Default to email when the contact has no known Slack identity yet (empty slackId/
+      // channelId) even if the word "email" wasn't typed -- Slack would just fail silently.
+      const isEmail = /\bemail\b/i.test(val) ||
+        (!!_match && !_match.slackId && !_match.channelId && !!_match.email);
       if (_match) {
         inp.value = ''; inp.style.height = 'auto';
         _appendMsg('oc-msg--user', val);
