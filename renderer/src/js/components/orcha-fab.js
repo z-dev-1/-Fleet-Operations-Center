@@ -1041,17 +1041,22 @@ function _openQuickCompose(contact, prefill) {
   async function _doSendMsg() {
     const msg = textarea.value.trim();
     if (!msg) { textarea.focus(); return; }
-    if (!contact.channelId) {
-      statusEl.textContent = '\u26a0\ufe0f No DM channel - this person needs to message you first';
-      statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--warn';
-      return;
-    }
     sendBtn.disabled = true;
-    sendBtn.textContent = 'Sending\u2026';
+    sendBtn.textContent = 'Sending…';
     statusEl.textContent = '';
     try {
-      await slack.sendToChannel({ channelId: contact.channelId, message: msg });
-      statusEl.textContent = '\u2713 Sent';
+      if (contact.channelId) {
+        // Fast path: DM channel already known (person has messaged us before)
+        await slack.sendToChannel({ channelId: contact.channelId, message: msg });
+      } else {
+        // Slow path: no cached channel ID — resolve via email or name.
+        // slack.send() handles lookupByEmail -> conversations.open -> postMessage.
+        const recipient = contact.email || contact.name;
+        if (!recipient) throw new Error('Contact has no email or name to look up in Slack');
+        statusEl.textContent = 'Looking up Slack user…';
+        await slack.send({ recipient, message: msg });
+      }
+      statusEl.textContent = '✓ Sent';
       statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--ok';
       setTimeout(() => bubble.remove(), 1400);
     } catch (e) {
