@@ -109,6 +109,7 @@ function _render() {
         </div>
         <div class="cb-card-meta">${_esc(c.slackId || '')} ${c.phone ? '• ' + _esc(c.phone) : ''}</div>
         <div class="cb-card-actions">
+          <button class="cb-btn cb-btn--use" data-action="slack-msg" data-id="${c.id}">💬 Message</button>
           <button class="cb-btn cb-btn--use" data-action="edit" data-id="${c.id}">✏️</button>
           <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">✕</button>
         </div>
@@ -216,6 +217,11 @@ function _useAddress(id) {
 }
 
 export function init() {
+  // Live refresh when main process auto-saves a new DM contact
+  if (window.electron && window.electron.on) {
+    window.electron.on('contacts:updated', () => _load());
+  }
+
   _el = document.createElement('div');
   _el.className = 'cb-panel';
   _el.innerHTML = `
@@ -245,6 +251,7 @@ export function init() {
     if (btn.dataset.action === 'delete') _delete(btn.dataset.id);
     if (btn.dataset.action === 'edit') _editContact(btn.dataset.id);
     if (btn.dataset.action === 'use-address') _useAddress(btn.dataset.id);
+    if (btn.dataset.action === 'slack-msg') bus.emit('slack:quick-compose', _contacts.find(x => x.id === btn.dataset.id));
   });
 
   

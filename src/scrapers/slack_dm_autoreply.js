@@ -164,6 +164,41 @@ async function _classifyAndDraft(messageText, historyMsgs) {
   }
 }
 
+
+// ── Auto-save DM senders to the contact book ─────────────────────────────────
+// Called once per new sender — deduplicates by slackId (userId) or channelId.
+function _autoSaveContact(dm, userId) {
+  if (!userId) return;
+  try {
+    const contacts = store.load('contacts', []);
+    const exists = contacts.some(c =>
+      (c.slackId && c.slackId === userId) ||
+      (c.channelId && c.channelId === dm.channelId)
+    );
+    if (exists) return;
+    const contact = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      type: 'slack',
+      name: dm.name || userId,
+      slackId: userId,
+      channelId: dm.channelId,
+      addedAt: new Date().toISOString(),
+      source: 'dm-autoreply',
+    };
+    contacts.push(contact);
+    store.save('contacts', contacts);
+    logger.info('[SlackDM] Auto-saved contact: ' + contact.name + ' (' + userId + ')');
+    // Notify renderer so the contact book refreshes live
+    try {
+      const { BrowserWindow } = require('electron');
+      const wins = BrowserWindow.getAllWindows();
+      if (wins.length) wins[0].webContents.send('contacts:updated', contact);
+    } catch (_) {}
+  } catch (e) {
+    logger.warn('[SlackDM] Failed to auto-save contact:', e.message);
+  }
+}
+
 // ── Main poll cycle ──────────────────────────────────────────────────────
 async function pollDMAutoReplyOnce(log) {
   const doLog = log || ((msg) => logger.info(msg));
@@ -269,6 +304,9 @@ async function pollDMAutoReplyOnce(log) {
       }
 
       _saveThreadLastSeen(dm.channelId, dm.name, newMsgs[newMsgs.length - 1].ts);
+      // Auto-save the first sender we see in this thread to the contact book
+      const firstSenderId = newMsgs.find(m => m.userId && m.userId !== myUserId)?.userId;
+      if (firstSenderId) _autoSaveContact(dm, firstSenderId);
     } catch (e) {
       doLog(`[SlackDM] ${dm.name}: poll error: ${e.message}`);
     }

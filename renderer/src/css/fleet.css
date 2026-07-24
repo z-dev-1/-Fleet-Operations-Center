@@ -8634,6 +8634,67 @@ body {
 .oc-reply-status--warn { color: #eab308; }
 .oc-reply-status--err  { color: #f85149; }
 
+/* ── Quick-compose bubble (2026-07-24) ────────────────────────────────────────
+   Floats between the msgs area and the input row when active.
+   Reuses .oc-reply-textarea and .oc-reply-status from the DM reply box. */
+.oc-quick-compose {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--el, #161b22);
+  border-top: 1px solid rgba(88,166,255,.35);
+  border-bottom: 1px solid var(--bdr);
+}
+.oc-qc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--txt2);
+}
+.oc-qc-header strong { color: var(--acc, #58a6ff); }
+.oc-qc-cancel {
+  background: none;
+  border: none;
+  color: var(--mut);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.oc-qc-cancel:hover { color: #f85149; background: rgba(248,81,73,.08); }
+.oc-qc-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.oc-qc-status { flex: 1; font-size: 10px; }
+.oc-qc-send { flex-shrink: 0; }
+.oc-qc-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.oc-qc-pick-btn {
+  padding: 7px 12px;
+  text-align: left;
+  background: var(--el);
+  border: 1px solid var(--bdr);
+  border-radius: 6px;
+  color: var(--txt);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.oc-qc-pick-btn:hover {
+  border-color: var(--acc, #58a6ff);
+  color: var(--acc, #58a6ff);
+  background: rgba(88,166,255,.06);
+}
+
 
 
 /* ═══════════════════════════════════════════════════════════════════════════

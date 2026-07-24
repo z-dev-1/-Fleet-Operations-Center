@@ -820,10 +820,150 @@ async function _addToTimeline(unitId, entry) {
 }
 
 // ── Main send handler ───────────────────────────────────────────────────────
+// ── Quick-compose bubble (2026-07-24) ────────────────────────────────────────
+// Opened from:
+//   a) Contact Book "💬 Message" button (bus 'slack:quick-compose')
+//   b) Chat input intercept: "message/msg/dm [name] [optional body]"
+// If the contact has no channelId (added manually, never DM'd us), warns the
+// user — channelId is only known once they've messaged us first.
+function _openQuickCompose(contact, prefill) {
+  if (!contact) return;
+  const existing = document.getElementById('oc-quick-compose');
+  if (existing) existing.remove();
+
+  // Ensure panel is open and on the Chat tab
+  if (!_panelOpen) _togglePanel();
+  if (_activeTab !== 'chat') _switchTab('chat');
+
+  const tabChat = document.getElementById('oc-tab-chat');
+  if (!tabChat) return;
+
+  const bubble = document.createElement('div');
+  bubble.id = 'oc-quick-compose';
+  bubble.className = 'oc-quick-compose';
+  bubble.innerHTML =
+    '<div class="oc-qc-header">' +
+      '<span>💬 <strong>' + _esc(contact.name) + '</strong></span>' +
+      '<button class="oc-qc-cancel" title="Cancel">×</button>' +
+    '</div>' +
+    '<textarea class="oc-reply-textarea oc-qc-textarea" placeholder="Type your message… (Ctrl+Enter to send)" rows="2">' +
+      _esc(prefill || '') +
+    '</textarea>' +
+    '<div class="oc-qc-footer">' +
+      '<span class="oc-reply-status oc-qc-status"></span>' +
+      '<button class="oc-qc-send oc-send">Send ➤</button>' +
+    '</div>';
+
+  const inputRow = tabChat.querySelector('.oc-input-row');
+  tabChat.insertBefore(bubble, inputRow || null);
+
+  const textarea  = bubble.querySelector('.oc-qc-textarea');
+  const sendBtn   = bubble.querySelector('.oc-qc-send');
+  const cancelBtn = bubble.querySelector('.oc-qc-cancel');
+  const statusEl  = bubble.querySelector('.oc-qc-status');
+
+  textarea.addEventListener('input', () => _autoGrowTextarea(textarea));
+  if (prefill) {
+    setTimeout(() => {
+      _autoGrowTextarea(textarea);
+      textarea.setSelectionRange(prefill.length, prefill.length);
+    }, 0);
+  }
+  textarea.focus();
+
+  cancelBtn.addEventListener('click', () => bubble.remove());
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') bubble.remove();
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendBtn.click();
+  });
+
+  sendBtn.addEventListener('click', async () => {
+    const msg = textarea.value.trim();
+    if (!msg) { textarea.focus(); return; }
+    if (!contact.channelId) {
+      statusEl.textContent = '⚠️ No DM channel — this person needs to message you first';
+      statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--warn';
+      return;
+    }
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Sending…';
+    statusEl.textContent = '';
+    try {
+      await slack.sendToChannel({ channelId: contact.channelId, message: msg });
+      statusEl.textContent = '✓ Sent';
+      statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--ok';
+      setTimeout(() => bubble.remove(), 1400);
+    } catch (e) {
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Send ➤';
+      statusEl.textContent = '❌ ' + e.message;
+      statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--err';
+    }
+  });
+}
+
+function _showContactPicker(matches, body) {
+  const existing = document.getElementById('oc-quick-compose');
+  if (existing) existing.remove();
+
+  if (!_panelOpen) _togglePanel();
+  if (_activeTab !== 'chat') _switchTab('chat');
+
+  const tabChat = document.getElementById('oc-tab-chat');
+  if (!tabChat) return;
+
+  const bubble = document.createElement('div');
+  bubble.id = 'oc-quick-compose';
+  bubble.className = 'oc-quick-compose';
+  bubble.innerHTML =
+    '<div class="oc-qc-header">' +
+      '<span>Multiple matches — pick one:</span>' +
+      '<button class="oc-qc-cancel">×</button>' +
+    '</div>' +
+    '<div class="oc-qc-picker">' +
+      matches.map(c => '<button class="oc-qc-pick-btn" data-id="' + c.id + '">' + _esc(c.name) + '</button>').join('') +
+    '</div>';
+
+  const inputRow = tabChat.querySelector('.oc-input-row');
+  tabChat.insertBefore(bubble, inputRow || null);
+
+  bubble.querySelector('.oc-qc-cancel').addEventListener('click', () => bubble.remove());
+  bubble.querySelectorAll('.oc-qc-pick-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const contact = matches.find(c => c.id === btn.dataset.id);
+      if (contact) { bubble.remove(); _openQuickCompose(contact, body); }
+    });
+  });
+}
+
 async function _send() {
   const inp = document.getElementById('orcha-input');
   const val = (inp.value || '').trim();
   if (!val) return;
+
+  // ── Quick-message intercept: "message/msg/dm [name] [optional body]" ────────
+  // Tries to match the name against contacts with type:'slack'.
+  // 1 match → open compose bubble immediately.
+  // 2+ matches → show disambiguation picker.
+  // 0 matches → fall through to AI (it can still handle it naturally).
+  const _msgMatch = val.match(/^(?:message|msg|dm)\s+(.+)/i);
+  if (_msgMatch && window.contacts) {
+    const rest = _msgMatch[1].trim();
+    const words = rest.split(/\s+/);
+    try {
+      const allContacts = await window.contacts.getAll();
+      const slackContacts = allContacts.filter(c => c.type === 'slack');
+      let matches = [], body = '';
+      for (let n = Math.min(words.length, 3); n >= 1; n--) {
+        const q = words.slice(0, n).join(' ').toLowerCase();
+        const found = slackContacts.filter(c => c.name.toLowerCase().includes(q));
+        if (found.length) { matches = found; body = words.slice(n).join(' '); break; }
+      }
+      if (matches.length === 1) { inp.value = ''; _openQuickCompose(matches[0], body); return; }
+      if (matches.length > 1)  { inp.value = ''; _showContactPicker(matches, body); return; }
+    } catch (_) { /* fall through to AI if contact lookup fails */ }
+  }
+
   inp.value = '';
   _appendMsg('oc-msg--user', val);
   _addHistory('user', val);
@@ -935,6 +1075,9 @@ export function init() {
   _wireSlackTab();
 
   // Shift panel when right drawer opens/closes
+  // Open compose bubble when Contact Book emits 'slack:quick-compose'
+  bus.on('slack:quick-compose', (contact) => _openQuickCompose(contact));
+
   bus.on('ui:unit-select', () => {
     if (_panelOpen) {
       const p = document.getElementById('orcha-panel');
