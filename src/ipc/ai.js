@@ -494,6 +494,21 @@ function registerAIHandlers(ctx) {
 
 
 
+  // Load saved AI preference at startup so relay.ask() uses the correct
+  // path immediately -- without this, relay defaults to 'auto' on every
+  // restart regardless of what the user saved in AI Config.
+  try {
+    if (fs.existsSync(P.orchaConfig)) {
+      const saved = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
+      if (saved.aiPreference && ['auto', 'orcha', 'claude'].includes(saved.aiPreference)) {
+        relay.setPreference(saved.aiPreference);
+        logger.info('[AI Config] Startup: loaded preference=' + saved.aiPreference);
+      }
+    }
+  } catch (e) {
+    logger.warn('[AI Config] Startup: failed to load saved preference:', e.message);
+  }
+
   logger.info('AI IPC handlers registered');
 }
 
