@@ -71,19 +71,12 @@ function _buildLocalPrompt(userPrompt) {
   const sys = _buildSystemContext();
   let hist = '';
   if (_localHistory.length > 0) {
-    hist = '
-
-[CONVERSATION HISTORY — use for context only]
-' +
+    hist = '\n\n[CONVERSATION HISTORY \u2014 use for context only]\n' +
       _localHistory
         .map(m => (m.role === 'user' ? 'User: ' : 'Assistant: ') + m.content)
-        .join('
-');
+        .join('\n');
   }
-  return sys + hist + '
-
-[CURRENT MESSAGE]
-' + userPrompt;
+  return sys + hist + '\n\n[CURRENT MESSAGE]\n' + userPrompt;
 }
 
 async function _localAsk(prompt) {
