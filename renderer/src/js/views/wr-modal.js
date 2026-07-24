@@ -330,8 +330,14 @@ function _collectPayload() {
     screenshotDataUrl,
     attachments,
     domicile:        _unit.site || _unit.domicileSite || '',
-    tow: { street: (_el('wr-tow-street')||{}).value||'', city: (_el('wr-tow-city')||{}).value||'', state: (_el('wr-tow-state')||{}).value||'', zip: (_el('wr-tow-zip')||{}).value||'' },
-    towFrom: { street: (_el('wr-tow-from-street')||{}).value||'', city: (_el('wr-tow-from-city')||{}).value||'', state: (_el('wr-tow-from-state')||{}).value||'', zip: (_el('wr-tow-from-zip')||{}).value||'' },
+    towStreet:     (_el('wr-tow-street')||{}).value||'',
+    towCity:       (_el('wr-tow-city')||{}).value||'',
+    towState:      (_el('wr-tow-state')||{}).value||'',
+    towZip:        (_el('wr-tow-zip')||{}).value||'',
+    towFromStreet: (_el('wr-tow-from-street')||{}).value||'',
+    towFromCity:   (_el('wr-tow-from-city')||{}).value||'',
+    towFromState:  (_el('wr-tow-from-state')||{}).value||'',
+    towFromZip:    (_el('wr-tow-from-zip')||{}).value||'',
   };
 }
 

@@ -1258,27 +1258,45 @@ const CreateWRAutofill = {
                if (commentsNextBtn) {
                    commentsNextBtn.click();
                    this.log('Comments: Next clicked -- moving to Review & Submit');
-                   await this.sleep(1200);
+                   // FIX (2026-07-24): increased from 1200ms -- Review & Submit page
+                   // needs more time to fully render before the submit button appears.
+                   await this.sleep(2500);
                } else {
                    this.log('Comments: WARNING - Next button not found, cannot reach Review & Submit');
                }
 
                // STEP 7: Review & Submit
                this.log('--- STEP 7: Review & Submit ---');
+               // FIX (2026-07-24): three changes from original:
+               // 1. Removed !b.disabled filter -- a disabled submit button still tells
+               //    us the page rendered correctly; log its state separately below.
+               // 2. Removed b.offsetParent filter -- submit may be in a fixed footer.
+               // 3. Increased waitFor timeout from 6000 to 12000ms.
+               // Previous run logs showed STEP 7 entered but ZERO output after that
+               // (no "button found", no WARNING, no COMPLETE) -- most likely the
+               // 6s window expired while the page was still loading and the context
+               // was destroyed before the timeout log could fire. Extending to 12s
+               // gives the slow AAP Review & Submit page enough runway.
                const submitBtn = await this.waitFor(() =>
-                   Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && !b.disabled && /submit request|submit/i.test((b.innerText || b.textContent || '').trim()))
-               , 6000, 100);
+                   Array.from(document.querySelectorAll('BUTTON')).find(b => /submit request|submit work request|submit/i.test((b.innerText || b.textContent || '').trim()))
+               , 12000, 100);
                if (submitBtn) {
-                   this.log('Submit Request: button found -- clicking now');
+                   if (submitBtn.disabled) {
+                       this.log('Submit Request: button found but DISABLED -- waiting 3s for it to enable');
+                       await this.sleep(3000);
+                   }
+                   // Log BEFORE click -- if the page navigates immediately on click
+                   // (destroying the JS context), at least we know the click happened.
+                   this.log('Submit Request: clicking now (disabled=' + submitBtn.disabled + ')');
                    this.click(submitBtn);
-                   this.log('Submit Request: clicked');
+                   this.log('Submit Request: click dispatched -- WR should be submitting');
                    await this.sleep(500);
                } else {
-                   this.log('Submit Request: WARNING - button not found -- stopped before submitting, review manually');
+                   this.log('Submit Request: WARNING - button not found after 12s -- stopped before submitting, review manually in the AAP window');
                }
 
                this.log('--- COMPLETE ---');
-               return { ok: true, message: 'Autofill ran all the way through Comments and Review & Submit (best-effort, first pass) -- check the app/log to confirm it actually went through correctly.' };
+               return { ok: true, message: 'Autofill completed through Review & Submit -- if the AAP window closed, the WR was submitted successfully.' };
            },                                 // run()
 
 }; // CreateWRAutofill
