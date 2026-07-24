@@ -821,6 +821,144 @@ async function _addToTimeline(unitId, entry) {
 }
 
 // ── Main send handler ───────────────────────────────────────────────────────
+function _showEmailPicker(matches, body) {
+  const existing = document.getElementById('oc-email-compose');
+  if (existing) existing.remove();
+  if (!_panelOpen) _togglePanel();
+  if (_activeTab !== 'chat') _switchTab('chat');
+  const tabChat = document.getElementById('oc-tab-chat');
+  if (!tabChat) return;
+  const bubble = document.createElement('div');
+  bubble.id = 'oc-email-compose';
+  bubble.className = 'oc-quick-compose';
+  bubble.innerHTML =
+    '<div class="oc-qc-header">' +
+      '<span>Multiple matches — pick one:</span>' +
+      '<button class="oc-qc-cancel">×</button>' +
+    '</div>' +
+    '<div class="oc-qc-picker">' +
+      matches.map(c => '<button class="oc-qc-pick-btn" data-id="' + c.id + '">' + _esc(c.name) + ' — ' + _esc(c.email) + '</button>').join('') +
+    '</div>';
+  const inputRow = tabChat.querySelector('.oc-input-row');
+  tabChat.insertBefore(bubble, inputRow || null);
+  bubble.querySelector('.oc-qc-cancel').addEventListener('click', () => bubble.remove());
+  bubble.querySelectorAll('.oc-qc-pick-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const contact = matches.find(c => c.id === btn.dataset.id);
+      if (contact) { bubble.remove(); _openEmailCompose(contact, body); }
+    });
+  });
+}
+
+// ── Email compose bubble (2026-07-24) ──────────────────────────────────────────
+// Opened from contact 📧 Email button or "email [name]" chat shortcut.
+function _openEmailCompose(contact, prefill) {
+  if (!contact) return;
+  const existing = document.getElementById('oc-email-compose');
+  if (existing) existing.remove();
+  if (!_panelOpen) _togglePanel();
+  if (_activeTab !== 'chat') _switchTab('chat');
+  const tabChat = document.getElementById('oc-tab-chat');
+  if (!tabChat) return;
+
+  const toDisplay = contact.email
+    ? _esc(contact.name) + ' <span class="oc-qc-email-addr">' + _esc(contact.email) + '</span>'
+    : _esc(contact.name);
+
+  const bubble = document.createElement('div');
+  bubble.id = 'oc-email-compose';
+  bubble.className = 'oc-quick-compose';
+  bubble.innerHTML =
+    '<div class="oc-qc-header">' +
+      '<span>📧 <strong>' + toDisplay + '</strong></span>' +
+      '<button class="oc-qc-cancel" title="Cancel">×</button>' +
+    '</div>' +
+    (contact.email ? '' : '<div class="oc-qc-warn">⚠️ No email saved for this contact — add one in Contact Book first</div>') +
+    '<input class="oc-input oc-qc-subject" id="oc-qc-subject-input" placeholder="Subject…" />' +
+    '<textarea class="oc-reply-textarea oc-qc-textarea" placeholder="Type your message… (Ctrl+Enter to send)" rows="4">' +
+      _esc(prefill || '') +
+    '</textarea>' +
+    '<div class="oc-qc-footer">' +
+      '<span class="oc-reply-status oc-qc-status"></span>' +
+      '<button class="oc-qc-polish oc-reply-btn oc-reply-btn--ai">✨ Polish</button>' +
+      '<button class="oc-qc-send oc-send" ' + (contact.email ? '' : 'disabled') + '>Send 📧</button>' +
+    '</div>';
+
+  const inputRow = tabChat.querySelector('.oc-input-row');
+  tabChat.insertBefore(bubble, inputRow || null);
+
+  const textarea  = bubble.querySelector('.oc-qc-textarea');
+  const subjectEl = bubble.querySelector('.oc-qc-subject');
+  const sendBtn   = bubble.querySelector('.oc-qc-send');
+  const polishBtn = bubble.querySelector('.oc-qc-polish');
+  const cancelBtn = bubble.querySelector('.oc-qc-cancel');
+  const statusEl  = bubble.querySelector('.oc-qc-status');
+
+  textarea.addEventListener('input', () => _autoGrowTextarea(textarea));
+  if (prefill) setTimeout(() => { _autoGrowTextarea(textarea); }, 0);
+  subjectEl.focus();
+
+  cancelBtn.addEventListener('click', () => bubble.remove());
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') bubble.remove();
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendBtn.click();
+  });
+
+  async function _doSend() {
+    const subject = subjectEl.value.trim();
+    const msg = textarea.value.trim();
+    if (!msg) { textarea.focus(); return; }
+    if (!subject) { subjectEl.focus(); return; }
+    sendBtn.disabled = true; polishBtn.disabled = true;
+    sendBtn.textContent = 'Sending…';
+    statusEl.textContent = '';
+    try {
+      const result = await window.ai.sendEmail({ to: contact.email, subject, body: msg });
+      if (result && result.ok) {
+        statusEl.textContent = '✓ Sent';
+        statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--ok';
+        setTimeout(() => bubble.remove(), 1400);
+      } else {
+        throw new Error((result && result.error) || 'Send failed');
+      }
+    } catch (e) {
+      sendBtn.disabled = false; polishBtn.disabled = false;
+      sendBtn.textContent = 'Send 📧';
+      statusEl.textContent = '❌ ' + e.message;
+      statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--err';
+    }
+  }
+
+  sendBtn.addEventListener('click', _doSend);
+
+  if (polishBtn) {
+    polishBtn.addEventListener('click', async () => {
+      const draft = textarea.value.trim();
+      if (!draft) { textarea.focus(); return; }
+      polishBtn.disabled = true; sendBtn.disabled = true;
+      const origLabel = polishBtn.textContent;
+      polishBtn.textContent = 'Polishing…';
+      try {
+        const prompt = 'Improve this email for clarity and professionalism. Keep the exact same ' +
+          'meaning and intent — do not add facts, names, dates, or commitments not already in the ' +
+          'original. No markdown — plain text only, ready to send:\n\n' + draft;
+        const result = await ai.chat(prompt);
+        if (result && result.text) {
+          textarea.value = result.text.trim();
+          _autoGrowTextarea(textarea);
+          _doSend();
+        } else { throw new Error('empty'); }
+      } catch (e) {
+        statusEl.textContent = '⚠️ Could not polish — your original is still sendable';
+        statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--warn';
+      } finally {
+        polishBtn.disabled = false; sendBtn.disabled = false;
+        polishBtn.textContent = origLabel;
+      }
+    });
+  }
+}
+
 // ── Quick-compose bubble (2026-07-24) ────────────────────────────────────────
 // Opened from:
 //   a) Contact Book "💬 Message" button (bus 'slack:quick-compose')
@@ -976,6 +1114,33 @@ async function _send() {
   const val = (inp.value || '').trim();
   if (!val) return;
 
+  // ── Email intercept: "email/mail [name] [optional body]" ────────────────────
+  const _emailMatch = val.match(/^(?:email|mail|send\s+email\s+to)\s+(.+)/i);
+  if (_emailMatch && window.contacts) {
+    const rest = _emailMatch[1].trim();
+    const words = rest.split(/\s+/);
+    try {
+      const allContacts = await window.contacts.getAll();
+      const emailCandidates = allContacts.filter(c => c.email);
+      let matches = [], body = '';
+      for (let n = Math.min(words.length, 3); n >= 1; n--) {
+        const q = words.slice(0, n).join(' ').toLowerCase();
+        const found = emailCandidates.filter(c => c.name.toLowerCase().includes(q));
+        if (found.length) { matches = found; body = words.slice(n).join(' '); break; }
+      }
+      if (matches.length === 1) { inp.value = ''; inp.style.height = 'auto'; _openEmailCompose(matches[0], body); return; }
+      if (matches.length > 1)  { inp.value = ''; inp.style.height = 'auto'; _showEmailPicker(matches, body); return; }
+      // 0 matches
+      const _eNameGuess = words.slice(0, Math.min(words.length, 2)).join(' ');
+      inp.value = ''; inp.style.height = 'auto';
+      _appendMsg('oc-msg--user', val);
+      _appendMsg('oc-msg--orcha',
+        '📧 No contact with an email address named “' + _eNameGuess + '” found.\n\n' +
+        'Add their email in Contact Book (📇 toolbar), then try again.');
+      return;
+    } catch (_) { /* fall through */ }
+  }
+
   // ── Quick-message intercept: "message/msg/dm [name] [optional body]" ────────
   // Tries to match the name against contacts with type:'slack'.
   // 1 match → open compose bubble immediately.
@@ -1127,6 +1292,7 @@ export function init() {
   // Shift panel when right drawer opens/closes
   // Open compose bubble when Contact Book emits 'slack:quick-compose'
   bus.on('slack:quick-compose', (contact) => _openQuickCompose(contact));
+  bus.on('contacts:quick-email', (contact) => _openEmailCompose(contact));
 
   bus.on('ui:unit-select', () => {
     if (_panelOpen) {

@@ -8705,6 +8705,38 @@ body {
   background: rgba(88,166,255,.06);
 }
 
+/* ── Email compose extras (2026-07-24) ──────────────────────────────────────
+   .oc-qc-subject: subject line input inside the email compose bubble.
+   .oc-qc-email-addr: muted address display next to contact name.
+   .oc-qc-warn: no-email warning banner. */
+.oc-qc-subject {
+  background: var(--el);
+  border: 1px solid var(--bdr);
+  border-radius: 5px;
+  padding: 5px 8px;
+  color: var(--txt);
+  font-size: 11px;
+  font-family: var(--font);
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+.oc-qc-subject:focus { border-color: rgba(210,168,255,.4); }
+.oc-qc-email-addr {
+  font-size: 10px;
+  color: var(--mut);
+  font-weight: 400;
+  margin-left: 4px;
+}
+.oc-qc-warn {
+  font-size: 10px;
+  color: #eab308;
+  background: rgba(234,179,8,.08);
+  border: 1px solid rgba(234,179,8,.2);
+  border-radius: 5px;
+  padding: 5px 8px;
+}
+
 /* ── Contact Book: Slack live-search (add-contact form, 2026-07-24) ───────
    Results dropdown + confirmed-person badge in the + Add Slack Contact form. */
 .cb-slack-results {

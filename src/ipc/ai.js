@@ -289,6 +289,10 @@ function registerAIHandlers(ctx) {
     const contactList = slackContacts.length 
       ? '\nSLACK CONTACTS (use exact handle when sending):\n' + slackContacts.map(function(ct){ return '@' + ct.slackId + ' (' + ct.name + (ct.company ? ' - ' + ct.company : '') + ')'; }).join('\n') + '\n'
       : '';
+    const emailContacts = allContacts.filter(function(ct){ return ct.email; });
+    const emailContactList = emailContacts.length
+      ? '\nEMAIL CONTACTS (use exact address for EMAIL action):\n' + emailContacts.map(function(ct){ return ct.name + ' <' + ct.email + '>'; }).join('\n') + '\n'
+      : '';
 
     // Check due reminders
     const allReminders = store.load('reminders', []);
@@ -331,7 +335,7 @@ function registerAIHandlers(ctx) {
 
     
     const d = new Date(); const dateStr = String(d.getMonth()+1).padStart(2,'0')+'/'+String(d.getDate()).padStart(2,'0'); const timeStr = String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
-    const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human — warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable}), PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Match recipient from SLACK CONTACTS by name. Confirm who you are sending to in reply.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+fleetSummary+'\\n'+unitDetail+'\\nUser: '+userMsg;
+    const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human — warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable}), PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Match recipient from SLACK CONTACTS by name. Confirm who you are sending to in reply.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+fleetSummary+'\\n'+unitDetail+contactList+emailContactList+'\\nUser: '+userMsg;
     try {
       logger.info('[ai:orcha-action] Calling relay.ask (' + prompt.length + ' chars)...');
       const aiText = await relay.ask(prompt);
@@ -347,7 +351,28 @@ function registerAIHandlers(ctx) {
         if (a.type==='SLACK'&&a.recipient&&a.message) { const {sendSlackMessage}=require('../../src/scrapers/slack_send'); const r=await sendSlackMessage(a.recipient,a.message); results.push(r&&r.ok!==false?'Slack sent to '+a.recipient:'Slack failed'); }
         if (a.type==='SYNC') results.push('Sync triggered');
         if (a.type==='SP_PUSH') results.push('SP push triggered');
-        if (a.type==='EMAIL') results.push('Email triggered');
+        if (a.type==='EMAIL') {
+          try {
+            const { sendFleetEmail } = require('../scrapers/email_sender');
+            let toAddr = (a.to || '').trim();
+            // If no @ in address, try to look up contact by name
+            if (!toAddr.includes('@')) {
+              const emailContact = allContacts.find(ct => ct.email &&
+                ct.name.toLowerCase().includes(toAddr.toLowerCase()));
+              if (emailContact) toAddr = emailContact.email;
+            }
+            if (!toAddr.includes('@')) {
+              results.push('Email failed: no email address found for "' + (a.to||'') + '" — add one in Contact Book');
+            } else {
+              const emailRes = await sendFleetEmail({
+                to: toAddr,
+                subject: a.subject || 'Message from Fleet Operations Center',
+                htmlBody: '<p>' + (a.body || '').replace(/\n/g, '<br>') + '</p>',
+              });
+              results.push(emailRes.ok ? 'Email sent to ' + toAddr : 'Email failed: ' + emailRes.error);
+            }
+          } catch(emailErr) { results.push('Email error: ' + emailErr.message); }
+        }
         if (a.type==='DRAFT_FOLLOWUPS') {
           const stale = rows.filter(function(r){ return (r.lifecycleState||'').toLowerCase().includes('unavail') && r.vendor && r.vendor !== '--'; });
           const drafts = stale.slice(0,5).map(function(r){ return r.equipmentId + ' (' + r.vendor + '): Request status update — unit down ' + (r.workDuration||'?') + '.'; });
@@ -508,6 +533,20 @@ function registerAIHandlers(ctx) {
   } catch (e) {
     logger.warn('[AI Config] Startup: failed to load saved preference:', e.message);
   }
+
+  // Direct email send from chat compose bubble (2026-07-24)
+  handle('ai:send-email', async (_e, data) => {
+    if (!data || !data.to || !data.body) throw new Error('to and body required');
+    requireStringMax(data.to,      'to',      256);
+    requireStringMax(data.subject, 'subject', 256);
+    requireStringMax(data.body,    'body',    8000);
+    const { sendFleetEmail } = require('../scrapers/email_sender');
+    return sendFleetEmail({
+      to: data.to,
+      subject: data.subject || 'Message from Fleet Operations Center',
+      htmlBody: '<p>' + (data.body || '').replace(/\n/g, '<br>') + '</p>',
+    });
+  });
 
   logger.info('AI IPC handlers registered');
 }

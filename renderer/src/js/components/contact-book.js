@@ -45,8 +45,10 @@ function _render() {
         <div class="cb-card-addr">${_esc(c.street || '')}${c.city ? ', ' + _esc(c.city) : ''} ${_esc(c.state || '')} ${_esc(c.zip || '')}</div>
         ${c.domiciles && c.domiciles.length ? '<div class="cb-card-meta" style="color:#58a6ff;">📍 ' + c.domiciles.join(', ') + '</div>' : ''}
         ${c.phone ? '<div class="cb-card-meta">📞 ' + _esc(c.phone) + '</div>' : ''}
+        ${c.email ? '<div class="cb-card-meta">📧 ' + _esc(c.email) + '</div>' : ''}
         <div class="cb-card-actions">
           <button class="cb-btn cb-btn--use" data-action="use-address" data-id="${c.id}">📍 Use for Tow</button>
+          ${c.email ? `<button class="cb-btn cb-btn--use" data-action="email-contact" data-id="${c.id}">📧 Email</button>` : ''}
           <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">✕</button>
         </div>
       </div>`).join('') : '<div class="cb-empty">No vendors yet — add one below</div>';
@@ -71,6 +73,7 @@ function _render() {
           <input class="cb-input" id="cb-v-zip" placeholder="ZIP" style="flex:1" />
         </div>
         <input class="cb-input" id="cb-v-phone" placeholder="Phone" />
+        <input class="cb-input" id="cb-v-email" placeholder="Email (for direct email from chat)" />
         <button class="cb-btn cb-btn--add" id="cb-add-vendor">Add Vendor</button>
       </div>`;
   } else if (_tab === 'domiciles') {
@@ -110,8 +113,10 @@ function _render() {
           <div class="cb-card-company">${_esc(c.company || c.role || '')}</div>
         </div>
         <div class="cb-card-meta">${_esc(c.slackId || '')} ${c.phone ? '• ' + _esc(c.phone) : ''}</div>
+        ${c.email ? '<div class="cb-card-meta">📧 ' + _esc(c.email) + '</div>' : ''}
         <div class="cb-card-actions">
           <button class="cb-btn cb-btn--use" data-action="slack-msg" data-id="${c.id}">💬 Message</button>
+          ${c.email ? `<button class="cb-btn cb-btn--use" data-action="email-contact" data-id="${c.id}">📧 Email</button>` : ''}
           <button class="cb-btn cb-btn--use" data-action="edit" data-id="${c.id}">✏️</button>
           <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">✕</button>
         </div>
@@ -125,6 +130,7 @@ function _render() {
         <div class="cb-slack-confirm" id="cb-slack-confirm" style="display:none"></div>
         <input class="cb-input" id="cb-s-slack" placeholder="@slack-handle (auto-filled from search)" />
         <input class="cb-input" id="cb-s-company" placeholder="Company / Team" />
+        <input class="cb-input" id="cb-s-email" placeholder="Email (optional)" />
         <input class="cb-input" id="cb-s-phone" placeholder="Phone (optional)" />
         <button class="cb-btn cb-btn--add" id="cb-add-slack">Add Contact</button>
       </div>`;
@@ -198,7 +204,7 @@ async function _addVendor() {
     make: g('cb-v-make'),
     domiciles: g('cb-v-domiciles').split(',').map(d => d.trim().toUpperCase()).filter(Boolean),
     street: g('cb-v-street'), city: g('cb-v-city'), state: g('cb-v-state'), zip: g('cb-v-zip'),
-    phone: g('cb-v-phone')
+    phone: g('cb-v-phone'), email: g('cb-v-email')
   };
   if (!contact.name) return;
   await window.contacts.add(contact);
@@ -212,7 +218,7 @@ async function _addSlack() {
     name: g('cb-s-name'),
     slackId: (_pendingSlack && _pendingSlack.slackId) || g('cb-s-slack').replace(/^@/, '').trim(),
     channelId: (_pendingSlack && _pendingSlack.channelId) || null,
-    company: g('cb-s-company'), phone: g('cb-s-phone')
+    company: g('cb-s-company'), email: g('cb-s-email'), phone: g('cb-s-phone')
   };
   if (!contact.name) return;
   await window.contacts.add(contact);
@@ -245,6 +251,7 @@ async function _editContact(id) {
       <input class="cb-input" id="edit-name" value="${contact.name || ''}" placeholder="Name" />
       <input class="cb-input" id="edit-slack" value="${contact.slackId || ''}" placeholder="Slack handle or email" />
       <input class="cb-input" id="edit-company" value="${contact.company || ''}" placeholder="Company" />
+      <input class="cb-input" id="edit-email" value="${contact.email || ''}" placeholder="Email" />
       <input class="cb-input" id="edit-phone" value="${contact.phone || ''}" placeholder="Phone" />
       <div style="display:flex;gap:6px;margin-top:4px;">
         <button class="cb-btn cb-btn--add" id="edit-save">Save</button>
@@ -256,6 +263,7 @@ async function _editContact(id) {
     contact.name = card.querySelector('#edit-name').value.trim();
     contact.slackId = card.querySelector('#edit-slack').value.trim();
     contact.company = card.querySelector('#edit-company').value.trim();
+    contact.email = card.querySelector('#edit-email').value.trim();
     contact.phone = card.querySelector('#edit-phone').value.trim();
     await window.contacts.update(contact);
     _load();
@@ -309,6 +317,11 @@ export function init() {
     if (btn.dataset.action === 'delete') _delete(btn.dataset.id);
     if (btn.dataset.action === 'edit') _editContact(btn.dataset.id);
     if (btn.dataset.action === 'use-address') _useAddress(btn.dataset.id);
+    if (btn.dataset.action === 'email-contact') {
+      bus.emit('contacts:quick-email', _contacts.find(x => x.id === btn.dataset.id));
+      if (_open) _toggle();
+      return;
+    }
     if (btn.dataset.action === 'slack-msg') {
       bus.emit('slack:quick-compose', _contacts.find(x => x.id === btn.dataset.id));
       if (_open) _toggle(); // close the contact book so the FAB compose bubble is visible
