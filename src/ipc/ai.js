@@ -427,15 +427,43 @@ function registerAIHandlers(ctx) {
         if (a.type==='TIMELINE'&&a.unit&&a.entry) { const ns=store.load('notesStore',{}); const u=ns[a.unit]||{}; u.timeline=u.timeline?u.timeline+'\\n'+a.entry:a.entry; ns[a.unit]=u; store.save('notesStore',ns); try { const _s = require('electron').BrowserWindow.getAllWindows()[0]; if(_s) _s.webContents.send('notes:updated',{unitId:a.unit,timeline:u.timeline}); } catch(e){} results.push('Timeline:'+a.unit+' done');
           try { require('../orcha/repair-history').addEvent(a.unit, {summary:a.entry,vendor:'',outcome:'in-progress'}); } catch(e){} }
         if (a.type==='SLACK'&&a.recipient&&a.message) {
-          const {sendSlackMessage}=require('../../src/scrapers/slack_send');
-          // If user asked for site/operator details, build the real data message
-          // instead of using the AI's generic placeholder (e.g. "Here's the updated
-          // status for AVP40..."). _buildEmailReport returns a plain-text report
-          // with actual unit-level data -- same content the email path uses.
+          const { sendSlackMessage, sendToChannel, openConversation } = require('../../src/scrapers/slack_send');
+          // Build real fleet data body (falls back to AI text if no site/unit in userMsg)
           const realReport = _buildEmailReport(userMsg, rows, notesStore);
           const slackBody  = realReport || a.message;
-          const r=await sendSlackMessage(a.recipient, slackBody);
-          results.push(r&&r.ok!==false?'Slack sent to '+a.recipient:'Slack failed');
+
+          // Resolve recipient: contact book first (exact match), then fuzzy Slack search.
+          // This prevents partial names like "zila" from matching the wrong Slack user.
+          const rLower = a.recipient.toLowerCase();
+          const matchedContact = allContacts.find(ct =>
+            ct.name && ct.name.toLowerCase().includes(rLower)
+          );
+
+          let sendOk = false;
+          if (matchedContact) {
+            // Path 1: known DM channel — send directly, no API lookup needed
+            if (matchedContact.channelId) {
+              const r2 = await sendToChannel(matchedContact.channelId, slackBody);
+              sendOk = !!(r2 && r2.ok !== false);
+            }
+            // Path 2: Slack user ID — open DM channel via conversations.open
+            else if (matchedContact.slackId) {
+              const chId = await openConversation({ id: matchedContact.slackId, type: 'person' });
+              const r2   = await sendToChannel(chId, slackBody);
+              sendOk = !!(r2 && r2.ok !== false);
+            }
+            // Path 3: email only — lookupByEmail → conversations.open → send
+            else if (matchedContact.email) {
+              const r2 = await sendSlackMessage(matchedContact.email, slackBody);
+              sendOk = !!(r2 && r2.ok !== false);
+            }
+            results.push(sendOk ? 'Slack sent to ' + matchedContact.name : 'Slack failed (contact found but send failed)');
+          } else {
+            // No contact match — fall back to raw recipient (Slack name/email/handle)
+            const r2 = await sendSlackMessage(a.recipient, slackBody);
+            sendOk = !!(r2 && r2.ok !== false);
+            results.push(sendOk ? 'Slack sent to ' + a.recipient : 'Slack failed: no contact named "' + a.recipient + '" found in Contact Book');
+          }
         }
         if (a.type==='SYNC') results.push('Sync triggered');
         if (a.type==='SP_PUSH') results.push('SP push triggered');
