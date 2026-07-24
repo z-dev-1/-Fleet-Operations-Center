@@ -935,25 +935,33 @@ function _openEmailCompose(contact, prefill) {
     polishBtn.addEventListener('click', async () => {
       const draft = textarea.value.trim();
       if (!draft) { textarea.focus(); return; }
+      // Auto-fill subject from first line of draft if the user left it blank.
+      // _doSend() returns early (silent) on empty subject -- this prevents that.
+      if (!subjectEl.value.trim()) {
+        const firstLine = draft.split('\n')[0].replace(/[^a-zA-Z0-9 ,.\x27!?-]/g, '').trim();
+        subjectEl.value = firstLine.length > 60 ? firstLine.substring(0, 57) + '\u2026' : (firstLine || 'Message');
+      }
       polishBtn.disabled = true; sendBtn.disabled = true;
       const origLabel = polishBtn.textContent;
-      polishBtn.textContent = 'Polishing…';
+      polishBtn.textContent = 'Polishing\u2026';
+      statusEl.textContent = '';
+      statusEl.className = 'oc-reply-status oc-qc-status';
       try {
         const prompt = 'Improve this email for clarity and professionalism. Keep the exact same ' +
-          'meaning and intent — do not add facts, names, dates, or commitments not already in the ' +
-          'original. No markdown — plain text only, ready to send:\n\n' + draft;
+          'meaning and intent - do not add facts, names, dates, or commitments not already in the ' +
+          'original. No markdown - plain text only, ready to send:\n\n' + draft;
         const result = await ai.chat(prompt);
         if (result && result.text) {
           textarea.value = result.text.trim();
           _autoGrowTextarea(textarea);
-          _doSend();
+          // await so the finally block does not reset button state mid-send
+          await _doSend();
         } else { throw new Error('empty'); }
       } catch (e) {
-        statusEl.textContent = '⚠️ Could not polish — your original is still sendable';
-        statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--warn';
-      } finally {
         polishBtn.disabled = false; sendBtn.disabled = false;
         polishBtn.textContent = origLabel;
+        statusEl.textContent = '\u26a0\ufe0f Could not polish - your original is still sendable';
+        statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--warn';
       }
     });
   }
