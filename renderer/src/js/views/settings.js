@@ -2033,6 +2033,69 @@ function _acctPersist() {
 }
 
 // ── UI Tab: theme / color / font / slider wiring ─────────────────────────────
+// ── Theme token tables — applied directly to documentElement so all CSS vars ─
+// update atomically regardless of cascade order or inline-style conflicts.
+const _THEMES = {
+  dark: {
+    '--bg': '#0d1117', '--panel': '#161b22', '--card': '#1c2128',
+    '--el': '#21262d', '--bdr': '#30363d', '--bdrs': '#444c56',
+    '--txt': '#e6edf3', '--txt2': '#8b949e', '--mut': '#484f58',
+    '--acc': '#58a6ff', '--acc2': '#79c0ff', '--adim': 'rgba(88,166,255,.08)',
+    '--hov': 'rgba(255,255,255,.04)',
+    '--grn': '#7ee787', '--grnd': 'rgba(126,231,135,.08)',
+    '--red': '#ff7b72', '--redd': 'rgba(255,123,114,.08)',
+    '--org': '#ffa657', '--orgd': 'rgba(255,166,87,.08)',
+    '--ylw': '#e3b341', '--pur': '#d2a8ff', '--purd': 'rgba(210,168,255,.08)',
+    '--fg': '#e6edf3', '--fg2': '#8b949e', '--fg3': '#484f58',
+  },
+  light: {
+    '--bg': '#f6f8fa', '--panel': '#ffffff', '--card': '#f0f2f5',
+    '--el': '#e8eaed', '--bdr': '#d0d7de', '--bdrs': '#b0b7c0',
+    '--txt': '#1f2328', '--txt2': '#57606a', '--mut': '#8c959f',
+    '--acc': '#0969da', '--acc2': '#0550ae', '--adim': 'rgba(9,105,218,.08)',
+    '--hov': 'rgba(0,0,0,.04)',
+    '--grn': '#1a7f37', '--grnd': 'rgba(26,127,55,.08)',
+    '--red': '#cf222e', '--redd': 'rgba(207,34,46,.08)',
+    '--org': '#bc4c00', '--orgd': 'rgba(188,76,0,.08)',
+    '--ylw': '#9a6700', '--pur': '#8250df', '--purd': 'rgba(130,80,223,.08)',
+    '--fg': '#1f2328', '--fg2': '#57606a', '--fg3': '#8c959f',
+  },
+  midnight: {
+    '--bg': '#000000', '--panel': '#0a0a0a', '--card': '#111111',
+    '--el': '#181818', '--bdr': '#222222', '--bdrs': '#333333',
+    '--txt': '#f0f6fc', '--txt2': '#8b949e', '--mut': '#484f58',
+    '--acc': '#58a6ff', '--acc2': '#79c0ff', '--adim': 'rgba(88,166,255,.08)',
+    '--hov': 'rgba(255,255,255,.02)',
+    '--grn': '#7ee787', '--grnd': 'rgba(126,231,135,.08)',
+    '--red': '#ff7b72', '--redd': 'rgba(255,123,114,.08)',
+    '--org': '#ffa657', '--orgd': 'rgba(255,166,87,.08)',
+    '--ylw': '#e3b341', '--pur': '#d2a8ff', '--purd': 'rgba(210,168,255,.08)',
+    '--fg': '#f0f6fc', '--fg2': '#8b949e', '--fg3': '#484f58',
+  },
+  ocean: {
+    '--bg': '#0d1f2d', '--panel': '#0e2a3a', '--card': '#0f3040',
+    '--el': '#0e4d4d', '--bdr': '#1a5c5c', '--bdrs': '#2a7070',
+    '--txt': '#e0f4f4', '--txt2': '#7db8b8', '--mut': '#4a8888',
+    '--acc': '#2dd4bf', '--acc2': '#5eead4', '--adim': 'rgba(45,212,191,.12)',
+    '--hov': 'rgba(255,255,255,.04)',
+    '--grn': '#2dd4bf', '--grnd': 'rgba(45,212,191,.08)',
+    '--red': '#ff7b72', '--redd': 'rgba(255,123,114,.08)',
+    '--org': '#ffa657', '--orgd': 'rgba(255,166,87,.08)',
+    '--ylw': '#e3b341', '--pur': '#a5b4fc', '--purd': 'rgba(165,180,252,.08)',
+    '--fg': '#e0f4f4', '--fg2': '#7db8b8', '--fg3': '#4a8888',
+  },
+};
+
+function _applyThemeVars(theme) {
+  const tokens = _THEMES[theme] || _THEMES.dark;
+  Object.entries(tokens).forEach(([k, v]) => {
+    document.documentElement.style.setProperty(k, v);
+  });
+  // Keep body class for any external CSS that targets it (e.g. body.light-mode)
+  document.body.classList.remove('light-mode', 'midnight-mode', 'ocean-mode');
+  if (theme !== 'dark') document.body.classList.add(theme + '-mode');
+}
+
 function _wireUITab() {
   // ── Template cards ──────────────────────────────────────────────────────
   _drawer.querySelectorAll('.sd-template').forEach((card) => {
@@ -2044,8 +2107,7 @@ function _wireUITab() {
       card.classList.add('active');
       card.querySelector('.sd-tpl-check').style.display = '';
       const theme = card.dataset.theme;
-      document.body.classList.remove('light-mode','midnight-mode','ocean-mode');
-      if (theme !== 'dark') document.body.classList.add(`${theme}-mode`);
+      _applyThemeVars(theme);
       _saveUI();
     });
   });
@@ -2316,15 +2378,15 @@ function _applyUI(prefs) {
     inter:  '"Inter",sans-serif',
   };
 
-  // Theme class on body
+  // Theme — apply ALL token vars so there's no cascade conflict with swatches
   if (prefs.theme) {
-    document.body.classList.remove('light-mode','midnight-mode','ocean-mode');
-    if (prefs.theme !== 'dark') document.body.classList.add(`${prefs.theme}-mode`);
+    _applyThemeVars(prefs.theme);
     // Sync active card in drawer
-    _drawer.querySelectorAll('.sd-template').forEach((card) => {
+    if (_drawer) _drawer.querySelectorAll('.sd-template').forEach((card) => {
       const active = card.dataset.theme === prefs.theme;
       card.classList.toggle('active', active);
-      card.querySelector('.sd-tpl-check').style.display = active ? '' : 'none';
+      if (card.querySelector('.sd-tpl-check'))
+        card.querySelector('.sd-tpl-check').style.display = active ? '' : 'none';
     });
   }
 
@@ -2644,11 +2706,14 @@ export function init() {
     if (to === 'settings') _open();
   });
 
-  // ── Apply saved CSS vars immediately on startup (don't wait for drawer open) ──
+  // ── Apply saved theme + CSS vars immediately on startup (before drawer opens) ──
   settingsBridge.getAll().then((all) => {
-    if (!all?.ui_prefs?.swatches) return;
-    Object.entries(all.ui_prefs.swatches).forEach(([cssVar, color]) => {
-      if (color) document.documentElement.style.setProperty(cssVar, color);
-    });
+    if (!all?.ui_prefs) return;
+    if (all.ui_prefs.theme) _applyThemeVars(all.ui_prefs.theme);
+    if (all.ui_prefs.swatches) {
+      Object.entries(all.ui_prefs.swatches).forEach(([cssVar, color]) => {
+        if (color) document.documentElement.style.setProperty(cssVar, color);
+      });
+    }
   }).catch(() => {});
 }
