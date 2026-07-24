@@ -253,6 +253,61 @@ function _html() {
           </div>
         </div>
 
+        <!-- Chat Floater -->
+        <div class="sd-section" id="sect-chat-floater">
+          <div class="sd-section-title">Chat Floater</div>
+          <div class="sd-hint" style="margin-bottom:10px">Customize the Orcha AI panel — size, bubble colors, border, and FAB accent.</div>
+
+          <!-- Size presets -->
+          <div class="sd-field" style="margin-bottom:10px">
+            <div class="sd-label" style="margin-bottom:6px">Panel Size</div>
+            <div style="display:flex;gap:6px">
+              <button class="sd-font-btn" id="chat-size-compact" data-chat-size="compact">Compact</button>
+              <button class="sd-font-btn active" id="chat-size-normal" data-chat-size="normal">Normal</button>
+              <button class="sd-font-btn" id="chat-size-wide" data-chat-size="wide">Wide</button>
+              <button class="sd-font-btn" id="chat-size-tall" data-chat-size="tall">Tall</button>
+            </div>
+          </div>
+
+          <!-- AI bubble color -->
+          <div class="sd-color-row" style="margin-bottom:10px">
+            <div class="sd-color-item">
+              <div class="sd-label">AI Bubble</div>
+              <div class="sd-color-swatch-row">
+                <div class="sd-swatch active" style="background:rgba(88,166,255,.08)"  title="Blue (default)" data-var="--chat-bubble-ai"></div>
+                <div class="sd-swatch"        style="background:rgba(210,168,255,.10)" title="Purple"        data-var="--chat-bubble-ai"></div>
+                <div class="sd-swatch"        style="background:rgba(126,231,135,.08)" title="Green"         data-var="--chat-bubble-ai"></div>
+                <div class="sd-swatch"        style="background:rgba(255,166,87,.08)"  title="Orange"        data-var="--chat-bubble-ai"></div>
+                <div class="sd-swatch"        style="background:rgba(255,255,255,.05)" title="Subtle"        data-var="--chat-bubble-ai"></div>
+                <input type="color" class="sd-color-custom" value="#58a6ff" title="Custom" data-var="--chat-bubble-ai"/>
+              </div>
+            </div>
+            <div class="sd-color-item">
+              <div class="sd-label">User Bubble</div>
+              <div class="sd-color-swatch-row">
+                <div class="sd-swatch active" style="background:rgba(88,166,255,.08)"  title="Blue (default)" data-var="--chat-bubble-user"></div>
+                <div class="sd-swatch"        style="background:rgba(210,168,255,.14)" title="Purple"        data-var="--chat-bubble-user"></div>
+                <div class="sd-swatch"        style="background:rgba(88,166,255,.18)"  title="Blue bold"     data-var="--chat-bubble-user"></div>
+                <div class="sd-swatch"        style="background:rgba(255,255,255,.06)" title="Subtle"        data-var="--chat-bubble-user"></div>
+                <input type="color" class="sd-color-custom" value="#58a6ff" title="Custom" data-var="--chat-bubble-user"/>
+              </div>
+            </div>
+          </div>
+
+          <!-- Panel border color -->
+          <div class="sd-color-row" style="margin-bottom:10px">
+            <div class="sd-color-item">
+              <div class="sd-label">Panel Border</div>
+              <div class="sd-color-swatch-row">
+                <div class="sd-swatch active" style="background:rgba(88,166,255,.25)"  title="Blue (default)" data-var="--chat-border"></div>
+                <div class="sd-swatch"        style="background:rgba(210,168,255,.30)" title="Purple"        data-var="--chat-border"></div>
+                <div class="sd-swatch"        style="background:rgba(48,54,61,.80)"    title="Subtle"        data-var="--chat-border"></div>
+                <div class="sd-swatch"        style="background:rgba(126,231,135,.25)" title="Green"         data-var="--chat-border"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- ═══ NEXUS THEME BUILDER (Year 3030) ═══ -->
         <div class="sd-section" id="sect-nexus-theme">
           <div class="sd-section-title" style="display:flex;align-items:center;gap:8px">
@@ -2065,6 +2120,24 @@ function _wireUITab() {
     });
   });
 
+  // ── Chat floater size chips ─────────────────────────────────────────────
+  const CHAT_SIZES = {
+    compact: { w: '300px', h: '360px' },
+    normal:  { w: '360px', h: '480px' },
+    wide:    { w: '440px', h: '480px' },
+    tall:    { w: '360px', h: '620px' },
+  };
+  _drawer.querySelectorAll('[data-chat-size]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      _drawer.querySelectorAll('[data-chat-size]').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      const s = CHAT_SIZES[btn.dataset.chatSize] || CHAT_SIZES.normal;
+      document.documentElement.style.setProperty('--chat-w', s.w);
+      document.documentElement.style.setProperty('--chat-h', s.h);
+      _saveUI();
+    });
+  });
+
   // ── Compact toggle ──────────────────────────────────────────────────────
   const compact = document.getElementById('toggle-compact');
   if (compact) compact.addEventListener('change', _saveUI);
@@ -2200,7 +2273,7 @@ function _saveUI() {
     if (document.body.classList.contains('ocean-mode'))    theme = 'ocean';
 
     // Active swatch per CSS var (store the background color value)
-    const swatchVars = ['--acc', '--bg', '--panel', '--txt', '--row-avail', '--row-unavail'];
+    const swatchVars = ['--acc', '--bg', '--panel', '--txt', '--row-avail', '--row-unavail', '--chat-bubble-ai', '--chat-bubble-user', '--chat-border'];
     const swatches = {};
     swatchVars.forEach((v) => {
       const active = _drawer.querySelector(`.sd-swatch.active[data-var="${v}"]`);
@@ -2216,14 +2289,18 @@ function _saveUI() {
     });
 
     // Active font
-    const fontBtn = _drawer.querySelector('.sd-font-btn.active');
+    const fontBtn = _drawer.querySelector('[data-font].active');
     const font = fontBtn ? fontBtn.dataset.font : 'system';
+
+    // Chat floater size
+    const chatSizeBtn = _drawer.querySelector('[data-chat-size].active');
+    const chatSize = chatSizeBtn ? chatSizeBtn.dataset.chatSize : 'normal';
 
     // Compact toggle
     const compact = document.getElementById('toggle-compact');
     const compactRows = compact ? compact.checked : false;
 
-    settingsBridge.save('ui_prefs', { theme, swatches, sliders, font, compactRows })
+    settingsBridge.save('ui_prefs', { theme, swatches, sliders, font, compactRows, chatSize })
       .catch(() => {});
   }, 400);
 }
@@ -2293,6 +2370,17 @@ function _applyUI(prefs) {
   if (prefs.compactRows != null) {
     const compact = document.getElementById('toggle-compact');
     if (compact) compact.checked = prefs.compactRows;
+  }
+
+  // Chat floater size
+  if (prefs.chatSize) {
+    const CHAT_SIZES = { compact: { w: '300px', h: '360px' }, normal: { w: '360px', h: '480px' }, wide: { w: '440px', h: '480px' }, tall: { w: '360px', h: '620px' } };
+    const s = CHAT_SIZES[prefs.chatSize] || CHAT_SIZES.normal;
+    document.documentElement.style.setProperty('--chat-w', s.w);
+    document.documentElement.style.setProperty('--chat-h', s.h);
+    if (_drawer) _drawer.querySelectorAll('[data-chat-size]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.chatSize === prefs.chatSize);
+    });
   }
 }
 

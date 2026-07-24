@@ -3406,9 +3406,10 @@ td .pm-pill {
   position: fixed;
   bottom: 84px;
   right: 24px;
-  width: 360px;
-  background: var(--panel);
-  border: 1px solid rgba(88,166,255,.25);
+  width: var(--chat-w, 360px);
+  max-height: var(--chat-h, 480px);
+  background: var(--chat-bg, var(--panel));
+  border: 1px solid var(--chat-border, rgba(88,166,255,.25));
   border-radius: 10px;
   display: flex;
   flex-direction: column;
@@ -3475,15 +3476,15 @@ td .pm-pill {
   line-height: 1.5;
 }
 .oc-msg--orcha {
-  background: rgba(88,166,255,.08);
-  border: 1px solid rgba(88,166,255,.12);
+  background: var(--chat-bubble-ai, rgba(88,166,255,.08));
+  border: 1px solid var(--chat-bubble-ai-border, rgba(88,166,255,.12));
   color: var(--txt2);
   align-self: flex-start;
   border-radius: 4px 8px 8px 8px;
 }
 .oc-msg--user {
-  background: var(--adim);
-  border: 1px solid rgba(88,166,255,.2);
+  background: var(--chat-bubble-user, var(--adim));
+  border: 1px solid var(--chat-bubble-user-border, rgba(88,166,255,.2));
   color: var(--txt);
   align-self: flex-end;
   border-radius: 8px 4px 8px 8px;
@@ -7989,18 +7990,53 @@ body {
   --panel-blur: 20px;
   --drawer-speed: 600ms;
   --card-radius: 0px;
-  --row-avail: rgba(126,231,135,.06);
-  --row-unavail: rgba(248,81,73,.06);
-  --row-decom: rgba(139,148,158,.06);
-  --acc: #58a6ff;
-  --bg: #0d1117;
+
+  /* ── Row colors — raised to .10 so they're visible on dark backgrounds ── */
+  --row-avail:   rgba(126,231,135,.10);
+  --row-unavail: rgba(248,81,73,.10);
+  --row-decom:   rgba(139,148,158,.08);
+
+  /* ── Core dark-mode tokens ─────────────────────────────────────────────── */
+  --acc:   #58a6ff;
+  --bg:    #0d1117;
   --panel: #161b22;
-  --txt: #e6edf3;
-  --txt2: #8b949e;
-  --bdr: #30363d;
-  --el: #21262d;
-  --mut: #484f58;
-  --acc2: #79c0ff;
+  --card:  #1c2128;
+  --el:    #21262d;
+  --bdr:   #30363d;
+  --bdrs:  #444c56;
+  --txt:   #e6edf3;
+  --txt2:  #8b949e;
+  --mut:   #484f58;
+  --acc2:  #79c0ff;
+  --adim:  rgba(88,166,255,.08);
+  --hov:   rgba(255,255,255,.04);
+
+  /* ── Aliases so old --fg refs work (drawer, WR form, etc.) ────────────── */
+  --fg:  var(--txt);
+  --fg2: var(--txt2);
+  --fg3: var(--mut);
+
+  /* ── Status colors (dark defaults) ────────────────────────────────────── */
+  --grn:  #7ee787;
+  --grnd: rgba(126,231,135,.08);
+  --red:  #ff7b72;
+  --redd: rgba(255,123,114,.08);
+  --org:  #ffa657;
+  --orgd: rgba(255,166,87,.08);
+  --ylw:  #e3b341;
+  --pur:  #d2a8ff;
+  --purd: rgba(210,168,255,.08);
+
+  /* ── Chat floater theming ──────────────────────────────────────────────── */
+  --chat-w:         360px;
+  --chat-h:         480px;
+  --chat-bg:        var(--panel);
+  --chat-border:    rgba(88,166,255,.25);
+  --chat-bubble-ai: rgba(88,166,255,.08);
+  --chat-bubble-ai-border: rgba(88,166,255,.14);
+  --chat-bubble-user: var(--adim);
+  --chat-bubble-user-border: rgba(88,166,255,.2);
+  --chat-fab-color: var(--pur);
 }
 
 /* Apply blur to side panels only */
@@ -8021,15 +8057,15 @@ body {
 /* Settings drawer — relative container for panes */
 
 
-/* Settings drawer text visibility fix */
-.settings-drawer .sd-section-title { color: #8b949e !important; }
-.settings-drawer .sd-label { color: #c9d1d9 !important; }
-.settings-drawer .sd-hint { color: #8b949e !important; }
-.settings-drawer .sd-input { color: #e6edf3 !important; }
-.settings-drawer .sd-select { color: #e6edf3 !important; }
-.settings-drawer .sd-btn { color: #c9d1d9 !important; }
-.settings-drawer .acct-input { color: #e6edf3 !important; }
-.settings-drawer .sd-status { color: #c9d1d9 !important; }
+/* Settings drawer — use CSS vars so theme changes apply */
+.settings-drawer .sd-section-title { color: var(--txt2); }
+.settings-drawer .sd-label  { color: var(--txt); }
+.settings-drawer .sd-hint   { color: var(--txt2); }
+.settings-drawer .sd-input  { color: var(--txt); background: var(--el); border-color: var(--bdr); }
+.settings-drawer .sd-select { color: var(--txt); background: var(--el); border-color: var(--bdr); }
+.settings-drawer .sd-btn    { color: var(--txt2); }
+.settings-drawer .acct-input { color: var(--txt); }
+.settings-drawer .sd-status { color: var(--txt2); }
 
 /* Hide intel panel when empty */
 .ip-panel--hidden { display: none !important; }
@@ -8037,17 +8073,17 @@ body {
 /* Contact Book Panel */
 .cb-panel {
   position: fixed; top: 48px; right: 0; width: 380px; bottom: 0;
-  background: #0d1117; border-left: 1px solid rgba(48,54,61,0.8);
+  background: var(--bg); border-left: 1px solid var(--bdr);
   z-index: 610; display: flex; flex-direction: column;
   transform: translateX(100%); transition: transform 0.2s ease;
 }
 .cb-panel.open { transform: translateX(0); }
 .cb-header {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 16px; background: #161b22; border-bottom: 1px solid rgba(48,54,61,0.8);
+  padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--bdr);
 }
-.cb-header-title { font-size: 13px; font-weight: 600; color: #c9d1d9; }
-.cb-close { background: none; border: none; color: #8b949e; cursor: pointer; font-size: 14px; }
+.cb-header-title { font-size: 13px; font-weight: 600; color: var(--txt); }
+.cb-close { background: none; border: none; color: var(--mut); cursor: pointer; font-size: 14px; }
 .cb-body { flex: 1; overflow-y: auto; padding: 0; }
 .cb-tabs { display: flex; border-bottom: 1px solid #21262d; }
 .cb-tab {
