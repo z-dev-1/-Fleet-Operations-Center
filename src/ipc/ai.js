@@ -27,6 +27,111 @@ const MAX_PROMPT_LEN       = 32000;   // characters — ai:ask, ai:chat
 const MAX_DAILY_NOTES_BATCH = 100;   // units    — daily-notes:run
 const MAX_SUGGEST_KEYS      = 100;   // keys on unit object for ai:suggest (raised S28: enriched units have ~71 keys)
 
+
+// ── Site / unit email report builder ──────────────────────────────────────────
+// Called from the EMAIL action handler when the user's message references a
+// domicile site code (e.g. AVP40) or a specific unit ID.
+// Returns a self-contained HTML string — no external dependencies.
+function _buildEmailReport(userMsg, rows, notesStore) {
+  const today = new Date().toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' });
+
+  // Detect site codes (e.g. AVP40, DPD1, LGB8) and unit IDs (5-8 digits, optional letter prefix)
+  const siteMatch = userMsg.match(/\b([A-Z]{2,4}\d{2,3})\b/i);
+  const unitMatch = userMsg.match(/\b([A-Za-z]?\d{5,8})\b/);
+  const siteCode  = siteMatch ? siteMatch[1].toUpperCase() : null;
+  const unitId    = unitMatch ? unitMatch[1].toUpperCase() : null;
+
+  let targetRows = [];
+  if (siteCode) {
+    targetRows = rows.filter(function(r) {
+      return (r.domicileSite||'').toUpperCase() === siteCode
+          || (r.operator||'').toUpperCase()     === siteCode;
+    });
+  } else if (unitId) {
+    const r = rows.find(function(r){ return r.equipmentId === unitId; });
+    if (r) targetRows = [r];
+  }
+
+  // Fall back — no recognisable site/unit → return null so caller uses AI body
+  if (!targetRows.length) return null;
+
+  const label     = siteCode || unitId;
+  const total     = targetRows.length;
+  const unavail   = targetRows.filter(function(r){ return (r.lifecycleState||'').toLowerCase().includes('unavail'); });
+  const avail     = targetRows.filter(function(r){ return !(r.lifecycleState||'').toLowerCase().includes('unavail'); });
+  const uptakeRate = total ? Math.round((avail.length / total) * 100) : 0;
+
+  const css = [
+    '<style>',
+    'body{font-family:Arial,sans-serif;font-size:13px;color:#222}',
+    'h2{color:#1a5276;margin-bottom:4px}',
+    '.summary{background:#eaf4fb;padding:8px 12px;border-radius:4px;margin-bottom:12px}',
+    'table{border-collapse:collapse;width:100%;font-size:12px}',
+    'th{background:#1a5276;color:#fff;padding:5px 8px;text-align:left}',
+    'td{padding:4px 8px;border-bottom:1px solid #ddd;vertical-align:top}',
+    'tr:nth-child(even) td{background:#f5f8fa}',
+    '.badge-unavail{color:#c0392b;font-weight:bold}',
+    '.badge-avail{color:#1e8449;font-weight:bold}',
+    '.timeline{font-size:11px;color:#555;max-width:340px}',
+    '</style>',
+  ].join('');
+
+  function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  // Unavailable units table
+  const unavailRows = unavail.map(function(r) {
+    const ns       = notesStore[r.equipmentId] || {};
+    const timeline = (r.repairTimeline || ns.timeline || ns.notes || '').trim();
+    const tl       = timeline
+      ? timeline.split('\n').slice(-5).join('<br>') // last 5 timeline entries
+      : '<em>No notes</em>';
+    const issueShort = esc((r.issueDetails || ns.issueSummary || '').substring(0, 120));
+    return '<tr>' +
+      '<td><strong>' + esc(r.equipmentId) + '</strong></td>' +
+      '<td>' + esc(r.lifecycleReason || r.lifecycleState || '') + '</td>' +
+      '<td>' + esc(r.vendor || '') + '</td>' +
+      '<td>' + esc(r.workDuration || '') + '</td>' +
+      '<td>' + esc(r.etc || r.pmBDue || '') + '</td>' +
+      '<td>' + issueShort + '</td>' +
+      '<td class="timeline">' + tl + '</td>' +
+      '</tr>';
+  }).join('');
+
+  const availRows = avail.length ? avail.map(function(r) {
+    return '<tr>' +
+      '<td><strong>' + esc(r.equipmentId) + '</strong></td>' +
+      '<td class="badge-avail">Available</td>' +
+      '<td>' + esc(r.vendor || '') + '</td>' +
+      '<td colspan="4">' + esc(r.lifecycleReason || '') + '</td>' +
+      '</tr>';
+  }).join('') : '';
+
+  return '<!DOCTYPE html><html><head>' + css + '</head><body>' +
+    '<h2>Fleet Report — ' + esc(label) + '</h2>' +
+    '<p style="color:#777;font-size:11px">Generated ' + today + ' by Fleet Operations Center</p>' +
+    '<div class="summary">' +
+      '<strong>Site Uptake: ' + uptakeRate + '%</strong> &nbsp;|&nbsp; ' +
+      'Total: ' + total + ' &nbsp;|&nbsp; ' +
+      '<span class="badge-avail">Available: ' + avail.length + '</span> &nbsp;|&nbsp; ' +
+      '<span class="badge-unavail">Unavailable: ' + unavail.length + '</span>' +
+    '</div>' +
+    (unavail.length ? (
+      '<h3 style="color:#c0392b">Unavailable Units (' + unavail.length + ')</h3>' +
+      '<table><tr>' +
+        '<th>Unit</th><th>Reason</th><th>Vendor</th>' +
+        '<th>Down</th><th>ETC / Next PM</th><th>Issue</th><th>Recent Notes</th>' +
+      '</tr>' + unavailRows + '</table>'
+    ) : '') +
+    (avail.length ? (
+      '<h3 style="color:#1e8449;margin-top:16px">Available Units (' + avail.length + ')</h3>' +
+      '<table><tr>' +
+        '<th>Unit</th><th>Status</th><th>Vendor</th><th colspan="4">Notes</th>' +
+      '</tr>' + availRows + '</table>'
+    ) : '') +
+    '<p style="font-size:10px;color:#aaa;margin-top:20px">Sent from Fleet Operations Center</p>' +
+    '</body></html>';
+}
+
 function registerAIHandlers(ctx) {
   const { suggestDropdowns, askOrcha, sendOrchaChat, loadOrchaConfig, saveOrchaConfig } = require('../../src/scrapers/orcha_ws');
   const relay = require('../orcha/relay');
@@ -364,10 +469,17 @@ function registerAIHandlers(ctx) {
             if (!toAddr.includes('@')) {
               results.push('Email failed: no email address found for "' + (a.to||'') + '" — add one in Contact Book');
             } else {
+              // Build a real data report if the message references a site/unit;
+              // otherwise use the AI-generated body as-is.
+              const reportHtml = _buildEmailReport(userMsg, rows, notesStore);
+              const siteMatch2 = userMsg.match(/\b([A-Z]{2,4}\d{2,3})\b/i);
+              const autoSubject = siteMatch2
+                ? 'Fleet Report \u2014 ' + siteMatch2[1].toUpperCase() + ' \u2014 ' + new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})
+                : null;
               const emailRes = await sendFleetEmail({
                 to: toAddr,
-                subject: a.subject || 'Message from Fleet Operations Center',
-                htmlBody: '<p>' + (a.body || '').replace(/\n/g, '<br>') + '</p>',
+                subject: a.subject || autoSubject || 'Message from Fleet Operations Center',
+                htmlBody: reportHtml || ('<p>' + (a.body || '').replace(/\n/g, '<br>') + '</p>'),
               });
               results.push(emailRes.ok ? 'Email sent to ' + toAddr : 'Email failed: ' + emailRes.error);
             }
