@@ -1235,17 +1235,24 @@ async function _send() {
         _addHistory('user', val);
 
         // Show disambiguation — never guess intent
+        // Render INSIDE the composer (pinned above the input box), not in the
+        // scrollable chat log -- a message-log entry can end up off-screen if
+        // the user isn't scrolled to the bottom, so it looked like it never showed.
+        const existingDis = document.getElementById('oc-disambig');
+        if (existingDis) existingDis.remove();
         const disambig = document.createElement('div');
-        disambig.className = 'oc-msg oc-msg--orcha';
+        disambig.id = 'oc-disambig';
+        disambig.className = 'oc-quick-compose';
         disambig.innerHTML =
-          '<div style="margin-bottom:8px">Are you <strong>sending data TO ' + _esc(_match.name) + '</strong>, or <strong>asking THEM for data</strong>?</div>' +
+          '<div style="font-size:12px;color:var(--txt2)">Are you <strong>sending data TO ' + _esc(_match.name) + '</strong>, or <strong>asking THEM for data</strong>?</div>' +
           '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-            '<button class="sd-btn primary oc-dis-send" style="font-size:12px;padding:4px 12px">📤 Send my fleet data</button>' +
-            '<button class="sd-btn secondary oc-dis-ask" style="font-size:12px;padding:4px 12px">❓ Ask them for data</button>' +
-            '<button class="oc-dis-cancel" style="font-size:12px;padding:4px 10px;background:none;border:none;color:var(--txt2);cursor:pointer">✕</button>' +
+            '<button class="oc-reply-btn oc-reply-btn--ai oc-dis-send">📤 Send my fleet data</button>' +
+            '<button class="oc-reply-btn oc-dis-ask">❓ Ask them for data</button>' +
+            '<button class="oc-qc-cancel oc-dis-cancel">✕</button>' +
           '</div>';
-        const msgsEl = document.getElementById('orcha-msgs');
-        if (msgsEl) { msgsEl.appendChild(disambig); msgsEl.scrollTop = msgsEl.scrollHeight; }
+        const tabChatEl  = document.getElementById('oc-tab-chat');
+        const inputRowEl  = tabChatEl && tabChatEl.querySelector('.oc-input-row');
+        if (tabChatEl) tabChatEl.insertBefore(disambig, inputRowEl || null);
 
         disambig.querySelector('.oc-dis-cancel').addEventListener('click', () => disambig.remove());
 
