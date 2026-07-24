@@ -910,21 +910,23 @@ function _openEmailCompose(contact, prefill) {
     if (!msg) { textarea.focus(); return; }
     if (!subject) { subjectEl.focus(); return; }
     sendBtn.disabled = true; polishBtn.disabled = true;
-    sendBtn.textContent = 'Sending…';
+    sendBtn.textContent = 'Sending\u2026';
     statusEl.textContent = '';
     try {
       const result = await window.ai.sendEmail({ to: contact.email, subject, body: msg });
       if (result && result.ok) {
-        statusEl.textContent = '✓ Sent';
+        // mailto: path opens Outlook pre-filled; smtp path sends silently
+        const label = result.method === 'mailto' ? '\u2713 Opening in Outlook\u2026' : '\u2713 Sent';
+        statusEl.textContent = label;
         statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--ok';
-        setTimeout(() => bubble.remove(), 1400);
+        setTimeout(() => bubble.remove(), result.method === 'mailto' ? 2200 : 1400);
       } else {
         throw new Error((result && result.error) || 'Send failed');
       }
     } catch (e) {
       sendBtn.disabled = false; polishBtn.disabled = false;
-      sendBtn.textContent = 'Send 📧';
-      statusEl.textContent = '❌ ' + e.message;
+      sendBtn.textContent = 'Send \U0001F4E7';
+      statusEl.textContent = '\u274c ' + e.message;
       statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--err';
     }
   }

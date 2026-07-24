@@ -534,18 +534,40 @@ function registerAIHandlers(ctx) {
     logger.warn('[AI Config] Startup: failed to load saved preference:', e.message);
   }
 
-  // Direct email send from chat compose bubble (2026-07-24)
+  // Direct email send from chat compose bubble.
+  // Strategy:
+  //   1. If SMTP password is configured -> send via PowerShell SmtpClient (silent, no window)
+  //   2. Otherwise -> shell.openExternal(mailto:) opens Outlook pre-filled; user clicks Send.
+  //      This always works without any password or SMTP setup.
   handle('ai:send-email', async (_e, data) => {
     if (!data || !data.to || !data.body) throw new Error('to and body required');
     requireStringMax(data.to,      'to',      256);
-    requireStringMax(data.subject, 'subject', 256);
+    if (data.subject) requireStringMax(data.subject, 'subject', 256);
     requireStringMax(data.body,    'body',    8000);
-    const { sendFleetEmail } = require('../scrapers/email_sender');
-    return sendFleetEmail({
-      to: data.to,
-      subject: data.subject || 'Message from Fleet Operations Center',
-      htmlBody: '<p>' + (data.body || '').replace(/\n/g, '<br>') + '</p>',
-    });
+
+    const { sendFleetEmail, loadEmailConfig } = require('../scrapers/email_sender');
+    const cfg = loadEmailConfig();
+
+    // Path 1: SMTP (silent send) -- only if password is configured
+    if (cfg.password && cfg.password.trim()) {
+      const res = await sendFleetEmail({
+        to: data.to,
+        subject: data.subject || 'Message from Fleet Operations Center',
+        htmlBody: '<p>' + (data.body || '').replace(/\n/g, '<br>') + '</p>',
+      });
+      if (res.ok) return { ok: true, method: 'smtp' };
+      // SMTP failed -- fall through to mailto: so the message is never lost
+      logger.warn('[ai:send-email] SMTP failed ('+res.error+'), falling back to mailto');
+    }
+
+    // Path 2: mailto: -- opens Outlook (or default mail client) pre-filled.
+    // subject/body are percent-encoded so special chars survive the URL.
+    const { shell } = require('electron');
+    const subj = encodeURIComponent(data.subject || 'Message from Fleet Operations Center');
+    const body = encodeURIComponent(data.body || '');
+    const mailto = 'mailto:' + encodeURIComponent(data.to) + '?subject=' + subj + '&body=' + body;
+    await shell.openExternal(mailto);
+    return { ok: true, method: 'mailto' };
   });
 
   logger.info('AI IPC handlers registered');
