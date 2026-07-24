@@ -64,36 +64,49 @@ function sendOrchaPrompt(prompt) {
 
 // ── PERSISTENT CHAT SESSION ───────────────────────────────────────────────
 // Fleet Chat uses a single persistent session so Orcha remembers context across restarts.
-let _fleetChatSessionId = null;
-let _fleetChatSessionTs  = 0;   // S21-F: epoch ms when session loaded/created
-const FLEET_CHAT_SESSION_FILE = P.chatSessionId;
+// S21-F + DM-isolation: named persistent chat sessions. 'fleet' is the
+// interactive Fleet Chat floater (original behavior, unchanged). 'dm' is a
+// fully separate session used only by the Slack DM Auto-Reply engine, so
+// its background polling never competes with or inherits context bloat
+// from the floater's own growing conversation (root cause of DM replies
+// timing out and silently falling back to a canned line -- see
+// slack_dm_autoreply.js header for the incident this fixes).
 const SESSION_MAX_AGE_MS = 8 * 60 * 60 * 1000;  // S21-F: expire after 8h
+const _sessions = {
+  fleet: { id: null, ts: 0, file: P.chatSessionId },
+  dm:    { id: null, ts: 0, file: P.dmChatSessionId },
+};
 
-function getFleetChatSessionId() {
+function _sessionState(sessionKey) {
+  return _sessions[sessionKey] || _sessions.fleet;
+}
+
+function getFleetChatSessionId(sessionKey) {
+  const s = _sessionState(sessionKey);
   // S21-F: expire in-memory session after SESSION_MAX_AGE_MS (8h)
-  if (_fleetChatSessionId) {
-    if (Date.now() - _fleetChatSessionTs > SESSION_MAX_AGE_MS) {
+  if (s.id) {
+    if (Date.now() - s.ts > SESSION_MAX_AGE_MS) {
       logger.warn('[Fleet Chat] Session expired (>8h) -- clearing');
-      resetFleetChatSession();
+      resetFleetChatSession(sessionKey);
     } else {
-      return _fleetChatSessionId;
+      return s.id;
     }
   }
   // Try to load saved session ID from disk (persists across restarts)
   try {
-    const saved = fs.readFileSync(FLEET_CHAT_SESSION_FILE, 'utf8').trim();
+    const saved = fs.readFileSync(s.file, 'utf8').trim();
     if (saved && saved.startsWith('ct_')) {
       // S21-F: check file mtime for age
-      const stat = fs.statSync(FLEET_CHAT_SESSION_FILE);
+      const stat = fs.statSync(s.file);
       if (Date.now() - stat.mtimeMs > SESSION_MAX_AGE_MS) {
         logger.warn('[Fleet Chat] Saved session expired (>8h) -- ignoring');
-        try { fs.unlinkSync(FLEET_CHAT_SESSION_FILE); } catch (_) {}
+        try { fs.unlinkSync(s.file); } catch (_) {}
         return null;
       }
-      _fleetChatSessionId = saved;
-      _fleetChatSessionTs  = stat.mtimeMs;  // S21-F: stamp age
+      s.id = saved;
+      s.ts  = stat.mtimeMs;  // S21-F: stamp age
       logger.info('[Fleet Chat] Restored persistent session:', saved);
-      return _fleetChatSessionId;
+      return s.id;
     }
   } catch (_) {}
   // No saved session -- return null (will create new on first chat)
@@ -101,9 +114,10 @@ function getFleetChatSessionId() {
 }
 
 // Reset chat session (clears memory — starts fresh next message)
-function resetFleetChatSession() {
-  _fleetChatSessionId = null;
-  try { fs.unlinkSync(FLEET_CHAT_SESSION_FILE); } catch (_) {}
+function resetFleetChatSession(sessionKey) {
+  const s = _sessionState(sessionKey);
+  s.id = null;
+  try { fs.unlinkSync(s.file); } catch (_) {}
   logger.info('[Fleet Chat] Session reset — next message will create fresh session');
 }
 // ──────────────────────────────────────────────────────────────────────────
@@ -176,8 +190,9 @@ function sendOrchaViaWS(prompt, sessionId) {
  * sendOrchaChat(prompt)
  * Persistent chat — reuses the same Orcha session across calls and restarts.
  */
-function sendOrchaChat(prompt) {
-  const savedSessionId = getFleetChatSessionId();
+function sendOrchaChat(prompt, sessionKey) {
+  const key = sessionKey || 'fleet';
+  const savedSessionId = getFleetChatSessionId(key);
   return new Promise((resolve, reject) => {
     const wsUrl = getOrchaUrl();
     const ws = new WebSocket(wsUrl);
@@ -212,7 +227,7 @@ function sendOrchaChat(prompt) {
           if (savedSessionId) {
             ws.send(JSON.stringify({ type: 'load_session', session_id: savedSessionId }));
           } else {
-            ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet Chat', agent_id: 'orcha_default' }));
+            ws.send(JSON.stringify({ type: 'create_session', title: key === 'dm' ? 'Fleet Chat (DM Auto-Reply)' : 'Fleet Chat', agent_id: 'orcha_default' }));
           }
           break;
         }
@@ -224,9 +239,10 @@ function sendOrchaChat(prompt) {
         }
         case 'session_created': {
           const sid = msg.session_id;
-          _fleetChatSessionId = sid;
-          _fleetChatSessionTs  = Date.now();  // S21-F: record creation time
-          try { fs.writeFileSync(FLEET_CHAT_SESSION_FILE, sid); } catch (_) {}
+          const s = _sessionState(key);
+          s.id = sid;
+          s.ts = Date.now();  // S21-F: record creation time
+          try { fs.writeFileSync(s.file, sid); } catch (_) {}
           logger.info('[Fleet Chat] New session created:', sid);
           ws.send(JSON.stringify({ type: 'send_message', session_id: sid, message: prompt, images: [] }));
           break;
@@ -234,8 +250,8 @@ function sendOrchaChat(prompt) {
         case 'error': {
           if (msg.request_type === 'load_session') {
             logger.info('[Fleet Chat] Session not found, creating new...');
-            _fleetChatSessionId = null;
-            ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet Chat', agent_id: 'orcha_default' }));
+            _sessionState(key).id = null;
+            ws.send(JSON.stringify({ type: 'create_session', title: key === 'dm' ? 'Fleet Chat (DM Auto-Reply)' : 'Fleet Chat', agent_id: 'orcha_default' }));
             break;
           }
           if (msg.request_type === 'send_message' || msg.request_type === 'create_session') {

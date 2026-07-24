@@ -96,7 +96,7 @@ async function _classifyAndDraft(messageText, sendOrchaChat) {
   const prompt = PERSONA_SYSTEM_PROMPT + '\n\nIncoming DM:\n' + messageText;
   let raw;
   try {
-    raw = await sendOrchaChat(prompt);
+    raw = await sendOrchaChat(prompt, 'dm'); // isolated session -- see orcha_ws.js 'dm' session key
   } catch (e) {
     logger.warn('[SlackDM] AI call threw:', e.message);
     raw = null;

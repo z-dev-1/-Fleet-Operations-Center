@@ -68,6 +68,7 @@ const P = {
   get emailConfig()          { return path.join(getDataDir(), 'email_config.json'); },
   get slackConfig()          { return path.join(getDataDir(), 'slack_config.json'); },
   get chatSessionId()        { return path.join(getDataDir(), 'chat_session_id.txt'); },
+  get dmChatSessionId()       { return path.join(getDataDir(), 'dm_chat_session_id.txt'); },
 
   // ── Daily notes ────────────────────────────────────────────────────────────
   get dailyNotesSnap()       { return path.join(getDataDir(), 'daily_notes_snapshots.json'); },
