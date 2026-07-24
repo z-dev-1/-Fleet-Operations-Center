@@ -78,7 +78,7 @@ const COLS = [
 function _lifecycleClass(val) {
   if (!val) return '';
   const v = val.toLowerCase();
-  if (v.includes('available') && !v.includes('un')) return 'lc--available';
+  if ((v.includes('available') && !v.includes('un')) || v === 'active') return 'lc--available';
   if (v.includes('unavailable'))  return 'lc--unavailable';
   if (v.includes('decommission')) return 'lc--decommissioned';
   if (v.includes('maintenance'))  return 'lc--maintenance';
@@ -89,7 +89,7 @@ function _lifecycleClass(val) {
 function _lifecyclePill(val) {
   if (!val) return '<span class="lc-pill lc-pill--unknown">—</span>';
   const v = val.toLowerCase();
-  if (v.includes('available') && !v.includes('un'))
+  if ((v.includes('available') && !v.includes('un')) || v === 'active')
     return '<span class="lc-pill lc-pill--available">Active</span>';
   if (v.includes('unavailable'))
     return '<span class="lc-pill lc-pill--unavailable">Unavailable</span>';

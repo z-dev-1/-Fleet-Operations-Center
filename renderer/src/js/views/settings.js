@@ -2096,6 +2096,27 @@ function _applyThemeVars(theme) {
   if (theme !== 'dark') document.body.classList.add(theme + '-mode');
 }
 
+
+function _syncSwatchesToTheme(theme) {
+  if (!_drawer) return;
+  const tokens = _THEMES[theme] || _THEMES.dark;
+  _drawer.querySelectorAll('.sd-swatch').forEach(sw => sw.classList.remove('active'));
+  ['--acc','--bg','--panel','--txt','--row-avail','--row-unavail',
+   '--chat-bubble-ai','--chat-bubble-user','--chat-border'].forEach(varName => {
+    const themeVal = tokens[varName];
+    const swatches = _drawer.querySelectorAll(`.sd-swatch[data-var="${varName}"]`);
+    if (!swatches.length) return;
+    let matched = false;
+    swatches.forEach(sw => {
+      if (!matched && themeVal && sw.style.background === themeVal) {
+        sw.classList.add('active');
+        matched = true;
+      }
+    });
+    if (!matched && swatches[0]) swatches[0].classList.add('active');
+  });
+}
+
 function _wireUITab() {
   // ── Template cards ──────────────────────────────────────────────────────
   _drawer.querySelectorAll('.sd-template').forEach((card) => {
@@ -2108,6 +2129,7 @@ function _wireUITab() {
       card.querySelector('.sd-tpl-check').style.display = '';
       const theme = card.dataset.theme;
       _applyThemeVars(theme);
+      _syncSwatchesToTheme(theme);
       _saveUI();
     });
   });
@@ -2210,6 +2232,9 @@ function _wireUITab() {
 
 function _wireNexusThemeBuilder() {
   // Uses top-level imports: setPreset, setTheme, getThemeConfig, resetTheme, PRESETS
+  // Nexus → Fleet theme bridge mapping
+  const NEXUS_TO_FLEET = { default: 'dark', void: 'midnight', solar: 'dark', arctic: 'ocean', ember: 'midnight' };
+
 
 
   // Load current config and set initial UI state
@@ -2225,6 +2250,18 @@ function _wireNexusThemeBuilder() {
         presetGrid.querySelectorAll('.nx-preset-chip').forEach(c => c.classList.remove('nx-preset-chip--active'));
         chip.classList.add('nx-preset-chip--active');
         setPreset(chip.dataset.preset);
+        // Bridge: update fleet CSS vars to match nexus preset
+        const mappedTheme = NEXUS_TO_FLEET[chip.dataset.preset] || 'dark';
+        _applyThemeVars(mappedTheme);
+        _syncSwatchesToTheme(mappedTheme);
+        // Sync fleet template card active state
+        if (_drawer) _drawer.querySelectorAll('.sd-template').forEach(card => {
+          const active = card.dataset.theme === mappedTheme;
+          card.classList.toggle('active', active);
+          const chk = card.querySelector('.sd-tpl-check');
+          if (chk) chk.style.display = active ? '' : 'none';
+        });
+        _saveUI();
         // Update accent picker to match preset
         const p = PRESETS[chip.dataset.preset];
         if (p) {
@@ -2232,6 +2269,9 @@ function _wireNexusThemeBuilder() {
           const hex = document.getElementById('nx-accent-hex');
           if (picker) picker.value = p.accent;
           if (hex) hex.textContent = p.accent;
+          // Also update fleet accent var
+          document.documentElement.style.setProperty('--acc', p.accent);
+          document.documentElement.style.setProperty('--adim', p.accent.replace(/^#/, '') ? 'rgba(' + parseInt(p.accent.slice(1,3),16) + ',' + parseInt(p.accent.slice(3,5),16) + ',' + parseInt(p.accent.slice(5,7),16) + ',.08)' : 'rgba(88,166,255,.08)');
         }
       });
     });
@@ -2246,6 +2286,13 @@ function _wireNexusThemeBuilder() {
     accentPicker.addEventListener('input', () => {
       setTheme('accent', accentPicker.value);
       if (accentHex) accentHex.textContent = accentPicker.value;
+      // Bridge: also update fleet accent var
+      document.documentElement.style.setProperty('--acc', accentPicker.value);
+      const r = parseInt(accentPicker.value.slice(1,3),16);
+      const g = parseInt(accentPicker.value.slice(3,5),16);
+      const b = parseInt(accentPicker.value.slice(5,7),16);
+      document.documentElement.style.setProperty('--adim', `rgba(${r},${g},${b},.08)`);
+      document.documentElement.style.setProperty('--acc2', accentPicker.value);
     });
   }
   const accentReset = document.getElementById('nx-accent-reset');
@@ -2392,10 +2439,15 @@ function _applyUI(prefs) {
 
   // Color swatches + CSS vars
   if (prefs.swatches) {
+    const themeTokens = _THEMES[prefs.theme] || {};
     Object.entries(prefs.swatches).forEach(([cssVar, color]) => {
+      // Skip stale swatches: if theme controls this var and saved value doesn't match
+      // the saved theme's token, it was set while on a different theme — ignore it.
+      const expected = themeTokens[cssVar];
+      if (expected !== undefined && expected !== color) return;
       document.documentElement.style.setProperty(cssVar, color);
       // Mark matching swatch active
-      _drawer.querySelectorAll(`.sd-swatch[data-var="${cssVar}"]`).forEach((sw) => {
+      if (_drawer) _drawer.querySelectorAll(`.sd-swatch[data-var="${cssVar}"]`).forEach((sw) => {
         sw.classList.toggle('active', sw.style.background === color);
       });
     });
