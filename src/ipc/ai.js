@@ -29,13 +29,11 @@ const MAX_SUGGEST_KEYS      = 100;   // keys on unit object for ai:suggest (rais
 
 
 // ── Site / unit email report builder ──────────────────────────────────────────
-// Called from the EMAIL action handler when the user's message references a
-// domicile site code (e.g. AVP40) or a specific unit ID.
-// Returns a self-contained HTML string — no external dependencies.
+// Returns plain-text (not HTML) so the body renders correctly in OWA/mailto.
+// Called from the EMAIL action handler when userMsg references a site or unit.
 function _buildEmailReport(userMsg, rows, notesStore) {
   const today = new Date().toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' });
 
-  // Detect site codes (e.g. AVP40, DPD1, LGB8) and unit IDs (5-8 digits, optional letter prefix)
   const siteMatch = userMsg.match(/\b([A-Z]{2,4}\d{2,3})\b/i);
   const unitMatch = userMsg.match(/\b([A-Za-z]?\d{5,8})\b/);
   const siteCode  = siteMatch ? siteMatch[1].toUpperCase() : null;
@@ -51,85 +49,60 @@ function _buildEmailReport(userMsg, rows, notesStore) {
     const r = rows.find(function(r){ return r.equipmentId === unitId; });
     if (r) targetRows = [r];
   }
-
-  // Fall back — no recognisable site/unit → return null so caller uses AI body
   if (!targetRows.length) return null;
 
-  const label     = siteCode || unitId;
-  const total     = targetRows.length;
-  const unavail   = targetRows.filter(function(r){ return (r.lifecycleState||'').toLowerCase().includes('unavail'); });
-  const avail     = targetRows.filter(function(r){ return !(r.lifecycleState||'').toLowerCase().includes('unavail'); });
+  const label   = siteCode || unitId;
+  const total   = targetRows.length;
+  const unavail = targetRows.filter(function(r){ return (r.lifecycleState||'').toLowerCase().includes('unavail'); });
+  const avail   = targetRows.filter(function(r){ return !(r.lifecycleState||'').toLowerCase().includes('unavail'); });
   const uptakeRate = total ? Math.round((avail.length / total) * 100) : 0;
 
-  const css = [
-    '<style>',
-    'body{font-family:Arial,sans-serif;font-size:13px;color:#222}',
-    'h2{color:#1a5276;margin-bottom:4px}',
-    '.summary{background:#eaf4fb;padding:8px 12px;border-radius:4px;margin-bottom:12px}',
-    'table{border-collapse:collapse;width:100%;font-size:12px}',
-    'th{background:#1a5276;color:#fff;padding:5px 8px;text-align:left}',
-    'td{padding:4px 8px;border-bottom:1px solid #ddd;vertical-align:top}',
-    'tr:nth-child(even) td{background:#f5f8fa}',
-    '.badge-unavail{color:#c0392b;font-weight:bold}',
-    '.badge-avail{color:#1e8449;font-weight:bold}',
-    '.timeline{font-size:11px;color:#555;max-width:340px}',
-    '</style>',
-  ].join('');
+  const lines = [];
+  lines.push('Fleet Report — ' + label);
+  lines.push('Generated: ' + today);
+  lines.push('');
+  lines.push('SITE SUMMARY');
+  lines.push('  Uptake Rate : ' + uptakeRate + '%');
+  lines.push('  Total Units : ' + total);
+  lines.push('  Available   : ' + avail.length);
+  lines.push('  Unavailable : ' + unavail.length);
 
-  function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  if (unavail.length) {
+    lines.push('');
+    lines.push('UNAVAILABLE UNITS (' + unavail.length + ')');
+    lines.push(('-').repeat(80));
+    unavail.forEach(function(r) {
+      const ns       = notesStore[r.equipmentId] || {};
+      const timeline = (r.repairTimeline || ns.timeline || ns.notes || '').trim();
+      const recentTl = timeline
+        ? timeline.split('\n').slice(-5).join('\n          ')
+        : 'No notes on file';
+      lines.push('');
+      lines.push('Unit     : ' + r.equipmentId + (r.assetType ? '  (' + r.assetType + ')' : ''));
+      lines.push('Status   : ' + (r.lifecycleReason || r.lifecycleState || ''));
+      lines.push('Vendor   : ' + (r.vendor || 'N/A'));
+      lines.push('Down     : ' + (r.workDuration || 'unknown'));
+      if (r.etc || r.pmBDue)
+        lines.push('ETC/PM   : ' + (r.etc || r.pmBDue || ''));
+      if (r.issueDetails || ns.issueSummary)
+        lines.push('Issue    : ' + (r.issueDetails || ns.issueSummary || '').substring(0, 200));
+      lines.push('Notes    : ' + recentTl);
+    });
+  }
 
-  // Unavailable units table
-  const unavailRows = unavail.map(function(r) {
-    const ns       = notesStore[r.equipmentId] || {};
-    const timeline = (r.repairTimeline || ns.timeline || ns.notes || '').trim();
-    const tl       = timeline
-      ? timeline.split('\n').slice(-5).join('<br>') // last 5 timeline entries
-      : '<em>No notes</em>';
-    const issueShort = esc((r.issueDetails || ns.issueSummary || '').substring(0, 120));
-    return '<tr>' +
-      '<td><strong>' + esc(r.equipmentId) + '</strong></td>' +
-      '<td>' + esc(r.lifecycleReason || r.lifecycleState || '') + '</td>' +
-      '<td>' + esc(r.vendor || '') + '</td>' +
-      '<td>' + esc(r.workDuration || '') + '</td>' +
-      '<td>' + esc(r.etc || r.pmBDue || '') + '</td>' +
-      '<td>' + issueShort + '</td>' +
-      '<td class="timeline">' + tl + '</td>' +
-      '</tr>';
-  }).join('');
+  if (avail.length) {
+    lines.push('');
+    lines.push('AVAILABLE UNITS (' + avail.length + ')');
+    lines.push(('-').repeat(80));
+    avail.forEach(function(r) {
+      lines.push('  ' + r.equipmentId + '  ' + (r.lifecycleState||'') + '  ' + (r.vendor||''));
+    });
+  }
 
-  const availRows = avail.length ? avail.map(function(r) {
-    return '<tr>' +
-      '<td><strong>' + esc(r.equipmentId) + '</strong></td>' +
-      '<td class="badge-avail">Available</td>' +
-      '<td>' + esc(r.vendor || '') + '</td>' +
-      '<td colspan="4">' + esc(r.lifecycleReason || '') + '</td>' +
-      '</tr>';
-  }).join('') : '';
-
-  return '<!DOCTYPE html><html><head>' + css + '</head><body>' +
-    '<h2>Fleet Report — ' + esc(label) + '</h2>' +
-    '<p style="color:#777;font-size:11px">Generated ' + today + ' by Fleet Operations Center</p>' +
-    '<div class="summary">' +
-      '<strong>Site Uptake: ' + uptakeRate + '%</strong> &nbsp;|&nbsp; ' +
-      'Total: ' + total + ' &nbsp;|&nbsp; ' +
-      '<span class="badge-avail">Available: ' + avail.length + '</span> &nbsp;|&nbsp; ' +
-      '<span class="badge-unavail">Unavailable: ' + unavail.length + '</span>' +
-    '</div>' +
-    (unavail.length ? (
-      '<h3 style="color:#c0392b">Unavailable Units (' + unavail.length + ')</h3>' +
-      '<table><tr>' +
-        '<th>Unit</th><th>Reason</th><th>Vendor</th>' +
-        '<th>Down</th><th>ETC / Next PM</th><th>Issue</th><th>Recent Notes</th>' +
-      '</tr>' + unavailRows + '</table>'
-    ) : '') +
-    (avail.length ? (
-      '<h3 style="color:#1e8449;margin-top:16px">Available Units (' + avail.length + ')</h3>' +
-      '<table><tr>' +
-        '<th>Unit</th><th>Status</th><th>Vendor</th><th colspan="4">Notes</th>' +
-      '</tr>' + availRows + '</table>'
-    ) : '') +
-    '<p style="font-size:10px;color:#aaa;margin-top:20px">Sent from Fleet Operations Center</p>' +
-    '</body></html>';
+  lines.push('');
+  lines.push('---');
+  lines.push('Sent from Fleet Operations Center');
+  return lines.join('\n');
 }
 
 function registerAIHandlers(ctx) {
@@ -440,7 +413,7 @@ function registerAIHandlers(ctx) {
 
     
     const d = new Date(); const dateStr = String(d.getMonth()+1).padStart(2,'0')+'/'+String(d.getDate()).padStart(2,'0'); const timeStr = String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
-    const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human — warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable}), PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Match recipient from SLACK CONTACTS by name. Confirm who you are sending to in reply.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+fleetSummary+'\\n'+unitDetail+contactList+emailContactList+'\\nUser: '+userMsg;
+    const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human — warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle_or_email,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable}), PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Use exact @handle from SLACK CONTACTS when available. If user gives an email address instead, pass it directly as recipient — the system resolves it via Slack lookup. Always confirm who you are sending to.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+fleetSummary+'\\n'+unitDetail+contactList+emailContactList+'\\nUser: '+userMsg;
     try {
       logger.info('[ai:orcha-action] Calling relay.ask (' + prompt.length + ' chars)...');
       const aiText = await relay.ask(prompt);
@@ -479,7 +452,11 @@ function registerAIHandlers(ctx) {
               const emailRes = await sendFleetEmail({
                 to: toAddr,
                 subject: a.subject || autoSubject || 'Message from Fleet Operations Center',
-                htmlBody: reportHtml || ('<p>' + (a.body || '').replace(/\n/g, '<br>') + '</p>'),
+                // Plain text — wraps in <pre> for SMTP so spacing is preserved;
+                // OWA/mailto: receives it as-is (no HTML in mailto: body params).
+                htmlBody: reportHtml
+                  ? '<pre style="font-family:Courier New,monospace;font-size:12px">' + reportHtml + '</pre>'
+                  : '<p>' + (a.body || '').replace(/\n/g, '<br>') + '</p>',
               });
               results.push(emailRes.ok ? 'Email sent to ' + toAddr : 'Email failed: ' + emailRes.error);
             }
