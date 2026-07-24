@@ -224,6 +224,31 @@ async function _isDirectedAtMe(messageText, myName, askOrcha) {
   }
 }
 
+// ── Thread-mention tracking ─────────────────────────────────────────────
+// FEATURE (2026-07-24): when a message @-mentions the signed-in user, the
+// thread it belongs to (or starts) is recorded persistently so that any
+// future reply in that same thread triggers a mandatory response even when
+// the original mention has scrolled past the 20-message fetch window.
+// Entries expire after 7 days (Slack ts is Unix seconds as a string).
+const MENTION_THREAD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function _trackMentionThread(channelId, threadTs) {
+  if (!threadTs) return;
+  const all = store.load('slackMentionThreads', {});
+  if (!all[channelId]) all[channelId] = [];
+  if (!all[channelId].includes(threadTs)) all[channelId].push(threadTs);
+  // Prune entries older than TTL
+  const cutoff = ((Date.now() - MENTION_THREAD_TTL_MS) / 1000).toFixed(6);
+  all[channelId] = all[channelId].filter(ts => parseFloat(ts) > parseFloat(cutoff));
+  store.save('slackMentionThreads', all);
+}
+
+function _isInMentionThread(channelId, threadTs) {
+  if (!threadTs) return false;
+  const all = store.load('slackMentionThreads', {});
+  return !!(all[channelId] && all[channelId].includes(threadTs));
+}
+
 // ── AI classify + draft ──────────────────────────────────────────────────
 async function _classifyAndDraft(messageText, askOrcha) {
   const prompt = PERSONA_SYSTEM_PROMPT + '\n\nPartner message:\n' + messageText;
@@ -369,31 +394,49 @@ async function pollChannelsOnce(log) {
           continue;
         }
 
-        // FEATURE (2026-07-22): "occasional" mode gate -- only consulted
-        // for messages that did NOT mention the user (see filter above).
-        // A NO here is a deliberate, logged decision to stay quiet, not a
-        // failure -- correctly still advances lastSeenTs since the
-        // message WAS considered, just declined.
+        // ── Reply routing ────────────────────────────────────────────────
+        // Three tiers, evaluated in order — same for both modes:
+        //   TIER 1: literal @mention — always reply.
+        //   TIER 2: reply in a thread where user was @mentioned — always reply,
+        //           even when the original mention has scrolled past the
+        //           20-message window (tracked persistently, 7-day TTL).
+        //   TIER 3 (occasional): _isDirectedAtMe or _shouldChimeIn gate.
+        //   TIER 3 (mentions):   _isDirectedAtMe strict gate only.
         const mentioned = isMention(msg);
-        if (!mentioned && chMode === 'occasional') {
-          const shouldChime = await _shouldChimeIn(msg.text, askOrcha);
-          if (!shouldChime) {
-            doLog(`[SlackWatch] ${ch.name}: not mentioned, chose not to chime in on ${msg.ts}`);
-            continue;
+
+        // Slack: thread_ts == ts on root messages; on replies it is the root ts.
+        const msgThreadTs = (msg.thread_ts && msg.thread_ts !== msg.ts) ? msg.thread_ts : null;
+        const isThreadReplyToMyMention = !mentioned && !!msgThreadTs && _isInMentionThread(ch.id, msgThreadTs);
+
+        // Persist the thread so future replies in it are also Tier 2.
+        if (mentioned) _trackMentionThread(ch.id, msg.thread_ts || msg.ts);
+
+        if (mentioned) {
+          // Tier 1: explicit @mention — fall through to draft.
+        } else if (isThreadReplyToMyMention) {
+          // Tier 2: reply in a thread where I was @mentioned — mandatory.
+          doLog(`[SlackWatch] ${ch.name}: reply in thread where I was @mentioned — mandatory reply on ${msg.ts}`);
+        } else if (chMode === 'occasional') {
+          // Tier 3a (occasional): directed-at-me check first, then chime gate.
+          const directedAtMe = await _isDirectedAtMe(msg.text, auth.user, askOrcha);
+          if (directedAtMe) {
+            doLog(`[SlackWatch] ${ch.name}: not mentioned, but clearly directed at me — replying on ${msg.ts}`);
+          } else {
+            const shouldChime = await _shouldChimeIn(msg.text, askOrcha);
+            if (!shouldChime) {
+              doLog(`[SlackWatch] ${ch.name}: not mentioned — chose not to chime in on ${msg.ts}`);
+              continue;
+            }
+            doLog(`[SlackWatch] ${ch.name}: not mentioned, but chiming in on ${msg.ts} (gate said relevant)`);
           }
-          doLog(`[SlackWatch] ${ch.name}: not mentioned, but chiming in on ${msg.ts} (gate said relevant)`);
-        } else if (!mentioned && chMode === 'mentions') {
-          // FEATURE (2026-07-23): strict mode still gets one more chance --
-          // no literal @-mention token, but is this UNMISTAKABLY meant for
-          // the signed-in user anyway (addressed by name, direct reply to
-          // them, etc)? Deliberately a stricter bar than the occasional
-          // gate above (see _isDirectedAtMe comment).
+        } else {
+          // Tier 3b (mentions/strict): must be unmistakably directed at me.
           const directedAtMe = await _isDirectedAtMe(msg.text, auth.user, askOrcha);
           if (!directedAtMe) {
-            doLog(`[SlackWatch] ${ch.name}: not mentioned, strict mode — not clearly directed at me, skipping ${msg.ts}`);
+            doLog(`[SlackWatch] ${ch.name}: strict mode — not clearly directed at me, skipping ${msg.ts}`);
             continue;
           }
-          doLog(`[SlackWatch] ${ch.name}: not mentioned, but strict-mode gate says clearly directed at me on ${msg.ts}`);
+          doLog(`[SlackWatch] ${ch.name}: strict-mode gate says clearly directed at me on ${msg.ts}`);
         }
 
         const draft = await _classifyAndDraft(msg.text, askOrcha);
@@ -423,6 +466,7 @@ async function pollChannelsOnce(log) {
           question: msg.text,
           reply: taggedReply,
           wasMentioned: mentioned,
+          wasThreadReply: isThreadReplyToMyMention,
           inScope: draft.inScope,
           category: draft.inScope ? null : draft.category,
           title: draft.title,
