@@ -8695,6 +8695,60 @@ body {
   background: rgba(88,166,255,.06);
 }
 
+/* ── Contact Book: Slack live-search (add-contact form, 2026-07-24) ───────
+   Results dropdown + confirmed-person badge in the + Add Slack Contact form. */
+.cb-slack-results {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+.cb-slack-result-item {
+  padding: 6px 10px;
+  font-size: 10px;
+  color: var(--txt2);
+  background: var(--el);
+  border: 1px solid var(--bdr);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.cb-slack-result-item:hover {
+  background: rgba(88,166,255,.09);
+  color: var(--acc, #58a6ff);
+  border-color: rgba(88,166,255,.3);
+}
+.cb-slack-searching {
+  font-size: 10px;
+  color: var(--mut);
+  padding: 3px 0;
+}
+.cb-slack-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 10px;
+  color: #7ee787;
+  background: rgba(62,207,142,.08);
+  border: 1px solid rgba(62,207,142,.2);
+  border-radius: 5px;
+}
+.cb-slack-confirm strong { color: #7ee787; }
+.cb-slack-clear-btn {
+  background: none;
+  border: none;
+  color: var(--mut);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 4px;
+  line-height: 1;
+  border-radius: 3px;
+}
+.cb-slack-clear-btn:hover { color: #f85149; background: rgba(248,81,73,.08); }
+
 
 
 /* ═══════════════════════════════════════════════════════════════════════════

@@ -11,6 +11,8 @@ let _el = null;
 let _open = false;
 let _tab = 'vendors'; // 'vendors' | 'slack'
 let _contacts = [];
+let _slackSearchTimer = null; // debounce handle for live search
+let _pendingSlack = null;     // { slackId, name, channelId? } resolved from search
 
 const _esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -118,8 +120,10 @@ function _render() {
     listHtml += `
       <div class="cb-add-form">
         <div class="cb-add-title">+ Add Slack Contact</div>
-        <input class="cb-input" id="cb-s-name" placeholder="Name" />
-        <input class="cb-input" id="cb-s-slack" placeholder="@slack-handle" />
+        <input class="cb-input" id="cb-s-name" placeholder="Name (searches Slack as you type)" autocomplete="off" />
+        <div class="cb-slack-results" id="cb-slack-results"></div>
+        <div class="cb-slack-confirm" id="cb-slack-confirm" style="display:none"></div>
+        <input class="cb-input" id="cb-s-slack" placeholder="@slack-handle (auto-filled from search)" />
         <input class="cb-input" id="cb-s-company" placeholder="Company / Team" />
         <input class="cb-input" id="cb-s-phone" placeholder="Phone (optional)" />
         <button class="cb-btn cb-btn--add" id="cb-add-slack">Add Contact</button>
@@ -127,6 +131,57 @@ function _render() {
   }
 
   _el.querySelector('.cb-body').innerHTML = tabsHtml + '<div class="cb-list">' + listHtml + '</div>';
+}
+
+// ── Slack live-search (add-contact form) ─────────────────────────────────────
+async function _searchSlackContacts(query) {
+  const resultsEl = document.getElementById('cb-slack-results');
+  if (!resultsEl) return;
+  if (!query || query.length < 2) { resultsEl.innerHTML = ''; return; }
+  if (!window.slack) { resultsEl.innerHTML = ''; return; }
+  resultsEl.innerHTML = '<div class="cb-slack-searching">Searching…</div>';
+  try {
+    const results = await window.slack.searchDirectory({ query, limit: 6 });
+    const people = (results || []).filter(r => r.type === 'user');
+    if (!people.length) { resultsEl.innerHTML = '<div class="cb-slack-searching">No matches</div>'; return; }
+    resultsEl.innerHTML = people.map(p =>
+      '<div class="cb-slack-result-item" data-id="' + _esc(p.id) + '" data-name="' + _esc(p.name) + '">' + _esc(p.name) + '</div>'
+    ).join('');
+  } catch (_) {
+    resultsEl.innerHTML = ''; // Slack not connected — manual entry still works
+  }
+}
+
+function _pickSlackPerson(id, name) {
+  // Fill name field
+  const nameEl = document.getElementById('cb-s-name');
+  if (nameEl) nameEl.value = name;
+  // Clear dropdown
+  const resultsEl = document.getElementById('cb-slack-results');
+  if (resultsEl) resultsEl.innerHTML = '';
+  // Show confirmed badge
+  const confirmEl = document.getElementById('cb-slack-confirm');
+  if (confirmEl) {
+    confirmEl.innerHTML =
+      '<span>✓ Found in Slack: <strong>' + _esc(name) + '</strong></span>' +
+      '<button class="cb-slack-clear-btn" id="cb-slack-clear">×</button>';
+    confirmEl.style.display = 'flex';
+  }
+  // Store immediately; resolve DM channelId in background
+  _pendingSlack = { slackId: id, name, channelId: null };
+  if (window.slack) {
+    window.slack.openConversation({ id, type: 'user' })
+      .then(res => { if (_pendingSlack && _pendingSlack.slackId === id) _pendingSlack.channelId = res && res.channelId; })
+      .catch(() => {});
+  }
+}
+
+function _clearSlackPick() {
+  _pendingSlack = null;
+  const confirmEl = document.getElementById('cb-slack-confirm');
+  if (confirmEl) { confirmEl.innerHTML = ''; confirmEl.style.display = 'none'; }
+  const nameEl = document.getElementById('cb-s-name');
+  if (nameEl) { nameEl.value = ''; nameEl.focus(); }
 }
 
 function _toggle() {
@@ -154,11 +209,14 @@ async function _addSlack() {
   const g = id => (document.getElementById(id) || {}).value || '';
   const contact = {
     type: 'slack',
-    name: g('cb-s-name'), slackId: g('cb-s-slack').trim(),
+    name: g('cb-s-name'),
+    slackId: (_pendingSlack && _pendingSlack.slackId) || g('cb-s-slack').replace(/^@/, '').trim(),
+    channelId: (_pendingSlack && _pendingSlack.channelId) || null,
     company: g('cb-s-company'), phone: g('cb-s-phone')
   };
   if (!contact.name) return;
   await window.contacts.add(contact);
+  _pendingSlack = null;
   _load();
 }
 
@@ -252,10 +310,27 @@ export function init() {
     if (btn.dataset.action === 'edit') _editContact(btn.dataset.id);
     if (btn.dataset.action === 'use-address') _useAddress(btn.dataset.id);
     if (btn.dataset.action === 'slack-msg') bus.emit('slack:quick-compose', _contacts.find(x => x.id === btn.dataset.id));
+
+    // Live search result item
+    const resultItem = e.target.closest('.cb-slack-result-item');
+    if (resultItem) { _pickSlackPerson(resultItem.dataset.id, resultItem.dataset.name); return; }
+
+    // Clear confirmed-person banner
+    if (e.target.id === 'cb-slack-clear') { _clearSlackPick(); return; }
   });
 
   
   bus.on('ui:contacts-toggle', _toggle);
+
+  // Delegated input handler for the Slack live-search name field
+  _el.addEventListener('input', (e) => {
+    if (e.target.id === 'cb-s-name') {
+      // If user edits name after confirming, reset the pending pick
+      if (_pendingSlack) _clearSlackPick();
+      clearTimeout(_slackSearchTimer);
+      _slackSearchTimer = setTimeout(() => _searchSlackContacts(e.target.value.trim()), 400);
+    }
+  });
 }
 
 // Export for @ mention autocomplete
