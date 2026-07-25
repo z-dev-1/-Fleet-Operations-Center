@@ -393,6 +393,15 @@ function _processClaudeQueue() {
     _processClaudeQueue();
   }, CLAUDE_TIMEOUT_MS);
   try {
+    // BUG FIX (2026-07-25): a timed-out job kills _claudeProc and sets it to
+    // null, then calls _processClaudeQueue() again to move to the next queued
+    // job -- but this function never re-spawned the process, it just assumed
+    // _claudeProc was still alive and wrote straight to its stdin. That threw
+    // "Cannot read properties of null (reading 'stdin')" for every job still
+    // in the queue at that moment, instantly cascading the whole backlog to
+    // failure instead of just the one job that actually timed out. Re-ensure
+    // (spawn if needed) right before writing so each job gets a live process.
+    _ensureClaudeProcess();
     const msg = { type: 'user', message: { role: 'user', content: job.prompt } };
     _claudeProc.stdin.write(JSON.stringify(msg) + '\n');
   } catch (e) {

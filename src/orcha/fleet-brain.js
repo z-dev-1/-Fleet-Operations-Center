@@ -185,10 +185,38 @@ function _saveSession(sid) {
 }
 
 // ─── CONNECTION ─────────────────────────────────────────────────────────────
+function _isRemoteModeConfigured() {
+  try {
+    if (fs.existsSync(P.orchaConfig)) {
+      const cfg = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
+      return cfg.mode === 'remote';
+    }
+  } catch (_) {}
+  return false;
+}
+
 function connect() {
   // Don't attempt WS if we already gave up — local mode handles calls until retry window
   if (_wsGaveUp) return;
   if (_ws && (_ws.readyState === WebSocket.OPEN || _ws.readyState === WebSocket.CONNECTING)) return;
+
+  // orcha_config.json explicitly says "local" (no separate Orcha server is ever
+  // expected to run) -- attempting ws://localhost:4799 here is guaranteed to fail
+  // and, on this machine, the TCP connect attempt can hang for a long time before
+  // erroring, so every chat message would time out on a doomed WS call and fall
+  // through to the bare, context-less Claude Code fallback for MINUTES after every
+  // app launch. Skip WS entirely and go straight to local (context-injected) mode.
+  if (!_isRemoteModeConfigured()) {
+    if (!_wsGaveUp) {
+      _wsGaveUp = true;
+      logger.info('[fleet-brain] Orcha mode is "local" (no remote WS server configured) -- using local AI mode, skipping WS entirely');
+      if (_localAskFn && _queue.length) {
+        const queued = _queue.splice(0);
+        queued.forEach(req => _localAsk(req.prompt).then(req.resolve).catch(req.reject));
+      }
+    }
+    return;
+  }
 
   const url = _getWsUrl();
   logger.info('Connecting to Orcha at ' + url + '...');

@@ -852,6 +852,31 @@ function _html() {
           <div id="asana-status" class="settings__status" style="display:none"></div>
         </div>
 
+        <!-- Fleet Ops Companion (iPhone PWA) -->
+        <div class="sd-section" id="sect-cloud-companion">
+          <div class="sd-section-title">
+            <span style="font-size:11px">📱</span> Fleet Ops Companion
+          </div>
+          <div class="sd-hint" style="margin-bottom:10px">Chat with your fleet assistant from your iPhone. Requires the companion Worker deployed from companion/README.md at the repo root.</div>
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">Enable</span>
+            <input type="checkbox" id="cc-enabled"/>
+          </div>
+          <div class="sd-field">
+            <label class="sd-label">Worker URL</label>
+            <input class="sd-input" id="cc-worker-url" placeholder="https://fleet-companion.YOUR-SUBDOMAIN.workers.dev" />
+          </div>
+          <div class="sd-field">
+            <label class="sd-label">Alert Secret</label>
+            <input class="sd-input" id="cc-alert-secret" type="password" placeholder="the ALERT_SECRET you set via wrangler secret put" />
+          </div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary" id="cc-save">Save</button>
+            <button class="sd-btn secondary" id="cc-test">Test Connection</button>
+          </div>
+          <div id="cc-status" class="sd-status" style="margin-top:8px;display:none"></div>
+        </div>
+
       </div>
       <!-- end sd-pane-integrations -->
 
@@ -1867,6 +1892,51 @@ function _wireAsana() {
   });
 }
 
+// ── Section: Fleet Ops Companion (iPhone PWA) ────────────────────────────────
+function _wireCloudCompanion() {
+  const enabledEl = document.getElementById("cc-enabled");
+  const urlEl     = document.getElementById("cc-worker-url");
+  const secretEl  = document.getElementById("cc-alert-secret");
+  const statusEl  = document.getElementById("cc-status");
+  if (!enabledEl || !window.cloudCompanion) return;
+
+  function showStatus(msg, kind) {
+    statusEl.textContent = msg;
+    statusEl.className = "sd-status" + (kind === "ok" ? " ok" : kind === "err" ? " err" : "");
+    statusEl.style.display = "block";
+  }
+
+  window.cloudCompanion.getConfig().then((cfg) => {
+    enabledEl.checked = !!cfg.enabled;
+    urlEl.value = cfg.workerUrl || "";
+    // Alert Secret is intentionally never echoed back into the password
+    // field (same pattern as Asana's PAT field above) -- only overwritten
+    // on Save if the user actually typed a new value.
+  }).catch(() => {});
+
+  document.getElementById("cc-save").addEventListener("click", async () => {
+    const partial = { enabled: !!enabledEl.checked, workerUrl: urlEl.value.trim() };
+    if (secretEl.value.trim()) partial.alertSecret = secretEl.value.trim();
+    try {
+      await window.cloudCompanion.setConfig(partial);
+      secretEl.value = "";
+      showStatus("✓ Saved", "ok");
+    } catch (e) {
+      showStatus("Save failed: " + e.message, "err");
+    }
+  });
+
+  document.getElementById("cc-test").addEventListener("click", async () => {
+    showStatus("Testing...", null);
+    try {
+      const res = await window.cloudCompanion.testConnection();
+      showStatus(res.ok ? "✅ Connected" : "❌ " + res.error, res.ok ? "ok" : "err");
+    } catch (e) {
+      showStatus("❌ " + e.message, "err");
+    }
+  });
+}
+
 // ── Section: Notifications ───────────────────────────────────────────────────
 function _wireNotifications() {
   // BUG-AWARE (2026-07-22): settings:save fully REPLACES whatever value
@@ -2805,6 +2875,7 @@ export function init() {
   _wireSchedulerConfig();
   _wireSP();
   _wireAsana();
+  _wireCloudCompanion();
   _wireNotifications();
   _wireAccounts();
   _wireSectionAccordion('sd-pane-integrations');

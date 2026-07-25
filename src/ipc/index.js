@@ -29,6 +29,7 @@ const { registerVendorHistoryIPC } = require('./vendor-history');
 const { registerSetupIPC }       = require('./setup');
 const { registerWorkflowIntelIPC } = require('./workflow-intel');
 const { registerLongDwellIPC }     = require('./long-dwell');
+const { registerCloudCompanionIPC } = require('./cloud-companion');
 const logger = require('../utils/logger')('ipc');
 
 function registerAllIPC(ctx) {
@@ -48,6 +49,7 @@ function registerAllIPC(ctx) {
   registerVendorHistoryIPC();
   registerWorkflowIntelIPC(ctx);
   registerLongDwellIPC();
+  registerCloudCompanionIPC(ctx);
   const { registerPartnerWRHandlers } = require("./partner-wr");
   registerPartnerWRHandlers(ctx);
   const { registerContactsHandlers } = require('./contacts');

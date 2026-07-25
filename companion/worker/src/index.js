@@ -16,6 +16,9 @@
  *   ALERT_SECRET       - shared secret the desktop app sends as a Bearer
  *                        token when posting alerts, so randoms can't spam
  *                        your phone if they guess the worker URL
+ *   PHONE_TOKEN        - shared secret the PWA sends as a Bearer token on
+ *                        chat endpoints, so randoms can't chat with your
+ *                        fleet assistant if they guess the worker URL
  */
 import { buildPushPayload } from '@block65/webcrypto-web-push';
 
@@ -135,6 +138,83 @@ export default {
       const results = await sendPushToAll(env, subs, alert);
 
       return json({ ok: true, delivered: subs.length, results: results.map(r => r.status) });
+    }
+
+    // ── Phone: send a chat message to the fleet assistant ──────────────────
+    if (pathname === '/api/chat' && request.method === 'POST') {
+      const auth = request.headers.get('Authorization') || '';
+      if (auth !== `Bearer ${env.PHONE_TOKEN}`) {
+        return json({ error: 'unauthorized' }, 401);
+      }
+      const { text } = await request.json();
+      if (!text || !String(text).trim()) return json({ error: 'empty message' }, 400);
+
+      const id = crypto.randomUUID();
+      const msg = { id, role: 'user', text: String(text).slice(0, 2000), ts: Date.now() };
+
+      const rawHistory = await env.COMPANION_KV.get('chat:history');
+      const history = rawHistory ? JSON.parse(rawHistory) : [];
+      history.push(msg);
+      await env.COMPANION_KV.put('chat:history', JSON.stringify(history.slice(-100)));
+
+      return json({ ok: true, id });
+    }
+
+    // ── Phone: fetch the running conversation ───────────────────────────────
+    if (pathname === '/api/chat-history' && request.method === 'GET') {
+      const auth = request.headers.get('Authorization') || '';
+      if (auth !== `Bearer ${env.PHONE_TOKEN}`) {
+        return json({ error: 'unauthorized' }, 401);
+      }
+      const raw = await env.COMPANION_KV.get('chat:history');
+      return json({ messages: raw ? JSON.parse(raw) : [] });
+    }
+
+    // ── Desktop: poll for phone messages awaiting an AI reply ───────────────
+    // Derived directly from chat:history instead of a separate destructible
+    // "pending" queue. KV is not strongly consistent across regions/time --
+    // a queue that gets unconditionally overwritten-with-[] on every read can
+    // silently lose a message if a poll lands on a stale read right after a
+    // phone message was written. History never gets destructively cleared,
+    // so nothing can be lost this way: any user message after the last
+    // assistant reply is, by definition, still awaiting an answer.
+    if (pathname === '/api/chat-poll' && request.method === 'GET') {
+      const auth = request.headers.get('Authorization') || '';
+      if (auth !== `Bearer ${env.ALERT_SECRET}`) {
+        return json({ error: 'unauthorized' }, 401);
+      }
+      const raw = await env.COMPANION_KV.get('chat:history');
+      const history = raw ? JSON.parse(raw) : [];
+      let lastAssistantIdx = -1;
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i].role === 'assistant') { lastAssistantIdx = i; break; }
+      }
+      const pending = history.slice(lastAssistantIdx + 1).filter(m => m.role === 'user');
+      return json({ messages: pending });
+    }
+
+    // ── Desktop: post the AI's reply to a phone message ─────────────────────
+    if (pathname === '/api/chat-reply' && request.method === 'POST') {
+      const auth = request.headers.get('Authorization') || '';
+      if (auth !== `Bearer ${env.ALERT_SECRET}`) {
+        return json({ error: 'unauthorized' }, 401);
+      }
+      const { id, text } = await request.json();
+      const reply = { id: id || crypto.randomUUID(), role: 'assistant', text: String(text || '').slice(0, 4000), ts: Date.now() };
+
+      const rawHistory = await env.COMPANION_KV.get('chat:history');
+      const history = rawHistory ? JSON.parse(rawHistory) : [];
+      history.push(reply);
+      await env.COMPANION_KV.put('chat:history', JSON.stringify(history.slice(-100)));
+
+      const subs = await listSubscriptions(env.COMPANION_KV);
+      await sendPushToAll(env, subs, {
+        title: 'Fleet Assistant',
+        body: reply.text.slice(0, 150),
+        url: './index.html',
+      });
+
+      return json({ ok: true });
     }
 
     return json({ error: 'not found' }, 404);

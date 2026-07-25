@@ -405,3 +405,10 @@ contextBridge.exposeInMainWorld('bubble', {
   setOpacity:       (v)      => ipcRenderer.send('bubble:set-opacity', v),
   onOpacityChanged: (cb)     => ipcRenderer.on('bubble:opacity-changed', (_e, v) => cb(v)),
 });
+
+// ── Fleet Ops Companion (iPhone PWA bridge) ─────────────────────────────────
+contextBridge.exposeInMainWorld('cloudCompanion', {
+  getConfig:       ()      => ipcRenderer.invoke('cloud-companion:get-config'),
+  setConfig:       (cfg)   => ipcRenderer.invoke('cloud-companion:set-config', cfg),
+  testConnection:  ()      => ipcRenderer.invoke('cloud-companion:test-connection'),
+});

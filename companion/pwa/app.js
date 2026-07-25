@@ -3,6 +3,8 @@
 // !!! SET THIS after you deploy the worker (see companion/README.md) !!!
 // Looks like: https://fleet-companion.<your-subdomain>.workers.dev
 const WORKER_BASE = 'https://fleet-companion.z-fleet.workers.dev';
+// !!! SET THIS to the PHONE_TOKEN you set via `wrangler secret put PHONE_TOKEN` !!!
+const PHONE_TOKEN = 'c78ae0aea34fd7479ed55dce330e9673';
 
 const statusEl = document.getElementById('status');
 const btnEnable = document.getElementById('btn-enable');
@@ -93,6 +95,87 @@ async function loadAlerts() {
 
 btnEnable.addEventListener('click', enableNotifications);
 
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+const tabBtnChat = document.getElementById('tab-btn-chat');
+const tabBtnAlerts = document.getElementById('tab-btn-alerts');
+const tabChat = document.getElementById('tab-chat');
+const tabAlerts = document.getElementById('tab-alerts');
+
+function showTab(name) {
+  const isChat = name === 'chat';
+  tabBtnChat.classList.toggle('active', isChat);
+  tabBtnAlerts.classList.toggle('active', !isChat);
+  tabChat.classList.toggle('active', isChat);
+  tabAlerts.classList.toggle('active', !isChat);
+}
+tabBtnChat.addEventListener('click', () => showTab('chat'));
+tabBtnAlerts.addEventListener('click', () => showTab('alerts'));
+
+// ── Chat ──────────────────────────────────────────────────────────────────────
+const chatScroll = document.getElementById('chat-scroll');
+const chatInput = document.getElementById('chat-input');
+const chatSend = document.getElementById('chat-send');
+const chatThinking = document.getElementById('chat-thinking');
+let _lastRenderedCount = 0;
+
+function renderChat(messages) {
+  if (!messages || messages.length === 0) {
+    chatScroll.innerHTML = '<div class="empty">Ask your fleet assistant anything.</div>';
+    return;
+  }
+  chatScroll.innerHTML = messages.map((m) => `
+    <div class="msg ${m.role === 'user' ? 'user' : 'assistant'}">
+      ${escapeHtml(m.text)}
+      <div class="msg-time">${new Date(m.ts).toLocaleTimeString()}</div>
+    </div>
+  `).join('');
+  chatScroll.scrollTop = chatScroll.scrollHeight;
+}
+
+async function loadChatHistory(scrollToBottom) {
+  try {
+    const res = await fetch(`${WORKER_BASE}/api/chat-history`, {
+      headers: { Authorization: `Bearer ${PHONE_TOKEN}` },
+    });
+    const data = await res.json();
+    const messages = data.messages || [];
+    // Once a new assistant message shows up, the reply has landed -- hide
+    // the "thinking" indicator even if the phone missed the push (app was
+    // in the foreground and push notifications don't fire while visible).
+    if (messages.length > _lastRenderedCount) chatThinking.style.display = 'none';
+    _lastRenderedCount = messages.length;
+    renderChat(messages);
+    if (scrollToBottom) chatScroll.scrollTop = chatScroll.scrollHeight;
+  } catch {
+    // Leave whatever is currently rendered; will retry on next interval tick.
+  }
+}
+
+async function sendChatMessage() {
+  const text = chatInput.value.trim();
+  if (!text) return;
+  chatInput.value = '';
+  chatThinking.style.display = 'block';
+  try {
+    await fetch(`${WORKER_BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${PHONE_TOKEN}` },
+      body: JSON.stringify({ text }),
+    });
+    await loadChatHistory(true);
+  } catch (err) {
+    chatThinking.style.display = 'none';
+    setStatus('Could not send message: ' + err.message);
+  }
+}
+
+chatSend.addEventListener('click', sendChatMessage);
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendChatMessage();
+});
+
 registerServiceWorker().catch(() => {});
 loadAlerts();
+loadChatHistory(true);
 setInterval(loadAlerts, 30000); // refresh every 30s while the app is open
+setInterval(loadChatHistory, 5000); // poll for AI replies every 5s while open

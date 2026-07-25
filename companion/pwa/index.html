@@ -45,6 +45,28 @@
   .alert-body { font-size: 13px; color: #8b949e; margin-top: 4px; }
   .alert-time { font-size: 11px; color: #6e7681; margin-top: 6px; }
   .empty { color: #6e7681; font-size: 13px; text-align: center; padding: 40px 0; }
+
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+  .tab-btn {
+    flex: 1; padding: 10px; border-radius: 8px; border: 1px solid rgba(88,166,255,.2);
+    background: #161b22; color: #8b949e; font-size: 13px; font-weight: 600;
+  }
+  .tab-btn.active { background: rgba(88,166,255,.2); color: #f0f6fc; border-color: rgba(88,166,255,.4); }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  .chat-scroll { height: calc(100vh - 260px); overflow-y: auto; margin-bottom: 10px; padding-bottom: 10px; }
+  .msg { max-width: 82%; padding: 10px 12px; border-radius: 12px; margin-bottom: 8px; font-size: 14px; line-height: 1.4; white-space: pre-wrap; }
+  .msg.user { background: linear-gradient(135deg, rgba(88,166,255,.3), rgba(210,168,255,.22)); color: #f0f6fc; margin-left: auto; border-bottom-right-radius: 3px; }
+  .msg.assistant { background: #161b22; color: #c9d1d9; border: 1px solid rgba(88,166,255,.15); margin-right: auto; border-bottom-left-radius: 3px; }
+  .msg-time { font-size: 10px; color: #6e7681; margin-top: 3px; }
+  .chat-input-row { display: flex; gap: 8px; position: sticky; bottom: 0; background: #0d1117; padding-top: 6px; }
+  .chat-input-row input {
+    flex: 1; padding: 12px; border-radius: 10px; border: 1px solid rgba(88,166,255,.25);
+    background: #161b22; color: #f0f6fc; font-size: 14px;
+  }
+  .chat-input-row button { width: auto; padding: 12px 18px; margin-bottom: 0; }
+  .thinking { color: #6e7681; font-size: 12px; font-style: italic; padding: 4px 0 10px; }
 </style>
 </head>
 <body>
@@ -54,7 +76,23 @@
   <button id="btn-enable">Enable Notifications</button>
   <div id="status"></div>
 
-  <div id="alerts-list"></div>
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-btn-chat">Chat</button>
+    <button class="tab-btn" id="tab-btn-alerts">Alerts</button>
+  </div>
+
+  <div class="tab-pane active" id="tab-chat">
+    <div class="chat-scroll" id="chat-scroll"></div>
+    <div class="thinking" id="chat-thinking" style="display:none">Fleet assistant is thinking...</div>
+    <div class="chat-input-row">
+      <input type="text" id="chat-input" placeholder="Ask about the fleet..." />
+      <button id="chat-send">Send</button>
+    </div>
+  </div>
+
+  <div class="tab-pane" id="tab-alerts">
+    <div id="alerts-list"></div>
+  </div>
 
   <script src="app.js"></script>
 </body>
