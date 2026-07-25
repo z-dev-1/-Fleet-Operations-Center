@@ -146,7 +146,43 @@ function _buildEmailReport(userMsg, rows, notesStore) {
 // sends externally (Slack/email) -- those require an explicit confirm step
 // via confirmSend() below, regardless of caller (FAB button click or phone
 // text reply).
-async function processOrchaAction(userMsg) {
+// Simple deterministic fleet-count/status questions are answered directly
+// from already-loaded rows/unavail data below, with NO AI call at all --
+// requirement being: normal simple unit requests should bypass the AI
+// cascade entirely rather than pay a 90-240s round trip for something a
+// straight array filter/length can answer instantly and exactly.
+function _tryFastPathAnswer(userMsg, rows, unavail) {
+  const msg = (userMsg || '').trim().toLowerCase();
+  // Anything with an action verb or a specific unit/site reference still
+  // needs the full AI cascade -- only bare counting/status questions here.
+  if (/\b(send|email|slack|remind|schedule|note|timeline|pin|unpin|move|create|draft)\b/.test(msg)) return null;
+  if (/[A-Za-z]?\d{5,8}/.test(msg)) return null; // looks like a specific unit id
+
+  const total = rows.length;
+  if (!total) return null; // no fleet data loaded -- let the AI explain that itself
+
+  if (/how many.*(unavailable|down|out of service)/.test(msg) || /^(unavailable|down)\s*count\??$/.test(msg)) {
+    return unavail.length + ' of ' + total + ' units are currently unavailable.';
+  }
+  if (/how many.*\bavailable\b/.test(msg) && !/unavailable/.test(msg)) {
+    return (total - unavail.length) + ' of ' + total + ' units are currently available.';
+  }
+  if (/how many (total )?(units|vehicles|trucks)\b/.test(msg)) {
+    return 'There are ' + total + ' total units in the fleet.';
+  }
+  if (/uptake rate/.test(msg)) {
+    const rate = Math.round(((total - unavail.length) / total) * 100);
+    return 'Current uptake rate is ' + rate + '% (' + (total - unavail.length) + ' of ' + total + ' units available).';
+  }
+  return null;
+}
+
+// opts.signal    — optional AbortSignal threaded into relay.ask(); lets a
+//                  caller (e.g. Slack Just Me's per-message job) cancel a
+//                  hung AI call and clean up without waiting for the 240s
+//                  outer safety timeout.
+// opts.requestId — optional caller-supplied id for correlated logging.
+async function processOrchaAction(userMsg, opts = {}) {
   requireStringMax(userMsg, 'userMsg', MAX_PROMPT_LEN);
     const store = require('../store');
     // Conversation memory (7 days)
@@ -167,6 +203,16 @@ async function processOrchaAction(userMsg) {
     const rows = fd.rows || [];
     const notesStore = store.load('notesStore', {});
     const unavail = rows.filter(r => (r.lifecycleState || '').toLowerCase().includes('unavail'));
+
+    const _fastAnswer = _tryFastPathAnswer(userMsg, rows, unavail);
+    if (_fastAnswer) {
+      logger.info('[ai:orcha-action] fast-path answered directly from fleet data \u2014 AI cascade bypassed');
+      chatHistory.push({role:'user', text:userMsg, ts:Date.now()});
+      chatHistory.push({role:'ai', text:_fastAnswer, ts:Date.now()});
+      store.save('chatHistory', chatHistory);
+      return { ok: true, text: _fastAnswer, action: 'chat', fastPath: true };
+    }
+
     const unitMatch = userMsg.match(/([A-Za-z]?\\d{5,8})/);
     let unitDetail = '';
     if (unitMatch) {
@@ -239,7 +285,7 @@ async function processOrchaAction(userMsg) {
     const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human — warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- If a DETAILED FLEET REPORT is provided below, that is your full and only source of truth for that site/operator/unit -- it has every unit status, vendor, down time, ETC/PM, issue details and full repair timeline/notes, plus the uptake rate (% available), AND -- separately -- any Uptake (fleet.uptake.com) predictive-maintenance risk score/label and full insight details (title, subsystem, guidance, active/resolved, first/last seen) under an UPTAKE INSIGHTS section for units that have been scraped by that third-party telematics tool. Uptake rate and Uptake insights are two different things -- do not conflate them, report both when present. Use ALL of it when relevant to what was asked: whether the user is asking a question (summarize thoroughly -- status, vendor, timeline, issue, uptake rate, uptake risk/insights) or sending it to someone (the system attaches the whole report; your job is just the intro line). Same data either way -- only the framing changes.\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nCRITICAL — SEND vs ASK:\n- "send update/report/data/notes to [person] for [site]" = YOU are DELIVERING fleet info TO them.\n  Write the message as the person SENDING the report, not asking for one.\n  Your message body is just a 1-sentence intro — the system attaches the real data automatically.\n  WRONG: "Could you provide an update on AVP40?" (that is asking them)\n  RIGHT:  "Here is the latest AVP40 fleet status and notes, as requested." (that is delivering)\n- Only generate a question/follow-up when the user explicitly says "ask", "follow up", or "check on".\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle_or_email,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable}), PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Send to whoever the user specifies. If user gives an email address or a name not in KNOWN SLACK CONTACTS, use it directly as recipient — the system will resolve it. NEVER refuse or ask for confirmation because someone is not in the contact list. Just attempt the send.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+(siteReport?'DETAILED FLEET REPORT:\\n'+siteReport:fleetSummary+'\\n'+unitDetail)+contactList+emailContactList+'\\nUser: '+userMsg;
     try {
       logger.info('[ai:orcha-action] Calling relay.ask (' + prompt.length + ' chars)...');
-      const aiText = await relay.ask(prompt);
+      const aiText = await relay.ask(prompt, { signal: opts.signal, requestId: opts.requestId });
       logger.info('[ai:orcha-action] Got response: ' + (aiText ? aiText.length + ' chars' : 'EMPTY'));
       if (!aiText) return {ok:false,text:'AI empty',action:'chat'};
       let parsed; const jm = aiText.match(/\{[\s\S]*\}/);

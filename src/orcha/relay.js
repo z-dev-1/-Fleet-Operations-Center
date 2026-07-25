@@ -59,6 +59,7 @@ let _aiPreference = 'auto'; // 'auto' | 'orcha' | 'claude'
 const MAX_CONCURRENT = 5;
 let _activeCount = 0;
 const _waitQueue = [];
+let _reqSeq = 0;
 
 function _acquireSlot() {
   return new Promise(resolve => {
@@ -73,108 +74,127 @@ function _releaseSlot() {
 
 // ── ASK ───────────────────────────────────────────────────────────────────────
 async function ask(prompt, opts = {}) {
+  const signal = opts.signal;
+  const requestId = opts.requestId || ('rl' + (++_reqSeq));
+  if (signal && signal.aborted) throw new Error('Aborted before start');
+
   await _acquireSlot();
   _requestCount++;
+  logger.info('[' + requestId + '] relay.ask started');
 
-    // Preference: 'claude' -- skip Orcha entirely, go straight to Claude Code
-  if (_aiPreference === 'claude') {
-    try {
-      const ccText = await _tryClaudeCode(prompt);
-      if (ccText) {
-        _lastHealthy = Date.now(); _status = 'connected-claude'; _releaseSlot(); _saveStatus();
-        logger.info('OK via claude-code (preference=claude, ' + ccText.length + ' chars)');
-        return ccText;
-      }
-    } catch (ccErr) { logger.warn('claude-code fast-path failed: ' + ccErr.message); }
-    _lastError = 'Claude Code failed'; _status = 'error'; _errorCount++;
-    _saveStatus(); _releaseSlot();
-    throw new Error('Claude Code unavailable (preference=claude)');
-  }
-
-  // PRIMARY: Route through fleet-brain (persistent session with full fleet context).
-  // fleet-brain.getStatus().ready is true in BOTH WS mode (Orcha running) AND
-  // local mode (claude-code fallback wired in). Either way fleet-brain manages
-  // the system prompt + rolling conversation history so every AI call is context-aware.
   try {
-    const _fbStatus = fleetBrain.getStatus ? fleetBrain.getStatus() : {};
-    if (!_fbStatus || !_fbStatus.ready) throw new Error('fleet-brain not ready');
-    const text = await fleetBrain.ask(prompt);
-    if (text) {
-      const via = _fbStatus.localMode ? 'fleet-brain/local' : 'fleet-brain/ws';
-      _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
-      _releaseSlot();
-      logger.info('OK via ' + via + ' (' + text.length + ' chars)');
+    // Preference: 'claude' -- skip Orcha entirely, go straight to Claude Code
+    if (_aiPreference === 'claude') {
+      try {
+        const ccText = await _tryClaudeCode(prompt, { signal, requestId });
+        if (ccText) {
+          _lastHealthy = Date.now(); _status = 'connected-claude'; _saveStatus();
+          logger.info('[' + requestId + '] OK via claude-code (preference=claude, ' + ccText.length + ' chars)');
+          return ccText;
+        }
+      } catch (ccErr) { logger.warn('[' + requestId + '] claude-code fast-path failed: ' + ccErr.message); }
+      _lastError = 'Claude Code failed'; _status = 'error'; _errorCount++;
       _saveStatus();
-      return text;
+      throw new Error('Claude Code unavailable (preference=claude)');
     }
-  } catch (brainErr) {
-    logger.warn('Fleet-brain failed: ' + brainErr.message);
-  }
 
-  // FALLBACK: Direct WS (throwaway session, no context).
-  // Skip entirely if fleet-brain already confirmed the WS endpoint is unreachable —
-  // _tryWS hits the same URL and would just burn the full timeout for nothing.
-  const _fbDown = !(fleetBrain.getStatus ? fleetBrain.getStatus().connected : false);
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    // PRIMARY: Route through fleet-brain (persistent session with full fleet context).
+    // fleet-brain.getStatus().ready is true in BOTH WS mode (Orcha running) AND
+    // local mode (claude-code fallback wired in). Either way fleet-brain manages
+    // the system prompt + rolling conversation history so every AI call is context-aware.
     try {
-      const text = _fbDown ? null : await _tryWS(prompt).catch(() => null);
+      const _fbStatus = fleetBrain.getStatus ? fleetBrain.getStatus() : {};
+      if (!_fbStatus || !_fbStatus.ready) throw new Error('fleet-brain not ready');
+      logger.info('[' + requestId + '] Fleet Brain attempt started');
+      const text = await fleetBrain.ask(prompt, { signal, requestId });
       if (text) {
+        const via = _fbStatus.localMode ? 'fleet-brain/local' : 'fleet-brain/ws';
         _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
-        _releaseSlot();
-        logger.info('OK via WS fallback (' + text.length + ' chars, attempt ' + attempt + ')');
+        logger.info('[' + requestId + '] OK via ' + via + ' (' + text.length + ' chars)');
         _saveStatus();
         return text;
       }
-      const cliText = await _tryHeadless(prompt).catch(() => null);
-      if (cliText) {
-        _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
-        _releaseSlot();
-        logger.info('OK via CLI fallback (' + cliText.length + ' chars)');
-        _saveStatus();
-        return cliText;
-      }
-      // Skip Claude Code fallback when preference is 'orcha'
-      if (_aiPreference !== 'orcha') {
-        // CLAUDE CODE FALLBACK: claude -p via Cecelia shared account
-        try {
-          logger.info('Trying claude-code fallback...');
-          const ccText = await _tryClaudeCode(prompt);
-          if (ccText) {
-            _lastHealthy = Date.now(); _status = 'connected-claude';
-            _saveStatus();
-            logger.info('OK via claude-code fallback (' + ccText.length + ' chars)');
-            return ccText;
-          }
-        } catch (ccErr) { logger.warn('claude-code fallback failed: ' + ccErr.message); }
-      }
-
-      // BEDROCK FALLBACK: direct Claude call via Bedrock SDK
-      try {
-        const { askBedrock } = require('../scrapers/bedrock');
-        logger.info('Trying Bedrock fallback...');
-        const brText = await askBedrock(prompt);
-        if (brText) {
-          _lastHealthy = Date.now(); _status = 'connected-bedrock';
-          _saveStatus();
-          return brText;
-        }
-      } catch (brErr) { logger.warn('Bedrock failed: ' + brErr.message); }
-      throw new Error('All transports failed');
-    } catch (e) {
-      const msg = e.message || String(e);
-      logger.warn('Fallback ERROR attempt ' + attempt + '/' + MAX_RETRIES + ': ' + msg);
-      if (attempt < MAX_RETRIES) { await _sleep(2000); continue; }
-      _lastError = msg; _status = 'error'; _errorCount++;
-      _saveStatus(); _releaseSlot();
-      throw new Error('Orcha AI failed: ' + msg);
+    } catch (brainErr) {
+      if (signal && signal.aborted) throw brainErr;
+      logger.warn('[' + requestId + '] Fleet-brain failed: ' + brainErr.message);
     }
+
+    // FALLBACK: Direct WS (throwaway session, no context).
+    // Skip entirely if fleet-brain already confirmed the WS endpoint is unreachable --
+    // _tryWS hits the same URL and would just burn the full timeout for nothing.
+    const _fbDown = !(fleetBrain.getStatus ? fleetBrain.getStatus().connected : false);
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      if (signal && signal.aborted) throw new Error('Aborted');
+      try {
+        logger.info('[' + requestId + '] WebSocket attempt ' + attempt);
+        const text = _fbDown ? null : await _tryWS(prompt, { signal }).catch(() => null);
+        if (text) {
+          _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
+          logger.info('[' + requestId + '] OK via WS fallback (' + text.length + ' chars, attempt ' + attempt + ')');
+          _saveStatus();
+          return text;
+        }
+        logger.info('[' + requestId + '] CLI attempt ' + attempt);
+        const cliText = await _tryHeadless(prompt, { signal }).catch(() => null);
+        if (cliText) {
+          _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
+          logger.info('[' + requestId + '] OK via CLI fallback (' + cliText.length + ' chars)');
+          _saveStatus();
+          return cliText;
+        }
+        // Skip Claude Code fallback when preference is 'orcha'
+        if (_aiPreference !== 'orcha') {
+          // CLAUDE CODE FALLBACK: claude -p via Cecelia shared account
+          try {
+            logger.info('[' + requestId + '] Claude Code attempt ' + attempt);
+            const ccText = await _tryClaudeCode(prompt, { signal, requestId });
+            if (ccText) {
+              _lastHealthy = Date.now(); _status = 'connected-claude';
+              _saveStatus();
+              logger.info('[' + requestId + '] OK via claude-code fallback (' + ccText.length + ' chars)');
+              return ccText;
+            }
+          } catch (ccErr) { logger.warn('[' + requestId + '] claude-code fallback failed: ' + ccErr.message); }
+        }
+
+        // BEDROCK FALLBACK: direct Claude call via Bedrock SDK
+        try {
+          const { askBedrock } = require('../scrapers/bedrock');
+          logger.info('[' + requestId + '] Bedrock attempt ' + attempt);
+          const brText = await askBedrock(prompt);
+          if (brText) {
+            _lastHealthy = Date.now(); _status = 'connected-bedrock';
+            _saveStatus();
+            logger.info('[' + requestId + '] OK via Bedrock fallback (' + brText.length + ' chars)');
+            return brText;
+          }
+        } catch (brErr) { logger.warn('[' + requestId + '] Bedrock failed: ' + brErr.message); }
+        throw new Error('All transports failed');
+      } catch (e) {
+        const msg = e.message || String(e);
+        logger.warn('[' + requestId + '] Fallback ERROR attempt ' + attempt + '/' + MAX_RETRIES + ': ' + msg);
+        if (signal && signal.aborted) throw new Error('Aborted');
+        if (attempt < MAX_RETRIES) { await _sleep(2000); continue; }
+        _lastError = msg; _status = 'error'; _errorCount++;
+        _saveStatus();
+        throw new Error('Orcha AI failed: ' + msg);
+      }
+    }
+    throw new Error('Max retries exhausted');
+  } finally {
+    // Single, unconditional cleanup point -- every return/throw path above
+    // (success at any tier, every-tier-failed, aborted) funnels through here
+    // exactly once, so the concurrency slot can never be double-released or
+    // leaked no matter how many exit paths get added later.
+    _releaseSlot();
+    logger.info('[' + requestId + '] relay.ask cleanup completed -- slot released');
   }
-  _releaseSlot();
-  throw new Error('Max retries exhausted');
 }
 // ── WS TRANSPORT ─────────────────────────────────────────────────────────────
-function _tryWS(prompt) {
+function _tryWS(prompt, opts = {}) {
+  const signal = opts.signal;
   return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) return reject(new Error('Aborted before start'));
     const WebSocket = require('ws');
     const crypto    = require('crypto');
     const wsUrl     = getOrchaUrl();
@@ -184,9 +204,17 @@ function _tryWS(prompt) {
 
     const done = (err, txt) => {
       if (resolved) return; resolved = true;
-      clearTimeout(timer); try { ws.close(); } catch (_) {}
+      clearTimeout(timer);
+      if (signal && onAbort) { try { signal.removeEventListener('abort', onAbort); } catch (_) {} }
+      try { ws.terminate ? ws.terminate() : ws.close(); } catch (_) {}
       err ? reject(err) : resolve(txt);
     };
+
+    let onAbort = null;
+    if (signal) {
+      onAbort = () => done(new Error('Aborted by caller'));
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
 
     timer = setTimeout(() => done(new Error('WS timeout')), Math.min(TIMEOUT_MS, 60000));
     ws.on('error', err => done(err));
@@ -222,8 +250,10 @@ function _tryWS(prompt) {
 }
 
 // ── HEADLESS CLI ─────────────────────────────────────────────────────────────
-function _tryHeadless(prompt) {
+function _tryHeadless(prompt, opts = {}) {
+  const signal = opts.signal;
   return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) return reject(new Error('Aborted before start'));
     const orchaPath = process.platform === 'win32'
       ? path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'orcha.cmd')
       : path.join(os.homedir(), '.toolbox', 'bin', 'orcha');
@@ -237,10 +267,19 @@ function _tryHeadless(prompt) {
     const args  = ['--headless', '--agent', 'orcha_default', '--prompt-file', tmpFile];
     const timer = setTimeout(() => reject(new Error('Headless timeout')), TIMEOUT_MS);
 
-    execFile(orchaPath, args, { maxBuffer: 1024 * 1024, timeout: TIMEOUT_MS, shell: process.platform === 'win32' }, (err, stdout, stderr) => {
+    // Node's execFile accepts a native AbortSignal via options.signal (v15.7+):
+    // aborting kills the child process for us, which is exactly what a
+    // caller-triggered cancellation needs here.
+    const execOpts = { maxBuffer: 1024 * 1024, timeout: TIMEOUT_MS, shell: process.platform === 'win32' };
+    if (signal) execOpts.signal = signal;
+
+    execFile(orchaPath, args, execOpts, (err, stdout, stderr) => {
       clearTimeout(timer);
       try { fs.unlinkSync(tmpFile); } catch (_) {}
-      if (err) return reject(new Error('Headless error: ' + (err.message || stderr || 'unknown')));
+      if (err) {
+        const msg = (signal && signal.aborted) ? 'Aborted by caller' : ('Headless error: ' + (err.message || stderr || 'unknown'));
+        return reject(new Error(msg));
+      }
       const text = (stdout || '').trim();
       if (!text) return reject(new Error('Headless returned empty'));
       resolve(text);
@@ -413,8 +452,34 @@ function _processClaudeQueue() {
   }
 }
 
-function _tryClaudeCode(prompt) {
+function _abortClaudeJob(job) {
+  if (job.done) return;
+  const qi = _claudeQueue.indexOf(job);
+  if (qi !== -1) {
+    // Still waiting its turn -- just drop it out of the queue, nothing to kill.
+    _claudeQueue.splice(qi, 1);
+    job.reject(new Error('Aborted by caller'));
+    return;
+  }
+  if (_claudeCurrentJob === job) {
+    // It's the job actively writing/reading the warm process right now --
+    // same kill-and-null pattern as the timeout handler below, for the same
+    // reason: a stale in-flight turn must never be able to answer a later job.
+    logger.warn('claude-code: active job aborted by caller -- killing process');
+    clearTimeout(job._timer);
+    if (_claudeProc) { try { _claudeProc.kill(); } catch (_e) {} }
+    _claudeProc = null;
+    _claudeCurrentJob = null;
+    _claudeBusy = false;
+    job.reject(new Error('Aborted by caller'));
+    _processClaudeQueue();
+  }
+}
+
+function _tryClaudeCode(prompt, opts = {}) {
+  const signal = opts.signal;
   return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) return reject(new Error('Aborted before start'));
     try {
       _ensureClaudeProcess();
     } catch (e) {
@@ -429,7 +494,14 @@ function _tryClaudeCode(prompt) {
     // guards against truly pathological input, not normal feature prompts.
     const CLAUDE_PROMPT_MAX_CHARS = 60000;
     const trimmed = prompt.length > CLAUDE_PROMPT_MAX_CHARS ? prompt.slice(0, CLAUDE_PROMPT_MAX_CHARS) + '...[trimmed]' : prompt;
-    _claudeQueue.push({ prompt: trimmed, resolve, reject });
+    const job = { prompt: trimmed, signal, onAbort: null, done: false };
+    job.resolve = (text) => { if (job.done) return; job.done = true; if (signal && job.onAbort) { try { signal.removeEventListener('abort', job.onAbort); } catch (_) {} } resolve(text); };
+    job.reject  = (err)  => { if (job.done) return; job.done = true; if (signal && job.onAbort) { try { signal.removeEventListener('abort', job.onAbort); } catch (_) {} } reject(err); };
+    if (signal) {
+      job.onAbort = () => _abortClaudeJob(job);
+      signal.addEventListener('abort', job.onAbort, { once: true });
+    }
+    _claudeQueue.push(job);
     _processClaudeQueue();
   });
 }

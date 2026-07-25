@@ -379,17 +379,112 @@ function _jmClearPending(channelId) {
 // was racing that internal retry and killing good-but-slow answers right as
 // attempt 1 was handing off to attempt 2. 240s gives margin above the observed
 // worst-case normal latency while still catching genuine multi-minute+ hangs.
-const JM_AI_TIMEOUT_MS = 240 * 1000;
-function _withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
-    ),
-  ]);
+let JM_AI_TIMEOUT_MS = 240 * 1000; // let (not const) -- overridable in tests via __test__.setAiTimeoutMs()
+
+// ─── AI JOB QUEUE (Just Me only) ─────────────────────────────────────────────
+// BUGFIX (2026-07-25 round 2): _jmHandleMessage() used to be awaited directly
+// inside pollChannelsOnce()'s per-channel loop, which runs under _pollLock --
+// so a slow/hung AI call for ONE Just Me message held the lock and blocked
+// polling for every other watched channel (partner channels included) for up
+// to the full 240s. It also meant the second consecutive question could
+// never even start until the first one's wait fully resolved.
+//
+// Fix: pollChannelsOnce() (via _pollJustMeChannel) now only READS messages,
+// advances the per-channel watermark, and hands each new message to this
+// independent job queue -- then returns immediately, releasing _pollLock.
+// The actual AI call + Slack reply happen here, entirely outside the lock.
+//
+// Concurrency is deliberately 1 (one active AI job at a time) until running
+// concurrent Orcha sessions is proven safe -- fleet-brain maintains a single
+// shared session, so parallel calls would fight over it. Every job is
+// guaranteed to resolve or reject, and the queue is always advanced in a
+// `finally` so one failed/timed-out job can never permanently wedge the
+// queue for the next Slack message.
+const _aiJobQueue = [];
+let _aiJobRunning = false;
+let _aiJobSeq = 0;
+
+function _jmEnqueueJob(ch, msg, doLog) {
+  const jobId = 'jm' + (++_aiJobSeq);
+  logger.info(`[SlackWatch][${jobId}] Slack message received (${ch.name} ts=${msg.ts}) -- queued`);
+  _aiJobQueue.push({ jobId, ch, msg, doLog });
+  _pumpAiJobQueue();
 }
 
-async function _jmHandleMessage(channelId, text) {
+function _pumpAiJobQueue() {
+  if (_aiJobRunning) return;
+  const job = _aiJobQueue.shift();
+  if (!job) return;
+  _aiJobRunning = true;
+  _runJustMeJob(job)
+    .catch(e => logger.warn(`[SlackWatch][${job.jobId}] unexpected error escaped job runner: ${e.message}`))
+    .finally(() => {
+      _aiJobRunning = false;
+      logger.info(`[SlackWatch][${job.jobId}] queue advanced`);
+      _pumpAiJobQueue();
+    });
+}
+
+async function _runJustMeJob(job) {
+  const { jobId, ch, msg, doLog } = job;
+  const startedAt = Date.now();
+
+  // JM_AI_TIMEOUT_MS remains ONLY a final safety boundary -- normal answers
+  // (fleet-brain fast path, or the fast-path bypass in ipc/ai.js for simple
+  // count/status questions) complete well inside it. If it does fire, we
+  // abort the in-flight request end-to-end (WS terminate / CLI kill / Claude
+  // Code process kill, depending which tier was active -- see relay.js +
+  // fleet-brain.js) rather than merely abandoning the promise, so the next
+  // Slack message is never left waiting on stale state.
+  const controller = new AbortController();
+  const hardTimer = setTimeout(() => {
+    logger.warn(`[SlackWatch][${jobId}] hit the ${JM_AI_TIMEOUT_MS}ms final safety boundary -- aborting`);
+    controller.abort();
+  }, JM_AI_TIMEOUT_MS);
+
+  let replyText;
+  try {
+    replyText = await _jmHandleMessage(ch.id, msg.text, controller.signal, jobId);
+    logger.info(`[SlackWatch][${jobId}] response completed (${Date.now() - startedAt}ms)`);
+  } catch (e) {
+    logger.warn(`[SlackWatch][${jobId}] processOrchaAction failed after ${Date.now() - startedAt}ms: ${e.message}`);
+    // Never surface raw internal errors (e.g. "processOrchaAction timed out
+    // after 240000ms") in Slack -- replace with a friendly, actionable message.
+    replyText = "I couldn't complete that request because Fleet Brain stopped responding. The AI connection has been reset, so you can try again now.";
+  } finally {
+    clearTimeout(hardTimer);
+  }
+
+  const { sendToChannel } = require('./slack_send');
+  const taggedReply = (msg.userId ? `<@${msg.userId}> ` : '') + replyText;
+  let replyTs = null;
+  try {
+    const sendResult = await sendToChannel(ch.id, taggedReply, msg.ts);
+    replyTs = sendResult.ts;
+  } catch (e) {
+    doLog(`[SlackWatch] ${ch.name} (justme): reply send FAILED: ${e.message}`);
+  }
+
+  _appendReplyLog({
+    id: ch.id + ':' + msg.ts,
+    channelId: ch.id,
+    channelName: ch.name,
+    ts: msg.ts,
+    replyTs,
+    question: msg.text,
+    reply: taggedReply,
+    wasMentioned: false,
+    wasThreadReply: false,
+    inScope: true,
+    category: null,
+    title: 'Just Me',
+    createdAt: new Date().toISOString(),
+    status: 'auto-answered',
+  });
+  logger.info(`[SlackWatch][${jobId}] cleanup completed`);
+}
+
+async function _jmHandleMessage(channelId, text, signal, jobId) {
   const { processOrchaAction, confirmSend } = require('../ipc/ai');
 
   const pending = _jmGetPending(channelId);
@@ -416,7 +511,8 @@ async function _jmHandleMessage(channelId, text) {
     _jmClearPending(channelId);
   }
 
-  const result = await _withTimeout(processOrchaAction(text), JM_AI_TIMEOUT_MS, 'processOrchaAction');
+  logger.info(`[SlackWatch][${jobId || '?'}] processOrchaAction started`);
+  const result = await processOrchaAction(text, { signal, requestId: jobId });
   let replyText = result && result.text ? result.text : "Sorry, I couldn't process that.";
   if (result && result.pendingConfirm && result.pendingConfirm.length) {
     _jmSetPending(channelId, result.pendingConfirm);
@@ -426,7 +522,7 @@ async function _jmHandleMessage(channelId, text) {
 }
 
 async function _pollJustMeChannel(ch, myUserId, doLog) {
-  const { readMessages, sendToChannel } = require('./slack_send');
+  const { readMessages } = require('./slack_send');
   const messages = await readMessages(ch.id, 20); // newest-first
   if (!messages.length) return;
 
@@ -452,45 +548,24 @@ async function _pollJustMeChannel(ch, myUserId, doLog) {
     return;
   }
 
+  // BUGFIX (2026-07-25 round 2): the watermark used to only advance ONCE,
+  // after the whole batch (including every AI wait) finished. That meant a
+  // hung/slow message #1 blocked message #2 from ever being seen as "new"
+  // on a LATER poll too, and held _pollLock for the entire batch. Now: each
+  // message's AI processing is handed to the independent job queue above,
+  // and the watermark advances immediately per message -- so a slow/hung
+  // job can never re-block polling (this channel or any other) and never
+  // prevents the next message from being picked up on the next cycle.
   for (const msg of newMsgs.slice(0, MAX_MESSAGES_PER_POLL)) {
     const existingLog = store.load('slackChannelReplies', []);
-    if (existingLog.some(e => e.id === ch.id + ':' + msg.ts)) continue;
-
-    let replyText;
-    try {
-      replyText = await _jmHandleMessage(ch.id, msg.text);
-    } catch (e) {
-      replyText = 'Error: ' + e.message;
+    if (existingLog.some(e => e.id === ch.id + ':' + msg.ts)) {
+      _saveChannelLastSeen(ch.id, msg.ts);
+      continue;
     }
 
-    const taggedReply = (msg.userId ? `<@${msg.userId}> ` : '') + replyText;
-    let replyTs = null;
-    try {
-      const sendResult = await sendToChannel(ch.id, taggedReply, msg.ts);
-      replyTs = sendResult.ts;
-    } catch (e) {
-      doLog(`[SlackWatch] ${ch.name} (justme): reply send FAILED: ${e.message}`);
-    }
-
-    _appendReplyLog({
-      id: ch.id + ':' + msg.ts,
-      channelId: ch.id,
-      channelName: ch.name,
-      ts: msg.ts,
-      replyTs,
-      question: msg.text,
-      reply: taggedReply,
-      wasMentioned: false,
-      wasThreadReply: false,
-      inScope: true,
-      category: null,
-      title: 'Just Me',
-      createdAt: new Date().toISOString(),
-      status: 'auto-answered',
-    });
+    _saveChannelLastSeen(ch.id, msg.ts); // advance watermark BEFORE the AI wait
+    _jmEnqueueJob(ch, msg, doLog);       // fire-and-forget -- runs outside _pollLock
   }
-
-  _saveChannelLastSeen(ch.id, newMsgs[newMsgs.length - 1].ts);
 }
 
 
@@ -710,6 +785,24 @@ async function pollChannelsOnce(log) {
   }
 }
 
+// Test-only introspection/control -- never used by production code paths.
+// Lets the regression suite (tests/slack-justme-queue.test.js) deterministically
+// wait for the fire-and-forget AI job queue to drain instead of arbitrary
+// sleeps, and shrink the 240s final-safety-boundary timeout so the
+// deliberate-hang/abort test doesn't actually take 4 minutes to run.
+function _aiQueueIdle() { return !_aiJobRunning && _aiJobQueue.length === 0; }
+function _waitForAiQueueIdle(timeoutMs) {
+  const limit = timeoutMs || 5000;
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    (function poll() {
+      if (_aiQueueIdle()) return resolve();
+      if (Date.now() - start > limit) return reject(new Error('AI queue did not drain within ' + limit + 'ms'));
+      setTimeout(poll, 5);
+    })();
+  });
+}
+
 module.exports = {
   DEFAULT_CHANNELS,
   getWatchConfig,
@@ -719,4 +812,9 @@ module.exports = {
   getReplyLog,
   updateReviewItem,
   dedupeReplyLog,
+  __test__: {
+    waitForAiQueueIdle: _waitForAiQueueIdle,
+    setAiTimeoutMs: (ms) => { JM_AI_TIMEOUT_MS = ms; },
+    getAiTimeoutMs: () => JM_AI_TIMEOUT_MS,
+  },
 };

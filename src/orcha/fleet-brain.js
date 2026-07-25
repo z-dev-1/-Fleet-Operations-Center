@@ -26,7 +26,14 @@ const store     = require('../store');
 const logger    = require('../utils/logger')('fleet-brain');
 
 // ─── CONFIG ─────────────────────────────────────────────────────────────────
-const TIMEOUT_MS        = 10000;
+// Was 10000ms — far shorter than real Orcha response latency (90-180s+).
+// That mismatch meant almost every request fell through fleet-brain into
+// relay.js's slower fallback cascade, AND on internal timeout the WS was
+// left open with no per-request correlation, so a late text_delta /
+// message_complete for the timed-out request would get silently
+// misattributed to whatever request became _activeReq next (root cause
+// of 'first Just Me question works, second hangs/corrupts').
+const TIMEOUT_MS        = 200000; // stay below the 240s outer safety boundary
 const SESSION_FILE      = P.chatSessionId;
 const SESSION_MAX_AGE   = 8 * 60 * 60 * 1000;
 const AGENT_ID          = 'orcha_default';
@@ -101,6 +108,7 @@ let _activeReq    = null;
 let _requestCount = 0;
 let _lastActivity = null;
 let _failCount    = 0;
+let _reqSeq       = 0;
 
 // ─── FLEET SYSTEM CONTEXT ───────────────────────────────────────────────────
 function _buildSystemContext() {
@@ -314,10 +322,13 @@ function _handleMessage(msg) {
       break;
     case 'message_complete':
       if (_activeReq) {
-        const text = _activeReq.text;
-        _activeReq.resolve(text);
+        const req = _activeReq;
+        const text = req.text;
         _activeReq = null;
         _lastActivity = Date.now();
+        logger.info('[' + req.id + '] response completed (' + text.length + ' chars, ' + (Date.now() - req.createdAt) + 'ms total)');
+        req.resolve(text);
+        logger.info('[' + req.id + '] cleanup completed — queue advanced');
         _processNext();
       }
       break;
@@ -329,57 +340,110 @@ function _drainQueue() {
   if (_queue.length > 0 && !_activeReq) _processNext();
 }
 
+function _cleanupReq(req) {
+  if (req.timer) { clearTimeout(req.timer); req.timer = null; }
+  if (req.signal && req.onAbort) {
+    try { req.signal.removeEventListener('abort', req.onAbort); } catch (_) {}
+  }
+}
+
+// Shared abort path used by: internal response timeout, caller-supplied
+// AbortSignal firing, and (indirectly) WS error/close while a request is
+// active. Guarantees: request always settles exactly once, timer + abort
+// listener are always removed, and — critically — if the request had
+// already been sent over the WS we terminate the socket so any late
+// response from Orcha can never leak into a subsequent request. The queue
+// is always advanced afterward so the next request runs immediately.
+function _abortRequest(req, err, opts) {
+  if (req.done) return;
+  const wasActive = (_activeReq === req);
+  const qi = _queue.indexOf(req);
+  if (qi !== -1) _queue.splice(qi, 1);
+  if (wasActive) {
+    _activeReq = null;
+    if (!(opts && opts.skipSocketClose) && _ws) {
+      logger.warn('[' + req.id + '] aborting active WS request (' + err.message + ') — terminating socket to prevent stale-response misattribution');
+      try { _ws.terminate(); } catch (_) {}
+    }
+  }
+  req.reject(err);
+  _processNext();
+}
+
+function _onRequestTimeout(req) {
+  if (_activeReq !== req || req.done) return; // already resolved/aborted
+  logger.warn('[' + req.id + '] response timeout after ' + TIMEOUT_MS + 'ms');
+  _abortRequest(req, new Error('Response timeout'));
+}
+
 function _processNext() {
   if (_queue.length === 0 || _activeReq) return;
   if (!_ready || !_ws || _ws.readyState !== WebSocket.OPEN) return;
   const req = _queue.shift();
   _activeReq = req;
   if (Date.now() - req.createdAt > TIMEOUT_MS) {
-    req.reject(new Error('Request timed out in queue'));
+    logger.info('[' + req.id + '] timed out while queued — discarding');
     _activeReq = null;
+    req.reject(new Error('Request timed out in queue'));
     _processNext();
     return;
   }
+  logger.info('[' + req.id + '] WS attempt — sending (queueWait=' + (Date.now() - req.createdAt) + 'ms)');
   _ws.send(JSON.stringify({ type: 'send_message', session_id: _sessionId, message: req.prompt, images: [] }));
-  req.timer = setTimeout(() => {
-    if (_activeReq === req) {
-      req.reject(new Error('Response timeout'));
-      _activeReq = null;
-      _processNext();
-    }
-  }, TIMEOUT_MS);
+  req.timer = setTimeout(() => _onRequestTimeout(req), TIMEOUT_MS);
 }
 
 // ─── PUBLIC API ─────────────────────────────────────────────────────────────
 
 /**
- * ask(prompt) — Send a prompt to the fleet brain, get text response.
+ * ask(prompt, opts) — Send a prompt to the fleet brain, get text response.
  *
- * Routing:
- *   1. WS mode  — Orcha WS connected → queue over WebSocket
- *   2. Local mode — Orcha gave up or not configured → inject context + history,
- *                   call through _localAskFn (claude-code / Bedrock)
+ * opts.signal     — optional AbortSignal; aborting cancels the request,
+ *                    terminates the WS if it was already in flight, and
+ *                    immediately frees the queue for the next request.
+ * opts.requestId  — optional caller-supplied id for correlated logging
+ *                    across relay.js / slack_channel_watch.js / here.
  */
-function ask(prompt) {
+function ask(prompt, opts) {
+  opts = opts || {};
+  const signal = opts.signal;
+  const requestId = opts.requestId || ('fb' + (++_reqSeq));
   _requestCount++;
+  logger.info('[' + requestId + '] fleet-brain.ask received');
   return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) return reject(new Error('Aborted before start'));
     if (_queue.length >= MAX_QUEUE) return reject(new Error('Fleet brain queue full'));
 
     // Local mode: WS gave up OR WS not connected but local fallback is available
     if ((_wsGaveUp || !_connected) && _localAskFn) {
-      _localAsk(prompt).then(resolve).catch(reject);
+      logger.info('[' + requestId + '] routing via local AI fallback (WS unavailable)');
+      let settled = false;
+      const onAbort = () => { if (settled) return; settled = true; reject(new Error('Aborted by caller')); };
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
+      _localAsk(prompt)
+        .then((text) => { if (settled) return; settled = true; if (signal) signal.removeEventListener('abort', onAbort); logger.info('[' + requestId + '] local AI resolved'); resolve(text); })
+        .catch((err) => { if (settled) return; settled = true; if (signal) signal.removeEventListener('abort', onAbort); logger.info('[' + requestId + '] local AI rejected: ' + err.message); reject(err); });
       return;
     }
 
     const req = {
+      id:        requestId,
       prompt,
       text:      '',
       timer:     null,
       createdAt: Date.now(),
-      resolve:   (text) => { clearTimeout(req.timer); resolve(text); },
-      reject:    (err)  => { clearTimeout(req.timer); reject(err);   },
+      signal,
+      onAbort:   null,
+      done:      false,
+      resolve:   (text) => { if (req.done) return; req.done = true; _cleanupReq(req); resolve(text); },
+      reject:    (err)  => { if (req.done) return; req.done = true; _cleanupReq(req); reject(err);   },
     };
+    if (signal) {
+      req.onAbort = () => _abortRequest(req, new Error('Aborted by caller'));
+      signal.addEventListener('abort', req.onAbort, { once: true });
+    }
     _queue.push(req);
+    logger.info('[' + requestId + '] queued (queueLength=' + _queue.length + ')');
     if (!_ws || _ws.readyState !== WebSocket.OPEN) {
       connect();
     } else if (_ready) {
