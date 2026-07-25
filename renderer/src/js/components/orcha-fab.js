@@ -555,6 +555,140 @@ function _escapeHtml(str) {
   return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// FEATURE (2026-07-24): Alerts tab -- computed live, client-side, from
+// state.slice('fleet').rows (the same fleet data already pushed to every
+// renderer view via window.fleet.onData -- no new backend/IPC needed).
+// Two real signal sources, both already populated on real rows today:
+//   1. HIGH UPTAKE RISK  -- r.riskScore/r.riskLabel (fleet.uptake.com
+//      predictive-maintenance scraper -- see _buildEmailReport in ai.js
+//      for the same fields used in report generation).
+//   2. STALE DOWN UNITS  -- unavailable units whose r.workDuration parses
+//      to 15+ days down.
+// Dismiss is session-local (a Set of keys) -- there is no backend
+// "resolve" concept for either signal, so dismissing just hides it from
+// this list until the next data refresh re-surfaces it if still true.
+const _dismissedAlertKeys = new Set();
+const STALE_DAYS_THRESHOLD = 14; // matches the dashboard's own 'Stuck 14d+' quick-filter
+
+function _parseDownDays(workDuration) {
+  if (!workDuration) return null;
+  const m = String(workDuration).match(/(\d+)\s*d/i);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function _computeAlerts() {
+  const fleetSlice = state.slice('fleet');
+  const rows = (fleetSlice && fleetSlice.rows) || [];
+  const items = [];
+
+  rows.forEach((r) => {
+    const unit = r.equipmentId;
+    if (!unit) return;
+    const site = r.domicileSite || r.operator || '';
+
+    // Signal 1: high Uptake risk
+    const riskHigh = (r.riskScore != null && r.riskScore >= 70) || // matches dashboard's own High Risk quick-filter (fleet.js _quickFilterHighRisk)
+      (r.riskLabel && String(r.riskLabel).toUpperCase() === 'HIGH');
+    if (riskHigh) {
+      const activeInsight = Array.isArray(r.insightsList)
+        ? r.insightsList.find((ins) => ins.stillActive !== false)
+        : null;
+      let detail = 'Uptake risk score ' + (r.riskScore != null ? r.riskScore : 'N/A') +
+        (r.riskLabel ? ' (' + r.riskLabel + ')' : '');
+      if (activeInsight) {
+        detail += ' — ' + (activeInsight.title || 'active insight') +
+          (activeInsight.subsystem ? ' [' + activeInsight.subsystem + ']' : '');
+      }
+      items.push({
+        key: unit + ':risk',
+        severity: 'high',
+        unit, site,
+        label: 'HIGH UPTAKE RISK',
+        detail,
+        sortScore: r.riskScore != null ? r.riskScore : 75,
+      });
+    }
+
+    // Signal 2: stale down (unavailable + 15+ days)
+    const isUnavailable = /unavail/i.test(r.lifecycleState || r.atsState || '');
+    const downDays = _parseDownDays(r.workDuration);
+    if (isUnavailable && downDays != null && downDays >= STALE_DAYS_THRESHOLD) {
+      items.push({
+        key: unit + ':stale',
+        severity: downDays >= 30 ? 'high' : 'medium',
+        unit, site,
+        label: 'STALE REPAIR',
+        detail: 'Down ' + downDays + ' days · Vendor: ' + (r.vendor || 'N/A') +
+          (r.lifecycleReason ? ' · ' + r.lifecycleReason : ''),
+        sortScore: downDays,
+      });
+    }
+  });
+
+  return items
+    .filter((it) => !_dismissedAlertKeys.has(it.key))
+    .sort((a, b) => {
+      if (a.severity !== b.severity) return a.severity === 'high' ? -1 : 1;
+      return b.sortScore - a.sortScore;
+    });
+}
+
+function _updateAlertsBadge() {
+  const count = _computeAlerts().length;
+  const badge = document.getElementById('oc-alerts-badge');
+  if (!badge) return;
+  if (count) {
+    badge.textContent = String(count);
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function _refreshAlerts() {
+  const listEl = document.getElementById('oc-alerts-list');
+  if (!listEl) return;
+  const items = _computeAlerts();
+  _updateAlertsBadge();
+
+  if (!items.length) {
+    listEl.innerHTML = '<div class="oc-alerts-empty" id="oc-alerts-empty">No active alerts right now.</div>';
+    return;
+  }
+
+  listEl.innerHTML = items.map((item) => {
+    const sevClass = item.severity === 'high' ? 'oc-alert-sev--high' : 'oc-alert-sev--medium';
+    return `<div class="oc-alert-item ${item.severity === 'high' ? 'oc-alert-item--high' : ''}" data-key="${_escapeHtml(item.key)}">
+      <div class="oc-alert-head">
+        <span class="oc-alert-unit">${_escapeHtml(item.unit)}</span>
+        <span class="oc-alert-sev ${sevClass}">${_escapeHtml(item.label)}</span>
+        <span class="oc-alert-site">${_escapeHtml(item.site)}</span>
+      </div>
+      <div class="oc-alert-detail">${_escapeHtml(item.detail)}</div>
+      <div class="oc-alert-actions">
+        <button class="oc-alert-btn" data-action="view">View unit</button>
+        <button class="oc-alert-btn" data-action="dismiss">Dismiss</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  listEl.querySelectorAll('.oc-alert-item').forEach((el) => {
+    const key = el.getAttribute('data-key');
+    const unit = key.split(':')[0];
+    el.querySelectorAll('.oc-alert-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const action = btn.getAttribute('data-action');
+        if (action === 'dismiss') {
+          _dismissedAlertKeys.add(key);
+          _refreshAlerts();
+        } else {
+          bus.emit('navigate:unit', unit);
+        }
+      });
+    });
+  });
+}
+
 // ── FEATURE (2026-07-16): Slack tab — Chat/Slack tab switching ──────────────
 function _switchTab(tab) {
   if (tab === _activeTab) return;
@@ -562,15 +696,19 @@ function _switchTab(tab) {
   const chatBtn  = document.getElementById('oc-tab-btn-chat');
   const slackBtn = document.getElementById('oc-tab-btn-slack');
   const reviewBtn = document.getElementById('oc-tab-btn-review');
+  const alertsBtn = document.getElementById('oc-tab-btn-alerts');
   const chatPane = document.getElementById('oc-tab-chat');
   const slackPane = document.getElementById('oc-tab-slack');
   const reviewPane = document.getElementById('oc-tab-review');
+  const alertsPane = document.getElementById('oc-tab-alerts');
   if (chatBtn)  chatBtn.classList.toggle('oc-tab--active', tab === 'chat');
   if (slackBtn) slackBtn.classList.toggle('oc-tab--active', tab === 'slack');
   if (reviewBtn) reviewBtn.classList.toggle('oc-tab--active', tab === 'review');
+  if (alertsBtn) alertsBtn.classList.toggle('oc-tab--active', tab === 'alerts');
   if (chatPane)  chatPane.style.display  = tab === 'chat'  ? '' : 'none';
   if (slackPane) slackPane.style.display = tab === 'slack' ? '' : 'none';
   if (reviewPane) reviewPane.style.display = tab === 'review' ? '' : 'none';
+  if (alertsPane) alertsPane.style.display = tab === 'alerts' ? '' : 'none';
 
   if (tab === 'slack') {
     _refreshSlackTabState();
@@ -578,6 +716,9 @@ function _switchTab(tab) {
   } else if (tab === 'review') {
     _stopSlackTabRefresh();
     _refreshReviewQueue();
+  } else if (tab === 'alerts') {
+    _stopSlackTabRefresh();
+    _refreshAlerts();
   } else {
     _stopSlackTabRefresh();
   }
@@ -778,9 +919,11 @@ function _wireSlackTab() {
   const chatBtn  = document.getElementById('oc-tab-btn-chat');
   const slackBtn = document.getElementById('oc-tab-btn-slack');
   const reviewBtn = document.getElementById('oc-tab-btn-review');
+  const alertsBtn = document.getElementById('oc-tab-btn-alerts');
   if (chatBtn)  chatBtn.addEventListener('click', () => _switchTab('chat'));
   if (slackBtn) slackBtn.addEventListener('click', () => _switchTab('slack'));
   if (reviewBtn) reviewBtn.addEventListener('click', () => _switchTab('review'));
+  if (alertsBtn) alertsBtn.addEventListener('click', () => _switchTab('alerts'));
 
   const loginBtn = document.getElementById('oc-slack-login-btn');
   if (loginBtn) loginBtn.addEventListener('click', _slackLogin);
@@ -1434,6 +1577,7 @@ export function init() {
       <button class="oc-tab oc-tab--active" id="oc-tab-btn-chat" data-tab="chat">Chat</button>
       <button class="oc-tab" id="oc-tab-btn-slack" data-tab="slack">Slack</button>
       <button class="oc-tab" id="oc-tab-btn-review" data-tab="review">Review<span class="oc-review-badge" id="oc-review-badge" style="display:none">0</span></button>
+      <button class="oc-tab" id="oc-tab-btn-alerts" data-tab="alerts">Alerts<span class="oc-alerts-badge" id="oc-alerts-badge" style="display:none">0</span></button>
     </div>
     <div class="oc-tab-content" id="oc-tab-chat">
       <div class="oc-msgs" id="orcha-msgs">
@@ -1470,6 +1614,11 @@ export function init() {
     <div class="oc-tab-content" id="oc-tab-review" style="display:none">
       <div class="oc-review-list" id="oc-review-list">
         <div class="oc-review-empty" id="oc-review-empty">No items need review right now.</div>
+      </div>
+    </div>
+    <div class="oc-tab-content" id="oc-tab-alerts" style="display:none">
+      <div class="oc-alerts-list" id="oc-alerts-list">
+        <div class="oc-alerts-empty" id="oc-alerts-empty">No active alerts right now.</div>
       </div>
     </div>
   `;
@@ -1556,6 +1705,16 @@ export function init() {
     const status = document.getElementById('orcha-status');
     if (status) status.textContent = '\u{25CF} ' + (p.message || 'Working...');
   });
+
+  // FEATURE (2026-07-24): Alerts tab -- refresh badge/list whenever fresh
+  // fleet data lands (same event bridge.js already re-emits from
+  // window.fleet.onData), and once immediately in case data is already
+  // cached in state by the time this component initializes.
+  bus.on('fleet:data', () => {
+    _updateAlertsBadge();
+    if (_activeTab === 'alerts') _refreshAlerts();
+  });
+  _updateAlertsBadge();
 
   // Start Slack DM polling on boot (background)
   setTimeout(() => _startSlackPoll(), 3000);
