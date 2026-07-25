@@ -675,13 +675,37 @@ async function scrapeServiceByUUID(uuid, partition) {
   });
 }
 
+// BUGFIX (2026-07-25): units with no findable work order (e.g. UNAVAILABLE
+// but not yet assigned a WR) were re-scraped from scratch on every single
+// auto-sync cycle (default every 5 min) because a null result was never
+// written to relayCache. resolveServiceUUID() does up to 9 full garage-page
+// loads (3 tabs x 3 passes) before giving up, so this could burn 1.5-3+
+// minutes per cycle, back-to-back, forever, for a stubborn unit -- observed
+// live blocking the shared Slack "Just Me" poll lock for 6+ minutes on unit
+// B13353. Fix: cache the negative result too, with a short TTL, so repeat
+// syncs skip the expensive scrape until the TTL expires.
+const NO_WR_RETRY_MS = 15 * 60 * 1000; // 15 min
+
 async function scrapeUnitPage(equipmentId, partition, relayCache) {
   logger.info('[Relay] scrapeUnitPage called for', equipmentId);
+
+  // Negative-cache check: skip the expensive garage-page dance entirely if
+  // we already confirmed recently that this unit has no findable WR.
+  if (relayCache && relayCache[equipmentId] && relayCache[equipmentId]._noWR) {
+    const noWrAgeMs = Date.now() - (relayCache[equipmentId]._cachedAt || 0);
+    if (noWrAgeMs < NO_WR_RETRY_MS) {
+      logger.info('[Relay] Negative-cache HIT (no WR) for', equipmentId,
+        '| age:', Math.round(noWrAgeMs / 60000) + 'min', '/ TTL:', Math.round(NO_WR_RETRY_MS / 60000) + 'min',
+        '— skipping garage scrape');
+      return null;
+    }
+  }
+
   // Step 1: resolve the actual service UUID via Relay Garage dashboard
   const serviceUUID = await resolveServiceUUID(equipmentId, partition);
   if (!serviceUUID) {
-    logger.info('[Relay] No valid WR for unit', equipmentId, '— skipping');
-    return null;
+    logger.info('[Relay] No valid WR for unit', equipmentId, '— skipping (negative-caching for', Math.round(NO_WR_RETRY_MS / 60000) + 'min)');
+    return { _noWR: true, _cachedAt: Date.now() };
   }
 
   // ── M-1: TTL cache check ──────────────────────────────────────────────────────
@@ -953,6 +977,10 @@ async function scrapeRelay(aapRows, onBatchDone, relayCache) {
       const res = batchResults[idx];
       if (res && res._skippedFleetNet) {
         skippedFleetNet++;
+      } else if (res && res._noWR) {
+        // Negative-cache marker: persist it so the next sync cycle can skip
+        // the expensive garage scrape, but don't surface it as a real result.
+        updatedCache[r.equipmentId] = res;
       } else if (res) {
         results[r.equipmentId] = res;
         // Update cache with fresh result (whether cache hit or full scrape)
