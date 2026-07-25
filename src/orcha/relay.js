@@ -102,6 +102,7 @@ async function ask(prompt, opts = {}) {
     // fleet-brain.getStatus().ready is true in BOTH WS mode (Orcha running) AND
     // local mode (claude-code fallback wired in). Either way fleet-brain manages
     // the system prompt + rolling conversation history so every AI call is context-aware.
+    let _fbJustTimedOut = false;
     try {
       const _fbStatus = fleetBrain.getStatus ? fleetBrain.getStatus() : {};
       if (!_fbStatus || !_fbStatus.ready) throw new Error('fleet-brain not ready');
@@ -117,12 +118,21 @@ async function ask(prompt, opts = {}) {
     } catch (brainErr) {
       if (signal && signal.aborted) throw brainErr;
       logger.warn('[' + requestId + '] Fleet-brain failed: ' + brainErr.message);
+      // If fleet-brain JUST failed with a timeout, that alone proves the WS
+      // endpoint isn't answering right now -- retrying the identical Orcha URL
+      // via _tryWS below is guaranteed to burn another ~60s doing nothing
+      // (this was silently eating the last 40s of budget before CLI/Claude
+      // Code ever got a chance to run). Treat a timeout as equivalent to
+      // "down" regardless of what fleetBrain.getStatus().connected reports,
+      // since that flag doesn't reliably flip immediately after ws.terminate().
+      _fbJustTimedOut = /timeout/i.test(brainErr.message || '');
     }
 
     // FALLBACK: Direct WS (throwaway session, no context).
-    // Skip entirely if fleet-brain already confirmed the WS endpoint is unreachable --
-    // _tryWS hits the same URL and would just burn the full timeout for nothing.
-    const _fbDown = !(fleetBrain.getStatus ? fleetBrain.getStatus().connected : false);
+    // Skip entirely if fleet-brain already confirmed the WS endpoint is unreachable,
+    // or just proved it via a timeout -- _tryWS hits the same URL and would just
+    // burn the full timeout for nothing, starving CLI/Claude Code/Bedrock of time.
+    const _fbDown = _fbJustTimedOut || !(fleetBrain.getStatus ? fleetBrain.getStatus().connected : false);
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       if (signal && signal.aborted) throw new Error('Aborted');
       try {
