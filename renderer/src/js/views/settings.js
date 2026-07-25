@@ -1620,6 +1620,8 @@ function _wirePartnerAutoReply() {
       const count    = _replyCounts[ch.id] || 0;
       const modeDesc = chMode === 'occasional'
         ? 'Replies to @mentions, thread follow-ups, and relevant messages'
+        : chMode === 'justme'
+        ? 'Personal channel: every message you send here is treated as a real question/command (same as the in-app assistant), with confirm-before-send for Slack/email actions'
         : 'Replies to @mentions and messages clearly directed at you';
       return `<div style="background:var(--el);border:1px solid var(--bdr);border-radius:8px;padding:10px 12px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
@@ -1633,6 +1635,7 @@ function _wirePartnerAutoReply() {
         <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
           <button class="sd-font-btn par-mode-btn ${chMode === 'mentions'   ? 'active' : ''}" data-idx="${i}" data-mode="mentions"   type="button" style="font-size:9px;padding:3px 10px">Mentions</button>
           <button class="sd-font-btn par-mode-btn ${chMode === 'occasional' ? 'active' : ''}" data-idx="${i}" data-mode="occasional" type="button" style="font-size:9px;padding:3px 10px">Occasional</button>
+          <button class="sd-font-btn par-mode-btn ${chMode === 'justme'     ? 'active' : ''}" data-idx="${i}" data-mode="justme"     type="button" style="font-size:9px;padding:3px 10px">Just Me</button>
           <span style="margin-left:auto;font-size:9px;color:var(--mut)">${count ? count + ' ' + (count === 1 ? 'reply' : 'replies') + ' · ' : ''}${lastSeen}</span>
         </div>
         <div style="font-size:9px;color:var(--mut);margin-top:6px;padding-top:5px;border-top:1px solid rgba(48,54,61,.6)">${modeDesc}</div>

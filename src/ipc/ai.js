@@ -139,230 +139,15 @@ function _buildEmailReport(userMsg, rows, notesStore) {
   return lines.join('\n');
 }
 
-function registerAIHandlers(ctx) {
-  const { suggestDropdowns, askOrcha, sendOrchaChat, loadOrchaConfig, saveOrchaConfig } = require('../../src/scrapers/orcha_ws');
-  const relay = require('../orcha/relay');
-  const send  = ctx.sendToWindow;
-
-  // Issue #15: prompt length cap
-  handle('ai:suggest', async (_e, unit) => {
-    if (!unit || typeof unit !== 'object') throw new ConfigError('unit must be an object', 'unit');
-    const keyCount = Object.keys(unit).length;
-    if (keyCount > MAX_SUGGEST_KEYS) {
-      throw new ConfigError('unit object too large (' + keyCount + ' keys, max ' + MAX_SUGGEST_KEYS + ')', 'unit');
-    }
-    return suggestDropdowns(unit);
-  });
-
-  // Issue #15: prompt length cap
-  handle('ai:ask', async (_e, prompt) => {
-    requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
-    return askOrcha(prompt);
-  });
-
-  // Issue #13: response now includes `path` field ('chat' or 'fallback')
-  // so the renderer knows which code path ran.
-  handle('ai:chat', async (_e, prompt) => {
-    requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
-    // Inject Orcha system directive into every chat call
-    const { ORCHA_DIRECTIVE } = require('../orcha/system-prompt');
-    // Inject live fleet data summary
-    const store = require('../store');
-    const fd = store.load('fleetData', {});
-    const rows = fd.rows || [];
-    const unavail = rows.filter(r => (r.lifecycleState || '').toLowerCase().includes('unavail'));
-    const offsite = rows.filter(r => (r.lifecycleReason || '').toLowerCase().includes('offsite'));
-    const fleetSummary = '\n\nLIVE FLEET DATA (' + rows.length + ' total units):\n'
-      + 'Unavailable: ' + unavail.length + ' | Offsite: ' + offsite.length + ' | Available: ' + (rows.length - unavail.length) + '\n'
-      + 'Unavailable units:\n'
-      + unavail.slice(0, 40).map(r => r.equipmentId + ' | ' + (r.vendor || 'no vendor') + ' | ' + (r.lifecycleReason || '') + ' | ' + (r.domicileSite || '') + ' | Down: ' + (r.workDuration || '?')).join('\n')
-      + '\n';
-    prompt = ORCHA_DIRECTIVE + fleetSummary + '\n\nUser: ' + prompt;
-    try {
-      const text = await sendOrchaChat(prompt);
-      return { ok: true, text, path: 'chat' };
-    } catch (e) {
-      logger.warn('Fleet Chat fallback to askOrcha:', e.message);
-      const result = await askOrcha(prompt);
-      // askOrcha may return a string or an object — normalise
-      if (typeof result === 'string') return { ok: true, text: result, path: 'fallback' };
-      return { ...result, path: 'fallback' };
-    }
-  });
-
-  // Orcha config
-  handle('orcha:get-config',    () => loadOrchaConfig());
-  handle('orcha:save-config',   (_e, config) => { saveOrchaConfig(config); return { ok: true }; });
-
-  // Relay health / auth
-  handle('orcha:test',          async () => relay.healthCheck());
-  handle('orcha:status',        () => relay.getStatus());
-  handle('orcha:mwinit',        async () => relay.runMwinit());
-  handle('orcha:refresh-creds', () => { relay.refreshCredentials(); return { ok: true }; });
-
-  // ── AI Config (preference + per-backend config) ────────────────────────
-  // Returns full config: preference, orcha settings, claude settings + live status
-  handle('ai:get-ai-config', () => {
-    const orchaCfg = (() => {
-      try {
-        if (fs.existsSync(P.orchaConfig)) return JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
-      } catch (_) {}
-      return {};
-    })();
-    const os = require('os'), path = require('path');
-    const claudeBin = process.platform === 'win32'
-      ? path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'claude.exe')
-      : path.join(os.homedir(), '.toolbox', 'bin', 'claude');
-    return {
-      aiPreference:     relay.getPreference(),
-      mode:             orchaCfg.mode || 'local',
-      host:             orchaCfg.host || 'localhost',
-      port:             orchaCfg.port || 4799,
-      claudeBin,
-      claudeTimeoutMs:  orchaCfg.claudeTimeoutMs || 60000,
-      claudeAvailable:  require('fs').existsSync(claudeBin),
-    };
-  });
-
-  // Save AI config — persists preference + both backends, hot-applies preference
-  handle('ai:save-ai-config', (_e, config) => {
-    const existing = (() => {
-      try {
-        if (fs.existsSync(P.orchaConfig)) return JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
-      } catch (_) {}
-      return {};
-    })();
-    const merged = {
-      ...existing,
-      mode:            config.mode             || existing.mode || 'local',
-      host:            config.host             || existing.host || 'localhost',
-      port:            config.port             || existing.port || 4799,
-      aiPreference:    config.aiPreference     || 'auto',
-      claudeTimeoutMs: config.claudeTimeoutMs  || 60000,
-    };
-    const tmp = P.orchaConfig + '.tmp';
-    fs.mkdirSync(require('path').dirname(P.orchaConfig), { recursive: true });
-    fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf8');
-    fs.renameSync(tmp, P.orchaConfig);
-    relay.setPreference(merged.aiPreference);
-    logger.info('[AI Config] Saved. preference=' + merged.aiPreference);
-    return { ok: true, preference: merged.aiPreference };
-  });
-
-  // Test the Claude Code path directly
-  handle('ai:test-claude', () => relay.testClaude());
-
-  // Daily Notes - open Relay + Offsite windows side-by-side
-  handle('daily-notes:open-windows', async (_e, opts) => {
-    const spSes = eSession.defaultSession;
-    const { width, height } = eScreen.getPrimaryDisplay().workAreaSize;
-    const halfW = Math.floor(width / 2);
-    const winH  = Math.floor(height * 0.85);
-    const topY  = Math.floor(height * 0.05);
-    const windows = [];
-
-    if (opts.relayUrl) {
-      const relayWin = new BrowserWindow({
-        width: halfW, height: winH, x: 0, y: topY,
-        title: 'Relay Garage - ' + (opts.unitId || ''),
-        icon: require('../config/app-icon').getAppIconPath(),
-        webPreferences: { nodeIntegration: false, contextIsolation: true, session: spSes },
-      });
-      relayWin.loadURL(opts.relayUrl);
-      windows.push(relayWin);
-    }
-
-    if (opts.offsiteUrl) {
-      const offsiteWin = new BrowserWindow({
-        width: halfW, height: winH, x: halfW, y: topY,
-        title: 'Offsite Event - ' + (opts.unitId || ''),
-        icon: require('../config/app-icon').getAppIconPath(),
-        webPreferences: { nodeIntegration: false, contextIsolation: true, session: spSes },
-      });
-      offsiteWin.loadURL(opts.offsiteUrl);
-      windows.push(offsiteWin);
-    }
-
-    if (windows.length === 1) {
-      windows[0].setBounds({ x: Math.floor(width * 0.1), y: topY, width: Math.floor(width * 0.8), height: winH });
-    }
-    return { opened: windows.length };
-  });
-
-  // Issue #8: batch size cap + per-unit shape validation
-  handle('daily-notes:run', async (_e, units) => {
-    if (!Array.isArray(units) || units.length === 0) {
-      throw new ConfigError('units must be a non-empty array', 'units');
-    }
-    if (units.length > MAX_DAILY_NOTES_BATCH) {
-      throw new ConfigError(
-        'daily-notes:run batch too large (' + units.length + ', max ' + MAX_DAILY_NOTES_BATCH + ')',
-        'units'
-      );
-    }
-    // Each element must have a non-empty equipmentId string
-    for (let i = 0; i < units.length; i++) {
-      const u = units[i];
-      if (!u || typeof u !== 'object') {
-        throw new ConfigError('units[' + i + '] must be an object', 'units');
-      }
-      if (typeof u.equipmentId !== 'string' || u.equipmentId.trim() === '') {
-        throw new ConfigError('units[' + i + '].equipmentId must be a non-empty string', 'units');
-      }
-    }
-    const { runDailyNotes } = require('../../src/scrapers/daily_notes');
-    // V-C: use P.aapCache instead of hardcoded AppData path
-    let session = { cookies: [] };
-    try {
-      if (fs.existsSync(P.aapCache)) session = JSON.parse(fs.readFileSync(P.aapCache, 'utf8'));
-    } catch (_) { /* no session yet - proceed without cookies */ }
-    return runDailyNotes(units, session, askOrcha, (msg) => {
-      logger.info(msg);
-      if (send) send('daily-notes:progress', msg);
-    });
-  });
-
-  handle('daily-notes:get-log', () => {
-    const { loadNotesLog } = require('../../src/scrapers/daily_notes');
-    return loadNotesLog();
-  });
-  // S28: Append entry to unit timeline
-  handle('ai:append-timeline', async (_e, data) => {
-    if (!data || !data.unitId || !data.entry) throw new ConfigError('unitId and entry required', 'data');
-    const store = require('../store');
-    const ns = store.load('notesStore', {});
-    const unit = ns[data.unitId] || {};
-    const existing = unit.timeline || '';
-    unit.timeline = existing ? existing + '\n' + data.entry : data.entry;
-    // Track as a manually-confirmed entry (immutable truth) so a later Orcha
-    // deep-scan regeneration merges it back in instead of discarding it when
-    // it rebuilds the timeline from raw vendor comments.
-    unit.manualEntries = Array.isArray(unit.manualEntries) ? unit.manualEntries : [];
-    unit.manualEntries.push(data.entry);
-    ns[data.unitId] = unit;
-    store.save('notesStore', ns);
-    
-    // Also update fleet_data row
-    const fd = store.load('fleetData', {});
-    if (fd.rows) {
-      const row = fd.rows.find(r => r.equipmentId === data.unitId);
-      if (row) row.repairTimeline = unit.timeline;
-      store.save('fleetData', fd);
-    }
-
-    // Notify renderer for instant refresh (parity with notes:add-timeline)
-    try {
-      const wins = require('electron').BrowserWindow.getAllWindows();
-      const main = wins.find(w => !w.isDestroyed() && w.webContents.getURL().includes('localhost:5173'));
-      if (main) main.webContents.send('notes:updated', { unitId: data.unitId, timeline: unit.timeline });
-    } catch (e) { /* no active renderer window yet */ }
-
-    logger.info('[AI] Timeline appended for ' + data.unitId + ': ' + data.entry.substring(0, 60));
-    return { ok: true };
-  });
-  // ── Unified Orcha action handler (used by bubble + main) ────────────────
-  handle('ai:orcha-action', async (_e, userMsg) => {
-    requireStringMax(userMsg, 'userMsg', MAX_PROMPT_LEN);
+// ── Unified Orcha action handler (used by bubble + main + phone companion) ──
+// Builds the full fleet-context prompt (per-unit detail, contacts, memory,
+// reminders), calls the AI, parses {reply, actions:[...]}, executes safe
+// actions immediately, and returns pendingConfirm items for anything that
+// sends externally (Slack/email) -- those require an explicit confirm step
+// via confirmSend() below, regardless of caller (FAB button click or phone
+// text reply).
+async function processOrchaAction(userMsg) {
+  requireStringMax(userMsg, 'userMsg', MAX_PROMPT_LEN);
     const store = require('../store');
     // Conversation memory (7 days)
     let chatHistory = store.load('chatHistory', []);
@@ -702,56 +487,287 @@ function registerAIHandlers(ctx) {
       store.save('chatHistory', chatHistory);
       return {ok:true,text:(parsed.reply||'')+(results.length?'\n'+results.join('\n'):''),action:results.length?'multi':'chat',pendingConfirm};
     } catch(e) { return {ok:false,text:'Error:'+e.message,action:'chat'}; }
+}
+
+// ── Confirmed send ─────────────────────────────────────────────────────────
+// processOrchaAction() never sends directly -- it returns a pendingConfirm
+// item (recipient + real report body) and the caller (FAB renderer or phone
+// companion) must get an explicit confirmation before this runs. Nothing
+// goes out without it.
+async function confirmSend(item) {
+  if (!item || !item.channel) return { ok: false, error: 'Nothing to send' };
+  try {
+    if (item.channel === 'slack') {
+      const { sendSlackMessage, sendToChannel, openConversation } = require('../../src/scrapers/slack_send');
+      const contact = item.contact;
+      let r2;
+      if (contact && contact.channelId) {
+        r2 = await sendToChannel(contact.channelId, item.body);
+      } else if (contact && contact.slackId) {
+        const chId = await openConversation({ id: contact.slackId, type: 'person' });
+        r2 = await sendToChannel(chId, item.body);
+      } else if (contact && contact.email) {
+        r2 = await sendSlackMessage(contact.email, item.body);
+      } else {
+        r2 = await sendSlackMessage(item.rawRecipient, item.body);
+      }
+      const sendOk = !!(r2 && r2.ok !== false);
+      return sendOk
+        ? { ok: true, message: 'Slack sent to ' + item.recipientName }
+        : { ok: false, error: 'Slack send failed' };
+    }
+    if (item.channel === 'email') {
+      const { sendFleetEmail } = require('../scrapers/email_sender');
+      const emailRes = await sendFleetEmail({
+        to: item.to,
+        subject: item.subject,
+        htmlBody: item.body ? '<pre>' + item.body.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>' : '',
+        plainText: item.body || '',
+      });
+      if (emailRes.ok) return { ok: true, message: 'Email sent to ' + item.to };
+      // SMTP failed — open the in-app composer pre-filled so the user can still send.
+      try {
+        const _ew = require('electron').BrowserWindow.getAllWindows()[0];
+        if (_ew) _ew.webContents.send('email:compose', { to: item.to, subject: item.subject, body: item.body || '' });
+      } catch (_) {}
+      return { ok: false, error: 'SMTP failed — composer opened instead' };
+    }
+    return { ok: false, error: 'Unknown channel: ' + item.channel };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+function registerAIHandlers(ctx) {
+  const { suggestDropdowns, askOrcha, sendOrchaChat, loadOrchaConfig, saveOrchaConfig } = require('../../src/scrapers/orcha_ws');
+  const relay = require('../orcha/relay');
+  const send  = ctx.sendToWindow;
+
+  // Issue #15: prompt length cap
+  handle('ai:suggest', async (_e, unit) => {
+    if (!unit || typeof unit !== 'object') throw new ConfigError('unit must be an object', 'unit');
+    const keyCount = Object.keys(unit).length;
+    if (keyCount > MAX_SUGGEST_KEYS) {
+      throw new ConfigError('unit object too large (' + keyCount + ' keys, max ' + MAX_SUGGEST_KEYS + ')', 'unit');
+    }
+    return suggestDropdowns(unit);
   });
+
+  // Issue #15: prompt length cap
+  handle('ai:ask', async (_e, prompt) => {
+    requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
+    return askOrcha(prompt);
+  });
+
+  // Issue #13: response now includes `path` field ('chat' or 'fallback')
+  // so the renderer knows which code path ran.
+  handle('ai:chat', async (_e, prompt) => {
+    requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
+    // Inject Orcha system directive into every chat call
+    const { ORCHA_DIRECTIVE } = require('../orcha/system-prompt');
+    // Inject live fleet data summary
+    const store = require('../store');
+    const fd = store.load('fleetData', {});
+    const rows = fd.rows || [];
+    const unavail = rows.filter(r => (r.lifecycleState || '').toLowerCase().includes('unavail'));
+    const offsite = rows.filter(r => (r.lifecycleReason || '').toLowerCase().includes('offsite'));
+    const fleetSummary = '\n\nLIVE FLEET DATA (' + rows.length + ' total units):\n'
+      + 'Unavailable: ' + unavail.length + ' | Offsite: ' + offsite.length + ' | Available: ' + (rows.length - unavail.length) + '\n'
+      + 'Unavailable units:\n'
+      + unavail.slice(0, 40).map(r => r.equipmentId + ' | ' + (r.vendor || 'no vendor') + ' | ' + (r.lifecycleReason || '') + ' | ' + (r.domicileSite || '') + ' | Down: ' + (r.workDuration || '?')).join('\n')
+      + '\n';
+    prompt = ORCHA_DIRECTIVE + fleetSummary + '\n\nUser: ' + prompt;
+    try {
+      const text = await sendOrchaChat(prompt);
+      return { ok: true, text, path: 'chat' };
+    } catch (e) {
+      logger.warn('Fleet Chat fallback to askOrcha:', e.message);
+      const result = await askOrcha(prompt);
+      // askOrcha may return a string or an object — normalise
+      if (typeof result === 'string') return { ok: true, text: result, path: 'fallback' };
+      return { ...result, path: 'fallback' };
+    }
+  });
+
+  // Orcha config
+  handle('orcha:get-config',    () => loadOrchaConfig());
+  handle('orcha:save-config',   (_e, config) => { saveOrchaConfig(config); return { ok: true }; });
+
+  // Relay health / auth
+  handle('orcha:test',          async () => relay.healthCheck());
+  handle('orcha:status',        () => relay.getStatus());
+  handle('orcha:mwinit',        async () => relay.runMwinit());
+  handle('orcha:refresh-creds', () => { relay.refreshCredentials(); return { ok: true }; });
+
+  // ── AI Config (preference + per-backend config) ────────────────────────
+  // Returns full config: preference, orcha settings, claude settings + live status
+  handle('ai:get-ai-config', () => {
+    const orchaCfg = (() => {
+      try {
+        if (fs.existsSync(P.orchaConfig)) return JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
+      } catch (_) {}
+      return {};
+    })();
+    const os = require('os'), path = require('path');
+    const claudeBin = process.platform === 'win32'
+      ? path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'claude.exe')
+      : path.join(os.homedir(), '.toolbox', 'bin', 'claude');
+    return {
+      aiPreference:     relay.getPreference(),
+      mode:             orchaCfg.mode || 'local',
+      host:             orchaCfg.host || 'localhost',
+      port:             orchaCfg.port || 4799,
+      claudeBin,
+      claudeTimeoutMs:  orchaCfg.claudeTimeoutMs || 60000,
+      claudeAvailable:  require('fs').existsSync(claudeBin),
+    };
+  });
+
+  // Save AI config — persists preference + both backends, hot-applies preference
+  handle('ai:save-ai-config', (_e, config) => {
+    const existing = (() => {
+      try {
+        if (fs.existsSync(P.orchaConfig)) return JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
+      } catch (_) {}
+      return {};
+    })();
+    const merged = {
+      ...existing,
+      mode:            config.mode             || existing.mode || 'local',
+      host:            config.host             || existing.host || 'localhost',
+      port:            config.port             || existing.port || 4799,
+      aiPreference:    config.aiPreference     || 'auto',
+      claudeTimeoutMs: config.claudeTimeoutMs  || 60000,
+    };
+    const tmp = P.orchaConfig + '.tmp';
+    fs.mkdirSync(require('path').dirname(P.orchaConfig), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf8');
+    fs.renameSync(tmp, P.orchaConfig);
+    relay.setPreference(merged.aiPreference);
+    logger.info('[AI Config] Saved. preference=' + merged.aiPreference);
+    return { ok: true, preference: merged.aiPreference };
+  });
+
+  // Test the Claude Code path directly
+  handle('ai:test-claude', () => relay.testClaude());
+
+  // Daily Notes - open Relay + Offsite windows side-by-side
+  handle('daily-notes:open-windows', async (_e, opts) => {
+    const spSes = eSession.defaultSession;
+    const { width, height } = eScreen.getPrimaryDisplay().workAreaSize;
+    const halfW = Math.floor(width / 2);
+    const winH  = Math.floor(height * 0.85);
+    const topY  = Math.floor(height * 0.05);
+    const windows = [];
+
+    if (opts.relayUrl) {
+      const relayWin = new BrowserWindow({
+        width: halfW, height: winH, x: 0, y: topY,
+        title: 'Relay Garage - ' + (opts.unitId || ''),
+        icon: require('../config/app-icon').getAppIconPath(),
+        webPreferences: { nodeIntegration: false, contextIsolation: true, session: spSes },
+      });
+      relayWin.loadURL(opts.relayUrl);
+      windows.push(relayWin);
+    }
+
+    if (opts.offsiteUrl) {
+      const offsiteWin = new BrowserWindow({
+        width: halfW, height: winH, x: halfW, y: topY,
+        title: 'Offsite Event - ' + (opts.unitId || ''),
+        icon: require('../config/app-icon').getAppIconPath(),
+        webPreferences: { nodeIntegration: false, contextIsolation: true, session: spSes },
+      });
+      offsiteWin.loadURL(opts.offsiteUrl);
+      windows.push(offsiteWin);
+    }
+
+    if (windows.length === 1) {
+      windows[0].setBounds({ x: Math.floor(width * 0.1), y: topY, width: Math.floor(width * 0.8), height: winH });
+    }
+    return { opened: windows.length };
+  });
+
+  // Issue #8: batch size cap + per-unit shape validation
+  handle('daily-notes:run', async (_e, units) => {
+    if (!Array.isArray(units) || units.length === 0) {
+      throw new ConfigError('units must be a non-empty array', 'units');
+    }
+    if (units.length > MAX_DAILY_NOTES_BATCH) {
+      throw new ConfigError(
+        'daily-notes:run batch too large (' + units.length + ', max ' + MAX_DAILY_NOTES_BATCH + ')',
+        'units'
+      );
+    }
+    // Each element must have a non-empty equipmentId string
+    for (let i = 0; i < units.length; i++) {
+      const u = units[i];
+      if (!u || typeof u !== 'object') {
+        throw new ConfigError('units[' + i + '] must be an object', 'units');
+      }
+      if (typeof u.equipmentId !== 'string' || u.equipmentId.trim() === '') {
+        throw new ConfigError('units[' + i + '].equipmentId must be a non-empty string', 'units');
+      }
+    }
+    const { runDailyNotes } = require('../../src/scrapers/daily_notes');
+    // V-C: use P.aapCache instead of hardcoded AppData path
+    let session = { cookies: [] };
+    try {
+      if (fs.existsSync(P.aapCache)) session = JSON.parse(fs.readFileSync(P.aapCache, 'utf8'));
+    } catch (_) { /* no session yet - proceed without cookies */ }
+    return runDailyNotes(units, session, askOrcha, (msg) => {
+      logger.info(msg);
+      if (send) send('daily-notes:progress', msg);
+    });
+  });
+
+  handle('daily-notes:get-log', () => {
+    const { loadNotesLog } = require('../../src/scrapers/daily_notes');
+    return loadNotesLog();
+  });
+  // S28: Append entry to unit timeline
+  handle('ai:append-timeline', async (_e, data) => {
+    if (!data || !data.unitId || !data.entry) throw new ConfigError('unitId and entry required', 'data');
+    const store = require('../store');
+    const ns = store.load('notesStore', {});
+    const unit = ns[data.unitId] || {};
+    const existing = unit.timeline || '';
+    unit.timeline = existing ? existing + '\n' + data.entry : data.entry;
+    // Track as a manually-confirmed entry (immutable truth) so a later Orcha
+    // deep-scan regeneration merges it back in instead of discarding it when
+    // it rebuilds the timeline from raw vendor comments.
+    unit.manualEntries = Array.isArray(unit.manualEntries) ? unit.manualEntries : [];
+    unit.manualEntries.push(data.entry);
+    ns[data.unitId] = unit;
+    store.save('notesStore', ns);
+    
+    // Also update fleet_data row
+    const fd = store.load('fleetData', {});
+    if (fd.rows) {
+      const row = fd.rows.find(r => r.equipmentId === data.unitId);
+      if (row) row.repairTimeline = unit.timeline;
+      store.save('fleetData', fd);
+    }
+
+    // Notify renderer for instant refresh (parity with notes:add-timeline)
+    try {
+      const wins = require('electron').BrowserWindow.getAllWindows();
+      const main = wins.find(w => !w.isDestroyed() && w.webContents.getURL().includes('localhost:5173'));
+      if (main) main.webContents.send('notes:updated', { unitId: data.unitId, timeline: unit.timeline });
+    } catch (e) { /* no active renderer window yet */ }
+
+    logger.info('[AI] Timeline appended for ' + data.unitId + ': ' + data.entry.substring(0, 60));
+    return { ok: true };
+  });
+  // ── Unified Orcha action handler (used by bubble + main) ────────────────
+  handle('ai:orcha-action', async (_e, userMsg) => processOrchaAction(userMsg));
 
   // ── Confirmed send ─────────────────────────────────────────────────────────
   // ai:orcha-action never sends directly — it returns a pendingConfirm item
   // (recipient + real report body) and the renderer shows Send/Cancel buttons.
   // This handler fires ONLY after the user explicitly clicks Send. Regardless
   // of how the original request was phrased, nothing ever goes out without it.
-  handle('ai:confirm-send', async (_e, item) => {
-    if (!item || !item.channel) return { ok: false, error: 'Nothing to send' };
-    try {
-      if (item.channel === 'slack') {
-        const { sendSlackMessage, sendToChannel, openConversation } = require('../../src/scrapers/slack_send');
-        const contact = item.contact;
-        let r2;
-        if (contact && contact.channelId) {
-          r2 = await sendToChannel(contact.channelId, item.body);
-        } else if (contact && contact.slackId) {
-          const chId = await openConversation({ id: contact.slackId, type: 'person' });
-          r2 = await sendToChannel(chId, item.body);
-        } else if (contact && contact.email) {
-          r2 = await sendSlackMessage(contact.email, item.body);
-        } else {
-          r2 = await sendSlackMessage(item.rawRecipient, item.body);
-        }
-        const sendOk = !!(r2 && r2.ok !== false);
-        return sendOk
-          ? { ok: true, message: 'Slack sent to ' + item.recipientName }
-          : { ok: false, error: 'Slack send failed' };
-      }
-      if (item.channel === 'email') {
-        const { sendFleetEmail } = require('../scrapers/email_sender');
-        const emailRes = await sendFleetEmail({
-          to: item.to,
-          subject: item.subject,
-          htmlBody: item.body ? '<pre>' + item.body.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>' : '',
-          plainText: item.body || '',
-        });
-        if (emailRes.ok) return { ok: true, message: 'Email sent to ' + item.to };
-        // SMTP failed — open the in-app composer pre-filled so the user can still send.
-        try {
-          const _ew = require('electron').BrowserWindow.getAllWindows()[0];
-          if (_ew) _ew.webContents.send('email:compose', { to: item.to, subject: item.subject, body: item.body || '' });
-        } catch (_) {}
-        return { ok: false, error: 'SMTP failed — composer opened instead' };
-      }
-      return { ok: false, error: 'Unknown channel: ' + item.channel };
-    } catch (e) {
-      return { ok: false, error: e.message };
-    }
-  });
+  handle('ai:confirm-send', async (_e, item) => confirmSend(item));
 
 
 
@@ -884,4 +900,4 @@ function registerAIHandlers(ctx) {
   logger.info('AI IPC handlers registered');
 }
 
-module.exports = { registerAIHandlers };
+module.exports = { registerAIHandlers, processOrchaAction, confirmSend };

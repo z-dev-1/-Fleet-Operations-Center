@@ -315,6 +315,161 @@ async function _classifyAndDraft(messageText, askOrcha) {
 }
 
 // ── Main poll cycle ──────────────────────────────────────────────────────
+
+// ── "Just Me" mode ──────────────────────────────────────────────────────────
+// A channel used ONLY between the signed-in user and this app -- no
+// partner, no persona, no escalation queue. Routes straight through the
+// SAME action pipeline the in-app FAB and the phone companion use
+// (processOrchaAction / confirmSend in ../ipc/ai.js), including the
+// mandatory confirm-before-send step for Slack/email actions.
+//
+// IDENTITY PROBLEM this solves: there is no bot account here -- the app
+// posts replies by driving the SAME logged-in Slack session as the user,
+// so every message in this channel (the user's questions AND the app's
+// own past replies) is authored by the identical Slack user ID. The
+// existing "skip messages authored by myUserId" filter used for partner
+// channels would therefore filter out EVERYTHING here. Instead, the app
+// always tags its own replies with a real "<@myUserId>" self-mention
+// (using the exact same reply-tagging line the partner path already has,
+// which happens to tag the ORIGINAL SENDER -- here that sender is also
+// the user, so it doubles perfectly as a "the app wrote this" marker).
+// Any incoming message WITHOUT that tag is therefore a genuine new
+// question/command from the user, never a stray echo of a past reply.
+//
+// NOTE: replies still post under the user's own Slack identity (no bot
+// token yet), so this does NOT trigger a phone push notification --
+// Slack never notifies you of your own posts. Once a bot/webhook is
+// approved, only the send step needs to change; the read/identify logic
+// here stays the same.
+const _JM_PENDING_TTL_MS = 15 * 60 * 1000;
+const _JM_YES_RE = /^\s*(yes|yep|yeah|y|confirm|confirmed|send|send it|go ahead|do it|ok|okay|k)\s*[.!]?\s*$/i;
+const _JM_NO_RE  = /^\s*(no|nope|n|cancel|nevermind|never mind|stop|don'?t)\s*[.!]?\s*$/i;
+
+function _jmGetPending(channelId) {
+  const all = store.load('slackJustMePendingConfirm', {});
+  const p = all[channelId];
+  if (!p || !p.items || !p.items.length) return null;
+  if (Date.now() - (p.createdAt || 0) > _JM_PENDING_TTL_MS) return null;
+  return p;
+}
+
+function _jmSetPending(channelId, items) {
+  const all = store.load('slackJustMePendingConfirm', {});
+  all[channelId] = { items, createdAt: Date.now() };
+  store.save('slackJustMePendingConfirm', all);
+}
+
+function _jmClearPending(channelId) {
+  const all = store.load('slackJustMePendingConfirm', {});
+  delete all[channelId];
+  store.save('slackJustMePendingConfirm', all);
+}
+
+async function _jmHandleMessage(channelId, text) {
+  const { processOrchaAction, confirmSend } = require('../ipc/ai');
+
+  const pending = _jmGetPending(channelId);
+  if (pending) {
+    if (_JM_YES_RE.test(text)) {
+      const outcomes = [];
+      for (const item of pending.items) {
+        try {
+          const r = await confirmSend(item);
+          outcomes.push(r && r.ok ? (r.message || 'Sent.') : ('Failed: ' + (r && r.error || 'unknown error')));
+        } catch (e) {
+          outcomes.push('Failed: ' + e.message);
+        }
+      }
+      _jmClearPending(channelId);
+      return outcomes.join('\n');
+    }
+    if (_JM_NO_RE.test(text)) {
+      _jmClearPending(channelId);
+      return 'Cancelled -- nothing was sent.';
+    }
+    // Stale/unrelated reply -- drop the old pending confirm and process
+    // this message as a brand new question instead of silently ignoring it.
+    _jmClearPending(channelId);
+  }
+
+  const result = await processOrchaAction(text);
+  let replyText = result && result.text ? result.text : "Sorry, I couldn't process that.";
+  if (result && result.pendingConfirm && result.pendingConfirm.length) {
+    _jmSetPending(channelId, result.pendingConfirm);
+    replyText += '\n\nReply YES to send, or NO to cancel.';
+  }
+  return replyText;
+}
+
+async function _pollJustMeChannel(ch, myUserId, doLog) {
+  const { readMessages, sendToChannel } = require('./slack_send');
+  const messages = await readMessages(ch.id, 20); // newest-first
+  if (!messages.length) return;
+
+  // FIRST-EVER poll: baseline only, do not reply to pre-existing history
+  // (same safeguard as the partner path).
+  if (!ch.lastSeenTs) {
+    _saveChannelLastSeen(ch.id, messages[0].ts);
+    doLog(`[SlackWatch] ${ch.name} (justme): first poll — baselined at ts ${messages[0].ts}, no replies sent for existing history`);
+    return;
+  }
+
+  const mentionToken = myUserId ? '<@' + myUserId + '>' : null;
+  const newMsgs = messages
+    .filter(m => parseFloat(m.ts) > parseFloat(ch.lastSeenTs))
+    .filter(m => !(mentionToken && m.text && m.text.includes(mentionToken))) // skip our own past replies
+    .reverse(); // oldest first
+
+  if (!newMsgs.length) {
+    // Still need to advance the watermark past any self-tagged replies we
+    // just skipped, or the next poll will keep re-seeing them forever.
+    const newest = messages.filter(m => parseFloat(m.ts) > parseFloat(ch.lastSeenTs));
+    if (newest.length) _saveChannelLastSeen(ch.id, newest[0].ts);
+    return;
+  }
+
+  for (const msg of newMsgs.slice(0, MAX_MESSAGES_PER_POLL)) {
+    const existingLog = store.load('slackChannelReplies', []);
+    if (existingLog.some(e => e.id === ch.id + ':' + msg.ts)) continue;
+
+    let replyText;
+    try {
+      replyText = await _jmHandleMessage(ch.id, msg.text);
+    } catch (e) {
+      replyText = 'Error: ' + e.message;
+    }
+
+    const taggedReply = (msg.userId ? `<@${msg.userId}> ` : '') + replyText;
+    let replyTs = null;
+    try {
+      const sendResult = await sendToChannel(ch.id, taggedReply, msg.ts);
+      replyTs = sendResult.ts;
+    } catch (e) {
+      doLog(`[SlackWatch] ${ch.name} (justme): reply send FAILED: ${e.message}`);
+    }
+
+    _appendReplyLog({
+      id: ch.id + ':' + msg.ts,
+      channelId: ch.id,
+      channelName: ch.name,
+      ts: msg.ts,
+      replyTs,
+      question: msg.text,
+      reply: taggedReply,
+      wasMentioned: false,
+      wasThreadReply: false,
+      inScope: true,
+      category: null,
+      title: 'Just Me',
+      createdAt: new Date().toISOString(),
+      status: 'auto-answered',
+    });
+  }
+
+  _saveChannelLastSeen(ch.id, newMsgs[newMsgs.length - 1].ts);
+}
+
+
 async function pollChannelsOnce(log) {
   const doLog = log || ((msg) => logger.info(msg));
 
@@ -344,6 +499,22 @@ async function pollChannelsOnce(log) {
 
   for (const ch of config.channels) {
     if (ch.enabled === false) continue;
+
+    // FEATURE (2026-07-25): 'justme' mode -- a channel used ONLY between
+    // the signed-in user and this app (no partner, no persona, no
+    // escalation queue). Fully separate code path so the existing
+    // mentions/occasional logic below is completely untouched for every
+    // other channel. See _pollJustMeChannel() for the full design note.
+    const _earlyMode = ch.replyMode || config.replyMode || 'mentions';
+    if (_earlyMode === 'justme') {
+      try {
+        await _pollJustMeChannel(ch, myUserId, doLog);
+      } catch (e) {
+        doLog(`[SlackWatch] ${ch.name}: justme poll error: ${e.message}`);
+      }
+      continue;
+    }
+
     try {
       const messages = await readMessages(ch.id, 20); // newest-first
       if (!messages.length) continue;

@@ -4,9 +4,16 @@
  *
  * Polls the companion Cloudflare Worker (see companion/ folder at the repo
  * root -- a separate, independently deployed project) for chat messages
- * sent from the phone, answers them through the exact same AI pipeline the
- * in-app FAB uses (relay.ask()), and posts the reply back so the phone gets
- * a push notification with the answer.
+ * sent from the phone, answers them through the EXACT SAME AI action
+ * pipeline the in-app FAB uses (processOrchaAction() / confirmSend() in
+ * ./ai.js — same fleet context, same Slack/email send capability, same
+ * confirm-before-send safety gate), and posts the reply back so the phone
+ * gets a push notification with the answer.
+ *
+ * Because there's no clickable Send/Cancel button on the phone, a pending
+ * send (Slack or email) is tracked here and resolved by the user's next
+ * plain-text reply ("yes"/"no"). Nothing ever sends without that explicit
+ * confirmation, matching the in-app FAB's guarantee.
  *
  * Config (Settings > Integrations > Cloud Companion) is stored via the
  * shared `store` module under the 'cloudCompanion' key:
@@ -20,6 +27,13 @@ const logger = require('../utils/logger')('cloud-companion');
 const POLL_INTERVAL_MS = 10000;
 const DEFAULT_CONFIG = { enabled: false, workerUrl: '', alertSecret: '' };
 
+// How long a pending Slack/email confirmation stays valid on the phone side.
+// Past this, a stray "yes" days later can't trigger an old send.
+const PENDING_CONFIRM_TTL_MS = 15 * 60 * 1000;
+
+const YES_RE = /^\s*(yes|yep|yeah|y|confirm|confirmed|send|send it|go ahead|do it|ok|okay|k)\s*[.!]?\s*$/i;
+const NO_RE  = /^\s*(no|nope|n|cancel|nevermind|never mind|stop|don'?t)\s*[.!]?\s*$/i;
+
 let _pollTimer = null;
 let _polling = false; // reentrancy guard, in case a poll takes >10s
 
@@ -31,6 +45,57 @@ function saveConfig(partial) {
   const cfg = { ...getConfig(), ...partial };
   store.save('cloudCompanion', cfg);
   return cfg;
+}
+
+function _getPending() {
+  const p = store.load('cloudCompanionPendingConfirm', null);
+  if (!p || !p.items || !p.items.length) return null;
+  if (Date.now() - (p.createdAt || 0) > PENDING_CONFIRM_TTL_MS) return null;
+  return p;
+}
+
+function _setPending(items) {
+  store.save('cloudCompanionPendingConfirm', { items, createdAt: Date.now() });
+}
+
+function _clearPending() {
+  store.save('cloudCompanionPendingConfirm', null);
+}
+
+async function _handleIncomingMessage(text) {
+  const { processOrchaAction, confirmSend } = require('./ai');
+
+  const pending = _getPending();
+  if (pending) {
+    if (YES_RE.test(text)) {
+      const outcomes = [];
+      for (const item of pending.items) {
+        try {
+          const r = await confirmSend(item);
+          outcomes.push(r && r.ok ? (r.message || 'Sent.') : ('Failed: ' + (r && r.error || 'unknown error')));
+        } catch (e) {
+          outcomes.push('Failed: ' + e.message);
+        }
+      }
+      _clearPending();
+      return outcomes.join('\n');
+    }
+    if (NO_RE.test(text)) {
+      _clearPending();
+      return 'Cancelled — nothing was sent.';
+    }
+    // Stale/unrelated reply — drop the old pending confirm and treat this
+    // message as a brand new question instead of silently ignoring it.
+    _clearPending();
+  }
+
+  const result = await processOrchaAction(text);
+  let replyText = result && result.text ? result.text : "Sorry, I couldn't process that.";
+  if (result && result.pendingConfirm && result.pendingConfirm.length) {
+    _setPending(result.pendingConfirm);
+    replyText += '\n\nReply YES to send, or NO to cancel.';
+  }
+  return replyText;
 }
 
 async function _pollOnce() {
@@ -51,14 +116,13 @@ async function _pollOnce() {
     if (!messages || messages.length === 0) return;
 
     logger.info(`Received ${messages.length} phone chat message(s)`);
-    const relay = require('../orcha/relay');
 
     for (const msg of messages) {
       let replyText;
       try {
-        replyText = await relay.ask(msg.text);
+        replyText = await _handleIncomingMessage(msg.text);
       } catch (askErr) {
-        logger.warn('relay.ask failed for phone message: ' + askErr.message);
+        logger.warn('AI pipeline failed for phone message: ' + askErr.message);
         replyText = "Sorry, I couldn't reach the AI assistant just now. Try again in a bit.";
       }
       try {

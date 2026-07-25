@@ -420,6 +420,11 @@ const CATEGORY_META = {
 
 async function _startChannelWatchPoll() {
   if (_channelWatchTimer) return;
+  // Lowered 30s -> 10s (2026-07-25) so a 'justme' personal channel gets
+  // checked roughly every 10s as requested. Shared timer, so partner
+  // channels get polled more often too -- harmless (faster replies there
+  // as a side benefit), same pollChannelsOnce() re-entrancy lock still
+  // protects against overlap either way.
   _channelWatchTimer = setInterval(async () => {
     try {
       const result = await slack.pollChannelWatch();
@@ -434,7 +439,7 @@ async function _startChannelWatchPoll() {
         if (_activeTab === 'review') _refreshReviewQueue();
       }
     } catch (e) { /* silent -- same pattern as DM poller above */ }
-  }, 30000);
+  }, 10000);
 }
 
 // FEATURE (2026-07-23): DM Auto-Reply poll -- mirrors _startChannelWatchPoll

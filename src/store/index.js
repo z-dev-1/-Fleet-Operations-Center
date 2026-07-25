@@ -81,6 +81,8 @@ const REGISTRY = {
 
   // Cloud Companion phone chat bridge (2026-07-24)
   cloudCompanion: () => path.join(P.dataDir, 'cloud_companion.json'),
+  cloudCompanionPendingConfirm: () => path.join(P.dataDir, 'cloud_companion_pending_confirm.json'),
+  slackJustMePendingConfirm: () => path.join(P.dataDir, 'slack_justme_pending_confirm.json'),
   slackChannelReplies:     () => path.join(P.dataDir, 'slack_channel_replies.json'),
   slackDMAutoReplyConfig:  () => path.join(P.dataDir, 'slack_dm_autoreply_config.json'),
   slackDMReplies:          () => path.join(P.dataDir, 'slack_dm_replies.json'),
