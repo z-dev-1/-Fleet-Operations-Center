@@ -303,7 +303,18 @@ function initWindows(ctx) {
       // window out of any backdrop material entirely.
       backgroundMaterial: 'none',
       alwaysOnTop: true,
-      resizable: false, skipTaskbar: true, hasShadow: false,
+      // WINDOWS RESIZE REPAINT FIX (2026-07-25): this window is resized
+      // programmatically at runtime (56x56 mini <-> ~400x580 expanded, see
+      // 'bubble:resize' handler below) every time the panel opens/closes.
+      // resizable:false + a layered/transparent surface is a known bad
+      // combination on Windows -- DWM treats non-resizable windows as
+      // fixed-size and can fail to re-invalidate/repaint the compositor
+      // surface for a *programmatic* setSize() call on one, leaving it
+      // blank until some unrelated event forces a repaint. frame:false
+      // already removes any visible border/handles, so there is no UX
+      // downside to allowing resize -- the user still has nothing to
+      // drag, there's just no frame to grab.
+      resizable: true, skipTaskbar: true, hasShadow: false,
       webPreferences: {
         preload:          path.join(ROOT_DIR, 'preload.js'),
         contextIsolation: true,
