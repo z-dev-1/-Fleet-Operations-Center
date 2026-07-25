@@ -215,6 +215,18 @@ app.whenReady().then(async () => {
       if (win && !win.isDestroyed())
         win.webContents.send(channel, payload);
     } catch (_) {}
+    // BUBBLE MIRROR (2026-07-25): the bubble window now runs the exact same
+    // renderer (bridge.js + orcha-fab.js) as the main window, so it needs
+    // the exact same real-time pushes (fleet:data, fleet:status, etc.) --
+    // otherwise its Alerts tab (and anything else keyed off live fleet
+    // state) sees a permanently-empty default and never updates. Without
+    // this, the bubble was a "mirror" of the UI but silently starved of
+    // the data that UI depends on.
+    try {
+      const bubble = _windowApi && _windowApi.getBubbleWin && _windowApi.getBubbleWin();
+      if (bubble && !bubble.isDestroyed())
+        bubble.webContents.send(channel, payload);
+    } catch (_) {}
   }
 
   // pushData: guards against out-of-order stale pushes arriving after a fresh one

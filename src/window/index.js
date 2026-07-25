@@ -292,7 +292,8 @@ function initWindows(ctx) {
     bubbleWin = new BrowserWindow({
       width: 56, height: 56,
       x: savedPos.x, y: savedPos.y,
-      frame: false, transparent: true, alwaysOnTop: true,
+      frame: false, transparent: true, backgroundColor: '#00000000',
+      alwaysOnTop: true,
       resizable: false, skipTaskbar: true, hasShadow: false,
       webPreferences: {
         preload:          path.join(ROOT_DIR, 'preload.js'),
@@ -1035,7 +1036,19 @@ function initWindows(ctx) {
       }
     });
 
-    ipcMain.on('renderer:ready', () => {
+    ipcMain.on('renderer:ready', (event) => {
+      // BUBBLE MIRROR (2026-07-25): this handler used to be sender-unaware
+      // (always targeted mainWindow + always forced a fresh AAP sync). Now
+      // that the bubble window mounts the same renderer tree and also fires
+      // window.fleet.signalReady() on load, treat it distinctly: just hand
+      // it the cached snapshot directly, no forced resync (the mirror fix
+      // to _send() in app.js already keeps it live going forward).
+      const isMainWindow = mainWindow && event.sender === mainWindow.webContents;
+      if (!isMainWindow) {
+        const cached = store.load('fleetData', null);
+        if (cached) event.sender.send('fleet:data', { ...cached, stale: true });
+        return;
+      }
       logger.info('renderer:ready \u2014 pushing cached data...');
       const cached = store.load('fleetData', null);
       if (cached) {
@@ -1254,7 +1267,14 @@ function initWindows(ctx) {
   });
 
   ipcMain.on('bubble:resize', (_e, w, h) => {
-    if (bubbleWin && !bubbleWin.isDestroyed()) bubbleWin.setSize(w, h);
+    if (bubbleWin && !bubbleWin.isDestroyed()) {
+      bubbleWin.setSize(w, h);
+      // WINDOWS TRANSPARENCY FIX (2026-07-25): on Windows, a runtime
+      // setSize() on a frameless transparent BrowserWindow can drop DWM's
+      // transparency compositing and paint an opaque fallback color
+      // instead. Re-assert it after every resize (expand AND collapse).
+      bubbleWin.setBackgroundColor('#00000000');
+    }
     // CHAT HEAD (2026-07-24): the FAB panel opening/closing is what drives
     // these resize calls (56x56 mini <-> ~400x580 expanded -- see
     // _togglePanel() in orcha-fab.js), so reuse it as the signal for
