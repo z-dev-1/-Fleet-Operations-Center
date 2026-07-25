@@ -20,7 +20,14 @@ const { handle, requireString, requireStringMax } = require('./_safe');
 
 // ── Issue #5: Slack field caps ───────────────────────────────────────────────
 const MAX_RECIPIENT_LEN = 128;    // Slack channel name / user handle
-const MAX_MESSAGE_LEN   = 8000;   // Slack API message body limit
+// Slack's real chat.postMessage text-field limit is 40,000 characters --
+// 8000 was an overly conservative guess that silently rejected real fleet
+// reports (a full site report regularly runs 10k-30k+ chars). The renderer
+// used to swallow this ConfigError as if the send had succeeded ("says sent
+// but no action" -- fixed separately in orcha-fab.js), so the failure was
+// invisible; this raises the cap to match Slack's actual limit instead of
+// truncating/rejecting real data.
+const MAX_MESSAGE_LEN   = 40000;  // Slack API message body limit
 
 function registerSlackIPC() {
   // FEATURE (2026-07-16): the handler below only checks that a token file

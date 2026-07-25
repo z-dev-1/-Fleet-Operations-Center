@@ -230,7 +230,10 @@ function _wireReplyBox(box, msg) {
     const originalLabel = sendBtn.textContent;
     sendBtn.textContent = 'Sending\u2026';
     try {
-      await slack.sendToChannel({ channelId: msg.channelId, message: finalText });
+      const sendResult = await slack.sendToChannel({ channelId: msg.channelId, message: finalText });
+      if (!sendResult || sendResult.ok === false) {
+        throw new Error((sendResult && sendResult.error) || 'Send failed');
+      }
       _appendMsg('oc-msg--slack-out', finalText, '\u2705 You \u2192 ' + (msg.user || 'Slack'));
       box.remove();
     } catch (e) {
@@ -722,7 +725,10 @@ async function _sendSlackReply() {
     msgsEl.scrollTop = msgsEl.scrollHeight;
   }
   try {
-    await slack.sendToChannel({ channelId: _activeSlackChannel.id, message: val });
+    const sendResult = await slack.sendToChannel({ channelId: _activeSlackChannel.id, message: val });
+    if (!sendResult || sendResult.ok === false) {
+      throw new Error((sendResult && sendResult.error) || 'Send failed');
+    }
   } catch (e) {
     if (msgsEl) {
       const d = document.createElement('div');
@@ -1046,16 +1052,27 @@ function _openQuickCompose(contact, prefill) {
     sendBtn.textContent = 'Sending…';
     statusEl.textContent = '';
     try {
+      let sendResult;
       if (contact.channelId) {
         // Fast path: DM channel already known (person has messaged us before)
-        await slack.sendToChannel({ channelId: contact.channelId, message: msg });
+        sendResult = await slack.sendToChannel({ channelId: contact.channelId, message: msg });
       } else {
         // Slow path: no cached channel ID — resolve via email or name.
         // slack.send() handles lookupByEmail -> conversations.open -> postMessage.
         const recipient = contact.email || contact.name;
         if (!recipient) throw new Error('Contact has no email or name to look up in Slack');
         statusEl.textContent = 'Looking up Slack user…';
-        await slack.send({ recipient, message: msg });
+        sendResult = await slack.send({ recipient, message: msg });
+      }
+      // IPC handlers never reject on a known/expected failure (safeIPC catches
+      // and resolves { ok:false, error } instead so Electron does not mangle
+      // the error across the bridge) -- so a resolved promise here does NOT
+      // mean the send actually succeeded. Must check .ok explicitly, or every
+      // failure (message too long, recipient not found, etc.) silently shows
+      // "Sent" while nothing goes out. This was the root cause of "it says
+      // sent but no action".
+      if (!sendResult || sendResult.ok === false) {
+        throw new Error((sendResult && sendResult.error) || 'Send failed');
       }
       statusEl.textContent = '✓ Sent';
       statusEl.className = 'oc-reply-status oc-qc-status oc-reply-status--ok';
@@ -1178,33 +1195,20 @@ async function _send() {
       // Renders the actual "send my data" vs "ask them for data" prompt for a
       // resolved contact. Shared by both the direct-match path and the
       // pick-a-contact path below so neither one re-guesses intent.
-      const _renderDisambig = (target) => {
+      // Dispatches the send-data intent directly, without asking the user to
+      // confirm "send TO" vs "ask FOR" -- the phrasing already tells us which.
+      // Default is SEND (the overwhelmingly common case: "message X with data
+      // for Y"). Only routed to the AI ask-flow when the message clearly asks
+      // to request/pull data FROM the contact and contains no send verb.
+      const _dispatchIntent = async (target) => {
         inp.value = ''; inp.style.height = 'auto';
         const isEmail = /\bemail\b/i.test(val) ||
           (!target.slackId && !target.channelId && !!target.email);
+        const isAsk = /\b(ask|request)\b/i.test(val) &&
+          !/\b(send|give|share|forward|here\s+is|attached)\b/i.test(val);
+        const st = document.getElementById('orcha-status');
 
-        const existingDis = document.getElementById('oc-disambig');
-        if (existingDis) existingDis.remove();
-        const disambig = document.createElement('div');
-        disambig.id = 'oc-disambig';
-        disambig.className = 'oc-quick-compose';
-        disambig.innerHTML =
-          '<div style="font-size:12px;color:var(--txt2)">Are you <strong>sending data TO ' + _esc(target.name) + '</strong>, or <strong>asking THEM for data</strong>?</div>' +
-          '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-            '<button class="oc-reply-btn oc-reply-btn--ai oc-dis-send">📤 Send my fleet data</button>' +
-            '<button class="oc-reply-btn oc-dis-ask">❓ Ask them for data</button>' +
-            '<button class="oc-qc-cancel oc-dis-cancel">✕</button>' +
-          '</div>';
-        const tabChatEl  = document.getElementById('oc-tab-chat');
-        const inputRowEl  = tabChatEl && tabChatEl.querySelector('.oc-input-row');
-        if (tabChatEl) tabChatEl.insertBefore(disambig, inputRowEl || null);
-
-        disambig.querySelector('.oc-dis-cancel').addEventListener('click', () => disambig.remove());
-
-        // ── Ask path: let AI generate a question as normal
-        disambig.querySelector('.oc-dis-ask').addEventListener('click', async () => {
-          disambig.remove();
-          const st = document.getElementById('orcha-status');
+        if (isAsk) {
           if (st) st.textContent = '\u25CF Thinking...';
           try {
             const r2 = await window.ai.orchaAction(val);
@@ -1212,39 +1216,36 @@ async function _send() {
             _addHistory('assistant', (r2 && r2.text) || '');
           } catch(e2) { _appendMsg('oc-msg--orcha', '\u274c ' + e2.message); }
           if (st) st.textContent = '\u25CF Ready';
-        });
+          return;
+        }
 
-        // ── Send path: build real fleet report, skip AI entirely
-        disambig.querySelector('.oc-dis-send').addEventListener('click', async () => {
-          disambig.remove();
-          const st = document.getElementById('orcha-status');
-          if (st) st.textContent = '\u25CF Building report...';
-          try {
-            const rr = await window.ai.buildReport({ query: val });
-            if (st) st.textContent = '\u25CF Ready';
-            if (rr && rr.ok) {
-              const subject = 'Fleet Report \u2014 ' + rr.label + ' \u2014 ' +
-                new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-              if (isEmail) {
-                _openEmailCompose(target, rr.report, subject);
-              } else {
-                _openQuickCompose(target, rr.report);
-              }
-              _appendMsg('oc-msg--orcha', '\u2705 ' + rr.label + ' report ready for ' + _esc(target.name) + ' — review and click Send ➤');
+        // Send path: build real fleet report, skip AI entirely
+        if (st) st.textContent = '\u25CF Building report...';
+        try {
+          const rr = await window.ai.buildReport({ query: val });
+          if (st) st.textContent = '\u25CF Ready';
+          if (rr && rr.ok) {
+            const subject = 'Fleet Report \u2014 ' + rr.label + ' \u2014 ' +
+              new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            if (isEmail) {
+              _openEmailCompose(target, rr.report, subject);
             } else {
-              _appendMsg('oc-msg--orcha', '\u26a0\ufe0f ' + (rr && rr.error || 'Could not build report — sync fleet data first.'));
+              _openQuickCompose(target, rr.report);
             }
-          } catch(e3) {
-            if (st) st.textContent = '\u25CF Ready';
-            _appendMsg('oc-msg--orcha', '\u274c ' + e3.message);
+            _appendMsg('oc-msg--orcha', '\u2705 ' + rr.label + ' report ready for ' + _esc(target.name) + ' — review and click Send ➤');
+          } else {
+            _appendMsg('oc-msg--orcha', '\u26a0\ufe0f ' + (rr && rr.error || 'Could not build report — sync fleet data first.'));
           }
-        });
+        } catch(e3) {
+          if (st) st.textContent = '\u25CF Ready';
+          _appendMsg('oc-msg--orcha', '\u274c ' + e3.message);
+        }
       };
 
       if (_match) {
         _appendMsg('oc-msg--user', val);
         _addHistory('user', val);
-        _renderDisambig(_match);
+        _dispatchIntent(_match);
         return;
       }
 
@@ -1278,7 +1279,7 @@ async function _send() {
         picker.querySelectorAll('.oc-pick-contact').forEach(btn => {
           btn.addEventListener('click', () => {
             picker.remove();
-            _renderDisambig(_nonDomC[Number(btn.dataset.idx)]);
+            _dispatchIntent(_nonDomC[Number(btn.dataset.idx)]);
           });
         });
         return;

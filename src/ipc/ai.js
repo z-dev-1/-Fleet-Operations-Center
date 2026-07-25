@@ -485,9 +485,17 @@ function registerAIHandlers(ctx) {
 
           // Resolve recipient: contact book first (exact match), then fuzzy Slack search.
           // This prevents partial names like "zila" from matching the wrong Slack user.
-          const rLower = a.recipient.toLowerCase();
+          // Strip a leading @ -- the AI copies the exact "@slackId (Name)"
+          // format shown in KNOWN SLACK CONTACTS, so a.recipient often comes
+          // back as the literal Slack ID (e.g. "@U024WLE7Q11") rather than a
+          // name. The old name-only .includes() check never matched that, so
+          // the contact fell through to a raw findUser() search for the
+          // literal ID string and failed with "Could not find recipient".
+          const rLower = a.recipient.toLowerCase().replace(/^@/, '');
           const matchedContact = allContacts.find(ct =>
-            ct.name && ct.name.toLowerCase().includes(rLower)
+            (ct.name && ct.name.toLowerCase().includes(rLower)) ||
+            (ct.slackId && ct.slackId.toLowerCase() === rLower) ||
+            (ct.email && ct.email.toLowerCase() === rLower)
           );
 
           // Never send automatically — regardless of how the user phrased the
