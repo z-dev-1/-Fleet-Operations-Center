@@ -513,7 +513,13 @@ async function _jmHandleMessage(channelId, text, signal, jobId) {
 
   logger.info(`[SlackWatch][${jobId || '?'}] processOrchaAction started`);
   const result = await processOrchaAction(text, { signal, requestId: jobId });
-  let replyText = result && result.text ? result.text : "Sorry, I couldn't process that.";
+  // If processOrchaAction returned a hard error (ok===false), throw so
+  // _runJustMeJob's catch block replaces it with the friendly fallback message
+  // instead of blindly posting "Error:Aborted" (or any other raw error) to Slack.
+  if (!result || result.ok === false) {
+    throw new Error(result ? result.text : 'processOrchaAction returned no result');
+  }
+  let replyText = result.text || "Sorry, I couldn't process that.";
   if (result && result.pendingConfirm && result.pendingConfirm.length) {
     _jmSetPending(channelId, result.pendingConfirm);
     replyText += '\n\nReply YES to send, or NO to cancel.';
