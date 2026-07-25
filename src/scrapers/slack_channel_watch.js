@@ -442,7 +442,7 @@ async function _pollJustMeChannel(ch, myUserId, doLog) {
     const taggedReply = (msg.userId ? `<@${msg.userId}> ` : '') + replyText;
     let replyTs = null;
     try {
-      const sendResult = await sendToChannel(ch.id, taggedReply);
+      const sendResult = await sendToChannel(ch.id, taggedReply, msg.ts);
       replyTs = sendResult.ts;
     } catch (e) {
       doLog(`[SlackWatch] ${ch.name} (justme): reply send FAILED: ${e.message}`);
