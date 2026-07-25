@@ -397,4 +397,11 @@ contextBridge.exposeInMainWorld('bubble', {
   resize:         (w, h)   => ipcRenderer.send('bubble:resize', w, h),
   reposition:     ()       => ipcRenderer.send('bubble:reposition'),
   repositionMini: ()       => ipcRenderer.send('bubble:reposition-mini'),
+  // CHAT FLOATER TRANSPARENCY (2026-07-25): exposed on the shared preload
+  // so BOTH the main window's Settings panel (to set it) and the bubble
+  // window itself (to read/apply it) can use the same API -- the IPC
+  // handlers live in the main process regardless of which renderer calls.
+  getOpacity:       ()       => ipcRenderer.invoke('bubble:get-opacity'),
+  setOpacity:       (v)      => ipcRenderer.send('bubble:set-opacity', v),
+  onOpacityChanged: (cb)     => ipcRenderer.on('bubble:opacity-changed', (_e, v) => cb(v)),
 });

@@ -349,6 +349,15 @@ function initWindows(ctx) {
           bubbleWin.webContents.send('bubble:badge', unavail);
       });
     }
+
+    // CHAT FLOATER TRANSPARENCY (2026-07-25): apply the user's saved panel
+    // opacity as soon as the bubble finishes loading, so it doesn't flash
+    // fully opaque then jump to the saved value.
+    bubbleWin.webContents.once('did-finish-load', () => {
+      if (!bubbleWin || bubbleWin.isDestroyed()) return;
+      const bubbleCfg = store.load('bubbleConfig', { opacity: 100 });
+      bubbleWin.webContents.send('bubble:opacity-changed', bubbleCfg.opacity);
+    });
   }
 
   function hideBubble() {
@@ -1309,6 +1318,23 @@ function initWindows(ctx) {
   });
 
   ipcMain.on('bubble:hide', () => { hideBubble(); });
+
+  // CHAT FLOATER TRANSPARENCY (2026-07-25): user-controlled opacity for the
+  // desktop bubble's expanded panel (Settings -> UI -> Transparency). Persists
+  // across restarts via the store; pushed live to the bubble if it's open.
+  ipcMain.handle('bubble:get-opacity', () => {
+    const cfg = store.load('bubbleConfig', { opacity: 100 });
+    return cfg.opacity;
+  });
+
+  ipcMain.on('bubble:set-opacity', (_e, opacity) => {
+    const clamped = Math.max(40, Math.min(100, Number(opacity) || 100));
+    const cfg = store.load('bubbleConfig', {});
+    cfg.opacity = clamped;
+    store.save('bubbleConfig', cfg);
+    if (bubbleWin && !bubbleWin.isDestroyed())
+      bubbleWin.webContents.send('bubble:opacity-changed', clamped);
+  });
 
   ipcMain.on('bubble:open-unit', (_e, unitId) => {
     hideBubble();

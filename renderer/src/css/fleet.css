@@ -5120,6 +5120,16 @@ tr.selected td {
   box-shadow: var(--shadow-elevated), 0 0 40px rgba(0,0,0,.3) !important;
 }
 
+/* Chat Floater (desktop bubble window) transparency control. Scoped to
+   body.bubble-window only (set in bubble-fab.html) so the in-app FAB's
+   panel styling above is completely unaffected. --bubble-panel-alpha is
+   set by bubble-fab.html from the user's Settings > Chat Floater Opacity
+   slider (src/window/index.js IPC: bubble:get-opacity/set-opacity). */
+body.bubble-window #orcha-panel,
+body.bubble-window .orcha-panel {
+  background: rgba(22, 27, 34, var(--bubble-panel-alpha, 1)) !important;
+}
+
 /* ── Settings Panel ────────────────────────────────────────────────────────── */
 .settings-panel {
   background: var(--gradient-surface) !important;

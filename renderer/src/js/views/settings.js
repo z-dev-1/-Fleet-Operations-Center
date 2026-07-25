@@ -189,6 +189,13 @@ function _html() {
               <span class="sd-slider-val" id="sl-blur-val">4px</span>
             </div>
           </div>
+          <div class="sd-slider-row">
+            <div class="sd-label">Chat Floater Opacity</div>
+            <div class="sd-slider-wrap">
+              <input type="range" class="sd-slider" id="sl-bubble-opacity" min="40" max="100" value="100"/>
+              <span class="sd-slider-val" id="sl-bubble-opacity-val">100%</span>
+            </div>
+          </div>
         </div>
 
         <!-- Layout -->
@@ -2586,6 +2593,25 @@ function _esc(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 }
 
+// ── Chat Floater (desktop bubble) opacity control ───────────────────────────
+function _wireChatFloaterSection() {
+  const slider = document.getElementById('sl-bubble-opacity');
+  const valEl  = document.getElementById('sl-bubble-opacity-val');
+  if (!slider || !valEl || !window.bubble || !window.bubble.getOpacity) return;
+
+  window.bubble.getOpacity().then((v) => {
+    const val = Number(v) || 100;
+    slider.value = String(val);
+    valEl.textContent = val + '%';
+  }).catch(() => {});
+
+  slider.addEventListener('input', () => {
+    const val = Number(slider.value);
+    valEl.textContent = val + '%';
+    window.bubble.setOpacity(val);
+  });
+}
+
 // ── Export: init ──────────────────────────────────────────────────────────────
 export function init() {
   // Inject drawer HTML into body
@@ -2606,6 +2632,11 @@ export function init() {
 
   // Wire UI tab controls
   _wireUITab();
+
+  // Wire Chat Floater opacity control (IPC-backed, separate from the
+  // localStorage-based UI theme sliders above, since it must reach the
+  // bubble BrowserWindow's own separate renderer process).
+  _wireChatFloaterSection();
 
   // Wire all integration sections
   

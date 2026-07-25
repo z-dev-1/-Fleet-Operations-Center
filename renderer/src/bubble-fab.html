@@ -24,6 +24,21 @@
     // bubble window (vs. mounted inside the full app window), so panel
     // open/close also resizes/repositions the actual OS window.
     window.__isBubbleWindow = true;
+    // Scopes the chat-floater-opacity CSS rule (fleet.css) to this window
+    // only, so the main app's Orcha panel styling is never affected.
+    document.body.classList.add('bubble-window');
+  </script>
+  <script>
+    // Apply the user's saved chat-floater opacity on load, and keep it
+    // live-updated if changed from Settings while the bubble is open.
+    if (window.bubble && window.bubble.getOpacity) {
+      const applyOpacity = (v) => {
+        const alpha = Math.max(0.4, Math.min(1, Number(v) / 100));
+        document.documentElement.style.setProperty('--bubble-panel-alpha', String(alpha));
+      };
+      window.bubble.getOpacity().then(applyOpacity).catch(() => {});
+      window.bubble.onOpacityChanged(applyOpacity);
+    }
   </script>
   <script type="module">
     import { init as initBridge }   from './js/bridge.js';
