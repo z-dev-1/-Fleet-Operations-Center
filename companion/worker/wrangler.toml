@@ -7,4 +7,4 @@ compatibility_flags = ["nodejs_compat"]
 # Then paste the returned id below.
 [[kv_namespaces]]
 binding = "COMPANION_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "ca115114b7ff41b19cbe5210df00b457"

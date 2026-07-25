@@ -2,7 +2,7 @@
 //
 // !!! SET THIS after you deploy the worker (see companion/README.md) !!!
 // Looks like: https://fleet-companion.<your-subdomain>.workers.dev
-const WORKER_BASE = 'https://fleet-companion.YOUR-SUBDOMAIN.workers.dev';
+const WORKER_BASE = 'https://fleet-companion.z-fleet.workers.dev';
 
 const statusEl = document.getElementById('status');
 const btnEnable = document.getElementById('btn-enable');
