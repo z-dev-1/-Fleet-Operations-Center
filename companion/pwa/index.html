@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Fleet Ops Companion</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#161b22" />
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    min-height: 100vh;
+    padding: env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 16px) 16px;
+  }
+  h1 { font-size: 20px; margin: 24px 0 4px; color: #f0f6fc; }
+  .sub { color: #8b949e; font-size: 13px; margin-bottom: 20px; }
+  button {
+    width: 100%;
+    padding: 14px;
+    border-radius: 10px;
+    border: 1px solid rgba(88,166,255,.35);
+    background: linear-gradient(135deg, rgba(88,166,255,.25), rgba(210,168,255,.2));
+    color: #f0f6fc;
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 10px;
+  }
+  button:disabled { opacity: .5; }
+  #status { font-size: 13px; color: #8b949e; margin-bottom: 24px; min-height: 18px; }
+  .alert-card {
+    background: #161b22;
+    border: 1px solid rgba(88,166,255,.2);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+  }
+  .alert-title { font-weight: 600; color: #f0f6fc; font-size: 14px; }
+  .alert-body { font-size: 13px; color: #8b949e; margin-top: 4px; }
+  .alert-time { font-size: 11px; color: #6e7681; margin-top: 6px; }
+  .empty { color: #6e7681; font-size: 13px; text-align: center; padding: 40px 0; }
+</style>
+</head>
+<body>
+  <h1>Fleet Ops Companion</h1>
+  <div class="sub">Alerts from the Fleet Operations Center desktop app</div>
+
+  <button id="btn-enable">Enable Notifications</button>
+  <div id="status"></div>
+
+  <div id="alerts-list"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
