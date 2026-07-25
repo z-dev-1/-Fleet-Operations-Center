@@ -365,6 +365,24 @@ function _jmClearPending(channelId) {
   store.save('slackJustMePendingConfirm', all);
 }
 
+// BUGFIX (2026-07-25): processOrchaAction() was awaited with no upper
+// bound. If the underlying AI pipeline hangs (observed: claude-code
+// fallback queue can hang indefinitely with no timeout timer), this call
+// never resolves -- and since _jmHandleMessage() is awaited inside
+// pollChannelsOnce() under _pollLock, the WHOLE Slack "Just Me" poll gets
+// stuck forever with zero further logging. Observed live: messages sat
+// unanswered for 3+ hours with no self-recovery. Fix: race against a hard
+// timeout so a hung AI call can never hold the poll lock past this bound.
+const JM_AI_TIMEOUT_MS = 90 * 1000; // generous -- real answers finish in seconds
+function _withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
 async function _jmHandleMessage(channelId, text) {
   const { processOrchaAction, confirmSend } = require('../ipc/ai');
 
@@ -392,7 +410,7 @@ async function _jmHandleMessage(channelId, text) {
     _jmClearPending(channelId);
   }
 
-  const result = await processOrchaAction(text);
+  const result = await _withTimeout(processOrchaAction(text), JM_AI_TIMEOUT_MS, 'processOrchaAction');
   let replyText = result && result.text ? result.text : "Sorry, I couldn't process that.";
   if (result && result.pendingConfirm && result.pendingConfirm.length) {
     _jmSetPending(channelId, result.pendingConfirm);
