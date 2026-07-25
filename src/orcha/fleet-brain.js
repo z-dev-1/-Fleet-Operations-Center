@@ -185,38 +185,21 @@ function _saveSession(sid) {
 }
 
 // ─── CONNECTION ─────────────────────────────────────────────────────────────
-function _isRemoteModeConfigured() {
-  try {
-    if (fs.existsSync(P.orchaConfig)) {
-      const cfg = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
-      return cfg.mode === 'remote';
-    }
-  } catch (_) {}
-  return false;
-}
+// orcha_config.json mode:"local" means "auto-detect Orcha running on THIS
+// machine" (the normal case whenever the user has the Orcha desktop app open)
+// -- it is NOT a signal that no server will ever be there. So we always
+// attempt the WS connection. The problem this used to cause was purely about
+// SPEED of detecting "Orcha isn't open right now": on this machine a refused
+// connection can hang at the TCP level for a long time before erroring, so a
+// single failed attempt could block real answers for minutes. Fix: give each
+// connect() attempt a short explicit timeout (CONNECT_TIMEOUT_MS) and force-fail
+// it via ws.terminate() if it hasn't opened by then, instead of waiting on the OS.
+const CONNECT_TIMEOUT_MS = 3000;
 
 function connect() {
   // Don't attempt WS if we already gave up — local mode handles calls until retry window
   if (_wsGaveUp) return;
   if (_ws && (_ws.readyState === WebSocket.OPEN || _ws.readyState === WebSocket.CONNECTING)) return;
-
-  // orcha_config.json explicitly says "local" (no separate Orcha server is ever
-  // expected to run) -- attempting ws://localhost:4799 here is guaranteed to fail
-  // and, on this machine, the TCP connect attempt can hang for a long time before
-  // erroring, so every chat message would time out on a doomed WS call and fall
-  // through to the bare, context-less Claude Code fallback for MINUTES after every
-  // app launch. Skip WS entirely and go straight to local (context-injected) mode.
-  if (!_isRemoteModeConfigured()) {
-    if (!_wsGaveUp) {
-      _wsGaveUp = true;
-      logger.info('[fleet-brain] Orcha mode is "local" (no remote WS server configured) -- using local AI mode, skipping WS entirely');
-      if (_localAskFn && _queue.length) {
-        const queued = _queue.splice(0);
-        queued.forEach(req => _localAsk(req.prompt).then(req.resolve).catch(req.reject));
-      }
-    }
-    return;
-  }
 
   const url = _getWsUrl();
   logger.info('Connecting to Orcha at ' + url + '...');
@@ -224,12 +207,21 @@ function connect() {
   try { _ws = new WebSocket(url); }
   catch (e) { logger.warn('WS constructor error: ' + e.message); _scheduleReconnect(); return; }
 
+  const connectTimer = setTimeout(() => {
+    if (_ws && _ws.readyState === WebSocket.CONNECTING) {
+      logger.info('WS connect attempt timed out after ' + CONNECT_TIMEOUT_MS + 'ms (Orcha likely not open) — forcing fast failure');
+      _ws.terminate();
+    }
+  }, CONNECT_TIMEOUT_MS);
+
   _ws.on('open', () => {
+    clearTimeout(connectTimer);
     _failCount = 0;
     logger.info('WS open — waiting for connected signal');
   });
 
   _ws.on('error', (err) => {
+    clearTimeout(connectTimer);
     _failCount++;
     const logFn = _failCount <= 5 ? 'warn' : 'info';
     logger[logFn]('WS error (attempt ' + _failCount + '): ' + (err.message || 'unknown'));
@@ -256,6 +248,7 @@ function connect() {
   });
 
   _ws.on('close', () => {
+    clearTimeout(connectTimer);
     logger.info('WS closed');
     _connected = false;
     _ready     = false;
