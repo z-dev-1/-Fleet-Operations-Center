@@ -1815,6 +1815,7 @@ function _wireDMAutoReply() {
 
       return `<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--el);border:1px solid var(--bdr);border-radius:6px">
         <span style="flex:1;font-size:11px;font-weight:600;color:var(--txt2)">${name}</span>
+        ${t.isGroup ? '<span style="font-size:9px;font-weight:700;color:var(--txt2);background:var(--bdr);padding:1px 6px;border-radius:10px">Group</span>' : ''}
         ${count ? `<span style="font-size:9px;font-weight:700;color:var(--acc2);background:var(--adim);padding:1px 6px;border-radius:10px">${count} repl${count === 1 ? 'y' : 'ies'}</span>` : ''}
         <span style="font-size:9px;color:var(--mut)">last seen ${rel}</span>
       </div>`;

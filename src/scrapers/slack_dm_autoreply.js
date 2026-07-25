@@ -56,10 +56,13 @@ function saveDMAutoReplyConfig(config) {
   return { ok: true };
 }
 
-function _saveThreadLastSeen(channelId, name, ts) {
+function _saveThreadLastSeen(channelId, name, ts, isGroup) {
   const cfg = getDMAutoReplyConfig();
   if (!cfg.threads) cfg.threads = {};
-  cfg.threads[channelId] = { name, lastSeenTs: ts };
+  // FEATURE (2026-07-25): persist isGroup alongside name/lastSeenTs so the
+  // Settings UI's monitored-thread list can show a "Group" badge instead of
+  // silently looking identical to a 1:1 DM.
+  cfg.threads[channelId] = { name, lastSeenTs: ts, isGroup: !!isGroup };
   store.save('slackDMAutoReplyConfig', cfg);
 }
 
@@ -93,12 +96,24 @@ function updateDMReviewItem(id, updates) {
 // Uses relay.ask() -- full fallback chain (fleet-brain -> WS -> Claude Code
 // -> Bedrock). The DM persona + conversation context are carried in the
 // prompt, so no persistent session is required here.
-async function _classifyAndDraft(messageText, historyMsgs) {
+async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
   // historyMsgs: optional array of strings ("Speaker: text") from recent
   // conversation, oldest-first, to give the AI context before replying.
   let contextBlock = '';
   if (historyMsgs && historyMsgs.length) {
     contextBlock = '\n\nRecent conversation context (for reference):\n' + historyMsgs.join('\n') + '\n';
+  }
+  // FEATURE (2026-07-25): group DM awareness. A reply in a group DM is
+  // visible to everyone in the thread, not just the person who sent the
+  // triggering message -- the model needs to know that (so it doesn't, say,
+  // address something privately) and who specifically asked, since
+  // "Recent conversation context" alone doesn't make the group nature or
+  // current speaker obvious.
+  let groupBlock = '';
+  if (groupContext && groupContext.isGroup) {
+    groupBlock = '\n\nThis is a GROUP direct message (not 1:1) with: ' + groupContext.memberNames.join(', ') +
+      '. Your reply will be visible to everyone in this group, not just the person below.' +
+      (groupContext.speakerName ? (' The message below was sent by: ' + groupContext.speakerName + '.') : '');
   }
   // Inject local time so the AI uses the correct time-of-day greeting
   // (morning/afternoon/evening) rather than guessing from UTC.
@@ -106,7 +121,7 @@ async function _classifyAndDraft(messageText, historyMsgs) {
   const _timeStr = _now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
   const _dateStr = _now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   const timeContext = '\n\nCurrent local time: ' + _timeStr + ', ' + _dateStr + '.';
-  const prompt = PERSONA_SYSTEM_PROMPT + timeContext + contextBlock + '\n\nIncoming DM:\n' + messageText;
+  const prompt = PERSONA_SYSTEM_PROMPT + timeContext + groupBlock + contextBlock + '\n\nIncoming DM:\n' + messageText;
   // FIX (2026-07-24): was using sendOrchaChat() (direct WS-only, 90s timeout,
   // no fallback). If the Orcha WS server is not running or slow, EVERY DM call
   // timed out and sent the canned fallback reply. Switch to relay.ask() which
@@ -166,20 +181,28 @@ async function _classifyAndDraft(messageText, historyMsgs) {
 
 
 // ── Auto-save DM senders to the contact book ─────────────────────────────────
-// Called once per new sender — deduplicates by slackId (userId) or channelId.
-function _autoSaveContact(dm, userId) {
+// Called once per new sender — deduplicates by slackId (userId).
+// FIX (2026-07-25): now resolves the INDIVIDUAL person's real name via
+// resolveUserName() instead of using dm.name. For a 1:1 DM those were the
+// same thing anyway, but for a GROUP DM dm.name is the joined
+// "Alice, Bob, Carol" string for the whole thread -- using that as one
+// person's contact name was wrong (every group member would have been
+// saved under the same multi-name string). Also dropped the old
+// channelId-based dedup: multiple distinct people legitimately share one
+// channelId in a group DM, so that check would have silently blocked
+// saving the 2nd+ member of the same group thread.
+async function _autoSaveContact(dm, userId) {
   if (!userId) return;
   try {
     const contacts = store.load('contacts', []);
-    const exists = contacts.some(c =>
-      (c.slackId && c.slackId === userId) ||
-      (c.channelId && c.channelId === dm.channelId)
-    );
+    const exists = contacts.some(c => c.slackId && c.slackId === userId);
     if (exists) return;
+    const { resolveUserName } = require('./slack_send');
+    const name = (await resolveUserName(userId)) || dm.name || userId;
     const contact = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
       type: 'slack',
-      name: dm.name || userId,
+      name,
       slackId: userId,
       channelId: dm.channelId,
       addedAt: new Date().toISOString(),
@@ -213,7 +236,7 @@ async function pollDMAutoReplyOnce(log) {
   const config = getDMAutoReplyConfig();
   if (!config.enabled) { doLog('[SlackDM] Disabled — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
 
-  const { listOpenDMs, readMessages, sendToChannel, checkLiveAuth } = require('./slack_send');
+  const { listOpenDMs, readMessages, sendToChannel, checkLiveAuth, resolveUserName } = require('./slack_send');
 
   const auth = await checkLiveAuth();
   if (!auth || !auth.authenticated) { doLog('[SlackDM] Slack not authenticated — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
@@ -222,7 +245,7 @@ async function pollDMAutoReplyOnce(log) {
   let repliedCount = 0, escalatedCount = 0;
   const newEscalations = [];
 
-  const dms = await listOpenDMs(40);
+  const dms = await listOpenDMs(40, myUserId); // myUserId excludes Z from group-DM display names
   if (!dms.length) return { repliedCount: 0, escalatedCount: 0, items: [] };
 
   for (const dm of dms) {
@@ -236,7 +259,7 @@ async function pollDMAutoReplyOnce(log) {
       // FIRST-EVER poll of this DM thread: baseline only, do not reply to
       // pre-existing history (same safety rule as channel watch).
       if (!seen || !seen.lastSeenTs) {
-        _saveThreadLastSeen(dm.channelId, dm.name, messages[0].ts);
+        _saveThreadLastSeen(dm.channelId, dm.name, messages[0].ts, dm.isGroup);
         doLog(`[SlackDM] ${dm.name}: first poll — baselined at ts ${messages[0].ts}, no replies sent for existing history`);
         continue;
       }
@@ -262,12 +285,30 @@ async function pollDMAutoReplyOnce(log) {
         // Grab up to 2 messages that came before this one for context.
         // messages[] is newest-first; filter to older ts, take first 2 (most
         // recent before this msg), then reverse to chronological order.
-        const historyMsgs = messages
-          .filter(m => parseFloat(m.ts) < parseFloat(msg.ts))
-          .slice(0, 2)
-          .reverse()
-          .map(m => (m.userId === myUserId ? 'You' : (dm.name || 'Them')) + ': ' + (m.text || ''));
-        const draft = await _classifyAndDraft(msg.text, historyMsgs);
+        //
+        // FEATURE (2026-07-25): resolve each message's ACTUAL sender name
+        // instead of blanket-labelling every non-Z message with dm.name.
+        // For a 1:1 DM dm.name already IS the one counterpart's name, so
+        // this is equivalent -- but for a GROUP DM, dm.name is the joined
+        // "Alice, Bob, Carol" string for the whole thread, which is wrong
+        // to stamp on every individual line. Resolving per-message keeps
+        // multi-person context (who said what) intact for the AI.
+        const historyMsgs = await Promise.all(
+          messages
+            .filter(m => parseFloat(m.ts) < parseFloat(msg.ts))
+            .slice(0, 2)
+            .reverse()
+            .map(async m => {
+              const who = m.userId === myUserId ? 'You' : ((await resolveUserName(m.userId)) || dm.name || 'Them');
+              return who + ': ' + (m.text || '');
+            })
+        );
+
+        const speakerName = dm.isGroup ? ((await resolveUserName(msg.userId)) || 'Someone in the group') : null;
+        const groupContext = dm.isGroup
+          ? { isGroup: true, memberNames: (dm.name || '').split(', ').filter(Boolean), speakerName }
+          : null;
+        const draft = await _classifyAndDraft(msg.text, historyMsgs, groupContext);
 
         let replyTs = null;
         try {
@@ -303,10 +344,15 @@ async function pollDMAutoReplyOnce(log) {
         }
       }
 
-      _saveThreadLastSeen(dm.channelId, dm.name, newMsgs[newMsgs.length - 1].ts);
-      // Auto-save the first sender we see in this thread to the contact book
-      const firstSenderId = newMsgs.find(m => m.userId && m.userId !== myUserId)?.userId;
-      if (firstSenderId) _autoSaveContact(dm, firstSenderId);
+      _saveThreadLastSeen(dm.channelId, dm.name, newMsgs[newMsgs.length - 1].ts, dm.isGroup);
+      // Auto-save every distinct sender seen in this thread to the contact
+      // book. FIX (2026-07-25): a 1:1 DM only ever has one possible sender,
+      // so "just the first" was equivalent there -- but in a GROUP DM,
+      // multiple different people can each send a first-ever message in the
+      // same poll cycle, and only ever saving the first meant every other
+      // group member was silently never added as a contact.
+      const senderIds = [...new Set(newMsgs.filter(m => m.userId && m.userId !== myUserId).map(m => m.userId))];
+      for (const id of senderIds) await _autoSaveContact(dm, id);
     } catch (e) {
       doLog(`[SlackDM] ${dm.name}: poll error: ${e.message}`);
     }

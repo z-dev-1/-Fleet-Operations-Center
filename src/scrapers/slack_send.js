@@ -305,13 +305,65 @@ async function readMessages(channelId, limit) {
  */
 const _dmUserNameCache = new Map();
 
-async function _resolveDmSenderName(channelId) {
+// FEATURE (2026-07-25): generic userId -> display name cache/resolver, used
+// both by 1:1 DM name resolution below and, for GROUP DMs, to build a
+// human-readable "Alice, Bob, Carol" name from multiple member IDs. Kept
+// separate from _dmUserNameCache, which caches by *channelId* not userId.
+const _userInfoCache = new Map();
+
+async function resolveUserName(userId) {
+  if (!userId) return null;
+  if (_userInfoCache.has(userId)) return _userInfoCache.get(userId);
+  try {
+    const u = await slackWebApi('users.info', { user: userId });
+    const name = (u.ok && u.user) ? (u.user.real_name || u.user.name || userId) : userId;
+    _userInfoCache.set(userId, name);
+    return name;
+  } catch (_) {
+    return userId;
+  }
+}
+
+// Own userId (Z), fetched lazily via auth.test and cached for the process
+// lifetime -- needed to exclude Z from the joined member-name list when
+// resolving a GROUP DM's display name (see below), without every caller
+// having to look it up and pass it in explicitly.
+let _myUserId = null;
+async function _getMyUserId() {
+  if (_myUserId) return _myUserId;
+  try {
+    const auth = await checkLiveAuth();
+    if (auth && auth.authenticated && auth.userId) _myUserId = auth.userId;
+  } catch (_) { /* best-effort -- group name just falls back to including Z if this fails */ }
+  return _myUserId;
+}
+
+// FEATURE (2026-07-25): now handles GROUP DMs (Slack "mpim" conversations,
+// 3+ people) in addition to 1:1 DMs. A 1:1 DM's conversations.info response
+// has a single 'user' field; a group DM has none -- instead it has
+// 'is_mpim: true' and requires a separate conversations.members call to
+// get the participant list, each of which is then resolved and joined into
+// e.g. "Alice Smith, Bob Lee" for display (Z's own name is excluded).
+async function _resolveDmSenderName(channelId, myUserId) {
   if (_dmUserNameCache.has(channelId)) return _dmUserNameCache.get(channelId);
   try {
     const info = await slackWebApi('conversations.info', { channel: channelId });
-    if (!info.ok || !info.channel || !info.channel.user) return null;
-    const u = await slackWebApi('users.info', { user: info.channel.user });
-    const name = (u.ok && u.user) ? (u.user.real_name || u.user.name || info.channel.user) : info.channel.user;
+    if (!info.ok || !info.channel) return null;
+
+    let name = null;
+    if (info.channel.user) {
+      // 1:1 DM -- single named counterpart.
+      name = await resolveUserName(info.channel.user);
+    } else if (info.channel.is_mpim) {
+      // Group DM -- resolve every member's name, excluding Z.
+      const self = myUserId || await _getMyUserId();
+      const mem = await slackWebApi('conversations.members', { channel: channelId });
+      const memberIds = (mem.ok && mem.members) ? mem.members : [];
+      const others = memberIds.filter(id => id !== self);
+      const names = await Promise.all(others.map(id => resolveUserName(id)));
+      name = names.filter(Boolean).join(', ') || info.channel.name || null;
+    }
+    if (!name) return null;
     _dmUserNameCache.set(channelId, name);
     return name;
   } catch (_) {
@@ -369,15 +421,24 @@ const _dmNotifiedTs = new Set();
  * poller, and sharing it here would cause the two pollers to silently steal
  * each other's notifications.
  */
-async function listOpenDMs(limit) {
+// FEATURE (2026-07-25): now also returns GROUP DMs (Slack's "mpim" list,
+// alongside the existing "ims" 1:1 list) -- previously this only pulled
+// counts.ims, so the DM Auto-Reply engine (slack_dm_autoreply.js) never
+// even saw group DM threads, let alone replied in them. Each result now
+// carries isGroup so callers can tell the two apart (e.g. for reply-context
+// / persona prompting -- a group thread needs different handling than a
+// 1:1, since replies are visible to everyone in the group).
+async function listOpenDMs(limit, myUserId) {
   const lim = Math.min(Number(limit) || 40, 100);
   const counts = await slackWebApi('client.counts', {});
   if (!counts.ok) throw new Error('client.counts failed: ' + counts.error);
-  const ims = (counts.ims || []).slice(0, lim);
+  const ims   = (counts.ims   || []).map(c => ({ id: c.id, isGroup: false }));
+  const mpims = (counts.mpims || []).map(c => ({ id: c.id, isGroup: true  }));
+  const all = ims.concat(mpims).slice(0, lim);
   const results = [];
-  for (const im of ims) {
-    const name = await _resolveDmSenderName(im.id);
-    results.push({ channelId: im.id, name: name || im.id });
+  for (const c of all) {
+    const name = await _resolveDmSenderName(c.id, myUserId);
+    results.push({ channelId: c.id, name: name || c.id, isGroup: c.isGroup });
   }
   return results;
 }
@@ -386,7 +447,11 @@ async function readDMs(limit) {
   const lim = Math.min(Number(limit) || 20, 39);
   const counts = await slackWebApi('client.counts', {});
   if (!counts.ok) throw new Error('client.counts failed: ' + counts.error);
-  const unread = (counts.ims || []).filter(im => im.has_unreads).slice(0, lim);
+  // FEATURE (2026-07-25): include group DMs (mpims), not just 1:1 (ims) --
+  // same gap as listOpenDMs() had. Without this, an unread message in a
+  // group DM never surfaced a Chat tab notification at all.
+  const unread = (counts.ims || []).concat(counts.mpims || [])
+    .filter(im => im.has_unreads).slice(0, lim);
 
   const results = [];
   for (const im of unread) {
@@ -478,4 +543,4 @@ async function processAutoReplies(messages, rules) {
   return sent;
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership };
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName };
