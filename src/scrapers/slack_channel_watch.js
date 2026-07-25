@@ -373,7 +373,13 @@ function _jmClearPending(channelId) {
 // stuck forever with zero further logging. Observed live: messages sat
 // unanswered for 3+ hours with no self-recovery. Fix: race against a hard
 // timeout so a hung AI call can never hold the poll lock past this bound.
-const JM_AI_TIMEOUT_MS = 90 * 1000; // generous -- real answers finish in seconds
+// NOTE (2026-07-25): raised from 90s -- normal answers routinely take 90-180s
+// because relay.ask() already has its own internal 90s-per-attempt retry/cascade
+// (fleet-brain -> WS -> CLI -> Claude Code -> Bedrock). A 90s outer timeout here
+// was racing that internal retry and killing good-but-slow answers right as
+// attempt 1 was handing off to attempt 2. 240s gives margin above the observed
+// worst-case normal latency while still catching genuine multi-minute+ hangs.
+const JM_AI_TIMEOUT_MS = 240 * 1000;
 function _withTimeout(promise, ms, label) {
   return Promise.race([
     promise,
