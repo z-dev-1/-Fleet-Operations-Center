@@ -247,6 +247,13 @@ function initWindows(ctx) {
   let bubbleWin         = null;
   let wizWin             = null; // BUG FIX (2026-07-22): hoisted so closeSetupWizard() below can reach it
   let _bubbleLastPos    = null;
+  // CHAT HEAD (2026-07-24): true when the bubble was popped up temporarily
+  // for an incoming-message notification while the main window was still
+  // open (Messenger-style chat head), as opposed to the normal persistent
+  // bubble shown while the main window is minimized/closed.
+  let _bubbleIsTemporary   = false;
+  let _bubbleAutoHideTimer = null;
+  const BUBBLE_AUTO_HIDE_MS = 15000;
   let _rescanInProgress = false;
   let _appReady         = false;
 
@@ -263,11 +270,24 @@ function initWindows(ctx) {
 
   // ── Bubble ────────────────────────────────────────────────────────────────
   function showBubble() {
-    if (bubbleWin && !bubbleWin.isDestroyed()) return;
+    if (bubbleWin && !bubbleWin.isDestroyed()) {
+      // Already showing (e.g. as a temporary chat-head) — the main window
+      // is now actually minimized/closed too, so promote it to the normal
+      // persistent bubble instead of letting the auto-hide timer kill it.
+      _bubbleIsTemporary = false;
+      if (_bubbleAutoHideTimer) { clearTimeout(_bubbleAutoHideTimer); _bubbleAutoHideTimer = null; }
+      return;
+    }
 
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     const savedPos = _bubbleLastPos || { x: width - 70, y: height - 70 };
-    const bubbleHtml = path.join(ROOT_DIR, 'renderer', 'bubble.html');
+    // BUBBLE MIRROR (2026-07-24): the bubble now loads the SAME renderer
+    // entry point/component tree as the real in-app Orcha FAB (see
+    // renderer/src/bubble-fab.html + renderer/src/js/components/orcha-fab.js)
+    // instead of the old thin, hand-rolled renderer/bubble.html, and shares
+    // the app's real preload.js (which now also exposes window.bubble.*)
+    // instead of the old separate bubble-preload.js.
+    const bubbleHtml = path.join(ROOT_DIR, 'renderer', 'src', 'bubble-fab.html');
 
     bubbleWin = new BrowserWindow({
       width: 56, height: 56,
@@ -275,7 +295,7 @@ function initWindows(ctx) {
       frame: false, transparent: true, alwaysOnTop: true,
       resizable: false, skipTaskbar: true, hasShadow: false,
       webPreferences: {
-        preload:          path.join(ROOT_DIR, 'renderer', 'bubble-preload.js'),
+        preload:          path.join(ROOT_DIR, 'preload.js'),
         contextIsolation: true,
         nodeIntegration:  false,
       },
@@ -284,7 +304,7 @@ function initWindows(ctx) {
     if (fs.existsSync(bubbleHtml)) {
       bubbleWin.loadFile(bubbleHtml);
     } else {
-      logger.warn('bubble.html not found — bubble will be blank until renderer is built');
+      logger.warn('bubble-fab.html not found — bubble will be blank until renderer is built');
       bubbleWin.loadURL('data:text/html,<body style="background:transparent"></body>');
     }
 
@@ -311,18 +331,48 @@ function initWindows(ctx) {
   }
 
   function hideBubble() {
+    if (_bubbleAutoHideTimer) { clearTimeout(_bubbleAutoHideTimer); _bubbleAutoHideTimer = null; }
+    _bubbleIsTemporary = false;
     if (bubbleWin && !bubbleWin.isDestroyed()) {
       bubbleWin.destroy();
       bubbleWin = null;
     }
   }
 
+  function _scheduleBubbleAutoHide() {
+    if (_bubbleAutoHideTimer) clearTimeout(_bubbleAutoHideTimer);
+    _bubbleAutoHideTimer = setTimeout(() => {
+      // Only auto-hide if it's still in temporary chat-head mode (the user
+      // hasn't opened the panel, and the main window hasn't been minimized
+      // in the meantime -- both of those paths already clear this flag).
+      if (_bubbleIsTemporary) hideBubble();
+    }, BUBBLE_AUTO_HIDE_MS);
+  }
+
   function pushBubbleNotification(notif) {
+    // CHAT HEAD (2026-07-24): if nothing is showing yet, pop the bubble up
+    // temporarily for this notification -- like Android Messenger chat
+    // heads -- even though the main window may still be open. If the main
+    // window is genuinely hidden/minimized already, showBubble() below
+    // behaves exactly as before (persistent, not temporary).
+    const mainOpen = !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized());
+    if (!bubbleWin || bubbleWin.isDestroyed()) {
+      showBubble();
+      if (mainOpen) {
+        _bubbleIsTemporary = true;
+        _scheduleBubbleAutoHide();
+      }
+    } else if (_bubbleIsTemporary) {
+      // Already showing as a chat head -- another message came in, so
+      // restart the countdown instead of letting it vanish mid-read.
+      _scheduleBubbleAutoHide();
+    }
+
     if (bubbleWin && !bubbleWin.isDestroyed())
       bubbleWin.webContents.send('bubble:notification', notif);
 
     _sendDesktopNotification(
-      notif.unit ? ('Unit ' + notif.unit) : 'Fleet Update',
+      notif.title || (notif.unit ? ('Unit ' + notif.unit) : 'Fleet Update'),
       notif.message || '',
       () => {
         if (mainWindow) {
@@ -803,7 +853,8 @@ function initWindows(ctx) {
         logger.info('[startup] Cookies valid (' + state.count + ' cookies, expires in ' +
           (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ')');
       }
-      // Keep window invisible during AAP scrape
+
+      // Keep window invisible during AAP scrape
       mainWindow.setPosition(-3000, -3000);
       // Window hidden during scrape via position
       // Auto-login: detect login pages and fill credentials
@@ -1187,7 +1238,11 @@ function initWindows(ctx) {
   ipcMain.on('bubble:reposition', () => {
     if (bubbleWin && !bubbleWin.isDestroyed()) {
       const { width, height } = screen.getPrimaryDisplay().workAreaSize;
-      bubbleWin.setPosition(width - 360, height - 520);
+      // BUBBLE MIRROR (2026-07-24): expanded panel is now ~400x580 (real
+      // .orcha-panel is 360x480 positioned bottom:84px/right:24px -- see
+      // renderer/src/css/fleet.css) instead of the old bubble.html's
+      // 340x500, so leave a bit more margin.
+      bubbleWin.setPosition(width - 410, height - 590);
     }
   });
 
@@ -1198,7 +1253,20 @@ function initWindows(ctx) {
     }
   });
 
-  ipcMain.on('bubble:resize', (_e, w, h) => { if (bubbleWin && !bubbleWin.isDestroyed()) bubbleWin.setSize(w, h); });
+  ipcMain.on('bubble:resize', (_e, w, h) => {
+    if (bubbleWin && !bubbleWin.isDestroyed()) bubbleWin.setSize(w, h);
+    // CHAT HEAD (2026-07-24): the FAB panel opening/closing is what drives
+    // these resize calls (56x56 mini <-> ~400x580 expanded -- see
+    // _togglePanel() in orcha-fab.js), so reuse it as the signal for
+    // "user is looking at it" / "user is done with it" instead of adding a
+    // separate IPC channel.
+    if (w > 56) {
+      if (_bubbleAutoHideTimer) { clearTimeout(_bubbleAutoHideTimer); _bubbleAutoHideTimer = null; }
+    } else if (_bubbleIsTemporary) {
+      _bubbleIsTemporary = false;
+      hideBubble();
+    }
+  });
 
   ipcMain.on('bubble:hide', () => { hideBubble(); });
 

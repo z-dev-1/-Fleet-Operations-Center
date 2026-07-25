@@ -384,3 +384,17 @@ contextBridge.exposeInMainWorld('workflowIntel', {
   getExecutionLog: (limit) => ipcRenderer.invoke('wi:get-execution-log', limit),
   getSuggestionForUnit: (unit) => ipcRenderer.invoke('wi:get-suggestion-for-unit', unit),
 });
+
+// -- Bubble/mini-FAB window controls (2026-07-24) -- only meaningful when this
+// preload is used by the always-on-top bubble window (see showBubble() in
+// src/window/index.js), but exposed here too so the SAME preload.js can back
+// both windows -- one bridge surface, no drifting second copy. No-op/unused
+// in the main window.
+contextBridge.exposeInMainWorld('bubble', {
+  openMain:       ()       => ipcRenderer.send('bubble:clicked'),
+  openUnit:       (unitId) => ipcRenderer.send('bubble:open-unit', unitId),
+  hide:           ()       => ipcRenderer.send('bubble:hide'),
+  resize:         (w, h)   => ipcRenderer.send('bubble:resize', w, h),
+  reposition:     ()       => ipcRenderer.send('bubble:reposition'),
+  repositionMini: ()       => ipcRenderer.send('bubble:reposition-mini'),
+});

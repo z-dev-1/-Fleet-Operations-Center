@@ -29,7 +29,7 @@ const MAX_RECIPIENT_LEN = 128;    // Slack channel name / user handle
 // truncating/rejecting real data.
 const MAX_MESSAGE_LEN   = 40000;  // Slack API message body limit
 
-function registerSlackIPC() {
+function registerSlackIPC(ctx) {
   // FEATURE (2026-07-16): the handler below only checks that a token file
   // exists on disk. slack:check-live-auth (added a few lines down) actually
   // confirms the token still works via Slack's auth.test endpoint -- used
@@ -265,7 +265,25 @@ function registerSlackIPC() {
 
   handle('slack:poll-dm-autoreply', async () => {
     const { pollDMAutoReplyOnce } = require('../../src/scrapers/slack_dm_autoreply');
-    return pollDMAutoReplyOnce((msg) => logger.info(msg));
+    const result = await pollDMAutoReplyOnce((msg) => logger.info(msg));
+    // CHAT HEAD (2026-07-24): a DM that the AI couldn't confidently
+    // auto-answer (escalated -- needs Z's own judgment) pops the desktop
+    // bubble up temporarily, Messenger-chat-head style, even if the main
+    // window is open elsewhere. Auto-answered DMs stay silent here --
+    // they didn't need Z, so no interruption -- they're still logged and
+    // visible in the Slack tab's reply log same as always.
+    if (ctx && ctx.pushBubbleNotification && result && result.items && result.items.length) {
+      for (const item of result.items) {
+        try {
+          ctx.pushBubbleNotification({
+            title:   'Slack DM: ' + (item.channelName || 'Unknown'),
+            message: item.title || item.question || 'New message needs your reply',
+            kind:    'slack-dm',
+          });
+        } catch (_) {}
+      }
+    }
+    return result;
   });
 
   handle('slack:get-dm-review-queue', async () => {

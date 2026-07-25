@@ -128,6 +128,19 @@ function _togglePanel() {
   panel.style.right = offset;
   fab.style.right   = offset;
   if (_panelOpen && !_initialized) { _initialized = true; _onFirstOpen(); }
+  // BUBBLE MIRROR (2026-07-24): when this FAB is mounted inside the standalone
+  // desktop bubble window (renderer/src/bubble-fab.html), the panel toggle also
+  // needs to grow/shrink the actual OS window itself (the bubble is a tiny
+  // 56x56 frameless BrowserWindow when collapsed).
+  if (window.__isBubbleWindow && window.bubble) {
+    if (_panelOpen) {
+      window.bubble.resize(400, 580);
+      window.bubble.reposition();
+    } else {
+      window.bubble.resize(56, 56);
+      window.bubble.repositionMini();
+    }
+  }
   // Always start Slack poll (background DM check)
   if (!_pollTimer) _startSlackPoll();
   // FEATURE (2026-07-16): stop the Slack-tab-specific refresh timer when the
@@ -563,7 +576,7 @@ function _escapeHtml(str) {
 //      predictive-maintenance scraper -- see _buildEmailReport in ai.js
 //      for the same fields used in report generation).
 //   2. STALE DOWN UNITS  -- unavailable units whose r.workDuration parses
-//      to 15+ days down.
+//      to 14+ days down.
 // Dismiss is session-local (a Set of keys) -- there is no backend
 // "resolve" concept for either signal, so dismissing just hides it from
 // this list until the next data refresh re-surfaces it if still true.

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Orcha</title>
+  <link rel="stylesheet" href="./css/nexus-theme.css" />
+  <link rel="stylesheet" href="./css/fleet.css" />
+  <style>
+    /* BUBBLE MIRROR (2026-07-24): this page is loaded into a tiny frameless,
+       transparent, always-on-top BrowserWindow (see showBubble() in
+       src/window/index.js). nexus-theme.css sets an opaque html/body
+       background for the real app window; override it here so only the
+       Orcha FAB circle/panel is visible, not an opaque square. */
+    html, body {
+      background: transparent !important;
+      overflow: hidden !important;
+      -webkit-app-region: no-drag;
+    }
+  </style>
+</head>
+<body>
+  <script>
+    // Lets orcha-fab.js know it is running inside the standalone desktop
+    // bubble window (vs. mounted inside the full app window), so panel
+    // open/close also resizes/repositions the actual OS window.
+    window.__isBubbleWindow = true;
+  </script>
+  <script type="module">
+    import { init as initBridge }   from './js/bridge.js';
+    import { init as initOrchaFab } from './js/components/orcha-fab.js';
+    initBridge();
+    initOrchaFab();
+  </script>
+</body>
+</html>

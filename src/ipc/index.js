@@ -34,7 +34,7 @@ const logger = require('../utils/logger')('ipc');
 function registerAllIPC(ctx) {
   registerSettingsIPC(ctx);
   registerNotesIPC();
-  registerSlackIPC();
+  registerSlackIPC(ctx);
   registerGraphIPC();
   registerSharePointIPC(ctx);
   registerAsanaIPC();
