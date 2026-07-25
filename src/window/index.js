@@ -293,6 +293,15 @@ function initWindows(ctx) {
       width: 56, height: 56,
       x: savedPos.x, y: savedPos.y,
       frame: false, transparent: true, backgroundColor: '#00000000',
+      // WINDOWS 11 BACKDROP MATERIAL FIX (2026-07-25): DWM can silently
+      // apply an automatic Mica/frosted backdrop material to frameless
+      // windows even with transparent:true set, painting a flat pale tint
+      // over anything not covered by real content. Barely visible on the
+      // tiny 56x56 mini icon (almost no blank margin), but glaringly
+      // obvious as a solid rectangle on the ~400x580 expanded panel (lots
+      // of blank margin around the actual chat panel). 'none' opts the
+      // window out of any backdrop material entirely.
+      backgroundMaterial: 'none',
       alwaysOnTop: true,
       resizable: false, skipTaskbar: true, hasShadow: false,
       webPreferences: {
