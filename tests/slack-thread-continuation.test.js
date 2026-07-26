@@ -26,7 +26,15 @@
 // mention-threads, merged into the candidate pool before any existing
 // filtering/tiering runs.
 //
-// Both tests mirror the pure logic in isolation, following the existing
+// BUG 3 (Just Me channels, same file): _pollJustMeChannel() has the exact
+// same conversations.history limitation as BUG 2 above -- every justme
+// reply threads under the message it answered, so if the user continues
+// the conversation by replying INSIDE that thread, the reply is invisible
+// to the poller. Fix mirrors BUG 2's merge, but the "tracked threads" list
+// comes from the (newest-first) slackChannelReplies log rather than a
+// separate mention-thread store, since justme has no @mention concept.
+//
+// All tests mirror the pure logic in isolation, following the existing
 // project convention (live Slack Web API calls aren't easily mockable in
 // this Vitest CJS setup) -- see slack-dm-polling.test.js and
 // slack-group-dm.test.js for the pattern.
@@ -82,6 +90,37 @@ describe('DM Auto-Reply: thread-aware replies (BUG 1 fix)', () => {
     const msg = { ts: '100.001', threadTs: '100.001', text: 'root of a thread' };
     const payload = buildDmReplyPayload('D123', 'reply text', msg);
     expect(payload.thread_ts).toBe('100.001');
+  });
+});
+
+// Mirrors _pollJustMeChannel()'s recent-thread selection: the reply log is
+// stored newest-first (unshift), so the most recent N threads for a channel
+// are simply the first N entries after filtering by channelId -- NOT a
+// slice(-N), which would be correct for the channel-watch mention-thread
+// store (append/push order) but wrong here.
+function selectRecentJustMeThreads(replyLog, channelId, maxCount) {
+  return replyLog
+    .filter(e => e.channelId === channelId)
+    .slice(0, maxCount)
+    .map(e => e.ts);
+}
+
+describe('Just Me channels: thread-reply merge (BUG 3 fix)', () => {
+  it('selects the N most recent threads for THIS channel from a newest-first, multi-channel log', () => {
+    const log = [
+      { channelId: 'C_OTHER', ts: '500.0' },   // newest overall, but wrong channel
+      { channelId: 'C_JM', ts: '400.0' },
+      { channelId: 'C_JM', ts: '300.0' },
+      { channelId: 'C_OTHER', ts: '250.0' },
+      { channelId: 'C_JM', ts: '200.0' },
+    ];
+    const threads = selectRecentJustMeThreads(log, 'C_JM', 2);
+    expect(threads).toEqual(['400.0', '300.0']); // most recent 2 for C_JM only
+  });
+
+  it('returns an empty list when the channel has no reply-log history yet (first-ever poll)', () => {
+    const threads = selectRecentJustMeThreads([{ channelId: 'C_OTHER', ts: '1.0' }], 'C_JM', 10);
+    expect(threads).toEqual([]);
   });
 });
 

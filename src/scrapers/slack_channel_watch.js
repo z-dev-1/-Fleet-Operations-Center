@@ -528,8 +528,45 @@ async function _jmHandleMessage(channelId, text, signal, jobId) {
 }
 
 async function _pollJustMeChannel(ch, myUserId, doLog) {
-  const { readMessages } = require('./slack_send');
-  const messages = await readMessages(ch.id, 20); // newest-first
+  const { readMessages, readThreadReplies } = require('./slack_send');
+  const rootMessages = await readMessages(ch.id, 20); // newest-first
+  if (!rootMessages.length) return;
+
+  // BUG FIX (2026-07-26): same conversations.history limitation as the
+  // Partner Auto-Reply path (see pollChannelsOnce below) -- every justme
+  // reply threads under the message it answered (sendToChannel(..., msg.ts)
+  // further down), so if the user continues the conversation by replying
+  // INSIDE that thread rather than sending a new top-level message,
+  // conversations.history never returns it at all -- it's invisible here,
+  // same root cause. Fix: fetch replies for this channel's recently
+  // replied-to message timestamps (each one is a thread root, since every
+  // justme reply threads under msg.ts) and merge them in, deduped by ts,
+  // before any of the filtering below runs -- that logic is otherwise
+  // untouched.
+  let messages = rootMessages;
+  try {
+    const recentThreads = store.load('slackChannelReplies', [])
+      .filter(e => e.channelId === ch.id)
+      .slice(0, 10) // log is newest-first (unshift) -- most recent 10 threads
+      .map(e => e.ts);
+    if (recentThreads.length) {
+      const replyBatches = await Promise.all(
+        recentThreads.map(t => readThreadReplies(ch.id, t, 20).catch(() => []))
+      );
+      const seenTs = new Set(rootMessages.map(m => m.ts));
+      const extra = [];
+      for (const batch of replyBatches) {
+        for (const m of batch) {
+          if (!seenTs.has(m.ts)) { seenTs.add(m.ts); extra.push(m); }
+        }
+      }
+      if (extra.length) {
+        messages = rootMessages.concat(extra).sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
+      }
+    }
+  } catch (e) {
+    doLog(`[SlackWatch] ${ch.name} (justme): thread-reply merge failed (non-fatal, falling back to root messages only): ${e.message}`);
+  }
   if (!messages.length) return;
 
   // FIRST-EVER poll: baseline only, do not reply to pre-existing history
