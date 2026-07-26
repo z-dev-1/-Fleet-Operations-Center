@@ -298,6 +298,35 @@ async function readMessages(channelId, limit) {
 }
 
 /**
+ * FIX (2026-07-26): conversations.history (readMessages above) only returns
+ * a channel's TOP-LEVEL message timeline -- actual thread reply messages
+ * (thread_ts differs from their own ts) are excluded entirely. That means
+ * the mention-thread continuation logic in slack_channel_watch.js
+ * (_isInMentionThread) was fully implemented but effectively dead: the
+ * reply messages it needs to see never showed up in readMessages()'s
+ * output in the first place. This calls conversations.replies to fetch the
+ * actual reply messages for a given thread, in the same result shape as
+ * readMessages() so callers can merge the two lists interchangeably.
+ */
+async function readThreadReplies(channelId, threadTs, limit) {
+  if (!channelId) throw new Error('channelId required');
+  if (!threadTs) throw new Error('threadTs required');
+  const lim = String(limit || 20);
+  const res = await slackWebApi('conversations.replies', {
+    channel: channelId, ts: threadTs, limit: lim
+  });
+  if (!res.ok) throw new Error('conversations.replies failed: ' + res.error);
+  return (res.messages || []).map(m => ({
+    ts:       m.ts,
+    userId:   m.user || m.username || '',
+    text:     m.text || '',
+    threadTs: m.thread_ts || null,
+    replyCount: m.reply_count || 0,
+    channelId
+  }));
+}
+
+/**
  * FEATURE (2026-07-16): cache of channelId -> display name for DM senders,
  * to avoid re-resolving conversations.info + users.info on every 30s poll
  * for the same conversation. See readDMs() below for the full rewrite
@@ -543,4 +572,4 @@ async function processAutoReplies(messages, rules) {
   return sent;
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName };
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName };

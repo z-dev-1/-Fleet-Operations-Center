@@ -312,7 +312,10 @@ async function pollDMAutoReplyOnce(log) {
 
         let replyTs = null;
         try {
-          const sendResult = await sendToChannel(dm.channelId, draft.reply);
+          // Reply in-thread if the incoming message was itself part of a
+          // thread (msg.threadTs is null for plain top-level messages, so
+          // this is a no-op / unchanged behavior for the common case).
+          const sendResult = await sendToChannel(dm.channelId, draft.reply, msg.threadTs || undefined);
           replyTs = sendResult.ts;
           repliedCount++;
         } catch (e) {

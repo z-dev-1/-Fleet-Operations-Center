@@ -592,7 +592,7 @@ async function pollChannelsOnce(log) {
   const config = getWatchConfig();
   if (!config.enabled) { doLog('[SlackWatch] Disabled — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
 
-  const { readMessages, sendToChannel, checkLiveAuth } = require('./slack_send');
+  const { readMessages, readThreadReplies, sendToChannel, checkLiveAuth } = require('./slack_send');
   const { askOrcha } = require('./orcha_ws');
 
   const auth = await checkLiveAuth();
@@ -621,7 +621,40 @@ async function pollChannelsOnce(log) {
     }
 
     try {
-      const messages = await readMessages(ch.id, 20); // newest-first
+      const rootMessages = await readMessages(ch.id, 20); // newest-first
+      if (!rootMessages.length) continue;
+
+      // BUG FIX (2026-07-26): conversations.history (readMessages) never
+      // returns thread REPLY messages -- only the channel's top-level
+      // timeline. That silently broke TIER 2 below (continuing a reply in
+      // a thread the user was previously @mentioned in): the tracked
+      // thread exists, but the actual continuation messages never made it
+      // into the candidate pool at all. Fix: separately fetch replies for
+      // this channel's currently-tracked mention-threads (capped to the
+      // 10 most recently tracked, to bound API calls) and merge them in,
+      // deduped by ts, before any of the existing filtering/tiering logic
+      // runs below -- that logic is otherwise untouched.
+      let messages = rootMessages;
+      try {
+        const trackedThreads = (store.load('slackMentionThreads', {})[ch.id] || []).slice(-10);
+        if (trackedThreads.length) {
+          const replyBatches = await Promise.all(
+            trackedThreads.map(t => readThreadReplies(ch.id, t, 20).catch(() => []))
+          );
+          const seenTs = new Set(rootMessages.map(m => m.ts));
+          const extra = [];
+          for (const batch of replyBatches) {
+            for (const m of batch) {
+              if (!seenTs.has(m.ts)) { seenTs.add(m.ts); extra.push(m); }
+            }
+          }
+          if (extra.length) {
+            messages = rootMessages.concat(extra).sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
+          }
+        }
+      } catch (e) {
+        doLog(`[SlackWatch] ${ch.name}: thread-reply merge failed (non-fatal, falling back to root messages only): ${e.message}`);
+      }
       if (!messages.length) continue;
 
       // FIRST-EVER poll of this channel: baseline only, do not reply to
