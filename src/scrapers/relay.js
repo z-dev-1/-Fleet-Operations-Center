@@ -28,8 +28,12 @@ const AAP_OPEN_STATUSES_QS = AAP_OPEN_STATUSES.map(function(s){ return 'statuses
 function garageUrl(tab, id) {
   var idQS = 'ids=' + encodeURIComponent(id);
   if (tab === 'Planned') {
-    // No tab param for Planned — open-status filter alone is the correct query (confirmed against live AAP UI).
-    return AAP_GARAGE_BASE + '?' + idQS + '&' + AAP_OPEN_STATUSES_QS;
+    // BUGFIX (2026-07-26): previously omitted tab= entirely for Planned, on the
+    // assumption that no tab param defaults to Planned. Live testing showed the
+    // AAP SPA can retain whatever tab was last selected client-side rather than
+    // reliably defaulting to Planned on a bare query-param load -- so an omitted
+    // tab= is ambiguous. Explicit tab=Planned removes that ambiguity.
+    return AAP_GARAGE_BASE + '?tab=Planned&' + idQS + '&' + AAP_OPEN_STATUSES_QS;
   }
   if (tab === 'Unplanned') {
     return AAP_GARAGE_BASE + '?tab=Unplanned&' + idQS + '&' + AAP_OPEN_STATUSES_QS;
@@ -392,11 +396,25 @@ const GARAGE_LIST_SCRIPT = String.raw`
     var title = (a.textContent || '').trim();
     var el = a.parentElement, vendor = '', state = '';
     for (var d = 0; d < 8 && el; d++) {
+      // Stop climbing once this ancestor spans more than one WR row — otherwise an
+      // unrecognized vendor name (e.g. KOONER, not in the whitelist below) makes the
+      // loop keep climbing past its own row and borrow a NEIGHBORING row's vendor/state
+      // (observed: a real KOONER work order got mislabeled FLEETNET this way and was
+      // then correctly-but-wrongly dropped by the FleetNet skip).
+      var wrLinksHere = el.querySelectorAll('a[href]');
+      var wrLinkCount = 0;
+      for (var la = 0; la < wrLinksHere.length; la++) {
+        if (/\/v2\/service\/[a-f0-9-]{36}/i.test(wrLinksHere[la].href)
+            || /\/service\/[a-f0-9-]{36}/i.test(wrLinksHere[la].href)
+            || /[?&](?:wrId|workRequestId|id)=[a-f0-9-]{36}/i.test(wrLinksHere[la].href)) wrLinkCount++;
+      }
+      if (wrLinkCount > 1) break;
+
       var cells = el.querySelectorAll('td, [class*="cell"], [class*="column"]');
       for (var c = 0; c < cells.length; c++) {
         var ct = (cells[c].textContent||'').trim();
         // Vendor detection
-        if (!vendor && /^(TA|Volvo|Amerit|Cox|PCSR|FleetNet|Fleet Net|RENTAL|UNASSIGNED|CEI|VELOCITI|RTS|CUMMINS|FREIGHTLINER|KENWORTH|PETERBILT|MACK|INTERNATIONAL|NAVISTAR|DAIMLER|PACCAR)$/i.test(ct)) {
+        if (!vendor && /^(TA|Volvo|Amerit|Cox|PCSR|FleetNet|Fleet Net|RENTAL|UNASSIGNED|CEI|VELOCITI|RTS|CUMMINS|FREIGHTLINER|KENWORTH|PETERBILT|MACK|INTERNATIONAL|NAVISTAR|DAIMLER|PACCAR|KOONER|GOODYEAR|GEOTAB|PENSKE|SAFELITE|SIEMENS|PACLEASE|KWNE|OEM|Ryder|FLEETPRIDE|STRAIGHTLINE|DICKINSON)$/i.test(ct)) {
           vendor = ct;
         }
         // State badge detection
@@ -456,6 +474,17 @@ async function scrapeGarageList(url, equipmentId, partition) {
 
     // Attempt extract — called after any page settles on AAP domain
     let _pollCount = 0;
+    // BUGFIX (2026-07-26): did-finish-load and did-stop-loading BOTH kicked off
+    // their own independent setTimeout(tryExtract, 1500) chain below, so on a
+    // normal load (both events fire) _pollCount was incremented by TWO
+    // concurrent recursive loops at once. That silently halved the real
+    // give-up budget from the intended ~10s (20 x 500ms) down to ~3.5-5s,
+    // which was long enough on fast loads but caused a false "gave up, no
+    // rows found" -> 15min negative-cache on any tab that needed longer to
+    // render its table (observed live: B13353/B12261 "gave up" 3.5s after
+    // did-finish-load, well under the intended budget). _chainStarted
+    // ensures only one poll chain ever runs per page load.
+    let _chainStarted = false;
     const tryExtract = async () => {
       if (!win || win.isDestroyed()) return;
       const curUrl = win.webContents.getURL();
@@ -504,7 +533,7 @@ async function scrapeGarageList(url, equipmentId, partition) {
       const u = win.webContents.getURL();
       logger.info('[Relay] Garage did-finish-load', equipmentId, '|', u.slice(0, 80));
       // Give React 1.5s to mount the table, then start polling
-      setTimeout(tryExtract, 1500);
+      if (!_chainStarted) { _chainStarted = true; setTimeout(tryExtract, 1500); }
     });
 
     win.webContents.on('did-navigate', (_, navUrl) => {
@@ -516,7 +545,7 @@ async function scrapeGarageList(url, equipmentId, partition) {
       const u = win.webContents.getURL();
       // Only try if we're on AAP and haven't settled yet
       if (!settled && /aap-na\.corp\.amazon\.com/i.test(u)) {
-        setTimeout(tryExtract, 1500);
+        if (!_chainStarted) { _chainStarted = true; setTimeout(tryExtract, 1500); }
       }
     });
 
@@ -716,7 +745,7 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
   //   (d) the _serviceUUID is unchanged (WO has not been reassigned)
   // If UUID changed, always re-scrape regardless of age — WO reassignment
   // means the cached WR fields are for a different work order entirely.
-  if (relayCache && relayCache[equipmentId] && RELAY_CACHE_TTL_MS > 0) {
+  if (relayCache && relayCache[equipmentId] && !relayCache[equipmentId]._noWR && RELAY_CACHE_TTL_MS > 0) {
     const cached  = relayCache[equipmentId];
     const ageMs   = Date.now() - (cached._cachedAt || 0);
     const uuidOk  = !cached._serviceUUID || cached._serviceUUID === serviceUUID;
