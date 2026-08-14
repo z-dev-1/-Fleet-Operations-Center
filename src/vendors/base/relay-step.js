@@ -46,7 +46,14 @@ const VOLVO_PATTERNS  = ["volvo"];
  * Checks unit.make, unit.manufacturer, unit.vendor, unit.model in order.
  */
 function detectVendorFromUnit(unit) {
-  const haystack = [unit.make, unit.manufacturer, unit.vendor, unit.model]
+  // BUGFIX (2026-07-26): unit.vendor is the CURRENTLY ASSIGNED repair vendor
+  // (e.g. GOODYEAR, PENSKE) -- not the truck's chassis brand. Dealer WO
+  // creation is, by definition, usually triggered because that current
+  // vendor could NOT fix the unit and it needs to be escalated to the
+  // dealer. Checking unit.vendor for dealer-routing purposes was backwards:
+  // it can only ever add noise, never signal. Detection must be based only
+  // on the actual chassis identity fields (make/manufacturer/model).
+  const haystack = [unit.make, unit.manufacturer, unit.model]
     .filter(Boolean).join(" ").toLowerCase();
   if (PACCAR_PATTERNS.some(p => haystack.includes(p))) return "paccar";
   if (VOLVO_PATTERNS.some(p  => haystack.includes(p))) return "volvo";

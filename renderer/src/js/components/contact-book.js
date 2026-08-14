@@ -14,7 +14,49 @@ let _contacts = [];
 let _slackSearchTimer = null; // debounce handle for live search
 let _pendingSlack = null;     // { slackId, name, channelId? } resolved from search
 
-const _esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const _esc  = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const _attr = (s) => _esc(s).replace(/"/g, '&quot;');
+
+// A vendor's rank can differ per domicile it serves (e.g. #1 at AVP40 but #2
+// at ABE40 because a closer competitor covers ABE40 better). `preference` is
+// the shared default that applies to every domicile the vendor serves unless
+// a specific site is overridden in `preferenceByDomicile`.
+// Parses "AVP40:1, ABE40:2" into { AVP40: 1, ABE40: 2 }. Malformed/blank
+// entries are skipped rather than throwing, so a typo doesn't block saving.
+function _parsePrefOverrides(raw) {
+  const out = {};
+  String(raw || '').split(',').forEach(pair => {
+    const [site, rank] = pair.split(':').map(s => (s || '').trim());
+    const n = parseInt(rank, 10);
+    if (site && Number.isFinite(n) && n > 0) out[site.toUpperCase()] = n;
+  });
+  return Object.keys(out).length ? out : null;
+}
+
+function _vendorMakesLabel(c) {
+  const makes = Array.isArray(c.makes) && c.makes.length ? c.makes : (c.make ? [c.make] : []);
+  return makes.length ? '• ' + _esc(makes.join(', ')) : '';
+}
+
+function _prefFor(c, site) {
+  const overrides = c.preferenceByDomicile || {};
+  if (site && overrides[site] != null) return overrides[site];
+  return c.preference != null ? c.preference : null;
+}
+
+function _prefBadgeHtml(c) {
+  const sites = Array.isArray(c.domiciles) ? c.domiciles : [];
+  const overrides = c.preferenceByDomicile || {};
+  const hasOverride = sites.some(s => overrides[s] != null && overrides[s] !== c.preference);
+  if (!hasOverride) {
+    return c.preference ? '<span class="cb-pref-badge">Pref #' + _esc(c.preference) + '</span>' : '';
+  }
+  // Mixed ranks across domiciles -- show each site's rank explicitly.
+  return sites.map(s => {
+    const p = _prefFor(c, s);
+    return p ? '<span class="cb-pref-badge">' + _esc(s) + ': #' + _esc(p) + '</span>' : '';
+  }).join(' ');
+}
 
 async function _load() {
   if (!window.contacts) return;
@@ -39,8 +81,8 @@ function _render() {
     listHtml = vendors.length ? vendors.map((c, i) => `
       <div class="cb-card" data-idx="${i}" data-id="${c.id}">
         <div class="cb-card-top">
-          <div class="cb-card-name">${_esc(c.name)}</div>
-          <div class="cb-card-company">${_esc(c.company || '')} ${c.make ? '• ' + _esc(c.make) : ''}</div>
+          <div class="cb-card-name">${_esc(c.name)} ${_prefBadgeHtml(c)}</div>
+          <div class="cb-card-company">${_esc(c.company || '')} ${_vendorMakesLabel(c)}</div>
         </div>
         <div class="cb-card-addr">${_esc(c.street || '')}${c.city ? ', ' + _esc(c.city) : ''} ${_esc(c.state || '')} ${_esc(c.zip || '')}</div>
         ${c.domiciles && c.domiciles.length ? '<div class="cb-card-meta" style="color:#58a6ff;">📍 ' + c.domiciles.join(', ') + '</div>' : ''}
@@ -49,6 +91,7 @@ function _render() {
         <div class="cb-card-actions">
           <button class="cb-btn cb-btn--use" data-action="use-address" data-id="${c.id}">📍 Use for Tow</button>
           ${c.email ? `<button class="cb-btn cb-btn--use" data-action="email-contact" data-id="${c.id}">📧 Email</button>` : ''}
+          <button class="cb-btn cb-btn--use" data-action="edit" data-id="${c.id}">✏️ Edit</button>
           <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">✕</button>
         </div>
       </div>`).join('') : '<div class="cb-empty">No vendors yet — add one below</div>';
@@ -57,15 +100,14 @@ function _render() {
       <div class="cb-add-form">
         <div class="cb-add-title">+ Add Vendor</div>
         <input class="cb-input" id="cb-v-name" placeholder="Vendor / Dealer name" />
-        <select class="cb-input" id="cb-v-make" style="padding:5px 8px;">
-          <option value="">— Make (for AI routing) —</option>
-          <option>VOLVO</option><option>MACK</option><option>FREIGHTLINER</option>
-          <option>KENWORTH</option><option>PETERBILT</option><option>INTERNATIONAL</option>
-          <option>CUMMINS</option><option>OTHER</option>
-        </select>
+        <input class="cb-input" id="cb-v-makes" placeholder="Makes this vendor services (VOLVO, KENWORTH, PETERBILT...)" />
+        <div style="font-size:8px;color:#6e7681;margin-top:2px;">Comma-separated. Many dealers service multiple makes -- list all of them so Dealer WO can route to this vendor for any of them.</div>
         <input class="cb-input" id="cb-v-company" placeholder="Company name (Bergeys, Transedge...)" />
         <input class="cb-input" id="cb-v-domiciles" placeholder="Domiciles this vendor serves (ABE40, PHL40...)" />
         <div style="font-size:8px;color:#6e7681;margin-top:2px;">Comma-separated. Must match your managed domiciles in Settings.</div>
+        <input class="cb-input" id="cb-v-preference" type="number" min="1" step="1" placeholder="Preference rank (1 = first choice, 2 = backup...) -- applies to every domicile above" />
+        <input class="cb-input" id="cb-v-pref-overrides" placeholder="Override rank for specific domiciles, e.g. AVP40:1, ABE40:2 (optional)" />
+        <div style="font-size:8px;color:#6e7681;margin-top:2px;">Preference applies to all domiciles listed above by default. Only use overrides if this vendor's rank actually differs by site. Dealer WO picks the lowest-ranked vendor for that domicile with fewer than 3 units already there.</div>
         <input class="cb-input" id="cb-v-street" placeholder="Street address" />
         <div class="cb-row">
           <input class="cb-input" id="cb-v-city" placeholder="City" style="flex:2" />
@@ -198,13 +240,18 @@ function _toggle() {
 
 async function _addVendor() {
   const g = id => (document.getElementById(id) || {}).value || '';
+  const prefRaw = parseInt(g('cb-v-preference'), 10);
+  const makes = g('cb-v-makes').split(',').map(m => m.trim().toUpperCase()).filter(Boolean);
   const contact = {
     type: 'vendor',
     name: g('cb-v-name'), company: g('cb-v-company'),
-    make: g('cb-v-make'),
+    makes: makes,
+    make: makes[0] || '', // legacy single-make field kept in sync for older display code
     domiciles: g('cb-v-domiciles').split(',').map(d => d.trim().toUpperCase()).filter(Boolean),
     street: g('cb-v-street'), city: g('cb-v-city'), state: g('cb-v-state'), zip: g('cb-v-zip'),
-    phone: g('cb-v-phone'), email: g('cb-v-email')
+    phone: g('cb-v-phone'), email: g('cb-v-email'),
+    preference: Number.isFinite(prefRaw) && prefRaw > 0 ? prefRaw : null,
+    preferenceByDomicile: _parsePrefOverrides(g('cb-v-pref-overrides'))
   };
   if (!contact.name) return;
   await window.contacts.add(contact);
@@ -241,11 +288,58 @@ async function _addDomicile() {
 async function _editContact(id) {
   const contact = _contacts.find(x => x.id === id);
   if (!contact) return;
-  
+
   // Show inline edit form
   const card = _el.querySelector('[data-id="' + id + '"]');
   if (!card) return;
-  
+
+  if (contact.type === 'vendor') {
+    card.innerHTML = `
+      <div class="cb-add-form" style="margin:0;border:none;padding:0;">
+        <input class="cb-input" id="edit-name" value="${_attr(contact.name)}" placeholder="Vendor / Dealer name" />
+        <input class="cb-input" id="edit-makes" value="${_attr((Array.isArray(contact.makes) && contact.makes.length ? contact.makes : (contact.make ? [contact.make] : [])).join(', '))}" placeholder="Makes this vendor services (VOLVO, KENWORTH, PETERBILT...)" />
+        <input class="cb-input" id="edit-company" value="${_attr(contact.company || '')}" placeholder="Company name" />
+        <input class="cb-input" id="edit-domiciles" value="${_attr((contact.domiciles || []).join(', '))}" placeholder="Domiciles this vendor serves (ABE40, PHL40...)" />
+        <input class="cb-input" id="edit-preference" type="number" min="1" step="1" value="${_attr(contact.preference || '')}" placeholder="Preference rank (1 = first choice) -- applies to all domiciles above" />
+        <input class="cb-input" id="edit-pref-overrides" value="${_attr(Object.entries(contact.preferenceByDomicile || {}).map(([s, r]) => s + ':' + r).join(', '))}" placeholder="Override rank for specific domiciles, e.g. AVP40:1, ABE40:2 (optional)" />
+        <input class="cb-input" id="edit-street" value="${_attr(contact.street || '')}" placeholder="Street address" />
+        <div class="cb-row">
+          <input class="cb-input" id="edit-city" value="${_attr(contact.city || '')}" placeholder="City" style="flex:2" />
+          <input class="cb-input" id="edit-state" value="${_attr(contact.state || '')}" placeholder="ST" style="flex:0.5" maxlength="2" />
+          <input class="cb-input" id="edit-zip" value="${_attr(contact.zip || '')}" placeholder="ZIP" style="flex:1" />
+        </div>
+        <input class="cb-input" id="edit-phone" value="${_attr(contact.phone || '')}" placeholder="Phone" />
+        <input class="cb-input" id="edit-email" value="${_attr(contact.email || '')}" placeholder="Email" />
+        <div style="display:flex;gap:6px;margin-top:4px;">
+          <button class="cb-btn cb-btn--add" id="edit-save">Save</button>
+          <button class="cb-btn cb-btn--del" id="edit-cancel">Cancel</button>
+        </div>
+      </div>`;
+
+    card.querySelector('#edit-save').addEventListener('click', async () => {
+      const g = sel => (card.querySelector(sel) || {}).value || '';
+      contact.name       = g('#edit-name').trim();
+      const editMakes    = g('#edit-makes').split(',').map(m => m.trim().toUpperCase()).filter(Boolean);
+      contact.makes      = editMakes;
+      contact.make        = editMakes[0] || ''; // legacy single-make field kept in sync
+      contact.company    = g('#edit-company').trim();
+      contact.domiciles  = g('#edit-domiciles').split(',').map(d => d.trim().toUpperCase()).filter(Boolean);
+      const prefRaw = parseInt(g('#edit-preference'), 10);
+      contact.preference = Number.isFinite(prefRaw) && prefRaw > 0 ? prefRaw : null;
+      contact.preferenceByDomicile = _parsePrefOverrides(g('#edit-pref-overrides'));
+      contact.street = g('#edit-street').trim();
+      contact.city   = g('#edit-city').trim();
+      contact.state  = g('#edit-state').trim();
+      contact.zip    = g('#edit-zip').trim();
+      contact.phone  = g('#edit-phone').trim();
+      contact.email  = g('#edit-email').trim();
+      await window.contacts.update(contact);
+      _load();
+    });
+    card.querySelector('#edit-cancel').addEventListener('click', () => _render());
+    return;
+  }
+
   card.innerHTML = `
     <div class="cb-add-form" style="margin:0;border:none;padding:0;">
       <input class="cb-input" id="edit-name" value="${contact.name || ''}" placeholder="Name" />
@@ -258,7 +352,7 @@ async function _editContact(id) {
         <button class="cb-btn cb-btn--del" id="edit-cancel">Cancel</button>
       </div>
     </div>`;
-  
+
   card.querySelector('#edit-save').addEventListener('click', async () => {
     contact.name = card.querySelector('#edit-name').value.trim();
     contact.slackId = card.querySelector('#edit-slack').value.trim();

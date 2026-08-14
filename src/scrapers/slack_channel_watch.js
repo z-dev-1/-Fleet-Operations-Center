@@ -183,7 +183,8 @@ Message: `;
 
 async function _shouldChimeIn(messageText, askOrcha) {
   try {
-    const aiResult = await askOrcha(CHIME_IN_GATE_PROMPT + messageText);
+    const _t = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 20s')), 20000));
+    const aiResult = await Promise.race([askOrcha(CHIME_IN_GATE_PROMPT + messageText), _t]);
     const text = (aiResult && aiResult.text || '').trim().toUpperCase();
     return text.startsWith('YES');
   } catch (e) {
@@ -215,7 +216,8 @@ function _directedAtMePrompt(myName) {
 
 async function _isDirectedAtMe(messageText, myName, askOrcha) {
   try {
-    const aiResult = await askOrcha(_directedAtMePrompt(myName) + messageText);
+    const _t = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 20s')), 20000));
+    const aiResult = await Promise.race([askOrcha(_directedAtMePrompt(myName) + messageText), _t]);
     const text = (aiResult && aiResult.text || '').trim().toUpperCase();
     return text.startsWith('YES');
   } catch (e) {
@@ -260,7 +262,11 @@ async function _classifyAndDraft(messageText, askOrcha) {
   const prompt = PERSONA_SYSTEM_PROMPT + timeContext + '\n\nPartner message:\n' + messageText;
   let aiResult;
   try {
-    aiResult = await askOrcha(prompt);
+    // Timeout guard: askOrcha() can hang up to 183s (90s × 2 retries) if the
+    // Orcha WS is unreachable. That holds _pollLock forever. Cap at 20s so one
+    // slow/hung partner message never blocks all channel + DM polling.
+    const _aiTimeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 20s')), 20000));
+    aiResult = await Promise.race([askOrcha(prompt), _aiTimeoutP]);
   } catch (e) {
     logger.warn('[SlackWatch] AI call threw:', e.message);
     aiResult = { ok: false, error: e.message };
@@ -599,8 +605,8 @@ async function _pollJustMeChannel(ch, myUserId, doLog) {
   // and the watermark advances immediately per message -- so a slow/hung
   // job can never re-block polling (this channel or any other) and never
   // prevents the next message from being picked up on the next cycle.
+  const existingLog = store.load('slackChannelReplies', []); // hoisted — one disk read for all messages
   for (const msg of newMsgs.slice(0, MAX_MESSAGES_PER_POLL)) {
-    const existingLog = store.load('slackChannelReplies', []);
     if (existingLog.some(e => e.id === ch.id + ':' + msg.ts)) {
       _saveChannelLastSeen(ch.id, msg.ts);
       continue;
@@ -624,6 +630,11 @@ async function pollChannelsOnce(log) {
     return { repliedCount: 0, escalatedCount: 0, items: [], _skipped: true };
   }
   _pollLock = true;
+  // Hard outer deadline: individual AI calls are capped at 20s each, but N channels
+  // × M messages can still add up. 90s guarantees the lock always releases within
+  // one poll interval even in the worst-case batch. Checked at the start of each
+  // channel iteration — coarse but safe.
+  const _pollDeadline = Date.now() + 90000;
   try {
 
   const config = getWatchConfig();
@@ -641,6 +652,7 @@ async function pollChannelsOnce(log) {
 
   for (const ch of config.channels) {
     if (ch.enabled === false) continue;
+    if (Date.now() > _pollDeadline) { doLog('[SlackWatch] Poll deadline reached — stopping channel iteration'); break; }
 
     // FEATURE (2026-07-25): 'justme' mode -- a channel used ONLY between
     // the signed-in user and this app (no partner, no persona, no
@@ -744,6 +756,7 @@ async function pollChannelsOnce(log) {
 
       if (!newMsgs.length) continue;
 
+      const partnerLog = store.load('slackChannelReplies', []); // hoisted — one disk read for all messages in this channel
       for (const msg of newMsgs) {
         // BUG FIX (2026-07-22): defense-in-depth dedup check, on top of
         // the _pollLock above. Skip if this exact message (channelId+ts)
@@ -752,9 +765,8 @@ async function pollChannelsOnce(log) {
         // alive at the same time, which is exactly what happened during
         // today's freeze incident -- a lock only protects within one
         // process's memory, not across processes sharing the same file
-        // store). Checked fresh from disk, not any in-memory cache.
-        const existingLog = store.load('slackChannelReplies', []);
-        if (existingLog.some(e => e.id === ch.id + ':' + msg.ts)) {
+        // store). Loaded once before the loop, not once per message.
+        if (partnerLog.some(e => e.id === ch.id + ':' + msg.ts)) {
           doLog(`[SlackWatch] ${ch.name}: message ${msg.ts} already replied to (found in log) — skipping duplicate`);
           continue;
         }

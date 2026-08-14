@@ -164,18 +164,23 @@ export const vendor = {
    * Returns immediately with { workflowId, altId } — portal work is async.
    * Progress arrives via bus events (vendor:progress / vendor:review-ready).
    * @param {object} unit  fleet unit record
+   * @param {object} [formData]  resolved Dealer WO review-modal values --
+   *   see renderer/src/js/views/dealer-wo-modal.js. Optional; when present
+   *   the orchestrator fills the real request-service form from it instead
+   *   of guessing from unit fields alone.
    * @returns {Promise<{ workflowId: string, altId: string }>}
    */
-  startPaccar: (unit) =>
-    window.vendor.startPaccar(unit),
+  startPaccar: (unit, formData) =>
+    window.vendor.startPaccar(unit, formData),
 
   /**
    * Start a Volvo / ASIST workflow.
    * @param {object} unit  fleet unit record
+   * @param {object} [formData]  see startPaccar above.
    * @returns {Promise<{ workflowId: string, altId: string }>}
    */
-  startVolvo: (unit) =>
-    window.vendor.startVolvo(unit),
+  startVolvo: (unit, formData) =>
+    window.vendor.startVolvo(unit, formData),
 
   /**
    * Approve a workflow that is sitting at review-ready.

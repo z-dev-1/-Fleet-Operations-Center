@@ -18,6 +18,16 @@ const REVIEW_KEY = 'partnerWRs_review';
 const SCHEDULED_KEY = 'partnerWRs_scheduled';
 const PROCESSED_KEY = 'partnerWRs_processed';
 
+// Vendors that go through OEM dealer portals (PACCAR/Decisiv, Volvo/ASIST, DTNA).
+// The AAP createRepair API cannot create these -- they require manual portal WRs.
+const DEALER_VENDORS = new Set([
+  'Volvo (ASIST)', 'Volvo', 'VOLVO',
+  'Kenworth (PACCAR)', 'KENWORTH', 'PACCAR',
+  'Peterbilt (PACCAR)', 'PETERBILT',
+  'Freightliner (DAIMLER)', 'FREIGHTLINER', 'DAIMLER',
+  'MACK', 'Mack',
+]);
+
 function registerPartnerWRHandlers(ctx) {
   const relay = require('../orcha/relay');
 
@@ -165,12 +175,23 @@ function registerPartnerWRHandlers(ctx) {
     const unit = (fd.rows || []).find(r => r.equipmentId === wr.payload.unit);
     if (!unit) return { ok: false, error: 'Unit not found: ' + wr.payload.unit };
 
-    // Submit via AAP API
+    // Always create relay/garage AAP WR first, then flag dealer reminder if needed
+    const vendorName = (wr.payload && wr.payload.vendor) || '';
     const { createWorkRequest } = require('../../src/scrapers/aap_create_wr');
     const result = await createWorkRequest(wr.payload, unit, logger.info.bind(logger));
 
     if (result && result.ok) {
-      // Remove from review, mark processed
+      const isDealer = DEALER_VENDORS.has(vendorName);
+      if (isDealer) {
+        // Relay WR created -- keep card as dealer WR reminder
+        wr.status = 'dealer-wr-needed';
+        wr.relayWRId = result.workRequestId;
+        review[idx] = wr;
+        store.save(REVIEW_KEY, review);
+        logger.info('[Partner] Relay WR created + dealer WR needed: ' + wr.payload.unit + ' — ' + vendorName + ' — relayWR=' + result.workRequestId);
+        return { ok: true, workRequestId: result.workRequestId, dealerWRNeeded: true, vendor: vendorName };
+      }
+      // Non-dealer: relay WR done, remove from queue
       review.splice(idx, 1);
       store.save(REVIEW_KEY, review);
       const processed = store.load(PROCESSED_KEY, []);

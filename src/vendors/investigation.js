@@ -55,11 +55,22 @@ const ROUTABLE_STATES = [
   'in repair',        // already at shop, may need dealer portal case
   'pending',          // queued for offsite
   'down',             // common abbreviation for unavailable
+  'available',        // BUGFIX (2026-07-26): dealer WO very often starts FROM
+                       // Available -- current vendor fails to resolve an
+                       // issue on a running unit, and escalating to the
+                       // dealer is what puts it into Unavailable. This is a
+                       // normal starting point, not an edge case.
 ];
 
 // States where starting a dealer WO makes no sense.
+// BUGFIX (2026-07-26): 'available' was previously blocked here on the
+// assumption a dealer WO is premature while the unit is still on the road.
+// In practice, a dealer WO is very often created FROM Available -- the unit
+// is running, the current vendor fails to resolve an issue, and escalating
+// to the dealer is exactly what puts it into Unavailable. Blocking on
+// Available was blocking the workflow at its most common real starting
+// point. Only truly terminal/out-of-fleet states should block.
 const BLOCKED_STATES = [
-  'available',        // unit is active on road -- premature
   'decommissioned',   // out of fleet
   'disposed',
   'sold',

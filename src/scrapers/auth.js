@@ -96,20 +96,44 @@ function checkMwinit() {
   const { cookies, expired } = parsed;
 
   if (cookies.length === 0) {
-    return { ok: false, reason: 'All Midway cookies have expired — run mwinit', expired };
-  }
-
-  if (expired.length > 0 && cookies.length === 0) {
-    // Only block if ALL cookies expired
+    // All cookies in the file have expired
     const names = expired.map(c => c.name).join(', ');
-    return { ok: false, reason: 'Expired cookies: ' + names, expired };
+    const reason = expired.length > 0
+      ? 'All Midway cookies have expired (' + names + ') — run mwinit'
+      : 'All Midway cookies have expired — run mwinit';
+    return { ok: false, reason, expired };
   }
 
-  // Find the soonest expiry for logging
+  // Some cookies expired, some still valid — session is still usable.
+  // The soonest-expiry logic below will reflect how much time is left.
   const now = Math.floor(Date.now() / 1000);
-  const soonest = cookies
-    .filter(c => c.expirationDate)
-    .reduce((min, c) => Math.min(min, c.expirationDate), Infinity);
+  // FIX (2026-07-28): was computing soonest expiry across ALL cookies, which
+  // always picked up amazon_enterprise_access — a short-lived (~2h) JWT access
+  // token that Midway issues alongside the real ~20h session cookies. That
+  // made the app report "expires in ~2h" and fire auto-renewal ~18h too early.
+  //
+  // Cookie lifetime breakdown (confirmed from live cookie file):
+  //   amazon_enterprise_access  → ~2h  (JWT access token, 4 domains)
+  //   __Host-session / session  → ~20h (actual Midway session credential)
+  //   tpm_metrics               → ~20h (TPM metrics token)
+  //   user_name                 → ~1yr (static identity cookie)
+  //
+  // The session is alive as long as __Host-session / session are valid.
+  // amazon_enterprise_access is a short-lived token used during the Midway
+  // handshake — it is NOT the ongoing session credential and must be excluded
+  // from the expiry clock.
+  //
+  // SESSION_COOKIES: names that represent the real ~20h session.
+  // SHORT_LIVED:     names to exclude from the expiry/renewal clock.
+  const SHORT_LIVED_NAMES = new Set(['amazon_enterprise_access']);
+  const sessionCookies = cookies.filter(c => !SHORT_LIVED_NAMES.has(c.name) && c.expirationDate);
+  const allCookies     = cookies.filter(c => c.expirationDate);
+
+  // Find the soonest expiry among SESSION cookies only (for renewal clock)
+  const soonest = sessionCookies.length
+    ? sessionCookies.reduce((min, c) => Math.min(min, c.expirationDate), Infinity)
+    : allCookies.reduce((min, c) => Math.min(min, c.expirationDate), Infinity);
+
   const expiresInMin = soonest === Infinity ? null : Math.round((soonest - now) / 60);
 
   return { ok: true, count: cookies.length, expiresInMin };
@@ -196,13 +220,13 @@ async function injectCookies(targetSession) {
 // renewal is already in progress, every caller just awaits that SAME
 // in-flight promise instead of spawning a second terminal.
 let _mwinitInFlight = null;
-function runMwinit() {
+function runMwinit(force) {
   if (_mwinitInFlight) {
     logger.info('[AuthManager] mwinit already in flight -- awaiting existing attempt instead of spawning another');
     return _mwinitInFlight;
   }
   _mwinitInFlight = new Promise((resolve, reject) => {
-    logger.info('[AuthManager] Spawning mwinit terminal...');
+    logger.info('[AuthManager] Spawning mwinit terminal' + (force ? ' (force -f)' : '') + '...');
 
     // FIX (2026-07-21): the ":RETRY" loop below treated ANY non-zero mwinit
     // exit code as total failure and looped back to re-run the entire
@@ -228,7 +252,7 @@ function runMwinit() {
       '@echo off',
       'echo Fleet Operations - Midway auth required.',
       'echo.',
-      'mwinit',
+      force ? 'mwinit -f' : 'mwinit',
       'echo.',
       'echo Auth step complete - this window will close in 3 seconds.',
       'timeout /t 3 /nobreak > nul',

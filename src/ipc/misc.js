@@ -288,8 +288,24 @@ function registerMiscIPC(ctx) {
   });
 
   handle('auth:check-midway', () => {
-    const ok = fs.existsSync(P.midwayCookie);
-    return { ok, reason: ok ? null : 'Midway cookie not found — run mwinit' };
+    // FIX (2026-07-28): was only checking fs.existsSync() — reported "expired"
+    // even when the session was valid because it never read the actual Unix
+    // expiry timestamps in the cookie file. Now delegates to checkMwinit()
+    // (the same function used by the app.js heartbeat) which reads real
+    // timestamps and returns { ok, expiresInMin } correctly.
+    try {
+      const { checkMwinit } = require('../scrapers/auth');
+      const state = checkMwinit();
+      return {
+        ok:          state.ok,
+        reason:      state.ok ? null : (state.reason || 'Midway cookies expired - run mwinit'),
+        expiresInMin: state.expiresInMin || null,
+      };
+    } catch (e) {
+      // Fallback: if auth module fails to load, at least check file existence
+      const ok = fs.existsSync(P.midwayCookie);
+      return { ok, reason: ok ? null : 'Midway cookie file not found - run mwinit' };
+    }
   });
 
   handle('aap:open-url', async (_e, url) => {

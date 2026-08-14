@@ -250,22 +250,12 @@ function cleanTimeline(timeline) {
 
   const isRealUpdate = (line) => !isGapFiller(line) && line.length > 5;
 
-  // Find the last real update
-  let lastRealIdx = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (isRealUpdate(lines[i])) { lastRealIdx = i; break; }
-  }
+  // If any real update exists, drop ALL gap fillers — they add noise once
+  // there is substantive content to read.
+  const hasAnyReal = lines.some(isRealUpdate);
+  if (!hasAnyReal) return timeline; // nothing but gap fillers — keep as-is
 
-  if (lastRealIdx === -1) return timeline; // no real updates at all
-
-  // Remove gap fillers that are BEFORE the last real update
-  // (keep gap fillers AFTER the last real update — they're current/recent)
-  const cleaned = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (i < lastRealIdx && isGapFiller(lines[i])) continue; // skip old gap fillers
-    cleaned.push(lines[i]);
-  }
-
+  const cleaned = lines.filter(l => !isGapFiller(l));
   return cleaned.join('\n');
 }
 

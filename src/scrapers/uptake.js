@@ -430,18 +430,19 @@ const SCRAPE_INSIGHTS_LIST = `(function() {
 // _insight-details__action_1ba7f_897 blocks. We just need body > 300 chars
 // AND the insight-details data row to be present.
 const CHECK_DETAIL_READY = `(function() {
-  // body=892 is the nav shell only — React has NOT yet hydrated the content.
-  // The _insight-details__action sections only appear after full React render.
-  // Require bodyLen > 800 AND at least one action section whose markdown/value
-  // text is longer than 30 chars (the truncated pre-expand state is still >30).
+  // BUG FIX (2026-08-12): the original check used obfuscated hash-suffixed class
+  // names (_insight-details__action_1ba7f_897 etc.) that broke when Uptake
+  // redeployed their SPA — every detail page timed out, no screenshots taken.
+  // New check: body > 1800 chars (nav shell alone is ~892; a rendered insight
+  // card with title + subsystem + at least one content section reliably exceeds
+  // 1800). Also accepts any div with class containing "insight" that has
+  // substantial text, as a secondary signal. No hash suffixes anywhere.
   var bodyLen = (document.body ? document.body.innerText : '').trim().length;
-  if (bodyLen < 800) return false;
-  var secs = Array.from(document.querySelectorAll('._insight-details__action_1ba7f_897'));
-  if (!secs.length) return false;
-  return secs.some(function(sec) {
-    var el = sec.querySelector('._insight-details__markdown_1ba7f_902') ||
-             sec.querySelector('._insight-details__value_1ba7f_942');
-    return !!(el && (el.innerText || el.textContent || '').trim().length > 30);
+  if (bodyLen < 1800) return false;
+  // Secondary: look for any element whose class contains "insight" with real text
+  var insightEls = Array.from(document.querySelectorAll('[class*="insight"]'));
+  return insightEls.some(function(el) {
+    return (el.innerText || el.textContent || '').trim().length > 100;
   });
 })()`;
 
@@ -701,7 +702,48 @@ async function scrapeUptake() {
           unitMap[row.assetId].insightCount++;
         });
 
-        // ── 4. Visit each insight detail page ────────────────────────────
+        // ── 4. Risk score pass — FIRST, before detail pages ────────────────
+        // BUG FIX (2026-08-12): risk pass used to run AFTER the detail page loop.
+        // The detail loop takes ~43s per timed-out page × 55 pages = well over the
+        // 15-min master timeout. When the timeout fired, settled=true, and the risk
+        // pass immediately broke on the first asset check — returning 0 scores every
+        // run. Swapped order so risk scores (fast, ~12s each, 47 assets ≈ 10 min)
+        // always complete before detail pages. Detail pages are enrichment; risk
+        // scores drive the email. Even if details time out, emails get real scores.
+        const uniqueAssets = Object.values(unitMap).filter(u => u.assetUuid);
+        flog(`[Uptake] Risk score pass: ${uniqueAssets.length} unique assets...`);
+        for (const u of uniqueAssets) {
+          if (win.isDestroyed() || settled) break;
+          try {
+            await navTo(`https://fleet.uptake.com/asset/${u.assetUuid}`);
+            const assetReady = await pollUntil(win, CHECK_ASSET_READY, 600, 20);
+            if (!assetReady) { fwarn(`[Uptake] Asset overview not ready for ${u.id}`); continue; }
+            flog('[Uptake] Asset overview ready for', u.id, '| signal: DOM');
+            const assetData = await win.webContents.executeJavaScript(SCRAPE_ASSET_RISK);
+
+            // ── Log diagnostic on first asset only ──────────────────────
+            if (uniqueAssets.indexOf(u) === 0 && assetData._diag) {
+              const rd = assetData._diag;
+              flog(`[Uptake] RISK-DIAG#1 bodyLen=${rd.bodyLen} url=${rd.url}`);
+              flog(`[Uptake] RISK-DIAG#1 candidateClasses=${JSON.stringify(rd.candidateClasses)}`);
+              flog(`[Uptake] RISK-DIAG#1 numericLeaves=${JSON.stringify(rd.numericLeaves)}`);
+            }
+
+            if (assetData.riskScore !== null) u.riskScore    = assetData.riskScore;
+            if (assetData.riskLabel)          u.riskLabel    = assetData.riskLabel;
+            if (!u.vin          && assetData.vin)          u.vin          = assetData.vin;
+            if (!u.model        && assetData.model)        u.model        = assetData.model;
+            if (!u.modelYear    && assetData.modelYear)    u.modelYear    = assetData.modelYear;
+            if (!u.manufacturer && assetData.manufacturer) u.manufacturer = assetData.manufacturer;
+            if (!u.fuelType     && assetData.fuelType)     u.fuelType     = assetData.fuelType;
+            flog(`[Uptake] Asset ${u.id}: risk=${assetData.riskScore} vin=${assetData.vin}`);
+          } catch(e) {
+            fwarn(`[Uptake] Risk pass failed for ${u.id}: ${e.message}`);
+          }
+        }
+        flog(`[Uptake] Risk pass done — ${uniqueAssets.filter(u=>u.riskScore!==null).length}/${uniqueAssets.length} scored`);
+
+        // ── 5. Visit each insight detail page (enrichment — can be partial) ──
         flog(`[Uptake] Visiting ${insightRows.length} detail pages...`);
         for (let i = 0; i < insightRows.length; i++) {
           if (win.isDestroyed() || settled) break;
@@ -812,40 +854,6 @@ async function scrapeUptake() {
           } catch(e) {
             fwarn(`[Uptake] Detail ${i+1} failed (${row.assetId}): ${e.message}`);
             unitMap[row.assetId].insightsList.push(baseEntry);
-          }
-        }
-
-        // ── 5. Risk score pass — visit each unique asset overview page ────
-        // Risk score lives on /asset/{uuid} (overview tab), NOT the insight page.
-        const uniqueAssets = Object.values(unitMap).filter(u => u.assetUuid);
-        flog(`[Uptake] Risk score pass: ${uniqueAssets.length} unique assets...`);
-        for (const u of uniqueAssets) {
-          if (win.isDestroyed() || settled) break;
-          try {
-            await navTo(`https://fleet.uptake.com/asset/${u.assetUuid}`);
-            const assetReady = await pollUntil(win, CHECK_ASSET_READY, 600, 20);
-            if (!assetReady) { fwarn(`[Uptake] Asset overview not ready for ${u.id}`); continue; }
-            flog('[Uptake] Asset overview ready for', u.id, '| signal: DOM');
-            const assetData = await win.webContents.executeJavaScript(SCRAPE_ASSET_RISK);
-
-            // ── Log diagnostic on first asset only ──────────────────────
-            if (uniqueAssets.indexOf(u) === 0 && assetData._diag) {
-              const rd = assetData._diag;
-              flog(`[Uptake] RISK-DIAG#1 bodyLen=${rd.bodyLen} url=${rd.url}`);
-              flog(`[Uptake] RISK-DIAG#1 candidateClasses=${JSON.stringify(rd.candidateClasses)}`);
-              flog(`[Uptake] RISK-DIAG#1 numericLeaves=${JSON.stringify(rd.numericLeaves)}`);
-            }
-
-            if (assetData.riskScore !== null) u.riskScore    = assetData.riskScore;
-            if (assetData.riskLabel)          u.riskLabel    = assetData.riskLabel;
-            if (!u.vin          && assetData.vin)          u.vin          = assetData.vin;
-            if (!u.model        && assetData.model)        u.model        = assetData.model;
-            if (!u.modelYear    && assetData.modelYear)    u.modelYear    = assetData.modelYear;
-            if (!u.manufacturer && assetData.manufacturer) u.manufacturer = assetData.manufacturer;
-            if (!u.fuelType     && assetData.fuelType)     u.fuelType     = assetData.fuelType;
-            flog(`[Uptake] Asset ${u.id}: risk=${assetData.riskScore} vin=${assetData.vin}`);
-          } catch(e) {
-            fwarn(`[Uptake] Risk pass failed for ${u.id}: ${e.message}`);
           }
         }
 

@@ -14,6 +14,7 @@
 const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
+const util = require('util');
 
 const LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 const LEVEL_NAMES = ['DEBUG', 'INFO ', 'WARN ', 'ERROR'];
@@ -46,7 +47,7 @@ function _writeToFile(filePath, line) {
         fs.renameSync(filePath, filePath + '.old');
       }
     } catch (_) {}
-    fs.appendFileSync(filePath, line + '\n');
+    fs.appendFileSync(filePath, line + '\n', { encoding: 'utf8' });
   } catch (_) {}
 }
 
@@ -60,21 +61,36 @@ function _log(namespace, level, args) {
   if (level < _minLevel || _silent) return;
   const ts    = new Date().toISOString();
   const label = LEVEL_NAMES[level] || '?????';
-  const parts = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-  const line  = `[${ts}] [${label}] [${namespace}] ${parts}`;
+  // _serialize: strings pass through unchanged (fixes UTF-8 double-encoding).
+  // Objects: util.inspect for console (human-readable), JSON.stringify for file.
+  function _serialize(a, forFile) {
+    if (a === null)            return 'null';
+    if (a === undefined)       return 'undefined';
+    if (typeof a === 'string') return a;                 // already a string — never re-encode
+    if (a instanceof Error)    return a.stack || a.message;
+    if (typeof a === 'object') {
+      if (forFile) { try { return JSON.stringify(a); } catch (_) { return util.inspect(a, { depth: 4 }); } }
+      return util.inspect(a, { depth: 4, colors: false });
+    }
+    return String(a);
+  }
+  const consoleParts = args.map(a => _serialize(a, false)).join(' ');
+  const fileParts    = args.map(a => _serialize(a, true)).join(' ');
+  const consoleLine = `[${ts}] [${label}] [${namespace}] ${consoleParts}`;
+  const fileLine    = `[${ts}] [${label}] [${namespace}] ${fileParts}`;
 
   // Console output
   if (level >= LEVELS.WARN) {
-    process.stderr.write(line + '\n');
+    process.stderr.write(consoleLine + '\n');
   } else {
-    process.stdout.write(line + '\n');
+    process.stdout.write(consoleLine + '\n');
   }
 
   // File output
-  _writeToFile(_getLogFile(namespace), line);
+  _writeToFile(_getLogFile(namespace), fileLine);
   // Always write to app.log too
   if (_logDir) {
-    _writeToFile(path.join(_logDir, 'app.log'), line);
+    _writeToFile(path.join(_logDir, 'app.log'), fileLine);
   }
 }
 

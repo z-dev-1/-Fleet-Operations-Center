@@ -193,10 +193,11 @@ contextBridge.exposeInMainWorld('slack', {
 //    doesn't need VPN (unlike SMTP), unlike this app's other two send
 //    paths. Mirrors the Slack block above.
 contextBridge.exposeInMainWorld('graphMail', {
-  checkAuth: ()   => ipcRenderer.invoke('graph:check-auth'),
-  signIn:    ()   => ipcRenderer.invoke('graph:sign-in'),
-  signOut:   ()   => ipcRenderer.invoke('graph:sign-out'),
-  send:      (data) => ipcRenderer.invoke('graph:send-mail', data),
+  checkAuth:         ()      => ipcRenderer.invoke('graph:check-auth'),
+  signIn:            ()      => ipcRenderer.invoke('graph:sign-in'),
+  signOut:           ()      => ipcRenderer.invoke('graph:sign-out'),
+  send:              (data)  => ipcRenderer.invoke('graph:send-mail', data),
+  getCalendarEvents: (opts)  => ipcRenderer.invoke('graph:get-calendar-events', opts),
 });
 
 
@@ -306,6 +307,12 @@ contextBridge.exposeInMainWorld('contacts', {
   search:   (q)     => ipcRenderer.invoke('contacts:search', q),
 });
 
+contextBridge.exposeInMainWorld('vendorAssignments', {
+  getAll: ()      => ipcRenderer.invoke('vendor-assignments:get-all'),
+  upsert: (entry) => ipcRenderer.invoke('vendor-assignments:upsert', entry),
+  remove: (unitId) => ipcRenderer.invoke('vendor-assignments:remove', unitId),
+});
+
 contextBridge.exposeInMainWorld('app', {
   windowAction:   (action) => ipcRenderer.invoke('window:action', action),
   notify:         (title, body) => ipcRenderer.invoke('notify', title, body),
@@ -351,8 +358,11 @@ contextBridge.exposeInMainWorld('vendor', {
   onComplete:    (cb) => on('vendor:complete',     cb),
   onError:       (cb) => on('vendor:error',        cb),
   investigate: (unit)       => ipcRenderer.invoke('vendor:investigate',  { unit }),
-  startPaccar: (unit)       => ipcRenderer.invoke('vendor:start-paccar', { unit }),
-  startVolvo:  (unit)       => ipcRenderer.invoke('vendor:start-volvo',  { unit }),
+  // formData (optional): resolved Dealer WO review-modal values -- see
+  // renderer/src/js/views/dealer-wo-modal.js -- threaded through to the
+  // vendor orchestrator's fill step.
+  startPaccar: (unit, formData) => ipcRenderer.invoke('vendor:start-paccar', { unit, formData }),
+  startVolvo:  (unit, formData) => ipcRenderer.invoke('vendor:start-volvo',  { unit, formData }),
   approve:     (workflowId, altId) => ipcRenderer.invoke('vendor:approve', { workflowId, altId }),
   cancel:      (workflowId) => ipcRenderer.invoke('vendor:cancel',       { workflowId }),
   getStatus:   ()           => ipcRenderer.invoke('vendor:get-status'),
@@ -404,6 +414,7 @@ contextBridge.exposeInMainWorld('bubble', {
   getOpacity:       ()       => ipcRenderer.invoke('bubble:get-opacity'),
   setOpacity:       (v)      => ipcRenderer.send('bubble:set-opacity', v),
   onOpacityChanged: (cb)     => ipcRenderer.on('bubble:opacity-changed', (_e, v) => cb(v)),
+  quit:           ()       => ipcRenderer.send('app:quit'),
 });
 
 // ── Fleet Ops Companion (iPhone PWA bridge) ─────────────────────────────────

@@ -41,6 +41,9 @@ const MAX_MESSAGES_PER_POLL = 5;   // per DM thread, per poll cycle
 const MAX_LOG_ENTRIES       = 500; // persisted reply log cap
 
 let _pollLock = false; // mirrors slack_channel_watch.js's _pollLock exactly
+let _rlUntil  = 0;    // epoch ms — skip all conversations.replies calls until this time
+let _threadReplyCount = {}; // cache: channelId:parentTs -> replyCount seen on last fetch
+let _sendBlockedChannels = new Set(); // channels that returned restricted_action_read_only_channel — skip sends for the session
 
 function getDMAutoReplyConfig() {
   const cfg = store.load('slackDMAutoReplyConfig', null);
@@ -96,6 +99,64 @@ function updateDMReviewItem(id, updates) {
 // Uses relay.ask() -- full fallback chain (fleet-brain -> WS -> Claude Code
 // -> Bedrock). The DM persona + conversation context are carried in the
 // prompt, so no persistent session is required here.
+// ── Extract links and file content from a Slack message for AI context ────
+// Returns a string block to append to the prompt, or '' if nothing found.
+async function _buildAttachmentContext(msg, downloadFn) {
+  const parts = [];
+
+  // 1. Inline URLs in message text (Slack wraps them as <url> or <url|label>)
+  const urlMatches = (msg.text || '').match(/<(https?:[^|>]+)(?:\|[^>]+)?>/g) || [];
+  const urls = urlMatches
+    .map(m => m.replace(/^</, '').replace(/>$/, '').split('|')[0])
+    .filter(u => u && u.startsWith('http'));
+  if (urls.length) {
+    parts.push('Links shared in this message:\n' + urls.map(u => '  - ' + u).join('\n'));
+  }
+
+  // 2. Slack attachment blocks (link previews, unfurled URLs from prior sends)
+  const attachments = msg.attachments || [];
+  for (const a of attachments) {
+    const label = a.title || a.service_name || '';
+    const link  = a.title_link || a.from_url || '';
+    const blurb = a.text || a.fallback || a.pretext || '';
+    if (label || link || blurb) {
+      parts.push(
+        'Linked content preview:' +
+        (label ? '\n  Title: '   + label              : '') +
+        (link  ? '\n  URL: '     + link               : '') +
+        (blurb ? '\n  Excerpt: ' + blurb.slice(0, 400) : '')
+      );
+    }
+  }
+
+  // 3. Shared files — download readable ones (txt, md, csv, json, log)
+  const files = msg.files || [];
+  for (const file of files) {
+    try {
+      const result = await downloadFn(file);
+      if (result && result.content) {
+        const snippet   = result.content.slice(0, 4096); // 4KB cap per file
+        const truncated = result.content.length > 4096;
+        parts.push(
+          'Shared file: ' + result.name +
+          '\n--- file content start ---\n' +
+          snippet +
+          (truncated ? '\n[... truncated at 4KB ...]' : '') +
+          '\n--- file content end ---'
+        );
+      } else if (file.name) {
+        // Not a readable format (image, PDF, binary) — name it so AI knows
+        parts.push('Shared file (not readable): ' + file.name +
+          (file.mimetype ? ' (' + file.mimetype + ')' : ''));
+      }
+    } catch (_) {
+      if (file.name) parts.push('Shared file (fetch failed): ' + file.name);
+    }
+  }
+
+  return parts.length ? '\n\n' + parts.join('\n\n') : '';
+}
+
 async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
   // historyMsgs: optional array of strings ("Speaker: text") from recent
   // conversation, oldest-first, to give the AI context before replying.
@@ -121,7 +182,21 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
   const _timeStr = _now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
   const _dateStr = _now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   const timeContext = '\n\nCurrent local time: ' + _timeStr + ', ' + _dateStr + '.';
-  const prompt = PERSONA_SYSTEM_PROMPT + timeContext + groupBlock + contextBlock + '\n\nIncoming DM:\n' + messageText;
+  // FIX (2026-07-30): The persistent Claude Code process accumulates conversation
+  // history across all relay.ask() callers. Fleet WR classification calls that
+  // return REPAIR_STATUS: plain-text format contaminate the context, causing
+  // subsequent DM calls to ignore the JSON format instruction and respond in the
+  // same fleet-status style. A context-reset prefix breaks that inherited pattern
+  // so Claude follows only the instructions in THIS message.
+  const _contextReset =
+    '=== NEW INDEPENDENT TASK — IGNORE ALL PRIOR CONTEXT AND OUTPUT FORMATS ===\n' +
+    'What follows is a completely independent task with its own format requirements. ' +
+    'Disregard any prior conversation history, output styles, or response patterns. ' +
+    'Follow ONLY the instructions in this message.\n\n';
+  // JSON-schema reminder appended last so it is the final instruction the model
+  // sees before the actual message — reduces plain-text / "Holding, unchanged." responses.
+  const _jsonReminder = '\n\nREMINDER — YOUR ENTIRE RESPONSE MUST BE A SINGLE VALID JSON OBJECT, nothing before or after it:\n{"inScope":true|false,"reply":"...","category":"alert"|"action"|"workflow"|null,"title":"..."|null}';
+  const prompt = _contextReset + PERSONA_SYSTEM_PROMPT + timeContext + groupBlock + contextBlock + _jsonReminder + '\n\nIncoming DM:\n' + messageText;
   // FIX (2026-07-24): was using sendOrchaChat() (direct WS-only, 90s timeout,
   // no fallback). If the Orcha WS server is not running or slow, EVERY DM call
   // timed out and sent the canned fallback reply. Switch to relay.ask() which
@@ -129,7 +204,10 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
   let raw;
   try {
     const relay = require('../orcha/relay');
-    raw = await relay.ask(prompt);
+    // Timeout guard: relay.ask() can hang if all workers are busy on fleet jobs.
+    // Cap at 20s so a single slow AI call doesn't hold _pollLock for minutes.
+    const _aiTimeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 20s')), 20000));
+    raw = await Promise.race([relay.ask(prompt), _aiTimeoutP]);
   } catch (e) {
     logger.warn('[SlackDM] AI call threw:', e.message);
     raw = null;
@@ -149,6 +227,27 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
 
   const match = raw.match(/\{[\s\S]*\}/);
   if (!match) {
+    // FEATURE (2026-08-14): AI sometimes returns plain "Holding, unchanged." or
+    // similar meta-phrases instead of JSON — it is correctly identifying a repeat
+    // message and choosing not to engage. Respect that decision: skip the send
+    // entirely rather than spamming the canned fallback reply every 30s.
+    if (/^\s*(holding|no\s*change|same\s*(as\s*before)?|unchanged|nothing\s*new|no\s*update)/i.test(raw)) {
+      logger.info('[SlackDM] AI held/unchanged response — skipping reply for this message');
+      return { ...fallback, _skip: true };
+    }
+    // FIX (2026-07-30): When the AI returns REPAIR_STATUS: plain-text (fleet status
+    // format contamination from prior calls), don't silently fall back to the canned
+    // holding reply — extract the actual content and compose a real DM reply from it.
+    const statusLine = raw.match(/REPAIR_STATUS:\s*([^\n]+)/);
+    const issueLine  = raw.match(/ISSUE:\s*([^\n]+)/);
+    if (issueLine || statusLine) {
+      const parts = [];
+      if (issueLine)  parts.push(issueLine[1].trim());
+      if (statusLine) parts.push('currently ' + statusLine[1].trim().toLowerCase());
+      const rescuedReply = parts.join(' — ');
+      logger.warn('[SlackDM] AI response in fleet-status format (context contamination) -- rescued into DM reply. Raw:', raw.slice(0, 200));
+      return { inScope: true, reply: rescuedReply, category: null, title: null };
+    }
     logger.warn('[SlackDM] AI response had no JSON object, using safe fallback. Raw:', raw.slice(0, 200));
     return fallback;
   }
@@ -236,7 +335,7 @@ async function pollDMAutoReplyOnce(log) {
   const config = getDMAutoReplyConfig();
   if (!config.enabled) { doLog('[SlackDM] Disabled — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
 
-  const { listOpenDMs, readMessages, sendToChannel, checkLiveAuth, resolveUserName } = require('./slack_send');
+  const { listOpenDMs, readMessages, readThreadReplies, sendToChannel, checkLiveAuth, resolveUserName, downloadFileContent } = require('./slack_send');
 
   const auth = await checkLiveAuth();
   if (!auth || !auth.authenticated) { doLog('[SlackDM] Slack not authenticated — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
@@ -244,14 +343,45 @@ async function pollDMAutoReplyOnce(log) {
 
   let repliedCount = 0, escalatedCount = 0;
   const newEscalations = [];
+  // Hard cap: if this poll runs over 25s (e.g. many thread-reply fetches hanging
+  // at 8s each), bail out of the thread section and return — the next poll cycle
+  // will pick up any missed threads. Keeps the poll lock from being held for minutes.
+  const _pollDeadline = Date.now() + 10000; // 10s total — prevents thread fetches from stalling a poll past the 30s interval
 
   const dms = await listOpenDMs(40, myUserId); // myUserId excludes Z from group-DM display names
   if (!dms.length) return { repliedCount: 0, escalatedCount: 0, items: [] };
 
-  for (const dm of dms) {
+  // ── PHASE 1: parallel fetch ──────────────────────────────────────────────
+  // Fetch all DM message histories in parallel so hanging Slack API calls
+  // (which timeout at 8s each) are paid once in total, not once per DM.
+  // Previously these were sequential: 10 hanging calls × 8s = 80s stall;
+  // now: max(all fetch times) ≈ 8s total.
+  const dmFetchResults = await Promise.all(
+    dms.map(dm => {
+      if (dm.name === 'Slackbot' || dm.name === 'ATS AI Training SlackBot') return Promise.resolve(null);
+      if (_sendBlockedChannels.has(dm.channelId)) return Promise.resolve(null);
+      return readMessages(dm.channelId, 20).catch(e => {
+        doLog(`[SlackDM] ${dm.name}: readMessages error — ${e.message}`);
+        return [];
+      });
+    })
+  );
+
+  // ── PHASE 2: sequential process ──────────────────────────────────────────
+  for (let _di = 0; _di < dms.length; _di++) {
+    const dm = dms[_di];
+    const messages = dmFetchResults[_di];
+    // Skip checks (same conditions as the fetch phase above).
+    if (dm.name === 'Slackbot' || dm.name === 'ATS AI Training SlackBot') {
+      doLog(`[SlackDM] ${dm.name}: skipping (system bot)`);
+      continue;
+    }
+    if (_sendBlockedChannels.has(dm.channelId)) {
+      doLog(`[SlackDM] ${dm.name}: skipping (read-only channel, send was blocked)`);
+      continue;
+    }
     try {
-      const messages = await readMessages(dm.channelId, 20); // newest-first
-      if (!messages.length) continue;
+      if (!messages || !messages.length) continue;
 
       const threads = config.threads || {};
       const seen = threads[dm.channelId];
@@ -270,15 +400,29 @@ async function pollDMAutoReplyOnce(log) {
         .reverse()
         .slice(0, MAX_MESSAGES_PER_POLL);
 
-      if (!newMsgs.length) continue;
+      // Even when no new top-level messages exist, active threads may have
+      // received new replies -- don't skip the thread-reply poll below.
+      const hasNewTopLevel = newMsgs.length > 0;
 
-      for (const msg of newMsgs) {
+      const existingLog = store.load('slackDMReplies', []); // hoisted — one disk read for all messages
+      if (hasNewTopLevel) { for (const msg of newMsgs) {
         // Defense-in-depth dedup, on top of _pollLock (same rationale as
         // channel watch's identical check — see that file for the real
         // incident it prevents).
-        const existingLog = store.load('slackDMReplies', []);
         if (existingLog.some(e => e.id === dm.channelId + ':' + msg.ts)) {
           doLog(`[SlackDM] ${dm.name}: message ${msg.ts} already replied to (found in log) — skipping duplicate`);
+          continue;
+        }
+
+        // FEATURE (2026-07-30): If Z already replied manually in the Slack app
+        // after this message, don't auto-reply — the person already has a real
+        // answer. messages[] includes ALL senders; a Z-authored message with a
+        // newer ts means Z typed a response in Slack directly.
+        const zAlreadyRepliedManually = messages.some(
+          m => m.userId === myUserId && parseFloat(m.ts) > parseFloat(msg.ts)
+        );
+        if (zAlreadyRepliedManually) {
+          doLog(`[SlackDM] ${dm.name}: Z already replied manually after ${msg.ts} — skipping auto-reply`);
           continue;
         }
 
@@ -308,18 +452,36 @@ async function pollDMAutoReplyOnce(log) {
         const groupContext = dm.isGroup
           ? { isGroup: true, memberNames: (dm.name || '').split(', ').filter(Boolean), speakerName }
           : null;
-        const draft = await _classifyAndDraft(msg.text, historyMsgs, groupContext);
+        // Enrich AI prompt with any links or files attached to this message
+        const attachCtx = await _buildAttachmentContext(msg, downloadFileContent);
+        const msgTextWithAttach = (msg.text || '') + attachCtx;
+        const draft = await _classifyAndDraft(msgTextWithAttach, historyMsgs, groupContext);
+
+        // AI explicitly held (identified a repeat, "Holding, unchanged." etc.) — skip
+        // send and log entry; just let the watermark advance past this message.
+        if (draft._skip) {
+          doLog(`[SlackDM] ${dm.name}: AI held — skipping send for ${msg.ts}`);
+          _saveThreadSeen(dm.channelId, dm.name, msg.ts, !!dm.isGroup);
+          continue;
+        }
 
         let replyTs = null;
+        // Declared outside the try so it is in scope for the log entry below
+        // regardless of whether the send succeeds or throws.
+        const taggedReply = (msg.userId ? `<@${msg.userId}> ` : '') + draft.reply;
         try {
           // Reply in-thread if the incoming message was itself part of a
           // thread (msg.threadTs is null for plain top-level messages, so
           // this is a no-op / unchanged behavior for the common case).
-          const sendResult = await sendToChannel(dm.channelId, draft.reply, msg.threadTs || undefined);
+          const sendResult = await sendToChannel(dm.channelId, taggedReply, msg.threadTs || undefined);
           replyTs = sendResult.ts;
           repliedCount++;
         } catch (e) {
           doLog(`[SlackDM] ${dm.name}: reply send FAILED: ${e.message}`);
+          if (e.message && e.message.includes('restricted_action')) {
+            _sendBlockedChannels.add(dm.channelId);
+            doLog(`[SlackDM] ${dm.name}: marked as read-only — will skip sends for this session`);
+          }
         }
 
         const entry = {
@@ -329,7 +491,7 @@ async function pollDMAutoReplyOnce(log) {
           ts: msg.ts,
           replyTs,
           question: msg.text,
-          reply: draft.reply,
+          reply: taggedReply,
           inScope: draft.inScope,
           category: draft.inScope ? null : draft.category,
           title: draft.title,
@@ -345,9 +507,159 @@ async function pollDMAutoReplyOnce(log) {
         } else {
           doLog(`[SlackDM] ${dm.name}: answered`);
         }
-      }
+      } } // end if (hasNewTopLevel) / for-of newMsgs
 
-      _saveThreadLastSeen(dm.channelId, dm.name, newMsgs[newMsgs.length - 1].ts, dm.isGroup);
+      // ── FEATURE: thread-reply auto-reply ─────────────────────────────────
+      // conversations.history only returns top-level messages; thread replies
+      // are invisible to it. For every top-level message that has replies
+      // (replyCount > 0), fetch the thread via readThreadReplies and process
+      // any replies newer than lastSeenTs the same way as top-level messages —
+      // but always send the response back into the same thread.
+      //
+      // BASELINE (same principle as lastSeenTs for top-level messages):
+      // On the first time we see a thread, cache its current reply count without
+      // fetching. Only threads where replyCount INCREASES on a subsequent poll
+      // get fetched. This makes cold-start (empty cache) cost zero extra API calls —
+      // no "reply to all existing threads on first run" explosion.
+      for (const msg of messages) {
+        if (msg.replyCount > 0) {
+          const bKey = dm.channelId + ':' + msg.ts;
+          if (_threadReplyCount[bKey] === undefined) {
+            _threadReplyCount[bKey] = msg.replyCount; // baseline without fetching
+          }
+        }
+      }
+      // Only check thread replies for messages posted in the last 7 days.
+      // Older threads have already been fully processed; re-fetching them
+      // wastes API quota and causes rate-limit errors.
+      const _sevenDaysAgo = (Date.now() / 1000) - 7 * 86400;
+      const threadsToCheck = messages.filter(m => m.replyCount > 0 && parseFloat(m.ts) > _sevenDaysAgo).slice(0, 5); // cap at 5 per DM
+      let latestThreadReplyTs = null;
+
+      // Rate-limit guard: _rlUntil is module-level so it persists across DMs
+      // and across poll cycles. If we hit ratelimited, back off 60s globally.
+      for (const parentMsg of threadsToCheck) {
+        if (Date.now() < _rlUntil) break; // still in cooldown — skip rest of threads
+        if (Date.now() > _pollDeadline) { doLog(`[SlackDM] ${dm.name}: poll deadline reached — skipping remaining threads`); break; }
+        // Skip the API call entirely if replyCount has not changed since we last fetched.
+        const _cacheKey = dm.channelId + ':' + parentMsg.ts;
+        if (_threadReplyCount[_cacheKey] === parentMsg.replyCount) continue;
+        await new Promise(r => setTimeout(r, 200)); // was 600ms — reduced; rate-limit backoff handles actual limits
+        try {
+          // conversations.replies always includes the parent as index 0; skip it.
+          const replies = await readThreadReplies(dm.channelId, parentMsg.ts, 20);
+          _threadReplyCount[_cacheKey] = parentMsg.replyCount; // cache so next poll skips if unchanged
+          const newReplies = replies
+            .slice(1)
+            .filter(r => parseFloat(r.ts) > parseFloat(seen.lastSeenTs))
+            .filter(r => r.userId && r.userId !== myUserId);
+
+          for (const reply of newReplies) {
+            const replyLogId = dm.channelId + ':' + reply.ts;
+            const existingLog = store.load('slackDMReplies', []);
+            if (existingLog.some(e => e.id === replyLogId)) {
+              doLog(`[SlackDM] ${dm.name}: thread reply ${reply.ts} already in log — skipping`);
+              // Advance so lastSeenTs catches up; stops re-processing this reply every poll.
+              if (!latestThreadReplyTs || parseFloat(reply.ts) > parseFloat(latestThreadReplyTs)) latestThreadReplyTs = reply.ts;
+              continue;
+            }
+
+            // FEATURE (2026-07-30): Skip if Z already replied manually in this
+            // thread after this reply's timestamp.
+            const zAlreadyRepliedInThread = replies.some(
+              r => r.userId === myUserId && parseFloat(r.ts) > parseFloat(reply.ts)
+            );
+            if (zAlreadyRepliedInThread) {
+              doLog(`[SlackDM] ${dm.name}: Z already replied manually in thread after ${reply.ts} — skipping auto-reply`);
+              // Advance so lastSeenTs catches up.
+              if (!latestThreadReplyTs || parseFloat(reply.ts) > parseFloat(latestThreadReplyTs)) latestThreadReplyTs = reply.ts;
+              continue;
+            }
+
+            // Build context from prior messages in this thread (up to 2).
+            const threadContext = await Promise.all(
+              replies
+                .filter(r => parseFloat(r.ts) < parseFloat(reply.ts))
+                .slice(-2)
+                .map(async r => {
+                  const who = r.userId === myUserId ? 'You' : ((await resolveUserName(r.userId)) || dm.name || 'Them');
+                  return who + ': ' + (r.text || '');
+                })
+            );
+
+            const speakerNameT = dm.isGroup ? ((await resolveUserName(reply.userId)) || 'Someone in the group') : null;
+            const groupContextT = dm.isGroup
+              ? { isGroup: true, memberNames: (dm.name || '').split(', ').filter(Boolean), speakerName: speakerNameT }
+              : null;
+
+            // Enrich AI prompt with any links or files in this thread reply
+            const attachCtxT = await _buildAttachmentContext(reply, downloadFileContent);
+            const replyTextWithAttach = (reply.text || '') + attachCtxT;
+            const draft = await _classifyAndDraft(replyTextWithAttach, threadContext, groupContextT);
+
+            let replyTs = null;
+            let taggedReplyT = null;
+            try {
+              // Reply in the same thread as the parent message.
+              taggedReplyT = (reply.userId ? `<@${reply.userId}> ` : '') + draft.reply;
+              const sendResult = await sendToChannel(dm.channelId, taggedReplyT, parentMsg.ts);
+              replyTs = sendResult.ts;
+              repliedCount++;
+            } catch (e) {
+              doLog(`[SlackDM] ${dm.name}: thread reply send FAILED: ${e.message}`);
+              if (e.message && e.message.includes('restricted_action')) {
+                _sendBlockedChannels.add(dm.channelId);
+                doLog(`[SlackDM] ${dm.name}: marked as read-only — will skip sends for this session`);
+              }
+            }
+
+            const entry = {
+              id: replyLogId,
+              channelId: dm.channelId,
+              channelName: dm.name,
+              ts: reply.ts,
+              threadTs: parentMsg.ts,   // distinguishes thread replies in the log
+              replyTs,
+              question: reply.text,
+              reply: taggedReplyT,
+              inScope: draft.inScope,
+              category: draft.inScope ? null : draft.category,
+              title: draft.title,
+              createdAt: new Date().toISOString(),
+              status: draft.inScope ? 'auto-answered' : 'open',
+            };
+            _appendReplyLog(entry);
+
+            if (!draft.inScope) {
+              escalatedCount++;
+              newEscalations.push(entry);
+              doLog(`[SlackDM] ${dm.name}: thread reply escalated (${draft.category}) — "${draft.title}"`);
+            } else {
+              doLog(`[SlackDM] ${dm.name}: thread reply answered (parent ts ${parentMsg.ts})`);
+            }
+
+            if (!latestThreadReplyTs || parseFloat(reply.ts) > parseFloat(latestThreadReplyTs)) {
+              latestThreadReplyTs = reply.ts;
+            }
+          }
+        } catch (e) {
+          doLog(`[SlackDM] ${dm.name}: thread fetch error (parent ${parentMsg.ts}): ${e.message}`);
+          if (e.message && e.message.indexOf('ratelimited') !== -1) {
+            _rlUntil = Date.now() + 60000; // back off 60s globally across all DMs + poll cycles
+            break;
+          }
+        }
+      }
+      // ── end thread-reply block ─────────────────────────────────────────────
+
+      // Advance lastSeenTs to the latest of: newest top-level msg OR newest
+      // thread reply, so neither source can re-trigger on the next poll.
+      const _topTs      = hasNewTopLevel ? newMsgs[newMsgs.length - 1].ts : seen.lastSeenTs;
+      const overallLatest = latestThreadReplyTs && parseFloat(latestThreadReplyTs) > parseFloat(_topTs)
+        ? latestThreadReplyTs
+        : _topTs;
+
+      _saveThreadLastSeen(dm.channelId, dm.name, overallLatest, dm.isGroup);
       // Auto-save every distinct sender seen in this thread to the contact
       // book. FIX (2026-07-25): a 1:1 DM only ever has one possible sender,
       // so "just the first" was equivalent there -- but in a GROUP DM,
@@ -363,6 +675,23 @@ async function pollDMAutoReplyOnce(log) {
 
   return { repliedCount, escalatedCount, items: newEscalations };
   } finally {
+    // Persist thread-reply count cache so the next app restart doesn't cold-start
+    // and re-fetch every thread (avoids 5-10min first-poll stalls).
+    try {
+      // Trim to last 2000 entries by ts (keys are channelId:ts — sort drops oldest)
+      const keys = Object.keys(_threadReplyCount);
+      if (keys.length > 2000) {
+        const sorted = keys.sort((a, b) => {
+          const tsA = parseFloat(a.split(':').pop()) || 0;
+          const tsB = parseFloat(b.split(':').pop()) || 0;
+          return tsB - tsA; // newest first
+        });
+        const trimmed = {};
+        sorted.slice(0, 2000).forEach(k => { trimmed[k] = _threadReplyCount[k]; });
+        _threadReplyCount = trimmed;
+      }
+      store.save('slackDMThreadReplyCount', _threadReplyCount);
+    } catch (_) {}
     _pollLock = false;
   }
 }

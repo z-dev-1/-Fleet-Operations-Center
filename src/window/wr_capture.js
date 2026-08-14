@@ -54,7 +54,9 @@ function buildWRUrls(wrRows, rawRows, _pageId, logger, label) {
     }
 
     var url = buildWRUrl(wr.eqId, wr.colToClick);
-    urlMap[wr.eqId] = { url: url, col: wr.colToClick };
+    if (!urlMap[wr.eqId]) urlMap[wr.eqId] = {};
+    // Store keyed by type so both planned + unplanned can coexist for the same unit
+    urlMap[wr.eqId][wr.colToClick] = url;
     logger.info('[' + label + '] WR URL eq=' + wr.eqId + ' (' + wr.colToClick + '): ' + url);
   });
 

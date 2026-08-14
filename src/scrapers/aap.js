@@ -13,7 +13,7 @@ const { withRetry } = require('../utils/retry'); // P1-A: retry on transient fai
 // V-C extras: sortColumn, limit/pageSize=1000 force full table load
 const AAP_SCAN_URL =
   'https://aap-na.corp.amazon.com/v2/page/bafc8b2a-3be6-4a52-a86f-7cb2de7b5400' +
-  '?states=%5B%7B%22state%22%3A%22ACTIVE%22%2C%22reasons%22%3A%5B%5D%7D%2C%7B%22state%22%3A%22UNAVAILABLE%22%2C%22reasons%22%3A%5B%5D%7D%5D' +
+  '?states=%5B%7B%22state%22%3A%22ACTIVE%22%2C%22reasons%22%3A%5B%5D%7D%2C%7B%22state%22%3A%22UNAVAILABLE%22%2C%22reasons%22%3A%5B%5D%7D%2C%7B%22state%22%3A%22ORDERED%22%2C%22reasons%22%3A%5B%5D%7D%5D' +
   '&operationalStatuses=%5B%5D' +
   '&geofences=%7B%22type%22%3A%22ANYWHERE%22%2C%22customGeofences%22%3A%5B%5D%7D' +
   '&stationCodes=%5B%5D' +

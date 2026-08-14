@@ -59,6 +59,7 @@ const REGISTRY = {
   // relying on the removed absolute-path fallback.
   reminders:             () => path.join(P.dataDir, 'reminders.json'),
   contacts:              () => path.join(P.dataDir, 'contacts.json'),
+  vendorAssignments:     () => path.join(P.dataDir, 'vendor-assignments.json'),
   partnerWRs_review:    () => path.join(P.dataDir, 'partner_review.json'),
   partnerWRs_scheduled: () => path.join(P.dataDir, 'partner_scheduled.json'),
   partnerWRs_processed: () => path.join(P.dataDir, 'partner_processed.json'),
@@ -70,6 +71,8 @@ const REGISTRY = {
   retentionHistory: () => P.retentionHistory,
   slackAutoReply:   () => path.join(P.dataDir, 'slack_auto_reply.json'), // FEATURE (2026-07-16)
   longDwellStore:   () => path.join(P.dataDir, 'long_dwell.json'), // FEATURE (2026-07-20): Analytics -> Long Dwell Units tab
+  slackMentionThreads: () => path.join(P.dataDir, 'slack_mention_threads.json'), // thread-continuation tracking for channel watch
+  bubbleConfig:     () => path.join(P.dataDir, 'bubble_config.json'),             // floating bubble opacity setting
 
   // Workflow Intelligence (Phase 8, 2026-07-19) - see docs/PHASE8_WORKFLOW_INTELLIGENCE_PLAN.md
   workflowRecordings:   () => path.join(P.dataDir, 'workflow_recordings.json'),

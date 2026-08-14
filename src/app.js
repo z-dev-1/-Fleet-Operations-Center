@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 /**
  * src/app.js  [Version C]
  *
@@ -131,47 +131,28 @@ app.whenReady().then(async () => {
   // bootstrap resumes automatically the moment the tunnel comes up.
   // Closing the gate window quits the app rather than launching in a broken state.
   {
-    const { checkVpnState } = require('./utils/vpn');
+    const { checkVpnState, connectVpn } = require('./utils/vpn');
     const _vpnInitial = await checkVpnState();
     log.info('[vpn-gate] Initial state: ' + _vpnInitial.status);
 
     if (!_vpnInitial.connected) {
       log.warn('[vpn-gate] VPN not connected — holding startup until tunnel is up');
+      const _vpnAttempt = await connectVpn();
+      log.info('[vpn-gate] Auto-connect: ' + _vpnAttempt.raw.substring(0,100));
+      const _vpnRecheck = await checkVpnState();
+      log.info('[vpn-gate] Post-connect: ' + _vpnRecheck.status);
+      if (_vpnRecheck.connected) {
+        log.info('[vpn-gate] Auto-connect succeeded');
+        // VPN auto-connected successfully
+      } else { // auto-connect failed - fall back to manual gate
 
       await new Promise((resolve) => {
         const { BrowserWindow } = require('electron');
 
-        const _vpnHtml = '<!DOCTYPE html><html><head><meta charset="utf-8">' +
-          '<style>*{box-sizing:border-box;margin:0;padding:0}' +
-          'body{font-family:-apple-system,"Segoe UI",sans-serif;background:#0d1117;' +
-          'color:#e6edf3;padding:32px;user-select:none}' +
-          '.icon{font-size:36px;margin-bottom:14px}' +
-          'h2{font-size:16px;font-weight:600;margin-bottom:12px}' +
-          'p{font-size:13px;line-height:1.65;color:#8b949e;margin-bottom:10px}' +
-          'strong{color:#e6edf3}' +
-          '.status{margin-top:20px;font-size:12px;color:#6e7681;display:flex;' +
-          'align-items:center;gap:8px}' +
-          '.dot{width:8px;height:8px;border-radius:50%;background:#f0883e;' +
-          'animation:pulse 1.8s ease-in-out infinite;flex-shrink:0}' +
-          '@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}' +
-          '</style></head><body>' +
-          '<div class="icon">\uD83D\uDD12</div>' +
-          '<h2>VPN Required</h2>' +
-          '<p>Fleet Operations needs an active Amazon VPN connection to reach internal ' +
-          'resources\u2014AAP inventory, SharePoint, Relay, and the email relay.</p>' +
-          '<p>Connect via <strong>Cisco Secure Client</strong> and this window will ' +
-          'close automatically.</p>' +
-          '<div class="status"><div class="dot"></div>' +
-          '<span id="lbl">Checking VPN status\u2026</span></div>' +
-          '<script>var n=5;setInterval(function(){' +
-          'n=n<=1?5:n-1;' +
-          'document.getElementById("lbl").textContent=' +
-          '"Checking VPN status \u2014 next check in "+n+"s\u2026";' +
-          '},1000);<\/script>' +
-          '</body></html>';
+        const _vpnHtml = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0d1117;color:#e6edf3;padding:32px;font-family:system-ui,sans-serif;user-select:none}.icon{font-size:36px;margin-bottom:14px}h2{font-size:16px;font-weight:600;margin-bottom:10px}p{font-size:13px;line-height:1.6;color:#8b949e;margin-bottom:10px}.btn{display:inline-flex;align-items:center;gap:8px;margin-top:4px;margin-bottom:14px;padding:9px 18px;background:#1f6feb;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s}.btn:hover{background:#388bfd}.btn:active{background:#1158c7}.status{font-size:12px;color:#6e7681;display:flex;align-items:center;gap:8px}.dot{width:8px;height:8px;border-radius:50%;background:#f0883e;animation:pulse 1.8s ease-in-out infinite;flex-shrink:0}.dot.green{background:#3fb950;animation:none}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}</style></head><body><div class=\"icon\">🔒</div><h2>VPN Required</h2><p>Fleet Operations needs an active Amazon VPN to reach internal resources.</p><button class=\"btn\" id=\"vpnBtn\">🖥️ Open Cisco Secure Client</button><p style=\"font-size:12px;color:#6e7681;margin-bottom:16px\">Click Connect in Cisco — this window closes automatically.</p><div class=\"status\"><div class=\"dot\" id=\"dot\"></div><span id=\"lbl\">Checking VPN…</span></div><script>document.getElementById(\"vpnBtn\").onclick=function(){console.log(\"vpn-btn-open\");};var n=5;setInterval(function(){n=n<=1?5:n-1;var el=document.getElementById(\"lbl\");if(el)el.textContent=\"Checking VPN... next check: \"+n+\"s\";},1000);<\\/script></body></html>";
 
         const _vpnWin = new BrowserWindow({
-          width: 460, height: 280, resizable: false, center: true, show: false,
+          width: 460, height: 320, resizable: false, center: true, show: false,
           title: 'Fleet Operations \u2014 VPN Required',
           icon: require('./config/app-icon').getAppIconPath(),
           frame: true, autoHideMenuBar: true,
@@ -179,6 +160,22 @@ app.whenReady().then(async () => {
         });
         _vpnWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(_vpnHtml));
         _vpnWin.once('ready-to-show', () => _vpnWin.show());
+
+        // Open Cisco Secure Client: intercept console-message from renderer (works with contextIsolation)
+        _vpnWin.webContents.on('console-message', (_e, _level, msg) => {
+          log.info('[vpn-gate] renderer msg: ' + msg.substring(0,80));
+          if (msg.includes('vpn-btn-open')) {
+            const { VPNUI_PATH } = require('./utils/vpn');
+            log.info('[vpn-gate] Launching Cisco Secure Client UI: ' + VPNUI_PATH);
+            try {
+              const _vpnUi = require('child_process').spawn(VPNUI_PATH, [], { detached: true, stdio: 'ignore', windowsHide: false });
+              _vpnUi.unref();
+            } catch (e) {
+              log.warn('[vpn-gate] Failed to launch vpnui: ' + e.message + ' — trying shell.openPath');
+              require('electron').shell.openPath(VPNUI_PATH);
+            }
+          }
+        });
 
         // Poll vpncli every 5 s; auto-close + continue when connected
         const _vpnPoll = setInterval(async () => {
@@ -199,6 +196,7 @@ app.whenReady().then(async () => {
         });
       });
 
+      } // end else: manual gate fallback
       log.info('[vpn-gate] VPN connected \u2014 resuming startup');
     }
   }
@@ -388,6 +386,8 @@ app.whenReady().then(async () => {
         // silence was indistinguishable from "working fine, nothing due yet."
         // A low-volume heartbeat every 5-min cycle removes that blind spot.
         log.info('[midway] heartbeat: ok=' + state.ok + ' expiresInMin=' + state.expiresInMin);
+        // Push live session status to renderer so the auth badge updates every tick
+        _send('auth:mwinit-status', { ok: state.ok, expiresInMin: state.expiresInMin });
         if (state.ok && state.expiresInMin !== null && state.expiresInMin < 15) {
           log.info('[midway] Cookies expire in ' + state.expiresInMin + 'min -- auto-renewing');
           _midwayRenewalInFlight = true;
@@ -682,20 +682,55 @@ function _scheduleAutoEmail() {
     _ctxRef.pushStatus('\uD83D\uDCE7 Auto-email: syncing for ' + slot.label + ' report...');
 
     _ctxRef.runFullSync().then(() => {
+      // DATA READINESS CHECK (2026-08-12): verify fleet data is populated before
+      // firing the email event. A sync can succeed but return 0 rows (e.g. AAP
+      // cache miss on first boot). Sending a blank email is worse than skipping.
+      const _fd      = store.load('fleetData', {});
+      const _rows    = (_fd && Array.isArray(_fd.rows)) ? _fd.rows : [];
+      const _uptakeN = _rows.filter(r => r.riskScore && r.riskScore > 0).length;
+      const _ageMin  = _fd.syncedAt
+        ? Math.round((Date.now() - new Date(_fd.syncedAt).getTime()) / 60000)
+        : 9999;
+
+      if (_rows.length < 3) {
+        log.warn('Auto-email SKIPPED: fleet data has only ' + _rows.length + ' units — possibly empty or sync failed before data loaded');
+        _ctxRef.pushStatus('⚠️ Auto-email skipped: no fleet data available (' + _rows.length + ' units)');
+        return;
+      }
+
+      const _dataNote = _uptakeN > 0
+        ? _uptakeN + ' Uptake-scored units included'
+        : 'no Uptake risk scores available';
+      log.info('Auto-email data ready: ' + _rows.length + ' units, ' + _dataNote + ', synced ' + _ageMin + 'min ago');
+
       setTimeout(() => {
         _ctxRef.send('fleet:auto-email', {
           slot: slot.label,
           triggeredAt: new Date().toISOString(),
           autoEmailNote,
+          dataRowCount: _rows.length,
+          dataUptakeCount: _uptakeN,
+          dataAgeMins: _ageMin,
         });
       }, 2000);
     }).catch(err => {
       log.warn('Auto-email sync failed:', err.message);
+      // Still attempt send — use whatever data is on disk from last successful sync.
+      // The renderer will see syncError and can warn the recipient if needed.
+      const _fd2   = store.load('fleetData', {});
+      const _rows2 = (_fd2 && Array.isArray(_fd2.rows)) ? _fd2.rows : [];
+      if (_rows2.length < 3) {
+        log.warn('Auto-email SKIPPED after sync failure: no usable cached data (' + _rows2.length + ' units)');
+        _ctxRef.pushStatus('⚠️ Auto-email skipped: sync failed and no cached data available');
+        return;
+      }
+      log.info('Auto-email using cached data after sync failure: ' + _rows2.length + ' units');
       _ctxRef.send('fleet:auto-email', {
         slot: slot.label,
         triggeredAt: new Date().toISOString(),
         syncError: err.message,
         autoEmailNote,
+        dataRowCount: _rows2.length,
       });
     });
   }, 30000);

@@ -3458,6 +3458,27 @@ td .pm-pill {
 }
 .orcha-close:hover { color: var(--txt); }
 
+/* Open App + Quit buttons — same shape as collapse button, hidden in main app */
+.orcha-open-app,
+.orcha-quit-btn {
+  width: 20px; height: 20px;
+  border-radius: 5px;
+  border: 1px solid var(--bdr);
+  background: var(--el);
+  color: var(--mut);
+  cursor: pointer;
+  display: none;
+  align-items: center; justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+}
+.orcha-open-app:hover { color: var(--txt); }
+.orcha-quit-btn:hover  { color: #e55; border-color: #e55; }
+/* Only show these buttons inside the standalone bubble window */
+.bubble-window .orcha-open-app,
+.bubble-window .orcha-quit-btn { display: flex; }
+
 .oc-msgs {
   flex: 1;
   overflow-y: auto;
@@ -3690,6 +3711,52 @@ td .pm-pill {
   text-align: center;
 }
 .oc-slack-status { font-size: 11px; color: var(--txt2); line-height: 1.5; }
+
+/* ── Calendar tab ─────────────────────────────────────────────────────────── */
+.oc-cal-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 10px 4px; border-bottom: 1px solid var(--bdr);
+}
+.oc-cal-title { font-size: 10px; font-weight: 700; color: var(--mut); text-transform: uppercase; letter-spacing: .04em; }
+.oc-cal-refresh-btn {
+  background: transparent; border: none; color: var(--mut);
+  font-size: 14px; cursor: pointer; padding: 2px 4px; border-radius: 4px;
+  line-height: 1;
+}
+.oc-cal-refresh-btn:hover { color: var(--txt2); background: rgba(255,255,255,.06); }
+.oc-cal-list { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.oc-cal-empty, .oc-cal-loading { font-size: 11px; color: var(--mut); text-align: center; padding: 24px 16px; }
+.oc-cal-signin { display: flex; flex-direction: column; align-items: center; padding: 24px 16px; gap: 10px; }
+.oc-cal-event {
+  border: 1px solid var(--bdr);
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: rgba(255,255,255,.02);
+}
+.oc-cal-event-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 4px;
+}
+.oc-cal-event-time { font-size: 10px; color: var(--mut); }
+.oc-cal-event-title { font-size: 11px; font-weight: 600; color: var(--txt2); line-height: 1.3; }
+.oc-cal-join-btn {
+  padding: 3px 8px; border-radius: 5px; border: 1px solid #2563eb;
+  background: rgba(37,99,235,.15); color: #60a5fa;
+  font-size: 10px; font-weight: 600; cursor: pointer; white-space: nowrap;
+}
+.oc-cal-join-btn:hover { background: rgba(37,99,235,.3); }
+/* Bulk-dismiss bar (review queue) */
+.oc-review-bulk-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 10px; background: rgba(255,255,255,.03);
+  border-bottom: 1px solid var(--bdr); font-size: 10px; color: var(--mut);
+}
+.oc-review-btn--dismiss-all {
+  border-color: rgba(220,38,38,.4) !important;
+  color: #f87171 !important;
+  flex: none !important;
+}
+.oc-review-btn--dismiss-all:hover { background: rgba(220,38,38,.15) !important; }
 
 /* FEATURE (2026-07-16): search-based directory lookup, replacing the old
    browse-all-channels list (blocked by Enterprise Grid's
@@ -8178,6 +8245,7 @@ body {
 }
 .cb-card-top { display: flex; justify-content: space-between; align-items: center; }
 .cb-card-name { font-size: 12px; font-weight: 600; color: var(--txt); }
+.cb-pref-badge { font-size: 8px; font-weight: 600; color: #3fb950; background: rgba(63,185,80,0.12); border: 1px solid rgba(63,185,80,0.35); border-radius: 3px; padding: 1px 5px; margin-left: 6px; vertical-align: middle; }
 .cb-card-company { font-size: 10px; color: var(--acc); }
 .cb-card-addr { font-size: 10px; color: var(--txt2); margin-top: 3px; }
 .cb-card-meta { font-size: 9px; color: var(--mut); margin-top: 2px; }
@@ -8241,6 +8309,7 @@ body {
 .wr-inbox-tag--ready { background: rgba(63,185,80,0.12); color: #3fb950; }
 .wr-inbox-tag--error { background: rgba(248,81,73,0.12); color: #f85149; }
 .wr-inbox-tag--pending { background: rgba(240,168,0,0.12); color: #f0a800; }
+.wr-inbox-tag--dealer  { background: rgba(68,147,248,0.12); color: #4493f8; }
 .wr-inbox-ai {
   margin-top: 6px;
   padding: 6px 8px;

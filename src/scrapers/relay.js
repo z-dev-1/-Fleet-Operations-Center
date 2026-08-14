@@ -620,6 +620,26 @@ async function resolveServiceUUID(equipmentId, partition) {
     }
   }
 
+  // FleetNet is now secondary rather than excluded entirely: if the ONLY WR on any
+  // tab is FleetNet, still surface it (the Phase-1 guard downstream tags it isFleetNet
+  // so the UI suppresses it by default) instead of treating the unit as having no WR.
+  for (let t = 0; t < tabs.length; t++) {
+    const rows = await scrapeGarageList(tabs[t], equipmentId, partition);
+    const fleetNetOnly = rows.find(r => isFleetNetVendor(r.vendor) && !CLOSED_STATES.test(r.state || ''));
+    if (fleetNetOnly) {
+      logger.info('[Relay]', equipmentId, '-> FLEETNET-ONLY UUID:', fleetNetOnly.uuid, 'state:', fleetNetOnly.state||'?');
+      return fleetNetOnly.uuid;
+    }
+  }
+  for (let t = 0; t < tabs.length; t++) {
+    const rows = await scrapeGarageList(tabs[t], equipmentId, partition);
+    const fleetNetClosed = rows.find(r => isFleetNetVendor(r.vendor));
+    if (fleetNetClosed) {
+      logger.info('[Relay]', equipmentId, '-> FLEETNET-ONLY UUID (closed/Cancelled):', fleetNetClosed.uuid, fleetNetClosed.state);
+      return fleetNetClosed.uuid;
+    }
+  }
+
   logger.info('[Relay]', equipmentId, '— no valid WR found on any tab');
   return null;
 }
@@ -815,11 +835,12 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
 
           if (!wrData || !wrData.equipmentId) { done(null); return; }
 
-          // FleetNet guard — return a sentinel so batch loop can count it separately
-          if (isFleetNetVendor(wrData.vendor)) {
-            logger.info('[Relay] Skipping FleetNet unit:', equipmentId);
-            done({ _skippedFleetNet: true });
-            return;
+          // FleetNet is no longer dropped entirely — tag it so the unit still surfaces
+          // in results, but the renderer suppresses it from the default view (secondary,
+          // shown only when the FleetNet filter is toggled on).
+          const _isFleetNetUnit = isFleetNetVendor(wrData.vendor);
+          if (_isFleetNetUnit) {
+            logger.info('[Relay] FleetNet-only unit (tagged secondary, not dropped):', equipmentId);
           }
 
           // Phase 2 — Work Orders tab
@@ -942,6 +963,7 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
           done({
             ...wrData,
             ...woData,
+            isFleetNet: _isFleetNetUnit,
             offsiteShopEvent:    _finalOffsite    ? _finalOffsite.caseNumber    : (wrData.offsiteShopEvent    || ''),
             offsiteShopEventUrl: _finalOffsite    ? _finalOffsite.url           : (wrData.offsiteShopEventUrl || ''),
             asistSource:         (_finalOffsite && _finalOffsite.asistSource)    || '',
@@ -990,8 +1012,27 @@ async function scrapeRelay(aapRows, onBatchDone, relayCache) {
 
   const results = {};
   const updatedCache = Object.assign({}, relayCache || {});
+
+  // BUGFIX (2026-07-26): prune stale relay cache entries for units that are
+  // no longer Unavailable. targets only re-scrapes Unavailable units, so a
+  // unit that goes back to Active (real work order closed, 0/0 open WRs)
+  // otherwise keeps its old cached WR (vendor/state/pageUrl/etc.) forever --
+  // updatedCache only ever gets OVERWRITTEN for units still in targets, never
+  // cleared for ones that fell out of it. Without this, mergeRelayIntoRows()
+  // has no way to know the cached data is stale and keeps displaying a
+  // days-old work order as if it were still live (observed: units 321339,
+  // 320129 showing WR data from 6 and 2 days ago despite 0/0 open WRs and
+  // Active lifecycle state).
+  (aapRows || []).forEach(r => {
+    if (!r.equipmentId) return;
+    const isUnavailable = r.lifecycleState && r.lifecycleState.toUpperCase() === 'UNAVAILABLE';
+    if (!isUnavailable && updatedCache[r.equipmentId]) {
+      delete updatedCache[r.equipmentId];
+    }
+  });
+
   const partition = ''; // use default session — same as auth.js midway injection
-  let skippedFleetNet = 0;
+  let fleetNetTagged = 0;
   let cacheHits = 0;
 
   for (let i = 0; i < targets.length; i += MAX_CONCURRENT) {
@@ -1004,9 +1045,7 @@ async function scrapeRelay(aapRows, onBatchDone, relayCache) {
     );
     batch.forEach((r, idx) => {
       const res = batchResults[idx];
-      if (res && res._skippedFleetNet) {
-        skippedFleetNet++;
-      } else if (res && res._noWR) {
+      if (res && res._noWR) {
         // Negative-cache marker: persist it so the next sync cycle can skip
         // the expensive garage scrape, but don't surface it as a real result.
         updatedCache[r.equipmentId] = res;
@@ -1015,11 +1054,12 @@ async function scrapeRelay(aapRows, onBatchDone, relayCache) {
         // Update cache with fresh result (whether cache hit or full scrape)
         updatedCache[r.equipmentId] = res;
         if (res._cacheHit) cacheHits++;
+        if (res.isFleetNet) fleetNetTagged++;
       }
     });
     const batchNum = Math.floor(i / MAX_CONCURRENT) + 1;
     logger.info('[Relay] Batch', batchNum, 'done -',
-      Object.keys(results).length, 'total,', cacheHits, 'cache hits,', skippedFleetNet, 'FleetNet skips');
+      Object.keys(results).length, 'total,', cacheHits, 'cache hits,', fleetNetTagged, 'FleetNet (tagged, still included)');
     // Progressive push after each batch
     if (typeof onBatchDone === 'function') {
       try { onBatchDone({ results: { ...results }, done: false, batchNum }); } catch(_) {}
@@ -1027,7 +1067,7 @@ async function scrapeRelay(aapRows, onBatchDone, relayCache) {
   }
 
   logger.info('[Relay] Complete:', Object.keys(results).length, '/', targets.length,
-    'units |', cacheHits, 'cache hits |', skippedFleetNet, 'FleetNet skips');
+    'units |', cacheHits, 'cache hits |', fleetNetTagged, 'FleetNet (tagged, still included)');
 
   // Second pass: for PM Failed / Expired Inspection Unavailable units that have BOTH
   // an open Unplanned WR (primary) AND an open Planned WR, scrape the Planned WR too.
@@ -1074,6 +1114,80 @@ async function scrapeRelay(aapRows, onBatchDone, relayCache) {
         }
       } catch (_pe) {
         logger.warn('[Relay] Planned-WR pass failed for', r.equipmentId, _pe.message);
+      }
+    }
+  }
+
+
+  // ── Third pass: multi-WR ─────────────────────────────────────────────────
+  // For any unit where (openUnplanned + openPlanned) > 1, collect ALL
+  // additional open non-FleetNet, non-closed WR UUIDs beyond the primary
+  // (and beyond whatever the planned-WR second pass already captured).
+  // Stored as _secondaryWRs: Array<{ ...serviceData, _wrType, _relayUrl }>
+  const _CLOSED_ANY_RE = /^(Completed|Cancelled)$/i;
+  // Fix string-math bug: openUnplanned/openPlanned are strings, use parseInt
+  const _multiWRTargets = targets.filter(r => {
+    const total = (parseInt(r.openUnplanned, 10) || 0) + (parseInt(r.openPlanned, 10) || 0);
+    return total > 1 && !!results[r.equipmentId];
+  });
+  if (_multiWRTargets.length) {
+    logger.info('[Relay] Multi-WR pass:', _multiWRTargets.length,
+      'unit(s):', _multiWRTargets.map(r => r.equipmentId).join(', '));
+    for (const r of _multiWRTargets) {
+      try {
+        const _primaryUUID = (results[r.equipmentId] || {})._serviceUUID || null;
+        const _plannedUUID = ((results[r.equipmentId] || {})._plannedWRData || {})._serviceUUID || null;
+        const _seenUUIDs   = new Set([_primaryUUID, _plannedUUID].filter(Boolean));
+        logger.info('[Relay] Multi-WR', r.equipmentId,
+          '| openUnplanned:', r.openUnplanned, '| openPlanned:', r.openPlanned,
+          '| primaryUUID:', _primaryUUID ? _primaryUUID.slice(0, 8) : 'none');
+
+        // Scan Unplanned + Planned + All tabs; dedup across tabs
+        const _extras = [];
+        for (const tab of ['Unplanned', 'Planned', 'All']) {
+          const _rows = await scrapeGarageList(garageUrl(tab, r.equipmentId), r.equipmentId, partition);
+          logger.info('[Relay] Multi-WR', r.equipmentId, '| tab:', tab,
+            '| garage rows:', _rows.length,
+            '|', _rows.map(x => x.uuid.slice(0,8) + '/' + (x.vendor||'?') + '/' + (x.state||'?')).join(', '));
+          for (const _row of _rows) {
+            if (isFleetNetVendor(_row.vendor))         continue;
+            if (_CLOSED_ANY_RE.test(_row.state || '')) continue;
+            if (_seenUUIDs.has(_row.uuid)) {
+              logger.info('[Relay] Multi-WR', r.equipmentId, '| uuid', _row.uuid.slice(0,8), 'already seen, skipping');
+              continue;
+            }
+            _seenUUIDs.add(_row.uuid);
+            _extras.push({ ..._row, _tab: tab });
+          }
+        }
+
+        if (!_extras.length) {
+          logger.info('[Relay] Multi-WR pass: no additional WRs for', r.equipmentId);
+          continue;
+        }
+
+        const _secondary = [];
+        for (const _wr of _extras) {
+          logger.info('[Relay] Multi-WR pass: scraping', r.equipmentId,
+            '| uuid:', _wr.uuid.slice(0, 8), '| tab:', _wr._tab, '| state:', _wr.state || '?');
+          const _data = await scrapeServiceByUUID(_wr.uuid, partition);
+          if (_data) {
+            _secondary.push({
+              ..._data,
+              _wrType:   _wr._tab === 'Planned' ? 'planned' : 'unplanned',
+              _relayUrl: 'https://aap-na.corp.amazon.com/v2/service/' + _wr.uuid,
+            });
+          }
+        }
+
+        if (_secondary.length) {
+          results[r.equipmentId]._secondaryWRs      = _secondary;
+          updatedCache[r.equipmentId]._secondaryWRs = _secondary;
+          logger.info('[Relay] Multi-WR pass done for', r.equipmentId,
+            '|', _secondary.length, 'secondary WR(s)');
+        }
+      } catch (_me) {
+        logger.warn('[Relay] Multi-WR pass failed for', r.equipmentId, _me.message);
       }
     }
   }
@@ -1224,6 +1338,7 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       relaySynced: Object.keys(r).length > 0,
       // Planned WR for PM Failed / Expired Inspection units (secondary scrape)
       _plannedWRData:   r._plannedWRData   || null,
+      _secondaryWRs:    r._secondaryWRs    || null,
     };
   });
 }

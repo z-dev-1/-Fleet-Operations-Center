@@ -100,6 +100,9 @@ function slackWebApi(method, params = {}) {
       });
     });
     req.on('error', reject);
+    req.setTimeout(8000, () => {
+      req.destroy(new Error('Slack API timeout: ' + method));
+    });
     req.write(postData);
     req.end();
   });
@@ -237,7 +240,13 @@ async function sendToChannel(channelId, message, threadTs) {
   // Added for the Slack Partner Auto-Reply engine (slack_channel_watch.js),
   // which always replies in-thread rather than posting new top-level
   // messages into a partner-facing channel.
-  const payload = { channel: channelId, text: message };
+  const payload = {
+    channel:       channelId,
+    text:          message,
+    // Unfurl links/media so URLs in AI replies auto-expand in Slack
+    unfurl_links:  'true',
+    unfurl_media:  'true',
+  };
   if (threadTs) payload.thread_ts = threadTs;
   const result = await slackWebApi('chat.postMessage', payload);
   if (!result.ok) throw new Error(`Slack API error: ${result.error}`);
@@ -288,11 +297,14 @@ async function readMessages(channelId, limit) {
   });
   if (!res.ok) throw new Error('conversations.history failed: ' + res.error);
   return (res.messages || []).map(m => ({
-    ts:       m.ts,
-    userId:   m.user || m.username || '',
-    text:     m.text || '',
-    threadTs: m.thread_ts || null,
+    ts:         m.ts,
+    userId:     m.user || m.username || '',
+    text:       m.text || '',
+    threadTs:   m.thread_ts || null,
     replyCount: m.reply_count || 0,
+    // Pass through files and attachments so consumers can read shared docs/links
+    files:       m.files       || [],
+    attachments: m.attachments || [],
     channelId
   }));
 }
@@ -317,11 +329,13 @@ async function readThreadReplies(channelId, threadTs, limit) {
   });
   if (!res.ok) throw new Error('conversations.replies failed: ' + res.error);
   return (res.messages || []).map(m => ({
-    ts:       m.ts,
-    userId:   m.user || m.username || '',
-    text:     m.text || '',
-    threadTs: m.thread_ts || null,
+    ts:         m.ts,
+    userId:     m.user || m.username || '',
+    text:       m.text || '',
+    threadTs:   m.thread_ts || null,
     replyCount: m.reply_count || 0,
+    files:       m.files       || [],
+    attachments: m.attachments || [],
     channelId
   }));
 }
@@ -464,12 +478,13 @@ async function listOpenDMs(limit, myUserId) {
   const ims   = (counts.ims   || []).map(c => ({ id: c.id, isGroup: false }));
   const mpims = (counts.mpims || []).map(c => ({ id: c.id, isGroup: true  }));
   const all = ims.concat(mpims).slice(0, lim);
-  const results = [];
-  for (const c of all) {
-    const name = await _resolveDmSenderName(c.id, myUserId);
-    results.push({ channelId: c.id, name: name || c.id, isGroup: c.isGroup });
-  }
-  return results;
+  // Parallel name resolution — resolve all conversations.info calls at once
+  // instead of sequentially. With 40 DMs, sequential calls at 8s timeout each
+  // could take 40×8s=320s; parallel reduces that to max(one call) ≈ 8s.
+  const names = await Promise.all(
+    all.map(c => _resolveDmSenderName(c.id, myUserId).catch(() => null))
+  );
+  return all.map((c, i) => ({ channelId: c.id, name: names[i] || c.id, isGroup: c.isGroup }));
 }
 
 async function readDMs(limit) {
@@ -572,4 +587,77 @@ async function processAutoReplies(messages, rules) {
   return sent;
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName };
+/**
+ * FEATURE (2026-07-28): downloadFileContent(file) — fetches the plaintext
+ * body of a file shared in a Slack DM so the auto-reply AI can read and
+ * respond to its content.
+ *
+ * Supported: text/*, application/json, *csv*, *markdown*, *log*
+ * Unsupported (images, PDFs, binaries): returns null — caller skips gracefully.
+ *
+ * Auth: uses the stored xoxc token as a Bearer header against
+ * url_private (the Slack CDN URL for the file). This is the correct
+ * auth method for xoxc-type user tokens on Enterprise Grid.
+ *
+ * Returns: { name, mimetype, content } or null.
+ */
+async function downloadFileContent(file) {
+  if (!file || !file.url_private) return null;
+
+  // Only attempt to read human-readable text formats
+  const mime = (file.mimetype || '').toLowerCase();
+  const name = (file.name    || '').toLowerCase();
+  const isReadable =
+    mime.startsWith('text/') ||
+    mime.includes('json')    ||
+    mime.includes('csv')     ||
+    mime.includes('markdown')  ||
+    name.endsWith('.txt')    ||
+    name.endsWith('.md')     ||
+    name.endsWith('.csv')    ||
+    name.endsWith('.json')   ||
+    name.endsWith('.log');
+  if (!isReadable) return null;
+
+  const config = getConfig();
+  if (!config || !config.token) return null;
+
+  return new Promise((resolve) => {
+    const urlObj = new URL(file.url_private);
+    const options = {
+      hostname: urlObj.hostname,
+      path:     urlObj.pathname + urlObj.search,
+      method:   'GET',
+      headers:  { Authorization: 'Bearer ' + config.token },
+    };
+    const req = https.request(options, (res) => {
+      // Follow one redirect (Slack CDN sometimes redirects)
+      if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
+        const redir = new URL(res.headers.location);
+        const rOpts = {
+          hostname: redir.hostname,
+          path:     redir.pathname + redir.search,
+          method:   'GET',
+          headers:  { Authorization: 'Bearer ' + config.token },
+        };
+        const rReq = https.request(rOpts, (rRes) => {
+          let data = '';
+          rRes.on('data', c => { if (data.length < 32768) data += c; }); // 32KB cap
+          rRes.on('end', () => resolve({ name: file.name, mimetype: mime, content: data }));
+        });
+        rReq.on('error', () => resolve(null));
+        rReq.setTimeout(8000, () => { rReq.destroy(); resolve(null); });
+        rReq.end();
+        return;
+      }
+      let data = '';
+      res.on('data', c => { if (data.length < 32768) data += c; }); // 32KB cap
+      res.on('end', () => resolve({ name: file.name, mimetype: mime, content: data }));
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(8000, () => { req.destroy(); resolve(null); });
+    req.end();
+  });
+}
+
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, downloadFileContent };

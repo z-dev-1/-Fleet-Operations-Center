@@ -29,6 +29,7 @@ let _relayMap = {};
 let _sortKey             = null;
 let _sortDir             = 'asc';
 let _quickFilterHighRisk = false;
+let _showFleetNet        = false; // FleetNet units hidden by default; shown via the FleetNet quick-filter pill
 let _selectedId          = null;   // persists highlight across re-renders
 let _selectedIds         = new Set(); // S28: multi-select for bulk ops
 let _heatmapOn           = false;  // S28: risk heatmap overlay
@@ -177,11 +178,16 @@ function _augmentRow(row) {
     _opSite:     [row.operator, row.domicileSite].filter(Boolean).join(' / '),
     _wos:        unplanned + ' / ' + planned,
     _pmDates:    pmDatesHtml,
+    isFleetNet:  !!rel.isFleetNet,
   });
 }
 
 function _applyFiltersAndSort(rows) {
   let result = rows.filter((row) => {
+    // FleetNet-only units are hidden by default (secondary/low-priority); shown only
+    // when the FleetNet quick-filter is active.
+    if (row.isFleetNet && !_showFleetNet) return false;
+
     // Quick filter: high-risk
     if (_quickFilterHighRisk && (row.riskScore || 0) < 70) return false;
 
@@ -647,8 +653,11 @@ export function init(container) {
       _filters['lifecycleReason'] = 'offsite';
     } else if (filter === 'high-risk') {
       _quickFilterHighRisk = true;
+    } else if (filter === 'fleetnet') {
+      _showFleetNet = true;
     }
     if (filter !== 'high-risk') _quickFilterHighRisk = false;
+    if (filter !== 'fleetnet') _showFleetNet = false;
     _renderRows(_allRows);
   });
 

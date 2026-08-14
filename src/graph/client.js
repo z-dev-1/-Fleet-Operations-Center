@@ -54,7 +54,7 @@ const CLIENT_ID = process.env.GRAPH_CLIENT_ID || 'REPLACE_WITH_REAL_CLIENT_ID';
 const TENANT = process.env.GRAPH_TENANT || 'organizations'; // any Microsoft work/school account
 const AUTHORITY = `https://login.microsoftonline.com/${TENANT}`;
 const REDIRECT_URI = 'https://login.microsoftonline.com/common/oauth2/nativeclient';
-const SCOPES = ['Mail.Send', 'User.Read'];
+const SCOPES = ['Mail.Send', 'User.Read', 'Calendars.Read'];
 
 function isConfigured() {
   return !!CLIENT_ID && CLIENT_ID !== 'REPLACE_WITH_REAL_CLIENT_ID';
@@ -217,4 +217,49 @@ async function sendMail({ to, cc, bcc, subject, htmlBody }) {
   });
 }
 
-module.exports = { isConfigured, isSignedIn, signInInteractive, signOut, sendMail, getAccessTokenSilent };
+// ── Calendar events via /me/calendarView ─────────────────────────────────
+// Returns up to `maxResults` events between `start` and `end` (ISO strings).
+// Each event is the raw Graph API object; callers extract what they need.
+// Zoom links are found in onlineMeetingUrl, location.displayName, or body.
+async function getCalendarEvents({ start, end, maxResults = 20 } = {}) {
+  const token = await getAccessTokenSilent();
+  if (!token) {
+    throw Object.assign(
+      new Error('Not signed in to Outlook. Go to Settings → Accounts → Outlook and sign in.'),
+      { code: 'GRAPH_NOT_SIGNED_IN' }
+    );
+  }
+  const now     = start ? new Date(start) : new Date();
+  const endTime = end   ? new Date(end)   : new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const qs = [
+    'startDateTime=' + encodeURIComponent(now.toISOString()),
+    'endDateTime='   + encodeURIComponent(endTime.toISOString()),
+    '$select=id,subject,start,end,location,bodyPreview,onlineMeetingUrl,onlineMeeting,webLink',
+    '$orderby=start%2FdateTime',
+    '$top=' + maxResults,
+  ].join('&');
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'graph.microsoft.com',
+      path: '/v1.0/me/calendarView?' + qs,
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' },
+    }, (res) => {
+      let raw = '';
+      res.on('data', (c) => { raw += c; });
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try { resolve(JSON.parse(raw).value || []); }
+          catch (e) { reject(new Error('Graph calendar parse error: ' + e.message)); }
+        } else {
+          reject(new Error('Graph calendar HTTP ' + res.statusCode + ': ' + raw.slice(0, 300)));
+        }
+      });
+    });
+    req.on('error', (e) => reject(new Error('Graph calendar network error: ' + e.message)));
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error('Graph calendar timeout')); });
+    req.end();
+  });
+}
+
+module.exports = { isConfigured, isSignedIn, signInInteractive, signOut, sendMail, getAccessTokenSilent, getCalendarEvents };

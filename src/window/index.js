@@ -167,20 +167,22 @@ const JS_EXTRACT_TABLE = `(function(){
     r.push(o);
     // Only click-capture for UNAVAILABLE units
     if ((o['Lifecycle state']||'').toLowerCase() !== 'unavailable') return;
-    // Expired inspection -> planned column; everything else -> unplanned column
-    var reason   = (o['Lifecycle state reason']||'').toLowerCase();
-    var useCol   = /expired.{0,6}inspection/i.test(reason) ? 'planned' : 'unplanned';
-    var cidx     = useCol === 'planned' ? colPlanned : colUnplanned;
-    if (cidx < 0) return;
-    var wrCount  = (c[cidx] ? c[cidx].innerText : '').trim();
-    if (!wrCount || wrCount === '0' || wrCount === '--') return;
-    wrRows.push({
-      rowIdx:     ri,
-      eqId:       o['Equipment ID'] || '',
-      colToClick: useCol,
-      colIdx:     cidx,
-      reason:     o['Lifecycle state reason'] || ''
-    });
+    // Check BOTH columns independently — a unit can have both planned and
+    // unplanned WRs simultaneously (e.g. expired inspection + active breakdown).
+    var eqIdVal = o['Equipment ID'] || '';
+    var stateReason = o['Lifecycle state reason'] || '';
+    if (colUnplanned >= 0) {
+      var ucnt = (c[colUnplanned] ? c[colUnplanned].innerText : '').trim();
+      if (ucnt && ucnt !== '0' && ucnt !== '--') {
+        wrRows.push({ rowIdx: ri, eqId: eqIdVal, colToClick: 'unplanned', colIdx: colUnplanned, reason: stateReason });
+      }
+    }
+    if (colPlanned >= 0) {
+      var pcnt = (c[colPlanned] ? c[colPlanned].innerText : '').trim();
+      if (pcnt && pcnt !== '0' && pcnt !== '--') {
+        wrRows.push({ rowIdx: ri, eqId: eqIdVal, colToClick: 'planned', colIdx: colPlanned, reason: stateReason });
+      }
+    }
   });
   return { rows:r, count:r.length, headers:h, wrRows:wrRows,
     debug:'table class='+t.className+' trs='+t.querySelectorAll('tbody tr').length };
@@ -724,11 +726,9 @@ function initWindows(ctx) {
             (data.rows||[]).forEach(function(row) {
               const hit = wrUrlMap[row['Equipment ID']];
               if (hit) {
-                if (hit.col === 'planned') {
-                  row['Open Planned Work Requests_url']   = hit.url;
-                } else {
-                  row['Open Unplanned Work Requests_url'] = hit.url;
-                }
+                // hit is now { planned?: url, unplanned?: url } — set whichever exist
+                if (hit.planned)   row['Open Planned Work Requests_url']   = hit.planned;
+                if (hit.unplanned) row['Open Unplanned Work Requests_url'] = hit.unplanned;
               }
             });
           }
@@ -775,6 +775,17 @@ function initWindows(ctx) {
       },
     });
     Menu.setApplicationMenu(null);
+
+    // DIAGNOSTIC (2026-07-27): forward the main window's own devtools console
+    // to our logger. Without this, renderer-side "Uncaught TypeError" reports
+    // are unlocatable from here -- there's no browser/devtools access in this
+    // tooling, only whatever text the user manually copies out of a toast.
+    // levels: 0=verbose/log, 1=info, 2=warning, 3=error
+    mainWindow.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+      if (level >= 2) {
+        logger.warn('[renderer-console] ' + message + '  (' + (sourceId || '').split(/[\\/]/).pop() + ':' + line + ')');
+      }
+    });
 
     // Forward maximize/restore state to the renderer so the custom toolbar
     // button can swap its icon -- native titlebars do this automatically;
@@ -873,15 +884,26 @@ function initWindows(ctx) {
         try {
           await runMwinit();
           await injectCookies();
+          // Verify the session actually works after standard mwinit
+          const { probeSession } = _getAuth();
+          const startupPageOk = await probeSession();
+          if (!startupPageOk) {
+            logger.warn('[startup] probeSession failed after standard mwinit -- retrying with mwinit -f');
+            pushStatus('\uD83D\uDD04 Session still rejected -- retrying with mwinit -f (tap WebAuthn again)...');
+            await runMwinit(true);
+            await injectCookies();
+          }
           logger.info('[startup] mwinit complete \u2014 loading AAP');
           pushStatus('\u2705 Midway auth complete \u2014 loading AAP...');
         } catch (e) {
           logger.error('[startup] mwinit failed:', e.message);
-          pushError('\u26A0\uFE0F mwinit failed: ' + e.message + ' \u2014 run mwinit manually then restart');
+          pushError('\u26A0\uFE0F mwinit failed: ' + e.message + ' \u2014 try running mwinit -f in a terminal');
         }
       } else {
         logger.info('[startup] Cookies valid (' + state.count + ' cookies, expires in ' +
           (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ')');
+        // Push session status to renderer immediately so the auth badge is green on startup
+        send('auth:mwinit-status', { ok: true, expiresInMin: state.expiresInMin });
       }
 
       // Keep window invisible during AAP scrape
@@ -892,20 +914,7 @@ function initWindows(ctx) {
       mainWindow.loadURL(startUrl);
     })();
 
-    function switchToApp() {
-    // If we already have fleet data cached, load app immediately (don't wait for full scrape)
-    try {
-      const store = require('../store');
-      const cached = store.load('fleetData', null);
-      if (cached && cached.rows && cached.rows.length > 0) {
-        const cacheAge = Date.now() - (cached._ts || 0);
-        if (cacheAge < 30 * 60 * 1000) { // Less than 30 min old
-          logger.info('[switchToApp] Using cached fleet data (' + cached.rows.length + ' rows, ' + Math.round(cacheAge/60000) + 'min old)');
-          // Skip waiting for fresh scrape — show app with cached data, sync in background
-        }
-      }
-    } catch(e) {}
-
+    function _showApp() {
       _appReady = true;
       setTimeout(() => {
         triggerLiveRescan(false);
@@ -913,20 +922,32 @@ function initWindows(ctx) {
       }, 90000);
       logger.info('Switching to Fleet Operations app...');
       if (process.env.NODE_ENV === 'development') {
-        logger.info('[window] Dev mode: loading Vite dev server at http://localhost:5173');
         mainWindow.loadURL('http://localhost:5173');
       } else {
-        mainWindow.loadFile(path.join(ROOT_DIR, 'renderer', 'src', 'index.html'));
+        mainWindow.loadFile(path.join(ROOT_DIR,'renderer','src','index.html'));
       }
       mainWindow.setMinimumSize(1200, 700);
       mainWindow.setSize(1600, 960);
       mainWindow.center();
       mainWindow.setTitle('Fleet Operations');
-      mainWindow.center();
       mainWindow.show();
       mainWindow.focus();
     }
 
+    function switchToApp() {
+      try {
+        const store=require('../store');
+        const cached=store.load('fleetData',null);
+        if(cached&&cached.rows&&cached.rows.length>0){
+          const cacheAge=Date.now()-(cached._ts||0);
+          if(cacheAge<30*60*1000){
+            logger.info('[switchToApp] Fast path: '+cached.rows.length+' rows, '+Math.round(cacheAge/60000)+'min old');
+            _showApp(); return;
+          }
+        }
+      }catch(e){}
+      _showApp();
+    }
     let _startupScrapeStarted = false;
 
     function _onMainWindowNav(url) {
@@ -935,6 +956,15 @@ function initWindows(ctx) {
       const onAAP = url.includes('aap-na.corp.amazon.com') && !url.includes('midway-auth');
       if (onAAP && !_startupScrapeStarted) {
         _startupScrapeStarted = true;
+        // Fast path: fresh cache -> show app immediately, scrape updates live
+        try {
+          const _cs=require('../store');
+          const _cd=_cs.load('fleetData',null);
+          if(_cd&&_cd.rows&&_cd.rows.length>0&&(Date.now()-(_cd._ts||0))<30*60*1000){
+            logger.info('[startup] Cache hit - showing app now, background scrape active');
+            switchToApp();
+          }
+        }catch(e){}
         logger.info('[startup] AAP loaded \u2014 starting scrape loop');
         _runAAPScrapeLoop(mainWindow, {
           label: 'startup', maxPolls: 45,
@@ -1005,11 +1035,23 @@ function initWindows(ctx) {
             // verification+retry ensureAuthenticated() does, without its
             // disabled auto-spawn branch.
             const { runMwinit, injectCookies, probeSession, pingRelayEndpoint } = _getAuth();
+
+            // ATTEMPT 1: standard mwinit
             await runMwinit();
             await injectCookies();
 
-            const pageOk = await probeSession();
-            if (!pageOk) throw new Error('AAP rejected session -- run mwinit -f then restart');
+            let pageOk = await probeSession();
+            if (!pageOk) {
+              // ATTEMPT 2: force mwinit (-f) clears stale server-side session.
+              // Fixes the "AAP rejected session" startup blocker that required
+              // manual mwinit -f + restart. Now happens automatically.
+              logger.warn('[auth-poll] probeSession failed after standard mwinit -- retrying with mwinit -f');
+              pushStatus('\uD83D\uDD04 Session still rejected -- retrying with mwinit -f (tap WebAuthn again)...');
+              await runMwinit(true);
+              await injectCookies();
+              pageOk = await probeSession();
+            }
+            if (!pageOk) throw new Error('AAP rejected session after mwinit -f -- check VPN/network and restart');
 
             let relayOk = await pingRelayEndpoint();
             if (!relayOk) {
@@ -1017,14 +1059,14 @@ function initWindows(ctx) {
               await injectCookies();
               relayOk = await pingRelayEndpoint();
             }
-            if (!relayOk) throw new Error('AAP relay rejected session -- run mwinit -f then restart');
+            if (!relayOk) throw new Error('AAP relay rejected session -- try restarting the app');
 
             logger.info('[auth-poll] session verified (page + relay probes passed) \u2014 reloading AAP');
             pushStatus('\u2705 Midway auth complete \u2014 reloading AAP...');
             mainWindow.loadURL(startUrl);
           } catch (e) {
             logger.error('[auth-poll] mwinit/verification failed:', e.message);
-            pushError('\u26A0\uFE0F ' + e.message + ' \u2014 run mwinit manually then restart');
+            pushError('\u26A0\uFE0F ' + e.message);
           }
         }
       } else {
@@ -1265,10 +1307,13 @@ function initWindows(ctx) {
   ipcMain.on('win:minimize', () => { if (mainWindow) mainWindow.minimize(); });
   ipcMain.on('win:maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
   ipcMain.on('win:close', () => { if (mainWindow) mainWindow.close(); });
+  ipcMain.on('win:show',  () => { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); } });
   // Lets the renderer sync the maximize/restore icon on first paint,
   // before the first 'maximize'/'unmaximize' event has fired.
   ipcMain.handle('win:is-maximized', () => !!(mainWindow && mainWindow.isMaximized()));
 
+
+  ipcMain.on('app:quit', () => app.exit(0));
 
   ipcMain.handle('app:version', () => app.getVersion());
 

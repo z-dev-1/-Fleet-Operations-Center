@@ -14,7 +14,8 @@
 const store  = require('../store');
 const { handle } = require('./_safe');
 
-const STORE_KEY = 'contacts';
+const STORE_KEY      = 'contacts';
+const ASSIGN_KEY     = 'vendorAssignments';
 
 function registerContactsHandlers() {
   handle('contacts:get-all', async () => {
@@ -62,6 +63,35 @@ function registerContactsHandlers() {
       (c.slackId || '').toLowerCase().includes(q) ||
       (c.role || '').toLowerCase().includes(q)
     );
+  });
+
+  // Vendor Assignments — tracks which specific Contact Book vendor a unit's
+  // Dealer WO was routed to, so the Dealer WO modal can auto-route away from
+  // an already-loaded preferred vendor (>= 3 units) to the next preference.
+  // One active entry per unitId (upsert replaces any prior entry for that unit).
+  handle('vendor-assignments:get-all', async () => {
+    return store.load(ASSIGN_KEY, []);
+  });
+
+  handle('vendor-assignments:upsert', async (_e, entry) => {
+    if (!entry || !entry.unitId || !entry.vendorId) return { ok: false, error: 'unitId and vendorId required' };
+    const all = store.load(ASSIGN_KEY, []).filter(a => a.unitId !== entry.unitId);
+    all.push({
+      unitId:     entry.unitId,
+      vendorId:   entry.vendorId,
+      vendorName: entry.vendorName || '',
+      make:       entry.make || '',
+      site:       entry.site || '',
+      ts:         Date.now(),
+    });
+    store.save(ASSIGN_KEY, all);
+    return { ok: true };
+  });
+
+  handle('vendor-assignments:remove', async (_e, unitId) => {
+    const all = store.load(ASSIGN_KEY, []).filter(a => a.unitId !== unitId);
+    store.save(ASSIGN_KEY, all);
+    return { ok: true };
   });
 }
 

@@ -6,9 +6,12 @@
  * Registers all vendor: IPC channels, owns the active-workflow registry.
  *
  * HANDLE channels (renderer invokes, main replies):
- *   vendor:start-paccar  { unit }  -> { ok, workflowId, vendor, altId,
+ *   vendor:start-paccar  { unit, formData }  -> { ok, workflowId, vendor, altId,
  *                                      workRequestId, serviceUrl, isDuplicate }
- *   vendor:start-volvo   { unit }  -> same shape
+ *   vendor:start-volvo   { unit, formData }  -> same shape
+ *   (formData is optional -- resolved contact-book/user-profile values from
+ *   the Dealer WO review modal; see dealer-wo-modal.js. When present, the
+ *   vendor orchestrator's fill step uses it instead of unit-derived guesses.)
  *   vendor:approve       { workflowId, altId }  -> { ok }
  *   vendor:cancel        { workflowId }         -> { ok }
  *   vendor:get-status    ()  -> { active: [{workflowId, vendor, unit, startedAt, step}] }
@@ -166,7 +169,7 @@ async function _runVendorWorkflow(vendor, unit, workflowId) {
       entry._reject  = rej;
     });
 
-    const runResult = await orchestrator.run(unit, entry.altId || "", { approveSignal, workflowId });
+    const runResult = await orchestrator.run(unit, entry.altId || "", { approveSignal, workflowId, formData: entry.formData || null });
 
     // run() resolved -- orchestrator handled its own complete emission.
     // Clean up registry.
@@ -211,6 +214,11 @@ async function _handleStart(vendor, payload) {
   const unit = requireObject(payload && payload.unit, "payload.unit");
   const eqId = String(unit.equipmentId || unit.id || "").trim();
   if (!eqId) throw new ConfigError("payload.unit.equipmentId is required", "equipmentId");
+  // FEATURE (2026-07-26): Dealer WO review modal -- renderer resolves contact
+  // book / user-profile values BEFORE the portal automation runs, and sends
+  // them here so the vendor orchestrator can fill the real request-service
+  // form deterministically instead of guessing from unit fields alone.
+  const formData = (payload && payload.formData) || null;
 
   // -- Concurrency guard 1: same unit already running --
   if (_unitIndex.has(eqId)) {
@@ -240,12 +248,23 @@ async function _handleStart(vendor, payload) {
   logger.info("["+workflowId+"] starting | vendor:", vendor, "| unit:", eqId);
 
   // -- Relay step (S23-2): create/find Relay WO, capture altId --
+  // TEMP (2026-07-27): the AAP tracking WR (runRelayStep) is a SEPARATE
+  // record from the actual dealer WO -- the real dealer WO is created by the
+  // portal automation below (_runVendorWorkflow). Right now runRelayStep is
+  // broken for most vendors (VENDOR_IDS supplierId table in aap_create_wr.js
+  // is mostly unfilled placeholders) and was hard-aborting the ENTIRE
+  // workflow before the portal window ever opened. Until the dealer-WO
+  // portal flow itself is fully proven out, a relay-step failure is
+  // downgraded to non-fatal: log it, proceed with empty altId/workRequestId,
+  // and let the portal automation run anyway. Revisit once the portal flow
+  // is solid -- then re-tighten this gate and wire the real altId (AMZ-...)
+  // into the dealer WO form as a reference field.
   let relayResult;
   try {
     relayResult = await runRelayStep(unit);
   } catch (relayErr) {
-    logger.warn("["+workflowId+"] relay step failed:", relayErr.message);
-    throw relayErr; // safeIPC will catch and return { ok:false }
+    logger.warn("["+workflowId+"] relay step failed (non-fatal while dealer-WO flow is being perfected):", relayErr.message);
+    relayResult = { altId: "", workRequestId: "", serviceUrl: "", isDuplicate: false };
   }
 
   const { altId, workRequestId, serviceUrl, isDuplicate } = relayResult;
@@ -256,6 +275,7 @@ async function _handleStart(vendor, payload) {
     vendor, unit, startedAt: Date.now(),
     step:        "relay-done",
     altId,       workRequestId, serviceUrl, isDuplicate,
+    formData,
     workflow:    null,
     _resolve:    null,
     _reject:     null,

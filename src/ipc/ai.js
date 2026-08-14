@@ -637,7 +637,11 @@ function registerAIHandlers(ctx) {
 
   // Orcha config
   handle('orcha:get-config',    () => loadOrchaConfig());
-  handle('orcha:save-config',   (_e, config) => { saveOrchaConfig(config); return { ok: true }; });
+  handle('orcha:save-config',   (_e, config) => {
+    logger.info('[AI Config] orcha:save-config called with aiPreference=' + (config && config.aiPreference));
+    saveOrchaConfig(config);
+    return { ok: true };
+  });
 
   // Relay health / auth
   handle('orcha:test',          async () => relay.healthCheck());
@@ -690,7 +694,8 @@ function registerAIHandlers(ctx) {
     fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf8');
     fs.renameSync(tmp, P.orchaConfig);
     relay.setPreference(merged.aiPreference);
-    logger.info('[AI Config] Saved. preference=' + merged.aiPreference);
+    relay.setClaudeTimeout(merged.claudeTimeoutMs);
+    logger.info('[AI Config] Saved. preference=' + merged.aiPreference + ', claudeTimeoutMs=' + merged.claudeTimeoutMs);
     return { ok: true, preference: merged.aiPreference };
   });
 

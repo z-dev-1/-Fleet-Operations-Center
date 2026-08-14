@@ -727,6 +727,7 @@ function _html() {
             <button class="sd-btn secondary" id="auto-note-clear">Clear note</button>
           </div>
           <div id="auto-note-status" class="sd-status" style="display:none;margin-top:8px"></div>
+          <div id="auto-note-preview" style="display:none;margin-top:10px;padding:10px 16px;color:#dc2626;font-weight:bold;font-family:Arial,sans-serif;font-size:12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:4px;word-break:break-word;">NOTE: </div>
         </div>
 
         <!-- Slack -->
@@ -773,8 +774,11 @@ function _html() {
             <span class="sd-toggle-label">Enable</span>
             <input type="checkbox" id="par-enabled"/>
           </div>
-          <div style="margin-top:12px">
-            <div class="sd-label" style="margin-bottom:6px">Add channel by ID</div>
+          <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+            <button class="sd-btn secondary" id="par-scan-btn" type="button">Scan my channels</button>
+            <button class="sd-btn secondary" id="par-add-manual-toggle" type="button">+ Add by ID</button>
+          </div>
+          <div id="par-add-manual" style="display:none;margin-top:8px">
             <div style="display:flex;gap:6px">
               <input id="par-add-id" class="sd-input" style="flex:1;font-size:11px" type="text" placeholder="e.g. C0A8WSPA4R3" />
               <button class="sd-btn secondary" id="par-add-btn" type="button">Add</button>
@@ -1385,7 +1389,16 @@ function _wireAutoNote() {
   var saveBtn   = document.getElementById('auto-note-save');
   var clearBtn  = document.getElementById('auto-note-clear');
   var statusEl  = document.getElementById('auto-note-status');
+  var previewEl = document.getElementById('auto-note-preview');
   if (!textEl || !saveBtn) return;
+
+  function _updateNotePreview() {
+    if (!previewEl) return;
+    var txt = (textEl.value || '').trim();
+    if (txt) { previewEl.textContent = 'NOTE: ' + txt; previewEl.style.display = ''; }
+    else { previewEl.style.display = 'none'; }
+  }
+  textEl.addEventListener('input', _updateNotePreview);
 
   function showStatus(text, cls) {
     if (!statusEl) return;
@@ -1399,6 +1412,7 @@ function _wireAutoNote() {
     var s = all || {};
     textEl.value = s.autoEmailNote || '';
     if (oneShotEl) oneShotEl.checked = !!s.autoEmailNoteOneShot;
+    _updateNotePreview();
     if (s.autoEmailNote) {
       showStatus('✅ Active — will be included in the next scheduled auto-send' + (s.autoEmailNoteOneShot ? ' (one-time only)' : ''), 'ok');
     }
@@ -1579,12 +1593,15 @@ function _wireGraphMail() {
 // channel is ever added to the watch list, and is simpler/less
 // error-prone than name search per the user's own request.
 function _wirePartnerAutoReply() {
-  const enabledEl = document.getElementById('par-enabled');
-  const listEl    = document.getElementById('par-channel-list');
-  const saveBtn   = document.getElementById('par-save');
-  const statusEl  = document.getElementById('par-status');
-  const addIdEl   = document.getElementById('par-add-id');
-  const addBtn    = document.getElementById('par-add-btn');
+  const enabledEl       = document.getElementById('par-enabled');
+  const listEl          = document.getElementById('par-channel-list');
+  const saveBtn         = document.getElementById('par-save');
+  const statusEl        = document.getElementById('par-status');
+  const addIdEl         = document.getElementById('par-add-id');
+  const addBtn          = document.getElementById('par-add-btn');
+  const scanBtn         = document.getElementById('par-scan-btn');
+  const addManualToggle = document.getElementById('par-add-manual-toggle');
+  const addManualEl     = document.getElementById('par-add-manual');
   if (!enabledEl || !listEl || !saveBtn) return;
 
   function showStatus(text, cls) {
@@ -1606,12 +1623,22 @@ function _wirePartnerAutoReply() {
   let _currentConfig = null;
   let _replyCounts   = {};
 
+  async function _autoSave() {
+    if (!_currentConfig) return;
+    _currentConfig.enabled = !!enabledEl.checked;
+    try {
+      await slackBridge.saveChannelWatchConfig(_currentConfig);
+    } catch (e) {
+      showStatus('Auto-save failed: ' + e.message, 'err');
+    }
+  }
+
   function render(config) {
     _currentConfig = config;
     enabledEl.checked = !!config.enabled;
     const channels = config.channels || [];
     if (!channels.length) {
-      listEl.innerHTML = '<div class="sd-hint">No channels added yet — enter a channel ID above to add one.</div>';
+      listEl.innerHTML = '<div class="sd-hint">No channels yet — click "Scan my channels" to discover all channels you are in, or use "+ Add by ID" to add one manually.</div>';
       return;
     }
     listEl.innerHTML = channels.map((ch, i) => {
@@ -1621,7 +1648,7 @@ function _wirePartnerAutoReply() {
       const modeDesc = chMode === 'occasional'
         ? 'Replies to @mentions, thread follow-ups, and relevant messages'
         : chMode === 'justme'
-        ? 'Personal channel: every message you send here is treated as a real question/command (same as the in-app assistant), with confirm-before-send for Slack/email actions'
+        ? 'Personal channel: every message treated as a direct question or command'
         : 'Replies to @mentions and messages clearly directed at you';
       return `<div style="background:var(--el);border:1px solid var(--bdr);border-radius:8px;padding:10px 12px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
@@ -1630,13 +1657,13 @@ function _wirePartnerAutoReply() {
             <span style="color:var(--mut);font-size:9px;margin-left:4px">${_esc(ch.id)}</span>
           </span>
           <input type="checkbox" id="par-ch-${i}" ${ch.enabled !== false ? 'checked' : ''}/>
-          <button class="sd-btn danger par-ch-remove" data-idx="${i}" type="button" style="padding:2px 8px;font-size:10px;border-radius:5px">✕</button>
+          <button class="sd-btn danger par-ch-remove" data-idx="${i}" type="button" style="padding:2px 8px;font-size:10px;border-radius:5px">&#x2715;</button>
         </div>
         <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
           <button class="sd-font-btn par-mode-btn ${chMode === 'mentions'   ? 'active' : ''}" data-idx="${i}" data-mode="mentions"   type="button" style="font-size:9px;padding:3px 10px">Mentions</button>
           <button class="sd-font-btn par-mode-btn ${chMode === 'occasional' ? 'active' : ''}" data-idx="${i}" data-mode="occasional" type="button" style="font-size:9px;padding:3px 10px">Occasional</button>
           <button class="sd-font-btn par-mode-btn ${chMode === 'justme'     ? 'active' : ''}" data-idx="${i}" data-mode="justme"     type="button" style="font-size:9px;padding:3px 10px">Just Me</button>
-          <span style="margin-left:auto;font-size:9px;color:var(--mut)">${count ? count + ' ' + (count === 1 ? 'reply' : 'replies') + ' · ' : ''}${lastSeen}</span>
+          <span style="margin-left:auto;font-size:9px;color:var(--mut)">${count ? count + ' ' + (count === 1 ? 'reply' : 'replies') + ' \u00b7 ' : ''}${lastSeen}</span>
         </div>
         <div style="font-size:9px;color:var(--mut);margin-top:6px;padding-top:5px;border-top:1px solid rgba(48,54,61,.6)">${modeDesc}</div>
       </div>`;
@@ -1648,6 +1675,17 @@ function _wirePartnerAutoReply() {
         const mode = btn.getAttribute('data-mode');
         _currentConfig.channels[idx].replyMode = mode;
         render(_currentConfig);
+        _autoSave();
+      });
+    });
+
+    listEl.querySelectorAll('input[id^="par-ch-"]').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        const i = parseInt(cb.id.replace('par-ch-', ''), 10);
+        if (_currentConfig && _currentConfig.channels[i]) {
+          _currentConfig.channels[i].enabled = cb.checked;
+        }
+        _autoSave();
       });
     });
 
@@ -1656,10 +1694,13 @@ function _wirePartnerAutoReply() {
         const idx = parseInt(btn.getAttribute('data-idx'), 10);
         _currentConfig.channels.splice(idx, 1);
         render(_currentConfig);
-        showStatus('Channel removed — click Save to confirm', '');
+        _autoSave();
       });
     });
   }
+
+  // Main enable toggle auto-saves
+  enabledEl.addEventListener('change', () => _autoSave());
 
   Promise.all([
     slackBridge.getChannelWatchConfig(),
@@ -1671,8 +1712,55 @@ function _wirePartnerAutoReply() {
     });
     render(config);
   }).catch((e) => {
-    showStatus('❌ Failed to load config: ' + e.message, 'err');
+    showStatus('\u274c Failed to load config: ' + e.message, 'err');
   });
+
+  // Scan channels button
+  if (scanBtn) {
+    scanBtn.addEventListener('click', async () => {
+      scanBtn.disabled = true;
+      const origText = scanBtn.textContent;
+      scanBtn.textContent = 'Scanning...';
+      try {
+        const channels = await slackBridge.getChannels();
+        const eligible = (channels || []).filter(ch => !ch.isIm && !ch.isMpim);
+        if (!eligible.length) {
+          toast.show('warn', 'No channels found', 3000);
+          return;
+        }
+        if (!_currentConfig) _currentConfig = { enabled: true, channels: [] };
+        const existing = new Set(_currentConfig.channels.map(c => c.id));
+        let added = 0;
+        eligible.forEach(ch => {
+          if (!existing.has(ch.id)) {
+            _currentConfig.channels.push({ id: ch.id, name: ch.name, enabled: false, lastSeenTs: null, replyMode: 'mentions' });
+            added++;
+          }
+        });
+        render(_currentConfig);
+        if (added > 0) {
+          await _autoSave();
+          toast.show('success', 'Found ' + added + ' new channel' + (added === 1 ? '' : 's') + ' \u2014 enable the ones you want, changes save automatically', 5000);
+        } else {
+          toast.show('info', 'All channels already in the list', 3000);
+        }
+      } catch (e) {
+        toast.show('error', 'Scan failed: ' + e.message, 4000);
+      } finally {
+        scanBtn.disabled = false;
+        scanBtn.textContent = origText;
+      }
+    });
+  }
+
+  // "Add by ID" collapsible toggle
+  if (addManualToggle && addManualEl) {
+    addManualToggle.addEventListener('click', () => {
+      const open = addManualEl.style.display !== 'none';
+      addManualEl.style.display = open ? 'none' : '';
+      addManualToggle.textContent = open ? '+ Add by ID' : '\u2212 Add by ID';
+    });
+  }
 
   if (addBtn && addIdEl) {
     addBtn.addEventListener('click', async () => {
@@ -1692,14 +1780,15 @@ function _wirePartnerAutoReply() {
           return;
         }
         if (!result.isMember) {
-          toast.show('error', `Found #${result.name}, but you're not a member of it — join it in Slack first, then add it here.`, 5000);
+          toast.show('error', 'Found #' + result.name + ', but you are not a member of it \u2014 join it in Slack first, then add it here.', 5000);
           return;
         }
         if (!_currentConfig) _currentConfig = { enabled: true, channels: [] };
         _currentConfig.channels.push({ id, name: result.name, enabled: true, lastSeenTs: null, replyMode: 'mentions' });
         render(_currentConfig);
         addIdEl.value = '';
-        toast.show('success', `Added #${result.name} — click Save to confirm`, 3000);
+        await _autoSave();
+        toast.show('success', 'Added #' + result.name, 3000);
       } catch (e) {
         toast.show('error', 'Lookup failed: ' + e.message, 4000);
       } finally {
@@ -1712,22 +1801,9 @@ function _wirePartnerAutoReply() {
 
   saveBtn.addEventListener('click', async () => {
     if (!_currentConfig) return;
-    const updated = {
-      enabled: !!enabledEl.checked,
-      channels: _currentConfig.channels.map((ch, i) => {
-        const cb = document.getElementById('par-ch-' + i);
-        return { ...ch, enabled: cb ? !!cb.checked : ch.enabled };
-      }),
-    };
-    try {
-      await slackBridge.saveChannelWatchConfig(updated);
-      _currentConfig = updated;
-      showStatus('✅ Saved', 'ok');
-      toast.show('success', 'Partner Auto-Reply settings saved', 2500);
-    } catch (e) {
-      showStatus('❌ Save failed: ' + e.message, 'err');
-      toast.show('error', 'Save failed: ' + e.message, 4000);
-    }
+    await _autoSave();
+    showStatus('\u2705 Saved', 'ok');
+    toast.show('success', 'Partner Auto-Reply settings saved', 2500);
   });
 }
 
@@ -1831,6 +1907,17 @@ function _wireDMAutoReply() {
     _renderThreadList(_currentConfig, replyLog);
   }).catch(e => {
     showStatus('Failed to load config: ' + e.message, 'err');
+  });
+
+  // Auto-save the enable toggle so it persists without clicking Save
+  enabledEl.addEventListener('change', async () => {
+    const updated = { ..._currentConfig, enabled: !!enabledEl.checked };
+    try {
+      await slackBridge.saveDMAutoReplyConfig(updated);
+      _currentConfig = updated;
+    } catch (e) {
+      showStatus('Auto-save failed: ' + e.message, 'err');
+    }
   });
 
   saveBtn.addEventListener('click', async () => {

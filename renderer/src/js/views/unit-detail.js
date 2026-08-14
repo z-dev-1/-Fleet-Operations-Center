@@ -15,6 +15,7 @@ import state         from '../state.js';
 import { notes, ai, aap, relay, vendor, workflowIntel } from '../bridge.js';
 import { open as openWRModal }    from './wr-modal.js';
 import { open as openVendorReview } from './vendor-review-modal.js';
+import { open as openDealerWOModal } from './dealer-wo-modal.js';
 import toast         from '../components/toast.js';
 
 let _panel    = null;
@@ -315,41 +316,47 @@ async function _showApproveCancel(workflowId, reviewPayload) {
   });
 }
 async function _startVendorWF(unit, vendorKey) {
-  // S28: Record correction if Orcha suggested a different vendor (closes the learning loop)
-  try {
-    const aiResult = await ai.suggestVendor(unit).catch(() => null);
-    if (aiResult && aiResult.vendor && aiResult.vendor.toLowerCase() !== vendorKey.toLowerCase()) {
-      ai.recordCorrection({
-        unitId:         unit.equipmentId || unit.id || '',
-        field:          'vendor',
-        orchaSuggested: aiResult.vendor,
-        userChose:      vendorKey,
-        context: {
-          domicile:  unit.domicileSite || '',
-          vendor:    vendorKey,
-          component: unit.savedPrimaryComponent || '',
-          make:      unit.manufacturer || unit.make || '',
-          issue:     unit.issueSummary || '',
-        },
-      }).catch(() => {});
-    }
-  } catch (_) {}
+  // Open the Dealer WO review modal first so the user can confirm city/state,
+  // dealer, name, phone, and issue before portal automation fires. The resolved
+  // formData is passed into the workflow so the orchestrator fills the real
+  // request-service form from it instead of guessing from unit fields alone.
+  openDealerWOModal(unit, vendorKey, async (formData) => {
+    // S28: Record correction if Orcha suggested a different vendor (closes the learning loop)
+    try {
+      const aiResult = await ai.suggestVendor(unit).catch(() => null);
+      if (aiResult && aiResult.vendor && aiResult.vendor.toLowerCase() !== vendorKey.toLowerCase()) {
+        ai.recordCorrection({
+          unitId:         unit.equipmentId || unit.id || '',
+          field:          'vendor',
+          orchaSuggested: aiResult.vendor,
+          userChose:      vendorKey,
+          context: {
+            domicile:  unit.domicileSite || '',
+            vendor:    vendorKey,
+            component: unit.savedPrimaryComponent || '',
+            make:      unit.manufacturer || unit.make || '',
+            issue:     unit.issueSummary || '',
+          },
+        }).catch(() => {});
+      }
+    } catch (_) {}
 
-  const startBtn = document.getElementById('dp-vnd-start');
-  if (startBtn) { startBtn.disabled = true; startBtn.textContent = 'Starting...'; }
-  const progressEl = document.getElementById('dp-vnd-progress');
-  if (progressEl) { progressEl.style.display = 'block'; progressEl.innerHTML = ''; }
-  try {
-    const fn = vendorKey === 'paccar' ? vendor.startPaccar : vendor.startVolvo;
-    const { workflowId } = await fn(unit);
-    const sec = document.getElementById('dp-vendor-section');
-    if (sec) sec.dataset.workflowId = workflowId;
-    // S25-6-A: do NOT call _showApproveCancel here — modal opens via vendor:review-ready bus event.
-    toast.show('info', 'Dealer WO workflow started \u2014 waiting for portal...', 3000);
-  } catch (e) {
-    toast.show('error', 'Failed to start workflow: ' + e.message);
-    if (startBtn) { startBtn.disabled = false; startBtn.textContent = 'Retry'; }
-  }
+    const startBtn = document.getElementById('dp-vnd-start');
+    if (startBtn) { startBtn.disabled = true; startBtn.textContent = 'Starting...'; }
+    const progressEl = document.getElementById('dp-vnd-progress');
+    if (progressEl) { progressEl.style.display = 'block'; progressEl.innerHTML = ''; }
+    try {
+      const fn = vendorKey === 'paccar' ? vendor.startPaccar : vendor.startVolvo;
+      const { workflowId } = await fn(unit, formData);
+      const sec = document.getElementById('dp-vendor-section');
+      if (sec) sec.dataset.workflowId = workflowId;
+      // S25-6-A: do NOT call _showApproveCancel here — modal opens via vendor:review-ready bus event.
+      toast.show('info', 'Dealer WO workflow started \u2014 waiting for portal...', 3000);
+    } catch (e) {
+      toast.show('error', 'Failed to start workflow: ' + e.message);
+      if (startBtn) { startBtn.disabled = false; startBtn.textContent = 'Retry'; }
+    }
+  });
 }
 
 async function _approveWF(workflowId) {
@@ -1261,6 +1268,59 @@ function renderRepairPane(unit){
       '</div>';
   }
 
+
+  // ── secondary WR cards (multi-WR pass) ──────────────────────────────────
+  // One card per entry in unit._secondaryWRs, styled same as plannedWRCard.
+  var secondaryWRCards = '';
+  var _secondaryRelayUrl = ''; // captured for split-view below
+  if (Array.isArray(unit._secondaryWRs) && unit._secondaryWRs.length) {
+    unit._secondaryWRs.forEach(function(p, idx) {
+      if (idx === 0) _secondaryRelayUrl = p._relayUrl || '';
+      var pStateRaw  = p.serviceState || '';
+      var pStateKey  = (p.completed || /clos|complet/i.test(pStateRaw)) ? 'closed'
+                     : /sour/i.test(pStateRaw) ? 'sourcing' : 'open';
+      var pTypeLabel = p._wrType === 'planned' ? 'Planned' : 'Unplanned';
+      var pFields = [
+        p.workRequestId   ? ['WR ID',      p.workRequestId]   : null,
+        p.salesforceCase  ? ['SF Case',    p.salesforceCase]  : null,
+        p.serviceCategory ? ['Category',   p.serviceCategory] : null,
+        p.totalCost       ? ['Total Cost', p.totalCost]       : null,
+      ].filter(Boolean);
+      secondaryWRCards +=
+        '<div class="dp-section-title dp-section-title--planned">' + pTypeLabel + ' Work Order</div>' +
+        '<div class="dp-wo-card dp-wo-card--planned">' +
+          '<div class="dp-wo-card__header">' +
+            '<span class="dp-wo-card__vendor">' + esc(p.vendor || 'Unknown Vendor') + '</span>' +
+            '<span class="dp-wo-card__status-pill dp-wo-card__status-pill--' + pStateKey + '">' + esc(pStateRaw || 'Open') + '</span>' +
+          '</div>' +
+          (p.issueDetails ? '<div class="dp-wo-card__desc">' + esc(p.issueDetails) + '</div>' : '') +
+          (pFields.length ? '<div class="dp-wo-card__fields">' + pFields.map(function(f) {
+            return '<span class="dp-wo-field"><span class="dp-wo-field__k">' + esc(f[0]) + '</span>' +
+                   '<span class="dp-wo-field__v">' + esc(f[1]) + '</span></span>';
+          }).join('') + '</div>' : '') +
+          ((p.created || p.completed) ? '<div class="dp-wo-card__dates">' +
+            (p.created   ? '<span>Opened ' + fmtDate(p.created)   + '</span>' : '') +
+            (p.completed ? '<span>Closed ' + fmtDate(p.completed) + '</span>' : '') +
+          '</div>' : '') +
+          (p._relayUrl ? '<div class="dp-wo-card__dates"><a class="dp-wo-card__relay-link" href="#" data-ext-url="' +
+            esc(p._relayUrl) + '">Open in Relay ↗</a></div>' : '') +
+          (function() {
+            var _pOffsite = p.offsiteShopEventUrl || p.asistSrUrl || '';
+            var _pLabel   = p.asistLabel || p.offsiteShopEvent || 'ASIST';
+            if (!_pOffsite) return '';
+            return '<div class="dp-wo-card__dates" style="gap:10px;flex-wrap:wrap">' +
+              '<a class="dp-wo-card__relay-link" href="#" data-ext-url="' + esc(_pOffsite) + '">' + esc(_pLabel) + ' ↗</a>' +
+              (p._relayUrl ? ' <button class="dp-split-view-btn" style="font-size:9px;padding:3px 10px"' +
+                ' data-secondary-split="1"' +
+                ' data-split-left="' + esc(p._relayUrl) + '"' +
+                ' data-split-right="' + esc(_pOffsite) + '">' +
+                '🔍 Split View</button>' : '') +
+            '</div>';
+          })() +
+        '</div>';
+    });
+  }
+
   var durBar=workDurationBar(unit);
 
   // ── Conversation → vertical timeline ──────────────────────────────────────
@@ -1275,7 +1335,7 @@ function renderRepairPane(unit){
   // no AI timeline exists yet (e.g. Orcha deep-scan hasn't run, or an AI call failed
   // due to a token/quota limit). Manual entries are immutable truth and must be
   // addable at any time -- they should never be gated behind AI availability.
-  var tlEntries = aiTimeline ? aiTimeline.split('\n').filter(function(l){ return l.trim().length > 5; }) : [];
+  var tlEntries = aiTimeline ? aiTimeline.split('\n').filter(function(l){ var t=l.trim(); return t.length > 5 && !t.toLowerCase().includes('[no update logged]') && !(t.toLowerCase().includes('requested') && t.toLowerCase().includes('update') && t.toLowerCase().includes('vendor')); }) : [];
   var tlEntriesHtml = tlEntries.length
     ? tlEntries.map(function(entry) {
         var m = entry.trim().match(/^(\d{2}\/\d{2})\s*[-\u2013]\s*(.+)$/);
@@ -1333,7 +1393,7 @@ function renderRepairPane(unit){
       if (data && data.unitId === unit.equipmentId && data.timeline) {
         var tlEl = document.querySelector('.dp-orcha-timeline');
         if (tlEl) {
-          var entries = data.timeline.split('\n').filter(function(l){ return l.trim().length > 5; });
+          var entries = data.timeline.split('\n').filter(function(l){ var t=l.trim(); return t.length > 5 && !t.toLowerCase().includes('[no update logged]') && !(t.toLowerCase().includes('requested') && t.toLowerCase().includes('update') && t.toLowerCase().includes('vendor')); });
           tlEl.innerHTML = entries.map(function(entry) {
             var m = entry.trim().match(/^(\d{2}\/\d{2})\s*[-\u2013]\s*(.+)$/);
             if (m) return '<div class="dp-tl3-item dp-tl3-dot--ai" data-entry="' + encodeURIComponent(entry.trim()) + '"><span class="dp-tl3-date">' + esc(m[1]) + '</span><span class="dp-tl3-dash"> \u2014 </span><span class="dp-tl3-text">' + esc(m[2]) + '</span><span class="dp-tl3-actions"><button class="dp-tl3-edit-btn" title="Edit">\u270f</button><button class="dp-tl3-hide-btn" title="Hide">\u2715</button></span></div>';
@@ -1479,7 +1539,7 @@ function renderRepairPane(unit){
   }, 100);
 
   return '<div class="dp-pane active" id="dp-pane-repair">'+
-    '<div class="dp-section-title">Work Request</div>'+woCard+plannedWRCard+splitViewBtn+durBar+timelineHtml+offsiteHtml+
+    '<div class="dp-section-title">Work Request</div>'+woCard+plannedWRCard+secondaryWRCards+splitViewBtn+durBar+timelineHtml+offsiteHtml+
   '</div>';
 }
 
@@ -1764,6 +1824,17 @@ function _renderUnit(unit) {
   });
   _panel.querySelectorAll('[data-ext-url]').forEach(function(b) {
     b.addEventListener('click', function(e){ e.preventDefault(); var u=b.dataset.extUrl||b.getAttribute('data-ext-url'); if(u&&window.files) window.files.openExternal(u).catch(function(){}); });
+  });
+
+  // Split view for secondary ASIST/offsite WR cards
+  _panel.querySelectorAll('[data-secondary-split]').forEach(function(b) {
+    b.addEventListener('click', function(e) {
+      e.preventDefault();
+      var leftUrl  = b.dataset.splitLeft  || b.getAttribute('data-split-left')  || '';
+      var rightUrl = b.dataset.splitRight || b.getAttribute('data-split-right') || '';
+      var unitId   = (window.__splitUnit && window.__splitUnit.equipmentId) || '';
+      _openInlineSplit(leftUrl, rightUrl, unitId);
+    });
   });
 
   // ── show all timeline entries ────────────────────────────────────────────

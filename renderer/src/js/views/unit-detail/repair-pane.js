@@ -14,7 +14,7 @@ function renderRepairPane(unit){
     var fields=[
       unit.workRequestId?['WR ID',unit.workRequestId]:null,
       unit.vendorWorkOrderId?['Vendor WO',unit.vendorWorkOrderId]:null,
-      unit.salesforceCase?['SF Case',unit.salesforceCase]:null,
+      unit.salesforceCase?['SF Case',unit.salesforceCase,unit.salesforceCaseUrl||'']:null,
       unit.createdBy?['Created By',unit.createdBy]:null,
       unit.needBy?['Need By',unit.needBy]:null,
       unit.serviceCategory?['Category',unit.serviceCategory]:null,
@@ -39,7 +39,7 @@ function renderRepairPane(unit){
       '</div>':'')+
       ((unit.issueSummary||unit.issueDetails)?'<div class="dp-wo-card__desc">'+(unit.issueSummary?'<span class="dp-orcha-badge">\uD83E\uDDE0</span> '+esc((unit.issueSummary||'').split('TIMELINE:')[0].split('\\n')[0].substring(0,200)):esc(unit.issueDetails))+'</div>':'')+
       cause+correction+
-      (fields.length?'<div class="dp-wo-card__fields">'+fields.map(function(f){return'<span class="dp-wo-field"><span class="dp-wo-field__k">'+esc(f[0])+'</span><span class="dp-wo-field__v">'+esc(f[1])+'</span></span>';}).join('')+'</div>':'')+
+      (fields.length?'<div class="dp-wo-card__fields">'+fields.map(function(f){return'<span class="dp-wo-field"><span class="dp-wo-field__k">'+esc(f[0])+'</span><span class="dp-wo-field__v">'+(f[2]?'<a href="'+f[2]+'" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;cursor:pointer;">'+esc(f[1])+'</a>':esc(f[1]))+'</span></span>';}).join('')+'</div>':'')+
       (unit.created||unit.completed?'<div class="dp-wo-card__dates">'+
         (unit.created?'<span>Opened '+fmtDate(unit.created)+'</span>':'')+
         (unit.completed?'<span>Closed '+fmtDate(unit.completed)+'</span>':'')+

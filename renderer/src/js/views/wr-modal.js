@@ -869,7 +869,7 @@ async function _runAIAssist() {
       const vendors = allContacts.filter(v => v.type === 'vendor' && v.street);
       if (vendors.length) {
         vendorBookCtx = '\nVENDOR BOOK (pick dealer by unit domicile + make):\n' +
-          vendors.map(v => v.name + ' | Make: ' + (v.make || 'ANY') + ' | Domiciles: ' + (v.domiciles || []).join(',') + ' | ' + v.street + ', ' + (v.city||'') + ' ' + (v.state||'')).join('\n') +
+          vendors.map(v => v.name + ' | Make: ' + ((Array.isArray(v.makes) && v.makes.length ? v.makes.join('/') : v.make) || 'ANY') + ' | Domiciles: ' + (v.domiciles || []).join(',') + ' | ' + v.street + ', ' + (v.city||'') + ' ' + (v.state||'')).join('\n') +
           '\nWhen user says "send to dealer": pick the vendor from this book that matches unit make AND domicile. If no match, leave vendor empty.\n';
       }
     } catch(e) {}

@@ -148,8 +148,41 @@ const BARRIER_TERMS = [
 // Expected-flip completion signals — DRAFT ONLY, always editable
 const FLIP_SIGNAL = /\b(repair complete|repairs? completed|road[- ]?test(ed)?|ready for (pickup|release)|returning to service|release(d)? back to fleet|flip(ping)? (to|back) (a\/h|available)|complete[d]? (today|this morning))\b/i;
 
+// Structured barrier signal, straight from the scraped Relay repair-status
+// field (see savedRepairStatus in src/scrapers/relay.js) rather than a
+// keyword guess against free text. This is a much cleaner signal than the
+// BARRIER_TERMS regexes above -- e.g. "Waiting for vendor" was found on 23
+// of 41 unavailable units in a live check, none of which necessarily
+// contain the literal words the BARRIER_TERMS regexes look for. Statuses
+// NOT listed here (Repair in progress, Repair completed, Road test,
+// Diagnosis completed, Vehicle arrived, Work order closed) are active/done
+// states, not barriers, and are intentionally excluded.
+const STATUS_BARRIER_MAP = {
+  'waiting for vendor':   'Waiting for vendor response',
+  'awaiting estimate':    'Awaiting estimate approval',
+  'parts backordered':    'Parts backordered',
+  'under diagnosis':      'Diagnosis unresolved',
+};
+
 function _unitText(r) {
-  return [r.issueDetails || '', r.issueSummary || '', r.savedNotes || '', r.savedRepairStatus || ''].join(' ');
+  return [r.issueDetails || '', r.issueSummary || '', r.savedNotes || '', r.savedRepairStatus || '', r.repairTimeline || ''].join(' ');
+}
+
+// Parse how long a unit has been open, in whole days, from structured fields.
+// Returns an integer or null if no duration data is available.
+function _parseDaysOpen(r) {
+  if (r.workDuration) {
+    const m = r.workDuration.match(/^(\d+)d/);
+    if (m) return parseInt(m[1], 10);
+  }
+  if (r.created) {
+    const dm = r.created.match(/\((\d+)\s+days?\s+ago\)/i);
+    if (dm) return parseInt(dm[1], 10);
+    if (/a month ago/i.test(r.created)) return 30;
+    const mm = r.created.match(/(\d+)\s+months?\s+ago/i);
+    if (mm) return parseInt(mm[1], 10) * 30;
+  }
+  return null;
 }
 
 function _isUnavail(r) {
@@ -166,16 +199,32 @@ function _computeGroup(groupRows, allRowsInGroup) {
   const trendMap = {};
   for (const r of unavail) {
     const text = _unitText(r);
+    const daysOpen = _parseDaysOpen(r);
+    const op = (r.operator || '').toUpperCase().trim();
     for (const [label, re] of TREND_TERMS) {
       if (re.test(text)) {
-        if (!trendMap[label]) trendMap[label] = new Set();
-        trendMap[label].add(r.equipmentId || r.id || '?');
+        if (!trendMap[label]) trendMap[label] = { ids: new Set(), days: [], operators: new Set() };
+        trendMap[label].ids.add(r.equipmentId || r.id || '?');
+        if (daysOpen !== null) trendMap[label].days.push(daysOpen);
+        if (op) trendMap[label].operators.add(op);
       }
     }
   }
   const trends = Object.entries(trendMap)
-    .filter(([, ids]) => ids.size >= TREND_MIN_UNITS)
-    .map(([label, ids]) => ({ label, count: ids.size, units: Array.from(ids) }))
+    .filter(([, v]) => v.ids.size >= TREND_MIN_UNITS)
+    .map(([label, v]) => {
+      const count = v.ids.size;
+      const units = Array.from(v.ids);
+      const minDays = v.days.length ? Math.min(...v.days) : null;
+      const maxDays = v.days.length ? Math.max(...v.days) : null;
+      const avgDays = v.days.length ? Math.round(v.days.reduce((s, d) => s + d, 0) / v.days.length) : null;
+      // Persisting: same issue open 7+ days across units; Emerging: all < 3d; else Recurring
+      const direction = maxDays === null ? 'Recurring' : maxDays >= 7 ? 'Persisting' : maxDays < 3 ? 'Emerging' : 'Recurring';
+      // daysRange: "Xd" if uniform, "X–Yd" if spread; shown in output as duration window
+      const daysRange = minDays !== null ? (minDays === maxDays ? `${minDays}d` : `${minDays}–${maxDays}d`) : null;
+      const scacs = Array.from(v.operators);
+      return { label, count, units, direction, avgDays, daysRange, scacs };
+    })
     .sort((a, b) => b.count - a.count);
 
   // Barriers (draft) — tally candidate signal -> count
@@ -187,14 +236,36 @@ function _computeGroup(groupRows, allRowsInGroup) {
     const text = _unitText(r);
     for (const [label, re] of BARRIER_TERMS) {
       if (label === 'No vendor assigned') continue; // handled above via vendor field
-      if (re.test(text)) barrierMap[label] = (barrierMap[label] || 0) + 1;
+      if (re.test(text)) {
+        if (!barrierMap[label]) barrierMap[label] = { count: 0, days: [] };
+        barrierMap[label].count++;
+        const bd = _parseDaysOpen(r);
+        if (bd !== null) barrierMap[label].days.push(bd);
+      }
+    }
+    // Structured signal straight from the scraped repair-status field --
+    // catches real vendor/parts/estimate barriers that don't happen to
+    // contain any of the BARRIER_TERMS keywords (e.g. "Waiting for vendor"
+    // status with terse notes text like "PM B failed").
+    const statusLabel = STATUS_BARRIER_MAP[(r.savedRepairStatus || '').trim().toLowerCase()];
+    if (statusLabel) {
+      if (!barrierMap[statusLabel]) barrierMap[statusLabel] = { count: 0, days: [] };
+      barrierMap[statusLabel].count++;
+      const sd = _parseDaysOpen(r);
+      if (sd !== null) barrierMap[statusLabel].days.push(sd);
     }
   }
-  if (noVendorCount > 0) barrierMap['No vendor assigned'] = noVendorCount;
+  if (noVendorCount > 0) {
+    if (!barrierMap['No vendor assigned']) barrierMap['No vendor assigned'] = { count: 0, days: [] };
+    barrierMap['No vendor assigned'].count += noVendorCount;
+  }
   const barriers = Object.entries(barrierMap)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 4)
-    .map(([label, count]) => `${label} (${count})`);
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, 5)
+    .map(([label, v]) => {
+      const avgDays = v.days.length ? Math.round(v.days.reduce((s, d) => s + d, 0) / v.days.length) : null;
+      return `${label} (${v.count} units${avgDays ? ', avg ' + avgDays + 'd' : ''})`;
+    });
 
   // Expected flips (draft)
   const flipUnits = unavail.filter(r => FLIP_SIGNAL.test(_unitText(r))).map(r => r.equipmentId || r.id || '?');
@@ -205,7 +276,18 @@ function _computeGroup(groupRows, allRowsInGroup) {
   // never let AI "verify" against a summary of a summary.
   const unavailRows = unavail.map(r => ({
     id: r.equipmentId || r.id || '?',
-    text: _unitText(r).trim().substring(0, 300),
+    // 300 -> 900: _unitText now includes repairTimeline (the day-by-day
+    // narrative where actual barrier language lives -- "pending ETC",
+    // "awaiting technician assignment", etc). 300 chars truncated most
+    // timelines to nothing useful. This cap just bounds what's kept in
+    // memory/cache -- _buildAIPrompt (below) does its own budget-aware
+    // re-truncation per unit based on how many rows actually go in the
+    // prompt, so this doesn't need to worry about MAX_PROMPT_LEN itself.
+    text: _unitText(r).trim().substring(0, 900),
+    daysOpen: _parseDaysOpen(r),
+    vendor: (r.vendor && r.vendor !== '--') ? r.vendor : null,
+    repairStatus: r.savedRepairStatus || null,
+    operator: (r.operator || '').toUpperCase().trim() || null,
   }));
 
   return {
@@ -276,10 +358,26 @@ function _saveAIReview(kind, groupKey, data) {
 function _buildAIPrompt(kind, g) {
   const label = kind === 'site' ? 'Domicile' : 'SCAC';
   const rows = g.unavailRows.slice(0, 60); // keep prompt size sane; matches MAX_PROMPT_LEN headroom in src/ipc/ai.js
+  // Budget-aware per-unit truncation: ~20000 chars total for unit text,
+  // split evenly across however many rows actually made the cut, clamped
+  // between 350 (always keep at least the issue line + a bit of timeline)
+  // and 900 (matches the cap _computeGroup stored). Prevents a large group
+  // (many rows × long repairTimeline) from silently blowing past
+  // MAX_PROMPT_LEN and having the whole AI Review fail with a validation
+  // error instead of gracefully trimming.
+  const perUnitBudget = Math.max(350, Math.min(900, Math.floor(20000 / Math.max(rows.length, 1))));
   const trendsList = g.trends.length
-    ? g.trends.map(t => `- "${t.label}": ${t.count} units (${t.units.join(', ')})`).join('\n')
+    ? g.trends.map(t => `- ${t.count} ${t.label}${t.daysRange ? ' — ' + t.daysRange : ''} [${t.direction || 'Recurring'}]${t.scacs && t.scacs.length ? ' (' + t.scacs.join(', ') + ')' : ''}: units ${t.units.join(', ')}`).join('\n')
     : '(none detected)';
-  const unitLines = rows.map(u => `[${u.id}] ${u.text || '(no issue text)'}`).join('\n');
+  const unitLines = rows.map(u => {
+    const meta = [
+      u.operator ? `SCAC: ${u.operator}` : '',
+      u.vendor ? `Vendor: ${u.vendor}` : 'Vendor: unassigned',
+      (u.daysOpen !== null && u.daysOpen !== undefined) ? `Open: ${u.daysOpen}d` : '',
+      u.repairStatus ? `Status: ${u.repairStatus}` : '',
+    ].filter(Boolean).join(' | ');
+    return `[${u.id}]${meta ? ' ' + meta : ''}\n${(u.text || '(no issue text)').substring(0, perUnitBudget)}`;
+  }).join('\n\n');
 
   return `You are Orcha, cross-checking a fleet operations "Daily Call" report for accuracy. You are a SUPPORTING / VERIFICATION source only -- never invent information.
 
@@ -299,6 +397,10 @@ YOUR TASK:
 4. ACTIONS -- suggest concrete next steps the fleet coordinator (the user) could personally take to move things forward, e.g. "Request updated ETC from Amerit for unit X", "Escalate diagnosis delay at dealer for unit Y". Be specific and cite the relevant unit ID(s) when the action is unit-specific; citation is optional for a genuinely group-wide action (e.g. "Request consolidated status update from Amerit for all open WOs at this site").
 5. HELP NEEDED -- assess whether cross-team help is needed (e.g. SM team lifecycle correction, FAS/AFP coordination, Last Mile escalation) and from whom. If no help is needed, do not invent a need -- simply return an empty array for this field.
 
+TRENDS RULE: A trend exists ONLY when 3+ units share the same failure category. Report format: "[# units] [failure category] — [duration range] ([SCACs affected])". Valid categories: Engine, Transmission, PM Backlog, Expired Inspections, Accident/CEI, Reconditioning, Electrical, Brakes, Tires, Parts Sourcing, Offsite Dealer, Vendor Capacity. If no category has 3+ units, report "No trends — no single issue category has 3+ units affected." Use direction [Persisting/Emerging/Recurring] for direction labeling.
+BARRIERS RULE: Only list EXTERNAL blockers — vendor delays, parts sourcing, dealer backlogs, estimate approvals, no weekend coverage, capacity constraints. Be unit-specific: include unit #, vendor/dealer name, and days stuck. Group multiple units under the same blocker category. Flag anything stuck > 7 days as CRITICAL. Format: "[Blocker Category]: [Unit #] — [specific issue] at [vendor/dealer] ([# days])". Every barrier note must include category, vendor, and days.
+ACTIONS RULE: Every barrier MUST have a matching action — no orphan barriers. Use specific action verbs: Escalated, Requested, Confirmed, Scheduled, Created WO, Sent correspondence, Pushed for, Contacted. Always state WHO you contacted, WHAT you specifically requested, and WHEN you expect resolution. NEVER use "following up" alone. Format: "[Action verb] [who/what] for [specific ask]; [ETA or expected outcome]".
+
 STRICT RULES -- violating these invalidates your response:
 - Every TREND or BARRIER claim MUST cite the exact unit IDs (from the bracketed list above) where you found it. No unit IDs = do not include the claim.
 - Do NOT invent, guess, or extrapolate beyond what is explicitly stated in the raw text.
@@ -307,7 +409,7 @@ STRICT RULES -- violating these invalidates your response:
 - Actions and help-needed are recommendations, not factual claims -- they don't require the same unit-citation rigor, but should still be grounded in what you actually see in the text, not generic boilerplate.
 
 RESPOND WITH JSON ONLY, no markdown, no explanation outside the JSON:
-{"trendsAccurate": true, "trendIssues": "", "additionalTrends": [{"label": "short name", "units": ["id1","id2","id3"], "quote": "short supporting phrase from the text"}], "barrierNotes": [{"note": "short barrier description", "units": ["id1","id2"]}], "suggestedActions": [{"action": "short concrete next step", "units": ["id1"]}], "suggestedHelp": [{"note": "short description of help needed and from whom", "units": ["id1"]}]}`;
+{"trendsAccurate": true, "trendIssues": "", "additionalTrends": [{"label": "failure category name", "direction": "Persisting|Emerging|Recurring", "timeframe": "e.g. 12-day window or 3rd consecutive week", "units": ["id1","id2","id3"], "quote": "short supporting phrase from the text", "scacs": ["SCAC1","SCAC2"]}], "barrierNotes": [{"category": "Parts Delay|Offsite Shop|Vendor Capacity|Estimate Approval|No Weekend Coverage|Other", "note": "unit-specific description e.g. throttle body incorrect 2x, no correct PN sourced", "vendor": "vendor or dealer name", "days": 12, "critical": true, "units": ["id1"]}], "suggestedActions": [{"action": "Escalated/Requested/Confirmed/etc + who + what + ETA", "owner": "Z or team name", "deadline": "e.g. EOD Wed", "refersTo": "barrier category this resolves", "units": ["id1"]}], "suggestedHelp": [{"note": "short description of help needed and from whom", "units": ["id1"]}]}`;
 }
 
 // Anti-fabrication gate — drop any AI claim that isn't traceable to real
@@ -329,6 +431,9 @@ function _validateAIResult(parsed, g) {
       if (units.length < TREND_MIN_UNITS) continue; // fewer verified units than claimed, or below threshold — drop
       out.additionalTrends.push({
         label: t.label.trim().substring(0, 60),
+        direction: (typeof t.direction === 'string' && ['Persisting','Emerging','Recurring'].includes(t.direction)) ? t.direction : 'Recurring',
+        timeframe: typeof t.timeframe === 'string' ? t.timeframe.trim().substring(0, 80) : '',
+        scacs: Array.isArray(t.scacs) ? t.scacs.filter(s => typeof s === 'string').map(s => s.trim()).filter(Boolean).slice(0, 8) : [],
         units,
         quote: (typeof t.quote === 'string' ? t.quote.trim().substring(0, 150) : ''),
       });
@@ -340,7 +445,17 @@ function _validateAIResult(parsed, g) {
       if (!b || typeof b.note !== 'string' || !b.note.trim()) continue;
       const units = Array.isArray(b.units) ? b.units.filter(u => knownIds.has(u)) : [];
       if (units.length === 0) continue; // uncited barrier note — drop
-      out.barrierNotes.push({ note: b.note.trim().substring(0, 150), units });
+      const bDays = typeof b.days === 'number' && b.days >= 0 ? b.days : null;
+      out.barrierNotes.push({
+        category: typeof b.category === 'string' ? b.category.trim().substring(0, 50) : 'Other',
+        note: b.note.trim().substring(0, 200),
+        vendor: typeof b.vendor === 'string' ? b.vendor.trim().substring(0, 60) : '',
+        days: bDays,
+        critical: bDays !== null ? bDays > 7 : Boolean(b.critical),
+        blockedBy: typeof b.blockedBy === 'string' ? b.blockedBy.trim().substring(0, 40) : '',
+        duration: typeof b.duration === 'string' ? b.duration.trim().substring(0, 30) : '',
+        units,
+      });
     }
   }
 
@@ -354,7 +469,13 @@ function _validateAIResult(parsed, g) {
     for (const a of parsed.suggestedActions) {
       if (!a || typeof a.action !== 'string' || !a.action.trim()) continue;
       const units = Array.isArray(a.units) ? a.units.filter(u => knownIds.has(u)) : [];
-      out.suggestedActions.push({ action: a.action.trim().substring(0, 150), units });
+      out.suggestedActions.push({
+        action: a.action.trim().substring(0, 200),
+        owner: typeof a.owner === 'string' ? a.owner.trim().substring(0, 40) : '',
+        deadline: typeof a.deadline === 'string' ? a.deadline.trim().substring(0, 40) : '',
+        refersTo: typeof a.refersTo === 'string' ? a.refersTo.trim().substring(0, 60) : '',
+        units,
+      });
     }
   }
 
@@ -388,7 +509,10 @@ async function _runAIReviewForGroup(kind, g) {
   if (!g.unavailRows.length) return fail('No units to review');
   try {
     const prompt = _buildAIPrompt(kind, g);
-    const result = await window.ai.ask(prompt);
+    // Timeout guard: window.ai.ask() can hang indefinitely if the AI layer is
+    // busy or unreachable -- freezing the whole Daily Call view. Cap at 25s.
+    const _aiTimeout = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 25s')), 25000));
+    const result = await Promise.race([window.ai.ask(prompt), _aiTimeout]);
     if (!result || result.ok === false) return fail((result && result.error) || 'AI call failed');
     const text = result.text || '';
     const jm = text.match(/\{[\s\S]*\}/);
@@ -412,7 +536,12 @@ async function _runAIReviewForGroup(kind, g) {
 function _getAIDrafts(kind, g) {
   const aiData = _aiReview[_aiKey(kind, g.key)];
   if (!aiData || aiData.error) return { actionsDraft: '', helpDraft: '' };
-  const actionsDraft = (aiData.suggestedActions || []).map(a => a.action + (a.units.length ? ` (${a.units.join(', ')})` : '')).join('; ');
+  const actionsDraft = (aiData.suggestedActions || []).map(a => {
+    const who = a.owner ? `[${a.owner}]` : '';
+    const when = a.deadline ? ` by ${a.deadline}` : '';
+    const unitStr = a.units && a.units.length ? ` (${a.units.join(', ')})` : '';
+    return `${who}${who ? ' ' : ''}${a.action}${when}${unitStr}`.trim();
+  }).join('\n');
   const helpDraft = (aiData.suggestedHelp || []).map(h => h.note + (h.units.length ? ` (${h.units.join(', ')})` : '')).join('; ');
   return { actionsDraft, helpDraft };
 }
@@ -420,8 +549,14 @@ function _getAIDrafts(kind, g) {
 // ── Row render (editable) ───────────────────────────────────────────────────
 function _renderGroupRow(kind, g) {
   const trendsHtml = g.trends.length
-    ? g.trends.map(t => `<div class="dc-trend-line">${_safe(t.label)} — ${t.count} units <span class="dc-unit-list">(${t.units.slice(0, 8).map(_safe).join(', ')})</span></div>`).join('')
-    : '<span class="an-empty">No trends</span>';
+    ? g.trends.map(t => {
+        const dir = t.direction || 'Recurring';
+        const badge = `<span class="dc-trend-badge dc-trend--${dir.toLowerCase()}">${_safe(dir)}</span>`;
+        const durStr = t.daysRange ? ` — ${t.daysRange}` : '';
+        const scacStr = t.scacs && t.scacs.length ? ` <span class="dc-unit-list">(${t.scacs.map(_safe).join(', ')})</span>` : '';
+        return `<div class="dc-trend-line">${badge}${t.count} ${_safe(t.label)}${durStr}${scacStr}</div>`;
+      }).join('')
+    : '<span class="an-empty">No trends — no single issue category has 3+ units affected</span>';
 
   // AI verification results (if this group has been reviewed) — visually
   // distinct from mechanical findings so it's always clear what's
@@ -460,23 +595,42 @@ function _renderGroupRow(kind, g) {
 
       // Trends column: only genuine 3+-unit additional trends + accuracy flag
       const addTrendsHtml = additionalTrends.length
-        ? additionalTrends.map(t => `<div class="dc-trend-line dc-trend-line--ai">🤖 ${_safe(t.label)} — ${t.units.length} units <span class="dc-unit-list">(${t.units.map(_safe).join(', ')})</span>${t.quote ? `<div class="dc-ai-quote">"${_safe(t.quote)}"</div>` : ''}</div>`).join('')
+        ? additionalTrends.map(t => { const aiScacStr = t.scacs && t.scacs.length ? ` <span class="dc-unit-list">(${t.scacs.map(_safe).join(', ')})</span>` : ''; return `<div class="dc-trend-line dc-trend-line--ai">🤖 ${t.units.length} ${_safe(t.label)}${t.timeframe ? ' — ' + _safe(t.timeframe) : ''}${aiScacStr}${t.quote ? `<div class="dc-ai-quote">"${_safe(t.quote)}"</div>` : ''}</div>`; }).join('')
         : '';
       const issueHtml = (!aiData.trendsAccurate && aiData.trendIssues)
         ? `<div class="dc-ai-note dc-ai-note--warn">⚠ AI flagged: ${_safe(aiData.trendIssues)}</div>` : '';
       const nothingInTrends = !addTrendsHtml && !issueHtml;
       aiTrendsHtml = `<div class="dc-ai-block">${addTrendsHtml}${issueHtml}${nothingInTrends ? '<div class="dc-ai-note dc-ai-note--ok">🤖 Reviewed — no additional trends found</div>' : ''}<div class="dc-ai-timestamp">Reviewed ${reviewedStr}</div></div>`;
 
-      // Barriers column: everything blocking progress, single-unit OK
-      aiBarriersHtml = barrierNotes.length
-        ? `<div class="dc-ai-block">${barrierNotes.map(b => `<div class="dc-ai-note">🤖 ${_safe(b.note)} <span class="dc-unit-list">(${b.units.map(_safe).join(', ')})</span></div>`).join('')}</div>`
-        : '';
+      // Barriers column: grouped by category, unit-specific with vendor + days
+      if (barrierNotes.length) {
+        const byCat = {};
+        for (const b of barrierNotes) {
+          const cat = b.category || 'Other';
+          if (!byCat[cat]) byCat[cat] = [];
+          byCat[cat].push(b);
+        }
+        const bHtml = Object.entries(byCat).map(([cat, entries]) => {
+          const entriesHtml = entries.map(b => {
+            const vendorStr = b.vendor ? ` at ${_safe(b.vendor)}` : '';
+            const daysStr = b.days !== null && b.days !== undefined ? ` (${b.days}d)` : '';
+            const critFlag = b.critical ? ' <span class="dc-barrier-critical">⚠ CRITICAL</span>' : '';
+            const unitTag = b.units.length ? `<span class="dc-unit-list">[${b.units.map(_safe).join(', ')}]</span> ` : '';
+            return `<div class="dc-ai-note">🤖 ${unitTag}${_safe(b.note)}${vendorStr}${daysStr}${critFlag}</div>`;
+          }).join('');
+          return `<div class="dc-barrier-group"><span class="dc-barrier-cat">${_safe(cat)}:</span>${entriesHtml}</div>`;
+        }).join('');
+        aiBarriersHtml = `<div class="dc-ai-block">${bHtml}</div>`;
+      }
 
       // Actions column: AI-suggested next steps — also used as the default
       // draft text for the textarea (Actions had no deterministic draft
       // before; this is what the user explicitly asked for).
       if (suggestedActions.length) {
-        aiActionsHtml = `<div class="dc-ai-block">${suggestedActions.map(a => `<div class="dc-ai-note">🤖 ${_safe(a.action)}${a.units.length ? ` <span class="dc-unit-list">(${a.units.map(_safe).join(', ')})</span>` : ''}</div>`).join('')}</div>`;
+        aiActionsHtml = `<div class="dc-ai-block">${suggestedActions.map(a => {
+          const ownerDeadline = (a.owner || a.deadline) ? `<span class="dc-ai-owner">${[a.owner, a.deadline ? 'by ' + a.deadline : ''].filter(Boolean).join(' · ')}</span>` : '';
+          return `<div class="dc-ai-note">🤖 ${_safe(a.action)}${ownerDeadline}${a.units && a.units.length ? ` <span class="dc-unit-list">(${a.units.map(_safe).join(', ')})</span>` : ''}</div>`;
+        }).join('')}</div>`;
       }
 
       // Help Needed column: AI assessment of cross-team help — same
@@ -538,7 +692,7 @@ function _buildTsv(groups, kind, showBottom10) {
   const header = [kind === 'site' ? 'DOMICILE' : 'SCAC', 'Uptime %', '# Units Unavailable', 'Trends (SITE/SCAC)', 'Barriers (SITE/SCAC)', 'Expected Flips to A/H Today', 'Actions', 'Help Needed'];
   const lines = [header.join('\t')];
   for (const g of visible) {
-    const trendsTxt = g.trends.length ? g.trends.map(t => `${t.label} — ${t.count} units`).join('\n') : 'No Trends';
+    const trendsTxt = g.trends.length ? g.trends.map(t => `${t.count} ${t.label}${t.daysRange ? ' — ' + t.daysRange : ''}${t.scacs && t.scacs.length ? ' (' + t.scacs.join(', ') + ')' : ''}`).join('\n') : 'No trends — no single issue category has 3+ units affected';
     const barriersTxt = _lsGet(kind, g.key, 'barriers') || (g.barriers.join('; ') || '');
     const flipsTxt = _lsGet(kind, g.key, 'flips') || (g.flipUnits.length ? `~${g.flipUnits.length}` : '0');
     const { actionsDraft, helpDraft } = _getAIDrafts(kind, g);
@@ -570,6 +724,14 @@ function _viewHtml() {
       #view-daily-call .dc-trend-line--ai { color: #8b5cf6; }
       #view-daily-call .dc-ai-block { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border, #444); }
       #view-daily-call .dc-ai-block--error { color: #dc2626; font-size: 11px; }
+      #view-daily-call .dc-trend-badge { display:inline-block; font-size:9px; font-weight:700; text-transform:uppercase; padding:1px 5px; border-radius:3px; margin-right:4px; vertical-align:middle; }
+      #view-daily-call .dc-trend--persisting { background:#7f1d1d; color:#fca5a5; }
+      #view-daily-call .dc-trend--emerging   { background:#1e3a5f; color:#93c5fd; }
+      #view-daily-call .dc-trend--recurring  { background:#3b2a00; color:#fcd34d; }
+      #view-daily-call .dc-ai-owner { font-size:10px; color:#6366f1; margin-left:4px; }
+      #view-daily-call .dc-barrier-group { margin-bottom: 6px; }
+      #view-daily-call .dc-barrier-cat { font-size:10px; font-weight:700; text-transform:uppercase; color:#d97706; margin-right:4px; }
+      #view-daily-call .dc-barrier-critical { font-size:9px; font-weight:700; color:#dc2626; background:#450a0a; padding:1px 4px; border-radius:3px; margin-left:4px; }
       #view-daily-call .dc-ai-note { font-size: 11px; color: #8b5cf6; margin-bottom: 3px; }
       #view-daily-call .dc-ai-note--warn { color: #d97706; }
       #view-daily-call .dc-ai-note--ok { color: var(--mut, #888); opacity: .8; }

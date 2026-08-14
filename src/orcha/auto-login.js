@@ -18,6 +18,14 @@ const { getForHostname } = require("../ipc/credentials");
 
 // ── Session partitions (one per site — prevents cookie bleed) ─────────────────
 const VENDOR_PARTITIONS = {
+  // BUG FIX (2026-07-26): the real PACCAR portal host is pssmfleet.decisiv.net
+  // (confirmed live by the user) -- paccarpg.decisiv.net was never correct
+  // and is kept below only in case any stale reference still resolves
+  // through it. Given its own SEPARATE persist: partition (not shared with
+  // paccarpg.decisiv.net or persist:vendor-volvo) -- per user request, the
+  // old (possibly-wrong/stale) host and the confirmed-real host must never
+  // share cookies with each other, on top of never bleeding into Volvo.
+  "pssmfleet.decisiv.net":           "persist:vendor-paccar-pssmfleet",
   "paccarpg.decisiv.net":            "persist:vendor-paccar",
   "volvopg.asist.decisiv.net":       "persist:vendor-volvo",
   "dashboard.record360.com":         "persist:vendor-record360",
@@ -58,6 +66,10 @@ const VENDOR_PARTITIONS = {
 // sso-click : just click a button (no credentials needed)
 // stay-in   : click "Yes" / "Stay signed in" (OWA MFA prompt)
 const LOGIN_STRATEGIES = {
+  // BUG FIX (2026-07-26): see matching VENDOR_PARTITIONS note above --
+  // pssmfleet.decisiv.net is the real host, paccarpg.decisiv.net kept as
+  // a stale fallback only.
+  "pssmfleet.decisiv.net":           "standard",
   "paccarpg.decisiv.net":            "standard",
   "volvopg.asist.decisiv.net":       "standard",
   "dashboard.record360.com":         "two-step",

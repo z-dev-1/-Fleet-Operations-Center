@@ -55,7 +55,7 @@ let _list     = null;
 let _pollTimer = null;
 
 function _pillId(workflowId) {
-  return 'vab-pill-' + workflowId.replace(/[^a-z0-9]/gi, '_');
+  return 'vab-pill-' + String(workflowId || '').replace(/[^a-z0-9]/gi, '_');
 }
 
 function _vendorCls(v) {
@@ -210,7 +210,11 @@ export function init(container) {
   bus.on('vendor:complete', (p) => {
     if (!p || !p.workflowId) return;
     const ex = _pills.get(p.workflowId) || {};
-    _pills.set(p.workflowId, { ...ex, step: 'complete' });
+    // Bug fix: always set workflowId explicitly -- when no prior
+    // vendor:progress pill exists (e.g. fast-fail before any progress
+    // event), `ex` is {} and spreading it alone drops workflowId from
+    // the stored pill, crashing _pillId() downstream in _render().
+    _pills.set(p.workflowId, { ...ex, workflowId: p.workflowId, step: 'complete' });
     _render();
     _flashRemove(p.workflowId, 'ok');
   });
@@ -218,7 +222,8 @@ export function init(container) {
   bus.on('vendor:error', (p) => {
     if (!p || !p.workflowId) return;
     const ex = _pills.get(p.workflowId) || {};
-    _pills.set(p.workflowId, { ...ex, step: 'error' });
+    // Same fix as vendor:complete above -- keep workflowId explicit.
+    _pills.set(p.workflowId, { ...ex, workflowId: p.workflowId, step: 'error' });
     _render();
     _flashRemove(p.workflowId, 'err');
   });

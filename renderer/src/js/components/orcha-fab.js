@@ -211,13 +211,33 @@ function _wireReplyBox(box, msg) {
     rewriteBtn.textContent = 'Rewriting\u2026';
     _setStatus('', null);
     try {
-      const prompt = 'Rewrite this as a professional, concise Slack direct message reply. ' +
+      // Context-reset prefix prevents Claude Code's accumulated DM-classification
+      // history from bleeding into this plain-text rewrite call and causing it
+      // to return the DM JSON schema ({inScope, reply, category, title}) instead
+      // of the plain rewritten message the user expects.
+      const _ctxReset = '=== NEW INDEPENDENT TASK — IGNORE ALL PRIOR CONTEXT AND OUTPUT FORMATS ===\n' +
+        'What follows is a completely independent task. Disregard any prior conversation history, ' +
+        'output styles, or response patterns. Follow ONLY the instructions in this message.\n\n';
+      const prompt = _ctxReset +
+        'Rewrite this as a professional, concise Slack direct message reply. ' +
         'Keep the exact same meaning and intent -- do not add new facts, names, dates, dollar ' +
         'amounts, or commitments that were not already in the original. No markdown, no greeting ' +
         'or signature -- just the message body as plain text, ready to send as-is:\n\n' + draft;
       const result = await ai.chat(prompt);
       if (result && result.text) {
-        textarea.value = result.text.trim();
+        let rewritten = result.text.trim();
+        // Guard: model may return DM-classification JSON due to context contamination.
+        // Unwrap the reply field if the response is a JSON object instead of plain text.
+        const _jmR = rewritten.match(/^\{[\s\S]*\}$/);
+        if (_jmR) {
+          try {
+            const _pR = JSON.parse(_jmR[0]);
+            if (typeof _pR.reply === 'string' && _pR.reply.trim()) rewritten = _pR.reply.trim();
+            else if (typeof _pR.body  === 'string' && _pR.body.trim())  rewritten = _pR.body.trim();
+            else if (typeof _pR.text  === 'string' && _pR.text.trim())  rewritten = _pR.text.trim();
+          } catch (_) {}
+        }
+        textarea.value = rewritten;
         _autoGrowTextarea(textarea);
         // Auto-send immediately after successful rewrite
         sendBtn.click();
@@ -496,6 +516,120 @@ async function _updateReviewBadge() {
 // (updateReviewItem vs updateDMReviewItem below). Sorted newest-first so
 // the two engines interleave naturally instead of DM items always
 // trailing after channel items.
+// ── Calendar tab -- Outlook events via Microsoft Graph ───────────────────────
+// Fetches today's meetings (next 24h), extracts Zoom join links, and renders
+// them with a one-click "Join" button that fires the zoommtg:// deep link.
+async function _refreshCalendar() {
+  const listEl = document.getElementById('oc-cal-list');
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="oc-cal-loading">Loading\u2026</div>';
+
+  if (!window.graphMail) {
+    listEl.innerHTML = '<div class="oc-cal-empty">Outlook not available.</div>';
+    return;
+  }
+
+  try {
+    const auth = await window.graphMail.checkAuth();
+    if (!auth || !auth.signedIn) {
+      listEl.innerHTML =
+        '<div class="oc-cal-signin">' +
+        '<div class="oc-cal-empty" style="margin-bottom:8px">Not signed in to Outlook.</div>' +
+        '<button class="oc-review-btn oc-review-btn--done" id="oc-cal-signin-btn">Sign in to Outlook</button>' +
+        '</div>';
+      const btn = listEl.querySelector('#oc-cal-signin-btn');
+      if (btn) btn.addEventListener('click', async () => {
+        btn.disabled = true; btn.textContent = 'Signing in\u2026';
+        try {
+          await window.graphMail.signIn();
+          _refreshCalendar();
+        } catch (e) {
+          btn.disabled = false; btn.textContent = 'Sign in to Outlook';
+          listEl.innerHTML = '<div class="oc-cal-empty">Sign-in failed: ' + _escapeHtml(e.message) + '</div>';
+        }
+      });
+      return;
+    }
+
+    const now = new Date();
+    const endTime = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const events = await window.graphMail.getCalendarEvents({
+      start: now.toISOString(),
+      end:   endTime.toISOString(),
+      maxResults: 20,
+    });
+
+    if (!events || !events.length) {
+      listEl.innerHTML = '<div class="oc-cal-empty">No meetings in the next 24 hours.</div>';
+      return;
+    }
+
+    listEl.innerHTML = events.map((ev) => {
+      const title = _escapeHtml(ev.subject || '(No title)');
+      const startDt = ev.start && ev.start.dateTime ? new Date(ev.start.dateTime) : null;
+      const timeStr = startDt
+        ? startDt.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', weekday: 'short' })
+        : '';
+      const zoomUrl = _extractZoomUrl(ev);
+      const joinHtml = zoomUrl
+        ? '<button class="oc-cal-join-btn" data-zoom="' + _escapeHtml(zoomUrl) + '">Join Zoom</button>'
+        : '';
+      return (
+        '<div class="oc-cal-event">' +
+        '<div class="oc-cal-event-head">' +
+        '<span class="oc-cal-event-time">' + _escapeHtml(timeStr) + '</span>' +
+        joinHtml +
+        '</div>' +
+        '<div class="oc-cal-event-title">' + title + '</div>' +
+        '</div>'
+      );
+    }).join('');
+
+    listEl.querySelectorAll('.oc-cal-join-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const url = btn.getAttribute('data-zoom');
+        if (url && window.files && window.files.openExternal) {
+          window.files.openExternal(_toZoomDeepLink(url));
+        }
+      });
+    });
+
+  } catch (e) {
+    const el = document.getElementById('oc-cal-list');
+    if (el) el.innerHTML = '<div class="oc-cal-empty">Error: ' + _escapeHtml(e.message) + '</div>';
+  }
+}
+
+/** Extracts the best Zoom HTTPS join URL from a Graph calendar event. */
+function _extractZoomUrl(ev) {
+  if (ev.onlineMeetingUrl && ev.onlineMeetingUrl.includes('zoom.us')) {
+    return ev.onlineMeetingUrl;
+  }
+  const loc = ev.location && ev.location.displayName;
+  if (loc && loc.includes('zoom.us')) {
+    const m = loc.match(/https:\/\/[^\s"<>]+zoom\.us\/j\/[^\s"<>]+/);
+    if (m) return m[0];
+  }
+  if (ev.bodyPreview) {
+    const m = ev.bodyPreview.match(/https:\/\/[^\s"<>]+zoom\.us\/j\/[^\s"<>]+/);
+    if (m) return m[0];
+  }
+  return null;
+}
+
+/** Converts https://zoom.us/j/CONFNO?pwd=XXX to a zoommtg:// deep link. */
+function _toZoomDeepLink(url) {
+  try {
+    const u = new URL(url);
+    const confno = u.pathname.replace(/^\/j\//, '');
+    const pwd    = u.searchParams.get('pwd') || '';
+    return 'zoommtg://zoom.us/join?confno=' + encodeURIComponent(confno) +
+      (pwd ? '&pwd=' + encodeURIComponent(pwd) : '');
+  } catch (_e) {
+    return url;
+  }
+}
+
 async function _refreshReviewQueue() {
   const listEl = document.getElementById('oc-review-list');
   const emptyEl = document.getElementById('oc-review-empty');
@@ -517,7 +651,7 @@ async function _refreshReviewQueue() {
     return;
   }
 
-  listEl.innerHTML = items.map((item) => {
+  const _itemsHtml = items.map((item) => {
     const meta = CATEGORY_META[item.category] || CATEGORY_META.workflow;
     const when = _formatSlackTs(item.ts);
     const chanLabel = item.source === 'dm'
@@ -538,6 +672,29 @@ async function _refreshReviewQueue() {
       </div>
     </div>`;
   }).join('');
+  listEl.innerHTML = (items.length > 1
+    ? `<div class="oc-review-bulk-bar"><span>${items.length} items pending</span><button class="oc-review-btn oc-review-btn--dismiss-all" id="oc-dismiss-all">Dismiss all</button></div>`
+    : '') + _itemsHtml;
+
+  if (items.length > 1) {
+    const dismissAllBtn = listEl.querySelector('#oc-dismiss-all');
+    if (dismissAllBtn) {
+      dismissAllBtn.addEventListener('click', async () => {
+        try {
+          await Promise.all(items.map((item) => {
+            if (item.source === 'dm') {
+              return slack.updateDMReviewItem({ id: item.id, updates: { status: 'dismissed' } });
+            }
+            return slack.updateReviewItem({ id: item.id, updates: { status: 'dismissed' } });
+          }));
+          toast.show('success', 'All dismissed', 2000);
+          _refreshReviewQueue();
+        } catch (e) {
+          toast.show('error', 'Failed to dismiss all: ' + e.message, 3000);
+        }
+      });
+    }
+  }
 
   listEl.querySelectorAll('.oc-review-item').forEach((el) => {
     const id = el.getAttribute('data-id');
@@ -715,18 +872,22 @@ function _switchTab(tab) {
   const slackBtn = document.getElementById('oc-tab-btn-slack');
   const reviewBtn = document.getElementById('oc-tab-btn-review');
   const alertsBtn = document.getElementById('oc-tab-btn-alerts');
+  const calBtn   = document.getElementById('oc-tab-btn-calendar');
   const chatPane = document.getElementById('oc-tab-chat');
   const slackPane = document.getElementById('oc-tab-slack');
   const reviewPane = document.getElementById('oc-tab-review');
   const alertsPane = document.getElementById('oc-tab-alerts');
+  const calPane  = document.getElementById('oc-tab-calendar');
   if (chatBtn)  chatBtn.classList.toggle('oc-tab--active', tab === 'chat');
   if (slackBtn) slackBtn.classList.toggle('oc-tab--active', tab === 'slack');
   if (reviewBtn) reviewBtn.classList.toggle('oc-tab--active', tab === 'review');
   if (alertsBtn) alertsBtn.classList.toggle('oc-tab--active', tab === 'alerts');
-  if (chatPane)  chatPane.style.display  = tab === 'chat'  ? '' : 'none';
-  if (slackPane) slackPane.style.display = tab === 'slack' ? '' : 'none';
+  if (calBtn)   calBtn.classList.toggle('oc-tab--active', tab === 'calendar');
+  if (chatPane)  chatPane.style.display  = tab === 'chat'     ? '' : 'none';
+  if (slackPane) slackPane.style.display = tab === 'slack'    ? '' : 'none';
   if (reviewPane) reviewPane.style.display = tab === 'review' ? '' : 'none';
   if (alertsPane) alertsPane.style.display = tab === 'alerts' ? '' : 'none';
+  if (calPane)  calPane.style.display   = tab === 'calendar'  ? '' : 'none';
 
   if (tab === 'slack') {
     _refreshSlackTabState();
@@ -737,6 +898,9 @@ function _switchTab(tab) {
   } else if (tab === 'alerts') {
     _stopSlackTabRefresh();
     _refreshAlerts();
+  } else if (tab === 'calendar') {
+    _stopSlackTabRefresh();
+    _refreshCalendar();
   } else {
     _stopSlackTabRefresh();
   }
@@ -938,10 +1102,15 @@ function _wireSlackTab() {
   const slackBtn = document.getElementById('oc-tab-btn-slack');
   const reviewBtn = document.getElementById('oc-tab-btn-review');
   const alertsBtn = document.getElementById('oc-tab-btn-alerts');
+  const calBtn2   = document.getElementById('oc-tab-btn-calendar');
   if (chatBtn)  chatBtn.addEventListener('click', () => _switchTab('chat'));
   if (slackBtn) slackBtn.addEventListener('click', () => _switchTab('slack'));
   if (reviewBtn) reviewBtn.addEventListener('click', () => _switchTab('review'));
   if (alertsBtn) alertsBtn.addEventListener('click', () => _switchTab('alerts'));
+  if (calBtn2)  calBtn2.addEventListener('click', () => _switchTab('calendar'));
+
+  const calRefreshBtn = document.getElementById('oc-cal-refresh');
+  if (calRefreshBtn) calRefreshBtn.addEventListener('click', _refreshCalendar);
 
   const loginBtn = document.getElementById('oc-slack-login-btn');
   if (loginBtn) loginBtn.addEventListener('click', _slackLogin);
@@ -1133,6 +1302,7 @@ function _openEmailCompose(contact, prefill, subjectPrefill) {
             if (jm) {
               const parsed = JSON.parse(jm[0]);
               if (parsed.body)    polishedBody    = parsed.body.trim();
+              else if (parsed.reply) polishedBody = parsed.reply.trim(); // fallback if model uses DM schema
               if (parsed.subject) polishedSubject = parsed.subject.trim();
             }
           } catch (_) { /* AI returned plain text -- use as body, keep existing subject */ }
@@ -1259,13 +1429,28 @@ function _openQuickCompose(contact, prefill) {
       polishBtn.textContent = 'Polishing\u2026';
       statusEl.textContent = '';
       try {
-        const prompt = 'Improve this Slack message for clarity and professionalism. Keep the ' +
+        const _ctxResetP = '=== NEW INDEPENDENT TASK — IGNORE ALL PRIOR CONTEXT AND OUTPUT FORMATS ===\n' +
+          'What follows is a completely independent task. Disregard any prior conversation history, ' +
+          'output styles, or response patterns. Follow ONLY the instructions in this message.\n\n';
+        const prompt = _ctxResetP +
+          'Improve this Slack message for clarity and professionalism. Keep the ' +
           'exact same meaning and intent - do not add new facts, names, dates, dollar amounts, ' +
           'or commitments not already in the original. No markdown, no greeting or signature - ' +
           'just the message body as plain text, ready to send:\n\n' + draft;
         const result = await ai.chat(prompt);
         if (result && result.text) {
-          textarea.value = result.text.trim();
+          // Guard: model may return DM-classification JSON due to context contamination.
+          let _polished = result.text.trim();
+          const _jmP = _polished.match(/^\{[\s\S]*\}$/);
+          if (_jmP) {
+            try {
+              const _pP = JSON.parse(_jmP[0]);
+              if (typeof _pP.reply === 'string' && _pP.reply.trim()) _polished = _pP.reply.trim();
+              else if (typeof _pP.body === 'string' && _pP.body.trim()) _polished = _pP.body.trim();
+              else if (typeof _pP.text === 'string' && _pP.text.trim()) _polished = _pP.text.trim();
+            } catch (_) {}
+          }
+          textarea.value = _polished;
           _autoGrowTextarea(textarea);
           // await so finally does not reset button state mid-send
           await _doSendMsg();
@@ -1507,6 +1692,12 @@ async function _send() {
     } catch (_) { /* fall through to AI if contact lookup errors */ }
   }
 
+  // FAB Lifecycle Interceptor (2026-07-29)
+  var _lcVerb=/\bset\b|\bflip\b|\bchange\b|\bmark\b/i.test(val);
+  var _stateM=val.match(/\b(active|available|unavailable|ordered|end of life)\b/i);
+  var _uidsM=val.match(/\b([A-Za-z0-9]{3,10})\b/g);
+  if(_lcVerb&&_stateM&&_uidsM){var _raw=_stateM[1].toLowerCase(),_lcS=_raw=="available"?"Active":_raw=="unavailable"?"Unavailable":_raw=="ordered"?"Ordered":"End of Life",_fd=(window.fleet&&typeof window.fleet.getData=="function")?window.fleet.getData():null,_rs=(_fd&&_fd.rows)||[],_u=null;for(var _wi=0;_wi<_uidsM.length;_wi++){var _q=_uidsM[_wi].toUpperCase(),_f=_rs.find(function(r){return r.equipmentId&&r.equipmentId.toUpperCase().indexOf(_q)!==-1;});if(_f&&_f.assetUrl){_u=_f;break;}}if(_u&&_u.assetUrl){var _rM=val.match(/\b(?:reason|because|for)\s+(.+)$/i),_lr=_rM?_rM[1].trim():"";inp.value="";inp.style.height="auto";_appendMsg("oc-msg--user",val);_addHistory("user",val);var _lcSt=document.getElementById("orcha-status");if(_lcSt)_lcSt.textContent="\u25CF Setting lifecycle...";try{var _r=await window.aap.setLifecycle(_u.equipmentId,_u.assetUrl,_lcS,_lr);if(_r&&_r.success){var _ok="\u2705 Unit "+_u.equipmentId+" set to "+_lcS+(_lr?" \u2014 "+_lr:"")+".";_appendMsg("oc-msg--orcha",_ok);_addHistory("assistant",_ok);}else{var _fl="\u274c Failed: "+((_r&&_r.message)||"AAP did not confirm.");_appendMsg("oc-msg--orcha",_fl);_addHistory("assistant",_fl);}}catch(_le){_appendMsg("oc-msg--orcha","\u274c Error: "+_le.message);}if(_lcSt)_lcSt.textContent="\u25CF Ready";return;}}
+
 
   inp.value = ''; inp.style.height = 'auto';
   _appendMsg('oc-msg--user', val);
@@ -1590,6 +1781,8 @@ export function init() {
       <span class="orcha-title">Orcha</span>
       <span class="orcha-status" id="orcha-status">\u{25CF} Ready</span>
       <button class="orcha-close" id="orcha-close">\u{25BC}</button>
+      <button class="orcha-open-app" id="orcha-open-app" title="Open main window">\u{2B06}</button>
+      <button class="orcha-quit-btn" id="orcha-quit-btn" title="Quit Orcha">&times;</button>
     </div>
     <div class="oc-tabs" id="oc-tabs">
       <button class="oc-tab oc-tab--active" id="oc-tab-btn-chat" data-tab="chat">Chat</button>
@@ -1639,10 +1832,23 @@ export function init() {
         <div class="oc-alerts-empty" id="oc-alerts-empty">No active alerts right now.</div>
       </div>
     </div>
+    <div class="oc-tab-content" id="oc-tab-calendar" style="display:none">
+      <div class="oc-cal-toolbar">
+        <span class="oc-cal-title">Today’s meetings</span>
+        <button class="oc-cal-refresh-btn" id="oc-cal-refresh" title="Refresh">↻</button>
+      </div>
+      <div class="oc-cal-list" id="oc-cal-list">
+        <div class="oc-cal-empty">Sign in to Outlook to see your calendar.</div>
+      </div>
+    </div>
   `;
   document.body.appendChild(panel);
 
   document.getElementById('orcha-close').addEventListener('click', _togglePanel);
+  var _oa = document.getElementById('orcha-open-app');
+  if (_oa) _oa.addEventListener('click', function() { if (window.bubble && window.bubble.openMain) window.bubble.openMain(); });
+  var _qq = document.getElementById('orcha-quit-btn');
+  if (_qq) _qq.addEventListener('click', function() { if (window.bubble && window.bubble.quit) window.bubble.quit(); });
   document.getElementById('orcha-panel-header').addEventListener('click', (e) => {
     if (!e.target.closest('#orcha-close')) _togglePanel();
   });

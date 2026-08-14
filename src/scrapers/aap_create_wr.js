@@ -62,6 +62,31 @@ const VENDOR_IDS = {
   'KWNE (Kenworth NE)':     '', // legacy key
 };
 
+// Known WR UUIDs for supplier ID resolution.
+// When VENDOR_IDS has no supplierId for a vendor, resolveSupplierIdForVendor()
+// fetches one of these WRs from AAP and extracts the supplierId from the response,
+// then caches it in VENDOR_IDS for the rest of the session.
+// Seeded from scraper logs 2026-07-26.
+const VENDOR_SAMPLE_WR = {
+  'Volvo (ASIST)':          '88ce1ce2-942d-4e39-a1c0-c91e60398680',
+  'Volvo':                  '88ce1ce2-942d-4e39-a1c0-c91e60398680',
+  'VOLVO':                  '88ce1ce2-942d-4e39-a1c0-c91e60398680',
+  'FREIGHTLINER':           '375a6bc3-961b-400a-944b-ad85913ed672',
+  'Freightliner (DAIMLER)': '375a6bc3-961b-400a-944b-ad85913ed672',
+  'DAIMLER':                '375a6bc3-961b-400a-944b-ad85913ed672',
+  'Peterbilt (PACCAR)':     'ffb8271d-b8ad-4c12-9fa4-27fcbe75a3af',
+  'PETERBILT':              'ffb8271d-b8ad-4c12-9fa4-27fcbe75a3af',
+  'Kenworth (PACCAR)':      'ffb8271d-b8ad-4c12-9fa4-27fcbe75a3af', // PACCAR family -- use Peterbilt WR until Kenworth WR captured
+  'KENWORTH':               'ffb8271d-b8ad-4c12-9fa4-27fcbe75a3af',
+  'PACCAR':                 'ffb8271d-b8ad-4c12-9fa4-27fcbe75a3af',
+  'Amerit':                 '58791f1a-2d69-408c-82f5-d3a0ad47a93b',
+  'AMERIT':                 '58791f1a-2d69-408c-82f5-d3a0ad47a93b',
+  'CEI':                    '4ca84908-a4ef-40bc-bfab-f4ae300e2082',
+  'CUMMINS':                'fef19166-69c4-4001-968c-dd3f3b438c75',
+  'Cummins':                'fef19166-69c4-4001-968c-dd3f3b438c75',
+  'TA':                     '0593c832-2d33-49ad-a637-9405c2588e1c',
+};
+
 // Vendor portal URLs -- informational; surfaced in vendor review modal for
 // vendors that do NOT have an automated Decisiv workflow.
 // PACCAR + Volvo portals live in src/vendors/index.js PORTAL_URLS.
@@ -90,12 +115,78 @@ const VENDOR_PORTAL_URLS = {
 };
 
 /**
- * Create a Work Request via AAP API
- * @param {Object} payload - from collectPayload() in the renderer
- * @param {Object} unit - the UNITS entry for this equipment
- * @param {Function} log - logging callback
- * @returns {Object} { ok, workRequestId, error }
+ * Resolve supplierId for a vendor name.
+ * 1. Check VENDOR_IDS cache (pre-populated or cached from a prior call this session).
+ * 2. If empty, find a known sample WR UUID in VENDOR_SAMPLE_WR, fetch it from AAP,
+ *    extract supplierId, cache it in VENDOR_IDS, and return it.
+ * 3. If no sample WR known either, return null.
  */
+async function resolveSupplierIdForVendor(vendorName, log) {
+  if (!log) log = console.log;
+  if (!vendorName) return null;
+
+  // Cache hit
+  if (VENDOR_IDS[vendorName]) return VENDOR_IDS[vendorName];
+
+  const sampleWrId = VENDOR_SAMPLE_WR[vendorName];
+  if (!sampleWrId) {
+    log('[ResolveSupplier] No sample WR known for vendor "' + vendorName + '" -- cannot auto-resolve supplierId.');
+    return null;
+  }
+
+  log('[ResolveSupplier] Looking up supplierId for "' + vendorName + '" via WR ' + sampleWrId + '...');
+  try {
+    // Run the fetch from within an existing AAP browser window so it is same-origin
+    // and uses the page's full auth context (cookies + any session tokens).
+    // ses.fetch() from the main process triggers a CORS preflight that AAP rejects
+    // with net::ERR_FAILED for GET requests -- executeJavaScript bypasses that.
+    const { BrowserWindow } = require('electron');
+    const wins = BrowserWindow.getAllWindows().filter(w => !w.isDestroyed());
+    // Prefer a window already on aap-na.corp.amazon.com
+    const win = wins.find(w => {
+      try { return w.webContents.getURL().includes('aap-na.corp.amazon.com'); } catch(_) { return false; }
+    }) || wins[0];
+
+    if (!win) {
+      log('[ResolveSupplier] No browser window available for lookup.');
+      return null;
+    }
+
+    const resultStr = await win.webContents.executeJavaScript(`
+      (async () => {
+        try {
+          const r = await fetch('/api/v1/workRequests/' + ${JSON.stringify(sampleWrId)} + '', {
+            credentials: 'include',
+            headers: { 'Accept': 'application/json' }
+          });
+          if (!r.ok) return JSON.stringify({ _error: r.status, _body: await r.text().catch(() => '') });
+          return JSON.stringify(await r.json());
+        } catch(e) {
+          return JSON.stringify({ _error: e.message });
+        }
+      })()
+    `);
+
+    const wr = JSON.parse(resultStr);
+    if (wr._error !== undefined) {
+      log('[ResolveSupplier] WR fetch error: ' + wr._error + (wr._body ? ' -- ' + String(wr._body).slice(0, 200) : ''));
+      return null;
+    }
+    const resolved = wr.supplierId || (wr.supplier && wr.supplier.id) || null;
+    if (!resolved) {
+      log('[ResolveSupplier] WR response had no supplierId. Keys: ' + Object.keys(wr).slice(0, 20).join(', '));
+      return null;
+    }
+    log('[ResolveSupplier] Resolved supplierId=' + resolved + ' for "' + vendorName + '" -- caching.');
+    VENDOR_IDS[vendorName] = resolved;
+    return resolved;
+  } catch (e) {
+    log('[ResolveSupplier] Error: ' + e.message);
+    return null;
+  }
+}
+
+
 async function createWorkRequest(payload, unit, log) {
   if (!log) log = console.log;
 
@@ -129,19 +220,15 @@ async function createWorkRequest(payload, unit, log) {
     }
   }
 
-  // Resolve vendor
+  // Resolve vendor + supplierId
   const vendorName = payload.vendor || '';
-  const supplierId = VENDOR_IDS[vendorName] || '';
-  if (!supplierId) {
-    // FIX (2026-07-23): AAP's createRepair API rejects requests with a
-    // missing/null supplierId with 403 Forbidden -- it is a server-side
-    // entitlement check, not something retrying or omitting the field
-    // works around. Bail out BEFORE making the doomed API call and tell
-    // the caller (src/ipc/scrapers.js -> wr-modal.js) to fall back to the
-    // browser-automation autofill flow instead, which does not need a
-    // pre-captured supplierId.
-    log('[CreateWR] No supplierId on file for vendor "' + vendorName + '" -- AAP will reject this with 403. Falling back to autofill.');
-    return { ok: false, needsAutofill: true, error: 'No supplierId on file for vendor "' + vendorName + '" -- use autofill.' };
+  const supplierId = await resolveSupplierIdForVendor(vendorName, log);
+  if (!vendorName) {
+    log('[CreateWR] No vendor specified -- proceeding with supplierId=null.');
+  } else if (!supplierId) {
+    log('[CreateWR] No supplierId resolved for vendor "' + vendorName + '" -- attempting API with null.');
+  } else {
+    log('[CreateWR] Resolved supplierId for "' + vendorName + '": ' + supplierId);
   }
 
   // Build suggestedItems from areaPairs
@@ -205,12 +292,17 @@ async function createWorkRequest(payload, unit, log) {
   let workRequestId;
   try {
     const resp1 = await aapFetch('/createRepair', repairBody);
+    log('[CreateWR] Step 1 response: HTTP ' + resp1.status + ' ' + resp1.statusText);
     if (!resp1.ok) {
-      return { ok: false, error: 'createRepair failed: ' + (resp1.statusText || resp1.status) };
+      let errBody = '';
+      try { errBody = await resp1.text(); } catch(_) {}
+      log('[CreateWR] Step 1 error body: ' + errBody.slice(0, 400));
+      return { ok: false, error: 'createRepair HTTP ' + resp1.status + (errBody ? ': ' + errBody.slice(0, 200) : '') };
     }
     const data1 = await resp1.json();
     workRequestId = data1.workRequestId || data1.id;
     if (!workRequestId) {
+      log('[CreateWR] Step 1 no workRequestId in response: ' + JSON.stringify(data1).slice(0, 300));
       return { ok: false, error: 'createRepair returned no workRequestId' };
     }
     log('[CreateWR] Step 1 OK: workRequestId = ' + workRequestId);
@@ -280,15 +372,18 @@ async function createWorkRequest(payload, unit, log) {
  * Uses the Electron session cookies (same auth as AAP scraper)
  */
 async function aapFetch(endpoint, body) {
+  // Use session.fetch() so requests go through Electron's Chromium network
+  // stack, which handles the corporate proxy, SSL certs, and AAP auth
+  // cookies automatically -- global fetch() bypasses all of that and
+  // produces "fetch failed" (network-level error) on internal URLs.
   const { session } = require('electron');
   const ses = session.defaultSession;
 
-  // Get cookies for aap-na.corp.amazon.com
   const cookies = await ses.cookies.get({ url: 'https://aap-na.corp.amazon.com' });
   const cookieStr = cookies.map(c => c.name + '=' + c.value).join('; ');
 
   const url = AAP_BASE + endpoint;
-  const response = await fetch(url, {
+  const response = await ses.fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json;charset=UTF-8',
@@ -303,6 +398,26 @@ async function aapFetch(endpoint, body) {
   return response;
 }
 
+
+/**
+ * Make authenticated GET fetch to AAP API
+ */
+async function aapGetFetch(endpoint) {
+  const { session } = require('electron');
+  const ses = session.defaultSession;
+  const cookies = await ses.cookies.get({ url: 'https://aap-na.corp.amazon.com' });
+  const cookieStr = cookies.map(c => c.name + '=' + c.value).join('; ');
+  const url = AAP_BASE + endpoint;
+  return ses.fetch(url, {
+    method: 'GET',
+    headers: {
+      'Cookie': cookieStr,
+      'Accept': 'application/json',
+      'Origin': 'https://aap-na.corp.amazon.com',
+      'Referer': 'https://aap-na.corp.amazon.com/v2/page/891a81dc-538d-4f10-be93-441545840a24'
+    }
+  });
+}
 
 /** addConversationNote -- S25-8: post internal comment on AAP WR */
 async function addConversationNote(wrIdOrUrl,text){

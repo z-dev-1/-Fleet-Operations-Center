@@ -303,61 +303,72 @@ function _tryHeadless(prompt, opts = {}) {
 const CLAUDE_BIN = process.platform === 'win32'
   ? path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'claude.exe')
   : path.join(os.homedir(), '.toolbox', 'bin', 'claude');
-const CLAUDE_TIMEOUT_MS = 60000;
+let CLAUDE_TIMEOUT_MS = 60000; // mutable — updated by setClaudeTimeout() when Settings change
 
-// Persistent claude-code process (stream-json) -- avoids ~13s cold-start
-// penalty on every call. First call after idle/spawn still pays startup cost;
-// subsequent calls on the same warm process take ~2s (measured).
-let _claudeProc = null;
-let _claudeBusy = false;
-let _claudeCurrentJob = null;
-const _claudeQueue = [];
-let _claudeStdoutBuf = '';
-let _claudeIdleTimer = null;
+// 3-worker pool — lets up to 3 concurrent AI calls run in parallel.
+// When DM poll, WR autofill, and long-dwell fill all fire at once, each gets
+// its own Claude Code process instead of queuing behind the others.
+// Kill-after-job is preserved per worker (prevents context bleed across
+// unrelated callers — same correctness guarantee as the old single-worker design).
+const WORKER_POOL_SIZE = 3;
 const CLAUDE_IDLE_KILL_MS = 10 * 60 * 1000; // kill warm process after 10min idle
+function _makeWorker(id) {
+  return { id, proc: null, busy: false, currentJob: null, stdoutBuf: '', idleTimer: null };
+}
+const _workers = Array.from({ length: WORKER_POOL_SIZE }, (_, i) => _makeWorker(i));
+const _claudeQueue = [];
 
-function _resetClaudeIdleTimer() {
-  if (_claudeIdleTimer) clearTimeout(_claudeIdleTimer);
-  _claudeIdleTimer = setTimeout(() => {
-    if (_claudeProc && !_claudeBusy) {
-      logger.info('claude-code: killing idle warm process (10min inactive)');
-      _claudeProc.kill();
-      _claudeProc = null;
+// Windows-safe process-tree kill. Node's proc.kill() only terminates the
+// immediate handle; on Windows the Toolbox claude.exe spawns child workers
+// that survive, accumulating as zombies over time. taskkill /F /T kills the
+// entire tree. Falls back to proc.kill() on non-Windows.
+function _killClaudeTree(proc) {
+  if (!proc) return;
+  try {
+    if (process.platform === 'win32' && proc.pid) {
+      require('child_process').spawn('taskkill', ['/F', '/T', '/PID', String(proc.pid)], { detached: true, stdio: 'ignore' });
+    } else {
+      proc.kill();
+    }
+  } catch (_e) {}
+}
+
+function _resetClaudeIdleTimer(worker) {
+  if (worker.idleTimer) clearTimeout(worker.idleTimer);
+  worker.idleTimer = setTimeout(() => {
+    if (worker.proc && !worker.busy) {
+      logger.info('claude-code[' + worker.id + ']: killing idle warm process (10min inactive)');
+      _killClaudeTree(worker.proc);
+      worker.proc = null;
     }
   }, CLAUDE_IDLE_KILL_MS);
 }
 
 function _failClaudeQueue(err) {
-  if (_claudeCurrentJob) {
-    clearTimeout(_claudeCurrentJob._timer);
-    _claudeCurrentJob.reject(err);
-    _claudeCurrentJob = null;
+  // Fail the current job on every busy worker, then drain the shared queue.
+  for (const w of _workers) {
+    if (w.currentJob) {
+      clearTimeout(w.currentJob._timer);
+      w.currentJob.reject(err);
+      w.currentJob = null;
+    }
+    w.busy = false;
   }
   while (_claudeQueue.length) {
     const job = _claudeQueue.shift();
     job.reject(err);
   }
-  _claudeBusy = false;
 }
 
-function _ensureClaudeProcess() {
-  if (_claudeProc && !_claudeProc.killed) return;
+function _ensureClaudeProcess(worker) {
+  if (worker.proc && !worker.proc.killed) return;
   if (!fs.existsSync(CLAUDE_BIN)) {
     throw new Error('claude-code not installed — run: toolbox install claude-code');
   }
-  logger.info('claude-code: spawning persistent process');
-  // FIX (2026-07-23): Claude Code's default system prompt frames it as a
-  // coding assistant with tools -- when relay callers (e.g. the AdaptiveWR
-  // Submit-WR agent) ask for a strict machine-readable format ("respond with
-  // ONLY a JSON array"), the default persona often answers in its own
-  // shorthand instead (observed: 'TYPE [8] "B12267"' + newline + 'CLICK [9]'
-  // instead of JSON). Downstream JSON.parse() then fails every single step,
-  // the agent exhausts its retry budget, and falls back to "fill the wizard
-  // in yourself" -- confirmed root cause of "Submit WR opens the right page
-  // but the automated steps never run." --system-prompt replaces the default
-  // persona for this spawned process with a strict headless-API framing so
-  // it reliably obeys per-call formatting instructions (JSON, plain text,
-  // etc.) instead of describing actions in its own style.
+  logger.info('claude-code[' + worker.id + ']: spawning process');
+  // --system-prompt: override default coding-assistant persona with a strict
+  // headless-API framing so all callers get reliable JSON/plain-text output
+  // without explanations or markdown fences (see original rationale above).
   const proc = spawn(
     CLAUDE_BIN,
     ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json',
@@ -371,21 +382,21 @@ function _ensureClaudeProcess() {
      'be valid JSON and nothing more.'],
     { stdio: ['pipe', 'pipe', 'pipe'] }
   );
-  _claudeStdoutBuf = '';
+  worker.stdoutBuf = '';
 
   proc.stdout.on('data', (chunk) => {
-    _claudeStdoutBuf += chunk.toString();
-    const lines = _claudeStdoutBuf.split('\n');
-    _claudeStdoutBuf = lines.pop();
+    worker.stdoutBuf += chunk.toString();
+    const lines = worker.stdoutBuf.split('\n');
+    worker.stdoutBuf = lines.pop();
     for (const line of lines) {
       if (!line.trim()) continue;
       let obj;
       try { obj = JSON.parse(line); } catch (e) { continue; }
-      if (obj.type === 'result' && _claudeCurrentJob) {
-        const job = _claudeCurrentJob;
+      if (obj.type === 'result' && worker.currentJob) {
+        const job = worker.currentJob;
         clearTimeout(job._timer);
-        _claudeCurrentJob = null;
-        _claudeBusy = false;
+        worker.currentJob = null;
+        worker.busy = false;
         if (obj.is_error) {
           job.reject(new Error('claude-code error: ' + (obj.result || 'unknown')));
         } else {
@@ -393,72 +404,85 @@ function _ensureClaudeProcess() {
           if (!text) job.reject(new Error('claude-code returned empty'));
           else job.resolve(text);
         }
-        _resetClaudeIdleTimer();
+        // Kill after every completed job — prevents context bleed across
+        // unrelated callers (WR autofill, DM draft, long-dwell summaries all
+        // sharing the pool). Next call re-spawns a clean process.
+        if (worker.proc) { _killClaudeTree(worker.proc); }
+        worker.proc = null;
         _processClaudeQueue();
       }
     }
   });
 
-  proc.stderr.on('data', (d) => logger.warn('claude-code stderr: ' + d.toString().slice(0, 300)));
+  proc.stderr.on('data', (d) => logger.warn('claude-code[' + worker.id + '] stderr: ' + d.toString().slice(0, 300)));
 
   proc.on('exit', (code) => {
-    logger.warn('claude-code: persistent process exited (code ' + code + ')');
-    _claudeProc = null;
-    _failClaudeQueue(new Error('claude-code process exited unexpectedly'));
+    // Guard: if this worker's proc was already replaced (killed after a
+    // completed job), its delayed exit event must NOT fail a new job.
+    if (proc !== worker.proc) { logger.warn('claude-code[' + worker.id + ']: stale process exited (code ' + code + ') — ignoring'); return; }
+    logger.warn('claude-code[' + worker.id + ']: process exited (code ' + code + ')');
+    worker.proc = null;
+    if (worker.currentJob) {
+      const job = worker.currentJob;
+      clearTimeout(job._timer);
+      worker.currentJob = null;
+      worker.busy = false;
+      job.reject(new Error('claude-code process exited unexpectedly'));
+      _processClaudeQueue();
+    }
   });
 
   proc.on('error', (e) => {
-    logger.warn('claude-code: persistent process error: ' + e.message);
-    _claudeProc = null;
-    _failClaudeQueue(new Error('claude-code spawn error: ' + e.message));
+    if (proc !== worker.proc) { logger.warn('claude-code[' + worker.id + ']: stale process error — ignoring'); return; }
+    logger.warn('claude-code[' + worker.id + ']: process error: ' + e.message);
+    worker.proc = null;
+    if (worker.currentJob) {
+      const job = worker.currentJob;
+      clearTimeout(job._timer);
+      worker.currentJob = null;
+      worker.busy = false;
+      job.reject(new Error('claude-code spawn error: ' + e.message));
+      _processClaudeQueue();
+    }
   });
 
-  _claudeProc = proc;
-  _resetClaudeIdleTimer();
+  worker.proc = proc;
+  _resetClaudeIdleTimer(worker);
 }
 
 function _processClaudeQueue() {
-  if (_claudeBusy || _claudeQueue.length === 0) return;
-  const job = _claudeQueue.shift();
-  _claudeCurrentJob = job;
-  _claudeBusy = true;
-  job._timer = setTimeout(() => {
-    // FIX (2026-07-23): previously just freed the slot and moved on to the
-    // next queued job while leaving the SAME warm process running -- if the
-    // timed-out turn was still generating server-side and its "result"
-    // arrived late, it got matched against whatever job was _claudeCurrentJob
-    // by then (a totally unrelated caller), silently handing back the wrong
-    // answer. Confirmed live: AdaptiveWR received repair-timeline text meant
-    // for a background deep-scan call after one of its steps timed out.
-    // Killing + nulling the process on timeout guarantees the stale turn can
-    // never emit a response that gets misattributed -- costs one cold-start
-    // on the next call, a fine trade for correctness.
-    logger.warn('claude-code: job timed out -- killing process to avoid a stale/late response being misattributed to a later job');
-    if (_claudeProc) { try { _claudeProc.kill(); } catch (_e) {} }
-    _claudeProc = null;
-    _claudeCurrentJob = null;
-    _claudeBusy = false;
-    job.reject(new Error('claude-code timeout'));
-    _processClaudeQueue();
-  }, CLAUDE_TIMEOUT_MS);
-  try {
-    // BUG FIX (2026-07-25): a timed-out job kills _claudeProc and sets it to
-    // null, then calls _processClaudeQueue() again to move to the next queued
-    // job -- but this function never re-spawned the process, it just assumed
-    // _claudeProc was still alive and wrote straight to its stdin. That threw
-    // "Cannot read properties of null (reading 'stdin')" for every job still
-    // in the queue at that moment, instantly cascading the whole backlog to
-    // failure instead of just the one job that actually timed out. Re-ensure
-    // (spawn if needed) right before writing so each job gets a live process.
-    _ensureClaudeProcess();
-    const msg = { type: 'user', message: { role: 'user', content: job.prompt } };
-    _claudeProc.stdin.write(JSON.stringify(msg) + '\n');
-  } catch (e) {
-    clearTimeout(job._timer);
-    _claudeCurrentJob = null;
-    _claudeBusy = false;
-    job.reject(new Error('claude-code stdin write failed: ' + e.message));
-    _processClaudeQueue();
+  // Drain queue: assign each pending job to the next idle worker.
+  // With WORKER_POOL_SIZE=3, up to 3 jobs run concurrently without waiting.
+  while (_claudeQueue.length > 0) {
+    const worker = _workers.find(w => !w.busy);
+    if (!worker) return; // all 3 workers busy — remaining jobs stay queued
+    const job = _claudeQueue.shift();
+    worker.currentJob = job;
+    worker.busy = true;
+    job._timer = setTimeout(() => {
+      // Kill-on-timeout: prevents a stale/late response being matched to a
+      // later job on the same worker (same correctness guarantee as before).
+      logger.warn('claude-code[' + worker.id + ']: job timed out — killing process');
+      if (worker.proc) { _killClaudeTree(worker.proc); }
+      worker.proc = null;
+      worker.currentJob = null;
+      worker.busy = false;
+      job.reject(new Error('claude-code timeout'));
+      _processClaudeQueue();
+    }, CLAUDE_TIMEOUT_MS);
+    try {
+      // Spawn a fresh process for this worker if needed (re-ensure after any
+      // prior kill — timeout, abort, or completed-job kill).
+      _ensureClaudeProcess(worker);
+      const msg = { type: 'user', message: { role: 'user', content: job.prompt } };
+      worker.proc.stdin.write(JSON.stringify(msg) + '\n');
+    } catch (e) {
+      clearTimeout(job._timer);
+      worker.currentJob = null;
+      worker.busy = false;
+      job.reject(new Error('claude-code stdin write failed: ' + e.message));
+      _processClaudeQueue();
+    }
   }
 }
 
@@ -466,21 +490,20 @@ function _abortClaudeJob(job) {
   if (job.done) return;
   const qi = _claudeQueue.indexOf(job);
   if (qi !== -1) {
-    // Still waiting its turn -- just drop it out of the queue, nothing to kill.
+    // Still waiting its turn — drop from queue, nothing to kill.
     _claudeQueue.splice(qi, 1);
     job.reject(new Error('Aborted by caller'));
     return;
   }
-  if (_claudeCurrentJob === job) {
-    // It's the job actively writing/reading the warm process right now --
-    // same kill-and-null pattern as the timeout handler below, for the same
-    // reason: a stale in-flight turn must never be able to answer a later job.
-    logger.warn('claude-code: active job aborted by caller -- killing process');
+  // Find which worker is running this job and kill its process.
+  const worker = _workers.find(w => w.currentJob === job);
+  if (worker) {
+    logger.warn('claude-code[' + worker.id + ']: active job aborted by caller — killing process');
     clearTimeout(job._timer);
-    if (_claudeProc) { try { _claudeProc.kill(); } catch (_e) {} }
-    _claudeProc = null;
-    _claudeCurrentJob = null;
-    _claudeBusy = false;
+    if (worker.proc) { _killClaudeTree(worker.proc); }
+    worker.proc = null;
+    worker.currentJob = null;
+    worker.busy = false;
     job.reject(new Error('Aborted by caller'));
     _processClaudeQueue();
   }
@@ -490,18 +513,6 @@ function _tryClaudeCode(prompt, opts = {}) {
   const signal = opts.signal;
   return new Promise((resolve, reject) => {
     if (signal && signal.aborted) return reject(new Error('Aborted before start'));
-    try {
-      _ensureClaudeProcess();
-    } catch (e) {
-      return reject(e);
-    }
-    // FIX (2026-07-23): was hard-truncated to 8000 chars, which silently cut off
-    // the tail of any longer prompt -- including the final "RESPOND WITH ONLY
-    // JSON" formatting instruction on AdaptiveWR's buildPrompt() (~11000 chars
-    // with WIZARD_KNOWLEDGE + lessons), and likely the second vendor-conversation
-    // block appended in deep-scan.js's dual-WR timeline prompt too. Claude models
-    // handle far more context than this; raised to a generous ceiling that only
-    // guards against truly pathological input, not normal feature prompts.
     const CLAUDE_PROMPT_MAX_CHARS = 60000;
     const trimmed = prompt.length > CLAUDE_PROMPT_MAX_CHARS ? prompt.slice(0, CLAUDE_PROMPT_MAX_CHARS) + '...[trimmed]' : prompt;
     const job = { prompt: trimmed, signal, onAbort: null, done: false };
@@ -600,6 +611,12 @@ function _saveStatus() {
 
 // -- AI PREFERENCE -------------------------------------------------------
 // Runtime switch — no restart needed. Persisted to orchaConfig on save.
+function setClaudeTimeout(ms) {
+  const clamped = Math.max(10000, Math.min(300000, Number(ms) || 60000)); // 10s–300s
+  CLAUDE_TIMEOUT_MS = clamped;
+  logger.info('Claude timeout set to: ' + clamped + 'ms');
+}
+
 function setPreference(pref) {
   const valid = ['auto', 'orcha', 'claude'];
   _aiPreference = valid.includes(pref) ? pref : 'auto';
@@ -621,8 +638,9 @@ function testClaude() {
     if (fs.existsSync(P.orchaConfig)) {
       const cfg = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
       if (cfg && cfg.aiPreference) setPreference(cfg.aiPreference);
+      if (cfg && cfg.claudeTimeoutMs > 0) CLAUDE_TIMEOUT_MS = cfg.claudeTimeoutMs;
     }
   } catch (_) {}
 })();
 
-module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, testClaude };
+module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setClaudeTimeout, testClaude };

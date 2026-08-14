@@ -32,19 +32,29 @@ function _render() {
   }
 
   list.innerHTML = _reviewWRs.map((wr, i) => {
-    const isReady = wr.aiClassified;
-    const borderCol = isReady ? '#3fb950' : '#f0a800';
-    const tag = isReady
-      ? '<span class="wr-inbox-tag wr-inbox-tag--ready">AI READY</span>'
-      : (wr.aiError ? '<span class="wr-inbox-tag wr-inbox-tag--error">AI FAILED</span>' : '<span class="wr-inbox-tag wr-inbox-tag--pending">PENDING</span>');
+    const isDealerWR = wr.status === 'dealer-wr-needed';
+    const isReady = wr.aiClassified && !isDealerWR;
+    const borderCol = isDealerWR ? '#4493f8' : (isReady ? '#3fb950' : '#f0a800');
+    const tag = isDealerWR
+      ? '<span class="wr-inbox-tag wr-inbox-tag--dealer">DEALER WR NEEDED</span>'
+      : (isReady
+        ? '<span class="wr-inbox-tag wr-inbox-tag--ready">AI READY</span>'
+        : (wr.aiError ? '<span class="wr-inbox-tag wr-inbox-tag--error">AI FAILED</span>' : '<span class="wr-inbox-tag wr-inbox-tag--pending">PENDING</span>'));
 
-    const aiDetails = isReady && wr.payload ? `
+    const aiDetails = wr.payload ? `
       <div class="wr-inbox-ai">
         <div><strong>Title:</strong> ${_esc(wr.payload.title)}</div>
-        <div><strong>Area:</strong> ${_esc(wr.aiArea)} → ${_esc(wr.aiSubcategory)}</div>
-        <div><strong>Vendor:</strong> ${_esc(wr.aiVendor || 'Auto-assign')}</div>
-        <div><strong>Urgent:</strong> ${wr.payload.urgent === 'Yes' ? '⚠️ YES' : 'No'}</div>
+        <div><strong>Area:</strong> ${_esc(wr.aiArea || (wr.payload.areaPairs && wr.payload.areaPairs[0] && wr.payload.areaPairs[0].area))} → ${_esc(wr.aiSubcategory || (wr.payload.areaPairs && wr.payload.areaPairs[0] && wr.payload.areaPairs[0].subcategory))}</div>
+        <div><strong>Vendor:</strong> ${_esc(wr.aiVendor || wr.payload.vendor || 'Auto-assign')}</div>
+        ${isDealerWR ? '<div style="color:#4493f8;font-weight:600">⚠ Create this WR manually via the dealer portal, then Mark Done.</div>' : ''}
+        <div><strong>Urgent:</strong> ${wr.payload.urgent === 'Yes' ? '\u26a0\ufe0f YES' : 'No'}</div>
       </div>` : '';
+
+    const actions = isDealerWR
+      ? `<button class="wr-inbox-btn wr-inbox-btn--approve" data-action="decline" data-idx="${i}">✅ Mark Done</button>
+         <button class="wr-inbox-btn wr-inbox-btn--decline" data-action="decline" data-idx="${i}">🚫 Dismiss</button>`
+      : `<button class="wr-inbox-btn wr-inbox-btn--approve" data-action="approve" data-idx="${i}">${isReady ? '⚡ Approve & Submit' : '✅ Approve'}</button>
+         <button class="wr-inbox-btn wr-inbox-btn--decline" data-action="decline" data-idx="${i}">🚫 Decline</button>`;
 
     return `
       <div class="wr-inbox-card" style="border-left-color:${borderCol}" data-idx="${i}">
@@ -58,8 +68,7 @@ function _render() {
         </div>
         ${aiDetails}
         <div class="wr-inbox-card-actions">
-          <button class="wr-inbox-btn wr-inbox-btn--approve" data-action="approve" data-idx="${i}">${isReady ? '⚡ Approve & Submit' : '✅ Approve'}</button>
-          <button class="wr-inbox-btn wr-inbox-btn--decline" data-action="decline" data-idx="${i}">🚫 Decline</button>
+          ${actions}
         </div>
       </div>`;
   }).join('');
@@ -113,6 +122,13 @@ async function _approve(idx) {
     if (result && result.ok) {
       const label = (wr.payload && wr.payload.unit) || wr.unit || 'unit';
       const title = (wr.payload && wr.payload.title) || wr.issue || '';
+      if (result.dealerWRNeeded) {
+        // Relay WR created -- now remind user to also create dealer WR
+        bus.emit('ui:toast', { type: 'success', message: `Relay WR created for ${label}${result.workRequestId ? ' (' + result.workRequestId + ')' : ''} \u2014 dealer WR still needed via ${result.vendor}`, duration: 8000 });
+        bus.emit('ui:notif-push', { icon: '\uD83C\uDFE2', title: 'Dealer WR Needed', body: label + ' \u2014 relay WR done, create dealer WR via ' + result.vendor, time: Date.now() });
+        await _loadReview(); // re-render with DEALER WR NEEDED badge (card stays)
+        return;
+      }
       bus.emit('ui:toast', { type: 'success', message: `WR submitted for ${label}${result.workRequestId ? ' (' + result.workRequestId + ')' : ''} \u2014 ${title}`, duration: 5000 });
       bus.emit('ui:notif-push', { icon: '\u2705', title: 'WR Created', body: label + ' \u2014 ' + title, time: Date.now() });
       _reviewWRs.splice(idx, 1);

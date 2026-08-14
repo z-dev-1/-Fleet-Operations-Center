@@ -191,6 +191,7 @@ function _html() {
             <div class="ec-section__title">
               Email Note
               <span class="ec-section__hint">Shown as a red banner at top of email</span>
+              <button id="ec-note-polish" class="ec-icon-btn" title="Polish note text with AI">✶ Polish</button>
             </div>
             <textarea id="ec-note" class="settings__textarea" rows="2"
               placeholder="Optional — e.g. 'Units at EWR45 excluded due to site freeze'"></textarea>
@@ -502,6 +503,37 @@ function _wireSubjectReset() {
   _el2('ec-subject-reset').addEventListener('click', () => _updateSubject());
 }
 
+// ── Wire: note Polish AI ──────────────────────────────────────────────────
+function _wireNotePolish() {
+  _el2('ec-note-polish').addEventListener('click', async () => {
+    const ta = _el2('ec-note');
+    const original = (ta.value || '').trim();
+    if (!original) { toast.show('warn', 'Type a note first, then polish it.', 2500); return; }
+    const btn = _el2('ec-note-polish');
+    btn.disabled = true;
+    btn.textContent = '…';
+    try {
+      const result = await window.ai.ask(
+        'Polish this email note to be clear, professional, and concise. ' +
+        'Keep the same meaning and facts. Return ONLY the polished text — no quotes, no explanation, no preamble.\n\n' +
+        original
+      );
+      const polished = (typeof result === 'string' ? result : result && result.text || '').trim();
+      if (polished) {
+        ta.value = polished;
+        toast.show('success', 'Note polished.', 2000);
+      } else {
+        toast.show('warn', 'AI returned empty — try again.', 2500);
+      }
+    } catch (e) {
+      toast.show('error', 'AI polish failed: ' + (e.message || 'unknown'), 4000);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '✶ Polish';
+    }
+  });
+}
+
 // ── Wire: preview ─────────────────────────────────────────────────────────
 function _wirePreview() {
   _el2('ec-preview').addEventListener('click', async () => {
@@ -768,6 +800,7 @@ export async function init(container) {
   _wireSlot();
   _wireScope();
   _wireSubjectReset();
+  _wireNotePolish();
   _wirePresets();
   _wirePreview();
   _wireCompose();
@@ -874,13 +907,30 @@ export async function init(container) {
 
   // ── S28: Auto-email handler — fires when scheduler triggers ──────────────
   bus.on('fleet:auto-email', async (payload) => {
-    const { slot, triggeredAt, syncError, autoEmailNote } = payload || {};
+    const { slot, triggeredAt, syncError, autoEmailNote, dataRowCount, dataUptakeCount, dataAgeMins } = payload || {};
     // BUG FIX (2026-07-16): see _normalizeSlotToAmPm() above — `slot` here is
     // a raw "HH:MM" time string from the scheduler (e.g. "08:00"), not the
     // literal "AM"/"PM" that _buildSubject() and the email template expect.
     const slotAmPm = _normalizeSlotToAmPm(slot);
-    console.log('[email-composer] Auto-email triggered: slot=' + (slot || '?') + ' (' + slotAmPm + ') at ' + (triggeredAt || 'unknown'));
-    if (syncError) console.warn('[email-composer] Auto-email sync had error:', syncError);
+
+    // DATA AVAILABILITY LOG (2026-08-12): app.js validates data before firing
+    // this event, but we log what arrived so it's visible in devtools.
+    const _dataInfo = dataRowCount != null
+      ? dataRowCount + ' units' + (dataUptakeCount ? ', ' + dataUptakeCount + ' Uptake-scored' : '') + (dataAgeMins != null ? ', synced ' + dataAgeMins + 'min ago' : '')
+      : 'data stats not provided';
+    console.log('[email-composer] Auto-email triggered: slot=' + (slot || '?') + ' (' + slotAmPm + ') at ' + (triggeredAt || 'unknown') + ' | data: ' + _dataInfo);
+
+    if (syncError) {
+      console.warn('[email-composer] Auto-email sync had error:', syncError, '— sending with cached data (' + (dataRowCount || '?') + ' units)');
+      // If app.js reached here despite a sync error, it already confirmed
+      // cached data exists (>= 3 units). Proceed but note the stale-data risk.
+    }
+
+    // Guard: if no units somehow slipped through (should not happen — app.js gates on 3+)
+    if (dataRowCount != null && dataRowCount < 1) {
+      console.error('[email-composer] Auto-email ABORTED: 0 units in fleet data — nothing to send');
+      return;
+    }
 
     // Load email recipients from both sources
     await _loadSpEmails();

@@ -40,19 +40,33 @@ import { init as initWorkflowIntel }      from './views/workflow-intelligence.js
 function boot() {
   // Global error boundary — prevent white screen
   window.onerror = (msg, src, line, col, err) => {
-    console.error('[FATAL]', msg, src, line);
+    // DIAGNOSTIC (2026-07-27): include file:line + stack in both the console
+    // and the toast itself -- without this, "Cannot read properties of
+    // undefined" reports are unlocatable (dozens of .replace() call sites
+    // across the codebase, no browser devtools access from this tooling).
+    const loc = (src ? src.split('/').pop() : '?') + ':' + (line || '?') + ':' + (col || '?');
+    console.error('[FATAL]', msg, loc, err && err.stack);
     const toast = document.getElementById('toast-container');
     if (toast) {
       const el = document.createElement('div');
       el.className = 'toast toast--error';
-      el.textContent = 'Error: ' + (msg || 'Unknown').substring(0, 80);
+      el.textContent = 'Error: ' + (msg || 'Unknown').substring(0, 80) + ' [' + loc + ']';
       toast.appendChild(el);
-      setTimeout(() => el.remove(), 5000);
+      setTimeout(() => el.remove(), 9000);
     }
     return true; // Prevent default error handling
   };
   window.onunhandledrejection = (e) => {
-    console.error('[UNHANDLED]', e.reason);
+    const reason = e && e.reason;
+    console.error('[UNHANDLED]', reason && reason.message, reason && reason.stack);
+    const toast = document.getElementById('toast-container');
+    if (toast) {
+      const el = document.createElement('div');
+      el.className = 'toast toast--error';
+      el.textContent = 'Unhandled: ' + (reason && (reason.message || String(reason)) || 'Unknown').substring(0, 100);
+      toast.appendChild(el);
+      setTimeout(() => el.remove(), 9000);
+    }
     return true;
   };
 

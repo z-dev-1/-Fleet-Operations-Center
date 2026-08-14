@@ -383,7 +383,20 @@ function _downDays(row) {
   if (dm) return parseInt(dm[1], 10);
   const hm = s.match(/\((\d+)\s*hours?\s*ago\)/i);
   if (hm) return 0; // less than a full day down
-  const d = new Date(s);
+  const ym = s.match(/\((\d+)\s*years?\s*ago\)/i);
+  if (ym) return parseInt(ym[1], 10) * 365;
+  const mm = s.match(/\((\d+)\s*months?\s*ago\)/i);
+  if (mm) return parseInt(mm[1], 10) * 30;
+  // Singular relative phrasing has no leading digit ("a month ago", "an hour ago").
+  if (/\(an?\s+year\s+ago\)/i.test(s)) return 365;
+  if (/\(an?\s+month\s+ago\)/i.test(s)) return 30;
+  if (/\(an?\s+day\s+ago\)/i.test(s)) return 1;
+  if (/\(an?\s+hour\s+ago\)/i.test(s)) return 0;
+  // Fallback: strip any trailing "(...)" relative-time annotation before
+  // attempting a straight Date parse -- the raw string (with the
+  // parenthetical still attached) never parses successfully otherwise.
+  const stripped = s.replace(/\s*\([^)]*\)\s*$/, '').trim();
+  const d = new Date(stripped || s);
   if (isNaN(d.getTime())) return null;
   return Math.floor((Date.now() - d.getTime()) / 86400000);
 }
@@ -526,13 +539,37 @@ function _buildAIFillPrompt(row, dd) {
     '1. delayReason -- pick EXACTLY ONE of this fixed list (verbatim, no variation):\n' +
     '   Primary Vendor, Parts Delay, Offsite Shop, Estimate Process, Payment, Speciality Vendor, ' +
     'Out of Scope for FAS, End of Life Review, PMR, MCS SW Miss, Weather, Towing, Reconditioning, Repaired\n\n' +
-    '2. escalationLevel -- pick EXACTLY ONE of: SEV5, SEV4, SEV3, SEV2 (SEV2 is the HIGHEST severity, SEV5 the lowest). Rubric:\n' +
-    '   SEV2 = no vendor engagement / long unexplained stall / safety issue / blocking fleet capacity with no clear path forward\n' +
-    '   SEV3 = active delay with a real blocker (parts backordered, awaiting approval, vendor unresponsive for days)\n' +
-    '   SEV4 = in progress with a known next step and reasonable ETA\n' +
-    '   SEV5 = routine, close to completion, or a low-impact single remaining step\n\n' +
-    '3. summary -- ONE OR TWO SHORT SENTENCES (max 280 chars) in professional fleet-coordinator voice, stating the CURRENT repair state and WHAT HAPPENS NEXT. Same voice/rules as the official repair timeline:\n' +
-    '   - ZERO TOLERANCE, invalidates the whole response if present: dollar amounts, personal names, phone numbers, emails, VINs, license plates, street addresses, gate codes, raw vendor signatures.\n' +
+    '2. escalationLevel -- pick EXACTLY ONE of: SEV5, SEV4, SEV3, SEV2 (SEV2 is the HIGHEST severity, SEV5 the lowest).\n\n' +
+    '   SEVERITY RUBRIC (use day count + ETC status + situation to decide):\n' +
+    '   SEV5 = 5-14 days down; vendor actively engaged; ETC exists OR repair clearly in progress -> Monitor only\n' +
+    '   SEV4 = 7-30 days down; ETC approaching or just passed; needs follow-up -> Request repair status and firm ETC\n' +
+    '   SEV3 = 14-60+ days down; ETC significantly past OR vendor unresponsive OR complex/multi-attempt repair OR EOL/SWAP pending -> Active escalation\n' +
+    '   SEV2 = 40-150+ days down; no resolution path; major component failure; parts severely backordered; leadership intervention required -> Leadership escalation, Asana ticket required\n\n' +
+    '   ESCALATION TRIGGERS (apply BEFORE finalizing the SEV level -- each trigger bumps up one level):\n' +
+    '   - No ETC at all -> bump up one SEV level (e.g. SEV4 becomes SEV3)\n' +
+    '   - ETC has passed with no update -> bump up one SEV level\n' +
+    '   - Vendor rejected repair or marked out of scope for primary vendor -> minimum SEV3, likely SEV2\n' +
+    '   - Multiple repair attempts or multiple vendor handoffs -> minimum SEV3\n' +
+    '   - DOT-critical safety item (brakes, air systems, steering) -> escalate one level faster than day count alone suggests\n\n' +
+    '3. summary -- ONE concise sentence (max 280 chars) in professional fleet-coordinator voice.\n' +
+    '   Use EXACTLY this formula:\n' +
+    '   "[X] days down at [Vendor] for [component] repair. [ETC STATUS]. [ACTION]."\n\n' +
+    '   ETC STATUS options (pick the ONE that fits):\n' +
+    '   - "No ETC" (when no completion date is known)\n' +
+    '   - "ETC [date] has passed" (when a past date was given but no update followed)\n' +
+    '   - "ETC [date]" (when a future or current completion date exists)\n\n' +
+    '   ACTION options (pick the ONE that fits the SEV level):\n' +
+    '   - SEV5: brief status note only, e.g. "Parts arrived [date] - pending return to tech [date]."\n' +
+    '   - SEV4: "Request repair status and firm completion date."\n' +
+    '   - SEV3: "Follow up for completion/release status." OR "Escalate for [specific issue]."\n' +
+    '   - SEV2: "Continue leadership escalation for parts status and recovery plan."\n\n' +
+    '   GOOD EXAMPLES:\n' +
+    '   SEV5: "Parts arrived 8/10 - pending return to tech 8/11; ETC 8/12."\n' +
+    '   SEV4: "15 days down at Volvo for battery assembly repair. No ETC. Request repair status and firm completion date."\n' +
+    '   SEV3: "26-day accident repair. ETC 8/10 has passed. Follow up for completion/release status."\n' +
+    '   SEV2: "146 days down at Volvo for transmission converter repair. No ETC. Continue leadership escalation for parts status and recovery plan."\n\n' +
+    '   STRICT CONTENT RULES -- any violation invalidates the whole response:\n' +
+    '   - ZERO TOLERANCE: dollar amounts, personal names, phone numbers, emails, VINs, license plates, street addresses, gate codes, raw vendor signatures.\n' +
     '   - Allowed: vendor company names, dealer locations, case/reference numbers, part names, domicile codes, dates, ETAs.\n' +
     '   - Never invent or fabricate -- if source data is thin, say so plainly (e.g. "No vendor update logged; escalation recommended.") rather than guessing.\n\n' +
     'RESPOND WITH RAW JSON ONLY -- no markdown, no code fences, no explanation, exactly this shape:\n' +

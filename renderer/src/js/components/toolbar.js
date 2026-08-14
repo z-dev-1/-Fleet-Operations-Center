@@ -134,6 +134,7 @@ export function init(container) {
         <button class="tb-pill" data-filter="offsite">Offsite</button>
         <button class="tb-pill" data-filter="high-risk">High Risk</button>
         <button class="tb-pill" data-filter="stuck">Stuck 14d+</button>
+        <button class="tb-pill" data-filter="fleetnet">FleetNet</button>
       </div>
       <div class="tb-sep" id="tb-op-sep" style="display:none"></div>
       <div class="tb-pills" id="tb-op-pills" style="display:none"></div>
@@ -525,6 +526,9 @@ export function init(container) {
       } else if (f === 'stuck') {
         if (lc) lc.value = '';
         bus.emit('ui:quick-filter', { filter: 'stuck' });
+      } else if (f === 'fleetnet') {
+        if (lc) lc.value = '';
+        bus.emit('ui:quick-filter', { filter: 'fleetnet' });
       }
     });
   });

@@ -31,6 +31,11 @@ function registerGraphIPC() {
     return signOut();
   });
 
+  handle('graph:get-calendar-events', async (_e, opts) => {
+    const { getCalendarEvents } = require('../graph/client');
+    return getCalendarEvents(opts || {});
+  });
+
   handle('graph:send-mail', async (_e, data) => {
     if (!data || typeof data !== 'object') {
       const { ConfigError } = require('../utils/errors');
