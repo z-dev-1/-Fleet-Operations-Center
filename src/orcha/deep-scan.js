@@ -107,7 +107,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
           // AI regenerates the timeline purely from raw vendor/WO comments -- it has no
           // awareness of previously manually-added lines. Merge them back in so a rescan
           // never silently discards user-entered timeline entries (immutable truth).
-          row.repairTimeline = _filterHiddenEntries(_mergeManualEntries(_stripCosts(val.timeline), ns.manualEntries), ns.hiddenEntries);
+          row.repairTimeline = _sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(_stripCosts(val.timeline), ns.manualEntries), ns.hiddenEntries));
         }
         if (val.correctedNotes)     row.savedNotes = val.correctedNotes;
         if (val.repairStatus)       row.savedRepairStatus = val.repairStatus;
@@ -131,7 +131,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
       // Save timeline + issueSummary to notesStore
       // Merge AI-regenerated timeline with prior manual entries so a rescan never
       // silently drops user-entered lines (immutable truth).
-      if (val.timeline) { ns.timeline = _filterHiddenEntries(_mergeManualEntries(val.timeline, ns.manualEntries), ns.hiddenEntries); isChanged = true; }
+      if (val.timeline) { ns.timeline = _sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(val.timeline, ns.manualEntries), ns.hiddenEntries)); isChanged = true; }
 
       if (val.summary) { ns.issueSummary = val.summary; isChanged = true; }
 
@@ -405,6 +405,68 @@ function _mergeManualEntries(aiTimeline, manualEntries) {
   });
   if (!missing.length) return aiTimeline;
   return (aiTimeline ? aiTimeline.trim() + '\n' : '') + missing.join('\n');
+}
+
+/**
+ * _sortTimelineChronologically -- deterministic MM/DD sort of a timeline block.
+ *
+ * The AI is instructed to merge all work orders into one chronological
+ * timeline, but that is only an instruction -- with 2-3 interleaved work
+ * orders (and manual entries appended at the end by _mergeManualEntries) the
+ * actual order can drift. This enforces true chronological order regardless of
+ * what the model or the manual-merge produced.
+ *
+ * Rules:
+ *  - Each line is expected to start with "MM/DD" (optionally a range
+ *    "MM/DD-MM/DD"). Sort by the FIRST date on the line, oldest -> newest.
+ *  - Year-agnostic: the data spans one rolling year, so a month far in the
+ *    future relative to "now" is treated as the PRIOR year (e.g. in Jan, a
+ *    "12/28" entry sorts before "01/03"). This keeps a Dec->Jan wrap correct.
+ *  - Lines with no parseable date (headers, wrapped continuation lines) keep
+ *    their position relative to the dated line above them (stable attach).
+ *  - Stable within the same date (preserves same-day ordering from the AI).
+ */
+function _sortTimelineChronologically(timelineText) {
+  if (!timelineText || typeof timelineText !== 'string') return timelineText;
+  const rawLines = timelineText.split('\n');
+  const now = new Date();
+  const curMonth = now.getMonth() + 1; // 1-12
+
+  // Group each dated line with any following non-dated continuation lines.
+  const dateRe = /^\s*(\d{1,2})\/(\d{1,2})/;
+  const groups = [];
+  let cur = null;
+  for (const line of rawLines) {
+    const m = line.match(dateRe);
+    if (m) {
+      cur = { mm: parseInt(m[1], 10), dd: parseInt(m[2], 10), lines: [line], idx: groups.length };
+      groups.push(cur);
+    } else if (cur) {
+      cur.lines.push(line); // continuation of the previous dated entry
+    } else {
+      // Leading non-dated line (rare) -- keep as its own group, sorts first.
+      groups.push({ mm: -1, dd: -1, lines: [line], idx: groups.length });
+    }
+  }
+  if (groups.length <= 1) return timelineText;
+
+  const sortKey = (g) => {
+    if (g.mm < 1) return -Infinity; // undated leading lines first
+    // Future month relative to now => previous year (Dec->Jan wrap).
+    const yearOffset = g.mm > curMonth + 1 ? -1 : 0;
+    return (now.getFullYear() + yearOffset) * 10000 + g.mm * 100 + g.dd;
+  };
+
+  const sorted = groups
+    .map((g, i) => ({ g, i }))
+    .sort((a, b) => {
+      const ka = sortKey(a.g), kb = sortKey(b.g);
+      if (ka !== kb) return ka - kb;
+      return a.i - b.i; // stable: preserve original order for same date
+    })
+    .map(x => x.g.lines.join('\n'));
+
+  return sorted.join('\n');
 }
 
 
