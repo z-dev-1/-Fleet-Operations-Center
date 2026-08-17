@@ -11,7 +11,7 @@
 const { BrowserWindow } = require('electron');
 const { P } = require('../config/paths');
 const logger = require('../utils/logger').createLogger('relay');
-const { enrichVolvoAsist, isUpgrade } = require('./asist_enrich');
+const { enrichVolvoAsist, isUpgrade, SR_RE: SR_RE_MOD } = require('./asist_enrich');
 const { withRetry } = require('../utils/retry');    // H-1: per-unit retry
 // MODULE LOAD PROBE
 
@@ -690,28 +690,74 @@ async function scrapeServiceByUUID(uuid, partition) {
           // scrapeUnitPage) so the second-pass Planned WR can feed its own
           // updates into the AI timeline, not just vendor/state fields.
           let _conv = '';
+          let _offsite = null;
           try {
+            // Poll up to 8x (was 5x) — matches the primary Phase 3 path. The
+            // secondary WR's conversation (which holds the ASIST offsite links)
+            // sometimes renders slower than 5s; too-short a wait meant
+            // pickOffsiteFromConversation() ran before the links were in the DOM
+            // and returned nothing (root cause of 39263's Volvo ASIST secondary
+            // WR having an empty offsite URL despite the link being present).
             let _cr2 = 'not-loaded';
-            for (let _p2 = 0; _p2 < 5; _p2++) {
+            for (let _p2 = 0; _p2 < 8; _p2++) {
               await new Promise(r => setTimeout(r, 1000));
               try { _cr2 = await win.webContents.executeJavaScript(safewrap(RELAY_CLICK_CONV_SCRIPT)); } catch(_) {}
               if (_cr2 !== 'not-loaded') break;
             }
             const _lenBefore = await win.webContents.executeJavaScript('document.body ? document.body.innerText.length : 0').catch(()=>0);
-            for (let _w2 = 0; _w2 < 5; _w2++) {
+            for (let _w2 = 0; _w2 < 8; _w2++) {
               await new Promise(r => setTimeout(r, 1000));
               const _l2 = await win.webContents.executeJavaScript('document.body ? document.body.innerText.length : 0').catch(()=>0);
               if (_l2 > _lenBefore + 200) break;
             }
             const _convData2 = await win.webContents.executeJavaScript(safewrap(RELAY_CONVERSATION_SCRIPT));
-            if (_convData2 && !_convData2._rendererError && _convData2.fullConversation) {
-              _conv = _convData2.fullConversation;
+            if (_convData2 && !_convData2._rendererError) {
+              if (_convData2.fullConversation) _conv = _convData2.fullConversation;
+              // FIX (2026-08-17): secondary/planned WRs (scraped here) used to
+              // capture ONLY vendor/state/conversation — never the offsite link.
+              // So a secondary WR whose vendor is "Volvo (ASIST)" (e.g. unit
+              // 39263) had an empty offsiteShopEventUrl, and "Open in Relay
+              // (Split View)" had nothing to show on the right / no ASIST case
+              // to chase. Mirror Phase 3 here: pull the offsite link from this
+              // WR's own conversation so each secondary WR carries its real
+              // offsite/ASIST URL. Enrichment (SR->Case->Estimate) runs below.
+              _offsite = pickOffsiteFromConversation(_convData2);
             }
           } catch (_ce2) {
             logger.info('[Relay] scrapeServiceByUUID conv fetch failed for', uuid.slice(0,8), _ce2.message);
           }
 
-          done({ ...wrData, fullConversation: _conv, _serviceUUID: uuid, _cachedAt: Date.now() });
+          // Phase 3.5 (secondary): if the offsite link is a Volvo/PACCAR ASIST
+          // service_request, chase it to the real Case/Fleet-Estimate so the
+          // secondary WR's Split View opens the right page like the primary does.
+          let _secAsist = null;
+          try {
+            if (_offsite && _offsite.url && SR_RE_MOD.test(_offsite.url)) {
+              logger.info('[Relay] scrapeServiceByUUID ASIST enrich for', uuid.slice(0,8), '|', _offsite.url.slice(0,80));
+              _secAsist = await enrichVolvoAsist(_offsite.url);
+              if (_secAsist && _secAsist.ok) {
+                logger.info('[Relay] scrapeServiceByUUID ASIST result | source:', _secAsist.source, '| url:', (_secAsist.bestUrl||'').slice(0,80));
+              }
+            }
+          } catch (_ae2) {
+            logger.warn('[Relay] scrapeServiceByUUID ASIST enrich failed for', uuid.slice(0,8), _ae2.message);
+          }
+
+          const _finalOff = (_secAsist && _secAsist.ok)
+            ? { url: _secAsist.bestUrl, caseNumber: _secAsist.caseNumber || _secAsist.bestLabel, asistSource: _secAsist.source, asistLabel: _secAsist.bestLabel, asistSrUrl: _secAsist.srUrl }
+            : (_offsite || null);
+
+          done({
+            ...wrData,
+            fullConversation: _conv,
+            offsiteShopEvent:    _finalOff ? (_finalOff.caseNumber || '') : '',
+            offsiteShopEventUrl: _finalOff ? (_finalOff.url || '')        : '',
+            asistSource:         (_finalOff && _finalOff.asistSource) || '',
+            asistLabel:          (_finalOff && _finalOff.asistLabel)  || '',
+            asistSrUrl:          (_finalOff && _finalOff.asistSrUrl)  || (_offsite && _offsite.url) || '',
+            _serviceUUID: uuid,
+            _cachedAt: Date.now(),
+          });
         } catch (e) {
           logger.warn('[Relay] scrapeServiceByUUID failed for', uuid, e.message);
           done(null);
