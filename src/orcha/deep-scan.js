@@ -198,6 +198,31 @@ async function _processUnit(u, notesStore, askOrcha) {
     plannedConv = plannedConv.substring(0, 3500);
   }
 
+  // Secondary work orders (multi-WR pass -> u._secondaryWRs): a unit can have
+  // MORE than two open WRs (e.g. unit 39263: primary CBRE + secondary
+  // "Volvo (ASIST)"). Each secondary WR is its own active repair thread with
+  // its own vendor conversation. FIX (2026-08-17): these were never fed to the
+  // timeline builder, so their notes/comments were silently dropped. Collect
+  // each secondary WR's conversation so the AI sees ALL work orders' activity.
+  const secondaryConvs = [];
+  if (Array.isArray(u._secondaryWRs) && u._secondaryWRs.length) {
+    u._secondaryWRs.forEach(function (w, idx) {
+      let sConv = (w && w.fullConversation) || '';
+      if (!sConv) return;
+      const sStart = sConv.indexOf('Conversation');
+      if (sStart > 0) sConv = sConv.substring(sStart);
+      sConv = sConv.substring(0, 3500);
+      if (sConv.trim()) {
+        secondaryConvs.push({
+          label:  (w._wrType === 'planned' ? 'Planned #' : 'Unplanned #') + (idx + 2), // #2, #3... (primary=#1)
+          vendor: w.vendor || 'vendor unknown',
+          conv:   sConv,
+        });
+      }
+    });
+  }
+  const hasSecondary = secondaryConvs.length > 0;
+
   // Offsite enrichment: if unit has a Decisiv URL, scrape vendor notes
   let offsiteText = '';
   const offsiteUrl = u.offsiteShopEventUrl || u.asistSrUrl || '';
@@ -276,13 +301,15 @@ async function _processUnit(u, notesStore, askOrcha) {
     '   - NEVER invent or fabricate. Only write what is supported by actual comment text.\n' +
     '   - If a comment is unclear, extract only what is factually stated.\n' +
     '   - Include the MOST RECENT comments — they are the most important for current status.\n\n' +
-    (plannedConv ?
-      '8. TWO ACTIVE WORK ORDERS:\n' +
-      '   This unit has BOTH an open Unplanned WR (conversation above) AND an open Planned WR ' +
-      '(conversation below). Produce timeline entries for BOTH -- do not drop either one. ' +
-      'Prefix every entry with which WR it belongs to, e.g. "07/15 - [Unplanned] Requested vendor repair update." ' +
-      'or "07/10 - [Planned] PM B service scheduled with Kooner." Merge entries from both WRs into ONE ' +
-      'chronological timeline sorted by date.\n\n' : '') +
+    ((plannedConv || hasSecondary) ?
+      '8. MULTIPLE ACTIVE WORK ORDERS:\n' +
+      '   This unit has MORE THAN ONE open work order (the primary Unplanned WR conversation above' +
+      (plannedConv ? ', an open Planned WR' : '') +
+      (hasSecondary ? ', and ' + secondaryConvs.length + ' additional work order(s)' : '') +
+      ' -- each with its own conversation below). Produce timeline entries for EVERY work order -- ' +
+      'do not drop any. Prefix every entry with which WR it belongs to, e.g. "07/15 - [Unplanned] ' +
+      'Requested vendor repair update." or "07/10 - [Planned] PM B service scheduled." Merge entries ' +
+      'from ALL work orders into ONE chronological timeline sorted by date.\n\n' : '') +
     'ALSO PROVIDE:\n' +
     'REPAIR_STATUS: [current stage: Waiting for vendor | Appointment scheduled | Vehicle arrived | Under diagnosis | Diagnosis completed | Awaiting estimate | Awaiting approval | Parts ordered | Parts backordered | Parts received | Repair in progress | Road test | Quality inspection | Ready for pickup | Repair completed | Work order closed]\n' +
     'PRIMARY_COMPONENT: [exactly one: ENGINE/MOTOR SYSTEMS | CHASSIS | ELECTRICAL | CAB/CLIMATE CONTROL/INSTRUMENTATION | ACCESSORIES]\n' +
@@ -296,6 +323,9 @@ async function _processUnit(u, notesStore, askOrcha) {
     '\nRELAY GARAGE CONVERSATION (Unplanned WR):\n' +
     (fullConv || '(no conversation)') + '\n\n' +
     (plannedConv ? 'RELAY GARAGE CONVERSATION (Planned WR -- ' + (u._plannedWRData.vendor || 'vendor unknown') + '):\n' + plannedConv + '\n\n' : '') +
+    (hasSecondary ? secondaryConvs.map(function (s) {
+      return 'RELAY GARAGE CONVERSATION (' + s.label + ' WR -- ' + s.vendor + '):\n' + s.conv + '\n\n';
+    }).join('') : '') +
     (offsiteText ? 'OFFSITE/VENDOR NOTES (Decisiv/ASIST):\n' + offsiteText + '\n\n' : '') +
     'RESPOND IN EXACTLY THIS FORMAT (no markdown, no backticks):\n' +
     'REPAIR_STATUS: [stage]\n' +
