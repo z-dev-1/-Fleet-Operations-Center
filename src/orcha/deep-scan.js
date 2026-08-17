@@ -373,7 +373,22 @@ async function _processUnit(u, notesStore, askOrcha) {
   }
   if (correctedNotes && correctedNotes.length > 300) correctedNotes = correctedNotes.substring(0, 300).trim();
 
-    if (timeline && timeline.length > 2000) timeline = timeline.substring(0, 2000).trim();
+    // Cap the timeline length, but keep the MOST RECENT entries. The old code
+    // did `substring(0, 2000)` which kept the OLDEST 2000 chars and silently
+    // dropped the newest — so a long multi-week / multi-WR repair (e.g. 321950,
+    // whose conversation runs to the current week) had its latest activity
+    // chopped off, making the stored timeline look stale even though the scan
+    // ran. Raised the cap to 6000 (a full multi-WO repair needs the room) and,
+    // when trimming is still needed, drop whole OLD lines from the top and keep
+    // the recent tail, with a marker so it's clear earlier history was trimmed.
+    const TIMELINE_MAX = 6000;
+    if (timeline && timeline.length > TIMELINE_MAX) {
+      const _lines = timeline.split('\n');
+      while (_lines.length > 1 && _lines.join('\n').length > TIMELINE_MAX - 40) {
+        _lines.shift(); // drop oldest line first (timeline is chronological)
+      }
+      timeline = '(earlier history trimmed)\n' + _lines.join('\n');
+    }
 
   return {
     equipmentId:      u.equipmentId,
