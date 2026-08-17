@@ -58,6 +58,8 @@ Thumbs.db
 
 # DevSpace / smoke-test artefacts
 _headless_prompt.txt
+store_usage.txt
+wi_test_log.txt
 
 # S28: Additional cleanup entries
 startup.log

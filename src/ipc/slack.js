@@ -132,11 +132,22 @@ function registerSlackIPC(ctx) {
   // FEATURE (2026-07-16): resolves a search result to an open conversation
   // ID (opens the DM if it's a person; passes through the channel ID as-is
   // if it's a channel). See openConversation in slack_send.js.
+  // Also supports { userId: 'self' } to open the user's own self-DM.
   handle('slack:open-conversation', async (_e, data) => {
+    const { openConversation, checkLiveAuth } = require('../../src/scrapers/slack_send');
+
+    // Handle self-DM shortcut
+    if (data && data.userId === 'self') {
+      const auth = await checkLiveAuth();
+      if (!auth.authenticated || !auth.userId) throw new Error('Could not determine your Slack user ID — check Slack auth');
+      // openConversation with type 'user' and the user's own ID = self-DM
+      const channelId = await openConversation({ id: auth.userId, type: 'user' });
+      return { channelId, name: 'My DM' };
+    }
+
     if (!data || !data.id || !data.type) {
       throw new Error('slack:open-conversation requires { id, type }');
     }
-    const { openConversation } = require('../../src/scrapers/slack_send');
     return { channelId: await openConversation(data) };
   });
 
@@ -206,7 +217,10 @@ function registerSlackIPC(ctx) {
   handle('slack:save-channel-watch-config', async (_e, config) => {
     if (!config || typeof config !== 'object') throw new Error('config must be an object');
     const { saveWatchConfig } = require('../../src/scrapers/slack_channel_watch');
-    return saveWatchConfig(config);
+    const result = saveWatchConfig(config);
+    // Signal renderer to restart the channel watch poller with new config
+    ctx.send('slack:config-updated', { type: 'channel-watch' });
+    return result;
   });
 
   // FEATURE (2026-07-22): channel-add-by-ID membership check -- see

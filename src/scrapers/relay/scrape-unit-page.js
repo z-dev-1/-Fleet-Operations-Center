@@ -4,11 +4,42 @@
 
 async function scrapeUnitPage(equipmentId, partition, relayCache) {
   logger.info('[Relay] scrapeUnitPage called for', equipmentId);
+
+  // NOTE: We intentionally do NOT short-circuit on a cached _pendingAssignment
+  // entry before resolving the UUID. resolveServiceUUID is the source of truth
+  // for whether a work order / vendor now exists. If we returned the stale
+  // pending entry here, a unit that got a vendor assigned AFTER being cached
+  // would stay hidden until the TTL expired. Instead we always ask the garage
+  // dashboard first, then only fall back to the pending cache if the unit
+  // STILL has no resolvable WR (which keeps the "skip re-scan" optimization
+  // for genuinely unassigned units without ever hiding a real WO).
+
   // Step 1: resolve the actual service UUID via Relay Garage dashboard
   const serviceUUID = await resolveServiceUUID(equipmentId, partition);
   if (!serviceUUID) {
-    logger.info('[Relay] No valid WR for unit', equipmentId, '— skipping');
-    return null;
+    // Unit genuinely has no assignable WR right now. Serve a short-lived pending
+    // entry so we don't hammer the garage dashboard every cycle, but keep the TTL
+    // small (10 min) so a newly-assigned vendor surfaces quickly.
+    const prev = relayCache && relayCache[equipmentId];
+    if (prev && prev._pendingAssignment) {
+      const ageMs = Date.now() - (prev._cachedAt || 0);
+      if (ageMs < 10 * 60 * 1000) {
+        logger.info('[Relay] Still pending for', equipmentId, '| age:', Math.round(ageMs / 60000) + 'min / TTL: 10m (re-confirmed no WR)');
+      } else {
+        logger.info('[Relay] Pending entry expired for', equipmentId, '— re-confirmed still no WR, refreshing timestamp');
+      }
+    } else {
+      logger.info('[Relay] No valid WR for unit', equipmentId, '— caching as pending/unassigned');
+    }
+    // Return a "pending" result so the cache prevents re-scanning this unit every cycle.
+    return {
+      equipmentId,
+      vendor: 'UNASSIGNED',
+      state: 'Pending Assignment',
+      title: 'No Vendor Assigned',
+      _cachedAt: Date.now(),
+      _pendingAssignment: true,
+    };
   }
 
   // ── M-1: TTL cache check ──────────────────────────────────────────────────────
@@ -22,6 +53,13 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
   if (relayCache && relayCache[equipmentId] && RELAY_CACHE_TTL_MS > 0) {
     const cached  = relayCache[equipmentId];
     const ageMs   = Date.now() - (cached._cachedAt || 0);
+    // If the previous entry was a pending/unassigned placeholder but we just
+    // resolved a real service UUID, the vendor was assigned since we last looked.
+    // Force a full re-scrape — never serve the stale "No Vendor Assigned" entry.
+    if (cached._pendingAssignment) {
+      logger.info('[Relay] Was pending, now has WR for', equipmentId,
+        '| uuid:', serviceUUID, '— cache bypassed, scraping');
+    } else {
     const uuidOk  = !cached._serviceUUID || cached._serviceUUID === serviceUUID;
     if (ageMs < RELAY_CACHE_TTL_MS && uuidOk) {
       logger.info('[Relay] Cache HIT for', equipmentId,
@@ -34,6 +72,7 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
     } else {
       logger.info('[Relay] Cache STALE for', equipmentId,
         '| age:', Math.round(ageMs / 60000) + 'min', '> TTL:', Math.round(RELAY_CACHE_TTL_MS / 3600000) + 'h');
+    }
     }
   }
   return new Promise((resolve) => {
@@ -171,9 +210,12 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
           let _asistEnrich = null;
           try {
             const _asistUrl = _finalOffsite && _finalOffsite.url;
-            const _isVolvoSR = _asistUrl && /volvopg\.asist\.decisiv\.net\/service_requests\//i.test(_asistUrl);
+            // Fire for BOTH Volvo and PACCAR Decisiv service_request URLs.
+            // (2026-08-17: was Volvo-only; PACCAR uses the same Decisiv platform
+            // so the SR->Case->Estimate chase works for it too.)
+            const _isAsistSR = _asistUrl && /(?:volvopg\.asist|paccarpg)\.decisiv\.net\/service_requests\//i.test(_asistUrl);
             const _prevSrc   = _finalOffsite && _finalOffsite.asistSource;
-            if (_isVolvoSR && _prevSrc !== 'estimate') {
+            if (_isAsistSR && _prevSrc !== 'estimate') {
               logger.info('[Relay] Phase3.5 ASIST enrich for', equipmentId, '|', _asistUrl.slice(0,80));
               _asistEnrich = await enrichVolvoAsist(_asistUrl);
               logger.info('[Relay] Phase3.5 result | source:', _asistEnrich.source, '| url:', _asistEnrich.bestUrl.slice(0,80));

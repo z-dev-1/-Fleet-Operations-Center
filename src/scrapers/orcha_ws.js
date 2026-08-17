@@ -27,6 +27,17 @@ function loadOrchaConfig() {
   return { mode: 'local', host: 'localhost', port: null }; // default: local auto-detect
 }
 
+// Resolve the Orcha agent from config (Settings → AI → Orcha Agent). The agent
+// determines the server-side model (orcha_default = Opus 4.6, others = Sonnet
+// 4.6). Falls back to orcha_default when unset. Read fresh per create_session.
+function _resolveAgentId() {
+  try {
+    const cfg = loadOrchaConfig();
+    if (cfg && typeof cfg.orchaAgentId === 'string' && cfg.orchaAgentId.trim()) return cfg.orchaAgentId.trim();
+  } catch (_) {}
+  return 'orcha_default';
+}
+
 function saveOrchaConfig(config) {
   try {
     const dir = path.dirname(ORCHA_CONFIG_FILE);
@@ -146,7 +157,7 @@ function sendOrchaViaWS(prompt, sessionId) {
       ws.send(JSON.stringify({
         type:       'create_session',
         title:      'Fleet AI (ephemeral)',
-        agent_id:   'orcha_default',
+        agent_id:   _resolveAgentId(),
         session_id: sessionId,
       }));
     });
@@ -227,7 +238,7 @@ function sendOrchaChat(prompt, sessionKey) {
           if (savedSessionId) {
             ws.send(JSON.stringify({ type: 'load_session', session_id: savedSessionId }));
           } else {
-            ws.send(JSON.stringify({ type: 'create_session', title: key === 'dm' ? 'Fleet Chat (DM Auto-Reply)' : 'Fleet Chat', agent_id: 'orcha_default' }));
+            ws.send(JSON.stringify({ type: 'create_session', title: key === 'dm' ? 'Fleet Chat (DM Auto-Reply)' : 'Fleet Chat', agent_id: _resolveAgentId() }));
           }
           break;
         }
@@ -251,7 +262,7 @@ function sendOrchaChat(prompt, sessionKey) {
           if (msg.request_type === 'load_session') {
             logger.info('[Fleet Chat] Session not found, creating new...');
             _sessionState(key).id = null;
-            ws.send(JSON.stringify({ type: 'create_session', title: key === 'dm' ? 'Fleet Chat (DM Auto-Reply)' : 'Fleet Chat', agent_id: 'orcha_default' }));
+            ws.send(JSON.stringify({ type: 'create_session', title: key === 'dm' ? 'Fleet Chat (DM Auto-Reply)' : 'Fleet Chat', agent_id: _resolveAgentId() }));
             break;
           }
           if (msg.request_type === 'send_message' || msg.request_type === 'create_session') {

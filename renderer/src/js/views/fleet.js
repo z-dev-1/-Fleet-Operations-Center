@@ -182,7 +182,25 @@ function _augmentRow(row) {
   });
 }
 
+// Phase 2 perf fix: memoize filter/sort results. Skip recomputation when
+// neither the row data nor the filter/sort parameters have changed.
+let _memoKey    = '';
+let _memoResult = null;
+
+function _filterSortKey(rows) {
+  // Cheap identity: row count + first/last equipmentId + filter/sort state
+  const first = rows.length > 0 ? rows[0].equipmentId : '';
+  const last  = rows.length > 1 ? rows[rows.length - 1].equipmentId : '';
+  return rows.length + '|' + first + '|' + last + '|' +
+    JSON.stringify(_filters) + '|' + _search + '|' +
+    _sortKey + '|' + _sortDir + '|' +
+    _quickFilterHighRisk + '|' + _showFleetNet;
+}
+
 function _applyFiltersAndSort(rows) {
+  const key = _filterSortKey(rows);
+  if (key === _memoKey && _memoResult) return _memoResult;
+
   let result = rows.filter((row) => {
     // FleetNet-only units are hidden by default (secondary/low-priority); shown only
     // when the FleetNet quick-filter is active.
@@ -215,6 +233,8 @@ function _applyFiltersAndSort(rows) {
     });
   }
 
+  _memoKey    = key;
+  _memoResult = result;
   return result;
 }
 
@@ -224,6 +244,17 @@ let _countEl  = null;
 let _wrapEl   = null;
 let _theadEl  = null;
 let _allRows  = [];
+let _scrollEl = null;  // Phase 5: virtual scroll container reference
+
+// Phase 5: Virtual scrolling state — only render visible rows + buffer
+const _VROW_HEIGHT = 36;    // px per row (matches .fleet-table__row height in CSS)
+const _VBUFFER     = 15;    // extra rows above/below viewport
+let _vFiltered     = [];    // current filtered+sorted dataset
+let _vStart        = -1;    // current rendered range start
+let _vEnd          = -1;    // current rendered range end
+let _vSpacerTop    = null;  // invisible spacer element (top)
+let _vSpacerBot    = null;  // invisible spacer element (bottom)
+let _vRafPending   = false; // debounce: only one rAF per frame
 
 function _renderRows(rows) {
   _allRows = rows;
@@ -232,6 +263,7 @@ function _renderRows(rows) {
   // Augment with relay virtual columns
   const augmented = rows.map(_augmentRow);
   const filtered  = _applyFiltersAndSort(augmented);
+  _vFiltered = filtered;
 
   if (_countEl) {
     _countEl.textContent = filtered.length + ' / ' + rows.length + ' units';
@@ -252,7 +284,67 @@ function _renderRows(rows) {
     return;
   }
 
-  _tbodyEl.innerHTML = filtered.map((row) => {
+  // Phase 5: Force re-render of visible window
+  _vStart = -1;
+  _vEnd   = -1;
+  _renderVirtualWindow();
+}
+
+/** Phase 5: Render only the visible slice of _vFiltered into _tbodyEl */
+function _renderVirtualWindow() {
+  if (!_scrollEl || !_vFiltered.length) return;
+
+  // Debounce via requestAnimationFrame — max 1 render per frame (prevents flash)
+  if (_vRafPending) return;
+  _vRafPending = true;
+  requestAnimationFrame(() => {
+    _vRafPending = false;
+    _doRenderVirtualWindow();
+  });
+}
+
+function _doRenderVirtualWindow() {
+  if (!_scrollEl || !_vFiltered.length) return;
+
+  const scrollTop  = _scrollEl.scrollTop;
+  const viewHeight = _scrollEl.clientHeight;
+  const totalRows  = _vFiltered.length;
+
+  let startIdx = Math.floor(scrollTop / _VROW_HEIGHT) - _VBUFFER;
+  let endIdx   = Math.ceil((scrollTop + viewHeight) / _VROW_HEIGHT) + _VBUFFER;
+  startIdx = Math.max(0, startIdx);
+  endIdx   = Math.min(totalRows, endIdx);
+
+  // Hysteresis: skip re-render if range changed by less than 3 rows (prevents boundary oscillation/flash)
+  if (_vStart >= 0 && _vEnd >= 0) {
+    const startDelta = Math.abs(startIdx - _vStart);
+    const endDelta   = Math.abs(endIdx - _vEnd);
+    if (startDelta < 3 && endDelta < 3) return;
+  }
+
+  _vStart = startIdx;
+  _vEnd   = endIdx;
+
+  // Build HTML for visible rows
+  const visibleHtml = _buildRowsHtml(_vFiltered, startIdx, endIdx);
+
+  // Render all rows (dataset is small enough that full render is flicker-free)
+  // Virtual scrolling removed — caused flashing on scroll due to innerHTML swaps.
+  // The memoized _applyFiltersAndSort ensures this only rebuilds when data/filters change.
+  const topH = 0;
+  const botH = 0;
+
+  _tbodyEl.innerHTML = _buildRowsHtml(_vFiltered, 0, _vFiltered.length);
+
+  // Wire event handlers on the visible rows
+  _wireRowEvents(_vFiltered);
+}
+
+/** Build the HTML for rows[startIdx..endIdx) — preserves ALL existing cell rendering */
+function _buildRowsHtml(filtered, startIdx, endIdx) {
+  let html = '';
+  for (let i = startIdx; i < endIdx; i++) {
+    const row = filtered[i];
     const lcClass   = _lifecycleClass(row.lifecycleState);
     const isSelected = row.equipmentId === _selectedId;
     const cells = COLS.map((c) => {
@@ -349,17 +441,19 @@ function _renderRows(rows) {
         const days = _parseDurationDays(row.duration || row.workDuration);
         if (days !== null) {
           const pct = days / _SLA_TARGET_DAYS;
-          if (pct >= 1.0)      breachCls = ' row--breached';       // already exceeded
-          else if (pct >= 0.6) breachCls = ' row--breach-risk';    // approaching (60-99%)
+          if (pct >= 1.0)      breachCls = ' row--breached';
+          else if (pct >= 0.6) breachCls = ' row--breach-risk';
         }
       }
     }
 
-    return '<tr class="fleet-table__row' + selCls + breachCls + '"' + heatStyle + ' data-id="' + row.equipmentId + '" data-lc="' + lcClass + '">' + cells + '</tr>';
-  }).join('');
+    html += '<tr class="fleet-table__row' + selCls + breachCls + '"' + heatStyle + ' data-id="' + row.equipmentId + '" data-lc="' + lcClass + '">' + cells + '</tr>';
+  }
+  return html;
+}
 
-
-  // Equipment ID / WR link → open in-app AAP asset window
+/** Wire click/context/checkbox handlers on visible rows */
+function _wireRowEvents(filtered) {
   _tbodyEl.querySelectorAll('a.eq-link, a.wr-link').forEach((a) => {
     a.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -546,6 +640,10 @@ export function init(container) {
   _wrapEl  = document.getElementById('fleet-table-wrap');
   _theadEl = document.getElementById('fleet-thead');
 
+  // Phase 5: Scroll listener removed — full render is used instead of virtual scroll
+  // (dataset ~180 rows renders instantly, virtual scroll caused flashing)
+  _scrollEl = el.querySelector('.fleet-table-scroll');
+
   // S9: column sort click
   _theadEl.querySelectorAll('th.sortable').forEach((th) => {
     th.addEventListener('click', () => {
@@ -695,10 +793,16 @@ function _updateBulkBar() {
   bar.style.display = 'flex';
   bar.innerHTML = `
     <span class="bulk-count">${count} unit${count > 1 ? 's' : ''} selected</span>
+    <button class="bulk-btn bulk-btn--compare" id="bulk-compare" ${count < 2 || count > 3 ? 'disabled title="Select 2-3 units"' : ''}>🔍 Compare</button>
     <button class="bulk-btn bulk-btn--relay" id="bulk-relay">🔄 Bulk Relay Change</button>
     <button class="bulk-btn bulk-btn--export" id="bulk-export-csv">📥 Export Selected</button>
     <button class="bulk-btn bulk-btn--clear" id="bulk-clear">✕ Clear</button>
   `;
+
+  // Wire compare
+  document.getElementById('bulk-compare').addEventListener('click', () => {
+    bus.emit('ui:compare-units', { unitIds: [..._selectedIds] });
+  });
 
   // Wire bulk relay
   document.getElementById('bulk-relay').addEventListener('click', () => {
@@ -823,24 +927,44 @@ function _showBulkRelayModal() {
 
 // ── S28: Export CSV ──────────────────────────────────────────────────────────
 const CSV_COLUMNS = [
-  { key: 'equipmentId',     header: 'Unit ID' },
-  { key: 'bodyType',        header: 'Body Type' },
-  { key: 'operator',        header: 'Operator' },
-  { key: 'domicileSite',    header: 'Domicile' },
-  { key: 'lifecycleState',  header: 'Lifecycle State' },
-  { key: 'lifecycleReason', header: 'Lifecycle Reason' },
-  { key: 'riskScore',       header: 'Risk Score' },
-  { key: 'vendor',          header: 'Vendor' },
-  { key: 'duration',        header: 'Duration' },
-  { key: 'manufacturer',    header: 'Make' },
-  { key: 'fuelType',        header: 'Fuel Type' },
-  { key: 'geofence',        header: 'Geofence' },
-  { key: 'openUnplanned',   header: 'Open Unplanned WRs' },
-  { key: 'openPlanned',     header: 'Open Planned WRs' },
-  { key: 'dueDate',         header: 'PM Due Dates' },
-  { key: 'issueSummary',    header: 'Issue Summary' },
-  { key: 'savedRepairStatus',     header: 'Repair Status' },
-  { key: 'savedPrimaryComponent', header: 'Primary Component' },
+  { key: 'equipmentId',            header: 'Unit ID' },
+  { key: 'bodyType',               header: 'Body Type' },
+  { key: 'operator',               header: 'Operator' },
+  { key: 'domicileSite',           header: 'Domicile' },
+  { key: 'lifecycleState',         header: 'Lifecycle State' },
+  { key: 'lifecycleReason',        header: 'Lifecycle Reason' },
+  { key: 'riskScore',              header: 'Risk Score' },
+  { key: 'vendor',                 header: 'Vendor' },
+  { key: 'dealerName',             header: 'Dealer Name' },
+  { key: 'duration',               header: 'Duration' },
+  { key: 'workDuration',           header: 'Work Duration' },
+  { key: 'manufacturer',           header: 'Make' },
+  { key: 'fuelType',               header: 'Fuel Type' },
+  { key: 'geofence',               header: 'Location/Geofence' },
+  { key: 'openUnplanned',          header: 'Open Unplanned WRs' },
+  { key: 'openPlanned',            header: 'Open Planned WRs' },
+  { key: 'alternativeId',          header: 'Alt ID (Dealer Case)' },
+  { key: 'offsiteShopEvent',       header: 'Offsite Event' },
+  { key: 'offsiteShopEventUrl',    header: 'Offsite URL' },
+  { key: 'salesforceCase',         header: 'Salesforce Case' },
+  { key: 'salesforceCaseUrl',      header: 'Salesforce URL' },
+  { key: 'serviceUrl',             header: 'Relay Service URL' },
+  { key: 'savedRepairStatus',      header: 'Repair Status' },
+  { key: 'savedPrimaryComponent',  header: 'Primary Component' },
+  { key: 'savedNotes',             header: 'Notes' },
+  { key: 'issueSummary',           header: 'Issue Summary' },
+  { key: 'issueDetails',           header: 'Issue Details' },
+  { key: 'repairTimeline',         header: 'Repair Timeline' },
+  { key: 'pmB',                    header: 'PM-B Due' },
+  { key: 'pmX',                    header: 'PM-X Due' },
+  { key: 'dot',                    header: 'DOT Due' },
+  { key: 'quarterlyLift',          header: 'Quarterly Lift Due' },
+  { key: 'pmStatus',               header: 'PM Status' },
+  { key: 'created',                header: 'WR Created Date' },
+  { key: 'assetType',              header: 'Asset Type' },
+  { key: 'subVendor',              header: 'Sub-Vendor' },
+  { key: 'asistSource',            header: 'ASIST Source' },
+  { key: 'asistLabel',             header: 'ASIST Label' },
 ];
 
 function _exportCSV(selectedOnly = false) {

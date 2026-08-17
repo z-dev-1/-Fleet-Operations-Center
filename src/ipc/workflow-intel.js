@@ -307,6 +307,21 @@ function registerWorkflowIntelIPC(ctx) {
     return (log.entries || []).slice(-lim).reverse();
   });
 
+  // ── Phase 4: Workflow Execution Engine ─────────────────────────────────────
+  handle('wi:execute-workflow', async (_e, id, runtimeVars) => {
+    requireString(id, 'id');
+    const all = store.load('workflowRecordings', {});
+    const workflow = all[id];
+    if (!workflow) throw new ConfigError(`Workflow not found: ${id}`, 'id');
+    if (!workflow.steps || !workflow.steps.length) throw new ConfigError('Workflow has no steps to execute', 'steps');
+
+    const { executeWorkflow } = require('../orcha/workflow-execute');
+    const variables = runtimeVars && typeof runtimeVars === 'object' ? runtimeVars : {};
+    logger.info(`Executing workflow: "${workflow.name}" (${id}) with ${workflow.steps.length} steps`);
+    const result = await executeWorkflow(workflow, { ctx, variables });
+    return result;
+  });
+
   // -- On-demand suggestion (Phase 3) -- mirrors the existing on-demand
   // "Analyze" pattern already used for ai:suggest-vendor in ipc/orcha.js,
   // rather than depending on the (currently dormant) runRecommendations()

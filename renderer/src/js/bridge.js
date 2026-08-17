@@ -12,6 +12,7 @@
 import bus   from './bus.js';
 import { init as initVendorBridge } from './vendor-bridge.js';
 import state from './state.js';
+import { playSound } from './notif-sounds.js';
 
 // ── IPC listener wiring ────────────────────────────────────────────────────
 
@@ -103,6 +104,10 @@ export function init() {
     window.fleet.onAlerts((alertData) => {
       state.update('alerts', alertData);
       bus.emit('orcha:alerts', alertData);
+      // Play sound for critical alerts
+      if (alertData && alertData.counts && alertData.counts.critical > 0) {
+        playSound('alert');
+      }
     });
   }
 

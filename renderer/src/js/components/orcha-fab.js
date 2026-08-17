@@ -141,8 +141,10 @@ function _togglePanel() {
       window.bubble.repositionMini();
     }
   }
-  // Always start Slack poll (background DM check)
-  if (!_pollTimer) _startSlackPoll();
+  // Phase 1 fix: only start the background DM poll once on first panel open.
+  // The boot-time setTimeout (below) already kicks it off — this guard just
+  // prevents a duplicate timer if the user opens the panel before the 3s boot delay.
+  if (!_pollTimer && _panelOpen) _startSlackPoll();
   // FEATURE (2026-07-16): stop the Slack-tab-specific refresh timer when the
   // whole panel closes, so it doesn't keep polling in the background when
   // the user can't even see it (separate from the always-on DM poll above).
@@ -1957,6 +1959,15 @@ export function init() {
     _startDMAutoReplyPoll();
     _updateReviewBadge();
   }, 4000);
+
+  // Auto-restart pollers when config is saved from Settings
+  if (slack.onConfigUpdated) {
+    slack.onConfigUpdated(() => {
+      // Reset and restart the channel watch timer
+      if (_channelWatchTimer) { clearInterval(_channelWatchTimer); _channelWatchTimer = null; }
+      _startChannelWatchPoll();
+    });
+  }
 
   // Morning briefing
   if (window.fleet && window.fleet.onBriefing) {

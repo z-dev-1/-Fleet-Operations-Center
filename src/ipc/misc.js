@@ -47,10 +47,49 @@ function registerMiscIPC(ctx) {
 
   // ── Stage 3 guards preserved ────────────────────────────────────────────
   // Issue #18: unpredictable temp file name + cleanup on close
+  // BUG FIX (Phase 4): email:preview previously expected payload.html to be pre-built,
+  // but the renderer sends the same raw payload as email:compose (operator, units, slot, etc.).
+  // Now builds HTML via buildEmail() — same as compose — then opens in a preview window.
   handle('email:preview', (_e, payload) => {
+    let html = payload.html || '';
+    if (!html) {
+      try {
+        const { buildEmail } = require('../../src/scrapers/emailBuilder');
+        const relayCache     = store.load('relayCache', {});
+        const notesStore     = store.load('notesStore', {});
+        const { operator, domicile, units, slot, testMode, emailNote } = payload;
+
+        let emailUnits = null;
+        if (units && units.length > 0 && units[0].op) { emailUnits = units; }
+        if (!emailUnits) {
+          const rawRows = (store.load('fleetData', { rows: [] })).rows || [];
+          emailUnits = rawRows.map(r => ({
+            id: r.equipmentId || '', op: r.operator || '', site: r.domicileSite || '',
+            model: (r.manufacturer || r.make || '').trim() || '--',
+            bodyType: r.bodyType || r.assetType || '', fuelType: r.fuelType || '',
+            atsState: r.lifecycleState || '', relayStatus: r.lifecycleReason || '',
+            riskScore: r.riskScore || 0,
+            riskTier: r.riskScore >= 75 ? 'HIGH' : r.riskScore >= 50 ? 'MEDIUM' : 'LOW',
+            vendor: r.vendor || '', duration: r.workDuration || '',
+            issue: r.issueDetails || '', created: r.created || '',
+            altId: r.alternativeId || '', serviceUrl: r.serviceUrl || '',
+            offsiteShopEvent: r.offsiteShopEvent || '', offsiteShopEventUrl: r.offsiteShopEventUrl || '',
+            savedRepairStatus: r.savedRepairStatus || '', savedPrimaryComponent: r.savedPrimaryComponent || '',
+            savedNotes: r.savedNotes || '', geofence: r.geofence || '',
+            insightsList: r.insightsList || [],
+          }));
+        }
+        html = buildEmail({ operator, domicile, units: emailUnits, slot, testMode, relayCache, notesStore, emailNote });
+      } catch (e) {
+        logger.error('email:preview build failed:', e.message);
+        return { success: false, error: e.message };
+      }
+    }
+    if (!html || html.length < 50) return { success: false, error: 'No HTML generated' };
+
     const rand    = crypto.randomBytes(8).toString('hex');
     const tmpFile = p.join(os.tmpdir(), 'fleet_email_preview_' + rand + '.html');
-    fs.writeFileSync(tmpFile, payload.html, 'utf8');
+    fs.writeFileSync(tmpFile, html, 'utf8');
     const win = new BrowserWindow({
       width: 980, height: 860, title: 'Fleet Email Preview',
       icon: require('../config/app-icon').getAppIconPath(),
@@ -62,14 +101,17 @@ function registerMiscIPC(ctx) {
     win.once('closed', () => {
       try { fs.unlinkSync(tmpFile); } catch (_) { /* already gone */ }
     });
+    return { success: true };
   });
 
   // Issue #12: setInterval always cleared through finish()
   handle('email:compose', async (_e, payload) => {
     const { to, cc, subject, label, operator, domicile, units, slot, testMode, emailNote } = payload;
     let finalHtml = '';
+    let _buildEmailRef = null;
     try {
       const { buildEmail } = require('../../src/scrapers/emailBuilder');
+      _buildEmailRef = buildEmail;
       const relayCache     = store.load('relayCache', {});
       const notesStore     = store.load('notesStore', {});
       let emailUnits       = null;
@@ -102,13 +144,20 @@ function registerMiscIPC(ctx) {
           return { id: r.equipmentId || '', op: r.operator || '', site: r.domicileSite || '', model: cleanMake(r), bodyType: r.bodyType || r.assetType || '', fuelType: r.fuelType || '', atsState: r.lifecycleState || '', relayStatus: r.lifecycleReason || '', riskScore: r.riskScore || 0, riskTier: r.riskScore >= 75 ? 'HIGH' : r.riskScore >= 50 ? 'MEDIUM' : 'LOW', vendor: r.vendor || '', duration: r.workDuration || '', issue: r.issueDetails || '', created: r.created || '', altId: r.alternativeId || '', serviceUrl: r.serviceUrl || '', offsiteShopEvent: r.offsiteShopEvent || '', offsiteShopEventUrl: r.offsiteShopEventUrl || '', asistSource: r.asistSource || '', asistLabel: r.asistLabel || '', asistSrUrl: r.asistSrUrl || '', asistScrapedAt: r.asistScrapedAt || '', dealerName: r.dealerName || '', subVendor: r.subVendor || r.dealerName || r.geofence || '', savedRepairStatus: r.savedRepairStatus || '', savedPrimaryComponent: r.savedPrimaryComponent || '', savedSalesforceCase: r.savedSalesforceCase || r.salesforceCase || '', savedSalesforceCaseUrl: r.savedSalesforceCaseUrl || r.salesforceCaseUrl || '', savedOffsiteEvent: r.savedOffsiteEvent || '', savedOffsiteUrl: r.savedOffsiteUrl || '', savedNotes: r.savedNotes || '', pmB: pm.pmB, pmX: pm.pmX, dot: pm.dot, quarterlyLift: pm.quarterlyLift, insightsList: r.insightsList || [], pmStatus: r.pmStatus || '', uptakeSynced: r.uptakeSynced || false, geofence: r.geofence || '' };
         });
       }
-      finalHtml = buildEmail({ operator, domicile, units: emailUnits, slot, testMode, relayCache, notesStore, emailNote });
+      finalHtml = _buildEmailRef({ operator, domicile, units: emailUnits, slot, testMode, relayCache, notesStore, emailNote });
     } catch (e) { logger.error('email:compose build failed:', e.message); return { success: false, error: e.message }; }
     if (!finalHtml || finalHtml.length < 100) return { success: false, error: 'HTML too short' };
+
+    // Enhance subject with change counts (e.g. "| 42 Unavail | 3 New ↓ | 2 Returned ↑")
+    let finalSubject = subject || '';
+    if (_buildEmailRef && _buildEmailRef._lastSubjectSuffix) {
+      finalSubject += _buildEmailRef._lastSubjectSuffix;
+    }
+
     const { session: eSession } = require('electron');
     return new Promise((resolve) => {
       const win = new BrowserWindow({ width: 1100, height: 800, show: true, title: 'Fleet Email', icon: require('../config/app-icon').getAppIconPath(), backgroundColor: '#f6f8fa', autoHideMenuBar: true, webPreferences: { nodeIntegration: false, contextIsolation: true, session: eSession.defaultSession } });
-      const owaUrl = 'https://outlook.office365.com/mail/deeplink/compose' + '?to=' + encodeURIComponent(to||'') + '&cc=' + encodeURIComponent(cc||'') + '&subject=' + encodeURIComponent(subject||'');
+      const owaUrl = 'https://outlook.office365.com/mail/deeplink/compose' + '?to=' + encodeURIComponent(to||'') + '&cc=' + encodeURIComponent(cc||'') + '&subject=' + encodeURIComponent(finalSubject||'');
       win.loadURL(owaUrl);
       let attempts = 0, done = false;
       let poll = null;
@@ -477,28 +526,35 @@ function registerMiscIPC(ctx) {
 
   // Split-view: open two URLs side by side in separate windows
   handle('window:split-view', async (_e, data) => {
-    const { BrowserWindow, screen } = require('electron');
+    const { BrowserWindow, screen, session: eSession } = require('electron');
+    const { attachAutoLogin, partitionForUrl } = require('../orcha/auto-login');
     const { leftUrl, rightUrl, leftTitle, rightTitle } = data || {};
         if (!leftUrl && !rightUrl) return { ok: false, error: 'No URLs provided' };
 
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     const halfW = Math.floor(width / 2);
 
-    const opts = (x, title) => ({
-      width: halfW, height: height, x, y: 0,
-      title: title || 'Fleet Operations',
-      icon: require('../config/app-icon').getAppIconPath(),
-      webPreferences: { nodeIntegration: false, contextIsolation: true },
-    });
+    const opts = (x, title, url) => {
+      const partition = url ? partitionForUrl(url) : null;
+      const ses = partition ? eSession.fromPartition(partition) : eSession.defaultSession;
+      return {
+        width: halfW, height: height, x, y: 0,
+        title: title || 'Fleet Operations',
+        icon: require('../config/app-icon').getAppIconPath(),
+        webPreferences: { nodeIntegration: false, contextIsolation: true, session: ses },
+      };
+    };
 
     if (leftUrl) {
-      const left = new BrowserWindow(opts(0, leftTitle || 'Relay Garage'));
+      const left = new BrowserWindow(opts(0, leftTitle || 'Relay Garage', leftUrl));
       left.setMenuBarVisibility(false);
+      attachAutoLogin(left, leftUrl, { maxRetries: 3 });
       left.loadURL(leftUrl);
     }
     if (rightUrl) {
-      const right = new BrowserWindow(opts(halfW, rightTitle || 'Offsite Shop'));
+      const right = new BrowserWindow(opts(halfW, rightTitle || 'Offsite Shop', rightUrl));
       right.setMenuBarVisibility(false);
+      attachAutoLogin(right, rightUrl, { maxRetries: 3 });
       right.loadURL(rightUrl);
     }
 

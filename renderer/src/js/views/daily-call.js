@@ -510,8 +510,13 @@ async function _runAIReviewForGroup(kind, g) {
   try {
     const prompt = _buildAIPrompt(kind, g);
     // Timeout guard: window.ai.ask() can hang indefinitely if the AI layer is
-    // busy or unreachable -- freezing the whole Daily Call view. Cap at 25s.
-    const _aiTimeout = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 25s')), 25000));
+    // busy or unreachable -- freezing the whole Daily Call view.
+    // FIX (2026-08-17): raised 25s -> 90s. The 25s cap was shorter than the AI
+    // layer's real response time (50-90s via the fleet-brain/WS transport), so
+    // "AI Review" timed out every time and showed "AI review failed". 90s
+    // matches the transport's own ORCHA_TIMEOUT_MS ceiling. The button shows a
+    // spinner while running, so the view isn't frozen — just waiting.
+    const _aiTimeout = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 90s')), 90000));
     const result = await Promise.race([window.ai.ask(prompt), _aiTimeout]);
     if (!result || result.ok === false) return fail((result && result.error) || 'AI call failed');
     const text = result.text || '';

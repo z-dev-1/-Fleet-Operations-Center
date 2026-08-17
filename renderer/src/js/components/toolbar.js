@@ -17,7 +17,8 @@ let _suppressFilterEvents = false;
 
 // ── Nav tab → bus view map ──────────────────────────────────────────────────
 const TAB_VIEW = {
-  dashboard:  'fleet',
+  'fleet-table': 'fleet',
+  dashboard:  'dashboard',
   analytics:  'analytics',
   vendors:    'vendors',
   scheduler:  'schedulers',
@@ -47,9 +48,12 @@ export function init(container) {
         <span class="tb-brand-text">Fleet Ops</span>
       </div>
 
-      <!-- Nav tabs (reduced to 4 core views) -->
+      <!-- Nav tabs -->
       <div class="tb-nav">
-        <button class="tb-tab active" data-view="dashboard">
+        <button class="tb-tab active" data-view="fleet-table">
+          <span class="tb-tab-icon">📋</span> Fleet
+        </button>
+        <button class="tb-tab" data-view="dashboard">
           <span class="tb-tab-icon">⊞</span> Dashboard
         </button>
         <button class="tb-tab" data-view="analytics">
@@ -281,19 +285,21 @@ export function init(container) {
   setInterval(_pollAiStatus, 15000);
 
   // ── Theme toggle ──────────────────────────────────────────────────────────
-  const THEMES = ['dark', 'light', 'midnight'];
-  const THEME_ICONS = { dark: '🌙', light: '☀️', midnight: '✦' };
-  const THEME_VARS = {
-    dark:     { '--bg':'#0d1117','--panel':'#161b22','--card':'#1c2128','--el':'#21262d','--txt':'#f0f6fc','--txt2':'#8b949e','--bdr':'#30363d' },
-    light:    { '--bg':'#f6f8fa','--panel':'#ffffff','--card':'#f0f2f5','--el':'#e7eaf0','--txt':'#1c2128','--txt2':'#57606a','--bdr':'#d0d7de' },
-    midnight: { '--bg':'#050709','--panel':'#0d1117','--card':'#111418','--el':'#161b22','--txt':'#e6edf3','--txt2':'#7d8590','--bdr':'#21262d' },
-  };
+  // Unified theme system — uses the full token set from settings.js (25+ vars)
+  // instead of the old partial 7-var override. Includes all 4 themes.
+  const THEMES = ['dark', 'light', 'midnight', 'ocean'];
+  const THEME_ICONS = { dark: '🌙', light: '☀️', midnight: '✦', ocean: '🌊' };
+
+  // Import the full theme applier from settings (applies 25+ CSS vars + body class)
+  let _applyFullTheme = null;
+  import('../views/settings.js').then(mod => { _applyFullTheme = mod.applyTheme; }).catch(() => {});
+
   let _themeIdx = THEMES.indexOf(localStorage.getItem('fleet_theme') || 'dark');
   if (_themeIdx < 0) _themeIdx = 0;
 
   function _applyTheme(name) {
-    const vars = THEME_VARS[name] || THEME_VARS.dark;
-    Object.entries(vars).forEach(([k, v]) => document.documentElement.style.setProperty(k, v));
+    // Full theme application via settings.js (25+ vars, body class, persists to store)
+    if (_applyFullTheme) _applyFullTheme(name);
     document.documentElement.setAttribute('data-theme', name);
     localStorage.setItem('fleet_theme', name);
     const icon = document.getElementById('tb-theme-icon');
@@ -310,6 +316,19 @@ export function init(container) {
       message: THEMES[_themeIdx].charAt(0).toUpperCase() + THEMES[_themeIdx].slice(1) + ' theme',
       duration: 1200
     });
+  });
+
+  // Sync toolbar icon when theme changes from settings panel
+  bus.on('nexus:theme-change', () => {
+    // Read current theme from body class
+    let current = 'dark';
+    if (document.body.classList.contains('light-mode'))    current = 'light';
+    if (document.body.classList.contains('midnight-mode')) current = 'midnight';
+    if (document.body.classList.contains('ocean-mode'))    current = 'ocean';
+    _themeIdx = THEMES.indexOf(current);
+    if (_themeIdx < 0) _themeIdx = 0;
+    const icon = document.getElementById('tb-theme-icon');
+    if (icon) icon.textContent = THEME_ICONS[current] || '🌙';
   });
 
   // ── Search ────────────────────────────────────────────────────────────────
@@ -488,7 +507,7 @@ export function init(container) {
   // ── Show filter bar only on fleet/dashboard view ──────────────────────────
   const filterBar = document.getElementById('tb-filterbar');
   bus.on('ui:view-change', ({ to }) => {
-    if (filterBar) filterBar.style.display = (to === 'fleet' || to === 'dashboard') ? 'flex' : 'none';
+    if (filterBar) filterBar.style.display = (to === 'fleet') ? 'flex' : 'none';
   });
 
   // ── Quick-filter pills ──────────────────────────────────────────

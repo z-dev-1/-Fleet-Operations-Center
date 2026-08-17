@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    /* Phase 6: TypeScript for new modules — gradual adoption */
+    "target": "ES2022",
+    "module": "CommonJS",
+    "lib": ["ES2022"],
+    "outDir": "./dist/ts",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    /* Allow JS files to coexist — gradual migration */
+    "allowJs": true,
+    "checkJs": false,
+    /* Don't emit — we use ts-node/tsx at runtime or pre-compile selectively */
+    "noEmit": true,
+    "moduleResolution": "node",
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.js"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "renderer",
+    "tests"
+  ]
+}

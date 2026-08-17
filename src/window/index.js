@@ -225,8 +225,9 @@ function _saveAAPCaches(rows) {
       mergedRows = mergeUptakeIntoRows(mergedRows, uptakeHash.units);
     }
     // Merge Relay from cache file
-    if (_fs.existsSync(P.relayCache)) {
-      const relayData = JSON.parse(_fs.readFileSync(P.relayCache, 'utf8'));
+    // Phase 1 fix: use store.load() instead of raw fs.readFileSync for atomic-read safety.
+    const relayData = store.load('relayCache', {});
+    if (relayData && Object.keys(relayData).length > 0) {
       const notesStore = store.load('notesStore', {});
       const { mergeRelayIntoRows } = require('../scrapers/relay');
       mergedRows = mergeRelayIntoRows(mergedRows, relayData, notesStore);
@@ -436,7 +437,7 @@ function initWindows(ctx) {
   //  1. Auto-configures AAP columns via UI injection
   //  2. Polls for table rows every 2s
   //  3. Forces 1000/page, extracts, maps, calls onComplete(rows)
-  async function _runAAPScrapeLoop(win, { label, maxPolls = 45, onComplete, onTimeout }) {
+  async function _runAAPScrapeLoop(win, { label, maxPolls = 18, onComplete, onTimeout }) {
     let done  = false;
     let polls = 0;
 
@@ -740,7 +741,7 @@ function initWindows(ctx) {
       } catch (e) {
         logger.info('[' + label + '] Poll ' + polls + ' error (page navigating): ' + e.message);
       }
-    }, 2000);
+    }, 5000); // Phase 2 perf fix: reduced from 2s to 5s — AAP load time is server-bound, faster polling just adds IPC noise
   }
 
   // ── Main window ───────────────────────────────────────────────────────────
@@ -967,7 +968,7 @@ function initWindows(ctx) {
         }catch(e){}
         logger.info('[startup] AAP loaded \u2014 starting scrape loop');
         _runAAPScrapeLoop(mainWindow, {
-          label: 'startup', maxPolls: 45,
+          label: 'startup', maxPolls: 18,
           onComplete: (rows) => {
             const payload = _saveAAPCaches(rows);
             logger.info('Startup scrape: saved ' + rows.length + ' units');
@@ -1167,7 +1168,7 @@ function initWindows(ctx) {
 
       scrapeWin.webContents.once('did-finish-load', () => {
         _runAAPScrapeLoop(scrapeWin, {
-          label: 'rescan', maxPolls: 40,
+          label: 'rescan', maxPolls: 18,
           onComplete: (rows) => {
             const payload = _saveAAPCaches(rows);
             logger.info('Rescan complete: ' + rows.length + ' units saved');
@@ -1408,12 +1409,30 @@ function initWindows(ctx) {
     // Re-inject Midway cookies so AEA passes on first load
     try { await _getAuth().injectCookies(); } catch(e) { logger.warn('[relay:open-url] Cookie inject skipped:', e.message); }
     if (!url || !/^https?:\/\//i.test(url)) return;
+
+    // Use vendor-specific partition if available (preserves login session per vendor)
+    const partition = partitionForUrl(url) || '';
+    const ses = partition ? session.fromPartition(partition) : session.defaultSession;
+
     const win = new BrowserWindow({
-      width: 1400, height: 900, title: 'AAP Relay \u2013 Service Request',
+      width: 1400, height: 900, title: 'Fleet Ops \u2013 Vendor Portal',
       icon: getAppIconPath(),
       backgroundColor: '#0d1117', autoHideMenuBar: true,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, session: session.defaultSession },
+      webPreferences: { nodeIntegration: false, contextIsolation: true, session: ses },
     });
+
+    // Attach auto-login: if the page redirects to a login page, fill credentials automatically
+    attachAutoLogin(win, url, {
+      maxRetries: 3,
+      onDone: (result) => {
+        if (result.success) {
+          logger.info('[relay:open-url] Auto-login succeeded for', url.slice(0, 80));
+        } else {
+          logger.warn('[relay:open-url] Auto-login failed:', result.error || 'unknown', '| url:', url.slice(0, 80));
+        }
+      }
+    });
+
     win.loadURL(url);
     win.once('ready-to-show', () => win.show());
   });

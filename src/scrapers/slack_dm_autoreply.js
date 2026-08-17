@@ -196,7 +196,12 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
   // JSON-schema reminder appended last so it is the final instruction the model
   // sees before the actual message — reduces plain-text / "Holding, unchanged." responses.
   const _jsonReminder = '\n\nREMINDER — YOUR ENTIRE RESPONSE MUST BE A SINGLE VALID JSON OBJECT, nothing before or after it:\n{"inScope":true|false,"reply":"...","category":"alert"|"action"|"workflow"|null,"title":"..."|null}';
-  const prompt = _contextReset + PERSONA_SYSTEM_PROMPT + timeContext + groupBlock + contextBlock + _jsonReminder + '\n\nIncoming DM:\n' + messageText;
+
+  // Inject live fleet data context so AI can answer unit/vendor/status questions accurately
+  const { buildFleetContext } = require('../orcha/ai-context');
+  const fleetContext = buildFleetContext(messageText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true });
+
+  const prompt = _contextReset + PERSONA_SYSTEM_PROMPT + timeContext + groupBlock + contextBlock + fleetContext + _jsonReminder + '\n\nIncoming DM:\n' + messageText;
   // FIX (2026-07-24): was using sendOrchaChat() (direct WS-only, 90s timeout,
   // no fallback). If the Orcha WS server is not running or slow, EVERY DM call
   // timed out and sent the canned fallback reply. Switch to relay.ask() which
@@ -204,9 +209,13 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
   let raw;
   try {
     const relay = require('../orcha/relay');
-    // Timeout guard: relay.ask() can hang if all workers are busy on fleet jobs.
-    // Cap at 20s so a single slow AI call doesn't hold _pollLock for minutes.
-    const _aiTimeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 20s')), 20000));
+    // relay.ask() uses the automatic chain: Orcha (fleet-brain WS) first, then
+    // WS -> CLI -> Claude Code -> Bedrock fallback — same behavior as the rest
+    // of the app. FIX (2026-08-17): the ONLY change vs. the original is the
+    // timeout: raised 20s -> 90s. The old 20s cap was shorter than a real Orcha
+    // response (50-90s), so every DM timed out and sent the canned fallback even
+    // though Orcha would have answered. 90s matches the transport's own ceiling.
+    const _aiTimeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 90s')), 90000));
     raw = await Promise.race([relay.ask(prompt), _aiTimeoutP]);
   } catch (e) {
     logger.warn('[SlackDM] AI call threw:', e.message);

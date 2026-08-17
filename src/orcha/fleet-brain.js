@@ -36,8 +36,22 @@ const logger    = require('../utils/logger')('fleet-brain');
 const TIMEOUT_MS        = 200000; // stay below the 240s outer safety boundary
 const SESSION_FILE      = P.chatSessionId;
 const SESSION_MAX_AGE   = 8 * 60 * 60 * 1000;
-const AGENT_ID          = 'orcha_default';
+const AGENT_ID          = 'orcha_default'; // fallback default (Opus 4.6)
 const RECONNECT_DELAY   = 3000;
+
+// Resolve the Orcha agent at session-create time from orcha_config.json
+// (Settings → AI → Orcha Agent). The agent determines the server-side model
+// (orcha_default = Opus 4.6, others = Sonnet 4.6). Read fresh so a Settings
+// change applies on the next new session; never crash on missing/bad config.
+function _resolveAgentId() {
+  try {
+    if (fs.existsSync(P.orchaConfig)) {
+      const cfg = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
+      if (cfg && typeof cfg.orchaAgentId === 'string' && cfg.orchaAgentId.trim()) return cfg.orchaAgentId.trim();
+    }
+  } catch (_) {}
+  return AGENT_ID;
+}
 const MAX_QUEUE         = 50;
 // After this many consecutive WS failures, stop trying Orcha and switch to
 // local mode. Reset and retry Orcha after RETRY_WS_AFTER_MS.
@@ -288,7 +302,7 @@ function _handleMessage(msg) {
       if (_sessionId) {
         _ws.send(JSON.stringify({ type: 'load_session', session_id: _sessionId }));
       } else {
-        _ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet Operations Brain', agent_id: AGENT_ID, system_prompt: _buildSystemContext() }));
+        _ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet Operations Brain', agent_id: _resolveAgentId(), system_prompt: _buildSystemContext() }));
       }
       break;
     case 'session_loaded':
@@ -310,7 +324,7 @@ function _handleMessage(msg) {
       if (msg.request_type === 'load_session') {
         logger.info('Session not found — creating new');
         _sessionId = null;
-        _ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet Operations Brain', agent_id: AGENT_ID }));
+        _ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet Operations Brain', agent_id: _resolveAgentId() }));
       } else if (_activeReq) {
         _activeReq.reject(new Error(msg.error || 'Orcha error'));
         _activeReq = null;
@@ -460,7 +474,7 @@ function resetSession() {
   _localHistory = []; // clear local context too
   try { fs.unlinkSync(SESSION_FILE); } catch (_) {}
   if (_ws && _ws.readyState === WebSocket.OPEN) {
-    _ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet Operations Brain', agent_id: AGENT_ID }));
+    _ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet Operations Brain', agent_id: _resolveAgentId() }));
   }
   logger.info('Session reset — next call creates fresh context');
 }

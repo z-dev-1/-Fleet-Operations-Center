@@ -1,125 +1,114 @@
 /**
- * notif-sounds.js — Sound notifications for the app's existing 'ui:notif-push'
- * bus event (see notif-dropdown.js for the notification payload shape:
- * { icon, title, body, tag, time }).
+ * notif-sounds.js — Notification sounds using Web Audio API
  *
- * DESIGN: uses the Web Audio API to synthesize short, distinct tones per
- * notification type rather than shipping audio asset files -- no binary
- * files to add to the repo/build, no licensing concerns, and each sound
- * is generated on the fly so volume scaling is exact and consistent.
+ * No external audio files needed — generates tones programmatically.
+ * Sounds are short, professional, and non-intrusive.
  *
- * Type is inferred from the notification's `icon` field (the app's
- * existing, already-consistent vocabulary -- confirmed live across every
- * ui:notif-push call site in the codebase):
- *   ✅          -> success   (e.g. WR Created)
- *   ❌          -> error     (e.g. Submit Failed)
- *   🚨          -> alert     (e.g. Partner Auto-Reply escalation)
- *   📩          -> message   (e.g. Slack DM/incoming)
- *   anything else -> default (generic single blip)
- *
- * Settings persisted via the existing generic settings store under the
- * same 'notifications' key already used by the OS-notification toggles in
- * Settings -> Integrations -> Notifications (see settings.js
- * _wireNotifications/_populate) -- new fields: soundsEnabled, soundVolume.
+ * Usage:
+ *   import { playSound } from './notif-sounds.js';
+ *   playSound('alert');    // critical alert
+ *   playSound('dm');       // new Slack DM
+ *   playSound('success');  // action completed
+ *   playSound('info');     // general notification
  */
 
-let _enabled = true;
-let _volume = 0.5; // 0..1
 let _ctx = null;
+let _enabled = true;
+let _volume = 0.3; // 0-1
 
 function _getCtx() {
   if (!_ctx) {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return null;
-    _ctx = new AC();
+    try { _ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (_) { return null; }
   }
   return _ctx;
 }
 
-/**
- * configure({enabled, volume}) — called once on init (loaded from saved
- * settings) and again live whenever the user changes the toggle/slider in
- * Settings (via bus event 'notif-sounds:config' -- see settings.js).
- */
-export function configure(prefs) {
-  if (!prefs) return;
-  if (typeof prefs.enabled === 'boolean') _enabled = prefs.enabled;
-  if (typeof prefs.volume === 'number') _volume = Math.max(0, Math.min(1, prefs.volume));
-}
+function _playTone(freq, duration, type = 'sine', ramp = true) {
+  const ctx = _getCtx();
+  if (!ctx || !_enabled) return;
 
-export function getConfig() {
-  return { enabled: _enabled, volume: _volume };
-}
-
-// Plays a single tone: frequency (Hz), duration (seconds), start delay (seconds)
-function _tone(ctx, freq, dur, delay, gainScale = 1) {
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
-  osc.type = 'sine';
-  osc.frequency.value = freq;
-  const startAt = ctx.currentTime + delay;
-  const peak = _volume * 0.25 * gainScale; // 0.25 base ceiling -- keeps synth tones comfortably quiet even at volume=1
-  gain.gain.setValueAtTime(0, startAt);
-  gain.gain.linearRampToValueAtTime(peak, startAt + 0.01);
-  gain.gain.exponentialRampToValueAtTime(0.001, startAt + dur);
   osc.connect(gain);
   gain.connect(ctx.destination);
-  osc.start(startAt);
-  osc.stop(startAt + dur + 0.02);
+
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, ctx.currentTime);
+  gain.gain.setValueAtTime(_volume, ctx.currentTime);
+
+  if (ramp) {
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + duration);
+  }
+
+  osc.start(ctx.currentTime);
+  osc.stop(ctx.currentTime + duration);
 }
 
-// Distinct tone patterns per type -- pitch/rhythm chosen so each is
-// recognizable by ear alone, not just by volume/length:
-//   success: bright two-note rising chime (like a soft "ta-da")
-//   error:   two-note falling tone (lower, slightly longer -- unmistakably "wrong")
-//   alert:   three quick short beeps at an urgent, higher pitch
-//   message: single short, soft mid-pitch blip
-//   default: single plain tone
-const PATTERNS = {
-  success: (ctx) => { _tone(ctx, 660, 0.12, 0); _tone(ctx, 880, 0.16, 0.1); },
-  error:   (ctx) => { _tone(ctx, 400, 0.18, 0, 1.1); _tone(ctx, 300, 0.22, 0.12, 1.1); },
-  alert:   (ctx) => { _tone(ctx, 950, 0.09, 0, 1.2); _tone(ctx, 950, 0.09, 0.14, 1.2); _tone(ctx, 950, 0.09, 0.28, 1.2); },
-  message: (ctx) => { _tone(ctx, 520, 0.1, 0, 0.8); },
-  default: (ctx) => { _tone(ctx, 600, 0.12, 0, 0.8); },
+const SOUNDS = {
+  // Critical alert: two-tone urgent beep (high-low)
+  alert: () => {
+    _playTone(880, 0.12, 'square');
+    setTimeout(() => _playTone(660, 0.15, 'square'), 140);
+    setTimeout(() => _playTone(880, 0.12, 'square'), 320);
+  },
+
+  // New Slack DM: gentle double-tap (like a message received)
+  dm: () => {
+    _playTone(587, 0.08, 'sine');
+    setTimeout(() => _playTone(784, 0.1, 'sine'), 100);
+  },
+
+  // Success: rising chime
+  success: () => {
+    _playTone(523, 0.08, 'sine');
+    setTimeout(() => _playTone(659, 0.08, 'sine'), 80);
+    setTimeout(() => _playTone(784, 0.12, 'sine'), 160);
+  },
+
+  // Info: soft single tap
+  info: () => {
+    _playTone(440, 0.1, 'sine');
+  },
+
+  // Warning: descending tone
+  warning: () => {
+    _playTone(660, 0.1, 'triangle');
+    setTimeout(() => _playTone(440, 0.15, 'triangle'), 120);
+  },
 };
 
-const ICON_TYPE_MAP = {
-  '\u2705': 'success', // ✅
-  '\u274c': 'error',   // ❌
-  '\u{1f6a8}': 'alert',   // 🚨
-  '\u{1f4e9}': 'message', // 📩
-};
-
-export function typeForIcon(icon) {
-  return ICON_TYPE_MAP[icon] || 'default';
+export function playSound(name) {
+  const fn = SOUNDS[name];
+  if (fn) fn();
 }
 
-/**
- * play(type) — type is one of 'success' | 'error' | 'alert' | 'message' |
- * 'default'. Silently no-ops if sounds are disabled, volume is 0, or the
- * browser's autoplay policy hasn't yet granted audio (AudioContext
- * requires a prior user gesture on first use in Chromium -- this is a
- * best-effort notification sound, not a critical alert, so failing
- * silently here is the correct behavior rather than surfacing an error
- * for something the user has no direct action to take on).
- */
-export function play(type) {
-  if (!_enabled || _volume <= 0) return;
-  try {
-    const ctx = _getCtx();
-    if (!ctx) return;
-    if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); }
-    const fn = PATTERNS[type] || PATTERNS.default;
-    fn(ctx);
-  } catch (e) { /* best-effort -- never let a sound failure break notifications */ }
+export function setSoundEnabled(enabled) {
+  _enabled = !!enabled;
 }
 
+export function setSoundVolume(vol) {
+  _volume = Math.max(0, Math.min(1, vol));
+}
+
+export function isSoundEnabled() {
+  return _enabled;
+}
+
+
 /**
- * playForNotification(n) — convenience wrapper: derives type from the
- * notification object's icon field and plays it. This is the function
- * notif-dropdown.js actually calls from its existing 'ui:notif-push'
- * handler.
+ * playForNotification(n) — Derives sound type from notification icon and plays it.
+ * Called by notif-dropdown.js on every ui:notif-push event.
+ * @param {{ icon, title, body }} n — notification payload
  */
 export function playForNotification(n) {
-  play(typeForIcon(n && n.icon));
+  if (!n || !n.icon) { playSound('info'); return; }
+  const icon = n.icon;
+  if (icon.includes('\u{1F6A8}') || icon.includes('🚨')) { playSound('alert'); return; }   // 🚨 escalation
+  if (icon.includes('\u{1F534}') || icon.includes('🔴')) { playSound('alert'); return; }   // 🔴 critical
+  if (icon.includes('\u{1F4E9}') || icon.includes('📩')) { playSound('dm'); return; }      // 📩 DM / message
+  if (icon.includes('\u2705') || icon.includes('✅'))    { playSound('success'); return; } // ✅ success
+  if (icon.includes('\u274C') || icon.includes('❌'))    { playSound('warning'); return; } // ❌ error
+  if (icon.includes('\u26A0') || icon.includes('⚠'))    { playSound('warning'); return; } // ⚠️ warning
+  playSound('info'); // default
 }

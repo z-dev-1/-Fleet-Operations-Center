@@ -55,6 +55,12 @@ function _validatePopupUrl(rawUrl) {
 function registerOrchaIPC(ctx) {
   const send = ctx.sendToWindow;
 
+  // ── Timeline Intelligence ────────────────────────────────────────────────
+  handle('orcha:timeline-intel', async () => {
+    const { analyzeFleet } = require('../orcha/timeline-intel');
+    return analyzeFleet();
+  });
+
   // ── orcha:deep-process ───────────────────────────────────────────────────
   // Issue #11: 120s timeout — runOrchaDeepScan cannot hang IPC indefinitely
   handle('orcha:deep-process', async (_e, unitIds) => {

@@ -30,6 +30,13 @@
  *   ui:loading       Boolean
  */
 
+import * as EVENTS from './events.js';
+
+// Phase 5: build a Set of known event names for dev-mode validation
+const _knownEvents = new Set(Object.values(EVENTS));
+const _isDev = (typeof process !== 'undefined' && process.env && process.env.NODE_ENV === 'development')
+  || (typeof location !== 'undefined' && location.search && location.search.includes('dev=1'));
+
 const _bus = new EventTarget();
 
 const bus = {
@@ -49,6 +56,10 @@ const bus = {
   },
   /** Emit an event with an optional payload. */
   emit(event, detail) {
+    // Phase 5: warn on unknown event names in dev mode (catches typos)
+    if (_isDev && !_knownEvents.has(event)) {
+      console.warn('[bus] Unknown event "' + event + '" — is it missing from events.js?');
+    }
     _bus.dispatchEvent(new CustomEvent(event, { detail }));
   },
 };

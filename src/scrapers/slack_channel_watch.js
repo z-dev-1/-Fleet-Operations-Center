@@ -254,19 +254,29 @@ function _isInMentionThread(channelId, threadTs) {
 // ── AI classify + draft ──────────────────────────────────────────────────
 async function _classifyAndDraft(messageText, askOrcha) {
   // Inject local time so the AI uses the correct time-of-day greeting
-  // (morning/afternoon/evening) rather than guessing from UTC.
   const _now = new Date();
   const _timeStr = _now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
   const _dateStr = _now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   const timeContext = '\n\nCurrent local time: ' + _timeStr + ', ' + _dateStr + '.';
-  const prompt = PERSONA_SYSTEM_PROMPT + timeContext + '\n\nPartner message:\n' + messageText;
+
+  // Inject live fleet data context so AI can give real, data-driven answers
+  const { buildFleetContext } = require('../orcha/ai-context');
+  const fleetContext = buildFleetContext(messageText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true });
+
+  const prompt = PERSONA_SYSTEM_PROMPT + timeContext + fleetContext + '\n\nPartner message:\n' + messageText;
   let aiResult;
   try {
-    // Timeout guard: askOrcha() can hang up to 183s (90s × 2 retries) if the
-    // Orcha WS is unreachable. That holds _pollLock forever. Cap at 20s so one
-    // slow/hung partner message never blocks all channel + DM polling.
-    const _aiTimeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 20s')), 20000));
-    aiResult = await Promise.race([askOrcha(prompt), _aiTimeoutP]);
+    // FIX (2026-08-17): was using askOrcha() (WS-only, no fallback, 20s cap) —
+    // WS-only meant no automatic Claude/Bedrock fallback, and 20s was shorter
+    // than a real Orcha response so replies timed out into the canned fallback.
+    // Switch to relay.ask() — the SAME automatic chain the rest of the app uses:
+    // Orcha (fleet-brain WS) first, then WS -> CLI -> Claude Code -> Bedrock.
+    // relay.ask returns a raw string, so normalize into the { text } shape the
+    // JSON-parsing below expects. 90s matches the transport's own ceiling.
+    const relay = require('../orcha/relay');
+    const _aiTimeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 90s')), 90000));
+    const _raw = await Promise.race([relay.ask(prompt), _aiTimeoutP]);
+    aiResult = { ok: true, text: _raw };
   } catch (e) {
     logger.warn('[SlackWatch] AI call threw:', e.message);
     aiResult = { ok: false, error: e.message };

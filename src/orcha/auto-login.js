@@ -75,11 +75,11 @@ const LOGIN_STRATEGIES = {
   "dashboard.record360.com":         "two-step",
   "amazon.aperiatech.com":           "two-step",
   "amazon.reach24.net":              "standard",
-  "dtna.my.site.com":                "standard",
-  "ciam.dtna.com":                   "standard",
-  "login.dtna.com":                  "standard",
-  "login.na.ciam.daimlertruck.com":  "standard",
-  "login.ciam.daimlertruck.com":     "standard",
+  "dtna.my.site.com":                "azure-b2c",
+  "ciam.dtna.com":                   "azure-b2c",
+  "login.dtna.com":                  "azure-b2c",
+  "login.na.ciam.daimlertruck.com":  "azure-b2c",
+  "login.ciam.daimlertruck.com":     "azure-b2c",
   "roadready.fadv.com":              "standard",
   "amazonfreightpartner.my.salesforce.com": "sso-click",
   "velogic.my.site.com":             "standard",
@@ -271,6 +271,82 @@ async function _loginTwoStep(wc, username, password) {
   return true;
 }
 
+// ── Strategy: azure-b2c (DTNA/Daimler Truck CIAM — single-page email+pass) ───
+// The DTNA CIAM login page shows: User ID + Password + "Login" button + 
+// "Daimler Truck Corporate Login" button. We need the "Login" button specifically.
+// The fields use placeholder text "User ID" and "Password".
+async function _loginAzureB2C(wc, username, password) {
+  // Wait for the page to fully render (JS-heavy)
+  await _wait(2000);
+
+  // Fill User ID — try placeholder-based selectors first (most reliable for this form)
+  const emailSelectors = [
+    'input[placeholder="User ID"]',
+    '#signInName',
+    'input[name="signInName"]',
+    'input[type="email"]',
+    'input[type="text"]',
+  ];
+  let emailFilled = false;
+  for (const sel of emailSelectors) {
+    const ok = await _execSafe(wc, _fillScript(sel, username));
+    if (ok) { emailFilled = true; logger.info('Azure B2C: filled User ID with:', sel); break; }
+  }
+  if (!emailFilled) {
+    logger.warn('Azure B2C: could not fill User ID');
+    await _dumpInputs(wc, 'azure-b2c-no-userid');
+    return false;
+  }
+
+  // Fill Password
+  await _wait(300);
+  const passSelectors = [
+    'input[placeholder="Password"]',
+    '#password',
+    'input[name="password"]',
+    'input[type="password"]',
+  ];
+  let passFilled = false;
+  for (const sel of passSelectors) {
+    const ok = await _execSafe(wc, _fillScript(sel, password));
+    if (ok) { passFilled = true; logger.info('Azure B2C: filled Password with:', sel); break; }
+  }
+  if (!passFilled) {
+    logger.warn('Azure B2C: could not fill password');
+    await _dumpInputs(wc, 'azure-b2c-no-password');
+    return false;
+  }
+
+  // Click the "Login" button specifically — NOT the "Daimler Truck Corporate Login" button.
+  // Find button by text content "Login" (exact match, not the corporate one).
+  await _wait(500);
+  const loginClickScript = (
+    '(function(){' +
+    'var btns=[].slice.call(document.querySelectorAll("button,input[type=submit],a"));' +
+    'for(var i=0;i<btns.length;i++){' +
+    '  var t=((btns[i].textContent||btns[i].value||"").trim());' +
+    '  if(t==="Login"||t==="login"||t==="Sign In"||t==="Sign in"){btns[i].click();return t;}' +
+    '}' +
+    // Fallback: click #next if it exists (some B2C configs)
+    'var next=document.querySelector("#next");' +
+    'if(next){next.click();return "next";}' +
+    // Last resort: first submit button
+    'var sub=document.querySelector("button[type=submit],input[type=submit]");' +
+    'if(sub){sub.click();return "submit";}' +
+    'return false;' +
+    '})()'
+  );
+  const clicked = await _execSafe(wc, loginClickScript);
+  if (clicked) {
+    logger.info('Azure B2C: clicked submit by text:', clicked);
+    return true;
+  }
+
+  logger.warn('Azure B2C: filled fields but could not find Login button');
+  await _dumpInputs(wc, 'azure-b2c-no-login-btn');
+  return true; // credentials filled — user can click manually
+}
+
 // ── Strategy: iframe (form inside child frame) ────────────────────────────────
 async function _loginIframe(wc, username, password) {
   const script = (
@@ -435,6 +511,8 @@ async function attemptAutoLogin(wc, currentUrl, overrideHostname) {
     ok = await _loginStandard(wc, match.username, match.password);
   } else if (strategy === 'two-step') {
     ok = await _loginTwoStep(wc, match.username, match.password);
+  } else if (strategy === 'azure-b2c') {
+    ok = await _loginAzureB2C(wc, match.username, match.password);
   } else if (strategy === 'iframe') {
     ok = await _loginIframe(wc, match.username, match.password);
   }

@@ -347,13 +347,28 @@ function createSyncEngine(ctx) {
           relayData  = cachedRelay;
           relayCount = cachedCount;
           logger.info(`Relay live=0 — using ${cachedCount} cached entries`);
-          try { const _rP = require('../config/paths').P; const _rRaw = require('fs').readFileSync(_rP.relayCache, 'utf8'); relayData = JSON.parse(_rRaw); logger.info('Relay: ' + Object.keys(relayData).length + ' units detailed'); } catch(_re) { logger.warn('Relay cache read failed: ' + _re.message); }
-      mergedRows = ctx.mergeRelayIntoRows(mergedRows, relayData, store.load('notesStore', {}));
+          mergedRows = ctx.mergeRelayIntoRows(mergedRows, relayData, store.load('notesStore', {}));
         }
       }
 
-      // FORCE: Always re-merge from full relay_cache.json (live scrape may be partial)
-      try { const _fP = require('../config/paths').P; const _fRaw = require('fs').readFileSync(_fP.relayCache, 'utf8'); const _fullRelay = JSON.parse(_fRaw); const _fCount = Object.keys(_fullRelay).length; if (_fCount > Object.keys(relayData).length) { relayData = _fullRelay; relayCount = _fCount; mergedRows = ctx.mergeRelayIntoRows(mergedRows, relayData, store.load('notesStore', {})); logger.info('Relay: force-merged ' + _fCount + ' from cache (live was ' + relayCount + ')'); } } catch(_fe) { logger.warn('Relay force-read failed: ' + _fe.message); }
+      // Phase 3 reliability fix: merge live relay data ON TOP of cache instead of
+      // replacing entirely based on count. Live data is always fresher per-unit;
+      // cache fills gaps for units not in the current live scrape.
+      // Strategy: cache provides baseline, live results overlay per equipmentId.
+      if (relayCount > 0) {
+        try {
+          const _fullRelay = store.load('relayCache', {});
+          const _fCount = Object.keys(_fullRelay).length;
+          if (_fCount > relayCount) {
+            // Merge: start with cache, overlay live on top (live wins per-unit)
+            const merged = Object.assign({}, _fullRelay, relayData);
+            relayData  = merged;
+            relayCount = Object.keys(merged).length;
+            mergedRows = ctx.mergeRelayIntoRows(mergedRows, relayData, store.load('notesStore', {}));
+            logger.info('Relay: merged ' + _fCount + ' cached + ' + Object.keys(relayData).length + ' live → ' + relayCount + ' total (live wins per-unit)');
+          }
+        } catch (_fe) { logger.warn('Relay force-read failed: ' + _fe.message); }
+      }
 
       const payload = {
         rows:            mergedRows,

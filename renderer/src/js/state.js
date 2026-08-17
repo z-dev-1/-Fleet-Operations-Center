@@ -77,9 +77,17 @@ const _state = {
 
 
 
+// Phase 2 perf fix: structuredClone is 2-5x faster than JSON.parse(JSON.stringify)
+// for large objects (2000+ row arrays with nested objects). It's native V8,
+// avoids the string serialization overhead, and handles more types correctly.
+// Chromium 98+ (Electron 17+) supports it — this app uses Electron 42.
 function _deepClone(obj) {
-  return JSON.parse(JSON.stringify(obj));
+  return structuredClone(obj);
 }
+
+// Version counters per slice — lets consumers skip work when nothing changed.
+const _versions = {};
+Object.keys(_state).forEach(k => { _versions[k] = 0; });
 
 const state = {
   /** Read current state (frozen snapshot). */
@@ -100,12 +108,18 @@ const state = {
       return;
     }
     Object.assign(_state[slice], patch);
+    _versions[slice] = (_versions[slice] || 0) + 1;
     bus.emit('state:' + slice, _deepClone(_state[slice]));
   },
 
   /** Get a single slice snapshot. */
   slice(name) {
     return _deepClone(_state[name] || {});
+  },
+
+  /** Get the version counter for a slice (cheap identity check). */
+  version(name) {
+    return _versions[name] || 0;
   },
 };
 

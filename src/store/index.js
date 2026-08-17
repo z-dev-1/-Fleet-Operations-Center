@@ -89,6 +89,9 @@ const REGISTRY = {
   slackChannelReplies:     () => path.join(P.dataDir, 'slack_channel_replies.json'),
   slackDMAutoReplyConfig:  () => path.join(P.dataDir, 'slack_dm_autoreply_config.json'),
   slackDMReplies:          () => path.join(P.dataDir, 'slack_dm_replies.json'),
+  emailLastSnapshot:       () => path.join(P.dataDir, 'email_last_snapshot.json'),
+  proactiveAlertHistory:  () => path.join(P.dataDir, 'proactive_alert_history.json'),
+  proactiveLastScores:   () => path.join(P.dataDir, 'proactive_last_scores.json'),
 };
 
 function _resolvePath(name) {
@@ -157,12 +160,44 @@ function save(key, data) {
 /**
  * update(name, mergeFn) — read-modify-write with merge function
  * mergeFn receives current value and returns new value.
+ * NOTE: This synchronous version has no concurrency protection. For async
+ * contexts where multiple callers may update the same store concurrently,
+ * use updateAsync() below which serializes access per-store.
  */
 function update(name, mergeFn, defaultValue = {}) {
   const current = load(name, defaultValue);
   const updated = mergeFn(current);
   save(name, updated);
   return updated;
+}
+
+// ── Phase 3: Per-store async mutex for safe concurrent updates ──────────────
+// Simple promise-chain lock: each updateAsync() call for the same store key
+// waits for the previous one to finish before entering read-modify-write.
+// No external dependencies, no deadlock risk (each chain link always resolves).
+const _locks = {};
+
+/**
+ * updateAsync(name, mergeFn, defaultValue?) — serialized read-modify-write
+ * Same as update() but guarantees that concurrent callers for the SAME store
+ * key are serialized (second caller waits for first to finish).
+ * mergeFn may be sync or async (its return value is awaited).
+ */
+async function updateAsync(name, mergeFn, defaultValue = {}) {
+  // Chain onto any pending operation for this store key
+  const prev = _locks[name] || Promise.resolve();
+  let release;
+  _locks[name] = new Promise(resolve => { release = resolve; });
+
+  try {
+    await prev; // wait for prior operation to complete
+    const current = load(name, defaultValue);
+    const updated = await mergeFn(current);
+    save(name, updated);
+    return updated;
+  } finally {
+    release(); // unblock next waiter
+  }
 }
 
 function exists(name) {
@@ -173,4 +208,4 @@ function del(name) {
   try { fs.unlinkSync(_resolvePath(name)); } catch (_) {}
 }
 
-module.exports = { load, save, update, exists, delete: del, REGISTRY };
+module.exports = { load, save, update, updateAsync, exists, delete: del, REGISTRY };

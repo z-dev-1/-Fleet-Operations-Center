@@ -9,18 +9,21 @@
     "build:renderer": "vite build",
     "build:app": "npm run build:renderer && electron-builder --win --x64",
     "test": "vitest run",
-    "lint": "eslint src/ renderer/src/ --ext .js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/ renderer/src/ --ext .js,.ts",
     "launch": "start /min cmd /c npm run dev",
     "launch:hidden": "powershell -WindowStyle Hidden -Command \"npm run dev\"",
     "test:watch": "vitest"
   },
   "devDependencies": {
+    "@types/node": "^22.5.0",
     "concurrently": "^9.1.0",
     "cross-env": "^10.1.0",
     "electron": "^42.4.1",
     "electron-builder": "^26.15.3",
     "eslint": "^9.0.0",
     "png-to-ico": "^3.0.2",
+    "typescript": "^5.5.4",
     "vite": "^6.3.5",
     "vite-plugin-electron": "^0.29.0",
     "vitest": "^4.1.10"

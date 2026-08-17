@@ -22,6 +22,9 @@ import { init as initDraftInbox }         from './components/draft-inbox.js';
 import { init as initTimeline }           from './components/workflow-timeline.js';
 import { init as initStatusBar }          from './components/status-bar.js';
 import { init as initWorkflowRecorderHud } from './components/workflow-recorder-hud.js';
+import { initKeyboardShortcuts }          from './components/keyboard-shortcuts.js';
+import { initSmartSearch }               from './components/smart-search.js';
+import { initUnitCompare }              from './components/unit-compare.js';
 import { initTheme }                      from './nexus-theme.js';
 
 import { init as initFleetView }          from './views/fleet.js';
@@ -30,6 +33,7 @@ import { init as initSettings, applyBootPrefs } from './views/settings.js';
 import { init as initSchedulers }         from './views/schedulers.js';
 import { init as initAnalytics }          from './views/analytics.js';
 import { init as initVendors }            from './views/vendors.js';
+import { init as initDashboard }          from './views/dashboard.js';
 import { init as initEmailComposer }      from './views/email-composer.js';
 import { init as initDailyNotes }         from './views/daily-notes.js';
 import { init as initNotesLinks }         from './views/notes-links.js';
@@ -109,6 +113,9 @@ initNexusSidebar();
   initTimeline();
 initStatusBar(document.getElementById('status-bar-mount'));
   initTheme();
+  initKeyboardShortcuts();
+  initSmartSearch();
+  initUnitCompare();
 
   // ── Routed views ───────────────────────────────────────────────────────────
   const viewsMount  = document.getElementById('views-mount');
@@ -119,6 +126,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
   initSchedulers(viewsMount);
   initAnalytics(viewsMount);
   initVendors(viewsMount);
+  initDashboard(viewsMount);
   initEmailComposer(viewsMount);
   initDailyNotes(viewsMount);
   initNotesLinks(viewsMount);
@@ -141,6 +149,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
   const rcaQueueView      = document.getElementById('view-rca-queue');
   const dailyCallView     = document.getElementById('view-daily-call');
   const workflowIntelView = document.getElementById('view-workflow-intel');
+  const dashboardView     = document.getElementById('view-dashboard');
 
   bus.on('ui:view-change', ({ to }) => {
     if (to === 'settings') return;
@@ -154,6 +163,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
     if (rcaQueueView)      rcaQueueView.style.display      = to === 'rca-queue'      ? 'flex' : 'none';
     if (dailyCallView)     dailyCallView.style.display     = to === 'daily-call'     ? 'flex' : 'none';
     if (workflowIntelView) workflowIntelView.style.display = to === 'workflow-intel' ? 'flex' : 'none';
+    if (dashboardView)     dashboardView.style.display     = to === 'dashboard'      ? 'flex' : 'none';
   });
 
   bus.on('ui:view-change', () => bus.emit('ui:unit-deselect'));

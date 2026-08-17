@@ -25,9 +25,10 @@ setImmediate(() => {
 });
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
-const MODEL_ID    = 'us.anthropic.claude-sonnet-4-20250514-v1:0';
-const REGION      = 'us-east-1';
-const MAX_TOKENS  = 4096;
+const DEFAULTS  = require('../config/defaults');
+const MODEL_ID    = DEFAULTS.AI_MODEL_ID;
+const REGION      = DEFAULTS.AI_REGION;
+const MAX_TOKENS  = DEFAULTS.AI_MAX_TOKENS;
 const TIMEOUT_MS  = 120000;
 const MAX_RETRIES = 2;
 

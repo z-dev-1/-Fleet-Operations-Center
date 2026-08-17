@@ -17,7 +17,14 @@ const { BrowserWindow } = require('electron');
 const { partitionForUrl, attachAutoLogin } = require('../orcha/auto-login');
 const logger = require('../utils/logger')('asist-enrich');
 
-const SR_RE = /https?:\/\/volvopg\.asist\.decisiv\.net\/service_requests\/([A-Za-z0-9_-]+)/i;
+// Both Volvo and PACCAR use the Decisiv platform with identical URL shapes:
+//   Volvo:  https://volvopg.asist.decisiv.net/service_requests/<id>
+//   PACCAR: https://paccarpg.decisiv.net/service_requests/<id>
+// (and /fleet/estimates/<id>, /cases/<id>, /service_requests/case-<id>).
+// ASIST_DOMAIN matches either host so the SR->Case->Estimate chase works for
+// both. (2026-08-17: extended from Volvo-only to include PACCAR.)
+const ASIST_DOMAIN = String.raw`(?:volvopg\.asist|paccarpg)\.decisiv\.net`;
+const SR_RE = new RegExp('https?://' + ASIST_DOMAIN + '/service_requests/([A-Za-z0-9_-]+)', 'i');
 const PAGE_LOAD_TIMEOUT = 25000; const POLL_INTERVAL = 1000; const POLL_MAX = 20;
 const MAX_RESPONSE_HOPS = 3; // bounds the SR -> response-case -> response-case chase
 
@@ -26,9 +33,9 @@ const ASIST_SCRAPE = String.raw`
   var body = document.body ? document.body.innerText : '';
   var hrefs = Array.from(document.querySelectorAll('a[href]')).map(function(a){return String(a.href||'');});
   var combined = hrefs.join(' ')+' '+body;
-  var reEst=/https?:\/\/volvopg\.asist\.decisiv\.net\/fleet\/estimates\/([A-Za-z0-9_-]+)/gi;
-  var reCase=/https?:\/\/volvopg\.asist\.decisiv\.net\/(?:service_requests\/case-|cases\/)([A-Za-z0-9_-]+)/gi;
-  var reSR=/https?:\/\/volvopg\.asist\.decisiv\.net\/service_requests\/([A-Za-z0-9_-]+)/gi;
+  var reEst=/https?:\/\/(?:volvopg\.asist|paccarpg)\.decisiv\.net\/fleet\/estimates\/([A-Za-z0-9_-]+)/gi;
+  var reCase=/https?:\/\/(?:volvopg\.asist|paccarpg)\.decisiv\.net\/(?:service_requests\/case-|cases\/)([A-Za-z0-9_-]+)/gi;
+  var reSR=/https?:\/\/(?:volvopg\.asist|paccarpg)\.decisiv\.net\/service_requests\/([A-Za-z0-9_-]+)/gi;
   var reCNum=/\bCase\s*#?\s*(\d{6,12})\b/gi; var reSRN=/\b(C-\d{6,10}|SR-\d{5,10})\b/gi;
   function collect(re,str){var f=[],m;re.lastIndex=0;while((m=re.exec(str))!==null){var url=m[0].split(/[\s<>]/)[0],id=(m[1]||'').replace(/[/?#].*$/,'');if(!f.find(function(x){return x.url===url;}))f.push({url:url,id:id});}return f;}
   var estimateLinks=collect(reEst,combined),caseLinks=collect(reCase,combined);
@@ -113,7 +120,7 @@ async function _chaseResponseLinks(startPage, partition, visited) {
 }
 
 async function enrichVolvoAsist(srUrl){
-  if(!srUrl||!SR_RE.test(srUrl))return _empty(srUrl,'not a Volvo ASIST SR URL');
+  if(!srUrl||!SR_RE.test(srUrl))return _empty(srUrl,'not a Volvo/PACCAR ASIST SR URL');
   const part=partitionForUrl(srUrl);
   if(!part)return _empty(srUrl,'no partition found');
   logger.info('[ae] START',srUrl.slice(0,80));
@@ -156,4 +163,6 @@ async function enrichVolvoAsist(srUrl){
 const SOURCE_RANK={estimate:3,case:2,service_request:1,none:0};
 function isUpgrade(es,ns){return(SOURCE_RANK[ns]||0)>(SOURCE_RANK[es]||0);}
 
-module.exports={enrichVolvoAsist,isUpgrade,SOURCE_RANK};
+// enrichVolvoAsist kept as the name for back-compat with existing callers;
+// enrichAsist is the accurate alias now that it handles Volvo AND PACCAR.
+module.exports={enrichVolvoAsist,enrichAsist:enrichVolvoAsist,isUpgrade,SOURCE_RANK,SR_RE};

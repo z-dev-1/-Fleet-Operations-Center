@@ -255,11 +255,17 @@ function extractPageText(html) {
  */
 function getRelayData(unitId) {
   try {
-    const relayCachePath = P.relayCache;
-    if (fs.existsSync(relayCachePath)) {
-      const cache = JSON.parse(fs.readFileSync(relayCachePath, 'utf8'));
-      const unitData = cache.find(r => r.equipmentId === unitId || r.id === unitId);
-      if (unitData) {
+    // Phase 1 fix: use store.load() instead of raw fs.readFileSync for atomic-read safety.
+    const store = require('../store');
+    const cache = store.load('relayCache', {});
+    // relayCache may be an object keyed by equipmentId or an array — handle both
+    let unitData = null;
+    if (Array.isArray(cache)) {
+      unitData = cache.find(r => r.equipmentId === unitId || r.id === unitId);
+    } else if (cache && typeof cache === 'object') {
+      unitData = cache[unitId] || null;
+    }
+    if (unitData) {
         return {
           status: unitData.status || unitData.relayStatus || '',
           vendor: unitData.vendor || '',
@@ -268,7 +274,6 @@ function getRelayData(unitId) {
           comments: unitData.comments || unitData.relayComments || '',
           lastUpdated: unitData.lastUpdated || unitData.updatedAt || ''
         };
-      }
     }
   } catch (e) { logger.warn('[DailyNotes] getRelayData error:', e.message); }
   return null;

@@ -936,9 +936,12 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
           let _asistEnrich = null;
           try {
             const _asistUrl = _finalOffsite && _finalOffsite.url;
-            const _isVolvoSR = _asistUrl && /volvopg\.asist\.decisiv\.net\/service_requests\//i.test(_asistUrl);
+            // Fire for BOTH Volvo and PACCAR Decisiv service_request URLs.
+            // (2026-08-17: was Volvo-only; PACCAR uses the same Decisiv platform
+            // so the SR->Case->Estimate chase works for it too.)
+            const _isAsistSR = _asistUrl && /(?:volvopg\.asist|paccarpg)\.decisiv\.net\/service_requests\//i.test(_asistUrl);
             const _prevSrc   = _finalOffsite && _finalOffsite.asistSource;
-            if (_isVolvoSR && _prevSrc !== 'estimate') {
+            if (_isAsistSR && _prevSrc !== 'estimate') {
               logger.info('[Relay] Phase3.5 ASIST enrich for', equipmentId, '|', _asistUrl.slice(0,80));
               _asistEnrich = await enrichVolvoAsist(_asistUrl);
               logger.info('[Relay] Phase3.5 result | source:', _asistEnrich.source, '| url:', _asistEnrich.bestUrl.slice(0,80));

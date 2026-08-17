@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PACCAR SR Mock — pssmfleet.decisiv.net/t/AMZN</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a1a;}
+.topbar{background:#1c2b3a;color:#fff;padding:10px 20px;display:flex;align-items:center;gap:16px;font-size:13px;border-bottom:3px solid #e8a000;}
+.topbar .logo{font-weight:700;font-size:16px;color:#e8a000;}
+.topbar .tenant{opacity:.7;font-size:11px;}
+.topbar .url-bar{flex:1;background:#0d1c28;border:1px solid #3a4f62;color:#8ab4c9;padding:4px 10px;border-radius:4px;font-size:11px;font-family:monospace;}
+.page{max-width:920px;margin:28px auto;padding:0 16px;}
+.steps{display:flex;margin-bottom:24px;border:1px solid #d0d7de;border-radius:8px;overflow:hidden;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.06);}
+.step{flex:1;padding:12px 6px;text-align:center;font-size:11px;font-weight:600;color:#6b7280;border-right:1px solid #d0d7de;}
+.step:last-child{border-right:none;}
+.step.active{background:#1c2b3a;color:#fff;}
+.step.done{background:#e6f4ea;color:#2e7d32;}
+.card{background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:24px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.06);}
+.card-title{font-size:14px;font-weight:700;color:#1c2b3a;margin-bottom:18px;padding-bottom:10px;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;gap:8px;}
+.badge{background:#e8a000;color:#fff;font-size:10px;padding:2px 7px;border-radius:12px;font-weight:700;}
+.form-row{display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap;}
+.form-group{display:flex;flex-direction:column;gap:5px;flex:1;min-width:180px;}
+.form-group label{font-size:12px;font-weight:600;color:#374151;}
+.form-group input,.form-group select,.form-group textarea{border:1.5px solid #d1d5db;border-radius:5px;padding:8px 10px;font-size:13px;color:#111;background:#fafafa;font-family:inherit;transition:border-color .15s;}
+.form-group input:focus,.form-group select:focus,.form-group textarea:focus{outline:none;border-color:#1c2b3a;box-shadow:0 0 0 3px rgba(28,43,58,.12);background:#fff;}
+.form-group textarea{resize:vertical;min-height:72px;}
+.sel-tag{font-size:10px;font-family:monospace;color:#6366f1;background:#f0f0ff;border:1px solid #c7d2fe;padding:1px 6px;border-radius:3px;display:inline-block;margin-top:2px;}
+.btn{background:#1c2b3a;color:#fff;border:none;padding:9px 20px;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer;}
+.btn:hover{background:#2d4a63;}
+.btn.gray{background:#6b7280;} .btn.gray:hover{background:#4b5563;}
+.btn.green{background:#2e7d32;} .btn.green:hover{background:#1b5e20;}
+.btn.gold{background:#e8a000;font-size:14px;padding:11px 28px;} .btn.gold:hover{background:#cf8c00;}
+.btn.gold:disabled{opacity:.45;cursor:not-allowed;}
+.ack-row{display:flex;align-items:center;gap:10px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:12px 14px;margin-bottom:8px;cursor:pointer;}
+.ack-row input[type=checkbox]{width:16px;height:16px;accent-color:#1c2b3a;cursor:pointer;}
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100;align-items:center;justify-content:center;}
+.overlay.open{display:flex;}
+.popup{background:#fff;border-radius:10px;padding:28px;width:400px;max-width:95vw;box-shadow:0 8px 32px rgba(0,0,0,.22);border:1px solid #d0d7de;}
+.popup-title{font-size:15px;font-weight:700;color:#1c2b3a;margin-bottom:18px;}
+.popup-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px;}
+.btn-add-contact{background:#fff;color:#1c2b3a;border:1.5px dashed #1c2b3a;padding:7px 16px;border-radius:5px;font-size:12px;font-weight:600;cursor:pointer;margin-bottom:6px;transition:background .15s;}
+.btn-add-contact:hover{background:#f0f4f8;}
+.contact-pill{display:none;background:#e6f4ea;border:1px solid #a5d6a7;border-radius:20px;padding:4px 14px;font-size:12px;color:#2e7d32;font-weight:600;margin-bottom:12px;}
+.contact-pill.show{display:inline-block;}
+.result-banner{background:#e6f4ea;border:1.5px solid #4caf50;border-radius:8px;padding:18px 22px;}
+.result-banner h3{font-size:15px;color:#2e7d32;margin-bottom:8px;}
+.result-banner code{font-size:13px;background:#c8e6c9;padding:2px 7px;border-radius:3px;}
+.debug-panel{background:#1a1a2e;color:#a0e0b0;font-family:monospace;font-size:11px;border-radius:6px;padding:14px;max-height:220px;overflow-y:auto;}
+.debug-panel .ll{margin-bottom:3px;}
+.debug-panel .ll.warn{color:#ffd580;}
+.debug-panel .ll.error{color:#ff7070;}
+.eHLOTE{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border:1px solid #d0d7de;border-radius:6px;background:#fafafa;margin-bottom:10px;}
+.unit-info strong{display:block;font-size:14px;margin-bottom:2px;}
+.unit-info{font-size:12px;color:#374151;}
+.info-note{font-size:11px;color:#9ca3af;margin-top:8px;line-height:1.6;}
+code.s{background:#f3f4f6;padding:1px 5px;border-radius:3px;font-size:10px;font-family:monospace;}
+.screen{display:none;} .screen.active{display:block;}
+.r-row{display:flex;justify-content:flex-end;gap:12px;margin-top:16px;}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="logo">DECISIV SRM</span>
+  <span class="tenant">Tenant: AMZN</span>
+  <div class="url-bar" id="urlBar">https://pssmfleet.decisiv.net/t/AMZN/search</div>
+</div>
+
+<div class="page">
+
+<div class="steps">
+  <div class="step active" id="s0">1 · Search</div>
+  <div class="step" id="s1">2 · Vehicle</div>
+  <div class="step" id="s2">3 · SR Form</div>
+  <div class="step" id="s3">4 · Review</div>
+  <div class="step" id="s4">5 · Confirm</div>
+</div>
+
+<!-- S0: Search -->
+<div class="screen active" id="sc0">
+  <div class="card">
+    <div class="card-title">Unit Search</div>
+    <div class="form-row">
+      <div class="form-group" style="max-width:260px;">
+        <label>Unit Number</label>
+        <input type="text" id="searchInput" value="321256" placeholder="e.g. 321256" onkeydown="if(event.key==='Enter')doSearch()">
+      </div>
+      <div class="form-group" style="flex:none;justify-content:flex-end;padding-top:20px;">
+        <button class="btn" onclick="doSearch()">Search →</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- S1: Results -->
+<div class="screen" id="sc1">
+  <div class="card">
+    <div class="card-title">Search Results <span class="badge" id="rCount">0</span></div>
+    <div id="resultsArea"></div>
+  </div>
+</div>
+
+<!-- S2: SR Form -->
+<div class="screen" id="sc2">
+  <div class="card">
+    <div class="card-title">New Service Request <span class="badge">pssmfleet.decisiv.net</span></div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Domicile / City, State</label>
+        <input type="text" id="input-field-target-111" placeholder="Philadelphia, PA">
+        <span class="sel-tag">#input-field-target-111</span>
+      </div>
+      <div class="form-group">
+        <label>Dealer / Service Location</label>
+        <input type="text" id="input-field-target-112" placeholder="Rush Truck Centers">
+        <span class="sel-tag">#input-field-target-112</span>
+      </div>
+    </div>
+
+    <!-- Advance button — exact class path from index.js -->
+    <div class="jUvqIE">
+      <div><div><div>
+        <div style="display:flex;justify-content:flex-end;margin-bottom:6px;">
+          <button class="btn" onclick="doAdvance()">Continue →</button>
+        </div>
+      </div></div></div>
+    </div>
+    <div style="margin-bottom:16px;"><span class="sel-tag">.jUvqIE &gt; div:nth-child(4) &gt; div:nth-child(1) &gt; button:nth-child(1)</span></div>
+
+    <div id="postAdv" style="display:none;">
+      <div class="form-row">
+        <div class="form-group" style="max-width:220px;">
+          <label>Appointment Date</label>
+          <input type="date" id="select-date-113">
+          <span class="sel-tag">#select-date-113</span>
+        </div>
+      </div>
+
+      <div class="jkBRFb" style="margin-bottom:8px;">
+        <label class="ack-row">
+          <div onclick="toggleAck()" style="display:flex;align-items:center;gap:10px;width:100%;cursor:pointer;">
+            <input type="checkbox" id="ackCb" onclick="event.stopPropagation();updateBtn();">
+            <span style="font-size:13px;color:#92400e;font-weight:500;">I acknowledge I have authorization to initiate this service request.</span>
+          </div>
+        </label>
+      </div>
+      <div style="margin-bottom:14px;"><span class="sel-tag">.jkBRFb &gt; label:nth-child(2) &gt; div:nth-child(1)</span></div>
+
+      <button class="btn-add-contact EditAppointmentContact__AddAdhocContactButton-sc-1ns93os-0" onclick="openPopup()">+ Add Ad-hoc Contact</button><br>
+      <span class="sel-tag">.EditAppointmentContact__AddAdhocContactButton-sc-1ns93os-0</span>
+      <div class="contact-pill" id="cpill"></div>
+
+      <div class="form-row" style="margin-top:14px;">
+        <div class="form-group">
+          <label>Issue / Complaint Details</label>
+          <textarea id="input-field-target-125" rows="3" placeholder="Describe the issue..."></textarea>
+          <span class="sel-tag">#input-field-target-125</span>
+        </div>
+      </div>
+
+      <div class="euVa-DA">
+        <div>
+          <div class="r-row">
+            <button class="btn gray" onclick="showS(1)">← Back</button>
+            <button class="btn gold" id="subBtn" disabled onclick="goReview()">Submit SR →</button>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:6px;"><span class="sel-tag">.euVa-DA &gt; div:nth-child(1) &gt; button:nth-child(1)</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Fill Script Log
+      <span style="font-size:11px;font-weight:400;color:#6b7280;margin-left:8px;">mirrors executeJavaScript() output</span>
+    </div>
+    <div class="debug-panel" id="dbg"></div>
+  </div>
+</div>
+
+<!-- S3: Review -->
+<div class="screen" id="sc3">
+  <div class="card">
+    <div class="card-title">Review &amp; Approve</div>
+    <div id="reviewBody" style="font-size:13px;line-height:1.9;"></div>
+    <div class="r-row">
+      <button class="btn gray" onclick="showS(2)">← Edit</button>
+      <button class="btn gold" onclick="doFinalSubmit()">Approve &amp; Submit →</button>
+    </div>
+  </div>
+</div>
+
+<!-- S4: Confirm -->
+<div class="screen" id="sc4">
+  <div class="card">
+    <div class="result-banner">
+      <h3>✅ Service Request Created</h3>
+      <p style="font-size:13px;margin-bottom:6px;">SR: <code id="srOut">—</code></p>
+      <p style="font-size:11px;color:#555;font-family:monospace;" id="srUrlOut"></p>
+      <p style="font-size:11px;color:#888;margin-top:10px;">READ_SR_SCRIPT polls for <code class="s">SR-XXXXXXX</code> or <code class="s">PCSR-XXXXXXXX</code> in page text / URL</p>
+    </div>
+  </div>
+</div>
+
+</div><!-- /page -->
+
+<!-- Contact popup -->
+<div class="overlay" id="popupOverlay">
+  <div class="popup">
+    <div class="popup-title">Ad-hoc Contact</div>
+    <div class="form-group" style="margin-bottom:12px;">
+      <label>First Name <span style="color:#e8a000;font-size:10px;">(min 3 chars — Decisiv constraint, _padName3() pads with spaces)</span></label>
+      <input type="text" id="input-field-target-241" placeholder="First Name">
+      <span class="sel-tag">#input-field-target-241</span>
+    </div>
+    <div class="form-group" style="margin-bottom:12px;">
+      <label>Last Name</label>
+      <input type="text" id="input-field-target-243-label" placeholder="Last Name">
+      <span class="sel-tag">#input-field-target-243-label</span>
+    </div>
+    <div class="form-group" style="margin-bottom:12px;">
+      <label>Phone</label>
+      <input type="tel" id="input-field-target-245-label" placeholder="7328743387">
+      <span class="sel-tag">#input-field-target-245-label</span>
+    </div>
+    <div class="form-group" style="margin-bottom:12px;">
+      <label>Email</label>
+      <input type="email" id="input-field-target-247" placeholder="coordinator@amazon.com">
+      <span class="sel-tag">#input-field-target-247</span>
+    </div>
+    <div class="popup-actions">
+      <button class="btn gray" onclick="closePopup()">Cancel</button>
+      <button class="btn green gcHUHI" onclick="saveContact()">Save &nbsp;<span class="sel-tag" style="margin:0;">.gcHUHI</span></button>
+    </div>
+  </div>
+</div>
+
+<script>
+var unit=null, advDone=false;
+var db={
+  '321256':{unitNumber:'321256',make:'Peterbilt',model:'579',year:'2021',vin:'1XP4DP9X9MD123456',mileage:'312400',domicileCity:'Philadelphia',domicileState:'PA',vendor:'Rush Truck Centers - Philadelphia'},
+  '39534': {unitNumber:'39534', make:'Kenworth', model:'T680',year:'2020',vin:'1XKWDB0X0LJ123789',mileage:'287900',domicileCity:'Allentown',   domicileState:'PA',vendor:"Bergey's Kenworth"},
+};
+
+function showS(n){
+  document.querySelectorAll('.screen').forEach(function(s,i){s.classList.toggle('active',i===n);});
+  document.querySelectorAll('.step').forEach(function(s,i){
+    s.classList.remove('active','done');
+    if(i===n)s.classList.add('active');
+    else if(i<n)s.classList.add('done');
+  });
+  var srNum=document.getElementById('srOut').textContent||'—';
+  var urls=[
+    'https://pssmfleet.decisiv.net/t/AMZN/search',
+    'https://pssmfleet.decisiv.net/t/AMZN/search?query='+(unit?unit.unitNumber:''),
+    'https://pssmfleet.decisiv.net/t/AMZN/vehicles/'+(unit?unit.unitNumber:'')+'/request_service',
+    'https://pssmfleet.decisiv.net/t/AMZN/vehicles/'+(unit?unit.unitNumber:'')+'/request_service/review',
+    'https://pssmfleet.decisiv.net/t/AMZN/service_requests/'+srNum,
+  ];
+  document.getElementById('urlBar').textContent=urls[n]||urls[0];
+}
+
+function doSearch(){
+  var q=document.getElementById('searchInput').value.trim();
+  if(!q)return;
+  unit=db[q]||{unitNumber:q,make:'Kenworth',model:'T680',year:'2022',vin:'MOCK_VIN_'+q,mileage:'0',domicileCity:'',domicileState:'',vendor:''};
+  document.getElementById('resultsArea').innerHTML=
+    '<div class="eHLOTE" data-unit="'+unit.unitNumber+'">'
+    +'<div class="unit-info"><strong>'+unit.unitNumber+' — '+unit.year+' '+unit.make+' '+unit.model+'</strong>'
+    +'VIN: '+unit.vin+' &nbsp;|&nbsp; '+Number(unit.mileage||0).toLocaleString()+' mi &nbsp;|&nbsp; '+(unit.domicileCity||'—')+', '+(unit.domicileState||'—')+'</div>'
+    +'<button class="btn" onclick="selectVehicle()">&#x25B6; Open SR</button>'
+    +'</div>'
+    +'<p class="info-note">Confirmed action selector: <code class="s">.eHLOTE &gt; div:nth-child(1) &gt; button:nth-child(1)</code> — SVG icon button. '
+    +'index.js CLICK_ACTION_SCRIPT fires .click() on the &lt;button&gt; parent (not the SVG).<br>'
+    +'If selector misses after portal DOM update, EXTRACT_ROW_SCRIPT dumps row links+buttons to logs.</p>';
+  document.getElementById('rCount').textContent='1';
+  showS(1);
+}
+
+function selectVehicle(){
+  advDone=false;
+  document.getElementById('postAdv').style.display='none';
+  document.getElementById('subBtn').disabled=true;
+  document.getElementById('ackCb').checked=false;
+  document.getElementById('cpill').classList.remove('show');
+  document.getElementById('cpill').textContent='';
+  ['input-field-target-241','input-field-target-243-label','input-field-target-245-label','input-field-target-247']
+    .forEach(function(id){document.getElementById(id).value='';document.getElementById(id).style.borderColor='';});
+  clearLog();
+  if(unit){
+    document.getElementById('input-field-target-111').value=[unit.domicileCity,unit.domicileState].filter(Boolean).join(', ');
+    document.getElementById('input-field-target-112').value=unit.vendor||'';
+    document.getElementById('input-field-target-125').value='Amazon Fleet Unit: '+unit.unitNumber+' | VIN: '+unit.vin+' | Issue: [describe complaint]';
+  }
+  document.getElementById('select-date-113').value=new Date().toISOString().slice(0,10);
+  log('ok','SR form loaded — unit '+(unit?unit.unitNumber:'?'));
+  log('ok','Pre-fill city-state="'+document.getElementById('input-field-target-111').value+'"');
+  log('ok','Pre-fill dealer="'+document.getElementById('input-field-target-112').value+'"');
+  showS(2);
+}
+
+function doAdvance(){
+  advDone=true;
+  document.getElementById('postAdv').style.display='block';
+  log('ok','advance() fired — date/ack/contact/issue/submit visible');
+  log('ok','Date: '+document.getElementById('select-date-113').value);
+  updateBtn();
+}
+
+function toggleAck(){var cb=document.getElementById('ackCb');cb.checked=!cb.checked;updateBtn();}
+function updateBtn(){
+  var ok=document.getElementById('ackCb').checked&&advDone;
+  document.getElementById('subBtn').disabled=!ok;
+  if(ok)log('ok','Ack checked — submit enabled');
+}
+
+function openPopup(){document.getElementById('popupOverlay').classList.add('open');log('ok','popup opened via .EditAppointmentContact__AddAdhocContactButton-sc-1ns93os-0');}
+function closePopup(){document.getElementById('popupOverlay').classList.remove('open');}
+function saveContact(){
+  var fn=document.getElementById('input-field-target-241').value.trim();
+  var ln=document.getElementById('input-field-target-243-label').value.trim();
+  var ph=document.getElementById('input-field-target-245-label').value.trim();
+  var em=document.getElementById('input-field-target-247').value.trim();
+  if(fn.length<3){
+    log('warn','WARN: firstName "'+fn+'" < 3 chars — will be rejected by Decisiv. _padName3() needed.');
+    document.getElementById('input-field-target-241').style.borderColor='#ef4444';
+    return;
+  }
+  document.getElementById('input-field-target-241').style.borderColor='';
+  var p=document.getElementById('cpill');
+  p.textContent='Contact: '+fn+' '+ln+(ph?' · '+ph:'')+(em?' · '+em:'');
+  p.classList.add('show');
+  closePopup();
+  log('ok','Contact saved via .gcHUHI — '+fn+' '+ln+' ph:'+(ph||'none')+' em:'+(em||'none'));
+}
+
+function goReview(){
+  var rows=[
+    ['Unit', unit?(unit.unitNumber+' — '+unit.year+' '+unit.make+' '+unit.model):'—'],
+    ['VIN', unit?unit.vin:'—'],
+    ['City/State', document.getElementById('input-field-target-111').value||'—'],
+    ['Dealer', document.getElementById('input-field-target-112').value||'—'],
+    ['Appointment', document.getElementById('select-date-113').value||'—'],
+    ['Ack', document.getElementById('ackCb').checked?'✔ Yes':'✘ No'],
+    ['Contact', (function(){
+      var fn=document.getElementById('input-field-target-241').value;
+      var ln=document.getElementById('input-field-target-243-label').value;
+      var ph=document.getElementById('input-field-target-245-label').value;
+      var em=document.getElementById('input-field-target-247').value;
+      return [fn,ln,ph?'· '+ph:'',em?'· '+em:''].filter(Boolean).join(' ')||'(none)';
+    })()],
+    ['Issue', document.getElementById('input-field-target-125').value||'—'],
+  ];
+  var h='<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+  rows.forEach(function(r){
+    h+='<tr><td style="padding:5px 10px 5px 0;color:#6b7280;width:110px;font-weight:600;vertical-align:top;">'+r[0]+'</td><td style="word-break:break-word;">'+r[1]+'</td></tr>';
+  });
+  h+='</table><p class="info-note" style="margin-top:12px;">Submit selector: <code class="s">.euVa-DA &gt; div:nth-child(1) &gt; button:nth-child(1)</code></p>';
+  document.getElementById('reviewBody').innerHTML=h;
+  showS(3);
+}
+
+function doFinalSubmit(){
+  var sr='SR-'+(970000+Math.floor(Math.random()*20000));
+  document.getElementById('srOut').textContent=sr;
+  var url='https://pssmfleet.decisiv.net/t/AMZN/service_requests/'+sr;
+  document.getElementById('srUrlOut').textContent=url;
+  showS(4);
+}
+
+function clearLog(){document.getElementById('dbg').innerHTML='';}
+function log(type,msg){
+  var el=document.getElementById('dbg');
+  var d=document.createElement('div');
+  d.className='ll '+(type||'ok');
+  d.textContent=new Date().toLocaleTimeString()+'  '+msg;
+  el.appendChild(d);el.scrollTop=el.scrollHeight;
+}
+
+document.addEventListener('DOMContentLoaded',function(){
+  var watch=[
+    'input-field-target-111','input-field-target-112','select-date-113',
+    'input-field-target-125','input-field-target-241',
+    'input-field-target-243-label','input-field-target-245-label','input-field-target-247',
+  ];
+  watch.forEach(function(id){
+    var el=document.getElementById(id);
+    if(!el)return;
+    el.addEventListener('input',function(){log('ok','[#'+id+'] -> "'+el.value.slice(0,70)+'"');});
+  });
+  log('ok','Mock ready. Try unit 321256 (Peterbilt) or 39534 (Kenworth).');
+});
+</script>
+</body>
+</html>

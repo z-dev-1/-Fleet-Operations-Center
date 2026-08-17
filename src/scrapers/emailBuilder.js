@@ -366,7 +366,18 @@ ${pmRows}
   template = template.replace(/\{\{FLEET_SUMMARY\}\}/g, fleetSummary);
   template = template.replace(/\{\{VENDOR_CHIPS\}\}/g, vendorChips);
   template = template.replace(/\{\{UNAVAIL_COUNT\}\}/g, String(unavailUnits.length));
-  template = template.replace(/\{\{UNAVAIL_TABLE\}\}/g, unavailTable);
+
+  // Smart change summary — shows what changed since last email send
+  let changeSummaryHtml = '';
+  let changeMeta = null;
+  try {
+    const { buildChangeSummary } = require('./email-summary');
+    const result = buildChangeSummary(filteredUnits, { slot: slotLabel });
+    changeSummaryHtml = result.html || '';
+    changeMeta = result.meta || null;
+  } catch (e) { logger.warn('Change summary failed (non-fatal):', e.message); }
+
+  template = template.replace(/\{\{UNAVAIL_TABLE\}\}/g, changeSummaryHtml + unavailTable);
   template = template.replace(/\{\{PM_TABLE\}\}/g, pmTable);
 
   // Uptake Predictive Insights (score >= 60)
@@ -432,6 +443,16 @@ ${uptakeRows}
 
 
   template = template.replace(/\{\{UPTAKE_TABLE\}\}/g, uptakeTable);
+
+  // Store change metadata for subject enhancement (read by email:compose handler)
+  buildEmail._lastChangeMeta = changeMeta;
+  buildEmail._lastSubjectSuffix = '';
+  if (changeMeta) {
+    try {
+      const { buildSubjectSuffix } = require('./email-summary');
+      buildEmail._lastSubjectSuffix = buildSubjectSuffix(changeMeta);
+    } catch (_) {}
+  }
 
   return template;
 }

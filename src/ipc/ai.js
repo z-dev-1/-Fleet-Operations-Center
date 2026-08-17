@@ -22,6 +22,30 @@ const fs     = require('fs');
 const { handle, requireString, requireStringMax, requireArrayMax } = require('./_safe');
 const { ConfigError } = require('../utils/errors');
 
+// ── Phase 3: IPC rate limiter for expensive AI operations ────────────────────
+// Prevents renderer from flooding AI backends (Bedrock $$, Orcha WS) with
+// concurrent requests. Simple per-channel concurrency cap: excess calls queue
+// and resolve in order. No external dependency.
+function _createLimiter(maxConcurrent) {
+  let active = 0;
+  const queue = [];
+  return function limit(fn) {
+    return new Promise((resolve, reject) => {
+      const run = () => {
+        active++;
+        fn().then(resolve, reject).finally(() => {
+          active--;
+          if (queue.length > 0) queue.shift()();
+        });
+      };
+      if (active < maxConcurrent) run();
+      else queue.push(run);
+    });
+  };
+}
+const _aiAskLimit  = _createLimiter(1);  // max 1 concurrent ai:ask
+const _aiChatLimit = _createLimiter(1);  // max 1 concurrent ai:chat
+
 // ── Issue #15 / #8: size caps ────────────────────────────────────────────────
 const MAX_PROMPT_LEN       = 32000;   // characters — ai:ask, ai:chat
 const MAX_DAILY_NOTES_BATCH = 100;   // units    — daily-notes:run
@@ -213,18 +237,43 @@ async function processOrchaAction(userMsg, opts = {}) {
       return { ok: true, text: _fastAnswer, action: 'chat', fastPath: true };
     }
 
-    const unitMatch = userMsg.match(/([A-Za-z]?\\d{5,8})/);
-    let unitDetail = '';
-    if (unitMatch) {
-      const uid = unitMatch[1].toUpperCase();
-      const unit = rows.find(r => r.equipmentId === uid);
-      const notes = notesStore[uid] || {};
-      if (unit) unitDetail = '\\nUNIT ' + uid + ': Vendor=' + (unit.vendor||'none') + ' Life=' + (unit.lifecycleState||'') + '/' + (unit.lifecycleReason||'') + ' Site=' + (unit.domicileSite||'') + ' Down=' + (unit.workDuration||'?') + ' Issue=' + (unit.issueDetails||notes.issueSummary||'') + '\\nTimeline: ' + (notes.timeline||'none');
-    }
-    // Full-depth report for whatever site/operator/unit the message is about --
-    // same data whether this is a question or a send. No separate thin summary
-    // for 'ask' vs a full one for 'send': fleet knowledge is fleet knowledge.
+    // FIX (2026-08-17): the previous regex was /([A-Za-z]?\\d{5,8})/ — the
+    // doubled backslash meant it matched a literal "\d", never an actual digit,
+    // so unit-specific detail was NEVER attached (every unit summary went in
+    // blind, and the model would hallucinate — e.g. asked for one unit, it
+    // echoed a different ID with no real data). Rather than rely on a shape
+    // guess at all, match against the REAL equipment IDs present in the fleet
+    // data: find the longest equipmentId that appears as a whole token in the
+    // message. This handles numeric IDs (208336), prefixed IDs (B62281,
+    // AMZ3339, IND260155) and any future format without a brittle pattern.
+    // FIX (2026-08-17): understand what the user MEANS the way they do.
+    // One resolver (src/orcha/ai-context.js resolveEntities) matches the message
+    // against the REAL units, domicile SITES, and OPERATORS in the data as whole
+    // tokens — so "ABE40" resolves as the ABE40 site, "AMZ1997" as that unit,
+    // "ABEOW" as the operator, etc. buildFleetContext then emits focused,
+    // data-rich detail (unit timelines, or a site/operator roll-up) instead of
+    // the old brittle /\d{5,8}/ regex that silently attached nothing.
+    const { buildFleetContext, resolveEntities } = require('../orcha/ai-context');
+    const _resolved = resolveEntities(userMsg, rows);
+    const richContext = buildFleetContext(userMsg, {
+      maxUnits: 8, includeTimeline: true, includePM: true, includeRisk: true,
+    });
+
+    // siteReport still used by the EMAIL/SLACK *action* paths below (they attach
+    // a full plain-text report when delivering data to someone).
     const siteReport = _buildEmailReport(userMsg, rows, notesStore);
+
+    // Anti-hallucination guard: only if the message names an ID-like token AND
+    // the resolver found NOTHING (no unit, site, or operator) — then tell the
+    // model plainly there's no data so it doesn't invent a summary. With the new
+    // resolver this now correctly does NOT fire for real sites like ABE40.
+    let notFoundNote = '';
+    if (!_resolved.units.length && !_resolved.groups.length && rows.length) {
+      const _idLike = (userMsg || '').match(/\b([A-Za-z]{2,}\d{1,}|[A-Za-z]?\d{4,})\b/);
+      if (_idLike) {
+        notFoundNote = '\\n\\nIMPORTANT: The fleet data currently loaded has NO unit, site, or operator matching "' + _idLike[1] + '". Do NOT invent or summarize data for it. Tell the user plainly that you have no data for "' + _idLike[1] + '" and ask them to confirm the ID.';
+      }
+    }
     // Load contact book
     const allContacts = store.load('contacts', []);
     const slackContacts = allContacts.filter(function(ct){ return ct.type === 'slack' && ct.slackId; });
@@ -247,42 +296,14 @@ async function processOrchaAction(userMsg, opts = {}) {
     const dueReminders = allReminders.filter(function(r){ return r.when <= today; });
     const reminderText = dueReminders.length ? '\nDUE REMINDERS:\n' + dueReminders.map(function(r){ return r.unit + ': ' + r.note + ' (due ' + r.when + ')'; }).join('\n') + '\n' : '';
 
-    const fleetSummary = 'FLEET:' + rows.length + ' total|' + unavail.length + ' unavail\\n' + unavail.slice(0,30).map(function(r){return r.equipmentId+' | '+(r.vendor||'-')+' | '+(r.domicileSite||'')+' | '+(r.operator||'')+' | Down:'+(r.workDuration||'?')+' | ETC:'+(r.etc||'-')+' | Risk:'+(r.riskScore||'-')}).join('\n');
-    // Token management — keep prompt under ~3000 chars to leave room for response
-    const TOKEN_BUDGET = 3000;
-    let promptParts = [fleetSummary, contactList, reminderText, memoryContext, unitDetail];
-    let totalLen = promptParts.join('').length;
-    
-    // If over budget, trim in priority order (least important first)
-    if (totalLen > TOKEN_BUDGET) {
-      // 1. Trim fleet summary to 15 units
-      const shortFleet = 'FLEET:' + rows.length + ' total|' + unavail.length + ' unavail\n' +
-        unavail.slice(0,15).map(function(r){return r.equipmentId+' | '+(r.vendor||'-')+' | '+(r.domicileSite||'')}).join('\n');
-      promptParts[0] = shortFleet;
-    }
-    totalLen = promptParts.join('').length;
-    if (totalLen > TOKEN_BUDGET) {
-      // 2. Trim memory to last 5 exchanges
-      const shortMem = chatHistory.length > 0
-        ? '\nRECENT:\n' + chatHistory.slice(-5).map(function(m){ return m.role + ': ' + m.text.substring(0, 80); }).join('\n') + '\n'
-        : '';
-      promptParts[3] = shortMem;
-    }
-    totalLen = promptParts.join('').length;
-    if (totalLen > TOKEN_BUDGET) {
-      // 3. Trim unit detail timeline to last 5 entries
-      if (unitDetail.includes('Timeline:')) {
-        const tlIdx = unitDetail.indexOf('Timeline:');
-        const tlLines = unitDetail.substring(tlIdx).split('\n');
-        unitDetail = unitDetail.substring(0, tlIdx) + 'Timeline (recent):\n' + tlLines.slice(-5).join('\n');
-        promptParts[4] = unitDetail;
-      }
-    }
-    const finalContext = promptParts.join('');
+    // richContext (from resolveEntities/buildFleetContext) is the authoritative
+    // data block: it already focuses on whatever units/site/operator the message
+    // referenced, with fleet summary as the fallback. Keep contacts/reminders/
+    // memory as supporting context. No more brittle unitDetail string.
 
     
     const d = new Date(); const dateStr = String(d.getMonth()+1).padStart(2,'0')+'/'+String(d.getDate()).padStart(2,'0'); const timeStr = String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
-    const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human — warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- If a DETAILED FLEET REPORT is provided below, that is your full and only source of truth for that site/operator/unit -- it has every unit status, vendor, down time, ETC/PM, issue details and full repair timeline/notes, plus the uptake rate (% available), AND -- separately -- any Uptake (fleet.uptake.com) predictive-maintenance risk score/label and full insight details (title, subsystem, guidance, active/resolved, first/last seen) under an UPTAKE INSIGHTS section for units that have been scraped by that third-party telematics tool. Uptake rate and Uptake insights are two different things -- do not conflate them, report both when present. Use ALL of it when relevant to what was asked: whether the user is asking a question (summarize thoroughly -- status, vendor, timeline, issue, uptake rate, uptake risk/insights) or sending it to someone (the system attaches the whole report; your job is just the intro line). Same data either way -- only the framing changes.\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nCRITICAL — SEND vs ASK:\n- "send update/report/data/notes to [person] for [site]" = YOU are DELIVERING fleet info TO them.\n  Write the message as the person SENDING the report, not asking for one.\n  Your message body is just a 1-sentence intro — the system attaches the real data automatically.\n  WRONG: "Could you provide an update on AVP40?" (that is asking them)\n  RIGHT:  "Here is the latest AVP40 fleet status and notes, as requested." (that is delivering)\n- Only generate a question/follow-up when the user explicitly says "ask", "follow up", or "check on".\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle_or_email,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable}), PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Send to whoever the user specifies. If user gives an email address or a name not in KNOWN SLACK CONTACTS, use it directly as recipient — the system will resolve it. NEVER refuse or ask for confirmation because someone is not in the contact list. Just attempt the send.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+(siteReport?'DETAILED FLEET REPORT:\\n'+siteReport:fleetSummary+'\\n'+unitDetail)+contactList+emailContactList+'\\nUser: '+userMsg;
+    const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human — warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- If a DETAILED FLEET REPORT is provided below, that is your full and only source of truth for that site/operator/unit -- it has every unit status, vendor, down time, ETC/PM, issue details and full repair timeline/notes, plus the uptake rate (% available), AND -- separately -- any Uptake (fleet.uptake.com) predictive-maintenance risk score/label and full insight details (title, subsystem, guidance, active/resolved, first/last seen) under an UPTAKE INSIGHTS section for units that have been scraped by that third-party telematics tool. Uptake rate and Uptake insights are two different things -- do not conflate them, report both when present. Use ALL of it when relevant to what was asked: whether the user is asking a question (summarize thoroughly -- status, vendor, timeline, issue, uptake rate, uptake risk/insights) or sending it to someone (the system attaches the whole report; your job is just the intro line). Same data either way -- only the framing changes.\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nCRITICAL — SEND vs ASK:\n- "send update/report/data/notes to [person] for [site]" = YOU are DELIVERING fleet info TO them.\n  Write the message as the person SENDING the report, not asking for one.\n  Your message body is just a 1-sentence intro — the system attaches the real data automatically.\n  WRONG: "Could you provide an update on AVP40?" (that is asking them)\n  RIGHT:  "Here is the latest AVP40 fleet status and notes, as requested." (that is delivering)\n- Only generate a question/follow-up when the user explicitly says "ask", "follow up", or "check on".\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle_or_email,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable}), PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Send to whoever the user specifies. If user gives an email address or a name not in KNOWN SLACK CONTACTS, use it directly as recipient — the system will resolve it. NEVER refuse or ask for confirmation because someone is not in the contact list. Just attempt the send.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+richContext+(siteReport?'\\n\\nDETAILED FLEET REPORT (for delivery/attachment):\\n'+siteReport:'')+notFoundNote+reminderText+memoryContext+contactList+emailContactList+'\\nUser: '+userMsg;
     try {
       logger.info('[ai:orcha-action] Calling relay.ask (' + prompt.length + ' chars)...');
       const aiText = await relay.ask(prompt, { signal: opts.signal, requestId: opts.requestId });
@@ -447,7 +468,7 @@ async function processOrchaAction(userMsg, opts = {}) {
           // vendor, urgency) exactly like a partner-submitted request, and
           // shows up in the existing Review queue for one-click approval.
           try {
-            const { classifyRequest } = require('./partner-wr');
+            const { classifyRequest } = require('./wr-classify');
             const review = store.load('partnerWRs_review', []);
             const reqId = 'CHAT-' + Date.now().toString(36).toUpperCase();
             let chatReq = {
@@ -600,15 +621,18 @@ function registerAIHandlers(ctx) {
   });
 
   // Issue #15: prompt length cap
+  // Phase 3: rate-limited to 1 concurrent call
   handle('ai:ask', async (_e, prompt) => {
     requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
-    return askOrcha(prompt);
+    return _aiAskLimit(() => askOrcha(prompt));
   });
 
   // Issue #13: response now includes `path` field ('chat' or 'fallback')
   // so the renderer knows which code path ran.
+  // Phase 3: rate-limited to 1 concurrent call
   handle('ai:chat', async (_e, prompt) => {
     requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
+    return _aiChatLimit(async () => {
     // Inject Orcha system directive into every chat call
     const { ORCHA_DIRECTIVE } = require('../orcha/system-prompt');
     // Inject live fleet data summary
@@ -633,6 +657,7 @@ function registerAIHandlers(ctx) {
       if (typeof result === 'string') return { ok: true, text: result, path: 'fallback' };
       return { ...result, path: 'fallback' };
     }
+    });
   });
 
   // Orcha config
@@ -667,6 +692,8 @@ function registerAIHandlers(ctx) {
       mode:             orchaCfg.mode || 'local',
       host:             orchaCfg.host || 'localhost',
       port:             orchaCfg.port || 4799,
+      orchaAgentId:     orchaCfg.orchaAgentId || 'orcha_default',
+      modelId:          orchaCfg.modelId || '',
       claudeBin,
       claudeTimeoutMs:  orchaCfg.claudeTimeoutMs || 60000,
       claudeAvailable:  require('fs').existsSync(claudeBin),
@@ -687,6 +714,11 @@ function registerAIHandlers(ctx) {
       host:            config.host             || existing.host || 'localhost',
       port:            config.port             || existing.port || 4799,
       aiPreference:    config.aiPreference     || 'auto',
+      // Orcha agent selects the server-side model (orcha_default = Opus 4.6).
+      orchaAgentId:    config.orchaAgentId     || existing.orchaAgentId || 'orcha_default',
+      // Bedrock fallback model. Empty string is a valid "use app default" value,
+      // so honor it explicitly when the key is present rather than dropping it.
+      modelId:         (config.modelId !== undefined ? config.modelId : (existing.modelId || '')),
       claudeTimeoutMs: config.claudeTimeoutMs  || 60000,
     };
     const tmp = P.orchaConfig + '.tmp';
@@ -695,16 +727,16 @@ function registerAIHandlers(ctx) {
     fs.renameSync(tmp, P.orchaConfig);
     relay.setPreference(merged.aiPreference);
     relay.setClaudeTimeout(merged.claudeTimeoutMs);
-    logger.info('[AI Config] Saved. preference=' + merged.aiPreference + ', claudeTimeoutMs=' + merged.claudeTimeoutMs);
+    logger.info('[AI Config] Saved. preference=' + merged.aiPreference + ', agent=' + merged.orchaAgentId + ', modelId=' + (merged.modelId || '(default)') + ', claudeTimeoutMs=' + merged.claudeTimeoutMs);
     return { ok: true, preference: merged.aiPreference };
   });
 
   // Test the Claude Code path directly
   handle('ai:test-claude', () => relay.testClaude());
 
-  // Daily Notes - open Relay + Offsite windows side-by-side
+  // Daily Notes - open Relay + Offsite windows side-by-side (with auto-login)
   handle('daily-notes:open-windows', async (_e, opts) => {
-    const spSes = eSession.defaultSession;
+    const { attachAutoLogin, partitionForUrl } = require('../orcha/auto-login');
     const { width, height } = eScreen.getPrimaryDisplay().workAreaSize;
     const halfW = Math.floor(width / 2);
     const winH  = Math.floor(height * 0.85);
@@ -712,23 +744,29 @@ function registerAIHandlers(ctx) {
     const windows = [];
 
     if (opts.relayUrl) {
+      const partition = partitionForUrl(opts.relayUrl) || '';
+      const ses = partition ? eSession.fromPartition(partition) : eSession.defaultSession;
       const relayWin = new BrowserWindow({
         width: halfW, height: winH, x: 0, y: topY,
         title: 'Relay Garage - ' + (opts.unitId || ''),
         icon: require('../config/app-icon').getAppIconPath(),
-        webPreferences: { nodeIntegration: false, contextIsolation: true, session: spSes },
+        webPreferences: { nodeIntegration: false, contextIsolation: true, session: ses },
       });
+      attachAutoLogin(relayWin, opts.relayUrl, { maxRetries: 3 });
       relayWin.loadURL(opts.relayUrl);
       windows.push(relayWin);
     }
 
     if (opts.offsiteUrl) {
+      const partition = partitionForUrl(opts.offsiteUrl) || '';
+      const ses = partition ? eSession.fromPartition(partition) : eSession.defaultSession;
       const offsiteWin = new BrowserWindow({
         width: halfW, height: winH, x: halfW, y: topY,
         title: 'Offsite Event - ' + (opts.unitId || ''),
         icon: require('../config/app-icon').getAppIconPath(),
-        webPreferences: { nodeIntegration: false, contextIsolation: true, session: spSes },
+        webPreferences: { nodeIntegration: false, contextIsolation: true, session: ses },
       });
+      attachAutoLogin(offsiteWin, opts.offsiteUrl, { maxRetries: 3 });
       offsiteWin.loadURL(opts.offsiteUrl);
       windows.push(offsiteWin);
     }

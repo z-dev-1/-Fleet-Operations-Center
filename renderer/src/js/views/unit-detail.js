@@ -1018,9 +1018,15 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
       '<webview id="dp-wv-relay" src="' + leftUrl + '" class="dp-split-webview" allowpopups></webview></div>';
   }
   if (rightUrl) {
+    // Determine correct vendor partition for the offsite URL
+    var vendorPartition = 'persist:vendor-paccar'; // default
+    if (rightUrl.indexOf('volvopg') > -1 || rightUrl.indexOf('asist.decisiv') > -1) vendorPartition = 'persist:vendor-volvo';
+    else if (rightUrl.indexOf('dtna') > -1 || rightUrl.indexOf('daimlertruck') > -1) vendorPartition = 'persist:vendor-dtna';
+    else if (rightUrl.indexOf('pssmfleet') > -1) vendorPartition = 'persist:vendor-paccar-pssmfleet';
+
     html += '<div class="dp-split-pane dp-split-pane--offsite">' +
       '<div class="dp-split-pane-label">OFFSITE</div>' +
-      '<webview id="dp-wv-offsite" src="' + rightUrl + '" class="dp-split-webview" partition="persist:vendor-' + (rightUrl.indexOf("volvopg") > -1 ? 'volvo' : 'paccar') + '" allowpopups></webview></div>';
+      '<webview id="dp-wv-offsite" src="' + rightUrl + '" class="dp-split-webview" partition="' + vendorPartition + '" allowpopups></webview></div>';
   }
   html += '</div>';
 
@@ -1037,6 +1043,29 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
 
   var offsiteWv = document.getElementById('dp-wv-offsite');
   if (offsiteWv) {
+    // Auto-login: if the offsite webview lands on a login page, close it
+    // and reopen as a BrowserWindow (which has full auto-login wired).
+    offsiteWv.addEventListener('did-finish-load', function() {
+      offsiteWv.executeJavaScript(
+        '(function(){' +
+        'var pw=document.querySelectorAll("input[type=password]").length;' +
+        'var uid=document.querySelectorAll("input[placeholder*=User],input[type=email],input[type=text]").length;' +
+        'return (pw>0&&uid>0)?"login":"ok";' +
+        '})()'
+      ).then(function(result) {
+        if (result !== 'login') return;
+        // Login page detected in webview — reopen as BrowserWindow with auto-login
+        var targetUrl = rightUrl;
+        try { targetUrl = offsiteWv.getURL() || rightUrl; } catch(_) {}
+        // Close the split view
+        if (container && container.parentNode) container.remove();
+        // Open via relay:open-url which has auto-login + correct partition
+        if (window.files && window.files.openRelayUrl) {
+          window.files.openRelayUrl(rightUrl);
+        }
+      }).catch(function(){});
+    });
+
     offsiteWv.addEventListener('dom-ready', function() {
       offsiteWv.executeJavaScript('function waitForNotes(){var nb=document.querySelector("[data-testid=note-body]");var ta=document.querySelector("textarea[name=user-reply]");if(!nb){setTimeout(waitForNotes,1000);return;}var el=nb;while(el.parentElement&&el.parentElement!==document.body){el=el.parentElement;if(el.querySelector("[data-testid=note-body]")&&el.querySelector("textarea[name=user-reply]"))break;}el.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;background:#fff;z-index:99999;padding:0";var sib=el.parentElement?el.parentElement.children:[];for(var i=0;i<sib.length;i++){if(sib[i]!==el)sib[i].style.display="none";}} setTimeout(waitForNotes,2000)').catch(function(){});
     });
@@ -1265,6 +1294,22 @@ function renderRepairPane(unit){
           (p.created?'<span>Opened '+fmtDate(p.created)+'</span>':'')+
           (p.completed?'<span>Closed '+fmtDate(p.completed)+'</span>':'')+
         '</div>':'')+
+        // FIX (2026-08-17): give the Planned WR its own Split View button too.
+        // Its Relay URL is built from _serviceUUID (scrapeServiceByUUID doesn't
+        // attach _relayUrl to _plannedWRData the way it does for _secondaryWRs).
+        (function(){
+          var _plUuid = p._serviceUUID || '';
+          if (!_plUuid) return '';
+          var _plRelay = 'https://aap-na.corp.amazon.com/v2/service/' + _plUuid;
+          var _plOffsite = p.offsiteShopEventUrl || p.asistSrUrl || '';
+          return '<div class="dp-wo-card__dates" style="gap:10px;flex-wrap:wrap">' +
+            '<button class="dp-split-view-btn" style="font-size:9px;padding:3px 10px"' +
+              ' data-secondary-split="1"' +
+              ' data-split-left="' + esc(_plRelay) + '"' +
+              ' data-split-right="' + esc(_plOffsite) + '">' +
+              '🔍 Open in Relay (Split View)</button>' +
+          '</div>';
+        })()+
       '</div>';
   }
 
@@ -1302,19 +1347,27 @@ function renderRepairPane(unit){
             (p.created   ? '<span>Opened ' + fmtDate(p.created)   + '</span>' : '') +
             (p.completed ? '<span>Closed ' + fmtDate(p.completed) + '</span>' : '') +
           '</div>' : '') +
-          (p._relayUrl ? '<div class="dp-wo-card__dates"><a class="dp-wo-card__relay-link" href="#" data-ext-url="' +
-            esc(p._relayUrl) + '">Open in Relay ↗</a></div>' : '') +
           (function() {
+            // FIX (2026-08-17): two bugs on secondary/multi-WR cards —
+            //  (1) "Open in Relay ↗" used data-ext-url (opened an EXTERNAL
+            //      window), never the split view.
+            //  (2) The Split View button only rendered when an OFFSITE url
+            //      existed, so a secondary WR with a Relay link but no offsite
+            //      (e.g. 921126's planned APU WR) got NO Split View option.
+            // Now: Split View is available whenever _relayUrl exists (offsite
+            // optional — _openInlineSplit handles a missing right pane), and
+            // "Open in Relay ↗" opens the split view too. The offsite link (if
+            // any) stays as its own external link.
+            if (!p._relayUrl) return '';
             var _pOffsite = p.offsiteShopEventUrl || p.asistSrUrl || '';
             var _pLabel   = p.asistLabel || p.offsiteShopEvent || 'ASIST';
-            if (!_pOffsite) return '';
             return '<div class="dp-wo-card__dates" style="gap:10px;flex-wrap:wrap">' +
-              '<a class="dp-wo-card__relay-link" href="#" data-ext-url="' + esc(_pOffsite) + '">' + esc(_pLabel) + ' ↗</a>' +
-              (p._relayUrl ? ' <button class="dp-split-view-btn" style="font-size:9px;padding:3px 10px"' +
+              '<button class="dp-split-view-btn" style="font-size:9px;padding:3px 10px"' +
                 ' data-secondary-split="1"' +
                 ' data-split-left="' + esc(p._relayUrl) + '"' +
                 ' data-split-right="' + esc(_pOffsite) + '">' +
-                '🔍 Split View</button>' : '') +
+                '🔍 Open in Relay (Split View)</button>' +
+              (_pOffsite ? ' <a class="dp-wo-card__relay-link" href="#" data-ext-url="' + esc(_pOffsite) + '">' + esc(_pLabel) + ' ↗</a>' : '') +
             '</div>';
           })() +
         '</div>';
@@ -1761,6 +1814,10 @@ async function _runDailyNotesForUnit(unit) {
 function _renderUnit(unit) {
   _unit = unit;
   if (!_panel) return;
+  // Make the current unit available to every split-view button (primary,
+  // planned, and secondary) so the split header always shows the right unit ID
+  // even if the user clicks a secondary/planned split button first.
+  window.__splitUnit = unit;
   _teardownVendorBus();
 
   const isUnavail = (unit.lifecycleState||'').toLowerCase().includes('unavail');

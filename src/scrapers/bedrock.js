@@ -13,8 +13,24 @@ const logger = require('../utils/logger').createLogger('bedrock');
 
 // Claude Code toolbox binary — vends short-lived Cecelia Bedrock credentials
 const CLAUDE_BIN = path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'claude.exe');
-const REGION     = 'us-west-2';
-const MODEL_ID   = 'us.anthropic.claude-sonnet-4-20250514-v1:0';
+const DEFAULTS  = require('../config/defaults');
+const REGION    = DEFAULTS.AI_BEDROCK_REGION;
+
+// Resolve the Bedrock model at call time: the user-configured modelId from
+// orcha_config.json (Settings → AI → Fallback Model ID) if set, otherwise the
+// app default constant. Read fresh each call so a Settings change takes effect
+// without an app restart, and never crash if the config file is missing/bad.
+function _resolveModelId() {
+  try {
+    const { P } = require('../config/paths');
+    const fs = require('fs');
+    if (fs.existsSync(P.orchaConfig)) {
+      const cfg = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
+      if (cfg && typeof cfg.modelId === 'string' && cfg.modelId.trim()) return cfg.modelId.trim();
+    }
+  } catch (_) {}
+  return DEFAULTS.AI_MODEL_ID;
+}
 
 // Cached credentials — refreshed 2 min before expiry
 let _cachedCreds = null;
@@ -120,7 +136,7 @@ Reply ONLY with a single JSON object, no markdown, no explanation:
   try {
     const client = _makeClient();
     const cmd = new ConverseCommand({
-      modelId: MODEL_ID,
+      modelId: _resolveModelId(),
       messages: [{ role: 'user', content: [{ text: prompt }] }],
       inferenceConfig: { maxTokens: 200, temperature: 0 },
     });
@@ -153,7 +169,7 @@ Reply ONLY with a single JSON object, no markdown, no explanation:
 async function askBedrock(prompt) {
   const client = _makeClient();
   const cmd = new ConverseCommand({
-    modelId: MODEL_ID,
+    modelId: _resolveModelId(),
     messages: [{ role: 'user', content: [{ text: prompt }] }],
     inferenceConfig: { maxTokens: 2048 },
   });

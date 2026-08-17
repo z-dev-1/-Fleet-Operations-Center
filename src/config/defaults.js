@@ -28,9 +28,19 @@ module.exports = {
   ORCHA_MAX_CONCURRENT:  5,
   ORCHA_TIMEOUT_MS:      90000,
   ORCHA_FALLBACK_PORT:   4799,
-  BEDROCK_REGION:        'us-east-1',
-  BEDROCK_MODEL_ID:      'us.amazon.nova-pro-v1:0',
-  BEDROCK_MAX_TOKENS:    4096,
+  // Phase 4: consolidated AI model config — single source of truth.
+  // relay.js and bedrock.js read from here instead of hardcoding separately.
+  // REVERT (2026-08-17): restored the original Nova Pro model + us-east-1
+  // region. The Phase-4 consolidation had silently swapped these to Claude
+  // Sonnet 4 / us-west-2, which raised typical response time from a few
+  // seconds to ~90s+ — past the per-feature AI timeouts (Slack auto-reply 20s,
+  // Daily Call AI Review 25s, Fleet Chat 60s), so every one of those features
+  // was timing out and falling back to a canned/"AI review failed" path.
+  // Keeping the AI_* names (bedrock.js reads them) but the original values.
+  AI_MODEL_ID:           'us.amazon.nova-pro-v1:0',
+  AI_REGION:             'us-east-1',
+  AI_BEDROCK_REGION:     'us-east-1',
+  AI_MAX_TOKENS:         4096,
 
   // ── Priority engine ───────────────────────────────────────────────────────
   PRIORITY_STALE_DAYS:    3,

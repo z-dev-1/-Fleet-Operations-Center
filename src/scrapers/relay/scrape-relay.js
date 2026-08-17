@@ -11,10 +11,18 @@ async function scrapeRelay(aapRows, onBatchDone, relayCache) {
   _relayLock = true;
   try {
   const targets = (aapRows || []).filter(r =>
-    r.lifecycleState && r.lifecycleState.toUpperCase() === 'UNAVAILABLE' && r.equipmentId
+    r.lifecycleState && r.lifecycleState.toUpperCase() === 'UNAVAILABLE' && r.equipmentId &&
+    // Skip units with 0/0 WOs — no active work request means nothing to scrape on Relay Garage.
+    // These units get stuck in the garage scraper (25s timeout per attempt) for no result.
+    ((parseInt(r.openUnplanned, 10) || 0) + (parseInt(r.openPlanned, 10) || 0) > 0)
   );
 
-  logger.info('[Relay] Scraping', targets.length, 'unavailable units... (cache entries:', relayCache ? Object.keys(relayCache).length : 0, ')');
+  logger.info('[Relay] Scraping', targets.length, 'unavailable units with active WOs... (cache entries:', relayCache ? Object.keys(relayCache).length : 0, ')');
+  const skippedNoWO = (aapRows || []).filter(r =>
+    r.lifecycleState && r.lifecycleState.toUpperCase() === 'UNAVAILABLE' && r.equipmentId &&
+    ((parseInt(r.openUnplanned, 10) || 0) + (parseInt(r.openPlanned, 10) || 0) === 0)
+  ).length;
+  if (skippedNoWO > 0) logger.info('[Relay] Skipped', skippedNoWO, 'unavailable units with 0/0 WOs (no active work requests)');
 
   const results = {};
   const updatedCache = Object.assign({}, relayCache || {});

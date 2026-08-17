@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!--
+    CSP relaxed vs. setup/index.html's default-src 'self' to allow the
+    embedded Zoom Meeting SDK, which:
+      - streams AV/WASM/UI assets from Zoom's CDN at runtime (no local
+        vendoring -- see InitOptions.assetPath in @zoom/meetingsdk)
+      - opens WebSocket connections to Zoom's media servers
+      - runs decode/render work in Web Workers and WASM
+    Best-effort scoped to *.zoom.us rather than '*' -- if the SDK's
+    console logs a blocked-by-CSP error once real credentials are wired
+    up, loosen the specific directive that's failing rather than
+    widening all of them.
+  -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: https://*.zoom.us; style-src 'self' 'unsafe-inline' https://*.zoom.us; img-src 'self' data: blob: https://*.zoom.us; font-src 'self' data: https://*.zoom.us; media-src 'self' blob: https://*.zoom.us; worker-src 'self' blob:; connect-src 'self' https://*.zoom.us wss://*.zoom.us; frame-src https://*.zoom.us" />
+  <title>Fleet Operations — Zoom Meeting</title>
+  <style>
+    html, body, #zoom-meeting-root { height: 100%; margin: 0; padding: 0; background: #1a1a1a; }
+  </style>
+</head>
+<body>
+  <div id="zoom-meeting-root"></div>
+  <script type="module" src="./zoom-meeting.js"></script>
+</body>
+</html>

@@ -460,7 +460,40 @@ async function ensureAuthenticated(mainWindow) {
 
   // Verify AAP accepts the session
   send('fleet:status', 'Verifying session...');
-  const ok = await probeSession();
+  let ok = await probeSession();
+  if (!ok) {
+    // FIX (2026-08-17): a failed page probe used to throw MIDWAY_SESSION_INVALID
+    // immediately, which surfaced the interactive re-auth prompt (PIN + WebAuthn
+    // tap). But the vast majority of these failures are TRANSIENT: AAP/CloudFront
+    // intermittently bounces a probe to midway-auth SSO even while the Midway
+    // cookie file is fully valid (~20h __Host-session/session still live). The
+    // relay probe below already recovers from exactly this via a re-inject +
+    // retry; the page probe had no such recovery, so every transient blip forced
+    // a full manual re-auth — the ~2h "keeps asking me to re-auth" symptom.
+    //
+    // Recovery ladder (cheap → expensive), only escalating to mwinit if the
+    // cookie file is ACTUALLY expired or retries are exhausted:
+    //   1. If checkMwinit() says the file is expired, this is a real expiry →
+    //      throw so the caller prompts mwinit.
+    //   2. Otherwise re-inject the still-valid cookies and re-probe (up to 2x
+    //      with a short backoff) — recovers transient SSO bounces silently.
+    logger.warn('[AuthManager] Page probe failed — cookie file valid? re-injecting and retrying before prompting re-auth');
+    for (let attempt = 1; attempt <= 2 && !ok; attempt++) {
+      const liveState = checkMwinit();
+      if (!liveState.ok) {
+        // Genuinely expired — no amount of re-injecting will help.
+        logger.warn('[AuthManager] Cookie file genuinely expired (' + (liveState.reason || 'unknown') + ') — escalating to mwinit');
+        break;
+      }
+      logger.info('[AuthManager] Page probe retry ' + attempt + '/2 — cookies still valid (' +
+        liveState.count + ' cookies, ' +
+        (liveState.expiresInMin !== null ? liveState.expiresInMin + 'min left' : 'session') + '), re-injecting');
+      try { await injectCookies(); } catch (_) {}
+      await new Promise(r => setTimeout(r, 2000 * attempt));
+      ok = await probeSession();
+      if (ok) logger.info('[AuthManager] Page probe recovered on retry ' + attempt + ' — no re-auth needed');
+    }
+  }
   if (!ok) {
     const msg = 'AAP rejected session — run mwinit -f then restart';
     send('fleet:error', msg);

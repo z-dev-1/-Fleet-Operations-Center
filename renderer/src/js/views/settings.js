@@ -147,6 +147,25 @@ function _html() {
 
         <!-- Row Colors -->
         <div class="sd-section">
+          <div class="sd-section-title">Table Background</div>
+          <div class="sd-color-row">
+            <div class="sd-color-item">
+              <div class="sd-label">Table BG</div>
+              <div class="sd-color-swatch-row">
+                <div class="sd-swatch active" style="background:var(--card)"             title="Default (card)" data-var="--table-bg"></div>
+                <div class="sd-swatch"        style="background:#0d1117"                 title="Dark"           data-var="--table-bg"></div>
+                <div class="sd-swatch"        style="background:#000000"                 title="Black"          data-var="--table-bg"></div>
+                <div class="sd-swatch"        style="background:#161b22"                 title="Panel"          data-var="--table-bg"></div>
+                <div class="sd-swatch"        style="background:#1c2128"                 title="Card"           data-var="--table-bg"></div>
+                <div class="sd-swatch"        style="background:#0e2a3a"                 title="Ocean"          data-var="--table-bg"></div>
+                <div class="sd-swatch"        style="background:#ffffff"                 title="White"          data-var="--table-bg"></div>
+                <input type="color" class="sd-color-custom" value="#1c2128" title="Custom" data-var="--table-bg"/>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sd-section">
           <div class="sd-section-title">Row Colors</div>
           <div class="sd-color-row">
             <div class="sd-color-item">
@@ -465,7 +484,23 @@ function _html() {
                 <input class="sd-input" id="orcha-port" type="number" placeholder="4799"/>
               </div>
             </div>
-            <div class="sd-btn-row">
+            <div class="sd-field" style="margin-top:8px">
+              <div class="sd-label">Orcha Agent (model)</div>
+              <select class="sd-select" id="orcha-agent" style="font-size:11px">
+                <option value="orcha_default">Orcha — Claude Opus 4.6</option>
+                <option value="moon">Moon — Claude Sonnet 4.6</option>
+                <option value="mirror">Mirror — Claude Sonnet 4.6</option>
+                <option value="otter">Otter — Claude Sonnet 4.6</option>
+                <option value="tides_workflow_runner">Tides Workflow Runner — Claude Sonnet 4.6</option>
+              </select>
+              <div style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">The Orcha agent that answers AI requests. The model is chosen server-side by the agent (Orcha = Opus 4.6, others = Sonnet 4.6).</div>
+            </div>
+            <div class="sd-field" style="margin-top:8px">
+              <div class="sd-label">Fallback Model ID (Bedrock)</div>
+              <input class="sd-input" id="ai-model-id" placeholder="us.amazon.nova-pro-v1:0" style="font-family:monospace;font-size:10px"/>
+              <div style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">Bedrock model used only when Orcha WS is down and the app calls Bedrock directly. Leave blank to use the app default.</div>
+            </div>
+            <div class="sd-btn-row" style="margin-top:8px">
               <button class="sd-btn secondary" id="test-orcha" style="font-size:11px">Test Orcha</button>
             </div>
             <div id="orcha-test-status" style="margin-top:4px;font-size:11px;min-height:14px"></div>
@@ -776,6 +811,7 @@ function _html() {
           </div>
           <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
             <button class="sd-btn secondary" id="par-scan-btn" type="button">Scan my channels</button>
+            <button class="sd-btn secondary" id="par-add-dm-btn" type="button">+ Use My DM</button>
             <button class="sd-btn secondary" id="par-add-manual-toggle" type="button">+ Add by ID</button>
           </div>
           <div id="par-add-manual" style="display:none;margin-top:8px">
@@ -856,30 +892,7 @@ function _html() {
           <div id="asana-status" class="settings__status" style="display:none"></div>
         </div>
 
-        <!-- Fleet Ops Companion (iPhone PWA) -->
-        <div class="sd-section" id="sect-cloud-companion">
-          <div class="sd-section-title">
-            <span style="font-size:11px">📱</span> Fleet Ops Companion
-          </div>
-          <div class="sd-hint" style="margin-bottom:10px">Chat with your fleet assistant from your iPhone. Requires the companion Worker deployed from companion/README.md at the repo root.</div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">Enable</span>
-            <input type="checkbox" id="cc-enabled"/>
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Worker URL</label>
-            <input class="sd-input" id="cc-worker-url" placeholder="https://fleet-companion.YOUR-SUBDOMAIN.workers.dev" />
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Alert Secret</label>
-            <input class="sd-input" id="cc-alert-secret" type="password" placeholder="the ALERT_SECRET you set via wrangler secret put" />
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn primary" id="cc-save">Save</button>
-            <button class="sd-btn secondary" id="cc-test">Test Connection</button>
-          </div>
-          <div id="cc-status" class="sd-status" style="margin-top:8px;display:none"></div>
-        </div>
+        <!-- Fleet Ops Companion — removed (feature discontinued) -->
 
       </div>
       <!-- end sd-pane-integrations -->
@@ -1103,6 +1116,12 @@ function _wireAIConfig() {
     if (modeEl) modeEl.value = cfg.mode || 'local';
     if (hostEl) hostEl.value = cfg.host || '';
     if (portEl) portEl.value = cfg.port || 4799;
+    // Orcha agent (selects the server-side model) — defaults to orcha_default (Opus 4.6)
+    const agentEl = document.getElementById('orcha-agent');
+    if (agentEl) agentEl.value = cfg.orchaAgentId || 'orcha_default';
+    // Model ID (Bedrock fallback leg) — blank field means "use app default"
+    const modelEl = document.getElementById('ai-model-id');
+    if (modelEl) modelEl.value = cfg.modelId || '';
     // Claude fields
     const binEl  = document.getElementById('claude-bin-path');
     const toEl   = document.getElementById('claude-timeout');
@@ -1162,6 +1181,8 @@ function _wireAIConfig() {
       mode:            (document.getElementById('orcha-mode') || {}).value || 'local',
       host:            ((document.getElementById('orcha-host') || {}).value || '').trim(),
       port:            parseInt((document.getElementById('orcha-port') || {}).value, 10) || 4799,
+      orchaAgentId:    (document.getElementById('orcha-agent') || {}).value || 'orcha_default',
+      modelId:         ((document.getElementById('ai-model-id') || {}).value || '').trim(),
       claudeTimeoutMs: toSecs * 1000,
     });
     toast.show('success', 'AI config saved — active: ' + pref, 2500);
@@ -1799,6 +1820,38 @@ function _wirePartnerAutoReply() {
     addIdEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addBtn.click(); } });
   }
 
+  // "Use My DM" button — finds user's self-DM and adds it as a Just Me channel
+  const addDmBtn = document.getElementById('par-add-dm-btn');
+  if (addDmBtn) {
+    addDmBtn.addEventListener('click', async () => {
+      addDmBtn.disabled = true;
+      addDmBtn.textContent = 'Finding...';
+      try {
+        // Open a conversation with yourself (Slack's conversations.open with no users = self-DM)
+        const result = await slackBridge.openConversation({ userId: 'self' });
+        if (!result || !result.channelId) {
+          toast.show('error', 'Could not find your self-DM. Make sure Slack is authenticated.', 4000);
+          return;
+        }
+        const dmId = result.channelId;
+        if (_currentConfig && _currentConfig.channels.some(ch => ch.id === dmId)) {
+          toast.show('info', 'Your DM is already in the list', 2500);
+          return;
+        }
+        if (!_currentConfig) _currentConfig = { enabled: true, channels: [] };
+        _currentConfig.channels.push({ id: dmId, name: 'My DM (self)', enabled: true, lastSeenTs: null, replyMode: 'justme' });
+        render(_currentConfig);
+        await _autoSave();
+        toast.show('success', 'Added your self-DM as Just Me channel', 3000);
+      } catch (e) {
+        toast.show('error', 'Failed: ' + e.message, 4000);
+      } finally {
+        addDmBtn.disabled = false;
+        addDmBtn.textContent = '+ Use My DM';
+      }
+    });
+  }
+
   saveBtn.addEventListener('click', async () => {
     if (!_currentConfig) return;
     await _autoSave();
@@ -1983,50 +2036,7 @@ function _wireAsana() {
   });
 }
 
-// ── Section: Fleet Ops Companion (iPhone PWA) ────────────────────────────────
-function _wireCloudCompanion() {
-  const enabledEl = document.getElementById("cc-enabled");
-  const urlEl     = document.getElementById("cc-worker-url");
-  const secretEl  = document.getElementById("cc-alert-secret");
-  const statusEl  = document.getElementById("cc-status");
-  if (!enabledEl || !window.cloudCompanion) return;
-
-  function showStatus(msg, kind) {
-    statusEl.textContent = msg;
-    statusEl.className = "sd-status" + (kind === "ok" ? " ok" : kind === "err" ? " err" : "");
-    statusEl.style.display = "block";
-  }
-
-  window.cloudCompanion.getConfig().then((cfg) => {
-    enabledEl.checked = !!cfg.enabled;
-    urlEl.value = cfg.workerUrl || "";
-    // Alert Secret is intentionally never echoed back into the password
-    // field (same pattern as Asana's PAT field above) -- only overwritten
-    // on Save if the user actually typed a new value.
-  }).catch(() => {});
-
-  document.getElementById("cc-save").addEventListener("click", async () => {
-    const partial = { enabled: !!enabledEl.checked, workerUrl: urlEl.value.trim() };
-    if (secretEl.value.trim()) partial.alertSecret = secretEl.value.trim();
-    try {
-      await window.cloudCompanion.setConfig(partial);
-      secretEl.value = "";
-      showStatus("✓ Saved", "ok");
-    } catch (e) {
-      showStatus("Save failed: " + e.message, "err");
-    }
-  });
-
-  document.getElementById("cc-test").addEventListener("click", async () => {
-    showStatus("Testing...", null);
-    try {
-      const res = await window.cloudCompanion.testConnection();
-      showStatus(res.ok ? "✅ Connected" : "❌ " + res.error, res.ok ? "ok" : "err");
-    } catch (e) {
-      showStatus("❌ " + e.message, "err");
-    }
-  });
-}
+// ── Section: Fleet Ops Companion — removed (feature discontinued) ────────────
 
 // ── Section: Notifications ───────────────────────────────────────────────────
 function _wireNotifications() {
@@ -2237,6 +2247,7 @@ const _THEMES = {
     '--org': '#ffa657', '--orgd': 'rgba(255,166,87,.08)',
     '--ylw': '#e3b341', '--pur': '#d2a8ff', '--purd': 'rgba(210,168,255,.08)',
     '--fg': '#e6edf3', '--fg2': '#8b949e', '--fg3': '#484f58',
+    '--table-bg': '#1c2128',
   },
   light: {
     '--bg': '#f6f8fa', '--panel': '#ffffff', '--card': '#f0f2f5',
@@ -2249,6 +2260,7 @@ const _THEMES = {
     '--org': '#bc4c00', '--orgd': 'rgba(188,76,0,.08)',
     '--ylw': '#9a6700', '--pur': '#8250df', '--purd': 'rgba(130,80,223,.08)',
     '--fg': '#1f2328', '--fg2': '#57606a', '--fg3': '#8c959f',
+    '--table-bg': '#ffffff',
   },
   midnight: {
     '--bg': '#000000', '--panel': '#0a0a0a', '--card': '#111111',
@@ -2261,6 +2273,7 @@ const _THEMES = {
     '--org': '#ffa657', '--orgd': 'rgba(255,166,87,.08)',
     '--ylw': '#e3b341', '--pur': '#d2a8ff', '--purd': 'rgba(210,168,255,.08)',
     '--fg': '#f0f6fc', '--fg2': '#8b949e', '--fg3': '#484f58',
+    '--table-bg': '#000000',
   },
   ocean: {
     '--bg': '#0d1f2d', '--panel': '#0e2a3a', '--card': '#0f3040',
@@ -2273,6 +2286,7 @@ const _THEMES = {
     '--org': '#ffa657', '--orgd': 'rgba(255,166,87,.08)',
     '--ylw': '#e3b341', '--pur': '#a5b4fc', '--purd': 'rgba(165,180,252,.08)',
     '--fg': '#e0f4f4', '--fg2': '#7db8b8', '--fg3': '#4a8888',
+    '--table-bg': '#0f3040',
   },
 };
 
@@ -2286,12 +2300,19 @@ function _applyThemeVars(theme) {
   if (theme !== 'dark') document.body.classList.add(theme + '-mode');
 }
 
+// ── Exported theme API (used by toolbar and boot) ────────────────────────────
+export const THEME_NAMES = Object.keys(_THEMES); // ['dark','light','midnight','ocean']
+export function applyTheme(theme) {
+  _applyThemeVars(theme);
+  _saveUI();
+}
+
 
 function _syncSwatchesToTheme(theme) {
   if (!_drawer) return;
   const tokens = _THEMES[theme] || _THEMES.dark;
   _drawer.querySelectorAll('.sd-swatch').forEach(sw => sw.classList.remove('active'));
-  ['--acc','--bg','--panel','--txt','--row-avail','--row-unavail',
+  ['--acc','--bg','--panel','--txt','--table-bg','--row-avail','--row-unavail',
    '--chat-bubble-ai','--chat-bubble-user','--chat-border'].forEach(varName => {
     const themeVal = tokens[varName];
     const swatches = _drawer.querySelectorAll(`.sd-swatch[data-var="${varName}"]`);
@@ -2572,7 +2593,7 @@ function _saveUI() {
     if (document.body.classList.contains('ocean-mode'))    theme = 'ocean';
 
     // Active swatch per CSS var (store the background color value)
-    const swatchVars = ['--acc', '--bg', '--panel', '--txt', '--row-avail', '--row-unavail', '--chat-bubble-ai', '--chat-bubble-user', '--chat-border'];
+    const swatchVars = ['--acc', '--bg', '--panel', '--txt', '--table-bg', '--row-avail', '--row-unavail', '--chat-bubble-ai', '--chat-bubble-user', '--chat-border'];
     const swatches = {};
     swatchVars.forEach((v) => {
       const active = _drawer.querySelector(`.sd-swatch.active[data-var="${v}"]`);
@@ -2745,7 +2766,12 @@ function _populate() {
 // ── Apply saved UI prefs on cold boot (before drawer ever opens) ─────────────
 export function applyBootPrefs() {
   settingsBridge.getAll().then((all) => {
-    if (all && all.ui_prefs && _drawer) _applyUI(all.ui_prefs);
+    if (all && all.ui_prefs) {
+      // Always apply theme vars on boot — doesn't require _drawer to exist
+      if (all.ui_prefs.theme) _applyThemeVars(all.ui_prefs.theme);
+      // Full UI sync (swatches, sliders, font) only if drawer is mounted
+      if (_drawer) _applyUI(all.ui_prefs);
+    }
   }).catch(() => {});
 }
 
@@ -2966,7 +2992,6 @@ export function init() {
   _wireSchedulerConfig();
   _wireSP();
   _wireAsana();
-  _wireCloudCompanion();
   _wireNotifications();
   _wireAccounts();
   _wireSectionAccordion('sd-pane-integrations');

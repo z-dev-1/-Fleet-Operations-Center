@@ -29,6 +29,7 @@ const { installGlobalBoundary }      = require('./utils/errors');
 const { P }     = require('./config/paths');
 const DEFAULTS  = require('./config/defaults');
 const store     = require('./store');
+const scheduler = require('./scheduler');
 
 // ── 1. Error boundary — must be first ────────────────────────────────────
 installGlobalBoundary();
@@ -73,7 +74,7 @@ app.on('activate', () => {
 // Graceful shutdown — clear all timers
 app.on('before-quit', () => {
   log.info('Shutting down...');
-  _stopSchedulers();
+  scheduler.stop();
 });
 
 // ── 5. Ready ──────────────────────────────────────────────────────────────
@@ -242,60 +243,12 @@ app.whenReady().then(async () => {
       _lastPushTs = t;
     }
     _send('fleet:data',   d);
-    // Run anomaly detection on every data push
+    // Run anomaly detection + morning briefing + recommendations on every data push
+    // (extracted to src/orcha/briefing.js — Phase 4)
     try {
-      const { runAnomalyDetection } = require('./orcha/anomaly');
-      const repairHistory = require('./orcha/repair-history');
+      const briefing = require('./orcha/briefing');
       const rows = (d && d.rows) || [];
-      if (rows.length) {
-        const result = runAnomalyDetection(rows);
-        if (result && result.alerts && result.alerts.length) {
-          _send('orcha:alerts', result);
-        // Morning briefing (first push of session)
-        if (!global._briefingSent) {
-          global._briefingSent = true;
-          // Smart reminders — check due reminders
-          const _reminderStore = store.load('reminders', []);
-          const _today = new Date().toISOString().split('T')[0];
-          const _due = _reminderStore.filter(function(r){ return r.when <= _today; });
-          if (_due.length) {
-            const reminderMsg = '\u23F0 Reminders due today:\n' + _due.map(function(r){ return '\u2022 ' + r.unit + ': ' + r.note; }).join('\n');
-            _send('orcha:morning-briefing', { text: reminderMsg, critical: 0, warnings: _due.length, isReminder: true });
-            // Remove fired reminders
-            const remaining = _reminderStore.filter(function(r){ return r.when > _today; });
-            store.save('reminders', remaining);
-          }
-          // Auto-classify: flag units needing classification
-          const needsClassify = rows.filter(function(r) {
-            return (r.lifecycleState||'').toLowerCase().includes('unavail') && !r.savedRepairStatus;
-          });
-          if (needsClassify.length) {
-            log.info('[auto-classify] ' + needsClassify.length + ' units need repair status classification');
-          }
-          const critical = (result.alerts || []).filter(function(a){ return a.severity === 'critical'; });
-          const warnings = (result.alerts || []).filter(function(a){ return a.severity === 'warning'; });
-          const briefingText = (critical.length + warnings.length) > 0
-            ? '☀️ Morning Briefing: ' + critical.length + ' critical, ' + warnings.length + ' warnings.\n' +
-              critical.slice(0,5).map(function(a){ return '🔴 ' + a.unit + ' — ' + a.message; }).join('\n') +
-              (warnings.length ? '\n' + warnings.slice(0,5).map(function(a){ return '⚠️ ' + a.unit + ' — ' + a.message; }).join('\n') : '')
-            : '☀️ Morning Briefing: Fleet is healthy — no critical issues.';
-          _send('orcha:morning-briefing', { text: briefingText, critical: critical.length, warnings: warnings.length });
-        }
-        // Generate action recommendations from alerts
-        const recs = (result.alerts || []).filter(a => a.suggestion).map(a => ({
-          unit: a.unit,
-          type: a.type,
-          action: a.suggestion,
-          severity: a.severity,
-          message: a.message
-        }));
-        if (recs.length) _send('orcha:recommendations', { recommendations: recs });
-        // Detect repair completions (unavail -> available transitions)
-        try { repairHistory.detectTransitions(rows, global._prevRows || []); } catch(e) {}
-        global._prevRows = rows;
-        _send('orcha:health', { overallScore: Math.max(0, 100 - (recs.filter(function(a){return a.severity==="critical"}).length * 5)), lastSync: new Date().toISOString(), totalUnits: (d && d.rows) ? d.rows.length : 0, unavailCount: recs.length, integrations: { relay: {status:'green',label:'Relay'}, ai: {status:'green',label:'AI'}, sp: {status:'green',label:'SharePoint'}, slack: {status:'green',label:'Slack'} } });
-        }
-      }
+      if (rows.length) briefing.process(rows, _send);
     } catch(e) { /* advisory — don't block data push */ }
   }
   function _pushStatus(s) { _send('fleet:status', s); }
@@ -307,9 +260,16 @@ app.whenReady().then(async () => {
     _send('app:connection-status', { online: status === 'online' });
     if (status === 'online') {
       // Process queued entries with AI rewrite
+      // Phase 3: 30s timeout per rewrite — if AI is slow, use raw text and continue
       const relay = require('./orcha/relay');
       offline.processQueue(async (unit, raw) => {
-        try { const r = await relay.ask('Rewrite this fleet timeline entry professionally in 1 sentence (keep date prefix): ' + raw); return r || raw; }
+        try {
+          const r = await Promise.race([
+            relay.ask('Rewrite this fleet timeline entry professionally in 1 sentence (keep date prefix): ' + raw),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('rewrite timeout')), 30000))
+          ]);
+          return r || raw;
+        }
         catch(e) { return raw; }
       }).then((results) => {
         if (results.length) {
@@ -510,7 +470,7 @@ function _startAutoSync() {
   _ctx.runFullSync      = _syncEngine.runFullSync;
   _ctx.startAutoSync    = _startAutoSync;
   _ctx.triggerRescan    = _windowApi.triggerRescan;
-  _ctx.reloadSchedulers = _reloadSchedulers;   // IPC handler calls this after saving slot config
+  _ctx.reloadSchedulers = (newSlots) => scheduler.reload(newSlots);   // IPC handler calls this after saving slot config
   _ctx.reloadSyncInterval = _startAutoSync;    // settings:save-sync-interval calls this to apply immediately
 
   // ── 5e. Register all IPC handlers ─────────────────────────────────────────
@@ -550,13 +510,12 @@ function _startAutoSync() {
   log.info('Tray created');
 
   // ── 5h. Scheduler — SP push + email auto-send + missed-slot catch-up ───────
-  _ctxRef = _ctx;  // expose ctx to module-scope scheduler functions
-  _startSchedulers();
+  scheduler.start(_ctx);
 
   // ── 5i. Sleep resume → catch-up check ─────────────────────────────────────
   powerMonitor.on('resume', () => {
     log.info('System resumed from sleep — checking missed slots (15s delay)');
-    setTimeout(() => _catchUpMissedSlots(), 15000);
+    setTimeout(() => scheduler.catchUp(), 15000);
   });
 
   log.info('Bootstrap complete');
@@ -565,267 +524,3 @@ function _startAutoSync() {
   log.error('FATAL: app.whenReady() threw:', err.message, err.stack);
   app.quit();
 });
-
-// =============================================================================
-// Scheduler — weekday auto SP push + auto email
-// Extracted to module scope so _stopSchedulers() can reach the timers.
-// =============================================================================
-
-let _ctxRef             = null;  // set before _startSchedulers(); bridges closure to module scope
-let _spScheduleTimer    = null;
-let _emailScheduleTimer = null;
-let _lastSPSlot         = '';
-let _lastEmailSlot      = '';
-
-// Slot defaults — used when no saved config exists
-const _DEFAULT_SP_SLOTS    = [{ h: 7,  m: 30, label: '07:30' }, { h: 15, m: 30, label: '15:30' }];
-const _DEFAULT_EMAIL_SLOTS = [{ h: 8,  m: 0,  label: '08:00' }, { h: 15, m: 15, label: '15:15' }];
-
-// Live slot arrays — mutated by _loadScheduleSlots() and reloadSchedulers()
-let SP_SLOTS    = _DEFAULT_SP_SLOTS.slice();
-let EMAIL_SLOTS = _DEFAULT_EMAIL_SLOTS.slice();
-
-// Load saved slot config from store (falls back to defaults if not set)
-function _loadScheduleSlots() {
-  try {
-    const store   = require('./store');
-    const saved   = store.load('settings', {}).schedulerSlots;
-    if (saved && Array.isArray(saved.sp) && Array.isArray(saved.email)) {
-      SP_SLOTS    = saved.sp;
-      EMAIL_SLOTS = saved.email;
-      log.info('Scheduler slots loaded from config — SP:', SP_SLOTS.map(s=>s.label), 'Email:', EMAIL_SLOTS.map(s=>s.label));
-    }
-  } catch (e) {
-    log.warn('Could not load scheduler slot config, using defaults:', e.message);
-  }
-}
-
-function _todayPrefix() {
-  const n = new Date();
-  return n.getFullYear() + '-' +
-    String(n.getMonth() + 1).padStart(2, '0') + '-' +
-    String(n.getDate()).padStart(2, '0');
-}
-
-function _isWeekday() {
-  const d = new Date().getDay();
-  return d >= 1 && d <= 5;
-}
-
-// ── Scheduled SP push — weekdays 07:30 + 15:30 ───────────────────────────────
-function _scheduleAutoSPPush() {
-  if (_spScheduleTimer) clearInterval(_spScheduleTimer);
-  _spScheduleTimer = setInterval(() => {
-    if (!_isWeekday()) return;
-    const now  = new Date();
-    const hh   = now.getHours(), mm = now.getMinutes();
-    const slot = SP_SLOTS.find(s => s.h === hh && s.m === mm);
-    if (!slot) return;
-
-    const dateKey = _todayPrefix() + '-SP-' + slot.label;
-    if (_lastSPSlot === dateKey) return;
-    _lastSPSlot = dateKey;
-
-    log.info('Auto SP Push triggered: slot=' + slot.label);
-    _ctxRef.pushStatus('\uD83D\uDCE8 Auto SP Push: syncing for ' + slot.label + '...');
-
-    _ctxRef.runFullSync().then(() => {
-      const rows = _ctxRef.lastData && _ctxRef.lastData.rows;
-      if (!rows) return;
-      const { pushToSharePoint } = require('./scrapers/sharepoint_push');
-      const win = _ctxRef.getMainWindow();
-      pushToSharePoint(rows, (msg, type) => {
-        log.info('[SP Auto] ' + (type || 'info') + ' | ' + msg);
-        if (win && !win.isDestroyed())
-          win.webContents.send('sp:progress', { message: msg, type });
-      }).then(result => {
-        log.info('Auto SP Push complete (' + slot.label + '): ' + (result.ok ? 'SUCCESS' : result.error));
-        _ctxRef.pushStatus('\u2705 SP Push complete (' + slot.label + ')');
-      }).catch(err => {
-        log.error('Auto SP Push error:', err.message);
-        _ctxRef.pushStatus('\u274C SP Push failed: ' + err.message);
-      });
-    }).catch(err => {
-      log.error('Auto SP Push sync failed:', err.message);
-    });
-  }, 30000);
-}
-
-// ── Scheduled auto-email — weekdays 08:00 + 15:15 ────────────────────────────
-function _scheduleAutoEmail() {
-  if (_emailScheduleTimer) clearInterval(_emailScheduleTimer);
-  _emailScheduleTimer = setInterval(() => {
-    if (!_isWeekday()) return;
-    const now  = new Date();
-    const hh   = now.getHours(), mm = now.getMinutes();
-    const slot = EMAIL_SLOTS.find(s => s.h === hh && s.m === mm);
-    if (!slot) return;
-
-    const dateKey = _todayPrefix() + '-' + slot.label;
-    if (_lastEmailSlot === dateKey) return;
-    _lastEmailSlot = dateKey;
-
-    log.info('Auto-email triggered: slot=' + slot.label);
-    // FEATURE (2026-07-16): persisted "Auto-Email Note" — set once in
-    // Settings, rides along with every scheduled auto-send until cleared.
-    // If "one-shot" is checked, capture it for THIS send then immediately
-    // clear it so it doesn't carry into the next slot. Read fresh (not
-    // cached) so edits made between slots take effect right away.
-    const _settingsNow = store.load('settings', {});
-    const autoEmailNote = _settingsNow.autoEmailNote || '';
-    if (autoEmailNote && _settingsNow.autoEmailNoteOneShot) {
-      delete _settingsNow.autoEmailNote;
-      _settingsNow.autoEmailNoteOneShot = false;
-      store.save('settings', _settingsNow);
-      log.info('Auto-email note was one-shot — cleared after capturing for this send');
-    }
-    _ctxRef.pushStatus('\uD83D\uDCE7 Auto-email: syncing for ' + slot.label + ' report...');
-
-    _ctxRef.runFullSync().then(() => {
-      // DATA READINESS CHECK (2026-08-12): verify fleet data is populated before
-      // firing the email event. A sync can succeed but return 0 rows (e.g. AAP
-      // cache miss on first boot). Sending a blank email is worse than skipping.
-      const _fd      = store.load('fleetData', {});
-      const _rows    = (_fd && Array.isArray(_fd.rows)) ? _fd.rows : [];
-      const _uptakeN = _rows.filter(r => r.riskScore && r.riskScore > 0).length;
-      const _ageMin  = _fd.syncedAt
-        ? Math.round((Date.now() - new Date(_fd.syncedAt).getTime()) / 60000)
-        : 9999;
-
-      if (_rows.length < 3) {
-        log.warn('Auto-email SKIPPED: fleet data has only ' + _rows.length + ' units — possibly empty or sync failed before data loaded');
-        _ctxRef.pushStatus('⚠️ Auto-email skipped: no fleet data available (' + _rows.length + ' units)');
-        return;
-      }
-
-      const _dataNote = _uptakeN > 0
-        ? _uptakeN + ' Uptake-scored units included'
-        : 'no Uptake risk scores available';
-      log.info('Auto-email data ready: ' + _rows.length + ' units, ' + _dataNote + ', synced ' + _ageMin + 'min ago');
-
-      setTimeout(() => {
-        _ctxRef.send('fleet:auto-email', {
-          slot: slot.label,
-          triggeredAt: new Date().toISOString(),
-          autoEmailNote,
-          dataRowCount: _rows.length,
-          dataUptakeCount: _uptakeN,
-          dataAgeMins: _ageMin,
-        });
-      }, 2000);
-    }).catch(err => {
-      log.warn('Auto-email sync failed:', err.message);
-      // Still attempt send — use whatever data is on disk from last successful sync.
-      // The renderer will see syncError and can warn the recipient if needed.
-      const _fd2   = store.load('fleetData', {});
-      const _rows2 = (_fd2 && Array.isArray(_fd2.rows)) ? _fd2.rows : [];
-      if (_rows2.length < 3) {
-        log.warn('Auto-email SKIPPED after sync failure: no usable cached data (' + _rows2.length + ' units)');
-        _ctxRef.pushStatus('⚠️ Auto-email skipped: sync failed and no cached data available');
-        return;
-      }
-      log.info('Auto-email using cached data after sync failure: ' + _rows2.length + ' units');
-      _ctxRef.send('fleet:auto-email', {
-        slot: slot.label,
-        triggeredAt: new Date().toISOString(),
-        syncError: err.message,
-        autoEmailNote,
-        dataRowCount: _rows2.length,
-      });
-    });
-  }, 30000);
-}
-
-// ── Missed-slot catch-up — fires on startup and on sleep resume ───────────────
-function _catchUpMissedSlots() {
-  if (!_isWeekday()) return;
-
-  const now            = new Date();
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
-  const prefix         = _todayPrefix();
-
-  EMAIL_SLOTS.forEach(slot => {
-    const slotMin  = slot.h * 60 + slot.m;
-    const missedBy = currentMinutes - slotMin;
-    if (missedBy <= 0 || missedBy > 120) return;
-    const dateKey = prefix + '-' + slot.label;
-    if (_lastEmailSlot === dateKey) return;
-    _lastEmailSlot = dateKey;
-    log.info('Catch-up: missed email slot ' + slot.label + ' (' + missedBy + 'min ago)');
-    _ctxRef.pushStatus('\u23F0 Catch-up: sending ' + slot.label + ' email (missed ' + missedBy + 'min ago)...');
-    setTimeout(() => {
-      try {
-        const rows = _ctxRef.lastData && _ctxRef.lastData.rows;
-        if (rows) {
-          // BUG FIX (2026-07-16): this block previously called
-          // composeAndSendEmail(rows, win), a function that does not exist
-          // anywhere in email_sender.js's exports (confirmed exports:
-          // sendFleetEmail, loadEmailConfig, saveEmailConfig, CONFIG_FILE
-          // only). Every missed-slot catch-up email has silently failed
-          // since this code was written -- caught by the try/catch below,
-          // logged as "Catch-up email failed: ... is not a function", with
-          // no functional recovery. Fix: fire the same fleet:auto-email
-          // event the on-time scheduler uses (_scheduleAutoEmail above) so
-          // the catch-up path reuses the real, tested renderer-side compose
-          // logic (recipient lookup, OWA compose, subject building, SOS/EOS
-          // slot labeling) instead of a second, separate, broken path.
-          const _settingsNow2  = store.load('settings', {});
-          const autoEmailNote2 = _settingsNow2.autoEmailNote || '';
-          if (autoEmailNote2 && _settingsNow2.autoEmailNoteOneShot) {
-            delete _settingsNow2.autoEmailNote;
-            _settingsNow2.autoEmailNoteOneShot = false;
-            store.save('settings', _settingsNow2);
-          }
-          _ctxRef.send('fleet:auto-email', {
-            slot: slot.label,
-            triggeredAt: new Date().toISOString(),
-            autoEmailNote: autoEmailNote2,
-            catchUp: true,
-          });
-        }
-      } catch (e) { log.error('Catch-up email failed:', e.message); }
-    }, 5000);
-  });
-
-  SP_SLOTS.forEach(slot => {
-    const slotMin  = slot.h * 60 + slot.m;
-    const missedBy = currentMinutes - slotMin;
-    if (missedBy <= 0 || missedBy > 120) return;
-    const dateKey = prefix + '-SP-' + slot.label;
-    if (_lastSPSlot === dateKey) return;
-    _lastSPSlot = dateKey;
-    log.info('Catch-up: missed SP slot ' + slot.label + ' (' + missedBy + 'min ago)');
-    _ctxRef.pushStatus('\u23F0 Catch-up: SP push for ' + slot.label + ' (missed ' + missedBy + 'min ago)...');
-    setTimeout(() => {
-      try {
-        const rows = _ctxRef.lastData && _ctxRef.lastData.rows;
-        if (rows) {
-          const { pushToSharePoint } = require('./scrapers/sharepoint_push');
-          pushToSharePoint(rows, (msg) => log.info('[SP Catch-up] ' + msg));
-        }
-      } catch (e) { log.error('Catch-up SP push failed:', e.message); }
-    }, 10000);
-  });
-}
-
-function _startSchedulers() {
-  _loadScheduleSlots();
-  _scheduleAutoSPPush();
-  _scheduleAutoEmail();
-  _catchUpMissedSlots();
-  log.info('Schedulers started — SP:', SP_SLOTS.map(s=>s.label), 'Email:', EMAIL_SLOTS.map(s=>s.label));
-}
-
-function _stopSchedulers() {
-  if (_spScheduleTimer)    { clearInterval(_spScheduleTimer);    _spScheduleTimer    = null; }
-  if (_emailScheduleTimer) { clearInterval(_emailScheduleTimer); _emailScheduleTimer = null; }
-}
-
-// Called by IPC handler when user saves new slot config
-function _reloadSchedulers(newSlots) {
-  if (newSlots && newSlots.sp)    SP_SLOTS    = newSlots.sp;
-  if (newSlots && newSlots.email) EMAIL_SLOTS = newSlots.email;
-  _stopSchedulers();
-  _startSchedulers();
-  log.info('Schedulers reloaded with new slot config');
-}

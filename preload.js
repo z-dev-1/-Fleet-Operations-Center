@@ -149,6 +149,7 @@ contextBridge.exposeInMainWorld('ai', {
   getExecutionLog:  ()             => ipcRenderer.invoke('orcha:get-execution-log'),
   exportExcel:      (data)         => ipcRenderer.invoke('orcha:export-excel', data),
   inferRCA:         (text, ctx)    => ipcRenderer.invoke('orcha:infer-rca', text, ctx),
+  timelineIntel:    ()             => ipcRenderer.invoke('orcha:timeline-intel'),
 });
 
 
@@ -173,6 +174,7 @@ contextBridge.exposeInMainWorld('slack', {
   // -- Partner Auto-Reply engine (2026-07-21) -- see src/scrapers/slack_channel_watch.js
   getChannelWatchConfig:  ()       => ipcRenderer.invoke('slack:get-channel-watch-config'),
   saveChannelWatchConfig: (config) => ipcRenderer.invoke('slack:save-channel-watch-config', config),
+  onConfigUpdated:       (cb)     => on('slack:config-updated', cb),
   checkChannelMembership: (channelId) => ipcRenderer.invoke('slack:check-channel-membership', channelId),
   pollChannelWatch:       ()       => ipcRenderer.invoke('slack:poll-channel-watch'),
   dedupeReplies:          ()       => ipcRenderer.invoke('slack:dedupe-replies'),
@@ -251,21 +253,7 @@ contextBridge.exposeInMainWorld('email', {
   setTestMode:  (enabled) => ipcRenderer.invoke('email:set-test-mode', enabled),
 });
 
-// ── Partner portal ───────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('partner', {
-  getQR:         ()          => ipcRenderer.invoke('partner:get-qr'),
-  getQueue:      ()          => ipcRenderer.invoke('partner:get-queue'),
-  updateJob:     (id, update)=> ipcRenderer.invoke('partner:update-job', id, update),
-  onNewRequest:  (cb)        => on('partner:new-request', cb),
-  getReview:       ()          => ipcRenderer.invoke('partner:get-review'),
-  getScheduled:    ()          => ipcRenderer.invoke('partner:get-scheduled'),
-  pollForms:       (cfg)       => ipcRenderer.invoke('partner:poll-forms', cfg),
-  approve:         (idx)       => ipcRenderer.invoke('partner:approve', idx),
-  decline:         (idx)       => ipcRenderer.invoke('partner:decline', idx),
-  schedule:        (data)      => ipcRenderer.invoke('partner:schedule', data),
-  submitScheduled: (idx)       => ipcRenderer.invoke('partner:submit-scheduled', idx),
-  onNewRequests:   (cb)        => on('partner:new-requests', cb),
-});
+// ── Partner portal — removed in Phase 6 (feature no longer used) ─────────────
 
 // ── Screenshots / files ───────────────────────────────────────────────────────
 contextBridge.exposeInMainWorld('files', {
@@ -393,6 +381,9 @@ contextBridge.exposeInMainWorld('workflowIntel', {
   // Execution log (read-only until Phase 4 wires the execution engine)
   getExecutionLog: (limit) => ipcRenderer.invoke('wi:get-execution-log', limit),
   getSuggestionForUnit: (unit) => ipcRenderer.invoke('wi:get-suggestion-for-unit', unit),
+  // Phase 4: Execute a recorded workflow
+  execute:         (id, variables) => ipcRenderer.invoke('wi:execute-workflow', id, variables),
+  onProgress:      (cb) => on('wi:execution-progress', cb),
 });
 
 // -- Bubble/mini-FAB window controls (2026-07-24) -- only meaningful when this
@@ -417,9 +408,4 @@ contextBridge.exposeInMainWorld('bubble', {
   quit:           ()       => ipcRenderer.send('app:quit'),
 });
 
-// ── Fleet Ops Companion (iPhone PWA bridge) ─────────────────────────────────
-contextBridge.exposeInMainWorld('cloudCompanion', {
-  getConfig:       ()      => ipcRenderer.invoke('cloud-companion:get-config'),
-  setConfig:       (cfg)   => ipcRenderer.invoke('cloud-companion:set-config', cfg),
-  testConnection:  ()      => ipcRenderer.invoke('cloud-companion:test-connection'),
-});
+// ── Fleet Ops Companion — removed in Phase 6 (feature no longer used) ────────
