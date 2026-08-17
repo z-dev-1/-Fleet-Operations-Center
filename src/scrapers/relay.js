@@ -363,7 +363,21 @@ const RELAY_CONVERSATION_SCRIPT = String.raw`
     requestLinks:    requestLinks,
     dtnaLinks:       dtnaLinks,
     salesforceLinks: salesforceLinks,
-    fullConversation: convText.substring(0, 15000),
+    // FIX (2026-08-17): was convText.substring(0, 15000) — kept the OLDEST
+    // 15000 chars and dropped the NEWEST. The Relay conversation feed is
+    // oldest-first, so on a long repair (e.g. 321950, 34+ days) the most recent
+    // vendor comments (the ones that matter for current status) fell past char
+    // 15000 and were never scraped — so the timeline could never see them, no
+    // matter how often it rescanned. Now: if it fits, keep all; otherwise keep
+    // the HEAD (equipment/service overview + early context, ~4000 chars, which
+    // holds vendor/VIN/estimate links) AND the TAIL (newest ~11000 chars of the
+    // comment feed), dropping the middle with a marker.
+    fullConversation: (function(){
+      if (convText.length <= 15000) return convText;
+      var head = convText.slice(0, 4000);
+      var tail = convText.slice(convText.length - 11000);
+      return head + '\n...[older comments trimmed]...\n' + tail;
+    })(),
     convTextSnippet: salesforceLinks.length === 0 ? (function(){
       var sfIdx = convText.search(/(?:(?:sales?\s*force(?:\s+case)?|\bsf\b)\s*#?\s*\d{5,12}|\bCase\s+000\d{5,9}\b)/i);
       if (sfIdx > -1) return "FOUND@" + sfIdx + ":" + convText.slice(Math.max(0,sfIdx-30), sfIdx+140);
