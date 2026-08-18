@@ -11,7 +11,8 @@
 const { BrowserWindow } = require('electron');
 const { P } = require('../config/paths');
 const logger = require('../utils/logger').createLogger('relay');
-const { enrichVolvoAsist, isUpgrade, SR_RE: SR_RE_MOD } = require('./asist_enrich');
+const { enrichVolvoAsist, isUpgrade, SR_RE: SR_RE_MOD, openAndScrape } = require('./asist_enrich');
+const { partitionForUrl } = require('../orcha/auto-login');
 const { withRetry } = require('../utils/retry');    // H-1: per-unit retry
 // MODULE LOAD PROBE
 
@@ -1023,6 +1024,27 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
             logger.info('[Relay] Phase3.5 upgrade applied | source:', _asistEnrich.source, '| url:', _finalOffsite.url.slice(0,80));
           }
           logger.info('[Relay] done() sfCase for', equipmentId, '|', convSalesforce ? convSalesforce.caseNumber : 'null', '| urlFull:', convSalesforce && convSalesforce.url ? convSalesforce.url : 'NONE', '| urlLen:', convSalesforce && convSalesforce.url ? convSalesforce.url.length : 0);
+
+          // Phase 3.6: Scrape offsite page text if we have a Decisiv URL but no
+          // offsiteText from enrichment. This captures the dealer's latest notes
+          // from the estimate/case page (parts updates, tech notes, ETAs) so the
+          // timeline builder has BOTH Relay conversation + offsite dealer notes.
+          // Only fires for Decisiv URLs (Volvo/PACCAR), only when enrichment
+          // didn't already capture it (i.e. _asistEnrich is null or has no text).
+          let _offsitePageText = (_asistEnrich && _asistEnrich.offsiteText) || '';
+          if (!_offsitePageText && _finalOffsite && _finalOffsite.url && /decisiv\.net/i.test(_finalOffsite.url)) {
+            try {
+              logger.info('[Relay] Phase3.6 scraping offsite page text for', equipmentId, '|', _finalOffsite.url.slice(0, 80));
+              const _offPage = await openAndScrape(_finalOffsite.url, partitionForUrl(_finalOffsite.url));
+              if (_offPage && _offPage.pageText) {
+                _offsitePageText = _offPage.pageText.substring(0, 8000);
+                logger.info('[Relay] Phase3.6 offsite text captured for', equipmentId, '|', _offsitePageText.length + 'ch');
+              }
+            } catch (_oe) {
+              logger.warn('[Relay] Phase3.6 offsite scrape failed for', equipmentId, _oe.message);
+            }
+          }
+
           done({
             ...wrData,
             ...woData,
@@ -1034,7 +1056,7 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
             asistSrUrl:          (_finalOffsite && _finalOffsite.asistSrUrl)     || '',
             asistScrapedAt:      (_finalOffsite && _finalOffsite.asistScrapedAt) || '',
             dealerName:          (_finalOffsite && _finalOffsite.dealerName)     || '',
-            asistNotes:          (_asistEnrich && _asistEnrich.offsiteText)     || '',
+            asistNotes:          _offsitePageText || '',
             salesforceCase:      convSalesforce   ? convSalesforce.caseNumber   : (wrData.salesforceCase      || ''),
             salesforceCaseUrl:   convSalesforce   ? convSalesforce.url          : (wrData.salesforceCaseUrl   || ''),
             fullConversation:    _convData && _convData.fullConversation ? _convData.fullConversation : '',

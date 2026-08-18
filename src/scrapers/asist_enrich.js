@@ -165,4 +165,4 @@ function isUpgrade(es,ns){return(SOURCE_RANK[ns]||0)>(SOURCE_RANK[es]||0);}
 
 // enrichVolvoAsist kept as the name for back-compat with existing callers;
 // enrichAsist is the accurate alias now that it handles Volvo AND PACCAR.
-module.exports={enrichVolvoAsist,enrichAsist:enrichVolvoAsist,isUpgrade,SOURCE_RANK,SR_RE};
+module.exports={enrichVolvoAsist,enrichAsist:enrichVolvoAsist,isUpgrade,SOURCE_RANK,SR_RE,openAndScrape};
