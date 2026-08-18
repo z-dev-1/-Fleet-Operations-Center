@@ -622,9 +622,13 @@ function registerAIHandlers(ctx) {
 
   // Issue #15: prompt length cap
   // Phase 3: rate-limited to 1 concurrent call
+  // FIX (2026-08-17): was using askOrcha (WS-only, no fallback) which hangs
+  // when the Orcha WS queue is busy. Switch to relay.ask — the full automatic
+  // chain (Orcha WS → CLI → Claude Code → Bedrock) so ai:ask is reliable for
+  // all callers (Daily Call AI Review, WBR Generate, etc.)
   handle('ai:ask', async (_e, prompt) => {
     requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
-    return _aiAskLimit(() => askOrcha(prompt));
+    return _aiAskLimit(() => relay.ask(prompt));
   });
 
   // Issue #13: response now includes `path` field ('chat' or 'fallback')
