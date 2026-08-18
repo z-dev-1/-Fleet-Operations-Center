@@ -1107,7 +1107,7 @@ async function _injectAISplitDraft(webview, unit, side) {
         : 'Write a professional dealer note (1-3 sentences) requesting repair status, parts status if applicable, and estimated completion. If they have been quiet 3+ days, escalate firmly requesting immediate update. Ready to submit as-is.') +
       '\n\nReturn ONLY the comment text — no JSON, no markdown, no quotes.';
 
-    var _aiTimeout = new Promise(function(_, rej) { setTimeout(function() { rej(new Error('split-view AI timeout')); }, 20000); });
+    var _aiTimeout = new Promise(function(_, rej) { setTimeout(function() { rej(new Error('split-view AI timeout')); }, 60000); });
     var result = await Promise.race([window.ai.ask(prompt), _aiTimeout]);
     var text = (result && result.text) ? result.text.trim() : (typeof result === 'string' ? result.trim() : '');
     // Validate: must be plain text, not JSON, not empty
