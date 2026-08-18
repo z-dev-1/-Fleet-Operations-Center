@@ -220,6 +220,67 @@ function _render() {
 
   html += '</div>'; // end row 3
 
+  // ── Row 3b: Avg Downtime by Site + Avg Downtime by Operator ─────────────
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+
+  // Avg Downtime by Site
+  html += '<div style="background:var(--card);border:1px solid var(--bdr);border-radius:10px;padding:14px;">';
+  html += '<div style="font-size:10px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Avg Downtime by Site</div>';
+  const siteDownMap = {};
+  unavail.forEach(u => {
+    const s = u.domicileSite || 'Unknown';
+    if (!siteDownMap[s]) siteDownMap[s] = { total: 0, count: 0 };
+    siteDownMap[s].total += _parseDays(u.workDuration || u.duration);
+    siteDownMap[s].count++;
+  });
+  const siteDownSorted = Object.entries(siteDownMap)
+    .map(([site, d]) => ({ site, avg: d.count ? Math.round(d.total / d.count * 10) / 10 : 0, count: d.count }))
+    .filter(s => s.count >= 2)
+    .sort((a, b) => b.avg - a.avg)
+    .slice(0, 10);
+  const maxSiteDown = siteDownSorted.length ? siteDownSorted[0].avg : 1;
+  siteDownSorted.forEach(s => {
+    const pct = Math.round((s.avg / maxSiteDown) * 100);
+    const barColor = s.avg >= 14 ? '#ff7b72' : s.avg >= 7 ? '#ffa657' : '#7ee787';
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">';
+    html += '<div style="width:60px;font-size:9px;font-weight:700;color:var(--txt2);" title="' + _esc(s.site) + '">' + _esc(s.site) + '</div>';
+    html += '<div style="flex:1;height:6px;background:var(--el);border-radius:3px;overflow:hidden;"><div style="width:' + pct + '%;height:100%;background:' + barColor + ';border-radius:3px;"></div></div>';
+    html += '<div style="width:35px;font-size:10px;font-weight:700;color:var(--txt);text-align:right;">' + s.avg + 'd</div>';
+    html += '</div>';
+  });
+  if (!siteDownSorted.length) html += '<div style="font-size:10px;color:var(--mut);">No data</div>';
+  html += '</div>';
+
+  // Avg Downtime by Operator
+  html += '<div style="background:var(--card);border:1px solid var(--bdr);border-radius:10px;padding:14px;">';
+  html += '<div style="font-size:10px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Avg Downtime by Operator</div>';
+  const opDownMap = {};
+  unavail.forEach(u => {
+    const o = u.operator || 'Unknown';
+    if (!opDownMap[o]) opDownMap[o] = { total: 0, count: 0 };
+    opDownMap[o].total += _parseDays(u.workDuration || u.duration);
+    opDownMap[o].count++;
+  });
+  const opDownSorted = Object.entries(opDownMap)
+    .map(([op, d]) => ({ op, avg: d.count ? Math.round(d.total / d.count * 10) / 10 : 0, count: d.count }))
+    .filter(o => o.count >= 2)
+    .sort((a, b) => b.avg - a.avg)
+    .slice(0, 10);
+  const maxOpDown = opDownSorted.length ? opDownSorted[0].avg : 1;
+  opDownSorted.forEach(o => {
+    const pct = Math.round((o.avg / maxOpDown) * 100);
+    const barColor = o.avg >= 14 ? '#ff7b72' : o.avg >= 7 ? '#ffa657' : '#7ee787';
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">';
+    html += '<div style="width:60px;font-size:9px;font-weight:700;color:var(--txt2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + _esc(o.op) + '">' + _esc(o.op) + '</div>';
+    html += '<div style="flex:1;height:6px;background:var(--el);border-radius:3px;overflow:hidden;"><div style="width:' + pct + '%;height:100%;background:' + barColor + ';border-radius:3px;"></div></div>';
+    html += '<div style="width:35px;font-size:10px;font-weight:700;color:var(--txt);text-align:right;">' + o.avg + 'd</div>';
+    html += '</div>';
+  });
+  if (!opDownSorted.length) html += '<div style="font-size:10px;color:var(--mut);">No data</div>';
+  html += '</div>';
+
+  html += '</div>'; // end row 3b
+
   // ── Row 4: Stalled Units (no timeline update in 5+ days) ────────────────
   html += '<div style="background:var(--card);border:1px solid var(--bdr);border-radius:10px;padding:14px;">';
   html += '<div style="font-size:10px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">⚠️ Stalled — No Update in 5+ Days</div>';
