@@ -628,7 +628,10 @@ function registerAIHandlers(ctx) {
   // all callers (Daily Call AI Review, WBR Generate, etc.)
   handle('ai:ask', async (_e, prompt) => {
     requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
-    return _aiAskLimit(() => relay.ask(prompt));
+    const text = await _aiAskLimit(() => relay.ask(prompt));
+    // Normalize: relay.ask returns a raw string; callers expect { ok, text }
+    if (typeof text === 'string') return { ok: true, text };
+    return text; // in case it's already an object
   });
 
   // Issue #13: response now includes `path` field ('chat' or 'fallback')
