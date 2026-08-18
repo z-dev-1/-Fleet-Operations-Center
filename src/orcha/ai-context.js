@@ -66,13 +66,18 @@ function buildFleetContext(messageText, opts = {}) {
   });
 
   if (!resolved.units.length && !resolved.groups.length) {
-    // Nothing specific referenced — include a summary of unavailable units.
-    context += '\nUnavailable units (showing top ' + Math.min(unavail.length, 15) + '):\n';
-    unavail.slice(0, 15).forEach(r => {
-      const risk = r.riskScore ? ' | Risk: ' + r.riskScore : '';
-      const dur  = r.workDuration ? ' | Down: ' + r.workDuration : '';
+    // Nothing specific referenced — include ALL unavailable units so a general
+    // "give me a summary" request gets the full fleet picture, not just 15.
+    // Format is compact (one line per unit) so 40-50 units fit within token
+    // budgets. The AI can summarize/group/prioritize as it sees fit.
+    context += '\nAll unavailable units (' + unavail.length + '):\n';
+    unavail.forEach(r => {
+      const risk = r.riskScore ? ' | Risk:' + r.riskScore : '';
+      const dur  = r.workDuration ? ' | Down:' + r.workDuration : '';
+      const site = r.domicileSite ? ' | Site:' + r.domicileSite : '';
+      const issue = r.issueDetails ? ' | ' + (r.issueDetails || '').slice(0, 60) : '';
       context += '• ' + r.equipmentId + ' | ' + (r.vendor || 'no vendor') + ' | ' +
-        (r.lifecycleReason || r.lifecycleState || '') + dur + risk + '\n';
+        (r.lifecycleReason || r.lifecycleState || '') + dur + site + risk + issue + '\n';
     });
   }
 
