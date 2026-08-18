@@ -1049,8 +1049,19 @@ ${unitLines}
 RESPOND WITH JSON ONLY:
 {"bridge": "your field level bridge text", "actions": "your FAS field actions text"}`;
 
-      const _timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('WBR AI timeout')), 90000));
-      const raw = await Promise.race([window.ai.ask(prompt), _timeout]);
+      // Retry once on failure (first call after boot often fails while Orcha warms up)
+      let raw = null;
+      for (let attempt = 0; attempt < 2 && !raw; attempt++) {
+        try {
+          const _timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('WBR AI timeout')), 90000));
+          raw = await Promise.race([window.ai.ask(prompt), _timeout]);
+        } catch (retryErr) {
+          if (attempt === 0) {
+            console.warn('[WBR] Attempt 1 failed for', s.key, '— retrying:', retryErr.message);
+            await new Promise(r => setTimeout(r, 2000)); // brief pause before retry
+          }
+        }
+      }
       const jm = (raw || '').match(/\{[\s\S]*\}/);
       if (jm) {
         const parsed = JSON.parse(jm[0]);
@@ -1058,7 +1069,7 @@ RESPOND WITH JSON ONLY:
         if (parsed.actions) _wbrSet(s.key, 'actions', parsed.actions);
       }
     } catch (e) {
-      // AI failed for this site — leave empty, user can fill manually
+      // AI failed for this site after retry — leave empty, user can fill manually
       console.warn('[WBR] AI generation failed for', s.key, e.message);
     }
     done++;
