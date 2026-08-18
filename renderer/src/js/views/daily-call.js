@@ -767,6 +767,14 @@ function _viewHtml() {
 
       <div class="dc-section-title">Bottom by SCAC</div>
       <div id="dc-scac-table"></div>
+
+      <div class="dc-section-title" style="margin-top:20px;">WBR — Weekly Bridge Report</div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+        <button id="dc-wbr-generate" class="detail-panel__btn detail-panel__btn--secondary" style="font-size:11px;">🤖 Generate WBR</button>
+        <button id="dc-wbr-copy" class="detail-panel__btn detail-panel__btn--secondary" style="font-size:11px;">📋 Copy for SharePoint</button>
+        <span id="dc-wbr-status" style="font-size:10px;color:var(--mut);"></span>
+      </div>
+      <div id="dc-wbr-table"></div>
     </div>`;
 }
 
@@ -798,6 +806,9 @@ function _update(rows) {
 
   _wireEditableFields(siteEl, 'site');
   _wireEditableFields(scacEl, 'scac');
+
+  // WBR table (renders from localStorage; Generate fills it via AI)
+  _renderWBR(rows);
 }
 
 function _wireEditableFields(tableEl, kind) {
@@ -902,5 +913,174 @@ export function init(container) {
     if (to === 'daily-call') _update(state.slice('fleet').rows || []);
   });
 
+  // WBR buttons
+  _el.querySelector('#dc-wbr-generate').addEventListener('click', async (e) => {
+    const btn = e.target;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    const statusEl = _el.querySelector('#dc-wbr-status');
+    const rows = state.slice('fleet').rows || [];
+    await _generateWBR(rows, (done, total) => {
+      btn.textContent = `🤖 Generating ${done}/${total}...`;
+      if (statusEl) statusEl.textContent = '';
+    });
+    btn.disabled = false;
+    btn.textContent = orig;
+    if (statusEl) statusEl.textContent = '✓ Generated';
+    setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 3000);
+    _renderWBR(rows);
+  });
+
+  _el.querySelector('#dc-wbr-copy').addEventListener('click', async (e) => {
+    const btn = e.target;
+    const orig = btn.textContent;
+    _copyWBR();
+    btn.textContent = '✓ Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
+
   _update(state.slice('fleet').rows || []);
+}
+
+// ── WBR (Weekly Bridge Report) ──────────────────────────────────────────────
+// One row per site with unavailable units. AI generates Field Level Bridge
+// and FAS Field Actions per site using the same fleet context (units, vendors,
+// timelines, conversations) that processOrchaAction uses. Editable after
+// generation, persisted to localStorage keyed by site+week.
+
+function _wbrWeekKey() {
+  // Key by ISO week so content refreshes weekly
+  const d = new Date();
+  const oneJan = new Date(d.getFullYear(), 0, 1);
+  const weekNum = Math.ceil(((d - oneJan) / 86400000 + oneJan.getDay() + 1) / 7);
+  return d.getFullYear() + '-W' + String(weekNum).padStart(2, '0');
+}
+
+function _wbrLsKey(siteKey, field) {
+  return `wbr__${siteKey}__${field}__${_wbrWeekKey()}`;
+}
+
+function _wbrGet(siteKey, field) {
+  try { return localStorage.getItem(_wbrLsKey(siteKey, field)) || ''; } catch (e) { return ''; }
+}
+
+function _wbrSet(siteKey, field, val) {
+  try { localStorage.setItem(_wbrLsKey(siteKey, field), val); } catch (e) {}
+}
+
+function _getWBRSites(rows) {
+  const siteMap = {};
+  rows.forEach(r => {
+    if (!(r.lifecycleState || '').toLowerCase().includes('unavail')) return;
+    const op = (r.operator || '').toUpperCase();
+    const site = (r.domicileSite || '').toUpperCase();
+    const key = op && site ? op + '/' + site : site || op || 'Unknown';
+    if (!siteMap[key]) siteMap[key] = [];
+    siteMap[key].push(r);
+  });
+  return Object.entries(siteMap)
+    .map(([key, units]) => ({ key, units }))
+    .sort((a, b) => b.units.length - a.units.length);
+}
+
+function _renderWBR(rows) {
+  const el = _el ? _el.querySelector('#dc-wbr-table') : null;
+  if (!el) return;
+  const sites = _getWBRSites(rows);
+  if (!sites.length) {
+    el.innerHTML = '<div style="font-size:11px;color:var(--grn);padding:12px;">All units available — nothing to bridge 🎉</div>';
+    return;
+  }
+
+  let html = `<table class="dc-table" style="font-size:11px;">
+    <thead><tr>
+      <th style="min-width:100px;white-space:nowrap;">Site</th>
+      <th style="min-width:250px;">Field Level Bridge</th>
+      <th style="min-width:250px;">FAS Field Actions</th>
+    </tr></thead><tbody>`;
+
+  sites.forEach(s => {
+    const bridge = _wbrGet(s.key, 'bridge');
+    const actions = _wbrGet(s.key, 'actions');
+    html += `<tr>
+      <td style="font-weight:700;font-size:10px;white-space:nowrap;vertical-align:top;">${_safe(s.key)}<br><span style="font-weight:400;color:var(--mut);font-size:9px;">${s.units.length} down</span></td>
+      <td><textarea class="dc-wbr-cell" data-wbr-site="${_safe(s.key)}" data-wbr-field="bridge" rows="4" style="width:100%;font-size:10px;background:var(--el);border:1px solid var(--bdr);border-radius:4px;padding:6px;color:var(--txt);resize:vertical;font-family:inherit;">${_safe(bridge)}</textarea></td>
+      <td><textarea class="dc-wbr-cell" data-wbr-site="${_safe(s.key)}" data-wbr-field="actions" rows="4" style="width:100%;font-size:10px;background:var(--el);border:1px solid var(--bdr);border-radius:4px;padding:6px;color:var(--txt);resize:vertical;font-family:inherit;">${_safe(actions)}</textarea></td>
+    </tr>`;
+  });
+
+  html += '</tbody></table>';
+  el.innerHTML = html;
+
+  // Auto-save on edit
+  el.querySelectorAll('.dc-wbr-cell').forEach(ta => {
+    ta.addEventListener('input', () => {
+      _wbrSet(ta.dataset.wbrSite, ta.dataset.wbrField, ta.value);
+    });
+  });
+}
+
+async function _generateWBR(rows, progressCb) {
+  const sites = _getWBRSites(rows);
+  let done = 0;
+  for (const s of sites) {
+    if (progressCb) progressCb(done, sites.length);
+    try {
+      const unitLines = s.units.map(u => {
+        const days = u.workDuration || '?';
+        const tl = (u.repairTimeline || '').split('\n').filter(Boolean).slice(-2).join(' | ');
+        return `${u.equipmentId}: vendor=${u.vendor || 'none'}, down=${days}, reason=${u.lifecycleReason || '?'}, issue=${(u.issueDetails || u.issueSummary || '').slice(0, 100)}, recent timeline: ${tl || 'none'}`;
+      }).join('\n');
+
+      const prompt = `You are a fleet operations FAS writing a Weekly Bridge Report (WBR) for site ${s.key}.
+Write TWO fields — a Field Level Bridge (situation summary) and FAS Field Actions (what you're doing about it).
+
+RULES:
+- Be specific: include unit IDs, vendor names, days down, key blockers, ETAs.
+- Bridge: status overview (how many down, why, what stage each is at, key delays/blockers).
+- Actions: what specific actions you took or are taking (who you contacted, what you requested, what you're tracking). Use action verbs: Contacted, Escalated, Requested, Confirmed, Following up with [vendor] for [specific thing].
+- Write like a professional fleet manager in 1st person. Concise but thorough.
+- Do NOT invent information. Only use what's in the unit data below.
+
+SITE: ${s.key} (${s.units.length} units currently down)
+UNIT DATA:
+${unitLines}
+
+RESPOND WITH JSON ONLY:
+{"bridge": "your field level bridge text", "actions": "your FAS field actions text"}`;
+
+      const _timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('WBR AI timeout')), 90000));
+      const raw = await Promise.race([window.ai.ask(prompt), _timeout]);
+      const jm = (raw || '').match(/\{[\s\S]*\}/);
+      if (jm) {
+        const parsed = JSON.parse(jm[0]);
+        if (parsed.bridge) _wbrSet(s.key, 'bridge', parsed.bridge);
+        if (parsed.actions) _wbrSet(s.key, 'actions', parsed.actions);
+      }
+    } catch (e) {
+      // AI failed for this site — leave empty, user can fill manually
+      console.warn('[WBR] AI generation failed for', s.key, e.message);
+    }
+    done++;
+  }
+  if (progressCb) progressCb(done, sites.length);
+}
+
+function _copyWBR() {
+  const rows = state.slice('fleet').rows || [];
+  const sites = _getWBRSites(rows);
+  const tsv = sites.map(s => {
+    const bridge = _wbrGet(s.key, 'bridge').replace(/\t/g, ' ').replace(/\n/g, ' ');
+    const actions = _wbrGet(s.key, 'actions').replace(/\t/g, ' ').replace(/\n/g, ' ');
+    return s.key + '\t' + bridge + '\t' + actions;
+  }).join('\n');
+  const header = 'Site\tField Level Bridge\tFAS Field Actions\n';
+  try { navigator.clipboard.writeText(header + tsv); } catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = header + tsv;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  }
 }
