@@ -151,6 +151,81 @@ async function runOrchaDeepScan(mergedRows, opts) {
 
   // Always save notesStore (timelines + issueSummary + status)
   store.save('notesStore', notesStore);
+
+  // ── Repair-complete detection ─────────────────────────────────────────────
+  // After processing timelines, check each unit's latest entries for
+  // completion signals. Notify the user immediately so they can flip the unit
+  // back to available. Fires once per unit per day (localStorage gate) to
+  // avoid repeat notifications on subsequent scan cycles.
+  const REPAIR_DONE_RE = /\b(repair[s]?\s+(complete[d]?|finished|done)|ready\s+for\s+(pickup|release|return)|road[- ]?test(ed)?|release[d]?\s+(back\s+to|to)\s+(fleet|service|active)|complete[d]?\s+and\s+(ready|released)|flip(ped|ping)?\s+(to|back)\s+(a\/h|available|active)|unit\s+(returned|released|flipped)|work\s+complete[d]?)/i;
+  const _today = new Date().toISOString().slice(0, 10);
+  const _repairDoneUnits = [];
+
+  for (const r of results) {
+    if (r.status !== 'fulfilled' || !r.value) continue;
+    const val = r.value;
+    const unitId = val.equipmentId;
+    const row = mergedRows.find(x => x.equipmentId === unitId);
+    if (!row) continue;
+
+    // Check repair status field
+    const status = (val.repairStatus || '').toLowerCase();
+    const statusDone = /complete[d]?|finished|ready for (pickup|release|return)/i.test(status);
+
+    // Check last 2 timeline lines for completion language
+    const tl = (row.repairTimeline || '').trim();
+    const lastLines = tl ? tl.split('\n').filter(Boolean).slice(-2).join(' ') : '';
+    const timelineDone = REPAIR_DONE_RE.test(lastLines);
+
+    if (statusDone || timelineDone) {
+      // De-dupe: only notify once per unit per day (uses notesStore field)
+      const ns2 = notesStore[unitId] || {};
+      if (ns2._repairDoneNotifDate === _today) continue;
+      _repairDoneUnits.push({
+        id: unitId,
+        vendor: row.vendor || '?',
+        site: row.domicileSite || '',
+        signal: statusDone ? 'status: ' + (val.repairStatus || '') : lastLines.slice(-80),
+      });
+      // Mark notified today
+      if (!notesStore[unitId]) notesStore[unitId] = {};
+      notesStore[unitId]._repairDoneNotifDate = _today;
+    }
+  }
+
+  // Send notifications for units detected as repair-complete
+  if (_repairDoneUnits.length) {
+    logger.info('Repair-complete detected: ' + _repairDoneUnits.map(u => u.id).join(', '));
+    // Renderer notification
+    if (pushData && typeof pushData === 'function') {
+      try {
+        const mainWin = require('electron').BrowserWindow.getAllWindows()[0];
+        if (mainWin && !mainWin.isDestroyed()) {
+          _repairDoneUnits.forEach(u => {
+            mainWin.webContents.send('ui:notif-push', {
+              icon: '✅',
+              title: 'Repair Complete: ' + u.id,
+              body: u.vendor + (u.site ? ' @ ' + u.site : '') + ' — ' + u.signal,
+              time: Date.now(),
+            });
+          });
+        }
+      } catch (_) {}
+    }
+    // Slack self-DM (Just Me channel) — batch all into one message
+    try {
+      const slackSend = require('../scrapers/slack_send');
+      const slackConfig = store.load('slackChannelWatchConfig', {});
+      const justMeCh = (slackConfig.channels || []).find(ch => ch.mode === 'justme');
+      if (justMeCh && justMeCh.id) {
+        const msg = '✅ *Repair Complete — Ready to Flip*\n' +
+          _repairDoneUnits.map(u => `• *${u.id}* (${u.vendor}${u.site ? ' @ ' + u.site : ''}) — ${u.signal}`).join('\n') +
+          '\n\n_These units appear done based on their latest timeline. Verify and flip to Available._';
+        await slackSend.sendToChannel({ channelId: justMeCh.id, message: msg }).catch(e => logger.warn('Repair-done Slack notify failed:', e.message));
+      }
+    } catch (_) {}
+  }
+
   if (improved > 0) {
     logger.info('Orcha corrected notes on ' + improved + ' units');
   }
