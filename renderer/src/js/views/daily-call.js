@@ -398,7 +398,24 @@ YOUR TASK:
 5. HELP NEEDED -- assess whether cross-team help is needed (e.g. SM team lifecycle correction, FAS/AFP coordination, Last Mile escalation) and from whom. If no help is needed, do not invent a need -- simply return an empty array for this field.
 
 TRENDS RULE: A trend exists ONLY when 3+ units share the same failure category. Report format: "[# units] [failure category] — [duration range] ([SCACs affected])". Valid categories: Engine, Transmission, PM Backlog, Expired Inspections, Accident/CEI, Reconditioning, Electrical, Brakes, Tires, Parts Sourcing, Offsite Dealer, Vendor Capacity. If no category has 3+ units, report "No trends — no single issue category has 3+ units affected." Use direction [Persisting/Emerging/Recurring] for direction labeling.
-BARRIERS RULE: Only list EXTERNAL blockers — vendor delays, parts sourcing, dealer backlogs, estimate approvals, no weekend coverage, capacity constraints. Be unit-specific: include unit #, vendor/dealer name, and days stuck. Group multiple units under the same blocker category. Flag anything stuck > 7 days as CRITICAL. Format: "[Blocker Category]: [Unit #] — [specific issue] at [vendor/dealer] ([# days])". Every barrier note must include category, vendor, and days.
+BARRIERS RULE: List what's BLOCKING progress on downed units. Be specific when you can, brief when the situation is simple. "No barriers" is a valid answer if nothing is genuinely blocking.
+
+BARRIERS STYLE EXAMPLES (match this voice):
+- "no barriers"
+- "Dealer backlog"
+- "KTR has limited techs around the area and FM stated it will take a week to get oil out there to complete PMs"
+- "Weekend backlog"
+- "Expired Inspections; Amerit was not able to complete all the PMs over the weekend due to weekend repairs per AFM"
+- "Parts Delay: 322285 — throttle body 2x incorrect, 13 days, no ETA. 321548 — HALO sensors 4 days past EDD (8/7)."
+- "Offsite Shop: 321414 at Cummins — estimate stalled waiting on Volvo for harness PN (13d). 521073 at KW — ETR 8/13."
+- "Estimate approval bottlenecks (5 units) — 622106 escalated; 520062 pending approval for fuel testing; 59161 EGR estimate pending."
+- "Uptick in rejections from COX last week - 7 units OSR"
+- "Physical access barriers — 324130 (15d) both vehicle doors will not open; dealer cannot get inside to begin diagnostics."
+- "parts delay ETA 8/21 for back doors, dealer delays due to backlog and being short handed, 2 units in bay WIP pending ETC"
+- "Extended off-site repair aging is the primary driver of downtime. Parts sourcing and back-order delays. Vendor WO cancellations and dealer referrals."
+- "SWAP Delays for EOL units, Extended repairs for CEI. Barriers account for about 50% downtime"
+
+Format: direct, concise. Can be a single phrase or multiple barriers separated by semicolons/periods/newlines. Include unit IDs, vendor names, and days when relevant. Group by blocker category when multiple units share the same barrier. Say "no barriers" if nothing is genuinely blocking.
 ACTIONS RULE: Every barrier MUST have a matching action — no orphan barriers. Use specific action verbs: Escalated, Requested, Confirmed, Scheduled, Created WO, Sent correspondence, Pushed for, Contacted, Reached out to, Spoke with, Submitted, Coordinating. Always state WHO you contacted, WHAT you specifically requested, and WHEN you expect resolution. NEVER use "following up" alone — say what you're following up ON and with WHOM.
 
 ACTIONS STYLE EXAMPLES (match this voice):
