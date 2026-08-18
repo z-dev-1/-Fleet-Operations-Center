@@ -284,10 +284,10 @@ function _renderRows(rows) {
     return;
   }
 
-  // Phase 5: Force re-render of visible window
-  _vStart = -1;
-  _vEnd   = -1;
-  _renderVirtualWindow();
+  // Full render — with ~180 rows, virtual scrolling is unnecessary.
+  // Render all rows directly into the tbody.
+  _tbodyEl.innerHTML = _buildRowsHtml(filtered, 0, filtered.length);
+  _wireRowEvents(filtered);
 }
 
 /** Phase 5: Render only the visible slice of _vFiltered into _tbodyEl */
