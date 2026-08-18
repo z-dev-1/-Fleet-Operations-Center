@@ -1111,7 +1111,7 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
             'setTimeout(function(){' +
             'var ta=document.querySelector("textarea");' +
             'if(!ta){var all=document.querySelectorAll("input[type=text],textarea");ta=all[all.length-1];}' +
-            'if(ta){ta.value=' + JSON.stringify(_relayDraft) + ';ta.dispatchEvent(new Event("input",{bubbles:true}));ta.style.background="#fffbe6";}' +
+            'if(ta){ta.focus();ta.value="";document.execCommand("insertText",false,' + JSON.stringify(_relayDraft) + ');ta.style.background="#fffbe6";ta.blur();}' +
             '},1000)'
           ).catch(function(){});
         }, 5000); // wait for page to fully render + comments to toggle
@@ -1156,7 +1156,7 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
             'setTimeout(function(){' +
             'var ta=document.querySelector("textarea[name=user-reply]");' +
             'if(!ta) ta=document.querySelector("textarea");' +
-            'if(ta){ta.value=' + JSON.stringify(_offsiteDraft) + ';ta.dispatchEvent(new Event("input",{bubbles:true}));ta.style.background="#fffbe6";}' +
+            'if(ta){ta.focus();ta.value="";document.execCommand("insertText",false,' + JSON.stringify(_offsiteDraft) + ');ta.style.background="#fffbe6";ta.blur();}' +
             '},2000)'
           ).catch(function(){});
         }, 5000);
