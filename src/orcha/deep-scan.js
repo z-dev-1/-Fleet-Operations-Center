@@ -161,6 +161,12 @@ async function runOrchaDeepScan(mergedRows, opts) {
   const _today = new Date().toISOString().slice(0, 10);
   const _repairDoneUnits = [];
 
+  // ── Out-of-scope / needs dealer detection ─────────────────────────────────
+  // Vendor says they can't do the work — unit needs re-routing. Immediate
+  // action required (find another vendor or send to dealer).
+  const OUT_OF_SCOPE_RE = /\b(out\s+of\s+scope|outside\s+(our|their|roadside)?\s*scope|cannot\s+(repair|complete|perform|diagnose)|unable\s+to\s+(repair|complete|perform|diagnose)|not\s+(equipped|capable|able)\s+to|beyond\s+(our|their)\s+(capability|scope)|need[s]?\s+to\s+go\s+to\s+(a\s+)?(dealer|oem|shop)|refer(red|ring)?\s+to\s+(dealer|oem)|send\s+to\s+(dealer|oem)|tow\s+to\s+(dealer|oem)|requires?\s+(dealer|oem)\s+(repair|service|diagnosis)|dealer\s+only|oem\s+only|not\s+a\s+roadside\s+(repair|service))/i;
+  const _outOfScopeUnits = [];
+
   for (const r of results) {
     if (r.status !== 'fulfilled' || !r.value) continue;
     const val = r.value;
@@ -190,6 +196,23 @@ async function runOrchaDeepScan(mergedRows, opts) {
       // Mark notified today
       if (!notesStore[unitId]) notesStore[unitId] = {};
       notesStore[unitId]._repairDoneNotifDate = _today;
+    }
+
+    // Out-of-scope / needs dealer — check last 3 timeline lines
+    const scopeLines = tl ? tl.split('\n').filter(Boolean).slice(-3).join(' ') : '';
+    const isOutOfScope = OUT_OF_SCOPE_RE.test(scopeLines);
+    if (isOutOfScope) {
+      const ns3 = notesStore[unitId] || {};
+      if (ns3._outOfScopeNotifDate !== _today) {
+        _outOfScopeUnits.push({
+          id: unitId,
+          vendor: row.vendor || '?',
+          site: row.domicileSite || '',
+          signal: scopeLines.slice(-100),
+        });
+        if (!notesStore[unitId]) notesStore[unitId] = {};
+        notesStore[unitId]._outOfScopeNotifDate = _today;
+      }
     }
   }
 
@@ -222,6 +245,36 @@ async function runOrchaDeepScan(mergedRows, opts) {
           _repairDoneUnits.map(u => `• *${u.id}* (${u.vendor}${u.site ? ' @ ' + u.site : ''}) — ${u.signal}`).join('\n') +
           '\n\n_These units appear done based on their latest timeline. Verify and flip to Available._';
         await slackSend.sendToChannel({ channelId: justMeCh.id, message: msg }).catch(e => logger.warn('Repair-done Slack notify failed:', e.message));
+      }
+    } catch (_) {}
+  }
+
+  // Send notifications for units detected as out-of-scope / needs dealer
+  if (_outOfScopeUnits.length) {
+    logger.info('Out-of-scope/needs-dealer detected: ' + _outOfScopeUnits.map(u => u.id).join(', '));
+    try {
+      const mainWin = require('electron').BrowserWindow.getAllWindows()[0];
+      if (mainWin && !mainWin.isDestroyed()) {
+        _outOfScopeUnits.forEach(u => {
+          mainWin.webContents.send('ui:notif-push', {
+            icon: '⚠️',
+            title: 'Out of Scope: ' + u.id,
+            body: u.vendor + (u.site ? ' @ ' + u.site : '') + ' — needs re-routing to dealer/OEM',
+            time: Date.now(),
+          });
+        });
+      }
+    } catch (_) {}
+    // Slack self-DM
+    try {
+      const slackSend2 = require('../scrapers/slack_send');
+      const slackConfig2 = store.load('slackChannelWatchConfig', {});
+      const justMeCh2 = (slackConfig2.channels || []).find(ch => ch.mode === 'justme');
+      if (justMeCh2 && justMeCh2.id) {
+        const msg2 = '⚠️ *Out of Scope / Needs Dealer*\n' +
+          _outOfScopeUnits.map(u => `• *${u.id}* (${u.vendor}${u.site ? ' @ ' + u.site : ''}) — ${u.signal}`).join('\n') +
+          '\n\n_These units need re-routing. The current vendor cannot complete the repair — route to dealer/OEM._';
+        await slackSend2.sendToChannel({ channelId: justMeCh2.id, message: msg2 }).catch(e => logger.warn('Out-of-scope Slack notify failed:', e.message));
       }
     } catch (_) {}
   }
