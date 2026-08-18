@@ -551,27 +551,30 @@ function _buildAIFillPrompt(row, dd) {
     '   - Vendor rejected repair or marked out of scope for primary vendor -> minimum SEV3, likely SEV2\n' +
     '   - Multiple repair attempts or multiple vendor handoffs -> minimum SEV3\n' +
     '   - DOT-critical safety item (brakes, air systems, steering) -> escalate one level faster than day count alone suggests\n\n' +
-    '3. summary -- ONE concise sentence (max 280 chars) in professional fleet-coordinator voice.\n' +
-    '   Use EXACTLY this formula:\n' +
-    '   "[X] days down at [Vendor] for [component] repair. [ETC STATUS]. [ACTION]."\n\n' +
-    '   ETC STATUS options (pick the ONE that fits):\n' +
-    '   - "No ETC" (when no completion date is known)\n' +
-    '   - "ETC [date] has passed" (when a past date was given but no update followed)\n' +
-    '   - "ETC [date]" (when a future or current completion date exists)\n\n' +
-    '   ACTION options (pick the ONE that fits the SEV level):\n' +
-    '   - SEV5: brief status note only, e.g. "Parts arrived [date] - pending return to tech [date]."\n' +
-    '   - SEV4: "Request repair status and firm completion date."\n' +
-    '   - SEV3: "Follow up for completion/release status." OR "Escalate for [specific issue]."\n' +
-    '   - SEV2: "Continue leadership escalation for parts status and recovery plan."\n\n' +
-    '   GOOD EXAMPLES:\n' +
-    '   SEV5: "Parts arrived 8/10 - pending return to tech 8/11; ETC 8/12."\n' +
-    '   SEV4: "15 days down at Volvo for battery assembly repair. No ETC. Request repair status and firm completion date."\n' +
-    '   SEV3: "26-day accident repair. ETC 8/10 has passed. Follow up for completion/release status."\n' +
-    '   SEV2: "146 days down at Volvo for transmission converter repair. No ETC. Continue leadership escalation for parts status and recovery plan."\n\n' +
-    '   STRICT CONTENT RULES -- any violation invalidates the whole response:\n' +
-    '   - ZERO TOLERANCE: dollar amounts, personal names, phone numbers, emails, VINs, license plates, street addresses, gate codes, raw vendor signatures.\n' +
-    '   - Allowed: vendor company names, dealer locations, case/reference numbers, part names, domicile codes, dates, ETAs.\n' +
-    '   - Never invent or fabricate -- if source data is thin, say so plainly (e.g. "No vendor update logged; escalation recommended.") rather than guessing.\n\n' +
+    '3. summary -- A concise professional fleet-coordinator note (max 400 chars).\n' +
+    '   Write it like a FAS would -- include: what\'s happening, what\'s blocking, what\'s next.\n' +
+    '   Be specific: include vendor names, part names, ETAs/ETCs with dates, days down.\n' +
+    '   If the vendor rejected: explain WHY and where it was routed.\n' +
+    '   If parts are the blocker: say which part and ETA.\n' +
+    '   If repairs are in progress: say what stage and ETC.\n\n' +
+    '   STYLE EXAMPLES (match this voice and specificity):\n' +
+    '   - "Estimate approved 8/12. Parts ordered, ETA 8/14. Pending parts arrival and ETC from dealer."\n' +
+    '   - "Unit at Cummins 14 days. ETC passed 7/22. Asana escalation submitted."\n' +
+    '   - "Primary Vendor Rejection: Amerit rejected — transmission repair requires dealer diagnostics. Towed to Cummins 7/30. Estimate approved 8/12. Pending parts ETA."\n' +
+    '   - "OSR; EST approved 8/12, dealer is sourcing parts, pending ETA"\n' +
+    '   - "Tech finishing repairs, work completion EOD"\n' +
+    '   - "Pending parts — Head PN 5581552 ETA pending from Cummins RDC. Continue to monitor."\n' +
+    '   - "Accident: CEI managing. CNG/roof damage. No ETC."\n' +
+    '   - "Shop is backed up, pending diagnosis"\n' +
+    '   - "Repairs complete, pending return tow to site"\n' +
+    '   - "8 days at primary vendor (Amerit) for brake assembly. ETC 8/14. Communication gap — vendor non-responsive."\n\n' +
+    '   KEY RULES:\n' +
+    '   - Be direct and action-oriented, not formal\n' +
+    '   - If multiple issues: list them concisely separated by semicolons\n' +
+    '   - Include the NEXT ACTION (what needs to happen next)\n' +
+    '   - If no data: "No vendor update logged; follow-up required."\n' +
+    '   - NEVER include dollar amounts, personal names, phone numbers, emails, VINs\n' +
+    '   - Allowed: vendor names, dealer locations, case numbers, part names, dates, ETAs\n\n' +
     'RESPOND WITH RAW JSON ONLY -- no markdown, no code fences, no explanation, exactly this shape:\n' +
     '{"delayReason": "...", "escalationLevel": "...", "summary": "..."}'
   );
