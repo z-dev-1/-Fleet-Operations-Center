@@ -82,11 +82,13 @@ async function runOrchaDeepScan(mergedRows, opts) {
   // benefit — the later duplicate result just silently overwrote the
   // earlier one in notesStore. Advancing by 5 (matching the slice window)
   // restores the non-overlapping batching the comment above intends.
+  const allResults = []; // collect all settled results across batches for post-scan detection
   for (let i = 0; i < unitsToProcess.length; i += 5) {
     const batch   = unitsToProcess.slice(i, i + 5);
     const results = await Promise.allSettled(
       batch.map(u => _processUnit(u, notesStore, askOrcha))
     );
+    allResults.push(...results);
 
     for (const r of results) {
       if (r.status !== 'fulfilled' || !r.value) {
@@ -167,7 +169,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
   const OUT_OF_SCOPE_RE = /\b(out\s+of\s+scope|outside\s+(our|their|roadside)?\s*scope|cannot\s+(repair|complete|perform|diagnose)|unable\s+to\s+(repair|complete|perform|diagnose)|not\s+(equipped|capable|able)\s+to|beyond\s+(our|their)\s+(capability|scope)|need[s]?\s+to\s+go\s+to\s+(a\s+)?(dealer|oem|shop)|refer(red|ring)?\s+to\s+(dealer|oem)|send\s+to\s+(dealer|oem)|tow\s+to\s+(dealer|oem)|requires?\s+(dealer|oem)\s+(repair|service|diagnosis)|dealer\s+only|oem\s+only|not\s+a\s+roadside\s+(repair|service))/i;
   const _outOfScopeUnits = [];
 
-  for (const r of results) {
+  for (const r of allResults) {
     if (r.status !== 'fulfilled' || !r.value) continue;
     const val = r.value;
     const unitId = val.equipmentId;
