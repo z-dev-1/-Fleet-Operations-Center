@@ -1097,15 +1097,29 @@ async function _injectAISplitDraft(webview, unit, side) {
   // Now ask AI for a better version (with 20s timeout — don't block if AI is busy)
   try {
     var prompt = 'You are a fleet coordinator writing a ' +
-      (side === 'relay' ? 'Relay Garage comment' : 'vendor/dealer escalation note') +
+      (side === 'relay' ? 'Relay Garage comment' : 'vendor/dealer note') +
       ' for unit ' + equipId + '.\n\n' +
       'Unit: ' + equipId + ' | Vendor: ' + vendor + ' | Down: ' + days + ' | Reason: ' + reason + '\n' +
       'Issue: ' + issue + '\n' +
       'Recent timeline: ' + tl + '\n\n' +
+      'STRICT RULES:\n' +
+      '- ONLY reference vendors/names that appear in the data above. NEVER invent or guess vendor names.\n' +
+      '- Tone: professional and firm but NOT aggressive or demanding. No "immediately", "respond today", "urgent action required".\n' +
+      '- Write like a professional peer checking in — not a manager issuing demands.\n' +
+      '- Keep it 1-2 sentences. Short and direct.\n' +
+      '- Reference the ACTUAL current situation from the timeline.\n' +
+      '- Do NOT assume lack of response if the last update was within 24 hours.\n\n' +
       (side === 'relay'
-        ? 'Write a professional Relay Garage comment (1-3 sentences) that references the current situation from the timeline and requests a specific update (ETC, parts status, or next steps). Be direct, no greeting/signature. If vendor has been quiet, escalate firmly. Ready to post as-is.'
-        : 'Write a professional dealer note (1-3 sentences) requesting repair status, parts status if applicable, and estimated completion. If they have been quiet 3+ days, escalate firmly requesting immediate update. Ready to submit as-is.') +
-      '\n\nReturn ONLY the comment text — no JSON, no markdown, no quotes.';
+        ? 'Write a Relay Garage comment that checks on the current status. Examples of good tone:\n' +
+          '- "Confirming unit cannot be diagnosed at this location — please advise on reassignment to [type]-capable vendor."\n' +
+          '- "Parts confirmed on hand — requesting tech assignment and ETC for completion."\n' +
+          '- "Checking in on repair progress. Please advise current status and ETC."\n' +
+          '- "Estimate approved [date] — confirming parts have been ordered and ETA."'
+        : 'Write a dealer/vendor note requesting a status update. Examples of good tone:\n' +
+          '- "Checking in on repair progress for this unit. Please advise current status, any parts pending, and estimated completion."\n' +
+          '- "Confirming parts received — please advise when tech can begin and estimated completion."\n' +
+          '- "Following up on this case — please provide latest repair status and any outstanding items."') +
+      '\n\nReturn ONLY the comment text — no JSON, no markdown, no quotes, no greeting/signature.';
 
     var _aiTimeout = new Promise(function(_, rej) { setTimeout(function() { rej(new Error('split-view AI timeout')); }, 60000); });
     var result = await Promise.race([window.ai.ask(prompt), _aiTimeout]);
