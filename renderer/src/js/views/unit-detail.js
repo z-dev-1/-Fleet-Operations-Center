@@ -997,6 +997,69 @@ function renderTabs(unit){
   return '<div class="dp-tabs">'+tabs.map(function(t){return'<button class="dp-tab'+(t.id===def?' active':'')+'" data-tab="'+t.id+'">'+t.label+t.b+'</button>';}).join('')+'</div>';
 }
 
+// ── Split-view auto-draft helpers ──────────────────────────────────────────────
+// Builds a draft comment for the Relay Garage comment box based on the unit's
+// latest offsite update or escalation need. Returns null if nothing meaningful.
+function _buildRelayDraft(unit) {
+  if (!unit) return null;
+  var tl = (unit.repairTimeline || '').trim();
+  var lines = tl ? tl.split('\n').filter(Boolean) : [];
+  var lastLine = lines.length ? lines[lines.length - 1] : '';
+
+  // Calculate days since last timeline entry
+  var daysSilent = 0;
+  var dateMatch = lastLine.match(/^(\d{1,2})\/(\d{1,2})/);
+  if (dateMatch) {
+    var now = new Date();
+    var entryDate = new Date(now.getFullYear(), parseInt(dateMatch[1],10) - 1, parseInt(dateMatch[2],10));
+    if (entryDate > now) entryDate.setFullYear(now.getFullYear() - 1);
+    daysSilent = Math.round((now - entryDate) / (24*60*60*1000));
+  }
+
+  var vendor = unit.vendor || 'vendor';
+  var equipId = unit.equipmentId || '';
+
+  // If 3+ days since last update — escalation draft
+  if (daysSilent >= 3) {
+    return 'Requesting repair status update on unit ' + equipId + '. No logged vendor activity in ' + daysSilent + ' days. Please provide current repair status, any parts pending, and estimated time to completion (ETC).';
+  }
+
+  // If there's a recent timeline entry with useful content — relay it
+  var lastContent = lastLine.replace(/^\d{1,2}\/\d{1,2}\s*[-–]\s*/, '').trim();
+  if (lastContent && lastContent.length > 10) {
+    return 'Per latest update: ' + lastContent + ' — Tracking for next steps/ETC.';
+  }
+
+  return null;
+}
+
+// Builds a draft note for the offsite (Decisiv/ASIST) notes field.
+// Requests status update / escalation from the dealer.
+function _buildOffsiteDraft(unit) {
+  if (!unit) return null;
+  var tl = (unit.repairTimeline || '').trim();
+  var lines = tl ? tl.split('\n').filter(Boolean) : [];
+  var lastLine = lines.length ? lines[lines.length - 1] : '';
+
+  var daysSilent = 0;
+  var dateMatch = lastLine.match(/^(\d{1,2})\/(\d{1,2})/);
+  if (dateMatch) {
+    var now = new Date();
+    var entryDate = new Date(now.getFullYear(), parseInt(dateMatch[1],10) - 1, parseInt(dateMatch[2],10));
+    if (entryDate > now) entryDate.setFullYear(now.getFullYear() - 1);
+    daysSilent = Math.round((now - entryDate) / (24*60*60*1000));
+  }
+
+  var equipId = unit.equipmentId || '';
+
+  if (daysSilent >= 3) {
+    return 'Requesting repair status update for unit ' + equipId + '. No activity logged in ' + daysSilent + ' days. Please provide: current repair status, parts status (if applicable), and estimated completion date. If repair is complete, please confirm so unit can be released back to service.';
+  }
+
+  // Default — general status request
+  return 'Please provide a status update for unit ' + equipId + ': current repair progress, any parts pending, and estimated time to completion.';
+}
+
 // ── repair pane ───────────────────────────────────────────────────────────────
 function _openInlineSplit(leftUrl, rightUrl, unitId) {
   var existing = document.getElementById('dp-split-container');
@@ -1038,6 +1101,21 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
   if (relayWv) {
     relayWv.addEventListener('dom-ready', function() {
       relayWv.executeJavaScript('setTimeout(function(){ var btns=document.querySelectorAll("button,a,[role=button]"); for(var i=0;i<btns.length;i++){if((btns[i].textContent||"").indexOf("Toggle Comments")>-1){btns[i].click();break;}} setTimeout(function(){ var h1s=document.querySelectorAll("h1"); var conv=null; for(var i=0;i<h1s.length;i++){if(h1s[i].textContent==="Conversation"){conv=h1s[i].closest("[aria-hidden]")||h1s[i].parentElement.parentElement.parentElement.parentElement;break;}} if(conv){conv.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;background:#fff;z-index:99999";var all=document.body.children;for(var j=0;j<all.length;j++){if(all[j]!==conv&&!conv.contains(all[j])&&!all[j].contains(conv)){all[j].style.display="none";}}} },2500); },1500)').catch(function(){});
+
+      // Pre-fill Relay comment box with a draft based on latest offsite/timeline
+      var _u = window.__splitUnit;
+      var _relayDraft = _buildRelayDraft(_u);
+      if (_relayDraft) {
+        setTimeout(function() {
+          relayWv.executeJavaScript(
+            'setTimeout(function(){' +
+            'var ta=document.querySelector("textarea");' +
+            'if(!ta){var all=document.querySelectorAll("input[type=text],textarea");ta=all[all.length-1];}' +
+            'if(ta){ta.value=' + JSON.stringify(_relayDraft) + ';ta.dispatchEvent(new Event("input",{bubbles:true}));ta.style.background="#fffbe6";}' +
+            '},1000)'
+          ).catch(function(){});
+        }, 5000); // wait for page to fully render + comments to toggle
+      }
     });
   }
 
@@ -1068,6 +1146,21 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
 
     offsiteWv.addEventListener('dom-ready', function() {
       offsiteWv.executeJavaScript('function waitForNotes(){var nb=document.querySelector("[data-testid=note-body]");var ta=document.querySelector("textarea[name=user-reply]");if(!nb){setTimeout(waitForNotes,1000);return;}var el=nb;while(el.parentElement&&el.parentElement!==document.body){el=el.parentElement;if(el.querySelector("[data-testid=note-body]")&&el.querySelector("textarea[name=user-reply]"))break;}el.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;background:#fff;z-index:99999;padding:0";var sib=el.parentElement?el.parentElement.children:[];for(var i=0;i<sib.length;i++){if(sib[i]!==el)sib[i].style.display="none";}} setTimeout(waitForNotes,2000)').catch(function(){});
+
+      // Pre-fill offsite notes textarea with escalation/update request
+      var _u2 = window.__splitUnit;
+      var _offsiteDraft = _buildOffsiteDraft(_u2);
+      if (_offsiteDraft) {
+        setTimeout(function() {
+          offsiteWv.executeJavaScript(
+            'setTimeout(function(){' +
+            'var ta=document.querySelector("textarea[name=user-reply]");' +
+            'if(!ta) ta=document.querySelector("textarea");' +
+            'if(ta){ta.value=' + JSON.stringify(_offsiteDraft) + ';ta.dispatchEvent(new Event("input",{bubbles:true}));ta.style.background="#fffbe6";}' +
+            '},2000)'
+          ).catch(function(){});
+        }, 5000);
+      }
     });
   }
 }
