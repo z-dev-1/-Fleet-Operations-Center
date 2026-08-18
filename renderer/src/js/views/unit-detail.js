@@ -1060,6 +1060,62 @@ function _buildOffsiteDraft(unit) {
   return 'Please provide a status update for unit ' + equipId + ': current repair progress, any parts pending, and estimated time to completion.';
 }
 
+// AI-powered split-view draft injection. Generates a context-aware comment
+// using the unit's timeline, vendor, issue, and days down. Injects into the
+// webview textarea once the AI returns. Falls back to the basic template draft
+// if the AI is unavailable or slow.
+async function _injectAISplitDraft(webview, unit, side) {
+  if (!unit || !webview) return;
+  var equipId = unit.equipmentId || '';
+  var vendor = unit.vendor || 'unknown';
+  var days = unit.workDuration || '?';
+  var issue = unit.issueDetails || unit.issueSummary || '';
+  var reason = unit.lifecycleReason || '';
+  var tl = (unit.repairTimeline || '').split('\n').filter(Boolean).slice(-3).join(' | ') || 'none';
+
+  // Inject basic fallback immediately so there's always something
+  var fallback = side === 'relay' ? _buildRelayDraft(unit) : _buildOffsiteDraft(unit);
+  var selector = side === 'relay'
+    ? 'var ta=document.querySelector("textarea");if(!ta){var all=document.querySelectorAll("input[type=text],textarea");ta=all[all.length-1];}'
+    : 'var ta=document.querySelector("textarea[name=user-reply]");if(!ta)ta=document.querySelector("textarea");';
+
+  if (fallback) {
+    webview.executeJavaScript(
+      'setTimeout(function(){' + selector +
+      'if(ta){ta.focus();ta.value="";document.execCommand("insertText",false,' + JSON.stringify(fallback) + ');ta.style.background="#fffbe6";ta.blur();}' +
+      '},1000)'
+    ).catch(function(){});
+  }
+
+  // Now ask AI for a better version
+  try {
+    var prompt = 'You are a fleet coordinator writing a ' +
+      (side === 'relay' ? 'Relay Garage comment' : 'vendor/dealer escalation note') +
+      ' for unit ' + equipId + '.\n\n' +
+      'Unit: ' + equipId + ' | Vendor: ' + vendor + ' | Down: ' + days + ' | Reason: ' + reason + '\n' +
+      'Issue: ' + issue + '\n' +
+      'Recent timeline: ' + tl + '\n\n' +
+      (side === 'relay'
+        ? 'Write a professional Relay Garage comment (1-3 sentences) that references the current situation from the timeline and requests a specific update (ETC, parts status, or next steps). Be direct, no greeting/signature. If vendor has been quiet, escalate firmly. Ready to post as-is.'
+        : 'Write a professional dealer note (1-3 sentences) requesting repair status, parts status if applicable, and estimated completion. If they have been quiet 3+ days, escalate firmly requesting immediate update. Ready to submit as-is.') +
+      '\n\nReturn ONLY the comment text — no JSON, no markdown, no quotes.';
+
+    var result = await window.ai.ask(prompt);
+    var text = (result && result.text) ? result.text.trim() : (typeof result === 'string' ? result.trim() : '');
+    // Validate: must be plain text, not JSON, not empty
+    if (text && text.length > 15 && !text.startsWith('{') && !text.startsWith('```')) {
+      // Replace the fallback with the AI version (blue background to distinguish)
+      webview.executeJavaScript(
+        '(function(){' + selector +
+        'if(ta){ta.focus();ta.select();document.execCommand("insertText",false,' + JSON.stringify(text) + ');ta.style.background="#e6f7ff";ta.blur();}' +
+        '})()'
+      ).catch(function(){});
+    }
+  } catch (e) {
+    // AI failed — fallback already in place, nothing to do
+  }
+}
+
 // ── repair pane ───────────────────────────────────────────────────────────────
 function _openInlineSplit(leftUrl, rightUrl, unitId) {
   var existing = document.getElementById('dp-split-container');
@@ -1102,19 +1158,12 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
     relayWv.addEventListener('dom-ready', function() {
       relayWv.executeJavaScript('setTimeout(function(){ var btns=document.querySelectorAll("button,a,[role=button]"); for(var i=0;i<btns.length;i++){if((btns[i].textContent||"").indexOf("Toggle Comments")>-1){btns[i].click();break;}} setTimeout(function(){ var h1s=document.querySelectorAll("h1"); var conv=null; for(var i=0;i<h1s.length;i++){if(h1s[i].textContent==="Conversation"){conv=h1s[i].closest("[aria-hidden]")||h1s[i].parentElement.parentElement.parentElement.parentElement;break;}} if(conv){conv.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;background:#fff;z-index:99999";var all=document.body.children;for(var j=0;j<all.length;j++){if(all[j]!==conv&&!conv.contains(all[j])&&!all[j].contains(conv)){all[j].style.display="none";}}} },2500); },1500)').catch(function(){});
 
-      // Pre-fill Relay comment box with a draft based on latest offsite/timeline
+      // Pre-fill Relay comment box with AI-generated draft
       var _u = window.__splitUnit;
-      var _relayDraft = _buildRelayDraft(_u);
-      if (_relayDraft) {
+      if (_u) {
         setTimeout(function() {
-          relayWv.executeJavaScript(
-            'setTimeout(function(){' +
-            'var ta=document.querySelector("textarea");' +
-            'if(!ta){var all=document.querySelectorAll("input[type=text],textarea");ta=all[all.length-1];}' +
-            'if(ta){ta.focus();ta.value="";document.execCommand("insertText",false,' + JSON.stringify(_relayDraft) + ');ta.style.background="#fffbe6";ta.blur();}' +
-            '},1000)'
-          ).catch(function(){});
-        }, 5000); // wait for page to fully render + comments to toggle
+          _injectAISplitDraft(relayWv, _u, 'relay');
+        }, 5000);
       }
     });
   }
@@ -1147,18 +1196,11 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
     offsiteWv.addEventListener('dom-ready', function() {
       offsiteWv.executeJavaScript('function waitForNotes(){var nb=document.querySelector("[data-testid=note-body]");var ta=document.querySelector("textarea[name=user-reply]");if(!nb){setTimeout(waitForNotes,1000);return;}var el=nb;while(el.parentElement&&el.parentElement!==document.body){el=el.parentElement;if(el.querySelector("[data-testid=note-body]")&&el.querySelector("textarea[name=user-reply]"))break;}el.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;background:#fff;z-index:99999;padding:0";var sib=el.parentElement?el.parentElement.children:[];for(var i=0;i<sib.length;i++){if(sib[i]!==el)sib[i].style.display="none";}} setTimeout(waitForNotes,2000)').catch(function(){});
 
-      // Pre-fill offsite notes textarea with escalation/update request
+      // Pre-fill offsite notes textarea with AI-generated escalation/update
       var _u2 = window.__splitUnit;
-      var _offsiteDraft = _buildOffsiteDraft(_u2);
-      if (_offsiteDraft) {
+      if (_u2) {
         setTimeout(function() {
-          offsiteWv.executeJavaScript(
-            'setTimeout(function(){' +
-            'var ta=document.querySelector("textarea[name=user-reply]");' +
-            'if(!ta) ta=document.querySelector("textarea");' +
-            'if(ta){ta.focus();ta.value="";document.execCommand("insertText",false,' + JSON.stringify(_offsiteDraft) + ');ta.style.background="#fffbe6";ta.blur();}' +
-            '},2000)'
-          ).catch(function(){});
+          _injectAISplitDraft(offsiteWv, _u2, 'offsite');
         }, 5000);
       }
     });
