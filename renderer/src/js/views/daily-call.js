@@ -415,7 +415,13 @@ TRENDS STYLE EXAMPLES (match this voice):
 - "Amerit parts sourcing failures — 4 occurrences in 13 days (322285 2x incorrect throttle body, 321548 sensors past EDD, 320210 no ETA post-approval).\nOffsite dealer extended dwell — 4 units (521073 KW 27d, 9010434 KW 14d, 321414 Cummins 13d).\nSame-day downed spike — 5 units downed DoD."
 - "Live snapshot 8/11: 73.4% uptime (80/109 tractors active). Movement is offsite/OEM-driven — Amerit on-site queue is fresh and clearing."
 
-Format: brief counts when simple, detailed with unit IDs when complex. Include the category name and count. List unit IDs in parentheses when citing specific units. Can be a single line or multi-line. Use direction labels [Persisting/Emerging] only when a trend is worsening or new.
+Format: category name + count + each unit ID with its SPECIFIC issue (not just the category repeated). Examples:
+- "Electrical (3) — B62179 ignition switch vandalism, B62196 liftgate switch ripped from dash, 39263 wiring harness short to ground"
+- "Engine/Motor Systems (4) — 321950 cylinders 5&6 misfire/turbo oil carryover, 122148 oil leak at dealer event, 59090 engine fueling predictive alert, 922516 engine oil pressure alert"
+- "Transmission (3) — 520079 shift solenoid failure, 321254 MTM internal damage pending Eaton direction, 39110 communication fault harness delay"
+- "PM Backlog (5) — B12257 PM-B 7d, B12263 PM-B 8d, B62049 PM-B 8d, 9010381 PM-B pending tech, B62020 PM-B blocked by CNG diag"
+
+Each unit gets its own brief description of WHAT specifically is wrong — not just the unit ID alone. This gives leadership instant visibility into whether the trend is one root cause or diverse failures in the same category. Use direction labels [Persisting/Emerging] only when a trend is worsening or new.
 BARRIERS RULE: List what's BLOCKING progress on downed units. Be specific when you can, brief when the situation is simple. "No barriers" is a valid answer if nothing is genuinely blocking.
 
 BARRIERS STYLE EXAMPLES (match this voice):
