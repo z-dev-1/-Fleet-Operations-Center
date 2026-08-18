@@ -1170,6 +1170,20 @@ function initWindows(ctx) {
         _runAAPScrapeLoop(scrapeWin, {
           label: 'rescan', maxPolls: 18,
           onComplete: (rows) => {
+            // Sanity guard: if the rescan returns drastically fewer rows than
+            // what's currently stored, it hit a bad page state (auth blip,
+            // timeout, AAP error page). Discard it to avoid wiping the fleet
+            // table with garbage data. Threshold: <50% of current rows.
+            const store = require('../store');
+            const existing = store.load('fleetData', {});
+            const existingCount = (existing.rows || []).length;
+            if (existingCount > 10 && rows.length < existingCount * 0.5) {
+              logger.warn('Rescan: got ' + rows.length + ' rows but have ' + existingCount + ' — discarding bad scrape (likely AAP error page)');
+              clearTimeout(timeout);
+              _rescanInProgress = false;
+              try { scrapeWin.destroy(); } catch (_) {}
+              return;
+            }
             const payload = _saveAAPCaches(rows);
             logger.info('Rescan complete: ' + rows.length + ' units saved');
             pushData(payload);
