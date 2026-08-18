@@ -66,18 +66,18 @@ function buildFleetContext(messageText, opts = {}) {
   });
 
   if (!resolved.units.length && !resolved.groups.length) {
-    // Nothing specific referenced — include ALL unavailable units so a general
-    // "give me a summary" request gets the full fleet picture, not just 15.
-    // Format is compact (one line per unit) so 40-50 units fit within token
-    // budgets. The AI can summarize/group/prioritize as it sees fit.
-    context += '\nAll unavailable units (' + unavail.length + '):\n';
+    // Nothing specific referenced — include ALL unavailable units with full
+    // breakdown details (same fields as a specific-unit query) plus a condensed
+    // timeline (last 3 entries) so the AI can give a meaningful summary of each.
+    // Even at 70 units this fits within Orcha's context window.
+    context += '\n--- ALL UNAVAILABLE UNITS (' + unavail.length + ') ---\n';
     unavail.forEach(r => {
-      const risk = r.riskScore ? ' | Risk:' + r.riskScore : '';
-      const dur  = r.workDuration ? ' | Down:' + r.workDuration : '';
-      const site = r.domicileSite ? ' | Site:' + r.domicileSite : '';
-      const issue = r.issueDetails ? ' | ' + (r.issueDetails || '').slice(0, 60) : '';
-      context += '• ' + r.equipmentId + ' | ' + (r.vendor || 'no vendor') + ' | ' +
-        (r.lifecycleReason || r.lifecycleState || '') + dur + site + risk + issue + '\n';
+      context += _buildUnitDetail(r.equipmentId, rows, notesStore, {
+        includeTimeline: true,
+        includePM: true,
+        includeRisk: true,
+        timelineLines: 3,  // condensed: last 3 entries per unit for general summary
+      });
     });
   }
 
@@ -250,7 +250,8 @@ function _buildUnitDetail(unitId, rows, notesStore, opts) {
     const tl = (ns.timeline || row.repairTimeline || '').trim();
     if (tl) {
       const lines = tl.split('\n').filter(Boolean);
-      const recent = lines.slice(-8); // last 8 entries
+      const count = opts.timelineLines || 8; // default 8, can be reduced for bulk summaries
+      const recent = lines.slice(-count);
       detail += '  Recent timeline:\n    ' + recent.join('\n    ') + '\n';
     }
   }
