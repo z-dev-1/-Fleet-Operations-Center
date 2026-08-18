@@ -399,7 +399,22 @@ YOUR TASK:
 
 TRENDS RULE: A trend exists ONLY when 3+ units share the same failure category. Report format: "[# units] [failure category] — [duration range] ([SCACs affected])". Valid categories: Engine, Transmission, PM Backlog, Expired Inspections, Accident/CEI, Reconditioning, Electrical, Brakes, Tires, Parts Sourcing, Offsite Dealer, Vendor Capacity. If no category has 3+ units, report "No trends — no single issue category has 3+ units affected." Use direction [Persisting/Emerging/Recurring] for direction labeling.
 BARRIERS RULE: Only list EXTERNAL blockers — vendor delays, parts sourcing, dealer backlogs, estimate approvals, no weekend coverage, capacity constraints. Be unit-specific: include unit #, vendor/dealer name, and days stuck. Group multiple units under the same blocker category. Flag anything stuck > 7 days as CRITICAL. Format: "[Blocker Category]: [Unit #] — [specific issue] at [vendor/dealer] ([# days])". Every barrier note must include category, vendor, and days.
-ACTIONS RULE: Every barrier MUST have a matching action — no orphan barriers. Use specific action verbs: Escalated, Requested, Confirmed, Scheduled, Created WO, Sent correspondence, Pushed for, Contacted. Always state WHO you contacted, WHAT you specifically requested, and WHEN you expect resolution. NEVER use "following up" alone. Format: "[Action verb] [who/what] for [specific ask]; [ETA or expected outcome]".
+ACTIONS RULE: Every barrier MUST have a matching action — no orphan barriers. Use specific action verbs: Escalated, Requested, Confirmed, Scheduled, Created WO, Sent correspondence, Pushed for, Contacted, Reached out to, Spoke with, Submitted, Coordinating. Always state WHO you contacted, WHAT you specifically requested, and WHEN you expect resolution. NEVER use "following up" alone — say what you're following up ON and with WHOM.
+
+ACTIONS STYLE EXAMPLES (match this voice):
+- "Contacted Cox FM, tech to finish lift gate PMs today and getting started on PM-Bs"
+- "Reached out to Kenworth dealer for progress updates on 521073 (27 days, estimate approved 8/10)"
+- "Escalated pending estimates (2) to HVE team in AAP"
+- "Confirming tows to site for units completing offsite repair"
+- "Submitted vendor coaching for Amerit on unit 59008 due to SLA breach; Asana task created"
+- "Spoke with Amerit techs and FM to prioritize repairs as parts arrive for OOS units"
+- "Follow up with Valley Peterbilt for ETC; expedite 520079 estimate approval; set up tow for 520072"
+- "Reached out to kooner management for update on units with solid and accurate updates"
+- "Sending two units to Volvo for expedited PMs"
+- "5 units downed DoD all pending Amerit diagnostics — spoke with techs to prioritize"
+- "Escalate dealer estimate approvals; return tow scheduled for 9010380"
+
+Format: direct, 1st person, action-oriented. Can be a single line per action or multiple actions separated by semicolons/newlines. Reference specific unit IDs when the action is unit-specific.
 
 STRICT RULES -- violating these invalidates your response:
 - Every TREND or BARRIER claim MUST cite the exact unit IDs (from the bracketed list above) where you found it. No unit IDs = do not include the claim.
@@ -1037,9 +1052,24 @@ Write TWO fields — a Field Level Bridge (situation summary) and FAS Field Acti
 
 RULES:
 - Be specific: include unit IDs, vendor names, days down, key blockers, ETAs.
-- Bridge: status overview (how many down, why, what stage each is at, key delays/blockers).
-- Actions: what specific actions you took or are taking (who you contacted, what you requested, what you're tracking). Use action verbs: Contacted, Escalated, Requested, Confirmed, Following up with [vendor] for [specific thing].
-- Write like a professional fleet manager in 1st person. Concise but thorough.
+- Bridge: status overview (how many down out of total fleet at this site, % uptime, why they're down, what stage each is at, key delays/blockers). Group by theme when possible.
+- Actions: what SPECIFIC actions you took or are taking TODAY. Write like you're reporting to leadership what you personally did this morning.
+  * Name who you contacted (dealer name, vendor FM name, carrier, tech)
+  * Say what you specifically asked for or did
+  * Reference unit IDs when unit-specific
+  * Include outcomes if you have them ("estimate approved", "ETC confirmed", "parts arriving today")
+  * Use action verbs: Contacted, Escalated, Reached out to, Spoke with, Confirmed, Submitted, Created WO, Scheduled tow, Pushed for, Coordinating
+
+  GOOD ACTION EXAMPLES:
+  - "Contacted Cox FM, tech to finish lift gate PMs today and getting started on PM-Bs"
+  - "Reached out to Kenworth dealer for progress updates on 521073 (27 days, estimate approved 8/10)"
+  - "Escalated pending estimates (2) to HVE team in AAP"
+  - "Confirming tows to site for units completing offsite repair"
+  - "Submitted vendor coaching for Amerit on unit 59008 due to SLA breach; Asana task created"
+  - "Follow up with Valley Peterbilt for ETC; expedite 520079 estimate approval; set up tow for 520072"
+  - "5 units downed DoD all pending Amerit diagnostics — spoke with techs to prioritize"
+
+- Write like a professional fleet manager in 1st person. Direct and concise.
 - Do NOT invent information. Only use what's in the unit data below.
 
 SITE: ${s.key} (${s.units.length} units currently down)
