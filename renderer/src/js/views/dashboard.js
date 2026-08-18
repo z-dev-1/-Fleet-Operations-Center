@@ -171,6 +171,111 @@ function _render() {
 
   html += '</div>'; // end bottom row
 
+  // ── Row 3: By Operator + Uptake Rate by Site ────────────────────────────
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+
+  // By Operator
+  html += '<div style="background:var(--card);border:1px solid var(--bdr);border-radius:10px;padding:14px;">';
+  html += '<div style="font-size:10px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">By Operator</div>';
+  const opMap = {};
+  unavail.forEach(u => { const o = u.operator || 'Unknown'; opMap[o] = (opMap[o] || 0) + 1; });
+  const opSorted = Object.entries(opMap).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  const maxOp = opSorted.length ? opSorted[0][1] : 1;
+  opSorted.forEach(([op, count]) => {
+    const pct = Math.round((count / maxOp) * 100);
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">';
+    html += '<div style="width:60px;font-size:9px;font-weight:700;color:var(--txt2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + _esc(op) + '">' + _esc(op) + '</div>';
+    html += '<div style="flex:1;height:6px;background:var(--el);border-radius:3px;overflow:hidden;"><div style="width:' + pct + '%;height:100%;background:var(--acc2);border-radius:3px;"></div></div>';
+    html += '<div style="width:20px;font-size:10px;font-weight:700;color:var(--txt);text-align:right;">' + count + '</div>';
+    html += '</div>';
+  });
+  if (!opSorted.length) html += '<div style="font-size:10px;color:var(--mut);">No data</div>';
+  html += '</div>';
+
+  // Uptime by Site (% available per domicile, worst first)
+  html += '<div style="background:var(--card);border:1px solid var(--bdr);border-radius:10px;padding:14px;">';
+  html += '<div style="font-size:10px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Uptime by Site</div>';
+  const siteStats = {};
+  rows.forEach(r => {
+    const s = r.domicileSite || 'Unknown';
+    if (!siteStats[s]) siteStats[s] = { total: 0, avail: 0 };
+    siteStats[s].total++;
+    if (!(r.lifecycleState || '').toLowerCase().includes('unavail')) siteStats[s].avail++;
+  });
+  const siteRates = Object.entries(siteStats)
+    .map(([site, st]) => ({ site, rate: st.total ? Math.round((st.avail / st.total) * 100) : 100, total: st.total }))
+    .filter(s => s.total >= 3) // only sites with 3+ units (meaningful)
+    .sort((a, b) => a.rate - b.rate)
+    .slice(0, 10);
+  siteRates.forEach(s => {
+    const barColor = s.rate >= 90 ? '#7ee787' : s.rate >= 70 ? '#ffa657' : '#ff7b72';
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">';
+    html += '<div style="width:60px;font-size:9px;font-weight:700;color:var(--txt2);" title="' + _esc(s.site) + '">' + _esc(s.site) + '</div>';
+    html += '<div style="flex:1;height:6px;background:var(--el);border-radius:3px;overflow:hidden;"><div style="width:' + s.rate + '%;height:100%;background:' + barColor + ';border-radius:3px;"></div></div>';
+    html += '<div style="width:30px;font-size:10px;font-weight:700;color:var(--txt);text-align:right;">' + s.rate + '%</div>';
+    html += '</div>';
+  });
+  if (!siteRates.length) html += '<div style="font-size:10px;color:var(--mut);">Not enough data</div>';
+  html += '</div>';
+
+  html += '</div>'; // end row 3
+
+  // ── Row 4: Stalled Units (no timeline update in 5+ days) ────────────────
+  html += '<div style="background:var(--card);border:1px solid var(--bdr);border-radius:10px;padding:14px;">';
+  html += '<div style="font-size:10px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">⚠️ Stalled — No Update in 5+ Days</div>';
+  const now = Date.now();
+  const STALE_MS = 5 * 24 * 60 * 60 * 1000;
+  const stalledUnits = unavail.filter(u => {
+    // Check timeline for the most recent date mentioned (MM/DD pattern)
+    const tl = u.repairTimeline || '';
+    const dates = tl.match(/(\d{1,2})\/(\d{1,2})/g);
+    if (!dates || !dates.length) return true; // no timeline at all = stalled
+    const lastDate = dates[dates.length - 1];
+    const [mm, dd] = lastDate.split('/').map(Number);
+    const year = new Date().getFullYear();
+    const entryDate = new Date(year, mm - 1, dd);
+    // Handle Dec->Jan wrap
+    if (entryDate.getTime() > now + 30 * 24 * 3600 * 1000) entryDate.setFullYear(year - 1);
+    return (now - entryDate.getTime()) > STALE_MS;
+  }).sort((a, b) => {
+    // Sort by longest since last update
+    const getAge = (u) => {
+      const tl = u.repairTimeline || '';
+      const dates = tl.match(/(\d{1,2})\/(\d{1,2})/g);
+      if (!dates || !dates.length) return 999;
+      const lastDate = dates[dates.length - 1];
+      const [mm, dd] = lastDate.split('/').map(Number);
+      const entryDate = new Date(new Date().getFullYear(), mm - 1, dd);
+      if (entryDate.getTime() > now + 30 * 24 * 3600 * 1000) entryDate.setFullYear(new Date().getFullYear() - 1);
+      return Math.round((now - entryDate.getTime()) / (24 * 3600 * 1000));
+    };
+    return getAge(b) - getAge(a);
+  }).slice(0, 12);
+
+  if (stalledUnits.length) {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px;">';
+    stalledUnits.forEach(u => {
+      const tl = u.repairTimeline || '';
+      const dates = tl.match(/(\d{1,2})\/(\d{1,2})/g);
+      let staleDays = '?';
+      if (dates && dates.length) {
+        const [mm, dd] = dates[dates.length - 1].split('/').map(Number);
+        const entryDate = new Date(new Date().getFullYear(), mm - 1, dd);
+        if (entryDate.getTime() > now + 30 * 24 * 3600 * 1000) entryDate.setFullYear(new Date().getFullYear() - 1);
+        staleDays = Math.round((now - entryDate.getTime()) / (24 * 3600 * 1000));
+      }
+      html += '<div style="display:flex;align-items:center;gap:6px;padding:4px 8px;background:var(--el);border-radius:6px;">';
+      html += '<span style="font-family:var(--mono);font-size:10px;font-weight:700;color:var(--acc2);">' + _esc(u.equipmentId) + '</span>';
+      html += '<span style="font-size:9px;color:var(--txt2);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _esc(u.vendor || 'no vendor') + '</span>';
+      html += '<span style="font-size:9px;font-weight:700;color:var(--red);">' + staleDays + 'd silent</span>';
+      html += '</div>';
+    });
+    html += '</div>';
+  } else {
+    html += '<div style="font-size:11px;color:var(--grn);font-weight:600;">✓ All units have recent activity</div>';
+  }
+  html += '</div>';
+
   _container.innerHTML = html;
 }
 
