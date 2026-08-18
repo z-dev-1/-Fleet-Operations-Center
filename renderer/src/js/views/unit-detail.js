@@ -1087,7 +1087,14 @@ async function _injectAISplitDraft(webview, unit, side) {
     ).catch(function(){});
   }
 
-  // Now ask AI for a better version
+  // Show a small "AI drafting..." indicator near the textarea while waiting
+  webview.executeJavaScript(
+    'setTimeout(function(){' + selector +
+    'if(ta){var ind=document.createElement("div");ind.id="ai-draft-indicator";ind.textContent="🤖 AI drafting better comment...";ind.style.cssText="font-size:11px;color:#58a6ff;padding:4px 8px;margin-top:4px;";ta.parentElement.insertBefore(ind,ta.nextSibling);}' +
+    '},1200)'
+  ).catch(function(){});
+
+  // Now ask AI for a better version (with 20s timeout — don't block if AI is busy)
   try {
     var prompt = 'You are a fleet coordinator writing a ' +
       (side === 'relay' ? 'Relay Garage comment' : 'vendor/dealer escalation note') +
@@ -1100,7 +1107,8 @@ async function _injectAISplitDraft(webview, unit, side) {
         : 'Write a professional dealer note (1-3 sentences) requesting repair status, parts status if applicable, and estimated completion. If they have been quiet 3+ days, escalate firmly requesting immediate update. Ready to submit as-is.') +
       '\n\nReturn ONLY the comment text — no JSON, no markdown, no quotes.';
 
-    var result = await window.ai.ask(prompt);
+    var _aiTimeout = new Promise(function(_, rej) { setTimeout(function() { rej(new Error('split-view AI timeout')); }, 20000); });
+    var result = await Promise.race([window.ai.ask(prompt), _aiTimeout]);
     var text = (result && result.text) ? result.text.trim() : (typeof result === 'string' ? result.trim() : '');
     // Validate: must be plain text, not JSON, not empty
     if (text && text.length > 15 && !text.startsWith('{') && !text.startsWith('```')) {
@@ -1108,11 +1116,17 @@ async function _injectAISplitDraft(webview, unit, side) {
       webview.executeJavaScript(
         '(function(){' + selector +
         'if(ta){ta.focus();ta.select();document.execCommand("insertText",false,' + JSON.stringify(text) + ');ta.style.background="#e6f7ff";ta.blur();}' +
+        'var ind=document.getElementById("ai-draft-indicator");if(ind)ind.textContent="✅ AI draft ready";setTimeout(function(){if(ind)ind.remove();},3000);' +
         '})()'
       ).catch(function(){});
+    } else {
+      // AI returned but wasn't usable — remove indicator
+      webview.executeJavaScript('(function(){var ind=document.getElementById("ai-draft-indicator");if(ind)ind.remove();})()').catch(function(){});
     }
   } catch (e) {
-    // AI failed — fallback already in place, nothing to do
+    // AI failed or timed out — remove indicator, fallback stays
+    console.warn('[split-view] AI draft failed (' + side + '):', e.message);
+    webview.executeJavaScript('(function(){var ind=document.getElementById("ai-draft-indicator");if(ind){ind.textContent="⚠️ AI unavailable — using template";setTimeout(function(){ind.remove();},3000);}})()').catch(function(){});
   }
 }
 
