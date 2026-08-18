@@ -397,7 +397,25 @@ YOUR TASK:
 4. ACTIONS -- suggest concrete next steps the fleet coordinator (the user) could personally take to move things forward, e.g. "Request updated ETC from Amerit for unit X", "Escalate diagnosis delay at dealer for unit Y". Be specific and cite the relevant unit ID(s) when the action is unit-specific; citation is optional for a genuinely group-wide action (e.g. "Request consolidated status update from Amerit for all open WOs at this site").
 5. HELP NEEDED -- assess whether cross-team help is needed (e.g. SM team lifecycle correction, FAS/AFP coordination, Last Mile escalation) and from whom. If no help is needed, do not invent a need -- simply return an empty array for this field.
 
-TRENDS RULE: A trend exists ONLY when 3+ units share the same failure category. Report format: "[# units] [failure category] — [duration range] ([SCACs affected])". Valid categories: Engine, Transmission, PM Backlog, Expired Inspections, Accident/CEI, Reconditioning, Electrical, Brakes, Tires, Parts Sourcing, Offsite Dealer, Vendor Capacity. If no category has 3+ units, report "No trends — no single issue category has 3+ units affected." Use direction [Persisting/Emerging/Recurring] for direction labeling.
+TRENDS RULE: Identify recurring patterns in why units are down at this site/SCAC. A trend exists when 3+ units share the same failure category or situation. "No trends" is valid when nothing clusters.
+
+TRENDS STYLE EXAMPLES (match this voice):
+- "No trends"
+- "No trends. Only four units down"
+- "4 no starts"
+- "5 Expired PMs"
+- "5 transmission"
+- "7 Reconditioning units"
+- "3 OOS\nNo trends"
+- "8 Engine issues\n4 Cab/Climate Control issues\n3 Accessories"
+- "13 OOS\n4 Expired Inspection\n3 OSR\n2 EOL"
+- "Engine/Motor Systems (3) — 59340, 122309, 520079."
+- "Chassis (4) — 321357, 520065, 520089, 321571.\nEngine/Motor Systems (5) — 321579, 322442, 521296, 569073, 876609."
+- "Predictive maintenance — 12 active (6 within the last 2 days)\nKenworth Brockton congestion persists — 9 units assigned there; recurring 'waiting on next tech' across multiple units"
+- "Amerit parts sourcing failures — 4 occurrences in 13 days (322285 2x incorrect throttle body, 321548 sensors past EDD, 320210 no ETA post-approval).\nOffsite dealer extended dwell — 4 units (521073 KW 27d, 9010434 KW 14d, 321414 Cummins 13d).\nSame-day downed spike — 5 units downed DoD."
+- "Live snapshot 8/11: 73.4% uptime (80/109 tractors active). Movement is offsite/OEM-driven — Amerit on-site queue is fresh and clearing."
+
+Format: brief counts when simple, detailed with unit IDs when complex. Include the category name and count. List unit IDs in parentheses when citing specific units. Can be a single line or multi-line. Use direction labels [Persisting/Emerging] only when a trend is worsening or new.
 BARRIERS RULE: List what's BLOCKING progress on downed units. Be specific when you can, brief when the situation is simple. "No barriers" is a valid answer if nothing is genuinely blocking.
 
 BARRIERS STYLE EXAMPLES (match this voice):
