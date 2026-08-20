@@ -1066,6 +1066,8 @@ function _buildOffsiteDraft(unit) {
 // if the AI is unavailable or slow.
 async function _injectAISplitDraft(webview, unit, side) {
   if (!unit || !webview) return;
+  // Guard: webview must be attached to DOM and ready
+  if (!webview.isConnected || !document.contains(webview)) return;
   var equipId = unit.equipmentId || '';
   var vendor = unit.vendor || 'unknown';
   var days = unit.workDuration || '?';
@@ -1080,6 +1082,7 @@ async function _injectAISplitDraft(webview, unit, side) {
     : 'var ta=document.querySelector("textarea[name=user-reply]");if(!ta)ta=document.querySelector("textarea");';
 
   if (fallback) {
+    if (!webview.isConnected) return;
     webview.executeJavaScript(
       'setTimeout(function(){' + selector +
       'if(ta){ta.focus();ta.value="";document.execCommand("insertText",false,' + JSON.stringify(fallback) + ');ta.style.background="#fffbe6";ta.blur();}' +
@@ -1088,6 +1091,7 @@ async function _injectAISplitDraft(webview, unit, side) {
   }
 
   // Show a small "AI drafting..." indicator near the textarea while waiting
+  if (!webview.isConnected) return;
   webview.executeJavaScript(
     'setTimeout(function(){' + selector +
     'if(ta){var ind=document.createElement("div");ind.id="ai-draft-indicator";ind.textContent="🤖 AI drafting better comment...";ind.style.cssText="font-size:11px;color:#58a6ff;padding:4px 8px;margin-top:4px;";ta.parentElement.insertBefore(ind,ta.nextSibling);}' +
@@ -1127,6 +1131,7 @@ async function _injectAISplitDraft(webview, unit, side) {
     // Validate: must be plain text, not JSON, not empty
     if (text && text.length > 15 && !text.startsWith('{') && !text.startsWith('```')) {
       // Replace the fallback with the AI version (blue background to distinguish)
+      if (!webview.isConnected) return;
       webview.executeJavaScript(
         '(function(){' + selector +
         'if(ta){ta.focus();ta.select();document.execCommand("insertText",false,' + JSON.stringify(text) + ');ta.style.background="#e6f7ff";ta.blur();}' +
