@@ -921,6 +921,22 @@ function workDurationBar(unit){
   '</div>';
 }
 
+// Relay Garage deep-link for a single unit. Mirrors the AAP Garage dashboard URL
+// the scraper uses (src/scrapers/relay.js AAP_GARAGE_BASE) but WITHOUT the heavy
+// vendor/status filter params — those would hide the unit if its vendor isn't in
+// the whitelist. Tab follows where the unit's open WR actually lives so the row
+// is visible on arrival; defaults to Unplanned.
+var _AAP_GARAGE_BASE = 'https://aap-na.corp.amazon.com/v2/page/817ca098-8441-4329-a71e-6768f9d7e6c5';
+function _garageUrlForUnit(unit){
+  var id = (unit && (unit.equipmentId || unit.id)) || '';
+  if (!id) return '';
+  // Planned-only unit (e.g. a PM with no unplanned WR) -> land on the Planned tab.
+  var planned   = parseInt(unit.openPlanned, 10)   || 0;
+  var unplanned = parseInt(unit.openUnplanned, 10) || 0;
+  var tab = (planned > 0 && unplanned === 0) ? 'Planned' : 'Unplanned';
+  return _AAP_GARAGE_BASE + '?tab=' + tab + '&ids=' + encodeURIComponent(id);
+}
+
 // ── header ────────────────────────────────────────────────────────────────────
 function renderHeader(unit){
   var isUnavail=(unit.lifecycleState||'').toLowerCase().includes('unavail');
@@ -968,7 +984,8 @@ function renderHeader(unit){
   return '<div class="dp-header dp-header--'+hdrCls+'">'+
     '<div class="dp-header__scan"></div>'+
     '<div class="dp-header__top">'+
-      '<span class="dp-header__id">'+esc(unit.equipmentId)+'</span>'+
+      '<span class="dp-header__id dp-header__id--link" title="Open '+esc(unit.equipmentId)+' in Relay Garage" '+
+        'data-aap-url="'+esc(_garageUrlForUnit(unit))+'">'+esc(unit.equipmentId)+'</span>'+
       (unit.vin?'<span class="dp-header__vin">'+esc(unit.vin)+'</span>':'')+
       '<span class="dp-header__state-badge dp-header__state-badge--'+(isUnavail?'unavailable':'active')+'">'+esc(unit.lifecycleState||'Active')+'</span>'+
       '<div class="dp-header__launchers">'+launchers+'</div>'+

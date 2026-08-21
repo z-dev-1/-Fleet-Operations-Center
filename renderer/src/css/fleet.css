@@ -2646,6 +2646,10 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .dp-header__scan{position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(88,166,255,.4),transparent);animation:scanline 6s linear infinite;pointer-events:none}
 .dp-header__top{display:flex;align-items:flex-start;gap:10px;margin-bottom:8px}
 .dp-header__id{font-family:var(--mono);font-size:20px;font-weight:800;color:var(--txt);line-height:1}
+/* Clickable unit ID -> opens the unit's Relay Garage row in the in-app AAP window. */
+.dp-header__id--link{cursor:pointer;text-decoration:none;border-bottom:1px dashed rgba(88,166,255,.45);transition:color .15s ease,border-color .15s ease}
+.dp-header__id--link:hover{color:var(--acc,#58a6ff);border-bottom-color:var(--acc,#58a6ff)}
+.dp-header__id--link:active{opacity:.75}
 .dp-header__state-badge{padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;flex-shrink:0;margin-top:3px}
 .dp-header__state-badge--unavailable{background:var(--redd);color:var(--red);border:1px solid rgba(255,123,114,.3)}
 .dp-header__state-badge--active{background:var(--grnd);color:var(--grn);border:1px solid rgba(126,231,135,.3)}
