@@ -409,7 +409,7 @@ const GARAGE_LIST_SCRIPT = String.raw`
     if (!m) return;
     var uuid  = m[1];
     var title = (a.textContent || '').trim();
-    var el = a.parentElement, vendor = '', state = '';
+    var el = a.parentElement, vendor = '', state = '', lastUpdated = '';
     for (var d = 0; d < 8 && el; d++) {
       // Stop climbing once this ancestor spans more than one WR row — otherwise an
       // unrecognized vendor name (e.g. KOONER, not in the whitelist below) makes the
@@ -447,11 +447,21 @@ const GARAGE_LIST_SCRIPT = String.raw`
           }
 
         }
+        // Last-updated timestamp detection — used to force a cache-bypass re-scrape
+        // when the garage list shows newer activity than the cached scrape (Option 3).
+        // Accepts absolute ("Aug 5, 2026 01:13PM") or relative ("11 days ago", "3 hours ago").
+        if (!lastUpdated) {
+          var ctu = (ct || '').replace(/\s+/g, ' ').trim();
+          var mAbs = ctu.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM)?)?/i);
+          var mRel = ctu.match(/\b\d{1,3}\s+(?:second|minute|hour|day|week|month|year)s?\s+ago\b/i);
+          if (mAbs) { lastUpdated = mAbs[0]; }
+          else if (mRel) { lastUpdated = mRel[0]; }
+        }
       }
-      if (vendor && state) break;
+      if (vendor && state && lastUpdated) break;
       el = el.parentElement;
     }
-    rows.push({ uuid: uuid, title: title, vendor: vendor, state: state });
+    rows.push({ uuid: uuid, title: title, vendor: vendor, state: state, lastUpdated: lastUpdated });
   });
   var seen = {}, deduped = [];
   rows.forEach(function(r) { if (!seen[r.uuid]) { seen[r.uuid]=1; deduped.push(r); } });
@@ -585,6 +595,8 @@ async function scrapeGarageList(url, equipmentId, partition) {
 
 async function resolveServiceUUID(equipmentId, partition) {
   logger.info('[Relay] resolveServiceUUID called for', equipmentId);
+  // Option 3: reset any prior lastUpdated for this unit; set it on the resolved row below.
+  _resolvedLastUpdated[equipmentId] = '';
   const tabs = [
     garageUrl('Unplanned', equipmentId),
     garageUrl('Planned', equipmentId),
@@ -605,7 +617,8 @@ async function resolveServiceUUID(equipmentId, partition) {
     // Prefer an active (non-closed, non-FleetNet) WR first
     const active = rows.find(r => !isFleetNetVendor(r.vendor) && !CLOSED_STATES.test(r.state || ''));
     if (active) {
-      logger.info('[Relay]', equipmentId, '->', labels[t], 'ACTIVE UUID:', active.uuid, 'vendor:', active.vendor||'?', 'state:', active.state||'?', 'title:', (active.title||'').slice(0,40));
+      logger.info('[Relay]', equipmentId, '->', labels[t], 'ACTIVE UUID:', active.uuid, 'vendor:', active.vendor||'?', 'state:', active.state||'?', 'title:', (active.title||'').slice(0,40), '| lastUpdated:', active.lastUpdated || '?');
+      _resolvedLastUpdated[equipmentId] = active.lastUpdated || '';
       return active.uuid;
     }
 
@@ -621,6 +634,7 @@ async function resolveServiceUUID(equipmentId, partition) {
     const fallback = rows.find(r => !isFleetNetVendor(r.vendor) && !CLOSED_STATES.test(r.state || ''));
     if (fallback) {
       logger.info('[Relay]', equipmentId, '-> FALLBACK UUID:', fallback.uuid, 'vendor:', fallback.vendor||'?', 'state:', fallback.state||'?');
+      _resolvedLastUpdated[equipmentId] = fallback.lastUpdated || '';
       return fallback.uuid;
     }
   }
@@ -631,6 +645,7 @@ async function resolveServiceUUID(equipmentId, partition) {
     const last = rows.find(r => !isFleetNetVendor(r.vendor));
     if (last) {
       logger.info('[Relay]', equipmentId, '-> LAST-RESORT UUID (Cancelled?):', last.uuid, last.state);
+      _resolvedLastUpdated[equipmentId] = last.lastUpdated || '';
       return last.uuid;
     }
   }
@@ -643,6 +658,7 @@ async function resolveServiceUUID(equipmentId, partition) {
     const fleetNetOnly = rows.find(r => isFleetNetVendor(r.vendor) && !CLOSED_STATES.test(r.state || ''));
     if (fleetNetOnly) {
       logger.info('[Relay]', equipmentId, '-> FLEETNET-ONLY UUID:', fleetNetOnly.uuid, 'state:', fleetNetOnly.state||'?');
+      _resolvedLastUpdated[equipmentId] = fleetNetOnly.lastUpdated || '';
       return fleetNetOnly.uuid;
     }
   }
@@ -651,6 +667,7 @@ async function resolveServiceUUID(equipmentId, partition) {
     const fleetNetClosed = rows.find(r => isFleetNetVendor(r.vendor));
     if (fleetNetClosed) {
       logger.info('[Relay]', equipmentId, '-> FLEETNET-ONLY UUID (closed/Cancelled):', fleetNetClosed.uuid, fleetNetClosed.state);
+      _resolvedLastUpdated[equipmentId] = fleetNetClosed.lastUpdated || '';
       return fleetNetClosed.uuid;
     }
   }
@@ -796,6 +813,16 @@ async function scrapeServiceByUUID(uuid, partition) {
 // syncs skip the expensive scrape until the TTL expires.
 const NO_WR_RETRY_MS = 15 * 60 * 1000; // 15 min
 
+// Option 3 (2026-08-21): the garage list scrape (which runs every sync cycle to
+// resolve the service UUID) also reads each WR's "last updated" timestamp. We
+// stash the resolved WR's lastUpdated here, keyed by equipmentId, so that
+// scrapeUnitPage can compare it against the cached scrape's stored _lastUpdated
+// and FORCE a cache-bypass re-scrape when the garage shows newer activity —
+// even though we're still inside the 4h cache TTL. This keeps routine units
+// cheap (4h cache) while never showing a stale timeline for a unit that just
+// got a new vendor/offsite update.
+const _resolvedLastUpdated = {};
+
 async function scrapeUnitPage(equipmentId, partition, relayCache) {
   logger.info('[Relay] scrapeUnitPage called for', equipmentId);
 
@@ -830,14 +857,27 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
     const cached  = relayCache[equipmentId];
     const ageMs   = Date.now() - (cached._cachedAt || 0);
     const uuidOk  = !cached._serviceUUID || cached._serviceUUID === serviceUUID;
-    if (ageMs < RELAY_CACHE_TTL_MS && uuidOk) {
+    // Option 3: force a re-scrape (bypass the TTL cache) when the garage list
+    // reports a DIFFERENT "last updated" than what we captured on the cached
+    // scrape. This catches new vendor comments / offsite dealer updates posted
+    // within the 4h TTL window. Only compares when BOTH values are present, so
+    // a page that doesn't render the timestamp never causes needless re-scrapes.
+    const freshLU = (_resolvedLastUpdated[equipmentId] || '').trim();
+    const cachedLU = (cached._lastUpdated || '').trim();
+    const luChanged = !!freshLU && !!cachedLU && freshLU !== cachedLU;
+    if (ageMs < RELAY_CACHE_TTL_MS && uuidOk && !luChanged) {
       logger.info('[Relay] Cache HIT for', equipmentId,
-        '| age:', Math.round(ageMs / 60000) + 'min', '/ TTL:', Math.round(RELAY_CACHE_TTL_MS / 3600000) + 'h');
+        '| age:', Math.round(ageMs / 60000) + 'min', '/ TTL:', Math.round(RELAY_CACHE_TTL_MS / 3600000) + 'h',
+        (freshLU ? '| lastUpdated: ' + freshLU : ''));
       return { ...cached, _cacheHit: true };
     }
     if (!uuidOk) {
       logger.info('[Relay] UUID CHANGED for', equipmentId,
         '| was:', cached._serviceUUID, '-> now:', serviceUUID, '— cache bypassed');
+    } else if (luChanged) {
+      logger.info('[Relay] LAST-UPDATED CHANGED for', equipmentId,
+        '| was:', cachedLU, '-> now:', freshLU, '— cache bypassed (Option 3 forced re-scrape), age:',
+        Math.round(ageMs / 60000) + 'min');
     } else {
       logger.info('[Relay] Cache STALE for', equipmentId,
         '| age:', Math.round(ageMs / 60000) + 'min', '> TTL:', Math.round(RELAY_CACHE_TTL_MS / 3600000) + 'h');
@@ -1061,6 +1101,7 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
             salesforceCaseUrl:   convSalesforce   ? convSalesforce.url          : (wrData.salesforceCaseUrl   || ''),
             fullConversation:    _convData && _convData.fullConversation ? _convData.fullConversation : '',
             _serviceUUID:        serviceUUID,
+            _lastUpdated:        (_resolvedLastUpdated[equipmentId] || ''),
             _cachedAt:           Date.now(),
           });
 
