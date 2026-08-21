@@ -441,8 +441,12 @@ function initWindows(ctx) {
     let done  = false;
     let polls = 0;
 
-    // Configure columns before polling starts
-    if (label === 'startup' || label === 'rescan') {
+    // Configure columns before polling starts.
+    // NOTE: chunked rescans use labels like 'rescan#1/2', so match by prefix —
+    // an exact 'rescan' check would skip the DOM-settle wait + column config for
+    // every chunk, causing them to poll an unrendered/unconfigured page and
+    // return 0 rows (observed: chunk 'rescan#2/2' polled 0 rows x18 then gave up).
+    if (label === 'startup' || label.indexOf('rescan') === 0) {
       try {
         // Wait for DOM to settle: 1.5s quiet window AFTER last did-finish-load.
         // Do NOT arm timer immediately -- scrape starts mid-redirect-storm.
@@ -1181,11 +1185,19 @@ function initWindows(ctx) {
           },
         });
 
+        // Safety-net timeout only. _runAAPScrapeLoop has its OWN budget
+        // (maxPolls 18 x 5s poll = 90s) AND then does a force-1000 click +
+        // ~8s settle + table extract + WR-URL build AFTER it finds rows. So a
+        // healthy-but-slow scrape can legitimately run ~100s+. The old 90s
+        // outer timeout raced that finalization and killed chunks that had
+        // ALREADY found rows (observed: chunk found 150 rows at poll 12, then
+        // got destroyed mid-extract and returned 0). Set the net well beyond
+        // the loop's real worst case so it only fires on a truly hung window.
         const timeout = setTimeout(() => {
-          logger.warn('[' + label + '] chunk timed out (90s)');
+          logger.warn('[' + label + '] chunk safety-net timeout (150s) — window hung');
           try { scrapeWin.destroy(); } catch (_) {}
           finish([]);
-        }, 90000);
+        }, 150000);
 
         scrapeWin.webContents.once('did-finish-load', () => {
           _runAAPScrapeLoop(scrapeWin, {
@@ -1248,23 +1260,40 @@ function initWindows(ctx) {
           logger.info('[' + label + '] +' + rows.length + ' rows (running total: ' + allRows.length + ')');
         }
 
-        // Sanity guard: if the combined rescan returns drastically fewer rows
-        // than what's currently stored, it hit a bad page state (auth blip,
-        // timeout, AAP error page). Discard to avoid wiping the fleet table with
-        // garbage. Threshold: <50% of current rows. Compared against the COMBINED
-        // total (not per-chunk) so legitimately-partial chunks don't trip it.
-        // One-time exception: if a chunk failed but we still got SOME rows and
-        // there's no prior data yet, we still save what we have.
         const store = require('../store');
         const existing = store.load('fleetData', {});
         const existingCount = (existing.rows || []).length;
-        if (existingCount > 10 && allRows.length < existingCount * 0.5) {
-          logger.warn('Rescan: got ' + allRows.length + ' combined rows but have ' +
-            existingCount + ' \u2014 discarding bad scrape (likely AAP error page or failed chunk)');
-          return;
-        }
+
         if (allRows.length === 0) {
           logger.warn('Rescan: 0 combined rows \u2014 nothing to save');
+          return;
+        }
+
+        // Partial-failure recovery (multi-chunk only): if SOME chunks succeeded
+        // but at least one returned 0 rows, don't discard the good chunks just
+        // because the combined total dipped under the 50% guard. Instead merge
+        // the fresh rows OVER the existing dataset (fresh units update, units
+        // from the failed chunk keep their last-known-good values). This avoids
+        // a single flaky chunk throwing away the other chunks' fresh data.
+        if (multi && anyChunkFailed && existingCount > 10) {
+          const byId = new Map((existing.rows || []).map(r => [r.equipmentId, r]));
+          for (const r of allRows) if (r.equipmentId) byId.set(r.equipmentId, r);
+          const merged = Array.from(byId.values());
+          const payload = _saveAAPCaches(merged);
+          logger.warn('Rescan: ' + allRows.length + ' fresh rows from surviving chunk(s) merged over '
+            + existingCount + ' existing \u2014 ' + merged.length + ' total (a chunk returned 0; kept prior data for it)');
+          pushData(payload);
+          return;
+        }
+
+        // Sanity guard: a drastically-shrunken FULL result means a bad page state
+        // (auth blip, AAP error page) rather than real fleet shrinkage. Discard to
+        // avoid wiping the table with garbage. Threshold: <50% of current rows,
+        // compared against the COMBINED total so a legitimately-partial (but
+        // complete) chunk set doesn't trip it.
+        if (existingCount > 10 && allRows.length < existingCount * 0.5) {
+          logger.warn('Rescan: got ' + allRows.length + ' combined rows but have ' +
+            existingCount + ' \u2014 discarding bad scrape (likely AAP error page)');
           return;
         }
 
