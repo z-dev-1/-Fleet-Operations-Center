@@ -869,7 +869,15 @@ function initWindows(ctx) {
     });
 
     const scrapeDomiciles = getDomiciles();
-    const startUrl        = buildScanURL(scrapeDomiciles);
+    // AAP caps the search filter at 6 domiciles (more -> empty page). If the user
+    // has >6 configured, the startup scrape loads only the FIRST 6 so the app shows
+    // quickly with partial data; the chunked triggerLiveRescan() that fires 90s
+    // after _showApp() then backfills the remaining chunks into the full dataset.
+    const startupDomiciles = scrapeDomiciles.slice(0, 6);
+    const startUrl        = buildScanURL(startupDomiciles);
+    if (scrapeDomiciles.length > 6) {
+      logger.info('Startup: ' + scrapeDomiciles.length + ' domiciles configured; scraping first 6 now, rest via chunked rescan');
+    }
     logger.info('Loading AAP in main window: ' + startUrl.substring(0, 80));
 
     // ── Midway pre-flight: check actual cookie expiry, run mwinit if needed ──
@@ -1141,66 +1149,134 @@ function initWindows(ctx) {
     // ── Live rescan: off-screen BrowserWindow every 5 min ────────────────────
     const RESCAN_INTERVAL_MS = 5 * 60 * 1000;
 
-    function triggerLiveRescan(force) {
+    // The AAP dashboard hard-caps the domicile/search filter at 6 sites — pass
+    // more and the page returns an EMPTY result set. To support fleets spread
+    // across >6 domiciles we chunk the configured list into groups of <=6,
+    // scrape each chunk in its own off-screen window, and merge the rows
+    // (deduped by Equipment ID) into ONE fleet dataset. <=6 domiciles behaves
+    // exactly as before (single scrape).
+    const AAP_MAX_DOMICILES_PER_SCAN = 6;
+
+    function _chunk(arr, size) {
+      const out = [];
+      for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+      return out;
+    }
+
+    // Scrape ONE domicile chunk in a throwaway off-screen window. Resolves with
+    // the mapped rows, or [] on timeout/failure (never rejects — callers decide
+    // whether a partial/empty chunk should abort the whole rescan).
+    function _scrapeChunk(freshUrl, label) {
+      return new Promise((resolve) => {
+        let settled = false;
+        const finish = (rows) => { if (settled) return; settled = true; resolve(rows || []); };
+
+        const scrapeWin = new BrowserWindow({
+          width: 1400, height: 800,
+          show: true, x: -3000, y: -3000, skipTaskbar: true,
+          webPreferences: {
+            nodeIntegration:  false,
+            contextIsolation: true,
+            session:          session.defaultSession,
+          },
+        });
+
+        const timeout = setTimeout(() => {
+          logger.warn('[' + label + '] chunk timed out (90s)');
+          try { scrapeWin.destroy(); } catch (_) {}
+          finish([]);
+        }, 90000);
+
+        scrapeWin.webContents.once('did-finish-load', () => {
+          _runAAPScrapeLoop(scrapeWin, {
+            label, maxPolls: 18,
+            onComplete: (rows) => {
+              clearTimeout(timeout);
+              try { scrapeWin.destroy(); } catch (_) {}
+              finish(rows);
+            },
+            onTimeout: () => {
+              clearTimeout(timeout);
+              try { scrapeWin.destroy(); } catch (_) {}
+              finish([]);
+            },
+          });
+        });
+
+        scrapeWin.loadURL(freshUrl);
+      });
+    }
+
+    async function triggerLiveRescan(force) {
       if (!_appReady)         { logger.info('Rescan skipped \u2014 app not ready'); return; }
       if (_rescanInProgress)  { logger.info('Rescan already in progress'); return; }
       if (!mainWindow || mainWindow.isDestroyed()) return;
 
-      const freshUrl = buildScanURL(getDomiciles());
-      logger.info('Rescan' + (force ? ' (forced)' : ' (timer)') + ': ' + freshUrl.substring(0, 60));
+      const domiciles = getDomiciles();
+      const chunks = _chunk(domiciles, AAP_MAX_DOMICILES_PER_SCAN);
+      const multi = chunks.length > 1;
+      logger.info('Rescan' + (force ? ' (forced)' : ' (timer)') +
+        ': ' + domiciles.length + ' domiciles in ' + chunks.length + ' chunk(s)');
 
       _rescanInProgress = true;
-      const scrapeWin = new BrowserWindow({
-        width: 1400, height: 800,
-        show: true, x: -3000, y: -3000, skipTaskbar: true,
-        webPreferences: {
-          nodeIntegration:  false,
-          contextIsolation: true,
-          session:          session.defaultSession,
-        },
-      });
+      try {
+        // Scrape each chunk sequentially (running several visible scrape windows
+        // in parallel fights over the shared Midway session and CPU). Accumulate
+        // rows deduped by Equipment ID — first chunk wins on collision.
+        const seen = new Set();
+        const allRows = [];
+        let anyChunkFailed = false;
 
-      const timeout = setTimeout(() => {
-        logger.warn('Rescan timed out (90s)');
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
+          const label = multi ? ('rescan#' + (i + 1) + '/' + chunks.length) : 'rescan';
+          const url = buildScanURL(chunk);
+          if (multi) {
+            pushStatus('\uD83D\uDD04 Rescan ' + (i + 1) + '/' + chunks.length +
+              ' \u2014 ' + chunk.join(', ') + '...');
+          }
+          logger.info('[' + label + '] ' + chunk.join(', ') + ' \u2014 ' + url.substring(0, 70));
+          const rows = await _scrapeChunk(url, label);
+          if (!rows.length) {
+            anyChunkFailed = true;
+            logger.warn('[' + label + '] returned 0 rows');
+          }
+          for (const r of rows) {
+            const id = r.equipmentId;
+            if (id && !seen.has(id)) { seen.add(id); allRows.push(r); }
+          }
+          logger.info('[' + label + '] +' + rows.length + ' rows (running total: ' + allRows.length + ')');
+        }
+
+        // Sanity guard: if the combined rescan returns drastically fewer rows
+        // than what's currently stored, it hit a bad page state (auth blip,
+        // timeout, AAP error page). Discard to avoid wiping the fleet table with
+        // garbage. Threshold: <50% of current rows. Compared against the COMBINED
+        // total (not per-chunk) so legitimately-partial chunks don't trip it.
+        // One-time exception: if a chunk failed but we still got SOME rows and
+        // there's no prior data yet, we still save what we have.
+        const store = require('../store');
+        const existing = store.load('fleetData', {});
+        const existingCount = (existing.rows || []).length;
+        if (existingCount > 10 && allRows.length < existingCount * 0.5) {
+          logger.warn('Rescan: got ' + allRows.length + ' combined rows but have ' +
+            existingCount + ' \u2014 discarding bad scrape (likely AAP error page or failed chunk)');
+          return;
+        }
+        if (allRows.length === 0) {
+          logger.warn('Rescan: 0 combined rows \u2014 nothing to save');
+          return;
+        }
+
+        const payload = _saveAAPCaches(allRows);
+        logger.info('Rescan complete: ' + allRows.length + ' units saved' +
+          (multi ? (' from ' + chunks.length + ' chunks' + (anyChunkFailed ? ' (some chunks empty)' : '')) : ''));
+        pushData(payload);
+      } catch (e) {
+        logger.warn('Rescan failed:', e.message);
+      } finally {
         _rescanInProgress = false;
-        try { scrapeWin.destroy(); } catch (_) {}
-      }, 90000);
-
-      scrapeWin.webContents.once('did-finish-load', () => {
-        _runAAPScrapeLoop(scrapeWin, {
-          label: 'rescan', maxPolls: 18,
-          onComplete: (rows) => {
-            // Sanity guard: if the rescan returns drastically fewer rows than
-            // what's currently stored, it hit a bad page state (auth blip,
-            // timeout, AAP error page). Discard it to avoid wiping the fleet
-            // table with garbage data. Threshold: <50% of current rows.
-            const store = require('../store');
-            const existing = store.load('fleetData', {});
-            const existingCount = (existing.rows || []).length;
-            if (existingCount > 10 && rows.length < existingCount * 0.5) {
-              logger.warn('Rescan: got ' + rows.length + ' rows but have ' + existingCount + ' — discarding bad scrape (likely AAP error page)');
-              clearTimeout(timeout);
-              _rescanInProgress = false;
-              try { scrapeWin.destroy(); } catch (_) {}
-              return;
-            }
-            const payload = _saveAAPCaches(rows);
-            logger.info('Rescan complete: ' + rows.length + ' units saved');
-            pushData(payload);
-            clearTimeout(timeout);
-            _rescanInProgress = false;
-            try { scrapeWin.destroy(); } catch (_) {}
-          },
-          onTimeout: () => {
-            logger.warn('Rescan: no rows within poll limit');
-            clearTimeout(timeout);
-            _rescanInProgress = false;
-            try { scrapeWin.destroy(); } catch (_) {}
-          },
-        });
-      });
-
-      scrapeWin.loadURL(freshUrl);
+      }
     }
 
     ipcMain.on('aap:rescan', (_e, opts) => triggerLiveRescan(!!(opts && opts.force)));
@@ -1255,7 +1331,9 @@ function initWindows(ctx) {
       },
     });
 
-    setupWin.loadURL(buildScanURL(getDomiciles()));
+    // Cap at 6 domiciles — AAP returns an empty page past that, and this window
+    // only needs the table to render so the user can add/remove columns.
+    setupWin.loadURL(buildScanURL(getDomiciles().slice(0, 6)));
 
     setupWin.webContents.on('did-finish-load', () => {
       setupWin.webContents.executeJavaScript(`

@@ -310,6 +310,7 @@ export function _html() {
           <div class="sd-field">
             <div class="sd-label">Managed domiciles (comma-separated)</div>
             <textarea id="settings-domiciles" class="settings__textarea sd-input" placeholder="ABE40, AVP40, AUVTE01..."></textarea>
+            <div class="sd-hint">Add as many as you need. AAP caps its filter at 6 sites, so the app automatically scrapes them in batches of 6 and merges everything into one fleet table. More than 6 means each sync takes a bit longer.</div>
           </div>
           <div class="sd-btn-row">
             <button class="sd-btn primary" id="save-domiciles">Save</button>
