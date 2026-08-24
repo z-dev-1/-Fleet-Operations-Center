@@ -343,22 +343,67 @@ async function probeSession() {
     const isAAP   = (url) => { try { return /(^|\.)aap-na\.corp\.amazon\.com$/i.test(new URL(url).hostname); } catch (_) { return false; } };
     const isSSO   = (url) => /midway|login\.amazon|signin|sso\.amazon|oidc|oauth|\/auth\//i.test(url) && !isAAP(url);
 
-    // FIX (2026-07-21): will-redirect and did-navigate-in-page were both
-    // silently calling done(false) with NO logging when they detected an SSO
-    // url -- unlike did-navigate/did-finish-load below, which both log
-    // before deciding. That total silence is exactly why "AAP rejected
-    // session" kept throwing with zero visibility into what URL was actually
-    // being rejected. Logging here now so the real blocking URL is visible.
-    probe.webContents.on('will-redirect',        (_, url) => { if (isSSO(url)) { logger.info('[AuthManager] will-redirect (SSO, rejecting):', url); done(false); } else { logger.info('[AuthManager] will-redirect (ok):', url.slice(0, 120)); } });
-    probe.webContents.on('did-navigate',         (_, url) => { logger.info('[AuthManager] nav:', url); if (isSSO(url)) done(false); });
-    probe.webContents.on('did-navigate-in-page', (_, url) => { if (isSSO(url)) { logger.info('[AuthManager] did-navigate-in-page (SSO, rejecting):', url); done(false); } });
+    // FIX (2026-08-24): the probe used to call done(false) the instant it saw
+    // ANY Midway/SSO URL in will-redirect / did-navigate. But AAP's NORMAL,
+    // healthy auth flow for a VALID session redirects THROUGH Midway's OIDC
+    // handshake first:
+    //   aap-na.../v2/page/...  ->  midway-auth.../SSO/redirect?response_type=id_token&redirect_uri=<aap>  ->  back to aap-na...
+    // With good cookies that hop auto-completes in well under a second. The old
+    // code killed the probe on that transient hop and reported the session
+    // invalid EVEN THOUGH mwinit had just written valid cookies (observed live
+    // 2026-08-24: 6 straight "will-redirect (SSO, rejecting)" on the standard
+    // id_token handshake URL, one of them right after a fresh mwinit -f).
+    //
+    // New approach: do NOT fail on a transient SSO HANDSHAKE redirect (one that
+    // carries a redirect_uri back to AAP — Midway is about to bounce us home).
+    // Let the chain run and judge only by where navigation FINALLY SETTLES:
+    //   - lands on AAP           -> success
+    //   - settles on a Midway    -> failure (real login wall; cookies rejected)
+    //     page that does NOT
+    //     immediately redirect onward within the settle grace window
+    // A terminal login wall stops navigating; a handshake keeps going. We use a
+    // short debounce after each navigation to tell them apart.
+
+    // An SSO URL that is just the OIDC handshake bouncing back to AAP — carries
+    // redirect_uri/redirect back to the aap-na host. NOT a terminal login wall.
+    const isHandshakeHop = (url) => {
+      if (!isSSO(url)) return false;
+      try {
+        const dec = decodeURIComponent(url);
+        return /redirect_uri=[^&]*aap-na\.corp\.amazon\.com/i.test(url)
+            || /aap-na\.corp\.amazon\.com/i.test(dec.split('?')[1] || '');
+      } catch (_) { return false; }
+    };
+
+    let settleTimer = null;
+    const scheduleSettleCheck = () => {
+      clearTimeout(settleTimer);
+      // If navigation goes quiet for this long, whatever we're on is the final
+      // landing. Handshake hops keep navigating and keep resetting this timer.
+      settleTimer = setTimeout(() => {
+        if (settled) return;
+        const cur = probe.webContents.getURL();
+        if (isAAP(cur)) { logger.info('[AuthManager] Probe settled on AAP — session OK'); done(true); }
+        else if (isSSO(cur)) { logger.info('[AuthManager] Probe settled on SSO/login wall — session rejected:', cur.slice(0, 120)); done(false); }
+        else { logger.info('[AuthManager] Probe settled on unknown page:', cur.slice(0, 120)); done(isAAP(cur)); }
+      }, 2500);
+    };
+
+    probe.webContents.on('will-redirect', (_, url) => {
+      if (isHandshakeHop(url)) { logger.info('[AuthManager] will-redirect (SSO handshake -> AAP, allowing):', url.slice(0, 120)); }
+      else if (isSSO(url))     { logger.info('[AuthManager] will-redirect (SSO):', url.slice(0, 120)); }
+      else                     { logger.info('[AuthManager] will-redirect (ok):', url.slice(0, 120)); }
+      scheduleSettleCheck();
+    });
+    probe.webContents.on('did-navigate', (_, url) => { logger.info('[AuthManager] nav:', url.slice(0, 120)); if (isAAP(url)) { done(true); return; } scheduleSettleCheck(); });
+    probe.webContents.on('did-navigate-in-page', (_, url) => { if (isAAP(url)) done(true); else scheduleSettleCheck(); });
     probe.webContents.on('did-finish-load', async () => {
       const url = probe.webContents.getURL();
-      logger.info('[AuthManager] Probe landed:', url);
-      if (isSSO(url)) { done(false); return; }
-      if (isAAP(url)) { done(true);  return; }
-      await new Promise(r => setTimeout(r, 1500));
-      done(isAAP(probe.webContents.getURL()));
+      logger.info('[AuthManager] Probe landed:', url.slice(0, 120));
+      if (isAAP(url)) { done(true); return; }
+      // On an SSO URL: could be mid-handshake (will redirect onward) or a
+      // terminal wall. Don't decide yet — let the settle timer arbitrate.
+      scheduleSettleCheck();
     });
     probe.webContents.on('did-fail-load', (_, code, desc) => {
       if (code === -3) return;

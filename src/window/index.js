@@ -982,13 +982,29 @@ function initWindows(ctx) {
         _runAAPScrapeLoop(mainWindow, {
           label: 'startup', maxPolls: 18,
           onComplete: (rows) => {
+            // Sanity guard: don't let an empty/degraded startup scrape (auth
+            // blip, AAP error page) overwrite good cached fleet data and blank
+            // the table. Same <50% threshold as the rescan. If we already have
+            // usable cached rows and this scrape came back drastically smaller,
+            // keep the cache and just show the app.
+            try {
+              const _cs = require('../store');
+              const _existing = _cs.load('fleetData', {});
+              const _existingCount = (_existing.rows || []).length;
+              if (rows.length === 0 || (_existingCount > 10 && rows.length < _existingCount * 0.5)) {
+                logger.warn('Startup scrape: got ' + rows.length + ' rows but cache has ' + _existingCount +
+                  ' \u2014 keeping cached data (likely auth/error page), not overwriting');
+                switchToApp();
+                return;
+              }
+            } catch (_) {}
             const payload = _saveAAPCaches(rows);
             logger.info('Startup scrape: saved ' + rows.length + ' units');
             pushData(payload);
             switchToApp();
           },
           onTimeout: () => {
-            logger.warn('Startup scrape timed out \u2014 switching to app with empty cache');
+            logger.warn('Startup scrape timed out \u2014 switching to app with cached data');
             switchToApp();
           },
         });
