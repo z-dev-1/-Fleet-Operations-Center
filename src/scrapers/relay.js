@@ -1441,6 +1441,14 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       asistLabel:          r.asistLabel          || row.asistLabel          || '',
       asistSrUrl:          r.asistSrUrl          || row.asistSrUrl          || '',
       asistScrapedAt:      r.asistScrapedAt      || row.asistScrapedAt      || '',
+      // BUG FIX (2026-08-24): asistNotes (the 8000-char offsite Decisiv/ASIST page
+      // text captured by Phase 3.6) was scraped and stored in relay_cache.json but
+      // NEVER carried through this merge, so it arrived at the deep-scan AI as empty.
+      // That left units whose ONLY substantive update lives on the offsite dealer
+      // page (e.g. 39546: RENTAL WR with no Relay comments but a full Volvo ASIST
+      // estimate) with a thin '[no activity logged]' timeline. Now propagated so the
+      // timeline builder always sees the offsite diagnosis/estimate notes.
+      asistNotes:          r.asistNotes          || row.asistNotes          || '',
       dealerName:          r.dealerName          || row.dealerName          || '',
       subVendor:           r.dealerName || row.dealerName || r.geofence || row.geofence || '',
 

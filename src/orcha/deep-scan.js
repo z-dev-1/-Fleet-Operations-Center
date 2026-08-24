@@ -356,7 +356,18 @@ async function _processUnit(u, notesStore, askOrcha) {
   // Offsite enrichment: if unit has a Decisiv URL, scrape vendor notes
   let offsiteText = '';
   const offsiteUrl = u.offsiteShopEventUrl || u.asistSrUrl || '';
-  if (offsiteUrl && /decisiv\.net/i.test(offsiteUrl)) {
+  // PRIMARY source: the offsite page text already captured by relay.js Phase 3.6
+  // (stored as asistNotes, ~8000ch). Prefer it — it's already on the row, so we
+  // avoid a slow, failure-prone live re-scrape during the deep-scan. This is what
+  // gives units whose only real update lives on the offsite dealer page (e.g.
+  // 39546: RENTAL WR, no Relay comments, full Volvo ASIST estimate) a substantive
+  // timeline instead of '[no activity logged]'.
+  if (u.asistNotes && u.asistNotes.trim().length > 50) {
+    offsiteText = u.asistNotes.substring(0, 3000);
+    logger.info('[DS] Offsite text from cached asistNotes for ' + u.equipmentId + ' | ' + offsiteText.length + 'ch');
+  }
+  // FALLBACK: only re-scrape live if we have a Decisiv URL but no cached text yet.
+  if (!offsiteText && offsiteUrl && /decisiv\.net/i.test(offsiteUrl)) {
     try {
       const { enrichVolvoAsist } = require('../scrapers/asist_enrich');
       const enrichResult = await enrichVolvoAsist(offsiteUrl);
@@ -366,7 +377,7 @@ async function _processUnit(u, notesStore, askOrcha) {
         u.asistSource = enrichResult.source;
         u.asistLabel = enrichResult.bestLabel;
         u.asistSrUrl = enrichResult.bestUrl || offsiteUrl;
-        logger.info('[DS] Offsite enriched for ' + u.equipmentId + ' | ' + enrichResult.source + ' | ' + offsiteText.length + 'ch');
+        logger.info('[DS] Offsite enriched (live) for ' + u.equipmentId + ' | ' + enrichResult.source + ' | ' + offsiteText.length + 'ch');
       }
     } catch (e) {
       logger.warn('[DS] Offsite enrich failed for ' + u.equipmentId + ': ' + e.message);
