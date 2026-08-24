@@ -149,9 +149,27 @@ async function runOrchaDeepScan(mergedRows, opts) {
 
       if (isChanged) notesStore[val.equipmentId] = ns;
     }
+
+    // Persist INCREMENTALLY after each group of 5 (not only at end of batch).
+    // Each unit's timeline is independent, so there's no reason a finished
+    // unit's result should wait on the rest of the batch. The deep-scan AI
+    // queue can stall on a slow Orcha backend (observed 2026-08-24: batch hung
+    // at unit 9/32 for 10+ min); a save-only-at-end design would lose every
+    // already-computed timeline in that stall. Saving per-group means results
+    // reach disk (and the UI on next push) as soon as they're generated.
+    try {
+      store.save('notesStore', notesStore);
+      if (pushData && typeof pushData === 'function') {
+        pushData({ ...payload, rows: mergedRows, _partial: 'deep-scan' });
+      }
+      logger.info('[DS] Incremental save after ' + Math.min(i + 5, unitsToProcess.length) + '/' + unitsToProcess.length + ' units');
+    } catch (e) {
+      logger.warn('[DS] Incremental save failed: ' + e.message);
+    }
   }
 
-  // Always save notesStore (timelines + issueSummary + status)
+  // Final save (idempotent — captures any last-group changes and downstream
+  // notification-flag writes below).
   store.save('notesStore', notesStore);
 
   // ── Repair-complete detection ─────────────────────────────────────────────
