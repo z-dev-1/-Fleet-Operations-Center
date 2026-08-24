@@ -17,6 +17,14 @@ const store  = require('../store');
 
 const UNIT_TIMEOUT_MS = 180000;
 
+// Deep-scan batch size. MUST match the claude-code worker pool (WORKER_POOL_SIZE=3
+// in relay.js). Processing 5 units in parallel while only 3 claude workers exist
+// meant 5 AI calls fought over 3 workers every batch — the extra 2 queued, and the
+// churn (kill-after-job + respawn) showed up as the 'stale process exited' spam and
+// stalled progress. Matching the pool size lets each unit get a worker immediately
+// with no contention. (2026-08-24)
+const DS_BATCH_SIZE = 3;
+
 // Post-processing: strip dollar amounts AI may have included despite instructions
 function _stripCosts(text) {
   if (!text) return text;
@@ -83,8 +91,8 @@ async function runOrchaDeepScan(mergedRows, opts) {
   // earlier one in notesStore. Advancing by 5 (matching the slice window)
   // restores the non-overlapping batching the comment above intends.
   const allResults = []; // collect all settled results across batches for post-scan detection
-  for (let i = 0; i < unitsToProcess.length; i += 5) {
-    const batch   = unitsToProcess.slice(i, i + 5);
+  for (let i = 0; i < unitsToProcess.length; i += DS_BATCH_SIZE) {
+    const batch   = unitsToProcess.slice(i, i + DS_BATCH_SIZE);
     const results = await Promise.allSettled(
       batch.map(u => _processUnit(u, notesStore, askOrcha))
     );
@@ -204,7 +212,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
       if (pushData && typeof pushData === 'function') {
         pushData({ ...payload, rows: mergedRows, _partial: 'deep-scan' });
       }
-      logger.info('[DS] Incremental save after ' + Math.min(i + 5, unitsToProcess.length) + '/' + unitsToProcess.length + ' units');
+      logger.info('[DS] Incremental save after ' + Math.min(i + DS_BATCH_SIZE, unitsToProcess.length) + '/' + unitsToProcess.length + ' units');
     } catch (e) {
       logger.warn('[DS] Incremental save failed: ' + e.message);
     }

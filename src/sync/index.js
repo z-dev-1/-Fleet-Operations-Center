@@ -90,9 +90,22 @@ function _saveUptakeHash(h) { store.save('uptakeHash', h); }
 // ---------------------------------------------------------------------------
 function createSyncEngine(ctx) {
 
+  // Deep-scan runs asynchronously AFTER the scrape phase sets isSyncing=false, so
+  // the isSyncing guard alone does NOT prevent the next sync cycle (5-min timer)
+  // from starting a SECOND deep-scan while the first is still running. Observed
+  // live: two concurrent deep-scans each spawning AI calls, competing for the
+  // 3-worker claude-code pool and stalling everything. This flag serializes deep
+  // scans: a new sync is skipped while a deep-scan from a prior cycle is active.
+  let _deepScanInProgress = false;
+
   async function runFullSync() {
     if (ctx.isSyncing) {
       ctx.pushStatus('Sync already in progress...');
+      return;
+    }
+    if (_deepScanInProgress) {
+      logger.info('Skipping sync — deep scan from previous cycle still running');
+      ctx.pushStatus('Orcha deep scan still running — skipping this sync cycle');
       return;
     }
     ctx.isSyncing = true;
@@ -408,13 +421,18 @@ function createSyncEngine(ctx) {
       logger.info(`Sync complete: ${mergedRows.length} units, ${uptakeCount} Uptake, ${relayCount} Relay`);
 
       // ── Orcha Deep Scan — non-blocking, non-fatal ────────────────────────
+      // Guarded by _deepScanInProgress so the next sync cycle won't launch a
+      // second, competing deep-scan while this one is still running.
+      _deepScanInProgress = true;
       setTimeout(() => { runOrchaDeepScan(mergedRows, {
         pushData:        ctx.pushData,
         pushStatus:      ctx.pushStatus,
         payload,
         uptakeCount,
         relayCount,
-      }).catch(e => logger.error('Orcha Deep Scan error (non-fatal):', e.message)); }, 15000); // Wait 15s for relay extraction to finish
+      })
+        .catch(e => logger.error('Orcha Deep Scan error (non-fatal):', e.message))
+        .finally(() => { _deepScanInProgress = false; }); }, 15000); // Wait 15s for relay extraction to finish
 
       // ── Bubble notifications — status-change detection ───────────────────
       const prevRows = (ctx.lastData && ctx.lastData._prevRows) || [];
