@@ -101,15 +101,25 @@ async function runOrchaDeepScan(mergedRows, opts) {
       let isChanged = false;
       const ns = notesStore[val.equipmentId] || {};
 
-      // Apply results to the live row
+      // Apply results to the live row (same degraded-response guard as the
+      // notesStore save below — don't let a placeholder clobber a good row value).
+      const _isPlaceholderRow = (s) => {
+        const t = (s || '').trim().toLowerCase();
+        return !t || t === '[no activity logged]' || t.startsWith('no issue details') || t.startsWith('no activity');
+      };
       const row = mergedRows.find(x => x.equipmentId === val.equipmentId);
       if (row) {
-        if (val.summary)          { row.issueSummary = val.summary; row.issue = val.summary; }
+        if (val.summary && (!_isPlaceholderRow(val.summary) || _isPlaceholderRow(row.issueSummary))) {
+          row.issueSummary = val.summary; row.issue = val.summary;
+        }
         if (val.timeline) {
           // AI regenerates the timeline purely from raw vendor/WO comments -- it has no
           // awareness of previously manually-added lines. Merge them back in so a rescan
           // never silently discards user-entered timeline entries (immutable truth).
-          row.repairTimeline = _sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(_stripCosts(val.timeline), ns.manualEntries), ns.hiddenEntries));
+          const _rowTl = _sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(_stripCosts(val.timeline), ns.manualEntries), ns.hiddenEntries));
+          if (!_isPlaceholderRow(_rowTl) || _isPlaceholderRow(row.repairTimeline)) {
+            row.repairTimeline = _rowTl;
+          }
         }
         if (val.correctedNotes)     row.savedNotes = val.correctedNotes;
         if (val.repairStatus)       row.savedRepairStatus = val.repairStatus;
@@ -133,18 +143,50 @@ async function runOrchaDeepScan(mergedRows, opts) {
       // Save timeline + issueSummary to notesStore
       // Merge AI-regenerated timeline with prior manual entries so a rescan never
       // silently drops user-entered lines (immutable truth).
-      if (val.timeline) { ns.timeline = _sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(val.timeline, ns.manualEntries), ns.hiddenEntries)); isChanged = true; }
-
-      if (val.summary) { ns.issueSummary = val.summary; isChanged = true; }
-
-      // Only set repairStatus/primaryComponent if not already saved by user
-      if (val.repairStatus && !ns.repairStatus) {
-        ns.repairStatus = val.repairStatus;
-        isChanged = true;
+      //
+      // QUALITY GUARD (2026-08-24): a DEGRADED AI response (empty timeline, or the
+      // "[no activity logged]" / "No issue details available" placeholders) must NOT
+      // overwrite a previously SUBSTANTIVE stored timeline/summary. Observed live:
+      // unit 39546 had a good "Halo system hose / Parts ordered" timeline (1575ch)
+      // that a later 195-char degraded scan replaced with "No issue details
+      // available." That is the real "bad data replacing good data" the user saw.
+      // If the AI genuinely has nothing this cycle, keep the last good value.
+      const _isPlaceholder = (s) => {
+        const t = (s || '').trim().toLowerCase();
+        return !t || t === '[no activity logged]' || t.startsWith('no issue details') || t.startsWith('no activity');
+      };
+      const _prevTl = ns.timeline || '';
+      if (val.timeline) {
+        const _merged = _sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(val.timeline, ns.manualEntries), ns.hiddenEntries));
+        // Only accept the new timeline if it is NOT a placeholder, OR the stored
+        // one is already empty/placeholder too (nothing better to protect).
+        if (!_isPlaceholder(_merged) || _isPlaceholder(_prevTl)) {
+          ns.timeline = _merged;
+          isChanged = true;
+        } else {
+          logger.info('[DS] ' + val.equipmentId + ' — keeping prior substantive timeline; new AI result was a placeholder ("' + _merged.slice(0, 40) + '")');
+        }
       }
-      if (val.primaryComponent && !ns.primaryComponent) {
-        ns.primaryComponent = val.primaryComponent;
-        isChanged = true;
+
+      if (val.summary) {
+        // Same guard for issueSummary: don't let "No issue details available" clobber a real one.
+        if (!_isPlaceholder(val.summary) || _isPlaceholder(ns.issueSummary)) {
+          ns.issueSummary = val.summary;
+          isChanged = true;
+        }
+      }
+
+      // repairStatus/primaryComponent: allow a FRESH AI value to update a prior
+      // AI value, but never override one the USER explicitly set. Prior code used
+      // `!ns.repairStatus` which blocked ALL updates once any value existed —
+      // meaning a stale AI status could never be refreshed. Track user-set via
+      // _userSetRepairStatus/_userSetPrimaryComponent flags (set elsewhere when
+      // the user edits); absent the flag, a stored value is AI-owned and updatable.
+      if (val.repairStatus && !ns._userSetRepairStatus) {
+        if (ns.repairStatus !== val.repairStatus) { ns.repairStatus = val.repairStatus; isChanged = true; }
+      }
+      if (val.primaryComponent && !ns._userSetPrimaryComponent) {
+        if (ns.primaryComponent !== val.primaryComponent) { ns.primaryComponent = val.primaryComponent; isChanged = true; }
       }
 
       if (isChanged) notesStore[val.equipmentId] = ns;
