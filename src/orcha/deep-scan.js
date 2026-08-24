@@ -431,6 +431,14 @@ async function _processUnit(u, notesStore, askOrcha) {
     '   - NEVER invent or fabricate. Only write what is supported by actual comment text.\n' +
     '   - If a comment is unclear, extract only what is factually stated.\n' +
     '   - Include the MOST RECENT comments — they are the most important for current status.\n\n' +
+    '7b. NO VENDOR COMMENTS YET (important):\n' +
+    '   - If the conversation feed is empty or has no substantive comments, DO NOT output "[no activity logged]".\n' +
+    '   - Instead build a baseline timeline from the known work-order facts provided above\n' +
+    '     (WO Created date, current State/Status, vendor, and the work type/issue). Example:\n' +
+    '       "MM/DD - Work order created with [vendor] for [work type]. [Current state]."\n' +
+    '     then a gap-range line up to today if the created date is older, e.g. "MM/DD-MM/DD - Awaiting vendor update."\n' +
+    '   - Use ONLY the WO facts given — do not invent comments or repair steps that were never stated.\n' +
+    '   - Only fall back to "[no activity logged]" when there is NO WO created date AND no status at all.\n\n' +
     ((plannedConv || hasSecondary) ?
       '8. MULTIPLE ACTIVE WORK ORDERS:\n' +
       '   This unit has MORE THAN ONE open work order (the primary Unplanned WR conversation above' +
@@ -449,6 +457,7 @@ async function _processUnit(u, notesStore, askOrcha) {
     'Lifecycle: ' + (u.lifecycleState || '--') + ' / ' + (u.lifecycleReason || '--') + '\n' +
     'Current Status: ' + (repairStatus || 'unknown') + ' | Component: ' + (primaryComponent || 'unknown') + '\n' +
     'WO Created: ' + (u.created || '--') + '\n' +
+    (u.serviceState ? 'WO State: ' + u.serviceState + '\n' : '') +
     (u.issueDetails ? 'Issue: ' + u.issueDetails.substring(0, 300) + '\n' : '') +
     '\nRELAY GARAGE CONVERSATION (Unplanned WR):\n' +
     (fullConv || '(no conversation)') + '\n\n' +
