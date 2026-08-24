@@ -1112,6 +1112,33 @@ function initWindows(ctx) {
           mainWindow.webContents.openDevTools({ mode: 'detach' });
         }
       }
+      // F5 — refresh the UI from the latest cached fleet data (instant, no scrape).
+      // Re-pushes the freshest merged fleetData so every view (and the open unit
+      // detail panel, via its fleet:data listener) re-renders with current data.
+      // This is the fast fix for the propagation-lag cases where a unit's WR/
+      // timeline resolved on a recent cycle but the on-screen view was rendered
+      // before it landed. Shift+F5 forces a full re-sync (scrape) instead.
+      if (input.key === 'F5' && input.type === 'keyDown') {
+        try {
+          if (input.shift) {
+            logger.info('[shortcut] Shift+F5 — forcing full re-sync');
+            pushStatus('\uD83D\uDD04 Refreshing (full sync)...');
+            ipcMain.emit('aap:rescan', null, { force: true });
+            if (runFullSync) { try { runFullSync(); } catch (_) {} }
+          } else {
+            const cached = store.load('fleetData', null);
+            if (cached && cached.rows) {
+              logger.info('[shortcut] F5 — re-pushing cached fleet data (' + cached.rows.length + ' rows)');
+              pushData(cached);
+              pushStatus('\u2705 Refreshed \u2014 ' + cached.rows.length + ' units');
+            } else {
+              logger.info('[shortcut] F5 — no cached data to refresh');
+            }
+          }
+        } catch (e) {
+          logger.warn('[shortcut] F5 refresh failed: ' + e.message);
+        }
+      }
     });
 
     mainWindow.on('close', e => {
