@@ -2326,6 +2326,48 @@ export function init(container) {
   bus.on('ui:unit-deselect', () => {
     if (_panel) _panel.classList.remove('detail-panel--open');
   });
+
+  // Live WR refresh: the detail panel renders ONCE from the unit object captured
+  // at ui:unit-select time. If the panel is opened BEFORE Relay resolves that
+  // unit's work-request data (common — the panel opens instantly, Relay finishes
+  // seconds/minutes later), the WR card renders "No Relay WR data" and used to
+  // stay stuck there forever, because only the timeline live-refreshed
+  // (onNotesUpdated) — the WR card never did. Fix: when fresh fleet:data arrives,
+  // if THIS unit's row now has WR data it didn't before, re-render the panel
+  // (preserving the active tab so the user isn't yanked off their current view).
+  bus.on('fleet:data', (data) => {
+    if (!_panel || !_unit) return;
+    if (!_panel.classList.contains('detail-panel--open')) return;
+    const rows = (data && data.rows) || [];
+    const fresh = rows.find(r => r.equipmentId === _unit.equipmentId);
+    if (!fresh) return;
+
+    // Did WR data materially change? (empty -> populated, or vendor/state/UUID changed)
+    const wrKey = (u) => [
+      u.relaySynced ? 1 : 0, u.vendor || '', u.serviceState || '',
+      u.issueDetails || '', u._serviceUUID || '', u.offsiteShopEventUrl || '',
+      u.repairTimeline || '',
+    ].join('|');
+    if (wrKey(fresh) === wrKey(_unit)) return; // nothing relevant changed — leave the panel alone
+
+    // Preserve which tab the user is on so a background refresh doesn't reset it.
+    const activeTab = (_panel.querySelector('.dp-tab.active') || {}).dataset
+      ? _panel.querySelector('.dp-tab.active').dataset.tab
+      : null;
+
+    _renderUnit(fresh);
+
+    if (activeTab) {
+      const btn = _panel.querySelector('.dp-tab[data-tab="' + activeTab + '"]');
+      const pane = document.getElementById('dp-pane-' + activeTab);
+      if (btn && pane) {
+        _panel.querySelectorAll('.dp-tab').forEach(t => t.classList.remove('active'));
+        _panel.querySelectorAll('.dp-pane').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        pane.classList.add('active');
+      }
+    }
+  });
 }
 
 
