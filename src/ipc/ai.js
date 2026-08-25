@@ -303,7 +303,7 @@ async function processOrchaAction(userMsg, opts = {}) {
 
     
     const d = new Date(); const dateStr = String(d.getMonth()+1).padStart(2,'0')+'/'+String(d.getDate()).padStart(2,'0'); const timeStr = String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
-    const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human — warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- If a DETAILED FLEET REPORT is provided below, that is your full and only source of truth for that site/operator/unit -- it has every unit status, vendor, down time, ETC/PM, issue details and full repair timeline/notes, plus the uptake rate (% available), AND -- separately -- any Uptake (fleet.uptake.com) predictive-maintenance risk score/label and full insight details (title, subsystem, guidance, active/resolved, first/last seen) under an UPTAKE INSIGHTS section for units that have been scraped by that third-party telematics tool. Uptake rate and Uptake insights are two different things -- do not conflate them, report both when present. Use ALL of it when relevant to what was asked: whether the user is asking a question (summarize thoroughly -- status, vendor, timeline, issue, uptake rate, uptake risk/insights) or sending it to someone (the system attaches the whole report; your job is just the intro line). Same data either way -- only the framing changes.\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nCRITICAL — SEND vs ASK:\n- "send update/report/data/notes to [person] for [site]" = YOU are DELIVERING fleet info TO them.\n  Write the message as the person SENDING the report, not asking for one.\n  Your message body is just a 1-sentence intro — the system attaches the real data automatically.\n  WRONG: "Could you provide an update on AVP40?" (that is asking them)\n  RIGHT:  "Here is the latest AVP40 fleet status and notes, as requested." (that is delivering)\n- Only generate a question/follow-up when the user explicitly says "ask", "follow up", or "check on".\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle_or_email,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable}), PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Send to whoever the user specifies. If user gives an email address or a name not in KNOWN SLACK CONTACTS, use it directly as recipient — the system will resolve it. NEVER refuse or ask for confirmation because someone is not in the contact list. Just attempt the send.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+richContext+(siteReport?'\\n\\nDETAILED FLEET REPORT (for delivery/attachment):\\n'+siteReport:'')+notFoundNote+reminderText+memoryContext+contactList+emailContactList+'\\nUser: '+userMsg;
+    const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human — warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- If a DETAILED FLEET REPORT is provided below, that is your full and only source of truth for that site/operator/unit -- it has every unit status, vendor, down time, ETC/PM, issue details and full repair timeline/notes, plus the uptake rate (% available), AND -- separately -- any Uptake (fleet.uptake.com) predictive-maintenance risk score/label and full insight details (title, subsystem, guidance, active/resolved, first/last seen) under an UPTAKE INSIGHTS section for units that have been scraped by that third-party telematics tool. Uptake rate and Uptake insights are two different things -- do not conflate them, report both when present. Use ALL of it when relevant to what was asked: whether the user is asking a question (summarize thoroughly -- status, vendor, timeline, issue, uptake rate, uptake risk/insights) or sending it to someone (the system attaches the whole report; your job is just the intro line). Same data either way -- only the framing changes.\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nCRITICAL — SEND vs ASK:\n- "send update/report/data/notes to [person] for [site]" = YOU are DELIVERING fleet info TO them.\n  Write the message as the person SENDING the report, not asking for one.\n  Your message body is just a 1-sentence intro — the system attaches the real data automatically.\n  WRONG: "Could you provide an update on AVP40?" (that is asking them)\n  RIGHT:  "Here is the latest AVP40 fleet status and notes, as requested." (that is delivering)\n- Only generate a question/follow-up when the user explicitly says "ask", "follow up", or "check on".\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle_or_email,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable,reason:text}) — changes the unit REAL lifecycle in AAP (available=Active, unavailable=Unavailable); reason optional, defaults to Healthy for Active; user confirms before it commits, PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Send to whoever the user specifies. If user gives an email address or a name not in KNOWN SLACK CONTACTS, use it directly as recipient — the system will resolve it. NEVER refuse or ask for confirmation because someone is not in the contact list. Just attempt the send.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+richContext+(siteReport?'\\n\\nDETAILED FLEET REPORT (for delivery/attachment):\\n'+siteReport:'')+notFoundNote+reminderText+memoryContext+contactList+emailContactList+'\\nUser: '+userMsg;
     try {
       logger.info('[ai:orcha-action] Calling relay.ask (' + prompt.length + ' chars)...');
       const aiText = await relay.ask(prompt, { signal: opts.signal, requestId: opts.requestId });
@@ -498,11 +498,31 @@ async function processOrchaAction(userMsg, opts = {}) {
           }
         }
         if (a.type==='MOVE_UNIT'&&a.unit&&a.status) {
+          // MOVE_UNIT performs the REAL AAP lifecycle change (via setLifecycle),
+          // not just a local display update. Route through pendingConfirm so a
+          // conversational request ("make unit X available") requires an explicit
+          // confirm click before mutating AAP — same safety gate as Slack/email.
           const fd2 = store.load('fleetData', {});
           const target = (fd2.rows||[]).find(function(r){return r.equipmentId===a.unit;});
-          if (target) { target.lifecycleState = a.status === 'available' ? 'Available' : 'Unavailable'; store.save('fleetData', fd2); }
-          try { const _w = require('electron').BrowserWindow.getAllWindows()[0]; if(_w) _w.webContents.send('fleet:refresh'); } catch(e){}
-          results.push('Unit ' + a.unit + ' moved to ' + a.status);
+          if (!target) {
+            results.push('Cannot change lifecycle: unit ' + a.unit + ' not found in fleet data — sync first.');
+          } else if (!target.assetUrl) {
+            results.push('Cannot change lifecycle for ' + a.unit + ': no AAP asset URL (re-sync the app, then retry).');
+          } else {
+            const _state  = a.status === 'available' ? 'Active' : 'Unavailable';
+            const _reason = (a.reason && String(a.reason).trim())
+              ? String(a.reason).trim()
+              : (_state === 'Active' ? 'Healthy' : '');
+            pendingConfirm.push({
+              id: 'pc' + Date.now() + Math.random().toString(36).slice(2, 6),
+              channel: 'lifecycle',
+              recipientName: a.unit + ' \u2192 ' + _state + (_reason ? ' (' + _reason + ')' : ''),
+              equipmentId: target.equipmentId,
+              assetUrl: target.assetUrl,
+              state: _state,
+              reason: _reason,
+            });
+          }
         }
         if (a.type==='PIN'&&a.unit) {
           const pins = store.load('pins', []);
@@ -598,6 +618,31 @@ async function confirmSend(item) {
         if (_ew) _ew.webContents.send('email:compose', { to: item.to, subject: item.subject, body: item.body || '' });
       } catch (_) {}
       return { ok: false, error: 'SMTP failed — composer opened instead' };
+    }
+    if (item.channel === 'lifecycle') {
+      // Real AAP lifecycle mutation, gated behind the confirm click.
+      const { setLifecycleState } = require('../scrapers/setLifecycle');
+      const lr = await setLifecycleState({
+        equipmentId: item.equipmentId,
+        assetUrl:    item.assetUrl,
+        state:       item.state,
+        reason:      item.reason || '',
+      });
+      if (lr && lr.success) {
+        try {
+          const fd = store.load('fleetData', {});
+          const t = (fd.rows||[]).find(r => r.equipmentId === item.equipmentId);
+          if (t) {
+            t.lifecycleState = item.state;
+            if (item.reason) t.lifecycleReason = item.reason;
+            store.save('fleetData', fd);
+          }
+          const _w = require('electron').BrowserWindow.getAllWindows()[0];
+          if (_w) _w.webContents.send('fleet:refresh');
+        } catch (_) {}
+        return { ok: true, message: 'Unit ' + item.equipmentId + ' set to ' + item.state + (item.reason ? ' - ' + item.reason : '') + ' in AAP' };
+      }
+      return { ok: false, error: (lr && lr.message) || 'AAP did not confirm the lifecycle change' };
     }
     return { ok: false, error: 'Unknown channel: ' + item.channel };
   } catch (e) {

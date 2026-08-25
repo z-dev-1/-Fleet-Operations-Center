@@ -1727,13 +1727,15 @@ async function _send() {
         const confirmEl = document.createElement('div');
         confirmEl.id = 'oc-disambig';
         confirmEl.className = 'oc-quick-compose';
-        const icon = item.channel === 'slack' ? '\uD83D\uDCAC' : '\uD83D\uDCE7';
-        const verb = item.channel === 'slack' ? 'Slack' : 'Email';
+        const _isLc = item.channel === 'lifecycle';
+        const icon = _isLc ? '\uD83D\uDD04' : (item.channel === 'slack' ? '\uD83D\uDCAC' : '\uD83D\uDCE7');
+        const verb = _isLc ? 'change lifecycle:' : (item.channel === 'slack' ? 'Slack' : 'Email');
+        const btnLabel = _isLc ? 'Apply in AAP' : 'Send';
         const dataNote = item.isRealData ? ' <span style="font-size:10px;color:#3fb950">(real fleet report)</span>' : '';
         confirmEl.innerHTML =
           '<div style="font-size:12px;color:var(--txt2)">Ready to ' + verb + ' <strong>' + _esc(item.recipientName) + '</strong>' + dataNote + '</div>' +
           '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-            '<button class="oc-reply-btn oc-reply-btn--ai oc-confirm-send">' + icon + '\u00A0Send</button>' +
+            '<button class="oc-reply-btn oc-reply-btn--ai oc-confirm-send">' + icon + '\u00A0' + btnLabel + '</button>' +
             '<button class="oc-qc-cancel oc-confirm-cancel">\u2715 Cancel</button>' +
           '</div>';
         const tabChatEl = document.getElementById('oc-tab-chat');
