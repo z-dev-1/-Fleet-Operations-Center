@@ -513,10 +513,18 @@ async function processOrchaAction(userMsg, opts = {}) {
             const _reason = (a.reason && String(a.reason).trim())
               ? String(a.reason).trim()
               : (_state === 'Active' ? 'Healthy' : '');
+            // Open work-order awareness: if flipping to Active while an open WR
+            // exists, surface it in the confirm prompt so the user knows AAP may
+            // block it (they can still confirm to attempt — "insist").
+            const _openU = parseInt(target.openUnplanned, 10) || 0;
+            const _openP = parseInt(target.openPlanned, 10) || 0;
+            const _woNote = (_state === 'Active' && (_openU + _openP) > 0)
+              ? ' \u26a0 open WR (' + (_openU ? _openU + ' unplanned' : '') + (_openU && _openP ? ', ' : '') + (_openP ? _openP + ' planned' : '') + (target.vendor ? ' \u2014 ' + target.vendor : '') + ') \u2014 AAP may block; confirm to attempt anyway'
+              : '';
             pendingConfirm.push({
               id: 'pc' + Date.now() + Math.random().toString(36).slice(2, 6),
               channel: 'lifecycle',
-              recipientName: a.unit + ' \u2192 ' + _state + (_reason ? ' (' + _reason + ')' : ''),
+              recipientName: a.unit + ' \u2192 ' + _state + (_reason ? ' (' + _reason + ')' : '') + _woNote,
               equipmentId: target.equipmentId,
               assetUrl: target.assetUrl,
               state: _state,
