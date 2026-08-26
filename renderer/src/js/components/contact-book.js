@@ -1,5 +1,5 @@
-﻿/**
- * contact-book.js â€” Contact Book Panel (two tabs: Slack Contacts + Vendors)
+/**
+ * contact-book.js — Contact Book Panel (two tabs: Slack Contacts + Vendors)
  *
  * Vendors have addresses usable for tow destination in WR modal.
  * Slack contacts have @handles for mentions.
@@ -20,20 +20,20 @@ const _attr = (s) => _esc(s).replace(/"/g, '&quot;');
 // Operator codes from the latest fleet scan, for the per-contact data-scope picker.
 function _fleetOperators() {
   try {
-    var d = (window.fleet && typeof window.fleet.getData === "function") ? window.fleet.getData() : null;
-    var rows = (d && d.rows) || [];
-    var set = {};
-    rows.forEach(function(r){ var o = (r.operator||"").trim(); if(o) set[o.toUpperCase()] = true; });
+    const d = (window.fleet && typeof window.fleet.getData === 'function') ? window.fleet.getData() : null;
+    const rows = (d && d.rows) || [];
+    const set = {};
+    rows.forEach(function(r){ const o = (r.operator||'').trim(); if(o) set[o.toUpperCase()] = true; });
     return Object.keys(set).sort();
   } catch(e) { return []; }
 }
 // Build <option> list for the operators multi-select; marks selected ones.
 function _operatorOptions(selected) {
-  var sel = (selected || []).map(function(s){ return String(s||"").toUpperCase(); });
+  const sel = (selected || []).map(function(s){ return String(s||'').toUpperCase(); });
   return _fleetOperators().map(function(op){
-    var isSel = sel.indexOf(op) !== -1 ? " selected" : "";
-    return "<option value=\"" + _attr(op) + "\"" + isSel + ">" + _esc(op) + "</option>";
-  }).join("");
+    const isSel = sel.indexOf(op) !== -1 ? ' selected' : '';
+    return '<option value="' + _attr(op) + '"' + isSel + '>' + _esc(op) + '</option>';
+  }).join('');
 }
 
 // A vendor's rank can differ per domicile it serves (e.g. #1 at AVP40 but #2
@@ -54,7 +54,7 @@ function _parsePrefOverrides(raw) {
 
 function _vendorMakesLabel(c) {
   const makes = Array.isArray(c.makes) && c.makes.length ? c.makes : (c.make ? [c.make] : []);
-  return makes.length ? 'â€¢ ' + _esc(makes.join(', ')) : '';
+  return makes.length ? '• ' + _esc(makes.join(', ')) : '';
 }
 
 function _prefFor(c, site) {
@@ -90,9 +90,9 @@ function _render() {
 
   const tabsHtml = `
     <div class="cb-tabs">
-      <button class="cb-tab ${_tab === 'vendors' ? 'active' : ''}" data-tab="vendors">ðŸ¢ Vendors</button>
-      <button class="cb-tab ${_tab === 'domiciles' ? 'active' : ''}" data-tab="domiciles">ðŸ  Domiciles</button>
-      <button class="cb-tab ${_tab === 'slack' ? 'active' : ''}" data-tab="slack">ðŸ’¬ Slack</button>
+      <button class="cb-tab ${_tab === 'vendors' ? 'active' : ''}" data-tab="vendors">🏢 Vendors</button>
+      <button class="cb-tab ${_tab === 'domiciles' ? 'active' : ''}" data-tab="domiciles">🏠 Domiciles</button>
+      <button class="cb-tab ${_tab === 'slack' ? 'active' : ''}" data-tab="slack">💬 Slack</button>
     </div>`;
 
   let listHtml = '';
@@ -104,16 +104,16 @@ function _render() {
           <div class="cb-card-company">${_esc(c.company || '')} ${_vendorMakesLabel(c)}</div>
         </div>
         <div class="cb-card-addr">${_esc(c.street || '')}${c.city ? ', ' + _esc(c.city) : ''} ${_esc(c.state || '')} ${_esc(c.zip || '')}</div>
-        ${c.domiciles && c.domiciles.length ? '<div class="cb-card-meta" style="color:#58a6ff;">ðŸ“ ' + c.domiciles.join(', ') + '</div>' : ''}
-        ${c.phone ? '<div class="cb-card-meta">ðŸ“ž ' + _esc(c.phone) + '</div>' : ''}
-        ${c.email ? '<div class="cb-card-meta">ðŸ“§ ' + _esc(c.email) + '</div>' : ''}
+        ${c.domiciles && c.domiciles.length ? '<div class="cb-card-meta" style="color:#58a6ff;">📍 ' + c.domiciles.join(', ') + '</div>' : ''}
+        ${c.phone ? '<div class="cb-card-meta">📞 ' + _esc(c.phone) + '</div>' : ''}
+        ${c.email ? '<div class="cb-card-meta">📧 ' + _esc(c.email) + '</div>' : ''}
         <div class="cb-card-actions">
-          <button class="cb-btn cb-btn--use" data-action="use-address" data-id="${c.id}">ðŸ“ Use for Tow</button>
-          ${c.email ? `<button class="cb-btn cb-btn--use" data-action="email-contact" data-id="${c.id}">ðŸ“§ Email</button>` : ''}
-          <button class="cb-btn cb-btn--use" data-action="edit" data-id="${c.id}">âœï¸ Edit</button>
-          <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">âœ•</button>
+          <button class="cb-btn cb-btn--use" data-action="use-address" data-id="${c.id}">📍 Use for Tow</button>
+          ${c.email ? `<button class="cb-btn cb-btn--use" data-action="email-contact" data-id="${c.id}">📧 Email</button>` : ''}
+          <button class="cb-btn cb-btn--use" data-action="edit" data-id="${c.id}">✏️ Edit</button>
+          <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">✕</button>
         </div>
-      </div>`).join('') : '<div class="cb-empty">No vendors yet â€” add one below</div>';
+      </div>`).join('') : '<div class="cb-empty">No vendors yet — add one below</div>';
 
     listHtml += `
       <div class="cb-add-form">
@@ -140,7 +140,7 @@ function _render() {
   } else if (_tab === 'domiciles') {
     const domiciles = _contacts.filter(c => c.type === 'domicile');
     
-    listHtml = '<div class="cb-add-form" style="margin-bottom:8px;border-color:rgba(88,166,255,0.2);"><div class="cb-add-title">iï¸ Domiciles from Settings â†’ Integrations</div><div style="font-size:9px;color:#8b949e;margin-bottom:6px;">Add addresses here so AI and Tow events can use them.</div></div>';
+    listHtml = '<div class="cb-add-form" style="margin-bottom:8px;border-color:rgba(88,166,255,0.2);"><div class="cb-add-title">i️ Domiciles from Settings → Integrations</div><div style="font-size:9px;color:#8b949e;margin-bottom:6px;">Add addresses here so AI and Tow events can use them.</div></div>';
     
     listHtml += domiciles.length ? domiciles.map((c, i) => `
       <div class="cb-card" data-id="${c.id}">
@@ -150,7 +150,7 @@ function _render() {
         </div>
         <div class="cb-card-addr">${_esc(c.street || '')}${c.city ? ', ' + _esc(c.city) : ''} ${_esc(c.state || '')} ${_esc(c.zip || '')}</div>
         <div class="cb-card-actions">
-          <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">âœ•</button>
+          <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">✕</button>
         </div>
       </div>`).join('') : '';
 
@@ -173,16 +173,16 @@ function _render() {
           <div class="cb-card-name">${_esc(c.name)}</div>
           <div class="cb-card-company">${_esc(c.company || c.role || '')}</div>
         </div>
-        <div class="cb-card-meta">${_esc(c.slackId || '')} ${c.phone ? 'â€¢ ' + _esc(c.phone) : ''}</div>
-        ${(Array.isArray(c.operators) && c.operators.length) ? '<div class="cb-card-meta" style="color:#3fb950">\uD83D\uDD12 ' + _esc(c.operators.join(', ')) + ' only</div>' : ''}
-        ${c.email ? '<div class="cb-card-meta">ðŸ“§ ' + _esc(c.email) + '</div>' : ''}
+        <div class="cb-card-meta">${_esc(c.slackId || '')} ${c.phone ? '• ' + _esc(c.phone) : ''}</div>
+        ${(Array.isArray(c.operators) && c.operators.length) ? '<div class="cb-card-meta" style="color:#3fb950">🔒 ' + _esc(c.operators.join(', ')) + ' only</div>' : ''}
+        ${c.email ? '<div class="cb-card-meta">📧 ' + _esc(c.email) + '</div>' : ''}
         <div class="cb-card-actions">
-          <button class="cb-btn cb-btn--use" data-action="slack-msg" data-id="${c.id}">ðŸ’¬ Message</button>
-          ${c.email ? `<button class="cb-btn cb-btn--use" data-action="email-contact" data-id="${c.id}">ðŸ“§ Email</button>` : ''}
-          <button class="cb-btn cb-btn--use" data-action="edit" data-id="${c.id}">âœï¸</button>
-          <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">âœ•</button>
+          <button class="cb-btn cb-btn--use" data-action="slack-msg" data-id="${c.id}">💬 Message</button>
+          ${c.email ? `<button class="cb-btn cb-btn--use" data-action="email-contact" data-id="${c.id}">📧 Email</button>` : ''}
+          <button class="cb-btn cb-btn--use" data-action="edit" data-id="${c.id}">✏️</button>
+          <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">✕</button>
         </div>
-      </div>`).join('') : '<div class="cb-empty">No Slack contacts yet â€” add one below</div>';
+      </div>`).join('') : '<div class="cb-empty">No Slack contacts yet — add one below</div>';
 
     listHtml += `
       <div class="cb-add-form">
@@ -192,7 +192,7 @@ function _render() {
         <div class="cb-slack-confirm" id="cb-slack-confirm" style="display:none"></div>
         <input class="cb-input" id="cb-s-slack" placeholder="@slack-handle (auto-filled from search)" />
         <input class="cb-input" id="cb-s-company" placeholder="Company / Team" />
-        <div class="cb-field-label" style="font-size:9px;color:#8b949e;margin-top:6px;">Operators (data scope) &mdash; leave empty to share full fleet</div>
+        <div style="font-size:9px;color:#8b949e;margin-top:6px;">Operators (data scope) &mdash; leave empty to share full fleet</div>
         <select class="cb-input" id="cb-s-operators" multiple size="4" style="height:auto;">${_operatorOptions([])}</select>
         <input class="cb-input" id="cb-s-email" placeholder="Email (optional)" />
         <input class="cb-input" id="cb-s-phone" placeholder="Phone (optional)" />
@@ -203,13 +203,13 @@ function _render() {
   _el.querySelector('.cb-body').innerHTML = tabsHtml + '<div class="cb-list">' + listHtml + '</div>';
 }
 
-// â”€â”€ Slack live-search (add-contact form) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Slack live-search (add-contact form) ─────────────────────────────────────
 async function _searchSlackContacts(query) {
   const resultsEl = document.getElementById('cb-slack-results');
   if (!resultsEl) return;
   if (!query || query.length < 2) { resultsEl.innerHTML = ''; return; }
   if (!window.slack) { resultsEl.innerHTML = ''; return; }
-  resultsEl.innerHTML = '<div class="cb-slack-searching">Searchingâ€¦</div>';
+  resultsEl.innerHTML = '<div class="cb-slack-searching">Searching…</div>';
   try {
     const results = await window.slack.searchDirectory({ query, limit: 6 });
     const people = (results || []).filter(r => r.type === 'user');
@@ -218,7 +218,7 @@ async function _searchSlackContacts(query) {
       '<div class="cb-slack-result-item" data-id="' + _esc(p.id) + '" data-name="' + _esc(p.name) + '">' + _esc(p.name) + '</div>'
     ).join('');
   } catch (_) {
-    resultsEl.innerHTML = ''; // Slack not connected â€” manual entry still works
+    resultsEl.innerHTML = ''; // Slack not connected — manual entry still works
   }
 }
 
@@ -233,8 +233,8 @@ function _pickSlackPerson(id, name) {
   const confirmEl = document.getElementById('cb-slack-confirm');
   if (confirmEl) {
     confirmEl.innerHTML =
-      '<span>âœ“ Found in Slack: <strong>' + _esc(name) + '</strong></span>' +
-      '<button class="cb-slack-clear-btn" id="cb-slack-clear">Ã—</button>';
+      '<span>✓ Found in Slack: <strong>' + _esc(name) + '</strong></span>' +
+      '<button class="cb-slack-clear-btn" id="cb-slack-clear">×</button>';
     confirmEl.style.display = 'flex';
   }
   // Store immediately; resolve DM channelId in background
@@ -412,8 +412,8 @@ export function init() {
   _el.className = 'cb-panel';
   _el.innerHTML = `
     <div class="cb-header">
-      <span class="cb-header-title">ðŸ“‡ Contact Book</span>
-      <button class="cb-close" id="cb-close">âœ•</button>
+      <span class="cb-header-title">📇 Contact Book</span>
+      <button class="cb-close" id="cb-close">✕</button>
     </div>
     <div class="cb-body"></div>
   `;

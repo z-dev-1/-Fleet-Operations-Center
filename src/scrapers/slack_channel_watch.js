@@ -1,6 +1,6 @@
-﻿'use strict';
+'use strict';
 /**
- * slack_channel_watch.js â€” Partner Auto-Reply engine (2026-07-21)
+ * slack_channel_watch.js — Partner Auto-Reply engine (2026-07-21)
  *
  * Watches a configured list of Slack channels (default: the 4 Slack
  * Connect channels shared with external partner orgs the user specified),
@@ -10,8 +10,8 @@
  *   2. ALWAYS posts a professional threaded reply back -- either the real
  *      answer (in scope) or a warm holding reply (out of scope). Partners
  *      never see silence.
- *   3. If out of scope, ALSO logs a review-queue entry (ðŸš¨ Alert / ðŸ’¡ Action
- *      / ðŸ“ Workflow) for a human to review in the Orcha floater's Review
+ *   3. If out of scope, ALSO logs a review-queue entry (🚨 Alert / 💡 Action
+ *      / 📍 Workflow) for a human to review in the Orcha floater's Review
  *      tab -- in addition to, not instead of, the in-channel reply.
  *
  * SAFETY: see the design-note comment in slack-partner-persona.js for the
@@ -53,7 +53,7 @@ const MAX_LOG_ENTRIES       = 500; // persisted reply log cap
 // silently updated the wrong entry instead of the one actually clicked.
 let _pollLock = false;
 
-// Default watch list â€” the 4 channels confirmed live and specified by the
+// Default watch list — the 4 channels confirmed live and specified by the
 // user. Stored so they can be toggled off individually without code
 // changes; new channels can be added the same way via the config store.
 const DEFAULT_CHANNELS = [
@@ -226,7 +226,7 @@ async function _isDirectedAtMe(messageText, myName, askOrcha) {
   }
 }
 
-// â”€â”€ Thread-mention tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Thread-mention tracking ─────────────────────────────────────────────
 // FEATURE (2026-07-24): when a message @-mentions the signed-in user, the
 // thread it belongs to (or starts) is recorded persistently so that any
 // future reply in that same thread triggers a mandatory response even when
@@ -251,7 +251,7 @@ function _isInMentionThread(channelId, threadTs) {
   return !!(all[channelId] && all[channelId].includes(threadTs));
 }
 
-// â”€â”€ AI classify + draft â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── AI classify + draft ──────────────────────────────────────────────────
 async function _classifyAndDraft(messageText, askOrcha, allowedOperators) {
   // Inject local time so the AI uses the correct time-of-day greeting
   const _now = new Date();
@@ -266,10 +266,10 @@ async function _classifyAndDraft(messageText, askOrcha, allowedOperators) {
   const prompt = PERSONA_SYSTEM_PROMPT + timeContext + fleetContext + '\n\nPartner message:\n' + messageText;
   let aiResult;
   try {
-    // FIX (2026-08-17): was using askOrcha() (WS-only, no fallback, 20s cap) â€”
+    // FIX (2026-08-17): was using askOrcha() (WS-only, no fallback, 20s cap) —
     // WS-only meant no automatic Claude/Bedrock fallback, and 20s was shorter
     // than a real Orcha response so replies timed out into the canned fallback.
-    // Switch to relay.ask() â€” the SAME automatic chain the rest of the app uses:
+    // Switch to relay.ask() — the SAME automatic chain the rest of the app uses:
     // Orcha (fleet-brain WS) first, then WS -> CLI -> Claude Code -> Bedrock.
     // relay.ask returns a raw string, so normalize into the { text } shape the
     // JSON-parsing below expects. 90s matches the transport's own ceiling.
@@ -284,7 +284,7 @@ async function _classifyAndDraft(messageText, askOrcha, allowedOperators) {
 
   const fallback = {
     inScope: false,
-    reply: "Thanks for reaching out â€” I want to make sure you get an accurate answer, so I'm looping in the team and we'll follow up shortly.",
+    reply: "Thanks for reaching out — I want to make sure you get an accurate answer, so I'm looping in the team and we'll follow up shortly.",
     category: 'workflow',
     title: (messageText || '').slice(0, 60),
   };
@@ -313,7 +313,7 @@ async function _classifyAndDraft(messageText, askOrcha, allowedOperators) {
       try {
         const inner = JSON.parse(innerJson[0]);
         if (typeof inner.reply === 'string' && inner.reply.trim()) {
-          logger.warn('[SlackWatch] Model embedded JSON in reply field â€” unwrapping');
+          logger.warn('[SlackWatch] Model embedded JSON in reply field — unwrapping');
           replyText = inner.reply;
         }
       } catch (_) {}
@@ -330,9 +330,9 @@ async function _classifyAndDraft(messageText, askOrcha, allowedOperators) {
   }
 }
 
-// â”€â”€ Main poll cycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Main poll cycle ──────────────────────────────────────────────────────
 
-// â”€â”€ "Just Me" mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── "Just Me" mode ──────────────────────────────────────────────────────────
 // A channel used ONLY between the signed-in user and this app -- no
 // partner, no persona, no escalation queue. Routes straight through the
 // SAME action pipeline the in-app FAB and the phone companion use
@@ -397,7 +397,7 @@ function _jmClearPending(channelId) {
 // worst-case normal latency while still catching genuine multi-minute+ hangs.
 let JM_AI_TIMEOUT_MS = 240 * 1000; // let (not const) -- overridable in tests via __test__.setAiTimeoutMs()
 
-// â”€â”€â”€ AI JOB QUEUE (Just Me only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── AI JOB QUEUE (Just Me only) ─────────────────────────────────────────────
 // BUGFIX (2026-07-25 round 2): _jmHandleMessage() used to be awaited directly
 // inside pollChannelsOnce()'s per-channel loop, which runs under _pollLock --
 // so a slow/hung AI call for ONE Just Me message held the lock and blocked
@@ -589,7 +589,7 @@ async function _pollJustMeChannel(ch, myUserId, doLog) {
   // (same safeguard as the partner path).
   if (!ch.lastSeenTs) {
     _saveChannelLastSeen(ch.id, messages[0].ts);
-    doLog(`[SlackWatch] ${ch.name} (justme): first poll â€” baselined at ts ${messages[0].ts}, no replies sent for existing history`);
+    doLog(`[SlackWatch] ${ch.name} (justme): first poll — baselined at ts ${messages[0].ts}, no replies sent for existing history`);
     return;
   }
 
@@ -615,7 +615,7 @@ async function _pollJustMeChannel(ch, myUserId, doLog) {
   // and the watermark advances immediately per message -- so a slow/hung
   // job can never re-block polling (this channel or any other) and never
   // prevents the next message from being picked up on the next cycle.
-  const existingLog = store.load('slackChannelReplies', []); // hoisted â€” one disk read for all messages
+  const existingLog = store.load('slackChannelReplies', []); // hoisted — one disk read for all messages
   for (const msg of newMsgs.slice(0, MAX_MESSAGES_PER_POLL)) {
     if (existingLog.some(e => e.id === ch.id + ':' + msg.ts)) {
       _saveChannelLastSeen(ch.id, msg.ts);
@@ -636,25 +636,25 @@ async function pollChannelsOnce(log) {
   // relay.js's scrapeRelay) rather than throwing, since this is called on
   // an unattended 30s timer -- a thrown error would just spam logs.
   if (_pollLock) {
-    doLog('[SlackWatch] Poll already in progress â€” skipping overlapping call');
+    doLog('[SlackWatch] Poll already in progress — skipping overlapping call');
     return { repliedCount: 0, escalatedCount: 0, items: [], _skipped: true };
   }
   _pollLock = true;
   // Hard outer deadline: individual AI calls are capped at 20s each, but N channels
-  // Ã— M messages can still add up. 90s guarantees the lock always releases within
+  // × M messages can still add up. 90s guarantees the lock always releases within
   // one poll interval even in the worst-case batch. Checked at the start of each
-  // channel iteration â€” coarse but safe.
+  // channel iteration — coarse but safe.
   const _pollDeadline = Date.now() + 90000;
   try {
 
   const config = getWatchConfig();
-  if (!config.enabled) { doLog('[SlackWatch] Disabled â€” skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
+  if (!config.enabled) { doLog('[SlackWatch] Disabled — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
 
   const { readMessages, readThreadReplies, sendToChannel, checkLiveAuth } = require('./slack_send');
   const { askOrcha } = require('./orcha_ws');
 
   const auth = await checkLiveAuth();
-  if (!auth || !auth.authenticated) { doLog('[SlackWatch] Slack not authenticated â€” skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
+  if (!auth || !auth.authenticated) { doLog('[SlackWatch] Slack not authenticated — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
   const myUserId = auth.userId || '';
 
   let repliedCount = 0, escalatedCount = 0;
@@ -662,7 +662,7 @@ async function pollChannelsOnce(log) {
 
   for (const ch of config.channels) {
     if (ch.enabled === false) continue;
-    if (Date.now() > _pollDeadline) { doLog('[SlackWatch] Poll deadline reached â€” stopping channel iteration'); break; }
+    if (Date.now() > _pollDeadline) { doLog('[SlackWatch] Poll deadline reached — stopping channel iteration'); break; }
 
     // FEATURE (2026-07-25): 'justme' mode -- a channel used ONLY between
     // the signed-in user and this app (no partner, no persona, no
@@ -720,7 +720,7 @@ async function pollChannelsOnce(log) {
       // pre-existing history (see file header safety note).
       if (!ch.lastSeenTs) {
         _saveChannelLastSeen(ch.id, messages[0].ts);
-        doLog(`[SlackWatch] ${ch.name}: first poll â€” baselined at ts ${messages[0].ts}, no replies sent for existing history`);
+        doLog(`[SlackWatch] ${ch.name}: first poll — baselined at ts ${messages[0].ts}, no replies sent for existing history`);
         continue;
       }
 
@@ -766,7 +766,7 @@ async function pollChannelsOnce(log) {
 
       if (!newMsgs.length) continue;
 
-      const partnerLog = store.load('slackChannelReplies', []); // hoisted â€” one disk read for all messages in this channel
+      const partnerLog = store.load('slackChannelReplies', []); // hoisted — one disk read for all messages in this channel
       for (const msg of newMsgs) {
         // BUG FIX (2026-07-22): defense-in-depth dedup check, on top of
         // the _pollLock above. Skip if this exact message (channelId+ts)
@@ -777,14 +777,14 @@ async function pollChannelsOnce(log) {
         // process's memory, not across processes sharing the same file
         // store). Loaded once before the loop, not once per message.
         if (partnerLog.some(e => e.id === ch.id + ':' + msg.ts)) {
-          doLog(`[SlackWatch] ${ch.name}: message ${msg.ts} already replied to (found in log) â€” skipping duplicate`);
+          doLog(`[SlackWatch] ${ch.name}: message ${msg.ts} already replied to (found in log) — skipping duplicate`);
           continue;
         }
 
-        // â”€â”€ Reply routing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        // Three tiers, evaluated in order â€” same for both modes:
-        //   TIER 1: literal @mention â€” always reply.
-        //   TIER 2: reply in a thread where user was @mentioned â€” always reply,
+        // ── Reply routing ────────────────────────────────────────────────
+        // Three tiers, evaluated in order — same for both modes:
+        //   TIER 1: literal @mention — always reply.
+        //   TIER 2: reply in a thread where user was @mentioned — always reply,
         //           even when the original mention has scrolled past the
         //           20-message window (tracked persistently, 7-day TTL).
         //   TIER 3 (occasional): _isDirectedAtMe or _shouldChimeIn gate.
@@ -799,19 +799,19 @@ async function pollChannelsOnce(log) {
         if (mentioned) _trackMentionThread(ch.id, msg.thread_ts || msg.ts);
 
         if (mentioned) {
-          // Tier 1: explicit @mention â€” fall through to draft.
+          // Tier 1: explicit @mention — fall through to draft.
         } else if (isThreadReplyToMyMention) {
-          // Tier 2: reply in a thread where I was @mentioned â€” mandatory.
-          doLog(`[SlackWatch] ${ch.name}: reply in thread where I was @mentioned â€” mandatory reply on ${msg.ts}`);
+          // Tier 2: reply in a thread where I was @mentioned — mandatory.
+          doLog(`[SlackWatch] ${ch.name}: reply in thread where I was @mentioned — mandatory reply on ${msg.ts}`);
         } else if (chMode === 'occasional') {
           // Tier 3a (occasional): directed-at-me check first, then chime gate.
           const directedAtMe = await _isDirectedAtMe(msg.text, auth.user, askOrcha);
           if (directedAtMe) {
-            doLog(`[SlackWatch] ${ch.name}: not mentioned, but clearly directed at me â€” replying on ${msg.ts}`);
+            doLog(`[SlackWatch] ${ch.name}: not mentioned, but clearly directed at me — replying on ${msg.ts}`);
           } else {
             const shouldChime = await _shouldChimeIn(msg.text, askOrcha);
             if (!shouldChime) {
-              doLog(`[SlackWatch] ${ch.name}: not mentioned â€” chose not to chime in on ${msg.ts}`);
+              doLog(`[SlackWatch] ${ch.name}: not mentioned — chose not to chime in on ${msg.ts}`);
               continue;
             }
             doLog(`[SlackWatch] ${ch.name}: not mentioned, but chiming in on ${msg.ts} (gate said relevant)`);
@@ -820,7 +820,7 @@ async function pollChannelsOnce(log) {
           // Tier 3b (mentions/strict): must be unmistakably directed at me.
           const directedAtMe = await _isDirectedAtMe(msg.text, auth.user, askOrcha);
           if (!directedAtMe) {
-            doLog(`[SlackWatch] ${ch.name}: strict mode â€” not clearly directed at me, skipping ${msg.ts}`);
+            doLog(`[SlackWatch] ${ch.name}: strict mode — not clearly directed at me, skipping ${msg.ts}`);
             continue;
           }
           doLog(`[SlackWatch] ${ch.name}: strict-mode gate says clearly directed at me on ${msg.ts}`);
@@ -865,7 +865,7 @@ async function pollChannelsOnce(log) {
         if (!draft.inScope) {
           escalatedCount++;
           newEscalations.push(entry);
-          doLog(`[SlackWatch] ${ch.name}: escalated (${draft.category}) â€” "${draft.title}"`);
+          doLog(`[SlackWatch] ${ch.name}: escalated (${draft.category}) — "${draft.title}"`);
         } else {
           doLog(`[SlackWatch] ${ch.name}: answered in-scope question`);
         }

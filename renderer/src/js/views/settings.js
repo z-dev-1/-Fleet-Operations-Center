@@ -1,16 +1,16 @@
-﻿/**
- * settings.js â€” Fleet Ops Settings Drawer (4-tab redesign)
+/**
+ * settings.js — Fleet Ops Settings Drawer (4-tab redesign)
  *
  * Tabs:
- *   1. UI & App        â€” themes, colors, font, layout, animations
- *   2. Integrations    â€” domiciles, midway, orcha, creds, email, slack, asana
- *   3. Operators & SP  â€” per-operator SharePoint config (auto-populated from sync)
- *   4. Accounts        â€” flat site credentials list (auto-save)
+ *   1. UI & App        — themes, colors, font, layout, animations
+ *   2. Integrations    — domiciles, midway, orcha, creds, email, slack, asana
+ *   3. Operators & SP  — per-operator SharePoint config (auto-populated from sync)
+ *   4. Accounts        — flat site credentials list (auto-save)
  *
  * Architecture:
  *   - Drawer mounts on document.body (fixed overlay), NOT in #views-mount
- *   - Listens for bus 'ui:view-change' â†’ { to: 'settings' } to open
- *   - Does NOT consume the view-change â€” fleet view stays mounted behind
+ *   - Listens for bus 'ui:view-change' → { to: 'settings' } to open
+ *   - Does NOT consume the view-change — fleet view stays mounted behind
  *   - Close button / overlay click closes the drawer
  */
 
@@ -27,11 +27,11 @@ import { graphMail as graphMailBridge }            from '../bridge.js';
 import toast                                       from '../components/toast.js';
 import { setPreset, setTheme, getThemeConfig, resetTheme, PRESETS } from '../nexus-theme.js';
 
-// â”€â”€ Module state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Module state ────────────────────────────────────────────────────────────
 let _drawer   = null;   // the drawer DOM element
 let _overlay  = null;   // the backdrop overlay
 
-// â”€â”€ HTML â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── HTML ─────────────────────────────────────────────────────────────────────
 function _html() {
   return `
   <!-- Overlay backdrop -->
@@ -42,9 +42,9 @@ function _html() {
 
     <!-- Header -->
     <div class="sd-header">
-      <span style="font-size:16px">âš™</span>
+      <span style="font-size:16px">⚙</span>
       <span class="sd-title">Settings</span>
-      <button class="sd-close" id="sd-close-btn">âœ•</button>
+      <button class="sd-close" id="sd-close-btn">✕</button>
     </div>
 
     <!-- Tab bar -->
@@ -58,7 +58,7 @@ function _html() {
     <!-- Body -->
     <div class="sd-body">
 
-      <!-- â•â• TAB 1: UI & App â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
+      <!-- ══ TAB 1: UI & App ══════════════════════════════════════════════ -->
       <div id="sd-pane-ui">
 
         <!-- Templates -->
@@ -71,7 +71,7 @@ function _html() {
                 <div class="sd-tpl-name">Dark</div>
                 <div class="sd-tpl-desc">Default dark theme</div>
               </div>
-              <span class="sd-tpl-check">âœ“</span>
+              <span class="sd-tpl-check">✓</span>
             </div>
             <div class="sd-template" data-theme="light">
               <div class="sd-tpl-preview light-prev"></div>
@@ -79,7 +79,7 @@ function _html() {
                 <div class="sd-tpl-name">Light</div>
                 <div class="sd-tpl-desc">Light mode</div>
               </div>
-              <span class="sd-tpl-check" style="display:none">âœ“</span>
+              <span class="sd-tpl-check" style="display:none">✓</span>
             </div>
             <div class="sd-template" data-theme="midnight">
               <div class="sd-tpl-preview midnight-prev"></div>
@@ -87,7 +87,7 @@ function _html() {
                 <div class="sd-tpl-name">Midnight</div>
                 <div class="sd-tpl-desc">Deep black</div>
               </div>
-              <span class="sd-tpl-check" style="display:none">âœ“</span>
+              <span class="sd-tpl-check" style="display:none">✓</span>
             </div>
             <div class="sd-template" data-theme="ocean">
               <div class="sd-tpl-preview ocean-prev"></div>
@@ -95,7 +95,7 @@ function _html() {
                 <div class="sd-tpl-name">Ocean</div>
                 <div class="sd-tpl-desc">Teal accents</div>
               </div>
-              <span class="sd-tpl-check" style="display:none">âœ“</span>
+              <span class="sd-tpl-check" style="display:none">✓</span>
             </div>
           </div>
         </div>
@@ -282,7 +282,7 @@ function _html() {
         <!-- Chat Floater -->
         <div class="sd-section" id="sect-chat-floater">
           <div class="sd-section-title">Chat Floater</div>
-          <div class="sd-hint" style="margin-bottom:10px">Customize the Orcha AI panel â€” size, bubble colors, border, and FAB accent.</div>
+          <div class="sd-hint" style="margin-bottom:10px">Customize the Orcha AI panel — size, bubble colors, border, and FAB accent.</div>
 
           <!-- Size presets -->
           <div class="sd-field" style="margin-bottom:10px">
@@ -334,10 +334,10 @@ function _html() {
           </div>
         </div>
 
-        <!-- â•â•â• NEXUS THEME BUILDER (Year 3030) â•â•â• -->
+        <!-- ═══ NEXUS THEME BUILDER (Year 3030) ═══ -->
         <div class="sd-section" id="sect-nexus-theme">
           <div class="sd-section-title" style="display:flex;align-items:center;gap:8px">
-            <span style="font-size:14px">ðŸŒŒ</span> Nexus Theme Engine
+            <span style="font-size:14px">🌌</span> Nexus Theme Engine
             <span style="font-size:8px;color:var(--nx-accent,#00d4ff);font-weight:700;background:var(--nx-accent-dim,rgba(0,212,255,.1));padding:2px 6px;border-radius:8px">3030</span>
           </div>
 
@@ -413,7 +413,7 @@ function _html() {
       <!-- end sd-pane-ui -->
 
 
-      <!-- â•â• TAB 2: Integrations â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
+      <!-- ══ TAB 2: Integrations ══════════════════════════════════════════ -->
       <div id="sd-pane-integrations" style="display:none">
 
         <!-- Domiciles -->
@@ -433,7 +433,7 @@ function _html() {
         <!-- Midway Auth -->
         <div class="sd-section" id="sect-auth">
           <div class="sd-section-title">Midway Auth</div>
-          <div id="auth-status" class="sd-status warn">â³ Checking...</div>
+          <div id="auth-status" class="sd-status warn">⏳ Checking...</div>
           <div class="sd-btn-row" style="margin-top:8px">
             <button class="sd-btn primary" id="auth-mwinit">Run mwinit</button>
             <button class="sd-btn secondary" id="auth-recheck">Re-check</button>
@@ -443,8 +443,8 @@ function _html() {
         <!-- AI Config -->
         <div class="sd-section" id="sect-ai-config">
           <div class="sd-section-title" style="display:flex;align-items:center;gap:8px">
-            ðŸ¤– AI Config
-            <span id="ai-config-live-status" style="font-size:10px;padding:2px 10px;border-radius:10px;background:#21262d;color:#8b949e;font-weight:500">â³ checking...</span>
+            🤖 AI Config
+            <span id="ai-config-live-status" style="font-size:10px;padding:2px 10px;border-radius:10px;background:#21262d;color:#8b949e;font-weight:500">⏳ checking...</span>
           </div>
 
           <!-- Preference selector -->
@@ -466,7 +466,7 @@ function _html() {
 
           <!-- Orcha subsection -->
           <div style="border:1px solid var(--bdr);border-radius:6px;padding:10px 12px;margin-bottom:10px">
-            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">âš¡ Orcha</div>
+            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">⚡ Orcha</div>
             <div class="sd-row">
               <div class="sd-field">
                 <div class="sd-label">Mode</div>
@@ -487,11 +487,11 @@ function _html() {
             <div class="sd-field" style="margin-top:8px">
               <div class="sd-label">Orcha Agent (model)</div>
               <select class="sd-select" id="orcha-agent" style="font-size:11px">
-                <option value="orcha_default">Orcha â€” Claude Opus 4.6</option>
-                <option value="moon">Moon â€” Claude Sonnet 4.6</option>
-                <option value="mirror">Mirror â€” Claude Sonnet 4.6</option>
-                <option value="otter">Otter â€” Claude Sonnet 4.6</option>
-                <option value="tides_workflow_runner">Tides Workflow Runner â€” Claude Sonnet 4.6</option>
+                <option value="orcha_default">Orcha — Claude Opus 4.6</option>
+                <option value="moon">Moon — Claude Sonnet 4.6</option>
+                <option value="mirror">Mirror — Claude Sonnet 4.6</option>
+                <option value="otter">Otter — Claude Sonnet 4.6</option>
+                <option value="tides_workflow_runner">Tides Workflow Runner — Claude Sonnet 4.6</option>
               </select>
               <div style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">The Orcha agent that answers AI requests. The model is chosen server-side by the agent (Orcha = Opus 4.6, others = Sonnet 4.6).</div>
             </div>
@@ -508,7 +508,7 @@ function _html() {
 
           <!-- Claude Code subsection -->
           <div style="border:1px solid var(--bdr);border-radius:6px;padding:10px 12px;margin-bottom:12px">
-            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">ðŸ§  Claude Code</div>
+            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">🧠 Claude Code</div>
             <div class="sd-field">
               <div class="sd-label">Binary (auto-detected)</div>
               <input class="sd-input" id="claude-bin-path" placeholder="(auto)" readonly style="color:#6e7681;font-size:10px;font-family:monospace"/>
@@ -587,7 +587,7 @@ function _html() {
 
         <!-- Schedulers Config -->
         <div class="sd-section" style="border-top:1px solid var(--bdr);padding-top:14px;margin-top:4px">
-          <div class="sd-section-title">Schedulers â€“ Config</div>
+          <div class="sd-section-title">Schedulers – Config</div>
           <div class="sd-field">
             <div class="sd-label">Sync interval (minutes)</div>
             <input class="sd-input" id="sched-interval" type="number" min="1" max="360" placeholder="5"/>
@@ -596,7 +596,7 @@ function _html() {
           <div class="sd-field">
             <div class="sd-label">Default scheduler endpoint</div>
             <input class="sd-input" id="sched-endpoint" placeholder="https://..."/>
-            <div class="sd-hint" style="margin-top:4px">Reserved for a future remote-scheduler integration â€” not yet functional.</div>
+            <div class="sd-hint" style="margin-top:4px">Reserved for a future remote-scheduler integration — not yet functional.</div>
           </div>
           <div class="sd-btn-row">
             <button class="sd-btn primary" id="save-sched">Save</button>
@@ -735,7 +735,7 @@ function _html() {
           <div class="sd-field" style="margin-top:8px">
             <div class="sd-label">Send Method</div>
             <select class="sd-input" id="email-method">
-              <option value="auto">Auto (Graph â†’ SMTP â†’ OWA)</option>
+              <option value="auto">Auto (Graph → SMTP → OWA)</option>
               <option value="graph">Microsoft Graph (no VPN needed)</option>
               <option value="smtp">SMTP (VPN required)</option>
               <option value="owa">OWA (in-app compose window)</option>
@@ -768,7 +768,7 @@ function _html() {
         <!-- Slack -->
         <div class="sd-section" id="sect-slack">
           <div class="sd-section-title">Slack</div>
-          <div id="slack-status" class="sd-status warn" style="margin-bottom:8px">âš ï¸ Not connected</div>
+          <div id="slack-status" class="sd-status warn" style="margin-bottom:8px">⚠️ Not connected</div>
           <div class="sd-btn-row">
             <button class="sd-btn primary"   id="slack-login">Sign in to Slack</button>
             <button class="sd-btn secondary" id="slack-recheck">Re-check</button>
@@ -776,7 +776,7 @@ function _html() {
           </div>
         </div>
 
-        <!-- Outlook (Microsoft Graph) â€” 2026-07-21. Replaces the need for
+        <!-- Outlook (Microsoft Graph) — 2026-07-21. Replaces the need for
              SMTP (requires VPN) or pasting into OWA's compose editor
              (strips colors via its own sanitizer -- see src/graph/client.js
              for the full writeup). Sign in once, like Slack above; stays
@@ -796,15 +796,15 @@ function _html() {
              the configured Slack Connect channels and ALWAYS replies with a
              professional message -- the real answer if confident, or a
              warm holding reply otherwise. Out-of-scope requests are also
-             logged to the Orcha floater's Review tab (ðŸš¨ Alerts / ðŸ’¡ Actions
-             / ðŸ“ Workflow) for follow-up. See src/scrapers/slack_channel_watch.js
+             logged to the Orcha floater's Review tab (🚨 Alerts / 💡 Actions
+             / 📍 Workflow) for follow-up. See src/scrapers/slack_channel_watch.js
              for the full design + safety writeup. -->
         <div class="sd-section" id="sect-partner-autoreply">
           <div class="sd-section-title">
-            <span style="font-size:11px">ðŸ¤–</span> Partner Auto-Reply
+            <span style="font-size:11px">🤖</span> Partner Auto-Reply
             <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">AI</span>
           </div>
-          <div class="sd-hint" style="margin-bottom:10px">Watches your Slack Connect partner channels and replies automatically â€” confident answer when it has one, warm holding reply otherwise. Out-of-scope messages are also logged for review in Orcha.</div>
+          <div class="sd-hint" style="margin-bottom:10px">Watches your Slack Connect partner channels and replies automatically — confident answer when it has one, warm holding reply otherwise. Out-of-scope messages are also logged for review in Orcha.</div>
           <div class="sd-toggle-row">
             <span class="sd-toggle-label">Enable</span>
             <input type="checkbox" id="par-enabled"/>
@@ -829,10 +829,10 @@ function _html() {
 
         <div class="sd-section" id="sect-dm-autoreply">
           <div class="sd-section-title">
-            <span style="font-size:11px">ðŸ’¬</span> DM Auto-Reply
+            <span style="font-size:11px">💬</span> DM Auto-Reply
             <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">AI</span>
           </div>
-          <div class="sd-hint" style="margin-bottom:10px">Replies to your personal Slack DMs as you â€” adapts tone per-message (casual, professional, supportive), uses live fleet data for unit questions. Holds anything it's not confident about for your review in Orcha.</div>
+          <div class="sd-hint" style="margin-bottom:10px">Replies to your personal Slack DMs as you — adapts tone per-message (casual, professional, supportive), uses live fleet data for unit questions. Holds anything it's not confident about for your review in Orcha.</div>
           <div class="sd-toggle-row">
             <span class="sd-toggle-label">Enable</span>
             <input type="checkbox" id="dm-ar-enabled"/>
@@ -892,17 +892,17 @@ function _html() {
           <div id="asana-status" class="settings__status" style="display:none"></div>
         </div>
 
-        <!-- Fleet Ops Companion â€” removed (feature discontinued) -->
+        <!-- Fleet Ops Companion — removed (feature discontinued) -->
 
       </div>
       <!-- end sd-pane-integrations -->
 
-      <!-- â•â• TAB 3: Operators & SP â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
+      <!-- ══ TAB 3: Operators & SP ═════════════════════════════════════════ -->
       <div id="sd-pane-operators" style="display:none">
         <!-- Standalone SP Workbook Config -->
         <div class="sd-section" id="sect-sp-workbooks">
           <div class="sd-section-title">SharePoint Workbooks</div>
-          <div class="sd-hint" style="margin-bottom:10px">Paste a SharePoint Excel URL â†’ Load sheets â†’ Pick sheet + operator â†’ Save. The app will push fleet data to these workbooks.</div>
+          <div class="sd-hint" style="margin-bottom:10px">Paste a SharePoint Excel URL → Load sheets → Pick sheet + operator → Save. The app will push fleet data to these workbooks.</div>
           <div class="sd-field">
             <div class="sd-label">SharePoint Excel URL</div>
             <input class="sd-input" id="sp-wb-url" placeholder="Paste SharePoint Excel file URL here..." style="width:100%" />
@@ -937,7 +937,7 @@ function _html() {
              exist in this template. The Operators tab's real data (the
              per-operator SharePoint workbook cards above) is populated by a
              separate, live mechanism, not by this button. -->
-        <!-- FEATURE (2026-07-22): removed the duplicate "Email â€” Global
+        <!-- FEATURE (2026-07-22): removed the duplicate "Email — Global
              SMTP" panel that lived here. It was 100% dead/broken: no event
              listener ever wired the inputs or the "Send test email"
              button, nothing populated the fields on load, and the one
@@ -955,14 +955,14 @@ function _html() {
       </div>
       <!-- end sd-pane-operators -->
 
-      <!-- â•â• TAB 4: Accounts â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
+      <!-- ══ TAB 4: Accounts ════════════════════════════════════════════════ -->
       <div id="sd-pane-accounts" style="display:none">
 
         <!-- Header -->
         <div class="ops-pane-header">
           <div class="ops-pane-header-left">
             <span class="ops-pane-title">Accounts</span>
-            <span class="ops-pane-sub">Site credentials â€“ click a site name to open it</span>
+            <span class="ops-pane-sub">Site credentials – click a site name to open it</span>
           </div>
           <button class="ops-sync-btn" id="acct-add">+ Add account</button>
         </div>
@@ -970,7 +970,7 @@ function _html() {
         <!-- Account rows -->
         <div class="acct-list" id="acct-list">
           <div class="acct-empty" id="acct-empty">
-            <span style="font-size:28px;opacity:.5">ðŸ”‘</span>
+            <span style="font-size:28px;opacity:.5">🔑</span>
             <div class="ops-empty-title">No accounts yet</div>
             <div class="ops-empty-sub">Click <strong>+ Add account</strong> to save a site credential.</div>
           </div>
@@ -987,7 +987,7 @@ function _html() {
   `;
 }
 
-// â”€â”€ Tab switching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Tab switching ────────────────────────────────────────────────────────────
 function _wireTabSwitching() {
   _drawer.querySelectorAll('.sd-tab').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -1002,7 +1002,7 @@ function _wireTabSwitching() {
   });
 }
 
-// â”€â”€ Open / close â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Open / close ─────────────────────────────────────────────────────────────
 function _open() {
   _drawer.classList.add('open');
   _overlay.classList.add('open');
@@ -1015,7 +1015,7 @@ function _close() {
   _overlay.classList.remove('open');
 }
 
-// â”€â”€ Section: Domiciles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section: Domiciles ───────────────────────────────────────────────────────
 function _wireDomiciles() {
   document.getElementById('save-domiciles').addEventListener('click', async () => {
     const raw = document.getElementById('settings-domiciles').value;
@@ -1069,16 +1069,16 @@ function _wireDomiciles() {
   });
 }
 
-// â”€â”€ Section: Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section: Auth ────────────────────────────────────────────────────────────
 function _checkAuth() {
   authBridge.checkMidway().then((ok) => {
     const el = document.getElementById('auth-status');
     if (!el) return;
     if (ok) {
-      el.textContent = 'âœ… Authenticated';
+      el.textContent = '✅ Authenticated';
       el.className = 'sd-status ok';
     } else {
-      el.textContent = 'âš ï¸ Not authenticated';
+      el.textContent = '⚠️ Not authenticated';
       el.className = 'sd-status warn';
     }
   }).catch(() => {});
@@ -1092,11 +1092,11 @@ function _wireAuth() {
   });
 }
 
-// â”€â”€ Section: Orcha â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section: Orcha ───────────────────────────────────────────────────────────
 function _wireOrcha() { _wireAIConfig(); }
 
 function _wireAIConfig() {
-  // â”€â”€ Load current config into form fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Load current config into form fields ──────────────────────────────
   async function _loadAIConfig() {
     // Live status badge
     if (window.ai && window.ai.status) {
@@ -1116,10 +1116,10 @@ function _wireAIConfig() {
     if (modeEl) modeEl.value = cfg.mode || 'local';
     if (hostEl) hostEl.value = cfg.host || '';
     if (portEl) portEl.value = cfg.port || 4799;
-    // Orcha agent (selects the server-side model) â€” defaults to orcha_default (Opus 4.6)
+    // Orcha agent (selects the server-side model) — defaults to orcha_default (Opus 4.6)
     const agentEl = document.getElementById('orcha-agent');
     if (agentEl) agentEl.value = cfg.orchaAgentId || 'orcha_default';
-    // Model ID (Bedrock fallback leg) â€” blank field means "use app default"
+    // Model ID (Bedrock fallback leg) — blank field means "use app default"
     const modelEl = document.getElementById('ai-model-id');
     if (modelEl) modelEl.value = cfg.modelId || '';
     // Claude fields
@@ -1134,11 +1134,11 @@ function _wireAIConfig() {
     if (!el) return;
     const s = st && st.status;
     const MAP = {
-      'connected':         { text: 'ðŸŸ¢ Orcha connected',  bg: '#1a2f1a', color: '#22c55e' },
-      'connected-claude':  { text: 'ðŸ”µ Claude active',    bg: '#1c1c30', color: '#818cf8' },
-      'connected-bedrock': { text: 'ðŸŸ  Bedrock active',   bg: '#2a1e0a', color: '#f59e0b' },
-      'error':             { text: 'ðŸ”´ AI offline',       bg: '#2f1a1a', color: '#f85149' },
-      'unknown':           { text: 'â³ Checking...',      bg: '#21262d', color: '#8b949e' },
+      'connected':         { text: '🟢 Orcha connected',  bg: '#1a2f1a', color: '#22c55e' },
+      'connected-claude':  { text: '🔵 Claude active',    bg: '#1c1c30', color: '#818cf8' },
+      'connected-bedrock': { text: '🟠 Bedrock active',   bg: '#2a1e0a', color: '#f59e0b' },
+      'error':             { text: '🔴 AI offline',       bg: '#2f1a1a', color: '#f85149' },
+      'unknown':           { text: '⏳ Checking...',      bg: '#21262d', color: '#8b949e' },
     };
     const d = MAP[s] || MAP.unknown;
     el.textContent = d.text; el.style.background = d.bg; el.style.color = d.color;
@@ -1163,7 +1163,7 @@ function _wireAIConfig() {
     });
   }
 
-  // â”€â”€ Preference radio change â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Preference radio change ────────────────────────────────────────────
   document.querySelectorAll('input[name="ai-pref"]').forEach(radio => {
     radio.addEventListener('change', () => {
       _updatePrefHint(radio.value);
@@ -1171,7 +1171,7 @@ function _wireAIConfig() {
     });
   });
 
-  // â”€â”€ Save â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Save ──────────────────────────────────────────────────────────────
   const saveBtn = document.getElementById('save-ai-config');
   if (saveBtn) saveBtn.addEventListener('click', async () => {
     const pref    = (document.querySelector('input[name="ai-pref"]:checked') || {}).value || 'auto';
@@ -1185,44 +1185,44 @@ function _wireAIConfig() {
       modelId:         ((document.getElementById('ai-model-id') || {}).value || '').trim(),
       claudeTimeoutMs: toSecs * 1000,
     });
-    toast.show('success', 'AI config saved â€” active: ' + pref, 2500);
+    toast.show('success', 'AI config saved — active: ' + pref, 2500);
     window.ai.status().then(_updateLiveStatus).catch(() => {});
   });
 
-  // â”€â”€ Test Orcha â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Test Orcha ────────────────────────────────────────────────────────
   const testOrchaBtn = document.getElementById('test-orcha');
   if (testOrchaBtn) testOrchaBtn.addEventListener('click', async () => {
     const statusEl = document.getElementById('orcha-test-status');
     testOrchaBtn.disabled = true; testOrchaBtn.textContent = 'Testing...';
-    if (statusEl) { statusEl.textContent = 'â³ Connecting to Orcha...'; statusEl.style.color = '#94a3b8'; }
+    if (statusEl) { statusEl.textContent = '⏳ Connecting to Orcha...'; statusEl.style.color = '#94a3b8'; }
     try {
       const result = await window.ai.test();
       if (result && result.ok) {
         const model = (result.model || '').split('/').pop().split(':')[0];
-        if (statusEl) { statusEl.textContent = 'âœ… Connected â€” "' + (result.response || 'OK').slice(0, 40) + '" | ' + model; statusEl.style.color = '#22c55e'; }
+        if (statusEl) { statusEl.textContent = '✅ Connected — "' + (result.response || 'OK').slice(0, 40) + '" | ' + model; statusEl.style.color = '#22c55e'; }
       } else {
-        if (statusEl) { statusEl.textContent = 'âŒ ' + (result.lastError || result.status || 'No response'); statusEl.style.color = '#ef4444'; }
+        if (statusEl) { statusEl.textContent = '❌ ' + (result.lastError || result.status || 'No response'); statusEl.style.color = '#ef4444'; }
       }
     } catch (e) {
-      if (statusEl) { statusEl.textContent = 'âŒ ' + e.message; statusEl.style.color = '#ef4444'; }
+      if (statusEl) { statusEl.textContent = '❌ ' + e.message; statusEl.style.color = '#ef4444'; }
     } finally { testOrchaBtn.disabled = false; testOrchaBtn.textContent = 'Test Orcha'; }
   });
 
-  // â”€â”€ Test Claude â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Test Claude ───────────────────────────────────────────────────────
   const testClaudeBtn = document.getElementById('test-claude');
   if (testClaudeBtn) testClaudeBtn.addEventListener('click', async () => {
     const statusEl = document.getElementById('claude-test-status');
     testClaudeBtn.disabled = true; testClaudeBtn.textContent = 'Testing...';
-    if (statusEl) { statusEl.textContent = 'â³ Calling claude -p...'; statusEl.style.color = '#94a3b8'; }
+    if (statusEl) { statusEl.textContent = '⏳ Calling claude -p...'; statusEl.style.color = '#94a3b8'; }
     try {
       const result = await window.ai.testClaude();
       if (result && result.ok) {
-        if (statusEl) { statusEl.textContent = 'âœ… Online â€” "' + (result.response || '').slice(0, 60) + '"'; statusEl.style.color = '#818cf8'; }
+        if (statusEl) { statusEl.textContent = '✅ Online — "' + (result.response || '').slice(0, 60) + '"'; statusEl.style.color = '#818cf8'; }
       } else {
-        if (statusEl) { statusEl.textContent = 'âŒ ' + (result.error || 'Failed'); statusEl.style.color = '#ef4444'; }
+        if (statusEl) { statusEl.textContent = '❌ ' + (result.error || 'Failed'); statusEl.style.color = '#ef4444'; }
       }
     } catch (e) {
-      if (statusEl) { statusEl.textContent = 'âŒ ' + e.message; statusEl.style.color = '#ef4444'; }
+      if (statusEl) { statusEl.textContent = '❌ ' + e.message; statusEl.style.color = '#ef4444'; }
     } finally { testClaudeBtn.disabled = false; testClaudeBtn.textContent = 'Test Claude'; }
   });
 
@@ -1231,7 +1231,7 @@ function _wireAIConfig() {
   bus.on('ui:view-change', ({ to }) => { if (to === 'settings') setTimeout(_loadAIConfig, 150); });
 }
 
-// â”€â”€ Section: Credentials â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section: Credentials ─────────────────────────────────────────────────────
 function _loadCredsList() {
   credsBridge.list().then((keys) => {
     const el = document.getElementById('cred-list');
@@ -1259,7 +1259,7 @@ function _wireCreds() {
     document.getElementById('cred-val').value = '';
     _loadCredsList();
     const st = document.getElementById('cred-status');
-    st.textContent = 'âœ“ Saved'; st.style.display = 'block';
+    st.textContent = '✓ Saved'; st.style.display = 'block';
     setTimeout(() => { st.style.display = 'none'; }, 2000);
   });
   document.getElementById('cred-delete').addEventListener('click', async () => {
@@ -1271,12 +1271,12 @@ function _wireCreds() {
   });
 }
 
-// â”€â”€ Section: Vendor Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section: Vendor Auth ─────────────────────────────────────────────────────
 function _checkVendorCred(vendor, statusId) {
   credsBridge.has(`vendor.${vendor}.username`).then((has) => {
     const st = document.getElementById(statusId);
     if (!st) return;
-    st.textContent = has ? `âœ… Credentials saved` : 'âš ï¸ Not configured';
+    st.textContent = has ? `✅ Credentials saved` : '⚠️ Not configured';
     st.style.display = 'block';
     st.className = `settings__status settings__status--${has ? 'ok' : 'loading'}`;
   }).catch(() => {});
@@ -1287,7 +1287,7 @@ function _wireVendorAuth() {
   ALL_VENDORS.forEach((v) => {
     _checkVendorCred(v, `${v}-status`);
 
-    // Repopulate username field (password never retrieved â€” encrypted only)
+    // Repopulate username field (password never retrieved — encrypted only)
     settingsBridge.getAll().then((all) => {
       const userEl = document.getElementById(`${v}-user`);
       if (userEl && all && all[`${v}_user`]) userEl.value = all[`${v}_user`];
@@ -1352,13 +1352,13 @@ function _wireVendorAuth() {
   });
 }
 
-// â”€â”€ Section: Slack â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section: Slack ───────────────────────────────────────────────────────────
 function _checkSlack() {
-  // BUG FIX (2026-07-16): was checkAuth().then((ok) => ...) â€” checkAuth()
+  // BUG FIX (2026-07-16): was checkAuth().then((ok) => ...) — checkAuth()
   // resolves to an OBJECT ({ authenticated: bool }), not a boolean. Since a
   // non-null object is always truthy, `ok ? 'Connected' : 'Not connected'`
   // showed "Connected" every single time the promise resolved, regardless
-  // of actual auth state â€” this status indicator has never once correctly
+  // of actual auth state — this status indicator has never once correctly
   // shown "Not connected." Also switched to checkLiveAuth(), which confirms
   // the token still actually works (Slack sessions can be revoked without
   // the local token file changing) rather than just checking a file exists.
@@ -1366,7 +1366,7 @@ function _checkSlack() {
     const ok = !!(res && res.authenticated);
     const el = document.getElementById('slack-status');
     if (!el) return;
-    el.textContent = ok ? 'âœ… Connected' : 'âš ï¸ Not connected';
+    el.textContent = ok ? '✅ Connected' : '⚠️ Not connected';
     el.className = `sd-status ${ok ? 'ok' : 'warn'}`;
   }).catch(() => {});
 }
@@ -1395,14 +1395,14 @@ function _wireEmail() {
     document.getElementById('email-pass').value = '';
     const methodLabel = { auto: 'Auto', graph: 'Microsoft Graph', smtp: 'SMTP', owa: 'OWA' };
     const sel = methodEl ? (methodLabel[methodEl.value] || methodEl.value) : 'Auto';
-    showEmailStatus('Saved â€” send method: ' + sel, 'ok');
+    showEmailStatus('Saved — send method: ' + sel, 'ok');
   });
   if (testBtn) testBtn.addEventListener('click', () => {});
 }
 
 // FEATURE (2026-07-16): persisted note for scheduled auto-sends (08:00 /
 // 15:15). Stored via the generic settings:save IPC under keys
-// `autoEmailNote` / `autoEmailNoteOneShot` â€” read fresh by the scheduler in
+// `autoEmailNote` / `autoEmailNoteOneShot` — read fresh by the scheduler in
 // src/app.js on every fire, so edits here take effect on the very next slot.
 function _wireAutoNote() {
   var textEl    = document.getElementById('auto-note-text');
@@ -1435,16 +1435,16 @@ function _wireAutoNote() {
     if (oneShotEl) oneShotEl.checked = !!s.autoEmailNoteOneShot;
     _updateNotePreview();
     if (s.autoEmailNote) {
-      showStatus('âœ… Active â€” will be included in the next scheduled auto-send' + (s.autoEmailNoteOneShot ? ' (one-time only)' : ''), 'ok');
+      showStatus('✅ Active — will be included in the next scheduled auto-send' + (s.autoEmailNoteOneShot ? ' (one-time only)' : ''), 'ok');
     }
   }).catch(() => {});
 
   saveBtn.addEventListener('click', async () => {
     var note = (textEl.value || '').trim();
-    if (!note) { showStatus('âš ï¸ Enter a note first, or use "Clear note" to remove an existing one', 'warn'); return; }
+    if (!note) { showStatus('⚠️ Enter a note first, or use "Clear note" to remove an existing one', 'warn'); return; }
     await settingsBridge.save('autoEmailNote', note);
     await settingsBridge.save('autoEmailNoteOneShot', !!(oneShotEl && oneShotEl.checked));
-    showStatus('âœ… Saved â€” will be included in the next scheduled auto-send' + (oneShotEl && oneShotEl.checked ? ' (one-time only)' : ''), 'ok');
+    showStatus('✅ Saved — will be included in the next scheduled auto-send' + (oneShotEl && oneShotEl.checked ? ' (one-time only)' : ''), 'ok');
     toast.show('success', 'Auto-email note saved', 2500);
   });
 
@@ -1453,12 +1453,12 @@ function _wireAutoNote() {
     if (oneShotEl) oneShotEl.checked = false;
     await settingsBridge.save('autoEmailNote', '');
     await settingsBridge.save('autoEmailNoteOneShot', false);
-    showStatus('Note cleared â€” future auto-sends will not include a note', '');
+    showStatus('Note cleared — future auto-sends will not include a note', '');
     toast.show('info', 'Auto-email note cleared', 2500);
   });
 }
 
-// FEATURE (2026-07-16): "Schedulers â€“ Config â†’ Sync interval (minutes)" had
+// FEATURE (2026-07-16): "Schedulers – Config → Sync interval (minutes)" had
 // zero wiring anywhere -- no click handler, no IPC handler, no read path.
 // The main data sync (AAP/Uptake/Relay) ran on a hardcoded 5-minute timer
 // (DEFAULTS.SYNC_INTERVAL_MS in src/config/defaults.js) with no way to
@@ -1495,17 +1495,17 @@ function _wireSchedulerConfig() {
   saveBtn.addEventListener('click', async () => {
     var raw = (intervalEl.value || '').trim();
     var minutes = parseInt(raw, 10);
-    if (!raw || isNaN(minutes)) { showStatus('âš ï¸ Enter a number of minutes first', 'warn'); return; }
+    if (!raw || isNaN(minutes)) { showStatus('⚠️ Enter a number of minutes first', 'warn'); return; }
     try {
       var result = await settingsBridge.saveSyncInterval(minutes);
       if (result && result.ok) {
-        showStatus('âœ… Saved â€” now syncing every ' + result.minutes + ' min (applied immediately)', 'ok');
+        showStatus('✅ Saved — now syncing every ' + result.minutes + ' min (applied immediately)', 'ok');
         toast.show('success', 'Sync interval updated to ' + result.minutes + ' min', 3000);
       } else {
-        showStatus('âŒ ' + ((result && result.error) || 'Save failed'), 'err');
+        showStatus('❌ ' + ((result && result.error) || 'Save failed'), 'err');
       }
     } catch (e) {
-      showStatus('âŒ ' + (e.message || 'Save failed'), 'err');
+      showStatus('❌ ' + (e.message || 'Save failed'), 'err');
       toast.show('error', 'Save failed: ' + e.message, 4000);
     }
   });
@@ -1616,19 +1616,19 @@ function _wireGraphMail() {
 // Operator codes from the latest fleet scan, for per-channel data-scope pickers.
 function _parFleetOperators() {
   try {
-    var d = (window.fleet && typeof window.fleet.getData === "function") ? window.fleet.getData() : null;
-    var rows = (d && d.rows) || [];
-    var set = {};
-    rows.forEach(function(r){ var o=(r.operator||"").trim(); if(o) set[o.toUpperCase()]=true; });
+    const d = (window.fleet && typeof window.fleet.getData === 'function') ? window.fleet.getData() : null;
+    const rows = (d && d.rows) || [];
+    const set = {};
+    rows.forEach(function(r){ const o=(r.operator||'').trim(); if(o) set[o.toUpperCase()]=true; });
     return Object.keys(set).sort();
   } catch(e){ return []; }
 }
 function _parOperatorOptions(selected) {
-  var sel = (selected||[]).map(function(s){ return String(s||"").toUpperCase(); });
+  const sel = (selected||[]).map(function(s){ return String(s||'').toUpperCase(); });
   return _parFleetOperators().map(function(op){
-    var s = sel.indexOf(op)!==-1 ? " selected" : "";
-    return "<option value=\"" + _esc(op) + "\"" + s + ">" + _esc(op) + "</option>";
-  }).join("");
+    const s = sel.indexOf(op)!==-1 ? ' selected' : '';
+    return '<option value="' + _esc(op) + '"' + s + '>' + _esc(op) + '</option>';
+  }).join('');
 }
 function _wirePartnerAutoReply() {
   const enabledEl       = document.getElementById('par-enabled');
@@ -1676,7 +1676,7 @@ function _wirePartnerAutoReply() {
     enabledEl.checked = !!config.enabled;
     const channels = config.channels || [];
     if (!channels.length) {
-      listEl.innerHTML = '<div class="sd-hint">No channels yet â€” click "Scan my channels" to discover all channels you are in, or use "+ Add by ID" to add one manually.</div>';
+      listEl.innerHTML = '<div class="sd-hint">No channels yet — click "Scan my channels" to discover all channels you are in, or use "+ Add by ID" to add one manually.</div>';
       return;
     }
     listEl.innerHTML = channels.map((ch, i) => {
@@ -1851,7 +1851,7 @@ function _wirePartnerAutoReply() {
     addIdEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addBtn.click(); } });
   }
 
-  // "Use My DM" button â€” finds user's self-DM and adds it as a Just Me channel
+  // "Use My DM" button — finds user's self-DM and adds it as a Just Me channel
   const addDmBtn = document.getElementById('par-add-dm-btn');
   if (addDmBtn) {
     addDmBtn.addEventListener('click', async () => {
@@ -1895,7 +1895,7 @@ function _wirePartnerAutoReply() {
 // with no caller (its "Global SMTP" HTML panel was removed above for the
 // same reason) and would have thrown ReferenceError on _opsEmailTimers
 // (never declared anywhere in this codebase) had it ever actually run.
-// â”€â”€ SP: per-domicile save helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── SP: per-domicile save helper ──────────────────────────────────────────────
 // cfg shape: { domiciles: { [opName_domCode]: { siteUrl, listName } }, emailHost, ... }
 async function _spSaveDomicile(opName, domCode, siteUrl, listName, headerRow) {
   const existing = await spBridge.getConfig().catch(() => ({})) || {};
@@ -1922,7 +1922,7 @@ async function _spSaveDomicile(opName, domCode, siteUrl, listName, headerRow) {
   return spBridge.saveConfig({ ...existing, domiciles, workbooks });
 }
 
-// â”€â”€ SP: render operator accordion cards â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── SP: render operator accordion cards ──────────────────────────────────────
 
 function _wireDMAutoReply() {
   const enabledEl  = document.getElementById('dm-ar-enabled');
@@ -1938,7 +1938,7 @@ function _wireDMAutoReply() {
     statusEl.style.display = '';
   }
 
-  // Preserve threads on every save â€” saveDMAutoReplyConfig returns { ok: true },
+  // Preserve threads on every save — saveDMAutoReplyConfig returns { ok: true },
   // not the saved config, so drive UI from local state only.
   let _currentConfig = { enabled: false, threads: {} };
 
@@ -2028,7 +2028,7 @@ function _wbLookup(spCfg, opName, domCode) {
   return { siteUrl: wb.path || "", listName: (carrier && carrier.sheet) || "", headerRow: wb.headerRow || 16 };
 }
 
-// â”€â”€ SP: per-domicile email save helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── SP: per-domicile email save helper ───────────────────────────────────────
 async function _spSaveEmail(opName, domCode, to, cc) {
   const existing = await spBridge.getConfig().catch(() => ({})) || {};
   const emails   = existing.emails || {};
@@ -2038,7 +2038,7 @@ async function _spSaveEmail(opName, domCode, to, cc) {
 }
 
 
-// â”€â”€ Section: Asana â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section: Asana ───────────────────────────────────────────────────────────
 function _wireSP() { /* SP wiring handled in operators tab */ }
 
 function _wireAsana() {
@@ -2050,7 +2050,7 @@ function _wireAsana() {
     });
     document.getElementById('asana-pat').value = '';
     const st = document.getElementById('asana-status');
-    st.textContent = 'âœ“ Saved'; st.style.display = 'block';
+    st.textContent = '✓ Saved'; st.style.display = 'block';
     setTimeout(() => { st.style.display = 'none'; }, 2000);
   });
   document.getElementById('asana-verify').addEventListener('click', () => {
@@ -2061,15 +2061,15 @@ function _wireAsana() {
     asanaBridge.checkAuth().then((res) => {
       const ok = !!(res && res.ok);
       const st = document.getElementById('asana-status');
-      st.textContent = ok ? 'âœ… Token valid' : 'âŒ Token invalid';
+      st.textContent = ok ? '✅ Token valid' : '❌ Token invalid';
       st.style.display = 'block';
     }).catch(() => {});
   });
 }
 
-// â”€â”€ Section: Fleet Ops Companion â€” removed (feature discontinued) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section: Fleet Ops Companion — removed (feature discontinued) ────────────
 
-// â”€â”€ Section: Notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section: Notifications ───────────────────────────────────────────────────
 function _wireNotifications() {
   // BUG-AWARE (2026-07-22): settings:save fully REPLACES whatever value
   // is stored under a key (confirmed in src/ipc/settings.js -- `s[key] =
@@ -2119,7 +2119,7 @@ function _wireNotifications() {
 }
 
 
-// â”€â”€ Section Accordion (Integrations tab) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section Accordion (Integrations tab) ─────────────────────────────────────
 // CLEANUP (2026-07-23): the Integrations tab had grown to 15 always-expanded
 // sections (Domiciles, AI Config, Credentials, Schedulers, Vendor Portal
 // Credentials, Email, etc.) stacked in one long scroll. Collapsed them into
@@ -2150,7 +2150,7 @@ function _wireSectionAccordion(paneId) {
   });
 }
 
-// â”€â”€ Section: Accounts (S11) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section: Accounts (S11) ──────────────────────────────────────────────────
 function _wireAccounts() {
 
   settingsBridge.getAll().then((all) => {
@@ -2192,18 +2192,18 @@ function _acctAddRow(prefill = {}) {
     <div class="acct-cell acct-cell-site">
       <input class="acct-input acct-url"  type="url"  placeholder="https://..."     value="${_esc(url)}"  title="Site URL"/>
       <input class="acct-input acct-name" type="text" placeholder="Site name"       value="${_esc(name)}" title="Display name"/>
-      <a class="acct-link" href="${_esc(url) || '#'}" title="Open site" style="${url ? '' : 'display:none'}" target="_blank">ðŸ”—</a>
+      <a class="acct-link" href="${_esc(url) || '#'}" title="Open site" style="${url ? '' : 'display:none'}" target="_blank">🔗</a>
     </div>
     <div class="acct-cell acct-cell-user">
       <input class="acct-input" type="text" placeholder="username / email" value="${_esc(user)}"/>
     </div>
     <div class="acct-cell acct-cell-pass">
       <input class="acct-input acct-pass" type="password" placeholder="password" value="${_esc(pass)}"/>
-      <button class="acct-eye" type="button" title="Show/hide">ðŸ‘ï¸</button>
+      <button class="acct-eye" type="button" title="Show/hide">👁️</button>
     </div>
     <div class="acct-cell acct-cell-actions">
       <span class="acct-save-badge" id="badge-${id}"></span>
-      <button class="acct-del" type="button" title="Remove">ðŸ—‘</button>
+      <button class="acct-del" type="button" title="Remove">🗑</button>
     </div>`;
 
   row.querySelector('.acct-url').addEventListener('input', function () {
@@ -2220,7 +2220,7 @@ function _acctAddRow(prefill = {}) {
   row.querySelector('.acct-eye').addEventListener('click', function () {
     const inp = row.querySelector('.acct-pass');
     inp.type = inp.type === 'password' ? 'text' : 'password';
-    this.textContent = inp.type === 'password' ? 'ðŸ‘ï¸' : 'ðŸ™ˆ';
+    this.textContent = inp.type === 'password' ? '👁️' : '🙈';
   });
   row.querySelector('.acct-del').addEventListener('click', () => {
     row.remove();
@@ -2242,7 +2242,7 @@ function _acctAutoSave(row) {
   _acctTimers[row.id] = setTimeout(() => {
     _acctPersist();
     if (badge) {
-      badge.textContent = 'âœ…'; badge.className = 'acct-save-badge saved';
+      badge.textContent = '✅'; badge.className = 'acct-save-badge saved';
       setTimeout(() => { badge.textContent = ''; badge.className = 'acct-save-badge'; }, 2000);
     }
   }, 700);
@@ -2263,8 +2263,8 @@ function _acctPersist() {
   settingsBridge.save('accounts', rows).catch(() => {});
 }
 
-// â”€â”€ UI Tab: theme / color / font / slider wiring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// â”€â”€ Theme token tables â€” applied directly to documentElement so all CSS vars â”€
+// ── UI Tab: theme / color / font / slider wiring ─────────────────────────────
+// ── Theme token tables — applied directly to documentElement so all CSS vars ─
 // update atomically regardless of cascade order or inline-style conflicts.
 const _THEMES = {
   dark: {
@@ -2331,7 +2331,7 @@ function _applyThemeVars(theme) {
   if (theme !== 'dark') document.body.classList.add(theme + '-mode');
 }
 
-// â”€â”€ Exported theme API (used by toolbar and boot) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Exported theme API (used by toolbar and boot) ────────────────────────────
 export const THEME_NAMES = Object.keys(_THEMES); // ['dark','light','midnight','ocean']
 export function applyTheme(theme) {
   _applyThemeVars(theme);
@@ -2360,7 +2360,7 @@ function _syncSwatchesToTheme(theme) {
 }
 
 function _wireUITab() {
-  // â”€â”€ Template cards â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Template cards ──────────────────────────────────────────────────────
   _drawer.querySelectorAll('.sd-template').forEach((card) => {
     card.addEventListener('click', () => {
       _drawer.querySelectorAll('.sd-template').forEach((c) => {
@@ -2376,7 +2376,7 @@ function _wireUITab() {
     });
   });
 
-  // â”€â”€ Color swatches â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Color swatches ──────────────────────────────────────────────────────
   _drawer.querySelectorAll('.sd-swatch').forEach((sw) => {
     sw.addEventListener('click', () => {
       const cssVar = sw.dataset.var;
@@ -2388,7 +2388,7 @@ function _wireUITab() {
     });
   });
 
-  // â”€â”€ Custom color pickers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Custom color pickers ────────────────────────────────────────────────
   _drawer.querySelectorAll('.sd-color-custom').forEach((inp) => {
     inp.addEventListener('input', () => {
       if (inp.dataset.var) document.documentElement.style.setProperty(inp.dataset.var, inp.value);
@@ -2396,7 +2396,7 @@ function _wireUITab() {
     });
   });
 
-  // â”€â”€ Sliders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Sliders ─────────────────────────────────────────────────────────────
   const sliders = [
     { id: 'sl-opacity', valId: 'sl-opacity-val', suffix: '%', cssVar: '--panel-opacity' },
     { id: 'sl-blur',    valId: 'sl-blur-val',    suffix: 'px', cssVar: '--panel-blur' },
@@ -2414,7 +2414,7 @@ function _wireUITab() {
     });
   });
 
-  // â”€â”€ S28: SLA Target slider â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── S28: SLA Target slider ─────────────────────────────────────────────────
   const slaSl = document.getElementById('sl-sla-target');
   const slaVl = document.getElementById('sl-sla-target-val');
   if (slaSl && slaVl) {
@@ -2430,7 +2430,7 @@ function _wireUITab() {
     });
   }
 
-  // â”€â”€ Font buttons â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Font buttons ───────────────────────────────────────────────────────────
   _drawer.querySelectorAll('.sd-font-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       _drawer.querySelectorAll('.sd-font-btn').forEach((b) => b.classList.remove('active'));
@@ -2446,7 +2446,7 @@ function _wireUITab() {
     });
   });
 
-  // â”€â”€ Chat floater size chips â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Chat floater size chips ─────────────────────────────────────────────
   const CHAT_SIZES = {
     compact: { w: '300px', h: '360px' },
     normal:  { w: '360px', h: '480px' },
@@ -2464,17 +2464,17 @@ function _wireUITab() {
     });
   });
 
-  // â”€â”€ Compact toggle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Compact toggle ──────────────────────────────────────────────────────
   const compact = document.getElementById('toggle-compact');
   if (compact) compact.addEventListener('change', _saveUI);
 
-  // â”€â”€ NEXUS THEME BUILDER WIRING â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── NEXUS THEME BUILDER WIRING ─────────────────────────────────────────────
   _wireNexusThemeBuilder();
 }
 
 function _wireNexusThemeBuilder() {
   // Uses top-level imports: setPreset, setTheme, getThemeConfig, resetTheme, PRESETS
-  // Nexus â†’ Fleet theme bridge mapping
+  // Nexus → Fleet theme bridge mapping
   const NEXUS_TO_FLEET = { default: 'dark', void: 'midnight', solar: 'dark', arctic: 'ocean', ember: 'midnight' };
 
 
@@ -2612,7 +2612,7 @@ function _wireNexusThemeBuilder() {
 }
 
 
-// â”€â”€ Collect UI prefs and persist (debounced 400ms) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Collect UI prefs and persist (debounced 400ms) ──────────────────────────
 let _saveUITimer = null;
 function _saveUI() {
   clearTimeout(_saveUITimer);
@@ -2656,7 +2656,7 @@ function _saveUI() {
   }, 400);
 }
 
-// â”€â”€ Apply saved UI prefs to DOM + CSS vars â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Apply saved UI prefs to DOM + CSS vars ───────────────────────────────────
 function _applyUI(prefs) {
   if (!prefs) return;
 
@@ -2667,7 +2667,7 @@ function _applyUI(prefs) {
     inter:  '"Inter",sans-serif',
   };
 
-  // Theme â€” apply ALL token vars so there's no cascade conflict with swatches
+  // Theme — apply ALL token vars so there's no cascade conflict with swatches
   if (prefs.theme) {
     _applyThemeVars(prefs.theme);
     // Sync active card in drawer
@@ -2684,7 +2684,7 @@ function _applyUI(prefs) {
     const themeTokens = _THEMES[prefs.theme] || {};
     Object.entries(prefs.swatches).forEach(([cssVar, color]) => {
       // Skip stale swatches: if theme controls this var and saved value doesn't match
-      // the saved theme's token, it was set while on a different theme â€” ignore it.
+      // the saved theme's token, it was set while on a different theme — ignore it.
       const expected = themeTokens[cssVar];
       if (expected !== undefined && expected !== color) return;
       document.documentElement.style.setProperty(cssVar, color);
@@ -2740,7 +2740,7 @@ function _applyUI(prefs) {
   }
 }
 
-// â”€â”€ Populate fields on open â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Populate fields on open ──────────────────────────────────────────────────
 function _populate() {
   settingsBridge.getAll().then((all) => {
     if (!all) return;
@@ -2794,11 +2794,11 @@ function _populate() {
   }).catch(() => {});
 }
 
-// â”€â”€ Apply saved UI prefs on cold boot (before drawer ever opens) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Apply saved UI prefs on cold boot (before drawer ever opens) ─────────────
 export function applyBootPrefs() {
   settingsBridge.getAll().then((all) => {
     if (all && all.ui_prefs) {
-      // Always apply theme vars on boot â€” doesn't require _drawer to exist
+      // Always apply theme vars on boot — doesn't require _drawer to exist
       if (all.ui_prefs.theme) _applyThemeVars(all.ui_prefs.theme);
       // Full UI sync (swatches, sliders, font) only if drawer is mounted
       if (_drawer) _applyUI(all.ui_prefs);
@@ -2806,12 +2806,12 @@ export function applyBootPrefs() {
   }).catch(() => {});
 }
 
-// â”€â”€ Escape HTML attr values â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Escape HTML attr values ──────────────────────────────────────────────────
 function _esc(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 }
 
-// â”€â”€ Chat Floater (desktop bubble) opacity control â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Chat Floater (desktop bubble) opacity control ───────────────────────────
 function _wireChatFloaterSection() {
   const slider = document.getElementById('sl-bubble-opacity');
   const valEl  = document.getElementById('sl-bubble-opacity-val');
@@ -2830,7 +2830,7 @@ function _wireChatFloaterSection() {
   });
 }
 
-// â”€â”€ Export: init â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Export: init ──────────────────────────────────────────────────────────────
 export function init() {
   // Inject drawer HTML into body
   const wrap = document.createElement('div');
@@ -2858,7 +2858,7 @@ export function init() {
 
   // Wire all integration sections
   
-  // â”€â”€ Partner Forms (top-level, always registers) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Partner Forms (top-level, always registers) ─────────────────────────
   (function _wireFormsTopLevel() {
     const sheetInput = document.getElementById('forms-sheet-id');
     const pollSelect = document.getElementById('forms-poll-interval');
@@ -2894,12 +2894,12 @@ export function init() {
         statusEl.textContent = '\u2705 Connected! ' + (rows.length - 1) + ' row(s) found';
         statusEl.className = 'sd-status ok'; statusEl.style.display = '';
         const result = await window.partner.pollForms({ csvText: csv });
-        if (result && result.newCount > 0) { statusEl.textContent = '\u2705 ' + result.newCount + ' new request(s) â€” AI classifying...'; }
+        if (result && result.newCount > 0) { statusEl.textContent = '\u2705 ' + result.newCount + ' new request(s) — AI classifying...'; }
       } catch(e) { statusEl.textContent = '\u274c ' + e.message; statusEl.className = 'sd-status err'; statusEl.style.display = ''; }
     });
   })();
 
-  // â”€â”€ SP Workbook Discover â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── SP Workbook Discover ────────────────────────────────────────────────
   document.getElementById('sp-wb-discover').addEventListener('click', async () => {
     console.log('[SP Discover] Button clicked');
     const urlInput = document.getElementById('sp-wb-url');
@@ -2993,9 +2993,9 @@ export function init() {
         <div style="background:#161b22;border:1px solid #21262d;border-radius:4px;padding:8px 10px;margin-bottom:4px;">
           <div style="display:flex;justify-content:space-between;align-items:center;">
             <div style="font-size:11px;font-weight:600;color:#c9d1d9;">${wb.name}</div>
-            <button onclick="window._removeWB(${i})" style="background:none;border:none;color:#f85149;cursor:pointer;font-size:11px;">âœ•</button>
+            <button onclick="window._removeWB(${i})" style="background:none;border:none;color:#f85149;cursor:pointer;font-size:11px;">✕</button>
           </div>
-          <div style="font-size:9px;color:#6e7681;margin-top:2px;">${(wb.carriers||[]).map(c => c.code + ' â†’ ' + (c.sheetName || c.sheet)).join(' | ')}</div>
+          <div style="font-size:9px;color:#6e7681;margin-top:2px;">${(wb.carriers||[]).map(c => c.code + ' → ' + (c.sheetName || c.sheet)).join(' | ')}</div>
         </div>
       `).join('');
   }
@@ -3034,7 +3034,7 @@ export function init() {
     if (to === 'settings') _open();
   });
 
-  // â”€â”€ Apply saved theme + CSS vars immediately on startup (before drawer opens) â”€â”€
+  // ── Apply saved theme + CSS vars immediately on startup (before drawer opens) ──
   settingsBridge.getAll().then((all) => {
     if (!all?.ui_prefs) return;
     if (all.ui_prefs.theme) _applyThemeVars(all.ui_prefs.theme);
