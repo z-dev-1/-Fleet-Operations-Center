@@ -15,6 +15,7 @@
  */
 
 import bus                                         from '../bus.js';
+import state                                        from '../state.js';
 import * as notifSounds                            from '../notif-sounds.js';
 import { settings as settingsBridge }              from '../bridge.js';
 import { auth     as authBridge }                  from '../bridge.js';
@@ -1616,8 +1617,7 @@ function _wireGraphMail() {
 // Operator codes from the latest fleet scan, for per-channel data-scope pickers.
 function _parFleetOperators() {
   try {
-    const d = (window.fleet && typeof window.fleet.getData === 'function') ? window.fleet.getData() : null;
-    const rows = (d && d.rows) || [];
+    const rows = (state.slice('fleet').rows) || [];
     const set = {};
     rows.forEach(function(r){ const o=(r.operator||'').trim(); if(o) set[o.toUpperCase()]=true; });
     return Object.keys(set).sort();

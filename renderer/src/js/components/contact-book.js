@@ -6,6 +6,7 @@
  */
 
 import bus from '../bus.js';
+import state from '../state.js';
 
 let _el = null;
 let _open = false;
@@ -20,8 +21,7 @@ const _attr = (s) => _esc(s).replace(/"/g, '&quot;');
 // Operator codes from the latest fleet scan, for the per-contact data-scope picker.
 function _fleetOperators() {
   try {
-    const d = (window.fleet && typeof window.fleet.getData === 'function') ? window.fleet.getData() : null;
-    const rows = (d && d.rows) || [];
+    const rows = (state.slice('fleet').rows) || [];
     const set = {};
     rows.forEach(function(r){ const o = (r.operator||'').trim(); if(o) set[o.toUpperCase()] = true; });
     return Object.keys(set).sort();
