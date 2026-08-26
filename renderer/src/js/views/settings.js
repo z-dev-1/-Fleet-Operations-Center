@@ -1767,6 +1767,21 @@ function _wirePartnerAutoReply() {
     showStatus('\u274c Failed to load config: ' + e.message, 'err');
   });
 
+  // Re-render the channel list when fleet data arrives, so the per-channel
+  // operator dropdowns populate. This section wires ONCE at app startup —
+  // before fleet data is loaded into state — so the first render has no
+  // operator options. Repainting on fleet:data (guarded on _currentConfig)
+  // backfills the options once a scan lands. Cheap: only rebuilds the list HTML.
+  bus.on('fleet:data', () => {
+    // Only repaint if the operator options are currently empty (i.e. the first
+    // render happened before fleet data existed). Avoids wiping an in-progress
+    // selection on every routine sync push once options are already populated.
+    if (!_currentConfig) return;
+    const _firstSel = listEl && listEl.querySelector('.par-ch-ops');
+    const _needsBackfill = _firstSel && _firstSel.options.length === 0 && _parFleetOperators().length > 0;
+    if (_needsBackfill) render(_currentConfig);
+  });
+
   // Scan channels button
   if (scanBtn) {
     scanBtn.addEventListener('click', async () => {
