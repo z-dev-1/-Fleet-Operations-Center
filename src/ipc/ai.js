@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ipc/ai.js - AI features IPC handlers
  * ai:suggest, ai:ask, ai:chat
  * orcha:get-config, orcha:save-config, orcha:test, orcha:status, orcha:mwinit, orcha:refresh-creds
@@ -22,7 +22,7 @@ const fs     = require('fs');
 const { handle, requireString, requireStringMax, requireArrayMax } = require('./_safe');
 const { ConfigError } = require('../utils/errors');
 
-// ── Phase 3: IPC rate limiter for expensive AI operations ────────────────────
+// â”€â”€ Phase 3: IPC rate limiter for expensive AI operations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Prevents renderer from flooding AI backends (Bedrock $$, Orcha WS) with
 // concurrent requests. Simple per-channel concurrency cap: excess calls queue
 // and resolve in order. No external dependency.
@@ -46,19 +46,23 @@ function _createLimiter(maxConcurrent) {
 const _aiAskLimit  = _createLimiter(1);  // max 1 concurrent ai:ask
 const _aiChatLimit = _createLimiter(1);  // max 1 concurrent ai:chat
 
-// ── Issue #15 / #8: size caps ────────────────────────────────────────────────
-const MAX_PROMPT_LEN       = 32000;   // characters — ai:ask, ai:chat
-const MAX_DAILY_NOTES_BATCH = 100;   // units    — daily-notes:run
+// â”€â”€ Issue #15 / #8: size caps â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+const MAX_PROMPT_LEN       = 32000;   // characters â€” ai:ask, ai:chat
+const MAX_DAILY_NOTES_BATCH = 100;   // units    â€” daily-notes:run
 const MAX_SUGGEST_KEYS      = 100;   // keys on unit object for ai:suggest (raised S28: enriched units have ~71 keys)
 
 
-// ── Site / unit email report builder ──────────────────────────────────────────
+// â”€â”€ Site / unit email report builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Returns plain-text (not HTML) so the body renders correctly in OWA/mailto.
 // Called from the EMAIL action handler when userMsg references a site or unit.
-function _buildEmailReport(userMsg, rows, notesStore) {
+function _buildEmailReport(userMsg, rows, notesStore, allowedOperators) {
   const today = new Date().toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' });
+  if (Array.isArray(allowedOperators) && allowedOperators.length) {
+    var _allow = allowedOperators.map(function(o){ return String(o||"").toUpperCase().trim(); }).filter(Boolean);
+    if (_allow.length) { rows = (rows || []).filter(function(r){ return _allow.indexOf((r.operator||"").toUpperCase()) !== -1; }); }
+  }
 
-  // Match against actual known sites/operators from the data — not a fixed regex.
+  // Match against actual known sites/operators from the data â€” not a fixed regex.
   // This catches all-letter operator codes (AGNLI, TUZR, etc.) that the old
   // /[A-Z]{2,4}\d{2,3}/ pattern silently skipped.
   const msgUpper    = userMsg.toUpperCase();
@@ -91,7 +95,7 @@ function _buildEmailReport(userMsg, rows, notesStore) {
   const uptakeRate = total ? Math.round((avail.length / total) * 100) : 0;
 
   const lines = [];
-  lines.push('Fleet Report — ' + label);
+  lines.push('Fleet Report â€” ' + label);
   lines.push('Generated: ' + today);
   lines.push('');
   lines.push('SITE SUMMARY');
@@ -134,7 +138,7 @@ function _buildEmailReport(userMsg, rows, notesStore) {
     });
   }
 
-  // Uptake (fleet.uptake.com) predictive-maintenance insights — full detail,
+  // Uptake (fleet.uptake.com) predictive-maintenance insights â€” full detail,
   // not just risk score, so the AI has real diagnostic content to work with.
   const withInsights = targetRows.filter(function(r){ return Array.isArray(r.insightsList) && r.insightsList.length; });
   if (withInsights.length) {
@@ -163,7 +167,7 @@ function _buildEmailReport(userMsg, rows, notesStore) {
   return lines.join('\n');
 }
 
-// ── Unified Orcha action handler (used by bubble + main + phone companion) ──
+// â”€â”€ Unified Orcha action handler (used by bubble + main + phone companion) â”€â”€
 // Builds the full fleet-context prompt (per-unit detail, contacts, memory,
 // reminders), calls the AI, parses {reply, actions:[...]}, executes safe
 // actions immediately, and returns pendingConfirm items for anything that
@@ -201,11 +205,11 @@ function _tryFastPathAnswer(userMsg, rows, unavail) {
   return null;
 }
 
-// opts.signal    — optional AbortSignal threaded into relay.ask(); lets a
+// opts.signal    â€” optional AbortSignal threaded into relay.ask(); lets a
 //                  caller (e.g. Slack Just Me's per-message job) cancel a
 //                  hung AI call and clean up without waiting for the 240s
 //                  outer safety timeout.
-// opts.requestId — optional caller-supplied id for correlated logging.
+// opts.requestId â€” optional caller-supplied id for correlated logging.
 async function processOrchaAction(userMsg, opts = {}) {
   requireStringMax(userMsg, 'userMsg', MAX_PROMPT_LEN);
     const store = require('../store');
@@ -237,10 +241,10 @@ async function processOrchaAction(userMsg, opts = {}) {
       return { ok: true, text: _fastAnswer, action: 'chat', fastPath: true };
     }
 
-    // FIX (2026-08-17): the previous regex was /([A-Za-z]?\\d{5,8})/ — the
+    // FIX (2026-08-17): the previous regex was /([A-Za-z]?\\d{5,8})/ â€” the
     // doubled backslash meant it matched a literal "\d", never an actual digit,
     // so unit-specific detail was NEVER attached (every unit summary went in
-    // blind, and the model would hallucinate — e.g. asked for one unit, it
+    // blind, and the model would hallucinate â€” e.g. asked for one unit, it
     // echoed a different ID with no real data). Rather than rely on a shape
     // guess at all, match against the REAL equipment IDs present in the fleet
     // data: find the longest equipmentId that appears as a whole token in the
@@ -249,7 +253,7 @@ async function processOrchaAction(userMsg, opts = {}) {
     // FIX (2026-08-17): understand what the user MEANS the way they do.
     // One resolver (src/orcha/ai-context.js resolveEntities) matches the message
     // against the REAL units, domicile SITES, and OPERATORS in the data as whole
-    // tokens — so "ABE40" resolves as the ABE40 site, "AMZ1997" as that unit,
+    // tokens â€” so "ABE40" resolves as the ABE40 site, "AMZ1997" as that unit,
     // "ABEOW" as the operator, etc. buildFleetContext then emits focused,
     // data-rich detail (unit timelines, or a site/operator roll-up) instead of
     // the old brittle /\d{5,8}/ regex that silently attached nothing.
@@ -264,7 +268,7 @@ async function processOrchaAction(userMsg, opts = {}) {
     const siteReport = _buildEmailReport(userMsg, rows, notesStore);
 
     // Anti-hallucination guard: only if the message names an ID-like token AND
-    // the resolver found NOTHING (no unit, site, or operator) — then tell the
+    // the resolver found NOTHING (no unit, site, or operator) â€” then tell the
     // model plainly there's no data so it doesn't invent a summary. With the new
     // resolver this now correctly does NOT fire for real sites like ABE40.
     let notFoundNote = '';
@@ -303,7 +307,7 @@ async function processOrchaAction(userMsg, opts = {}) {
 
     
     const d = new Date(); const dateStr = String(d.getMonth()+1).padStart(2,'0')+'/'+String(d.getDate()).padStart(2,'0'); const timeStr = String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
-    const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human — warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- If a DETAILED FLEET REPORT is provided below, that is your full and only source of truth for that site/operator/unit -- it has every unit status, vendor, down time, ETC/PM, issue details and full repair timeline/notes, plus the uptake rate (% available), AND -- separately -- any Uptake (fleet.uptake.com) predictive-maintenance risk score/label and full insight details (title, subsystem, guidance, active/resolved, first/last seen) under an UPTAKE INSIGHTS section for units that have been scraped by that third-party telematics tool. Uptake rate and Uptake insights are two different things -- do not conflate them, report both when present. Use ALL of it when relevant to what was asked: whether the user is asking a question (summarize thoroughly -- status, vendor, timeline, issue, uptake rate, uptake risk/insights) or sending it to someone (the system attaches the whole report; your job is just the intro line). Same data either way -- only the framing changes.\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nCRITICAL — SEND vs ASK:\n- "send update/report/data/notes to [person] for [site]" = YOU are DELIVERING fleet info TO them.\n  Write the message as the person SENDING the report, not asking for one.\n  Your message body is just a 1-sentence intro — the system attaches the real data automatically.\n  WRONG: "Could you provide an update on AVP40?" (that is asking them)\n  RIGHT:  "Here is the latest AVP40 fleet status and notes, as requested." (that is delivering)\n- Only generate a question/follow-up when the user explicitly says "ask", "follow up", or "check on".\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle_or_email,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable,reason:text}) — changes the unit REAL lifecycle in AAP (available=Active, unavailable=Unavailable); reason optional, defaults to Healthy for Active; user confirms before it commits, PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Send to whoever the user specifies. If user gives an email address or a name not in KNOWN SLACK CONTACTS, use it directly as recipient — the system will resolve it. NEVER refuse or ask for confirmation because someone is not in the contact list. Just attempt the send.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+richContext+(siteReport?'\\n\\nDETAILED FLEET REPORT (for delivery/attachment):\\n'+siteReport:'')+notFoundNote+reminderText+memoryContext+contactList+emailContactList+'\\nUser: '+userMsg;
+    const prompt = 'You are a professional fleet operations coordinator writing on behalf of the user. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nPERSONALITY:\n- You communicate like a professional human â€” warm but concise\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- If a DETAILED FLEET REPORT is provided below, that is your full and only source of truth for that site/operator/unit -- it has every unit status, vendor, down time, ETC/PM, issue details and full repair timeline/notes, plus the uptake rate (% available), AND -- separately -- any Uptake (fleet.uptake.com) predictive-maintenance risk score/label and full insight details (title, subsystem, guidance, active/resolved, first/last seen) under an UPTAKE INSIGHTS section for units that have been scraped by that third-party telematics tool. Uptake rate and Uptake insights are two different things -- do not conflate them, report both when present. Use ALL of it when relevant to what was asked: whether the user is asking a question (summarize thoroughly -- status, vendor, timeline, issue, uptake rate, uptake risk/insights) or sending it to someone (the system attaches the whole report; your job is just the intro line). Same data either way -- only the framing changes.\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- Never add recommendations or suggestions unless user explicitly asks\n\nCRITICAL â€” SEND vs ASK:\n- "send update/report/data/notes to [person] for [site]" = YOU are DELIVERING fleet info TO them.\n  Write the message as the person SENDING the report, not asking for one.\n  Your message body is just a 1-sentence intro â€” the system attaches the real data automatically.\n  WRONG: "Could you provide an update on AVP40?" (that is asking them)\n  RIGHT:  "Here is the latest AVP40 fleet status and notes, as requested." (that is delivering)\n- Only generate a question/follow-up when the user explicitly says "ask", "follow up", or "check on".\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle_or_email,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable,reason:text}) â€” changes the unit REAL lifecycle in AAP (available=Active, unavailable=Unavailable); reason optional, defaults to Healthy for Active; user confirms before it commits, PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text})\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Send to whoever the user specifies. If user gives an email address or a name not in KNOWN SLACK CONTACTS, use it directly as recipient â€” the system will resolve it. NEVER refuse or ask for confirmation because someone is not in the contact list. Just attempt the send.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent data.\\n\\n'+richContext+(siteReport?'\\n\\nDETAILED FLEET REPORT (for delivery/attachment):\\n'+siteReport:'')+notFoundNote+reminderText+memoryContext+contactList+emailContactList+'\\nUser: '+userMsg;
     try {
       logger.info('[ai:orcha-action] Calling relay.ask (' + prompt.length + ' chars)...');
       const aiText = await relay.ask(prompt, { signal: opts.signal, requestId: opts.requestId });
@@ -321,15 +325,20 @@ async function processOrchaAction(userMsg, opts = {}) {
           // Build real fleet data body.
           // If the user asked to send data for a site/operator but we have no fleet data
           // loaded yet, do NOT fall back to the AI's invented text (which is usually a
-          // question asking the recipient for data — the opposite of what was intended).
-          const realReport  = _buildEmailReport(userMsg, rows, notesStore);
+          // question asking the recipient for data â€” the opposite of what was intended).
+          // Per-operator scoping: if the target contact is tagged with operators,
+          // the report is hard-limited to those operators (empty = full, unchanged).
+          var _scRL = a.recipient.toLowerCase().replace(/^@/, "");
+          var _scContact = allContacts.find(function(ct){ return (ct.name && ct.name.toLowerCase().includes(_scRL)) || (ct.slackId && ct.slackId.toLowerCase() === _scRL) || (ct.email && ct.email.toLowerCase() === _scRL); });
+          var _scOps = (_scContact && Array.isArray(_scContact.operators)) ? _scContact.operators : [];
+          const realReport  = _buildEmailReport(userMsg, rows, notesStore, _scOps);
           const _msgUp      = userMsg.toUpperCase();
           const _knownS     = [...new Set(rows.map(r => (r.domicileSite||''). toUpperCase()).filter(Boolean))];
           const _knownO     = [...new Set(rows.map(r => (r.operator||''). toUpperCase()).filter(Boolean))];
           const _siteHit    = _knownS.find(s => s.length > 2 && _msgUp.includes(s))
                            || _knownO.find(o => o.length > 2 && _msgUp.includes(o));
           if (!realReport && _siteHit) {
-            // User asked to send data for a known site but report is empty — stop, explain
+            // User asked to send data for a known site but report is empty â€” stop, explain
             results.push('Slack not sent: no fleet data found for ' + _siteHit + '. Sync fleet data first.');
             continue; // eslint-disable-line no-continue
           }
@@ -350,7 +359,7 @@ async function processOrchaAction(userMsg, opts = {}) {
             (ct.email && ct.email.toLowerCase() === rLower)
           );
 
-          // Never send automatically — regardless of how the user phrased the
+          // Never send automatically â€” regardless of how the user phrased the
           // request, a real Slack send always needs an explicit confirm click.
           // This is the single choke point every AI-driven SLACK action passes
           // through, so no phrasing can bypass the confirmation prompt.
@@ -363,7 +372,7 @@ async function processOrchaAction(userMsg, opts = {}) {
             body: slackBody,
             isRealData: !!realReport
           });
-          results.push('Ready to send Slack message to ' + (matchedContact ? matchedContact.name : a.recipient) + ' — confirm below.');
+          results.push('Ready to send Slack message to ' + (matchedContact ? matchedContact.name : a.recipient) + ' â€” confirm below.');
         }
         if (a.type==='SYNC') results.push('Sync triggered');
         if (a.type==='SP_PUSH') results.push('SP push triggered');
@@ -377,11 +386,15 @@ async function processOrchaAction(userMsg, opts = {}) {
               if (emailContact) toAddr = emailContact.email;
             }
             if (!toAddr.includes('@')) {
-              results.push('Email failed: no email address found for "' + (a.to||'') + '" — add one in Contact Book');
+              results.push('Email failed: no email address found for "' + (a.to||'') + '" â€” add one in Contact Book');
             } else {
               // Build a real data report. If user asked to send data for a known
-              // site but we have nothing, stop — do not send AI's invented question.
-              const reportHtml  = _buildEmailReport(userMsg, rows, notesStore);
+              // site but we have nothing, stop â€” do not send AI's invented question.
+              // Per-operator scoping for email recipients (empty = full, unchanged).
+              var _emTo = (a.to || "").toLowerCase().trim();
+              var _emC = allContacts.find(function(ct){ return (ct.email && ct.email.toLowerCase() === _emTo) || (ct.name && ct.name.toLowerCase().includes(_emTo)); });
+              var _emScOps = (_emC && Array.isArray(_emC.operators)) ? _emC.operators : [];
+              const reportHtml  = _buildEmailReport(userMsg, rows, notesStore, _emScOps);
               const _emMsgUp    = userMsg.toUpperCase();
               const _emSites    = [...new Set(rows.map(r => (r.domicileSite||''). toUpperCase()).filter(Boolean))];
               const _emOps      = [...new Set(rows.map(r => (r.operator||''). toUpperCase()).filter(Boolean))];
@@ -400,7 +413,7 @@ async function processOrchaAction(userMsg, opts = {}) {
               const autoSubject = _label2
                 ? 'Fleet Report \u2014 ' + _label2 + ' \u2014 ' + new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})
                 : null;
-              // Never send automatically — same choke point as SLACK above.
+              // Never send automatically â€” same choke point as SLACK above.
               // Every AI-driven EMAIL action lands here and waits for confirm.
               pendingConfirm.push({
                 id: 'pc' + Date.now() + Math.random().toString(36).slice(2, 6),
@@ -411,13 +424,13 @@ async function processOrchaAction(userMsg, opts = {}) {
                 body: reportHtml || a.body || '',
                 isRealData: !!reportHtml
               });
-              results.push('Ready to email ' + toAddr + ' — confirm below.');
+              results.push('Ready to email ' + toAddr + ' â€” confirm below.');
             }
           } catch(emailErr) { results.push('Email error: ' + emailErr.message); }
         }
         if (a.type==='DRAFT_FOLLOWUPS') {
           const stale = rows.filter(function(r){ return (r.lifecycleState||'').toLowerCase().includes('unavail') && r.vendor && r.vendor !== '--'; });
-          const drafts = stale.slice(0,5).map(function(r){ return r.equipmentId + ' (' + r.vendor + '): Request status update — unit down ' + (r.workDuration||'?') + '.'; });
+          const drafts = stale.slice(0,5).map(function(r){ return r.equipmentId + ' (' + r.vendor + '): Request status update â€” unit down ' + (r.workDuration||'?') + '.'; });
           results.push('Follow-up drafts:\n' + drafts.join('\n'));
         }
         if (a.type==='DAILY_NOTES') {
@@ -442,7 +455,7 @@ async function processOrchaAction(userMsg, opts = {}) {
         }
         if (a.type==='DRAFT_FOLLOWUPS') {
           const stale = rows.filter(function(r){ return (r.lifecycleState||'').toLowerCase().includes('unavail') && r.vendor && r.vendor !== '--'; });
-          const drafts = stale.slice(0,5).map(function(r){ return r.equipmentId + ' (' + r.vendor + '): Request status — down ' + (r.workDuration||'?'); });
+          const drafts = stale.slice(0,5).map(function(r){ return r.equipmentId + ' (' + r.vendor + '): Request status â€” down ' + (r.workDuration||'?'); });
           results.push('Follow-up drafts:\n' + drafts.join('\n'));
         }
         if (a.type==='CREATE_WR'&&a.unit&&a.issue) {
@@ -491,8 +504,8 @@ async function processOrchaAction(userMsg, opts = {}) {
             store.save('partnerWRs_review', review2);
             try { const _w = require('electron').BrowserWindow.getAllWindows()[0]; if(_w) _w.webContents.send('partner:new-requests', { count: review2.length }); } catch(e){}
             results.push(chatReq.status === 'ready'
-              ? 'Added to WR review queue for ' + a.unit + ': "' + (chatReq.aiTitle || a.issue) + '" — approve in Partner Requests to submit to AAP.'
-              : 'Logged request for ' + a.unit + ' but AI classification failed — check Partner Requests review queue to fill in manually.');
+              ? 'Added to WR review queue for ' + a.unit + ': "' + (chatReq.aiTitle || a.issue) + '" â€” approve in Partner Requests to submit to AAP.'
+              : 'Logged request for ' + a.unit + ' but AI classification failed â€” check Partner Requests review queue to fill in manually.');
           } catch (e) {
             results.push('Could not queue WR for ' + a.unit + ': ' + e.message);
           }
@@ -501,11 +514,11 @@ async function processOrchaAction(userMsg, opts = {}) {
           // MOVE_UNIT performs the REAL AAP lifecycle change (via setLifecycle),
           // not just a local display update. Route through pendingConfirm so a
           // conversational request ("make unit X available") requires an explicit
-          // confirm click before mutating AAP — same safety gate as Slack/email.
+          // confirm click before mutating AAP â€” same safety gate as Slack/email.
           const fd2 = store.load('fleetData', {});
           const target = (fd2.rows||[]).find(function(r){return r.equipmentId===a.unit;});
           if (!target) {
-            results.push('Cannot change lifecycle: unit ' + a.unit + ' not found in fleet data — sync first.');
+            results.push('Cannot change lifecycle: unit ' + a.unit + ' not found in fleet data â€” sync first.');
           } else if (!target.assetUrl) {
             results.push('Cannot change lifecycle for ' + a.unit + ': no AAP asset URL (re-sync the app, then retry).');
           } else {
@@ -515,7 +528,7 @@ async function processOrchaAction(userMsg, opts = {}) {
               : (_state === 'Active' ? 'Healthy' : '');
             // Open work-order awareness: if flipping to Active while an open WR
             // exists, surface it in the confirm prompt so the user knows AAP may
-            // block it (they can still confirm to attempt — "insist").
+            // block it (they can still confirm to attempt â€” "insist").
             const _openU = parseInt(target.openUnplanned, 10) || 0;
             const _openP = parseInt(target.openPlanned, 10) || 0;
             const _woNote = (_state === 'Active' && (_openU + _openP) > 0)
@@ -551,7 +564,7 @@ async function processOrchaAction(userMsg, opts = {}) {
           store.save('schedules', schedules);
           results.push('Scheduled: ' + a.action + ' (' + a.cron + ')');
         }
-        // (duplicate EMAIL handler removed — handled above with real report body)
+        // (duplicate EMAIL handler removed â€” handled above with real report body)
         if (a.type==='REMIND'&&a.unit&&a.when&&a.note) {
           const reminders = store.load('reminders', []);
           reminders.push({unit:a.unit, when:a.when, note:a.note, created:new Date().toISOString()});
@@ -564,7 +577,7 @@ async function processOrchaAction(userMsg, opts = {}) {
             const dms = await readDMs(10);
             if (dms && dms.length) {
               const summary = dms.slice(0,5).map(function(m){ return (m.user||'unknown') + ': ' + (m.text||'').substring(0,100); }).join('\n');
-              results.push('📩 Recent messages:\n' + summary);
+              results.push('ðŸ“© Recent messages:\n' + summary);
             } else { results.push('No new messages'); }
           } catch(e) { results.push('Slack read error: ' + e.message); }
         }
@@ -584,7 +597,7 @@ async function processOrchaAction(userMsg, opts = {}) {
     } catch(e) { return {ok:false,text:'Error:'+e.message,action:'chat'}; }
 }
 
-// ── Confirmed send ─────────────────────────────────────────────────────────
+// â”€â”€ Confirmed send â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // processOrchaAction() never sends directly -- it returns a pendingConfirm
 // item (recipient + real report body) and the caller (FAB renderer or phone
 // companion) must get an explicit confirmation before this runs. Nothing
@@ -620,12 +633,12 @@ async function confirmSend(item) {
         plainText: item.body || '',
       });
       if (emailRes.ok) return { ok: true, message: 'Email sent to ' + item.to };
-      // SMTP failed — open the in-app composer pre-filled so the user can still send.
+      // SMTP failed â€” open the in-app composer pre-filled so the user can still send.
       try {
         const _ew = require('electron').BrowserWindow.getAllWindows()[0];
         if (_ew) _ew.webContents.send('email:compose', { to: item.to, subject: item.subject, body: item.body || '' });
       } catch (_) {}
-      return { ok: false, error: 'SMTP failed — composer opened instead' };
+      return { ok: false, error: 'SMTP failed â€” composer opened instead' };
     }
     if (item.channel === 'lifecycle') {
       // Real AAP lifecycle mutation, gated behind the confirm click.
@@ -676,8 +689,8 @@ function registerAIHandlers(ctx) {
   // Issue #15: prompt length cap
   // Phase 3: rate-limited to 1 concurrent call
   // FIX (2026-08-17): was using askOrcha (WS-only, no fallback) which hangs
-  // when the Orcha WS queue is busy. Switch to relay.ask — the full automatic
-  // chain (Orcha WS → CLI → Claude Code → Bedrock) so ai:ask is reliable for
+  // when the Orcha WS queue is busy. Switch to relay.ask â€” the full automatic
+  // chain (Orcha WS â†’ CLI â†’ Claude Code â†’ Bedrock) so ai:ask is reliable for
   // all callers (Daily Call AI Review, WBR Generate, etc.)
   handle('ai:ask', async (_e, prompt) => {
     requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
@@ -713,7 +726,7 @@ function registerAIHandlers(ctx) {
     } catch (e) {
       logger.warn('Fleet Chat fallback to askOrcha:', e.message);
       const result = await askOrcha(prompt);
-      // askOrcha may return a string or an object — normalise
+      // askOrcha may return a string or an object â€” normalise
       if (typeof result === 'string') return { ok: true, text: result, path: 'fallback' };
       return { ...result, path: 'fallback' };
     }
@@ -734,7 +747,7 @@ function registerAIHandlers(ctx) {
   handle('orcha:mwinit',        async () => relay.runMwinit());
   handle('orcha:refresh-creds', () => { relay.refreshCredentials(); return { ok: true }; });
 
-  // ── AI Config (preference + per-backend config) ────────────────────────
+  // â”€â”€ AI Config (preference + per-backend config) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Returns full config: preference, orcha settings, claude settings + live status
   handle('ai:get-ai-config', () => {
     const orchaCfg = (() => {
@@ -760,7 +773,7 @@ function registerAIHandlers(ctx) {
     };
   });
 
-  // Save AI config — persists preference + both backends, hot-applies preference
+  // Save AI config â€” persists preference + both backends, hot-applies preference
   handle('ai:save-ai-config', (_e, config) => {
     const existing = (() => {
       try {
@@ -908,11 +921,11 @@ function registerAIHandlers(ctx) {
     logger.info('[AI] Timeline appended for ' + data.unitId + ': ' + data.entry.substring(0, 60));
     return { ok: true };
   });
-  // ── Unified Orcha action handler (used by bubble + main) ────────────────
+  // â”€â”€ Unified Orcha action handler (used by bubble + main) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   handle('ai:orcha-action', async (_e, userMsg) => processOrchaAction(userMsg));
 
-  // ── Confirmed send ─────────────────────────────────────────────────────────
-  // ai:orcha-action never sends directly — it returns a pendingConfirm item
+  // â”€â”€ Confirmed send â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ai:orcha-action never sends directly â€” it returns a pendingConfirm item
   // (recipient + real report body) and the renderer shows Send/Cancel buttons.
   // This handler fires ONLY after the user explicitly clicks Send. Regardless
   // of how the original request was phrased, nothing ever goes out without it.
@@ -952,7 +965,7 @@ function registerAIHandlers(ctx) {
     const cfg    = loadEmailConfig();
     const method = cfg.emailMethod || 'auto';
     // Use <pre> so plain-text fleet reports render with correct spacing on SMTP.
-    // OWA path uses data.body (plain text) in the &body= URL param — no HTML.
+    // OWA path uses data.body (plain text) in the &body= URL param â€” no HTML.
     const htmlBody = '<pre style="font-family:Courier New,monospace;font-size:12px;white-space:pre-wrap">'
       + (data.body || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
       + '</pre>';
@@ -966,14 +979,14 @@ function registerAIHandlers(ctx) {
         + '?to='      + encodeURIComponent(data.to)
         + '&subject=' + encodeURIComponent(data.subject || 'Message from Fleet Operations Center')
         + '&body='    + encodeURIComponent(data.body || '');
-      const owaWin = new BrowserWindow({ width: 960, height: 720, title: 'Compose Email — ' + data.to, icon: getAppIconPath(), webPreferences: { nodeIntegration: false, contextIsolation: true, session: eSession.defaultSession } });
+      const owaWin = new BrowserWindow({ width: 960, height: 720, title: 'Compose Email â€” ' + data.to, icon: getAppIconPath(), webPreferences: { nodeIntegration: false, contextIsolation: true, session: eSession.defaultSession } });
       owaWin.setMenu(null);
       owaWin.loadURL(owaUrl);
       owaWin.once('ready-to-show', () => owaWin.show());
       return { ok: true, method: 'owa' };
     }
 
-    // ── Graph ──────────────────────────────────────────────────────────────
+    // â”€â”€ Graph â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (method === 'graph' || method === 'auto') {
       try {
         const graphClient = require('../graph/client');
@@ -989,7 +1002,7 @@ function registerAIHandlers(ctx) {
       }
     }
 
-    // ── SMTP ───────────────────────────────────────────────────────────────
+    // â”€â”€ SMTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (method === 'smtp' || (method === 'auto' && (cfg.password || cfg.pass) && (cfg.password || cfg.pass).trim())) {
       const res = await sendFleetEmail({ to: data.to, subject: data.subject || 'Message from Fleet Operations Center', htmlBody });
       if (res.ok) return { ok: true, method: 'smtp' };
@@ -997,16 +1010,16 @@ function registerAIHandlers(ctx) {
       if (method === 'smtp') return { ok: false, error: res.error || 'SMTP failed' };
     }
 
-    // ── OWA ────────────────────────────────────────────────────────────────
+    // â”€â”€ OWA â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     return openOWACompose();
   });
 
 
-  // ── ai:build-report ──────────────────────────────────────────────────────────
+  // â”€â”€ ai:build-report â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Called by the renderer's direct data-send interceptor BEFORE the AI ever
   // sees the message. Extracts the site/operator from the query, pulls matching
   // rows from the fleet store, and returns the plain-text report that the compose
-  // bubble pre-fills. No AI involved — pure data retrieval.
+  // bubble pre-fills. No AI involved â€” pure data retrieval.
   handle('ai:build-report', (_e, opts) => {
     const query = (opts && opts.query) || '';
     const store = require('../store');
@@ -1015,7 +1028,7 @@ function registerAIHandlers(ctx) {
     const notesStore = store.load('notesStore', {});
 
     if (!rows.length) {
-      return { ok: false, error: 'No fleet data loaded — sync first.' };
+      return { ok: false, error: 'No fleet data loaded â€” sync first.' };
     }
 
     const report = _buildEmailReport(query, rows, notesStore);

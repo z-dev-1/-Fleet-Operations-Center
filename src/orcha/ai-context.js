@@ -1,6 +1,6 @@
-'use strict';
+﻿'use strict';
 /**
- * ai-context.js — Fleet data context builder for AI prompts
+ * ai-context.js â€” Fleet data context builder for AI prompts
  *
  * Provides rich, accurate fleet context to any AI call (Slack DM replies,
  * partner channel replies, Orcha chat, etc.) so the AI can give real,
@@ -30,12 +30,18 @@ function buildFleetContext(messageText, opts = {}) {
   const includeRisk    = opts.includeRisk !== false;
 
   const fd         = store.load('fleetData', {});
-  const rows       = fd.rows || [];
+  let rows         = fd.rows || [];
   const notesStore = store.load('notesStore', {});
+  // Per-operator data scoping (channel/contact): when allowedOperators is set,
+  // restrict ALL fleet context to those operators. Empty/undefined = full (unchanged).
+  if (Array.isArray(opts.allowedOperators) && opts.allowedOperators.length) {
+    var _allowOps = opts.allowedOperators.map(function(o){ return String(o||"").toUpperCase().trim(); }).filter(Boolean);
+    if (_allowOps.length) rows = rows.filter(function(r){ return _allowOps.indexOf((r.operator||"").toUpperCase()) !== -1; });
+  }
 
-  if (!rows.length) return '\n\n[No fleet data available — sync may not have run yet]';
+  if (!rows.length) return '\n\n[No fleet data available â€” sync may not have run yet]';
 
-  // ── Fleet Summary ──────────────────────────────────────────────────────
+  // â”€â”€ Fleet Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const unavail  = rows.filter(r => (r.lifecycleState || '').toLowerCase().includes('unavail'));
   const offsite  = unavail.filter(r => (r.lifecycleReason || '').toLowerCase().includes('offsite'));
   const highRisk = rows.filter(r => (r.riskScore || 0) >= 70);
@@ -45,10 +51,10 @@ function buildFleetContext(messageText, opts = {}) {
     ' | Offsite at vendor: ' + offsite.length + ' | Available: ' + (rows.length - unavail.length) +
     ' | High risk (70+): ' + highRisk.length + '\n';
 
-  // ── Resolve what the message is ABOUT ───────────────────────────────────
+  // â”€â”€ Resolve what the message is ABOUT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // One intelligent resolver understands units, domicile SITES, and OPERATORS
-  // (and vendors) by matching against the REAL values in the data — whole-token,
-  // case-insensitive — so short codes like "ABE40" (a site) resolve correctly
+  // (and vendors) by matching against the REAL values in the data â€” whole-token,
+  // case-insensitive â€” so short codes like "ABE40" (a site) resolve correctly
   // instead of falling through every brittle regex. See resolveEntities().
   const resolved = resolveEntities(messageText, rows);
 
@@ -66,7 +72,7 @@ function buildFleetContext(messageText, opts = {}) {
   });
 
   if (!resolved.units.length && !resolved.groups.length) {
-    // Nothing specific referenced — include ALL unavailable units with full
+    // Nothing specific referenced â€” include ALL unavailable units with full
     // breakdown details (same fields as a specific-unit query) plus a condensed
     // timeline (last 3 entries) so the AI can give a meaningful summary of each.
     // Even at 70 units this fits within Orcha's context window.
@@ -84,7 +90,7 @@ function buildFleetContext(messageText, opts = {}) {
   return context;
 }
 
-// ── resolveEntities(text, rows) ────────────────────────────────────────────────
+// â”€â”€ resolveEntities(text, rows) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // The single "understand what the user means" resolver. Returns:
 //   { units:   [equipmentId, ...],           // exact unit IDs found in the message
 //     groups:  [{ kind:'site'|'operator'|'vendor', value, rows:[...] }, ...] }
@@ -109,7 +115,7 @@ function resolveEntities(text, rows) {
   // Longest-first so more specific codes win (ABEOW01 before ABEOW before ABE)
   const byLenDesc = (a, b) => b.length - a.length;
 
-  // Units — exact whole-token match
+  // Units â€” exact whole-token match
   unitIds.sort(byLenDesc).forEach(id => {
     if (id.length >= 3 && tokenRe(id).test(upper) && !out.units.includes(id)) out.units.push(id);
   });
@@ -134,7 +140,7 @@ function resolveEntities(text, rows) {
     }
   };
 
-  // Sites first (most common ask), then operators, then vendors — longest-first.
+  // Sites first (most common ask), then operators, then vendors â€” longest-first.
   sites.sort(byLenDesc).forEach(s => addGroup('site', s));
   ops.sort(byLenDesc).forEach(o => addGroup('operator', o));
   vendors.sort(byLenDesc).forEach(v => addGroup('vendor', v));
@@ -160,7 +166,7 @@ function _buildGroupSummary(group, allRows, opts) {
     unavail.slice(0, 25).forEach(r => {
       const risk = (opts && opts.includeRisk && r.riskScore) ? ' | Risk:' + r.riskScore : '';
       const dur  = r.workDuration ? ' | Down:' + r.workDuration : '';
-      s += '• ' + r.equipmentId + ' | ' + (r.vendor || 'no vendor') + ' | ' +
+      s += 'â€¢ ' + r.equipmentId + ' | ' + (r.vendor || 'no vendor') + ' | ' +
         (r.lifecycleReason || r.lifecycleState || '') +
         (r.issueDetails ? ' | ' + r.issueDetails.slice(0, 80) : '') + dur + risk + '\n';
     });
@@ -171,7 +177,7 @@ function _buildGroupSummary(group, allRows, opts) {
 }
 
 /**
- * buildUnitContext(unitId) — Build full context for a single specific unit
+ * buildUnitContext(unitId) â€” Build full context for a single specific unit
  */
 function buildUnitContext(unitId) {
   const fd         = store.load('fleetData', {});
@@ -180,7 +186,7 @@ function buildUnitContext(unitId) {
   return _buildUnitDetail(unitId, rows, notesStore, { includeTimeline: true, includePM: true, includeRisk: true });
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+// â”€â”€ Internal helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function _extractUnitIds(text, rows) {
   if (!text) return [];
@@ -208,7 +214,7 @@ function _extractUnitIds(text, rows) {
 
 function _buildUnitDetail(unitId, rows, notesStore, opts) {
   const row = rows.find(r => r.equipmentId === unitId);
-  if (!row) return '• ' + unitId + ': NOT FOUND in fleet data\n';
+  if (!row) return 'â€¢ ' + unitId + ': NOT FOUND in fleet data\n';
 
   const ns = notesStore[unitId] || {};
   let detail = '\n[' + unitId + ']\n';
