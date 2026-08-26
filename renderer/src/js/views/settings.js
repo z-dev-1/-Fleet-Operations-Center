@@ -1630,6 +1630,19 @@ function _parOperatorOptions(selected) {
     return '<option value="' + _esc(op) + '"' + s + '>' + _esc(op) + '</option>';
   }).join('');
 }
+// Checkbox list for per-channel operator scope — clearer than a native
+// multi-select (no Ctrl+click needed, no accidental single-select reset).
+function _parOperatorCheckboxes(idx, selected) {
+  const sel = (selected||[]).map(function(s){ return String(s||'').toUpperCase(); });
+  const ops = _parFleetOperators();
+  if (!ops.length) return '<div style="font-size:9px;color:var(--mut)">No operators yet — waiting for fleet data…</div>';
+  return '<div style="display:flex;flex-wrap:wrap;gap:6px">' + ops.map(function(op){
+    const chk = sel.indexOf(op)!==-1 ? ' checked' : '';
+    return '<label style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:var(--txt);cursor:pointer">' +
+      '<input type="checkbox" class="par-ch-op" data-idx="' + idx + '" value="' + _esc(op) + '"' + chk + ' style="margin:0"/>' + _esc(op) +
+      '</label>';
+  }).join('') + '</div>';
+}
 function _wirePartnerAutoReply() {
   const enabledEl       = document.getElementById('par-enabled');
   const listEl          = document.getElementById('par-channel-list');
@@ -1706,16 +1719,19 @@ function _wirePartnerAutoReply() {
         <div style="font-size:9px;color:var(--mut);margin-top:6px;padding-top:5px;border-top:1px solid rgba(48,54,61,.6)">${modeDesc}</div>
         ${chMode !== 'justme' ? `<div style="margin-top:6px;padding-top:5px;border-top:1px solid rgba(48,54,61,.6)">
           <div style="font-size:9px;color:var(--mut);margin-bottom:3px">Operators (data scope) &mdash; empty = full fleet</div>
-          <select class="par-ch-ops" data-idx="${i}" multiple size="3" style="width:100%;font-size:10px;background:var(--el);color:var(--txt);border:1px solid var(--bdr);border-radius:5px">${_parOperatorOptions(ch.operators || [])}</select>
+          ${_parOperatorCheckboxes(i, ch.operators || [])}
         </div>` : ''}
       </div>`;
     }).join('');
 
-    listEl.querySelectorAll('.par-ch-ops').forEach((sel) => {
-      sel.addEventListener('change', () => {
-        const i = parseInt(sel.getAttribute('data-idx'), 10);
+    listEl.querySelectorAll('.par-ch-op').forEach((box) => {
+      box.addEventListener('change', () => {
+        const i = parseInt(box.getAttribute('data-idx'), 10);
         if (_currentConfig && _currentConfig.channels[i]) {
-          _currentConfig.channels[i].operators = Array.from(sel.selectedOptions || []).map(function(o){ return o.value; });
+          const checked = Array.from(listEl.querySelectorAll('.par-ch-op[data-idx="' + i + '"]'))
+            .filter(function(b){ return b.checked; })
+            .map(function(b){ return b.value; });
+          _currentConfig.channels[i].operators = checked;
           _autoSave();
         }
       });
@@ -1777,9 +1793,11 @@ function _wirePartnerAutoReply() {
     // render happened before fleet data existed). Avoids wiping an in-progress
     // selection on every routine sync push once options are already populated.
     if (!_currentConfig) return;
-    const _firstSel = listEl && listEl.querySelector('.par-ch-ops');
-    const _needsBackfill = _firstSel && _firstSel.options.length === 0 && _parFleetOperators().length > 0;
-    if (_needsBackfill) render(_currentConfig);
+    // Backfill only when operator checkboxes are absent but fleet data now exists
+    // (first render happened before fleet data loaded). Avoids wiping edits later.
+    const _hasCheckboxes = listEl && listEl.querySelector('.par-ch-op');
+    const _hasScopedChannel = (_currentConfig.channels || []).some(function(ch){ return ch.replyMode !== 'justme'; });
+    if (!_hasCheckboxes && _hasScopedChannel && _parFleetOperators().length > 0) render(_currentConfig);
   });
 
   // Scan channels button

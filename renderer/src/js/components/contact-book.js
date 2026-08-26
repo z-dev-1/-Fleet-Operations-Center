@@ -35,6 +35,19 @@ function _operatorOptions(selected) {
     return '<option value="' + _attr(op) + '"' + isSel + '>' + _esc(op) + '</option>';
   }).join('');
 }
+// Checkbox list for operator scope — clearer than a native multi-select
+// (no Ctrl+click, no accidental single-select reset). Used in add + edit forms.
+function _operatorCheckboxes(cls, selected) {
+  const sel = (selected || []).map(function(s){ return String(s||'').toUpperCase(); });
+  const ops = _fleetOperators();
+  if (!ops.length) return '<div style="font-size:9px;color:#8b949e">No operators yet — waiting for fleet data…</div>';
+  return '<div style="display:flex;flex-wrap:wrap;gap:8px">' + ops.map(function(op){
+    const chk = sel.indexOf(op) !== -1 ? ' checked' : '';
+    return '<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">' +
+      '<input type="checkbox" class="' + cls + '" value="' + _attr(op) + '"' + chk + ' style="margin:0"/>' + _esc(op) +
+      '</label>';
+  }).join('') + '</div>';
+}
 
 // A vendor's rank can differ per domicile it serves (e.g. #1 at AVP40 but #2
 // at ABE40 because a closer competitor covers ABE40 better). `preference` is
@@ -192,8 +205,8 @@ function _render() {
         <div class="cb-slack-confirm" id="cb-slack-confirm" style="display:none"></div>
         <input class="cb-input" id="cb-s-slack" placeholder="@slack-handle (auto-filled from search)" />
         <input class="cb-input" id="cb-s-company" placeholder="Company / Team" />
-        <div style="font-size:9px;color:#8b949e;margin-top:6px;">Operators (data scope) &mdash; leave empty to share full fleet</div>
-        <select class="cb-input" id="cb-s-operators" multiple size="4" style="height:auto;">${_operatorOptions([])}</select>
+        <div style="font-size:9px;color:#8b949e;margin-top:6px;margin-bottom:3px;">Operators (data scope) &mdash; leave empty to share full fleet</div>
+        ${_operatorCheckboxes('cb-s-op', [])}
         <input class="cb-input" id="cb-s-email" placeholder="Email (optional)" />
         <input class="cb-input" id="cb-s-phone" placeholder="Phone (optional)" />
         <button class="cb-btn cb-btn--add" id="cb-add-slack">Add Contact</button>
@@ -288,7 +301,7 @@ async function _addSlack() {
     slackId: (_pendingSlack && _pendingSlack.slackId) || g('cb-s-slack').replace(/^@/, '').trim(),
     channelId: (_pendingSlack && _pendingSlack.channelId) || null,
     company: g('cb-s-company'), email: g('cb-s-email'), phone: g('cb-s-phone'),
-    operators: Array.from((document.getElementById('cb-s-operators')||{selectedOptions:[]}).selectedOptions||[]).map(function(o){return o.value;})
+    operators: Array.from(document.querySelectorAll('.cb-s-op')).filter(function(b){return b.checked;}).map(function(b){return b.value;})
   };
   if (!contact.name) return;
   await window.contacts.add(contact);
@@ -370,8 +383,8 @@ async function _editContact(id) {
       <input class="cb-input" id="edit-company" value="${contact.company || ''}" placeholder="Company" />
       <input class="cb-input" id="edit-email" value="${contact.email || ''}" placeholder="Email" />
       <input class="cb-input" id="edit-phone" value="${contact.phone || ''}" placeholder="Phone" />
-      <div style="font-size:9px;color:#8b949e;margin-top:6px;">Operators (data scope) &mdash; empty = full fleet</div>
-      <select class="cb-input" id="edit-operators" multiple size="4" style="height:auto;">${_operatorOptions(contact.operators || [])}</select>
+      <div style="font-size:9px;color:#8b949e;margin-top:6px;margin-bottom:3px;">Operators (data scope) &mdash; empty = full fleet</div>
+      ${_operatorCheckboxes('edit-op', contact.operators || [])}
       <div style="display:flex;gap:6px;margin-top:4px;">
         <button class="cb-btn cb-btn--add" id="edit-save">Save</button>
         <button class="cb-btn cb-btn--del" id="edit-cancel">Cancel</button>
@@ -384,7 +397,7 @@ async function _editContact(id) {
     contact.company = card.querySelector('#edit-company').value.trim();
     contact.email = card.querySelector('#edit-email').value.trim();
     contact.phone = card.querySelector('#edit-phone').value.trim();
-    contact.operators = Array.from((card.querySelector('#edit-operators')||{selectedOptions:[]}).selectedOptions||[]).map(function(o){return o.value;});
+    contact.operators = Array.from(card.querySelectorAll('.edit-op')).filter(function(b){return b.checked;}).map(function(b){return b.value;});
     await window.contacts.update(contact);
     _load();
   });
