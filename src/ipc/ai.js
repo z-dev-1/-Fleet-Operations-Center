@@ -52,6 +52,32 @@ const MAX_DAILY_NOTES_BATCH = 100;   // units    — daily-notes:run
 const MAX_SUGGEST_KEYS      = 100;   // keys on unit object for ai:suggest (raised S28: enriched units have ~71 keys)
 
 
+// Convert common Markdown to Slack's mrkdwn so replies render correctly in Slack
+// (Slack bold is *single asterisk*, not **double**). Safe on plain text.
+function _toSlackFormat(s) {
+  if (!s) return s;
+  return String(s)
+    .replace(/\*\*([^*]+)\*\*/g, '*$1*')   // **bold** -> *bold*
+    .replace(/^\s*#{1,6}\s*/gm, '');        // strip markdown headers
+}
+
+// Salvage the reply text when the AI returned a JSON object whose literal
+// newlines made JSON.parse fail (long multi-line summaries do this). Pulls the
+// value of the "reply" field out of the raw text so we never post the raw
+// {"reply":"...","actions":[]} wrapper to Slack/chat.
+function _salvageReply(raw) {
+  if (!raw) return raw;
+  // Only act if it looks like our action-JSON wrapper.
+  const m = raw.match(/"reply"\s*:\s*"([\s\S]*?)"\s*,\s*"actions"\s*:/);
+  if (m && m[1]) {
+    // Unescape the standard JSON string escapes the model did emit.
+    return m[1]
+      .replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+      .replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+  return raw;
+}
+
 // ── Site / unit email report builder ──────────────────────────────────────────
 // Returns plain-text (not HTML) so the body renders correctly in OWA/mailto.
 // Called from the EMAIL action handler when userMsg references a site or unit.
@@ -321,7 +347,10 @@ async function processOrchaAction(userMsg, opts = {}) {
       if (!aiText) return {ok:false,text:'AI empty',action:'chat'};
       let parsed; const jm = aiText.match(/\{[\s\S]*\}/);
       if (jm) try { parsed = JSON.parse(jm[0]); } catch(e) {}
-      if (!parsed) return {ok:true,text:aiText,action:'chat'};
+      // JSON.parse fails when the model's long multi-line reply contains raw
+      // newlines (invalid in a JSON string). Salvage the reply text instead of
+      // dumping the raw {"reply":...} wrapper to Slack. Also normalize markdown.
+      if (!parsed) return {ok:true,text:_toSlackFormat(_salvageReply(aiText)),action:'chat'};
       const results = [];
       const pendingConfirm = [];
       for (const a of (parsed.actions||[])) {
@@ -599,7 +628,7 @@ async function processOrchaAction(userMsg, opts = {}) {
       chatHistory.push({role:'user', text:userMsg, ts:Date.now()});
       chatHistory.push({role:'ai', text:parsed.reply||'', ts:Date.now()});
       store.save('chatHistory', chatHistory);
-      return {ok:true,text:(parsed.reply||'')+(results.length?'\n'+results.join('\n'):''),action:results.length?'multi':'chat',pendingConfirm};
+      return {ok:true,text:_toSlackFormat(parsed.reply||'')+(results.length?'\n'+results.join('\n'):''),action:results.length?'multi':'chat',pendingConfirm};
     } catch(e) { return {ok:false,text:'Error:'+e.message,action:'chat'}; }
 }
 

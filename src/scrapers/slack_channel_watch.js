@@ -320,7 +320,7 @@ async function _classifyAndDraft(messageText, askOrcha, allowedOperators) {
     }
     return {
       inScope: parsed.inScope === true,
-      reply: replyText,
+      reply: String(replyText || '').replace(/\*\*([^*]+)\*\*/g, '*$1*').replace(/^\s*#{1,6}\s*/gm, ''),
       category: ['alert', 'action', 'workflow'].includes(parsed.category) ? parsed.category : 'workflow',
       title: (typeof parsed.title === 'string' && parsed.title.trim()) ? parsed.title.slice(0, 60) : (messageText || '').slice(0, 60),
     };
