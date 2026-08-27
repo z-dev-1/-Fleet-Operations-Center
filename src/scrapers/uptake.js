@@ -343,6 +343,42 @@ const CHECK_LIST_READY = `(function() {
   });
 })()`;
 
+// ─── Force all insight rows to load (virtualized/lazy list) ───────────────────
+// BUG FIX (2026-08-14): the insights list renders only the first screenful of
+// rows (~60 assets / ~71 insight rows) because it's a virtualized/lazy grid.
+// SCRAPE_INSIGHTS_LIST previously read the DOM once, so ~half the fleet's ~136
+// assets (e.g. unit 322600) were never discovered — they showed no Uptake data
+// forever. This scrolls every plausible scroll container (window + any tall
+// scrollable ancestor of the table/grid) to the bottom, then reports the
+// current row count. runScrape() calls it in a loop until the count stops
+// growing, forcing all rows into the DOM before scraping.
+const SCROLL_LIST_STEP = `(function() {
+  try {
+    function rowCount() {
+      return Array.from(document.querySelectorAll('table tbody tr, [role="row"]'))
+        .filter(function(r) { return r.querySelectorAll('td, [role="gridcell"]').length >= 4; }).length;
+    }
+    var before = rowCount();
+    // Scroll the window itself.
+    window.scrollTo(0, document.body.scrollHeight);
+    // Scroll any scrollable ancestor of the grid/table, plus the grid itself.
+    var anchors = Array.from(document.querySelectorAll('table, [role="grid"], [role="rowgroup"], tbody'));
+    anchors.forEach(function(a) {
+      var el = a;
+      for (var hops = 0; el && hops < 8; hops++) {
+        try {
+          if (el.scrollHeight > el.clientHeight + 20) { el.scrollTop = el.scrollHeight; }
+        } catch(_) {}
+        el = el.parentElement;
+      }
+    });
+    // Also scroll the last rendered row into view (helps react-window/virtual grids).
+    var rows = Array.from(document.querySelectorAll('table tbody tr, [role="row"]'));
+    if (rows.length) { try { rows[rows.length - 1].scrollIntoView({ block: 'end' }); } catch(_) {} }
+    return { count: before, height: document.body.scrollHeight };
+  } catch(e) { return { count: 0, error: e.message }; }
+})()`;
+
 // ─── Scrape insights list table ───────────────────────────────────────────────
 const SCRAPE_INSIGHTS_LIST = `(function() {
   try {
@@ -661,6 +697,33 @@ async function scrapeUptake() {
 
         const listReady = await pollUntil(win, CHECK_LIST_READY);
         if (!listReady) { fwarn('[Uptake] Insights list did not render'); finish([], null); return; }
+
+        // ── 1b. Force all rows to load (virtualized/lazy list) ─────────────
+        // The list only renders the first screenful of rows, so ~half the fleet
+        // was never discovered. Scroll to the bottom repeatedly until the row
+        // count stops growing (or a safety cap), forcing every row into the DOM.
+        let prevRowCount = -1;
+        let stableStreak = 0;
+        for (let scrollPass = 0; scrollPass < 40; scrollPass++) {
+          if (win.isDestroyed()) break;
+          let step;
+          try { step = await win.webContents.executeJavaScript(SCROLL_LIST_STEP); }
+          catch(_) { step = { count: 0 }; }
+          const curr = step && step.count || 0;
+          if (curr <= prevRowCount) {
+            // No growth this pass. Require 3 consecutive no-growth passes to
+            // confirm the list is fully loaded (guards against lazy fetch lag).
+            if (++stableStreak >= 3) break;
+          } else {
+            stableStreak = 0;
+          }
+          prevRowCount = Math.max(prevRowCount, curr);
+          await sleep(700); // let the next chunk of rows fetch/render
+        }
+        flog(`[Uptake] List fully loaded after scroll: ~${prevRowCount} rows in DOM`);
+        // Scroll back to top so the list screenshot captures the header.
+        try { await win.webContents.executeJavaScript('window.scrollTo(0,0)'); } catch(_) {}
+        await sleep(300);
 
         const listResult = await win.webContents.executeJavaScript(SCRAPE_INSIGHTS_LIST);
         flog(`[Uptake] List scraped: ${listResult.count} rows`);
