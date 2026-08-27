@@ -157,6 +157,139 @@ async function _buildAttachmentContext(msg, downloadFn) {
   return parts.length ? '\n\n' + parts.join('\n\n') : '';
 }
 
+// ── Auto-flip: detect "flip unit XXXXXX" requests and act on them ──────────
+// FEATURE (2026-08-27): the most common actionable DM is a partner asking to
+// "flip" a unit back into service (Unavailable -> Active). The app already has
+// the machinery to do this (src/scrapers/setLifecycle.js, same automation the
+// unit-detail UI + Orcha chat use). This connects the two: when a DM clearly
+// asks to flip a specific unit, we flip it automatically to Active (reason
+// "Healthy", matching the UI convention) UNLESS the unit's current
+// lifecycleReason is a state that must NOT be auto-cleared without a human:
+//   - "PM Failed"          (preventive-maintenance failure)
+//   - "Expired Inspection" (out-of-date DOT/annual inspection)
+//   - "Damaged-Moderate" / "Damaged-Severe" (accident/damage state)
+// In those blocked cases we do NOT flip; we send an in-voice reply explaining
+// why and queue it for Z's review (category "action").
+
+// lifecycleReason values that block an automatic flip (case-insensitive match).
+const FLIP_BLOCK_REASONS = ['pm failed', 'expired inspection', 'damaged-moderate', 'damaged-severe'];
+
+// Human-readable label for why a flip was blocked, keyed off lifecycleReason.
+function _flipBlockLabel(reason) {
+  const r = (reason || '').toLowerCase();
+  if (r.includes('pm failed'))          return 'a failed PM';
+  if (r.includes('expired inspection')) return 'an expired inspection';
+  if (r.includes('damaged'))            return 'an open damage/accident state';
+  return 'its current hold state';
+}
+
+// Detect a flip request in the message text. Returns the referenced unit token
+// (raw string) if the message is asking to flip/activate/release a unit, else null.
+function _detectFlipRequest(messageText) {
+  const text = (messageText || '').trim();
+  if (!text) return null;
+  // Must contain a flip-style verb. "flip", "activate", "put back", "release",
+  // "make available", "bring back", "reactivate".
+  const flipVerb = /\b(flip|reactivate|re-?activate|activate|release|put\s+(?:it\s+)?back|bring\s+(?:it\s+)?back|make\s+(?:it\s+)?available)\b/i;
+  if (!flipVerb.test(text)) return null;
+  // Extract a plausible unit token: optional letter prefix + 4-8 digits
+  // (matches equipmentId format like 321060, B12257, 9010424).
+  const m = text.match(/\b([A-Za-z]?\d{4,8})\b/);
+  return m ? m[1] : null;
+}
+
+// Resolve a unit token against fleet rows. Returns the matching row or null.
+function _findFleetRow(unitToken) {
+  if (!unitToken) return null;
+  const fd = store.load('fleetData', {});
+  const rows = fd.rows || [];
+  const q = String(unitToken).toUpperCase();
+  return rows.find(r => (r.equipmentId || '').toUpperCase() === q) || null;
+}
+
+// Given the resolved fleet row, decide whether an auto-flip is allowed and
+// perform it. Returns an object that overrides the draft reply/scope, or null
+// if this isn't actually a flip we should handle (let the normal AI reply stand).
+async function _maybeAutoFlip(unitToken, tagPrefix) {
+  const row = _findFleetRow(unitToken);
+  // Unknown unit — let the AI's normal reply handle it (it'll ask for the unit #).
+  if (!row) return null;
+
+  const unitId = row.equipmentId;
+  const state  = (row.lifecycleState || '');
+  const reason = (row.lifecycleReason || '');
+
+  // Already Active — nothing to flip. Confirm gracefully, mark handled.
+  if (/active/i.test(state)) {
+    return {
+      reply: `${unitId} is already active and in service — nothing to flip on my end 👍`,
+      inScope: true,
+      category: null,
+      title: null,
+      _flip: { unitId, action: 'noop-already-active' },
+    };
+  }
+
+  // Blocked state — do NOT auto-flip. Explain and escalate for Z's review.
+  const blocked = FLIP_BLOCK_REASONS.some(b => reason.toLowerCase().includes(b));
+  if (blocked) {
+    const why = _flipBlockLabel(reason);
+    return {
+      reply: `I can't flip ${unitId} automatically — it's showing ${why} (${reason}). ` +
+             `That needs to be cleared before it can go back in service. I'll take a look and follow up.`,
+      inScope: false,
+      category: 'action',
+      title: `Flip blocked: ${unitId} (${reason})`,
+      _flip: { unitId, action: 'blocked', reason },
+    };
+  }
+
+  // No asset URL — can't drive the AAP automation. Escalate.
+  if (!row.assetUrl) {
+    return {
+      reply: `Trying to flip ${unitId} but I don't have its AAP link cached yet — let me sort that and get it flipped shortly.`,
+      inScope: false,
+      category: 'action',
+      title: `Flip pending (no AAP URL): ${unitId}`,
+      _flip: { unitId, action: 'no-url' },
+    };
+  }
+
+  // Allowed — perform the flip to Active / Healthy (UI convention).
+  try {
+    const { setLifecycleState } = require('./setLifecycle');
+    logger.info(`[SlackDM] Auto-flip: ${unitId} ${state}/${reason} -> Active (Healthy)`);
+    const res = await setLifecycleState({ equipmentId: unitId, assetUrl: row.assetUrl, state: 'Active', reason: 'Healthy' });
+    if (res && res.success) {
+      return {
+        reply: `Done — ${unitId} is flipped back to active 👍`,
+        inScope: true,
+        category: null,
+        title: null,
+        _flip: { unitId, action: 'flipped' },
+      };
+    }
+    // Automation ran but AAP didn't confirm — escalate with the failure detail.
+    return {
+      reply: `Tried to flip ${unitId} but it didn't go through (${(res && res.message) || 'AAP did not confirm'}). ` +
+             `Let me look into it and get it flipped.`,
+      inScope: false,
+      category: 'action',
+      title: `Flip failed: ${unitId}`,
+      _flip: { unitId, action: 'failed', message: res && res.message },
+    };
+  } catch (e) {
+    logger.warn(`[SlackDM] Auto-flip threw for ${unitId}: ${e.message}`);
+    return {
+      reply: `Ran into a snag flipping ${unitId} — I'll get it sorted and follow up.`,
+      inScope: false,
+      category: 'action',
+      title: `Flip error: ${unitId}`,
+      _flip: { unitId, action: 'error', message: e.message },
+    };
+  }
+}
+
 async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
   // historyMsgs: optional array of strings ("Speaker: text") from recent
   // conversation, oldest-first, to give the AI context before replying.
@@ -492,6 +625,23 @@ async function pollDMAutoReplyOnce(log) {
           doLog(`[SlackDM] ${dm.name}: AI held — skipping send for ${msg.ts}`);
           _saveThreadSeen(dm.channelId, dm.name, msg.ts, !!dm.isGroup);
           continue;
+        }
+
+        // AUTO-FLIP: if this DM is asking to flip a specific unit back into
+        // service, act on it (flip to Active) unless the unit is in a blocked
+        // state (PM Failed / Expired Inspection / accident-damage). The result
+        // overrides the AI draft so the reply reflects what actually happened.
+        const _flipUnit = _detectFlipRequest(msg.text || '');
+        if (_flipUnit) {
+          const flipResult = await _maybeAutoFlip(_flipUnit, msg.userId ? `<@${msg.userId}> ` : '');
+          if (flipResult) {
+            draft.reply    = flipResult.reply;
+            draft.inScope  = flipResult.inScope;
+            draft.category = flipResult.category;
+            draft.title    = flipResult.title;
+            const _fa = flipResult._flip ? flipResult._flip.action : 'unknown';
+            doLog(`[SlackDM] ${dm.name}: auto-flip ${_flipUnit} -> ${_fa}`);
+          }
         }
 
         let replyTs = null;
