@@ -183,19 +183,40 @@ function _flipBlockLabel(reason) {
   return 'its current hold state';
 }
 
+// Extract the first plausible unit token from a string (optional letter prefix
+// + 4-8 digits, e.g. 321060, B12257, 9010424). Returns the token or null.
+function _unitTokenIn(text) {
+  const m = (text || '').match(/\b([A-Za-z]?\d{4,8})\b/);
+  return m ? m[1] : null;
+}
+
+// Find the most recently mentioned unit in the conversation history.
+// historyMsgs is an array of "Speaker: text" strings, oldest-first. We scan
+// newest-first and return the first unit token found — this is the unit "it"
+// most likely refers to in a follow-up like "flip it" or "the truck's fixed".
+function _lastUnitFromHistory(historyMsgs) {
+  if (!Array.isArray(historyMsgs) || !historyMsgs.length) return null;
+  for (let i = historyMsgs.length - 1; i >= 0; i--) {
+    const tok = _unitTokenIn(historyMsgs[i]);
+    if (tok) return tok;
+  }
+  return null;
+}
+
 // Detect a flip request in the message text. Returns the referenced unit token
 // (raw string) if the message is asking to flip/activate/release a unit, else null.
-function _detectFlipRequest(messageText) {
+// FEATURE (2026-08-27): when the message has a flip verb but NO explicit unit
+// ("can you please flip it?", "put it back in service"), fall back to the last
+// unit mentioned in the thread history so implicit follow-ups still resolve.
+function _detectFlipRequest(messageText, historyMsgs) {
   const text = (messageText || '').trim();
   if (!text) return null;
   // Must contain a flip-style verb. "flip", "activate", "put back", "release",
   // "make available", "bring back", "reactivate".
   const flipVerb = /\b(flip|reactivate|re-?activate|activate|release|put\s+(?:it\s+)?back|bring\s+(?:it\s+)?back|make\s+(?:it\s+)?available)\b/i;
   if (!flipVerb.test(text)) return null;
-  // Extract a plausible unit token: optional letter prefix + 4-8 digits
-  // (matches equipmentId format like 321060, B12257, 9010424).
-  const m = text.match(/\b([A-Za-z]?\d{4,8})\b/);
-  return m ? m[1] : null;
+  // Prefer an explicit unit in the message; otherwise inherit the thread's unit.
+  return _unitTokenIn(text) || _lastUnitFromHistory(historyMsgs);
 }
 
 // Resolve a unit token against fleet rows. Returns the matching row or null.
@@ -330,11 +351,26 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
   // sees before the actual message — reduces plain-text / "Holding, unchanged." responses.
   const _jsonReminder = '\n\nREMINDER — YOUR ENTIRE RESPONSE MUST BE A SINGLE VALID JSON OBJECT, nothing before or after it:\n{"inScope":true|false,"reply":"...","category":"alert"|"action"|"workflow"|null,"title":"..."|null}';
 
-  // Inject live fleet data context so AI can answer unit/vendor/status questions accurately
+  // Inject live fleet data context so AI can answer unit/vendor/status questions accurately.
+  // IMPLICIT-UNIT FOLLOW-UPS (2026-08-27): if this message has no explicit unit
+  // but the thread was just talking about one ("the truck's fixed", "they
+  // ordered a part for it", "is it ready?"), inherit that unit so buildFleetContext
+  // pulls its data AND the AI is told what "it" refers to — instead of punting.
   const { buildFleetContext } = require('../orcha/ai-context');
-  const fleetContext = buildFleetContext(messageText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true });
+  let _fleetLookupText = messageText;
+  let _inheritedUnitNote = '';
+  if (!_unitTokenIn(messageText)) {
+    const inherited = _lastUnitFromHistory(historyMsgs);
+    if (inherited) {
+      _fleetLookupText = messageText + ' ' + inherited;
+      _inheritedUnitNote = '\n\nNOTE: This message has no unit number, but the conversation was just about unit ' +
+        inherited + '. If the message says "it"/"the truck"/"that one" or is a follow-up, it almost certainly refers to ' +
+        inherited + ' — use that unit\'s data below to answer.';
+    }
+  }
+  const fleetContext = buildFleetContext(_fleetLookupText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true });
 
-  const prompt = _contextReset + PERSONA_SYSTEM_PROMPT + timeContext + groupBlock + contextBlock + fleetContext + _jsonReminder + '\n\nIncoming DM:\n' + messageText;
+  const prompt = _contextReset + PERSONA_SYSTEM_PROMPT + timeContext + groupBlock + contextBlock + _inheritedUnitNote + fleetContext + _jsonReminder + '\n\nIncoming DM:\n' + messageText;
   // FIX (2026-07-24): was using sendOrchaChat() (direct WS-only, 90s timeout,
   // no fallback). If the Orcha WS server is not running or slow, EVERY DM call
   // timed out and sent the canned fallback reply. Switch to relay.ask() which
@@ -631,7 +667,7 @@ async function pollDMAutoReplyOnce(log) {
         // service, act on it (flip to Active) unless the unit is in a blocked
         // state (PM Failed / Expired Inspection / accident-damage). The result
         // overrides the AI draft so the reply reflects what actually happened.
-        const _flipUnit = _detectFlipRequest(msg.text || '');
+        const _flipUnit = _detectFlipRequest(msg.text || '', historyMsgs);
         if (_flipUnit) {
           const flipResult = await _maybeAutoFlip(_flipUnit, msg.userId ? `<@${msg.userId}> ` : '');
           if (flipResult) {
