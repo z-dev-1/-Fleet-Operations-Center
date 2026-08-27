@@ -393,18 +393,38 @@ async function pollDMAutoReplyOnce(log) {
       if (!messages || !messages.length) continue;
 
       const threads = config.threads || {};
-      const seen = threads[dm.channelId];
+      let seen = threads[dm.channelId];
 
       // FIRST-EVER poll of this DM thread: baseline only, do not reply to
       // pre-existing history (same safety rule as channel watch).
       if (!seen || !seen.lastSeenTs) {
-        _saveThreadLastSeen(dm.channelId, dm.name, messages[0].ts, dm.isGroup);
-        doLog(`[SlackDM] ${dm.name}: first poll — baselined at ts ${messages[0].ts}, no replies sent for existing history`);
-        continue;
+        // For a 1:1 DM (not a group), a first-ever poll usually means a NEW
+        // person just messaged us — they should get a reply, not be silently
+        // baselined until their SECOND message. So if the newest message is
+        // from the other person and recent (< 10 min old), baseline to the
+        // message BEFORE it so the newest one flows into newMsgs and gets a
+        // reply. Group DMs keep the safe backlog-baseline behavior.
+        const _newest = messages[0];
+        const _newestFromOther = _newest && _newest.userId && _newest.userId !== myUserId;
+        const _newestAgeMs = _newest ? (Date.now() - parseFloat(_newest.ts) * 1000) : Infinity;
+        const _replyToFirst = !dm.isGroup && _newestFromOther && _newestAgeMs < 10 * 60 * 1000;
+        if (_replyToFirst) {
+          // Baseline to the previous message (or 0 if none) so _newest is "new".
+          const _baseTs = messages[1] ? messages[1].ts : '0';
+          _saveThreadLastSeen(dm.channelId, dm.name, _baseTs, dm.isGroup);
+          seen = { lastSeenTs: _baseTs, name: dm.name, isGroup: dm.isGroup };
+          doLog(`[SlackDM] ${dm.name}: first poll (1:1, recent) — replying to new sender's first message ${_newest.ts}`);
+          // fall through — do NOT continue — so newMsgs picks up _newest below
+        } else {
+          _saveThreadLastSeen(dm.channelId, dm.name, messages[0].ts, dm.isGroup);
+          doLog(`[SlackDM] ${dm.name}: first poll — baselined at ts ${messages[0].ts}, no replies sent for existing history`);
+          continue;
+        }
       }
+      const _seenNow = seen;
 
       const newMsgs = messages
-        .filter(m => parseFloat(m.ts) > parseFloat(seen.lastSeenTs))
+        .filter(m => parseFloat(m.ts) > parseFloat(_seenNow.lastSeenTs))
         .filter(m => m.userId && m.userId !== myUserId) // skip our own + system/empty-author messages
         .reverse()
         .slice(0, MAX_MESSAGES_PER_POLL);
