@@ -53,14 +53,14 @@ const PARTITION           = '';
 // handler below is ALSO fixed to salvage whatever was actually completed
 // instead of discarding it, so even if 15 min still isn't enough one day,
 // the cache gets a genuine (if incomplete) refresh instead of nothing.
-const MASTER_TIMEOUT_MS   = 900000;  // 15 min (was 5 min, was 3 min)
+const MASTER_TIMEOUT_MS   = 1200000;  // 20 min (was 15 min) -- headroom so all insights finish before salvage
 // H-3: concurrency lock — prevents duplicate BrowserWindow farms on re-entrant calls
 let _uptakeLock = false;
  // Stage 5 C-2: 3 min cap (was 15 min) -- isSyncing clears promptly on hang
 const PAGE_LOAD_TIMEOUT   = 20000;  // per-page: 20s -- stalled pages skip faster
 const DOM_POLL_INTERVAL   = 800;    // ms between DOM-ready checks
 const DOM_POLL_MAX        = 50;     // max polls (~40 seconds) — asset overview pages load slowly
-const UPTAKE_READ_MORE_WAIT_MS = 3_000;   // S8: Read More expansion poll deadline (was 2500ms fixed sleep)
+const UPTAKE_READ_MORE_WAIT_MS = 1_200;   // S8: Read More expansion poll deadline (was 3000ms; times out ~96% of insights, so shortened to reclaim ~1.8s/insight)
 const UPTAKE_READ_MORE_POLL_MS = 300;     // S8: body-length delta poll tick interval
 
 const DEBUG = process.env.UPTAKE_DEBUG === '1';
@@ -820,13 +820,13 @@ async function scrapeUptake() {
               } catch(_) {}
             }
             logger.info('[Uptake] Read More settle | waited:', (Date.now() - _t0_rm) + 'ms',
-              '| signal:', _rmReady ? 'DOM' : 'timeout(3s)');
+              '| signal:', _rmReady ? 'DOM' : 'timeout(' + UPTAKE_READ_MORE_WAIT_MS + 'ms)');
             const expanded = await win.webContents.executeJavaScript(SCRAPE_AFTER_READMORE);
 
             const finalSummary     = expanded.summary     || detail.summary     || '';
             const finalRecommended = expanded.recommended || detail.recommended || '';
 
-            await sleep(1500);
+            await sleep(800); // settle expanded DOM before screenshot (was 1500ms; screenshots still capture fully-rendered Read More content)
             const shotPath = await captureScreenshot(win, `insight_${row.assetId}_${i}`);
 
             const u = unitMap[row.assetId];
