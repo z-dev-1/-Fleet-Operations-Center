@@ -72,6 +72,13 @@ function buildFleetContext(messageText, opts = {}) {
     context += _buildGroupSummary(g, rows, { includeRisk });
   });
 
+  // Contact / reference-data lookups (vendor POCs, addresses, phone/email,
+  // site addresses, people). These questions ("Ryder POC for Allentown?",
+  // "address for Horwith?", "James Amerit contact info") used to fail because
+  // the contacts store was never injected into the prompt — the data exists,
+  // the AI just couldn't see it. See _buildContactContext.
+  context += _buildContactContext(messageText, rows);
+
   if (!resolved.units.length && !resolved.groups.length) {
     // Nothing specific referenced — include ALL unavailable units with full
     // breakdown details (same fields as a specific-unit query) plus a condensed
@@ -174,6 +181,89 @@ function _buildGroupSummary(group, allRows, opts) {
   } else {
     s += '(All units at ' + group.value + ' are currently available.)\n';
   }
+  return s;
+}
+
+// ── Contact / reference-data context ───────────────────────────────────────
+// Injects matching entries from the `contacts` store (vendors, domicile sites,
+// people) so the AI can answer reference questions instead of punting with
+// "let me look into that". The contacts store already holds vendor POCs,
+// addresses, phones, emails, and site addresses — it just was never surfaced
+// to the DM/channel AI. Strategy:
+//   1. If the message names a known vendor/site/person (whole-word), inject the
+//      full record(s) for those.
+//   2. If the message asks a reference-type question (address / phone / email /
+//      POC / contact / who / where) but nothing matched by name, inject a
+//      compact directory of ALL vendors + sites (small: <15 entries) so the AI
+//      can still find e.g. "Horwith" even if it isn't a fleet-data vendor token.
+function _buildContactContext(messageText, rows) {
+  if (!messageText) return '';
+  let contacts = [];
+  try { contacts = store.load('contacts', []) || []; } catch (_) { contacts = []; }
+  if (!Array.isArray(contacts) || !contacts.length) return '';
+
+  const upper = ' ' + messageText.toUpperCase().replace(/[^A-Z0-9]+/g, ' ') + ' ';
+  const rawUpper = (messageText || '').toUpperCase();
+  const tokenRe = (v) => new RegExp('(^| )' + String(v).toUpperCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '( |$)');
+
+  // Is this a reference-type question at all? (address, contact, phone, etc.)
+  const refQuestion = /\b(ADDRESS|LOCATION|WHERE|POC|CONTACT|PHONE|NUMBER|CALL|EMAIL|E-?MAIL|SCAC|REACH|WHO\b|INFO|HOOKED\s*UP)\b/.test(rawUpper);
+
+  // Match contacts by name (whole-word-ish; also allow the first significant
+  // word of a multi-word contact name, e.g. "Horwith" in "Horwith Trucks").
+  const matched = [];
+  contacts.forEach(c => {
+    const name = (c.name || c.company || '').trim();
+    if (!name) return;
+    const nameU = name.toUpperCase();
+    // Full-name substring, or any significant word (len>=4) of the name present.
+    const words = nameU.split(/[^A-Z0-9]+/).filter(w => w.length >= 4);
+    const hit = rawUpper.includes(nameU) || words.some(w => tokenRe(w).test(upper));
+    if (hit) matched.push(c);
+  });
+
+  // Nothing to add and not a reference question — stay silent (no noise).
+  if (!matched.length && !refQuestion) return '';
+
+  const fmtContact = (c) => {
+    const bits = [];
+    const label = c.name || c.company || '(unnamed)';
+    const typeTag = c.type === 'vendor' ? 'Vendor' : c.type === 'domicile' ? 'Site' : c.type === 'slack' ? 'Person' : (c.type || 'Contact');
+    bits.push('• [' + typeTag + '] ' + label);
+    const addr = [c.street, c.city, c.state, c.zip].map(x => (x || '').toString().trim()).filter(Boolean).join(', ');
+    if (addr) bits.push('    Address: ' + addr);
+    if (c.phone) bits.push('    Phone: ' + c.phone);
+    if (c.email) bits.push('    Email: ' + c.email);
+    if (c.domiciles) bits.push('    Serves: ' + c.domiciles);
+    if (c.makes || c.make) bits.push('    Makes: ' + (c.makes || c.make));
+    return bits.join('\n');
+  };
+
+  let s = '\n--- CONTACTS / REFERENCE DATA ---\n';
+  if (matched.length) {
+    // De-dup by id/name and cap so a broad word-match can't flood the prompt.
+    const seen = new Set();
+    const uniq = matched.filter(c => {
+      const k = c.id || (c.name || c.company || '');
+      if (seen.has(k)) return false;
+      seen.add(k); return true;
+    }).slice(0, 8);
+    s += uniq.map(fmtContact).join('\n') + '\n';
+  } else {
+    // Reference question, no name match → give the compact directory so the AI
+    // can locate a vendor/site the message referred to loosely.
+    const dir = contacts
+      .filter(c => c.type === 'vendor' || c.type === 'domicile')
+      .slice(0, 20)
+      .map(fmtContact)
+      .join('\n');
+    if (dir) {
+      s += 'No exact name match — here is the vendor/site directory to check against:\n' + dir + '\n';
+    } else {
+      return '';
+    }
+  }
+  s += '(Use this contact info to answer directly. If the specific contact/address/SCAC being asked about is NOT listed here, say you don\'t have it on file rather than guessing.)\n';
   return s;
 }
 
