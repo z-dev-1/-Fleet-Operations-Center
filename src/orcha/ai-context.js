@@ -51,6 +51,13 @@ function buildFleetContext(messageText, opts = {}) {
   context += 'Total units: ' + rows.length + ' | Unavailable: ' + unavail.length +
     ' | Offsite at vendor: ' + offsite.length + ' | Available: ' + (rows.length - unavail.length) +
     ' | High risk (70+): ' + highRisk.length + '\n';
+  // SCAC == operator. A partner asking "does the SCAC exist" / "what's the SCAC"
+  // is asking about the OPERATOR code. Surface the known operators/SCACs so the
+  // AI answers instead of punting (these questions failed before this note).
+  const _scacs = [...new Set(rows.map(r => (r.operator || '').toUpperCase().trim()).filter(Boolean))];
+  if (_scacs.length) {
+    context += 'SCAC = operator. Known SCACs/operators in the fleet: ' + _scacs.join(', ') + '.\n';
+  }
 
   // ── Resolve what the message is ABOUT ───────────────────────────────────
   // One intelligent resolver understands units, domicile SITES, and OPERATORS
@@ -159,7 +166,7 @@ function resolveEntities(text, rows) {
 // Build a focused summary block for a site/operator/vendor group.
 function _buildGroupSummary(group, allRows, opts) {
   const kindLabel = group.kind === 'site' ? 'DOMICILE SITE'
-                  : group.kind === 'operator' ? 'OPERATOR'
+                  : group.kind === 'operator' ? 'OPERATOR / SCAC'
                   : 'VENDOR';
   const gRows   = group.rows;
   const unavail = gRows.filter(r => (r.lifecycleState || '').toLowerCase().includes('unavail'));
