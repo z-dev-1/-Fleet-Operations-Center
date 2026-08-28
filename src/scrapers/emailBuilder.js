@@ -372,7 +372,13 @@ ${pmRows}
   let changeMeta = null;
   try {
     const { buildChangeSummary } = require('./email-summary');
-    const result = buildChangeSummary(filteredUnits, { slot: slotLabel });
+    // Scope the change-summary snapshot per operator (+domicile if scoped) +slot
+    // so each recipient's "new / returned" diff compares against its own history,
+    // not a shared global snapshot that other operators' sends overwrite.
+    const _scopeKey = [String(op || 'ALL').toUpperCase(),
+                       (domicile && domicile !== 'ALL') ? String(domicile).toUpperCase() : '',
+                       String(slotLabel || '')].filter(Boolean).join('_');
+    const result = buildChangeSummary(filteredUnits, { slot: slotLabel, scopeKey: _scopeKey });
     changeSummaryHtml = result.html || '';
     changeMeta = result.meta || null;
   } catch (e) { logger.warn('Change summary failed (non-fatal):', e.message); }

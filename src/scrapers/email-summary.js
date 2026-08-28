@@ -25,8 +25,19 @@ const STALE_NO_UPDATE_HOURS = 48;
 function buildChangeSummary(currentUnits, opts = {}) {
   const slot = opts.slot || '';
 
+  // BUG FIX (2026-08-28): the snapshot used to be a single global key
+  // ('emailLastSnapshot'). Emails are built per operator (each with its own
+  // operator-filtered `currentUnits`), so a shared snapshot cross-contaminated
+  // the diff: operator A's send overwrote the snapshot with only A's units,
+  // then operator B diffed B's units against A's snapshot — making all of B's
+  // units look "new" and all of A's look "returned to service" regardless of
+  // operator. Namespacing the snapshot per scope (operator[+domicile]+slot)
+  // makes each recipient's returned/new diff compare against its OWN history.
+  const scopeKey = opts.scopeKey ? String(opts.scopeKey) : '';
+  const snapKey  = scopeKey ? ('emailLastSnapshot_' + scopeKey) : 'emailLastSnapshot';
+
   // Load previous snapshot (saved after last successful email send)
-  const prevSnap = store.load('emailLastSnapshot', null);
+  const prevSnap = store.load(snapKey, null);
   const prevUnits = (prevSnap && Array.isArray(prevSnap.units)) ? prevSnap.units : [];
   const prevTime  = prevSnap ? prevSnap.sentAt : null;
 
@@ -79,8 +90,8 @@ function buildChangeSummary(currentUnits, opts = {}) {
     ? (currUnavail.reduce((sum, u) => sum + (_parseDays(u.duration) || 0), 0) / currUnavail.length).toFixed(1)
     : '0';
 
-  // Save current state as snapshot for next comparison
-  _saveSnapshot(currentUnits, slot);
+  // Save current state as snapshot for next comparison (per-scope key)
+  _saveSnapshot(currentUnits, slot, snapKey);
 
   // If no previous snapshot, skip the summary (first email ever)
   if (!prevSnap) {
@@ -192,7 +203,7 @@ function _timelineAgeHours(timeline) {
   return null; // no parseable date found
 }
 
-function _saveSnapshot(units, slot) {
+function _saveSnapshot(units, slot, snapKey) {
   const snap = {
     sentAt: new Date().toISOString(),
     slot,
@@ -204,7 +215,7 @@ function _saveSnapshot(units, slot) {
       riskScore: u.riskScore || 0,
     })),
   };
-  store.save('emailLastSnapshot', snap);
+  store.save(snapKey || 'emailLastSnapshot', snap);
 }
 
 function _esc(s) {
