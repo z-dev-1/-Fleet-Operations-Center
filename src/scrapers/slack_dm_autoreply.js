@@ -158,7 +158,58 @@ async function _buildAttachmentContext(msg, downloadFn) {
   return parts.length ? '\n\n' + parts.join('\n\n') : '';
 }
 
-// ── Auto-flip: detect "flip unit XXXXXX" requests and act on them ──────────
+// ── Rapid-fire message batching ───────────────────────────────────────────
+// FEATURE (2026-08-28): people often split one thought across multiple fast
+// messages ("Is there any update on 321060?" / "please?" / "we need the
+// truck" — all within 60s). The engine previously replied to EACH one
+// separately, which felt spammy and forced Z to delete the extras. This
+// helper batches consecutive messages from the same sender that arrive within
+// BATCH_WINDOW_S seconds into a single entry so one consolidated reply goes out.
+const BATCH_WINDOW_S = 60; // max gap between messages to batch them together
+
+function _batchRapidMessages(msgs) {
+  if (!msgs || msgs.length <= 1) return msgs;
+  const batches = [];
+  let current = null;
+  for (const m of msgs) {
+    const mTs = parseFloat(m.ts);
+    if (current && m.userId === current.userId &&
+        (mTs - parseFloat(current.lastTs)) <= BATCH_WINDOW_S) {
+      // Same sender, within window — merge into current batch
+      current.texts.push(m.text || '');
+      current.lastTs = m.ts;
+      current.merged.push(m);
+    } else {
+      // New batch
+      if (current) batches.push(current);
+      current = {
+        userId: m.userId,
+        ts: m.ts,
+        lastTs: m.ts,
+        threadTs: m.threadTs,
+        text: m.text || '',
+        texts: [m.text || ''],
+        merged: [m],
+        // Keep original msg shape fields
+        attachments: m.attachments,
+        files: m.files,
+        replyCount: m.replyCount,
+      };
+    }
+  }
+  if (current) batches.push(current);
+  // Convert batches back to msg-like objects. Concatenate texts with newline.
+  return batches.map(b => {
+    const combined = b.texts.filter(Boolean).join('\n');
+    return {
+      ...b.merged[0],             // base shape from first message
+      text: combined,             // merged text
+      ts: b.lastTs,               // use the LAST message's ts as the watermark
+      _batchedCount: b.merged.length,
+      _batchedTs: b.merged.map(mm => mm.ts),
+    };
+  });
+}
 // FEATURE (2026-08-27): the most common actionable DM is a partner asking to
 // "flip" a unit back into service (Unavailable -> Active). The app already has
 // the machinery to do this (src/scrapers/setLifecycle.js, same automation the
@@ -710,7 +761,13 @@ async function pollDMAutoReplyOnce(log) {
       const hasNewTopLevel = newMsgs.length > 0;
 
       const existingLog = store.load('slackDMReplies', []); // hoisted — one disk read for all messages
-      if (hasNewTopLevel) { for (const msg of newMsgs) {
+      // BATCH rapid-fire messages from the same sender so we reply ONCE to the
+      // consolidated thought instead of spamming multiple separate replies.
+      const batchedMsgs = hasNewTopLevel ? _batchRapidMessages(newMsgs) : [];
+      if (hasNewTopLevel && batchedMsgs.length < newMsgs.length) {
+        doLog(`[SlackDM] ${dm.name}: batched ${newMsgs.length} messages into ${batchedMsgs.length}`);
+      }
+      if (hasNewTopLevel) { for (const msg of batchedMsgs) {
         // Defense-in-depth dedup, on top of _pollLock (same rationale as
         // channel watch's identical check — see that file for the real
         // incident it prevents).
