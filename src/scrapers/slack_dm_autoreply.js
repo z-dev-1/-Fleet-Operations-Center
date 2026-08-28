@@ -78,7 +78,8 @@ function _appendReplyLog(entry) {
 
 function getDMReviewQueue() {
   const log = store.load('slackDMReplies', []);
-  return log.filter(e => e.inScope === false && e.status === 'open');
+  // Include normal open escalations AND pending WR drafts (Z-only approval).
+  return log.filter(e => (e.inScope === false && e.status === 'open') || e.status === 'wr-pending');
 }
 
 function getDMReplyLog(limit) {
@@ -226,6 +227,112 @@ function _findFleetRow(unitToken) {
   const rows = fd.rows || [];
   const q = String(unitToken).toUpperCase();
   return rows.find(r => (r.equipmentId || '').toUpperCase() === q) || null;
+}
+
+// ── Create-WR drafting (Bucket 3, Option A: draft + Z-only approval) ────────
+// FEATURE (2026-08-27): grounding / predictive-maintenance alerts routinely ask
+// "please create the work order following the predictive maintenance process".
+// Rather than auto-creating a WR in AAP (risky: no vendor selection, no
+// duplicate hard-block, writes a real record), we PARSE the alert, run
+// guardrails, and — if clean — build a WR payload and drop a Z-ONLY review
+// item with a one-click "Create WR" button. NOTHING is sent to the partner or
+// alert channel; this is a private draft-and-approve. See _maybeDraftWR.
+
+// Detect whether a message is asking to create a WR / is a grounding-or-PM
+// alert that implies WR creation. Returns the referenced unit token or null.
+function _detectWRRequest(messageText, historyMsgs) {
+  const text = (messageText || '');
+  if (!text.trim()) return null;
+  // Grounding / predictive-maintenance alert phrasing, or an explicit ask.
+  const wrIntent = /\b(create|open|submit|put in|cut)\b[^.]*\b(work\s*order|work\s*request|wr)\b/i.test(text)
+    || /please create the work order/i.test(text)
+    || /predictive maintenance process/i.test(text)
+    || /partner grounding date confirmed/i.test(text)
+    || /predictive maintenance alert/i.test(text);
+  if (!wrIntent) return null;
+  // Prefer "Asset ID: XXXXX" (alert format), then any unit token, then history.
+  const assetLine = text.match(/asset\s*id\s*[:#]?\s*([A-Za-z]?\d{4,8})/i);
+  if (assetLine) return assetLine[1];
+  return _unitTokenIn(text) || _lastUnitFromHistory(historyMsgs);
+}
+
+// Parse a grounding / predictive-maintenance alert into structured bits used to
+// compose the WR title/issue. All fields optional — missing ones are just blank.
+function _parseAlert(text) {
+  const t = text || '';
+  const out = { riskScore: '', insights: [], faultCodes: [], repairWindow: '', domicile: '', groundingDate: '' };
+  const rs = t.match(/risk\s*score\s*[:#]?\s*([\d.]+)/i);            if (rs) out.riskScore = rs[1];
+  const dm = t.match(/domicile\s*[:#]?\s*([A-Za-z0-9]+)/i);          if (dm) out.domicile = dm[1];
+  const rw = t.match(/repair\s*window\s*[:#]?\s*([^|\n]+)/i);        if (rw) out.repairWindow = rw[1].trim();
+  const gd = t.match(/grounding\s*date\/?\s*time?\s*[:#]?\s*([^\n]+)/i); if (gd) out.groundingDate = gd[1].trim();
+  // Fault codes: "Fault Code(s): 1325, 1323, ..." — capture the numbers.
+  const fc = t.match(/fault\s*code\(?s?\)?\s*[:#]?\s*([\d,\s]+)/i);
+  if (fc) out.faultCodes = fc[1].split(/[,\s]+/).map(x => x.trim()).filter(Boolean);
+  // Insight names: lines like "1. *Engine Misfire* | ..." — grab the bold-ish name.
+  const insightRe = /\d+\.\s*\*?([A-Za-z][A-Za-z /&-]{3,60})\*?\s*\|/g;
+  let m;
+  while ((m = insightRe.exec(t)) !== null) { out.insights.push(m[1].trim()); }
+  return out;
+}
+
+// Build the createWorkRequest payload + resolved unit for a drafted WR.
+// Returns { payload, unit } — the exact args aap:create-wr expects.
+function _buildWRDraft(row, alert) {
+  const insightStr = alert.insights.length ? alert.insights.join('; ') : 'Predictive maintenance insight';
+  const faultStr   = alert.faultCodes.length ? ' | Fault codes: ' + alert.faultCodes.join(', ') : '';
+  const riskStr    = alert.riskScore ? ' | Risk score: ' + alert.riskScore : '';
+  const winStr     = alert.repairWindow ? ' | Repair window: ' + alert.repairWindow : '';
+  const title = 'Predictive Maintenance — ' + (alert.insights[0] || 'Insight') + ' (' + row.equipmentId + ')';
+  const issue = insightStr + faultStr + riskStr + winStr +
+    (row.issueDetails ? ' | Existing notes: ' + String(row.issueDetails).slice(0, 200) : '');
+  const payload = {
+    unit:       row.equipmentId,
+    title:      title.slice(0, 120),
+    issue:      issue.slice(0, 500),
+    vendor:     row.vendor || '',            // may be blank — Z picks on approval
+    urgent:     alert.riskScore && parseFloat(alert.riskScore) >= 80 ? 'Yes' : 'No',
+    urgencyReason: alert.riskScore && parseFloat(alert.riskScore) >= 80 ? 'DEA - Asset Shortage' : '',
+    areaPairs:  [],                          // Z selects component areas on approval
+    comments:   '',
+    shareWith:  'internal',
+    domicile:   (row.domicileSite || alert.domicile || '').toUpperCase(),
+    attachments: [],
+  };
+  return { payload, unit: row };
+}
+
+// Decide whether to draft a WR for this alert/request. Returns a decision
+// object describing what to log for Z (never anything sent to the partner),
+// or null if we can't resolve the unit (let the normal AI reply stand).
+function _maybeDraftWR(unitToken) {
+  const row = _findFleetRow(unitToken);
+  if (!row) return null; // unknown unit — normal reply handles it
+
+  const unitId = row.equipmentId;
+
+  // Guardrail: unit must have an AAP asset URL to create a WR against.
+  if (!row.assetUrl) {
+    return { kind: 'blocked', unitId, title: `WR draft blocked: ${unitId} (no AAP URL)`,
+      note: `Can't draft a WR for ${unitId} — no AAP asset URL cached. Re-sync and it'll be draftable.` };
+  }
+  // Guardrail: don't create a WR for an Available/Active unit (mirrors AAP's own
+  // block — WRs are for units that need work).
+  if (/active/i.test(row.lifecycleState || '') && !/unavail/i.test(row.lifecycleState || '')) {
+    // Active units CAN legitimately get a predictive WR, but flag it for review
+    // rather than silently drafting against an in-service unit.
+    // (We still draft — just note the state so Z sees it.)
+  }
+  // Guardrail: don't draft a duplicate if the unit already has an open WR.
+  const openU = parseInt(row.openUnplanned, 10) || 0;
+  const openP = parseInt(row.openPlanned, 10) || 0;
+  const hasWO = openU + openP > 0 || (row.workRequestId && row.workRequestId !== '--');
+  if (hasWO) {
+    return { kind: 'blocked', unitId, title: `WR already open: ${unitId}`,
+      note: `${unitId} already has an open work order` +
+        (row.workRequestId && row.workRequestId !== '--' ? ` (${row.workRequestId})` : ` (${openU} unplanned / ${openP} planned)`) +
+        ` — not drafting a duplicate. Review the existing WR instead.` };
+  }
+  return { kind: 'draft', unitId, row };
 }
 
 // Given the resolved fleet row, decide whether an auto-flip is allowed and
@@ -645,6 +752,58 @@ async function pollDMAutoReplyOnce(log) {
               return who + ': ' + (m.text || '');
             })
         );
+
+        // CREATE-WR (Bucket 3, Option A): if this is a grounding / predictive-
+        // maintenance alert (or explicit "create the WR" ask), draft a WR for
+        // Z's approval — DO NOT reply to the partner/alert channel. This is a
+        // private draft-and-approve: we log a Z-only review item (with the
+        // pre-built payload for the one-click "Create WR" button) and advance
+        // the watermark, sending nothing outbound.
+        const _wrUnit = _detectWRRequest(msg.text || '', historyMsgs);
+        if (_wrUnit) {
+          const wrDecision = _maybeDraftWR(_wrUnit);
+          if (wrDecision) {
+            if (wrDecision.kind === 'draft') {
+              const alert = _parseAlert(msg.text || '');
+              const { payload, unit } = _buildWRDraft(wrDecision.row, alert);
+              _appendReplyLog({
+                id: dm.channelId + ':' + msg.ts,
+                channelId: dm.channelId,
+                channelName: dm.name,
+                ts: msg.ts,
+                replyTs: null,          // nothing sent to the partner
+                question: msg.text,
+                reply: '',              // Z-only — no outbound reply
+                inScope: false,
+                category: 'action',
+                title: `Create WR — ${wrDecision.unitId}`,
+                pendingWR: { payload, unit },
+                createdAt: new Date().toISOString(),
+                status: 'wr-pending',
+              });
+              doLog(`[SlackDM] ${dm.name}: WR drafted for ${wrDecision.unitId} (Z approval, no partner reply)`);
+            } else {
+              // Guardrail tripped (no URL / already-open WR). Log a Z-only note.
+              _appendReplyLog({
+                id: dm.channelId + ':' + msg.ts,
+                channelId: dm.channelId,
+                channelName: dm.name,
+                ts: msg.ts,
+                replyTs: null,
+                question: msg.text,
+                reply: '',
+                inScope: false,
+                category: 'action',
+                title: wrDecision.title,
+                createdAt: new Date().toISOString(),
+                status: 'open',
+              });
+              doLog(`[SlackDM] ${dm.name}: WR not drafted for ${wrDecision.unitId} — ${wrDecision.note}`);
+            }
+            _saveThreadSeen(dm.channelId, dm.name, msg.ts, !!dm.isGroup);
+            continue; // handled — no AI draft, no partner reply
+          }
+        }
 
         const speakerName = dm.isGroup ? ((await resolveUserName(msg.userId)) || 'Someone in the group') : null;
         const groupContext = dm.isGroup

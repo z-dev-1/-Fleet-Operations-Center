@@ -10,7 +10,7 @@
  */
 
 import bus from '../bus.js';
-import { ai, slack } from '../bridge.js';
+import { ai, slack, aap } from '../bridge.js';
 import state from '../state.js';
 import toast from '../components/toast.js';
 
@@ -659,6 +659,33 @@ async function _refreshReviewQueue() {
     const chanLabel = item.source === 'dm'
       ? `DM: ${_escapeHtml(item.channelName || '')}`
       : `#${_escapeHtml(item.channelName || '')}`;
+    // WR-pending items are Z-only drafts (nothing was sent out) — render a
+    // "Create WR" approval button and show the drafted WR summary instead of a
+    // "sent" reply line.
+    const isWR = item.status === 'wr-pending' && item.pendingWR;
+    if (isWR) {
+      const p = item.pendingWR.payload || {};
+      const wrSummary =
+        `<div class="oc-review-reply"><span class="oc-review-reply-label">Drafted WR (needs your approval):</span></div>` +
+        `<div class="oc-review-question"><strong>${_escapeHtml(p.title || 'Work Request')}</strong><br>` +
+        `Unit ${_escapeHtml(p.unit || '')}` +
+        (p.vendor ? ` • Vendor: ${_escapeHtml(p.vendor)}` : ` • <em>no vendor selected</em>`) +
+        (p.urgent === 'Yes' ? ` • URGENT` : '') +
+        `<br>${_escapeHtml(p.issue || '')}</div>`;
+      return `<div class="oc-review-item" data-id="${_escapeHtml(item.id)}" data-source="${item.source}" data-wr="1">
+        <div class="oc-review-item-head">
+          <span class="oc-review-cat">🛠️ Create WR</span>
+          <span class="oc-review-chan">${chanLabel}</span>
+          <span class="oc-review-time">${when}</span>
+        </div>
+        <div class="oc-review-question">${_escapeHtml(item.question || '')}</div>
+        ${wrSummary}
+        <div class="oc-review-actions">
+          <button class="oc-review-btn oc-review-btn--done" data-action="create-wr">Create WR</button>
+          <button class="oc-review-btn oc-review-btn--dismiss" data-action="dismiss">Dismiss</button>
+        </div>
+      </div>`;
+    }
     const replyLabel = item.source === 'dm' ? 'Sent as you:' : 'Sent to partner:';
     return `<div class="oc-review-item" data-id="${_escapeHtml(item.id)}" data-source="${item.source}">
       <div class="oc-review-item-head">
@@ -704,6 +731,37 @@ async function _refreshReviewQueue() {
     el.querySelectorAll('.oc-review-btn').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const action = btn.getAttribute('data-action');
+
+        // CREATE WR (Bucket 3): approve a drafted WR. Calls aap.createWR with
+        // the payload the DM engine pre-built, then marks the item handled.
+        if (action === 'create-wr') {
+          const item = items.find((it) => it.id === id);
+          const pending = item && item.pendingWR;
+          if (!pending || !pending.payload || !pending.unit) {
+            toast.show('error', 'WR draft data missing — dismiss and create manually.', 3500);
+            return;
+          }
+          btn.disabled = true;
+          const _orig = btn.textContent;
+          btn.textContent = 'Creating\u2026';
+          try {
+            const res = await aap.createWR(pending.payload, pending.unit);
+            if (res && (res.ok || res.success || res.workRequestId)) {
+              const wrId = res.workRequestId ? ` (${res.workRequestId})` : '';
+              toast.show('success', `WR created for ${pending.payload.unit}${wrId}`, 3000);
+              await slack.updateDMReviewItem({ id, updates: { status: 'done' } });
+              _refreshReviewQueue();
+            } else {
+              btn.disabled = false; btn.textContent = _orig;
+              toast.show('error', 'WR not created: ' + ((res && (res.error || res.message)) || 'unknown error'), 4000);
+            }
+          } catch (e) {
+            btn.disabled = false; btn.textContent = _orig;
+            toast.show('error', 'WR create failed: ' + e.message, 4000);
+          }
+          return;
+        }
+
         const status = action === 'done' ? 'done' : 'dismissed';
         try {
           if (source === 'dm') {
