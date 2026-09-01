@@ -196,23 +196,27 @@ async function pushToSharePoint(units, onProgress) {
   for (const wb of LIVE_WORKBOOKS) {
     const wbUnits = allUnits.filter(u => {
 
-      const op = (u.op || u.operator || '').toUpperCase();
-      const dom = (u.site || u.domicileSite || '').toUpperCase();
-      const carrierMatch = wb.carriers.some(c => c.code === op);
+      const op = (u.op || u.operator || '').trim().toUpperCase();
+      const carrierMatch = wb.carriers.some(c => (c.code || '').trim().toUpperCase() === op);
       if (!carrierMatch) return false;
       // Filter by domicile: if workbook has a domicile set, only include units from that domicile
       if (wb.domicile) {
-        const unitDom = (u.site || u.domicileSite || u.domicile || '').toUpperCase();
-        return unitDom === wb.domicile.toUpperCase() || unitDom.includes(wb.domicile.toUpperCase());
+        const unitDom = (u.site || u.domicileSite || u.domicile || '').trim().toUpperCase();
+        return unitDom === wb.domicile.trim().toUpperCase() || unitDom.includes(wb.domicile.trim().toUpperCase());
       }
-          });
+      // No domicile filter on this workbook -> include all carrier-matched units.
+      // (BUG FIX: previously fell through to `undefined` here, which rejected
+      // every unit, so any workbook with an empty domicile pushed nothing.)
+      return true;
+    });
 
 
 
     if (!wbUnits.length) { log(wb.name + ': No units.', 'info'); continue; }
 
     for (const carrier of wb.carriers) {
-      const carrierUnits = wbUnits.filter(u => (u.op || u.operator || '').toUpperCase() === carrier.code);
+      const carrierCode = (carrier.code || '').trim().toUpperCase();
+      const carrierUnits = wbUnits.filter(u => (u.op || u.operator || '').trim().toUpperCase() === carrierCode);
       if (!carrierUnits.length) continue;
 
       log(wb.name + ' / ' + carrier.code + ' -> ' + carrier.sheet + ': ' + carrierUnits.length + ' units', 'info');
@@ -244,7 +248,9 @@ async function pushToSharePoint(units, onProgress) {
           sheetName: carrier.sheet,
           units: rowData,
           digest: digest,
-          headerRow: wb.headerRow,
+          // Prefer the per-carrier headerRow when set (each sheet can differ),
+          // fall back to the workbook-level value. Generic — no hardcoding.
+          headerRow: (carrier.headerRow != null ? carrier.headerRow : wb.headerRow),
           dryRun: false
         }, 90000);
 

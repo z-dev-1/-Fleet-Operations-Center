@@ -13,6 +13,20 @@ async function spPushWorksheet(config) {
 
   const log = (msg) => { results.log.push(msg); console.log('[SP Push]', msg); };
 
+  // ── SAFETY GUARD (top region is sacred) ──────────────────────────────────
+  // Every write/insert/delete below is bounded to rows STRICTLY GREATER than
+  // headerRow, which protects the fixed dashboard/summary/title block at the
+  // top of each sheet. That protection is only as good as headerRow itself, so
+  // if it's missing or not a sane positive integer we REFUSE to touch the sheet
+  // rather than risk defaulting to a value that writes into the top region.
+  // Generic — applies to every sheet, current and future.
+  const _hr = parseInt(headerRow, 10);
+  if (!Number.isFinite(_hr) || _hr < 1) {
+    log('ERROR: invalid headerRow (' + JSON.stringify(headerRow) + ') for ' + sheetName + ' — skipping this sheet to protect its header/top region. Configure a valid header row and retry.');
+    results.errors++;
+    return results;
+  }
+
   // === DOWNLOAD ===
   log('Downloading: ' + filePath);
   // Extract site from filePath for proper API scope
@@ -257,11 +271,11 @@ async function spPushWorksheet(config) {
   const unitCol = 'B';
   const rowRe = /<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g;
   const existingUnits = {}; // normalized unitId -> rowNum
-  let maxDataRow = headerRow;
+  let maxDataRow = _hr;
   let rm;
   while ((rm = rowRe.exec(wsXml)) !== null) {
     const rowNum = parseInt(rm[1], 10);
-    if (rowNum <= headerRow) continue;
+    if (rowNum <= _hr) continue;
     const cellRe = /<c\b[^>]*\br="B\d+"[^>]*?(?:\/>|>[\s\S]*?<\/c>)/;
     const cm = cellRe.exec(rm[2]);
     if (cm) {
@@ -371,6 +385,14 @@ async function spPushWorksheet(config) {
 
     const targetRow = existingRow || (++maxDataRow);
 
+    // HARD GUARD: never write at/above the header/top region. Data rows are
+    // always > headerRow; if anything ever computes a target inside the top
+    // block, skip it rather than overwrite the dashboard/title/summary.
+    if (targetRow <= _hr) {
+      log('[SKIP] refusing to write ' + unitId + ' at row ' + targetRow + ' (<= headerRow ' + _hr + ') — protects top region');
+      continue;
+    }
+
     // Debug log
     log('[ROW ' + targetRow + (existingRow ? ' UPDATE' : ' NEW') + (isActive ? ' ACTIVE' : '') + '] ' + unitId + ' | E:' + unit[4] + ' | F:' + (unit[5]||'--') + ' | L:' + (unit[11]||'--'));
 
@@ -432,7 +454,7 @@ async function spPushWorksheet(config) {
   let rdm;
   while ((rdm = rowReDedup.exec(wsXml)) !== null) {
     const rn = parseInt(rdm[1], 10);
-    if (rn <= headerRow) continue;
+    if (rn <= _hr) continue;
     const cellRe2 = /<c\b[^>]*\br="B\d+"[^>]*?(?:\/>|>[\s\S]*?<\/c>)/;
     const cm2 = cellRe2.exec(rdm[2]);
     if (cm2) {
