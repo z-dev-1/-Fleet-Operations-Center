@@ -361,7 +361,12 @@ async function spPushWorksheet(config) {
       const nid = normalizeId(unitId);
       const existingRow = existingUnits[nid];
       const isActive = String(unit[4] || '').toUpperCase() === 'ACTIVE';
-      if (isActive && !existingRow) continue;
+      // Write EVERY unit to the sheet — active AND unavailable, whether or not
+      // it already exists. The full operator roster must appear in the tracker.
+      // (Previously active units that weren't already in the sheet were skipped,
+      // which is why e.g. TUZR pushed 62 but only 43 landed. Active units still
+      // get their maintenance columns cleared upstream; they just also get added
+      // as new rows when missing.)
       const targetRow = existingRow || (++maxDataRow);
       if (targetRow <= _hr) { log('[' + sheetLabel + '] [SKIP] ' + unitId + ' row ' + targetRow + ' <= header ' + _hr); continue; }
 
