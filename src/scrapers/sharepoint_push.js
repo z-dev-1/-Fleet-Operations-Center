@@ -219,6 +219,12 @@ async function pushToSharePoint(units, onProgress) {
 
     if (!wbUnits.length) { log(wb.name + ': No units.', 'info'); continue; }
 
+    // Build ALL carrier→sheet mappings for this workbook, then push them
+    // in a SINGLE download→modify-all→upload cycle. This eliminates the race
+    // condition where sequential per-carrier uploads overwrite each other
+    // (SharePoint's write propagation isn't instant, so a second carrier's
+    // download could grab the pre-first-carrier version and blank its data).
+    const sheets = [];
     for (const carrier of wb.carriers) {
       const carrierCode = (carrier.code || '').trim().toUpperCase();
       const carrierUnits = wbUnits.filter(u => (u.op || u.operator || '').trim().toUpperCase() === carrierCode);
@@ -241,33 +247,35 @@ async function pushToSharePoint(units, onProgress) {
           row.values[13] = '';  // N: Days Unavailable
           row.urls = {};        // No hyperlinks for active units
         }
-
         return row;
       });
 
+      sheets.push({
+        sheetName: carrier.sheet,
+        units: rowData,
+        headerRow: (carrier.headerRow != null ? carrier.headerRow : wb.headerRow),
+        carrierCode: carrier.code,
+      });
+    }
 
+    if (!sheets.length) { log(wb.name + ': No carrier sheets to push.', 'info'); continue; }
 
-      try {
-        const result = await spRun({
-          filePath: wb.path,
-          sheetName: carrier.sheet,
-          units: rowData,
-          digest: digest,
-          // Prefer the per-carrier headerRow when set (each sheet can differ),
-          // fall back to the workbook-level value. Generic — no hardcoding.
-          headerRow: (carrier.headerRow != null ? carrier.headerRow : wb.headerRow),
-          dryRun: false
-        }, 90000);
+    try {
+      // ONE download → modify ALL sheets → ONE upload per workbook.
+      const result = await spRun({
+        filePath: wb.path,
+        sheets: sheets,
+        digest: digest,
+        dryRun: false,
+      }, 120000);
 
-
-        if (result && result.log) result.log.forEach(l => log('    ' + l, 'info'));
-        totalPushed += (result && result.pushed) || 0;
-        totalUpdated += (result && result.updated) || 0;
-        totalErrors += (result && result.errors) || 0;
-      } catch(e) {
-        log('  [ERROR] ' + carrier.code + ': ' + e.message, 'bad');
-        totalErrors++;
-      }
+      if (result && result.log) result.log.forEach(l => log('    ' + l, 'info'));
+      totalPushed += (result && result.pushed) || 0;
+      totalUpdated += (result && result.updated) || 0;
+      totalErrors += (result && result.errors) || 0;
+    } catch(e) {
+      log('  [ERROR] ' + wb.name + ': ' + e.message, 'bad');
+      totalErrors++;
     }
   }
 
