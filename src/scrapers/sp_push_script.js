@@ -242,6 +242,43 @@ async function spPushWorksheet(config) {
   }
   log('Shared strings: ' + sharedStrings.length + ' entries');
 
+  // === HEADER-ROW VERIFICATION GUARD ===
+  // A wrong-but-valid headerRow (e.g. 3 when the real header band is row 16)
+  // would make the push write DATA rows into the title/summary/header region
+  // and corrupt the sheet's top. The numeric guard elsewhere only catches
+  // missing/<=0 values, so ALSO verify that the configured headerRow actually
+  // lands on the real header band: the row must contain the expected column
+  // titles (CARRIER + UNIT NUMBER). If it doesn't, refuse to write this sheet.
+  (function _verifyHeaderRow() {
+    const rowMatch = wsXml.match(new RegExp('<row\\b[^>]*\\br="' + _hr + '"[^>]*>([\\s\\S]*?)<\\/row>'));
+    let headerText = '';
+    if (rowMatch) {
+      // Pull each cell's resolved text (shared-string or inline) from the row.
+      const cellRe = /<c\b[^>]*?(?:\/>|>([\s\S]*?)<\/c>)/g;
+      let cmv;
+      while ((cmv = cellRe.exec(rowMatch[1])) !== null) {
+        const cellXml = cmv[0];
+        const tAttr = (cellXml.match(/\bt="([^"]+)"/) || [])[1] || '';
+        const vm = cellXml.match(/<v>([\s\S]*?)<\/v>/);
+        if (tAttr === 's' && vm) {
+          headerText += ' ' + (sharedStrings[parseInt(vm[1], 10)] || '');
+        } else {
+          const im = cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/);
+          if (im) headerText += ' ' + im[1];
+          else if (vm) headerText += ' ' + vm[1];
+        }
+      }
+    }
+    const h = headerText.toUpperCase();
+    const looksLikeHeader = h.includes('CARRIER') && (h.includes('UNIT') || h.includes('BODY TYPE'));
+    if (!looksLikeHeader) {
+      log('ERROR: headerRow ' + _hr + ' on ' + sheetName + ' does not look like the column-header band (found: "' + headerText.trim().slice(0, 80) + '"). Refusing to write — this protects the sheet\'s top region. Fix the configured headerRow and retry.');
+      results.errors++;
+      results._headerCheckFailed = true;
+    }
+  })();
+  if (results._headerCheckFailed) return results;
+
   // Read rows
 
   function getCellValue(cellXml) {
@@ -290,40 +327,64 @@ async function spPushWorksheet(config) {
 
 
   // === FIND OR CREATE WRAP TEXT STYLE ===
-  // Look for existing style with wrapText in styles.xml, or add one
+  // ── WRAP-TEXT FOR COLUMN K (REPAIR UPDATES) ──────────────────────────────
+  // FEATURE (2026-09-01): the REPAIR UPDATES column holds long, multi-line
+  // notes that need to wrap. We build a wrap-enabled cell style and apply it
+  // ONLY to column K data cells. SAFETY: we only ever APPEND a new <xf> at the
+  // END of cellXfs — appending never renumbers existing style indices, so every
+  // header/top-region cell (which references its original index) is untouched.
+  // We clone column K's existing template style (to keep its font/fill/border)
+  // and just add wrapText="1" to the clone, so K looks identical but wraps.
   const stylesEnt = entries.find(e => e.name === 'xl/styles.xml');
-  let wrapStyleIdx = '0'; // default
   let stylesModified = false;
   let stylesXml = '';
+  // Map of source-xf-index -> new wrap-clone-index, so repeated rows reuse the
+  // same appended clone instead of appending one per row.
+  const _wrapCloneByBase = {};
+  let _cellXfsList = [];
   if (stylesEnt) {
     const stylesRaw = await inflate(stylesEnt.compData, stylesEnt.method);
     stylesXml = new TextDecoder().decode(stylesRaw);
-    // Find existing xf with wrapText
-    const xfRe = /<xf\b[^>]*>/g;
-    let xfMatch; let xfIdx = 0; let foundWrap = -1;
-    // Count cellXfs entries
     const cellXfsMatch = stylesXml.match(/<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/);
     if (cellXfsMatch) {
-      const xfBlock = cellXfsMatch[1];
-      const allXfs = xfBlock.match(/<xf\b[^>]*\/?>/g) || [];
-      for (let i = 0; i < allXfs.length; i++) {
-        if (/wrapText="1"/.test(allXfs[i])) { foundWrap = i; break; }
-      }
-      if (foundWrap >= 0) {
-        wrapStyleIdx = String(foundWrap);
-        log('Found existing wrapText style at index ' + wrapStyleIdx);
-      } else {
-        // Add new xf with wrapText at end of cellXfs
-        const newXf = '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment wrapText="1"/></xf>';
-        const newIdx = allXfs.length;
-        stylesXml = stylesXml.replace('</cellXfs>', newXf + '</cellXfs>');
-        // Update count
-        stylesXml = stylesXml.replace(/<cellXfs count="(\d+)"/, (m, n) => '<cellXfs count="' + (parseInt(n) + 1) + '"');
-        wrapStyleIdx = String(newIdx);
-        stylesModified = true;
-        log('Added wrapText style at index ' + wrapStyleIdx);
-      }
+      _cellXfsList = cellXfsMatch[1].match(/<xf\b[\s\S]*?(?:\/>|<\/xf>)/g) || [];
     }
+  }
+  // Returns a style index that renders like `baseIdx` but with wrapText on.
+  // Appends a clone to cellXfs the first time a given base index is requested.
+  function getWrapStyleFor(baseIdx) {
+    if (!stylesEnt || !_cellXfsList.length) return baseIdx || null;
+    const key = (baseIdx == null || baseIdx === '') ? 'none' : String(baseIdx);
+    if (_wrapCloneByBase[key] != null) return String(_wrapCloneByBase[key]);
+    // Build the clone from the base xf (or a plain xf if no base).
+    let baseXf = null;
+    const bi = parseInt(baseIdx, 10);
+    if (Number.isFinite(bi) && bi >= 0 && bi < _cellXfsList.length) baseXf = _cellXfsList[bi];
+    let cloneXf;
+    if (baseXf) {
+      if (/wrapText="1"/.test(baseXf)) { _wrapCloneByBase[key] = bi; return String(bi); } // already wraps
+      if (/<alignment\b[^>]*\/>/.test(baseXf)) {
+        cloneXf = baseXf.replace(/<alignment\b([^>]*)\/>/, '<alignment$1 wrapText="1"/>');
+      } else if (/<alignment\b[^>]*>[\s\S]*?<\/alignment>/.test(baseXf)) {
+        cloneXf = baseXf.replace(/<alignment\b([^>]*)>/, '<alignment$1 wrapText="1">');
+      } else if (/<xf\b[^>]*\/>/.test(baseXf)) {
+        // self-closing xf, no alignment child -> convert to open/close with alignment
+        cloneXf = baseXf.replace(/<xf\b([^>]*)\/>/, '<xf$1 applyAlignment="1"><alignment wrapText="1"/></xf>');
+      } else {
+        cloneXf = baseXf.replace(/<xf\b([^>]*)>/, '<xf$1 applyAlignment="1"><alignment wrapText="1"/>').replace(/<\/xf>?$/, '</xf>');
+        if (!/<\/xf>$/.test(cloneXf)) cloneXf = cloneXf + '</xf>';
+      }
+    } else {
+      cloneXf = '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment wrapText="1"/></xf>';
+    }
+    const newIdx = _cellXfsList.length;
+    _cellXfsList.push(cloneXf);
+    stylesXml = stylesXml.replace('</cellXfs>', cloneXf + '</cellXfs>');
+    stylesXml = stylesXml.replace(/<cellXfs count="(\d+)"/, (m, n) => '<cellXfs count="' + (parseInt(n) + 1) + '"');
+    stylesModified = true;
+    _wrapCloneByBase[key] = newIdx;
+    log('Appended wrap-text style clone at index ' + newIdx + ' (base ' + key + ')');
+    return String(newIdx);
   }
 
   function xmlEsc(v) { return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -360,7 +421,20 @@ async function spPushWorksheet(config) {
         rowAttrs = attrs;
       }
     }
-    const cells = cols.map((c, i) => buildCell(c, rowNum, unitData[i] || '', existingStyles[c])).join('');
+    const cells = cols.map((c, i) => {
+      let styleForCell = existingStyles[c];
+      // Force wrap on REPAIR UPDATES (column K) when the note is long/multi-line
+      // so it wraps instead of overflowing. Only K, only when it actually needs
+      // it — short cells keep their original style untouched.
+      if (c === 'K') {
+        const kv = String(unitData[i] || '');
+        if (kv.length > 40 || /\n/.test(kv)) {
+          const ws = getWrapStyleFor(existingStyles[c]);
+          if (ws != null) styleForCell = ws;
+        }
+      }
+      return buildCell(c, rowNum, unitData[i] || '', styleForCell);
+    }).join('');
     return '<row ' + rowAttrs + '>' + cells + '</row>';
   }
 
@@ -406,9 +480,12 @@ async function spPushWorksheet(config) {
 
     const newRowXml = buildRow(targetRow, unit, existingRowXml);
 
-    // Only add hyperlinks for Unavailable units
+    // Only add hyperlinks for Unavailable units.
+    // H = Relay Garage, I = Offsite Shop Event, J = Salesforce Case.
+    // (BUG FIX: column I was previously omitted, so offsite links never showed.)
     if (!isActive) {
       if (urls.H) hyperlinks.push({ ref: 'H' + targetRow, url: urls.H });
+      if (urls.I) hyperlinks.push({ ref: 'I' + targetRow, url: urls.I });
       if (urls.J) hyperlinks.push({ ref: 'J' + targetRow, url: urls.J });
     }
 
@@ -480,6 +557,57 @@ async function spPushWorksheet(config) {
 
   log('Modified: ' + results.updated + ' updated, ' + results.pushed + ' new');
 
+  // === COMPACT DATA ROWS (no blank gaps) ===
+  // Deleting orphan/duplicate rows above leaves holes in the row numbering, so
+  // the sheet shows blank gaps between units. Renumber all DATA rows (rows
+  // strictly > headerRow) to be contiguous starting at headerRow+1, preserving
+  // their existing order and content. Rows <= headerRow (the fixed top/header
+  // region) are never read or touched. Also remaps hyperlink refs so links
+  // still point at the right cells after renumbering.
+  const rowRemap = {}; // oldRowNum -> newRowNum (data rows only)
+  (function _compactDataRows() {
+    // Split the sheet at </sheetData> so we only rewrite the data region.
+    const sdMatch = wsXml.match(/([\s\S]*<sheetData[^>]*>)([\s\S]*?)(<\/sheetData>[\s\S]*)/);
+    if (!sdMatch) { log('[COMPACT] no <sheetData> found — skipping'); return; }
+    const head = sdMatch[1], body = sdMatch[2], tail = sdMatch[3];
+    const rowRe2 = /<row\b[^>]*\br="(\d+)"[^>]*>[\s\S]*?<\/row>/g;
+    let next = _hr + 1;
+    let rebuiltBody = body;
+    // Collect data rows in document order.
+    const dataRows = [];
+    let rm2;
+    while ((rm2 = rowRe2.exec(body)) !== null) {
+      const rn = parseInt(rm2[1], 10);
+      if (rn <= _hr) continue; // never touch header/top region
+      dataRows.push({ oldRow: rn, xml: rm2[0] });
+    }
+    // Renumber each data row and its cell refs to a contiguous sequence.
+    for (const dr of dataRows) {
+      const newRow = next++;
+      rowRemap[dr.oldRow] = newRow;
+      if (newRow === dr.oldRow) continue; // already in place
+      let rowXml = dr.xml;
+      // Update the <row r="..."> attribute.
+      rowXml = rowXml.replace(/(<row\b[^>]*\br=")\d+(")/,'$1' + newRow + '$2');
+      // Update every cell ref r="<Col><oldRow>" -> r="<Col><newRow>".
+      rowXml = rowXml.replace(/(\br=")([A-Z]+)\d+(")/g, '$1$2' + newRow + '$3');
+      rebuiltBody = rebuiltBody.replace(dr.xml, rowXml);
+    }
+    wsXml = head + rebuiltBody + tail;
+    const moved = Object.keys(rowRemap).filter(k => rowRemap[k] !== parseInt(k, 10)).length;
+    log('[COMPACT] ' + dataRows.length + ' data rows, ' + moved + ' renumbered to remove gaps');
+  })();
+  // Remap hyperlink refs to the compacted row numbers so links stay aligned.
+  if (hyperlinks.length && Object.keys(rowRemap).length) {
+    for (const h of hyperlinks) {
+      const m = h.ref.match(/^([A-Z]+)(\d+)$/);
+      if (m) {
+        const oldR = parseInt(m[2], 10);
+        if (rowRemap[oldR] && rowRemap[oldR] !== oldR) h.ref = m[1] + rowRemap[oldR];
+      }
+    }
+  }
+
   // === INJECT HYPERLINKS ===
   if (hyperlinks.length) {
     // Remove existing hyperlinks for our cells (avoid duplicates)
@@ -491,12 +619,30 @@ async function spPushWorksheet(config) {
     // Build hyperlink XML entries
     const hlXml = hyperlinks.map((h, i) => '<hyperlink ref="' + h.ref + '" r:id="rIdPush' + i + '"/>').join('');
 
-    // Insert/update <hyperlinks> block
+    // FIX (2026-09-01): the r:id references require the relationships namespace
+    // to be declared on the <worksheet> root. If the template didn't declare
+    // xmlns:r, Excel treats r:id as invalid and silently DROPS every hyperlink
+    // on open — which is why H/J links weren't showing. Ensure it's present.
+    const wsRootMatch = wsXml.match(/<worksheet\b[^>]*>/);
+    if (wsRootMatch && !/xmlns:r=/.test(wsRootMatch[0])) {
+      const fixedRoot = wsRootMatch[0].replace(/>$/, ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">');
+      wsXml = wsXml.replace(wsRootMatch[0], fixedRoot);
+      log('[FIX] Added xmlns:r namespace to <worksheet> (was missing — hyperlinks would have been dropped)');
+    }
+
+    // Insert/update <hyperlinks> block.
+    // FIX (2026-09-01): per the OOXML CT_Worksheet schema, <hyperlinks> must
+    // appear AFTER <sheetData>/<mergeCells> but BEFORE <pageMargins>/<drawing>.
+    // Previously it was inserted right before </worksheet> (i.e. after those
+    // trailing elements), an out-of-order position Excel's repair pass strips.
+    // Place it right after </mergeCells> if present, else after </sheetData>.
     if (/<hyperlinks[^>]*>/.test(wsXml)) {
+      // Existing block — append our entries into it (position already valid).
       wsXml = wsXml.replace('</hyperlinks>', hlXml + '</hyperlinks>');
+    } else if (wsXml.includes('</mergeCells>')) {
+      wsXml = wsXml.replace('</mergeCells>', '</mergeCells><hyperlinks>' + hlXml + '</hyperlinks>');
     } else {
-      // Insert before </worksheet>
-      wsXml = wsXml.replace('</worksheet>', '<hyperlinks>' + hlXml + '</hyperlinks></worksheet>');
+      wsXml = wsXml.replace('</sheetData>', '</sheetData><hyperlinks>' + hlXml + '</hyperlinks>');
     }
 
     // wsEnt.name = 'xl/worksheets/sheet2.xml' -> rels = 'xl/worksheets/_rels/sheet2.xml.rels'
@@ -607,8 +753,18 @@ async function spPushWorksheet(config) {
   }
 
 
-  // DISABLED: Do NOT modify styles.xml — preserve original layout
-  // if (stylesModified && stylesEnt) { ... }
+  // Write styles.xml back ONLY when we appended a wrap-text clone for column K.
+  // SAFE: getWrapStyleFor only ever APPENDS a new <xf> to the end of cellXfs and
+  // bumps the count — it never edits or renumbers any existing style, so every
+  // header/top-region cell (which references its original index) renders exactly
+  // as before. If nothing was appended (stylesModified stays false), styles.xml
+  // is left byte-for-byte untouched.
+  if (stylesModified && stylesEnt) {
+    const newStylesData = new TextEncoder().encode(stylesXml);
+    const compStyles = await deflate(newStylesData);
+    modifiedMap[stylesEnt.name] = { compData: compStyles, rawSize: newStylesData.length, crc: crc32(newStylesData) };
+    log('styles.xml updated (appended wrap style only — existing styles unchanged)');
+  }
 
   const newZip = rebuildZip(entries, modifiedMap);
 

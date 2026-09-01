@@ -197,16 +197,21 @@ async function pushToSharePoint(units, onProgress) {
     const wbUnits = allUnits.filter(u => {
 
       const op = (u.op || u.operator || '').trim().toUpperCase();
-      const carrierMatch = wb.carriers.some(c => (c.code || '').trim().toUpperCase() === op);
-      if (!carrierMatch) return false;
-      // Filter by domicile: if workbook has a domicile set, only include units from that domicile
-      if (wb.domicile) {
+      // Find the matching carrier entry (trim+case-normalized).
+      const matchedCarrier = wb.carriers.find(c => (c.code || '').trim().toUpperCase() === op);
+      if (!matchedCarrier) return false;
+      // Operator-specific domicile scoping: only carriers flagged
+      // `domicileScoped: true` (multi-domicile operators like AZNG, which can
+      // appear at more than one domicile) get filtered to THIS workbook's
+      // domicile. Every other operator (TUZR, SAPB, EOFE, YTSC, AGNLI, ...)
+      // belongs to its SharePoint regardless of domicile, so it's NOT filtered.
+      // Generic + config-driven — nothing hardcoded to a specific operator.
+      if (matchedCarrier.domicileScoped && wb.domicile) {
         const unitDom = (u.site || u.domicileSite || u.domicile || '').trim().toUpperCase();
-        return unitDom === wb.domicile.trim().toUpperCase() || unitDom.includes(wb.domicile.trim().toUpperCase());
+        const wbDom = wb.domicile.trim().toUpperCase();
+        return unitDom === wbDom || unitDom.includes(wbDom);
       }
-      // No domicile filter on this workbook -> include all carrier-matched units.
-      // (BUG FIX: previously fell through to `undefined` here, which rejected
-      // every unit, so any workbook with an empty domicile pushed nothing.)
+      // Not domicile-scoped -> include all carrier-matched units for this workbook.
       return true;
     });
 
