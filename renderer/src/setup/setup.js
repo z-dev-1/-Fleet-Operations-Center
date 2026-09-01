@@ -335,7 +335,10 @@ const STEPS = [
             <div class="setup__sheet-row">
               <input type="checkbox" id="sw-sp-sh-${i}" data-sheet="${_esc(s.xmlFile || s.name)}" data-name="${_esc(s.name)}" data-header="${_esc(s.headerRow)}" />
               <label for="sw-sp-sh-${i}"><strong>${_esc(s.name)}</strong> <span class="setup__mut">(header row ${_esc(s.headerRow)})</span></label>
-              <input class="setup__input setup__input--sm" placeholder="Operator code" id="sw-sp-op-${i}" />
+              <input class="setup__input setup__input--sm" placeholder="Operator code" id="sw-sp-op-${i}" value="${_esc(s.name)}" />
+              <label class="setup__mut" title="Only this operator's units for the workbook's domicile (e.g. AZNG). Leave off for operators whose units all go here regardless of domicile.">
+                <input type="checkbox" id="sw-sp-ds-${i}" /> domicile-scoped
+              </label>
             </div>
           `).join('') + `
             <label>Domicile <input class="setup__input" id="sw-sp-domicile" placeholder="ABE40, AVP40..." /></label>
@@ -348,8 +351,17 @@ const STEPS = [
             checks.forEach((cb) => {
               const headerRow = parseInt(cb.dataset.header || '16', 10);
               const opInput = cb.parentElement.querySelector('.setup__input--sm');
-              const operator = opInput ? opInput.value.trim().toUpperCase() : '';
-              carriers.push({ code: (operator || cb.dataset.name || 'DEFAULT').toUpperCase(), sheet: cb.dataset.sheet, sheetName: cb.dataset.name, headerRow });
+              // Operator code defaults to the sheet name (tabs are named after
+              // the operator: AZNG, SAPB, TUZR...). Trim + uppercase.
+              const operator = (opInput ? opInput.value.trim().toUpperCase() : '') || (cb.dataset.name || '').trim().toUpperCase() || 'DEFAULT';
+              // Domicile-scoped flag: only this operator's units for the
+              // workbook's domicile (e.g. AZNG). Persisted so reconfiguring the
+              // workbook never silently drops the scoping again.
+              const dsCb = cb.parentElement.querySelector('input[id^="sw-sp-ds-"]');
+              const domicileScoped = !!(dsCb && dsCb.checked);
+              const carrier = { code: operator, sheet: cb.dataset.sheet, sheetName: cb.dataset.name, headerRow };
+              if (domicileScoped) carrier.domicileScoped = true;
+              carriers.push(carrier);
             });
             const domicile = (document.getElementById('sw-sp-domicile').value || '').trim().toUpperCase();
             const workbook = { name: 'Workbook', domicile, path: result.filePath || url, carriers, headerRow: carriers[0].headerRow };
