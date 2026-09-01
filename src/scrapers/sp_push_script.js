@@ -15,17 +15,14 @@ async function spPushWorksheet(config) {
 
   // ── SAFETY GUARD (top region is sacred) ──────────────────────────────────
   // Every write/insert/delete below is bounded to rows STRICTLY GREATER than
-  // headerRow, which protects the fixed dashboard/summary/title block at the
-  // top of each sheet. That protection is only as good as headerRow itself, so
-  // if it's missing or not a sane positive integer we REFUSE to touch the sheet
-  // rather than risk defaulting to a value that writes into the top region.
-  // Generic — applies to every sheet, current and future.
-  const _hr = parseInt(headerRow, 10);
-  if (!Number.isFinite(_hr) || _hr < 1) {
-    log('ERROR: invalid headerRow (' + JSON.stringify(headerRow) + ') for ' + sheetName + ' — skipping this sheet to protect its header/top region. Configure a valid header row and retry.');
-    results.errors++;
-    return results;
-  }
+  // the header row, which protects the fixed dashboard/summary/title block at
+  // the top of each sheet. We do NOT trust the configured headerRow — after the
+  // sheet is downloaded, _autoFindHeaderRow() locates the real header band in
+  // the live file and overrides _hr with it (see below). The config value is
+  // only a provisional hint until then; if it's unusable we just seed a safe
+  // provisional value and let the auto-find determine the truth.
+  let _hr = parseInt(headerRow, 10);
+  if (!Number.isFinite(_hr) || _hr < 1) _hr = 16; // provisional; auto-find overrides
 
   // === DOWNLOAD ===
   log('Downloading: ' + filePath);
@@ -245,34 +242,47 @@ async function spPushWorksheet(config) {
   // === HEADER-ROW VERIFICATION GUARD ===
   // A wrong-but-valid headerRow (e.g. 3 when the real header band is row 16)
   // would make the push write DATA rows into the title/summary/header region
-  // and corrupt the sheet's top. The numeric guard elsewhere only catches
-  // missing/<=0 values, so ALSO verify that the configured headerRow actually
-  // lands on the real header band: the row must contain the expected column
-  // titles (CARRIER + UNIT NUMBER). If it doesn't, refuse to write this sheet.
-  (function _verifyHeaderRow() {
-    const rowMatch = wsXml.match(new RegExp('<row\\b[^>]*\\br="' + _hr + '"[^>]*>([\\s\\S]*?)<\\/row>'));
-    let headerText = '';
-    if (rowMatch) {
-      // Pull each cell's resolved text (shared-string or inline) from the row.
-      const cellRe = /<c\b[^>]*?(?:\/>|>([\s\S]*?)<\/c>)/g;
-      let cmv;
-      while ((cmv = cellRe.exec(rowMatch[1])) !== null) {
-        const cellXml = cmv[0];
-        const tAttr = (cellXml.match(/\bt="([^"]+)"/) || [])[1] || '';
-        const vm = cellXml.match(/<v>([\s\S]*?)<\/v>/);
-        if (tAttr === 's' && vm) {
-          headerText += ' ' + (sharedStrings[parseInt(vm[1], 10)] || '');
-        } else {
-          const im = cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/);
-          if (im) headerText += ' ' + im[1];
-          else if (vm) headerText += ' ' + vm[1];
-        }
+  // and corrupt the sheet's top. Rather than TRUST a configured headerRow (which
+  // can be stale or mis-detected), AUTO-FIND the real header band directly from
+  // the live sheet on every push by scanning for the column-title signature
+  // (CARRIER + UNIT NUMBER + BODY TYPE / REPAIR UPDATES). The row we find becomes
+  // the authoritative header row for this push — nothing is hardcoded and the
+  // config value is only a last-resort hint. If no header band can be found at
+  // all, we refuse to write (protects the top region).
+  (function _autoFindHeaderRow() {
+    function rowSignatureText(cellsXml) {
+      let txt = '';
+      const cRe = /<c\b[^>]*?(?:\/>|>([\s\S]*?)<\/c>)/g; let ccm;
+      while ((ccm = cRe.exec(cellsXml)) !== null) {
+        const cx = ccm[0];
+        const ta = (cx.match(/\bt="([^"]+)"/) || [])[1] || '';
+        const vv = cx.match(/<v>([\s\S]*?)<\/v>/);
+        if (ta === 's' && vv) txt += ' ' + (sharedStrings[parseInt(vv[1], 10)] || '');
+        else { const im = cx.match(/<t[^>]*>([\s\S]*?)<\/t>/); if (im) txt += ' ' + im[1]; else if (vv) txt += ' ' + vv[1]; }
+      }
+      return txt.toUpperCase();
+    }
+    let found = 0;
+    const scanRe = /<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g;
+    let scm;
+    while ((scm = scanRe.exec(wsXml)) !== null) {
+      const rNum = parseInt(scm[1], 10);
+      if (rNum > 60) break; // header is always near the top
+      const tu = rowSignatureText(scm[2]);
+      // The real data-table header band — distinguished from the top summary
+      // block by the presence of distinctive titles the summary never has.
+      if (tu.includes('CARRIER') && tu.includes('UNIT') &&
+          (tu.includes('BODY TYPE') || tu.includes('REPAIR UPDATES') || tu.includes('LIFECYCLE'))) {
+        found = rNum;
+        break;
       }
     }
-    const h = headerText.toUpperCase();
-    const looksLikeHeader = h.includes('CARRIER') && (h.includes('UNIT') || h.includes('BODY TYPE'));
-    if (!looksLikeHeader) {
-      log('ERROR: headerRow ' + _hr + ' on ' + sheetName + ' does not look like the column-header band (found: "' + headerText.trim().slice(0, 80) + '"). Refusing to write — this protects the sheet\'s top region. Fix the configured headerRow and retry.');
+    if (found) {
+      if (found !== _hr) log('[HEADER] auto-located header band at row ' + found + ' on ' + sheetName + ' (config hint was ' + _hr + ') — using ' + found);
+      else log('[HEADER] header band confirmed at row ' + found + ' on ' + sheetName);
+      _hr = found; // authoritative for all row guards / inserts below
+    } else {
+      log('ERROR: could not locate the header band (CARRIER + UNIT NUMBER + BODY TYPE/REPAIR UPDATES) in rows 1-60 of ' + sheetName + '. Refusing to write to protect the top region.');
       results.errors++;
       results._headerCheckFailed = true;
     }
