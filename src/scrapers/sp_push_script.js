@@ -419,25 +419,57 @@ async function spPushWorksheet(config) {
     // COMPACT (remove blank gaps)
     const rowRemap = {};
     (function() {
-      const sdM = wsXml.match(/([\s\S]*<sheetData[^>]*>)([\s\S]*?)(<\/sheetData>[\s\S]*)/);
-      if (!sdM) return;
-      let body = sdM[2];
-      const drs = []; const rr2 = /<row\b[^>]*\br="(\d+)"[^>]*>[\s\S]*?<\/row>/g; let rm2;
-      while ((rm2 = rr2.exec(sdM[2])) !== null) { const rn = parseInt(rm2[1], 10); if (rn > _hr) drs.push({ old: rn, xml: rm2[0] }); }
+      const sdM = wsXml.match(/([\s\S]*?<sheetData[^>]*>)([\s\S]*?)(<\/sheetData>[\s\S]*)/);
+      if (!sdM) { log('[' + sheetLabel + '] [COMPACT] no <sheetData> — skipping'); return; }
+      const head = sdM[1], body = sdM[2], tail = sdM[3];
+
+      // Walk the body ONCE, in document order, keeping every row token exactly
+      // as-is. Rows <= headerRow (top/header region) are emitted UNCHANGED and
+      // in place. Data rows (> headerRow) that actually contain a unit id in
+      // column B are renumbered CONTIGUOUSLY starting at headerRow+1; empty /
+      // gap rows are DROPPED (that's what removes the blank holes). Anything
+      // between rows (whitespace/text) is preserved.
+      //
+      // IMPORTANT: this REBUILDS the body by concatenation instead of doing
+      // string find-and-replace per row. The old replace approach corrupted
+      // sheets where one row's XML was a substring of another's (common with
+      // many near-empty rows), which is what was blanking SAPB's sheet3.
+      const rowTokenRe = /<row\b[^>]*?(?:\/>|>[\s\S]*?<\/row>)/g;
+      let out = '';
+      let lastIndex = 0;
       let next = _hr + 1;
-      for (const dr of drs) {
+      let dataCount = 0, dropped = 0, moved = 0;
+      let mt;
+      while ((mt = rowTokenRe.exec(body)) !== null) {
+        // Preserve any inter-row text (whitespace) exactly.
+        out += body.slice(lastIndex, mt.index);
+        lastIndex = mt.index + mt[0].length;
+
+        const rowXml = mt[0];
+        const rnMatch = rowXml.match(/\br="(\d+)"/);
+        const rn = rnMatch ? parseInt(rnMatch[1], 10) : 0;
+
+        // Header/top region — emit unchanged, never touch.
+        if (!rn || rn <= _hr) { out += rowXml; continue; }
+
+        // Does this data row actually hold a unit id in column B?
+        const bCell = /<c\b[^>]*\br="B\d+"[^>]*?(?:\/>|>[\s\S]*?<\/c>)/.exec(rowXml);
+        const hasUnit = bCell && normalizeId(getCellValue(bCell[0]));
+        if (!hasUnit) { dropped++; continue; } // blank/gap row -> drop it
+
+        dataCount++;
         const nr = next++;
-        rowRemap[dr.old] = nr;
-        if (nr !== dr.old) {
-          let rx = dr.xml;
-          rx = rx.replace(/(<row\b[^>]*\br=")\d+(")/, '$1' + nr + '$2');
-          rx = rx.replace(/(\br=")([A-Z]+)\d+(")/g, '$1$2' + nr + '$3');
-          body = body.replace(dr.xml, rx);
-        }
+        rowRemap[rn] = nr;
+        if (nr === rn) { out += rowXml; continue; }
+        moved++;
+        // Renumber the row and every cell ref inside it.
+        let rx = rowXml.replace(/(<row\b[^>]*\br=")\d+(")/, '$1' + nr + '$2');
+        rx = rx.replace(/(\br=")([A-Z]+)\d+(")/g, '$1$2' + nr + '$3');
+        out += rx;
       }
-      wsXml = sdM[1] + body + sdM[3];
-      const moved = Object.keys(rowRemap).filter(k => rowRemap[k] !== parseInt(k, 10)).length;
-      log('[' + sheetLabel + '] [COMPACT] ' + drs.length + ' rows, ' + moved + ' renumbered');
+      out += body.slice(lastIndex); // trailing text after last row
+      wsXml = head + out + tail;
+      log('[' + sheetLabel + '] [COMPACT] ' + dataCount + ' data rows, ' + moved + ' renumbered, ' + dropped + ' blank rows dropped');
     })();
     // Remap hyperlink refs
     if (hyperlinks.length) {
