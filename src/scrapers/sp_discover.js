@@ -13,11 +13,25 @@ const logger = require('../utils/logger').createLogger('sp-discover');
 
 const SP_ORIGIN = 'https://amazon.sharepoint.com';
 
-// Known header keywords to detect the header row
-const HEADER_KEYWORDS = [
-  'unit', 'equipment', 'asset', 'vendor', 'status', 'domicile',
-  'operator', 'carrier', 'issue', 'notes', 'duration', 'created',
-  'wr', 'work request', 'lifecycle', 'make', 'model', 'vin'
+// The REAL data-table header signature — the exact column titles of the
+// tracker's data grid. Detection scores a row by how many of these it matches,
+// so the fixed dashboard/summary block at the top of the sheet (which only has
+// generic words like "CARRIER" / "In Service") can never outscore the true
+// header band. "Distinctive" titles are ones that only appear in the real
+// header (never in the summary block) — matching several of these is a strong,
+// unambiguous signal we've found the right row.
+const HEADER_TITLES = [
+  'carrier', 'unit number', 'body type', 'make', 'lifecycle state',
+  'repair status', 'primary component', 'relay garage', 'offsite shop event',
+  'salesforce case', 'repair updates', 'assigned vendor', 'date downed',
+  'days unavailable',
+];
+// Titles that do NOT appear in the top summary/dashboard block — matching these
+// is the clincher that this is the data-table header, not a summary header.
+const DISTINCTIVE_TITLES = [
+  'unit number', 'body type', 'lifecycle state', 'repair status',
+  'primary component', 'relay garage', 'offsite shop event', 'salesforce case',
+  'repair updates', 'date downed', 'days unavailable',
 ];
 
 /**
@@ -198,53 +212,96 @@ function parseXlsxSheets(buf) {
 function detectHeaderRow(buf, sheetId) {
   try {
     const entries = unzipEntries(buf);
-    
-    // Get shared strings
-    const ssEntry = entries.find(e => e.name === 'xl/sharedStrings.xml');
-    if (!ssEntry) return 16; // default
-    const ssXml = ssEntry.data.toString('utf8');
+
+    // Shared strings (index -> lowercased text).
     const strings = [];
-    const siRegex = /<si[^>]*>(?:<t[^>]*>([^<]*)<\/t>|<r>.*?<t[^>]*>([^<]*)<\/t>.*?<\/r>)/gs;
-    let m;
-    while ((m = siRegex.exec(ssXml)) !== null) {
-      strings.push((m[1] || m[2] || '').toLowerCase());
+    const ssEntry = entries.find(e => e.name === 'xl/sharedStrings.xml');
+    if (ssEntry) {
+      const ssXml = ssEntry.data.toString('utf8');
+      // Each <si> may hold a single <t> or multiple <r><t> runs — join runs.
+      const siRegex = /<si\b[^>]*>([\s\S]*?)<\/si>/g;
+      let sm;
+      while ((sm = siRegex.exec(ssXml)) !== null) {
+        const parts = [];
+        const tRe = /<t[^>]*>([\s\S]*?)<\/t>/g; let tm;
+        while ((tm = tRe.exec(sm[1])) !== null) parts.push(tm[1]);
+        strings.push(parts.join('')
+          .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+          .toLowerCase().replace(/\s+/g, ' ').trim());
+      }
     }
 
-    // Get the sheet xml
     const sheetFile = 'xl/worksheets/sheet' + sheetId + '.xml';
     const sheetEntry = entries.find(e => e.name === sheetFile);
     if (!sheetEntry) return 16;
     const sheetXml = sheetEntry.data.toString('utf8');
 
-    // Find rows and check which one has the most header keyword matches
-    const rowRegex = /<row\s+r="(\d+)"[^>]*>([\s\S]*?)<\/row>/g;
-    let bestRow = 16;
-    let bestScore = 0;
-
-    while ((m = rowRegex.exec(sheetXml)) !== null) {
-      const rowNum = parseInt(m[1]);
-      if (rowNum > 25) break; // Don't scan past row 25
-      const cells = m[2];
-      
-      // Count keyword matches in this row's cell values
-      const vRegex = /<v>(\d+)<\/v>/g;
-      let score = 0;
-      let vm;
-      while ((vm = vRegex.exec(cells)) !== null) {
-        const strIdx = parseInt(vm[1]);
-        if (strings[strIdx]) {
-          const val = strings[strIdx];
-          if (HEADER_KEYWORDS.some(kw => val.includes(kw))) score++;
+    // Resolve every cell's text in a row, whether it's a shared string
+    // (t="s" -> <v>index</v>) or an inline string (<is><t>..</t></is>). The
+    // OLD detector only read shared strings, so inline-string header rows (like
+    // this tracker's real header band) scored 0 and the summary row won.
+    function rowTexts(cellsXml) {
+      const out = [];
+      const cellRe = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
+      let cm;
+      while ((cm = cellRe.exec(cellsXml)) !== null) {
+        const attrs = cm[1] || '';
+        const inner = cm[2] || '';
+        const t = (attrs.match(/\bt="([^"]+)"/) || [])[1] || '';
+        if (t === 's') {
+          const vm = inner.match(/<v>(\d+)<\/v>/);
+          if (vm) out.push(strings[parseInt(vm[1], 10)] || '');
+        } else {
+          // inline string or plain: gather any <t> text
+          const tRe = /<t[^>]*>([\s\S]*?)<\/t>/g; let tm; const parts = [];
+          while ((tm = tRe.exec(inner)) !== null) parts.push(tm[1]);
+          if (parts.length) {
+            out.push(parts.join('')
+              .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+              .toLowerCase().replace(/\s+/g, ' ').trim());
+          }
         }
       }
-      
-      if (score > bestScore) {
+      return out;
+    }
+
+    const rowRegex = /<row\s+r="(\d+)"[^>]*>([\s\S]*?)<\/row>/g;
+    let bestRow = -1, bestScore = 0, bestDistinct = 0;
+    let m;
+    while ((m = rowRegex.exec(sheetXml)) !== null) {
+      const rowNum = parseInt(m[1], 10);
+      if (rowNum > 40) break; // headers are always near the top
+      const cellText = rowTexts(m[2]);
+
+      // Score: count matched column titles. A title matches if any cell text
+      // equals it or contains it (handles "# DAYS UNAVAILABLE" vs "days unavailable").
+      let score = 0, distinct = 0;
+      for (const title of HEADER_TITLES) {
+        if (cellText.some(v => v === title || v.includes(title))) score++;
+      }
+      for (const title of DISTINCTIVE_TITLES) {
+        if (cellText.some(v => v === title || v.includes(title))) distinct++;
+      }
+
+      // Prefer the row with the most DISTINCTIVE matches (tie-break on total).
+      // Distinctive titles never appear in the top summary block, so this is
+      // what separates the true data-table header from the dashboard header.
+      if (distinct > bestDistinct || (distinct === bestDistinct && score > bestScore)) {
+        bestDistinct = distinct;
         bestScore = score;
         bestRow = rowNum;
       }
     }
 
-    return bestRow;
+    // Only trust the detection if we matched several distinctive titles — that
+    // confirms it's the real header band. Otherwise fall back to the common
+    // default (16) rather than risk picking a summary row.
+    if (bestRow > 0 && bestDistinct >= 3) {
+      logger.info('[sp-discover] header row for sheet' + sheetId + ' = ' + bestRow + ' (matched ' + bestScore + '/' + HEADER_TITLES.length + ' titles, ' + bestDistinct + ' distinctive)');
+      return bestRow;
+    }
+    logger.warn('[sp-discover] no confident header match for sheet' + sheetId + ' (best distinctive=' + bestDistinct + ') — defaulting to 16');
+    return 16;
   } catch (e) {
     return 16; // safe default
   }
