@@ -18,7 +18,16 @@
 
 const store = require('../../store');
 const profiles = require('./sender-profiles');
+const crypto = require('crypto');
 const now = () => new Date().toISOString();
+
+// Stable idempotency key from a namespace + semantic parts. Retries of the
+// SAME logical action (same unit + same content) produce the same key so the
+// executor can skip a duplicate note/reminder/case/WR/message/lifecycle change.
+function _idem(ns, parts) {
+  const h = crypto.createHash('sha1').update(ns + '|' + JSON.stringify(parts)).digest('hex').slice(0, 16);
+  return ns + ':' + h;
+}
 
 // ── LOW-RISK ACTIONS ────────────────────────────────────────────────────────
 
@@ -27,6 +36,7 @@ const now = () => new Date().toISOString();
 const ADD_TIMELINE = {
   level: 'low',
   requires: 'follow_up',
+  idempotencyKey(args) { return _idem('ADD_TIMELINE', { unit: String(args.unit || '').trim().toUpperCase(), entry: String(args.entry || '').trim() }); },
   run(args) {
     const unit = String(args.unit || '').trim();
     const entry = String(args.entry || '').trim();
@@ -51,6 +61,7 @@ const ADD_TIMELINE = {
 const CREATE_REMINDER = {
   level: 'low',
   requires: 'follow_up',
+  idempotencyKey(args) { return _idem('CREATE_REMINDER', { unit: args.unit || null, note: String(args.note || '').slice(0, 300), when: args.when || null }); },
   run(args) {
     const rem = store.load('reminders', []) || [];
     const id = 'rem_' + Date.now().toString(36);
@@ -70,6 +81,7 @@ const CREATE_REMINDER = {
 const CREATE_FOLLOWUP_CASE = {
   level: 'low',
   requires: 'follow_up',
+  idempotencyKey(args) { return _idem('CREATE_FOLLOWUP_CASE', { unit: args.unit || null, summary: args.summary || '', promise: args.promise || '', dueAt: args.dueAt || null }); },
   run(args) {
     const caseStore = require('./case-store');
     const unit = args.unit ? String(args.unit).trim() : null;
@@ -100,15 +112,43 @@ const CREATE_FOLLOWUP_CASE = {
 const MOVE_UNIT = {
   level: 'approval',
   requires: 'lifecycle_change',
+  // A lifecycle change to the SAME target state is idempotent — retrying must
+  // not double-apply. Keyed by unit + target state + reason.
+  idempotencyKey(args) { return _idem('MOVE_UNIT', { unit: String(args.unit || '').trim().toUpperCase(), state: String(args.state || '').trim().toUpperCase(), reason: String(args.reason || '').trim() }); },
   async run(args) {
     const { setLifecycleState } = require('../../scrapers/setLifecycle');
     const res = await setLifecycleState({ equipmentId: args.unit, assetUrl: args.assetUrl, state: args.state, reason: args.reason || '' });
     return { ok: !!(res && res.success), result: res, error: res && !res.success ? res.message : undefined };
   },
-  async verify(args) {
-    // Verify via live fleet data on next sync; here we confirm run reported
-    // success. (Full source-of-truth re-read happens on the next AAP sync.)
-    return { verified: true, evidence: 'AAP reported success; confirm on next sync', deferred: true };
+  async verify(args, ctx, runResult) {
+    // SPEC: do NOT report verified success just because the write returned ok.
+    // Read the lifecycle state back from the SOURCE (AAP). If the setLifecycle
+    // automation read back the post-apply state, use it. Otherwise attempt a
+    // read-back via a provided reader; if none is available, hold in a
+    // VERIFYING (deferred, NOT verified) state until the next sync confirms.
+    const want = String(args.state || '').trim().toUpperCase();
+    // (a) automation-reported post-apply state, if present.
+    const readBack = runResult && runResult.result &&
+      (runResult.result.verifiedState || runResult.result.newState || runResult.result.currentState);
+    if (readBack) {
+      const ok = String(readBack).trim().toUpperCase() === want;
+      return ok
+        ? { verified: true, evidence: 'AAP read-back confirms lifecycle=' + readBack }
+        : { verified: false, error: 'AAP read-back shows ' + readBack + ', expected ' + want };
+    }
+    // (b) optional injected reader (used by tests / future single-unit reader).
+    const reader = ctx && typeof ctx.readLifecycle === 'function' ? ctx.readLifecycle : null;
+    if (reader) {
+      try {
+        const cur = await reader(args.unit);
+        const ok = String(cur || '').trim().toUpperCase() === want;
+        return ok
+          ? { verified: true, evidence: 'source read-back confirms lifecycle=' + cur }
+          : { verified: false, error: 'source read-back shows ' + cur + ', expected ' + want };
+      } catch (e) { return { verified: false, deferred: true, error: 'read-back failed: ' + e.message }; }
+    }
+    // (c) no read-back available -> honest deferred/verifying state (NOT verified).
+    return { verified: false, deferred: true, error: 'write reported ok; awaiting AAP read-back on next sync' };
   },
 };
 
@@ -116,6 +156,7 @@ const MOVE_UNIT = {
 const SUBMIT_WORK_REQUEST = {
   level: 'approval',
   requires: 'create_wr',
+  idempotencyKey(args) { return _idem('SUBMIT_WORK_REQUEST', { unit: String(args.unit || '').trim().toUpperCase(), payload: args.payload || {} }); },
   async run(args) {
     const { BrowserWindow } = (() => { try { return require('electron'); } catch (_) { return {}; } })();
     // Reuse the app's create-WR path via IPC-equivalent function.
@@ -134,6 +175,7 @@ const SUBMIT_WORK_REQUEST = {
 const SEND_SLACK_MESSAGE = {
   level: 'approval',
   requires: 'follow_up',
+  idempotencyKey(args) { return _idem('SEND_SLACK_MESSAGE', { channelId: args.channelId || '', message: String(args.message || ''), threadTs: args.threadTs || null }); },
   async run(args) {
     const { sendToChannel } = require('../../scrapers/slack_send');
     const res = await sendToChannel(args.channelId, args.message, args.threadTs || undefined);

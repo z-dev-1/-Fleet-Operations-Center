@@ -57,9 +57,39 @@ function _audit(entry) {
  * executeVerified(name, args, ctx) -> { status, verified?, evidence?, error? }
  * Runs the action then verifies. Only status:'done' means truly succeeded.
  */
+// Idempotency ledger: maps idempotencyKey -> { status, at, result }. Prevents a
+// retry from creating a duplicate note/reminder/case/WR/message/lifecycle change.
+const IDEM_CAP = 1000;
+function _loadIdem() { const m = store.load('fasIdempotency', {}); return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {}; }
+function _recordIdem(key, entry) {
+  if (!key) return;
+  const m = _loadIdem();
+  m[key] = { ...entry, at: now() };
+  const keys = Object.keys(m);
+  if (keys.length > IDEM_CAP) { // drop oldest
+    keys.sort((a, b) => Date.parse(m[a].at || 0) - Date.parse(m[b].at || 0));
+    for (let i = 0; i < keys.length - IDEM_CAP; i++) delete m[keys[i]];
+  }
+  store.save('fasIdempotency', m);
+}
+
 async function executeVerified(name, args, ctx) {
   const action = actions.getAction(name);
   if (!action) return { status: 'error', error: 'unknown action: ' + name };
+
+  // ── IDEMPOTENCY: skip a duplicate of an already-completed action. ─────────
+  let idemKey = null;
+  if (typeof action.idempotencyKey === 'function') {
+    try { idemKey = action.idempotencyKey(args || {}); } catch (_) { idemKey = null; }
+  }
+  if (idemKey) {
+    const prior = _loadIdem()[idemKey];
+    if (prior && prior.status === 'done') {
+      _audit({ action: name, status: 'idempotent-skip', idemKey });
+      return { status: 'done', verified: true, idempotent: true, evidence: 'already completed (idempotent)', priorResult: prior.result };
+    }
+  }
+
   let runResult;
   try {
     runResult = await action.run(args || {}, ctx || {});
@@ -81,7 +111,16 @@ async function executeVerified(name, args, ctx) {
   }
   if (ver && ver.verified) {
     _audit({ action: name, status: 'done', evidence: ver.evidence, deferred: !!ver.deferred });
+    if (idemKey) _recordIdem(idemKey, { status: 'done', result: runResult && runResult.result });
     return { status: 'done', verified: true, evidence: ver.evidence, deferred: !!ver.deferred };
+  }
+  // Deferred verification (e.g. MOVE_UNIT awaiting AAP read-back): keep the
+  // action in a VERIFYING state — NOT done — until a later sync confirms it.
+  if (ver && ver.deferred) {
+    _audit({ action: name, status: 'verifying', error: (ver && ver.error) || 'awaiting source read-back', deferred: true });
+    // Record as verifying so a retry doesn't re-apply while we await read-back.
+    if (idemKey) _recordIdem(idemKey, { status: 'verifying', result: runResult && runResult.result });
+    return { status: 'verifying', verified: false, deferred: true, error: (ver && ver.error) || 'awaiting source read-back' };
   }
   _audit({ action: name, status: 'unverified', error: (ver && ver.error) || 'verification failed' });
   return { status: 'unverified', verified: false, error: (ver && ver.error) || 'could not verify' };
