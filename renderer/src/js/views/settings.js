@@ -27,6 +27,7 @@ import { asana    as asanaBridge }                 from '../bridge.js';
 import { graphMail as graphMailBridge }            from '../bridge.js';
 import toast                                       from '../components/toast.js';
 import { setPreset, setTheme, getThemeConfig, resetTheme, PRESETS } from '../nexus-theme.js';
+import { initFasSettings } from './fas-settings.js';
 
 // ── Module state ────────────────────────────────────────────────────────────
 let _drawer   = null;   // the drawer DOM element
@@ -843,6 +844,44 @@ function _html() {
             <button class="sd-btn primary" id="dm-ar-save">Save</button>
           </div>
           <div id="dm-ar-status" class="sd-status" style="display:none;margin-top:8px"></div>
+        </div>
+
+        <!-- Digital Fleet Asset Specialist (FAS) -->
+        <div class="sd-section" id="sect-fas">
+          <div class="sd-section-title">
+            <span style="font-size:11px">🤖</span> Digital Fleet Asset Specialist
+            <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">AGENT</span>
+          </div>
+          <div class="sd-hint" style="margin-bottom:10px">A permission-aware agent that researches scoped fleet data, applies FAS judgment, and drafts replies. Starts in <strong>Shadow</strong> mode — it drafts and compares against your real replies but sends nothing.</div>
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">Enable FAS agent</span>
+            <input type="checkbox" id="fas-enabled"/>
+          </div>
+          <div class="sd-field" style="margin-top:8px">
+            <label class="sd-label">Mode</label>
+            <select class="sd-select" id="fas-mode">
+              <option value="shadow">Shadow — draft &amp; compare, send nothing</option>
+              <option value="approval">Approval — propose, execute only after approval</option>
+              <option value="autonomous">Autonomous — auto-handle verified low-risk</option>
+            </select>
+            <div class="sd-hint">New installs default to Shadow. Approval/Autonomous also require per-action permissions.</div>
+          </div>
+          <div class="sd-field">
+            <label class="sd-label">Max agent steps</label>
+            <input class="sd-input" id="fas-max-steps" type="number" min="1" max="20" />
+          </div>
+          <div class="sd-field">
+            <label class="sd-label">Max runtime (seconds)</label>
+            <input class="sd-input" id="fas-max-runtime" type="number" min="5" max="180" />
+          </div>
+          <div class="sd-btn-row" style="margin-top:10px">
+            <button class="sd-btn primary" id="fas-save">Save FAS Config</button>
+            <button class="sd-btn secondary" id="fas-refresh-audit">Refresh Shadow Log</button>
+          </div>
+          <div id="fas-status" class="sd-status" style="display:none;margin-top:8px"></div>
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Shadow comparisons (FAS draft vs. what was sent)</div>
+          <div class="sd-hint" style="margin-bottom:6px">Highest-divergence first. Nothing here was sent — this is evaluation only.</div>
+          <div id="fas-audit-list" style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto"></div>
         </div>
 
         <!-- Partner Forms -->
@@ -2888,6 +2927,9 @@ export function init() {
   // localStorage-based UI theme sliders above, since it must reach the
   // bubble BrowserWindow's own separate renderer process).
   _wireChatFloaterSection();
+
+  // Wire the Digital Fleet Asset Specialist section (mode toggles + shadow log).
+  try { initFasSettings(); } catch (_) { /* non-fatal */ }
 
   // Wire all integration sections
   

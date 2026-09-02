@@ -333,6 +333,13 @@ export const slack = {
   getDMReviewQueue:       ()       => window.slack.getDMReviewQueue(),
   getDMReplyLog:          (limit)  => window.slack.getDMReplyLog(limit),
   updateDMReviewItem:     (data)   => window.slack.updateDMReviewItem(data),
+  // -- Digital FAS (Stage D)
+  fasGetConfig:           ()       => window.slack.fasGetConfig(),
+  fasSaveConfig:          (patch)  => window.slack.fasSaveConfig(patch),
+  fasGetAudit:            (limit)  => window.slack.fasGetAudit(limit),
+  fasGetSenderProfiles:   ()       => window.slack.fasGetSenderProfiles(),
+  fasSaveSenderProfile:   (p)      => window.slack.fasSaveSenderProfile(p),
+  fasResolveSender:       (id)     => window.slack.fasResolveSender(id),
 };
 
 // ── SharePoint ─────────────────────────────────────────────────────────────

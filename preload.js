@@ -188,6 +188,13 @@ contextBridge.exposeInMainWorld('slack', {
   getDMReviewQueue:       ()       => ipcRenderer.invoke('slack:get-dm-review-queue'),
   getDMReplyLog:          (limit)  => ipcRenderer.invoke('slack:get-dm-reply-log', limit),
   updateDMReviewItem:     (data)   => ipcRenderer.invoke('slack:update-dm-review-item', data),
+  // Digital FAS (Stage D UI)
+  fasGetConfig:           ()       => ipcRenderer.invoke('fas:get-config'),
+  fasSaveConfig:          (patch)  => ipcRenderer.invoke('fas:save-config', patch),
+  fasGetAudit:            (limit)  => ipcRenderer.invoke('fas:get-audit', limit),
+  fasGetSenderProfiles:   ()       => ipcRenderer.invoke('fas:get-sender-profiles'),
+  fasSaveSenderProfile:   (p)      => ipcRenderer.invoke('fas:save-sender-profile', p),
+  fasResolveSender:       (id)     => ipcRenderer.invoke('fas:resolve-sender', id),
 });
 
 // -- Microsoft Graph mail (2026-07-21) -- see src/graph/client.js for the

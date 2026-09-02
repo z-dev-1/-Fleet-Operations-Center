@@ -316,6 +316,46 @@ function registerSlackIPC(ctx) {
     return updateDMReviewItem(data.id, data.updates || {});
   });
 
+  // ── Digital FAS (Stage D UI) ─────────────────────────────────────────────
+  handle('fas:get-config', async () => {
+    const fasConfig = require('../orcha/fas/config');
+    return fasConfig.get();
+  });
+
+  handle('fas:save-config', async (_e, patch) => {
+    if (!patch || typeof patch !== 'object') throw new Error('config patch required');
+    // Whitelist editable keys so the renderer can't inject arbitrary fields.
+    const allowed = ['enabled', 'mode', 'maxSteps', 'maxRuntimeMs', 'maxToolResultChars',
+      'dataFreshnessMs', 'contextBudgetChars', 'approvedAutomaticActions', 'approvedLinkDomains'];
+    const clean = {};
+    for (const k of allowed) if (patch[k] !== undefined) clean[k] = patch[k];
+    if (patch.retry && typeof patch.retry === 'object') clean.retry = patch.retry;
+    const fasConfig = require('../orcha/fas/config');
+    return fasConfig.save(clean);
+  });
+
+  handle('fas:get-audit', async (_e, limit) => {
+    const n = Math.min(Number(limit) || 100, 500);
+    const log = store.load('fasAuditLog', []);
+    return (Array.isArray(log) ? log : []).slice(0, n);
+  });
+
+  handle('fas:get-sender-profiles', async () => {
+    const raw = store.load('slackSenderProfiles', {});
+    return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  });
+
+  handle('fas:save-sender-profile', async (_e, profile) => {
+    if (!profile || !profile.slackId) throw new Error('profile.slackId required');
+    const sp = require('../orcha/fas/sender-profiles');
+    return sp.saveProfile(profile);
+  });
+
+  handle('fas:resolve-sender', async (_e, slackId) => {
+    const sp = require('../orcha/fas/sender-profiles');
+    return sp.resolveSender(slackId);
+  });
+
   logger.info('Slack IPC handlers registered');
 }
 
