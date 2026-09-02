@@ -182,7 +182,23 @@ async function buildEvidence({ profile, text, question, factsNeeded, mode }) {
   }
 
   // Prior promises / open questions from case memory (compact).
-  const related = caseStore.findRelated({ units: entities.units, slackId: profile.slackId });
+  // SCOPE FILTER (Part 4): case memory can reference any unit; an external
+  // (carrier/vendor/unknown) sender must only see cases for units within THEIR
+  // operator/domicile scope, or cases keyed to their own sender id. Never leak
+  // another carrier's/domicile's case history into the AI context.
+  const _fleetRows = (fd && fd.rows) || [];
+  const _rowFor = (unit) => _fleetRows.find(r => String(r.equipmentId || '').trim().toUpperCase() === String(unit || '').trim().toUpperCase()) || null;
+  const _senderCaseId = caseStore.caseIdForSender(profile.slackId);
+  function _caseInScope(c) {
+    if (profile.type === 'internal' || profile.type === 'manager') return true;
+    if (c.caseId && c.caseId === _senderCaseId) return true; // the sender's own case
+    if (!c.unit) return false; // sender-less/unit-less case -> external can't see
+    const row = _rowFor(c.unit);
+    if (!row) return false;    // can't confirm scope -> deny for external
+    return profiles.scopeUnitForSender(profile, row);
+  }
+  const related = caseStore.findRelated({ units: entities.units, slackId: profile.slackId })
+    .filter(_caseInScope);
   const previousPromises = [];
   related.forEach(c => { (c.promises || []).forEach(p => previousPromises.push(p)); });
 

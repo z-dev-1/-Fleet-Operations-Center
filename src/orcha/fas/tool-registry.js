@@ -312,6 +312,11 @@ function GET_SITE_SUMMARY(args, ctx) {
   const { rows } = _loadFleet();
   const site = String((args && args.domicile) || '').trim().toUpperCase();
   if (!site) return { ok: false, error: 'domicile required' };
+  if (!ctx || !ctx.profile) return { ok: false, error: 'sender profile required' };
+  // Category: sender must be allowed to see site summaries at all.
+  if (!profiles.canViewCategory(ctx.profile, 'site_summary')) {
+    return { ok: false, denied: true, error: 'sender not authorized for data category: site_summary' };
+  }
   // Scope: external sender must own this domicile.
   if (!(ctx.profile.type === 'internal' || ctx.profile.type === 'manager') &&
       !(ctx.profile.domiciles || []).map(d => d.toUpperCase()).includes(site)) {
@@ -325,6 +330,11 @@ function GET_OPERATOR_SUMMARY(args, ctx) {
   const { rows } = _loadFleet();
   const op = String((args && args.operator) || '').trim().toUpperCase();
   if (!op) return { ok: false, error: 'operator required' };
+  if (!ctx || !ctx.profile) return { ok: false, error: 'sender profile required' };
+  // Category: sender must be allowed to see operator/carrier summaries at all.
+  if (!profiles.canViewCategory(ctx.profile, 'operator_summary')) {
+    return { ok: false, denied: true, error: 'sender not authorized for data category: operator_summary' };
+  }
   if (!(ctx.profile.type === 'internal' || ctx.profile.type === 'manager') &&
       !(ctx.profile.operators || []).map(o => o.toUpperCase()).includes(op)) {
     return { ok: false, denied: true, error: 'sender not authorized for operator ' + op };
