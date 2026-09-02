@@ -187,6 +187,31 @@ function reconcileInFlight() {
   return { expired, verifying };
 }
 
+// Reconcile VERIFYING lifecycle actions against the latest fleetData (Part 5):
+// after a fleet sync refreshes each unit's lifecycleState, resolve any pending
+// MOVE_UNIT verification to 'done' (matches expected) or 'failed' (disagrees).
+// Called after a sync completes. Returns { resolved, failed }.
+function reconcileVerifyingLifecycle() {
+  const m = _loadIdem();
+  let resolved = 0, failed = 0, changed = false;
+  let rows = [];
+  try { rows = (store.load('fleetData', {}) || {}).rows || []; } catch (_) { rows = []; }
+  const byUnit = {};
+  rows.forEach(r => { if (r && r.equipmentId) byUnit[String(r.equipmentId).trim().toUpperCase()] = r; });
+  for (const k of Object.keys(m)) {
+    const e = m[k];
+    if (!e || e.status !== 'verifying' || e.action !== 'MOVE_UNIT' || !e.target || !e.target.unit) continue;
+    const row = byUnit[String(e.target.unit).trim().toUpperCase()];
+    if (!row || !row.lifecycleState) continue; // not yet in synced data
+    const want = String(e.target.state || '').trim().toUpperCase();
+    const have = String(row.lifecycleState || '').trim().toUpperCase();
+    if (have === want) { m[k] = { ...e, status: 'done', at: now() }; resolved++; changed = true; _audit({ action: 'MOVE_UNIT', status: 'done', evidence: 'sync reconcile confirms lifecycle=' + row.lifecycleState, unit: e.target.unit }); }
+    else { m[k] = { ...e, status: 'failed', at: now(), error: 'sync shows ' + row.lifecycleState + ', expected ' + want }; failed++; changed = true; _audit({ action: 'MOVE_UNIT', status: 'unverified', unit: e.target.unit, error: 'sync shows ' + row.lifecycleState }); }
+  }
+  if (changed) _saveIdem(m);
+  return { resolved, failed };
+}
+
 // Allow a genuinely FAILED/recoverable action to be retried on operator demand.
 function clearIdem(key) {
   if (!key) return;
@@ -277,7 +302,10 @@ async function executeVerified(name, args, ctx) {
   if (ver && ver.deferred) {
     _audit({ action: name, status: 'verifying', error: (ver && ver.error) || 'awaiting source read-back', deferred: true });
     // Record as verifying so a retry doesn't re-apply while we await read-back.
-    if (idemKey) _recordIdem(idemKey, { status: 'verifying', result: runResult && runResult.result });
+    // Store the target (unit + expected state) so the next sync can reconcile.
+    if (idemKey) _recordIdem(idemKey, { status: 'verifying', leaseUntil: null,
+      action: name, target: { unit: (args && (args.unit || args.equipmentId)) || null, state: (args && args.state) || null },
+      result: runResult && runResult.result });
     return { status: 'verifying', verified: false, deferred: true, error: (ver && ver.error) || 'awaiting source read-back' };
   }
   _audit({ action: name, status: 'unverified', error: (ver && ver.error) || 'verification failed' });
@@ -372,4 +400,4 @@ function _safeArgs(args) {
   return a;
 }
 
-module.exports = { routeAction, executeVerified, approveQueued, rejectQueued, getQueue, reconcileInFlight, clearIdem, _idemBlock, _claimIdem };
+module.exports = { routeAction, executeVerified, approveQueued, rejectQueued, getQueue, reconcileInFlight, reconcileVerifyingLifecycle, clearIdem, _idemBlock, _claimIdem };

@@ -136,19 +136,35 @@ const MOVE_UNIT = {
         ? { verified: true, evidence: 'AAP read-back confirms lifecycle=' + readBack }
         : { verified: false, error: 'AAP read-back shows ' + readBack + ', expected ' + want };
     }
-    // (b) optional injected reader (used by tests / future single-unit reader).
-    const reader = ctx && typeof ctx.readLifecycle === 'function' ? ctx.readLifecycle : null;
-    if (reader) {
+    // (b) optional injected reader (tests) — takes a unit, returns state string.
+    const injected = ctx && typeof ctx.readLifecycle === 'function' ? ctx.readLifecycle : null;
+    if (injected) {
       try {
-        const cur = await reader(args.unit);
+        const cur = await injected(args.unit);
         const ok = String(cur || '').trim().toUpperCase() === want;
         return ok
           ? { verified: true, evidence: 'source read-back confirms lifecycle=' + cur }
           : { verified: false, error: 'source read-back shows ' + cur + ', expected ' + want };
       } catch (e) { return { verified: false, deferred: true, error: 'read-back failed: ' + e.message }; }
     }
-    // (c) no read-back available -> honest deferred/verifying state (NOT verified).
-    return { verified: false, deferred: true, error: 'write reported ok; awaiting AAP read-back on next sync' };
+    // (c) REAL authenticated AAP read-back of the SAME asset page we mutated.
+    //     Requires assetUrl + a live Midway session; runs a hidden BrowserWindow
+    //     in the main process. On any failure we DEFER (verifying) rather than
+    //     falsely claim success — the next fleet sync reconciles it.
+    try {
+      const { readLifecycle } = require('../../scrapers/readLifecycle');
+      const cur = await readLifecycle(args.assetUrl);
+      if (cur && cur.state) {
+        const ok = String(cur.state).trim().toUpperCase() === want;
+        return ok
+          ? { verified: true, evidence: 'AAP read-back confirms lifecycle=' + cur.state + (cur.reason ? (' / ' + cur.reason) : '') }
+          : { verified: false, error: 'AAP read-back shows ' + cur.state + ', expected ' + want };
+      }
+      // Could not read live (no session / page miss) -> defer for sync reconcile.
+      return { verified: false, deferred: true, error: 'live AAP read-back unavailable; awaiting sync reconcile' };
+    } catch (e) {
+      return { verified: false, deferred: true, error: 'read-back error: ' + e.message + '; awaiting sync reconcile' };
+    }
   },
 };
 

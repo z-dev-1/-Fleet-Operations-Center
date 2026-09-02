@@ -399,6 +399,13 @@ function createSyncEngine(ctx) {
       store.save('fleetData', payload);
       ctx.pushData(payload);
 
+      // Digital FAS (Part 5): reconcile any pending MOVE_UNIT verifications
+      // against the freshly-synced lifecycle state — resolve to done/failed.
+      try {
+        const rec = require('../orcha/fas/executor').reconcileVerifyingLifecycle();
+        if (rec && (rec.resolved || rec.failed)) logger.info('FAS lifecycle reconcile: ' + rec.resolved + ' confirmed, ' + rec.failed + ' failed');
+      } catch (e) { logger.warn('FAS lifecycle reconcile failed: ' + e.message); }
+
       const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       ctx.pushStatus(
         `\u2705 Live \u00B7 ${mergedRows.length} units \u00B7 ` +
