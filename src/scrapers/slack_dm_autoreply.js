@@ -36,6 +36,7 @@
 const store = require('../store');
 const logger = require('../utils/logger').createLogger('slack_dm_autoreply');
 const { PERSONA_SYSTEM_PROMPT } = require('../orcha/slack-dm-persona');
+const { trace } = require('./slack_decision_trace');
 
 const MAX_MESSAGES_PER_POLL = 5;   // per DM thread, per poll cycle
 const MAX_LOG_ENTRIES       = 500; // persisted reply log cap
@@ -517,13 +518,29 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
   const { buildFleetContext } = require('../orcha/ai-context');
   let _fleetLookupText = messageText;
   let _inheritedUnitNote = '';
+  let _inheritedUnitUsed = null;
   if (!_unitTokenIn(messageText)) {
-    const inherited = _lastUnitFromHistory(historyMsgs);
-    if (inherited) {
-      _fleetLookupText = messageText + ' ' + inherited;
-      _inheritedUnitNote = '\n\nNOTE: This message has no unit number, but the conversation was just about unit ' +
-        inherited + '. If the message says "it"/"the truck"/"that one" or is a follow-up, it almost certainly refers to ' +
-        inherited + ' — use that unit\'s data below to answer.';
+    // TIGHTENED (2026-09-02): only inherit the thread's last unit when the
+    // message CLEARLY refers back to it with a pronoun ("it", "that one",
+    // "the truck", "this unit") AND does not introduce a NEW subject. A
+    // message like "I got this PMx but the unit is now at your site" was
+    // wrongly inheriting an unrelated unit (the Donte 59244 case) — it names
+    // "this PMx"/"the unit" generically but isn't a follow-up about the prior
+    // unit. Require an explicit back-reference pronoun and avoid messages that
+    // introduce fresh context ("this PMx", "got a new", "another", a different
+    // site, etc.).
+    const _txt = (messageText || '').toLowerCase();
+    const _hasBackRef = /\b(it|that one|that truck|the truck|this one|the unit|same one|same truck)\b/.test(_txt);
+    const _introducesNew = /\b(this pmx|new|another|different|got a|received|picked up|just broke|went down)\b/.test(_txt);
+    if (_hasBackRef && !_introducesNew) {
+      const inherited = _lastUnitFromHistory(historyMsgs);
+      if (inherited) {
+        _inheritedUnitUsed = inherited;
+        _fleetLookupText = messageText + ' ' + inherited;
+        _inheritedUnitNote = '\n\nNOTE: This message has no unit number, but it refers back ("it"/"the truck"/"that one") to unit ' +
+          inherited + ' from earlier in the thread — use that unit\'s data below to answer. If you are not confident the message is about ' +
+          inherited + ', do NOT assume a unit; ask which unit they mean instead of guessing.';
+      }
     }
   }
   const fleetContext = buildFleetContext(_fleetLookupText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true });
@@ -607,6 +624,8 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
       reply: replyText,
       category: ['alert', 'action', 'workflow'].includes(parsed.category) ? parsed.category : 'workflow',
       title: (typeof parsed.title === 'string' && parsed.title.trim()) ? parsed.title.slice(0, 60) : (messageText || '').slice(0, 60),
+      _raw: raw,
+      _inheritedUnit: _inheritedUnitUsed,
     };
   } catch (e) {
     logger.warn('[SlackDM] AI JSON parse failed, using safe fallback:', e.message);
@@ -930,6 +949,12 @@ async function pollDMAutoReplyOnce(log) {
           status: draft.inScope ? 'auto-answered' : 'open',
         };
         _appendReplyLog(entry);
+
+        trace({ engine: 'dm', channel: dm.name, sender: msg.userId, ts: msg.ts, text: msg.text,
+          decision: draft.inScope ? 'replied' : 'escalated',
+          reason: draft.inScope ? 'in-scope auto-answer' : ('escalated: ' + (draft.category || '')),
+          inheritedUnit: draft._inheritedUnit || null,
+          aiRaw: draft._raw, reply: draft.reply });
 
         if (!draft.inScope) {
           escalatedCount++;

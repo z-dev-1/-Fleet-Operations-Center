@@ -30,6 +30,7 @@
 const store = require('../store');
 const logger = require('../utils/logger').createLogger('slack_channel_watch');
 const { PERSONA_SYSTEM_PROMPT } = require('../orcha/slack-partner-persona');
+const { trace } = require('./slack_decision_trace');
 
 const MAX_MESSAGES_PER_POLL = 5;   // per channel, per poll cycle
 const MAX_LOG_ENTRIES       = 500; // persisted reply log cap
@@ -323,6 +324,7 @@ async function _classifyAndDraft(messageText, askOrcha, allowedOperators) {
       reply: String(replyText || '').replace(/\*\*([^*]+)\*\*/g, '*$1*').replace(/^\s*#{1,6}\s*/gm, ''),
       category: ['alert', 'action', 'workflow'].includes(parsed.category) ? parsed.category : 'workflow',
       title: (typeof parsed.title === 'string' && parsed.title.trim()) ? parsed.title.slice(0, 60) : (messageText || '').slice(0, 60),
+      _raw: raw,
     };
   } catch (e) {
     logger.warn('[SlackWatch] AI JSON parse failed, using safe fallback:', e.message);
@@ -798,6 +800,24 @@ async function pollChannelsOnce(log) {
         // Persist the thread so future replies in it are also Tier 2.
         if (mentioned) _trackMentionThread(ch.id, msg.thread_ts || msg.ts);
 
+        // ── DETERMINISTIC GUARD: addressed to a DIFFERENT specific person ──
+        // If the message @-mentions a specific OTHER user (not the signed-in
+        // user) and does NOT mention us, it is addressed to that person — do
+        // NOT reply on their behalf. This is the fix for the mmfm predictive
+        // alerts that tag "*FAS:* <@W017P5T8NHG>" (Melissa): those are directed
+        // at her, not us, yet the AI directed-at-me gate was answering YES and
+        // committing her to action. A literal mention of someone else is an
+        // unambiguous signal the AI gate should never override. We still honor
+        // Tier 2 (a reply inside a thread where WE were mentioned).
+        const _otherMention = (!mentioned && msg.text) ? (msg.text.match(/<@([A-Z0-9]+)>/) || [])[1] : null;
+        if (_otherMention && !mentioned && !isThreadReplyToMyMention) {
+          trace({ engine: 'channel', channel: ch.name, sender: msg.userId, ts: msg.ts, text: msg.text,
+            decision: 'skipped', reason: 'addressed to a different specific person (not us)',
+            mentioned: false, otherMention: _otherMention });
+          doLog(`[SlackWatch] ${ch.name}: message ${msg.ts} @-mentions ${_otherMention} (not me) — addressed to them, skipping`);
+          continue;
+        }
+
         if (mentioned) {
           // Tier 1: explicit @mention — fall through to draft.
         } else if (isThreadReplyToMyMention) {
@@ -811,6 +831,9 @@ async function pollChannelsOnce(log) {
           } else {
             const shouldChime = await _shouldChimeIn(msg.text, askOrcha);
             if (!shouldChime) {
+              trace({ engine: 'channel', channel: ch.name, sender: msg.userId, ts: msg.ts, text: msg.text,
+                decision: 'skipped', reason: 'occasional mode — not directed at me and not worth chiming in',
+                mentioned: false, directedAtMe: false });
               doLog(`[SlackWatch] ${ch.name}: not mentioned — chose not to chime in on ${msg.ts}`);
               continue;
             }
@@ -820,6 +843,9 @@ async function pollChannelsOnce(log) {
           // Tier 3b (mentions/strict): must be unmistakably directed at me.
           const directedAtMe = await _isDirectedAtMe(msg.text, auth.user, askOrcha);
           if (!directedAtMe) {
+            trace({ engine: 'channel', channel: ch.name, sender: msg.userId, ts: msg.ts, text: msg.text,
+              decision: 'skipped', reason: 'strict mode — AI gate says not clearly directed at me',
+              mentioned: false, directedAtMe: false });
             doLog(`[SlackWatch] ${ch.name}: strict mode — not clearly directed at me, skipping ${msg.ts}`);
             continue;
           }
@@ -834,6 +860,11 @@ async function pollChannelsOnce(log) {
         // the model remembering to do it. msg.userId is the real sender's
         // Slack user ID, already available from readMessages().
         const taggedReply = (msg.userId ? `<@${msg.userId}> ` : '') + draft.reply;
+
+        trace({ engine: 'channel', channel: ch.name, sender: msg.userId, ts: msg.ts, text: msg.text,
+          decision: draft.inScope === false ? 'escalated' : 'replied',
+          reason: mentioned ? 'literal @-mention of me' : (isThreadReplyToMyMention ? 'reply in my mention thread' : 'gate: directed at me / chime-in'),
+          mentioned: mentioned, aiRaw: draft._raw, reply: draft.reply });
 
         let replyTs = null;
         try {
