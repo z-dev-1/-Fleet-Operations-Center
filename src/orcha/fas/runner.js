@@ -36,6 +36,29 @@ const store = require('../../store');
 let logger; try { logger = require('../../utils/logger').createLogger('fas-runner'); } catch (_) { logger = { info(){}, warn(){} }; }
 
 const AUDIT_CAP = 500;
+
+// Build the IMMUTABLE original-requester permission snapshot (Part 5). This is
+// what execution authorization is checked against — never the operator's own
+// authority. Includes identity, contactId, scope, request types, and the
+// lifecycle 3-state permission.
+function _buildRequesterSnapshot(input) {
+  try {
+    const p = require('./sender-profiles').resolveSender(input.slackId, input.senderName);
+    return {
+      slackId: p.slackId || input.slackId || '',
+      contactId: p.contactId || null,
+      name: p.name || input.senderName || '',
+      identityType: p.type,
+      enabled: p.enabled !== false,
+      operators: (p.operators || []).slice(),
+      domiciles: (p.domiciles || []).slice(),
+      allowedDataCategories: (p.allowedDataCategories || []).slice(),
+      permittedRequestTypes: (p.permittedRequestTypes || []).slice(),
+      lifecyclePermission: p.lifecyclePermission || 'not_allowed',
+      capturedAt: new Date().toISOString(),
+    };
+  } catch (_) { return null; }
+}
 // Autonomous auto-send only for routine answers at/above this confidence.
 const AUTO_SEND_MIN_CONFIDENCE = 0.75;
 
@@ -221,11 +244,14 @@ async function _executeLinkedActions(input, decision, approverProfile) {
   if (!list.length) return { ok: true, outcomes };
   let executor; try { executor = require('./executor'); } catch (_) { return { ok: false, outcomes: [{ error: 'executor unavailable' }] }; }
   const profile = approverProfile || require('./sender-profiles').resolveSender(input.slackId, input.senderName);
+  // Autonomous: the requester IS the sender (no separate operator). The
+  // requester snapshot still gates lifecycle 3-state + scope at execution.
+  const requesterSnapshot = _buildRequesterSnapshot(input);
   let allOk = true;
   for (const a of list) {
     if (!a || !a.tool) continue;
     try {
-      const r = await executor.executeVerified(a.tool, { ...(a.args || {}), slackId: input.slackId }, { profile });
+      const r = await executor.executeVerified(a.tool, { ...(a.args || {}), slackId: input.slackId }, { profile, requesterSnapshot });
       outcomes.push({ tool: a.tool, status: r.status, error: r.error });
       // A linked action counts as OK only if done (verified) or idempotent-done.
       if (!(r.status === 'done' || (r.idempotent && r.status === 'done'))) allOk = false;
@@ -267,12 +293,10 @@ function _queueReply(input, decision, extra) {
       conflicts: (decision._evidence && decision._evidence.conflicts) || [],
     },
     targetUnit: (decision._evidence && decision._evidence.entities && (decision._evidence.entities.units || [])[0]) || null,
-    // Permission snapshot at proposal time (Part 3/11).
-    permissionSnapshot: (() => {
-      try { const p = require('./sender-profiles').resolveSender(input.slackId, input.senderName);
-        return { slackId: p.slackId, type: p.type, operators: (p.operators || []).slice(), domiciles: (p.domiciles || []).slice() }; }
-      catch (_) { return null; }
-    })(),
+    // IMMUTABLE original-requester permission snapshot (Part 5). Captured at
+    // proposal time; used at EXECUTION to verify the requester was permitted to
+    // request the action — the operator's Approve does NOT replace this.
+    requesterSnapshot: _buildRequesterSnapshot(input),
     // Risk classification: does this transaction include a mutating action?
     riskClass: _hasApprovalLevelAction(decision) ? 'mutating' : ((decision.actions || []).length ? 'low-risk-action' : 'reply-only'),
     // State-machine + linked-transaction bookkeeping.
@@ -491,7 +515,11 @@ async function approveReply(id, ctx, deps) {
     for (const a of item.proposedActions.slice(0, 6)) {
       if (!a || !a.tool) continue;
       try {
-        const r = await executor.executeVerified(a.tool, { ...(a.args || {}), slackId: item.slackId }, { profile: approver });
+        // Part 5: pass BOTH the APPROVER (operator) profile AND the IMMUTABLE
+        // ORIGINAL-REQUESTER snapshot. The executor verifies the requester was
+        // permitted to request this action (incl. lifecycle 3-state) — the
+        // operator's Approve does NOT bypass the requester's authority.
+        const r = await executor.executeVerified(a.tool, { ...(a.args || {}), slackId: item.slackId }, { profile: approver, requesterSnapshot: item.requesterSnapshot });
         actionOutcomes.push({ tool: a.tool, status: r.status, error: r.error });
         if (!(r.status === 'done')) allActionsOk = false;
       } catch (e) { actionOutcomes.push({ tool: a.tool, status: 'error', error: e.message }); allActionsOk = false; }

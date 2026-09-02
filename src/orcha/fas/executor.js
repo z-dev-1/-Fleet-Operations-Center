@@ -81,6 +81,65 @@ function _authorizeUnitAction(name, args, profile, action) {
   return { ok: true };
 }
 
+// ── ORIGINAL-REQUESTER AUTHORIZATION (Part 5) ────────────────────────────────
+// The person who ASKED for the action must have been permitted to request it.
+// The operator clicking Approve does NOT replace the requester's authority —
+// Approve executes the requester's request only if the requester was allowed to
+// make it. `snapshot` is the immutable permission snapshot captured when the
+// transaction was created (identityType, operators, domiciles, permittedRequestTypes,
+// lifecyclePermission). Returns { ok, reason, requesterResult }.
+//
+// Lifecycle 3-state:
+//   not_allowed        -> blocked even if an operator approves
+//   may_request        -> the carrier MAY request; execution still needs approval/verify
+//   trusted_autonomous -> may run autonomously (only when explicitly set; the
+//                         autonomous gate is enforced separately in routeAction)
+function _requesterAuthorize(name, args, snapshot) {
+  if (!snapshot) return { ok: true, requesterResult: 'no-snapshot' }; // internal operator-initiated
+  const isInternal = snapshot.identityType === 'internal' || snapshot.identityType === 'manager';
+  const action = actions.getAction(name);
+  const requires = action && action.requires;
+
+  // Lifecycle changes are gated by the 3-state lifecyclePermission, NOT the
+  // generic request-type list. An external requester with not_allowed (or no
+  // lifecycle permission) can never have a lifecycle change executed on their
+  // behalf — even if an operator clicks Approve.
+  if (name === 'MOVE_UNIT' || requires === 'lifecycle_change') {
+    if (isInternal) return { ok: true, requesterResult: 'internal-allowed' };
+    const lp = snapshot.lifecyclePermission || 'not_allowed';
+    if (lp === 'not_allowed') return { ok: false, reason: 'requester not permitted to request lifecycle changes', requesterResult: 'lifecycle:not_allowed' };
+    return { ok: true, requesterResult: 'lifecycle:' + lp };
+  }
+
+  // Other request types: the requester must have the category permission.
+  if (requires && !isInternal) {
+    const permitted = Array.isArray(snapshot.permittedRequestTypes) && snapshot.permittedRequestTypes.includes(requires);
+    if (!permitted) return { ok: false, reason: 'requester not permitted to request ' + requires, requesterResult: 'request-type:denied' };
+  }
+
+  // Per-unit scope from the snapshot (external requesters only).
+  const unit = args && (args.unit || args.equipmentId);
+  if (unit && !isInternal) {
+    const ops = (snapshot.operators || []).map(s => String(s).toUpperCase());
+    const doms = (snapshot.domiciles || []).map(s => String(s).toUpperCase());
+    if (!ops.length && !doms.length) return { ok: false, reason: 'requester has no fleet scope', requesterResult: 'scope:none' };
+    // Confirm the unit is within the requester's scope using current fleet data.
+    let row = null;
+    try {
+      const rows = (store.load('fleetData', {}) || {}).rows || [];
+      const u = String(unit).trim().toUpperCase();
+      row = rows.find(r => String(r.equipmentId || '').trim().toUpperCase() === u) || null;
+    } catch (_) {}
+    if (!row) return { ok: false, reason: 'requester unit ' + unit + ' not found / not in scope', requesterResult: 'scope:unit-not-found' };
+    const op = String(row.operator || '').toUpperCase();
+    const dom = String(row.domicileSite || row.site || '').toUpperCase();
+    if (!((op && ops.includes(op)) || (dom && doms.includes(dom)))) {
+      return { ok: false, reason: 'requester unit ' + unit + ' outside requester scope', requesterResult: 'scope:out-of-scope' };
+    }
+  }
+  return { ok: true, requesterResult: 'allowed' };
+}
+
 function _loadQueue() { const q = store.load('fasApprovalQueue', []); return Array.isArray(q) ? q : []; }
 function _saveQueue(q) { store.save('fasApprovalQueue', q.slice(0, QUEUE_CAP)); }
 
@@ -233,6 +292,19 @@ async function executeVerified(name, args, ctx) {
     return { status: 'blocked', error: authz.reason };
   }
 
+  // ── ORIGINAL-REQUESTER AUTHORIZATION (Part 5) ─────────────────────────────
+  // The operator/approver's authority does NOT replace the requester's. If a
+  // requester snapshot is present, the requester must have been permitted to
+  // request THIS action (incl. lifecycle 3-state). Blocked even on Approve.
+  const reqAuth = _requesterAuthorize(name, args, ctx && ctx.requesterSnapshot);
+  if (!reqAuth.ok) {
+    _audit({ action: name, status: 'blocked-requester', reason: reqAuth.reason,
+      requesterResult: reqAuth.requesterResult, requester: ctx && ctx.requesterSnapshot && ctx.requesterSnapshot.slackId,
+      contactId: ctx && ctx.requesterSnapshot && ctx.requesterSnapshot.contactId,
+      approver: ctx && ctx.profile && ctx.profile.slackId });
+    return { status: 'blocked', error: 'requester not authorized: ' + reqAuth.reason, requesterResult: reqAuth.requesterResult };
+  }
+
   // ── CENTRAL ARG VALIDATION (Part 15) ──────────────────────────────────────
   // Validate action arguments against the schema before running. Reject
   // malformed args rather than executing on garbage.
@@ -293,7 +365,13 @@ async function executeVerified(name, args, ctx) {
     return { status: 'verifying', error: 'verify threw: ' + e.message };
   }
   if (ver && ver.verified) {
-    _audit({ action: name, status: 'done', evidence: ver.evidence, deferred: !!ver.deferred });
+    _audit({ action: name, status: 'done', evidence: ver.evidence, deferred: !!ver.deferred,
+      requester: ctx && ctx.requesterSnapshot && ctx.requesterSnapshot.slackId,
+      contactId: ctx && ctx.requesterSnapshot && ctx.requesterSnapshot.contactId,
+      identityType: ctx && ctx.requesterSnapshot && ctx.requesterSnapshot.identityType,
+      requesterScope: ctx && ctx.requesterSnapshot ? { operators: ctx.requesterSnapshot.operators, domiciles: ctx.requesterSnapshot.domiciles } : null,
+      requesterResult: reqAuth.requesterResult,
+      approver: ctx && ctx.profile && ctx.profile.slackId, args: _safeArgs(args) });
     if (idemKey) _recordIdem(idemKey, { status: 'done', leaseUntil: null, result: runResult && runResult.result });
     return { status: 'done', verified: true, evidence: ver.evidence, deferred: !!ver.deferred };
   }
