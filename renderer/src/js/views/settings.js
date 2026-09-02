@@ -882,14 +882,10 @@ function _html() {
           <div class="sd-hint" style="margin-bottom:6px">Actions the FAS agent proposed that require your approval. Approving runs the real action and verifies the result before marking it done.</div>
           <div id="fas-approval-list" style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow:auto"></div>
 
-          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Sender profiles &amp; permissions</div>
-          <div class="sd-hint" style="margin-bottom:6px">Who each Slack sender is and what they can see/request. Seeded from contacts; edit to set operator/domicile scope and permissions.</div>
-          <div style="display:flex;gap:6px;margin-bottom:6px">
-            <input class="sd-input" id="fas-prof-lookup" placeholder="Slack ID (e.g. U0ABC123)" style="flex:1" />
-            <button class="sd-btn secondary" id="fas-prof-load">Load</button>
-          </div>
-          <div id="fas-profile-editor" style="display:none;flex-direction:column;gap:6px;border:1px solid var(--bd,#333);border-radius:8px;padding:8px"></div>
-          <div id="fas-profile-list" style="display:flex;flex-direction:column;gap:6px;max-height:180px;overflow:auto;margin-top:6px"></div>
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Sender permissions (from the Contact Book)</div>
+          <div class="sd-hint" style="margin-bottom:6px">Identity and FAS permissions come from the Contact Book — the single source of truth. Edit a person's identity type, operator/domicile scope, and data/request permissions on their contact. For external (carrier/vendor/unknown) contacts, an EMPTY operator/domicile scope means NO fleet-scoped access (not full-fleet). This list is read-only.</div>
+          <div class="sd-btn-row" style="margin-bottom:6px"><button class="sd-btn secondary" id="fas-migrate-profiles">Migrate legacy profiles → Contact Book</button></div>
+          <div id="fas-profile-list" style="display:flex;flex-direction:column;gap:6px;max-height:200px;overflow:auto;margin-top:6px"></div>
 
           <div class="sd-section-title" style="margin-top:14px;font-size:11px">Knowledge drafts (from AITeammate)</div>
           <div class="sd-hint" style="margin-bottom:6px">Internal guidance the agent gathered. Approve to fold into the FAS playbook; reject to discard. Nothing becomes policy automatically.</div>

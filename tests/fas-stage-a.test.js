@@ -43,7 +43,7 @@ describe('FAS Stage A — sender identity + scoping', () => {
   it('seeds an internal profile from contacts', () => {
     const p = profiles.resolveSender('U_INT');
     expect(p.type).toBe('internal');
-    expect(p.source).toBe('contacts-seed');
+    expect(p.source).toBe('contact-book'); // Contact Book is the single source of truth (Part 1)
     expect(profiles.authorizationSummary(p).isInternal).toBe(true);
   });
 

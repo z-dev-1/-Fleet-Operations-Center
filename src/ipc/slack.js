@@ -453,6 +453,11 @@ function registerSlackIPC(ctx) {
   // verifying actions are left for AAP read-back reconciliation.
   try { const rec = require('../orcha/fas/executor').reconcileInFlight(); if (rec && (rec.expired || rec.verifying)) logger.info('FAS reconcile: ' + rec.expired + ' recoverable, ' + rec.verifying + ' verifying'); } catch (e) { logger.warn('FAS reconcile failed: ' + e.message); }
 
+  // Migrate legacy slackSenderProfiles into the Contact Book (Part 1) — versioned
+  // + idempotent + backs up both stores. Safe to run every startup; a no-op once
+  // migrated. Makes the Contact Book the single identity/permission source.
+  try { const mg = require('../orcha/fas/sender-profiles').migrateSenderProfilesToContacts(); if (mg && (mg.merged || mg.created)) logger.info('FAS contact migration: ' + mg.merged + ' merged, ' + mg.created + ' created'); } catch (e) { logger.warn('FAS contact migration failed: ' + e.message); }
+
   // Start the passive FAS follow-up scheduler (surfaces due items only; never
   // contacts anyone). Safe no-op when there are no cases / FAS is disabled.
   try { require('../orcha/fas/scheduler').startScheduler(); } catch (e) { logger.warn('FAS scheduler start failed: ' + e.message); }

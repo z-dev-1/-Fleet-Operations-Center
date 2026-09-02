@@ -322,15 +322,20 @@ async function _loadProfile() {
 async function _refreshProfiles() {
   const list = document.getElementById('fas-profile-list');
   if (!list) return;
+  // PART 1: FAS Sender Profiles is now a FILTERED, READ-ONLY view of the Contact
+  // Book. Identity + permissions are edited on the contact itself (single source
+  // of truth), not in a separate profile store.
   try {
-    const map = await slackBridge.fasGetSenderProfiles();
-    const arr = Object.values(map || {});
-    if (!arr.length) { list.innerHTML = '<div class="sd-hint">No saved profiles yet. Look up a Slack ID above to create one.</div>'; return; }
-    list.innerHTML = arr.map(p => '<div class="sd-hint" data-id="' + _esc(p.slackId) + '" style="cursor:pointer;border-bottom:1px solid var(--bd,#333);padding:2px 0">' +
-      '<strong>' + _esc(p.name || p.slackId) + '</strong> — ' + _esc(p.type) + (p.operators&&p.operators.length?(' · ops: ' + _esc(p.operators.join(','))):'') + (p.domiciles&&p.domiciles.length?(' · doms: ' + _esc(p.domiciles.join(','))):'') + '</div>').join('');
-    list.querySelectorAll('[data-id]').forEach(el => el.addEventListener('click', async () => {
-      const p = await slackBridge.fasResolveSender(el.getAttribute('data-id')); _renderProfileEditor(p);
-    }));
+    const view = (window.contacts && window.contacts.getFasView) ? await window.contacts.getFasView() : [];
+    if (!view || !view.length) { list.innerHTML = '<div class="sd-hint">No Slack-linked contacts yet. Add people in the Contact Book (with a Slack ID) and set their identity type + scope there.</div>'; return; }
+    list.innerHTML = view.map(p => {
+      const disabled = p.enabled === false ? ' <span style="color:var(--err,#c0392b)">(disabled)</span>' : '';
+      return '<div style="border-bottom:1px solid var(--bd,#333);padding:4px 0">' +
+        '<div style="font-size:11px;font-weight:700">' + _esc(p.name || p.slackId) + ' — ' + _esc(p.identityType) + disabled + '</div>' +
+        '<div class="sd-hint" style="opacity:.85">' + _esc(p.summary || '') + '</div>' +
+        '<div class="sd-hint" style="opacity:.55;font-size:9px">Edit identity/scope/permissions in the Contact Book. Source: ' + _esc(p.permissionSource || 'contact-book') + '</div>' +
+      '</div>';
+    }).join('');
   } catch (e) { list.innerHTML = '<div class="sd-hint">Failed: ' + _esc(e.message) + '</div>'; }
 }
 
@@ -376,8 +381,17 @@ export function initFasSettings() {
   const refreshBtn = document.getElementById('fas-refresh-audit');
   if (saveBtn) saveBtn.addEventListener('click', _saveConfig);
   if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshAudit(); _refreshReplyApprovals(); _refreshFollowUps(); _refreshApprovals(); _refreshAutoActions(); _refreshDrafts(); _refreshProfiles(); });
-  const profLoad = document.getElementById('fas-prof-load');
-  if (profLoad) profLoad.addEventListener('click', _loadProfile);
+  const migrateBtn = document.getElementById('fas-migrate-profiles');
+  if (migrateBtn) migrateBtn.addEventListener('click', async () => {
+    migrateBtn.disabled = true; migrateBtn.textContent = 'Migrating…';
+    try {
+      const res = (window.contacts && window.contacts.migrateSenderProfiles) ? await window.contacts.migrateSenderProfiles() : { error: 'unavailable' };
+      if (res && !res.error) toast.show('success', 'Migrated: ' + (res.merged || 0) + ' merged, ' + (res.created || 0) + ' created', 3500);
+      else toast.show('error', 'Migration failed: ' + (res && res.error), 4000);
+    } catch (e) { toast.show('error', e.message, 4000); }
+    migrateBtn.disabled = false; migrateBtn.textContent = 'Migrate legacy profiles → Contact Book';
+    _refreshProfiles();
+  });
   const autoReset = document.getElementById('fas-autoaction-reset');
   if (autoReset) autoReset.addEventListener('click', async () => {
     try { await slackBridge.fasSaveConfig({ approvedAutomaticActions: [] }); toast.show('success', 'Reset — all automatic actions off', 2000); }

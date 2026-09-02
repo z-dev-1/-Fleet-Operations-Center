@@ -307,6 +307,11 @@ contextBridge.exposeInMainWorld('contacts', {
   update:   (c)     => ipcRenderer.invoke('contacts:update', c),
   remove:   (id)    => ipcRenderer.invoke('contacts:delete', id),
   search:   (q)     => ipcRenderer.invoke('contacts:search', q),
+  // Contact Book as the single FAS identity/permission source (Part 1)
+  directorySearch: (q)  => ipcRenderer.invoke('contacts:directory-search', q),
+  linkSlack:       (d)  => ipcRenderer.invoke('contacts:link-slack', d),
+  getFasView:      ()   => ipcRenderer.invoke('contacts:get-fas-view'),
+  migrateSenderProfiles: () => ipcRenderer.invoke('contacts:migrate-sender-profiles'),
 });
 
 contextBridge.exposeInMainWorld('vendorAssignments', {
