@@ -115,4 +115,47 @@ describe('Contact Book hardened write service', () => {
     expect(store.load('contacts', []).length).toBe(0);
     expect(store.load('contactsTombstones', []).some(t => t.slackId === 'U1')).toBe(true);
   });
+
+  it('preserves vendor tow/email/make/domicile fields through the write service (no FAS clobber)', () => {
+    // A vendor contact carries non-FAS fields (address for tow, email, makes,
+    // domiciles, preference). The hardened service must pass them through
+    // verbatim and never wipe them when re-sanitizing FAS fields.
+    const v = cb.upsert({
+      type: 'vendor', name: 'Bergeys', company: 'Bergey Truck Center',
+      makes: ['VOLVO', 'MACK'], make: 'VOLVO',
+      domiciles: ['ABE40', 'PHL40'],
+      street: '123 Main St', city: 'Souderton', state: 'PA', zip: '18964',
+      phone: '215-555-0100', email: 'service@bergeys.com',
+      preference: 1, preferenceByDomicile: { ABE40: 1, PHL40: 2 },
+    });
+    expect(v.ok).toBe(true);
+    let c = store.load('contacts', []).find(x => x.id === v.id);
+    expect(c.type).toBe('vendor');
+    expect(c.street).toBe('123 Main St');            // tow address preserved
+    expect(c.city).toBe('Souderton');
+    expect(c.state).toBe('PA');
+    expect(c.zip).toBe('18964');
+    expect(c.email).toBe('service@bergeys.com');     // email preserved
+    expect(c.makes).toEqual(['VOLVO', 'MACK']);
+    expect(c.domiciles).toEqual(['ABE40', 'PHL40']); // uppercased, preserved
+    expect(c.preference).toBe(1);
+    expect(c.preferenceByDomicile).toEqual({ ABE40: 1, PHL40: 2 });
+
+    // A later partial update (e.g. phone only) must not blank the address/email.
+    cb.update({ id: v.id, phone: '215-555-0199' });
+    c = store.load('contacts', []).find(x => x.id === v.id);
+    expect(c.phone).toBe('215-555-0199');
+    expect(c.street).toBe('123 Main St');            // still there
+    expect(c.email).toBe('service@bergeys.com');     // still there
+    expect(c.makes).toEqual(['VOLVO', 'MACK']);      // still there
+  });
+
+  it('preserves a domicile contact address through the write service', () => {
+    const d = cb.upsert({ type: 'domicile', name: 'ABE40', street: '1 Yard Rd', city: 'Allentown', state: 'PA', zip: '18109' });
+    const c = store.load('contacts', []).find(x => x.id === d.id);
+    expect(c.type).toBe('domicile');
+    expect(c.name).toBe('ABE40');
+    expect(c.street).toBe('1 Yard Rd');
+    expect(c.zip).toBe('18109');
+  });
 });
