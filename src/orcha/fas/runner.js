@@ -125,12 +125,39 @@ async function handleInbound(input) {
     loop: decision._loop || null,
   };
 
+  // ── AI FAILURE HANDLING (Part 6) ──────────────────────────────────────────
+  // If Orcha/Claude timed out, returned invalid JSON, was aborted, exhausted
+  // its research budget without a usable answer, or produced an EMPTY reply,
+  // we must NEVER send an empty reply, NEVER mark the request handled, and
+  // NEVER advance silently. In Shadow, let the legacy path proceed. In
+  // Approval/Autonomous, create a VISIBLE manual-review item with the original
+  // request + failure reason, and send nothing.
+  const _aiFailed = !!decision._fallback || !!decision._aborted ||
+    typeof decision.reply !== 'string' || decision.reply.trim().length === 0;
+  if (_aiFailed) {
+    const failReason = decision._aborted ? 'AI aborted (runtime/cancellation)'
+      : decision._fallback ? 'AI unavailable or unparseable response'
+      : 'AI produced an empty reply';
+    if (mode === 'shadow') {
+      const audit = { ...base, outcome: 'ai-failed-shadow', failReason, actualReply: input.actualReply || '' };
+      _appendAudit(audit);
+      // Shadow records evaluation only; do NOT update authoritative case memory.
+      return { mode, letLegacyReply: true, decision, outcome: 'ai-failed-shadow', actionOutcomes, audit };
+    }
+    const item = _queueManualReview(input, decision, failReason);
+    const audit = { ...base, outcome: 'manual-review', failReason, approvalId: item.id };
+    _appendAudit(audit);
+    // Do NOT update case memory from a failed/empty AI result.
+    return { mode, letLegacyReply: false, decision, outcome: 'manual-review', approvalId: item.id, failReason, actionOutcomes, audit };
+  }
+
   // ── SHADOW: legacy replies; we only record the comparison. ────────────────
   if (mode === 'shadow') {
     const audit = { ...base, actualReply: input.actualReply || '',
       divergence: Number(_divergence(input.actualReply, decision.reply).toFixed(3)) };
     _appendAudit(audit);
-    _updateCaseFromInteraction(input, decision, 'shadow');
+    // NOTE (Part 7): Shadow drafts are EVALUATION data only — never written to
+    // authoritative case memory as facts/promises. Recorded in the audit log.
     return { mode, letLegacyReply: true, decision, outcome: 'shadow', actionOutcomes, audit };
   }
 
@@ -139,7 +166,9 @@ async function handleInbound(input) {
     const item = _queueReply(input, decision);
     const audit = { ...base, outcome: 'queued-for-approval', approvalId: item.id };
     _appendAudit(audit);
-    _updateCaseFromInteraction(input, decision, 'queued');
+    // NOTE (Part 7): a QUEUED (unapproved) draft must NOT become a case fact or
+    // an active promise. Case memory is updated only when the reply is actually
+    // sent (autonomous auto-send below, or approveReply after Slack confirms).
     return { mode, letLegacyReply: false, decision, outcome: 'queued', approvalId: item.id, actionOutcomes, audit };
   }
 
@@ -167,7 +196,7 @@ async function handleInbound(input) {
       : _hasApprovalLevelAction(decision) ? 'approval-level action proposed'
       : 'low confidence', approvalId: item.id };
   _appendAudit(audit);
-  _updateCaseFromInteraction(input, decision, 'queued');
+  // NOTE (Part 7): queued (unapproved) draft does NOT update case memory.
   return { mode, letLegacyReply: false, decision, outcome: 'queued', approvalId: item.id, actionOutcomes, audit };
 }
 
@@ -202,6 +231,37 @@ function _queueReply(input, decision) {
       conflicts: (decision._evidence && decision._evidence.conflicts) || [],
     },
     targetUnit: (decision._evidence && decision._evidence.entities && (decision._evidence.entities.units || [])[0]) || null,
+  };
+  arr.unshift(item);
+  if (arr.length > REPLY_QUEUE_CAP) arr.length = REPLY_QUEUE_CAP;
+  store.save('fasApprovalQueue', arr);
+  return item;
+}
+
+// Queue a VISIBLE manual-review item when the AI failed (timeout/invalid/empty/
+// aborted/budget-exhausted). It carries the ORIGINAL request + failure reason so
+// the operator can respond manually. It has NO proposed reply (nothing to send).
+function _queueManualReview(input, decision, failReason) {
+  const q = store.load('fasApprovalQueue', []);
+  const arr = Array.isArray(q) ? q : [];
+  const item = {
+    id: 'review_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    kind: 'manual-review',
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+    engine: input.engine || 'dm',
+    channelId: input.channelId || '',
+    channelName: input.channelName || '',
+    threadTs: input.threadTs || null,
+    ts: input.ts || '',                 // preserve the original Slack message ref
+    slackId: input.slackId || '',
+    senderName: input.senderName || '',
+    request: input.text || '',
+    proposedReply: '',                  // nothing to send — AI did not produce a usable answer
+    proposedActions: [],
+    failReason: failReason || 'AI unavailable',
+    decision: (decision && decision.decision) || 'clarify',
+    reason: (decision && decision.reason) || failReason,
   };
   arr.unshift(item);
   if (arr.length > REPLY_QUEUE_CAP) arr.length = REPLY_QUEUE_CAP;
@@ -323,6 +383,19 @@ async function approveReply(id, ctx, deps) {
   const it2 = q2.find(x => x.id === id);
   if (it2) { it2.status = 'approved-sent'; it2.sentTs = sendRes.ts; it2.sentChannel = item.channelId; it2.resolvedAt = new Date().toISOString(); it2.actionOutcomes = actionOutcomes; _saveQueue(q2); }
   _appendAudit({ at: new Date().toISOString(), kind: 'reply-approved', id, sentTs: sendRes.ts, channel: item.channelId, actionOutcomes });
+
+  // 4) NOW that Slack confirmed the send, commit case memory (Part 7): the
+  //    reply was actually sent, so its promise becomes real. Reconstruct a
+  //    minimal decision from the stored queue item.
+  try {
+    _updateCaseFromInteraction(
+      { slackId: item.slackId, channelId: item.channelId, ts: item.ts },
+      { decision: item.decision, reply: item.proposedReply, followUp: item.followUp,
+        _evidence: { verifiedFacts: (item.evidence && item.evidence.verifiedFacts) || [],
+          sources: (item.evidence && item.evidence.sources) || [],
+          entities: { units: item.targetUnit ? [item.targetUnit] : [] } } },
+      'approved-sent');
+  } catch (_) {}
   return { ok: true, sent: { ts: sendRes.ts, channel: item.channelId }, actionOutcomes };
 }
 

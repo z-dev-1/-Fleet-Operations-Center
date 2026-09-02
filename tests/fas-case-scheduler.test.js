@@ -33,23 +33,23 @@ afterEach(() => { vi.restoreAllMocks(); scheduler.stopScheduler(); try { fs.rmSy
 const R = (o) => JSON.stringify(o);
 const inbound = () => ({ engine: 'dm', slackId: 'U_INT', senderName: 'Zila', channelName: 'DM', channelId: 'C1', ts: '100.1', text: 'any update on 320160?' });
 
-describe('FAS case memory auto-wiring', () => {
-  it('creates/updates a unit case after an interaction', async () => {
-    seed('shadow');
-    vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.8, reason: 'ok', research: [], actions: [], reply: "I'll follow up with Amerit and confirm the ETA today." }));
-    await runner.handleInbound(inbound());
+describe('FAS case memory auto-wiring (only from SENT replies — Part 7)', () => {
+  it('creates/updates a unit case after an AUTONOMOUS SENT reply', async () => {
+    seed('autonomous');
+    vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.9, reason: 'ok', research: [], actions: [], reply: "I'll follow up with Amerit and confirm the ETA today." }));
+    const out = await runner.handleInbound(inbound());
+    expect(out.outcome).toBe('auto-sent'); // actually sent -> case committed
     const c = caseStore.getCase(caseStore.caseIdForUnit('320160'));
     expect(c).toBeTruthy();
     expect(c.unit).toBe('320160');
     expect(c.currentSummary).toMatch(/Amerit/);
-    // A first-person promise was captured -> follow-up scheduled.
     expect(c.promises.length).toBeGreaterThanOrEqual(1);
     expect(c.nextFollowUpAt).toBeTruthy();
   });
 
-  it('dedupes repeated promises across interactions', async () => {
-    seed('shadow');
-    vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.8, reason: 'ok', research: [], actions: [], reply: "I'll follow up with Amerit today." }));
+  it('dedupes repeated promises across sent interactions', async () => {
+    seed('autonomous');
+    vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.9, reason: 'ok', research: [], actions: [], reply: "I'll follow up with Amerit today." }));
     await runner.handleInbound(inbound());
     await runner.handleInbound(inbound()); // same promise again
     const c = caseStore.getCase(caseStore.caseIdForUnit('320160'));
@@ -58,14 +58,30 @@ describe('FAS case memory auto-wiring', () => {
   });
 
   it('dedupes verified facts in the case', async () => {
-    seed('shadow');
-    vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.8, reason: 'ok', research: [], actions: [], reply: 'status noted' }));
+    seed('autonomous');
+    vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.9, reason: 'ok', research: [], actions: [], reply: 'status noted' }));
     await runner.handleInbound(inbound());
     const before = caseStore.getCase(caseStore.caseIdForUnit('320160')).verifiedFacts.length;
     await runner.handleInbound(inbound()); // same facts again
     const after = caseStore.getCase(caseStore.caseIdForUnit('320160')).verifiedFacts.length;
-    // Second identical run should not append duplicate facts.
     expect(after).toBe(before);
+  });
+
+  it('SHADOW mode does NOT write authoritative case memory (Part 7)', async () => {
+    seed('shadow');
+    vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.9, reason: 'ok', research: [], actions: [], reply: "I'll follow up with Amerit today." }));
+    await runner.handleInbound(inbound());
+    const c = caseStore.getCase(caseStore.caseIdForUnit('320160'));
+    expect(c).toBeNull(); // shadow drafts are evaluation-only, never case facts
+  });
+
+  it('APPROVAL queued (unapproved) draft does NOT create a promise (Part 7)', async () => {
+    seed('approval');
+    vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.9, reason: 'ok', research: [], actions: [], reply: "I'll follow up with Amerit today." }));
+    const out = await runner.handleInbound(inbound());
+    expect(out.outcome).toBe('queued');
+    const c = caseStore.getCase(caseStore.caseIdForUnit('320160'));
+    expect(c).toBeNull(); // nothing committed until the reply is actually sent
   });
 });
 

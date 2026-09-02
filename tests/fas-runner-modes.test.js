@@ -110,13 +110,47 @@ describe('FAS unified runner — mode routing (all three differ)', () => {
     expect(out.fasReply).toBeUndefined();
   });
 
-  it('FAIL-SAFE: agent throw lets legacy reply (never drops the message)', async () => {
+  it('FAIL-SAFE: AI unavailable never auto-sends and never marks handled', async () => {
     seed('autonomous');
     vi.spyOn(relay, 'ask').mockRejectedValue(new Error('relay down'));
     const out = await runner.handleInbound(inbound());
-    // agent returns a fallback (clarify) rather than throwing, so this queues;
-    // but if the agent itself threw, we would fail safe. Assert no auto-send.
+    expect(out.fasReply).toBeUndefined();       // never an (empty) auto-send
+    expect(out.outcome).toBe('manual-review');  // visible review, not silent
+  });
+});
+
+describe('Part 6: AI failure handling', () => {
+  it('AUTONOMOUS: unparseable/empty AI -> manual-review item with the original request + reason (no empty send)', async () => {
+    seed('autonomous');
+    vi.spyOn(relay, 'ask').mockResolvedValue('not json at all');
+    const out = await runner.handleInbound(inbound());
+    expect(out.outcome).toBe('manual-review');
     expect(out.fasReply).toBeUndefined();
-    expect(out.letLegacyReply === false || out.outcome === 'error-failsafe').toBe(true);
+    expect(out.failReason).toBeTruthy();
+    const q = store.load('fasApprovalQueue', []);
+    const item = q.find(x => x.kind === 'manual-review');
+    expect(item).toBeTruthy();
+    expect(item.request).toMatch(/update on 320160/); // original request preserved
+    expect(item.proposedReply).toBe('');              // nothing to send
+    expect(item.ts).toBe('100.1');                    // original Slack ref preserved
+  });
+
+  it('APPROVAL: empty reply -> manual-review, not a queued empty proposal', async () => {
+    seed('approval');
+    vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.9, reason: 'x', research: [], actions: [], reply: '   ' }));
+    const out = await runner.handleInbound(inbound());
+    expect(out.outcome).toBe('manual-review');
+    const q = store.load('fasApprovalQueue', []);
+    expect(q.some(x => x.kind === 'manual-review')).toBe(true);
+    expect(q.some(x => x.kind === 'reply' && x.proposedReply.trim() === '')).toBe(false);
+  });
+
+  it('SHADOW: AI failure lets the legacy path proceed (no manual-review queue)', async () => {
+    seed('shadow');
+    vi.spyOn(relay, 'ask').mockRejectedValue(new Error('timeout'));
+    const out = await runner.handleInbound(inbound());
+    expect(out.letLegacyReply).toBe(true);
+    expect(out.outcome).toBe('ai-failed-shadow');
+    expect(store.load('fasApprovalQueue', []).length).toBe(0);
   });
 });
