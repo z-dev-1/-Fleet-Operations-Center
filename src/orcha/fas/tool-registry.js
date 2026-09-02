@@ -441,8 +441,18 @@ async function runTool(name, args, ctx) {
   const fn = READ_TOOLS[name];
   if (!fn) return { ok: false, error: 'unknown read tool: ' + name };
   if (!ctx || !ctx.profile) return { ok: false, error: 'sender profile required for scoping' };
+  // CENTRAL ARG VALIDATION (Part 15): validate name/args against the schema
+  // before dispatch. Never trust the AI to produce correct JSON.
+  let cleaned = args || {};
   try {
-    return await fn(args || {}, ctx);
+    const schema = require('./arg-schema');
+    const v = schema.validateArgs(name, args || {});
+    if (!v.ok) return { ok: false, error: 'invalid arguments for ' + name + ': ' + v.error };
+    cleaned = v.cleaned;
+  } catch (_) { /* validator unavailable -> proceed with raw args */ }
+  try {
+    const res = await fn(cleaned, ctx);
+    try { return require('./arg-schema').capResult(res); } catch (_) { return res; }
   } catch (e) {
     logger.warn('[fas-tools] ' + name + ' threw: ' + e.message);
     return { ok: false, error: e.message };

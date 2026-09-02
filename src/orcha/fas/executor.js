@@ -135,6 +135,19 @@ async function executeVerified(name, args, ctx) {
     return { status: 'blocked', error: authz.reason };
   }
 
+  // ── CENTRAL ARG VALIDATION (Part 15) ──────────────────────────────────────
+  // Validate action arguments against the schema before running. Reject
+  // malformed args rather than executing on garbage.
+  try {
+    const schema = require('./arg-schema');
+    const v = schema.validateArgs(name, args || {});
+    if (!v.ok) {
+      _audit({ action: name, status: 'invalid-args', error: v.error });
+      return { status: 'failed', error: 'invalid arguments: ' + v.error };
+    }
+    args = v.cleaned; // use the validated + cleaned args downstream
+  } catch (_) { /* validator unavailable -> proceed with raw args */ }
+
   // ── IDEMPOTENCY: skip a duplicate of an already-completed action. ─────────
   let idemKey = null;
   if (typeof action.idempotencyKey === 'function') {

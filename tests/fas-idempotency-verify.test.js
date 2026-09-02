@@ -63,7 +63,7 @@ describe('FAS MOVE_UNIT read-back verification', () => {
     const sl = require('../src/scrapers/setLifecycle');
     vi.spyOn(sl, 'setLifecycleState').mockResolvedValue({ success: true });
     const res = await executor.executeVerified('MOVE_UNIT',
-      { unit: '320160', state: 'Active', reason: 'repair complete', assetUrl: 'https://aap/x' },
+      { unit: '320160', state: 'Active', reason: 'repair complete', assetUrl: 'https://aap-na.corp.amazon.com/v2/service/uuid-x' },
       { profile: INTERNAL });
     expect(res.status).toBe('verifying');
     expect(res.verified).toBe(false);
@@ -74,7 +74,7 @@ describe('FAS MOVE_UNIT read-back verification', () => {
     const sl = require('../src/scrapers/setLifecycle');
     vi.spyOn(sl, 'setLifecycleState').mockResolvedValue({ success: true });
     const res = await executor.executeVerified('MOVE_UNIT',
-      { unit: '320160', state: 'Active', reason: 'repair complete', assetUrl: 'https://aap/x' },
+      { unit: '320160', state: 'Active', reason: 'repair complete', assetUrl: 'https://aap-na.corp.amazon.com/v2/service/uuid-x' },
       { profile: INTERNAL, readLifecycle: async () => 'Active' });
     expect(res.status).toBe('done');
     expect(res.verified).toBe(true);
@@ -85,7 +85,7 @@ describe('FAS MOVE_UNIT read-back verification', () => {
     const sl = require('../src/scrapers/setLifecycle');
     vi.spyOn(sl, 'setLifecycleState').mockResolvedValue({ success: true });
     const res = await executor.executeVerified('MOVE_UNIT',
-      { unit: '320160', state: 'Active', reason: 'x', assetUrl: 'https://aap/x' },
+      { unit: '320160', state: 'Active', reason: 'x', assetUrl: 'https://aap-na.corp.amazon.com/v2/service/uuid-x' },
       { profile: INTERNAL, readLifecycle: async () => 'Unavailable' });
     expect(res.verified).toBe(false);
     expect(res.status).not.toBe('done');
