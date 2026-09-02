@@ -289,14 +289,8 @@ async function getChannels(limit) {
 /**
  * readMessages(channelId, limit) -- fetch history for any channel or DM
  */
-async function readMessages(channelId, limit) {
-  if (!channelId) throw new Error('channelId required');
-  const lim = String(limit || 30);
-  const res = await slackWebApi('conversations.history', {
-    channel: channelId, limit: lim, inclusive: 'true'
-  });
-  if (!res.ok) throw new Error('conversations.history failed: ' + res.error);
-  return (res.messages || []).map(m => ({
+function _mapMsg(m, channelId) {
+  return {
     ts:         m.ts,
     userId:     m.user || m.username || '',
     text:       m.text || '',
@@ -306,7 +300,46 @@ async function readMessages(channelId, limit) {
     files:       m.files       || [],
     attachments: m.attachments || [],
     channelId
-  }));
+  };
+}
+
+/**
+ * readMessages(channelId, limit, sinceTs?)
+ *
+ * Default (no sinceTs): returns the newest `limit` messages (unchanged behavior).
+ *
+ * FIX (2026-09-02): when `sinceTs` is provided, paginate with `oldest`+cursor to
+ * fetch EVERY message since the watermark — so a burst of >limit messages
+ * between polls can never silently drop the oldest new ones. Bounded by
+ * maxPages so a runaway channel can't stall a poll; result is newest-first
+ * (same shape as before).
+ */
+async function readMessages(channelId, limit, sinceTs) {
+  if (!channelId) throw new Error('channelId required');
+  const lim = String(limit || 30);
+
+  if (!sinceTs) {
+    const res = await slackWebApi('conversations.history', { channel: channelId, limit: lim, inclusive: 'true' });
+    if (!res.ok) throw new Error('conversations.history failed: ' + res.error);
+    return (res.messages || []).map(m => _mapMsg(m, channelId));
+  }
+
+  // Cursor-paginated fetch of everything strictly after sinceTs.
+  const all = [];
+  let cursor = null;
+  const maxPages = 5; // up to ~5*limit messages caught per poll — bounded
+  for (let page = 0; page < maxPages; page++) {
+    const params = { channel: channelId, limit: lim, oldest: String(sinceTs), inclusive: 'false' };
+    if (cursor) params.cursor = cursor;
+    const res = await slackWebApi('conversations.history', params);
+    if (!res.ok) throw new Error('conversations.history failed: ' + res.error);
+    (res.messages || []).forEach(m => all.push(_mapMsg(m, channelId)));
+    cursor = res.response_metadata && res.response_metadata.next_cursor;
+    if (!cursor || !res.has_more) break;
+  }
+  // conversations.history returns newest-first per page; keep that ordering.
+  all.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
+  return all;
 }
 
 /**

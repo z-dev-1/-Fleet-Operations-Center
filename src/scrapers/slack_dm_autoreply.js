@@ -39,6 +39,11 @@ const { PERSONA_SYSTEM_PROMPT } = require('../orcha/slack-dm-persona');
 const { trace } = require('./slack_decision_trace');
 // Digital FAS shadow runner (no-op unless fasConfig.enabled && mode==='shadow').
 let _fasShadow; try { _fasShadow = require('../orcha/fas/shadow'); } catch (_) { _fasShadow = { runShadow: () => {} }; }
+// AITeammate is the INTERNAL AI agent we consult via ASK_INTERNAL. Its DM must
+// NEVER be treated as an ordinary human DM — otherwise the auto-reply engine
+// would answer AITeammate's messages, which could ping-pong into a loop.
+let _AITEAMMATE_CHANNEL = 'D0BTCKCQKA9';
+try { _AITEAMMATE_CHANNEL = require('../orcha/ask-internal').AITEAMMATE_CHANNEL || _AITEAMMATE_CHANNEL; } catch (_) {}
 
 const MAX_MESSAGES_PER_POLL = 5;   // per DM thread, per poll cycle
 const MAX_LOG_ENTRIES       = 500; // persisted reply log cap
@@ -47,6 +52,14 @@ let _pollLock = false; // mirrors slack_channel_watch.js's _pollLock exactly
 let _rlUntil  = 0;    // epoch ms — skip all conversations.replies calls until this time
 let _threadReplyCount = {}; // cache: channelId:parentTs -> replyCount seen on last fetch
 let _sendBlockedChannels = new Set(); // channels that returned restricted_action_read_only_channel — skip sends for the session
+// BOUNDED AI RETRY (2026-09-02): when the AI is unavailable for a message we
+// retry on later polls — but with backoff and a cap, not forever every 30s.
+// Keyed by channelId:ts -> { attempts, nextAttemptAt }. After MAX_AI_RETRIES
+// we escalate the message to the review queue instead of retrying endlessly.
+let _aiRetry = {};
+const MAX_AI_RETRIES = 4;
+function _retryState(id) { return _aiRetry[id] || { attempts: 0, nextAttemptAt: 0 }; }
+function _backoffMs(attempts) { return Math.min(30000 * Math.pow(2, attempts), 15 * 60 * 1000); } // 30s,1m,2m,4m… cap 15m
 
 function getDMAutoReplyConfig() {
   const cfg = store.load('slackDMAutoReplyConfig', null);
@@ -718,11 +731,17 @@ async function pollDMAutoReplyOnce(log) {
   // (which timeout at 8s each) are paid once in total, not once per DM.
   // Previously these were sequential: 10 hanging calls × 8s = 80s stall;
   // now: max(all fetch times) ≈ 8s total.
+  const _threads = config.threads || {};
   const dmFetchResults = await Promise.all(
     dms.map(dm => {
       if (dm.name === 'Slackbot' || dm.name === 'ATS AI Training SlackBot') return Promise.resolve(null);
+      if (dm.channelId === _AITEAMMATE_CHANNEL) return Promise.resolve(null); // never auto-reply to AITeammate
       if (_sendBlockedChannels.has(dm.channelId)) return Promise.resolve(null);
-      return readMessages(dm.channelId, 20).catch(e => {
+      // If we have a prior watermark for this DM, paginate from it so a burst of
+      // >20 messages since the last poll can't silently drop the oldest new ones.
+      // First-ever poll (no watermark) uses the plain newest-20 fetch (baseline).
+      const seenTs = _threads[dm.channelId] && _threads[dm.channelId].lastSeenTs;
+      return readMessages(dm.channelId, 20, seenTs || undefined).catch(e => {
         doLog(`[SlackDM] ${dm.name}: readMessages error — ${e.message}`);
         return [];
       });
@@ -736,6 +755,10 @@ async function pollDMAutoReplyOnce(log) {
     // Skip checks (same conditions as the fetch phase above).
     if (dm.name === 'Slackbot' || dm.name === 'ATS AI Training SlackBot') {
       doLog(`[SlackDM] ${dm.name}: skipping (system bot)`);
+      continue;
+    }
+    if (dm.channelId === _AITEAMMATE_CHANNEL) {
+      doLog(`[SlackDM] ${dm.name}: skipping (AITeammate internal agent — never auto-reply, prevents loop)`);
       continue;
     }
     if (_sendBlockedChannels.has(dm.channelId)) {
@@ -918,12 +941,45 @@ async function pollDMAutoReplyOnce(log) {
         // longer permanently swallows a real question. Cap the watermark below
         // this ts. (We still trace it so it's visible in the debugger.)
         if (draft._fallback) {
+          // Bounded retry with backoff. Track attempts per message; after
+          // MAX_AI_RETRIES, stop retrying and ESCALATE to the review queue so a
+          // persistently-down AI doesn't silently loop forever or drop the ask.
+          const _rid = dm.channelId + ':' + msg.ts;
+          const st = _retryState(_rid);
+          if (st.attempts >= MAX_AI_RETRIES) {
+            const entry = {
+              id: _rid, channelId: dm.channelId, channelName: dm.name, ts: msg.ts, replyTs: null,
+              question: msg.text, reply: '', inScope: false, category: 'action',
+              title: 'AI unavailable — needs manual reply: ' + (msg.text || '').slice(0, 48),
+              createdAt: new Date().toISOString(), status: 'open',
+            };
+            _appendReplyLog(entry);
+            escalatedCount++; newEscalations.push(entry);
+            delete _aiRetry[_rid];
+            trace({ engine: 'dm', channel: dm.name, sender: msg.userId, ts: msg.ts, text: msg.text,
+              decision: 'escalated', reason: 'AI unavailable after ' + MAX_AI_RETRIES + ' retries — escalated for manual reply' });
+            doLog(`[SlackDM] ${dm.name}: ${msg.ts} — AI unavailable after ${MAX_AI_RETRIES} retries, escalated to review`);
+            // Advance past it — it's now tracked as an open review item, not lost.
+            _saveThreadSeen(dm.channelId, dm.name, msg.ts, !!dm.isGroup);
+            continue;
+          }
+          if (Date.now() < st.nextAttemptAt) {
+            // Still in backoff window — leave for a later poll, don't burn an attempt.
+            _markRetry(msg.ts);
+            doLog(`[SlackDM] ${dm.name}: ${msg.ts} — AI unavailable, in backoff (attempt ${st.attempts}/${MAX_AI_RETRIES})`);
+            continue;
+          }
+          st.attempts += 1;
+          st.nextAttemptAt = Date.now() + _backoffMs(st.attempts);
+          _aiRetry[_rid] = st;
           _markRetry(msg.ts);
           trace({ engine: 'dm', channel: dm.name, sender: msg.userId, ts: msg.ts, text: msg.text,
-            decision: 'skipped', reason: 'AI unavailable (timeout/empty) — will retry next poll', aiRaw: draft._raw || '' });
-          doLog(`[SlackDM] ${dm.name}: AI unavailable for ${msg.ts} — deferring for retry (no canned reply sent)`);
+            decision: 'skipped', reason: 'AI unavailable — retry ' + st.attempts + '/' + MAX_AI_RETRIES + ', backoff ' + Math.round(_backoffMs(st.attempts) / 1000) + 's', aiRaw: draft._raw || '' });
+          doLog(`[SlackDM] ${dm.name}: AI unavailable for ${msg.ts} — retry ${st.attempts}/${MAX_AI_RETRIES}, backing off`);
           continue;
         }
+        // Successful (non-fallback) draft — clear any retry state for this msg.
+        delete _aiRetry[dm.channelId + ':' + msg.ts];
 
         // AUTO-FLIP: if this DM is asking to flip a specific unit back into
         // service, act on it (flip to Active) unless the unit is in a blocked
@@ -1098,8 +1154,27 @@ async function pollDMAutoReplyOnce(log) {
             const replyTextWithAttach = (reply.text || '') + attachCtxT;
             const draft = await _classifyAndDraft(replyTextWithAttach, threadContext, groupContextT);
 
+            // PARITY WITH TOP-LEVEL (2026-09-02): thread replies now get the same
+            // protections — AI held/skip, AI-unavailable fallback (retry, no
+            // canned reply), and decision tracing — instead of silently sending
+            // a canned line or advancing past an unanswered message.
+            if (draft._skip) {
+              doLog(`[SlackDM] ${dm.name}: thread reply ${reply.ts} — AI held, skipping`);
+              if (!latestThreadReplyTs || parseFloat(reply.ts) > parseFloat(latestThreadReplyTs)) latestThreadReplyTs = reply.ts;
+              continue;
+            }
+            if (draft._fallback) {
+              // AI didn't actually answer — do NOT send the canned reply and do
+              // NOT advance past this reply; leave it for the next poll to retry.
+              trace({ engine: 'dm-thread', channel: dm.name, sender: reply.userId, ts: reply.ts, text: reply.text,
+                decision: 'skipped', reason: 'AI unavailable (timeout/empty) — will retry next poll', aiRaw: draft._raw || '' });
+              doLog(`[SlackDM] ${dm.name}: thread reply ${reply.ts} — AI unavailable, deferring for retry`);
+              continue; // NOT advancing latestThreadReplyTs -> retried next poll
+            }
+
             let replyTs = null;
             let taggedReplyT = null;
+            let _threadSendFailed = false;
             try {
               // Reply in the same thread as the parent message.
               taggedReplyT = (reply.userId ? `<@${reply.userId}> ` : '') + draft.reply;
@@ -1111,8 +1186,17 @@ async function pollDMAutoReplyOnce(log) {
               if (e.message && e.message.includes('restricted_action')) {
                 _sendBlockedChannels.add(dm.channelId);
                 doLog(`[SlackDM] ${dm.name}: marked as read-only — will skip sends for this session`);
+              } else {
+                // Transient failure — retry next poll; do NOT advance past it.
+                _threadSendFailed = true;
+                doLog(`[SlackDM] ${dm.name}: thread reply ${reply.ts} send failed — deferring for retry`);
+                continue; // NOT advancing latestThreadReplyTs, NOT logging as handled
               }
             }
+            trace({ engine: 'dm-thread', channel: dm.name, sender: reply.userId, ts: reply.ts, text: reply.text,
+              decision: draft.inScope ? 'replied' : 'escalated',
+              reason: draft.inScope ? 'in-scope thread auto-answer' : ('escalated: ' + (draft.category || '')),
+              inheritedUnit: draft._inheritedUnit || null, aiRaw: draft._raw, reply: draft.reply });
 
             const entry = {
               id: replyLogId,

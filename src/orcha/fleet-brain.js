@@ -127,6 +127,11 @@ let _reqSeq       = 0;
 // ─── FLEET SYSTEM CONTEXT ───────────────────────────────────────────────────
 function _buildSystemContext() {
   let fleetSummary = '';
+  // Derive fleet scope DYNAMICALLY from live data instead of hardcoding
+  // "~160 CNG units at ABE40/EWR45/PHL40/AVP40". Falls back to a neutral
+  // description when no data is loaded yet.
+  let roleScope = '- You manage the fleet configured in this app across its current domiciles\n' +
+                  '- You track repairs, generate notes, and detect issues for the current unit roster\n';
   try {
     const data = store.load('fleetData', null);
     if (data && data.rows) {
@@ -135,16 +140,21 @@ function _buildSystemContext() {
       const vendors = {};
       unavail.forEach(r => { const v = r.vendor || 'Unknown'; vendors[v] = (vendors[v] || 0) + 1; });
       const vendorStr = Object.entries(vendors).sort((a, b) => b[1] - a[1]).map(([v, c]) => v + '(' + c + ')').join(', ');
+      const domiciles = [...new Set(data.rows.map(r => (r.domicileSite || r.site || '').trim().toUpperCase()).filter(Boolean))].sort();
+      const operators = [...new Set(data.rows.map(r => (r.operator || '').trim().toUpperCase()).filter(Boolean))].sort();
       fleetSummary = '\nFLEET STATE: ' + total + ' total units | ' + unavail.length + ' unavailable | Vendors: ' + vendorStr;
       fleetSummary += '\nLast sync: ' + (data.syncedAt || 'unknown');
+      roleScope =
+        '- You manage ' + total + ' units across domiciles: ' + (domiciles.join(', ') || 'unknown') + '\n' +
+        (operators.length ? ('- Operators (SCACs): ' + operators.join(', ') + '\n') : '') +
+        '- You track repairs, generate notes, and detect issues for this live roster\n';
     }
   } catch (_) {}
 
   return 'You are Orcha — the AI brain powering Fleet Operations Center v3.\n' +
     'You are INTEGRATED into this fleet management app. You are not a generic assistant.\n\n' +
     'YOUR ROLE:\n' +
-    '- You manage a CNG fleet at ABE40/EWR45/PHL40/AVP40 domiciles\n' +
-    '- You monitor ~160 units, track repairs, generate notes, detect issues\n' +
+    roleScope +
     '- You communicate with the Fleet Asset Specialist who operates this app\n' +
     '- You proactively identify problems and suggest actions\n\n' +
     'YOUR RULES FOR WORK ORDER NOTES:\n' +
