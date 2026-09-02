@@ -56,6 +56,23 @@ async function runShadow(input) {
       isGroup: !!input.isGroup,
     });
 
+    // Route any proposed actions through the executor. In Shadow this records
+    // them as "proposed" only (executes nothing); in Approval it queues them;
+    // in Autonomous it runs whitelisted low-risk ones (with verification). The
+    // executor enforces authorization + mode — this call is always safe.
+    const actionOutcomes = [];
+    if (Array.isArray(decision.actions) && decision.actions.length) {
+      try {
+        const executor = require('./executor');
+        const profile = require('./sender-profiles').resolveSender(input.slackId, input.senderName);
+        for (const a of decision.actions.slice(0, 6)) {
+          if (!a || !a.tool) continue;
+          const r = await executor.routeAction(a.tool, { ...(a.args || {}), slackId: input.slackId }, { profile });
+          actionOutcomes.push({ tool: a.tool, outcome: r.outcome });
+        }
+      } catch (e) { logger.warn('[fas-shadow] action routing failed (non-fatal): ' + e.message); }
+    }
+
     const divergence = _divergence(input.actualReply, decision.reply);
     const audit = {
       at: new Date().toISOString(),
@@ -70,6 +87,7 @@ async function runShadow(input) {
       fasReason: decision.reason,
       fasReply: decision.reply,
       fasProposedActions: (decision.actions || []).map(a => a && a.tool).filter(Boolean),
+      actionOutcomes,
       divergence: Number(divergence.toFixed(3)),
       caseId: decision._evidence && decision._evidence.caseId,
       deniedScope: (decision._evidence && decision._evidence.deniedScope) || [],

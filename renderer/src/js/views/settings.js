@@ -879,6 +879,10 @@ function _html() {
             <button class="sd-btn secondary" id="fas-refresh-audit">Refresh Shadow Log</button>
           </div>
           <div id="fas-status" class="sd-status" style="display:none;margin-top:8px"></div>
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Actions awaiting approval</div>
+          <div class="sd-hint" style="margin-bottom:6px">Actions the FAS agent proposed that require your approval. Approving runs the real action and verifies the result before marking it done.</div>
+          <div id="fas-approval-list" style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow:auto"></div>
+
           <div class="sd-section-title" style="margin-top:14px;font-size:11px">Shadow comparisons (FAS draft vs. what was sent)</div>
           <div class="sd-hint" style="margin-bottom:6px">Highest-divergence first. Nothing here was sent — this is evaluation only.</div>
           <div id="fas-audit-list" style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto"></div>

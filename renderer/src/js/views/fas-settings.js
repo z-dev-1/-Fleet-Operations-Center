@@ -87,6 +87,53 @@ async function _refreshAudit() {
   }
 }
 
+async function _refreshApprovals() {
+  const list = document.getElementById('fas-approval-list');
+  if (!list) return;
+  try {
+    const rows = await slackBridge.fasGetApprovalQueue('pending');
+    if (!rows || !rows.length) {
+      list.innerHTML = '<div class="sd-hint">No actions awaiting approval.</div>';
+      return;
+    }
+    list.innerHTML = rows.map((r) => {
+      const args = _esc(JSON.stringify(r.args || {}).slice(0, 220));
+      return '<div style="border:1px solid var(--bd,#333);border-radius:8px;padding:8px" data-id="' + _esc(r.id) + '">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
+          '<span style="font-size:11px;font-weight:700">' + _esc(r.action) + ' <span style="opacity:.6;font-weight:400">(' + _esc(r.level) + ')</span></span>' +
+          '<span style="font-size:9px;opacity:.6">' + _esc(r.requestedBy || '') + '</span>' +
+        '</div>' +
+        '<div class="sd-hint" style="margin:4px 0">' + args + '</div>' +
+        '<div class="sd-btn-row">' +
+          '<button class="sd-btn primary fas-approve" data-id="' + _esc(r.id) + '">Approve &amp; run</button>' +
+          '<button class="sd-btn secondary fas-reject" data-id="' + _esc(r.id) + '">Reject</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+    list.querySelectorAll('.fas-approve').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-id');
+        btn.disabled = true; btn.textContent = 'Running…';
+        try {
+          const res = await slackBridge.fasApproveAction(id);
+          if (res && res.ok) toast.show('success', 'Action done & verified', 2500);
+          else toast.show('error', 'Action did not verify: ' + ((res && res.result && res.result.error) || 'unknown'), 4000);
+        } catch (e) { toast.show('error', 'Approve failed: ' + e.message, 4000); }
+        _refreshApprovals();
+      });
+    });
+    list.querySelectorAll('.fas-reject').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-id');
+        try { await slackBridge.fasRejectAction(id); toast.show('success', 'Rejected', 1500); } catch (e) { toast.show('error', e.message, 3000); }
+        _refreshApprovals();
+      });
+    });
+  } catch (e) {
+    list.innerHTML = '<div class="sd-hint" style="color:var(--err,#c0392b)">Failed to load: ' + _esc(e.message) + '</div>';
+  }
+}
+
 // Called once from settings.init(). Idempotent (guards against double-wiring).
 let _wired = false;
 export function initFasSettings() {
@@ -96,9 +143,10 @@ export function initFasSettings() {
   const saveBtn = document.getElementById('fas-save');
   const refreshBtn = document.getElementById('fas-refresh-audit');
   if (saveBtn) saveBtn.addEventListener('click', _saveConfig);
-  if (refreshBtn) refreshBtn.addEventListener('click', _refreshAudit);
+  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshAudit(); _refreshApprovals(); });
   _loadConfig();
   _refreshAudit();
+  _refreshApprovals();
 }
 
 export { _refreshAudit as refreshFasAudit };

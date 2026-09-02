@@ -59,6 +59,20 @@ describe('FAS shadow runner', () => {
     expect(log[0].caseId).toBe('unit-320160');
   });
 
+  it('in shadow mode, proposed actions are recorded but NOT executed', async () => {
+    config.save({ enabled: true, mode: 'shadow' });
+    const relay = require('../src/orcha/relay');
+    vi.spyOn(relay, 'ask').mockResolvedValue('{"decision":"act","confidence":0.8,"reason":"add note","actions":[{"tool":"ADD_TIMELINE","args":{"unit":"320160","entry":"09/02 test"}}],"reply":"logging that now","followUp":{"required":false}}');
+    store.save('notesStore', {});
+    await shadow.runShadow({ engine: 'dm', slackId: 'U_INT', senderName: 'Internal Person', channelName: 'Internal Person', ts: '9.0', text: 'log a note on 320160', actualReply: 'ok' });
+    // Shadow must not have executed the timeline write.
+    expect(store.load('notesStore', {})['320160']).toBeUndefined();
+    const log = store.load('fasAuditLog', []);
+    const withActions = log.find(e => e.actionOutcomes && e.actionOutcomes.length);
+    expect(withActions).toBeTruthy();
+    expect(withActions.actionOutcomes[0].outcome).toBe('shadow');
+  });
+
   it('never throws even if the agent errors (guarded)', async () => {
     config.save({ enabled: true, mode: 'shadow' });
     const relay = require('../src/orcha/relay');
