@@ -343,6 +343,10 @@ export const slack = {
   fasGetApprovalQueue:    (status) => window.slack.fasGetApprovalQueue(status),
   fasApproveAction:       (id)     => window.slack.fasApproveAction(id),
   fasRejectAction:        (id)     => window.slack.fasRejectAction(id),
+  fasGetPlaybook:         ()       => window.slack.fasGetPlaybook(),
+  fasGetKnowledgeDrafts:  (status) => window.slack.fasGetKnowledgeDrafts(status),
+  fasApproveKnowledgeDraft:(data)  => window.slack.fasApproveKnowledgeDraft(data),
+  fasRejectKnowledgeDraft:(id)     => window.slack.fasRejectKnowledgeDraft(id),
 };
 
 // ── SharePoint ─────────────────────────────────────────────────────────────

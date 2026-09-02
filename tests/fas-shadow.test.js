@@ -73,6 +73,17 @@ describe('FAS shadow runner', () => {
     expect(withActions.actionOutcomes[0].outcome).toBe('shadow');
   });
 
+  it('records shadow comparisons for channel + thread engines', async () => {
+    config.save({ enabled: true, mode: 'shadow' });
+    const relay = require('../src/orcha/relay');
+    vi.spyOn(relay, 'ask').mockResolvedValue('{"decision":"answer","confidence":0.7,"reason":"x","actions":[],"reply":"channel reply","followUp":{"required":false}}');
+    await shadow.runShadow({ engine: 'channel', slackId: 'U_INT', senderName: 'ch', channelName: '#ops', ts: '10.0', text: 'status?', actualReply: 'sent to channel' });
+    await shadow.runShadow({ engine: 'dm-thread', slackId: 'U_INT', senderName: 'X', channelName: 'X', ts: '11.0', text: 'reply?', actualReply: 'thread reply' });
+    const log = store.load('fasAuditLog', []);
+    expect(log.some(e => e.engine === 'channel')).toBe(true);
+    expect(log.some(e => e.engine === 'dm-thread')).toBe(true);
+  });
+
   it('never throws even if the agent errors (guarded)', async () => {
     config.save({ enabled: true, mode: 'shadow' });
     const relay = require('../src/orcha/relay');

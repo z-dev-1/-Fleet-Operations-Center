@@ -1197,6 +1197,12 @@ async function pollDMAutoReplyOnce(log) {
               decision: draft.inScope ? 'replied' : 'escalated',
               reason: draft.inScope ? 'in-scope thread auto-answer' : ('escalated: ' + (draft.category || '')),
               inheritedUnit: draft._inheritedUnit || null, aiRaw: draft._raw, reply: draft.reply });
+            // FAS shadow on thread replies too (no-op unless enabled+shadow).
+            try {
+              _fasShadow.runShadow({ engine: 'dm-thread', slackId: reply.userId, senderName: dm.name,
+                channelName: dm.name, ts: reply.ts, text: reply.text, isGroup: !!dm.isGroup,
+                conversation: threadContext, actualReply: draft.reply });
+            } catch (_) {}
 
             const entry = {
               id: replyLogId,

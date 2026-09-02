@@ -883,6 +883,22 @@ function _html() {
           <div class="sd-hint" style="margin-bottom:6px">Actions the FAS agent proposed that require your approval. Approving runs the real action and verifies the result before marking it done.</div>
           <div id="fas-approval-list" style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow:auto"></div>
 
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Sender profiles &amp; permissions</div>
+          <div class="sd-hint" style="margin-bottom:6px">Who each Slack sender is and what they can see/request. Seeded from contacts; edit to set operator/domicile scope and permissions.</div>
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <input class="sd-input" id="fas-prof-lookup" placeholder="Slack ID (e.g. U0ABC123)" style="flex:1" />
+            <button class="sd-btn secondary" id="fas-prof-load">Load</button>
+          </div>
+          <div id="fas-profile-editor" style="display:none;flex-direction:column;gap:6px;border:1px solid var(--bd,#333);border-radius:8px;padding:8px"></div>
+          <div id="fas-profile-list" style="display:flex;flex-direction:column;gap:6px;max-height:180px;overflow:auto;margin-top:6px"></div>
+
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Knowledge drafts (from AITeammate)</div>
+          <div class="sd-hint" style="margin-bottom:6px">Internal guidance the agent gathered. Approve to fold into the FAS playbook; reject to discard. Nothing becomes policy automatically.</div>
+          <div id="fas-drafts-list" style="display:flex;flex-direction:column;gap:8px;max-height:220px;overflow:auto"></div>
+
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">FAS playbook (current rules)</div>
+          <div id="fas-playbook-list" style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow:auto"></div>
+
           <div class="sd-section-title" style="margin-top:14px;font-size:11px">Shadow comparisons (FAS draft vs. what was sent)</div>
           <div class="sd-hint" style="margin-bottom:6px">Highest-divergence first. Nothing here was sent — this is evaluation only.</div>
           <div id="fas-audit-list" style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto"></div>

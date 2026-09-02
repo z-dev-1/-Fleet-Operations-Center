@@ -31,6 +31,7 @@ const store = require('../store');
 const logger = require('../utils/logger').createLogger('slack_channel_watch');
 const { PERSONA_SYSTEM_PROMPT } = require('../orcha/slack-partner-persona');
 const { trace } = require('./slack_decision_trace');
+let _fasShadow; try { _fasShadow = require('../orcha/fas/shadow'); } catch (_) { _fasShadow = { runShadow: () => {} }; }
 
 const MAX_MESSAGES_PER_POLL = 5;   // per channel, per poll cycle
 const MAX_LOG_ENTRIES       = 500; // persisted reply log cap
@@ -880,6 +881,11 @@ async function pollChannelsOnce(log) {
           decision: draft.inScope === false ? 'escalated' : 'replied',
           reason: mentioned ? 'literal @-mention of me' : (isThreadReplyToMyMention ? 'reply in my mention thread' : 'gate: directed at me / chime-in'),
           mentioned: mentioned, aiRaw: draft._raw, reply: draft.reply });
+        // FAS shadow on channel replies too (no-op unless enabled+shadow).
+        try {
+          _fasShadow.runShadow({ engine: 'channel', slackId: msg.userId, senderName: ch.name,
+            channelName: ch.name, ts: msg.ts, text: msg.text, actualReply: draft.reply });
+        } catch (_) {}
 
         let replyTs = null;
         try {

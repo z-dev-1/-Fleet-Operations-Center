@@ -198,6 +198,10 @@ contextBridge.exposeInMainWorld('slack', {
   fasGetApprovalQueue:    (status) => ipcRenderer.invoke('fas:get-approval-queue', status),
   fasApproveAction:       (id)     => ipcRenderer.invoke('fas:approve-action', id),
   fasRejectAction:        (id)     => ipcRenderer.invoke('fas:reject-action', id),
+  fasGetPlaybook:         ()       => ipcRenderer.invoke('fas:get-playbook'),
+  fasGetKnowledgeDrafts:  (status) => ipcRenderer.invoke('fas:get-knowledge-drafts', status),
+  fasApproveKnowledgeDraft:(data)  => ipcRenderer.invoke('fas:approve-knowledge-draft', data),
+  fasRejectKnowledgeDraft:(id)     => ipcRenderer.invoke('fas:reject-knowledge-draft', id),
 });
 
 // -- Microsoft Graph mail (2026-07-21) -- see src/graph/client.js for the

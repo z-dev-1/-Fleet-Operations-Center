@@ -134,6 +134,97 @@ async function _refreshApprovals() {
   }
 }
 
+// ── Sender profiles ─────────────────────────────────────────────────────────
+const _DATA_CATS = ['unit_status','repair_timeline','work_orders','pm_status','uptake','vendor_contact','site_summary','operator_summary'];
+const _REQ_TYPES = ['unit_status','repair_update','follow_up','report','process_question','lifecycle_change','create_wr'];
+
+function _renderProfileEditor(p) {
+  const ed = document.getElementById('fas-profile-editor');
+  if (!ed) return;
+  ed.style.display = 'flex';
+  const csv = (a) => (a || []).join(', ');
+  const catChecks = _DATA_CATS.map(c => '<label class="sd-hint" style="display:inline-flex;gap:3px;margin-right:8px"><input type="checkbox" class="fp-cat" value="' + c + '"' + ((p.allowedDataCategories||[]).includes(c) ? ' checked' : '') + '/>' + c + '</label>').join('');
+  const reqChecks = _REQ_TYPES.map(c => '<label class="sd-hint" style="display:inline-flex;gap:3px;margin-right:8px"><input type="checkbox" class="fp-req" value="' + c + '"' + ((p.permittedRequestTypes||[]).includes(c) ? ' checked' : '') + '/>' + c + '</label>').join('');
+  ed.innerHTML =
+    '<div style="font-size:11px;font-weight:700">' + _esc(p.name || p.slackId) + ' <span style="opacity:.6;font-weight:400">(' + _esc(p.source || '') + ')</span></div>' +
+    '<input type="hidden" id="fp-slackid" value="' + _esc(p.slackId) + '"/>' +
+    '<label class="sd-label">Type</label><select class="sd-select" id="fp-type">' +
+      ['internal','manager','carrier','vendor','unknown'].map(t => '<option value="' + t + '"' + (p.type===t?' selected':'') + '>' + t + '</option>').join('') + '</select>' +
+    '<label class="sd-label">Operators (comma-sep)</label><input class="sd-input" id="fp-ops" value="' + _esc(csv(p.operators)) + '"/>' +
+    '<label class="sd-label">Domiciles (comma-sep)</label><input class="sd-input" id="fp-doms" value="' + _esc(csv(p.domiciles)) + '"/>' +
+    '<label class="sd-label">Allowed data</label><div>' + catChecks + '</div>' +
+    '<label class="sd-label">Permitted requests</label><div>' + reqChecks + '</div>' +
+    '<div class="sd-btn-row"><button class="sd-btn primary" id="fp-save">Save profile</button></div>';
+  const parseCsv = (s) => String(s || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean);
+  ed.querySelector('#fp-save').addEventListener('click', async () => {
+    const profile = {
+      slackId: ed.querySelector('#fp-slackid').value,
+      name: p.name, org: p.org,
+      type: ed.querySelector('#fp-type').value,
+      operators: parseCsv(ed.querySelector('#fp-ops').value),
+      domiciles: parseCsv(ed.querySelector('#fp-doms').value),
+      allowedDataCategories: [...ed.querySelectorAll('.fp-cat:checked')].map(x => x.value),
+      permittedRequestTypes: [...ed.querySelectorAll('.fp-req:checked')].map(x => x.value),
+    };
+    try { await slackBridge.fasSaveSenderProfile(profile); toast.show('success', 'Profile saved', 2000); _refreshProfiles(); }
+    catch (e) { toast.show('error', 'Save failed: ' + e.message, 3000); }
+  });
+}
+
+async function _loadProfile() {
+  const id = (document.getElementById('fas-prof-lookup').value || '').trim();
+  if (!id) return;
+  try { const p = await slackBridge.fasResolveSender(id); _renderProfileEditor(p); }
+  catch (e) { toast.show('error', e.message, 3000); }
+}
+
+async function _refreshProfiles() {
+  const list = document.getElementById('fas-profile-list');
+  if (!list) return;
+  try {
+    const map = await slackBridge.fasGetSenderProfiles();
+    const arr = Object.values(map || {});
+    if (!arr.length) { list.innerHTML = '<div class="sd-hint">No saved profiles yet. Look up a Slack ID above to create one.</div>'; return; }
+    list.innerHTML = arr.map(p => '<div class="sd-hint" data-id="' + _esc(p.slackId) + '" style="cursor:pointer;border-bottom:1px solid var(--bd,#333);padding:2px 0">' +
+      '<strong>' + _esc(p.name || p.slackId) + '</strong> — ' + _esc(p.type) + (p.operators&&p.operators.length?(' · ops: ' + _esc(p.operators.join(','))):'') + (p.domiciles&&p.domiciles.length?(' · doms: ' + _esc(p.domiciles.join(','))):'') + '</div>').join('');
+    list.querySelectorAll('[data-id]').forEach(el => el.addEventListener('click', async () => {
+      const p = await slackBridge.fasResolveSender(el.getAttribute('data-id')); _renderProfileEditor(p);
+    }));
+  } catch (e) { list.innerHTML = '<div class="sd-hint">Failed: ' + _esc(e.message) + '</div>'; }
+}
+
+// ── Knowledge drafts + playbook ──────────────────────────────────────────────
+async function _refreshDrafts() {
+  const list = document.getElementById('fas-drafts-list');
+  if (!list) return;
+  try {
+    const rows = await slackBridge.fasGetKnowledgeDrafts('pending');
+    if (!rows || !rows.length) { list.innerHTML = '<div class="sd-hint">No pending knowledge drafts.</div>'; return; }
+    list.innerHTML = rows.map(r => '<div style="border:1px solid var(--bd,#333);border-radius:8px;padding:8px" data-id="' + _esc(r.id) + '">' +
+      '<div style="font-size:11px;font-weight:700">' + _esc(r.topic || 'guidance') + '</div>' +
+      '<div class="sd-hint" style="margin:4px 0">' + _esc((r.guidance||'').slice(0,300)) + '</div>' +
+      '<div class="sd-btn-row"><button class="sd-btn primary kd-approve" data-id="' + _esc(r.id) + '">Approve into playbook</button>' +
+      '<button class="sd-btn secondary kd-reject" data-id="' + _esc(r.id) + '">Reject</button></div></div>').join('');
+    list.querySelectorAll('.kd-approve').forEach(b => b.addEventListener('click', async () => {
+      try { await slackBridge.fasApproveKnowledgeDraft({ id: b.getAttribute('data-id') }); toast.show('success','Added to playbook',2000); _refreshDrafts(); _refreshPlaybook(); }
+      catch(e){ toast.show('error', e.message, 3000); }
+    }));
+    list.querySelectorAll('.kd-reject').forEach(b => b.addEventListener('click', async () => {
+      try { await slackBridge.fasRejectKnowledgeDraft(b.getAttribute('data-id')); _refreshDrafts(); } catch(e){ toast.show('error', e.message, 3000); }
+    }));
+  } catch (e) { list.innerHTML = '<div class="sd-hint">Failed: ' + _esc(e.message) + '</div>'; }
+}
+
+async function _refreshPlaybook() {
+  const list = document.getElementById('fas-playbook-list');
+  if (!list) return;
+  try {
+    const pb = await slackBridge.fasGetPlaybook();
+    const secs = (pb && pb.sections) || [];
+    list.innerHTML = secs.map(s => '<div class="sd-hint" style="border-bottom:1px solid var(--bd,#333);padding:3px 0"><strong>' + _esc(s.title) + '</strong>: ' + _esc((s.body||'').slice(0,240)) + '</div>').join('');
+  } catch (e) { list.innerHTML = '<div class="sd-hint">Failed: ' + _esc(e.message) + '</div>'; }
+}
+
 // Called once from settings.init(). Idempotent (guards against double-wiring).
 let _wired = false;
 export function initFasSettings() {
@@ -143,10 +234,15 @@ export function initFasSettings() {
   const saveBtn = document.getElementById('fas-save');
   const refreshBtn = document.getElementById('fas-refresh-audit');
   if (saveBtn) saveBtn.addEventListener('click', _saveConfig);
-  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshAudit(); _refreshApprovals(); });
+  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshAudit(); _refreshApprovals(); _refreshDrafts(); _refreshProfiles(); });
+  const profLoad = document.getElementById('fas-prof-load');
+  if (profLoad) profLoad.addEventListener('click', _loadProfile);
   _loadConfig();
   _refreshAudit();
   _refreshApprovals();
+  _refreshProfiles();
+  _refreshDrafts();
+  _refreshPlaybook();
 }
 
 export { _refreshAudit as refreshFasAudit };
