@@ -175,12 +175,18 @@ async function handleInbound(input) {
   // ── AUTONOMOUS: auto-send only routine, confident answers w/o approval-level
   // actions or unresolved gaps; otherwise queue. Legacy stays silent either way.
   const gapsOrConflicts = (base.missingFacts && base.missingFacts.length) || (base.conflicts && base.conflicts.length);
+  // STALE EVIDENCE (Part 13): if any verified fact backing this decision is
+  // stale (cache older than the freshness window), it must NOT support an
+  // autonomous reply — queue for human review instead.
+  const evFacts = (decision._evidence && decision._evidence.verifiedFacts) || [];
+  const staleEvidence = evFacts.some(f => f && f.stale === true);
   const canAutoSend =
     decision.decision === 'answer' &&
     typeof decision.reply === 'string' && decision.reply.trim().length > 0 &&
     (decision.confidence == null || decision.confidence >= AUTO_SEND_MIN_CONFIDENCE) &&
     !_hasApprovalLevelAction(decision) &&
-    !gapsOrConflicts;
+    !gapsOrConflicts &&
+    !staleEvidence;
 
   if (canAutoSend) {
     const audit = { ...base, outcome: 'auto-sent' };
@@ -193,6 +199,7 @@ async function handleInbound(input) {
   const audit = { ...base, outcome: 'queued-for-approval',
     queueReason: decision.decision !== 'answer' ? ('decision=' + decision.decision)
       : gapsOrConflicts ? 'missing/conflicting evidence'
+      : staleEvidence ? 'stale cached evidence'
       : _hasApprovalLevelAction(decision) ? 'approval-level action proposed'
       : 'low confidence', approvalId: item.id };
   _appendAudit(audit);

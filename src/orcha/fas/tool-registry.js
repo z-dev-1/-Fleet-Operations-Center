@@ -136,9 +136,23 @@ function GET_UPTAKE_INSIGHTS(args, ctx) {
 // judge freshness. Offsite Event data is Relay-derived (Decisiv/DTNA links on
 // the unit's WR page), so it lives in the same cache entry.
 function _loadRelayCache() { return store.load('relayCache', {}) || {}; }
-// Fact whose freshness reflects the SOURCE system's own update time.
+// Configured freshness window (default 6h) for judging cache staleness.
+function _freshnessMs() {
+  try { return require('./config').get().dataFreshnessMs || (6 * 3600 * 1000); } catch (_) { return 6 * 3600 * 1000; }
+}
+// Fact whose freshness reflects the SOURCE system's own update time. Also
+// exposes cache AGE and a STALE flag (Part 13) so the AI/approval evidence can
+// see how old cached data is and never treat old cache as live. `stale` facts
+// must not support an autonomous reply (enforced in the runner).
 function _srcFact(field, value, source, sourceAt) {
-  return { field, value, source, retrievedAt: now(), sourceUpdatedAt: sourceAt || null };
+  let ageMs = null, stale = false;
+  if (sourceAt) {
+    const t = Date.parse(sourceAt);
+    if (!isNaN(t)) { ageMs = Date.now() - t; stale = ageMs > _freshnessMs(); }
+  }
+  // No source time -> we cannot assert age; leave stale=false (a negative/absent
+  // fact like "no work order cached" must not block an autonomous reply).
+  return { field, value, source, retrievedAt: now(), sourceUpdatedAt: sourceAt || null, ageMs, stale };
 }
 function _relayEntry(unit) {
   const cache = _loadRelayCache();
@@ -201,13 +215,17 @@ function GET_RELAY_WORK_ORDER_DETAILS(args, ctx) {
   const { entry } = _relayEntry(row.equipmentId);
   if (!entry || entry._noWR) return { ok: true, summary: 'No work order detail cached', verifiedFacts: [] };
   const at = entry._cachedAt ? new Date(entry._cachedAt).toISOString() : null;
-  return { ok: true, verifiedFacts: [
+  const facts = [
     _srcFact('vendorWorkOrderId', entry.vendorWorkOrderId || null, 'RelayGarage/WO', at),
     _srcFact('reasonForRepair', entry.cause || '', 'RelayGarage/WO', at),
     _srcFact('workAccomplished', entry.correction || '', 'RelayGarage/WO', at),
-    _srcFact('totalCost', entry.totalCost || '', 'RelayGarage/WO', at),
     _srcFact('salesforceCase', entry.salesforceCase || '', 'RelayGarage/WO', at),
-  ] };
+  ];
+  // FINANCIAL DATA (Part 13): total work-order cost is INTERNAL-ONLY by default
+  // — never exposed to carriers/vendors.
+  const isInternal = !!(ctx && ctx.profile && (ctx.profile.type === 'internal' || ctx.profile.type === 'manager'));
+  if (isInternal) facts.push(_srcFact('totalCost', entry.totalCost || '', 'RelayGarage/WO', at));
+  return { ok: true, verifiedFacts: facts };
 }
 
 function GET_RELAY_REPAIR_TIMELINE(args, ctx) {
