@@ -33,6 +33,7 @@ function _limitedDefaults(slackId, name) {
     domiciles: [],
     allowedDataCategories: ['unit_status'], // may ask about a unit they name; nothing fleet-wide
     permittedRequestTypes: ['unit_status', 'repair_update', 'follow_up', 'process_question'],
+    lifecyclePermission: 'not_allowed',
     commPreferences: {},
     source: 'default-limited',
   };
@@ -61,13 +62,25 @@ function presetFor(type) {
   };
 }
 
-// Infer identityType from a raw contact when not explicitly set.
+// Infer identityType from a raw contact when not explicitly set. IMPORTANT: an
+// UNTRIAGED Slack contact (type:'slack' with no explicit identityType) must NOT
+// be treated as a carrier — that would grant a carrier preset to an unknown DM
+// sender. Only an Amazon org/email is safely inferred as internal; a declared
+// vendor is vendor; everything else is UNKNOWN (safe default) until an operator
+// sets the identity in the Contact Book.
 function _inferType(c) {
   if (VALID_TYPES.includes(c.identityType)) return c.identityType;
   if (VALID_TYPES.includes(c.type) && c.type !== 'slack') return c.type;
   if ((c.org && /amazon/i.test(c.org)) || /amazon\.com$/i.test(c.email || '')) return 'internal';
   if (c.type === 'vendor') return 'vendor';
-  if (c.type === 'slack' || c.slackId) return 'carrier';
+  // A contact that has been explicitly SCOPED to specific operators/domiciles is
+  // clearly a carrier (that scope only makes sense for one). But an UNTRIAGED
+  // contact with NO scope (e.g. an auto-discovered DM sender) stays UNKNOWN so
+  // it never gets a carrier preset by accident.
+  const hasScope = (Array.isArray(c.operators) && c.operators.length) ||
+    (Array.isArray(c.domiciles) && c.domiciles.length) ||
+    (typeof c.domiciles === 'string' && c.domiciles.trim()) || c.operator;
+  if (hasScope) return 'carrier';
   return 'unknown';
 }
 
@@ -104,6 +117,11 @@ function _fromContact(c) {
     domiciles,
     allowedDataCategories: disabled ? [] : (hasExplicitCats ? c.allowedDataCategories.filter(x => DATA_CATEGORIES.includes(x)) : preset.allowedDataCategories),
     permittedRequestTypes: disabled ? [] : (hasExplicitReqs ? c.permittedRequestTypes.filter(x => REQUEST_TYPES.includes(x)) : preset.permittedRequestTypes),
+    // Lifecycle permission is a 3-state field, NOT part of presets: it must be
+    // explicitly granted per contact. Default (and disabled) => 'not_allowed'.
+    // 'trusted_autonomous' is only honored when EXPLICITLY set on the contact.
+    lifecyclePermission: disabled ? 'not_allowed'
+      : (['not_allowed', 'may_request', 'trusted_autonomous'].includes(c.lifecyclePermission) ? c.lifecyclePermission : 'not_allowed'),
     commPreferences: (c.communicationPreferences && typeof c.communicationPreferences === 'object') ? c.communicationPreferences : (c.commPreferences || {}),
     source: 'contact-book',
   };

@@ -680,29 +680,15 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
 async function _autoSaveContact(dm, userId) {
   if (!userId) return;
   try {
-    const contacts = store.load('contacts', []);
-    const exists = contacts.some(c => c.slackId && c.slackId === userId);
-    if (exists) return;
     const { resolveUserName } = require('./slack_send');
     const name = (await resolveUserName(userId)) || dm.name || userId;
-    const contact = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      type: 'slack',
-      name,
-      slackId: userId,
-      channelId: dm.channelId,
-      addedAt: new Date().toISOString(),
-      source: 'dm-autoreply',
-    };
-    contacts.push(contact);
-    store.save('contacts', contacts);
-    logger.info('[SlackDM] Auto-saved contact: ' + contact.name + ' (' + userId + ')');
-    // Notify renderer so the contact book refreshes live
-    try {
-      const { BrowserWindow } = require('electron');
-      const wins = BrowserWindow.getAllWindows();
-      if (wins.length) wins[0].webContents.send('contacts:updated', contact);
-    } catch (_) {}
+    // Route through the ONE hardened Contact Book service: case-insensitive
+    // dedupe, safe UNKNOWN defaults (identity=unknown, no scope, no lifecycle
+    // permission, conservative data/request perms), and a contacts:updated
+    // event so the Contact Book refreshes live.
+    const contactBook = require('../services/contact-book');
+    const res = contactBook.discoverFromDM({ slackId: userId, name, channelId: dm.channelId });
+    if (res && res.ok && !res.existed) logger.info('[SlackDM] Auto-discovered contact (unknown, no scope): ' + name + ' (' + userId + ')');
   } catch (e) {
     logger.warn('[SlackDM] Failed to auto-save contact:', e.message);
   }
