@@ -37,6 +37,8 @@ const store = require('../store');
 const logger = require('../utils/logger').createLogger('slack_dm_autoreply');
 const { PERSONA_SYSTEM_PROMPT } = require('../orcha/slack-dm-persona');
 const { trace } = require('./slack_decision_trace');
+// Digital FAS shadow runner (no-op unless fasConfig.enabled && mode==='shadow').
+let _fasShadow; try { _fasShadow = require('../orcha/fas/shadow'); } catch (_) { _fasShadow = { runShadow: () => {} }; }
 
 const MAX_MESSAGES_PER_POLL = 5;   // per DM thread, per poll cycle
 const MAX_LOG_ENTRIES       = 500; // persisted reply log cap
@@ -987,6 +989,17 @@ async function pollDMAutoReplyOnce(log) {
           reason: draft.inScope ? 'in-scope auto-answer' : ('escalated: ' + (draft.category || '')),
           inheritedUnit: draft._inheritedUnit || null,
           aiRaw: draft._raw, reply: draft.reply });
+
+        // FAS SHADOW (no-op unless enabled+shadow): run the digital-FAS agent on
+        // this same message and record how its draft compares to what we just
+        // sent. Fire-and-forget — never blocks or affects the live reply.
+        try {
+          _fasShadow.runShadow({
+            engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
+            ts: msg.ts, text: msg.text, isGroup: !!dm.isGroup, conversation: historyMsgs,
+            actualReply: draft.reply,
+          });
+        } catch (_) { /* shadow must never break the live path */ }
 
         if (!draft.inScope) {
           escalatedCount++;
