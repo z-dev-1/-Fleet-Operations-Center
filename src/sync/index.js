@@ -399,12 +399,19 @@ function createSyncEngine(ctx) {
       store.save('fleetData', payload);
       ctx.pushData(payload);
 
-      // Digital FAS (Part 5): reconcile any pending MOVE_UNIT verifications
-      // against the freshly-synced lifecycle state — resolve to done/failed.
+      // Digital FAS: reconcile any pending MOVE_UNIT verifications against the
+      // freshly-synced lifecycle state — resolve to done/failed (Part 5), THEN
+      // resume any reply transaction that was waiting on that verification —
+      // send the truthful reply exactly once or fail it for operator review
+      // (Part 7). Both run after fleetData is saved above.
       try {
-        const rec = require('../orcha/fas/executor').reconcileVerifyingLifecycle();
+        const executor = require('../orcha/fas/executor');
+        const rec = executor.reconcileVerifyingLifecycle();
         if (rec && (rec.resolved || rec.failed)) logger.info('FAS lifecycle reconcile: ' + rec.resolved + ' confirmed, ' + rec.failed + ' failed');
-      } catch (e) { logger.warn('FAS lifecycle reconcile failed: ' + e.message); }
+        const runner = require('../orcha/fas/runner');
+        const res = await runner.resumeVerifiedTransactions();
+        if (res && (res.resumed || res.failed)) logger.info('FAS txn resume: ' + res.resumed + ' sent, ' + res.failed + ' failed-review');
+      } catch (e) { logger.warn('FAS lifecycle reconcile/resume failed: ' + e.message); }
 
       const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       ctx.pushStatus(

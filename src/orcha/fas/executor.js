@@ -210,6 +210,23 @@ function _idemBlock(key) {
   // Otherwise (failed, expired lease, stale verifying) -> not blocking; recoverable.
   return { blocked: false, entry: e };
 }
+
+// Current ledger verdict for an action (used by the runner's Part-7 resume of a
+// waiting-verification reply transaction). Returns 'done' | 'failed' |
+// 'verifying' | 'unknown'. reconcileVerifyingLifecycle() (run after a fleet
+// sync) is what flips a verifying MOVE_UNIT entry to done/failed.
+function lifecycleVerdictFor(name, args) {
+  const action = actions.getAction(name);
+  if (!action || typeof action.idempotencyKey !== 'function') return 'unknown';
+  let key; try { key = action.idempotencyKey(args || {}); } catch (_) { return 'unknown'; }
+  const e = _loadIdem()[key];
+  if (!e) return 'unknown';
+  if (e.status === 'done') return 'done';
+  if (e.status === 'failed' || e.status === 'unverified') return 'failed';
+  if (e.status === 'verifying') return 'verifying';
+  return 'unknown';
+}
+
 // Atomically claim a key for execution with a lease. Returns false if another
 // live claim exists (prevents double execution from two windows / rapid clicks).
 function _claimIdem(key) {
@@ -478,4 +495,4 @@ function _safeArgs(args) {
   return a;
 }
 
-module.exports = { routeAction, executeVerified, approveQueued, rejectQueued, getQueue, reconcileInFlight, reconcileVerifyingLifecycle, clearIdem, _idemBlock, _claimIdem };
+module.exports = { routeAction, executeVerified, approveQueued, rejectQueued, getQueue, reconcileInFlight, reconcileVerifyingLifecycle, lifecycleVerdictFor, clearIdem, _idemBlock, _claimIdem };

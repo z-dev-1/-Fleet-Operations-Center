@@ -508,7 +508,8 @@ async function approveReply(id, ctx, deps) {
   // 2) Execute + VERIFY the linked actions FIRST (before sending the reply).
   _setTxnStatus(id, 'executing');
   const actionOutcomes = [];
-  let allActionsOk = true;
+  let anyFailed = false;
+  let anyVerifying = false;
   if (Array.isArray(item.proposedActions) && item.proposedActions.length) {
     _setTxnStatus(id, 'verifying');
     const executor = require('./executor');
@@ -520,40 +521,58 @@ async function approveReply(id, ctx, deps) {
         // permitted to request this action (incl. lifecycle 3-state) — the
         // operator's Approve does NOT bypass the requester's authority.
         const r = await executor.executeVerified(a.tool, { ...(a.args || {}), slackId: item.slackId }, { profile: approver, requesterSnapshot: item.requesterSnapshot });
-        actionOutcomes.push({ tool: a.tool, status: r.status, error: r.error });
-        if (!(r.status === 'done')) allActionsOk = false;
-      } catch (e) { actionOutcomes.push({ tool: a.tool, status: 'error', error: e.message }); allActionsOk = false; }
+        actionOutcomes.push({ tool: a.tool, status: r.status, error: r.error, deferred: !!r.deferred });
+        if (r.status === 'verifying' || (r.status !== 'done' && r.deferred)) anyVerifying = true;
+        else if (r.status !== 'done') anyFailed = true;
+      } catch (e) { actionOutcomes.push({ tool: a.tool, status: 'error', error: e.message }); anyFailed = true; }
     }
   }
 
-  // 3) If any linked action failed/did not verify, DO NOT send the success
-  //    reply. Mark the transaction failed with the truthful outcome.
-  if (!allActionsOk) {
+  // 3a) A hard failure -> DO NOT send the success reply. Truthful failure.
+  if (anyFailed) {
     _setTxnStatus(id, 'failed', { executionResults: actionOutcomes, failReason: 'a proposed action failed or did not verify — reply not sent' });
     _appendAudit({ at: new Date().toISOString(), kind: 'reply-action-failed', id, actionOutcomes });
     return { ok: false, error: 'linked action failed/unverified — success reply NOT sent', actionOutcomes };
   }
 
-  // 4) Actions verified (or none) — now send the reply.
-  const tagged = (item.slackId ? '<@' + item.slackId + '> ' : '') + (item.proposedReply || '');
-  let sendRes;
-  try {
-    sendRes = await sendToChannel(item.channelId, tagged, item.threadTs || undefined);
-  } catch (e) {
-    _setTxnStatus(id, 'failed', { executionResults: actionOutcomes, failReason: 'send failed: ' + e.message });
-    return { ok: false, error: 'send failed: ' + e.message, actionOutcomes };
-  }
-  if (!sendRes || !sendRes.ts) {
-    _setTxnStatus(id, 'failed', { executionResults: actionOutcomes, failReason: 'send returned no ts' });
-    return { ok: false, error: 'send returned no ts', actionOutcomes };
+  // 3b) DEFERRED verification (e.g. MOVE_UNIT awaiting AAP read-back, Part 7):
+  //     keep the SAME transaction in a 'waiting-verification' state and send
+  //     NOTHING now. A later fleet sync's reconcile resumes THIS exact txn:
+  //     resumeVerifiedTransactions() sends the truthful reply once (or fails it
+  //     with an operator-review item). Never send a false success meanwhile.
+  if (anyVerifying) {
+    _setTxnStatus(id, 'waiting-verification', { executionResults: actionOutcomes, waitingSince: new Date().toISOString() });
+    _appendAudit({ at: new Date().toISOString(), kind: 'reply-awaiting-verification', id, actionOutcomes });
+    return { ok: true, deferred: true, status: 'waiting-verification', actionOutcomes };
   }
 
-  // 5) Record final sent evidence + resolve the transaction.
+  // 4) Actions verified (or none) — send the reply + resolve the transaction.
+  return _finalizeSendAndCommit(id, item, actionOutcomes, sendToChannel);
+}
+
+// Send the transaction's reply through the real path, record Slack evidence,
+// commit case memory (ONLY after Slack confirms), and resolve the txn to 'sent'.
+// Idempotent: if the txn is already 'sent' it does nothing (prevents double-send
+// from a restart/retry/reconcile race). Used by approveReply AND the deferred
+// verification resume path so the reply is sent EXACTLY ONCE.
+async function _finalizeSendAndCommit(id, item, actionOutcomes, sendToChannel) {
+  // Re-load + guard: only a transaction not already sent may be finalized.
+  const cur = _loadQueue().find(x => x.id === id);
+  if (cur && cur.status === 'sent') return { ok: true, alreadySent: true, sent: cur.sentEvidence };
+  const send = sendToChannel || (() => { try { return require('../../scrapers/slack_send').sendToChannel; } catch (_) { return null; } })();
+  if (!send) { _setTxnStatus(id, 'failed', { failReason: 'send path unavailable' }); return { ok: false, error: 'send path unavailable' }; }
+
+  const tagged = (item.slackId ? '<@' + item.slackId + '> ' : '') + (item.proposedReply || '');
+  let sendRes;
+  try { sendRes = await send(item.channelId, tagged, item.threadTs || undefined); }
+  catch (e) { _setTxnStatus(id, 'failed', { executionResults: actionOutcomes, failReason: 'send failed: ' + e.message }); return { ok: false, error: 'send failed: ' + e.message, actionOutcomes }; }
+  if (!sendRes || !sendRes.ts) { _setTxnStatus(id, 'failed', { executionResults: actionOutcomes, failReason: 'send returned no ts' }); return { ok: false, error: 'send returned no ts', actionOutcomes }; }
+
   _setTxnStatus(id, 'sent', { sentEvidence: { ts: sendRes.ts, channel: item.channelId, at: new Date().toISOString() },
     executionResults: actionOutcomes, resolvedAt: new Date().toISOString() });
   _appendAudit({ at: new Date().toISOString(), kind: 'reply-approved-sent', id, sentTs: sendRes.ts, channel: item.channelId, actionOutcomes });
 
-  // 6) Commit case memory only AFTER Slack confirmed the send (Part 7).
+  // Commit case memory only AFTER Slack confirmed the send (Part 7).
   try {
     _updateCaseFromInteraction(
       { slackId: item.slackId, channelId: item.channelId, ts: item.ts },
@@ -565,6 +584,57 @@ async function approveReply(id, ctx, deps) {
       'approved-sent');
   } catch (_) {}
   return { ok: true, sent: { ts: sendRes.ts, channel: item.channelId }, actionOutcomes };
+}
+
+/**
+ * resumeVerifiedTransactions(deps) — Part 7. Called AFTER a fleet sync's
+ * lifecycle reconcile. For every reply transaction in 'waiting-verification':
+ *   - look up whether its linked lifecycle action(s) have now resolved via the
+ *     executor idempotency ledger (done vs failed);
+ *   - if DONE: resume THIS exact transaction — send the truthful reply once,
+ *     record Slack evidence, commit case memory;
+ *   - if FAILED (sync disagreed): mark the txn failed + leave a visible
+ *     operator-review record. Never send a false success.
+ * Uses per-transaction status guards so a restart/retry cannot double-send.
+ */
+async function resumeVerifiedTransactions(deps) {
+  const q = _loadQueue();
+  const waiting = q.filter(x => x.kind === 'reply' && x.status === 'waiting-verification');
+  if (!waiting.length) return { resumed: 0, failed: 0 };
+  let executor; try { executor = require('./executor'); } catch (_) { return { resumed: 0, failed: 0 }; }
+  const sendToChannel = (deps && deps.sendToChannel) || null;
+  let resumed = 0, failed = 0;
+  for (const item of waiting) {
+    // Atomically claim this txn for resume so two syncs/restarts can't both act.
+    const claimed = _claimResume(item.id);
+    if (!claimed) continue;
+    // Resolve the lifecycle state of the linked MOVE_UNIT action(s).
+    const verdicts = (item.proposedActions || []).filter(a => a && (a.tool === 'MOVE_UNIT'))
+      .map(a => executor.lifecycleVerdictFor(a.tool, { ...(a.args || {}), slackId: item.slackId }));
+    const anyStillPending = verdicts.some(v => v === 'verifying' || v === 'unknown');
+    const anyFailed = verdicts.some(v => v === 'failed');
+    if (anyFailed) {
+      _setTxnStatus(item.id, 'failed', { failReason: 'lifecycle verification disagreed on sync — success reply NOT sent; operator review required', needsOperatorReview: true });
+      _appendAudit({ at: new Date().toISOString(), kind: 'reply-verification-failed', id: item.id });
+      failed++;
+      continue;
+    }
+    if (anyStillPending) { _setTxnStatus(item.id, 'waiting-verification', {}); continue; } // still waiting; unclaim by resetting
+    // All linked lifecycle actions confirmed done -> resume + send truthfully once.
+    const res = await _finalizeSendAndCommit(item.id, item, item.executionResults || [], sendToChannel);
+    if (res.ok) resumed++;
+  }
+  return { resumed, failed };
+}
+
+// Claim a waiting-verification txn for resume (prevents double resume/send).
+function _claimResume(id) {
+  const q = _loadQueue();
+  const it = q.find(x => x.id === id);
+  if (!it || it.status !== 'waiting-verification') return false;
+  it.status = 'resuming'; it.resumeAt = new Date().toISOString();
+  _saveQueue(q);
+  return true;
 }
 
 function rejectReply(id) {
@@ -581,4 +651,4 @@ function getReplyQueue(status) {
   return _loadQueue().filter(x => x.kind === 'reply' && (!status || x.status === status));
 }
 
-module.exports = { handleInbound, approveReply, rejectReply, getReplyQueue, _divergence, _hasApprovalLevelAction, _extractPromise, _validateDueAt, _nextBusinessDueAt, AUTO_SEND_MIN_CONFIDENCE };
+module.exports = { handleInbound, approveReply, rejectReply, getReplyQueue, resumeVerifiedTransactions, _finalizeSendAndCommit, _buildRequesterSnapshot, _divergence, _hasApprovalLevelAction, _extractPromise, _validateDueAt, _nextBusinessDueAt, AUTO_SEND_MIN_CONFIDENCE };

@@ -88,6 +88,8 @@ describe('FAS reply approval (approval mode)', () => {
     // scope for the queued action here — but simpler: mock executor via a
     // non-existent unit so ADD_TIMELINE proceeds; instead force failure by
     // using MOVE_UNIT which requires internal + real read-back -> verifying).
+    const sl = require('../src/scrapers/setLifecycle');
+    vi.spyOn(sl, 'setLifecycleState').mockResolvedValue({ success: true }); // write ok, no read-back
     vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'act', confidence: 0.95, reason: 'move it',
       research: [], actions: [{ tool: 'MOVE_UNIT', args: { unit: '320160', state: 'Active', assetUrl: 'https://aap-na.corp.amazon.com/v2/asset/x' } }],
       reply: '320160 has been moved to Active.' }));
@@ -96,9 +98,12 @@ describe('FAS reply approval (approval mode)', () => {
     const q = runner.getReplyQueue('pending');
     const sent = [];
     const res = await runner.approveReply(q[0].id, null, { sendToChannel: async (c, t) => { sent.push(t); return { ts: '1.1' }; } });
-    // MOVE_UNIT can't verify in the test env (no electron read-back) -> verifying, not done
-    expect(res.ok).toBe(false);
-    expect(sent.length).toBe(0); // the "has been moved" reply was NOT sent
-    expect(runner.getReplyQueue('failed').length).toBe(1);
+    // MOVE_UNIT write succeeded but AAP read-back is deferred (no electron in
+    // tests) -> transaction WAITS for verification; the "has been moved"
+    // success reply is NOT sent yet (Part 7). Never a false success.
+    expect(res.deferred).toBe(true);
+    expect(sent.length).toBe(0);
+    expect(runner.getReplyQueue('waiting-verification').length).toBe(1);
+    expect(runner.getReplyQueue('sent').length).toBe(0);
   });
 });
