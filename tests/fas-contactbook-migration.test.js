@@ -92,12 +92,28 @@ describe('MIGRATION: slackSenderProfiles -> Contact Book', () => {
     expect(contacts.filter(c => c.slackId === 'U9').length).toBe(1);
   });
 
-  it('backs up both stores before migrating', () => {
+  it('takes an immutable versioned backup of BOTH stores exactly once', () => {
     store.save('contacts', [{ id: 'c1', slackId: 'U1', name: 'Joe' }]);
     store.save('slackSenderProfiles', { U1: { slackId: 'U1', type: 'carrier' } });
     profiles.migrateSenderProfilesToContacts();
-    expect(store.load('contactsBackup', null)).toBeTruthy();
-    expect(store.load('slackSenderProfilesBackup', null)).toBeTruthy();
+    const backup = store.load('fasMigrationBackup_v1', null);
+    expect(backup).toBeTruthy();
+    expect(Array.isArray(backup.contacts)).toBe(true);
+    expect(backup.slackSenderProfiles).toBeTruthy();
+    // Immutable: the original backup timestamp is preserved across reruns.
+    const firstAt = backup.at;
+    profiles.migrateSenderProfilesToContacts(); // no-op rerun
+    expect(store.load('fasMigrationBackup_v1', {}).at).toBe(firstAt);
+  });
+
+  it('dry run performs NO writes (no backup, no contact change, legacy unmarked)', () => {
+    store.save('contacts', []);
+    store.save('slackSenderProfiles', { U1: { slackId: 'U1', type: 'carrier', operators: ['TUZR'] } });
+    const res = profiles.migrateSenderProfilesToContacts({ dryRun: true });
+    expect(res.created).toBe(1);        // reports what WOULD happen
+    expect(store.load('contacts', []).length).toBe(0);       // nothing written
+    expect(store.load('fasMigrationBackup_v1', null)).toBeNull();
+    expect(store.load('slackSenderProfiles', {}).__migratedAt).toBeUndefined();
   });
 
   it('does not overwrite useful contact info with blanks', () => {
@@ -136,5 +152,52 @@ describe('MIGRATION: slackSenderProfiles -> Contact Book', () => {
     profiles.migrateSenderProfilesToContacts();
     const after = store.load('contacts', []).length;
     expect(after).toBe(before); // no new contacts on rerun
+  });
+
+  it('a rerun after completion is a TRUE no-op (noop flag, no rewrite)', () => {
+    store.save('slackSenderProfiles', { U1: { slackId: 'U1', type: 'carrier', operators: ['TUZR'] } });
+    profiles.migrateSenderProfilesToContacts();
+    const contactsAfter1 = JSON.stringify(store.load('contacts', []));
+    const res2 = profiles.migrateSenderProfilesToContacts();
+    expect(res2.noop).toBe(true);
+    expect(res2.merged).toBe(0);
+    expect(res2.created).toBe(0);
+    // Contacts untouched by the no-op rerun.
+    expect(JSON.stringify(store.load('contacts', []))).toBe(contactsAfter1);
+  });
+
+  it('case-insensitive slackId match prevents a duplicate contact', () => {
+    store.save('contacts', [{ id: 'c1', slackId: 'u1', name: 'Joe' }]); // lowercase
+    store.save('slackSenderProfiles', { U1: { slackId: 'U1', type: 'carrier', operators: ['TUZR'] } }); // uppercase
+    const res = profiles.migrateSenderProfilesToContacts();
+    expect(res.merged).toBe(1);
+    expect(res.created).toBe(0);
+    expect(store.load('contacts', []).length).toBe(1); // no dup despite case diff
+  });
+
+  it('if contacts save FAILS, legacy profiles are NOT marked migrated (still honored)', () => {
+    store.save('slackSenderProfiles', { U1: { slackId: 'U1', type: 'internal', allowedDataCategories: ['uptake'], operators: [] } });
+    // Force store.save('contacts', ...) to throw.
+    const realSave = store.save;
+    store.save = (key, data) => { if (key === 'contacts') throw new Error('disk full'); return realSave(key, data); };
+    let res;
+    try { res = profiles.migrateSenderProfilesToContacts(); } finally { store.save = realSave; }
+    expect(res.aborted).toBe('contacts-save-failed');
+    // Legacy NOT marked migrated -> resolveSender still honors it.
+    expect(store.load('slackSenderProfiles', {}).__migratedAt).toBeUndefined();
+    const p = profiles.resolveSender('U1');
+    expect(p.type).toBe('internal'); // legacy authorization preserved
+  });
+
+  it('aborts (no contact writes) if the backup cannot be written', () => {
+    store.save('slackSenderProfiles', { U1: { slackId: 'U1', type: 'carrier', operators: ['TUZR'] } });
+    store.save('contacts', []);
+    const realSave = store.save;
+    store.save = (key, data) => { if (key === 'fasMigrationBackup_v1') throw new Error('backup disk full'); return realSave(key, data); };
+    let res;
+    try { res = profiles.migrateSenderProfilesToContacts(); } finally { store.save = realSave; }
+    expect(res.aborted).toBe('backup-failed');
+    expect(store.load('contacts', []).length).toBe(0); // nothing migrated
+    expect(store.load('slackSenderProfiles', {}).__migratedAt).toBeUndefined();
   });
 });

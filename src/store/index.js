@@ -107,6 +107,7 @@ const REGISTRY = {
   fasMigrationLog:         () => path.join(P.dataDir, 'fas_migration_log.json'),
   contactsBackup:          () => path.join(P.dataDir, 'contacts_backup.json'),
   slackSenderProfilesBackup: () => path.join(P.dataDir, 'slack_sender_profiles_backup.json'),
+  fasMigrationBackup_v1:   () => path.join(P.dataDir, 'fas_migration_backup_v1.json'),
   contactsTombstones:      () => path.join(P.dataDir, 'contacts_tombstones.json'),
   emailLastSnapshot:       () => path.join(P.dataDir, 'email_last_snapshot.json'),
   proactiveAlertHistory:  () => path.join(P.dataDir, 'proactive_alert_history.json'),

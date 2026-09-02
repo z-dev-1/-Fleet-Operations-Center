@@ -283,18 +283,36 @@ function migrateSenderProfilesToContacts(opts) {
   opts = opts || {};
   const legacy = _loadProfiles();
   const already = legacy.__migratedAt && legacy.__migrationVersion === MIGRATION_VERSION;
-  const contacts = store.load('contacts', []) || [];
-  const result = { version: MIGRATION_VERSION, at: new Date().toISOString(), merged: 0, created: 0, conflicts: [], failures: [], alreadyMigrated: !!already };
+  const at = new Date().toISOString();
+  const result = { version: MIGRATION_VERSION, at, merged: 0, created: 0, conflicts: [], failures: [], alreadyMigrated: !!already, dryRun: !!opts.dryRun, noop: false };
 
-  // Back up both stores before any change (idempotent — overwrite each run).
-  try {
-    store.save('contactsBackup', { at: result.at, contacts });
-    store.save('slackSenderProfilesBackup', { at: result.at, profiles: legacy });
-  } catch (e) { result.failures.push('backup: ' + e.message); }
+  // (1) TRUE NO-OP if this version already completed: return WITHOUT rewriting
+  //     contacts, backups, timestamps, or logs. Re-running is safe.
+  if (already && !opts.force) { result.noop = true; return result; }
 
+  // (2) Take an IMMUTABLE, VERSIONED backup exactly ONCE (never overwrite the
+  //     original pre-migration backup). A dry run performs NO writes at all.
+  const backupKey = 'fasMigrationBackup_v' + MIGRATION_VERSION;
+  if (!opts.dryRun) {
+    const existingBackup = store.load(backupKey, null);
+    if (!existingBackup) {
+      try {
+        store.save(backupKey, { version: MIGRATION_VERSION, at,
+          contacts: store.load('contacts', []) || [],
+          slackSenderProfiles: legacy });
+      } catch (e) {
+        // (3) ABORT if backup fails — do not touch contacts or legacy.
+        result.failures.push('backup: ' + e.message);
+        result.aborted = 'backup-failed';
+        return result;
+      }
+    }
+  }
+
+  const contacts = (store.load('contacts', []) || []).map(c => ({ ...c }));
   const entries = Object.keys(legacy).filter(k => !k.startsWith('__')).map(k => legacy[k]).filter(p => p && p.slackId);
   const bySlack = {};
-  contacts.forEach(c => { if (c.slackId) bySlack[String(c.slackId).trim().toUpperCase()] = c; });
+  contacts.forEach(c => { if (c.slackId) bySlack[String(c.slackId).trim().toUpperCase()] = c; }); // case-insensitive
 
   for (const p of entries) {
     try {
@@ -307,32 +325,29 @@ function migrateSenderProfilesToContacts(opts) {
         permittedRequestTypes: (p.permittedRequestTypes || []).filter(x => REQUEST_TYPES.includes(x)),
         communicationPreferences: (p.commPreferences && typeof p.commPreferences === 'object') ? p.commPreferences : {},
         permissionSource: 'migrated-v' + MIGRATION_VERSION,
-        updatedAt: result.at,
+        updatedAt: at,
       };
       const existing = bySlack[key];
       if (existing) {
         // Merge WITHOUT overwriting useful existing info with blanks.
         if (!existing.name && p.name) existing.name = p.name;
         if (!existing.org && !existing.organization && (p.org)) existing.organization = p.org;
-        // Only set identityType if the contact doesn't already have one.
         if (!existing.identityType) existing.identityType = permFields.identityType;
-        // Scopes: union (don't drop what the contact already had).
         existing.operators = Array.from(new Set([].concat(existing.operators || [], permFields.operators).map(s => String(s).trim().toUpperCase()).filter(Boolean)));
         existing.domiciles = Array.from(new Set([].concat(existing.domiciles || [], permFields.domiciles).map(s => String(s).trim().toUpperCase()).filter(Boolean)));
-        // Permissions: prefer existing explicit permissions if present.
         if (!Array.isArray(existing.allowedDataCategories) && permFields.allowedDataCategories.length) existing.allowedDataCategories = permFields.allowedDataCategories;
         if (!Array.isArray(existing.permittedRequestTypes) && permFields.permittedRequestTypes.length) existing.permittedRequestTypes = permFields.permittedRequestTypes;
         if (!existing.communicationPreferences && Object.keys(permFields.communicationPreferences).length) existing.communicationPreferences = permFields.communicationPreferences;
         if (existing.enabled === undefined) existing.enabled = true;
         existing.permissionSource = permFields.permissionSource;
-        existing.updatedAt = result.at;
+        existing.updatedAt = at;
         result.merged++;
       } else {
         const nc = {
           id: _genId(), type: 'slack', slackId: p.slackId,
           name: p.name || p.slackId, organization: p.org || '',
           role: p.role || '', enabled: true, source: 'migrated-sender-profile',
-          createdAt: result.at, ...permFields,
+          createdAt: at, ...permFields,
         };
         contacts.push(nc);
         bySlack[key] = nc;
@@ -341,13 +356,29 @@ function migrateSenderProfilesToContacts(opts) {
     } catch (e) { result.failures.push((p && p.slackId) + ': ' + e.message); }
   }
 
-  if (!opts.dryRun) {
-    try { store.save('contacts', contacts); } catch (e) { result.failures.push('save contacts: ' + e.message); }
-    // Mark legacy store migrated so resolveSender stops honoring it, but KEEP it
-    // as a legacy backup (do not delete) until the operator verifies migration.
-    try { legacy.__migratedAt = result.at; legacy.__migrationVersion = MIGRATION_VERSION; store.save('slackSenderProfiles', legacy); } catch (e) { result.failures.push('mark legacy: ' + e.message); }
+  // (4) DRY RUN: report what WOULD happen; write nothing.
+  if (opts.dryRun) return result;
+
+  // (5) Save contacts and VERIFY the save succeeded BEFORE marking legacy
+  //     migrated. If contacts save/verify fails, keep honoring legacy profiles
+  //     (do NOT mark migrated) so authorization is never silently lost.
+  let saved = false;
+  try {
+    store.save('contacts', contacts);
+    const back = store.load('contacts', []) || [];
+    saved = back.length >= contacts.length; // verify persisted
+  } catch (e) { result.failures.push('save contacts: ' + e.message); }
+
+  if (!saved) {
+    result.aborted = 'contacts-save-failed';
+    result.rollback = { backupKey }; // legacy remains authoritative
     try { const log = store.load('fasMigrationLog', []); const arr = Array.isArray(log) ? log : []; arr.unshift(result); store.save('fasMigrationLog', arr.slice(0, 50)); } catch (_) {}
+    return result; // legacy NOT marked migrated -> resolveSender keeps honoring it
   }
+
+  // Contacts saved + verified -> now it's safe to mark legacy migrated.
+  try { legacy.__migratedAt = at; legacy.__migrationVersion = MIGRATION_VERSION; store.save('slackSenderProfiles', legacy); } catch (e) { result.failures.push('mark legacy: ' + e.message); }
+  try { const log = store.load('fasMigrationLog', []); const arr = Array.isArray(log) ? log : []; arr.unshift(result); store.save('fasMigrationLog', arr.slice(0, 50)); } catch (_) {}
   return result;
 }
 
