@@ -39,6 +39,9 @@ const { PERSONA_SYSTEM_PROMPT } = require('../orcha/slack-dm-persona');
 const { trace } = require('./slack_decision_trace');
 // Digital FAS shadow runner (no-op unless fasConfig.enabled && mode==='shadow').
 let _fasShadow; try { _fasShadow = require('../orcha/fas/shadow'); } catch (_) { _fasShadow = { runShadow: () => {} }; }
+// Digital FAS UNIFIED runner — decides per-mode who owns the reply (shadow =
+// legacy; approval = queue + legacy silent; autonomous = auto-send or queue).
+let _fasRunner; try { _fasRunner = require('../orcha/fas/runner'); } catch (_) { _fasRunner = null; }
 // AITeammate is the INTERNAL AI agent we consult via ASK_INTERNAL. Its DM must
 // NEVER be treated as an ordinary human DM — otherwise the auto-reply engine
 // would answer AITeammate's messages, which could ping-pong into a loop.
@@ -998,10 +1001,51 @@ async function pollDMAutoReplyOnce(log) {
           }
         }
 
+        // ── DIGITAL FAS UNIFIED RUNNER ────────────────────────────────────
+        // Decide who owns this reply based on FAS mode. In shadow/disabled the
+        // legacy draft is sent as before (runner records the comparison). In
+        // approval mode the runner queues the proposed reply and the legacy
+        // engine stays SILENT (no duplicate). In autonomous mode the runner may
+        // return a fasReply to send instead of the legacy draft, or queue it.
+        let _fasOwnsReply = false;   // FAS suppressed the legacy send (queued)
+        let _replyText = draft.reply; // may be replaced by a FAS auto-send
+        if (_fasRunner) {
+          try {
+            const _fr = await _fasRunner.handleInbound({
+              engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
+              channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
+              isGroup: !!dm.isGroup, conversation: historyMsgs, actualReply: draft.reply,
+            });
+            if (_fr && _fr.letLegacyReply === false) {
+              if (_fr.fasReply && String(_fr.fasReply).trim()) {
+                _replyText = _fr.fasReply;           // autonomous auto-send
+                doLog(`[SlackDM] ${dm.name}: FAS(${_fr.mode}) auto-sending reply for ${msg.ts}`);
+              } else {
+                _fasOwnsReply = true;                 // approval/queued — send nothing
+                doLog(`[SlackDM] ${dm.name}: FAS(${_fr.mode}) queued reply for ${msg.ts} (${_fr.outcome}) — legacy suppressed`);
+              }
+            }
+          } catch (_e) { /* runner must never break the live path — fall back to legacy send */ }
+        }
+
         let replyTs = null;
         // Declared outside the try so it is in scope for the log entry below
         // regardless of whether the send succeeds or throws.
-        const taggedReply = (msg.userId ? `<@${msg.userId}> ` : '') + draft.reply;
+        const taggedReply = (msg.userId ? `<@${msg.userId}> ` : '') + _replyText;
+        if (_fasOwnsReply) {
+          // FAS queued this for approval — record it as handled (so the
+          // watermark advances; the message is processed, not lost) but send
+          // nothing outbound this cycle.
+          _appendReplyLog({
+            id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
+            ts: msg.ts, replyTs: null, question: msg.text, reply: '(queued for FAS approval)',
+            inScope: true, category: null, title: draft.title,
+            createdAt: new Date().toISOString(), status: 'fas-queued',
+          });
+          trace({ engine: 'dm', channel: dm.name, sender: msg.userId, ts: msg.ts, text: msg.text,
+            decision: 'fas-queued', reason: 'FAS approval/autonomous queued the reply', reply: '' });
+          continue; // next message; watermark logic below still advances
+        }
         try {
           // Reply in-thread if the incoming message was itself part of a
           // thread (msg.threadTs is null for plain top-level messages, so
@@ -1046,16 +1090,11 @@ async function pollDMAutoReplyOnce(log) {
           inheritedUnit: draft._inheritedUnit || null,
           aiRaw: draft._raw, reply: draft.reply });
 
-        // FAS SHADOW (no-op unless enabled+shadow): run the digital-FAS agent on
-        // this same message and record how its draft compares to what we just
-        // sent. Fire-and-forget — never blocks or affects the live reply.
-        try {
-          _fasShadow.runShadow({
-            engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
-            ts: msg.ts, text: msg.text, isGroup: !!dm.isGroup, conversation: historyMsgs,
-            actualReply: draft.reply,
-          });
-        } catch (_) { /* shadow must never break the live path */ }
+        // NOTE: The Digital FAS agent already ran via _fasRunner.handleInbound()
+        // ABOVE (before the send) — that call records the shadow comparison in
+        // shadow mode and routes reply/actions in approval/autonomous mode. We
+        // no longer call _fasShadow.runShadow() here to avoid running the agent
+        // twice on the same message. (_fasShadow retained for compatibility.)
 
         if (!draft.inScope) {
           escalatedCount++;
