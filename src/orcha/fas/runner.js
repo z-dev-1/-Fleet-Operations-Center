@@ -284,18 +284,56 @@ function _dedupeFacts(existing, incoming) {
   return out;
 }
 function _extractPromise(reply) {
-  // A promise is a first-person commitment ("I'll…", "I will…", "let me…",
-  // "we'll get…"). Compact — used for follow-up tracking, deduped by text.
+  // A promise is a genuine FIRST-PERSON COMMITMENT to do something:
+  // "I'll…", "I will…", "we'll…", "we will…", "let me…", "I'm going to…",
+  // or an explicit deadline ("by EOD", "within 2 hours"). Deliberately EXCLUDES
+  // soft/capability phrasing like "I can" / "I could" / "I'd be happy to",
+  // which are NOT commitments (Part 7). Compact; deduped by text.
   const t = String(reply || '');
-  const m = t.match(/\b(i'?ll|i will|we'?ll|we will|let me|i'?m going to|i can|i'?ll get|by (?:today|tomorrow|eod|end of day)|within \d+\s*(?:hr|hour|day)s?)\b[^.!?\n]*/i);
-  return m ? m[0].trim().slice(0, 160) : null;
+  const m = t.match(/\b(i'?ll\b|i will\b|we'?ll\b|we will\b|let me\b|i'?m going to\b|by (?:today|tomorrow|eod|end of day|end of week)\b|within \d+\s*(?:hr|hour|day|business day)s?\b)[^.!?\n]*/i);
+  if (!m) return null;
+  // Guard: "I can" / "I could" alone must not slip through via a following word.
+  const frag = m[0].trim();
+  if (/^i\s+(can|could|may|might|would)\b/i.test(frag) && !/\bwill\b|\bi'?ll\b/i.test(frag)) return null;
+  return frag.slice(0, 160);
+}
+// Next business day at 09:00 in the configured timezone (weekends skipped).
+// Falls back to +1 calendar day if timezone math is unavailable.
+function _nextBusinessDueAt() {
+  try {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    // Skip Sat(6)/Sun(0).
+    while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+    d.setHours(9, 0, 0, 0);
+    return d.toISOString();
+  } catch (_) {
+    return new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+  }
+}
+// Validate an AI-provided dueAt as a real, future-ish date. Returns an ISO
+// string or null (never a bogus "+24h business-ish" guess).
+function _validateDueAt(dueAt) {
+  if (!dueAt) return null;
+  const ms = Date.parse(dueAt);
+  if (isNaN(ms)) return null;
+  // Reject absurd dates (before 2020 or > 2 years out) — likely a hallucination.
+  const y = new Date(ms).getFullYear();
+  if (y < 2020 || y > new Date().getFullYear() + 2) return null;
+  return new Date(ms).toISOString();
 }
 function _followUpFromDecision(decision) {
   const fu = decision && decision.followUp;
-  if (fu && fu.required && fu.dueAt) return { owner: fu.owner || '', dueAt: fu.dueAt };
-  // If the reply promises action but no explicit dueAt, default to +1 business-ish day.
+  if (fu && fu.required) {
+    const valid = _validateDueAt(fu.dueAt);
+    if (valid) return { owner: fu.owner || '', dueAt: valid };
+    // required but no/invalid date -> schedule for next business day.
+    return { owner: (fu && fu.owner) || '', dueAt: _nextBusinessDueAt() };
+  }
+  // If the reply makes a real commitment but gives no explicit dueAt, schedule
+  // the follow-up for the next business day (not a naive +24h).
   if (_extractPromise(decision && decision.reply)) {
-    return { owner: '', dueAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString() };
+    return { owner: '', dueAt: _nextBusinessDueAt() };
   }
   return null;
 }
@@ -312,6 +350,12 @@ function _updateCaseFromInteraction(input, decision, outcome) {
     const promises = (promiseText && !priorPromises.has(promiseText))
       ? [{ text: promiseText, madeAt: new Date().toISOString(), owner: '', dueAt: null }] : [];
     const fu = _followUpFromDecision(decision);
+    // Connect completed/failed action outcomes to the case (Part 7).
+    const outcomes = Array.isArray(decision && decision._actionOutcomes) ? decision._actionOutcomes : [];
+    const completedActions = outcomes.filter(o => o && (o.status === 'done' || o.outcome === 'done'))
+      .map(o => ({ tool: o.tool, at: new Date().toISOString() }));
+    const failedActions = outcomes.filter(o => o && (o.status === 'error' || o.status === 'unverified' || o.outcome === 'error'))
+      .map(o => ({ tool: o.tool, status: o.status || o.outcome, at: new Date().toISOString() }));
     const patch = {
       unit,
       currentSummary: (decision && decision.reply) ? String(decision.reply).slice(0, 500) : (existing && existing.currentSummary) || '',
@@ -319,6 +363,8 @@ function _updateCaseFromInteraction(input, decision, outcome) {
       verifiedFacts: _dedupeFacts(existing && existing.verifiedFacts, (ev && ev.verifiedFacts) || []),
       openQuestions: decision && decision.decision === 'clarify' && decision.reply ? [decision.reply.slice(0, 160)] : [],
       promises,
+      completedActions,
+      failedActions,
       responsibleParty: (decision && decision.followUp && decision.followUp.owner) || (existing && existing.responsibleParty) || '',
       nextFollowUpAt: fu ? fu.dueAt : (existing && existing.nextFollowUpAt) || null,
       relatedSlackMessages: input.channelId && input.ts ? [{ channelId: input.channelId, ts: input.ts }] : [],
@@ -413,4 +459,4 @@ function getReplyQueue(status) {
   return _loadQueue().filter(x => x.kind === 'reply' && (!status || x.status === status));
 }
 
-module.exports = { handleInbound, approveReply, rejectReply, getReplyQueue, _divergence, _hasApprovalLevelAction, AUTO_SEND_MIN_CONFIDENCE };
+module.exports = { handleInbound, approveReply, rejectReply, getReplyQueue, _divergence, _hasApprovalLevelAction, _extractPromise, _validateDueAt, _nextBusinessDueAt, AUTO_SEND_MIN_CONFIDENCE };

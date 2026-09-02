@@ -74,7 +74,15 @@ function upsert(caseId, patch, unit) {
   if (patch.responsibleParty != null) c.responsibleParty = patch.responsibleParty;
   if (patch.nextFollowUpAt !== undefined) c.nextFollowUpAt = patch.nextFollowUpAt;
   if (patch.unit && !c.unit) c.unit = patch.unit;
-  c.verifiedFacts = appendCap(c.verifiedFacts, patch.verifiedFacts, 40);
+  // verifiedFacts: NEWER facts SUPERSEDE older ones for the same field (Part 7)
+  // — don't accumulate conflicting permanent values. Incoming facts replace any
+  // existing fact with the same `field`; other fields are preserved.
+  if (patch.verifiedFacts && patch.verifiedFacts.length) {
+    const incoming = Array.isArray(patch.verifiedFacts) ? patch.verifiedFacts : [patch.verifiedFacts];
+    const incomingFields = new Set(incoming.map(f => f && f.field).filter(Boolean));
+    const kept = (c.verifiedFacts || []).filter(f => !(f && f.field && incomingFields.has(f.field)));
+    c.verifiedFacts = kept.concat(incoming).slice(-40);
+  }
   c.openQuestions = appendCap(c.openQuestions, patch.openQuestions, 20);
   c.promises = appendCap(c.promises, patch.promises, 30);
   c.completedActions = appendCap(c.completedActions, patch.completedActions, 40);
