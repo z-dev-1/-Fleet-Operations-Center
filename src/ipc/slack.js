@@ -403,6 +403,18 @@ function registerSlackIPC(ctx) {
     const scheduler = require('../orcha/fas/scheduler');
     return scheduler.getDueFollowUps();
   });
+  handle('fas:snooze-followup', async (_e, data) => {
+    if (!data || !data.caseId || !data.until) throw new Error('caseId and until required');
+    return require('../orcha/fas/scheduler').snooze(data.caseId, data.until);
+  });
+  handle('fas:complete-followup', async (_e, data) => {
+    if (!data || !data.caseId) throw new Error('caseId required');
+    return require('../orcha/fas/scheduler').complete(data.caseId, data.note || '');
+  });
+  handle('fas:dismiss-followup', async (_e, caseId) => {
+    if (!caseId) throw new Error('caseId required');
+    return require('../orcha/fas/scheduler').dismiss(caseId);
+  });
 
   // ── FAS automatic-action catalog (Part 12) ────────────────────────────────
   // Every action + risk level + description + whether it can be automatic.

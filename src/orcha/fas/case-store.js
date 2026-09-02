@@ -102,4 +102,53 @@ function dueFollowUps(whenISO) {
   return Object.values(all).filter(c => c.status === 'open' && c.nextFollowUpAt && c.nextFollowUpAt <= cutoff);
 }
 
-module.exports = { getCase, findRelated, upsert, caseIdForUnit, caseIdForSender, dueFollowUps };
+/** Mark that a due follow-up was surfaced now (anti-spam: controls resurface). */
+function markSurfaced(caseId, atISO) {
+  const all = _load();
+  const c = all[caseId];
+  if (!c) return null;
+  c.lastSurfacedAt = atISO || now();
+  c.updatedAt = now();
+  _save(all);
+  return c;
+}
+
+/** Snooze a follow-up until `untilISO` (keeps the case open). */
+function snoozeFollowUp(caseId, untilISO) {
+  const all = _load();
+  const c = all[caseId];
+  if (!c) return { ok: false, error: 'case not found' };
+  const ms = Date.parse(untilISO);
+  if (isNaN(ms)) return { ok: false, error: 'invalid snooze date' };
+  c.nextFollowUpAt = new Date(ms).toISOString();
+  c.lastSurfacedAt = null; // allow it to resurface when the new time comes
+  c.updatedAt = now();
+  _save(all);
+  return { ok: true, case: c };
+}
+
+/** Complete a follow-up: clears the due time and records completion. */
+function completeFollowUp(caseId, note) {
+  const all = _load();
+  const c = all[caseId];
+  if (!c) return { ok: false, error: 'case not found' };
+  c.nextFollowUpAt = null;
+  c.completedActions = (c.completedActions || []).concat([{ tool: 'FOLLOW_UP', note: String(note || '').slice(0, 300), at: now() }]).slice(-40);
+  c.updatedAt = now();
+  _save(all);
+  return { ok: true, case: c };
+}
+
+/** Dismiss a follow-up: clears the due time WITHOUT recording completion. */
+function dismissFollowUp(caseId) {
+  const all = _load();
+  const c = all[caseId];
+  if (!c) return { ok: false, error: 'case not found' };
+  c.nextFollowUpAt = null;
+  c.updatedAt = now();
+  _save(all);
+  return { ok: true, case: c };
+}
+
+module.exports = { getCase, findRelated, upsert, caseIdForUnit, caseIdForSender, dueFollowUps,
+  markSurfaced, snoozeFollowUp, completeFollowUp, dismissFollowUp };

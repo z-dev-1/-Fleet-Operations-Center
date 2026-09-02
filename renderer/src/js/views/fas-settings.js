@@ -87,6 +87,54 @@ async function _refreshAudit() {
   }
 }
 
+async function _refreshFollowUps() {
+  const list = document.getElementById('fas-followup-list');
+  if (!list) return;
+  try {
+    const rows = await slackBridge.fasGetDueFollowups();
+    if (!rows || !rows.length) { list.innerHTML = '<div class="sd-hint">No follow-ups due.</div>'; return; }
+    list.innerHTML = rows.map((r) => {
+      const when = (() => { try { return new Date(r.dueAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (_) { return r.dueAt || ''; } })();
+      const openBtn = (r.slackRef && r.slackRef.channelId)
+        ? '<button class="sd-btn secondary fas-fu-open" data-ch="' + _esc(r.slackRef.channelId) + '" data-ts="' + _esc(r.slackRef.ts || '') + '">Open Slack</button>' : '';
+      return '<div style="border:1px solid var(--bd,#333);border-radius:8px;padding:8px" data-cid="' + _esc(r.caseId) + '">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
+          '<span style="font-size:11px;font-weight:700">' + _esc(r.unit || r.caseId) + (r.owner ? (' \u00b7 ' + _esc(r.owner)) : '') + '</span>' +
+          '<span style="font-size:9px;opacity:.7">due ' + _esc(when) + '</span>' +
+        '</div>' +
+        (r.sourcePromise ? '<div class="sd-hint" style="margin:3px 0"><strong>Promise:</strong> ' + _esc(r.sourcePromise) + '</div>' : '') +
+        (r.summary ? '<div class="sd-hint" style="opacity:.8">' + _esc(String(r.summary).slice(0, 200)) + '</div>' : '') +
+        '<div class="sd-btn-row" style="margin-top:6px">' +
+          '<button class="sd-btn primary fas-fu-complete" data-cid="' + _esc(r.caseId) + '">Complete</button>' +
+          '<button class="sd-btn secondary fas-fu-snooze" data-cid="' + _esc(r.caseId) + '">Snooze 1 day</button>' +
+          '<button class="sd-btn secondary fas-fu-dismiss" data-cid="' + _esc(r.caseId) + '">Dismiss</button>' +
+          openBtn +
+        '</div>' +
+      '</div>';
+    }).join('');
+    const refresh = () => _refreshFollowUps();
+    list.querySelectorAll('.fas-fu-complete').forEach(b => b.addEventListener('click', async () => {
+      try { await slackBridge.fasCompleteFollowup({ caseId: b.getAttribute('data-cid') }); toast.show('success', 'Follow-up completed', 1500); } catch (e) { toast.show('error', e.message, 3000); }
+      refresh();
+    }));
+    list.querySelectorAll('.fas-fu-snooze').forEach(b => b.addEventListener('click', async () => {
+      const until = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+      try { await slackBridge.fasSnoozeFollowup({ caseId: b.getAttribute('data-cid'), until }); toast.show('success', 'Snoozed 1 day', 1500); } catch (e) { toast.show('error', e.message, 3000); }
+      refresh();
+    }));
+    list.querySelectorAll('.fas-fu-dismiss').forEach(b => b.addEventListener('click', async () => {
+      try { await slackBridge.fasDismissFollowup(b.getAttribute('data-cid')); toast.show('info', 'Dismissed', 1500); } catch (e) { toast.show('error', e.message, 3000); }
+      refresh();
+    }));
+    list.querySelectorAll('.fas-fu-open').forEach(b => b.addEventListener('click', () => {
+      const ch = b.getAttribute('data-ch');
+      if (ch && window.files && window.files.openExternal) window.files.openExternal('slack://channel?id=' + ch);
+    }));
+  } catch (e) {
+    list.innerHTML = '<div class="sd-hint" style="color:var(--err,#c0392b)">Failed to load: ' + _esc(e.message) + '</div>';
+  }
+}
+
 async function _refreshAutoActions() {
   const list = document.getElementById('fas-autoaction-list');
   if (!list) return;
@@ -327,7 +375,7 @@ export function initFasSettings() {
   const saveBtn = document.getElementById('fas-save');
   const refreshBtn = document.getElementById('fas-refresh-audit');
   if (saveBtn) saveBtn.addEventListener('click', _saveConfig);
-  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshAudit(); _refreshReplyApprovals(); _refreshApprovals(); _refreshAutoActions(); _refreshDrafts(); _refreshProfiles(); });
+  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshAudit(); _refreshReplyApprovals(); _refreshFollowUps(); _refreshApprovals(); _refreshAutoActions(); _refreshDrafts(); _refreshProfiles(); });
   const profLoad = document.getElementById('fas-prof-load');
   if (profLoad) profLoad.addEventListener('click', _loadProfile);
   const autoReset = document.getElementById('fas-autoaction-reset');
@@ -339,6 +387,7 @@ export function initFasSettings() {
   _loadConfig();
   _refreshAudit();
   _refreshReplyApprovals();
+  _refreshFollowUps();
   _refreshApprovals();
   _refreshAutoActions();
   _refreshProfiles();

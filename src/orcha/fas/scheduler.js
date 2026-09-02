@@ -22,7 +22,20 @@ let _timer = null;
  *   openQuestions, promises }]
  * Compact, ready for the UI or a briefing. Sorted soonest-due first.
  */
+// Minimum gap between re-surfacing the SAME due follow-up (anti-spam).
+const RESURFACE_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
+
+// Is follow-up tracking active? Only when FAS is enabled, OR the operator has
+// explicitly turned on independent follow-up tracking (config.followUpTracking).
+function _trackingActive() {
+  try {
+    const cfg = require('./config').get();
+    return !!(cfg && (cfg.enabled || cfg.followUpTracking));
+  } catch (_) { return false; }
+}
+
 function getDueFollowUps(whenISO) {
+  if (!_trackingActive()) return [];
   const due = caseStore.dueFollowUps(whenISO);
   return due
     .map(c => ({
@@ -31,29 +44,48 @@ function getDueFollowUps(whenISO) {
       summary: c.currentSummary || '',
       owner: c.responsibleParty || '',
       dueAt: c.nextFollowUpAt,
+      lastSurfacedAt: c.lastSurfacedAt || null,
       openQuestions: (c.openQuestions || []).slice(-3),
+      // The promise that drove this follow-up (most recent), for the UI.
+      sourcePromise: ((c.promises || []).slice(-1)[0] || {}).text || null,
       promises: (c.promises || []).slice(-3).map(p => p.text || p),
+      // Link to the originating Slack conversation, if any.
+      slackRef: (c.relatedSlackMessages || []).slice(-1)[0] || null,
     }))
     .sort((a, b) => String(a.dueAt).localeCompare(String(b.dueAt)));
 }
 
-// Record the current due list to the audit log so it's visible/traceable.
-// Never sends anything. Returns the due list.
+// Surface due follow-ups to the audit log — but ONLY those not surfaced within
+// the resurface interval, and mark each as surfaced so it does NOT re-log every
+// cycle (fixes the every-15-min audit-spam). Never contacts anyone.
 function surfaceDueFollowUps() {
+  if (!_trackingActive()) return [];
   const due = getDueFollowUps();
-  if (due.length) {
+  const nowMs = Date.now();
+  const fresh = due.filter(d => {
+    const last = d.lastSurfacedAt ? Date.parse(d.lastSurfacedAt) : 0;
+    return isNaN(last) || (nowMs - last) >= RESURFACE_INTERVAL_MS;
+  });
+  if (fresh.length) {
     try {
       const log = store.load('fasAuditLog', []);
       const arr = Array.isArray(log) ? log : [];
-      arr.unshift({ at: new Date().toISOString(), kind: 'followups-due', count: due.length,
-        items: due.map(d => ({ caseId: d.caseId, unit: d.unit, dueAt: d.dueAt })) });
+      arr.unshift({ at: new Date().toISOString(), kind: 'followups-due', count: fresh.length,
+        items: fresh.map(d => ({ caseId: d.caseId, unit: d.unit, dueAt: d.dueAt })) });
       if (arr.length > 500) arr.length = 500;
       store.save('fasAuditLog', arr);
     } catch (e) { logger.warn('[fas-scheduler] audit write failed: ' + e.message); }
-    logger.info('[fas-scheduler] ' + due.length + ' follow-up(s) due (surfaced, not contacted)');
+    // Mark surfaced so the next cycle does not re-log the same items.
+    fresh.forEach(d => { try { caseStore.markSurfaced(d.caseId); } catch (_) {} });
+    logger.info('[fas-scheduler] ' + fresh.length + ' new follow-up(s) surfaced (not contacted)');
   }
-  return due;
+  return fresh;
 }
+
+// Operator actions (never contact anyone; just adjust the case).
+function snooze(caseId, untilISO) { return caseStore.snoozeFollowUp(caseId, untilISO); }
+function complete(caseId, note) { return caseStore.completeFollowUp(caseId, note); }
+function dismiss(caseId) { return caseStore.dismissFollowUp(caseId); }
 
 /**
  * startScheduler(intervalMs?) — begin periodically surfacing due follow-ups.
@@ -72,4 +104,4 @@ function stopScheduler() {
   if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { getDueFollowUps, surfaceDueFollowUps, startScheduler, stopScheduler };
+module.exports = { getDueFollowUps, surfaceDueFollowUps, snooze, complete, dismiss, startScheduler, stopScheduler, RESURFACE_INTERVAL_MS };
