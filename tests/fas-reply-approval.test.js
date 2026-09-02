@@ -53,10 +53,10 @@ describe('FAS reply approval (approval mode)', () => {
     expect(sent[0].channelId).toBe('C1');
     expect(sent[0].text).toMatch(/<@U_INT>.*320160 is active/);
 
-    // Queue item now resolved with real send evidence.
+    // Transaction reached 'sent' state with real send evidence.
     const after = runner.getReplyQueue();
-    expect(after[0].status).toBe('approved-sent');
-    expect(after[0].sentTs).toBe('999.9');
+    expect(after[0].status).toBe('sent');
+    expect(after[0].sentEvidence.ts).toBe('999.9');
   });
 
   it('REJECT sends nothing and marks the item rejected', async () => {
@@ -77,7 +77,28 @@ describe('FAS reply approval (approval mode)', () => {
     const q = runner.getReplyQueue('pending');
     const res = await runner.approveReply(q[0].id, null, { sendToChannel: async () => ({}) });
     expect(res.ok).toBe(false);
-    // still pending — not falsely marked sent
-    expect(runner.getReplyQueue('pending').length).toBe(1);
+    // NOT falsely marked sent — the transaction is 'failed', not 'sent'.
+    expect(runner.getReplyQueue('sent').length).toBe(0);
+    expect(runner.getReplyQueue('failed').length).toBe(1);
+  });
+
+  it('PART 3: verify-before-send — a linked action that fails prevents the success reply', async () => {
+    seed('approval');
+    // Reply proposes a low-risk action; the executor will FAIL it (unit not in
+    // scope for the queued action here — but simpler: mock executor via a
+    // non-existent unit so ADD_TIMELINE proceeds; instead force failure by
+    // using MOVE_UNIT which requires internal + real read-back -> verifying).
+    vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'act', confidence: 0.95, reason: 'move it',
+      research: [], actions: [{ tool: 'MOVE_UNIT', args: { unit: '320160', state: 'Active', assetUrl: 'https://aap-na.corp.amazon.com/v2/asset/x' } }],
+      reply: '320160 has been moved to Active.' }));
+    const out = await runner.handleInbound(inbound());
+    expect(out.outcome).toBe('queued'); // approval-level action -> queued
+    const q = runner.getReplyQueue('pending');
+    const sent = [];
+    const res = await runner.approveReply(q[0].id, null, { sendToChannel: async (c, t) => { sent.push(t); return { ts: '1.1' }; } });
+    // MOVE_UNIT can't verify in the test env (no electron read-back) -> verifying, not done
+    expect(res.ok).toBe(false);
+    expect(sent.length).toBe(0); // the "has been moved" reply was NOT sent
+    expect(runner.getReplyQueue('failed').length).toBe(1);
   });
 });

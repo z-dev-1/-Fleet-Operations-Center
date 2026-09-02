@@ -90,20 +90,12 @@ async function handleInbound(input) {
       slackId: input.slackId, senderName: input.senderName,
       text: input.text, conversation: input.conversation || [], isGroup: !!input.isGroup,
     });
-
-    // Route proposed actions through the executor (it re-enforces mode + auth;
-    // shadow records only, approval queues, autonomous runs whitelisted low-risk).
-    if (Array.isArray(decision.actions) && decision.actions.length) {
-      const executor = require('./executor');
-      const profile = require('./sender-profiles').resolveSender(input.slackId, input.senderName);
-      for (const a of decision.actions.slice(0, 6)) {
-        if (!a || !a.tool) continue;
-        try {
-          const r = await executor.routeAction(a.tool, { ...(a.args || {}), slackId: input.slackId }, { profile });
-          actionOutcomes.push({ tool: a.tool, outcome: r.outcome, detail: r.detail });
-        } catch (e) { actionOutcomes.push({ tool: a.tool, outcome: 'error', detail: e.message }); }
-      }
-    }
+    // PART 3: DO NOT route or execute actions here. Proposed actions are
+    // carried on the decision and become part of the SINGLE reply+action
+    // transaction, executed only AFTER the final confidence/evidence/scope/mode
+    // gate below (on autonomous auto-send, or when the operator approves the
+    // reply). Executing before the gate would let unverified/low-confidence or
+    // out-of-scope proposals run.
   } catch (e) {
     // FAIL SAFE: never drop a message. In shadow just log; in primary modes,
     // fall back to letting the legacy engine reply this cycle.
@@ -189,10 +181,22 @@ async function handleInbound(input) {
     !staleEvidence;
 
   if (canAutoSend) {
-    const audit = { ...base, outcome: 'auto-sent' };
+    // PART 3: reply + its (low-risk) actions are ONE transaction. Execute the
+    // linked actions FIRST and verify them; only auto-send the reply if they
+    // all succeed. If any action fails/does not verify, do NOT auto-send a
+    // success reply — queue for review with the truthful outcome.
+    const execRes = await _executeLinkedActions(input, decision);
+    decision._actionOutcomes = execRes.outcomes;
+    if (!execRes.ok) {
+      const item = _queueReply(input, decision, { failReason: 'a proposed action failed/did not verify', actionOutcomes: execRes.outcomes });
+      const audit = { ...base, outcome: 'action-failed-queued', approvalId: item.id, actionOutcomes: execRes.outcomes };
+      _appendAudit(audit);
+      return { mode, letLegacyReply: false, decision, outcome: 'queued', approvalId: item.id, actionOutcomes: execRes.outcomes, audit };
+    }
+    const audit = { ...base, outcome: 'auto-sent', actionOutcomes: execRes.outcomes };
     _appendAudit(audit);
     _updateCaseFromInteraction(input, decision, 'auto-sent');
-    return { mode, letLegacyReply: false, fasReply: decision.reply, decision, outcome: 'auto-sent', actionOutcomes, audit };
+    return { mode, letLegacyReply: false, fasReply: decision.reply, decision, outcome: 'auto-sent', actionOutcomes: execRes.outcomes, audit };
   }
 
   const item = _queueReply(input, decision);
@@ -207,10 +211,35 @@ async function handleInbound(input) {
   return { mode, letLegacyReply: false, decision, outcome: 'queued', approvalId: item.id, actionOutcomes, audit };
 }
 
-// Queue a proposed REPLY (distinct from action queue) so the approval UI can
-// show the original request, proposed reply, evidence, sender, reason, etc.
+// Execute a decision's proposed actions through the VERIFIED executor as part
+// of one transaction. Returns { ok, outcomes } — ok is false if any action did
+// not reach a 'done' (or idempotent-done) state, so the caller can avoid
+// sending a success reply for an action that failed/did not verify (Part 3).
+async function _executeLinkedActions(input, decision, approverProfile) {
+  const outcomes = [];
+  const list = Array.isArray(decision.actions) ? decision.actions.slice(0, 6) : [];
+  if (!list.length) return { ok: true, outcomes };
+  let executor; try { executor = require('./executor'); } catch (_) { return { ok: false, outcomes: [{ error: 'executor unavailable' }] }; }
+  const profile = approverProfile || require('./sender-profiles').resolveSender(input.slackId, input.senderName);
+  let allOk = true;
+  for (const a of list) {
+    if (!a || !a.tool) continue;
+    try {
+      const r = await executor.executeVerified(a.tool, { ...(a.args || {}), slackId: input.slackId }, { profile });
+      outcomes.push({ tool: a.tool, status: r.status, error: r.error });
+      // A linked action counts as OK only if done (verified) or idempotent-done.
+      if (!(r.status === 'done' || (r.idempotent && r.status === 'done'))) allOk = false;
+    } catch (e) { outcomes.push({ tool: a.tool, status: 'error', error: e.message }); allOk = false; }
+  }
+  return { ok: allOk, outcomes };
+}
+
+// Queue a proposed REPLY as a SINGLE transaction that also carries its proposed
+// actions, evidence, sender+permission snapshot, confidence, and state. The
+// linked actions are executed only when this transaction is approved (or, in
+// autonomous, alongside the auto-send) — never as a separate independent queue.
 const REPLY_QUEUE_CAP = 300;
-function _queueReply(input, decision) {
+function _queueReply(input, decision, extra) {
   const q = store.load('fasApprovalQueue', []);
   const arr = Array.isArray(q) ? q : [];
   const item = {
@@ -238,6 +267,19 @@ function _queueReply(input, decision) {
       conflicts: (decision._evidence && decision._evidence.conflicts) || [],
     },
     targetUnit: (decision._evidence && decision._evidence.entities && (decision._evidence.entities.units || [])[0]) || null,
+    // Permission snapshot at proposal time (Part 3/11).
+    permissionSnapshot: (() => {
+      try { const p = require('./sender-profiles').resolveSender(input.slackId, input.senderName);
+        return { slackId: p.slackId, type: p.type, operators: (p.operators || []).slice(), domiciles: (p.domiciles || []).slice() }; }
+      catch (_) { return null; }
+    })(),
+    // Risk classification: does this transaction include a mutating action?
+    riskClass: _hasApprovalLevelAction(decision) ? 'mutating' : ((decision.actions || []).length ? 'low-risk-action' : 'reply-only'),
+    // State-machine + linked-transaction bookkeeping.
+    claimedBy: null,
+    executionResults: [],
+    sentEvidence: null,
+    ...(extra || {}),
   };
   arr.unshift(item);
   if (arr.length > REPLY_QUEUE_CAP) arr.length = REPLY_QUEUE_CAP;
@@ -394,56 +436,101 @@ function _saveQueue(q) { store.save('fasApprovalQueue', q); }
  * deps.sendToChannel is injectable for testing; defaults to the app's Slack
  * send. ctx.profile is the approver (operator) for action authorization.
  */
-async function approveReply(id, ctx, deps) {
+// Atomically CLAIM a pending transaction so two windows / rapid double-clicks
+// can't both approve it. Returns the claimed item or null.
+function _claimTransaction(id) {
   const q = _loadQueue();
   const item = q.find(x => x.id === id && x.kind === 'reply');
-  if (!item) return { ok: false, error: 'reply not found' };
-  if (item.status !== 'pending') return { ok: false, error: 'not pending (' + item.status + ')' };
+  if (!item) return { error: 'reply not found' };
+  if (item.status !== 'pending') return { error: 'not pending (' + item.status + ')' };
+  item.status = 'claimed';
+  item.claimedBy = 'operator';
+  item.claimedAt = new Date().toISOString();
+  _saveQueue(q);
+  return { item };
+}
+function _setTxnStatus(id, status, patch) {
+  const q = _loadQueue();
+  const it = q.find(x => x.id === id);
+  if (it) { it.status = status; Object.assign(it, patch || {}); it.updatedAt = new Date().toISOString(); _saveQueue(q); }
+  return it;
+}
+
+/**
+ * approveReply(id, ctx, deps) — approve ONE linked reply+action transaction.
+ *
+ * PART 3 ordering (verify-before-send): atomic claim -> execute + VERIFY the
+ * linked actions FIRST -> only if they all succeed, send the reply -> record
+ * Slack send evidence -> commit case memory. If any action fails/doesn't
+ * verify, DO NOT send the (success) reply; mark the transaction failed with the
+ * truthful outcome so the operator can send a corrected message.
+ *
+ * deps.sendToChannel is injectable for testing; ctx.profile is the approver.
+ */
+async function approveReply(id, ctx, deps) {
+  // 1) Atomic claim — prevents double approval.
+  const claim = _claimTransaction(id);
+  if (claim.error) return { ok: false, error: claim.error };
+  const item = claim.item;
 
   const sendToChannel = (deps && deps.sendToChannel) ||
     (() => { try { return require('../../scrapers/slack_send').sendToChannel; } catch (_) { return null; } })();
-  if (!sendToChannel) return { ok: false, error: 'send path unavailable' };
+  if (!sendToChannel) { _setTxnStatus(id, 'failed', { failReason: 'send path unavailable' }); return { ok: false, error: 'send path unavailable' }; }
 
-  // 1) Send the proposed reply (tagging the original sender), in-thread if the
-  //    original message was in a thread.
-  const tagged = (item.slackId ? '<@' + item.slackId + '> ' : '') + (item.proposedReply || '');
-  let sendRes;
-  try {
-    sendRes = await sendToChannel(item.channelId, tagged, item.threadTs || undefined);
-  } catch (e) {
-    return { ok: false, error: 'send failed: ' + e.message };
-  }
-  if (!sendRes || !sendRes.ts) return { ok: false, error: 'send returned no ts' };
-
-  // 2) Route the proposed actions through the executor NOW that it's approved.
-  const actionOutcomes = [];
   const approver = (ctx && ctx.profile) || { slackId: 'operator', name: 'Operator', type: 'internal',
     operators: [], domiciles: [], allowedDataCategories: ['*'],
     permittedRequestTypes: ['unit_status', 'repair_update', 'follow_up', 'report', 'process_question', 'lifecycle_change', 'create_wr'] };
+
+  // 2) Execute + VERIFY the linked actions FIRST (before sending the reply).
+  _setTxnStatus(id, 'executing');
+  const actionOutcomes = [];
+  let allActionsOk = true;
   if (Array.isArray(item.proposedActions) && item.proposedActions.length) {
+    _setTxnStatus(id, 'verifying');
     const executor = require('./executor');
     for (const a of item.proposedActions.slice(0, 6)) {
       if (!a || !a.tool) continue;
       try {
         const r = await executor.executeVerified(a.tool, { ...(a.args || {}), slackId: item.slackId }, { profile: approver });
-        actionOutcomes.push({ tool: a.tool, status: r.status });
-      } catch (e) { actionOutcomes.push({ tool: a.tool, status: 'error', error: e.message }); }
+        actionOutcomes.push({ tool: a.tool, status: r.status, error: r.error });
+        if (!(r.status === 'done')) allActionsOk = false;
+      } catch (e) { actionOutcomes.push({ tool: a.tool, status: 'error', error: e.message }); allActionsOk = false; }
     }
   }
 
-  // 3) Mark resolved with real send evidence (ts + channel, no credentials).
-  const q2 = _loadQueue();
-  const it2 = q2.find(x => x.id === id);
-  if (it2) { it2.status = 'approved-sent'; it2.sentTs = sendRes.ts; it2.sentChannel = item.channelId; it2.resolvedAt = new Date().toISOString(); it2.actionOutcomes = actionOutcomes; _saveQueue(q2); }
-  _appendAudit({ at: new Date().toISOString(), kind: 'reply-approved', id, sentTs: sendRes.ts, channel: item.channelId, actionOutcomes });
+  // 3) If any linked action failed/did not verify, DO NOT send the success
+  //    reply. Mark the transaction failed with the truthful outcome.
+  if (!allActionsOk) {
+    _setTxnStatus(id, 'failed', { executionResults: actionOutcomes, failReason: 'a proposed action failed or did not verify — reply not sent' });
+    _appendAudit({ at: new Date().toISOString(), kind: 'reply-action-failed', id, actionOutcomes });
+    return { ok: false, error: 'linked action failed/unverified — success reply NOT sent', actionOutcomes };
+  }
 
-  // 4) NOW that Slack confirmed the send, commit case memory (Part 7): the
-  //    reply was actually sent, so its promise becomes real. Reconstruct a
-  //    minimal decision from the stored queue item.
+  // 4) Actions verified (or none) — now send the reply.
+  const tagged = (item.slackId ? '<@' + item.slackId + '> ' : '') + (item.proposedReply || '');
+  let sendRes;
+  try {
+    sendRes = await sendToChannel(item.channelId, tagged, item.threadTs || undefined);
+  } catch (e) {
+    _setTxnStatus(id, 'failed', { executionResults: actionOutcomes, failReason: 'send failed: ' + e.message });
+    return { ok: false, error: 'send failed: ' + e.message, actionOutcomes };
+  }
+  if (!sendRes || !sendRes.ts) {
+    _setTxnStatus(id, 'failed', { executionResults: actionOutcomes, failReason: 'send returned no ts' });
+    return { ok: false, error: 'send returned no ts', actionOutcomes };
+  }
+
+  // 5) Record final sent evidence + resolve the transaction.
+  _setTxnStatus(id, 'sent', { sentEvidence: { ts: sendRes.ts, channel: item.channelId, at: new Date().toISOString() },
+    executionResults: actionOutcomes, resolvedAt: new Date().toISOString() });
+  _appendAudit({ at: new Date().toISOString(), kind: 'reply-approved-sent', id, sentTs: sendRes.ts, channel: item.channelId, actionOutcomes });
+
+  // 6) Commit case memory only AFTER Slack confirmed the send (Part 7).
   try {
     _updateCaseFromInteraction(
       { slackId: item.slackId, channelId: item.channelId, ts: item.ts },
       { decision: item.decision, reply: item.proposedReply, followUp: item.followUp,
+        _actionOutcomes: actionOutcomes,
         _evidence: { verifiedFacts: (item.evidence && item.evidence.verifiedFacts) || [],
           sources: (item.evidence && item.evidence.sources) || [],
           entities: { units: item.targetUnit ? [item.targetUnit] : [] } } },
