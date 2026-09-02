@@ -15,6 +15,8 @@ const tools = require('./tool-registry');
 const profiles = require('./sender-profiles');
 const caseStore = require('./case-store');
 const store = require('../../store');
+const guard = require('./injection-guard');
+let linkResearch; try { linkResearch = require('./link-research'); } catch (_) { linkResearch = null; }
 
 let _resolveEntities;
 try { _resolveEntities = require('../ai-context').resolveEntities; } catch (_) { _resolveEntities = null; }
@@ -104,6 +106,19 @@ async function buildEvidence({ profile, text, question, factsNeeded }) {
 
   if (stale) missingFacts.push('fleet data is stale (last sync ' + (syncedAt || 'unknown') + ') — may need SYNC_FLEET before acting');
 
+  // Prompt-injection scan on the incoming message (untrusted).
+  const injection = guard.detectInjection(text || question || '');
+
+  // Approved-link research: fetch ONLY allowlisted domains, treat as untrusted.
+  const linkRefusals = [];
+  if (linkResearch) {
+    try {
+      const lr = await linkResearch.researchLinks(text || question || '');
+      (lr.evidence || []).forEach(f => { verifiedFacts.push(f); sources.add(f.source); });
+      (lr.refused || []).forEach(r => linkRefusals.push(r));
+    } catch (e) { /* link research is best-effort */ }
+  }
+
   // Prior promises / open questions from case memory (compact).
   const related = caseStore.findRelated({ units: entities.units, slackId: profile.slackId });
   const previousPromises = [];
@@ -118,6 +133,8 @@ async function buildEvidence({ profile, text, question, factsNeeded }) {
     conflicts,
     missingFacts,
     deniedScope: denied,           // entities the sender wasn't authorized to see
+    injection,                     // { suspicious, matches } — untrusted-message scan
+    linkRefusals,                  // links refused by the allowlist (audit)
     dataFreshness: { fleetSyncedAt: syncedAt, stale },
     senderAuthorization: profiles.authorizationSummary(profile),
     previousPromises,
