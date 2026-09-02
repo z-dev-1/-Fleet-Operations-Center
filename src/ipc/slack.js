@@ -378,6 +378,26 @@ function registerSlackIPC(ctx) {
     return executor.rejectQueued(id);
   });
 
+  // ── FAS REPLY approval queue (approval / autonomous-queued Slack replies) ──
+  handle('fas:get-reply-queue', async (_e, status) => {
+    const runner = require('../orcha/fas/runner');
+    return runner.getReplyQueue(status || null);
+  });
+
+  // Approve a queued reply: sends it through the real Slack path + executes its
+  // proposed actions (verified). Rejection does nothing outbound.
+  handle('fas:approve-reply', async (_e, id) => {
+    if (!id) throw new Error('id required');
+    const runner = require('../orcha/fas/runner');
+    return runner.approveReply(id, null);
+  });
+
+  handle('fas:reject-reply', async (_e, id) => {
+    if (!id) throw new Error('id required');
+    const runner = require('../orcha/fas/runner');
+    return runner.rejectReply(id);
+  });
+
   // ── FAS playbook + knowledge drafts (Stage 9) ────────────────────────────
   handle('fas:get-playbook', async () => {
     const pb = require('../orcha/fas/playbook');

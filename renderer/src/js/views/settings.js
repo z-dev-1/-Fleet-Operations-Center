@@ -879,6 +879,10 @@ function _html() {
             <button class="sd-btn secondary" id="fas-refresh-audit">Refresh Shadow Log</button>
           </div>
           <div id="fas-status" class="sd-status" style="display:none;margin-top:8px"></div>
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Replies awaiting approval</div>
+          <div class="sd-hint" style="margin-bottom:6px">Slack replies the FAS agent prepared (Approval/Autonomous mode). Review the request, proposed reply, evidence and reason, then Approve to send it (and run any proposed actions, verified) or Reject to send nothing.</div>
+          <div id="fas-reply-approval-list" style="display:flex;flex-direction:column;gap:8px;max-height:320px;overflow:auto"></div>
+
           <div class="sd-section-title" style="margin-top:14px;font-size:11px">Actions awaiting approval</div>
           <div class="sd-hint" style="margin-bottom:6px">Actions the FAS agent proposed that require your approval. Approving runs the real action and verifies the result before marking it done.</div>
           <div id="fas-approval-list" style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow:auto"></div>

@@ -87,6 +87,62 @@ async function _refreshAudit() {
   }
 }
 
+async function _refreshReplyApprovals() {
+  const list = document.getElementById('fas-reply-approval-list');
+  if (!list) return;
+  try {
+    const rows = await slackBridge.fasGetReplyQueue('pending');
+    if (!rows || !rows.length) {
+      list.innerHTML = '<div class="sd-hint">No replies awaiting approval. (Only Approval/Autonomous modes queue replies.)</div>';
+      return;
+    }
+    list.innerHTML = rows.map((r) => {
+      const facts = (r.evidence && r.evidence.verifiedFacts || []).slice(0, 6)
+        .map(f => '· ' + _esc(f.field) + ': ' + _esc(String(typeof f.value === 'object' ? JSON.stringify(f.value) : f.value).slice(0, 80)) + ' [' + _esc(f.source || '?') + ']').join('<br/>');
+      const missing = (r.evidence && r.evidence.missingFacts || []).length ? ('<div class="sd-hint" style="color:var(--warn,#b8860b)">Missing/stale: ' + _esc((r.evidence.missingFacts).slice(0, 3).join('; ')) + '</div>') : '';
+      const conflicts = (r.evidence && r.evidence.conflicts || []).length ? ('<div class="sd-hint" style="color:var(--err,#c0392b)">Conflicts: ' + _esc((r.evidence.conflicts).map(c => c.type || c.detail || '').join('; ')) + '</div>') : '';
+      const risks = (r.proposedActions || []).length ? ('<div class="sd-hint" style="color:var(--err,#c0392b)">Proposed actions (executed on approval): ' + _esc(r.proposedActions.map(a => a && a.tool).filter(Boolean).join(', ')) + '</div>') : '';
+      const conf = (r.confidence != null) ? (' · conf ' + Math.round(r.confidence * 100) + '%') : '';
+      return '<div style="border:1px solid var(--bd,#333);border-radius:8px;padding:8px" data-id="' + _esc(r.id) + '">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
+          '<span style="font-size:11px;font-weight:700">' + _esc(r.senderName || r.slackId || '') + ' · ' + _esc(r.engine || 'dm') + ' · ' + _esc(r.decision || '') + _esc(conf) + '</span>' +
+          '<span style="font-size:9px;opacity:.6">' + _esc(r.targetUnit || '') + '</span>' +
+        '</div>' +
+        '<div class="sd-hint" style="margin:4px 0"><strong>Request:</strong> ' + _esc((r.request || '').slice(0, 240)) + '</div>' +
+        '<div class="sd-hint" style="margin:2px 0"><strong>Proposed reply:</strong> ' + _esc((r.proposedReply || '').slice(0, 400)) + '</div>' +
+        (r.reason ? '<div class="sd-hint" style="opacity:.75"><strong>Reason:</strong> ' + _esc(r.reason) + '</div>' : '') +
+        (facts ? '<div class="sd-hint" style="margin-top:4px"><strong>Evidence:</strong><br/>' + facts + '</div>' : '') +
+        missing + conflicts + risks +
+        '<div class="sd-btn-row" style="margin-top:6px">' +
+          '<button class="sd-btn primary fas-reply-approve" data-id="' + _esc(r.id) + '">Approve &amp; send</button>' +
+          '<button class="sd-btn secondary fas-reply-reject" data-id="' + _esc(r.id) + '">Reject</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+    list.querySelectorAll('.fas-reply-approve').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-id');
+        btn.disabled = true; btn.textContent = 'Sending…';
+        try {
+          const res = await slackBridge.fasApproveReply(id);
+          if (res && res.ok) toast.show('success', 'Reply sent (ts ' + (res.sent && res.sent.ts) + ')', 2500);
+          else toast.show('error', 'Send failed: ' + ((res && res.error) || 'unknown'), 4000);
+        } catch (e) { toast.show('error', 'Approve failed: ' + e.message, 4000); }
+        _refreshReplyApprovals();
+      });
+    });
+    list.querySelectorAll('.fas-reply-reject').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-id');
+        try { await slackBridge.fasRejectReply(id); toast.show('success', 'Rejected (nothing sent)', 1500); } catch (e) { toast.show('error', e.message, 3000); }
+        _refreshReplyApprovals();
+      });
+    });
+  } catch (e) {
+    list.innerHTML = '<div class="sd-hint" style="color:var(--err,#c0392b)">Failed to load: ' + _esc(e.message) + '</div>';
+  }
+}
+
 async function _refreshApprovals() {
   const list = document.getElementById('fas-approval-list');
   if (!list) return;
@@ -234,11 +290,12 @@ export function initFasSettings() {
   const saveBtn = document.getElementById('fas-save');
   const refreshBtn = document.getElementById('fas-refresh-audit');
   if (saveBtn) saveBtn.addEventListener('click', _saveConfig);
-  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshAudit(); _refreshApprovals(); _refreshDrafts(); _refreshProfiles(); });
+  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshAudit(); _refreshReplyApprovals(); _refreshApprovals(); _refreshDrafts(); _refreshProfiles(); });
   const profLoad = document.getElementById('fas-prof-load');
   if (profLoad) profLoad.addEventListener('click', _loadProfile);
   _loadConfig();
   _refreshAudit();
+  _refreshReplyApprovals();
   _refreshApprovals();
   _refreshProfiles();
   _refreshDrafts();

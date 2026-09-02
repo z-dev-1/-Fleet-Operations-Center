@@ -205,4 +205,76 @@ function _queueReply(input, decision) {
   return item;
 }
 
-module.exports = { handleInbound, _divergence, _hasApprovalLevelAction, AUTO_SEND_MIN_CONFIDENCE };
+// ── Reply-queue approval/rejection (approval + autonomous-queued replies) ────
+function _loadQueue() { const q = store.load('fasApprovalQueue', []); return Array.isArray(q) ? q : []; }
+function _saveQueue(q) { store.save('fasApprovalQueue', q); }
+
+/**
+ * approveReply(id, ctx, deps) -> { ok, sent?, actionOutcomes?, error? }
+ * Sends the proposed reply through the REAL send path and routes the proposed
+ * actions through the executor (they were held until approval). Verifies the
+ * send returned a ts. Marks the queue item resolved. Rejection does nothing.
+ *
+ * deps.sendToChannel is injectable for testing; defaults to the app's Slack
+ * send. ctx.profile is the approver (operator) for action authorization.
+ */
+async function approveReply(id, ctx, deps) {
+  const q = _loadQueue();
+  const item = q.find(x => x.id === id && x.kind === 'reply');
+  if (!item) return { ok: false, error: 'reply not found' };
+  if (item.status !== 'pending') return { ok: false, error: 'not pending (' + item.status + ')' };
+
+  const sendToChannel = (deps && deps.sendToChannel) ||
+    (() => { try { return require('../../scrapers/slack_send').sendToChannel; } catch (_) { return null; } })();
+  if (!sendToChannel) return { ok: false, error: 'send path unavailable' };
+
+  // 1) Send the proposed reply (tagging the original sender), in-thread if the
+  //    original message was in a thread.
+  const tagged = (item.slackId ? '<@' + item.slackId + '> ' : '') + (item.proposedReply || '');
+  let sendRes;
+  try {
+    sendRes = await sendToChannel(item.channelId, tagged, item.threadTs || undefined);
+  } catch (e) {
+    return { ok: false, error: 'send failed: ' + e.message };
+  }
+  if (!sendRes || !sendRes.ts) return { ok: false, error: 'send returned no ts' };
+
+  // 2) Route the proposed actions through the executor NOW that it's approved.
+  const actionOutcomes = [];
+  const approver = (ctx && ctx.profile) || { slackId: 'operator', name: 'Operator', type: 'internal',
+    operators: [], domiciles: [], allowedDataCategories: ['*'],
+    permittedRequestTypes: ['unit_status', 'repair_update', 'follow_up', 'report', 'process_question', 'lifecycle_change', 'create_wr'] };
+  if (Array.isArray(item.proposedActions) && item.proposedActions.length) {
+    const executor = require('./executor');
+    for (const a of item.proposedActions.slice(0, 6)) {
+      if (!a || !a.tool) continue;
+      try {
+        const r = await executor.executeVerified(a.tool, { ...(a.args || {}), slackId: item.slackId }, { profile: approver });
+        actionOutcomes.push({ tool: a.tool, status: r.status });
+      } catch (e) { actionOutcomes.push({ tool: a.tool, status: 'error', error: e.message }); }
+    }
+  }
+
+  // 3) Mark resolved with real send evidence (ts + channel, no credentials).
+  const q2 = _loadQueue();
+  const it2 = q2.find(x => x.id === id);
+  if (it2) { it2.status = 'approved-sent'; it2.sentTs = sendRes.ts; it2.sentChannel = item.channelId; it2.resolvedAt = new Date().toISOString(); it2.actionOutcomes = actionOutcomes; _saveQueue(q2); }
+  _appendAudit({ at: new Date().toISOString(), kind: 'reply-approved', id, sentTs: sendRes.ts, channel: item.channelId, actionOutcomes });
+  return { ok: true, sent: { ts: sendRes.ts, channel: item.channelId }, actionOutcomes };
+}
+
+function rejectReply(id) {
+  const q = _loadQueue();
+  const item = q.find(x => x.id === id && x.kind === 'reply');
+  if (!item) return { ok: false, error: 'reply not found' };
+  item.status = 'rejected'; item.resolvedAt = new Date().toISOString();
+  _saveQueue(q);
+  _appendAudit({ at: new Date().toISOString(), kind: 'reply-rejected', id });
+  return { ok: true };
+}
+
+function getReplyQueue(status) {
+  return _loadQueue().filter(x => x.kind === 'reply' && (!status || x.status === status));
+}
+
+module.exports = { handleInbound, approveReply, rejectReply, getReplyQueue, _divergence, _hasApprovalLevelAction, AUTO_SEND_MIN_CONFIDENCE };
