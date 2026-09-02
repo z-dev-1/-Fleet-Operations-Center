@@ -16,7 +16,7 @@
 const { registerSettingsIPC }    = require('./settings');
 const { registerNotesIPC }       = require('./notes');
 const { registerSlackIPC }       = require('./slack');
-const { registerGraphIPC }       = require('./graph');
+// Microsoft Graph removed (2026-09-02) — email uses SMTP/OWA only.
 const { registerSharePointIPC }  = require('./sharepoint');
 const { registerAsanaIPC }       = require('./asana');
 const { registerAIHandlers }     = require('./ai');
@@ -35,7 +35,6 @@ function registerAllIPC(ctx) {
   registerSettingsIPC(ctx);
   registerNotesIPC();
   registerSlackIPC(ctx);
-  registerGraphIPC();
   registerSharePointIPC(ctx);
   registerAsanaIPC();
   registerAIHandlers(ctx);

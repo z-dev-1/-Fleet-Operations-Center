@@ -435,13 +435,7 @@ export const asana = {
   linkUnit:       (unitId, taskId)   => window.asana.linkUnit(unitId, taskId),
 };
 
-// -- Microsoft Graph mail (2026-07-21) -- see src/graph/client.js
-export const graphMail = {
-  checkAuth: ()     => window.graphMail.checkAuth(),
-  signIn:    ()     => window.graphMail.signIn(),
-  signOut:   ()     => window.graphMail.signOut(),
-  send:      (data) => window.graphMail.send(data),
-};
+// Microsoft Graph mail was removed (2026-09-02). Email uses SMTP/OWA only.
 
 // ── Vendor (Dealer Work Order Engine) ──
 export { vendor, getPortalUrl } from './vendor-bridge.js';

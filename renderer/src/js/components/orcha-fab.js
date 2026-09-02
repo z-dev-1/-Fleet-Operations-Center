@@ -521,85 +521,14 @@ async function _updateReviewBadge() {
 // ── Calendar tab -- Outlook events via Microsoft Graph ───────────────────────
 // Fetches today's meetings (next 24h), extracts Zoom join links, and renders
 // them with a one-click "Join" button that fires the zoommtg:// deep link.
+// Outlook calendar was powered by Microsoft Graph, which has been removed
+// (2026-09-02) because it does not work in the intended environment. The
+// calendar panel now shows that the feature is unavailable. If a calendar
+// feature is needed later it must be built on the authenticated OWA session.
 async function _refreshCalendar() {
   const listEl = document.getElementById('oc-cal-list');
   if (!listEl) return;
-  listEl.innerHTML = '<div class="oc-cal-loading">Loading\u2026</div>';
-
-  if (!window.graphMail) {
-    listEl.innerHTML = '<div class="oc-cal-empty">Outlook not available.</div>';
-    return;
-  }
-
-  try {
-    const auth = await window.graphMail.checkAuth();
-    if (!auth || !auth.signedIn) {
-      listEl.innerHTML =
-        '<div class="oc-cal-signin">' +
-        '<div class="oc-cal-empty" style="margin-bottom:8px">Not signed in to Outlook.</div>' +
-        '<button class="oc-review-btn oc-review-btn--done" id="oc-cal-signin-btn">Sign in to Outlook</button>' +
-        '</div>';
-      const btn = listEl.querySelector('#oc-cal-signin-btn');
-      if (btn) btn.addEventListener('click', async () => {
-        btn.disabled = true; btn.textContent = 'Signing in\u2026';
-        try {
-          await window.graphMail.signIn();
-          _refreshCalendar();
-        } catch (e) {
-          btn.disabled = false; btn.textContent = 'Sign in to Outlook';
-          listEl.innerHTML = '<div class="oc-cal-empty">Sign-in failed: ' + _escapeHtml(e.message) + '</div>';
-        }
-      });
-      return;
-    }
-
-    const now = new Date();
-    const endTime = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-    const events = await window.graphMail.getCalendarEvents({
-      start: now.toISOString(),
-      end:   endTime.toISOString(),
-      maxResults: 20,
-    });
-
-    if (!events || !events.length) {
-      listEl.innerHTML = '<div class="oc-cal-empty">No meetings in the next 24 hours.</div>';
-      return;
-    }
-
-    listEl.innerHTML = events.map((ev) => {
-      const title = _escapeHtml(ev.subject || '(No title)');
-      const startDt = ev.start && ev.start.dateTime ? new Date(ev.start.dateTime) : null;
-      const timeStr = startDt
-        ? startDt.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', weekday: 'short' })
-        : '';
-      const zoomUrl = _extractZoomUrl(ev);
-      const joinHtml = zoomUrl
-        ? '<button class="oc-cal-join-btn" data-zoom="' + _escapeHtml(zoomUrl) + '">Join Zoom</button>'
-        : '';
-      return (
-        '<div class="oc-cal-event">' +
-        '<div class="oc-cal-event-head">' +
-        '<span class="oc-cal-event-time">' + _escapeHtml(timeStr) + '</span>' +
-        joinHtml +
-        '</div>' +
-        '<div class="oc-cal-event-title">' + title + '</div>' +
-        '</div>'
-      );
-    }).join('');
-
-    listEl.querySelectorAll('.oc-cal-join-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const url = btn.getAttribute('data-zoom');
-        if (url && window.files && window.files.openExternal) {
-          window.files.openExternal(_toZoomDeepLink(url));
-        }
-      });
-    });
-
-  } catch (e) {
-    const el = document.getElementById('oc-cal-list');
-    if (el) el.innerHTML = '<div class="oc-cal-empty">Error: ' + _escapeHtml(e.message) + '</div>';
-  }
+  listEl.innerHTML = '<div class="oc-cal-empty">Calendar is unavailable (Outlook/Graph integration was removed).</div>';
 }
 
 /** Extracts the best Zoom HTTPS join URL from a Graph calendar event. */

@@ -447,7 +447,7 @@ function registerMiscIPC(ctx) {
 
   handle('email:send', async (_e, opts) => {
     // Route to the method the user chose in Settings -> Email -> Send Method.
-    // 'auto' (default) preserves the original cascade: Graph -> SMTP -> OWA.
+    // 'auto' (default) cascade: SMTP -> OWA. (Microsoft Graph was removed.)
     // Any explicit choice goes directly to that method with no silent fallback,
     // so the user knows immediately when something isn't configured right.
     const { sendFleetEmail, loadEmailConfig } = require('../../src/scrapers/email_sender');
@@ -470,31 +470,12 @@ function registerMiscIPC(ctx) {
       owaWin.once('ready-to-show', () => owaWin.show());
     }
 
-    // ── Graph ──────────────────────────────────────────────────────────────
-    if (method === 'graph' || method === 'auto') {
-      try {
-        const graphClient = require('../graph/client');
-        if (await graphClient.isSignedIn()) {
-          logger.info('[Email] Sending via Microsoft Graph...');
-          if (send) send('email:progress', '[Email] Sending via Microsoft Graph...');
-          const result = await graphClient.sendMail({ to: opts.to, cc: opts.cc, bcc: opts.bcc, subject: opts.subject || 'Fleet Status Report', htmlBody: opts.htmlBody });
-          if (send) send('email:progress', '[Email] Sent via Microsoft Graph.');
-          return result;
-        } else if (method === 'graph') {
-          // Explicit — don't fall through, tell the user
-          return { ok: false, error: 'Microsoft Graph: not signed in. Go to Settings -> Outlook (Microsoft Graph) to sign in.' };
-        }
-      } catch (e) {
-        logger.warn('[Email] Graph send failed:', e.message);
-        if (method === 'graph') {
-          return { ok: false, error: 'Microsoft Graph failed: ' + e.message };
-        }
-        if (send) send('email:progress', '[Email] Graph failed (' + e.message + ') -- trying SMTP...');
-      }
-    }
+    // Microsoft Graph was removed (2026-09-02): it does not work in the
+    // intended environment. Email now uses SMTP or the authenticated OWA
+    // browser session only. A legacy 'graph' method value degrades to 'auto'.
 
     // ── SMTP ───────────────────────────────────────────────────────────────
-    if (method === 'smtp' || method === 'auto') {
+    if (method === 'smtp' || method === 'auto' || method === 'graph') {
       const smtpResult = await sendFleetEmail(opts, (msg) => { logger.info(msg); if (send) send('email:progress', msg); });
       if (smtpResult && smtpResult.ok) return smtpResult;
       if (method === 'smtp') {

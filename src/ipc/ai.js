@@ -1057,24 +1057,11 @@ function registerAIHandlers(ctx) {
       return { ok: true, method: 'owa' };
     }
 
-    // ── Graph ──────────────────────────────────────────────────────────────
-    if (method === 'graph' || method === 'auto') {
-      try {
-        const graphClient = require('../graph/client');
-        if (await graphClient.isSignedIn()) {
-          const res = await graphClient.sendMail({ to: data.to, subject: data.subject || 'Message from Fleet Operations Center', htmlBody });
-          if (res.ok) return { ok: true, method: 'graph' };
-        } else if (method === 'graph') {
-          return { ok: false, error: 'Microsoft Graph: not signed in. Go to Settings -> Outlook (Microsoft Graph).' };
-        }
-      } catch (e) {
-        logger.warn('[ai:send-email] Graph failed:', e.message);
-        if (method === 'graph') return { ok: false, error: 'Graph failed: ' + e.message };
-      }
-    }
+    // Microsoft Graph was removed (2026-09-02) — email uses SMTP or OWA only.
+    // A legacy 'graph' method value degrades to the auto (SMTP -> OWA) cascade.
 
     // ── SMTP ───────────────────────────────────────────────────────────────
-    if (method === 'smtp' || (method === 'auto' && (cfg.password || cfg.pass) && (cfg.password || cfg.pass).trim())) {
+    if (method === 'smtp' || ((method === 'auto' || method === 'graph') && (cfg.password || cfg.pass) && (cfg.password || cfg.pass).trim())) {
       const res = await sendFleetEmail({ to: data.to, subject: data.subject || 'Message from Fleet Operations Center', htmlBody });
       if (res.ok) return { ok: true, method: 'smtp' };
       logger.warn('[ai:send-email] SMTP failed (' + res.error + ')' + (method === 'smtp' ? '' : ', falling back to OWA'));

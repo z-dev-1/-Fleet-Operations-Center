@@ -24,7 +24,6 @@ import { slack    as slackBridge }                 from '../bridge.js';
 import { email    as emailBridge }                 from '../bridge.js';
 import { sp       as spBridge }                    from '../bridge.js';
 import { asana    as asanaBridge }                 from '../bridge.js';
-import { graphMail as graphMailBridge }            from '../bridge.js';
 import toast                                       from '../components/toast.js';
 import { setPreset, setTheme, getThemeConfig, resetTheme, PRESETS } from '../nexus-theme.js';
 import { initFasSettings } from './fas-settings.js';
@@ -778,21 +777,8 @@ function _html() {
           </div>
         </div>
 
-        <!-- Outlook (Microsoft Graph) — 2026-07-21. Replaces the need for
-             SMTP (requires VPN) or pasting into OWA's compose editor
-             (strips colors via its own sanitizer -- see src/graph/client.js
-             for the full writeup). Sign in once, like Slack above; stays
-             signed in silently after that via a background token refresh. -->
-        <div class="sd-section" id="sect-graph">
-          <div class="sd-section-title">Outlook (Microsoft Graph)</div>
-          <div class="sd-hint" style="margin-bottom:8px">Sends fleet reports directly via Microsoft Graph -- no VPN needed, and colors/formatting always render correctly (unlike pasting into Outlook Web).</div>
-          <div id="graph-status" class="sd-status warn" style="margin-bottom:8px">Not connected</div>
-          <div class="sd-btn-row">
-            <button class="sd-btn primary"   id="graph-login">Sign in to Outlook</button>
-            <button class="sd-btn secondary" id="graph-recheck">Re-check</button>
-            <button class="sd-btn secondary" id="graph-logout">Sign out</button>
-          </div>
-        </div>
+        <!-- Microsoft Graph / Outlook sign-in was removed (2026-09-02).
+             Email uses SMTP or the authenticated OWA browser session only. -->
 
         <!-- Partner Auto-Reply (AI) -- 2026-07-21. AI reads new messages in
              the configured Slack Connect channels and ALWAYS replies with a
@@ -1613,56 +1599,8 @@ function _wireSlack() {
   });
 }
 
-// -- Section: Microsoft Graph mail (2026-07-21) -- see src/graph/client.js
-// for the full "why" this exists. Mirrors _wireSlack()/_checkSlack() above
-// exactly -- same interactive-sign-in UX pattern, different backend.
-function _checkGraphMail() {
-  graphMailBridge.checkAuth().then((res) => {
-    const el = document.getElementById('graph-status');
-    if (!el) return;
-    if (!res || !res.configured) {
-      el.textContent = '\u26A0\uFE0F Not yet configured (needs a Client ID -- see Settings help)';
-      el.className = 'sd-status warn';
-      return;
-    }
-    const ok = !!res.signedIn;
-    el.textContent = ok ? '\u2705 Connected' : '\u26A0\uFE0F Not connected';
-    el.className = `sd-status ${ok ? 'ok' : 'warn'}`;
-  }).catch(() => {});
-}
-
-function _wireGraphMail() {
-  _checkGraphMail();
-  var recheckBtn = document.getElementById('graph-recheck');
-  var loginBtn = document.getElementById('graph-login');
-  if (recheckBtn) recheckBtn.addEventListener('click', _checkGraphMail);
-  if (loginBtn) loginBtn.addEventListener('click', () => {
-    loginBtn.disabled = true;
-    const originalText = loginBtn.textContent;
-    loginBtn.textContent = 'Signing in\u2026';
-    graphMailBridge.signIn().then((result) => {
-      if (result && result.ok) {
-        toast.show('success', 'Signed in to Outlook (' + (result.account || '') + ')', 3000);
-      } else {
-        toast.show('warn', (result && result.error) || 'Sign-in was not completed', 4000);
-      }
-      _checkGraphMail();
-    }).catch((e) => {
-      toast.show('error', 'Outlook sign-in failed: ' + e.message, 4000);
-    }).finally(() => {
-      loginBtn.disabled = false;
-      loginBtn.textContent = originalText;
-    });
-  });
-
-  var logoutBtn = document.getElementById('graph-logout');
-  if (logoutBtn) logoutBtn.addEventListener('click', () => {
-    graphMailBridge.signOut().then(() => {
-      toast.show('info', 'Signed out of Outlook', 2500);
-      _checkGraphMail();
-    }).catch((e) => toast.show('error', 'Sign-out failed: ' + e.message, 3000));
-  });
-}
+// Microsoft Graph mail section was removed (2026-09-02). Email uses SMTP or
+// the authenticated OWA browser session only; there is no Outlook sign-in UI.
 
 // -- Section: Partner Auto-Reply (AI) (2026-07-21, extended 2026-07-22) --
 // see src/scrapers/slack_channel_watch.js for the full design/safety
@@ -3114,7 +3052,6 @@ export function init() {
   _wireCreds();
   _wireVendorAuth();
   _wireSlack();
-  _wireGraphMail();
   _wirePartnerAutoReply();
   _wireDMAutoReply();
   _wireEmail();

@@ -208,17 +208,9 @@ contextBridge.exposeInMainWorld('slack', {
   fasRejectKnowledgeDraft:(id)     => ipcRenderer.invoke('fas:reject-knowledge-draft', id),
 });
 
-// -- Microsoft Graph mail (2026-07-21) -- see src/graph/client.js for the
-//    full "why": bypasses OWA compose's paste sanitizer entirely, and
-//    doesn't need VPN (unlike SMTP), unlike this app's other two send
-//    paths. Mirrors the Slack block above.
-contextBridge.exposeInMainWorld('graphMail', {
-  checkAuth:         ()      => ipcRenderer.invoke('graph:check-auth'),
-  signIn:            ()      => ipcRenderer.invoke('graph:sign-in'),
-  signOut:           ()      => ipcRenderer.invoke('graph:sign-out'),
-  send:              (data)  => ipcRenderer.invoke('graph:send-mail', data),
-  getCalendarEvents: (opts)  => ipcRenderer.invoke('graph:get-calendar-events', opts),
-});
+// Microsoft Graph mail was removed (2026-09-02) — it does not work in the
+// intended environment. Email uses SMTP / the authenticated OWA session only.
+// The graphMail bridge and its IPC channels no longer exist.
 
 
 // ── SharePoint ────────────────────────────────────────────────────────────────

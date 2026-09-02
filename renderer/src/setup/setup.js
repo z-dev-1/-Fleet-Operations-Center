@@ -256,33 +256,8 @@ const STEPS = [
       return { ok: true };
     },
   },
-  {
-    id: 'graph', title: 'Outlook (Microsoft Graph)', required: false,
-    html: `
-      <p class="setup__hint">Sends fleet reports via Microsoft Graph -- no VPN needed. Sign in once; stays signed in after that.</p>
-      <div id="sw-graph-status" class="setup__status">Checking...</div>
-      <button id="sw-graph-login" class="setup__btn setup__btn--secondary" type="button">Sign in to Outlook</button>
-    `,
-    afterMount: () => {
-      const check = () => window.graphMail.checkAuth().then((res) => {
-        const el = document.getElementById('sw-graph-status');
-        if (!res || !res.configured) { el.textContent = 'Not yet configured -- skip, set up later in Settings'; return; }
-        el.textContent = res.signedIn ? 'Connected' : 'Not connected';
-      }).catch(() => {});
-      check();
-      document.getElementById('sw-graph-login').addEventListener('click', async () => {
-        const btn = document.getElementById('sw-graph-login');
-        btn.disabled = true; btn.textContent = 'Signing in...';
-        try {
-          const r = await window.graphMail.signIn();
-          _savedSummary.graph = (r && r.ok) ? ('Connected: ' + (r.account || '')) : 'Not completed';
-        } catch (e) { _savedSummary.graph = 'Error: ' + e.message; }
-        btn.disabled = false; btn.textContent = 'Sign in to Outlook';
-        check();
-      });
-    },
-    onNext: async () => { if (!_savedSummary.graph) _savedSummary.graph = 'skipped'; return { ok: true }; },
-  },
+  // Microsoft Graph / Outlook sign-in setup step was removed (2026-09-02):
+  // Graph does not work in the intended environment. Email uses SMTP/OWA.
   {
     id: 'slack', title: 'Slack', required: false,
     html: `
@@ -518,7 +493,7 @@ const STEPS = [
       const LABELS = {
         profile: 'Profile', domiciles: 'Domiciles', midway: 'Midway',
         notifications: 'Notifications', orcha: 'Orcha AI', email: 'Email (SMTP)',
-        graph: 'Outlook (Graph)', slack: 'Slack', sharepoint: 'SharePoint',
+        slack: 'Slack', sharepoint: 'SharePoint',
         asana: 'Asana', vendorcreds: 'Vendor Credentials', schedulers: 'Sync Interval',
       };
       const el = document.getElementById('sw-confirm-summary');

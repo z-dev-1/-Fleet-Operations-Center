@@ -31,7 +31,6 @@
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1073.0",
     "@aws-sdk/credential-providers": "^3.1073.0",
-    "@azure/msal-node": "^5.4.1",
     "juice": "^12.1.1",
     "nodemailer": "^9.0.1",
     "playwright": "^1.61.1",
