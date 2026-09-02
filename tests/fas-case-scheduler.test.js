@@ -32,12 +32,17 @@ afterEach(() => { vi.restoreAllMocks(); scheduler.stopScheduler(); try { fs.rmSy
 
 const R = (o) => JSON.stringify(o);
 const inbound = () => ({ engine: 'dm', slackId: 'U_INT', senderName: 'Zila', channelName: 'DM', channelId: 'C1', ts: '100.1', text: 'any update on 320160?' });
+// Part 8: autonomous case memory is committed ONLY after Slack confirms a ts.
+// The real DM/channel callers inject sendToChannel so the runner sends + commits
+// atomically; these tests do the same with a confirming stub.
+let _sendN = 0;
+const okSend = { sendToChannel: async () => ({ ts: 'S' + (++_sendN) }) };
 
 describe('FAS case memory auto-wiring (only from SENT replies — Part 7)', () => {
   it('creates/updates a unit case after an AUTONOMOUS SENT reply', async () => {
     seed('autonomous');
     vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.9, reason: 'ok', research: [], actions: [], reply: "I'll follow up with Amerit and confirm the ETA today." }));
-    const out = await runner.handleInbound(inbound());
+    const out = await runner.handleInbound(inbound(), okSend);
     expect(out.outcome).toBe('auto-sent'); // actually sent -> case committed
     const c = caseStore.getCase(caseStore.caseIdForUnit('320160'));
     expect(c).toBeTruthy();
@@ -50,8 +55,8 @@ describe('FAS case memory auto-wiring (only from SENT replies — Part 7)', () =
   it('dedupes repeated promises across sent interactions', async () => {
     seed('autonomous');
     vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.9, reason: 'ok', research: [], actions: [], reply: "I'll follow up with Amerit today." }));
-    await runner.handleInbound(inbound());
-    await runner.handleInbound(inbound()); // same promise again
+    await runner.handleInbound(inbound(), okSend);
+    await runner.handleInbound(inbound(), okSend); // same promise again
     const c = caseStore.getCase(caseStore.caseIdForUnit('320160'));
     const followUps = c.promises.filter(p => /follow up with amerit/i.test(p.text));
     expect(followUps.length).toBe(1); // not duplicated
@@ -60,9 +65,9 @@ describe('FAS case memory auto-wiring (only from SENT replies — Part 7)', () =
   it('dedupes verified facts in the case', async () => {
     seed('autonomous');
     vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.9, reason: 'ok', research: [], actions: [], reply: 'status noted' }));
-    await runner.handleInbound(inbound());
+    await runner.handleInbound(inbound(), okSend);
     const before = caseStore.getCase(caseStore.caseIdForUnit('320160')).verifiedFacts.length;
-    await runner.handleInbound(inbound()); // same facts again
+    await runner.handleInbound(inbound(), okSend); // same facts again
     const after = caseStore.getCase(caseStore.caseIdForUnit('320160')).verifiedFacts.length;
     expect(after).toBe(before);
   });

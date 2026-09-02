@@ -98,7 +98,7 @@ function _hasApprovalLevelAction(decision) {
  * input: { engine, slackId, senderName, channelName, ts, text, conversation,
  *          isGroup, actualReply? }  (actualReply only known in shadow, post-send)
  */
-async function handleInbound(input) {
+async function handleInbound(input, deps) {
   const cfg = config.get();
   const mode = (cfg && cfg.enabled) ? (cfg.mode || 'shadow') : 'disabled';
 
@@ -216,10 +216,34 @@ async function handleInbound(input) {
       _appendAudit(audit);
       return { mode, letLegacyReply: false, decision, outcome: 'queued', approvalId: item.id, actionOutcomes: execRes.outcomes, audit };
     }
-    const audit = { ...base, outcome: 'auto-sent', actionOutcomes: execRes.outcomes };
+    // AUTONOMOUS DELIVERY SAFETY (Part 8): case memory / promises / follow-ups
+    // must NOT be committed until Slack confirms delivery with a timestamp.
+    // If a send path is available here, send now and commit ONLY on a confirmed
+    // ts; on failure, queue a recoverable review item and commit nothing.
+    const autoSend = (deps && deps.sendToChannel) || null;
+    if (autoSend) {
+      const tagged = (input.slackId ? '<@' + input.slackId + '> ' : '') + decision.reply;
+      let sr;
+      try { sr = await autoSend(input.channelId, tagged, input.threadTs || undefined); }
+      catch (e) { sr = null; decision._sendError = e.message; }
+      if (sr && sr.ts) {
+        const audit = { ...base, outcome: 'auto-sent', actionOutcomes: execRes.outcomes, sentTs: sr.ts };
+        _appendAudit(audit);
+        _updateCaseFromInteraction(input, decision, 'auto-sent'); // AFTER confirmed send
+        return { mode, letLegacyReply: false, decision, outcome: 'auto-sent', sent: { ts: sr.ts }, actionOutcomes: execRes.outcomes, audit };
+      }
+      // Delivery failed -> recoverable review; NO case memory committed.
+      const item = _queueReply(input, decision, { failReason: 'autonomous Slack delivery failed: ' + (decision._sendError || 'no ts'), actionOutcomes: execRes.outcomes });
+      const audit = { ...base, outcome: 'auto-send-failed-queued', approvalId: item.id, actionOutcomes: execRes.outcomes };
+      _appendAudit(audit);
+      return { mode, letLegacyReply: false, decision, outcome: 'auto-send-failed', approvalId: item.id, actionOutcomes: execRes.outcomes, audit };
+    }
+    // No send path injected (current DM/channel callers): return fasReply for
+    // the caller to send. Case memory is committed by the caller via
+    // confirmAutonomousSend() ONLY after Slack confirms — NOT here.
+    const audit = { ...base, outcome: 'auto-sent-pending-delivery', actionOutcomes: execRes.outcomes };
     _appendAudit(audit);
-    _updateCaseFromInteraction(input, decision, 'auto-sent');
-    return { mode, letLegacyReply: false, fasReply: decision.reply, decision, outcome: 'auto-sent', actionOutcomes: execRes.outcomes, audit };
+    return { mode, letLegacyReply: false, fasReply: decision.reply, decision, outcome: 'auto-sent', _pendingCaseCommit: true, actionOutcomes: execRes.outcomes, audit };
   }
 
   const item = _queueReply(input, decision);
@@ -627,6 +651,16 @@ async function resumeVerifiedTransactions(deps) {
   return { resumed, failed };
 }
 
+// Called by a DM/channel caller AFTER it has confirmed the autonomous reply was
+// delivered (Slack returned a ts). Commits case memory exactly once. If the
+// caller could not confirm delivery, it must NOT call this — nothing is
+// committed and the message stays recoverable (Part 8).
+function confirmAutonomousSend(input, decision) {
+  if (!input || !decision) return { ok: false };
+  try { _updateCaseFromInteraction(input, decision, 'auto-sent'); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+}
+
 // Claim a waiting-verification txn for resume (prevents double resume/send).
 function _claimResume(id) {
   const q = _loadQueue();
@@ -651,4 +685,4 @@ function getReplyQueue(status) {
   return _loadQueue().filter(x => x.kind === 'reply' && (!status || x.status === status));
 }
 
-module.exports = { handleInbound, approveReply, rejectReply, getReplyQueue, resumeVerifiedTransactions, _finalizeSendAndCommit, _buildRequesterSnapshot, _divergence, _hasApprovalLevelAction, _extractPromise, _validateDueAt, _nextBusinessDueAt, AUTO_SEND_MIN_CONFIDENCE };
+module.exports = { handleInbound, approveReply, rejectReply, getReplyQueue, resumeVerifiedTransactions, confirmAutonomousSend, _finalizeSendAndCommit, _buildRequesterSnapshot, _divergence, _hasApprovalLevelAction, _extractPromise, _validateDueAt, _nextBusinessDueAt, AUTO_SEND_MIN_CONFIDENCE };

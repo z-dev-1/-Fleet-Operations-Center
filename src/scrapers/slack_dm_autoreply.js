@@ -875,21 +875,25 @@ async function pollDMAutoReplyOnce(log) {
         try { const _cfg = require('../orcha/fas/config').get(); _fasMode = (_cfg && _cfg.enabled) ? (_cfg.mode || 'shadow') : 'disabled'; } catch (_) {}
         if (_fasRunner && (_fasMode === 'approval' || _fasMode === 'autonomous')) {
           try {
+            // Part 8: inject the send path so the runner sends the autonomous
+            // reply AND commits case memory atomically ONLY after Slack confirms
+            // a ts. On delivery failure the runner queues a recoverable review
+            // item and commits nothing — we retry the message next poll.
             const _fr = await _fasRunner.handleInbound({
               engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
               channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
               isGroup: !!dm.isGroup, conversation: historyMsgs,
-            });
-            // Autonomous may auto-send a verified reply; approval/queued send nothing now.
-            if (_fr && _fr.fasReply && String(_fr.fasReply).trim()) {
-              const _txt = (msg.userId ? `<@${msg.userId}> ` : '') + _fr.fasReply;
-              try {
-                const _sr = await sendToChannel(dm.channelId, _txt, msg.threadTs || undefined);
-                repliedCount++;
-                _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
-                  ts: msg.ts, replyTs: _sr && _sr.ts, question: msg.text, reply: _txt, inScope: true,
-                  category: null, title: 'FAS autonomous reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
-              } catch (e) { doLog(`[SlackDM] ${dm.name}: FAS autonomous send failed for ${msg.ts}: ${e.message}`); _markRetry(msg.ts); continue; }
+            }, { sendToChannel });
+            if (_fr && _fr.outcome === 'auto-sent' && _fr.sent && _fr.sent.ts) {
+              repliedCount++;
+              _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
+                ts: msg.ts, replyTs: _fr.sent.ts, question: msg.text, reply: (msg.userId ? `<@${msg.userId}> ` : '') + (_fr.decision && _fr.decision.reply || ''),
+                inScope: true, category: null, title: 'FAS autonomous reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
+            } else if (_fr && _fr.outcome === 'auto-send-failed') {
+              // Delivery failed — nothing committed; retry this message later.
+              doLog(`[SlackDM] ${dm.name}: FAS autonomous delivery failed for ${msg.ts} — deferring for retry`);
+              _markRetry(msg.ts);
+              continue;
             } else {
               // Queued for approval, manual-review (AI failure), or clarify.
               _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
@@ -1210,25 +1214,33 @@ async function pollDMAutoReplyOnce(log) {
             try { const _c = require('../orcha/fas/config').get(); _fasModeT = (_c && _c.enabled) ? (_c.mode || 'shadow') : 'disabled'; } catch (_) {}
             if (_fasRunner && (_fasModeT === 'approval' || _fasModeT === 'autonomous')) {
               try {
+                // Part 8: inject the send path so the runner sends the autonomous
+                // thread reply AND commits case memory atomically ONLY after
+                // Slack confirms a ts. On delivery failure the runner queues a
+                // recoverable review item and commits nothing — we do NOT advance
+                // latestThreadReplyTs so this reply is retried next poll.
                 const _fr = await _fasRunner.handleInbound({
                   engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
                   channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
                   isGroup: !!dm.isGroup, conversation: threadContext,
-                });
-                if (_fr && _fr.fasReply && String(_fr.fasReply).trim()) {
-                  const _txt = (reply.userId ? `<@${reply.userId}> ` : '') + _fr.fasReply;
-                  try {
-                    const _sr = await sendToChannel(dm.channelId, _txt, parentMsg.ts);
-                    repliedCount++;
-                    _appendReplyLog({ id: replyLogId, channelId: dm.channelId, channelName: dm.name, ts: reply.ts,
-                      threadTs: parentMsg.ts, replyTs: _sr && _sr.ts, question: reply.text, reply: _txt, inScope: true,
-                      category: null, title: 'FAS autonomous thread reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
-                  } catch (e) { doLog(`[SlackDM] ${dm.name}: FAS autonomous thread send failed ${reply.ts}: ${e.message}`); continue; }
+                }, { sendToChannel });
+                if (_fr && _fr.outcome === 'auto-send-failed') {
+                  // Delivery failed — nothing committed; retry this reply later.
+                  doLog(`[SlackDM] ${dm.name}: FAS autonomous thread delivery failed ${reply.ts} — deferring for retry`);
+                  continue; // NOT advancing latestThreadReplyTs -> retried next poll
+                }
+                if (_fr && _fr.outcome === 'auto-sent' && _fr.sent && _fr.sent.ts) {
+                  repliedCount++;
+                  const _txt = (reply.userId ? `<@${reply.userId}> ` : '') + ((_fr.decision && _fr.decision.reply) || '');
+                  _appendReplyLog({ id: replyLogId, channelId: dm.channelId, channelName: dm.name, ts: reply.ts,
+                    threadTs: parentMsg.ts, replyTs: _fr.sent.ts, question: reply.text, reply: _txt, inScope: true,
+                    category: null, title: 'FAS autonomous thread reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
                 } else {
+                  // Queued for approval, manual-review (AI failure), or clarify.
                   _appendReplyLog({ id: replyLogId, channelId: dm.channelId, channelName: dm.name, ts: reply.ts,
                     threadTs: parentMsg.ts, replyTs: null, question: reply.text, reply: '(FAS ' + _fasModeT + ': ' + ((_fr && _fr.outcome) || 'handled') + ')',
                     inScope: true, category: null, title: 'FAS ' + _fasModeT, createdAt: new Date().toISOString(), status: 'fas-' + ((_fr && _fr.outcome) || 'handled') });
-                  doLog(`[SlackDM] ${dm.name}: FAS(${_fasModeT}) owned thread reply ${reply.ts} — legacy skipped`);
+                  doLog(`[SlackDM] ${dm.name}: FAS(${_fasModeT}) owned thread reply ${reply.ts} (${(_fr && _fr.outcome) || 'handled'}) — legacy skipped`);
                 }
               } catch (e) {
                 doLog(`[SlackDM] ${dm.name}: FAS(${_fasModeT}) thread error ${reply.ts}: ${e.message} — manual review`);

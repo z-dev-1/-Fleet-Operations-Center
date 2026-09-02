@@ -878,24 +878,32 @@ async function pollChannelsOnce(log) {
         try { const _c = require('../orcha/fas/config').get(); _fasModeC = (_c && _c.enabled) ? (_c.mode || 'shadow') : 'disabled'; } catch (_) {}
         if (_fasRunner && (_fasModeC === 'approval' || _fasModeC === 'autonomous')) {
           try {
+            // Part 8: inject the send path so the runner sends the autonomous
+            // channel reply AND commits case memory atomically ONLY after Slack
+            // confirms a ts. On delivery failure the runner queues a recoverable
+            // review item and commits nothing — we do NOT advance the channel
+            // watermark so this message is retried next poll.
             const _fr = await _fasRunner.handleInbound({
               engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
               channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text,
-            });
-            if (_fr && _fr.fasReply && String(_fr.fasReply).trim()) {
-              const _txt = (msg.userId ? `<@${msg.userId}> ` : '') + _fr.fasReply;
-              try {
-                const _sr = await sendToChannel(ch.id, _txt, msg.ts);
-                repliedCount++;
-                _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
-                  replyTs: _sr && _sr.ts, question: msg.text, reply: _txt, wasMentioned: mentioned,
-                  inScope: true, category: null, title: 'FAS autonomous channel reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
-              } catch (e) { doLog(`[SlackWatch] ${ch.name}: FAS autonomous send failed ${msg.ts}: ${e.message}`); }
+            }, { sendToChannel });
+            if (_fr && _fr.outcome === 'auto-send-failed') {
+              // Delivery failed — nothing committed; retry this message later.
+              doLog(`[SlackWatch] ${ch.name}: FAS autonomous delivery failed ${msg.ts} — deferring for retry (watermark not advanced)`);
+              continue; // NOT advancing lastSeenTs -> retried next poll
+            }
+            if (_fr && _fr.outcome === 'auto-sent' && _fr.sent && _fr.sent.ts) {
+              repliedCount++;
+              const _txt = (msg.userId ? `<@${msg.userId}> ` : '') + ((_fr.decision && _fr.decision.reply) || '');
+              _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
+                replyTs: _fr.sent.ts, question: msg.text, reply: _txt, wasMentioned: mentioned,
+                inScope: true, category: null, title: 'FAS autonomous channel reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
             } else {
+              // Queued for approval, manual-review (AI failure), or clarify.
               _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
                 replyTs: null, question: msg.text, reply: '(FAS ' + _fasModeC + ': ' + ((_fr && _fr.outcome) || 'handled') + ')',
                 wasMentioned: mentioned, inScope: true, category: null, title: 'FAS ' + _fasModeC, createdAt: new Date().toISOString(), status: 'fas-' + ((_fr && _fr.outcome) || 'handled') });
-              doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) owned ${msg.ts} — legacy skipped`);
+              doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) owned ${msg.ts} (${(_fr && _fr.outcome) || 'handled'}) — legacy skipped`);
             }
           } catch (e) {
             doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) error ${msg.ts}: ${e.message} — manual review`);
