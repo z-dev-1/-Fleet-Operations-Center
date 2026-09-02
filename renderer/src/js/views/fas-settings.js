@@ -87,6 +87,43 @@ async function _refreshAudit() {
   }
 }
 
+async function _refreshAutoActions() {
+  const list = document.getElementById('fas-autoaction-list');
+  if (!list) return;
+  try {
+    const cat = await slackBridge.fasGetActionCatalog();
+    if (!cat || !cat.length) { list.innerHTML = '<div class="sd-hint">No actions registered.</div>'; return; }
+    list.innerHTML = cat.map((a) => {
+      const lvl = a.level === 'low'
+        ? '<span style="color:var(--ok,#2e7d32);font-size:9px">low-risk</span>'
+        : '<span style="color:var(--err,#c0392b);font-size:9px">always requires approval</span>';
+      const control = a.eligibleForAutomatic
+        ? '<label class="sd-hint" style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" class="fas-auto-cb" data-name="' + _esc(a.name) + '"' + (a.enabled ? ' checked' : '') + '/> allow automatic</label>'
+        : '<span class="sd-hint" style="opacity:.6">approval only</span>';
+      return '<div style="border:1px solid var(--bd,#333);border-radius:8px;padding:8px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
+          '<span style="font-size:11px;font-weight:700">' + _esc(a.name) + '</span>' + lvl +
+        '</div>' +
+        '<div class="sd-hint" style="margin:3px 0">' + _esc(a.description) + '</div>' +
+        control +
+      '</div>';
+    }).join('');
+    list.querySelectorAll('.fas-auto-cb').forEach((cb) => {
+      cb.addEventListener('change', async () => {
+        // Recompute the full enabled list from the current checkbox state.
+        const enabled = [...list.querySelectorAll('.fas-auto-cb')].filter(x => x.checked).map(x => x.getAttribute('data-name'));
+        try {
+          await slackBridge.fasSaveConfig({ approvedAutomaticActions: enabled });
+          toast.show('success', 'Automatic actions updated', 1800);
+        } catch (e) { toast.show('error', 'Save failed: ' + e.message, 3000); }
+        _refreshAutoActions();
+      });
+    });
+  } catch (e) {
+    list.innerHTML = '<div class="sd-hint" style="color:var(--err,#c0392b)">Failed to load: ' + _esc(e.message) + '</div>';
+  }
+}
+
 async function _refreshReplyApprovals() {
   const list = document.getElementById('fas-reply-approval-list');
   if (!list) return;
@@ -290,13 +327,20 @@ export function initFasSettings() {
   const saveBtn = document.getElementById('fas-save');
   const refreshBtn = document.getElementById('fas-refresh-audit');
   if (saveBtn) saveBtn.addEventListener('click', _saveConfig);
-  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshAudit(); _refreshReplyApprovals(); _refreshApprovals(); _refreshDrafts(); _refreshProfiles(); });
+  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshAudit(); _refreshReplyApprovals(); _refreshApprovals(); _refreshAutoActions(); _refreshDrafts(); _refreshProfiles(); });
   const profLoad = document.getElementById('fas-prof-load');
   if (profLoad) profLoad.addEventListener('click', _loadProfile);
+  const autoReset = document.getElementById('fas-autoaction-reset');
+  if (autoReset) autoReset.addEventListener('click', async () => {
+    try { await slackBridge.fasSaveConfig({ approvedAutomaticActions: [] }); toast.show('success', 'Reset — all automatic actions off', 2000); }
+    catch (e) { toast.show('error', e.message, 3000); }
+    _refreshAutoActions();
+  });
   _loadConfig();
   _refreshAudit();
   _refreshReplyApprovals();
   _refreshApprovals();
+  _refreshAutoActions();
   _refreshProfiles();
   _refreshDrafts();
   _refreshPlaybook();

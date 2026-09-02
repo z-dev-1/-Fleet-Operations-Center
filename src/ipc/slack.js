@@ -404,6 +404,15 @@ function registerSlackIPC(ctx) {
     return scheduler.getDueFollowUps();
   });
 
+  // ── FAS automatic-action catalog (Part 12) ────────────────────────────────
+  // Every action + risk level + description + whether it can be automatic.
+  handle('fas:get-action-catalog', async () => {
+    const reg = require('../orcha/fas/action-registry');
+    const cfg = require('../orcha/fas/config').get();
+    const enabled = new Set(cfg.approvedAutomaticActions || []);
+    return reg.listActionCatalog().map(a => ({ ...a, enabled: enabled.has(a.name) }));
+  });
+
   // ── FAS playbook + knowledge drafts (Stage 9) ────────────────────────────
   handle('fas:get-playbook', async () => {
     const pb = require('../orcha/fas/playbook');

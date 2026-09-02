@@ -202,6 +202,7 @@ contextBridge.exposeInMainWorld('slack', {
   fasApproveReply:        (id)     => ipcRenderer.invoke('fas:approve-reply', id),
   fasRejectReply:         (id)     => ipcRenderer.invoke('fas:reject-reply', id),
   fasGetDueFollowups:     ()       => ipcRenderer.invoke('fas:get-due-followups'),
+  fasGetActionCatalog:    ()       => ipcRenderer.invoke('fas:get-action-catalog'),
   fasGetPlaybook:         ()       => ipcRenderer.invoke('fas:get-playbook'),
   fasGetKnowledgeDrafts:  (status) => ipcRenderer.invoke('fas:get-knowledge-drafts', status),
   fasApproveKnowledgeDraft:(data)  => ipcRenderer.invoke('fas:approve-knowledge-draft', data),

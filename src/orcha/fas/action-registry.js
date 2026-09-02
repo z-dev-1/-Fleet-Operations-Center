@@ -201,4 +201,33 @@ function getAction(name) { return REGISTRY[name] || null; }
 function actionLevel(name) { const a = REGISTRY[name]; return a ? a.level : null; }
 function actionNames() { return Object.keys(REGISTRY); }
 
-module.exports = { REGISTRY, getAction, actionLevel, actionNames };
+// Plain-language descriptions + automatic-eligibility for the Settings UI
+// (Part 12). Only 'low'-risk actions are eligible to be enabled as automatic;
+// 'approval'-level actions (lifecycle changes, WR submission, outbound sends)
+// ALWAYS require approval and can never be made automatic.
+const DESCRIPTIONS = {
+  ADD_TIMELINE: 'Add a note to a unit\u2019s repair timeline (internal record only).',
+  CREATE_REMINDER: 'Create a reminder/task for yourself to follow up (internal only).',
+  CREATE_FOLLOWUP_CASE: 'Open or update an internal follow-up case for a unit.',
+  MOVE_UNIT: 'Change a unit\u2019s lifecycle state in AAP (e.g. Active/Unavailable).',
+  SUBMIT_WORK_REQUEST: 'Submit a work request in AAP for a unit.',
+  SEND_SLACK_MESSAGE: 'Send a Slack message on your behalf.',
+};
+
+function listActionCatalog() {
+  return actionNames().map(name => {
+    const a = REGISTRY[name];
+    return {
+      name,
+      level: a.level,                          // 'low' | 'approval'
+      requires: a.requires || null,
+      description: DESCRIPTIONS[name] || '',
+      // Only low-risk actions may EVER run automatically; approval-level
+      // actions always require human approval.
+      eligibleForAutomatic: a.level === 'low',
+      isMutation: a.level === 'approval' || /MOVE_UNIT|SUBMIT_WORK_REQUEST|SEND_SLACK/.test(name),
+    };
+  });
+}
+
+module.exports = { REGISTRY, getAction, actionLevel, actionNames, listActionCatalog, DESCRIPTIONS };

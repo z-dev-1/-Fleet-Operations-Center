@@ -347,6 +347,7 @@ export const slack = {
   fasApproveReply:        (id)     => window.slack.fasApproveReply(id),
   fasRejectReply:         (id)     => window.slack.fasRejectReply(id),
   fasGetDueFollowups:     ()       => window.slack.fasGetDueFollowups(),
+  fasGetActionCatalog:    ()       => window.slack.fasGetActionCatalog(),
   fasGetPlaybook:         ()       => window.slack.fasGetPlaybook(),
   fasGetKnowledgeDrafts:  (status) => window.slack.fasGetKnowledgeDrafts(status),
   fasApproveKnowledgeDraft:(data)  => window.slack.fasApproveKnowledgeDraft(data),

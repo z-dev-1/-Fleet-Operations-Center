@@ -869,6 +869,11 @@ function _html() {
           <div class="sd-hint" style="margin-bottom:6px">Slack replies the FAS agent prepared (Approval/Autonomous mode). Review the request, proposed reply, evidence and reason, then Approve to send it (and run any proposed actions, verified) or Reject to send nothing.</div>
           <div id="fas-reply-approval-list" style="display:flex;flex-direction:column;gap:8px;max-height:320px;overflow:auto"></div>
 
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Automatic actions (Autonomous mode)</div>
+          <div class="sd-hint" style="margin-bottom:6px">Choose which low-risk actions FAS may run automatically in Autonomous mode. Lifecycle changes, work requests and outbound messages always require approval and cannot be automated. Everything defaults to off.</div>
+          <div id="fas-autoaction-list" style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow:auto"></div>
+          <div class="sd-btn-row" style="margin-top:6px"><button class="sd-btn secondary" id="fas-autoaction-reset">Reset to safe defaults (all off)</button></div>
+
           <div class="sd-section-title" style="margin-top:14px;font-size:11px">Actions awaiting approval</div>
           <div class="sd-hint" style="margin-bottom:6px">Actions the FAS agent proposed that require your approval. Approving runs the real action and verifies the result before marking it done.</div>
           <div id="fas-approval-list" style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow:auto"></div>

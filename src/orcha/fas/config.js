@@ -31,13 +31,30 @@ function get() {
   if (!raw || typeof raw !== 'object') return { ...DEFAULTS };
   // Shallow-merge so new default keys appear for existing installs without
   // clobbering user settings.
-  return {
+  const merged = {
     ...DEFAULTS,
     ...raw,
     retry: { ...DEFAULTS.retry, ...(raw.retry || {}) },
     approvedAutomaticActions: raw.approvedAutomaticActions || DEFAULTS.approvedAutomaticActions,
     approvedLinkDomains: raw.approvedLinkDomains || DEFAULTS.approvedLinkDomains,
   };
+  // Defense-in-depth: even a hand-edited config file cannot grant automatic
+  // execution to a mutating/approval-level action (Part 12/Part 3).
+  merged.approvedAutomaticActions = _sanitizeAutoActions(merged.approvedAutomaticActions);
+  return merged;
+}
+
+// Sanitize approvedAutomaticActions so a malformed/hostile config can NEVER
+// make a mutating or approval-level action automatic (Part 12/Part 3). Only
+// registered, low-risk, automatic-eligible action names survive.
+function _sanitizeAutoActions(list) {
+  if (!Array.isArray(list)) return [];
+  let catalog = [];
+  try { catalog = require('./action-registry').listActionCatalog(); } catch (_) { return []; }
+  const eligible = new Set(catalog.filter(a => a.eligibleForAutomatic).map(a => a.name));
+  const out = [];
+  for (const n of list) { if (typeof n === 'string' && eligible.has(n) && !out.includes(n)) out.push(n); }
+  return out;
 }
 
 function save(patch) {
@@ -46,8 +63,10 @@ function save(patch) {
   // Never allow autonomous mode to be set without the master switch on — and
   // even then, keep the safer default unless explicitly requested.
   if (next.mode && !['shadow', 'approval', 'autonomous'].includes(next.mode)) next.mode = 'shadow';
+  // HARD SAFETY: automatic actions can only ever be low-risk eligible actions.
+  next.approvedAutomaticActions = _sanitizeAutoActions(next.approvedAutomaticActions);
   store.save('fasConfig', next);
   return next;
 }
 
-module.exports = { get, save, DEFAULTS };
+module.exports = { get, save, DEFAULTS, _sanitizeAutoActions };
