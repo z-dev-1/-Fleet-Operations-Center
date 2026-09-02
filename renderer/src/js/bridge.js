@@ -340,6 +340,9 @@ export const slack = {
   fasGetSenderProfiles:   ()       => window.slack.fasGetSenderProfiles(),
   fasSaveSenderProfile:   (p)      => window.slack.fasSaveSenderProfile(p),
   fasResolveSender:       (id)     => window.slack.fasResolveSender(id),
+  fasGetApprovalQueue:    (status) => window.slack.fasGetApprovalQueue(status),
+  fasApproveAction:       (id)     => window.slack.fasApproveAction(id),
+  fasRejectAction:        (id)     => window.slack.fasRejectAction(id),
 };
 
 // ── SharePoint ─────────────────────────────────────────────────────────────

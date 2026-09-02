@@ -102,6 +102,7 @@ const REGISTRY = {
   fasKnowledgeDrafts:      () => path.join(P.dataDir, 'fas_knowledge_drafts.json'),
   fasConfig:               () => path.join(P.dataDir, 'fas_config.json'),
   fasAuditLog:             () => path.join(P.dataDir, 'fas_audit_log.json'),
+  fasApprovalQueue:        () => path.join(P.dataDir, 'fas_approval_queue.json'),
   emailLastSnapshot:       () => path.join(P.dataDir, 'email_last_snapshot.json'),
   proactiveAlertHistory:  () => path.join(P.dataDir, 'proactive_alert_history.json'),
   proactiveLastScores:   () => path.join(P.dataDir, 'proactive_last_scores.json'),

@@ -195,6 +195,9 @@ contextBridge.exposeInMainWorld('slack', {
   fasGetSenderProfiles:   ()       => ipcRenderer.invoke('fas:get-sender-profiles'),
   fasSaveSenderProfile:   (p)      => ipcRenderer.invoke('fas:save-sender-profile', p),
   fasResolveSender:       (id)     => ipcRenderer.invoke('fas:resolve-sender', id),
+  fasGetApprovalQueue:    (status) => ipcRenderer.invoke('fas:get-approval-queue', status),
+  fasApproveAction:       (id)     => ipcRenderer.invoke('fas:approve-action', id),
+  fasRejectAction:        (id)     => ipcRenderer.invoke('fas:reject-action', id),
 });
 
 // -- Microsoft Graph mail (2026-07-21) -- see src/graph/client.js for the

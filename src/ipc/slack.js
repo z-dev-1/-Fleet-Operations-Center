@@ -356,6 +356,28 @@ function registerSlackIPC(ctx) {
     return sp.resolveSender(slackId);
   });
 
+  // ── FAS action approval queue (Stage D) ──────────────────────────────────
+  handle('fas:get-approval-queue', async (_e, status) => {
+    const executor = require('../orcha/fas/executor');
+    return executor.getQueue(status || null);
+  });
+
+  handle('fas:approve-action', async (_e, id) => {
+    if (!id) throw new Error('id required');
+    const executor = require('../orcha/fas/executor');
+    // The approver is the app operator (Z) — an internal, fully-authorized actor.
+    const ctx = { profile: { slackId: 'operator', name: 'Operator', type: 'internal',
+      operators: [], domiciles: [], allowedDataCategories: ['*'],
+      permittedRequestTypes: ['unit_status','repair_update','follow_up','report','process_question','lifecycle_change','create_wr'] } };
+    return executor.approveQueued(id, ctx);
+  });
+
+  handle('fas:reject-action', async (_e, id) => {
+    if (!id) throw new Error('id required');
+    const executor = require('../orcha/fas/executor');
+    return executor.rejectQueued(id);
+  });
+
   logger.info('Slack IPC handlers registered');
 }
 
