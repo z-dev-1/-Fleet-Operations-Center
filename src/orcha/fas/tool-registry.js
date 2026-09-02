@@ -128,6 +128,144 @@ function GET_UPTAKE_INSIGHTS(args, ctx) {
   ] };
 }
 
+// ── RELAY GARAGE + OFFSITE EVENT read tools ─────────────────────────────────
+// Reuse the app's existing Relay Garage / Offsite data cached in `relayCache`
+// (populated by src/scrapers/relay.js). READ-ONLY: never opens a browser or
+// triggers a live scrape here — reads the cache and reports the cache's own
+// _cachedAt as the SOURCE timestamp (not the time we read it), so the AI can
+// judge freshness. Offsite Event data is Relay-derived (Decisiv/DTNA links on
+// the unit's WR page), so it lives in the same cache entry.
+function _loadRelayCache() { return store.load('relayCache', {}) || {}; }
+// Fact whose freshness reflects the SOURCE system's own update time.
+function _srcFact(field, value, source, sourceAt) {
+  return { field, value, source, retrievedAt: now(), sourceUpdatedAt: sourceAt || null };
+}
+function _relayEntry(unit) {
+  const cache = _loadRelayCache();
+  const key = String(unit || '').trim().toUpperCase();
+  // relayCache is keyed by equipmentId (already upper in practice); match loosely.
+  if (cache[key]) return { key, entry: cache[key] };
+  const found = Object.keys(cache).find(k => k.toUpperCase() === key);
+  return found ? { key: found, entry: cache[found] } : { key, entry: null };
+}
+
+function GET_RELAY_GARAGE_UNIT(args, ctx) {
+  const { rows } = _loadFleet();
+  const row = _findRow(rows, args && args.unit);
+  if (!row) return { ok: false, error: 'unit not found' };
+  const denied = _scopeCheck(ctx, row, 'work_orders'); if (denied) return denied;
+  const { entry } = _relayEntry(row.equipmentId);
+  if (!entry || entry._noWR) {
+    return { ok: true, summary: 'No open Relay Garage work order cached for ' + row.equipmentId + (entry && entry._noWR ? ' (confirmed no findable WR)' : ''), verifiedFacts: [
+      _srcFact('relayHasWorkOrder', false, 'RelayGarage', entry ? new Date(entry._cachedAt || Date.now()).toISOString() : null),
+    ] };
+  }
+  const at = entry._cachedAt ? new Date(entry._cachedAt).toISOString() : null;
+  return { ok: true, verifiedFacts: [
+    _srcFact('workRequestId', entry.workRequestId || null, 'RelayGarage', at),
+    _srcFact('serviceState', entry.serviceState || '', 'RelayGarage', at),
+    _srcFact('vendor', entry.vendor || '', 'RelayGarage', at),
+    _srcFact('issueDetails', entry.issueDetails || '', 'RelayGarage', at),
+    _srcFact('lifecycleReason', entry.lifecycleReason || '', 'RelayGarage', at),
+    _srcFact('workDuration', entry.workDuration || '', 'RelayGarage', at),
+    _srcFact('completed', entry.completed || '', 'RelayGarage', at),
+    _srcFact('sourceUrl', entry.pageUrl || '', 'RelayGarage', at),
+  ] };
+}
+
+function GET_RELAY_WORK_ORDERS(args, ctx) {
+  const { rows } = _loadFleet();
+  const row = _findRow(rows, args && args.unit);
+  if (!row) return { ok: false, error: 'unit not found' };
+  const denied = _scopeCheck(ctx, row, 'work_orders'); if (denied) return denied;
+  const { entry } = _relayEntry(row.equipmentId);
+  if (!entry || entry._noWR) return { ok: true, summary: 'No open work orders cached', verifiedFacts: [] };
+  const at = entry._cachedAt ? new Date(entry._cachedAt).toISOString() : null;
+  // Primary + any planned/secondary WRs so a single result isn't relied on.
+  const list = [];
+  const push = (e, kind, url) => list.push({
+    kind, workRequestId: e.workRequestId || null, vendorWorkOrderId: e.vendorWorkOrderId || null,
+    state: e.serviceState || '', vendor: e.vendor || '', url: url || e.pageUrl || '',
+  });
+  push(entry, 'primary');
+  if (entry._plannedWRData) push(entry._plannedWRData, 'planned', entry._plannedWRData._relayUrl);
+  (entry._secondaryWRs || []).forEach(w => push(w, w._wrType || 'secondary', w._relayUrl));
+  return { ok: true, verifiedFacts: [ _srcFact('workOrders', list, 'RelayGarage', at) ] };
+}
+
+function GET_RELAY_WORK_ORDER_DETAILS(args, ctx) {
+  const { rows } = _loadFleet();
+  const row = _findRow(rows, args && args.unit);
+  if (!row) return { ok: false, error: 'unit not found' };
+  const denied = _scopeCheck(ctx, row, 'work_orders'); if (denied) return denied;
+  const { entry } = _relayEntry(row.equipmentId);
+  if (!entry || entry._noWR) return { ok: true, summary: 'No work order detail cached', verifiedFacts: [] };
+  const at = entry._cachedAt ? new Date(entry._cachedAt).toISOString() : null;
+  return { ok: true, verifiedFacts: [
+    _srcFact('vendorWorkOrderId', entry.vendorWorkOrderId || null, 'RelayGarage/WO', at),
+    _srcFact('reasonForRepair', entry.cause || '', 'RelayGarage/WO', at),
+    _srcFact('workAccomplished', entry.correction || '', 'RelayGarage/WO', at),
+    _srcFact('totalCost', entry.totalCost || '', 'RelayGarage/WO', at),
+    _srcFact('salesforceCase', entry.salesforceCase || '', 'RelayGarage/WO', at),
+  ] };
+}
+
+function GET_RELAY_REPAIR_TIMELINE(args, ctx) {
+  const { rows } = _loadFleet();
+  const row = _findRow(rows, args && args.unit);
+  if (!row) return { ok: false, error: 'unit not found' };
+  const denied = _scopeCheck(ctx, row, 'repair_timeline'); if (denied) return denied;
+  const { entry } = _relayEntry(row.equipmentId);
+  if (!entry || entry._noWR) return { ok: true, summary: 'No Relay conversation/timeline cached', verifiedFacts: [] };
+  const at = entry._cachedAt ? new Date(entry._cachedAt).toISOString() : null;
+  // Compact the conversation feed — never dump the whole thing.
+  let conv = String(entry.fullConversation || '').trim();
+  const cap = 2000;
+  if (conv.length > cap) conv = conv.slice(-cap) + ' …[older comments trimmed]';
+  return { ok: true, verifiedFacts: [
+    _srcFact('relayConversation', conv || '(no comments)', 'RelayGarage/conversation', at),
+    _srcFact('needBy', entry.needBy || '', 'RelayGarage', at),
+    _srcFact('urgent', entry.urgent || '', 'RelayGarage', at),
+  ] };
+}
+
+function GET_OFFSITE_EVENT(args, ctx) {
+  const { rows } = _loadFleet();
+  const row = _findRow(rows, args && args.unit);
+  if (!row) return { ok: false, error: 'unit not found' };
+  const denied = _scopeCheck(ctx, row, 'work_orders'); if (denied) return denied;
+  const { entry } = _relayEntry(row.equipmentId);
+  const hasOffsite = entry && (entry.offsiteShopEventUrl || entry.offsiteShopEvent || entry.asistLabel);
+  if (!hasOffsite) return { ok: true, summary: 'No offsite shop event linked for ' + row.equipmentId, verifiedFacts: [
+    _srcFact('hasOffsiteEvent', false, 'RelayGarage/offsite', entry && entry._cachedAt ? new Date(entry._cachedAt).toISOString() : null),
+  ] };
+  const at = entry._cachedAt ? new Date(entry._cachedAt).toISOString() : null;
+  return { ok: true, verifiedFacts: [
+    _srcFact('hasOffsiteEvent', true, 'RelayGarage/offsite', at),
+    _srcFact('offsiteEvent', entry.offsiteShopEvent || entry.asistLabel || '', 'OffsiteEvent', entry.asistScrapedAt || at),
+    _srcFact('offsiteEventUrl', entry.offsiteShopEventUrl || entry.asistSrUrl || '', 'OffsiteEvent', entry.asistScrapedAt || at),
+    _srcFact('offsiteVendor', entry.dealerName || entry.vendor || '', 'OffsiteEvent', entry.asistScrapedAt || at),
+    _srcFact('offsiteSource', entry.asistSource || '', 'OffsiteEvent', entry.asistScrapedAt || at),
+  ] };
+}
+
+function GET_OFFSITE_EVENT_TIMELINE(args, ctx) {
+  const { rows } = _loadFleet();
+  const row = _findRow(rows, args && args.unit);
+  if (!row) return { ok: false, error: 'unit not found' };
+  const denied = _scopeCheck(ctx, row, 'repair_timeline'); if (denied) return denied;
+  const { entry } = _relayEntry(row.equipmentId);
+  const notes = entry && String(entry.asistNotes || '').trim();
+  if (!notes) return { ok: true, summary: 'No offsite event timeline/notes cached', verifiedFacts: [] };
+  const at = entry.asistScrapedAt || (entry._cachedAt ? new Date(entry._cachedAt).toISOString() : null);
+  let text = notes; const cap = 2500;
+  if (text.length > cap) text = text.slice(0, cap) + ' …[truncated]';
+  return { ok: true, verifiedFacts: [
+    _srcFact('offsiteTimeline', text, 'OffsiteEvent/Decisiv', at),
+    _srcFact('offsiteDealer', entry.dealerName || '', 'OffsiteEvent', at),
+  ] };
+}
+
 function GET_SITE_SUMMARY(args, ctx) {
   const { rows } = _loadFleet();
   const site = String((args && args.domicile) || '').trim().toUpperCase();
@@ -238,6 +376,12 @@ const READ_TOOLS = {
   GET_OPEN_WORK_ORDERS,
   GET_PM_STATUS,
   GET_UPTAKE_INSIGHTS,
+  GET_RELAY_GARAGE_UNIT,
+  GET_RELAY_WORK_ORDERS,
+  GET_RELAY_WORK_ORDER_DETAILS,
+  GET_RELAY_REPAIR_TIMELINE,
+  GET_OFFSITE_EVENT,
+  GET_OFFSITE_EVENT_TIMELINE,
   GET_SITE_SUMMARY,
   GET_OPERATOR_SUMMARY,
   GET_VENDOR_CONTACT,

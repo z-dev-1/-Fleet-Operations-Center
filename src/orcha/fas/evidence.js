@@ -104,6 +104,26 @@ async function buildEvidence({ profile, text, question, factsNeeded }) {
       if (up.ok) up.verifiedFacts.forEach(f => verifiedFacts.push(f));
     }
 
+    // Relay Garage + Offsite Event are PRIMARY work-order evidence sources.
+    // Pull them into the same timeline when the unit is down/at-shop or the
+    // request concerns repair/work-order/vendor/location/completion.
+    const _lc = String(u.verifiedFacts.find(f => f.field === 'lifecycleState')?.value || '').toLowerCase();
+    const _repairAsk = /\b(repair|work ?order|wr|vendor|shop|offsite|status|down|diagnos|part|complete|fix|eta|etc|when|location|where)\b/i.test(q);
+    if (_wants('work') || _wants('repair') || _wants('relay') || _wants('offsite') || _lc.includes('unavail') || _repairAsk) {
+      const rg = await tools.runTool('GET_RELAY_GARAGE_UNIT', { unit }, ctx);
+      if (rg.ok) rg.verifiedFacts.forEach(f => { verifiedFacts.push(f); sources.add(f.source); });
+      const roff = await tools.runTool('GET_OFFSITE_EVENT', { unit }, ctx);
+      if (roff.ok) {
+        const hasOff = roff.verifiedFacts.find(f => f.field === 'hasOffsiteEvent');
+        roff.verifiedFacts.forEach(f => { verifiedFacts.push(f); sources.add(f.source); });
+        // If there IS an offsite event, pull its timeline too (dealer notes).
+        if (hasOff && hasOff.value === true) {
+          const rtl = await tools.runTool('GET_OFFSITE_EVENT_TIMELINE', { unit }, ctx);
+          if (rtl.ok) rtl.verifiedFacts.forEach(f => { verifiedFacts.push(f); sources.add(f.source); });
+        }
+      }
+    }
+
     // Only flag a missing ETC when the request is actually about timing/completion.
     if (_asksEtc) {
       const hasEtc = verifiedFacts.some(f => /\betc\b|estimated completion|completion date/i.test(f.field) && f.value);
@@ -145,7 +165,7 @@ async function buildEvidence({ profile, text, question, factsNeeded }) {
   // silently. Real checks against the facts we actually gathered:
   const _factVal = (field) => { const f = verifiedFacts.find(x => x.field === field); return f ? f.value : undefined; };
   const _lifecycle = String(_factVal('lifecycleState') || '');
-  const _repairStatus = String(_factVal('repairStatus') || '');
+  const _repairStatus = String(_factVal('repairStatus') || '') + ' ' + String(_factVal('serviceState') || '');
   const _hasOpenWR = _factVal('hasOpenWR');
   const _timeline = _factVal('recentTimeline');
   const _timelineStr = Array.isArray(_timeline) ? _timeline.join(' ') : String(_timeline || '');
