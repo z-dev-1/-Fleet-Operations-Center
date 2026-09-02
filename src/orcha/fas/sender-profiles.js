@@ -77,12 +77,50 @@ function _loadProfiles() {
   return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
 }
 
+const VALID_TYPES = ['internal', 'manager', 'carrier', 'vendor', 'unknown'];
+
+/**
+ * validateProfile(profile) -> { ok, profile?, error? }
+ * Sanitizes an inbound (UI-edited) profile so a malformed one can't grant
+ * unintended access:
+ *   - slackId required (string)
+ *   - type coerced to a known value (default 'unknown')
+ *   - allowedDataCategories / permittedRequestTypes filtered to the known
+ *     enums; anything else (incl. wildcards like "*" or non-arrays) dropped
+ *   - operators / domiciles normalized to uppercase string arrays
+ * Security-enforcing categories/scopes therefore only ever contain known,
+ * intended values — never a wildcard or arbitrary string.
+ */
+function validateProfile(profile) {
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return { ok: false, error: 'profile object required' };
+  const slackId = typeof profile.slackId === 'string' ? profile.slackId.trim() : '';
+  if (!slackId) return { ok: false, error: 'slackId required (string)' };
+  const type = VALID_TYPES.includes(profile.type) ? profile.type : 'unknown';
+  const toUpperArr = (v) => Array.isArray(v) ? v.map(x => String(x).trim().toUpperCase()).filter(Boolean) : [];
+  const filterEnum = (v, allowed) => Array.isArray(v) ? v.filter(x => allowed.includes(x)) : [];
+  const clean = {
+    slackId,
+    name: typeof profile.name === 'string' ? profile.name.slice(0, 120) : slackId,
+    org: typeof profile.org === 'string' ? profile.org.slice(0, 120) : '',
+    role: typeof profile.role === 'string' ? profile.role.slice(0, 60) : '',
+    type,
+    operators: toUpperArr(profile.operators),
+    domiciles: toUpperArr(profile.domiciles),
+    allowedDataCategories: filterEnum(profile.allowedDataCategories, DATA_CATEGORIES),
+    permittedRequestTypes: filterEnum(profile.permittedRequestTypes, REQUEST_TYPES),
+    commPreferences: (profile.commPreferences && typeof profile.commPreferences === 'object' && !Array.isArray(profile.commPreferences)) ? profile.commPreferences : {},
+    source: 'ui-edited',
+  };
+  return { ok: true, profile: clean };
+}
+
 function saveProfile(profile) {
-  if (!profile || !profile.slackId) return { ok: false, error: 'slackId required' };
+  const v = validateProfile(profile);
+  if (!v.ok) return { ok: false, error: v.error };
   const all = _loadProfiles();
-  all[profile.slackId] = { ...all[profile.slackId], ...profile, updatedAt: new Date().toISOString() };
+  all[v.profile.slackId] = { ...all[v.profile.slackId], ...v.profile, updatedAt: new Date().toISOString() };
   store.save('slackSenderProfiles', all);
-  return { ok: true, profile: all[profile.slackId] };
+  return { ok: true, profile: all[v.profile.slackId] };
 }
 
 /**
@@ -152,6 +190,7 @@ module.exports = {
   REQUEST_TYPES,
   resolveSender,
   saveProfile,
+  validateProfile,
   canViewCategory,
   canRequest,
   scopeUnitForSender,
