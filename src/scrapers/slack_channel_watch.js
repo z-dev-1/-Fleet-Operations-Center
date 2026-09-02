@@ -264,7 +264,22 @@ async function _classifyAndDraft(messageText, askOrcha, allowedOperators) {
   const { buildFleetContext } = require('../orcha/ai-context');
   const fleetContext = buildFleetContext(messageText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true, allowedOperators: allowedOperators || [] });
 
-  const prompt = PERSONA_SYSTEM_PROMPT + timeContext + fleetContext + '\n\nPartner message:\n' + messageText;
+  // CONTEXT RESET (2026-09-02): relay.ask() routes through fleet-brain, a
+  // SINGLE persistent session whose rolling history is shared across every
+  // caller (DM replies, fleet-status classifications, email reports, etc.).
+  // Without an explicit reset, a prior unrelated call's format/topic bleeds
+  // into this reply — the exact contamination the DM path already guards
+  // against but the channel path never did. Force each partner reply to be an
+  // independent turn that answers ONLY this message.
+  const _contextReset =
+    '=== NEW INDEPENDENT TASK — IGNORE ALL PRIOR CONTEXT, TOPICS, AND OUTPUT FORMATS ===\n' +
+    'What follows is a self-contained request. Disregard any earlier conversation, unit, or ' +
+    'formatting from previous messages. Read THIS partner message carefully, understand exactly ' +
+    'what is being asked, and answer only that using the fleet data provided below.\n\n';
+  const _jsonReminder = '\n\nREMINDER — respond with ONE valid JSON object only ' +
+    '{"inScope":true|false,"reply":"...","category":"alert"|"action"|"workflow"|null,"title":"..."|null}, nothing before or after it.';
+
+  const prompt = _contextReset + PERSONA_SYSTEM_PROMPT + timeContext + fleetContext + _jsonReminder + '\n\nPartner message:\n' + messageText;
   let aiResult;
   try {
     // FIX (2026-08-17): was using askOrcha() (WS-only, no fallback, 20s cap) —
