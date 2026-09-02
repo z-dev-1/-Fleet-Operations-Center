@@ -475,9 +475,17 @@ async function listOpenDMs(limit, myUserId) {
   const lim = Math.min(Number(limit) || 40, 100);
   const counts = await slackWebApi('client.counts', {});
   if (!counts.ok) throw new Error('client.counts failed: ' + counts.error);
-  const ims   = (counts.ims   || []).map(c => ({ id: c.id, isGroup: false }));
-  const mpims = (counts.mpims || []).map(c => ({ id: c.id, isGroup: true  }));
-  const all = ims.concat(mpims).slice(0, lim);
+  // Carry activity signals so we can PRIORITIZE which DMs to poll when there
+  // are more than `lim`. Previously we sliced the raw API order and any DM
+  // beyond position `lim` was never polled — an active conversation could
+  // silently fall off and never get a reply. Sort unread-first, then by most
+  // recent activity, so the DMs most likely to need a reply are always kept.
+  const _ts = (c) => parseFloat(c.latest || c.updated || 0) || 0;
+  const ims   = (counts.ims   || []).map(c => ({ id: c.id, isGroup: false, unread: !!c.has_unreads, ts: _ts(c) }));
+  const mpims = (counts.mpims || []).map(c => ({ id: c.id, isGroup: true,  unread: !!c.has_unreads, ts: _ts(c) }));
+  const all = ims.concat(mpims)
+    .sort((a, b) => (Number(b.unread) - Number(a.unread)) || (b.ts - a.ts))
+    .slice(0, lim);
   // Parallel name resolution — resolve all conversations.info calls at once
   // instead of sequentially. With 40 DMs, sequential calls at 8s timeout each
   // could take 40×8s=320s; parallel reduces that to max(one call) ≈ 8s.

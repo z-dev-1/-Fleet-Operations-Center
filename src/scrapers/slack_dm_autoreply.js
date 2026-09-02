@@ -571,6 +571,11 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
     reply: "hey, let me look into that and get back to you shortly",
     category: 'workflow',
     title: (messageText || '').slice(0, 60),
+    // _fallback marks that the AI did NOT actually answer (timeout / empty /
+    // unparseable). The poll loop uses this to NOT advance the watermark past
+    // the message, so it gets RETRIED on the next cycle instead of being
+    // permanently marked handled with a canned holding reply.
+    _fallback: true,
   };
 
   if (!raw) {
@@ -786,6 +791,13 @@ async function pollDMAutoReplyOnce(log) {
       if (hasNewTopLevel && batchedMsgs.length < newMsgs.length) {
         doLog(`[SlackDM] ${dm.name}: batched ${newMsgs.length} messages into ${batchedMsgs.length}`);
       }
+      // Track the earliest message ts we could NOT genuinely answer this cycle
+      // (AI timeout/empty fallback, or a send failure). We cap the watermark
+      // just below it so those messages are RETRIED next poll instead of being
+      // permanently marked handled. null = everything answered.
+      let _retryFromTs = null;
+      const _markRetry = (ts) => { if (_retryFromTs == null || parseFloat(ts) < parseFloat(_retryFromTs)) _retryFromTs = ts; };
+
       if (hasNewTopLevel) { for (const msg of batchedMsgs) {
         // Defense-in-depth dedup, on top of _pollLock (same rationale as
         // channel watch's identical check — see that file for the real
@@ -898,6 +910,19 @@ async function pollDMAutoReplyOnce(log) {
           continue;
         }
 
+        // AI did NOT actually answer (timeout / empty / unparseable). Do NOT
+        // send the canned holding reply and do NOT mark this message handled —
+        // leave it for the next poll to retry, so a transient backend hang no
+        // longer permanently swallows a real question. Cap the watermark below
+        // this ts. (We still trace it so it's visible in the debugger.)
+        if (draft._fallback) {
+          _markRetry(msg.ts);
+          trace({ engine: 'dm', channel: dm.name, sender: msg.userId, ts: msg.ts, text: msg.text,
+            decision: 'skipped', reason: 'AI unavailable (timeout/empty) — will retry next poll', aiRaw: draft._raw || '' });
+          doLog(`[SlackDM] ${dm.name}: AI unavailable for ${msg.ts} — deferring for retry (no canned reply sent)`);
+          continue;
+        }
+
         // AUTO-FLIP: if this DM is asking to flip a specific unit back into
         // service, act on it (flip to Active) unless the unit is in a blocked
         // state (PM Failed / Expired Inspection / accident-damage). The result
@@ -931,6 +956,13 @@ async function pollDMAutoReplyOnce(log) {
           if (e.message && e.message.includes('restricted_action')) {
             _sendBlockedChannels.add(dm.channelId);
             doLog(`[SlackDM] ${dm.name}: marked as read-only — will skip sends for this session`);
+          } else {
+            // Transient send failure (network/rate-limit) — retry this message
+            // next poll instead of advancing past it and losing it. Don't log
+            // it as a handled entry.
+            _markRetry(msg.ts);
+            doLog(`[SlackDM] ${dm.name}: send failed for ${msg.ts} — deferring for retry`);
+            continue;
           }
         }
 
@@ -1111,9 +1143,24 @@ async function pollDMAutoReplyOnce(log) {
       // Advance lastSeenTs to the latest of: newest top-level msg OR newest
       // thread reply, so neither source can re-trigger on the next poll.
       const _topTs      = hasNewTopLevel ? newMsgs[newMsgs.length - 1].ts : seen.lastSeenTs;
-      const overallLatest = latestThreadReplyTs && parseFloat(latestThreadReplyTs) > parseFloat(_topTs)
+      let overallLatest = latestThreadReplyTs && parseFloat(latestThreadReplyTs) > parseFloat(_topTs)
         ? latestThreadReplyTs
         : _topTs;
+
+      // RETRY GUARD: if any message this cycle couldn't be genuinely answered
+      // (AI timeout/empty, or transient send failure), do NOT advance the
+      // watermark past it — cap just below the earliest such message so the
+      // next poll picks it up again. Prevents silently losing a real question
+      // to a transient backend/API hiccup.
+      if (_retryFromTs != null && parseFloat(_retryFromTs) <= parseFloat(overallLatest)) {
+        const capped = (parseFloat(_retryFromTs) - 0.000001).toFixed(6);
+        if (parseFloat(capped) > parseFloat(seen.lastSeenTs)) {
+          overallLatest = capped;
+        } else {
+          overallLatest = seen.lastSeenTs; // don't move watermark at all this cycle
+        }
+        doLog(`[SlackDM] ${dm.name}: holding watermark at ${overallLatest} to retry unanswered message(s) from ${_retryFromTs}`);
+      }
 
       _saveThreadLastSeen(dm.channelId, dm.name, overallLatest, dm.isGroup);
       // Auto-save every distinct sender seen in this thread to the contact
