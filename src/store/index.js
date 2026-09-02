@@ -89,6 +89,19 @@ const REGISTRY = {
   slackChannelReplies:     () => path.join(P.dataDir, 'slack_channel_replies.json'),
   slackDMAutoReplyConfig:  () => path.join(P.dataDir, 'slack_dm_autoreply_config.json'),
   slackDMReplies:          () => path.join(P.dataDir, 'slack_dm_replies.json'),
+  // RELIABILITY FIX (2026-09-02): slackDMThreadReplyCount was saved/loaded by
+  // slack_dm_autoreply.js but never registered here — so store.load threw and
+  // the thread-reply baseline cold-started on every launch. Registered now.
+  slackDMThreadReplyCount: () => path.join(P.dataDir, 'slack_dm_thread_reply_count.json'),
+  // Digital FAS agent (2026-09-02) — see src/orcha/fas/*.
+  // Sender profiles (seeded from contacts), persistent case memory, FAS
+  // playbook, knowledge-draft review queue, and agent config/audit.
+  slackSenderProfiles:     () => path.join(P.dataDir, 'slack_sender_profiles.json'),
+  fasCases:                () => path.join(P.dataDir, 'fas_cases.json'),
+  fasPlaybook:             () => path.join(P.dataDir, 'fas_playbook.json'),
+  fasKnowledgeDrafts:      () => path.join(P.dataDir, 'fas_knowledge_drafts.json'),
+  fasConfig:               () => path.join(P.dataDir, 'fas_config.json'),
+  fasAuditLog:             () => path.join(P.dataDir, 'fas_audit_log.json'),
   emailLastSnapshot:       () => path.join(P.dataDir, 'email_last_snapshot.json'),
   proactiveAlertHistory:  () => path.join(P.dataDir, 'proactive_alert_history.json'),
   proactiveLastScores:   () => path.join(P.dataDir, 'proactive_last_scores.json'),
