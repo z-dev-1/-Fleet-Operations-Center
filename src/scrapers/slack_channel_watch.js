@@ -870,6 +870,43 @@ async function pollChannelsOnce(log) {
           doLog(`[SlackWatch] ${ch.name}: strict-mode gate says clearly directed at me on ${msg.ts}`);
         }
 
+        // ── FAS EXECUTION-ORDER GATE (channel, Part 2) ────────────────────
+        // Approval/Autonomous: FAS owns the reply BEFORE the legacy classify
+        // AI call (also avoids a duplicate AI call). Disabled/Shadow fall
+        // through to the legacy classify+reply below.
+        let _fasModeC = 'disabled';
+        try { const _c = require('../orcha/fas/config').get(); _fasModeC = (_c && _c.enabled) ? (_c.mode || 'shadow') : 'disabled'; } catch (_) {}
+        if (_fasRunner && (_fasModeC === 'approval' || _fasModeC === 'autonomous')) {
+          try {
+            const _fr = await _fasRunner.handleInbound({
+              engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
+              channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text,
+            });
+            if (_fr && _fr.fasReply && String(_fr.fasReply).trim()) {
+              const _txt = (msg.userId ? `<@${msg.userId}> ` : '') + _fr.fasReply;
+              try {
+                const _sr = await sendToChannel(ch.id, _txt, msg.ts);
+                repliedCount++;
+                _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
+                  replyTs: _sr && _sr.ts, question: msg.text, reply: _txt, wasMentioned: mentioned,
+                  inScope: true, category: null, title: 'FAS autonomous channel reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
+              } catch (e) { doLog(`[SlackWatch] ${ch.name}: FAS autonomous send failed ${msg.ts}: ${e.message}`); }
+            } else {
+              _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
+                replyTs: null, question: msg.text, reply: '(FAS ' + _fasModeC + ': ' + ((_fr && _fr.outcome) || 'handled') + ')',
+                wasMentioned: mentioned, inScope: true, category: null, title: 'FAS ' + _fasModeC, createdAt: new Date().toISOString(), status: 'fas-' + ((_fr && _fr.outcome) || 'handled') });
+              doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) owned ${msg.ts} — legacy skipped`);
+            }
+          } catch (e) {
+            doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) error ${msg.ts}: ${e.message} — manual review`);
+            _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
+              replyTs: null, question: msg.text, reply: '', wasMentioned: mentioned, inScope: false, category: 'fas-error',
+              title: 'FAS error — manual review', createdAt: new Date().toISOString(), status: 'fas-error' });
+          }
+          _saveChannelLastSeen(ch.id, msg.ts);
+          continue; // FAS owns this channel message
+        }
+
         const draft = await _classifyAndDraft(msg.text, askOrcha, (ch && ch.operators) || []);
 
         // FEATURE (2026-07-22): always tag the person being responded to,
@@ -883,44 +920,25 @@ async function pollChannelsOnce(log) {
           decision: draft.inScope === false ? 'escalated' : 'replied',
           reason: mentioned ? 'literal @-mention of me' : (isThreadReplyToMyMention ? 'reply in my mention thread' : 'gate: directed at me / chime-in'),
           mentioned: mentioned, aiRaw: draft._raw, reply: draft.reply });
-        // DIGITAL FAS UNIFIED RUNNER — decide reply ownership by mode. In
-        // shadow/disabled the legacy channel reply is sent as before (runner
-        // records the comparison). In approval mode the proposed reply is
-        // queued and the legacy engine stays silent. In autonomous mode the
-        // runner may auto-send its own reply or queue it.
-        let _fasOwnsChannelReply = false;
-        let _channelReplyText = draft.reply;
-        if (_fasRunner) {
+        // DIGITAL FAS SHADOW COMPARISON. Only reached in Disabled/Shadow
+        // (Approval/Autonomous handled by the execution-order gate above). In
+        // Shadow, record the comparison only — never suppress/replace.
+        if (_fasRunner && _fasModeC === 'shadow') {
           try {
-            const _fr = await _fasRunner.handleInbound({
+            await _fasRunner.handleInbound({
               engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
               channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text, actualReply: draft.reply,
             });
-            if (_fr && _fr.letLegacyReply === false) {
-              if (_fr.fasReply && String(_fr.fasReply).trim()) {
-                _channelReplyText = _fr.fasReply;
-                doLog(`[SlackWatch] ${ch.name}: FAS(${_fr.mode}) auto-sending channel reply for ${msg.ts}`);
-              } else {
-                _fasOwnsChannelReply = true;
-                doLog(`[SlackWatch] ${ch.name}: FAS(${_fr.mode}) queued channel reply for ${msg.ts} (${_fr.outcome}) — legacy suppressed`);
-              }
-            }
-          } catch (_e) { /* never break the live path */ }
+          } catch (_e) { /* shadow comparison must never break the live path */ }
         }
 
-        const _taggedFinal = (msg.userId ? `<@${msg.userId}> ` : '') + _channelReplyText;
         let replyTs = null;
-        if (!_fasOwnsChannelReply) {
-          try {
-            const sendResult = await sendToChannel(ch.id, _taggedFinal, msg.ts);
-            replyTs = sendResult.ts;
-            repliedCount++;
-          } catch (e) {
-            doLog(`[SlackWatch] ${ch.name}: reply send FAILED: ${e.message}`);
-          }
-        } else {
-          trace({ engine: 'channel', channel: ch.name, sender: msg.userId, ts: msg.ts, text: msg.text,
-            decision: 'fas-queued', reason: 'FAS approval/autonomous queued the channel reply', reply: '' });
+        try {
+          const sendResult = await sendToChannel(ch.id, taggedReply, msg.ts);
+          replyTs = sendResult.ts;
+          repliedCount++;
+        } catch (e) {
+          doLog(`[SlackWatch] ${ch.name}: reply send FAILED: ${e.message}`);
         }
 
         const entry = {
@@ -930,7 +948,7 @@ async function pollChannelsOnce(log) {
           ts: msg.ts,
           replyTs,
           question: msg.text,
-          reply: _fasOwnsChannelReply ? '(queued for FAS approval)' : _taggedFinal,
+          reply: taggedReply,
           wasMentioned: mentioned,
           wasThreadReply: isThreadReplyToMyMention,
           inScope: draft.inScope,

@@ -878,6 +878,51 @@ async function pollDMAutoReplyOnce(log) {
             })
         );
 
+        // ── DIGITAL FAS EXECUTION-ORDER GATE (Part 2) ─────────────────────
+        // Resolve the FAS mode BEFORE any legacy classification or legacy
+        // mutation. In Approval/Autonomous mode, FAS is primary and owns the
+        // message end-to-end: the legacy auto-flip (lifecycle mutation) and the
+        // legacy Create-WR shortcut MUST NOT run first and bypass FAS policy.
+        // Only Disabled/Shadow fall through to the legacy path below (Shadow
+        // still lets legacy reply and records a comparison afterward).
+        let _fasMode = 'disabled';
+        try { const _cfg = require('../orcha/fas/config').get(); _fasMode = (_cfg && _cfg.enabled) ? (_cfg.mode || 'shadow') : 'disabled'; } catch (_) {}
+        if (_fasRunner && (_fasMode === 'approval' || _fasMode === 'autonomous')) {
+          try {
+            const _fr = await _fasRunner.handleInbound({
+              engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
+              channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
+              isGroup: !!dm.isGroup, conversation: historyMsgs,
+            });
+            // Autonomous may auto-send a verified reply; approval/queued send nothing now.
+            if (_fr && _fr.fasReply && String(_fr.fasReply).trim()) {
+              const _txt = (msg.userId ? `<@${msg.userId}> ` : '') + _fr.fasReply;
+              try {
+                const _sr = await sendToChannel(dm.channelId, _txt, msg.threadTs || undefined);
+                repliedCount++;
+                _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
+                  ts: msg.ts, replyTs: _sr && _sr.ts, question: msg.text, reply: _txt, inScope: true,
+                  category: null, title: 'FAS autonomous reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
+              } catch (e) { doLog(`[SlackDM] ${dm.name}: FAS autonomous send failed for ${msg.ts}: ${e.message}`); _markRetry(msg.ts); continue; }
+            } else {
+              // Queued for approval, manual-review (AI failure), or clarify.
+              _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
+                ts: msg.ts, replyTs: null, question: msg.text, reply: '(FAS ' + _fasMode + ': ' + ((_fr && _fr.outcome) || 'handled') + ')',
+                inScope: true, category: null, title: 'FAS ' + _fasMode, createdAt: new Date().toISOString(), status: 'fas-' + ((_fr && _fr.outcome) || 'handled') });
+              doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) owned ${msg.ts} (${(_fr && _fr.outcome) || 'handled'}) — legacy path skipped`);
+            }
+          } catch (e) {
+            // FAIL SAFE: never drop the message. Record a manual-review item
+            // rather than silently falling through to legacy mutations.
+            doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) error on ${msg.ts}: ${e.message} — recorded for manual review`);
+            _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
+              ts: msg.ts, replyTs: null, question: msg.text, reply: '', inScope: false, category: 'fas-error',
+              title: 'FAS error — manual review', createdAt: new Date().toISOString(), status: 'fas-error' });
+          }
+          _saveThreadSeen(dm.channelId, dm.name, msg.ts, !!dm.isGroup);
+          continue; // FAS owns this message; do NOT run legacy classify/flip/WR
+        }
+
         // CREATE-WR (Bucket 3, Option A): if this is a grounding / predictive-
         // maintenance alert (or explicit "create the WR" ask), draft a WR for
         // Z's approval — DO NOT reply to the partner/alert channel. This is a
@@ -1010,51 +1055,26 @@ async function pollDMAutoReplyOnce(log) {
           }
         }
 
-        // ── DIGITAL FAS UNIFIED RUNNER ────────────────────────────────────
-        // Decide who owns this reply based on FAS mode. In shadow/disabled the
-        // legacy draft is sent as before (runner records the comparison). In
-        // approval mode the runner queues the proposed reply and the legacy
-        // engine stays SILENT (no duplicate). In autonomous mode the runner may
-        // return a fasReply to send instead of the legacy draft, or queue it.
-        let _fasOwnsReply = false;   // FAS suppressed the legacy send (queued)
-        let _replyText = draft.reply; // may be replaced by a FAS auto-send
-        if (_fasRunner) {
+        // ── DIGITAL FAS SHADOW COMPARISON ─────────────────────────────────
+        // We only reach here in Disabled/Shadow mode (Approval/Autonomous were
+        // handled by the execution-order gate above and skipped the legacy
+        // path). In Shadow mode, run the FAS agent purely to RECORD how its
+        // draft compares to the legacy reply we are about to send — it must
+        // never suppress or replace the legacy reply here.
+        if (_fasRunner && _fasMode === 'shadow') {
           try {
-            const _fr = await _fasRunner.handleInbound({
+            await _fasRunner.handleInbound({
               engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
               channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
               isGroup: !!dm.isGroup, conversation: historyMsgs, actualReply: draft.reply,
             });
-            if (_fr && _fr.letLegacyReply === false) {
-              if (_fr.fasReply && String(_fr.fasReply).trim()) {
-                _replyText = _fr.fasReply;           // autonomous auto-send
-                doLog(`[SlackDM] ${dm.name}: FAS(${_fr.mode}) auto-sending reply for ${msg.ts}`);
-              } else {
-                _fasOwnsReply = true;                 // approval/queued — send nothing
-                doLog(`[SlackDM] ${dm.name}: FAS(${_fr.mode}) queued reply for ${msg.ts} (${_fr.outcome}) — legacy suppressed`);
-              }
-            }
-          } catch (_e) { /* runner must never break the live path — fall back to legacy send */ }
+          } catch (_e) { /* shadow comparison must never break the live path */ }
         }
 
         let replyTs = null;
         // Declared outside the try so it is in scope for the log entry below
         // regardless of whether the send succeeds or throws.
-        const taggedReply = (msg.userId ? `<@${msg.userId}> ` : '') + _replyText;
-        if (_fasOwnsReply) {
-          // FAS queued this for approval — record it as handled (so the
-          // watermark advances; the message is processed, not lost) but send
-          // nothing outbound this cycle.
-          _appendReplyLog({
-            id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
-            ts: msg.ts, replyTs: null, question: msg.text, reply: '(queued for FAS approval)',
-            inScope: true, category: null, title: draft.title,
-            createdAt: new Date().toISOString(), status: 'fas-queued',
-          });
-          trace({ engine: 'dm', channel: dm.name, sender: msg.userId, ts: msg.ts, text: msg.text,
-            decision: 'fas-queued', reason: 'FAS approval/autonomous queued the reply', reply: '' });
-          continue; // next message; watermark logic below still advances
-        }
+        const taggedReply = (msg.userId ? `<@${msg.userId}> ` : '') + draft.reply;
         try {
           // Reply in-thread if the incoming message was itself part of a
           // thread (msg.threadTs is null for plain top-level messages, so
@@ -1197,6 +1217,43 @@ async function pollDMAutoReplyOnce(log) {
               ? { isGroup: true, memberNames: (dm.name || '').split(', ').filter(Boolean), speakerName: speakerNameT }
               : null;
 
+            // ── FAS EXECUTION-ORDER GATE (thread replies, Part 2) ──────────
+            // Approval/Autonomous: FAS owns the thread reply BEFORE any legacy
+            // classification/mutation. Disabled/Shadow fall through to legacy.
+            let _fasModeT = 'disabled';
+            try { const _c = require('../orcha/fas/config').get(); _fasModeT = (_c && _c.enabled) ? (_c.mode || 'shadow') : 'disabled'; } catch (_) {}
+            if (_fasRunner && (_fasModeT === 'approval' || _fasModeT === 'autonomous')) {
+              try {
+                const _fr = await _fasRunner.handleInbound({
+                  engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
+                  channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
+                  isGroup: !!dm.isGroup, conversation: threadContext,
+                });
+                if (_fr && _fr.fasReply && String(_fr.fasReply).trim()) {
+                  const _txt = (reply.userId ? `<@${reply.userId}> ` : '') + _fr.fasReply;
+                  try {
+                    const _sr = await sendToChannel(dm.channelId, _txt, parentMsg.ts);
+                    repliedCount++;
+                    _appendReplyLog({ id: replyLogId, channelId: dm.channelId, channelName: dm.name, ts: reply.ts,
+                      threadTs: parentMsg.ts, replyTs: _sr && _sr.ts, question: reply.text, reply: _txt, inScope: true,
+                      category: null, title: 'FAS autonomous thread reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
+                  } catch (e) { doLog(`[SlackDM] ${dm.name}: FAS autonomous thread send failed ${reply.ts}: ${e.message}`); continue; }
+                } else {
+                  _appendReplyLog({ id: replyLogId, channelId: dm.channelId, channelName: dm.name, ts: reply.ts,
+                    threadTs: parentMsg.ts, replyTs: null, question: reply.text, reply: '(FAS ' + _fasModeT + ': ' + ((_fr && _fr.outcome) || 'handled') + ')',
+                    inScope: true, category: null, title: 'FAS ' + _fasModeT, createdAt: new Date().toISOString(), status: 'fas-' + ((_fr && _fr.outcome) || 'handled') });
+                  doLog(`[SlackDM] ${dm.name}: FAS(${_fasModeT}) owned thread reply ${reply.ts} — legacy skipped`);
+                }
+              } catch (e) {
+                doLog(`[SlackDM] ${dm.name}: FAS(${_fasModeT}) thread error ${reply.ts}: ${e.message} — manual review`);
+                _appendReplyLog({ id: replyLogId, channelId: dm.channelId, channelName: dm.name, ts: reply.ts,
+                  threadTs: parentMsg.ts, replyTs: null, question: reply.text, reply: '', inScope: false, category: 'fas-error',
+                  title: 'FAS error — manual review', createdAt: new Date().toISOString(), status: 'fas-error' });
+              }
+              if (!latestThreadReplyTs || parseFloat(reply.ts) > parseFloat(latestThreadReplyTs)) latestThreadReplyTs = reply.ts;
+              continue; // FAS owns this thread reply
+            }
+
             // Enrich AI prompt with any links or files in this thread reply
             const attachCtxT = await _buildAttachmentContext(reply, downloadFileContent);
             const replyTextWithAttach = (reply.text || '') + attachCtxT;
@@ -1220,37 +1277,17 @@ async function pollDMAutoReplyOnce(log) {
               continue; // NOT advancing latestThreadReplyTs -> retried next poll
             }
 
-            // DIGITAL FAS UNIFIED RUNNER (thread-reply parity with top-level).
-            let _fasOwnsThreadReply = false;
-            let _threadReplyText = draft.reply;
-            if (_fasRunner) {
+            // DIGITAL FAS SHADOW COMPARISON (thread replies). Only reached in
+            // Disabled/Shadow (Approval/Autonomous handled by the gate above).
+            // In Shadow, record the comparison only — never suppress/replace.
+            if (_fasRunner && _fasModeT === 'shadow') {
               try {
-                const _fr = await _fasRunner.handleInbound({
+                await _fasRunner.handleInbound({
                   engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
                   channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
                   isGroup: !!dm.isGroup, conversation: threadContext, actualReply: draft.reply,
                 });
-                if (_fr && _fr.letLegacyReply === false) {
-                  if (_fr.fasReply && String(_fr.fasReply).trim()) {
-                    _threadReplyText = _fr.fasReply;
-                    doLog(`[SlackDM] ${dm.name}: FAS(${_fr.mode}) auto-sending thread reply for ${reply.ts}`);
-                  } else {
-                    _fasOwnsThreadReply = true;
-                    doLog(`[SlackDM] ${dm.name}: FAS(${_fr.mode}) queued thread reply for ${reply.ts} (${_fr.outcome}) — legacy suppressed`);
-                  }
-                }
-              } catch (_e) { /* never break the live path */ }
-            }
-            if (_fasOwnsThreadReply) {
-              // Queued for approval — mark processed (advance thread watermark)
-              // and send nothing outbound this cycle.
-              if (!latestThreadReplyTs || parseFloat(reply.ts) > parseFloat(latestThreadReplyTs)) latestThreadReplyTs = reply.ts;
-              _appendReplyLog({ id: replyLogId, channelId: dm.channelId, channelName: dm.name, ts: reply.ts,
-                threadTs: parentMsg.ts, replyTs: null, question: reply.text, reply: '(queued for FAS approval)',
-                inScope: true, category: null, title: draft.title, createdAt: new Date().toISOString(), status: 'fas-queued' });
-              trace({ engine: 'dm-thread', channel: dm.name, sender: reply.userId, ts: reply.ts, text: reply.text,
-                decision: 'fas-queued', reason: 'FAS approval/autonomous queued the thread reply', reply: '' });
-              continue;
+              } catch (_e) { /* shadow comparison must never break the live path */ }
             }
 
             let replyTs = null;
@@ -1258,7 +1295,7 @@ async function pollDMAutoReplyOnce(log) {
             let _threadSendFailed = false;
             try {
               // Reply in the same thread as the parent message.
-              taggedReplyT = (reply.userId ? `<@${reply.userId}> ` : '') + _threadReplyText;
+              taggedReplyT = (reply.userId ? `<@${reply.userId}> ` : '') + draft.reply;
               const sendResult = await sendToChannel(dm.channelId, taggedReplyT, parentMsg.ts);
               replyTs = sendResult.ts;
               repliedCount++;
