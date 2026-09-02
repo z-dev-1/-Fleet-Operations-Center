@@ -35,6 +35,21 @@ function _findRow(rows, unitToken) {
   return rows.find(r => (r.equipmentId || '').trim().toUpperCase() === q) || null;
 }
 
+// Enforce BOTH: (1) the sender is allowed the data CATEGORY, and (2) the unit
+// is within the sender's operator/domicile scope. Returns null if OK, or a
+// denied result to return directly. Applied by every unit read tool so
+// authorization is code-enforced, not prompt-enforced.
+function _scopeCheck(ctx, row, category) {
+  if (!ctx || !ctx.profile) return { ok: false, error: 'sender profile required' };
+  if (category && !profiles.canViewCategory(ctx.profile, category)) {
+    return { ok: false, denied: true, error: 'sender not authorized for data category: ' + category };
+  }
+  if (!profiles.scopeUnitForSender(ctx.profile, row)) {
+    return { ok: false, denied: true, error: 'sender not authorized for unit ' + row.equipmentId + ' (operator/domicile scope)' };
+  }
+  return null;
+}
+
 // ── READ TOOLS ─────────────────────────────────────────────────────────────
 // Each: (args, ctx) -> { ok, verifiedFacts?, data?, error?, denied? }
 // ctx = { profile }  (sender profile for scoping)
@@ -43,9 +58,7 @@ function GET_UNIT(args, ctx) {
   const { rows, syncedAt } = _loadFleet();
   const row = _findRow(rows, args && args.unit);
   if (!row) return { ok: false, error: 'unit not found: ' + (args && args.unit) };
-  if (!profiles.scopeUnitForSender(ctx.profile, row)) {
-    return { ok: false, denied: true, error: 'sender not authorized for unit ' + row.equipmentId + ' (operator/domicile scope)' };
-  }
+  const denied = _scopeCheck(ctx, row, 'unit_status'); if (denied) return denied;
   const facts = [
     _fact('unit', row.equipmentId, 'fleetData'),
     _fact('lifecycleState', row.lifecycleState || 'unknown', 'AAP/fleetData'),
@@ -62,7 +75,7 @@ function GET_REPAIR_TIMELINE(args, ctx) {
   const { rows } = _loadFleet();
   const row = _findRow(rows, args && args.unit);
   if (!row) return { ok: false, error: 'unit not found' };
-  if (!profiles.scopeUnitForSender(ctx.profile, row)) return { ok: false, denied: true, error: 'not authorized' };
+  const denied = _scopeCheck(ctx, row, 'repair_timeline'); if (denied) return denied;
   const ns = _loadNotes()[row.equipmentId] || {};
   const tl = (ns.timeline || row.repairTimeline || '').trim();
   const lines = tl ? tl.split('\n').filter(Boolean).slice(-8) : [];
@@ -78,7 +91,7 @@ function GET_OPEN_WORK_ORDERS(args, ctx) {
   const { rows } = _loadFleet();
   const row = _findRow(rows, args && args.unit);
   if (!row) return { ok: false, error: 'unit not found' };
-  if (!profiles.scopeUnitForSender(ctx.profile, row)) return { ok: false, denied: true, error: 'not authorized' };
+  const denied = _scopeCheck(ctx, row, 'work_orders'); if (denied) return denied;
   const openU = parseInt(row.openUnplanned, 10) || 0;
   const openP = parseInt(row.openPlanned, 10) || 0;
   return { ok: true, verifiedFacts: [
@@ -93,7 +106,7 @@ function GET_PM_STATUS(args, ctx) {
   const { rows } = _loadFleet();
   const row = _findRow(rows, args && args.unit);
   if (!row) return { ok: false, error: 'unit not found' };
-  if (!profiles.scopeUnitForSender(ctx.profile, row)) return { ok: false, denied: true, error: 'not authorized' };
+  const denied = _scopeCheck(ctx, row, 'pm_status'); if (denied) return denied;
   return { ok: true, verifiedFacts: [
     _fact('pmB', row.pmB || row.pmBDue || null, 'fleetData'),
     _fact('pmX', row.pmX || row.pmXDue || null, 'fleetData'),
@@ -106,7 +119,7 @@ function GET_UPTAKE_INSIGHTS(args, ctx) {
   const { rows } = _loadFleet();
   const row = _findRow(rows, args && args.unit);
   if (!row) return { ok: false, error: 'unit not found' };
-  if (!profiles.scopeUnitForSender(ctx.profile, row)) return { ok: false, denied: true, error: 'not authorized' };
+  const denied = _scopeCheck(ctx, row, 'uptake'); if (denied) return denied;
   const insights = Array.isArray(row.insightsList) ? row.insightsList.map(i => ({ title: i.title || i.name, active: i.stillActive !== false })) : [];
   return { ok: true, verifiedFacts: [
     _fact('riskScore', row.riskScore != null ? row.riskScore : null, 'Uptake'),
@@ -168,6 +181,10 @@ function _aggregate(units, kind, key) {
 }
 
 function GET_VENDOR_CONTACT(args, ctx) {
+  // Authorization: sender must be allowed the vendor_contact data category.
+  if (!profiles.canViewCategory(ctx.profile, 'vendor_contact')) {
+    return { ok: false, denied: true, error: 'sender not authorized for vendor contact info' };
+  }
   const name = String((args && args.vendor) || '').trim().toLowerCase();
   if (!name) return { ok: false, error: 'vendor required' };
   const contacts = store.load('contacts', []) || [];
@@ -193,6 +210,12 @@ function GET_SENDER_PROFILE(args, ctx) {
 }
 
 async function ASK_INTERNAL(args, ctx) {
+  // Authorization: ASK_INTERNAL consults the internal Amazon agent (AITeammate).
+  // Only internal/manager senders may trigger it — never external carriers/vendors.
+  const auth = profiles.authorizationSummary(ctx.profile);
+  if (!auth.isInternal) {
+    return { ok: false, denied: true, error: 'ASK_INTERNAL restricted to internal users' };
+  }
   try {
     const { askInternal } = require('../ask-internal');
     const q = (args && args.question) || '';

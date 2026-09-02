@@ -59,7 +59,17 @@ async function buildEvidence({ profile, text, question, factsNeeded }) {
   const entities = resolveMessageEntities(text || question || '');
   const fd = store.load('fleetData', {});
   const syncedAt = (fd && (fd.syncedAt || fd.updatedAt)) || null;
-  const stale = syncedAt ? (Date.now() - Date.parse(syncedAt) > STALE_MS) : true;
+  // FIX: use the CONFIGURED freshness window, not a hard-coded constant.
+  let freshnessMs = STALE_MS;
+  try { freshnessMs = require('./config').get().dataFreshnessMs || STALE_MS; } catch (_) {}
+  const stale = syncedAt ? (Date.now() - Date.parse(syncedAt) > freshnessMs) : true;
+  const q = (text || question || '');
+  // FIX: only treat a missing ETC as a gap when the request actually asks about
+  // timing/completion — don't label every unit as "missing ETC".
+  const _asksEtc = /\b(etc|eta|when|ready|complete|completion|done|back|timeline|estimate|how long)\b/i.test(q);
+  // factsNeeded (optional AI hint) can force specific tool families to run.
+  const _need = Array.isArray(factsNeeded) ? factsNeeded.map(s => String(s).toLowerCase()) : [];
+  const _wants = (kind) => !_need.length || _need.some(n => n.includes(kind));
 
   const verifiedFacts = [];
   const openWorkOrders = [];
@@ -77,29 +87,40 @@ async function buildEvidence({ profile, text, question, factsNeeded }) {
     if (u.denied) { denied.push(unit); continue; }
     if (!u.ok) { missingFacts.push('unit record for ' + unit); continue; }
     u.verifiedFacts.forEach(f => { verifiedFacts.push(f); sources.add(f.source); });
-    const wo = await tools.runTool('GET_OPEN_WORK_ORDERS', { unit }, ctx);
-    if (wo.ok) { wo.verifiedFacts.forEach(f => { if (f.field === 'hasOpenWR' || f.field === 'workRequestId') { verifiedFacts.push(f); } }); openWorkOrders.push({ unit, facts: wo.verifiedFacts }); }
-    const tl = await tools.runTool('GET_REPAIR_TIMELINE', { unit }, ctx);
-    if (tl.ok) tl.verifiedFacts.forEach(f => { verifiedFacts.push(f); sources.add(f.source); });
-    const pm = await tools.runTool('GET_PM_STATUS', { unit }, ctx);
-    if (pm.ok) pm.verifiedFacts.forEach(f => verifiedFacts.push(f));
-    const up = await tools.runTool('GET_UPTAKE_INSIGHTS', { unit }, ctx);
-    if (up.ok) up.verifiedFacts.forEach(f => verifiedFacts.push(f));
+    if (_wants('work') || _wants('wr') || _wants('repair')) {
+      const wo = await tools.runTool('GET_OPEN_WORK_ORDERS', { unit }, ctx);
+      if (wo.ok) { wo.verifiedFacts.forEach(f => { if (f.field === 'hasOpenWR' || f.field === 'workRequestId') { verifiedFacts.push(f); } }); openWorkOrders.push({ unit, facts: wo.verifiedFacts }); }
+    }
+    if (_wants('repair') || _wants('timeline') || _wants('status') || !_need.length) {
+      const tl = await tools.runTool('GET_REPAIR_TIMELINE', { unit }, ctx);
+      if (tl.ok) tl.verifiedFacts.forEach(f => { verifiedFacts.push(f); sources.add(f.source); });
+    }
+    if (_wants('pm') || _wants('inspection') || !_need.length) {
+      const pm = await tools.runTool('GET_PM_STATUS', { unit }, ctx);
+      if (pm.ok) pm.verifiedFacts.forEach(f => verifiedFacts.push(f));
+    }
+    if (_wants('uptake') || _wants('risk') || !_need.length) {
+      const up = await tools.runTool('GET_UPTAKE_INSIGHTS', { unit }, ctx);
+      if (up.ok) up.verifiedFacts.forEach(f => verifiedFacts.push(f));
+    }
 
-    // Common missing fact: no confirmed ETC anywhere in the data.
-    const hasEtc = verifiedFacts.some(f => /etc|estimated completion/i.test(f.field));
-    if (!hasEtc) missingFacts.push('confirmed ETC for ' + unit);
+    // Only flag a missing ETC when the request is actually about timing/completion.
+    if (_asksEtc) {
+      const hasEtc = verifiedFacts.some(f => /\betc\b|estimated completion|completion date/i.test(f.field) && f.value);
+      if (!hasEtc) missingFacts.push('confirmed ETC for ' + unit + ' (no source confirms a completion date)');
+    }
   }
 
   // Group (site/operator) evidence — aggregated, not per-unit dumps.
+  // FIX: resolveEntities groups carry `.value` (not `.key`).
   for (const g of entities.groups.slice(0, 2)) {
     if (g.kind === 'site') {
-      const s = await tools.runTool('GET_SITE_SUMMARY', { domicile: g.key }, ctx);
-      if (s.denied) denied.push('site:' + g.key);
+      const s = await tools.runTool('GET_SITE_SUMMARY', { domicile: g.value }, ctx);
+      if (s.denied) denied.push('site:' + g.value);
       else if (s.ok) { verifiedFacts.push({ field: 'siteSummary', value: s.summary, source: s.source, retrievedAt: s.retrievedAt }); sources.add(s.source); }
     } else if (g.kind === 'operator') {
-      const o = await tools.runTool('GET_OPERATOR_SUMMARY', { operator: g.key }, ctx);
-      if (o.denied) denied.push('operator:' + g.key);
+      const o = await tools.runTool('GET_OPERATOR_SUMMARY', { operator: g.value }, ctx);
+      if (o.denied) denied.push('operator:' + g.value);
       else if (o.ok) { verifiedFacts.push({ field: 'operatorSummary', value: o.summary, source: o.source, retrievedAt: o.retrievedAt }); sources.add(o.source); }
     }
   }
@@ -117,6 +138,27 @@ async function buildEvidence({ profile, text, question, factsNeeded }) {
       (lr.evidence || []).forEach(f => { verifiedFacts.push(f); sources.add(f.source); });
       (lr.refused || []).forEach(r => linkRefusals.push(r));
     } catch (e) { /* link research is best-effort */ }
+  }
+
+  // ── CONFLICT DETECTION across the collected sources ──────────────────────
+  // Surface contradictions so the AI reasons about them instead of picking one
+  // silently. Real checks against the facts we actually gathered:
+  const _factVal = (field) => { const f = verifiedFacts.find(x => x.field === field); return f ? f.value : undefined; };
+  const _lifecycle = String(_factVal('lifecycleState') || '');
+  const _repairStatus = String(_factVal('repairStatus') || '');
+  const _hasOpenWR = _factVal('hasOpenWR');
+  const _timeline = _factVal('recentTimeline');
+  const _timelineStr = Array.isArray(_timeline) ? _timeline.join(' ') : String(_timeline || '');
+  if (/active/i.test(_lifecycle) && _hasOpenWR === true) {
+    conflicts.push({ type: 'lifecycle_vs_wr', detail: 'Unit shows ACTIVE but still has an open work order — confirm whether the repair is actually closed.' });
+  }
+  if (/unavail/i.test(_lifecycle) && /(repair complete|ready|completed|good to go|back in service)/i.test(_repairStatus + ' ' + _timelineStr)) {
+    conflicts.push({ type: 'repair_complete_vs_unavailable', detail: 'Repair notes indicate complete/ready but lifecycle is still Unavailable — the flip may not have been done, or the notes are ahead of the source system.' });
+  }
+  // Freshness conflict: repair notes newer/older than the fleet sync.
+  const _notesAt = _factVal('notesUpdatedAt');
+  if (_notesAt && syncedAt && Date.parse(_notesAt) > Date.parse(syncedAt) + 3600 * 1000) {
+    conflicts.push({ type: 'notes_newer_than_sync', detail: 'Repair notes were updated after the last fleet sync — the live source system may show a newer state than fleetData.' });
   }
 
   // Prior promises / open questions from case memory (compact).
