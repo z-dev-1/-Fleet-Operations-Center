@@ -266,6 +266,30 @@ function GET_OFFSITE_EVENT_TIMELINE(args, ctx) {
   ] };
 }
 
+// ── SEARCH_SLACK ────────────────────────────────────────────────────────────
+// Authorized Slack message-content search over the local index of monitored
+// surfaces. Results are re-filtered by the requesting sender's scope inside the
+// adapter. Unknown/unauthorized senders (no data categories) get nothing.
+function SEARCH_SLACK(args, ctx) {
+  if (!ctx || !ctx.profile) return { ok: false, error: 'sender profile required' };
+  if (!(ctx.profile.allowedDataCategories || []).length) {
+    return { ok: false, denied: true, error: 'sender not authorized to search Slack' };
+  }
+  let searcher;
+  try { searcher = require('./slack-search'); } catch (e) { return { ok: false, error: 'slack search unavailable' }; }
+  const q = {
+    unit: (args && args.unit) || '', vendor: (args && args.vendor) || '',
+    operator: (args && args.operator) || '', domicile: (args && args.domicile) || '',
+    keywords: (args && args.keywords) || '', sender: (args && args.sender) || '',
+    channel: (args && args.channel) || '',
+    fromMs: (args && args.fromMs) || 0, toMs: (args && args.toMs) || undefined,
+  };
+  const res = searcher.searchSlack(q, ctx.profile, {});
+  if (!res.ok) return { ok: false, error: res.error || 'search failed' };
+  return { ok: true, summary: res.results.length + ' Slack match(es)' + (res.truncated ? ' (capped)' : ''),
+    verifiedFacts: [ _fact('slackMatches', res.results, 'SlackSearch') ] };
+}
+
 function GET_SITE_SUMMARY(args, ctx) {
   const { rows } = _loadFleet();
   const site = String((args && args.domicile) || '').trim().toUpperCase();
@@ -382,6 +406,7 @@ const READ_TOOLS = {
   GET_RELAY_REPAIR_TIMELINE,
   GET_OFFSITE_EVENT,
   GET_OFFSITE_EVENT_TIMELINE,
+  SEARCH_SLACK,
   GET_SITE_SUMMARY,
   GET_OPERATOR_SUMMARY,
   GET_VENDOR_CONTACT,

@@ -53,6 +53,10 @@ let _sentMessages; // [{ channelId, text, threadTs }]
 let _fakeMessages;  // messages readMessages() returns
 injectFakeModule('../src/scrapers/slack_send', {
   readMessages: async () => _fakeMessages,
+  // Thread-reply merge path is real in production (slack_send exports this);
+  // provide a stub so the SUT exercises the merge instead of logging a
+  // misleading "readThreadReplies is not a function" fallback.
+  readThreadReplies: async () => [],
   sendToChannel: async (channelId, text, threadTs) => {
     _sentMessages.push({ channelId, text, threadTs });
     return { ts: 'reply-' + _sentMessages.length };
