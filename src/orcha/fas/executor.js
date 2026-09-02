@@ -33,6 +33,54 @@ let logger; try { logger = require('../../utils/logger').createLogger('fas-exec'
 const now = () => new Date().toISOString();
 const QUEUE_CAP = 300;
 
+// Actions that require internal/operator approval regardless of the sender's
+// category permission — a lifecycle change or WR submission must never be
+// initiated by an external carrier/vendor even if their profile lists the
+// request type. (Part 11: category permission != per-unit authority.)
+const INTERNAL_ONLY_ACTIONS = new Set(['MOVE_UNIT', 'SUBMIT_WORK_REQUEST']);
+
+// ── UNIT-LEVEL AUTHORIZATION (Part 11) ───────────────────────────────────────
+// Category permission (canRequest) is NOT sufficient. For any unit-specific
+// action we must ALSO confirm the TARGET UNIT is within the sender's
+// operator/domicile scope, and that lifecycle/WR actions are only initiated by
+// internal/operator actors. This is called BOTH at proposal time AND again at
+// EXECUTION time (authorization can change between the two).
+function _authorizeUnitAction(name, args, profile, action) {
+  action = action || actions.getAction(name);
+  // 1) Category permission.
+  if (action && action.requires && !profiles.canRequest(profile, action.requires)) {
+    return { ok: false, reason: 'sender not authorized for request type ' + action.requires };
+  }
+  // 2) Lifecycle / WR-submission require internal/operator authority.
+  const isInternal = !!(profile && (profile.type === 'internal' || profile.type === 'manager'));
+  if (INTERNAL_ONLY_ACTIONS.has(name) && !isInternal) {
+    return { ok: false, reason: name + ' requires internal/operator approval' };
+  }
+  // 3) Per-UNIT scope: if the action targets a specific unit, an EXTERNAL
+  //    (scoped) sender may only act on units inside their operator/domicile
+  //    scope. Internal/manager users have fleet-wide authority, so a unit not
+  //    present in the local cache does not block them (it may simply be
+  //    un-synced). External senders acting on an unknown or out-of-scope unit
+  //    are denied.
+  const unit = args && (args.unit || args.equipmentId);
+  if (unit && !isInternal) {
+    let row = null;
+    try {
+      const fd = store.load('fleetData', {});
+      const rows = (fd && fd.rows) || [];
+      const u = String(unit).trim().toUpperCase();
+      row = rows.find(r => String(r.equipmentId || '').trim().toUpperCase() === u) || null;
+    } catch (_) {}
+    if (!row) return { ok: false, reason: 'target unit ' + unit + ' not found / not in sender scope' };
+    try {
+      if (!profiles.scopeUnitForSender(profile, row)) {
+        return { ok: false, reason: 'unit ' + unit + ' is outside sender scope' };
+      }
+    } catch (_) { return { ok: false, reason: 'unit scope check failed' }; }
+  }
+  return { ok: true };
+}
+
 function _loadQueue() { const q = store.load('fasApprovalQueue', []); return Array.isArray(q) ? q : []; }
 function _saveQueue(q) { store.save('fasApprovalQueue', q.slice(0, QUEUE_CAP)); }
 
@@ -76,6 +124,16 @@ function _recordIdem(key, entry) {
 async function executeVerified(name, args, ctx) {
   const action = actions.getAction(name);
   if (!action) return { status: 'error', error: 'unknown action: ' + name };
+
+  // ── RE-CHECK AUTHORIZATION AT EXECUTION TIME (Part 11) ────────────────────
+  // Authorization is verified again here, not only when the proposal was
+  // created — the sender's scope or the unit's ownership may have changed. A
+  // blocked action must never execute.
+  const authz = _authorizeUnitAction(name, args, ctx && ctx.profile, action);
+  if (!authz.ok) {
+    _audit({ action: name, status: 'blocked-at-exec', reason: authz.reason });
+    return { status: 'blocked', error: authz.reason };
+  }
 
   // ── IDEMPOTENCY: skip a duplicate of an already-completed action. ─────────
   let idemKey = null;
@@ -136,12 +194,21 @@ async function routeAction(name, args, ctx) {
   const action = actions.getAction(name);
   if (!action) return { outcome: 'blocked', detail: 'unknown action: ' + name };
 
-  // Authorization: sender must be permitted to request this action's category.
+  // Authorization (Part 11): category permission AND per-unit operator/domicile
+  // scope AND internal-only guard for lifecycle/WR actions.
   const profile = ctx && ctx.profile;
-  if (action.requires && !profiles.canRequest(profile, action.requires)) {
-    _audit({ action: name, status: 'blocked', reason: 'sender not authorized (needs ' + action.requires + ')' });
-    return { outcome: 'blocked', detail: 'sender not authorized for ' + name };
+  const authz = _authorizeUnitAction(name, args, profile, action);
+  if (!authz.ok) {
+    _audit({ action: name, status: 'blocked', reason: authz.reason });
+    return { outcome: 'blocked', detail: authz.reason };
   }
+  // Permission snapshot captured at proposal time (stored on queued items).
+  const permissionSnapshot = profile ? {
+    slackId: profile.slackId, type: profile.type,
+    operators: (profile.operators || []).slice(), domiciles: (profile.domiciles || []).slice(),
+    permittedRequestTypes: (profile.permittedRequestTypes || []).slice(),
+    at: now(),
+  } : null;
 
   // Shadow: never execute, never queue — record only.
   if (!cfg.enabled || cfg.mode === 'shadow') {
@@ -163,6 +230,7 @@ async function routeAction(name, args, ctx) {
   const item = _enqueue({
     id: 'act_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     action: name, args: _safeArgs(args), level, requestedBy: profile && profile.slackId,
+    permissionSnapshot,
     status: 'pending', createdAt: now(),
   });
   return { outcome: 'queued', detail: { id: item.id } };
