@@ -5,6 +5,7 @@
 
 import { slack as slackBridge } from '../bridge.js';
 import toast from '../components/toast.js';
+import bus from '../bus.js';
 
 function _esc(s) {
   return String(s == null ? '' : s)
@@ -286,10 +287,18 @@ async function _refreshProfiles() {
   // PART 1: FAS Sender Profiles is now a FILTERED, READ-ONLY view of the Contact
   // Book. Identity + permissions are edited on the contact itself (single source
   // of truth), not in a separate profile store.
+  // "Edit in Contact Book" — this view is READ-ONLY; all identity/scope/
+  // permission edits happen in the Contact Book (single source of truth).
+  const editBtnHtml = '<div style="margin-bottom:8px"><button class="sd-btn secondary" id="fas-edit-in-contact-book">Edit in Contact Book</button>' +
+    '<span class="sd-hint" style="opacity:.6;margin-left:8px">Read-only summary. Identity, scope and permissions are set in the Contact Book.</span></div>';
+  const wireEditBtn = () => {
+    const b = document.getElementById('fas-edit-in-contact-book');
+    if (b && !b._wired) { b._wired = true; b.addEventListener('click', () => bus.emit('ui:contacts-toggle')); }
+  };
   try {
     const view = (window.contacts && window.contacts.getFasView) ? await window.contacts.getFasView() : [];
-    if (!view || !view.length) { list.innerHTML = '<div class="sd-hint">No Slack-linked contacts yet. Add people in the Contact Book (with a Slack ID) and set their identity type + scope there.</div>'; return; }
-    list.innerHTML = view.map(p => {
+    if (!view || !view.length) { list.innerHTML = editBtnHtml + '<div class="sd-hint">No Slack-linked contacts yet. Add people in the Contact Book (with a Slack ID) and set their identity type + scope there.</div>'; wireEditBtn(); return; }
+    list.innerHTML = editBtnHtml + view.map(p => {
       const disabled = p.enabled === false ? ' <span style="color:var(--err,#c0392b)">(disabled)</span>' : '';
       return '<div style="border-bottom:1px solid var(--bd,#333);padding:4px 0">' +
         '<div style="font-size:11px;font-weight:700">' + _esc(p.name || p.slackId) + ' — ' + _esc(p.identityType) + disabled + '</div>' +
@@ -297,6 +306,7 @@ async function _refreshProfiles() {
         '<div class="sd-hint" style="opacity:.55;font-size:9px">Edit identity/scope/permissions in the Contact Book. Source: ' + _esc(p.permissionSource || 'contact-book') + '</div>' +
       '</div>';
     }).join('');
+    wireEditBtn();
   } catch (e) { list.innerHTML = '<div class="sd-hint">Failed: ' + _esc(e.message) + '</div>'; }
 }
 
