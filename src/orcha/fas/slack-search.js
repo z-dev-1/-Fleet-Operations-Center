@@ -27,26 +27,40 @@ const DEFAULT_MAX_RESULTS = 12;
 const DEFAULT_MAX_CHARS = 4000;
 const EXCERPT_CHARS = 240;
 
-// Build the local index from stored monitored messages. Each stored surface
-// keeps a slightly different shape; normalize to { ts, userId, senderName,
-// channelId, channelName, text, threadTs, permalink, operator, domicile }.
+// Build the local index from stored monitored messages.
+//
+// FIX (Part 10): the REAL reply-log records (slackDMReplies / slackChannelReplies,
+// written by _appendReplyLog in the Slack scrapers) store the INCOMING message
+// under `question` and the SENT reply under `reply` — NOT `text`/`message`/
+// `incoming`. The old normalizer only checked text/message/incoming, so real
+// logs were never searchable. We now index the incoming question and the sent
+// reply as SEPARATE labeled entries (kind: 'incoming' | 'reply'), while keeping
+// the text/message/incoming/message-shape fallbacks for other sources.
 function _loadLocalIndex() {
   const out = [];
+  const base = (m, src) => ({
+    ts: String(m.ts || m.timestamp || ''),
+    userId: m.userId || m.user || m.from || '',
+    senderName: m.senderName || m.name || '',
+    channelId: m.channelId || m.channel || '',
+    channelName: m.channelName || m.channel || src,
+    threadTs: m.threadTs || m.thread_ts || null,
+    permalink: m.permalink || m.link || (m.replyTs ? null : null),
+    operator: (m.operator || '').toUpperCase(),
+    domicile: (m.domicile || m.domicileSite || '').toUpperCase(),
+    _src: src,
+  });
   const push = (m, src) => {
     if (!m) return;
-    out.push({
-      ts: String(m.ts || m.timestamp || ''),
-      userId: m.userId || m.user || m.from || '',
-      senderName: m.senderName || m.name || '',
-      channelId: m.channelId || m.channel || '',
-      channelName: m.channelName || m.channel || src,
-      text: String(m.text || m.message || m.incoming || ''),
-      threadTs: m.threadTs || m.thread_ts || null,
-      permalink: m.permalink || m.link || '',
-      operator: (m.operator || '').toUpperCase(),
-      domicile: (m.domicile || m.domicileSite || '').toUpperCase(),
-      _src: src,
-    });
+    // Direct message-shaped content (Slack message objects, mention threads).
+    const direct = String(m.text || m.message || m.incoming || '');
+    if (direct) out.push({ ...base(m, src), text: direct, kind: 'message' });
+    // Reply-log shape: incoming question (what the sender asked).
+    const incoming = String(m.question || '');
+    if (incoming) out.push({ ...base(m, src), text: incoming, kind: 'incoming' });
+    // Reply-log shape: the reply we actually sent (labeled separately).
+    const sent = String(m.reply || '');
+    if (sent) out.push({ ...base(m, src), text: sent, kind: 'reply', ts: String(m.replyTs || m.ts || m.timestamp || '') });
   };
   try {
     const dm = store.load('slackDMReplies', []) || [];
@@ -67,10 +81,18 @@ function _loadLocalIndex() {
 }
 
 function _tsToMs(ts) {
-  // Slack ts is "seconds.micro"; also accept ISO strings.
-  const n = parseFloat(ts);
-  if (!isNaN(n) && n > 1e8) return Math.round(n * 1000);
-  const p = Date.parse(ts);
+  // Slack ts is "seconds.micro" (a numeric string like "1756800000.000123").
+  // A purely-numeric string is ALWAYS Slack epoch seconds — never a calendar
+  // date. (A prior bug passed "100.1" to Date.parse, which read it as year 100
+  // AD and produced a huge negative ms, silently dropping the record from any
+  // date-bounded search.) Only non-numeric strings fall back to Date.parse.
+  const str = String(ts == null ? '' : ts).trim();
+  if (!str) return 0;
+  if (/^\d+(\.\d+)?$/.test(str)) {
+    const n = parseFloat(str);
+    return isNaN(n) ? 0 : Math.round(n * 1000);
+  }
+  const p = Date.parse(str);
   return isNaN(p) ? 0 : p;
 }
 
@@ -166,9 +188,10 @@ function searchSlack(query, profile, opts) {
       when: s.ms ? new Date(s.ms).toISOString() : null,
       sender: s.m.senderName || s.m.userId,
       channel: s.m.channelName,
+      kind: s.m.kind || 'message', // 'incoming' (what they asked) | 'reply' (what we sent) | 'message'
       excerpt,
       permalink: s.m.permalink || null,
-      source: 'Slack/' + s.m._src,
+      source: 'Slack/' + s.m._src + (s.m.kind ? ('/' + s.m.kind) : ''),
       exactUnitMatch: s.exactUnit,
     });
   }
