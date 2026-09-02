@@ -262,14 +262,17 @@ async function runAgent(input) {
   const profile = profiles.resolveSender(input.slackId, input.senderName);
   const text = input.text || '';
   const maxSteps = Math.max(1, cfg.maxSteps || 6);
+  // Effective mode drives side-effect rules for tools (e.g. ASK_INTERNAL must
+  // not contact AITeammate in Shadow). input.mode overrides for tests.
+  const mode = input.mode || (cfg.enabled ? (cfg.mode || 'shadow') : 'disabled');
 
   const controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(), cfg.maxRuntimeMs);
 
   try {
     // ── STEP 0: deterministic scoped evidence baseline ────────────────────
-    const evidence = await buildEvidence({ profile, text });
-    const ctx = { profile, _evidence: evidence };
+    const evidence = await buildEvidence({ profile, text, mode });
+    const ctx = { profile, mode, _evidence: evidence, approvedAutomaticActions: cfg.approvedAutomaticActions || [] };
     const extraResearch = [];
     const seen = new Set();
     let decision = null;

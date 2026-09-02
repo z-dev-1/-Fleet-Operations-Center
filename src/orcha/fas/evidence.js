@@ -55,7 +55,7 @@ function resolveMessageEntities(text) {
  * factsNeeded (optional) is a hint list of tool names to run; if omitted we
  * infer sensible defaults from the resolved entities.
  */
-async function buildEvidence({ profile, text, question, factsNeeded }) {
+async function buildEvidence({ profile, text, question, factsNeeded, mode }) {
   const entities = resolveMessageEntities(text || question || '');
   const fd = store.load('fleetData', {});
   const syncedAt = (fd && (fd.syncedAt || fd.updatedAt)) || null;
@@ -78,7 +78,7 @@ async function buildEvidence({ profile, text, question, factsNeeded }) {
   const sources = new Set();
   const denied = [];
 
-  const ctx = { profile };
+  const ctx = { profile, mode: mode || 'disabled' };
   const primaryUnit = entities.units[0] || null;
 
   // Per-unit evidence (only for the units actually referenced).

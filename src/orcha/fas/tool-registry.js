@@ -378,6 +378,25 @@ async function ASK_INTERNAL(args, ctx) {
   if (!auth.isInternal) {
     return { ok: false, denied: true, error: 'ASK_INTERNAL restricted to internal users' };
   }
+  // SIDE-EFFECT GATE (Part 9): asking AITeammate SENDS a real Slack message,
+  // so it is OUTBOUND activity. In Shadow mode we must not contact AITeammate;
+  // we only record the proposed consult for evaluation. In Approval mode it
+  // requires explicit approval unless the operator enabled ASK_INTERNAL as an
+  // approved automatic action. Autonomous may consult (internal, low-risk read).
+  const mode = (ctx && ctx.mode) || 'disabled';
+  const q0 = (args && args.question) || '';
+  if (mode === 'shadow' || mode === 'disabled') {
+    return { ok: true, proposedOnly: true, summary: 'Proposed internal consult (not sent in ' + mode + ' mode)',
+      verifiedFacts: [], proposedResearch: { tool: 'ASK_INTERNAL', question: String(q0).slice(0, 300) } };
+  }
+  if (mode === 'approval') {
+    const approved = (ctx.approvedAutomaticActions || []).includes('ASK_INTERNAL');
+    if (!approved) {
+      return { ok: true, proposedOnly: true, requiresApproval: true,
+        summary: 'Internal consult requires approval (enable ASK_INTERNAL in automatic actions to allow)',
+        verifiedFacts: [], proposedResearch: { tool: 'ASK_INTERNAL', question: String(q0).slice(0, 300) } };
+    }
+  }
   try {
     const { askInternal } = require('../ask-internal');
     const q = (args && args.question) || '';
