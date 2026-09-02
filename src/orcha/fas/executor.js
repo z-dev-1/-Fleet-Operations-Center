@@ -105,20 +105,93 @@ function _audit(entry) {
  * executeVerified(name, args, ctx) -> { status, verified?, evidence?, error? }
  * Runs the action then verifies. Only status:'done' means truly succeeded.
  */
-// Idempotency ledger: maps idempotencyKey -> { status, at, result }. Prevents a
-// retry from creating a duplicate note/reminder/case/WR/message/lifecycle change.
+// Idempotency ledger: maps idempotencyKey -> { status, at, leaseUntil, result }.
+// Prevents a retry from re-applying an action that is already done OR currently
+// in-flight (claimed/executing/verifying). Uses an atomic claim with a lease so
+// a crash mid-flight can be recovered after the lease expires (Part 4).
 const IDEM_CAP = 1000;
+// How long an in-flight claim is honored before it's considered abandoned and
+// eligible for recovery (e.g. the app crashed during a lifecycle write).
+const LEASE_MS = 5 * 60 * 1000;              // 5 min in-flight lease
+// A verifying action (awaiting AAP read-back) is retained far longer — it must
+// be reconciled by a later sync, not re-applied.
+const VERIFY_HOLD_MS = 24 * 60 * 60 * 1000;  // 24h
+
 function _loadIdem() { const m = store.load('fasIdempotency', {}); return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {}; }
-function _recordIdem(key, entry) {
-  if (!key) return;
-  const m = _loadIdem();
-  m[key] = { ...entry, at: now() };
+function _saveIdem(m) {
   const keys = Object.keys(m);
-  if (keys.length > IDEM_CAP) { // drop oldest
+  if (keys.length > IDEM_CAP) {
     keys.sort((a, b) => Date.parse(m[a].at || 0) - Date.parse(m[b].at || 0));
     for (let i = 0; i < keys.length - IDEM_CAP; i++) delete m[keys[i]];
   }
   store.save('fasIdempotency', m);
+}
+function _recordIdem(key, entry) {
+  if (!key) return;
+  const m = _loadIdem();
+  m[key] = { ...(m[key] || {}), ...entry, at: now() };
+  _saveIdem(m);
+}
+// Is a key currently blocking (done, or a live in-flight/verifying lease)?
+// Returns { blocked, reason, entry } — used to decide whether to run.
+function _idemBlock(key) {
+  if (!key) return { blocked: false };
+  const m = _loadIdem();
+  const e = m[key];
+  if (!e) return { blocked: false };
+  if (e.status === 'done') return { blocked: true, reason: 'already completed (idempotent)', entry: e };
+  const leaseUntil = e.leaseUntil ? Date.parse(e.leaseUntil) : 0;
+  if ((e.status === 'claimed' || e.status === 'executing') && leaseUntil > Date.now()) {
+    return { blocked: true, reason: 'action in-flight (leased)', entry: e };
+  }
+  if (e.status === 'verifying') {
+    const vAge = Date.now() - (Date.parse(e.at || 0) || 0);
+    if (vAge < VERIFY_HOLD_MS) return { blocked: true, reason: 'awaiting source verification', entry: e };
+  }
+  // Otherwise (failed, expired lease, stale verifying) -> not blocking; recoverable.
+  return { blocked: false, entry: e };
+}
+// Atomically claim a key for execution with a lease. Returns false if another
+// live claim exists (prevents double execution from two windows / rapid clicks).
+function _claimIdem(key) {
+  if (!key) return true;
+  const m = _loadIdem();
+  const e = m[key];
+  const leaseUntil = e && e.leaseUntil ? Date.parse(e.leaseUntil) : 0;
+  if (e && (e.status === 'done' ||
+      ((e.status === 'claimed' || e.status === 'executing') && leaseUntil > Date.now()) ||
+      (e.status === 'verifying' && (Date.now() - (Date.parse(e.at || 0) || 0)) < VERIFY_HOLD_MS))) {
+    return false; // already terminal or live in-flight
+  }
+  m[key] = { ...(e || {}), status: 'claimed', at: now(), leaseUntil: new Date(Date.now() + LEASE_MS).toISOString() };
+  _saveIdem(m);
+  return true;
+}
+
+// Reconcile in-flight ledger entries after a restart: expired claims (crash
+// mid-flight) are marked 'recoverable' so the operator can retry; verifying
+// entries are left for AAP read-back reconciliation. Returns a summary.
+function reconcileInFlight() {
+  const m = _loadIdem();
+  let expired = 0, verifying = 0;
+  for (const k of Object.keys(m)) {
+    const e = m[k];
+    if (!e) continue;
+    const leaseUntil = e.leaseUntil ? Date.parse(e.leaseUntil) : 0;
+    if ((e.status === 'claimed' || e.status === 'executing') && leaseUntil <= Date.now()) {
+      m[k] = { ...e, status: 'recoverable', at: now() };
+      expired++;
+    } else if (e.status === 'verifying') { verifying++; }
+  }
+  if (expired) { _saveIdem(m); _audit({ action: '(reconcile)', status: 'recovered-inflight', expired, verifying }); }
+  return { expired, verifying };
+}
+
+// Allow a genuinely FAILED/recoverable action to be retried on operator demand.
+function clearIdem(key) {
+  if (!key) return;
+  const m = _loadIdem();
+  if (m[key] && m[key].status !== 'done' && m[key].status !== 'verifying') { delete m[key]; _saveIdem(m); }
 }
 
 async function executeVerified(name, args, ctx) {
@@ -148,17 +221,28 @@ async function executeVerified(name, args, ctx) {
     args = v.cleaned; // use the validated + cleaned args downstream
   } catch (_) { /* validator unavailable -> proceed with raw args */ }
 
-  // ── IDEMPOTENCY: skip a duplicate of an already-completed action. ─────────
+  // ── IDEMPOTENCY + IN-FLIGHT PROTECTION (Part 4) ───────────────────────────
+  // Skip if the action is already done, currently in-flight (claimed/executing,
+  // live lease), or awaiting verification. Otherwise atomically CLAIM it so a
+  // second window / rapid double-click cannot execute it concurrently.
   let idemKey = null;
   if (typeof action.idempotencyKey === 'function') {
     try { idemKey = action.idempotencyKey(args || {}); } catch (_) { idemKey = null; }
   }
   if (idemKey) {
-    const prior = _loadIdem()[idemKey];
-    if (prior && prior.status === 'done') {
-      _audit({ action: name, status: 'idempotent-skip', idemKey });
-      return { status: 'done', verified: true, idempotent: true, evidence: 'already completed (idempotent)', priorResult: prior.result };
+    const block = _idemBlock(idemKey);
+    if (block.blocked) {
+      _audit({ action: name, status: 'idempotent-skip', idemKey, reason: block.reason });
+      const priorDone = block.entry && block.entry.status === 'done';
+      return { status: priorDone ? 'done' : (block.entry ? block.entry.status : 'blocked'),
+        verified: priorDone, idempotent: true, evidence: block.reason,
+        priorResult: block.entry && block.entry.result };
     }
+    if (!_claimIdem(idemKey)) {
+      _audit({ action: name, status: 'claim-lost', idemKey });
+      return { status: 'blocked', error: 'action already in-flight (concurrent claim)' };
+    }
+    _recordIdem(idemKey, { status: 'executing', leaseUntil: new Date(Date.now() + LEASE_MS).toISOString() });
   }
 
   let runResult;
@@ -166,10 +250,12 @@ async function executeVerified(name, args, ctx) {
     runResult = await action.run(args || {}, ctx || {});
   } catch (e) {
     _audit({ action: name, status: 'error', error: e.message });
+    if (idemKey) _recordIdem(idemKey, { status: 'failed', leaseUntil: null, error: e.message });
     return { status: 'error', error: 'run threw: ' + e.message };
   }
   if (!runResult || !runResult.ok) {
     _audit({ action: name, status: 'failed', error: (runResult && runResult.error) || 'run failed' });
+    if (idemKey) _recordIdem(idemKey, { status: 'failed', leaseUntil: null, error: (runResult && runResult.error) || 'run failed' });
     return { status: 'failed', error: (runResult && runResult.error) || 'run failed' };
   }
   // VERIFY through the source system before claiming success.
@@ -178,11 +264,12 @@ async function executeVerified(name, args, ctx) {
     ver = await action.verify(args || {}, ctx || {}, runResult);
   } catch (e) {
     _audit({ action: name, status: 'verify_error', error: e.message });
+    if (idemKey) _recordIdem(idemKey, { status: 'verifying', leaseUntil: null, result: runResult && runResult.result });
     return { status: 'verifying', error: 'verify threw: ' + e.message };
   }
   if (ver && ver.verified) {
     _audit({ action: name, status: 'done', evidence: ver.evidence, deferred: !!ver.deferred });
-    if (idemKey) _recordIdem(idemKey, { status: 'done', result: runResult && runResult.result });
+    if (idemKey) _recordIdem(idemKey, { status: 'done', leaseUntil: null, result: runResult && runResult.result });
     return { status: 'done', verified: true, evidence: ver.evidence, deferred: !!ver.deferred };
   }
   // Deferred verification (e.g. MOVE_UNIT awaiting AAP read-back): keep the
@@ -194,6 +281,7 @@ async function executeVerified(name, args, ctx) {
     return { status: 'verifying', verified: false, deferred: true, error: (ver && ver.error) || 'awaiting source read-back' };
   }
   _audit({ action: name, status: 'unverified', error: (ver && ver.error) || 'verification failed' });
+  if (idemKey) _recordIdem(idemKey, { status: 'failed', leaseUntil: null, error: (ver && ver.error) || 'unverified' });
   return { status: 'unverified', verified: false, error: (ver && ver.error) || 'could not verify' };
 }
 
@@ -284,4 +372,4 @@ function _safeArgs(args) {
   return a;
 }
 
-module.exports = { routeAction, executeVerified, approveQueued, rejectQueued, getQueue };
+module.exports = { routeAction, executeVerified, approveQueued, rejectQueued, getQueue, reconcileInFlight, clearIdem, _idemBlock, _claimIdem };

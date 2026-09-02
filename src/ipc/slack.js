@@ -448,6 +448,11 @@ function registerSlackIPC(ctx) {
     return pb.rejectDraft(id);
   });
 
+  // Reconcile any FAS actions left in-flight by a previous crash/restart
+  // (Part 4): expired execution leases become recoverable (retryable);
+  // verifying actions are left for AAP read-back reconciliation.
+  try { const rec = require('../orcha/fas/executor').reconcileInFlight(); if (rec && (rec.expired || rec.verifying)) logger.info('FAS reconcile: ' + rec.expired + ' recoverable, ' + rec.verifying + ' verifying'); } catch (e) { logger.warn('FAS reconcile failed: ' + e.message); }
+
   // Start the passive FAS follow-up scheduler (surfaces due items only; never
   // contacts anyone). Safe no-op when there are no cases / FAS is disabled.
   try { require('../orcha/fas/scheduler').startScheduler(); } catch (e) { logger.warn('FAS scheduler start failed: ' + e.message); }
