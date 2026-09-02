@@ -53,7 +53,16 @@ const MAX_LOG_ENTRIES       = 500; // persisted reply log cap
 
 let _pollLock = false; // mirrors slack_channel_watch.js's _pollLock exactly
 let _rlUntil  = 0;    // epoch ms — skip all conversations.replies calls until this time
-let _threadReplyCount = {}; // cache: channelId:parentTs -> replyCount seen on last fetch
+// cache: channelId:parentTs -> replyCount seen on last fetch.
+// FIX (2026-09-02): RESTORE this from storage at startup. Previously it was
+// only ever SAVED (never loaded), so after every app restart the baseline was
+// empty — making every existing thread look brand-new and risking spurious
+// re-processing/replies to old thread replies on the first poll after a
+// restart. Loading the persisted baseline makes restart recovery correct.
+let _threadReplyCount = (() => {
+  try { const v = store.load('slackDMThreadReplyCount', {}); return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {}; }
+  catch (_) { return {}; }
+})();
 let _sendBlockedChannels = new Set(); // channels that returned restricted_action_read_only_channel — skip sends for the session
 // BOUNDED AI RETRY (2026-09-02): when the AI is unavailable for a message we
 // retry on later polls — but with backoff and a cap, not forever every 30s.
@@ -1377,4 +1386,7 @@ module.exports = {
   getDMReviewQueue,
   getDMReplyLog,
   updateDMReviewItem,
+  // Test-only: expose the restored thread-reply baseline so restart-recovery
+  // (loading slackDMThreadReplyCount at startup) can be asserted.
+  _getThreadReplyCountForTest: () => _threadReplyCount,
 };
