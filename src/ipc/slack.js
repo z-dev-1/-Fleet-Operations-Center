@@ -398,6 +398,12 @@ function registerSlackIPC(ctx) {
     return runner.rejectReply(id);
   });
 
+  // ── FAS follow-up scheduler (passive — never contacts anyone) ─────────────
+  handle('fas:get-due-followups', async () => {
+    const scheduler = require('../orcha/fas/scheduler');
+    return scheduler.getDueFollowUps();
+  });
+
   // ── FAS playbook + knowledge drafts (Stage 9) ────────────────────────────
   handle('fas:get-playbook', async () => {
     const pb = require('../orcha/fas/playbook');
@@ -420,6 +426,10 @@ function registerSlackIPC(ctx) {
     const pb = require('../orcha/fas/playbook');
     return pb.rejectDraft(id);
   });
+
+  // Start the passive FAS follow-up scheduler (surfaces due items only; never
+  // contacts anyone). Safe no-op when there are no cases / FAS is disabled.
+  try { require('../orcha/fas/scheduler').startScheduler(); } catch (e) { logger.warn('FAS scheduler start failed: ' + e.message); }
 
   logger.info('Slack IPC handlers registered');
 }

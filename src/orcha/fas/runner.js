@@ -130,6 +130,7 @@ async function handleInbound(input) {
     const audit = { ...base, actualReply: input.actualReply || '',
       divergence: Number(_divergence(input.actualReply, decision.reply).toFixed(3)) };
     _appendAudit(audit);
+    _updateCaseFromInteraction(input, decision, 'shadow');
     return { mode, letLegacyReply: true, decision, outcome: 'shadow', actionOutcomes, audit };
   }
 
@@ -138,6 +139,7 @@ async function handleInbound(input) {
     const item = _queueReply(input, decision);
     const audit = { ...base, outcome: 'queued-for-approval', approvalId: item.id };
     _appendAudit(audit);
+    _updateCaseFromInteraction(input, decision, 'queued');
     return { mode, letLegacyReply: false, decision, outcome: 'queued', approvalId: item.id, actionOutcomes, audit };
   }
 
@@ -154,6 +156,7 @@ async function handleInbound(input) {
   if (canAutoSend) {
     const audit = { ...base, outcome: 'auto-sent' };
     _appendAudit(audit);
+    _updateCaseFromInteraction(input, decision, 'auto-sent');
     return { mode, letLegacyReply: false, fasReply: decision.reply, decision, outcome: 'auto-sent', actionOutcomes, audit };
   }
 
@@ -164,6 +167,7 @@ async function handleInbound(input) {
       : _hasApprovalLevelAction(decision) ? 'approval-level action proposed'
       : 'low confidence', approvalId: item.id };
   _appendAudit(audit);
+  _updateCaseFromInteraction(input, decision, 'queued');
   return { mode, letLegacyReply: false, decision, outcome: 'queued', approvalId: item.id, actionOutcomes, audit };
 }
 
@@ -203,6 +207,65 @@ function _queueReply(input, decision) {
   if (arr.length > REPLY_QUEUE_CAP) arr.length = REPLY_QUEUE_CAP;
   store.save('fasApprovalQueue', arr);
   return item;
+}
+
+// ── Case memory: create/update a case after every relevant interaction. ──────
+// Connects Slack messages (and, via evidence, Relay/Offsite/email facts) to the
+// same unit case. Facts and promises are DEDUPED. Old case memory is context
+// only — it never overrides newer source records (the agent already prefers
+// sourced facts; here we just persist a compact summary + open items).
+function _dedupeFacts(existing, incoming) {
+  const seen = new Set((existing || []).map(f => (f.field || '') + '=' + JSON.stringify(f.value)));
+  const out = [];
+  (incoming || []).forEach(f => {
+    const k = (f.field || '') + '=' + JSON.stringify(f.value);
+    if (!seen.has(k)) { seen.add(k); out.push(f); }
+  });
+  return out;
+}
+function _extractPromise(reply) {
+  // A promise is a first-person commitment ("I'll…", "I will…", "let me…",
+  // "we'll get…"). Compact — used for follow-up tracking, deduped by text.
+  const t = String(reply || '');
+  const m = t.match(/\b(i'?ll|i will|we'?ll|we will|let me|i'?m going to|i can|i'?ll get|by (?:today|tomorrow|eod|end of day)|within \d+\s*(?:hr|hour|day)s?)\b[^.!?\n]*/i);
+  return m ? m[0].trim().slice(0, 160) : null;
+}
+function _followUpFromDecision(decision) {
+  const fu = decision && decision.followUp;
+  if (fu && fu.required && fu.dueAt) return { owner: fu.owner || '', dueAt: fu.dueAt };
+  // If the reply promises action but no explicit dueAt, default to +1 business-ish day.
+  if (_extractPromise(decision && decision.reply)) {
+    return { owner: '', dueAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString() };
+  }
+  return null;
+}
+function _updateCaseFromInteraction(input, decision, outcome) {
+  try {
+    const caseStore = require('./case-store');
+    const ev = decision && decision._evidence;
+    const unit = (ev && ev.entities && (ev.entities.units || [])[0]) || null;
+    const caseId = unit ? caseStore.caseIdForUnit(unit) : caseStore.caseIdForSender(input.slackId || 'unknown');
+    const existing = caseStore.getCase(caseId);
+    const promiseText = _extractPromise(decision && decision.reply);
+    // Dedupe promises by text against the existing case.
+    const priorPromises = new Set(((existing && existing.promises) || []).map(p => p.text));
+    const promises = (promiseText && !priorPromises.has(promiseText))
+      ? [{ text: promiseText, madeAt: new Date().toISOString(), owner: '', dueAt: null }] : [];
+    const fu = _followUpFromDecision(decision);
+    const patch = {
+      unit,
+      currentSummary: (decision && decision.reply) ? String(decision.reply).slice(0, 500) : (existing && existing.currentSummary) || '',
+      status: decision && decision.decision === 'escalate' ? 'escalated' : 'open',
+      verifiedFacts: _dedupeFacts(existing && existing.verifiedFacts, (ev && ev.verifiedFacts) || []),
+      openQuestions: decision && decision.decision === 'clarify' && decision.reply ? [decision.reply.slice(0, 160)] : [],
+      promises,
+      responsibleParty: (decision && decision.followUp && decision.followUp.owner) || (existing && existing.responsibleParty) || '',
+      nextFollowUpAt: fu ? fu.dueAt : (existing && existing.nextFollowUpAt) || null,
+      relatedSlackMessages: input.channelId && input.ts ? [{ channelId: input.channelId, ts: input.ts }] : [],
+      sources: (ev && ev.sources) || [],
+    };
+    caseStore.upsert(caseId, patch, unit);
+  } catch (e) { logger.warn('[fas-runner] case update failed (non-fatal): ' + e.message); }
 }
 
 // ── Reply-queue approval/rejection (approval + autonomous-queued replies) ────
