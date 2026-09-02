@@ -378,6 +378,29 @@ function registerSlackIPC(ctx) {
     return executor.rejectQueued(id);
   });
 
+  // ── FAS playbook + knowledge drafts (Stage 9) ────────────────────────────
+  handle('fas:get-playbook', async () => {
+    const pb = require('../orcha/fas/playbook');
+    return pb.getPlaybook();
+  });
+
+  handle('fas:get-knowledge-drafts', async (_e, status) => {
+    const pb = require('../orcha/fas/playbook');
+    return pb.listDrafts(status || null);
+  });
+
+  handle('fas:approve-knowledge-draft', async (_e, data) => {
+    if (!data || !data.id) throw new Error('id required');
+    const pb = require('../orcha/fas/playbook');
+    return pb.approveDraft(data.id, data.sectionMeta || null);
+  });
+
+  handle('fas:reject-knowledge-draft', async (_e, id) => {
+    if (!id) throw new Error('id required');
+    const pb = require('../orcha/fas/playbook');
+    return pb.rejectDraft(id);
+  });
+
   logger.info('Slack IPC handlers registered');
 }
 

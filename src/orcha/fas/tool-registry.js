@@ -195,8 +195,15 @@ function GET_SENDER_PROFILE(args, ctx) {
 async function ASK_INTERNAL(args, ctx) {
   try {
     const { askInternal } = require('../ask-internal');
-    const res = await askInternal((args && args.question) || '');
-    if (res && res.ok) return { ok: true, verifiedFacts: [_fact('internalGuidance', res.answer, 'AITeammate')] };
+    const q = (args && args.question) || '';
+    const res = await askInternal(q);
+    if (res && res.ok) {
+      // Save verified internal guidance as a REVIEWABLE knowledge draft — not
+      // auto-promoted to permanent policy (Stage 9). You approve it into the
+      // playbook via the knowledge-draft queue.
+      try { require('./playbook').addDraft({ topic: q.slice(0, 80), guidance: res.answer, source: 'ASK_INTERNAL' }); } catch (_) {}
+      return { ok: true, verifiedFacts: [_fact('internalGuidance', res.answer, 'AITeammate')] };
+    }
     return { ok: false, error: (res && res.error) || 'AITeammate unavailable' };
   } catch (e) { return { ok: false, error: e.message }; }
 }

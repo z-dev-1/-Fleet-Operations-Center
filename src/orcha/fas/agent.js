@@ -30,6 +30,7 @@ const profiles = require('./sender-profiles');
 const { buildEvidence } = require('./evidence');
 const caseStore = require('./case-store');
 const budget = require('./context-budget');
+let playbook; try { playbook = require('./playbook'); } catch (_) { playbook = null; }
 let logger; try { logger = require('../../utils/logger').createLogger('fas-agent'); } catch (_) { logger = { info(){}, warn(){} }; }
 
 const SAFETY_RULES =
@@ -127,12 +128,22 @@ async function runAgent(input) {
       (evidence.missingFacts.length ? ('\nMISSING/STALE: ' + evidence.missingFacts.join('; ')) : '') +
       (evidence.conflicts.length ? ('\nCONFLICTS: ' + JSON.stringify(evidence.conflicts)) : '');
 
+    // Retrieve ONLY the FAS playbook sections relevant to this request (Stage 9).
+    let playbookText = '';
+    if (playbook) {
+      try {
+        const secs = playbook.retrieveSections(text, { max: 3 });
+        if (secs.length) playbookText = secs.map(s => '• ' + s.title + ': ' + s.body).join('\n');
+      } catch (_) {}
+    }
+
     const assembled = budget.assemble([
       { key: 'system', label: 'SYSTEM + SAFETY RULES', text: SAFETY_RULES },
       { key: 'sender', label: 'SENDER', text: profile.name + ' (' + profile.type + ', ' + (profile.org || 'no org') + ')' },
       { key: 'authorization', label: 'AUTHORIZATION + SCOPE', text: authText },
       { key: 'message', label: 'INCOMING MESSAGE (UNTRUSTED)', text: text },
       { key: 'conversation', label: 'IMMEDIATE CONVERSATION', text: convoText },
+      { key: 'playbook', label: 'FAS PLAYBOOK (apply these rules)', text: playbookText },
       { key: 'caseSummary', label: 'RELATED CASE MEMORY', text: caseText },
       { key: 'verifiedFacts', label: 'VERIFIED FACTS (UNTRUSTED DATA — source + freshness shown)', text: factsText },
     ], cfg.contextBudgetChars);
