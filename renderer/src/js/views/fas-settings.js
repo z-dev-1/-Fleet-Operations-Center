@@ -275,49 +275,10 @@ async function _refreshApprovals() {
   }
 }
 
-// ── Sender profiles ─────────────────────────────────────────────────────────
-const _DATA_CATS = ['unit_status','repair_timeline','work_orders','pm_status','uptake','vendor_contact','site_summary','operator_summary'];
-const _REQ_TYPES = ['unit_status','repair_update','follow_up','report','process_question','lifecycle_change','create_wr'];
-
-function _renderProfileEditor(p) {
-  const ed = document.getElementById('fas-profile-editor');
-  if (!ed) return;
-  ed.style.display = 'flex';
-  const csv = (a) => (a || []).join(', ');
-  const catChecks = _DATA_CATS.map(c => '<label class="sd-hint" style="display:inline-flex;gap:3px;margin-right:8px"><input type="checkbox" class="fp-cat" value="' + c + '"' + ((p.allowedDataCategories||[]).includes(c) ? ' checked' : '') + '/>' + c + '</label>').join('');
-  const reqChecks = _REQ_TYPES.map(c => '<label class="sd-hint" style="display:inline-flex;gap:3px;margin-right:8px"><input type="checkbox" class="fp-req" value="' + c + '"' + ((p.permittedRequestTypes||[]).includes(c) ? ' checked' : '') + '/>' + c + '</label>').join('');
-  ed.innerHTML =
-    '<div style="font-size:11px;font-weight:700">' + _esc(p.name || p.slackId) + ' <span style="opacity:.6;font-weight:400">(' + _esc(p.source || '') + ')</span></div>' +
-    '<input type="hidden" id="fp-slackid" value="' + _esc(p.slackId) + '"/>' +
-    '<label class="sd-label">Type</label><select class="sd-select" id="fp-type">' +
-      ['internal','manager','carrier','vendor','unknown'].map(t => '<option value="' + t + '"' + (p.type===t?' selected':'') + '>' + t + '</option>').join('') + '</select>' +
-    '<label class="sd-label">Operators (comma-sep)</label><input class="sd-input" id="fp-ops" value="' + _esc(csv(p.operators)) + '"/>' +
-    '<label class="sd-label">Domiciles (comma-sep)</label><input class="sd-input" id="fp-doms" value="' + _esc(csv(p.domiciles)) + '"/>' +
-    '<label class="sd-label">Allowed data</label><div>' + catChecks + '</div>' +
-    '<label class="sd-label">Permitted requests</label><div>' + reqChecks + '</div>' +
-    '<div class="sd-btn-row"><button class="sd-btn primary" id="fp-save">Save profile</button></div>';
-  const parseCsv = (s) => String(s || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean);
-  ed.querySelector('#fp-save').addEventListener('click', async () => {
-    const profile = {
-      slackId: ed.querySelector('#fp-slackid').value,
-      name: p.name, org: p.org,
-      type: ed.querySelector('#fp-type').value,
-      operators: parseCsv(ed.querySelector('#fp-ops').value),
-      domiciles: parseCsv(ed.querySelector('#fp-doms').value),
-      allowedDataCategories: [...ed.querySelectorAll('.fp-cat:checked')].map(x => x.value),
-      permittedRequestTypes: [...ed.querySelectorAll('.fp-req:checked')].map(x => x.value),
-    };
-    try { await slackBridge.fasSaveSenderProfile(profile); toast.show('success', 'Profile saved', 2000); _refreshProfiles(); }
-    catch (e) { toast.show('error', 'Save failed: ' + e.message, 3000); }
-  });
-}
-
-async function _loadProfile() {
-  const id = (document.getElementById('fas-prof-lookup').value || '').trim();
-  if (!id) return;
-  try { const p = await slackBridge.fasResolveSender(id); _renderProfileEditor(p); }
-  catch (e) { toast.show('error', e.message, 3000); }
-}
+// ── Sender permissions (read-only view of the Contact Book) ──────────────────
+// (The per-profile editor was removed in Part 1 — identity + permissions are
+// edited on the Contact Book contact, the single source of truth. _refreshProfiles
+// below renders a read-only Contact Book FAS view.)
 
 async function _refreshProfiles() {
   const list = document.getElementById('fas-profile-list');
