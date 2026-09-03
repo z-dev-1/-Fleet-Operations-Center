@@ -127,6 +127,17 @@ function slotToAmPm(slot) {
   return parseInt(m[1], 10) < 12 ? 'AM' : 'PM';
 }
 
+// Which report series a given slot should send.
+//   AM slot (before noon, e.g. 07:10) -> Start of Shift  -> ['SOS']
+//   PM slot (noon or later, e.g. 15:30) -> End of Shift   -> ['EOS']
+// FIX: previously runEmailSlot always fanned out to BOTH ['SOS','EOS'] on every
+// slot, so the afternoon run sent a nonsensical "SOS PM" email alongside the
+// real "EOS PM" one (and the morning run sent "EOS AM"). A slot represents one
+// point in the shift, so it maps to exactly one series based on time of day.
+function seriesForSlot(slot) {
+  return slotToAmPm(slot) === 'AM' ? ['SOS'] : ['EOS'];
+}
+
 /**
  * applyTestMode(base, opts) -> { subject, to, cc, banner, intendedRecipients, actualRecipients }
  * In production: pass through. In test mode: subject prefixed [TEST], recipients
@@ -197,7 +208,7 @@ function classifyError(message) {
 
 module.exports = {
   SERIES,
-  resolveRecipients, scopeKey, slotToAmPm, applyTestMode, testRecipientsFor,
+  resolveRecipients, scopeKey, slotToAmPm, seriesForSlot, applyTestMode, testRecipientsFor,
   shouldNotify, injectBanner, classifyError,
   _splitAddrs, _normAddr, _resetNotifyDedup, _setDeps,
   // execution wired below
@@ -395,9 +406,13 @@ async function runEmailSlot(ctx, slotSpec) {
   const emailNote = settings.autoEmailNote || '';
   const slotAmPm = slotToAmPm(slotSpec.slotLabel);
 
+  // A slot maps to exactly ONE series by time of day: AM->SOS, PM->EOS.
+  // (Was previously fanning out to both, sending e.g. a bogus "SOS PM" email.)
+  const slotSeries = seriesForSlot(slotSpec.slotLabel);
+
   const outcomes = [];
   for (const rec of recipients) {
-    for (const series of SERIES) {
+    for (const series of slotSeries) {
       const scope = { operator: rec.operator, domicile: rec.domicile, series };
       const outcome = await _runOneEmailScope(ctx, {
         ...slotSpec, scope, recipient: rec, testMode, testRecips, emailNote, slotAmPm,

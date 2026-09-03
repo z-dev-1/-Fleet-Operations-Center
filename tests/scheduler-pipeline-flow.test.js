@@ -65,12 +65,20 @@ beforeEach(() => {
 afterEach(() => { vi.clearAllMocks(); });
 
 describe('verified send -> COMPLETED + snapshot committed', () => {
-  it('all scopes sent, snapshots committed', async () => {
+  it('AM slot sends only the SOS scope, snapshot committed', async () => {
     const ctx = fakeCtx(FRESH);
     const r = await pipeline.runEmailSlot(ctx, { dateKey: '2026-08-14', slotLabel: '08:00', origin: 'scheduled', testMode: false });
-    expect(r.outcomes.length).toBe(2); // TUZR x SOS/EOS
+    expect(r.outcomes.length).toBe(1); // AM slot => TUZR x SOS only
     expect(r.outcomes.every(o => o.state === ledger.STATES.COMPLETED)).toBe(true);
-    expect(_snapshotCommits.length).toBe(2);
+    expect(r.outcomes.every(o => o.scope.series === 'SOS')).toBe(true);
+    expect(_snapshotCommits.length).toBe(1);
+  });
+  it('PM slot sends only the EOS scope', async () => {
+    const ctx = fakeCtx(FRESH);
+    const r = await pipeline.runEmailSlot(ctx, { dateKey: '2026-08-14', slotLabel: '15:30', origin: 'scheduled', testMode: false });
+    expect(r.outcomes.length).toBe(1); // PM slot => TUZR x EOS only
+    expect(r.outcomes.every(o => o.state === ledger.STATES.COMPLETED)).toBe(true);
+    expect(r.outcomes.every(o => o.scope.series === 'EOS')).toBe(true);
   });
 });
 
@@ -109,7 +117,9 @@ describe('stale data -> BLOCKED_STALE_DATA (production hard-block)', () => {
 
 describe('one-shot note cleared ONLY after all scopes verified sent', () => {
   it('retains note when a scope is not completed', async () => {
-    _owaStatusQueue = ['sent', 'delivery-uncertain'];
+    // Single scope for the slot is delivery-uncertain => not all completed =>
+    // the one-shot note must be retained.
+    _owaStatusQueue = ['delivery-uncertain'];
     store.save('settings', { autoEmailNote: 'Heads up', autoEmailNoteOneShot: true });
     const ctx = fakeCtx(FRESH);
     await pipeline.runEmailSlot(ctx, { dateKey: '2026-08-14', slotLabel: '08:00', origin: 'scheduled', testMode: false });

@@ -62,6 +62,24 @@ describe('scopeKey + slotToAmPm', () => {
   });
 });
 
+describe('seriesForSlot — one series per slot by time of day', () => {
+  it('AM slot maps to SOS only (Start of Shift)', () => {
+    expect(pipe.seriesForSlot('07:10')).toEqual(['SOS']);
+    expect(pipe.seriesForSlot('08:00')).toEqual(['SOS']);
+    expect(pipe.seriesForSlot('11:59')).toEqual(['SOS']);
+  });
+  it('PM slot maps to EOS only (End of Shift)', () => {
+    expect(pipe.seriesForSlot('12:00')).toEqual(['EOS']);
+    expect(pipe.seriesForSlot('15:30')).toEqual(['EOS']);
+    expect(pipe.seriesForSlot('23:59')).toEqual(['EOS']);
+  });
+  it('never returns both series for a single slot', () => {
+    for (const slot of ['07:10', '08:00', '12:00', '15:30']) {
+      expect(pipe.seriesForSlot(slot).length).toBe(1);
+    }
+  });
+});
+
 describe('applyTestMode', () => {
   const base = { subject: 'Fleet Status TUZR — SOS AM', to: 'real@x.com', cc: 'boss@x.com' };
   it('production passes through unchanged', () => {
