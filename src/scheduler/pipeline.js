@@ -151,9 +151,20 @@ function applyTestMode(base, opts) {
 }
 
 // The configured test recipient list. Blocks test sends when empty.
+// Per the product owner: default to the logged-in user's OWN profile email
+// (settings.profile.email, captured as "Amazon Email" in the setup wizard) so
+// test-mode sends land in the user's own inbox without any hardcoded address.
+// An explicit override (emailTestRecipient / schedulerTest.recipient) still
+// wins if one is configured.
 function testRecipientsFor() {
   const s = store.load('settings', {}) || {};
-  return _splitAddrs(s.emailTestRecipient || s.testEmailRecipient || (s.schedulerTest && s.schedulerTest.recipient) || '');
+  return _splitAddrs(
+    s.emailTestRecipient ||
+    s.testEmailRecipient ||
+    (s.schedulerTest && s.schedulerTest.recipient) ||
+    (s.profile && s.profile.email) ||
+    ''
+  );
 }
 
 // Notification dedup: one notice per (jobId, state). Returns true if this

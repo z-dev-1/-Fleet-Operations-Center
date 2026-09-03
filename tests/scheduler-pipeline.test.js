@@ -89,7 +89,15 @@ describe('testRecipientsFor', () => {
     store.save('settings', { emailTestRecipient: 'qa@x.com' });
     expect(pipe.testRecipientsFor()).toEqual(['qa@x.com']);
   });
-  it('empty when unset (caller must block test send)', () => {
+  it('falls back to the logged-in user profile email', () => {
+    store.save('settings', { profile: { name: 'Z', email: 'zilasant@amazon.com' } });
+    expect(pipe.testRecipientsFor()).toEqual(['zilasant@amazon.com']);
+  });
+  it('explicit test recipient overrides the profile email', () => {
+    store.save('settings', { emailTestRecipient: 'qa@x.com', profile: { email: 'zilasant@amazon.com' } });
+    expect(pipe.testRecipientsFor()).toEqual(['qa@x.com']);
+  });
+  it('empty when neither test recipient nor profile email is set (caller must block)', () => {
     store.save('settings', {});
     expect(pipe.testRecipientsFor()).toEqual([]);
   });
