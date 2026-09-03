@@ -37,6 +37,10 @@ const store = require('../store');
 const logger = require('../utils/logger').createLogger('slack_dm_autoreply');
 const { PERSONA_SYSTEM_PROMPT } = require('../orcha/slack-dm-persona');
 const { trace } = require('./slack_decision_trace');
+// Shared inbound pipeline helpers: decoupled contact discovery, temporary
+// send-block registry, thread-scoped manual-reply detection, structured
+// lifecycle observability. See slack_inbound_support.js.
+const inbound = require('./slack_inbound_support');
 // Digital FAS shadow runner (no-op unless fasConfig.enabled && mode==='shadow').
 let _fasShadow; try { _fasShadow = require('../orcha/fas/shadow'); } catch (_) { _fasShadow = { runShadow: () => {} }; }
 // Digital FAS UNIFIED runner — decides per-mode who owns the reply (shadow =
@@ -50,6 +54,10 @@ try { _AITEAMMATE_CHANNEL = require('../orcha/ask-internal').AITEAMMATE_CHANNEL 
 
 const MAX_MESSAGES_PER_POLL = 5;   // per DM thread, per poll cycle
 const MAX_LOG_ENTRIES       = 500; // persisted reply log cap
+// Scan every open DM, not just the ~40 most active. Bounded to keep Slack
+// calls + the Electron main process responsive (client.counts returns the full
+// list; this caps how many we fetch histories for per cycle).
+const MAX_DMS_PER_POLL      = 200;
 
 let _pollLock = false; // mirrors slack_channel_watch.js's _pollLock exactly
 let _rlUntil  = 0;    // epoch ms — skip all conversations.replies calls until this time
@@ -63,7 +71,10 @@ let _threadReplyCount = (() => {
   try { const v = store.load('slackDMThreadReplyCount', {}); return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {}; }
   catch (_) { return {}; }
 })();
-let _sendBlockedChannels = new Set(); // channels that returned restricted_action_read_only_channel — skip sends for the session
+// (removed) in-memory _sendBlockedChannels Set — replaced by the persisted,
+// self-rechecking send-block registry in slack_inbound_support.js so a
+// restricted_action is TEMPORARY (with periodic recheck) instead of a
+// permanent, session-long, invisible skip. See inbound.isSendBlocked/markSendBlocked.
 // BOUNDED AI RETRY (2026-09-02): when the AI is unavailable for a message we
 // retry on later polls — but with backoff and a cap, not forever every 30s.
 // Keyed by channelId:ts -> { attempts, nextAttemptAt }. After MAX_AI_RETRIES
@@ -96,6 +107,12 @@ function _saveThreadLastSeen(channelId, name, ts, isGroup) {
   cfg.threads[channelId] = { name, lastSeenTs: ts, isGroup: !!isGroup };
   store.save('slackDMAutoReplyConfig', cfg);
 }
+// BUG FIX (2026-09): the message loop called `_saveThreadSeen(...)` in several
+// early-exit paths (FAS-owned, WR draft, AI held) but only `_saveThreadLastSeen`
+// was ever defined — so those calls threw ReferenceError, were swallowed by the
+// per-DM try/catch, and aborted the DM's processing BEFORE contact discovery
+// ran. This alias makes the watermark write actually happen. Same signature.
+const _saveThreadSeen = _saveThreadLastSeen;
 
 function _appendReplyLog(entry) {
   const log = store.load('slackDMReplies', []);
@@ -721,20 +738,24 @@ async function pollDMAutoReplyOnce(log) {
   // will pick up any missed threads. Keeps the poll lock from being held for minutes.
   const _pollDeadline = Date.now() + 10000; // 10s total — prevents thread fetches from stalling a poll past the 30s interval
 
-  const dms = await listOpenDMs(40, myUserId); // myUserId excludes Z from group-DM display names
+  // Scan EVERY open DM (not just the ~40 most active). client.counts returns
+  // the full DM/mpim list in one shot (no cursor), so we just raise the cap.
+  // MAX_DMS_PER_POLL bounds work per cycle to keep Slack calls + the Electron
+  // main process from freezing; the parallel fetch below pays latency once.
+  const dms = await listOpenDMs(MAX_DMS_PER_POLL, myUserId); // myUserId excludes Z from group-DM display names
   if (!dms.length) return { repliedCount: 0, escalatedCount: 0, items: [] };
 
   // ── PHASE 1: parallel fetch ──────────────────────────────────────────────
   // Fetch all DM message histories in parallel so hanging Slack API calls
   // (which timeout at 8s each) are paid once in total, not once per DM.
-  // Previously these were sequential: 10 hanging calls × 8s = 80s stall;
-  // now: max(all fetch times) ≈ 8s total.
+  // NOTE: we intentionally FETCH send-blocked channels too — a channel we
+  // cannot SEND to can still receive incoming messages we must discover senders
+  // from and track. Only the SEND is skipped later, not discovery/tracking.
   const _threads = config.threads || {};
   const dmFetchResults = await Promise.all(
     dms.map(dm => {
       if (dm.name === 'Slackbot' || dm.name === 'ATS AI Training SlackBot') return Promise.resolve(null);
       if (dm.channelId === _AITEAMMATE_CHANNEL) return Promise.resolve(null); // never auto-reply to AITeammate
-      if (_sendBlockedChannels.has(dm.channelId)) return Promise.resolve(null);
       // If we have a prior watermark for this DM, paginate from it so a burst of
       // >20 messages since the last poll can't silently drop the oldest new ones.
       // First-ever poll (no watermark) uses the plain newest-20 fetch (baseline).
@@ -759,18 +780,32 @@ async function pollDMAutoReplyOnce(log) {
       doLog(`[SlackDM] ${dm.name}: skipping (AITeammate internal agent — never auto-reply, prevents loop)`);
       continue;
     }
-    if (_sendBlockedChannels.has(dm.channelId)) {
-      doLog(`[SlackDM] ${dm.name}: skipping (read-only channel, send was blocked)`);
-      continue;
-    }
+    // NOTE: a send-blocked channel is NO LONGER skipped here. We still discover
+    // senders + track incoming messages; only the SEND is skipped later (via the
+    // temporary, self-rechecking send-block registry in slack_inbound_support).
     try {
       if (!messages || !messages.length) continue;
+
+      // ── CONTACT DISCOVERY (decoupled from every reply decision) ──────────
+      // Save EVERY external top-level sender BEFORE first-seen baseline, age
+      // checks, manual-reply detection, AI, permission resolution, or any
+      // early return/continue below. A decision NOT to reply must never
+      // prevent contact discovery. Thread-reply senders are discovered inside
+      // the thread loop (also before their reply decision). Never throws.
+      try {
+        const _disc = await inbound.discoverSenders(messages, { myUserId, channelId: dm.channelId, isGroup: dm.isGroup }, { resolveUserName });
+        if (_disc.created) doLog(`[SlackDM] ${dm.name}: discovered ${_disc.created} new contact(s) from ${_disc.discovered} sender(s)`);
+        if (_disc.failed) doLog(`[SlackDM] ${dm.name}: ${_disc.failed} contact save(s) FAILED (see system health)`);
+        _disc.ids.forEach(id => inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, senderId: id, stage: 'discovered', contact: 'processed' }));
+      } catch (_e) { doLog(`[SlackDM] ${dm.name}: discovery pass error (non-fatal): ${_e.message}`); }
 
       const threads = config.threads || {};
       let seen = threads[dm.channelId];
 
       // FIRST-EVER poll of this DM thread: baseline only, do not reply to
-      // pre-existing history (same safety rule as channel watch).
+      // pre-existing history (same safety rule as channel watch). Contact
+      // discovery already ran above, so a baselined group DM / old 1:1 still
+      // saves its senders — we only avoid REPLYING to old history here.
       if (!seen || !seen.lastSeenTs) {
         // For a 1:1 DM (not a group), a first-ever poll usually means a NEW
         // person just messaged us — they should get a reply, not be silently
@@ -830,15 +865,17 @@ async function pollDMAutoReplyOnce(log) {
           continue;
         }
 
-        // FEATURE (2026-07-30): If Z already replied manually in the Slack app
-        // after this message, don't auto-reply — the person already has a real
-        // answer. messages[] includes ALL senders; a Z-authored message with a
-        // newer ts means Z typed a response in Slack directly.
-        const zAlreadyRepliedManually = messages.some(
-          m => m.userId === myUserId && parseFloat(m.ts) > parseFloat(msg.ts)
-        );
+        // If Z already replied manually in the Slack app after THIS message,
+        // don't auto-reply. Precise: only a top-level message from me AFTER
+        // this msg counts (a reply I made in some other thread must NOT
+        // suppress a brand-new top-level question — the old whole-DM check
+        // false-positived in group DMs / fast conversations).
+        const zAlreadyRepliedManually = inbound.manualReplyByOperator(messages, {
+          myUserId, incomingTs: msg.ts, threadTs: (msg.threadTs && msg.threadTs !== msg.ts) ? msg.threadTs : null,
+        });
         if (zAlreadyRepliedManually) {
-          doLog(`[SlackDM] ${dm.name}: Z already replied manually after ${msg.ts} — skipping auto-reply`);
+          doLog(`[SlackDM] ${dm.name}: operator already replied after ${msg.ts} — skipping auto-reply`);
+          inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'skipped', reason: inbound.REASON.MANUAL_REPLY });
           continue;
         }
 
@@ -874,6 +911,12 @@ async function pollDMAutoReplyOnce(log) {
         let _fasMode = 'disabled';
         try { const _cfg = require('../orcha/fas/config').get(); _fasMode = (_cfg && _cfg.enabled) ? (_cfg.mode || 'shadow') : 'disabled'; } catch (_) {}
         if (_fasRunner && (_fasMode === 'approval' || _fasMode === 'autonomous')) {
+          // Whether FAS took ownership of this message. If FAS FAILS in a way
+          // that sets letLegacyReply (a thrown error -> error-failsafe), we do
+          // NOT mark it handled — we fall through to the legacy reply path
+          // below (honoring letLegacyReply) instead of silently dropping it.
+          let _fasOwned = true;
+          inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'ai-requested', detail: 'fas:' + _fasMode });
           try {
             // Part 8: inject the send path so the runner sends the autonomous
             // reply AND commits case memory atomically ONLY after Slack confirms
@@ -884,15 +927,24 @@ async function pollDMAutoReplyOnce(log) {
               channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
               isGroup: !!dm.isGroup, conversation: historyMsgs,
             }, { sendToChannel });
-            if (_fr && _fr.outcome === 'auto-sent' && _fr.sent && _fr.sent.ts) {
+            if (_fr && _fr.letLegacyReply) {
+              // Runner asked us to let the legacy engine reply (error-failsafe /
+              // ai-failed-shadow). Fall through — do NOT mark FAS-handled and do
+              // NOT advance the watermark here.
+              _fasOwned = false;
+              doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) deferred to legacy (${(_fr && _fr.outcome) || 'letLegacyReply'}) for ${msg.ts}`);
+              inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'ai-failed', reason: inbound.REASON.LEGACY_FALLBACK });
+            } else if (_fr && _fr.outcome === 'auto-sent' && _fr.sent && _fr.sent.ts) {
               repliedCount++;
               _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
                 ts: msg.ts, replyTs: _fr.sent.ts, question: msg.text, reply: (msg.userId ? `<@${msg.userId}> ` : '') + (_fr.decision && _fr.decision.reply || ''),
                 inScope: true, category: null, title: 'FAS autonomous reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
+              inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'sent', reason: inbound.REASON.SENT });
             } else if (_fr && _fr.outcome === 'auto-send-failed') {
               // Delivery failed — nothing committed; retry this message later.
               doLog(`[SlackDM] ${dm.name}: FAS autonomous delivery failed for ${msg.ts} — deferring for retry`);
               _markRetry(msg.ts);
+              inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'retry', reason: inbound.REASON.SEND_FAILED_RETRY });
               continue;
             } else {
               // Queued for approval, manual-review (AI failure), or clarify.
@@ -900,17 +952,22 @@ async function pollDMAutoReplyOnce(log) {
                 ts: msg.ts, replyTs: null, question: msg.text, reply: '(FAS ' + _fasMode + ': ' + ((_fr && _fr.outcome) || 'handled') + ')',
                 inScope: true, category: null, title: 'FAS ' + _fasMode, createdAt: new Date().toISOString(), status: 'fas-' + ((_fr && _fr.outcome) || 'handled') });
               doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) owned ${msg.ts} (${(_fr && _fr.outcome) || 'handled'}) — legacy path skipped`);
+              inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'queued', reason: inbound.REASON.QUEUED_REVIEW, detail: (_fr && _fr.outcome) || 'handled' });
             }
           } catch (e) {
-            // FAIL SAFE: never drop the message. Record a manual-review item
-            // rather than silently falling through to legacy mutations.
-            doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) error on ${msg.ts}: ${e.message} — recorded for manual review`);
-            _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
-              ts: msg.ts, replyTs: null, question: msg.text, reply: '', inScope: false, category: 'fas-error',
-              title: 'FAS error — manual review', createdAt: new Date().toISOString(), status: 'fas-error' });
+            // FAS threw -> the runner's own error path returns letLegacyReply.
+            // Honor that: fall through to the legacy reply below (do NOT mark
+            // handled), so an AI/runner failure still gets a real reply attempt
+            // instead of only a silent review item.
+            _fasOwned = false;
+            doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) threw on ${msg.ts}: ${e.message} — falling back to legacy reply`);
+            inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'ai-failed', reason: inbound.REASON.LEGACY_FALLBACK, detail: e.message });
           }
-          _saveThreadSeen(dm.channelId, dm.name, msg.ts, !!dm.isGroup);
-          continue; // FAS owns this message; do NOT run legacy classify/flip/WR
+          if (_fasOwned) {
+            _saveThreadSeen(dm.channelId, dm.name, msg.ts, !!dm.isGroup);
+            continue; // FAS owns this message; do NOT run legacy classify/flip/WR
+          }
+          // else: fall through to the legacy reply path (letLegacyReply honored)
         }
 
         // CREATE-WR (Bucket 3, Option A): if this is a grounding / predictive-
@@ -1065,6 +1122,16 @@ async function pollDMAutoReplyOnce(log) {
         // Declared outside the try so it is in scope for the log entry below
         // regardless of whether the send succeeds or throws.
         const taggedReply = (msg.userId ? `<@${msg.userId}> ` : '') + draft.reply;
+        // Temporary send-block: if this conversation is currently blocked (and
+        // the recheck window hasn't elapsed), don't attempt a send — but DON'T
+        // advance the watermark either, so the message is retried after the
+        // block's recheck time. Discovery already ran.
+        if (inbound.isSendBlocked(dm.channelId)) {
+          doLog(`[SlackDM] ${dm.name}: send-blocked (temporary) — holding ${msg.ts} for recheck`);
+          inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'blocked', reason: inbound.REASON.SEND_BLOCKED });
+          _markRetry(msg.ts);
+          continue;
+        }
         try {
           // Reply in-thread if the incoming message was itself part of a
           // thread (msg.threadTs is null for plain top-level messages, so
@@ -1072,19 +1139,27 @@ async function pollDMAutoReplyOnce(log) {
           const sendResult = await sendToChannel(dm.channelId, taggedReply, msg.threadTs || undefined);
           replyTs = sendResult.ts;
           repliedCount++;
+          inbound.clearSendBlocked(dm.channelId); // a successful send clears any prior block
+          inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'sent', reason: inbound.REASON.SENT });
         } catch (e) {
-          doLog(`[SlackDM] ${dm.name}: reply send FAILED: ${e.message}`);
-          if (e.message && e.message.includes('restricted_action')) {
-            _sendBlockedChannels.add(dm.channelId);
-            doLog(`[SlackDM] ${dm.name}: marked as read-only — will skip sends for this session`);
-          } else {
-            // Transient send failure (network/rate-limit) — retry this message
-            // next poll instead of advancing past it and losing it. Don't log
-            // it as a handled entry.
+          const cls = inbound.classifySendError(e);
+          doLog(`[SlackDM] ${dm.name}: reply send FAILED (${cls.kind}): ${e.message}`);
+          if (cls.kind === 'send-blocked') {
+            // TEMPORARY block (not permanent): recorded with a reason + recheck
+            // time. Discovery + incoming tracking continue on future polls; the
+            // block auto-expires so sending is periodically re-attempted.
+            inbound.markSendBlocked(dm.channelId, cls.reason);
+            inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'blocked', reason: inbound.REASON.SEND_BLOCKED });
             _markRetry(msg.ts);
-            doLog(`[SlackDM] ${dm.name}: send failed for ${msg.ts} — deferring for retry`);
+            doLog(`[SlackDM] ${dm.name}: temporarily send-blocked — will recheck later`);
             continue;
           }
+          // Retryable (timeout / rate-limit / auth / transient) — retry this
+          // message next poll instead of advancing past it. Not logged handled.
+          _markRetry(msg.ts);
+          inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'retry', reason: inbound.REASON.SEND_FAILED_RETRY, detail: cls.kind });
+          doLog(`[SlackDM] ${dm.name}: send failed for ${msg.ts} — deferring for retry`);
+          continue;
         }
 
         const entry = {
@@ -1168,6 +1243,14 @@ async function pollDMAutoReplyOnce(log) {
             .slice(1)
             .filter(r => parseFloat(r.ts) > parseFloat(seen.lastSeenTs))
             .filter(r => r.userId && r.userId !== myUserId);
+
+          // CONTACT DISCOVERY for thread repliers — runs BEFORE any per-reply
+          // reply decision, so a thread-only sender (never a top-level DM
+          // author) is still saved even if we ultimately don't reply.
+          try {
+            const _dt = await inbound.discoverSenders(newReplies, { myUserId, channelId: dm.channelId, isGroup: dm.isGroup }, { resolveUserName });
+            if (_dt.created) doLog(`[SlackDM] ${dm.name}: discovered ${_dt.created} new contact(s) from thread ${parentMsg.ts}`);
+          } catch (_e) { doLog(`[SlackDM] ${dm.name}: thread discovery error (non-fatal): ${_e.message}`); }
 
           for (const reply of newReplies) {
             const replyLogId = dm.channelId + ':' + reply.ts;
@@ -1288,6 +1371,12 @@ async function pollDMAutoReplyOnce(log) {
               } catch (_e) { /* shadow comparison must never break the live path */ }
             }
 
+            // Temporary send-block: hold this reply for recheck (don't advance).
+            if (inbound.isSendBlocked(dm.channelId)) {
+              doLog(`[SlackDM] ${dm.name}: thread reply ${reply.ts} send-blocked (temporary) — holding for recheck`);
+              inbound.lifecycle({ engine: 'dm-thread', channelId: dm.channelId, ts: reply.ts, threadTs: parentMsg.ts, senderId: reply.userId, stage: 'blocked', reason: inbound.REASON.SEND_BLOCKED });
+              continue; // NOT advancing latestThreadReplyTs -> retried after recheck
+            }
             let replyTs = null;
             let taggedReplyT = null;
             let _threadSendFailed = false;
@@ -1297,17 +1386,20 @@ async function pollDMAutoReplyOnce(log) {
               const sendResult = await sendToChannel(dm.channelId, taggedReplyT, parentMsg.ts);
               replyTs = sendResult.ts;
               repliedCount++;
+              inbound.clearSendBlocked(dm.channelId);
             } catch (e) {
-              doLog(`[SlackDM] ${dm.name}: thread reply send FAILED: ${e.message}`);
-              if (e.message && e.message.includes('restricted_action')) {
-                _sendBlockedChannels.add(dm.channelId);
-                doLog(`[SlackDM] ${dm.name}: marked as read-only — will skip sends for this session`);
-              } else {
-                // Transient failure — retry next poll; do NOT advance past it.
-                _threadSendFailed = true;
-                doLog(`[SlackDM] ${dm.name}: thread reply ${reply.ts} send failed — deferring for retry`);
-                continue; // NOT advancing latestThreadReplyTs, NOT logging as handled
+              const cls = inbound.classifySendError(e);
+              doLog(`[SlackDM] ${dm.name}: thread reply send FAILED (${cls.kind}): ${e.message}`);
+              if (cls.kind === 'send-blocked') {
+                inbound.markSendBlocked(dm.channelId, cls.reason);
+                inbound.lifecycle({ engine: 'dm-thread', channelId: dm.channelId, ts: reply.ts, threadTs: parentMsg.ts, senderId: reply.userId, stage: 'blocked', reason: inbound.REASON.SEND_BLOCKED });
+                continue; // NOT advancing latestThreadReplyTs -> retried after recheck
               }
+              // Transient failure — retry next poll; do NOT advance past it.
+              _threadSendFailed = true;
+              inbound.lifecycle({ engine: 'dm-thread', channelId: dm.channelId, ts: reply.ts, threadTs: parentMsg.ts, senderId: reply.userId, stage: 'retry', reason: inbound.REASON.SEND_FAILED_RETRY, detail: cls.kind });
+              doLog(`[SlackDM] ${dm.name}: thread reply ${reply.ts} send failed — deferring for retry`);
+              continue; // NOT advancing latestThreadReplyTs, NOT logging as handled
             }
             trace({ engine: 'dm-thread', channel: dm.name, sender: reply.userId, ts: reply.ts, text: reply.text,
               decision: draft.inScope ? 'replied' : 'escalated',

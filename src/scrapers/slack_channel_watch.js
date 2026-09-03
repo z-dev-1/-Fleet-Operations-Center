@@ -34,6 +34,9 @@ const { trace } = require('./slack_decision_trace');
 let _fasShadow; try { _fasShadow = require('../orcha/fas/shadow'); } catch (_) { _fasShadow = { runShadow: () => {} }; }
 // Digital FAS UNIFIED runner — per-mode reply ownership (see orcha/fas/runner.js).
 let _fasRunner; try { _fasRunner = require('../orcha/fas/runner'); } catch (_) { _fasRunner = null; }
+// Shared inbound helpers: contact discovery, temporary send-block registry,
+// structured lifecycle observability (same module the DM engine uses).
+const inbound = require('./slack_inbound_support');
 
 const MAX_MESSAGES_PER_POLL = 5;   // per channel, per poll cycle
 const MAX_LOG_ENTRIES       = 500; // persisted reply log cap
@@ -736,8 +739,18 @@ async function pollChannelsOnce(log) {
       }
       if (!messages.length) continue;
 
+      // ── CONTACT DISCOVERY (decoupled from reply decisions) ──────────────
+      // Save every external sender seen in this partner channel BEFORE the
+      // first-poll baseline / reply routing / any early continue. A decision
+      // not to reply must never prevent contact discovery. Never throws.
+      try {
+        const _disc = await inbound.discoverSenders(messages, { myUserId, channelId: ch.id, isGroup: true }, {});
+        if (_disc.created) doLog(`[SlackWatch] ${ch.name}: discovered ${_disc.created} new contact(s) from ${_disc.discovered} sender(s)`);
+      } catch (_e) { doLog(`[SlackWatch] ${ch.name}: discovery pass error (non-fatal): ${_e.message}`); }
+
       // FIRST-EVER poll of this channel: baseline only, do not reply to
-      // pre-existing history (see file header safety note).
+      // pre-existing history (see file header safety note). Discovery above
+      // already ran, so first-seen still saves senders.
       if (!ch.lastSeenTs) {
         _saveChannelLastSeen(ch.id, messages[0].ts);
         doLog(`[SlackWatch] ${ch.name}: first poll — baselined at ts ${messages[0].ts}, no replies sent for existing history`);
@@ -785,6 +798,14 @@ async function pollChannelsOnce(log) {
         .slice(0, MAX_MESSAGES_PER_POLL);
 
       if (!newMsgs.length) continue;
+
+      // Track the earliest message we could NOT genuinely send this cycle
+      // (send-blocked / transient send failure). We cap the watermark just
+      // below it so those messages are RETRIED next poll instead of being
+      // permanently skipped (the channel engine previously advanced the
+      // watermark unconditionally even when a send failed). null = all good.
+      let _channelRetryFromTs = null;
+      const _markChannelRetry = (ts) => { if (_channelRetryFromTs == null || parseFloat(ts) < parseFloat(_channelRetryFromTs)) _channelRetryFromTs = ts; };
 
       const partnerLog = store.load('slackChannelReplies', []); // hoisted — one disk read for all messages in this channel
       for (const msg of newMsgs) {
@@ -877,6 +898,7 @@ async function pollChannelsOnce(log) {
         let _fasModeC = 'disabled';
         try { const _c = require('../orcha/fas/config').get(); _fasModeC = (_c && _c.enabled) ? (_c.mode || 'shadow') : 'disabled'; } catch (_) {}
         if (_fasRunner && (_fasModeC === 'approval' || _fasModeC === 'autonomous')) {
+          let _fasOwnedC = true;
           try {
             // Part 8: inject the send path so the runner sends the autonomous
             // channel reply AND commits case memory atomically ONLY after Slack
@@ -887,12 +909,17 @@ async function pollChannelsOnce(log) {
               engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
               channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text,
             }, { sendToChannel });
-            if (_fr && _fr.outcome === 'auto-send-failed') {
+            if (_fr && _fr.letLegacyReply) {
+              // Runner asked us to let legacy reply (error-failsafe / ai-failed-
+              // shadow). Fall through to the legacy classify+reply below; do NOT
+              // mark handled or advance the watermark here.
+              _fasOwnedC = false;
+              doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) deferred to legacy (${(_fr && _fr.outcome) || 'letLegacyReply'}) ${msg.ts}`);
+            } else if (_fr && _fr.outcome === 'auto-send-failed') {
               // Delivery failed — nothing committed; retry this message later.
               doLog(`[SlackWatch] ${ch.name}: FAS autonomous delivery failed ${msg.ts} — deferring for retry (watermark not advanced)`);
               continue; // NOT advancing lastSeenTs -> retried next poll
-            }
-            if (_fr && _fr.outcome === 'auto-sent' && _fr.sent && _fr.sent.ts) {
+            } else if (_fr && _fr.outcome === 'auto-sent' && _fr.sent && _fr.sent.ts) {
               repliedCount++;
               const _txt = (msg.userId ? `<@${msg.userId}> ` : '') + ((_fr.decision && _fr.decision.reply) || '');
               _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
@@ -906,13 +933,17 @@ async function pollChannelsOnce(log) {
               doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) owned ${msg.ts} (${(_fr && _fr.outcome) || 'handled'}) — legacy skipped`);
             }
           } catch (e) {
-            doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) error ${msg.ts}: ${e.message} — manual review`);
-            _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
-              replyTs: null, question: msg.text, reply: '', wasMentioned: mentioned, inScope: false, category: 'fas-error',
-              title: 'FAS error — manual review', createdAt: new Date().toISOString(), status: 'fas-error' });
+            // FAS threw -> honor the runner's letLegacyReply-on-error design by
+            // falling through to the legacy reply below instead of only logging
+            // a silent review item.
+            _fasOwnedC = false;
+            doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) threw ${msg.ts}: ${e.message} — falling back to legacy reply`);
           }
-          _saveChannelLastSeen(ch.id, msg.ts);
-          continue; // FAS owns this channel message
+          if (_fasOwnedC) {
+            _saveChannelLastSeen(ch.id, msg.ts);
+            continue; // FAS owns this channel message
+          }
+          // else: fall through to legacy reply path (letLegacyReply honored)
         }
 
         const draft = await _classifyAndDraft(msg.text, askOrcha, (ch && ch.operators) || []);
@@ -940,13 +971,37 @@ async function pollChannelsOnce(log) {
           } catch (_e) { /* shadow comparison must never break the live path */ }
         }
 
+        // Temporary send-block: hold this message for recheck (don't advance).
+        if (inbound.isSendBlocked(ch.id)) {
+          doLog(`[SlackWatch] ${ch.name}: send-blocked (temporary) — holding ${msg.ts} for recheck`);
+          inbound.lifecycle({ engine: 'channel', channelId: ch.id, ts: msg.ts, senderId: msg.userId, stage: 'blocked', reason: inbound.REASON.SEND_BLOCKED });
+          _markChannelRetry(msg.ts);
+          continue;
+        }
         let replyTs = null;
+        let _chSendFailed = false;
         try {
           const sendResult = await sendToChannel(ch.id, taggedReply, msg.ts);
           replyTs = sendResult.ts;
           repliedCount++;
+          inbound.clearSendBlocked(ch.id);
         } catch (e) {
-          doLog(`[SlackWatch] ${ch.name}: reply send FAILED: ${e.message}`);
+          const cls = inbound.classifySendError(e);
+          doLog(`[SlackWatch] ${ch.name}: reply send FAILED (${cls.kind}): ${e.message}`);
+          if (cls.kind === 'send-blocked') {
+            // Temporary block (was: silently advanced past + never retried).
+            inbound.markSendBlocked(ch.id, cls.reason);
+            inbound.lifecycle({ engine: 'channel', channelId: ch.id, ts: msg.ts, senderId: msg.userId, stage: 'blocked', reason: inbound.REASON.SEND_BLOCKED });
+            _markChannelRetry(msg.ts);
+            continue;
+          }
+          // Retryable (timeout/rate-limit/auth/transient): hold for retry —
+          // do NOT log a handled entry, do NOT let the watermark pass it.
+          _chSendFailed = true;
+          inbound.lifecycle({ engine: 'channel', channelId: ch.id, ts: msg.ts, senderId: msg.userId, stage: 'retry', reason: inbound.REASON.SEND_FAILED_RETRY, detail: cls.kind });
+          _markChannelRetry(msg.ts);
+          doLog(`[SlackWatch] ${ch.name}: send failed for ${msg.ts} — deferring for retry`);
+          continue;
         }
 
         const entry = {
@@ -976,7 +1031,16 @@ async function pollChannelsOnce(log) {
         }
       }
 
-      _saveChannelLastSeen(ch.id, newMsgs[newMsgs.length - 1].ts);
+      // Advance the watermark to the newest processed message — but if any
+      // message was send-blocked / send-failed this cycle, cap it JUST below
+      // the earliest such message so those are retried next poll instead of
+      // being permanently skipped.
+      let _chWatermark = newMsgs[newMsgs.length - 1].ts;
+      if (_channelRetryFromTs != null && parseFloat(_channelRetryFromTs) <= parseFloat(_chWatermark)) {
+        const _capped = (parseFloat(_channelRetryFromTs) - 0.000001).toFixed(6);
+        _chWatermark = (parseFloat(_capped) > parseFloat(ch.lastSeenTs || '0')) ? _capped : (ch.lastSeenTs || _chWatermark);
+      }
+      _saveChannelLastSeen(ch.id, _chWatermark);
     } catch (e) {
       doLog(`[SlackWatch] ${ch.name}: poll error: ${e.message}`);
     }

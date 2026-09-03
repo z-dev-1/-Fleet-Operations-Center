@@ -93,6 +93,13 @@ const REGISTRY = {
   // slack_dm_autoreply.js but never registered here — so store.load threw and
   // the thread-reply baseline cold-started on every launch. Registered now.
   slackDMThreadReplyCount: () => path.join(P.dataDir, 'slack_dm_thread_reply_count.json'),
+  // Slack inbound pipeline reliability stores (2026-09, slack_inbound_support.js):
+  //   - contact-save failures that need attention (surfaced in system health)
+  //   - temporary send-block registry (restricted_action, with recheck TTL)
+  //   - structured per-message lifecycle / activity history
+  slackContactSaveFailures: () => path.join(P.dataDir, 'slack_contact_save_failures.json'),
+  slackSendBlocks:          () => path.join(P.dataDir, 'slack_send_blocks.json'),
+  slackInboundLifecycle:    () => path.join(P.dataDir, 'slack_inbound_lifecycle.json'),
   // Digital FAS agent (2026-09-02) — see src/orcha/fas/*.
   // Sender profiles (seeded from contacts), persistent case memory, FAS
   // playbook, knowledge-draft review queue, and agent config/audit.

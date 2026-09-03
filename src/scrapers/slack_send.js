@@ -505,7 +505,10 @@ const _dmNotifiedTs = new Set();
 // / persona prompting -- a group thread needs different handling than a
 // 1:1, since replies are visible to everyone in the group).
 async function listOpenDMs(limit, myUserId) {
-  const lim = Math.min(Number(limit) || 40, 100);
+  // Ceiling raised 100 -> 500 (2026-09) so "scan every open DM" is possible:
+  // client.counts returns the full DM/mpim list in one shot (no cursor), so we
+  // only need to not truncate. The caller still bounds work per cycle.
+  const lim = Math.min(Number(limit) || 40, 500);
   const counts = await slackWebApi('client.counts', {});
   if (!counts.ok) throw new Error('client.counts failed: ' + counts.error);
   // Carry activity signals so we can PRIORITIZE which DMs to poll when there
@@ -525,7 +528,7 @@ async function listOpenDMs(limit, myUserId) {
   const names = await Promise.all(
     all.map(c => _resolveDmSenderName(c.id, myUserId).catch(() => null))
   );
-  return all.map((c, i) => ({ channelId: c.id, name: names[i] || c.id, isGroup: c.isGroup }));
+  return all.map((c, i) => ({ channelId: c.id, name: names[i] || c.id, isGroup: c.isGroup, unread: c.unread }));
 }
 
 async function readDMs(limit) {
