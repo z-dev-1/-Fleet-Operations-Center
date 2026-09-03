@@ -101,3 +101,45 @@ describe('auth host detection', () => {
     expect(owa.AUTH_HOST_RE.test('https://outlook.office365.com/mail/deeplink/compose')).toBe(false);
   });
 });
+
+// A fake Electron whose API SHAPE matches the real one: setWindowOpenHandler
+// lives on webContents (NOT on BrowserWindow). This guards the regression where
+// win.setWindowOpenHandler threw "is not a function" and killed every send.
+function makeFakeElectron(navUrl) {
+  const listeners = {};
+  const wc = {
+    setWindowOpenHandler() {},               // correct location (on webContents)
+    on(evt, cb) { (listeners[evt] = listeners[evt] || []).push(cb); },
+    getURL() { return navUrl; },
+    executeJavaScript: async () => 'no',
+    isDestroyed() { return false; },
+  };
+  function FakeWin() {
+    this.webContents = wc;
+    this.on = () => {};
+    this.close = () => {};
+    this.hide = () => {};
+    this.isDestroyed = () => false;
+    // loadURL lives on BrowserWindow in the real Electron API.
+    this.loadURL = () => {
+      // Fire the auth-wall navigation shortly after load, like real navigation.
+      setTimeout(() => { (listeners['did-navigate'] || []).forEach(cb => cb({}, navUrl)); }, 5);
+    };
+  }
+  return { BrowserWindow: FakeWin, session: { defaultSession: {} } };
+}
+
+describe('sendViaOwa window setup (regression guard)', () => {
+  it('uses webContents.setWindowOpenHandler and does not throw on window setup', async () => {
+    const fake = makeFakeElectron('https://login.microsoftonline.com/common/oauth2/authorize');
+    const r = await owa.sendViaOwa({
+      to: 'zilasant@amazon.com', subject: 'Fleet', html: '<html><body>' + 'x'.repeat(300) + '</body></html>',
+      _electron: fake, timeoutMs: 3000,
+    });
+    // The exact regression: win.setWindowOpenHandler threw "is not a function"
+    // and every job failed with a 'window error'. Assert that NEVER happens —
+    // window setup must succeed (any legitimate outcome is fine here).
+    expect((r.errors || []).some(e => /setWindowOpenHandler|is not a function|window error/.test(e))).toBe(false);
+    expect(['blocked-auth', 'failed', 'delivery-uncertain', 'sent']).toContain(r.status);
+  });
+});

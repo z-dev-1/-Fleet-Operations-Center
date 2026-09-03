@@ -274,7 +274,8 @@ async function sendViaOwa(opts) {
         webPreferences: { nodeIntegration: false, contextIsolation: true, session: session.defaultSession },
       });
       // Never allow this window to be shown or to spawn popups.
-      win.setWindowOpenHandler(() => ({ action: 'deny' }));
+      // NOTE: setWindowOpenHandler lives on webContents, not on BrowserWindow.
+      win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       win.on('show', () => { try { win.hide(); } catch (_) {} });  // defensively re-hide
 
       const hardTimeout = setTimeout(() => { R.errors.push('overall timeout'); signals.error = 'timeout'; settle({ status: classifyOutcome(signals) }); }, timeoutMs);
@@ -464,7 +465,7 @@ async function previewSelectors(opts) {
     try {
       win = new BrowserWindow({ width: 1100, height: 800, show: false, x: -32000, y: -32000, skipTaskbar: true,
         webPreferences: { nodeIntegration: false, contextIsolation: true, session: session.defaultSession } });
-      win.setWindowOpenHandler(() => ({ action: 'deny' }));
+      win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       win.on('show', () => { try { win.hide(); } catch (_) {} });
       const t = setTimeout(() => settle({ error: 'timeout' }), timeoutMs);
       const onNav = (_e, url) => { if (AUTH_HOST_RE.test(url || '')) { clearTimeout(t); settle({ authWall: true, url }); } };
