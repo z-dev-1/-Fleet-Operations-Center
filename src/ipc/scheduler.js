@@ -130,6 +130,15 @@ function registerSchedulerIPC(ctx) {
     return { ok: true };
   });
 
+  // Read-only OWA selector self-check — confirms the compose editor + Send
+  // control are locatable in the current OWA build WITHOUT sending anything.
+  // Used by the live acceptance step to de-risk the DOM targets.
+  handle('scheduler:owa-selfcheck', async () => {
+    const { previewSelectors } = require('../scrapers/owa-mailer');
+    logger.info('OWA selector self-check requested');
+    return previewSelectors({});
+  });
+
   logger.info('Scheduler IPC handlers registered');
 }
 

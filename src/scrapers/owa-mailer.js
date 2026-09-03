@@ -44,8 +44,24 @@ const OWA_ORIGIN  = 'https://outlook.office365.com';
 // lands here we must pause, not attempt to type or send.
 const AUTH_HOST_RE = /(login\.microsoftonline\.com|login\.live\.com|login\.windows\.net|msft\.sts|adfs|\/common\/oauth2|\/consent|multifactor|\bmfa\b)/i;
 
-const EDITOR_SELECTOR = 'div[aria-label*="Message body"],div.elementToProof[contenteditable="true"]';
-const SEND_SELECTOR   = 'button[aria-label*="Send"]';
+// OWA markup shifts between builds, so each target has several fallbacks tried
+// in order. The message-body editor is a contenteditable region; the Send
+// control is a button with an accessible "Send" label (and a Ctrl+Enter
+// keyboard fallback exists if the button can't be found).
+const EDITOR_SELECTOR = [
+  'div[aria-label*="Message body"]',
+  'div[aria-label*="message body"]',
+  'div.elementToProof[contenteditable="true"]',
+  'div[role="textbox"][contenteditable="true"]',
+  'div[contenteditable="true"][aria-multiline="true"]',
+].join(',');
+const SEND_SELECTOR = [
+  'button[aria-label^="Send"]',
+  'button[aria-label*="Send"]',
+  'button[title^="Send"]',
+  'div[role="button"][aria-label*="Send"]',
+  'button[data-testid*="send" i]',
+].join(',');
 
 // ── Pure helpers (unit-tested without Electron) ────────────────────────────────
 
@@ -158,12 +174,24 @@ function _buildSendButtonProbeScript() {
 
 function _buildSendClickScript() {
   const sel = JSON.stringify(SEND_SELECTOR);
+  const edSel = JSON.stringify(EDITOR_SELECTOR);
   return `(function(){
     var b = document.querySelector(${sel});
-    if (!b) return 'no-btn';
-    if (b.disabled || b.getAttribute('aria-disabled') === 'true') return 'disabled';
-    b.click();
-    return 'clicked';
+    if (b) {
+      if (b.disabled || b.getAttribute('aria-disabled') === 'true') return 'disabled';
+      b.click();
+      return 'clicked';
+    }
+    // Fallback: OWA sends on Ctrl+Enter from within the editor. Only used when
+    // the Send button cannot be located by any selector.
+    var ed = document.querySelector(${edSel});
+    if (ed) {
+      ed.focus();
+      var ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, ctrlKey: true, bubbles: true });
+      ed.dispatchEvent(ev);
+      return 'clicked-keyboard';
+    }
+    return 'no-btn';
   })();`;
 }
 
@@ -291,15 +319,18 @@ async function sendViaOwa(opts) {
           signals.insertOk = ins === 'ok';
           if (!signals.insertOk) { R.errors.push('insert result: ' + ins); clearTimeout(hardTimeout); settle({ status: 'failed' }); return; }
 
-          // 2) Pre-send verify Send button enabled.
+          // 2) Pre-send verify the Send control. 'enabled' = button ready.
+          // 'no-btn' = button not found by any selector; we allow the Ctrl+Enter
+          // keyboard fallback (editor is confirmed ready + populated). Only an
+          // explicitly 'disabled' button blocks the send.
           const probe = await win.webContents.executeJavaScript(_buildSendButtonProbeScript());
-          signals.sendButtonEnabled = probe === 'enabled';
-          R.sendButtonEnabled = signals.sendButtonEnabled;
-          if (!signals.sendButtonEnabled) { R.errors.push('send button ' + probe); clearTimeout(hardTimeout); settle({ status: 'failed' }); return; }
+          if (probe === 'disabled') { signals.sendButtonEnabled = false; R.sendButtonEnabled = false; R.errors.push('send button disabled'); clearTimeout(hardTimeout); settle({ status: 'failed' }); return; }
+          signals.sendButtonEnabled = (probe === 'enabled' || probe === 'no-btn');
+          R.sendButtonEnabled = probe === 'enabled';
 
-          // 3) Click Send.
+          // 3) Click Send (button click, or Ctrl+Enter keyboard fallback).
           const click = await win.webContents.executeJavaScript(_buildSendClickScript());
-          signals.sendClicked = click === 'clicked';
+          signals.sendClicked = (click === 'clicked' || click === 'clicked-keyboard');
           if (!signals.sendClicked) { R.errors.push('send click: ' + click); clearTimeout(hardTimeout); settle({ status: 'failed' }); return; }
 
           // 4) Confirm the compose view closed (message left the outbox).
@@ -409,9 +440,59 @@ async function authenticateOwa(opts) {
   });
 }
 
+// ── Read-only selector self-check (Task #9 live acceptance aid) ────────────────
+/**
+ * previewSelectors(opts) -> Promise<{ ok, authWall, editorFound, sendButtonFound,
+ *   editorSelector, sendSelector, url, error? }>
+ *
+ * Opens a HIDDEN compose window exactly like a real send, but does NOT insert a
+ * body and does NOT click Send. It only reports whether the current OWA build
+ * exposes the editor + Send control our selectors target, or whether an auth
+ * wall is in the way. This lets the live acceptance step confirm the DOM
+ * targets before any real message is sent — zero side effects.
+ */
+async function previewSelectors(opts) {
+  opts = opts || {};
+  const electron = opts._electron || require('electron');
+  const { BrowserWindow, session } = electron;
+  const timeoutMs = opts.timeoutMs || 45000;
+  const out = { ok: false, authWall: false, editorFound: false, sendButtonFound: false,
+    editorSelector: EDITOR_SELECTOR, sendSelector: SEND_SELECTOR, url: null, error: null };
+  return new Promise((resolve) => {
+    let win, done = false;
+    const settle = (over) => { if (done) return; done = true; try { if (win && !win.isDestroyed()) win.close(); } catch (_) {} resolve(Object.assign(out, over || {})); };
+    try {
+      win = new BrowserWindow({ width: 1100, height: 800, show: false, x: -32000, y: -32000, skipTaskbar: true,
+        webPreferences: { nodeIntegration: false, contextIsolation: true, session: session.defaultSession } });
+      win.setWindowOpenHandler(() => ({ action: 'deny' }));
+      win.on('show', () => { try { win.hide(); } catch (_) {} });
+      const t = setTimeout(() => settle({ error: 'timeout' }), timeoutMs);
+      const onNav = (_e, url) => { if (AUTH_HOST_RE.test(url || '')) { clearTimeout(t); settle({ authWall: true, url }); } };
+      win.webContents.on('did-navigate', onNav);
+      win.webContents.on('did-redirect-navigation', onNav);
+      // subject only — no recipients, no body -> nothing can be sent
+      win.loadURL(COMPOSE_URL + '?subject=' + encodeURIComponent('[selector-check]'));
+      win.webContents.on('did-finish-load', async () => {
+        if (done) return;
+        const curUrl = win.webContents.getURL();
+        out.url = curUrl;
+        if (AUTH_HOST_RE.test(curUrl)) { clearTimeout(t); settle({ authWall: true }); return; }
+        if (!/outlook\.office(365)?\.com/i.test(curUrl)) return;
+        try {
+          const editorFound = await _waitFor(win, EDITOR_SELECTOR, 30, 1000);
+          const probe = await win.webContents.executeJavaScript(_buildSendButtonProbeScript());
+          clearTimeout(t);
+          settle({ ok: editorFound, editorFound, sendButtonFound: (probe === 'enabled' || probe === 'disabled') });
+        } catch (e) { clearTimeout(t); settle({ error: e.message }); }
+      });
+    } catch (e) { settle({ error: e.message }); }
+  });
+}
+
 module.exports = {
   sendViaOwa,
   authenticateOwa,
+  previewSelectors,
   // pure helpers (exported for tests + reuse)
   normalizeSubject, normalizeRecipient, toRecipientArray,
   genCorrelationMarker, embedMarker, classifyOutcome,

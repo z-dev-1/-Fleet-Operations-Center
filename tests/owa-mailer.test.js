@@ -76,8 +76,22 @@ describe('insertion is clipboard-free', () => {
     expect(script).not.toMatch(/clipboard/i);
     expect(script).not.toMatch(/paste/i);
   });
-  it('send click script targets the Send button', () => {
-    expect(owa._buildSendClickScript()).toMatch(/Send/);
+  it('send click script targets the Send button and has a Ctrl+Enter fallback', () => {
+    const s = owa._buildSendClickScript();
+    expect(s).toMatch(/Send/);
+    expect(s).toMatch(/ctrlKey/);            // keyboard fallback present
+    expect(s).toMatch(/clicked-keyboard/);
+  });
+});
+
+describe('selectors tolerate OWA markup variance', () => {
+  it('editor selector has multiple contenteditable fallbacks', () => {
+    expect(owa.EDITOR_SELECTOR).toMatch(/contenteditable="true"/);
+    expect(owa.EDITOR_SELECTOR.split(',').length).toBeGreaterThanOrEqual(3);
+  });
+  it('send selector has multiple fallbacks', () => {
+    expect(owa.SEND_SELECTOR.split(',').length).toBeGreaterThanOrEqual(3);
+    expect(owa.SEND_SELECTOR).toMatch(/Send/);
   });
 });
 

@@ -284,6 +284,7 @@ contextBridge.exposeInMainWorld('scheduler', {
   setFreshness:    (patch)   => ipcRenderer.invoke('scheduler:set-freshness', patch),
   authenticateOwa: ()        => ipcRenderer.invoke('scheduler:authenticate-owa'),
   openSentItems:   ()        => ipcRenderer.invoke('scheduler:open-sent-items'),
+  owaSelfCheck:    ()        => ipcRenderer.invoke('scheduler:owa-selfcheck'),
   // Live job-state updates pushed from the pipeline (scheduler:job-update).
   onJobUpdate:     (cb)      => on('scheduler:job-update', cb),
 });
