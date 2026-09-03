@@ -40,6 +40,7 @@ function pastSlot(minsAgo) {
 
 let _owaStatus;
 let _sendCalls;
+let _spPushCalls;
 
 beforeEach(() => {
   store.save('schedulerLedger', ledger._emptyLedger());
@@ -60,10 +61,12 @@ beforeEach(() => {
 
   _owaStatus = 'sent';
   _sendCalls = [];
+  _spPushCalls = 0;
   pipeline._setDeps({
     sendViaOwa: async ({ subject }) => { _sendCalls.push(subject); return { status: _owaStatus, to: ['ops@x.com'], cc: [], subject, sentItemsMatch: { found: _owaStatus === 'sent' }, composeClosed: true, errors: _owaStatus === 'sent' ? [] : [_owaStatus] }; },
     buildEmail: () => '<html><body>' + 'x'.repeat(300) + '</body></html>',
     summary: { buildSubjectSuffix: () => '', commitSnapshot: () => {} },
+    pushToSharePoint: async () => { _spPushCalls++; return { ok: true, status: 'ok', workbooksAttempted: 1, workbooksSucceeded: 1, workbooksFailed: 0, rowsVerified: 10, readBack: { verifiedWorkbooks: ['wb'], sampleUnits: [], hyperlinksChecked: true }, errors: [], completedAt: new Date().toISOString() }; },
   });
   pipeline._resetNotifyDedup();
 });
@@ -126,5 +129,24 @@ describe('auto-recovery of blocked-stale-data slots', () => {
     try { await scheduler.recoverBlockedSlots(); } finally { scheduler.stop(); }
     expect(_sendCalls.length).toBe(0);   // delivery-uncertain is left for manual reconcile
     expect(ledger.getJob(job.jobId).state).toBe(ledger.STATES.DELIVERY_UNCERTAIN);
+  });
+});
+
+describe('manual SP push is not defeated by a concurrent rescan (useExistingIfFresh)', () => {
+  it('runSpNow proceeds + verifies when sync reports in-progress but persisted data is fresh', async () => {
+    // ctx.runFullSync returns the "already in progress -> cache" envelope a
+    // background rescan produces — WITHOUT useExistingIfFresh this hard-blocks.
+    const ctx = {
+      runFullSync: async () => ({ ok: false, usedCache: true, rowCount: 0, syncedAt: null, dataAgeMs: null, sourcesUpdated: [], sourcesFailed: ['guard'], errors: [{ source: 'guard', message: 'sync already in progress' }] }),
+      lastData: { rows: store.load('fleetData', {}).rows },
+      getMainWindow: () => null, send: () => {}, pushStatus: () => {},
+    };
+    scheduler.start(ctx);
+    let r;
+    try { r = await scheduler.runSpNow(); } finally { scheduler.stop(); }
+    // Fresh persisted fleetData (set in beforeEach) lets the gate pass -> push runs + verifies.
+    expect(_spPushCalls).toBe(1);
+    expect(r && r.ok).toBe(true);
+    expect(r && r.blocked).toBeUndefined();
   });
 });

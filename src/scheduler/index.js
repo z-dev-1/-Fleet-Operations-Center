@@ -231,10 +231,22 @@ async function _recoverBlockedSlots() {
 }
 
 // ── Manual / test entry points (used by scheduler:* IPC) ───────────────────────
-function runSpNow() {
+async function runSpNow() {
   const dateKey = _todayPrefix();
   const label = 'manual-' + new Date().toTimeString().slice(0, 5);
-  return pipeline.runSharePointJob(_ctx, { dateKey, slotLabel: label, origin: ledger.ORIGINS.MANUAL, testMode: false });
+  // Re-queue any of today's blocked/failed SP jobs so a manual push isn't
+  // skipped as "paused" (e.g. a slot that hit blocked-stale-data earlier).
+  const requeueStates = [ledger.STATES.BLOCKED_STALE_DATA, ledger.STATES.BLOCKED_AUTH, ledger.STATES.RETRY, ledger.STATES.PARTIAL_FAILURE, ledger.STATES.FAILED];
+  const blocked = ledger.listJobs({ channel: ledger.CHANNELS.SHAREPOINT, dateKey, testMode: false })
+    .filter(j => requeueStates.includes(j.state));
+  for (const j of blocked) {
+    await ledger.transition(j.jobId, ledger.STATES.QUEUED, { attempts: 0, nextRetryAt: null }, 'manual SP re-run');
+  }
+  // useExistingIfFresh: a background rescan can make runFullSync return an
+  // in-progress/cache envelope even though the persisted fleetData is fresh; a
+  // manual push should validate the actual fresh data, not be defeated by a
+  // concurrent rescan (same fix as runEmailNow).
+  return pipeline.runSharePointJob(_ctx, { dateKey, slotLabel: label, origin: ledger.ORIGINS.MANUAL, testMode: false, useExistingIfFresh: true });
 }
 
 // "Run next email slot as test now" — uses the next upcoming email slot label

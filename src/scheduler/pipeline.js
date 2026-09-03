@@ -326,7 +326,7 @@ async function runSharePointJob(ctx, spec) {
   if (!lease.ok) { logger.info('SP channel busy — skipping'); return { skipped: 'channel-busy', job }; }
 
   try {
-    const gate = await _syncAndGate(ctx, job);
+    const gate = await _syncAndGate(ctx, job, { useExistingIfFresh: !!spec.useExistingIfFresh });
     if (!gate.proceed) { await ledger.releaseLease(ledger.CHANNELS.SHAREPOINT, job.jobId); return { blocked: 'stale-data', job: ledger.getJob(job.jobId) }; }
 
     await ledger.transition(job.jobId, ledger.STATES.RUNNING, {}, 'sharepoint push');
