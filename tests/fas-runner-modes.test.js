@@ -101,13 +101,41 @@ describe('FAS unified runner — mode routing (all three differ)', () => {
     expect(out.fasReply).toBeUndefined();
   });
 
-  it('AUTONOMOUS: approval-level action (SEND_SLACK) forces queue even if answer', async () => {
-    seed('autonomous');
+  it('AUTONOMOUS: SEND_SLACK queues when NOT whitelisted (safe default)', async () => {
+    seed('autonomous');   // approvedAutomaticActions: [] — not whitelisted
     vi.spyOn(relay, 'ask').mockResolvedValue(R({ decision: 'answer', confidence: 0.95, reason: 'ok', research: [],
       actions: [{ tool: 'SEND_SLACK', args: { text: 'hi' } }], reply: 'done' }));
     const out = await runner.handleInbound(inbound());
     expect(out.outcome).toBe('queued');
     expect(out.fasReply).toBeUndefined();
+  });
+
+  // The routeAction gate is the authoritative place the auto-send decision is
+  // made; prove it directly (executor unit) rather than through the whole
+  // runner dispatch (which has its own reply-vs-send routing).
+  it('AUTONOMOUS + whitelisted: routeAction AUTO-EXECUTES SEND_SLACK_MESSAGE (the requested behavior)', async () => {
+    seed('autonomous');
+    config.save({ enabled: true, mode: 'autonomous', approvedAutomaticActions: ['SEND_SLACK_MESSAGE'] });
+    const executor = require('../src/orcha/fas/executor');
+    const slackSend = require('../src/scrapers/slack_send');
+    const sendSpy = vi.spyOn(slackSend, 'sendToChannel').mockResolvedValue({ ts: '111.222' });
+    // Internal sender profile (authorized for follow_up / in scope).
+    const profile = { slackId: 'U_INT', type: 'internal', operators: ['*'], domiciles: ['*'], permittedRequestTypes: ['follow_up'] };
+    const res = await executor.routeAction('SEND_SLACK_MESSAGE', { channelId: 'C1', message: 'hi' }, { profile });
+    expect(res.outcome).toBe('executed');          // NOT 'queued'
+    expect(sendSpy).toHaveBeenCalled();
+    expect(store.load('fasApprovalQueue', []).filter(x => x.status === 'pending').length).toBe(0);
+  });
+
+  it('AUTONOMOUS + whitelisted: MOVE_UNIT still QUEUES (mutations never auto-run)', async () => {
+    seed('autonomous');
+    // Even if someone tries to whitelist a mutation, config strips it — and
+    // routeAction would queue it regardless. Prove the safety invariant holds.
+    config.save({ enabled: true, mode: 'autonomous', approvedAutomaticActions: ['SEND_SLACK_MESSAGE', 'MOVE_UNIT'] });
+    const executor = require('../src/orcha/fas/executor');
+    const profile = { slackId: 'U_INT', type: 'internal', operators: ['*'], domiciles: ['*'], permittedRequestTypes: ['lifecycle_change'] };
+    const res = await executor.routeAction('MOVE_UNIT', { unit: '320160', state: 'Active', reason: 'x' }, { profile });
+    expect(res.outcome).toBe('queued');            // mutation always queues
   });
 
   it('FAIL-SAFE: AI unavailable never auto-sends and never marks handled', async () => {

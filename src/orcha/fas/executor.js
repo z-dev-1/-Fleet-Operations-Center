@@ -455,7 +455,15 @@ async function routeAction(name, args, ctx) {
   }
 
   const level = action.level;
-  const canAuto = cfg.mode === 'autonomous' && level === 'low' &&
+  // Auto-execute ONLY in autonomous mode, ONLY when the operator has explicitly
+  // whitelisted this action (approvedAutomaticActions — itself sanitized by
+  // config so only automatic-eligible actions can be listed), AND the action is
+  // automatic-eligible: any 'low' action, or an 'approval' action that opts in
+  // via automaticEligible (e.g. SEND_SLACK_MESSAGE — a low-stakes outbound
+  // message). Mutating fleet actions (MOVE_UNIT / SUBMIT_WORK_REQUEST) do NOT
+  // opt in, so they always queue for approval even in autonomous mode.
+  const autoEligible = level === 'low' || action.automaticEligible === true;
+  const canAuto = cfg.mode === 'autonomous' && autoEligible &&
     (cfg.approvedAutomaticActions || []).includes(name);
 
   if (canAuto) {

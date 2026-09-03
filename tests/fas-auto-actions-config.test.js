@@ -18,23 +18,28 @@ beforeEach(() => { store.save('fasConfig', null); });
 afterEach(() => { try { fs.rmSync(tmpDir, { recursive: true }); } catch (_) {} fs.mkdirSync(tmpDir, { recursive: true }); });
 
 describe('Part 12: automatic-action catalog + config safety', () => {
-  it('catalog marks lifecycle/WR/send as approval-only (never automatic-eligible)', () => {
+  it('catalog keeps fleet MUTATIONS approval-only; SEND_SLACK opts in as automatic-eligible', () => {
     const cat = reg.listActionCatalog();
     const byName = Object.fromEntries(cat.map(a => [a.name, a]));
     expect(byName.ADD_TIMELINE.eligibleForAutomatic).toBe(true);
+    // Fleet-mutating actions can NEVER be made automatic.
     expect(byName.MOVE_UNIT.eligibleForAutomatic).toBe(false);
     expect(byName.SUBMIT_WORK_REQUEST.eligibleForAutomatic).toBe(false);
-    expect(byName.SEND_SLACK_MESSAGE.eligibleForAutomatic).toBe(false);
+    // SEND_SLACK_MESSAGE is a low-stakes outbound message: it opts in via
+    // automaticEligible so it CAN be whitelisted for autonomous auto-send
+    // (still queues in approval mode; still requires explicit whitelisting).
+    expect(byName.SEND_SLACK_MESSAGE.eligibleForAutomatic).toBe(true);
   });
 
   it('defaults to NO automatic actions', () => {
     expect(config.get().approvedAutomaticActions).toEqual([]);
   });
 
-  it('save() strips approval-level actions from approvedAutomaticActions', () => {
+  it('save() keeps SEND_SLACK_MESSAGE but strips fleet mutations from approvedAutomaticActions', () => {
     const saved = config.save({ enabled: true, mode: 'autonomous',
       approvedAutomaticActions: ['ADD_TIMELINE', 'MOVE_UNIT', 'SEND_SLACK_MESSAGE', 'SUBMIT_WORK_REQUEST'] });
-    expect(saved.approvedAutomaticActions).toEqual(['ADD_TIMELINE']); // mutations dropped
+    // ADD_TIMELINE (low) + SEND_SLACK_MESSAGE (opt-in) survive; mutations dropped.
+    expect(saved.approvedAutomaticActions).toEqual(['ADD_TIMELINE', 'SEND_SLACK_MESSAGE']);
   });
 
   it('save() strips unknown/bogus action names', () => {

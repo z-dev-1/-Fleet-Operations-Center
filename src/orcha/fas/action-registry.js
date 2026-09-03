@@ -188,8 +188,15 @@ const SUBMIT_WORK_REQUEST = {
 };
 
 // Send a Slack message (external effect).
+// level:'approval' means it QUEUES for approval by default (safe default). But
+// unlike the mutating actions (MOVE_UNIT / SUBMIT_WORK_REQUEST), a Slack reply
+// is a low-stakes outbound message, so it is flagged automaticEligible: it MAY
+// be auto-sent — but ONLY in autonomous mode AND ONLY when the operator has
+// explicitly added it to approvedAutomaticActions. Lifecycle/WR actions have no
+// such flag and can therefore NEVER be made automatic.
 const SEND_SLACK_MESSAGE = {
   level: 'approval',
+  automaticEligible: true,
   requires: 'follow_up',
   idempotencyKey(args) { return _idem('SEND_SLACK_MESSAGE', { channelId: args.channelId || '', message: String(args.message || ''), threadTs: args.threadTs || null }); },
   async run(args) {
@@ -238,9 +245,12 @@ function listActionCatalog() {
       level: a.level,                          // 'low' | 'approval'
       requires: a.requires || null,
       description: DESCRIPTIONS[name] || '',
-      // Only low-risk actions may EVER run automatically; approval-level
-      // actions always require human approval.
-      eligibleForAutomatic: a.level === 'low',
+      // Low-risk actions are automatic-eligible; approval-level actions require
+      // human approval UNLESS the action opts in with automaticEligible (e.g.
+      // SEND_SLACK_MESSAGE — a low-stakes outbound message). Mutating fleet
+      // actions (MOVE_UNIT / SUBMIT_WORK_REQUEST) never set that flag, so they
+      // remain approval-only and can never be made automatic.
+      eligibleForAutomatic: a.level === 'low' || a.automaticEligible === true,
       isMutation: a.level === 'approval' || /MOVE_UNIT|SUBMIT_WORK_REQUEST|SEND_SLACK/.test(name),
     };
   });
