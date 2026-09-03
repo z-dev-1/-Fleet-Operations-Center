@@ -55,6 +55,7 @@ function _buildRequesterSnapshot(input) {
       allowedDataCategories: (p.allowedDataCategories || []).slice(),
       permittedRequestTypes: (p.permittedRequestTypes || []).slice(),
       lifecyclePermission: p.lifecyclePermission || 'not_allowed',
+      createWrPermission: p.createWrPermission || 'not_allowed',
       capturedAt: new Date().toISOString(),
     };
   } catch (_) { return null; }

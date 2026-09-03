@@ -62,6 +62,7 @@ function registerContactsHandlers() {
         identityType: p.type, enabled: p.enabled !== false, operators: p.operators, domiciles: p.domiciles,
         allowedDataCategories: p.allowedDataCategories, permittedRequestTypes: p.permittedRequestTypes,
         lifecyclePermission: p.lifecyclePermission || 'not_allowed',
+        createWrPermission: p.createWrPermission || 'not_allowed',
         permissionSource: c.permissionSource || p.source, summary: profiles.permissionSummary(p) };
     });
   });

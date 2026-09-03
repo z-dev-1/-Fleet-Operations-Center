@@ -77,15 +77,19 @@ describe('Contact Book hardened write service', () => {
     expect(res.ok).toBe(false);
   });
 
-  it('discoverFromDM creates a SAFE UNKNOWN contact (no scope, no lifecycle perm)', () => {
+  it('discoverFromDM creates an UNKNOWN contact: all-scope + all data, but NO auto lifecycle/WR', () => {
+    // Most unknown senders are internal contacts, so unknown defaults to ALL
+    // scope ('*') + all data/requests — but lifecycle and WR creation are still
+    // not_allowed (never automatic) until an operator grants them explicitly.
     const r = cb.discoverFromDM({ slackId: 'U_NEW', name: 'Stranger', channelId: 'D1' });
     expect(r.existed).toBe(false);
     const c = store.load('contacts', []).find(x => x.id === r.id);
     expect(c.identityType).toBe('unknown');
-    expect(c.operators).toEqual([]);
-    expect(c.domiciles).toEqual([]);
+    expect(c.operators).toEqual(['*']);
+    expect(c.domiciles).toEqual(['*']);
     expect(c.lifecyclePermission).toBe('not_allowed');
-    expect(c.allowedDataCategories).toEqual(['unit_status']); // conservative
+    expect(c.createWrPermission).toBe('not_allowed');
+    expect(c.allowedDataCategories.length).toBe(8);   // all data categories
   });
 
   it('discoverFromDM dedupes case-insensitively and does NOT downgrade an existing contact', () => {

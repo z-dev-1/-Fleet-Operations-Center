@@ -21,45 +21,50 @@ const DATA_CATEGORIES = ['unit_status', 'repair_timeline', 'work_orders', 'pm_st
 // Request types a profile may be allowed to make.
 const REQUEST_TYPES = ['unit_status', 'repair_update', 'follow_up', 'report', 'process_question', 'lifecycle_change', 'create_wr'];
 
-// Conservative default for anyone we don't recognize.
+// Wildcard all-scope token (matches every operator/domicile, incl. future).
+const ALL_SCOPE = '*';
+
+// Default for anyone we don't recognize = UNKNOWN. Because most unknown senders
+// are internal contacts, unknown gets ALL data + ALL request types and ALL
+// scope ('*'), but may NOT change lifecycle or create WRs automatically.
 function _limitedDefaults(slackId, name) {
   return {
     slackId: slackId || '',
     name: name || slackId || 'Unknown',
     org: '',
     role: 'unknown',
-    type: 'unknown',           // internal | carrier | vendor | manager | unknown
-    operators: [],
-    domiciles: [],
-    allowedDataCategories: ['unit_status'], // may ask about a unit they name; nothing fleet-wide
-    permittedRequestTypes: ['unit_status', 'repair_update', 'follow_up', 'process_question'],
+    type: 'unknown',           // internal | carrier | vendor | unknown
+    operators: [ALL_SCOPE],
+    domiciles: [ALL_SCOPE],
+    allowedDataCategories: DATA_CATEGORIES.slice(),
+    permittedRequestTypes: REQUEST_TYPES.slice(),
     lifecyclePermission: 'not_allowed',
+    createWrPermission: 'not_allowed',
     commPreferences: {},
     source: 'default-limited',
   };
 }
 
-// ── Permission PRESETS by identity type (Part 1) ─────────────────────────────
-// Safe starting points; an authorized operator can customize per contact in the
-// Contact Book. Internal/manager get broad categories; external (carrier/vendor)
-// are scoped to their own operators/domiciles with a narrower category set;
-// unknown gets the most limited access.
+// ── Permission PRESETS by identity type (2026-09 simplified model) ───────────
+// Every identity gets ALL data categories + ALL request types (data access is
+// governed by SCOPE, not category toggles). The meaningful per-contact controls
+// are: SCAC/domicile scope, lifecyclePermission (3-state), createWrPermission
+// (3-state). Lifecycle + create-WR are NEVER granted by a preset — they default
+// to not_allowed and must be set explicitly per contact.
+//   - internal / carrier : all data + all requests; operator picks scope.
+//   - vendor             : all data + all requests, but lifecycle + create-WR
+//                          are LOCKED to not_allowed (mechanic asks, op acts).
+//   - unknown            : all data + all requests + ALL scope ('*').
 function presetFor(type) {
-  const isInternal = type === 'internal' || type === 'manager';
-  if (isInternal) {
-    return { allowedDataCategories: DATA_CATEGORIES.slice(), permittedRequestTypes: REQUEST_TYPES.slice() };
-  }
-  if (type === 'carrier' || type === 'vendor') {
-    return {
-      allowedDataCategories: ['unit_status', 'repair_timeline', 'work_orders', 'pm_status'],
-      permittedRequestTypes: ['unit_status', 'repair_update', 'follow_up', 'process_question'],
-    };
-  }
-  // unknown
-  return {
-    allowedDataCategories: ['unit_status'],
-    permittedRequestTypes: ['unit_status', 'repair_update', 'follow_up', 'process_question'],
-  };
+  return { allowedDataCategories: DATA_CATEGORIES.slice(), permittedRequestTypes: REQUEST_TYPES.slice() };
+}
+
+// Default SCOPE for an identity when the contact carries no explicit scope.
+// `internal` and `unknown` default to ALL-scope ('*') — broad by default, but
+// editable to specific SCAC/domicile. `carrier`/`vendor` (external) default to
+// EMPTY = no data until explicitly scoped ("empty external scope = NO access").
+function _defaultScopeFor(type) {
+  return (type === 'unknown' || type === 'internal') ? [ALL_SCOPE] : [];
 }
 
 // Infer identityType from a raw contact when not explicitly set. IMPORTANT: an
@@ -91,19 +96,34 @@ function _inferType(c) {
 // (enabled === false) grants NO access.
 function _fromContact(c) {
   const type = _inferType(c);
-  const domiciles = []
+  // Normalize scope, PRESERVING the '*' all-scope wildcard.
+  const normScope = (arr) => {
+    const out = Array.from(new Set(arr.map(s => String(s).trim()).filter(Boolean)
+      .map(s => s === ALL_SCOPE ? ALL_SCOPE : s.toUpperCase())));
+    return out.includes(ALL_SCOPE) ? [ALL_SCOPE] : out;
+  };
+  let domiciles = normScope([]
     .concat(c.domiciles ? (Array.isArray(c.domiciles) ? c.domiciles : String(c.domiciles).split(/[\s,]+/)) : [])
-    .concat(Array.isArray(c.domicileList) ? c.domicileList : [])
-    .map(s => String(s).trim().toUpperCase()).filter(Boolean);
-  const operators = []
+    .concat(Array.isArray(c.domicileList) ? c.domicileList : []));
+  let operators = normScope([]
     .concat(Array.isArray(c.operators) ? c.operators : [])
-    .concat(c.operator ? [c.operator] : [])
-    .map(s => String(s).trim().toUpperCase()).filter(Boolean);
+    .concat(c.operator ? [c.operator] : []));
+  // If the resolved scope is empty, apply the identity's default scope.
+  // internal/unknown default to all-scope ('*'); carrier/vendor stay empty
+  // (= no data until explicitly scoped).
+  if (!operators.length && !domiciles.length) {
+    const def = _defaultScopeFor(type);
+    operators = def.slice(); domiciles = def.slice();
+  }
   const preset = presetFor(type);
-  // Disabled contact -> revoke all FAS authorization immediately (Part 1).
+  // Disabled contact -> revoke all FAS authorization immediately.
   const disabled = c.enabled === false;
   const hasExplicitCats = Array.isArray(c.allowedDataCategories);
   const hasExplicitReqs = Array.isArray(c.permittedRequestTypes);
+  // VENDOR LOCK: mechanics can never be trusted/autonomous for lifecycle or WR
+  // creation — force both to not_allowed no matter what the contact stored.
+  const isVendor = type === 'vendor';
+  const three = (v) => (['not_allowed', 'may_request', 'trusted_autonomous'].includes(v) ? v : 'not_allowed');
   return {
     contactId: c.id || null,
     slackId: c.slackId || '',
@@ -117,11 +137,11 @@ function _fromContact(c) {
     domiciles,
     allowedDataCategories: disabled ? [] : (hasExplicitCats ? c.allowedDataCategories.filter(x => DATA_CATEGORIES.includes(x)) : preset.allowedDataCategories),
     permittedRequestTypes: disabled ? [] : (hasExplicitReqs ? c.permittedRequestTypes.filter(x => REQUEST_TYPES.includes(x)) : preset.permittedRequestTypes),
-    // Lifecycle permission is a 3-state field, NOT part of presets: it must be
-    // explicitly granted per contact. Default (and disabled) => 'not_allowed'.
-    // 'trusted_autonomous' is only honored when EXPLICITLY set on the contact.
-    lifecyclePermission: disabled ? 'not_allowed'
-      : (['not_allowed', 'may_request', 'trusted_autonomous'].includes(c.lifecyclePermission) ? c.lifecyclePermission : 'not_allowed'),
+    // Lifecycle + create-WR are 3-state, explicit-only, and disabled/vendor ->
+    // not_allowed. 'trusted_autonomous' only honored when explicitly set on a
+    // non-vendor contact.
+    lifecyclePermission: (disabled || isVendor) ? 'not_allowed' : three(c.lifecyclePermission),
+    createWrPermission: (disabled || isVendor) ? 'not_allowed' : three(c.createWrPermission),
     commPreferences: (c.communicationPreferences && typeof c.communicationPreferences === 'object') ? c.communicationPreferences : (c.commPreferences || {}),
     source: 'contact-book',
   };
@@ -133,7 +153,7 @@ function _loadProfiles() {
   return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
 }
 
-const VALID_TYPES = ['internal', 'manager', 'carrier', 'vendor', 'unknown'];
+const VALID_TYPES = ['internal', 'carrier', 'vendor', 'unknown'];
 
 /**
  * validateProfile(profile) -> { ok, profile?, error? }
@@ -209,9 +229,17 @@ function canViewCategory(profile, category) {
   return (profile.allowedDataCategories || []).includes(category);
 }
 
-/** Can this sender make a given request type? */
+/** Can this sender make a given request type?
+ * lifecycle_change + create_wr are gated by their dedicated 3-state fields
+ * (not just membership in permittedRequestTypes): anything other than
+ * not_allowed counts as "may request" for the purpose of proposing/asking. */
 function canRequest(profile, requestType) {
   if (!profile) return false;
+  if (profile.enabled === false) return false; // disabled -> no access at all
+  // Internal actors have full request authority (they ARE the operator).
+  if (profile.type === 'internal') return true;
+  if (requestType === 'lifecycle_change') return (profile.lifecyclePermission || 'not_allowed') !== 'not_allowed';
+  if (requestType === 'create_wr') return (profile.createWrPermission || 'not_allowed') !== 'not_allowed';
   return (profile.permittedRequestTypes || []).includes(requestType);
 }
 
@@ -224,15 +252,20 @@ function canRequest(profile, requestType) {
  */
 function scopeUnitForSender(profile, unitRow) {
   if (!profile || !unitRow) return false;
-  if (profile.type === 'internal' || profile.type === 'manager') return true;
+  const ops = (profile.operators || []).map(s => String(s).toUpperCase());
+  const doms = (profile.domiciles || []).map(s => String(s).toUpperCase());
+  // All-scope wildcard: an operator OR domicile of '*' matches every unit
+  // (default for unknown/internal; can be set on any identity explicitly).
+  if (ops.includes(ALL_SCOPE) || doms.includes(ALL_SCOPE)) return true;
+  // internal with NO narrowing scope = all fleet (broad by default). Once an
+  // internal contact is given specific SCAC/domicile, it is restricted to them.
+  if (profile.type === 'internal' && !ops.length && !doms.length) return true;
   const op = (unitRow.operator || '').trim().toUpperCase();
   const dom = (unitRow.domicileSite || unitRow.site || '').trim().toUpperCase();
-  const ops = (profile.operators || []).map(s => s.toUpperCase());
-  const doms = (profile.domiciles || []).map(s => s.toUpperCase());
   if (ops.length && op && ops.includes(op)) return true;
   if (doms.length && dom && doms.includes(dom)) return true;
-  // No matching scope -> deny (conservative). Unknown senders with no scope
-  // configured cannot pull fleet-scoped records.
+  // No matching scope -> deny (conservative). A contact with empty scope
+  // (carrier/internal/vendor that hasn't been scoped) sees NO fleet-scoped data.
   return false;
 }
 
@@ -245,28 +278,37 @@ function authorizationSummary(profile) {
     canRequestFollowUp: canRequest(profile, 'follow_up'),
     canRequestLifecycleChange: canRequest(profile, 'lifecycle_change'),
     canRequestWR: canRequest(profile, 'create_wr'),
-    isInternal: !!(profile && (profile.type === 'internal' || profile.type === 'manager')),
+    isInternal: !!(profile && profile.type === 'internal'),
   };
 }
 
-// Plain-language summary of what a resolved profile can do (Part 1 UI helper).
+// Plain-language summary of what a resolved profile can do (Contact Book UI).
 function permissionSummary(profile) {
   if (!profile) return 'No access.';
   if (profile.enabled === false) return 'Disabled — no FAS access.';
-  const isInternal = profile.type === 'internal' || profile.type === 'manager';
+  const ops = (profile.operators || []);
+  const doms = (profile.domiciles || []);
+  const allScope = ops.includes(ALL_SCOPE) || doms.includes(ALL_SCOPE);
   const cats = (profile.allowedDataCategories || []);
-  const scope = isInternal ? 'all fleet units'
-    : (profile.operators || []).length || (profile.domiciles || []).length
-      ? ([].concat((profile.operators || []).length ? (profile.operators.join('/') + ' units') : [])
-           .concat((profile.domiciles || []).length ? ('units at ' + profile.domiciles.join('/')) : []).join(' and '))
-      : 'NO fleet-scoped units (no operator/domicile scope set)';
+  let scope;
+  if (allScope) scope = 'all fleet units (all SCAC + all domiciles)';
+  else if (ops.length || doms.length) {
+    scope = [].concat(ops.length ? (ops.join('/') + ' units') : [])
+              .concat(doms.length ? ('units at ' + doms.join('/')) : []).join(' and ');
+  } else scope = 'NO fleet-scoped units (no SCAC/domicile scope set)';
   const canView = cats.length ? ('can view ' + cats.map(c => c.replace(/_/g, ' ')).join(', ')) : 'cannot view fleet data';
-  const canLc = canRequest(profile, 'lifecycle_change');
-  const canWr = canRequest(profile, 'create_wr');
-  const cannot = [];
-  if (!canLc) cannot.push('request lifecycle changes');
-  if (!canWr) cannot.push('create work requests');
-  return 'Can ' + canView + ' for ' + scope + '.' + (cannot.length ? (' Cannot ' + cannot.join(' or ') + '.') : '');
+  const lp = profile.lifecyclePermission || 'not_allowed';
+  const wp = profile.createWrPermission || 'not_allowed';
+  const cap = (label, v) => v === 'trusted_autonomous' ? (label + ': trusted (autonomous)')
+    : v === 'may_request' ? (label + ': may request (approval)') : null;
+  let out = 'Can ' + canView + ' for ' + scope + '.';
+  const canCaps = [cap('lifecycle changes', lp), cap('work requests', wp)].filter(Boolean);
+  if (canCaps.length) out += ' ' + canCaps.join('; ') + '.';
+  const cannotCaps = [];
+  if (lp === 'not_allowed') cannotCaps.push('change lifecycle');
+  if (wp === 'not_allowed') cannotCaps.push('create work requests');
+  if (cannotCaps.length) out += ' Cannot ' + cannotCaps.join(' or ') + '.';
+  return out;
 }
 
 // ── MIGRATION: slackSenderProfiles -> Contact Book (Part 1 / MIGRATION) ──────
@@ -323,6 +365,8 @@ function migrateSenderProfilesToContacts(opts) {
         domiciles: (p.domiciles || []).map(s => String(s).trim().toUpperCase()).filter(Boolean),
         allowedDataCategories: (p.allowedDataCategories || []).filter(x => DATA_CATEGORIES.includes(x)),
         permittedRequestTypes: (p.permittedRequestTypes || []).filter(x => REQUEST_TYPES.includes(x)),
+        lifecyclePermission: ['not_allowed', 'may_request', 'trusted_autonomous'].includes(p.lifecyclePermission) ? p.lifecyclePermission : 'not_allowed',
+        createWrPermission: ['not_allowed', 'may_request', 'trusted_autonomous'].includes(p.createWrPermission) ? p.createWrPermission : 'not_allowed',
         communicationPreferences: (p.commPreferences && typeof p.commPreferences === 'object') ? p.commPreferences : {},
         permissionSource: 'migrated-v' + MIGRATION_VERSION,
         updatedAt: at,

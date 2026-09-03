@@ -139,9 +139,14 @@ describe('MIGRATION: slackSenderProfiles -> Contact Book', () => {
     legacy.U_STALE = { slackId: 'U_STALE', type: 'internal', operators: [], allowedDataCategories: ['uptake'] };
     store.save('slackSenderProfiles', legacy);
     const stale = profiles.resolveSender('U_STALE');
-    // Migrated store -> legacy ignored -> falls to limited default (not internal).
+    // Migrated store -> legacy ignored -> falls to the limited DEFAULT, NOT the
+    // legacy 'internal' profile. (Unknown now reads broadly, but it is the
+    // default profile — not the legacy one — that answers, and it has NO
+    // lifecycle/WR authority, unlike the legacy internal would have implied.)
     expect(stale.type).toBe('unknown');
-    expect(profiles.canViewCategory(stale, 'uptake')).toBe(false);
+    expect(stale.source).toBe('default-limited');
+    expect(profiles.canRequest(stale, 'lifecycle_change')).toBe(false);
+    expect(profiles.canRequest(stale, 'create_wr')).toBe(false);
   });
 
   it('is idempotent (rerun produces same merged/created counts of zero-new)', () => {

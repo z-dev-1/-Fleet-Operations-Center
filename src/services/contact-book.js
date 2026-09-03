@@ -29,16 +29,25 @@ let logger; try { logger = require('../utils/logger').createLogger('contact-book
 
 const STORE_KEY = 'contacts';
 
-const VALID_IDENTITY = ['internal', 'manager', 'carrier', 'vendor', 'unknown'];
+// FOUR identities only (2026-09: manager removed — internal covers it).
+const VALID_IDENTITY = ['internal', 'carrier', 'vendor', 'unknown'];
 const DATA_CATS = ['unit_status', 'repair_timeline', 'work_orders', 'pm_status', 'uptake', 'vendor_contact', 'site_summary', 'operator_summary'];
 const REQ_TYPES = ['unit_status', 'repair_update', 'follow_up', 'report', 'process_question', 'lifecycle_change', 'create_wr'];
-// Lifecycle permission is a 3-state field (NOT a boolean and NOT part of the
-// request-type list): what a contact may do with lifecycle changes.
+// The two sensitive capabilities are each a 3-state field (NOT booleans, NOT in
+// the request-type list): lifecycle changes and work-request creation. Data
+// categories + request types are effectively always "all" now — the meaningful
+// per-contact controls are SCOPE (SCAC/domicile) + these two capabilities.
 const LIFECYCLE_PERMS = ['not_allowed', 'may_request', 'trusted_autonomous'];
+const CREATE_WR_PERMS = ['not_allowed', 'may_request', 'trusted_autonomous'];
 
-// Safe defaults for an automatically discovered (unknown) contact.
-const UNKNOWN_DATA_CATS = ['unit_status'];
-const UNKNOWN_REQ_TYPES = ['unit_status', 'repair_update', 'follow_up', 'process_question'];
+// Wildcard scope token: '*' means ALL operators / ALL domiciles, including any
+// that appear in the fleet later. Used as the default for `unknown` contacts.
+const ALL_SCOPE = '*';
+
+// "All" defaults applied to every contact for data/requests (these are no
+// longer per-contact toggles in the UI).
+const ALL_DATA_CATS = DATA_CATS.slice();
+const ALL_REQ_TYPES = REQ_TYPES.slice();
 
 function _now() { return new Date().toISOString(); }
 function _genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
@@ -48,8 +57,15 @@ function _load() { const c = store.load(STORE_KEY, []); return Array.isArray(c) 
 function _slackKey(slackId) { return slackId ? String(slackId).trim().toUpperCase() : ''; }
 
 function _upperArrayOrEmpty(v) {
-  if (Array.isArray(v)) return Array.from(new Set(v.map(x => String(x).trim().toUpperCase()).filter(Boolean)));
-  if (typeof v === 'string' && v.trim()) return Array.from(new Set(v.split(/[\s,]+/).map(x => x.trim().toUpperCase()).filter(Boolean)));
+  // Preserves the '*' wildcard (all-scope) token; everything else uppercased,
+  // trimmed, de-duped. If '*' is present it collapses to just ['*'].
+  const norm = (arr) => {
+    const cleaned = Array.from(new Set(arr.map(x => String(x).trim()).filter(Boolean)
+      .map(x => x === ALL_SCOPE ? ALL_SCOPE : x.toUpperCase())));
+    return cleaned.includes(ALL_SCOPE) ? [ALL_SCOPE] : cleaned;
+  };
+  if (Array.isArray(v)) return norm(v);
+  if (typeof v === 'string' && v.trim()) return norm(v.split(/[\s,]+/));
   return []; // malformed / non-array -> SAFE EMPTY array
 }
 function _enumArrayOrEmpty(v, allowed) {
@@ -67,6 +83,11 @@ function sanitize(incoming) {
   const out = { ...(incoming || {}) };
   if (out.identityType !== undefined && !VALID_IDENTITY.includes(out.identityType)) out.identityType = 'unknown';
   if (out.lifecyclePermission !== undefined && !LIFECYCLE_PERMS.includes(out.lifecyclePermission)) out.lifecyclePermission = 'not_allowed';
+  if (out.createWrPermission !== undefined && !CREATE_WR_PERMS.includes(out.createWrPermission)) out.createWrPermission = 'not_allowed';
+  // VENDOR LOCK: a vendor (mechanic) can never be trusted/autonomous for
+  // lifecycle changes or WR creation — they ask, the operator acts. Force both
+  // to not_allowed regardless of what was submitted.
+  if (out.identityType === 'vendor') { out.lifecyclePermission = 'not_allowed'; out.createWrPermission = 'not_allowed'; }
   if (out.operators !== undefined) out.operators = _upperArrayOrEmpty(out.operators);
   if (out.domiciles !== undefined) out.domiciles = _upperArrayOrEmpty(out.domiciles);
   if (out.allowedDataCategories !== undefined) out.allowedDataCategories = _enumArrayOrEmpty(out.allowedDataCategories, DATA_CATS);
@@ -221,15 +242,22 @@ function discoverFromDM({ slackId, name, channelId } = {}) {
     if (changed) { existing.updatedAt = _now(); _persist(all, existing); }
     return { ok: true, id: existing.id, existed: true, contact: existing };
   }
+  // A newly discovered sender defaults to UNKNOWN. Because most unknown senders
+  // are internal contacts, unknown now gets ALL data + ALL request types and
+  // ALL scope (every SCAC + every domicile, via '*'). It still may NOT change
+  // lifecycle or create work requests automatically (both not_allowed) — those
+  // require the operator to explicitly grant them (and to set a narrower
+  // identity/scope if this turns out to be an external carrier/vendor).
   const created = {
     id: _genId(), type: 'slack', slackId: String(slackId).trim(),
     name: name || slackId, channelId: channelId || '',
     identityType: 'unknown',
     enabled: true,
-    operators: [], domiciles: [],
-    allowedDataCategories: UNKNOWN_DATA_CATS.slice(),
-    permittedRequestTypes: UNKNOWN_REQ_TYPES.slice(),
+    operators: [ALL_SCOPE], domiciles: [ALL_SCOPE],
+    allowedDataCategories: ALL_DATA_CATS.slice(),
+    permittedRequestTypes: ALL_REQ_TYPES.slice(),
     lifecyclePermission: 'not_allowed',
+    createWrPermission: 'not_allowed',
     communicationPreferences: {},
     permissionSource: 'dm-discovery',
     source: 'dm-autoreply',
@@ -271,7 +299,7 @@ function findBySlackId(slackId) {
 module.exports = {
   upsert, update, linkSlack, bulkSave, discoverFromDM, remove, findBySlackId,
   sanitize, _mergeNoBlank, _slackKey,
-  VALID_IDENTITY, DATA_CATS, REQ_TYPES, LIFECYCLE_PERMS,
-  UNKNOWN_DATA_CATS, UNKNOWN_REQ_TYPES,
+  VALID_IDENTITY, DATA_CATS, REQ_TYPES, LIFECYCLE_PERMS, CREATE_WR_PERMS,
+  ALL_SCOPE, ALL_DATA_CATS, ALL_REQ_TYPES,
   STORE_KEY,
 };

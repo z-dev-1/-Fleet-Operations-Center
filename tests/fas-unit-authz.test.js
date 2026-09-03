@@ -51,8 +51,11 @@ describe('Part 11: unit-level action authorization', () => {
     expect(r.outcome).toBe('blocked');
   });
 
-  it('lifecycle change (MOVE_UNIT) requires internal — carrier blocked even with a category grant', async () => {
-    const carrierWithLC = { ...CARRIER_TUZR, permittedRequestTypes: ['unit_status','follow_up','lifecycle_change'] };
+  it('lifecycle change (MOVE_UNIT) requires internal — carrier blocked even with lifecycle permission', async () => {
+    // Even a carrier explicitly granted may_request for lifecycle is blocked
+    // from INITIATING the mutation directly — MOVE_UNIT is operator-only. (The
+    // carrier can REQUEST it; an operator then approves — see requester-auth.)
+    const carrierWithLC = { ...CARRIER_TUZR, permittedRequestTypes: ['unit_status','follow_up','lifecycle_change'], lifecyclePermission: 'may_request' };
     const r = await executor.routeAction('MOVE_UNIT', { unit: '320160', state: 'Active' }, { profile: carrierWithLC });
     expect(r.outcome).toBe('blocked');
     expect(r.detail).toMatch(/internal/i);

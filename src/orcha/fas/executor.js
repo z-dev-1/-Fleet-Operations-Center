@@ -52,7 +52,7 @@ function _authorizeUnitAction(name, args, profile, action) {
     return { ok: false, reason: 'sender not authorized for request type ' + action.requires };
   }
   // 2) Lifecycle / WR-submission require internal/operator authority.
-  const isInternal = !!(profile && (profile.type === 'internal' || profile.type === 'manager'));
+  const isInternal = !!(profile && profile.type === 'internal');
   if (INTERNAL_ONLY_ACTIONS.has(name) && !isInternal) {
     return { ok: false, reason: name + ' requires internal/operator approval' };
   }
@@ -96,7 +96,7 @@ function _authorizeUnitAction(name, args, profile, action) {
 //                         autonomous gate is enforced separately in routeAction)
 function _requesterAuthorize(name, args, snapshot) {
   if (!snapshot) return { ok: true, requesterResult: 'no-snapshot' }; // internal operator-initiated
-  const isInternal = snapshot.identityType === 'internal' || snapshot.identityType === 'manager';
+  const isInternal = snapshot.identityType === 'internal';
   const action = actions.getAction(name);
   const requires = action && action.requires;
 
@@ -111,6 +111,18 @@ function _requesterAuthorize(name, args, snapshot) {
     return { ok: true, requesterResult: 'lifecycle:' + lp };
   }
 
+  // Work-request creation is gated by the dedicated 3-state createWrPermission,
+  // NOT the generic request-type list. A requester with not_allowed can never
+  // have a WR created on their behalf — even if an operator clicks Approve.
+  // (Vendors are always not_allowed at profile resolution, so this also blocks
+  // a mechanic from ever having a WR auto-created.)
+  if (name === 'SUBMIT_WORK_REQUEST' || requires === 'create_wr') {
+    if (isInternal) return { ok: true, requesterResult: 'internal-allowed' };
+    const wp = snapshot.createWrPermission || 'not_allowed';
+    if (wp === 'not_allowed') return { ok: false, reason: 'requester not permitted to create work requests', requesterResult: 'create_wr:not_allowed' };
+    return { ok: true, requesterResult: 'create_wr:' + wp };
+  }
+
   // Other request types: the requester must have the category permission.
   if (requires && !isInternal) {
     const permitted = Array.isArray(snapshot.permittedRequestTypes) && snapshot.permittedRequestTypes.includes(requires);
@@ -122,6 +134,8 @@ function _requesterAuthorize(name, args, snapshot) {
   if (unit && !isInternal) {
     const ops = (snapshot.operators || []).map(s => String(s).toUpperCase());
     const doms = (snapshot.domiciles || []).map(s => String(s).toUpperCase());
+    // All-scope wildcard ('*') satisfies the scope check for any unit.
+    if (ops.includes('*') || doms.includes('*')) return { ok: true, requesterResult: 'allowed' };
     if (!ops.length && !doms.length) return { ok: false, reason: 'requester has no fleet scope', requesterResult: 'scope:none' };
     // Confirm the unit is within the requester's scope using current fleet data.
     let row = null;

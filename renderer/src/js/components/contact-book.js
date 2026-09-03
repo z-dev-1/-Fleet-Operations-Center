@@ -23,64 +23,30 @@ let _pendingSlack = null;     // { slackId, name, channelId? } resolved from sea
 const _esc  = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const _attr = (s) => _esc(s).replace(/"/g, '&quot;');
 
-// ── Canonical permission vocabulary ─────────────────────────────────────────
-// These MUST mirror src/services/contact-book.js (VALID_IDENTITY / DATA_CATS /
-// REQ_TYPES / LIFECYCLE_PERMS). The service re-sanitizes every write against
-// these same lists, so the UI can only ever offer values the backend accepts.
+// ── Permission model (2026-09 simplified) ───────────────────────────────────
+// FOUR identities. Data categories + request types are always "all" under the
+// hood (governed by SCOPE, not toggles), so the editor only exposes the things
+// that actually matter: identity, SCAC/domicile scope, and the two sensitive
+// 3-state capabilities (lifecycle change, create work request).
 const IDENTITY_TYPES = [
   { value: 'internal', label: 'Internal (Amazon team)' },
-  { value: 'manager',  label: 'Manager (full access)' },
   { value: 'carrier',  label: 'Carrier / SCAC partner' },
-  { value: 'vendor',   label: 'Vendor / dealer' },
+  { value: 'vendor',   label: 'Vendor / dealer (mechanic)' },
   { value: 'unknown',  label: 'Unknown / untriaged' },
 ];
-const DATA_CATS = [
-  { value: 'unit_status',     label: 'Unit status' },
-  { value: 'repair_timeline', label: 'Repair timeline' },
-  { value: 'work_orders',     label: 'Work orders' },
-  { value: 'pm_status',       label: 'PM status' },
-  { value: 'uptake',          label: 'Uptake' },
-  { value: 'vendor_contact',  label: 'Vendor contact' },
-  { value: 'site_summary',    label: 'Site summary' },
-  { value: 'operator_summary',label: 'Operator summary' },
+const CAP_PERMS = [
+  { value: 'not_allowed',        label: 'Not allowed', hint: 'Blocked even if an operator clicks Approve.' },
+  { value: 'may_request',        label: 'May request (needs approval)', hint: 'Can request it; a human must approve.' },
+  { value: 'trusted_autonomous', label: 'Trusted (autonomous)', hint: 'FAS may act without approval when all gates pass.' },
 ];
-const REQ_TYPES = [
-  { value: 'unit_status',      label: 'Ask unit status' },
-  { value: 'repair_update',    label: 'Ask repair update' },
-  { value: 'follow_up',        label: 'Follow up' },
-  { value: 'report',           label: 'Request a report' },
-  { value: 'process_question', label: 'Process question' },
-  { value: 'lifecycle_change', label: 'Request lifecycle change' },
-  { value: 'create_wr',        label: 'Create work request' },
-];
-const LIFECYCLE_PERMS = [
-  { value: 'not_allowed',        label: 'Not allowed', hint: 'Blocks lifecycle actions even if an operator clicks Approve.' },
-  { value: 'may_request',        label: 'May request (needs approval)', hint: 'Can request a lifecycle change; a human must approve it.' },
-  { value: 'trusted_autonomous', label: 'Trusted (autonomous)', hint: 'FAS may act on lifecycle requests without approval when all gates pass.' },
-];
-const ALL_DATA_CAT_VALUES = DATA_CATS.map(d => d.value);
-const ALL_REQ_TYPE_VALUES = REQ_TYPES.map(r => r.value);
+const ALL_SCOPE = '*';
 
-// Identity → default preset. MIRRORS sender-profiles.js presetFor(). Lifecycle
-// is deliberately NEVER preset — it is granted explicitly per contact.
-function _presetFor(identity) {
-  if (identity === 'internal' || identity === 'manager') {
-    return { allowedDataCategories: ALL_DATA_CAT_VALUES.slice(), permittedRequestTypes: ALL_REQ_TYPE_VALUES.slice() };
-  }
-  if (identity === 'carrier' || identity === 'vendor') {
-    return {
-      allowedDataCategories: ['unit_status', 'repair_timeline', 'work_orders', 'pm_status'],
-      permittedRequestTypes: ['unit_status', 'repair_update', 'follow_up', 'process_question'],
-    };
-  }
-  // unknown
-  return {
-    allowedDataCategories: ['unit_status'],
-    permittedRequestTypes: ['unit_status', 'repair_update', 'follow_up', 'process_question'],
-  };
-}
-// Identity types that are EXTERNAL — empty scope for these means NO access.
-const _isExternalIdentity = (id) => id === 'carrier' || id === 'vendor' || id === 'unknown';
+// Vendors (mechanics) can never be trusted/autonomous for lifecycle or WR
+// creation — they ask, you act.
+const _isVendor = (id) => id === 'vendor';
+// Only `unknown` defaults to all-scope; carrier/internal/vendor start empty and
+// mean NO data until scoped.
+const _defaultAllScope = (id) => id === 'unknown';
 
 // Operator codes (SCAC) from the latest fleet scan, for the data-scope picker.
 function _fleetOperators() {
@@ -101,22 +67,28 @@ function _fleetDomiciles() {
   } catch (e) { return []; }
 }
 
-// ── Searchable multi-select (checkbox list + search + select-all/clear) ──────
+// ── Searchable multi-select (checkbox list + search + all/clear + All-'*') ───
 // `kind` distinguishes multiple selectors on the same form (op | dom).
+// An "All (every current + future)" checkbox maps to the '*' wildcard: when it
+// is checked, the individual boxes are disabled and the stored value is ['*'].
 function _multiSelectHtml(kind, label, options, selected, opts) {
   opts = opts || {};
-  const sel = (selected || []).map(function(s){ return String(s || '').toUpperCase(); });
+  const sel = (selected || []).map(function(s){ return String(s || '').trim() === ALL_SCOPE ? ALL_SCOPE : String(s || '').toUpperCase(); });
+  const allChecked = sel.indexOf(ALL_SCOPE) !== -1;
   const searchId = 'cb-ms-search-' + kind;
   const listId = 'cb-ms-list-' + kind;
+  const allBox = '<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;font-weight:600">' +
+    '<input type="checkbox" class="cb-ms-all-flag cb-ms-all-' + kind + '" data-kind="' + kind + '"' + (allChecked ? ' checked' : '') + ' style="margin:0"/>' +
+    'All (every ' + (kind === 'op' ? 'SCAC' : 'domicile') + ', incl. future)</label>';
   let body;
   if (!options.length) {
     body = '<div style="font-size:9px;color:#8b949e">' + _esc(opts.emptyText || 'No options yet — waiting for fleet data…') + '</div>';
   } else {
-    body = '<div class="cb-ms-list" id="' + listId + '" style="max-height:120px;overflow:auto;display:flex;flex-wrap:wrap;gap:6px;padding:4px;border:1px solid rgba(139,148,158,0.2);border-radius:4px">' +
+    body = '<div class="cb-ms-list" id="' + listId + '" style="max-height:110px;overflow:auto;display:flex;flex-wrap:wrap;gap:6px;padding:4px;border:1px solid rgba(139,148,158,0.2);border-radius:4px' + (allChecked ? ';opacity:0.4;pointer-events:none' : '') + '">' +
       options.map(function(op){
-        const chk = sel.indexOf(op) !== -1 ? ' checked' : '';
+        const chk = (!allChecked && sel.indexOf(op) !== -1) ? ' checked' : '';
         return '<label class="cb-ms-item" data-value="' + _attr(op) + '" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">' +
-          '<input type="checkbox" class="cb-ms-' + kind + '" value="' + _attr(op) + '"' + chk + ' style="margin:0"/>' + _esc(op) +
+          '<input type="checkbox" class="cb-ms-' + kind + '" value="' + _attr(op) + '"' + chk + (allChecked ? ' disabled' : '') + ' style="margin:0"/>' + _esc(op) +
           '</label>';
       }).join('') + '</div>';
   }
@@ -124,24 +96,13 @@ function _multiSelectHtml(kind, label, options, selected, opts) {
     '<div style="display:flex;align-items:center;justify-content:space-between;margin:6px 0 3px">' +
       '<span style="font-size:9px;color:#8b949e">' + _esc(label) + '</span>' +
       (options.length ? '<span style="font-size:9px">' +
-        '<a href="#" class="cb-ms-all" data-kind="' + kind + '" style="color:#58a6ff;text-decoration:none">all</a> · ' +
+        '<a href="#" class="cb-ms-allsel" data-kind="' + kind + '" style="color:#58a6ff;text-decoration:none">select all</a> · ' +
         '<a href="#" class="cb-ms-none" data-kind="' + kind + '" style="color:#8b949e;text-decoration:none">clear</a></span>' : '') +
     '</div>' +
-    (options.length ? '<input class="cb-input cb-ms-search" id="' + searchId + '" data-kind="' + kind + '" placeholder="Search…" autocomplete="off" style="margin-bottom:4px" />' : '') +
+    '<div style="margin-bottom:4px">' + allBox + '</div>' +
+    (options.length ? '<input class="cb-input cb-ms-search" id="' + searchId + '" data-kind="' + kind + '" placeholder="Search…" autocomplete="off" style="margin-bottom:4px"' + (allChecked ? ' disabled' : '') + ' />' : '') +
     body +
   '</div>';
-}
-
-// Fixed-vocabulary checkbox grid (data categories / request types).
-function _checkGridHtml(cls, label, options, selected) {
-  const sel = (selected || []);
-  return '<div style="font-size:9px;color:#8b949e;margin:6px 0 3px">' + _esc(label) + '</div>' +
-    '<div style="display:flex;flex-wrap:wrap;gap:8px">' + options.map(function(o){
-      const chk = sel.indexOf(o.value) !== -1 ? ' checked' : '';
-      return '<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">' +
-        '<input type="checkbox" class="' + cls + '" value="' + _attr(o.value) + '"' + chk + ' style="margin:0"/>' + _esc(o.label) +
-        '</label>';
-    }).join('') + '</div>';
 }
 
 // ── The full permission editor block (shared by add + edit) ──────────────────
@@ -149,24 +110,35 @@ function _checkGridHtml(cls, label, options, selected) {
 // coexist. `c` is the current contact (or {} for a new one).
 function _permissionEditorHtml(p, c) {
   c = c || {};
-  const identity = c.identityType || 'unknown';
+  const identity = IDENTITY_TYPES.some(t => t.value === c.identityType) ? c.identityType : 'unknown';
   const enabled = c.enabled !== false;
-  const preset = _presetFor(identity);
-  const cats = Array.isArray(c.allowedDataCategories) ? c.allowedDataCategories : preset.allowedDataCategories;
-  const reqs = Array.isArray(c.permittedRequestTypes) ? c.permittedRequestTypes : preset.permittedRequestTypes;
-  const lifecycle = LIFECYCLE_PERMS.some(l => l.value === c.lifecyclePermission) ? c.lifecyclePermission : 'not_allowed';
+  const isVendor = _isVendor(identity);
+  const lifecycle = isVendor ? 'not_allowed' : (CAP_PERMS.some(l => l.value === c.lifecyclePermission) ? c.lifecyclePermission : 'not_allowed');
+  const createWr = isVendor ? 'not_allowed' : (CAP_PERMS.some(l => l.value === c.createWrPermission) ? c.createWrPermission : 'not_allowed');
   const commPrefs = (c.communicationPreferences && typeof c.communicationPreferences === 'object' && !Array.isArray(c.communicationPreferences)) ? c.communicationPreferences : {};
+
+  // Scope: if the contact has no explicit scope, apply the identity default
+  // (unknown -> all '*', others -> empty).
+  let ops = Array.isArray(c.operators) ? c.operators : null;
+  let doms = Array.isArray(c.domiciles) ? c.domiciles : null;
+  if (ops == null && doms == null && _defaultAllScope(identity)) { ops = [ALL_SCOPE]; doms = [ALL_SCOPE]; }
+  ops = ops || []; doms = doms || [];
 
   const identityOpts = IDENTITY_TYPES.map(function(t){
     return '<option value="' + _attr(t.value) + '"' + (t.value === identity ? ' selected' : '') + '>' + _esc(t.label) + '</option>';
   }).join('');
 
-  const lifecycleRadios = LIFECYCLE_PERMS.map(function(l){
-    return '<label style="display:flex;align-items:flex-start;gap:6px;font-size:11px;cursor:pointer;margin:2px 0">' +
-      '<input type="radio" name="' + p + '-lifecycle" class="' + p + '-lifecycle" value="' + _attr(l.value) + '"' + (l.value === lifecycle ? ' checked' : '') + ' style="margin:2px 0 0"/>' +
+  const capRadios = (field, current) => CAP_PERMS.map(function(l){
+    const locked = isVendor ? ' disabled' : '';
+    return '<label style="display:flex;align-items:flex-start;gap:6px;font-size:11px;cursor:pointer;margin:2px 0' + (isVendor ? ';opacity:0.5' : '') + '">' +
+      '<input type="radio" name="' + p + '-' + field + '" class="' + p + '-' + field + '" value="' + _attr(l.value) + '"' + (l.value === current ? ' checked' : '') + locked + ' style="margin:2px 0 0"/>' +
       '<span><strong>' + _esc(l.label) + '</strong><br/><span style="color:#8b949e;font-size:9px">' + _esc(l.hint) + '</span></span>' +
     '</label>';
   }).join('');
+
+  const vendorNote = isVendor
+    ? '<div style="font-size:9px;color:#8b949e;margin:2px 0 0">Vendors (mechanics) can ask and receive updates, but lifecycle changes and work-request creation are always operator-only.</div>'
+    : '';
 
   return '' +
     '<div class="cb-perm" data-prefix="' + p + '" data-identity="' + _attr(identity) + '">' +
@@ -178,20 +150,22 @@ function _permissionEditorHtml(p, c) {
         'Enabled (unchecked = disabled, revokes ALL FAS access)' +
       '</label>' +
 
+      '<div style="font-size:9px;color:#8b949e;margin:6px 0 2px">Who gets what data — by SCAC/operator and domicile (both can be multiple, or All):</div>' +
       // Carrier / SCAC scope.
-      _multiSelectHtml(p + '-op', 'Carrier / SCAC scope', _fleetOperators(), c.operators || [], { emptyText: 'No operators yet — waiting for fleet data…' }) +
+      _multiSelectHtml(p + '-op', 'Carrier / SCAC scope', _fleetOperators(), ops, { emptyText: 'No operators yet — waiting for fleet data…' }) +
       // Domicile scope.
-      _multiSelectHtml(p + '-dom', 'Domicile scope', _fleetDomiciles(), c.domiciles || [], { emptyText: 'No domiciles yet — waiting for fleet data…' }) +
+      _multiSelectHtml(p + '-dom', 'Domicile scope', _fleetDomiciles(), doms, { emptyText: 'No domiciles yet — waiting for fleet data…' }) +
 
       '<div class="cb-scope-warn ' + p + '-scope-warn" style="display:none;font-size:9px;color:#f0883e;background:rgba(240,136,62,0.08);border:1px solid rgba(240,136,62,0.3);border-radius:4px;padding:5px 7px;margin-top:6px"></div>' +
 
-      _checkGridHtml(p + '-cat', 'Data categories this contact may see', DATA_CATS, cats) +
-      _checkGridHtml(p + '-req', 'Request types this contact may make', REQ_TYPES, reqs) +
+      '<div style="font-size:9px;color:#8b949e;margin:10px 0 3px">Lifecycle change permission</div>' +
+      '<div class="' + p + '-lifecycle-group">' + capRadios('lifecycle', lifecycle) + '</div>' +
 
-      '<div style="font-size:9px;color:#8b949e;margin:8px 0 3px">Lifecycle permission</div>' +
-      '<div class="' + p + '-lifecycle-group">' + lifecycleRadios + '</div>' +
+      '<div style="font-size:9px;color:#8b949e;margin:10px 0 3px">Create work request permission</div>' +
+      '<div class="' + p + '-createwr-group">' + capRadios('createwr', createWr) + '</div>' +
+      vendorNote +
 
-      '<div style="font-size:9px;color:#8b949e;margin:8px 0 3px">Communication preferences</div>' +
+      '<div style="font-size:9px;color:#8b949e;margin:10px 0 3px">Communication preferences</div>' +
       '<div style="display:flex;flex-wrap:wrap;gap:10px">' +
         '<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">' +
           '<input type="checkbox" class="' + p + '-comm-slack" ' + (commPrefs.slack !== false ? 'checked' : '') + ' style="margin:0"/>Slack</label>' +
@@ -204,21 +178,32 @@ function _permissionEditorHtml(p, c) {
     '</div>';
 }
 
-// Read the editor block back into a contact patch object.
+// Read one multi-select back into a scope array, honoring the All ('*') flag.
+function _readScope(root, kind) {
+  const allFlag = root.querySelector('.cb-ms-all-' + kind);
+  if (allFlag && allFlag.checked) return [ALL_SCOPE];
+  return Array.from(root.querySelectorAll('.cb-ms-' + kind)).filter(b => b.checked).map(b => b.value);
+}
+
+// Read the editor block back into a contact patch object. Data categories +
+// request types are ALWAYS all (governed by scope, not toggles).
 function _readPermissionEditor(root, p) {
   const q = (sel) => root.querySelector(sel);
-  const checkedVals = (cls) => Array.from(root.querySelectorAll('.' + cls)).filter(b => b.checked).map(b => b.value);
   const identityEl = q('.' + p + '-identity');
   const identity = identityEl ? identityEl.value : 'unknown';
+  const isVendor = _isVendor(identity);
   const lifeEl = root.querySelector('.' + p + '-lifecycle:checked');
+  const wrEl = root.querySelector('.' + p + '-createwr:checked');
   return {
     identityType: identity,
     enabled: !!(q('.' + p + '-enabled') && q('.' + p + '-enabled').checked),
-    operators: checkedVals(p + '-op'),
-    domiciles: checkedVals(p + '-dom'),
-    allowedDataCategories: checkedVals(p + '-cat'),
-    permittedRequestTypes: checkedVals(p + '-req'),
-    lifecyclePermission: lifeEl ? lifeEl.value : 'not_allowed',
+    operators: _readScope(root, p + '-op'),
+    domiciles: _readScope(root, p + '-dom'),
+    // Always-all under the hood; the backend re-applies the preset too.
+    allowedDataCategories: ['unit_status', 'repair_timeline', 'work_orders', 'pm_status', 'uptake', 'vendor_contact', 'site_summary', 'operator_summary'],
+    permittedRequestTypes: ['unit_status', 'repair_update', 'follow_up', 'report', 'process_question', 'lifecycle_change', 'create_wr'],
+    lifecyclePermission: isVendor ? 'not_allowed' : (lifeEl ? lifeEl.value : 'not_allowed'),
+    createWrPermission: isVendor ? 'not_allowed' : (wrEl ? wrEl.value : 'not_allowed'),
     communicationPreferences: {
       slack: !!(q('.' + p + '-comm-slack') && q('.' + p + '-comm-slack').checked),
       email: !!(q('.' + p + '-comm-email') && q('.' + p + '-comm-email').checked),
@@ -227,30 +212,31 @@ function _readPermissionEditor(root, p) {
 }
 
 // Plain-language summary — MIRRORS sender-profiles.js permissionSummary().
-// Empty external scope = NO fleet units (never full fleet).
+// Empty scope = NO fleet units (never full fleet); '*' = all fleet.
 function _permissionSummaryText(v) {
   if (v.enabled === false) return 'Disabled — no FAS access.';
-  const internal = v.identityType === 'internal' || v.identityType === 'manager';
+  const ops = v.operators || []; const doms = v.domiciles || [];
+  const allScope = ops.indexOf(ALL_SCOPE) !== -1 || doms.indexOf(ALL_SCOPE) !== -1;
   let scope;
-  if (internal) {
-    scope = 'all fleet units';
-  } else {
+  if (allScope) scope = 'all fleet units (all SCAC + all domiciles)';
+  else {
     const parts = [];
-    if (v.operators && v.operators.length) parts.push(v.operators.join('/') + ' units');
-    if (v.domiciles && v.domiciles.length) parts.push('units at ' + v.domiciles.join('/'));
-    scope = parts.length ? parts.join(' and ') : 'NO fleet-scoped units (no operator/domicile scope set)';
+    if (ops.length) parts.push(ops.join('/') + ' units');
+    if (doms.length) parts.push('units at ' + doms.join('/'));
+    scope = parts.length ? parts.join(' and ') : 'NO fleet-scoped units (no SCAC/domicile scope set)';
   }
-  const cats = (v.allowedDataCategories || []);
-  const canView = cats.length ? ('can view ' + cats.map(x => x.replace(/_/g, ' ')).join(', ')) : 'cannot view fleet data';
+  const lp = v.lifecyclePermission || 'not_allowed';
+  const wp = v.createWrPermission || 'not_allowed';
+  const cap = (label, val) => val === 'trusted_autonomous' ? (label + ': trusted (autonomous)')
+    : val === 'may_request' ? (label + ': may request (approval)') : null;
+  let out = 'Can view fleet data for ' + scope + '.';
+  const canCaps = [cap('lifecycle changes', lp), cap('work requests', wp)].filter(Boolean);
+  if (canCaps.length) out += ' ' + canCaps.join('; ') + '.';
   const cannot = [];
-  const reqs = v.permittedRequestTypes || [];
-  if (reqs.indexOf('lifecycle_change') === -1 || v.lifecyclePermission === 'not_allowed') cannot.push('request lifecycle changes');
-  if (reqs.indexOf('create_wr') === -1) cannot.push('create work requests');
-  let life = '';
-  if (v.lifecyclePermission === 'trusted_autonomous') life = ' Trusted for autonomous lifecycle actions.';
-  else if (v.lifecyclePermission === 'may_request') life = ' May request lifecycle changes (needs approval).';
-  return 'Can ' + canView + ' for ' + scope + '.' +
-    (cannot.length ? ' Cannot ' + cannot.join(' or ') + '.' : '') + life;
+  if (lp === 'not_allowed') cannot.push('change lifecycle');
+  if (wp === 'not_allowed') cannot.push('create work requests');
+  if (cannot.length) out += ' Cannot ' + cannot.join(' or ') + '.';
+  return out;
 }
 
 // Refresh the live summary + no-scope warning for one editor block.
@@ -260,10 +246,9 @@ function _refreshEditorFeedback(root, p) {
   if (summaryEl) summaryEl.textContent = _permissionSummaryText(v);
   const warnEl = root.querySelector('.' + p + '-scope-warn');
   if (warnEl) {
-    const external = _isExternalIdentity(v.identityType);
     const noScope = !(v.operators && v.operators.length) && !(v.domiciles && v.domiciles.length);
-    if (v.enabled !== false && external && noScope) {
-      warnEl.textContent = '⚠ No carrier or domicile scope set. An empty scope means this external contact gets NO fleet data — it does NOT mean full-fleet access.';
+    if (v.enabled !== false && noScope) {
+      warnEl.textContent = '⚠ No SCAC or domicile scope set. An empty scope means this contact gets NO fleet data — it does NOT mean full-fleet access. Use the "All" box for full fleet.';
       warnEl.style.display = 'block';
     } else {
       warnEl.style.display = 'none';
@@ -271,12 +256,31 @@ function _refreshEditorFeedback(root, p) {
   }
 }
 
-// Apply the identity preset to an editor block's category/request checkboxes,
-// AFTER confirming (so a manual selection is never silently overwritten).
+// Apply the identity default to an editor block WITH confirm. Because data +
+// requests are always all, the only preset effect is: set the vendor lock, and
+// set default scope for unknown (all '*') vs others (leave scope as-is unless
+// switching to unknown from empty).
 function _applyPresetToEditor(root, p, identity) {
-  const preset = _presetFor(identity);
-  root.querySelectorAll('.' + p + '-cat').forEach(b => { b.checked = preset.allowedDataCategories.indexOf(b.value) !== -1; });
-  root.querySelectorAll('.' + p + '-req').forEach(b => { b.checked = preset.permittedRequestTypes.indexOf(b.value) !== -1; });
+  // Re-render this editor block's capability + scope controls for the new
+  // identity by rebuilding from a synthetic contact carrying the current scope.
+  const cur = _readPermissionEditor(root, p);
+  const synthetic = {
+    identityType: identity,
+    enabled: cur.enabled,
+    operators: (identity === 'unknown' && !cur.operators.length && !cur.domiciles.length) ? [ALL_SCOPE] : cur.operators,
+    domiciles: (identity === 'unknown' && !cur.operators.length && !cur.domiciles.length) ? [ALL_SCOPE] : cur.domiciles,
+    lifecyclePermission: cur.lifecyclePermission,
+    createWrPermission: cur.createWrPermission,
+    communicationPreferences: cur.communicationPreferences,
+  };
+  const wrap = root.querySelector('.cb-perm');
+  if (wrap) {
+    // Replace only the inner permission block markup, preserving the outer form.
+    const holder = document.createElement('div');
+    holder.innerHTML = _permissionEditorHtml(p, synthetic);
+    const fresh = holder.querySelector('.cb-perm');
+    if (fresh) wrap.replaceWith(fresh);
+  }
   _refreshEditorFeedback(root, p);
 }
 
@@ -318,11 +322,16 @@ function _prefBadgeHtml(c) {
 // Short permission badge for a Slack contact card.
 function _slackScopeBadge(c) {
   if (c.enabled === false) return '<div class="cb-card-meta" style="color:#f85149">⛔ Disabled — no FAS access</div>';
+  const ops = Array.isArray(c.operators) ? c.operators : [];
+  const doms = Array.isArray(c.domiciles) ? c.domiciles : [];
   const identity = c.identityType || 'unknown';
-  if (identity === 'internal' || identity === 'manager') return '<div class="cb-card-meta" style="color:#3fb950">🔓 Internal — all fleet</div>';
+  // Unknown with no explicit scope defaults to all-scope ('*').
+  const allScope = ops.indexOf('*') !== -1 || doms.indexOf('*') !== -1 ||
+    (identity === 'unknown' && !ops.length && !doms.length);
+  if (allScope) return '<div class="cb-card-meta" style="color:#3fb950">🔓 All fleet (all SCAC + domiciles)</div>';
   const parts = [];
-  if (Array.isArray(c.operators) && c.operators.length) parts.push(c.operators.join(', '));
-  if (Array.isArray(c.domiciles) && c.domiciles.length) parts.push('@' + c.domiciles.join(', '));
+  if (ops.length) parts.push(ops.join(', '));
+  if (doms.length) parts.push('@' + doms.join(', '));
   if (parts.length) return '<div class="cb-card-meta" style="color:#3fb950">🔒 ' + _esc(parts.join(' · ')) + '</div>';
   return '<div class="cb-card-meta" style="color:#f0883e">⚠ ' + _esc(identity) + ' — no scope (no fleet data)</div>';
 }
@@ -693,14 +702,15 @@ export function init() {
     const tab = e.target.closest('[data-tab]');
     if (tab) { _tab = tab.dataset.tab; _render(); return; }
 
-    // Multi-select select-all / clear links.
-    const allLink = e.target.closest('.cb-ms-all');
+    // Multi-select "select all" (checks every visible individual box; does NOT
+    // set the '*' wildcard — that's the separate "All" checkbox) / clear links.
+    const allLink = e.target.closest('.cb-ms-allsel');
     if (allLink) {
       e.preventDefault();
       const root = _editorRootFor(allLink);
-      const kind = allLink.dataset.kind;
+      const kind = allLink.dataset.kind; // full kind, e.g. 'cb-s-op' / 'edit-op'
       if (root) {
-        root.querySelectorAll('.' + kind).forEach(b => { if (b.closest('.cb-ms-item').style.display !== 'none') b.checked = true; });
+        root.querySelectorAll('.cb-ms-' + kind).forEach(b => { if (!b.disabled) b.checked = true; });
         _refreshEditorFeedback(root, _prefixFor(root));
       }
       return;
@@ -709,9 +719,13 @@ export function init() {
     if (noneLink) {
       e.preventDefault();
       const root = _editorRootFor(noneLink);
-      const kind = noneLink.dataset.kind;
+      const kind = noneLink.dataset.kind; // full kind, e.g. 'cb-s-op'
       if (root) {
-        root.querySelectorAll('.' + kind).forEach(b => { b.checked = false; });
+        // Clear both the All ('*') flag and the individual boxes.
+        const allFlag = root.querySelector('.cb-ms-all-' + kind);
+        if (allFlag) allFlag.checked = false;
+        root.querySelectorAll('.cb-ms-' + kind).forEach(b => { b.disabled = false; b.checked = false; });
+        const wrap = allFlag && allFlag.closest('.cb-ms'); if (wrap) { const list = wrap.querySelector('.cb-ms-list'); if (list) { list.style.opacity = ''; list.style.pointerEvents = ''; } }
         _refreshEditorFeedback(root, _prefixFor(root));
       }
       return;
@@ -752,14 +766,25 @@ export function init() {
     if (!root) return;
     const prefix = _prefixFor(root);
 
-    // Identity changed -> offer to apply that identity's default permissions,
-    // confirming first so a manual selection is never silently overwritten.
+    // Identity changed -> re-render the permission block so vendor lock +
+    // unknown all-scope default apply. Data/request permissions are always
+    // "all" (not user-editable), so there's nothing to overwrite/confirm.
     if (e.target.classList.contains(prefix + '-identity')) {
-      const identity = e.target.value;
-      root.querySelector('.cb-perm').dataset.identity = identity;
-      const ok = window.confirm('Apply the default data + request permissions for "' + identity + '"? This overwrites the current category/request selections. Scope, lifecycle and comms are left unchanged.');
-      if (ok) _applyPresetToEditor(root, prefix, identity);
-      else _refreshEditorFeedback(root, prefix); // still refresh warning/summary
+      _applyPresetToEditor(root, prefix, e.target.value);
+      return;
+    }
+    // "All ('*')" scope flag toggled -> enable/disable that multi-select's list.
+    if (e.target.classList.contains('cb-ms-all-flag')) {
+      const wrap = e.target.closest('.cb-ms');
+      if (wrap) {
+        const on = e.target.checked;
+        const list = wrap.querySelector('.cb-ms-list');
+        const search = wrap.querySelector('.cb-ms-search');
+        if (list) { list.style.opacity = on ? '0.4' : ''; list.style.pointerEvents = on ? 'none' : ''; }
+        if (search) search.disabled = on;
+        wrap.querySelectorAll('input[type="checkbox"]').forEach(b => { if (b !== e.target && !b.classList.contains('cb-ms-all-flag')) b.disabled = on; });
+      }
+      _refreshEditorFeedback(root, prefix);
       return;
     }
     // Any other permission control toggled -> refresh summary + warning.

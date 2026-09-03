@@ -58,7 +58,8 @@ describe('FAS Stage A — sender identity + scoping', () => {
     const p = profiles.resolveSender('U_NOBODY');
     expect(p.source).toBe('default-limited');
     expect(profiles.canRequest(p, 'lifecycle_change')).toBe(false);
-    expect(p.operators).toHaveLength(0);
+    expect(profiles.canRequest(p, 'create_wr')).toBe(false);
+    expect(p.operators).toEqual(['*']); // unknown defaults to all-scope
   });
 
   it('unit scoping: internal sees any unit, carrier only its operator', () => {
