@@ -948,6 +948,10 @@ html, body {
 .sb-dot--green { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,.5); }
 .sb-dot--amber { background: #f59e0b; box-shadow: 0 0 6px rgba(245,158,11,.4); }
 .sb-dot--red   { background: #ef4444; box-shadow: 0 0 6px rgba(239,68,68,.5); }
+.sb-dot--grey  { background: #6b7280; box-shadow: 0 0 6px rgba(107,114,128,.4); }
+.sb-state-label { font-weight: 600; }
+.sb-sep-dot { color: var(--nx-border2); margin: 0 4px; }
+.sb-msg--error { color: var(--nx-red); font-style: normal; font-weight: 600; }
 
 /* ══════════════════════════════════════════════════════════════════════════════
    TOOLBAR ENHANCEMENTS (Final Redesign)

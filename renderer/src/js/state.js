@@ -19,8 +19,21 @@ const _state = {
   fleet: {
     rows:     [],
     count:    0,
-    syncedAt: null,
+    syncedAt: null,        // timestamp reported by the incoming payload
     stale:    false,
+    // Status-bar authority fields (Task: authoritative bottom status bar).
+    // partial: falsy for a final full payload; a label like 'aap' | 'uptake' |
+    //          'relay-batch-3' for intermediate progress pushes.
+    partial:  null,
+    // usedCache: true when the payload was served from cache (a fresh live sync
+    //            did NOT complete) — must never count as a new successful sync.
+    usedCache: false,
+    // lastSuccessfulSyncAt: the syncedAt of the most recent FRESH, COMPLETE
+    //   (non-partial, non-cache) payload. Preserved across later failures/partials.
+    lastSuccessfulSyncAt: null,
+    // seq: monotonically increasing per accepted payload — lets consumers reject
+    //   out-of-order/older pushes.
+    seq: 0,
   },
   ui: {
     view:         'fleet',  // 'fleet' | 'unit' | 'settings'

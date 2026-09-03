@@ -18,15 +18,41 @@ import { playSound } from './notif-sounds.js';
 
 /** Call once at app startup. Attaches all push-listener subscriptions. */
 export function init() {
-  // Fleet data pushed from main process
+  // Fleet data pushed from main process.
+  //
+  // The main process pushes MULTIPLE payloads per sync cycle: progressive
+  // partials (partial: 'aap' | 'uptake' | 'relay-batch-N') followed by ONE
+  // final full payload (no `partial`). It may also push a cache-backed payload
+  // (stale/usedCache) when a live sync can't complete. The status bar must be
+  // able to tell these apart, so we forward the full field set into state and
+  // maintain the authoritative "last SUCCESSFUL (fresh + complete) sync" here —
+  // NOT in the status bar — so there is a single source of truth.
   window.fleet.onData((data) => {
+    const isPartial = !!data.partial;
+    const isCache   = !!data.usedCache || !!data.stale;
+    const prev      = state.slice('fleet');
+
+    // A payload counts as a NEW successful sync ONLY when it is the final,
+    // full, fresh payload (not partial, not cache/stale) and carries a real
+    // syncedAt. Otherwise preserve the previous successful timestamp.
+    const isSuccessfulFinal = !isPartial && !isCache && !!data.syncedAt;
+    const lastSuccessfulSyncAt = isSuccessfulFinal
+      ? data.syncedAt
+      : (prev.lastSuccessfulSyncAt || null);
+
     state.update('fleet', {
       rows:     data.rows  || [],
       count:    data.count || 0,
       syncedAt: data.syncedAt || null,
       stale:    !!data.stale,
+      partial:  data.partial || null,
+      usedCache: isCache,
+      lastSuccessfulSyncAt,
+      seq: (prev.seq || 0) + 1,
     });
-    state.update('sync', { inProgress: false });
+    // Only a final (non-partial) payload ends the in-progress state; partials
+    // keep it "in progress" so nothing claims completion early.
+    if (!isPartial) state.update('sync', { inProgress: false });
     bus.emit('fleet:data', data);
   });
 
