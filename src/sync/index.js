@@ -99,14 +99,54 @@ function createSyncEngine(ctx) {
   let _deepScanInProgress = false;
 
   async function runFullSync() {
+    // ── Structured sync result contract (Task #4) ──────────────────────────
+    // Every exit path returns this object so the backend scheduler can gate a
+    // job on real, honest sync status instead of guessing from side effects.
+    // Shape: { ok, startedAt, completedAt, rowCount, syncedAt, dataAgeMs,
+    //          sourcesUpdated:[], sourcesFailed:[], usedCache, errors:[] }
+    // NOTE: `ok` means the sync ORCHESTRATION completed and produced a usable
+    // fleet payload — it does NOT by itself assert freshness. Freshness is a
+    // separate gate (src/scheduler/freshness.js) that inspects dataAgeMs,
+    // rowCount, sourcesFailed and usedCache. `usedCache:true` is surfaced so a
+    // gate can refuse to present cached data as fresh.
+    const _result = {
+      ok: false,
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      rowCount: 0,
+      syncedAt: null,
+      dataAgeMs: null,
+      sourcesUpdated: [],
+      sourcesFailed: [],
+      usedCache: false,
+      errors: [],
+    };
+    const _markUpdated = (s) => { if (!_result.sourcesUpdated.includes(s)) _result.sourcesUpdated.push(s); };
+    const _markFailed  = (s, msg) => {
+      if (!_result.sourcesFailed.includes(s)) _result.sourcesFailed.push(s);
+      if (msg) _result.errors.push({ source: s, message: String(msg).slice(0, 300) });
+    };
+    const _finish = () => { _result.completedAt = new Date().toISOString(); return _result; };
+
     if (ctx.isSyncing) {
       ctx.pushStatus('Sync already in progress...');
-      return;
+      _result.errors.push({ source: 'guard', message: 'sync already in progress' });
+      // Report the current cached payload's age so a gate has something to judge.
+      try {
+        const _fd = store.load('fleetData', {});
+        if (_fd && _fd.syncedAt) { _result.syncedAt = _fd.syncedAt; _result.rowCount = Array.isArray(_fd.rows) ? _fd.rows.length : 0; _result.dataAgeMs = Date.now() - new Date(_fd.syncedAt).getTime(); _result.usedCache = true; }
+      } catch (_) {}
+      return _finish();
     }
     if (_deepScanInProgress) {
       logger.info('Skipping sync — deep scan from previous cycle still running');
       ctx.pushStatus('Orcha deep scan still running — skipping this sync cycle');
-      return;
+      _result.errors.push({ source: 'guard', message: 'deep scan from previous cycle still running' });
+      try {
+        const _fd = store.load('fleetData', {});
+        if (_fd && _fd.syncedAt) { _result.syncedAt = _fd.syncedAt; _result.rowCount = Array.isArray(_fd.rows) ? _fd.rows.length : 0; _result.dataAgeMs = Date.now() - new Date(_fd.syncedAt).getTime(); _result.usedCache = true; }
+      } catch (_) {}
+      return _finish();
     }
     ctx.isSyncing = true;
     logger.info('Starting sync...');
@@ -127,7 +167,8 @@ function createSyncEngine(ctx) {
           ctx.pushAuthFailure({ code: authErr.code, message: authErr.message });
         }
         ctx.isSyncing = false;
-        return;
+        _markFailed('auth', authErr.message);
+        return _finish();
       }
 
       // ── Step 2: AAP — read from aap_cache.json (populated by main-window scrape)
@@ -141,9 +182,15 @@ function createSyncEngine(ctx) {
           aapResult = cached;
           const ageMin = Math.round((Date.now() - new Date(cached.scrapedAt).getTime()) / 60000);
           logger.info(`AAP cache: ${cached.count} units (${ageMin}min old)`);
+          // AAP is ALWAYS sourced from the aap_cache written by the live main
+          // window (the AEA extension blocks hidden scrapes) — so a populated
+          // cache is the normal, expected "updated" source, not a degraded
+          // fallback. Only flag usedCache when the cache is stale/empty below.
+          _markUpdated('aap');
         } else {
           aapResult = { rows: [], count: 0, scrapedAt: new Date().toISOString() };
           logger.info('AAP cache empty or missing — waiting for main window scrape');
+          _markFailed('aap', 'AAP cache empty or missing (' + (cached ? cached.count : 0) + ' units)');
         }
 
         // Diff against previous state for diagnostics
@@ -185,7 +232,13 @@ function createSyncEngine(ctx) {
         ctx.pushError('AAP read failed: ' + aapErr.message);
         if (ctx.lastData) ctx.pushData({ ...ctx.lastData, stale: true });
         ctx.isSyncing = false;
-        return;
+        _markFailed('aap', aapErr.message);
+        // Report the (now stale) cached payload age so a gate can judge.
+        try {
+          const _fd = store.load('fleetData', {});
+          if (_fd && _fd.syncedAt) { _result.syncedAt = _fd.syncedAt; _result.rowCount = Array.isArray(_fd.rows) ? _fd.rows.length : 0; _result.dataAgeMs = Date.now() - new Date(_fd.syncedAt).getTime(); _result.usedCache = true; }
+        } catch (_) {}
+        return _finish();
       }
 
       // ── Steps 3 + 4: Uptake + Relay — parallel ──────────────────────────
@@ -273,6 +326,8 @@ function createSyncEngine(ctx) {
       if (uptakeOutcome.status === 'fulfilled') {
         uptakeResult = uptakeOutcome.value;
         logger.info(`Uptake: ${uptakeResult.count} units`);
+        if (uptakeResult && uptakeResult._fromCache) { _result.usedCache = true; _markUpdated('uptake-cache'); }
+        else if (uptakeResult && Array.isArray(uptakeResult.units) && uptakeResult.units.length) _markUpdated('uptake');
         // BUG FIX (2026-07-14): a "fulfilled" outcome with 0 units (e.g. the
         // master-timeout path resolving too early, or a genuinely empty scrape)
         // previously fell straight through to the final merge with an empty
@@ -283,6 +338,9 @@ function createSyncEngine(ctx) {
           if (_cachedUptake2.units && _cachedUptake2.units.length) {
             uptakeResult = { units: _cachedUptake2.units, count: _cachedUptake2.units.length, scrapedAt: _cachedUptake2.scrapedAt, _fromCache: true };
             logger.info(`Uptake returned 0 \u2014 using ${_cachedUptake2.units.length} cached units (age since ${_cachedUptake2.scrapedAt})`);
+            _result.usedCache = true; _markFailed('uptake', 'live returned 0 units — used cache');
+          } else {
+            _markFailed('uptake', 'live returned 0 units, no cache available');
           }
         }
         if (!uptakeResult._fromCache &&
@@ -302,6 +360,7 @@ function createSyncEngine(ctx) {
         }
       } else {
         logger.warn('Uptake failed (non-fatal):', uptakeOutcome.reason && uptakeOutcome.reason.message);
+        _markFailed('uptake', (uptakeOutcome.reason && uptakeOutcome.reason.message) || 'uptake scrape rejected');
         // BUG FIX (2026-07-14): Relay already falls back to its persisted cache
         // on failure (see relayOutcome handling below) -- Uptake had no
         // equivalent, so a failed/timed-out scrape left uptakeResult at its
@@ -313,6 +372,7 @@ function createSyncEngine(ctx) {
           if (_cachedUptake.units && _cachedUptake.units.length) {
             uptakeResult = { units: _cachedUptake.units, count: _cachedUptake.units.length, scrapedAt: _cachedUptake.scrapedAt, _fromCache: true };
             logger.info(`Uptake failed \u2014 using ${_cachedUptake.units.length} cached units (age since ${_cachedUptake.scrapedAt})`);
+            _result.usedCache = true;
           }
         }
       }
@@ -324,6 +384,9 @@ function createSyncEngine(ctx) {
         if (!relayData || Object.keys(relayData).length === 0) {
           relayData = store.load('relayCache', {});
           logger.info(`Relay returned 0 — using cached (${Object.keys(relayData).length} entries)`);
+          _result.usedCache = true; _markFailed('relay', 'live returned 0 entries — used cache');
+        } else {
+          _markUpdated('relay');
         }
         if (_relayOutcome.updatedCache) store.save('relayCache', _relayOutcome.updatedCache);
         logger.info(`Relay: ${Object.keys(relayData).length} units detailed`);
@@ -331,6 +394,7 @@ function createSyncEngine(ctx) {
         logger.warn('Relay failed (non-fatal):', relayOutcome.reason && relayOutcome.reason.message);
         relayData = store.load('relayCache', {});
         logger.info(`Using cached relay data (${Object.keys(relayData).length} entries)`);
+        _result.usedCache = true; _markFailed('relay', (relayOutcome.reason && relayOutcome.reason.message) || 'relay scrape rejected');
       }
 
       // ── Step 5: Merge ────────────────────────────────────────────────────
@@ -398,6 +462,13 @@ function createSyncEngine(ctx) {
       ctx.lastData = payload;
       store.save('fleetData', payload);
       ctx.pushData(payload);
+
+      // Populate the structured sync result from the freshly-built payload.
+      _result.ok = true;
+      _result.rowCount = mergedRows.length;
+      _result.syncedAt = payload.syncedAt;
+      _result.dataAgeMs = 0; // just synced
+      if (!_result.sourcesUpdated.length && !_result.sourcesFailed.length) _markUpdated('aap');
 
       // Digital FAS: reconcile any pending MOVE_UNIT verifications against the
       // freshly-synced lifecycle state — resolve to done/failed (Part 5), THEN
@@ -504,9 +575,22 @@ function createSyncEngine(ctx) {
     } catch (e) {
       logger.error('Unexpected sync error:', e.message, e.stack);
       ctx.pushError('Sync error: ' + e.message);
+      _result.ok = false;
+      _result.errors.push({ source: 'sync', message: String(e.message).slice(0, 300) });
+      // Surface last known cached payload age so a gate can still judge.
+      try {
+        const _fd = store.load('fleetData', {});
+        if (_fd && _fd.syncedAt && !_result.syncedAt) {
+          _result.syncedAt = _fd.syncedAt;
+          _result.rowCount = Array.isArray(_fd.rows) ? _fd.rows.length : 0;
+          _result.dataAgeMs = Date.now() - new Date(_fd.syncedAt).getTime();
+          _result.usedCache = true;
+        }
+      } catch (_) {}
     } finally {
       ctx.isSyncing = false;
     }
+    return _finish();
   }
 
   return { runFullSync };
