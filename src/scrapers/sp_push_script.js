@@ -572,7 +572,181 @@ async function spPushWorksheet(config) {
     body: newZip
   });
   if (upResp.ok) log('Upload SUCCESS');
-  else { log('ERROR: Upload failed HTTP ' + upResp.status); results.errors++; }
+  else { log('ERROR: Upload failed HTTP ' + upResp.status); results.errors++; results.uploadFailed = true; }
 
   return results;
+}
+
+/**
+ * spVerifyWorkbook(config) — READ-BACK verification (Task #5).
+ * Runs INSIDE the SP-authenticated BrowserWindow AFTER a push. Re-downloads the
+ * workbook fresh from SharePoint and confirms the upload actually landed:
+ *   - each expected worksheet exists
+ *   - per-sheet data-row count (rows with a unit id in column B, below header)
+ *   - a set of representative expected unit ids are present, with their
+ *     lifecycle state (col E) matching what we intended to write
+ *   - hyperlink presence for a representative unavailable unit (H/I/J refs)
+ *
+ * config: { filePath, sheets: [{ sheetName, headerRow, carrierCode,
+ *            expectedIds:[...], sampleUnavail:{ id, cols:{E}, wantUrls:{H,I,J} } }] }
+ * Returns: {
+ *   ok, downloadedBytes, sheets:[{ sheetName, found, dataRows, expectedFound,
+ *     expectedMissing:[], sampleUnit, sampleLifecycleMatch, sampleHyperlinksFound },
+ *   ], errors:[], log:[] }
+ *
+ * This function performs NO writes — it is read-only.
+ */
+async function spVerifyWorkbook(config) {
+  const SP = 'https://amazon.sharepoint.com';
+  const out = { ok: false, downloadedBytes: 0, sheets: [], errors: [], log: [] };
+  const log = (m) => { out.log.push(m); console.log('[SP Verify]', m); };
+  const { filePath, sheets } = config;
+  if (!sheets || !sheets.length) { out.errors.push('no sheets to verify'); return out; }
+
+  // ── minimal ZIP reader (mirror of the push-side helpers) ──────────────────
+  function parseZip(buf) {
+    const view = new DataView(buf); const entries = []; let idx = 0;
+    while (idx < buf.byteLength - 4) {
+      if (view.getUint32(idx, true) === 0x04034b50) {
+        const flags = view.getUint16(idx + 6, true);
+        const method = view.getUint16(idx + 8, true);
+        let compSize = view.getUint32(idx + 18, true);
+        const nameLen = view.getUint16(idx + 26, true);
+        const extraLen = view.getUint16(idx + 28, true);
+        const localHeaderSize = 30 + nameLen + extraLen;
+        const nameBytes = new Uint8Array(buf, idx + 30, nameLen);
+        let name = ''; for (let n = 0; n < nameBytes.length; n++) name += String.fromCharCode(nameBytes[n]);
+        const dataStart = idx + localHeaderSize;
+        if ((flags & 0x08) && compSize === 0) {
+          let scanIdx = dataStart;
+          while (scanIdx < buf.byteLength - 4) {
+            const sig = view.getUint32(scanIdx, true);
+            if (sig === 0x04034b50 || sig === 0x02014b50) break;
+            if (sig === 0x08074b50) { compSize = view.getUint32(scanIdx + 8, true); break; }
+            scanIdx++;
+          }
+          if (compSize === 0) compSize = scanIdx - dataStart;
+        }
+        entries.push({ name, method, compData: new Uint8Array(buf, dataStart, compSize) });
+        idx = dataStart + compSize;
+        if (flags & 0x08) {
+          if (idx < buf.byteLength - 4 && view.getUint32(idx, true) === 0x08074b50) idx += 16;
+          else if (idx < buf.byteLength - 12) idx += 12;
+        }
+      } else { idx++; }
+    }
+    return entries;
+  }
+  async function inflate(data, method) {
+    if (method === 0) return data;
+    const ds = new DecompressionStream('deflate-raw');
+    const w = ds.writable.getWriter(); const r = ds.readable.getReader();
+    w.write(data); w.close();
+    const chunks = []; let total = 0;
+    while (true) { const x = await r.read(); if (x.done) break; chunks.push(x.value); total += x.value.length; }
+    const o = new Uint8Array(total); let off = 0; chunks.forEach(c => { o.set(c, off); off += c.length; });
+    return o;
+  }
+  function normalizeId(v) { return String(v || '').replace(/[\n\r\s]+/g, '').replace(/^0+/, '').toLowerCase(); }
+
+  try {
+    const siteMatch = filePath.match(/(\/sites\/[^\/]+)/);
+    const siteScope = siteMatch ? siteMatch[1] : '/sites/AFP-FAS';
+    // Cache-bust the read-back so we can't read a stale cached copy.
+    const fileUrl = SP + siteScope + "/_api/web/getfilebyserverrelativeurl('" + encodeURI(filePath).replace(/'/g, "''") + "')/$value?rb=" + Date.now();
+    const resp = await fetch(fileUrl, { credentials: 'include', cache: 'no-store' });
+    if (!resp.ok) { out.errors.push('read-back download HTTP ' + resp.status); return out; }
+    const buffer = await resp.arrayBuffer();
+    out.downloadedBytes = buffer.byteLength;
+    log('Read-back downloaded ' + (buffer.byteLength / 1024).toFixed(0) + ' KB');
+    const entries = parseZip(buffer);
+
+    // shared strings for value decoding
+    const ssEnt = entries.find(e => e.name === 'xl/sharedStrings.xml');
+    let sharedStrings = [];
+    if (ssEnt) {
+      const ssXml = new TextDecoder().decode(await inflate(ssEnt.compData, ssEnt.method));
+      const re = /<si>([\s\S]*?)<\/si>/g; let m;
+      while ((m = re.exec(ssXml)) !== null) {
+        const tRe = /<t[^>]*>([\s\S]*?)<\/t>/g; let tm; const parts = [];
+        while ((tm = tRe.exec(m[1])) !== null) parts.push(tm[1].replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"'));
+        sharedStrings.push(parts.join(''));
+      }
+    }
+    function cellVal(cellXml) {
+      const t = (cellXml.match(/\bt="([^"]+)"/) || [])[1] || '';
+      if (t === 'inlineStr') { const ism = cellXml.match(/<is>[\s\S]*?<t[^>]*>([\s\S]*?)<\/t>[\s\S]*?<\/is>/); return ism ? ism[1] : ''; }
+      const vm = cellXml.match(/<v>([\s\S]*?)<\/v>/);
+      if (!vm) { const fb = cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/); return fb ? fb[1] : ''; }
+      const raw = vm[1].replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+      if (t === 's') return sharedStrings[parseInt(raw, 10)] || '';
+      return raw;
+    }
+
+    let allSheetsFound = true, anyError = false;
+    for (const s of sheets) {
+      const rec = { sheetName: s.sheetName, carrierCode: s.carrierCode || '', found: false, dataRows: 0,
+        expectedFound: 0, expectedMissing: [], sampleUnit: null, sampleLifecycleMatch: null, sampleHyperlinksFound: null };
+      const wsName = 'xl/worksheets/' + String(s.sheetName).toLowerCase() + '.xml';
+      const wsEnt = entries.find(e => e.name.toLowerCase() === wsName.toLowerCase());
+      if (!wsEnt) { rec.found = false; allSheetsFound = false; out.sheets.push(rec); log('MISSING worksheet ' + wsName); continue; }
+      rec.found = true;
+      const wsXml = new TextDecoder().decode(await inflate(wsEnt.compData, wsEnt.method));
+      let hr = parseInt(s.headerRow, 10); if (!Number.isFinite(hr) || hr < 1) hr = 16;
+
+      // Map unit id -> row and capture col E (lifecycle) for that row.
+      const idToRow = {}; const rowLifecycle = {};
+      const rowRe = /<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g; let rm;
+      while ((rm = rowRe.exec(wsXml)) !== null) {
+        const rn = parseInt(rm[1], 10);
+        if (rn <= hr) continue;
+        const bCell = /<c\b[^>]*\br="B\d+"[^>]*?(?:\/>|>[\s\S]*?<\/c>)/.exec(rm[2]);
+        const id = bCell ? normalizeId(cellVal(bCell[0])) : '';
+        if (!id) continue;
+        rec.dataRows++;
+        idToRow[id] = rn;
+        const eCell = /<c\b[^>]*\br="E\d+"[^>]*?(?:\/>|>[\s\S]*?<\/c>)/.exec(rm[2]);
+        rowLifecycle[id] = eCell ? String(cellVal(eCell[0])).toUpperCase() : '';
+      }
+
+      // Expected ids present?
+      const expected = Array.isArray(s.expectedIds) ? s.expectedIds.map(normalizeId).filter(Boolean) : [];
+      for (const eid of expected) { if (idToRow[eid]) rec.expectedFound++; else rec.expectedMissing.push(eid); }
+
+      // Representative unavailable-unit lifecycle + hyperlink check.
+      if (s.sampleUnavail && s.sampleUnavail.id) {
+        const sid = normalizeId(s.sampleUnavail.id);
+        rec.sampleUnit = s.sampleUnavail.id;
+        const row = idToRow[sid];
+        if (row) {
+          const wantE = String((s.sampleUnavail.cols && s.sampleUnavail.cols.E) || '').toUpperCase();
+          rec.sampleLifecycleMatch = wantE ? (rowLifecycle[sid] === wantE) : null;
+          const wantUrls = s.sampleUnavail.wantUrls || {};
+          const refsToCheck = Object.keys(wantUrls).filter(k => wantUrls[k]);
+          if (refsToCheck.length) {
+            let foundLinks = 0;
+            for (const col of refsToCheck) {
+              const hlRe = new RegExp('<hyperlink\\b[^>]*\\bref="' + col + row + '"');
+              if (hlRe.test(wsXml)) foundLinks++;
+            }
+            rec.sampleHyperlinksFound = foundLinks + '/' + refsToCheck.length;
+          }
+        } else {
+          rec.sampleLifecycleMatch = false;
+          rec.expectedMissing.push(sid);
+        }
+      }
+
+      if (rec.expectedMissing.length) anyError = true;
+      if (rec.sampleLifecycleMatch === false) anyError = true;
+      out.sheets.push(rec);
+      log('[' + (rec.carrierCode || rec.sheetName) + '] found=' + rec.found + ' dataRows=' + rec.dataRows + ' expected=' + rec.expectedFound + '/' + expected.length + ' missing=' + rec.expectedMissing.length + ' lifecycleMatch=' + rec.sampleLifecycleMatch + ' links=' + rec.sampleHyperlinksFound);
+    }
+
+    out.ok = allSheetsFound && !anyError;
+    return out;
+  } catch (e) {
+    out.errors.push('verify exception: ' + e.message);
+    return out;
+  }
 }

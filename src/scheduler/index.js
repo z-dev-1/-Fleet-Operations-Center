@@ -83,8 +83,19 @@ function _scheduleAutoSPPush() {
         if (win && !win.isDestroyed())
           win.webContents.send('sp:progress', { message: msg, type });
       }).then(result => {
-        logger.info('Auto SP Push complete (' + slot.label + '): ' + (result.ok ? 'SUCCESS' : result.error));
-        _ctx.pushStatus('\u2705 SP Push complete (' + slot.label + ')');
+        // Task #5: honor the standardized SharePoint contract. `ok` is true ONLY
+        // when all attempted workbooks pushed AND read-back verified. Anything
+        // else is surfaced honestly (partial-failure / verification-pending /
+        // failed) — never a blanket "complete".
+        const ok = !!(result && result.ok);
+        const status = (result && result.status) || 'unknown';
+        logger.info('Auto SP Push (' + slot.label + '): status=' + status +
+          ' verified=' + ((result && result.workbooksSucceeded) || 0) + '/' + ((result && result.workbooksAttempted) || 0));
+        if (ok) {
+          _ctx.pushStatus('\u2705 SP Push verified (' + slot.label + ')');
+        } else {
+          _ctx.pushStatus('\u26A0\uFE0F SP Push ' + status + ' (' + slot.label + ') — ' + ((result && result.errors && result.errors.join('; ')) || 'not verified'));
+        }
       }).catch(err => {
         logger.error('Auto SP Push error:', err.message);
         _ctx.pushStatus('\u274C SP Push failed: ' + err.message);
@@ -223,7 +234,17 @@ function _catchUpMissedSlots() {
         const rows = _ctx.lastData && _ctx.lastData.rows;
         if (rows) {
           const { pushToSharePoint } = require('../scrapers/sharepoint_push');
-          pushToSharePoint(rows, (msg) => logger.info('[SP Catch-up] ' + msg));
+          // Task #5: no longer ignore the result — log the verified outcome so a
+          // catch-up push that didn't verify is visible, not silently "done".
+          pushToSharePoint(rows, (msg) => logger.info('[SP Catch-up] ' + msg))
+            .then(result => {
+              const status = (result && result.status) || 'unknown';
+              logger.info('Catch-up SP push (' + slot.label + '): status=' + status +
+                ' verified=' + ((result && result.workbooksSucceeded) || 0) + '/' + ((result && result.workbooksAttempted) || 0));
+              if (result && result.ok) _ctx.pushStatus('\u2705 Catch-up SP Push verified (' + slot.label + ')');
+              else _ctx.pushStatus('\u26A0\uFE0F Catch-up SP Push ' + status + ' (' + slot.label + ')');
+            })
+            .catch(e => logger.error('Catch-up SP push error:', e.message));
         }
       } catch (e) { logger.error('Catch-up SP push failed:', e.message); }
     }, 10000);

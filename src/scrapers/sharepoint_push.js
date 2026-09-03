@@ -40,10 +40,26 @@ const WORKBOOKS = loadWorkbooks();
 // Load the injectable push script
 const PUSH_SCRIPT = fs.readFileSync(path.join(__dirname, 'sp_push_script.js'), 'utf8');
 
+// ── Concurrency guard (Task #5) ───────────────────────────────────────────────
+// A single in-process promise-chain mutex prevents two pushToSharePoint() runs
+// from writing the shared workbooks at the same time (scheduled + manual +
+// catch-up could otherwise overlap and clobber each other's uploads). The
+// backend pipeline (Task #7) ALSO holds a durable ledger lease per channel;
+// this mutex is the last-line, in-process guarantee even for direct IPC calls.
+let _spWriteLock = Promise.resolve();
+function _withWriteLock(fn) {
+  const run = _spWriteLock.then(fn, fn);
+  // keep the chain alive regardless of success/failure, swallow to avoid unhandled
+  _spWriteLock = run.then(() => {}, () => {});
+  return run;
+}
+
 /**
- * Run the push script inside an authenticated SP BrowserWindow.
+ * Run an injected function inside an authenticated SP BrowserWindow.
+ * fnCall is the JS expression to invoke (e.g. "spPushWorksheet({...})").
  */
-function spRun(config, timeoutMs) {
+function spRun(config, timeoutMs, fnName) {
+  const call = fnName || 'spPushWorksheet';
   const spSes = session.defaultSession;
   return new Promise((resolve, reject) => {
     const win = new BrowserWindow({ width: 800, height: 600, show: false, x: -3000, y: -3000,
@@ -55,13 +71,18 @@ function spRun(config, timeoutMs) {
     win.loadURL(SP_ORIGIN + SP_SITE + '/_layouts/15/blank.htm');
     win.webContents.on('did-finish-load', async () => {
       try {
-        // Inject the push script + call it with config
-        const fullScript = PUSH_SCRIPT + '\n;spPushWorksheet(' + JSON.stringify(config) + ')';
+        // Inject the script + call the requested function with config
+        const fullScript = PUSH_SCRIPT + '\n;' + call + '(' + JSON.stringify(config) + ')';
         const result = await win.webContents.executeJavaScript(fullScript);
         finish(null, result);
       } catch(e) { finish(e); }
     });
   });
+}
+
+// Read-back verification runner — invokes spVerifyWorkbook in the SP window.
+function spVerify(config, timeoutMs) {
+  return spRun(config, timeoutMs || 90000, 'spVerifyWorkbook');
 }
 
 /**
@@ -167,9 +188,55 @@ function buildRowValues(unit) {
 
 
 
-async function pushToSharePoint(units, onProgress) {
+// ── Standardized SharePoint result contract (Task #5) ─────────────────────────
+// {
+//   ok, status, workbooksAttempted, workbooksSucceeded, workbooksFailed,
+//   sheetsAttempted, sheetsSucceeded, sheetsFailed,
+//   rowsInserted, rowsUpdated, rowsVerified,
+//   readBack: { verifiedWorkbooks:[names], sampleUnits:[...], hyperlinksChecked },
+//   workbooks: [ { name, status, sheets:[...], verify:{...}, error? } ],
+//   errors: [], completedAt
+// }
+// status values:
+//   'ok'                     — all required workbooks+sheets pushed AND read-back verified
+//   'partial-failure'        — some workbooks/sheets ok, some not
+//   'verification-pending'   — pushed but read-back could not confirm
+//   'blocked-configuration'  — no workbooks configured / nothing to push
+//   'auth-failed' / 'digest-failed' / 'failed'
+// `ok` is true ONLY for status 'ok'.
+function _newSpResult() {
+  return {
+    ok: false, status: 'failed',
+    workbooksAttempted: 0, workbooksSucceeded: 0, workbooksFailed: 0,
+    sheetsAttempted: 0, sheetsSucceeded: 0, sheetsFailed: 0,
+    rowsInserted: 0, rowsUpdated: 0, rowsVerified: 0,
+    readBack: { verifiedWorkbooks: [], sampleUnits: [], hyperlinksChecked: false },
+    workbooks: [], errors: [], completedAt: null,
+  };
+}
+
+// Pure status derivation from workbook accounting (Task #5) — extracted so it
+// can be unit-tested without a live SharePoint session. `ok` is true ONLY when
+// at least one workbook was attempted, none failed, and every attempted
+// workbook verified via read-back.
+function _deriveSpStatus(R) {
+  if (R.workbooksAttempted === 0) return { status: 'blocked-configuration', ok: false };
+  if (R.workbooksFailed === 0 && R.workbooksSucceeded === R.workbooksAttempted) return { status: 'ok', ok: true };
+  if (R.workbooksSucceeded > 0) return { status: 'partial-failure', ok: false };
+  const pending = (R.workbooks || []).some(w => w.status === 'verification-pending');
+  return { status: pending ? 'verification-pending' : 'failed', ok: false };
+}
+
+function pushToSharePoint(units, onProgress) {
+  // Serialize workbook writes — no two pushes touch the shared files at once.
+  return _withWriteLock(() => _pushToSharePointInner(units, onProgress));
+}
+
+async function _pushToSharePointInner(units, onProgress) {
   const log = onProgress || ((msg, type) => logger.info('[SP Push]', type, msg));
   log('Starting SharePoint push...', 'info');
+  const R = _newSpResult();
+  const _finish = () => { R.completedAt = new Date().toISOString(); return R; };
 
   // Push ALL units — renderer uses atsState: 'Unavailable' or 'Available'
   const allUnits = units; // push everything, let the script decide
@@ -178,21 +245,28 @@ async function pushToSharePoint(units, onProgress) {
 
   log('Total units to push: ' + allUnits.length + ' (' + unavailCount + ' unavailable, ' + activeCount + ' active)', 'info');
 
+  const LIVE_WORKBOOKS = loadWorkbooks();
+  if (!Array.isArray(LIVE_WORKBOOKS) || !LIVE_WORKBOOKS.length) {
+    log('No workbooks configured — nothing to push.', 'warn');
+    R.status = 'blocked-configuration';
+    R.errors.push('no workbooks configured');
+    return _finish();
+  }
+
   // Auth
   try {
     await withRetry(() => ensureSpAuth(), { attempts: 2, backoffMs: 3000, label: 'sp:auth' });
     log('SP session authenticated.', 'ok');
-  } catch(e) { log('Auth failed: ' + e.message, 'bad'); return { success: false, error: e.message }; }
+  } catch(e) { log('Auth failed: ' + e.message, 'bad'); R.status = 'auth-failed'; R.errors.push('auth: ' + e.message); return _finish(); }
 
   let digest;
   try {
     digest = await withRetry(() => getDigest(), { attempts: 2, backoffMs: 3000, label: 'sp:digest' });
     log('Write token acquired.', 'ok');
-  } catch(e) { log('Digest failed: ' + e.message, 'bad'); return { success: false, error: e.message }; }
+  } catch(e) { log('Digest failed: ' + e.message, 'bad'); R.status = 'digest-failed'; R.errors.push('digest: ' + e.message); return _finish(); }
 
   let totalPushed = 0, totalUpdated = 0, totalErrors = 0;
 
-  const LIVE_WORKBOOKS = loadWorkbooks();
   for (const wb of LIVE_WORKBOOKS) {
     const wbUnits = allUnits.filter(u => {
 
@@ -217,7 +291,9 @@ async function pushToSharePoint(units, onProgress) {
 
 
 
-    if (!wbUnits.length) { log(wb.name + ': No units.', 'info'); continue; }
+    const wbRec = { name: wb.name, path: wb.path, status: 'zero-eligible', sheets: [], verify: null, error: null };
+
+    if (!wbUnits.length) { log(wb.name + ': No units.', 'info'); wbRec.status = 'zero-eligible'; wbRec.error = 'no eligible units for this workbook'; R.workbooks.push(wbRec); continue; }
 
     // Build ALL carrier→sheet mappings for this workbook, then push them
     // in a SINGLE download→modify-all→upload cycle. This eliminates the race
@@ -225,6 +301,8 @@ async function pushToSharePoint(units, onProgress) {
     // (SharePoint's write propagation isn't instant, so a second carrier's
     // download could grab the pre-first-carrier version and blank its data).
     const sheets = [];
+    // Read-back expectations captured alongside each sheet (Task #5).
+    const verifySheets = [];
     for (const carrier of wb.carriers) {
       const carrierCode = (carrier.code || '').trim().toUpperCase();
       const carrierUnits = wbUnits.filter(u => (u.op || u.operator || '').trim().toUpperCase() === carrierCode);
@@ -232,10 +310,13 @@ async function pushToSharePoint(units, onProgress) {
 
       log(wb.name + ' / ' + carrier.code + ' -> ' + carrier.sheet + ': ' + carrierUnits.length + ' units', 'info');
 
+      const expectedIds = [];
+      let sampleUnavail = null;
       const rowData = carrierUnits.map(u => {
         const row = buildRowValues(u);
+        const isActive = !/unavailable/i.test((u.atsState||u.lifecycleState) || '');
         // When unit is ACTIVE, clear all maintenance fields
-        if (!/unavailable/i.test((u.atsState||u.lifecycleState) || '')) {
+        if (isActive) {
           row.values[5] = '';   // F: Repair Status
           row.values[6] = '';   // G: Primary Component
           row.values[7] = '';   // H: Relay Garage (Alt ID)
@@ -247,41 +328,127 @@ async function pushToSharePoint(units, onProgress) {
           row.values[13] = '';  // N: Days Unavailable
           row.urls = {};        // No hyperlinks for active units
         }
+        const uid = String(row.values[1] || '');
+        if (uid) expectedIds.push(uid);
+        // First unavailable unit WITH at least one hyperlink is our representative
+        // sample for read-back (confirms lifecycle=UNAVAILABLE + hyperlink landed).
+        if (!sampleUnavail && !isActive && uid) {
+          sampleUnavail = { id: uid, cols: { E: String(row.values[4] || '').toUpperCase() },
+            wantUrls: { H: row.urls.H || '', I: row.urls.I || '', J: row.urls.J || '' } };
+        }
         return row;
       });
 
-      sheets.push({
-        sheetName: carrier.sheet,
-        units: rowData,
-        headerRow: (carrier.headerRow != null ? carrier.headerRow : wb.headerRow),
-        carrierCode: carrier.code,
+      const headerRow = (carrier.headerRow != null ? carrier.headerRow : wb.headerRow);
+      sheets.push({ sheetName: carrier.sheet, units: rowData, headerRow, carrierCode: carrier.code });
+      // Cap the expected-id sample to keep the read-back payload small but
+      // representative (first 25 ids + the sample unavailable unit).
+      verifySheets.push({
+        sheetName: carrier.sheet, headerRow, carrierCode: carrier.code,
+        expectedIds: expectedIds.slice(0, 25),
+        sampleUnavail,
       });
     }
 
-    if (!sheets.length) { log(wb.name + ': No carrier sheets to push.', 'info'); continue; }
+    if (!sheets.length) { log(wb.name + ': No carrier sheets to push.', 'info'); wbRec.status = 'zero-eligible'; wbRec.error = 'no carrier sheets matched'; R.workbooks.push(wbRec); continue; }
 
+    R.workbooksAttempted++;
+    R.sheetsAttempted += sheets.length;
+
+    let pushResult = null;
     try {
       // ONE download → modify ALL sheets → ONE upload per workbook.
-      const result = await spRun({
+      pushResult = await spRun({
         filePath: wb.path,
         sheets: sheets,
         digest: digest,
         dryRun: false,
       }, 120000);
 
-      if (result && result.log) result.log.forEach(l => log('    ' + l, 'info'));
-      totalPushed += (result && result.pushed) || 0;
-      totalUpdated += (result && result.updated) || 0;
-      totalErrors += (result && result.errors) || 0;
+      if (pushResult && pushResult.log) pushResult.log.forEach(l => log('    ' + l, 'info'));
+      totalPushed += (pushResult && pushResult.pushed) || 0;
+      totalUpdated += (pushResult && pushResult.updated) || 0;
+      totalErrors += (pushResult && pushResult.errors) || 0;
     } catch(e) {
       log('  [ERROR] ' + wb.name + ': ' + e.message, 'bad');
       totalErrors++;
+      wbRec.status = 'failed';
+      wbRec.error = e.message;
+      R.workbooksFailed++;
+      R.sheetsFailed += sheets.length;
+      R.errors.push(wb.name + ': ' + e.message);
+      R.workbooks.push(wbRec);
+      continue;
     }
+
+    // A push-side hard error (upload failed / no sheets modified) means we do
+    // NOT claim success and do NOT bother verifying — record and move on.
+    const pushErrs = (pushResult && pushResult.errors) || 0;
+    const uploadFailed = !!(pushResult && pushResult.uploadFailed);
+    if (uploadFailed || pushErrs > 0) {
+      wbRec.status = 'failed';
+      wbRec.error = uploadFailed ? 'upload failed' : (pushErrs + ' in-sheet error(s)');
+      R.workbooksFailed++;
+      R.sheetsFailed += sheets.length;
+      R.errors.push(wb.name + ': ' + wbRec.error);
+      R.workbooks.push(wbRec);
+      continue;
+    }
+
+    // ── READ-BACK VERIFICATION (Task #5) ─────────────────────────────────────
+    // Re-download the workbook fresh and confirm the write actually landed.
+    let verify = null;
+    try {
+      // Small settle delay — SharePoint write propagation isn't instant.
+      await new Promise(r => setTimeout(r, 2500));
+      verify = await spVerify({ filePath: wb.path, sheets: verifySheets }, 90000);
+      if (verify && verify.log) verify.log.forEach(l => log('    [verify] ' + l, 'info'));
+    } catch (e) {
+      log('  [VERIFY ERROR] ' + wb.name + ': ' + e.message, 'warn');
+      verify = { ok: false, errors: ['verify exception: ' + e.message], sheets: [] };
+    }
+    wbRec.verify = verify;
+    wbRec.sheets = (verify && verify.sheets) || [];
+
+    // Aggregate read-back evidence into the top-level result.
+    const verifiedSheets = (verify && verify.sheets) || [];
+    const verifiedRows = verifiedSheets.reduce((n, s) => n + (s.dataRows || 0), 0);
+    const sheetsOk = verifiedSheets.filter(s => s.found && (!s.expectedMissing || !s.expectedMissing.length) && s.sampleLifecycleMatch !== false).length;
+    const anyLinkCheck = verifiedSheets.some(s => s.sampleHyperlinksFound != null);
+    if (anyLinkCheck) R.readBack.hyperlinksChecked = true;
+    verifiedSheets.forEach(s => { if (s.sampleUnit) R.readBack.sampleUnits.push({ workbook: wb.name, sheet: s.sheetName, unit: s.sampleUnit, lifecycleMatch: s.sampleLifecycleMatch, links: s.sampleHyperlinksFound }); });
+
+    if (verify && verify.ok) {
+      wbRec.status = 'verified';
+      R.workbooksSucceeded++;
+      R.sheetsSucceeded += sheets.length;
+      R.rowsVerified += verifiedRows;
+      R.readBack.verifiedWorkbooks.push(wb.name);
+    } else {
+      // Pushed but read-back did not confirm -> verification-pending, NOT ok.
+      wbRec.status = 'verification-pending';
+      wbRec.error = (verify && verify.errors && verify.errors.join('; ')) || 'read-back could not confirm';
+      R.workbooksFailed++;
+      R.sheetsFailed += sheets.length;
+      R.errors.push(wb.name + ': verification-pending — ' + wbRec.error);
+    }
+    R.workbooks.push(wbRec);
   }
 
-  const summary = 'Done: ' + totalPushed + ' new, ' + totalUpdated + ' updated, ' + totalErrors + ' errors.';
-  log(summary, totalErrors ? 'warn' : 'ok');
-  return { success: true, pushed: totalPushed, updated: totalUpdated, errors: totalErrors };
+  R.rowsInserted = totalPushed;
+  R.rowsUpdated = totalUpdated;
+
+  // Overall status: ok only when at least one workbook was attempted, none
+  // failed, and every attempted workbook verified via read-back.
+  const derived = _deriveSpStatus(R);
+  R.status = derived.status;
+  R.ok = derived.ok;
+
+  const summary = 'Done: ' + totalPushed + ' new, ' + totalUpdated + ' updated, ' +
+    R.rowsVerified + ' verified · ' + R.workbooksSucceeded + '/' + R.workbooksAttempted +
+    ' workbooks verified · status=' + R.status;
+  log(summary, R.ok ? 'ok' : (R.status === 'partial-failure' || R.status === 'verification-pending' ? 'warn' : 'bad'));
+  return _finish();
 }
 
-module.exports = { pushToSharePoint, WORKBOOKS, buildRowValues, loadWorkbooks, saveWorkbooks, SP_CONFIG_FILE };
+module.exports = { pushToSharePoint, WORKBOOKS, buildRowValues, loadWorkbooks, saveWorkbooks, SP_CONFIG_FILE, _newSpResult, _deriveSpStatus };
