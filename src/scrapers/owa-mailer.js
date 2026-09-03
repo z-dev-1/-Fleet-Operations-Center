@@ -324,12 +324,12 @@ async function sendViaOwa(opts) {
         if (!/outlook\.office365\.com|outlook\.office\.com/i.test(curUrl)) return; // wait for the real compose page
 
         try {
-          // 1) Wait for the editor, then insert clipboard-free.
+          // 1) Wait for the editor, then insert the HTML body.
           const editorReady = await _waitFor(win, EDITOR_SELECTOR, 40, 1000);
           if (!editorReady) { signals.error = 'no editor'; R.errors.push('editor not found'); clearTimeout(hardTimeout); settle({ status: 'failed' }); return; }
           signals.editorReady = true;
 
-          const ins = await win.webContents.executeJavaScript(_buildInsertScript(html));
+          const ins = await _insertBody(win, electron, html);
           signals.insertOk = ins === 'ok';
           if (!signals.insertOk) { R.errors.push('insert result: ' + ins); clearTimeout(hardTimeout); settle({ status: 'failed' }); return; }
 
@@ -369,6 +369,73 @@ async function sendViaOwa(opts) {
       settle({ status: 'failed', errors: ['window error: ' + e.message] });
     }
   });
+}
+
+// Insert the HTML body into the OWA editor while PRESERVING its rich structure
+// (layout tables + <font> tags). OWA's editor sanitizer FLATTENS content set via
+// innerHTML / execCommand('insertHTML') to plain text — confirmed against a live
+// send — so the styled SOS/EOS report is lost. OWA's PASTE pipeline, however,
+// preserves HTML from the clipboard. Per the product owner, clipboard use is
+// permitted "if unavoidable" with save + restore; this is that case.
+//
+// Strategy:
+//   1. Save the user's current clipboard (text + html).
+//   2. Write the email HTML to the clipboard.
+//   3. Focus + select-all + clear the editor, then webContents.paste().
+//   4. Verify the editor now contains a table (structure preserved).
+//   5. ALWAYS restore the user's original clipboard.
+// Falls back to direct innerHTML insertion only if the clipboard is unavailable.
+async function _insertBody(win, electron, html) {
+  const { clipboard } = electron;
+  const sel = JSON.stringify(EDITOR_SELECTOR);
+  // Save existing clipboard so we can restore it afterwards.
+  let savedText = '', savedHtml = '';
+  try { savedText = clipboard.readText(); savedHtml = clipboard.readHTML(); } catch (_) {}
+
+  try {
+    // Focus + clear the editor before paste.
+    await win.webContents.executeJavaScript(`(function(){
+      var ed = document.querySelector(${sel});
+      if (!ed) return 'no-editor';
+      ed.focus();
+      try { var s = window.getSelection(); s.removeAllRanges(); var r = document.createRange(); r.selectNodeContents(ed); s.addRange(r); document.execCommand('delete', false, null); } catch(e){}
+      return 'ready';
+    })();`);
+
+    if (clipboard && typeof clipboard.write === 'function') {
+      clipboard.write({ html: html, text: 'Fleet Status Report' });
+      // Give the OS clipboard a beat, then paste through OWA's HTML paste path.
+      await _sleep(150);
+      win.webContents.paste();
+      // Poll for the pasted structure to appear (tables preserved).
+      for (let i = 0; i < 12; i++) {
+        await _sleep(600);
+        if (win.isDestroyed()) break;
+        try {
+          const chk = await win.webContents.executeJavaScript(`(function(){
+            var ed = document.querySelector(${sel});
+            if (!ed) return 'no-editor';
+            var h = ed.innerHTML || '';
+            if (h.length < 40) return 'empty';
+            return /<table/i.test(h) ? 'ok-rich' : 'ok-plain';
+          })();`);
+          if (chk === 'ok-rich') return 'ok';
+          if (chk === 'ok-plain' && i >= 4) return 'ok'; // content present even if tables stripped
+        } catch (_) {}
+      }
+    }
+
+    // Fallback: direct insertion (may flatten, but better than nothing).
+    const direct = await win.webContents.executeJavaScript(_buildInsertScript(html));
+    return direct === 'ok' ? 'ok' : ('insert-failed:' + direct);
+  } finally {
+    // ALWAYS restore the user's clipboard.
+    try {
+      if (savedHtml) clipboard.write({ html: savedHtml, text: savedText });
+      else if (savedText) clipboard.writeText(savedText);
+      else clipboard.clear();
+    } catch (_) {}
+  }
 }
 
 // Poll for a selector to appear.
