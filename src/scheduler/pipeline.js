@@ -269,13 +269,34 @@ function _notify(ctx, job, extra) {
 // ── Shared sync + freshness gate ───────────────────────────────────────────────
 // Runs a fresh sync, records the structured result on the job, then applies the
 // per-channel freshness policy. Returns { proceed, banner } or throws to retry.
-async function _syncAndGate(ctx, job) {
+async function _syncAndGate(ctx, job, opts) {
+  opts = opts || {};
   await ledger.transition(job.jobId, ledger.STATES.SYNCING, {}, 'sync start');
   let sync;
   try {
     sync = await ctx.runFullSync();
   } catch (e) {
     sync = { ok: false, errors: [{ source: 'sync', message: e.message }] };
+  }
+  // Manual "send now": a live sync can be busy (a background rescan is running)
+  // and return an in-progress/cache result even though the persisted fleetData
+  // is genuinely fresh. In that case, judge the ACTUAL persisted data against
+  // the freshness policy instead of the busy-sync envelope, so an on-demand
+  // send isn't defeated by a concurrent rescan. Only used when explicitly
+  // requested (opts.useExistingIfFresh) — the scheduled path is unchanged.
+  if (opts.useExistingIfFresh && (!sync || !sync.ok || sync.usedCache)) {
+    try {
+      const fd = store.load('fleetData', {}) || {};
+      const rows = Array.isArray(fd.rows) ? fd.rows : [];
+      if (fd.syncedAt && rows.length && !fd.partial) {
+        const ageMs = Date.now() - new Date(fd.syncedAt).getTime();
+        sync = {
+          ok: true, rowCount: rows.length, syncedAt: fd.syncedAt, dataAgeMs: ageMs,
+          sourcesUpdated: ['aap'], sourcesFailed: [], usedCache: false, errors: [],
+          _fromPersistedFresh: true,
+        };
+      }
+    } catch (_) {}
   }
   await ledger.transition(job.jobId, ledger.STATES.VALIDATING, { syncResult: _redactSync(sync) }, 'freshness gate');
   const decision = freshness.evaluate(sync, { channel: job.channel, testMode: job.testMode });
@@ -414,7 +435,7 @@ async function _runOneEmailScope(ctx, o) {
   if (!lease.ok) return { state: job.state, scope: o.scope, skipped: 'channel-busy' };
 
   try {
-    const gate = await _syncAndGate(ctx, job);
+    const gate = await _syncAndGate(ctx, job, { useExistingIfFresh: !!o.useExistingIfFresh });
     if (!gate.proceed) { await ledger.releaseLease(ledger.CHANNELS.EMAIL, job.jobId); return { state: ledger.STATES.BLOCKED_STALE_DATA, scope: o.scope }; }
 
     await ledger.transition(job.jobId, ledger.STATES.RUNNING, {}, 'build + owa send');

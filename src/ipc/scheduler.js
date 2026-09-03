@@ -41,6 +41,14 @@ function registerSchedulerIPC(ctx) {
     return { ok: !(r && r.blocked), result: _redactEmailRun(r) };
   });
 
+  // REAL production email run (sends to actual operator recipients). Recovers a
+  // slot that was blocked/missed earlier once data is fresh.
+  handle('scheduler:run-email-now', async (_e, slotLabel) => {
+    logger.info('Run PRODUCTION email now requested (slot=' + (slotLabel || 'auto') + ')');
+    const r = await scheduler.runEmailNow(slotLabel);
+    return { ok: !(r && r.blocked), result: _redactEmailRun(r) };
+  });
+
   // ── Job actions ────────────────────────────────────────────────────────────
   handle('scheduler:retry', async (_e, jobId) => {
     requireString(jobId, 'jobId');

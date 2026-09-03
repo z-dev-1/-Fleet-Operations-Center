@@ -177,6 +177,37 @@ function runNextEmailAsTest() {
   return pipeline.runEmailSlot(_ctx, { dateKey, slotLabel: slot.label, origin: ledger.ORIGINS.TEST, testMode: true });
 }
 
+// "Run the email slot NOW as a real PRODUCTION send" — sends to the real
+// operator recipients. Used to recover a slot that was blocked/missed earlier
+// (e.g. a stale-data block first thing in the morning) once data is fresh.
+// Because the earlier blocked jobs already exist under the production
+// idempotency key and sit in a paused state (blocked-stale-data), the pipeline
+// would otherwise skip them — so we first RE-QUEUE any blocked/retry production
+// email jobs for the target slot, then run the slot against the now-fresh data.
+async function runEmailNow(slotLabel) {
+  const dateKey = _todayPrefix();
+  let slot;
+  if (slotLabel) {
+    slot = EMAIL_SLOTS.find(s => s.label === slotLabel);
+  }
+  if (!slot) {
+    // Default to the most recent slot at/just before now (the one likely missed).
+    const now = new Date().getHours() * 60 + new Date().getMinutes();
+    const past = EMAIL_SLOTS.filter(s => (s.h * 60 + s.m) <= now).sort((a, b) => (b.h * 60 + b.m) - (a.h * 60 + a.m));
+    slot = past[0] || EMAIL_SLOTS[0] || DEFAULT_EMAIL_SLOTS[0];
+  }
+  // Re-queue this slot's blocked/retry PRODUCTION email jobs so they aren't
+  // skipped as "paused".
+  const requeueStates = [ledger.STATES.BLOCKED_STALE_DATA, ledger.STATES.BLOCKED_AUTH, ledger.STATES.RETRY, ledger.STATES.PARTIAL_FAILURE, ledger.STATES.FAILED];
+  const jobs = ledger.listJobs({ channel: ledger.CHANNELS.EMAIL, dateKey, testMode: false })
+    .filter(j => j.slotLabel === slot.label && requeueStates.includes(j.state));
+  for (const j of jobs) {
+    await ledger.transition(j.jobId, ledger.STATES.QUEUED, { attempts: 0, nextRetryAt: null }, 'manual production re-run');
+  }
+  logger.info('Manual PRODUCTION email run for slot ' + slot.label + ' (re-queued ' + jobs.length + ' blocked job(s))');
+  return pipeline.runEmailSlot(_ctx, { dateKey, slotLabel: slot.label, origin: ledger.ORIGINS.MANUAL, testMode: false, useExistingIfFresh: true });
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 function start(ctx) {
   _ctx = ctx;
@@ -307,4 +338,4 @@ function setFreshness(patch) {
   return s.schedulerFreshness;
 }
 
-module.exports = { start, stop, reload, catchUp, runSpNow, runNextEmailAsTest, getState, setEnabled, setFreshness, _jobSummary };
+module.exports = { start, stop, reload, catchUp, runSpNow, runNextEmailAsTest, runEmailNow, getState, setEnabled, setFreshness, _jobSummary };

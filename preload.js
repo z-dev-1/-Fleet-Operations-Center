@@ -302,6 +302,7 @@ expose('fleetScheduler', {
   getJob:          (jobId)   => ipcRenderer.invoke('scheduler:get-job', jobId),
   runSpNow:        ()        => ipcRenderer.invoke('scheduler:run-sp-now'),
   runEmailTestNow: ()        => ipcRenderer.invoke('scheduler:run-email-test-now'),
+  runEmailNow:     (slot)    => ipcRenderer.invoke('scheduler:run-email-now', slot),
   retry:           (jobId)   => ipcRenderer.invoke('scheduler:retry', jobId),
   cancel:          (jobId)   => ipcRenderer.invoke('scheduler:cancel', jobId),
   reconcile:       (jobId)   => ipcRenderer.invoke('scheduler:reconcile', jobId),
