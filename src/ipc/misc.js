@@ -12,7 +12,10 @@
 //   - Issue #28: file:read-dataurl validates filePath is within allowed dirs
 //     (P.screenshotsDir or P.dataDir) before reading
 
-const { app, BrowserWindow, shell, clipboard, Notification } = require('electron');
+// Task #6: top-level `clipboard` removed — the scheduled OWA path is now
+// clipboard-free (see src/scrapers/owa-mailer.js). The legacy manual
+// email:send OWA-open cascade still re-requires clipboard locally.
+const { app, BrowserWindow, shell, Notification } = require('electron');
 const p      = require('path');
 const fs     = require('fs');
 const os     = require('os');
@@ -154,49 +157,41 @@ function registerMiscIPC(ctx) {
       finalSubject += _buildEmailRef._lastSubjectSuffix;
     }
 
-    const { session: eSession } = require('electron');
-    return new Promise((resolve) => {
-      const win = new BrowserWindow({ width: 1100, height: 800, show: true, title: 'Fleet Email', icon: require('../config/app-icon').getAppIconPath(), backgroundColor: '#f6f8fa', autoHideMenuBar: true, webPreferences: { nodeIntegration: false, contextIsolation: true, session: eSession.defaultSession } });
-      const owaUrl = 'https://outlook.office365.com/mail/deeplink/compose' + '?to=' + encodeURIComponent(to||'') + '&cc=' + encodeURIComponent(cc||'') + '&subject=' + encodeURIComponent(finalSubject||'');
-      win.loadURL(owaUrl);
-      let attempts = 0, done = false;
-      let poll = null;
-      function finish(r) {
-        if (done) return;
-        done = true;
-        if (poll !== null) { clearInterval(poll); poll = null; }
-        setTimeout(() => { if (!win.isDestroyed()) win.close(); }, 1500);
-        resolve(r);
-      }
-      setTimeout(() => finish({ success: false, error: 'timeout' }), 60000);
-      win.on('closed', () => finish({ success: false, error: 'closed' }));
-      const edQ = 'div[aria-label*="Message body"],div.elementToProof[contenteditable="true"]';
-      poll = setInterval(() => {
-        if (++attempts > 50) { finish({ success: false, error: 'no editor' }); return; }
-        if (win.isDestroyed()) { finish({ success: false, error: 'closed' }); return; }
-        win.webContents.executeJavaScript('(function(){if(window.__fi)return"already";var ed=document.querySelector(' + JSON.stringify(edQ) + ');if(!ed)return"no-editor";ed.focus();document.execCommand("selectAll",false,null);document.execCommand("delete",false,null);window.__fi=true;return"ready";})();')
-          .then((r) => {
-            if (r !== 'ready') return;
-            if (poll !== null) { clearInterval(poll); poll = null; }
-            clipboard.write({ html: finalHtml, text: 'Fleet Report' });
-            setTimeout(() => {
-              if (win.isDestroyed()) { finish({ success: false }); return; }
-              win.webContents.paste();
-              let pa = 0;
-              const verify = () => {
-                if (win.isDestroyed()) { finish({ success: false }); return; }
-                win.webContents.executeJavaScript('(function(){var ed=document.querySelector(' + JSON.stringify(edQ) + ');return(!ed)?"no-editor":(ed.innerHTML||"").length>50?"ok":"empty";})();')
-                  .then((chk) => {
-                    if (chk === 'ok') { setTimeout(() => { win.webContents.executeJavaScript('(function(){var b=document.querySelector("button[aria-label*=\\"Send\\"]");if(b)b.click();return b?"sent":"no-btn";})();').then(() => finish({ success: true })).catch(() => finish({ success: true })); }, 1000); }
-                    else if (pa < 3) { pa++; clipboard.write({ html: finalHtml, text: 'Fleet Report' }); setTimeout(() => { win.webContents.paste(); setTimeout(verify, 1500); }, 500); }
-                    else { finish({ success: false, error: 'paste-empty' }); }
-                  }).catch(() => setTimeout(verify, 1000));
-              };
-              setTimeout(verify, 2000);
-            }, 800);
-          }).catch(() => {});
-      }, 1000);
+    // Task #6: deliver through the ONE hidden OWA background service.
+    // - fully hidden window (never shown/focused/moved), popups blocked
+    // - clipboard-FREE HTML insertion
+    // - auth/MFA/consent detection -> 'blocked-auth' (no fake success)
+    // - Sent-Items verification before claiming 'sent'
+    // NO SMTP / NO Graph / NO fallback in this path.
+    const { sendViaOwa } = require('../scrapers/owa-mailer');
+    const owaResult = await sendViaOwa({
+      to, cc, subject: finalSubject, html: finalHtml,
+      correlationMarker: payload.correlationMarker || undefined,
     });
+    // Map to the legacy { success } shape the current renderer expects, while
+    // also surfacing the full structured contract (status, sentItemsMatch, ...).
+    // success is TRUE only for a verified 'sent' — 'delivery-uncertain' and
+    // 'blocked-auth' are NOT success.
+    return {
+      success: owaResult.status === 'sent',
+      status: owaResult.status,
+      to: owaResult.to,
+      cc: owaResult.cc,
+      subject: owaResult.subject,
+      sentItemsMatch: owaResult.sentItemsMatch,
+      correlationMarker: owaResult.correlationMarker,
+      composeClosed: owaResult.composeClosed,
+      errors: owaResult.errors,
+      error: owaResult.status === 'sent' ? undefined : (owaResult.errors && owaResult.errors[0]) || owaResult.status,
+    };
+  });
+
+  // Task #6: interactive OWA sign-in on demand (the ONLY place an OWA window is
+  // shown). The scheduler pipeline resumes the SAME paused jobs afterwards.
+  handle('email:authenticate-owa', async () => {
+    const { authenticateOwa } = require('../scrapers/owa-mailer');
+    logger.info('Interactive OWA authentication requested');
+    return authenticateOwa({});
   });
 
   // ── Stage 4: remaining utility handlers migrated to handle() ────────────

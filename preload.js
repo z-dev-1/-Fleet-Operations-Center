@@ -265,6 +265,9 @@ contextBridge.exposeInMainWorld('email', {
   loadOpEmails: ()        => ipcRenderer.invoke('email:load-op-emails'),
   getTestMode:  ()        => ipcRenderer.invoke('email:get-test-mode'),
   setTestMode:  (enabled) => ipcRenderer.invoke('email:set-test-mode', enabled),
+  // Task #6: interactive OWA sign-in on demand (only path that shows an OWA
+  // window). Used by the Scheduler UI "Authenticate OWA" control.
+  authenticateOwa: ()     => ipcRenderer.invoke('email:authenticate-owa'),
 });
 
 // ── Partner portal — removed in Phase 6 (feature no longer used) ─────────────
