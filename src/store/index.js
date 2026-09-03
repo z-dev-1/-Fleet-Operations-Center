@@ -119,6 +119,13 @@ const REGISTRY = {
   emailLastSnapshot:       () => path.join(P.dataDir, 'email_last_snapshot.json'),
   proactiveAlertHistory:  () => path.join(P.dataDir, 'proactive_alert_history.json'),
   proactiveLastScores:   () => path.join(P.dataDir, 'proactive_last_scores.json'),
+  // Production backend scheduler (2026-08) — durable job ledger for SharePoint
+  // push + scheduled OWA email jobs. See src/scheduler/ledger.js. Owns job
+  // state machine, idempotency keys, expiring leases, completed-slot keys,
+  // and per-scope snapshot bookkeeping. The immutable versioned migration
+  // backup is stored under schedulerLedgerBackup_v1.
+  schedulerLedger:         () => path.join(P.dataDir, 'scheduler_ledger.json'),
+  schedulerLedgerBackup_v1: () => path.join(P.dataDir, 'scheduler_ledger_backup_v1.json'),
 };
 
 function _resolvePath(name) {
