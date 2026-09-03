@@ -160,6 +160,76 @@ function _catchUpMissedSlots() {
   });
 }
 
+// ── Automatic recovery of blocked slots (Task #2) ─────────────────────────────
+// Root cause of "didn't auto-send this morning": at the 07:10 slot the fleet
+// sync couldn't complete a fresh live pull (Midway was expired), so the
+// freshness gate correctly HARD-BLOCKED the jobs (blocked-stale-data) — but
+// nothing retried once the sync recovered, so the slot was silently missed.
+// Likewise an early cold OWA session yields blocked-auth.
+//
+// This sweep runs periodically and re-attempts today's still-blocked slots
+// (blocked-stale-data / blocked-auth) once conditions may have improved:
+//   - The pipeline's own freshness gate re-checks data freshness, so if data
+//     is STILL stale the job simply re-blocks (no send, idempotent).
+//   - blocked-auth is only retried if an OWA session now looks usable (we can't
+//     cheaply probe here, so we DO re-attempt — the send itself will re-block
+//     with blocked-auth if still not signed in; harmless, no send occurs).
+// Safety: never touches completed slots (isSlotCompleted + idempotency), never
+// retries delivery-uncertain (needs manual reconcile), bounded time window, and
+// a debounce flag prevents overlapping sweeps.
+const RECOVERY_WINDOW_MIN = 240;   // don't recover a slot more than 4h late
+let _recoverTimer = null;
+let _recoverInFlight = false;
+
+async function _recoverBlockedSlots() {
+  if (!_ctx || _recoverInFlight) return;
+  if (!_isWeekday()) return;
+  _recoverInFlight = true;
+  try {
+    const dateKey = _todayPrefix();
+    const now = new Date().getHours() * 60 + new Date().getMinutes();
+    const recoverableStates = [ledger.STATES.BLOCKED_STALE_DATA, ledger.STATES.BLOCKED_AUTH];
+
+    // ── Email: recover per slot ──
+    if (_enabled('email')) {
+      for (const slot of EMAIL_SLOTS) {
+        const slotMin = slot.h * 60 + slot.m;
+        const age = now - slotMin;
+        if (age <= 0 || age > RECOVERY_WINDOW_MIN) continue;             // only past, within window
+        if (ledger.isSlotCompleted(ledger.CHANNELS.EMAIL, dateKey, slot.label)) continue;
+        const blocked = ledger.listJobs({ channel: ledger.CHANNELS.EMAIL, dateKey, testMode: false })
+          .filter(j => j.slotLabel === slot.label && recoverableStates.includes(j.state));
+        if (!blocked.length) continue;
+        logger.info('Auto-recovery: re-attempting blocked email slot ' + slot.label + ' (' + blocked.length + ' job(s), ' + age + 'min late)');
+        _ctx.pushStatus('\u267B\uFE0F Auto-recovery: retrying ' + slot.label + ' email...');
+        try { await runEmailNow(slot.label); } catch (e) { logger.warn('Auto-recovery email failed: ' + e.message); }
+      }
+    }
+
+    // ── SharePoint: recover per slot ──
+    if (_enabled('sp')) {
+      for (const slot of SP_SLOTS) {
+        const slotMin = slot.h * 60 + slot.m;
+        const age = now - slotMin;
+        if (age <= 0 || age > RECOVERY_WINDOW_MIN) continue;
+        if (ledger.isSlotCompleted(ledger.CHANNELS.SHAREPOINT, dateKey, slot.label)) continue;
+        const blocked = ledger.listJobs({ channel: ledger.CHANNELS.SHAREPOINT, dateKey, testMode: false })
+          .filter(j => j.slotLabel === slot.label && recoverableStates.includes(j.state));
+        if (!blocked.length) continue;
+        // Re-queue the blocked SP jobs, then re-fire the slot.
+        for (const j of blocked) {
+          await ledger.transition(j.jobId, ledger.STATES.QUEUED, { attempts: 0, nextRetryAt: null }, 'auto-recovery re-queue');
+        }
+        logger.info('Auto-recovery: re-attempting blocked SP slot ' + slot.label + ' (' + blocked.length + ' job(s), ' + age + 'min late)');
+        _ctx.pushStatus('\u267B\uFE0F Auto-recovery: retrying ' + slot.label + ' SP push...');
+        _fireSP(dateKey, slot, 'recovery');
+      }
+    }
+  } finally {
+    _recoverInFlight = false;
+  }
+}
+
 // ── Manual / test entry points (used by scheduler:* IPC) ───────────────────────
 function runSpNow() {
   const dateKey = _todayPrefix();
@@ -219,6 +289,12 @@ function start(ctx) {
   _scheduleAutoSPPush();
   _scheduleAutoEmail();
   _catchUpMissedSlots();
+  // Auto-recovery sweep: re-attempt today's still-blocked slots (stale-data /
+  // auth) once conditions may have improved. Every 2 min; also once shortly
+  // after startup so a restart mid-morning recovers a missed early slot.
+  if (_recoverTimer) clearInterval(_recoverTimer);
+  _recoverTimer = setInterval(() => { _recoverBlockedSlots().catch(() => {}); }, 120000);
+  setTimeout(() => { _recoverBlockedSlots().catch(() => {}); }, 60000);
   // Prune old ledger entries occasionally.
   ledger.pruneOldJobs().catch(() => {});
   logger.info('Schedulers started — SP:', SP_SLOTS.map(s=>s.label), 'Email:', EMAIL_SLOTS.map(s=>s.label));
@@ -227,6 +303,7 @@ function start(ctx) {
 function stop() {
   if (_spScheduleTimer)    { clearInterval(_spScheduleTimer);    _spScheduleTimer    = null; }
   if (_emailScheduleTimer) { clearInterval(_emailScheduleTimer); _emailScheduleTimer = null; }
+  if (_recoverTimer)       { clearInterval(_recoverTimer);       _recoverTimer       = null; }
 }
 
 function reload(newSlots) {
@@ -338,4 +415,4 @@ function setFreshness(patch) {
   return s.schedulerFreshness;
 }
 
-module.exports = { start, stop, reload, catchUp, runSpNow, runNextEmailAsTest, runEmailNow, getState, setEnabled, setFreshness, _jobSummary };
+module.exports = { start, stop, reload, catchUp, runSpNow, runNextEmailAsTest, runEmailNow, recoverBlockedSlots: _recoverBlockedSlots, getState, setEnabled, setFreshness, _jobSummary };
