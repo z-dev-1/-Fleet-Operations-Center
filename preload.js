@@ -32,8 +32,30 @@ function on(channel, cb) {
   ipcRenderer.on(channel, handler);
   return () => ipcRenderer.removeListener(channel, handler);
 }
+
+// ── Helper: fault-tolerant bridge binding ───────────────────────────────────
+// RELIABILITY FIX: this same preload is injected into BOTH the AAP scrape page
+// (a corp web page that defines its OWN `window.aap` global) AND the app UI —
+// the app reuses one BrowserWindow and navigates it from AAP to the local app
+// page (see src/window/index.js). On the AAP page, binding 'aap' via
+// contextBridge.exposeInMainWorld THROWS "Cannot bind an API on top of an
+// existing property on the window object", and because that throw was
+// unguarded it aborted the ENTIRE preload — so on the app UI every bridge
+// (window.credentials, window.scheduler, window.fleet, ...) went missing and
+// the renderer crashed with "Cannot read properties of undefined". Wrapping each
+// binding so a single collision is logged and skipped keeps all the OTHER
+// bridges intact. Safe because the AAP page never uses our bridges anyway.
+function expose(name, api) {
+  try {
+    contextBridge.exposeInMainWorld(name, api);
+  } catch (e) {
+    // Expected on the AAP corp page for 'aap'; harmless there. Any other
+    // collision is logged but never allowed to break the remaining bridges.
+    console.warn('[preload] skipped bridge "' + name + '": ' + e.message);
+  }
+}
 // ── Fleet data ────────────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('fleet', {
+expose('fleet', {
   onData:       (cb) => on('fleet:data', cb),
   onStatus:     (cb) => on('fleet:status', cb),
   onError:      (cb) => on('fleet:error', cb),
@@ -80,7 +102,7 @@ contextBridge.exposeInMainWorld('fleet', {
 
 
 // ── Settings & Domiciles ───────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('settings', {
+expose('settings', {
   getDomiciles:  ()        => ipcRenderer.invoke('settings:get-domiciles'),
   saveDomiciles: (d)       => ipcRenderer.invoke('settings:save-domiciles', d),
   resetDomiciles:()        => ipcRenderer.invoke('settings:reset-domiciles'),
@@ -96,7 +118,7 @@ contextBridge.exposeInMainWorld('settings', {
 });
 
 // ── Notes ─────────────────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('notes', {
+expose('notes', {
   getUnit:   (id)     => ipcRenderer.invoke('notes:get-unit', id),
   getAll:    ()       => ipcRenderer.invoke('notes:get-all'),
   saveUnit:  (data)   => ipcRenderer.invoke('notes:save-unit', data),
@@ -104,7 +126,7 @@ contextBridge.exposeInMainWorld('notes', {
 });
 
 // ── Long Dwell Units (Analytics tab) ──────────────────────────────────────
-contextBridge.exposeInMainWorld('longDwell', {
+expose('longDwell', {
   getAll:     ()     => ipcRenderer.invoke('long-dwell:get-all'),
   getUnit:    (id)   => ipcRenderer.invoke('long-dwell:get-unit', id),
   saveUnit:   (data) => ipcRenderer.invoke('long-dwell:save-unit', data),
@@ -112,7 +134,7 @@ contextBridge.exposeInMainWorld('longDwell', {
 });
 
 // ── AI / Orcha ────────────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('ai', {
+expose('ai', {
   suggest:          (unit)        => ipcRenderer.invoke('ai:suggest', unit),
   ask:              (prompt)      => ipcRenderer.invoke('ai:ask', prompt),
   orchaAction:      (msg)         => ipcRenderer.invoke('ai:orcha-action', msg),
@@ -155,7 +177,7 @@ contextBridge.exposeInMainWorld('ai', {
 
 
 // ── Slack ─────────────────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('slack', {
+expose('slack', {
   send:      (data) => ipcRenderer.invoke('slack:send', data),
   checkAuth: ()     => ipcRenderer.invoke('slack:check-auth'),
   login:     ()     => ipcRenderer.invoke('slack:login'),
@@ -218,7 +240,7 @@ contextBridge.exposeInMainWorld('slack', {
 
 
 // ── SharePoint ────────────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('sp', {
+expose('sp', {
   push:           (units)   => ipcRenderer.invoke('sp:push', units),
   pushDomicile:   (payload) => ipcRenderer.invoke('sp:push-domicile', payload),
   onProgress:     (cb)      => on('sp:progress', cb),
@@ -229,14 +251,14 @@ contextBridge.exposeInMainWorld('sp', {
 });
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('auth', {
+expose('auth', {
   runMwinit:     ()   => ipcRenderer.invoke('auth:run-mwinit'),
   onMwinitStatus:(cb) => on('auth:mwinit-status', cb),
   checkMidway:   ()   => ipcRenderer.invoke('auth:check-midway'),
 });
 
 // ── AAP actions ───────────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('aap', {
+expose('aap', {
   setLifecycle:     (id, url, state, reason) => ipcRenderer.invoke('aap:set-lifecycle', { equipmentId: id, assetUrl: url, state, reason }),
   autofill:         (url, payload)           => ipcRenderer.invoke('aap:autofill', url, payload),
   stopAutofill:     ()                       => ipcRenderer.invoke('aap:autofill-stop'),
@@ -249,13 +271,13 @@ contextBridge.exposeInMainWorld('aap', {
 });
 
 // ── Geofence ──────────────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('geofence', {
+expose('geofence', {
   scrape:   () => ipcRenderer.invoke('geofence:scrape'),
   getCache: () => ipcRenderer.invoke('geofence:get-cache'),
 });
 
 // ── Email ─────────────────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('email', {
+expose('email', {
   send:         (opts)    => ipcRenderer.invoke('email:send', opts),
   getConfig:    ()        => ipcRenderer.invoke('email:get-config'),
   saveConfig:   (config)  => ipcRenderer.invoke('email:save-config', config),
@@ -271,7 +293,11 @@ contextBridge.exposeInMainWorld('email', {
 });
 
 // ── Scheduler (authoritative backend state + controls) — Task #8 ─────────────
-contextBridge.exposeInMainWorld('scheduler', {
+// Exposed as window.fleetScheduler (NOT window.scheduler): `scheduler` is a
+// native browser global (the Prioritized Task Scheduling API), so binding to
+// it via contextBridge throws "Cannot bind an API on top of an existing
+// property" and the bridge would silently go missing.
+expose('fleetScheduler', {
   getState:        ()        => ipcRenderer.invoke('scheduler:get-state'),
   getJob:          (jobId)   => ipcRenderer.invoke('scheduler:get-job', jobId),
   runSpNow:        ()        => ipcRenderer.invoke('scheduler:run-sp-now'),
@@ -292,7 +318,7 @@ contextBridge.exposeInMainWorld('scheduler', {
 // ── Partner portal — removed in Phase 6 (feature no longer used) ─────────────
 
 // ── Screenshots / files ───────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('files', {
+expose('files', {
   openUptakeScreenshot: (p) => ipcRenderer.invoke('uptake:open-screenshot', p),
   getLatestScreenshot:  ()  => ipcRenderer.invoke('uptake:latest-screenshot'),
   readAsDataUrl:        (p) => ipcRenderer.invoke('file:read-dataurl', p),
@@ -301,13 +327,13 @@ contextBridge.exposeInMainWorld('files', {
 });
 
 // ── Relay cache (S28: wiring fix — exposes relay data to renderer) ────────────
-contextBridge.exposeInMainWorld('relay', {
+expose('relay', {
   getCache:     ()   => ipcRenderer.invoke('relay:get-cache'),
   getUnitCache: (id) => ipcRenderer.invoke('relay:get-unit-cache', id),
 });
 
 // ── Credentials (UI-facing — never returns raw values) ──────────────────────
-contextBridge.exposeInMainWorld('credentials', {
+expose('credentials', {
   set:    (key, val) => ipcRenderer.invoke('credentials:set', key, val),
   has:    (key)      => ipcRenderer.invoke('credentials:has', key),
   delete: (key)      => ipcRenderer.invoke('credentials:delete', key),
@@ -322,7 +348,7 @@ contextBridge.exposeInMainWorld('credentials', {
 
 
 // ── Window / app ──────────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('contacts', {
+expose('contacts', {
   getAll:   ()      => ipcRenderer.invoke('contacts:get-all'),
   save:     (list)  => ipcRenderer.invoke('contacts:save', list),
   add:      (c)     => ipcRenderer.invoke('contacts:add', c),
@@ -336,13 +362,13 @@ contextBridge.exposeInMainWorld('contacts', {
   migrateSenderProfiles: () => ipcRenderer.invoke('contacts:migrate-sender-profiles'),
 });
 
-contextBridge.exposeInMainWorld('vendorAssignments', {
+expose('vendorAssignments', {
   getAll: ()      => ipcRenderer.invoke('vendor-assignments:get-all'),
   upsert: (entry) => ipcRenderer.invoke('vendor-assignments:upsert', entry),
   remove: (unitId) => ipcRenderer.invoke('vendor-assignments:remove', unitId),
 });
 
-contextBridge.exposeInMainWorld('app', {
+expose('app', {
   windowAction:   (action) => ipcRenderer.invoke('window:action', action),
   notify:         (title, body) => ipcRenderer.invoke('notify', title, body),
   onNavigateUnit: (cb)     => on('navigate:unit', cb),
@@ -351,7 +377,7 @@ contextBridge.exposeInMainWorld('app', {
 });
 
 // ── Setup wizard ─────────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('setup', {
+expose('setup', {
   getState:       ()         => ipcRenderer.invoke('setup:get-state'),
   saveStep:       (step, data) => ipcRenderer.invoke('setup:save-step', step, data),
   verifyStep:     (step)     => ipcRenderer.invoke('setup:verify-step', step),
@@ -361,7 +387,7 @@ contextBridge.exposeInMainWorld('setup', {
 });
 
 // ── Asana ─────────────────────────────────────────────────────────────────────
-contextBridge.exposeInMainWorld('asana', {
+expose('asana', {
   checkAuth:     ()                    => ipcRenderer.invoke('asana:check-auth'),
   getConfig:     ()                    => ipcRenderer.invoke('asana:get-config'),
   saveConfig:    (cfg)                 => ipcRenderer.invoke('asana:save-config', cfg),
@@ -381,7 +407,7 @@ contextBridge.exposeInMainWorld('asana', {
 });
 
 // -- Vendor / Dealer Work Order Engine (S23-8)
-contextBridge.exposeInMainWorld('vendor', {
+expose('vendor', {
   onProgress:    (cb) => on('vendor:progress',     cb),
   onReviewReady: (cb) => on('vendor:review-ready', cb),
   onComplete:    (cb) => on('vendor:complete',     cb),
@@ -404,7 +430,7 @@ contextBridge.exposeInMainWorld('vendor', {
 
 // -- Workflow Intelligence (Phase 8) -- recorder, library, execution
 // See docs/PHASE8_WORKFLOW_INTELLIGENCE_PLAN.md for the full design.
-contextBridge.exposeInMainWorld('workflowIntel', {
+expose('workflowIntel', {
   // Recording session lifecycle
   startRecording:   (meta)               => ipcRenderer.invoke('wi:start-recording', meta),
   recordStep:       (sessionId, step)    => ipcRenderer.invoke('wi:record-step', sessionId, step),
@@ -432,7 +458,7 @@ contextBridge.exposeInMainWorld('workflowIntel', {
 // src/window/index.js), but exposed here too so the SAME preload.js can back
 // both windows -- one bridge surface, no drifting second copy. No-op/unused
 // in the main window.
-contextBridge.exposeInMainWorld('bubble', {
+expose('bubble', {
   openMain:       ()       => ipcRenderer.send('bubble:clicked'),
   openUnit:       (unitId) => ipcRenderer.send('bubble:open-unit', unitId),
   hide:           ()       => ipcRenderer.send('bubble:hide'),

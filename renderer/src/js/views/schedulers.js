@@ -2,19 +2,19 @@
  * schedulers.js — Scheduler status + control view (Task #8 rebuild)
  *
  * AUTHORITATIVE from the backend ledger. Everything shown here comes from
- * window.scheduler.getState() (structured values only). There is NO
+ * window.fleetScheduler.getState() (structured values only). There is NO
  * localStorage run history and NO parsing of human-readable status strings —
  * the previous version derived status by regex-matching fleet:status messages,
  * which was fragile and could show "sent" when nothing was verified.
  *
  * Sources:
- *   window.scheduler.getState()            - full structured state
- *   window.scheduler.runSpNow()            - manual verified SP push
- *   window.scheduler.runEmailTestNow()     - run next email slot as TEST
- *   window.scheduler.retry/cancel/reconcile/resolveUncertain(jobId)
- *   window.scheduler.setEnabled/setFreshness(patch)
- *   window.scheduler.authenticateOwa() / openSentItems()
- *   window.scheduler.onJobUpdate(cb)       - live state pushes
+ *   window.fleetScheduler.getState()            - full structured state
+ *   window.fleetScheduler.runSpNow()            - manual verified SP push
+ *   window.fleetScheduler.runEmailTestNow()     - run next email slot as TEST
+ *   window.fleetScheduler.retry/cancel/reconcile/resolveUncertain(jobId)
+ *   window.fleetScheduler.setEnabled/setFreshness(patch)
+ *   window.fleetScheduler.authenticateOwa() / openSentItems()
+ *   window.fleetScheduler.onJobUpdate(cb)       - live state pushes
  *   window.settings.saveScheduleSlots(s)   - save + hot-reload backend slots
  */
 
@@ -222,9 +222,9 @@ function _injectCss() {
 
 // ── Data ────────────────────────────────────────────────────────────────────
 async function _refresh() {
-  if (!window.scheduler || !window.scheduler.getState) return;
+  if (!window.fleetScheduler || !window.fleetScheduler.getState) return;
   try {
-    const st = await window.scheduler.getState();
+    const st = await window.fleetScheduler.getState();
     if (st && !st.ok === false) _state = st;
     _render();
   } catch (_) {}
@@ -366,20 +366,20 @@ function _toast(type, message) { try { bus.emit('ui:toast', { type, message, dur
 async function _runSpNow() {
   await _guard(async () => {
     _toast('info', 'SharePoint push started (verified)...');
-    const r = await window.scheduler.runSpNow();
+    const r = await window.fleetScheduler.runSpNow();
     if (r && r.ok) _toast('success', 'SharePoint push verified');
     else _toast('error', 'SharePoint push not verified: ' + ((r && r.result && (r.result.status || r.result.blocked || r.result.skipped)) || 'see jobs'));
   });
 }
 async function _runEmailTest() {
   await _guard(async () => {
-    const r = await window.scheduler.runEmailTestNow();
+    const r = await window.fleetScheduler.runEmailTestNow();
     if (r && r.result && r.result.blocked === 'no-test-recipient') { _toast('error', 'Set a test recipient in Settings first'); return; }
     _toast('info', 'Test email run started (goes to test recipient only)');
   });
 }
 async function _setEnabled(channel, on) {
-  await window.scheduler.setEnabled({ [channel]: on });
+  await window.fleetScheduler.setEnabled({ [channel]: on });
   _toast('success', (channel === 'sp' ? 'SharePoint' : 'Email') + ' scheduler ' + (on ? 'enabled' : 'disabled'));
 }
 function _wireDelegatedActions(root) {
@@ -388,12 +388,12 @@ function _wireDelegatedActions(root) {
     if (!btn) return;
     const act = btn.getAttribute('data-act');
     const jobId = btn.getAttribute('data-job');
-    if (act === 'auth') return _guard(async () => { await window.scheduler.authenticateOwa(); _toast('info', 'Complete sign-in, then jobs resume on the next slot/catch-up'); });
-    if (act === 'sent') return window.scheduler.openSentItems();
-    if (act === 'retry' && jobId) return _guard(async () => { const r = await window.scheduler.retry(jobId); _toast(r && r.ok ? 'success' : 'error', r && r.ok ? 'Re-queued' : ('Retry failed: ' + (r && r.error))); });
-    if (act === 'cancel' && jobId) return _guard(async () => { const r = await window.scheduler.cancel(jobId); _toast(r && r.ok ? 'success' : 'error', r && r.ok ? 'Cancelled' : ('Cancel failed: ' + (r && r.error))); });
-    if (act === 'verified' && jobId) return _guard(async () => { const r = await window.scheduler.resolveUncertain(jobId, true); _toast(r && r.ok ? 'success' : 'error', r && r.ok ? 'Marked verified' : 'Failed'); });
-    if (act === 'notsent' && jobId) return _guard(async () => { const r = await window.scheduler.resolveUncertain(jobId, false); _toast(r && r.ok ? 'success' : 'error', r && r.ok ? 'Marked not-sent' : 'Failed'); });
+    if (act === 'auth') return _guard(async () => { await window.fleetScheduler.authenticateOwa(); _toast('info', 'Complete sign-in, then jobs resume on the next slot/catch-up'); });
+    if (act === 'sent') return window.fleetScheduler.openSentItems();
+    if (act === 'retry' && jobId) return _guard(async () => { const r = await window.fleetScheduler.retry(jobId); _toast(r && r.ok ? 'success' : 'error', r && r.ok ? 'Re-queued' : ('Retry failed: ' + (r && r.error))); });
+    if (act === 'cancel' && jobId) return _guard(async () => { const r = await window.fleetScheduler.cancel(jobId); _toast(r && r.ok ? 'success' : 'error', r && r.ok ? 'Cancelled' : ('Cancel failed: ' + (r && r.error))); });
+    if (act === 'verified' && jobId) return _guard(async () => { const r = await window.fleetScheduler.resolveUncertain(jobId, true); _toast(r && r.ok ? 'success' : 'error', r && r.ok ? 'Marked verified' : 'Failed'); });
+    if (act === 'notsent' && jobId) return _guard(async () => { const r = await window.fleetScheduler.resolveUncertain(jobId, false); _toast(r && r.ok ? 'success' : 'error', r && r.ok ? 'Marked not-sent' : 'Failed'); });
   });
 }
 
@@ -449,8 +449,8 @@ export function init(container) {
   bind('sched-back', 'click', () => bus.emit('ui:view-change', { from: 'schedulers', to: 'fleet' }));
   bind('sched-sp-trigger', 'click', _runSpNow);
   bind('sched-em-test', 'click', _runEmailTest);
-  bind('sched-owa-auth', 'click', () => _guard(async () => { await window.scheduler.authenticateOwa(); _toast('info', 'Sign-in window opened'); }));
-  bind('sched-owa-sent', 'click', () => window.scheduler.openSentItems());
+  bind('sched-owa-auth', 'click', () => _guard(async () => { await window.fleetScheduler.authenticateOwa(); _toast('info', 'Sign-in window opened'); }));
+  bind('sched-owa-sent', 'click', () => window.fleetScheduler.openSentItems());
   bind('sched-sp-save', 'click', () => _saveSlots('sp'));
   bind('sched-em-save', 'click', () => _saveSlots('email'));
   bind('sched-sp-enabled', 'change', (e) => _setEnabled('sp', e.target.checked));
@@ -466,7 +466,7 @@ export function init(container) {
     if (br) { const cur = parseFloat(br.style.width) || 0; br.style.width = Math.min(cur + 8, 90) + '%'; }
   });
   // Live job-state updates from the pipeline -> refresh authoritative state.
-  if (window.scheduler && window.scheduler.onJobUpdate) window.scheduler.onJobUpdate(() => { if (_el && _el.style.display !== 'none') _refresh(); });
+  if (window.fleetScheduler && window.fleetScheduler.onJobUpdate) window.fleetScheduler.onJobUpdate(() => { if (_el && _el.style.display !== 'none') _refresh(); });
 
   bus.on('ui:view-change', ({ to }) => {
     const vis = to === 'schedulers';
