@@ -270,6 +270,24 @@ contextBridge.exposeInMainWorld('email', {
   authenticateOwa: ()     => ipcRenderer.invoke('email:authenticate-owa'),
 });
 
+// ── Scheduler (authoritative backend state + controls) — Task #8 ─────────────
+contextBridge.exposeInMainWorld('scheduler', {
+  getState:        ()        => ipcRenderer.invoke('scheduler:get-state'),
+  getJob:          (jobId)   => ipcRenderer.invoke('scheduler:get-job', jobId),
+  runSpNow:        ()        => ipcRenderer.invoke('scheduler:run-sp-now'),
+  runEmailTestNow: ()        => ipcRenderer.invoke('scheduler:run-email-test-now'),
+  retry:           (jobId)   => ipcRenderer.invoke('scheduler:retry', jobId),
+  cancel:          (jobId)   => ipcRenderer.invoke('scheduler:cancel', jobId),
+  reconcile:       (jobId)   => ipcRenderer.invoke('scheduler:reconcile', jobId),
+  resolveUncertain:(jobId, verified) => ipcRenderer.invoke('scheduler:resolve-uncertain', jobId, verified),
+  setEnabled:      (patch)   => ipcRenderer.invoke('scheduler:set-enabled', patch),
+  setFreshness:    (patch)   => ipcRenderer.invoke('scheduler:set-freshness', patch),
+  authenticateOwa: ()        => ipcRenderer.invoke('scheduler:authenticate-owa'),
+  openSentItems:   ()        => ipcRenderer.invoke('scheduler:open-sent-items'),
+  // Live job-state updates pushed from the pipeline (scheduler:job-update).
+  onJobUpdate:     (cb)      => on('scheduler:job-update', cb),
+});
+
 // ── Partner portal — removed in Phase 6 (feature no longer used) ─────────────
 
 // ── Screenshots / files ───────────────────────────────────────────────────────

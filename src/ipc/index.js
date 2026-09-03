@@ -29,6 +29,7 @@ const { registerVendorHistoryIPC } = require('./vendor-history');
 const { registerSetupIPC }       = require('./setup');
 const { registerWorkflowIntelIPC } = require('./workflow-intel');
 const { registerLongDwellIPC }     = require('./long-dwell');
+const { registerSchedulerIPC }     = require('./scheduler');
 const logger = require('../utils/logger')('ipc');
 
 function registerAllIPC(ctx) {
@@ -47,6 +48,7 @@ function registerAllIPC(ctx) {
   registerVendorHistoryIPC();
   registerWorkflowIntelIPC(ctx);
   registerLongDwellIPC();
+  registerSchedulerIPC(ctx);
   const { registerContactsHandlers } = require('./contacts');
   registerContactsHandlers();
   logger.info('All IPC handlers registered');

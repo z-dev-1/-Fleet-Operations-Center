@@ -210,4 +210,101 @@ function catchUp() {
   _catchUpMissedSlots();
 }
 
-module.exports = { start, stop, reload, catchUp, runSpNow, runNextEmailAsTest };
+// ── Authoritative state for the Scheduler UI (Task #8) ─────────────────────────
+// Everything the UI needs, sourced from the durable ledger + live config — NO
+// renderer localStorage, NO message-string parsing. Structured values only.
+function _nextSlot(slots) {
+  const now = new Date();
+  const cur = now.getHours() * 60 + now.getMinutes();
+  const today = slots
+    .map(s => ({ label: s.label, min: s.h * 60 + s.m }))
+    .filter(s => s.min > cur)
+    .sort((a, b) => a.min - b.min);
+  if (today.length) return { label: today[0].label, when: 'today' };
+  // Next weekday's first slot.
+  const first = slots.slice().sort((a, b) => (a.h * 60 + a.m) - (b.h * 60 + b.m))[0];
+  return first ? { label: first.label, when: 'next-weekday' } : null;
+}
+
+function getState() {
+  const dateKey = _todayPrefix();
+  const jobsToday = ledger.listJobs({ dateKey });
+  const allRecent = ledger.listJobs({}).slice(0, 100);
+  const ledgerState = ledger.getState();
+
+  const byChannel = (channel) => {
+    const jobs = allRecent.filter(j => j.channel === channel);
+    const lastVerified = jobs.find(j => j.state === ledger.STATES.COMPLETED) || null;
+    const lastFailure = jobs.find(j => j.state === ledger.STATES.FAILED || j.state === ledger.STATES.PARTIAL_FAILURE) || null;
+    const active = jobs.filter(j => ledger.ACTIVE_STATES.includes(j.state));
+    const blockedAuth = jobs.filter(j => j.state === ledger.STATES.BLOCKED_AUTH);
+    const blockedStale = jobs.filter(j => j.state === ledger.STATES.BLOCKED_STALE_DATA);
+    const uncertain = jobs.filter(j => j.state === ledger.STATES.DELIVERY_UNCERTAIN);
+    const retrying = jobs.filter(j => j.state === ledger.STATES.RETRY);
+    return {
+      lastVerified: lastVerified && _jobSummary(lastVerified),
+      lastFailure: lastFailure && _jobSummary(lastFailure),
+      active: active.map(_jobSummary),
+      blockedAuth: blockedAuth.map(_jobSummary),
+      blockedStale: blockedStale.map(_jobSummary),
+      uncertain: uncertain.map(_jobSummary),
+      retrying: retrying.map(_jobSummary),
+    };
+  };
+
+  const settings = store.load('settings', {}) || {};
+  const fd = store.load('fleetData', {}) || {};
+  return {
+    now: new Date().toISOString(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'local',
+    enabled: {
+      sp: _enabled('sp'),
+      email: _enabled('email'),
+    },
+    slots: { sp: SP_SLOTS, email: EMAIL_SLOTS },
+    nextSlot: { sp: _nextSlot(SP_SLOTS), email: _nextSlot(EMAIL_SLOTS) },
+    freshness: settings.schedulerFreshness || require('./freshness').DEFAULT_POLICY,
+    data: {
+      rowCount: Array.isArray(fd.rows) ? fd.rows.length : 0,
+      syncedAt: fd.syncedAt || null,
+      ageMin: fd.syncedAt ? Math.round((Date.now() - new Date(fd.syncedAt).getTime()) / 60000) : null,
+    },
+    sharepoint: byChannel(ledger.CHANNELS.SHAREPOINT),
+    email: byChannel(ledger.CHANNELS.EMAIL),
+    jobsToday: jobsToday.map(_jobSummary),
+    completedSlots: ledgerState.completedSlots,
+    migrationVersion: ledgerState.migrationVersion,
+  };
+}
+
+// Redacted job view for the UI — NO email bodies, NO secrets. Recipients are
+// addresses only (intended vs actual kept separate, as recorded).
+function _jobSummary(j) {
+  if (!j) return null;
+  return {
+    jobId: j.jobId, channel: j.channel, slotLabel: j.slotLabel, dateKey: j.dateKey,
+    scope: j.scope, origin: j.origin, testMode: j.testMode, state: j.state,
+    attempts: j.attempts, maxAttempts: j.maxAttempts, nextRetryAt: j.nextRetryAt,
+    createdAt: j.createdAt, updatedAt: j.updatedAt,
+    intendedRecipients: j.intendedRecipients || [], actualRecipients: j.actualRecipients || [],
+    syncResult: j.syncResult || null, deliveryResult: j.deliveryResult || null,
+    lastError: (j.errors && j.errors.length) ? j.errors[j.errors.length - 1] : null,
+    history: (j.history || []).map(h => ({ at: h.at, from: h.from, to: h.to, note: h.note })),
+  };
+}
+
+function setEnabled(patch) {
+  const s = store.load('settings', {}) || {};
+  s.schedulerEnabled = Object.assign({ sp: true, email: true }, s.schedulerEnabled || {}, patch || {});
+  store.save('settings', s);
+  return s.schedulerEnabled;
+}
+
+function setFreshness(patch) {
+  const s = store.load('settings', {}) || {};
+  s.schedulerFreshness = Object.assign({}, s.schedulerFreshness || {}, patch || {});
+  store.save('settings', s);
+  return s.schedulerFreshness;
+}
+
+module.exports = { start, stop, reload, catchUp, runSpNow, runNextEmailAsTest, getState, setEnabled, setFreshness, _jobSummary };
