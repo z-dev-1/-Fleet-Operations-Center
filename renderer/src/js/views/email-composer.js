@@ -905,84 +905,23 @@ export async function init(container) {
 
 
 
-  // ── S28: Auto-email handler — fires when scheduler triggers ──────────────
-  bus.on('fleet:auto-email', async (payload) => {
-    const { slot, triggeredAt, syncError, autoEmailNote, dataRowCount, dataUptakeCount, dataAgeMins } = payload || {};
-    // BUG FIX (2026-07-16): see _normalizeSlotToAmPm() above — `slot` here is
-    // a raw "HH:MM" time string from the scheduler (e.g. "08:00"), not the
-    // literal "AM"/"PM" that _buildSubject() and the email template expect.
+  // ── Auto-email handler — STATUS ONLY (Task #7) ───────────────────────────
+  // The scheduled auto-email is now built, delivered via the HIDDEN OWA
+  // service, and Sent-Items-verified entirely in the MAIN process
+  // (src/scheduler/pipeline.js). This renderer handler NO LONGER SENDS — it
+  // only logs the status event so the composer view can reflect activity.
+  // Removing the renderer-side send eliminates the fire-and-forget,
+  // Test-Mode-ignoring, unacknowledged delivery path that used to live here.
+  bus.on('fleet:auto-email', (payload) => {
+    const { slot, triggeredAt, origin, testMode, statusOnly } = payload || {};
     const slotAmPm = _normalizeSlotToAmPm(slot);
-
-    // DATA AVAILABILITY LOG (2026-08-12): app.js validates data before firing
-    // this event, but we log what arrived so it's visible in devtools.
-    const _dataInfo = dataRowCount != null
-      ? dataRowCount + ' units' + (dataUptakeCount ? ', ' + dataUptakeCount + ' Uptake-scored' : '') + (dataAgeMins != null ? ', synced ' + dataAgeMins + 'min ago' : '')
-      : 'data stats not provided';
-    console.log('[email-composer] Auto-email triggered: slot=' + (slot || '?') + ' (' + slotAmPm + ') at ' + (triggeredAt || 'unknown') + ' | data: ' + _dataInfo);
-
-    if (syncError) {
-      console.warn('[email-composer] Auto-email sync had error:', syncError, '— sending with cached data (' + (dataRowCount || '?') + ' units)');
-      // If app.js reached here despite a sync error, it already confirmed
-      // cached data exists (>= 3 units). Proceed but note the stale-data risk.
-    }
-
-    // Guard: if no units somehow slipped through (should not happen — app.js gates on 3+)
-    if (dataRowCount != null && dataRowCount < 1) {
-      console.error('[email-composer] Auto-email ABORTED: 0 units in fleet data — nothing to send');
-      return;
-    }
-
-    // Load email recipients from both sources
-    await _loadSpEmails();
-    const opData = await emailBridge.loadOpEmails() || {};
-    if (opData && typeof opData === 'object') Object.assign(_opEmails, opData);
-
-    // Build recipient list: check _opEmails (op_emails.json) and _spEmails (spConfig.emails)
-    const sendList = [];
-    // From op_emails.json (primary — keyed by operator name)
-    Object.keys(_opEmails).forEach(op => {
-      if (_opEmails[op] && _opEmails[op].to) sendList.push({ key: op, opName: op, domCode: 'ALL', ...(_opEmails[op]) });
-    });
-    // From spConfig.emails (keyed Op__DOM — only add if not already covered)
-    Object.keys(_spEmails).forEach(k => {
-      if (_spEmails[k] && _spEmails[k].to && !sendList.find(s => s.key === k)) {
-        const [opName, domCode] = k.split('__');
-        sendList.push({ key: k, opName, domCode: domCode || 'ALL', ...(_spEmails[k]) });
-      }
-    });
-
-    if (!sendList.length) {
-      console.warn('[email-composer] Auto-email: no email presets configured — skipping');
-      return;
-    }
-
-    // Send one email per recipient entry
-    for (let _i = 0; _i < sendList.length; _i++) {
-      if (_i > 0) await new Promise(r => setTimeout(r, 15000));
-      const entry = sendList[_i];
-      const { opName, domCode } = entry;
-      if (!opName) continue;
-      const recipients = entry;
-
-      try {
-        const result = await emailBridge.compose({
-          subject: _buildSubject(opName, slotAmPm, domCode),
-          operator: opName,
-          domicile: domCode || 'ALL',
-          slot: slotAmPm,
-          to: recipients.to || '',
-          cc: recipients.cc || '',
-          // FEATURE (2026-07-16): "Auto-Email Note" set in Settings, threaded
-          // through from the scheduler in src/app.js via the fleet:auto-email
-          // payload. Empty string if the user hasn't set one.
-          emailNote: autoEmailNote || '',
-          testMode: false,
-        });
-        console.log('[email-composer] Auto-email ' + entry.key + ':', result && result.success !== false ? 'SUCCESS' : 'FAILED');
-      } catch (e) {
-        console.error('[email-composer] Auto-email compose error for ' + entry.key + ':', e);
-      }
-    }
+    console.log('[email-composer] Auto-email status event: slot=' + (slot || '?') +
+      ' (' + slotAmPm + ')' + (testMode ? ' [TEST]' : '') +
+      ' origin=' + (origin || '?') + ' at ' + (triggeredAt || 'unknown') +
+      (statusOnly ? ' (status-only; delivery handled by backend)' : ''));
+    // NOTE: no emailBridge.compose() call here by design. If a manual compose
+    // is still desired from the UI, the user triggers it explicitly via the
+    // composer controls, which remain unchanged.
   });
 
 }

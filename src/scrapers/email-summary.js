@@ -33,11 +33,19 @@ function buildChangeSummary(currentUnits, opts = {}) {
   // units look "new" and all of A's look "returned to service" regardless of
   // operator. Namespacing the snapshot per scope (operator[+domicile]+slot)
   // makes each recipient's returned/new diff compare against its OWN history.
+  // DEFECT FIX (Task #7, 2026-08): the per-scope namespacing above used to
+  // build a DYNAMIC store key ('emailLastSnapshot_' + scopeKey) and call
+  // store.load/save on it. But the store is a strict whitelist (see
+  // store/index.js REGISTRY) — those dynamic keys are NOT registered, so every
+  // call threw "Unknown store" and the change summary silently failed
+  // ("Change summary failed (non-fatal)"), leaving diffs blank. Fix: keep ALL
+  // per-scope snapshots inside the SINGLE registered `emailLastSnapshot` key as
+  // a map { [scopeKey]: snap }. Legacy single-snapshot data (a bare
+  // {sentAt,units} object) is still honored for the no-scope case.
   const scopeKey = opts.scopeKey ? String(opts.scopeKey) : '';
-  const snapKey  = scopeKey ? ('emailLastSnapshot_' + scopeKey) : 'emailLastSnapshot';
 
-  // Load previous snapshot (saved after last successful email send)
-  const prevSnap = store.load(snapKey, null);
+  // Load previous snapshot (saved after last verified email send)
+  const prevSnap = _loadSnapshot(scopeKey);
   const prevUnits = (prevSnap && Array.isArray(prevSnap.units)) ? prevSnap.units : [];
   const prevTime  = prevSnap ? prevSnap.sentAt : null;
 
@@ -90,8 +98,17 @@ function buildChangeSummary(currentUnits, opts = {}) {
     ? (currUnavail.reduce((sum, u) => sum + (_parseDays(u.duration) || 0), 0) / currUnavail.length).toFixed(1)
     : '0';
 
-  // Save current state as snapshot for next comparison (per-scope key)
-  _saveSnapshot(currentUnits, slot, snapKey);
+  // Save current state as snapshot for next comparison (per-scope key).
+  // DEFECT FIX (Task #7, 2026-08): the snapshot USED to advance here — at
+  // HTML-build time — which meant a preview, a draft, a failed send, or a
+  // delivery-uncertain send would still overwrite the "last sent" baseline,
+  // so the NEXT real email would compute its changed/returned diff against a
+  // report that never actually went out. The backend pipeline now commits the
+  // snapshot ONLY after a verified 'sent' (see scheduler/pipeline.js), by
+  // calling commitSnapshot(). Callers that still want the legacy inline behavior
+  // (e.g. a one-off preview that has no delivery step) can pass
+  // opts.saveSnapshot === true. Default is DEFER (do not advance here).
+  if (opts.saveSnapshot === true) _saveSnapshot(currentUnits, slot, scopeKey);
 
   // If no previous snapshot, skip the summary (first email ever)
   if (!prevSnap) {
@@ -203,11 +220,26 @@ function _timelineAgeHours(timeline) {
   return null; // no parseable date found
 }
 
-function _saveSnapshot(units, slot, snapKey) {
+// All per-scope snapshots live inside the single registered `emailLastSnapshot`
+// store key, as a map { __scopes: { [scopeKey]: snap } }. A legacy bare snapshot
+// (just {sentAt,units}) is still read for the no-scope case.
+function _loadSnapshot(scopeKey) {
+  const root = store.load('emailLastSnapshot', null);
+  if (!root) return null;
+  if (scopeKey) {
+    if (root.__scopes && root.__scopes[scopeKey]) return root.__scopes[scopeKey];
+    return null;
+  }
+  // No scope requested — honor a legacy bare snapshot if that's what's stored.
+  if (Array.isArray(root.units)) return root;
+  return null;
+}
+
+function _saveSnapshot(units, slot, scopeKey) {
   const snap = {
     sentAt: new Date().toISOString(),
     slot,
-    units: units.map(u => ({
+    units: (units || []).map(u => ({
       id: u.id,
       atsState: u.atsState || '',
       vendor: u.vendor || '',
@@ -215,7 +247,14 @@ function _saveSnapshot(units, slot, snapKey) {
       riskScore: u.riskScore || 0,
     })),
   };
-  store.save(snapKey || 'emailLastSnapshot', snap);
+  if (!scopeKey) { store.save('emailLastSnapshot', snap); return; }
+  // Merge into the scoped map without disturbing other scopes.
+  store.update('emailLastSnapshot', (cur) => {
+    const root = (cur && typeof cur === 'object' && !Array.isArray(cur)) ? cur : {};
+    if (!root.__scopes || typeof root.__scopes !== 'object') root.__scopes = {};
+    root.__scopes[scopeKey] = snap;
+    return root;
+  }, {});
 }
 
 function _esc(s) {
@@ -239,4 +278,16 @@ function buildSubjectSuffix(meta) {
   return parts.length ? ' | ' + parts.join(' | ') : '';
 }
 
-module.exports = { buildChangeSummary, buildSubjectSuffix };
+/**
+ * commitSnapshot(currentUnits, slot, scopeKey) — advance the per-scope "last
+ * sent" baseline. Task #7: called by the backend pipeline ONLY after a send is
+ * verified in Sent Items (never on preview/draft/test/fail/uncertain). scopeKey
+ * is [OP, dom, slotLabel].join('_') so each operator/domicile/slot has its own
+ * history and diffs never cross-contaminate.
+ */
+function commitSnapshot(currentUnits, slot, scopeKey) {
+  _saveSnapshot(currentUnits || [], slot, scopeKey || '');
+  return scopeKey ? ('emailLastSnapshot#' + scopeKey) : 'emailLastSnapshot';
+}
+
+module.exports = { buildChangeSummary, buildSubjectSuffix, commitSnapshot };

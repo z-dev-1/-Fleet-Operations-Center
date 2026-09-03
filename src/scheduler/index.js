@@ -1,27 +1,35 @@
 'use strict';
 /**
- * scheduler/index.js — Weekday auto SP push + auto email
+ * scheduler/index.js — Weekday auto SP push + auto email (production backend).
  *
- * Extracted from src/app.js (Phase 4) for maintainability.
- * Owns all scheduled-push logic: slot config, weekday checks,
- * catch-up on startup/sleep-resume, and reload on settings change.
+ * The central scheduler. It owns slot timing, weekday checks, catch-up on
+ * startup/sleep-resume, restart recovery, and hot-reload on settings change.
+ * ALL delivery work is delegated to the durable, verified pipeline
+ * (scheduler/pipeline.js) which is driven by the ledger (scheduler/ledger.js).
  *
- * Usage (from app.js):
- *   const scheduler = require('./scheduler');
- *   scheduler.start(ctx);          // after sync engine + IPC are wired
- *   scheduler.stop();              // on before-quit
- *   scheduler.reload(newSlots);    // from settings IPC handler
+ * What changed vs the legacy scheduler (root-cause fixes):
+ *   - Completed-slot dedup keys now live in the ledger and SURVIVE RESTART
+ *     (the old in-memory _lastSPSlot/_lastEmailSlot were lost on restart, so a
+ *     restart right after a slot could re-fire it).
+ *   - Email is delivered + Sent-Items-verified in the MAIN process via the
+ *     hidden OWA service. fleet:auto-email is now a STATUS-ONLY event — the
+ *     renderer no longer performs the send.
+ *   - SharePoint push is read-back verified and its real status is honored.
+ *   - Overlap between scheduled / catch-up / manual is prevented by ledger
+ *     leases + idempotency (get-or-create collapses duplicates).
+ *
+ * Usage (from app.js) is unchanged: start(ctx) / stop() / reload(slots) / catchUp().
  */
 
 const logger = require('../utils/logger')('scheduler');
 const store  = require('../store');
+const ledger = require('./ledger');
+const pipeline = require('./pipeline');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let _ctx                = null;
 let _spScheduleTimer    = null;
 let _emailScheduleTimer = null;
-let _lastSPSlot         = '';
-let _lastEmailSlot      = '';
 
 // Slot defaults — used when no saved config exists
 const DEFAULT_SP_SLOTS    = [{ h: 7,  m: 30, label: '07:30' }, { h: 15, m: 30, label: '15:30' }];
@@ -43,6 +51,13 @@ function _isWeekday() {
   return d >= 1 && d <= 5;
 }
 
+function _enabled(channel) {
+  const s = store.load('settings', {}) || {};
+  const e = s.schedulerEnabled;
+  if (!e || typeof e !== 'object') return true; // default ON
+  return channel === 'sp' ? e.sp !== false : e.email !== false;
+}
+
 function _loadScheduleSlots() {
   try {
     const saved = store.load('settings', {}).schedulerSlots;
@@ -60,205 +75,121 @@ function _loadScheduleSlots() {
 function _scheduleAutoSPPush() {
   if (_spScheduleTimer) clearInterval(_spScheduleTimer);
   _spScheduleTimer = setInterval(() => {
-    if (!_isWeekday()) return;
+    if (!_isWeekday() || !_enabled('sp')) return;
     const now  = new Date();
-    const hh   = now.getHours(), mm = now.getMinutes();
-    const slot = SP_SLOTS.find(s => s.h === hh && s.m === mm);
+    const slot = SP_SLOTS.find(s => s.h === now.getHours() && s.m === now.getMinutes());
     if (!slot) return;
-
-    const dateKey = _todayPrefix() + '-SP-' + slot.label;
-    if (_lastSPSlot === dateKey) return;
-    _lastSPSlot = dateKey;
-
-    logger.info('Auto SP Push triggered: slot=' + slot.label);
-    _ctx.pushStatus('\uD83D\uDCE8 Auto SP Push: syncing for ' + slot.label + '...');
-
-    _ctx.runFullSync().then(() => {
-      const rows = _ctx.lastData && _ctx.lastData.rows;
-      if (!rows) return;
-      const { pushToSharePoint } = require('../scrapers/sharepoint_push');
-      const win = _ctx.getMainWindow();
-      pushToSharePoint(rows, (msg, type) => {
-        logger.info('[SP Auto] ' + (type || 'info') + ' | ' + msg);
-        if (win && !win.isDestroyed())
-          win.webContents.send('sp:progress', { message: msg, type });
-      }).then(result => {
-        // Task #5: honor the standardized SharePoint contract. `ok` is true ONLY
-        // when all attempted workbooks pushed AND read-back verified. Anything
-        // else is surfaced honestly (partial-failure / verification-pending /
-        // failed) — never a blanket "complete".
-        const ok = !!(result && result.ok);
-        const status = (result && result.status) || 'unknown';
-        logger.info('Auto SP Push (' + slot.label + '): status=' + status +
-          ' verified=' + ((result && result.workbooksSucceeded) || 0) + '/' + ((result && result.workbooksAttempted) || 0));
-        if (ok) {
-          _ctx.pushStatus('\u2705 SP Push verified (' + slot.label + ')');
-        } else {
-          _ctx.pushStatus('\u26A0\uFE0F SP Push ' + status + ' (' + slot.label + ') — ' + ((result && result.errors && result.errors.join('; ')) || 'not verified'));
-        }
-      }).catch(err => {
-        logger.error('Auto SP Push error:', err.message);
-        _ctx.pushStatus('\u274C SP Push failed: ' + err.message);
-      });
-    }).catch(err => {
-      logger.error('Auto SP Push sync failed:', err.message);
-    });
+    const dateKey = _todayPrefix();
+    // Ledger-backed completed-slot dedup (survives restart).
+    if (ledger.isSlotCompleted(ledger.CHANNELS.SHAREPOINT, dateKey, slot.label)) return;
+    _fireSP(dateKey, slot, 'scheduled');
   }, 30000);
+}
+
+function _fireSP(dateKey, slot, origin) {
+  logger.info('SP push (' + origin + '): slot=' + slot.label);
+  _ctx.pushStatus('\uD83D\uDCE8 SP Push: ' + slot.label + ' (' + origin + ')...');
+  pipeline.runSharePointJob(_ctx, { dateKey, slotLabel: slot.label, origin, testMode: false })
+    .then(r => {
+      if (r.ok) _ctx.pushStatus('\u2705 SP Push verified (' + slot.label + ')');
+      else if (r.blocked) _ctx.pushStatus('\u26D4 SP Push blocked: ' + r.blocked + ' (' + slot.label + ')');
+      else if (r.partial) _ctx.pushStatus('\u26A0\uFE0F SP Push ' + r.partial + ' (' + slot.label + ')');
+      else if (r.skipped) logger.info('SP push skipped: ' + r.skipped);
+      else _ctx.pushStatus('\u274C SP Push not verified (' + slot.label + ')');
+    })
+    .catch(e => { logger.error('SP push error:', e.message); _ctx.pushStatus('\u274C SP Push error: ' + e.message); });
 }
 
 // ── Scheduled auto-email ──────────────────────────────────────────────────────
 function _scheduleAutoEmail() {
   if (_emailScheduleTimer) clearInterval(_emailScheduleTimer);
   _emailScheduleTimer = setInterval(() => {
-    if (!_isWeekday()) return;
+    if (!_isWeekday() || !_enabled('email')) return;
     const now  = new Date();
-    const hh   = now.getHours(), mm = now.getMinutes();
-    const slot = EMAIL_SLOTS.find(s => s.h === hh && s.m === mm);
+    const slot = EMAIL_SLOTS.find(s => s.h === now.getHours() && s.m === now.getMinutes());
     if (!slot) return;
-
-    const dateKey = _todayPrefix() + '-' + slot.label;
-    if (_lastEmailSlot === dateKey) return;
-    _lastEmailSlot = dateKey;
-
-    logger.info('Auto-email triggered: slot=' + slot.label);
-    const _settingsNow = store.load('settings', {});
-    const autoEmailNote = _settingsNow.autoEmailNote || '';
-    if (autoEmailNote && _settingsNow.autoEmailNoteOneShot) {
-      delete _settingsNow.autoEmailNote;
-      _settingsNow.autoEmailNoteOneShot = false;
-      store.save('settings', _settingsNow);
-      logger.info('Auto-email note was one-shot — cleared after capturing for this send');
-    }
-    _ctx.pushStatus('\uD83D\uDCE7 Auto-email: syncing for ' + slot.label + ' report...');
-
-    _ctx.runFullSync().then(() => {
-      const _fd      = store.load('fleetData', {});
-      const _rows    = (_fd && Array.isArray(_fd.rows)) ? _fd.rows : [];
-      const _uptakeN = _rows.filter(r => r.riskScore && r.riskScore > 0).length;
-      const _ageMin  = _fd.syncedAt
-        ? Math.round((Date.now() - new Date(_fd.syncedAt).getTime()) / 60000)
-        : 9999;
-
-      if (_rows.length < 3) {
-        logger.warn('Auto-email SKIPPED: fleet data has only ' + _rows.length + ' units — possibly empty or sync failed before data loaded');
-        _ctx.pushStatus('⚠️ Auto-email skipped: no fleet data available (' + _rows.length + ' units)');
-        return;
-      }
-
-      const _dataNote = _uptakeN > 0
-        ? _uptakeN + ' Uptake-scored units included'
-        : 'no Uptake risk scores available';
-      logger.info('Auto-email data ready: ' + _rows.length + ' units, ' + _dataNote + ', synced ' + _ageMin + 'min ago');
-
-      setTimeout(() => {
-        _ctx.send('fleet:auto-email', {
-          slot: slot.label,
-          triggeredAt: new Date().toISOString(),
-          autoEmailNote,
-          dataRowCount: _rows.length,
-          dataUptakeCount: _uptakeN,
-          dataAgeMins: _ageMin,
-        });
-      }, 2000);
-    }).catch(err => {
-      logger.warn('Auto-email sync failed:', err.message);
-      const _fd2   = store.load('fleetData', {});
-      const _rows2 = (_fd2 && Array.isArray(_fd2.rows)) ? _fd2.rows : [];
-      if (_rows2.length < 3) {
-        logger.warn('Auto-email SKIPPED after sync failure: no usable cached data (' + _rows2.length + ' units)');
-        _ctx.pushStatus('⚠️ Auto-email skipped: sync failed and no cached data available');
-        return;
-      }
-      logger.info('Auto-email using cached data after sync failure: ' + _rows2.length + ' units');
-      _ctx.send('fleet:auto-email', {
-        slot: slot.label,
-        triggeredAt: new Date().toISOString(),
-        syncError: err.message,
-        autoEmailNote,
-        dataRowCount: _rows2.length,
-      });
-    });
+    const dateKey = _todayPrefix();
+    if (ledger.isSlotCompleted(ledger.CHANNELS.EMAIL, dateKey, slot.label)) return;
+    _fireEmail(dateKey, slot, 'scheduled', false);
   }, 30000);
+}
+
+function _fireEmail(dateKey, slot, origin, testMode) {
+  logger.info('Auto-email (' + origin + (testMode ? '/test' : '') + '): slot=' + slot.label);
+  _ctx.pushStatus('\uD83D\uDCE7 Auto-email: ' + slot.label + (testMode ? ' [TEST]' : '') + ' (' + origin + ')...');
+  // Status-only renderer event (execution now owned by the main process).
+  try {
+    _ctx.send('fleet:auto-email', { slot: slot.label, triggeredAt: new Date().toISOString(), statusOnly: true, origin, testMode: !!testMode });
+  } catch (_) {}
+  pipeline.runEmailSlot(_ctx, { dateKey, slotLabel: slot.label, origin, testMode: !!testMode })
+    .then(r => {
+      if (r.blocked === 'no-test-recipient') { _ctx.pushStatus('\u26D4 Test email blocked: configure a test recipient first'); return; }
+      if (r.skipped === 'no-recipients') { _ctx.pushStatus('\u26A0\uFE0F Auto-email: no recipients configured'); return; }
+      const outs = r.outcomes || [];
+      const sent = outs.filter(o => o.state === ledger.STATES.COMPLETED).length;
+      const blockedAuth = outs.some(o => o.state === ledger.STATES.BLOCKED_AUTH);
+      const uncertain = outs.filter(o => o.state === ledger.STATES.DELIVERY_UNCERTAIN).length;
+      if (blockedAuth) _ctx.pushStatus('\uD83D\uDD10 Auto-email paused: OWA sign-in required');
+      else if (uncertain) _ctx.pushStatus('\u26A0\uFE0F Auto-email: ' + sent + '/' + outs.length + ' verified, ' + uncertain + ' unconfirmed');
+      else _ctx.pushStatus('\u2705 Auto-email: ' + sent + '/' + outs.length + ' verified sent (' + slot.label + ')');
+    })
+    .catch(e => { logger.error('Auto-email error:', e.message); _ctx.pushStatus('\u274C Auto-email error: ' + e.message); });
 }
 
 // ── Missed-slot catch-up ──────────────────────────────────────────────────────
 function _catchUpMissedSlots() {
   if (!_isWeekday()) return;
-
   const now            = new Date();
   const currentMinutes = now.getHours() * 60 + now.getMinutes();
-  const prefix         = _todayPrefix();
+  const dateKey        = _todayPrefix();
 
-  EMAIL_SLOTS.forEach(slot => {
-    const slotMin  = slot.h * 60 + slot.m;
-    const missedBy = currentMinutes - slotMin;
+  if (_enabled('email')) EMAIL_SLOTS.forEach(slot => {
+    const missedBy = currentMinutes - (slot.h * 60 + slot.m);
     if (missedBy <= 0 || missedBy > 120) return;
-    const dateKey = prefix + '-' + slot.label;
-    if (_lastEmailSlot === dateKey) return;
-    _lastEmailSlot = dateKey;
+    if (ledger.isSlotCompleted(ledger.CHANNELS.EMAIL, dateKey, slot.label)) return;
     logger.info('Catch-up: missed email slot ' + slot.label + ' (' + missedBy + 'min ago)');
-    _ctx.pushStatus('\u23F0 Catch-up: sending ' + slot.label + ' email (missed ' + missedBy + 'min ago)...');
-    setTimeout(() => {
-      try {
-        const rows = _ctx.lastData && _ctx.lastData.rows;
-        if (rows) {
-          const _settingsNow2  = store.load('settings', {});
-          const autoEmailNote2 = _settingsNow2.autoEmailNote || '';
-          if (autoEmailNote2 && _settingsNow2.autoEmailNoteOneShot) {
-            delete _settingsNow2.autoEmailNote;
-            _settingsNow2.autoEmailNoteOneShot = false;
-            store.save('settings', _settingsNow2);
-          }
-          _ctx.send('fleet:auto-email', {
-            slot: slot.label,
-            triggeredAt: new Date().toISOString(),
-            autoEmailNote: autoEmailNote2,
-            catchUp: true,
-          });
-        }
-      } catch (e) { logger.error('Catch-up email failed:', e.message); }
-    }, 5000);
+    setTimeout(() => _fireEmail(dateKey, slot, 'catchup', false), 5000);
   });
 
-  SP_SLOTS.forEach(slot => {
-    const slotMin  = slot.h * 60 + slot.m;
-    const missedBy = currentMinutes - slotMin;
+  if (_enabled('sp')) SP_SLOTS.forEach(slot => {
+    const missedBy = currentMinutes - (slot.h * 60 + slot.m);
     if (missedBy <= 0 || missedBy > 120) return;
-    const dateKey = prefix + '-SP-' + slot.label;
-    if (_lastSPSlot === dateKey) return;
-    _lastSPSlot = dateKey;
+    if (ledger.isSlotCompleted(ledger.CHANNELS.SHAREPOINT, dateKey, slot.label)) return;
     logger.info('Catch-up: missed SP slot ' + slot.label + ' (' + missedBy + 'min ago)');
-    _ctx.pushStatus('\u23F0 Catch-up: SP push for ' + slot.label + ' (missed ' + missedBy + 'min ago)...');
-    setTimeout(() => {
-      try {
-        const rows = _ctx.lastData && _ctx.lastData.rows;
-        if (rows) {
-          const { pushToSharePoint } = require('../scrapers/sharepoint_push');
-          // Task #5: no longer ignore the result — log the verified outcome so a
-          // catch-up push that didn't verify is visible, not silently "done".
-          pushToSharePoint(rows, (msg) => logger.info('[SP Catch-up] ' + msg))
-            .then(result => {
-              const status = (result && result.status) || 'unknown';
-              logger.info('Catch-up SP push (' + slot.label + '): status=' + status +
-                ' verified=' + ((result && result.workbooksSucceeded) || 0) + '/' + ((result && result.workbooksAttempted) || 0));
-              if (result && result.ok) _ctx.pushStatus('\u2705 Catch-up SP Push verified (' + slot.label + ')');
-              else _ctx.pushStatus('\u26A0\uFE0F Catch-up SP Push ' + status + ' (' + slot.label + ')');
-            })
-            .catch(e => logger.error('Catch-up SP push error:', e.message));
-        }
-      } catch (e) { logger.error('Catch-up SP push failed:', e.message); }
-    }, 10000);
+    setTimeout(() => _fireSP(dateKey, slot, 'catchup'), 10000);
   });
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// ── Manual / test entry points (used by scheduler:* IPC) ───────────────────────
+function runSpNow() {
+  const dateKey = _todayPrefix();
+  const label = 'manual-' + new Date().toTimeString().slice(0, 5);
+  return pipeline.runSharePointJob(_ctx, { dateKey, slotLabel: label, origin: ledger.ORIGINS.MANUAL, testMode: false });
+}
 
+// "Run next email slot as test now" — uses the next upcoming email slot label
+// (or the most recent) so the test idempotency key is meaningful.
+function runNextEmailAsTest() {
+  const dateKey = _todayPrefix();
+  const now = new Date().getHours() * 60 + new Date().getMinutes();
+  const upcoming = EMAIL_SLOTS.filter(s => (s.h * 60 + s.m) >= now).sort((a, b) => (a.h * 60 + a.m) - (b.h * 60 + b.m));
+  const slot = upcoming[0] || EMAIL_SLOTS[EMAIL_SLOTS.length - 1] || DEFAULT_EMAIL_SLOTS[0];
+  return pipeline.runEmailSlot(_ctx, { dateKey, slotLabel: slot.label, origin: ledger.ORIGINS.TEST, testMode: true });
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
 function start(ctx) {
   _ctx = ctx;
+  // Establish + migrate the ledger before anything reads it.
+  try { ledger.migrate(); } catch (e) { logger.warn('Ledger migrate failed (non-fatal): ' + e.message); }
   _loadScheduleSlots();
+  // Restart recovery: re-commit verified-but-uncommitted sends, requeue retries.
+  Promise.resolve().then(() => pipeline.recover(_ctx)).catch(e => logger.warn('Recovery failed: ' + e.message));
   _scheduleAutoSPPush();
   _scheduleAutoEmail();
   _catchUpMissedSlots();
+  // Prune old ledger entries occasionally.
+  ledger.pruneOldJobs().catch(() => {});
   logger.info('Schedulers started — SP:', SP_SLOTS.map(s=>s.label), 'Email:', EMAIL_SLOTS.map(s=>s.label));
 }
 
@@ -279,4 +210,4 @@ function catchUp() {
   _catchUpMissedSlots();
 }
 
-module.exports = { start, stop, reload, catchUp };
+module.exports = { start, stop, reload, catchUp, runSpNow, runNextEmailAsTest };
