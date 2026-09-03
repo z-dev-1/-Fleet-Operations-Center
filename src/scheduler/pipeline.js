@@ -457,14 +457,22 @@ async function _runOneEmailScope(ctx, o) {
       return { state: ledger.getJob(job.jobId).state, scope: o.scope };
     }
 
-    // Record intended vs actual recipients on the job (kept separate).
-    await ledger.transition(job.jobId, ledger.STATES.VERIFYING,
-      { intendedRecipients: tm.intendedRecipients, actualRecipients: tm.actualRecipients }, 'owa deliver');
+    // Record intended vs actual recipients on the job (kept separate). The job
+    // STAYS in `running` during the OWA send — sendViaOwa does its own internal
+    // compose+send+Sent-Items check. We only move to VERIFYING/SENT/etc AFTER
+    // it returns, so a `blocked-auth`/`failed` result from the send is a legal
+    // transition from `running` (it was NOT from `verifying`, which orphaned
+    // jobs — fixed 2026-09). transitionSameState patches fields without a move.
+    await ledger.transition(job.jobId, ledger.STATES.RUNNING,
+      { intendedRecipients: tm.intendedRecipients, actualRecipients: tm.actualRecipients }, 'owa deliver start');
 
     const owa = await _deps.sendViaOwa({ to: tm.to, cc: tm.cc, subject: tm.subject, html, correlationMarker: job.correlationMarker });
 
     if (owa.status === 'sent') {
-      await ledger.transition(job.jobId, ledger.STATES.SENT, { deliveryResult: _redactOwa(owa) }, 'sent verified');
+      // running -> verifying -> sent (verification already happened inside
+      // sendViaOwa; VERIFYING here marks the post-send confirmed state).
+      await ledger.transition(job.jobId, ledger.STATES.VERIFYING, { deliveryResult: _redactOwa(owa) }, 'sent — verifying');
+      await ledger.transition(job.jobId, ledger.STATES.SENT, {}, 'sent verified');
       // Commit snapshot AFTER verified send — production only, never in test mode.
       if (!o.testMode) {
         try {

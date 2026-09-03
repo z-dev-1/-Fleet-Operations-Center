@@ -95,6 +95,28 @@ describe('state machine', () => {
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/illegal transition/);
   });
+  it('a same-state transition applies a patch without moving (records recipients in running)', async () => {
+    const { job } = await ledger.getOrCreateJob(emailSpec());
+    await ledger.transition(job.jobId, STATES.RUNNING);
+    const r = await ledger.transition(job.jobId, STATES.RUNNING, { intendedRecipients: ['a@x.com'], actualRecipients: ['a@x.com'] });
+    expect(r.ok).toBe(true);
+    expect(ledger.getJob(job.jobId).state).toBe(STATES.RUNNING);
+    expect(ledger.getJob(job.jobId).intendedRecipients).toEqual(['a@x.com']);
+  });
+  it('VERIFYING can transition to BLOCKED_AUTH (regression: orphaned-verifying bug)', async () => {
+    const { job } = await ledger.getOrCreateJob(emailSpec());
+    await ledger.transition(job.jobId, STATES.RUNNING);
+    await ledger.transition(job.jobId, STATES.VERIFYING);
+    const r = await ledger.transition(job.jobId, STATES.BLOCKED_AUTH);
+    expect(r.ok).toBe(true);
+    expect(ledger.getJob(job.jobId).state).toBe(STATES.BLOCKED_AUTH);
+  });
+  it('RUNNING can transition directly to BLOCKED_AUTH (new send-from-running flow)', async () => {
+    const { job } = await ledger.getOrCreateJob(emailSpec());
+    await ledger.transition(job.jobId, STATES.RUNNING);
+    const r = await ledger.transition(job.jobId, STATES.BLOCKED_AUTH);
+    expect(r.ok).toBe(true);
+  });
 });
 
 describe('leases + overlap protection', () => {
