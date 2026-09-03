@@ -225,8 +225,12 @@ async function _refresh() {
   if (!window.fleetScheduler || !window.fleetScheduler.getState) return;
   try {
     const st = await window.fleetScheduler.getState();
-    if (st && !st.ok === false) _state = st;
+    // getState() returns the full state object on success. The safeIPC wrapper
+    // returns { ok:false, error } only on failure. Accept anything that carries
+    // real state (has slots) and isn't an error envelope.
+    if (st && st.ok !== false && st.slots) { _state = st; }
     _render();
+    _populateTimeInputs();
   } catch (_) {}
 }
 
