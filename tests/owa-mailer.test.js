@@ -190,14 +190,46 @@ function makeFakeElectron(navUrl) {
 describe('sendViaOwa window setup (regression guard)', () => {
   it('uses webContents.setWindowOpenHandler and does not throw on window setup', async () => {
     const fake = makeFakeElectron('https://login.microsoftonline.com/common/oauth2/authorize');
+    // skipWarmup:true so this exercises the COMPOSE window setup directly (its
+    // purpose), not the warmup window. Warmup is covered by its own tests below.
     const r = await owa.sendViaOwa({
       to: 'zilasant@amazon.com', subject: 'Fleet', html: '<html><body>' + 'x'.repeat(300) + '</body></html>',
-      _electron: fake, timeoutMs: 3000,
+      _electron: fake, timeoutMs: 3000, skipWarmup: true,
     });
     // The exact regression: win.setWindowOpenHandler threw "is not a function"
     // and every job failed with a 'window error'. Assert that NEVER happens —
     // window setup must succeed (any legitimate outcome is fine here).
     expect((r.errors || []).some(e => /setWindowOpenHandler|is not a function|window error/.test(e))).toBe(false);
     expect(['blocked-auth', 'failed', 'delivery-uncertain', 'sent']).toContain(r.status);
+  });
+});
+
+describe('warmOwaSession — silent session warmup (auto sign-in fix)', () => {
+  it('reports ok when the mailbox loads (non-auth outlook host)', async () => {
+    const fake = makeFakeElectron('https://outlook.office365.com/mail/');
+    const r = await owa.warmOwaSession({ _electron: fake, timeoutMs: 3000, settleMs: 5 });
+    expect(r.ok).toBe(true);
+    expect(r.authWall).toBe(false);
+  });
+
+  it('reports authWall (never prompts) when warmup redirects to a login host', async () => {
+    const fake = makeFakeElectron('https://login.microsoftonline.com/common/oauth2/authorize');
+    const r = await owa.warmOwaSession({ _electron: fake, timeoutMs: 3000, settleMs: 5 });
+    expect(r.ok).toBe(false);
+    expect(r.authWall).toBe(true);
+  });
+});
+
+describe('sendViaOwa warmup gate — honest blocked-auth on cold session', () => {
+  it('returns blocked-auth (no send) when warmup hits an auth wall', async () => {
+    const fake = makeFakeElectron('https://login.microsoftonline.com/common/oauth2/authorize');
+    // No skipWarmup: the warmup runs first, detects the auth wall, and the send
+    // must stop with blocked-auth WITHOUT ever attempting compose/typing/click.
+    const r = await owa.sendViaOwa({
+      to: 'zilasant@amazon.com', subject: 'Fleet', html: '<html><body>' + 'x'.repeat(300) + '</body></html>',
+      _electron: fake, timeoutMs: 3000,
+    });
+    expect(r.status).toBe('blocked-auth');
+    expect(r.sentItemsMatch).toBeFalsy();
   });
 });

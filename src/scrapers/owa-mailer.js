@@ -300,6 +300,37 @@ async function sendViaOwa(opts) {
 
   const signals = { authWall: false, editorReady: false, insertOk: false, sendButtonEnabled: false, sendClicked: false, composeClosed: false, sentItemsFound: false, error: null };
 
+  // ── Silent OWA session warmup (fixes recurring "OWA sign-in required") ──────
+  // Before touching the compose deeplink, load the mailbox root once so OWA can
+  // silently refresh its own tokens (the same thing the manual "Authenticate
+  // OWA" button did). This self-heals a cold-but-refreshable session with no
+  // user click. If warmup hits a real interactive auth wall, we stop here and
+  // return 'blocked-auth' honestly — never typing, never clicking, never faking
+  // success. Skippable via opts.skipWarmup (used by unit tests that stub the
+  // compose flow directly). A warmup timeout/soft-failure is non-fatal: we still
+  // attempt the compose, which will itself detect an auth wall if present.
+  if (!opts.skipWarmup) {
+    try {
+      const warm = await warmOwaSession({
+        _electron: electron,
+        timeoutMs: opts.warmupTimeoutMs || 30000,
+        settleMs: opts.warmupSettleMs,
+      });
+      if (warm && warm.authWall) {
+        R.errors.push('auth wall (warmup): ' + (warm.url || ''));
+        return finish({ status: 'blocked-auth' });
+      }
+      if (warm && warm.ok) {
+        logger.info && logger.info('[owa-mailer] session warmup ok before compose');
+      } else if (warm && warm.reason) {
+        // Non-fatal: proceed to compose, which re-checks auth on its own.
+        logger.warn && logger.warn('[owa-mailer] session warmup soft-fail:', warm.reason);
+      }
+    } catch (e) {
+      logger.warn && logger.warn('[owa-mailer] warmup threw (non-fatal):', e && e.message);
+    }
+  }
+
   return new Promise((resolve) => {
     let win;
     let done = false;
@@ -560,6 +591,93 @@ function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── Interactive re-auth (visible login on demand) ─────────────────────────────
 /**
+ * warmOwaSession(opts) -> Promise<{ ok, authWall, url?, reason? }>
+ *
+ * SILENT, non-interactive OWA session warmup. Opens a HIDDEN, offscreen window
+ * (exactly like a real send — never shown, popups blocked) and loads the
+ * mailbox root `/mail/`. Loading the mailbox lets OWA run its OWN silent token
+ * refresh (the same thing the visible "Authenticate OWA" button triggers) and
+ * write fresh office365 auth cookies into the shared defaultSession cookie jar.
+ *
+ * WHY THIS EXISTS: the scheduled send (sendViaOwa) used to navigate STRAIGHT to
+ * the compose deeplink. When the office365 session had gone cold, that deeplink
+ * answered with a redirect to login.microsoftonline.com → detected as an auth
+ * wall → 'blocked-auth', and the slot paused. A manual click of "Authenticate
+ * OWA" worked only because it loaded `/mail/` first and let OWA silently
+ * refresh. This helper does that same warmup automatically and silently before
+ * every send, so a cold-but-refreshable session self-heals with no user click.
+ *
+ * HONEST FALLBACK (no false success): if the warmup itself lands on an auth
+ * host, OWA genuinely needs interactive MFA/consent — we return
+ * { ok:false, authWall:true } WITHOUT typing or clicking anything. The caller
+ * then reports 'blocked-auth' exactly as before, and the visible "Authenticate
+ * OWA" flow remains the correct fallback. Warmup only ever helps; it never
+ * sends, and it never masks a real auth requirement.
+ */
+async function warmOwaSession(opts) {
+  opts = opts || {};
+  const electron = opts._electron || require('electron');
+  const { BrowserWindow, session } = electron;
+  const timeoutMs = opts.timeoutMs || 30000;
+  // Grace period after landing on the mailbox so OWA can finish its silent
+  // token exchange and flush fresh cookies into defaultSession before we
+  // navigate on to the compose deeplink.
+  const settleMs = Number.isFinite(opts.settleMs) ? opts.settleMs : 1800;
+
+  return new Promise((resolve) => {
+    let win, done = false;
+    const settle = (over) => {
+      if (done) return; done = true;
+      try { if (win && !win.isDestroyed()) win.close(); } catch (_) {}
+      resolve(Object.assign({ ok: false, authWall: false, url: null }, over || {}));
+    };
+    try {
+      win = new BrowserWindow({
+        width: 1100, height: 800,
+        show: false, x: -32000, y: -32000,   // HIDDEN + offscreen (never shown)
+        skipTaskbar: true,
+        webPreferences: { nodeIntegration: false, contextIsolation: true, session: session.defaultSession },
+      });
+      win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      win.on('show', () => { try { win.hide(); } catch (_) {} });
+
+      const t = setTimeout(() => settle({ ok: false, reason: 'warmup timeout' }), timeoutMs);
+      const MAILBOX_RE = /outlook\.office365\.com\/mail|outlook\.office\.com\/mail/i;
+      const onMailbox = (url) => { clearTimeout(t); setTimeout(() => settle({ ok: true, url }), settleMs); };
+      // Navigation handler: an interactive auth host means genuine MFA/consent is
+      // required — do NOT prompt, report it so the caller keeps the honest
+      // blocked-auth path (never type or click here). A non-auth mailbox landing
+      // means OWA authenticated silently — that's a successful warmup. We handle
+      // both did-navigate and did-finish-load because OWA's SPA can land on the
+      // mailbox via either signal depending on cache/redirect state.
+      const onNav = (_e, url) => {
+        if (done) return;
+        if (AUTH_HOST_RE.test(url || '')) { clearTimeout(t); settle({ ok: false, authWall: true, url }); return; }
+        if (MAILBOX_RE.test(url || '')) { onMailbox(url); }
+      };
+      win.webContents.on('did-navigate', onNav);
+      win.webContents.on('did-redirect-navigation', onNav);
+      win.webContents.on('did-fail-load', (_e, code, desc) => {
+        if (code === -3) return; // aborted (normal for SPA navigations)
+        clearTimeout(t); settle({ ok: false, reason: 'load failed: ' + desc });
+      });
+      win.webContents.on('did-finish-load', () => {
+        if (done) return;
+        const curUrl = win.webContents.getURL();
+        if (AUTH_HOST_RE.test(curUrl)) { clearTimeout(t); settle({ ok: false, authWall: true, url: curUrl }); return; }
+        // Only treat a real mailbox landing as a successful warmup.
+        if (!MAILBOX_RE.test(curUrl)) return;
+        onMailbox(curUrl);
+      });
+
+      win.loadURL(OWA_ORIGIN + '/mail/');
+    } catch (e) {
+      settle({ ok: false, reason: 'window error: ' + e.message });
+    }
+  });
+}
+
+/**
  * authenticateOwa(opts) -> Promise<{ ok, reason? }>
  * Opens a VISIBLE OWA window so the user can complete interactive auth / MFA /
  * consent. Resolves ok:true once we land back on the mailbox (not an auth
@@ -643,6 +761,7 @@ async function previewSelectors(opts) {
 module.exports = {
   sendViaOwa,
   authenticateOwa,
+  warmOwaSession,
   previewSelectors,
   // pure helpers (exported for tests + reuse)
   normalizeSubject, normalizeRecipient, toRecipientArray,
