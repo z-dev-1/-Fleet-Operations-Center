@@ -215,6 +215,20 @@ function _newSpResult() {
   };
 }
 
+// Total count of expected-but-missing units across a read-back verify result.
+// Used to pick the BEST read-back attempt during propagation-lag retries — the
+// attempt with the fewest missing is closest to the truth.
+function _verifyMissingCount(verify) {
+  if (!verify || !Array.isArray(verify.sheets)) return Infinity;
+  let n = 0;
+  for (const s of verify.sheets) {
+    if (!s.found) { n += 1000; continue; }   // a missing worksheet is worse than a few missing rows
+    n += (s.expectedMissing ? s.expectedMissing.length : 0);
+    if (s.sampleLifecycleMatch === false) n += 1;
+  }
+  return n;
+}
+
 // Pure status derivation from workbook accounting (Task #5) — extracted so it
 // can be unit-tested without a live SharePoint session. `ok` is true ONLY when
 // at least one workbook was attempted, none failed, and every attempted
@@ -397,15 +411,30 @@ async function _pushToSharePointInner(units, onProgress) {
 
     // ── READ-BACK VERIFICATION (Task #5) ─────────────────────────────────────
     // Re-download the workbook fresh and confirm the write actually landed.
+    // SharePoint write propagation is NOT instant — a read-back run immediately
+    // after upload can see a slightly-stale copy where a couple of just-written
+    // rows haven't propagated yet, producing a false "N missing" partial-failure
+    // (observed live: AUVTE01 reported 23/25 with 2 "missing" even though the
+    // upload succeeded). So we retry the read-back a few times with increasing
+    // settle delays and accept the first fully-verified result. We keep the
+    // BEST (most-complete) attempt if none fully verify, so the reported result
+    // is honest, not worse than reality.
     let verify = null;
-    try {
-      // Small settle delay — SharePoint write propagation isn't instant.
-      await new Promise(r => setTimeout(r, 2500));
-      verify = await spVerify({ filePath: wb.path, sheets: verifySheets }, 90000);
-      if (verify && verify.log) verify.log.forEach(l => log('    [verify] ' + l, 'info'));
-    } catch (e) {
-      log('  [VERIFY ERROR] ' + wb.name + ': ' + e.message, 'warn');
-      verify = { ok: false, errors: ['verify exception: ' + e.message], sheets: [] };
+    const _settles = [2500, 4000, 6000];   // ~12.5s total worst case
+    for (let attempt = 0; attempt < _settles.length; attempt++) {
+      try {
+        await new Promise(r => setTimeout(r, _settles[attempt]));
+        const v = await spVerify({ filePath: wb.path, sheets: verifySheets }, 90000);
+        if (v && v.log) v.log.forEach(l => log('    [verify' + (attempt ? ' retry' + attempt : '') + '] ' + l, 'info'));
+        // Keep the best attempt: prefer ok, else the one with fewest missing.
+        if (!verify) verify = v;
+        else if (v && _verifyMissingCount(v) < _verifyMissingCount(verify)) verify = v;
+        if (v && v.ok) { verify = v; break; }   // fully verified — done
+        if (attempt < _settles.length - 1) log('  [verify] ' + wb.name + ' not fully confirmed yet — retrying after propagation delay', 'info');
+      } catch (e) {
+        log('  [VERIFY ERROR] ' + wb.name + ': ' + e.message, 'warn');
+        if (!verify) verify = { ok: false, errors: ['verify exception: ' + e.message], sheets: [] };
+      }
     }
     wbRec.verify = verify;
     wbRec.sheets = (verify && verify.sheets) || [];
@@ -451,4 +480,4 @@ async function _pushToSharePointInner(units, onProgress) {
   return _finish();
 }
 
-module.exports = { pushToSharePoint, WORKBOOKS, buildRowValues, loadWorkbooks, saveWorkbooks, SP_CONFIG_FILE, _newSpResult, _deriveSpStatus };
+module.exports = { pushToSharePoint, WORKBOOKS, buildRowValues, loadWorkbooks, saveWorkbooks, SP_CONFIG_FILE, _newSpResult, _deriveSpStatus, _verifyMissingCount };

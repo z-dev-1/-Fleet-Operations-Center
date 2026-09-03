@@ -21,6 +21,28 @@ function base(over = {}) {
   return { ...R, ...over };
 }
 
+describe('read-back propagation-lag retry: pick the BEST attempt (_verifyMissingCount)', () => {
+  it('counts total missing units across sheets', () => {
+    expect(sp._verifyMissingCount({ sheets: [{ found: true, expectedMissing: ['a', 'b'] }, { found: true, expectedMissing: [] }] })).toBe(2);
+  });
+  it('a fully-verified attempt scores 0 (chosen over a partial one)', () => {
+    expect(sp._verifyMissingCount({ sheets: [{ found: true, expectedMissing: [] }] })).toBe(0);
+  });
+  it('a missing worksheet is scored far worse than a couple missing rows', () => {
+    const missingSheet = sp._verifyMissingCount({ sheets: [{ found: false }] });
+    const fewMissingRows = sp._verifyMissingCount({ sheets: [{ found: true, expectedMissing: ['a', 'b', 'c'] }] });
+    expect(missingSheet).toBeGreaterThan(fewMissingRows);
+  });
+  it('a lifecycle mismatch adds to the missing score', () => {
+    expect(sp._verifyMissingCount({ sheets: [{ found: true, expectedMissing: [], sampleLifecycleMatch: false }] })).toBe(1);
+  });
+  it('null/invalid verify scores Infinity (never chosen over any real attempt)', () => {
+    expect(sp._verifyMissingCount(null)).toBe(Infinity);
+    // A real attempt with 2 missing beats a null attempt.
+    expect(sp._verifyMissingCount({ sheets: [{ found: true, expectedMissing: ['a', 'b'] }] })).toBeLessThan(sp._verifyMissingCount(null));
+  });
+});
+
 describe('SharePoint status derivation (ok only when read-back verified)', () => {
   it('ok=true only when every attempted workbook verified', () => {
     const d = sp._deriveSpStatus(base({ workbooksAttempted: 2, workbooksSucceeded: 2, workbooksFailed: 0 }));
