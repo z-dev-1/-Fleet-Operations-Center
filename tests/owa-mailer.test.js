@@ -17,6 +17,64 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const owa = require('../src/scrapers/owa-mailer');
 
+// Run the generated Sent-Items check script against a fake DOM. The script is a
+// self-contained IIFE string, so we can eval it with a minimal document stub to
+// prove the matching logic — this is the exact code that runs in the OWA page.
+function runSentItemsCheck({ marker, normSubject, recipients, bodyText, rows, attrNodes }) {
+  const script = owa._buildSentItemsCheckScript(marker, normSubject, recipients);
+  const fakeDoc = {
+    body: { innerText: bodyText || '' },
+    querySelectorAll(sel) {
+      if (sel.indexOf('[title]') !== -1 && sel.indexOf('listitem') === -1) {
+        return (attrNodes || []).map(a => ({ getAttribute: (k) => a[k] || '' }));
+      }
+      return (rows || []).map(r => ({ innerText: r, getAttribute: () => '' }));
+    },
+  };
+  // eslint-disable-next-line no-new-func
+  const fn = new Function('document', 'return ' + script);
+  return fn(fakeDoc);
+}
+
+describe('Sent-Items verification matching (the delivery-uncertain fix)', () => {
+  const marker = 'FOC-abc123def45678';
+  // The caller passes normalizeSubject(subject); the real subject uses an
+  // em-dash: "Fleet Status TUZR — SOS AM". Use that same normalized form here.
+  const subj = owa.normalizeSubject('Fleet Status TUZR — SOS AM');
+  const recips = ['ops@amazon.com'];
+
+  it('matches the just-sent message at the top of Sent Items by subject', () => {
+    const r = runSentItemsCheck({ marker, normSubject: subj, recipients: recips,
+      rows: ['Fleet Status TUZR — SOS AM  ops@amazon.com  9:07 AM', 'Some older email  yesterday'] });
+    expect(r.indexOf('found')).toBe(0);
+  });
+  it('matches even when OWA truncates the subject in the list row', () => {
+    const r = runSentItemsCheck({ marker, normSubject: subj, recipients: recips,
+      rows: ['Fleet Status TUZR — S\u2026', 'unrelated'] });
+    expect(r.indexOf('found')).toBe(0);
+  });
+  it('reports subject+recipient when a recipient token is visible', () => {
+    const r = runSentItemsCheck({ marker, normSubject: subj, recipients: recips,
+      rows: ['Fleet Status TUZR — SOS AM to ops@amazon.com'] });
+    expect(r).toBe('found:subject+recipient');
+  });
+  it('matches by hidden correlation marker if OWA surfaces it', () => {
+    const r = runSentItemsCheck({ marker, normSubject: subj, recipients: recips,
+      bodyText: 'reading pane ... ' + marker + ' ... end' });
+    expect(r).toBe('found:marker');
+  });
+  it('does NOT match when the message is absent (honest not-found)', () => {
+    const r = runSentItemsCheck({ marker, normSubject: subj, recipients: recips,
+      rows: ['Totally different subject', 'Another unrelated one'] });
+    expect(r).toBe('not-found');
+  });
+  it('ignores [TEST] prefix + marker noise when normalizing rows', () => {
+    const r = runSentItemsCheck({ marker, normSubject: '[test] ' + subj, recipients: recips,
+      rows: ['[TEST] Fleet Status TUZR — SOS AM'] });
+    expect(r.indexOf('found')).toBe(0);
+  });
+});
+
 describe('classifyOutcome — never fake success', () => {
   const happy = { authWall: false, editorReady: true, insertOk: true, sendButtonEnabled: true, sendClicked: true, composeClosed: true, sentItemsFound: true };
   it('sent ONLY when send clicked AND Sent Items confirmed', () => {

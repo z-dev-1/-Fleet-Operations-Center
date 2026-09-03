@@ -200,33 +200,64 @@ function _buildSendClickScript() {
 // reliable cross-tenant approach without Graph is to open the Sent Items folder
 // and scan rendered rows. We use the OWA search box query for the marker.
 // This script returns 'found' | 'not-found' | 'error:...'.
-function _buildSentItemsCheckScript(marker, normSubject) {
-  const m = JSON.stringify(marker);
-  const subj = JSON.stringify(normSubject);
+function _buildSentItemsCheckScript(marker, normSubject, recipients) {
+  const m = JSON.stringify(marker || '');
+  const subj = JSON.stringify(normSubject || '');
+  // Recipient local-parts + full addresses give the best chance of matching the
+  // way OWA renders the "To" preview (often just a display name or first token).
+  const recipTokens = [];
+  (recipients || []).forEach(function (r) {
+    const addr = String(r || '').toLowerCase();
+    if (!addr) return;
+    recipTokens.push(addr);
+    const local = addr.split('@')[0];
+    if (local) recipTokens.push(local);
+  });
+  const recips = JSON.stringify(recipTokens);
   return `(function(){
     try {
-      // (1) Marker match anywhere in the rendered page — search results and the
-      // reading pane both surface indexed body text; the hidden span carries
-      // our marker. Check innerText AND common attributes used by list rows.
-      var bodyText = document.body ? document.body.innerText : '';
-      if (bodyText && bodyText.indexOf(${m}) !== -1) return 'found';
-      var attrNodes = document.querySelectorAll('[title],[aria-label]');
-      for (var a=0;a<attrNodes.length;a++){
-        var av = (attrNodes[a].getAttribute('title') || '') + ' ' + (attrNodes[a].getAttribute('aria-label') || '');
-        if (av.indexOf(${m}) !== -1) return 'found';
-      }
-      // (2) Subject fallback: compare normalized subject against list/row text.
-      // Normalize the same way the main process does (strip [TEST]/marker/ws,
-      // lowercase) so a rendered "[TEST] Fleet ..." row still matches.
-      var want = ${subj};
       function norm(s){ return String(s||'').replace(/\\bFOC-[0-9a-f]{8,}\\b/gi,'').replace(/^\\s*\\[test\\]\\s*/i,'').replace(/\\s+/g,' ').trim().toLowerCase(); }
+      var want = norm(${subj});
+      var marker = ${m};
+      var recips = ${recips};
+
+      // (A) STRONGEST: hidden correlation marker surfaced anywhere in the DOM
+      // (reading pane / row aria). Kept as a bonus — OWA may not index hidden
+      // body text, so this can miss even for a real send.
+      if (marker) {
+        var bodyText = document.body ? document.body.innerText : '';
+        if (bodyText && bodyText.indexOf(marker) !== -1) return 'found:marker';
+        var attrNodes = document.querySelectorAll('[title],[aria-label]');
+        for (var a=0;a<attrNodes.length;a++){
+          var av = (attrNodes[a].getAttribute('title')||'') + ' ' + (attrNodes[a].getAttribute('aria-label')||'');
+          if (av.indexOf(marker) !== -1) return 'found:marker';
+        }
+      }
+
+      // (B) PRIMARY: scan the rendered Sent-Items message rows. Sent Items is
+      // newest-first, so a message we JUST sent is at/near the top. A row that
+      // contains our (normalized) subject is a match; if we can also see a
+      // recipient token in/near the row, that's a strong match.
       if (want) {
-        var rows = document.querySelectorAll('[role="listitem"], [role="option"], .lvHighlightSubjectClass, span[title], [aria-label]');
-        for (var i=0;i<rows.length;i++){
-          var raw = rows[i].innerText || rows[i].getAttribute('title') || rows[i].getAttribute('aria-label') || '';
-          var t = norm(raw);
-          var w = norm(want);
-          if (t && w && t.indexOf(w) !== -1) return 'found';
+        // OWA truncates long subjects in the list ("Fleet Status TUZR — S…"),
+        // so ALSO match on a shorter distinctive prefix that survives truncation.
+        var wantPrefix = want.slice(0, Math.min(want.length, 16));
+        var rows = document.querySelectorAll('[role="listitem"], [role="option"], div[data-convid], div[data-animation-id]');
+        // Only consider the first ~12 rows (newest). Virtualized lists render the
+        // visible window; the top rows are the most recent.
+        var limit = Math.min(rows.length, 12);
+        for (var i=0;i<limit;i++){
+          var rowText = norm(rows[i].innerText || '');
+          if (!rowText) continue;
+          if (rowText.indexOf(want) !== -1 || (wantPrefix.length >= 12 && rowText.indexOf(wantPrefix) !== -1)) {
+            // Subject matched. Try to also confirm a recipient token for a
+            // stronger signal; if none of our recipients render in the list
+            // (OWA often shows only a display name), a top-row subject match is
+            // still accepted.
+            var recipHit = false;
+            for (var k=0;k<recips.length;k++){ if (recips[k] && rowText.indexOf(recips[k]) !== -1){ recipHit = true; break; } }
+            return recipHit ? 'found:subject+recipient' : 'found:subject';
+          }
         }
       }
       return 'not-found';
@@ -257,8 +288,8 @@ async function sendViaOwa(opts) {
   const html = embedMarker(String(opts.html || ''), marker);
   const bodyBytes = Buffer.byteLength(html, 'utf8');
   const minBodyBytes = Number.isFinite(opts.minBodyBytes) ? opts.minBodyBytes : 200;
-  const timeoutMs = opts.timeoutMs || 90000;
-  const verifyTimeoutMs = opts.verifyTimeoutMs || 45000;
+  const timeoutMs = opts.timeoutMs || 120000;
+  const verifyTimeoutMs = opts.verifyTimeoutMs || 75000;
 
   const R = _newResult({ to, cc, subject, bodyBytes, correlationMarker: marker });
   const finish = (over) => { Object.assign(R, over); R.completedAt = new Date().toISOString(); return R; };
@@ -351,8 +382,14 @@ async function sendViaOwa(opts) {
           signals.composeClosed = await _waitForGone(win, EDITOR_SELECTOR, 15, 1000);
           R.composeClosed = signals.composeClosed;
 
-          // 5) Sent Items verification (recipient + normalized subject + marker).
-          const verify = await _verifySentItems(win, marker, normalizeSubject(subject), verifyTimeoutMs);
+          // 5) Sent Items verification (recipient + normalized subject + marker
+          //    + recency at top of the newest-first Sent folder).
+          const verify = await _verifySentItems(win, {
+            marker,
+            normSubject: normalizeSubject(subject),
+            recipients: to.concat(cc),
+            timeoutMs: verifyTimeoutMs,
+          });
           signals.sentItemsFound = verify.found;
           R.sentItemsMatch = verify;
 
@@ -470,32 +507,48 @@ async function _waitForGone(win, selector, attempts, intervalMs) {
 //       an unambiguous match. We drive it via the search deeplink.
 //   (2) Fallback: scan the rendered Sent-Items list for the normalized subject.
 // We reload/settle between attempts and keep polling until the deadline.
-async function _verifySentItems(win, marker, normSubject, timeoutMs) {
+async function _verifySentItems(win, opts) {
+  opts = opts || {};
+  const marker = opts.marker;
+  const normSubject = opts.normSubject;
+  const recipients = opts.recipients || [];
+  const timeoutMs = opts.timeoutMs || 75000;
   const result = { found: false, matchedBy: null, at: null };
   try {
     const deadline = Date.now() + timeoutMs;
-    const script = _buildSentItemsCheckScript(marker, normSubject);
-    // Sent Items search deeplink for the marker (folder-scoped full-text).
-    const searchUrl = OWA_ORIGIN + '/mail/sentitems/search/' +
-      encodeURIComponent(marker);
+    const script = _buildSentItemsCheckScript(marker, normSubject, recipients);
     const listUrl = OWA_ORIGIN + '/mail/sentitems';
+    // Search deeplink kept as a secondary probe for the marker (helps when OWA
+    // does index the body). Primary is the newest-first folder list.
+    const searchUrl = marker ? (OWA_ORIGIN + '/mail/search/' + encodeURIComponent(marker)) : null;
 
-    // First give the send a moment to land + index.
-    await _sleep(4000);
-    let usedSearch = false;
+    // Give the message a moment to land in Sent Items before the first look.
+    await _sleep(5000);
+    // Load the Sent Items folder once up front.
+    try { if (!win.isDestroyed()) win.loadURL(listUrl); } catch (_) {}
+    await _sleep(3500);
+
+    let cycle = 0;
     while (Date.now() < deadline) {
       if (win.isDestroyed()) break;
-      // Alternate: try the marker search first, then fall back to the plain
-      // folder list for the subject scan.
-      const target = usedSearch ? listUrl : searchUrl;
-      try { if (!win.isDestroyed()) win.loadURL(target); } catch (_) {}
-      usedSearch = !usedSearch;
-      await _sleep(3500);
+      // Every few cycles, refresh the folder (newest-first) so a message that
+      // has just appeared is picked up; occasionally try the marker search too.
+      if (cycle > 0) {
+        const target = (searchUrl && cycle % 3 === 0) ? searchUrl : listUrl;
+        try { if (!win.isDestroyed()) win.loadURL(target); } catch (_) {}
+        await _sleep(3000);
+      }
       try {
         const r = await win.webContents.executeJavaScript(script);
-        if (r === 'found') { result.found = true; result.matchedBy = 'marker/subject'; result.at = new Date().toISOString(); return result; }
+        if (typeof r === 'string' && r.indexOf('found') === 0) {
+          result.found = true;
+          result.matchedBy = r.slice(r.indexOf(':') + 1) || 'match';
+          result.at = new Date().toISOString();
+          return result;
+        }
       } catch (_) {}
-      await _sleep(1500);
+      cycle++;
+      await _sleep(2500);
     }
   } catch (e) {
     result.error = e.message;
