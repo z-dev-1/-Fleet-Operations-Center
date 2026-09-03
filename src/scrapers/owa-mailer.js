@@ -205,16 +205,29 @@ function _buildSentItemsCheckScript(marker, normSubject) {
   const subj = JSON.stringify(normSubject);
   return `(function(){
     try {
-      // Look for any list item / conversation row that references the marker
-      // (present in the hidden span, which OWA indexes) or the subject text.
-      var text = document.body ? document.body.innerText : '';
-      if (text && text.indexOf(${m}) !== -1) return 'found';
-      // Fallback: subject match in the Sent list.
-      var rows = document.querySelectorAll('[role="listitem"], [role="option"], .lvHighlightSubjectClass, span[title]');
+      // (1) Marker match anywhere in the rendered page — search results and the
+      // reading pane both surface indexed body text; the hidden span carries
+      // our marker. Check innerText AND common attributes used by list rows.
+      var bodyText = document.body ? document.body.innerText : '';
+      if (bodyText && bodyText.indexOf(${m}) !== -1) return 'found';
+      var attrNodes = document.querySelectorAll('[title],[aria-label]');
+      for (var a=0;a<attrNodes.length;a++){
+        var av = (attrNodes[a].getAttribute('title') || '') + ' ' + (attrNodes[a].getAttribute('aria-label') || '');
+        if (av.indexOf(${m}) !== -1) return 'found';
+      }
+      // (2) Subject fallback: compare normalized subject against list/row text.
+      // Normalize the same way the main process does (strip [TEST]/marker/ws,
+      // lowercase) so a rendered "[TEST] Fleet ..." row still matches.
       var want = ${subj};
-      for (var i=0;i<rows.length;i++){
-        var t = (rows[i].innerText || rows[i].getAttribute('title') || '').replace(/\\s+/g,' ').trim().toLowerCase();
-        if (t && want && t.indexOf(want) !== -1) return 'found';
+      function norm(s){ return String(s||'').replace(/\\bFOC-[0-9a-f]{8,}\\b/gi,'').replace(/^\\s*\\[test\\]\\s*/i,'').replace(/\\s+/g,' ').trim().toLowerCase(); }
+      if (want) {
+        var rows = document.querySelectorAll('[role="listitem"], [role="option"], .lvHighlightSubjectClass, span[title], [aria-label]');
+        for (var i=0;i<rows.length;i++){
+          var raw = rows[i].innerText || rows[i].getAttribute('title') || rows[i].getAttribute('aria-label') || '';
+          var t = norm(raw);
+          var w = norm(want);
+          if (t && w && t.indexOf(w) !== -1) return 'found';
+        }
       }
       return 'not-found';
     } catch (e) { return 'error:' + e.message; }
@@ -381,24 +394,41 @@ async function _waitForGone(win, selector, attempts, intervalMs) {
 }
 
 // Navigate to Sent Items and poll for the marker/subject.
+//
+// A just-sent message can take several seconds to land + index in Sent Items,
+// and the FOLDER LIST view only shows subject/preview (not the hidden body
+// marker). So we verify in two ways, most reliable first:
+//   (1) OWA search scoped to Sent Items for the correlation marker — OWA
+//       indexes full body text (including our hidden span), so a search hit is
+//       an unambiguous match. We drive it via the search deeplink.
+//   (2) Fallback: scan the rendered Sent-Items list for the normalized subject.
+// We reload/settle between attempts and keep polling until the deadline.
 async function _verifySentItems(win, marker, normSubject, timeoutMs) {
   const result = { found: false, matchedBy: null, at: null };
   try {
-    // Open Sent Items via the OWA search for the marker (indexed from the
-    // hidden span). This avoids Graph and stays inside the OWA session.
-    const searchUrl = OWA_ORIGIN + '/mail/sentitems';
-    if (!win.isDestroyed()) win.loadURL(searchUrl);
     const deadline = Date.now() + timeoutMs;
     const script = _buildSentItemsCheckScript(marker, normSubject);
-    // Give the folder a moment to render, then poll.
-    await _sleep(3000);
+    // Sent Items search deeplink for the marker (folder-scoped full-text).
+    const searchUrl = OWA_ORIGIN + '/mail/sentitems/search/' +
+      encodeURIComponent(marker);
+    const listUrl = OWA_ORIGIN + '/mail/sentitems';
+
+    // First give the send a moment to land + index.
+    await _sleep(4000);
+    let usedSearch = false;
     while (Date.now() < deadline) {
       if (win.isDestroyed()) break;
+      // Alternate: try the marker search first, then fall back to the plain
+      // folder list for the subject scan.
+      const target = usedSearch ? listUrl : searchUrl;
+      try { if (!win.isDestroyed()) win.loadURL(target); } catch (_) {}
+      usedSearch = !usedSearch;
+      await _sleep(3500);
       try {
         const r = await win.webContents.executeJavaScript(script);
         if (r === 'found') { result.found = true; result.matchedBy = 'marker/subject'; result.at = new Date().toISOString(); return result; }
       } catch (_) {}
-      await _sleep(2500);
+      await _sleep(1500);
     }
   } catch (e) {
     result.error = e.message;
