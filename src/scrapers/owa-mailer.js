@@ -371,13 +371,44 @@ async function sendViaOwa(opts) {
 
       const hardTimeout = setTimeout(() => { R.errors.push('overall timeout'); signals.error = 'timeout'; settle({ status: classifyOutcome(signals) }); }, timeoutMs);
 
-      // Auth-wall detection on navigation.
+      // FIX (2026-09-04): the compose window used to bail to blocked-auth on the
+      // FIRST sight of ANY auth host. But the office365.com compose deeplink now
+      // redirects through the cloud.microsoft SSO chain (which momentarily passes
+      // a /common/oauth2 hop) before landing on the real compose editor — and the
+      // warmup has already confirmed the session is good. Bailing on that
+      // transient hop produced a FALSE blocked-auth even though sign-in succeeded.
+      // New behavior: do NOT settle on a transient login host. Instead, if we're
+      // sitting on a login host, arm a short grace timer; only conclude blocked-
+      // auth if we're STILL on a login host after the grace (i.e. genuinely stuck,
+      // needing interactive MFA). Any progress to an Outlook host cancels it.
+      let authGrace = null;
+      const AUTH_GRACE_MS = 12000;
+      const clearAuthGrace = () => { if (authGrace) { clearTimeout(authGrace); authGrace = null; } };
       const onNav = (_e, url) => {
+        if (done) return;
+        if (OUTLOOK_HOST_RE.test(url || '')) { clearAuthGrace(); return; } // made it to Outlook — fine
         if (AUTH_HOST_RE.test(url || '')) {
-          signals.authWall = true;
-          R.errors.push('auth wall: ' + url);
-          clearTimeout(hardTimeout);
-          settle({ status: 'blocked-auth' });
+          if (authGrace) return; // already waiting
+          authGrace = setTimeout(() => {
+            if (done) return;
+            let cur = '';
+            try { cur = win && !win.isDestroyed() ? win.webContents.getURL() : ''; } catch (_) {}
+            // Try to click "Stay signed in?" to push a stalled chain through.
+            const STAY = '(function(){try{var b=document.querySelector("#idSIButton9")||document.querySelector("input[type=submit][value=\\"Yes\\"]");if(b){b.click();return "clicked";}return "no";}catch(e){return "err";}})()';
+            try { if (win && !win.isDestroyed()) win.webContents.executeJavaScript(STAY); } catch (_) {}
+            // Re-check shortly after the click; if still on a login host, it's real.
+            setTimeout(() => {
+              if (done) return;
+              let u = '';
+              try { u = win && !win.isDestroyed() ? win.webContents.getURL() : ''; } catch (_) {}
+              if (AUTH_HOST_RE.test(u) && !OUTLOOK_HOST_RE.test(u)) {
+                signals.authWall = true;
+                R.errors.push('auth wall (stuck): ' + u);
+                clearTimeout(hardTimeout);
+                settle({ status: 'blocked-auth' });
+              }
+            }, 3000);
+          }, AUTH_GRACE_MS);
         }
       };
       win.webContents.on('did-navigate', onNav);
@@ -396,9 +427,17 @@ async function sendViaOwa(opts) {
 
       win.webContents.on('did-finish-load', async () => {
         if (done) return;
-        // If we've navigated to an auth host, onNav already handled it.
         const curUrl = win.webContents.getURL();
-        if (AUTH_HOST_RE.test(curUrl)) { signals.authWall = true; clearTimeout(hardTimeout); settle({ status: 'blocked-auth' }); return; }
+        // On a transient login host, do NOT bail — the onNav grace timer will
+        // click "Stay signed in?" and only conclude blocked-auth if we stay
+        // stuck. Try a stay-in click here too (in case this load IS the prompt),
+        // then wait for the chain to land on Outlook. Bailing here was the false
+        // blocked-auth: the SSO hop finishes loading before redirecting onward.
+        if (AUTH_HOST_RE.test(curUrl) && !OUTLOOK_HOST_RE.test(curUrl)) {
+          const STAY = '(function(){try{var b=document.querySelector("#idSIButton9")||document.querySelector("input[type=submit][value=\\"Yes\\"]");if(b){b.click();return "clicked";}return "no";}catch(e){return "err";}})()';
+          try { await win.webContents.executeJavaScript(STAY); } catch (_) {}
+          return;
+        }
         if (!OUTLOOK_HOST_RE.test(curUrl)) return; // wait for the real compose page (any Outlook host, incl. cloud.microsoft)
 
         try {
