@@ -40,8 +40,24 @@ let logger; try { logger = require('../utils/logger')('owa-mailer'); } catch (_)
 
 const COMPOSE_URL = 'https://outlook.office365.com/mail/deeplink/compose';
 const OWA_ORIGIN  = 'https://outlook.office365.com';
+// FIX (2026-09-04): Microsoft migrated OWA onto a NEW host — outlook.cloud.microsoft
+// — and the office365.com deeplink now silently redirects there. A live probe
+// confirmed the hidden window authenticates silently (interactionType:"silent")
+// and lands on https://outlook.cloud.microsoft/mail/ with the real mailbox
+// ("Mail - Santiago, Z - Outlook"). Our old matchers only knew outlook.office365.com
+// / outlook.office.com, so a fully-successful silent sign-in was never recognized
+// and every warmup/verify "timed out" — misreported as an auth problem when auth
+// had actually SUCCEEDED. These matchers now include outlook.cloud.microsoft.
+// MAILBOX_RE: any real OWA mailbox landing (success signal).
+const MAILBOX_RE = /(outlook\.office365\.com|outlook\.office\.com|outlook\.cloud\.microsoft)\/mail/i;
+// OUTLOOK_HOST_RE: any Outlook host at all (used to know we're on the OWA app,
+// not still mid-redirect on a Microsoft login/SSO host).
+const OUTLOOK_HOST_RE = /(outlook\.office365\.com|outlook\.office\.com|outlook\.cloud\.microsoft)/i;
 // Hosts that indicate an interactive auth / MFA / consent wall — if the window
-// lands here we must pause, not attempt to type or send.
+// lands here we must pause, not attempt to type or send. NOTE: the silent SSO
+// completion lands on outlook.cloud.microsoft/mail/oauthRedirect.html#code=...
+// which is an OUTLOOK host (handled by MAILBOX_RE), not a login host, so it is
+// correctly NOT treated as an auth wall.
 const AUTH_HOST_RE = /(login\.microsoftonline\.com|login\.live\.com|login\.windows\.net|msft\.sts|adfs|\/common\/oauth2|\/consent|multifactor|\bmfa\b)/i;
 
 // OWA markup shifts between builds, so each target has several fallbacks tried
@@ -383,7 +399,7 @@ async function sendViaOwa(opts) {
         // If we've navigated to an auth host, onNav already handled it.
         const curUrl = win.webContents.getURL();
         if (AUTH_HOST_RE.test(curUrl)) { signals.authWall = true; clearTimeout(hardTimeout); settle({ status: 'blocked-auth' }); return; }
-        if (!/outlook\.office365\.com|outlook\.office\.com/i.test(curUrl)) return; // wait for the real compose page
+        if (!OUTLOOK_HOST_RE.test(curUrl)) return; // wait for the real compose page (any Outlook host, incl. cloud.microsoft)
 
         try {
           // 1) Wait for the editor, then insert the HTML body.
@@ -646,7 +662,7 @@ async function warmOwaSession(opts) {
       win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       win.on('show', () => { try { win.hide(); } catch (_) {} });
 
-      const MAILBOX_RE = /outlook\.office365\.com\/mail|outlook\.office\.com\/mail/i;
+      // Uses module-level MAILBOX_RE (now includes outlook.cloud.microsoft).
       const onMailbox = (url) => { clearTimeout(t); setTimeout(() => settle({ ok: true, url }), settleMs); };
 
       // The overall deadline. Unlike before, we DO NOT bail the instant we see a
@@ -664,8 +680,9 @@ async function warmOwaSession(opts) {
         // report a soft failure and let the caller attempt compose anyway.
         let cur = '';
         try { cur = win && !win.isDestroyed() ? win.webContents.getURL() : ''; } catch (_) {}
+        logger.warn && logger.warn('[owa-mailer] warmup timeout — final url: ' + (cur || '(none)'));
         if (AUTH_HOST_RE.test(cur)) settle({ ok: false, authWall: true, url: cur });
-        else settle({ ok: false, reason: 'warmup timeout' });
+        else settle({ ok: false, reason: 'warmup timeout', url: cur });
       }, timeoutMs);
 
       // Click Microsoft's "Stay signed in?" Yes button (#idSIButton9) if present.
@@ -717,19 +734,85 @@ async function warmOwaSession(opts) {
       // Poll while a login host is showing: periodically re-check the URL and
       // attempt the "Stay signed in?" click. This drives the auto-completing SSO
       // chain to the mailbox without any user interaction.
+      let lastLoggedUrl = '';
       poll = setInterval(async () => {
         if (done || !win || win.isDestroyed()) return;
         let cur = '';
         try { cur = win.webContents.getURL(); } catch (_) {}
+        if (cur && cur !== lastLoggedUrl) {
+          lastLoggedUrl = cur;
+          logger.info && logger.info('[owa-mailer] warmup at: ' + cur.slice(0, 120));
+        }
         if (MAILBOX_RE.test(cur)) { onMailbox(cur); return; }
         if (AUTH_HOST_RE.test(cur)) {
-          try { await win.webContents.executeJavaScript(STAY_IN_SCRIPT); } catch (_) {}
+          try {
+            const r = await win.webContents.executeJavaScript(STAY_IN_SCRIPT);
+            if (r && r !== 'no-prompt') logger.info && logger.info('[owa-mailer] warmup stay-in: ' + r);
+          } catch (_) {}
         }
       }, 2000);
 
       win.loadURL(OWA_ORIGIN + '/mail/');
     } catch (e) {
       settle({ ok: false, reason: 'window error: ' + e.message });
+    }
+  });
+}
+
+/**
+ * warmOwaSessionProbe(opts) -> Promise<{ ok, authWall, finalUrl, chain[], title }>
+ * DIAGNOSTIC ONLY (no send). Loads /mail/ and records every URL the window
+ * navigates through, plus the final URL + page title, so we can see exactly
+ * what the OWA SSO does in a hidden (or visible, if opts.show) window. Auto-
+ * clicks "Stay signed in?" like the real warmup. Never types credentials.
+ */
+async function warmOwaSessionProbe(opts) {
+  opts = opts || {};
+  const electron = opts._electron || require('electron');
+  const { BrowserWindow, session } = electron;
+  const timeoutMs = opts.timeoutMs || 60000;
+  const show = !!opts.show;
+  // Uses module-level MAILBOX_RE (now includes outlook.cloud.microsoft).
+  const chain = [];
+  return new Promise((resolve) => {
+    let win, done = false, poll = null;
+    const finish = (over) => {
+      if (done) return; done = true;
+      if (poll) clearInterval(poll);
+      let title = ''; try { title = win && !win.isDestroyed() ? win.webContents.getTitle() : ''; } catch (_) {}
+      let finalUrl = ''; try { finalUrl = win && !win.isDestroyed() ? win.webContents.getURL() : ''; } catch (_) {}
+      // Keep the window open briefly if visible so a human can watch, else close.
+      setTimeout(() => { try { if (win && !win.isDestroyed()) win.close(); } catch (_) {} }, show ? 8000 : 0);
+      resolve(Object.assign({ ok: false, authWall: false, finalUrl, title, chain }, over || {}));
+    };
+    try {
+      win = new BrowserWindow({
+        width: 1100, height: 800, show, x: show ? undefined : -32000, y: show ? undefined : -32000,
+        skipTaskbar: !show,
+        webPreferences: { nodeIntegration: false, contextIsolation: true, session: session.defaultSession },
+      });
+      win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      if (!show) win.on('show', () => { try { win.hide(); } catch (_) {} });
+      const STAY_IN =
+        '(function(){try{var b=document.querySelector("#idSIButton9")||document.querySelector("input[type=submit][value=\\"Yes\\"]");' +
+        'if(b){b.click();return "clicked";}return "no-prompt";}catch(e){return "err:"+e.message;}})()';
+      const record = (url) => { if (url && chain[chain.length - 1] !== url) chain.push(url); };
+      const t = setTimeout(() => {
+        let cur = ''; try { cur = win.webContents.getURL(); } catch (_) {}
+        finish({ ok: MAILBOX_RE.test(cur), authWall: AUTH_HOST_RE.test(cur), reason: 'timeout' });
+      }, timeoutMs);
+      win.webContents.on('did-navigate', (_e, url) => { record(url); if (MAILBOX_RE.test(url)) { clearTimeout(t); finish({ ok: true }); } });
+      win.webContents.on('did-redirect-navigation', (_e, url) => record(url));
+      poll = setInterval(async () => {
+        if (done || !win || win.isDestroyed()) return;
+        let cur = ''; try { cur = win.webContents.getURL(); } catch (_) {}
+        record(cur);
+        if (MAILBOX_RE.test(cur)) { clearTimeout(t); finish({ ok: true }); return; }
+        if (AUTH_HOST_RE.test(cur)) { try { await win.webContents.executeJavaScript(STAY_IN); } catch (_) {} }
+      }, 1500);
+      win.loadURL(OWA_ORIGIN + '/mail/');
+    } catch (e) {
+      finish({ ok: false, reason: 'window error: ' + e.message });
     }
   });
 }
@@ -755,7 +838,7 @@ async function authenticateOwa(opts) {
     const finish = (r) => { if (done) return; done = true; try { if (!win.isDestroyed()) win.close(); } catch (_) {} resolve(r); };
     const t = setTimeout(() => finish({ ok: false, reason: 'auth timeout' }), timeoutMs);
     const onNav = (_e, url) => {
-      if (/outlook\.office365\.com\/mail|outlook\.office\.com\/mail/i.test(url) && !AUTH_HOST_RE.test(url)) {
+      if (MAILBOX_RE.test(url) && !AUTH_HOST_RE.test(url)) {
         clearTimeout(t); setTimeout(() => finish({ ok: true }), 1500);
       }
     };
@@ -803,7 +886,7 @@ async function previewSelectors(opts) {
         const curUrl = win.webContents.getURL();
         out.url = curUrl;
         if (AUTH_HOST_RE.test(curUrl)) { clearTimeout(t); settle({ authWall: true }); return; }
-        if (!/outlook\.office(365)?\.com/i.test(curUrl)) return;
+        if (!OUTLOOK_HOST_RE.test(curUrl)) return;
         try {
           const editorFound = await _waitFor(win, EDITOR_SELECTOR, 30, 1000);
           const probe = await win.webContents.executeJavaScript(_buildSendButtonProbeScript());
@@ -819,10 +902,11 @@ module.exports = {
   sendViaOwa,
   authenticateOwa,
   warmOwaSession,
+  warmOwaSessionProbe,
   previewSelectors,
   // pure helpers (exported for tests + reuse)
   normalizeSubject, normalizeRecipient, toRecipientArray,
   genCorrelationMarker, embedMarker, classifyOutcome,
-  COMPOSE_URL, OWA_ORIGIN, AUTH_HOST_RE, EDITOR_SELECTOR, SEND_SELECTOR,
+  COMPOSE_URL, OWA_ORIGIN, AUTH_HOST_RE, MAILBOX_RE, OUTLOOK_HOST_RE, EDITOR_SELECTOR, SEND_SELECTOR,
   _newResult, _buildInsertScript, _buildSendClickScript, _buildSentItemsCheckScript,
 };

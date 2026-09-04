@@ -160,6 +160,27 @@ describe('auth host detection', () => {
   });
 });
 
+describe('OWA host recognition — new outlook.cloud.microsoft domain (silent-SSO landing)', () => {
+  it('MAILBOX_RE recognizes the migrated cloud.microsoft mailbox as a success landing', () => {
+    // Live probe confirmed OWA now silently lands here after SSO completes.
+    expect(owa.MAILBOX_RE.test('https://outlook.cloud.microsoft/mail/')).toBe(true);
+    expect(owa.MAILBOX_RE.test('https://outlook.cloud.microsoft/mail/oauthRedirect.html#code=abc')).toBe(true);
+    // Legacy hosts still recognized.
+    expect(owa.MAILBOX_RE.test('https://outlook.office365.com/mail/')).toBe(true);
+    expect(owa.MAILBOX_RE.test('https://outlook.office.com/mail/')).toBe(true);
+  });
+  it('the cloud.microsoft mailbox landing is NOT treated as an auth wall', () => {
+    // The silent oauthRedirect completion is on an Outlook host, not a login host.
+    expect(owa.AUTH_HOST_RE.test('https://outlook.cloud.microsoft/mail/oauthRedirect.html#code=abc')).toBe(false);
+    expect(owa.MAILBOX_RE.test('https://login.microsoftonline.com/common/oauth2/authorize')).toBe(false);
+  });
+  it('OUTLOOK_HOST_RE recognizes all three outlook hosts (compose-page gate)', () => {
+    expect(owa.OUTLOOK_HOST_RE.test('https://outlook.cloud.microsoft/mail/deeplink/compose')).toBe(true);
+    expect(owa.OUTLOOK_HOST_RE.test('https://outlook.office365.com/mail/deeplink/compose')).toBe(true);
+    expect(owa.OUTLOOK_HOST_RE.test('https://login.microsoftonline.com/')).toBe(false);
+  });
+});
+
 // A fake Electron whose API SHAPE matches the real one: setWindowOpenHandler
 // lives on webContents (NOT on BrowserWindow). This guards the regression where
 // win.setWindowOpenHandler threw "is not a function" and killed every send.

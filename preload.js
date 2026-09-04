@@ -310,6 +310,7 @@ expose('fleetScheduler', {
   setEnabled:      (patch)   => ipcRenderer.invoke('scheduler:set-enabled', patch),
   setFreshness:    (patch)   => ipcRenderer.invoke('scheduler:set-freshness', patch),
   authenticateOwa: ()        => ipcRenderer.invoke('scheduler:authenticate-owa'),
+  owaProbe:        (opts)    => ipcRenderer.invoke('scheduler:owa-probe', opts),
   openSentItems:   ()        => ipcRenderer.invoke('scheduler:open-sent-items'),
   owaSelfCheck:    ()        => ipcRenderer.invoke('scheduler:owa-selfcheck'),
   // Live job-state updates pushed from the pipeline (scheduler:job-update).

@@ -132,6 +132,13 @@ function registerSchedulerIPC(ctx) {
     logger.info('Interactive OWA authentication requested (scheduler)');
     return authenticateOwa({});
   });
+  // Diagnostic: run the silent warmup and report the redirect chain + final URL
+  // so we can see exactly what the OWA SSO does in a hidden window (no send).
+  handle('scheduler:owa-probe', async (_e, opts) => {
+    const { warmOwaSessionProbe } = require('../scrapers/owa-mailer');
+    logger.info('OWA warmup probe requested');
+    return warmOwaSessionProbe(opts || {});
+  });
   handle('scheduler:open-sent-items', async () => {
     const { shell } = require('electron');
     await shell.openExternal('https://outlook.office365.com/mail/sentitems');
