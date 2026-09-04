@@ -313,7 +313,7 @@ async function sendViaOwa(opts) {
     try {
       const warm = await warmOwaSession({
         _electron: electron,
-        timeoutMs: opts.warmupTimeoutMs || 30000,
+        timeoutMs: opts.warmupTimeoutMs || 60000,
         settleMs: opts.warmupSettleMs,
       });
       if (warm && warm.authWall) {
@@ -618,7 +618,10 @@ async function warmOwaSession(opts) {
   opts = opts || {};
   const electron = opts._electron || require('electron');
   const { BrowserWindow, session } = electron;
-  const timeoutMs = opts.timeoutMs || 30000;
+  // 60s default: the microsoftonline SSO redirect chain + a "Stay signed in?"
+  // click needs real headroom to auto-complete (a bare 30s could time out mid
+  // redirect and mislabel a self-completing chain as an auth wall).
+  const timeoutMs = opts.timeoutMs || 60000;
   // Grace period after landing on the mailbox so OWA can finish its silent
   // token exchange and flush fresh cookies into defaultSession before we
   // navigate on to the compose deeplink.
@@ -628,9 +631,11 @@ async function warmOwaSession(opts) {
     let win, done = false;
     const settle = (over) => {
       if (done) return; done = true;
+      if (poll) { clearInterval(poll); poll = null; }
       try { if (win && !win.isDestroyed()) win.close(); } catch (_) {}
       resolve(Object.assign({ ok: false, authWall: false, url: null }, over || {}));
     };
+    let poll = null;
     try {
       win = new BrowserWindow({
         width: 1100, height: 800,
@@ -641,34 +646,86 @@ async function warmOwaSession(opts) {
       win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       win.on('show', () => { try { win.hide(); } catch (_) {} });
 
-      const t = setTimeout(() => settle({ ok: false, reason: 'warmup timeout' }), timeoutMs);
       const MAILBOX_RE = /outlook\.office365\.com\/mail|outlook\.office\.com\/mail/i;
       const onMailbox = (url) => { clearTimeout(t); setTimeout(() => settle({ ok: true, url }), settleMs); };
-      // Navigation handler: an interactive auth host means genuine MFA/consent is
-      // required — do NOT prompt, report it so the caller keeps the honest
-      // blocked-auth path (never type or click here). A non-auth mailbox landing
-      // means OWA authenticated silently — that's a successful warmup. We handle
-      // both did-navigate and did-finish-load because OWA's SPA can land on the
-      // mailbox via either signal depending on cache/redirect state.
-      const onNav = (_e, url) => {
+
+      // The overall deadline. Unlike before, we DO NOT bail the instant we see a
+      // Microsoft login host — for a session that can complete SSO silently
+      // (confirmed for this user: "Authenticate OWA" lands on the mailbox with
+      // NO password/MFA typed), that login host is just a TRANSIENT redirect hop
+      // in an auto-completing chain. Bailing on first sight of it was killing the
+      // exact chain that works. Instead we let the redirect chain run, auto-click
+      // any "Stay signed in?" prompt to push it through (and to maximize how long
+      // the resulting session persists), and only conclude a genuine interactive
+      // auth wall if we're STILL stuck on a login host at the deadline.
+      const t = setTimeout(() => {
+        // Timed out. If the last URL we saw is a login host, it's a real
+        // interactive wall (needs the visible Authenticate OWA flow). Otherwise
+        // report a soft failure and let the caller attempt compose anyway.
+        let cur = '';
+        try { cur = win && !win.isDestroyed() ? win.webContents.getURL() : ''; } catch (_) {}
+        if (AUTH_HOST_RE.test(cur)) settle({ ok: false, authWall: true, url: cur });
+        else settle({ ok: false, reason: 'warmup timeout' });
+      }, timeoutMs);
+
+      // Click Microsoft's "Stay signed in?" Yes button (#idSIButton9) if present.
+      // This both completes the SSO chain and, crucially, makes the resulting
+      // Office365 session long-lived so subsequent scheduled sends stay automatic
+      // for days instead of re-prompting. Harmless no-op on non-login pages.
+      const STAY_IN_SCRIPT =
+        '(function(){try{' +
+        'var b=document.querySelector("#idSIButton9")' +
+        '||document.querySelector("input[type=submit][value=\\"Yes\\"]")' +
+        '||document.querySelector("button[data-report-event=\\"Signin_Submit\\"]");' +
+        'if(b){b.click();return "clicked-stay-in";}' +
+        // Some tenants show a "Yes"/"No" pair; prefer the accept control.
+        'var yes=[].slice.call(document.querySelectorAll("input,button")).find(function(e){' +
+        ' var t=((e.value||e.textContent||"")+"").trim().toLowerCase(); return t==="yes";});' +
+        'if(yes){yes.click();return "clicked-yes";}' +
+        'return "no-prompt";' +
+        '}catch(e){return "err:"+e.message;}})()';
+
+      const onMailboxCheck = (url) => {
         if (done) return;
-        if (AUTH_HOST_RE.test(url || '')) { clearTimeout(t); settle({ ok: false, authWall: true, url }); return; }
         if (MAILBOX_RE.test(url || '')) { onMailbox(url); }
+        // Login host: do NOT bail. Let the chain continue; the poll below will
+        // try to click "Stay signed in?" to push it through.
       };
-      win.webContents.on('did-navigate', onNav);
-      win.webContents.on('did-redirect-navigation', onNav);
+      win.webContents.on('did-navigate', (_e, url) => onMailboxCheck(url));
+      win.webContents.on('did-redirect-navigation', (_e, url) => onMailboxCheck(url));
       win.webContents.on('did-fail-load', (_e, code, desc) => {
         if (code === -3) return; // aborted (normal for SPA navigations)
-        clearTimeout(t); settle({ ok: false, reason: 'load failed: ' + desc });
+        // A real load failure while NOT on a mailbox — soft-fail (non-fatal);
+        // the caller will still attempt compose which re-checks auth.
+        try {
+          const cur = win && !win.isDestroyed() ? win.webContents.getURL() : '';
+          if (!MAILBOX_RE.test(cur)) { clearTimeout(t); settle({ ok: false, reason: 'load failed: ' + desc }); }
+        } catch (_) { clearTimeout(t); settle({ ok: false, reason: 'load failed: ' + desc }); }
       });
-      win.webContents.on('did-finish-load', () => {
+      win.webContents.on('did-finish-load', async () => {
         if (done) return;
-        const curUrl = win.webContents.getURL();
-        if (AUTH_HOST_RE.test(curUrl)) { clearTimeout(t); settle({ ok: false, authWall: true, url: curUrl }); return; }
-        // Only treat a real mailbox landing as a successful warmup.
-        if (!MAILBOX_RE.test(curUrl)) return;
-        onMailbox(curUrl);
+        let curUrl = '';
+        try { curUrl = win.webContents.getURL(); } catch (_) {}
+        if (MAILBOX_RE.test(curUrl)) { onMailbox(curUrl); return; }
+        // On any login/consent page, try to click through the "Stay signed in?"
+        // prompt so the chain can complete on its own.
+        if (AUTH_HOST_RE.test(curUrl)) {
+          try { await win.webContents.executeJavaScript(STAY_IN_SCRIPT); } catch (_) {}
+        }
       });
+
+      // Poll while a login host is showing: periodically re-check the URL and
+      // attempt the "Stay signed in?" click. This drives the auto-completing SSO
+      // chain to the mailbox without any user interaction.
+      poll = setInterval(async () => {
+        if (done || !win || win.isDestroyed()) return;
+        let cur = '';
+        try { cur = win.webContents.getURL(); } catch (_) {}
+        if (MAILBOX_RE.test(cur)) { onMailbox(cur); return; }
+        if (AUTH_HOST_RE.test(cur)) {
+          try { await win.webContents.executeJavaScript(STAY_IN_SCRIPT); } catch (_) {}
+        }
+      }, 2000);
 
       win.loadURL(OWA_ORIGIN + '/mail/');
     } catch (e) {

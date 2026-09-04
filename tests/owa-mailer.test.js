@@ -163,13 +163,13 @@ describe('auth host detection', () => {
 // A fake Electron whose API SHAPE matches the real one: setWindowOpenHandler
 // lives on webContents (NOT on BrowserWindow). This guards the regression where
 // win.setWindowOpenHandler threw "is not a function" and killed every send.
-function makeFakeElectron(navUrl) {
+function makeFakeElectron(navUrl, scriptCalls) {
   const listeners = {};
   const wc = {
     setWindowOpenHandler() {},               // correct location (on webContents)
     on(evt, cb) { (listeners[evt] = listeners[evt] || []).push(cb); },
     getURL() { return navUrl; },
-    executeJavaScript: async () => 'no',
+    executeJavaScript: async (s) => { if (Array.isArray(scriptCalls)) scriptCalls.push(String(s)); return 'no'; },
     isDestroyed() { return false; },
   };
   function FakeWin() {
@@ -205,29 +205,46 @@ describe('sendViaOwa window setup (regression guard)', () => {
 });
 
 describe('warmOwaSession — silent session warmup (auto sign-in fix)', () => {
-  it('reports ok when the mailbox loads (non-auth outlook host)', async () => {
+  it('reports ok as soon as the mailbox loads (non-auth outlook host)', async () => {
     const fake = makeFakeElectron('https://outlook.office365.com/mail/');
     const r = await owa.warmOwaSession({ _electron: fake, timeoutMs: 3000, settleMs: 5 });
     expect(r.ok).toBe(true);
     expect(r.authWall).toBe(false);
   });
 
-  it('reports authWall (never prompts) when warmup redirects to a login host', async () => {
+  it('does NOT bail immediately on a login host — waits for the SSO chain, then reports authWall only if still stuck at the deadline', async () => {
     const fake = makeFakeElectron('https://login.microsoftonline.com/common/oauth2/authorize');
-    const r = await owa.warmOwaSession({ _electron: fake, timeoutMs: 3000, settleMs: 5 });
+    const start = Date.now();
+    // Short deadline so the test is fast; the key assertion is that it did NOT
+    // resolve near-instantly (which was the old bail-on-first-sight bug) and
+    // ultimately reports an auth wall because the fake never leaves the login host.
+    const r = await owa.warmOwaSession({ _electron: fake, timeoutMs: 800, settleMs: 5 });
     expect(r.ok).toBe(false);
     expect(r.authWall).toBe(true);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(700); // waited for the deadline
+  });
+
+  it('never types credentials — only attempts the "Stay signed in?" click', async () => {
+    // The fake records executeJavaScript calls; assert we only ran the stay-in
+    // probe script and never any credential-filling script.
+    const calls = [];
+    const fake = makeFakeElectron('https://login.microsoftonline.com/common/oauth2/authorize', calls);
+    await owa.warmOwaSession({ _electron: fake, timeoutMs: 800, settleMs: 5 });
+    // Every executed script must be the harmless stay-in/Yes probe.
+    expect(calls.every(s => /idSIButton9|Stay|Yes|Signin_Submit/i.test(s))).toBe(true);
+    expect(calls.some(s => /password|type=password|value.*@/i.test(s))).toBe(false);
   });
 });
 
-describe('sendViaOwa warmup gate — honest blocked-auth on cold session', () => {
-  it('returns blocked-auth (no send) when warmup hits an auth wall', async () => {
+describe('sendViaOwa warmup gate — honest blocked-auth when truly stuck on login', () => {
+  it('returns blocked-auth (no send) when warmup cannot get past the login host', async () => {
     const fake = makeFakeElectron('https://login.microsoftonline.com/common/oauth2/authorize');
-    // No skipWarmup: the warmup runs first, detects the auth wall, and the send
-    // must stop with blocked-auth WITHOUT ever attempting compose/typing/click.
+    // No skipWarmup: the warmup runs first, tries to drive the SSO chain, and
+    // only after failing to reach the mailbox reports the honest auth wall — the
+    // send stops with blocked-auth WITHOUT ever attempting compose/typing/click.
     const r = await owa.sendViaOwa({
       to: 'zilasant@amazon.com', subject: 'Fleet', html: '<html><body>' + 'x'.repeat(300) + '</body></html>',
-      _electron: fake, timeoutMs: 3000,
+      _electron: fake, timeoutMs: 3000, warmupTimeoutMs: 800,
     });
     expect(r.status).toBe('blocked-auth');
     expect(r.sentItemsMatch).toBeFalsy();
