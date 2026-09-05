@@ -29,6 +29,36 @@ const MAX_RECIPIENT_LEN = 128;    // Slack channel name / user handle
 // truncating/rejecting real data.
 const MAX_MESSAGE_LEN   = 40000;  // Slack API message body limit
 
+// ── FAS "last message" outcome selector (spec v2 fix) ────────────────────────
+// The FAS audit log is stored NEWEST-FIRST (runner._appendAudit + executor._audit
+// both unshift), so the most recent event is at index 0 — NOT the end of the
+// array. The engine-status panel was reading audit[audit.length-1] (the OLDEST
+// entry), so "Last message" showed a stale/first event. This picks the newest
+// VALID audit event defensively: prefer entries with a parseable `at` timestamp
+// (max by time); fall back to array order (index 0 = newest by insertion) when
+// timestamps are missing/unparseable. Exported for a regression test.
+function _newestAuditOutcome(audit) {
+  const arr = Array.isArray(audit) ? audit.filter(Boolean) : [];
+  if (!arr.length) return null;
+  // Candidate 1: newest by parseable timestamp.
+  let best = null, bestT = -Infinity;
+  for (const e of arr) {
+    const t = e && e.at ? Date.parse(e.at) : NaN;
+    if (!isNaN(t) && t > bestT) { bestT = t; best = e; }
+  }
+  // Candidate 2: if NO entry had a usable timestamp, the array is newest-first
+  // by insertion, so index 0 is the newest.
+  const a = best || arr[0];
+  if (!a) return null;
+  return {
+    at: a.at || null,
+    engine: a.handledBy || (a.mode === 'shadow' || a.mode === 'disabled' ? 'legacy' : 'digital-fas'),
+    outcome: a.outcome || a.fasDecision || a.status || null,
+    reason: a.queueReason || a.failReason || a.fasReason || a.reason || null,
+    channel: a.channelName || null,
+  };
+}
+
 function registerSlackIPC(ctx) {
   // FEATURE (2026-07-16): the handler below only checks that a token file
   // exists on disk. slack:check-live-auth (added a few lines down) actually
@@ -447,14 +477,13 @@ function registerSlackIPC(ctx) {
     try {
       const cfg = require('../orcha/fas/config').get();
       const primary = !!cfg.enabled && (cfg.mode === 'approval' || cfg.mode === 'autonomous');
-      // Last outcome from the most recent audit entry.
+      // Last outcome = the NEWEST audit event. The log is newest-first, so we
+      // must NOT read the last array element (that's the oldest). Use the
+      // defensive newest-by-timestamp selector.
       let last = null;
       try {
         const audit = require('../../src/store').load('fasAuditLog', []) || [];
-        const a = audit[audit.length - 1];
-        if (a) last = { at: a.at, engine: a.handledBy || (a.mode === 'shadow' || a.mode === 'disabled' ? 'legacy' : 'digital-fas'),
-          outcome: a.outcome || a.fasDecision || null, reason: a.queueReason || a.failReason || a.fasReason || null,
-          channel: a.channelName || null };
+        last = _newestAuditOutcome(audit);
       } catch (_) {}
       return {
         enabled: !!cfg.enabled,
@@ -508,4 +537,4 @@ function registerSlackIPC(ctx) {
   logger.info('Slack IPC handlers registered');
 }
 
-module.exports = { registerSlackIPC };
+module.exports = { registerSlackIPC, _newestAuditOutcome };
