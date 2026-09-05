@@ -115,6 +115,14 @@ const REGISTRY = {
   // startup/sync/schedule/manual; stale coverage is preserved, never wiped by
   // an empty/failed refresh. See src/orcha/fas/coverage.js.
   fasCoverage:             () => path.join(P.dataDir, 'fas_coverage.json'),
+  // Digital FAS shared inbound-message claim ledger (2026-09, spec v2) — the
+  // durable, atomic exactly-once owner registry for every inbound Slack message
+  // keyed by channelId|ts|threadTs. Acquired BEFORE either engine (Digital FAS
+  // or legacy) processes, so the two can never respond concurrently, a retry
+  // cannot duplicate, and a restart cannot resend an already-delivered reply.
+  // Claims carry a lease so a crashed in-flight claim is recoverable. See
+  // src/orcha/fas/inbound-claim.js.
+  fasInboundClaims:        () => path.join(P.dataDir, 'fas_inbound_claims.json'),
   // Digital FAS versioned DOT/FMCSA compliance knowledge source (2026-09) —
   // searchable regulation records (jurisdiction, reg id, equipment, requirement,
   // effective + last-verified dates, authoritative source, FAS interpretation).

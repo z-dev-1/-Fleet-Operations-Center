@@ -46,6 +46,12 @@ let _fasShadow; try { _fasShadow = require('../orcha/fas/shadow'); } catch (_) {
 // Digital FAS UNIFIED runner — decides per-mode who owns the reply (shadow =
 // legacy; approval = queue + legacy silent; autonomous = auto-send or queue).
 let _fasRunner; try { _fasRunner = require('../orcha/fas/runner'); } catch (_) { _fasRunner = null; }
+// Durable, atomic exactly-once inbound-message claim (spec v2). Acquired BEFORE
+// either engine processes a message so FAS + legacy can never both reply, a
+// retry/restart can't duplicate, and a technical fallback transfers ownership
+// to legacy safely. Optional-safe: if unavailable, processing proceeds (the
+// existing reply-log + watermark still dedupe).
+let _inboundClaim; try { _inboundClaim = require('../orcha/fas/inbound-claim'); } catch (_) { _inboundClaim = null; }
 // AITeammate is the INTERNAL AI agent we consult via ASK_INTERNAL. Its DM must
 // NEVER be treated as an ordinary human DM — otherwise the auto-reply engine
 // would answer AITeammate's messages, which could ping-pong into a loop.
@@ -731,6 +737,11 @@ async function pollDMAutoReplyOnce(log) {
   if (!auth || !auth.authenticated) { doLog('[SlackDM] Slack not authenticated — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
   const myUserId = auth.userId || '';
 
+  // Recover any stale in-flight durable claims (e.g. a crash mid-processing on a
+  // prior run) so their messages become re-processable this poll. Delivered/
+  // owned/legacy claims are untouched (never re-sent).
+  if (_inboundClaim) { try { _inboundClaim.reconcile(); } catch (_) {} }
+
   let repliedCount = 0, escalatedCount = 0;
   const newEscalations = [];
   // Hard cap: if this poll runs over 25s (e.g. many thread-reply fetches hanging
@@ -879,26 +890,62 @@ async function pollDMAutoReplyOnce(log) {
           continue;
         }
 
-        // Grab up to 2 messages that came before this one for context.
-        // messages[] is newest-first; filter to older ts, take first 2 (most
-        // recent before this msg), then reverse to chronological order.
+        // ── DURABLE EXACTLY-ONCE CLAIM (spec v2) ──────────────────────────
+        // Acquire a persistent, atomic claim keyed by channel|ts|threadTs BEFORE
+        // any engine processes this message. If it's already delivered (retry/
+        // restart), already owned/queued by FAS, or in-flight, skip. This is the
+        // authoritative single-owner guarantee (not just the in-memory watermark
+        // or reply-log). Optional-safe if the module is unavailable.
+        const _claimTs = msg.ts;
+        const _claimThread = (msg.threadTs && msg.threadTs !== msg.ts) ? msg.threadTs : null;
+        let _claimKey = null;
+        if (_inboundClaim) {
+          const acq = _inboundClaim.acquire({ channelId: dm.channelId, ts: _claimTs, threadTs: _claimThread, owner: 'digital-fas' });
+          if (!acq.ok) {
+            doLog(`[SlackDM] ${dm.name}: message ${msg.ts} already ${acq.already} (durable claim) — skipping`);
+            // Advance the watermark past a delivered/owned message so we don't
+            // re-scan it; a 'processing'/'legacy' in-flight is left for its owner.
+            if (acq.already === 'delivered' || acq.already === 'owned') _saveThreadSeen(dm.channelId, dm.name, msg.ts, !!dm.isGroup);
+            continue;
+          }
+          _claimKey = acq.key;
+        }
+
+        // Build conversation context: at least the 10 most recent prior messages
+        // (spec v2 raised this from 2), relevance-ordered so "any update?"-style
+        // references resolve. messages[] is newest-first; we take the prior
+        // messages, order them: (1) same active thread, (2) same unit as the
+        // current message, then (3) plain recency — then cap and present
+        // chronologically. Older history beyond this window is summarized via
+        // case memory in the FAS agent, not dumped here.
         //
         // FEATURE (2026-07-25): resolve each message's ACTUAL sender name
         // instead of blanket-labelling every non-Z message with dm.name.
-        // For a 1:1 DM dm.name already IS the one counterpart's name, so
-        // this is equivalent -- but for a GROUP DM, dm.name is the joined
-        // "Alice, Bob, Carol" string for the whole thread, which is wrong
-        // to stamp on every individual line. Resolving per-message keeps
-        // multi-person context (who said what) intact for the AI.
+        const HISTORY_LIMIT = 10;
+        const _curUnit = _unitTokenIn(msg.text || '');
+        const _priorMsgs = messages.filter(m => parseFloat(m.ts) < parseFloat(msg.ts));
+        const _relevanceRank = (m) => {
+          // Lower rank = higher priority (kept first when we cap).
+          const inThread = _claimThread && (m.threadTs === _claimThread || m.ts === _claimThread);
+          if (inThread) return 0;
+          if (_curUnit && _unitTokenIn(m.text || '') === _curUnit) return 1;
+          return 2;
+        };
+        const _selected = _priorMsgs
+          .slice() // newest-first
+          .sort((a, b) => {
+            const r = _relevanceRank(a) - _relevanceRank(b);
+            if (r !== 0) return r;
+            return parseFloat(b.ts) - parseFloat(a.ts); // within a tier, newest first
+          })
+          .slice(0, HISTORY_LIMIT)
+          // Present chronologically (oldest-first) so the AI reads the flow.
+          .sort((a, b) => parseFloat(a.ts) - parseFloat(b.ts));
         const historyMsgs = await Promise.all(
-          messages
-            .filter(m => parseFloat(m.ts) < parseFloat(msg.ts))
-            .slice(0, 2)
-            .reverse()
-            .map(async m => {
-              const who = m.userId === myUserId ? 'You' : ((await resolveUserName(m.userId)) || dm.name || 'Them');
-              return who + ': ' + (m.text || '');
-            })
+          _selected.map(async m => {
+            const who = m.userId === myUserId ? 'You' : ((await resolveUserName(m.userId)) || dm.name || 'Them');
+            return who + ': ' + (m.text || '');
+          })
         );
 
         // ── DIGITAL FAS EXECUTION-ORDER GATE (Part 2) ─────────────────────
@@ -930,24 +977,34 @@ async function pollDMAutoReplyOnce(log) {
             if (_fr && _fr.letLegacyReply) {
               // Runner asked us to let the legacy engine reply (error-failsafe /
               // ai-failed-shadow). Fall through — do NOT mark FAS-handled and do
-              // NOT advance the watermark here.
+              // NOT advance the watermark here. Transfer the durable claim to
+              // legacy so it (and only it) may reply this cycle.
               _fasOwned = false;
+              if (_inboundClaim && _claimKey) _inboundClaim.transferToLegacy(_claimKey, 'fas:' + ((_fr && _fr.outcome) || 'letLegacyReply'));
               doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) deferred to legacy (${(_fr && _fr.outcome) || 'letLegacyReply'}) for ${msg.ts}`);
               inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'ai-failed', reason: inbound.REASON.LEGACY_FALLBACK });
             } else if (_fr && _fr.outcome === 'auto-sent' && _fr.sent && _fr.sent.ts) {
               repliedCount++;
+              // Delivery verified (Slack ts) -> mark the durable claim delivered
+              // (terminal; a retry/restart can never resend it).
+              if (_inboundClaim && _claimKey) _inboundClaim.markDelivered(_claimKey, _fr.sent.ts);
               _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
                 ts: msg.ts, replyTs: _fr.sent.ts, question: msg.text, reply: (msg.userId ? `<@${msg.userId}> ` : '') + (_fr.decision && _fr.decision.reply || ''),
                 inScope: true, category: null, title: 'FAS autonomous reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
               inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'sent', reason: inbound.REASON.SENT });
             } else if (_fr && _fr.outcome === 'auto-send-failed') {
-              // Delivery failed — nothing committed; retry this message later.
+              // Delivery failed — nothing committed; mark the claim failed
+              // (recoverable) and retry this message later.
+              if (_inboundClaim && _claimKey) _inboundClaim.markFailed(_claimKey, 'autonomous delivery failed');
               doLog(`[SlackDM] ${dm.name}: FAS autonomous delivery failed for ${msg.ts} — deferring for retry`);
               _markRetry(msg.ts);
               inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'retry', reason: inbound.REASON.SEND_FAILED_RETRY });
               continue;
             } else {
-              // Queued for approval, manual-review (AI failure), or clarify.
+              // Queued for approval, manual-review (AI failure), or clarify. FAS
+              // RETAINS ownership of the durable claim (legacy must never take a
+              // queued message) until it's approved+delivered or rejected.
+              if (_inboundClaim && _claimKey) _inboundClaim.markOwnedQueued(_claimKey);
               _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
                 ts: msg.ts, replyTs: null, question: msg.text, reply: '(FAS ' + _fasMode + ': ' + ((_fr && _fr.outcome) || 'handled') + ')',
                 inScope: true, category: null, title: 'FAS ' + _fasMode, createdAt: new Date().toISOString(), status: 'fas-' + ((_fr && _fr.outcome) || 'handled') });
@@ -955,11 +1012,11 @@ async function pollDMAutoReplyOnce(log) {
               inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'queued', reason: inbound.REASON.QUEUED_REVIEW, detail: (_fr && _fr.outcome) || 'handled' });
             }
           } catch (e) {
-            // FAS threw -> the runner's own error path returns letLegacyReply.
-            // Honor that: fall through to the legacy reply below (do NOT mark
-            // handled), so an AI/runner failure still gets a real reply attempt
-            // instead of only a silent review item.
+            // FAS threw -> genuine technical failure. Transfer the durable claim
+            // to legacy and fall through to the legacy reply below (do NOT mark
+            // handled), so an AI/runner failure still gets a real reply attempt.
             _fasOwned = false;
+            if (_inboundClaim && _claimKey) _inboundClaim.transferToLegacy(_claimKey, 'fas-exception: ' + e.message);
             doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) threw on ${msg.ts}: ${e.message} — falling back to legacy reply`);
             inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'ai-failed', reason: inbound.REASON.LEGACY_FALLBACK, detail: e.message });
           }
@@ -1017,6 +1074,9 @@ async function pollDMAutoReplyOnce(log) {
               });
               doLog(`[SlackDM] ${dm.name}: WR not drafted for ${wrDecision.unitId} — ${wrDecision.note}`);
             }
+            // Handled as a Z-only WR draft (no outbound reply) — release the
+            // durable claim; the watermark advances past this message.
+            if (_inboundClaim && _claimKey) _inboundClaim.release(_claimKey);
             _saveThreadSeen(dm.channelId, dm.name, msg.ts, !!dm.isGroup);
             continue; // handled — no AI draft, no partner reply
           }
@@ -1035,6 +1095,9 @@ async function pollDMAutoReplyOnce(log) {
         // send and log entry; just let the watermark advance past this message.
         if (draft._skip) {
           doLog(`[SlackDM] ${dm.name}: AI held — skipping send for ${msg.ts}`);
+          // Handled (nothing to send) — release the durable claim so it isn't
+          // left dangling in 'processing'; the watermark advances past it.
+          if (_inboundClaim && _claimKey) _inboundClaim.release(_claimKey);
           _saveThreadSeen(dm.channelId, dm.name, msg.ts, !!dm.isGroup);
           continue;
         }
@@ -1045,6 +1108,9 @@ async function pollDMAutoReplyOnce(log) {
         // longer permanently swallows a real question. Cap the watermark below
         // this ts. (We still trace it so it's visible in the debugger.)
         if (draft._fallback) {
+          // AI didn't answer -> not delivered. Release the durable claim to
+          // FAILED (recoverable) so a retry poll can re-acquire this message.
+          if (_inboundClaim && _claimKey) _inboundClaim.markFailed(_claimKey, 'legacy AI unavailable — retry');
           // Bounded retry with backoff. Track attempts per message; after
           // MAX_AI_RETRIES, stop retrying and ESCALATE to the review queue so a
           // persistently-down AI doesn't silently loop forever or drop the ask.
@@ -1139,11 +1205,18 @@ async function pollDMAutoReplyOnce(log) {
           const sendResult = await sendToChannel(dm.channelId, taggedReply, msg.threadTs || undefined);
           replyTs = sendResult.ts;
           repliedCount++;
+          // Legacy delivery verified -> mark the durable claim delivered
+          // (terminal). Covers both FAS-disabled/shadow and post-fallback sends.
+          if (_inboundClaim && _claimKey && replyTs) _inboundClaim.markDelivered(_claimKey, replyTs);
           inbound.clearSendBlocked(dm.channelId); // a successful send clears any prior block
           inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'sent', reason: inbound.REASON.SENT });
         } catch (e) {
           const cls = inbound.classifySendError(e);
           doLog(`[SlackDM] ${dm.name}: reply send FAILED (${cls.kind}): ${e.message}`);
+          // Delivery did NOT succeed -> release the durable claim to
+          // FAILED (recoverable) so a later poll can re-acquire and retry this
+          // exact message. (Leaving it 'processing' would block the retry.)
+          if (_inboundClaim && _claimKey) _inboundClaim.markFailed(_claimKey, 'legacy send failed: ' + cls.kind);
           if (cls.kind === 'send-blocked') {
             // TEMPORARY block (not permanent): recorded with a reason + recheck
             // time. Discovery + incoming tracking continue on future polls; the
