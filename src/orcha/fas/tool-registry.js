@@ -115,6 +115,41 @@ function GET_PM_STATUS(args, ctx) {
   ] };
 }
 
+// GET_INSPECTION_STATUS — the primary DOT-related fact used operationally is the
+// power unit's inspection (annual DOT) due/expiration date. This returns the
+// EXACT date from verified fleet data and classifies it as current / approaching
+// / expired / unavailable. The agent uses THIS for routine "when is the
+// inspection due?" questions — it must NOT search regulations for a due-date
+// question (that's what GET_COMPLIANCE_REQUIREMENT is for). Never invents a date.
+function GET_INSPECTION_STATUS(args, ctx) {
+  const { rows } = _loadFleet();
+  const row = _findRow(rows, args && args.unit);
+  if (!row) return { ok: false, error: 'unit not found' };
+  const denied = _scopeCheck(ctx, row, 'pm_status'); if (denied) return denied;
+  // DOT/annual inspection due date lives under a few historical field names.
+  const raw = row.dot || row.dotDue || row.dotInspection || row.annualInspection || null;
+  let status = 'unavailable', dueDate = null, daysUntil = null;
+  if (raw && String(raw).trim() && !/^--$/.test(String(raw).trim())) {
+    dueDate = String(raw).trim();
+    const t = Date.parse(dueDate);
+    if (!isNaN(t)) {
+      daysUntil = Math.round((t - Date.now()) / 86400000);
+      if (daysUntil < 0) status = 'expired';
+      else if (daysUntil <= 30) status = 'approaching';   // within 30 days
+      else status = 'current';
+    } else {
+      // A non-date string (e.g. "OK"/"N/A") — record it but don't fabricate.
+      status = 'unavailable';
+    }
+  }
+  return { ok: true, verifiedFacts: [
+    _fact('inspectionDueDate', dueDate, 'fleetData(DOT)'),
+    _fact('inspectionStatus', status, 'fleetData(DOT)'),        // current|approaching|expired|unavailable
+    _fact('inspectionDaysUntil', daysUntil, 'fleetData(DOT)'),
+    _fact('unit', row.equipmentId, 'fleetData'),
+  ] };
+}
+
 function GET_UPTAKE_INSIGHTS(args, ctx) {
   const { rows } = _loadFleet();
   const row = _findRow(rows, args && args.unit);
@@ -501,6 +536,7 @@ const READ_TOOLS = {
   GET_REPAIR_TIMELINE,
   GET_OPEN_WORK_ORDERS,
   GET_PM_STATUS,
+  GET_INSPECTION_STATUS,
   GET_UPTAKE_INSIGHTS,
   GET_RELAY_GARAGE_UNIT,
   GET_RELAY_WORK_ORDERS,

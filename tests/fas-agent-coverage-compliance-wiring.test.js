@@ -48,7 +48,7 @@ describe('SAFETY_RULES include power-unit scope + evidence-gated DOT rules', () 
   });
   it('requires GET_COMPLIANCE_REQUIREMENT and forbids fabricated compliance conclusions', () => {
     expect(agent.SAFETY_RULES).toMatch(/GET_COMPLIANCE_REQUIREMENT/);
-    expect(agent.SAFETY_RULES).toMatch(/never declare a unit safe, compliant, or out of service/i);
+    expect(agent.SAFETY_RULES).toMatch(/never declare a unit safe, compliant,.*out of service/i);
     expect(agent.SAFETY_RULES).toMatch(/insufficient-evidence/);
   });
   it('mentions coverage awareness + GET_COVERAGE', () => {

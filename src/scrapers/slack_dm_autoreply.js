@@ -1347,11 +1347,15 @@ async function pollDMAutoReplyOnce(log) {
               continue;
             }
 
-            // Build context from prior messages in this thread (up to 2).
+            // Build context from prior messages in this thread. Spec v2 raised
+            // this from 2 to at least the 10 most recent prior in-thread
+            // messages (replies[] is chronological/oldest-first, so the last 10
+            // before this reply, kept in chronological order for the AI).
+            const THREAD_HISTORY_LIMIT = 10;
             const threadContext = await Promise.all(
               replies
                 .filter(r => parseFloat(r.ts) < parseFloat(reply.ts))
-                .slice(-2)
+                .slice(-THREAD_HISTORY_LIMIT)
                 .map(async r => {
                   const who = r.userId === myUserId ? 'You' : ((await resolveUserName(r.userId)) || dm.name || 'Them');
                   return who + ': ' + (r.text || '');

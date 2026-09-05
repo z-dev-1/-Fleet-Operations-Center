@@ -120,6 +120,7 @@ const SCHEMAS = {
   GET_REPAIR_TIMELINE: { unit: F.unitReq },
   GET_OPEN_WORK_ORDERS: { unit: F.unitReq },
   GET_PM_STATUS: { unit: F.unitReq },
+  GET_INSPECTION_STATUS: { unit: F.unitReq },
   GET_UPTAKE_INSIGHTS: { unit: F.unitReq },
   GET_RELAY_GARAGE_UNIT: { unit: F.unitReq },
   GET_RELAY_WORK_ORDERS: { unit: F.unitReq },
