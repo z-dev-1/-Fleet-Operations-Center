@@ -47,7 +47,13 @@ const SAFETY_RULES =
   '- Do not claim any action has happened. You may PROPOSE actions; they are executed and verified separately.\n' +
   '- Respect sender authorization: never disclose data outside their operator/domicile scope, never propose an action they are not permitted to request.\n' +
   '- If data is missing, stale, or conflicting, say so plainly rather than guessing. If genuinely ambiguous, ask ONE concise clarifying question.\n' +
-  '- Reply in first person as Zila: direct, calm, accountable, concise for Slack. No robotic disclaimers, no "the user should", no raw JSON in the reply text, no mention that an AI wrote it.';
+  '- Reply in first person as Zila: direct, calm, accountable, concise for Slack. No robotic disclaimers, no "the user should", no raw JSON in the reply text, no mention that an AI wrote it.\n' +
+  // POWER-UNIT SCOPE (route unsupported assets; never claim them).
+  '- Your owned asset scope is POWER UNITS only: box trucks, day-cab tractors, sleeper-cab tractors. You may understand other asset types for routing/coordination, but NEVER claim ownership of, take action on, or apply power-unit procedures to trailers, intermodal containers, hostlers, or other unsupported equipment. If a request concerns an unsupported asset, say it is outside your power-unit scope and route it to the appropriate owner/team when known — do not propose MOVE_UNIT or SUBMIT_WORK_REQUEST for it.\n' +
+  // DOT / COMPLIANCE — evidence-gated, never fabricated.
+  '- DOT/compliance: NEVER declare a unit safe, compliant, or out of service, and never cite a regulation, from memory. If a message asks about DOT/FMCSA compliance, an out-of-service condition, or safe return-to-service, you MUST research it with GET_COMPLIANCE_REQUIREMENT (pass topic and, if a specific defect is described, condition). Only state a confirmed status when a matching authoritative record AND a specific qualifying condition support it. Distinguish: confirmed-violation, confirmed-out-of-service, potential-concern (needs inspection), company-policy, maintenance-recommendation, and insufficient-evidence. When evidence is thin, say inspection is required — do not conclude a status.\n' +
+  // COVERAGE awareness.
+  '- Zila\'s coverage (the operators/SCAC/carriers and domiciles Zila owns) is shown in the COVERAGE section. Use it to judge whether a unit/site/operator is in scope and to route correctly. If you need the coverage list and it is not shown, request GET_COVERAGE. Coverage informs routing/scope only — it never grants a sender data permissions.';
 
 const DECISION_CONTRACT =
   '\n\nYou are running inside a bounded research loop. On each step you may EITHER ask for more\n' +
@@ -143,11 +149,29 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
     } catch (_) {}
   }
 
+  // Coverage context (Zila's owned operators/SCAC + domiciles). INTERNAL senders
+  // only — never expose the full carrier roster to a carrier/vendor/unknown
+  // sender. Compact + trusted (derived from our own synced fleet data). Marked
+  // stale when the last refresh could not derive fresh coverage.
+  let coverageText = '';
+  try {
+    const auth = profiles.authorizationSummary(profile);
+    if (auth && auth.isInternal) {
+      const cov = require('./coverage').summary();
+      if (cov && (cov.operatorCount || cov.domicileCount)) {
+        coverageText = 'Operators (SCAC/carriers): ' + (cov.operators || []).join(', ') +
+          '\nDomiciles: ' + (cov.domiciles || []).join(', ') +
+          (cov.stale ? '\n(NOTE: coverage is STALE — last verified ' + (cov.verifiedAt || 'unknown') + '; treat as approximate)' : '');
+      }
+    }
+  } catch (_) { /* coverage optional; never block a reply */ }
+
   const assembled = budget.assemble([
     { key: 'system', label: 'SYSTEM + SAFETY RULES', text: SAFETY_RULES },
     { key: 'loop', label: 'RESEARCH BUDGET', text: 'Step ' + stepInfo.step + ' of max ' + stepInfo.maxSteps + '. Research steps remaining: ' + stepInfo.remaining + '.' },
     { key: 'sender', label: 'SENDER', text: profile.name + ' (' + profile.type + ', ' + (profile.org || 'no org') + ')' },
     { key: 'authorization', label: 'AUTHORIZATION + SCOPE', text: authText },
+    { key: 'coverage', label: 'ZILA COVERAGE (routing/scope context)', text: coverageText },
     { key: 'message', label: 'INCOMING MESSAGE', text: guard.wrapUntrusted('INCOMING MESSAGE', text) },
     { key: 'conversation', label: 'IMMEDIATE CONVERSATION', text: guard.wrapUntrusted('CONVERSATION', convoText) },
     { key: 'playbook', label: 'FAS PLAYBOOK (apply these rules)', text: playbookText },
