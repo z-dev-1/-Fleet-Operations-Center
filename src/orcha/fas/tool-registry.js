@@ -399,6 +399,61 @@ function GET_SENDER_PROFILE(args, ctx) {
   ] };
 }
 
+// ── COVERAGE + COMPLIANCE read tools ────────────────────────────────────────
+// GET_COVERAGE returns Zila's normalized coverage profile (operators == SCAC ==
+// carriers, plus domiciles) derived from the authoritative synced fleetData.
+// This is operational context about "what Zila covers" — INTERNAL-ONLY, never
+// disclosed to a carrier/vendor/unknown sender (it would reveal the full carrier
+// roster across SCACs). It grants NO permissions; it only informs routing/scope.
+function GET_COVERAGE(args, ctx) {
+  const auth = profiles.authorizationSummary(ctx.profile);
+  if (!auth.isInternal) {
+    return { ok: false, denied: true, error: 'coverage profile is internal-only' };
+  }
+  let cov;
+  try { cov = require('./coverage'); } catch (e) { return { ok: false, error: 'coverage unavailable' }; }
+  const s = cov.summary();
+  return { ok: true, summary: 'Coverage: ' + s.operatorCount + ' operators, ' + s.domicileCount + ' domiciles' + (s.stale ? ' (STALE)' : ''),
+    verifiedFacts: [
+      _fact('operators', s.operators, 'coverage/fleetData'),
+      _fact('domiciles', s.domiciles, 'coverage/fleetData'),
+      _fact('coverageVerifiedAt', s.verifiedAt, 'coverage'),
+      _fact('coverageStale', s.stale, 'coverage'),
+    ] };
+}
+
+// GET_COMPLIANCE_REQUIREMENT searches the VERSIONED DOT/FMCSA knowledge source
+// for the applicable requirement(s) for a topic/condition on a power unit. It
+// returns real, cited records (jurisdiction, reg id, requirement, dates, source,
+// interpretation) so the agent can ground any compliance statement in evidence —
+// never invent a regulation. Optionally classifies an observed condition using
+// the strict evidence-gated classifier (violation / OOS / potential / policy /
+// recommendation / insufficient). Compliance knowledge itself is not carrier
+// data, but we still require an authorized (internal) sender to use it, since it
+// informs consequential safety/return-to-service language.
+function GET_COMPLIANCE_REQUIREMENT(args, ctx) {
+  const auth = profiles.authorizationSummary(ctx.profile);
+  if (!auth.isInternal) {
+    return { ok: false, denied: true, error: 'compliance research is internal-only' };
+  }
+  let comp;
+  try { comp = require('./compliance'); } catch (e) { return { ok: false, error: 'compliance source unavailable' }; }
+  const query = (args && (args.condition || args.query || args.keywords)) || '';
+  const topic = (args && args.topic) || '';
+  const equipment = (args && args.equipment) || '';
+  const records = comp.search({ query, topic, equipment, limit: 6 });
+  const facts = [ _fact('complianceRequirements', records.map(r => ({
+    regId: r.regId, jurisdiction: r.jurisdiction, topic: r.topic, requirement: r.requirement,
+    effectiveDate: r.effectiveDate, lastVerified: r.lastVerified, source: r.source, interpretation: r.interpretation,
+  })), 'compliance/DOT-FMCSA') ];
+  // If the caller supplied an observed condition, add a strict classification.
+  if (args && (args.condition || args.observation)) {
+    const cls = comp.classify({ observation: args.condition || args.observation, equipment, unitEvidence: (args && args.unitEvidence) || {} });
+    facts.push(_fact('complianceClassification', cls, 'compliance/classifier'));
+  }
+  return { ok: true, summary: records.length + ' applicable requirement(s)', verifiedFacts: facts };
+}
+
 async function ASK_INTERNAL(args, ctx) {
   // Authorization: ASK_INTERNAL consults the internal Amazon agent (AITeammate).
   // Only internal/manager senders may trigger it — never external carriers/vendors.
@@ -458,6 +513,8 @@ const READ_TOOLS = {
   GET_OPERATOR_SUMMARY,
   GET_VENDOR_CONTACT,
   GET_SENDER_PROFILE,
+  GET_COVERAGE,
+  GET_COMPLIANCE_REQUIREMENT,
   ASK_INTERNAL,
 };
 

@@ -518,6 +518,13 @@ function _startAutoSync() {
     setTimeout(() => scheduler.catchUp(), 15000);
   });
 
+  // ── 5j. Digital FAS coverage profile — derive Zila's domiciles+operators ───
+  // (SCAC/carriers) from the authoritative synced fleetData at startup, then on
+  // a periodic safety refresh. Sync-complete also refreshes it (see sync/index).
+  // Preserves last verified coverage if a refresh is empty/failed. Non-fatal.
+  try { require('./orcha/fas/coverage').start(); log.info('FAS coverage profile started'); }
+  catch (e) { log.warn('FAS coverage start failed (non-fatal):', e.message); }
+
   log.info('Bootstrap complete');
 
 }).catch((err) => {

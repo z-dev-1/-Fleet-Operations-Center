@@ -109,6 +109,19 @@ const REGISTRY = {
   fasKnowledgeDrafts:      () => path.join(P.dataDir, 'fas_knowledge_drafts.json'),
   fasConfig:               () => path.join(P.dataDir, 'fas_config.json'),
   fasAuditLog:             () => path.join(P.dataDir, 'fas_audit_log.json'),
+  // Digital FAS coverage profile (2026-09) — Zila's assigned coverage derived
+  // from the distinct operators (SCAC/carrier) + domiciles present in the
+  // authoritative synced fleetData. Verified-vs-stale tracked; refreshed on
+  // startup/sync/schedule/manual; stale coverage is preserved, never wiped by
+  // an empty/failed refresh. See src/orcha/fas/coverage.js.
+  fasCoverage:             () => path.join(P.dataDir, 'fas_coverage.json'),
+  // Digital FAS versioned DOT/FMCSA compliance knowledge source (2026-09) —
+  // searchable regulation records (jurisdiction, reg id, equipment, requirement,
+  // effective + last-verified dates, authoritative source, FAS interpretation).
+  // Seeded from a bundled baseline; correctable/extendable. Compliance
+  // conclusions must be evidence-gated against this source, never invented.
+  // See src/orcha/fas/compliance.js.
+  fasCompliance:           () => path.join(P.dataDir, 'fas_compliance.json'),
   fasApprovalQueue:        () => path.join(P.dataDir, 'fas_approval_queue.json'),
   fasIdempotency:          () => path.join(P.dataDir, 'fas_idempotency.json'),
   fasMigrationLog:         () => path.join(P.dataDir, 'fas_migration_log.json'),

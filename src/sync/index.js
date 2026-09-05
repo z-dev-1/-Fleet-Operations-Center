@@ -463,6 +463,14 @@ function createSyncEngine(ctx) {
       store.save('fleetData', payload);
       ctx.pushData(payload);
 
+      // ── Digital FAS: refresh coverage profile from the fresh fleet data ──
+      // Coverage == Zila's domiciles + operators (SCAC/carriers). fleetData is
+      // the authoritative source, so re-derive on every successful sync. If the
+      // derivation is empty/failed it preserves the last verified profile and
+      // marks it stale (never wipes verified coverage). Non-fatal.
+      try { require('../orcha/fas/coverage').onSyncComplete(); }
+      catch (e) { logger.warn('FAS coverage refresh (post-sync) failed (non-fatal): ' + e.message); }
+
       // Populate the structured sync result from the freshly-built payload.
       _result.ok = true;
       _result.rowCount = mergedRows.length;
