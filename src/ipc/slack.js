@@ -425,6 +425,49 @@ function registerSlackIPC(ctx) {
     return reg.listActionCatalog().map(a => ({ ...a, enabled: enabled.has(a.name) }));
   });
 
+  // ── FAS coverage profile summary (Zila's domiciles + operators/SCAC) ──────
+  // Compact, no unit-level data. Includes stale flag + last-verified time so
+  // Settings can show current coverage and when it was last confirmed.
+  handle('fas:get-coverage', async () => {
+    try { return require('../orcha/fas/coverage').summary(); }
+    catch (e) { return { error: e.message, operatorCount: 0, domicileCount: 0, operators: [], domiciles: [], stale: true }; }
+  });
+  // Manual coverage refresh (Settings "Refresh coverage" button). Preserves the
+  // last verified profile if the refresh is empty/failed (never wipes verified).
+  handle('fas:refresh-coverage', async () => {
+    try { const p = require('../orcha/fas/coverage').refresh({ reason: 'manual' }); return require('../orcha/fas/coverage').summary(); }
+    catch (e) { return { error: e.message }; }
+  });
+
+  // ── FAS engine status (which engine is primary + last outcome) ────────────
+  // Surfaces the routing truth for Settings: mode, whether Digital FAS is the
+  // primary DM engine, legacy backup status, auto-reply + proactive flags, and
+  // the last handled message's outcome + handling engine + reason.
+  handle('fas:get-engine-status', async () => {
+    try {
+      const cfg = require('../orcha/fas/config').get();
+      const primary = !!cfg.enabled && (cfg.mode === 'approval' || cfg.mode === 'autonomous');
+      // Last outcome from the most recent audit entry.
+      let last = null;
+      try {
+        const audit = require('../../src/store').load('fasAuditLog', []) || [];
+        const a = audit[audit.length - 1];
+        if (a) last = { at: a.at, engine: a.handledBy || (a.mode === 'shadow' || a.mode === 'disabled' ? 'legacy' : 'digital-fas'),
+          outcome: a.outcome || a.fasDecision || null, reason: a.queueReason || a.failReason || a.fasReason || null,
+          channel: a.channelName || null };
+      } catch (_) {}
+      return {
+        enabled: !!cfg.enabled,
+        mode: cfg.mode || 'shadow',
+        primaryEngine: primary ? 'digital-fas' : 'legacy',
+        legacyBackup: primary ? 'silent-backup (technical-failure only)' : 'active',
+        autoRepliesEnabled: cfg.mode === 'autonomous',
+        proactiveSlackEnabled: (cfg.approvedAutomaticActions || []).includes('SEND_SLACK_MESSAGE'),
+        lastOutcome: last,
+      };
+    } catch (e) { return { error: e.message }; }
+  });
+
   // ── FAS playbook + knowledge drafts (Stage 9) ────────────────────────────
   handle('fas:get-playbook', async () => {
     const pb = require('../orcha/fas/playbook');

@@ -43,6 +43,7 @@ async function _saveConfig() {
     await slackBridge.fasSaveConfig({ enabled, mode, maxSteps, maxRuntimeMs });
     _status('FAS config saved (' + mode + (enabled ? ', enabled' : ', disabled') + ')', 'ok');
     toast.show('success', 'FAS config saved', 2000);
+    try { _refreshEngineStatus(); } catch (_) {}
   } catch (e) {
     _status('Save failed: ' + e.message, 'error');
   }
@@ -136,6 +137,90 @@ async function _refreshFollowUps() {
   }
 }
 
+// ── Engine status + coverage panel ───────────────────────────────────────────
+// Surfaces the routing truth (which engine is primary, legacy backup status,
+// auto-reply/proactive flags) and Zila's current coverage (operators/SCAC +
+// domiciles) with the last-verified time. Rendered into #fas-engine-status; if
+// that element isn't in the settings HTML, we create one at the top of the FAS
+// section so this works without editing the settings template.
+function _ensureEngineStatusEl() {
+  let el = document.getElementById('fas-engine-status');
+  if (el) return el;
+  const sect = document.getElementById('sect-fas');
+  if (!sect) return null;
+  el = document.createElement('div');
+  el.id = 'fas-engine-status';
+  el.style.cssText = 'border:1px solid var(--bd,#333);border-radius:8px;padding:10px;margin-bottom:10px';
+  // Insert as the first child of the section so it's the header.
+  sect.insertBefore(el, sect.firstChild);
+  return el;
+}
+
+async function _refreshEngineStatus() {
+  const el = _ensureEngineStatusEl();
+  if (!el) return;
+  try {
+    const [st, cov] = await Promise.all([
+      slackBridge.fasGetEngineStatus ? slackBridge.fasGetEngineStatus() : Promise.resolve(null),
+      slackBridge.fasGetCoverage ? slackBridge.fasGetCoverage() : Promise.resolve(null),
+    ]);
+    const pill = (txt, color) => '<span style="font-size:9px;font-weight:700;color:#fff;background:' + color + ';padding:2px 7px;border-radius:8px">' + _esc(txt) + '</span>';
+    const primaryPill = st && st.primaryEngine === 'digital-fas'
+      ? pill('Digital FAS = PRIMARY', 'var(--acc2,#2d7)')
+      : pill('Legacy DM = primary', 'var(--warn,#b8860b)');
+    const modePill = st ? pill('mode: ' + (st.mode || '?'), 'var(--acc,#3a6ea5)') : '';
+    const autoPill = st && st.autoRepliesEnabled ? pill('auto-replies ON', 'var(--acc2,#2d7)') : pill('auto-replies off', '#777');
+    const proPill = st && st.proactiveSlackEnabled ? pill('proactive Slack ON', 'var(--acc2,#2d7)') : pill('proactive off', '#777');
+
+    let last = '';
+    if (st && st.lastOutcome) {
+      const lo = st.lastOutcome;
+      const when = (() => { try { return new Date(lo.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (_) { return lo.at || ''; } })();
+      last = '<div class="sd-hint" style="margin-top:4px"><strong>Last message:</strong> ' +
+        _esc(lo.outcome || '?') + ' · handled by ' + _esc(lo.engine || '?') +
+        (lo.reason ? ' · ' + _esc(String(lo.reason).slice(0, 80)) : '') +
+        (lo.channel ? ' · ' + _esc(lo.channel) : '') + ' · ' + _esc(when) + '</div>';
+    }
+
+    let covHtml = '<div class="sd-hint" style="opacity:.7">Coverage unavailable.</div>';
+    if (cov && !cov.error) {
+      const verified = (() => { try { return cov.verifiedAt ? new Date(cov.verifiedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'never'; } catch (_) { return cov.verifiedAt || 'never'; } })();
+      const staleTag = cov.stale ? ' <span style="color:var(--err,#c0392b);font-weight:700">(STALE)</span>' : '';
+      const ops = (cov.operators || []).slice(0, 24).join(', ') + ((cov.operators || []).length > 24 ? ' …' : '');
+      const doms = (cov.domiciles || []).slice(0, 24).join(', ') + ((cov.domiciles || []).length > 24 ? ' …' : '');
+      covHtml =
+        '<div class="sd-hint" style="margin-top:6px"><strong>Coverage</strong> — ' + (cov.operatorCount || 0) + ' operators / SCAC, ' + (cov.domicileCount || 0) + ' domiciles · verified ' + _esc(verified) + staleTag +
+          (cov.conflictCount ? ' · <span style="color:var(--warn,#b8860b)">' + cov.conflictCount + ' conflict(s) to review</span>' : '') + '</div>' +
+        '<div class="sd-hint" style="opacity:.85"><strong>Operators (SCAC):</strong> ' + _esc(ops || '—') + '</div>' +
+        '<div class="sd-hint" style="opacity:.85"><strong>Domiciles:</strong> ' + _esc(doms || '—') + '</div>';
+    } else if (cov && cov.error) {
+      covHtml = '<div class="sd-hint" style="color:var(--err,#c0392b)">Coverage error: ' + _esc(cov.error) + '</div>';
+    }
+
+    el.innerHTML =
+      '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">' + primaryPill + modePill + autoPill + proPill +
+        '<span style="flex:1"></span>' +
+        '<button class="sd-btn secondary" id="fas-refresh-coverage" style="font-size:10px">Refresh coverage</button>' +
+      '</div>' +
+      (st ? '<div class="sd-hint" style="margin-top:4px;opacity:.8">Legacy DM: ' + _esc(st.legacyBackup || '') + '</div>' : '') +
+      last + covHtml;
+
+    const rb = document.getElementById('fas-refresh-coverage');
+    if (rb && !rb._wired) {
+      rb._wired = true;
+      rb.addEventListener('click', async () => {
+        rb.disabled = true; rb.textContent = 'Refreshing…';
+        try { if (slackBridge.fasRefreshCoverage) await slackBridge.fasRefreshCoverage(); toast.show('success', 'Coverage refreshed', 1800); }
+        catch (e) { toast.show('error', 'Refresh failed: ' + e.message, 3000); }
+        rb.disabled = false; rb.textContent = 'Refresh coverage';
+        _refreshEngineStatus();
+      });
+    }
+  } catch (e) {
+    el.innerHTML = '<div class="sd-hint" style="color:var(--err,#c0392b)">Engine status failed: ' + _esc(e.message) + '</div>';
+  }
+}
+
 async function _refreshAutoActions() {
   const list = document.getElementById('fas-autoaction-list');
   if (!list) return;
@@ -143,12 +228,18 @@ async function _refreshAutoActions() {
     const cat = await slackBridge.fasGetActionCatalog();
     if (!cat || !cat.length) { list.innerHTML = '<div class="sd-hint">No actions registered.</div>'; return; }
     list.innerHTML = cat.map((a) => {
+      // Label reflects the TRUE gate: 'low' auto-eligible by default; an
+      // approval-level action is approval-only UNLESS it's explicitly marked
+      // automatic-eligible (e.g. SEND_SLACK_MESSAGE), in which case it can be
+      // whitelisted below. (Fixes the old blanket "always requires approval".)
       const lvl = a.level === 'low'
-        ? '<span style="color:var(--ok,#2e7d32);font-size:9px">low-risk</span>'
-        : '<span style="color:var(--err,#c0392b);font-size:9px">always requires approval</span>';
+        ? '<span style="color:var(--ok,#2e7d32);font-size:9px">low-risk (auto-eligible)</span>'
+        : (a.eligibleForAutomatic
+            ? '<span style="color:var(--warn,#b8860b);font-size:9px">approval by default · can allow automatic</span>'
+            : '<span style="color:var(--err,#c0392b);font-size:9px">approval required (mutation)</span>');
       const control = a.eligibleForAutomatic
         ? '<label class="sd-hint" style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" class="fas-auto-cb" data-name="' + _esc(a.name) + '"' + (a.enabled ? ' checked' : '') + '/> allow automatic</label>'
-        : '<span class="sd-hint" style="opacity:.6">approval only</span>';
+        : '<span class="sd-hint" style="opacity:.6">approval only (never auto)</span>';
       return '<div style="border:1px solid var(--bd,#333);border-radius:8px;padding:8px">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
           '<span style="font-size:11px;font-weight:700">' + _esc(a.name) + '</span>' + lvl +
@@ -351,7 +442,7 @@ export function initFasSettings() {
   const saveBtn = document.getElementById('fas-save');
   const refreshBtn = document.getElementById('fas-refresh-audit');
   if (saveBtn) saveBtn.addEventListener('click', _saveConfig);
-  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshAudit(); _refreshReplyApprovals(); _refreshFollowUps(); _refreshApprovals(); _refreshAutoActions(); _refreshDrafts(); _refreshProfiles(); });
+  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshEngineStatus(); _refreshAudit(); _refreshReplyApprovals(); _refreshFollowUps(); _refreshApprovals(); _refreshAutoActions(); _refreshDrafts(); _refreshProfiles(); });
   const migrateBtn = document.getElementById('fas-migrate-profiles');
   if (migrateBtn) migrateBtn.addEventListener('click', async () => {
     migrateBtn.disabled = true; migrateBtn.textContent = 'Migrating…';
@@ -370,6 +461,7 @@ export function initFasSettings() {
     _refreshAutoActions();
   });
   _loadConfig();
+  _refreshEngineStatus();
   _refreshAudit();
   _refreshReplyApprovals();
   _refreshFollowUps();
