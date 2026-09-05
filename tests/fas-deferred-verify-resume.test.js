@@ -18,7 +18,7 @@ const relay = require('../src/orcha/relay');
 const AAP = 'https://aap-na.corp.amazon.com/v2/asset/x';
 function seed(mode) {
   store.save('fleetData', { syncedAt: new Date().toISOString(), rows: [
-    { equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', lifecycleState: 'Unavailable', assetUrl: AAP },
+    { equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', assetType: 'Tractor', bodyType: 'Day Cab', lifecycleState: 'Unavailable', assetUrl: AAP },
   ] });
   store.save('contacts', [{ type: 'slack', slackId: 'U_INT', name: 'Zila', org: 'Amazon', email: 'z@amazon.com' }]);
   store.save('slackSenderProfiles', {});
@@ -53,7 +53,7 @@ describe('Part 7: deferred lifecycle verification resumes the SAME transaction',
 
     // Fleet sync now shows the unit is Active -> reconcile marks the MOVE_UNIT
     // idempotency entry done.
-    store.save('fleetData', { syncedAt: new Date().toISOString(), rows: [{ equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', lifecycleState: 'Active', assetUrl: AAP }] });
+    store.save('fleetData', { syncedAt: new Date().toISOString(), rows: [{ equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', assetType: 'Tractor', bodyType: 'Day Cab', lifecycleState: 'Active', assetUrl: AAP }] });
     executor.reconcileVerifyingLifecycle();
 
     // Resume the waiting transaction with an injected send.
@@ -75,7 +75,7 @@ describe('Part 7: deferred lifecycle verification resumes the SAME transaction',
     expect(runner.getReplyQueue('waiting-verification').length).toBe(1);
 
     // Fleet sync shows the unit is STILL Unavailable -> reconcile marks failed.
-    store.save('fleetData', { syncedAt: new Date().toISOString(), rows: [{ equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', lifecycleState: 'Unavailable', assetUrl: AAP }] });
+    store.save('fleetData', { syncedAt: new Date().toISOString(), rows: [{ equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', assetType: 'Tractor', bodyType: 'Day Cab', lifecycleState: 'Unavailable', assetUrl: AAP }] });
     executor.reconcileVerifyingLifecycle();
 
     const r = await runner.resumeVerifiedTransactions({ sendToChannel: async (c, t) => { sends.push(t); return { ts: 'F' }; } });

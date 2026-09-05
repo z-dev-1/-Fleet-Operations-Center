@@ -27,6 +27,12 @@ function reset() {
   store.save('fasAuditLog', []);
   store.save('fasConfig', null);
   store.save('fasCases', {});
+  // Seed the units used by the MOVE_UNIT routing tests as power units (Day Cab)
+  // so the code-level power-unit gate passes and these tests exercise ROUTING.
+  store.save('fleetData', { syncedAt: new Date().toISOString(), rows: [
+    { equipmentId: '1', operator: 'TUZR', domicileSite: 'ABE40', assetType: 'Tractor', bodyType: 'Day Cab', lifecycleState: 'Active' },
+    { equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', assetType: 'Tractor', bodyType: 'Day Cab', lifecycleState: 'Active' },
+  ] });
 }
 beforeEach(() => { reset(); });
 afterEach(() => { try { fs.rmSync(tmpDir, { recursive: true }); } catch (_) {} fs.mkdirSync(tmpDir, { recursive: true }); });

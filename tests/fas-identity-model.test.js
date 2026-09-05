@@ -17,8 +17,10 @@ const executor = require('../src/orcha/fas/executor');
 
 function seedFleet() {
   store.save('fleetData', { syncedAt: new Date().toISOString(), rows: [
-    { equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', lifecycleState: 'Unavailable' },
-    { equipmentId: '999999', operator: 'SAPB', domicileSite: 'EWR9', lifecycleState: 'Active' },
+    // Power units (Day Cab) so the code-level power-unit gate passes and these
+    // tests exercise the identity/requester permission model (their subject).
+    { equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', assetType: 'Tractor', bodyType: 'Day Cab', lifecycleState: 'Unavailable' },
+    { equipmentId: '999999', operator: 'SAPB', domicileSite: 'EWR9', assetType: 'Tractor', bodyType: 'Day Cab', lifecycleState: 'Active' },
   ] });
   store.save('fasAuditLog', []); store.save('fasIdempotency', {}); store.save('notesStore', {});
 }

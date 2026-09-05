@@ -22,8 +22,8 @@ const CARRIER_TUZR = { slackId: 'U_C', name: 'Carrier', type: 'carrier', operato
 
 function seed(mode) {
   store.save('fleetData', { syncedAt: new Date().toISOString(), rows: [
-    { equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', lifecycleState: 'Active' }, // TUZR
-    { equipmentId: '622072', operator: 'SAPB', domicileSite: 'EWR45', lifecycleState: 'Active' }, // SAPB (out of carrier scope)
+    { equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', assetType: 'Tractor', bodyType: 'Day Cab', lifecycleState: 'Active' }, // TUZR
+    { equipmentId: '622072', operator: 'SAPB', domicileSite: 'EWR45', assetType: 'Tractor', bodyType: 'Day Cab', lifecycleState: 'Active' }, // SAPB (out of carrier scope)
   ] });
   store.save('fasApprovalQueue', []);
   store.save('fasAuditLog', []);

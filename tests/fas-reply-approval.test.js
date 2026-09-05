@@ -17,7 +17,7 @@ const relay = require('../src/orcha/relay');
 
 function seed(mode) {
   store.save('fleetData', { syncedAt: new Date().toISOString(), rows: [
-    { equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', lifecycleState: 'Active' },
+    { equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', assetType: 'Tractor', bodyType: 'Day Cab', lifecycleState: 'Active' },
   ] });
   store.save('contacts', [{ type: 'slack', slackId: 'U_INT', name: 'Zila', org: 'Amazon', email: 'z@amazon.com' }]);
   store.save('slackSenderProfiles', {});

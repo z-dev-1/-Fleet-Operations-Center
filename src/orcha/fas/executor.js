@@ -39,6 +39,70 @@ const QUEUE_CAP = 300;
 // request type. (Part 11: category permission != per-unit authority.)
 const INTERNAL_ONLY_ACTIONS = new Set(['MOVE_UNIT', 'SUBMIT_WORK_REQUEST']);
 
+// ── POWER-UNIT GATE (spec v2) ────────────────────────────────────────────────
+// Zila owns POWER UNITS ONLY: box trucks, day-cab tractors, sleeper-cab
+// tractors. Operational fleet actions (MOVE_UNIT, SUBMIT_WORK_REQUEST) must be
+// blocked at the CODE level for any other equipment (trailers, hostlers,
+// intermodal containers, etc.) — even if the AI incorrectly proposes them.
+// Equipment type is determined ONLY from the VERIFIED unit record (assetType /
+// bodyType from AAP), NEVER from the unit-number format, a sender's claim, or AI
+// memory. Hostlers are explicitly OUT of scope here even though AAP classifies
+// them as a "power unit" for the WR wizard.
+const POWER_UNIT_ACTIONS = new Set(['MOVE_UNIT', 'SUBMIT_WORK_REQUEST']);
+
+// Classify a verified fleet row's equipment type against Zila's power-unit
+// scope. Returns { klass, powerUnit, resolved }:
+//   klass: 'box-truck' | 'day-cab' | 'sleeper-cab' | 'tractor' | 'hostler' |
+//          'trailer' | 'container' | 'other' | 'unknown'
+//   powerUnit: true only for box-truck / day-cab / sleeper-cab / (generic) tractor
+//   resolved: whether we could determine a type from the record at all
+function classifyEquipment(row) {
+  if (!row) return { klass: 'unknown', powerUnit: false, resolved: false };
+  const asset = String(row.assetType || '').toLowerCase();
+  const body = String(row.bodyType || row.type || '').toLowerCase();
+  const hay = (asset + ' ' + body).trim();
+  if (!hay) return { klass: 'unknown', powerUnit: false, resolved: false };
+  // Explicit NON-power-unit types first (never ownable/actionable here).
+  if (/hostler|yard\s*truck|yard\s*tractor|spotter/.test(hay)) return { klass: 'hostler', powerUnit: false, resolved: true };
+  if (/trailer/.test(hay)) return { klass: 'trailer', powerUnit: false, resolved: true };
+  if (/container|intermodal|chassis/.test(hay)) return { klass: 'container', powerUnit: false, resolved: true };
+  // Power units.
+  if (/box\s*truck|box/.test(hay)) return { klass: 'box-truck', powerUnit: true, resolved: true };
+  if (/sleeper/.test(hay)) return { klass: 'sleeper-cab', powerUnit: true, resolved: true };
+  if (/day\s*cab/.test(hay)) return { klass: 'day-cab', powerUnit: true, resolved: true };
+  // A generic "tractor" (assetType) with no cab detail is still a power unit
+  // (day/sleeper are both tractors); treat as power unit.
+  if (/tractor/.test(hay)) return { klass: 'tractor', powerUnit: true, resolved: true };
+  // Recognized-but-not-matched -> resolved but not a power unit.
+  return { klass: 'other', powerUnit: false, resolved: true };
+}
+
+// Look up a verified fleet row by unit id (case-insensitive). Never infers.
+function _findVerifiedRow(unit) {
+  if (!unit) return null;
+  try {
+    const rows = (store.load('fleetData', {}) || {}).rows || [];
+    const u = String(unit).trim().toUpperCase();
+    return rows.find(r => String(r.equipmentId || '').trim().toUpperCase() === u) || null;
+  } catch (_) { return null; }
+}
+
+// The code-level gate. Returns null if OK to proceed, or a blocking result.
+// `blockedReason` codes:
+//   'power-unit:not-in-scope'  — verified as a non-power-unit (route out)
+//   'power-unit:unresolved'    — no verified equipment type; do NOT act, research/clarify
+function _powerUnitGate(name, args) {
+  if (!POWER_UNIT_ACTIONS.has(name)) return null; // gate only fleet-mutating actions
+  const unit = args && (args.unit || args.equipmentId);
+  if (!unit) return { ok: false, code: 'power-unit:unresolved', reason: 'no unit specified — cannot verify equipment type' };
+  const row = _findVerifiedRow(unit);
+  if (!row) return { ok: false, code: 'power-unit:unresolved', reason: 'unit ' + unit + ' not in verified fleet data — cannot confirm it is a power unit; research the unit before acting' };
+  const cls = classifyEquipment(row);
+  if (!cls.resolved) return { ok: false, code: 'power-unit:unresolved', reason: 'equipment type for unit ' + unit + ' is not recorded — cannot confirm power unit; research before acting' };
+  if (!cls.powerUnit) return { ok: false, code: 'power-unit:not-in-scope', reason: 'unit ' + unit + ' is a ' + cls.klass + ', which is outside power-unit scope (box truck, day cab, sleeper cab) — route to the appropriate owner; no MOVE_UNIT/SUBMIT_WORK_REQUEST', klass: cls.klass };
+  return null; // power unit confirmed — proceed
+}
+
 // ── UNIT-LEVEL AUTHORIZATION (Part 11) ───────────────────────────────────────
 // Category permission (canRequest) is NOT sufficient. For any unit-specific
 // action we must ALSO confirm the TARGET UNIT is within the sender's
@@ -47,6 +111,13 @@ const INTERNAL_ONLY_ACTIONS = new Set(['MOVE_UNIT', 'SUBMIT_WORK_REQUEST']);
 // EXECUTION time (authorization can change between the two).
 function _authorizeUnitAction(name, args, profile, action) {
   action = action || actions.getAction(name);
+  // 0) POWER-UNIT GATE (spec v2) — code-level, BEFORE anything else. A fleet-
+  //    mutating action on a non-power-unit (or an unresolved equipment type) is
+  //    blocked regardless of what the AI proposed or the sender's permissions.
+  const puGate = _powerUnitGate(name, args);
+  if (puGate && !puGate.ok) {
+    return { ok: false, reason: puGate.reason, powerUnitBlock: puGate.code, klass: puGate.klass };
+  }
   // 1) Category permission.
   if (action && action.requires && !profiles.canRequest(profile, action.requires)) {
     return { ok: false, reason: 'sender not authorized for request type ' + action.requires };
@@ -319,8 +390,8 @@ async function executeVerified(name, args, ctx) {
   // blocked action must never execute.
   const authz = _authorizeUnitAction(name, args, ctx && ctx.profile, action);
   if (!authz.ok) {
-    _audit({ action: name, status: 'blocked-at-exec', reason: authz.reason });
-    return { status: 'blocked', error: authz.reason };
+    _audit({ action: name, status: 'blocked-at-exec', reason: authz.reason, powerUnitBlock: authz.powerUnitBlock, klass: authz.klass });
+    return { status: 'blocked', error: authz.reason, powerUnitBlock: authz.powerUnitBlock, klass: authz.klass };
   }
 
   // ── ORIGINAL-REQUESTER AUTHORIZATION (Part 5) ─────────────────────────────
@@ -437,8 +508,8 @@ async function routeAction(name, args, ctx) {
   const profile = ctx && ctx.profile;
   const authz = _authorizeUnitAction(name, args, profile, action);
   if (!authz.ok) {
-    _audit({ action: name, status: 'blocked', reason: authz.reason });
-    return { outcome: 'blocked', detail: authz.reason };
+    _audit({ action: name, status: 'blocked', reason: authz.reason, powerUnitBlock: authz.powerUnitBlock, klass: authz.klass });
+    return { outcome: 'blocked', detail: authz.reason, powerUnitBlock: authz.powerUnitBlock, klass: authz.klass };
   }
   // Permission snapshot captured at proposal time (stored on queued items).
   const permissionSnapshot = profile ? {
@@ -517,4 +588,4 @@ function _safeArgs(args) {
   return a;
 }
 
-module.exports = { routeAction, executeVerified, approveQueued, rejectQueued, getQueue, reconcileInFlight, reconcileVerifyingLifecycle, lifecycleVerdictFor, clearIdem, _idemBlock, _claimIdem };
+module.exports = { routeAction, executeVerified, approveQueued, rejectQueued, getQueue, reconcileInFlight, reconcileVerifyingLifecycle, lifecycleVerdictFor, clearIdem, _idemBlock, _claimIdem, classifyEquipment, _powerUnitGate, _authorizeUnitAction };

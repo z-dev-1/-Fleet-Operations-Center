@@ -23,6 +23,11 @@ function reset() {
   store.save('fasCases', {});
   store.save('fasAuditLog', []);
   store.save('fasIdempotency', {});
+  // Seed 320160 as a power unit (Day Cab) so the code-level power-unit gate
+  // passes and the MOVE_UNIT read-back verification tests exercise their subject.
+  store.save('fleetData', { syncedAt: new Date().toISOString(), rows: [
+    { equipmentId: '320160', operator: 'TUZR', domicileSite: 'ABE40', assetType: 'Tractor', bodyType: 'Day Cab', lifecycleState: 'Unavailable' },
+  ] });
 }
 beforeEach(() => { reset(); });
 afterEach(() => { vi.restoreAllMocks(); try { fs.rmSync(tmpDir, { recursive: true }); } catch (_) {} fs.mkdirSync(tmpDir, { recursive: true }); });
