@@ -72,6 +72,18 @@ let _areaCount = 1;
 let _progUnsub = null;
 let _towAddrUnsub = null; // BUG FIX (2026-07-16): see _wireTow() below
 let _attachments = []; // FEATURE (2026-07-23): [{name, dataUrl}] -- auto-attach + manual + drag-drop
+let _copyFromWrId = null; // set by the "+ 2nd WR (reuse data)" flow -> AAP copiedFromWorkRequestId
+
+// Resolve the unit's EXISTING work-request id (raw UUID) from the unit record,
+// so a second WR can be linked to it via AAP's copiedFromWorkRequestId.
+// Accepts workRequestId, _serviceUUID, or a /v2/service/<uuid> serviceUrl.
+function _existingWrId(unit) {
+  if (!unit) return null;
+  const cand = unit.workRequestId || unit._serviceUUID || unit.serviceUrl || '';
+  const m = String(cand).match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+  if (m) return m[1];
+  return /^[a-f0-9-]{36}$/i.test(String(cand).trim()) ? String(cand).trim() : null;
+}
 
 // ── Escape helpers ────────────────────────────────────────────────────────
 const _safe     = (s) => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -136,10 +148,10 @@ function _buildHTML(unit) {
     <!-- Work Details -->
     <div class="wr-section">
       <div class="wr-section__title" style="display:flex;justify-content:space-between;align-items:center;">Work Details <button id="wr-ai-assist" type="button" class="detail-panel__btn detail-panel__btn--secondary" style="font-size:9px;padding:2px 8px;">✨ AI Fill</button></div>
-      <label class="settings-label">WR Title
-        <input id="wr-title" class="settings__input" type="text"
+      <label class="settings-label">WR Title <span id="wr-title-count" class="wr-title-count" style="float:right;font-size:9px;opacity:.6">0/90</span>
+        <input id="wr-title" class="settings__input" type="text" maxlength="90"
           placeholder="Type title then press Enter or click AI Fill..."
-          value="${_safeAttr(unit.pmStatus || unit.issueDetails || '')}" />
+          value="${_safeAttr((unit.pmStatus || unit.issueDetails || '').slice(0, 90))}" />
       </label>
       <label class="settings-label" style="margin-top:6px">Issue Description
         <textarea id="wr-issue" class="settings__textarea" rows="3"
@@ -286,6 +298,8 @@ function _buildHTML(unit) {
       title="Open AAP browser window with payload auto-filled">Open in AAP (autofill)</button>
     <div class="wr-footer-right">
       <button id="wr-cancel" class="detail-panel__btn detail-panel__btn--secondary">Cancel</button>
+      <button id="wr-submit-second" class="detail-panel__btn detail-panel__btn--secondary"
+        title="Create a SECOND work request reusing all of this unit's data (e.g. a Dealer Tracking Event) — just give it a different title. Links to the existing WR.">+ 2nd WR (reuse data)</button>
       <button id="wr-submit" class="detail-panel__btn wr-submit-btn">Submit WR</button>
     </div>
   </div>
@@ -315,7 +329,8 @@ function _collectPayload() {
 
   return {
     unit:            _unit.id          || _unit.equipmentId || '',
-    title:           (_el('wr-title').value   || '').trim(),
+    title:           (_el('wr-title').value   || '').trim().slice(0, 90),
+    copiedFromWorkRequestId: _copyFromWrId || null,
     issue:           (_el('wr-issue').value   || '').trim(),
     vendor:          (_el('wr-vendor').value  || '').trim(),
     urgent:          _el('wr-urgent').checked ? 'Yes' : 'No',
@@ -518,18 +533,52 @@ function _wireScreenshot() {
   _renderAttachments();
 }
 
+// ── Wire: title character counter (90-char limit) ─────────────────────────
+function _wireTitleCount() {
+  const titleEl = _el('wr-title');
+  const countEl = _el('wr-title-count');
+  if (!titleEl || !countEl) return;
+  const update = () => {
+    const n = (titleEl.value || '').length;
+    countEl.textContent = n + '/90';
+    countEl.style.color = n >= 90 ? 'var(--err,#c0392b)' : (n >= 80 ? 'var(--warn,#b8860b)' : '');
+  };
+  titleEl.addEventListener('input', update);
+  update();
+}
+
 // ── Wire: submit ──────────────────────────────────────────────────────────
 function _wireSubmit() {
   const submitBtn   = _el('wr-submit');
+  const secondBtn   = _el('wr-submit-second');
   const fallbackBtn = _el('wr-autofill-fallback');
   const resultEl    = _el('wr-result');
 
-  submitBtn.addEventListener('click', async () => {
+  // Shared submit core used by BOTH "Submit WR" and "+ 2nd WR (reuse data)".
+  // For the 2nd-WR path, `copyFromWrId` links the new WR to the existing one
+  // (AAP copiedFromWorkRequestId) and ALL current form data is reused as-is —
+  // the only thing that differs is the title the user supplies.
+  async function _doSubmit(btn, opts) {
+    opts = opts || {};
+    // The 2nd-WR path reuses all data + links to the existing WR.
+    _copyFromWrId = opts.copyFromWrId || null;
     const payload = _collectPayload();
-    if (!payload.title)  { toast.show('warn', 'WR title required', 3000); return; }
+    if (!payload.title)  { toast.show('warn', 'WR title required', 3000); _copyFromWrId = null; return; }
+    if (payload.title.length > 90) { toast.show('warn', 'WR title must be 90 characters or fewer', 3000); _copyFromWrId = null; return; }
+    if (opts.copyFromWrId) {
+      // A second WR must have a DIFFERENT title from the existing WR it copies,
+      // so it's a distinct request (e.g. a Dealer Tracking Event). We don't
+      // block on "already open" — a second WR is always allowed with a new title.
+      const existingTitle = String((_unit && (_unit.wrTitle || _unit.savedRepairStatus)) || '').trim().toLowerCase();
+      if (existingTitle && payload.title.trim().toLowerCase() === existingTitle) {
+        toast.show('warn', 'Give the 2nd WR a DIFFERENT title (e.g. "Dealer Tracking Event")', 4000);
+        _copyFromWrId = null; return;
+      }
+    }
 
-    submitBtn.disabled = true; submitBtn.textContent = 'Submitting...';
-    fallbackBtn.disabled = true;
+    const origText = btn.textContent;
+    btn.disabled = true; btn.textContent = opts.copyFromWrId ? 'Creating 2nd WR...' : 'Submitting...';
+    submitBtn.disabled = true; secondBtn.disabled = true; fallbackBtn.disabled = true;
     resultEl.style.display = 'none';
     _el('wr-progress-wrap').style.display = '';
     _el('wr-progress-log').innerHTML = '';
@@ -543,10 +592,11 @@ function _wireSubmit() {
 
       if (result && result.ok) {
         const wrId = result.workRequestId || '';
+        const copiedNote = result.copiedFromWorkRequestId ? ' <span style="opacity:.7">(2nd WR — copied from existing)</span>' : '';
         resultEl.innerHTML = `
           <div class="wr-result--success">
             <span class="wr-result__icon">✓</span>
-            <span>WR created — <strong>${_safe(wrId)}</strong></span>
+            <span>WR created — <strong>${_safe(wrId)}</strong>${copiedNote}</span>
             ${_unit.assetUrl ? `<a href="#" id="wr-open-aap" class="wr-result__link">Open in AAP</a>` : ''}
           </div>`;
         resultEl.style.display = '';
@@ -569,9 +619,26 @@ function _wireSubmit() {
       if (_progUnsub) { _progUnsub(); _progUnsub = null; }
       _showError(e.message);
     } finally {
-      submitBtn.disabled   = false; submitBtn.textContent = 'Submit WR';
+      _copyFromWrId = null;
+      submitBtn.disabled = false; submitBtn.textContent = 'Submit WR';
+      secondBtn.disabled = false; secondBtn.textContent = '+ 2nd WR (reuse data)';
       fallbackBtn.disabled = false;
+      btn.textContent = origText;
     }
+  }
+
+  // "Submit WR" — a normal (first/independent) work request.
+  submitBtn.addEventListener('click', () => _doSubmit(submitBtn, {}));
+
+  // "+ 2nd WR (reuse data)" — a SECOND work request that reuses ALL of this
+  // unit's current form data and links to the existing WR via AAP's
+  // copiedFromWorkRequestId. Requires only a DIFFERENT title (e.g. a Dealer
+  // Tracking Event). If no existing WR id is resolvable, we still create the
+  // second WR (unlinked) rather than block — a dealer-tracking-only WR is valid.
+  secondBtn.addEventListener('click', () => {
+    const copyFrom = _existingWrId(_unit);
+    if (!copyFrom) toast.show('info', 'No existing WR found to link — creating a standalone second WR with your title.', 4000);
+    _doSubmit(secondBtn, { copyFromWrId: copyFrom });
   });
 
   // FIX (2026-07-23): this handler called aap.createWR() -- the same
@@ -666,6 +733,8 @@ function _close() {
   _overlay   = null;
   _unit      = null;
   _areaCount = 1;
+  _attachments = [];
+  _copyFromWrId = null;
 }
 
 
@@ -899,7 +968,7 @@ async function _runAIAssist() {
     if (!match) { toast.show('warn', 'AI returned no data', 3000); return; }
     const ai = JSON.parse(match[0]);
     
-    if (ai.title) titleEl.value = ai.title;
+    if (ai.title) { titleEl.value = String(ai.title).slice(0, 90); titleEl.dispatchEvent(new Event('input')); } // enforce 90-char cap + refresh counter
     if (ai.issue) { const el = _el('wr-issue'); if (el) el.value = ai.issue; }
     // Only set vendor if AI explicitly returned one (user said "send to dealer")
     if (ai.vendor && ai.vendor.trim()) {
@@ -987,6 +1056,7 @@ export function open(unit) {
   _wireUrgency();
   _wireOptional();
   _wireScreenshot();
+  _wireTitleCount();
   _wireSubmit();
   _wireAIAssist();
   _wireAutoUptake();

@@ -7,6 +7,22 @@ const logger = require('../utils/logger').createLogger('aap_create_wr');
 
 const AAP_BASE = 'https://aap-na.corp.amazon.com/api/v1';
 
+// WR title hard cap — AAP's own field limit. Enforced regardless of caller.
+const WR_TITLE_MAX = 90;
+function capWrTitle(title) {
+  return String(title == null || String(title).trim() === '' ? 'Work Request' : title).slice(0, WR_TITLE_MAX);
+}
+// Normalize a "copied from" WR reference (for a linked second WR / dealer
+// tracking event). Accepts a raw UUID or a /v2/service/<uuid> URL; returns the
+// bare UUID or null. Never fabricates — an unrecognized value yields null so
+// the second WR is simply created unlinked rather than pointing at garbage.
+function normalizeCopiedFromId(ref) {
+  if (!ref) return null;
+  const m = String(ref).match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+  if (m) return m[1];
+  return /^[a-f0-9-]{36}$/i.test(String(ref).trim()) ? String(ref).trim() : null;
+}
+
 // Known domicile coordinates
 const DOMICILE_COORDS = {
   'ABE40': { latitude: 40.6593, longitude: -75.4902 },
@@ -252,11 +268,21 @@ async function createWorkRequest(payload, unit, log) {
   const now = new Date();
   const needBy = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24h from now
 
+  // WR title has a hard 90-character limit (AAP's own field cap). Enforce it
+  // here too so it holds regardless of caller (UI, AI, vendor flow).
+  const wrTitle = capWrTitle(payload.title);
+
+  // Second-WR / dealer-tracking support: when the caller supplies
+  // copiedFromWorkRequestId (a second WR built by reusing an existing WR's
+  // data with a NEW, different title — e.g. a Dealer Tracking Event alongside
+  // the repair WR), pass it to AAP so the new WR is linked to the source.
+  const copiedFrom = normalizeCopiedFromId(payload.copiedFromWorkRequestId);
+
   // STEP 1: createRepair
   const repairBody = {
     aaid: aaid,
-    title: payload.title || 'Work Request',
-    damageDescription: payload.issue || payload.title || '',
+    title: wrTitle,
+    damageDescription: payload.issue || wrTitle || '',
     vendor: vendorName.split(' (')[0].toUpperCase(), // "Volvo (ASIST)" → "VOLVO"
     supplierId: supplierId || null,
     calltype: 'OFFSITE',
@@ -281,7 +307,7 @@ async function createWorkRequest(payload, unit, log) {
     campaign: null,
     source: null,
     dvirId: null,
-    copiedFromWorkRequestId: null,
+    copiedFromWorkRequestId: copiedFrom,
     relatedAsset: null,
     sourceNotificationIds: null,
     vendorIntegrationType: null
@@ -363,8 +389,8 @@ async function createWorkRequest(payload, unit, log) {
     log('[CreateWR] Step 3 error (non-fatal): ' + e.message);
   }
 
-  log('[CreateWR] SUCCESS — WR created: ' + workRequestId);
-  return { ok: true, workRequestId: workRequestId };
+  log('[CreateWR] SUCCESS — WR created: ' + workRequestId + (copiedFrom ? ' (copied from ' + copiedFrom + ')' : ''));
+  return { ok: true, workRequestId: workRequestId, title: wrTitle, copiedFromWorkRequestId: copiedFrom || null };
 }
 
 /**
@@ -433,4 +459,4 @@ async function addConversationNote(wrIdOrUrl,text){
   }catch(e){return{ok:false,error:e.message};}
 }
 
-module.exports = { createWorkRequest, addConversationNote, VENDOR_IDS, VENDOR_PORTAL_URLS, DOMICILE_COORDS };
+module.exports = { createWorkRequest, addConversationNote, VENDOR_IDS, VENDOR_PORTAL_URLS, DOMICILE_COORDS, capWrTitle, normalizeCopiedFromId, WR_TITLE_MAX };
