@@ -892,6 +892,15 @@ function _wireAIAssist() {
   });
 }
 
+// Gather this unit's Uptake insight text. Returns a clean string or ''.
+function _uptakeText(unit) {
+  return (unit.insightsList || [])
+    .map(i => (typeof i === 'object' ? (i.summary || i.text || '') : i))
+    .map(s => String(s || '').trim())
+    .filter(Boolean)
+    .join('; ');
+}
+
 async function _runAIAssist() {
   // BUG FIX (2026-07-16): defense-in-depth alongside the keydown fix above
   // -- guards against ANY overlapping call (double Enter, button click
@@ -903,6 +912,7 @@ async function _runAIAssist() {
   const btn = _el('wr-ai-assist');
   const title = (titleEl.value || '').trim();
   if (!title) { toast.show('warn', 'Type a title first', 2000); _aiRunning = false; return; }
+
   btn.disabled = true; btn.textContent = '⏳ AI...';
   
   const unit = _unit || {};
@@ -910,7 +920,7 @@ async function _runAIAssist() {
   const make = unit.manufacturer || '';
   const site = unit.domicileSite || unit.site || '';
   const notes = (unit.savedNotes || '').substring(0, 500);
-  const uptake = (unit.insightsList || []).map(i => typeof i === 'object' ? (i.summary || i.text || '') : i).join('; ');
+  const uptake = _uptakeText(unit);
   
   // BUG FIX (2026-07-16): this .join(...) call's separator argument was NOT
   // '\n' -- it was corrupted into a huge string containing a large block of
@@ -944,22 +954,37 @@ async function _runAIAssist() {
     } catch(e) {}
   }
 
-  const prompt = 'You are a fleet maintenance work request assistant for Amazon Transportation.\n\n'
-    + 'User typed this WR title: "' + title + '"\n\n'
-    + 'UNIT: ' + unitId + ' | Make: ' + make + ' | Site: ' + site + '\n'
-    + (notes ? 'Notes: ' + notes + '\n' : '')
-    + (uptake ? 'Uptake Insights: ' + uptake + '\n' : '')
+  const prompt = 'You are an experienced Amazon fleet maintenance work request assistant.\n\n'
+    + 'THE WR TITLE THE OPERATOR TYPED IS YOUR PRIMARY INSTRUCTION. Read it carefully, '
+    + 'infer their intent, and DECIDE what to fill using ALL the data provided below. '
+    + 'Only populate fields the title actually calls for — do NOT invent a full repair '
+    + 'plan when the operator asked for something narrower. When in doubt, prefer fewer, '
+    + 'accurate fields over more, guessed ones.\n\n'
+    + 'WR TITLE (operator instruction): "' + title + '"\n\n'
+    + 'AVAILABLE DATA:\n'
+    + 'UNIT: ' + unitId + ' | Make: ' + (make || 'unknown') + ' | Site: ' + (site || 'unknown') + '\n'
+    + (notes ? 'Fleet notes: ' + notes + '\n' : '')
+    + (uptake ? 'Uptake insights: ' + uptake + '\n' : 'Uptake insights: (none on file)\n')
+    + vendorBookCtx
+    + '\nHOW TO READ THE TITLE (intent examples — apply judgment, this is not exhaustive):\n'
+    + '- "dealer tracking only", "tracking only", "tracking event", "monitor only": this is a '
+    + 'TRACKING/MONITORING entry, NOT a repair request. Do NOT invent component areas, do NOT '
+    + 'assign a vendor, do NOT write a repair plan. areaPairs=[], vendor="". Base issue/comments '
+    + 'ONLY on the data the title points to (e.g. if it says "uptake", use ONLY the Uptake insights above).\n'
+    + '- "uptake" / "use uptake" / "uptake only": ground the issue + comments in the Uptake insights above and nothing invented.\n'
+    + '- A specific defect (e.g. "brake chamber leak", "clutch actuator"): fill the matching area/subcategory pair(s) and a concise issue.\n'
+    + '- "tow": Area=TOW, sub=MECHANICAL ISSUE or ACCIDENT/RECOVERY, vendor=FleetNet (FLEETNET), urgent=true.\n'
+    + '- "send to dealer" / "send to [vendor]": set vendor from the VENDOR BOOK / make mapping '
+    + '(Volvo/Mack→"Volvo (ASIST)", Kenworth→"Kenworth (PACCAR)", Peterbilt→"Peterbilt (PACCAR)", Freightliner→"Freightliner (DAIMLER)").\n'
+    + '- Safety/brakes/fire → urgent=true.\n'
     + '\nRULES:\n'
-    + '- "Tow" = Area=TOW, sub=MECHANICAL ISSUE or ACCIDENT/RECOVERY, vendor=FleetNet (FLEETNET), urgent=true\n'
-    + '- Vendor: LEAVE EMPTY by default (AAP auto-assigns). Only fill if user says "send to dealer" or "send to [vendor name]"\n'
-    + '- If user says "send to dealer": Volvo/Mack→"Volvo (ASIST)", Kenworth→"Kenworth (PACCAR)", Peterbilt→"Peterbilt (PACCAR)", Freightliner→"Freightliner (DAIMLER)"\n'
-    + '- Safety/brakes/fire → urgent=true\n'
-    + '- For Predictive Maintenance: title must include "Predictive Maintenance", reference Uptake data in comments\n\n'
+    + '- Vendor: LEAVE EMPTY unless the title says "send to dealer" or names a vendor. AAP auto-assigns otherwise.\n'
+    + '- Use EXACT area/subcategory values from the list below. If the title does not call for a repair area, return areaPairs=[].\n'
+    + '- NEVER fabricate a diagnosis, ETA, part, or vendor that the title/data does not support. Do not claim any action was completed.\n\n'
     + 'VALID AREAS/SUBCATEGORIES (use EXACT values):\n' + areaList + '\n\n'
-    + 'Respond ONLY with valid JSON:\n'
-    + '{"title":"improved title","issue":"2-3 sentence description","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","urgent":false,"comments":"what we need from vendor"}\n'
-    + 'areaPairs can have 1-4 pairs if multiple systems are affected.\n'
-    + 'vendor: LEAVE EMPTY unless user explicitly says "send to dealer" or names a specific vendor. AAP auto-assigns default vendor.';
+    + 'Respond ONLY with valid JSON (omit or empty any field the title does not call for):\n'
+    + '{"title":"cleaned-up title (<=90 chars)","issue":"concise description grounded in the data","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","urgent":false,"comments":"what is needed / tracking note"}\n'
+    + 'areaPairs: 0 pairs for a tracking/monitoring-only title; 1-4 pairs only if the title describes actual systems to repair.';
 
   try {
     const result = await window.ai.ask(prompt);
@@ -970,14 +995,30 @@ async function _runAIAssist() {
     
     if (ai.title) { titleEl.value = String(ai.title).slice(0, 90); titleEl.dispatchEvent(new Event('input')); } // enforce 90-char cap + refresh counter
     if (ai.issue) { const el = _el('wr-issue'); if (el) el.value = ai.issue; }
-    // Only set vendor if AI explicitly returned one (user said "send to dealer")
-    if (ai.vendor && ai.vendor.trim()) {
+    // Vendor: set it only if the AI explicitly returned one (title said "send to
+    // dealer" / named a vendor). If the AI returned empty (e.g. tracking-only or
+    // let-AAP-auto-assign), reset the dropdown to its default rather than keeping
+    // a stale/guessed vendor from a prior fill.
+    {
       const sel = _el('wr-vendor');
-      const opt = Array.from(sel.options).find(o => o.value === ai.vendor || o.value.toUpperCase().includes((ai.vendor||'').toUpperCase()));
-      if (opt) sel.value = opt.value;
+      if (sel) {
+        if (ai.vendor && String(ai.vendor).trim()) {
+          const opt = Array.from(sel.options).find(o => o.value === ai.vendor || o.value.toUpperCase().includes((ai.vendor||'').toUpperCase()));
+          if (opt) sel.value = opt.value;
+        } else {
+          sel.selectedIndex = 0; // default (AAP auto-assign)
+        }
+      }
     }
-    // Fill area/subcategory pairs (up to 4)
+    // Fill area/subcategory pairs (up to 4). If the AI decided this title needs
+    // NO repair areas (e.g. a tracking/monitoring-only intent), it returns an
+    // empty list — honor that by clearing the first area row instead of leaving
+    // stale/guessed values behind.
     const pairs = ai.areaPairs || (ai.area ? [{ area: ai.area, subcategory: ai.subcategory }] : []);
+    if (!pairs.length) {
+      const a0 = _el('wr-area-0'); if (a0) a0.value = '';
+      const s0 = _el('wr-sub-0');  if (s0) s0.value = '';
+    }
     const rowsContainer = _el('wr-area-rows');
     pairs.forEach((pair, i) => {
       if (i > 0 && rowsContainer) {
