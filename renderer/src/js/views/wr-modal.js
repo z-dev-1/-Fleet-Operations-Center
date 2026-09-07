@@ -954,38 +954,24 @@ async function _runAIAssist() {
     } catch(e) {}
   }
 
-  const prompt = 'You are an experienced Amazon fleet maintenance work request assistant.\n\n'
-    + 'THE WR TITLE THE OPERATOR TYPED IS YOUR PRIMARY INSTRUCTION. Read it, infer intent, '
-    + 'and fill the work request using ALL the data below (Uptake insights, notes, unit, vendor book).\n'
-    + 'DEFAULT: most WRs ARE repair requests — so by default you MUST choose the correct component '
-    + 'area/subcategory pair(s) (1-4) and write a concise issue. Only the narrow exceptions below skip areas.\n\n'
-    + 'WR TITLE (operator instruction): "' + title + '"\n\n'
-    + 'AVAILABLE DATA:\n'
-    + 'UNIT: ' + unitId + ' | Make: ' + (make || 'unknown') + ' | Site: ' + (site || 'unknown') + '\n'
-    + (notes ? 'Fleet notes: ' + notes + '\n' : '')
-    + (uptake ? 'Uptake insights: ' + uptake + '\n' : 'Uptake insights: (none on file)\n')
+  const prompt = 'You are a fleet maintenance work request assistant for Amazon Transportation.\n\n'
+    + 'User typed this WR title: "' + title + '"\n\n'
+    + 'UNIT: ' + unitId + ' | Make: ' + make + ' | Site: ' + site + '\n'
+    + (notes ? 'Notes: ' + notes + '\n' : '')
+    + (uptake ? 'Uptake Insights: ' + uptake + '\n' : '')
     + vendorBookCtx
-    + '\nHOW TO READ THE TITLE (apply judgment):\n'
-    + '- DEFAULT (a repair — the common case, e.g. "brake chamber leak", "clutch actuator", "DEF system fault", '
-    + 'or a symptom from the Uptake insights): CHOOSE the matching component area/subcategory pair(s) from the list '
-    + 'below (1-4) and write a concise issue. This is what the operator expects — DO fill areas.\n'
-    + '- DEALER CASE — title says "send to dealer", "dealer", "dealer event", or names a dealer/OEM: set vendor from '
-    + 'the VENDOR BOOK / make mapping (Volvo/Mack→"Volvo (ASIST)", Kenworth→"Kenworth (PACCAR)", '
-    + 'Peterbilt→"Peterbilt (PACCAR)", Freightliner→"Freightliner (DAIMLER)"). Still choose the component area(s) for the issue.\n'
-    + '- "tow": Area=TOW, sub=MECHANICAL ISSUE or ACCIDENT/RECOVERY, vendor=FleetNet (FLEETNET), urgent=true.\n'
-    + '- TRACKING/MONITORING-ONLY (narrow exception) — the title clearly says it is ONLY tracking, e.g. '
-    + '"tracking only", "dealer tracking only", "monitor only", "tracking event only", "no repair": this is NOT a repair. '
-    + 'Return areaPairs=[], vendor="" (unless a dealer is named), and base issue/comments only on the data pointed to '
-    + '(if it says "uptake", use ONLY the Uptake insights above). Do NOT invent a repair plan.\n'
-    + '- Safety/brakes/fire → urgent=true.\n'
     + '\nRULES:\n'
-    + '- Use EXACT area/subcategory values from the list below.\n'
-    + '- Vendor: fill it for a dealer case (above); otherwise LEAVE EMPTY (AAP auto-assigns).\n'
-    + '- NEVER fabricate a diagnosis, ETA, part, or vendor the data does not support. Do not claim any action was completed.\n\n'
+    + '- "Tow" = Area=TOW, sub=MECHANICAL ISSUE or ACCIDENT/RECOVERY, vendor=FleetNet (FLEETNET), urgent=true\n'
+    + '- Vendor: LEAVE EMPTY by default (AAP auto-assigns). Only fill if user says "send to dealer" or "send to [vendor name]"\n'
+    + '- If user says "send to dealer": Volvo/Mack\u2192"Volvo (ASIST)", Kenworth\u2192"Kenworth (PACCAR)", Peterbilt\u2192"Peterbilt (PACCAR)", Freightliner\u2192"Freightliner (DAIMLER)"\n'
+    + '- Safety/brakes/fire \u2192 urgent=true\n'
+    + '- For Predictive Maintenance: title must include "Predictive Maintenance", reference Uptake data in comments\n'
+    + '- EXCEPTION \u2014 if the title clearly says it is TRACKING/MONITORING ONLY (e.g. "tracking only", "dealer tracking only", "monitor only", "no repair"): this is NOT a repair, so return areaPairs=[] and base issue/comments only on the referenced data (if it says "uptake", use ONLY the Uptake Insights above). Otherwise ALWAYS choose the matching component area/subcategory pair(s).\n\n'
     + 'VALID AREAS/SUBCATEGORIES (use EXACT values):\n' + areaList + '\n\n'
     + 'Respond ONLY with valid JSON:\n'
-    + '{"title":"cleaned-up title (<=90 chars)","issue":"concise description grounded in the data","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","urgent":false,"comments":"what is needed from the vendor / tracking note"}\n'
-    + 'areaPairs: fill 1-4 pairs for a repair (the default); use [] ONLY for an explicit tracking/monitoring-only title.';
+    + '{"title":"improved title","issue":"2-3 sentence description","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","urgent":false,"comments":"what we need from vendor"}\n'
+    + 'areaPairs can have 1-4 pairs if multiple systems are affected.\n'
+    + 'vendor: LEAVE EMPTY unless user explicitly says "send to dealer" or names a specific vendor. AAP auto-assigns default vendor.';
 
   try {
     const result = await window.ai.ask(prompt);
