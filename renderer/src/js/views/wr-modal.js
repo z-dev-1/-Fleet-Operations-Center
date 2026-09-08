@@ -868,27 +868,18 @@ function _wireAIAssist() {
   const titleEl = _el('wr-title');
   const btn = _el('wr-ai-assist');
   if (!btn || !titleEl) return;
+  // AI Fill runs ONLY on an EXPLICIT action: clicking the AI Fill button, or
+  // pressing Enter in the title field. EXACTLY ONE call per action, then done.
+  //
+  // FIX (2026-09-08): removed the auto-fire-on-input debounce. Previously an
+  // 'input' listener re-armed a 2.5s timer on every keystroke and fired
+  // _runAIAssist() automatically whenever you paused typing — so editing a
+  // title produced MULTIPLE unrequested AI calls (and races), which is exactly
+  // "it keeps making AI calls instead of one call → output → done". AI Fill is
+  // now strictly user-triggered.
   btn.addEventListener('click', () => _runAIAssist());
   titleEl.addEventListener('keydown', (e) => {
-    // BUG FIX (2026-07-16): pressing Enter fired _runAIAssist() immediately
-    // but never cleared the debounced auto-trigger timer set up by the
-    // 'input' listener below. If the user typed a title (>8 chars) and hit
-    // Enter before the 2500ms debounce elapsed -- which is the NORMAL way
-    // someone uses this ("type title, hit Enter") -- the debounce timer
-    // kept running in the background and fired a SECOND, unrequested
-    // _runAIAssist() call ~2.5s later. Two overlapping AI calls means two
-    // async responses landing at different times, each overwriting
-    // whatever fields the OTHER one (or the user, manually editing in
-    // between) had just set -- this is almost certainly what presented as
-    // "sometimes it struggles with AI actually filling out the rest": not
-    // random model flakiness, but a real race between the Enter-triggered
-    // call and a stale debounced call the user never asked for. Fixed by
-    // clearing the pending timer whenever Enter triggers an immediate run.
-    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(_aiTimer); _runAIAssist(); }
-  });
-  titleEl.addEventListener('input', () => {
-    clearTimeout(_aiTimer);
-    if (titleEl.value.trim().length > 8) _aiTimer = setTimeout(_runAIAssist, 2500);
+    if (e.key === 'Enter') { e.preventDefault(); _runAIAssist(); }
   });
 }
 
