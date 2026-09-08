@@ -765,7 +765,21 @@ function registerAIHandlers(ctx) {
   // all callers (Daily Call AI Review, WBR Generate, etc.)
   handle('ai:ask', async (_e, prompt) => {
     requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
-    const text = await _aiAskLimit(() => relay.ask(prompt));
+    // FIX: ai:ask runs through a single-slot limiter (_aiAskLimit). If the
+    // underlying relay.ask HANGS (Orcha WS down + claude-code stalling), the one
+    // slot is never released, so the NEXT ai:ask (e.g. the next WR's AI Fill)
+    // queues behind it forever and "fails as if stuck on the first WR". Guard
+    // every call with a hard timeout + AbortSignal so a slow/stuck backend call
+    // fails fast, RELEASES the slot, and each WR's AI Fill is independent.
+    const AI_ASK_TIMEOUT_MS = 90000; // 90s hard cap per ai:ask
+    const text = await _aiAskLimit(() => {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), AI_ASK_TIMEOUT_MS);
+      return Promise.race([
+        relay.ask(prompt, { signal: ac.signal }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('ai:ask timed out after ' + (AI_ASK_TIMEOUT_MS / 1000) + 's')), AI_ASK_TIMEOUT_MS + 2000)),
+      ]).finally(() => clearTimeout(timer));
+    });
     // Normalize: relay.ask returns a raw string; callers expect { ok, text }
     if (typeof text === 'string') return { ok: true, text };
     return text; // in case it's already an object

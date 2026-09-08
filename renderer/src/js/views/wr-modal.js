@@ -974,10 +974,16 @@ async function _runAIAssist() {
     + 'vendor: LEAVE EMPTY unless user explicitly says "send to dealer" or names a specific vendor. AAP auto-assigns default vendor.';
 
   try {
-    const result = await window.ai.ask(prompt);
+    // Client-side timeout so a slow/stuck AI backend never leaves AI Fill
+    // spinning (and never blocks the NEXT unit's fill). The main-process
+    // ai:ask has its own hard timeout + slot release; this is the UI guard.
+    const result = await Promise.race([
+      window.ai.ask(prompt),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('AI Fill timed out — the AI service may be unavailable')), 95000)),
+    ]);
     const text = (result && result.text) ? result.text : (result || '');
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) { toast.show('warn', 'AI returned no data', 3000); return; }
+    if (!match) { toast.show('warn', 'AI returned no data (AI service may be down) — fill fields manually', 4000); return; }
     const ai = JSON.parse(match[0]);
     
     if (ai.title) { titleEl.value = String(ai.title).slice(0, 90); titleEl.dispatchEvent(new Event('input')); } // enforce 90-char cap + refresh counter
