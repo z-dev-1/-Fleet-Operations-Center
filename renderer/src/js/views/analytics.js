@@ -21,7 +21,7 @@
 
 import bus   from '../bus.js';
 import state from '../state.js';
-import { longDwell as longDwellBridge, ai as aiBridge, relay as relayBridge } from '../bridge.js';
+import { longDwell as longDwellBridge, ai as aiBridge, relay as relayBridge, files as filesBridge } from '../bridge.js';
 import toast from '../components/toast.js';
 
 let _el = null;
@@ -707,8 +707,9 @@ async function _aiFillRow(unitId, tr, onStatus) {
     if (eSel && escalationLevel) { eSel.value = escalationLevel; eSel.className = 'settings__select an-ld-select an-ld-esc-select an-ld-esc--' + _escSeverityCls(escalationLevel); }
     if (sTa)                     sTa.value  = summary;
 
-    const res = await longDwellBridge.saveUnit({ equipmentId: unitId, delayReason, escalationLevel, summary });
-    if (res && res.unit) _longDwellData[unitId] = res.unit;
+    const woKey = (tr.dataset && tr.dataset.woId) || 'primary';
+    const res = await longDwellBridge.saveUnit({ equipmentId: unitId, woKey, delayReason, escalationLevel, summary });
+    if (res && res.unit) _longDwellData[_ldKey(unitId, woKey)] = res.unit;
     _flashSavedRow(tr);
     toast.show('success', 'AI filled ' + unitId, 2000);
     return true;
@@ -784,16 +785,20 @@ function _renderLongDwellHeader(rows) {
 // cell would shift every following row out of alignment when pasted.
 function _buildLongDwellTsv(rows) {
   const list = _computeLongDwell(rows);
-  const header = ['Unit', 'Domicile', 'Operator', 'Down Days', 'Vendor', 'Delay Reason', 'Escalation Level', 'Summary'];
+  const header = ['Unit', 'Work Order', 'Domicile', 'Operator', 'Down Days', 'Vendor', 'Delay Reason', 'Escalation Level', 'Summary'];
   const lines = [header.join('\t')];
+  // One line PER WORK ORDER, matching the on-screen table.
   for (const { row, dd } of list) {
-    const id     = row.equipmentId || '';
-    const saved  = _longDwellData[id] || {};
-    const dom    = row.domicileSite || row.domicile || '';
-    const op     = row.operator || '';
-    const vendor = row.vendor || '';
-    const summary = String(saved.summary || '').replace(/\r?\n/g, ' ').trim();
-    lines.push([id, dom, op, dd + 'd', vendor, saved.delayReason || '', saved.escalationLevel || '', summary].join('\t'));
+    const id  = row.equipmentId || '';
+    const dom = row.domicileSite || row.domicile || '';
+    const op  = row.operator || '';
+    for (const wo of _expandRowToWOs(row)) {
+      const saved   = _savedForWO(id, wo.woKey, wo.isPrimary);
+      const vendor  = wo.woVendor || row.vendor || '';
+      const woNum   = wo.woNumber || (wo.woType === 'planned' ? 'Planned WR' : (wo.isPrimary ? 'Primary WR' : 'Open WR'));
+      const summary = String(saved.summary || '').replace(/\r?\n/g, ' ').trim();
+      lines.push([id, woNum, dom, op, dd + 'd', vendor, saved.delayReason || '', saved.escalationLevel || '', summary].join('\t'));
+    }
   }
   return lines.join('\n');
 }
@@ -815,6 +820,89 @@ async function _copyLongDwellTable(rows) {
   }
 }
 
+// ── Per-work-order expansion ────────────────────────────────────────────────
+// A unit can have multiple open work orders (e.g. an unplanned repair + a
+// planned PM). Long Dwell shows ONE ROW PER WORK ORDER so each WO gets its own
+// delay reason / escalation / summary. This helper turns one fleet row into
+// N "WO views": the PRIMARY work order (the flat top-level WR fields on the
+// row) plus any row._secondaryWRs (the multi-WR pass array). Single-WO units
+// yield exactly one entry, so behavior is unchanged for them.
+
+// Extract a stable service UUID from a Relay service URL, if present.
+function _uuidFromUrl(url) {
+  const m = String(url || '').match(/\/service\/([0-9a-f-]{8,})/i);
+  return m ? m[1] : '';
+}
+
+// Stable per-WO key for one WO view. Prefer the Relay service UUID (survives
+// re-syncs and WO reassignment detection), then the vendor WO id, then a
+// positional fallback so a WO without any id still gets a distinct, stable-ish
+// key within its unit.
+function _woKeyFor(wo, idx) {
+  return String(
+    wo._serviceUUID
+    || _uuidFromUrl(wo._relayUrl || wo.serviceUrl)
+    || wo.vendorWorkOrderId
+    || (idx === 0 ? 'primary' : 'wo' + idx)
+  ).trim() || ('wo' + idx);
+}
+
+// Compound store key: one saved annotation per (unit, work order).
+function _ldKey(equipmentId, woKey) {
+  return String(equipmentId || '').trim() + '::' + String(woKey || 'primary').trim();
+}
+
+// Look up the saved annotation for a WO, with backward-compat fallback to the
+// old unit-only key so annotations saved before the per-WO change still show
+// (on the unit's PRIMARY work order row).
+function _savedForWO(equipmentId, woKey, isPrimary) {
+  const compound = _longDwellData[_ldKey(equipmentId, woKey)];
+  if (compound) return compound;
+  if (isPrimary) {
+    const legacy = _longDwellData[String(equipmentId || '').trim()];
+    if (legacy) return legacy;
+  }
+  return {};
+}
+
+// Expand one fleet row into its list of WO views. Each view carries the WO's
+// own identifying/status fields plus a reference back to the parent row (used
+// for domicile/operator/vendor/down-days and the AI prompt source).
+function _expandRowToWOs(row) {
+  const views = [];
+  const primaryKey = _woKeyFor({
+    _serviceUUID: '', _relayUrl: row.serviceUrl, serviceUrl: row.serviceUrl,
+    vendorWorkOrderId: row.vendorWorkOrderId,
+  }, 0);
+  views.push({
+    row,
+    isPrimary:  true,
+    woKey:      primaryKey,
+    woNumber:   row.vendorWorkOrderId || row.workRequestId || '',
+    woStatus:   row.serviceState || '',
+    woVendor:   row.vendor || '',
+    woUrl:      row.serviceUrl || '',
+    woType:     'primary',
+  });
+
+  const sec = Array.isArray(row._secondaryWRs) ? row._secondaryWRs : [];
+  sec.forEach((wo, i) => {
+    const k = _woKeyFor(wo, i + 1);
+    if (k === primaryKey) return; // dedup: secondary resolved to primary UUID
+    views.push({
+      row,
+      isPrimary:  false,
+      woKey:      k,
+      woNumber:   wo.vendorWorkOrderId || '',
+      woStatus:   wo.serviceState || wo.state || '',
+      woVendor:   wo.vendor || row.vendor || '',
+      woUrl:      wo._relayUrl || '',
+      woType:     wo._wrType || 'unplanned',
+    });
+  });
+  return views;
+}
+
 function _renderLongDwellTable(rows) {
   const list = _computeLongDwell(rows);
   if (!list.length) {
@@ -825,6 +913,7 @@ function _renderLongDwellTable(rows) {
   const headerRow = `
     <tr>
       <th class="an-ld-sortable" data-sort-col="unit">Unit${_sortArrow('unit')}</th>
+      <th>Work Order</th>
       <th class="an-ld-sortable" data-sort-col="domicile">Domicile${_sortArrow('domicile')}</th>
       <th class="an-ld-sortable" data-sort-col="operator">Operator${_sortArrow('operator')}</th>
       <th class="an-tbl--r an-ld-sortable" data-sort-col="downDays">Down Days${_sortArrow('downDays')}</th>
@@ -834,16 +923,31 @@ function _renderLongDwellTable(rows) {
       <th>Summary</th>
       <th>Actions</th>
     </tr>`;
-  const dataRows = list.map(({ row, dd }) => {
+  // One row PER WORK ORDER: expand each qualifying unit into its WO views
+  // (primary WR + any secondary WRs). A unit with 3 open WOs => 3 rows.
+  const dataRows = list.flatMap(({ row, dd }) => {
     const id     = row.equipmentId || '';
-    const saved  = _longDwellData[id] || {};
     const dom    = row.domicileSite || row.domicile || '\u2014';
     const op     = row.operator || '\u2014';
-    const vendor = row.vendor || '\u2014';
     const ddCls  = dd >= 30 ? 'an-cell--danger' : dd >= 21 ? 'an-cell--warn' : '';
-    return `
-      <tr data-unit-id="${_safe(id)}" class="an-ld-row">
-        <td class="an-op-name an-ld-unit-link" data-action="open-unit" title="Open unit detail">${_safe(id)}</td>
+    const wos    = _expandRowToWOs(row);
+    const multi  = wos.length > 1;
+
+    return wos.map((wo, i) => {
+      const saved  = _savedForWO(id, wo.woKey, wo.isPrimary);
+      const vendor = wo.woVendor || row.vendor || '\u2014';
+      const woNum   = wo.woNumber || (wo.woType === 'planned' ? 'Planned WR' : (wo.isPrimary ? 'Primary WR' : 'Open WR'));
+      const woStat  = wo.woStatus ? `<span class="an-ld-wo-status">${_safe(wo.woStatus)}</span>` : '';
+      const woLinkOpen  = wo.woUrl ? `<a class="an-ld-wo-link" data-action="open-wo" data-wo-url="${_safe(wo.woUrl)}" title="Open work order in Relay">` : '<span>';
+      const woLinkClose = wo.woUrl ? '</a>' : '</span>';
+      const unitCell = i === 0
+        ? `<td class="an-op-name an-ld-unit-link" data-action="open-unit" title="Open unit detail">${_safe(id)}${multi ? ` <span class="an-ld-wo-count">(${wos.length} WOs)</span>` : ''}</td>`
+        : `<td class="an-ld-unit-cont" title="${_safe(id)} \u2014 additional work order">\u21B3</td>`;
+      const rowCls = 'an-ld-row' + (multi ? ' an-ld-row--multi' + (i === 0 ? ' an-ld-row--multi-first' : '') : '');
+      return `
+      <tr data-unit-id="${_safe(id)}" data-wo-id="${_safe(wo.woKey)}" data-wo-primary="${wo.isPrimary ? '1' : '0'}" class="${rowCls}">
+        ${unitCell}
+        <td class="an-ld-wo-cell">${woLinkOpen}${_safe(woNum)}${woLinkClose} ${woStat}</td>
         <td>${_safe(dom)}</td>
         <td>${_safe(op)}</td>
         <td class="an-tbl--r ${ddCls}">${dd}d</td>
@@ -862,9 +966,10 @@ function _renderLongDwellTable(rows) {
           <textarea class="settings__textarea an-ld-summary" data-field="summary" placeholder="What's the delay, what's next...">${_safe(saved.summary || '')}</textarea>
         </td>
         <td>
-          <button class="ec-preset-btn an-ld-ai-btn" data-action="ai-fill" title="AI-fill this row from repair notes">\u2728 AI Fill</button>
+          <button class="ec-preset-btn an-ld-ai-btn" data-action="ai-fill" title="AI-fill this work order from repair notes">\u2728 AI Fill</button>
         </td>
       </tr>`;
+    });
   }).join('');
   return `<table class="an-table an-ld-table"><thead>${headerRow}</thead><tbody>${dataRows}</tbody></table>`;
 }
@@ -950,7 +1055,9 @@ function _renderLongDwellTab(rows) {
       // is where an intentional overwrite is expected instead.
       const blankTrs = trs.filter(tr => {
         const id = tr.dataset.unitId;
-        const saved = _longDwellData[id] || {};
+        const woKey = tr.dataset.woId || 'primary';
+        const isPrimary = tr.dataset.woPrimary === '1';
+        const saved = _savedForWO(id, woKey, isPrimary);
         return !saved.delayReason && !saved.escalationLevel && !(saved.summary || '').trim();
       });
       if (!blankTrs.length) { toast.show('info', 'No blank rows to AI-fill', 2500); return; }
@@ -1140,13 +1247,14 @@ export function init(container) {
     const tr = e.target.closest('tr[data-unit-id]');
     if (!tr) return;
     const unitId = tr.dataset.unitId;
+    const woKey  = tr.dataset.woId || 'primary';
     const value  = e.target.value;
     if (field === 'escalationLevel') {
       e.target.className = 'settings__select an-ld-select an-ld-esc-select an-ld-esc--' + _escSeverityCls(value);
     }
     try {
-      const res = await longDwellBridge.saveUnit({ equipmentId: unitId, [field]: value });
-      if (res && res.unit) _longDwellData[unitId] = res.unit;
+      const res = await longDwellBridge.saveUnit({ equipmentId: unitId, woKey, [field]: value });
+      if (res && res.unit) _longDwellData[_ldKey(unitId, woKey)] = res.unit;
       _flashSavedRow(tr);
     } catch (err) {
       toast.show('error', 'Save failed: ' + err.message, 3000);
@@ -1160,10 +1268,11 @@ export function init(container) {
     const tr = e.target.closest('tr[data-unit-id]');
     if (!tr) return;
     const unitId = tr.dataset.unitId;
+    const woKey  = tr.dataset.woId || 'primary';
     const value  = e.target.value;
     try {
-      const res = await longDwellBridge.saveUnit({ equipmentId: unitId, summary: value });
-      if (res && res.unit) _longDwellData[unitId] = res.unit;
+      const res = await longDwellBridge.saveUnit({ equipmentId: unitId, woKey, summary: value });
+      if (res && res.unit) _longDwellData[_ldKey(unitId, woKey)] = res.unit;
       _flashSavedRow(tr);
     } catch (err) {
       toast.show('error', 'Save failed: ' + err.message, 3000);
@@ -1198,6 +1307,15 @@ export function init(container) {
     if (aiBtn) {
       const tr = aiBtn.closest('tr[data-unit-id]');
       if (tr) _aiFillRow(tr.dataset.unitId, tr);
+      return;
+    }
+    // Work Order link -- open that specific WR in Relay (external browser).
+    const woLink = e.target.closest('[data-action="open-wo"]');
+    if (woLink) {
+      e.preventDefault();
+      const url = woLink.dataset.woUrl;
+      if (url && filesBridge && filesBridge.openRelayUrl) filesBridge.openRelayUrl(url);
+      else if (url) window.open(url, '_blank');
       return;
     }
     const link = e.target.closest('[data-action="open-unit"]');

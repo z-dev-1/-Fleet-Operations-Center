@@ -29,8 +29,21 @@ const ESCALATION_LEVELS = ['SEV5', 'SEV4', 'SEV3', 'SEV2']; // SEV2 = highest
 
 const MAX_LENGTHS = {
   equipmentId: 32,
+  woKey:       128,
   summary:     2048,
 };
+
+// Compound store key: one saved annotation per (unit, work order). A unit with
+// multiple open work orders has one Long Dwell row (and one saved entry) per
+// WO. woKey is a stable per-WO identifier (Relay service UUID preferred).
+// Legacy entries (pre per-WO) were keyed by bare equipmentId; those are read
+// back on the unit's primary WO row via a fallback in the renderer, and are
+// left in place (not migrated) so nothing is lost.
+function _ldKey(equipmentId, woKey) {
+  const eq = String(equipmentId || '').trim();
+  const wo = String(woKey || 'primary').trim() || 'primary';
+  return eq + '::' + wo;
+}
 
 function _truncate(val, field) {
   if (val === undefined || val === null) return '';
@@ -46,9 +59,11 @@ function _truncate(val, field) {
 function registerLongDwellIPC() {
   handle('long-dwell:get-all', () => store.load('longDwellStore', {}));
 
-  handle('long-dwell:get-unit', (_e, equipmentId) => {
+  handle('long-dwell:get-unit', (_e, equipmentId, woKey) => {
     const s = store.load('longDwellStore', {});
-    return s[String(equipmentId || '').trim()] || {};
+    const id = String(equipmentId || '').trim();
+    // Prefer the compound (unit, WO) key; fall back to the legacy unit-only key.
+    return s[_ldKey(id, woKey)] || s[id] || {};
   });
 
   handle('long-dwell:save-unit', (_e, payload) => {
@@ -57,6 +72,12 @@ function registerLongDwellIPC() {
     if (id.length > MAX_LENGTHS.equipmentId) {
       throw new ConfigError('equipmentId too long (max ' + MAX_LENGTHS.equipmentId + ')', 'equipmentId');
     }
+
+    const woKey = String((payload && payload.woKey) || 'primary').trim() || 'primary';
+    if (woKey.length > MAX_LENGTHS.woKey) {
+      throw new ConfigError('woKey too long (max ' + MAX_LENGTHS.woKey + ')', 'woKey');
+    }
+    const key = _ldKey(id, woKey);
 
     let delayReason = payload && payload.delayReason !== undefined ? String(payload.delayReason).trim() : undefined;
     if (delayReason !== undefined && delayReason !== '' && !DELAY_REASONS.includes(delayReason)) {
@@ -70,26 +91,40 @@ function registerLongDwellIPC() {
 
     let updated;
     store.update('longDwellStore', (s) => {
-      const ex = s[id] || {};
-      s[id] = {
+      // Seed from an existing compound entry, else from a legacy unit-only
+      // entry (so the first per-WO save on a primary WO inherits prior data
+      // instead of blanking it), else empty.
+      const ex = s[key] || (woKey === 'primary' ? (s[id] || {}) : {});
+      s[key] = {
         equipmentId:     id,
+        woKey:           woKey,
         delayReason:     delayReason     !== undefined ? delayReason     : (ex.delayReason     || ''),
         escalationLevel: escalationLevel !== undefined ? escalationLevel : (ex.escalationLevel || ''),
         summary:         payload && payload.summary !== undefined ? _truncate(payload.summary, 'summary') : (ex.summary || ''),
         updatedAt:       new Date().toISOString(),
       };
-      updated = s[id];
+      updated = s[key];
       return s;
     }, {});
 
     return { ok: true, unit: updated };
   });
 
-  handle('long-dwell:delete-unit', (_e, equipmentId) => {
+  handle('long-dwell:delete-unit', (_e, equipmentId, woKey) => {
     const id = String(equipmentId || '').trim();
     if (!id) throw new ConfigError('equipmentId is required', 'equipmentId');
-    store.update('longDwellStore', (s) => { delete s[id]; return s; }, {});
-    logger.info('Long-dwell entry deleted for unit:', id);
+    store.update('longDwellStore', (s) => {
+      if (woKey !== undefined && woKey !== null) {
+        delete s[_ldKey(id, woKey)];       // delete one WO's entry
+      } else {
+        // No woKey: delete every entry for this unit (all its WOs + legacy).
+        delete s[id];
+        const prefix = id + '::';
+        for (const k of Object.keys(s)) { if (k.startsWith(prefix)) delete s[k]; }
+      }
+      return s;
+    }, {});
+    logger.info('Long-dwell entry deleted for unit:', id, woKey !== undefined ? '(wo ' + woKey + ')' : '(all WOs)');
     return { ok: true };
   });
 

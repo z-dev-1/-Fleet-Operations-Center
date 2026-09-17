@@ -287,10 +287,10 @@ export const notes = {
 
 // ── Long Dwell Units (Analytics tab) ───────────────────────────────────────
 export const longDwell = {
-  getAll:     ()     => window.longDwell.getAll(),
-  getUnit:    (id)   => window.longDwell.getUnit(id),
-  saveUnit:   (data) => window.longDwell.saveUnit(data),
-  deleteUnit: (id)   => window.longDwell.deleteUnit(id),
+  getAll:     ()            => window.longDwell.getAll(),
+  getUnit:    (id, woKey)   => window.longDwell.getUnit(id, woKey),
+  saveUnit:   (data)        => window.longDwell.saveUnit(data),
+  deleteUnit: (id, woKey)   => window.longDwell.deleteUnit(id, woKey),
 };
 
 // ── AI / Orcha ─────────────────────────────────────────────────────────────

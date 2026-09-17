@@ -1773,6 +1773,18 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .an-ld-ai-btn { white-space: nowrap; }
 .an-ld-ai-btn:disabled { opacity: .5; cursor: not-allowed; }
 
+/* Per-work-order rows: a unit with multiple open WOs shows one row per WO. */
+.an-ld-wo-cell { white-space: nowrap; }
+.an-ld-wo-link { cursor: pointer; text-decoration: none; }
+.an-ld-wo-link:hover { text-decoration: underline; }
+.an-ld-wo-status { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 8px; font-size: 11px; background: rgba(139,148,158,.18); color: var(--text-muted, #8b949e); }
+.an-ld-wo-count { font-size: 11px; color: var(--text-muted, #8b949e); font-weight: 400; }
+.an-ld-unit-cont { color: var(--text-muted, #8b949e); text-align: center; }
+/* Group continuation rows of the same unit with a subtle left accent so
+   multiple WOs for one unit read as a set, not unrelated rows. */
+.an-ld-row--multi td:first-child { border-left: 2px solid rgba(88,166,255,.35); }
+.an-ld-row--multi-first td:first-child { border-left-color: rgba(88,166,255,.6); }
+
 
 /* =============================================================
    Stage 14 additions — fleet.css

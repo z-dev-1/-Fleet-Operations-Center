@@ -127,10 +127,10 @@ expose('notes', {
 
 // ── Long Dwell Units (Analytics tab) ──────────────────────────────────────
 expose('longDwell', {
-  getAll:     ()     => ipcRenderer.invoke('long-dwell:get-all'),
-  getUnit:    (id)   => ipcRenderer.invoke('long-dwell:get-unit', id),
-  saveUnit:   (data) => ipcRenderer.invoke('long-dwell:save-unit', data),
-  deleteUnit: (id)   => ipcRenderer.invoke('long-dwell:delete-unit', id),
+  getAll:     ()            => ipcRenderer.invoke('long-dwell:get-all'),
+  getUnit:    (id, woKey)   => ipcRenderer.invoke('long-dwell:get-unit', id, woKey),
+  saveUnit:   (data)        => ipcRenderer.invoke('long-dwell:save-unit', data),
+  deleteUnit: (id, woKey)   => ipcRenderer.invoke('long-dwell:delete-unit', id, woKey),
 });
 
 // ── AI / Orcha ────────────────────────────────────────────────────────────────
