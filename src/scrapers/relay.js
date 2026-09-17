@@ -1477,4 +1477,4 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
   });
 }
 
-module.exports = { scrapeRelay, mergeRelayIntoRows };
+module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage };

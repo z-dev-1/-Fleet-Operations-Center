@@ -21,7 +21,7 @@
 
 import bus   from '../bus.js';
 import state from '../state.js';
-import { longDwell as longDwellBridge, ai as aiBridge } from '../bridge.js';
+import { longDwell as longDwellBridge, ai as aiBridge, relay as relayBridge } from '../bridge.js';
 import toast from '../components/toast.js';
 
 let _el = null;
@@ -598,16 +598,79 @@ function _buildAIFillPrompt(row, dd) {
   );
 }
 
+// Freshness window for a unit's relay data before an AI Fill. If the unit's
+// cached relay data is older than this, refresh it (live re-scrape + per-unit
+// deep-scan) so the summary is built from current data — not stale/inaccurate
+// info. 30 minutes per the agreed rule.
+const LD_FRESH_MS = 30 * 60 * 1000;
+
+// _ensureUnitFresh — before filling, guarantee this unit's relay data is fresh.
+// Reads relay.getUnitCache(id)._cachedAt; if <=30 min old, returns the current
+// row unchanged. If older (or unknown), live-refreshes the unit's relay data
+// (relay.refreshUnit) then runs a per-unit deep-scan (ai.deepProcess) so the
+// timeline/summary are regenerated from the fresh data, and returns the fresh
+// row. Degrades gracefully: any step failing falls back to the existing row so
+// the fill still proceeds (never blocks the user on a flaky backend).
+// `onStatus(text)` is optional (used by Fill-All to show progress).
+async function _ensureUnitFresh(unitId, onStatus) {
+  const rowsNow = () => (state.slice('fleet').rows || []);
+  const findRow = () => rowsNow().find(r => r.equipmentId === unitId) || null;
+  let row = findRow();
+
+  // Determine data age from the relay cache _cachedAt (the real vendor-data
+  // freshness marker). Missing/unparseable => treat as stale.
+  let ageMs = Infinity;
+  try {
+    const cache = await relayBridge.getUnitCache(unitId);
+    const cachedAt = cache && (cache._cachedAt || cache.cachedAt);
+    if (cachedAt) ageMs = Date.now() - Number(cachedAt);
+  } catch (_) { /* treat as stale */ }
+
+  if (ageMs <= LD_FRESH_MS) {
+    return { row, refreshed: false, ageMin: Math.round(ageMs / 60000) };
+  }
+
+  // Stale — refresh this one unit's relay data, then deep-scan it.
+  try {
+    if (onStatus) onStatus('Refreshing ' + unitId + ' (data ' + (ageMs === Infinity ? 'unknown' : Math.round(ageMs / 60000) + 'min') + ' old)\u2026');
+    if (relayBridge && relayBridge.refreshUnit) {
+      const rr = await relayBridge.refreshUnit(unitId);
+      if (rr && rr.unit) row = rr.unit; // fresh merged row from main
+    }
+  } catch (e) { /* non-fatal — fall through to deep-scan / existing row */ }
+
+  try {
+    if (onStatus) onStatus('Deep-scanning ' + unitId + '\u2026');
+    if (aiBridge && aiBridge.deepProcess) {
+      const dp = await aiBridge.deepProcess([unitId]);
+      const u = dp && Array.isArray(dp.units) ? dp.units.find(x => x.equipmentId === unitId) : null;
+      if (u && row) {
+        // Overlay the freshly regenerated AI fields onto the row we'll summarize.
+        if (u.issueSummary)   { row.issueSummary = u.issueSummary; row.issue = u.issueSummary; }
+        if (u.repairTimeline) row.repairTimeline = u.repairTimeline;
+        if (u.notes)          row.savedNotes = u.notes;
+      }
+    }
+  } catch (e) { /* non-fatal — use whatever row we have */ }
+
+  // Prefer the latest row from state (main may have pushed an update mid-refresh).
+  row = findRow() || row;
+  return { row, refreshed: true, ageMin: ageMs === Infinity ? null : Math.round(ageMs / 60000) };
+}
+
 // Runs the AI fill for one row, validates the result against the fixed
 // enums (never trust the model to stay in-list; the long-dwell:save-unit
 // IPC handler also validates server-side and would throw on anything else),
 // updates that row's DOM in place, and persists via the same saveUnit path
 // manual edits use.
-async function _aiFillRow(unitId, tr) {
+//
+// FRESHNESS (2026): before summarizing, ensure the unit's relay data is <=30
+// min old; if not, refresh + deep-scan just this unit so the summary reflects
+// current vendor/repair data. `onStatus` is optional progress reporting.
+async function _aiFillRow(unitId, tr, onStatus) {
   if (!tr) return false;
-  const row = (state.slice('fleet').rows || []).find(r => r.equipmentId === unitId);
+  let row = (state.slice('fleet').rows || []).find(r => r.equipmentId === unitId);
   if (!row) { toast.show('warn', 'Unit not found in current fleet data', 3000); return false; }
-  const dd = _downDays(row);
 
   const btn = tr.querySelector('[data-action="ai-fill"]');
   tr.classList.add('an-ld-row--ai-loading');
@@ -615,6 +678,12 @@ async function _aiFillRow(unitId, tr) {
 
   try {
     if (!aiBridge || !aiBridge.ask) throw new Error('AI bridge not available');
+    // Guarantee fresh data first (refresh + deep-scan if stale).
+    if (btn && onStatus === undefined) btn.textContent = '\u2728 Refreshing...';
+    const fresh = await _ensureUnitFresh(unitId, onStatus);
+    if (fresh.row) row = fresh.row;
+    if (btn && onStatus === undefined) btn.textContent = '\u2728 Filling...';
+    const dd = _downDays(row);
     const prompt = _buildAIFillPrompt(row, dd == null ? 0 : dd);
     const result = await aiBridge.ask(prompt);
     if (!result || result.ok === false) throw new Error((result && result.error) || 'AI call failed');
@@ -890,8 +959,15 @@ function _renderLongDwellTab(rows) {
       let done = 0;
       const total = blankTrs.length;
       fillAllBtn.textContent = `\u2728 Filling 0/${total}...`;
+      // Sequential (never parallel) so we don't hammer AAP/Relay with concurrent
+      // per-unit re-scrapes. Each unit is refreshed + deep-scanned only if its
+      // relay data is stale (>30 min); the onStatus callback surfaces that
+      // per-unit progress on the button so the user sees what's happening.
       for (const tr of blankTrs) {
-        await _aiFillRow(tr.dataset.unitId, tr);
+        const uid = tr.dataset.unitId;
+        const n = done + 1;
+        const onStatus = (msg) => { fillAllBtn.textContent = `\u2728 ${n}/${total}: ${msg}`; };
+        await _aiFillRow(uid, tr, onStatus);
         done++;
         fillAllBtn.textContent = `\u2728 Filling ${done}/${total}...`;
       }

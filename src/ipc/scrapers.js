@@ -425,6 +425,68 @@ function registerScrapersIPC(ctx) {
     return cache[equipmentId] || { workOrders: [] };
   });
 
+  // ── relay:refresh-unit ───────────────────────────────────────────────────
+  // Live re-scrape of ONE unit's Relay Garage / vendor data on demand (used by
+  // the Long Dwell "AI Fill" freshness gate: when a unit's cached relay data is
+  // older than the freshness window, refresh just that unit before summarizing).
+  //
+  // Scrapes via relay.scrapeUnitPage (default session — Midway cookies already
+  // injected, same as the batch sync path), updates relayCache[id] (incl.
+  // _cachedAt), re-merges the fresh relay data into the live fleet rows + saves
+  // fleetData, and returns the refreshed merged row so the caller can build its
+  // AI prompt from current data. Serialized with the batch scrape's own lock is
+  // not needed here (single unit, own window), but we guard against concurrent
+  // per-unit refreshes with a small lock.
+  let _refreshUnitLock = false;
+  handle('relay:refresh-unit', async (_e, equipmentId) => {
+    const store = require('../store');
+    const id = String(equipmentId || '').trim();
+    if (!id) throw new ScraperError('equipmentId required', 'relay:refresh-unit');
+    if (_refreshUnitLock) {
+      // Don't hard-fail — return the current cache so the caller can proceed.
+      const cache = store.load('relayCache', {});
+      return { ok: false, busy: true, unit: null, cache: cache[id] || null };
+    }
+    _refreshUnitLock = true;
+    try {
+      const { scrapeUnitPage, mergeRelayIntoRows } = require('../../src/scrapers/relay');
+      const relayCache = store.load('relayCache', {});
+      // partition '' == default session (Midway cookies already injected), same
+      // as scrapeRelay uses for the batch path.
+      const res = await scrapeUnitPage(id, '', relayCache);
+      // Persist the refreshed cache entry (scrapeUnitPage stamps _cachedAt).
+      if (res && !res._noWR) {
+        relayCache[id] = res;
+      } else if (res && res._noWR) {
+        relayCache[id] = res; // negative-cache marker (also stamped _cachedAt)
+      }
+      store.save('relayCache', relayCache);
+
+      // Re-merge the single fresh entry into the live fleet rows so the row the
+      // renderer reads (and the AI prompt uses) reflects current data.
+      const notesStore = store.load('notesStore', {});
+      let freshRow = null;
+      const rows = (ctx.lastData && ctx.lastData.rows) ? ctx.lastData.rows : ((store.load('fleetData', {}) || {}).rows || []);
+      if (rows.length) {
+        const singleCache = {}; if (res) singleCache[id] = res;
+        const merged = mergeRelayIntoRows(rows, singleCache, notesStore);
+        if (ctx.lastData) ctx.lastData.rows = merged;
+        const fd = store.load('fleetData', {}) || {};
+        fd.rows = merged;
+        store.save('fleetData', fd);
+        freshRow = merged.find(r => String(r.equipmentId || '').trim() === id) || null;
+        // Push the refreshed rows to the renderer so the grid/state updates.
+        if (ctx.pushData) { try { ctx.pushData({ ...fd, rows: merged, _partial: 'relay-refresh-unit' }); } catch (_) {} }
+      }
+      logger.info('relay:refresh-unit done for ' + id + (res && res._noWR ? ' (no WR)' : ''));
+      return { ok: true, unit: freshRow, cache: relayCache[id] || null };
+    } catch (e) {
+      throw new ScraperError(e.message, 'relay:refresh-unit', { equipmentId: id });
+    } finally {
+      _refreshUnitLock = false;
+    }
+  });
+
   logger.info('Scrapers IPC handlers registered');
 }
 

@@ -495,6 +495,13 @@ export const relay = {
       ? window.relay.getCache().then(cache => cache[equipmentId] || { workOrders: [] })
       : Promise.resolve({ workOrders: [] });
   },
+  // Live re-scrape of ONE unit's Relay data (freshness refresh before AI Fill).
+  refreshUnit: (equipmentId) => {
+    if (window.relay && typeof window.relay.refreshUnit === 'function') {
+      return window.relay.refreshUnit(equipmentId);
+    }
+    return Promise.resolve({ ok: false, unit: null });
+  },
 };
 
 // -- Workflow Intelligence (Phase 8) -- recorder, library, execution --
