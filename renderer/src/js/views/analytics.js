@@ -552,29 +552,47 @@ function _buildAIFillPrompt(row, dd) {
     '   - Multiple repair attempts or multiple vendor handoffs -> minimum SEV3\n' +
     '   - DOT-critical safety item (brakes, air systems, steering) -> escalate one level faster than day count alone suggests\n\n' +
     '3. summary -- A concise professional fleet-coordinator note (max 400 chars).\n' +
-    '   Write it like a FAS would -- include: what\'s happening, what\'s blocking, what\'s next.\n' +
+    '   Write it like a FAS would -- include: what\'s happening, what\'s blocking, what\'s next.\n\n' +
+    '   ===== DETAILED-NOTES RULE (units down 30+ days) =====\n' +
+    '   This unit is down ' + dd + ' days. If it is 30 OR MORE days down AND is NOT one of the\n' +
+    '   EXCEPTIONS below, the summary MUST contain all three of these, grounded ONLY in the\n' +
+    '   SOURCE DATA (never invent any of them):\n' +
+    '     a) PARTS SIM LINK -- if a parts SIM/ticket link appears in the source data, include the\n' +
+    '        actual link. If no parts SIM is open/mentioned, omit it (do NOT fabricate a link).\n' +
+    '     b) ETC or projected ETC -- include the completion date if one exists. If none exists,\n' +
+    '        write "ETA pending" followed by the reason (e.g. "ETA pending — awaiting parts quote").\n' +
+    '     c) NEXT FOLLOW-UP OWNER + WHEN -- clearly state who owns the next action and when.\n' +
+    '        Use forms like: "FAS follow-up [date]", "MCS follow-up by [date]", "Estimates team\n' +
+    '        follow-up", or for high-value estimates "expected answer within 24-48 hrs". If the\n' +
+    '        source does not name an owner/date, write "Follow-up required" and name the most\n' +
+    '        likely owner from context (do NOT invent a specific person or date).\n\n' +
+    '   ===== EXCEPTIONS (general note OK -- detailed notes NOT required) =====\n' +
+    '   If the unit is any of the following, a brief general note is fine (no Parts SIM / ETC /\n' +
+    '   follow-up-owner requirement) because it is not within FAS control:\n' +
+    '     - Accident units (and note: ACCIDENT work orders over 30 days are EXPLICITLY EXCLUDED\n' +
+    '       from the detailed-notes treatment -- a short general note is correct).\n' +
+    '     - End-of-life (EOL) units.\n' +
+    '     - Rentals.\n' +
+    '   For these, a short factual line (e.g. "Accident: CEI managing. CNG/roof damage. No ETC.")\n' +
+    '   is the correct output.\n\n' +
     '   Be specific: include vendor names, part names, ETAs/ETCs with dates, days down.\n' +
     '   If the vendor rejected: explain WHY and where it was routed.\n' +
-    '   If parts are the blocker: say which part and ETA.\n' +
-    '   If repairs are in progress: say what stage and ETC.\n\n' +
+    '   If parts are the blocker: say which part and ETA.\n\n' +
     '   STYLE EXAMPLES (match this voice and specificity):\n' +
-    '   - "Estimate approved 8/12. Parts ordered, ETA 8/14. Pending parts arrival and ETC from dealer."\n' +
-    '   - "Unit at Cummins 14 days. ETC passed 7/22. Asana escalation submitted."\n' +
-    '   - "Primary Vendor Rejection: Amerit rejected — transmission repair requires dealer diagnostics. Towed to Cummins 7/30. Estimate approved 8/12. Pending parts ETA."\n' +
-    '   - "OSR; EST approved 8/12, dealer is sourcing parts, pending ETA"\n' +
-    '   - "Tech finishing repairs, work completion EOD"\n' +
-    '   - "Pending parts — Head PN 5581552 ETA pending from Cummins RDC. Continue to monitor."\n' +
-    '   - "Accident: CEI managing. CNG/roof damage. No ETC."\n' +
-    '   - "Shop is backed up, pending diagnosis"\n' +
-    '   - "Repairs complete, pending return tow to site"\n' +
-    '   - "8 days at primary vendor (Amerit) for brake assembly. ETC 8/14. Communication gap — vendor non-responsive."\n\n' +
+    '   - "34 days at Cummins for turbo. Parts SIM open: <link>. ETA pending — turbo backordered. MCS follow-up by 8/16."\n' +
+    '   - "Estimate approved 8/12. Parts ordered, ETC 8/14. FAS follow-up 8/15."\n' +
+    '   - "High-value estimate submitted 8/12; expected answer within 24-48 hrs. Estimates team follow-up."\n' +
+    '   - "Pending parts — Head PN 5581552, ETA pending from Cummins RDC. FAS follow-up 8/18."\n' +
+    '   - "Accident: CEI managing. CNG/roof damage. No ETC." (exception — general note OK)\n' +
+    '   - "EOL review pending disposition." (exception — general note OK)\n\n' +
     '   KEY RULES:\n' +
     '   - Be direct and action-oriented, not formal\n' +
     '   - If multiple issues: list them concisely separated by semicolons\n' +
-    '   - Include the NEXT ACTION (what needs to happen next)\n' +
+    '   - Always include the NEXT ACTION / next follow-up (unless an exception unit)\n' +
     '   - If no data: "No vendor update logged; follow-up required."\n' +
     '   - NEVER include dollar amounts, personal names, phone numbers, emails, VINs\n' +
-    '   - Allowed: vendor names, dealer locations, case numbers, part names, dates, ETAs\n\n' +
+    '   - NEVER fabricate a SIM link, an ETC date, an owner name, or a follow-up date not in the source\n' +
+    '   - Allowed: vendor names, dealer locations, case numbers, part names, SIM links, dates, ETAs\n\n' +
     'RESPOND WITH RAW JSON ONLY -- no markdown, no code fences, no explanation, exactly this shape:\n' +
     '{"delayReason": "...", "escalationLevel": "...", "summary": "..."}'
   );
