@@ -1412,6 +1412,7 @@ function renderRepairPane(unit){
 
     var fields=[
       unit.workRequestId?['WR ID',unit.workRequestId]:null,
+      (unit.alternativeId||unit.altId)?['AMZ ID',unit.alternativeId||unit.altId]:null,
       unit.vendorWorkOrderId?['Vendor WO',unit.vendorWorkOrderId]:null,
       unit.salesforceCase?['SF Case',unit.salesforceCase]:null,
       unit.createdBy?['Created By',unit.createdBy]:null,
@@ -1460,6 +1461,7 @@ function renderRepairPane(unit){
     var pStateKey=(p.completed||/clos|complet/i.test(pStateRaw))?'closed':/sour/i.test(pStateRaw)?'sourcing':'open';
     var pFields=[
       p.workRequestId?['WR ID',p.workRequestId]:null,
+      (p.alternativeId||p.altId)?['AMZ ID',p.alternativeId||p.altId]:null,
       p.salesforceCase?['SF Case',p.salesforceCase]:null,
       p.serviceCategory?['Category',p.serviceCategory]:null,
       p.totalCost?['Total Cost',p.totalCost]:null,
@@ -1511,10 +1513,11 @@ function renderRepairPane(unit){
                      : /sour/i.test(pStateRaw) ? 'sourcing' : 'open';
       var pTypeLabel = p._wrType === 'planned' ? 'Planned' : 'Unplanned';
       var pFields = [
-        p.workRequestId   ? ['WR ID',      p.workRequestId]   : null,
-        p.salesforceCase  ? ['SF Case',    p.salesforceCase]  : null,
-        p.serviceCategory ? ['Category',   p.serviceCategory] : null,
-        p.totalCost       ? ['Total Cost', p.totalCost]       : null,
+        p.workRequestId          ? ['WR ID',      p.workRequestId]          : null,
+        (p.alternativeId||p.altId)?['AMZ ID',     p.alternativeId||p.altId] : null,
+        p.salesforceCase         ? ['SF Case',    p.salesforceCase]         : null,
+        p.serviceCategory        ? ['Category',   p.serviceCategory]        : null,
+        p.totalCost              ? ['Total Cost', p.totalCost]              : null,
       ].filter(Boolean);
       secondaryWRCards +=
         '<div class="dp-section-title dp-section-title--planned">' + pTypeLabel + ' Work Order</div>' +

@@ -785,7 +785,7 @@ function _renderLongDwellHeader(rows) {
 // cell would shift every following row out of alignment when pasted.
 function _buildLongDwellTsv(rows) {
   const list = _computeLongDwell(rows);
-  const header = ['Unit', 'Work Order', 'Domicile', 'Operator', 'Down Days', 'Vendor', 'Delay Reason', 'Escalation Level', 'Summary'];
+  const header = ['Unit', 'Work Order', 'Reason', 'Domicile', 'Operator', 'Down Days', 'Vendor', 'Delay Reason', 'Escalation Level', 'Summary'];
   const lines = [header.join('\t')];
   // One line PER WORK ORDER, matching the on-screen table.
   for (const { row, dd } of list) {
@@ -795,9 +795,10 @@ function _buildLongDwellTsv(rows) {
     for (const wo of _expandRowToWOs(row)) {
       const saved   = _savedForWO(id, wo.woKey, wo.isPrimary);
       const vendor  = wo.woVendor || row.vendor || '';
-      const woNum   = wo.woNumber || (wo.woType === 'planned' ? 'Planned WR' : (wo.isPrimary ? 'Primary WR' : 'Open WR'));
+      const woLabel = wo.woAmz || wo.woNumber || (wo.woType === 'planned' ? 'Planned WR' : (wo.isPrimary ? 'Primary WR' : 'Open WR'));
+      const reason  = String(wo.woReason || '').replace(/\r?\n/g, ' ').trim();
       const summary = String(saved.summary || '').replace(/\r?\n/g, ' ').trim();
-      lines.push([id, woNum, dom, op, dd + 'd', vendor, saved.delayReason || '', saved.escalationLevel || '', summary].join('\t'));
+      lines.push([id, woLabel, reason, dom, op, dd + 'd', vendor, saved.delayReason || '', saved.escalationLevel || '', summary].join('\t'));
     }
   }
   return lines.join('\n');
@@ -879,6 +880,8 @@ function _expandRowToWOs(row) {
     isPrimary:  true,
     woKey:      primaryKey,
     woNumber:   row.vendorWorkOrderId || row.workRequestId || '',
+    woAmz:      row.alternativeId || row.altId || '',
+    woReason:   _woShortReason(row),
     woStatus:   row.serviceState || '',
     woVendor:   row.vendor || '',
     woUrl:      row.serviceUrl || '',
@@ -894,6 +897,8 @@ function _expandRowToWOs(row) {
       isPrimary:  false,
       woKey:      k,
       woNumber:   wo.vendorWorkOrderId || '',
+      woAmz:      wo.alternativeId || wo.altId || '',
+      woReason:   _woShortReason(wo),
       woStatus:   wo.serviceState || wo.state || '',
       woVendor:   wo.vendor || row.vendor || '',
       woUrl:      wo._relayUrl || '',
@@ -901,6 +906,20 @@ function _expandRowToWOs(row) {
     });
   });
   return views;
+}
+
+// A really short, human reason for a work order, for the Long Dwell WO cell.
+// Prefers the vendor cause, then the AI issue summary, then raw issue details.
+// Kept tight (~60 chars) so the cell stays scannable.
+function _woShortReason(wo) {
+  const raw = String(
+    wo.cause
+    || (wo.issueSummary ? String(wo.issueSummary).split('TIMELINE:')[0] : '')
+    || wo.issueDetails
+    || ''
+  ).replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+  return raw.length > 60 ? raw.slice(0, 57).trimEnd() + '\u2026' : raw;
 }
 
 function _renderLongDwellTable(rows) {
@@ -936,10 +955,16 @@ function _renderLongDwellTable(rows) {
     return wos.map((wo, i) => {
       const saved  = _savedForWO(id, wo.woKey, wo.isPrimary);
       const vendor = wo.woVendor || row.vendor || '\u2014';
-      const woNum   = wo.woNumber || (wo.woType === 'planned' ? 'Planned WR' : (wo.isPrimary ? 'Primary WR' : 'Open WR'));
+      // Primary label: prefer the AMZ alt ID (what leadership references), then
+      // vendor WO#, then a type label. Show vendor WO# as a secondary tag when
+      // both exist.
+      const woLabel = wo.woAmz || wo.woNumber || (wo.woType === 'planned' ? 'Planned WR' : (wo.isPrimary ? 'Primary WR' : 'Open WR'));
+      const woSubTag = (wo.woAmz && wo.woNumber && wo.woNumber !== wo.woAmz)
+        ? `<span class="an-ld-wo-sub">${_safe(wo.woNumber)}</span>` : '';
       const woStat  = wo.woStatus ? `<span class="an-ld-wo-status">${_safe(wo.woStatus)}</span>` : '';
-      const woLinkOpen  = wo.woUrl ? `<a class="an-ld-wo-link" data-action="open-wo" data-wo-url="${_safe(wo.woUrl)}" title="Open work order in Relay">` : '<span>';
+      const woLinkOpen  = wo.woUrl ? `<a class="an-ld-wo-link" data-action="open-wo" data-wo-url="${_safe(wo.woUrl)}" title="Open work order in Relay">` : '<span class="an-ld-wo-link">';
       const woLinkClose = wo.woUrl ? '</a>' : '</span>';
+      const woReason = wo.woReason ? `<div class="an-ld-wo-reason" title="${_safe(wo.woReason)}">${_safe(wo.woReason)}</div>` : '';
       const unitCell = i === 0
         ? `<td class="an-op-name an-ld-unit-link" data-action="open-unit" title="Open unit detail">${_safe(id)}${multi ? ` <span class="an-ld-wo-count">(${wos.length} WOs)</span>` : ''}</td>`
         : `<td class="an-ld-unit-cont" title="${_safe(id)} \u2014 additional work order">\u21B3</td>`;
@@ -947,7 +972,10 @@ function _renderLongDwellTable(rows) {
       return `
       <tr data-unit-id="${_safe(id)}" data-wo-id="${_safe(wo.woKey)}" data-wo-primary="${wo.isPrimary ? '1' : '0'}" class="${rowCls}">
         ${unitCell}
-        <td class="an-ld-wo-cell">${woLinkOpen}${_safe(woNum)}${woLinkClose} ${woStat}</td>
+        <td class="an-ld-wo-cell">
+          <div class="an-ld-wo-idline">${woLinkOpen}${_safe(woLabel)}${woLinkClose}${woSubTag} ${woStat}</div>
+          ${woReason}
+        </td>
         <td>${_safe(dom)}</td>
         <td>${_safe(op)}</td>
         <td class="an-tbl--r ${ddCls}">${dd}d</td>
