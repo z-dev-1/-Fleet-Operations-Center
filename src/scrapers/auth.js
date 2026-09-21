@@ -136,7 +136,22 @@ function checkMwinit() {
 
   const expiresInMin = soonest === Infinity ? null : Math.round((soonest - now) / 60);
 
-  return { ok: true, count: cookies.length, expiresInMin };
+  // AEA (amazon_enterprise_access) is the short-lived access token that AAP
+  // actually enforces server-side. It is deliberately EXCLUDED from the
+  // session renewal clock above (renewing the 20h session early doesn't help),
+  // but AAP will bounce us to Midway SSO the moment this token lapses even
+  // though the session cookie still has many hours left. So we report its
+  // expiry SEPARATELY here (aeaExpiresInMin) so callers can proactively
+  // re-inject / refresh ahead of an AAP bounce instead of only reacting to the
+  // SSO-redirect loop after the fact. Root cause of the erratic ~2h re-auth
+  // churn (confirmed via cookie file + window.log SSO-loop correlation).
+  const aeaCookies = cookies.filter(c => SHORT_LIVED_NAMES.has(c.name) && c.expirationDate);
+  const aeaSoonest = aeaCookies.length
+    ? aeaCookies.reduce((min, c) => Math.min(min, c.expirationDate), Infinity)
+    : Infinity;
+  const aeaExpiresInMin = aeaSoonest === Infinity ? null : Math.round((aeaSoonest - now) / 60);
+
+  return { ok: true, count: cookies.length, expiresInMin, aeaExpiresInMin };
 }
 
 // ── Inject cookies into the Electron session ─────────────────────────────────

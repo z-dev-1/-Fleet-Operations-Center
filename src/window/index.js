@@ -258,6 +258,7 @@ function initWindows(ctx) {
   let _bubbleAutoHideTimer = null;
   const BUBBLE_AUTO_HIDE_MS = 15000;
   let _rescanInProgress = false;
+  let _rescanHitSSO     = false; // set when a rescan window lands on Midway SSO (dead session)
   let _appReady         = false;
 
   // Lazy-load scrapers to avoid circular require at module load
@@ -1213,7 +1214,20 @@ function initWindows(ctx) {
     // Scrape ONE domicile chunk in a throwaway off-screen window. Resolves with
     // the mapped rows, or [] on timeout/failure (never rejects — callers decide
     // whether a partial/empty chunk should abort the whole rescan).
-    function _scrapeChunk(freshUrl, label) {
+    async function _scrapeChunk(freshUrl, label) {
+      // AUTH-AWARE RESCAN (fix for erratic ~2h re-auth churn): the background
+      // rescan window shares session.defaultSession but used to loadURL(AAP)
+      // with NO cookie re-injection -- so once AAP invalidated the session
+      // server-side (AEA token lapse), this window silently landed on the
+      // Midway login page, scraped 0 rows for ~90s, and repeated every 5min
+      // without ever self-healing. Recovery only happened when the MAIN window
+      // happened to drift to SSO and its auth-poller fired mwinit -- hence the
+      // erratic timing. Fix part 1: re-inject the freshest cookies before every
+      // chunk load (same pattern relay:open-url / uptake:open-url already use),
+      // so the AEA the app holds is pushed in before AAP can reject it.
+      try { await _getAuth().injectCookies(); }
+      catch (e) { logger.warn('[' + label + '] pre-scrape cookie inject skipped: ' + e.message); }
+
       return new Promise((resolve) => {
         let settled = false;
         const finish = (rows) => { if (settled) return; settled = true; resolve(rows || []); };
@@ -1227,6 +1241,27 @@ function initWindows(ctx) {
             session:          session.defaultSession,
           },
         });
+
+        // Fix part 2: detect an SSO/login landing and bail immediately instead
+        // of wasting the full ~90s poll budget on a bounced session. If the
+        // rescan window ends up on midway-auth.amazon.com, the session is dead
+        // server-side; abandon this chunk fast and flag it so the main-window
+        // auth-poller path re-auths promptly rather than after minutes of
+        // 0-row scans.
+        const _isSSO = (u) => /midway-auth\.amazon\.com|\/SSO\/redirect/i.test(u || '');
+        const _bailIfSSO = () => {
+          let u = '';
+          try { u = scrapeWin.webContents.getURL(); } catch (_) {}
+          if (_isSSO(u)) {
+            logger.warn('[' + label + '] rescan landed on Midway SSO -- session invalid; bailing fast (will re-auth)');
+            _rescanHitSSO = true;
+            clearTimeout(timeout);
+            try { scrapeWin.destroy(); } catch (_) {}
+            finish([]);
+            return true;
+          }
+          return false;
+        };
 
         // Safety-net timeout only. _runAAPScrapeLoop has its OWN budget
         // (maxPolls 18 x 5s poll = 90s) AND then does a force-1000 click +
@@ -1243,6 +1278,7 @@ function initWindows(ctx) {
         }, 150000);
 
         scrapeWin.webContents.once('did-finish-load', () => {
+          if (_bailIfSSO()) return; // dead session -> don't burn 90s polling a login page
           _runAAPScrapeLoop(scrapeWin, {
             label, maxPolls: 18,
             onComplete: (rows) => {
@@ -1251,6 +1287,7 @@ function initWindows(ctx) {
               finish(rows);
             },
             onTimeout: () => {
+              _bailIfSSO(); // note SSO if that's why we got 0 rows
               clearTimeout(timeout);
               try { scrapeWin.destroy(); } catch (_) {}
               finish([]);
@@ -1274,6 +1311,7 @@ function initWindows(ctx) {
         ': ' + domiciles.length + ' domiciles in ' + chunks.length + ' chunk(s)');
 
       _rescanInProgress = true;
+      _rescanHitSSO = false; // reset per rescan; a chunk sets it if it lands on SSO
       try {
         // Scrape each chunk sequentially (running several visible scrape windows
         // in parallel fights over the shared Midway session and CPU). Accumulate
@@ -1348,6 +1386,38 @@ function initWindows(ctx) {
         logger.warn('Rescan failed:', e.message);
       } finally {
         _rescanInProgress = false;
+      }
+
+      // If any chunk landed on Midway SSO, the AAP session is dead server-side
+      // (AEA token lapsed) even if the 20h cookie is still valid. Proactively
+      // recover here so the NEXT rescan (5 min later) isn't another bounced,
+      // 0-row cycle: re-inject the freshest cookies first (fixes it silently
+      // when the cookie file still has a live AEA), and only escalate to a full
+      // mwinit -- the one path that needs the WebAuthn tap -- when the AEA on
+      // disk is itself dead. This is what makes the fix self-healing without
+      // waiting for the user to notice stale data.
+      if (_rescanHitSSO) {
+        _rescanHitSSO = false;
+        try {
+          const { injectCookies, checkMwinit, runMwinit } = _getAuth();
+          logger.warn('[rescan] session was invalid -- attempting proactive recovery (re-inject)');
+          await injectCookies();
+          const st = checkMwinit();
+          const aeaDead = !st.ok || (st.aeaExpiresInMin !== null && st.aeaExpiresInMin <= 0);
+          if (aeaDead) {
+            logger.warn('[rescan] AEA token dead (aeaExpiresInMin=' +
+              (st.aeaExpiresInMin) + ', ok=' + st.ok + ') -- launching mwinit to recover');
+            pushStatus('\uD83D\uDD11 Session expired \u2014 complete Midway auth in the terminal window...');
+            await runMwinit();
+            await injectCookies();
+            logger.info('[rescan] recovery mwinit complete -- session refreshed');
+          } else {
+            logger.info('[rescan] re-inject recovery done (AEA still valid on disk, aeaExpiresInMin=' +
+              st.aeaExpiresInMin + ') -- next rescan should succeed');
+          }
+        } catch (e) {
+          logger.warn('[rescan] proactive recovery failed: ' + e.message);
+        }
       }
     }
 
