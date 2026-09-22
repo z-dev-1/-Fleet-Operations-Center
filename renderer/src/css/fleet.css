@@ -1753,8 +1753,12 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 
 .an-ld-select { width: 100%; min-width: 130px; }
 .an-ld-summary {
-  width: 100%; min-height: 44px; max-height: 140px;
-  font-size: 11px; resize: vertical;
+  /* Holds the 7-field structured status block (Initial Issue / Vendor Rejection /
+     Barrier / Actions / Repair Status / ETC / Follow-up). Tall enough to show all
+     7 lines without scrolling; still user-resizable. */
+  width: 100%; min-width: 260px; min-height: 132px; max-height: 240px;
+  font-size: 11px; line-height: 1.45; resize: vertical;
+  white-space: pre-wrap;
 }
 
 /* Escalation severity coloring -- SEV2 = highest severity */

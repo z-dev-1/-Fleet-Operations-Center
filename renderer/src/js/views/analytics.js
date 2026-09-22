@@ -551,49 +551,38 @@ function _buildAIFillPrompt(row, dd) {
     '   - Vendor rejected repair or marked out of scope for primary vendor -> minimum SEV3, likely SEV2\n' +
     '   - Multiple repair attempts or multiple vendor handoffs -> minimum SEV3\n' +
     '   - DOT-critical safety item (brakes, air systems, steering) -> escalate one level faster than day count alone suggests\n\n' +
-    '3. summary -- A concise professional fleet-coordinator note (max 400 chars).\n' +
-    '   Write it like a FAS would -- include: what\'s happening, what\'s blocking, what\'s next.\n\n' +
-    '   ===== DETAILED-NOTES RULE (units down 30+ days) =====\n' +
-    '   This unit is down ' + dd + ' days. If it is 30 OR MORE days down AND is NOT one of the\n' +
-    '   EXCEPTIONS below, the summary MUST contain all three of these, grounded ONLY in the\n' +
-    '   SOURCE DATA (never invent any of them):\n' +
-    '     a) PARTS SIM LINK -- if a parts SIM/ticket link appears in the source data, include the\n' +
-    '        actual link. If no parts SIM is open/mentioned, omit it (do NOT fabricate a link).\n' +
-    '     b) ETC or projected ETC -- include the completion date if one exists. If none exists,\n' +
-    '        write "ETA pending" followed by the reason (e.g. "ETA pending — awaiting parts quote").\n' +
-    '     c) NEXT FOLLOW-UP OWNER + WHEN -- clearly state who owns the next action and when.\n' +
-    '        Use forms like: "FAS follow-up [date]", "MCS follow-up by [date]", "Estimates team\n' +
-    '        follow-up", or for high-value estimates "expected answer within 24-48 hrs". If the\n' +
-    '        source does not name an owner/date, write "Follow-up required" and name the most\n' +
-    '        likely owner from context (do NOT invent a specific person or date).\n\n' +
-    '   ===== EXCEPTIONS (general note OK -- detailed notes NOT required) =====\n' +
-    '   If the unit is any of the following, a brief general note is fine (no Parts SIM / ETC /\n' +
-    '   follow-up-owner requirement) because it is not within FAS control:\n' +
-    '     - Accident units (and note: ACCIDENT work orders over 30 days are EXPLICITLY EXCLUDED\n' +
-    '       from the detailed-notes treatment -- a short general note is correct).\n' +
-    '     - End-of-life (EOL) units.\n' +
-    '     - Rentals.\n' +
-    '   For these, a short factual line (e.g. "Accident: CEI managing. CNG/roof damage. No ETC.")\n' +
-    '   is the correct output.\n\n' +
-    '   Be specific: include vendor names, part names, ETAs/ETCs with dates, days down.\n' +
-    '   If the vendor rejected: explain WHY and where it was routed.\n' +
-    '   If parts are the blocker: say which part and ETA.\n\n' +
-    '   STYLE EXAMPLES (match this voice and specificity):\n' +
-    '   - "34 days at Cummins for turbo. Parts SIM open: <link>. ETA pending — turbo backordered. MCS follow-up by 8/16."\n' +
-    '   - "Estimate approved 8/12. Parts ordered, ETC 8/14. FAS follow-up 8/15."\n' +
-    '   - "High-value estimate submitted 8/12; expected answer within 24-48 hrs. Estimates team follow-up."\n' +
-    '   - "Pending parts — Head PN 5581552, ETA pending from Cummins RDC. FAS follow-up 8/18."\n' +
-    '   - "Accident: CEI managing. CNG/roof damage. No ETC." (exception — general note OK)\n' +
-    '   - "EOL review pending disposition." (exception — general note OK)\n\n' +
-    '   KEY RULES:\n' +
-    '   - Be direct and action-oriented, not formal\n' +
-    '   - If multiple issues: list them concisely separated by semicolons\n' +
-    '   - Always include the NEXT ACTION / next follow-up (unless an exception unit)\n' +
-    '   - If no data: "No vendor update logged; follow-up required."\n' +
-    '   - NEVER include dollar amounts, personal names, phone numbers, emails, VINs\n' +
-    '   - NEVER fabricate a SIM link, an ETC date, an owner name, or a follow-up date not in the source\n' +
-    '   - Allowed: vendor names, dealer locations, case numbers, part names, SIM links, dates, ETAs\n\n' +
-    'RESPOND WITH RAW JSON ONLY -- no markdown, no code fences, no explanation, exactly this shape:\n' +
+    '3. summary -- a STRUCTURED status block in EXACTLY this 7-field format, in this order,\n' +
+    '   one field per line, each line starting with "\\u2022 " (bullet + space) then the label\n' +
+    '   and a colon. Use a literal \\n between lines. This EXACT format is required for EVERY\n' +
+    '   unit -- accidents, EOL, and rentals included (they still fill every field; see below).\n\n' +
+    '   The 7 fields (verbatim labels, in this order):\n' +
+    '   \\u2022 Initial Issue Reported: <what the unit originally came in for -- the reported problem>\n' +
+    '   \\u2022 Primary Vendor Rejection: <if the primary vendor rejected/declined/routed it out, WHY and where it went; else "N/A">\n' +
+    '   \\u2022 Primary Barrier: <the single biggest thing blocking completion right now -- parts, estimate approval, payment, vendor capacity, diagnosis, etc.>\n' +
+    '   \\u2022 Actions Taken: <what has been done so far -- diagnosis, estimates, parts ordered, handoffs, follow-ups already made>\n' +
+    '   \\u2022 Repair Status: <where the repair stands right now -- e.g. "Awaiting parts", "In repair", "Estimate pending approval", "Diagnosis in progress">\n' +
+    '   \\u2022 ETC: <estimated completion date if known; if none, "Pending \\u2014 <reason>" e.g. "Pending \\u2014 turbo backordered">\n' +
+    '   \\u2022 Follow-up date: <next follow-up owner + date, e.g. "FAS follow-up 8/18", "MCS follow-up by 8/16", "Estimates team follow-up"; if none in source, "Follow-up required">\n\n' +
+    '   FILL RULES (apply to every field):\n' +
+    '   - Ground EVERY field ONLY in the SOURCE DATA above. NEVER invent a part, date, link, owner,\n' +
+    '     vendor, or rejection that is not supported by the source.\n' +
+    '   - If a field genuinely does not apply, write "N/A" (e.g. no vendor rejection -> "Primary Vendor Rejection: N/A").\n' +
+    '   - If a field applies but the value is unknown from the source, write "Pending \\u2014 <short reason>"\n' +
+    '     (never leave a field blank after the colon).\n' +
+    '   - If a Parts SIM/ticket link appears in the source, include the actual link in "Primary Barrier"\n' +
+    '     or "Actions Taken" (whichever fits). Never fabricate a link.\n' +
+    '   - Keep each field to one concise line. Be specific: vendor names, part names, dates, days down.\n' +
+    '   - EXCEPTION UNITS (accident / EOL / rental): still use all 7 fields, but they are not within FAS\n' +
+    '     control, so ETC and Follow-up date are usually "N/A" and Primary Barrier states the situation\n' +
+    '     (e.g. "Primary Barrier: Accident \\u2014 CEI managing", "ETC: N/A", "Follow-up date: N/A").\n' +
+    '   - NEVER include dollar amounts, personal names, phone numbers, emails, VINs.\n' +
+    '   - Allowed: vendor names, dealer locations, case/SIM numbers, part names, SIM links, dates, ETAs.\n\n' +
+    '   EXAMPLE summary value (note the literal \\n between lines):\n' +
+    '   "\\u2022 Initial Issue Reported: Turbo failure, no-start.\\n\\u2022 Primary Vendor Rejection: N/A\\n' +
+    '\\u2022 Primary Barrier: Turbo backordered (PN 5581552).\\n\\u2022 Actions Taken: Diagnosed at Cummins; parts SIM opened; ordered from RDC.\\n' +
+    '\\u2022 Repair Status: Awaiting parts.\\n\\u2022 ETC: Pending \\u2014 turbo backordered.\\n\\u2022 Follow-up date: FAS follow-up 8/18"\n\n' +
+    'RESPOND WITH RAW JSON ONLY -- no markdown, no code fences, no explanation, exactly this shape\n' +
+    '(the summary value is a single JSON string containing the 7 bulleted lines separated by \\n):\n' +
     '{"delayReason": "...", "escalationLevel": "...", "summary": "..."}'
   );
 }
@@ -695,7 +684,7 @@ async function _aiFillRow(unitId, tr, onStatus) {
 
     let delayReason     = String(parsed.delayReason || '').trim();
     let escalationLevel = String(parsed.escalationLevel || '').trim().toUpperCase();
-    let summary         = _stripCosts(String(parsed.summary || '').trim()).slice(0, 400);
+    let summary         = _stripCosts(String(parsed.summary || '').trim()).slice(0, 1500);
 
     if (!DELAY_REASONS.includes(delayReason))     delayReason     = '';
     if (!ESCALATION_LEVELS.includes(escalationLevel)) escalationLevel = '';
@@ -991,7 +980,7 @@ function _renderLongDwellTable(rows) {
           </select>
         </td>
         <td>
-          <textarea class="settings__textarea an-ld-summary" data-field="summary" placeholder="What's the delay, what's next...">${_safe(saved.summary || '')}</textarea>
+          <textarea class="settings__textarea an-ld-summary" data-field="summary" placeholder="&#8226; Initial Issue Reported:&#10;&#8226; Primary Vendor Rejection:&#10;&#8226; Primary Barrier:&#10;&#8226; Actions Taken:&#10;&#8226; Repair Status:&#10;&#8226; ETC:&#10;&#8226; Follow-up date:">${_safe(saved.summary || '')}</textarea>
         </td>
         <td>
           <button class="ec-preset-btn an-ld-ai-btn" data-action="ai-fill" title="AI-fill this work order from repair notes">\u2728 AI Fill</button>
