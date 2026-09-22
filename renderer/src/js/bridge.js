@@ -325,6 +325,7 @@ export const longDwell = {
   getUnit:    (id, woKey)   => window.longDwell.getUnit(id, woKey),
   saveUnit:   (data)        => window.longDwell.saveUnit(data),
   deleteUnit: (id, woKey)   => window.longDwell.deleteUnit(id, woKey),
+  setAiFillActive: (active) => window.longDwell.setAiFillActive(active),
 };
 
 // ── AI / Orcha ─────────────────────────────────────────────────────────────

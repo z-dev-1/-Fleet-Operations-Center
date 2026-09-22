@@ -206,6 +206,15 @@ app.whenReady().then(async () => {
   // Mutable cells — updated by sync engine via setters, read by everyone.
   let _isSyncing = false;
   let _lastData  = null;
+  // AI-FILL GATE (2026): set true by the renderer (Long Dwell single AI Fill /
+  // Fill All) while a fill is in flight. The scheduled auto-sync (runFullSync)
+  // and the 5-min live rescan both check ctx.aiFillActive and SKIP while it's
+  // set -- because those fire progressive/partial fleet:data REPLACE pushes
+  // that momentarily shrink state.fleet.rows and made the Long Dwell grid
+  // "zero out" mid-fill. Auto-cleared on a safety timeout so a crashed/abandoned
+  // fill can't wedge sync off forever.
+  let _aiFillActive = false;
+  let _aiFillActiveTimer = null;
 
   // Safe IPC push helpers — no-op if window is gone
   function _send(channel, payload) {
@@ -420,6 +429,9 @@ app.whenReady().then(async () => {
     set isSyncing(v) { _isSyncing = v; },
     get lastData()  { return _lastData; },
     set lastData(v) { _lastData = v; },
+    // AI-fill gate — read by runFullSync + triggerLiveRescan to skip while a
+    // Long Dwell fill is in flight.
+    get aiFillActive() { return _aiFillActive; },
 
     // ── Window refs (lazy — window module populated below) ──────────────────
     getMainWindow:  () => _windowApi ? _windowApi.getMainWindow()  : null,
@@ -499,7 +511,14 @@ function _startAutoSync() {
     const ms = _getSyncIntervalMs();
     log.info('Auto-sync interval: ' + Math.round(ms / 60000) + ' minutes');
     _syncTimer = setInterval(
-      () => { if (_ctx.runFullSync) _ctx.runFullSync(); },
+      () => {
+        // Skip a scheduled sync while a Long Dwell AI Fill is in flight -- its
+        // progressive partial:'aap' push would REPLACE state.fleet.rows with an
+        // AAP-only set mid-fill and momentarily zero the grid. The fill re-reads
+        // fresh relay data per unit anyway; the next scheduled tick will sync.
+        if (_aiFillActive) { log.info('[auto-sync] skipped -- AI fill in progress'); return; }
+        if (_ctx.runFullSync) _ctx.runFullSync();
+      },
       ms
     );
   }
@@ -517,6 +536,25 @@ function _startAutoSync() {
   // ── 5e. Register all IPC handlers ─────────────────────────────────────────
   const { registerAllIPC } = require('./ipc');
   registerAllIPC(_ctx);
+
+  // AI-FILL GATE IPC: the renderer flips this on/off around a Long Dwell AI
+  // Fill (single or Fill All) so scheduled auto-sync + live rescan pause and
+  // don't zero the grid mid-fill. Safety timeout auto-clears the flag after
+  // 10 min in case a fill is abandoned/crashes, so sync can never be wedged
+  // off permanently.
+  ipcMain.handle('longdwell:ai-fill-active', (_e, active) => {
+    _aiFillActive = !!active;
+    if (_aiFillActiveTimer) { clearTimeout(_aiFillActiveTimer); _aiFillActiveTimer = null; }
+    if (_aiFillActive) {
+      _aiFillActiveTimer = setTimeout(() => {
+        _aiFillActive = false;
+        log.warn('[ai-fill-gate] auto-cleared after 10min safety timeout');
+      }, 10 * 60 * 1000);
+    }
+    log.info('[ai-fill-gate] aiFillActive = ' + _aiFillActive);
+    return { ok: true, aiFillActive: _aiFillActive };
+  });
+
   log.info('IPC handlers registered');
 
   // ── 5e-ii. Fleet Brain — persistent Orcha connection ───────────────────

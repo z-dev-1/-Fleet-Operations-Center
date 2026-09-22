@@ -1302,6 +1302,10 @@ function initWindows(ctx) {
     async function triggerLiveRescan(force) {
       if (!_appReady)         { logger.info('Rescan skipped \u2014 app not ready'); return; }
       if (_rescanInProgress)  { logger.info('Rescan already in progress'); return; }
+      // Skip the TIMER-driven rescan while a Long Dwell AI Fill is running -- a
+      // rescan pushes a fleet:data REPLACE that momentarily zeros the grid
+      // mid-fill. A user-FORCED rescan (force=true) still runs.
+      if (!force && ctx && ctx.aiFillActive) { logger.info('Rescan skipped \u2014 AI fill in progress'); return; }
       if (!mainWindow || mainWindow.isDestroyed()) return;
 
       const domiciles = getDomiciles();

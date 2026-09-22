@@ -724,6 +724,27 @@ function _buildAIFillPrompt(row, dd) {
 // info. 30 minutes per the agreed rule.
 const LD_FRESH_MS = 30 * 60 * 1000;
 
+// AI-FILL GATE (ref-counted): while a fill (single row or Fill All) is running,
+// tell the main process to pause scheduled auto-sync + live rescan so their
+// progressive fleet:data REPLACE pushes don't shrink state.fleet.rows and zero
+// the grid mid-fill. Ref-counted so overlapping/nested fills keep it on until
+// the LAST one finishes. Best-effort: bridge call is wrapped so a missing
+// bridge never blocks a fill.
+let _aiFillGateCount = 0;
+async function _aiFillGate(on) {
+  if (on) {
+    _aiFillGateCount++;
+    if (_aiFillGateCount === 1) {
+      try { await longDwellBridge.setAiFillActive(true); } catch (_) {}
+    }
+  } else {
+    _aiFillGateCount = Math.max(0, _aiFillGateCount - 1);
+    if (_aiFillGateCount === 0) {
+      try { await longDwellBridge.setAiFillActive(false); } catch (_) {}
+    }
+  }
+}
+
 // _ensureUnitFresh — before filling, guarantee this unit's relay data is fresh.
 // Reads relay.getUnitCache(id)._cachedAt; if <=30 min old, returns the current
 // row unchanged. If older (or unknown), live-refreshes the unit's relay data
@@ -796,6 +817,9 @@ async function _aiFillRow(unitId, tr, onStatus) {
   tr.classList.add('an-ld-row--ai-loading');
   if (btn) { btn.disabled = true; btn.textContent = '\u2728 Filling...'; }
 
+  // Pause scheduled auto-sync + live rescan for the duration of this fill so a
+  // concurrent full/partial fleet:data push can't zero the grid mid-fill.
+  await _aiFillGate(true);
   try {
     if (!aiBridge || !aiBridge.ask) throw new Error('AI bridge not available');
     // Guarantee fresh data first (refresh + deep-scan if stale).
@@ -837,6 +861,7 @@ async function _aiFillRow(unitId, tr, onStatus) {
     toast.show('error', 'AI fill failed for ' + unitId + ': ' + e.message, 4000);
     return false;
   } finally {
+    await _aiFillGate(false);
     tr.classList.remove('an-ld-row--ai-loading');
     if (btn) { btn.disabled = false; btn.textContent = '\u2728 AI Fill'; }
   }
@@ -1266,17 +1291,25 @@ function _renderLongDwellTab(rows) {
       let done = 0;
       const total = blankTrs.length;
       fillAllBtn.textContent = `\u2728 Filling 0/${total}...`;
-      // Sequential (never parallel) so we don't hammer AAP/Relay with concurrent
-      // per-unit re-scrapes. Each unit is refreshed + deep-scanned only if its
-      // relay data is stale (>30 min); the onStatus callback surfaces that
-      // per-unit progress on the button so the user sees what's happening.
-      for (const tr of blankTrs) {
-        const uid = tr.dataset.unitId;
-        const n = done + 1;
-        const onStatus = (msg) => { fillAllBtn.textContent = `\u2728 ${n}/${total}: ${msg}`; };
-        await _aiFillRow(uid, tr, onStatus);
-        done++;
-        fillAllBtn.textContent = `\u2728 Filling ${done}/${total}...`;
+      // Hold the AI-fill gate across the WHOLE batch (in addition to the per-row
+      // gate inside _aiFillRow) so auto-sync/rescan stay paused even in the tiny
+      // gaps between units. Ref-counted, so this stacks with the per-row gate.
+      await _aiFillGate(true);
+      try {
+        // Sequential (never parallel) so we don't hammer AAP/Relay with concurrent
+        // per-unit re-scrapes. Each unit is refreshed + deep-scanned only if its
+        // relay data is stale (>30 min); the onStatus callback surfaces that
+        // per-unit progress on the button so the user sees what's happening.
+        for (const tr of blankTrs) {
+          const uid = tr.dataset.unitId;
+          const n = done + 1;
+          const onStatus = (msg) => { fillAllBtn.textContent = `\u2728 ${n}/${total}: ${msg}`; };
+          await _aiFillRow(uid, tr, onStatus);
+          done++;
+          fillAllBtn.textContent = `\u2728 Filling ${done}/${total}...`;
+        }
+      } finally {
+        await _aiFillGate(false);
       }
       fillAllBtn.disabled = false;
       fillAllBtn.textContent = '\u2728 AI Fill All (blank rows)';

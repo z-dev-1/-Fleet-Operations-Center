@@ -131,6 +131,9 @@ expose('longDwell', {
   getUnit:    (id, woKey)   => ipcRenderer.invoke('long-dwell:get-unit', id, woKey),
   saveUnit:   (data)        => ipcRenderer.invoke('long-dwell:save-unit', data),
   deleteUnit: (id, woKey)   => ipcRenderer.invoke('long-dwell:delete-unit', id, woKey),
+  // Pause scheduled auto-sync + live rescan while an AI Fill runs (prevents the
+  // grid zeroing out mid-fill). Renderer sets true at start, false in finally.
+  setAiFillActive: (active) => ipcRenderer.invoke('longdwell:ai-fill-active', !!active),
 });
 
 // ── AI / Orcha ────────────────────────────────────────────────────────────────
