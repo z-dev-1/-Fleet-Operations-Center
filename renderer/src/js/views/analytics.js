@@ -529,10 +529,16 @@ function _buildAIFillPrompt(row, dd) {
   const dom    = row.domicileSite || row.domicile || 'unknown';
   const op     = row.operator || 'unknown';
   const reason = row.lifecycleReason || 'unknown';
+  // Inject TODAY so the AI can compute a real, concrete follow-up date (it has
+  // no inherent sense of "now"). Format: "Wed 9/24/2026".
+  const _now   = new Date();
+  const _dow   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][_now.getDay()];
+  const todayStr = _dow + ' ' + (_now.getMonth() + 1) + '/' + _now.getDate() + '/' + _now.getFullYear();
   return (
     'You are Orcha, the AI brain for Fleet Operations. This unit is a LONG DWELL unit -- ' +
     'down and unavailable for an extended period -- and needs a leadership-facing status ' +
     'entry filled in for the Long Dwell Units report.\n\n' +
+    'TODAY IS: ' + todayStr + '. Use this to compute a concrete follow-up date.\n\n' +
     'UNIT: ' + id + ' | Vendor: ' + vendor + ' | Domicile: ' + dom + ' | Operator: ' + op + ' | Down ' + dd + ' days | Lifecycle reason: ' + reason + '\n\n' +
     'SOURCE DATA:\n' + _sourceContextForRow(row) + '\n\n' +
     'TASK -- return exactly three fields:\n\n' +
@@ -562,19 +568,33 @@ function _buildAIFillPrompt(row, dd) {
     '   \\u2022 Actions Taken: <what has been done so far -- diagnosis, estimates, parts ordered, handoffs, follow-ups already made>\n' +
     '   \\u2022 Repair Status: <where the repair stands right now -- e.g. "Awaiting parts", "In repair", "Estimate pending approval", "Diagnosis in progress">\n' +
     '   \\u2022 ETC: <estimated completion date if known; if none, "Pending \\u2014 <reason>" e.g. "Pending \\u2014 turbo backordered">\n' +
-    '   \\u2022 Follow-up date: <next follow-up owner + date, e.g. "FAS follow-up 8/18", "MCS follow-up by 8/16", "Estimates team follow-up"; if none in source, "Follow-up required">\n\n' +
+    '   \\u2022 Follow-up date: <a CONCRETE calendar date (M/D) when we should next follow up to get a status\n' +
+    '        update -- ALWAYS an actual date, computed from TODAY, never "Follow-up required" or a bare owner.\n' +
+    '        You MAY prefix the owner, e.g. "FAS follow-up 9/26" or "MCS follow-up by 9/25", but the DATE is mandatory.>\n\n' +
+    '   FOLLOW-UP DATE RULE (this field must ALWAYS be a real M/D date computed from TODAY):\n' +
+    '   - Pick the date based on urgency, then write it as M/D (e.g. "9/26"):\n' +
+    '       * Vendor unresponsive / no update logged / DOT-critical / SEV2-SEV3 -> follow up in 1-2 days from today.\n' +
+    '       * Estimate pending approval or awaiting vendor resubmission -> follow up in 2-3 days from today.\n' +
+    '       * Parts backordered / long lead time -> follow up in ~7 days from today (or the day AFTER the stated\n' +
+    '         parts ETA if one exists in the source).\n' +
+    '       * A firm ETC exists -> follow up the day AFTER that ETC.\n' +
+    '   - Compute the date from TODAY (given above) and output the resulting M/D. Do NOT output words like\n' +
+    '     "Follow-up required", "TBD", "Pending", or an owner with no date -- this field is never allowed to be dateless.\n' +
+    '   - EXCEPTION UNITS (accident / EOL / rental) are the ONLY case where Follow-up date may be "N/A".\n\n' +
     '   FILL RULES (apply to every field):\n' +
-    '   - Ground EVERY field ONLY in the SOURCE DATA above. NEVER invent a part, date, link, owner,\n' +
-    '     vendor, or rejection that is not supported by the source.\n' +
+    '   - Ground EVERY field ONLY in the SOURCE DATA above. NEVER invent a part, link, owner,\n' +
+    '     vendor, or rejection that is not supported by the source. (The Follow-up date is the ONE\n' +
+    '     allowed computed value -- it is derived from today + urgency, per the rule above.)\n' +
     '   - If a field genuinely does not apply, write "N/A" (e.g. no vendor rejection -> "Primary Vendor Rejection: N/A").\n' +
     '   - If a field applies but the value is unknown from the source, write "Pending \\u2014 <short reason>"\n' +
-    '     (never leave a field blank after the colon).\n' +
+    '     (never leave a field blank after the colon). This does NOT apply to Follow-up date, which is always a date.\n' +
     '   - If a Parts SIM/ticket link appears in the source, include the actual link in "Primary Barrier"\n' +
     '     or "Actions Taken" (whichever fits). Never fabricate a link.\n' +
     '   - Keep each field to one concise line. Be specific: vendor names, part names, dates, days down.\n' +
     '   - EXCEPTION UNITS (accident / EOL / rental): still use all 7 fields, but they are not within FAS\n' +
-    '     control, so ETC and Follow-up date are usually "N/A" and Primary Barrier states the situation\n' +
-    '     (e.g. "Primary Barrier: Accident \\u2014 CEI managing", "ETC: N/A", "Follow-up date: N/A").\n' +
+    '     control, so ETC and Follow-up date may be "N/A" and Primary Barrier states the situation\n' +
+    '     (e.g. "Primary Barrier: Accident \\u2014 CEI managing", "ETC: N/A", "Follow-up date: N/A"). For ALL\n' +
+    '     other (FAS-controlled) units, Follow-up date MUST be a concrete M/D date per the rule above.\n' +
     '   - NEVER include dollar amounts, personal names, phone numbers, emails, VINs.\n' +
     '   - Allowed: vendor names, dealer locations, case/SIM numbers, part names, SIM links, dates, ETAs.\n\n' +
     '   EXAMPLE summary value (note the literal \\n between lines):\n' +
