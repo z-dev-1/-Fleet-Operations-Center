@@ -745,6 +745,34 @@ async function _aiFillGate(on) {
   }
 }
 
+// Runs AI Fill sequentially over a list of <tr> rows, holding the AI-fill gate
+// across the WHOLE batch so auto-sync/rescan stay paused for the duration.
+// `btn` (optional) gets live progress text and is disabled while running.
+// `label` is the button's resting text to restore when done. Returns the count
+// filled. Shared by "AI Fill All" and the paste "Show + AI Fill" path.
+async function _runFillForRows(trs, btn, label) {
+  if (!trs || !trs.length) { toast.show('info', 'No rows to AI-fill', 2500); return 0; }
+  let done = 0;
+  const total = trs.length;
+  if (btn) { btn.disabled = true; btn.textContent = `\u2728 Filling 0/${total}...`; }
+  await _aiFillGate(true);
+  try {
+    for (const tr of trs) {
+      const uid = tr.dataset.unitId;
+      const n = done + 1;
+      const onStatus = (msg) => { if (btn) btn.textContent = `\u2728 ${n}/${total}: ${msg}`; };
+      await _aiFillRow(uid, tr, onStatus);
+      done++;
+      if (btn) btn.textContent = `\u2728 Filling ${done}/${total}...`;
+    }
+  } finally {
+    await _aiFillGate(false);
+  }
+  if (btn) { btn.disabled = false; btn.textContent = label; }
+  toast.show('success', `AI filled ${done} row(s)`, 2500);
+  return done;
+}
+
 // _ensureUnitFresh — before filling, guarantee this unit's relay data is fresh.
 // Reads relay.getUnitCache(id)._cachedAt; if <=30 min old, returns the current
 // row unchanged. If older (or unknown), live-refreshes the unit's relay data
@@ -904,6 +932,7 @@ function _renderLongDwellHeader(rows) {
         <label class="an-ld-paste-label" for="an-ld-paste">Paste unit IDs (any order/separator):</label>
         <textarea id="an-ld-paste" class="settings__textarea an-ld-paste-input" rows="1" placeholder="e.g. 39356, B62284, 39309 ...">${_safe(pasteMode ? _pastedUnitOrder.join('\n') : '')}</textarea>
         <button id="an-ld-paste-show" class="ec-preset-btn" title="Show Long Dwell for exactly these units, in this order">\uD83D\uDCCC Show These</button>
+        <button id="an-ld-paste-fill" class="ec-preset-btn" title="Show these units AND AI-fill every one of them in pasted order">\u2728 Show + AI Fill</button>
         ${pasteMode ? '<button id="an-ld-paste-clear" class="ec-preset-btn" title="Return to the normal threshold-based list">\u2715 Clear List</button>' : ''}
       </div>
       <div class="an-ld-toolbar-row an-ld-filter-row">
@@ -1191,8 +1220,12 @@ function _renderLongDwellTab(rows) {
   // units, in pasted order); "Clear List" returns to the threshold view.
   const pasteInput = _el.querySelector('#an-ld-paste');
   const pasteShow  = _el.querySelector('#an-ld-paste-show');
+  const pasteFill  = _el.querySelector('#an-ld-paste-fill');
   const pasteClear = _el.querySelector('#an-ld-paste-clear');
-  const applyPaste = () => {
+  // applyPaste enters paste mode (exactly the pasted units, in pasted order).
+  // Returns the ordered list of found ids so a caller (Show + AI Fill) can then
+  // fill them. `autoFill` triggers AI Fill over the shown rows after render.
+  const applyPaste = async (autoFill) => {
     const ids = _parsePastedUnits(pasteInput ? pasteInput.value : '');
     if (!ids.length) {
       _pastedUnitOrder = [];
@@ -1210,11 +1243,23 @@ function _renderLongDwellTab(rows) {
       'Showing ' + found + ' of ' + ids.length + ' pasted unit(s)' +
       (_pastedNotFound.length ? ' \u2014 ' + _pastedNotFound.length + ' not found' : ''), 3000);
     _renderLongDwellTab(rowsNow);
+
+    if (autoFill && found > 0) {
+      // Re-query the freshly rendered table for the pasted rows and fill ALL of
+      // them (paste = an explicit worklist, so overwrite existing summaries) in
+      // pasted order. The table was just rebuilt by _renderLongDwellTab, so grab
+      // the new <tr>s from the live wrapper.
+      const wrap = _el.querySelector('#an-ld-table-wrap');
+      const trs = wrap ? Array.from(wrap.querySelectorAll('tr[data-unit-id]')) : [];
+      const fillBtn = _el.querySelector('#an-ld-paste-fill');
+      await _runFillForRows(trs, fillBtn, '\u2728 Show + AI Fill');
+    }
   };
-  if (pasteShow)  pasteShow.addEventListener('click', applyPaste);
+  if (pasteShow)  pasteShow.addEventListener('click', () => applyPaste(false));
+  if (pasteFill)  pasteFill.addEventListener('click', () => applyPaste(true));
   if (pasteInput) pasteInput.addEventListener('keydown', (e) => {
     // Ctrl/Cmd+Enter applies (plain Enter inserts a newline, as expected in a textarea).
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); applyPaste(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); applyPaste(false); }
   });
   if (pasteClear) pasteClear.addEventListener('click', () => {
     _pastedUnitOrder = [];
@@ -1286,34 +1331,9 @@ function _renderLongDwellTab(rows) {
         return !saved.delayReason && !saved.escalationLevel && !(saved.summary || '').trim();
       });
       if (!blankTrs.length) { toast.show('info', 'No blank rows to AI-fill', 2500); return; }
-
-      fillAllBtn.disabled = true;
-      let done = 0;
-      const total = blankTrs.length;
-      fillAllBtn.textContent = `\u2728 Filling 0/${total}...`;
-      // Hold the AI-fill gate across the WHOLE batch (in addition to the per-row
-      // gate inside _aiFillRow) so auto-sync/rescan stay paused even in the tiny
-      // gaps between units. Ref-counted, so this stacks with the per-row gate.
-      await _aiFillGate(true);
-      try {
-        // Sequential (never parallel) so we don't hammer AAP/Relay with concurrent
-        // per-unit re-scrapes. Each unit is refreshed + deep-scanned only if its
-        // relay data is stale (>30 min); the onStatus callback surfaces that
-        // per-unit progress on the button so the user sees what's happening.
-        for (const tr of blankTrs) {
-          const uid = tr.dataset.unitId;
-          const n = done + 1;
-          const onStatus = (msg) => { fillAllBtn.textContent = `\u2728 ${n}/${total}: ${msg}`; };
-          await _aiFillRow(uid, tr, onStatus);
-          done++;
-          fillAllBtn.textContent = `\u2728 Filling ${done}/${total}...`;
-        }
-      } finally {
-        await _aiFillGate(false);
-      }
-      fillAllBtn.disabled = false;
-      fillAllBtn.textContent = '\u2728 AI Fill All (blank rows)';
-      toast.show('success', `AI filled ${done} row(s)`, 2500);
+      // Sequential fill over the blank rows (never parallel -- avoids hammering
+      // AAP/Relay). Shared helper holds the AI-fill gate across the whole batch.
+      await _runFillForRows(blankTrs, fillAllBtn, '\u2728 AI Fill All (blank rows)');
     });
   }
 }
