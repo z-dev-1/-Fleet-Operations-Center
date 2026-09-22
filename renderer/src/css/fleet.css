@@ -1760,6 +1760,15 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
   font-size: 11px; line-height: 1.45; resize: vertical;
   white-space: pre-wrap;
 }
+/* Per-row Copy button under the summary textarea. */
+.an-ld-copy-summary { margin-top: 4px; font-size: 11px; padding: 2px 8px; white-space: nowrap; }
+
+/* Paste-a-list-of-units row in the Long Dwell toolbar. */
+.an-ld-paste-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.an-ld-paste-label { font-size: 12px; color: var(--mut); white-space: nowrap; }
+.an-ld-paste-input { flex: 1 1 320px; min-width: 220px; min-height: 30px; max-height: 90px; font-size: 12px; resize: vertical; }
+.an-ld-paste-mode { font-size: 12px; color: #58a6ff; font-weight: 600; }
+.an-ld-paste-notfound { font-size: 12px; color: #f0a800; margin-left: 8px; }
 
 /* Escalation severity coloring -- SEV2 = highest severity */
 .an-ld-esc--sev2 { border-color: var(--red, #ff7b72) !important; color: var(--red, #ff7b72) !important; background: rgba(255,123,114,.08) !important; }

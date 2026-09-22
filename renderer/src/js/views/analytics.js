@@ -315,6 +315,32 @@ let _filterVendor        = '';
 let _filterDelayReason   = '';
 let _filterEscalation    = '';
 
+// PASTE MODE (2026): when the user pastes a specific list of unit IDs, the
+// table shows EXACTLY those units, in the pasted order, bypassing the dwell
+// threshold + "unavailable" filter + the dropdown filters + column sort. Empty
+// array = normal (threshold-based) mode. `_pastedNotFound` holds any pasted IDs
+// that weren't in the current fleet data, so we can tell the user.
+let _pastedUnitOrder = [];   // normalized equipmentIds, in pasted order (dedup, first-seen)
+let _pastedNotFound  = [];   // pasted IDs not found in current fleet rows
+
+// Normalize a unit id for matching (trim, uppercase — fleet ids like B62284
+// are uppercase; numeric ids are unaffected).
+function _normUnitId(s) { return String(s || '').trim().toUpperCase(); }
+
+// Parse a pasted blob (newline / comma / space / tab separated) into a
+// deduped, first-seen-ordered list of normalized ids.
+function _parsePastedUnits(text) {
+  const seen = new Set();
+  const out = [];
+  for (const tok of String(text || '').split(/[\s,;]+/)) {
+    const id = _normUnitId(tok);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
 // Long Dwell sort state (2026-07-21). Default matches the table's original
 // fixed behavior exactly (longest-down first) so nothing changes on screen
 // until a user actually clicks a column header.
@@ -421,6 +447,21 @@ function _computeLongDwellBase(rows) {
 // This is what actually renders in the table / feeds the count badge / TSV
 // export -- every one of those three call sites must see the same list.
 function _computeLongDwell(rows) {
+  // PASTE MODE: show exactly the pasted units, in the pasted order, regardless
+  // of dwell threshold / lifecycle / dropdown filters / column sort. If a
+  // pasted id maps to a unit that IS down, we still compute its down-days for
+  // display; if the id isn't in the current fleet data it's dropped here (and
+  // reported separately via _pastedNotFound, set in the paste handler).
+  if (_pastedUnitOrder.length) {
+    const byId = new Map((rows || []).map(r => [_normUnitId(r.equipmentId), r]));
+    const out = [];
+    for (const id of _pastedUnitOrder) {
+      const row = byId.get(id);
+      if (row) out.push({ row, dd: _downDays(row) });
+    }
+    return out; // pasted order preserved; no sort override
+  }
+
   const filtered = _computeLongDwellBase(rows).filter(({ row }) => {
     if (_filterDomicile && (row.domicileSite || row.domicile || '') !== _filterDomicile) return false;
     if (_filterOperator && (row.operator || '') !== _filterOperator) return false;
@@ -752,16 +793,29 @@ function _renderLongDwellHeader(rows) {
   const count   = _computeLongDwell(rows).length;
   const choices = _longDwellFilterChoices(rows);
   const anyFilterActive = _filterDomicile || _filterOperator || _filterVendor || _filterDelayReason || _filterEscalation;
+  const pasteMode = _pastedUnitOrder.length > 0;
+  const notFoundNote = (pasteMode && _pastedNotFound.length)
+    ? `<span class="an-ld-paste-notfound" title="These pasted IDs were not found in the current fleet data">\u26A0 not found: ${_safe(_pastedNotFound.join(', '))}</span>`
+    : '';
+  const countLabel = pasteMode
+    ? `<span class="an-ld-count">${count}</span> pasted unit(s) &middot; <span class="an-ld-paste-mode">showing your list in pasted order</span> ${notFoundNote}`
+    : `<span class="an-ld-count">${count}</span> unit(s) down &ge;
+        <input id="an-ld-threshold" type="number" min="1" value="${_dwellThreshold}" class="settings__input an-ld-threshold-input" />
+        days`;
   return `
     <div class="an-ld-toolbar">
       <div class="an-ld-toolbar-row">
-        <span class="an-ld-count">${count}</span> unit(s) down &ge;
-        <input id="an-ld-threshold" type="number" min="1" value="${_dwellThreshold}" class="settings__input an-ld-threshold-input" />
-        days
+        ${countLabel}
         <div class="an-ld-toolbar-actions">
           <button id="an-ld-fill-all" class="ec-preset-btn" title="AI-fill Delay Reason / Escalation / Summary for every row that's still blank">\u2728 AI Fill All (blank rows)</button>
           <button id="an-ld-copy" class="ec-preset-btn" title="Copy this table as a paste-ready block (Excel/Outlook/Slack)">\uD83D\uDCCB Copy Table</button>
         </div>
+      </div>
+      <div class="an-ld-toolbar-row an-ld-paste-row">
+        <label class="an-ld-paste-label" for="an-ld-paste">Paste unit IDs (any order/separator):</label>
+        <textarea id="an-ld-paste" class="settings__textarea an-ld-paste-input" rows="1" placeholder="e.g. 39356, B62284, 39309 ...">${_safe(pasteMode ? _pastedUnitOrder.join('\n') : '')}</textarea>
+        <button id="an-ld-paste-show" class="ec-preset-btn" title="Show Long Dwell for exactly these units, in this order">\uD83D\uDCCC Show These</button>
+        ${pasteMode ? '<button id="an-ld-paste-clear" class="ec-preset-btn" title="Return to the normal threshold-based list">\u2715 Clear List</button>' : ''}
       </div>
       <div class="an-ld-toolbar-row an-ld-filter-row">
         <label class="an-ld-filter-label">Domicile
@@ -820,20 +874,23 @@ function _buildLongDwellTsv(rows) {
 }
 
 
-async function _copyLongDwellTable(rows) {
-  const tsv = _buildLongDwellTsv(rows);
+// Copy arbitrary text to the clipboard, with a fallback for environments
+// without clipboard permission (same pattern as daily-call.js's _copyTable()).
+async function _copyText(text) {
   try {
-    await navigator.clipboard.writeText(tsv);
+    await navigator.clipboard.writeText(text);
   } catch (e) {
-    // Fallback for environments without clipboard permission (same pattern
-    // as daily-call.js's _copyTable()).
     const ta = document.createElement('textarea');
-    ta.value = tsv;
+    ta.value = text;
     document.body.appendChild(ta);
     ta.select();
     try { document.execCommand('copy'); } catch (e2) { /* ignore */ }
     document.body.removeChild(ta);
   }
+}
+
+async function _copyLongDwellTable(rows) {
+  await _copyText(_buildLongDwellTsv(rows));
 }
 
 // ── Per-work-order expansion ────────────────────────────────────────────────
@@ -1007,6 +1064,7 @@ function _renderLongDwellTable(rows) {
         </td>
         <td>
           <textarea class="settings__textarea an-ld-summary" data-field="summary" placeholder="&#8226; Initial Issue Reported:&#10;&#8226; Primary Vendor Rejection:&#10;&#8226; Primary Barrier:&#10;&#8226; Actions Taken:&#10;&#8226; Repair Status:&#10;&#8226; ETC:&#10;&#8226; Follow-up date:">${_safe(saved.summary || '')}</textarea>
+          <button class="ec-preset-btn an-ld-copy-summary" data-action="copy-summary" title="Copy this summary to clipboard">\uD83D\uDCCB Copy</button>
         </td>
         <td>
           <button class="ec-preset-btn an-ld-ai-btn" data-action="ai-fill" title="AI-fill this work order from repair notes">\u2728 AI Fill</button>
@@ -1039,6 +1097,41 @@ function _renderLongDwellTab(rows) {
       _renderLongDwellTab(state.slice('fleet').rows || []);
     });
   }
+
+  // Paste-a-list controls: "Show These" enters paste mode (exactly the pasted
+  // units, in pasted order); "Clear List" returns to the threshold view.
+  const pasteInput = _el.querySelector('#an-ld-paste');
+  const pasteShow  = _el.querySelector('#an-ld-paste-show');
+  const pasteClear = _el.querySelector('#an-ld-paste-clear');
+  const applyPaste = () => {
+    const ids = _parsePastedUnits(pasteInput ? pasteInput.value : '');
+    if (!ids.length) {
+      _pastedUnitOrder = [];
+      _pastedNotFound  = [];
+      toast.show('info', 'No unit IDs pasted', 2000);
+      _renderLongDwellTab(state.slice('fleet').rows || []);
+      return;
+    }
+    const rowsNow = state.slice('fleet').rows || [];
+    const present = new Set(rowsNow.map(r => _normUnitId(r.equipmentId)));
+    _pastedUnitOrder = ids;
+    _pastedNotFound  = ids.filter(id => !present.has(id));
+    const found = ids.length - _pastedNotFound.length;
+    toast.show(_pastedNotFound.length ? 'warning' : 'success',
+      'Showing ' + found + ' of ' + ids.length + ' pasted unit(s)' +
+      (_pastedNotFound.length ? ' \u2014 ' + _pastedNotFound.length + ' not found' : ''), 3000);
+    _renderLongDwellTab(rowsNow);
+  };
+  if (pasteShow)  pasteShow.addEventListener('click', applyPaste);
+  if (pasteInput) pasteInput.addEventListener('keydown', (e) => {
+    // Ctrl/Cmd+Enter applies (plain Enter inserts a newline, as expected in a textarea).
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); applyPaste(); }
+  });
+  if (pasteClear) pasteClear.addEventListener('click', () => {
+    _pastedUnitOrder = [];
+    _pastedNotFound  = [];
+    _renderLongDwellTab(state.slice('fleet').rows || []);
+  });
 
   // Filter dropdowns -- each just sets its module-level filter var and
   // does a full re-render, same pattern as the threshold input above.
@@ -1344,6 +1437,20 @@ export function init(container) {
         _sortDir = 'desc';
       }
       _renderLongDwellTab(state.slice('fleet').rows || []);
+      return;
+    }
+    // Copy just this row's summary text (reads the live textarea so any manual
+    // edits are copied too).
+    const copyBtn = e.target.closest('[data-action="copy-summary"]');
+    if (copyBtn) {
+      const tr = copyBtn.closest('tr[data-unit-id]');
+      const ta = tr && tr.querySelector('[data-field="summary"]');
+      const text = ta ? ta.value : '';
+      if (!text.trim()) { toast.show('info', 'Nothing to copy \u2014 summary is empty', 2000); return; }
+      _copyText(text);
+      const orig = copyBtn.textContent;
+      copyBtn.textContent = '\u2713 Copied';
+      setTimeout(() => { copyBtn.textContent = orig; }, 1500);
       return;
     }
     const aiBtn = e.target.closest('[data-action="ai-fill"]');
