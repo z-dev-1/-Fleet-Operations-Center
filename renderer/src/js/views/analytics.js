@@ -565,7 +565,13 @@ function _buildAIFillPrompt(row, dd) {
     '   \\u2022 Initial Issue Reported: <what the unit originally came in for -- the reported problem>\n' +
     '   \\u2022 Primary Vendor Rejection: <if the primary vendor rejected/declined/routed it out, WHY and where it went; else "N/A">\n' +
     '   \\u2022 Primary Barrier: <the single biggest thing blocking completion right now -- parts, estimate approval, payment, vendor capacity, diagnosis, etc.>\n' +
-    '   \\u2022 Actions Taken: <what has been done so far -- diagnosis, estimates, parts ordered, handoffs, follow-ups already made>\n' +
+    '   \\u2022 Actions Taken: <write in FIRST PERSON, past tense, as the actions I (the fleet coordinator)\n' +
+    '        personally took -- lead with strong ownership verbs (Diagnosed, Coordinated, Escalated,\n' +
+    '        Expedited, Secured, Drove, Followed up, Opened, Confirmed, Pushed). Professional and\n' +
+    '        proactive so it reflects well on me. Example: "Diagnosed with Cummins, opened parts SIM,\n' +
+    '        expedited the RDC order, and escalated to MCS for firm ETC." Base it ONLY on what the source\n' +
+    '        shows actually happened -- do NOT invent actions, vendor calls, or follow-ups that are not in\n' +
+    '        the source; frame the REAL actions in the strongest, most ownership-forward professional light.>\n' +
     '   \\u2022 Repair Status: <where the repair stands right now -- e.g. "Awaiting parts", "In repair", "Estimate pending approval", "Diagnosis in progress">\n' +
     '   \\u2022 ETC: <estimated completion date if known; if none, "Pending \\u2014 <reason>" e.g. "Pending \\u2014 turbo backordered">\n' +
     '   \\u2022 Follow-up date: <a CONCRETE calendar date (M/D) when we should next follow up to get a status\n' +
@@ -599,7 +605,7 @@ function _buildAIFillPrompt(row, dd) {
     '   - Allowed: vendor names, dealer locations, case/SIM numbers, part names, SIM links, dates, ETAs.\n\n' +
     '   EXAMPLE summary value (note the literal \\n between lines):\n' +
     '   "\\u2022 Initial Issue Reported: Turbo failure, no-start.\\n\\u2022 Primary Vendor Rejection: N/A\\n' +
-    '\\u2022 Primary Barrier: Turbo backordered (PN 5581552).\\n\\u2022 Actions Taken: Diagnosed at Cummins; parts SIM opened; ordered from RDC.\\n' +
+    '\\u2022 Primary Barrier: Turbo backordered (PN 5581552).\\n\\u2022 Actions Taken: Diagnosed with Cummins, opened the parts SIM, expedited the RDC order, and escalated to MCS for a firm ETC.\\n' +
     '\\u2022 Repair Status: Awaiting parts.\\n\\u2022 ETC: Pending \\u2014 turbo backordered.\\n\\u2022 Follow-up date: FAS follow-up 8/18"\n\n' +
     'RESPOND WITH RAW JSON ONLY -- no markdown, no code fences, no explanation, exactly this shape\n' +
     '(the summary value is a single JSON string containing the 7 bulleted lines separated by \\n):\n' +
