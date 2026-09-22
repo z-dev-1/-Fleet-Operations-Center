@@ -587,6 +587,26 @@ function _buildAIFillPrompt(row, dd) {
     'TODAY IS: ' + todayStr + '. Use this to compute a concrete follow-up date.\n\n' +
     'UNIT: ' + id + ' | Vendor: ' + vendor + ' | Domicile: ' + dom + ' | Operator: ' + op + ' | Down ' + dd + ' days | Lifecycle reason: ' + reason + '\n\n' +
     'SOURCE DATA:\n' + _sourceContextForRow(row) + '\n\n' +
+    'MY ROLE (FAS) -- OWNERSHIP RULES (critical: attribute actions to the correct team):\n' +
+    '   - I am a FAS. I do NOT approve or reject estimates -- ESTIMATE APPROVAL IS OWNED BY MCS\n' +
+    '     (MCS L3 for power-unit estimates up to $30K; MCS L4H / HVE leadership for $30K+ power units\n' +
+    '     and $15K+ non-power). So NEVER write that I approved/rejected an estimate. When the source\n' +
+    '     shows an estimate was approved, phrase it as the estimate BEING approved (e.g. "estimate v3\n' +
+    '     ($21,235.33) approved 9/16") or "approved by MCS" -- MY action is to ESCALATE it (to MCS Lead\n' +
+    '     when it dwells past SLA, or to HVE for high-value), or to INVESTIGATE/REASSIGN on a 3rd vendor\n' +
+    '     rejection. Use "escalated ... to MCS/HVE", never "I approved".\n' +
+    '   - Things I CAN own as actions: choosing/reassigning the vendor or dealer, creating a work order,\n' +
+    '     force-completing/force-closing a Relay Garage WO (when I independently confirmed the work),\n' +
+    '     opening/inputting SIMs (parts-delay, tractor-down), grounding assets flagged by predictive\n' +
+    '     maintenance, determining if a swap is needed and routing the SIM, and following up with vendors/\n' +
+    '     dealers for status/ETC.\n' +
+    '   - NOT my actions (attribute to the owning team, do not claim them): estimate approval (MCS),\n' +
+    '     vendor assignment via VRE (MCS), post-repair verification / flip to Active-Healthy (MCS),\n' +
+    '     invoice audit / billing / credits (MCS Buddy / AFP), pricing disputes (MCS), PM scheduling\n' +
+    '     (dedicated PM POCs / OEM), accident repair management (CEI + Amazon Claims/ARC -- I only track\n' +
+    '     the SIM), and the EOL decision itself (MCS Estimation + TEP).\n' +
+    '   - Do NOT overclaim. If an action was taken by another team, say so plainly; only put MY real\n' +
+    '     actions under "Actions Taken".\n\n' +
     'TASK -- return exactly three fields:\n\n' +
     '1. delayReason -- pick EXACTLY ONE of this fixed list (verbatim, no variation):\n' +
     '   Primary Vendor, Parts Delay, Offsite Shop, Estimate Process, Payment, Speciality Vendor, ' +
@@ -620,11 +640,14 @@ function _buildAIFillPrompt(row, dd) {
     '        estimate version + dollar figure + who it is escalated to + date (e.g. "Estimate v4\n' +
     '        ($22,706.78) escalated to HVE 9/22"), OR the exact part on backorder + source + parts-delay\n' +
     '        SIM reference, OR the pending diagnosis. Include the delayReason category word where it fits.>\n' +
-    '   \\u2022 Actions Taken: <a FIRST-PERSON, dated chronology of what I (the fleet coordinator) did --\n' +
-    '        outreach and milestones with dates, semicolon-separated, e.g. "Reached out for diag findings/\n' +
-    '        ETC (9/9, 9/21); estimate v3 ($21,235.33) approved 9/16; escalated estimate v4 to HVE 9/22."\n' +
-    '        Lead with ownership verbs (Reached out, Diagnosed, Opened, Escalated, Expedited, Input SIM,\n' +
-    '        Rerouted, Confirmed). Professional and proactive so it reflects well on me. Base it ONLY on what the source\n' +
+    '   \\u2022 Actions Taken: <a FIRST-PERSON, dated chronology of what I (the FAS) did -- outreach and\n' +
+    '        milestones with dates, semicolon-separated, e.g. "Reached out for diag findings/ETC (9/9,\n' +
+    '        9/21); estimate v3 ($21,235.33) approved 9/16; escalated estimate v4 to HVE 9/22." Note the\n' +
+    '        estimate approval is stated passively (MCS approved it) -- MY action is escalating it. Lead\n' +
+    '        with ownership verbs I actually own (Reached out, Diagnosed, Chose/Reassigned vendor, Created\n' +
+    '        WO, Force-completed, Opened/Input SIM, Escalated, Grounded, Rerouted, Confirmed). Do NOT write\n' +
+    '        "I approved the estimate" -- I never approve estimates (see MY ROLE rules above).\n' +
+    '        Professional and proactive so it reflects well on me. Base it ONLY on what the source\n' +
     '        shows actually happened -- do NOT invent actions, vendor calls, or follow-ups that are not in\n' +
     '        the source; frame the REAL actions in the strongest, most ownership-forward professional light.>\n' +
     '   \\u2022 Repair Status: <vendor/dealer LOCATION + what is physically done + what was uncovered +\n' +
