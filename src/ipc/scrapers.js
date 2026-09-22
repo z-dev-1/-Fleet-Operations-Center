@@ -466,17 +466,30 @@ function registerScrapersIPC(ctx) {
       // renderer reads (and the AI prompt uses) reflects current data.
       const notesStore = store.load('notesStore', {});
       let freshRow = null;
-      const rows = (ctx.lastData && ctx.lastData.rows) ? ctx.lastData.rows : ((store.load('fleetData', {}) || {}).rows || []);
-      if (rows.length) {
+      // Use the LARGER of ctx.lastData.rows vs the persisted fleetData rows as
+      // the merge base. During a background rescan, ctx.lastData can transiently
+      // be a partial chunk (e.g. 28 of 219 rows); merging over that and pushing
+      // it as the fleet is what zeroed out the grid. Never build from the
+      // smaller set.
+      const liveRows  = (ctx.lastData && Array.isArray(ctx.lastData.rows)) ? ctx.lastData.rows : [];
+      const storedFd  = store.load('fleetData', {}) || {};
+      const storedRows = Array.isArray(storedFd.rows) ? storedFd.rows : [];
+      const baseRows  = liveRows.length >= storedRows.length ? liveRows : storedRows;
+      if (baseRows.length) {
         const singleCache = {}; if (res) singleCache[id] = res;
-        const merged = mergeRelayIntoRows(rows, singleCache, notesStore);
+        const merged = mergeRelayIntoRows(baseRows, singleCache, notesStore);
+        // Persist the full merged set to state + store (unchanged behavior).
         if (ctx.lastData) ctx.lastData.rows = merged;
-        const fd = store.load('fleetData', {}) || {};
-        fd.rows = merged;
-        store.save('fleetData', fd);
+        storedFd.rows = merged;
+        store.save('fleetData', storedFd);
         freshRow = merged.find(r => String(r.equipmentId || '').trim() === id) || null;
-        // Push the refreshed rows to the renderer so the grid/state updates.
-        if (ctx.pushData) { try { ctx.pushData({ ...fd, rows: merged, _partial: 'relay-refresh-unit' }); } catch (_) {} }
+        // Push ONLY the single changed row as a row-level MERGE (partialMerge),
+        // not the whole fleet. The renderer overlays it by equipmentId, so a
+        // per-unit refresh can never shrink/replace the grid. This is the fix
+        // for "AI Fill All zeroed out my units".
+        if (ctx.pushData && freshRow) {
+          try { ctx.pushData({ rows: [freshRow], partialMerge: true, _partial: 'relay-refresh-unit' }); } catch (_) {}
+        }
       }
       logger.info('relay:refresh-unit done for ' + id + (res && res._noWR ? ' (no WR)' : ''));
       return { ok: true, unit: freshRow, cache: relayCache[id] || null };

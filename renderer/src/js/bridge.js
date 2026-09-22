@@ -28,9 +28,43 @@ export function init() {
   // maintain the authoritative "last SUCCESSFUL (fresh + complete) sync" here —
   // NOT in the status bar — so there is a single source of truth.
   window.fleet.onData((data) => {
+    const prev = state.slice('fleet');
+
+    // ROW-LEVEL MERGE payload (data.partialMerge === true): a targeted update of
+    // just a FEW rows (e.g. the single-unit relay:refresh-unit path used by Long
+    // Dwell AI Fill). This must NOT replace the whole fleet -- doing so shrank
+    // the grid to whatever small set was pushed, which is exactly what "AI Fill
+    // All zeroed out my units" was: a per-unit refresh pushing a partial row set
+    // that overwrote state.fleet.rows. Instead, overlay the pushed rows onto the
+    // existing rows by equipmentId, keep everything else intact, and never let a
+    // merge shrink the fleet or end the in-progress/sync state.
+    if (data.partialMerge && Array.isArray(data.rows) && data.rows.length) {
+      const existing = Array.isArray(prev.rows) ? prev.rows : [];
+      if (!existing.length) {
+        // Nothing to merge into yet -- ignore the fragment rather than replace
+        // the fleet with just a couple rows.
+        bus.emit('fleet:data', { ...data, rows: existing });
+        return;
+      }
+      const byId = new Map(existing.map(r => [r.equipmentId, r]));
+      for (const upd of data.rows) {
+        if (!upd || !upd.equipmentId) continue;
+        const cur = byId.get(upd.equipmentId);
+        byId.set(upd.equipmentId, cur ? { ...cur, ...upd } : upd);
+      }
+      const mergedRows = Array.from(byId.values());
+      state.update('fleet', {
+        rows:  mergedRows,
+        count: mergedRows.length,
+        seq:   (prev.seq || 0) + 1,
+        // Preserve all sync-status fields -- a targeted row merge is NOT a sync.
+      });
+      bus.emit('fleet:data', { ...data, rows: mergedRows });
+      return;
+    }
+
     const isPartial = !!data.partial;
     const isCache   = !!data.usedCache || !!data.stale;
-    const prev      = state.slice('fleet');
 
     // A payload counts as a NEW successful sync ONLY when it is the final,
     // full, fresh payload (not partial, not cache/stale) and carries a real
