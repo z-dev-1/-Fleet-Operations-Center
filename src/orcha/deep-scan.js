@@ -209,7 +209,9 @@ async function runOrchaDeepScan(mergedRows, opts) {
     // reach disk (and the UI on next push) as soon as they're generated.
     try {
       store.save('notesStore', notesStore);
-      if (pushData && typeof pushData === 'function') {
+      // Never push an EMPTY rows array -- the renderer would REPLACE the whole
+      // fleet with [] and zero the grid. Only push when we actually have rows.
+      if (pushData && typeof pushData === 'function' && Array.isArray(mergedRows) && mergedRows.length) {
         pushData({ ...payload, rows: mergedRows, _partial: 'deep-scan' });
       }
       logger.info('[DS] Incremental save after ' + Math.min(i + DS_BATCH_SIZE, unitsToProcess.length) + '/' + unitsToProcess.length + ' units');
@@ -354,7 +356,11 @@ async function runOrchaDeepScan(mergedRows, opts) {
   }
 
   payload.rows = mergedRows;
-  pushData(payload);
+  // Never push an EMPTY rows array (would REPLACE the fleet with [] and zero the
+  // grid). A 0-unit scan has nothing to push.
+  if (Array.isArray(mergedRows) && mergedRows.length) {
+    pushData(payload);
+  }
 
   const t2 = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   pushStatus(

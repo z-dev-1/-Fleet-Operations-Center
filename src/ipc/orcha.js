@@ -74,6 +74,16 @@ function registerOrchaIPC(ctx) {
     const { runOrchaDeepScan } = require('../orcha/deep-scan');
     const allRows = ctx.lastData && ctx.lastData.rows ? ctx.lastData.rows : [];
     const targets = allRows.filter(u => unitIds.includes(u.equipmentId));
+    // GUARD: if none of the requested units are in the current fleet rows,
+    // runOrchaDeepScan would process 0 units and still push a payload with an
+    // EMPTY rows array -- which the renderer treats as a full REPLACE and zeros
+    // the grid. Bail early with a no-op result instead. (This was the residual
+    // Long Dwell AI Fill zero-out: a deep-scan for a unit not present in
+    // ctx.lastData.rows pushed rows:[] and wiped state.fleet.rows.)
+    if (!targets.length) {
+      logger.warn('[orcha:deep-process] no matching units in fleet for', unitIds.join(','), '-- skipping (no push)');
+      return { processed: 0, units: [] };
+    }
     const scanPromise = runOrchaDeepScan(targets, {
       pushData:    ctx.pushData,
       pushStatus:  ctx.pushStatus,

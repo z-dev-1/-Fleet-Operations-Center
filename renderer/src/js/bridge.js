@@ -63,6 +63,18 @@ export function init() {
       return;
     }
 
+    // SAFETY NET: never let an EMPTY rows payload REPLACE a populated fleet.
+    // A 0-row push is almost always a transient/degraded push (e.g. a deep-scan
+    // that processed 0 units, or an auth-bounced scrape) -- replacing the grid
+    // with [] just zeros it until the next good push. If we already have rows
+    // and this payload carries none, ignore it (keep what we have).
+    if ((!Array.isArray(data.rows) || data.rows.length === 0) &&
+        Array.isArray(prev.rows) && prev.rows.length > 0) {
+      // Preserve sync status flags for cache/partial markers, but keep rows.
+      bus.emit('fleet:data', { ...data, rows: prev.rows });
+      return;
+    }
+
     const isPartial = !!data.partial;
     const isCache   = !!data.usedCache || !!data.stale;
 
