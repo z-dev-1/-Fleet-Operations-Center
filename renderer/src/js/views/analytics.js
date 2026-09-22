@@ -632,10 +632,15 @@ function _buildAIFillPrompt(row, dd) {
     '   figures, SR/case numbers, part names, and vendor/dealer names:\n' +
     '   \\u2022 Initial Issue Reported: <the original reported symptoms; list multiple symptoms separated\n' +
     '        by semicolons; include the report date in parens when known, e.g. "active CEL (8/10)".>\n' +
-    '   \\u2022 Primary Vendor Rejection: <why the primary/mobile vendor could NOT do it -- name the vendor\n' +
-    '        and the TECHNICAL reason it was out of scope, with date if known (e.g. "Amerit rejected --\n' +
-    '        transmission clutch failure requires Volvo dealer diagnostic tools"; or "Body damage repairs\n' +
-    '        -- out of scope for mobile service (8/26)"). If the primary vendor did NOT reject, "N/A".>\n' +
+    '   \\u2022 Primary Vendor Rejection: <this field applies ONLY when the unit STARTED at a primary/mobile\n' +
+    '        vendor (e.g. Amerit, TA) that then could NOT perform the work because it was OUT OF SCOPE, so\n' +
+    '        it had to be ROUTED TO A DEALER. State: which primary vendor, the technical reason it was out\n' +
+    '        of scope, and that it was sent to the dealer -- with date if known. E.g. "Amerit rejected --\n' +
+    '        transmission clutch failure requires Volvo dealer tools; routed to Shealy Duncan (9/10)" or\n' +
+    '        "TA out of scope -- body damage requires dealer body shop (8/26)". If the unit was NOT first at\n' +
+    '        a primary/mobile vendor (i.e. it went straight to a dealer), or the primary vendor is handling\n' +
+    '        it in scope, write "N/A". Do NOT put estimate rejections or general delays here -- ONLY the\n' +
+    '        mobile-vendor-out-of-scope -> dealer handoff.>\n' +
     '   \\u2022 Primary Barrier: <the single biggest thing blocking completion RIGHT NOW, with specifics:\n' +
     '        estimate version + dollar figure + who it is escalated to + date (e.g. "Estimate v4\n' +
     '        ($22,706.78) escalated to HVE 9/22"), OR the exact part on backorder + source + parts-delay\n' +
