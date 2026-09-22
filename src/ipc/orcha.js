@@ -77,7 +77,15 @@ function registerOrchaIPC(ctx) {
     const scanPromise = runOrchaDeepScan(targets, {
       pushData:    ctx.pushData,
       pushStatus:  ctx.pushStatus,
-      payload:     { rows: targets },
+      // partialMerge: this is the ON-DEMAND path (e.g. Long Dwell AI Fill scans
+      // just 1-2 units). runOrchaDeepScan does `payload.rows = mergedRows;
+      // pushData(payload)` -- with only the scanned targets. Without this flag
+      // the renderer would REPLACE the whole fleet with those 1-2 rows (grid
+      // "zeros out" until the next full rescan restores it -- the reported bug).
+      // partialMerge tells bridge.js to overlay these rows by equipmentId
+      // instead of replacing. The full-fleet deep-scan path omits this flag, so
+      // it still pushes a complete replacement as before.
+      payload:     { rows: targets, partialMerge: true },
       uptakeCount: 0,
       relayCount:  0,
     });
