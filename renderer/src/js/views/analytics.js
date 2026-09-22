@@ -529,14 +529,19 @@ async function _refreshLongDwellData() {
   }
 }
 
-// Strips dollar amounts before anything derived from row data reaches an AI
-// prompt or a copy-paste export -- mirrors src/orcha/deep-scan.js's
-// _stripCosts() (Node-side, not importable into the renderer bundle) so the
-// same "no cost figures in a leadership-facing summary" rule applies here.
+// Tidies text (collapses runs of whitespace) before it reaches the AI prompt
+// or the saved summary.
+//
+// DOLLAR AMOUNTS (2026): for LONG DWELL summaries specifically, estimate dollar
+// figures ARE wanted (e.g. "estimate v4 ($22,706.78) escalated to HVE") -- they
+// are part of the gold-standard status format the team uses. So this no longer
+// strips "$" amounts. (Kept the function + name so the 6 Long-Dwell call sites
+// and the source-context feed stay unchanged; it now only normalizes
+// whitespace.) The general "no cost figures" rule still lives in deep-scan.js
+// for other, broader-audience outputs -- this override is scoped to Long Dwell.
 function _stripCosts(text) {
   if (!text) return text;
   return String(text)
-    .replace(/\s*\$[\d,]+\.?\d*\s*/g, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim();
 }
@@ -602,24 +607,40 @@ function _buildAIFillPrompt(row, dd) {
     '   one field per line, each line starting with "\\u2022 " (bullet + space) then the label\n' +
     '   and a colon. Use a literal \\n between lines. This EXACT format is required for EVERY\n' +
     '   unit -- accidents, EOL, and rentals included (they still fill every field; see below).\n\n' +
-    '   The 7 fields (verbatim labels, in this order):\n' +
-    '   \\u2022 Initial Issue Reported: <what the unit originally came in for -- the reported problem>\n' +
-    '   \\u2022 Primary Vendor Rejection: <if the primary vendor rejected/declined/routed it out, WHY and where it went; else "N/A">\n' +
-    '   \\u2022 Primary Barrier: <the single biggest thing blocking completion right now -- parts, estimate approval, payment, vendor capacity, diagnosis, etc.>\n' +
-    '   \\u2022 Actions Taken: <write in FIRST PERSON, past tense, as the actions I (the fleet coordinator)\n' +
-    '        personally took -- lead with strong ownership verbs (Diagnosed, Coordinated, Escalated,\n' +
-    '        Expedited, Secured, Drove, Followed up, Opened, Confirmed, Pushed). Professional and\n' +
-    '        proactive so it reflects well on me. Example: "Diagnosed with Cummins, opened parts SIM,\n' +
-    '        expedited the RDC order, and escalated to MCS for firm ETC." Base it ONLY on what the source\n' +
+    '   The 7 fields (verbatim labels, in this order). Match the STYLE of the GOLD-STANDARD\n' +
+    '   EXAMPLES at the bottom -- dense, specific, date-stamped, with estimate versions + dollar\n' +
+    '   figures, SR/case numbers, part names, and vendor/dealer names:\n' +
+    '   \\u2022 Initial Issue Reported: <the original reported symptoms; list multiple symptoms separated\n' +
+    '        by semicolons; include the report date in parens when known, e.g. "active CEL (8/10)".>\n' +
+    '   \\u2022 Primary Vendor Rejection: <why the primary/mobile vendor could NOT do it -- name the vendor\n' +
+    '        and the TECHNICAL reason it was out of scope, with date if known (e.g. "Amerit rejected --\n' +
+    '        transmission clutch failure requires Volvo dealer diagnostic tools"; or "Body damage repairs\n' +
+    '        -- out of scope for mobile service (8/26)"). If the primary vendor did NOT reject, "N/A".>\n' +
+    '   \\u2022 Primary Barrier: <the single biggest thing blocking completion RIGHT NOW, with specifics:\n' +
+    '        estimate version + dollar figure + who it is escalated to + date (e.g. "Estimate v4\n' +
+    '        ($22,706.78) escalated to HVE 9/22"), OR the exact part on backorder + source + parts-delay\n' +
+    '        SIM reference, OR the pending diagnosis. Include the delayReason category word where it fits.>\n' +
+    '   \\u2022 Actions Taken: <a FIRST-PERSON, dated chronology of what I (the fleet coordinator) did --\n' +
+    '        outreach and milestones with dates, semicolon-separated, e.g. "Reached out for diag findings/\n' +
+    '        ETC (9/9, 9/21); estimate v3 ($21,235.33) approved 9/16; escalated estimate v4 to HVE 9/22."\n' +
+    '        Lead with ownership verbs (Reached out, Diagnosed, Opened, Escalated, Expedited, Input SIM,\n' +
+    '        Rerouted, Confirmed). Professional and proactive so it reflects well on me. Base it ONLY on what the source\n' +
     '        shows actually happened -- do NOT invent actions, vendor calls, or follow-ups that are not in\n' +
     '        the source; frame the REAL actions in the strongest, most ownership-forward professional light.>\n' +
-    '   \\u2022 Repair Status: <where the repair stands right now -- e.g. "Awaiting parts", "In repair", "Estimate pending approval", "Diagnosis in progress">\n' +
-    '   \\u2022 ETC: <estimated completion date if known; if none, "Pending \\u2014 <reason>" e.g. "Pending \\u2014 turbo backordered">\n' +
-    '   \\u2022 Follow-up date: <a CONCRETE calendar date (M/D) when we should next follow up to get a status\n' +
-    '        update -- ALWAYS an actual date, computed from TODAY, never "Follow-up required" or a bare owner.\n' +
-    '        You MAY prefix the owner, e.g. "FAS follow-up 9/26" or "MCS follow-up by 9/25", but the DATE is mandatory.>\n\n' +
-    '   FOLLOW-UP DATE RULE (this field must ALWAYS be a real M/D date computed from TODAY):\n' +
-    '   - Pick the date based on urgency, then write it as M/D (e.g. "9/26"):\n' +
+    '   \\u2022 Repair Status: <vendor/dealer LOCATION + what is physically done + what was uncovered +\n' +
+    '        what is pending, dated where known. E.g. "At Bergeys Newcastle -- steer brakes/windshield\n' +
+    '        replaced 9/18; front drive shock repair uncovered additional bracket/crossmember damage;\n' +
+    '        parts on order." or "OSR -- pending diag. Cummins pulling head for root cause. EOL pending.">\n' +
+    '   \\u2022 ETC: <estimated completion date if known. If an ETC exists but has PASSED, note it and the\n' +
+    '        days past due, e.g. "9/16/2026 (past due -- 6 days). No updated ETC." If none exists, "No ETC\n' +
+    '        -- <reason>" or "Not provided -- pending estimate approval".>\n' +
+    '   \\u2022 Follow-up date: <a CONCRETE calendar date in M/D/YYYY when we should next follow up, FOLLOWED\n' +
+    '        BY the specific action to take that day -- e.g. "9/23/2026 -- request updated ETC" or\n' +
+    '        "9/22/2026 (today) -- escalate updated estimate in RG to MCS for approval; request ETC from\n' +
+    '        Shealy Duncan upon approval." ALWAYS an actual date computed from TODAY, never "Follow-up\n' +
+    '        required" or a bare owner. The DATE + ACTION are both required.>\n\n' +
+    '   FOLLOW-UP DATE RULE (this field must ALWAYS be a real M/D/YYYY date computed from TODAY + the action):\n' +
+    '   - Pick the date based on urgency, write it as M/D/YYYY, then " -- <action>":\n' +
     '       * Vendor unresponsive / no update logged / DOT-critical / SEV2-SEV3 -> follow up in 1-2 days from today.\n' +
     '       * Estimate pending approval or awaiting vendor resubmission -> follow up in 2-3 days from today.\n' +
     '       * Parts backordered / long lead time -> follow up in ~7 days from today (or the day AFTER the stated\n' +
@@ -642,12 +663,27 @@ function _buildAIFillPrompt(row, dd) {
     '     control, so ETC and Follow-up date may be "N/A" and Primary Barrier states the situation\n' +
     '     (e.g. "Primary Barrier: Accident \\u2014 CEI managing", "ETC: N/A", "Follow-up date: N/A"). For ALL\n' +
     '     other (FAS-controlled) units, Follow-up date MUST be a concrete M/D date per the rule above.\n' +
-    '   - NEVER include dollar amounts, personal names, phone numbers, emails, VINs.\n' +
-    '   - Allowed: vendor names, dealer locations, case/SIM numbers, part names, SIM links, dates, ETAs.\n\n' +
-    '   EXAMPLE summary value (note the literal \\n between lines):\n' +
-    '   "\\u2022 Initial Issue Reported: Turbo failure, no-start.\\n\\u2022 Primary Vendor Rejection: N/A\\n' +
-    '\\u2022 Primary Barrier: Turbo backordered (PN 5581552).\\n\\u2022 Actions Taken: Diagnosed with Cummins, opened the parts SIM, expedited the RDC order, and escalated to MCS for a firm ETC.\\n' +
-    '\\u2022 Repair Status: Awaiting parts.\\n\\u2022 ETC: Pending \\u2014 turbo backordered.\\n\\u2022 Follow-up date: FAS follow-up 8/18"\n\n' +
+    '   - Estimate DOLLAR AMOUNTS ARE WANTED here (e.g. "estimate v4 ($22,706.78)") -- include them\n' +
+    '     when present in the source. Still NEVER include personal names, phone numbers, emails, or VINs.\n' +
+    '   - Allowed: vendor/dealer names + locations, case/SR/SIM numbers, part names/PNs, SIM links,\n' +
+    '     estimate versions + dollar figures, dates, ETAs.\n\n' +
+    '   GOLD-STANDARD EXAMPLES (match this density, dating, and voice; note the literal \\n between lines):\n' +
+    '   EXAMPLE 1:\n' +
+    '   "\\u2022 Initial Issue Reported: Passenger mirror loose/excessive shake; VADA ECU fault -- communication failure; transmission clutch slip accelerating gears 11-12.\\n' +
+    '\\u2022 Primary Vendor Rejection: Amerit rejected -- transmission clutch failure and VADA ECU faults require Volvo dealer diagnostic tools and transmission repair capability.\\n' +
+    '\\u2022 Primary Barrier: Estimate Process -- transmission repair completed, but road test 9/22 revealed VECU data mismatch codes and unit pulling right. Updated estimate submitted for alignment and code diagnostics, pending approval.\\n' +
+    '\\u2022 Actions Taken: Towed to Shealy Duncan 9/10. Transmission pulled, clutch/actuator/valve replaced. Exhaust flex pipe replaced. Estimate $7,697.91 approved 9/21. Road test 9/22 identified new codes. Updated estimate submitted to MCS for approval.\\n' +
+    '\\u2022 Repair Status: Transmission repair complete. Pending approval for alignment and VECU code diagnostics.\\n' +
+    '\\u2022 ETC: Not provided -- pending estimate approval.\\n' +
+    '\\u2022 Follow-up date: 9/22/2026 (today) -- escalate updated estimate in RG to MCS for approval. Request ETC from Shealy Duncan upon approval."\n\n' +
+    '   EXAMPLE 2:\n' +
+    '   "\\u2022 Initial Issue Reported: Driver side front tire, headlight, and bumper damage (8/25).\\n' +
+    '\\u2022 Primary Vendor Rejection: Body damage repairs -- out of scope for mobile service (8/26).\\n' +
+    '\\u2022 Primary Barrier: Chassis fairing on back order from PDC, originally expected ~9/24; parts delay SIM submitted 9/17 for assistance.\\n' +
+    '\\u2022 Actions Taken: Reached out for projected ETC (9/3); reached out for dealer update (9/9, 9/16); input parts delay SIM (9/17); escalated estimate v2 ($21,616.71) for approval (9/21), approved 9/22.\\n' +
+    '\\u2022 Repair Status: At Gabrielli Kenworth Bristol -- hood/bumper completed, transport arranged; estimate v2 approved 9/22 covering CEL road test, oil leak, door check, mirror monitor, camera mount, and washer pump.\\n' +
+    '\\u2022 ETC: No ETC -- road test still needed to confirm CEL/oil leak resolution before return.\\n' +
+    '\\u2022 Follow-up date: 9/24/2026 -- request road-test results and firm ETC from Gabrielli Kenworth Bristol."\n\n' +
     'RESPOND WITH RAW JSON ONLY -- no markdown, no code fences, no explanation, exactly this shape\n' +
     '(the summary value is a single JSON string containing the 7 bulleted lines separated by \\n):\n' +
     '{"delayReason": "...", "escalationLevel": "...", "summary": "..."}'
