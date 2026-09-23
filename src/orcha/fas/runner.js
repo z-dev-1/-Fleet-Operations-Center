@@ -113,6 +113,7 @@ async function handleInbound(input, deps) {
     decision = await agent.runAgent({
       slackId: input.slackId, senderName: input.senderName,
       text: input.text, conversation: input.conversation || [], isGroup: !!input.isGroup,
+      attachments: input.attachments || '',
     });
     // PART 3: DO NOT route or execute actions here. Proposed actions are
     // carried on the decision and become part of the SINGLE reply+action

@@ -61,7 +61,9 @@ describe('assembled prompt wiring (what the AI actually receives)', () => {
   it('includes Zila coverage (operators + domiciles) for an INTERNAL sender', async () => {
     let seenPrompt = '';
     vi.spyOn(relay, 'ask').mockImplementation(async (prompt) => {
-      seenPrompt = prompt;
+      // Capture the DECISION prompt (contains the decision contract). A separate
+      // review-pass call runs afterward in autonomous mode; ignore it here.
+      if (/decision":"answer\|research_more|research_more\|act\|clarify/.test(prompt)) seenPrompt = prompt;
       return JSON.stringify({ decision: 'answer', confidence: 0.9, reason: 'ok', research: [], actions: [], reply: 'ok' });
     });
     await agent.runAgent({ slackId: 'U_INT', senderName: 'Zila', text: 'any update on 320160?', conversation: [] });
@@ -78,7 +80,8 @@ describe('assembled prompt wiring (what the AI actually receives)', () => {
     seedCarrier();
     let seenPrompt = '';
     vi.spyOn(relay, 'ask').mockImplementation(async (prompt) => {
-      seenPrompt = prompt;
+      // Only the DECISION prompt (ignore the later review-pass call).
+      if (/decision":"answer\|research_more|research_more\|act\|clarify/.test(prompt)) seenPrompt = prompt;
       return JSON.stringify({ decision: 'answer', confidence: 0.9, reason: 'ok', research: [], actions: [], reply: 'ok' });
     });
     await agent.runAgent({ slackId: 'U_CAR', senderName: 'Carrier', text: 'update on 320160?', conversation: [] });

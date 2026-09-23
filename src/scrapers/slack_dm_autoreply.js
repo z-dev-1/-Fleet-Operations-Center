@@ -969,10 +969,15 @@ async function pollDMAutoReplyOnce(log) {
             // reply AND commits case memory atomically ONLY after Slack confirms
             // a ts. On delivery failure the runner queues a recoverable review
             // item and commits nothing — we retry the message next poll.
+            // Shared file/link/attachment context (same builder the legacy
+            // path uses) so the FAS agent can SEE shared docs, links, and file
+            // contents — previously the FAS path was blind to these, which
+            // thinned its answers and lowered its confidence.
+            const _fasAttach = await _buildAttachmentContext(msg, downloadFileContent);
             const _fr = await _fasRunner.handleInbound({
               engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
               channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
-              isGroup: !!dm.isGroup, conversation: historyMsgs,
+              isGroup: !!dm.isGroup, conversation: historyMsgs, attachments: _fasAttach,
             }, { sendToChannel });
             if (_fr && _fr.letLegacyReply) {
               // Runner asked us to let the legacy engine reply (error-failsafe /
@@ -1180,6 +1185,7 @@ async function pollDMAutoReplyOnce(log) {
               engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
               channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
               isGroup: !!dm.isGroup, conversation: historyMsgs, actualReply: draft.reply,
+              attachments: attachCtx,
             });
           } catch (_e) { /* shadow comparison must never break the live path */ }
         }
@@ -1379,10 +1385,11 @@ async function pollDMAutoReplyOnce(log) {
                 // Slack confirms a ts. On delivery failure the runner queues a
                 // recoverable review item and commits nothing — we do NOT advance
                 // latestThreadReplyTs so this reply is retried next poll.
+                const _fasAttachT = await _buildAttachmentContext(reply, downloadFileContent);
                 const _fr = await _fasRunner.handleInbound({
                   engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
                   channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
-                  isGroup: !!dm.isGroup, conversation: threadContext,
+                  isGroup: !!dm.isGroup, conversation: threadContext, attachments: _fasAttachT,
                 }, { sendToChannel });
                 if (_fr && _fr.outcome === 'auto-send-failed') {
                   // Delivery failed — nothing committed; retry this reply later.
@@ -1444,6 +1451,7 @@ async function pollDMAutoReplyOnce(log) {
                   engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
                   channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
                   isGroup: !!dm.isGroup, conversation: threadContext, actualReply: draft.reply,
+                  attachments: attachCtxT,
                 });
               } catch (_e) { /* shadow comparison must never break the live path */ }
             }

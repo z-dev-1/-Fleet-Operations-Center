@@ -117,6 +117,75 @@ function _parseDecision(raw, evidence) {
   }
 }
 
+// ── REVIEW / REFINE PASS ──────────────────────────────────────────────────
+// After the research loop lands a terminal decision, run ONE more AI call that
+// acts as a critical reviewer: it re-reads the drafted reply against the same
+// verified facts, the sender's scope, and the FAS role rules, then returns the
+// BEST final reply plus an HONEST re-scored confidence. This is the "review
+// before send + find the best response" step. It NEVER invents new facts (same
+// hard rules) and NEVER upgrades a clarify/escalate into a fabricated answer —
+// it only tightens wording, catches overclaims (e.g. "I approved" when a FAS
+// only escalates), removes anything unsupported, and recalibrates confidence to
+// reflect actual evidence quality. Fails safe: on any error it keeps the
+// original decision unchanged.
+const REVIEW_CONTRACT =
+  'You are a STRICT reviewer of a draft Slack reply written by the digital FAS (acting as Zila). ' +
+  'Your job: decide the BEST possible version of this reply and score how confident we should be.\n' +
+  'Check the draft against the VERIFIED FACTS, the sender scope, and the FAS role rules:\n' +
+  '- Remove or fix anything NOT supported by the verified facts (no invented unit/status/date/ETC/vendor/case).\n' +
+  '- A FAS ESCALATES estimates and NEVER approves them — flag/fix any claim of approving/rejecting an estimate or that an action already happened.\n' +
+  '- Keep it in Zila\'s voice: direct, calm, accountable, concise for Slack; no robotic disclaimers; no raw JSON; no mention of AI.\n' +
+  '- Do NOT turn a clarify/escalate into a fabricated answer. If the draft over-promises or asserts unverified facts, tighten it to what is actually supported.\n' +
+  '- Set confidence HONESTLY (0.0-1.0) based on evidence quality: high only when the reply is fully supported by fresh verified facts and needs no human judgment; lower when facts are missing/stale/conflicting or the reply needs Zila\'s personal decision.\n\n' +
+  'Respond with ONE valid JSON object only, no text before/after:\n' +
+  '{"reply":"the best final message to send as Zila","confidence":0.0,"changed":true|false,"critique":"one short line on what you changed and why"}';
+
+async function _reviewAndRefine(decision, cfg, profile, evidence, extraResearch, controller) {
+  // Only review terminal decisions that carry a real reply.
+  if (!decision || typeof decision.reply !== 'string' || !decision.reply.trim()) return decision;
+  if (decision._fallback || decision._aborted) return decision;
+  try {
+    const factsText = _factsToText(evidence.verifiedFacts) +
+      (evidence.missingFacts && evidence.missingFacts.length ? ('\nMISSING/STALE: ' + evidence.missingFacts.join('; ')) : '') +
+      (evidence.conflicts && evidence.conflicts.length ? ('\nCONFLICTS: ' + JSON.stringify(evidence.conflicts)) : '');
+    const researchText = (extraResearch && extraResearch.length)
+      ? extraResearch.map(r => '• ' + r.tool + '(' + JSON.stringify(r.args) + ') => ' + r.text).join('\n')
+      : '(none)';
+    const prompt =
+      '=== FAS REPLY REVIEW — INDEPENDENT TASK, IGNORE PRIOR CONTEXT/FORMATS ===\n' +
+      SAFETY_RULES + '\n\n' +
+      'SENDER: ' + profile.name + ' (' + profile.type + ')\n' +
+      'DECISION TYPE: ' + decision.decision + '\n' +
+      guard.wrapUntrusted('VERIFIED FACTS', factsText) + '\n' +
+      guard.wrapUntrusted('RESEARCH RESULTS', researchText) + '\n' +
+      guard.wrapUntrusted('DRAFT REPLY TO REVIEW', decision.reply) + '\n\n' +
+      REVIEW_CONTRACT;
+    const raw = await _ask(prompt, cfg, controller, 'fas-review');
+    if (!raw) return decision;
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) return decision;
+    const p = JSON.parse(m[0]);
+    if (typeof p.reply !== 'string' || !p.reply.trim()) return decision;
+    const reviewedConfidence = typeof p.confidence === 'number' ? p.confidence : decision.confidence;
+    // The reviewer can only LOWER or mildly adjust confidence for safety — never
+    // let review inflate a shaky draft past the original self-score by a lot.
+    const finalConfidence = Math.min(
+      typeof reviewedConfidence === 'number' ? reviewedConfidence : 0.5,
+      (typeof decision.confidence === 'number' ? decision.confidence : 0.5) + 0.1
+    );
+    decision._preReviewReply = decision.reply;
+    decision._preReviewConfidence = decision.confidence;
+    decision.reply = p.reply.trim();
+    decision.confidence = finalConfidence;
+    decision._review = { changed: !!p.changed, critique: String(p.critique || '').slice(0, 300) };
+    logger.info('[fas-agent] review pass: changed=' + (!!p.changed) + ' conf ' +
+      decision._preReviewConfidence + '->' + finalConfidence);
+  } catch (e) {
+    logger.warn('[fas-agent] review pass failed (keeping original): ' + (e && e.message));
+  }
+  return decision;
+}
+
 // Build the budgeted prompt from evidence + any extra research collected in the
 // loop. Untrusted content (message, conversation, facts, extra research) is
 // structurally fenced with wrapUntrusted() so injected instructions can't be
@@ -168,14 +237,30 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
     }
   } catch (_) { /* coverage optional; never block a reply */ }
 
+  // Current local time/date so time-relative phrasing (today/tomorrow/EOD,
+  // "still no update in N days") is accurate — the legacy DM engine already
+  // injects this; the FAS prompt was missing it.
+  let _nowText = '';
+  try {
+    const _n = new Date();
+    _nowText = 'Current local time: ' + _n.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) +
+      ', ' + _n.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }) + '.';
+  } catch (_) { _nowText = ''; }
+
   const assembled = budget.assemble([
     { key: 'system', label: 'SYSTEM + SAFETY RULES', text: SAFETY_RULES },
+    { key: 'now', label: 'CURRENT TIME', text: _nowText },
     { key: 'loop', label: 'RESEARCH BUDGET', text: 'Step ' + stepInfo.step + ' of max ' + stepInfo.maxSteps + '. Research steps remaining: ' + stepInfo.remaining + '.' },
     { key: 'sender', label: 'SENDER', text: profile.name + ' (' + profile.type + ', ' + (profile.org || 'no org') + ')' },
     { key: 'authorization', label: 'AUTHORIZATION + SCOPE', text: authText },
     { key: 'coverage', label: 'ZILA COVERAGE (routing/scope context)', text: coverageText },
     { key: 'message', label: 'INCOMING MESSAGE', text: guard.wrapUntrusted('INCOMING MESSAGE', text) },
     { key: 'conversation', label: 'IMMEDIATE CONVERSATION', text: guard.wrapUntrusted('CONVERSATION', convoText) },
+    // Shared files / link previews / attachment contents (from the Slack
+    // message). Untrusted, like the message. Empty when nothing was shared.
+    { key: 'attachments', label: 'SHARED FILES & LINKS', text: (input.attachments && String(input.attachments).trim())
+        ? guard.wrapUntrusted('SHARED FILES & LINKS', String(input.attachments).trim())
+        : '(no shared files or links)' },
     { key: 'playbook', label: 'FAS PLAYBOOK (apply these rules)', text: playbookText },
     { key: 'caseSummary', label: 'RELATED CASE MEMORY', text: caseText },
     { key: 'verifiedFacts', label: 'VERIFIED FACTS (source + freshness shown)', text: guard.wrapUntrusted('VERIFIED FACTS', factsText) },
@@ -342,6 +427,17 @@ async function runAgent(input) {
     if (decision.decision === 'research_more') {
       decision.decision = decision.reply ? 'answer' : 'clarify';
       decision.reason = (decision.reason || '') + ' [loop ended on research_more]';
+    }
+
+    // REVIEW / REFINE: one more AI pass to critique the draft and produce the
+    // best final reply + honest confidence, before it is sent or queued. Only
+    // runs when the reply will actually be USED (approval/autonomous) and when
+    // enabled in config (default on). Skipped in shadow/disabled (draft is
+    // evaluation-only there) and when explicitly disabled, so it adds no cost or
+    // extra AI call on paths that never send.
+    const _reviewOn = cfg.reviewReplies !== false && (mode === 'approval' || mode === 'autonomous');
+    if (_reviewOn && !controller.signal.aborted) {
+      decision = await _reviewAndRefine(decision, cfg, profile, evidence, extraResearch, controller);
     }
 
     decision._evidence = evidence;
