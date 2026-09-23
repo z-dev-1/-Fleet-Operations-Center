@@ -930,10 +930,16 @@ function initWindows(ctx) {
 
     function _showApp() {
       _appReady = true;
+      // Startup shows only the first 6 domiciles for a fast first paint; the
+      // chunked rescan backfills the remaining domiciles. Run that FIRST backfill
+      // almost immediately (~5s) instead of after 90s so all configured
+      // domiciles appear within seconds of launch, not a minute and a half later.
+      // The recurring rescan keeps its normal 5-min cadence, offset from the
+      // initial backfill so they don't stack.
+      setTimeout(() => { triggerLiveRescan(false); }, 5000);
       setTimeout(() => {
-        triggerLiveRescan(false);
         setInterval(() => triggerLiveRescan(false), RESCAN_INTERVAL_MS);
-      }, 90000);
+      }, RESCAN_INTERVAL_MS);
       logger.info('Switching to Fleet Operations app...');
       if (process.env.NODE_ENV === 'development') {
         mainWindow.loadURL('http://localhost:5173');
