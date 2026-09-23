@@ -225,6 +225,14 @@ function createSyncEngine(ctx) {
           aapScrapedAt: aapResult.scrapedAt,
           uptakeScrapedAt: null, uptakeCount: 0, relayCount: 0,
           syncedAt: new Date().toISOString(), stale: false, partial: 'aap',
+          // MERGE, don't REPLACE: this progressive push is built from the AAP
+          // cache which, right after startup, only holds the first 6 domiciles
+          // (~201 rows). Replacing the grid with it dropped the chunked-rescan's
+          // additional domiciles for the whole sync ("units disappear after
+          // sync"). partialMerge overlays these rows by equipmentId onto the
+          // existing fuller grid so it can only ENRICH, never shrink. The final
+          // full payload (after mid-sync cache re-read) still does a true replace.
+          partialMerge: true,
         });
         ctx.pushStatus(`\uD83D\uDCCB ${_aapOnly.length} units loaded \u2014 Uptake + Relay syncing...`);
 
@@ -264,6 +272,10 @@ function createSyncEngine(ctx) {
             relayCount: Object.keys(_relayPartial).length,
             syncedAt: new Date().toISOString(), stale: false,
             partial: 'relay-batch-' + batchNum,
+            // MERGE, don't REPLACE (same reason as the partial:'aap' push): these
+            // batch rows are built from the possibly-partial startup AAP cache;
+            // overlay by equipmentId so the grid never shrinks mid-sync.
+            partialMerge: true,
           });
           ctx.pushStatus(
             `\uD83D\uDD27 Relay: ${Object.keys(_relayPartial).length} units detailed (batch ${batchNum})...`
@@ -304,6 +316,9 @@ function createSyncEngine(ctx) {
                 uptakeCount: _liveUptakeUnits.length,
                 relayCount: Object.keys(_relayPartial).length,
                 syncedAt: new Date().toISOString(), stale: false, partial: 'uptake',
+                // MERGE, don't REPLACE — overlay by equipmentId so this partial
+                // never shrinks the grid mid-sync (see partial:'aap' note).
+                partialMerge: true,
               });
               ctx.pushStatus(
                 `\uD83D\uDD0D Uptake: ${_liveUptakeUnits.length} units enriched \u2014 Relay finishing...`
