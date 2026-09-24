@@ -18,7 +18,7 @@
  *   files.getLatestScreenshot() → files.readAsDataUrl(path) → embedded in payload.
  */
 
-import { aap, files } from '../bridge.js';
+import { aap, files, relay } from '../bridge.js';
 import bus from '../bus.js';
 import toast           from '../components/toast.js';
 
@@ -603,6 +603,20 @@ function _wireSubmit() {
         const link = _el('wr-open-aap');
         if (link) link.addEventListener('click', (e) => { e.preventDefault(); aap.openUrl(_unit.assetUrl); });
         toast.show('success', 'WR ' + wrId + ' created', 6000);
+
+        // Immediately re-scan just this unit so the newly-created WR (id,
+        // vendor, status, timeline) reflects in the grid/detail without
+        // waiting for the next full sync. Fire-and-forget so it doesn't block
+        // the modal's auto-close; the merged data is pushed back via
+        // partialMerge (relay:refresh-unit) and the UI updates when it lands.
+        const _eqId = _unit && (_unit.equipmentId || _unit.id);
+        if (_eqId && relay && typeof relay.refreshUnit === 'function') {
+          toast.show('info', 'Refreshing ' + _eqId + ' data…', 2500);
+          relay.refreshUnit(_eqId)
+            .then((r) => { if (r && r.ok) toast.show('success', _eqId + ' data updated', 2500); })
+            .catch(() => { /* non-fatal — next sync will still pick it up */ });
+        }
+
         setTimeout(() => _close(), 4000);
       } else if (result && result.needsAutofill) {
         // FIX (2026-07-23): vendor has no supplierId on file -- the direct
