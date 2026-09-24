@@ -9097,14 +9097,18 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  /* The fleet view is a fixed-height flex column with overflow:hidden and the
-     table takes flex:1, so a tall overview strip would get clipped with no way
-     to scroll to the bottom cards. Cap the strip's height and let it scroll
-     internally so everything is reachable, while the table keeps its own scroll. */
-  max-height: 52vh;
-  overflow-y: auto;
 }
 .fleet-overview--collapsed .fo-body { display: none; }
+
+/* Dashboard mode: when the overview strip is showing, the fleet view scrolls
+   as ONE page (overview flows into the table) instead of the table having its
+   own separate inner scroll. This lets the overview use its natural full
+   height with nothing clipped, and the table fills the rest. On the plain
+   Fleet tab (no dashboard-mode class) the original fixed-height table scroll
+   is preserved. */
+.view--fleet.dashboard-mode { overflow-y: auto; }
+.view--fleet.dashboard-mode .fleet-table-wrap { overflow: visible; flex: 0 0 auto; min-height: 60vh; }
+.view--fleet.dashboard-mode .fleet-table-scroll { overflow: visible; }
 
 /* clickable stat values */
 .fo-drill {

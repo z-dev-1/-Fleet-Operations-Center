@@ -416,10 +416,17 @@ export function mount(container) {
 
   // Show the overview strip only on the Dashboard tab; hide it on the plain
   // Fleet tab (both render view-fleet). Default: hidden until Dashboard opens.
+  // When shown, put the fleet view into "dashboard-mode" so the whole view
+  // scrolls as one page (overview + table) instead of the table having its own
+  // inner scroll — that's what let the overview cards get clipped / cramped.
+  const fleetViewEl = container; // mount() was called with the #view-fleet element
   bus.on('ui:view-change', ({ to, tab }) => {
     if (to !== 'fleet') return; // leaving the fleet view entirely
     const showOverview = tab === 'dashboard';
     wrap.classList.toggle('fleet-overview--hidden', !showOverview);
+    if (fleetViewEl && fleetViewEl.classList) {
+      fleetViewEl.classList.toggle('dashboard-mode', showOverview);
+    }
   });
 }
 
