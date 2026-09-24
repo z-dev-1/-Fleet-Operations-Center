@@ -315,7 +315,24 @@ async function _showApproveCancel(workflowId, reviewPayload) {
     },
   });
 }
+// Detect which dealer portal (if any) a unit routes to, mirroring the backend
+// detectVendorFromUnit (src/vendors/base/relay-step.js): kenworth/peterbilt/
+// paccar/kwne -> 'paccar', volvo -> 'volvo', everything else -> null (no
+// automated dealer WO — e.g. Freightliner/DAIMLER, International, Mack).
+function _detectVendorKey(unit) {
+  const hay = [unit && unit.manufacturer, unit && unit.make, unit && unit.vendor, unit && unit.model]
+    .map(s => String(s || '').toLowerCase()).join(' ');
+  if (/kenworth|peterbilt|paccar|kwne/.test(hay)) return 'paccar';
+  if (/volvo/.test(hay)) return 'volvo';
+  return null;
+}
+
 async function _startVendorWF(unit, vendorKey) {
+  console.log('[unit-detail] _startVendorWF', { unit: unit && (unit.equipmentId || unit.id), vendorKey, hasModal: typeof openDealerWOModal });
+  if (typeof openDealerWOModal !== 'function') {
+    toast.show('error', 'Dealer WO modal unavailable (load error)');
+    return;
+  }
   // Open the Dealer WO review modal first so the user can confirm city/state,
   // dealer, name, phone, and issue before portal automation fires. The resolved
   // formData is passed into the workflow so the orchestrator fills the real
@@ -2119,6 +2136,7 @@ function _renderUnit(unit) {
   var actDealerWO = document.getElementById('dp-act-dealer-wo');
   if (actDealerWO) {
     actDealerWO.addEventListener('click', function() {
+      // Switch to the Actions tab + scroll to the vendor eligibility panel.
       _panel.querySelectorAll('.dp-tab').forEach(function(t){ t.classList.remove('active'); });
       _panel.querySelectorAll('.dp-pane').forEach(function(p){ p.classList.remove('active'); });
       var at = _panel.querySelector('[data-tab="actions"]');
@@ -2126,6 +2144,24 @@ function _renderUnit(unit) {
       if (at) at.classList.add('active');
       if (ap) ap.classList.add('active');
       setTimeout(function(){ var s=document.getElementById('dp-vendor-section'); if(s)s.scrollIntoView({behavior:'smooth',block:'start'}); }, 100);
+
+      // Dealer WO automation only supports PACCAR (Kenworth/Peterbilt) and
+      // Volvo. For those, open the review modal directly so ONE click gets the
+      // popup (previously the tile just scrolled and looked like it did
+      // nothing). For any other make (Freightliner/DAIMLER, International,
+      // Mack, ...) there is no automated portal flow — say so clearly and open
+      // the manual offsite/dealer portal instead of dead-ending.
+      var vk = _detectVendorKey(unit);
+      if (vk) {
+        _startVendorWF(unit, vk);
+      } else {
+        var mk = (unit.manufacturer || unit.make || 'this make').toString();
+        toast.show('info', 'Automated Dealer WO supports PACCAR (Kenworth/Peterbilt) and Volvo only. For ' + mk + ', use the dealer portal manually.', 5000);
+        var portalUrl = unit.offsiteShopEventUrl || unit.savedOffsiteUrl || unit.asistSrUrl || '';
+        if (portalUrl && window.files && window.files.openExternal) {
+          window.files.openExternal(portalUrl).catch(function(){});
+        }
+      }
     });
   }
 

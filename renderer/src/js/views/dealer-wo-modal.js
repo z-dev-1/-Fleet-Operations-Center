@@ -296,26 +296,78 @@ function _wireSubmit() {
 }
 
 export function open(unit, vendorKey, onSubmit) {
-  if (_overlay) close();
-  _unit      = unit;
-  _vendorKey = vendorKey;
-  _onSubmit  = onSubmit;
+  try {
+    console.log('[dealer-wo-modal] open()', { unit: unit && (unit.equipmentId || unit.id), vendorKey });
+    if (_overlay) close();
+    _unit      = unit;
+    _vendorKey = vendorKey;
+    _onSubmit  = onSubmit;
 
-  _overlay           = document.createElement('div');
-  _overlay.id        = 'dwo-modal-overlay';
-  _overlay.className = 'wr-modal-overlay';
-  _overlay.innerHTML = '<div class="wr-modal" style="padding:24px;color:var(--text-secondary,#999)">Loading contact book / profile — generating issue description…</div>';
-  document.body.appendChild(_overlay);
+    _overlay           = document.createElement('div');
+    _overlay.id        = 'dwo-modal-overlay';
+    _overlay.className = 'wr-modal-overlay';
+    _overlay.innerHTML = '<div class="wr-modal" style="padding:24px;color:var(--text-secondary,#999)">Loading contact book / profile — generating issue description…</div>';
+    document.body.appendChild(_overlay);
+  } catch (e) {
+    console.error('[dealer-wo-modal] open() failed before render:', e);
+    return;
+  }
 
-  _resolveDefaults(unit).then((d) => {
+  // Render defaults. Wrapped so a slow/failing AI issue-synthesis or contact
+  // lookup can NEVER leave the modal stuck on "Loading…" — we render the form
+  // with whatever we have and let the user fill the rest.
+  const _renderWith = (d) => {
     if (!_overlay) return; // closed while resolving
-    _overlay.innerHTML = _buildHTML(unit, vendorKey, d);
-    _overlay.addEventListener('click', (e) => { if (e.target === _overlay) close(); });
-    _el('dwo-close').addEventListener('click', close);
-    _el('dwo-cancel').addEventListener('click', close);
-    _wireSubmit();
-    setTimeout(() => { const t = _el('dwo-city-state'); if (t) t.focus(); }, 50);
-  });
+    try {
+      _overlay.innerHTML = _buildHTML(unit, vendorKey, d || {});
+      _overlay.addEventListener('click', (e) => { if (e.target === _overlay) close(); });
+      const closeBtn = _el('dwo-close');  if (closeBtn)  closeBtn.addEventListener('click', close);
+      const cancelBtn = _el('dwo-cancel'); if (cancelBtn) cancelBtn.addEventListener('click', close);
+      _wireSubmit();
+      setTimeout(() => { const t = _el('dwo-city-state'); if (t) t.focus(); }, 50);
+    } catch (e) {
+      console.error('[dealer-wo-modal] render failed:', e);
+      if (_overlay) _overlay.innerHTML = '<div class="wr-modal" style="padding:24px;color:#f85149">Dealer WO modal failed to render: ' + _esc(e.message) + '</div>';
+    }
+  };
+
+  // Cap _resolveDefaults so a hung AI call (window.ai.ask can take 60-240s or
+  // never resolve) cannot hold the modal on "Loading…" forever. If it doesn't
+  // resolve within 6s, render the form immediately with minimal defaults;
+  // the AI-enriched issue text simply won't be pre-filled.
+  let _settled = false;
+  const _fallbackTimer = setTimeout(() => {
+    if (_settled) return;
+    _settled = true;
+    console.warn('[dealer-wo-modal] _resolveDefaults slow — rendering with minimal defaults');
+    _renderWith({
+      cityState: '', dealer: '',
+      firstName: '', lastName: '', phone: '', email: '',
+      issue: unit.issueDetails || unit.issueSummary || '',
+      date: new Date().toISOString().slice(0, 10), ackCheck: true,
+    });
+  }, 6000);
+
+  Promise.resolve()
+    .then(() => _resolveDefaults(unit))
+    .then((d) => {
+      if (_settled) return; // timeout already rendered
+      _settled = true;
+      clearTimeout(_fallbackTimer);
+      _renderWith(d);
+    })
+    .catch((e) => {
+      if (_settled) return;
+      _settled = true;
+      clearTimeout(_fallbackTimer);
+      console.error('[dealer-wo-modal] _resolveDefaults failed:', e);
+      _renderWith({
+        cityState: '', dealer: '',
+        firstName: '', lastName: '', phone: '', email: '',
+        issue: unit.issueDetails || unit.issueSummary || '',
+        date: new Date().toISOString().slice(0, 10), ackCheck: true,
+      });
+    });
 }
 
 export function close() {
