@@ -54,13 +54,53 @@ let _lastError    = null;
 let _status       = 'unknown'; // 'connected' | 'expired' | 'error' | 'unknown'
 let _requestCount = 0;
 let _errorCount   = 0;
-let _aiPreference = 'auto'; // 'auto' | 'orcha' | 'claude'
+let _aiPreference = 'auto'; // 'auto' | 'orcha' | 'claude' | 'balanced'
 
 // ── CONCURRENCY ───────────────────────────────────────────────────────────────
 const MAX_CONCURRENT = 5;
 let _activeCount = 0;
 const _waitQueue = [];
 let _reqSeq = 0;
+
+// ── BALANCED-MODE LANE ROUTER ─────────────────────────────────────────────────
+// Two "lanes" — Orcha (fleet-brain/WS/CLI) and Claude (claude-code/Bedrock).
+// In 'balanced' mode, a new request is dispatched to the least-busy HEALTHY
+// lane so the two run side by side (Orcha busy -> next goes to Claude), instead
+// of everything single-filing through Orcha. Each task still runs on ONE lane
+// (no doubled calls / no extra quota). If a lane is in a health cooldown, ALL
+// requests go to the other lane — so if Orcha is down everything uses Claude,
+// and vice versa. Whichever lane is chosen still falls through to the other on
+// a real failure, so the full fallback safety net is preserved.
+let _orchaBusy = 0;
+let _claudeBusy = 0;
+let _orchaDownUntil  = 0;  // epoch ms; while now < this, treat Orcha lane as down
+let _claudeDownUntil = 0;
+const LANE_COOLDOWN_MS = 60000; // how long a lane stays "down" after a failure
+
+function _laneHealthy(lane) {
+  const now = Date.now();
+  return lane === 'orcha' ? now >= _orchaDownUntil : now >= _claudeDownUntil;
+}
+function _markLaneDown(lane) {
+  const until = Date.now() + LANE_COOLDOWN_MS;
+  if (lane === 'orcha') _orchaDownUntil = until; else _claudeDownUntil = until;
+  logger.warn('[balanced] lane "' + lane + '" marked down for ' + (LANE_COOLDOWN_MS / 1000) + 's');
+}
+function _markLaneHealthy(lane) {
+  if (lane === 'orcha') _orchaDownUntil = 0; else _claudeDownUntil = 0;
+}
+
+// Decide which lane a new balanced-mode request should START on.
+function _pickLane() {
+  const orchaOk  = _laneHealthy('orcha');
+  const claudeOk = _laneHealthy('claude');
+  // If exactly one lane is healthy, use it exclusively (single-backend mode).
+  if (orchaOk && !claudeOk) return 'orcha';
+  if (claudeOk && !orchaOk) return 'claude';
+  if (!orchaOk && !claudeOk) return 'orcha'; // both cooling down — try Orcha, it'll fall through
+  // Both healthy: least-busy wins; ties go to Orcha (primary).
+  return _claudeBusy < _orchaBusy ? 'claude' : 'orcha';
+}
 
 function _acquireSlot() {
   return new Promise(resolve => {
@@ -81,6 +121,10 @@ async function ask(prompt, opts = {}) {
 
   await _acquireSlot();
   _requestCount++;
+  // Set true when balanced mode routes this call to the Orcha lane, so the
+  // outer finally can decrement _orchaBusy exactly once (per-call local — must
+  // NOT be module scope or concurrent calls would corrupt the counter).
+  let _balancedOrchaHeld = false;
   logger.info('[' + requestId + '] relay.ask started');
 
   try {
@@ -99,6 +143,40 @@ async function ask(prompt, opts = {}) {
       throw new Error('Claude Code unavailable (preference=claude)');
     }
 
+    // Preference: 'balanced' -- two-lane load balancer. Dispatch to the
+    // least-busy healthy lane so Orcha and Claude run side by side; if one lane
+    // is down, everything goes to the other. Whichever lane is picked still
+    // falls through to the other on failure (safety net preserved).
+    if (_aiPreference === 'balanced') {
+      const lane = _pickLane();
+      logger.info('[' + requestId + '] balanced -> lane "' + lane + '" (orchaBusy=' + _orchaBusy + ' claudeBusy=' + _claudeBusy + ')');
+      if (lane === 'claude') {
+        _claudeBusy++;
+        try {
+          const t = await _tryClaudeCode(prompt, { signal, requestId });
+          if (t) {
+            _markLaneHealthy('claude');
+            _lastHealthy = Date.now(); _lastError = null; _status = 'connected-claude'; _saveStatus();
+            logger.info('[' + requestId + '] OK via balanced/claude (' + t.length + ' chars)');
+            return t;
+          }
+          throw new Error('claude-code empty');
+        } catch (ccErr) {
+          if (signal && signal.aborted) throw ccErr;
+          _markLaneDown('claude');
+          logger.warn('[' + requestId + '] balanced/claude failed (' + ccErr.message + ') — falling through to Orcha lane');
+          // fall through to the Orcha cascade below
+        } finally {
+          _claudeBusy--;
+        }
+      } else {
+        // lane === 'orcha' — count it as Orcha-busy for the duration of the
+        // Orcha cascade below. Decrement in the outer finally via a flag.
+        _orchaBusy++;
+        _balancedOrchaHeld = true;
+      }
+    }
+
     // PRIMARY: Route through fleet-brain (persistent session with full fleet context).
     // fleet-brain.getStatus().ready is true in BOTH WS mode (Orcha running) AND
     // local mode (claude-code fallback wired in). Either way fleet-brain manages
@@ -111,6 +189,7 @@ async function ask(prompt, opts = {}) {
       const text = await fleetBrain.ask(prompt, { signal, requestId });
       if (text) {
         const via = _fbStatus.localMode ? 'fleet-brain/local' : 'fleet-brain/ws';
+        _markLaneHealthy(_fbStatus.localMode ? 'claude' : 'orcha');
         _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
         logger.info('[' + requestId + '] OK via ' + via + ' (' + text.length + ' chars)');
         _saveStatus();
@@ -140,6 +219,7 @@ async function ask(prompt, opts = {}) {
         logger.info('[' + requestId + '] WebSocket attempt ' + attempt);
         const text = _fbDown ? null : await _tryWS(prompt, { signal }).catch(() => null);
         if (text) {
+          _markLaneHealthy('orcha');
           _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
           logger.info('[' + requestId + '] OK via WS fallback (' + text.length + ' chars, attempt ' + attempt + ')');
           _saveStatus();
@@ -148,6 +228,7 @@ async function ask(prompt, opts = {}) {
         logger.info('[' + requestId + '] CLI attempt ' + attempt);
         const cliText = await _tryHeadless(prompt, { signal }).catch(() => null);
         if (cliText) {
+          _markLaneHealthy('orcha');
           _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
           logger.info('[' + requestId + '] OK via CLI fallback (' + cliText.length + ' chars)');
           _saveStatus();
@@ -160,6 +241,7 @@ async function ask(prompt, opts = {}) {
             logger.info('[' + requestId + '] Claude Code attempt ' + attempt);
             const ccText = await _tryClaudeCode(prompt, { signal, requestId });
             if (ccText) {
+              _markLaneHealthy('claude');
               _lastHealthy = Date.now(); _status = 'connected-claude';
               _saveStatus();
               logger.info('[' + requestId + '] OK via claude-code fallback (' + ccText.length + ' chars)');
@@ -174,6 +256,7 @@ async function ask(prompt, opts = {}) {
           logger.info('[' + requestId + '] Bedrock attempt ' + attempt);
           const brText = await askBedrock(prompt);
           if (brText) {
+            _markLaneHealthy('claude');
             _lastHealthy = Date.now(); _status = 'connected-bedrock';
             _saveStatus();
             logger.info('[' + requestId + '] OK via Bedrock fallback (' + brText.length + ' chars)');
@@ -186,6 +269,10 @@ async function ask(prompt, opts = {}) {
         logger.warn('[' + requestId + '] Fallback ERROR attempt ' + attempt + '/' + MAX_RETRIES + ': ' + msg);
         if (signal && signal.aborted) throw new Error('Aborted');
         if (attempt < MAX_RETRIES) { await _sleep(2000); continue; }
+        // Whole Orcha-first cascade exhausted — in balanced mode this means the
+        // Orcha lane is unhealthy right now, so cool it down and let subsequent
+        // balanced requests route to the Claude lane instead.
+        _markLaneDown('orcha');
         _lastError = msg; _status = 'error'; _errorCount++;
         _saveStatus();
         throw new Error('Orcha AI failed: ' + msg);
@@ -197,6 +284,7 @@ async function ask(prompt, opts = {}) {
     // (success at any tier, every-tier-failed, aborted) funnels through here
     // exactly once, so the concurrency slot can never be double-released or
     // leaked no matter how many exit paths get added later.
+    if (_balancedOrchaHeld) _orchaBusy--; // release the balanced Orcha-lane hold
     _releaseSlot();
     logger.info('[' + requestId + '] relay.ask cleanup completed -- slot released');
   }
@@ -619,7 +707,7 @@ function setClaudeTimeout(ms) {
 }
 
 function setPreference(pref) {
-  const valid = ['auto', 'orcha', 'claude'];
+  const valid = ['auto', 'orcha', 'claude', 'balanced'];
   _aiPreference = valid.includes(pref) ? pref : 'auto';
   logger.info('AI preference set to: ' + _aiPreference);
 }

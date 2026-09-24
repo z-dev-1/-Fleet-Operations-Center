@@ -461,6 +461,9 @@ function _html() {
               <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-claude">
                 <input type="radio" name="ai-pref" value="claude" style="accent-color:#818cf8"> Claude Code only
               </label>
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-balanced">
+                <input type="radio" name="ai-pref" value="balanced" style="accent-color:#f0a800"> Balanced (Orcha + Claude)
+              </label>
             </div>
             <div id="ai-pref-hint" style="margin-top:5px;font-size:10px;color:#6e7681;font-style:italic">Auto: tries Orcha first, falls back to Claude Code if quota is exceeded.</div>
           </div>
@@ -1201,16 +1204,17 @@ function _wireAIConfig() {
 
   function _updatePrefHint(pref) {
     const hints = {
-      auto:   'Auto: tries Orcha first, falls back to Claude Code if quota is exceeded.',
-      orcha:  'Orcha only: no Claude fallback. AI is unavailable if Orcha quota runs out.',
-      claude: 'Claude Code only: skips Orcha, uses Cecelia shared Bedrock via claude -p.',
+      auto:     'Auto: tries Orcha first, falls back to Claude Code if quota is exceeded.',
+      orcha:    'Orcha only: no Claude fallback. AI is unavailable if Orcha quota runs out.',
+      claude:   'Claude Code only: skips Orcha, uses Cecelia shared Bedrock via claude -p.',
+      balanced: 'Balanced: runs Orcha + Claude as two lanes — when one is busy the next request uses the other, so work goes faster. If one is down, everything uses the other automatically.',
     };
     const el = document.getElementById('ai-pref-hint');
     if (el) el.textContent = hints[pref] || '';
   }
 
   function _updateChipStyles(pref) {
-    ['auto', 'orcha', 'claude'].forEach(p => {
+    ['auto', 'orcha', 'claude', 'balanced'].forEach(p => {
       const chip = document.getElementById('ai-chip-' + p);
       if (!chip) return;
       chip.style.borderColor = p === pref ? 'var(--acc)' : 'var(--bdr)';
