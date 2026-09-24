@@ -9075,6 +9075,7 @@ body {
   border-radius: 8px;
   background: var(--pnl, #161b22);
   overflow: hidden;
+  flex-shrink: 0; /* don't let the flex parent squeeze/clip the strip */
 }
 .fleet-overview--hidden { display: none; }
 .fo-header {
@@ -9091,7 +9092,18 @@ body {
 .fleet-overview--collapsed .fo-caret { transform: rotate(-90deg); }
 .fo-title { font-weight: 700; font-size: 13px; color: var(--txt); }
 .fo-hint { margin-left: auto; font-size: 10px; color: var(--mut); font-style: italic; }
-.fo-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 10px; }
+.fo-body {
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* The fleet view is a fixed-height flex column with overflow:hidden and the
+     table takes flex:1, so a tall overview strip would get clipped with no way
+     to scroll to the bottom cards. Cap the strip's height and let it scroll
+     internally so everything is reachable, while the table keeps its own scroll. */
+  max-height: 52vh;
+  overflow-y: auto;
+}
 .fleet-overview--collapsed .fo-body { display: none; }
 
 /* clickable stat values */
