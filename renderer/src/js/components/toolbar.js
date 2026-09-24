@@ -489,10 +489,32 @@ export function init(container) {
   });
 
   // ── AI connection status ──────────────────────────────────────────────────
+  // Reflects which backends are actually connected (Orcha, Claude, or both)
+  // using the per-backend `backends` field from relay.getStatus(). Falls back
+  // to the legacy single-status label for older payloads without `backends`.
   bus.on('orcha:status', (status) => {
     const dot = document.getElementById('kpi-ai-dot');
     const lbl = document.getElementById('kpi-ai-label');
     if (!dot) return;
+
+    const be = status && status.backends;
+    if (be && typeof be === 'object') {
+      const orcha = !!be.orcha, claude = !!be.claude;
+      let cls, label;
+      if (orcha && claude)      { cls = 'tb-kpi-dot--green'; label = 'AI: Orcha + Claude'; }
+      else if (orcha)           { cls = 'tb-kpi-dot--green'; label = 'AI: Orcha'; }
+      else if (claude)          { cls = 'tb-kpi-dot--blue';  label = 'AI: Claude'; }
+      else                      { cls = 'tb-kpi-dot--red';   label = 'AI: Offline'; }
+      dot.className = 'tb-kpi-dot ' + cls;
+      dot.title = 'Orcha: ' + (orcha ? 'connected' : 'down') + ' · Claude: ' + (claude ? 'connected' : 'down');
+      if (lbl) lbl.textContent = label;
+      // Broadcast a simple connected/down signal for the bottom status bar so
+      // the two indicators never disagree.
+      bus.emit('ai:backends', { orcha, claude, anyUp: orcha || claude });
+      return;
+    }
+
+    // Legacy fallback (no per-backend info).
     const s = (status && status.status) || (status && status.connected ? 'connected' : 'unknown');
     const MAP = {
       'connected':         { cls: 'tb-kpi-dot--green',   label: 'AI: Orcha'   },
@@ -504,6 +526,7 @@ export function init(container) {
     const d = MAP[s] || MAP['unknown'];
     dot.className = 'tb-kpi-dot ' + d.cls;
     if (lbl) lbl.textContent = d.label;
+    bus.emit('ai:backends', { orcha: s === 'connected', claude: s === 'connected-claude' || s === 'connected-bedrock', anyUp: s.startsWith('connected') });
   });
 
   // ── Show filter bar only on fleet/dashboard view ──────────────────────────

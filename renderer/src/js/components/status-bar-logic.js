@@ -189,7 +189,7 @@ export function renderHtml(view) {
       '<div class="sb-right">' +
         '<span class="sb-item">' +
           '<span class="sb-dot ' + (view.aiConnected ? 'sb-dot--green' : 'sb-dot--red') + '"></span>' +
-          'AI: ' + (view.aiConnected ? 'Connected' : 'Disconnected') +
+          'AI: ' + esc(view.aiLabel || (view.aiConnected ? 'Connected' : 'Disconnected')) +
         '</span>' +
         '<span class="sb-sep">\u2502</span>' +
         '<span class="sb-item sb-version">' + esc(version ? ('v' + version) : '\u2026') + '</span>' +

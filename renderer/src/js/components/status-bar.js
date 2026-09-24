@@ -28,6 +28,7 @@ export { esc, deriveStatus, timeSince, renderHtml } from './status-bar-logic.js'
 let _el = null;
 let _version = '';           // resolved from the app, not hard-coded
 let _aiConnected = false;
+let _aiLabel = 'Disconnected'; // 'Orcha + Claude' | 'Orcha' | 'Claude' | 'Disconnected'
 
 // Message handling: a monotonically increasing token guarantees an OLDER
 // clear-timeout can never erase a NEWER message.
@@ -47,6 +48,7 @@ function _render() {
     fleet: _fleet,
     now: Date.now(),
     aiConnected: _aiConnected,
+    aiLabel: _aiLabel,
     version: _version,
     statusMsg: _statusMsg,
     statusIsError: _statusIsError,
@@ -103,13 +105,31 @@ export function init(container) {
     _showMessage(msg, true);
   });
 
-  // AI connection indicator.
-  bus.on('orcha:status', (status) => {
-    _aiConnected = !!(status && status.connected);
+  // AI connection indicator — reflect which backends are actually up (Orcha,
+  // Claude, or both) using the per-backend `backends` field from
+  // relay.getStatus(). The old code read status.connected (a boolean that
+  // relay.getStatus() never returns), so it was ALWAYS "Disconnected".
+  function _applyBackends(orcha, claude) {
+    _aiConnected = orcha || claude;
+    _aiLabel = orcha && claude ? 'Orcha + Claude'
+             : orcha           ? 'Orcha'
+             : claude          ? 'Claude'
+             : 'Disconnected';
     _render();
+  }
+  bus.on('orcha:status', (status) => {
+    const be = status && status.backends;
+    if (be && typeof be === 'object') { _applyBackends(!!be.orcha, !!be.claude); return; }
+    // Legacy fallback: derive from the single status string.
+    const s = (status && status.status) || '';
+    _applyBackends(s === 'connected', s === 'connected-claude' || s === 'connected-bedrock');
+  });
+  // Kept in sync with the top-right toolbar indicator via its ai:backends event.
+  bus.on('ai:backends', (b) => {
+    if (b && typeof b === 'object') _applyBackends(!!b.orcha, !!b.claude);
   });
   bus.on('orcha:health', (h) => {
-    if (h && typeof h.aiConnected === 'boolean') { _aiConnected = h.aiConnected; _render(); }
+    if (h && typeof h.aiConnected === 'boolean') { _aiConnected = h.aiConnected; if (!h.aiConnected) _aiLabel = 'Disconnected'; _render(); }
   });
 
   // Continuously refresh the "ago" text so age advances without a new payload.

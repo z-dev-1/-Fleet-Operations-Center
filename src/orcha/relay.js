@@ -628,7 +628,36 @@ async function healthCheck() {
 }
 
 function getStatus() {
-  return { status: _status, lastHealthy: _lastHealthy, lastError: _lastError, requestCount: _requestCount, errorCount: _errorCount, model: MODEL_ID, region: REGION };
+  // Per-backend availability so the UI can show which AIs are actually
+  // connected (Orcha, Claude, or both) rather than just the last one used.
+  // A lane counts as "up" when it is not in a failure cooldown AND its
+  // transport is actually reachable:
+  //   - Orcha: WS endpoint / fleet-brain reachable (or a recent success).
+  //   - Claude: the claude-code binary is installed (Bedrock is a further
+  //     fallback, but claude-code presence is the primary local signal).
+  let orchaReachable = false;
+  try {
+    orchaReachable = !!(fleetBrain.getStatus && fleetBrain.getStatus().connected);
+  } catch (_) {}
+  // Treat a very recent Orcha success as reachable too (covers WS/CLI paths
+  // where fleet-brain's connected flag lags).
+  const recentOrchaOk = _status === 'connected' && _lastHealthy && (Date.now() - _lastHealthy < 5 * 60 * 1000);
+  const orchaUp  = _laneHealthy('orcha') && (orchaReachable || recentOrchaOk);
+  let claudeInstalled = false;
+  try { claudeInstalled = fs.existsSync(CLAUDE_BIN); } catch (_) {}
+  const claudeUp = _laneHealthy('claude') && claudeInstalled;
+
+  return {
+    status: _status,
+    lastHealthy: _lastHealthy,
+    lastError: _lastError,
+    requestCount: _requestCount,
+    errorCount: _errorCount,
+    model: MODEL_ID,
+    region: REGION,
+    preference: _aiPreference,
+    backends: { orcha: orchaUp, claude: claudeUp },
+  };
 }
 
 // ── MWINIT ───────────────────────────────────────────────────────────────────
