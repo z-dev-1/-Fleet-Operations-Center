@@ -14,8 +14,24 @@
 
 const logger = require('../utils/logger')('deep-scan');
 const store  = require('../store');
+const crypto = require('crypto');
+const repairHistory = require('./repair-history');
 
 const UNIT_TIMEOUT_MS = 180000;
+
+// Fingerprint the work-order facts that define a unit's current repair event.
+// Used to gate the repair-history write so we only log a NEW history entry when
+// a unit's WO data actually changed (root cause diagnosed, WR closed, new WR,
+// vendor change) — not on every 5-min sync. Cheap: no AI call, just a hash.
+function _woFingerprint(row) {
+  const parts = [
+    row.workRequestId, row.alternativeId, row.vendor, row.serviceState,
+    row.issueDetails, row.cause, row.correction, row.created, row.completed,
+    (row._plannedWRData && row._plannedWRData.serviceState) || '',
+    (row._secondaryWRs || []).map(w => (w.workRequestId || '') + w.serviceState).join('|'),
+  ];
+  return crypto.createHash('sha1').update(parts.map(p => String(p || '')).join('\u0001')).digest('hex').slice(0, 16);
+}
 
 // Deep-scan batch size. MUST match the claude-code worker pool (WORKER_POOL_SIZE=3
 // in relay.js). Processing 5 units in parallel while only 3 claude workers exist
@@ -195,6 +211,32 @@ async function runOrchaDeepScan(mergedRows, opts) {
       }
       if (val.primaryComponent && !ns._userSetPrimaryComponent) {
         if (ns.primaryComponent !== val.primaryComponent) { ns.primaryComponent = val.primaryComponent; isChanged = true; }
+      }
+
+      // ── Automatic 3-month repair-history entry ──────────────────────────
+      // Reuse the AI's already-computed one-line summary (val.summary is the
+      // root-cause-rewritten issue — e.g. "check engine light" becomes
+      // "Diagnosis: failed clutch actuator" once the vendor diagnoses it).
+      // NO extra AI call. Gate on a WO fingerprint so we only append a new
+      // history event when the unit's work-order data actually changed, not
+      // every sync — otherwise the list would fill with duplicate lines.
+      if (row && val.summary && !_isPlaceholder(val.summary)) {
+        try {
+          const fp = _woFingerprint(row);
+          if (ns._repairRefineHash !== fp) {
+            repairHistory.addEvent(val.equipmentId, {
+              date: new Date().toISOString().split('T')[0],
+              summary: val.summary,
+              vendor: row.vendor || '',
+              duration: row.workDuration || '',
+              outcome: val.repairStatus || 'in-progress',
+            });
+            ns._repairRefineHash = fp;
+            isChanged = true;
+          }
+        } catch (_hErr) {
+          logger.warn('[DS] repair-history write failed for ' + val.equipmentId + ': ' + _hErr.message);
+        }
       }
 
       if (isChanged) notesStore[val.equipmentId] = ns;
