@@ -125,81 +125,25 @@ app.whenReady().then(async () => {
     log.info('Beta gate: launch allowed for user "' + currentUser + '" (' + (isAdminUser() ? 'admin' : 'beta tester') + ')');
   }
 
-  // ── 5a-3. VPN GATE — block launch until Amazon VPN is connected ────────────
-  // Internal resources (AAP, SharePoint, SMTP relay, Relay scraper) all live
-  // behind corp DNS. Launching without VPN silently fails every scrape and
-  // auth flow. This gate shows a small window and polls vpncli every 5 s;
-  // bootstrap resumes automatically the moment the tunnel comes up.
-  // Closing the gate window quits the app rather than launching in a broken state.
-  {
-    const { checkVpnState, connectVpn } = require('./utils/vpn');
+  // ── 5a-3. VPN — NON-BLOCKING auto-connect ─────────────────────────────────
+  // Internal resources (AAP, SharePoint, Relay) live behind corp DNS and need
+  // the Amazon (Cisco) VPN. But the VPN must NEVER prevent the app from
+  // opening. So: do one FAST state check, and if the tunnel is down, kick off
+  // ensureVpn() in the BACKGROUND (silent vpncli connect, then open the Cisco
+  // UI for the 2FA tap if still down) — do NOT await it. The app boots
+  // immediately either way and just works better once the tunnel comes up.
+  // The 5-min heartbeat re-checks and re-triggers this if VPN ever drops.
+  try {
+    const { checkVpnState, ensureVpn } = require('./utils/vpn');
     const _vpnInitial = await checkVpnState();
-    log.info('[vpn-gate] Initial state: ' + _vpnInitial.status);
-
+    log.info('[vpn] Initial state: ' + _vpnInitial.status);
     if (!_vpnInitial.connected) {
-      log.warn('[vpn-gate] VPN not connected — holding startup until tunnel is up');
-      const _vpnAttempt = await connectVpn();
-      log.info('[vpn-gate] Auto-connect: ' + _vpnAttempt.raw.substring(0,100));
-      const _vpnRecheck = await checkVpnState();
-      log.info('[vpn-gate] Post-connect: ' + _vpnRecheck.status);
-      if (_vpnRecheck.connected) {
-        log.info('[vpn-gate] Auto-connect succeeded');
-        // VPN auto-connected successfully
-      } else { // auto-connect failed - fall back to manual gate
-
-      await new Promise((resolve) => {
-        const { BrowserWindow } = require('electron');
-
-        const _vpnHtml = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0d1117;color:#e6edf3;padding:32px;font-family:system-ui,sans-serif;user-select:none}.icon{font-size:36px;margin-bottom:14px}h2{font-size:16px;font-weight:600;margin-bottom:10px}p{font-size:13px;line-height:1.6;color:#8b949e;margin-bottom:10px}.btn{display:inline-flex;align-items:center;gap:8px;margin-top:4px;margin-bottom:14px;padding:9px 18px;background:#1f6feb;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s}.btn:hover{background:#388bfd}.btn:active{background:#1158c7}.status{font-size:12px;color:#6e7681;display:flex;align-items:center;gap:8px}.dot{width:8px;height:8px;border-radius:50%;background:#f0883e;animation:pulse 1.8s ease-in-out infinite;flex-shrink:0}.dot.green{background:#3fb950;animation:none}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}</style></head><body><div class=\"icon\">🔒</div><h2>VPN Required</h2><p>Fleet Operations needs an active Amazon VPN to reach internal resources.</p><button class=\"btn\" id=\"vpnBtn\">🖥️ Open Cisco Secure Client</button><p style=\"font-size:12px;color:#6e7681;margin-bottom:16px\">Click Connect in Cisco — this window closes automatically.</p><div class=\"status\"><div class=\"dot\" id=\"dot\"></div><span id=\"lbl\">Checking VPN…</span></div><script>document.getElementById(\"vpnBtn\").onclick=function(){console.log(\"vpn-btn-open\");};var n=5;setInterval(function(){n=n<=1?5:n-1;var el=document.getElementById(\"lbl\");if(el)el.textContent=\"Checking VPN... next check: \"+n+\"s\";},1000);<\\/script></body></html>";
-
-        const _vpnWin = new BrowserWindow({
-          width: 460, height: 320, resizable: false, center: true, show: false,
-          title: 'Fleet Operations \u2014 VPN Required',
-          icon: require('./config/app-icon').getAppIconPath(),
-          frame: true, autoHideMenuBar: true,
-          webPreferences: { contextIsolation: true, nodeIntegration: false, devTools: false },
-        });
-        _vpnWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(_vpnHtml));
-        _vpnWin.once('ready-to-show', () => _vpnWin.show());
-
-        // Open Cisco Secure Client: intercept console-message from renderer (works with contextIsolation)
-        _vpnWin.webContents.on('console-message', (_e, _level, msg) => {
-          log.info('[vpn-gate] renderer msg: ' + msg.substring(0,80));
-          if (msg.includes('vpn-btn-open')) {
-            const { VPNUI_PATH } = require('./utils/vpn');
-            log.info('[vpn-gate] Launching Cisco Secure Client UI: ' + VPNUI_PATH);
-            try {
-              const _vpnUi = require('child_process').spawn(VPNUI_PATH, [], { detached: true, stdio: 'ignore', windowsHide: false });
-              _vpnUi.unref();
-            } catch (e) {
-              log.warn('[vpn-gate] Failed to launch vpnui: ' + e.message + ' — trying shell.openPath');
-              require('electron').shell.openPath(VPNUI_PATH);
-            }
-          }
-        });
-
-        // Poll vpncli every 5 s; auto-close + continue when connected
-        const _vpnPoll = setInterval(async () => {
-          const s = await checkVpnState();
-          log.info('[vpn-gate] Poll: ' + s.status);
-          if (s.connected) {
-            clearInterval(_vpnPoll);
-            if (!_vpnWin.isDestroyed()) _vpnWin.close();
-            resolve();
-          }
-        }, 5000);
-
-        // User closes window manually \u2192 quit rather than boot broken
-        _vpnWin.on('closed', () => {
-          clearInterval(_vpnPoll);
-          log.warn('[vpn-gate] Window closed by user \u2014 quitting');
-          app.quit();
-        });
-      });
-
-      } // end else: manual gate fallback
-      log.info('[vpn-gate] VPN connected \u2014 resuming startup');
+      log.warn('[vpn] Not connected at launch — auto-triggering connect in background (app opening anyway)');
+      ensureVpn(log.info).catch((e) => log.warn('[vpn] background ensureVpn failed: ' + e.message));
     }
+  } catch (e) {
+    // Never let a VPN error block startup.
+    log.warn('[vpn] gate skipped (non-fatal): ' + e.message);
   }
 
   // ── 5b. Shared ctx — one object, passed to every subsystem ───────────────
@@ -342,6 +286,20 @@ app.whenReady().then(async () => {
       // over hours in the same session (each 5-min tick spawning a new one
       // on top of incomplete previous ones). The guard below simply skips
       // this tick entirely if a renewal is already in progress.
+      // VPN keep-alive: if the Cisco tunnel dropped, auto-trigger a reconnect
+      // in the BACKGROUND (never blocks). Fast check; ensureVpn has its own
+      // lock so overlapping ticks are harmless. This is why "as soon as the
+      // app knows Cisco is off, it triggers it" holds continuously, not just
+      // at launch.
+      try {
+        const { checkVpnState, ensureVpn } = require('./utils/vpn');
+        const vpn = await checkVpnState();
+        if (!vpn.connected && vpn.status !== 'not-installed') {
+          log.warn('[vpn] heartbeat: tunnel is ' + vpn.status + ' — auto-triggering reconnect in background');
+          ensureVpn(log.info).catch((e) => log.warn('[vpn] heartbeat ensureVpn failed: ' + e.message));
+        }
+      } catch (e) { log.warn('[vpn] heartbeat check skipped: ' + e.message); }
+
       if (_midwayRenewalInFlight) {
         log.info('[midway] heartbeat: renewal already in flight, skipping this tick');
         return;
