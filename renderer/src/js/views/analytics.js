@@ -867,7 +867,10 @@ async function _aiFillRow(unitId, tr, onStatus) {
 
     let delayReason     = String(parsed.delayReason || '').trim();
     let escalationLevel = String(parsed.escalationLevel || '').trim().toUpperCase();
-    let summary         = _stripCosts(String(parsed.summary || '').trim()).slice(0, 1500);
+    // Cap generously — the detailed 7-bullet summaries (esp. dual-WO units) can
+    // run ~2000+ chars; the old 1500 cap chopped them mid-sentence. Matches the
+    // server MAX_LENGTHS.summary cap in src/ipc/long-dwell.js.
+    let summary         = _stripCosts(String(parsed.summary || '').trim()).slice(0, 4000);
 
     if (!DELAY_REASONS.includes(delayReason))     delayReason     = '';
     if (!ESCALATION_LEVELS.includes(escalationLevel)) escalationLevel = '';

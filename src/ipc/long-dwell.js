@@ -30,7 +30,12 @@ const ESCALATION_LEVELS = ['SEV5', 'SEV4', 'SEV3', 'SEV2']; // SEV2 = highest
 const MAX_LENGTHS = {
   equipmentId: 32,
   woKey:       128,
-  summary:     2048,
+  // Detailed 7-bullet summaries (Initial Issue / Vendor Rejection / Barrier /
+  // Actions / Repair Status / ETC / Follow-up), especially dual-WO units, can
+  // run ~2000+ chars. 2048 was clipping the longest ones; 4000 gives headroom
+  // while still bounding a runaway AI response. Matches the renderer cap in
+  // analytics.js _aiFillRow.
+  summary:     4000,
 };
 
 // Compound store key: one saved annotation per (unit, work order). A unit with
