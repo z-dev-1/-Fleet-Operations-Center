@@ -710,18 +710,22 @@ async function _autofillFallback(payload) {
     stopBtn.addEventListener('click', onStopClick);
   }
   try {
-    // Use the LIVE AI wizard (adaptive agent) — it reads the real AAP wizard
-    // each step and fills only the options that actually exist, instead of the
-    // old blind hardcoded-selector engine that broke whenever AAP changed.
-    // Stops at Review (autoSubmit:false); the user submits manually.
-    const result = await aap.runAdaptive({ ...payload, autoSubmit: false });
-    if (result && result.ok) {
-      toast.show('success', (result.message || 'Filled in AAP — review and click Submit.'), 6000);
+    // FIX (2026-07-23): was passing _unit.assetUrl (the asset's own
+    // detail page) here. aap_autofill_engine.js does not read equipment
+    // context from the URL at all -- it types payload.unit into an empty
+    // Equipment ID combobox on AAP's generic 'New Work Request' page.
+    // Opening assetUrl landed on the wrong page entirely (no such
+    // combobox there), which is why autofill opened 'the wrong URL'.
+    // The correct fixed entry point (same one runAdaptiveWR() uses) is:
+    const NEW_WR_URL = 'https://aap-na.corp.amazon.com/v2/page/891a81dc-538d-4f10-be93-441545840a24';
+    const result = await aap.autofill(NEW_WR_URL, payload);
+    if (result && result.ok === false) {
+      toast.show('error', 'AAP autofill stopped: ' + (result.message || 'unknown error') + ' \u2014 finish filling manually in the AAP window.', 7000);
     } else {
-      toast.show('error', 'AAP fill stopped: ' + ((result && (result.message || result.error)) || 'unknown error') + ' \u2014 finish filling manually in the AAP window.', 7000);
+      toast.show('success', (result && result.message) || 'AAP autofill complete \u2014 review before submitting.', 4000);
     }
   } catch (e) {
-    toast.show('error', 'AAP fill launch failed: ' + e.message);
+    toast.show('error', 'Autofill launch failed: ' + e.message);
   } finally {
     if (fbBtn) { fbBtn.disabled = false; fbBtn.textContent = fbBtnOriginalText; }
     if (stopBtn) { stopBtn.style.display = 'none'; stopBtn.removeEventListener('click', onStopClick); }
