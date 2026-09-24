@@ -565,15 +565,14 @@ async function _runAIReviewForGroup(kind, g) {
   if (!g.unavailRows.length) return fail('No units to review');
   try {
     const prompt = _buildAIPrompt(kind, g);
-    // Timeout guard: window.ai.ask() can hang indefinitely if the AI layer is
-    // busy or unreachable -- freezing the whole Daily Call view.
-    // FIX (2026-08-17): raised 25s -> 90s. The 25s cap was shorter than the AI
-    // layer's real response time (50-90s via the fleet-brain/WS transport), so
-    // "AI Review" timed out every time and showed "AI review failed". 90s
-    // matches the transport's own ORCHA_TIMEOUT_MS ceiling. The button shows a
-    // spinner while running, so the view isn't frozen — just waiting.
-    const _aiTimeout = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 90s')), 90000));
-    const result = await Promise.race([window.ai.ask(prompt), _aiTimeout]);
+    // Retry on timeout/transient failure: the AI layer occasionally times out
+    // or returns a transient error on a single group even when others succeed.
+    // Retrying JUST that group (short backoff) recovers it without re-running
+    // the whole review. onStatus surfaces the retry so the button shows it.
+    const result = await _askAIWithRetry(prompt, {
+      onStatus: (msg) => { if (typeof _aiReviewStatus === 'function') _aiReviewStatus(msg); },
+      label: g.label,
+    });
     if (!result || result.ok === false) return fail((result && result.error) || 'AI call failed');
     const text = result.text || '';
     const jm = text.match(/\{[\s\S]*\}/);
@@ -588,6 +587,38 @@ async function _runAIReviewForGroup(kind, g) {
   } catch (e) {
     return fail(e.message);
   }
+}
+
+// Progress callback set by the batch runner so per-group retries can surface
+// on the button; optional.
+let _aiReviewStatus = null;
+
+// Call window.ai.ask with a per-call timeout AND bounded retry on
+// timeout/transient failure. Returns the { ok, text } result, or throws the
+// last error after exhausting retries. Each attempt is independently timed out
+// (90s, matching the transport ceiling); between attempts it waits a short
+// backoff. A result with ok===false or a non-JSON body is NOT retried here
+// (that's a real AI answer, handled by the caller) — only timeouts/throws are.
+async function _askAIWithRetry(prompt, opts) {
+  const maxRetries = (opts && Number.isInteger(opts.maxRetries)) ? opts.maxRetries : 2;
+  const timeoutMs  = (opts && opts.timeoutMs) || 90000;
+  const label      = (opts && opts.label) || '';
+  let lastErr = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const _timeout = new Promise((_, rej) =>
+        setTimeout(() => rej(new Error('AI timeout after ' + Math.round(timeoutMs / 1000) + 's')), timeoutMs));
+      return await Promise.race([window.ai.ask(prompt), _timeout]);
+    } catch (e) {
+      lastErr = e;
+      if (attempt < maxRetries) {
+        if (opts && opts.onStatus) opts.onStatus('retry ' + (attempt + 1) + '/' + maxRetries + (label ? ' · ' + label : ''));
+        // Short backoff before retrying this same group (400ms, 800ms).
+        await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt)));
+      }
+    }
+  }
+  throw lastErr || new Error('AI call failed after retries');
 }
 
 // Shared by _renderGroupRow and _buildTsv so the "Copy for SharePoint"
@@ -1049,9 +1080,14 @@ export function init(container) {
     const btn = e.target;
     const orig = btn.textContent;
     btn.disabled = true;
+    let _prog = '';
+    // Surface per-group retry status on the button (e.g. "retry 1/2 · ABE40").
+    _aiReviewStatus = (msg) => { btn.textContent = `🤖 ${_prog} — ${msg}`; };
     await _runAIReviewAll((done, total) => {
-      btn.textContent = total > 0 ? `🤖 Reviewing ${done}/${total}...` : '🤖 Reviewing...';
+      _prog = total > 0 ? `Reviewing ${done}/${total}...` : 'Reviewing...';
+      btn.textContent = `🤖 ${_prog}`;
     });
+    _aiReviewStatus = null;
     btn.disabled = false;
     btn.textContent = orig;
     _update(state.slice('fleet').rows || []); // re-render with AI findings merged in
@@ -1142,9 +1178,19 @@ function _wbrSet(siteKey, field, val) {
   try { localStorage.setItem(_wbrLsKey(siteKey, field), val); } catch (e) {}
 }
 
+// Apply the active scope to a row set: when scope tokens are set, keep only
+// rows whose domicile OR operator matches a token. Same scope box drives both
+// the Daily Call tables and the WBR, so "ABE40, TUZR" narrows the WBR to rows
+// in ABE40 or operated by TUZR. No scope -> all rows.
+function _scopeRows(rows) {
+  if (!_scopeTokens.length) return rows || [];
+  const set = new Set(_scopeTokens);
+  return (rows || []).filter(r => set.has(_normTok(r.domicileSite)) || set.has(_normTok(r.operator)));
+}
+
 function _getWBRSites(rows) {
   const siteMap = {};
-  rows.forEach(r => {
+  _scopeRows(rows).forEach(r => {
     if (!(r.lifecycleState || '').toLowerCase().includes('unavail')) return;
     const op = (r.operator || '').toUpperCase();
     const site = (r.domicileSite || '').toUpperCase();
@@ -1238,19 +1284,18 @@ ${unitLines}
 RESPOND WITH JSON ONLY:
 {"bridge": "your field level bridge text", "actions": "your FAS field actions text"}`;
 
-      // Retry once on failure (first call after boot often fails while Orcha warms up)
-      let raw = null;
-      for (let attempt = 0; attempt < 2 && !raw; attempt++) {
-        try {
-          const _timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('WBR AI timeout')), 90000));
-          raw = await Promise.race([window.ai.ask(prompt), _timeout]);
-        } catch (retryErr) {
-          if (attempt === 0) {
-            console.warn('[WBR] Attempt 1 failed for', s.key, '— retrying:', retryErr.message);
-            await new Promise(r => setTimeout(r, 2000)); // brief pause before retry
-          }
-        }
+      // Retry on timeout/transient failure for THIS site (shared helper: 2
+      // retries, short backoff), so one flaky site recovers without redoing all.
+      let res = null;
+      try {
+        res = await _askAIWithRetry(prompt, {
+          label: s.key,
+          onStatus: (msg) => { if (progressCb) progressCb(done, sites.length, msg); },
+        });
+      } catch (retryErr) {
+        console.warn('[WBR] AI failed for', s.key, 'after retries:', retryErr.message);
       }
+      const raw = res && res.text ? res.text : (typeof res === 'string' ? res : '');
       const jm = (raw || '').match(/\{[\s\S]*\}/);
       if (jm) {
         const parsed = JSON.parse(jm[0]);
