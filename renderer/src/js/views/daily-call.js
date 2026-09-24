@@ -1188,6 +1188,56 @@ function _scopeRows(rows) {
   return (rows || []).filter(r => set.has(_normTok(r.domicileSite)) || set.has(_normTok(r.operator)));
 }
 
+// Classify a vendor as an OEM/dealer (unit physically AT a dealer) vs an
+// onsite/mobile vendor (repaired at the Amazon site). Best-effort from the
+// vendor name; the AI can refine from the timeline, and the user validates.
+const _OEM_VENDOR_RE = /volvo|kenworth|peterbilt|paccar|freightliner|daimler|international|mack|cei|dealer|asist/i;
+const _ONSITE_VENDOR_RE = /amerit|\bta\b|travel\s*centers|cox|velociti|fleetnet|mobile|onsite|road\s*ready/i;
+function _wbrLocationClass(vendor) {
+  const v = String(vendor || '').trim();
+  if (!v || v === '--' || /unassigned/i.test(v)) return 'unassigned';
+  if (_OEM_VENDOR_RE.test(v)) return 'oem';
+  if (_ONSITE_VENDOR_RE.test(v)) return 'onsite';
+  return 'other';
+}
+
+// Deterministic hard numbers for a site's down units — the "red" required
+// metrics. Computed in CODE (not guessed by AI) so counts are accurate; the AI
+// then writes the narrative around these verified numbers and the user
+// validates. Returns a compact text block to inject into the bridge prompt.
+function _wbrStats(units) {
+  const down = units.length;
+  const byFuel = {};
+  const byVendor = {};
+  let onsite = 0, oem = 0, unassigned = 0, otherLoc = 0;
+  const pmUnits = [];
+  for (const u of units) {
+    const fuel = (u.fuelType || 'Unknown').trim() || 'Unknown';
+    byFuel[fuel] = (byFuel[fuel] || 0) + 1;
+    const v = (u.vendor && u.vendor.trim() && u.vendor !== '--') ? u.vendor.trim() : 'Unassigned';
+    byVendor[v] = (byVendor[v] || 0) + 1;
+    const loc = _wbrLocationClass(u.vendor);
+    if (loc === 'oem') oem++;
+    else if (loc === 'onsite') onsite++;
+    else if (loc === 'unassigned') unassigned++;
+    else otherLoc++;
+    if (/\bpm\b|prevent? ?maintenance|inspection|pm-?[abx]/i.test((u.lifecycleReason || '') + ' ' + (u.issueDetails || ''))) {
+      pmUnits.push(u.equipmentId);
+    }
+  }
+  const fuelStr = Object.entries(byFuel).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`).join(', ');
+  const vendorStr = Object.entries(byVendor).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k}: ${n}`).join(', ');
+  return [
+    `VERIFIED COUNTS (use these EXACT numbers — do not recount):`,
+    `- Assets down: ${down}`,
+    `- Down by fuel type: ${fuelStr || 'n/a'}`,
+    `- Location split (best-effort by vendor): onsite/mobile ${onsite}, at OEM/dealer ${oem}` +
+      (unassigned ? `, unassigned ${unassigned}` : '') + (otherLoc ? `, other/unknown ${otherLoc}` : ''),
+    `- Units per vendor/OEM: ${vendorStr || 'n/a'}`,
+    `- Units flagged PM/inspection-related: ${pmUnits.length}${pmUnits.length ? ' (' + pmUnits.slice(0, 20).join(', ') + ')' : ''}`,
+  ].join('\n');
+}
+
 function _getWBRSites(rows) {
   const siteMap = {};
   _scopeRows(rows).forEach(r => {
@@ -1260,20 +1310,36 @@ async function _generateWBR(rows, progressCb) {
     try {
       const unitLines = s.units.map(u => {
         const days = u.workDuration || '?';
-        const tl = (u.repairTimeline || '').split('\n').filter(Boolean).slice(-2).join(' | ');
-        return `${u.equipmentId}: vendor=${u.vendor || 'none'}, down=${days}, reason=${u.lifecycleReason || '?'}, issue=${(u.issueDetails || u.issueSummary || '').slice(0, 100)}, recent timeline: ${tl || 'none'}`;
+        const tl = (u.repairTimeline || '').split('\n').filter(Boolean).slice(-3).join(' | ');
+        const loc = _wbrLocationClass(u.vendor);
+        const locLabel = loc === 'oem' ? 'AT-OEM/DEALER' : loc === 'onsite' ? 'ONSITE/MOBILE' : loc === 'unassigned' ? 'UNASSIGNED' : 'LOC-UNKNOWN';
+        return `${u.equipmentId}: fuel=${u.fuelType || '?'}, vendor=${u.vendor || 'none'} [${locLabel}], down=${days}, reason=${u.lifecycleReason || '?'}, issue=${(u.issueDetails || u.issueSummary || '').slice(0, 120)}, recent timeline: ${tl || 'none'}`;
       }).join('\n');
+
+      const stats = _wbrStats(s.units);
 
       const prompt = `You are a fleet operations FAS writing a Weekly Bridge Report (WBR) for site ${s.key}.
 Write TWO fields — a Field Level Bridge (situation summary) and FAS Field Actions (what you're doing about it).
 
+${stats}
+
+The Field Level Bridge MUST cover ALL of the following required items (this is a hard reporting rule). Use the VERIFIED COUNTS above for every number — do NOT recount or estimate:
+1. Number of assets down (use verified count).
+2. Down by fuel type (use verified counts — e.g. "X CNG, Y Diesel").
+3. How many are onsite/mobile vs at OEM/dealer (use the location split; the per-unit lines are tagged [ONSITE/MOBILE] / [AT-OEM/DEALER]).
+4. Number of units at each specific OEM/vendor (Volvo, Kenworth, Peterbilt, CEI, etc. — use the per-vendor counts).
+5. Estimate-delay specifics: for units stuck on estimates, state whether AMAZON or the VENDOR is causing the delay — infer ONLY from the timeline text; if the cause is not stated, write "cause not documented — verify".
+6. List each OOS (out-of-service) unit with its ETC where available; if no ETC is in the timeline, write "no ETC — pending".
+7. Overdue PMs: how many and how many days past due if the timeline states it; and whether AMAZON or the PARTNER is the root cause. If days-past-due or root cause is not in the data, say "days/root cause not documented — verify".
+
 RULES:
-- Be specific: include unit IDs, vendor names, days down, key blockers, ETAs.
-- Bridge: status overview (how many down out of total fleet at this site, % uptime, why they're down, what stage each is at, key delays/blockers). Group by theme when possible.
+- Ground EVERY number in the VERIFIED COUNTS block. The narrative (who caused a delay, ETCs, PM days-past-due) comes ONLY from the per-unit timelines below.
+- Do NOT invent or infer beyond what the timelines say. Where the data is missing, explicitly flag it as "not documented — verify" rather than guessing. The FAS will validate before submitting.
+- HISTORICAL NOTE: this tool has only current-week data — it does NOT store prior-week or T6W (trailing-6-week) snapshots. Do NOT fabricate last-week or T6W numbers. If prior-week comparison is expected, add one line: "Prior-week / T6W comparison not available from tool data — enter manually."
+- Be specific: include unit IDs, vendor names, days down, key blockers, ETCs.
 - Actions: what SPECIFIC actions you took or are taking TODAY. Write like you're reporting to leadership what you personally did this morning.
   * Name who you contacted (dealer name, vendor FM name, carrier, tech)
-  * Say what you specifically asked for or did
-  * Reference unit IDs when unit-specific
+  * Say what you specifically asked for or did; reference unit IDs when unit-specific
   * Include outcomes if you have them ("estimate approved", "ETC confirmed", "parts arriving today")
   * Use action verbs: Contacted, Escalated, Reached out to, Spoke with, Confirmed, Submitted, Created WO, Scheduled tow, Pushed for, Coordinating
 
@@ -1281,20 +1347,16 @@ RULES:
   - "Contacted Cox FM, tech to finish lift gate PMs today and getting started on PM-Bs"
   - "Reached out to Kenworth dealer for progress updates on 521073 (27 days, estimate approved 8/10)"
   - "Escalated pending estimates (2) to HVE team in AAP"
-  - "Confirming tows to site for units completing offsite repair"
   - "Submitted vendor coaching for Amerit on unit 59008 due to SLA breach; Asana task created"
-  - "Follow up with Valley Peterbilt for ETC; expedite 520079 estimate approval; set up tow for 520072"
-  - "5 units downed DoD all pending Amerit diagnostics — spoke with techs to prioritize"
 
 - Write like a professional fleet manager in 1st person. Direct and concise.
-- Do NOT invent information. Only use what's in the unit data below.
 
 SITE: ${s.key} (${s.units.length} units currently down)
 UNIT DATA:
 ${unitLines}
 
 RESPOND WITH JSON ONLY:
-{"bridge": "your field level bridge text", "actions": "your FAS field actions text"}`;
+{"bridge": "your field level bridge text covering all 7 required items", "actions": "your FAS field actions text"}`;
 
       // Retry on timeout/transient failure for THIS site (shared helper: 2
       // retries, short backoff), so one flaky site recovers without redoing all.
