@@ -55,6 +55,52 @@ function _splitName(full) {
   return { first: parts.slice(0, -1).join(' '), last: parts[parts.length - 1] };
 }
 
+// Assemble the FAS pickup-confirmation Issue Details block. `complaint` is the
+// text for the "Compliant:" line (AI-synthesized when available, else raw
+// issue details). profile/domicile may be partial/empty — every field degrades
+// gracefully so the block is always well-formed for the user to edit.
+function _buildStructuredIssue(unit, profile, domicile, complaint) {
+  profile = profile || {};
+  const { first, last } = _splitName(profile.name);
+  const pocName = String(profile.name || '').trim() || (first + (last ? ' ' + last : '')).trim();
+  const locationAddr = domicile
+    ? [String(domicile.street || '').trim(),
+       [String(domicile.city || '').trim(), String(domicile.state || '').trim()].filter(Boolean).join(', '),
+       String(domicile.zip || '').trim()].filter(Boolean).join(', ')
+    : String((unit && unit.domicileSite) || '').trim();
+  return [
+    'FAS HAS CONFIRMED WITH POC THAT UNIT IS READY FOR PICK UP',
+    'Amazon POC: ' + (pocName || ''),
+    'Phone number: ' + (profile.phone || ''),
+    'Email: ' + (profile.email || ''),
+    'Location: ' + (locationAddr || '(domicile address for unit)'),
+    'Unit: ' + ((unit && (unit.equipmentId || unit.id)) || ''),
+    'Key: ignition',
+    'Gate code: none',
+    'Unit ready: YES',
+    'Unit Drive-able: NO',
+    'Compliant: ' + String(complaint || '').trim(),
+  ].join('\n');
+}
+
+// Minimal defaults used when contact/AI resolution is slow or fails. Still
+// produces the structured Issue Details block (from the user profile +
+// whatever raw issue text the unit has) so the user never sees a blank/
+// unstructured field — they just fill City/State + Dealer and edit as needed.
+function _minimalDefaults(unit) {
+  let profile = {};
+  try { profile = JSON.parse(localStorage.getItem('fleet_user_profile') || '{}'); } catch (_) {}
+  const { first, last } = _splitName(profile.name);
+  const rawComplaint = (unit && (unit.issueDetails || unit.issueSummary)) || '';
+  return {
+    cityState: '', dealer: '',
+    firstName: first, lastName: last,
+    phone: profile.phone || '', email: profile.email || '',
+    issue: _buildStructuredIssue(unit, profile, null, rawComplaint),
+    date: new Date().toISOString().slice(0, 10), ackCheck: true,
+  };
+}
+
 async function _resolveDefaults(unit) {
   let profile = {};
   try { profile = JSON.parse(localStorage.getItem('fleet_user_profile') || '{}'); } catch (_) {}
@@ -152,6 +198,11 @@ async function _resolveDefaults(unit) {
   }
 
 
+  // Structured FAS pickup-confirmation Issue Details. The "Compliant:" line
+  // uses the AI-synthesized issue (folds in the CEL/complaint, the prior
+  // vendor's out-of-scope rejection, and shared diagnostic notes).
+  const structuredIssue = _buildStructuredIssue(unit, profile, domicile, issue);
+
   return {
     cityState: domicile
       ? [String(domicile.city || '').trim(), String(domicile.state || '').trim()]
@@ -162,7 +213,7 @@ async function _resolveDefaults(unit) {
     lastName:  last,
     phone:     profile.phone || '',
     email:     profile.email || '',
-    issue,
+    issue:     structuredIssue,
     date:      new Date().toISOString().slice(0, 10),
     ackCheck:  true,
   };
@@ -228,7 +279,7 @@ function _buildHTML(unit, vendorKey, d) {
 
     <div class="wr-section">
       <div class="wr-section__title">Issue Details</div>
-      <textarea id="dwo-issue" class="settings__textarea" rows="3"
+      <textarea id="dwo-issue" class="settings__textarea" rows="13"
         placeholder="Full defect / complaint details...">${_esc(d.issue)}</textarea>
     </div>
 
@@ -340,12 +391,7 @@ export function open(unit, vendorKey, onSubmit) {
     if (_settled) return;
     _settled = true;
     console.warn('[dealer-wo-modal] _resolveDefaults slow — rendering with minimal defaults');
-    _renderWith({
-      cityState: '', dealer: '',
-      firstName: '', lastName: '', phone: '', email: '',
-      issue: unit.issueDetails || unit.issueSummary || '',
-      date: new Date().toISOString().slice(0, 10), ackCheck: true,
-    });
+    _renderWith(_minimalDefaults(unit));
   }, 6000);
 
   Promise.resolve()
@@ -361,12 +407,7 @@ export function open(unit, vendorKey, onSubmit) {
       _settled = true;
       clearTimeout(_fallbackTimer);
       console.error('[dealer-wo-modal] _resolveDefaults failed:', e);
-      _renderWith({
-        cityState: '', dealer: '',
-        firstName: '', lastName: '', phone: '', email: '',
-        issue: unit.issueDetails || unit.issueSummary || '',
-        date: new Date().toISOString().slice(0, 10), ackCheck: true,
-      });
+      _renderWith(_minimalDefaults(unit));
     });
 }
 
