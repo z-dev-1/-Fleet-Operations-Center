@@ -799,6 +799,11 @@ function _viewHtml() {
       #view-daily-call .dc-ai-quote { font-size: 10px; opacity: .7; font-style: italic; margin: 2px 0 4px 18px; }
       #view-daily-call .dc-ai-timestamp { font-size: 9px; opacity: .5; margin-top: 4px; }
       #view-daily-call #dc-ai-review[disabled] { opacity: .6; cursor: wait; }
+      #view-daily-call .dc-scope-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+      #view-daily-call .dc-scope-label { font-size: 12px; color: var(--mut, #888); white-space: nowrap; }
+      #view-daily-call .dc-scope-input { flex: 1 1 280px; min-width: 200px; min-height: 30px; max-height: 90px; box-sizing: border-box; resize: vertical; font-size: 12px; font-family: inherit; background: var(--bg2, #1a1a2e); color: var(--fg, #eee); border: 1px solid var(--border, #444); border-radius: 4px; padding: 5px 7px; }
+      #view-daily-call .dc-scope-active { color: #58a6ff; font-weight: 600; }
+      #view-daily-call .dc-scope-notfound { color: #f0a800; }
     </style>
     <div class="an-header">
       <div class="an-header__left">
@@ -814,14 +819,21 @@ function _viewHtml() {
       </div>
     </div>
     <div class="an-body">
+      <div class="dc-scope-row">
+        <label class="dc-scope-label" for="dc-scope">Scope to domicile / SCAC (blank = all):</label>
+        <textarea id="dc-scope" class="dc-scope-input" rows="1" placeholder="e.g. ABE40, TUZR — each becomes its own section"></textarea>
+        <button id="dc-scope-apply" class="detail-panel__btn detail-panel__btn--secondary" style="font-size:11px;">🎯 Scope</button>
+        <button id="dc-scope-clear" class="detail-panel__btn detail-panel__btn--secondary" style="font-size:11px;">✕ Clear</button>
+        <span id="dc-scope-note" style="font-size:11px;"></span>
+      </div>
       <div class="dc-toggle-row">
         <label><input type="checkbox" id="dc-bottom10-toggle" /> Show bottom 10 only (default: show all sites/SCACs with unavailable units)</label>
       </div>
 
-      <div class="dc-section-title">Bottom by Domicile</div>
+      <div class="dc-section-title" id="dc-site-title">Bottom by Domicile</div>
       <div id="dc-site-table"></div>
 
-      <div class="dc-section-title">Bottom by SCAC</div>
+      <div class="dc-section-title" id="dc-scac-title">Bottom by SCAC</div>
       <div id="dc-scac-table"></div>
 
       <div class="dc-section-title" style="margin-top:20px;">WBR — Weekly Bridge Report</div>
@@ -839,10 +851,63 @@ let _siteGroups = [];
 let _scacGroups = [];
 let _showBottom10 = false;
 
+// SCOPE MODE: user types domicile and/or operator (SCAC) tokens (e.g.
+// "ABE40, TUZR"). Each token becomes its own group — a domicile token yields
+// that domicile's group, an operator token yields that operator's group — so
+// you can pull the full ABE40 picture AND the full TUZR picture side by side,
+// even when TUZR lives inside ABE40. Empty = normal (all groups) view.
+let _scopeTokens   = [];   // normalized tokens, in entered order (deduped)
+let _scopeNotFound = [];   // tokens not matching any domicile or operator
+
+function _normTok(s) { return String(s || '').trim().toUpperCase(); }
+
+// Parse the scope box (newline / comma / space / semicolon separated) into a
+// deduped, first-seen-ordered list of normalized tokens.
+function _parseScope(text) {
+  const seen = new Set();
+  const out = [];
+  for (const t of String(text || '').split(/[\s,;]+/)) {
+    const tok = _normTok(t);
+    if (!tok || seen.has(tok)) continue;
+    seen.add(tok);
+    out.push(tok);
+  }
+  return out;
+}
+
 function _update(rows) {
   if (!_el) return;
-  _siteGroups = _buildGroups(rows, r => r.domicileSite || '', k => k);
-  _scacGroups = _buildGroups(rows, r => (r.operator || '').toUpperCase(), k => k);
+
+  // SCOPE MODE: build only the requested domicile/operator groups (each token
+  // its own group). Otherwise build the full all-groups view.
+  if (_scopeTokens.length) {
+    const domSet = new Set((rows || []).map(r => _normTok(r.domicileSite)).filter(Boolean));
+    const opSet  = new Set((rows || []).map(r => _normTok(r.operator)).filter(Boolean));
+    _scopeNotFound = _scopeTokens.filter(t => !domSet.has(t) && !opSet.has(t));
+
+    const siteGroups = [];
+    const scacGroups = [];
+    for (const tok of _scopeTokens) {
+      if (domSet.has(tok)) {
+        // Domicile token -> that domicile's group (all its units).
+        const g = _buildGroups(rows.filter(r => _normTok(r.domicileSite) === tok),
+          r => r.domicileSite || '', k => k)[0];
+        if (g) siteGroups.push(g);
+      }
+      if (opSet.has(tok)) {
+        // Operator/SCAC token -> that operator's group (all its units, any domicile).
+        const g = _buildGroups(rows.filter(r => _normTok(r.operator) === tok),
+          r => (r.operator || '').toUpperCase(), k => k)[0];
+        if (g) scacGroups.push(g);
+      }
+    }
+    _siteGroups = siteGroups;
+    _scacGroups = scacGroups;
+  } else {
+    _scopeNotFound = [];
+    _siteGroups = _buildGroups(rows, r => r.domicileSite || '', k => k);
+    _scacGroups = _buildGroups(rows, r => (r.operator || '').toUpperCase(), k => k);
+  }
 
   // Restore any AI reviews already run today for these groups (avoids
   // burning another AI call on every refresh for unchanged data).
@@ -855,13 +920,34 @@ function _update(rows) {
     if (cached) _aiReview[_aiKey('scac', g.key)] = cached;
   }
 
+  const scoped = _scopeTokens.length > 0;
+  // In scope mode, never clip to bottom-10 — the user explicitly chose these.
+  const bottom10 = scoped ? false : _showBottom10;
+
   const siteEl = _el.querySelector('#dc-site-table');
   const scacEl = _el.querySelector('#dc-scac-table');
-  if (siteEl) siteEl.innerHTML = _renderTable('site', _siteGroups, _showBottom10);
-  if (scacEl) scacEl.innerHTML = _renderTable('scac', _scacGroups, _showBottom10);
+  if (siteEl) siteEl.innerHTML = _renderTable('site', _siteGroups, bottom10);
+  if (scacEl) scacEl.innerHTML = _renderTable('scac', _scacGroups, bottom10);
 
   _wireEditableFields(siteEl, 'site');
   _wireEditableFields(scacEl, 'scac');
+
+  // Update section titles + scope note to reflect scope mode.
+  const siteTitle = _el.querySelector('#dc-site-title');
+  const scacTitle = _el.querySelector('#dc-scac-title');
+  if (siteTitle) siteTitle.textContent = scoped ? 'Scoped — Domicile' : 'Bottom by Domicile';
+  if (scacTitle) scacTitle.textContent = scoped ? 'Scoped — SCAC / Operator' : 'Bottom by SCAC';
+  const noteEl = _el.querySelector('#dc-scope-note');
+  if (noteEl) {
+    if (scoped) {
+      const shown = _siteGroups.length + _scacGroups.length;
+      noteEl.innerHTML = '<span class="dc-scope-active">Scoped to ' + _scopeTokens.length +
+        ' token(s) · ' + shown + ' group(s)</span>' +
+        (_scopeNotFound.length ? ' <span class="dc-scope-notfound">⚠ not found: ' + _safe(_scopeNotFound.join(', ')) + '</span>' : '');
+    } else {
+      noteEl.textContent = '';
+    }
+  }
 
   // WBR table (renders from localStorage; Generate fills it via AI)
   _renderWBR(rows);
@@ -898,8 +984,12 @@ async function _copyTable(kind) {
 }
 
 async function _runAIReviewAll(progressCb) {
-  const siteVisible = _showBottom10 ? _siteGroups.slice(0, 10) : _siteGroups;
-  const scacVisible = _showBottom10 ? _scacGroups.slice(0, 10) : _scacGroups;
+  // When scoped, _siteGroups/_scacGroups already hold ONLY the requested
+  // domicile/operator groups, so review all of them (no bottom-10 clip).
+  const scoped = _scopeTokens.length > 0;
+  const clip = _showBottom10 && !scoped;
+  const siteVisible = clip ? _siteGroups.slice(0, 10) : _siteGroups;
+  const scacVisible = clip ? _scacGroups.slice(0, 10) : _scacGroups;
   const jobs = [...siteVisible.map(g => ({ kind: 'site', g })), ...scacVisible.map(g => ({ kind: 'scac', g }))];
   let done = 0;
   for (const { kind, g } of jobs) {
@@ -924,6 +1014,34 @@ export function init(container) {
   });
 
   _el.querySelector('#dc-refresh').addEventListener('click', () => {
+    _update(state.slice('fleet').rows || []);
+  });
+
+  // Scope controls: type domicile and/or operator tokens; each becomes its own
+  // scoped group. "Scope" applies, "Clear" returns to the full view.
+  const scopeInput = _el.querySelector('#dc-scope');
+  const applyScope = () => {
+    const toks = _parseScope(scopeInput ? scopeInput.value : '');
+    _scopeTokens = toks;
+    _update(state.slice('fleet').rows || []);
+    if (toks.length) {
+      const found = toks.length - _scopeNotFound.length;
+      bus.emit('ui:toast', { type: _scopeNotFound.length ? 'warning' : 'success',
+        message: 'Scoped to ' + found + '/' + toks.length + ' token(s)' +
+          (_scopeNotFound.length ? ' — not found: ' + _scopeNotFound.join(', ') : ''), duration: 3000 });
+    }
+  };
+  if (scopeInput) scopeInput.addEventListener('keydown', (ev) => {
+    // Ctrl/Cmd+Enter applies (plain Enter inserts a newline in the textarea).
+    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') { ev.preventDefault(); applyScope(); }
+  });
+  const scopeApplyBtn = _el.querySelector('#dc-scope-apply');
+  if (scopeApplyBtn) scopeApplyBtn.addEventListener('click', applyScope);
+  const scopeClearBtn = _el.querySelector('#dc-scope-clear');
+  if (scopeClearBtn) scopeClearBtn.addEventListener('click', () => {
+    _scopeTokens = [];
+    _scopeNotFound = [];
+    if (scopeInput) scopeInput.value = '';
     _update(state.slice('fleet').rows || []);
   });
 
