@@ -1217,6 +1217,7 @@ function _renderWBR(rows) {
       <th style="min-width:100px;white-space:nowrap;">Site</th>
       <th style="min-width:250px;">Field Level Bridge</th>
       <th style="min-width:250px;">FAS Field Actions</th>
+      <th style="min-width:70px;white-space:nowrap;">Copy</th>
     </tr></thead><tbody>`;
 
   sites.forEach(s => {
@@ -1226,6 +1227,7 @@ function _renderWBR(rows) {
       <td style="font-weight:700;font-size:10px;white-space:nowrap;vertical-align:top;">${_safe(s.key)}<br><span style="font-weight:400;color:var(--mut);font-size:9px;">${s.units.length} down</span></td>
       <td><textarea class="dc-wbr-cell" data-wbr-site="${_safe(s.key)}" data-wbr-field="bridge" rows="4" style="width:100%;font-size:10px;background:var(--el);border:1px solid var(--bdr);border-radius:4px;padding:6px;color:var(--txt);resize:vertical;font-family:inherit;">${_safe(bridge)}</textarea></td>
       <td><textarea class="dc-wbr-cell" data-wbr-site="${_safe(s.key)}" data-wbr-field="actions" rows="4" style="width:100%;font-size:10px;background:var(--el);border:1px solid var(--bdr);border-radius:4px;padding:6px;color:var(--txt);resize:vertical;font-family:inherit;">${_safe(actions)}</textarea></td>
+      <td style="vertical-align:top;"><button class="dc-wbr-copy-site detail-panel__btn detail-panel__btn--secondary" data-wbr-site="${_safe(s.key)}" title="Copy this site's Bridge + Actions — pastes into both columns" style="font-size:10px;white-space:nowrap;">📋 Copy row</button></td>
     </tr>`;
   });
 
@@ -1236,6 +1238,16 @@ function _renderWBR(rows) {
   el.querySelectorAll('.dc-wbr-cell').forEach(ta => {
     ta.addEventListener('input', () => {
       _wbrSet(ta.dataset.wbrSite, ta.dataset.wbrField, ta.value);
+    });
+  });
+
+  // Per-site copy: Bridge + Actions as two tab-separated cells for pasting.
+  el.querySelectorAll('.dc-wbr-copy-site').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _copyWBRSite(btn.dataset.wbrSite);
+      const orig = btn.textContent;
+      btn.textContent = '✓ Copied';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
     });
   });
 }
@@ -1311,21 +1323,53 @@ RESPOND WITH JSON ONLY:
   if (progressCb) progressCb(done, sites.length);
 }
 
+// Quote a value for a spreadsheet TSV cell. A cell containing a newline, tab,
+// or double-quote MUST be wrapped in double-quotes (and inner quotes doubled)
+// or Excel/Sheets will split it across rows/columns and misalign everything.
+// This is what makes a multi-line Bridge/Actions paste land in ONE cell.
+function _tsvCell(v) {
+  const s = String(v == null ? '' : v);
+  if (/[\t\n"\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+// Copy to clipboard with a textarea fallback.
+function _copyToClipboard(text) {
+  try { navigator.clipboard.writeText(text); return; } catch (e) { /* fall through */ }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } catch (_) {}
+  document.body.removeChild(ta);
+}
+
+// Read a site's CURRENT Bridge/Actions from the live textareas if present
+// (so unsaved edits are copied too), falling back to the saved store.
+function _wbrLive(siteKey, field) {
+  if (_el) {
+    const ta = _el.querySelector('.dc-wbr-cell[data-wbr-site="' + (window.CSS && CSS.escape ? CSS.escape(siteKey) : siteKey) + '"][data-wbr-field="' + field + '"]');
+    if (ta) return ta.value;
+  }
+  return _wbrGet(siteKey, field);
+}
+
+// Copy ONE site's Bridge + Actions as two tab-separated, spreadsheet-safe
+// cells (Bridge<TAB>Actions). Paste drops them straight into the two columns
+// for that site's row, preserving the multi-line text within each cell.
+function _copyWBRSite(siteKey) {
+  const bridge  = _wbrLive(siteKey, 'bridge');
+  const actions = _wbrLive(siteKey, 'actions');
+  _copyToClipboard(_tsvCell(bridge) + '\t' + _tsvCell(actions));
+}
+
 function _copyWBR() {
   const rows = state.slice('fleet').rows || [];
   const sites = _getWBRSites(rows);
-  const tsv = sites.map(s => {
-    const bridge = _wbrGet(s.key, 'bridge').replace(/\t/g, ' ').replace(/\n/g, ' ');
-    const actions = _wbrGet(s.key, 'actions').replace(/\t/g, ' ').replace(/\n/g, ' ');
-    return s.key + '\t' + bridge + '\t' + actions;
-  }).join('\n');
-  const header = 'Site\tField Level Bridge\tFAS Field Actions\n';
-  try { navigator.clipboard.writeText(header + tsv); } catch (e) {
-    const ta = document.createElement('textarea');
-    ta.value = header + tsv;
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-  }
+  // Multi-line cells are now properly QUOTED (not collapsed to spaces) so each
+  // Bridge/Actions block pastes into a single cell in the correct column.
+  const lines = sites.map(s =>
+    [_tsvCell(s.key), _tsvCell(_wbrLive(s.key, 'bridge')), _tsvCell(_wbrLive(s.key, 'actions'))].join('\t'));
+  const header = ['Site', 'Field Level Bridge', 'FAS Field Actions'].join('\t');
+  _copyToClipboard(header + '\n' + lines.join('\n'));
 }
