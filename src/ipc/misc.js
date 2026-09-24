@@ -725,6 +725,18 @@ function registerMiscIPC(ctx) {
     return getAllHistory();
   });
 
+  // Morning briefing — manual regenerate (bypasses the once-per-day guard).
+  // Result is pushed back via the normal orcha:morning-briefing channel.
+  handle('briefing:refresh', async () => {
+    try {
+      const briefing = require('../orcha/briefing');
+      await briefing.refresh(send);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  });
+
   // Offline queue
   handle('offline:queue', async (_e, equipmentId, rawText) => {
     const { queueTimelineEntry } = require('../orcha/offline');

@@ -67,7 +67,18 @@ function _renderTab() {
 function _renderAlerts() {
   const raw = state.get('alerts');
   const alerts = Array.isArray(raw) ? raw : (raw?.alerts || []);
-  const briefingHtml = _lastBriefing ? '<div class="nx-card" style="margin-bottom:12px;border-left:3px solid var(--nx-accent,#f0a800);background:rgba(240,168,0,0.04)"><div style="font-size:10px;color:var(--nx-text3);margin-bottom:4px">MORNING BRIEFING</div><div style="font-size:11px;color:var(--nx-text);white-space:pre-line">' + _esc(_lastBriefing.text) + '</div></div>' : '';
+  const _brief = _lastBriefing;
+  const briefingHtml =
+    '<div class="nx-card" style="margin-bottom:12px;border-left:3px solid var(--nx-accent,#f0a800);background:rgba(240,168,0,0.04)">' +
+      '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
+        '<span style="font-size:10px;color:var(--nx-text3)">MORNING BRIEFING</span>' +
+        (_brief && _brief.generatedBy === 'ai' ? '<span style="font-size:9px;color:var(--nx-purple,#d2a8ff)">🧠 AI</span>' : '') +
+        '<button id="nx-brief-refresh" title="Regenerate briefing" style="margin-left:auto;background:none;border:none;color:var(--nx-text3);cursor:pointer;font-size:12px;padding:0 2px">↻</button>' +
+      '</div>' +
+      '<div style="font-size:11px;color:var(--nx-text);white-space:pre-line">' +
+        (_brief && _brief.text ? _esc(_brief.text) : '<span style="color:var(--nx-text3);font-style:italic">No briefing yet — click ↻ to generate.</span>') +
+      '</div>' +
+    '</div>';
   if (!Array.isArray(alerts) || alerts.length === 0) return briefingHtml + '<div class="nx-empty">No alerts — fleet is healthy</div>';
   return briefingHtml + alerts.slice(0, 20).map(a => `
     <div class="nx-card" style="margin-bottom:8px;border-left:3px solid ${a.severity === 'critical' ? 'var(--nx-red)' : a.severity === 'warning' ? 'var(--nx-orange)' : 'var(--nx-accent)'}">
@@ -186,6 +197,24 @@ function _wireEvents() {
   const closeBtn = document.getElementById('nx-sb-close');
   if (closeBtn) closeBtn.addEventListener('click', () => { _open = false; _render(); });
 
+  // Briefing refresh — regenerate the AI briefing on demand (bypasses the
+  // once-per-day guard in main). The result comes back via the normal
+  // orcha:morning-briefing push, which re-renders this card.
+  const briefRefresh = document.getElementById('nx-brief-refresh');
+  if (briefRefresh) {
+    briefRefresh.addEventListener('click', (e) => {
+      e.stopPropagation();
+      briefRefresh.textContent = '⏳';
+      briefRefresh.disabled = true;
+      if (window.fleet && window.fleet.refreshBriefing) {
+        window.fleet.refreshBriefing().catch(() => {});
+      }
+      // Restore the icon after a moment even if the push is slow; the push
+      // itself triggers a full _render() that replaces this button anyway.
+      setTimeout(() => { if (briefRefresh) { briefRefresh.textContent = '↻'; briefRefresh.disabled = false; } }, 4000);
+    });
+  }
+
   // Tabs
   _el.querySelectorAll('.nx-sidebar__tab').forEach(tab => {
     tab.addEventListener('click', () => { _tab = tab.dataset.tab; _render(); });
@@ -222,7 +251,11 @@ export function init() {
   _render();
 
   // Toggle sidebar
-  bus.on('orcha:morning-briefing', (data) => { if (data && data.text) _lastBriefing = data; });
+  bus.on('orcha:morning-briefing', (data) => {
+    // Reminder pushes come through the same channel — don't let a reminder-only
+    // payload overwrite the real briefing card. Keep the last real briefing.
+    if (data && data.text && !data.isReminder) { _lastBriefing = data; _render(); }
+  });
   bus.on('ui:toggle-intelligence', () => { _open = !_open; _render(); });
   bus.on('nexus:open-sidebar', (tab) => { _open = true; if (tab) _tab = tab; _render(); });
   bus.on('nexus:close-sidebar', () => { _open = false; _render(); });

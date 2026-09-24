@@ -183,6 +183,18 @@ export function init() {
     });
   }
 
+  // Morning briefing — forward the IPC push onto the bus so the sidebar
+  // briefing card (nexus-sidebar.js listens on bus 'orcha:morning-briefing')
+  // actually receives it. This forwarder was MISSING, which is why the card
+  // never populated even though the overlay/FAB (which subscribe to
+  // window.fleet.onBriefing directly) did get the data.
+  if (window.fleet.onBriefing) {
+    window.fleet.onBriefing((briefingData) => {
+      state.update('briefing', briefingData);
+      bus.emit('orcha:morning-briefing', briefingData);
+    });
+  }
+
   // S28-Sprint1: Orcha action recommendations
   if (window.fleet.onRecommendations) {
     window.fleet.onRecommendations((recData) => {
