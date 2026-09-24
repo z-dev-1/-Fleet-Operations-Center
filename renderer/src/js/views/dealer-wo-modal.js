@@ -110,10 +110,14 @@ async function _resolveDefaults(unit) {
   const MAX_UNITS_PER_VENDOR = 3; // route to next preference once a vendor hits this many active units
   try {
     const contacts = (window.contacts && await window.contacts.getAll()) || [];
-    // Trim names on both sides -- some Contact Book entries have trailing spaces
+    // Match the unit's domicile against the Contact Book "Domiciles" tab.
+    // Case-insensitive + trimmed on BOTH sides — Contact Book entries and the
+    // scraped domicileSite can differ in case/whitespace ("PHL40 " vs "phl40"),
+    // and an exact === match would silently leave Location blank.
     const site = String(unit.domicileSite || '').trim();
+    const siteU = site.toUpperCase();
     domicile = contacts.find(c => c.type === 'domicile' && site &&
-      String(c.name || '').trim() === site) || null;
+      String(c.name || '').trim().toUpperCase() === siteU) || null;
 
     const make = String(unit.manufacturer || unit.make || '').toUpperCase();
     // A vendor's rank can differ per domicile it serves (e.g. #1 at AVP40 but
@@ -130,9 +134,14 @@ async function _resolveDefaults(unit) {
     const servesMake = (c) => Array.isArray(c.makes) && c.makes.length
       ? c.makes.map(m => String(m).toUpperCase()).includes(make)
       : String(c.make || '').toUpperCase() === make;
+    // Vendor must serve this unit's make AND cover this domicile. Domicile
+    // codes compared case-insensitively/trimmed (same reason as above).
+    const servesSite = (c) => Array.isArray(c.domiciles) &&
+      c.domiciles.some(d => String(d || '').trim().toUpperCase() === siteU);
     let candidates = contacts.filter(c => c.type === 'vendor' && servesMake(c)
-      && site && Array.isArray(c.domiciles) && c.domiciles.includes(site)).sort(byPreference);
+      && site && servesSite(c)).sort(byPreference);
     if (!candidates.length) {
+      // No vendor scoped to this domicile — fall back to any vendor for the make.
       candidates = contacts.filter(c => c.type === 'vendor' && servesMake(c)).sort(byPreference);
     }
 
