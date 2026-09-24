@@ -51,7 +51,21 @@ const _BASE_PREDICATES = {
 
 function _predicateFor(key) {
   if (_BASE_PREDICATES[key]) return _BASE_PREDICATES[key];
-  if (key && key.startsWith('op:'))    { const v = key.slice(3);    return r => (r.operator || 'Unknown').toUpperCase().trim() === v; }
+  if (key && key.startsWith('op:')) {
+    // op:<NAME>            -> all units for that operator
+    // op:<NAME>:unavail    -> that operator's unavailable units
+    // op:<NAME>:highrisk   -> that operator's high-risk (>=75) units
+    // op:<NAME>:openwr     -> that operator's units with an open unplanned WR
+    const rest = key.slice(3);
+    const ci = rest.lastIndexOf(':');
+    const sub = ci > -1 ? rest.slice(ci + 1) : '';
+    const name = ci > -1 && ['unavail', 'highrisk', 'openwr'].includes(sub) ? rest.slice(0, ci) : rest;
+    const isOp = r => (r.operator || 'Unknown').toUpperCase().trim() === name;
+    if (sub === 'unavail')  return r => isOp(r) && _BASE_PREDICATES.unavail(r);
+    if (sub === 'highrisk') return r => isOp(r) && (r.riskScore || 0) >= 75;
+    if (sub === 'openwr')   return r => isOp(r) && (r.openUnplanned || 0) > 0;
+    return isOp;
+  }
   if (key && key.startsWith('vendor:')){ const v = key.slice(7);    return r => (r.vendor || '').trim() === v; }
   if (key && key.startsWith('fuel:'))  { const v = key.slice(5);    return r => (r.fuelType || 'Unknown').trim() === v; }
   if (key && key.startsWith('bt:'))    { const v = key.slice(3);    return r => (r.assetType || r.bodyType || 'Unknown').trim() === v; }
@@ -68,7 +82,15 @@ const _DRILL_TITLES = {
 };
 function _drillTitle(key) {
   if (_DRILL_TITLES[key]) return _DRILL_TITLES[key];
-  if (key.startsWith('op:'))     return 'Operator ' + key.slice(3);
+  if (key.startsWith('op:')) {
+    const rest = key.slice(3);
+    const ci = rest.lastIndexOf(':');
+    const sub = ci > -1 ? rest.slice(ci + 1) : '';
+    if (sub === 'unavail')  return rest.slice(0, ci) + ' — Unavailable';
+    if (sub === 'highrisk') return rest.slice(0, ci) + ' — High risk (≥75)';
+    if (sub === 'openwr')   return rest.slice(0, ci) + ' — Open WRs';
+    return rest + ' — all units';
+  }
   if (key.startsWith('vendor:')) return 'Vendor ' + key.slice(7);
   if (key.startsWith('fuel:'))   return key.slice(5) + ' units';
   if (key.startsWith('bt:'))     return key.slice(3) + ' units';
@@ -240,11 +262,11 @@ function _renderOperators(c) {
   const dataRows = c.opSorted.map(([op, d]) => `
     <tr>
       <td class="an-op-name">${_drillText(op, 'op:' + op)}</td>
-      <td class="an-tbl--r">${d.total}</td>
-      <td class="an-tbl--r ${d.unavail > 0 ? 'an-cell--warn' : ''}">${d.unavail}</td>
+      <td class="an-tbl--r">${_drill(d.total, 'op:' + op)}</td>
+      <td class="an-tbl--r ${d.unavail > 0 ? 'an-cell--warn' : ''}">${_drill(d.unavail, 'op:' + op + ':unavail')}</td>
       <td class="an-tbl--r">${_pct(d.unavail, d.total)}%</td>
-      <td class="an-tbl--r ${d.highRisk > 0 ? 'an-cell--danger' : ''}">${d.highRisk}</td>
-      <td class="an-tbl--r ${d.openWR > 0 ? 'an-cell--accent' : ''}">${d.openWR}</td>
+      <td class="an-tbl--r ${d.highRisk > 0 ? 'an-cell--danger' : ''}">${_drill(d.highRisk, 'op:' + op + ':highrisk')}</td>
+      <td class="an-tbl--r ${d.openWR > 0 ? 'an-cell--accent' : ''}">${_drill(d.openWR, 'op:' + op + ':openwr')}</td>
     </tr>`).join('');
   return `<table class="an-table"><thead>${headerRow}</thead><tbody>${dataRows}</tbody></table>`;
 }
