@@ -57,7 +57,7 @@ export function init(container) {
           <span class="tb-tab-icon">⊞</span> Dashboard
         </button>
         <button class="tb-tab" data-view="analytics">
-          <span class="tb-tab-icon">📊</span> Analytics
+          <span class="tb-tab-icon">⏳</span> Long Dwell
         </button>
         <button class="tb-tab" data-view="vendors">
           <span class="tb-tab-icon">🏢</span> Vendors

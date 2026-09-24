@@ -17,6 +17,7 @@ import state        from '../state.js';
 import { relay, ai } from '../bridge.js';
 import { showContextMenu } from '../components/context-menu.js';
 import { aap } from '../bridge.js';
+import { mount as mountOverview } from './fleet-overview.js';
 
 // Current filter/search applied client-side
 const _filters = {};
@@ -634,6 +635,10 @@ export function init(container) {
     </div>
   `;
   container.appendChild(el);
+
+  // Merged Fleet Overview strip (was the Analytics "Overview" tab) — collapsible
+  // KPI dashboard above the table, all tiles clickable to drill into units.
+  mountOverview(el);
 
   _tbodyEl = document.getElementById('fleet-tbody');
   _countEl = document.getElementById('fleet-count');

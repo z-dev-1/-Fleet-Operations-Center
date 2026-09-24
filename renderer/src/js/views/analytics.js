@@ -301,7 +301,7 @@ const DELAY_REASONS = [
 const ESCALATION_LEVELS = ['SEV5', 'SEV4', 'SEV3', 'SEV2']; // SEV2 = highest
 
 let _longDwellData  = {};        // { equipmentId: { delayReason, escalationLevel, summary, updatedAt } }
-let _activeTab      = 'overview'; // 'overview' | 'longdwell'
+let _activeTab      = 'longdwell'; // Overview merged into Dashboard; only Long Dwell remains here
 let _dwellThreshold = 14;         // days -- matches the app's existing "Stuck 14d+" convention (toolbar.js / unit-detail.js downDays() red threshold)
 
 // Long Dwell filters (2026-07-20) -- '' means "any" / no filter applied.
@@ -1349,8 +1349,8 @@ function _dashboardHtml() {
   return `
     <div class="an-header">
       <div class="an-header__left">
-        <span class="an-title">Analytics</span>
-        <span class="an-subtitle">Fleet KPI dashboard — computed from current sync data</span>
+        <span class="an-title">Long Dwell Units</span>
+        <span class="an-subtitle">Extended-down units — log delay reason, escalation & status. (Fleet KPIs now live on the Dashboard.)</span>
       </div>
       <div class="an-header__actions">
         <button id="an-refresh" class="detail-panel__btn detail-panel__btn--secondary">↺ Refresh</button>
@@ -1358,58 +1358,7 @@ function _dashboardHtml() {
       </div>
     </div>
 
-    <div class="sd-tabs an-tabs">
-      <button class="sd-tab active" data-an-tab="overview">Overview</button>
-      <button class="sd-tab" data-an-tab="longdwell">Long Dwell Units</button>
-    </div>
-
-    <div id="an-tab-overview" class="an-tab-panel">
-      <div class="an-body">
-
-        <!-- Summary bar -->
-        <div id="an-summary"></div>
-
-        <!-- Two-col grid: lifecycle + risk -->
-        <div class="an-grid-2">
-          <div class="an-card">
-            <div class="an-card__title">Lifecycle Breakdown</div>
-            <div id="an-lifecycle"></div>
-          </div>
-          <div class="an-card">
-            <div class="an-card__title">Risk Distribution</div>
-            <div id="an-risk"></div>
-          </div>
-        </div>
-
-        <!-- PM health + body-type mix -->
-        <div class="an-grid-2">
-          <div class="an-card">
-            <div class="an-card__title">PM Due Dates</div>
-            <div class="an-card__hint">Computed from pmB / pmX / DOT fields</div>
-            <div id="an-pm"></div>
-          </div>
-          <div class="an-card">
-            <div class="an-card__title">Asset Type Mix</div>
-            <div id="an-bodytypes"></div>
-          </div>
-        </div>
-
-        <!-- Full-width: by-operator -->
-        <div class="an-card">
-          <div class="an-card__title">By Operator</div>
-          <div id="an-operators"></div>
-        </div>
-
-        <!-- Full-width: vendor distribution -->
-        <div class="an-card">
-          <div class="an-card__title">Top Vendors</div>
-          <div id="an-vendors"></div>
-        </div>
-
-      </div>
-    </div>
-
-    <div id="an-tab-longdwell" class="an-tab-panel" style="display:none">
+    <div id="an-tab-longdwell" class="an-tab-panel">
       <div class="an-body">
         <div class="an-card">
           <div class="an-card__title">Long Dwell Units</div>
@@ -1472,21 +1421,9 @@ export function init(container) {
     btn.disabled = false; btn.textContent = '\u21ba Refresh';
   });
 
-  // Tab switching (Overview / Long Dwell Units)
-  _el.querySelectorAll('[data-an-tab]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const tab = btn.dataset.anTab;
-      if (tab === _activeTab) return;
-      _activeTab = tab;
-      _el.querySelectorAll('[data-an-tab]').forEach(b => b.classList.toggle('active', b.dataset.anTab === tab));
-      _el.querySelector('#an-tab-overview').style.display  = tab === 'overview'  ? '' : 'none';
-      _el.querySelector('#an-tab-longdwell').style.display = tab === 'longdwell' ? '' : 'none';
-      if (tab === 'longdwell') {
-        await _refreshLongDwellData();
-        _renderLongDwellTab(state.slice('fleet').rows || []);
-      }
-    });
-  });
+  // (Overview tab removed — its KPI dashboard now lives on the Dashboard/fleet
+  // view via fleet-overview.js. This view is Long Dwell only, so there is no
+  // tab switching to wire.)
 
   // Long Dwell table -- delegated events (table is rebuilt via innerHTML on
   // every _renderLongDwellTab() call, so listeners must live on the stable

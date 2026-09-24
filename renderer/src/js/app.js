@@ -33,7 +33,6 @@ import { init as initSettings, applyBootPrefs } from './views/settings.js';
 import { init as initSchedulers }         from './views/schedulers.js';
 import { init as initAnalytics }          from './views/analytics.js';
 import { init as initVendors }            from './views/vendors.js';
-import { init as initDashboard }          from './views/dashboard.js';
 import { init as initEmailComposer }      from './views/email-composer.js';
 import { init as initDailyNotes }         from './views/daily-notes.js';
 import { init as initNotesLinks }         from './views/notes-links.js';
@@ -126,7 +125,6 @@ initStatusBar(document.getElementById('status-bar-mount'));
   initSchedulers(viewsMount);
   initAnalytics(viewsMount);
   initVendors(viewsMount);
-  initDashboard(viewsMount);
   initEmailComposer(viewsMount);
   initDailyNotes(viewsMount);
   initNotesLinks(viewsMount);
@@ -149,7 +147,6 @@ initStatusBar(document.getElementById('status-bar-mount'));
   const rcaQueueView      = document.getElementById('view-rca-queue');
   const dailyCallView     = document.getElementById('view-daily-call');
   const workflowIntelView = document.getElementById('view-workflow-intel');
-  const dashboardView     = document.getElementById('view-dashboard');
 
   bus.on('ui:view-change', ({ to }) => {
     if (to === 'settings') return;
@@ -163,7 +160,6 @@ initStatusBar(document.getElementById('status-bar-mount'));
     if (rcaQueueView)      rcaQueueView.style.display      = to === 'rca-queue'      ? 'flex' : 'none';
     if (dailyCallView)     dailyCallView.style.display     = to === 'daily-call'     ? 'flex' : 'none';
     if (workflowIntelView) workflowIntelView.style.display = to === 'workflow-intel' ? 'flex' : 'none';
-    if (dashboardView)     dashboardView.style.display     = to === 'dashboard'      ? 'flex' : 'none';
   });
 
   bus.on('ui:view-change', () => bus.emit('ui:unit-deselect'));

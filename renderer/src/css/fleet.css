@@ -9067,3 +9067,92 @@ body {
   background: rgba(88, 166, 255, .12);
   white-space: nowrap;
 }
+
+/* ── Fleet Overview strip (merged from Analytics Overview) ────────────────── */
+.fleet-overview {
+  margin: 0 0 10px;
+  border: 1px solid rgba(48, 54, 61, .6);
+  border-radius: 8px;
+  background: var(--pnl, #161b22);
+  overflow: hidden;
+}
+.fo-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  background: rgba(255, 255, 255, .02);
+}
+.fo-header:hover { background: rgba(255, 255, 255, .05); }
+.fo-caret { color: var(--mut); transition: transform .15s; font-size: 11px; }
+.fleet-overview--collapsed .fo-caret { transform: rotate(-90deg); }
+.fo-title { font-weight: 700; font-size: 13px; color: var(--txt); }
+.fo-hint { margin-left: auto; font-size: 10px; color: var(--mut); font-style: italic; }
+.fo-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 10px; }
+.fleet-overview--collapsed .fo-body { display: none; }
+
+/* clickable stat values */
+.fo-drill {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0 3px;
+  transition: background .12s, color .12s;
+  text-decoration: underline;
+  text-decoration-color: rgba(88, 166, 255, .4);
+  text-underline-offset: 2px;
+}
+.fo-drill:hover { background: rgba(88, 166, 255, .18); color: var(--acc, #58a6ff); }
+.fo-drill:focus-visible { outline: 2px solid var(--acc, #58a6ff); outline-offset: 1px; }
+.fo-drill--empty { cursor: default; text-decoration: none; opacity: .55; }
+.fo-drill--empty:hover { background: none; color: inherit; }
+.fo-drill--text { text-decoration-color: rgba(88, 166, 255, .3); }
+
+/* ── Drill-down modal ─────────────────────────────────────────────────────── */
+.fo-drill-modal { position: fixed; inset: 0; z-index: 9000; display: flex; align-items: center; justify-content: center; }
+.fo-drill-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .5); }
+.fo-drill-panel {
+  position: relative;
+  width: min(520px, 92vw);
+  max-height: 78vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--pnl, #161b22);
+  border: 1px solid rgba(48, 54, 61, .8);
+  border-radius: 10px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, .5);
+  overflow: hidden;
+}
+.fo-drill-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(48, 54, 61, .6);
+}
+.fo-drill-title { font-weight: 700; font-size: 14px; color: var(--txt); }
+.fo-drill-count {
+  display: inline-block; margin-left: 4px; padding: 1px 8px;
+  border-radius: 10px; font-size: 11px; font-weight: 700;
+  background: rgba(88, 166, 255, .18); color: var(--acc, #58a6ff);
+}
+.fo-drill-close {
+  margin-left: auto; background: none; border: none; color: var(--mut);
+  font-size: 16px; cursor: pointer; padding: 2px 6px; border-radius: 4px;
+}
+.fo-drill-close:hover { background: rgba(255, 255, 255, .08); color: var(--txt); }
+.fo-drill-list { overflow-y: auto; padding: 6px; }
+.fo-drill-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: 6px; cursor: pointer;
+}
+.fo-drill-item:hover { background: rgba(88, 166, 255, .12); }
+.fo-drill-item__dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.fo-drill-item__dot--down { background: var(--red, #f85149); }
+.fo-drill-item__dot--ok { background: var(--grn, #7ee787); }
+.fo-drill-item__id { font-family: var(--mono); font-weight: 700; font-size: 13px; color: var(--txt); min-width: 90px; }
+.fo-drill-item__sub { font-size: 11px; color: var(--mut); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fo-drill-item__risk {
+  font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--ylw, #f0a800);
+  flex-shrink: 0; padding: 1px 6px; border-radius: 8px; background: rgba(240, 168, 0, .12);
+}
+.fo-drill-empty { padding: 20px; text-align: center; color: var(--mut); font-style: italic; }
