@@ -9024,3 +9024,46 @@ body {
   --acc2: var(--nx-accent);
   --adim: var(--nx-accent-dim);
 }
+
+/* ── History tab: 3-month repair history list ─────────────────────────────── */
+.dp-section-sub {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--mut);
+  margin-left: 4px;
+}
+.dp-repair-history {
+  margin: 6px 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dp-rh-item {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  padding: 5px 0;
+  border-bottom: 1px solid rgba(48, 54, 61, .5);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.dp-rh-item:last-child { border-bottom: none; }
+.dp-rh-date {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--txt);
+  flex-shrink: 0;
+  min-width: 66px;
+}
+.dp-rh-dash { color: var(--mut); flex-shrink: 0; }
+.dp-rh-text { color: var(--txt2); word-break: break-word; }
+.dp-rh-vendor {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  color: var(--mut);
+  background: rgba(88, 166, 255, .12);
+  white-space: nowrap;
+}

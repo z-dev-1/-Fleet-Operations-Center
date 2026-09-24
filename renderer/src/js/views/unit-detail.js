@@ -1947,6 +1947,8 @@ function renderHistoryPane(unit){
   ].filter(Boolean).join('');
 
   return '<div class="dp-pane" id="dp-pane-history">'+
+    '<div class="dp-section-title">Repair History <span class="dp-section-sub">(last 3 months)</span></div>'+
+    '<div id="dp-repair-history" class="dp-repair-history"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading repair history\u2026</div></div>'+
     '<div class="dp-section-title">Data Sync</div>'+
     '<div class="dp-sync-panel">'+syncRows+'</div>'+
     (timeline?'<div class="dp-section-title">Timeline</div><div class="dp-timeline">'+timeline+'</div>':'')+
@@ -2104,6 +2106,9 @@ function _renderUnit(unit) {
   // ── notes ──────────────────────────────────────────────────────────────────
   _wireNotes(unit);
 
+  // ── history tab: 3-month repair history list ───────────────────────────────
+  _wireHistoryPane(unit);
+
   // ── action buttons (new layout IDs) ───────────────────────────────────────
   var actCreateWR = document.getElementById('dp-act-create-wr');
   if (actCreateWR) actCreateWR.addEventListener('click', function(){ openWRModal(unit); });
@@ -2234,6 +2239,148 @@ function _renderUnit(unit) {
       bandEl.innerHTML = '<span class="dp-status-band__icon">&#9888;</span><span class="dp-status-band__text">AI brief unavailable -- Orcha unreachable.</span>';
     });
   }
+}
+
+// ── _wireHistoryPane ───────────────────────────────────────────────────────
+// Builds a clean 3-month repair-history list for the History tab:
+//   MM/DD/YYYY - short description
+// Merges three per-unit sources into dated entries, then dedupes so the SAME
+// work order + vendor collapses to one line that shows the LATEST known root
+// cause (cause/correction) instead of repeating the original complaint:
+//   1) structured repairHistory store (window.fleet.repairHistory) — dated events
+//   2) each work order on the row (primary WO + _plannedWRData + _secondaryWRs)
+//   3) repairTimeline lines (MM/DD - text) as a fallback for anything else
+// Everything is filtered to the last ~90 days and sorted newest-first.
+function _wireHistoryPane(unit) {
+  var host = document.getElementById('dp-repair-history');
+  if (!host) return;
+
+  var NINETY_DAYS = 90 * 24 * 60 * 60 * 1000;
+  var now = Date.now();
+  var thisYear = new Date().getFullYear();
+
+  // Parse a date-ish value into a JS timestamp (ms) or null.
+  function toTs(v) {
+    if (!v) return null;
+    if (typeof v === 'number') return v;
+    var s = String(v).trim();
+    if (!s) return null;
+    // MM/DD (no year) -> assume current year
+    var md = s.match(/^(\d{1,2})\/(\d{1,2})$/);
+    if (md) {
+      var t = new Date(thisYear, parseInt(md[1], 10) - 1, parseInt(md[2], 10)).getTime();
+      // if that lands in the future (e.g. Dec date early next year), roll back a year
+      return t > now + 86400000 ? new Date(thisYear - 1, parseInt(md[1], 10) - 1, parseInt(md[2], 10)).getTime() : t;
+    }
+    var d = new Date(s);
+    return isNaN(d.getTime()) ? null : d.getTime();
+  }
+
+  function fmtMDY(ts) {
+    var d = new Date(ts);
+    return (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
+  }
+
+  function shorten(txt) {
+    var s = String(txt || '').replace(/\s+/g, ' ').trim();
+    return s.length > 140 ? s.slice(0, 138) + '\u2026' : s;
+  }
+
+  // Collect raw candidate entries: { ts, desc, vendor, woKey, isRoot }
+  function collect(store) {
+    var out = [];
+
+    // (1) structured repair-history store
+    (store || []).forEach(function(e) {
+      var ts = toTs(e.date) || e.ts || null;
+      if (ts == null) return;
+      out.push({ ts: ts, desc: e.summary || '', vendor: e.vendor || '', woKey: '', isRoot: e.outcome === 'completed' });
+    });
+
+    // (2) work orders on the row
+    function pushWO(wo, tag) {
+      if (!wo) return;
+      var ts = toTs(wo.created) || toTs(wo.completed);
+      if (ts == null) return;
+      var woKey = (wo.workRequestId || wo.alternativeId || wo.vendorWorkOrderId || '') + '|' + (wo.vendor || '');
+      // root cause = cause/correction if present, else the reported issue
+      var root = (wo.cause || wo.correction || '').trim();
+      var desc = root || wo.issueDetails || wo.issueSummary || tag || 'Work order';
+      out.push({ ts: ts, desc: desc, vendor: wo.vendor || '', woKey: woKey.trim() === '|' ? '' : woKey, isRoot: !!root });
+    }
+    pushWO(unit, 'Primary WR');
+    pushWO(unit._plannedWRData, 'Planned WR');
+    (unit._secondaryWRs || []).forEach(function(w) { pushWO(w, 'Secondary WR'); });
+
+    // (3) repairTimeline lines (MM/DD - text)
+    var tl = (unit.repairTimeline || '').split('\n');
+    tl.forEach(function(line) {
+      var m = line.trim().match(/^(\d{1,2}\/\d{1,2})\s*[-\u2013]\s*(.+)$/);
+      if (!m) return;
+      var ts = toTs(m[1]);
+      if (ts == null) return;
+      out.push({ ts: ts, desc: m[2], vendor: '', woKey: '', isRoot: false });
+    });
+
+    return out;
+  }
+
+  function dedupe(entries) {
+    // Merge by work-order key: keep ONE row per WO+vendor, preferring the entry
+    // that carries a root cause and the most recent date.
+    var byWO = {};
+    var loose = [];
+    entries.forEach(function(en) {
+      if (!en.woKey) { loose.push(en); return; }
+      var cur = byWO[en.woKey];
+      if (!cur) { byWO[en.woKey] = en; return; }
+      // prefer root-cause entry; then prefer newer date
+      if ((en.isRoot && !cur.isRoot) || (en.isRoot === cur.isRoot && en.ts > cur.ts)) {
+        byWO[en.woKey] = en;
+      }
+    });
+    var merged = Object.keys(byWO).map(function(k) { return byWO[k]; }).concat(loose);
+    // drop near-duplicate loose lines (same day + same text)
+    var seen = {};
+    return merged.filter(function(en) {
+      var key = fmtMDY(en.ts) + '::' + shorten(en.desc).toLowerCase();
+      if (seen[key]) return false;
+      seen[key] = true;
+      return true;
+    });
+  }
+
+  function render(entries) {
+    var recent = entries
+      .filter(function(en) { return en.ts != null && (now - en.ts) < NINETY_DAYS && en.ts <= now + 86400000; })
+      .sort(function(a, b) { return b.ts - a.ts; });
+
+    if (!recent.length) {
+      host.innerHTML = '<div class="dp-empty" style="color:var(--mut);font-style:italic">No repair events in the last 3 months.</div>';
+      return;
+    }
+    host.innerHTML = recent.map(function(en) {
+      var vend = en.vendor ? ' <span class="dp-rh-vendor">' + esc(en.vendor) + '</span>' : '';
+      return '<div class="dp-rh-item">' +
+        '<span class="dp-rh-date">' + esc(fmtMDY(en.ts)) + '</span>' +
+        '<span class="dp-rh-dash"> \u2014 </span>' +
+        '<span class="dp-rh-text">' + esc(shorten(en.desc)) + '</span>' + vend +
+      '</div>';
+    }).join('');
+  }
+
+  // Fetch the structured store async, then merge with row-derived entries.
+  var fetchStore = (window.fleet && window.fleet.repairHistory)
+    ? window.fleet.repairHistory(unit.equipmentId).catch(function() { return []; })
+    : Promise.resolve([]);
+
+  fetchStore.then(function(store) {
+    try {
+      render(dedupe(collect(store || [])));
+    } catch (e) {
+      host.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to build history: ' + esc(e.message || 'error') + '</div>';
+    }
+  });
 }
 
 // ── _wireNotes ────────────────────────────────────────────────────────────────
