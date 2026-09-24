@@ -353,7 +353,10 @@ export function mount(container) {
 
   const wrap = document.createElement('div');
   wrap.id = 'fleet-overview';
-  wrap.className = 'fleet-overview' + (collapsed ? ' fleet-overview--collapsed' : '');
+  // Hidden by default — the strip belongs to the "Dashboard" tab. The plain
+  // "Fleet" tab shows just the table. Both tabs render view-fleet, so we
+  // toggle this strip on the ui:view-change `tab` key rather than the view.
+  wrap.className = 'fleet-overview fleet-overview--hidden' + (collapsed ? ' fleet-overview--collapsed' : '');
   wrap.innerHTML = `
     <div class="fo-header" id="fo-header">
       <span class="fo-caret">▾</span>
@@ -410,6 +413,14 @@ export function mount(container) {
 
   bus.on('state:fleet', render);
   render();
+
+  // Show the overview strip only on the Dashboard tab; hide it on the plain
+  // Fleet tab (both render view-fleet). Default: hidden until Dashboard opens.
+  bus.on('ui:view-change', ({ to, tab }) => {
+    if (to !== 'fleet') return; // leaving the fleet view entirely
+    const showOverview = tab === 'dashboard';
+    wrap.classList.toggle('fleet-overview--hidden', !showOverview);
+  });
 }
 
 export default { mount };

@@ -18,7 +18,7 @@ let _suppressFilterEvents = false;
 // ── Nav tab → bus view map ──────────────────────────────────────────────────
 const TAB_VIEW = {
   'fleet-table': 'fleet',
-  dashboard:  'dashboard',
+  dashboard:  'fleet',
   analytics:  'analytics',
   vendors:    'vendors',
   scheduler:  'schedulers',
@@ -153,7 +153,9 @@ export function init(container) {
       el.querySelectorAll('.tb-tab').forEach((t) => t.classList.remove('active'));
       btn.classList.add('active');
       const view = TAB_VIEW[btn.dataset.view] || 'fleet';
-      bus.emit('ui:view-change', { from: 'fleet', to: view });
+      // Pass the raw tab key too: "Fleet" and "Dashboard" both route to the
+      // fleet view, but the Fleet Overview strip only shows on Dashboard.
+      bus.emit('ui:view-change', { from: 'fleet', to: view, tab: btn.dataset.view });
     });
   });
 

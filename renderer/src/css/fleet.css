@@ -9076,6 +9076,7 @@ body {
   background: var(--pnl, #161b22);
   overflow: hidden;
 }
+.fleet-overview--hidden { display: none; }
 .fo-header {
   display: flex;
   align-items: center;
