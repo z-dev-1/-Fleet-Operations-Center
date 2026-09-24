@@ -1025,7 +1025,7 @@ function registerAIHandlers(ctx) {
   try {
     if (fs.existsSync(P.orchaConfig)) {
       const saved = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
-      if (saved.aiPreference && ['auto', 'orcha', 'claude'].includes(saved.aiPreference)) {
+      if (saved.aiPreference && ['auto', 'orcha', 'claude', 'balanced'].includes(saved.aiPreference)) {
         relay.setPreference(saved.aiPreference);
         logger.info('[AI Config] Startup: loaded preference=' + saved.aiPreference);
       }
