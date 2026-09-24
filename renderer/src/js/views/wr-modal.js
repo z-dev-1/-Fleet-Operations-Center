@@ -586,48 +586,41 @@ function _wireSubmit() {
     if (_progUnsub) { _progUnsub(); _progUnsub = null; }
     _progUnsub = aap.onWRProgress(_logProgress);
 
+    // Submit WR drives the LIVE AI wizard (adaptive agent): opens AAP, reads
+    // the wizard each step, fills only real current options, re-reads after
+    // every step, and STOPS at Review — it never submits automatically. The
+    // user reviews and clicks Submit in the AAP window. (autoSubmit:false)
+    btn.textContent = 'AI filling in AAP…';
     try {
-      const result = await aap.createWR(payload, _unit);
+      const result = await aap.runAdaptive({ ...payload, autoSubmit: false });
       if (_progUnsub) { _progUnsub(); _progUnsub = null; }
 
-      if (result && result.ok) {
-        const wrId = result.workRequestId || '';
-        const copiedNote = result.copiedFromWorkRequestId ? ' <span style="opacity:.7">(2nd WR — copied from existing)</span>' : '';
+      if (result && result.ok && result.readyToSubmit) {
         resultEl.innerHTML = `
           <div class="wr-result--success">
             <span class="wr-result__icon">✓</span>
-            <span>WR created — <strong>${_safe(wrId)}</strong>${copiedNote}</span>
-            ${_unit.assetUrl ? `<a href="#" id="wr-open-aap" class="wr-result__link">Open in AAP</a>` : ''}
+            <span>Filled in AAP — review the AAP window and click <strong>Submit</strong> to finish. Nothing was submitted automatically.</span>
           </div>`;
         resultEl.style.display = '';
-        const link = _el('wr-open-aap');
-        if (link) link.addEventListener('click', (e) => { e.preventDefault(); aap.openUrl(_unit.assetUrl); });
-        toast.show('success', 'WR ' + wrId + ' created', 6000);
-
-        // Immediately re-scan just this unit so the newly-created WR (id,
-        // vendor, status, timeline) reflects in the grid/detail without
-        // waiting for the next full sync. Fire-and-forget so it doesn't block
-        // the modal's auto-close; the merged data is pushed back via
-        // partialMerge (relay:refresh-unit) and the UI updates when it lands.
+        toast.show('success', 'WR filled in AAP — review & submit there', 7000);
+      } else if (result && result.ok) {
+        // A real submit/confirmation (only if autoSubmit was ever turned on).
+        const wrId = result.workRequestId || '';
+        resultEl.innerHTML = `
+          <div class="wr-result--success">
+            <span class="wr-result__icon">✓</span>
+            <span>WR ${_safe(wrId)}</span>
+          </div>`;
+        resultEl.style.display = '';
+        toast.show('success', 'WR ' + wrId, 6000);
         const _eqId = _unit && (_unit.equipmentId || _unit.id);
         if (_eqId && relay && typeof relay.refreshUnit === 'function') {
-          toast.show('info', 'Refreshing ' + _eqId + ' data…', 2500);
-          relay.refreshUnit(_eqId)
-            .then((r) => { if (r && r.ok) toast.show('success', _eqId + ' data updated', 2500); })
-            .catch(() => { /* non-fatal — next sync will still pick it up */ });
+          relay.refreshUnit(_eqId).catch(() => {});
         }
-
-        setTimeout(() => _close(), 4000);
-      } else if (result && result.needsAutofill) {
-        // FIX (2026-07-23): vendor has no supplierId on file -- the direct
-        // API path can never work for it (AAP rejects with 403). Instead of
-        // showing a dead-end error, transparently fall through to the
-        // browser-automation autofill flow so 'Submit WR' still gets the
-        // user a filled-out WR regardless of vendor.
-        toast.show('info', 'No API credentials on file for this vendor — opening AAP autofill instead...', 5000);
-        await _autofillFallback(payload);
       } else {
-        _showError((result && result.error) || 'Unknown error');
+        // Agent got stuck — AAP window stays open in WATCH MODE for the user
+        // to finish manually (the agent learns from what they do).
+        _showError((result && (result.error || result.message)) || 'AI could not finish the wizard — finish it in the AAP window.');
       }
     } catch (e) {
       if (_progUnsub) { _progUnsub(); _progUnsub = null; }
@@ -717,22 +710,18 @@ async function _autofillFallback(payload) {
     stopBtn.addEventListener('click', onStopClick);
   }
   try {
-    // FIX (2026-07-23): was passing _unit.assetUrl (the asset's own
-    // detail page) here. aap_autofill_engine.js does not read equipment
-    // context from the URL at all -- it types payload.unit into an empty
-    // Equipment ID combobox on AAP's generic 'New Work Request' page.
-    // Opening assetUrl landed on the wrong page entirely (no such
-    // combobox there), which is why autofill opened 'the wrong URL'.
-    // The correct fixed entry point (same one runAdaptiveWR() uses) is:
-    const NEW_WR_URL = 'https://aap-na.corp.amazon.com/v2/page/891a81dc-538d-4f10-be93-441545840a24';
-    const result = await aap.autofill(NEW_WR_URL, payload);
-    if (result && result.ok === false) {
-      toast.show('error', 'AAP autofill stopped: ' + (result.message || 'unknown error') + ' \u2014 finish filling manually in the AAP window.', 7000);
+    // Use the LIVE AI wizard (adaptive agent) — it reads the real AAP wizard
+    // each step and fills only the options that actually exist, instead of the
+    // old blind hardcoded-selector engine that broke whenever AAP changed.
+    // Stops at Review (autoSubmit:false); the user submits manually.
+    const result = await aap.runAdaptive({ ...payload, autoSubmit: false });
+    if (result && result.ok) {
+      toast.show('success', (result.message || 'Filled in AAP — review and click Submit.'), 6000);
     } else {
-      toast.show('success', (result && result.message) || 'AAP autofill complete \u2014 review before submitting.', 4000);
+      toast.show('error', 'AAP fill stopped: ' + ((result && (result.message || result.error)) || 'unknown error') + ' \u2014 finish filling manually in the AAP window.', 7000);
     }
   } catch (e) {
-    toast.show('error', 'Autofill launch failed: ' + e.message);
+    toast.show('error', 'AAP fill launch failed: ' + e.message);
   } finally {
     if (fbBtn) { fbBtn.disabled = false; fbBtn.textContent = fbBtnOriginalText; }
     if (stopBtn) { stopBtn.style.display = 'none'; stopBtn.removeEventListener('click', onStopClick); }

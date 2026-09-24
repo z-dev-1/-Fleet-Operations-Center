@@ -315,10 +315,17 @@ function buildActionScript(actions) {
 // ═══════════════════════════════════════════════════════════════
 // ORCHA PROMPT BUILDER — constructs the AI prompt for each step
 // ═══════════════════════════════════════════════════════════════
-function buildPrompt(snapshot, payload, stepHistory, lessonContext) {
+function buildPrompt(snapshot, payload, stepHistory, lessonContext, autoSubmit) {
   return `You are Orcha, filling out an AAP (Amazon Asset Portal) Work Request wizard. You can see the current page state below.
 
-YOUR GOAL: Fill all fields on the current page with the correct values from the payload, then click "Next" (or "Submit" on the final page).
+YOUR GOAL: Fill the fields on the CURRENT page with the correct values from the payload, then click "Next" to advance. ${autoSubmit ? 'On the final Review page, click Submit.' : 'DO NOT submit. When you reach the final Review/Submit page with everything filled, respond with a single {"type":"DONE_REVIEW"} action instead of clicking Submit — the user will review and submit manually.'}
+
+THE LIVE WIZARD IS THE SOURCE OF TRUTH — READ IT EVERY STEP:
+- The page state below (INTERACTIVE ELEMENTS + open dropdown options) reflects the wizard AS IT IS RIGHT NOW. Use ONLY what is shown there.
+- The wizard can change at any time — fields, steps, dropdown options, and required questions may be added, removed, or renamed. Do not assume it matches any previous version or any example.
+- For a dropdown/combobox: only choose a value that ACTUALLY APPEARS in that field's current options. To see a field's options, open it (click it / type into it) — the next page snapshot will list its live options; then pick the closest matching REAL option. Never type or select an option that is not present.
+- NEVER invent components, subcategories, locations, repair types, reasons, dropdown options, or unit info. If the payload's intended value has no matching live option, pick the closest real option that fits; if none fits, skip that field and note what's missing.
+- If a field is already filled correctly, leave it. After any Next / dropdown selection / step change, the page will be re-read and you'll get a fresh snapshot — work from that new snapshot, not from a remembered older one.
 
 CRITICAL FORMAT RULE (repeated at the end too, but stated here first in case this
 prompt ever gets truncated): your entire response must be ONLY a JSON array of
@@ -365,7 +372,8 @@ RESPOND WITH A JSON ARRAY OF ACTIONS. Each action is an object:
 - { "type": "select", "target": { "idx": 5 }, "value": "Tires" }
 - { "type": "waitForOption", "value": "T-8821", "timeout": 8000 }
 - { "type": "wait", "duration": 2000 }
-- { "type": "DONE", "workRequestId": "WR-12345" } ← when wizard is complete
+- { "type": "DONE", "workRequestId": "WR-12345" } ← ONLY when a WR confirmation/ID is actually shown after a real submit
+- { "type": "DONE_REVIEW" } ← when everything is filled and you're on the final Review/Submit page but must NOT submit (default) — hand off to the user
 
 PAST LESSONS FROM PREVIOUS ATTEMPTS:
 ${lessonContext}
@@ -454,9 +462,15 @@ function _describeActions(actions) {
   }).join(', ');
 }
 
-async function runAdaptiveWR(payload, askAI, log) {
+async function runAdaptiveWR(payload, askAI, log, opts) {
   if (!log) log = console.log;
-  log('[AdaptiveWR] Starting for unit: ' + (payload.unit || payload.asset_id));
+  opts = opts || {};
+  // autoSubmit controls whether the agent is allowed to click the final
+  // Submit button. Default FALSE per the user's spec: fill the whole wizard
+  // reading the live page each step, then STOP at Review and hand off — never
+  // submit unless explicitly told to. Set autoSubmit:true to let it submit.
+  const autoSubmit = opts.autoSubmit === true;
+  log('[AdaptiveWR] Starting for unit: ' + (payload.unit || payload.asset_id) + ' | autoSubmit=' + autoSubmit);
   
   const aapUrl = 'https://aap-na.corp.amazon.com/v2/page/891a81dc-538d-4f10-be93-441545840a24';
   
@@ -556,7 +570,7 @@ async function runAdaptiveWR(payload, askAI, log) {
     // which is the root cause of "Open in AAP (autofill)" doing nothing --
     // the whole adaptive-fill loop crashed before it ever sent a prompt to
     // Orcha or touched the page.
-    const prompt = buildPrompt(snapshot, payload, stepHistory, lessonContext);
+    const prompt = buildPrompt(snapshot, payload, stepHistory, lessonContext, autoSubmit);
     let aiResponse;
     try {
       log('[AdaptiveWR] Asking Orcha...');
@@ -581,31 +595,50 @@ async function runAdaptiveWR(payload, askAI, log) {
       continue;
     }
     
-    // 6. Check for DONE signal
+    // 6a. DONE_REVIEW — AI filled everything and stopped at Review without
+    // submitting (the default, no-auto-submit flow). Hand off to the user.
+    const reviewAction = actions.find(a => a.type === 'DONE_REVIEW');
+    if (reviewAction) {
+      log('[AdaptiveWR] Filled and stopped at Review — handing off for manual submit.');
+      result = {
+        ok: true,
+        workRequestId: 'READY-TO-SUBMIT',
+        readyToSubmit: true,
+        message: 'Work Request is filled and ready in the AAP window — review it and click Submit to finish. Nothing was submitted automatically.',
+      };
+      break;
+    }
+
+    // 6b. Check for DONE signal (AI saw a real confirmation/WR-ID page after submit)
     const doneAction = actions.find(a => a.type === 'DONE');
     if (doneAction) {
       log('[AdaptiveWR] ✅ DONE! WR ID: ' + (doneAction.workRequestId || 'unknown'));
       result = { ok: true, workRequestId: doneAction.workRequestId || 'SUBMITTED' };
       break;
     }
-    
-    // TEMP TEST GUARD (2026-07-23): verifying the Claude Code --system-prompt
-    // fix end-to-end without ever creating a real Work Request. When
-    // AKI_DRY_RUN_WR=1 is set, any CLICK action whose target looks like the
-    // final Submit button is intercepted and logged instead of executed --
-    // proves every prior step parsed/filled correctly via real JSON from the
-    // AI, then stops one click short of a live submission. Remove this block
-    // once the fix is confirmed and Z is ready to let it submit for real.
-    if (process.env.AKI_DRY_RUN_WR === "1") {
+
+    // NO-SUBMIT STOP (default). Per the user's spec, the agent fills the whole
+    // wizard reading the live page each step, but must NOT submit unless
+    // autoSubmit was explicitly requested. If this step's actions include a
+    // click on the final Submit button, intercept it: stop one click short,
+    // leave the fully-filled Review page open, and report "ready to submit".
+    // The AKI_DRY_RUN_WR=1 env var forces this behavior too (test safety net).
+    if (!autoSubmit || process.env.AKI_DRY_RUN_WR === '1') {
       const submitAction = actions.find(a => {
-        if (a.type !== "CLICK") return false;
+        if (!/^click$/i.test(a.type || '')) return false;
         const t = a.target || {};
-        const label = String(t.text || t.id || t.placeholder || "").toLowerCase();
-        return label.includes("submit");
+        const label = String(t.text || t.id || t.placeholder || t.ariaLabel || '').toLowerCase();
+        // Match the final submit button, not "Save & Continue"/"Next".
+        return /\bsubmit\b/.test(label) && !/save|continue|next/.test(label);
       });
       if (submitAction) {
-        log("[AdaptiveWR] [DRY-RUN] Would click Submit here -- stopping without submitting. Action: " + JSON.stringify(submitAction));
-        result = { ok: true, workRequestId: "DRY-RUN-NOT-SUBMITTED", dryRun: true };
+        log('[AdaptiveWR] Filled and stopped at Review — NOT submitting (autoSubmit=' + autoSubmit + '). Review the AAP window and click Submit yourself.');
+        result = {
+          ok: true,
+          workRequestId: 'READY-TO-SUBMIT',
+          readyToSubmit: true,
+          message: 'Work Request is filled and ready in the AAP window — review it and click Submit to finish. Nothing was submitted automatically.',
+        };
         break;
       }
     }

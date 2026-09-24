@@ -135,7 +135,10 @@ function registerScrapersIPC(ctx) {
       const { askOrcha }      = require('../../src/scrapers/orcha_ws');
       const logs = [];
       const log  = (msg) => { logs.push(msg); logger.info(msg); if (send) send('wr:progress', msg); };
-      const result = await runAdaptiveWR(payload, askOrcha, log);
+      // autoSubmit defaults to FALSE — the agent fills the wizard reading the
+      // live page each step and stops at Review; it only submits if the
+      // payload explicitly sets autoSubmit:true.
+      const result = await runAdaptiveWR(payload, askOrcha, log, { autoSubmit: payload.autoSubmit === true });
       return { ...result, logs };
     } finally {
       _adaptiveLock = false;
