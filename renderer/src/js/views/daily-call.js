@@ -1323,19 +1323,24 @@ Write TWO fields — a Field Level Bridge (situation summary) and FAS Field Acti
 
 ${stats}
 
-The Field Level Bridge MUST cover ALL of the following required items (this is a hard reporting rule). Use the VERIFIED COUNTS above for every number — do NOT recount or estimate:
-1. Number of assets down (use verified count).
-2. Down by fuel type (use verified counts — e.g. "X CNG, Y Diesel").
-3. How many are onsite/mobile vs at OEM/dealer (use the location split; the per-unit lines are tagged [ONSITE/MOBILE] / [AT-OEM/DEALER]).
-4. Number of units at each specific OEM/vendor (Volvo, Kenworth, Peterbilt, CEI, etc. — use the per-vendor counts).
-5. Estimate-delay specifics: for units stuck on estimates, state whether AMAZON or the VENDOR is causing the delay — infer ONLY from the timeline text; if the cause is not stated, write "cause not documented — verify".
-6. List each OOS (out-of-service) unit with its ETC where available; if no ETC is in the timeline, write "no ETC — pending".
-7. Overdue PMs: how many and how many days past due if the timeline states it; and whether AMAZON or the PARTNER is the root cause. If days-past-due or root cause is not in the data, say "days/root cause not documented — verify".
+The Field Level Bridge MUST be formatted as bullet points — ONE bullet per required item below, in THIS EXACT order, each starting with "• " and the bold label shown. Use the VERIFIED COUNTS above for every number — do NOT recount or estimate. This bullet layout is required so it copy-pastes cleanly.
+
+FORMAT THE BRIDGE EXACTLY LIKE THIS (fill in the values):
+• Assets Down: <verified total>
+• Down by Fuel Type: <e.g. 21 CNG, 13 Diesel>
+• Onsite/Mobile vs OEM/Dealer: <onsite count> onsite/mobile, <oem count> at OEM/dealer
+• Units per OEM/Vendor: <Volvo: X, Kenworth: Y, Peterbilt: Z, ...>
+• Estimate Delays (Amazon vs Vendor): <for units stuck on estimates, state whether AMAZON or the VENDOR is causing it — infer ONLY from timeline; if not stated write "cause not documented — verify">
+• OOS Units & ETC: <list each OOS unit with ETC; if no ETC in timeline write "unit ####: no ETC — pending">
+• Overdue PMs: <how many, how many days past due if timeline states it, and whether AMAZON or the PARTNER is root cause; if not in data write "days/root cause not documented — verify">
+• Prior-Week / T6W: Prior-week / T6W comparison not available from tool data — enter manually.
+
+Keep each bullet on its own line. Put multiple units within a bullet on the same line separated by "; " (do not add sub-bullets).
 
 RULES:
 - Ground EVERY number in the VERIFIED COUNTS block. The narrative (who caused a delay, ETCs, PM days-past-due) comes ONLY from the per-unit timelines below.
 - Do NOT invent or infer beyond what the timelines say. Where the data is missing, explicitly flag it as "not documented — verify" rather than guessing. The FAS will validate before submitting.
-- HISTORICAL NOTE: this tool has only current-week data — it does NOT store prior-week or T6W (trailing-6-week) snapshots. Do NOT fabricate last-week or T6W numbers. If prior-week comparison is expected, add one line: "Prior-week / T6W comparison not available from tool data — enter manually."
+- HISTORICAL NOTE: this tool has only current-week data — it does NOT store prior-week or T6W snapshots. NEVER fabricate last-week or T6W numbers; use the fixed Prior-Week / T6W bullet text shown above.
 - Be specific: include unit IDs, vendor names, days down, key blockers, ETCs.
 - Actions: what SPECIFIC actions you took or are taking TODAY. Write like you're reporting to leadership what you personally did this morning.
   * Name who you contacted (dealer name, vendor FM name, carrier, tech)
@@ -1356,7 +1361,7 @@ UNIT DATA:
 ${unitLines}
 
 RESPOND WITH JSON ONLY:
-{"bridge": "your field level bridge text covering all 7 required items", "actions": "your FAS field actions text"}`;
+{"bridge": "the bulleted field level bridge, each required item on its own • line in the exact order shown", "actions": "your FAS field actions text"}`;
 
       // Retry on timeout/transient failure for THIS site (shared helper: 2
       // retries, short backoff), so one flaky site recovers without redoing all.
