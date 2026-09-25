@@ -46,6 +46,11 @@ const REGISTRY = {
   chatHistory:      () => path.join(P.dataDir, 'chat-history.json'),
   repairHistory:    () => path.join(P.dataDir, 'repair-history.json'),
   aapLessons:       () => path.join(P.dataDir, 'aap-lessons.json'),
+  // Per-step recipe learning for the AdaptiveWR agent (2026-08): proven action
+  // sequences keyed by wizard step name, replayed (payload-hydrated) on future
+  // runs so a perfected step is executed without asking the AI. See
+  // src/scrapers/aap_adaptive_agent.js (RECIPE_STORE_KEY).
+  aapStepRecipes:   () => path.join(P.dataDir, 'aap-step-recipes.json'),
   offlineQueue:     () => path.join(P.dataDir, 'offline-queue.json'),
   orchaPatterns:    () => path.join(P.dataDir, 'orcha-patterns.json'),
   pins:             () => path.join(P.dataDir, 'pins.json'),
