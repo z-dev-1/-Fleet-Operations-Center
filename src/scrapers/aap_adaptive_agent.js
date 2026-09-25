@@ -47,9 +47,26 @@ const SNAPSHOT_SCRIPT = `
     'input, textarea, select, button, [role="button"], [role="combobox"], [role="radio"], [role="checkbox"], [role="option"], [role="listbox"], [contenteditable="true"]'
   );
   
+  // Visibility test that ALSO accepts fixed-position / transform-laid-out
+  // controls (AAP's Next button lives in a fixed footer, and freshly-hydrated
+  // React controls can have offsetParent === null while still being on-screen).
+  // The old "offsetParent === null" gate silently dropped exactly those — which
+  // is why only ~10 elements came through and the AI never saw the real Next
+  // button. Treat an element as visible if it has a non-zero rendered box.
+  function _isVisible(el) {
+    if (el.type === 'file') return true;
+    if (el.offsetParent !== null) return true;
+    if (el.closest('[role="dialog"]')) return true;
+    try {
+      const r = el.getBoundingClientRect();
+      const cs = window.getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none';
+    } catch (e) { return false; }
+  }
+
   interactives.forEach((el, idx) => {
-    // Skip hidden elements
-    if (el.offsetParent === null && el.type !== 'file' && !el.closest('[role="dialog"]')) return;
+    // Skip truly-hidden elements only.
+    if (!_isVisible(el)) return;
     
     // Find associated label
     let label = '';
@@ -80,7 +97,7 @@ const SNAPSHOT_SCRIPT = `
       ariaLabel: el.getAttribute('aria-label') || '',
       ariaExpanded: el.getAttribute('aria-expanded'),
       options: [],
-      visible: el.offsetParent !== null || el.type === 'file'
+      visible: _isVisible(el)
     };
     
     // For select elements, get options
@@ -125,7 +142,39 @@ const SNAPSHOT_SCRIPT = `
   const visErrors = [];
   errors.forEach(e => { if (e.offsetParent !== null) visErrors.push((e.innerText || '').trim()); });
   if (visErrors.length > 0) snapshot.errors = visErrors;
-  
+
+  // ── Explicit primary-button scan (Next / Submit / Continue) ───────────────
+  // On this wizard the Next button lives at the BOTTOM of a long scrollable
+  // page (below "Other Open Work"), so it's rendered but off-screen. The
+  // element loop above may or may not surface it clearly, so scan for it
+  // directly and report its exact state — text, disabled, and whether it's
+  // currently in the viewport — so the AI/executor knows it exists and whether
+  // it can be clicked yet.
+  (function() {
+    const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+    const navBtn = btns.find(b => {
+      const t = (b.innerText || b.textContent || '').trim();
+      return /^(next|continue|save\\s*&?\\s*continue|proceed|submit|submit request)$/i.test(t);
+    });
+    if (navBtn) {
+      let inView = false;
+      try { const r = navBtn.getBoundingClientRect(); inView = r.top >= 0 && r.bottom <= (window.innerHeight || 9999); } catch (e) {}
+      snapshot.primaryButton = {
+        text: (navBtn.innerText || navBtn.textContent || '').trim().substring(0, 40),
+        disabled: navBtn.disabled || navBtn.getAttribute('aria-disabled') === 'true',
+        inView: inView,
+      };
+    }
+  })();
+
+  // ── Current wizard step (left-side stepper) ───────────────────────────────
+  // Report which step is highlighted so the AI (and stuck detection) can tell
+  // whether the wizard actually advanced. Best-effort across common markers.
+  (function() {
+    const cur = document.querySelector('[aria-current="step"], [aria-current="true"], [class*="stepper"] [class*="active"], [class*="Step"][class*="active"], [class*="current"]');
+    if (cur) { snapshot.currentStep = (cur.innerText || cur.textContent || '').trim().substring(0, 60); }
+  })();
+
   return JSON.stringify(snapshot);
 })();
 `;
@@ -151,7 +200,11 @@ function buildActionScript(actions) {
   }
   
   function fullClick(el) {
-    try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch(e) {}
+    // INSTANT scroll (not smooth) so the element is actually in view BEFORE we
+    // dispatch the click — a smooth scroll is async and the old code fired the
+    // click while the page was still scrolling, so an off-screen Next button
+    // (bottom of this long wizard page) never actually got clicked.
+    try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch(e) {}
     ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(type => {
       try {
         el.dispatchEvent(type.startsWith('pointer')
@@ -160,6 +213,21 @@ function buildActionScript(actions) {
       } catch(e) {}
     });
     try { el.click(); el.focus(); } catch(e) {}
+  }
+
+  function isDisabled(el) {
+    return !!(el && (el.disabled || el.getAttribute('aria-disabled') === 'true'));
+  }
+
+  // Find the wizard's primary nav button by its label text.
+  function findNavButton(label) {
+    const want = String(label || '').toLowerCase();
+    const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+    // Exact-ish match first (avoid matching "Next steps" etc.)
+    return btns.find(b => {
+      const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+      return want ? (t === want || t.startsWith(want)) : /^(next|continue|save\\s*&?\\s*continue|proceed)$/.test(t);
+    }) || null;
   }
   
   function findElement(selector) {
@@ -215,8 +283,53 @@ function buildActionScript(actions) {
     try {
       if (action.type === 'click') {
         const el = findElement(action.target);
-        if (el) { fullClick(el); results.push({ ok: true, action: 'click', target: action.target.text || action.target.id || 'idx:' + action.target.idx }); }
-        else results.push({ ok: false, action: 'click', error: 'Element not found', target: action.target });
+        const _tgt = action.target.text || action.target.id || 'idx:' + action.target.idx;
+        if (!el) { results.push({ ok: false, action: 'click', error: 'Element not found', target: action.target }); }
+        else if (isDisabled(el)) {
+          // Never report a disabled click as success — that's what taught the
+          // AI that clicking a disabled Next "worked" and made it loop.
+          results.push({ ok: false, action: 'click', error: 'target is disabled — cannot click', disabled: true, target: _tgt });
+        } else {
+          fullClick(el);
+          results.push({ ok: true, action: 'click', target: _tgt });
+        }
+      }
+      else if (action.type === 'clickNext') {
+        // Robust wizard-advance: find the Next/Continue button (even below the
+        // fold), scroll it into view, WAIT until it's enabled (up to 10s), click
+        // it, then VERIFY the page changed. Returns a clear disabled/no-effect
+        // signal instead of a false success.
+        const label = action.label || 'Next';
+        let btn = findNavButton(label);
+        if (!btn) { results.push({ ok: false, action: 'clickNext', error: 'Next/Continue button not found on page' }); }
+        else {
+          try { btn.scrollIntoView({ block: 'center' }); } catch(e) {}
+          // Wait for enabled (unit data / required fields still loading).
+          const t0 = Date.now();
+          while (isDisabled(btn) && Date.now() - t0 < 10000) {
+            await sleep(300);
+            btn = findNavButton(label) || btn;
+            try { btn.scrollIntoView({ block: 'center' }); } catch(e) {}
+          }
+          if (isDisabled(btn)) {
+            results.push({ ok: false, action: 'clickNext', error: 'Next stayed disabled 10s — a required field on this step is not filled yet', disabled: true });
+          } else {
+            const beforeUrl = location.href;
+            const beforeSig = document.body ? document.body.innerText.slice(0, 400) : '';
+            fullClick(btn);
+            // Verify it advanced: URL or page content changed within ~3s.
+            let advanced = false;
+            const t1 = Date.now();
+            while (Date.now() - t1 < 3000) {
+              await sleep(300);
+              const afterSig = document.body ? document.body.innerText.slice(0, 400) : '';
+              if (location.href !== beforeUrl || afterSig !== beforeSig) { advanced = true; break; }
+            }
+            results.push(advanced
+              ? { ok: true, action: 'clickNext', advanced: true }
+              : { ok: false, action: 'clickNext', error: 'clicked Next but the page did not change', noEffect: true });
+          }
+        }
       }
       else if (action.type === 'type') {
         const el = findElement(action.target);
@@ -341,6 +454,8 @@ CURRENT PAGE STATE:
 - Loading: ${snapshot.isLoading}
 - Modal visible: ${snapshot.modalVisible || false}${snapshot.modalText ? '\n- Modal text: ' + snapshot.modalText : ''}
 ${snapshot.errors ? '- ERRORS: ' + snapshot.errors.join(', ') : ''}
+${snapshot.currentStep ? '- Current wizard step: ' + snapshot.currentStep : ''}
+${snapshot.primaryButton ? '- Primary button: "' + snapshot.primaryButton.text + '" (disabled=' + snapshot.primaryButton.disabled + ', inView=' + snapshot.primaryButton.inView + ') — use {"type":"clickNext"} to press it' : ''}
 ${snapshot.openDropdownOptions ? '- Open dropdown options: ' + snapshot.openDropdownOptions.join(', ') : ''}
 
 INTERACTIVE ELEMENTS:
@@ -354,18 +469,22 @@ ${stepHistory.slice(-5).map(h => '- ' + h).join('\n') || '(none yet)'}
 ${WIZARD_KNOWLEDGE}
 
 WIZARD RULES (mechanical -- how to execute actions, applies regardless of which screen you're on):
-- This is a multi-page wizard. Fill visible fields on the CURRENT screen using the domain guidance above, then click Next.
+- This is a multi-page wizard. Fill visible fields on the CURRENT screen using the domain guidance above, then advance.
+- TO ADVANCE THE WIZARD, ALWAYS use { "type": "clickNext" } — do NOT use a plain click on "Next". clickNext scrolls the Next button into view (it is often BELOW the fold at the bottom of a long page), WAITS until it is enabled, clicks it, and VERIFIES the page actually changed. Use { "type": "clickNext", "label": "Continue" } if the button says something other than "Next".
+- The primaryButton field in CURRENT PAGE STATE tells you the Next/Submit button's text, whether it is disabled, and whether it's in view. If primaryButton.disabled is true, a REQUIRED FIELD on this step is not filled yet — fill it; do NOT try to click Next. Never click a disabled button.
+- If STEP HISTORY says "the previous action did NOT change the page", do NOT repeat that action. Either fill a missing required field, or use clickNext (which handles scrolling + enabled-wait), or emit a single { "type": "wait", "duration": 1500 } if the page still looks like it's loading.
 - For combobox inputs (role="combobox"): type the value using charByChar:true with charDelay:80, then use a waitForOption action with a generous timeout (8000ms or more -- AAP's dropdown can be slow to render, don't give up early) to wait for the dropdown, then click the matching option.
 - If a field is already filled correctly, skip it and move on.
 - For radio buttons: use action type "radio" with the label text.
 - If a modal is visible, handle it first (e.g., click Confirm).
 - If page is loading, respond with a single "wait" action.
 - If you see errors, note them and try to fix.
-- After filling all fields on the page, ALWAYS click Next/Submit as the last action.
+- After filling all fields on the page, advance with clickNext as the last action.
 - If this is the confirmation/success page (WR ID visible), respond with DONE.
 
 RESPOND WITH A JSON ARRAY OF ACTIONS. Each action is an object:
-- { "type": "click", "target": { "text": "Next" } }
+- { "type": "clickNext" } ← ALWAYS use this to advance (scrolls to Next, waits for enabled, clicks, verifies). Optionally { "type": "clickNext", "label": "Continue" }
+- { "type": "click", "target": { "text": "Some option" } } ← for non-nav clicks (options, checkboxes)
 - { "type": "type", "target": { "id": "wr-title" }, "value": "CEL on - Engine fault", "clear": true }
 - { "type": "type", "target": { "placeholder": "Enter Asset ID" }, "value": "T-8821", "charByChar": true, "charDelay": 80 }
 - { "type": "radio", "value": "Unsafe to Move" }
@@ -530,6 +649,17 @@ async function runAdaptiveWR(payload, askAI, log, opts) {
   let maxSteps = 30; // Safety limit
   let step = 0;
   let result = { ok: false, error: 'Max steps reached' };
+  // Stuck detection: if the page signature (step + URL + text + element
+  // fingerprint) doesn't change across consecutive turns, the AI is repeating
+  // an action that isn't advancing the wizard. Bail to WATCH MODE after a few
+  // no-progress turns instead of burning all 30 steps clicking into the void.
+  let _prevSig = '';
+  let _noProgress = 0;
+  const _pageSig = (s) => {
+    if (!s) return '';
+    const els = (s.elements || []).map(e => e.tag + ':' + (e.id || e.label || e.text || '') + ':' + e.disabled + ':' + e.value).join('|');
+    return (s.currentStep || '') + '::' + (s.url || '') + '::' + (s.pageText || '') + '::' + els;
+  };
   
   while (step < maxSteps) {
     step++;
@@ -561,15 +691,28 @@ async function runAdaptiveWR(payload, askAI, log, opts) {
     }
     
     log(`[AdaptiveWR] Page has ${snapshot.elements.length} elements. Text: ${snapshot.pageText.substring(0, 100)}...`);
-    
+
+    // 3b. STUCK DETECTION — did the last turn's actions change anything?
+    const _sig = _pageSig(snapshot);
+    if (_sig && _sig === _prevSig) {
+      _noProgress++;
+      log('[AdaptiveWR] No page change since last step (x' + _noProgress + ')');
+      if (_noProgress >= 3) {
+        log('[AdaptiveWR] Stuck — page has not advanced in 3 turns. Stopping and handing off to WATCH MODE.');
+        result = { ok: false, error: 'Wizard did not advance (stuck on same step). The AAP window is open — finish this step manually (e.g. scroll down and click Next); the agent will learn from what you do.' };
+        break;
+      }
+    } else {
+      _noProgress = 0;
+    }
+    _prevSig = _sig;
+    // Tell the AI, in-band, that its last action didn't move the page so it
+    // tries something different (e.g. clickNext / scroll) instead of repeating.
+    if (_noProgress > 0) {
+      stepHistory.push('NOTE: the previous action did NOT change the page — do NOT repeat it. If you need to advance, use {"type":"clickNext"} (it scrolls the Next button into view, waits for it to be enabled, and verifies the page changed). If a required field is still empty, fill it first.');
+    }
+
     // 4. Ask Orcha what to do
-    // FIX: buildPrompt() references ${lessonContext} in its template but has
-    // its own function scope -- it never had access to the lessonContext
-    // computed above in runAdaptiveWR (line ~426). That threw
-    // "ReferenceError: lessonContext is not defined" on every single call,
-    // which is the root cause of "Open in AAP (autofill)" doing nothing --
-    // the whole adaptive-fill loop crashed before it ever sent a prompt to
-    // Orcha or touched the page.
     const prompt = buildPrompt(snapshot, payload, stepHistory, lessonContext, autoSubmit);
     let aiResponse;
     try {
@@ -705,8 +848,8 @@ async function runAdaptiveWR(payload, askAI, log, opts) {
     // same still-settling page and effectively get the loop stuck retrying
     // the same step. Give navigation-style clicks (Next/Continue/Save &
     // Continue/Proceed) extra time to land.
-    const clickedNav = actions.some(a => a.type === 'click' &&
-      /\b(next|continue|proceed|save\s*&?\s*continue)\b/i.test((a.target && a.target.text) || ''));
+    const clickedNav = actions.some(a => a.type === 'clickNext' || (a.type === 'click' &&
+      /\b(next|continue|proceed|save\s*&?\s*continue)\b/i.test((a.target && a.target.text) || '')));
     await sleep(clickedNav ? 3500 : 1500);
   }
   
