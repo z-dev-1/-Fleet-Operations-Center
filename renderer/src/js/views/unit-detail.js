@@ -1244,35 +1244,65 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
         // body, so the conversation can never be hidden by our own rule.
         // level by level (not a blanket body-wide hide) so nothing the sheet
         // needs disappears and we never blank the page.
+        // IMPORTANT: do NOT use position:fixed / 100vw / huge z-index on the
+        // sheet. That fights Relay\'s own layout — it caused horizontal overflow
+        // (content cut off on the right) AND broke the "Share Comment With"
+        // dropdown (Relay positions its popovers relative to normal flow; a
+        // fixed, max-z parent traps/mis-places them and can eat clicks). Instead
+        // we leave the sheet in normal document flow and ONLY hide the chrome
+        // siblings + let the sheet fill its container width. This declutters the
+        // view without touching Relay\'s internal positioning, so dropdowns and
+        // scrolling keep working.
         'function isolate(sheet){' +
+          // Skip hiding popover/menu/portal siblings — Relay renders the
+          // "Share Comment With" dropdown (and other menus/tooltips) as a NEW
+          // body-level element when opened. Our 500ms re-run must NOT hide those
+          // or the dropdown appears to "not work". Detect them by role/class.
+          'function isPopover(el){try{var r=(el.getAttribute("role")||"").toLowerCase();if(r==="menu"||r==="listbox"||r==="dialog"||r==="tooltip"||r==="presentation")return true;var c=(el.className&&el.className.baseVal!==undefined?el.className.baseVal:(""+el.className)).toLowerCase();if(/popover|dropdown|menu|listbox|tooltip|portal|overlay/.test(c))return true;if(el.querySelector&&el.querySelector("[role=option],[role=menuitem]"))return true;}catch(e){}return false;}' +
           'var node=sheet;' +
           'while(node&&node.parentElement&&node!==document.body){' +
             'var parent=node.parentElement;var kids=parent.children;' +
-            'for(var i=0;i<kids.length;i++){if(kids[i]!==node){kids[i].style.setProperty("display","none","important");}}' +
+            'for(var i=0;i<kids.length;i++){if(kids[i]!==node&&!isPopover(kids[i])){kids[i].style.setProperty("display","none","important");}}' +
+            // Let the ancestor chain take the full width/height of the pane, but
+            // do NOT force fixed positioning or viewport units.
+            'parent.style.setProperty("flex","1 1 auto","important");' +
             'parent.style.setProperty("width","100%","important");' +
-            'parent.style.setProperty("height","100%","important");' +
-            'parent.style.setProperty("max-height","100vh","important");' +
+            'parent.style.setProperty("max-width","100%","important");' +
             'parent.style.setProperty("margin","0","important");' +
             'parent.style.setProperty("padding","0","important");' +
-            'parent.style.setProperty("overflow-x","hidden","important");' +
             'node=parent;' +
           '}' +
-          'sheet.style.setProperty("position","fixed","important");' +
-          'sheet.style.setProperty("inset","0","important");' +
-          'sheet.style.setProperty("width","100vw","important");' +
-          'sheet.style.setProperty("height","100vh","important");' +
-          'sheet.style.setProperty("max-height","100vh","important");' +
+          // Sheet fills the width of its (now-only-child) container. Keep its
+          // own positioning intact so popovers/dropdowns still work.
+          'sheet.style.setProperty("width","100%","important");' +
+          'sheet.style.setProperty("max-width","100%","important");' +
           'sheet.style.setProperty("margin","0","important");' +
-          'sheet.style.setProperty("background","#fff","important");' +
-          'sheet.style.setProperty("z-index","2147483647","important");' +
-          'sheet.style.setProperty("overflow","auto","important");' +
+          // Kill any page-level horizontal scrollbar without pinning width.
           'document.documentElement.style.setProperty("overflow-x","hidden","important");' +
-          'try{document.body.style.setProperty("overflow-x","hidden","important");}catch(e){}' +
+          'try{document.body.style.setProperty("overflow-x","hidden","important");document.body.style.setProperty("margin","0","important");}catch(e){}' +
           'try{var sc=[].slice.call(sheet.querySelectorAll("*")).filter(function(el){var cs=getComputedStyle(el);return (cs.overflowY==="auto"||cs.overflowY==="scroll")&&el.scrollHeight>el.clientHeight+20;});sc.sort(function(a,b){return b.scrollHeight-a.scrollHeight;});if(sc[0])sc[0].scrollTop=sc[0].scrollHeight;else sheet.scrollTop=sheet.scrollHeight;}catch(e){}' +
+        '}' +
+        // The conversation sheet only exists AFTER the comments panel is opened.
+        // The old script clicked a "Toggle Comments" button to open it; that
+        // step must run FIRST or .rg-full-height-sheet never appears. Click it
+        // (once) if the sheet isn\'t present yet — match a few likely labels.
+        'var opened=false;' +
+        'function openConversation(){' +
+          'if(document.querySelector(".rg-full-height-sheet"))return true;' +
+          'var els=[].slice.call(document.querySelectorAll("button,a,[role=button],[role=tab]"));' +
+          'for(var i=0;i<els.length;i++){' +
+            'var t=(els[i].textContent||els[i].getAttribute("aria-label")||"").trim().toLowerCase();' +
+            'if(t.indexOf("toggle comments")>-1||t==="comments"||t==="conversation"||t.indexOf("view comments")>-1||t.indexOf("show comments")>-1){' +
+              'try{els[i].click();opened=true;}catch(e){}' +
+              'return false;' +
+            '}' +
+          '}' +
+          'return false;' +
         '}' +
         'var tries=0,MAX=40;' +
         'function tick(){' +
           'var sheet=document.querySelector(".rg-full-height-sheet");' +
+          'if(!sheet){openConversation();sheet=document.querySelector(".rg-full-height-sheet");}' +
           'if(sheet){isolate(sheet);}' +               // only touch the DOM when the sheet exists
           'if(++tries<MAX)setTimeout(tick,500);' +      // keep re-asserting (Relay re-renders)
         '}' +
