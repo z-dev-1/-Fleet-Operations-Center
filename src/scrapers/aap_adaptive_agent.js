@@ -284,7 +284,19 @@ function buildActionScript(actions) {
       if (action.type === 'click') {
         const el = findElement(action.target);
         const _tgt = action.target.text || action.target.id || 'idx:' + action.target.idx;
-        if (!el) { results.push({ ok: false, action: 'click', error: 'Element not found', target: action.target }); }
+        // AUTO-PROMOTE a plain click on the wizard's Next/Continue button into
+        // the robust clickNext path. The AI keeps emitting {type:"click",
+        // target:{text:"Next"}} (see live logs), which used to "succeed" even
+        // when the button was off-screen/disabled and nothing happened — the
+        // exact cause of the 8-step no-progress loop. If the click target is a
+        // nav button, fall through to the clickNext behavior (scroll + wait for
+        // enabled + verify the page actually changed).
+        const _navText = String(_tgt || '').trim().toLowerCase();
+        const _isNav = /^(next|continue|save\\s*&?\\s*continue|proceed|submit|submit request)$/.test(_navText);
+        if (_isNav) {
+          action = { type: 'clickNext', label: (action.target && action.target.text) || 'Next', _promotedFrom: 'click' };
+          // fall through to the clickNext handler below
+        } else if (!el) { results.push({ ok: false, action: 'click', error: 'Element not found', target: action.target }); }
         else if (isDisabled(el)) {
           // Never report a disabled click as success — that's what taught the
           // AI that clicking a disabled Next "worked" and made it loop.
@@ -294,7 +306,7 @@ function buildActionScript(actions) {
           results.push({ ok: true, action: 'click', target: _tgt });
         }
       }
-      else if (action.type === 'clickNext') {
+      if (action.type === 'clickNext') {
         // Robust wizard-advance: find the Next/Continue button (even below the
         // fold), scroll it into view, WAIT until it's enabled (up to 10s), click
         // it, then VERIFY the page changed. Returns a clear disabled/no-effect
@@ -314,16 +326,28 @@ function buildActionScript(actions) {
           if (isDisabled(btn)) {
             results.push({ ok: false, action: 'clickNext', error: 'Next stayed disabled 10s — a required field on this step is not filled yet', disabled: true });
           } else {
+            // Capture a STABLE step marker before clicking so we can tell a
+            // real step transition from mere hydration churn. Prefer the
+            // left-side stepper's current-step label; fall back to the set of
+            // field labels present (structure, not values); last resort URL.
+            function _stepMarker() {
+              const cur = document.querySelector('[aria-current="step"], [aria-current="true"], [class*="stepper"] [class*="active"], [class*="Step"][class*="active"], [class*="current"]');
+              if (cur) return 'S:' + (cur.innerText || cur.textContent || '').trim().slice(0, 60);
+              const labels = Array.from(document.querySelectorAll('label, legend'))
+                .map(l => (l.innerText || '').trim()).filter(Boolean).sort().join('|');
+              return 'L:' + labels.slice(0, 400);
+            }
             const beforeUrl = location.href;
-            const beforeSig = document.body ? document.body.innerText.slice(0, 400) : '';
+            const beforeMarker = _stepMarker();
             fullClick(btn);
-            // Verify it advanced: URL or page content changed within ~3s.
+            // Verify it advanced: URL or the step marker changed within ~5s.
+            // (5s, not 3s — a wizard step transition can render slower than the
+            // old 3s window, which produced false "did not change" signals.)
             let advanced = false;
             const t1 = Date.now();
-            while (Date.now() - t1 < 3000) {
+            while (Date.now() - t1 < 5000) {
               await sleep(300);
-              const afterSig = document.body ? document.body.innerText.slice(0, 400) : '';
-              if (location.href !== beforeUrl || afterSig !== beforeSig) { advanced = true; break; }
+              if (location.href !== beforeUrl || _stepMarker() !== beforeMarker) { advanced = true; break; }
             }
             results.push(advanced
               ? { ok: true, action: 'clickNext', advanced: true }
@@ -470,7 +494,9 @@ ${WIZARD_KNOWLEDGE}
 
 WIZARD RULES (mechanical -- how to execute actions, applies regardless of which screen you're on):
 - This is a multi-page wizard. Fill visible fields on the CURRENT screen using the domain guidance above, then advance.
-- TO ADVANCE THE WIZARD, ALWAYS use { "type": "clickNext" } — do NOT use a plain click on "Next". clickNext scrolls the Next button into view (it is often BELOW the fold at the bottom of a long page), WAITS until it is enabled, clicks it, and VERIFIES the page actually changed. Use { "type": "clickNext", "label": "Continue" } if the button says something other than "Next".
+- TO ADVANCE THE WIZARD, ALWAYS use { "type": "clickNext" } — do NOT use a plain click on "Next". clickNext scrolls the Next button into view (it is often BELOW the fold at the bottom of a long page), WAITS until it is enabled, clicks it, and VERIFIES the page actually changed. Use { "type": "clickNext", "label": "Continue" } if the button says something other than "Next". (A plain click on a button literally labelled Next/Continue/Submit is auto-upgraded to clickNext for you, but you should still emit clickNext directly.)
+- IMPORTANT — SELECT EQUIPMENT (screen 1): the Next button starts DISABLED and only enables AFTER you type the Asset ID AND the asset data (VIN/Make/Model) finishes auto-populating. Correct sequence for step 1: type the Asset ID into the equipment field, THEN emit ONE { "type": "clickNext" } as the LAST action — it waits for the button to enable on its own. Do NOT emit several clicks; do NOT click before typing the ID.
+- If your previous turn was a click/clickNext on Next and the page did NOT advance (you'll see a NOTE saying so, or a clickNext result with noEffect/disabled), the required field for THIS step is not satisfied yet. Do NOT click Next again. Instead fill the missing field the page shows, or if everything looks filled emit a single { "type": "wait", "duration": 2000 } to let it settle, then clickNext once.
 - The primaryButton field in CURRENT PAGE STATE tells you the Next/Submit button's text, whether it is disabled, and whether it's in view. If primaryButton.disabled is true, a REQUIRED FIELD on this step is not filled yet — fill it; do NOT try to click Next. Never click a disabled button.
 - If STEP HISTORY says "the previous action did NOT change the page", do NOT repeat that action. Either fill a missing required field, or use clickNext (which handles scrolling + enabled-wait), or emit a single { "type": "wait", "duration": 1500 } if the page still looks like it's loading.
 - For combobox inputs (role="combobox"): type the value using charByChar:true with charDelay:80, then use a waitForOption action with a generous timeout (8000ms or more -- AAP's dropdown can be slow to render, don't give up early) to wait for the dropdown, then click the matching option.
@@ -655,10 +681,23 @@ async function runAdaptiveWR(payload, askAI, log, opts) {
   // no-progress turns instead of burning all 30 steps clicking into the void.
   let _prevSig = '';
   let _noProgress = 0;
+  // STUCK SIGNATURE — must reflect "are we still on the SAME wizard step",
+  // NOT a byte-exact page fingerprint. Earlier this included pageText and every
+  // element's live .value, so async React hydration (e.g. "New Unplanned
+  // Request" -> "...for B62060", asset fields filling in) mutated the signature
+  // every turn and _noProgress kept resetting to 0 — the loop clicked a
+  // dead/off-screen Next 8+ times and stuck detection never fired. Base the
+  // signature on step IDENTITY only: which step the stepper shows, the wizard
+  // URL, and the STRUCTURE of fields present (tag+id+label — NOT their values,
+  // NOT their disabled state, NOT free page text). If that structural identity
+  // is unchanged across turns, we're on the same step and not advancing.
   const _pageSig = (s) => {
     if (!s) return '';
-    const els = (s.elements || []).map(e => e.tag + ':' + (e.id || e.label || e.text || '') + ':' + e.disabled + ':' + e.value).join('|');
-    return (s.currentStep || '') + '::' + (s.url || '') + '::' + (s.pageText || '') + '::' + els;
+    const els = (s.elements || [])
+      .map(e => e.tag + ':' + (e.id || e.label || e.text || ''))
+      .sort()
+      .join('|');
+    return (s.currentStep || '') + '::' + (s.url || '') + '::' + els;
   };
   
   while (step < maxSteps) {
