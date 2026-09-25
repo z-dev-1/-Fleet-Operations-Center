@@ -1223,92 +1223,63 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
   var relayWv = document.getElementById('dp-wv-relay');
   if (relayWv) {
     relayWv.addEventListener('dom-ready', function() {
-      // Isolate the Relay conversation panel inside the split-view webview so
-      // ONLY the conversation shows (no top nav / page title / breadcrumb /
-      // sidebar). The OLD script here hunted for an <h1>Conversation</h1> and
-      // guessed 4 parent levels up — Relay's DOM changed and that stopped
-      // matching, so nothing got isolated. Dev-tools confirmed the correct,
-      // STABLE target is `.rg-full-height-sheet` (Conversation/Automation tabs,
-      // search, thread, comment box). Approach: inject a stylesheet that hides
-      // the whole body, then re-shows ONLY the sheet + its subtree, and pins
-      // the sheet full-screen. A MutationObserver re-asserts it because Relay
-      // is a SPA that re-renders/re-adds chrome. Keyed to the rg- class, never
-      // the volatile css-* hashes.
+      // Isolate the Relay conversation in the split-view webview so ONLY the
+      // conversation shows (no top nav / title / breadcrumb / sidebar).
+      //
+      // KEY LESSON FROM THE ORIGINAL (git a247aa6): the original ALSO used
+      // position:fixed + z-index, and the dropdown worked — because it pinned a
+      // HIGHER ANCESTOR that CONTAINS the conversation, not the conversation
+      // element itself. When a later rewrite pinned `.rg-full-height-sheet`
+      // directly, the fixed context landed BETWEEN the dropdown trigger and
+      // where its popover renders, which broke the "Share Comment With"
+      // dropdown. So here we again pin the sheet's PARENT container full-screen
+      // and let the sheet lay out normally inside it — dropdown context intact,
+      // and the sheet fills the pinned container so it fills the view. We only
+      // open comments first (the sheet doesn't exist until then) and target the
+      // stable `.rg-full-height-sheet` to FIND the right container.
       relayWv.executeJavaScript(
         '(function(){' +
         'if(window.__fleetConvIsolate)return;window.__fleetConvIsolate=true;' +
-        // FAIL-SAFE: only ever touch the DOM once the sheet is actually found.
-        // If it is never found, the page stays fully visible (a bit of chrome
-        // is far better than a blank white pane). We hide chrome level-by-level
-        // as SIBLINGS of the sheet\'s ancestor chain — we never blanket-hide the
-        // body, so the conversation can never be hidden by our own rule.
-        // level by level (not a blanket body-wide hide) so nothing the sheet
-        // needs disappears and we never blank the page.
-        // IMPORTANT: do NOT use position:fixed / 100vw / huge z-index on the
-        // sheet. That fights Relay\'s own layout — it caused horizontal overflow
-        // (content cut off on the right) AND broke the "Share Comment With"
-        // dropdown (Relay positions its popovers relative to normal flow; a
-        // fixed, max-z parent traps/mis-places them and can eat clicks). Instead
-        // we leave the sheet in normal document flow and ONLY hide the chrome
-        // siblings + let the sheet fill its container width. This declutters the
-        // view without touching Relay\'s internal positioning, so dropdowns and
-        // scrolling keep working.
-        'function isolate(sheet){' +
-          // Skip hiding popover/menu/portal siblings — Relay renders the
-          // "Share Comment With" dropdown (and other menus/tooltips) as a NEW
-          // body-level element when opened. Our 500ms re-run must NOT hide those
-          // or the dropdown appears to "not work". Detect them by role/class.
-          'function isPopover(el){try{var r=(el.getAttribute("role")||"").toLowerCase();if(r==="menu"||r==="listbox"||r==="dialog"||r==="tooltip"||r==="presentation")return true;var c=(el.className&&el.className.baseVal!==undefined?el.className.baseVal:(""+el.className)).toLowerCase();if(/popover|dropdown|menu|listbox|tooltip|portal|overlay/.test(c))return true;if(el.querySelector&&el.querySelector("[role=option],[role=menuitem]"))return true;}catch(e){}return false;}' +
-          'var node=sheet;' +
-          'while(node&&node.parentElement&&node!==document.body){' +
-            'var parent=node.parentElement;var kids=parent.children;' +
-            'for(var i=0;i<kids.length;i++){if(kids[i]!==node&&!isPopover(kids[i])){kids[i].style.setProperty("display","none","important");}}' +
-            // Let the ancestor chain take the full width/height of the pane, but
-            // do NOT force fixed positioning or viewport units.
-            'parent.style.setProperty("flex","1 1 auto","important");' +
-            'parent.style.setProperty("width","100%","important");' +
-            'parent.style.setProperty("max-width","100%","important");' +
-            'parent.style.setProperty("margin","0","important");' +
-            'parent.style.setProperty("padding","0","important");' +
-            'node=parent;' +
-          '}' +
-          // Sheet fills the width of its (now-only-child) container. Keep its
-          // own positioning intact so popovers/dropdowns still work. We
-          // deliberately do NOT force widths on the sheet\'s inner children —
-          // that broke the "Share Comment With" dropdown (it is one of those
-          // children / renders inside them). Filling perfectly edge-to-edge is
-          // not worth breaking the dropdown.
-          'sheet.style.setProperty("width","100%","important");' +
-          'sheet.style.setProperty("max-width","100%","important");' +
-          'sheet.style.setProperty("margin","0","important");' +
-          // Kill any page-level horizontal scrollbar without pinning width.
-          'document.documentElement.style.setProperty("overflow-x","hidden","important");' +
-          'try{document.body.style.setProperty("overflow-x","hidden","important");document.body.style.setProperty("margin","0","important");}catch(e){}' +
-          'try{var sc=[].slice.call(sheet.querySelectorAll("*")).filter(function(el){var cs=getComputedStyle(el);return (cs.overflowY==="auto"||cs.overflowY==="scroll")&&el.scrollHeight>el.clientHeight+20;});sc.sort(function(a,b){return b.scrollHeight-a.scrollHeight;});if(sc[0])sc[0].scrollTop=sc[0].scrollHeight;else sheet.scrollTop=sheet.scrollHeight;}catch(e){}' +
-        '}' +
-        // The conversation sheet only exists AFTER the comments panel is opened.
-        // The old script clicked a "Toggle Comments" button to open it; that
-        // step must run FIRST or .rg-full-height-sheet never appears. Click it
-        // (once) if the sheet isn\'t present yet — match a few likely labels.
-        'var opened=false;' +
+        // Open the comments/conversation panel first (sheet only exists after).
         'function openConversation(){' +
           'if(document.querySelector(".rg-full-height-sheet"))return true;' +
           'var els=[].slice.call(document.querySelectorAll("button,a,[role=button],[role=tab]"));' +
           'for(var i=0;i<els.length;i++){' +
             'var t=(els[i].textContent||els[i].getAttribute("aria-label")||"").trim().toLowerCase();' +
             'if(t.indexOf("toggle comments")>-1||t==="comments"||t==="conversation"||t.indexOf("view comments")>-1||t.indexOf("show comments")>-1){' +
-              'try{els[i].click();opened=true;}catch(e){}' +
-              'return false;' +
+              'try{els[i].click();}catch(e){}return false;' +
             '}' +
           '}' +
           'return false;' +
+        '}' +
+        // Pin the sheet's PARENT (container) full-viewport — NOT the sheet
+        // itself — so the dropdown popover keeps its correct positioning
+        // context (this is what made the original work). Then hide the pinned
+        // container\'s other children and body-level siblings that aren\'t on the
+        // conversation\'s ancestor path. Never touch the sheet\'s inner children.
+        'function isolate(sheet){' +
+          'var container=sheet.parentElement||sheet;' +
+          'container.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:100%;margin:0;padding:0;overflow:auto;background:#fff;z-index:99999";' +
+          // Hide the container\'s other children (siblings of the sheet).
+          'var kids=container.children;' +
+          'for(var i=0;i<kids.length;i++){if(kids[i]!==sheet&&!kids[i].contains(sheet)){kids[i].style.setProperty("display","none","important");}}' +
+          // Make the sheet fill the pinned container.
+          'sheet.style.setProperty("width","100%","important");' +
+          'sheet.style.setProperty("height","100%","important");' +
+          'sheet.style.setProperty("margin","0","important");' +
+          // Hide body-level chrome that neither contains nor is inside the
+          // container (nav/title/breadcrumb/sidebar).
+          'var top=document.body.children;' +
+          'for(var j=0;j<top.length;j++){if(top[j]!==container&&!top[j].contains(container)&&!container.contains(top[j])){top[j].style.setProperty("display","none","important");}}' +
+          // Scroll the conversation to the newest message.
+          'try{var sc=[].slice.call(sheet.querySelectorAll("*")).filter(function(el){var cs=getComputedStyle(el);return (cs.overflowY==="auto"||cs.overflowY==="scroll")&&el.scrollHeight>el.clientHeight+20;});sc.sort(function(a,b){return b.scrollHeight-a.scrollHeight;});if(sc[0])sc[0].scrollTop=sc[0].scrollHeight;else sheet.scrollTop=sheet.scrollHeight;}catch(e){}' +
         '}' +
         'var tries=0,MAX=40;' +
         'function tick(){' +
           'var sheet=document.querySelector(".rg-full-height-sheet");' +
           'if(!sheet){openConversation();sheet=document.querySelector(".rg-full-height-sheet");}' +
-          'if(sheet){isolate(sheet);}' +               // only touch the DOM when the sheet exists
-          'if(++tries<MAX)setTimeout(tick,500);' +      // keep re-asserting (Relay re-renders)
+          'if(sheet){isolate(sheet);}' +
+          'if(++tries<MAX)setTimeout(tick,500);' +
         '}' +
         'tick();' +
         '})()'
