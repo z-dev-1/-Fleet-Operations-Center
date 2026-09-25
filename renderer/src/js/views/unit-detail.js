@@ -1273,7 +1273,11 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
             'node=parent;' +
           '}' +
           // Sheet fills the width of its (now-only-child) container. Keep its
-          // own positioning intact so popovers/dropdowns still work.
+          // own positioning intact so popovers/dropdowns still work. We
+          // deliberately do NOT force widths on the sheet\'s inner children —
+          // that broke the "Share Comment With" dropdown (it is one of those
+          // children / renders inside them). Filling perfectly edge-to-edge is
+          // not worth breaking the dropdown.
           'sheet.style.setProperty("width","100%","important");' +
           'sheet.style.setProperty("max-width","100%","important");' +
           'sheet.style.setProperty("margin","0","important");' +
