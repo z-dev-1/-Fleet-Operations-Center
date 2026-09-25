@@ -332,27 +332,30 @@ app.whenReady().then(async () => {
         // mwinit ahead of the bounce, so the WebAuthn tap happens proactively
         // instead of mid-task after AAP has already kicked us out.
         if (state.ok) {
-          const AEA_RENEW_AHEAD_MIN = 10; // mint a fresh AEA ~10min before it dies
+          // FIX (hourly re-auth prompt): the block here used to spawn mwinit
+          // ~10min before the short-lived (~1h) AEA token expired. But mwinit is
+          // NOT silent — it opens a terminal and requires a WebAuthn/security-key
+          // tap. So this proactively prompted the user for auth roughly every
+          // hour (on the AEA cadence) even though the real ~20h Midway session
+          // was perfectly valid and the app kept working — the exact reported
+          // symptom. It also escalated purely off the local AEA timestamp,
+          // without ever confirming AAP was actually bouncing a request, so it
+          // prompted speculatively even when nothing was broken and regardless
+          // of VPN state.
+          //
+          // Only the CHEAP, SILENT keep-alive re-inject runs now. While the 20h
+          // session is valid, AAP re-issues a fresh AEA on its own on the next
+          // authenticated request (rescan/sync) — no tap needed. If AEA truly
+          // lapses AND AAP actually bounces requests to SSO, the REACTIVE paths
+          // (the SSO auth-poll / probe-failure ladder) handle it WHEN IT REALLY
+          // HAPPENS. A genuine 20h session expiry is handled by the
+          // expiresInMin < 15 branch below (~once/day).
           const aeaMin = state.aeaExpiresInMin;
-          const aeaNeedsMwinit = aeaMin !== null && aeaMin < AEA_RENEW_AHEAD_MIN;
-          if (aeaNeedsMwinit && !_midwayRenewalInFlight) {
-            log.warn('[midway] AEA token expires in ' + aeaMin + 'min (<' + AEA_RENEW_AHEAD_MIN +
-              ') -- proactively refreshing via mwinit before AAP bounces the session');
-            _midwayRenewalInFlight = true;
-            _send('app:midway-renewing', { expiresIn: aeaMin, reason: 'aea' });
-            await _authModule.runMwinit();
+          try {
             await _authModule.injectCookies();
-            log.info('[midway] AEA proactively refreshed');
-            _send('app:midway-renewed', {});
-          } else {
-            // Cheap keep-alive: re-inject the current (still-valid) cookies so
-            // the AEA in the Electron session never goes stale relative to disk.
-            try {
-              await _authModule.injectCookies();
-              log.info('[midway] keep-alive re-inject done (aeaExpiresInMin=' + aeaMin + ')');
-            } catch (e) {
-              log.warn('[midway] keep-alive re-inject skipped: ' + e.message);
-            }
+            log.info('[midway] keep-alive re-inject done (aeaExpiresInMin=' + aeaMin + ') — no prompt');
+          } catch (e) {
+            log.warn('[midway] keep-alive re-inject skipped: ' + e.message);
           }
         }
 
