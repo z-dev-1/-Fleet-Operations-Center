@@ -521,10 +521,58 @@ function registerMiscIPC(ctx) {
       };
     };
 
+    // After the Relay Garage (left) window loads, expand + focus the
+    // conversation area so more of the thread is visible. Relay Garage's
+    // conversation sheet is the element with the STABLE class
+    // `.rg-full-height-sheet` (the surrounding css-* hash classes regenerate
+    // every Relay build, so we deliberately target only the rg- class). This
+    // is injected page-side, retries a few times because Relay hydrates async,
+    // and no-ops safely if the element isn't present (e.g. a login page).
+    const FOCUS_CONVERSATION_SCRIPT = `
+      (function () {
+        var tries = 0;
+        var MAX = 20; // ~20 * 500ms = up to 10s for Relay to render
+        function apply() {
+          try {
+            var sheet = document.querySelector('.rg-full-height-sheet');
+            if (!sheet) { if (++tries < MAX) return setTimeout(apply, 500); return; }
+            // Expand the conversation sheet to use more of the viewport so more
+            // of the thread shows without scrolling. Use !important via cssText
+            // append so Relay's inline/emotion styles don't override us.
+            var extra = 'height:100vh !important;max-height:100vh !important;min-height:80vh !important;';
+            if (sheet.style.cssText.indexOf('max-height:100vh') === -1) {
+              sheet.style.cssText += extra;
+            }
+            // Bring it into view and scroll the conversation to the latest.
+            try { sheet.scrollIntoView({ block: 'start', inline: 'nearest' }); } catch (e) {}
+            // Find the actual scrollable conversation region inside the sheet
+            // (the tallest scrollable descendant) and jump it to the bottom so
+            // the newest messages are focused.
+            try {
+              var scrollables = [].slice.call(sheet.querySelectorAll('*')).filter(function (el) {
+                var cs = getComputedStyle(el);
+                return (cs.overflowY === 'auto' || cs.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 20;
+              });
+              scrollables.sort(function (a, b) { return b.scrollHeight - a.scrollHeight; });
+              if (scrollables[0]) scrollables[0].scrollTop = scrollables[0].scrollHeight;
+              else sheet.scrollTop = sheet.scrollHeight;
+            } catch (e) {}
+          } catch (e) {}
+        }
+        apply();
+      })();
+    `;
+
     if (leftUrl) {
       const left = new BrowserWindow(opts(0, leftTitle || 'Relay Garage', leftUrl));
       left.setMenuBarVisibility(false);
       attachAutoLogin(left, leftUrl, { maxRetries: 3 });
+      // Re-run the conversation-focus on every finished navigation (initial
+      // load AND any in-app route change into a WR/conversation), since Relay
+      // is a SPA and the sheet mounts/re-mounts as the user navigates.
+      left.webContents.on('did-finish-load', () => {
+        left.webContents.executeJavaScript(FOCUS_CONVERSATION_SCRIPT).catch(() => {});
+      });
       left.loadURL(leftUrl);
     }
     if (rightUrl) {
