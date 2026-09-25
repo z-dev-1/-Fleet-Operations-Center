@@ -168,11 +168,35 @@ const SNAPSHOT_SCRIPT = `
   })();
 
   // ── Current wizard step (left-side stepper) ───────────────────────────────
-  // Report which step is highlighted so the AI (and stuck detection) can tell
-  // whether the wizard actually advanced. Best-effort across common markers.
+  // Report which step is highlighted so the AI, stuck detection, AND the
+  // per-step recipe engine can tell which step we're on and whether the wizard
+  // actually advanced. The AAP stepper (see live screenshots) renders each step
+  // as a row with a status marker: a checkmark for completed steps, a filled
+  // dot for the CURRENT step, and hollow dots for future steps. We try, in
+  // order: (1) an explicit aria-current marker, (2) framework "active/current"
+  // classes, (3) heuristic — the known step names present as a list, with the
+  // current one identified by not-yet-completed styling. Best-effort; falls
+  // back to a name match against the known AAP step list.
   (function() {
-    const cur = document.querySelector('[aria-current="step"], [aria-current="true"], [class*="stepper"] [class*="active"], [class*="Step"][class*="active"], [class*="current"]');
-    if (cur) { snapshot.currentStep = (cur.innerText || cur.textContent || '').trim().substring(0, 60); }
+    const KNOWN = ['Select Equipment','Asset Condition','Location','Work Request Details','Issue Details','Select Vendor','Comments','Review'];
+    let cur = document.querySelector('[aria-current="step"], [aria-current="true"], [class*="stepper"] [class*="active"], [class*="Step"][class*="active"], [class*="current"]');
+    if (cur) {
+      const t = (cur.innerText || cur.textContent || '').trim();
+      // Normalize to a known step name if the marker text contains one.
+      const hit = KNOWN.find(k => t.toLowerCase().includes(k.toLowerCase()));
+      snapshot.currentStep = (hit || t).substring(0, 60);
+    }
+    // Also expose the full step list + which look completed, so the recipe
+    // engine can reason about ordering even when markers are ambiguous.
+    try {
+      const rows = Array.from(document.querySelectorAll('a, li, div, span')).filter(el => {
+        const t = (el.innerText || '').trim();
+        return KNOWN.includes(t);
+      });
+      if (rows.length) {
+        snapshot.stepList = KNOWN.filter(k => rows.some(r => (r.innerText || '').trim() === k));
+      }
+    } catch (e) {}
   })();
 
   return JSON.stringify(snapshot);
@@ -607,6 +631,117 @@ function _describeActions(actions) {
   }).join(', ');
 }
 
+// ═══════════════════════════════════════════════════════════════
+// PER-STEP RECIPE LEARNING (cautious / self-healing)
+// ═══════════════════════════════════════════════════════════════
+// The AAP wizard tells us which step we're on (the left-side stepper: "Select
+// Equipment", "Asset Condition", "Location", ...). Instead of asking the AI to
+// re-derive every step from scratch on every run, we remember the SEQUENCE OF
+// ACTIONS that successfully advanced each NAMED step, then replay it on future
+// runs — but only after it has proven itself (successCount >= REPLAY_MIN_WINS),
+// and always verifying the page actually advanced. If a replay fails, we drop
+// that recipe and fall back to the AI, which re-learns it. Keying by step NAME
+// (not position) is what makes "sometimes more steps, sometimes fewer" work:
+// an unknown step name simply has no recipe and goes to the AI.
+//
+// Recipes are NOT dumb keystroke macros. Per-unit values (Asset ID, location
+// code, issue text) change every run, so on capture we TEMPLATIZE action
+// values that match a payload field into {{field}} placeholders, and on replay
+// we HYDRATE them back from the CURRENT payload. Structure is reused; values
+// are always current.
+const REPLAY_MIN_WINS = 2; // cautious: only auto-replay after 2 clean successes
+const RECIPE_STORE_KEY = 'aapStepRecipes';
+const RECIPE_UNREPLAYABLE_TYPES = new Set(['DONE', 'DONE_REVIEW']);
+
+// Normalize a step name to a stable key (lowercase, collapse whitespace).
+function _normStep(name) {
+  return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ').substring(0, 60);
+}
+
+// Flatten payload into a list of {field, value} for templatizing. Only
+// primitive string/number leaves are useful as fill values.
+function _payloadPairs(payload) {
+  const pairs = [];
+  const walk = (obj, prefix) => {
+    if (obj == null) return;
+    if (Array.isArray(obj)) { obj.forEach((v, i) => walk(v, prefix + '[' + i + ']')); return; }
+    if (typeof obj === 'object') { for (const k of Object.keys(obj)) walk(obj[k], prefix ? prefix + '.' + k : k); return; }
+    const s = String(obj);
+    if (s.length >= 2) pairs.push({ field: prefix, value: s });
+  };
+  walk(payload || {}, '');
+  // Longest values first so we replace the most specific match, not a short
+  // substring that happens to collide.
+  return pairs.sort((a, b) => b.value.length - a.value.length);
+}
+
+// Replace any action value that exactly equals a payload value with a
+// {{field}} placeholder, so the recipe is unit-agnostic.
+function _templatizeActions(actions, payload) {
+  const pairs = _payloadPairs(payload);
+  const byValue = new Map();
+  pairs.forEach(p => { if (!byValue.has(p.value)) byValue.set(p.value, p.field); });
+  return actions.map(a => {
+    const copy = JSON.parse(JSON.stringify(a));
+    if (copy.value !== undefined && copy.value !== null) {
+      const v = String(copy.value);
+      if (byValue.has(v)) copy.value = '{{' + byValue.get(v) + '}}';
+    }
+    // Templatize a target's text/value the same way (e.g. a location code
+    // typed into a combobox target).
+    if (copy.target && typeof copy.target === 'object') {
+      for (const key of ['text', 'value']) {
+        if (copy.target[key] && byValue.has(String(copy.target[key]))) {
+          copy.target[key] = '{{' + byValue.get(String(copy.target[key])) + '}}';
+        }
+      }
+    }
+    return copy;
+  });
+}
+
+// Resolve a dotted/bracketed field path against the payload.
+function _resolvePath(payload, path) {
+  try {
+    return path.split('.').reduce((o, seg) => {
+      const m = seg.match(/^(.+?)\[(\d+)\]$/);
+      if (m) return o == null ? undefined : o[m[1]][Number(m[2])];
+      return o == null ? undefined : o[seg];
+    }, payload);
+  } catch (e) { return undefined; }
+}
+
+// Fill {{field}} placeholders in a stored recipe from the CURRENT payload.
+// Returns { actions, ok }. ok=false if any placeholder can't be resolved (a
+// required per-unit value is missing) — in that case we must NOT replay, and
+// let the AI handle the step live.
+function _hydrateActions(templateActions, payload) {
+  let ok = true;
+  const fill = (val) => {
+    if (typeof val !== 'string') return val;
+    const m = val.match(/^\{\{(.+)\}\}$/);
+    if (!m) return val;
+    const resolved = _resolvePath(payload, m[1]);
+    if (resolved === undefined || resolved === null || String(resolved).length === 0) { ok = false; return val; }
+    return String(resolved);
+  };
+  const actions = templateActions.map(a => {
+    const copy = JSON.parse(JSON.stringify(a));
+    if (copy.value !== undefined) copy.value = fill(copy.value);
+    if (copy.target && typeof copy.target === 'object') {
+      for (const key of ['text', 'value']) if (copy.target[key] !== undefined) copy.target[key] = fill(copy.target[key]);
+    }
+    return copy;
+  });
+  return { actions, ok };
+}
+
+function _loadRecipes(store) {
+  const r = store.load(RECIPE_STORE_KEY, {});
+  return (r && typeof r === 'object') ? r : {};
+}
+function _saveRecipes(store, recipes) { store.save(RECIPE_STORE_KEY, recipes); }
+
 async function runAdaptiveWR(payload, askAI, log, opts) {
   if (!log) log = console.log;
   opts = opts || {};
@@ -672,6 +807,28 @@ async function runAdaptiveWR(payload, askAI, log, opts) {
   const lessonContext = lessons.length > 0
     ? '\nPAST LESSONS (what worked before on this wizard):\n' + lessons.slice(-15).map(l => '- ' + l).join('\n') + '\n'
     : '';
+
+  // Per-step recipes — proven action sequences keyed by step name. Loaded once
+  // per run; replayed (task #2) and updated on success (task #3).
+  const recipes = _loadRecipes(store);
+  // Snapshot the wizard step-identity so we can tell if a set of executed
+  // actions actually ADVANCED the wizard (moved off the current step) rather
+  // than merely running without error. Mirrors _pageSig's step-identity logic.
+  const _stepIdentity = (s) => (s && (s.currentStep || '')) + '::' + ((s && s.url) || '');
+  // Re-snapshot and report whether the wizard advanced off `beforeIdentity`.
+  const _didAdvance = async (beforeIdentity) => {
+    // Give the page up to ~5s to transition (a step change can render slowly).
+    const t0 = Date.now();
+    while (Date.now() - t0 < 5000) {
+      await sleep(400);
+      try {
+        const raw = await win.webContents.executeJavaScript(SNAPSHOT_SCRIPT);
+        const s = JSON.parse(raw);
+        if (_stepIdentity(s) !== beforeIdentity) return true;
+      } catch (e) {}
+    }
+    return false;
+  };
   let maxSteps = 30; // Safety limit
   let step = 0;
   let result = { ok: false, error: 'Max steps reached' };
@@ -751,6 +908,54 @@ async function runAdaptiveWR(payload, askAI, log, opts) {
       stepHistory.push('NOTE: the previous action did NOT change the page — do NOT repeat it. If you need to advance, use {"type":"clickNext"} (it scrolls the Next button into view, waits for it to be enabled, and verifies the page changed). If a required field is still empty, fill it first.');
     }
 
+    // 3c. PER-STEP RECIPE REPLAY (cautious) — if we've already learned a proven
+    // recipe for THIS named step, replay it directly instead of asking the AI.
+    // This is what makes repeat runs fast: a perfected step is recognized by
+    // name and executed without guessing. Guarded heavily:
+    //   - only when we can identify the step name (from the stepper),
+    //   - only after the recipe has succeeded REPLAY_MIN_WINS times,
+    //   - only if every {{payload}} placeholder resolves for THIS unit,
+    //   - never for Review/Submit in no-submit mode (let the stop-logic handle it),
+    //   - always verified: if the page doesn't advance, the recipe is dropped
+    //     and we fall through to the AI, which re-learns it.
+    const _stepKey = _normStep(snapshot.currentStep);
+    const _recipe = _stepKey ? recipes[_stepKey] : null;
+    const _reviewish = /review|submit/.test(_stepKey);
+    if (_recipe && _recipe.actions && (_recipe.successCount || 0) >= REPLAY_MIN_WINS && !_reviewish) {
+      const { actions: hydrated, ok: hydratedOk } = _hydrateActions(_recipe.actions, payload);
+      if (!hydratedOk) {
+        log(`[AdaptiveWR] Recipe for "${snapshot.currentStep}" needs a value this unit doesn't have — using AI for this step.`);
+      } else {
+        log(`[AdaptiveWR] ▶ Replaying learned recipe for "${snapshot.currentStep}" (wins=${_recipe.successCount}) — no AI needed.`);
+        const _beforeId = _stepIdentity(snapshot);
+        let replayResults = [];
+        try {
+          const rawR = await win.webContents.executeJavaScript(buildActionScript(hydrated));
+          replayResults = JSON.parse(rawR);
+        } catch (e) {
+          log('[AdaptiveWR] Recipe execution error: ' + e.message);
+        }
+        const replaySummary = replayResults.map(r => `${r.action}:${r.ok ? '✓' : '✗'}`).join(', ');
+        const advanced = await _didAdvance(_beforeId);
+        if (advanced) {
+          _recipe.successCount = (_recipe.successCount || 0) + 1;
+          _recipe.lastUsed = Date.now();
+          recipes[_stepKey] = _recipe;
+          _saveRecipes(store, recipes);
+          stepHistory.push(`Step ${step}: [recipe replay] "${snapshot.currentStep}" → ${replaySummary} → advanced`);
+          log(`[AdaptiveWR] ✓ Recipe advanced "${snapshot.currentStep}".`);
+          await sleep(1500);
+          continue; // step done without an AI call
+        }
+        // Recipe didn't advance the wizard — it's stale (page changed). Drop it
+        // and fall through to the AI to re-learn this step.
+        log(`[AdaptiveWR] ✗ Recipe for "${snapshot.currentStep}" did not advance — discarding and asking AI.`);
+        delete recipes[_stepKey];
+        _saveRecipes(store, recipes);
+        stepHistory.push(`NOTE: a saved shortcut for "${snapshot.currentStep}" failed and was discarded; figure this step out fresh from the live page.`);
+      }
+    }
+
     // 4. Ask Orcha what to do
     const prompt = buildPrompt(snapshot, payload, stepHistory, lessonContext, autoSubmit);
     let aiResponse;
@@ -827,6 +1032,11 @@ async function runAdaptiveWR(payload, askAI, log, opts) {
 
     // 7. Execute actions
     log(`[AdaptiveWR] Executing ${actions.length} actions...`);
+    // Capture the step identity BEFORE executing so we can tell (section 8b) if
+    // these AI-derived actions actually advanced the wizard — the trigger for
+    // saving them as this step's recipe.
+    const _learnStepName = snapshot.currentStep || '';
+    const _learnBeforeId = _stepIdentity(snapshot);
     let actionResults;
     try {
       const execScript = buildActionScript(actions);
@@ -879,7 +1089,38 @@ async function runAdaptiveWR(payload, askAI, log, opts) {
         }
       }
     }
-    
+
+    // 8b. LEARN A PER-STEP RECIPE (task #3). If these AI-derived actions ran
+    // cleanly AND actually advanced the wizard off this step, remember the
+    // sequence as the recipe for this named step so future runs can replay it
+    // without an AI call. We templatize per-unit values into {{payload}}
+    // placeholders so the recipe is unit-agnostic. Confidence builds up over
+    // runs (successCount); replay only kicks in at REPLAY_MIN_WINS (see 3c).
+    // Skipped for Review/Submit (no advance there) and when the step name is
+    // unknown (can't key a recipe reliably).
+    const _learnKey = _normStep(_learnStepName);
+    const _learnReviewish = /review|submit/.test(_learnKey);
+    if (_learnKey && !_learnReviewish && allOk && actions.length > 0) {
+      // Only worth learning if these actions moved the wizard forward.
+      const advancedForLearning = await _didAdvance(_learnBeforeId);
+      if (advancedForLearning) {
+        const template = _templatizeActions(actions, payload);
+        const existing = recipes[_learnKey];
+        // If the templatized sequence matches what we already stored, just bump
+        // confidence; otherwise (first time, or the step's flow changed) store
+        // the new sequence and reset confidence to 1.
+        const sameAsStored = existing && JSON.stringify(existing.actions) === JSON.stringify(template);
+        recipes[_learnKey] = {
+          actions: template,
+          successCount: sameAsStored ? (existing.successCount || 0) + 1 : 1,
+          lastUsed: Date.now(),
+          unitHint: payload.unit || payload.asset_id || '',
+        };
+        _saveRecipes(store, recipes);
+        log(`[AdaptiveWR] 📗 Learned recipe for "${_learnStepName}" (wins=${recipes[_learnKey].successCount}${recipes[_learnKey].successCount >= REPLAY_MIN_WINS ? ' — will auto-replay next time' : ', needs ' + (REPLAY_MIN_WINS - recipes[_learnKey].successCount) + ' more to auto-replay'}).`);
+      }
+    }
+
     // 9. Wait for page to react
     // FIX (2026-07-23): a flat 1.5s wait was sometimes not enough for a
     // wizard step transition (e.g. Asset Condition -> next step) to finish
