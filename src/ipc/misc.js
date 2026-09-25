@@ -528,26 +528,61 @@ function registerMiscIPC(ctx) {
     // every Relay build, so we deliberately target only the rg- class). This
     // is injected page-side, retries a few times because Relay hydrates async,
     // and no-ops safely if the element isn't present (e.g. a login page).
+    // ISOLATE the conversation panel: hide ALL the surrounding Relay chrome
+    // (top amazon-relay nav, the "Service Details for ..." page title, the
+    // "Relay Garage > Service Details" breadcrumb, the left sidebar/robot rail,
+    // horizontal scrollbars) so the split-view window shows ONLY the
+    // conversation thread + comment box — exactly the second screenshot the
+    // user wants, not the first. Strategy that survives Relay's css-* hash
+    // churn: walk UP from the stable `.rg-full-height-sheet` to <body>, and at
+    // each level hide every SIBLING of the node on the conversation's ancestor
+    // path (those siblings ARE the nav/title/breadcrumb/sidebar), then stretch
+    // the sheet + its ancestor chain to fill the viewport.
     const FOCUS_CONVERSATION_SCRIPT = `
       (function () {
         var tries = 0;
-        var MAX = 20; // ~20 * 500ms = up to 10s for Relay to render
+        var MAX = 24; // ~24 * 500ms = up to 12s for Relay to render
         function apply() {
           try {
             var sheet = document.querySelector('.rg-full-height-sheet');
             if (!sheet) { if (++tries < MAX) return setTimeout(apply, 500); return; }
-            // Expand the conversation sheet to use more of the viewport so more
-            // of the thread shows without scrolling. Use !important via cssText
-            // append so Relay's inline/emotion styles don't override us.
-            var extra = 'height:100vh !important;max-height:100vh !important;min-height:80vh !important;';
-            if (sheet.style.cssText.indexOf('max-height:100vh') === -1) {
-              sheet.style.cssText += extra;
+
+            // 1. Walk up to <body>, hiding siblings not on the ancestor path.
+            var node = sheet;
+            while (node && node.parentElement && node !== document.body) {
+              var parent = node.parentElement;
+              var kids = parent.children;
+              for (var i = 0; i < kids.length; i++) {
+                if (kids[i] !== node) {
+                  // Hide the chrome sibling (nav/title/breadcrumb/sidebar).
+                  kids[i].style.setProperty('display', 'none', 'important');
+                }
+              }
+              // Make the ancestor on the path fill its parent, no padding/scroll.
+              parent.style.setProperty('flex', '1 1 100%', 'important');
+              parent.style.setProperty('width', '100%', 'important');
+              parent.style.setProperty('max-width', '100%', 'important');
+              parent.style.setProperty('height', '100%', 'important');
+              parent.style.setProperty('max-height', '100vh', 'important');
+              parent.style.setProperty('margin', '0', 'important');
+              parent.style.setProperty('padding', '0', 'important');
+              parent.style.setProperty('overflow-x', 'hidden', 'important');
+              node = parent;
             }
-            // Bring it into view and scroll the conversation to the latest.
-            try { sheet.scrollIntoView({ block: 'start', inline: 'nearest' }); } catch (e) {}
-            // Find the actual scrollable conversation region inside the sheet
-            // (the tallest scrollable descendant) and jump it to the bottom so
-            // the newest messages are focused.
+
+            // 2. Pin the conversation sheet itself to the full viewport.
+            sheet.style.setProperty('width', '100%', 'important');
+            sheet.style.setProperty('max-width', '100%', 'important');
+            sheet.style.setProperty('height', '100vh', 'important');
+            sheet.style.setProperty('max-height', '100vh', 'important');
+            sheet.style.setProperty('min-height', '100vh', 'important');
+            sheet.style.setProperty('margin', '0', 'important');
+
+            // 3. Kill the page's own horizontal scrollbar.
+            document.documentElement.style.setProperty('overflow-x', 'hidden', 'important');
+            document.body.style.setProperty('overflow-x', 'hidden', 'important');
+
+            // 4. Scroll the actual conversation region to the latest message.
             try {
               var scrollables = [].slice.call(sheet.querySelectorAll('*')).filter(function (el) {
                 var cs = getComputedStyle(el);
