@@ -408,24 +408,50 @@ function buildActionScript(actions) {
         else results.push({ ok: false, action: 'select', error: 'Select not found' });
       }
       else if (action.type === 'radio') {
-        // Click a radio by its label text
-        const labels = document.querySelectorAll('label');
-        let clicked = false;
+        // Click a radio by its label text.
+        // HARDENING (Asset Condition): the three options are
+        //   (1) "Safe to Move both In-Yard and On-The-Road (Minor Repair)"
+        //   (2) "Only Safe to Move In-Yard (Yellow Tag)"   <-- NEVER USE
+        //   (3) "Unsafe to Move (Red Tag)"
+        // Two problems the old code had here: (a) options (1) and (2) both
+        // contain "Safe to Move", so a naive .includes("safe to move") could
+        // grab the FORBIDDEN Yellow Tag row; (b) first-substring-wins picked
+        // whatever label came first in the DOM, not the best match. Fix: never
+        // select a "Yellow Tag" label, and choose the CLOSEST label (exact >
+        // startsWith > includes, and prefer the more specific of the two Safe
+        // rows via distinguishing keywords).
+        const want = String(action.value || '').trim().toLowerCase();
+        const labels = Array.from(document.querySelectorAll('label'));
+        // Score each candidate; hard-exclude Yellow Tag entirely.
+        let best = null, bestScore = -1;
         for (const l of labels) {
-          if ((l.innerText || '').trim().toLowerCase().includes(action.value.toLowerCase())) {
-            const radio = l.querySelector('input[type="radio"]') || l;
-            fullClick(radio);
-            // Also try native checked setter
-            if (radio.type === 'radio') {
-              const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked');
-              if (setter && setter.set) setter.set.call(radio, true);
-              radio.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-            clicked = true;
-            break;
+          const txt = (l.innerText || '').trim().toLowerCase();
+          if (!txt) continue;
+          if (txt.includes('yellow tag') || txt.includes('only safe to move in-yard')) continue; // forbidden, skip
+          let score = -1;
+          if (txt === want) score = 100;
+          else if (txt.startsWith(want)) score = 80;
+          else if (txt.includes(want)) score = 60;
+          // Intent-based reinforcement for Asset Condition wording.
+          if (/unsafe/.test(want) && /unsafe|red tag/.test(txt)) score = Math.max(score, 90);
+          if (/safe to move/.test(want) && !/unsafe/.test(want)) {
+            // Asked for the "Safe" option -> prefer the Minor Repair / On-The-Road row.
+            if (/minor repair|on-the-road|both in-yard/.test(txt)) score = Math.max(score, 90);
           }
+          if (score > bestScore) { bestScore = score; best = l; }
         }
-        results.push({ ok: clicked, action: 'radio', value: action.value });
+        let clicked = false;
+        if (best && bestScore >= 0) {
+          const radio = best.querySelector('input[type="radio"]') || best;
+          fullClick(radio);
+          if (radio.type === 'radio') {
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked');
+            if (setter && setter.set) setter.set.call(radio, true);
+            radio.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          clicked = true;
+        }
+        results.push({ ok: clicked, action: 'radio', value: action.value, matched: best ? (best.innerText || '').trim().substring(0, 60) : null });
       }
       else if (action.type === 'wait') {
         await sleep(action.duration || 1000);

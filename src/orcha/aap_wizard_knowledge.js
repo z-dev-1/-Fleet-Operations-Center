@@ -44,12 +44,14 @@ The page shows the asset's current state (e.g. "Active (Healthy)") and then asks
   (1) "Safe to Move both In-Yard and On-The-Road (Minor Repair)"
   (2) "Only Safe to Move In-Yard (Yellow Tag)"
   (3) "Unsafe to Move (Red Tag)"
-DECISION RULES (follow exactly):
-- NEVER select option (2) "Only Safe to Move In-Yard (Yellow Tag)". This option is not used. Choose only between (1) and (3).
-- Choose (3) "Unsafe to Move (Red Tag)" when the defect makes the unit non-drivable or unsafe to drive on the road: any tow request, no-start/dead unit, brake failure, steering failure, flat/blown tire that can't safely roll, coupling/fifth-wheel failure, major fluid leak, accident/collision damage, or anything the payload describes as non-drivable / needs a tow.
-- Otherwise choose (1) "Safe to Move both In-Yard and On-The-Road (Minor Repair)": the unit can still be driven and the repair is minor (CEL/engine light with no drivability loss, HVAC, minor electrical, cosmetic/body, scheduled/PM-type items, sensor faults that don't disable the truck).
-- When unsure between (1) and (3), lean on the payload's own words (drivable vs non-drivable, "tow", "won't start") and the issue severity; if the issue clearly stops the truck from driving safely, pick (3), else pick (1).
-- Match the radio by its visible label text (the labels above). After selecting, advance with clickNext.
+DECISION RULES (follow exactly -- the DEFAULT is Unsafe; Safe is the rare exception):
+- NEVER select option (2) "Only Safe to Move In-Yard (Yellow Tag)". This option is not used. Choose ONLY between (1) and (3).
+- CORE RULE: if the issue is a DOT violation OR would in any way affect/prevent the unit from departing the yard (i.e. it is not legal or not fully roadworthy to dispatch), choose (3) "Unsafe to Move (Red Tag)". This is the DEFAULT — most work requests are Unsafe.
+- Choose (3) "Unsafe to Move (Red Tag)" for anything DOT-related or drivability/roadworthiness-affecting: brakes, steering, tires (flat/low/worn/mismatched), lights/lamps out, air leaks, coupling/fifth-wheel, suspension, leaks, engine/transmission faults that could derate or disable, ABS faults, wipers, mirrors, DEF/emissions faults, no-start, any tow, accident/collision, or anything that would fail a DOT inspection or keep the unit from being dispatched.
+- Choose (1) "Safe to Move both In-Yard and On-The-Road (Minor Repair)" ONLY for truly minor, non-DOT issues that do NOT affect the unit leaving the yard — e.g. a check-engine light with no drivability/derate impact, a non-critical telematics/sensor device not responding, cosmetic/body, interior, or a comfort item (like HVAC when it is not a DOT/defrost safety issue). If in doubt, it is NOT this option.
+- WHEN UNSURE: default to (3) "Unsafe to Move (Red Tag)". Only pick (1) when you are confident the issue is minor, non-DOT, and does not stop the unit from departing the yard.
+- MAPPING from the modal payload value: the payload's Asset Condition is a two-way value — "Safe to Move" or "Unsafe to Move". Map "Unsafe to Move" -> option (3) Red Tag; map "Safe to Move" -> option (1) "Safe to Move both In-Yard and On-The-Road (Minor Repair)". If the payload gives a value, follow it. If it does not, apply the CORE RULE above.
+- MATCHING CAUTION: options (1) and (2) BOTH contain the words "Safe to Move" — do NOT match on that phrase alone or you may hit the forbidden Yellow Tag. Match option (1) by "both In-Yard and On-The-Road" / "Minor Repair", and option (3) by "Unsafe" / "Red Tag". After selecting, advance with clickNext.
 
 SCREEN 3 -- LOCATION (three options, pick the one matching where the unit physically is)
 - On Site (Yard) -- Geofence: unit is at a TOM/Amazon yard. Select from the geofence dropdown.
