@@ -1237,28 +1237,46 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
       relayWv.executeJavaScript(
         '(function(){' +
         'if(window.__fleetConvIsolate)return;window.__fleetConvIsolate=true;' +
-        'var SID="__fleet_conv_isolate_style";' +
-        'function ensureStyle(){' +
-          'var s=document.getElementById(SID);' +
-          'if(!s){s=document.createElement("style");s.id=SID;(document.head||document.documentElement).appendChild(s);}' +
-          's.textContent=' +
-            '"body * { visibility: hidden !important; }" +' +
-            '"[data-fleet-keep] { visibility: visible !important; }" +' +
-            '".rg-full-height-sheet, .rg-full-height-sheet * { visibility: visible !important; }" +' +
-            '".rg-full-height-sheet { position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; max-width:100vw !important; max-height:100vh !important; margin:0 !important; padding:0 !important; z-index:2147483647 !important; background:#fff !important; overflow:auto !important; }" +' +
-            '"html, body { overflow-x: hidden !important; margin:0 !important; }";' +
-        '}' +
-        'function mark(){' +
-          'var prev=document.querySelectorAll("[data-fleet-keep]");for(var i=0;i<prev.length;i++)prev[i].removeAttribute("data-fleet-keep");' +
-          'var sheet=document.querySelector(".rg-full-height-sheet");if(!sheet)return false;' +
-          'var n=sheet;while(n&&n!==document.documentElement){n.setAttribute("data-fleet-keep","1");n=n.parentElement;}' +
+        // FAIL-SAFE: only ever touch the DOM once the sheet is actually found.
+        // If it is never found, the page stays fully visible (a bit of chrome
+        // is far better than a blank white pane). We hide chrome level-by-level
+        // as SIBLINGS of the sheet\'s ancestor chain — we never blanket-hide the
+        // body, so the conversation can never be hidden by our own rule.
+        // level by level (not a blanket body-wide hide) so nothing the sheet
+        // needs disappears and we never blank the page.
+        'function isolate(sheet){' +
+          'var node=sheet;' +
+          'while(node&&node.parentElement&&node!==document.body){' +
+            'var parent=node.parentElement;var kids=parent.children;' +
+            'for(var i=0;i<kids.length;i++){if(kids[i]!==node){kids[i].style.setProperty("display","none","important");}}' +
+            'parent.style.setProperty("width","100%","important");' +
+            'parent.style.setProperty("height","100%","important");' +
+            'parent.style.setProperty("max-height","100vh","important");' +
+            'parent.style.setProperty("margin","0","important");' +
+            'parent.style.setProperty("padding","0","important");' +
+            'parent.style.setProperty("overflow-x","hidden","important");' +
+            'node=parent;' +
+          '}' +
+          'sheet.style.setProperty("position","fixed","important");' +
+          'sheet.style.setProperty("inset","0","important");' +
+          'sheet.style.setProperty("width","100vw","important");' +
+          'sheet.style.setProperty("height","100vh","important");' +
+          'sheet.style.setProperty("max-height","100vh","important");' +
+          'sheet.style.setProperty("margin","0","important");' +
+          'sheet.style.setProperty("background","#fff","important");' +
+          'sheet.style.setProperty("z-index","2147483647","important");' +
+          'sheet.style.setProperty("overflow","auto","important");' +
+          'document.documentElement.style.setProperty("overflow-x","hidden","important");' +
+          'try{document.body.style.setProperty("overflow-x","hidden","important");}catch(e){}' +
           'try{var sc=[].slice.call(sheet.querySelectorAll("*")).filter(function(el){var cs=getComputedStyle(el);return (cs.overflowY==="auto"||cs.overflowY==="scroll")&&el.scrollHeight>el.clientHeight+20;});sc.sort(function(a,b){return b.scrollHeight-a.scrollHeight;});if(sc[0])sc[0].scrollTop=sc[0].scrollHeight;else sheet.scrollTop=sheet.scrollHeight;}catch(e){}' +
-          'return true;' +
         '}' +
         'var tries=0,MAX=40;' +
-        'function tick(){ensureStyle();if(!mark()&&++tries<MAX)setTimeout(tick,500);}' +
+        'function tick(){' +
+          'var sheet=document.querySelector(".rg-full-height-sheet");' +
+          'if(sheet){isolate(sheet);}' +               // only touch the DOM when the sheet exists
+          'if(++tries<MAX)setTimeout(tick,500);' +      // keep re-asserting (Relay re-renders)
+        '}' +
         'tick();' +
-        'try{var obs=new MutationObserver(function(){ensureStyle();mark();});obs.observe(document.body,{childList:true,subtree:true});}catch(e){}' +
         '})()'
       ).catch(function(){});
 
