@@ -538,63 +538,95 @@ function registerMiscIPC(ctx) {
     // each level hide every SIBLING of the node on the conversation's ancestor
     // path (those siblings ARE the nav/title/breadcrumb/sidebar), then stretch
     // the sheet + its ancestor chain to fill the viewport.
+    // Positively ISOLATE the conversation sheet regardless of where Relay
+    // renders the surrounding chrome. Dev-tools confirmed the element the user
+    // wants is exactly \`.rg-full-height-sheet\` (Conversation/Automation tabs,
+    // search, thread, comment box) and nothing unwanted lives inside it. The
+    // chrome (top nav, page title, breadcrumb, sidebar) sits OUTSIDE it — often
+    // as fixed/sticky elements or siblings several levels up that a simple
+    // sibling-walk misses. So instead of hunting each chrome node, we:
+    //   (a) inject a stylesheet that HIDES the whole body subtree, then
+    //   (b) RE-SHOW only the sheet + its ancestor chain, and
+    //   (c) pin the sheet to fill the viewport via position:fixed.
+    // A MutationObserver re-asserts this if Relay re-renders (SPA route change,
+    // async hydration). Everything keys off the stable \`rg-\` class, never the
+    // volatile css-* hashes.
     const FOCUS_CONVERSATION_SCRIPT = `
       (function () {
-        var tries = 0;
-        var MAX = 24; // ~24 * 500ms = up to 12s for Relay to render
-        function apply() {
-          try {
-            var sheet = document.querySelector('.rg-full-height-sheet');
-            if (!sheet) { if (++tries < MAX) return setTimeout(apply, 500); return; }
+        if (window.__fleetConvIsolate) return;  // install once
+        window.__fleetConvIsolate = true;
 
-            // 1. Walk up to <body>, hiding siblings not on the ancestor path.
-            var node = sheet;
-            while (node && node.parentElement && node !== document.body) {
-              var parent = node.parentElement;
-              var kids = parent.children;
-              for (var i = 0; i < kids.length; i++) {
-                if (kids[i] !== node) {
-                  // Hide the chrome sibling (nav/title/breadcrumb/sidebar).
-                  kids[i].style.setProperty('display', 'none', 'important');
-                }
-              }
-              // Make the ancestor on the path fill its parent, no padding/scroll.
-              parent.style.setProperty('flex', '1 1 100%', 'important');
-              parent.style.setProperty('width', '100%', 'important');
-              parent.style.setProperty('max-width', '100%', 'important');
-              parent.style.setProperty('height', '100%', 'important');
-              parent.style.setProperty('max-height', '100vh', 'important');
-              parent.style.setProperty('margin', '0', 'important');
-              parent.style.setProperty('padding', '0', 'important');
-              parent.style.setProperty('overflow-x', 'hidden', 'important');
-              node = parent;
-            }
-
-            // 2. Pin the conversation sheet itself to the full viewport.
-            sheet.style.setProperty('width', '100%', 'important');
-            sheet.style.setProperty('max-width', '100%', 'important');
-            sheet.style.setProperty('height', '100vh', 'important');
-            sheet.style.setProperty('max-height', '100vh', 'important');
-            sheet.style.setProperty('min-height', '100vh', 'important');
-            sheet.style.setProperty('margin', '0', 'important');
-
-            // 3. Kill the page's own horizontal scrollbar.
-            document.documentElement.style.setProperty('overflow-x', 'hidden', 'important');
-            document.body.style.setProperty('overflow-x', 'hidden', 'important');
-
-            // 4. Scroll the actual conversation region to the latest message.
-            try {
-              var scrollables = [].slice.call(sheet.querySelectorAll('*')).filter(function (el) {
-                var cs = getComputedStyle(el);
-                return (cs.overflowY === 'auto' || cs.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 20;
-              });
-              scrollables.sort(function (a, b) { return b.scrollHeight - a.scrollHeight; });
-              if (scrollables[0]) scrollables[0].scrollTop = scrollables[0].scrollHeight;
-              else sheet.scrollTop = sheet.scrollHeight;
-            } catch (e) {}
-          } catch (e) {}
+        var STYLE_ID = '__fleet_conv_isolate_style';
+        function ensureStyle() {
+          var s = document.getElementById(STYLE_ID);
+          if (!s) {
+            s = document.createElement('style');
+            s.id = STYLE_ID;
+            document.head && document.head.appendChild(s);
+          }
+          // Hide everything, then re-show the sheet, its descendants, and its
+          // ancestor chain (marked with data-fleet-keep). Pin the sheet.
+          // Hide everything by default. Re-show ONLY: (a) the ancestor chain
+          // nodes themselves (data-fleet-keep) so the sheet's container is
+          // painted, and (b) the sheet and its whole subtree. We must NOT use
+          // '[data-fleet-keep] *' — that would also re-show the chrome, since
+          // the nav/title/breadcrumb are descendants of those same ancestors.
+          s.textContent =
+            'body * { visibility: hidden !important; }' +
+            '[data-fleet-keep] { visibility: visible !important; }' +
+            '.rg-full-height-sheet, .rg-full-height-sheet * { visibility: visible !important; }' +
+            '.rg-full-height-sheet {' +
+              'position: fixed !important; inset: 0 !important;' +
+              'width: 100vw !important; height: 100vh !important;' +
+              'max-width: 100vw !important; max-height: 100vh !important;' +
+              'margin: 0 !important; padding: 0 !important;' +
+              'z-index: 2147483647 !important; background: #fff !important;' +
+              'overflow: auto !important;' +
+            '}' +
+            'html, body { overflow-x: hidden !important; margin: 0 !important; }';
         }
-        apply();
+
+        function markChain() {
+          // Clear old marks
+          var prev = document.querySelectorAll('[data-fleet-keep]');
+          for (var i = 0; i < prev.length; i++) prev[i].removeAttribute('data-fleet-keep');
+          var sheet = document.querySelector('.rg-full-height-sheet');
+          if (!sheet) return false;
+          var node = sheet;
+          while (node && node !== document.documentElement) {
+            node.setAttribute('data-fleet-keep', '1');
+            node = node.parentElement;
+          }
+          // Scroll the tallest scrollable region inside the sheet to newest.
+          try {
+            var scrollables = [].slice.call(sheet.querySelectorAll('*')).filter(function (el) {
+              var cs = getComputedStyle(el);
+              return (cs.overflowY === 'auto' || cs.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 20;
+            });
+            scrollables.sort(function (a, b) { return b.scrollHeight - a.scrollHeight; });
+            if (scrollables[0]) scrollables[0].scrollTop = scrollables[0].scrollHeight;
+            else sheet.scrollTop = sheet.scrollHeight;
+          } catch (e) {}
+          return true;
+        }
+
+        var tries = 0, MAX = 40; // up to ~20s of polling for first mount
+        function tick() {
+          ensureStyle();
+          var found = markChain();
+          if (!found && ++tries < MAX) setTimeout(tick, 500);
+        }
+        tick();
+
+        // Re-assert on any DOM change (Relay is a SPA; the sheet re-mounts and
+        // Relay may re-add chrome or wipe our marks on route/hydration changes).
+        try {
+          var obs = new MutationObserver(function () {
+            ensureStyle();
+            markChain();
+          });
+          obs.observe(document.body, { childList: true, subtree: true });
+        } catch (e) {}
       })();
     `;
 
