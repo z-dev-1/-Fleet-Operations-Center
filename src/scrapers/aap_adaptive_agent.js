@@ -474,6 +474,110 @@ function buildActionScript(actions) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// FIXED STEP — SELECT EQUIPMENT (deterministic, no AI)
+// ═══════════════════════════════════════════════════════════════
+// The user's insight: Select Equipment never changes and is dead simple —
+// type the Asset ID, wait for the asset data to populate, pick the matching
+// option, click Next. Yet it was the exact step the AI kept getting stuck on
+// (looping on a below-fold/disabled Next). So we handle it deterministically:
+// no recipe, no AI, no guessing. Uses ONLY durable identifiers (input with
+// role="combobox", option matched by text/aria-label, the Next button by its
+// label) — NOT the brittle css-hash classes the blind engine relies on — so it
+// stays resilient if AAP restyles. Returns a clear ok/why so the caller can
+// fall back to the AI if the (rare) layout ever differs from this.
+function buildSelectEquipmentScript(assetId) {
+  return `
+(async function() {
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const ASSET = ${JSON.stringify(String(assetId || '').trim())};
+  const log = [];
+  if (!ASSET) return JSON.stringify({ ok: false, why: 'no asset id in payload', log });
+
+  function setReactValue(el, value) {
+    const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (setter && setter.set) setter.set.call(el, String(value)); else el.value = String(value);
+    ['input','change','keyup'].forEach(t => { try { el.dispatchEvent(new Event(t, { bubbles: true })); } catch(e){} });
+  }
+  function fullClick(el) {
+    try { el.scrollIntoView({ block: 'center' }); } catch(e){}
+    ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(type => {
+      try { el.dispatchEvent(type.startsWith('pointer') ? new PointerEvent(type,{bubbles:true,cancelable:true}) : new MouseEvent(type,{bubbles:true,cancelable:true})); } catch(e){}
+    });
+    try { el.click(); el.focus(); } catch(e){}
+  }
+  function isDisabled(el){ return !!(el && (el.disabled || el.getAttribute('aria-disabled') === 'true')); }
+  function findNext(){
+    return Array.from(document.querySelectorAll('button, [role="button"]')).find(b => {
+      const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+      return t === 'next' || t.startsWith('next');
+    }) || null;
+  }
+
+  // 1. Find the equipment combobox (durable: role="combobox").
+  let combo = null;
+  const t0 = Date.now();
+  while (!combo && Date.now() - t0 < 10000) {
+    combo = Array.from(document.querySelectorAll('input[role="combobox"]')).find(i => i.offsetParent) || null;
+    if (!combo) await sleep(120);
+  }
+  if (!combo) return JSON.stringify({ ok: false, why: 'equipment combobox never appeared (page may still be loading)', log });
+
+  // 2. Type the Asset ID char-by-char (React search needs real key churn).
+  combo.focus();
+  setReactValue(combo, '');
+  await sleep(80);
+  for (let i = 1; i <= ASSET.length; i++) { setReactValue(combo, ASSET.slice(0, i)); await sleep(70); }
+  log.push('typed ' + ASSET);
+
+  // 3. Wait for the matching option and click it.
+  let opt = null;
+  const t1 = Date.now();
+  const WANT = ASSET.toUpperCase();
+  while (!opt && Date.now() - t1 < 9000) {
+    const opts = Array.from(document.querySelectorAll('[role="option"], button[role="option"]'));
+    opt = opts.find(o => {
+      const ot = (o.getAttribute('aria-label') || o.innerText || o.textContent || '').trim().toUpperCase();
+      return ot === WANT || ot.includes(WANT);
+    }) || null;
+    if (!opt) await sleep(120);
+  }
+  if (!opt) return JSON.stringify({ ok: false, why: 'no matching Equipment option for ' + ASSET + ' (unit id may be wrong or not in AAP)', log });
+  fullClick(opt);
+  log.push('picked option');
+
+  // 4. Wait for asset data to populate + Next to enable, then click Next and
+  //    verify the equipment combobox is gone (i.e. we actually advanced).
+  await sleep(600);
+  let btn = findNext();
+  const t2 = Date.now();
+  while ((!btn || isDisabled(btn)) && Date.now() - t2 < 12000) {
+    await sleep(300);
+    btn = findNext();
+  }
+  if (!btn) return JSON.stringify({ ok: false, why: 'Next button not found after selecting equipment', log });
+  if (isDisabled(btn)) return JSON.stringify({ ok: false, why: 'Next stayed disabled after selecting equipment (asset data may not have loaded)', log });
+
+  // Click Next, retry a couple times if the combobox is still present.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    fullClick(btn);
+    log.push('clicked Next #' + (attempt + 1));
+    const t3 = Date.now();
+    let advanced = false;
+    while (Date.now() - t3 < 3000) {
+      await sleep(300);
+      const stillHere = Array.from(document.querySelectorAll('input[role="combobox"]')).some(i => i.offsetParent);
+      if (!stillHere) { advanced = true; break; }
+    }
+    if (advanced) return JSON.stringify({ ok: true, why: 'advanced past Select Equipment', log });
+    btn = findNext() || btn;
+  }
+  return JSON.stringify({ ok: false, why: 'clicked Next but still on Select Equipment', log });
+})();
+`;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // ORCHA PROMPT BUILDER — constructs the AI prompt for each step
 // ═══════════════════════════════════════════════════════════════
 function buildPrompt(snapshot, payload, stepHistory, lessonContext, autoSubmit) {
@@ -906,6 +1010,45 @@ async function runAdaptiveWR(payload, askAI, log, opts) {
     // tries something different (e.g. clickNext / scroll) instead of repeating.
     if (_noProgress > 0) {
       stepHistory.push('NOTE: the previous action did NOT change the page — do NOT repeat it. If you need to advance, use {"type":"clickNext"} (it scrolls the Next button into view, waits for it to be enabled, and verifies the page changed). If a required field is still empty, fill it first.');
+    }
+
+    // 3b2. FIXED STEP — SELECT EQUIPMENT (deterministic, no AI, no recipe).
+    // This step never changes (type Asset ID → pick option → Next), yet it's
+    // where the AI historically got stuck. Handle it in one deterministic shot.
+    // On success we advance; on any failure we fall through to the recipe/AI
+    // path below so the adaptive safety net is never lost.
+    // Trigger on the stepper name OR (as a fallback for when the stepper marker
+    // isn't captured yet on first load) an equipment combobox present on the
+    // very first turn with no other step yet completed.
+    const _looksLikeEquipStep = /select equipment/i.test(snapshot.currentStep || '')
+      || (step <= 2 && !snapshot.currentStep && (snapshot.pageText || '').toLowerCase().includes('select equipment')
+          && snapshot.elements.some(e => e.type === 'combobox' || (e.tag === 'input' && /combobox/i.test(e.type))));
+    if (_looksLikeEquipStep) {
+      const _eqId = payload.unit || payload.asset_id || payload.assetId || '';
+      log(`[AdaptiveWR] ⚙ Select Equipment — deterministic fill for "${_eqId}" (no AI)...`);
+      const _beforeEqId = _stepIdentity(snapshot);
+      let eqOutcome = { ok: false, why: 'exec error' };
+      try {
+        const raw = await win.webContents.executeJavaScript(buildSelectEquipmentScript(_eqId));
+        eqOutcome = JSON.parse(raw);
+      } catch (e) {
+        log('[AdaptiveWR] Select Equipment script error: ' + e.message);
+      }
+      if (eqOutcome.ok) {
+        // Confirm the wizard actually moved on before we count it.
+        const advanced = await _didAdvance(_beforeEqId);
+        if (advanced) {
+          stepHistory.push(`Step ${step}: [fixed] Select Equipment (${_eqId}) → advanced`);
+          log('[AdaptiveWR] ✓ Select Equipment done deterministically.');
+          await sleep(1200);
+          continue;
+        }
+        log('[AdaptiveWR] Select Equipment script said ok but page did not advance — falling back to AI.');
+      } else {
+        log('[AdaptiveWR] Select Equipment deterministic path failed (' + eqOutcome.why + ') — falling back to AI.');
+        stepHistory.push('NOTE: deterministic Select Equipment failed: ' + eqOutcome.why + '. Handle it from the live page.');
+      }
+      // fall through to recipe/AI
     }
 
     // 3c. PER-STEP RECIPE REPLAY (cautious) — if we've already learned a proven
