@@ -1223,7 +1223,44 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
   var relayWv = document.getElementById('dp-wv-relay');
   if (relayWv) {
     relayWv.addEventListener('dom-ready', function() {
-      relayWv.executeJavaScript('setTimeout(function(){ var btns=document.querySelectorAll("button,a,[role=button]"); for(var i=0;i<btns.length;i++){if((btns[i].textContent||"").indexOf("Toggle Comments")>-1){btns[i].click();break;}} setTimeout(function(){ var h1s=document.querySelectorAll("h1"); var conv=null; for(var i=0;i<h1s.length;i++){if(h1s[i].textContent==="Conversation"){conv=h1s[i].closest("[aria-hidden]")||h1s[i].parentElement.parentElement.parentElement.parentElement;break;}} if(conv){conv.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;background:#fff;z-index:99999";var all=document.body.children;for(var j=0;j<all.length;j++){if(all[j]!==conv&&!conv.contains(all[j])&&!all[j].contains(conv)){all[j].style.display="none";}}} },2500); },1500)').catch(function(){});
+      // Isolate the Relay conversation panel inside the split-view webview so
+      // ONLY the conversation shows (no top nav / page title / breadcrumb /
+      // sidebar). The OLD script here hunted for an <h1>Conversation</h1> and
+      // guessed 4 parent levels up — Relay's DOM changed and that stopped
+      // matching, so nothing got isolated. Dev-tools confirmed the correct,
+      // STABLE target is `.rg-full-height-sheet` (Conversation/Automation tabs,
+      // search, thread, comment box). Approach: inject a stylesheet that hides
+      // the whole body, then re-shows ONLY the sheet + its subtree, and pins
+      // the sheet full-screen. A MutationObserver re-asserts it because Relay
+      // is a SPA that re-renders/re-adds chrome. Keyed to the rg- class, never
+      // the volatile css-* hashes.
+      relayWv.executeJavaScript(
+        '(function(){' +
+        'if(window.__fleetConvIsolate)return;window.__fleetConvIsolate=true;' +
+        'var SID="__fleet_conv_isolate_style";' +
+        'function ensureStyle(){' +
+          'var s=document.getElementById(SID);' +
+          'if(!s){s=document.createElement("style");s.id=SID;(document.head||document.documentElement).appendChild(s);}' +
+          's.textContent=' +
+            '"body * { visibility: hidden !important; }" +' +
+            '"[data-fleet-keep] { visibility: visible !important; }" +' +
+            '".rg-full-height-sheet, .rg-full-height-sheet * { visibility: visible !important; }" +' +
+            '".rg-full-height-sheet { position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; max-width:100vw !important; max-height:100vh !important; margin:0 !important; padding:0 !important; z-index:2147483647 !important; background:#fff !important; overflow:auto !important; }" +' +
+            '"html, body { overflow-x: hidden !important; margin:0 !important; }";' +
+        '}' +
+        'function mark(){' +
+          'var prev=document.querySelectorAll("[data-fleet-keep]");for(var i=0;i<prev.length;i++)prev[i].removeAttribute("data-fleet-keep");' +
+          'var sheet=document.querySelector(".rg-full-height-sheet");if(!sheet)return false;' +
+          'var n=sheet;while(n&&n!==document.documentElement){n.setAttribute("data-fleet-keep","1");n=n.parentElement;}' +
+          'try{var sc=[].slice.call(sheet.querySelectorAll("*")).filter(function(el){var cs=getComputedStyle(el);return (cs.overflowY==="auto"||cs.overflowY==="scroll")&&el.scrollHeight>el.clientHeight+20;});sc.sort(function(a,b){return b.scrollHeight-a.scrollHeight;});if(sc[0])sc[0].scrollTop=sc[0].scrollHeight;else sheet.scrollTop=sheet.scrollHeight;}catch(e){}' +
+          'return true;' +
+        '}' +
+        'var tries=0,MAX=40;' +
+        'function tick(){ensureStyle();if(!mark()&&++tries<MAX)setTimeout(tick,500);}' +
+        'tick();' +
+        'try{var obs=new MutationObserver(function(){ensureStyle();mark();});obs.observe(document.body,{childList:true,subtree:true});}catch(e){}' +
+        '})()'
+      ).catch(function(){});
 
       // Pre-fill Relay comment box with AI-generated draft
       var _u = window.__splitUnit;
