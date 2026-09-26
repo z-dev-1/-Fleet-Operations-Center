@@ -1287,15 +1287,41 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
                     'node.style.setProperty("transition","none","important");' + // kill Relay\'s `transition:width 0.2s` so it can\'t animate back to 482
                     'node=par;' +
                   '}' +
-                  // KEY (from DevTools): the sheet\'s DIRECT CHILD wrapper (e.g.
-                  // div.css-1ffho3r) has `width:max-content; flex-shrink:0` and
-                  // stays ~450px even after the sheet grows — so the content is
-                  // still narrow. Grow the sheet\'s direct-child layout wrappers
-                  // to full width too. This wrapper is a layout container, not
-                  // the dropdown control itself, so it is safe. We go ONE level
-                  // in (the sheet\'s immediate children) — not deeper — to avoid
-                  // touching the combobox/listbox.
-                  'try{var inner=sheet.children;for(var ii=0;ii<inner.length;ii++){var w=inner[ii];var rr2=(w.getAttribute&&w.getAttribute("role")||"").toLowerCase();if(rr2!=="listbox"&&rr2!=="menu"&&rr2!=="combobox"&&!(w.getAttribute&&w.getAttribute("aria-haspopup"))){w.style.setProperty("width","auto","important");w.style.setProperty("align-self","stretch","important");w.style.setProperty("max-width","none","important");w.style.setProperty("min-width","0","important");w.style.setProperty("flex-shrink","1","important");w.style.setProperty("flex-grow","1","important");w.style.setProperty("flex-basis","auto","important");w.style.setProperty("transition","none","important");}}}catch(e){}' +
+                  // KEY (from DevTools): the hard width lock is NOT the sheet\'s
+                  // direct child — it is a DEEPER wrapper, e.g. `.css-1f0gnkk`
+                  // which has a literal `width:450px`. So walking one level in
+                  // missed it. Instead, RECURSE through the sheet\'s descendants
+                  // and neutralize any element that has an explicit fixed pixel
+                  // width (a layout wrapper), making it fluid — but STOP
+                  // descending into (and never touch) the combobox/listbox/menu
+                  // so the "Share Comment With" dropdown is preserved.
+                  'try{(function fluid(el,depth){' +
+                    'if(!el||depth>6)return;' +
+                    'var ch=el.children;' +
+                    'for(var ci=0;ci<ch.length;ci++){' +
+                      'var w=ch[ci];' +
+                      'var rr2=(w.getAttribute&&w.getAttribute("role")||"").toLowerCase();' +
+                      'if(rr2==="listbox"||rr2==="menu"||rr2==="combobox"||rr2==="option"||(w.getAttribute&&w.getAttribute("aria-haspopup"))){continue;}' + // skip dropdown, do not descend
+                      'try{' +
+                        'var cs=getComputedStyle(w);' +
+                        // Only neutralize wrappers whose width is a fixed px and
+                        // whose flex-direction is column (layout containers) OR
+                        // that are clearly narrower than the sheet — leave text
+                        // rows alone so we do not wreck line wrapping.
+                        'if(/px$/.test(cs.width)){' +
+                          'w.style.setProperty("width","auto","important");' +
+                          'w.style.setProperty("max-width","none","important");' +
+                          'w.style.setProperty("min-width","0","important");' +
+                          'w.style.setProperty("align-self","stretch","important");' +
+                          'w.style.setProperty("flex-grow","1","important");' +
+                          'w.style.setProperty("flex-shrink","1","important");' +
+                          'w.style.setProperty("flex-basis","auto","important");' +
+                          'w.style.setProperty("transition","none","important");' +
+                        '}' +
+                      '}catch(e){}' +
+                      'fluid(w,depth+1);' + // recurse into layout wrappers
+                    '}' +
+                  '})(sheet,0);}catch(e){}' +
                 '}' +
               '}catch(e){}' +
               'return true;' +
