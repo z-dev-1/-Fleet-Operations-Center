@@ -1238,96 +1238,46 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
       // open comments first (the sheet doesn't exist until then) and target the
       // stable `.rg-full-height-sheet` to FIND the right container.
       relayWv.executeJavaScript(
+        // EXACT ORIGINAL FIT LOGIC (git a247aa6) — the user confirmed the
+        // original fit the window well. The ONLY thing that broke was FINDING
+        // the container: the original located it from the <h1>Conversation</h1>
+        // text, which the site changed. So we keep the original\'s container-pin
+        // + body-sibling-hide VERBATIM, and just make container discovery
+        // resilient: try the original h1 path first, then fall back to the
+        // stable `.rg-full-height-sheet`\'s [aria-hidden] ancestor. No extra
+        // flex/width manipulation — that is what made it stop fitting.
         '(function(){' +
-        'if(window.__fleetConvIsolate)return;window.__fleetConvIsolate=true;' +
-        // Open the comments/conversation panel first (sheet only exists after).
-        'function openConversation(){' +
-          'if(document.querySelector(".rg-full-height-sheet"))return true;' +
-          'var els=[].slice.call(document.querySelectorAll("button,a,[role=button],[role=tab]"));' +
-          'for(var i=0;i<els.length;i++){' +
-            'var t=(els[i].textContent||els[i].getAttribute("aria-label")||"").trim().toLowerCase();' +
-            'if(t.indexOf("toggle comments")>-1||t==="comments"||t==="conversation"||t.indexOf("view comments")>-1||t.indexOf("show comments")>-1){' +
-              'try{els[i].click();}catch(e){}return false;' +
-            '}' +
+        'if(window.__fleetConvFit)return;window.__fleetConvFit=true;' +
+        // Click "Toggle Comments" first, exactly like the original.
+        'setTimeout(function(){' +
+          'var btns=document.querySelectorAll("button,a,[role=button]");' +
+          'for(var i=0;i<btns.length;i++){if((btns[i].textContent||"").indexOf("Toggle Comments")>-1){btns[i].click();break;}}' +
+          'function findContainer(){' +
+            // Original path: the <h1>Conversation</h1>\'s [aria-hidden] ancestor
+            // (or 4 parents up).
+            'var h1s=document.querySelectorAll("h1");' +
+            'for(var i=0;i<h1s.length;i++){if(h1s[i].textContent==="Conversation"){return h1s[i].closest("[aria-hidden]")||(h1s[i].parentElement&&h1s[i].parentElement.parentElement&&h1s[i].parentElement.parentElement.parentElement?h1s[i].parentElement.parentElement.parentElement.parentElement:null);}}' +
+            // Fallback for the changed site: the conversation sheet\'s
+            // [aria-hidden] ancestor (same KIND of node the original pinned).
+            'var sheet=document.querySelector(".rg-full-height-sheet");' +
+            'if(sheet){return (sheet.closest&&sheet.closest("[aria-hidden]"))||sheet;}' +
+            'return null;' +
           '}' +
-          'return false;' +
-        '}' +
-        // From live DevTools (the user\'s screenshots): the conversation
-        // `.rg-full-height-sheet` (~483x622) is a FLEX ITEM inside a "row
-        // nowrap" flex row — its left sibling flex item is the Equipment
-        // Overview panel. It doesn\'t fill because it is content-sized in that
-        // row, NOT because of any positioning. And the "Share Comment With"
-        // control is a `div[role=combobox][aria-haspopup=listbox]` (id starts
-        // "select-", class "mdn-input-box") whose options render as a LISTBOX
-        // popover — every prior version broke it by (a) position:fixed pinning
-        // a container between the combobox and its popover, or (b) display:none
-        // hiding the popover. So: NO pinning. We just (1) hide the sidebar +
-        // the sheet\'s sibling flex item (equipment panel), (2) make the sheet
-        // grow to fill the flex row, and (3) NEVER hide comboboxes/listboxes.
-        'function isProtected(el){' +
-          'try{' +
-            'var r=(el.getAttribute&&el.getAttribute("role")||"").toLowerCase();' +
-            'if(r==="listbox"||r==="menu"||r==="dialog"||r==="tooltip"||r==="combobox"||r==="option")return true;' +
-            'if(el.getAttribute&&el.getAttribute("aria-haspopup"))return true;' +
-            'if(el.id&&/^(select|react|radix|downshift|headlessui)/i.test(el.id))return true;' +
-            'var c=(el.className&&el.className.baseVal!==undefined?el.className.baseVal:(""+(el.className||""))).toLowerCase();' +
-            'if(/popover|dropdown|listbox|combobox|menu|tooltip|portal|overlay|mdn-input|mdn-select/.test(c))return true;' +
-            'if(el.querySelector&&el.querySelector("[role=listbox],[role=option],[role=combobox]"))return true;' +
-          '}catch(e){}' +
-          'return false;' +
-        '}' +
-        // FIT-FIRST (user\'s choice): reproduce the ORIGINAL\'s proven
-        // window-fit. The original found a container via the sheet\'s
-        // `[aria-hidden]` ancestor and pinned it position:fixed full-viewport —
-        // that fit the window well. We do the same, but we FIND that container
-        // from the stable `.rg-full-height-sheet` (the old <h1>Conversation</h1>
-        // text match broke when the site changed), and we skip/keep protected
-        // elements (combobox/listbox) out of the hide sweep to give the
-        // dropdown its best chance. Pinning is what makes it fit, so per the
-        // user\'s explicit "do the fit option" we pin here.
-        'function isolate(sheet){' +
-          // Container to pin: the nearest [aria-hidden] ancestor (as the
-          // original used), else the sheet\'s parent, else the sheet.
-          'var container=(sheet.closest&&sheet.closest("[aria-hidden]"))||sheet.parentElement||sheet;' +
-          'container.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:100%;margin:0;padding:0;overflow-y:auto;overflow-x:hidden;background:#fff;z-index:99999";' +
-          // Hide every body child that neither contains nor is inside the
-          // container (top nav, page title, breadcrumb, sidebar) — but never a
-          // protected popover/combobox/listbox.
-          'var all=document.body.children;' +
-          'for(var j=0;j<all.length;j++){var a=all[j];if(a!==container&&!a.contains(container)&&!container.contains(a)&&!isProtected(a)){a.style.setProperty("display","none","important");}}' +
-          // WIDTH FIX: the conversation is a NARROW flex child of the pinned
-          // container. Setting width:100% alone loses to flex sizing. So walk
-          // EVERY level from the container DOWN to the sheet and: hide each
-          // level\'s non-ancestor siblings (the equipment panel etc.), and force
-          // that level to grow to full width (kill fixed/max-width + flex-basis,
-          // set flex-grow). This makes the whole column from container to sheet
-          // stretch to the pinned container\'s full width.
-          'var path=[],p=sheet;while(p&&p!==container){path.push(p);p=p.parentElement;}path.push(container);' +
-          'for(var pi=0;pi<path.length;pi++){' +
-            'var lvl=path[pi];' +
-            'if(lvl!==container){' +
-              'var par=lvl.parentElement;if(par){var sib=par.children;for(var si=0;si<sib.length;si++){if(sib[si]!==lvl&&!sib[si].contains(sheet)&&!isProtected(sib[si])){sib[si].style.setProperty("display","none","important");}}}' +
-              'lvl.style.setProperty("flex","1 1 100%","important");' +
-              'lvl.style.setProperty("flex-grow","1","important");' +
-              'lvl.style.setProperty("flex-basis","auto","important");' +
-              'lvl.style.setProperty("flex-shrink","1","important");' +
-              'lvl.style.setProperty("width","100%","important");' +
-              'lvl.style.setProperty("max-width","none","important");' +
-              'lvl.style.setProperty("min-width","0","important");' +
-              'lvl.style.setProperty("margin","0","important");' +
+          'function pin(){' +
+            'var conv=findContainer();' +
+            'if(conv){' +
+              // VERBATIM original pin + hide.
+              'conv.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;background:#fff;z-index:99999";' +
+              'var all=document.body.children;' +
+              'for(var j=0;j<all.length;j++){if(all[j]!==conv&&!conv.contains(all[j])&&!all[j].contains(conv)){all[j].style.display="none";}}' +
+              'return true;' +
             '}' +
+            'return false;' +
           '}' +
-          // Scroll the conversation to the newest message.
-          'try{var sc=[].slice.call(sheet.querySelectorAll("*")).filter(function(el){var cs=getComputedStyle(el);return (cs.overflowY==="auto"||cs.overflowY==="scroll")&&el.scrollHeight>el.clientHeight+20;});sc.sort(function(a,b){return b.scrollHeight-a.scrollHeight;});if(sc[0])sc[0].scrollTop=sc[0].scrollHeight;else sheet.scrollTop=sheet.scrollHeight;}catch(e){}' +
-        '}' +
-        'var tries=0,MAX=40;' +
-        'function tick(){' +
-          'var sheet=document.querySelector(".rg-full-height-sheet");' +
-          'if(!sheet){openConversation();sheet=document.querySelector(".rg-full-height-sheet");}' +
-          'if(sheet){isolate(sheet);}' +
-          'if(++tries<MAX)setTimeout(tick,500);' +
-        '}' +
-        'tick();' +
+          // The original ran pin() once after 2.5s. Retry a few times in case
+          // the panel renders a bit later, but otherwise identical behavior.
+          'var t=0;(function retry(){if(pin())return;if(++t<12)setTimeout(retry,500);})();' +
+        '},1500);' +
         '})()'
       ).catch(function(e){ console.error('[split-view] isolate inject FAILED:', e && e.message); });
 
