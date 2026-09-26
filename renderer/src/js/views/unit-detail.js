@@ -1335,20 +1335,45 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
         '})()'
       ).catch(function(e){ console.error('[split-view] isolate inject FAILED:', e && e.message); });
 
-      // DIAGNOSTIC (temporary): verify the injection is actually reaching the
-      // webview and whether .rg-full-height-sheet exists there. Logs to the
-      // MAIN app console (which is easy to read) at 2s and 6s after load, so we
-      // stop guessing whether the script runs / finds the sheet.
-      [2000, 6000].forEach(function(delay){
-        setTimeout(function(){
-          try {
-            relayWv.executeJavaScript(
-              'JSON.stringify({url:location.href.slice(0,60),sheets:document.querySelectorAll(".rg-full-height-sheet").length,ariaHidden:document.querySelectorAll("[aria-hidden]").length,comboboxes:document.querySelectorAll("[role=combobox]").length})'
-            ).then(function(r){ console.log('[split-view DIAG @'+delay+'ms]', r); })
-             .catch(function(e){ console.error('[split-view DIAG @'+delay+'ms] executeJavaScript threw:', e && e.message); });
-          } catch (e) { console.error('[split-view DIAG] outer throw:', e && e.message); }
-        }, delay);
-      });
+      // DROPDOWN INSPECTOR (read-only, temporary): install a MutationObserver
+      // inside the webview that fires the instant the combobox\'s options
+      // listbox is added to the DOM, and report EXACTLY what state it is in —
+      // where it was inserted (portal to body? inside the sheet?), whether any
+      // ancestor is display:none (our hide sweep), whether an overflow ancestor
+      // clips it, its pointer-events, and what element sits at its center (an
+      // overlay stealing the click). Everything is console.log\'d back to the
+      // MAIN app console (which the user CAN see). Changes NOTHING about behavior.
+      relayWv.executeJavaScript(
+        '(function(){' +
+        'if(window.__fleetPopoverProbe)return "already";window.__fleetPopoverProbe=true;' +
+        'function report(lb){' +
+          'try{' +
+            'var info={};' +
+            'var cs=getComputedStyle(lb);info.disp=cs.display;info.vis=cs.visibility;info.pe=cs.pointerEvents;info.pos=cs.position;info.z=cs.zIndex;' +
+            'var b=lb.getBoundingClientRect();info.rect=Math.round(b.left)+","+Math.round(b.top)+" "+Math.round(b.width)+"x"+Math.round(b.height);' +
+            // Parent chain: note class + display + overflow + any hidden ancestor.
+            'var chain=[],n=lb,hiddenBy=null,clipBy=null;' +
+            'while(n&&n!==document.body){var c2=getComputedStyle(n);var cls=((n.className&&n.className.baseVal!==undefined?n.className.baseVal:""+(n.className||""))||n.tagName).slice(0,18);chain.push(cls+"["+c2.display+"/"+c2.overflow.slice(0,7)+"]");if(c2.display==="none"&&!hiddenBy)hiddenBy=cls;if((c2.overflow!=="visible"&&c2.overflowX!=="visible"||c2.overflowY!=="visible")&&c2.overflow!=="visible"&&!clipBy&&(c2.overflow==="hidden"||c2.overflow==="auto"||c2.overflow==="scroll"))clipBy=cls;n=n.parentElement;}' +
+            'info.parentIsBody=(lb.parentElement===document.body);' +
+            'info.hiddenAncestor=hiddenBy;info.clipAncestor=clipBy;' +
+            'info.chain=chain.join(" < ");' +
+            // What is actually at the listbox center (overlay stealing clicks?).
+            'try{var el=document.elementFromPoint(Math.round(b.left+b.width/2),Math.round(b.top+Math.min(b.height/2,20)));info.atCenter=el?(((el.className&&el.className.baseVal!==undefined?el.className.baseVal:""+(el.className||""))||el.tagName).slice(0,20)):"null";info.atCenterIsInList=!!(el&&lb.contains(el));}catch(e){info.atCenter="err";}' +
+            'console.log("[POPOVER PROBE]",JSON.stringify(info));' +
+          '}catch(e){console.log("[POPOVER PROBE] err",e&&e.message);}' +
+        '}' +
+        'var obs=new MutationObserver(function(muts){' +
+          'for(var i=0;i<muts.length;i++){var a=muts[i].addedNodes;for(var j=0;j<a.length;j++){var nd=a[j];if(nd.nodeType!==1)continue;' +
+            'var lb=(nd.getAttribute&&nd.getAttribute("role")==="listbox")?nd:(nd.querySelector&&nd.querySelector("[role=listbox]"));' +
+            'if(lb){setTimeout(function(){report(lb);},50);return;}' +
+          '}}' +
+        '});' +
+        'obs.observe(document.body,{childList:true,subtree:true});' +
+        'console.log("[POPOVER PROBE] armed — open the Share Comment With dropdown now");' +
+        'return "armed";' +
+        '})()'
+      ).then(function(r){ console.log('[split-view] popover probe:', r); })
+       .catch(function(e){ console.error('[split-view] popover probe inject failed:', e && e.message); });
 
       // Pre-fill Relay comment box with AI-generated draft
       var _u = window.__splitUnit;
