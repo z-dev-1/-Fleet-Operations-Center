@@ -1252,25 +1252,59 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
           '}' +
           'return false;' +
         '}' +
-        // Pin the sheet's PARENT (container) full-viewport — NOT the sheet
-        // itself — so the dropdown popover keeps its correct positioning
-        // context (this is what made the original work). Then hide the pinned
-        // container\'s other children and body-level siblings that aren\'t on the
-        // conversation\'s ancestor path. Never touch the sheet\'s inner children.
+        // From live DevTools (the user\'s screenshots): the conversation
+        // `.rg-full-height-sheet` (~483x622) is a FLEX ITEM inside a "row
+        // nowrap" flex row — its left sibling flex item is the Equipment
+        // Overview panel. It doesn\'t fill because it is content-sized in that
+        // row, NOT because of any positioning. And the "Share Comment With"
+        // control is a `div[role=combobox][aria-haspopup=listbox]` (id starts
+        // "select-", class "mdn-input-box") whose options render as a LISTBOX
+        // popover — every prior version broke it by (a) position:fixed pinning
+        // a container between the combobox and its popover, or (b) display:none
+        // hiding the popover. So: NO pinning. We just (1) hide the sidebar +
+        // the sheet\'s sibling flex item (equipment panel), (2) make the sheet
+        // grow to fill the flex row, and (3) NEVER hide comboboxes/listboxes.
+        'function isProtected(el){' +
+          'try{' +
+            'var r=(el.getAttribute&&el.getAttribute("role")||"").toLowerCase();' +
+            'if(r==="listbox"||r==="menu"||r==="dialog"||r==="tooltip"||r==="combobox"||r==="option")return true;' +
+            'if(el.getAttribute&&el.getAttribute("aria-haspopup"))return true;' +
+            'if(el.id&&/^(select|react|radix|downshift|headlessui)/i.test(el.id))return true;' +
+            'var c=(el.className&&el.className.baseVal!==undefined?el.className.baseVal:(""+(el.className||""))).toLowerCase();' +
+            'if(/popover|dropdown|listbox|combobox|menu|tooltip|portal|overlay|mdn-input|mdn-select/.test(c))return true;' +
+            'if(el.querySelector&&el.querySelector("[role=listbox],[role=option],[role=combobox]"))return true;' +
+          '}catch(e){}' +
+          'return false;' +
+        '}' +
         'function isolate(sheet){' +
-          'var container=sheet.parentElement||sheet;' +
-          'container.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:100%;margin:0;padding:0;overflow:auto;background:#fff;z-index:99999";' +
-          // Hide the container\'s other children (siblings of the sheet).
-          'var kids=container.children;' +
-          'for(var i=0;i<kids.length;i++){if(kids[i]!==sheet&&!kids[i].contains(sheet)){kids[i].style.setProperty("display","none","important");}}' +
-          // Make the sheet fill the pinned container.
+          // 1) Walk up hiding the SIBLINGS of the conversation\'s ancestor chain
+          //    (that removes the sidebar, the equipment-overview flex item, the
+          //    page title, breadcrumb, top nav) and let each ancestor grow.
+          'var node=sheet;' +
+          'while(node&&node.parentElement&&node!==document.body){' +
+            'var parent=node.parentElement;var kids=parent.children;' +
+            'for(var i=0;i<kids.length;i++){var k=kids[i];if(k!==node&&!k.contains(node)&&!isProtected(k)){k.style.setProperty("display","none","important");}}' +
+            // Make the ancestor a full-width block so the row collapses to just
+            // the conversation column.
+            'parent.style.setProperty("flex","1 1 100%","important");' +
+            'parent.style.setProperty("width","100%","important");' +
+            'parent.style.setProperty("max-width","100%","important");' +
+            'parent.style.setProperty("margin","0","important");' +
+            'parent.style.setProperty("padding","0","important");' +
+            'node=parent;' +
+          '}' +
+          // 2) Make the conversation sheet itself the growing flex item so it
+          //    takes the whole row width. NO position:fixed, NO z-index — that
+          //    is what kept breaking the combobox popover.
+          'sheet.style.setProperty("flex","1 1 100%","important");' +
+          'sheet.style.setProperty("flex-grow","1","important");' +
+          'sheet.style.setProperty("flex-shrink","1","important");' +
           'sheet.style.setProperty("width","100%","important");' +
-          'sheet.style.setProperty("height","100%","important");' +
+          'sheet.style.setProperty("max-width","100%","important");' +
           'sheet.style.setProperty("margin","0","important");' +
-          // Hide body-level chrome that neither contains nor is inside the
-          // container (nav/title/breadcrumb/sidebar).
-          'var top=document.body.children;' +
-          'for(var j=0;j<top.length;j++){if(top[j]!==container&&!top[j].contains(container)&&!container.contains(top[j])){top[j].style.setProperty("display","none","important");}}' +
+          // 3) Kill only the page-level horizontal scrollbar.
+          'document.documentElement.style.setProperty("overflow-x","hidden","important");' +
+          'try{document.body.style.setProperty("overflow-x","hidden","important");}catch(e){}' +
           // Scroll the conversation to the newest message.
           'try{var sc=[].slice.call(sheet.querySelectorAll("*")).filter(function(el){var cs=getComputedStyle(el);return (cs.overflowY==="auto"||cs.overflowY==="scroll")&&el.scrollHeight>el.clientHeight+20;});sc.sort(function(a,b){return b.scrollHeight-a.scrollHeight;});if(sc[0])sc[0].scrollTop=sc[0].scrollHeight;else sheet.scrollTop=sheet.scrollHeight;}catch(e){}' +
         '}' +
