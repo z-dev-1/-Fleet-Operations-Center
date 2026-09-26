@@ -1276,35 +1276,29 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
           '}catch(e){}' +
           'return false;' +
         '}' +
+        // FIT-FIRST (user\'s choice): reproduce the ORIGINAL\'s proven
+        // window-fit. The original found a container via the sheet\'s
+        // `[aria-hidden]` ancestor and pinned it position:fixed full-viewport —
+        // that fit the window well. We do the same, but we FIND that container
+        // from the stable `.rg-full-height-sheet` (the old <h1>Conversation</h1>
+        // text match broke when the site changed), and we skip/keep protected
+        // elements (combobox/listbox) out of the hide sweep to give the
+        // dropdown its best chance. Pinning is what makes it fit, so per the
+        // user\'s explicit "do the fit option" we pin here.
         'function isolate(sheet){' +
-          // 1) Walk up hiding the SIBLINGS of the conversation\'s ancestor chain
-          //    (that removes the sidebar, the equipment-overview flex item, the
-          //    page title, breadcrumb, top nav) and let each ancestor grow.
-          'var node=sheet;' +
-          'while(node&&node.parentElement&&node!==document.body){' +
-            'var parent=node.parentElement;var kids=parent.children;' +
-            'for(var i=0;i<kids.length;i++){var k=kids[i];if(k!==node&&!k.contains(node)&&!isProtected(k)){k.style.setProperty("display","none","important");}}' +
-            // Make the ancestor a full-width block so the row collapses to just
-            // the conversation column.
-            'parent.style.setProperty("flex","1 1 100%","important");' +
-            'parent.style.setProperty("width","100%","important");' +
-            'parent.style.setProperty("max-width","100%","important");' +
-            'parent.style.setProperty("margin","0","important");' +
-            'parent.style.setProperty("padding","0","important");' +
-            'node=parent;' +
-          '}' +
-          // 2) Make the conversation sheet itself the growing flex item so it
-          //    takes the whole row width. NO position:fixed, NO z-index — that
-          //    is what kept breaking the combobox popover.
-          'sheet.style.setProperty("flex","1 1 100%","important");' +
-          'sheet.style.setProperty("flex-grow","1","important");' +
-          'sheet.style.setProperty("flex-shrink","1","important");' +
+          // Container to pin: the nearest [aria-hidden] ancestor (as the
+          // original used), else the sheet\'s parent, else the sheet.
+          'var container=(sheet.closest&&sheet.closest("[aria-hidden]"))||sheet.parentElement||sheet;' +
+          'container.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:100%;margin:0;padding:0;overflow-y:auto;overflow-x:hidden;background:#fff;z-index:99999";' +
+          // Hide every body child that neither contains nor is inside the
+          // container (top nav, page title, breadcrumb, sidebar) — but never a
+          // protected popover/combobox/listbox.
+          'var all=document.body.children;' +
+          'for(var j=0;j<all.length;j++){var a=all[j];if(a!==container&&!a.contains(container)&&!container.contains(a)&&!isProtected(a)){a.style.setProperty("display","none","important");}}' +
+          // Let the sheet fill the pinned container width.
           'sheet.style.setProperty("width","100%","important");' +
           'sheet.style.setProperty("max-width","100%","important");' +
           'sheet.style.setProperty("margin","0","important");' +
-          // 3) Kill only the page-level horizontal scrollbar.
-          'document.documentElement.style.setProperty("overflow-x","hidden","important");' +
-          'try{document.body.style.setProperty("overflow-x","hidden","important");}catch(e){}' +
           // Scroll the conversation to the newest message.
           'try{var sc=[].slice.call(sheet.querySelectorAll("*")).filter(function(el){var cs=getComputedStyle(el);return (cs.overflowY==="auto"||cs.overflowY==="scroll")&&el.scrollHeight>el.clientHeight+20;});sc.sort(function(a,b){return b.scrollHeight-a.scrollHeight;});if(sc[0])sc[0].scrollTop=sc[0].scrollHeight;else sheet.scrollTop=sheet.scrollHeight;}catch(e){}' +
         '}' +
