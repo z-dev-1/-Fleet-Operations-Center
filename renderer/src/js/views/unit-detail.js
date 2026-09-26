@@ -1379,8 +1379,17 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
           // reveals the options. We scope this to the listbox\'s own ancestors
           // only, and only while it exists, so nothing else is affected.
           'try{var n=lb;while(n&&n!==document.body){if(n.style){if(n.style.display==="none")n.style.setProperty("display","","");}var c3=getComputedStyle(n);if(c3.visibility==="hidden"){n.style.setProperty("visibility","visible","important");}n=n.parentElement;}}catch(e){}' +
-          // Also force the listbox and its option rows visible directly.
+          // Force the listbox + option rows visible.
           'try{lb.style.setProperty("visibility","visible","important");var opts=lb.querySelectorAll("[role=option]");for(var oi=0;oi<opts.length;oi++){opts[oi].style.setProperty("visibility","visible","important");}}catch(e){}' +
+          // The probe shows the listbox is visible + correctly sized, but the
+          // element at its center is css-1ffho3r (the conversation content) —
+          // i.e. content is rendering ON TOP of the listbox (it is position:static
+          // z:auto, so it stacks below in-flow content). Lift it above with a
+          // stacking context so the options are actually visible + clickable.
+          'try{lb.style.setProperty("position","relative","important");lb.style.setProperty("z-index","2147483647","important");lb.style.setProperty("background","#fff","important");}catch(e){}' +
+          // Also lift its nearest positioned-able ancestor that carries the
+          // popover, so the whole options panel floats above the content.
+          'try{var pp=lb.parentElement;if(pp){pp.style.setProperty("position","relative","important");pp.style.setProperty("z-index","2147483647","important");}}catch(e){}' +
           'report(lb);' +
         '}' +
         'var obs=new MutationObserver(function(muts){' +
