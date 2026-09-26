@@ -1270,27 +1270,29 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
               'conv.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;overflow-x:hidden;background:#fff;z-index:99999";' +
               'var all=document.body.children;' +
               'for(var j=0;j<all.length;j++){if(all[j]!==conv&&!conv.contains(all[j])&&!all[j].contains(conv)){all[j].style.display="none";}}' +
-              // WIDTH: the conversation sheet measures only 482px while the
-              // pinned container is now full-width — so the sheet stays narrow
-              // with empty space to its right. Stretch the sheet AND every node
-              // BETWEEN it and the pinned container to full width (grow flex,
-              // clear max-width/flex-basis). We do this ONLY on the ancestor
-              // CHAIN — never on the sheet\'s inner children — so the "Share
-              // Comment With" dropdown (which lives inside the sheet) is left
-              // untouched. Also hide the sheet\'s sibling flex items (the
-              // Equipment Overview panel) that eat the row width.
+              // Width now works via the pin above. Remaining issue: the SIDEBAR
+              // / NAV / breadcrumb / equipment panel are still visible because
+              // they are NOT direct body children — they sit deeper, as SIBLINGS
+              // of nodes on the conversation\'s ancestor path (inside main /
+              // wrappers that themselves contain conv). So hide siblings at
+              // EVERY level from the sheet up to <body>, and grow the sheet\'s
+              // ancestor chain to full width. NEVER touch the sheet\'s inner
+              // children (dropdown lives there) — a sibling is safe to hide.
               'try{' +
                 'var sheet=conv.querySelector(".rg-full-height-sheet")||(conv.className&&(""+conv.className).indexOf("rg-full-height-sheet")>-1?conv:null);' +
                 'if(sheet){' +
+                  'function keep(kid,ref){var rr=(kid.getAttribute&&kid.getAttribute("role")||"").toLowerCase();if(rr==="listbox"||rr==="menu"||rr==="dialog"||rr==="tooltip")return true;if(kid.getAttribute&&kid.getAttribute("aria-haspopup"))return true;if(kid.querySelector&&kid.querySelector("[role=listbox],[role=option]"))return true;return false;}' +
                   'var node=sheet;' +
-                  'while(node&&node!==conv&&node!==document.body){' +
-                    'var par=node.parentElement;' +
-                    'if(par){' +
-                      'var kids=par.children;' +
-                      'for(var k=0;k<kids.length;k++){var kid=kids[k];if(kid!==node&&!kid.contains(node)){var rr=(kid.getAttribute&&kid.getAttribute("role")||"").toLowerCase();var hasPop=kid.getAttribute&&kid.getAttribute("aria-haspopup");var hasList=kid.querySelector&&kid.querySelector("[role=listbox],[role=option]");if(rr!=="listbox"&&rr!=="menu"&&rr!=="dialog"&&!hasPop&&!hasList){kid.style.setProperty("display","none","important");}}}' +
-                    '}' +
-                    'node.style.setProperty("flex","1 1 100%","important");' +
+                  'while(node&&node!==document.body){' +
+                    'var par=node.parentElement;if(!par)break;' +
+                    // Hide this level\'s siblings (sidebar/nav/breadcrumb/equip).
+                    'var kids=par.children;' +
+                    'for(var k=0;k<kids.length;k++){var kid=kids[k];if(kid!==node&&!kid.contains(node)&&!keep(kid)){kid.style.setProperty("display","none","important");}}' +
+                    // Grow the sheet\'s ancestor chain to full width (the sheet
+                    // itself is a flex-shrink:0 482px item — override that).
+                    'node.style.setProperty("flex","1 1 auto","important");' +
                     'node.style.setProperty("flex-grow","1","important");' +
+                    'node.style.setProperty("flex-shrink","1","important");' +
                     'node.style.setProperty("flex-basis","auto","important");' +
                     'node.style.setProperty("width","100%","important");' +
                     'node.style.setProperty("max-width","none","important");' +
