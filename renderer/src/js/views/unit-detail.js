@@ -1266,10 +1266,39 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
           'function pin(){' +
             'var conv=findContainer();' +
             'if(conv){' +
-              // VERBATIM original pin + hide.
-              'conv.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;background:#fff;z-index:99999";' +
+              // VERBATIM original pin + hide (fills the viewport via inset:0).
+              'conv.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;overflow-x:hidden;background:#fff;z-index:99999";' +
               'var all=document.body.children;' +
               'for(var j=0;j<all.length;j++){if(all[j]!==conv&&!conv.contains(all[j])&&!all[j].contains(conv)){all[j].style.display="none";}}' +
+              // WIDTH: the conversation sheet measures only 482px while the
+              // pinned container is now full-width — so the sheet stays narrow
+              // with empty space to its right. Stretch the sheet AND every node
+              // BETWEEN it and the pinned container to full width (grow flex,
+              // clear max-width/flex-basis). We do this ONLY on the ancestor
+              // CHAIN — never on the sheet\'s inner children — so the "Share
+              // Comment With" dropdown (which lives inside the sheet) is left
+              // untouched. Also hide the sheet\'s sibling flex items (the
+              // Equipment Overview panel) that eat the row width.
+              'try{' +
+                'var sheet=conv.querySelector(".rg-full-height-sheet")||(conv.className&&(""+conv.className).indexOf("rg-full-height-sheet")>-1?conv:null);' +
+                'if(sheet){' +
+                  'var node=sheet;' +
+                  'while(node&&node!==conv&&node!==document.body){' +
+                    'var par=node.parentElement;' +
+                    'if(par){' +
+                      'var kids=par.children;' +
+                      'for(var k=0;k<kids.length;k++){var kid=kids[k];if(kid!==node&&!kid.contains(node)){var rr=(kid.getAttribute&&kid.getAttribute("role")||"").toLowerCase();var hasPop=kid.getAttribute&&kid.getAttribute("aria-haspopup");var hasList=kid.querySelector&&kid.querySelector("[role=listbox],[role=option]");if(rr!=="listbox"&&rr!=="menu"&&rr!=="dialog"&&!hasPop&&!hasList){kid.style.setProperty("display","none","important");}}}' +
+                    '}' +
+                    'node.style.setProperty("flex","1 1 100%","important");' +
+                    'node.style.setProperty("flex-grow","1","important");' +
+                    'node.style.setProperty("flex-basis","auto","important");' +
+                    'node.style.setProperty("width","100%","important");' +
+                    'node.style.setProperty("max-width","none","important");' +
+                    'node.style.setProperty("min-width","0","important");' +
+                    'node=par;' +
+                  '}' +
+                '}' +
+              '}catch(e){}' +
               'return true;' +
             '}' +
             'return false;' +
