@@ -1299,6 +1299,15 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
                     'node.style.setProperty("min-width","0","important");' +
                     'node=par;' +
                   '}' +
+                  // KEY (from DevTools): the sheet\'s DIRECT CHILD wrapper (e.g.
+                  // div.css-1ffho3r) has `width:max-content; flex-shrink:0` and
+                  // stays ~450px even after the sheet grows — so the content is
+                  // still narrow. Grow the sheet\'s direct-child layout wrappers
+                  // to full width too. This wrapper is a layout container, not
+                  // the dropdown control itself, so it is safe. We go ONE level
+                  // in (the sheet\'s immediate children) — not deeper — to avoid
+                  // touching the combobox/listbox.
+                  'try{var inner=sheet.children;for(var ii=0;ii<inner.length;ii++){var w=inner[ii];var rr2=(w.getAttribute&&w.getAttribute("role")||"").toLowerCase();if(rr2!=="listbox"&&rr2!=="menu"&&rr2!=="combobox"&&!(w.getAttribute&&w.getAttribute("aria-haspopup"))){w.style.setProperty("width","100%","important");w.style.setProperty("max-width","none","important");w.style.setProperty("min-width","0","important");w.style.setProperty("flex-shrink","1","important");w.style.setProperty("flex-grow","1","important");}}}catch(e){}' +
                 '}' +
               '}catch(e){}' +
               'return true;' +
