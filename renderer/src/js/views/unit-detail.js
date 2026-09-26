@@ -1371,11 +1371,16 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
         // popover to 0x0. Un-hiding its ancestor chain restores it — surgical,
         // touches only the popover\'s own ancestors, nothing near the width code.
         'function unhide(lb){' +
-          // Only clear inline display:none that WE set (Relay controls the
-          // show/hide via visibility, so we leave visibility to Relay — undoing
-          // it would force the list permanently visible). Reset our display:none
-          // to empty so the element falls back to its own stylesheet value.
-          'try{var n=lb;while(n&&n!==document.body){if(n.style&&n.style.display==="none"){n.style.setProperty("display","","");}n=n.parentElement;}}catch(e){}' +
+          // The listbox is now positioned + sized correctly (probe confirmed
+          // rect 440x80 on-screen), but it and an ancestor (css-1nuztn2) are
+          // visibility:hidden, so it is invisible and clicks fall through it.
+          // Since the listbox is PRESENT in the DOM, the dropdown IS open — so
+          // forcing visibility:visible up its chain (and clearing our display:none)
+          // reveals the options. We scope this to the listbox\'s own ancestors
+          // only, and only while it exists, so nothing else is affected.
+          'try{var n=lb;while(n&&n!==document.body){if(n.style){if(n.style.display==="none")n.style.setProperty("display","","");}var c3=getComputedStyle(n);if(c3.visibility==="hidden"){n.style.setProperty("visibility","visible","important");}n=n.parentElement;}}catch(e){}' +
+          // Also force the listbox and its option rows visible directly.
+          'try{lb.style.setProperty("visibility","visible","important");var opts=lb.querySelectorAll("[role=option]");for(var oi=0;oi<opts.length;oi++){opts[oi].style.setProperty("visibility","visible","important");}}catch(e){}' +
           'report(lb);' +
         '}' +
         'var obs=new MutationObserver(function(muts){' +
