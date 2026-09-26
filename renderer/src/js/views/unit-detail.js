@@ -1252,36 +1252,22 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
         'setTimeout(function(){' +
           'var btns=document.querySelectorAll("button,a,[role=button]");' +
           'for(var i=0;i<btns.length;i++){if((btns[i].textContent||"").indexOf("Toggle Comments")>-1){btns[i].click();break;}}' +
-          'function findContainer(){' +
-            // Original path: the <h1>Conversation</h1>\'s [aria-hidden] ancestor
-            // (or 4 parents up).
-            'var h1s=document.querySelectorAll("h1");' +
-            'for(var i=0;i<h1s.length;i++){if(h1s[i].textContent==="Conversation"){return h1s[i].closest("[aria-hidden]")||(h1s[i].parentElement&&h1s[i].parentElement.parentElement&&h1s[i].parentElement.parentElement.parentElement?h1s[i].parentElement.parentElement.parentElement.parentElement:null);}}' +
-            // Fallback for the changed site: the conversation sheet\'s
-            // [aria-hidden] ancestor (same KIND of node the original pinned).
-            'var sheet=document.querySelector(".rg-full-height-sheet");' +
-            'if(sheet){return (sheet.closest&&sheet.closest("[aria-hidden]"))||sheet;}' +
-            'return null;' +
-          '}' +
           'function pin(){' +
-            'var conv=findContainer();' +
-            'if(conv){' +
-              // VERBATIM original pin + hide (fills the viewport via inset:0).
+            // ROOT-CAUSE FIX: find the conversation DIRECTLY by its stable
+            // class. (The old findContainer did sheet.closest("[aria-hidden]"),
+            // but the sheet ITSELF has aria-hidden="false" — so that returned
+            // the sheet, then the width block searched INSIDE it, found nothing,
+            // and silently skipped ALL width/hide work. That is why nothing
+            // changed no matter what widths we set.)
+            'var sheet=document.querySelector(".rg-full-height-sheet");' +
+            'if(sheet){' +
+              'function keep(kid){var rr=(kid.getAttribute&&kid.getAttribute("role")||"").toLowerCase();if(rr==="listbox"||rr==="menu"||rr==="dialog"||rr==="tooltip")return true;if(kid.getAttribute&&kid.getAttribute("aria-haspopup"))return true;if(kid.querySelector&&kid.querySelector("[role=listbox],[role=option]"))return true;return false;}' +
+              // Pin the sheet\'s PARENT full-viewport (fills via inset:0) so the
+              // dropdown\'s positioning context stays one level above the sheet.
+              'var conv=sheet.parentElement||sheet;' +
               'conv.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;overflow-x:hidden;background:#fff;z-index:99999";' +
-              'var all=document.body.children;' +
-              'for(var j=0;j<all.length;j++){if(all[j]!==conv&&!conv.contains(all[j])&&!all[j].contains(conv)){all[j].style.display="none";}}' +
-              // Width now works via the pin above. Remaining issue: the SIDEBAR
-              // / NAV / breadcrumb / equipment panel are still visible because
-              // they are NOT direct body children — they sit deeper, as SIBLINGS
-              // of nodes on the conversation\'s ancestor path (inside main /
-              // wrappers that themselves contain conv). So hide siblings at
-              // EVERY level from the sheet up to <body>, and grow the sheet\'s
-              // ancestor chain to full width. NEVER touch the sheet\'s inner
-              // children (dropdown lives there) — a sibling is safe to hide.
               'try{' +
-                'var sheet=conv.querySelector(".rg-full-height-sheet")||(conv.className&&(""+conv.className).indexOf("rg-full-height-sheet")>-1?conv:null);' +
                 'if(sheet){' +
-                  'function keep(kid,ref){var rr=(kid.getAttribute&&kid.getAttribute("role")||"").toLowerCase();if(rr==="listbox"||rr==="menu"||rr==="dialog"||rr==="tooltip")return true;if(kid.getAttribute&&kid.getAttribute("aria-haspopup"))return true;if(kid.querySelector&&kid.querySelector("[role=listbox],[role=option]"))return true;return false;}' +
                   'var node=sheet;' +
                   'while(node&&node!==document.body){' +
                     'var par=node.parentElement;if(!par)break;' +
