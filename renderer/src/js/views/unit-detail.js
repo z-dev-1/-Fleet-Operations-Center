@@ -1280,9 +1280,11 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
                     'node.style.setProperty("flex-grow","1","important");' +
                     'node.style.setProperty("flex-shrink","1","important");' +
                     'node.style.setProperty("flex-basis","auto","important");' +
-                    'node.style.setProperty("width","100%","important");' +
+                    'node.style.setProperty("width","auto","important");' +      // fluid: follow the container, not a fixed value
+                    'node.style.setProperty("align-self","stretch","important");' + // stretch across the cross axis of the flex row
                     'node.style.setProperty("max-width","none","important");' +
                     'node.style.setProperty("min-width","0","important");' +
+                    'node.style.setProperty("transition","none","important");' + // kill Relay\'s `transition:width 0.2s` so it can\'t animate back to 482
                     'node=par;' +
                   '}' +
                   // KEY (from DevTools): the sheet\'s DIRECT CHILD wrapper (e.g.
@@ -1293,7 +1295,7 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
                   // the dropdown control itself, so it is safe. We go ONE level
                   // in (the sheet\'s immediate children) — not deeper — to avoid
                   // touching the combobox/listbox.
-                  'try{var inner=sheet.children;for(var ii=0;ii<inner.length;ii++){var w=inner[ii];var rr2=(w.getAttribute&&w.getAttribute("role")||"").toLowerCase();if(rr2!=="listbox"&&rr2!=="menu"&&rr2!=="combobox"&&!(w.getAttribute&&w.getAttribute("aria-haspopup"))){w.style.setProperty("width","100%","important");w.style.setProperty("max-width","none","important");w.style.setProperty("min-width","0","important");w.style.setProperty("flex-shrink","1","important");w.style.setProperty("flex-grow","1","important");}}}catch(e){}' +
+                  'try{var inner=sheet.children;for(var ii=0;ii<inner.length;ii++){var w=inner[ii];var rr2=(w.getAttribute&&w.getAttribute("role")||"").toLowerCase();if(rr2!=="listbox"&&rr2!=="menu"&&rr2!=="combobox"&&!(w.getAttribute&&w.getAttribute("aria-haspopup"))){w.style.setProperty("width","auto","important");w.style.setProperty("align-self","stretch","important");w.style.setProperty("max-width","none","important");w.style.setProperty("min-width","0","important");w.style.setProperty("flex-shrink","1","important");w.style.setProperty("flex-grow","1","important");w.style.setProperty("flex-basis","auto","important");w.style.setProperty("transition","none","important");}}}catch(e){}' +
                 '}' +
               '}catch(e){}' +
               'return true;' +
