@@ -1301,15 +1301,7 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
                     'for(var ci=0;ci<ch.length;ci++){' +
                       'var w=ch[ci];' +
                       'var rr2=(w.getAttribute&&w.getAttribute("role")||"").toLowerCase();' +
-                      // Skip the dropdown itself AND any wrapper that CONTAINS a
-                      // combobox/listbox anywhere inside it — do NOT recurse into
-                      // it. From DevTools the "Share Comment With" row (.css-7pr6kr)
-                      // wraps the combobox + its label/value/suffix; forcing
-                      // flex-grow/align-self/width on those inner wrappers was
-                      // distorting the control and breaking its open/click. Leave
-                      // the ENTIRE dropdown row subtree untouched.
-                      'if(rr2==="listbox"||rr2==="menu"||rr2==="combobox"||rr2==="option"||(w.getAttribute&&w.getAttribute("aria-haspopup"))){continue;}' +
-                      'try{if(w.querySelector&&w.querySelector("[role=combobox],[role=listbox],[aria-haspopup=\\"listbox\\"],[class*=mdn-input-box],[class*=mdn-select]")){continue;}}catch(e){}' +
+                      'if(rr2==="listbox"||rr2==="menu"||rr2==="combobox"||rr2==="option"||(w.getAttribute&&w.getAttribute("aria-haspopup"))){continue;}' + // skip dropdown, do not descend
                       'try{' +
                         'var cs=getComputedStyle(w);' +
                         // Only neutralize wrappers whose width is a fixed px and
