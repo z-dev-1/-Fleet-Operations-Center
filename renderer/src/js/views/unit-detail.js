@@ -1383,7 +1383,7 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
         var pid = setInterval(function(){
           try {
             relayWv.executeJavaScript('window.__fleetPopoverResult||"(none)"').then(function(r){
-              if (r && r !== last) { last = r; console.log('[POPOVER RESULT]', r); }
+              if (r && r !== last) { last = r; console.warn('[POPOVER RESULT] ' + r); }
             }).catch(function(){});
           } catch (e) {}
         }, 2000);
