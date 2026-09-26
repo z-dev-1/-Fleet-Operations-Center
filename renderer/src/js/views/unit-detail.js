@@ -1311,7 +1311,22 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
         '}' +
         'tick();' +
         '})()'
-      ).catch(function(){});
+      ).catch(function(e){ console.error('[split-view] isolate inject FAILED:', e && e.message); });
+
+      // DIAGNOSTIC (temporary): verify the injection is actually reaching the
+      // webview and whether .rg-full-height-sheet exists there. Logs to the
+      // MAIN app console (which is easy to read) at 2s and 6s after load, so we
+      // stop guessing whether the script runs / finds the sheet.
+      [2000, 6000].forEach(function(delay){
+        setTimeout(function(){
+          try {
+            relayWv.executeJavaScript(
+              'JSON.stringify({url:location.href.slice(0,60),sheets:document.querySelectorAll(".rg-full-height-sheet").length,ariaHidden:document.querySelectorAll("[aria-hidden]").length,comboboxes:document.querySelectorAll("[role=combobox]").length})'
+            ).then(function(r){ console.log('[split-view DIAG @'+delay+'ms]', r); })
+             .catch(function(e){ console.error('[split-view DIAG @'+delay+'ms] executeJavaScript threw:', e && e.message); });
+          } catch (e) { console.error('[split-view DIAG] outer throw:', e && e.message); }
+        }, delay);
+      });
 
       // Pre-fill Relay comment box with AI-generated draft
       var _u = window.__splitUnit;
