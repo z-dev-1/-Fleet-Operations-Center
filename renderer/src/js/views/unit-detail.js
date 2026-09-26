@@ -1346,21 +1346,22 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
       relayWv.executeJavaScript(
         '(function(){' +
         'if(window.__fleetPopoverProbe)return "already";window.__fleetPopoverProbe=true;' +
+        'window.__fleetPopoverResult="(waiting - open the dropdown)";' +
         'function report(lb){' +
           'try{' +
             'var info={};' +
             'var cs=getComputedStyle(lb);info.disp=cs.display;info.vis=cs.visibility;info.pe=cs.pointerEvents;info.pos=cs.position;info.z=cs.zIndex;' +
             'var b=lb.getBoundingClientRect();info.rect=Math.round(b.left)+","+Math.round(b.top)+" "+Math.round(b.width)+"x"+Math.round(b.height);' +
-            // Parent chain: note class + display + overflow + any hidden ancestor.
             'var chain=[],n=lb,hiddenBy=null,clipBy=null;' +
-            'while(n&&n!==document.body){var c2=getComputedStyle(n);var cls=((n.className&&n.className.baseVal!==undefined?n.className.baseVal:""+(n.className||""))||n.tagName).slice(0,18);chain.push(cls+"["+c2.display+"/"+c2.overflow.slice(0,7)+"]");if(c2.display==="none"&&!hiddenBy)hiddenBy=cls;if((c2.overflow!=="visible"&&c2.overflowX!=="visible"||c2.overflowY!=="visible")&&c2.overflow!=="visible"&&!clipBy&&(c2.overflow==="hidden"||c2.overflow==="auto"||c2.overflow==="scroll"))clipBy=cls;n=n.parentElement;}' +
+            'while(n&&n!==document.body){var c2=getComputedStyle(n);var cls=((n.className&&n.className.baseVal!==undefined?n.className.baseVal:""+(n.className||""))||n.tagName).slice(0,18);chain.push(cls+"["+c2.display+"/"+c2.overflow.slice(0,7)+"]");if(c2.display==="none"&&!hiddenBy)hiddenBy=cls;if((c2.overflow==="hidden"||c2.overflow==="auto"||c2.overflow==="scroll")&&!clipBy)clipBy=cls;n=n.parentElement;}' +
             'info.parentIsBody=(lb.parentElement===document.body);' +
             'info.hiddenAncestor=hiddenBy;info.clipAncestor=clipBy;' +
             'info.chain=chain.join(" < ");' +
-            // What is actually at the listbox center (overlay stealing clicks?).
             'try{var el=document.elementFromPoint(Math.round(b.left+b.width/2),Math.round(b.top+Math.min(b.height/2,20)));info.atCenter=el?(((el.className&&el.className.baseVal!==undefined?el.className.baseVal:""+(el.className||""))||el.tagName).slice(0,20)):"null";info.atCenterIsInList=!!(el&&lb.contains(el));}catch(e){info.atCenter="err";}' +
-            'console.log("[POPOVER PROBE]",JSON.stringify(info));' +
-          '}catch(e){console.log("[POPOVER PROBE] err",e&&e.message);}' +
+            // Store the result on a global; the MAIN renderer polls this out
+            // (webview console is NOT forwarded, but executeJavaScript reads work).
+            'window.__fleetPopoverResult=JSON.stringify(info);' +
+          '}catch(e){window.__fleetPopoverResult="ERR:"+(e&&e.message);}' +
         '}' +
         'var obs=new MutationObserver(function(muts){' +
           'for(var i=0;i<muts.length;i++){var a=muts[i].addedNodes;for(var j=0;j<a.length;j++){var nd=a[j];if(nd.nodeType!==1)continue;' +
@@ -1369,11 +1370,25 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
           '}}' +
         '});' +
         'obs.observe(document.body,{childList:true,subtree:true});' +
-        'console.log("[POPOVER PROBE] armed — open the Share Comment With dropdown now");' +
         'return "armed";' +
         '})()'
       ).then(function(r){ console.log('[split-view] popover probe:', r); })
        .catch(function(e){ console.error('[split-view] popover probe inject failed:', e && e.message); });
+
+      // Poll the probe result out of the webview into the MAIN renderer console
+      // (which IS forwarded to window.log), every 2s for 60s. This is how we
+      // read the webview state without needing to inspect the webview directly.
+      (function(){
+        var last = '';
+        var pid = setInterval(function(){
+          try {
+            relayWv.executeJavaScript('window.__fleetPopoverResult||"(none)"').then(function(r){
+              if (r && r !== last) { last = r; console.log('[POPOVER RESULT]', r); }
+            }).catch(function(){});
+          } catch (e) {}
+        }, 2000);
+        setTimeout(function(){ clearInterval(pid); }, 60000);
+      })();
 
       // Pre-fill Relay comment box with AI-generated draft
       var _u = window.__splitUnit;
