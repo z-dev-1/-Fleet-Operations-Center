@@ -1295,10 +1295,28 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
           // protected popover/combobox/listbox.
           'var all=document.body.children;' +
           'for(var j=0;j<all.length;j++){var a=all[j];if(a!==container&&!a.contains(container)&&!container.contains(a)&&!isProtected(a)){a.style.setProperty("display","none","important");}}' +
-          // Let the sheet fill the pinned container width.
-          'sheet.style.setProperty("width","100%","important");' +
-          'sheet.style.setProperty("max-width","100%","important");' +
-          'sheet.style.setProperty("margin","0","important");' +
+          // WIDTH FIX: the conversation is a NARROW flex child of the pinned
+          // container. Setting width:100% alone loses to flex sizing. So walk
+          // EVERY level from the container DOWN to the sheet and: hide each
+          // level\'s non-ancestor siblings (the equipment panel etc.), and force
+          // that level to grow to full width (kill fixed/max-width + flex-basis,
+          // set flex-grow). This makes the whole column from container to sheet
+          // stretch to the pinned container\'s full width.
+          'var path=[],p=sheet;while(p&&p!==container){path.push(p);p=p.parentElement;}path.push(container);' +
+          'for(var pi=0;pi<path.length;pi++){' +
+            'var lvl=path[pi];' +
+            'if(lvl!==container){' +
+              'var par=lvl.parentElement;if(par){var sib=par.children;for(var si=0;si<sib.length;si++){if(sib[si]!==lvl&&!sib[si].contains(sheet)&&!isProtected(sib[si])){sib[si].style.setProperty("display","none","important");}}}' +
+              'lvl.style.setProperty("flex","1 1 100%","important");' +
+              'lvl.style.setProperty("flex-grow","1","important");' +
+              'lvl.style.setProperty("flex-basis","auto","important");' +
+              'lvl.style.setProperty("flex-shrink","1","important");' +
+              'lvl.style.setProperty("width","100%","important");' +
+              'lvl.style.setProperty("max-width","none","important");' +
+              'lvl.style.setProperty("min-width","0","important");' +
+              'lvl.style.setProperty("margin","0","important");' +
+            '}' +
+          '}' +
           // Scroll the conversation to the newest message.
           'try{var sc=[].slice.call(sheet.querySelectorAll("*")).filter(function(el){var cs=getComputedStyle(el);return (cs.overflowY==="auto"||cs.overflowY==="scroll")&&el.scrollHeight>el.clientHeight+20;});sc.sort(function(a,b){return b.scrollHeight-a.scrollHeight;});if(sc[0])sc[0].scrollTop=sc[0].scrollHeight;else sheet.scrollTop=sheet.scrollHeight;}catch(e){}' +
         '}' +
