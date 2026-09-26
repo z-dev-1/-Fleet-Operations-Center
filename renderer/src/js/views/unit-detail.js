@@ -1363,10 +1363,25 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
             'window.__fleetPopoverResult=JSON.stringify(info);' +
           '}catch(e){window.__fleetPopoverResult="ERR:"+(e&&e.message);}' +
         '}' +
+        // FIX: when the options listbox appears, walk UP its ancestors and undo
+        // any display:none / visibility:hidden that OUR isolation hide-sweep put
+        // there. Root cause (confirmed by the probe): the popover renders inside
+        // a container that our sweep had already set display:none (it had no
+        // listbox child yet when we hid it, so keep() missed it), collapsing the
+        // popover to 0x0. Un-hiding its ancestor chain restores it — surgical,
+        // touches only the popover\'s own ancestors, nothing near the width code.
+        'function unhide(lb){' +
+          // Only clear inline display:none that WE set (Relay controls the
+          // show/hide via visibility, so we leave visibility to Relay — undoing
+          // it would force the list permanently visible). Reset our display:none
+          // to empty so the element falls back to its own stylesheet value.
+          'try{var n=lb;while(n&&n!==document.body){if(n.style&&n.style.display==="none"){n.style.setProperty("display","","");}n=n.parentElement;}}catch(e){}' +
+          'report(lb);' +
+        '}' +
         'var obs=new MutationObserver(function(muts){' +
           'for(var i=0;i<muts.length;i++){var a=muts[i].addedNodes;for(var j=0;j<a.length;j++){var nd=a[j];if(nd.nodeType!==1)continue;' +
             'var lb=(nd.getAttribute&&nd.getAttribute("role")==="listbox")?nd:(nd.querySelector&&nd.querySelector("[role=listbox]"));' +
-            'if(lb){setTimeout(function(){report(lb);},50);return;}' +
+            'if(lb){(function(x){setTimeout(function(){unhide(x);},0);})(lb);return;}' +
           '}}' +
         '});' +
         'obs.observe(document.body,{childList:true,subtree:true});' +
