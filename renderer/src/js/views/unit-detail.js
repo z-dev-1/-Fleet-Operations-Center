@@ -1265,7 +1265,23 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
               // Pin the sheet\'s PARENT full-viewport (fills via inset:0) so the
               // dropdown\'s positioning context stays one level above the sheet.
               'var conv=sheet.parentElement||sheet;' +
-              'conv.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;overflow-x:hidden;background:#fff;z-index:99999";' +
+              // NOTE: overflow on this pinned container can CLIP the combobox
+              // popover (the "Share Comment With" listbox opens as an absolutely
+              // positioned child; overflow:hidden/auto on an ancestor clips it).
+              // Use overflow:visible so the popover is never clipped; the sheet
+              // itself scrolls internally, so we don\'t lose scrolling.
+              'conv.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow:visible;background:#fff;z-index:99999";' +
+              // Since conv no longer scrolls, let the SHEET scroll internally so
+              // the conversation is still scrollable, and give it a fixed height.
+              'sheet.style.setProperty("height","100vh","important");' +
+              'sheet.style.setProperty("max-height","100vh","important");' +
+              'sheet.style.setProperty("overflow-y","auto","important");' +
+              'sheet.style.setProperty("overflow-x","visible","important");' +
+              // Inject a global rule so ANY combobox listbox popover that opens
+              // renders above everything and is never clipped — belt-and-braces
+              // in case a wrapper still has overflow. Also ensure the sheet\'s
+              // ancestors don\'t clip it.
+              'try{if(!document.getElementById("__fleet_popover_css")){var st=document.createElement("style");st.id="__fleet_popover_css";st.textContent="[role=listbox],[role=menu],[class*=popover],[class*=Popover]{z-index:2147483647 !important;}";(document.head||document.documentElement).appendChild(st);}}catch(e){}' +
               'try{' +
                 'if(sheet){' +
                   'var node=sheet;' +
