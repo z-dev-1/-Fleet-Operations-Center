@@ -351,11 +351,27 @@ app.whenReady().then(async () => {
           // HAPPENS. A genuine 20h session expiry is handled by the
           // expiresInMin < 15 branch below (~once/day).
           const aeaMin = state.aeaExpiresInMin;
-          try {
-            await _authModule.injectCookies();
-            log.info('[midway] keep-alive re-inject done (aeaExpiresInMin=' + aeaMin + ') — no prompt');
-          } catch (e) {
-            log.warn('[midway] keep-alive re-inject skipped: ' + e.message);
+          // AEA (~6h) is what AAP actually enforces and expires long before the
+          // ~24h session — that is why a single auth wasn't lasting 20h. When
+          // AEA is near expiry, SILENTLY re-mint it via the Midway OIDC
+          // handshake (no WebAuthn tap) so the session keeps working for its
+          // full ~24h life. Otherwise just do the cheap keep-alive re-inject.
+          const AEA_SILENT_REFRESH_AHEAD_MIN = 20;
+          if (aeaMin !== null && aeaMin < AEA_SILENT_REFRESH_AHEAD_MIN) {
+            try {
+              log.info('[midway] AEA near expiry (' + aeaMin + 'min) — refreshing silently (no prompt)...');
+              const r = await _authModule.refreshAeaSilently();
+              log.info('[midway] Silent AEA refresh result: ok=' + r.ok);
+            } catch (e) {
+              log.warn('[midway] Silent AEA refresh failed: ' + e.message);
+            }
+          } else {
+            try {
+              await _authModule.injectCookies();
+              log.info('[midway] keep-alive re-inject done (aeaExpiresInMin=' + aeaMin + ') — no prompt');
+            } catch (e) {
+              log.warn('[midway] keep-alive re-inject skipped: ' + e.message);
+            }
           }
         }
 

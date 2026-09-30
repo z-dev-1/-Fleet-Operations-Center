@@ -578,11 +578,56 @@ async function ensureAuthenticated(mainWindow) {
   return true;
 }
 
+// ── Silent AEA refresh (NO WebAuthn tap) ─────────────────────────────────────
+// ROOT CAUSE of "a single auth doesn't last 20h" (confirmed from the live
+// cookie file 2026-09-30):
+//   __Host-session / session / tpm_metrics  -> ~24h  (the real session)
+//   amazon_enterprise_access (AEA, x4)       -> ~6h   (short-lived access token)
+// AAP enforces AEA server-side: the moment AEA lapses (~6h), AAP bounces every
+// request to Midway SSO — so the effective session was capped at ~6h, forcing a
+// re-auth long before the 24h session cookie expires.
+//
+// THE KEY: AEA can be re-minted SILENTLY. While the __Host-session cookie is
+// still valid, navigating to AAP triggers Midway's OIDC handshake
+// (aap -> midway-auth/SSO/redirect?...redirect_uri=aap -> back to aap) which
+// completes WITHOUT any WebAuthn/PIN prompt and issues a fresh AEA into the
+// Electron session. probeSession() already performs exactly this handshake and
+// returns true when it lands back on AAP. So a proactive probeSession() run,
+// followed by a cookie re-inject, refreshes AEA with NO tap — letting a single
+// mwinit auth actually last the full ~24h session, refreshing AEA in the
+// background every time it nears expiry.
+//
+// Returns { ok, refreshed } — ok=true means the silent handshake landed on AAP
+// (session still valid, AEA refreshed). ok=false means the session itself is
+// gone and a real mwinit is required.
+async function refreshAeaSilently() {
+  try {
+    // 1) Make sure the freshest cookies from disk are in the Electron session.
+    try { await injectCookies(); } catch (_) {}
+    // 2) Run the silent SSO handshake. If the session cookie is valid this
+    //    lands on AAP with a fresh AEA and NO prompt. If the session is truly
+    //    expired it settles on a login wall and returns false.
+    const landed = await probeSession();
+    if (!landed) {
+      logger.warn('[AuthManager] Silent AEA refresh: handshake did not land on AAP — session likely expired, real mwinit needed');
+      return { ok: false, refreshed: false };
+    }
+    // 3) Re-inject so any refreshed cookies (incl. a new AEA) are consistent.
+    try { await injectCookies(); } catch (_) {}
+    logger.info('[AuthManager] Silent AEA refresh OK — AAP handshake completed with no prompt');
+    return { ok: true, refreshed: true };
+  } catch (e) {
+    logger.warn('[AuthManager] Silent AEA refresh error: ' + e.message);
+    return { ok: false, refreshed: false };
+  }
+}
+
 module.exports = {
   checkMwinit,
   runMwinit,
   injectCookies, // FEATURE (2026-07-23): now accepts optional target session
   probeSession, // FIX (2026-07-21): exported so callers can replicate ensureAuthenticated's verification steps without its disabled auto-spawn branch
+  refreshAeaSilently, // FIX (2026-09-30): silent AEA re-mint so one auth lasts the full ~24h session
   ensureAuthenticated,
   pingRelayEndpoint,
   COOKIE_FILE,
