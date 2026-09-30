@@ -606,17 +606,23 @@ async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
   const seenTs = new Set();
   const pushCand = (m) => { if (m && m.ts && !seenTs.has(m.ts)) { seenTs.add(m.ts); candidates.push(m); } };
 
+  // Fetch thread replies ONLY for roots that are themselves PM alerts AND have
+  // replies — that is where a tag-in-thread would live. Fetching a thread for
+  // every root with replies hammered conversations.replies (strict Slack rate
+  // limit) and got the whole session throttled. Cap hard at 3 fetches/poll and
+  // skip any root already handled (its thread was scanned on a prior poll).
+  const MAX_THREAD_FETCHES = 3;
   let threadFetches = 0;
   for (const root of roots) {
     pushCand(root);
-    const hasReplies = (root.replyCount || 0) > 0 || (root.threadTs && root.threadTs === root.ts);
+    const hasReplies = (root.replyCount || 0) > 0;
     const looksAlert = pmAlert.looksLikeAlert(root.text);
-    if ((hasReplies || looksAlert) && threadFetches < 10) {
+    if (looksAlert && hasReplies && !alreadyHandled(root.ts) && threadFetches < MAX_THREAD_FETCHES) {
       threadFetches++;
       try {
         const replies = await readThreadReplies(ch.id, root.ts, 30);
         replies.forEach(pushCand);
-      } catch (e) { doLog(`[PMAlert] ${ch.name}: thread fetch failed for ${root.ts}: ${e.message}`); }
+      } catch (e) { doLog(`[PMAlert] ${ch.name}: thread fetch skipped for ${root.ts}: ${e.message}`); }
     }
   }
 
