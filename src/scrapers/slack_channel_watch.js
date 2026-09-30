@@ -622,6 +622,12 @@ async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
 
   const taggedCount = candidates.filter(m => m.text && m.text.indexOf(token) !== -1).length;
   doLog(`[PMAlert] ${ch.name}: ${candidates.length} candidates (${threadFetches} threads fetched), ${taggedCount} tag me`);
+  // DIAGNOSTIC: dump the raw text + parse result of each tagged candidate so we
+  // can see exactly why parseAlert isn't matching (Slack bold/emoji formatting).
+  candidates.filter(m => m.text && m.text.indexOf(token) !== -1).forEach((m) => {
+    const parsed = pmAlert.parseAlert(m.text);
+    doLog(`[PMAlert] ${ch.name}: TAGGED ts=${m.ts} parsedAsset=${parsed ? parsed.assetId : 'NONE'} isThreadReply=${!!(m.threadTs && m.threadTs !== m.ts)} rawText="${(m.text || '').replace(/\n/g, ' \\n ').slice(0, 300)}"`);
+  });
 
   // Handle any candidate where the user is literally tagged, not yet handled.
   for (const msg of candidates) {
@@ -796,7 +802,11 @@ async function pollChannelsOnce(log) {
     // a tag inside a thread (how MCS alerts arrive) is actually seen. Runs
     // BEFORE the mode branches and does NOT continue — a normal channel still
     // does its regular replies too. Deduped via slackChannelReplies id.
-    if (ch.pmAlertAutoReply === true) {
+    const _earlyMode = ch.replyMode || config.replyMode || 'mentions';
+    // Skip PM-alert scanning on justme (personal) channels like the self-DM —
+    // they have many old threads and hammering conversations.replies there just
+    // gets rate-limited. PM alerts come from partner/support channels.
+    if (ch.pmAlertAutoReply === true && _earlyMode !== 'justme') {
       try {
         await _pollPmAlertChannel(
           ch, myUserId,
@@ -808,7 +818,6 @@ async function pollChannelsOnce(log) {
       }
     }
 
-    const _earlyMode = ch.replyMode || config.replyMode || 'mentions';
     if (_earlyMode === 'justme') {
       try {
         await _pollJustMeChannel(ch, myUserId, doLog);
