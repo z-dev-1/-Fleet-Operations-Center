@@ -590,10 +590,11 @@ async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
 
   let roots;
   try { roots = await readMessages(ch.id, 20); } catch (e) { doLog(`[PMAlert] ${ch.name}: readMessages failed: ${e.message}`); return; }
+  doLog(`[PMAlert] ${ch.name}: scan start — ${roots ? roots.length : 0} root msgs, myUserId=${myUserId || '?'}`);
   if (!roots || !roots.length) return;
 
   const token = myUserId ? '<@' + myUserId + '>' : '';
-  if (!token) return;
+  if (!token) { doLog(`[PMAlert] ${ch.name}: no myUserId — cannot detect tags`); return; }
 
   const replyLog = store.load('slackChannelReplies', []);
   const alreadyHandled = (ts) => replyLog.some(e => e.id === ch.id + ':' + ts);
@@ -618,6 +619,9 @@ async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
       } catch (e) { doLog(`[PMAlert] ${ch.name}: thread fetch failed for ${root.ts}: ${e.message}`); }
     }
   }
+
+  const taggedCount = candidates.filter(m => m.text && m.text.indexOf(token) !== -1).length;
+  doLog(`[PMAlert] ${ch.name}: ${candidates.length} candidates (${threadFetches} threads fetched), ${taggedCount} tag me`);
 
   // Handle any candidate where the user is literally tagged, not yet handled.
   for (const msg of candidates) {
