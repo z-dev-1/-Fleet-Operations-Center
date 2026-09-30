@@ -571,6 +571,93 @@ async function _jmHandleMessage(channelId, text, signal, jobId) {
   return replyText;
 }
 
+// ── PM-ALERT channel scan (additive, runs for pmAlertAutoReply channels) ──────
+// Why this exists as its own scan instead of relying on the main tier loop:
+// the main loop feeds off conversations.history (readMessages), which returns
+// ONLY top-level messages — thread REPLIES are merged in only for
+// ALREADY-TRACKED mention threads. MCS Predictive-Maintenance alerts post as a
+// top-level message and tag the user (@zilasant) in a THREAD REPLY, so that
+// reply is never in the main loop's candidate pool and the PM branch never
+// sees it. This scan explicitly walks recent top-level messages AND, for any
+// that look like a PM alert or have replies, fetches the thread replies and
+// checks EACH (root + replies) for a real <@user> tag + parseable alert. It is
+// deduped via the same slackChannelReplies id (channelId:ts) so it never
+// double-replies, and it does NOT gate on lastSeenTs (a threaded tag can land
+// under an old root the watermark already passed).
+async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
+  const { readMessages, readThreadReplies, sendToChannel, askOrcha, uploadFileToChannel, downloadFileBuffer } = deps;
+  const pmAlert = require('./pm_alert_reply');
+
+  let roots;
+  try { roots = await readMessages(ch.id, 20); } catch (e) { doLog(`[PMAlert] ${ch.name}: readMessages failed: ${e.message}`); return; }
+  if (!roots || !roots.length) return;
+
+  const token = myUserId ? '<@' + myUserId + '>' : '';
+  if (!token) return;
+
+  const replyLog = store.load('slackChannelReplies', []);
+  const alreadyHandled = (ts) => replyLog.some(e => e.id === ch.id + ':' + ts);
+
+  // Build the candidate set: every root, plus the replies of any root that is
+  // itself an alert OR has thread replies (bounded to the 10 most recent roots
+  // with replies, to keep API calls sane).
+  const candidates = [];
+  const seenTs = new Set();
+  const pushCand = (m) => { if (m && m.ts && !seenTs.has(m.ts)) { seenTs.add(m.ts); candidates.push(m); } };
+
+  let threadFetches = 0;
+  for (const root of roots) {
+    pushCand(root);
+    const hasReplies = (root.replyCount || 0) > 0 || (root.threadTs && root.threadTs === root.ts);
+    const looksAlert = pmAlert.looksLikeAlert(root.text);
+    if ((hasReplies || looksAlert) && threadFetches < 10) {
+      threadFetches++;
+      try {
+        const replies = await readThreadReplies(ch.id, root.ts, 30);
+        replies.forEach(pushCand);
+      } catch (e) { doLog(`[PMAlert] ${ch.name}: thread fetch failed for ${root.ts}: ${e.message}`); }
+    }
+  }
+
+  // Handle any candidate where the user is literally tagged, not yet handled.
+  for (const msg of candidates) {
+    if (!msg.text || msg.text.indexOf(token) === -1) continue;      // must tag me
+    if (alreadyHandled(msg.ts)) continue;                            // dedup
+    // Only engage if this message OR its thread root parses as an alert; the
+    // handler itself re-checks and falls back to the thread root for data.
+    const parsableHere = pmAlert.looksLikeAlert(msg.text) || (msg.threadTs && msg.threadTs !== msg.ts);
+    if (!parsableHere) continue;
+
+    try {
+      const r = await pmAlert.handleTaggedPmAlert(
+        ch, msg, myUserId,
+        { readThreadReplies, sendToChannel, askOrcha, uploadFileToChannel, downloadFileBuffer }, doLog
+      );
+      if (r && r.handled) {
+        _appendReplyLog({
+          id: ch.id + ':' + msg.ts,
+          channelId: ch.id,
+          channelName: ch.name,
+          ts: msg.ts,
+          replyTs: r.replyTs || null,
+          question: msg.text,
+          reply: r.reply,
+          wasMentioned: true,
+          wasThreadReply: !!(msg.threadTs && msg.threadTs !== msg.ts),
+          inScope: true,
+          category: null,
+          title: 'PM Alert: ' + (r.assetId || '') + (r.matched ? ' (matched)' : ' (ack)') + (r.fanout && r.fanout.sent ? ' + carrier' : ''),
+          createdAt: new Date().toISOString(),
+          status: 'auto-answered',
+          pmAlert: true,
+        });
+      }
+    } catch (e) {
+      doLog(`[PMAlert] ${ch.name}: handler error on ${msg.ts}: ${e.message}`);
+    }
+  }
+}
+
 async function _pollJustMeChannel(ch, myUserId, doLog) {
   const { readMessages, readThreadReplies } = require('./slack_send');
   const rootMessages = await readMessages(ch.id, 20); // newest-first
@@ -700,6 +787,23 @@ async function pollChannelsOnce(log) {
     // escalation queue). Fully separate code path so the existing
     // mentions/occasional logic below is completely untouched for every
     // other channel. See _pollJustMeChannel() for the full design note.
+    // PM-ALERT scan (additive): for channels with pmAlertAutoReply on, run a
+    // dedicated scan that reads top-level messages AND their thread replies, so
+    // a tag inside a thread (how MCS alerts arrive) is actually seen. Runs
+    // BEFORE the mode branches and does NOT continue — a normal channel still
+    // does its regular replies too. Deduped via slackChannelReplies id.
+    if (ch.pmAlertAutoReply === true) {
+      try {
+        await _pollPmAlertChannel(
+          ch, myUserId,
+          { readMessages, readThreadReplies, sendToChannel, askOrcha, uploadFileToChannel, downloadFileBuffer },
+          doLog
+        );
+      } catch (e) {
+        doLog(`[SlackWatch] ${ch.name}: PM-alert scan error: ${e.message}`);
+      }
+    }
+
     const _earlyMode = ch.replyMode || config.replyMode || 'mentions';
     if (_earlyMode === 'justme') {
       try {
@@ -830,53 +934,13 @@ async function pollChannelsOnce(log) {
           continue;
         }
 
-        // ── PM ALERT AUTO-REPLY (additive) ───────────────────────────────
-        // If this channel has pmAlertAutoReply enabled and the user is tagged
-        // on a message (or a thread reply) that parses as a Predictive
-        // Maintenance alert, handle it here and skip the normal reply tiers for
-        // this message. Fires ONLY when an Asset ID is parsed, so ordinary
-        // @-mentions with no alert data fall through to the existing logic.
-        if (ch.pmAlertAutoReply === true) {
-          try {
-            // STRICT: engage ONLY when the user is LITERALLY @-tagged in THIS
-            // exact message (fixes the earlier bug where it replied in threads
-            // that weren't the user's). No thread-membership inference here —
-            // the handler will still look at the thread ROOT for the alert DATA,
-            // but engagement requires the tag on the message itself.
-            const taggedHere = pmAlert.isTaggedIn(msg.text, myUserId);
-            if (taggedHere) {
-              const r = await pmAlert.handleTaggedPmAlert(
-                ch, msg, myUserId,
-                { readThreadReplies, sendToChannel, askOrcha, uploadFileToChannel, downloadFileBuffer }, doLog
-              );
-              if (r && r.handled) {
-                repliedCount++;
-                _appendReplyLog({
-                  id: ch.id + ':' + msg.ts,
-                  channelId: ch.id,
-                  channelName: ch.name,
-                  ts: msg.ts,
-                  replyTs: r.replyTs || null,
-                  question: msg.text,
-                  reply: r.reply,
-                  wasMentioned: true,
-                  wasThreadReply: !!(msg.threadTs && msg.threadTs !== msg.ts),
-                  inScope: true,
-                  category: null,
-                  title: 'PM Alert: ' + (r.assetId || '') + (r.matched ? ' (matched)' : ' (ack)'),
-                  createdAt: new Date().toISOString(),
-                  status: 'auto-answered',
-                  pmAlert: true,
-                });
-                continue; // PM alert handled — skip normal tiers for this msg
-              }
-              // r.handled === false with reason 'no-asset-id'/'not-tagged'
-              // falls through to normal reply routing below (it wasn't an alert).
-            }
-          } catch (e) {
-            doLog(`[SlackWatch] ${ch.name}: PM-alert handling error (falling through): ${e.message}`);
-          }
-        }
+        // NOTE: PM-alert auto-reply is handled up-front by _pollPmAlertChannel
+        // (runs at the top of the per-channel loop for pmAlertAutoReply
+        // channels). It scans top-level messages AND thread replies, so a tag
+        // inside a thread is seen — which the main loop below can't do
+        // (conversations.history omits thread replies). It dedups via the same
+        // slackChannelReplies id, so anything it already handled is skipped by
+        // the guard above and never reaches the normal tiers here.
 
         // ── Reply routing ────────────────────────────────────────────────
         // Three tiers, evaluated in order — same for both modes:
