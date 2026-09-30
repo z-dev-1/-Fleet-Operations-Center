@@ -645,10 +645,12 @@ async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
     if (!parsableHere) continue;
 
     try {
+      doLog(`[PMAlert] ${ch.name}: -> calling handler for ${msg.ts}`);
       const r = await pmAlert.handleTaggedPmAlert(
         ch, msg, myUserId,
         { readThreadReplies, sendToChannel, askOrcha, uploadFileToChannel, downloadFileBuffer }, doLog
       );
+      doLog(`[PMAlert] ${ch.name}: <- handler result: ` + JSON.stringify(r ? { handled: r.handled, reason: r.reason, matched: r.matched, fanout: r.fanout && r.fanout.reason } : null));
       if (r && r.handled) {
         _appendReplyLog({
           id: ch.id + ':' + msg.ts,
