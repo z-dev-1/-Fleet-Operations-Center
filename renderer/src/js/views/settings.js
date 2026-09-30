@@ -1727,6 +1727,10 @@ function _wirePartnerAutoReply() {
           <span style="margin-left:auto;font-size:9px;color:var(--mut)">${count ? count + ' ' + (count === 1 ? 'reply' : 'replies') + ' \u00b7 ' : ''}${lastSeen}</span>
         </div>
         <div style="font-size:9px;color:var(--mut);margin-top:6px;padding-top:5px;border-top:1px solid rgba(48,54,61,.6)">${modeDesc}</div>
+        <label style="display:flex;align-items:flex-start;gap:6px;font-size:9px;color:var(--txt2);margin-top:6px;padding-top:5px;border-top:1px solid rgba(48,54,61,.6);cursor:pointer">
+          <input type="checkbox" class="par-pmalert" data-idx="${i}" ${ch.pmAlertAutoReply === true ? 'checked' : ''} style="margin-top:1px"/>
+          <span>Predictive Maintenance alerts: when I'm tagged (message or thread reply), auto-reply in-thread using fleet data &mdash; cites the existing work order (AMZ) + Relay link if the unit is already down, else acknowledges.</span>
+        </label>
         ${chMode !== 'justme' ? `<div style="margin-top:6px;padding-top:5px;border-top:1px solid rgba(48,54,61,.6)">
           <div style="font-size:9px;color:var(--mut);margin-bottom:3px">Operators (data scope) &mdash; empty = full fleet</div>
           ${_parOperatorCheckboxes(i, ch.operators || [])}
@@ -1762,6 +1766,17 @@ function _wirePartnerAutoReply() {
         const i = parseInt(cb.id.replace('par-ch-', ''), 10);
         if (_currentConfig && _currentConfig.channels[i]) {
           _currentConfig.channels[i].enabled = cb.checked;
+        }
+        _autoSave();
+      });
+    });
+
+    // PM Alert auto-reply per-channel toggle (additive; separate from replyMode).
+    listEl.querySelectorAll('.par-pmalert').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        const idx = parseInt(cb.getAttribute('data-idx'), 10);
+        if (_currentConfig && _currentConfig.channels[idx]) {
+          _currentConfig.channels[idx].pmAlertAutoReply = cb.checked;
         }
         _autoSave();
       });

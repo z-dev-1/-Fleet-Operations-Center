@@ -85,6 +85,11 @@ function getWatchConfig() {
     // nothing silently changes behavior on upgrade. Idempotent -- once a
     // channel has its own replyMode this is a no-op for it.
     cfg.channels.forEach((ch) => { if (!ch.replyMode) ch.replyMode = cfg.replyMode; });
+    // FEATURE (2026-10): additive per-channel PM-alert auto-reply flag. Default
+    // OFF so nothing changes for existing channels on upgrade; the user opts in
+    // per channel in Settings. Kept SEPARATE from replyMode so Mentions /
+    // Occasional / Just Me are entirely untouched.
+    cfg.channels.forEach((ch) => { if (typeof ch.pmAlertAutoReply !== 'boolean') ch.pmAlertAutoReply = false; });
     return cfg;
   }
   // First run - seed defaults.
@@ -675,6 +680,9 @@ async function pollChannelsOnce(log) {
 
   const { readMessages, readThreadReplies, sendToChannel, checkLiveAuth } = require('./slack_send');
   const { askOrcha } = require('./orcha_ws');
+  // PM Alert auto-reply (additive, per-channel pmAlertAutoReply flag). Isolated
+  // in its own module so the existing tier logic below is untouched.
+  const pmAlert = require('./pm_alert_reply');
 
   const auth = await checkLiveAuth();
   if (!auth || !auth.authenticated) { doLog('[SlackWatch] Slack not authenticated — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
@@ -820,6 +828,54 @@ async function pollChannelsOnce(log) {
         if (partnerLog.some(e => e.id === ch.id + ':' + msg.ts)) {
           doLog(`[SlackWatch] ${ch.name}: message ${msg.ts} already replied to (found in log) — skipping duplicate`);
           continue;
+        }
+
+        // ── PM ALERT AUTO-REPLY (additive) ───────────────────────────────
+        // If this channel has pmAlertAutoReply enabled and the user is tagged
+        // on a message (or a thread reply) that parses as a Predictive
+        // Maintenance alert, handle it here and skip the normal reply tiers for
+        // this message. Fires ONLY when an Asset ID is parsed, so ordinary
+        // @-mentions with no alert data fall through to the existing logic.
+        if (ch.pmAlertAutoReply === true) {
+          try {
+            const token = myUserId ? '<@' + myUserId + '>' : '';
+            const taggedHere = token && msg.text && msg.text.indexOf(token) !== -1;
+            // Parse the message itself, or (for a thread reply) let the handler
+            // fall back to the thread root. Only engage if it looks like an alert.
+            const parsable = taggedHere && (pmAlert.looksLikeAlert(msg.text) ||
+              (msg.threadTs && msg.threadTs !== msg.ts));
+            if (parsable) {
+              const r = await pmAlert.handleTaggedPmAlert(
+                ch, msg, myUserId,
+                { readThreadReplies, sendToChannel, askOrcha }, doLog
+              );
+              if (r && r.handled) {
+                repliedCount++;
+                _appendReplyLog({
+                  id: ch.id + ':' + msg.ts,
+                  channelId: ch.id,
+                  channelName: ch.name,
+                  ts: msg.ts,
+                  replyTs: r.replyTs || null,
+                  question: msg.text,
+                  reply: r.reply,
+                  wasMentioned: true,
+                  wasThreadReply: !!(msg.threadTs && msg.threadTs !== msg.ts),
+                  inScope: true,
+                  category: null,
+                  title: 'PM Alert: ' + (r.assetId || '') + (r.matched ? ' (matched)' : ' (ack)'),
+                  createdAt: new Date().toISOString(),
+                  status: 'auto-answered',
+                  pmAlert: true,
+                });
+                continue; // PM alert handled — skip normal tiers for this msg
+              }
+              // r.handled === false with reason 'no-asset-id'/'not-tagged'
+              // falls through to normal reply routing below (it wasn't an alert).
+            }
+          } catch (e) {
+            doLog(`[SlackWatch] ${ch.name}: PM-alert handling error (falling through): ${e.message}`);
+          }
         }
 
         // ── Reply routing ────────────────────────────────────────────────
