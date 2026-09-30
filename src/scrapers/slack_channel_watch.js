@@ -838,13 +838,13 @@ async function pollChannelsOnce(log) {
         // @-mentions with no alert data fall through to the existing logic.
         if (ch.pmAlertAutoReply === true) {
           try {
-            const token = myUserId ? '<@' + myUserId + '>' : '';
-            const taggedHere = token && msg.text && msg.text.indexOf(token) !== -1;
-            // Parse the message itself, or (for a thread reply) let the handler
-            // fall back to the thread root. Only engage if it looks like an alert.
-            const parsable = taggedHere && (pmAlert.looksLikeAlert(msg.text) ||
-              (msg.threadTs && msg.threadTs !== msg.ts));
-            if (parsable) {
+            // STRICT: engage ONLY when the user is LITERALLY @-tagged in THIS
+            // exact message (fixes the earlier bug where it replied in threads
+            // that weren't the user's). No thread-membership inference here —
+            // the handler will still look at the thread ROOT for the alert DATA,
+            // but engagement requires the tag on the message itself.
+            const taggedHere = pmAlert.isTaggedIn(msg.text, myUserId);
+            if (taggedHere) {
               const r = await pmAlert.handleTaggedPmAlert(
                 ch, msg, myUserId,
                 { readThreadReplies, sendToChannel, askOrcha }, doLog

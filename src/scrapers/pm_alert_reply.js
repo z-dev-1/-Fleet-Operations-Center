@@ -81,6 +81,20 @@ function looksLikeAlert(text) {
   return !!parseAlert(text);
 }
 
+// STRICT tag check: is the given Slack user id literally @-mentioned in THIS
+// message text? Slack renders mentions as "<@U0123>" or "<@U0123|display>".
+// Match the exact user id in either form and nothing else — no display-name
+// matching, no thread inference. This is the single source of truth for "am I
+// actually tagged," used both by the handler and the channel-watch wiring so
+// they cannot disagree.
+function isTaggedIn(text, myUserId) {
+  if (!text || !myUserId) return false;
+  // Escape id for regex safety, then match <@ID> or <@ID|anything>
+  const id = String(myUserId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp('<@' + id + '(\\|[^>]*)?>');
+  return re.test(text);
+}
+
 // ── Fleet-data lookup ─────────────────────────────────────────────────────────
 // Match on equipmentId, case-insensitive (alert may print "B62060" vs a stored
 // "b62060"). Returns the matched row or null.
@@ -149,9 +163,12 @@ async function handleTaggedPmAlert(ch, msg, myUserId, deps, log) {
   const doLog = log || ((m) => logger.info(m));
   const { readThreadReplies, sendToChannel, askOrcha } = deps || {};
 
-  // 1) Confirm the user is actually tagged in THIS message.
-  const token = myUserId ? '<@' + myUserId + '>' : '';
-  if (!token || !msg.text || msg.text.indexOf(token) === -1) {
+  // 1) STRICT: the user must be LITERALLY @-tagged in THIS exact message.
+  //    Slack renders a mention as "<@U0123>" or "<@U0123|display>" — match
+  //    either form for the user's own id, and NOTHING else (no thread-membership
+  //    inference, no "directed at me" guessing). This is the guard against the
+  //    earlier bug where replies landed in threads that weren't the user's.
+  if (!isTaggedIn(msg.text, myUserId)) {
     return { handled: false, reason: 'not-tagged' };
   }
 
@@ -223,6 +240,7 @@ async function handleTaggedPmAlert(ch, msg, myUserId, deps, log) {
 module.exports = {
   parseAlert,
   looksLikeAlert,
+  isTaggedIn,
   findUnit,
   buildPrompt,
   handleTaggedPmAlert,
