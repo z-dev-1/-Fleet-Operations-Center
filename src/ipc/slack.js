@@ -253,6 +253,25 @@ function registerSlackIPC(ctx) {
     return result;
   });
 
+  // FEATURE (2026-10): Operator Channels config for the PM-alert carrier
+  // fan-out. Maps each fleet operator -> its carrier Slack channel + owner.
+  handle('slack:get-operator-channels', async () => {
+    const { getOperatorChannels } = require('../../src/scrapers/pm_alert_reply');
+    return getOperatorChannels();
+  });
+
+  handle('slack:save-operator-channels', async (_e, config) => {
+    if (!config || typeof config !== 'object') throw new Error('config must be an object');
+    const { saveOperatorChannels } = require('../../src/scrapers/pm_alert_reply');
+    return saveOperatorChannels(config);
+  });
+
+  // Distinct operators present in fleetData — for the "Populate from fleet" btn.
+  handle('slack:list-fleet-operators', async () => {
+    const { listFleetOperators } = require('../../src/scrapers/pm_alert_reply');
+    return listFleetOperators();
+  });
+
   // FEATURE (2026-07-22): channel-add-by-ID membership check -- see
   // checkChannelMembership() in slack_send.js for the full rationale on
   // why ID entry + verification replaces a browsable channel list here.

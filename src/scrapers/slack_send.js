@@ -704,4 +704,109 @@ async function downloadFileContent(file) {
   });
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, downloadFileContent };
+// ── Download a shared file's RAW BYTES (any type) ─────────────────────────────
+// FEATURE (2026-10): downloadFileContent above only handles readable TEXT (for
+// the AI to read). For the PM-alert carrier fan-out we need the raw bytes of
+// the attached document (often a PDF/xlsx) so we can RE-UPLOAD it to the
+// carrier channel. Same Bearer-token auth against url_private, follows one
+// redirect, but collects a Buffer with no text cap. Returns
+// { name, mimetype, buffer } or null.
+async function downloadFileBuffer(file) {
+  if (!file || !file.url_private) return null;
+  const config = getConfig();
+  if (!config || !config.token) return null;
+
+  const fetchTo = (urlStr, cb, redirectsLeft) => {
+    const u = new URL(urlStr);
+    const req = https.request({
+      hostname: u.hostname,
+      path:     u.pathname + u.search,
+      method:   'GET',
+      headers:  { Authorization: 'Bearer ' + config.token },
+    }, (res) => {
+      if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location && redirectsLeft > 0) {
+        res.resume();
+        return fetchTo(res.headers.location, cb, redirectsLeft - 1);
+      }
+      if (res.statusCode !== 200) { res.resume(); return cb(null); }
+      const chunks = [];
+      let total = 0;
+      res.on('data', (c) => { total += c.length; if (total <= 25 * 1024 * 1024) chunks.push(c); }); // 25MB cap
+      res.on('end', () => cb(Buffer.concat(chunks)));
+    });
+    req.on('error', () => cb(null));
+    req.setTimeout(20000, () => { req.destroy(); cb(null); });
+    req.end();
+  };
+
+  return new Promise((resolve) => {
+    fetchTo(file.url_private, (buf) => {
+      if (!buf || !buf.length) return resolve(null);
+      resolve({ name: file.name || 'attachment', mimetype: file.mimetype || 'application/octet-stream', buffer: buf });
+    }, 2);
+  });
+}
+
+// ── Upload a file to a channel (Slack external upload flow) ───────────────────
+// FEATURE (2026-10): posts a FILE (with an optional message) to a channel, used
+// by the PM-alert carrier fan-out to attach the alert document. Slack's modern
+// flow is 3 steps:
+//   1. files.getUploadURLExternal  -> { upload_url, file_id }
+//   2. HTTP POST the raw bytes to upload_url
+//   3. files.completeUploadExternal(files=[{id}], channel_id, initial_comment)
+// Enterprise xoxc tokens may or may not permit this; callers should treat a
+// thrown error / {ok:false} as "upload not available" and fall back to a
+// text-only post. Returns { ok, fileId? } or throws.
+async function uploadFileToChannel(channelId, opts) {
+  if (!channelId) throw new Error('channelId required');
+  opts = opts || {};
+  const buffer = opts.buffer;
+  if (!buffer || !buffer.length) throw new Error('file buffer required');
+  const filename = opts.filename || 'attachment';
+  const title = opts.title || filename;
+  const initialComment = opts.initialComment || '';
+
+  // Step 1: get an upload URL.
+  const step1 = await slackWebApi('files.getUploadURLExternal', {
+    filename: filename,
+    length: String(buffer.length),
+  });
+  if (!step1 || !step1.ok || !step1.upload_url || !step1.file_id) {
+    throw new Error('getUploadURLExternal failed: ' + ((step1 && step1.error) || 'unknown'));
+  }
+
+  // Step 2: POST the raw bytes to the returned upload URL.
+  await new Promise((resolve, reject) => {
+    const u = new URL(step1.upload_url);
+    const req = https.request({
+      hostname: u.hostname,
+      path:     u.pathname + u.search,
+      method:   'POST',
+      headers:  { 'Content-Type': 'application/octet-stream', 'Content-Length': buffer.length },
+    }, (res) => {
+      res.resume();
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve();
+        else reject(new Error('upload POST status ' + res.statusCode));
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(30000, () => { req.destroy(); reject(new Error('upload POST timeout')); });
+    req.write(buffer);
+    req.end();
+  });
+
+  // Step 3: complete the upload, attaching it to the channel.
+  const completeParams = {
+    files: JSON.stringify([{ id: step1.file_id, title: title }]),
+    channel_id: channelId,
+  };
+  if (initialComment) completeParams.initial_comment = initialComment;
+  const step3 = await slackWebApi('files.completeUploadExternal', completeParams);
+  if (!step3 || !step3.ok) {
+    throw new Error('completeUploadExternal failed: ' + ((step3 && step3.error) || 'unknown'));
+  }
+  return { ok: true, fileId: step1.file_id };
+}
+
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, downloadFileContent, downloadFileBuffer, uploadFileToChannel };

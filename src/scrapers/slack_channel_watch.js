@@ -678,7 +678,7 @@ async function pollChannelsOnce(log) {
   const config = getWatchConfig();
   if (!config.enabled) { doLog('[SlackWatch] Disabled — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
 
-  const { readMessages, readThreadReplies, sendToChannel, checkLiveAuth } = require('./slack_send');
+  const { readMessages, readThreadReplies, sendToChannel, checkLiveAuth, uploadFileToChannel, downloadFileBuffer } = require('./slack_send');
   const { askOrcha } = require('./orcha_ws');
   // PM Alert auto-reply (additive, per-channel pmAlertAutoReply flag). Isolated
   // in its own module so the existing tier logic below is untouched.
@@ -847,7 +847,7 @@ async function pollChannelsOnce(log) {
             if (taggedHere) {
               const r = await pmAlert.handleTaggedPmAlert(
                 ch, msg, myUserId,
-                { readThreadReplies, sendToChannel, askOrcha }, doLog
+                { readThreadReplies, sendToChannel, askOrcha, uploadFileToChannel, downloadFileBuffer }, doLog
               );
               if (r && r.handled) {
                 repliedCount++;

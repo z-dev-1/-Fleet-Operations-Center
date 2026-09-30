@@ -405,6 +405,9 @@ export const slack = {
   // -- Partner Auto-Reply engine (2026-07-21)
   getChannelWatchConfig:  ()       => window.slack.getChannelWatchConfig(),
   saveChannelWatchConfig: (config) => window.slack.saveChannelWatchConfig(config),
+  getOperatorChannels:   ()       => window.slack.getOperatorChannels(),
+  saveOperatorChannels:  (config) => window.slack.saveOperatorChannels(config),
+  listFleetOperators:    ()       => window.slack.listFleetOperators(),
   checkChannelMembership: (channelId) => window.slack.checkChannelMembership(channelId),
   pollChannelWatch:       ()       => window.slack.pollChannelWatch(),
   dedupeReplies:          ()       => window.slack.dedupeReplies(),

@@ -51,6 +51,12 @@ const REGISTRY = {
   // runs so a perfected step is executed without asking the AI. See
   // src/scrapers/aap_adaptive_agent.js (RECIPE_STORE_KEY).
   aapStepRecipes:   () => path.join(P.dataDir, 'aap-step-recipes.json'),
+  // Operator -> Slack channel + owner mapping for the PM-alert carrier fan-out
+  // (2026-10). See src/scrapers/pm_alert_reply.js. Shape:
+  //   { operators: [ { operator, channelId, ownerId, ownerName } ] }
+  operatorChannels: () => path.join(P.dataDir, 'operator-channels.json'),
+  // Dedup ledger so a PM alert is fanned out to a carrier channel only once.
+  pmAlertFanout:    () => path.join(P.dataDir, 'pm-alert-fanout.json'),
   offlineQueue:     () => path.join(P.dataDir, 'offline-queue.json'),
   orchaPatterns:    () => path.join(P.dataDir, 'orcha-patterns.json'),
   pins:             () => path.join(P.dataDir, 'pins.json'),

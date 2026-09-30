@@ -95,6 +95,55 @@ function isTaggedIn(text, myUserId) {
   return re.test(text);
 }
 
+// ── Operator Channels config (operator -> carrier channel + owner) ────────────
+// Shape: { operators: [ { operator, channelId, ownerId, ownerName } ] }
+function getOperatorChannels() {
+  const cfg = store.load('operatorChannels', null);
+  if (cfg && Array.isArray(cfg.operators)) return cfg;
+  const seeded = { operators: [] };
+  return seeded;
+}
+function saveOperatorChannels(cfg) {
+  if (!cfg || !Array.isArray(cfg.operators)) throw new Error('operatorChannels.operators must be an array');
+  // Normalize: trim operator codes, keep only entries with an operator name.
+  const operators = cfg.operators
+    .map((o) => ({
+      operator: String(o.operator || '').trim(),
+      channelId: String(o.channelId || '').trim(),
+      ownerId: String(o.ownerId || '').trim(),
+      ownerName: String(o.ownerName || '').trim(),
+    }))
+    .filter((o) => o.operator);
+  store.save('operatorChannels', { operators });
+  return { ok: true };
+}
+
+// Distinct operator codes present in fleetData (for the "Populate from fleet"
+// button). Case-preserving, de-duplicated, sorted.
+function listFleetOperators() {
+  try {
+    const fd = store.load('fleetData', {}) || {};
+    const rows = Array.isArray(fd.rows) ? fd.rows : [];
+    const seen = new Map(); // lower -> original
+    for (const r of rows) {
+      const op = String(r.operator || '').trim();
+      if (op && !seen.has(op.toLowerCase())) seen.set(op.toLowerCase(), op);
+    }
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+  } catch (e) {
+    logger.warn('[PMAlert] listFleetOperators error: ' + e.message);
+    return [];
+  }
+}
+
+// Resolve a unit's operator to its mapped carrier entry (case-insensitive).
+function resolveOperatorEntry(operator) {
+  const op = String(operator || '').trim().toLowerCase();
+  if (!op) return null;
+  const cfg = getOperatorChannels();
+  return cfg.operators.find((o) => String(o.operator || '').trim().toLowerCase() === op) || null;
+}
+
 // ── Fleet-data lookup ─────────────────────────────────────────────────────────
 // Match on equipmentId, case-insensitive (alert may print "B62060" vs a stored
 // "b62060"). Returns the matched row or null.
@@ -155,13 +204,147 @@ function buildPrompt(alert, unit) {
   ].join('\n');
 }
 
+// ── Carrier fan-out: AI message + doc to the operator's channel ───────────────
+// Prompt for the message posted to the CARRIER's channel. Intent: notify the
+// carrier their unit has a predictive maintenance alert and ask THEM to
+// schedule a repair date + time in their email (they also receive an email
+// notification). Professional, Slack-friendly emojis. MUST NOT mention Z / the
+// requester, and must never invent data.
+function buildCarrierPrompt(alert, unit, ownerTag) {
+  const line = (k, v) => (v ? '- ' + k + ': ' + v : '');
+  const details = [
+    line('Asset ID', alert.assetId),
+    line('Domicile', alert.domicile || (unit && unit.domicileSite)),
+    line('Risk Score', alert.riskScore),
+    line('Component/Insight', alert.insight),
+    line('Fault Code(s)', alert.faultCodes),
+    line('Repair Window', alert.repairWindow),
+    line('Make', unit && unit.make),
+  ].filter(Boolean).join('\n');
+
+  return [
+    'Write a SHORT, professional Slack message to a carrier/operator partner channel notifying them of a Predictive Maintenance alert on one of their units. Use a few tasteful, Slack-friendly emojis (e.g. :rotating_light:, :calendar:, :email:, :wrench:). Output ONLY the message text — no preamble, no JSON, no markdown headers.',
+    '',
+    'ALERT DETAILS (use only what is given; never invent anything):',
+    details,
+    '',
+    'The message MUST:',
+    '- Clearly state the unit/asset and the maintenance concern (component/fault) and the repair window if given.',
+    '- ASK the carrier to schedule a repair date and time in their email (they have also received an email notification about this).',
+    '- Be concise (2–4 short sentences), courteous, and partner-appropriate.',
+    ownerTag ? ('- Begin by addressing the owner using EXACTLY this token so Slack tags them: ' + ownerTag) : '',
+    '',
+    'The message MUST NOT:',
+    '- Mention "Z", "Zila", "FAS", the internal requester, or any internal-only names/roles.',
+    '- Invent a work order number, date, price, or any detail not provided above.',
+    '- Instruct them on a specific grounding date/time — only ASK them to schedule the repair date/time in their email.',
+  ].filter(Boolean).join('\n');
+}
+
+// Fan out to the carrier channel. deps: { sendToChannel, uploadFileToChannel,
+// downloadFileBuffer, askOrcha }. `alertFiles` = the Slack message's files[]
+// (the attached document, if any). Returns { sent, channelId?, withDoc?, reason? }.
+async function fanOutToCarrier(alert, unit, alertFiles, deps, log) {
+  const doLog = log || ((m) => logger.info(m));
+  const { sendToChannel, uploadFileToChannel, downloadFileBuffer, askOrcha } = deps || {};
+
+  const operator = unit && unit.operator;
+  if (!operator) { doLog('[PMAlert] fan-out: unit has no operator — skipping'); return { sent: false, reason: 'no-operator' }; }
+
+  const entry = resolveOperatorEntry(operator);
+  if (!entry || !entry.channelId) {
+    doLog('[PMAlert] fan-out: operator "' + operator + '" has no mapped carrier channel — skipping');
+    return { sent: false, reason: 'no-channel' };
+  }
+
+  // Dedup: same asset -> same carrier channel, only once.
+  const dedupKey = entry.channelId + ':' + String(alert.assetId).toLowerCase();
+  try {
+    const ledger = store.load('pmAlertFanout', {}) || {};
+    if (ledger[dedupKey]) {
+      doLog('[PMAlert] fan-out: already sent for ' + dedupKey + ' — skipping');
+      return { sent: false, reason: 'dedup' };
+    }
+  } catch (_) {}
+
+  const ownerTag = entry.ownerId ? '<@' + entry.ownerId + '>' : '';
+
+  // Generate the carrier message.
+  let message = '';
+  try {
+    const prompt = buildCarrierPrompt(alert, unit, ownerTag);
+    const ai = await Promise.race([
+      askOrcha(prompt),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), 20000)),
+    ]);
+    message = (ai && ai.text) ? String(ai.text).trim() : (typeof ai === 'string' ? ai.trim() : '');
+  } catch (e) {
+    doLog('[PMAlert] fan-out: AI message failed (' + e.message + ') — using fallback');
+  }
+  if (!message) {
+    // Deterministic fallback so the carrier is still notified.
+    message = (ownerTag ? ownerTag + ' ' : '') +
+      ':rotating_light: Predictive Maintenance alert for unit ' + alert.assetId +
+      (alert.insight ? ' — ' + alert.insight : '') +
+      (alert.repairWindow ? ' (repair window: ' + alert.repairWindow + ')' : '') +
+      '. :calendar: Please schedule a repair date and time in your email — a notification has also been sent there. :email:';
+  }
+  // Safety net: make sure the owner is actually tagged even if the AI omitted it.
+  if (ownerTag && message.indexOf(ownerTag) === -1) message = ownerTag + ' ' + message;
+
+  // Try to attach the alert document (first attachable file). Best-effort:
+  // on any failure, fall back to a text-only post so the carrier is still told.
+  let withDoc = false;
+  const file = Array.isArray(alertFiles) ? alertFiles.find((f) => f && f.url_private) : null;
+  if (file && typeof downloadFileBuffer === 'function' && typeof uploadFileToChannel === 'function') {
+    try {
+      const dl = await downloadFileBuffer(file);
+      if (dl && dl.buffer && dl.buffer.length) {
+        await uploadFileToChannel(entry.channelId, {
+          buffer: dl.buffer,
+          filename: dl.name || 'alert-document',
+          title: 'PM Alert – ' + alert.assetId,
+          initialComment: message,
+        });
+        withDoc = true;
+        doLog('[PMAlert] fan-out: posted to ' + entry.channelId + ' WITH document for ' + alert.assetId);
+      }
+    } catch (e) {
+      doLog('[PMAlert] fan-out: file upload failed (' + e.message + ') — falling back to text-only');
+    }
+  }
+
+  // Text-only post (either no doc, or upload failed).
+  if (!withDoc) {
+    try {
+      await sendToChannel(entry.channelId, message); // top-level (no thread_ts)
+      doLog('[PMAlert] fan-out: posted TEXT to ' + entry.channelId + ' for ' + alert.assetId);
+    } catch (e) {
+      doLog('[PMAlert] fan-out: text post FAILED: ' + e.message);
+      return { sent: false, reason: 'send-failed' };
+    }
+  }
+
+  // Record dedup.
+  try {
+    const ledger = store.load('pmAlertFanout', {}) || {};
+    ledger[dedupKey] = { at: new Date().toISOString(), channelId: entry.channelId, asset: alert.assetId, withDoc };
+    // Cap the ledger so it doesn't grow unbounded.
+    const keys = Object.keys(ledger);
+    if (keys.length > 2000) { keys.slice(0, keys.length - 2000).forEach((k) => delete ledger[k]); }
+    store.save('pmAlertFanout', ledger);
+  } catch (_) {}
+
+  return { sent: true, channelId: entry.channelId, withDoc };
+}
+
 // ── Main entry: attempt a PM-alert auto-reply for one tagged message ──────────
 // deps: { readThreadReplies, sendToChannel, askOrcha } — injected so this stays
 // unit-testable and matches the channel-watch engine's existing modules.
 // Returns { handled: bool, reply?, assetId?, matched?, reason? }.
 async function handleTaggedPmAlert(ch, msg, myUserId, deps, log) {
   const doLog = log || ((m) => logger.info(m));
-  const { readThreadReplies, sendToChannel, askOrcha } = deps || {};
+  const { readThreadReplies, sendToChannel, askOrcha, uploadFileToChannel, downloadFileBuffer } = deps || {};
 
   // 1) STRICT: the user must be LITERALLY @-tagged in THIS exact message.
   //    Slack renders a mention as "<@U0123>" or "<@U0123|display>" — match
@@ -177,6 +360,10 @@ async function handleTaggedPmAlert(ch, msg, myUserId, deps, log) {
   //    the parent message).
   let alert = parseAlert(msg.text);
   let sourceText = msg.text;
+  // The document to attach to the carrier lives on the message that CARRIES the
+  // alert (the tagged msg, or — when tagged in a reply — the thread message that
+  // actually is the alert). Track its files[] so the fan-out can re-upload it.
+  let alertFiles = Array.isArray(msg.files) ? msg.files : [];
   if (!alert) {
     const rootTs = (msg.threadTs && msg.threadTs !== msg.ts) ? msg.threadTs : (msg.thread_ts || null);
     if (rootTs && typeof readThreadReplies === 'function') {
@@ -185,11 +372,11 @@ async function handleTaggedPmAlert(ch, msg, myUserId, deps, log) {
         // The root message is the one whose ts === threadTs; also scan all
         // thread messages for the first one that parses as an alert.
         const root = replies.find((r) => r.ts === rootTs);
-        if (root && parseAlert(root.text)) { alert = parseAlert(root.text); sourceText = root.text; }
+        if (root && parseAlert(root.text)) { alert = parseAlert(root.text); sourceText = root.text; alertFiles = Array.isArray(root.files) ? root.files : []; }
         if (!alert) {
           for (const r of replies) {
             const a = parseAlert(r.text);
-            if (a) { alert = a; sourceText = r.text; break; }
+            if (a) { alert = a; sourceText = r.text; alertFiles = Array.isArray(r.files) ? r.files : []; break; }
           }
         }
       } catch (e) {
@@ -234,7 +421,23 @@ async function handleTaggedPmAlert(ch, msg, myUserId, deps, log) {
   }
 
   doLog('[PMAlert] ' + ch.name + ': replied in-thread for ' + alert.assetId + (unit ? ' (matched)' : ' (ack only)'));
-  return { handled: true, reply, replyTs, assetId: alert.assetId, matched: !!unit };
+
+  // 6) CARRIER FAN-OUT (part 2): also post a top-level, AI-generated message to
+  //    the unit's operator/carrier channel (tagging the operator owner) with
+  //    the alert document attached. Best-effort and independent of the reply
+  //    above — a fan-out failure never fails the in-thread acknowledgment.
+  let fanout = { sent: false, reason: 'not-attempted' };
+  try {
+    fanout = await fanOutToCarrier(
+      alert, unit, alertFiles,
+      { sendToChannel, uploadFileToChannel, downloadFileBuffer, askOrcha },
+      doLog
+    );
+  } catch (e) {
+    doLog('[PMAlert] ' + ch.name + ': carrier fan-out error: ' + e.message);
+  }
+
+  return { handled: true, reply, replyTs, assetId: alert.assetId, matched: !!unit, fanout };
 }
 
 module.exports = {
@@ -244,4 +447,11 @@ module.exports = {
   findUnit,
   buildPrompt,
   handleTaggedPmAlert,
+  buildCarrierPrompt,
+  fanOutToCarrier,
+  // Operator Channels config
+  getOperatorChannels,
+  saveOperatorChannels,
+  listFleetOperators,
+  resolveOperatorEntry,
 };

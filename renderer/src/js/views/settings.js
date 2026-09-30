@@ -818,6 +818,23 @@ function _html() {
           <div id="par-status" class="sd-status" style="display:none;margin-top:8px"></div>
         </div>
 
+        <div class="sd-section" id="sect-operator-channels">
+          <div class="sd-section-title">
+            <span style="font-size:11px">📣</span> Operator Channels
+            <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">PM ALERTS</span>
+          </div>
+          <div class="sd-hint" style="margin-bottom:10px">When a Predictive Maintenance alert you're tagged in is handled, the app also posts a top-level message to the matching operator's carrier channel (tagging the owner) with the alert document attached. Map each operator to its Slack channel and owner here.</div>
+          <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+            <button class="sd-btn secondary" id="opc-populate-btn" type="button">Populate from fleet</button>
+            <button class="sd-btn secondary" id="opc-add-btn" type="button">+ Add operator</button>
+          </div>
+          <div id="opc-list" style="margin-top:10px;display:flex;flex-direction:column;gap:8px"></div>
+          <div class="sd-btn-row" style="margin-top:10px">
+            <button class="sd-btn primary" id="opc-save">Save</button>
+          </div>
+          <div id="opc-status" class="sd-status" style="display:none;margin-top:8px"></div>
+        </div>
+
         <div class="sd-section" id="sect-dm-autoreply">
           <div class="sd-section-title">
             <span style="font-size:11px">💬</span> DM Auto-Reply
@@ -1980,6 +1997,160 @@ async function _spSaveDomicile(opName, domCode, siteUrl, listName, headerRow) {
   return spBridge.saveConfig({ ...existing, domiciles, workbooks });
 }
 
+// ── Operator Channels (PM-alert carrier fan-out mapping) ──────────────────────
+function _wireOperatorChannels() {
+  const listEl     = document.getElementById('opc-list');
+  const populateBtn= document.getElementById('opc-populate-btn');
+  const addBtn     = document.getElementById('opc-add-btn');
+  const saveBtn    = document.getElementById('opc-save');
+  const statusEl   = document.getElementById('opc-status');
+  if (!listEl || !saveBtn) return;
+
+  let _cfg = { operators: [] };
+  // Track owner-search timers per-row so we debounce directory lookups.
+  const _ownerTimers = {};
+
+  function showStatus(text, cls) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.className = 'sd-status ' + (cls || '');
+    statusEl.style.display = '';
+  }
+  const _esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  async function _save() {
+    try { await slackBridge.saveOperatorChannels(_cfg); }
+    catch (e) { showStatus('Auto-save failed: ' + e.message, 'err'); }
+  }
+
+  function render() {
+    if (!_cfg.operators.length) {
+      listEl.innerHTML = '<div class="sd-hint">No operators yet — click "Populate from fleet" to load your operators, then set each one\'s channel + owner.</div>';
+      return;
+    }
+    listEl.innerHTML = _cfg.operators.map((o, i) => `
+      <div style="background:var(--el);border:1px solid var(--bdr);border-radius:8px;padding:10px 12px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <input class="sd-input opc-operator" data-idx="${i}" value="${_esc(o.operator)}" placeholder="Operator (e.g. TUZR)" style="flex:1;font-size:11px;font-weight:600"/>
+          <button class="sd-btn danger opc-remove" data-idx="${i}" type="button" style="padding:2px 8px;font-size:10px;border-radius:5px">&#x2715;</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <input class="sd-input opc-channel" data-idx="${i}" value="${_esc(o.channelId)}" placeholder="Carrier channel ID (e.g. C0B4H2JJS06)" style="font-size:11px"/>
+          <div style="position:relative">
+            <input class="sd-input opc-owner" data-idx="${i}" value="${_esc(o.ownerName)}" placeholder="Operator owner — search Slack contacts to tag" style="font-size:11px"/>
+            <div class="opc-owner-results" data-idx="${i}" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--el);border:1px solid var(--bdr);border-radius:6px;margin-top:2px;max-height:160px;overflow:auto"></div>
+          </div>
+          <div style="font-size:9px;color:var(--mut)">${o.ownerId ? 'Owner tag: &lt;@' + _esc(o.ownerId) + '&gt;' : 'No owner selected — carrier message will post without a tag'}</div>
+        </div>
+      </div>`).join('');
+
+    // Operator code edits
+    listEl.querySelectorAll('.opc-operator').forEach((el) => {
+      el.addEventListener('change', () => {
+        const i = parseInt(el.getAttribute('data-idx'), 10);
+        _cfg.operators[i].operator = el.value.trim();
+        _save();
+      });
+    });
+    // Channel id edits
+    listEl.querySelectorAll('.opc-channel').forEach((el) => {
+      el.addEventListener('change', () => {
+        const i = parseInt(el.getAttribute('data-idx'), 10);
+        _cfg.operators[i].channelId = el.value.trim();
+        _save();
+      });
+    });
+    // Remove row
+    listEl.querySelectorAll('.opc-remove').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const i = parseInt(btn.getAttribute('data-idx'), 10);
+        _cfg.operators.splice(i, 1);
+        render();
+        _save();
+      });
+    });
+    // Owner search (debounced directory lookup)
+    listEl.querySelectorAll('.opc-owner').forEach((el) => {
+      const i = parseInt(el.getAttribute('data-idx'), 10);
+      const resultsEl = listEl.querySelector('.opc-owner-results[data-idx="' + i + '"]');
+      el.addEventListener('input', () => {
+        // Typing a fresh name invalidates the previously-picked owner id until
+        // they select one from the results.
+        const q = el.value.trim();
+        clearTimeout(_ownerTimers[i]);
+        if (!q || q.length < 2) { if (resultsEl) resultsEl.style.display = 'none'; return; }
+        _ownerTimers[i] = setTimeout(async () => {
+          try {
+            const results = await slackBridge.searchDirectory({ query: q, limit: 6 });
+            const people = (results || []).filter((r) => r.type === 'user');
+            if (!people.length) { resultsEl.innerHTML = '<div style="padding:6px 8px;font-size:10px;color:var(--mut)">No matches</div>'; resultsEl.style.display = ''; return; }
+            resultsEl.innerHTML = people.map((p) =>
+              `<div class="opc-owner-pick" data-idx="${i}" data-id="${_esc(p.id)}" data-name="${_esc(p.name)}" style="padding:6px 8px;font-size:11px;cursor:pointer;border-bottom:1px solid rgba(48,54,61,.5)">${_esc(p.name)}</div>`
+            ).join('');
+            resultsEl.style.display = '';
+            resultsEl.querySelectorAll('.opc-owner-pick').forEach((row) => {
+              row.addEventListener('click', () => {
+                const idx = parseInt(row.getAttribute('data-idx'), 10);
+                _cfg.operators[idx].ownerId = row.getAttribute('data-id');
+                _cfg.operators[idx].ownerName = row.getAttribute('data-name');
+                render();
+                _save();
+              });
+            });
+          } catch (e) {
+            if (resultsEl) { resultsEl.innerHTML = '<div style="padding:6px 8px;font-size:10px;color:var(--err,#f66)">Search failed</div>'; resultsEl.style.display = ''; }
+          }
+        }, 350);
+      });
+    });
+  }
+
+  slackBridge.getOperatorChannels().then((cfg) => {
+    _cfg = (cfg && Array.isArray(cfg.operators)) ? cfg : { operators: [] };
+    render();
+  }).catch(() => { _cfg = { operators: [] }; render(); });
+
+  if (populateBtn) {
+    populateBtn.addEventListener('click', async () => {
+      populateBtn.disabled = true;
+      const orig = populateBtn.textContent;
+      populateBtn.textContent = 'Loading...';
+      try {
+        const ops = await slackBridge.listFleetOperators();
+        const existing = new Set(_cfg.operators.map((o) => o.operator.toLowerCase()));
+        let added = 0;
+        (ops || []).forEach((op) => {
+          if (op && !existing.has(op.toLowerCase())) {
+            _cfg.operators.push({ operator: op, channelId: '', ownerId: '', ownerName: '' });
+            added++;
+          }
+        });
+        _cfg.operators.sort((a, b) => a.operator.localeCompare(b.operator));
+        render();
+        await _save();
+        showStatus(added > 0 ? ('Added ' + added + ' operator' + (added === 1 ? '' : 's')) : 'All fleet operators already listed', 'ok');
+      } catch (e) {
+        showStatus('Populate failed: ' + e.message, 'err');
+      } finally {
+        populateBtn.disabled = false;
+        populateBtn.textContent = orig;
+      }
+    });
+  }
+
+  if (addBtn) {
+    addBtn.addEventListener('click', () => {
+      _cfg.operators.push({ operator: '', channelId: '', ownerId: '', ownerName: '' });
+      render();
+    });
+  }
+
+  saveBtn.addEventListener('click', async () => {
+    await _save();
+    showStatus('\u2705 Saved', 'ok');
+  });
+}
+
 // ── SP: render operator accordion cards ──────────────────────────────────────
 
 function _wireDMAutoReply() {
@@ -3077,6 +3248,7 @@ export function init() {
   _wireVendorAuth();
   _wireSlack();
   _wirePartnerAutoReply();
+  _wireOperatorChannels();
   _wireDMAutoReply();
   _wireEmail();
   _wireAutoNote();
