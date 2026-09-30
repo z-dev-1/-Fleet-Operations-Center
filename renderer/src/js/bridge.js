@@ -408,6 +408,7 @@ export const slack = {
   getOperatorChannels:   ()       => window.slack.getOperatorChannels(),
   saveOperatorChannels:  (config) => window.slack.saveOperatorChannels(config),
   listFleetOperators:    ()       => window.slack.listFleetOperators(),
+  resolveUserName:       (userId) => window.slack.resolveUserName(userId),
   checkChannelMembership: (channelId) => window.slack.checkChannelMembership(channelId),
   pollChannelWatch:       ()       => window.slack.pollChannelWatch(),
   dedupeReplies:          ()       => window.slack.dedupeReplies(),

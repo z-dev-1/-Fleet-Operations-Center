@@ -203,6 +203,7 @@ expose('slack', {
   getOperatorChannels:   ()       => ipcRenderer.invoke('slack:get-operator-channels'),
   saveOperatorChannels:  (config) => ipcRenderer.invoke('slack:save-operator-channels', config),
   listFleetOperators:    ()       => ipcRenderer.invoke('slack:list-fleet-operators'),
+  resolveUserName:       (userId) => ipcRenderer.invoke('slack:resolve-user-name', userId),
   onConfigUpdated:       (cb)     => on('slack:config-updated', cb),
   checkChannelMembership: (channelId) => ipcRenderer.invoke('slack:check-channel-membership', channelId),
   pollChannelWatch:       ()       => ipcRenderer.invoke('slack:poll-channel-watch'),

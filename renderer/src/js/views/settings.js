@@ -2105,9 +2105,27 @@ function _wireOperatorChannels() {
     });
   }
 
+  // Resolve any owner whose stored name is missing or is just the raw Slack id
+  // (e.g. "U0A8X5TTANR") into a real display name, then persist + re-render.
+  async function _resolveOwnerNames() {
+    let changed = false;
+    for (const o of _cfg.operators) {
+      const looksLikeId = o.ownerName && /^U[A-Z0-9]{6,}$/.test(o.ownerName.trim());
+      if (o.ownerId && (!o.ownerName || looksLikeId || o.ownerName === o.ownerId)) {
+        try {
+          const res = await slackBridge.resolveUserName(o.ownerId);
+          const name = res && res.name;
+          if (name && name !== o.ownerName) { o.ownerName = name; changed = true; }
+        } catch (_) { /* leave as-is on failure */ }
+      }
+    }
+    if (changed) { render(); _save(); }
+  }
+
   slackBridge.getOperatorChannels().then((cfg) => {
     _cfg = (cfg && Array.isArray(cfg.operators)) ? cfg : { operators: [] };
     render();
+    _resolveOwnerNames();
   }).catch(() => { _cfg = { operators: [] }; render(); });
 
   if (populateBtn) {

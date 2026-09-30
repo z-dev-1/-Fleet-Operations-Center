@@ -272,6 +272,14 @@ function registerSlackIPC(ctx) {
     return listFleetOperators();
   });
 
+  // Resolve a Slack user id -> display name (cached). Used by the Operator
+  // Channels UI to show a readable owner name instead of the raw id.
+  handle('slack:resolve-user-name', async (_e, userId) => {
+    requireString(userId, 'userId');
+    const { resolveUserName } = require('../../src/scrapers/slack_send');
+    return { userId, name: await resolveUserName(userId) };
+  });
+
   // FEATURE (2026-07-22): channel-add-by-ID membership check -- see
   // checkChannelMembership() in slack_send.js for the full rationale on
   // why ID entry + verification replaces a browsable channel list here.
