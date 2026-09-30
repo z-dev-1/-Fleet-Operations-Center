@@ -42,8 +42,18 @@ const logger = require('../utils/logger').createLogger('pm_alert_reply');
 // B62060), so we anchor on the "Asset ID:" label first, then fall back to a
 // loose scan.
 function parseAlert(text) {
-  const t = String(text || '');
+  let t = String(text || '');
   if (!t) return null;
+
+  // Slack renders these alerts with markdown: labels are bold (*Asset ID:*),
+  // values follow after the closing '*'. Strip Slack markdown decorations
+  // (*bold*, _italic_, `code`, ~strike~) so labels/values parse cleanly. Also
+  // unwrap <url|text> / <url> link syntax to its text. This is the fix for
+  // parseAlert returning NONE on real alerts (confirmed live: "*Asset ID:* 622008").
+  t = t
+    .replace(/<([^|>]+)\|([^>]+)>/g, '$2')   // <url|label> -> label
+    .replace(/<([^>]+)>/g, '$1')             // <url> -> url
+    .replace(/[*_~`]/g, '');                 // drop bold/italic/strike/code marks
 
   // Asset ID — required. Prefer the explicit label; be tolerant of spacing/case.
   let assetId = '';
