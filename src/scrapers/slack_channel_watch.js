@@ -597,7 +597,14 @@ async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
   if (!token) { doLog(`[PMAlert] ${ch.name}: no myUserId — cannot detect tags`); return; }
 
   const replyLog = store.load('slackChannelReplies', []);
-  const alreadyHandled = (ts) => replyLog.some(e => e.id === ch.id + ':' + ts);
+  // Mirror the main loop's invariant: a message is "handled" ONLY once a real
+  // reply actually posted. Match ONLY our own confirmed PM reply (pmAlert:true
+  // AND a real replyTs) — NOT any id-only entry. An id-only match (as before)
+  // let a stale/failed PM entry, or an entry the main tier loop wrote for the
+  // same ts, permanently suppress the handler (the bug: scan found the tag every
+  // poll but never called the handler). Now a prior send-failure correctly
+  // retries next poll, exactly like the working path.
+  const alreadyHandled = (ts) => replyLog.some(e => e.id === ch.id + ':' + ts && e.pmAlert === true && e.replyTs);
 
   // Build the candidate set: every root, plus the replies of any root that is
   // itself an alert OR has thread replies (bounded to the 10 most recent roots
@@ -626,19 +633,16 @@ async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
     }
   }
 
-  const taggedCount = candidates.filter(m => m.text && m.text.indexOf(token) !== -1).length;
+  // Use the SAME tag check the handler uses (pmAlert.isTaggedIn — regex that
+  // handles both <@ID> and <@ID|display> forms) so the scan and handler can
+  // never disagree.
+  const taggedCount = candidates.filter(m => pmAlert.isTaggedIn(m.text, myUserId)).length;
   doLog(`[PMAlert] ${ch.name}: ${candidates.length} candidates (${threadFetches} threads fetched), ${taggedCount} tag me`);
-  // DIAGNOSTIC: dump the raw text + parse result of each tagged candidate so we
-  // can see exactly why parseAlert isn't matching (Slack bold/emoji formatting).
-  candidates.filter(m => m.text && m.text.indexOf(token) !== -1).forEach((m) => {
-    const parsed = pmAlert.parseAlert(m.text);
-    doLog(`[PMAlert] ${ch.name}: TAGGED ts=${m.ts} parsedAsset=${parsed ? parsed.assetId : 'NONE'} isThreadReply=${!!(m.threadTs && m.threadTs !== m.ts)} rawText="${(m.text || '').replace(/\n/g, ' \\n ').slice(0, 300)}"`);
-  });
 
-  // Handle any candidate where the user is literally tagged, not yet handled.
+  // Handle any candidate where the user is tagged, not yet handled.
   for (const msg of candidates) {
-    if (!msg.text || msg.text.indexOf(token) === -1) continue;      // must tag me
-    if (alreadyHandled(msg.ts)) continue;                            // dedup
+    if (!pmAlert.isTaggedIn(msg.text, myUserId)) continue;           // must tag me
+    if (alreadyHandled(msg.ts)) continue;                            // dedup (own confirmed reply only)
     // Only engage if this message OR its thread root parses as an alert; the
     // handler itself re-checks and falls back to the thread root for data.
     const parsableHere = pmAlert.looksLikeAlert(msg.text) || (msg.threadTs && msg.threadTs !== msg.ts);
