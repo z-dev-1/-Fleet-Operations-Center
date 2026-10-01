@@ -279,20 +279,42 @@ async function fanOutToCarrier(alert, unit, alertFiles, deps, log) {
 
   const ownerTag = entry.ownerId ? '<@' + entry.ownerId + '>' : '';
 
-  // Generate the carrier message.
+  // Generate the carrier message — the carrier message MUST be AI-written.
+  // The Orcha backend is sometimes slow (observed 20s+), so a single 20s race
+  // would fall back to deterministic text too eagerly. RETRY up to 3 times with
+  // a longer per-attempt budget (35s) and a short pause between tries. The
+  // deterministic fallback is a LAST RESORT only if all attempts fail — not the
+  // first timeout. (This runs in the PM handler which is already outside the
+  // tight gate path, so the longer budget is fine.)
+  const prompt = buildCarrierPrompt(alert, unit, ownerTag);
   let message = '';
-  try {
-    const prompt = buildCarrierPrompt(alert, unit, ownerTag);
-    const ai = await Promise.race([
-      askOrcha(prompt),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), 20000)),
-    ]);
-    message = (ai && ai.text) ? String(ai.text).trim() : (typeof ai === 'string' ? ai.trim() : '');
-  } catch (e) {
-    doLog('[PMAlert] fan-out: AI message failed (' + e.message + ') — using fallback');
+  // Bounded so the whole handler stays under the poll's 90s deadline (the
+  // handler is awaited inside _pollLock): 2 attempts × 30s + 1.5s pause ≈ 62s.
+  const AI_ATTEMPTS = 2;
+  const AI_ATTEMPT_MS = 30000;
+  for (let attempt = 1; attempt <= AI_ATTEMPTS && !message; attempt++) {
+    try {
+      const ai = await Promise.race([
+        askOrcha(prompt),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), AI_ATTEMPT_MS)),
+      ]);
+      message = (ai && ai.text) ? String(ai.text).trim() : (typeof ai === 'string' ? ai.trim() : '');
+      if (message) {
+        doLog('[PMAlert] fan-out: AI message generated (attempt ' + attempt + ')');
+      } else {
+        doLog('[PMAlert] fan-out: AI returned empty (attempt ' + attempt + '/' + AI_ATTEMPTS + ')');
+      }
+    } catch (e) {
+      doLog('[PMAlert] fan-out: AI attempt ' + attempt + '/' + AI_ATTEMPTS + ' failed (' + e.message + ')');
+    }
+    if (!message && attempt < AI_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, 1500)); // brief pause before retry
+    }
   }
   if (!message) {
-    // Deterministic fallback so the carrier is still notified.
+    // LAST-RESORT deterministic fallback (all AI attempts failed) so the
+    // carrier is still notified rather than getting nothing.
+    doLog('[PMAlert] fan-out: all ' + AI_ATTEMPTS + ' AI attempts failed — using deterministic fallback');
     message = (ownerTag ? ownerTag + ' ' : '') +
       ':rotating_light: Predictive Maintenance alert for unit ' + alert.assetId +
       (alert.insight ? ' — ' + alert.insight : '') +
