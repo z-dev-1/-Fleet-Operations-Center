@@ -835,6 +835,51 @@ function _html() {
           <div id="opc-status" class="sd-status" style="display:none;margin-top:8px"></div>
         </div>
 
+        <div class="sd-section" id="sect-carrier-briefing">
+          <div class="sd-section-title">
+            <span style="font-size:11px">📅</span> Daily Carrier Briefing
+            <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">AI</span>
+          </div>
+          <div class="sd-hint" style="margin-bottom:10px">Once a day, posts an AI-written fleet snapshot and safety tip to each operator's carrier channel (from Operator Channels above), tagging the owner. The AI writes the whole message from the real fleet data and Contact Book domicile addresses — nothing invented. One message per operator per day.</div>
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">Enable daily briefing</span>
+            <input type="checkbox" id="cb-enabled"/>
+          </div>
+          <div class="sd-field" style="margin-top:8px">
+            <label class="sd-label">Send time</label>
+            <input class="sd-input" id="cb-send-time" type="time" />
+          </div>
+          <div class="sd-field">
+            <label class="sd-label">Timezone (IANA)</label>
+            <input class="sd-input" id="cb-timezone" placeholder="America/New_York" />
+            <div class="sd-hint">e.g. America/New_York, America/Chicago, America/Los_Angeles.</div>
+          </div>
+          <div class="sd-field">
+            <label class="sd-label">Include in snapshot</label>
+            <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:4px">
+              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-down"/> Units down</label>
+              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-flagged"/> Flagged this week</label>
+              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-active"/> Active count</label>
+              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-domiciles"/> Domiciles</label>
+            </div>
+          </div>
+          <div class="sd-field">
+            <label class="sd-label">Flagged threshold (risk ≥)</label>
+            <input class="sd-input" id="cb-risk-threshold" type="number" min="0" max="100" step="1" />
+          </div>
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">Include AI safety tip</span>
+            <input type="checkbox" id="cb-tip-enabled"/>
+          </div>
+          <div class="sd-hint" id="cb-run-info" style="margin-top:8px"></div>
+          <div class="sd-btn-row" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+            <button class="sd-btn secondary" id="cb-test-btn" type="button">Send test to myself</button>
+            <button class="sd-btn secondary" id="cb-runnow-btn" type="button">Run now (live)</button>
+            <button class="sd-btn primary" id="cb-save">Save</button>
+          </div>
+          <div id="cb-status" class="sd-status" style="display:none;margin-top:8px"></div>
+        </div>
+
         <div class="sd-section" id="sect-dm-autoreply">
           <div class="sd-section-title">
             <span style="font-size:11px">💬</span> DM Auto-Reply
@@ -2169,6 +2214,141 @@ function _wireOperatorChannels() {
   });
 }
 
+// ── Daily Carrier Briefing ────────────────────────────────────────────────────
+function _wireCarrierBriefing() {
+  const enabledEl   = document.getElementById('cb-enabled');
+  const timeEl      = document.getElementById('cb-send-time');
+  const tzEl        = document.getElementById('cb-timezone');
+  const incDownEl   = document.getElementById('cb-inc-down');
+  const incFlagEl   = document.getElementById('cb-inc-flagged');
+  const incActiveEl = document.getElementById('cb-inc-active');
+  const incDomEl    = document.getElementById('cb-inc-domiciles');
+  const riskEl      = document.getElementById('cb-risk-threshold');
+  const tipEl       = document.getElementById('cb-tip-enabled');
+  const runInfoEl   = document.getElementById('cb-run-info');
+  const testBtn     = document.getElementById('cb-test-btn');
+  const runNowBtn   = document.getElementById('cb-runnow-btn');
+  const saveBtn     = document.getElementById('cb-save');
+  const statusEl    = document.getElementById('cb-status');
+  if (!enabledEl || !saveBtn) return;
+
+  let _saveTimer = null;
+
+  function showStatus(text, cls) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.className = 'sd-status ' + (cls || '');
+    statusEl.style.display = '';
+  }
+
+  function _collect() {
+    return {
+      enabled: !!enabledEl.checked,
+      sendTime: (timeEl.value || '').trim(),
+      timezone: (tzEl.value || '').trim(),
+      includeDown: !!incDownEl.checked,
+      includeFlagged: !!incFlagEl.checked,
+      includeActive: !!incActiveEl.checked,
+      includeDomiciles: !!incDomEl.checked,
+      riskThreshold: parseInt(riskEl.value, 10),
+      tipEnabled: !!tipEl.checked,
+    };
+  }
+
+  async function _save() {
+    try {
+      const saved = await slackBridge.saveBriefingConfig(_collect());
+      _apply(saved); // reflect normalized values back
+    } catch (e) {
+      showStatus('Save failed: ' + e.message, 'err');
+    }
+  }
+
+  // Debounced auto-save on any change.
+  function _autoSave() {
+    clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(_save, 400);
+  }
+
+  function _apply(cfg) {
+    cfg = cfg || {};
+    enabledEl.checked   = !!cfg.enabled;
+    timeEl.value        = cfg.sendTime || '07:00';
+    tzEl.value          = cfg.timezone || 'America/New_York';
+    incDownEl.checked   = cfg.includeDown !== false;
+    incFlagEl.checked   = cfg.includeFlagged !== false;
+    incActiveEl.checked = cfg.includeActive !== false;
+    incDomEl.checked    = cfg.includeDomiciles !== false;
+    riskEl.value        = (cfg.riskThreshold != null ? cfg.riskThreshold : 80);
+    tipEl.checked       = cfg.tipEnabled !== false;
+  }
+
+  [enabledEl, incDownEl, incFlagEl, incActiveEl, incDomEl, tipEl].forEach((el) => {
+    if (el) el.addEventListener('change', _autoSave);
+  });
+  [timeEl, tzEl, riskEl].forEach((el) => {
+    if (el) el.addEventListener('input', _autoSave);
+  });
+
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async () => {
+      await _save();
+      showStatus('\u2705 Saved', 'ok');
+    });
+  }
+
+  if (testBtn) {
+    testBtn.addEventListener('click', async () => {
+      testBtn.disabled = true;
+      const orig = testBtn.textContent;
+      testBtn.textContent = 'Sending...';
+      try {
+        await _save(); // persist current settings first so the test reflects them
+        const res = await slackBridge.sendBriefingTest({});
+        if (res && res.sent) showStatus('\uD83E\uDDEA Test sent to your Slack DM (' + (res.aiWritten ? 'AI-written' : 'fallback') + ') for ' + (res.operator || '') + '.', 'ok');
+        else showStatus('Test not sent: ' + ((res && res.reason) || 'unknown') + '.', 'err');
+      } catch (e) {
+        showStatus('Test failed: ' + e.message, 'err');
+      } finally {
+        testBtn.disabled = false;
+        testBtn.textContent = orig;
+      }
+    });
+  }
+
+  if (runNowBtn) {
+    runNowBtn.addEventListener('click', async () => {
+      if (!confirm('Post the briefing to ALL mapped carrier channels now? This sends live messages to carriers.')) return;
+      runNowBtn.disabled = true;
+      const orig = runNowBtn.textContent;
+      runNowBtn.textContent = 'Running...';
+      try {
+        await _save();
+        const res = await slackBridge.runBriefingNow();
+        const sent = (res && res.results || []).filter((r) => r.sent).length;
+        const total = (res && res.results || []).length;
+        showStatus('Posted ' + sent + '/' + total + ' carrier briefing(s).', sent ? 'ok' : 'err');
+      } catch (e) {
+        showStatus('Run failed: ' + e.message, 'err');
+      } finally {
+        runNowBtn.disabled = false;
+        runNowBtn.textContent = orig;
+      }
+    });
+  }
+
+  slackBridge.getBriefingConfig().then((cfg) => {
+    _apply(cfg);
+    if (runInfoEl) {
+      const tz = (cfg && cfg.timezone) || 'America/New_York';
+      const t  = (cfg && cfg.sendTime) || '07:00';
+      runInfoEl.textContent = (cfg && cfg.enabled)
+        ? ('Enabled — sends daily at ' + t + ' ' + tz + ' to each mapped carrier channel.')
+        : 'Disabled — enable to send a daily briefing.';
+    }
+  }).catch(() => { _apply({}); });
+}
+
 // ── SP: render operator accordion cards ──────────────────────────────────────
 
 function _wireDMAutoReply() {
@@ -3267,6 +3447,7 @@ export function init() {
   _wireSlack();
   _wirePartnerAutoReply();
   _wireOperatorChannels();
+  _wireCarrierBriefing();
   _wireDMAutoReply();
   _wireEmail();
   _wireAutoNote();

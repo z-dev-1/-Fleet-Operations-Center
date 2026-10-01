@@ -272,6 +272,43 @@ function registerSlackIPC(ctx) {
     return listFleetOperators();
   });
 
+  // ── Daily Carrier Briefing ──────────────────────────────────────────────
+  // AI-written daily snapshot + safety tip to each mapped carrier channel.
+  handle('slack:get-briefing-config', async () => {
+    const { getConfig } = require('../../src/scrapers/carrier_briefing');
+    return getConfig();
+  });
+
+  handle('slack:save-briefing-config', async (_e, patch) => {
+    if (!patch || typeof patch !== 'object') throw new Error('config must be an object');
+    const { saveConfig } = require('../../src/scrapers/carrier_briefing');
+    return saveConfig(patch);
+  });
+
+  // Preview the briefing by posting it to the user's own Slack DM. Uses the
+  // first mapped operator by default, or a specific one if provided.
+  handle('slack:send-briefing-test', async (_e, data) => {
+    const cb = require('../../src/scrapers/carrier_briefing');
+    const { sendToChannel, openConversation, checkLiveAuth } = require('../../src/scrapers/slack_send');
+    const deps = { sendToChannel, openConversation, checkLiveAuth };
+    let operator = data && data.operator ? String(data.operator).trim() : '';
+    if (!operator) {
+      const chans = cb.getConfig && require('../../src/scrapers/pm_alert_reply').getOperatorChannels();
+      const first = (chans && chans.operators || []).find((o) => o && o.operator && o.channelId);
+      if (!first) throw new Error('No operator with a mapped carrier channel — add one in Operator Channels first.');
+      operator = first.operator;
+    }
+    return cb.sendOperatorBriefing(operator, deps, { testToSelf: true }, (m) => logger.info(m));
+  });
+
+  // Run the whole daily briefing now (bypasses the enabled/dedup gates via
+  // force) — posts to the live carrier channels. Used by a "Run now" button.
+  handle('slack:run-briefing-now', async () => {
+    const cb = require('../../src/scrapers/carrier_briefing');
+    const { sendToChannel, openConversation, checkLiveAuth } = require('../../src/scrapers/slack_send');
+    return cb.runDailyBriefing({ sendToChannel, openConversation, checkLiveAuth }, { force: true }, (m) => logger.info(m));
+  });
+
   // Resolve a Slack user id -> display name (cached). Used by the Operator
   // Channels UI to show a readable owner name instead of the raw id.
   handle('slack:resolve-user-name', async (_e, userId) => {
@@ -560,6 +597,11 @@ function registerSlackIPC(ctx) {
   // Start the passive FAS follow-up scheduler (surfaces due items only; never
   // contacts anyone). Safe no-op when there are no cases / FAS is disabled.
   try { require('../orcha/fas/scheduler').startScheduler(); } catch (e) { logger.warn('FAS scheduler start failed: ' + e.message); }
+
+  // Start the Daily Carrier Briefing scheduler. Ticks every 60s; only sends at
+  // the configured time/timezone when enabled, deduped one-per-operator-per-day.
+  // Safe no-op when disabled or no operators are mapped.
+  try { require('../../src/scrapers/carrier_briefing').startScheduler(); } catch (e) { logger.warn('Carrier briefing scheduler start failed: ' + e.message); }
 
   logger.info('Slack IPC handlers registered');
 }

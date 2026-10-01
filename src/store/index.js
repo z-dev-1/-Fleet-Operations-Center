@@ -57,6 +57,14 @@ const REGISTRY = {
   operatorChannels: () => path.join(P.dataDir, 'operator-channels.json'),
   // Dedup ledger so a PM alert is fanned out to a carrier channel only once.
   pmAlertFanout:    () => path.join(P.dataDir, 'pm-alert-fanout.json'),
+  // Daily Carrier Briefing (2026-10). See src/scrapers/carrier_briefing.js.
+  // Config shape: { enabled, sendTime:'HH:MM', timezone, includeDown,
+  //   includeFlagged, includeActive, includeDomiciles, riskThreshold, tipEnabled }.
+  carrierBriefingConfig: () => path.join(P.dataDir, 'carrier-briefing-config.json'),
+  // Run ledger: per-operator-per-day dedup keys ('OPERATOR:YYYY-MM-DD') + a
+  // short rolling history of recent safety tips so the AI avoids repeats.
+  // Shape: { sent: { 'OP:2026-08-14': ISO, ... }, lastRunAt, recentTips: [..] }.
+  carrierBriefingLog:    () => path.join(P.dataDir, 'carrier-briefing-log.json'),
   offlineQueue:     () => path.join(P.dataDir, 'offline-queue.json'),
   orchaPatterns:    () => path.join(P.dataDir, 'orcha-patterns.json'),
   pins:             () => path.join(P.dataDir, 'pins.json'),
