@@ -590,7 +590,6 @@ async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
 
   let roots;
   try { roots = await readMessages(ch.id, 20); } catch (e) { doLog(`[PMAlert] ${ch.name}: readMessages failed: ${e.message}`); return; }
-  doLog(`[PMAlert] ${ch.name}: scan start — ${roots ? roots.length : 0} root msgs, myUserId=${myUserId || '?'}`);
   if (!roots || !roots.length) return;
 
   const token = myUserId ? '<@' + myUserId + '>' : '';
@@ -633,13 +632,9 @@ async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
     }
   }
 
-  // Use the SAME tag check the handler uses (pmAlert.isTaggedIn — regex that
-  // handles both <@ID> and <@ID|display> forms) so the scan and handler can
-  // never disagree.
-  const taggedCount = candidates.filter(m => pmAlert.isTaggedIn(m.text, myUserId)).length;
-  doLog(`[PMAlert] ${ch.name}: ${candidates.length} candidates (${threadFetches} threads fetched), ${taggedCount} tag me`);
-
-  // Handle any candidate where the user is tagged, not yet handled.
+  // Handle any candidate where the user is tagged, not yet handled. Uses the
+  // SAME tag check the handler uses (pmAlert.isTaggedIn — regex that handles
+  // both <@ID> and <@ID|display> forms) so the scan and handler never disagree.
   for (const msg of candidates) {
     if (!pmAlert.isTaggedIn(msg.text, myUserId)) continue;           // must tag me
     if (alreadyHandled(msg.ts)) continue;                            // dedup (own confirmed reply only)
@@ -649,12 +644,10 @@ async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
     if (!parsableHere) continue;
 
     try {
-      doLog(`[PMAlert] ${ch.name}: -> calling handler for ${msg.ts}`);
       const r = await pmAlert.handleTaggedPmAlert(
         ch, msg, myUserId,
         { readThreadReplies, sendToChannel, askOrcha, uploadFileToChannel, downloadFileBuffer }, doLog
       );
-      doLog(`[PMAlert] ${ch.name}: <- handler result: ` + JSON.stringify(r ? { handled: r.handled, reason: r.reason, matched: r.matched, fanout: r.fanout && r.fanout.reason } : null));
       if (r && r.handled) {
         _appendReplyLog({
           id: ch.id + ':' + msg.ts,
