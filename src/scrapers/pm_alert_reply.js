@@ -424,20 +424,39 @@ async function handleTaggedPmAlert(ch, msg, myUserId, deps, log) {
   doLog('[PMAlert] ' + ch.name + ': tagged on alert for ' + alert.assetId +
     (unit ? (' — matched unit (' + (unit.lifecycleState || '?') + ')') : ' — no fleet match'));
 
-  // 4) Ask the AI for the reply.
+  // 4) Ask the AI for the reply. The reply MUST be AI-written — the Orcha
+  // backend is sometimes slow (observed 20s+), so RETRY (2 attempts × 30s with
+  // a short pause) rather than falling back to the canned acknowledgment on the
+  // first 20s timeout. Bounded to stay under the poll's 90s deadline (this is
+  // awaited inside _pollLock): 2 × 30s + 1.5s pause ≈ 62s. The canned
+  // acknowledgment is a LAST RESORT only if every attempt fails.
+  const prompt = buildPrompt(alert, unit);
   let reply = '';
-  try {
-    const prompt = buildPrompt(alert, unit);
-    const ai = await Promise.race([
-      askOrcha(prompt),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), 20000)),
-    ]);
-    reply = (ai && ai.text) ? String(ai.text).trim() : (typeof ai === 'string' ? ai.trim() : '');
-  } catch (e) {
-    doLog('[PMAlert] ' + ch.name + ': AI reply failed (' + e.message + ') — using fallback acknowledgment');
+  const REPLY_ATTEMPTS = 2;
+  const REPLY_ATTEMPT_MS = 30000;
+  for (let attempt = 1; attempt <= REPLY_ATTEMPTS && !reply; attempt++) {
+    try {
+      const ai = await Promise.race([
+        askOrcha(prompt),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), REPLY_ATTEMPT_MS)),
+      ]);
+      reply = (ai && ai.text) ? String(ai.text).trim() : (typeof ai === 'string' ? ai.trim() : '');
+      if (reply) {
+        doLog('[PMAlert] ' + ch.name + ': AI reply generated (attempt ' + attempt + ')');
+      } else {
+        doLog('[PMAlert] ' + ch.name + ': AI reply empty (attempt ' + attempt + '/' + REPLY_ATTEMPTS + ')');
+      }
+    } catch (e) {
+      doLog('[PMAlert] ' + ch.name + ': AI reply attempt ' + attempt + '/' + REPLY_ATTEMPTS + ' failed (' + e.message + ')');
+    }
+    if (!reply && attempt < REPLY_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, 1500)); // brief pause before retry
+    }
   }
-  // Safety fallback so the thread is never left unacknowledged if the AI fails.
+  // LAST-RESORT acknowledgment so the thread is never left unanswered if every
+  // AI attempt fails.
   if (!reply) {
+    doLog('[PMAlert] ' + ch.name + ': all ' + REPLY_ATTEMPTS + ' AI reply attempts failed — using fallback acknowledgment');
     reply = 'Received — reviewing ' + alert.assetId + ' and will align accordingly.';
   }
 
