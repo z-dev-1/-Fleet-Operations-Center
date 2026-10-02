@@ -17,6 +17,35 @@ const AAP_SERVICE_PROBE = 'https://aap-na.corp.amazon.com/v2/service/00000000-00
 const RELAY_PROBE_MS    = 10_000;
 const MWINIT_TIMEOUT_MS = 3 * 60 * 1000;
 
+// Connectivity check (raw internet only; VPN does NOT count). Lazy-required to
+// avoid a load-order/circular dependency with orcha/offline, and defensively
+// wrapped so a missing/uninitialized module never blocks auth (defaults to
+// "online" so behavior is unchanged if offline monitoring isn't running).
+function _isOfflineNow() {
+  try { return !!require('../orcha/offline').isOffline(); }
+  catch (_) { return false; }
+}
+
+// Chromium network-layer error codes that mean "could not reach the network"
+// (connectivity/offline), as opposed to the page loading and the server
+// rejecting the session. Used to keep a connectivity blip from being misread
+// as an auth rejection. See https://source.chromium.org/ net_error_list.
+const _NETWORK_ERR_CODES = new Set([
+  -2,   // FAILED (generic)
+  -21,  // NETWORK_CHANGED
+  -100, // CONNECTION_CLOSED
+  -101, // CONNECTION_RESET
+  -102, // CONNECTION_REFUSED
+  -104, // CONNECTION_FAILED
+  -105, // NAME_NOT_RESOLVED
+  -106, // INTERNET_DISCONNECTED
+  -109, // ADDRESS_UNREACHABLE
+  -118, // CONNECTION_TIMED_OUT
+  -137, // NAME_RESOLUTION_FAILED
+  -138, // NETWORK_ACCESS_DENIED
+  -324, // EMPTY_RESPONSE
+]);
+
 // ── Parse Netscape cookie file ────────────────────────────────────────────────
 // Format: domain \t flag \t path \t secure \t expiry(unix) \t name \t value
 // HttpOnly lines prefixed with: #HttpOnly_<domain>\t...
@@ -240,6 +269,19 @@ function runMwinit(force) {
     logger.info('[AuthManager] mwinit already in flight -- awaiting existing attempt instead of spawning another');
     return _mwinitInFlight;
   }
+  // OFFLINE GATE (2026-10): never spawn the interactive mwinit terminal while
+  // the machine has no internet. Historically a brief network drop (or VPN
+  // hiccup) made the session probes fail to LOAD, which was indistinguishable
+  // from an SSO rejection and forced an unnecessary re-auth prompt — the root
+  // cause of "re-authing multiple times a day". "Offline" here is raw internet
+  // connectivity only (net.isOnline); VPN state deliberately does NOT count. On
+  // reconnect, the auth layer re-probes the SAME cookies first (see
+  // startOnlineReauthWatch) and only prompts if the server genuinely rejects
+  // the session while confirmed online.
+  if (_isOfflineNow()) {
+    logger.info('[AuthManager] mwinit requested while OFFLINE — skipping prompt; will re-probe on reconnect');
+    return Promise.resolve({ ok: false, skipped: 'offline' });
+  }
   _mwinitInFlight = new Promise((resolve, reject) => {
     logger.info('[AuthManager] Spawning mwinit terminal' + (force ? ' (force -f)' : '') + '...');
 
@@ -421,8 +463,17 @@ async function probeSession() {
       scheduleSettleCheck();
     });
     probe.webContents.on('did-fail-load', (_, code, desc) => {
-      if (code === -3) return;
-      logger.info('[AuthManager] Probe fail-load:', code, desc);
+      if (code === -3) return; // ABORTED (navigation superseded) — not a failure
+      // Network-layer errors (negative Chromium codes like -106
+      // ERR_INTERNET_DISCONNECTED, -105 ERR_NAME_NOT_RESOLVED, -118
+      // ERR_CONNECTION_TIMED_OUT, -21 ERR_NETWORK_CHANGED) mean the page could
+      // not load at all — a connectivity problem, NOT a rejected session. Log
+      // it as such; ensureAuthenticated's offline guard decides what to do.
+      if (_NETWORK_ERR_CODES.has(code)) {
+        logger.info('[AuthManager] Probe network error (offline/connectivity), not a session rejection:', code, desc);
+      } else {
+        logger.info('[AuthManager] Probe fail-load:', code, desc);
+      }
       done(false);
     });
 
@@ -470,7 +521,11 @@ async function pingRelayEndpoint() {
     });
     probe.webContents.on('did-fail-load', (_, code, desc) => {
       if (code === -3) return;
-      logger.warn('[AuthManager] Relay fail-load:', code, desc);
+      if (_NETWORK_ERR_CODES.has(code)) {
+        logger.info('[AuthManager] Relay network error (offline/connectivity), not a session rejection:', code, desc);
+      } else {
+        logger.warn('[AuthManager] Relay fail-load:', code, desc);
+      }
       done(false);
     });
 
@@ -555,6 +610,16 @@ async function ensureAuthenticated(mainWindow) {
     }
   }
   if (!ok) {
+    // OFFLINE GUARD: a probe can only "fail" because the page didn't load. If
+    // we're offline, that's a network failure, NOT a rejected session — do not
+    // escalate to the invalid-session error (which would prompt re-auth).
+    // Signal a transient network condition the caller can treat as "retry
+    // later / stay on cached data" instead of a real auth failure.
+    if (_isOfflineNow()) {
+      logger.info('[AuthManager] Page probe failed but OFFLINE — treating as network error, not session rejection');
+      send('fleet:status', '\uD83D\uDCE1 Offline — will re-verify Midway session when connection returns');
+      throw Object.assign(new Error('Offline — cannot verify Midway session'), { code: 'NETWORK_OFFLINE' });
+    }
     const msg = 'AAP rejected session — run mwinit -f then restart';
     send('fleet:error', msg);
     throw Object.assign(new Error(msg), { code: 'MIDWAY_SESSION_INVALID' });
@@ -569,6 +634,13 @@ async function ensureAuthenticated(mainWindow) {
     relayOk = await pingRelayEndpoint();
   }
   if (!relayOk) {
+    // OFFLINE GUARD (same rationale as the page probe above): a relay probe
+    // failure while offline is a network error, not a rejected session.
+    if (_isOfflineNow()) {
+      logger.info('[AuthManager] Relay probe failed but OFFLINE — treating as network error, not session rejection');
+      send('fleet:status', '\uD83D\uDCE1 Offline — will re-verify relay session when connection returns');
+      throw Object.assign(new Error('Offline — cannot verify relay session'), { code: 'NETWORK_OFFLINE' });
+    }
     const msg = 'AAP relay rejected session — run mwinit -f then retry';
     send('fleet:error', msg);
     throw Object.assign(new Error(msg), { code: 'RELAY_SESSION_INVALID' });
@@ -622,6 +694,50 @@ async function refreshAeaSilently() {
   }
 }
 
+// ── Reconnect watcher (re-probe the SAME session when internet returns) ───────
+// Subscribes to the offline module's online/offline transitions. When the
+// machine comes back ONLINE, re-verify the existing on-disk cookies ONCE
+// (silently, via refreshAeaSilently — re-inject + SSO handshake, no prompt).
+//   - If that lands on AAP: the session was fine all along; do nothing. This is
+//     the common case after a brief drop/VPN flap and means NO re-auth prompt.
+//   - If it fails while we are CONFIRMED ONLINE: the server genuinely rejected
+//     the session, so auto-prompt mwinit (per the user's choice). runMwinit is
+//     itself offline-gated, but we're online here so it proceeds.
+// Idempotent; a second call replaces the prior subscription.
+let _reauthUnsub = null;
+let _reauthInFlight = false;
+function startOnlineReauthWatch() {
+  let offline;
+  try { offline = require('../orcha/offline'); } catch (_) { return () => {}; }
+  if (_reauthUnsub) { try { _reauthUnsub(); } catch (_) {} _reauthUnsub = null; }
+  _reauthUnsub = offline.onChange(async (status) => {
+    if (status !== 'online') return;
+    if (_reauthInFlight) return;
+    _reauthInFlight = true;
+    try {
+      // Settle briefly so DNS/routing is actually ready before we probe.
+      await new Promise((r) => setTimeout(r, 2500));
+      if (_isOfflineNow()) return; // flapped back offline — bail, wait for next 'online'
+      logger.info('[AuthManager] Back online — re-verifying existing Midway session (no prompt unless rejected)');
+      const res = await refreshAeaSilently();
+      if (res && res.ok) {
+        logger.info('[AuthManager] Reconnect re-verify OK — session still valid, no re-auth needed');
+        return;
+      }
+      // Confirmed online + session did NOT re-verify → genuine rejection.
+      if (_isOfflineNow()) return; // dropped again mid-check; don't prompt
+      logger.warn('[AuthManager] Reconnect re-verify failed while online — session genuinely rejected, prompting mwinit');
+      try { await runMwinit(); } catch (e) { logger.warn('[AuthManager] Reconnect mwinit failed: ' + e.message); }
+    } catch (e) {
+      logger.warn('[AuthManager] Reconnect re-verify error: ' + e.message);
+    } finally {
+      _reauthInFlight = false;
+    }
+  });
+  logger.info('[AuthManager] Online-reconnect re-auth watch started');
+  return _reauthUnsub;
+}
+
 module.exports = {
   checkMwinit,
   runMwinit,
@@ -630,5 +746,6 @@ module.exports = {
   refreshAeaSilently, // FIX (2026-09-30): silent AEA re-mint so one auth lasts the full ~24h session
   ensureAuthenticated,
   pingRelayEndpoint,
+  startOnlineReauthWatch, // FIX (2026-10): re-probe same session on reconnect; prompt only on confirmed-online rejection
   COOKIE_FILE,
 };

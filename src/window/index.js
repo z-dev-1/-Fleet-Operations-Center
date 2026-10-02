@@ -1040,7 +1040,16 @@ function initWindows(ctx) {
       const isSSO = url.includes('midway-auth.amazon.com') || url.includes('/SSO/redirect');
       logger.info('[auth-poll] ' + url.substring(0, 80));
 
-      if (isSSO) {
+      // OFFLINE GATE (2026-10): if there's no internet, a page can look "stuck"
+      // on an SSO URL purely because nothing can load — that is NOT an expired
+      // session. Do not count toward the SSO-loop escalation while offline;
+      // just wait. The reconnect watcher (auth.startOnlineReauthWatch) re-checks
+      // the session when the internet returns. "Offline" = raw internet only
+      // (net.isOnline); VPN state does not count.
+      let _offline = false;
+      try { _offline = require('../orcha/offline').isOffline(); } catch (_) {}
+
+      if (isSSO && !_offline) {
         _ssoCount++;
         if (_ssoCount >= 10 && !_mwinitRunning) {
           _mwinitRunning = true;
@@ -1105,6 +1114,11 @@ function initWindows(ctx) {
             pushError('\u26A0\uFE0F ' + e.message);
           }
         }
+      } else if (isSSO && _offline) {
+        // On an SSO URL but offline — don't escalate and don't treat it as a
+        // real navigation. Hold steady (don't reset _ssoCount upward) and wait
+        // for connectivity to return.
+        logger.info('[auth-poll] on SSO URL but offline — holding, no re-auth until online');
       } else {
         _ssoCount = 0;
         _onMainWindowNav(url);

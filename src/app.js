@@ -262,6 +262,12 @@ app.whenReady().then(async () => {
     }
   });
 
+  // Re-verify the Midway session the moment the internet returns (re-probes the
+  // SAME cookies silently; prompts mwinit only on a confirmed-online rejection).
+  // This is the counterpart to the offline gates that keep a connectivity blip
+  // from being misread as an expired session.
+  try { require('./scrapers/auth').startOnlineReauthWatch(); } catch (e) { log.warn('[midway] online-reauth watch start failed: ' + e.message); }
+
   // ── Midway auto-refresh — check every 5 minutes, renew 15 min before expiry ──
   const _authModule = require('./scrapers/auth');
   let _midwayRefreshTimer = null;
@@ -304,6 +310,20 @@ app.whenReady().then(async () => {
         log.info('[midway] heartbeat: renewal already in flight, skipping this tick');
         return;
       }
+      // OFFLINE GATE (2026-10): skip all auth work while there's no internet.
+      // The probes/handshake can only fail against a dead network, and that
+      // failure is indistinguishable from a rejected session — which previously
+      // forced spurious re-auth prompts on every connectivity blip. "Offline"
+      // is raw internet only (net.isOnline); VPN state does NOT count. The
+      // reconnect watcher (auth.startOnlineReauthWatch) re-verifies the same
+      // session the moment the internet returns, prompting only on a genuine
+      // confirmed-online rejection.
+      try {
+        if (require('./orcha/offline').isOffline()) {
+          log.info('[midway] heartbeat: offline — skipping auth check until connection returns');
+          return;
+        }
+      } catch (_) { /* offline module unavailable — proceed as before */ }
       try {
         const state = _authModule.checkMwinit();
         // OBSERVABILITY FIX (2026-07-14): the block below only logs on a state

@@ -14,11 +14,30 @@ const logger = require('../utils/logger')('offline');
 let _isOffline = false;
 let _checkInterval = null;
 let _onStatusChange = null;
+// Additional transition subscribers (besides the single startMonitoring
+// callback). Each is called with 'online' | 'offline'. Used by the Midway auth
+// layer so it can pause re-auth while offline and re-probe on reconnect without
+// clobbering the existing queue-processing callback.
+const _subscribers = [];
 
 function isOffline() { return _isOffline; }
+function isOnline() { return !_isOffline; }
 
-function startMonitoring(onChange) {
-  _onStatusChange = onChange;
+// Subscribe to online/offline transitions. Returns an unsubscribe fn. Safe to
+// call before startMonitoring; the subscriber simply fires on the next change.
+function onChange(fn) {
+  if (typeof fn !== 'function') return () => {};
+  _subscribers.push(fn);
+  return () => { const i = _subscribers.indexOf(fn); if (i !== -1) _subscribers.splice(i, 1); };
+}
+
+function _emit(status) {
+  if (_onStatusChange) { try { _onStatusChange(status); } catch (_) {} }
+  for (const fn of _subscribers.slice()) { try { fn(status); } catch (_) {} }
+}
+
+function startMonitoring(onStatusChange) {
+  _onStatusChange = onStatusChange;
   _checkInterval = setInterval(_check, 10000); // Check every 10s
   _check();
 }
@@ -31,13 +50,13 @@ function _check() {
   const online = net.isOnline();
   const wasOffline = _isOffline;
   _isOffline = !online;
-  
+
   if (wasOffline && online) {
     logger.info('Back online — processing offline queue');
-    if (_onStatusChange) _onStatusChange('online');
+    _emit('online');
   } else if (!wasOffline && !online) {
     logger.info('Gone offline — queuing mode active');
-    if (_onStatusChange) _onStatusChange('offline');
+    _emit('offline');
   }
 }
 
@@ -83,4 +102,4 @@ function getQueueCount() {
   return store.load('offlineQueue', []).length;
 }
 
-module.exports = { isOffline, startMonitoring, stopMonitoring, queueTimelineEntry, processQueue, getQueueCount };
+module.exports = { isOffline, isOnline, onChange, startMonitoring, stopMonitoring, queueTimelineEntry, processQueue, getQueueCount };
