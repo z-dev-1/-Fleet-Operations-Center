@@ -110,8 +110,21 @@ async function _warm(vendorId, opts) {
           settleTimer = setTimeout(checkSettled, 1200);
           return;
         }
+        const onLoginHost = _LOGIN_HOSTS_RE.test(currentUrl);
+        // DIAGNOSTIC (2026-10): if we settle on a LOGIN HOST but isLoginPage()
+        // saw no form (so no login attempt was made), log the page so we can
+        // see what state DTNA's B2C page is actually in (loading? pick-account?
+        // consent?) — this is the 'attempted=false, loggedIn=false' case.
+        if (onLoginHost && !attempted) {
+          try {
+            const snip = await win.webContents.executeJavaScript(
+              '(function(){var t=(document.body&&document.body.innerText||"").replace(/\\s+/g," ").trim();return t.slice(0,300);})()'
+            ).catch(() => '');
+            logger.warn('[warm] ' + vendorId + ' settled on login host with NO detected form. url=' + currentUrl.slice(0, 120) + ' | body="' + String(snip || '').slice(0, 220) + '"');
+          } catch (_) {}
+        }
         // Settled on a non-login page. loggedIn iff it's the real vendor site.
-        finish({ ok: true, loggedIn: !_LOGIN_HOSTS_RE.test(currentUrl), attempted });
+        finish({ ok: true, loggedIn: !onLoginHost, attempted });
         return;
       }
 
@@ -136,7 +149,12 @@ async function _warm(vendorId, opts) {
     function onNav() {
       if (resolved) return;
       clearTimeout(settleTimer);
-      settleTimer = setTimeout(checkSettled, 1200);
+      // Azure B2C / Salesforce pages hydrate their login form asynchronously
+      // after did-finish-load. Give them 2.5s to render before isLoginPage()
+      // checks, otherwise we settle on a "no form yet" page and never attempt
+      // the fill (the observed attempted=false). Matches the 2000ms the
+      // azure-b2c handler itself waits for the form.
+      settleTimer = setTimeout(checkSettled, 2500);
     }
 
     win.webContents.on('did-finish-load', onNav);
