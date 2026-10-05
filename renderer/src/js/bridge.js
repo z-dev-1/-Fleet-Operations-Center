@@ -493,6 +493,7 @@ export const credentials = {
   delete: (key)      => window.credentials.delete(key),
   list:   ()         => window.credentials.list(),
   testLogin: (vendorId) => window.credentials.testLogin(vendorId),
+  warmVendor: (vendorId) => window.credentials.warmVendor(vendorId),
 };
 
 

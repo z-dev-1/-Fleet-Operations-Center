@@ -143,6 +143,20 @@ function registerCredentialIPC() {
   // deliberately not over-claiming a "verified successful login" this
   // handler can't fully confirm without knowing every vendor's specific
   // post-login page shape.
+  // Silent vendor pre-warm (hidden window) — used by the inline split-view so a
+  // DTNA offsite pane is logged in BEFORE/while it loads. Shares the vendor
+  // partition, so warming the hidden window authenticates the webview too.
+  handle("credentials:warm-vendor", async (_e, vendorId) => {
+    requireString(vendorId, "vendorId");
+    try {
+      const { warmVendorSession } = require('../../src/scrapers/vendor_session');
+      return await warmVendorSession(vendorId);
+    } catch (e) {
+      logger.warn('credentials:warm-vendor failed for', vendorId, ':', e.message);
+      return { ok: false, loggedIn: false, error: e.message };
+    }
+  });
+
   handle("credentials:test-login", async (_e, vendorId) => {
     requireString(vendorId, "vendorId");
     const url = VENDOR_TEST_URLS[vendorId];

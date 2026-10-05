@@ -1175,6 +1175,18 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
   document.getElementById('app').appendChild(container);
   document.getElementById('dp-split-close').addEventListener('click', function() { container.remove(); });
 
+  // Proactive: if the offsite pane is DTNA, kick off a silent background warm
+  // immediately (shared partition). Common case = it's already logged in by the
+  // time the webview finishes loading, so no login page is ever shown. The
+  // did-finish-load handler below is the fallback if it still lands on login.
+  if (rightUrl && (rightUrl.indexOf('dtna') > -1 || rightUrl.indexOf('daimlertruck') > -1) && window.credentials && window.credentials.warmVendor) {
+    window.credentials.warmVendor('dtna').then(function(r) {
+      console.log('[split-view] proactive DTNA warm:', r && r.loggedIn);
+      var wv = document.getElementById('dp-wv-offsite');
+      if (wv && r && r.loggedIn) { try { wv.reload(); } catch (_) {} }
+    }).catch(function(){});
+  }
+
   var relayWv = document.getElementById('dp-wv-relay');
   if (relayWv) {
     relayWv.addEventListener('dom-ready', function() {
@@ -1386,28 +1398,48 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
 
   var offsiteWv = document.getElementById('dp-wv-offsite');
   if (offsiteWv) {
-    // Auto-login: if the offsite webview lands on a login page, close it
-    // and reopen as a BrowserWindow (which has full auto-login wired).
-    offsiteWv.addEventListener('did-finish-load', function() {
+    // Which vendor is this offsite pane? (for silent background login)
+    var _offsiteVendor = '';
+    if (rightUrl.indexOf('dtna') > -1 || rightUrl.indexOf('daimlertruck') > -1) _offsiteVendor = 'dtna';
+
+    var _warming = false;
+    // Detect a login page INSIDE the webview and, if found, silently warm the
+    // vendor session in the background (shared partition) then reload the
+    // webview so it comes back logged in — no window swap, no manual sign-in.
+    // DTNA is TWO-STEP: step 1 shows ONLY a User ID field (no password yet), so
+    // detect a login by password OR a user-id field + a Continue/Login button
+    // (the old 'password AND user' check missed DTNA step 1 entirely — the
+    // reason "already logged out, it does nothing").
+    function _checkOffsiteLoginAndWarm() {
+      if (_warming || !_offsiteVendor) return;
       offsiteWv.executeJavaScript(
         '(function(){' +
         'var pw=document.querySelectorAll("input[type=password]").length;' +
-        'var uid=document.querySelectorAll("input[placeholder*=User],input[type=email],input[type=text]").length;' +
-        'return (pw>0&&uid>0)?"login":"ok";' +
+        'var uid=document.querySelectorAll("input[placeholder*=\\"User\\" i],input[placeholder*=\\"Email\\" i],input[type=email],#signInName").length;' +
+        'var bt=(document.body&&document.body.innerText||"").toLowerCase();' +
+        'var ciam=bt.indexOf("dtna ciam")!==-1||bt.indexOf("enter your email or user id")!==-1||bt.indexOf("enter your password")!==-1;' +
+        'return (pw>0||uid>0||ciam)?"login":"ok";' +
         '})()'
       ).then(function(result) {
-        if (result !== 'login') return;
-        // Login page detected in webview — reopen as BrowserWindow with auto-login
-        var targetUrl = rightUrl;
-        try { targetUrl = offsiteWv.getURL() || rightUrl; } catch(_) {}
-        // Close the split view
-        if (container && container.parentNode) container.remove();
-        // Open via relay:open-url which has auto-login + correct partition
-        if (window.files && window.files.openRelayUrl) {
-          window.files.openRelayUrl(rightUrl);
-        }
+        if (result !== 'login' || _warming) return;
+        _warming = true;
+        console.log('[split-view] offsite login detected (' + _offsiteVendor + ') — warming session silently');
+        var warm = (window.credentials && window.credentials.warmVendor)
+          ? window.credentials.warmVendor(_offsiteVendor)
+          : Promise.resolve({ ok: false });
+        warm.then(function(r) {
+          console.log('[split-view] warm result:', r && r.loggedIn);
+          // Reload the webview — shared partition means it now has the session.
+          try { offsiteWv.reload(); } catch (_) {}
+          setTimeout(function() { _warming = false; }, 4000);
+        }).catch(function(e) {
+          console.warn('[split-view] warm failed:', e && e.message);
+          _warming = false;
+        });
       }).catch(function(){});
-    });
+    }
+    offsiteWv.addEventListener('did-finish-load', _checkOffsiteLoginAndWarm);
+    offsiteWv.addEventListener('did-stop-loading', _checkOffsiteLoginAndWarm);
 
     offsiteWv.addEventListener('dom-ready', function() {
       offsiteWv.executeJavaScript('function waitForNotes(){var nb=document.querySelector("[data-testid=note-body]");var ta=document.querySelector("textarea[name=user-reply]");if(!nb){setTimeout(waitForNotes,1000);return;}var el=nb;while(el.parentElement&&el.parentElement!==document.body){el=el.parentElement;if(el.querySelector("[data-testid=note-body]")&&el.querySelector("textarea[name=user-reply]"))break;}el.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;background:#fff;z-index:99999;padding:0";var sib=el.parentElement?el.parentElement.children:[];for(var i=0;i<sib.length;i++){if(sib[i]!==el)sib[i].style.display="none";}} setTimeout(waitForNotes,2000)').catch(function(){});
