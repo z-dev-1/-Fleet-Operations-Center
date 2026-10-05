@@ -339,6 +339,26 @@ async function _loginAzureB2C(wc, username, password) {
   const clicked = await _execSafe(wc, loginClickScript);
   if (clicked) {
     logger.info('Azure B2C: clicked submit by text:', clicked);
+    // DIAGNOSTIC (2026-10): the single-page fill+submit above sometimes doesn't
+    // complete the login (user reported DTNA "not logged in"). Azure B2C can
+    // present a SECOND step after submit (a separate password page, an MFA/code
+    // prompt, or a "Stay signed in?" page). If we're STILL on a CIAM/B2C login
+    // host ~2.5s after the click, capture what's on screen so the real second
+    // step can be read from the log instead of guessed. Log-only; does not
+    // change behavior.
+    try {
+      await _wait(2500);
+      const nowUrl = await _execSafe(wc, 'location.href') || '';
+      if (/ciam\.daimlertruck\.com|ciam\.dtna\.com|b2clogin\.com|login\.microsoftonline/i.test(nowUrl)) {
+        const snippet = await _execSafe(wc,
+          '(function(){var t=(document.body&&document.body.innerText||"").replace(/\\s+/g," ").trim();return t.slice(0,400);})()'
+        );
+        logger.warn('Azure B2C: still on login host 2.5s after submit — possible 2nd step. url=' + String(nowUrl).slice(0, 120) + ' | body="' + String(snippet || '').slice(0, 300) + '"');
+        await _dumpInputs(wc, 'azure-b2c-post-submit');
+      } else {
+        logger.info('Azure B2C: navigated off login host after submit → ' + String(nowUrl).slice(0, 100));
+      }
+    } catch (_) { /* diagnostic only — never fail the login over it */ }
     return true;
   }
 

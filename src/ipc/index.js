@@ -47,6 +47,9 @@ function registerAllIPC(ctx) {
   registerVendorIPC();
   registerVendorHistoryIPC();
   registerDailyTasksIPC(ctx);
+  // DTNA session pre-warm: keep the vendor portal logged in in the background
+  // (morning + on-demand) so Split View is ready without a manual sign-in.
+  try { require('../scrapers/vendor_session').startWarmScheduler(); } catch (e) { logger.warn('vendor warm scheduler start failed: ' + e.message); }
   registerLongDwellIPC();
   registerSchedulerIPC(ctx);
   const { registerContactsHandlers } = require('./contacts');

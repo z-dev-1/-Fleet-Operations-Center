@@ -93,6 +93,10 @@ const REGISTRY = {
   slackMentionThreads: () => path.join(P.dataDir, 'slack_mention_threads.json'), // thread-continuation tracking for channel watch
   bubbleConfig:     () => path.join(P.dataDir, 'bubble_config.json'),             // floating bubble opacity setting
 
+  // DTNA (and future vendor) session pre-warm bookkeeping (2026-10). Tracks the
+  // last day we silently warmed each vendor portal so the morning pre-warm runs
+  // once/day. See src/scrapers/vendor_session.js. Shape: { lastWarmedDay: {dtna:'YYYY-MM-DD'} }.
+  vendorWarm:           () => path.join(P.dataDir, 'vendor-warm.json'),
   // Daily Tasks / Action Board (2026-10) — replaces the former Workflow
   // Intelligence recorder/library (Phase 8, removed). The "Workflow AI" tab is
   // now an AI-generated + manual daily task board. See src/ipc/daily-tasks.js.
