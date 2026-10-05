@@ -657,10 +657,37 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
     const currentUrl = win.webContents.getURL();
 
     if (currentUrl === targetUrl || currentUrl.startsWith(targetUrl)) {
-      _done = true;
-      win.webContents.removeListener('did-finish-load', onLoad);
-      logger.info('attachAutoLogin: reached target:', currentUrl.slice(0, 80));
-      if (onDone) onDone({ success: true, url: currentUrl });
+      // BUG FIX (2026-10): DTNA (Salesforce Lightning) renders its login screen
+      // IN PLACE on the case URL when you're not logged in — the URL still
+      // equals the target, so the old code declared "reached target" and
+      // stopped WITHOUT ever logging in. That's why Split View / offsite sync
+      // never logged in (while Test Login, which starts on the CIAM URL, did).
+      // So: only treat a target-URL match as success if the page is NOT a login
+      // page. If a login form is showing on the target URL, fall through and run
+      // the login instead of falsely succeeding.
+      let onLoginPg = false;
+      try { onLoginPg = await isLoginPage(win.webContents); } catch (_) {}
+      if (!onLoginPg) {
+        _done = true;
+        win.webContents.removeListener('did-finish-load', onLoad);
+        logger.info('attachAutoLogin: reached target:', currentUrl.slice(0, 80));
+        if (onDone) onDone({ success: true, url: currentUrl });
+        return;
+      }
+      logger.info('attachAutoLogin: on target URL but a login form is showing — logging in first:', currentUrl.slice(0, 80));
+      if (!_loginAttempted) {
+        if (loginAttempts >= maxRetries) {
+          logger.warn('attachAutoLogin: login still showing on target after', loginAttempts, 'attempts');
+          _done = true;
+          win.webContents.removeListener('did-finish-load', onLoad);
+          if (onDone) onDone({ success: false, url: currentUrl, error: 'login_required' });
+          return;
+        }
+        loginAttempts++;
+        const result = await attemptAutoLogin(win.webContents, currentUrl, new URL(targetUrl).hostname);
+        if (result.filled) _loginAttempted = true;
+        else logger.warn('attachAutoLogin: could not act on login at target URL (no strategy/creds for this host?)');
+      }
       return;
     }
 
