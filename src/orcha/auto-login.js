@@ -271,15 +271,15 @@ async function _loginTwoStep(wc, username, password) {
   return true;
 }
 
-// ── Strategy: azure-b2c (DTNA/Daimler Truck CIAM — single-page email+pass) ───
+// ── Strategy: azure-b2c (DTNA/Daimler Truck CIAM — TWO-STEP email then pass) ─
 // DTNA CIAM is a TWO-STEP login (confirmed via screenshots):
 //   Step 1: "Email or User ID" field + a "Continue" button.
 //   Step 2: (after Continue) "Hello, <userid>" + "Password" field + "Continue".
 // There is ALSO a yellow "Login with Daimler Truck Account" button we must NEVER
 // click (that's the wrong corporate-SSO path). The old handler assumed user+pass
 // on one page and clicked once, so it never reached the password step — the
-// confirmed cause of "DTNA won't auto-login". This now drives both steps and
-// still handles a single-page variant (password already present) as a fallback.
+// confirmed cause of "DTNA won't auto-login". This now ALWAYS drives both steps
+// (User ID -> Continue -> wait for the password step -> Password -> Continue).
 
 // Click the primary submit on the CIAM form — "Continue" (or Login/Sign In),
 // but DELIBERATELY avoid the "...Daimler Truck Account" corporate button.
@@ -303,17 +303,22 @@ const _CIAM_SUBMIT_SCRIPT = (
   '})()'
 );
 
-// Poll for the password field to become VISIBLE (step 2 renders async after
-// Continue). Visibility (not mere DOM presence) matters: DTNA keeps the
-// password input in the DOM but hidden until step 2.
-async function _waitForVisiblePassword(wc, maxMs) {
+// Detect that we've advanced to the PASSWORD step (step 2). The reliable
+// signal on DTNA CIAM is the body text switching to the "please enter your
+// Password" greeting (shown with "Hello, <user>"); we also accept a password
+// field that is actually visible+enabled. Polls because step 2 renders async.
+async function _waitForPasswordStep(wc, maxMs) {
   const deadline = Date.now() + (maxMs || 9000);
-  const probe = '(function(){var el=document.querySelector("input[type=password],#password,input[placeholder=\\"Password\\"]");' +
-    'if(!el) return false; var r=el.getBoundingClientRect();' +
-    'return !!(el.offsetParent!==null && r.width>0 && r.height>0);})()';
+  const probe = '(function(){' +
+    'var bt=(document.body&&document.body.innerText||"").toLowerCase();' +
+    'var greetingStep=(bt.indexOf("enter your password")!==-1)||(bt.indexOf("hello,")!==-1 && bt.indexOf("password")!==-1 && bt.indexOf("user id")===-1 && bt.indexOf("email or user id")===-1);' +
+    'var el=document.querySelector("input[type=password],#password,input[placeholder=\\"Password\\"]");' +
+    'var pwUsable=false; if(el){var r=el.getBoundingClientRect(); pwUsable=(el.offsetParent!==null && r.width>0 && r.height>0 && !el.disabled);}' +
+    'return greetingStep||pwUsable;' +
+    '})()';
   while (Date.now() < deadline) {
-    const vis = await _execSafe(wc, probe);
-    if (vis) return true;
+    const ok = await _execSafe(wc, probe);
+    if (ok) return true;
     await _wait(500);
   }
   return false;
@@ -357,27 +362,11 @@ async function _loginAzureB2C(wc, username, password) {
   }
   logger.info('Azure B2C step1: filled User ID with ' + userSel);
 
-  // Single-page variant ONLY if a password field is actually VISIBLE right now.
-  // IMPORTANT: DTNA CIAM renders the password <input> in the DOM on step 1 but
-  // keeps it HIDDEN until after Continue — so a plain querySelector("password")
-  // is true even on the user-id step. Filling it + clicking once then stalled on
-  // the "Hello, <user> — enter Password" page (confirmed live). Require genuine
-  // visibility (offsetParent + size) so DTNA correctly takes the two-step path.
-  const passVisible = await _execSafe(wc,
-    '(function(){var el=document.querySelector("input[type=password],#password,input[placeholder=\\"Password\\"]");' +
-    'if(!el) return false; var r=el.getBoundingClientRect();' +
-    'return !!(el.offsetParent!==null && r.width>0 && r.height>0);})()'
-  );
-  if (passVisible) {
-    const pSel = await _fillFirst(wc, PASS_SELECTORS, password);
-    if (pSel) logger.info('Azure B2C: single-page variant — filled Password with ' + pSel);
-    await _wait(400);
-    const c = await _execSafe(wc, _CIAM_SUBMIT_SCRIPT);
-    logger.info('Azure B2C: single-page submit clicked: ' + c);
-    return await _postSubmitDiag(wc);
-  }
-
-  // Two-step: click Continue to advance to the password page.
+  // ALWAYS two-step for DTNA CIAM. The form processes the User ID first (even
+  // though it keeps the password <input> in the DOM), so filling password on
+  // step 1 + clicking once lands stuck on "Hello, <user> — enter Password".
+  // Click Continue to advance, then handle the password step separately. The
+  // "Hello, <user>" greeting is the reliable marker that we're on step 2.
   await _wait(300);
   const c1 = await _execSafe(wc, _CIAM_SUBMIT_SCRIPT);
   if (!c1) {
@@ -385,25 +374,28 @@ async function _loginAzureB2C(wc, username, password) {
     await _dumpInputs(wc, 'azure-b2c-no-continue-step1');
     return false;
   }
-  logger.info('Azure B2C step1: clicked "' + c1 + '" — waiting for password field');
+  logger.info('Azure B2C step1: User ID submitted via "' + c1 + '" — waiting for password step');
 
   // ── Step 2: Password ──────────────────────────────────────────────────────
-  const pwAppeared = await _waitForVisiblePassword(wc, 9000);
-  if (!pwAppeared) {
-    logger.warn('Azure B2C: password field never appeared after step 1');
+  // Wait for the password STEP (the "enter your Password" greeting / an enabled
+  // password field), then fill + submit. Poll because step 2 renders async.
+  const onPwStep = await _waitForPasswordStep(wc, 9000);
+  if (!onPwStep) {
+    logger.warn('Azure B2C: password step never appeared after step 1');
     await _dumpInputs(wc, 'azure-b2c-no-password-step2');
-    return await _postSubmitDiag(wc); // still log where we ended up
+    return await _postSubmitDiag(wc);
   }
+  await _wait(400); // let the field settle/enable
   const passSel = await _fillFirst(wc, PASS_SELECTORS, password);
   if (!passSel) {
-    logger.warn('Azure B2C: password field present but fill failed');
+    logger.warn('Azure B2C: on password step but fill failed');
     await _dumpInputs(wc, 'azure-b2c-password-fill-failed');
     return false;
   }
   logger.info('Azure B2C step2: filled Password with ' + passSel);
   await _wait(400);
   const c2 = await _execSafe(wc, _CIAM_SUBMIT_SCRIPT);
-  logger.info('Azure B2C step2: clicked "' + c2 + '"');
+  logger.info('Azure B2C step2: Password submitted via "' + c2 + '"');
   return await _postSubmitDiag(wc);
 }
 
