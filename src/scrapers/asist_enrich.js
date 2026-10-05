@@ -82,11 +82,33 @@ const ASIST_SCRAPE = String.raw`
   function isPlausibleDealerName(s){if(!s)return false;if(/unit\s*:|key\s*location|site\s*:/i.test(s))return false;if(/\d+\s+[A-Za-z].*,\s*[A-Za-z]+\s+[A-Z]{2}\s+\d{5}/.test(s))return false;if(s.length>60)return false;return true;}
   var _dealerRaw=rf('Dealer')||rf('Location')||rf('Service Location')||rf('Shop');
   var dealerName=isPlausibleDealerName(_dealerRaw)?_dealerRaw:'';
-  return{currentUrl:location.href,estimateLinks:estimateLinks,caseLinks:caseLinks,srLinks:srLinks,responseCaseLinks:responseCaseLinks,caseNumbers:caseNumbers,srNumbers:srNumbers,srStatus:rf('Status'),dealer:dealerName,complaint:rf('Complaint'),assetVin:rf('VIN'),unitNumber:rf('Unit Number'),pageText:body.substring(0,12000),pageReady:body.length>300};
+  // STATUS/RESPONSES THREAD (2026-10): the dealer's actual status updates
+  // ("Asset is Ready", "REPAIRS ARE COMPLETED", "Case status set to Asset
+  // Ready", "ready to be picked up") live in the Responses section of the
+  // service_request page -- NOT on the estimate page the chase ends on. The old
+  // scraper only read this container for LINKS and never captured the note
+  // text, so the single most important update (repairs done, come get it) never
+  // reached the timeline. Capture that text explicitly here.
+  var responsesText = '';
+  var _respEl = document.getElementById('service_request_responses');
+  if (_respEl && _respEl.innerText) responsesText = _respEl.innerText;
+  if (!responsesText) {
+    // Fallback: no known container id -> scan blocks for status-note keywords
+    // and keep the surrounding text. Covers ASIST page variants (Volvo/PACCAR).
+    var _statusRe = /(asset\s+is\s+ready|asset\s+ready|repairs?\s+(are\s+)?completed|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|case\s+status\s+set\s+to|work\s+order\s+completed|unit\s+is\s+ready)/i;
+    if (_statusRe.test(body)) {
+      // Grab a window of text around the first match so we keep the note + its date.
+      var _mi = body.search(_statusRe);
+      var _from = Math.max(0, _mi - 300);
+      responsesText = body.slice(_from, _mi + 700);
+    }
+  }
+  responsesText = String(responsesText || '').replace(/\s+\n/g, '\n').trim().slice(0, 4000);
+  return{currentUrl:location.href,estimateLinks:estimateLinks,caseLinks:caseLinks,srLinks:srLinks,responseCaseLinks:responseCaseLinks,caseNumbers:caseNumbers,srNumbers:srNumbers,srStatus:rf('Status'),dealer:dealerName,complaint:rf('Complaint'),assetVin:rf('VIN'),unitNumber:rf('Unit Number'),responsesText:responsesText,pageText:body.substring(0,12000),pageReady:body.length>300};
 })()
 `;
 
-function _empty(srUrl,err){return{ok:false,srUrl:srUrl||'',srNumber:'',caseNumber:'',caseUrl:'',estimateUrl:'',bestUrl:srUrl||'',bestLabel:srUrl?'Service Request':'N/A',source:srUrl?'service_request':'none',scrapedAt:new Date().toISOString(),dealer:'',error:err||null};}
+function _empty(srUrl,err){return{ok:false,srUrl:srUrl||'',srNumber:'',caseNumber:'',caseUrl:'',estimateUrl:'',bestUrl:srUrl||'',bestLabel:srUrl?'Service Request':'N/A',source:srUrl?'service_request':'none',scrapedAt:new Date().toISOString(),dealer:'',statusText:'',offsiteText:'',error:err||null};}
 
 async function pollScrape(win){for(let i=0;i<POLL_MAX;i++){await new Promise(r=>setTimeout(r,POLL_INTERVAL));if(!win||win.isDestroyed())return null;try{const d=await win.webContents.executeJavaScript('(function(){try{return '+ASIST_SCRAPE.trim()+'}catch(e){return{pageReady:false};}})()');if(d&&d.pageReady)return d;}catch(_){}}return null;}
 
@@ -154,10 +176,18 @@ async function enrichVolvoAsist(srUrl){
   if(estUrl){bUrl=estUrl;src='estimate';bLabel=caseNum?'Fleet Estimate | Case #'+caseNum:'Fleet Estimate';}
   else if(caseUrl){bUrl=caseUrl;src='case';bLabel=caseNum?'ASIST Case #'+caseNum:'ASIST Case';}
   else{bUrl=srUrl;src='service_request';bLabel=srNum?'ASIST SR '+srNum:'Service Request';}
-  logger.info('[ae] DONE | src:',src,'case:',caseNum,'bestUrl:',bUrl.slice(0,80));
-  // Combine all scraped page text for timeline building
-  const offsiteText = (sr.pageText || '').trim();
-  return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',offsiteText};
+  logger.info('[ae] DONE | src:',src,'case:',caseNum,'bestUrl:',bUrl.slice(0,80),'| statusThread:',(sr.responsesText||'').length+'ch');
+  // Build the offsite text for the timeline. PREFER the SR status/Responses
+  // thread (where "Asset Ready / repairs completed" live) over the generic SR
+  // body, since the chase ends on the estimate page which never carries that
+  // note. statusText is the pure status thread; offsiteText leads with it then
+  // appends the SR body for extra context (deduped by the leading status text).
+  const statusText = (sr.responsesText || '').trim();
+  const srBody = (sr.pageText || '').trim();
+  const offsiteText = statusText
+    ? (statusText + (srBody ? '\n\n--- Service Request page ---\n' + srBody : '')).slice(0, 10000)
+    : srBody;
+  return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',statusText,offsiteText};
 }
 
 const SOURCE_RANK={estimate:3,case:2,service_request:1,none:0};

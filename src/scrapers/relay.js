@@ -1071,17 +1071,31 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
           // timeline builder has BOTH Relay conversation + offsite dealer notes.
           // Only fires for Decisiv URLs (Volvo/PACCAR), only when enrichment
           // didn't already capture it (i.e. _asistEnrich is null or has no text).
+          // The enrichment's offsiteText now LEADS with the SR status/Responses
+          // thread ("Asset Ready / repairs completed"), captured on the
+          // service_request page (A1 fix). Prefer it.
           let _offsitePageText = (_asistEnrich && _asistEnrich.offsiteText) || '';
-          if (!_offsitePageText && _finalOffsite && _finalOffsite.url && /decisiv\.net/i.test(_finalOffsite.url)) {
+          // Fallback re-scrape: if enrichment returned no text, scrape the
+          // SERVICE_REQUEST page (where the status thread lives) -- NOT the
+          // estimate page the chase ends on (which never carries the status
+          // note; scraping it was why asistNotes came back empty for B62281).
+          const _srNotesUrl = (_finalOffsite && _finalOffsite.asistSrUrl) ||
+                              (_asistEnrich && _asistEnrich.srUrl) ||
+                              (_finalOffsite && _finalOffsite.url) || '';
+          if (!_offsitePageText && _srNotesUrl && /decisiv\.net\/service_requests\//i.test(_srNotesUrl)) {
             try {
-              logger.info('[Relay] Phase3.6 scraping offsite page text for', equipmentId, '|', _finalOffsite.url.slice(0, 80));
-              const _offPage = await openAndScrape(_finalOffsite.url, partitionForUrl(_finalOffsite.url));
-              if (_offPage && _offPage.pageText) {
-                _offsitePageText = _offPage.pageText.substring(0, 8000);
-                logger.info('[Relay] Phase3.6 offsite text captured for', equipmentId, '|', _offsitePageText.length + 'ch');
+              logger.info('[Relay] Phase3.6 scraping SR status thread for', equipmentId, '|', _srNotesUrl.slice(0, 80));
+              const _offPage = await openAndScrape(_srNotesUrl, partitionForUrl(_srNotesUrl));
+              if (_offPage) {
+                const _status = (_offPage.responsesText || '').trim();
+                const _bodyTxt = (_offPage.pageText || '').trim();
+                _offsitePageText = (_status
+                  ? (_status + (_bodyTxt ? '\n\n--- Service Request page ---\n' + _bodyTxt : ''))
+                  : _bodyTxt).slice(0, 8000);
+                if (_offsitePageText) logger.info('[Relay] Phase3.6 SR status thread captured for', equipmentId, '|', _offsitePageText.length + 'ch | hasStatus:', !!_status);
               }
             } catch (_oe) {
-              logger.warn('[Relay] Phase3.6 offsite scrape failed for', equipmentId, _oe.message);
+              logger.warn('[Relay] Phase3.6 SR status scrape failed for', equipmentId, _oe.message);
             }
           }
 

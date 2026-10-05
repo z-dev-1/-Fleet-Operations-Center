@@ -89,7 +89,20 @@ async function runOrchaDeepScan(mergedRows, opts) {
   const unitsToProcess = mergedRows.filter(u => {
     const lc     = (u.lifecycleState  || '').toLowerCase();
     const reason = (u.lifecycleReason || '').toLowerCase();
-    return lc.includes('unavail') || reason.includes('offsite');
+    if (lc.includes('unavail') || reason.includes('offsite')) return true;
+    // FINAL-UPDATE PASS (2026-10): a unit the user just flipped to Active after
+    // picking it up still needs ONE more timeline regeneration so the closing
+    // "ready for pickup / picked up / repairs completed" update actually lands.
+    // Include units with RECENT offsite activity (enriched within ~2 days) even
+    // once they're Active. The timeline quality-guard + manual-entry merge keep
+    // this from clobbering anything; it just lets the final line through.
+    try {
+      if (u.asistScrapedAt) {
+        const ageMs = Date.now() - new Date(u.asistScrapedAt).getTime();
+        if (Number.isFinite(ageMs) && ageMs < 2 * 24 * 60 * 60 * 1000) return true;
+      }
+    } catch (_) {}
+    return false;
   });
 
   logger.info('Orcha Deep Scan: processing ' + unitsToProcess.length + ' units...');
@@ -478,7 +491,9 @@ async function _processUnit(u, notesStore, askOrcha) {
   // gives units whose only real update lives on the offsite dealer page (e.g.
   // 39546: RENTAL WR, no Relay comments, full Volvo ASIST estimate) a substantive
   // timeline instead of '[no activity logged]'.
-  if (u.asistNotes && u.asistNotes.trim().length > 50) {
+  // Lowered gate (2026-10): a terse but critical status note like "Asset Ready.
+  // REPAIRS ARE COMPLETED." must not be skipped. >10 chars is enough signal.
+  if (u.asistNotes && u.asistNotes.trim().length > 10) {
     offsiteText = u.asistNotes.substring(0, 3000);
     logger.info('[DS] Offsite text from cached asistNotes for ' + u.equipmentId + ' | ' + offsiteText.length + 'ch');
   }
