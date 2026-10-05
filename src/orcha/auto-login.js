@@ -367,14 +367,20 @@ async function _loginAzureB2C(wc, username, password) {
   // step 1 + clicking once lands stuck on "Hello, <user> — enter Password".
   // Click Continue to advance, then handle the password step separately. The
   // "Hello, <user>" greeting is the reliable marker that we're on step 2.
+  // Advance via ENTER in the User ID field (what the user does manually) AND
+  // click Continue as a fallback — the page re-renders in place on the same URL.
   await _wait(300);
+  const step1Enter = (
+    '(function(){' +
+    'var el=document.querySelector("input[placeholder=\\"User ID\\"],input[placeholder=\\"Email or User ID\\"],#signInName,input[type=email],input[type=text]");' +
+    'if(el){el.focus();var o={bubbles:true,cancelable:true,key:"Enter",code:"Enter",keyCode:13,which:13};' +
+    'el.dispatchEvent(new KeyboardEvent("keydown",o));el.dispatchEvent(new KeyboardEvent("keypress",o));el.dispatchEvent(new KeyboardEvent("keyup",o));}' +
+    'return !!el;' +
+    '})()'
+  );
+  await _execSafe(wc, step1Enter);
   const c1 = await _execSafe(wc, _CIAM_SUBMIT_SCRIPT);
-  if (!c1) {
-    logger.warn('Azure B2C: step1 Continue button not found');
-    await _dumpInputs(wc, 'azure-b2c-no-continue-step1');
-    return false;
-  }
-  logger.info('Azure B2C step1: User ID submitted via "' + c1 + '" — waiting for password step');
+  logger.info('Azure B2C step1: User ID submitted (Enter + "' + c1 + '") — waiting for password step');
 
   // ── Step 2: Password ──────────────────────────────────────────────────────
   // Wait for the password STEP (the "enter your Password" greeting / an enabled
@@ -412,9 +418,37 @@ async function _loginAzureB2C(wc, username, password) {
   );
   const committed = await _execSafe(wc, commitScript);
   logger.info('Azure B2C step2: filled Password with ' + passSel + ' | commit=' + committed);
-  await _wait(700); // give the form time to enable Continue after the value commits
-  const c2 = await _execSafe(wc, _CIAM_SUBMIT_SCRIPT);
-  logger.info('Azure B2C step2: Password submitted via "' + c2 + '"');
+  await _wait(700); // give the form time to enable submit after the value commits
+
+  // SUBMIT via ENTER in the password field — the user confirmed that clicking
+  // Continue does NOT reliably submit, but pressing Enter DOES log in. Dispatch
+  // a full Enter key sequence on the field, then also submit its form + click
+  // Continue as belt-and-suspenders. (DTNA CIAM re-renders in place on the same
+  // URL, so this is the step that actually completes the login.)
+  const enterSubmit = (
+    '(function(){' +
+    'var el=document.querySelector("input[type=password],#password,input[placeholder=\\"Password\\"]");' +
+    'if(!el) return "no-field";' +
+    'el.focus();' +
+    'var opts={bubbles:true,cancelable:true,key:"Enter",code:"Enter",keyCode:13,which:13};' +
+    'el.dispatchEvent(new KeyboardEvent("keydown",opts));' +
+    'el.dispatchEvent(new KeyboardEvent("keypress",opts));' +
+    'el.dispatchEvent(new KeyboardEvent("keyup",opts));' +
+    'try{var f=el.form||el.closest("form"); if(f){ if(typeof f.requestSubmit==="function") f.requestSubmit(); else f.submit(); return "form-submit"; }}catch(e){}' +
+    'return "enter";' +
+    '})()'
+  );
+  const submitted = await _execSafe(wc, enterSubmit);
+  logger.info('Azure B2C step2: Password submitted via Enter (' + submitted + ')');
+  // Belt-and-suspenders: if Enter didn't navigate, also try the Continue button.
+  await _wait(1500);
+  const stillHere = await _execSafe(wc,
+    '(function(){var bt=(document.body&&document.body.innerText||"").toLowerCase();return bt.indexOf("enter your password")!==-1||bt.indexOf("hello,")!==-1;})()'
+  );
+  if (stillHere) {
+    const c2 = await _execSafe(wc, _CIAM_SUBMIT_SCRIPT);
+    logger.info('Azure B2C step2: still on password step — also clicked "' + c2 + '"');
+  }
   return await _postSubmitDiag(wc);
 }
 
