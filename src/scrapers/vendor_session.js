@@ -73,7 +73,7 @@ async function _warm(vendorId, opts) {
     let settleTimer = null;
     let urlAtLastAttempt = null;
     let graceChecks = 0;
-    const maxGraceChecks = 5;
+    const maxGraceChecks = 8; // ~12s of post-submit redirect grace (frontdoor -> app)
 
     const hardTimeout = setTimeout(() => finish({ ok: true, loggedIn: _looksLoggedIn(), attempted, timedOut: true }), timeoutMs);
 
@@ -105,12 +105,22 @@ async function _warm(vendorId, opts) {
       try { onLoginPg = await isLoginPage(win.webContents); } catch (_) {}
 
       if (!onLoginPg) {
-        if (urlAtLastAttempt && currentUrl === urlAtLastAttempt && graceChecks < maxGraceChecks) {
+        const onLoginHost = _LOGIN_HOSTS_RE.test(currentUrl);
+        // After a submit, the post-login redirect chain passes through transient
+        // hops (e.g. Salesforce frontdoor.jsp) before landing on the real app
+        // page. If we're still on the login host OR on the exact URL we just
+        // filled, don't conclude yet — give the redirect time to complete so we
+        // correctly observe the logged-in landing instead of reporting a false
+        // loggedIn=false. (Root cause of the earlier mismatch where
+        // attachAutoLogin reached the case page but the warm said loggedIn=false.)
+        const stillSettling = onLoginHost ||
+          (urlAtLastAttempt && currentUrl === urlAtLastAttempt) ||
+          !/^https?:/i.test(currentUrl);
+        if (stillSettling && graceChecks < maxGraceChecks) {
           graceChecks++;
-          settleTimer = setTimeout(checkSettled, 1200);
+          settleTimer = setTimeout(checkSettled, 1500);
           return;
         }
-        const onLoginHost = _LOGIN_HOSTS_RE.test(currentUrl);
         // DIAGNOSTIC (2026-10): if we settle on a LOGIN HOST but isLoginPage()
         // saw no form (so no login attempt was made), log the page so we can
         // see what state DTNA's B2C page is actually in (loading? pick-account?
