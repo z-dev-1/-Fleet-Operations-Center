@@ -123,7 +123,13 @@ async function isLoginPage(wc) {
     // DTNA CIAM login by its distinctive on-page text (present at top level even
     // when the fields are in an iframe), and also scan same-origin iframes for
     // credential fields.
-    'var dtnaLogin=(bodyTxt.indexOf("dtna ciam")!==-1)||(bodyTxt.indexOf("login with daimler truck account")!==-1)||(bodyTxt.indexOf("enter your email or user id")!==-1)||(bodyTxt.indexOf("enter your password to sign in")!==-1);' +
+    // DTNA CIAM login markers — but ONLY count them when a credential INPUT is
+    // actually present, so the LOGGED-IN app (which still has a text search box
+    // and may retain CIAM text in cache) is not mistaken for a login page. The
+    // old text-only check caused the loop to keep "logging in" into the app\'s
+    // global-search box after a successful login.
+    'var dtnaText=(bodyTxt.indexOf("dtna ciam")!==-1)||(bodyTxt.indexOf("login with daimler truck account")!==-1)||(bodyTxt.indexOf("enter your email or user id")!==-1)||(bodyTxt.indexOf("enter your password to sign in")!==-1);' +
+    'var dtnaLogin=dtnaText&&(pw>0||document.querySelector("#signInName")||document.querySelector("input[placeholder*=\\"User ID\\" i]")||document.querySelector("input[placeholder*=\\"Email or User ID\\" i]"));' +
     'var frameLogin=false;try{var ifr=document.querySelectorAll("iframe");for(var i=0;i<ifr.length;i++){try{var d=ifr[i].contentDocument;if(d&&(d.querySelector("input[type=password]")||d.querySelector("input[type=email],input[type=text]")))' +
     '{frameLogin=true;break;}}catch(e){}}}catch(e){}' +
     'return pw>0||em>0||hasConsentGate||dtnaLogin||frameLogin;' +
@@ -345,15 +351,17 @@ async function _fillFirst(wc, selectors, value) {
 async function _loginAzureB2C(wc, username, password) {
   await _wait(2000); // JS-heavy page — let it render
 
+  // CIAM-specific selectors only. Deliberately NO generic input[type=text]
+  // fallback — that matched the logged-in app's global SEARCH box and made the
+  // loop "log in" into search after a successful login.
   const USER_SELECTORS = [
     'input[placeholder="User ID"]',
     'input[placeholder="Email or User ID"]',
     'input[placeholder*="User ID" i]',
-    'input[placeholder*="Email" i]',
+    'input[placeholder*="Email or User" i]',
     '#signInName',
     'input[name="signInName"]',
     'input[type="email"]',
-    'input[type="text"]',
   ];
   const PASS_SELECTORS = [
     'input[placeholder="Password"]',
