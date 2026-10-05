@@ -793,4 +793,83 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
   logger.info('attachAutoLogin: attached for', targetUrl.slice(0, 80));
 }
 
-module.exports = { attemptAutoLogin, attachAutoLogin, isLoginPage, partitionForUrl, VENDOR_PARTITIONS, LOGIN_STRATEGIES };
+// ── runAutoLoginLoop — the PROVEN "Test Login" settle loop ────────────────────
+// This is exactly the loop credentials:test-login uses (which the user confirms
+// WORKS for DTNA), lifted so Split View / offsite windows can use the SAME
+// behavior instead of attachAutoLogin's URL-matching approach (which kept
+// landing on DTNA's in-place login without acting). Core idea: it is URL-
+// AGNOSTIC — on every settle it just asks "is a login form showing?" If yes,
+// run attemptAutoLogin and wait for the next settle; if no, it's done. Each
+// navigation/stop-loading/in-page render re-arms a short settle check.
+// Returns a Promise<{ ok, attempted, site, timedOut? }>. Does NOT create or
+// close the window — the caller owns its lifecycle.
+function runAutoLoginLoop(win, opts = {}) {
+  const label = opts.label || 'auto-login-loop';
+  const maxAttempts = opts.maxAttempts || 4;
+  const timeoutMs = opts.timeoutMs || 45000;
+  return new Promise((resolve) => {
+    let resolved = false, attempts = 0, lastSite = '';
+    let settleTimer = null, urlAtLastAttempt = null, graceChecks = 0;
+    const maxGraceChecks = 6;
+
+    const finish = (r) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(hardTimeout); clearTimeout(settleTimer);
+      try {
+        win.webContents.removeListener('did-finish-load', onNav);
+        win.webContents.removeListener('did-navigate', onNav);
+        win.webContents.removeListener('did-navigate-in-page', onNav);
+        win.webContents.removeListener('did-stop-loading', onNav);
+      } catch (_) {}
+      logger.info('[' + label + '] done | attempted=' + (attempts > 0) + (r.timedOut ? ' (timeout)' : ''));
+      resolve(r);
+    };
+    const hardTimeout = setTimeout(() => finish({ ok: true, attempted: attempts > 0, site: lastSite, timedOut: true }), timeoutMs);
+
+    async function checkSettled() {
+      if (resolved || !win || win.isDestroyed()) return;
+      const currentUrl = win.webContents.getURL();
+      let onLoginPg = false;
+      try { onLoginPg = await isLoginPage(win.webContents); } catch (_) {}
+      if (!onLoginPg) {
+        if (urlAtLastAttempt && currentUrl === urlAtLastAttempt && graceChecks < maxGraceChecks) {
+          graceChecks++; settleTimer = setTimeout(checkSettled, 1200); return;
+        }
+        logger.info('[' + label + '] settled, no login form at ' + currentUrl.slice(0, 80));
+        finish({ ok: true, attempted: attempts > 0, site: lastSite });
+        return;
+      }
+      if (attempts >= maxAttempts) {
+        logger.warn('[' + label + '] max attempts, still on login: ' + currentUrl.slice(0, 80));
+        finish({ ok: true, attempted: attempts > 0, site: lastSite, maxAttemptsReached: true });
+        return;
+      }
+      attempts++;
+      try {
+        const result = await attemptAutoLogin(win.webContents, currentUrl);
+        lastSite = result.site || lastSite;
+        logger.info('[' + label + '] attempt ' + attempts + ' -> filled:' + result.filled + ' on ' + currentUrl.slice(0, 80));
+        if (!result.filled) { finish({ ok: true, attempted: false, site: lastSite }); return; }
+        urlAtLastAttempt = currentUrl; graceChecks = 0;
+      } catch (e) {
+        logger.warn('[' + label + '] error: ' + e.message);
+        finish({ ok: false, error: e.message, site: lastSite });
+      }
+    }
+    function onNav() {
+      if (resolved) return;
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(checkSettled, 1500);
+    }
+    win.webContents.on('did-finish-load', onNav);
+    win.webContents.on('did-navigate', onNav);
+    win.webContents.on('did-navigate-in-page', onNav); // SPA in-place renders
+    win.webContents.on('did-stop-loading', onNav);
+    // Kick off an initial settle in case the page is already loaded.
+    settleTimer = setTimeout(checkSettled, 1500);
+    logger.info('[' + label + '] started');
+  });
+}
+
+module.exports = { attemptAutoLogin, attachAutoLogin, runAutoLoginLoop, isLoginPage, partitionForUrl, VENDOR_PARTITIONS, LOGIN_STRATEGIES };

@@ -542,7 +542,7 @@ function registerMiscIPC(ctx) {
   // Split-view: open two URLs side by side in separate windows
   handle('window:split-view', async (_e, data) => {
     const { BrowserWindow, screen, session: eSession } = require('electron');
-    const { attachAutoLogin, partitionForUrl } = require('../orcha/auto-login');
+    const { runAutoLoginLoop, partitionForUrl } = require('../orcha/auto-login');
     const { leftUrl, rightUrl, leftTitle, rightTitle } = data || {};
         if (!leftUrl && !rightUrl) return { ok: false, error: 'No URLs provided' };
 
@@ -672,7 +672,9 @@ function registerMiscIPC(ctx) {
     if (leftUrl) {
       const left = new BrowserWindow(opts(0, leftTitle || 'Relay Garage', leftUrl));
       left.setMenuBarVisibility(false);
-      attachAutoLogin(left, leftUrl, { maxRetries: 3 });
+      // Use the PROVEN test-login settle loop (URL-agnostic: fills whenever a
+      // login form shows, including DTNA's in-place Lightning login).
+      runAutoLoginLoop(left, { label: 'split-left' });
       // Re-run the conversation-focus on every finished navigation (initial
       // load AND any in-app route change into a WR/conversation), since Relay
       // is a SPA and the sheet mounts/re-mounts as the user navigates.
@@ -684,7 +686,7 @@ function registerMiscIPC(ctx) {
     if (rightUrl) {
       const right = new BrowserWindow(opts(halfW, rightTitle || 'Offsite Shop', rightUrl));
       right.setMenuBarVisibility(false);
-      attachAutoLogin(right, rightUrl, { maxRetries: 3 });
+      runAutoLoginLoop(right, { label: 'split-right' });
       right.loadURL(rightUrl);
     }
 

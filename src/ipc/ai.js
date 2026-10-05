@@ -894,7 +894,7 @@ function registerAIHandlers(ctx) {
 
   // Daily Notes - open Relay + Offsite windows side-by-side (with auto-login)
   handle('daily-notes:open-windows', async (_e, opts) => {
-    const { attachAutoLogin, partitionForUrl } = require('../orcha/auto-login');
+    const { runAutoLoginLoop, partitionForUrl } = require('../orcha/auto-login');
     const { width, height } = eScreen.getPrimaryDisplay().workAreaSize;
     const halfW = Math.floor(width / 2);
     const winH  = Math.floor(height * 0.85);
@@ -910,7 +910,7 @@ function registerAIHandlers(ctx) {
         icon: require('../config/app-icon').getAppIconPath(),
         webPreferences: { nodeIntegration: false, contextIsolation: true, session: ses },
       });
-      attachAutoLogin(relayWin, opts.relayUrl, { maxRetries: 3 });
+      runAutoLoginLoop(relayWin, { label: 'ai-split-relay' });
       relayWin.loadURL(opts.relayUrl);
       windows.push(relayWin);
     }
@@ -924,7 +924,7 @@ function registerAIHandlers(ctx) {
         icon: require('../config/app-icon').getAppIconPath(),
         webPreferences: { nodeIntegration: false, contextIsolation: true, session: ses },
       });
-      attachAutoLogin(offsiteWin, opts.offsiteUrl, { maxRetries: 3 });
+      runAutoLoginLoop(offsiteWin, { label: 'ai-split-offsite' });
       offsiteWin.loadURL(opts.offsiteUrl);
       windows.push(offsiteWin);
     }
