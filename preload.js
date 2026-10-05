@@ -447,28 +447,14 @@ expose('vendor', {
 });
 
 // -- Workflow Intelligence (Phase 8) -- recorder, library, execution
-// See docs/PHASE8_WORKFLOW_INTELLIGENCE_PLAN.md for the full design.
-expose('workflowIntel', {
-  // Recording session lifecycle
-  startRecording:   (meta)               => ipcRenderer.invoke('wi:start-recording', meta),
-  recordStep:       (sessionId, step)    => ipcRenderer.invoke('wi:record-step', sessionId, step),
-  stopRecording:    (sessionId, finalMeta) => ipcRenderer.invoke('wi:stop-recording', sessionId, finalMeta),
-  discardRecording: (sessionId)          => ipcRenderer.invoke('wi:discard-recording', sessionId),
-  // Library CRUD
-  list:           (filter)     => ipcRenderer.invoke('wi:list-workflows', filter),
-  get:            (id)         => ipcRenderer.invoke('wi:get-workflow', id),
-  save:           (recording)  => ipcRenderer.invoke('wi:save-workflow', recording),
-  delete:         (id)         => ipcRenderer.invoke('wi:delete-workflow', id),
-  toggleFavorite: (id)         => ipcRenderer.invoke('wi:toggle-favorite', id),
-  // Import / export
-  importWorkflow: (bundle) => ipcRenderer.invoke('wi:import-workflow', bundle),
-  exportWorkflow: (id)     => ipcRenderer.invoke('wi:export-workflow', id),
-  // Execution log (read-only until Phase 4 wires the execution engine)
-  getExecutionLog: (limit) => ipcRenderer.invoke('wi:get-execution-log', limit),
-  getSuggestionForUnit: (unit) => ipcRenderer.invoke('wi:get-suggestion-for-unit', unit),
-  // Phase 4: Execute a recorded workflow
-  execute:         (id, variables) => ipcRenderer.invoke('wi:execute-workflow', id, variables),
-  onProgress:      (cb) => on('wi:execution-progress', cb),
+// Daily Tasks / Action Board (2026-10) — replaces the former Workflow
+// Intelligence recorder/library. The "Workflow AI" tab is now a task board.
+expose('dailyTasks', {
+  list:      ()      => ipcRenderer.invoke('tasks:list'),
+  addManual: (data)  => ipcRenderer.invoke('tasks:add-manual', data),
+  update:    (data)  => ipcRenderer.invoke('tasks:update', data),
+  remove:    (id)    => ipcRenderer.invoke('tasks:delete', id),
+  generate:  ()      => ipcRenderer.invoke('tasks:generate'),
 });
 
 // -- Bubble/mini-FAB window controls (2026-07-24) -- only meaningful when this

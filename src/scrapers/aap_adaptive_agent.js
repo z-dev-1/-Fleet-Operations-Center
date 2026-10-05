@@ -892,24 +892,6 @@ async function runAdaptiveWR(payload, askAI, log, opts) {
     webPreferences: { nodeIntegration: false, contextIsolation: true }
   });
 
-  // Workflow Intelligence: attach capture if a recording is currently in
-  // progress -- this is THE window a user manually finishes a WR in after
-  // the AI loop gets stuck or picks the wrong option (confirmed real cases:
-  // wrong Asset Condition, missed Title). Capturing what the human actually
-  // did here, across a few real runs (standard repair / tow / dealer-routed),
-  // is what feeds the recorded-replay engine this is being built towards.
-  // Observation-only -- see action_capture.js's header for the safety note.
-  try {
-    const { getActiveSessionId } = require('../ipc/workflow-intel');
-    const activeSession = getActiveSessionId();
-    if (activeSession) {
-      const { attachCapture } = require('../window/action_capture');
-      attachCapture(win, activeSession);
-    }
-  } catch (e) {
-    log('[AdaptiveWR] Workflow Intelligence capture attach failed: ' + e.message);
-  }
-
   // FIX (2026-07-23): if AAP's wizard form has an unsaved-changes guard,
   // Electron's default behavior on window close is to run the page's
   // beforeunload handler and show a native "Leave Site?" confirm dialog --

@@ -93,10 +93,13 @@ const REGISTRY = {
   slackMentionThreads: () => path.join(P.dataDir, 'slack_mention_threads.json'), // thread-continuation tracking for channel watch
   bubbleConfig:     () => path.join(P.dataDir, 'bubble_config.json'),             // floating bubble opacity setting
 
-  // Workflow Intelligence (Phase 8, 2026-07-19) - see docs/PHASE8_WORKFLOW_INTELLIGENCE_PLAN.md
-  workflowRecordings:   () => path.join(P.dataDir, 'workflow_recordings.json'),
-  workflowExecutionLog: () => path.join(P.dataDir, 'workflow_execution_log.json'),
-  workflowPatterns:     () => path.join(P.dataDir, 'workflow_patterns.json'),
+  // Daily Tasks / Action Board (2026-10) — replaces the former Workflow
+  // Intelligence recorder/library (Phase 8, removed). The "Workflow AI" tab is
+  // now an AI-generated + manual daily task board. See src/ipc/daily-tasks.js.
+  // Shape: { ai: [task], manual: [task], lastGeneratedDay, lastGeneratedAt }.
+  // task: { id, source:'ai'|'manual', text, unitId?, action?, urgency?,
+  //         due?, done, dismissed, createdAt, resolvedAt?, dedupeKey }.
+  dailyTasks:           () => path.join(P.dataDir, 'daily_tasks.json'),
 
   // Slack Partner Auto-Reply (2026-07-21) -- see src/scrapers/slack_channel_watch.js
   slackChannelWatchConfig: () => path.join(P.dataDir, 'slack_channel_watch_config.json'),

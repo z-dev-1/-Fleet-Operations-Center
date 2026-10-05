@@ -21,7 +21,6 @@ import { init as initContactBook }       from './components/contact-book.js';
 import { init as initDraftInbox }         from './components/draft-inbox.js';
 import { init as initTimeline }           from './components/workflow-timeline.js';
 import { init as initStatusBar }          from './components/status-bar.js';
-import { init as initWorkflowRecorderHud } from './components/workflow-recorder-hud.js';
 import { initKeyboardShortcuts }          from './components/keyboard-shortcuts.js';
 import { initSmartSearch }               from './components/smart-search.js';
 import { initUnitCompare }              from './components/unit-compare.js';
@@ -104,7 +103,6 @@ function boot() {
   // Body-level overlays (mount on document.body)
   initNotifDropdown();
   initOrchaFab();
-  initWorkflowRecorderHud();
 initDraftInbox();
 initNexusSidebar();
   initMorningBriefing();
