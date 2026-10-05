@@ -79,11 +79,16 @@ const VENDOR_TEST_URLS = {
   record360: 'https://dashboard.record360.com/',
   aperia:    'https://amazon.aperiatech.com/',
   reach24:   'https://amazon.reach24.net/',
-  // FEATURE (2026-07-23): user confirmed directly -- this exact
-  // Daimler Truck CIAM authorize URL is the real DTNA login entry
-  // point, not dtna.my.site.com (which shows a different, wrong login
-  // form first). Using it verbatim per the user's explicit correction.
-  dtna:      'https://login.na.ciam.daimlertruck.com/ef757345-807b-4e61-b1f1-14006aeb0b83/b2c_1a_signin_oidc/oauth2/v2.0/authorize?client_id=d65b878e-f980-4fc6-a03d-27d301a34c23&redirect_uri=https%3a%2f%2flogin.ciam.daimlertruck.com%2f3db550f0-0c7f-439b-8e24-e32bf233615d%2foauth2%2fauthresp&response_type=code&scope=openid&response_mode=form_post&nonce=41rb05OaBkXKoUEzR5U4MQ%3d%3d&AppClientID=222e5aee-3a77-4214-a3c3-a4f6ae644e95&CustomUI=default&state=StateProperties%3deyJTSUQiOiJ4LW1zLWNwaW0tcmM6MjQ1MjNlMjktOGJjOS00NzkxLWIwOTAtOGUxOGU2MGFiMTAwIiwiVElEIjoiMmZlZDY3NGEtYWIyNC00NjcwLTk1ZDctMGQ2YTI0MGUzMDdlIiwiVE9JRCI6IjNkYjU1MGYwLTBjN2YtNDM5Yi04ZTI0LWUzMmJmMjMzNjE1ZCJ9',
+  // FIX (2026-10): use the DTNA Service Tracker APP root, not a hardcoded
+  // Azure B2C authorize URL. The old static authorize URL embedded a one-time
+  // `nonce` + `state` (B2C anti-replay tokens from 2026-07); those expired, so
+  // every login POSTed to /oauth2/authresp and got "Bad Request" (confirmed
+  // live via the azure-b2c post-submit diagnostic). Mirroring the user's manual
+  // flow: open the app/case URL -> DTNA detects no session -> redirects to the
+  // Daimler login with FRESH tokens it mints itself -> after login it auto-
+  // refreshes to the destination. Live logs confirm this app URL redirects
+  // through login.na.ciam.daimlertruck.com (azure-b2c) and reaches target.
+  dtna:      'https://dtna.my.site.com/Servicetracker/',
   // FEATURE (2026-07-23): RoadReady's real entry point is this Amazon
   // Freight Partner Salesforce case-list URL, confirmed live by the user
   // -- not roadready.fadv.com. Lands on a page with an 'Amazon SSO'
