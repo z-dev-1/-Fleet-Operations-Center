@@ -78,45 +78,190 @@ function _fleetRows() {
 //   - a task whose key is no longer recommended AND isn't done is auto-cleared
 //     (issue resolved); done ones are kept briefly so the user sees it as done.
 // Manual tasks are never touched here.
-function _generate() {
+// ── AI-authored generation (reasons over the FULL fleet) ─────────────────────
+// Compress every unit to ONE dense line of only decision-relevant signals, so
+// the whole fleet fits in the prompt and the AI has full-fleet awareness
+// without the 2,000-field dump. Returns an array of lines.
+const _DOWN = (r) => String(r.lifecycleState || '').toLowerCase().includes('unavail');
+
+function _parseDaysDown(r) {
+  const s = String(r.workDuration || r.duration || '').toLowerCase().trim();
+  if (!s || s === '--') return null;
+  let d = 0;
+  const dm = s.match(/(\d+)\s*d/); if (dm) d += parseInt(dm[1], 10);
+  const hm = s.match(/(\d+)\s*h/); if (hm) d += parseInt(hm[1], 10) / 24;
+  if (!dm && !hm) { const n = parseFloat(s); if (!isNaN(n)) d = n; }
+  return d ? Math.round(d) : null;
+}
+
+function _unitSignalLine(r) {
+  const id = String(r.equipmentId || '').trim();
+  if (!id) return null;
+  const down = _DOWN(r);
+  const parts = [id, down ? 'DOWN' : 'up'];
+  if (down) {
+    const days = _parseDaysDown(r);
+    if (days != null) parts.push(days + 'd');
+    const reason = String(r.lifecycleReason || r.issueSummary || r.issueDetails || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    if (reason) parts.push('"' + reason + '"');
+    const vendor = String(r.vendor || '').trim();
+    parts.push(vendor && vendor !== '--' ? 'vendor=' + vendor : 'NO-VENDOR');
+  }
+  const risk = parseInt(r.riskScore, 10);
+  if (Number.isFinite(risk) && risk > 0) parts.push('risk=' + risk);
+  const dom = String(r.domicileSite || '').trim();
+  if (dom) parts.push('@' + dom);
+  const due = String(r.dueDate || '').toLowerCase();
+  if (due.includes('overdue') || due.includes('past due')) parts.push('PM-OVERDUE');
+  // Offsite + how stale the last enrichment is.
+  const offsite = r.offsiteShopEvent || r.asistSrUrl || r.offsiteShopEventUrl;
+  if (offsite) {
+    let age = '';
+    if (r.asistScrapedAt) {
+      const ageDays = Math.floor((Date.now() - new Date(r.asistScrapedAt).getTime()) / 86400000);
+      if (Number.isFinite(ageDays)) age = ';last-update=' + ageDays + 'd-ago';
+    } else { age = ';no-update-logged'; }
+    parts.push('OFFSITE' + age);
+  }
+  return parts.join(' ');
+}
+
+// Build the fleet snapshot lines (ALL units). Returns array of lines.
+function _fleetSnapshotLines() {
   const rows = _fleetRows();
-  let recs = [];
+  const lines = [];
+  for (const r of rows) { const l = _unitSignalLine(r); if (l) lines.push(l); }
+  return lines;
+}
+
+const _AI_ATTEMPTS = 2;
+const _AI_ATTEMPT_MS = 30000;
+const _PROMPT_CHAR_BUDGET = 14000; // per batch of unit lines
+
+function _buildPrompt(lines) {
+  return [
+    'You are the fleet operations coordinator\'s assistant. Review the ENTIRE fleet snapshot below and produce a PRIORITIZED daily action list that minimizes vehicle downtime.',
+    '',
+    'Each unit is one line of signals:',
+    '  <id> <up|DOWN> [<days>d] ["reason"] [vendor=X|NO-VENDOR] [risk=N] [@domicile] [PM-OVERDUE] [OFFSITE;last-update=Nd-ago|;no-update-logged]',
+    '',
+    'FLEET SNAPSHOT (every unit; use ONLY this data — never invent a unit, number, vendor, or date):',
+    lines.join('\n'),
+    '',
+    'Decide which units genuinely need action and write as many actions as the priorities warrant (do not pad; do not cap artificially). Favor actions that reduce downtime: assign a vendor to a DOWN unit with NO-VENDOR; follow up / escalate units down many days or stale OFFSITE with no recent update; chase overdue PM; preventive attention on high risk.',
+    '',
+    'Respond with ONLY a JSON array (no prose, no code fences). Each item:',
+    '{"unitId":"<id>","action":"<short_slug e.g. assign_vendor|follow_up|escalate|schedule_pm|preventive_wr|chase_offsite|update_status>","urgency":"high|medium|low","text":"<one concise action sentence a coordinator would do today>","reason":"<the grounding fact from the snapshot>"}',
+    'Order the array by priority (highest first). If nothing needs action, return [].',
+  ].join('\n');
+}
+
+function _parseAiActions(raw) {
+  if (!raw) return [];
+  let txt = String(raw).trim();
+  // Strip code fences if present.
+  txt = txt.replace(/^```(?:json)?/i, '').replace(/```$/,'').trim();
+  // Extract the first JSON array if there's surrounding prose.
+  const start = txt.indexOf('[');
+  const end = txt.lastIndexOf(']');
+  if (start === -1 || end === -1 || end < start) return [];
   try {
-    const { runRecommendations } = require('../orcha/recommend');
-    const out = runRecommendations(rows);
-    recs = (out && out.recommendations) || [];
-  } catch (e) {
-    logger.warn('[tasks] recommendation engine failed: ' + e.message);
-    recs = [];
+    const arr = JSON.parse(txt.slice(start, end + 1));
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((x) => x && (x.unitId || x.text))
+      .map((x) => ({
+        unitId: String(x.unitId || '').trim(),
+        action: String(x.action || 'action').trim().toLowerCase().replace(/\s+/g, '_').slice(0, 40),
+        urgency: ['high', 'medium', 'low'].includes(String(x.urgency || '').toLowerCase()) ? String(x.urgency).toLowerCase() : 'medium',
+        text: String(x.text || '').trim().slice(0, 300),
+        reason: String(x.reason || '').trim().slice(0, 300),
+      }))
+      .filter((x) => x.text || x.unitId);
+  } catch (_) { return []; }
+}
+
+async function _askAIOnce(prompt) {
+  const relay = require('../orcha/relay');
+  const raw = await Promise.race([
+    relay.ask(prompt),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), _AI_ATTEMPT_MS)),
+  ]);
+  return (typeof raw === 'string') ? raw : (raw && raw.text ? String(raw.text) : '');
+}
+
+// Reasons over the full fleet. Batches the snapshot if it exceeds the prompt
+// budget (every unit is still covered). 2 attempts x 30s per batch. Returns the
+// merged action-candidate array, or null if AI produced nothing usable.
+async function _generateViaAI() {
+  const lines = _fleetSnapshotLines();
+  if (!lines.length) return null;
+
+  // Split into batches that fit the budget (full-fleet coverage preserved).
+  const batches = [];
+  let cur = [], curLen = 0;
+  for (const l of lines) {
+    if (curLen + l.length + 1 > _PROMPT_CHAR_BUDGET && cur.length) { batches.push(cur); cur = []; curLen = 0; }
+    cur.push(l); curLen += l.length + 1;
+  }
+  if (cur.length) batches.push(cur);
+
+  const all = [];
+  let anySuccess = false;
+  for (let b = 0; b < batches.length; b++) {
+    const prompt = _buildPrompt(batches[b]);
+    let got = null;
+    for (let attempt = 1; attempt <= _AI_ATTEMPTS && got === null; attempt++) {
+      try {
+        const txt = await _askAIOnce(prompt);
+        const actions = _parseAiActions(txt);
+        got = actions; // parsed (possibly empty) = this batch succeeded
+        anySuccess = true;
+        logger.info('[tasks] AI batch ' + (b + 1) + '/' + batches.length + ': ' + actions.length + ' action(s) from ' + batches[b].length + ' units (attempt ' + attempt + ')');
+      } catch (e) {
+        logger.warn('[tasks] AI batch ' + (b + 1) + '/' + batches.length + ' attempt ' + attempt + '/' + _AI_ATTEMPTS + ' failed (' + e.message + ')');
+        if (attempt < _AI_ATTEMPTS) await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+    if (got) all.push(...got);
   }
 
+  // If every batch failed (none parsed), signal failure so the caller falls
+  // back to rules. If at least one batch succeeded we accept the result (even
+  // if some batches returned []).
+  if (!anySuccess) return null;
+  return all;
+}
+
+// Merge a list of candidate actions into the persisted AI task list. A
+// candidate = { unitId, action, urgency, text, reason, icon? }. This is the
+// source-agnostic part: dedupe by unit+action, preserve prior done/dismissed/
+// createdAt, auto-clear undone resolved tasks (keep done ones <2 days). Manual
+// tasks are never touched. `source` tags where the candidates came from.
+function _mergeCandidates(candidates, sourceTag) {
   const s = _load();
   const prevByKey = new Map(s.ai.map((t) => [t.dedupeKey, t]));
   const now = new Date().toISOString();
   const nextAi = [];
   const seen = new Set();
 
-  for (const r of recs) {
-    const unitId = r.unit || (r.payload && r.payload.unitId) || '';
-    const action = r.action || 'action';
+  for (const c of candidates) {
+    const unitId = String(c.unitId || '').trim();
+    const action = String(c.action || 'action').trim();
     const key = unitId + ':' + action;
-    if (seen.has(key)) continue; // one task per unit+action
+    if (seen.has(key)) continue;
     seen.add(key);
-    const meta = r.meta || {};
-    const text = (meta.label ? meta.label + ': ' : '') +
-      (r.suggestion || r.reason || action) +
-      (unitId ? ' (' + unitId + ')' : '');
     const prev = prevByKey.get(key);
     nextAi.push({
       id: prev ? prev.id : _genId('ai'),
       source: 'ai',
-      text,
+      text: c.text || (c.reason || action) + (unitId ? ' (' + unitId + ')' : ''),
       unitId,
       action,
-      urgency: meta.urgency || 'medium',
-      reason: r.reason || '',
-      suggestion: r.suggestion || '',
-      icon: meta.icon || '',
+      urgency: c.urgency || 'medium',
+      reason: c.reason || '',
+      suggestion: c.suggestion || c.text || '',
+      icon: c.icon || '',
       due: prev ? prev.due || null : null,
       done: prev ? !!prev.done : false,
       dismissed: prev ? !!prev.dismissed : false,
@@ -126,25 +271,70 @@ function _generate() {
     });
   }
 
-  // Keep recently-done AI tasks that fell out of the recommendations so the
-  // user still sees them ticked off today; drop undone ones that resolved.
+  // Keep recently-done tasks that fell out so the user still sees them ticked
+  // off today; drop undone ones that resolved (auto-clear).
   for (const t of s.ai) {
     if (seen.has(t.dedupeKey)) continue;
     if (t.done && !t.dismissed) {
-      // resolved + done — keep but mark resolved; prune on next generation if stale.
       if (!t.resolvedAt) t.resolvedAt = now;
-      // Drop if it was resolved more than ~2 days ago (keeps the list clean).
       const ageMs = Date.now() - Date.parse(t.resolvedAt || now);
       if (ageMs < 2 * 24 * 60 * 60 * 1000) nextAi.push(t);
     }
-    // undone + no longer recommended -> auto-cleared (issue resolved): drop it.
   }
 
   if (nextAi.length > AI_MAX) nextAi.length = AI_MAX;
   s.ai = nextAi;
   s.lastGeneratedAt = now;
+  s.lastGenSource = sourceTag;
   _save(s);
-  logger.info('[tasks] AI generation: ' + nextAi.length + ' task(s) from ' + recs.length + ' recommendation(s)');
+  return s;
+}
+
+// Rule-based candidates (the fallback when AI is unavailable/slow). Maps
+// runRecommendations output to the candidate shape.
+function _ruleCandidates() {
+  try {
+    const { runRecommendations } = require('../orcha/recommend');
+    const out = runRecommendations(_fleetRows());
+    return (out && out.recommendations || []).map((r) => {
+      const unitId = r.unit || (r.payload && r.payload.unitId) || '';
+      const meta = r.meta || {};
+      return {
+        unitId,
+        action: r.action || 'action',
+        urgency: meta.urgency || 'medium',
+        icon: meta.icon || '',
+        text: (meta.label ? meta.label + ': ' : '') + (r.suggestion || r.reason || r.action) + (unitId ? ' (' + unitId + ')' : ''),
+        reason: r.reason || '',
+        suggestion: r.suggestion || '',
+      };
+    });
+  } catch (e) {
+    logger.warn('[tasks] rule engine failed: ' + e.message);
+    return [];
+  }
+}
+
+// Main generation: AI-authored over the FULL fleet, with a rule-based fallback.
+async function _generate() {
+  let aiCandidates = null;
+  try {
+    aiCandidates = await _generateViaAI();
+  } catch (e) {
+    logger.warn('[tasks] AI generation threw: ' + e.message);
+    aiCandidates = null;
+  }
+
+  if (aiCandidates && aiCandidates.length) {
+    const s = _mergeCandidates(aiCandidates, 'ai');
+    logger.info('[tasks] AI generation: ' + s.ai.filter((t) => !t.done && !t.dismissed).length + ' active task(s) (AI-authored)');
+    return s;
+  }
+
+  // AI unavailable/empty/timed out -> rule-based fallback so the board is never
+  // empty. The next scheduled/manual run retries AI.
+  const s = _mergeCandidates(_ruleCandidates(), 'fallback');
+  logger.info('[tasks] AI unavailable — used rule-based fallback (' + s.ai.filter((t) => !t.done && !t.dismissed).length + ' active); will retry AI next run');
   return s;
 }
 
@@ -215,11 +405,14 @@ function registerDailyTasksIPC(ctx) {
 
   // Generate AI tasks now (manual "Generate" button). Never touches manual.
   handle('tasks:generate', async () => {
-    const s = _generate();
-    // Mark today's generation done so the morning scheduler won't re-run.
-    const tz = DEFAULT_TZ;
-    s.lastGeneratedDay = _todayInZone(tz);
-    _save(s);
+    const s = await _generate();
+    // Mark today's generation done so the morning scheduler won't re-run —
+    // but ONLY if the AI path actually produced the list; if we fell back to
+    // rules, leave the day unmarked so the morning tick retries AI.
+    if (s.lastGenSource === 'ai') {
+      s.lastGeneratedDay = _todayInZone(DEFAULT_TZ);
+      _save(s);
+    }
     return s;
   });
 
@@ -245,18 +438,27 @@ function _hourInZone(tz) {
   } catch (_) { return new Date().getHours(); }
 }
 
-function _tick() {
+let _tickRunning = false;
+async function _tick() {
+  if (_tickRunning) return; // AI generation can take a while — never overlap
   try {
     const s = _load();
     const today = _todayInZone(DEFAULT_TZ);
     if (s.lastGeneratedDay === today) return;        // already generated today
     if (_hourInZone(DEFAULT_TZ) < MORNING_HOUR) return; // wait until morning
+    _tickRunning = true;
     logger.info('[tasks] morning auto-generation for ' + today);
-    const ns = _generate();
-    ns.lastGeneratedDay = today;
-    _save(ns);
+    const ns = await _generate();
+    // Only mark the day done if AI actually authored the list; a rule-based
+    // fallback leaves the day open so the next tick retries AI.
+    if (ns.lastGenSource === 'ai') {
+      ns.lastGeneratedDay = today;
+      _save(ns);
+    }
   } catch (e) {
     logger.warn('[tasks] scheduler tick failed: ' + e.message);
+  } finally {
+    _tickRunning = false;
   }
 }
 
