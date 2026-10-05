@@ -303,13 +303,17 @@ const _CIAM_SUBMIT_SCRIPT = (
   '})()'
 );
 
-// Poll for a password field to appear (step 2 renders async after Continue).
-async function _waitForPasswordField(wc, maxMs) {
-  const deadline = Date.now() + (maxMs || 8000);
-  const probe = '(function(){return !!document.querySelector("input[type=password],#password,input[placeholder=\\"Password\\"]");})()';
+// Poll for the password field to become VISIBLE (step 2 renders async after
+// Continue). Visibility (not mere DOM presence) matters: DTNA keeps the
+// password input in the DOM but hidden until step 2.
+async function _waitForVisiblePassword(wc, maxMs) {
+  const deadline = Date.now() + (maxMs || 9000);
+  const probe = '(function(){var el=document.querySelector("input[type=password],#password,input[placeholder=\\"Password\\"]");' +
+    'if(!el) return false; var r=el.getBoundingClientRect();' +
+    'return !!(el.offsetParent!==null && r.width>0 && r.height>0);})()';
   while (Date.now() < deadline) {
-    const has = await _execSafe(wc, probe);
-    if (has) return true;
+    const vis = await _execSafe(wc, probe);
+    if (vis) return true;
     await _wait(500);
   }
   return false;
@@ -353,11 +357,18 @@ async function _loginAzureB2C(wc, username, password) {
   }
   logger.info('Azure B2C step1: filled User ID with ' + userSel);
 
-  // Single-page variant: if a password field is ALREADY here, fill it now.
-  const passAlreadyPresent = await _execSafe(wc,
-    '(function(){return !!document.querySelector("input[type=password],#password,input[placeholder=\\"Password\\"]");})()'
+  // Single-page variant ONLY if a password field is actually VISIBLE right now.
+  // IMPORTANT: DTNA CIAM renders the password <input> in the DOM on step 1 but
+  // keeps it HIDDEN until after Continue — so a plain querySelector("password")
+  // is true even on the user-id step. Filling it + clicking once then stalled on
+  // the "Hello, <user> — enter Password" page (confirmed live). Require genuine
+  // visibility (offsetParent + size) so DTNA correctly takes the two-step path.
+  const passVisible = await _execSafe(wc,
+    '(function(){var el=document.querySelector("input[type=password],#password,input[placeholder=\\"Password\\"]");' +
+    'if(!el) return false; var r=el.getBoundingClientRect();' +
+    'return !!(el.offsetParent!==null && r.width>0 && r.height>0);})()'
   );
-  if (passAlreadyPresent) {
+  if (passVisible) {
     const pSel = await _fillFirst(wc, PASS_SELECTORS, password);
     if (pSel) logger.info('Azure B2C: single-page variant — filled Password with ' + pSel);
     await _wait(400);
@@ -377,7 +388,7 @@ async function _loginAzureB2C(wc, username, password) {
   logger.info('Azure B2C step1: clicked "' + c1 + '" — waiting for password field');
 
   // ── Step 2: Password ──────────────────────────────────────────────────────
-  const pwAppeared = await _waitForPasswordField(wc, 8000);
+  const pwAppeared = await _waitForVisiblePassword(wc, 9000);
   if (!pwAppeared) {
     logger.warn('Azure B2C: password field never appeared after step 1');
     await _dumpInputs(wc, 'azure-b2c-no-password-step2');
