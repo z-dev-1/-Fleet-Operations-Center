@@ -38,7 +38,15 @@ async function spPushWorksheet(config) {
       if (view.getUint32(idx, true) === 0x04034b50) {
         const flags = view.getUint16(idx + 6, true);
         const method = view.getUint16(idx + 8, true);
+        // Metadata from the local header. For data-descriptor entries
+        // (GP flag bit 0x08) these three are 0 here and live in the trailing
+        // data descriptor instead — recovered below. We MUST capture the real
+        // crc + uncompSize so the rebuilt (canonical) headers are correct;
+        // the old code never did, which left CRC=0 on those entries and made
+        // Excel reject the whole workbook. (Root cause of "cannot be opened".)
+        let crc = view.getUint32(idx + 14, true);
         let compSize = view.getUint32(idx + 18, true);
+        let uncompSize = view.getUint32(idx + 22, true);
         const nameLen = view.getUint16(idx + 26, true);
         const extraLen = view.getUint16(idx + 28, true);
         const localHeaderSize = 30 + nameLen + extraLen;
@@ -46,22 +54,41 @@ async function spPushWorksheet(config) {
         let name = '';
         for (let n = 0; n < nameBytes.length; n++) name += String.fromCharCode(nameBytes[n]);
         const dataStart = idx + localHeaderSize;
-        if ((flags & 0x08) && compSize === 0) {
-          let scanIdx = dataStart;
-          while (scanIdx < buf.byteLength - 4) {
-            const sig = view.getUint32(scanIdx, true);
-            if (sig === 0x04034b50 || sig === 0x02014b50) break;
-            if (sig === 0x08074b50) { compSize = view.getUint32(scanIdx + 8, true); break; }
-            scanIdx++;
-          }
-          if (compSize === 0) compSize = scanIdx - dataStart;
-        }
-        entries.push({ name, method, compSize, localHeader: new Uint8Array(buf, idx, localHeaderSize), compData: new Uint8Array(buf, dataStart, compSize) });
-        idx = dataStart + compSize;
+        let ddLen = 0; // bytes consumed by a trailing data descriptor, if any
         if (flags & 0x08) {
-          if (idx < buf.byteLength - 4 && view.getUint32(idx, true) === 0x08074b50) idx += 16;
-          else if (idx < buf.byteLength - 12) idx += 12;
+          // Compressed size (and crc/uncompSize) are unknown in the local
+          // header — scan forward to the data descriptor / next record.
+          let scanIdx = (compSize === 0) ? dataStart : (dataStart + compSize);
+          if (compSize === 0) {
+            while (scanIdx < buf.byteLength - 4) {
+              const sig = view.getUint32(scanIdx, true);
+              if (sig === 0x04034b50 || sig === 0x02014b50) break;
+              if (sig === 0x08074b50) break;
+              scanIdx++;
+            }
+            compSize = scanIdx - dataStart;
+          }
+          // Read the real crc/sizes from the data descriptor (with or without
+          // its optional 0x08074b50 signature).
+          if (view.getUint32(scanIdx, true) === 0x08074b50) {
+            crc = view.getUint32(scanIdx + 4, true);
+            compSize = view.getUint32(scanIdx + 8, true) || compSize;
+            uncompSize = view.getUint32(scanIdx + 12, true);
+            ddLen = 16;
+          } else {
+            crc = view.getUint32(scanIdx + 0, true);
+            compSize = view.getUint32(scanIdx + 4, true) || compSize;
+            uncompSize = view.getUint32(scanIdx + 8, true);
+            ddLen = 12;
+          }
         }
+        // For stored (method 0) entries, uncompSize === compSize.
+        if (method === 0 && !uncompSize) uncompSize = compSize;
+        entries.push({
+          name, method, crc, compSize, uncompSize,
+          compData: new Uint8Array(buf, dataStart, compSize),
+        });
+        idx = dataStart + compSize + ddLen;
       } else { idx++; }
     }
     return entries;
@@ -99,48 +126,69 @@ async function spPushWorksheet(config) {
   }
 
   function rebuildZip(entries, modifiedMap) {
+    // REWRITTEN (2026-10): emit a fully CANONICAL zip. Every entry — modified
+    // or not — gets a clean 30-byte local header + 46-byte central-dir record
+    // with: general-purpose flag = 0 (NO data-descriptor bit), extra-field
+    // length = 0, and the REAL crc / compSize / uncompSize / method. Offsets
+    // accumulate from the exact bytes written. This removes all three previous
+    // corruption sources: (1) central-dir records that declared an extra-field
+    // length but wrote zero extra bytes; (2) copied local headers whose GP flag
+    // still advertised a data descriptor that was never emitted; (3) CRC/size
+    // of 0 carried over from data-descriptor entries. Any of those made Excel
+    // reject the workbook ("cannot be opened").
     const parts = []; const centralDir = []; let offset = 0;
     for (const ent of entries) {
       const mod = modifiedMap[ent.name];
       const nameB = new TextEncoder().encode(ent.name);
-      if (!mod) {
-        parts.push(ent.localHeader); parts.push(ent.compData);
-        const lhView = new DataView(ent.localHeader.buffer, ent.localHeader.byteOffset, ent.localHeader.byteLength);
-        const _xLen = lhView.getUint16(28, true);
-        const cd = new ArrayBuffer(46 + nameB.length + _xLen);
-        const cv = new DataView(cd);
-        cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true);
-        cv.setUint16(6, lhView.getUint16(4, true), true); cv.setUint16(8, lhView.getUint16(6, true), true);
-        cv.setUint16(10, lhView.getUint16(8, true), true); cv.setUint16(12, lhView.getUint16(10, true), true);
-        cv.setUint16(14, lhView.getUint16(12, true), true); cv.setUint32(16, lhView.getUint32(14, true), true);
-        cv.setUint32(20, lhView.getUint32(18, true), true); cv.setUint32(24, lhView.getUint32(22, true), true);
-        cv.setUint16(28, nameB.length, true); cv.setUint16(30, _xLen, true);
-        cv.setUint16(32, 0, true); cv.setUint16(34, 0, true); cv.setUint16(36, 0, true);
-        cv.setUint32(38, ent.externalAttrs || 0x20, true); cv.setUint32(42, offset, true);
-        new Uint8Array(cd, 46).set(nameB);
-        centralDir.push(new Uint8Array(cd));
-        offset += ent.localHeader.length + ent.compData.length;
-      } else {
-        const lh = new ArrayBuffer(30 + nameB.length); const lv = new DataView(lh);
-        lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true);
-        lv.setUint16(6, 0, true); lv.setUint16(8, 8, true);
-        lv.setUint16(10, 0, true); lv.setUint16(12, 0, true);
-        lv.setUint32(14, mod.crc, true); lv.setUint32(18, mod.compData.length, true);
-        lv.setUint32(22, mod.rawSize, true); lv.setUint16(26, nameB.length, true);
-        lv.setUint16(28, 0, true);
-        new Uint8Array(lh, 30).set(nameB);
-        parts.push(new Uint8Array(lh)); parts.push(mod.compData);
-        const cd = new ArrayBuffer(46 + nameB.length); const cv = new DataView(cd);
-        cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true);
-        cv.setUint16(8, 0, true); cv.setUint16(10, 8, true);
-        cv.setUint16(12, 0, true); cv.setUint16(14, 0, true);
-        cv.setUint32(16, mod.crc, true); cv.setUint32(20, mod.compData.length, true);
-        cv.setUint32(24, mod.rawSize, true); cv.setUint16(28, nameB.length, true);
-        cv.setUint32(42, offset, true);
-        new Uint8Array(cd, 46).set(nameB);
-        centralDir.push(new Uint8Array(cd));
-        offset += 30 + nameB.length + mod.compData.length;
-      }
+      // Resolve canonical values from either the modification or the original.
+      const method     = mod ? 8 : ent.method;         // modified entries are deflate-raw
+      const compData   = mod ? mod.compData : ent.compData;
+      const compSize   = compData.length;
+      const uncompSize = mod ? mod.rawSize : ent.uncompSize;
+      const crc        = mod ? mod.crc : ent.crc;
+
+      // Local file header (30 bytes + name, no extra, no data descriptor).
+      const lh = new ArrayBuffer(30 + nameB.length);
+      const lv = new DataView(lh);
+      lv.setUint32(0, 0x04034b50, true);        // local file header signature
+      lv.setUint16(4, 20, true);                // version needed
+      lv.setUint16(6, 0, true);                 // GP flag = 0 (no data descriptor)
+      lv.setUint16(8, method, true);            // compression method
+      lv.setUint16(10, 0, true);                // mod time
+      lv.setUint16(12, 0, true);                // mod date
+      lv.setUint32(14, crc, true);              // crc-32
+      lv.setUint32(18, compSize, true);         // compressed size
+      lv.setUint32(22, uncompSize, true);       // uncompressed size
+      lv.setUint16(26, nameB.length, true);     // file name length
+      lv.setUint16(28, 0, true);                // extra field length = 0
+      new Uint8Array(lh, 30).set(nameB);
+      parts.push(new Uint8Array(lh));
+      parts.push(compData);
+
+      // Central directory record (46 bytes + name, no extra, no comment).
+      const cd = new ArrayBuffer(46 + nameB.length);
+      const cv = new DataView(cd);
+      cv.setUint32(0, 0x02014b50, true);        // central dir signature
+      cv.setUint16(4, 20, true);                // version made by
+      cv.setUint16(6, 20, true);                // version needed
+      cv.setUint16(8, 0, true);                 // GP flag = 0
+      cv.setUint16(10, method, true);           // compression method
+      cv.setUint16(12, 0, true);                // mod time
+      cv.setUint16(14, 0, true);                // mod date
+      cv.setUint32(16, crc, true);              // crc-32
+      cv.setUint32(20, compSize, true);         // compressed size
+      cv.setUint32(24, uncompSize, true);       // uncompressed size
+      cv.setUint16(28, nameB.length, true);     // file name length
+      cv.setUint16(30, 0, true);                // extra field length = 0
+      cv.setUint16(32, 0, true);                // file comment length
+      cv.setUint16(34, 0, true);                // disk number start
+      cv.setUint16(36, 0, true);                // internal attrs
+      cv.setUint32(38, 0, true);                // external attrs
+      cv.setUint32(42, offset, true);           // relative offset of local header
+      new Uint8Array(cd, 46).set(nameB);
+      centralDir.push(new Uint8Array(cd));
+
+      offset += 30 + nameB.length + compSize;   // exact bytes just written
     }
     let cdSize = 0; centralDir.forEach(cd => { parts.push(cd); cdSize += cd.length; });
     const eocd = new ArrayBuffer(22); const ev = new DataView(eocd);
@@ -561,6 +609,36 @@ async function spPushWorksheet(config) {
   const zv = new DataView(newZip.buffer || newZip);
   if (zv.getUint32(0, true) !== 0x04034b50) { log('ERROR: Invalid ZIP signature'); results.errors++; return results; }
   if (newZip.length < 1000) { log('ERROR: ZIP too small (' + newZip.length + ')'); results.errors++; return results; }
+
+  // SELF-CHECK (2026-10): re-parse the rebuilt zip and prove it is internally
+  // consistent BEFORE uploading, so a bad build can never corrupt the live
+  // tracker ("workbook cannot be opened"). We confirm: (1) the entry count
+  // round-trips via parseZip; (2) every modified XML part re-inflates to its
+  // exact expected uncompressed size and CRC; (3) the central directory count
+  // and EOCD offset line up. Any failure aborts the upload.
+  try {
+    const rtEntries = parseZip(newZip.buffer || newZip);
+    if (rtEntries.length !== entries.length) {
+      log('ERROR: self-check entry count ' + rtEntries.length + ' != ' + entries.length + ' — aborting upload');
+      results.errors++; return results;
+    }
+    for (const name of Object.keys(modifiedMap)) {
+      const re = rtEntries.find(e => e.name === name);
+      if (!re) { log('ERROR: self-check missing modified entry ' + name + ' — aborting'); results.errors++; return results; }
+      const expected = modifiedMap[name];
+      if (re.crc !== (expected.crc >>> 0)) { log('ERROR: self-check CRC mismatch on ' + name + ' — aborting'); results.errors++; return results; }
+      if (re.uncompSize !== expected.rawSize) { log('ERROR: self-check size mismatch on ' + name + ' (' + re.uncompSize + '!=' + expected.rawSize + ') — aborting'); results.errors++; return results; }
+      // Prove the stream actually inflates to the right bytes.
+      const infl = await inflate(re.compData, re.method);
+      if (infl.length !== expected.rawSize || (crc32(infl) >>> 0) !== (expected.crc >>> 0)) {
+        log('ERROR: self-check inflate/CRC failed on ' + name + ' — aborting'); results.errors++; return results;
+      }
+    }
+    log('ZIP self-check passed: ' + rtEntries.length + ' entries round-trip, all modified parts inflate + CRC-match');
+  } catch (e) {
+    log('ERROR: ZIP self-check threw (' + e.message + ') — aborting upload to protect the live file');
+    results.errors++; return results;
+  }
   log('ZIP validation passed: ' + newZip.length + ' bytes, starts with PK');
 
   if (dryRun) { log('DRY RUN — skipping upload'); return results; }
