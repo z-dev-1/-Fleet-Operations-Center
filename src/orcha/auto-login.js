@@ -854,6 +854,17 @@ function runAutoLoginLoop(win, opts = {}) {
         if (urlAtLastAttempt && currentUrl === urlAtLastAttempt && graceChecks < maxGraceChecks) {
           graceChecks++; settleTimer = setTimeout(checkSettled, 1200); return;
         }
+        // "Doesn't recognize I'm logged off until I open it a couple times":
+        // DTNA's CIAM login mounts ASYNC (often in an iframe), so the FIRST
+        // isLoginPage check can run before the form appears and we'd wrongly
+        // conclude "logged in". If we have NOT yet attempted a login, re-check a
+        // couple more times with a delay before concluding there's no login.
+        if (attempts === 0 && graceChecks < 3) {
+          graceChecks++;
+          logger.info('[' + label + '] no login form yet — re-checking (' + graceChecks + '/3) in case it mounts async');
+          settleTimer = setTimeout(checkSettled, 2000);
+          return;
+        }
         logger.info('[' + label + '] settled, no login form at ' + currentUrl.slice(0, 80));
         finish({ ok: true, attempted: attempts > 0, site: lastSite });
         return;

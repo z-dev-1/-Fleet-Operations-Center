@@ -1144,6 +1144,15 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
   if (existing) existing.remove();
   if (!leftUrl && !rightUrl) return;
 
+  // DTNA deep-link: a DTNA case URL opens on its default view, but the user
+  // wants the COMMENTS tab. The suffix "?tabset-032e7=5194e" is a STABLE
+  // (user-confirmed, always the same) Lightning tab-state that lands on
+  // comments. Append it to DTNA case URLs (idempotent) so the offsite pane
+  // opens straight on the comments the user actually needs.
+  if (rightUrl && /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(rightUrl) && rightUrl.indexOf('tabset-032e7') === -1) {
+    rightUrl = rightUrl + (rightUrl.indexOf('?') > -1 ? '&' : '?') + 'tabset-032e7=5194e';
+  }
+
   var container = document.createElement('div');
   container.id = 'dp-split-container';
   container.className = 'dp-split-container';
@@ -1405,15 +1414,19 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
     if (rightUrl.indexOf('dtna') > -1 || rightUrl.indexOf('daimlertruck') > -1) _offsiteVendor = 'dtna';
 
     var _warming = false;
+    var _warmAttempts = 0;
+    var _maxWarmAttempts = 3; // bounded auto-retry so "takes a couple opens" is automatic
     // Detect a login page INSIDE the webview and, if found, silently warm the
     // vendor session in the background (shared partition) then reload the
     // webview so it comes back logged in — no window swap, no manual sign-in.
     // DTNA is TWO-STEP: step 1 shows ONLY a User ID field (no password yet), so
     // detect a login by password OR a user-id field + a Continue/Login button
     // (the old 'password AND user' check missed DTNA step 1 entirely — the
-    // reason "already logged out, it does nothing").
+    // reason "already logged out, it does nothing"). We auto-retry up to 3x: on
+    // reload this handler fires again; if it STILL shows login we warm again,
+    // so the user doesn't have to manually re-open a couple times.
     function _checkOffsiteLoginAndWarm() {
-      if (_warming || !_offsiteVendor) return;
+      if (_warming || !_offsiteVendor || _warmAttempts >= _maxWarmAttempts) return;
       offsiteWv.executeJavaScript(
         '(function(){' +
         'var pw=document.querySelectorAll("input[type=password]").length;' +
@@ -1423,9 +1436,10 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
         'return (pw>0||uid>0||ciam)?"login":"ok";' +
         '})()'
       ).then(function(result) {
-        if (result !== 'login' || _warming) return;
+        if (result !== 'login' || _warming || _warmAttempts >= _maxWarmAttempts) return;
         _warming = true;
-        console.log('[split-view] offsite login detected (' + _offsiteVendor + ') — warming session silently');
+        _warmAttempts++;
+        console.log('[split-view] offsite login detected (' + _offsiteVendor + ') — warming (attempt ' + _warmAttempts + '/' + _maxWarmAttempts + ')');
         var warmUrl = rightUrl;
         try { warmUrl = offsiteWv.getURL() || rightUrl; } catch (_) {}
         var warm = (window.credentials && window.credentials.warmVendor)
