@@ -44,6 +44,57 @@ function _assertAllowedFilePath(filePath) {
   }
 }
 
+// ── Screenshot retention (2026-10) ───────────────────────────────────────────
+// The screenshots folder (uptake_insight_* + playwright captures) was never
+// cleaned: each sync writes a NEW uniquely-named .png per unit and nothing ever
+// deleted the old ones, so it had grown to ~16GB / ~59k files over ~2.5 months.
+// Only the newest capture per unit is ever read (uptake:latest-screenshot), so
+// older files are dead weight. Keep a 7-day window (recent history) and delete
+// anything older by mtime. Safe/no-throw; returns a small report.
+const SCREENSHOT_RETENTION_DAYS = 7;
+
+function pruneScreenshots(maxAgeDays) {
+  const days = Number.isFinite(maxAgeDays) ? maxAgeDays : SCREENSHOT_RETENTION_DAYS;
+  const dir = P.screenshotsDir;
+  const out = { deleted: 0, keptCount: 0, bytesReclaimed: 0 };
+  try {
+    if (!fs.existsSync(dir)) return out;
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const files = fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.png'));
+    for (const f of files) {
+      const full = p.join(dir, f);
+      let st;
+      try { st = fs.statSync(full); } catch (_) { continue; }
+      if (st.mtimeMs < cutoff) {
+        try { fs.unlinkSync(full); out.deleted++; out.bytesReclaimed += st.size; }
+        catch (_) { /* file locked/in-use — skip, retry next cycle */ }
+      } else {
+        out.keptCount++;
+      }
+    }
+    if (out.deleted > 0) {
+      logger.info('[screenshots] pruned ' + out.deleted + ' file(s) older than ' + days +
+        'd (' + (out.bytesReclaimed / 1024 / 1024).toFixed(0) + ' MB reclaimed), ' + out.keptCount + ' kept');
+    }
+  } catch (e) {
+    logger.warn('[screenshots] prune error: ' + e.message);
+  }
+  return out;
+}
+
+// Daily prune scheduler — idempotent, unref'd so it never keeps the process
+// alive, mirroring the FAS / carrier-briefing scheduler pattern. Prunes once
+// immediately at startup (reclaims the backlog) then every 24h.
+let _screenshotPruneTimer = null;
+function startScreenshotPruneScheduler() {
+  if (_screenshotPruneTimer) { clearInterval(_screenshotPruneTimer); _screenshotPruneTimer = null; }
+  try { pruneScreenshots(); } catch (_) {}
+  _screenshotPruneTimer = setInterval(() => { try { pruneScreenshots(); } catch (_) {} }, 24 * 60 * 60 * 1000);
+  if (_screenshotPruneTimer.unref) _screenshotPruneTimer.unref();
+  logger.info('[screenshots] retention scheduler started (' + SCREENSHOT_RETENTION_DAYS + '-day window, daily prune)');
+  return () => { if (_screenshotPruneTimer) { clearInterval(_screenshotPruneTimer); _screenshotPruneTimer = null; } };
+}
+
 function registerMiscIPC(ctx) {
   const send     = ctx.sendToWindow;
   const ROOT_DIR = p.join(__dirname, '../..');
@@ -864,7 +915,11 @@ function registerMiscIPC(ctx) {
     return getQueueCount();
   });
 
+  // Start the screenshots retention scheduler (prune >7-day-old captures now +
+  // daily). Keeps the ~16GB screenshots folder from growing unbounded.
+  try { startScreenshotPruneScheduler(); } catch (e) { logger.warn('[screenshots] scheduler start failed: ' + e.message); }
+
   logger.info('Misc IPC handlers registered');
 }
 
-module.exports = { registerMiscIPC };
+module.exports = { registerMiscIPC, pruneScreenshots, startScreenshotPruneScheduler, SCREENSHOT_RETENTION_DAYS };
