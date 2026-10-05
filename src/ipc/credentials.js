@@ -147,6 +147,7 @@ function registerCredentialIPC() {
   // DTNA offsite pane is logged in BEFORE/while it loads. Shares the vendor
   // partition, so warming the hidden window authenticates the webview too.
   handle("credentials:warm-vendor", async (_e, vendorId) => {
+    logger.info('credentials:warm-vendor CALLED for', vendorId); // probe: confirms renderer reached the IPC
     requireString(vendorId, "vendorId");
     try {
       const { warmVendorSession } = require('../../src/scrapers/vendor_session');
