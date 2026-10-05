@@ -33,7 +33,10 @@ function _wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 // same debounced auto-login pass as test-login, auto-close when settled.
 async function _warm(vendorId, opts) {
   opts = opts || {};
-  const timeoutMs = opts.timeoutMs || 30000;
+  // DTNA's two-step CIAM login (user id -> continue -> password -> continue ->
+  // post-submit redirect through frontdoor.jsp) can take ~20s end to end, so
+  // give the warm a generous ceiling.
+  const timeoutMs = opts.timeoutMs || 45000;
   const { VENDOR_TEST_URLS } = require('../ipc/credentials');
   const { attemptAutoLogin, isLoginPage, VENDOR_PARTITIONS, LOGIN_STRATEGIES } = require('../orcha/auto-login');
 

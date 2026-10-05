@@ -272,99 +272,148 @@ async function _loginTwoStep(wc, username, password) {
 }
 
 // ── Strategy: azure-b2c (DTNA/Daimler Truck CIAM — single-page email+pass) ───
-// The DTNA CIAM login page shows: User ID + Password + "Login" button + 
-// "Daimler Truck Corporate Login" button. We need the "Login" button specifically.
-// The fields use placeholder text "User ID" and "Password".
-async function _loginAzureB2C(wc, username, password) {
-  // Wait for the page to fully render (JS-heavy)
-  await _wait(2000);
+// DTNA CIAM is a TWO-STEP login (confirmed via screenshots):
+//   Step 1: "Email or User ID" field + a "Continue" button.
+//   Step 2: (after Continue) "Hello, <userid>" + "Password" field + "Continue".
+// There is ALSO a yellow "Login with Daimler Truck Account" button we must NEVER
+// click (that's the wrong corporate-SSO path). The old handler assumed user+pass
+// on one page and clicked once, so it never reached the password step — the
+// confirmed cause of "DTNA won't auto-login". This now drives both steps and
+// still handles a single-page variant (password already present) as a fallback.
 
-  // Fill User ID — try placeholder-based selectors first (most reliable for this form)
-  const emailSelectors = [
+// Click the primary submit on the CIAM form — "Continue" (or Login/Sign In),
+// but DELIBERATELY avoid the "...Daimler Truck Account" corporate button.
+const _CIAM_SUBMIT_SCRIPT = (
+  '(function(){' +
+  'var btns=[].slice.call(document.querySelectorAll("button,input[type=submit],a"));' +
+  'function txt(b){return ((b.textContent||b.value||"").trim());}' +
+  // Prefer an exact primary action; never the Daimler Truck Account button.
+  'for(var i=0;i<btns.length;i++){var t=txt(btns[i]);' +
+  '  if(/daimler\\s+truck\\s+account/i.test(t)) continue;' +
+  '  if(t==="Continue"||t==="CONTINUE"||t==="Login"||t==="Sign In"||t==="Sign in"||t==="Next"){btns[i].click();return t;}' +
+  '}' +
+  // Fallback: a submit button that is NOT the Daimler Truck Account one.
+  'for(var j=0;j<btns.length;j++){var t2=txt(btns[j]);' +
+  '  if(/daimler\\s+truck\\s+account/i.test(t2)) continue;' +
+  '  if(btns[j].type==="submit"){btns[j].click();return t2||"submit";}' +
+  '}' +
+  'var next=document.querySelector("#next,#continue");' +
+  'if(next){next.click();return "next";}' +
+  'return false;' +
+  '})()'
+);
+
+// Poll for a password field to appear (step 2 renders async after Continue).
+async function _waitForPasswordField(wc, maxMs) {
+  const deadline = Date.now() + (maxMs || 8000);
+  const probe = '(function(){return !!document.querySelector("input[type=password],#password,input[placeholder=\\"Password\\"]");})()';
+  while (Date.now() < deadline) {
+    const has = await _execSafe(wc, probe);
+    if (has) return true;
+    await _wait(500);
+  }
+  return false;
+}
+
+async function _fillFirst(wc, selectors, value) {
+  for (const sel of selectors) {
+    const ok = await _execSafe(wc, _fillScript(sel, value));
+    if (ok) return sel;
+  }
+  return null;
+}
+
+async function _loginAzureB2C(wc, username, password) {
+  await _wait(2000); // JS-heavy page — let it render
+
+  const USER_SELECTORS = [
     'input[placeholder="User ID"]',
+    'input[placeholder="Email or User ID"]',
+    'input[placeholder*="User ID" i]',
+    'input[placeholder*="Email" i]',
     '#signInName',
     'input[name="signInName"]',
     'input[type="email"]',
     'input[type="text"]',
   ];
-  let emailFilled = false;
-  for (const sel of emailSelectors) {
-    const ok = await _execSafe(wc, _fillScript(sel, username));
-    if (ok) { emailFilled = true; logger.info('Azure B2C: filled User ID with:', sel); break; }
-  }
-  if (!emailFilled) {
-    logger.warn('Azure B2C: could not fill User ID');
-    await _dumpInputs(wc, 'azure-b2c-no-userid');
-    return false;
-  }
-
-  // Fill Password
-  await _wait(300);
-  const passSelectors = [
+  const PASS_SELECTORS = [
     'input[placeholder="Password"]',
+    'input[placeholder*="Password" i]',
     '#password',
     'input[name="password"]',
     'input[type="password"]',
   ];
-  let passFilled = false;
-  for (const sel of passSelectors) {
-    const ok = await _execSafe(wc, _fillScript(sel, password));
-    if (ok) { passFilled = true; logger.info('Azure B2C: filled Password with:', sel); break; }
-  }
-  if (!passFilled) {
-    logger.warn('Azure B2C: could not fill password');
-    await _dumpInputs(wc, 'azure-b2c-no-password');
+
+  // ── Step 1: User ID ──────────────────────────────────────────────────────
+  const userSel = await _fillFirst(wc, USER_SELECTORS, username);
+  if (!userSel) {
+    logger.warn('Azure B2C: could not fill User ID (step 1)');
+    await _dumpInputs(wc, 'azure-b2c-no-userid');
     return false;
   }
+  logger.info('Azure B2C step1: filled User ID with ' + userSel);
 
-  // Click the "Login" button specifically — NOT the "Daimler Truck Corporate Login" button.
-  // Find button by text content "Login" (exact match, not the corporate one).
-  await _wait(500);
-  const loginClickScript = (
-    '(function(){' +
-    'var btns=[].slice.call(document.querySelectorAll("button,input[type=submit],a"));' +
-    'for(var i=0;i<btns.length;i++){' +
-    '  var t=((btns[i].textContent||btns[i].value||"").trim());' +
-    '  if(t==="Login"||t==="login"||t==="Sign In"||t==="Sign in"){btns[i].click();return t;}' +
-    '}' +
-    // Fallback: click #next if it exists (some B2C configs)
-    'var next=document.querySelector("#next");' +
-    'if(next){next.click();return "next";}' +
-    // Last resort: first submit button
-    'var sub=document.querySelector("button[type=submit],input[type=submit]");' +
-    'if(sub){sub.click();return "submit";}' +
-    'return false;' +
-    '})()'
+  // Single-page variant: if a password field is ALREADY here, fill it now.
+  const passAlreadyPresent = await _execSafe(wc,
+    '(function(){return !!document.querySelector("input[type=password],#password,input[placeholder=\\"Password\\"]");})()'
   );
-  const clicked = await _execSafe(wc, loginClickScript);
-  if (clicked) {
-    logger.info('Azure B2C: clicked submit by text:', clicked);
-    // DIAGNOSTIC (2026-10): the single-page fill+submit above sometimes doesn't
-    // complete the login (user reported DTNA "not logged in"). Azure B2C can
-    // present a SECOND step after submit (a separate password page, an MFA/code
-    // prompt, or a "Stay signed in?" page). If we're STILL on a CIAM/B2C login
-    // host ~2.5s after the click, capture what's on screen so the real second
-    // step can be read from the log instead of guessed. Log-only; does not
-    // change behavior.
-    try {
-      await _wait(2500);
-      const nowUrl = await _execSafe(wc, 'location.href') || '';
-      if (/ciam\.daimlertruck\.com|ciam\.dtna\.com|b2clogin\.com|login\.microsoftonline/i.test(nowUrl)) {
-        const snippet = await _execSafe(wc,
-          '(function(){var t=(document.body&&document.body.innerText||"").replace(/\\s+/g," ").trim();return t.slice(0,400);})()'
-        );
-        logger.warn('Azure B2C: still on login host 2.5s after submit — possible 2nd step. url=' + String(nowUrl).slice(0, 120) + ' | body="' + String(snippet || '').slice(0, 300) + '"');
-        await _dumpInputs(wc, 'azure-b2c-post-submit');
-      } else {
-        logger.info('Azure B2C: navigated off login host after submit → ' + String(nowUrl).slice(0, 100));
-      }
-    } catch (_) { /* diagnostic only — never fail the login over it */ }
-    return true;
+  if (passAlreadyPresent) {
+    const pSel = await _fillFirst(wc, PASS_SELECTORS, password);
+    if (pSel) logger.info('Azure B2C: single-page variant — filled Password with ' + pSel);
+    await _wait(400);
+    const c = await _execSafe(wc, _CIAM_SUBMIT_SCRIPT);
+    logger.info('Azure B2C: single-page submit clicked: ' + c);
+    return await _postSubmitDiag(wc);
   }
 
-  logger.warn('Azure B2C: filled fields but could not find Login button');
-  await _dumpInputs(wc, 'azure-b2c-no-login-btn');
-  return true; // credentials filled — user can click manually
+  // Two-step: click Continue to advance to the password page.
+  await _wait(300);
+  const c1 = await _execSafe(wc, _CIAM_SUBMIT_SCRIPT);
+  if (!c1) {
+    logger.warn('Azure B2C: step1 Continue button not found');
+    await _dumpInputs(wc, 'azure-b2c-no-continue-step1');
+    return false;
+  }
+  logger.info('Azure B2C step1: clicked "' + c1 + '" — waiting for password field');
+
+  // ── Step 2: Password ──────────────────────────────────────────────────────
+  const pwAppeared = await _waitForPasswordField(wc, 8000);
+  if (!pwAppeared) {
+    logger.warn('Azure B2C: password field never appeared after step 1');
+    await _dumpInputs(wc, 'azure-b2c-no-password-step2');
+    return await _postSubmitDiag(wc); // still log where we ended up
+  }
+  const passSel = await _fillFirst(wc, PASS_SELECTORS, password);
+  if (!passSel) {
+    logger.warn('Azure B2C: password field present but fill failed');
+    await _dumpInputs(wc, 'azure-b2c-password-fill-failed');
+    return false;
+  }
+  logger.info('Azure B2C step2: filled Password with ' + passSel);
+  await _wait(400);
+  const c2 = await _execSafe(wc, _CIAM_SUBMIT_SCRIPT);
+  logger.info('Azure B2C step2: clicked "' + c2 + '"');
+  return await _postSubmitDiag(wc);
+}
+
+// Post-submit diagnostic: ~2.5s after the final submit, if still on a CIAM/B2C
+// login host, dump the page so any remaining step (MFA/consent) is visible.
+// Returns true (credentials were driven) regardless — log-only.
+async function _postSubmitDiag(wc) {
+  try {
+    await _wait(2500);
+    const nowUrl = await _execSafe(wc, 'location.href') || '';
+    if (/ciam\.daimlertruck\.com|ciam\.dtna\.com|b2clogin\.com|login\.microsoftonline/i.test(nowUrl)) {
+      const snippet = await _execSafe(wc,
+        '(function(){var t=(document.body&&document.body.innerText||"").replace(/\\s+/g," ").trim();return t.slice(0,400);})()'
+      );
+      logger.warn('Azure B2C: still on login host 2.5s after final submit — url=' + String(nowUrl).slice(0, 120) + ' | body="' + String(snippet || '').slice(0, 300) + '"');
+      await _dumpInputs(wc, 'azure-b2c-post-submit');
+    } else {
+      logger.info('Azure B2C: navigated off login host after submit → ' + String(nowUrl).slice(0, 100));
+    }
+  } catch (_) { /* diagnostic only */ }
+  return true;
 }
 
 // ── Strategy: iframe (form inside child frame) ────────────────────────────────
