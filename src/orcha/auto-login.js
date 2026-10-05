@@ -385,15 +385,34 @@ async function _loginAzureB2C(wc, username, password) {
     await _dumpInputs(wc, 'azure-b2c-no-password-step2');
     return await _postSubmitDiag(wc);
   }
-  await _wait(400); // let the field settle/enable
+  await _wait(600); // let the field settle/enable
   const passSel = await _fillFirst(wc, PASS_SELECTORS, password);
   if (!passSel) {
     logger.warn('Azure B2C: on password step but fill failed');
     await _dumpInputs(wc, 'azure-b2c-password-fill-failed');
     return false;
   }
-  logger.info('Azure B2C step2: filled Password with ' + passSel);
-  await _wait(400);
+  // Fire the FULL event sequence a framework-controlled field expects, so the
+  // value actually commits to React/Angular state BEFORE we submit. The plain
+  // input+change from _fillScript was leaving the Continue click to submit an
+  // empty/uncommitted password (confirmed: page re-rendered the same password
+  // prompt after submit). Also VERIFY the field holds the value first.
+  const commitScript = (
+    '(function(){' +
+    'var el=document.querySelector("input[type=password],#password,input[placeholder=\\"Password\\"]");' +
+    'if(!el) return "no-field";' +
+    'el.focus();' +
+    'el.dispatchEvent(new KeyboardEvent("keydown",{bubbles:true}));' +
+    'el.dispatchEvent(new KeyboardEvent("keyup",{bubbles:true}));' +
+    'el.dispatchEvent(new Event("input",{bubbles:true}));' +
+    'el.dispatchEvent(new Event("change",{bubbles:true}));' +
+    'el.dispatchEvent(new Event("blur",{bubbles:true}));' +
+    'return el.value && el.value.length ? "ok:"+el.value.length : "empty";' +
+    '})()'
+  );
+  const committed = await _execSafe(wc, commitScript);
+  logger.info('Azure B2C step2: filled Password with ' + passSel + ' | commit=' + committed);
+  await _wait(700); // give the form time to enable Continue after the value commits
   const c2 = await _execSafe(wc, _CIAM_SUBMIT_SCRIPT);
   logger.info('Azure B2C step2: Password submitted via "' + c2 + '"');
   return await _postSubmitDiag(wc);
