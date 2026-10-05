@@ -116,7 +116,17 @@ async function isLoginPage(wc) {
     // next to consent/acknowledge language as pending too.
     'var bodyTxt=(document.body.innerText||"").toLowerCase();' +
     'var hasConsentGate=(bodyTxt.indexOf("acknowledge")!==-1||bodyTxt.indexOf("consent")!==-1)&&document.querySelectorAll("input[type=checkbox]:not(:checked)").length>0;' +
-    'return pw>0||em>0||hasConsentGate;' +
+    // FIX (2026-10): DTNA CIAM can render the login inside an IFRAME (and/or on
+    // the dtna.my.site.com app host), so the top-level document has NO
+    // password/email field and the old check returned false -> callers thought
+    // "already logged in" while a login screen was clearly showing. Detect the
+    // DTNA CIAM login by its distinctive on-page text (present at top level even
+    // when the fields are in an iframe), and also scan same-origin iframes for
+    // credential fields.
+    'var dtnaLogin=(bodyTxt.indexOf("dtna ciam")!==-1)||(bodyTxt.indexOf("login with daimler truck account")!==-1)||(bodyTxt.indexOf("enter your email or user id")!==-1)||(bodyTxt.indexOf("enter your password to sign in")!==-1);' +
+    'var frameLogin=false;try{var ifr=document.querySelectorAll("iframe");for(var i=0;i<ifr.length;i++){try{var d=ifr[i].contentDocument;if(d&&(d.querySelector("input[type=password]")||d.querySelector("input[type=email],input[type=text]")))' +
+    '{frameLogin=true;break;}}catch(e){}}}catch(e){}' +
+    'return pw>0||em>0||hasConsentGate||dtnaLogin||frameLogin;' +
     '})()'
   );
   return !!r;
