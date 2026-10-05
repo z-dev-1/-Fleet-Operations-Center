@@ -362,7 +362,7 @@ expose('credentials', {
   // full design/safety writeup (fixed allowlist, separate from
   // open-popup's).
   testLogin: (vendorId) => ipcRenderer.invoke('credentials:test-login', vendorId),
-  warmVendor: (vendorId) => ipcRenderer.invoke('credentials:warm-vendor', vendorId),
+  warmVendor: (vendorId, targetUrl) => ipcRenderer.invoke('credentials:warm-vendor', vendorId, targetUrl),
 });
 
 

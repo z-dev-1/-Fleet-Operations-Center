@@ -146,12 +146,14 @@ function registerCredentialIPC() {
   // Silent vendor pre-warm (hidden window) — used by the inline split-view so a
   // DTNA offsite pane is logged in BEFORE/while it loads. Shares the vendor
   // partition, so warming the hidden window authenticates the webview too.
-  handle("credentials:warm-vendor", async (_e, vendorId) => {
-    logger.info('credentials:warm-vendor CALLED for', vendorId); // probe: confirms renderer reached the IPC
+  handle("credentials:warm-vendor", async (_e, vendorId, targetUrl) => {
     requireString(vendorId, "vendorId");
+    logger.info('credentials:warm-vendor for', vendorId, targetUrl ? ('@ ' + String(targetUrl).slice(0, 80)) : '(generic)');
     try {
       const { warmVendorSession } = require('../../src/scrapers/vendor_session');
-      return await warmVendorSession(vendorId);
+      // Pass the exact URL (e.g. the DTNA case the user is opening) so the warm
+      // hits the SAME page that needs auth — not a generic landing that may not.
+      return await warmVendorSession(vendorId, targetUrl ? { targetUrl: String(targetUrl) } : {});
     } catch (e) {
       logger.warn('credentials:warm-vendor failed for', vendorId, ':', e.message);
       return { ok: false, loggedIn: false, error: e.message };

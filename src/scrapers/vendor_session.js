@@ -40,10 +40,17 @@ async function _warm(vendorId, opts) {
   const { VENDOR_TEST_URLS } = require('../ipc/credentials');
   const { attemptAutoLogin, isLoginPage, VENDOR_PARTITIONS, LOGIN_STRATEGIES } = require('../orcha/auto-login');
 
-  const url = VENDOR_TEST_URLS[vendorId];
+  // Prefer an explicit target URL (e.g. the exact DTNA CASE url the user is
+  // opening) over the generic vendor landing URL. CRITICAL for DTNA: the
+  // Servicetracker ROOT may load WITHOUT triggering auth (warm wrongly reports
+  // loggedIn=true), while the actual /s/case/<id> URL requires login — so warm
+  // the SAME url that needs auth, not a generic one. (Confirmed: root warm said
+  // loggedIn=true while the case webview showed the CIAM login.)
+  const url = (opts.targetUrl && /^https?:/i.test(opts.targetUrl)) ? opts.targetUrl : VENDOR_TEST_URLS[vendorId];
   if (!url) { logger.warn('[warm] unknown vendor: ' + vendorId); return { ok: false, loggedIn: false, attempted: false }; }
   let hostname;
   try { hostname = new URL(url).hostname; } catch (_) { return { ok: false, loggedIn: false, attempted: false }; }
+  logger.info('[warm] ' + vendorId + ' using url ' + url.slice(0, 90));
 
   const win = new BrowserWindow({
     width: 1200, height: 800,

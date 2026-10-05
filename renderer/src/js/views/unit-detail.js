@@ -1180,7 +1180,9 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
   // time the webview finishes loading, so no login page is ever shown. The
   // did-finish-load handler below is the fallback if it still lands on login.
   if (rightUrl && (rightUrl.indexOf('dtna') > -1 || rightUrl.indexOf('daimlertruck') > -1) && window.credentials && window.credentials.warmVendor) {
-    window.credentials.warmVendor('dtna').then(function(r) {
+    // Pass the EXACT case URL so the hidden warm hits the same page that needs
+    // auth (the Servicetracker root doesn't always trigger login).
+    window.credentials.warmVendor('dtna', rightUrl).then(function(r) {
       console.log('[split-view] proactive DTNA warm:', r && r.loggedIn);
       var wv = document.getElementById('dp-wv-offsite');
       if (wv && r && r.loggedIn) { try { wv.reload(); } catch (_) {} }
@@ -1424,8 +1426,10 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
         if (result !== 'login' || _warming) return;
         _warming = true;
         console.log('[split-view] offsite login detected (' + _offsiteVendor + ') — warming session silently');
+        var warmUrl = rightUrl;
+        try { warmUrl = offsiteWv.getURL() || rightUrl; } catch (_) {}
         var warm = (window.credentials && window.credentials.warmVendor)
-          ? window.credentials.warmVendor(_offsiteVendor)
+          ? window.credentials.warmVendor(_offsiteVendor, warmUrl)
           : Promise.resolve({ ok: false });
         warm.then(function(r) {
           console.log('[split-view] warm result:', r && r.loggedIn);
