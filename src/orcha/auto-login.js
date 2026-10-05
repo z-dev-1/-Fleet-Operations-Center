@@ -652,6 +652,16 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
   let _loginAttempted = false;
   let _done = false;
 
+  // Remove ALL three listeners (finish-load, navigate, stop-loading) in one
+  // place so no exit path leaks a listener.
+  function _cleanup() {
+    try {
+      _cleanup();
+      win.webContents.removeListener('did-navigate', onLoad);
+      win.webContents.removeListener('did-stop-loading', onLoad);
+    } catch (_) { /* window already destroyed */ }
+  }
+
   async function onLoad() {
     if (_done || !win || win.isDestroyed()) return;
     const currentUrl = win.webContents.getURL();
@@ -667,9 +677,20 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
       // the login instead of falsely succeeding.
       let onLoginPg = false;
       try { onLoginPg = await isLoginPage(win.webContents); } catch (_) {}
+      // DTNA/Salesforce Lightning renders the login IN PLACE and ASYNC — at the
+      // instant the target URL finishes loading, the login form may not have
+      // mounted yet, so isLoginPage() is briefly false. Don't conclude success
+      // immediately: wait a moment and re-check for a login form that renders
+      // a beat later (this is why Split View "landed on the login page" with no
+      // auto-login — the first check passed before the form appeared).
+      if (!onLoginPg) {
+        await _wait(3000);
+        if (_done || win.isDestroyed()) return;
+        try { onLoginPg = await isLoginPage(win.webContents); } catch (_) {}
+      }
       if (!onLoginPg) {
         _done = true;
-        win.webContents.removeListener('did-finish-load', onLoad);
+        _cleanup();
         logger.info('attachAutoLogin: reached target:', currentUrl.slice(0, 80));
         if (onDone) onDone({ success: true, url: currentUrl });
         return;
@@ -679,7 +700,7 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
         if (loginAttempts >= maxRetries) {
           logger.warn('attachAutoLogin: login still showing on target after', loginAttempts, 'attempts');
           _done = true;
-          win.webContents.removeListener('did-finish-load', onLoad);
+          _cleanup();
           if (onDone) onDone({ success: false, url: currentUrl, error: 'login_required' });
           return;
         }
@@ -702,7 +723,7 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
         if (loginAttempts >= maxRetries) {
           logger.warn('attachAutoLogin: still on login page after', loginAttempts, 'attempts — bad credentials?');
           _done = true;
-          win.webContents.removeListener('did-finish-load', onLoad);
+          _cleanup();
           if (onDone) onDone({ success: false, url: currentUrl, error: 'bad_credentials' });
           return;
         }
@@ -744,7 +765,7 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
     if (loginAttempts >= maxRetries) {
       logger.warn('attachAutoLogin: max retries reached');
       _done = true;
-      win.webContents.removeListener('did-finish-load', onLoad);
+      _cleanup();
       if (onDone) onDone({ success: false, url: currentUrl, error: 'max_retries' });
       return;
     }
@@ -758,13 +779,17 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
     } else {
       logger.warn('attachAutoLogin: could not fill for', currentUrl.slice(0, 80));
       _done = true;
-      win.webContents.removeListener('did-finish-load', onLoad);
+      _cleanup();
       if (onDone) onDone({ success: false, url: currentUrl, error: 'no_credentials' });
     }
   }
 
   win.webContents.on('did-finish-load', onLoad);
   win.webContents.on('did-navigate', onLoad);
+  // did-stop-loading also fires for in-place SPA renders (Salesforce Lightning
+  // swapping to the login view without a navigation), so a late-rendering login
+  // form still gets caught even when no navigation event fires.
+  win.webContents.on('did-stop-loading', onLoad);
   logger.info('attachAutoLogin: attached for', targetUrl.slice(0, 80));
 }
 
