@@ -588,4 +588,7 @@ export const dailyTasks = {
   update:    (data)  => window.dailyTasks.update(data),
   remove:    (id)    => window.dailyTasks.remove(id),
   generate:  ()      => window.dailyTasks.generate(),
+  getActionConfig: ()       => window.dailyTasks.getActionConfig(),
+  setActionConfig: (patch)  => window.dailyTasks.setActionConfig(patch),
+  executeAction:   (taskId) => window.dailyTasks.executeAction(taskId),
 };

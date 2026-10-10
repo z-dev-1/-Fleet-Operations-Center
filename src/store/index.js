@@ -215,6 +215,11 @@ const REGISTRY = {
   // Dedup ledger so the same gap-fill / dealer-ask isn't re-staged or re-posted
   // on every 5-min rescan. Keyed by equipmentId -> { lastGapSig, lastAskSig, lastAt }.
   relayReconcileLog:       () => path.join(P.dataDir, 'relay_reconcile_log.json'),
+  // Fleet Action Board execution config (2026-10) — per-action MODE A/B switch.
+  // MODE A (default, all false) = the "Do it" button deep-links into the
+  // existing confirm-gated flow. MODE B (true) = one-click execute behind a
+  // single YES confirm. Shape: { autoExecute: { <action_slug>: bool } }.
+  fleetActionConfig:       () => path.join(P.dataDir, 'fleet_action_config.json'),
 };
 
 function _resolvePath(name) {

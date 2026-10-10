@@ -381,10 +381,107 @@ async function generateNow(opts) {
   }
 }
 
+// ── Fleet Action execution config (per-action MODE A/B) ─────────────────────
+const _ACTION_SLUGS = ['assign_vendor', 'create_wr', 'preventive_wr', 'follow_up', 'escalate', 'chase_offsite', 'update_status', 'schedule_pm'];
+function _loadActionConfig() {
+  const c = store.load('fleetActionConfig', null);
+  const autoExecute = (c && c.autoExecute && typeof c.autoExecute === 'object') ? c.autoExecute : {};
+  const out = { autoExecute: {} };
+  for (const s of _ACTION_SLUGS) out.autoExecute[s] = !!autoExecute[s]; // default all OFF (MODE A)
+  return out;
+}
+function _saveActionConfig(patch) {
+  const cur = _loadActionConfig();
+  const next = { autoExecute: { ...cur.autoExecute } };
+  if (patch && patch.autoExecute && typeof patch.autoExecute === 'object') {
+    for (const s of _ACTION_SLUGS) if (s in patch.autoExecute) next.autoExecute[s] = !!patch.autoExecute[s];
+  }
+  store.save('fleetActionConfig', next);
+  return next;
+}
+
+// Find an AI task by id across the persisted list.
+function _findTask(id) {
+  const s = _load();
+  return (s.ai || []).find((t) => t.id === id) || (s.manual || []).find((t) => t.id === id) || null;
+}
+
+// MODE B executor: actually PERFORM the action for a task via the existing
+// engines, all of which are themselves confirm/stage-gated for live writes.
+// Returns { ok, message } / { ok:false, error }. Marks the task done on success.
+async function _executeAction(taskId) {
+  const task = _findTask(taskId);
+  if (!task) return { ok: false, error: 'task not found' };
+  const action = String(task.action || '').toLowerCase();
+  const unitId = String(task.unitId || '').trim();
+  if (!unitId) return { ok: false, error: 'task has no unit' };
+
+  const fd = store.load('fleetData', {}) || {};
+  const row = (fd.rows || []).find((r) => String(r.equipmentId || '').trim() === unitId);
+  if (!row) return { ok: false, error: 'unit ' + unitId + ' not in fleet data — sync first' };
+
+  const _markDone = () => {
+    try {
+      const s = _load();
+      const t = (s.ai || []).find((x) => x.id === taskId);
+      if (t) { t.done = true; t.resolvedAt = new Date().toISOString(); t.updatedAt = t.resolvedAt; _save(s); }
+    } catch (_) {}
+  };
+
+  try {
+    // Follow-up / escalate / chase / status-sync -> run the Relay↔Offsite
+    // reconcile for this unit; its apply layer stages (MODE B) or posts
+    // (MODE A) the comment to the Relay WR + updates the timeline. Already gated.
+    if (['follow_up', 'escalate', 'chase_offsite', 'update_status'].includes(action)) {
+      const reconcile = require('../scrapers/relay_reconcile');
+      const apply = require('../scrapers/relay_reconcile_apply');
+      const decision = await reconcile.reconcileUnit(row, {});
+      if (!decision) return { ok: false, error: 'no reconcile decision' };
+      const r = await apply.applyReconcile(decision, {});
+      _markDone();
+      const staged = (r.posts || []).filter((p) => p.action === 'staged').length;
+      const posted = (r.posts || []).filter((p) => p.action === 'posted').length;
+      return { ok: true, message: 'Reconciled ' + unitId + (posted ? ' — posted to Relay' : staged ? ' — staged ' + staged + ' update(s) for confirm' : ' — timeline updated') };
+    }
+    // Create WR / preventive WR -> real AAP work request via the existing
+    // creator. Grounded payload only (no invented fields).
+    if (['create_wr', 'preventive_wr'].includes(action)) {
+      const { createWorkRequest } = require('../scrapers/aap_create_wr');
+      const payload = {
+        unit: unitId,
+        title: (action === 'preventive_wr' ? 'Preventive — ' : '') + (row.issueSummary || row.lifecycleReason || 'Work Request').slice(0, 80),
+        issue: row.issueDetails || row.issueSummary || row.lifecycleReason || 'See fleet record',
+        vendor: row.vendor && row.vendor !== '--' ? row.vendor : '',
+        domicile: row.domicileSite || '',
+      };
+      const log = (m) => logger.info('[tasks:exec][create_wr] ' + m);
+      const r = await createWorkRequest(payload, row, log);
+      if (r && r.ok) { _markDone(); return { ok: true, message: 'Work Request created for ' + unitId + (r.workRequestId ? ' (' + r.workRequestId + ')' : '') }; }
+      return { ok: false, error: (r && r.error) || 'createWorkRequest failed' };
+    }
+    // assign_vendor / schedule_pm -> no safe headless executor; MODE B is not
+    // supported for these (they need the human form). Tell the caller to use
+    // the deep-link (MODE A) instead.
+    return { ok: false, error: 'Action "' + action + '" has no one-click executor — use the in-app flow (Do it opens it).' };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 // ── IPC ───────────────────────────────────────────────────────────────────────
 function registerDailyTasksIPC(ctx) {
   handle('tasks:list', async () => {
     return _load();
+  });
+
+  // Per-action MODE A/B config.
+  handle('tasks:get-action-config', () => _loadActionConfig());
+  handle('tasks:set-action-config', (_e, patch) => _saveActionConfig(patch || {}));
+
+  // MODE B one-click execute (renderer confirm-gates before calling this).
+  handle('tasks:execute-action', async (_e, taskId) => {
+    requireString(taskId, 'taskId');
+    return _executeAction(taskId);
   });
 
   // Add a manual task: { text, due?, unitId? }

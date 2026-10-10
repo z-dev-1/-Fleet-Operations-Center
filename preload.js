@@ -503,6 +503,9 @@ expose('dailyTasks', {
   update:    (data)  => ipcRenderer.invoke('tasks:update', data),
   remove:    (id)    => ipcRenderer.invoke('tasks:delete', id),
   generate:  ()      => ipcRenderer.invoke('tasks:generate'),
+  getActionConfig: ()        => ipcRenderer.invoke('tasks:get-action-config'),
+  setActionConfig: (patch)   => ipcRenderer.invoke('tasks:set-action-config', patch),
+  executeAction:   (taskId)  => ipcRenderer.invoke('tasks:execute-action', taskId),
 });
 
 // -- Bubble/mini-FAB window controls (2026-07-24) -- only meaningful when this

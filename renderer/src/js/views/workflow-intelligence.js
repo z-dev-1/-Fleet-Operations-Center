@@ -120,6 +120,10 @@ function _render() {
 function _aiRow(t) {
   const unit = t.unitId ? `<a class="tb-unit" data-unit="${_esc(t.unitId)}">${_esc(t.unitId)}</a>` : '';
   const reason = t.reason ? `<div class="tb-reason">${_esc(t.reason)}</div>` : '';
+  // "Do it" button on actionable, not-done AI tasks that reference a unit.
+  const doBtn = (!t.done && t.unitId && t.action)
+    ? `<button class="tb-do" data-id="${_esc(t.id)}" data-action="${_esc(t.action)}" data-unit="${_esc(t.unitId)}" title="Take this action">Do it</button>`
+    : '';
   return `
     <div class="tb-task ${t.done ? 'tb-task--done' : ''} tb-task--${_esc(t.urgency || 'medium')}" data-id="${_esc(t.id)}">
       <input type="checkbox" class="tb-check" data-id="${_esc(t.id)}" ${t.done ? 'checked' : ''} />
@@ -127,6 +131,7 @@ function _aiRow(t) {
         <div class="tb-task-text">${t.icon ? _esc(t.icon) + ' ' : ''}${_esc(t.suggestion || t.text)} ${unit}</div>
         ${reason}
       </div>
+      ${doBtn}
       <button class="tb-x" data-id="${_esc(t.id)}" title="Dismiss">✕</button>
     </div>`;
 }
@@ -205,6 +210,82 @@ function _wire() {
   _el.querySelectorAll('.tb-unit').forEach((a) => {
     a.addEventListener('click', () => _navigateToUnit(a.dataset.unit));
   });
+
+  // "Do it" -> MODE A deep-link (default) or MODE B one-click execute (per-action
+  // toggle). Every live mutation stays behind a confirm or an existing gated flow.
+  _el.querySelectorAll('.tb-do').forEach((btn) => {
+    btn.addEventListener('click', () => _doAction(btn.dataset.id, btn.dataset.action, btn.dataset.unit, btn));
+  });
+}
+
+// Resolve a unit row object (needed by the WR modal / dealer-WO flows).
+function _unitRow(unitId) {
+  const rows = (state.slice('fleet').rows) || [];
+  return rows.find((r) => String(r.equipmentId || '') === String(unitId)) || null;
+}
+
+async function _doAction(taskId, action, unitId, btn) {
+  action = String(action || '').toLowerCase();
+  // Check the per-action MODE A/B config.
+  let auto = false;
+  try {
+    const cfg = await dailyTasks.getActionConfig();
+    auto = !!(cfg && cfg.autoExecute && cfg.autoExecute[action]);
+  } catch (_) {}
+
+  // MODE B — one-click execute behind a single YES confirm.
+  if (auto) {
+    if (!window.confirm('Execute "' + action.replace(/_/g, ' ') + '" for ' + unitId + ' now?\nThis performs the action (live). Relay/WR writes are still confirm/stage-gated downstream.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Working…'; }
+    try {
+      const r = await dailyTasks.executeAction(taskId);
+      if (r && r.ok) {
+        bus.emit('ui:toast', { type: 'success', message: r.message || 'Done', duration: 3500 });
+        _data = await dailyTasks.list(); _render();
+      } else {
+        bus.emit('ui:toast', { type: 'warning', message: (r && r.error) || 'Could not execute — opening the in-app flow instead.', duration: 4000 });
+        _deepLink(action, unitId); // fall back to MODE A if no executor
+        if (btn) { btn.disabled = false; btn.textContent = 'Do it'; }
+      }
+    } catch (e) {
+      bus.emit('ui:toast', { type: 'error', message: 'Execute failed: ' + (e.message || e), duration: 4000 });
+      if (btn) { btn.disabled = false; btn.textContent = 'Do it'; }
+    }
+    return;
+  }
+
+  // MODE A — deep-link into the existing confirm-gated flow.
+  _deepLink(action, unitId);
+}
+
+// Route an action slug to the right EXISTING in-app flow (all confirm-gated).
+async function _deepLink(action, unitId) {
+  const row = _unitRow(unitId);
+  if (['create_wr', 'preventive_wr'].includes(action)) {
+    if (!row) { bus.emit('ui:toast', { type: 'warning', message: unitId + ' not in fleet data — sync first', duration: 3000 }); return; }
+    try {
+      const mod = await import('./wr-modal.js');
+      (mod.open || mod.openWRModal)(row);
+    } catch (e) { bus.emit('ui:toast', { type: 'error', message: 'Could not open WR form: ' + e.message }); }
+    return;
+  }
+  if (action === 'assign_vendor') {
+    bus.emit('ui:view-change', { from: 'workflow-intel', to: 'fleet' });
+    if (row) setTimeout(() => { bus.emit('ui:unit-select', { unit: row }); bus.emit('ui:dealer-wo-request', { unit: row }); }, 80);
+    return;
+  }
+  if (['follow_up', 'escalate', 'chase_offsite', 'update_status'].includes(action)) {
+    // Stage a Relay↔Offsite reconcile update for this unit, then open the 🔁
+    // review overlay so the user can confirm the post.
+    try {
+      bus.emit('ui:toast', { type: 'info', message: 'Reasoning over ' + unitId + '…', duration: 2000 });
+      if (window.relayReconcile && window.relayReconcile.runUnit) await window.relayReconcile.runUnit(unitId);
+      bus.emit('ui:relay-reconcile-toggle');
+    } catch (e) { bus.emit('ui:toast', { type: 'error', message: 'Reconcile failed: ' + e.message }); }
+    return;
+  }
+  // schedule_pm / anything else -> just open the unit so the user can act.
+  _navigateToUnit(unitId);
 }
 
 // -- Styles -------------------------------------------------------------------
@@ -241,6 +322,9 @@ function _styles() {
     .tb-unit:hover { text-decoration:underline; }
     .tb-x { background:transparent; border:none; color:#6e7681; font-size:13px; cursor:pointer; flex:none; padding:0 2px; }
     .tb-x:hover { color:#f85149; }
+    .tb-do { background:rgba(88,166,255,.14); border:1px solid rgba(88,166,255,.4); color:#58a6ff; font-size:11px; font-weight:600; border-radius:6px; padding:5px 12px; cursor:pointer; flex:none; white-space:nowrap; }
+    .tb-do:hover { background:rgba(88,166,255,.24); }
+    .tb-do:disabled { opacity:.6; cursor:default; }
     .tb-add { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
     .tb-input { background:rgba(255,255,255,.06); border:1px solid rgba(240,246,252,.12); border-radius:6px; color:#e6edf3; font-size:12px; padding:7px 10px; outline:none; }
     #tb-add-text { flex:1; min-width:180px; }
