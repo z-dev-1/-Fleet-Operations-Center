@@ -547,11 +547,25 @@ function createSyncEngine(ctx) {
       // re-reasoning (one AI call per down unit, not two). Shared across the
       // closures below.
       const _reconcileDecisions = {};
-      // Guard so the canonical pass runs exactly once per sync cycle — it is
-      // triggered by the reconcile pass when that finishes (so it sees the
-      // decisions), and ALSO by a standalone timer as a fallback for when
-      // reconcile is disabled / produced nothing. Whichever fires first wins.
+      // Guard so the canonical pass runs exactly once per sync cycle. It is
+      // triggered by the reconcile pass's finally{} once its decisions are ready
+      // (the authoritative path), with a standalone timer as a FALLBACK for when
+      // reconcile is disabled or never starts. The fallback must NOT pre-empt a
+      // reconcile pass that is still running — reconcile makes several slow AI
+      // calls and can take minutes, far longer than the fallback timer, so a
+      // naive "whichever fires first" let the fallback win every time and
+      // discard all the AI decisions (observed: canonical ran at +8s with 0
+      // decisions while reconcile kept working for 3+ min). _reconcileActive
+      // tells the fallback to stand down (and reschedule) while reconcile runs.
       let _canonicalRan = false;
+      // Optimistically mark reconcile active from the start IF it's enabled, so
+      // the fallback timer defers even if the reconcile pass hasn't yet reached
+      // its own `_reconcileActive = true` (it loads fleetData + detects changes
+      // first). The reconcile pass clears this in its finally{} no matter what
+      // (including the disabled / no-targets early returns below set it false).
+      let _reconcileActive = false;
+      try { _reconcileActive = !!require('../scrapers/relay_reconcile').getConfig().enabled; }
+      catch (_) { _reconcileActive = false; }
       const _runCanonicalPass = async () => {
         if (_canonicalRan) return;
         _canonicalRan = true;
@@ -625,6 +639,9 @@ function createSyncEngine(ctx) {
             const quietDown = down.filter(r => !changedSet.has(String(r.equipmentId || '').trim()));
             const targets = changedDown.concat(quietDown).slice(0, cfg.maxUnitsPerSync);
             if (!targets.length) return;
+            // Claim the canonical pass: the fallback timer will now stand down
+            // until our finally{} runs _runCanonicalPass() with real decisions.
+            _reconcileActive = true;
             logger.info('[relay-reconcile] running on ' + targets.length + ' down unit(s) — ' + Math.min(changedDown.length, targets.length) + ' changed-prioritized (mode ' + (cfg.autoPostToRelay ? 'A/auto' : 'B/staged') + ')');
             let posted = 0, staged = 0;
             for (const row of targets) {
@@ -644,22 +661,33 @@ function createSyncEngine(ctx) {
             logger.warn('[relay-reconcile] pass error (non-fatal): ' + e.message);
           } finally {
             // Decisions are now populated (or reconcile was disabled/empty) —
-            // run the canonical pass immediately so it reuses them. The 24s
-            // timer below is just a fallback if this never fires.
+            // release the claim and run the canonical pass so it reuses them.
+            _reconcileActive = false;
             _runCanonicalPass();
           }
         })();
       }, 20000); // after the deep scan's 15s relay-settle window
 
-      // ── Canonical state fallback timer — the single source of truth ──────
-      // The canonical pass (_runCanonicalPass) is normally triggered by the
-      // reconcile pass's finally{} the moment its decisions are ready. This
-      // timer is the fallback that guarantees canonical state is still written
-      // for EVERY unit even when the reconcile pass is disabled, errors out
-      // before its finally, or the AI loop runs long. The _canonicalRan guard
-      // makes whichever path fires first the only one that runs. 28s so it sits
-      // comfortably after the reconcile pass under normal conditions.
-      setTimeout(() => { _runCanonicalPass(); }, 28000);
+      // ── Canonical state fallback — the single source of truth ────────────
+      // Guarantees canonical state is written for EVERY unit even when the
+      // reconcile pass is disabled, never starts, or errors before its finally.
+      // CRITICAL: it must NOT pre-empt an in-flight reconcile pass (whose AI
+      // calls can take minutes) — otherwise it runs with zero decisions and the
+      // _canonicalRan guard then discards the real ones. So it POLLS: if
+      // reconcile is active, wait and re-check; only run canonical itself once
+      // reconcile is idle. A generous cap bounds the wait so a stuck reconcile
+      // can never starve canonical forever.
+      (function scheduleCanonicalFallback() {
+        let waited = 0;
+        const STEP = 5000;          // re-check every 5s
+        const MAX_WAIT = 300000;    // ...but never defer more than 5 min
+        const tick = () => {
+          if (_canonicalRan) return;              // reconcile's finally already ran it
+          if (_reconcileActive && waited < MAX_WAIT) { waited += STEP; setTimeout(tick, STEP); return; }
+          _runCanonicalPass();                     // reconcile idle/absent, or waited too long
+        };
+        setTimeout(tick, 28000); // first check ~28s in (after the 20s reconcile kick)
+      })();
 
       // ── Fleet Brain: continuous Daily Tasks regeneration — non-blocking ──
       // Re-reason over the WHOLE fleet after every sync so the Action Board is
