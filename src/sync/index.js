@@ -582,6 +582,22 @@ function createSyncEngine(ctx) {
         })();
       }, 20000); // after the deep scan's 15s relay-settle window
 
+      // ── Fleet Brain: continuous Daily Tasks regeneration — non-blocking ──
+      // Re-reason over the WHOLE fleet after every sync so the Action Board is
+      // always current, not just at 7am. generateNow() is THROTTLED (~25min)
+      // and overlap-guarded internally, so a 5-min rescan loop never hammers the
+      // AI; it simply no-ops when it ran recently. Non-fatal.
+      setTimeout(() => {
+        (async () => {
+          try {
+            const s = await require('../ipc/daily-tasks').generateNow();
+            if (s) logger.info('[tasks] regenerated after sync (' + (s.ai || []).filter((t) => !t.done && !t.dismissed).length + ' active)');
+          } catch (e) {
+            logger.warn('[tasks] post-sync regeneration failed (non-fatal): ' + e.message);
+          }
+        })();
+      }, 25000); // after reconcile; let relay/offsite data settle first
+
       // ── Bubble notifications — status-change detection ───────────────────
       const prevRows = (ctx.lastData && ctx.lastData._prevRows) || [];
       const prevMap  = {};

@@ -248,15 +248,12 @@ async function reconcileUnit(row, opts) {
   if (!brief.equipmentId) return null;
   const prompt = buildReconcilePrompt(brief, cfg);
   if (prompt.length > PROMPT_CAP) { /* already clipped per-field; proceed */ }
-  let decision;
-  try {
-    const rawText = await relay.ask(prompt, { signal: opts.signal, requestId: opts.requestId });
-    const parsed = _parseJson(rawText);
-    decision = parsed ? _normalizeDecision(brief, parsed, cfg) : _fallbackDecision(brief, cfg);
-  } catch (e) {
-    logger.warn('[relay-reconcile] AI failed for ' + brief.equipmentId + ': ' + e.message);
-    decision = _fallbackDecision(brief, cfg);
-  }
+  // Shared reasoning core: one AI call + robust JSON parse + timeout, never
+  // throws. ok:false (AI down/unparseable) -> deterministic fallback, same as
+  // the previous inline try/catch.
+  const { reason } = require('../orcha/reason');
+  const r = await reason({ prompt, signal: opts.signal, requestId: opts.requestId, label: 'relay-reconcile' });
+  const decision = r.ok ? _normalizeDecision(brief, r.data, cfg) : _fallbackDecision(brief, cfg);
   // Attach the keys the apply layer needs to post into the right Relay WR.
   decision._serviceUrl = brief._serviceUrl;
   decision._workRequestId = brief._workRequestId;

@@ -395,16 +395,15 @@ async function triageEmails(emails, opts) {
   if (!emails.length) return { records, aiUsed };
 
   const batches = _batchEmails(emails, unitIds);
+  const { reason } = require('../orcha/reason');
   for (const batch of batches) {
     const prompt = buildTriagePrompt(batch, unitIds);
-    let parsed = null;
-    try {
-      const raw = await relay.ask(prompt, { signal: opts.signal, requestId: opts.requestId });
-      parsed = _parseJson(raw);
-      if (parsed && Array.isArray(parsed.emails)) aiUsed = true;
-    } catch (e) {
-      logger.warn('[email-triage] AI batch failed: ' + e.message);
-    }
+    // Shared reasoning core: one AI call + robust JSON parse + timeout, never
+    // throws. On ok:false (AI down/unparseable) parsed stays null and each
+    // email falls back to _fallbackVerdict below — identical to before.
+    const r = await reason({ prompt, expectArray: 'emails', signal: opts.signal, requestId: opts.requestId, label: 'email-triage' });
+    const parsed = r.ok ? r.data : null;
+    if (r.ok) aiUsed = true;
     const verdictById = {};
     if (parsed && Array.isArray(parsed.emails)) {
       for (const v of parsed.emails) { if (v && v.id) verdictById[v.id] = v; }
