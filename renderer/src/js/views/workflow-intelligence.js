@@ -93,8 +93,10 @@ function _render() {
       <span class="tb-sub">${aiCount} action${aiCount === 1 ? '' : 's'} to review</span>
       <div style="flex:1"></div>
       <span class="tb-lastgen">AI last generated: ${_esc(lastGen)}</span>
+      <button id="tb-action-cfg" class="tb-btn" title="Action execution settings (MODE A / MODE B)">⚙ Actions</button>
       <button id="tb-generate" class="tb-btn tb-btn--primary">⟳ Generate</button>
     </div>
+    <div id="tb-action-cfg-panel" class="tb-cfg-panel" style="display:none"></div>
     <div class="tb-body">
       <section class="tb-section">
         <div class="tb-section-title">AI Suggested Actions</div>
@@ -159,7 +161,57 @@ function _isOverdue(t) {
 }
 
 // -- Wiring -------------------------------------------------------------------
+// Per-action MODE A/B settings panel. MODE A (unchecked) = "Do it" opens the
+// in-app confirm-gated flow. MODE B (checked) = one-click execute behind a
+// single YES confirm. assign_vendor + schedule_pm have no one-click executor,
+// so they stay MODE A only (shown disabled).
+const _ACTION_LABELS = {
+  follow_up:    'Follow up with vendor (post to Relay)',
+  escalate:     'Escalate (post to Relay)',
+  chase_offsite:'Chase offsite update (post to Relay)',
+  update_status:'Update status (reconcile + timeline)',
+  create_wr:    'Create Work Request (AAP)',
+  preventive_wr:'Create preventive WR (AAP)',
+  assign_vendor:'Assign vendor (opens panel — no one-click)',
+  schedule_pm:  'Schedule PM (opens unit — no one-click)',
+};
+const _NO_EXEC = new Set(['assign_vendor', 'schedule_pm']);
+
+async function _toggleActionConfig() {
+  const panel = _el.querySelector('#tb-action-cfg-panel');
+  if (!panel) return;
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  let cfg = { autoExecute: {} };
+  try { cfg = await dailyTasks.getActionConfig() || cfg; } catch (_) {}
+  const rows = Object.keys(_ACTION_LABELS).map((slug) => {
+    const on = !!(cfg.autoExecute && cfg.autoExecute[slug]);
+    const noExec = _NO_EXEC.has(slug);
+    return `<label class="tb-cfg-row">
+      <input type="checkbox" data-slug="${slug}" ${on ? 'checked' : ''} ${noExec ? 'disabled' : ''}/>
+      <span>${_esc(_ACTION_LABELS[slug])}</span>
+      <span class="tb-cfg-mode">${noExec ? 'MODE A only' : (on ? 'MODE B: one-click' : 'MODE A: opens flow')}</span>
+    </label>`;
+  }).join('');
+  panel.innerHTML = `
+    <div class="tb-cfg-head">⚙ "Do it" execution — unchecked = opens the in-app flow (MODE A); checked = one-click execute behind a confirm (MODE B)</div>
+    ${rows}`;
+  panel.style.display = 'block';
+  panel.querySelectorAll('input[data-slug]').forEach((cb) => {
+    cb.addEventListener('change', async () => {
+      try {
+        await dailyTasks.setActionConfig({ autoExecute: { [cb.dataset.slug]: cb.checked } });
+        const modeEl = cb.closest('.tb-cfg-row').querySelector('.tb-cfg-mode');
+        if (modeEl) modeEl.textContent = cb.checked ? 'MODE B: one-click' : 'MODE A: opens flow';
+        bus.emit('ui:toast', { type: 'info', message: _ACTION_LABELS[cb.dataset.slug] + ' → ' + (cb.checked ? 'MODE B (one-click)' : 'MODE A (opens flow)'), duration: 2500 });
+      } catch (e) { bus.emit('ui:toast', { type: 'error', message: 'Save failed: ' + e.message }); }
+    });
+  });
+}
+
 function _wire() {
+  const cfgBtn = _el.querySelector('#tb-action-cfg');
+  if (cfgBtn) cfgBtn.addEventListener('click', _toggleActionConfig);
+
   const gen = _el.querySelector('#tb-generate');
   if (gen) gen.addEventListener('click', async () => {
     gen.disabled = true; const orig = gen.textContent; gen.textContent = 'Generating…';
@@ -325,6 +377,12 @@ function _styles() {
     .tb-do { background:rgba(88,166,255,.14); border:1px solid rgba(88,166,255,.4); color:#58a6ff; font-size:11px; font-weight:600; border-radius:6px; padding:5px 12px; cursor:pointer; flex:none; white-space:nowrap; }
     .tb-do:hover { background:rgba(88,166,255,.24); }
     .tb-do:disabled { opacity:.6; cursor:default; }
+    .tb-cfg-panel { padding:12px 20px; border-bottom:1px solid rgba(240,246,252,.08); background:rgba(255,255,255,.02); }
+    .tb-cfg-head { font-size:11px; color:#8b949e; margin-bottom:8px; }
+    .tb-cfg-row { display:flex; align-items:center; gap:8px; font-size:12px; color:#e6edf3; padding:4px 0; }
+    .tb-cfg-row input { width:14px; height:14px; cursor:pointer; }
+    .tb-cfg-row input:disabled { cursor:default; }
+    .tb-cfg-mode { margin-left:auto; font-size:10px; color:#6e7681; }
     .tb-add { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
     .tb-input { background:rgba(255,255,255,.06); border:1px solid rgba(240,246,252,.12); border-radius:6px; color:#e6edf3; font-size:12px; padding:7px 10px; outline:none; }
     #tb-add-text { flex:1; min-width:180px; }
