@@ -200,8 +200,13 @@ async function applyReconcile(decision, opts) {
   //      MODE A). We only stage it when we actually have answer text.
   const intent = decision.nextActionType || '';
   const candidates = [];
-  if (!decision.relayHasLatest && decision.missingUpdate) {
-    candidates.push({ kind: 'gap-fill', text: decision.missingUpdate });
+  // The Relay-posted gap-fill is an INTERNAL note, so prefer the factual
+  // relayNote (third-person status log) over the raw missingUpdate gap text, and
+  // NEVER the vendor-facing dealerAsk. Post it when Relay lacks the latest OR
+  // when we have a relayNote worth logging.
+  const relayPostText = decision.relayNote || decision.missingUpdate;
+  if (relayPostText && (!decision.relayHasLatest || decision.relayNote)) {
+    candidates.push({ kind: 'gap-fill', text: relayPostText });
   }
   if (intent === 'reply_to_vendor') {
     // Only post a reply when we have concrete answer text; otherwise the open

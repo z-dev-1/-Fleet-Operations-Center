@@ -142,7 +142,7 @@ function buildReconcilePrompt(brief, cfg) {
     ' Reason like a human coordinator — do not just summarize.');
   lines.push('');
   lines.push('Return STRICT JSON ONLY (no prose, no markdown), exactly this shape:');
-  lines.push('{"relayHasLatest":true|false,"missingUpdate":"the specific NEW update present in Offsite but NOT yet in Relay — empty string if none or if no Offsite","currentStatus":"one-line real current status synthesized from ALL sources","nextStep":"the concrete next action","lastCommentBy":"vendor|us|unknown — who sent the most recent comment in the thread","lastCommentWhen":"the date of that last comment if shown, else empty","lastCommentGist":"a few words on what that last comment said","nextActionType":"reply_to_vendor|request_update|post_to_relay|none — SEE THE NEXT-ACTION RULE","awaitingReply":"when nextActionType=reply_to_vendor: the exact question the vendor asked us that still needs OUR answer — else empty","weOweReply":true|false,"threadOfRecord":"relay|offsite — which thread the live back-and-forth is happening in","isStale":true|false,"dealerAsk":"the EXACT message to post to the vendor — a chase for what we are waiting on (request_update) OR our answer to their question (reply_to_vendor) — grounded in what is already known; empty if none needed","confidence":0.0-1.0,"reasoning":"1-2 sentences","conflicts":[{"field":"status|eta|parts|location","positions":[{"source":"aap|relay|offsite","value":"what that source says"}],"resolution":"aap|relay|offsite — which source you trusted","reason":"why that source wins (e.g. fresher)"}],"statusChangeReason":"if the status appears to have CHANGED from the prior updates, the grounded reason — else empty string"}');
+  lines.push('{"relayHasLatest":true|false,"missingUpdate":"the specific NEW update present in Offsite but NOT yet in Relay — empty string if none or if no Offsite","currentStatus":"one-line real current status synthesized from ALL sources","nextStep":"the concrete next action","lastCommentBy":"vendor|us|unknown — who sent the most recent comment in the thread","lastCommentWhen":"the date of that last comment if shown, else empty","lastCommentGist":"a few words on what that last comment said","nextActionType":"reply_to_vendor|request_update|post_to_relay|none — SEE THE NEXT-ACTION RULE","awaitingReply":"when nextActionType=reply_to_vendor: the exact question the vendor asked us that still needs OUR answer — else empty","weOweReply":true|false,"threadOfRecord":"relay|offsite — which thread the live back-and-forth is happening in","isStale":true|false,"dealerAsk":"the EXACT message to post to the vendor — a chase for what we are waiting on (request_update) OR our answer to their question (reply_to_vendor) — grounded in what is already known; empty if none needed","relayNote":"a FACTUAL INTERNAL status log line to post in Relay Garage (see the RELAY NOTE rule) — third person, past tense, NOT addressed to the vendor; empty if nothing to log","confidence":0.0-1.0,"reasoning":"1-2 sentences","conflicts":[{"field":"status|eta|parts|location","positions":[{"source":"aap|relay|offsite","value":"what that source says"}],"resolution":"aap|relay|offsite — which source you trusted","reason":"why that source wins (e.g. fresher)"}],"statusChangeReason":"if the status appears to have CHANGED from the prior updates, the grounded reason — else empty string"}');
   lines.push('');
   lines.push('RULES:');
   lines.push('- Use ONLY the data below. NEVER invent a part, date, ETC, price, vendor, or status that is not present. If a field is blank, treat it as unknown.');
@@ -161,6 +161,7 @@ function buildReconcilePrompt(brief, cfg) {
   lines.push('    * none — current/complete, or the vendor JUST updated us and nothing is owed yet.');
   lines.push('  threadOfRecord = where the live back-and-forth is (offsite if the exchange is in the Offsite portal, relay if in Relay). A reply/chase to the vendor must go to THAT thread.');
   lines.push('- dealerAsk / FOLLOW-UP: when you do produce a vendor message, make it specific — reference the known issue/vendor and the date of the relevant note — e.g. "Following up on the DEF pump repair — no update since our 10/3 note. Can you confirm current status and a revised ETC?". Do NOT ask for anything the thread already answered. If nextActionType=none set dealerAsk="".');
+  lines.push('- RELAY NOTE (critical — this is DIFFERENT from dealerAsk): relayNote is an INTERNAL status log posted in our own tracking system, NOT a message to the vendor. It must be written in the THIRD PERSON and PAST/FACTUAL tense — a record of where things stand, NOT a request. NEVER address the vendor, NEVER write "can you confirm" / "please advise" / "provide an ETA" in relayNote. It must: (1) state the current situation and the known parts/ETC facts; (2) CREDIT the vendor\'s most recent update if a vendor comment exists — summarize what they said and when (e.g. "Per Kenworth 10/06, waiting on a clamp that is on backorder."); NEVER say "no vendor engagement"/"no vendor response" when the offsite/relay thread shows a vendor comment; (3) note what WE have done; (4) if we are chasing the vendor, END with "Update requested, pending response." Example relayNote: "Exhaust clamp and gasket on order since 09/30, no ETA. Per Kenworth of PA (Stephanie Bean) 10/06, awaiting a clamp currently on backorder. 10 days down; final repairs and DOT inspection still pending. Update requested, pending response." The dealerAsk for the SAME unit is the opposite voice (addressed TO the vendor). Produce BOTH.');
   lines.push('- CONFLICTS: only when two sources genuinely DISAGREE about the same fact (e.g. AAP lifecycle still says unavailable but Offsite says the repair is complete; or Relay shows an older ETC than Offsite). For each real disagreement add one conflicts[] entry listing each source\'s position, which source you trusted (resolution), and why (reason — usually "fresher"/"more specific"). If there is no genuine disagreement, return "conflicts":[]. NEVER invent a source that is not in the data below.');
   lines.push('- statusChangeReason: ONLY if the current status clearly moved from what the prior Relay/timeline updates showed (e.g. was awaiting parts, now ready). Give the grounded one-line reason. If no clear change, return "".');
   lines.push('- If the unit appears READY/COMPLETE, say so in currentStatus, set nextStep to pickup/close, isStale=false, dealerAsk="".');
@@ -294,6 +295,11 @@ function _normalizeDecision(brief, raw, cfg) {
     isStale,
     followUpNeeded,
     dealerAsk,
+    // relayNote = the FACTUAL internal status log for Relay (distinct voice from
+    // dealerAsk). Guard against the AI accidentally writing a vendor-chase here:
+    // if relayNote reads like a request, we still keep it but the apply/Split
+    // layers prefer it over dealerAsk for the Relay pane. Empty is fine.
+    relayNote: str(v.relayNote, 1200),
     confidence: conf,
     reasoning: str(v.reasoning, 500),
     // Audit fields for canonical state (optional; sanitized downstream by
@@ -332,6 +338,11 @@ function _fallbackDecision(brief, cfg) {
     isStale,
     followUpNeeded: isStale,
     dealerAsk: isStale ? ('No recent update on ' + (brief.equipmentId) + (brief.vendor ? ' at ' + brief.vendor : '') + ' — can you confirm current repair status and ETC?') : '',
+    // Factual internal note (no AI): state what's known + that we chased, never a
+    // vendor-addressed request.
+    relayNote: isStale
+      ? ((brief.lifecycleReason || 'Repair') + (brief.vendor ? ' at ' + brief.vendor : '') + '; no update in ' + (daysSince != null ? daysSince + ' day(s)' : 'a while') + '. Update requested, pending response.')
+      : '',
     confidence: 0,
     reasoning: 'AI unavailable; staleness inferred from last-refresh clock only.',
     conflicts: [],

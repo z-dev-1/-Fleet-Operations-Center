@@ -91,10 +91,15 @@ function registerRelayReconcileIPC(_ctx) {
           text = 'Vendor asked: "' + decision.awaitingReply + '" — reply needed.';
         }
       } else {
-        // The Relay (internal) pane: the gap-fill, else the status + next step.
-        if (decision.missingUpdate) text = decision.missingUpdate;
+        // The Relay (internal) pane — a FACTUAL status log, NEVER the vendor
+        // chase. Prefer the AI's relayNote (third-person internal voice), then
+        // the gap-fill, then a plain status line. We deliberately do NOT fall
+        // through to decision.dealerAsk here: that is the vendor-addressed
+        // message ("can you confirm...") and must never be posted into Relay as
+        // if we were talking to our own tracking system.
+        if (decision.relayNote) text = decision.relayNote;
+        else if (decision.missingUpdate) text = decision.missingUpdate;
         else if (intent === 'reply_to_vendor' && decision.awaitingReply) text = 'Open vendor question: "' + decision.awaitingReply + '" — awaiting our reply.';
-        else if ((decision.followUpNeeded || decision.isStale) && decision.dealerAsk) text = decision.dealerAsk;
         else if (decision.currentStatus) text = decision.currentStatus + (decision.nextStep ? ' Next: ' + decision.nextStep : '');
       }
       if (text) return { ok: true, text, source: 'reconcile', side: paneSide, intent, awaitingReply: decision.awaitingReply || '', decision };
