@@ -560,9 +560,14 @@ function createSyncEngine(ctx) {
           const fresh = store.load('fleetData', {});
           const rows = Array.isArray(fresh.rows) ? fresh.rows : [];
           if (!rows.length) return;
-          const { units, mirrored, counts } = canonical.buildAll(rows, { decisions: _reconcileDecisions });
-          // Persist the authoritative per-unit records.
+          // Prior cycle's records drive the temporal diff (changedFields,
+          // previousStatus, statusChangedAt, history).
           const prevCanon = store.load('canonicalState', {}) || {};
+          const { units, mirrored, counts } = canonical.buildAll(rows, {
+            decisions: _reconcileDecisions,
+            prior: prevCanon.units || {},
+          });
+          // Persist the authoritative per-unit records.
           store.save('canonicalState', {
             units,
             updatedAt: new Date().toISOString(),
@@ -580,7 +585,7 @@ function createSyncEngine(ctx) {
             ctx.lastData = latest;
             ctx.pushData(latest);
           }
-          logger.info('[canonical] ' + counts.total + ' unit(s) — ' + counts.reconciled + ' AI-reconciled, ' + counts.baseline + ' deterministic');
+          logger.info('[canonical] ' + counts.total + ' unit(s) — ' + counts.reconciled + ' AI-reconciled, ' + counts.baseline + ' deterministic, ' + (counts.changed || 0) + ' changed this cycle');
         } catch (e) {
           logger.warn('[canonical] pass error (non-fatal): ' + e.message);
         }
@@ -600,14 +605,27 @@ function createSyncEngine(ctx) {
             const cfg = reconcile.getConfig();
             if (!cfg.enabled) return;
             const apply = require('../scrapers/relay_reconcile_apply');
+            const canonical = require('../orcha/canonical_state');
             const fresh = store.load('fleetData', {});
             const rows = Array.isArray(fresh.rows) ? fresh.rows : [];
             const down = rows.filter(r =>
               (r.lifecycleState || '').toLowerCase().includes('unavail') &&
               reconcile.hasReconcilableData(r));
-            const targets = down.slice(0, cfg.maxUnitsPerSync);
+            if (!down.length) return;
+            // EVENT-TRIGGERED REASONING: spend the bounded AI budget on the units
+            // where reality actually MOVED since last cycle. detectChangedUnits
+            // diffs each row against the prior canonical record (status moved,
+            // offsite refreshed, new Relay comment, vendor assigned, reason
+            // changed) with no AI. Changed down-units are reconciled first; any
+            // remaining budget covers the rest so quiet units still refresh
+            // occasionally. First sync (no prior) treats everything as changed.
+            const prevCanon = store.load('canonicalState', {}) || {};
+            const changedSet = canonical.detectChangedUnits(rows, prevCanon.units || {});
+            const changedDown = down.filter(r => changedSet.has(String(r.equipmentId || '').trim()));
+            const quietDown = down.filter(r => !changedSet.has(String(r.equipmentId || '').trim()));
+            const targets = changedDown.concat(quietDown).slice(0, cfg.maxUnitsPerSync);
             if (!targets.length) return;
-            logger.info('[relay-reconcile] running on ' + targets.length + ' down unit(s) (mode ' + (cfg.autoPostToRelay ? 'A/auto' : 'B/staged') + ')');
+            logger.info('[relay-reconcile] running on ' + targets.length + ' down unit(s) — ' + Math.min(changedDown.length, targets.length) + ' changed-prioritized (mode ' + (cfg.autoPostToRelay ? 'A/auto' : 'B/staged') + ')');
             let posted = 0, staged = 0;
             for (const row of targets) {
               try {

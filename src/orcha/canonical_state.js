@@ -191,6 +191,87 @@ function _deriveWaitingOn(status) {
   }
 }
 
+// ── Evidence (the facts the conclusion rests on, by source) ────────────────────
+// Deterministic: restates fields already on the row, each tagged with the source
+// that produced it + when it was observed (if known). usedInConclusion marks the
+// facts that drove the chosen status/source. Never fabricates — only lists what
+// is present. Capped so the record stays small.
+const _EVIDENCE_CAP = 6;
+function _clipVal(v, n) { return _s(v).slice(0, n || 160); }
+
+function _buildEvidence(row, status, source) {
+  const r = row || {};
+  const ev = [];
+  const push = (src, field, value, observedAt) => {
+    const val = _clipVal(value);
+    if (!val) return;
+    ev.push({ source: src, field, value: val, observedAt: observedAt || '', usedInConclusion: src === source });
+  };
+  // AAP lifecycle — the base availability signal.
+  const life = _s(r.lifecycleState || r.atsState);
+  if (life) push('aap', 'lifecycleState', life);
+  if (_s(r.lifecycleReason)) push('aap', 'lifecycleReason', r.lifecycleReason);
+  // Relay (internal WR) — state + last comment context.
+  if (_s(r.serviceState)) push('relay', 'serviceState', r.serviceState);
+  if (_s(r.relayStatus)) push('relay', 'relayStatus', r.relayStatus);
+  // Offsite (vendor portal) — the freshest external reality, with its scrape time.
+  if (_s(r.asistNotes)) push('offsite', 'asistNotes', r.asistNotes, _s(r.asistScrapedAt));
+  else if (_s(r.offsiteShopEvent)) push('offsite', 'offsiteShopEvent', r.offsiteShopEvent, _s(r.asistScrapedAt));
+  // Manual / operator note — human-confirmed.
+  if (_s(r.manualNote) || _s(r.operatorNote) || _s(r.notesStatus)) {
+    push('manual', 'note', r.manualNote || r.operatorNote || r.notesStatus);
+  }
+  // Timeline — the day-by-day narrative (last line is the most recent).
+  const tl = _s(r.repairTimeline);
+  if (tl) { const last = tl.split('\n').filter(Boolean).pop(); if (last) push('timeline', 'repairTimeline', last); }
+  // Order: used-in-conclusion first, then by richness; cap.
+  ev.sort((a, b) => (b.usedInConclusion ? 1 : 0) - (a.usedInConclusion ? 1 : 0));
+  return ev.slice(0, _EVIDENCE_CAP);
+}
+
+// The freshest SUBSTANTIVE update we can point to (not status noise). Prefers the
+// offsite thread (dated), then the latest timeline line, then issue summary.
+function _lastMeaningfulUpdate(row) {
+  const r = row || {};
+  const offsite = _s(r.asistNotes);
+  if (offsite) {
+    const line = offsite.split('\n').filter(Boolean).pop() || offsite;
+    return { source: 'offsite', text: _clipVal(line, 300), at: _s(r.asistScrapedAt) };
+  }
+  const tl = _s(r.repairTimeline);
+  if (tl) {
+    const last = tl.split('\n').filter(Boolean).pop();
+    if (last) return { source: 'timeline', text: _clipVal(last, 300), at: '' };
+  }
+  const sum = _s(r.issueSummary || r.correction);
+  if (sum) return { source: 'relay', text: _clipVal(sum, 300), at: '' };
+  return null;
+}
+
+// Deterministic obvious-conflict detection: AAP says available but a repair
+// state says otherwise, or AAP says down but completion text says ready. These
+// are the cross-source disagreements we can see WITHOUT the AI. The AI tier adds
+// reasoned resolution; here we record the disagreement + a plain resolution note.
+function _detectObviousConflicts(row, status, source) {
+  const r = row || {};
+  const conflicts = [];
+  const down = isDown(r);
+  const svc = _s(r.serviceState) || _s(r.relayStatus);
+  // AAP down but Relay/Offsite say ready/complete.
+  if (down && (status === 'ready_for_pickup' || status === 'available')) {
+    conflicts.push({
+      field: 'status',
+      positions: [
+        { source: 'aap', value: _s(r.lifecycleState || 'Unavailable') },
+        { source, value: svc || 'repair complete' },
+      ],
+      resolution: source,
+      reason: 'AAP lifecycle still shows unavailable but the repair record indicates the work is finished; trusting the repair record pending the lifecycle clear.',
+    });
+  }
+  return conflicts;
+}
+
 /**
  * computeCanonical(row) -> canonical record (deterministic, no AI, no I/O).
  * Safe to call on EVERY unit every sync. Returns null only if there's no
@@ -222,6 +303,21 @@ function computeCanonical(row) {
     waitingOn,
     flags,
     aiReconciled: false,
+    // Audit trail — the facts behind the conclusion, the freshest real update,
+    // and any obvious cross-source disagreement (deterministic).
+    evidence: _buildEvidence(r, status, source),
+    conflicts: _detectObviousConflicts(r, status, source),
+    lastMeaningfulUpdate: _lastMeaningfulUpdate(r),
+    // Temporal fields — filled by diffAgainstPrior() in buildAll against the
+    // previous cycle's record. Defaults here so a standalone compute is complete.
+    changedFields: [],
+    previousStatus: null,
+    statusChangedAt: null,
+    statusChangeReason: '',
+    history: [],
+    // Cheap change-detection proxy for next cycle (not displayed): length of the
+    // relay conversation, so detectChangedUnits can see a new comment landed.
+    _convoLen: _s(r.fullConversation).length,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -293,6 +389,25 @@ function reconcileCanonical(row, opts) {
   if (_s(decision.dealerAsk)) addFlag('dealer_ask');
   if (decision.relayHasLatest === false && _s(decision.missingUpdate)) addFlag('relay_gap');
 
+  // Evidence: start from the deterministic set, then add what the AI pulled from
+  // Offsite that Relay lacked (the gap-fill) as an offsite fact that drove the
+  // conclusion. Keeps the audit trail honest about what the AI actually used.
+  const evidence = Array.isArray(base.evidence) ? base.evidence.slice() : [];
+  if (_s(decision.missingUpdate)) {
+    evidence.unshift({ source: 'offsite', field: 'missingUpdate', value: _clipVal(decision.missingUpdate), observedAt: '', usedInConclusion: true });
+  }
+
+  // Conflicts: prefer the AI's reasoned conflicts when it returned any (strictly
+  // optional, sanitized, never-throw); otherwise keep the deterministic ones.
+  const conflicts = _normalizeConflicts(decision.conflicts, source) || base.conflicts || [];
+
+  // lastMeaningfulUpdate: the AI's missing-update IS the freshest substantive
+  // thing when present; else keep the deterministic read.
+  let lastMeaningfulUpdate = base.lastMeaningfulUpdate;
+  if (_s(decision.missingUpdate)) {
+    lastMeaningfulUpdate = { source: 'offsite', text: _clipVal(decision.missingUpdate, 300), at: _s(decision.decidedAt) };
+  }
+
   return {
     equipmentId: base.equipmentId,
     status: isValidStatus(status) ? status : base.status,
@@ -304,8 +419,110 @@ function reconcileCanonical(row, opts) {
     waitingOn,
     flags,
     aiReconciled: true,
+    evidence: evidence.slice(0, _EVIDENCE_CAP + 1),
+    conflicts,
+    lastMeaningfulUpdate,
+    // AI's grounded reason for a status change (if it supplied one); the real
+    // from/to + timestamps are set by diffAgainstPrior() in buildAll.
+    changedFields: [],
+    previousStatus: null,
+    statusChangedAt: null,
+    statusChangeReason: _clipVal(decision.statusChangeReason, 300),
+    history: [],
+    _convoLen: base._convoLen || 0,
     updatedAt: new Date().toISOString(),
   };
+}
+
+// Sanitize an AI-provided conflicts array into our shape. Optional + defensive:
+// returns null when nothing usable (so the caller keeps the deterministic set),
+// never throws. Each conflict: { field, positions:[{source,value}], resolution,
+// reason }. We never invent a source — resolution must be one of the positions'
+// sources (or the record's trusted source), else we drop the resolution.
+function _normalizeConflicts(raw, trustedSource) {
+  if (!Array.isArray(raw) || !raw.length) return null;
+  const out = [];
+  for (const c of raw) {
+    if (!c || typeof c !== 'object') continue;
+    const field = _clipVal(c.field, 40);
+    const positions = Array.isArray(c.positions) ? c.positions
+      .filter((p) => p && typeof p === 'object')
+      .map((p) => ({ source: _clipVal(p.source, 20), value: _clipVal(p.value, 160) }))
+      .filter((p) => p.source && p.value)
+      .slice(0, 4) : [];
+    if (!field || positions.length < 2) continue; // a conflict needs >=2 positions
+    const srcs = positions.map((p) => p.source);
+    let resolution = _clipVal(c.resolution, 20);
+    if (resolution && !srcs.includes(resolution)) {
+      // Resolution must name one of the conflicting sources; else fall back to
+      // the trusted source if it's among them, otherwise drop it (don't invent).
+      resolution = srcs.includes(trustedSource) ? trustedSource : '';
+    }
+    out.push({ field, positions, resolution, reason: _clipVal(c.reason, 300) });
+    if (out.length >= 4) break;
+  }
+  return out.length ? out : null;
+}
+
+// ── Temporal diffing (event history) ───────────────────────────────────────────
+// Which row/record fields we track for "something changed." The sync pass uses
+// the SAME set to decide which units get a priority AI reconcile (event-trigger).
+const TRACKED_FIELDS = ['status', 'situation', 'nextStep', 'source', 'waitingOn', 'stale'];
+const _HISTORY_CAP = 10;
+
+/**
+ * diffAgainstPrior(record, prior) -> record (mutated copy returned)
+ * Compares the freshly-built record against the previous cycle's record for the
+ * same unit and fills the temporal fields:
+ *   changedFields[]   — {field, from, to} for each tracked field that moved
+ *   previousStatus    — prior.status when status changed (else carried through)
+ *   statusChangedAt   — now when status changed, else carried from prior
+ *   statusChangeReason— kept from the record (AI) or synthesized deterministically
+ *   history[]         — prior.history + a new {from,to,at,reason} entry on a
+ *                       status change, capped at _HISTORY_CAP (most recent last)
+ * Pure. If prior is null (first time we see the unit) returns the record with
+ * empty change-set and a fresh statusChangedAt.
+ */
+function diffAgainstPrior(record, prior) {
+  if (!record) return record;
+  const now = record.updatedAt || new Date().toISOString();
+  if (!prior) {
+    record.changedFields = [];
+    record.previousStatus = null;
+    record.statusChangedAt = now;      // first observation = the baseline moment
+    record.history = [];
+    return record;
+  }
+  const changed = [];
+  for (const f of TRACKED_FIELDS) {
+    const a = prior[f]; const b = record[f];
+    if (JSON.stringify(a == null ? '' : a) !== JSON.stringify(b == null ? '' : b)) {
+      changed.push({ field: f, from: a == null ? '' : a, to: b == null ? '' : b });
+    }
+  }
+  record.changedFields = changed;
+
+  const statusChanged = prior.status !== record.status;
+  record.previousStatus = statusChanged ? prior.status : (prior.previousStatus || null);
+  record.statusChangedAt = statusChanged ? now : (prior.statusChangedAt || now);
+
+  // Reason: prefer an AI-supplied reason; else synthesize from the drivers.
+  if (statusChanged && !record.statusChangeReason) {
+    const lmu = record.lastMeaningfulUpdate;
+    record.statusChangeReason = lmu && lmu.text
+      ? ('Per ' + (lmu.source || 'latest') + ': ' + lmu.text).slice(0, 300)
+      : ('Status moved ' + prior.status + ' -> ' + record.status + '.');
+  }
+  if (!statusChanged) record.statusChangeReason = prior.statusChangeReason || record.statusChangeReason || '';
+
+  // History: carry prior, append on a real status change.
+  const hist = Array.isArray(prior.history) ? prior.history.slice() : [];
+  if (statusChanged) {
+    hist.push({ from: prior.status, to: record.status, at: now, reason: record.statusChangeReason });
+    if (hist.length > _HISTORY_CAP) hist.splice(0, hist.length - _HISTORY_CAP);
+  }
+  record.history = hist;
+  return record;
 }
 
 /**
@@ -326,6 +543,13 @@ function mirrorFields(record) {
     canonicalFlags: Array.isArray(r.flags) ? r.flags.slice() : [],
     canonicalAiReconciled: !!r.aiReconciled,
     canonicalUpdatedAt: r.updatedAt || null,
+    // Lean temporal summary (the big evidence/conflicts/history arrays stay in
+    // the canonicalState store; read it directly when you need them).
+    canonicalPreviousStatus: r.previousStatus || null,
+    canonicalStatusChangedAt: r.statusChangedAt || null,
+    canonicalStatusChangeReason: r.statusChangeReason || '',
+    canonicalChangedFieldCount: Array.isArray(r.changedFields) ? r.changedFields.length : 0,
+    canonicalConflictCount: Array.isArray(r.conflicts) ? r.conflicts.length : 0,
   };
 }
 
@@ -340,23 +564,35 @@ function mirrorFields(record) {
  * opts.decisions — optional Map or object keyed by equipmentId -> relay_reconcile
  *                  decision. Rows with a decision get reconcileCanonical(); all
  *                  others get the deterministic computeCanonical() baseline.
+ * opts.prior     — optional object keyed by equipmentId -> the previous cycle's
+ *                  canonical record (typically canonicalState.units). Used to
+ *                  diff each unit for the temporal fields (changedFields,
+ *                  previousStatus, statusChangedAt, history). Omit on first run.
  */
 function buildAll(rows, opts) {
   opts = opts || {};
   const list = Array.isArray(rows) ? rows : [];
   const decisions = opts.decisions || {};
+  const prior = opts.prior || {};
   const getDecision = (id) => {
     if (decisions instanceof Map) return decisions.get(id);
     return decisions[id];
   };
+  const getPrior = (id) => {
+    if (prior instanceof Map) return prior.get(id);
+    return prior[id];
+  };
   const units = {};
-  let reconciled = 0, baseline = 0;
+  let reconciled = 0, baseline = 0, changed = 0;
   const mirrored = list.map((row) => {
     const id = _s(row && row.equipmentId);
     if (!id) return row;
     const decision = getDecision(id);
-    const record = decision ? reconcileCanonical(row, { decision }) : computeCanonical(row);
+    let record = decision ? reconcileCanonical(row, { decision }) : computeCanonical(row);
     if (!record) return row;
+    // Temporal diff against the previous cycle's record for this unit.
+    record = diffAgainstPrior(record, getPrior(id));
+    if (record.changedFields && record.changedFields.length) changed++;
     units[id] = record;
     if (record.aiReconciled) reconciled++; else baseline++;
     return Object.assign({}, row, mirrorFields(record));
@@ -364,8 +600,64 @@ function buildAll(rows, opts) {
   return {
     units,
     mirrored,
-    counts: { total: Object.keys(units).length, reconciled, baseline },
+    counts: { total: Object.keys(units).length, reconciled, baseline, changed },
   };
+}
+
+/**
+ * detectChangedUnits(rows, prior) -> Set<equipmentId>
+ * The EVENT-TRIGGER core: which units changed in a way that warrants a fresh AI
+ * reconcile this cycle. Compares the raw row's reality-bearing fields against
+ * the prior canonical record (and its mirrored provenance) WITHOUT any AI — so
+ * the sync pass can cheaply decide who to prioritize. A unit is "changed" when
+ * its deterministic status moved, or a tracked raw signal (offsite freshness/
+ * notes, relay conversation, vendor, lifecycleReason, parts/ETC text) differs
+ * from what the prior record was built on. Units with NO prior record count as
+ * changed (first observation). Pure.
+ */
+function detectChangedUnits(rows, prior) {
+  const list = Array.isArray(rows) ? rows : [];
+  const priorMap = prior instanceof Map ? prior : new Map(Object.entries(prior || {}));
+  const changed = new Set();
+  for (const row of list) {
+    const id = _s(row && row.equipmentId);
+    if (!id) continue;
+    const prev = priorMap.get(id);
+    if (!prev) { changed.add(id); continue; } // never seen -> reason it
+    // 1. deterministic status moved vs the prior record's status.
+    if (_deriveStatus(row) !== prev.status) { changed.add(id); continue; }
+    // 2. offsite freshness / notes moved (compare the stored lastMeaningfulUpdate
+    //    'at' + a hash of the current offsite text).
+    const offAt = _s(row.asistScrapedAt);
+    const prevAt = (prev.lastMeaningfulUpdate && prev.lastMeaningfulUpdate.at) || '';
+    if (offAt && offAt !== prevAt) { changed.add(id); continue; }
+    // 3. a tracked raw signal differs from the prior record's evidence snapshot.
+    const prevEvidence = Array.isArray(prev.evidence) ? prev.evidence : [];
+    const evidenceVal = (field) => { const e = prevEvidence.find((x) => x.field === field); return e ? e.value : ''; };
+    const trackedRaw = [
+      ['serviceState', _s(row.serviceState)],
+      ['relayStatus', _s(row.relayStatus)],
+      ['lifecycleReason', _s(row.lifecycleReason)],
+    ];
+    let moved = false;
+    for (const [field, cur] of trackedRaw) {
+      const was = evidenceVal(field);
+      // Compare on the clipped form the evidence stored (so lengths match).
+      if (_clipVal(cur) !== was) { moved = true; break; }
+    }
+    if (moved) { changed.add(id); continue; }
+    // 4. vendor assignment changed (vendor isn't in evidence; use situation).
+    const curVendor = _s(row.vendor);
+    if (curVendor && prev.situation && prev.situation.indexOf(curVendor) === -1 && curVendor !== '--') {
+      // vendor present now but not reflected in the prior situation line
+      changed.add(id); continue;
+    }
+    // 5. relay conversation grew (new comment) — compare a cheap length proxy.
+    const convoLen = _s(row.fullConversation).length;
+    const prevConvoLen = Number(prev._convoLen || 0);
+    if (convoLen && convoLen !== prevConvoLen) { changed.add(id); continue; }
+  }
+  return changed;
 }
 
 // ── Shared read accessors (the single way consumers read canonical state) ──────
@@ -452,12 +744,15 @@ function signalTokens(rowOrId, opts) {
 
 module.exports = {
   STATUSES,
+  TRACKED_FIELDS,
   isValidStatus,
   isDown,
   computeCanonical,
   reconcileCanonical,
   mirrorFields,
   buildAll,
+  diffAgainstPrior,
+  detectChangedUnits,
   fromRow,
   getCanonical,
   statusLabel,
@@ -469,4 +764,8 @@ module.exports = {
   _daysSinceOffsite,
   _statusFromDecision,
   _waitingOnFromDecision,
+  _buildEvidence,
+  _lastMeaningfulUpdate,
+  _detectObviousConflicts,
+  _normalizeConflicts,
 };

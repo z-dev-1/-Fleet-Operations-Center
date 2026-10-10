@@ -126,7 +126,7 @@ function buildReconcilePrompt(brief, cfg) {
     ' Reason like a human coordinator — do not just summarize.');
   lines.push('');
   lines.push('Return STRICT JSON ONLY (no prose, no markdown), exactly this shape:');
-  lines.push('{"relayHasLatest":true|false,"missingUpdate":"the specific NEW update present in Offsite but NOT yet in Relay — empty string if none or if no Offsite","currentStatus":"one-line real current status synthesized from ALL sources","nextStep":"the concrete next action","lastCommentBy":"vendor|us|unknown — who sent the most recent Relay comment","lastCommentWhen":"the date of that last comment if shown, else empty","lastCommentGist":"a few words on what that last comment said","isStale":true|false,"dealerAsk":"the EXACT message to post asking the vendor/dealer for an update, grounded in what is already known — empty string if not needed","confidence":0.0-1.0,"reasoning":"1-2 sentences"}');
+  lines.push('{"relayHasLatest":true|false,"missingUpdate":"the specific NEW update present in Offsite but NOT yet in Relay — empty string if none or if no Offsite","currentStatus":"one-line real current status synthesized from ALL sources","nextStep":"the concrete next action","lastCommentBy":"vendor|us|unknown — who sent the most recent Relay comment","lastCommentWhen":"the date of that last comment if shown, else empty","lastCommentGist":"a few words on what that last comment said","isStale":true|false,"dealerAsk":"the EXACT message to post asking the vendor/dealer for an update, grounded in what is already known — empty string if not needed","confidence":0.0-1.0,"reasoning":"1-2 sentences","conflicts":[{"field":"status|eta|parts|location","positions":[{"source":"aap|relay|offsite","value":"what that source says"}],"resolution":"aap|relay|offsite — which source you trusted","reason":"why that source wins (e.g. fresher)"}],"statusChangeReason":"if the status appears to have CHANGED from the prior updates, the grounded reason — else empty string"}');
   lines.push('');
   lines.push('RULES:');
   lines.push('- Use ONLY the data below. NEVER invent a part, date, ETC, price, vendor, or status that is not present. If a field is blank, treat it as unknown.');
@@ -139,6 +139,8 @@ function buildReconcilePrompt(brief, cfg) {
   }
   lines.push('- isStale=true when there is no fresh substantive update within ~' + cfg.staleDays + ' days AND the unit is not completed. If the unit is completed/ready, isStale=false.');
   lines.push('- dealerAsk / FOLLOW-UP: produce a message to post asking the vendor for an update when EITHER (a) the unit is stale, OR (b) lastCommentBy="us" (we spoke last, so the ball is in the vendor\'s court and they have gone quiet). Make it specific — reference the known issue/vendor and the date of our last note — e.g. "Following up on the DEF pump repair — no update since our 10/3 note. Can you confirm current status and a revised ETC?". Do NOT ask for anything the vendor\'s own last comment already answered. If lastCommentBy="vendor" and it is recent (they just updated us), set dealerAsk="" — the ball is in our court, not theirs.');
+  lines.push('- CONFLICTS: only when two sources genuinely DISAGREE about the same fact (e.g. AAP lifecycle still says unavailable but Offsite says the repair is complete; or Relay shows an older ETC than Offsite). For each real disagreement add one conflicts[] entry listing each source\'s position, which source you trusted (resolution), and why (reason — usually "fresher"/"more specific"). If there is no genuine disagreement, return "conflicts":[]. NEVER invent a source that is not in the data below.');
+  lines.push('- statusChangeReason: ONLY if the current status clearly moved from what the prior Relay/timeline updates showed (e.g. was awaiting parts, now ready). Give the grounded one-line reason. If no clear change, return "".');
   lines.push('- If the unit appears READY/COMPLETE, say so in currentStatus, set nextStep to pickup/close, isStale=false, dealerAsk="".');
   lines.push('');
   lines.push('UNIT ' + brief.equipmentId + ':');
@@ -204,6 +206,11 @@ function _normalizeDecision(brief, raw, cfg) {
     dealerAsk,
     confidence: conf,
     reasoning: str(v.reasoning, 500),
+    // Audit fields for canonical state (optional; sanitized downstream by
+    // canonical_state._normalizeConflicts). Pass the raw array/string through —
+    // never throw if the AI omitted or malformed them.
+    conflicts: Array.isArray(v.conflicts) ? v.conflicts : [],
+    statusChangeReason: str(v.statusChangeReason, 300),
     daysSinceOffsite: daysSince,
     completed,
     decidedAt: new Date().toISOString(),
@@ -230,6 +237,8 @@ function _fallbackDecision(brief, cfg) {
     dealerAsk: isStale ? ('No recent update on ' + (brief.equipmentId) + (brief.vendor ? ' at ' + brief.vendor : '') + ' — can you confirm current repair status and ETC?') : '',
     confidence: 0,
     reasoning: 'AI unavailable; staleness inferred from last-refresh clock only.',
+    conflicts: [],
+    statusChangeReason: '',
     daysSinceOffsite: daysSince,
     completed,
     aiUnavailable: true,

@@ -254,3 +254,172 @@ describe('canonical_state — shared read accessors (the consumer API)', () => {
     expect(canonical.signalTokens('UNKNOWN', { store })).toBe('');
   });
 });
+
+describe('canonical_state — evidence + lastMeaningfulUpdate', () => {
+  it('emits evidence tagged by source with usedInConclusion on the trusted source', () => {
+    const rec = canonical.computeCanonical({
+      equipmentId: 'E1', lifecycleState: 'Unavailable', lifecycleReason: 'DEF fault',
+      serviceState: 'awaiting parts', asistNotes: 'Dealer: parts on order, ETC 10/16',
+      asistScrapedAt: new Date().toISOString(),
+    });
+    expect(Array.isArray(rec.evidence)).toBe(true);
+    const sources = rec.evidence.map(e => e.source);
+    expect(sources).toContain('aap');
+    expect(sources).toContain('relay');
+    expect(sources).toContain('offsite');
+    // offsite is the fresh trusted source -> its evidence is marked used.
+    const off = rec.evidence.find(e => e.source === 'offsite');
+    expect(off.usedInConclusion).toBe(true);
+    expect(off.observedAt).toBeTruthy();
+  });
+
+  it('lastMeaningfulUpdate prefers the offsite thread with its scrape time', () => {
+    const at = new Date().toISOString();
+    const rec = canonical.computeCanonical({ equipmentId: 'E2', lifecycleState: 'Unavailable', asistNotes: 'line1\nparts arrived 10/14', asistScrapedAt: at });
+    expect(rec.lastMeaningfulUpdate).toMatchObject({ source: 'offsite', at });
+    expect(rec.lastMeaningfulUpdate.text).toContain('parts arrived');
+  });
+
+  it('detects an obvious AAP-down vs repair-complete conflict', () => {
+    const rec = canonical.computeCanonical({ equipmentId: 'E3', lifecycleState: 'Unavailable', serviceState: 'Repair complete' });
+    expect(rec.status).toBe('ready_for_pickup');
+    expect(rec.conflicts.length).toBeGreaterThanOrEqual(1);
+    const c = rec.conflicts[0];
+    expect(c.field).toBe('status');
+    expect(c.positions.map(p => p.source)).toContain('aap');
+    expect(canonical.STATUSES).toContain(rec.status);
+  });
+});
+
+describe('canonical_state — AI conflict sanitization (_normalizeConflicts)', () => {
+  it('drops conflicts with fewer than 2 positions and invented resolutions', () => {
+    const raw = [
+      { field: 'status', positions: [{ source: 'aap', value: 'down' }], resolution: 'aap', reason: 'only one' }, // <2 positions -> dropped
+      { field: 'eta', positions: [{ source: 'relay', value: '10/10' }, { source: 'offsite', value: '10/16' }], resolution: 'mars', reason: 'invented src' },
+    ];
+    const out = canonical._normalizeConflicts(raw, 'offsite');
+    expect(out.length).toBe(1);
+    expect(out[0].field).toBe('eta');
+    // resolution 'mars' isn't a position source; trusted 'offsite' IS -> falls back to it.
+    expect(out[0].resolution).toBe('offsite');
+  });
+
+  it('returns null for empty/garbage so the deterministic set is kept', () => {
+    expect(canonical._normalizeConflicts(null, 'aap')).toBeNull();
+    expect(canonical._normalizeConflicts([], 'aap')).toBeNull();
+    expect(canonical._normalizeConflicts(['nonsense'], 'aap')).toBeNull();
+  });
+
+  it('reconcileCanonical folds AI conflicts + statusChangeReason into the record', () => {
+    const rec = canonical.reconcileCanonical(
+      { equipmentId: 'C9', lifecycleState: 'Unavailable' },
+      { decision: {
+        equipmentId: 'C9', currentStatus: 'ready for pickup', nextStep: 'arrange pickup', confidence: 0.9, completed: true,
+        statusChangeReason: 'Dealer marked repair complete 10/15',
+        conflicts: [{ field: 'status', positions: [{ source: 'aap', value: 'unavailable' }, { source: 'offsite', value: 'complete' }], resolution: 'offsite', reason: 'offsite fresher' }],
+      } }
+    );
+    expect(rec.statusChangeReason).toContain('repair complete');
+    expect(rec.conflicts.length).toBe(1);
+    expect(rec.conflicts[0].resolution).toBe('offsite');
+  });
+});
+
+describe('canonical_state — temporal diffing (diffAgainstPrior)', () => {
+  it('first observation sets a baseline statusChangedAt and empty change-set', () => {
+    const rec = canonical.computeCanonical({ equipmentId: 'T1', lifecycleState: 'Unavailable', serviceState: 'awaiting parts' });
+    const diffed = canonical.diffAgainstPrior(rec, null);
+    expect(diffed.changedFields).toEqual([]);
+    expect(diffed.previousStatus).toBeNull();
+    expect(diffed.statusChangedAt).toBeTruthy();
+    expect(diffed.history).toEqual([]);
+  });
+
+  it('records a status transition into history with from/to/reason', () => {
+    const prior = canonical.diffAgainstPrior(
+      canonical.computeCanonical({ equipmentId: 'T2', lifecycleState: 'Unavailable', serviceState: 'awaiting parts' }), null
+    );
+    const next = canonical.computeCanonical({ equipmentId: 'T2', lifecycleState: 'Unavailable', serviceState: 'Repair complete', asistNotes: 'done 10/15', asistScrapedAt: new Date().toISOString() });
+    const diffed = canonical.diffAgainstPrior(next, prior);
+    expect(diffed.previousStatus).toBe('awaiting_parts');
+    expect(diffed.status).toBe('ready_for_pickup');
+    expect(diffed.history.length).toBe(1);
+    expect(diffed.history[0]).toMatchObject({ from: 'awaiting_parts', to: 'ready_for_pickup' });
+    expect(diffed.changedFields.some(c => c.field === 'status')).toBe(true);
+    expect(diffed.statusChangeReason).toBeTruthy();
+  });
+
+  it('carries prior history/statusChangedAt when status is unchanged', () => {
+    let rec = canonical.diffAgainstPrior(canonical.computeCanonical({ equipmentId: 'T3', lifecycleState: 'Unavailable', serviceState: 'awaiting parts' }), null);
+    const firstChangedAt = rec.statusChangedAt;
+    // same status next cycle
+    const next = canonical.computeCanonical({ equipmentId: 'T3', lifecycleState: 'Unavailable', serviceState: 'awaiting parts' });
+    rec = canonical.diffAgainstPrior(next, rec);
+    expect(rec.previousStatus).toBeNull();
+    expect(rec.statusChangedAt).toBe(firstChangedAt); // unchanged -> carried
+    expect(rec.history).toEqual([]);
+  });
+
+  it('caps history at 10 transitions', () => {
+    let rec = canonical.diffAgainstPrior(canonical.computeCanonical({ equipmentId: 'T4', lifecycleState: 'Unavailable', serviceState: 'in repair' }), null);
+    const states = ['awaiting parts', 'in repair', 'awaiting parts', 'in repair', 'awaiting parts', 'in repair', 'awaiting parts', 'in repair', 'awaiting parts', 'in repair', 'awaiting parts', 'in repair'];
+    for (const s of states) {
+      const n = canonical.computeCanonical({ equipmentId: 'T4', lifecycleState: 'Unavailable', serviceState: s });
+      rec = canonical.diffAgainstPrior(n, rec);
+    }
+    expect(rec.history.length).toBeLessThanOrEqual(10);
+  });
+});
+
+describe('canonical_state — event trigger (detectChangedUnits) + buildAll with prior', () => {
+  it('treats units with no prior record as changed (first observation)', () => {
+    const rows = [{ equipmentId: 'N1', lifecycleState: 'Unavailable' }, { equipmentId: 'N2', lifecycleState: 'Available' }];
+    const changed = canonical.detectChangedUnits(rows, {});
+    expect(changed.has('N1')).toBe(true);
+    expect(changed.has('N2')).toBe(true);
+  });
+
+  it('flags a unit whose status moved and NOT one that is unchanged', () => {
+    // build prior records
+    const priorBuild = canonical.buildAll([
+      { equipmentId: 'M1', lifecycleState: 'Unavailable', serviceState: 'awaiting parts' },
+      { equipmentId: 'M2', lifecycleState: 'Unavailable', serviceState: 'in repair' },
+    ], {});
+    const prior = priorBuild.units;
+    // M1 moved to ready; M2 unchanged
+    const rows = [
+      { equipmentId: 'M1', lifecycleState: 'Unavailable', serviceState: 'Repair complete' },
+      { equipmentId: 'M2', lifecycleState: 'Unavailable', serviceState: 'in repair' },
+    ];
+    const changed = canonical.detectChangedUnits(rows, prior);
+    expect(changed.has('M1')).toBe(true);
+    expect(changed.has('M2')).toBe(false);
+  });
+
+  it('flags a unit whose offsite thread refreshed (asistScrapedAt moved)', () => {
+    const prior = canonical.buildAll([{ equipmentId: 'O1', lifecycleState: 'Unavailable', asistNotes: 'old', asistScrapedAt: '2026-10-01T00:00:00Z' }], {}).units;
+    const rows = [{ equipmentId: 'O1', lifecycleState: 'Unavailable', asistNotes: 'new', asistScrapedAt: '2026-10-14T00:00:00Z' }];
+    expect(canonical.detectChangedUnits(rows, prior).has('O1')).toBe(true);
+  });
+
+  it('buildAll with prior fills temporal fields + counts.changed', () => {
+    const prior = canonical.buildAll([{ equipmentId: 'B1', lifecycleState: 'Unavailable', serviceState: 'awaiting parts' }], {}).units;
+    const out = canonical.buildAll([{ equipmentId: 'B1', lifecycleState: 'Unavailable', serviceState: 'Repair complete' }], { prior });
+    expect(out.counts.changed).toBe(1);
+    expect(out.units.B1.previousStatus).toBe('awaiting_parts');
+    expect(out.units.B1.history.length).toBe(1);
+  });
+
+  it('mirrorFields exposes lean temporal summary without the big arrays', () => {
+    const rec = canonical.diffAgainstPrior(
+      canonical.computeCanonical({ equipmentId: 'MF', lifecycleState: 'Unavailable', serviceState: 'Repair complete' }),
+      canonical.computeCanonical({ equipmentId: 'MF', lifecycleState: 'Unavailable', serviceState: 'awaiting parts' })
+    );
+    const m = canonical.mirrorFields(rec);
+    expect(m).toHaveProperty('canonicalPreviousStatus', 'awaiting_parts');
+    expect(m).toHaveProperty('canonicalStatusChangedAt');
+    expect(m).toHaveProperty('canonicalConflictCount');
+    expect(m).not.toHaveProperty('evidence');
+    expect(m).not.toHaveProperty('history');
+  });
+});
