@@ -89,6 +89,7 @@ export function init(container) {
         <div class="tb-icon-btn" id="tb-contacts" title="Contact Book">📇</div>
         <div class="tb-icon-btn" id="tb-inbox" title="Incoming Work Requests">📋<span class="tb-notif-badge" id="tb-inbox-badge" style="display:none">0</span></div>
         <div class="tb-icon-btn" id="tb-email-triage" title="Inbox Triage (AI)">📨</div>
+        <div class="tb-icon-btn" id="tb-relay-reconcile" title="Relay ↔ Offsite updates (AI)">🔁</div>
         <div class="tb-icon-btn" id="tb-notif" title="Notifications">
           🔔<span class="tb-notif-badge" id="tb-notif-badge" style="display:none">0</span>
         </div>
@@ -242,6 +243,12 @@ export function init(container) {
   const emailTriageBtn = document.getElementById('tb-email-triage');
   if (emailTriageBtn) emailTriageBtn.addEventListener('click', () => {
     bus.emit('ui:email-triage-toggle');
+  });
+
+  // ── Relay ↔ Offsite reconcile overlay toggle ───────────────────────
+  const relayReconcileBtn = document.getElementById('tb-relay-reconcile');
+  if (relayReconcileBtn) relayReconcileBtn.addEventListener('click', () => {
+    bus.emit('ui:relay-reconcile-toggle');
   });
 
   

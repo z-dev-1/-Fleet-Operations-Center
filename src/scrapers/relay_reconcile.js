@@ -1,0 +1,282 @@
+'use strict';
+/**
+ * scrapers/relay_reconcile.js — Relay ↔ Offsite reconcile REASONING engine.
+ *
+ * The point of this module is DECISION-MAKING, not plumbing. For a down unit it
+ * hands the AI everything known — the Relay Garage conversation (internal
+ * visibility), the current repair timeline, and the Offsite vendor's own update
+ * thread (asistNotes) — and asks it to REASON like a fleet coordinator:
+ *
+ *   - Does Relay already reflect the newest Offsite update?
+ *   - What update exists in Offsite that is MISSING from Relay (the gap to fill)?
+ *   - What is the real current status, synthesized across all sources?
+ *   - What is the next step?
+ *   - Is this genuinely stale (no fresh update anywhere past the threshold)?
+ *   - If stale: what EXACT question should we ask the dealer, grounded in what
+ *     we already know (so we never ask something already answered)?
+ *
+ * Relay Garage is the internal visibility surface, so the goal is to keep it
+ * updated from the Offsite vendors as much as possible. This module produces the
+ * decision; relay_reconcile_apply.js writes the synthesized status into the app
+ * timeline (always) and posts the gap-fill / dealer-ask into the real Relay WR
+ * comment — immediately (MODE A) or staged for confirm (MODE B).
+ *
+ * Grounding rule (hard): the AI may ONLY use the data provided. It must never
+ * invent a part, date, ETC, price, or status not present in the inputs.
+ */
+
+const store = require('../store');
+const relay = require('../orcha/relay');
+let logger; try { logger = require('../utils/logger')('relay-reconcile'); } catch (_) { logger = { info() {}, warn() {}, error() {} }; }
+
+const PROMPT_CAP = 55000; // stay under the ~60k claude-code prompt cap
+const RELAY_BLOB_CAP = 6000; // chars of each long blob handed to the AI
+const OFFSITE_BLOB_CAP = 6000;
+
+// ── Config ────────────────────────────────────────────────────────────────────
+const DEFAULT_CONFIG = {
+  enabled: false,          // master switch (reasoning runs during sync when on)
+  autoPostToRelay: false,  // MODE A when true (auto-post to Relay WR during sync);
+                           // MODE B when false (stage the post for an explicit confirm).
+  staleDays: 3,            // no fresh update in this many days => stale => dealer-ask
+  maxUnitsPerSync: 8,      // cap AI calls per sync so a sync never stalls on this
+  minConfidence: 0.5,      // below this, stage/skip the Relay post (timeline still gets it)
+};
+
+function getConfig() {
+  const cfg = store.load('relayReconcileConfig', null);
+  if (!cfg || typeof cfg !== 'object') return { ...DEFAULT_CONFIG };
+  return { ...DEFAULT_CONFIG, ...cfg };
+}
+
+function saveConfig(patch) {
+  const next = { ...getConfig(), ...(patch || {}) };
+  next.enabled = !!next.enabled;
+  next.autoPostToRelay = !!next.autoPostToRelay;
+  const sd = parseInt(next.staleDays, 10);
+  next.staleDays = Number.isFinite(sd) ? Math.max(1, Math.min(30, sd)) : DEFAULT_CONFIG.staleDays;
+  const mu = parseInt(next.maxUnitsPerSync, 10);
+  next.maxUnitsPerSync = Number.isFinite(mu) ? Math.max(1, Math.min(50, mu)) : DEFAULT_CONFIG.maxUnitsPerSync;
+  const mc = parseFloat(next.minConfidence);
+  next.minConfidence = Number.isFinite(mc) ? Math.max(0, Math.min(1, mc)) : DEFAULT_CONFIG.minConfidence;
+  store.save('relayReconcileConfig', next);
+  return next;
+}
+
+// ── Unit brief (the grounded facts the AI reasons over) ────────────────────────
+// Builds a compact, labelled view of one unit's Relay + Offsite state.
+function _unitBrief(row) {
+  const r = row || {};
+  const clip = (s, n) => String(s || '').trim().replace(/\u0000/g, '').slice(0, n);
+  return {
+    equipmentId: String(r.equipmentId || '').trim(),
+    vendor: String(r.vendor || '').trim(),
+    dealerName: String(r.dealerName || r.subVendor || '').trim(),
+    lifecycleReason: String(r.lifecycleReason || '').trim(),
+    serviceState: String(r.serviceState || '').trim(),
+    completed: String(r.completed || '').trim(),
+    workDuration: String(r.workDuration || '').trim(),
+    cause: clip(r.cause, 500),
+    correction: clip(r.correction, 500),
+    issueSummary: clip(r.issueSummary, 500),
+    // Relay internal comments (what the internal team currently sees).
+    relayConversation: clip(r.fullConversation, RELAY_BLOB_CAP),
+    relayTimeline: clip(r.repairTimeline, 2500),
+    // Offsite vendor update thread (the dealer's own notes/estimate/status).
+    offsiteNotes: clip(r.asistNotes, OFFSITE_BLOB_CAP),
+    offsiteLabel: String(r.asistLabel || r.offsiteShopEvent || '').trim(),
+    offsiteUrl: String(r.asistSrUrl || r.offsiteShopEventUrl || '').trim(),
+    offsiteScrapedAt: String(r.asistScrapedAt || '').trim(),
+    // Keys used by the apply layer (not shown to the AI as "facts").
+    _serviceUrl: String(r.serviceUrl || r.pageUrl || '').trim(),
+    _workRequestId: String(r.workRequestId || '').trim(),
+  };
+}
+
+// Does this unit even have anything to reconcile? (an offsite thread or a WR to
+// post into). Units with no offsite data and no Relay WR are skipped entirely.
+function hasReconcilableData(row) {
+  const b = _unitBrief(row);
+  const hasOffsite = !!(b.offsiteNotes || b.offsiteLabel || b.offsiteUrl);
+  const canPost = !!(b._serviceUrl || b._workRequestId);
+  return hasOffsite || canPost;
+}
+
+// Days since the offsite thread was last scraped (our best "freshness" proxy),
+// falling back to workDuration (days down) when no scrape timestamp exists.
+function _daysSinceOffsite(brief) {
+  if (brief.offsiteScrapedAt) {
+    const t = Date.parse(brief.offsiteScrapedAt);
+    if (!Number.isNaN(t)) return Math.floor((Date.now() - t) / 86400000);
+  }
+  // Fallback: parse a leading number of days from workDuration ("12 days" / "12d").
+  const m = String(brief.workDuration || '').match(/(\d+)\s*d/i);
+  if (m) return parseInt(m[1], 10);
+  return null;
+}
+
+// ── Prompt ──────────────────────────────────────────────────────────────────
+function buildReconcilePrompt(brief, cfg) {
+  const lines = [];
+  const hasOffsite = !!brief.offsiteNotes;
+  lines.push('You are a fleet repair coordinator keeping an INTERNAL tracking system ("Relay Garage") up to date. ' +
+    (hasOffsite
+      ? 'This unit has an EXTERNAL vendor/dealer repair portal ("Offsite"). Compare what Relay already knows against the latest Offsite update, decide what is MISSING from Relay, and decide the next action.'
+      : 'This unit is tracked ONLY in Relay (no external Offsite portal). Read the Relay conversation, figure out WHO sent the LAST comment (the vendor, or us/internal), and decide whether we are waiting on the vendor and should post a follow-up.') +
+    ' Reason like a human coordinator — do not just summarize.');
+  lines.push('');
+  lines.push('Return STRICT JSON ONLY (no prose, no markdown), exactly this shape:');
+  lines.push('{"relayHasLatest":true|false,"missingUpdate":"the specific NEW update present in Offsite but NOT yet in Relay — empty string if none or if no Offsite","currentStatus":"one-line real current status synthesized from ALL sources","nextStep":"the concrete next action","lastCommentBy":"vendor|us|unknown — who sent the most recent Relay comment","lastCommentWhen":"the date of that last comment if shown, else empty","lastCommentGist":"a few words on what that last comment said","isStale":true|false,"dealerAsk":"the EXACT message to post asking the vendor/dealer for an update, grounded in what is already known — empty string if not needed","confidence":0.0-1.0,"reasoning":"1-2 sentences"}');
+  lines.push('');
+  lines.push('RULES:');
+  lines.push('- Use ONLY the data below. NEVER invent a part, date, ETC, price, vendor, or status that is not present. If a field is blank, treat it as unknown.');
+  lines.push('- WHO COMMENTED LAST: the Relay conversation is an oldest-first feed where each comment shows an author name and date. Identify the LAST (most recent) comment. lastCommentBy="vendor" if a dealer/vendor/technician wrote it (they gave an update), "us" if an internal/fleet/coordinator name wrote it (we asked or logged a note), "unknown" if you genuinely cannot tell. When unknown, do NOT guess a follow-up — lean on the staleness clock instead.');
+  if (hasOffsite) {
+    lines.push('- relayHasLatest=true ONLY if the Relay conversation/timeline already contains the newest substantive Offsite update. Otherwise false and put the missing content in missingUpdate.');
+    lines.push('- missingUpdate = DEDUP WITH CONTEXT: a concise postable note of what Offsite has that Relay does NOT, written in past/factual tense. Do NOT repeat anything Relay already says. You MAY add a short connecting phrase for context (e.g. "Per dealer, further to the 10/08 tow: parts arrived 10/14, repair scheduled, ETC 10/16."). Empty if Relay is already current.');
+  } else {
+    lines.push('- No Offsite portal: set relayHasLatest=true and missingUpdate="" (there is nothing external to pull in). Focus on the follow-up decision below.');
+  }
+  lines.push('- isStale=true when there is no fresh substantive update within ~' + cfg.staleDays + ' days AND the unit is not completed. If the unit is completed/ready, isStale=false.');
+  lines.push('- dealerAsk / FOLLOW-UP: produce a message to post asking the vendor for an update when EITHER (a) the unit is stale, OR (b) lastCommentBy="us" (we spoke last, so the ball is in the vendor\'s court and they have gone quiet). Make it specific — reference the known issue/vendor and the date of our last note — e.g. "Following up on the DEF pump repair — no update since our 10/3 note. Can you confirm current status and a revised ETC?". Do NOT ask for anything the vendor\'s own last comment already answered. If lastCommentBy="vendor" and it is recent (they just updated us), set dealerAsk="" — the ball is in our court, not theirs.');
+  lines.push('- If the unit appears READY/COMPLETE, say so in currentStatus, set nextStep to pickup/close, isStale=false, dealerAsk="".');
+  lines.push('');
+  lines.push('UNIT ' + brief.equipmentId + ':');
+  if (brief.vendor) lines.push('- Vendor: ' + brief.vendor + (brief.dealerName ? ' / dealer: ' + brief.dealerName : ''));
+  if (brief.lifecycleReason) lines.push('- Down reason: ' + brief.lifecycleReason);
+  if (brief.serviceState) lines.push('- Work order state: ' + brief.serviceState + (brief.completed ? ' (completed ' + brief.completed + ')' : ''));
+  if (brief.workDuration) lines.push('- Down for: ' + brief.workDuration);
+  if (brief.cause) lines.push('- Reason for repair (cause): ' + brief.cause);
+  if (brief.correction) lines.push('- Work accomplished: ' + brief.correction);
+  if (brief.issueSummary) lines.push('- Issue summary on file: ' + brief.issueSummary);
+  const daysSince = _daysSinceOffsite(brief);
+  if (daysSince !== null) lines.push('- Offsite last refreshed: ~' + daysSince + ' day(s) ago');
+  lines.push('');
+  lines.push('RELAY (internal) — current conversation + timeline:');
+  lines.push(brief.relayConversation ? brief.relayConversation : '(no Relay comments on file)');
+  if (brief.relayTimeline) { lines.push('--- Relay timeline ---'); lines.push(brief.relayTimeline); }
+  lines.push('');
+  lines.push('OFFSITE (vendor/dealer portal) — latest update thread' + (brief.offsiteLabel ? ' [' + brief.offsiteLabel + ']' : '') + ':');
+  lines.push(brief.offsiteNotes ? brief.offsiteNotes : '(no Offsite update text captured)');
+  return lines.join('\n');
+}
+
+function _parseJson(text) {
+  if (!text) return null;
+  const m = String(text).match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try { return JSON.parse(m[0]); } catch (_) {}
+  try { return JSON.parse(m[0].replace(/,\s*([}\]])/g, '$1')); } catch (_) {}
+  return null;
+}
+
+// Normalize + sanity-bound a raw AI verdict into a trusted decision object.
+function _normalizeDecision(brief, raw, cfg) {
+  const v = raw || {};
+  const str = (s, n) => String(s == null ? '' : s).trim().slice(0, n || 500);
+  let conf = parseFloat(v.confidence);
+  if (!Number.isFinite(conf)) conf = 0.5;
+  conf = Math.max(0, Math.min(1, conf));
+  const daysSince = _daysSinceOffsite(brief);
+  // Deterministic staleness guard: trust the AI, but also never mark a
+  // completed unit stale, and surface our own staleness signal to the apply layer.
+  const completed = /complete|closed|ready|done|cancel/i.test(brief.serviceState + ' ' + brief.completed);
+  let isStale = !!v.isStale && !completed;
+  if (daysSince !== null && daysSince < cfg.staleDays) isStale = false;
+  const missingUpdate = str(v.missingUpdate, 1500);
+  const lastCommentBy = ['vendor', 'us', 'unknown'].includes(String(v.lastCommentBy)) ? v.lastCommentBy : 'unknown';
+  // A follow-up to the vendor is warranted when the unit is stale OR when WE
+  // spoke last (ball is in the vendor's court and they have gone quiet) — but
+  // never when it's completed, and never when the vendor just updated us.
+  const followUpNeeded = !completed && (isStale || lastCommentBy === 'us');
+  const dealerAsk = (followUpNeeded) ? str(v.dealerAsk, 1000) : '';
+  return {
+    equipmentId: brief.equipmentId,
+    relayHasLatest: !!v.relayHasLatest,
+    missingUpdate,
+    currentStatus: str(v.currentStatus, 400),
+    nextStep: str(v.nextStep, 400),
+    lastCommentBy,
+    lastCommentWhen: str(v.lastCommentWhen, 60),
+    lastCommentGist: str(v.lastCommentGist, 200),
+    isStale,
+    followUpNeeded,
+    dealerAsk,
+    confidence: conf,
+    reasoning: str(v.reasoning, 500),
+    daysSinceOffsite: daysSince,
+    completed,
+    decidedAt: new Date().toISOString(),
+  };
+}
+
+// Deterministic fallback decision when the AI is unavailable (no fabrication —
+// just flags staleness from the clock and leaves gap-fill to a human).
+function _fallbackDecision(brief, cfg) {
+  const daysSince = _daysSinceOffsite(brief);
+  const completed = /complete|closed|ready|done|cancel/i.test(brief.serviceState + ' ' + brief.completed);
+  const isStale = !completed && daysSince !== null && daysSince >= cfg.staleDays;
+  return {
+    equipmentId: brief.equipmentId,
+    relayHasLatest: null,
+    missingUpdate: '',
+    currentStatus: '(AI unavailable) ' + (brief.serviceState || brief.lifecycleReason || 'status unknown'),
+    nextStep: isStale ? 'Request an update from the dealer.' : '',
+    lastCommentBy: 'unknown',
+    lastCommentWhen: '',
+    lastCommentGist: '',
+    isStale,
+    followUpNeeded: isStale,
+    dealerAsk: isStale ? ('No recent update on ' + (brief.equipmentId) + (brief.vendor ? ' at ' + brief.vendor : '') + ' — can you confirm current repair status and ETC?') : '',
+    confidence: 0,
+    reasoning: 'AI unavailable; staleness inferred from last-refresh clock only.',
+    daysSinceOffsite: daysSince,
+    completed,
+    aiUnavailable: true,
+    decidedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * reconcileUnit(row, opts) -> Promise<decision>
+ * Pure reasoning for ONE unit. Does NOT write anything. opts: { signal, requestId, cfg }.
+ */
+async function reconcileUnit(row, opts) {
+  opts = opts || {};
+  const cfg = opts.cfg || getConfig();
+  const brief = _unitBrief(row);
+  if (!brief.equipmentId) return null;
+  const prompt = buildReconcilePrompt(brief, cfg);
+  if (prompt.length > PROMPT_CAP) { /* already clipped per-field; proceed */ }
+  let decision;
+  try {
+    const rawText = await relay.ask(prompt, { signal: opts.signal, requestId: opts.requestId });
+    const parsed = _parseJson(rawText);
+    decision = parsed ? _normalizeDecision(brief, parsed, cfg) : _fallbackDecision(brief, cfg);
+  } catch (e) {
+    logger.warn('[relay-reconcile] AI failed for ' + brief.equipmentId + ': ' + e.message);
+    decision = _fallbackDecision(brief, cfg);
+  }
+  // Attach the keys the apply layer needs to post into the right Relay WR.
+  decision._serviceUrl = brief._serviceUrl;
+  decision._workRequestId = brief._workRequestId;
+  decision.vendor = brief.vendor;
+  decision.dealerName = brief.dealerName;
+  decision.offsiteUrl = brief.offsiteUrl;
+  return decision;
+}
+
+module.exports = {
+  DEFAULT_CONFIG,
+  getConfig,
+  saveConfig,
+  buildReconcilePrompt,
+  reconcileUnit,
+  hasReconcilableData,
+  // exported for tests / reuse
+  _unitBrief,
+  _daysSinceOffsite,
+  _normalizeDecision,
+  _fallbackDecision,
+  _parseJson,
+};

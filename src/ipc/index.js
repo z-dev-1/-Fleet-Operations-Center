@@ -31,6 +31,7 @@ const { registerDailyTasksIPC }  = require('./daily-tasks');
 const { registerLongDwellIPC }     = require('./long-dwell');
 const { registerSchedulerIPC }     = require('./scheduler');
 const { registerEmailTriageIPC }   = require('./email-triage');
+const { registerRelayReconcileIPC } = require('./relay-reconcile');
 const logger = require('../utils/logger')('ipc');
 
 function registerAllIPC(ctx) {
@@ -54,6 +55,7 @@ function registerAllIPC(ctx) {
   registerLongDwellIPC();
   registerSchedulerIPC(ctx);
   registerEmailTriageIPC(ctx);
+  registerRelayReconcileIPC(ctx);
   const { registerContactsHandlers } = require('./contacts');
   registerContactsHandlers();
   logger.info('All IPC handlers registered');

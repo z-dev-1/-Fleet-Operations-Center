@@ -203,6 +203,18 @@ const REGISTRY = {
   //     kept:    { '<senderKey>': {count,lastAt} },
   //     keywords:{ deleted:{word:count}, kept:{word:count} } }.
   emailTriageLearning:     () => path.join(P.dataDir, 'email_triage_learning.json'),
+  // Relay ↔ Offsite reconcile (2026-10) — see src/scrapers/relay_reconcile.js.
+  // Config: { enabled, autoPostToRelay (MODE A vs MODE B), staleDays,
+  //   maxUnitsPerSync, minConfidence }.
+  relayReconcileConfig:    () => path.join(P.dataDir, 'relay_reconcile_config.json'),
+  // MODE B staging queue: Relay-comment / dealer-ask posts awaiting an explicit
+  // confirm before they are written to the real AAP work request. Shape:
+  //   { items: [ { id, equipmentId, serviceUrl, kind:'gap-fill'|'dealer-ask',
+  //       text, decision, stagedAt, state:'pending'|'posted'|'dismissed' } ] }.
+  relayReconcilePending:   () => path.join(P.dataDir, 'relay_reconcile_pending.json'),
+  // Dedup ledger so the same gap-fill / dealer-ask isn't re-staged or re-posted
+  // on every 5-min rescan. Keyed by equipmentId -> { lastGapSig, lastAskSig, lastAt }.
+  relayReconcileLog:       () => path.join(P.dataDir, 'relay_reconcile_log.json'),
 };
 
 function _resolvePath(name) {

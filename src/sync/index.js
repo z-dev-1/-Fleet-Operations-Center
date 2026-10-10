@@ -542,6 +542,46 @@ function createSyncEngine(ctx) {
         .catch(e => logger.error('Orcha Deep Scan error (non-fatal):', e.message))
         .finally(() => { _deepScanInProgress = false; }); }, 15000); // Wait 15s for relay extraction to finish
 
+      // ── Relay ↔ Offsite reconcile — non-blocking, non-fatal ──────────────
+      // For down units that have offsite data / a Relay WR, let the AI compare
+      // Relay comments against the Offsite vendor update thread and decide the
+      // gaps + next action. Always writes the synthesized status into the unit
+      // timeline; the Relay WR comment post is MODE A (auto) or MODE B (staged
+      // for confirm) per config. Runs after the deep scan so relay/offsite data
+      // is fully merged. Bounded by cfg.maxUnitsPerSync so it never stalls sync.
+      setTimeout(() => {
+        (async () => {
+          try {
+            const reconcile = require('../scrapers/relay_reconcile');
+            const cfg = reconcile.getConfig();
+            if (!cfg.enabled) return;
+            const apply = require('../scrapers/relay_reconcile_apply');
+            const fresh = store.load('fleetData', {});
+            const rows = Array.isArray(fresh.rows) ? fresh.rows : [];
+            const down = rows.filter(r =>
+              (r.lifecycleState || '').toLowerCase().includes('unavail') &&
+              reconcile.hasReconcilableData(r));
+            const targets = down.slice(0, cfg.maxUnitsPerSync);
+            if (!targets.length) return;
+            logger.info('[relay-reconcile] running on ' + targets.length + ' down unit(s) (mode ' + (cfg.autoPostToRelay ? 'A/auto' : 'B/staged') + ')');
+            let posted = 0, staged = 0;
+            for (const row of targets) {
+              try {
+                const decision = await reconcile.reconcileUnit(row, { cfg });
+                if (!decision) continue;
+                const r = await apply.applyReconcile(decision, { cfg });
+                for (const p of (r.posts || [])) { if (p.action === 'posted') posted++; if (p.action === 'staged') staged++; }
+              } catch (ue) {
+                logger.warn('[relay-reconcile] unit ' + (row.equipmentId || '?') + ' failed (non-fatal): ' + ue.message);
+              }
+            }
+            logger.info('[relay-reconcile] done — ' + posted + ' posted, ' + staged + ' staged for confirm');
+          } catch (e) {
+            logger.warn('[relay-reconcile] pass error (non-fatal): ' + e.message);
+          }
+        })();
+      }, 20000); // after the deep scan's 15s relay-settle window
+
       // ── Bubble notifications — status-change detection ───────────────────
       const prevRows = (ctx.lastData && ctx.lastData._prevRows) || [];
       const prevMap  = {};

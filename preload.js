@@ -144,6 +144,18 @@ expose('emailTriage', {
   onUpdated:    (cb)             => on('emailTriage:updated', cb),
 });
 
+// ── Relay ↔ Offsite reconcile ───────────────────────────────────────────────
+expose('relayReconcile', {
+  getConfig:  ()            => ipcRenderer.invoke('relayReconcile:get-config'),
+  setConfig:  (patch)       => ipcRenderer.invoke('relayReconcile:set-config', patch),
+  getPending: ()            => ipcRenderer.invoke('relayReconcile:get-pending'),
+  confirm:    (id)          => ipcRenderer.invoke('relayReconcile:confirm', id),
+  dismiss:    (id)          => ipcRenderer.invoke('relayReconcile:dismiss', id),
+  runUnit:    (equipmentId) => ipcRenderer.invoke('relayReconcile:run-unit', equipmentId),
+  draftForSplit: (equipmentId, side) => ipcRenderer.invoke('relayReconcile:draft-for-split', equipmentId, side),
+  onUpdated:  (cb)          => on('relayReconcile:updated', cb),
+});
+
 // ── Long Dwell Units (Analytics tab) ──────────────────────────────────────
 expose('longDwell', {
   getAll:     ()            => ipcRenderer.invoke('long-dwell:get-all'),

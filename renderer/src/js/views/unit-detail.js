@@ -1079,6 +1079,28 @@ async function _injectAISplitDraft(webview, unit, side) {
     ).catch(function(){});
   }
 
+  // ── Reconcile-first (2026-10): if the Relay↔Offsite reconcile engine is
+  // enabled, use its decision — the gap-fill (an Offsite update Relay is
+  // missing) for the Relay pane, or the escalated vendor follow-up / dealer-ask
+  // for the Offsite pane. This is the SAME reasoning that runs during sync, so
+  // Split View auto-fills exactly what would be posted. If the engine is off,
+  // low-confidence, or produces nothing, we fall through to the existing
+  // simple draft below (no regression).
+  try {
+    if (window.relayReconcile && window.relayReconcile.draftForSplit) {
+      var rec = await window.relayReconcile.draftForSplit(equipId, side);
+      if (rec && rec.ok && rec.text && rec.text.length > 10 && webview.isConnected) {
+        webview.executeJavaScript(
+          '(function(){' + selector +
+          'if(ta){ta.focus();ta.value="";document.execCommand("insertText",false,' + JSON.stringify(rec.text) + ');ta.style.background="#e6f7ff";ta.blur();' +
+          'var ind=document.createElement("div");ind.id="ai-draft-indicator";ind.textContent="\\u2705 Reconcile draft (Relay \\u2194 Offsite)";ind.style.cssText="font-size:11px;color:#3fb950;padding:4px 8px;margin-top:4px;";ta.parentElement.insertBefore(ind,ta.nextSibling);setTimeout(function(){if(ind)ind.remove();},4000);}' +
+          '})()'
+        ).catch(function(){});
+        return; // reconcile draft used — skip the generic AI draft below
+      }
+    }
+  } catch (e) { /* reconcile unavailable — fall through to the generic draft */ }
+
   // Show a small "AI drafting..." indicator near the textarea while waiting
   if (!webview.isConnected) return;
   webview.executeJavaScript(
