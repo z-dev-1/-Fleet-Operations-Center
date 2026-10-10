@@ -239,11 +239,44 @@ function _isBoilerplate(line) {
   if (!s || s.length < 6) return true;
   return _BOILERPLATE_RE.test(s);
 }
+// "Ref noise" — process/bookkeeping lines that are technically a comment but say
+// nothing about the unit's real state: bare reach/reference IDs, "reached out to
+// vendor" with no content, work-order pointers, blank acknowledgements. These
+// are poor status-change reasons, so we skip them when synthesizing one.
+const _REF_NOISE_RE = /^(sm\/?nra|nra|w\/ad|aa reach|reached out to (the )?vendor|as per reach ref|reach ref|per reach|work order #?\d|wo #?\d|ref\s*[:#]|bo\d{5,}|ro\s*#|po\s*#|https?:\/\/|disregard|please disregard|automation|recipient)\b/i;
+function _isRefNoise(line) {
+  // Strip a leading date/timeline prefix ("10/10 - ", "Oct 9, 2026: ") so the
+  // noise patterns match the actual content, not the date.
+  let s = String(line || '').trim().replace(/^\d{1,2}\/\d{1,2}(\/\d{2,4})?\s*[-:]\s*/, '').replace(/^[A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4}[^:]*:\s*/, '').trim();
+  if (!s) return true;
+  if (_REF_NOISE_RE.test(s)) return true;
+  // A line that's mostly an ID/reference token with little prose.
+  if (s.length < 40 && /\b[A-Z]{2,}\d{4,}\b/.test(s) && !/[.?!]/.test(s)) return true;
+  // Very short acknowledgements with no substance.
+  if (s.length < 8) return true;
+  return false;
+}
+// Is this text a SUBSTANTIVE update (not boilerplate, not ref-noise)?
+function _isSubstantive(text) {
+  const s = String(text || '').trim();
+  if (!s) return false;
+  return !_isBoilerplate(s) && !_isRefNoise(s);
+}
+
 // Last NON-boilerplate line of a multi-line blob (scanning upward).
 function _lastRealLine(blob) {
   const lines = String(blob || '').split('\n').map((l) => l.trim()).filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i--) {
     if (!_isBoilerplate(lines[i])) return lines[i];
+  }
+  return '';
+}
+// Last SUBSTANTIVE line (skips both boilerplate AND ref-noise), for status
+// reasons where a bare "reached out to vendor" or ref ID is useless.
+function _lastSubstantiveLine(blob) {
+  const lines = String(blob || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (_isSubstantive(lines[i])) return lines[i];
   }
   return '';
 }
@@ -253,25 +286,28 @@ function _lastRealLine(blob) {
 // real line, then the latest timeline line, then issue summary.
 function _lastMeaningfulUpdate(row) {
   const r = row || {};
-  // Best: a structured last comment from the parsed Relay/Offsite thread.
+  // Best: the latest SUBSTANTIVE comment from the parsed Relay/Offsite thread.
+  // Walk backward past ref-noise/boilerplate comments so we don't surface a
+  // bare "reached out to vendor" / ref-ID as the freshest news.
   try {
     const cp = require('../scrapers/convo_parse');
     const relayC = cp.parseConversation(_s(r.fullConversation), { cap: 20 });
     const offC = cp.parseConversation(_s(r.asistNotes), { cap: 20 });
     const arr = offC.length ? offC : relayC;
-    const last = cp.lastComment(arr);
-    if (last && last.text && !_isBoilerplate(last.text)) {
-      return { source: offC.length ? 'offsite' : 'relay', text: _clipVal(last.text, 300), at: last.date || _s(r.asistScrapedAt) };
+    for (let i = arr.length - 1; i >= 0; i--) {
+      if (arr[i] && arr[i].text && _isSubstantive(arr[i].text)) {
+        return { source: offC.length ? 'offsite' : 'relay', text: _clipVal(arr[i].text, 300), at: arr[i].date || _s(r.asistScrapedAt) };
+      }
     }
   } catch (_) { /* parser unavailable — fall through to line scan */ }
   const offsite = _s(r.asistNotes);
   if (offsite) {
-    const line = _lastRealLine(offsite);
+    const line = _lastSubstantiveLine(offsite) || _lastRealLine(offsite);
     if (line) return { source: 'offsite', text: _clipVal(line, 300), at: _s(r.asistScrapedAt) };
   }
   const tl = _s(r.repairTimeline);
   if (tl) {
-    const last = _lastRealLine(tl);
+    const last = _lastSubstantiveLine(tl) || _lastRealLine(tl);
     if (last) return { source: 'timeline', text: _clipVal(last, 300), at: '' };
   }
   const sum = _s(r.issueSummary || r.correction);
@@ -565,12 +601,18 @@ function diffAgainstPrior(record, prior) {
   record.previousStatus = statusChanged ? prior.status : (prior.previousStatus || null);
   record.statusChangedAt = statusChanged ? now : (prior.statusChangedAt || now);
 
-  // Reason: prefer an AI-supplied reason; else synthesize from the drivers.
+  // Reason: prefer an AI-supplied reason; else synthesize from the drivers — but
+  // ONLY from a SUBSTANTIVE update. A bare ref ("as per reach ref: BO890273") or
+  // process line ("reached out to vendor") is a useless reason, so we skip those
+  // and fall back to a clean "moved X -> Y" statement rather than surface noise.
   if (statusChanged && !record.statusChangeReason) {
     const lmu = record.lastMeaningfulUpdate;
-    record.statusChangeReason = lmu && lmu.text
-      ? ('Per ' + (lmu.source || 'latest') + ': ' + lmu.text).slice(0, 300)
-      : ('Status moved ' + prior.status + ' -> ' + record.status + '.');
+    const human = (f, t) => f.replace(/_/g, ' ') + ' \u2192 ' + t.replace(/_/g, ' ');
+    if (lmu && lmu.text && _isSubstantive(lmu.text)) {
+      record.statusChangeReason = ('Per ' + (lmu.source || 'latest') + ': ' + lmu.text).slice(0, 300);
+    } else {
+      record.statusChangeReason = 'Status moved ' + human(prior.status, record.status) + '.';
+    }
   }
   if (!statusChanged) record.statusChangeReason = prior.statusChangeReason || record.statusChangeReason || '';
 
@@ -837,4 +879,7 @@ module.exports = {
   _lastMeaningfulUpdate,
   _detectObviousConflicts,
   _normalizeConflicts,
+  _isRefNoise,
+  _isSubstantive,
+  _lastSubstantiveLine,
 };

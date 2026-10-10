@@ -360,6 +360,32 @@ describe('canonical_state — temporal diffing (diffAgainstPrior)', () => {
     expect(rec.history).toEqual([]);
   });
 
+  it('synthesizes a CLEAN reason (not ref-noise) when the latest line is bookkeeping', () => {
+    const prior = canonical.diffAgainstPrior(canonical.computeCanonical({ equipmentId: 'RN1', lifecycleState: 'Unavailable', serviceState: 'ready for pickup' }), null);
+    const next = canonical.computeCanonical({ equipmentId: 'RN1', lifecycleState: 'Unavailable', serviceState: 'awaiting parts', repairTimeline: '10/10 - as per reach ref : BO890273 | reached out to vendor on for the updates. Work Order #1' });
+    const d = canonical.diffAgainstPrior(next, prior);
+    expect(d.statusChangeReason).not.toMatch(/reach ref|BO890273|reached out/i);
+    expect(d.statusChangeReason).toContain('Status moved');
+    expect(d.statusChangeReason).toContain('awaiting parts');
+  });
+
+  it('keeps a SUBSTANTIVE latest line as the reason', () => {
+    const prior = canonical.diffAgainstPrior(canonical.computeCanonical({ equipmentId: 'RN2', lifecycleState: 'Unavailable', serviceState: 'ready for pickup' }), null);
+    const next = canonical.computeCanonical({ equipmentId: 'RN2', lifecycleState: 'Unavailable', serviceState: 'awaiting parts', repairTimeline: '10/09 - Dealer confirmed harness Part #85152780 ordered, ETC 10/11.' });
+    const d = canonical.diffAgainstPrior(next, prior);
+    expect(d.statusChangeReason).toContain('harness');
+    expect(d.statusChangeReason).toContain('ETC 10/11');
+  });
+
+  it('_isRefNoise / _isSubstantive classify correctly (date-prefix stripped)', () => {
+    expect(canonical._isRefNoise('10/10 - as per reach ref : BO890273 | reached out to vendor')).toBe(true);
+    expect(canonical._isRefNoise('SM/NRA')).toBe(true);
+    expect(canonical._isRefNoise('NRA')).toBe(true);
+    expect(canonical._isRefNoise('https://aap-na.corp.amazon.com/v2/service/abc')).toBe(true);
+    expect(canonical._isSubstantive('Dealer confirmed harness Part #85152780 ordered, ETC 10/11.')).toBe(true);
+    expect(canonical._isSubstantive('10/09 - Parts arrived, repair scheduled for 10/16.')).toBe(true);
+  });
+
   it('caps history at 10 transitions', () => {
     let rec = canonical.diffAgainstPrior(canonical.computeCanonical({ equipmentId: 'T4', lifecycleState: 'Unavailable', serviceState: 'in repair' }), null);
     const states = ['awaiting parts', 'in repair', 'awaiting parts', 'in repair', 'awaiting parts', 'in repair', 'awaiting parts', 'in repair', 'awaiting parts', 'in repair', 'awaiting parts', 'in repair'];
