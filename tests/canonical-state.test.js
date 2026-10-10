@@ -160,6 +160,22 @@ describe('canonical_state — buildAll + mirrorFields', () => {
     expect(units.X.aiReconciled).toBe(true);
   });
 
+  it('repairs mojibake in emitted text (double-encoded middle dot / em dash)', () => {
+    // "Ã‚Â·" is a middle dot that was UTF-8 decoded as Latin-1 twice;
+    // "Ã¢â‚¬â€œ" is an en dash likewise. The record must come out clean.
+    const rec = canonical.reconcileCanonical(
+      { equipmentId: 'MOJI', lifecycleState: 'Unavailable', vendor: 'Amerit' },
+      { decision: { equipmentId: 'MOJI', currentStatus: 'Waiting on parts Ã‚Â· ETC Ã¢â‚¬â€œ next week', nextStep: 'Chase dealer', confidence: 0.8, relayHasLatest: true } }
+    );
+    expect(rec.situation).not.toMatch(/[ÃÂ]/);
+    expect(rec.situation).toContain('·');
+  });
+
+  it('leaves clean ASCII/UTF-8 text untouched', () => {
+    const rec = canonical.computeCanonical({ equipmentId: 'CLEAN', lifecycleState: 'Unavailable', lifecycleReason: 'Engine fault', vendor: 'Amerit', workDuration: '5 days' });
+    expect(rec.situation).toBe('Engine fault - @ Amerit - 5 days down');
+  });
+
   it('mirrorFields produces the canonical* prefixed snapshot', () => {
     const rec = canonical.computeCanonical({ equipmentId: 'M', lifecycleState: 'Unavailable', serviceState: 'awaiting parts' });
     const m = canonical.mirrorFields(rec);

@@ -54,7 +54,35 @@ const STATUSES = [
 function isValidStatus(s) { return STATUSES.includes(String(s || '')); }
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
-function _s(v) { return String(v == null ? '' : v).trim(); }
+
+// Clean "mojibake" — text already UTF-8 but decoded once-or-twice as
+// Windows-1252/Latin-1 upstream, so a middle dot "·" shows up as "Ã‚Â·", an em
+// dash "—" as "Ã¢â‚¬â€", a right single quote "’" as "Ã¢â‚¬â„¢", etc. Blindly
+// re-decoding bytes is unreliable (triple-layered sequences produce U+FFFD and
+// can damage good text), so instead we SANITIZE deterministically: map the
+// handful of well-known garbled sequences to their intended ASCII equivalent
+// (longest-first so multi-char sequences win), then strip any leftover
+// Ã/Â/â€ noise. This can only remove garbage — clean text with no mojibake
+// signature is returned untouched.
+const _MOJIBAKE_MAP = [
+  ['Ã¢â‚¬â„¢', "'"], ['Ã¢â‚¬Å“', '"'], ['Ã¢â‚¬\u009d', '"'],
+  ['Ã¢â‚¬â€œ', '-'], ['Ã¢â‚¬â€', '-'], ['Ã¢â‚¬Â¦', '...'],
+  ['Ã¢â€šÂ¬', 'EUR'], ['Ã‚Â·', '·'], ['Ã‚', ''], ['Â·', '·'],
+  ['â€™', "'"], ['â€œ', '"'], ['â€\u009d', '"'], ['â€“', '-'], ['â€”', '-'], ['â€¦', '...'],
+];
+function _fixMojibake(input) {
+  let s = String(input == null ? '' : input);
+  if (!/[ÃÂâ]/.test(s)) return s; // no mojibake signature — leave clean text alone
+  for (const [bad, good] of _MOJIBAKE_MAP) s = s.split(bad).join(good);
+  // Strip any residual lone noise bytes left by deeper corruption, plus the
+  // U+FFFD replacement char if present. Keep normal accented chars intact.
+  s = s.replace(/[ÃÂ](?=[\s·])/g, '').replace(/\uFFFD/g, '');
+  return s;
+}
+
+// Trim + repair mojibake + strip stray NULs. Use for any human-facing string we
+// emit into the canonical record.
+function _s(v) { return _fixMojibake(String(v == null ? '' : v)).replace(/\u0000/g, '').trim(); }
 function _lc(v) { return _s(v).toLowerCase(); }
 function _has(hay, re) { return re.test(_lc(hay)); }
 
@@ -182,7 +210,7 @@ function computeCanonical(row) {
   if (_s(r.lifecycleReason)) situationBits.push(_s(r.lifecycleReason));
   if (_s(r.vendor)) situationBits.push('@ ' + _s(r.vendor));
   if (_s(r.workDuration)) situationBits.push(_s(r.workDuration) + ' down');
-  const situation = situationBits.join(' · ').slice(0, 300);
+  const situation = situationBits.join(' - ').slice(0, 300);
   return {
     equipmentId,
     status,
