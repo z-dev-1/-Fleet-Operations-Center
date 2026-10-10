@@ -303,6 +303,12 @@ function computeCanonical(row) {
     waitingOn,
     flags,
     aiReconciled: false,
+    // Next-action intent — the deterministic tier can't read a conversation to
+    // detect an unanswered question, so it stays 'none'/empty here; the AI tier
+    // (reconcileCanonical) fills these in. Keeps the record shape consistent.
+    nextActionType: 'none',
+    awaitingReply: '',
+    threadOfRecord: '',
     // Audit trail — the facts behind the conclusion, the freshest real update,
     // and any obvious cross-source disagreement (deterministic).
     evidence: _buildEvidence(r, status, source),
@@ -339,9 +345,15 @@ function _statusFromDecision(decision, baseStatus) {
   return baseStatus;
 }
 
-// waitingOn from the reconcile decision's richer signal (who commented last).
+// waitingOn from the reconcile decision's richer signal. The next-action intent
+// is the strongest signal (it already resolved the back-and-forth):
+//   reply_to_vendor -> WE owe the vendor an answer ('us')
+//   request_update  -> THEY owe us the next thing      ('vendor')
+// Fall back to who-commented-last when there's no clear intent.
 function _waitingOnFromDecision(decision, fallback) {
   const d = decision || {};
+  if (d.nextActionType === 'reply_to_vendor' || d.weOweReply) return 'us';     // we must reply
+  if (d.nextActionType === 'request_update') return 'vendor';                  // they owe us
   if (d.followUpNeeded || d.lastCommentBy === 'us') return 'vendor'; // ball in vendor's court
   if (d.lastCommentBy === 'vendor') return 'us';                     // they updated us
   return fallback || '';
@@ -388,6 +400,10 @@ function reconcileCanonical(row, opts) {
   if (decision.followUpNeeded) addFlag('needs_followup');
   if (_s(decision.dealerAsk)) addFlag('dealer_ask');
   if (decision.relayHasLatest === false && _s(decision.missingUpdate)) addFlag('relay_gap');
+  // Intent flags — an open vendor question we owe an answer to is the single
+  // most action-worthy state, so flag it loudly.
+  if (decision.nextActionType === 'reply_to_vendor' || decision.weOweReply) addFlag('question_open');
+  if (decision.nextActionType === 'request_update') addFlag('awaiting_vendor_reply');
 
   // Evidence: start from the deterministic set, then add what the AI pulled from
   // Offsite that Relay lacked (the gap-fill) as an offsite fact that drove the
@@ -395,6 +411,12 @@ function reconcileCanonical(row, opts) {
   const evidence = Array.isArray(base.evidence) ? base.evidence.slice() : [];
   if (_s(decision.missingUpdate)) {
     evidence.unshift({ source: 'offsite', field: 'missingUpdate', value: _clipVal(decision.missingUpdate), observedAt: '', usedInConclusion: true });
+  }
+  // An open question the vendor asked us is a decisive fact — record it as
+  // evidence from the thread it came from so the audit trail shows why we owe a reply.
+  if (_s(decision.awaitingReply)) {
+    const qSrc = decision.threadOfRecord === 'relay' ? 'relay' : 'offsite';
+    evidence.unshift({ source: qSrc, field: 'openQuestion', value: _clipVal(decision.awaitingReply, 300), observedAt: '', usedInConclusion: true });
   }
 
   // Conflicts: prefer the AI's reasoned conflicts when it returned any (strictly
@@ -419,7 +441,13 @@ function reconcileCanonical(row, opts) {
     waitingOn,
     flags,
     aiReconciled: true,
-    evidence: evidence.slice(0, _EVIDENCE_CAP + 1),
+    // Next-action intent — what WE must do next (reply to a vendor question /
+    // request an update / post to Relay / nothing) + the open question text and
+    // which thread the exchange is in. These drive the apply + Split View routing.
+    nextActionType: ['reply_to_vendor', 'request_update', 'post_to_relay', 'none'].includes(decision.nextActionType) ? decision.nextActionType : 'none',
+    awaitingReply: _clipVal(decision.awaitingReply, 300),
+    threadOfRecord: decision.threadOfRecord === 'relay' ? 'relay' : (decision.threadOfRecord === 'offsite' ? 'offsite' : ''),
+    evidence: evidence.slice(0, _EVIDENCE_CAP + 2),
     conflicts,
     lastMeaningfulUpdate,
     // AI's grounded reason for a status change (if it supplied one); the real
@@ -550,6 +578,11 @@ function mirrorFields(record) {
     canonicalStatusChangeReason: r.statusChangeReason || '',
     canonicalChangedFieldCount: Array.isArray(r.changedFields) ? r.changedFields.length : 0,
     canonicalConflictCount: Array.isArray(r.conflicts) ? r.conflicts.length : 0,
+    // Next-action intent (lean, mirrored so the grid/Slack can read it off the row).
+    canonicalNextActionType: r.nextActionType || 'none',
+    canonicalAwaitingReply: r.awaitingReply || '',
+    canonicalThreadOfRecord: r.threadOfRecord || '',
+    canonicalQuestionOpen: !!(Array.isArray(r.flags) && r.flags.includes('question_open')),
   };
 }
 
@@ -684,6 +717,9 @@ function fromRow(row) {
     waitingOn: r.canonicalWaitingOn || '',
     flags: Array.isArray(r.canonicalFlags) ? r.canonicalFlags.slice() : [],
     aiReconciled: !!r.canonicalAiReconciled,
+    nextActionType: r.canonicalNextActionType || 'none',
+    awaitingReply: r.canonicalAwaitingReply || '',
+    threadOfRecord: r.canonicalThreadOfRecord || '',
     updatedAt: r.canonicalUpdatedAt || null,
   };
 }
@@ -737,6 +773,8 @@ function signalTokens(rowOrId, opts) {
   if (Number.isFinite(rec.confidence)) t.push('conf=' + rec.confidence.toFixed(2));
   if (rec.stale) t.push('STALE');
   if (rec.waitingOn) t.push('wait=' + rec.waitingOn);
+  if (rec.nextActionType && rec.nextActionType !== 'none') t.push('action=' + rec.nextActionType);
+  if (rec.awaitingReply) t.push('OPEN-Q="' + rec.awaitingReply.slice(0, 80) + '"');
   if (rec.aiReconciled) t.push('ai-reconciled');
   if (rec.nextStep) t.push('next="' + rec.nextStep.slice(0, 80) + '"');
   return t.join(' ');

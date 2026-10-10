@@ -126,7 +126,7 @@ function buildReconcilePrompt(brief, cfg) {
     ' Reason like a human coordinator — do not just summarize.');
   lines.push('');
   lines.push('Return STRICT JSON ONLY (no prose, no markdown), exactly this shape:');
-  lines.push('{"relayHasLatest":true|false,"missingUpdate":"the specific NEW update present in Offsite but NOT yet in Relay — empty string if none or if no Offsite","currentStatus":"one-line real current status synthesized from ALL sources","nextStep":"the concrete next action","lastCommentBy":"vendor|us|unknown — who sent the most recent Relay comment","lastCommentWhen":"the date of that last comment if shown, else empty","lastCommentGist":"a few words on what that last comment said","isStale":true|false,"dealerAsk":"the EXACT message to post asking the vendor/dealer for an update, grounded in what is already known — empty string if not needed","confidence":0.0-1.0,"reasoning":"1-2 sentences","conflicts":[{"field":"status|eta|parts|location","positions":[{"source":"aap|relay|offsite","value":"what that source says"}],"resolution":"aap|relay|offsite — which source you trusted","reason":"why that source wins (e.g. fresher)"}],"statusChangeReason":"if the status appears to have CHANGED from the prior updates, the grounded reason — else empty string"}');
+  lines.push('{"relayHasLatest":true|false,"missingUpdate":"the specific NEW update present in Offsite but NOT yet in Relay — empty string if none or if no Offsite","currentStatus":"one-line real current status synthesized from ALL sources","nextStep":"the concrete next action","lastCommentBy":"vendor|us|unknown — who sent the most recent comment in the thread","lastCommentWhen":"the date of that last comment if shown, else empty","lastCommentGist":"a few words on what that last comment said","nextActionType":"reply_to_vendor|request_update|post_to_relay|none — SEE THE NEXT-ACTION RULE","awaitingReply":"when nextActionType=reply_to_vendor: the exact question the vendor asked us that still needs OUR answer — else empty","weOweReply":true|false,"threadOfRecord":"relay|offsite — which thread the live back-and-forth is happening in","isStale":true|false,"dealerAsk":"the EXACT message to post to the vendor — a chase for what we are waiting on (request_update) OR our answer to their question (reply_to_vendor) — grounded in what is already known; empty if none needed","confidence":0.0-1.0,"reasoning":"1-2 sentences","conflicts":[{"field":"status|eta|parts|location","positions":[{"source":"aap|relay|offsite","value":"what that source says"}],"resolution":"aap|relay|offsite — which source you trusted","reason":"why that source wins (e.g. fresher)"}],"statusChangeReason":"if the status appears to have CHANGED from the prior updates, the grounded reason — else empty string"}');
   lines.push('');
   lines.push('RULES:');
   lines.push('- Use ONLY the data below. NEVER invent a part, date, ETC, price, vendor, or status that is not present. If a field is blank, treat it as unknown.');
@@ -138,7 +138,13 @@ function buildReconcilePrompt(brief, cfg) {
     lines.push('- No Offsite portal: set relayHasLatest=true and missingUpdate="" (there is nothing external to pull in). Focus on the follow-up decision below.');
   }
   lines.push('- isStale=true when there is no fresh substantive update within ~' + cfg.staleDays + ' days AND the unit is not completed. If the unit is completed/ready, isStale=false.');
-  lines.push('- dealerAsk / FOLLOW-UP: produce a message to post asking the vendor for an update when EITHER (a) the unit is stale, OR (b) lastCommentBy="us" (we spoke last, so the ball is in the vendor\'s court and they have gone quiet). Make it specific — reference the known issue/vendor and the date of our last note — e.g. "Following up on the DEF pump repair — no update since our 10/3 note. Can you confirm current status and a revised ETC?". Do NOT ask for anything the vendor\'s own last comment already answered. If lastCommentBy="vendor" and it is recent (they just updated us), set dealerAsk="" — the ball is in our court, not theirs.');
+  lines.push('- NEXT-ACTION (the most important decision): read the LAST exchange and classify what WE must do next. This is a back-and-forth, so track whether the last message was a QUESTION and whether it was already ANSWERED:');
+  lines.push('    * reply_to_vendor — the vendor\'s LAST message asks US a question that we have NOT yet answered (e.g. "order normal or with freight?", "approve this estimate?"). We owe them an answer. Set weOweReply=true and put their exact open question in awaitingReply. dealerAsk = our answer ONLY if it is obvious from the data; if it is a judgment call (cost/approval), leave dealerAsk="" and just surface the question.');
+  lines.push('    * request_update — WE sent the last message (we answered their question, or we asked them something), so the ball is in THEIR court and they owe US the next thing. dealerAsk = a chase for THAT specific thing. CRITICAL: do NOT re-ask or re-authorize what we already said. If we already told them "get us the freight estimate," the chase is "any update on that freight estimate / revised ETC?" — NOT "please advise whether to use freight" (we already advised). You are NEVER "awaiting our own guidance" — if we spoke last, we are waiting on them.');
+  lines.push('    * post_to_relay — the only gap is that Offsite has an update Relay lacks (no open question either way); the action is to write that update into Relay internally. No vendor message needed (dealerAsk="").');
+  lines.push('    * none — current/complete, or the vendor JUST updated us and nothing is owed yet.');
+  lines.push('  threadOfRecord = where the live back-and-forth is (offsite if the exchange is in the Offsite portal, relay if in Relay). A reply/chase to the vendor must go to THAT thread.');
+  lines.push('- dealerAsk / FOLLOW-UP: when you do produce a vendor message, make it specific — reference the known issue/vendor and the date of the relevant note — e.g. "Following up on the DEF pump repair — no update since our 10/3 note. Can you confirm current status and a revised ETC?". Do NOT ask for anything the thread already answered. If nextActionType=none set dealerAsk="".');
   lines.push('- CONFLICTS: only when two sources genuinely DISAGREE about the same fact (e.g. AAP lifecycle still says unavailable but Offsite says the repair is complete; or Relay shows an older ETC than Offsite). For each real disagreement add one conflicts[] entry listing each source\'s position, which source you trusted (resolution), and why (reason — usually "fresher"/"more specific"). If there is no genuine disagreement, return "conflicts":[]. NEVER invent a source that is not in the data below.');
   lines.push('- statusChangeReason: ONLY if the current status clearly moved from what the prior Relay/timeline updates showed (e.g. was awaiting parts, now ready). Give the grounded one-line reason. If no clear change, return "".');
   lines.push('- If the unit appears READY/COMPLETE, say so in currentStatus, set nextStep to pickup/close, isStale=false, dealerAsk="".');
@@ -187,11 +193,36 @@ function _normalizeDecision(brief, raw, cfg) {
   if (daysSince !== null && daysSince < cfg.staleDays) isStale = false;
   const missingUpdate = str(v.missingUpdate, 1500);
   const lastCommentBy = ['vendor', 'us', 'unknown'].includes(String(v.lastCommentBy)) ? v.lastCommentBy : 'unknown';
-  // A follow-up to the vendor is warranted when the unit is stale OR when WE
-  // spoke last (ball is in the vendor's court and they have gone quiet) — but
-  // never when it's completed, and never when the vendor just updated us.
-  const followUpNeeded = !completed && (isStale || lastCommentBy === 'us');
-  const dealerAsk = (followUpNeeded) ? str(v.dealerAsk, 1000) : '';
+
+  // ── Next-action INTENT ──────────────────────────────────────────────────────
+  // Classify what WE must do next, derived from the last exchange. Trust the
+  // AI's call, but sanity-reconcile it with the deterministic signals so a
+  // malformed verdict can't produce a nonsensical action.
+  const ALLOWED_INTENTS = ['reply_to_vendor', 'request_update', 'post_to_relay', 'none'];
+  let nextActionType = ALLOWED_INTENTS.includes(String(v.nextActionType)) ? v.nextActionType : '';
+  const weOweReply = (nextActionType === 'reply_to_vendor') ? true : !!v.weOweReply;
+  const awaitingReply = weOweReply ? str(v.awaitingReply, 600) : '';
+  const threadOfRecord = (String(v.threadOfRecord) === 'offsite') ? 'offsite'
+    : (String(v.threadOfRecord) === 'relay') ? 'relay'
+    : (brief.offsiteNotes ? 'offsite' : 'relay'); // default to where a thread exists
+  // Fall back / reconcile when the AI didn't give a usable intent:
+  if (!nextActionType) {
+    if (completed) nextActionType = 'none';
+    else if (weOweReply) nextActionType = 'reply_to_vendor';
+    else if (missingUpdate) nextActionType = 'post_to_relay';
+    else if (isStale || lastCommentBy === 'us') nextActionType = 'request_update';
+    else nextActionType = 'none';
+  }
+  // Completed units never carry an open action.
+  if (completed) nextActionType = 'none';
+
+  // followUpNeeded == do we owe the VENDOR a message? True for a reply we owe
+  // them OR a chase we should send. post_to_relay/none are not vendor messages.
+  const followUpNeeded = !completed && (nextActionType === 'reply_to_vendor' || nextActionType === 'request_update');
+  // dealerAsk is the vendor-facing message (reply or chase). Empty for
+  // post_to_relay/none. For reply_to_vendor it may legitimately be empty when the
+  // answer is a judgment call — the open question is surfaced via awaitingReply.
+  const dealerAsk = followUpNeeded ? str(v.dealerAsk, 1000) : '';
   return {
     equipmentId: brief.equipmentId,
     relayHasLatest: !!v.relayHasLatest,
@@ -201,6 +232,10 @@ function _normalizeDecision(brief, raw, cfg) {
     lastCommentBy,
     lastCommentWhen: str(v.lastCommentWhen, 60),
     lastCommentGist: str(v.lastCommentGist, 200),
+    nextActionType,
+    awaitingReply,
+    weOweReply,
+    threadOfRecord,
     isStale,
     followUpNeeded,
     dealerAsk,
@@ -232,6 +267,13 @@ function _fallbackDecision(brief, cfg) {
     lastCommentBy: 'unknown',
     lastCommentWhen: '',
     lastCommentGist: '',
+    // No AI: we can only infer from the staleness clock. If stale, chase for an
+    // update; otherwise do nothing. We can't detect an unanswered question
+    // without the AI, so never guess reply_to_vendor here.
+    nextActionType: isStale && !completed ? 'request_update' : 'none',
+    awaitingReply: '',
+    weOweReply: false,
+    threadOfRecord: brief.offsiteNotes ? 'offsite' : 'relay',
     isStale,
     followUpNeeded: isStale,
     dealerAsk: isStale ? ('No recent update on ' + (brief.equipmentId) + (brief.vendor ? ' at ' + brief.vendor : '') + ' — can you confirm current repair status and ETC?') : '',

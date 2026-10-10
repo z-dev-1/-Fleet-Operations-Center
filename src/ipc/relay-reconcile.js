@@ -79,14 +79,25 @@ function registerRelayReconcileIPC(_ctx) {
     }
     if (decision) {
       let text = '';
+      const intent = decision.nextActionType || '';
       if (paneSide === 'offsite') {
+        // The vendor-facing pane. Fill it with the intent's vendor message:
+        //   reply_to_vendor -> OUR answer to their question (dealerAsk)
+        //   request_update  -> the chase for what we're waiting on (dealerAsk)
+        // When reply_to_vendor has no answer text (judgment call), surface the
+        // open question so the coordinator can answer it.
         text = decision.dealerAsk || '';
+        if (!text && intent === 'reply_to_vendor' && decision.awaitingReply) {
+          text = 'Vendor asked: "' + decision.awaitingReply + '" — reply needed.';
+        }
       } else {
+        // The Relay (internal) pane: the gap-fill, else the status + next step.
         if (decision.missingUpdate) text = decision.missingUpdate;
+        else if (intent === 'reply_to_vendor' && decision.awaitingReply) text = 'Open vendor question: "' + decision.awaitingReply + '" — awaiting our reply.';
         else if ((decision.followUpNeeded || decision.isStale) && decision.dealerAsk) text = decision.dealerAsk;
         else if (decision.currentStatus) text = decision.currentStatus + (decision.nextStep ? ' Next: ' + decision.nextStep : '');
       }
-      if (text) return { ok: true, text, source: 'reconcile', side: paneSide, decision };
+      if (text) return { ok: true, text, source: 'reconcile', side: paneSide, intent, awaitingReply: decision.awaitingReply || '', decision };
     }
 
     // Fallback: seed from CANONICAL STATE — populated for every unit every sync
@@ -98,21 +109,28 @@ function registerRelayReconcileIPC(_ctx) {
       const canon = require('../orcha/canonical_state').getCanonical(row);
       if (canon) {
         let text = '';
+        const intent = canon.nextActionType || '';
         if (paneSide === 'offsite') {
-          // Offsite pane = what to ask the vendor. Only when we're waiting on them.
-          if (canon.waitingOn === 'vendor' || canon.stale) {
+          // Vendor-facing pane. If the canonical record has an open vendor
+          // question, surface it (we owe a reply). Else, if we're waiting on the
+          // vendor, draft a chase.
+          if (intent === 'reply_to_vendor' && canon.awaitingReply) {
+            text = 'Vendor asked: "' + canon.awaitingReply + '" — reply needed.';
+          } else if (canon.waitingOn === 'vendor' || canon.stale) {
             text = 'Following up on ' + id + (canon.situation ? ' (' + canon.situation + ')' : '') +
               ' — can you confirm the current repair status and a revised ETC?';
           }
         } else {
-          // Relay pane = internal status + reconciled next step.
-          if (canon.situation || canon.nextStep) {
+          // Relay pane = internal status + reconciled next step (+ open question note).
+          if (intent === 'reply_to_vendor' && canon.awaitingReply) {
+            text = 'Open vendor question: "' + canon.awaitingReply + '" — awaiting our reply.';
+          } else if (canon.situation || canon.nextStep) {
             text = (canon.situation || '').trim();
             if (canon.nextStep) text += (text ? ' ' : '') + 'Next: ' + canon.nextStep;
           }
         }
         if (text && text.trim().length > 10) {
-          return { ok: true, text: text.trim(), source: 'canonical', side: paneSide, canonical: canon };
+          return { ok: true, text: text.trim(), source: 'canonical', side: paneSide, intent, awaitingReply: canon.awaitingReply || '', canonical: canon };
         }
       }
     } catch (e) { logger.warn('[draft-for-split] canonical fallback failed: ' + e.message); }

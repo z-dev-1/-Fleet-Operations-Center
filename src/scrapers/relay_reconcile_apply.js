@@ -192,33 +192,48 @@ async function applyReconcile(decision, opts) {
   _writeTimeline(decision);
   out.timeline = true;
 
-  // 2) Build the candidate Relay posts.
+  // 2) Build the candidate Relay posts, routed by the next-action INTENT.
+  //    - post_to_relay / gap-fill: an Offsite update Relay lacks -> internal note.
+  //    - request_update: WE are waiting on the vendor -> a chase (escalating).
+  //    - reply_to_vendor: the vendor asked US a question -> OUR answer; this is a
+  //      judgment call, so it is ALWAYS confirm-gated (never auto-posted, even in
+  //      MODE A). We only stage it when we actually have answer text.
+  const intent = decision.nextActionType || '';
   const candidates = [];
   if (!decision.relayHasLatest && decision.missingUpdate) {
     candidates.push({ kind: 'gap-fill', text: decision.missingUpdate });
   }
-  // Dealer follow-up fires on followUpNeeded (stale OR we-spoke-last), with an
-  // escalating count so repeated chases read like a human, not a bot.
-  const wantFollowUp = (decision.followUpNeeded || decision.isStale) && decision.dealerAsk;
-  if (wantFollowUp) {
-    const count = _nextFollowUpCount(decision.equipmentId);
-    candidates.push({ kind: 'dealer-ask', text: _escalate(decision.dealerAsk, count), followUpCount: count });
+  if (intent === 'reply_to_vendor') {
+    // Only post a reply when we have concrete answer text; otherwise the open
+    // question is surfaced in canonical state / Split View for a human to answer.
+    if (decision.dealerAsk) {
+      candidates.push({ kind: 'reply-to-vendor', text: decision.dealerAsk, forceStage: true });
+    }
+  } else {
+    // request_update (or stale) -> escalating dealer chase.
+    const wantFollowUp = (decision.followUpNeeded || decision.isStale) && decision.dealerAsk;
+    if (wantFollowUp) {
+      const count = _nextFollowUpCount(decision.equipmentId);
+      candidates.push({ kind: 'dealer-ask', text: _escalate(decision.dealerAsk, count), followUpCount: count });
+    }
   }
 
   const lowConfidence = Number(decision.confidence) < Number(cfg.minConfidence);
 
   for (const c of candidates) {
-    // Dedup: gap-fill = exact text; dealer-ask = re-ask window (chasing repeats).
-    if (_alreadyHandled(decision.equipmentId, c.kind, c.text, cfg)) {
+    // Dedup: gap-fill = exact text; dealer-ask/reply = re-ask window.
+    const dedupKind = (c.kind === 'reply-to-vendor') ? 'dealer-ask' : c.kind;
+    if (_alreadyHandled(decision.equipmentId, dedupKind, c.text, cfg)) {
       out.posts.push({ kind: c.kind, action: 'duplicate' });
       continue;
     }
-    // Low-confidence decisions never AUTO-post; they are staged for review even
-    // in MODE A (the timeline already captured the status).
-    if (cfg.autoPostToRelay && !lowConfidence) {
+    // A reply to a vendor question is a judgment call -> ALWAYS stage, never
+    // auto-post, regardless of MODE A. Low-confidence decisions also never
+    // auto-post (staged for review even in MODE A; timeline already has status).
+    if (cfg.autoPostToRelay && !lowConfidence && !c.forceStage) {
       const r = await _postToRelay(decision, c.text);
       if (r.ok) {
-        _markHandled(decision.equipmentId, c.kind, c.text, c.followUpCount);
+        _markHandled(decision.equipmentId, dedupKind, c.text, c.followUpCount);
         out.posts.push({ kind: c.kind, action: 'posted' });
         logger.info('[relay-reconcile] MODE A posted ' + c.kind + ' to Relay for ' + decision.equipmentId);
       } else {
@@ -226,10 +241,10 @@ async function applyReconcile(decision, opts) {
         logger.warn('[relay-reconcile] MODE A post failed for ' + decision.equipmentId + ': ' + r.error);
       }
     } else {
-      // MODE B (or low-confidence in MODE A): stage for explicit confirm.
+      // MODE B (or low-confidence, or a reply-to-vendor): stage for explicit confirm.
       _stage(decision, c.kind, c.text);
-      _markHandled(decision.equipmentId, c.kind, c.text, c.followUpCount);
-      out.posts.push({ kind: c.kind, action: 'staged' });
+      _markHandled(decision.equipmentId, dedupKind, c.text, c.followUpCount);
+      out.posts.push({ kind: c.kind, action: 'staged', reason: c.forceStage ? 'reply-needs-confirm' : undefined });
       logger.info('[relay-reconcile] staged ' + c.kind + ' for ' + decision.equipmentId + ' (confirm to post)');
     }
   }

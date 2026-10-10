@@ -423,3 +423,87 @@ describe('canonical_state — event trigger (detectChangedUnits) + buildAll with
     expect(m).not.toHaveProperty('history');
   });
 });
+
+describe('canonical_state — next-action intent', () => {
+  const row = { equipmentId: 'B62064', lifecycleState: 'Unavailable', vendor: 'Hunter Truck' };
+
+  it('reply_to_vendor -> waitingOn us, question_open flag, open question in evidence', () => {
+    const rec = canonical.reconcileCanonical(row, { decision: {
+      equipmentId: 'B62064', currentStatus: 'Awaiting our freight decision', nextStep: 'answer the dealer',
+      nextActionType: 'reply_to_vendor', weOweReply: true,
+      awaitingReply: 'order the mirror normal or with freight?', threadOfRecord: 'offsite',
+      confidence: 0.8,
+    } });
+    expect(rec.nextActionType).toBe('reply_to_vendor');
+    expect(rec.waitingOn).toBe('us');
+    expect(rec.flags).toContain('question_open');
+    expect(rec.awaitingReply).toContain('normal or with freight');
+    expect(rec.threadOfRecord).toBe('offsite');
+    // the open question is recorded as evidence from the offsite thread
+    const q = rec.evidence.find(e => e.field === 'openQuestion');
+    expect(q).toBeTruthy();
+    expect(q.source).toBe('offsite');
+  });
+
+  it('request_update (we already answered) -> waitingOn vendor, awaiting_vendor_reply flag', () => {
+    // B62064's REAL state: we replied asking for a freight estimate, now THEY owe us.
+    const rec = canonical.reconcileCanonical(row, { decision: {
+      equipmentId: 'B62064', currentStatus: 'Awaiting dealer freight estimate', nextStep: 'chase the freight estimate',
+      nextActionType: 'request_update', weOweReply: false, lastCommentBy: 'us', followUpNeeded: true,
+      dealerAsk: 'Any update on the freight shipping estimate and revised ETC?', threadOfRecord: 'offsite',
+      confidence: 0.82,
+    } });
+    expect(rec.nextActionType).toBe('request_update');
+    expect(rec.waitingOn).toBe('vendor');
+    expect(rec.flags).toContain('awaiting_vendor_reply');
+    expect(rec.flags).not.toContain('question_open');
+  });
+
+  it('signalTokens surfaces the intent + open question', () => {
+    const base = canonical.reconcileCanonical(row, { decision: {
+      equipmentId: 'B62064', currentStatus: 'awaiting freight decision', nextActionType: 'reply_to_vendor',
+      weOweReply: true, awaitingReply: 'normal or freight?', threadOfRecord: 'offsite', confidence: 0.8,
+    } });
+    const r2 = Object.assign({ equipmentId: 'B62064' }, canonical.mirrorFields(base));
+    const store = { load() { throw new Error('use mirror'); } };
+    const tokens = canonical.signalTokens(r2, { store });
+    expect(tokens).toContain('action=reply_to_vendor');
+    expect(tokens).toContain('OPEN-Q=');
+  });
+
+  it('deterministic record has intent none (cannot read a conversation)', () => {
+    const rec = canonical.computeCanonical({ equipmentId: 'D1', lifecycleState: 'Unavailable', serviceState: 'awaiting parts' });
+    expect(rec.nextActionType).toBe('none');
+    expect(rec.awaitingReply).toBe('');
+  });
+});
+
+describe('relay_reconcile_apply — reply_to_vendor is always confirm-gated', () => {
+  it('a reply_to_vendor decision is STAGED even when MODE A auto-post is on', async () => {
+    const apply = require('../src/scrapers/relay_reconcile_apply');
+    // Stub the pending store + dedup ledger via the store module the apply layer uses.
+    const store = require('../src/store');
+    const origLoad = store.load, origSave = store.save;
+    const mem = {};
+    store.load = (k, d) => (k in mem ? mem[k] : (d !== undefined ? d : null));
+    store.save = (k, v) => { mem[k] = v; };
+    try {
+      const decision = {
+        equipmentId: 'RV1', _serviceUrl: 'https://relay/wr/1', _workRequestId: 'WR1',
+        nextActionType: 'reply_to_vendor', followUpNeeded: true, weOweReply: true,
+        dealerAsk: 'Yes, proceed with freight shipping.', confidence: 0.9,
+        relayHasLatest: true, missingUpdate: '',
+      };
+      // MODE A on (autoPostToRelay true) + confidence above threshold.
+      const res = await apply.applyReconcile(decision, { cfg: { autoPostToRelay: true, minConfidence: 0.5, staleDays: 3 } });
+      const reply = res.posts.find(p => p.kind === 'reply-to-vendor');
+      expect(reply).toBeTruthy();
+      expect(reply.action).toBe('staged'); // NOT 'posted', despite MODE A
+      // and it was placed in the pending queue
+      const pending = mem['relayReconcilePending'];
+      expect(pending && pending.items.some(it => it.equipmentId === 'RV1' && it.kind === 'reply-to-vendor')).toBe(true);
+    } finally {
+      store.load = origLoad; store.save = origSave;
+    }
+  });
+});
