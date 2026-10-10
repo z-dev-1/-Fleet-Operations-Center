@@ -542,6 +542,50 @@ function createSyncEngine(ctx) {
         .catch(e => logger.error('Orcha Deep Scan error (non-fatal):', e.message))
         .finally(() => { _deepScanInProgress = false; }); }, 15000); // Wait 15s for relay extraction to finish
 
+      // Decisions produced by the reconcile pass this cycle, keyed by
+      // equipmentId, so the canonical-state pass can reuse them instead of
+      // re-reasoning (one AI call per down unit, not two). Shared across the
+      // closures below.
+      const _reconcileDecisions = {};
+      // Guard so the canonical pass runs exactly once per sync cycle — it is
+      // triggered by the reconcile pass when that finishes (so it sees the
+      // decisions), and ALSO by a standalone timer as a fallback for when
+      // reconcile is disabled / produced nothing. Whichever fires first wins.
+      let _canonicalRan = false;
+      const _runCanonicalPass = async () => {
+        if (_canonicalRan) return;
+        _canonicalRan = true;
+        try {
+          const canonical = require('../orcha/canonical_state');
+          const fresh = store.load('fleetData', {});
+          const rows = Array.isArray(fresh.rows) ? fresh.rows : [];
+          if (!rows.length) return;
+          const { units, mirrored, counts } = canonical.buildAll(rows, { decisions: _reconcileDecisions });
+          // Persist the authoritative per-unit records.
+          const prevCanon = store.load('canonicalState', {}) || {};
+          store.save('canonicalState', {
+            units,
+            updatedAt: new Date().toISOString(),
+            lastReconcileAt: Object.keys(_reconcileDecisions).length ? new Date().toISOString() : (prevCanon.lastReconcileAt || null),
+          });
+          // Mirror canonical fields onto the fleet rows (re-read + save so we
+          // don't clobber any other post-sync writer). Overlay by equipmentId.
+          const latest = store.load('fleetData', {});
+          if (latest && Array.isArray(latest.rows)) {
+            latest.rows = latest.rows.map(r => {
+              const rec = r && units[r.equipmentId];
+              return rec ? Object.assign({}, r, canonical.mirrorFields(rec)) : r;
+            });
+            store.save('fleetData', latest);
+            ctx.lastData = latest;
+            ctx.pushData(latest);
+          }
+          logger.info('[canonical] ' + counts.total + ' unit(s) — ' + counts.reconciled + ' AI-reconciled, ' + counts.baseline + ' deterministic');
+        } catch (e) {
+          logger.warn('[canonical] pass error (non-fatal): ' + e.message);
+        }
+      };
+
       // ── Relay ↔ Offsite reconcile — non-blocking, non-fatal ──────────────
       // For down units that have offsite data / a Relay WR, let the AI compare
       // Relay comments against the Offsite vendor update thread and decide the
@@ -569,6 +613,8 @@ function createSyncEngine(ctx) {
               try {
                 const decision = await reconcile.reconcileUnit(row, { cfg });
                 if (!decision) continue;
+                // Stash for the canonical-state pass (reuse, don't re-reason).
+                if (decision.equipmentId) _reconcileDecisions[decision.equipmentId] = decision;
                 const r = await apply.applyReconcile(decision, { cfg });
                 for (const p of (r.posts || [])) { if (p.action === 'posted') posted++; if (p.action === 'staged') staged++; }
               } catch (ue) {
@@ -578,9 +624,24 @@ function createSyncEngine(ctx) {
             logger.info('[relay-reconcile] done — ' + posted + ' posted, ' + staged + ' staged for confirm');
           } catch (e) {
             logger.warn('[relay-reconcile] pass error (non-fatal): ' + e.message);
+          } finally {
+            // Decisions are now populated (or reconcile was disabled/empty) —
+            // run the canonical pass immediately so it reuses them. The 24s
+            // timer below is just a fallback if this never fires.
+            _runCanonicalPass();
           }
         })();
       }, 20000); // after the deep scan's 15s relay-settle window
+
+      // ── Canonical state fallback timer — the single source of truth ──────
+      // The canonical pass (_runCanonicalPass) is normally triggered by the
+      // reconcile pass's finally{} the moment its decisions are ready. This
+      // timer is the fallback that guarantees canonical state is still written
+      // for EVERY unit even when the reconcile pass is disabled, errors out
+      // before its finally, or the AI loop runs long. The _canonicalRan guard
+      // makes whichever path fires first the only one that runs. 28s so it sits
+      // comfortably after the reconcile pass under normal conditions.
+      setTimeout(() => { _runCanonicalPass(); }, 28000);
 
       // ── Fleet Brain: continuous Daily Tasks regeneration — non-blocking ──
       // Re-reason over the WHOLE fleet after every sync so the Action Board is

@@ -220,6 +220,19 @@ const REGISTRY = {
   // existing confirm-gated flow. MODE B (true) = one-click execute behind a
   // single YES confirm. Shape: { autoExecute: { <action_slug>: bool } }.
   fleetActionConfig:       () => path.join(P.dataDir, 'fleet_action_config.json'),
+  // Canonical state (2026-10) — the ONE AI-reconciled authoritative state
+  // record per unit, the single source of truth every reasoning surface reads.
+  // No new UI; a few key fields are mirrored onto fleetData rows so existing
+  // panels can read it. Two-tier: a cheap deterministic baseline is computed
+  // for EVERY unit each sync, upgraded by the AI reconcile for the units that
+  // need deeper reasoning (down/offsite/stale), bounded like the reconcile
+  // pass. The AI reconciles conflicts (AAP vs Relay vs Offsite) and records
+  // which source it trusted + confidence — there is no hardcoded precedence.
+  // See src/orcha/canonical_state.js. Shape:
+  //   { units: { <equipmentId>: { equipmentId, status, situation, nextStep,
+  //       source, confidence, stale, waitingOn, flags:[], aiReconciled,
+  //       updatedAt } }, updatedAt, lastReconcileAt }.
+  canonicalState:          () => path.join(P.dataDir, 'canonical_state.json'),
 };
 
 function _resolvePath(name) {
