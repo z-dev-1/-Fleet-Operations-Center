@@ -755,7 +755,14 @@ function initWindows(ctx) {
 
     mainWindow = new BrowserWindow({
       width: 900, height: 700,
-      minWidth: 600, minHeight: 500,
+      // BUG FIX (2026-10): minHeight:500 let the window shrink below what the
+      // UI actually needs (48px topbar + filterbar + KPI strip), which combined
+      // with dashboard-mode's old forced 60vh table height caused header
+      // content to be pushed out of view on shorter laptop screens. Raised the
+      // floor; the fleet.css dashboard-mode fix (removal of that 60vh floor) is
+      // the primary fix, this is just a safety margin so the window itself
+      // can't be squeezed smaller than the chrome needs.
+      minWidth: 600, minHeight: 600,
       title: 'Fleet Operations \u2014 Sign in\u2026',
       icon: getAppIconPath(), // FEATURE (2026-07-22): real app icon instead of default Electron icon in taskbar/titlebar
       backgroundColor: '#0d1117',
@@ -915,9 +922,30 @@ function initWindows(ctx) {
         }
       } else {
         logger.info('[startup] Cookies valid (' + state.count + ' cookies, expires in ' +
-          (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ')');
+          (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ', aea=' +
+          (state.aeaExpiresInMin === null ? 'expired/missing' : state.aeaExpiresInMin + 'min') + ')');
         // Push session status to renderer immediately so the auth badge is green on startup
         send('auth:mwinit-status', { ok: true, expiresInMin: state.expiresInMin });
+        // PROACTIVE SILENT AEA REFRESH (2026-10-10): the ~24h session is valid,
+        // but AAP enforces the short-lived AEA token server-side. If AEA has
+        // lapsed (aeaExpiresInMin === null) or is near expiry, loading AAP now
+        // would bounce into the SSO redirect loop and (historically) trigger an
+        // interactive mwinit — the "doesn't last 20h, re-auth every ~2h" bug.
+        // Re-mint AEA SILENTLY (Midway OIDC handshake, no WebAuthn tap) BEFORE
+        // loading AAP so the first load is clean and no prompt appears.
+        const aeaStale = (state.aeaExpiresInMin === null) || (state.aeaExpiresInMin < 45);
+        if (aeaStale) {
+          try {
+            const { refreshAeaSilently } = _getAuth();
+            logger.info('[startup] AEA stale (' + (state.aeaExpiresInMin === null ? 'expired/missing' : state.aeaExpiresInMin + 'min') + ') \u2014 silent refresh before loading AAP (no prompt)');
+            pushStatus('\uD83D\uDD04 Refreshing Midway session silently\u2026');
+            const r = await refreshAeaSilently();
+            logger.info('[startup] Startup silent AEA refresh: ok=' + r.ok + (r.aeaMin != null ? ' (AEA now ' + r.aeaMin + 'min)' : ''));
+            if (r.ok) pushStatus('\u2705 Midway session ready');
+          } catch (e) {
+            logger.warn('[startup] Startup silent AEA refresh failed (non-fatal): ' + e.message);
+          }
+        }
       }
 
       // Keep window invisible during AAP scrape
@@ -1054,6 +1082,33 @@ function initWindows(ctx) {
         if (_ssoCount >= 10 && !_mwinitRunning) {
           _mwinitRunning = true;
           clearInterval(_authPoller);
+          logger.warn('[auth-poll] SSO redirect loop detected');
+          try {
+            // FIX (2026-10-10): an SSO loop is MOST OFTEN just an expired
+            // short-lived AEA token while the ~24h session cookie is still
+            // valid — NOT a dead session. Historically this path jumped
+            // straight to interactive mwinit (a WebAuthn tap) on EVERY loop,
+            // which is exactly why a single auth "didn't last 20h": every time
+            // AEA lapsed (~2-6h) the user got prompted again. Try the SILENT
+            // AEA re-mint FIRST (Midway OIDC handshake, no tap). If it lands on
+            // AAP, the session was fine — reload AAP and carry on with NO
+            // prompt. Only if the silent refresh fails (session genuinely dead)
+            // do we fall through to the interactive mwinit ladder below.
+            const { refreshAeaSilently } = _getAuth();
+            pushStatus('\uD83D\uDD04 Refreshing Midway session silently\u2026');
+            const silent = await refreshAeaSilently();
+            if (silent && silent.ok) {
+              logger.info('[auth-poll] SSO loop resolved by SILENT AEA refresh (no prompt) \u2014 reloading AAP');
+              pushStatus('\u2705 Session refreshed \u2014 no sign-in needed');
+              _ssoCount = 0;
+              _mwinitRunning = false;
+              mainWindow.loadURL(startUrl);
+              return;
+            }
+            logger.warn('[auth-poll] Silent AEA refresh did not resolve the loop \u2014 session genuinely expired, launching mwinit');
+          } catch (e) {
+            logger.warn('[auth-poll] Silent AEA refresh threw (' + e.message + ') \u2014 falling back to mwinit');
+          }
           logger.warn('[auth-poll] SSO redirect loop \u2014 launching mwinit terminal');
           pushStatus('\uD83D\uDD11 Session expired \u2014 complete Midway auth in the terminal window...');
           try {

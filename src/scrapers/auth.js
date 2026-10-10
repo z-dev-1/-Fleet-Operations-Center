@@ -83,7 +83,12 @@ function parseMidwayCookies() {
     const name       = parts[5];
     const value      = parts.slice(6).join('\t');
 
-    if (!/amazon\.(com|dev)|a2z\.com/.test(domain)) continue;
+    // Accept all Midway/Amazon auth domains. FIX (2026-10-10): the old filter
+    // was /amazon\.(com|dev)|a2z\.com/ which DROPPED the amazon_enterprise_access
+    // cookie on `.auth.midway.aws.dev` (matches none of those) — confirmed from
+    // the live cookie file. AAP checks AEA across all four of its domains, so a
+    // dropped one weakens the session. Added aws.dev + a generic midway match.
+    if (!/amazon\.(com|dev)|a2z\.com|aws\.dev|midway/i.test(domain)) continue;
 
     if (expiry && expiry < now) {
       expired.push({ name, domain, expiredAgoMin: Math.round((now - expiry) / 60) });
@@ -672,6 +677,22 @@ async function ensureAuthenticated(mainWindow) {
 // Returns { ok, refreshed } — ok=true means the silent handshake landed on AAP
 // (session still valid, AEA refreshed). ok=false means the session itself is
 // gone and a real mwinit is required.
+// Read the live AEA (amazon_enterprise_access) expiry FROM THE ELECTRON SESSION
+// cookie store (not the stale ~/.midway/cookie disk file). After a silent
+// handshake, AAP issues a fresh AEA into defaultSession — that is the real
+// source of truth for whether AEA is actually valid right now. Returns minutes
+// until the soonest live AEA expires, or null if none present.
+async function aeaSessionExpiryMin() {
+  try {
+    const all = await electronSession.defaultSession.cookies.get({ name: 'amazon_enterprise_access' });
+    if (!all || !all.length) return null;
+    const now = Math.floor(Date.now() / 1000);
+    const soonest = all.reduce((min, c) => (c.expirationDate ? Math.min(min, c.expirationDate) : min), Infinity);
+    if (soonest === Infinity) return null;
+    return Math.round((soonest - now) / 60);
+  } catch (_) { return null; }
+}
+
 async function refreshAeaSilently() {
   try {
     // 1) Make sure the freshest cookies from disk are in the Electron session.
@@ -686,8 +707,12 @@ async function refreshAeaSilently() {
     }
     // 3) Re-inject so any refreshed cookies (incl. a new AEA) are consistent.
     try { await injectCookies(); } catch (_) {}
-    logger.info('[AuthManager] Silent AEA refresh OK — AAP handshake completed with no prompt');
-    return { ok: true, refreshed: true };
+    // 4) VERIFY against the live session cookie store (truth), not the disk
+    //    file. The handshake writes the fresh AEA into defaultSession; the disk
+    //    file keeps the old expired AEA, so only this check proves it worked.
+    const liveAea = await aeaSessionExpiryMin();
+    logger.info('[AuthManager] Silent AEA refresh OK — AAP handshake completed with no prompt (live AEA expiry: ' + (liveAea === null ? 'unknown' : liveAea + 'min') + ')');
+    return { ok: true, refreshed: true, aeaMin: liveAea };
   } catch (e) {
     logger.warn('[AuthManager] Silent AEA refresh error: ' + e.message);
     return { ok: false, refreshed: false };
@@ -744,6 +769,7 @@ module.exports = {
   injectCookies, // FEATURE (2026-07-23): now accepts optional target session
   probeSession, // FIX (2026-07-21): exported so callers can replicate ensureAuthenticated's verification steps without its disabled auto-spawn branch
   refreshAeaSilently, // FIX (2026-09-30): silent AEA re-mint so one auth lasts the full ~24h session
+  aeaSessionExpiryMin, // FIX (2026-10-10): read live AEA expiry from the Electron session (truth), not the stale disk file
   ensureAuthenticated,
   pingRelayEndpoint,
   startOnlineReauthWatch, // FIX (2026-10): re-probe same session on reconnect; prompt only on confirmed-online rejection

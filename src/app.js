@@ -370,18 +370,43 @@ app.whenReady().then(async () => {
           // (the SSO auth-poll / probe-failure ladder) handle it WHEN IT REALLY
           // HAPPENS. A genuine 20h session expiry is handled by the
           // expiresInMin < 15 branch below (~once/day).
-          const aeaMin = state.aeaExpiresInMin;
-          // AEA (~6h) is what AAP actually enforces and expires long before the
+          // Prefer the LIVE AEA expiry from the Electron session cookie store
+          // (the truth AAP actually uses) over the disk-file value. The disk
+          // file keeps the OLD expired AEA after a silent refresh, so reading
+          // disk alone makes AEA look permanently expired and causes needless
+          // refreshes every tick. The session value reflects the real, refreshed
+          // AEA. Fall back to the disk value if the session read is unavailable.
+          let aeaMin = state.aeaExpiresInMin;
+          try {
+            const liveAea = await _authModule.aeaSessionExpiryMin();
+            if (liveAea !== null && liveAea !== undefined) aeaMin = liveAea;
+          } catch (_) {}
+          // AEA (~2-6h) is what AAP actually enforces and expires long before the
           // ~24h session — that is why a single auth wasn't lasting 20h. When
           // AEA is near expiry, SILENTLY re-mint it via the Midway OIDC
           // handshake (no WebAuthn tap) so the session keeps working for its
           // full ~24h life. Otherwise just do the cheap keep-alive re-inject.
-          const AEA_SILENT_REFRESH_AHEAD_MIN = 20;
-          if (aeaMin !== null && aeaMin < AEA_SILENT_REFRESH_AHEAD_MIN) {
+          //
+          // CRITICAL FIX (2026-10-10): the condition was `aeaMin !== null &&
+          // aeaMin < 20`. But checkMwinit() DROPS expired AEA cookies, so once
+          // AEA actually lapses, aeaExpiresInMin becomes NULL — which made this
+          // branch FALSE and fell through to a cheap re-inject that does NOT
+          // re-mint AEA. Result: the instant AEA expired, the app stopped
+          // silently refreshing it and just waited for AAP to bounce us into an
+          // interactive mwinit — the exact "re-auth every ~2h" loop. Confirmed
+          // from the live cookie file: AEA 3.8h lifetime, expired → aeaMin=null
+          // → silent refresh never fired. Now: refresh silently when AEA is near
+          // expiry OR already expired/missing (null). `null` means "AEA is gone,
+          // re-mint it NOW while the 24h session is still valid", not "do
+          // nothing". The lookahead is widened so a sleeping/flapping heartbeat
+          // can't miss the window.
+          const AEA_SILENT_REFRESH_AHEAD_MIN = 45;
+          const aeaNeedsRefresh = (aeaMin === null) || (aeaMin < AEA_SILENT_REFRESH_AHEAD_MIN);
+          if (aeaNeedsRefresh) {
             try {
-              log.info('[midway] AEA near expiry (' + aeaMin + 'min) — refreshing silently (no prompt)...');
+              log.info('[midway] AEA ' + (aeaMin === null ? 'expired/missing' : 'near expiry (' + aeaMin + 'min)') + ' — refreshing silently (no prompt)...');
               const r = await _authModule.refreshAeaSilently();
-              log.info('[midway] Silent AEA refresh result: ok=' + r.ok);
+              log.info('[midway] Silent AEA refresh result: ok=' + r.ok + ' refreshed=' + r.refreshed);
             } catch (e) {
               log.warn('[midway] Silent AEA refresh failed: ' + e.message);
             }

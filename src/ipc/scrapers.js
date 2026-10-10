@@ -490,6 +490,68 @@ function registerScrapersIPC(ctx) {
     }
   });
 
+  // ── quicksight:capture-afp / capture-dsp ─────────────────────────────────
+  // DBR DATA (Daily Call): opens the AFP/DSP QuickSight dashboards and
+  // returns the RENDERED PAGE TEXT (not structured data — QuickSight's
+  // pivot-table DOM has no stable selector shape, confirmed via live
+  // iteration). The renderer (daily-call.js) hands this text to AI to parse
+  // into the DBR table rows. See src/scrapers/quicksight_dbr.js.
+  //
+  // Caching: quicksight:save-parsed / quicksight:get-cache let the renderer
+  // persist whatever STRUCTURED result it got back from AI, so re-opening
+  // the DBR panel doesn't need a fresh scrape+AI-call every time.
+  let _quicksightLock = false;
+  handle('quicksight:capture-afp', async () => {
+    if (_quicksightLock) {
+      throw new ScraperError('quicksight:capture-afp operation already in progress', 'quicksight:capture-afp');
+    }
+    _quicksightLock = true;
+    try {
+      const { captureAfpText } = require('../../src/scrapers/quicksight_dbr');
+      return await captureAfpText();
+    } catch (e) {
+      throw new ScraperError(e.message, 'quicksight:capture-afp');
+    } finally {
+      _quicksightLock = false;
+    }
+  });
+
+  let _quicksightDspLock = false;
+  handle('quicksight:capture-dsp', async () => {
+    if (_quicksightDspLock) {
+      throw new ScraperError('quicksight:capture-dsp operation already in progress', 'quicksight:capture-dsp');
+    }
+    _quicksightDspLock = true;
+    try {
+      const { captureDspText } = require('../../src/scrapers/quicksight_dbr');
+      return await captureDspText();
+    } catch (e) {
+      throw new ScraperError(e.message, 'quicksight:capture-dsp');
+    } finally {
+      _quicksightDspLock = false;
+    }
+  });
+
+  // Renderer calls this after AI successfully parses the captured text, so
+  // the structured result survives a panel close/reopen without re-scraping.
+  handle('quicksight:save-parsed', (_e, payload) => {
+    requireObject(payload, 'payload');
+    const store = require('../store');
+    if (payload.kind === 'dsp') store.save('quicksightDbrDsp', payload.data);
+    else store.save('quicksightDbr', payload.data);
+    return { ok: true };
+  });
+
+  handle('quicksight:get-cache', () => {
+    const store = require('../store');
+    return store.load('quicksightDbr', { ok: false, domicile: [], scac: [], scrapedAt: null });
+  });
+
+  handle('quicksight:get-cache-dsp', () => {
+    const store = require('../store');
+    return store.load('quicksightDbrDsp', { ok: false, scac: [], scrapedAt: null });
+  });
+
   logger.info('Scrapers IPC handlers registered');
 }
 

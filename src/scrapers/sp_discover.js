@@ -308,6 +308,110 @@ function detectHeaderRow(buf, sheetId) {
 }
 
 /**
+ * ONE-OFF INSPECTION HELPER (added 2026-08-14, DBR DATA Copy-All alignment
+ * work): downloads the workbook and dumps every row's cell text + column
+ * letter for ONE sheet, so we can see the REAL row/column layout of a
+ * manually-templated tracker (headers, section titles, data start rows)
+ * instead of guessing. Not wired to any permanent UI — used via a temporary
+ * IPC handler, inspected once, then safe to remove.
+ */
+async function dumpSheetGrid(win, filePath, sheetNameOrIndex, maxRow) {
+  const siteMatch = filePath.match(/(\/sites\/[^/]+)/);
+  const siteScope = siteMatch ? siteMatch[1] : '';
+  const fileUrl = SP_ORIGIN + siteScope + "/_api/web/getfilebyserverrelativeurl('" + encodeURI(filePath).replace(/'/g, "''") + "')/$value";
+
+  const b64 = await win.webContents.executeJavaScript(`
+    fetch("${fileUrl}", { credentials: 'include' })
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
+      .then(buf => {
+        const bytes = new Uint8Array(buf);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        return btoa(binary);
+      })
+      .catch(e => ({ error: e.message }))
+  `);
+  if (b64 && b64.error) return { error: b64.error };
+  if (!b64 || typeof b64 !== 'string') return { error: 'Download returned empty' };
+
+  const buf = Buffer.from(b64, 'base64');
+  const sheets = parseXlsxSheets(buf);
+  if (!sheets.length) return { error: 'No sheets found in workbook' };
+
+  let sheet;
+  if (typeof sheetNameOrIndex === 'number') {
+    sheet = sheets[sheetNameOrIndex];
+  } else if (sheetNameOrIndex) {
+    sheet = sheets.find(s => s.name.toLowerCase() === String(sheetNameOrIndex).toLowerCase());
+  }
+  if (!sheet) sheet = sheets[0];
+  if (!sheet) return { error: 'Sheet not found', availableSheets: sheets.map(s => s.name) };
+
+  const entries = unzipEntries(buf);
+
+  const strings = [];
+  const ssEntry = entries.find(e => e.name === 'xl/sharedStrings.xml');
+  if (ssEntry) {
+    const ssXml = ssEntry.data.toString('utf8');
+    const siRegex = /<si\b[^>]*>([\s\S]*?)<\/si>/g;
+    let sm;
+    while ((sm = siRegex.exec(ssXml)) !== null) {
+      const parts = [];
+      const tRe = /<t[^>]*>([\s\S]*?)<\/t>/g; let tm;
+      while ((tm = tRe.exec(sm[1])) !== null) parts.push(tm[1]);
+      strings.push(parts.join('').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'));
+    }
+  }
+
+  const sheetFile = 'xl/worksheets/' + (sheet.xmlFile || 'sheet1') + '.xml';
+  const sheetEntry = entries.find(e => e.name === sheetFile);
+  if (!sheetEntry) return { error: 'Sheet XML not found: ' + sheetFile, availableSheets: sheets.map(s => s.name) };
+  const sheetXml = sheetEntry.data.toString('utf8');
+
+  // Resolve one cell: returns { col: 'A', text: '...' } or null if empty.
+  function resolveCell(ref, attrs, inner) {
+    const colMatch = ref.match(/^([A-Z]+)/);
+    const col = colMatch ? colMatch[1] : '?';
+    const t = (attrs.match(/\bt="([^"]+)"/) || [])[1] || '';
+    if (t === 's') {
+      const vm = inner.match(/<v>(\d+)<\/v>/);
+      if (vm) return { col, text: strings[parseInt(vm[1], 10)] || '' };
+      return null;
+    }
+    if (t === 'inlineStr') {
+      const tRe = /<t[^>]*>([\s\S]*?)<\/t>/g; let tm; const parts = [];
+      while ((tm = tRe.exec(inner)) !== null) parts.push(tm[1]);
+      if (parts.length) return { col, text: parts.join('').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>') };
+      return null;
+    }
+    // Plain numeric/formula value
+    const vm = inner.match(/<v>([\s\S]*?)<\/v>/);
+    if (vm && vm[1].trim()) return { col, text: vm[1].trim() };
+    return null;
+  }
+
+  const limit = maxRow || 60;
+  const rows = [];
+  const rowRegex = /<row\s+r="(\d+)"[^>]*>([\s\S]*?)<\/row>/g;
+  let m;
+  while ((m = rowRegex.exec(sheetXml)) !== null) {
+    const rowNum = parseInt(m[1], 10);
+    if (rowNum > limit) break;
+    const cellsXml = m[2];
+    const cellRe = /<c\s+r="([A-Z]+\d+)"([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
+    let cm;
+    const cells = [];
+    while ((cm = cellRe.exec(cellsXml)) !== null) {
+      const resolved = resolveCell(cm[1], cm[2] || '', cm[3] || '');
+      if (resolved && resolved.text !== '') cells.push(resolved);
+    }
+    if (cells.length) rows.push({ row: rowNum, cells });
+  }
+
+  return { ok: true, sheetName: sheet.name, availableSheets: sheets.map(s => s.name), rows, filePath };
+}
+
+/**
  * Simple zip parser for xlsx (stored + deflate entries)
  */
 function unzipEntries(buf) {
@@ -343,4 +447,4 @@ function unzipEntries(buf) {
   return entries;
 }
 
-module.exports = { extractFilePath, discoverSheets, findFileOnSite };
+module.exports = { extractFilePath, discoverSheets, findFileOnSite, dumpSheetGrid };

@@ -56,6 +56,80 @@ function _load() { const c = store.load(STORE_KEY, []); return Array.isArray(c) 
 // Case-insensitive Slack ID normalization key (Slack IDs are case-insensitive).
 function _slackKey(slackId) { return slackId ? String(slackId).trim().toUpperCase() : ''; }
 
+// Vendor dedupe key: vendors have no slackId, so a re-add (manual or imported)
+// would otherwise create a duplicate card. Match on name (+ company when both
+// have one) case-insensitively, collapsing punctuation/whitespace/diacritics so
+// "Bergey's Truck Centers - Souderton" and "Bergeys Truck Centers  Souderton"
+// resolve to the same vendor.
+function _vendorNameKey(s) {
+  return String(s || '')
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '') // strip accents
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ') // punctuation/apostrophes/dashes -> space
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+function _vendorKey(c) {
+  if (!c) return '';
+  const name = _vendorNameKey(c.name);
+  if (!name) return '';
+  const company = _vendorNameKey(c.company);
+  return company ? name + '|' + company : name;
+}
+// Find an existing type:'vendor' contact that matches `incoming` by name (+company).
+// Matches name|company first; falls back to name-only so a later add that omits
+// company still merges onto the same vendor.
+function _findVendorMatch(all, incoming) {
+  if (!incoming || incoming.type !== 'vendor') return -1;
+  const name = _vendorNameKey(incoming.name);
+  if (!name) return -1;
+  const key = _vendorKey(incoming);
+  let idx = all.findIndex(c => c && c.type === 'vendor' && _vendorKey(c) === key);
+  if (idx > -1) return idx;
+  return all.findIndex(c => c && c.type === 'vendor' && _vendorNameKey(c.name) === name);
+}
+
+// UNION-merge a vendor's accumulating fields onto `merged` (the base from
+// _mergeNoBlank). `base` = existing stored vendor, `incoming` = new patch.
+//  - domiciles / makes: case-insensitive union, order preserved (existing first)
+//  - mileageByDomicile / preferenceByDomicile: shallow object merge, incoming
+//    wins per key (newest distance/rank for that site)
+//  - prefTags: union of foreign "SITE Pref #n" strings (reference only)
+function _vendorUnionMerge(merged, base, incoming) {
+  const unionArr = (a, b) => {
+    const out = []; const seen = new Set();
+    [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])].forEach(v => {
+      const s = String(v == null ? '' : v).trim(); if (!s) return;
+      const k = s.toUpperCase(); if (seen.has(k)) return; seen.add(k); out.push(s);
+    });
+    return out;
+  };
+  if (Array.isArray(base.domiciles) || Array.isArray(incoming.domiciles)) {
+    merged.domiciles = unionArr(base.domiciles, incoming.domiciles).map(s => s.toUpperCase());
+  }
+  if (Array.isArray(base.makes) || Array.isArray(incoming.makes)) {
+    merged.makes = unionArr(base.makes, incoming.makes).map(s => s.toUpperCase());
+    if (!merged.make && merged.makes.length) merged.make = merged.makes[0];
+  }
+  if (Array.isArray(base.prefTags) || Array.isArray(incoming.prefTags)) {
+    merged.prefTags = unionArr(base.prefTags, incoming.prefTags);
+  }
+  const mergeMap = (a, b) => {
+    const out = { ...(a && typeof a === 'object' ? a : {}) };
+    if (b && typeof b === 'object') for (const k of Object.keys(b)) out[k] = b[k];
+    return out;
+  };
+  if ((base.mileageByDomicile && typeof base.mileageByDomicile === 'object') ||
+      (incoming.mileageByDomicile && typeof incoming.mileageByDomicile === 'object')) {
+    merged.mileageByDomicile = mergeMap(base.mileageByDomicile, incoming.mileageByDomicile);
+  }
+  if ((base.preferenceByDomicile && typeof base.preferenceByDomicile === 'object') ||
+      (incoming.preferenceByDomicile && typeof incoming.preferenceByDomicile === 'object')) {
+    merged.preferenceByDomicile = mergeMap(base.preferenceByDomicile, incoming.preferenceByDomicile);
+  }
+}
+
 function _upperArrayOrEmpty(v) {
   // Preserves the '*' wildcard (all-scope) token; everything else uppercased,
   // trimmed, de-duped. If '*' is present it collapses to just ['*'].
@@ -153,6 +227,11 @@ function upsert(incoming, opts) {
     const key = _slackKey(clean.slackId);
     idx = all.findIndex(c => _slackKey(c.slackId) === key);
   }
+  // Vendors have no id/slackId on a fresh add -> dedupe by name (+company) so a
+  // re-add or import merges onto the existing vendor card instead of duplicating.
+  if (idx < 0 && clean.type === 'vendor' && opts.vendorDedupe !== false) {
+    idx = _findVendorMatch(all, clean);
+  }
 
   if (idx > -1) {
     // If a slackId is being set, it must not collide with a DIFFERENT contact.
@@ -162,6 +241,13 @@ function upsert(incoming, opts) {
       if (dup > -1) return { ok: false, error: 'another contact already has Slack ID ' + clean.slackId };
     }
     const merged = opts.mergeNoBlank === false ? { ...all[idx], ...clean } : _mergeNoBlank(all[idx], clean);
+    // Vendor accumulation: when a vendor is re-upserted (e.g. the same dealer
+    // seen under a second domicile), UNION the multi-value fields instead of
+    // replacing, so domiciles/makes grow and per-domicile mileage/pref maps
+    // accumulate across adds. Opt-out with opts.vendorUnion === false.
+    if (clean.type === 'vendor' && opts.vendorUnion !== false) {
+      _vendorUnionMerge(merged, all[idx], clean);
+    }
     merged.updatedAt = _now();
     all[idx] = merged;
     _persist(all, merged);
@@ -178,12 +264,14 @@ function upsert(incoming, opts) {
   return { ok: true, id: created.id, linked: false, contact: created };
 }
 
-/** update(contact) — edit by id; requires an existing contact. */
+/** update(contact) — edit by id; requires an existing contact. An explicit edit
+ * REPLACES multi-value fields (domiciles/makes/mileage) rather than unioning, so
+ * removing a domicile in the edit form actually removes it (vendorUnion:false). */
 function update(contact) {
   if (!contact || !contact.id) return { ok: false, error: 'contact.id required' };
   const all = _load();
   if (!all.some(c => c.id === contact.id)) return { ok: false, error: 'Contact not found' };
-  return upsert(contact);
+  return upsert(contact, { vendorUnion: false });
 }
 
 /** linkSlack({ contactId, slackId, name }) — attach a Slack ID to an existing
@@ -298,7 +386,7 @@ function findBySlackId(slackId) {
 
 module.exports = {
   upsert, update, linkSlack, bulkSave, discoverFromDM, remove, findBySlackId,
-  sanitize, _mergeNoBlank, _slackKey,
+  sanitize, _mergeNoBlank, _slackKey, _vendorNameKey, _vendorKey, _findVendorMatch, _vendorUnionMerge,
   VALID_IDENTITY, DATA_CATS, REQ_TYPES, LIFECYCLE_PERMS, CREATE_WR_PERMS,
   ALL_SCOPE, ALL_DATA_CATS, ALL_REQ_TYPES,
   STORE_KEY,

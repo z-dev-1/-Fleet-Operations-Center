@@ -17,6 +17,7 @@ import { init as initNotifDropdown }      from './components/notif-dropdown.js';
 import { init as initOrchaFab }           from './components/orcha-fab.js';
 import { init as initNexusSidebar }       from './components/nexus-sidebar.js';
 import { init as initMorningBriefing }   from './components/morning-briefing.js';
+import { init as initEmailTriage }        from './components/email-triage-overlay.js';
 import { init as initContactBook }       from './components/contact-book.js';
 import { init as initDraftInbox }         from './components/draft-inbox.js';
 import { init as initTimeline }           from './components/workflow-timeline.js';
@@ -106,6 +107,7 @@ function boot() {
 initDraftInbox();
 initNexusSidebar();
   initMorningBriefing();
+  initEmailTriage();
   initContactBook();
   initTimeline();
 initStatusBar(document.getElementById('status-bar-mount'));

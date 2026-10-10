@@ -88,6 +88,7 @@ export function init(container) {
         <div class="tb-icon-btn" id="tb-intel" title="Intelligence Panel">🧠</div>
         <div class="tb-icon-btn" id="tb-contacts" title="Contact Book">📇</div>
         <div class="tb-icon-btn" id="tb-inbox" title="Incoming Work Requests">📋<span class="tb-notif-badge" id="tb-inbox-badge" style="display:none">0</span></div>
+        <div class="tb-icon-btn" id="tb-email-triage" title="Inbox Triage (AI)">📨</div>
         <div class="tb-icon-btn" id="tb-notif" title="Notifications">
           🔔<span class="tb-notif-badge" id="tb-notif-badge" style="display:none">0</span>
         </div>
@@ -235,6 +236,12 @@ export function init(container) {
   // ── Inbox Panel toggle ─────────────────────────────────────────────
   document.getElementById('tb-inbox').addEventListener('click', () => {
     bus.emit('ui:inbox-toggle');
+  });
+
+  // ── Inbox Triage (AI) overlay toggle ───────────────────────────────
+  const emailTriageBtn = document.getElementById('tb-email-triage');
+  if (emailTriageBtn) emailTriageBtn.addEventListener('click', () => {
+    bus.emit('ui:email-triage-toggle');
   });
 
   

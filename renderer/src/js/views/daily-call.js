@@ -64,6 +64,7 @@
 
 import bus   from '../bus.js';
 import state from '../state.js';
+import { quicksight } from '../bridge.js';
 
 let _el = null;
 
@@ -288,6 +289,7 @@ function _computeGroup(groupRows, allRowsInGroup) {
     vendor: (r.vendor && r.vendor !== '--') ? r.vendor : null,
     repairStatus: r.savedRepairStatus || null,
     operator: (r.operator || '').toUpperCase().trim() || null,
+    make: (r.make || '').trim() || null,
   }));
 
   return {
@@ -295,303 +297,6 @@ function _computeGroup(groupRows, allRowsInGroup) {
     trends, barriers, flipUnits, unavailRows,
   };
 }
-
-function _buildGroups(rows, keyFn, labelFn) {
-  const byKey = {};
-  for (const r of rows) {
-    const key = keyFn(r);
-    if (!key) continue;
-    if (!byKey[key]) byKey[key] = [];
-    byKey[key].push(r);
-  }
-  const groups = [];
-  for (const key of Object.keys(byKey)) {
-    const allInGroup = byKey[key];
-    const unavailInGroup = allInGroup.filter(_isUnavail);
-    if (unavailInGroup.length === 0) continue; // matches "bottom" semantics — nothing to report
-    const computed = _computeGroup(unavailInGroup, allInGroup);
-    groups.push({ key, label: labelFn(key), ...computed });
-  }
-  groups.sort((a, b) => a.uptime - b.uptime); // worst uptime first, matches "Bottom 10"
-  return groups;
-}
-
-// ── AI verification pass (FEATURE 2026-07-17) ───────────────────────────────
-// User's ask: "can AI be a supporting source to my daily call data to
-// ensure its correct and if anything missed? and be the source of truth if
-// it finds additional data?"
-//
-// Design, to honor that WITHOUT risking fabricated content reaching a sheet
-// that goes out to business partners/management:
-//   - The mechanical keyword computation (_computeGroup above) remains the
-//     base of record ALWAYS -- AI never silently overwrites it.
-//   - AI is given the group's RAW per-unit issue/notes text (not a summary)
-//     and asked to (1) sanity-check the mechanical trends, (2) find any
-//     additional 3+-unit pattern the keyword list missed, (3) flag barriers
-//     evident in the text. This is where AI becomes the source of truth for
-//     genuinely NEW findings -- but only additively, and only when verified.
-//   - Every AI claim MUST cite the specific unit IDs it applies to. Any
-//     claim citing a unit ID not actually in that group, or citing fewer
-//     than 3 units for a "trend", is silently dropped during validation --
-//     this is the anti-fabrication gate. AI output that can't be traced
-//     back to real units in the group never reaches the UI.
-//   - Results are visually distinct (🤖 badge) from mechanical findings so
-//     the user can tell at a glance what's deterministic vs. AI-found, and
-//     are cached per group+day so a page refresh doesn't burn another AI
-//     call for data that hasn't changed.
-
-let _aiReview = {}; // key: `${kind}::${groupKey}` -> { additionalTrends, barrierNotes, trendIssues, reviewedAt }
-
-function _aiKey(kind, groupKey) { return `${kind}::${groupKey}`; }
-function _aiLsKey(kind, groupKey) { return `dailyCall__ai__${kind}__${groupKey}__${_todayKey()}`; }
-
-function _loadCachedAIReview(kind, groupKey) {
-  try {
-    const raw = localStorage.getItem(_aiLsKey(kind, groupKey));
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) { return null; }
-}
-function _saveAIReview(kind, groupKey, data) {
-  try { localStorage.setItem(_aiLsKey(kind, groupKey), JSON.stringify(data)); } catch (e) { /* ignore quota errors */ }
-}
-
-function _buildAIPrompt(kind, g) {
-  const label = kind === 'site' ? 'Domicile' : 'SCAC';
-  const rows = g.unavailRows.slice(0, 60); // keep prompt size sane; matches MAX_PROMPT_LEN headroom in src/ipc/ai.js
-  // Budget-aware per-unit truncation: ~20000 chars total for unit text,
-  // split evenly across however many rows actually made the cut, clamped
-  // between 350 (always keep at least the issue line + a bit of timeline)
-  // and 900 (matches the cap _computeGroup stored). Prevents a large group
-  // (many rows × long repairTimeline) from silently blowing past
-  // MAX_PROMPT_LEN and having the whole AI Review fail with a validation
-  // error instead of gracefully trimming.
-  const perUnitBudget = Math.max(350, Math.min(900, Math.floor(20000 / Math.max(rows.length, 1))));
-  const trendsList = g.trends.length
-    ? g.trends.map(t => `- ${t.count} ${t.label}${t.daysRange ? ' — ' + t.daysRange : ''} [${t.direction || 'Recurring'}]${t.scacs && t.scacs.length ? ' (' + t.scacs.join(', ') + ')' : ''}: units ${t.units.join(', ')}`).join('\n')
-    : '(none detected)';
-  const unitLines = rows.map(u => {
-    const meta = [
-      u.operator ? `SCAC: ${u.operator}` : '',
-      u.vendor ? `Vendor: ${u.vendor}` : 'Vendor: unassigned',
-      (u.daysOpen !== null && u.daysOpen !== undefined) ? `Open: ${u.daysOpen}d` : '',
-      u.repairStatus ? `Status: ${u.repairStatus}` : '',
-    ].filter(Boolean).join(' | ');
-    return `[${u.id}]${meta ? ' ' + meta : ''}\n${(u.text || '(no issue text)').substring(0, perUnitBudget)}`;
-  }).join('\n\n');
-
-  return `You are Orcha, cross-checking a fleet operations "Daily Call" report for accuracy. You are a SUPPORTING / VERIFICATION source only -- never invent information.
-
-GROUP: ${g.label} (${label})
-${rows.length} unavailable units. Raw issue/notes text for each unit below.
-
-MECHANICAL TRENDS ALREADY DETECTED (keyword-matched against issue text, confirm or flag if wrong):
-${trendsList}
-
-RAW UNIT TEXT:
-${unitLines}
-
-YOUR TASK:
-1. Check whether the mechanical trends above are actually supported by the raw text. Flag anything that looks wrong.
-2. TRENDS -- look for any ADDITIONAL pattern shared by 3 or more units that was NOT already detected above: a repair type, component, or root cause explicitly mentioned in 3+ units' text. This is about WHAT is broken, repeated across multiple units.
-3. BARRIERS -- separately, note anything blocking progress or making a unit's record hard to act on: no vendor engaged, diagnosis blocked (e.g. waiting on a diagnostic tool, dealer, or parts), root cause unresolved after repeated attempts, incomplete/truncated records, unit sitting with no activity, etc. This is about WHY progress is stuck, and can apply to even a SINGLE unit -- it does not need to repeat across 3+ units like a trend does. Do NOT put barrier-type findings into additionalTrends -- they belong in barrierNotes even if you found several of them.
-4. ACTIONS -- suggest concrete next steps the fleet coordinator (the user) could personally take to move things forward, e.g. "Request updated ETC from Amerit for unit X", "Escalate diagnosis delay at dealer for unit Y". Be specific and cite the relevant unit ID(s) when the action is unit-specific; citation is optional for a genuinely group-wide action (e.g. "Request consolidated status update from Amerit for all open WOs at this site").
-5. HELP NEEDED -- assess whether cross-team help is needed (e.g. SM team lifecycle correction, FAS/AFP coordination, Last Mile escalation) and from whom. If no help is needed, do not invent a need -- simply return an empty array for this field.
-
-TRENDS RULE: Identify recurring patterns in why units are down at this site/SCAC. A trend exists when 3+ units share the same failure category or situation. "No trends" is valid when nothing clusters.
-
-TRENDS STYLE EXAMPLES (match this voice):
-- "No trends"
-- "No trends. Only four units down"
-- "4 no starts"
-- "5 Expired PMs"
-- "5 transmission"
-- "7 Reconditioning units"
-- "3 OOS\nNo trends"
-- "8 Engine issues\n4 Cab/Climate Control issues\n3 Accessories"
-- "13 OOS\n4 Expired Inspection\n3 OSR\n2 EOL"
-- "Engine/Motor Systems (3) — 59340, 122309, 520079."
-- "Chassis (4) — 321357, 520065, 520089, 321571.\nEngine/Motor Systems (5) — 321579, 322442, 521296, 569073, 876609."
-- "Predictive maintenance — 12 active (6 within the last 2 days)\nKenworth Brockton congestion persists — 9 units assigned there; recurring 'waiting on next tech' across multiple units"
-- "Amerit parts sourcing failures — 4 occurrences in 13 days (322285 2x incorrect throttle body, 321548 sensors past EDD, 320210 no ETA post-approval).\nOffsite dealer extended dwell — 4 units (521073 KW 27d, 9010434 KW 14d, 321414 Cummins 13d).\nSame-day downed spike — 5 units downed DoD."
-- "Live snapshot 8/11: 73.4% uptime (80/109 tractors active). Movement is offsite/OEM-driven — Amerit on-site queue is fresh and clearing."
-
-Format: category name + count + each unit ID with its SPECIFIC issue (not just the category repeated). Examples:
-- "Electrical (3) — B62179 ignition switch vandalism, B62196 liftgate switch ripped from dash, 39263 wiring harness short to ground"
-- "Engine/Motor Systems (4) — 321950 cylinders 5&6 misfire/turbo oil carryover, 122148 oil leak at dealer event, 59090 engine fueling predictive alert, 922516 engine oil pressure alert"
-- "Transmission (3) — 520079 shift solenoid failure, 321254 MTM internal damage pending Eaton direction, 39110 communication fault harness delay"
-- "PM Backlog (5) — B12257 PM-B 7d, B12263 PM-B 8d, B62049 PM-B 8d, 9010381 PM-B pending tech, B62020 PM-B blocked by CNG diag"
-
-Each unit gets its own brief description of WHAT specifically is wrong — not just the unit ID alone. This gives leadership instant visibility into whether the trend is one root cause or diverse failures in the same category. Use direction labels [Persisting/Emerging] only when a trend is worsening or new.
-BARRIERS RULE: List what's BLOCKING progress on downed units. Be specific when you can, brief when the situation is simple. "No barriers" is a valid answer if nothing is genuinely blocking.
-
-BARRIERS STYLE EXAMPLES (match this voice):
-- "no barriers"
-- "Dealer backlog"
-- "KTR has limited techs around the area and FM stated it will take a week to get oil out there to complete PMs"
-- "Weekend backlog"
-- "Expired Inspections; Amerit was not able to complete all the PMs over the weekend due to weekend repairs per AFM"
-- "Parts Delay: 322285 — throttle body 2x incorrect, 13 days, no ETA. 321548 — HALO sensors 4 days past EDD (8/7)."
-- "Offsite Shop: 321414 at Cummins — estimate stalled waiting on Volvo for harness PN (13d). 521073 at KW — ETR 8/13."
-- "Estimate approval bottlenecks (5 units) — 622106 escalated; 520062 pending approval for fuel testing; 59161 EGR estimate pending."
-- "Uptick in rejections from COX last week - 7 units OSR"
-- "Physical access barriers — 324130 (15d) both vehicle doors will not open; dealer cannot get inside to begin diagnostics."
-- "parts delay ETA 8/21 for back doors, dealer delays due to backlog and being short handed, 2 units in bay WIP pending ETC"
-- "Extended off-site repair aging is the primary driver of downtime. Parts sourcing and back-order delays. Vendor WO cancellations and dealer referrals."
-- "SWAP Delays for EOL units, Extended repairs for CEI. Barriers account for about 50% downtime"
-
-Format: direct, concise. Can be a single phrase or multiple barriers separated by semicolons/periods/newlines. Include unit IDs, vendor names, and days when relevant. Group by blocker category when multiple units share the same barrier. Say "no barriers" if nothing is genuinely blocking.
-ACTIONS RULE: Every barrier MUST have a matching action — no orphan barriers. Use specific action verbs: Escalated, Requested, Confirmed, Scheduled, Created WO, Sent correspondence, Pushed for, Contacted, Reached out to, Spoke with, Submitted, Coordinating. Always state WHO you contacted, WHAT you specifically requested, and WHEN you expect resolution. NEVER use "following up" alone — say what you're following up ON and with WHOM.
-
-ACTIONS STYLE EXAMPLES (match this voice):
-- "Contacted Cox FM, tech to finish lift gate PMs today and getting started on PM-Bs"
-- "Reached out to Kenworth dealer for progress updates on 521073 (27 days, estimate approved 8/10)"
-- "Escalated pending estimates (2) to HVE team in AAP"
-- "Confirming tows to site for units completing offsite repair"
-- "Submitted vendor coaching for Amerit on unit 59008 due to SLA breach; Asana task created"
-- "Spoke with Amerit techs and FM to prioritize repairs as parts arrive for OOS units"
-- "Follow up with Valley Peterbilt for ETC; expedite 520079 estimate approval; set up tow for 520072"
-- "Reached out to kooner management for update on units with solid and accurate updates"
-- "Sending two units to Volvo for expedited PMs"
-- "5 units downed DoD all pending Amerit diagnostics — spoke with techs to prioritize"
-- "Escalate dealer estimate approvals; return tow scheduled for 9010380"
-
-Format: direct, 1st person, action-oriented. Can be a single line per action or multiple actions separated by semicolons/newlines. Reference specific unit IDs when the action is unit-specific.
-
-STRICT RULES -- violating these invalidates your response:
-- Every TREND or BARRIER claim MUST cite the exact unit IDs (from the bracketed list above) where you found it. No unit IDs = do not include the claim.
-- Do NOT invent, guess, or extrapolate beyond what is explicitly stated in the raw text.
-- Minimum 3 units required for any "additional trend" claim -- same threshold as the mechanical detection. Barriers have NO minimum -- a single unit's blocker is still worth flagging.
-- If you find nothing beyond what's already detected for trends or barriers, say so plainly -- do not fabricate filler content to seem useful.
-- Actions and help-needed are recommendations, not factual claims -- they don't require the same unit-citation rigor, but should still be grounded in what you actually see in the text, not generic boilerplate.
-
-RESPOND WITH JSON ONLY, no markdown, no explanation outside the JSON:
-{"trendsAccurate": true, "trendIssues": "", "additionalTrends": [{"label": "failure category name", "direction": "Persisting|Emerging|Recurring", "timeframe": "e.g. 12-day window or 3rd consecutive week", "units": ["id1","id2","id3"], "quote": "short supporting phrase from the text", "scacs": ["SCAC1","SCAC2"]}], "barrierNotes": [{"category": "Parts Delay|Offsite Shop|Vendor Capacity|Estimate Approval|No Weekend Coverage|Other", "note": "unit-specific description e.g. throttle body incorrect 2x, no correct PN sourced", "vendor": "vendor or dealer name", "days": 12, "critical": true, "units": ["id1"]}], "suggestedActions": [{"action": "Escalated/Requested/Confirmed/etc + who + what + ETA", "owner": "Z or team name", "deadline": "e.g. EOD Wed", "refersTo": "barrier category this resolves", "units": ["id1"]}], "suggestedHelp": [{"note": "short description of help needed and from whom", "units": ["id1"]}]}`;
-}
-
-// Anti-fabrication gate — drop any AI claim that isn't traceable to real
-// unit IDs actually present in this group. This is the enforcement point;
-// nothing from here downstream is "trust the AI" without a cited, checkable
-// source.
-function _validateAIResult(parsed, g) {
-  const knownIds = new Set(g.unavailRows.map(u => u.id));
-  const out = { trendsAccurate: true, trendIssues: '', additionalTrends: [], barrierNotes: [], suggestedActions: [], suggestedHelp: [] };
-  if (!parsed || typeof parsed !== 'object') return out;
-
-  out.trendsAccurate = parsed.trendsAccurate !== false;
-  out.trendIssues = typeof parsed.trendIssues === 'string' ? parsed.trendIssues.trim().substring(0, 300) : '';
-
-  if (Array.isArray(parsed.additionalTrends)) {
-    for (const t of parsed.additionalTrends) {
-      if (!t || typeof t.label !== 'string' || !t.label.trim()) continue;
-      const units = Array.isArray(t.units) ? t.units.filter(u => knownIds.has(u)) : [];
-      if (units.length < TREND_MIN_UNITS) continue; // fewer verified units than claimed, or below threshold — drop
-      out.additionalTrends.push({
-        label: t.label.trim().substring(0, 60),
-        direction: (typeof t.direction === 'string' && ['Persisting','Emerging','Recurring'].includes(t.direction)) ? t.direction : 'Recurring',
-        timeframe: typeof t.timeframe === 'string' ? t.timeframe.trim().substring(0, 80) : '',
-        scacs: Array.isArray(t.scacs) ? t.scacs.filter(s => typeof s === 'string').map(s => s.trim()).filter(Boolean).slice(0, 8) : [],
-        units,
-        quote: (typeof t.quote === 'string' ? t.quote.trim().substring(0, 150) : ''),
-      });
-    }
-  }
-
-  if (Array.isArray(parsed.barrierNotes)) {
-    for (const b of parsed.barrierNotes) {
-      if (!b || typeof b.note !== 'string' || !b.note.trim()) continue;
-      const units = Array.isArray(b.units) ? b.units.filter(u => knownIds.has(u)) : [];
-      if (units.length === 0) continue; // uncited barrier note — drop
-      const bDays = typeof b.days === 'number' && b.days >= 0 ? b.days : null;
-      out.barrierNotes.push({
-        category: typeof b.category === 'string' ? b.category.trim().substring(0, 50) : 'Other',
-        note: b.note.trim().substring(0, 200),
-        vendor: typeof b.vendor === 'string' ? b.vendor.trim().substring(0, 60) : '',
-        days: bDays,
-        critical: bDays !== null ? bDays > 7 : Boolean(b.critical),
-        blockedBy: typeof b.blockedBy === 'string' ? b.blockedBy.trim().substring(0, 40) : '',
-        duration: typeof b.duration === 'string' ? b.duration.trim().substring(0, 30) : '',
-        units,
-      });
-    }
-  }
-
-  // Actions/help are recommendations, not factual claims about the data --
-  // held to a lighter validation bar than trends/barriers (which must cite
-  // real units or get dropped entirely). Units are still filtered to known
-  // IDs when present, but an empty/absent unit list is allowed since a
-  // suggestion can legitimately be group-wide (e.g. "request a consolidated
-  // status update from the vendor for this site").
-  if (Array.isArray(parsed.suggestedActions)) {
-    for (const a of parsed.suggestedActions) {
-      if (!a || typeof a.action !== 'string' || !a.action.trim()) continue;
-      const units = Array.isArray(a.units) ? a.units.filter(u => knownIds.has(u)) : [];
-      out.suggestedActions.push({
-        action: a.action.trim().substring(0, 200),
-        owner: typeof a.owner === 'string' ? a.owner.trim().substring(0, 40) : '',
-        deadline: typeof a.deadline === 'string' ? a.deadline.trim().substring(0, 40) : '',
-        refersTo: typeof a.refersTo === 'string' ? a.refersTo.trim().substring(0, 60) : '',
-        units,
-      });
-    }
-  }
-
-  if (Array.isArray(parsed.suggestedHelp)) {
-    for (const h of parsed.suggestedHelp) {
-      if (!h || typeof h.note !== 'string' || !h.note.trim()) continue;
-      const units = Array.isArray(h.units) ? h.units.filter(u => knownIds.has(u)) : [];
-      out.suggestedHelp.push({ note: h.note.trim().substring(0, 150), units });
-    }
-  }
-
-  return out;
-}
-
-async function _runAIReviewForGroup(kind, g) {
-  // BUG FIX (during initial build, 2026-07-17): every early-return error
-  // path used to just `return { error }` without writing to _aiReview, so
-  // a failed review (AI bridge down, bad JSON, etc.) was silently dropped
-  // -- the button would finish and nothing would visibly change, with no
-  // indication anything went wrong. Route every exit through one place
-  // that always records the result (success OR error) so _renderGroupRow's
-  // `if (aiData.error)` branch actually has something to show.
-  const fail = (msg) => {
-    const withMeta = { error: msg, reviewedAt: Date.now() };
-    _aiReview[_aiKey(kind, g.key)] = withMeta;
-    _saveAIReview(kind, g.key, withMeta);
-    return withMeta;
-  };
-
-  if (!window.ai || !window.ai.ask) return fail('AI bridge not available');
-  if (!g.unavailRows.length) return fail('No units to review');
-  try {
-    const prompt = _buildAIPrompt(kind, g);
-    // Retry on timeout/transient failure: the AI layer occasionally times out
-    // or returns a transient error on a single group even when others succeed.
-    // Retrying JUST that group (short backoff) recovers it without re-running
-    // the whole review. onStatus surfaces the retry so the button shows it.
-    const result = await _askAIWithRetry(prompt, {
-      onStatus: (msg) => { if (typeof _aiReviewStatus === 'function') _aiReviewStatus(msg); },
-      label: g.label,
-    });
-    if (!result || result.ok === false) return fail((result && result.error) || 'AI call failed');
-    const text = result.text || '';
-    const jm = text.match(/\{[\s\S]*\}/);
-    if (!jm) return fail('AI response was not JSON');
-    let parsed;
-    try { parsed = JSON.parse(jm[0]); } catch (e) { return fail('Could not parse AI JSON: ' + e.message); }
-    const validated = _validateAIResult(parsed, g);
-    const withMeta = { ...validated, reviewedAt: Date.now() };
-    _aiReview[_aiKey(kind, g.key)] = withMeta;
-    _saveAIReview(kind, g.key, withMeta);
-    return withMeta;
-  } catch (e) {
-    return fail(e.message);
-  }
-}
-
-// Progress callback set by the batch runner so per-group retries can surface
-// on the button; optional.
-let _aiReviewStatus = null;
 
 // Call window.ai.ask with a per-call timeout AND bounded retry on
 // timeout/transient failure. Returns the { ok, text } result, or throws the
@@ -622,214 +327,14 @@ async function _askAIWithRetry(prompt, opts) {
 }
 
 // Shared by _renderGroupRow and _buildTsv so the "Copy for SharePoint"
-// export always matches what's actually shown on screen — including the
-// AI-suggested draft text for Actions/Help Needed when the user hasn't
-// typed their own text yet.
-function _getAIDrafts(kind, g) {
-  const aiData = _aiReview[_aiKey(kind, g.key)];
-  if (!aiData || aiData.error) return { actionsDraft: '', helpDraft: '' };
-  const actionsDraft = (aiData.suggestedActions || []).map(a => {
-    const who = a.owner ? `[${a.owner}]` : '';
-    const when = a.deadline ? ` by ${a.deadline}` : '';
-    const unitStr = a.units && a.units.length ? ` (${a.units.join(', ')})` : '';
-    return `${who}${who ? ' ' : ''}${a.action}${when}${unitStr}`.trim();
-  }).join('\n');
-  const helpDraft = (aiData.suggestedHelp || []).map(h => h.note + (h.units.length ? ` (${h.units.join(', ')})` : '')).join('; ');
-  return { actionsDraft, helpDraft };
-}
-
-// ── Row render (editable) ───────────────────────────────────────────────────
-function _renderGroupRow(kind, g) {
-  const trendsHtml = g.trends.length
-    ? g.trends.map(t => {
-        const dir = t.direction || 'Recurring';
-        const badge = `<span class="dc-trend-badge dc-trend--${dir.toLowerCase()}">${_safe(dir)}</span>`;
-        const durStr = t.daysRange ? ` — ${t.daysRange}` : '';
-        const scacStr = t.scacs && t.scacs.length ? ` <span class="dc-unit-list">(${t.scacs.map(_safe).join(', ')})</span>` : '';
-        return `<div class="dc-trend-line">${badge}${t.count} ${_safe(t.label)}${durStr}${scacStr}</div>`;
-      }).join('')
-    : '<span class="an-empty">No trends — no single issue category has 3+ units affected</span>';
-
-  // AI verification results (if this group has been reviewed) — visually
-  // distinct from mechanical findings so it's always clear what's
-  // deterministic vs. AI-supplied. See _runAIReviewForGroup / _validateAIResult.
-  //
-  // BUG FIX (2026-07-17, user-reported via screenshot): every AI finding
-  // used to get dumped into ONE block appended only to the Trends cell --
-  // so barrier-type findings ("no vendor engaged", "diagnosis blocked",
-  // "record truncated") showed up under Trends instead of Barriers, making
-  // Barriers look empty while Trends got overloaded. Now split by type and
-  // routed to the column it actually belongs in: additionalTrends -> Trends
-  // cell, barrierNotes -> Barriers cell, suggestedActions -> Actions cell
-  // (also feeds the default draft text), suggestedHelp -> Help Needed cell
-  // (also feeds the default draft text).
-  const aiData = _aiReview[_aiKey(kind, g.key)];
-  let aiTrendsHtml = '';
-  let aiBarriersHtml = '';
-  let aiActionsHtml = '';
-  let aiHelpHtml = '';
-  const { actionsDraft: aiActionsDraft, helpDraft: aiHelpDraft } = _getAIDrafts(kind, g);
-
-  if (aiData) {
-    const reviewedStr = aiData.reviewedAt ? new Date(aiData.reviewedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
-    if (aiData.error) {
-      aiTrendsHtml = `<div class="dc-ai-block dc-ai-block--error">🤖 AI review failed: ${_safe(aiData.error)}</div>`;
-    } else {
-      // Defensive fallbacks: a review cached earlier today (before this
-      // column-routing fix shipped) won't have suggestedActions/
-      // suggestedHelp keys at all — accessing .length on undefined would
-      // throw and break the whole row's render. `|| []` on every array
-      // here guards against any stale-cache shape, old or new.
-      const additionalTrends = aiData.additionalTrends || [];
-      const barrierNotes = aiData.barrierNotes || [];
-      const suggestedActions = aiData.suggestedActions || [];
-      const suggestedHelp = aiData.suggestedHelp || [];
-
-      // Trends column: only genuine 3+-unit additional trends + accuracy flag
-      const addTrendsHtml = additionalTrends.length
-        ? additionalTrends.map(t => { const aiScacStr = t.scacs && t.scacs.length ? ` <span class="dc-unit-list">(${t.scacs.map(_safe).join(', ')})</span>` : ''; return `<div class="dc-trend-line dc-trend-line--ai">🤖 ${t.units.length} ${_safe(t.label)}${t.timeframe ? ' — ' + _safe(t.timeframe) : ''}${aiScacStr}${t.quote ? `<div class="dc-ai-quote">"${_safe(t.quote)}"</div>` : ''}</div>`; }).join('')
-        : '';
-      const issueHtml = (!aiData.trendsAccurate && aiData.trendIssues)
-        ? `<div class="dc-ai-note dc-ai-note--warn">⚠ AI flagged: ${_safe(aiData.trendIssues)}</div>` : '';
-      const nothingInTrends = !addTrendsHtml && !issueHtml;
-      aiTrendsHtml = `<div class="dc-ai-block">${addTrendsHtml}${issueHtml}${nothingInTrends ? '<div class="dc-ai-note dc-ai-note--ok">🤖 Reviewed — no additional trends found</div>' : ''}<div class="dc-ai-timestamp">Reviewed ${reviewedStr}</div></div>`;
-
-      // Barriers column: grouped by category, unit-specific with vendor + days
-      if (barrierNotes.length) {
-        const byCat = {};
-        for (const b of barrierNotes) {
-          const cat = b.category || 'Other';
-          if (!byCat[cat]) byCat[cat] = [];
-          byCat[cat].push(b);
-        }
-        const bHtml = Object.entries(byCat).map(([cat, entries]) => {
-          const entriesHtml = entries.map(b => {
-            const vendorStr = b.vendor ? ` at ${_safe(b.vendor)}` : '';
-            const daysStr = b.days !== null && b.days !== undefined ? ` (${b.days}d)` : '';
-            const critFlag = b.critical ? ' <span class="dc-barrier-critical">⚠ CRITICAL</span>' : '';
-            const unitTag = b.units.length ? `<span class="dc-unit-list">[${b.units.map(_safe).join(', ')}]</span> ` : '';
-            return `<div class="dc-ai-note">🤖 ${unitTag}${_safe(b.note)}${vendorStr}${daysStr}${critFlag}</div>`;
-          }).join('');
-          return `<div class="dc-barrier-group"><span class="dc-barrier-cat">${_safe(cat)}:</span>${entriesHtml}</div>`;
-        }).join('');
-        aiBarriersHtml = `<div class="dc-ai-block">${bHtml}</div>`;
-      }
-
-      // Actions column: AI-suggested next steps — also used as the default
-      // draft text for the textarea (Actions had no deterministic draft
-      // before; this is what the user explicitly asked for).
-      if (suggestedActions.length) {
-        aiActionsHtml = `<div class="dc-ai-block">${suggestedActions.map(a => {
-          const ownerDeadline = (a.owner || a.deadline) ? `<span class="dc-ai-owner">${[a.owner, a.deadline ? 'by ' + a.deadline : ''].filter(Boolean).join(' · ')}</span>` : '';
-          return `<div class="dc-ai-note">🤖 ${_safe(a.action)}${ownerDeadline}${a.units && a.units.length ? ` <span class="dc-unit-list">(${a.units.map(_safe).join(', ')})</span>` : ''}</div>`;
-        }).join('')}</div>`;
-      }
-
-      // Help Needed column: AI assessment of cross-team help — same
-      // draft-prefill pattern as Actions.
-      if (suggestedHelp.length) {
-        aiHelpHtml = `<div class="dc-ai-block">${suggestedHelp.map(h => `<div class="dc-ai-note">🤖 ${_safe(h.note)}${h.units.length ? ` <span class="dc-unit-list">(${h.units.map(_safe).join(', ')})</span>` : ''}</div>`).join('')}</div>`;
-      }
-    }
-  }
-
-  const barriersDraft = g.barriers.length ? g.barriers.join('; ') : '';
-  const flipCount = g.flipUnits.length;
-  const flipDraft = flipCount > 0 ? `~${flipCount} (${g.flipUnits.slice(0, 6).map(_safe).join(', ')})` : '0';
-
-  const barriersVal = _lsGet(kind, g.key, 'barriers') || barriersDraft;
-  const flipsVal     = _lsGet(kind, g.key, 'flips')     || flipDraft;
-  const actionsVal   = _lsGet(kind, g.key, 'actions') || aiActionsDraft;
-  const helpVal      = _lsGet(kind, g.key, 'help') || aiHelpDraft;
-
-  const uptimeCls = g.uptime < 65 ? 'dc-cell--danger' : g.uptime < 75 ? 'dc-cell--warn' : '';
-
-  return `
-    <tr data-group-key="${_safe(g.key)}">
-      <td class="dc-col-label"><b>${_safe(g.label)}</b></td>
-      <td class="dc-col-num ${uptimeCls}">${g.uptime}%</td>
-      <td class="dc-col-num ${g.unavailCount > 0 ? 'dc-cell--warn' : ''}">${g.unavailCount}</td>
-      <td class="dc-col-trends">${trendsHtml}${aiTrendsHtml}</td>
-      <td class="dc-col-editable">${aiBarriersHtml}<textarea class="dc-input dc-input--barriers" data-field="barriers" rows="2" placeholder="Draft — edit as needed">${_safe(barriersVal)}</textarea></td>
-      <td class="dc-col-editable"><textarea class="dc-input dc-input--flips" data-field="flips" rows="2" placeholder="Draft — edit as needed">${_safe(flipsVal)}</textarea></td>
-      <td class="dc-col-editable">${aiActionsHtml}<textarea class="dc-input dc-input--actions" data-field="actions" rows="2" placeholder="What are you doing about it?">${_safe(actionsVal)}</textarea></td>
-      <td class="dc-col-editable">${aiHelpHtml}<textarea class="dc-input dc-input--help" data-field="help" rows="2" placeholder="No help needed">${_safe(helpVal)}</textarea></td>
-    </tr>`;
-}
-
-function _renderTable(kind, groups, showBottom10) {
-  const visible = showBottom10 ? groups.slice(0, 10) : groups;
-  if (!visible.length) return '<div class="an-empty" style="padding:16px">No unavailable units — nothing to report 🎉</div>';
-  return `
-    <table class="an-table dc-table">
-      <thead>
-        <tr>
-          <th>${kind === 'site' ? 'DOMICILE' : 'SCAC'}</th>
-          <th class="an-tbl--r">Uptime %</th>
-          <th class="an-tbl--r"># Unavailable</th>
-          <th>Trends (3+ units, same issue)</th>
-          <th>Barriers <span class="dc-draft-badge">draft</span></th>
-          <th>Expected Flips Today <span class="dc-draft-badge">draft</span></th>
-          <th>Actions</th>
-          <th>Help Needed</th>
-        </tr>
-      </thead>
-      <tbody>${visible.map(g => _renderGroupRow(kind, g)).join('')}</tbody>
-    </table>`;
-}
-
-// ── Copy-for-SharePoint export ───────────────────────────────────────────────
-function _buildTsv(groups, kind, showBottom10) {
-  const visible = showBottom10 ? groups.slice(0, 10) : groups;
-  const header = [kind === 'site' ? 'DOMICILE' : 'SCAC', 'Uptime %', '# Units Unavailable', 'Trends (SITE/SCAC)', 'Barriers (SITE/SCAC)', 'Expected Flips to A/H Today', 'Actions', 'Help Needed'];
-  const lines = [header.join('\t')];
-  for (const g of visible) {
-    const trendsTxt = g.trends.length ? g.trends.map(t => `${t.count} ${t.label}${t.daysRange ? ' — ' + t.daysRange : ''}${t.scacs && t.scacs.length ? ' (' + t.scacs.join(', ') + ')' : ''}`).join('\n') : 'No trends — no single issue category has 3+ units affected';
-    const barriersTxt = _lsGet(kind, g.key, 'barriers') || (g.barriers.join('; ') || '');
-    const flipsTxt = _lsGet(kind, g.key, 'flips') || (g.flipUnits.length ? `~${g.flipUnits.length}` : '0');
-    const { actionsDraft, helpDraft } = _getAIDrafts(kind, g);
-    const actionsTxt = _lsGet(kind, g.key, 'actions') || actionsDraft || '';
-    const helpTxt = _lsGet(kind, g.key, 'help') || helpDraft || 'No help needed';
-    lines.push([g.label, g.uptime + '%', g.unavailCount, trendsTxt, barriersTxt, flipsTxt, actionsTxt, helpTxt].join('\t'));
-  }
-  return lines.join('\n');
-}
-
 // ── Full view HTML ───────────────────────────────────────────────────────────
 function _viewHtml() {
   return `
     <style>
       #view-daily-call .dc-table { width: 100%; border-collapse: collapse; }
       #view-daily-call .dc-table th, #view-daily-call .dc-table td { border: 1px solid var(--border, #333); padding: 8px; vertical-align: top; font-size: 12px; }
-      #view-daily-call .dc-col-label { min-width: 90px; }
-      #view-daily-call .dc-col-num { text-align: right; min-width: 60px; }
-      #view-daily-call .dc-col-trends { min-width: 220px; }
-      #view-daily-call .dc-col-editable { min-width: 160px; }
       #view-daily-call .dc-input { width: 100%; box-sizing: border-box; resize: vertical; font-size: 12px; font-family: inherit; background: var(--bg2, #1a1a2e); color: var(--fg, #eee); border: 1px solid var(--border, #444); border-radius: 4px; padding: 4px 6px; }
-      #view-daily-call .dc-trend-line { margin-bottom: 4px; }
-      #view-daily-call .dc-unit-list { opacity: .65; font-size: 11px; }
-      #view-daily-call .dc-draft-badge { font-size: 9px; opacity: .6; font-weight: normal; text-transform: uppercase; margin-left: 4px; }
-      #view-daily-call .dc-cell--warn   { color: #d97706; font-weight: 600; }
-      #view-daily-call .dc-cell--danger { color: #dc2626; font-weight: 600; }
       #view-daily-call .dc-section-title { font-size: 15px; font-weight: 600; margin: 20px 0 8px; }
-      #view-daily-call .dc-toggle-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 12px; }
-      #view-daily-call .dc-trend-line--ai { color: #8b5cf6; }
-      #view-daily-call .dc-ai-block { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border, #444); }
-      #view-daily-call .dc-ai-block--error { color: #dc2626; font-size: 11px; }
-      #view-daily-call .dc-trend-badge { display:inline-block; font-size:9px; font-weight:700; text-transform:uppercase; padding:1px 5px; border-radius:3px; margin-right:4px; vertical-align:middle; }
-      #view-daily-call .dc-trend--persisting { background:#7f1d1d; color:#fca5a5; }
-      #view-daily-call .dc-trend--emerging   { background:#1e3a5f; color:#93c5fd; }
-      #view-daily-call .dc-trend--recurring  { background:#3b2a00; color:#fcd34d; }
-      #view-daily-call .dc-ai-owner { font-size:10px; color:#6366f1; margin-left:4px; }
-      #view-daily-call .dc-barrier-group { margin-bottom: 6px; }
-      #view-daily-call .dc-barrier-cat { font-size:10px; font-weight:700; text-transform:uppercase; color:#d97706; margin-right:4px; }
-      #view-daily-call .dc-barrier-critical { font-size:9px; font-weight:700; color:#dc2626; background:#450a0a; padding:1px 4px; border-radius:3px; margin-left:4px; }
-      #view-daily-call .dc-ai-note { font-size: 11px; color: #8b5cf6; margin-bottom: 3px; }
-      #view-daily-call .dc-ai-note--warn { color: #d97706; }
-      #view-daily-call .dc-ai-note--ok { color: var(--mut, #888); opacity: .8; }
-      #view-daily-call .dc-ai-quote { font-size: 10px; opacity: .7; font-style: italic; margin: 2px 0 4px 18px; }
-      #view-daily-call .dc-ai-timestamp { font-size: 9px; opacity: .5; margin-top: 4px; }
-      #view-daily-call #dc-ai-review[disabled] { opacity: .6; cursor: wait; }
       #view-daily-call .dc-scope-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
       #view-daily-call .dc-scope-label { font-size: 12px; color: var(--mut, #888); white-space: nowrap; }
       #view-daily-call .dc-scope-input { flex: 1 1 280px; min-width: 200px; min-height: 30px; max-height: 90px; box-sizing: border-box; resize: vertical; font-size: 12px; font-family: inherit; background: var(--bg2, #1a1a2e); color: var(--fg, #eee); border: 1px solid var(--border, #444); border-radius: 4px; padding: 5px 7px; }
@@ -839,33 +344,22 @@ function _viewHtml() {
     <div class="an-header">
       <div class="an-header__left">
         <span class="an-title">Daily Call</span>
-        <span class="an-subtitle">Auto-drafted from live fleet data — Trends computed, Barriers/Flips drafted; run AI Review for Actions/Help suggestions + a second pass on Trends/Barriers</span>
+        <span class="an-subtitle">DBR DATA pulls Domicile/SCAC/Uptime/Trends/Barriers from QuickSight + live fleet data. WBR below is generated from live fleet data.</span>
       </div>
       <div class="an-header__actions">
-        <button id="dc-copy-site" class="detail-panel__btn detail-panel__btn--secondary">📋 Copy Domicile table</button>
-        <button id="dc-copy-scac" class="detail-panel__btn detail-panel__btn--secondary">📋 Copy SCAC table</button>
-        <button id="dc-ai-review" class="detail-panel__btn detail-panel__btn--secondary">🤖 AI Review</button>
+        <button id="dc-dbr-data" class="detail-panel__btn detail-panel__btn--secondary" title="AFP/DSP QuickSight — WTD Bottom 10 by Domicile/SCAC">📊 DBR DATA</button>
         <button id="dc-refresh" class="detail-panel__btn detail-panel__btn--secondary">↺ Refresh</button>
         <button id="dc-back" class="detail-panel__btn">Back to Fleet</button>
       </div>
     </div>
     <div class="an-body">
       <div class="dc-scope-row">
-        <label class="dc-scope-label" for="dc-scope">Scope to domicile / SCAC (blank = all):</label>
+        <label class="dc-scope-label" for="dc-scope">Scope WBR to domicile / SCAC (blank = all):</label>
         <textarea id="dc-scope" class="dc-scope-input" rows="1" placeholder="e.g. ABE40, TUZR — each becomes its own section"></textarea>
         <button id="dc-scope-apply" class="detail-panel__btn detail-panel__btn--secondary" style="font-size:11px;">🎯 Scope</button>
         <button id="dc-scope-clear" class="detail-panel__btn detail-panel__btn--secondary" style="font-size:11px;">✕ Clear</button>
         <span id="dc-scope-note" style="font-size:11px;"></span>
       </div>
-      <div class="dc-toggle-row">
-        <label><input type="checkbox" id="dc-bottom10-toggle" /> Show bottom 10 only (default: show all sites/SCACs with unavailable units)</label>
-      </div>
-
-      <div class="dc-section-title" id="dc-site-title">Bottom by Domicile</div>
-      <div id="dc-site-table"></div>
-
-      <div class="dc-section-title" id="dc-scac-title">Bottom by SCAC</div>
-      <div id="dc-scac-table"></div>
 
       <div class="dc-section-title" style="margin-top:20px;">WBR — Weekly Bridge Report</div>
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
@@ -878,15 +372,9 @@ function _viewHtml() {
 }
 
 // ── State + update ───────────────────────────────────────────────────────────
-let _siteGroups = [];
-let _scacGroups = [];
-let _showBottom10 = false;
-
 // SCOPE MODE: user types domicile and/or operator (SCAC) tokens (e.g.
-// "ABE40, TUZR"). Each token becomes its own group — a domicile token yields
-// that domicile's group, an operator token yields that operator's group — so
-// you can pull the full ABE40 picture AND the full TUZR picture side by side,
-// even when TUZR lives inside ABE40. Empty = normal (all groups) view.
+// "ABE40, TUZR") to narrow the WBR to just those sites/carriers. Empty =
+// all sites with unavailable units.
 let _scopeTokens   = [];   // normalized tokens, in entered order (deduped)
 let _scopeNotFound = [];   // tokens not matching any domicile or operator
 
@@ -909,71 +397,19 @@ function _parseScope(text) {
 function _update(rows) {
   if (!_el) return;
 
-  // SCOPE MODE: build only the requested domicile/operator groups (each token
-  // its own group). Otherwise build the full all-groups view.
   if (_scopeTokens.length) {
     const domSet = new Set((rows || []).map(r => _normTok(r.domicileSite)).filter(Boolean));
     const opSet  = new Set((rows || []).map(r => _normTok(r.operator)).filter(Boolean));
     _scopeNotFound = _scopeTokens.filter(t => !domSet.has(t) && !opSet.has(t));
-
-    const siteGroups = [];
-    const scacGroups = [];
-    for (const tok of _scopeTokens) {
-      if (domSet.has(tok)) {
-        // Domicile token -> that domicile's group (all its units).
-        const g = _buildGroups(rows.filter(r => _normTok(r.domicileSite) === tok),
-          r => r.domicileSite || '', k => k)[0];
-        if (g) siteGroups.push(g);
-      }
-      if (opSet.has(tok)) {
-        // Operator/SCAC token -> that operator's group (all its units, any domicile).
-        const g = _buildGroups(rows.filter(r => _normTok(r.operator) === tok),
-          r => (r.operator || '').toUpperCase(), k => k)[0];
-        if (g) scacGroups.push(g);
-      }
-    }
-    _siteGroups = siteGroups;
-    _scacGroups = scacGroups;
   } else {
     _scopeNotFound = [];
-    _siteGroups = _buildGroups(rows, r => r.domicileSite || '', k => k);
-    _scacGroups = _buildGroups(rows, r => (r.operator || '').toUpperCase(), k => k);
-  }
-
-  // Restore any AI reviews already run today for these groups (avoids
-  // burning another AI call on every refresh for unchanged data).
-  for (const g of _siteGroups) {
-    const cached = _loadCachedAIReview('site', g.key);
-    if (cached) _aiReview[_aiKey('site', g.key)] = cached;
-  }
-  for (const g of _scacGroups) {
-    const cached = _loadCachedAIReview('scac', g.key);
-    if (cached) _aiReview[_aiKey('scac', g.key)] = cached;
   }
 
   const scoped = _scopeTokens.length > 0;
-  // In scope mode, never clip to bottom-10 — the user explicitly chose these.
-  const bottom10 = scoped ? false : _showBottom10;
-
-  const siteEl = _el.querySelector('#dc-site-table');
-  const scacEl = _el.querySelector('#dc-scac-table');
-  if (siteEl) siteEl.innerHTML = _renderTable('site', _siteGroups, bottom10);
-  if (scacEl) scacEl.innerHTML = _renderTable('scac', _scacGroups, bottom10);
-
-  _wireEditableFields(siteEl, 'site');
-  _wireEditableFields(scacEl, 'scac');
-
-  // Update section titles + scope note to reflect scope mode.
-  const siteTitle = _el.querySelector('#dc-site-title');
-  const scacTitle = _el.querySelector('#dc-scac-title');
-  if (siteTitle) siteTitle.textContent = scoped ? 'Scoped — Domicile' : 'Bottom by Domicile';
-  if (scacTitle) scacTitle.textContent = scoped ? 'Scoped — SCAC / Operator' : 'Bottom by SCAC';
   const noteEl = _el.querySelector('#dc-scope-note');
   if (noteEl) {
     if (scoped) {
-      const shown = _siteGroups.length + _scacGroups.length;
-      noteEl.innerHTML = '<span class="dc-scope-active">Scoped to ' + _scopeTokens.length +
-        ' token(s) · ' + shown + ' group(s)</span>' +
+      noteEl.innerHTML = '<span class="dc-scope-active">Scoped to ' + _scopeTokens.length + ' token(s)</span>' +
         (_scopeNotFound.length ? ' <span class="dc-scope-notfound">⚠ not found: ' + _safe(_scopeNotFound.join(', ')) + '</span>' : '');
     } else {
       noteEl.textContent = '';
@@ -984,51 +420,801 @@ function _update(rows) {
   _renderWBR(rows);
 }
 
-function _wireEditableFields(tableEl, kind) {
-  if (!tableEl) return;
-  tableEl.querySelectorAll('tr[data-group-key]').forEach(tr => {
-    const key = tr.dataset.groupKey;
-    tr.querySelectorAll('.dc-input').forEach(input => {
-      input.addEventListener('input', () => {
-        _lsSet(kind, key, input.dataset.field, input.value);
-      });
+// ── DBR DATA panel (AFP QuickSight — WTD Bottom 10 by Domicile/SCAC) ───────
+// Per user: ONLY Domicile/SCAC, Uptime %, # Units Unavailable are auto-filled
+// from the QuickSight scrape (src/scrapers/quicksight_dbr.js). FAS is filled
+// in by other people during the call EXCEPT: if a row's Domicile or SCAC
+// matches one of the user's own (their managed domiciles / their carriers),
+// FAS is pre-filled "Z". Trends/Barriers/Expected Flips/Actions/Help
+// Needed/MM-PM-BC are always left blank for manual entry — this panel is a
+// reference/cross-check next to Daily Call's own computed table, not a
+// replacement for it.
+const _dbrEsc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// Uptime values come back from AI parsing as plain numbers (e.g. 82.4) so
+// the JSON stays strict — but the sheet (and this table) should always
+// show/paste the "%" the real DBR sheet uses (e.g. "82.4%"). Idempotent:
+// a value that already ends in "%" (e.g. a manually-typed edit) is left
+// alone rather than getting a second "%" appended.
+function _dbrPct(v) {
+  if (v == null || v === '') return '';
+  const s = String(v).trim();
+  if (s.endsWith('%')) return s;
+  return s + '%';
+}
+let _dbrOverlay = null;
+let _dbrData = null;    // last AFP scrape/cache result: { ok, domicile, scac, scrapedAt, error }
+let _dbrDspData = null; // last DSP scrape/cache result: { ok, scac, scrapedAt, error }
+
+// "Mine" = domiciles the user manages (Contact Book type:'domicile' names)
+// union with carriers/operators present in their own fleet data (the SCACs
+// that actually show up on their units) — matches the "if it matches my
+// domiciles or carriers" rule.
+async function _loadMySitesAndCarriers() {
+  const mySites = new Set();
+  const myCarriers = new Set();
+  try {
+    const rows = state.slice('fleet').rows || [];
+    rows.forEach(r => {
+      const d = (r.domicileSite || r.domicile || '').trim().toUpperCase();
+      if (d) mySites.add(d);
+      const op = (r.operator || '').trim().toUpperCase();
+      if (op) myCarriers.add(op);
     });
+  } catch (e) { /* fleet state unavailable — fall through with whatever Contact Book gives us */ }
+  try {
+    if (window.contacts) {
+      const all = await window.contacts.getAll();
+      all.filter(c => c.type === 'domicile').forEach(c => {
+        const n = (c.name || '').trim().toUpperCase();
+        if (n) mySites.add(n);
+      });
+    }
+  } catch (e) { /* contacts bridge unavailable — fleet-derived sets still apply */ }
+  return { mySites, myCarriers };
+}
+
+// AI JSON-extraction timeout — mirrors wr-modal.js's AI Fill guard so a
+// slow/stuck AI backend never leaves the Scrape button spinning forever.
+const _DBR_AI_TIMEOUT_MS = 95000;
+
+async function _dbrAskAi(prompt) {
+  const result = await Promise.race([
+    window.ai.ask(prompt),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('AI parsing timed out — the AI service may be unavailable')), _DBR_AI_TIMEOUT_MS)),
+  ]);
+  const text = (result && result.text) ? result.text : (result || '');
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error('AI returned no parseable data — the dashboard text may be unusable, or the AI service may be down.');
+  return JSON.parse(match[0]);
+}
+
+// Builds the AI prompt that turns raw QuickSight page text into the AFP
+// JSON shape _dbrRenderTables() expects: { domicile:[{domicile,uptimePct,
+// unitsUnavailable}], scac:[{scac,domicile,uptimePct,unitsUnavailable}] }.
+function _dbrAfpPrompt(pageText) {
+  return 'You are reading plain rendered text copied from an AWS QuickSight dashboard page (document.body.innerText — not HTML, so pivot tables render in a specific flattened order, NOT as neat rows of "label value value value").\n\n'
+    + 'CRITICAL — HOW THESE PIVOT TABLES ACTUALLY RENDER IN THIS TEXT (read carefully, this is NOT a normal table layout):\n'
+    + 'For each pivot table, the text contains, IN THIS ORDER:\n'
+    + '  1. The table title (e.g. "WTD Bottom 10 Performing Domicile Sites") and a one-line description.\n'
+    + '  2. A block of raw numbers — this is EVERY ROW\'s value for metric 1, then EVERY ROW\'s value for metric 2, then metric 3, and so on, metric-by-metric (COLUMN-MAJOR, not row-major). So if there are 10 rows, the first 10 numbers you see are all "% to Goal" (one per row, top row first), the next 10 are all "Uptime %", the next 10 are all "Uptime Goal", then 10 "CNG Asset" counts, 10 "DIESEL Asset" counts, 10 "Downed Asset" counts, 10 "Active WRs", etc.\n'
+    + '  3. A list of metric labels in order, each prefixed with a number like "1.1", "1.2", "2.1" etc, e.g.:\n'
+    + '     1.1 % to Goal / 1.2 Uptime / 1.3 Uptime Goal / 2.1 CNG Asset / 2.2 DIESEL Asset / 2.3 Downed Asset / 3.1 Active WRs / 3.2 Amerit/Kooner WRs / 3.2.1 Open>7 Days / 3.2.2 Open>30 Days / 3.3 Non-Amerit/Kooner WRs / 3.3.1 Open>7 Days / 3.3.2 Open>30 Days\n'
+    + '     This list tells you how many metrics there are and in what order — use it to figure out how many numbers belong to each metric block in step 2 (count = number of rows, which equals the number of row labels found in step 4).\n'
+    + '  4. LAST, the actual row labels (e.g. 10 Domicile Site codes like "OAK-W", "ABEOW01", "MKE40" — one per row, in the SAME top-to-bottom order as the numbers in step 2). For the SCAC table specifically, this label list ALTERNATES SCAC code then Domicile code then SCAC then Domicile, e.g. "OKC41, BIMT, BOS42, AVINR, ..." means row 1 = SCAC "OKC41" domicile "BIMT", row 2 = SCAC "BOS42" domicile "AVINR", etc. Pair them up correctly — do not treat every item in that list as the same type.\n\n'
+    + 'TO RECONSTRUCT EACH ROW: take the Nth value from the "Uptime %" metric block (2nd block of numbers = metric 1.2) and the Nth value from the "Downed Asset" block (metric 2.3, the # units unavailable/down count) and the Nth row label from step 4 — these all correspond to the same row N (counting from the top).\n\n'
+    + 'Find TWO tables in this text using this exact reconstruction method:\n'
+    + '1. The DOMICILE table — titled "WTD Bottom 10 Performing Domicile Sites". NOTE: this page usually has TWO similar domicile tables, one titled "Bottom 10 Performing Domicile Sites - overall within indicated timeframe" (NO "WTD") and one titled "WTD Bottom 10 Performing Domicile Sites". Use ONLY the one whose title contains "WTD" — ignore the non-WTD one. Extract domicile code (row label), Uptime % (metric 1.2 block), and Downed Asset count (metric 2.3 block, this is "# Units Unavailable").\n'
+    + '2. The SCAC table — titled "Bottom 10 Performing SCAC - overall within indicated timeframe" or similar. IMPORTANT: unlike the domicile section, there is usually only ONE SCAC table on this page and it typically does NOT have a "WTD" prefix at all — do not discard it or return an empty array just because its title lacks "WTD". If you see "SCAC" in a pivot table title near section header "C. By SCAC", that is the table to use regardless of whether "WTD" appears in its title. Extract SCAC code + its paired Domicile code (alternating row labels, see step 4 above), Uptime % (metric 1.2 block), and Downed Asset count (metric 2.3 block).\n\n'
+    + 'If the count of numeric values in a metric block does not divide evenly by the count of row labels you found (e.g. 12 rows of numbers but only 11 label pairs), extract as many COMPLETE rows as you can confidently pair up (numbers + a label) and simply omit the row(s) you cannot confidently match — do NOT return an empty array just because of a partial mismatch, and do NOT guess a label for a row you cannot pair.\n\n'
+    + 'Ignore any unrelated page chrome, navigation text, filter controls, or notification banners (e.g. "New data present for visual..."). Only extract real data rows with an actual uptime percentage.\n\n'
+    + 'Respond ONLY with valid JSON in this exact shape (numbers as plain numbers, uptimePct WITHOUT a % sign, e.g. 82.4 not "82.4%"):\n'
+    + '{"domicile":[{"domicile":"SITE_CODE","uptimePct":0,"unitsUnavailable":0}],"scac":[{"scac":"CODE","domicile":"SITE_CODE","uptimePct":0,"unitsUnavailable":0}]}\n\n'
+    + 'If a table cannot be found at all after checking both exact and near-match titles, return an empty array for it rather than guessing.\n\n'
+    + '--- PAGE TEXT START ---\n' + pageText.slice(0, 16000) + '\n--- PAGE TEXT END ---';
+}
+
+// DSP prompt: SCAC-ranked table (Downtime %, Uptime %, Asset #). Per user:
+// only SCAC/Uptime%/#UnitsUnavailable are needed. There is no direct
+// "# Units Unavailable" column on this dashboard — ask the AI to derive it
+// from Asset # x Downtime % if (and only if) it can find both columns, and
+// flag it as estimated so the UI shows it's not a literal dashboard value.
+function _dbrDspPrompt(pageText) {
+  return 'You are reading plain rendered text copied from an AWS QuickSight dashboard page (not HTML — just the visible text, so table rows/columns may be irregularly spaced or line-broken).\n\n'
+    + 'Find the SCAC-ranked performance table on this page. Its columns are SCAC, Downtime %, Uptime %, and Asset # (total asset count for that SCAC). The dashboard itself may be configured to show more than 10 rows (e.g. a "Bottom N" filter set to 20) — IGNORE that and only keep the WORST 10.\n\n'
+    + 'STEP 1: Extract every SCAC row you can find (SCAC code, Uptime %, Downtime %, Asset #) — however many rows actually appear.\n'
+    + 'STEP 2: Sort those rows by Uptime % ascending (lowest/worst uptime first).\n'
+    + 'STEP 3: Keep ONLY the first 10 rows after sorting (the 10 worst-performing SCACs by uptime). Discard the rest, even if the page showed more.\n\n'
+    + 'There is no direct "units unavailable" column. For each of the 10 kept rows, if you can read both the Asset # and Downtime % values, estimate unitsUnavailable = round(Asset# * Downtime% / 100) and set unitsUnavailableEstimated=true. If you cannot find Asset # or Downtime % for a row, leave unitsUnavailable null and unitsUnavailableEstimated=false.\n\n'
+    + 'Ignore any unrelated page chrome, navigation text, filter controls, or notification banners. Only extract real data rows.\n\n'
+    + 'Respond ONLY with valid JSON, MAXIMUM 10 ENTRIES in the "scac" array, in this exact shape (numbers as plain numbers, uptimePct WITHOUT a % sign):\n'
+    + '{"scac":[{"scac":"CODE","uptimePct":0,"unitsUnavailable":0,"unitsUnavailableEstimated":true}]}\n\n'
+    + 'If the table cannot be found at all, return an empty array rather than guessing.\n\n'
+    + '--- PAGE TEXT START ---\n' + pageText.slice(0, 12000) + '\n--- PAGE TEXT END ---';
+}
+
+// Safety net on top of the DSP prompt instruction: the DSP dashboard's own
+// "Bottom N" filter can be set higher than 10 (seen set to 20 live), so even
+// though the prompt tells the AI to sort+keep only the worst 10, this
+// re-sorts by uptime ascending and hard-slices to 10 in code so a prompt
+// miss can never leak extra rows into the sheet.
+function _dbrClampToBottom10(rows) {
+  if (!Array.isArray(rows)) return [];
+  const withUptime = rows.filter(r => r && typeof r.uptimePct === 'number');
+  const withoutUptime = rows.filter(r => !(r && typeof r.uptimePct === 'number'));
+  withUptime.sort((a, b) => a.uptimePct - b.uptimePct);
+  return [...withUptime, ...withoutUptime].slice(0, 10);
+}
+
+// ── Per-row AI review (Trends/Barriers/Expected Flips/Actions/Help Needed) ──
+// Per user: ONLY run the full mechanical+AI review for a DBR row when it's
+// "mine" (its Domicile is in mySites, or its SCAC is in myCarriers — same
+// check that drives the FAS="Z" auto-fill). Rows that aren't mine are left
+// blank for whoever owns that part of the call to fill in by hand.
+//
+// Reuses the exact deterministic engine (_computeGroup, TREND_TERMS,
+// BARRIER_TERMS, FLIP_SIGNAL, STATUS_BARRIER_MAP) and AI-verification pass
+// (_buildAIPrompt-style prompt + _validateAIResult anti-fabrication gate)
+// that the old whole-fleet Daily Call table used — just scoped down to the
+// units matched to ONE DBR row (one domicile, or one SCAC) instead of every
+// domicile/SCAC in the fleet.
+let _dbrReview = {}; // key: `${sectionKind}::${rowKey}` -> { trendsText, barriersText, flipsText, actionsText, helpText, error? }
+function _dbrReviewKey(sectionKind, rowKey) { return sectionKind + '::' + rowKey; }
+
+// Match fleet rows to a DBR row: AFP domicile rows match on domicileSite;
+// SCAC rows (AFP or DSP) match on operator. Always filtered to unavailable
+// units only — matches "Bottom 10" semantics (nothing to report otherwise).
+function _dbrMatchUnits(sectionKind, rowKey) {
+  const rows = state.slice('fleet').rows || [];
+  const key = (rowKey || '').trim().toUpperCase();
+  if (!key) return [];
+  const matched = sectionKind === 'domicile'
+    ? rows.filter(r => (r.domicileSite || r.domicile || '').trim().toUpperCase() === key)
+    : rows.filter(r => (r.operator || '').trim().toUpperCase() === key);
+  return matched.filter(_isUnavail);
+}
+
+// Builds the AI-review prompt for one DBR row's matched units. Lighter than
+// the old whole-group prompt (one row, not a whole fleet pass) but keeps the
+// same anti-fabrication contract and output voice/style guidance.
+function _dbrBuildReviewPrompt(label, computed) {
+  const rows = computed.unavailRows.slice(0, 60);
+  const perUnitBudget = Math.max(350, Math.min(900, Math.floor(16000 / Math.max(rows.length, 1))));
+  const unitLines = rows.map(u => {
+    const meta = [
+      u.operator ? `SCAC: ${u.operator}` : '',
+      u.make ? `Make: ${u.make}` : '',
+      u.vendor ? `Vendor: ${u.vendor}` : 'Vendor: unassigned',
+      (u.daysOpen !== null && u.daysOpen !== undefined) ? `Days down: ${u.daysOpen}` : '',
+      u.repairStatus ? `Repair status: ${u.repairStatus}` : '',
+    ].filter(Boolean).join(' | ');
+    return `[${u.id}]${meta ? ' ' + meta : ''}\n${(u.text || '(no issue text)').substring(0, perUnitBudget)}`;
+  }).join('\n\n');
+
+  return `You are filling in a fleet operations DBR (Daily Business Review) call sheet row for ${label}. You are a SUPPORTING / VERIFICATION source only — never invent information not present in the unit data below.
+
+${rows.length} unavailable (OOS) unit(s) at this ${label}. Per-unit data below (SCAC, Make, Vendor, Days down, Repair status, and raw issue/notes text).
+
+UNIT DATA:
+${unitLines}
+
+Fill FIVE fields using the EXACT logic below. Follow each step in order — this is not a style guide, it's the actual procedure to run.
+
+══════════════════════════════════════
+TRENDS — "What patterns do I see?"
+══════════════════════════════════════
+Work through this ANALYSIS SILENTLY (do not print your reasoning, counts-that-didn't-qualify, or "no single system reaches 3+" explanations into the output — the output is ONLY the final verdict, nothing else):
+1. Count the OOS units (shown above).
+2. Group units by SYSTEM (the broad component area the issue text points to — e.g. CHASSIS, ELECTRICAL, ENGINE, TRANSMISSION, BRAKES, HVAC, BODY/CAB, TIRES, SUSPENSION, DEF/EMISSIONS, PM/INSPECTION).
+3. Group by ISSUE TYPE within the data (the specific failure, e.g. "misfire", "no start", "oil leak"). Flag it as a trend ONLY if 3 OR MORE units share the SAME specific issue type. 2 units sharing an issue is NOT a trend.
+4. Group by MAKE (the OEM/manufacturer). Flag it ONLY if ONE make accounts for the clear majority AND has 3 or more units.
+5. If NONE of system/issue-type/make reaches 3+ units sharing the same thing, the ENTIRE output must be exactly the two words "No trends" — nothing else. Do not explain why, do not list the systems you checked, do not mention counts that fell short.
+
+OUTPUT RULES — this field gets typed directly into a spreadsheet cell, so it must be SHORT:
+- If no trend qualifies: output EXACTLY "No trends" and nothing more.
+- If a trend DOES qualify (3+ units, same system/issue/make): output ONLY that trend, in this terse style: "3 misfire (59080, 9010424, 39582)" or "CHASSIS (3) — 59080, 9010424, 39582". One line per qualifying trend. Still cite real unit IDs.
+- NEVER include your work, your rejected candidates, or a sentence explaining the absence of a trend. The field is either "No trends" or a short list of qualifying trends — nothing in between.
+
+══════════════════════════════════════
+BARRIERS — "What's blocking each unit?"
+══════════════════════════════════════
+1. Sort units by days down, LONGEST first.
+2. For each unit, classify its #1 blocker into exactly ONE of these 5 categories (pick the closest match from the actual text — do not invent a 6th category):
+   - PARTS DELAY (a part number and/or ETA is mentioned, part on backorder/sourcing)
+   - ESTIMATE DELAY (estimate pending/awaiting approval)
+   - VENDOR DELAY (awaiting technician assignment or bay availability, vendor backlog)
+   - ACCIDENT/CEI (legal hold, insurance claim, accident investigation)
+   - DIAGNOSTIC (awaiting diagnostic results, root cause not yet determined)
+   If a unit genuinely has no blocker evident in the text (e.g. actively being worked, or data too thin to classify), do not force one of the 5 categories — just omit that unit from the barriers list.
+3. Write ONE line per unit, longest-dwell first, in this exact form: "Unit ID (Xd): Blocker + ETA" — e.g. "521073 (27d): Parts delay — harness PN, ETA 8/13". If NO unit has a classifiable blocker, write "no barriers".
+
+══════════════════════════════════════
+ACTIONS — "What am I doing today?"
+══════════════════════════════════════
+For EACH unit that has a barrier from above, write ONE action line using this exact mapping from its repair status / situation to a template (fill in the brackets with real values, do not leave them literal):
+   - Parts backordered/ordered           → "Follow up with [vendor] on parts ETA for [unit]"
+   - Appointment scheduled                → "Confirm vendor arrival for [unit], await inspection results"
+   - Pending estimate                     → "Push/escalate estimate for [unit] in RG"
+   - Estimate approved                    → "Confirm repair start and ETC for [unit]"
+   - In bay / in progress                 → "Follow up with [vendor] on completion ETC for [unit]"
+   - Pending tow                          → "Coordinate tow for [unit] to [destination]"
+   - If days down > 14, ADD an extra line: "Escalate long-dwell [unit] (Xd)"
+Pick the template row that best matches what the unit's repair status / issue text actually says. Every barrier identified above should have a matching action line. If no units need action, return empty string.
+
+══════════════════════════════════════
+EXPECTED FLIPS — "Can anything flip today?"
+══════════════════════════════════════
+Count units where ANY of these is true in the text: parts ETA is TODAY and it's a quick install, OR repair status is "pending road test"/"pending QC", OR vendor has confirmed an ETC of TODAY. If none qualify, the value is "0". Otherwise give the count + unit IDs, e.g. "2 (520079, 39110)".
+
+══════════════════════════════════════
+HELP NEEDED — decision logic
+══════════════════════════════════════
+The DEFAULT answer is "No help needed" — you (the FAS) only escalate when a blocker is genuinely OUTSIDE your authority to resolve yourself. Core rule: if YOU can still take an action today (call vendor, escalate estimate, coordinate tow, push for ETC) → "No help needed". Only if the blocker requires someone ABOVE you (MMPM/BC) to intervene with authority you don't have, state what you need.
+
+Check each unit against these, IN ORDER, and stop at the first one that matches:
+1. STUCK ESTIMATE — estimate has been escalated to HVE TWICE and is still not approved (especially high-dollar, e.g. >$50K) → "Help with getting estimate pushed through for [unit]"
+2. CEI / LEGAL HOLD — accident unit pending Element, legal review, or salvage/liquidation decision (FAS has no authority to move it) → "Help with CEI/Element action on [unit]"
+3. VENDOR MANAGEMENT ISSUE — chronic vendor non-responsiveness, tech shortages, or systemic delays persisting after daily follow-ups → "Help escalating vendor performance with [vendor] at [site]"
+4. PARTS SOURCING BEYOND FAS — part is backordered network-wide, no alternate source, needs VP/procurement intervention → "Help sourcing Part #[X] for [unit]"
+5. BAY/RESOURCE CONSTRAINT — OEM or vendor has no capacity and alternate routing has already been exhausted → "Help with bay availability at [dealer]"
+6. NONE OF THE ABOVE (the normal case, ~95% of the time) — output EXACTLY "No help needed" and nothing more.
+
+Only match checks 1-5 if the unit data text ACTUALLY supports it (e.g. only call it a "stuck estimate" if the text shows it was escalated twice, not just "pending"). Do not invent a need that isn't evidenced in the text — when in doubt, the answer is "No help needed".
+
+STRICT RULES:
+- Every claim must cite real unit IDs from the UNIT DATA above. No unit IDs = do not include the claim.
+- Do not invent, guess, or extrapolate beyond what the unit data actually states.
+- Follow the step-by-step logic exactly — do not skip steps or substitute your own judgment for the stated thresholds (3+ units for any trend claim, 14 days for escalation, HVE escalated twice for stuck estimates, etc).
+
+RESPOND WITH JSON ONLY, no markdown, no explanation outside the JSON:
+{"trends":"","barriers":"","expectedFlips":"","actions":"","helpNeeded":""}`;
+}
+
+// Runs the full mechanical + AI review for one DBR row and caches the
+// result keyed by section+row so re-rendering doesn't re-call AI. Only
+// called for rows where mine===true.
+// Safety net on top of the prompt instruction: if the model still leaks its
+// reasoning instead of just saying "No trends" (e.g. "No single system
+// reaches 3+ units... No trends meeting threshold"), collapse any response
+// that CONTAINS a "no trend(s)" verdict but is longer than a short line down
+// to the plain "No trends" — the sheet cell should never show the model's
+// work. A response that's short to begin with, or that doesn't contain a
+// "no trend" phrase at all (i.e. it found a real trend), passes through
+// unchanged.
+function _dbrNormalizeTrendsText(raw) {
+  if (typeof raw !== 'string') return '';
+  const text = raw.trim();
+  if (!text) return '';
+  const looksLikeNoTrend = /\bno\s+trends?\b/i.test(text);
+  if (looksLikeNoTrend && text.length > 20) return 'No trends';
+  return text.substring(0, 400);
+}
+
+// Same safety net as _dbrNormalizeTrendsText, for Help Needed: the default
+// (~95% of rows) is "No help needed" and the cell should never show the
+// model's reasoning for why none of the 5 escalation checks matched.
+function _dbrNormalizeHelpText(raw) {
+  if (typeof raw !== 'string') return '';
+  const text = raw.trim();
+  if (!text) return '';
+  const looksLikeNoHelp = /\bno\s+help\s+needed\b/i.test(text);
+  if (looksLikeNoHelp && text.length > 20) return 'No help needed';
+  return text.substring(0, 300);
+}
+
+async function _dbrReviewRow(sectionKind, rowKey, label) {
+  const cacheKey = _dbrReviewKey(sectionKind, rowKey);
+  const units = _dbrMatchUnits(sectionKind, rowKey);
+  if (!units.length) {
+    _dbrReview[cacheKey] = { trendsText: '', barriersText: '', flipsText: '', actionsText: '', helpText: '', error: 'No matching units found in fleet data' };
+    return _dbrReview[cacheKey];
+  }
+  const computed = _computeGroup(units, units);
+  // Deterministic drafts (always available even if AI fails).
+  const mechTrendsText = computed.trends.length
+    ? computed.trends.map(t => `${t.count} ${t.label}${t.daysRange ? ' — ' + t.daysRange : ''}`).join('\n')
+    : 'No trends';
+  const mechBarriersText = computed.barriers.length ? computed.barriers.join('; ') : 'no barriers';
+  const mechFlipsText = computed.flipUnits.length ? `~${computed.flipUnits.length} (${computed.flipUnits.slice(0, 6).join(', ')})` : '0';
+
+  try {
+    const prompt = _dbrBuildReviewPrompt(label, computed);
+    const parsed = await _dbrAskAi(prompt);
+    const result = {
+      trendsText: _dbrNormalizeTrendsText(parsed.trends) || mechTrendsText,
+      barriersText: typeof parsed.barriers === 'string' && parsed.barriers.trim() ? parsed.barriers.trim().substring(0, 400) : mechBarriersText,
+      flipsText: typeof parsed.expectedFlips === 'string' && parsed.expectedFlips.trim() ? parsed.expectedFlips.trim().substring(0, 200) : mechFlipsText,
+      actionsText: typeof parsed.actions === 'string' ? parsed.actions.trim().substring(0, 400) : '',
+      helpText: _dbrNormalizeHelpText(parsed.helpNeeded),
+    };
+    _dbrReview[cacheKey] = result;
+    return result;
+  } catch (e) {
+    // AI failed — fall back to the deterministic mechanical drafts rather
+    // than leaving the row blank; flag the AI miss via console only (the
+    // row itself still gets useful mechanical content).
+    console.warn('[DBR] AI review failed for', label, e.message);
+    const result = { trendsText: mechTrendsText, barriersText: mechBarriersText, flipsText: mechFlipsText, actionsText: '', helpText: '', aiError: e.message };
+    _dbrReview[cacheKey] = result;
+    return result;
+  }
+}
+
+// ── Call Runner / Sheet Creator header fields (persisted, panel-level) ──────
+function _dbrHeaderGet(field) {
+  try { return localStorage.getItem('dbr__header__' + field) || ''; } catch (e) { return ''; }
+}
+function _dbrHeaderSet(field, val) {
+  try { localStorage.setItem('dbr__header__' + field, val); } catch (e) {}
+}
+
+function _dbrPanelHtml() {
+  return `
+  <style>
+    /* DBR overlay is appended directly to document.body (not inside
+       #view-daily-call), so it needs its own unscoped rules for the
+       dc-* classes shared with the main Daily Call view's table CSS. */
+    #dbr-overlay .dc-table { width: 100%; border-collapse: collapse; }
+    #dbr-overlay .dc-table th, #dbr-overlay .dc-table td { border: 1px solid var(--border, #333); padding: 6px; vertical-align: top; font-size: 11px; }
+    #dbr-overlay .dc-input { width: 100%; box-sizing: border-box; resize: vertical; font-size: 11px; font-family: inherit; background: var(--bg2, #1a1a2e); color: var(--fg, #eee); border: 1px solid var(--border, #444); border-radius: 4px; padding: 4px 6px; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+    #dbr-overlay .dc-input.dbr-cell--autogrow { resize: none; overflow: hidden; min-height: 36px; }
+    #dbr-overlay td { max-width: 260px; }
+    #dbr-overlay .dc-section-title { font-size: 20px; font-weight: 700; margin: 18px 0 2px; }
+    #dbr-overlay .dc-section-subtitle { font-size: 13px; font-weight: 600; margin: 4px 0 8px; text-transform: uppercase; }
+    #dbr-overlay .dc-empty { padding: 10px; font-size: 11px; color: var(--mut, #888); }
+  </style>
+  <div id="dbr-overlay" class="wr-modal-overlay">
+    <div class="wr-modal" id="dbr-modal-box" role="dialog" aria-modal="true" style="max-width:1300px;width:97vw;">
+      <div class="wr-modal__header">
+        <div class="wr-modal__title-row">
+          <span class="wr-modal__title">📊 DBR DATA (QuickSight)</span>
+        </div>
+        <button id="dbr-close" class="wr-modal__close" aria-label="Close">×</button>
+      </div>
+      <div class="wr-modal__body">
+        <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;flex-wrap:wrap;">
+          <label style="font-size:11px;display:flex;align-items:center;gap:6px;">CALL RUNNER:
+            <input type="text" id="dbr-call-runner" class="dc-input" style="width:160px;display:inline-block;" value="${_dbrEsc(_dbrHeaderGet('callRunner'))}" />
+          </label>
+          <label style="font-size:11px;display:flex;align-items:center;gap:6px;">SHEET CREATOR:
+            <input type="text" id="dbr-sheet-creator" class="dc-input" style="width:160px;display:inline-block;" value="${_dbrEsc(_dbrHeaderGet('sheetCreator'))}" />
+          </label>
+          <button id="dbr-copy-all-single" class="detail-panel__btn" title="Copies the WHOLE sheet (Call Runner/Sheet Creator through the end of DSP) as one block, including every banner/title/header row in between (reproduced verbatim) — paste once at A1 and everything lands correctly.">📋 Copy All — paste at cell A1</button>
+        </div>
+        <div style="font-size:10px;color:var(--mut);margin-bottom:10px;">
+          "Copy All" copies the WHOLE sheet in one block (A1:K49) — Call Runner/Sheet Creator, every banner/title/header row, and all 3 data sections. The banners/titles/headers are reproduced exactly as they already appear on the sheet, so pasting over them changes nothing. Or use each section's own Copy button below if you'd rather paste one at a time.
+        </div>
+
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+          <button id="dbr-scrape" class="detail-panel__btn">↺ Scrape QuickSight (AFP)</button>
+          <span id="dbr-status" style="font-size:11px;color:var(--mut);"></span>
+        </div>
+        <div style="font-size:10px;color:var(--mut);margin-bottom:10px;">
+          Domicile/SCAC, Uptime %, and # Units Unavailable come from the AFP QuickSight dashboard (WTD Bottom 10), read via AI.
+          FAS is pre-filled <strong>Z</strong> and Trends/Barriers/Expected Flips/Actions/Help Needed are AI-reviewed automatically for rows that match your own domiciles/carriers — everything else is left blank for whoever owns that row.
+        </div>
+        <div class="dc-section-title">AFP</div>
+        <div class="dc-section-subtitle" style="display:flex;align-items:center;gap:10px;">BOTTOM 10 BY DOMICILE
+          <button id="dbr-copy-domicile" class="detail-panel__btn detail-panel__btn--secondary" style="font-size:10px;text-transform:none;">📋 Copy block — paste at cell A8</button>
+        </div>
+        <div id="dbr-site-table"></div>
+        <div class="dc-section-subtitle" style="margin-top:16px;display:flex;align-items:center;gap:10px;">BOTTOM 10 BY SCAC
+          <button id="dbr-copy-scac" class="detail-panel__btn detail-panel__btn--secondary" style="font-size:10px;text-transform:none;">📋 Copy block — paste at cell A20</button>
+        </div>
+        <div id="dbr-scac-table"></div>
+
+        <div style="display:flex;align-items:center;gap:10px;margin:20px 0 10px;">
+          <button id="dbr-scrape-dsp" class="detail-panel__btn">↺ Scrape QuickSight (DSP)</button>
+          <span id="dbr-status-dsp" style="font-size:11px;color:var(--mut);"></span>
+        </div>
+        <div style="font-size:10px;color:var(--mut);margin-bottom:10px;">
+          The DSP dashboard has no direct "# Units Unavailable" column — it's <strong>estimated</strong> from Asset # × Downtime % (rounded), flagged with a ~ prefix.
+        </div>
+        <div class="dc-section-title">DSP</div>
+        <div class="dc-section-subtitle" style="display:flex;align-items:center;gap:10px;">BOTTOM 10 BY SCAC
+          <button id="dbr-copy-dsp" class="detail-panel__btn detail-panel__btn--secondary" style="font-size:10px;text-transform:none;">📋 Copy block — paste at cell A40</button>
+        </div>
+        <div id="dbr-dsp-table"></div>
+      </div>
+    </div>
+  </div>`;
+}
+
+// Builds one <table> for a DBR section. rows: array of {domicile|scac,
+// domicile(optional for scac sections), uptimePct, unitsUnavailable}.
+// sectionKind: 'domicile' | 'scac' — drives which fleet field rows are
+// matched against for the AI review. idLabel: display header ('Domicile'
+// or 'SCAC'). showDomicileCol: AFP's SCAC table has an extra Domicile
+// column; DSP's SCAC table does not.
+// Real SharePoint sheet layout (confirmed via live grid dump, Friday 10-9
+// sheet, Excel gutter row numbers): AFP Domicile section is A8:J17 (10 data
+// rows, no SCAC column). AFP SCAC section is A20:K33 (14 data rows, column
+// order is DOMICILE THEN SCAC — not SCAC then Domicile). DSP SCAC section
+// is A40:J49 (10 data rows, no Domicile column). These exact row counts
+// drive how many blank padding rows Copy-Section adds so a paste at the
+// template's top-left data cell always fills (and never overshoots) the
+// bordered/formatted block.
+const DBR_SHEET_ROWS = { domicile: 10, scac: 14, dsp: 10 };
+
+function _dbrBuildTable(rowsData, sectionKind, idLabel, showDomicileCol, mySites, myCarriers) {
+  // Column order matches the real sheet exactly: AFP SCAC section shows
+  // DOMICILE before SCAC (sectionKind 'scac' + showDomicileCol true is only
+  // ever the AFP SCAC table — DSP's SCAC table has showDomicileCol false).
+  const idHeaderCells = showDomicileCol ? '<th>Domicile</th><th>SCAC</th>' : `<th>${idLabel}</th>`;
+  const headerRow = `<tr><th>FAS</th>${idHeaderCells}<th>Uptime %</th><th># Units Unavailable</th><th>Trends (SITE/SCAC)</th><th>Barriers (SITE/SCAC)</th><th>Expected Flips to A/H Today</th><th>Actions</th><th>Help Needed</th><th>MM/PM/BC</th><th>Copy</th></tr>`;
+  if (!rowsData.length) {
+    return `<table class="dc-table"><thead>${headerRow}</thead><tbody><tr><td colspan="${showDomicileCol ? 12 : 11}" class="dc-empty">No rows returned.</td></tr></tbody></table>`;
+  }
+  const bodyRows = rowsData.map((r, idx) => {
+    const idVal = sectionKind === 'domicile' ? r.domicile : r.scac;
+    const idKey = (idVal || '').trim().toUpperCase();
+    const domicileKey = (r.domicile || '').trim().toUpperCase();
+    const mine = sectionKind === 'domicile'
+      ? mySites.has(idKey)
+      : (myCarriers.has(idKey) || (domicileKey && mySites.has(domicileKey)));
+    const unavailDisplay = r.unitsUnavailableEstimated ? ('~' + r.unitsUnavailable) : (r.unitsUnavailable != null ? r.unitsUnavailable : '');
+    const rowDomId = 'dbr-row-' + sectionKind + '-' + idx;
+    const review = mine ? _dbrReview[_dbrReviewKey(sectionKind, idVal)] : null;
+    const cell = (field) => {
+      const val = review ? (review[field] || '') : '';
+      return `<textarea class="dc-input dbr-cell dbr-cell--autogrow" data-dbr-field="${field}" rows="1" placeholder="${mine ? '' : 'Fill in during call'}">${_dbrEsc(val)}</textarea>`;
+    };
+    const idCells = showDomicileCol ? `<td>${_dbrEsc(r.domicile)}</td><td>${_dbrEsc(r.scac)}</td>` : `<td>${_dbrEsc(idVal)}</td>`;
+    return `<tr id="${rowDomId}" data-dbr-section="${sectionKind}" data-dbr-key="${_dbrEsc(idVal)}" data-dbr-mine="${mine ? '1' : '0'}" data-dbr-has-domicile-col="${showDomicileCol ? '1' : '0'}">
+      <td>${mine ? '<strong style="color:#58a6ff">Z</strong>' : ''}</td>
+      ${idCells}
+      <td>${_dbrEsc(_dbrPct(r.uptimePct))}</td>
+      <td>${_dbrEsc(unavailDisplay)}</td>
+      <td>${cell('trendsText')}</td>
+      <td>${cell('barriersText')}</td>
+      <td>${cell('flipsText')}</td>
+      <td>${cell('actionsText')}</td>
+      <td>${cell('helpText')}</td>
+      <td><textarea class="dc-input dbr-cell dbr-cell--autogrow" data-dbr-field="mmpmbc" rows="1"></textarea></td>
+      <td><button class="detail-panel__btn detail-panel__btn--secondary dbr-copy-row" style="font-size:10px;white-space:nowrap;">📋 Row</button></td>
+    </tr>`;
+  }).join('');
+  return `<table class="dc-table"><thead>${headerRow}</thead><tbody>${bodyRows}</tbody></table>`;
+}
+
+// Collects one row's cells (in REAL sheet column order) as an array of
+// strings, reading live textarea values so unsaved edits are included.
+// showDomicileCol=true means Domicile THEN SCAC (AFP SCAC section's real
+// column order) — matches the id-cell order _dbrBuildTable renders.
+function _dbrRowToCells(trEl, sectionKind, showDomicileCol) {
+  const fas = trEl.querySelector('td:nth-child(1)').textContent.trim();
+  let col = 2;
+  const idCells = [];
+  if (showDomicileCol) {
+    idCells.push(trEl.querySelector(`td:nth-child(${col++})`).textContent.trim()); // Domicile
+    idCells.push(trEl.querySelector(`td:nth-child(${col++})`).textContent.trim()); // SCAC
+  } else {
+    idCells.push(trEl.querySelector(`td:nth-child(${col++})`).textContent.trim()); // Domicile or SCAC
+  }
+  const uptime = trEl.querySelector(`td:nth-child(${col++})`).textContent.trim();
+  const unavail = trEl.querySelector(`td:nth-child(${col++})`).textContent.trim();
+  const get = (field) => { const ta = trEl.querySelector(`textarea[data-dbr-field="${field}"]`); return ta ? ta.value : ''; };
+  return [fas, ...idCells, uptime, unavail, get('trendsText'), get('barriersText'), get('flipsText'), get('actionsText'), get('helpText'), get('mmpmbc')];
+}
+
+function _dbrCopyRow(trEl, sectionKind, showDomicileCol) {
+  const cells = _dbrRowToCells(trEl, sectionKind, showDomicileCol);
+  _copyToClipboard(cells.map(_tsvCell).join('\t'));
+}
+
+// Copies ONE section's data rows ONLY — no headers, no section titles, no
+// CALL RUNNER line, since those already exist on the real SharePoint sheet
+// at fixed positions. Padded/trimmed to the real sheet's exact row count
+// (DBR_SHEET_ROWS) so a paste at the template's top-left data cell (A8 for
+// Domicile, A20 for SCAC, A40 for DSP, Excel gutter numbering) always lands cleanly inside that
+// section's bordered block — never overshooting into the next section's
+// title row, never leaving stray leftover rows from a previous paste.
+function _dbrCopySection(hostSelector, sectionKind, showDomicileCol, targetRowCount) {
+  const colCount = showDomicileCol ? 11 : 10;
+  const trs = Array.from(document.querySelectorAll(hostSelector + ' tbody tr[data-dbr-section]'));
+  const lines = trs.map(tr => _dbrRowToCells(tr, sectionKind, showDomicileCol).map(_tsvCell).join('\t'));
+  // Pad with fully-blank rows if we have fewer than the sheet expects;
+  // trim if (unexpectedly) more, so the paste never spills past the block.
+  const blankRow = new Array(colCount).fill('').join('\t');
+  while (lines.length < targetRowCount) lines.push(blankRow);
+  const trimmed = lines.slice(0, targetRowCount);
+  _copyToClipboard(trimmed.join('\n'));
+  return trimmed.length;
+}
+
+// Copies the ENTIRE sheet — CALL RUNNER/SHEET CREATOR through the end of
+// DSP — as ONE paste-ready block, meant to be pasted starting at cell A1
+// (Excel gutter numbering) covering through row 49. This works because
+// every row that already has content on the real sheet (banners, section
+// titles, header rows) is reproduced VERBATIM — same text, same row
+// position — so pasting over them is a no-op (identical text replacing
+// identical text), not a destructive overwrite. The only row with REAL
+// (non-static) content is row 1, which uses the live Call Runner/Sheet
+// Creator input values rather than copying old text. Column width is
+// padded to 11 (the widest section, AFP SCAC) for every row so the whole
+// block pastes as one rectangular range; narrower rows (Domicile/DSP, which
+// only use 10 cols) just leave column K blank, matching what's already there.
+function _dbrCopyAllSingle() {
+  const WIDTH = 11;
+  const pad = (cells) => { const c = cells.slice(); while (c.length < WIDTH) c.push(''); return c.slice(0, WIDTH); };
+  const blankRow = () => pad([]);
+  const lines = [];
+
+  // Row 1: CALL RUNNER / SHEET CREATOR — real values from the input fields,
+  // not a copy of existing sheet text (this row IS user-entered data).
+  const callRunnerInput = document.getElementById('dbr-call-runner');
+  const sheetCreatorInput = document.getElementById('dbr-sheet-creator');
+  const callRunner = callRunnerInput ? callRunnerInput.value.trim() : '';
+  const sheetCreator = sheetCreatorInput ? sheetCreatorInput.value.trim() : '';
+  lines.push(pad([
+    callRunner ? 'CALL RUNNER: ' + callRunner : '', '',
+    sheetCreator ? 'SHEET CREATOR: ' + sheetCreator : '',
+  ]));
+  // Row 2: "AFP" banner (verbatim)
+  lines.push(pad(['AFP']));
+  // Rows 3-5: blank spacing under the AFP banner (verbatim)
+  lines.push(blankRow(), blankRow(), blankRow());
+  // Row 6: "BOTTOM 10 BY DOMICILE" section title (verbatim)
+  lines.push(pad(['BOTTOM 10 BY DOMICILE']));
+  // Row 7: Domicile section header row (verbatim)
+  lines.push(pad(['FAS', 'DOMICILE', 'Uptime %', '# Units Unavailable', 'Trends (SITE/SCAC)', 'Barriers (SITE/SCAC)', 'Expected Flips to A/H Today', 'Actions', 'Help Nedded', 'MMPM/BC']));
+
+  // Rows 8-17: AFP Domicile data (10 cols used, padded to 11)
+  const domTrs = Array.from(document.querySelectorAll('#dbr-site-table tbody tr[data-dbr-section]'));
+  const domRows = domTrs.map(tr => pad(_dbrRowToCells(tr, 'domicile', false)));
+  while (domRows.length < DBR_SHEET_ROWS.domicile) domRows.push(blankRow());
+  lines.push(...domRows.slice(0, DBR_SHEET_ROWS.domicile));
+
+  // Row 18: "BOTTOM 10 BY SCAC" section title (verbatim from the real sheet)
+  lines.push(pad(['BOTTOM 10 BY SCAC']));
+  // Row 19: SCAC section header row (verbatim)
+  lines.push(pad(['FAS', 'DOMICILE', 'SCAC', 'Uptime %', '# Units Unavailable', 'Trends (SITE/SCAC)', 'Barriers (SITE/SCAC)', 'Expected Flips to A/H Today', 'Actions', 'Help Nedded', 'MMPM/BC']));
+
+  // Rows 20-33: AFP SCAC data (11 cols, full width)
+  const scacTrs = Array.from(document.querySelectorAll('#dbr-scac-table tbody tr[data-dbr-section]'));
+  const scacRows = scacTrs.map(tr => pad(_dbrRowToCells(tr, 'scac', true)));
+  while (scacRows.length < DBR_SHEET_ROWS.scac) scacRows.push(blankRow());
+  lines.push(...scacRows.slice(0, DBR_SHEET_ROWS.scac));
+
+  // Row 34: "DSP" banner (verbatim)
+  lines.push(pad(['DSP']));
+  // Rows 35-37: blank (verbatim)
+  lines.push(blankRow(), blankRow(), blankRow());
+  // Row 38: "BOTTOM 10 BY SCAC" (DSP) section title (verbatim)
+  lines.push(pad(['BOTTOM 10 BY SCAC']));
+  // Row 39: DSP section header row (verbatim)
+  lines.push(pad(['FAS', 'SCAC', 'Uptime %', '# Units Unavailable', 'Trends (SITE/SCAC)', 'Barriers (SITE/SCAC)', 'Expected Flips to A/H Today', 'Actions', 'Help Nedded', 'MMPM/BC']));
+
+  // Rows 40-49: DSP data (10 cols used, padded to 11, hard-capped to the
+  // worst 10 by uptime via _dbrClampToBottom10 at scrape time)
+  const dspTrs = Array.from(document.querySelectorAll('#dbr-dsp-table tbody tr[data-dbr-section]'));
+  const dspRows = dspTrs.map(tr => pad(_dbrRowToCells(tr, 'scac', false)));
+  while (dspRows.length < DBR_SHEET_ROWS.dsp) dspRows.push(blankRow());
+  lines.push(...dspRows.slice(0, DBR_SHEET_ROWS.dsp));
+
+  const tsv = lines.map(cells => cells.map(_tsvCell).join('\t')).join('\n');
+  _copyToClipboard(tsv);
+  return lines.length;
+}
+
+// Wires auto-save-on-edit + per-row copy buttons for a freshly-rendered
+// table host. Shared by all three sections.
+function _dbrWireTable(hostEl) {
+  if (!hostEl) return;
+  hostEl.querySelectorAll('.dbr-copy-row').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tr = btn.closest('tr');
+      const sectionKind = tr.dataset.dbrSection;
+      const showDomicileCol = tr.dataset.dbrHasDomicileCol === '1';
+      _dbrCopyRow(tr, sectionKind, showDomicileCol);
+      const orig = btn.textContent;
+      btn.textContent = '✓';
+      setTimeout(() => { btn.textContent = orig; }, 1200);
+    });
+  });
+
+  // Auto-grow the Trends/Barriers/Flips/Actions/Help/MM-PM-BC textareas so
+  // long AI output (or long manual notes) is fully visible without having
+  // to drag-resize or scroll inside a tiny 2-row box. Grows on input, and
+  // sized once up front for whatever's already filled in (AI results).
+  hostEl.querySelectorAll('.dbr-cell--autogrow').forEach(ta => {
+    _dbrAutoGrow(ta);
+    ta.addEventListener('input', () => _dbrAutoGrow(ta));
   });
 }
 
-async function _copyTable(kind) {
-  const groups = kind === 'site' ? _siteGroups : _scacGroups;
-  const tsv = _buildTsv(groups, kind, _showBottom10);
-  try {
-    await navigator.clipboard.writeText(tsv);
-    return true;
-  } catch (e) {
-    // Fallback for environments without clipboard permission
-    const ta = document.createElement('textarea');
-    ta.value = tsv;
-    document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand('copy'); } catch (e2) { /* ignore */ }
-    document.body.removeChild(ta);
-    return true;
+// Resizes a textarea's height to fit its content (classic auto-grow:
+// collapse to 0 first so scrollHeight reflects only the content, then set
+// height to that). A small min-height keeps empty cells from looking
+// collapsed/cramped next to the FAS/Uptime/Unavailable number columns.
+function _dbrAutoGrow(ta) {
+  ta.style.height = 'auto';
+  const minPx = 36;
+  ta.style.height = Math.max(minPx, ta.scrollHeight) + 'px';
+}
+
+// Kicks off AI review (async, in the background) for every "mine" row in a
+// freshly-scraped section, then re-renders that section's table once each
+// row's review resolves — so the panel doesn't block on N AI calls serially.
+async function _dbrRunReviewsForSection(rowsData, sectionKind, mySites, myCarriers, rerender) {
+  const mineRows = rowsData.filter(r => {
+    const idVal = sectionKind === 'domicile' ? r.domicile : r.scac;
+    const idKey = (idVal || '').trim().toUpperCase();
+    const domicileKey = (r.domicile || '').trim().toUpperCase();
+    return sectionKind === 'domicile' ? mySites.has(idKey) : (myCarriers.has(idKey) || (domicileKey && mySites.has(domicileKey)));
+  });
+  if (!mineRows.length) return;
+  for (const r of mineRows) {
+    const idVal = sectionKind === 'domicile' ? r.domicile : r.scac;
+    const label = sectionKind === 'domicile' ? ('domicile ' + idVal) : ('SCAC ' + idVal);
+    await _dbrReviewRow(sectionKind, idVal, label);
+    rerender();
   }
 }
 
-async function _runAIReviewAll(progressCb) {
-  // When scoped, _siteGroups/_scacGroups already hold ONLY the requested
-  // domicile/operator groups, so review all of them (no bottom-10 clip).
-  const scoped = _scopeTokens.length > 0;
-  const clip = _showBottom10 && !scoped;
-  const siteVisible = clip ? _siteGroups.slice(0, 10) : _siteGroups;
-  const scacVisible = clip ? _scacGroups.slice(0, 10) : _scacGroups;
-  const jobs = [...siteVisible.map(g => ({ kind: 'site', g })), ...scacVisible.map(g => ({ kind: 'scac', g }))];
-  let done = 0;
-  for (const { kind, g } of jobs) {
-    if (progressCb) progressCb(done, jobs.length);
-    await _runAIReviewForGroup(kind, g);
-    done++;
+async function _dbrRenderTables() {
+  const siteHost = document.getElementById('dbr-site-table');
+  const scacHost = document.getElementById('dbr-scac-table');
+  const dspHost = document.getElementById('dbr-dsp-table');
+  if (!siteHost || !scacHost) return;
+
+  const { mySites, myCarriers } = await _loadMySitesAndCarriers();
+  const data = _dbrData;
+
+  if (!data || !data.ok) {
+    const msg = data && data.error ? _dbrEsc(data.error) : 'No data yet — click "Scrape QuickSight (AFP)" above.';
+    siteHost.innerHTML = `<div class="dc-empty">${msg}</div>`;
+    scacHost.innerHTML = '';
+  } else {
+    siteHost.innerHTML = _dbrBuildTable(data.domicile || [], 'domicile', 'DOMICILE', false, mySites, myCarriers);
+    scacHost.innerHTML = _dbrBuildTable(data.scac || [], 'scac', 'SCAC', true, mySites, myCarriers);
+    _dbrWireTable(siteHost);
+    _dbrWireTable(scacHost);
   }
-  if (progressCb) progressCb(done, jobs.length);
+
+  if (dspHost) {
+    const dspData = _dbrDspData;
+    if (!dspData || !dspData.ok) {
+      const dspMsg = dspData && dspData.error ? _dbrEsc(dspData.error) : 'No data yet — click "Scrape QuickSight (DSP)" above.';
+      dspHost.innerHTML = `<div class="dc-empty">${dspMsg}</div>`;
+    } else {
+      dspHost.innerHTML = _dbrBuildTable(dspData.scac || [], 'scac', 'SCAC', false, mySites, myCarriers);
+      _dbrWireTable(dspHost);
+    }
+  }
+}
+
+async function _openDbrPanel() {
+  if (_dbrOverlay) return;
+  _dbrOverlay = document.createElement('div');
+  _dbrOverlay.innerHTML = _dbrPanelHtml();
+  document.body.appendChild(_dbrOverlay);
+
+  const close = () => {
+    if (_dbrOverlay && _dbrOverlay.parentNode) _dbrOverlay.parentNode.removeChild(_dbrOverlay);
+    _dbrOverlay = null;
+  };
+  document.getElementById('dbr-close').addEventListener('click', close);
+  document.getElementById('dbr-overlay').addEventListener('click', (e) => { if (e.target.id === 'dbr-overlay') close(); });
+
+  const callRunnerInput = document.getElementById('dbr-call-runner');
+  const sheetCreatorInput = document.getElementById('dbr-sheet-creator');
+  if (callRunnerInput) callRunnerInput.addEventListener('input', () => _dbrHeaderSet('callRunner', callRunnerInput.value));
+  if (sheetCreatorInput) sheetCreatorInput.addEventListener('input', () => _dbrHeaderSet('sheetCreator', sheetCreatorInput.value));
+
+  // Per-section copy buttons — each copies ONLY that section's data rows
+  // (no headers), padded/trimmed to the real sheet's exact row count, ready
+  // to paste directly at that section's top-left data cell.
+  const wireCopySection = (btnId, hostSelector, sectionKind, showDomicileCol, targetRowCount) => {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      _dbrCopySection(hostSelector, sectionKind, showDomicileCol, targetRowCount);
+      const orig = btn.textContent;
+      btn.textContent = '✓ Copied!';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    });
+  };
+  wireCopySection('dbr-copy-domicile', '#dbr-site-table', 'domicile', false, DBR_SHEET_ROWS.domicile);
+  wireCopySection('dbr-copy-scac', '#dbr-scac-table', 'scac', true, DBR_SHEET_ROWS.scac);
+  wireCopySection('dbr-copy-dsp', '#dbr-dsp-table', 'scac', false, DBR_SHEET_ROWS.dsp);
+
+  const copyAllSingleBtn = document.getElementById('dbr-copy-all-single');
+  if (copyAllSingleBtn) copyAllSingleBtn.addEventListener('click', () => {
+    _dbrCopyAllSingle();
+    const orig = copyAllSingleBtn.textContent;
+    copyAllSingleBtn.textContent = '✓ Copied! Paste at A1';
+    setTimeout(() => { copyAllSingleBtn.textContent = orig; }, 2000);
+  });
+
+  const statusEl = document.getElementById('dbr-status');
+  const scrapeBtn = document.getElementById('dbr-scrape');
+
+  // Load whatever was last cached (if anything) so re-opening the panel
+  // doesn't start blank while a fresh scrape runs.
+  try {
+    _dbrData = await quicksight.getCache();
+    if (_dbrData && _dbrData.scrapedAt) {
+      if (statusEl) statusEl.textContent = 'Last scraped ' + new Date(_dbrData.scrapedAt).toLocaleString();
+    }
+  } catch (e) { /* no cache yet — fine */ }
+  try { _dbrDspData = await quicksight.getCacheDsp(); } catch (e) { /* no cache yet — fine */ }
+  await _dbrRenderTables();
+
+  const dspScrapeBtn = document.getElementById('dbr-scrape-dsp');
+  const dspStatusEl = document.getElementById('dbr-status-dsp');
+  if (dspScrapeBtn) dspScrapeBtn.addEventListener('click', async () => {
+    dspScrapeBtn.disabled = true;
+    const dspOrig = dspScrapeBtn.textContent;
+    dspScrapeBtn.textContent = '⏳ Opening DSP…';
+    if (dspStatusEl) dspStatusEl.textContent = 'Opening DSP dashboard — this can take up to a minute…';
+    try {
+      const captured = await quicksight.captureDsp();
+      if (!captured || !captured.ok) {
+        throw new Error((captured && captured.error) || 'Could not load the DSP dashboard — see logs.');
+      }
+      dspScrapeBtn.textContent = '⏳ Reading table with AI…';
+      if (dspStatusEl) dspStatusEl.textContent = 'Page loaded — asking AI to read the SCAC table…';
+      const parsed = await _dbrAskAi(_dbrDspPrompt(captured.text));
+      _dbrDspData = { ok: true, scac: _dbrClampToBottom10(Array.isArray(parsed.scac) ? parsed.scac : []), scrapedAt: captured.scrapedAt || new Date().toISOString() };
+      if (dspStatusEl) dspStatusEl.textContent = 'Scraped ' + new Date(_dbrDspData.scrapedAt).toLocaleString() + ' — ' + _dbrDspData.scac.length + ' SCAC rows.';
+      try { await quicksight.saveParsed({ kind: 'dsp', data: _dbrDspData }); } catch (e) { /* cache save failure is non-fatal */ }
+    } catch (e) {
+      if (dspStatusEl) dspStatusEl.textContent = 'Scrape failed: ' + e.message;
+      _dbrDspData = { ok: false, error: e.message, scac: [] };
+    } finally {
+      await _dbrRenderTables();
+      dspScrapeBtn.disabled = false;
+      dspScrapeBtn.textContent = dspOrig;
+      // AI-review "mine" DSP rows in the background, re-rendering as each resolves.
+      if (_dbrDspData && _dbrDspData.ok) {
+        const { mySites, myCarriers } = await _loadMySitesAndCarriers();
+        if (dspStatusEl) dspStatusEl.textContent += ' — reviewing your rows…';
+        await _dbrRunReviewsForSection(_dbrDspData.scac || [], 'scac', mySites, myCarriers, () => _dbrRenderTables());
+        if (dspStatusEl) dspStatusEl.textContent = dspStatusEl.textContent.replace(' — reviewing your rows…', ' — review complete.');
+      }
+    }
+  });
+
+  scrapeBtn.addEventListener('click', async () => {
+    scrapeBtn.disabled = true;
+    const orig = scrapeBtn.textContent;
+    scrapeBtn.textContent = '⏳ Opening AFP…';
+    if (statusEl) statusEl.textContent = 'Opening AFP dashboard — this can take up to a minute…';
+    try {
+      const captured = await quicksight.captureAfp();
+      if (!captured || !captured.ok) {
+        throw new Error((captured && captured.error) || 'Could not load the AFP dashboard — see logs.');
+      }
+      scrapeBtn.textContent = '⏳ Reading tables with AI…';
+      if (statusEl) statusEl.textContent = 'Page loaded — asking AI to read the Domicile/SCAC tables…';
+      const parsed = await _dbrAskAi(_dbrAfpPrompt(captured.text));
+      _dbrData = {
+        ok: true,
+        domicile: Array.isArray(parsed.domicile) ? parsed.domicile : [],
+        scac: Array.isArray(parsed.scac) ? parsed.scac : [],
+        scrapedAt: captured.scrapedAt || new Date().toISOString(),
+      };
+      if (statusEl) statusEl.textContent = 'Scraped ' + new Date(_dbrData.scrapedAt).toLocaleString() +
+        ' — ' + _dbrData.domicile.length + ' domicile rows, ' + _dbrData.scac.length + ' SCAC rows.';
+      try { await quicksight.saveParsed({ data: _dbrData }); } catch (e) { /* cache save failure is non-fatal */ }
+    } catch (e) {
+      if (statusEl) statusEl.textContent = 'Scrape failed: ' + e.message;
+      _dbrData = { ok: false, error: e.message, domicile: [], scac: [] };
+    } finally {
+      await _dbrRenderTables();
+      scrapeBtn.disabled = false;
+      scrapeBtn.textContent = orig;
+      // AI-review "mine" AFP rows (both Domicile and SCAC sections) in the
+      // background, re-rendering as each resolves.
+      if (_dbrData && _dbrData.ok) {
+        const { mySites, myCarriers } = await _loadMySitesAndCarriers();
+        if (statusEl) statusEl.textContent += ' — reviewing your rows…';
+        await _dbrRunReviewsForSection(_dbrData.domicile || [], 'domicile', mySites, myCarriers, () => _dbrRenderTables());
+        await _dbrRunReviewsForSection(_dbrData.scac || [], 'scac', mySites, myCarriers, () => _dbrRenderTables());
+        if (statusEl) statusEl.textContent = statusEl.textContent.replace(' — reviewing your rows…', ' — review complete.');
+      }
+    }
+  });
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
@@ -1076,43 +1262,7 @@ export function init(container) {
     _update(state.slice('fleet').rows || []);
   });
 
-  _el.querySelector('#dc-ai-review').addEventListener('click', async (e) => {
-    const btn = e.target;
-    const orig = btn.textContent;
-    btn.disabled = true;
-    let _prog = '';
-    // Surface per-group retry status on the button (e.g. "retry 1/2 · ABE40").
-    _aiReviewStatus = (msg) => { btn.textContent = `🤖 ${_prog} — ${msg}`; };
-    await _runAIReviewAll((done, total) => {
-      _prog = total > 0 ? `Reviewing ${done}/${total}...` : 'Reviewing...';
-      btn.textContent = `🤖 ${_prog}`;
-    });
-    _aiReviewStatus = null;
-    btn.disabled = false;
-    btn.textContent = orig;
-    _update(state.slice('fleet').rows || []); // re-render with AI findings merged in
-  });
-
-  _el.querySelector('#dc-bottom10-toggle').addEventListener('change', (e) => {
-    _showBottom10 = !!e.target.checked;
-    _update(state.slice('fleet').rows || []);
-  });
-
-  _el.querySelector('#dc-copy-site').addEventListener('click', async (e) => {
-    const btn = e.target;
-    const orig = btn.textContent;
-    await _copyTable('site');
-    btn.textContent = '✓ Copied!';
-    setTimeout(() => { btn.textContent = orig; }, 1500);
-  });
-
-  _el.querySelector('#dc-copy-scac').addEventListener('click', async (e) => {
-    const btn = e.target;
-    const orig = btn.textContent;
-    await _copyTable('scac');
-    btn.textContent = '✓ Copied!';
-    setTimeout(() => { btn.textContent = orig; }, 1500);
-  });
+  _el.querySelector('#dc-dbr-data').addEventListener('click', () => { _openDbrPanel(); });
 
   bus.on('fleet:data', (data) => {
     _update((data && data.rows) ? data.rows : []);

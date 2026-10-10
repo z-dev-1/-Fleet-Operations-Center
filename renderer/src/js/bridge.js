@@ -388,6 +388,15 @@ export const aap = {
   openUrl:           (url)                 => window.aap.openUrl(url),
 };
 
+// ── QuickSight DBR DATA (Daily Call) ────────────────────────────────────────
+export const quicksight = {
+  captureAfp:  () => window.quicksight.captureAfp(),
+  captureDsp:  () => window.quicksight.captureDsp(),
+  saveParsed:  (payload) => window.quicksight.saveParsed(payload),
+  getCache:    () => window.quicksight.getCache(),
+  getCacheDsp: () => window.quicksight.getCacheDsp(),
+};
+
 // ── Slack ──────────────────────────────────────────────────────────────────
 export const slack = {
   send:         (data) => window.slack.send(data),

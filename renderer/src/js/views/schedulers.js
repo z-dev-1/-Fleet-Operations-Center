@@ -119,6 +119,26 @@ function _viewHtml() {
     + '<button class="sched-btn sched-btn--ghost" id="sched-owa-sent">\ud83d\udce4 Sent Items</button>'
     + '</div></div>'
 
+    // DBR DATA card — single daily slot fires BOTH AFP + DSP pulls; each
+    // retries on its own until its "Data as of (PT)" shows today.
+    + '<div class="sched-card" id="sched-card-dbr">'
+    + '<div class="sched-card__head"><div class="sched-card__icon sched-card__icon--sp">\ud83d\udcca</div>'
+    + '<div><div class="sched-card__title">DBR DATA Pull</div><div class="sched-card__sub" id="sched-dbr-sub">Weekdays \u2014</div></div>'
+    + '<label class="sched-toggle" title="Enable/disable scheduled DBR pull"><input type="checkbox" id="sched-dbr-enabled" /><span>On</span></label>'
+    + '<div class="sched-card__badge" id="sched-dbr-badge">\u2014</div></div>'
+    + '<div class="sched-card__meta">'
+    + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">AFP last</span><span class="sched-card__meta-val" id="sched-dbr-afp-last">\u2014</span></div>'
+    + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">DSP last</span><span class="sched-card__meta-val" id="sched-dbr-dsp-last">\u2014</span></div>'
+    + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Next</span><span class="sched-card__meta-val" id="sched-dbr-next">\u2014</span></div>'
+    + '</div>'
+    + '<div class="sched-time-editor">'
+    + '<span class="sched-time-editor__label">Run at</span><input class="sched-time-input" type="time" id="sched-dbr-time" />'
+    + '<button class="sched-btn sched-btn--save" id="sched-dbr-save">\u2713 Save</button></div>'
+    + '<div class="sched-card__sub" style="font-size:9px;padding:0 2px">AFP + DSP are pulled independently. A source that isn\'t published for today yet keeps retrying until it is.</div>'
+    + '<div class="sched-card__actions">'
+    + '<button class="sched-btn sched-btn--primary" id="sched-dbr-trigger">\ud83d\udcca Pull DBR Now (AFP + DSP)</button>'
+    + '</div></div>'
+
     + '</div>'   // /sched-grid
 
     // Attention (blockers / uncertain) surfaced prominently
@@ -243,6 +263,7 @@ function _render() {
   _rBanner();
   _rChannelCard('sp', _state.sharepoint, _state.slots.sp, _state.nextSlot.sp, _state.enabled.sp);
   _rChannelCard('em', _state.email, _state.slots.email, _state.nextSlot.email, _state.enabled.email);
+  _rDbrCard();
   _rAttention();
   _rJobs();
   _rAudit();
@@ -286,6 +307,30 @@ function _rChannelCard(pfx, ch, slots, next, enabled) {
   if (fail) fail.textContent = ch.lastFailure ? _fmtDT(ch.lastFailure.updatedAt) : '\u2014';
   const en = _q('sched-' + pfx + '-enabled');
   if (en) en.checked = !!enabled;
+}
+
+function _rDbrCard() {
+  const slots = _state.slots.dbr || [];
+  const sub = _q('sched-dbr-sub');
+  if (sub) sub.textContent = 'Weekdays ' + (slots.map(s => s.label).join(' \u00b7 ') || '\u2014');
+  const en = _q('sched-dbr-enabled');
+  if (en) en.checked = !!(_state.enabled && _state.enabled.dbr);
+  const next = _state.nextSlot && _state.nextSlot.dbr;
+  const nextEl = _q('sched-dbr-next');
+  if (nextEl) nextEl.textContent = next ? (next.label + (next.when === 'today' ? '' : ' (' + next.when + ')')) : '\u2014';
+  // Per-source last-verified + a badge reflecting the worst current state.
+  const afp = _state.dbrAfp || {}, dsp = _state.dbrDsp || {};
+  const afpLast = _q('sched-dbr-afp-last');
+  if (afpLast) afpLast.textContent = afp.lastVerified ? _fmtDT(afp.lastVerified.updatedAt) : '\u2014';
+  const dspLast = _q('sched-dbr-dsp-last');
+  if (dspLast) dspLast.textContent = dsp.lastVerified ? _fmtDT(dsp.lastVerified.updatedAt) : '\u2014';
+  const badge = _q('sched-dbr-badge');
+  if (badge) {
+    const activeOf = (ch) => (ch.active && ch.active[0]) || (ch.blockedStale && ch.blockedStale[0]) || (ch.retrying && ch.retrying[0]) || null;
+    const a = activeOf(afp) || activeOf(dsp);
+    const stateVal = a ? a.state : ((afp.lastVerified && dsp.lastVerified) ? 'completed' : (afp.lastFailure || dsp.lastFailure ? 'retry' : null));
+    badge.innerHTML = _badge(stateVal);
+  }
 }
 
 function _jobScopeLabel(j) {
@@ -384,7 +429,8 @@ async function _runEmailTest() {
 }
 async function _setEnabled(channel, on) {
   await window.fleetScheduler.setEnabled({ [channel]: on });
-  _toast('success', (channel === 'sp' ? 'SharePoint' : 'Email') + ' scheduler ' + (on ? 'enabled' : 'disabled'));
+  const name = channel === 'sp' ? 'SharePoint' : channel === 'dbr' ? 'DBR pull' : 'Email';
+  _toast('success', name + ' scheduler ' + (on ? 'enabled' : 'disabled'));
 }
 function _wireDelegatedActions(root) {
   root.addEventListener('click', async (e) => {
@@ -411,6 +457,8 @@ function _populateTimeInputs() {
   if (sp[1]) set('sched-sp-pm', _toTimeStr(sp[1].h, sp[1].m));
   if (em[0]) set('sched-em-am', _toTimeStr(em[0].h, em[0].m));
   if (em[1]) set('sched-em-pm', _toTimeStr(em[1].h, em[1].m));
+  const dbr = _state.slots.dbr || [];
+  if (dbr[0]) set('sched-dbr-time', _toTimeStr(dbr[0].h, dbr[0].m));
 }
 async function _saveSlots(type) {
   const amEl = _q('sched-' + (type === 'sp' ? 'sp' : 'em') + '-am');
@@ -428,6 +476,42 @@ async function _saveSlots(type) {
     if (result && result.ok) { _toast('success', (type === 'sp' ? 'SP' : 'Email') + ' times saved'); _refresh(); }
     else _toast('error', 'Save failed: ' + ((result && result.error) || 'unknown'));
   } catch (e) { _toast('error', 'Save failed: ' + e.message); }
+}
+
+// DBR has ONE slot (fires both AFP + DSP). Preserve the current sp/email
+// slots in the save payload so saving the DBR time doesn't disturb them.
+async function _saveDbrSlot() {
+  const el = _q('sched-dbr-time');
+  if (!el) return;
+  const t = _hm(el.value);
+  const slot = { h: t.h, m: t.m, label: _toTimeStr(t.h, t.m) };
+  const cur = _state ? _state.slots : { sp: [], email: [] };
+  const newSlots = { sp: cur.sp, email: cur.email, dbr: [slot] };
+  try {
+    const result = await settingsBridge.saveScheduleSlots(newSlots);
+    if (result && result.ok) { _toast('success', 'DBR pull time saved'); _refresh(); }
+    else _toast('error', 'Save failed: ' + ((result && result.error) || 'unknown'));
+  } catch (e) { _toast('error', 'Save failed: ' + e.message); }
+}
+
+async function _runDbrNow() {
+  await _guard(async () => {
+    _toast('info', 'DBR pull started (AFP + DSP)...');
+    const r = await window.fleetScheduler.runDbrNow();
+    const res = r && r.result;
+    if (!res) { _toast('error', 'DBR pull failed to start'); return; }
+    const describe = (x, name) => {
+      if (!x) return name + ': —';
+      if (x.state === 'ok') return name + ': ' + (x.rowCount != null ? x.rowCount + ' rows' : 'ok');
+      if (x.state === 'not-ready') return name + ': not ready yet (data as of ' + (x.dataAsOf || '?') + ') — will retry';
+      if (x.state === 'skipped') return name + ': ' + x.skipped;
+      if (x.state === 'failed' || x.state === 'error') return name + ': failed';
+      return name + ': ' + x.state;
+    };
+    const msg = describe(res.afp, 'AFP') + ' \u00b7 ' + describe(res.dsp, 'DSP');
+    const anyNotReady = (res.afp && res.afp.state === 'not-ready') || (res.dsp && res.dsp.state === 'not-ready');
+    _toast(anyNotReady ? 'warning' : 'success', msg);
+  });
 }
 
 // ── Tick ──────────────────────────────────────────────────────────────────
@@ -459,6 +543,9 @@ export function init(container) {
   bind('sched-em-save', 'click', () => _saveSlots('email'));
   bind('sched-sp-enabled', 'change', (e) => _setEnabled('sp', e.target.checked));
   bind('sched-em-enabled', 'change', (e) => _setEnabled('email', e.target.checked));
+  bind('sched-dbr-save', 'click', _saveDbrSlot);
+  bind('sched-dbr-trigger', 'click', _runDbrNow);
+  bind('sched-dbr-enabled', 'change', (e) => _setEnabled('dbr', e.target.checked));
   _wireDelegatedActions(_el);
 
   // SP push progress bar (informational only — status of record is the ledger).
