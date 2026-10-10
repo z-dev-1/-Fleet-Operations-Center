@@ -68,6 +68,19 @@ function saveConfig(patch) {
 function _unitBrief(row) {
   const r = row || {};
   const clip = (s, n) => String(s || '').trim().replace(/\u0000/g, '').slice(0, n);
+  const relayConversation = clip(r.fullConversation, RELAY_BLOB_CAP);
+  const offsiteNotes = clip(r.asistNotes, OFFSITE_BLOB_CAP);
+  // ADDITIVE structured parse of the SAME blobs (blobs stay intact above). This
+  // gives the AI an explicit, ordered who-said-what so it can tell who spoke
+  // LAST and whether we already replied — instead of fuzzy-matching the blob.
+  // Best-effort: [] when the parser can't split, and the blob is still passed
+  // as fallback context. Never throws.
+  let relayComments = [], offsiteComments = [];
+  try {
+    const cp = require('./convo_parse');
+    relayComments = cp.parseConversation(relayConversation, { cap: 20 });
+    offsiteComments = cp.parseConversation(offsiteNotes, { cap: 20 });
+  } catch (_) { /* parser unavailable — blobs still carry the content */ }
   return {
     equipmentId: String(r.equipmentId || '').trim(),
     vendor: String(r.vendor || '').trim(),
@@ -80,13 +93,16 @@ function _unitBrief(row) {
     correction: clip(r.correction, 500),
     issueSummary: clip(r.issueSummary, 500),
     // Relay internal comments (what the internal team currently sees).
-    relayConversation: clip(r.fullConversation, RELAY_BLOB_CAP),
+    relayConversation,
     relayTimeline: clip(r.repairTimeline, 2500),
     // Offsite vendor update thread (the dealer's own notes/estimate/status).
-    offsiteNotes: clip(r.asistNotes, OFFSITE_BLOB_CAP),
+    offsiteNotes,
     offsiteLabel: String(r.asistLabel || r.offsiteShopEvent || '').trim(),
     offsiteUrl: String(r.asistSrUrl || r.offsiteShopEventUrl || '').trim(),
     offsiteScrapedAt: String(r.asistScrapedAt || '').trim(),
+    // Structured, ordered comments (additive; derived from the blobs above).
+    relayComments,
+    offsiteComments,
     // Keys used by the apply layer (not shown to the AI as "facts").
     _serviceUrl: String(r.serviceUrl || r.pageUrl || '').trim(),
     _workRequestId: String(r.workRequestId || '').trim(),
@@ -159,12 +175,42 @@ function buildReconcilePrompt(brief, cfg) {
   if (brief.issueSummary) lines.push('- Issue summary on file: ' + brief.issueSummary);
   const daysSince = _daysSinceOffsite(brief);
   if (daysSince !== null) lines.push('- Offsite last refreshed: ~' + daysSince + ' day(s) ago');
+  // ── Structured LAST EXCHANGE (ground the who-spoke-last decision) ──────────
+  // When the parser could split the thread, show the ordered recent comments
+  // with explicit side (vendor/us) + date. This is the authoritative signal for
+  // lastCommentBy / nextActionType — the AI should trust it over its own read of
+  // the raw blob below. Shown for whichever thread(s) parsed.
+  let cp = null; try { cp = require('./convo_parse'); } catch (_) {}
+  const relayC = brief.relayComments || [];
+  const offsiteC = brief.offsiteComments || [];
+  if (cp && (relayC.length || offsiteC.length)) {
+    lines.push('');
+    lines.push('STRUCTURED LAST EXCHANGE (authoritative for who-spoke-last — trust this over the raw text):');
+    const renderThread = (label, arr) => {
+      if (!arr || !arr.length) return;
+      lines.push('  ' + label + ' thread (oldest-first, last ' + Math.min(arr.length, 6) + ' shown):');
+      for (const c of arr.slice(-6)) {
+        lines.push('    [' + (c.side || 'unknown') + (c.date ? ' ' + c.date : '') + '] ' + String(c.text || '').slice(0, 300));
+      }
+      const last = cp.lastComment(arr);
+      if (last) lines.push('    => LAST in ' + label + ': ' + (last.side || 'unknown') + (last.date ? ' on ' + last.date : '') + '.');
+    };
+    renderThread('OFFSITE', offsiteC);
+    renderThread('RELAY', relayC);
+    // The single most-recent comment across both threads (by position; offsite is
+    // usually the live vendor exchange). Prefer offsite's last if present.
+    const overallLast = cp.lastComment(offsiteC.length ? offsiteC : relayC);
+    if (overallLast) {
+      lines.push('  >>> MOST RECENT COMMENT OVERALL: ' + (overallLast.side || 'unknown') + (overallLast.date ? ' on ' + overallLast.date : '') + ': "' + String(overallLast.text || '').slice(0, 200) + '"');
+      lines.push('  >>> If that side is "us", WE spoke last -> we are waiting on THEM; chase what we asked, do NOT re-ask. If "vendor", they spoke last -> we may owe a reply.');
+    }
+  }
   lines.push('');
-  lines.push('RELAY (internal) — current conversation + timeline:');
+  lines.push('RELAY (internal) — current conversation + timeline (RAW — fallback context):');
   lines.push(brief.relayConversation ? brief.relayConversation : '(no Relay comments on file)');
   if (brief.relayTimeline) { lines.push('--- Relay timeline ---'); lines.push(brief.relayTimeline); }
   lines.push('');
-  lines.push('OFFSITE (vendor/dealer portal) — latest update thread' + (brief.offsiteLabel ? ' [' + brief.offsiteLabel + ']' : '') + ':');
+  lines.push('OFFSITE (vendor/dealer portal) — latest update thread' + (brief.offsiteLabel ? ' [' + brief.offsiteLabel + ']' : '') + ' (RAW — fallback context):');
   lines.push(brief.offsiteNotes ? brief.offsiteNotes : '(no Offsite update text captured)');
   return lines.join('\n');
 }
@@ -192,7 +238,16 @@ function _normalizeDecision(brief, raw, cfg) {
   let isStale = !!v.isStale && !completed;
   if (daysSince !== null && daysSince < cfg.staleDays) isStale = false;
   const missingUpdate = str(v.missingUpdate, 1500);
-  const lastCommentBy = ['vendor', 'us', 'unknown'].includes(String(v.lastCommentBy)) ? v.lastCommentBy : 'unknown';
+  let lastCommentBy = ['vendor', 'us', 'unknown'].includes(String(v.lastCommentBy)) ? v.lastCommentBy : 'unknown';
+  // GROUND who-spoke-last in the structured parse when available: the parser's
+  // ordered last comment is more reliable than the AI's read of a flat blob. If
+  // the parser gave a definite side (vendor/us), trust it over the AI's guess.
+  try {
+    const cp = require('./convo_parse');
+    const arr = (brief.offsiteComments && brief.offsiteComments.length) ? brief.offsiteComments : brief.relayComments;
+    const last = cp.lastComment(arr || []);
+    if (last && (last.side === 'vendor' || last.side === 'us')) lastCommentBy = last.side;
+  } catch (_) { /* parser unavailable — keep the AI's value */ }
 
   // ── Next-action INTENT ──────────────────────────────────────────────────────
   // Classify what WE must do next, derived from the last exchange. Trust the
