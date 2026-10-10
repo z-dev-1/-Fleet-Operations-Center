@@ -394,7 +394,7 @@ expose('files', {
 expose('relay', {
   getCache:     ()   => ipcRenderer.invoke('relay:get-cache'),
   getUnitCache: (id) => ipcRenderer.invoke('relay:get-unit-cache', id),
-  refreshUnit:  (id) => ipcRenderer.invoke('relay:refresh-unit', id),
+  refreshUnit:  (id, opts) => ipcRenderer.invoke('relay:refresh-unit', id, opts),
 });
 
 // ── Credentials (UI-facing — never returns raw values) ──────────────────────
