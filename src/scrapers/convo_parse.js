@@ -68,6 +68,25 @@ function inferSide(authorLine, opts) {
 
 function _clip(s, n) { return String(s == null ? '' : s).replace(/\u0000/g, '').trim().slice(0, n || 1200); }
 
+// A parsed "comment" that is really equipment/service OVERVIEW chrome from the
+// Relay WR page header (not an actual thread comment). Identified by telltale
+// label text and the absence of real prose. Conservative: only drops lines that
+// clearly match page-chrome patterns, so real comments are never removed.
+const _OVERVIEW_JUNK_RE = /\b(Asset ID|Asset Type|VIN|Owner Name|Domicile Site|VRID|Dock Status|Work Duration|Service Overview|Equipment Overview|Last Yard Location|Last Completed Maintenance|Lifecycle (State|Reason)|hours? ago|days? ago|minutes? ago|Skip to main|Associate Workspace|Dark mode|Contact us|Toggle Comments)\b/i;
+function _isOverviewJunk(c) {
+  const t = String((c && c.text) || '').trim();
+  if (!t) return true;
+  // Pure "N hours/days ago" or very short label-ish fragments.
+  if (/^\d+\s+(hours?|days?|minutes?)\s+ago$/i.test(t)) return true;
+  if (t.length < 12 && !/[.?!]/.test(t)) {
+    // short and no sentence punctuation — likely a label unless it's a URL.
+    if (!/https?:\/\//i.test(t)) return _OVERVIEW_JUNK_RE.test(t) || !/[a-z]{4,}/i.test(t);
+  }
+  // Longer fragments that are dominated by overview labels (tabs/metrics).
+  if (_OVERVIEW_JUNK_RE.test(t) && !/[.?!]/.test(t) && t.split(/\s+/).length < 14) return true;
+  return false;
+}
+
 /**
  * parseConversation(blob, opts) -> [{author, side, date, text}]  (oldest-first)
  * opts: { usNames?: string[], cap?: number }  (cap = max comments kept, newest-biased)
@@ -75,13 +94,31 @@ function _clip(s, n) { return String(s == null ? '' : s).replace(/\u0000/g, '').
  */
 function parseConversation(blob, opts) {
   opts = opts || {};
-  const raw = String(blob == null ? '' : blob);
+  let raw = String(blob == null ? '' : blob);
   if (!raw.trim()) return [];
+  // Trim the equipment/service OVERVIEW header that Relay WR pages render before
+  // the real thread (Asset ID, VIN, Work Duration, "N hours ago"...), whose
+  // date-ish lines otherwise parse as junk comments. The thread begins at the
+  // "Conversation" section marker (same anchor deep-scan uses). We trim at the
+  // marker that is actually followed by comment structure. If no marker (offsite
+  // pages), parse the whole blob and rely on the junk filter below.
+  const markerRe = /\n\s*Conversation\s*\n/gi;
+  let mm, bestIdx = -1;
+  while ((mm = markerRe.exec(raw)) !== null) { bestIdx = mm.index; break; } // first marker
+  if (bestIdx > -1) raw = raw.slice(bestIdx);
   const cap = Number.isFinite(opts.cap) ? opts.cap : 25;
   let comments = [];
   try {
     comments = _parseBlocks(raw, opts);
   } catch (_) { return []; } // never throw
+  if (!comments.length) return [];
+  // Drop junk "comments" that are actually equipment/service OVERVIEW header
+  // fragments (Asset ID, VIN, "4 hours ago", VRID/Dock labels, section nav).
+  // Relay WR pages render that chrome before the real thread; its date-ish lines
+  // otherwise parse as comments. We FILTER rather than hard-trim the blob so we
+  // never accidentally drop real comments (a blob can contain the word
+  // "Conversation" more than once). A real comment has prose; junk is labels.
+  comments = comments.filter((c) => !_isOverviewJunk(c));
   if (!comments.length) return [];
   // Newest-biased cap: keep the LAST `cap` comments (most recent exchange).
   if (comments.length > cap) comments = comments.slice(comments.length - cap);

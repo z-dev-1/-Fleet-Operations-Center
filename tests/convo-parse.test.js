@@ -101,4 +101,26 @@ describe('convo_parse — robustness', () => {
     expect(cp.lastComment([])).toBeNull();
     expect(cp.lastCommentLine([])).toBe('');
   });
+
+  it('trims the Relay WR equipment-overview header (does not parse it as comments)', () => {
+    // Real Relay WR page shape: a big overview header with date-ish lines, THEN
+    // the "Conversation" marker, THEN the real thread. The header must not
+    // produce junk comments.
+    const blob = [
+      'Skip to main content.', 'Service Details for B99999', 'Relay Garage',
+      'Asset ID\tB99999', 'VIN\t123', 'Last Completed Maintenance\tJul 28, 2026',
+      'Work Duration', '17d 23h 40m', 'Last Updated', 'Oct 10, 2026 12:39PM', '4 hours ago',
+      'VRID\t-- Dock Status\t--',
+      'Conversation', 'Automation', 'Recipient',
+      'vazqueze', 'Oct 7, 2026 04:56PM -04:00 (3 days ago)',
+      'Confirmed with the shop that the PM form is correct. Pending for PM to be performed.',
+      'Work Request', 'Internal Only',
+    ].join('\n');
+    const c = cp.parseConversation(blob);
+    // Only the real comment survives — none of the Asset ID / Work Duration /
+    // "4 hours ago" header lines become comments.
+    expect(c.length).toBe(1);
+    expect(c[0].text).toContain('PM form is correct');
+    expect(c[0].side).toBe('us'); // vazqueze on an Internal Only Relay note
+  });
 });

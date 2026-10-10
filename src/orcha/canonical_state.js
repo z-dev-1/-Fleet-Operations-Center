@@ -229,18 +229,49 @@ function _buildEvidence(row, status, source) {
   return ev.slice(0, _EVIDENCE_CAP);
 }
 
-// The freshest SUBSTANTIVE update we can point to (not status noise). Prefers the
-// offsite thread (dated), then the latest timeline line, then issue summary.
+// Boilerplate / chrome lines that are NOT a real update (page footers, nav,
+// copyright, version banners, generic labels). We skip these when picking the
+// "last meaningful update" so we never surface "Copyright © Decisiv..." as the
+// freshest news.
+const _BOILERPLATE_RE = /copyright|all rights reserved|privacy policy|policies\s*&|cookie|news center|version\s+v?\d|terms of|skip to main|associate workspace|dark mode|contact us|^\s*(none\.*|--|n\/a)\s*$/i;
+function _isBoilerplate(line) {
+  const s = String(line || '').trim();
+  if (!s || s.length < 6) return true;
+  return _BOILERPLATE_RE.test(s);
+}
+// Last NON-boilerplate line of a multi-line blob (scanning upward).
+function _lastRealLine(blob) {
+  const lines = String(blob || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!_isBoilerplate(lines[i])) return lines[i];
+  }
+  return '';
+}
+
+// The freshest SUBSTANTIVE update we can point to (not status noise, not page
+// chrome). Prefers a structured last comment, then the offsite thread's last
+// real line, then the latest timeline line, then issue summary.
 function _lastMeaningfulUpdate(row) {
   const r = row || {};
+  // Best: a structured last comment from the parsed Relay/Offsite thread.
+  try {
+    const cp = require('../scrapers/convo_parse');
+    const relayC = cp.parseConversation(_s(r.fullConversation), { cap: 20 });
+    const offC = cp.parseConversation(_s(r.asistNotes), { cap: 20 });
+    const arr = offC.length ? offC : relayC;
+    const last = cp.lastComment(arr);
+    if (last && last.text && !_isBoilerplate(last.text)) {
+      return { source: offC.length ? 'offsite' : 'relay', text: _clipVal(last.text, 300), at: last.date || _s(r.asistScrapedAt) };
+    }
+  } catch (_) { /* parser unavailable — fall through to line scan */ }
   const offsite = _s(r.asistNotes);
   if (offsite) {
-    const line = offsite.split('\n').filter(Boolean).pop() || offsite;
-    return { source: 'offsite', text: _clipVal(line, 300), at: _s(r.asistScrapedAt) };
+    const line = _lastRealLine(offsite);
+    if (line) return { source: 'offsite', text: _clipVal(line, 300), at: _s(r.asistScrapedAt) };
   }
   const tl = _s(r.repairTimeline);
   if (tl) {
-    const last = tl.split('\n').filter(Boolean).pop();
+    const last = _lastRealLine(tl);
     if (last) return { source: 'timeline', text: _clipVal(last, 300), at: '' };
   }
   const sum = _s(r.issueSummary || r.correction);
