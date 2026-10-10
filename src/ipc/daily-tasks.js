@@ -123,6 +123,15 @@ function _unitSignalLine(r) {
     } else { age = ';no-update-logged'; }
     parts.push('OFFSITE' + age);
   }
+  // Canonical state — the ONE reconciled truth for this unit (status/source/
+  // confidence/stale/waitingOn/next-step). This is the richest grounding we
+  // have: the AI reconciled Relay vs Offsite into it. Appended last so it
+  // anchors the line; absent only for rows that predate the first canonical
+  // pass (then the raw signals above still stand on their own).
+  try {
+    const tokens = require('../orcha/canonical_state').signalTokens(r);
+    if (tokens) parts.push(tokens);
+  } catch (_) {}
   return parts.join(' ');
 }
 
@@ -143,7 +152,9 @@ function _buildPrompt(lines) {
     'You are the fleet operations coordinator\'s assistant. Review the ENTIRE fleet snapshot below and produce a PRIORITIZED daily action list that minimizes vehicle downtime.',
     '',
     'Each unit is one line of signals:',
-    '  <id> <up|DOWN> [<days>d] ["reason"] [vendor=X|NO-VENDOR] [risk=N] [@domicile] [PM-OVERDUE] [OFFSITE;last-update=Nd-ago|;no-update-logged]',
+    '  <id> <up|DOWN> [<days>d] ["reason"] [vendor=X|NO-VENDOR] [risk=N] [@domicile] [PM-OVERDUE] [OFFSITE;last-update=Nd-ago|;no-update-logged] [canon=<status> src=<source> conf=<0-1> STALE wait=<who> ai-reconciled next="<next step>"]',
+    '',
+    'The canon=... tokens are the CANONICAL STATE — the single reconciled truth for the unit (status, which source it came from, confidence, whether it is stale, who we are waiting on, and the reconciled next step). When present, trust canon= over the raw signals, and prefer its next="..." as the action to take. (It is absent only for units not yet reconciled.)',
     '',
     'FLEET SNAPSHOT (every unit; use ONLY this data — never invent a unit, number, vendor, or date):',
     lines.join('\n'),

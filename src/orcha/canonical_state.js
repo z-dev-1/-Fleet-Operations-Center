@@ -368,6 +368,88 @@ function buildAll(rows, opts) {
   };
 }
 
+// ── Shared read accessors (the single way consumers read canonical state) ──────
+// Every reasoning surface (Action Board, briefing, Split View, Slack, grid)
+// should read a unit's canonical record through getCanonical() so they all see
+// ONE reconciled truth with ONE consistent fallback chain. Readers must never
+// need to know whether the record came from the store, the mirrored row fields,
+// or a fresh deterministic compute.
+
+// Reconstruct a canonical record from the canonical* fields mirrored onto a
+// fleetData row (written by the sync pass). Returns null if the row carries no
+// mirror (older row that predates the first canonical pass).
+function fromRow(row) {
+  const r = row || {};
+  if (r.canonicalStatus == null && r.canonicalUpdatedAt == null) return null;
+  return {
+    equipmentId: _s(r.equipmentId),
+    status: r.canonicalStatus || 'unknown',
+    situation: r.canonicalSituation || '',
+    nextStep: r.canonicalNextStep || '',
+    source: r.canonicalSource || '',
+    confidence: Number.isFinite(r.canonicalConfidence) ? r.canonicalConfidence : 0.5,
+    stale: !!r.canonicalStale,
+    waitingOn: r.canonicalWaitingOn || '',
+    flags: Array.isArray(r.canonicalFlags) ? r.canonicalFlags.slice() : [],
+    aiReconciled: !!r.canonicalAiReconciled,
+    updatedAt: r.canonicalUpdatedAt || null,
+  };
+}
+
+// getCanonical(rowOrId, opts) -> record | null
+// Fallback chain, cheapest-first:
+//   1. the canonical* fields already mirrored on the row (no I/O) — if a row is given,
+//   2. the persisted canonicalState store (keyed by equipmentId),
+//   3. a fresh deterministic computeCanonical(row) when a row is available,
+//   4. null.
+// opts.store lets tests inject a stub; defaults to require('../store').
+function getCanonical(rowOrId, opts) {
+  opts = opts || {};
+  const row = (rowOrId && typeof rowOrId === 'object') ? rowOrId : null;
+  const id = row ? _s(row.equipmentId) : _s(rowOrId);
+  if (!id) return null;
+  // 1. mirrored row fields
+  if (row) {
+    const fromMirror = fromRow(row);
+    if (fromMirror) return fromMirror;
+  }
+  // 2. persisted store
+  try {
+    const st = opts.store || require('../store');
+    const cs = st.load('canonicalState', {}) || {};
+    const rec = cs.units && cs.units[id];
+    if (rec) return rec;
+  } catch (_) {}
+  // 3. fresh deterministic compute from the row
+  if (row) {
+    const rec = computeCanonical(row);
+    if (rec) return rec;
+  }
+  return null;
+}
+
+// Humanize a canonical status enum for display ("awaiting_parts" -> "Awaiting parts").
+function statusLabel(status) {
+  const s = _s(status) || 'unknown';
+  return s.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+}
+
+// Compact tokens for an AI signal/prompt line, e.g.
+//   "canon=awaiting_parts src=offsite conf=0.8 STALE wait=vendor next=\"chase dealer\""
+// Only emits what's present; returns '' when there is no canonical record.
+function signalTokens(rowOrId, opts) {
+  const rec = getCanonical(rowOrId, opts);
+  if (!rec) return '';
+  const t = ['canon=' + (rec.status || 'unknown')];
+  if (rec.source) t.push('src=' + rec.source);
+  if (Number.isFinite(rec.confidence)) t.push('conf=' + rec.confidence.toFixed(2));
+  if (rec.stale) t.push('STALE');
+  if (rec.waitingOn) t.push('wait=' + rec.waitingOn);
+  if (rec.aiReconciled) t.push('ai-reconciled');
+  if (rec.nextStep) t.push('next="' + rec.nextStep.slice(0, 80) + '"');
+  return t.join(' ');
+}
+
 module.exports = {
   STATUSES,
   isValidStatus,
@@ -376,6 +458,10 @@ module.exports = {
   reconcileCanonical,
   mirrorFields,
   buildAll,
+  fromRow,
+  getCanonical,
+  statusLabel,
+  signalTokens,
   // exported for tests / reuse
   _deriveStatus,
   _deriveSource,

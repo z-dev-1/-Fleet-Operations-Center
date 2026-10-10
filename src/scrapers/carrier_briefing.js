@@ -153,11 +153,18 @@ function gatherOperatorFacts(operator, cfg) {
   const addrMap = _domicileAddressMap();
   const domicileCode = (r) => String(r.domicileSite || '').trim().toUpperCase();
 
+  // Canonical state accessor — the single reconciled truth per unit. Required
+  // lazily so this module stays testable without the orcha stack.
+  let _canon; try { _canon = require('../orcha/canonical_state'); } catch (_) { _canon = null; }
+
   const down = rows.filter(_isDown).map((r) => {
     const code = domicileCode(r);
     const loc = addrMap[code] || '';
     const reason = String(r.lifecycleReason || r.issueDetails || '').trim();
     const latestUpdate = _latestTimelineLine(r);
+    // Canonical record (reconciled status/situation/next-step/stale). null for
+    // units not yet reconciled — the raw reason/timeline below then stand alone.
+    const canon = _canon ? _canon.getCanonical(r) : null;
     return {
       unit: String(r.equipmentId || '').trim(),
       reason,
@@ -172,6 +179,11 @@ function gatherOperatorFacts(operator, cfg) {
       latestUpdate,
       domicile: code,
       location: loc, // "" when no Contact Book address on file (never guessed)
+      // Canonical state fields — "" / false when no record yet (never guessed).
+      canonStatus: canon ? (_canon.statusLabel(canon.status)) : '',
+      canonNextStep: canon ? String(canon.nextStep || '').trim() : '',
+      canonStale: !!(canon && canon.stale),
+      canonWaitingOn: canon ? String(canon.waitingOn || '').trim() : '',
     };
   }).filter((d) => d.unit);
 
@@ -276,6 +288,11 @@ function buildBriefingPrompt(facts, cfg, ownerTag, dateStr) {
       facts.down.forEach((d) => {
         const where = d.location ? (d.domicile + ' (' + d.location + ')') : d.domicile;
         let line = '    • ' + d.unit + (d.reason ? ' — ' + d.reason : '') + (where ? ' · ' + where : '');
+        // Canonical state — the reconciled status + next step for this unit.
+        // When present it is the authoritative "where it stands"; show it so the
+        // partner sees one consistent status (never contradicting the raw lines).
+        if (d.canonStatus) line += '\n        Status: ' + d.canonStatus + (d.canonStale ? ' (no recent update)' : '');
+        if (d.canonNextStep) line += '\n        Next step: ' + d.canonNextStep;
         if (d.issueSummary) line += '\n        Issue: ' + d.issueSummary;
         if (d.latestUpdate) line += '\n        Latest update: ' + d.latestUpdate;
         lines.push(line);
@@ -361,6 +378,8 @@ function _fallbackMessage(facts, cfg, ownerTag) {
       parts.push(':red_circle: ' + facts.downCount + ' unit(s) down:');
       facts.down.forEach((d) => {
         let line = '• ' + d.unit + (d.reason ? ' — ' + d.reason : '') + (d.domicile ? ' · ' + d.domicile : '');
+        if (d.canonStatus) line += '\n   Status: ' + d.canonStatus + (d.canonStale ? ' (no recent update)' : '');
+        if (d.canonNextStep) line += '\n   Next step: ' + d.canonNextStep;
         if (d.issueSummary) line += '\n   Issue: ' + d.issueSummary;
         if (d.latestUpdate) line += '\n   Latest: ' + d.latestUpdate;
         parts.push(line);

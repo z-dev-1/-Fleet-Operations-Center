@@ -64,29 +64,60 @@ function registerRelayReconcileIPC(_ctx) {
   handle('relayReconcile:draft-for-split', async (_e, equipmentId, side) => {
     requireString(equipmentId, 'equipmentId');
     const cfg = reconcile.getConfig();
-    if (!cfg.enabled) return { ok: false, reason: 'engine disabled' };
     const id = equipmentId.trim();
     const fd = store.load('fleetData', {}) || {};
     const row = (fd.rows || []).find((r) => String(r.equipmentId || '').trim() === id);
     if (!row) return { ok: false, reason: 'unit not found' };
-    let decision;
-    try { decision = await reconcile.reconcileUnit(row, { cfg }); }
-    catch (e) { return { ok: false, reason: e.message }; }
-    if (!decision) return { ok: false, reason: 'no decision' };
-
     const paneSide = (side === 'offsite') ? 'offsite' : 'relay';
-    let text = '';
-    if (paneSide === 'offsite') {
-      text = decision.dealerAsk || '';
-    } else {
-      // Relay pane: prefer the concrete gap-fill; else a warranted follow-up;
-      // else a plain status line.
-      if (decision.missingUpdate) text = decision.missingUpdate;
-      else if ((decision.followUpNeeded || decision.isStale) && decision.dealerAsk) text = decision.dealerAsk;
-      else if (decision.currentStatus) text = decision.currentStatus + (decision.nextStep ? ' Next: ' + decision.nextStep : '');
+
+    // Primary path: a LIVE reconcile decision (only when the engine is enabled).
+    // This is the freshest, most specific draft (gap-fill / dealer-ask).
+    let decision = null;
+    if (cfg.enabled) {
+      try { decision = await reconcile.reconcileUnit(row, { cfg }); }
+      catch (e) { logger.warn('[draft-for-split] live reconcile failed, falling back to canonical: ' + e.message); }
     }
-    if (!text) return { ok: false, reason: 'nothing to draft', decision };
-    return { ok: true, text, source: 'reconcile', side: paneSide, decision };
+    if (decision) {
+      let text = '';
+      if (paneSide === 'offsite') {
+        text = decision.dealerAsk || '';
+      } else {
+        if (decision.missingUpdate) text = decision.missingUpdate;
+        else if ((decision.followUpNeeded || decision.isStale) && decision.dealerAsk) text = decision.dealerAsk;
+        else if (decision.currentStatus) text = decision.currentStatus + (decision.nextStep ? ' Next: ' + decision.nextStep : '');
+      }
+      if (text) return { ok: true, text, source: 'reconcile', side: paneSide, decision };
+    }
+
+    // Fallback: seed from CANONICAL STATE — populated for every unit every sync
+    // regardless of the reconcile engine toggle. This is why Split View still
+    // auto-fills a reconciled draft even with the engine off. We never invent:
+    // if canonical has no usable text, we return ok:false so the renderer uses
+    // its own generic template.
+    try {
+      const canon = require('../orcha/canonical_state').getCanonical(row);
+      if (canon) {
+        let text = '';
+        if (paneSide === 'offsite') {
+          // Offsite pane = what to ask the vendor. Only when we're waiting on them.
+          if (canon.waitingOn === 'vendor' || canon.stale) {
+            text = 'Following up on ' + id + (canon.situation ? ' (' + canon.situation + ')' : '') +
+              ' — can you confirm the current repair status and a revised ETC?';
+          }
+        } else {
+          // Relay pane = internal status + reconciled next step.
+          if (canon.situation || canon.nextStep) {
+            text = (canon.situation || '').trim();
+            if (canon.nextStep) text += (text ? ' ' : '') + 'Next: ' + canon.nextStep;
+          }
+        }
+        if (text && text.trim().length > 10) {
+          return { ok: true, text: text.trim(), source: 'canonical', side: paneSide, canonical: canon };
+        }
+      }
+    } catch (e) { logger.warn('[draft-for-split] canonical fallback failed: ' + e.message); }
+
+    return { ok: false, reason: 'nothing to draft' };
   });
 
   logger.info('Relay Reconcile IPC handlers registered');

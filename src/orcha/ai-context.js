@@ -317,6 +317,26 @@ function _buildUnitDetail(unitId, rows, notesStore, opts) {
   const ns = notesStore[unitId] || {};
   let detail = '\n[' + unitId + ']\n';
   detail += '  Status: ' + (row.lifecycleState || '?') + ' | Reason: ' + (row.lifecycleReason || '?') + '\n';
+
+  // Canonical state — the single reconciled truth for this unit. Surface it
+  // right under the raw status so the AI answers "what's up with unit X" from
+  // ONE authoritative read (reconciled status, next step, who we're waiting on,
+  // freshness) instead of re-deriving from raw fields. Absent only for units
+  // not yet reconciled. Required lazily so this module stays testable.
+  try {
+    const canon = require('./canonical_state').getCanonical(row);
+    if (canon) {
+      const C = require('./canonical_state');
+      let line = '  Canonical state: ' + C.statusLabel(canon.status);
+      if (canon.stale) line += ' (STALE — no recent update)';
+      if (canon.waitingOn) line += ' | waiting on: ' + canon.waitingOn;
+      if (Number.isFinite(canon.confidence)) line += ' | confidence: ' + canon.confidence.toFixed(2);
+      detail += line + '\n';
+      if (canon.situation) detail += '  Situation: ' + canon.situation + '\n';
+      if (canon.nextStep) detail += '  Next step: ' + canon.nextStep + '\n';
+    }
+  } catch (_) { /* no canonical record — raw fields below stand alone */ }
+
   detail += '  Vendor: ' + (row.vendor || 'none') + ' | Make: ' + (row.manufacturer || row.make || '?') + ' | Body: ' + (row.bodyType || row.assetType || '?') + '\n';
   detail += '  Site: ' + (row.domicileSite || '?') + ' | Operator: ' + (row.operator || '?') + '\n';
 

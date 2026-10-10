@@ -185,3 +185,72 @@ describe('canonical_state — buildAll + mirrorFields', () => {
     expect(m).toHaveProperty('canonicalUpdatedAt');
   });
 });
+
+describe('canonical_state — shared read accessors (the consumer API)', () => {
+  it('fromRow reconstructs a record from mirrored canonical* fields', () => {
+    const base = canonical.computeCanonical({ equipmentId: 'R1', lifecycleState: 'Unavailable', serviceState: 'awaiting parts' });
+    const row = Object.assign({ equipmentId: 'R1' }, canonical.mirrorFields(base));
+    const rec = canonical.fromRow(row);
+    expect(rec).not.toBeNull();
+    expect(rec.status).toBe('awaiting_parts');
+    expect(rec.waitingOn).toBe('parts');
+  });
+
+  it('fromRow returns null for a row with no mirror', () => {
+    expect(canonical.fromRow({ equipmentId: 'R2', lifecycleState: 'Unavailable' })).toBeNull();
+  });
+
+  it('getCanonical prefers mirrored row fields (no store I/O)', () => {
+    const base = canonical.computeCanonical({ equipmentId: 'G1', lifecycleState: 'Unavailable', serviceState: 'in repair' });
+    const row = Object.assign({ equipmentId: 'G1' }, canonical.mirrorFields(base));
+    // store stub that would THROW if touched — proves the mirror path short-circuits.
+    const store = { load() { throw new Error('store must not be read when mirror present'); } };
+    const rec = canonical.getCanonical(row, { store });
+    expect(rec.status).toBe('in_repair');
+  });
+
+  it('getCanonical falls back to the store when given a bare id', () => {
+    const store = { load: (k) => (k === 'canonicalState' ? { units: { G2: { equipmentId: 'G2', status: 'awaiting_vendor', nextStep: 'chase', confidence: 0.7, flags: [], waitingOn: 'vendor' } } } : {}) };
+    const rec = canonical.getCanonical('G2', { store });
+    expect(rec.status).toBe('awaiting_vendor');
+    expect(rec.waitingOn).toBe('vendor');
+  });
+
+  it('getCanonical falls back to a fresh deterministic compute when no mirror and no store record', () => {
+    const store = { load: () => ({}) };
+    const rec = canonical.getCanonical({ equipmentId: 'G3', lifecycleState: 'Unavailable', serviceState: 'awaiting parts' }, { store });
+    expect(rec.status).toBe('awaiting_parts');
+    expect(rec.aiReconciled).toBe(false);
+  });
+
+  it('getCanonical returns null for an unknown bare id with empty store', () => {
+    const store = { load: () => ({}) };
+    expect(canonical.getCanonical('NOPE', { store })).toBeNull();
+  });
+
+  it('statusLabel humanizes the enum', () => {
+    expect(canonical.statusLabel('awaiting_estimate_approval')).toBe('Awaiting estimate approval');
+    expect(canonical.statusLabel('down')).toBe('Down');
+    expect(canonical.statusLabel('')).toBe('Unknown');
+  });
+
+  it('signalTokens emits compact prompt tokens from a reconciled record (via mirror)', () => {
+    const base = canonical.reconcileCanonical(
+      { equipmentId: 'S1', lifecycleState: 'Unavailable' },
+      { decision: { equipmentId: 'S1', currentStatus: 'awaiting parts', nextStep: 'chase dealer', lastCommentBy: 'us', followUpNeeded: true, confidence: 0.8, isStale: true, relayHasLatest: false, missingUpdate: 'parts on order' } }
+    );
+    const row = Object.assign({ equipmentId: 'S1' }, canonical.mirrorFields(base));
+    const store = { load() { throw new Error('should use mirror'); } };
+    const tokens = canonical.signalTokens(row, { store });
+    expect(tokens).toContain('canon=awaiting_parts');
+    expect(tokens).toContain('STALE');
+    expect(tokens).toContain('wait=vendor');
+    expect(tokens).toContain('ai-reconciled');
+    expect(tokens).toContain('next="chase dealer"');
+  });
+
+  it('signalTokens returns empty string when there is no canonical record', () => {
+    const store = { load: () => ({}) };
+    expect(canonical.signalTokens('UNKNOWN', { store })).toBe('');
+  });
+});
