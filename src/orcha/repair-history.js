@@ -238,4 +238,154 @@ function getAllHistory() {
   return all;
 }
 
-module.exports = { getUnitHistory, addEvent, closeRepair, detectTransitions, getAllHistory, archiveAndClearTimeline, sweepReturnedUnits };
+// ── Breakdown records ─────────────────────────────────────────────────────────
+// A unit's repair data (89 status events, archived timelines, the live WR) is
+// noisy — buildBreakdowns collapses it into ONE record per down->up repair
+// CYCLE so the History tab can show a clean "breakdown by date" list.
+//
+// Record: { downDate, backDate, days, ongoing, rootCause, vendor, sig, events:[{date,text}] }
+//   downDate/backDate: 'YYYY-MM-DD' (backDate null when still down/ongoing)
+//   days: whole-day duration (null if unknown)
+//   rootCause: best available failure description (WR cause/correction/issue, or
+//              first substantive event line) — the mechanical problem, not status
+//   sig: a stable fingerprint of the cycle (for caching AI analysis)
+//   events: the cleaned per-day lines belonging to this cycle (for AI grounding)
+
+function _ymd(v) {
+  if (!v) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(v))) return String(v).slice(0, 10);
+  const t = new Date(v).getTime();
+  if (isNaN(t)) return null;
+  const d = new Date(t);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function _daysBetween(a, b) {
+  const ta = new Date(a).getTime(), tb = new Date(b).getTime();
+  if (isNaN(ta) || isNaN(tb)) return null;
+  return Math.max(0, Math.round((tb - ta) / 86400000));
+}
+
+// Strip a leading "MM/DD - " prefix and collapse whitespace.
+function _cleanLine(s) {
+  return String(s || '').replace(/^\s*\d{1,2}\/\d{1,2}\s*[-\u2013]\s*/, '').replace(/\s+/g, ' ').trim();
+}
+
+// Does a line describe the actual FAILURE (root cause) vs a status update?
+const _CAUSE_RE = /fail|failure|leak|broken|crack|worn|fault|diagnos|replace|harness|engine|transmission|brake|coolant|electrical|wiring|valve|compressor|alternator|starter|clutch|axle|suspension|tire|def\b|aftertreatment|dpf|egr|turbo|injector|sensor/i;
+
+/**
+ * buildBreakdowns(equipmentId, row) — group this unit's repair data into one
+ * record per breakdown cycle, newest-first. `row` (optional) is the live
+ * fleetData row for the current/open WR (dates, vendor, cause).
+ */
+function buildBreakdowns(equipmentId, row) {
+  const cutoff = Date.now() - THREE_MONTHS_MS;
+
+  // Gather dated event lines from BOTH the structured store and archived
+  // timelines, each tagged with whether it closes a cycle (outcome 'completed').
+  const raw = [];
+
+  const all = store.load('repairHistory', {});
+  (all[equipmentId] || []).forEach(function (e) {
+    const ts = (e.ts && !isNaN(e.ts)) ? e.ts : new Date(e.date).getTime();
+    if (isNaN(ts)) return;
+    raw.push({ ts: ts, date: _ymd(e.date) || _ymd(ts), text: _cleanLine(e.summary), vendor: e.vendor || '', closes: e.outcome === 'completed' });
+  });
+
+  try {
+    const ns = store.load('notesStore', {});
+    const u = ns[equipmentId];
+    const archives = (u && Array.isArray(u.timelineArchive)) ? u.timelineArchive : [];
+    const thisYear = new Date().getFullYear();
+    archives.forEach(function (arc) {
+      const closeTs = arc.closedAt ? new Date(arc.closedAt).getTime() : Date.now();
+      const lines = String(arc.timeline || '').split('\n');
+      lines.forEach(function (line, i) {
+        const m = line.trim().match(/^(\d{1,2})\/(\d{1,2})\s*[-\u2013]\s*(.+)$/);
+        if (!m) return;
+        let ts = new Date(thisYear, parseInt(m[1], 10) - 1, parseInt(m[2], 10)).getTime();
+        if (isNaN(ts) || ts > Date.now() + 86400000) ts = closeTs;
+        raw.push({ ts: ts, date: _ymd(ts), text: _cleanLine(m[3]), vendor: '', closes: i === lines.length - 1 });
+      });
+    });
+  } catch (_) {}
+
+  if (!raw.length && !(row && row.created)) return [];
+
+  raw.sort(function (a, b) { return a.ts - b.ts; });
+
+  // Split the chronological stream into cycles: a 'closes' event ends the
+  // current cycle; the next event opens a new one.
+  const cycles = [];
+  let cur = null;
+  raw.forEach(function (ev) {
+    if (!cur) cur = { events: [], vendor: '' };
+    cur.events.push(ev);
+    if (ev.vendor && !cur.vendor) cur.vendor = ev.vendor;
+    if (ev.closes) { cycles.push(cur); cur = null; }
+  });
+  if (cur) cycles.push(cur); // trailing open (ongoing) cycle
+
+  // If there are no event-derived cycles but the row has an open WR, synthesize
+  // the current ongoing breakdown from the row.
+  if (!cycles.length && row && row.created) {
+    cycles.push({ events: [], vendor: row.vendor || '', _fromRow: true });
+  }
+
+  const out = cycles.map(function (c) {
+    const evs = c.events;
+    const first = evs[0], last = evs[evs.length - 1];
+    const closed = last && last.closes;
+    const downDate = first ? first.date : _ymd(row && row.created);
+    const backDate = closed ? last.date : null;
+    const days = (downDate && backDate) ? _daysBetween(downDate, backDate) : null;
+
+    // Root cause: prefer a WR cause/correction (for the open cycle), else the
+    // first event line that reads like a failure, else the first line.
+    let rootCause = '';
+    if (c._fromRow || (row && !closed)) {
+      rootCause = _cleanLine(row && (row.cause || row.correction)) || '';
+    }
+    if (!rootCause) {
+      const causeLine = evs.find(function (e) { return _CAUSE_RE.test(e.text); });
+      rootCause = (causeLine && causeLine.text) || (first && first.text) || _cleanLine(row && (row.issueDetails || row.issueSummary)) || 'Repair';
+    }
+    rootCause = rootCause.slice(0, 160);
+
+    const vendor = c.vendor || (row && row.vendor) || '';
+    const events = evs.map(function (e) { return { date: e.date, text: e.text }; }).filter(function (e) { return e.text; });
+
+    // Stable fingerprint for caching the AI analysis.
+    const sig = require('crypto').createHash('sha1')
+      .update(downDate + '|' + (backDate || 'open') + '|' + events.length + '|' + rootCause.slice(0, 40))
+      .digest('hex').slice(0, 12);
+
+    return {
+      downDate: downDate,
+      backDate: backDate,
+      days: days,
+      ongoing: !closed,
+      rootCause: rootCause,
+      vendor: vendor,
+      sig: sig,
+      events: events,
+    };
+  })
+  // Keep cycles within the 3-month window (by their most recent activity).
+  .filter(function (b) {
+    const ref = b.backDate || b.downDate;
+    const t = ref ? new Date(ref).getTime() : Date.now();
+    return isNaN(t) || t >= cutoff;
+  })
+  // Newest first.
+  .sort(function (a, b) {
+    const ta = new Date(a.backDate || a.downDate).getTime() || 0;
+    const tb = new Date(b.backDate || b.downDate).getTime() || 0;
+    return tb - ta;
+  });
+
+  return out;
+}
+
+module.exports = { getUnitHistory, addEvent, closeRepair, detectTransitions, getAllHistory, archiveAndClearTimeline, sweepReturnedUnits, buildBreakdowns };

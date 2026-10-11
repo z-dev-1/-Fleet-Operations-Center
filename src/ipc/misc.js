@@ -946,6 +946,114 @@ function registerMiscIPC(ctx) {
     return getAllHistory();
   });
 
+  // Breakdown history for the unit-detail History tab: one record per repair
+  // cycle, each with an AI 'analysis' one-liner + a quick overall 'summary' of
+  // the unit's breakdown pattern. AI output is cached per breakdown signature
+  // (and per summary signature) so it is generated once, not on every panel
+  // open. Grounded strictly in the recorded events; deterministic fallback when
+  // AI is unavailable so the tab always renders.
+  handle('breakdown-history:get', async (_e, equipmentId, row) => {
+    const store = require('../store');
+    const { buildBreakdowns } = require('../orcha/repair-history');
+    const id = String(equipmentId || '').trim();
+    if (!id) return { breakdowns: [], summary: '' };
+
+    const breakdowns = buildBreakdowns(id, row || null);
+    if (!breakdowns.length) return { breakdowns: [], summary: '' };
+
+    const cache = store.load('breakdownAnalysis', { bySig: {}, summaries: {} }) || { bySig: {}, summaries: {} };
+    cache.bySig = cache.bySig || {};
+    cache.summaries = cache.summaries || {};
+    let relay = null;
+    try { relay = require('../orcha/relay'); } catch (_) {}
+
+    function _fmt(b) {
+      const back = b.ongoing ? 'ongoing' : (b.backDate || 'returned');
+      const dur = b.days != null ? b.days + 'd' : (b.ongoing ? 'ongoing' : '?');
+      return b.downDate + ' \u2192 ' + back + ' (' + dur + ')';
+    }
+    // Deterministic one-line fallback — grounded, no AI.
+    function _fallbackAnalysis(b) {
+      const parts = [];
+      parts.push(b.rootCause ? b.rootCause.replace(/\.$/, '') : 'Repair');
+      if (b.vendor) parts.push('handled by ' + b.vendor);
+      if (b.days != null && !b.ongoing) parts.push('down ' + b.days + ' day' + (b.days === 1 ? '' : 's'));
+      else if (b.ongoing) parts.push('still down');
+      return parts.join('; ') + '.';
+    }
+
+    // Per-breakdown AI analysis (cached by sig).
+    let aiGenerated = 0;
+    for (const b of breakdowns) {
+      const cached = cache.bySig[b.sig];
+      if (cached && cached.analysis) { b.analysis = cached.analysis; continue; }
+
+      let analysis = '';
+      if (relay && relay.ask && b.events.length) {
+        const evText = b.events.slice(-25).map(function (e) { return e.date + ': ' + e.text; }).join('\n');
+        const prompt =
+          'You are a fleet maintenance analyst. Below is the recorded event log for ONE breakdown of unit ' + id +
+          ' (' + _fmt(b) + (b.vendor ? ', vendor ' + b.vendor : '') + ').\n\n' +
+          'Write ONE concise analysis sentence (max 40 words) stating the ROOT CAUSE (the actual mechanical/parts failure) and how the repair went ' +
+          '(key delay or blocker, and resolution if closed). Ground it STRICTLY in the events — do NOT invent parts, causes, dates, names, or costs. ' +
+          'If the root cause is not stated, say "root cause not documented". No preamble, no bullet points, just the sentence.\n\n' +
+          'EVENTS:\n' + evText;
+        try {
+          const txt = await Promise.race([
+            relay.ask(prompt),
+            new Promise(function (res) { setTimeout(function () { res(''); }, 20000); }),
+          ]);
+          analysis = String(txt || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        } catch (_) { analysis = ''; }
+      }
+      if (!analysis) analysis = _fallbackAnalysis(b);
+      else aiGenerated++;
+      b.analysis = analysis;
+      cache.bySig[b.sig] = { analysis: analysis, at: new Date().toISOString() };
+    }
+
+    // Overall summary (cached by the ordered set of breakdown sigs).
+    const sigKey = breakdowns.map(function (b) { return b.sig; }).join(',');
+    let summary = '';
+    const sc = cache.summaries[id];
+    if (sc && sc.sigKey === sigKey && sc.summary) {
+      summary = sc.summary;
+    } else {
+      const totalDays = breakdowns.reduce(function (s, b) { return s + (b.days || 0); }, 0);
+      const openCount = breakdowns.filter(function (b) { return b.ongoing; }).length;
+      if (relay && relay.ask) {
+        const list = breakdowns.map(function (b) { return '- ' + _fmt(b) + ': ' + (b.analysis || b.rootCause); }).join('\n');
+        const prompt =
+          'You are a fleet maintenance analyst. Here is the breakdown history for unit ' + id + ' (last 3 months, newest first):\n' +
+          list + '\n\n' +
+          'Write ONE short summary sentence (max 35 words) of this unit\'s breakdown pattern — how many breakdowns, total days down, any recurring component/vendor theme, and whether it is currently down. ' +
+          'Ground STRICTLY in the data above; do NOT invent. No preamble.';
+        try {
+          const txt = await Promise.race([
+            relay.ask(prompt),
+            new Promise(function (res) { setTimeout(function () { res(''); }, 20000); }),
+          ]);
+          summary = String(txt || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        } catch (_) { summary = ''; }
+      }
+      if (!summary) {
+        summary = breakdowns.length + ' breakdown' + (breakdowns.length === 1 ? '' : 's') +
+          ' in the last 3 months' + (totalDays ? ', ' + totalDays + ' total days down' : '') +
+          (openCount ? ' \u2014 currently down.' : '.');
+      }
+      cache.summaries[id] = { summary: summary, sigKey: sigKey, at: new Date().toISOString() };
+    }
+
+    try { store.save('breakdownAnalysis', cache); } catch (_) {}
+
+    // Strip the heavy events[] from the payload sent to the renderer (it only
+    // needs the display fields + analysis).
+    const payload = breakdowns.map(function (b) {
+      return { downDate: b.downDate, backDate: b.backDate, days: b.days, ongoing: b.ongoing, rootCause: b.rootCause, vendor: b.vendor, analysis: b.analysis };
+    });
+    return { breakdowns: payload, summary: summary, aiGenerated: aiGenerated };
+  });
+
   // Morning briefing — manual regenerate (bypasses the once-per-day guard).
   // Result is pushed back via the normal orcha:morning-briefing channel.
   handle('briefing:refresh', async () => {

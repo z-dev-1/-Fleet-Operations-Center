@@ -2190,47 +2190,25 @@ function renderActionsPane(unit){
     '<div id="dp-vnd-ai-suggest" class="dp-vnd-ai-suggest"></div>'+
     '<div id="dp-vendor-section" class="dp-vendor-section"><p class="dp-empty">Loading eligibility\u2026</p></div>'+
     '<div id="dp-vnd-history-strip" class="dp-vnd-history-strip"></div>'+
+    // Notes — moved here from the History tab so History stays a clean
+    // breakdown record. Same #dp-notes / #dp-save-notes IDs so _wireNotes works.
+    '<div class="dp-section-title" style="margin-top:10px">Notes</div>'+
+    '<textarea id="dp-notes" class="dp-notes-area" placeholder="Add notes...">'+esc(unit.savedNotes||'')+'</textarea>'+
+    '<div class="dp-notes-footer"><button id="dp-save-notes" class="detail-panel__btn">Save</button><span id="dp-notes-saved" class="dp-notes-saved">Saved \u2713</span></div>'+
   '</div>';
 }
 
 // ── history pane ──────────────────────────────────────────────────────────────
 function renderHistoryPane(unit){
-  var sources=[
-    {label:'AAP',      ts:unit.lastDataDate,   icon:'\ud83d\udd17'},
-    {label:'Relay',    ts:unit.relaySynced?new Date().toISOString():null, icon:'\ud83d\udcc4'},
-    {label:'Uptake',   ts:unit.uptakeSynced?unit.lastDataDate:null,       icon:'\u26a1'},
-    {label:'ASIST',    ts:unit.asistScrapedAt,  icon:'\ud83c\udfe6'},
-    {label:'Notes',    ts:unit.notesUpdatedAt,  icon:'\ud83d\udcdd'},
-  ];
-  var syncRows=sources.map(function(s){
-    var age=s.ts?Date.now()-new Date(s.ts).getTime():null;
-    var cls=age===null?'none':age>86400000?'old':'ok';
-    return '<div class="dp-sync-row">'+
-      '<div class="dp-sync-dot dp-sync-dot--'+cls+'"></div>'+
-      '<span class="dp-sync-icon">'+s.icon+'</span>'+
-      '<span class="dp-sync-source">'+s.label+'</span>'+
-      '<span class="dp-sync-time">'+(s.ts?relTime(s.ts):'Never')+'</span>'+
-    '</div>';
-  }).join('');
-
-  // unit timeline summary
-  var timeline=[
-    unit.created?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--open"></span><span class="dp-tl-label">WR Opened</span><span class="dp-tl-date">'+fmtDate(unit.created)+'</span></div>':'',
-    unit.workDuration?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--etc"></span><span class="dp-tl-label">Work Duration</span><span class="dp-tl-date">'+esc(unit.workDuration)+'</span></div>':'',
-    unit.needBy?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--needby"></span><span class="dp-tl-label">Need By</span><span class="dp-tl-date">'+esc(unit.needBy)+'</span></div>':'',
-    unit.completed?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--closed"></span><span class="dp-tl-label">Completed</span><span class="dp-tl-date">'+fmtDate(unit.completed)+'</span></div>':'',
-    unit.notesUpdatedAt?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--note"></span><span class="dp-tl-label">Notes Updated</span><span class="dp-tl-date">'+relTime(unit.notesUpdatedAt)+'</span></div>':'',
-  ].filter(Boolean).join('');
-
+  // Breakdown History — one card per down->up repair cycle, newest first, each
+  // with an AI analysis line + a quick AI summary of the unit's pattern at top.
+  // Populated async by _wireHistoryPane via window.fleet.breakdownHistory().
+  // (Data Sync / Timeline / Notes were removed from here — Notes moved to the
+  // Actions tab — so History is purely a clean record of breakdowns by date.)
   return '<div class="dp-pane" id="dp-pane-history">'+
-    '<div class="dp-section-title">Repair History <span class="dp-section-sub">(last 3 months)</span></div>'+
-    '<div id="dp-repair-history" class="dp-repair-history"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading repair history\u2026</div></div>'+
-    '<div class="dp-section-title">Data Sync</div>'+
-    '<div class="dp-sync-panel">'+syncRows+'</div>'+
-    (timeline?'<div class="dp-section-title">Timeline</div><div class="dp-timeline">'+timeline+'</div>':'')+
-    '<div class="dp-section-title">Notes</div>'+
-    '<textarea id="dp-notes" class="dp-notes-area" placeholder="Add notes...">'+esc(unit.savedNotes||'')+'</textarea>'+
-    '<div class="dp-notes-footer"><button id="dp-save-notes" class="detail-panel__btn">Save</button><span id="dp-notes-saved" class="dp-notes-saved">Saved \u2713</span></div>'+
+    '<div class="dp-section-title">Breakdown History <span class="dp-section-sub">(last 3 months)</span></div>'+
+    '<div id="dp-breakdown-summary" class="dp-breakdown-summary"></div>'+
+    '<div id="dp-breakdown-list" class="dp-breakdown-list"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading breakdown history\u2026</div></div>'+
   '</div>';
 }
 
@@ -2537,144 +2515,63 @@ function _renderUnit(unit) {
 }
 
 // ── _wireHistoryPane ───────────────────────────────────────────────────────
-// Builds a clean 3-month repair-history list for the History tab:
-//   MM/DD/YYYY - short description
-// Merges three per-unit sources into dated entries, then dedupes so the SAME
-// work order + vendor collapses to one line that shows the LATEST known root
-// cause (cause/correction) instead of repeating the original complaint:
-//   1) structured repairHistory store (window.fleet.repairHistory) — dated events
-//   2) each work order on the row (primary WO + _plannedWRData + _secondaryWRs)
-//   3) repairTimeline lines (MM/DD - text) as a fallback for anything else
-// Everything is filtered to the last ~90 days and sorted newest-first.
+// Populates the History tab's Breakdown History: one card per down->up repair
+// cycle (date down -> date back . duration . root cause . vendor) plus an AI
+// analysis line each, with a quick AI summary of the unit's pattern at top.
+// All computed server-side by the breakdown-history:get IPC (buildBreakdowns +
+// cached AI); this just fetches and renders. Honest empty state when none.
 function _wireHistoryPane(unit) {
-  var host = document.getElementById('dp-repair-history');
-  if (!host) return;
+  var list    = document.getElementById('dp-breakdown-list');
+  var summary = document.getElementById('dp-breakdown-summary');
+  if (!list) return;
 
-  var NINETY_DAYS = 90 * 24 * 60 * 60 * 1000;
-  var now = Date.now();
-  var thisYear = new Date().getFullYear();
+  function fmtDateShort(ymd) {
+    if (!ymd) return '';
+    var p = String(ymd).split('-');
+    if (p.length !== 3) return esc(ymd);
+    return parseInt(p[1], 10) + '/' + parseInt(p[2], 10) + '/' + p[0].slice(2);
+  }
 
-  // Parse a date-ish value into a JS timestamp (ms) or null.
-  function toTs(v) {
-    if (!v) return null;
-    if (typeof v === 'number') return v;
-    var s = String(v).trim();
-    if (!s) return null;
-    // MM/DD (no year) -> assume current year
-    var md = s.match(/^(\d{1,2})\/(\d{1,2})$/);
-    if (md) {
-      var t = new Date(thisYear, parseInt(md[1], 10) - 1, parseInt(md[2], 10)).getTime();
-      // if that lands in the future (e.g. Dec date early next year), roll back a year
-      return t > now + 86400000 ? new Date(thisYear - 1, parseInt(md[1], 10) - 1, parseInt(md[2], 10)).getTime() : t;
+  function renderCard(b) {
+    var back = b.ongoing
+      ? '<span class="dp-bd-ongoing">ongoing</span>'
+      : '<span class="dp-bd-date">' + fmtDateShort(b.backDate) + '</span>';
+    var dur = b.days != null ? b.days + 'd' : (b.ongoing ? 'still down' : '?');
+    var vend = b.vendor ? '<span class="dp-bd-vendor">' + esc(b.vendor) + '</span>' : '';
+    var analysis = b.analysis
+      ? '<div class="dp-bd-analysis"><span class="dp-bd-analysis-label">Analysis:</span> ' + esc(b.analysis) + '</div>'
+      : '';
+    return '<div class="dp-bd-card' + (b.ongoing ? ' dp-bd-card--ongoing' : '') + '">' +
+      '<div class="dp-bd-head">' +
+        '<span class="dp-bd-dates"><span class="dp-bd-date">' + fmtDateShort(b.downDate) + '</span>' +
+          '<span class="dp-bd-arrow"> \u2192 </span>' + back + '</span>' +
+        '<span class="dp-bd-dur">' + esc(dur) + '</span>' +
+      '</div>' +
+      '<div class="dp-bd-cause">' + esc(b.rootCause || 'Repair') + '</div>' +
+      (vend ? '<div class="dp-bd-meta">' + vend + '</div>' : '') +
+      analysis +
+    '</div>';
+  }
+
+  var fetch = (window.fleet && window.fleet.breakdownHistory)
+    ? window.fleet.breakdownHistory(unit.equipmentId, unit).catch(function(e) { return { breakdowns: [], summary: '', error: (e && e.message) || 'error' }; })
+    : Promise.resolve({ breakdowns: [], summary: '' });
+
+  fetch.then(function(res) {
+    res = res || {};
+    var bds = res.breakdowns || [];
+    if (summary) {
+      summary.innerHTML = res.summary
+        ? '<div class="dp-bd-summary-text">' + esc(res.summary) + '</div>'
+        : '';
     }
-    var d = new Date(s);
-    return isNaN(d.getTime()) ? null : d.getTime();
-  }
-
-  function fmtMDY(ts) {
-    var d = new Date(ts);
-    return (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
-  }
-
-  function shorten(txt) {
-    var s = String(txt || '').replace(/\s+/g, ' ').trim();
-    return s.length > 140 ? s.slice(0, 138) + '\u2026' : s;
-  }
-
-  // Collect raw candidate entries: { ts, desc, vendor, woKey, isRoot }
-  function collect(store) {
-    var out = [];
-
-    // (1) structured repair-history store
-    (store || []).forEach(function(e) {
-      var ts = toTs(e.date) || e.ts || null;
-      if (ts == null) return;
-      out.push({ ts: ts, desc: e.summary || '', vendor: e.vendor || '', woKey: '', isRoot: e.outcome === 'completed' });
-    });
-
-    // (2) work orders on the row
-    function pushWO(wo, tag) {
-      if (!wo) return;
-      var ts = toTs(wo.created) || toTs(wo.completed);
-      if (ts == null) return;
-      var woKey = (wo.workRequestId || wo.alternativeId || wo.vendorWorkOrderId || '') + '|' + (wo.vendor || '');
-      // root cause = cause/correction if present, else the reported issue
-      var root = (wo.cause || wo.correction || '').trim();
-      var desc = root || wo.issueDetails || wo.issueSummary || tag || 'Work order';
-      out.push({ ts: ts, desc: desc, vendor: wo.vendor || '', woKey: woKey.trim() === '|' ? '' : woKey, isRoot: !!root });
-    }
-    pushWO(unit, 'Primary WR');
-    pushWO(unit._plannedWRData, 'Planned WR');
-    (unit._secondaryWRs || []).forEach(function(w) { pushWO(w, 'Secondary WR'); });
-
-    // (3) repairTimeline lines (MM/DD - text)
-    var tl = (unit.repairTimeline || '').split('\n');
-    tl.forEach(function(line) {
-      var m = line.trim().match(/^(\d{1,2}\/\d{1,2})\s*[-\u2013]\s*(.+)$/);
-      if (!m) return;
-      var ts = toTs(m[1]);
-      if (ts == null) return;
-      out.push({ ts: ts, desc: m[2], vendor: '', woKey: '', isRoot: false });
-    });
-
-    return out;
-  }
-
-  function dedupe(entries) {
-    // Merge by work-order key: keep ONE row per WO+vendor, preferring the entry
-    // that carries a root cause and the most recent date.
-    var byWO = {};
-    var loose = [];
-    entries.forEach(function(en) {
-      if (!en.woKey) { loose.push(en); return; }
-      var cur = byWO[en.woKey];
-      if (!cur) { byWO[en.woKey] = en; return; }
-      // prefer root-cause entry; then prefer newer date
-      if ((en.isRoot && !cur.isRoot) || (en.isRoot === cur.isRoot && en.ts > cur.ts)) {
-        byWO[en.woKey] = en;
-      }
-    });
-    var merged = Object.keys(byWO).map(function(k) { return byWO[k]; }).concat(loose);
-    // drop near-duplicate loose lines (same day + same text)
-    var seen = {};
-    return merged.filter(function(en) {
-      var key = fmtMDY(en.ts) + '::' + shorten(en.desc).toLowerCase();
-      if (seen[key]) return false;
-      seen[key] = true;
-      return true;
-    });
-  }
-
-  function render(entries) {
-    var recent = entries
-      .filter(function(en) { return en.ts != null && (now - en.ts) < NINETY_DAYS && en.ts <= now + 86400000; })
-      .sort(function(a, b) { return b.ts - a.ts; });
-
-    if (!recent.length) {
-      host.innerHTML = '<div class="dp-empty" style="color:var(--mut);font-style:italic">No repair events in the last 3 months.</div>';
+    if (!bds.length) {
+      list.innerHTML = '<div class="dp-empty" style="color:var(--mut);font-style:italic">No breakdowns in the last 3 months.</div>';
       return;
     }
-    host.innerHTML = recent.map(function(en) {
-      var vend = en.vendor ? ' <span class="dp-rh-vendor">' + esc(en.vendor) + '</span>' : '';
-      return '<div class="dp-rh-item">' +
-        '<span class="dp-rh-date">' + esc(fmtMDY(en.ts)) + '</span>' +
-        '<span class="dp-rh-dash"> \u2014 </span>' +
-        '<span class="dp-rh-text">' + esc(shorten(en.desc)) + '</span>' + vend +
-      '</div>';
-    }).join('');
-  }
-
-  // Fetch the structured store async, then merge with row-derived entries.
-  var fetchStore = (window.fleet && window.fleet.repairHistory)
-    ? window.fleet.repairHistory(unit.equipmentId).catch(function() { return []; })
-    : Promise.resolve([]);
-
-  fetchStore.then(function(store) {
-    try {
-      render(dedupe(collect(store || [])));
-    } catch (e) {
-      host.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to build history: ' + esc(e.message || 'error') + '</div>';
-    }
+    list.innerHTML = bds.map(renderCard).join('');
+  }).catch(function(e) {
+    list.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to load breakdown history: ' + esc((e && e.message) || 'error') + '</div>';
   });
 }
 

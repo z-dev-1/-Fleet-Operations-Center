@@ -9107,6 +9107,64 @@ body {
   white-space: nowrap;
 }
 
+/* ── Breakdown History (History tab) ─────────────────────────────────────── */
+.dp-breakdown-summary { margin: 2px 0 10px; }
+.dp-bd-summary-text {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--txt2);
+  padding: 8px 10px;
+  border-left: 3px solid var(--acc, #58a6ff);
+  background: rgba(88, 166, 255, .08);
+  border-radius: 0 6px 6px 0;
+}
+.dp-breakdown-list { display: flex; flex-direction: column; gap: 8px; }
+.dp-bd-card {
+  border: 1px solid rgba(48, 54, 61, .7);
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: rgba(255, 255, 255, .02);
+}
+.dp-bd-card--ongoing { border-color: rgba(210, 153, 34, .55); background: rgba(210, 153, 34, .06); }
+.dp-bd-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.dp-bd-dates { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--txt); }
+.dp-bd-arrow { color: var(--mut); font-weight: 400; }
+.dp-bd-ongoing { color: #d29922; font-weight: 700; }
+.dp-bd-dur {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--txt2);
+  padding: 1px 7px;
+  border-radius: 8px;
+  background: rgba(139, 148, 158, .15);
+  white-space: nowrap;
+}
+.dp-bd-cause { font-size: 12px; line-height: 1.4; color: var(--txt); word-break: break-word; }
+.dp-bd-meta { margin-top: 3px; }
+.dp-bd-vendor {
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  color: var(--mut);
+  background: rgba(88, 166, 255, .12);
+  white-space: nowrap;
+}
+.dp-bd-analysis {
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--txt2);
+  padding-top: 6px;
+  border-top: 1px dashed rgba(48, 54, 61, .7);
+}
+.dp-bd-analysis-label { color: var(--acc, #58a6ff); font-weight: 700; }
+
 /* ── Fleet Overview strip (merged from Analytics Overview) ────────────────── */
 .fleet-overview {
   margin: 0 0 10px;

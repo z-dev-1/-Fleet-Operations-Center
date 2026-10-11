@@ -78,6 +78,7 @@ expose('fleet', {
   queueOffline: (uid, text) => ipcRenderer.invoke('offline:queue', uid, text),
   getOfflineCount: () => ipcRenderer.invoke('offline:count'),
   repairHistory: (uid) => ipcRenderer.invoke('fleet:repair-history', uid),
+  breakdownHistory: (uid, row) => ipcRenderer.invoke('breakdown-history:get', uid, row),
   refreshBriefing: () => ipcRenderer.invoke('briefing:refresh'),
   addTimeline:    (unitId, entry) => ipcRenderer.invoke('notes:add-timeline', unitId, entry),
   hideTimeline:   (unitId, entry) => ipcRenderer.invoke('notes:hide-timeline-entry', unitId, entry),

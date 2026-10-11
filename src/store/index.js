@@ -242,6 +242,13 @@ const REGISTRY = {
   // src/orcha/wbr_snapshot.js. Shape: { weeks: [ { week:'YYYY-Www', weekStart,
   //   capturedAt, total:SiteMetrics, sites:{key:SiteMetrics} } ], updatedAt }.
   wbrHistory:              () => path.join(P.dataDir, 'wbr_history.json'),
+  // Cached AI analysis for the unit-detail History tab's per-breakdown records
+  // (2026-10). Keyed so a breakdown's analysis is generated once and reused on
+  // every panel open. See src/ipc/misc.js 'breakdown-history:get' +
+  // src/orcha/repair-history.js buildBreakdowns. Shape:
+  //   { bySig: { '<sig>': { analysis, at } },
+  //     summaries: { '<equipmentId>': { summary, sigKey, at } } }.
+  breakdownAnalysis:       () => path.join(P.dataDir, 'breakdown_analysis.json'),
 };
 
 function _resolvePath(name) {
