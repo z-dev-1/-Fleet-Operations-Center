@@ -32,6 +32,14 @@ import { initFasSettings } from './fas-settings.js';
 let _drawer   = null;   // the drawer DOM element
 let _overlay  = null;   // the backdrop overlay
 
+// Font size → body zoom scale. The UI is px-based, so zoom (not root font-size)
+// is what scales the whole interface proportionally.
+const FONT_SIZE_SCALE = { small: 0.9, normal: 1, large: 1.12, xlarge: 1.25 };
+function _applyFontSize(size) {
+  const scale = FONT_SIZE_SCALE[size] || 1;
+  try { document.body.style.zoom = String(scale); } catch (_) {}
+}
+
 // ── HTML ─────────────────────────────────────────────────────────────────────
 function _html() {
   return `
@@ -267,6 +275,17 @@ function _html() {
             <button class="sd-font-btn" data-font="mono"    style="font-family:monospace">Mono</button>
             <button class="sd-font-btn" data-font="inter"   style="font-family:sans-serif">Inter</button>
           </div>
+        </div>
+
+        <div class="sd-section">
+          <div class="sd-section-title">Font Size</div>
+          <div class="sd-font-row">
+            <button class="sd-fontsize-btn" data-fontsize="small"  style="font-size:10px">Small</button>
+            <button class="sd-fontsize-btn active" data-fontsize="normal" style="font-size:12px">Normal</button>
+            <button class="sd-fontsize-btn" data-fontsize="large"  style="font-size:14px">Large</button>
+            <button class="sd-fontsize-btn" data-fontsize="xlarge" style="font-size:16px">X-Large</button>
+          </div>
+          <div class="sd-hint" style="margin-top:6px">Scales the entire app interface.</div>
         </div>
 
         <div class="sd-section">
@@ -2873,6 +2892,19 @@ function _wireUITab() {
     });
   });
 
+  // ── Font size chips ─────────────────────────────────────────────────────
+  // The app's UI is px-based (not rem), so a root font-size change wouldn't
+  // cascade. Scale the whole interface with body zoom instead — the same thing
+  // browser zoom does — which scales text AND layout proportionally.
+  _drawer.querySelectorAll('.sd-fontsize-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      _drawer.querySelectorAll('.sd-fontsize-btn').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      _applyFontSize(btn.dataset.fontsize);
+      _saveUI();
+    });
+  });
+
   // ── Chat floater size chips ─────────────────────────────────────────────
   const CHAT_SIZES = {
     compact: { w: '300px', h: '360px' },
@@ -3070,6 +3102,10 @@ function _saveUI() {
     const fontBtn = _drawer.querySelector('[data-font].active');
     const font = fontBtn ? fontBtn.dataset.font : 'system';
 
+    // Active font size
+    const fontSizeBtn = _drawer.querySelector('[data-fontsize].active');
+    const fontSize = fontSizeBtn ? fontSizeBtn.dataset.fontsize : 'normal';
+
     // Chat floater size
     const chatSizeBtn = _drawer.querySelector('[data-chat-size].active');
     const chatSize = chatSizeBtn ? chatSizeBtn.dataset.chatSize : 'normal';
@@ -3078,7 +3114,7 @@ function _saveUI() {
     const compact = document.getElementById('toggle-compact');
     const compactRows = compact ? compact.checked : false;
 
-    settingsBridge.save('ui_prefs', { theme, swatches, sliders, font, compactRows, chatSize })
+    settingsBridge.save('ui_prefs', { theme, swatches, sliders, font, fontSize, compactRows, chatSize })
       .catch(() => {});
   }, 400);
 }
@@ -3147,6 +3183,15 @@ function _applyUI(prefs) {
       btn.classList.toggle('active', btn.dataset.font === prefs.font);
     });
     document.documentElement.style.setProperty('--font', fontMap[prefs.font] || fontMap.system);
+  }
+
+  // Font size
+  {
+    const size = prefs.fontSize || 'normal';
+    _drawer.querySelectorAll('.sd-fontsize-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.fontsize === size);
+    });
+    _applyFontSize(size);
   }
 
   // Compact toggle
@@ -3474,5 +3519,16 @@ export function init() {
         if (color) document.documentElement.style.setProperty(cssVar, color);
       });
     }
+    // Font family + size on boot (not just when the drawer opens).
+    const _fontMap = {
+      system: '-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+      serif:  'Georgia,serif',
+      mono:   '"SFMono-Regular",Consolas,"Liberation Mono",monospace',
+      inter:  '"Inter",sans-serif',
+    };
+    if (all.ui_prefs.font) {
+      document.documentElement.style.setProperty('--font', _fontMap[all.ui_prefs.font] || _fontMap.system);
+    }
+    if (all.ui_prefs.fontSize) _applyFontSize(all.ui_prefs.fontSize);
   }).catch(() => {});
 }

@@ -2978,9 +2978,9 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 
 /* Font picker */
 .sd-font-row{display:flex;gap:6px;flex-wrap:wrap}
-.sd-font-btn{padding:5px 14px;border-radius:7px;font-size:11px;font-weight:600;border:1px solid var(--bdr);background:var(--el);color:var(--txt2);cursor:pointer;transition:all .2s}
-.sd-font-btn:hover{border-color:var(--mut);color:var(--txt)}
-.sd-font-btn.active{background:var(--adim);border-color:var(--acc);color:var(--acc2)}
+.sd-font-btn,.sd-fontsize-btn{padding:5px 14px;border-radius:7px;font-size:11px;font-weight:600;border:1px solid var(--bdr);background:var(--el);color:var(--txt2);cursor:pointer;transition:all .2s}
+.sd-font-btn:hover,.sd-fontsize-btn:hover{border-color:var(--mut);color:var(--txt)}
+.sd-font-btn.active,.sd-fontsize-btn.active{background:var(--adim);border-color:var(--acc);color:var(--acc2)}
 
 /* Template cards */
 .sd-template-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
