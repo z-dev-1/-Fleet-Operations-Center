@@ -32,12 +32,28 @@ import { initFasSettings } from './fas-settings.js';
 let _drawer   = null;   // the drawer DOM element
 let _overlay  = null;   // the backdrop overlay
 
-// Font size → body zoom scale. The UI is px-based, so zoom (not root font-size)
+// Font size → UI zoom scale. The UI is px-based, so zoom (not root font-size)
 // is what scales the whole interface proportionally.
+//
+// IMPORTANT: the app shell is a fixed 100vh flex column with overflow:hidden
+// and a bottom status bar. Zooming the body alone makes its 100vh content
+// render taller than the real window, so overflow:hidden clips the BOTTOM
+// (the status bar disappears). Fix: zoom #app AND shrink its height by the same
+// factor (height = 100vh / scale) so that AFTER the zoom it renders at exactly
+// one real viewport — everything, including the status bar, stays on screen.
 const FONT_SIZE_SCALE = { small: 0.9, normal: 1, large: 1.12, xlarge: 1.25 };
 function _applyFontSize(size) {
   const scale = FONT_SIZE_SCALE[size] || 1;
-  try { document.body.style.zoom = String(scale); } catch (_) {}
+  try {
+    const app = document.getElementById('app');
+    if (app) {
+      app.style.zoom = String(scale);
+      app.style.height = scale === 1 ? '' : `calc(100vh / ${scale})`;
+    } else {
+      // Fallback if #app isn't present yet.
+      document.body.style.zoom = String(scale);
+    }
+  } catch (_) {}
 }
 
 // ── HTML ─────────────────────────────────────────────────────────────────────
