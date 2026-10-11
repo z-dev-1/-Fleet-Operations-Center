@@ -279,9 +279,10 @@ html, body {
   font-weight: 700;
   background: var(--nx-red);
   color: white;
-  padding: 1px 5px;
+  padding: 1px 4px;
   border-radius: 10px;
-  margin-left: 5px;
+  margin-left: 3px;
+  flex-shrink: 0;
   animation: nx-badge-pop .3s var(--nx-ease-bounce);
 }
 
@@ -870,17 +871,24 @@ html, body {
   flex-shrink: 0;
 }
 .nx-sidebar__tab {
-  flex: 1;
-  padding: 10px 8px;
+  flex: 1 1 0;
+  min-width: 0;                 /* allow tabs to shrink instead of overflowing */
+  padding: 10px 4px;
   font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: .06em;
+  letter-spacing: .03em;
   color: var(--nx-text3);
   cursor: pointer;
   border-bottom: 2px solid transparent;
   text-align: center;
-  transition: all var(--nx-duration-fast);
+  transition: color var(--nx-duration-fast), border-color var(--nx-duration-fast);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  white-space: nowrap;
+  overflow: hidden;
 }
 .nx-sidebar__tab:hover { color: var(--nx-text2); }
 .nx-sidebar__tab--active {
