@@ -2547,7 +2547,8 @@ function _wireHistoryPane(unit) {
           '<span class="dp-bd-arrow"> \u2192 </span>' + back + '</span>' +
         '<span class="dp-bd-dur">' + esc(dur) + '</span>' +
       '</div>' +
-      '<div class="dp-bd-cause">' + esc(b.rootCause || 'Repair') + '</div>' +
+      (b.reportedIssue ? '<div class="dp-bd-reported"><span class="dp-bd-field-label">Reported:</span> ' + esc(b.reportedIssue) + '</div>' : '') +
+      '<div class="dp-bd-cause"><span class="dp-bd-field-label">Root cause:</span> ' + esc(b.rootCause || 'Repair') + '</div>' +
       (vend ? '<div class="dp-bd-meta">' + vend + '</div>' : '') +
       analysis +
     '</div>';

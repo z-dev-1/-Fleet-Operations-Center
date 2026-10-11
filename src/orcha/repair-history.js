@@ -353,6 +353,21 @@ function buildBreakdowns(equipmentId, row) {
     }
     rootCause = rootCause.slice(0, 160);
 
+    // Reported issue — the ORIGINAL complaint/symptom at intake (distinct from
+    // the root cause that was later found). For the open cycle this is the
+    // row's AI issue summary; for a closed cycle it's the earliest recorded
+    // event line (what was first reported). Skip bare URLs.
+    let reportedIssue = '';
+    const _notUrl = function (s) { return s && !/^https?:\/\//i.test(String(s).trim()); };
+    if (c._fromRow || (row && !closed)) {
+      const cand = (row && (row.issueSummary ||
+        (_notUrl(row.issueDetails) ? row.issueDetails : '') ||
+        row.lifecycleReason)) || '';
+      reportedIssue = _cleanLine(cand);
+    }
+    if (!reportedIssue && first) reportedIssue = first.text;
+    reportedIssue = (reportedIssue || '').slice(0, 180);
+
     const vendor = c.vendor || (row && row.vendor) || '';
     const events = evs.map(function (e) { return { date: e.date, text: e.text }; }).filter(function (e) { return e.text; });
 
@@ -366,6 +381,7 @@ function buildBreakdowns(equipmentId, row) {
       backDate: backDate,
       days: days,
       ongoing: !closed,
+      reportedIssue: reportedIssue,
       rootCause: rootCause,
       vendor: vendor,
       sig: sig,

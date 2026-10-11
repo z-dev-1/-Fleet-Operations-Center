@@ -1049,7 +1049,7 @@ function registerMiscIPC(ctx) {
     // Strip the heavy events[] from the payload sent to the renderer (it only
     // needs the display fields + analysis).
     const payload = breakdowns.map(function (b) {
-      return { downDate: b.downDate, backDate: b.backDate, days: b.days, ongoing: b.ongoing, rootCause: b.rootCause, vendor: b.vendor, analysis: b.analysis };
+      return { downDate: b.downDate, backDate: b.backDate, days: b.days, ongoing: b.ongoing, reportedIssue: b.reportedIssue, rootCause: b.rootCause, vendor: b.vendor, analysis: b.analysis };
     });
     return { breakdowns: payload, summary: summary, aiGenerated: aiGenerated };
   });
