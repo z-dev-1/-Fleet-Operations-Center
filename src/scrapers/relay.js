@@ -1409,6 +1409,19 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
     const n  = notes[row.equipmentId] || {};
     const pm = _parsePMDates(row);
 
+    // Return-to-service gate for the repair timeline: a unit that is now
+    // Available with NO open work order (unplanned + planned both 0) should not
+    // keep showing an old repair timeline. Historically mergeRelayIntoRows
+    // re-stamped notesStore[id].timeline onto every fresh row purely by
+    // equipmentId, so a returned-to-service unit carried its stale timeline
+    // forever. Suppress the stored timeline for such units (the authoritative
+    // archive-and-clear happens in repair-history.detectTransitions; this is the
+    // safety gate that also covers units that returned BEFORE that ran).
+    const _lc = String(row.lifecycleState || row.atsState || '').toLowerCase();
+    const _isAvail = _lc.includes('avail') && !_lc.includes('unavail');
+    const _openWR = (parseInt(row.openUnplanned, 10) || 0) + (parseInt(row.openPlanned, 10) || 0);
+    const _activeNoWR = _isAvail && _openWR === 0 && !r.serviceUrl && !r.workRequestId;
+
     return {
       ...row,
 
@@ -1439,7 +1452,7 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       workDuration:        r.workDuration      || row.workDuration      || '',
       issueDetails:        r.issueDetails      || row.issueDetails      || '',
       issueSummary:        n.issueSummary      || row.issueSummary    || '',
-      repairTimeline:      n.timeline          || row.repairTimeline  || '',
+      repairTimeline:      _activeNoWR ? '' : (n.timeline || row.repairTimeline || ''),
       _orchaProcessed:     row._orchaProcessed || false,
       alternativeId:       r.alternativeId     || row.alternativeId     || '',
       serviceUrl:         r.pageUrl           || row.serviceUrl        || '',

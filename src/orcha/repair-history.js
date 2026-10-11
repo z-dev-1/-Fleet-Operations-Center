@@ -54,6 +54,46 @@ function addEvent(equipmentId, event) {
 }
 
 /**
+ * archiveAndClearTimeline(equipmentId) — when a unit returns to service, move
+ * its live repair timeline out of the active record and blank it. Without this,
+ * the stored notesStore[id].timeline (mirrored to row.repairTimeline) persisted
+ * forever and kept showing on an Active/no-WO unit. We don't DELETE the history
+ * — it's archived into notesStore[id].timelineArchive[] (with a closedAt stamp)
+ * so it's recoverable and the repairHistory summary trail is untouched — we just
+ * stop it from being the unit's live, displayed timeline. manualEntries /
+ * hiddenEntries are reset too so a future repair starts clean. Best-effort.
+ */
+function archiveAndClearTimeline(equipmentId) {
+  try {
+    const ns = store.load('notesStore', {});
+    const u = ns[equipmentId];
+    if (!u || !u.timeline || !u.timeline.trim()) return;
+
+    u.timelineArchive = Array.isArray(u.timelineArchive) ? u.timelineArchive : [];
+    u.timelineArchive.push({ timeline: u.timeline, closedAt: new Date().toISOString() });
+    // Cap the archive so it can't grow unbounded.
+    if (u.timelineArchive.length > 10) u.timelineArchive = u.timelineArchive.slice(-10);
+
+    u.timeline = '';
+    u.manualEntries = [];
+    u.hiddenEntries = [];
+    ns[equipmentId] = u;
+    store.save('notesStore', ns);
+
+    // Mirror the cleared timeline onto the live fleetData row so the detail
+    // panel reflects it immediately (not just after the next merge).
+    const fd = store.load('fleetData', {});
+    if (fd && fd.rows) {
+      const row = fd.rows.find(r => r.equipmentId === equipmentId);
+      if (row) { row.repairTimeline = ''; store.save('fleetData', fd); }
+    }
+    logger.info('Archived + cleared repair timeline on return-to-service: ' + equipmentId);
+  } catch (e) {
+    logger.warn('archiveAndClearTimeline failed (non-fatal) for ' + equipmentId + ': ' + e.message);
+  }
+}
+
+/**
  * Summarize and close a repair when unit becomes available
  */
 function closeRepair(equipmentId, details) {
@@ -69,6 +109,10 @@ function closeRepair(equipmentId, details) {
     duration: duration,
     outcome: 'completed'
   });
+
+  // Now that the completion is logged to repairHistory, retire the live repair
+  // timeline so it stops showing on the now-Available unit.
+  archiveAndClearTimeline(equipmentId);
 }
 
 /**
@@ -115,4 +159,4 @@ function getAllHistory() {
   return all;
 }
 
-module.exports = { getUnitHistory, addEvent, closeRepair, detectTransitions, getAllHistory };
+module.exports = { getUnitHistory, addEvent, closeRepair, detectTransitions, getAllHistory, archiveAndClearTimeline };
