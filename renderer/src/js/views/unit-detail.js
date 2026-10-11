@@ -736,7 +736,7 @@ function _wireDealerWOBtn(unit) {
 // ── helpers ───────────────────────────────────────────────────────────────────
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function riskColor(n){return n>=70?'red':n>=40?'org':'grn';}
-function downDays(unit){const ts=unit.created;if(!ts)return null;return Math.floor((Date.now()-new Date(ts).getTime())/86400000);}
+function downDays(unit){const ts=unit.created;if(!ts)return null;const t=new Date(ts).getTime();if(isNaN(t))return null;return Math.floor((Date.now()-t)/86400000);}
 function relTime(ts){if(!ts)return'';const d=Date.now()-new Date(ts).getTime();if(d<3600000)return Math.floor(d/60000)+'m ago';if(d<86400000)return Math.floor(d/3600000)+'h ago';return Math.floor(d/86400000)+'d ago';}
 function fmtDate(ts){if(!ts)return'';try{return new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});}catch(e){return ts;}}
 function parseConvo(raw){
@@ -2185,6 +2185,7 @@ function renderActionsPane(unit){
       '<div class="dp-lc-row"><select id="dp-lc-state" class="detail-panel__select"><option value="Active">Active</option><option value="Unavailable">Unavailable</option><option value="Ordered">Ordered</option><option value="End of Life">End of Life</option></select>'+
       '<input id="dp-lc-reason" class="detail-panel__input" type="text" placeholder="Reason..."/></div>'+
       '<div class="dp-lc-row"><button id="dp-lc-confirm" class="detail-panel__btn">Confirm</button><button id="dp-lc-cancel" class="detail-panel__btn detail-panel__btn--secondary">Cancel</button></div>'+
+    '</div>'+ /* close #dp-lc-form — was MISSING, so the final </div> closed this form instead of #dp-pane-actions, leaving the Actions pane open and swallowing the entire History pane inside it (History rendered with offsetHeight 0 = blank). */
     '<div class="dp-section-title" style="margin-top:10px">Dealer Work Order</div>'+
     '<div id="dp-vnd-ai-suggest" class="dp-vnd-ai-suggest"></div>'+
     '<div id="dp-vendor-section" class="dp-vendor-section"><p class="dp-empty">Loading eligibility\u2026</p></div>'+
