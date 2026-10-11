@@ -542,6 +542,169 @@ function createSyncEngine(ctx) {
         .catch(e => logger.error('Orcha Deep Scan error (non-fatal):', e.message))
         .finally(() => { _deepScanInProgress = false; }); }, 15000); // Wait 15s for relay extraction to finish
 
+      // Decisions produced by the reconcile pass this cycle, keyed by
+      // equipmentId, so the canonical-state pass can reuse them instead of
+      // re-reasoning (one AI call per down unit, not two). Shared across the
+      // closures below.
+      const _reconcileDecisions = {};
+      // Guard so the canonical pass runs exactly once per sync cycle. It is
+      // triggered by the reconcile pass's finally{} once its decisions are ready
+      // (the authoritative path), with a standalone timer as a FALLBACK for when
+      // reconcile is disabled or never starts. The fallback must NOT pre-empt a
+      // reconcile pass that is still running — reconcile makes several slow AI
+      // calls and can take minutes, far longer than the fallback timer, so a
+      // naive "whichever fires first" let the fallback win every time and
+      // discard all the AI decisions (observed: canonical ran at +8s with 0
+      // decisions while reconcile kept working for 3+ min). _reconcileActive
+      // tells the fallback to stand down (and reschedule) while reconcile runs.
+      let _canonicalRan = false;
+      // Optimistically mark reconcile active from the start IF it's enabled, so
+      // the fallback timer defers even if the reconcile pass hasn't yet reached
+      // its own `_reconcileActive = true` (it loads fleetData + detects changes
+      // first). The reconcile pass clears this in its finally{} no matter what
+      // (including the disabled / no-targets early returns below set it false).
+      let _reconcileActive = false;
+      try { _reconcileActive = !!require('../scrapers/relay_reconcile').getConfig().enabled; }
+      catch (_) { _reconcileActive = false; }
+      const _runCanonicalPass = async () => {
+        if (_canonicalRan) return;
+        _canonicalRan = true;
+        try {
+          const canonical = require('../orcha/canonical_state');
+          const fresh = store.load('fleetData', {});
+          const rows = Array.isArray(fresh.rows) ? fresh.rows : [];
+          if (!rows.length) return;
+          // Prior cycle's records drive the temporal diff (changedFields,
+          // previousStatus, statusChangedAt, history).
+          const prevCanon = store.load('canonicalState', {}) || {};
+          const { units, mirrored, counts } = canonical.buildAll(rows, {
+            decisions: _reconcileDecisions,
+            prior: prevCanon.units || {},
+          });
+          // Persist the authoritative per-unit records.
+          store.save('canonicalState', {
+            units,
+            updatedAt: new Date().toISOString(),
+            lastReconcileAt: Object.keys(_reconcileDecisions).length ? new Date().toISOString() : (prevCanon.lastReconcileAt || null),
+          });
+          // Mirror canonical fields onto the fleet rows (re-read + save so we
+          // don't clobber any other post-sync writer). Overlay by equipmentId.
+          const latest = store.load('fleetData', {});
+          if (latest && Array.isArray(latest.rows)) {
+            latest.rows = latest.rows.map(r => {
+              const rec = r && units[r.equipmentId];
+              return rec ? Object.assign({}, r, canonical.mirrorFields(rec)) : r;
+            });
+            store.save('fleetData', latest);
+            ctx.lastData = latest;
+            ctx.pushData(latest);
+          }
+          logger.info('[canonical] ' + counts.total + ' unit(s) — ' + counts.reconciled + ' AI-reconciled, ' + counts.baseline + ' deterministic, ' + (counts.changed || 0) + ' changed this cycle');
+        } catch (e) {
+          logger.warn('[canonical] pass error (non-fatal): ' + e.message);
+        }
+      };
+
+      // ── Relay ↔ Offsite reconcile — non-blocking, non-fatal ──────────────
+      // For down units that have offsite data / a Relay WR, let the AI compare
+      // Relay comments against the Offsite vendor update thread and decide the
+      // gaps + next action. Always writes the synthesized status into the unit
+      // timeline; the Relay WR comment post is MODE A (auto) or MODE B (staged
+      // for confirm) per config. Runs after the deep scan so relay/offsite data
+      // is fully merged. Bounded by cfg.maxUnitsPerSync so it never stalls sync.
+      setTimeout(() => {
+        (async () => {
+          try {
+            const reconcile = require('../scrapers/relay_reconcile');
+            const cfg = reconcile.getConfig();
+            if (!cfg.enabled) return;
+            const apply = require('../scrapers/relay_reconcile_apply');
+            const canonical = require('../orcha/canonical_state');
+            const fresh = store.load('fleetData', {});
+            const rows = Array.isArray(fresh.rows) ? fresh.rows : [];
+            const down = rows.filter(r =>
+              (r.lifecycleState || '').toLowerCase().includes('unavail') &&
+              reconcile.hasReconcilableData(r));
+            if (!down.length) return;
+            // EVENT-TRIGGERED REASONING: spend the bounded AI budget on the units
+            // where reality actually MOVED since last cycle. detectChangedUnits
+            // diffs each row against the prior canonical record (status moved,
+            // offsite refreshed, new Relay comment, vendor assigned, reason
+            // changed) with no AI. Changed down-units are reconciled first; any
+            // remaining budget covers the rest so quiet units still refresh
+            // occasionally. First sync (no prior) treats everything as changed.
+            const prevCanon = store.load('canonicalState', {}) || {};
+            const changedSet = canonical.detectChangedUnits(rows, prevCanon.units || {});
+            const changedDown = down.filter(r => changedSet.has(String(r.equipmentId || '').trim()));
+            const quietDown = down.filter(r => !changedSet.has(String(r.equipmentId || '').trim()));
+            const targets = changedDown.concat(quietDown).slice(0, cfg.maxUnitsPerSync);
+            if (!targets.length) return;
+            // Claim the canonical pass: the fallback timer will now stand down
+            // until our finally{} runs _runCanonicalPass() with real decisions.
+            _reconcileActive = true;
+            logger.info('[relay-reconcile] running on ' + targets.length + ' down unit(s) — ' + Math.min(changedDown.length, targets.length) + ' changed-prioritized (mode ' + (cfg.autoPostToRelay ? 'A/auto' : 'B/staged') + ')');
+            let posted = 0, staged = 0;
+            for (const row of targets) {
+              try {
+                const decision = await reconcile.reconcileUnit(row, { cfg });
+                if (!decision) continue;
+                // Stash for the canonical-state pass (reuse, don't re-reason).
+                if (decision.equipmentId) _reconcileDecisions[decision.equipmentId] = decision;
+                const r = await apply.applyReconcile(decision, { cfg });
+                for (const p of (r.posts || [])) { if (p.action === 'posted') posted++; if (p.action === 'staged') staged++; }
+              } catch (ue) {
+                logger.warn('[relay-reconcile] unit ' + (row.equipmentId || '?') + ' failed (non-fatal): ' + ue.message);
+              }
+            }
+            logger.info('[relay-reconcile] done — ' + posted + ' posted, ' + staged + ' staged for confirm');
+          } catch (e) {
+            logger.warn('[relay-reconcile] pass error (non-fatal): ' + e.message);
+          } finally {
+            // Decisions are now populated (or reconcile was disabled/empty) —
+            // release the claim and run the canonical pass so it reuses them.
+            _reconcileActive = false;
+            _runCanonicalPass();
+          }
+        })();
+      }, 20000); // after the deep scan's 15s relay-settle window
+
+      // ── Canonical state fallback — the single source of truth ────────────
+      // Guarantees canonical state is written for EVERY unit even when the
+      // reconcile pass is disabled, never starts, or errors before its finally.
+      // CRITICAL: it must NOT pre-empt an in-flight reconcile pass (whose AI
+      // calls can take minutes) — otherwise it runs with zero decisions and the
+      // _canonicalRan guard then discards the real ones. So it POLLS: if
+      // reconcile is active, wait and re-check; only run canonical itself once
+      // reconcile is idle. A generous cap bounds the wait so a stuck reconcile
+      // can never starve canonical forever.
+      (function scheduleCanonicalFallback() {
+        let waited = 0;
+        const STEP = 5000;          // re-check every 5s
+        const MAX_WAIT = 300000;    // ...but never defer more than 5 min
+        const tick = () => {
+          if (_canonicalRan) return;              // reconcile's finally already ran it
+          if (_reconcileActive && waited < MAX_WAIT) { waited += STEP; setTimeout(tick, STEP); return; }
+          _runCanonicalPass();                     // reconcile idle/absent, or waited too long
+        };
+        setTimeout(tick, 28000); // first check ~28s in (after the 20s reconcile kick)
+      })();
+
+      // ── Fleet Brain: continuous Daily Tasks regeneration — non-blocking ──
+      // Re-reason over the WHOLE fleet after every sync so the Action Board is
+      // always current, not just at 7am. generateNow() is THROTTLED (~25min)
+      // and overlap-guarded internally, so a 5-min rescan loop never hammers the
+      // AI; it simply no-ops when it ran recently. Non-fatal.
+      setTimeout(() => {
+        (async () => {
+          try {
+            const s = await require('../ipc/daily-tasks').generateNow();
+            if (s) logger.info('[tasks] regenerated after sync (' + (s.ai || []).filter((t) => !t.done && !t.dismissed).length + ' active)');
+          } catch (e) {
+            logger.warn('[tasks] post-sync regeneration failed (non-fatal): ' + e.message);
+          }
+        })();
+      }, 25000); // after reconcile; let relay/offsite data settle first
+
       // ── Bubble notifications — status-change detection ───────────────────
       const prevRows = (ctx.lastData && ctx.lastData._prevRows) || [];
       const prevMap  = {};

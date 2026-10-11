@@ -56,7 +56,11 @@ const PRECOMMIT_STATES = Object.freeze([STATES.SENT]);
 // Paused states awaiting external action (auth / stale data / reconciliation).
 const PAUSED_STATES = Object.freeze([STATES.BLOCKED_AUTH, STATES.BLOCKED_STALE_DATA, STATES.DELIVERY_UNCERTAIN, STATES.PARTIAL_FAILURE, STATES.RETRY]);
 
-const CHANNELS = Object.freeze({ SHAREPOINT: 'sharepoint', EMAIL: 'email' });
+// DBR_AFP / DBR_DSP are two INDEPENDENT channels (not one "dbr" channel) so
+// the AFP and DSP QuickSight pulls get separate leases, separate retry/backoff,
+// and separate completed-slot stamps — i.e. if AFP's data is fresh-for-today
+// but DSP's isn't yet, only DSP keeps retrying while AFP is marked done.
+const CHANNELS = Object.freeze({ SHAREPOINT: 'sharepoint', EMAIL: 'email', DBR_AFP: 'dbr-afp', DBR_DSP: 'dbr-dsp' });
 const ORIGINS  = Object.freeze({ SCHEDULED: 'scheduled', CATCHUP: 'catchup', MANUAL: 'manual', TEST: 'test' });
 
 const DEFAULT_MAX_ATTEMPTS = 4;
@@ -119,15 +123,22 @@ function buildIdempotencyKey(spec) {
       mode,
     ].join('|');
   }
+  // DBR channels key on their own channel name so the AFP and DSP pulls never
+  // collide with each other or with the SharePoint key (which omits channel in
+  // the fallback below). dbr-afp|<date>|<slot>|P  vs  dbr-dsp|<date>|<slot>|P.
+  if (spec.channel === CHANNELS.DBR_AFP || spec.channel === CHANNELS.DBR_DSP) {
+    return [spec.channel, spec.dateKey, spec.slotLabel, mode].join('|');
+  }
   return ['sharepoint', spec.dateKey, spec.slotLabel, mode].join('|');
 }
 
 // Completed-slot key — persisted replacement for the in-memory _lastSPSlot /
 // _lastEmailSlot dedupe keys that were lost on restart (root-cause defect).
 function buildSlotKey(channel, dateKey, slotLabel) {
-  return channel === CHANNELS.SHAREPOINT
-    ? `${dateKey}-SP-${slotLabel}`
-    : `${dateKey}-${slotLabel}`;
+  if (channel === CHANNELS.SHAREPOINT) return `${dateKey}-SP-${slotLabel}`;
+  if (channel === CHANNELS.DBR_AFP)    return `${dateKey}-DBRAFP-${slotLabel}`;
+  if (channel === CHANNELS.DBR_DSP)    return `${dateKey}-DBRDSP-${slotLabel}`;
+  return `${dateKey}-${slotLabel}`; // email (legacy shape preserved)
 }
 
 // ── Job record factory ─────────────────────────────────────────────────────────

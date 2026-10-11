@@ -17,6 +17,16 @@ let _el = null;
 let _open = false;
 let _tab = 'vendors'; // 'vendors' | 'domiciles' | 'slack'
 let _contacts = [];
+// Vendor filter state (Vendors tab). domicile: site code or '' (all);
+// cng: show only CNG-accepting; make: make code or '' (all);
+// maxMiles: cap distance from the selected domicile (0 = any). Only meaningful
+// when a domicile is selected (mileage is per-site).
+let _vfilter = { domicile: '', cng: false, make: '', maxMiles: 0, rg: false };
+let _pasteOpen = false;      // paste-dealer box visibility
+let _pastePreviews = null;   // array of parsed dealers from the paste box
+let _pasteText = '';         // raw textarea content (preserved across re-renders)
+let _pasteBusy = false;      // true while AI parse is in flight
+let _pasteMode = '';         // 'ai' | 'local' — which parser produced the preview
 let _slackSearchTimer = null; // debounce handle for live search
 let _pendingSlack = null;     // { slackId, name, channelId? } resolved from search
 
@@ -306,6 +316,36 @@ function _prefFor(c, site) {
   return c.preference != null ? c.preference : null;
 }
 
+// Parse "SITE:miles, SITE:miles" into { SITE: number } (uppercased site). Mirrors
+// _parsePrefOverrides but keeps decimals (mileage like 4.3).
+function _parseMileage(raw) {
+  const out = {};
+  String(raw || '').split(',').forEach(pair => {
+    const [site, mi] = pair.split(':').map(s => (s || '').trim());
+    const n = parseFloat(mi);
+    if (site && Number.isFinite(n) && n >= 0) out[site.toUpperCase()] = n;
+  });
+  return Object.keys(out).length ? out : null;
+}
+
+// Mileage-from-site badges, sorted nearest first.
+function _mileageBadgeHtml(c) {
+  const m = c.mileageByDomicile || {};
+  const keys = Object.keys(m);
+  if (!keys.length) return '';
+  return keys.sort((a, b) => m[a] - m[b]).map(s =>
+    '<span class="cb-pref-badge" style="background:rgba(63,185,80,0.12);color:#3fb950;">' + _esc(s) + ': ' + _esc(m[s]) + ' mi</span>'
+  ).join(' ');
+}
+
+// Capability badges (CNG / Mobile) — the two routing-critical flags.
+function _capBadgeHtml(c) {
+  const out = [];
+  if (c.cng) out.push('<span class="cb-pref-badge" style="background:rgba(88,166,255,0.15);color:#58a6ff;">CNG</span>');
+  if (c.mobile) out.push('<span class="cb-pref-badge" style="background:rgba(240,136,62,0.15);color:#f0883e;">Mobile</span>');
+  return out.join(' ');
+}
+
 function _prefBadgeHtml(c) {
   const sites = Array.isArray(c.domiciles) ? c.domiciles : [];
   const overrides = c.preferenceByDomicile || {};
@@ -336,6 +376,390 @@ function _slackScopeBadge(c) {
   return '<div class="cb-card-meta" style="color:#f0883e">⚠ ' + _esc(identity) + ' — no scope (no fleet data)</div>';
 }
 
+// ── Vendor filtering (domicile + CNG + make) ────────────────────────────────
+// All domiciles that appear on vendor cards, unioned with type:'domicile'
+// contacts, so the filter never shows a site with zero dealers that isn't real.
+function _allVendorDomiciles() {
+  const set = {};
+  _contacts.forEach(c => {
+    if (c.type === 'vendor' && Array.isArray(c.domiciles)) c.domiciles.forEach(d => { const k = String(d || '').trim().toUpperCase(); if (k) set[k] = true; });
+    if (c.type === 'vendor' && c.mileageByDomicile) Object.keys(c.mileageByDomicile).forEach(d => { const k = String(d || '').trim().toUpperCase(); if (k) set[k] = true; });
+    if (c.type === 'domicile') { const k = String(c.name || '').trim().toUpperCase(); if (k) set[k] = true; }
+  });
+  return Object.keys(set).sort();
+}
+// All makes present on vendor cards, for the make dropdown.
+function _allVendorMakes() {
+  const set = {};
+  _contacts.forEach(c => {
+    if (c.type !== 'vendor') return;
+    const makes = Array.isArray(c.makes) && c.makes.length ? c.makes : (c.make ? [c.make] : []);
+    makes.forEach(m => { const k = String(m || '').trim().toUpperCase(); if (k) set[k] = true; });
+  });
+  return Object.keys(set).sort();
+}
+// Apply the active filters to a vendor list; when a domicile is selected, sort
+// nearest-first by that site's mileage (vendors with no mileage sink to the end).
+function _applyVendorFilters(vendors) {
+  const dom = _vfilter.domicile;
+  const make = _vfilter.make;
+  let out = vendors.filter(c => {
+    if (dom) {
+      const doms = (c.domiciles || []).map(d => String(d).toUpperCase());
+      const hasMi = c.mileageByDomicile && c.mileageByDomicile[dom] != null;
+      if (doms.indexOf(dom) === -1 && !hasMi) return false;
+    }
+    if (_vfilter.cng && !c.cng) return false;
+    if (_vfilter.rg && !/relay\s*garage|reach/i.test(String(c.affiliation || ''))) return false;
+    if (make) {
+      const makes = (Array.isArray(c.makes) && c.makes.length ? c.makes : (c.make ? [c.make] : [])).map(m => String(m).toUpperCase());
+      if (makes.indexOf(make) === -1) return false;
+    }
+    // Mileage cap only applies when a domicile is selected (mileage is per-site).
+    if (dom && _vfilter.maxMiles > 0) {
+      const mi = c.mileageByDomicile && c.mileageByDomicile[dom];
+      if (mi == null || mi > _vfilter.maxMiles) return false;
+    }
+    return true;
+  });
+  if (dom) {
+    const miOf = c => (c.mileageByDomicile && c.mileageByDomicile[dom] != null) ? c.mileageByDomicile[dom] : Infinity;
+    out = out.slice().sort((a, b) => miOf(a) - miOf(b));
+  }
+  return out;
+}
+// Filter bar markup for the Vendors tab.
+function _vendorFilterBarHtml(total, shown) {
+  const doms = _allVendorDomiciles();
+  const makes = _allVendorMakes();
+  const chip = (label, active, data) =>
+    '<button class="cb-chip' + (active ? ' active' : '') + '" ' + data + '>' + _esc(label) + '</button>';
+  const domChips = ['<span class="cb-filter-label">Domicile</span>',
+    chip('All', !_vfilter.domicile, 'data-vf="dom" data-val=""')]
+    .concat(doms.map(d => chip(d, _vfilter.domicile === d, 'data-vf="dom" data-val="' + _attr(d) + '"')))
+    .join('');
+  const cngChip = '<button class="cb-chip cb-chip--cng' + (_vfilter.cng ? ' active' : '') + '" data-vf="cng">CNG only</button>';
+  const rgChip = '<button class="cb-chip cb-chip--cng' + (_vfilter.rg ? ' active' : '') + '" data-vf="rg" title="Integrated via Relay Garage/Reach">RG integrated</button>';
+  const makeOpts = ['<option value="">All makes</option>']
+    .concat(makes.map(m => '<option value="' + _attr(m) + '"' + (_vfilter.make === m ? ' selected' : '') + '>' + _esc(m) + '</option>'))
+    .join('');
+  const makeSel = '<span class="cb-filter-label">Make</span><select class="cb-filter-make" data-vf="make">' + makeOpts + '</select>';
+  // Mileage cap — only meaningful with a domicile selected (disabled otherwise).
+  const miChoices = [0, 10, 25, 50, 100];
+  const miOpts = miChoices.map(m =>
+    '<option value="' + m + '"' + (_vfilter.maxMiles === m ? ' selected' : '') + '>' + (m === 0 ? 'Any distance' : '≤ ' + m + ' mi') + '</option>'
+  ).join('');
+  const miSel = '<span class="cb-filter-label">Within</span><select class="cb-filter-make" data-vf="miles"' +
+    (_vfilter.domicile ? '' : ' disabled title="Pick a domicile first"') + '>' + miOpts + '</select>';
+  const pasteBtn = '<button class="cb-chip' + (_pasteOpen ? ' active' : '') + '" data-vf="paste" title="Paste a dealer block to add/merge">📋 Paste dealer</button>';
+  const count = '<span class="cb-filter-count">' + shown + ' of ' + total + ' vendors</span>';
+  return '<div class="cb-filters">' + domChips + '<span class="cb-filter-sep"></span>' + cngChip + rgChip +
+    '<span class="cb-filter-sep"></span>' + makeSel +
+    '<span class="cb-filter-sep"></span>' + miSel +
+    '<span class="cb-filter-sep"></span>' + pasteBtn + count + '</div>';
+}
+
+// ── Paste-to-create: parse a dealer-locator block into a vendor record ───────
+// Handles the emoji-formatted block the user pastes from the dealer-locator
+// tool. Everything is best-effort; name is the only hard requirement. Lines:
+//   first non-empty line           -> name (⭐ and trailing "Unassigned" stripped)
+//   🔧 <makes>                      -> makes (CSV / slash-separated); "Mobile Service Available" -> mobile
+//   🔗 Affiliation/Integration: X   -> affiliation
+//   <SITE> Pref #<n> / Specialist   -> domicile + preference
+//   📍 <addr>                       -> street/city/state/zip (first 📍 line)
+//   🕐 <hours>                      -> hours
+//   🏷️ <tags>                       -> cng/mobile flags (+ raw tags appended to notes)
+//   📞 ... | ✉️ email | 👤 person    -> phone / email / contactPerson
+//   📍 <n> miles                    -> mileage from the Pref-tag domicile
+//   free text line                  -> notes
+function _parseDealerBlock(text) {
+  const raw = String(text || '').replace(/\r/g, '');
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return null;
+
+  const rec = { type: 'vendor', makes: [], domiciles: [], mileageByDomicile: {}, prefTags: [] };
+  const noteParts = [];
+  let domicile = '', pref = null, miles = null;
+
+  const stripEmoji = s => s.replace(/[\u2600-\u27BF\uE000-\uF8FF\uD83C-\uDBFF\uDC00-\uDFFF\u2B50\uFE0F\u2705\u26D4\u26A0]/g, '').trim();
+
+  // Name = first line, minus star ratings / trailing status words.
+  rec.name = stripEmoji(lines[0]).replace(/\s*(Unassigned|Do Not Use)\s*$/i, '').trim();
+
+  const addMakes = str => String(str || '').split(/[,/]/).map(s => s.trim().toUpperCase()).filter(Boolean).forEach(m => { if (rec.makes.indexOf(m) === -1) rec.makes.push(m); });
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    const body = stripEmoji(line);
+
+    if (/^🔧/.test(line)) {
+      if (/mobile service available/i.test(body)) { rec.mobile = true; continue; }
+      addMakes(body); continue;
+    }
+    if (/^🔗/.test(line)) {
+      rec.affiliation = body.replace(/^(Affiliation|Integration)\s*:\s*/i, '').replace(/\s*[•·]\s*/g, ' / ').trim();
+      continue;
+    }
+    if (/^📍/.test(line)) {
+      const m = body.match(/^([\d.]+)\s*miles?$/i);
+      if (m) { miles = parseFloat(m[1]); continue; }
+      if (!rec.street) {
+        // Address: "<street>, <city>, <ST> <zip>, <city>, <ST>" — take first street,
+        // and a ST+ZIP if present anywhere.
+        const parts = body.split(',').map(s => s.trim()).filter(Boolean);
+        rec.street = parts[0] || '';
+        const zipm = body.match(/\b([A-Z]{2})\s+(\d{5})\b/);
+        if (zipm) { rec.state = zipm[1]; rec.zip = zipm[2]; }
+        // City = the part just before the ST+ZIP token when resolvable.
+        if (parts.length >= 2) { const cand = parts[1]; if (cand && !/^\d/.test(cand)) rec.city = cand.replace(/\s+[A-Z]{2}\s+\d{5}.*$/, '').trim(); }
+      }
+      continue;
+    }
+    if (/^🕐/.test(line)) { rec.hours = body; continue; }
+    if (/^🏷️?/.test(line) || /^🏷/.test(line)) {
+      const tags = body.toLowerCase();
+      if (/\bcng\b/.test(tags)) rec.cng = true;
+      if (/\bmobile\b/.test(tags)) rec.mobile = true;
+      noteParts.push('Tags: ' + body);
+      continue;
+    }
+    if (/^📞/.test(line) || /✉️|👤/.test(line)) {
+      // "📞 phone | ✉️ email | 👤 person"
+      const segs = line.split('|').map(s => s.trim());
+      segs.forEach(seg => {
+        const sb = stripEmoji(seg);
+        if (/✉️/.test(seg) || /@/.test(sb)) { if (!rec.email) rec.email = sb; }
+        else if (/👤/.test(seg)) { if (!rec.contactPerson) rec.contactPerson = sb; }
+        else if (sb && !/^N\/?A$/i.test(sb)) { if (!rec.phone) rec.phone = sb; }
+      });
+      continue;
+    }
+    if (/^🚛/.test(line) || /^✅/.test(line)) { continue; } // units-assigned / integration confirmation — ignore
+    // Pref tag: "ABE40 Pref #1" or "EWR5 Specialist" / "CDW5 Specialist"
+    const prefm = body.match(/^([A-Z0-9]{3,8})\s+Pref\s+#?(\d+)/i);
+    const specm = body.match(/^([A-Z0-9]{3,8})\s+Specialist$/i);
+    if (prefm) { domicile = prefm[1].toUpperCase(); pref = parseInt(prefm[2], 10); rec.prefTags.push(body); continue; }
+    if (specm) { domicile = specm[1].toUpperCase(); rec.prefTags.push(body); continue; }
+    // Otherwise free-text note.
+    if (body && body.length > 1) noteParts.push(body);
+  }
+
+  if (domicile) {
+    rec.domiciles = [domicile];
+    if (pref != null) { rec.preference = pref; rec.preferenceByDomicile = { [domicile]: pref }; }
+    if (miles != null) rec.mileageByDomicile = { [domicile]: miles };
+  } else if (miles != null) {
+    // No pref tag but a distance — keep it unkeyed is useless; drop silently.
+  }
+  rec.make = rec.makes[0] || '';
+  if (noteParts.length) rec.notes = noteParts.join(' | ').slice(0, 500);
+  rec.company = rec.name;
+  rec._doNotUse = /do not use/i.test(raw);
+  return rec;
+}
+
+// One preview card for a parsed dealer. idx = position in _pastePreviews, used
+// to wire the per-dealer domicile override dropdown back on change.
+function _pastePreviewCard(p, idx) {
+  if (p._doNotUse) {
+    return '<div class="cb-paste-preview" style="color:#f85149">⛔ "' + _esc(p.name) + '" is marked "Do Not Use" — will be SKIPPED.</div>';
+  }
+  const dom = (p.domiciles || [])[0] || '';
+  const mi = dom && p.mileageByDomicile ? p.mileageByDomicile[dom] : null;
+  // Prefer the AI's duplicate judgment; fall back to literal name match.
+  const litMatch = _contacts.find(c => c.type === 'vendor' && (c.name || '').trim().toLowerCase() === (p.name || '').trim().toLowerCase());
+  const dupName = p.aiDuplicateOf || (litMatch ? litMatch.name : null);
+  const flags = [p.cng ? 'CNG' : '', p.mobile ? 'Mobile' : '', /relay\s*garage|reach/i.test(p.affiliation || '') ? 'RG' : ''].filter(Boolean).join(' · ');
+  // Domicile line: show assignment + estimated marker + an override dropdown.
+  const sites = _allVendorDomiciles();
+  const domOpts = ['<option value="">— no site —</option>']
+    .concat(sites.map(s => '<option value="' + _attr(s) + '"' + (s === dom ? ' selected' : '') + '>' + _esc(s) + '</option>'))
+    .join('');
+  const milesTxt = mi != null ? (mi + ' mi' + (p._milesEstimated ? ' (est.)' : '')) : '';
+  const assignNote = p._assignedByAI ? ' <span style="color:#d29922">· AI-assigned nearest</span>' : '';
+  return '<div class="cb-paste-preview">' +
+    (dupName ? '<div style="color:#58a6ff;font-size:10px">↻ MERGE onto "' + _esc(dupName) + '"' + (p.aiDuplicateOf ? ' <span style="color:#8b949e">(AI matched)</span>' : '') + '</div>'
+             : '<div style="color:#3fb950;font-size:10px">+ NEW</div>') +
+    '<div style="font-size:11px;font-weight:600;color:var(--txt)">' + _esc(p.name) + '</div>' +
+    '<div style="font-size:10px;color:#8b949e">' +
+      _esc((p.makes || []).join(', ') || '—') +
+      (milesTxt ? ' · ' + _esc(milesTxt) : '') +
+      (flags ? ' · ' + _esc(flags) : '') +
+    '</div>' +
+    '<div style="font-size:9px;color:var(--txt2)">' + _esc([p.street, p.city, p.state, p.zip].filter(Boolean).join(', ') || '—') + '</div>' +
+    '<div style="font-size:9px;color:#8b949e;margin-top:3px;display:flex;align-items:center;gap:4px">Site:' +
+      '<select class="cb-filter-make" data-paste-dom="' + idx + '">' + domOpts + '</select>' + assignNote +
+    '</div>' +
+  '</div>';
+}
+
+// Paste-dealer box markup (shown when _pasteOpen). Supports one OR many dealers.
+function _pasteBoxHtml() {
+  if (!_pasteOpen) return '';
+  let preview = '';
+  if (_pasteBusy) {
+    preview = '<div class="cb-paste-preview" style="color:#58a6ff">🤖 AI is reading the paste…</div>';
+  }
+  const list = _pastePreviews;
+  if (!_pasteBusy && list && list.length) {
+    const addable = list.filter(p => !p._doNotUse).length;
+    const skipped = list.length - addable;
+    const modeNote = _pasteMode === 'ai' ? '🤖 AI-parsed' : '📝 parsed locally (AI offline)';
+    preview =
+      '<div style="font-size:10px;color:#8b949e;margin:8px 0 4px">' + modeNote + ' — ' + list.length + ' dealer' + (list.length === 1 ? '' : 's') +
+        (skipped ? ' (' + skipped + ' Do-Not-Use skipped)' : '') + ':</div>' +
+      '<div class="cb-paste-list">' + list.map((p, i) => _pastePreviewCard(p, i)).join('') + '</div>' +
+      (addable ? '<div style="display:flex;gap:6px;margin-top:8px"><button class="cb-btn cb-btn--add" id="cb-paste-save">Add / Merge ' + addable + '</button></div>' : '');
+  }
+  return '<div class="cb-paste-box">' +
+    '<div style="font-size:10px;color:#8b949e;margin-bottom:4px">Paste one OR many dealer blocks (name, 🔧 makes, 🔗 affiliation, SITE Pref #, 📍 address, 🕐 hours, 🏷️ tags, 📞 phone, 📍 miles). Auto-parses and adds or merges. "Do Not Use" are skipped.</div>' +
+    '<textarea class="cb-input" id="cb-paste-text" rows="6" placeholder="Paste one or more dealer blocks here…" style="font-family:monospace;font-size:11px;width:100%">' + _esc(_pasteText) + '</textarea>' +
+    '<div style="display:flex;gap:6px;margin-top:6px"><button class="cb-btn cb-btn--use" id="cb-paste-parse">Preview</button>' +
+    '<button class="cb-btn cb-btn--del" id="cb-paste-close">Close</button></div>' +
+    preview +
+  '</div>';
+}
+
+// Split a multi-dealer paste into individual blocks and parse each. The reliable
+// per-dealer marker is the "🚛 N units assigned" line that follows every dealer
+// name. A new block begins at the NAME line that precedes each 🚛 line (i.e. the
+// first line after the previous dealer's content). We also drop a leading
+// "📍 SITE — address" header line and a "🏢 Primary on-site vendor" line if the
+// user pasted the whole list including its header. "Beyond 50 mi" separators are
+// ignored.
+function _parseDealerBlocks(text) {
+  const raw = String(text || '').replace(/\r/g, '');
+  const lines = raw.split('\n');
+  // Find indices of the 🚛 marker lines.
+  const truckIdx = [];
+  lines.forEach((l, i) => { if (/^\s*🚛/.test(l)) truckIdx.push(i); });
+  if (truckIdx.length <= 1) {
+    const one = _parseDealerBlock(raw);
+    return one ? [one] : [];
+  }
+  // Each dealer block = from the line AFTER the previous dealer's last content
+  // up to (but not including) the next dealer's name. Practically: the name sits
+  // 1+ lines above each 🚛; a block runs from the name line to just before the
+  // next block's name line. We compute block boundaries as the name line =
+  // the first non-empty, non-"Beyond"/non-header line scanning back from 🚛.
+  const isNoise = s => !s.trim() || /^\s*(Beyond\s+\d+\s*mi|📍\s*[A-Z0-9]{3,8}\s*—|🏢)/i.test(s);
+  const nameLineFor = (ti) => {
+    let j = ti - 1;
+    while (j >= 0 && isNoise(lines[j])) j--;
+    return j; // index of the name line for the dealer at truck-line ti
+  };
+  const nameIdx = truckIdx.map(nameLineFor);
+  const blocks = [];
+  for (let b = 0; b < nameIdx.length; b++) {
+    const start = nameIdx[b];
+    const end = (b + 1 < nameIdx.length) ? nameIdx[b + 1] : lines.length;
+    const chunk = lines.slice(start, end).join('\n');
+    const rec = _parseDealerBlock(chunk);
+    if (rec && rec.name) blocks.push(rec);
+  }
+  return blocks;
+}
+
+// ── AI-powered paste parse + dedupe ─────────────────────────────────────────
+// Sends the pasted text + a compact existing-vendor list to fleet-brain, asking
+// it to (a) extract structured dealer records and (b) flag likely duplicates of
+// existing vendors by name/address/phone (not just literal name match). Returns
+// an array of records in the SAME shape as _parseDealerBlocks, with an added
+// `aiDuplicateOf` (existing vendor name or null). Falls back to the local regex
+// parser on any failure (offline, bad JSON, AI off). Confirm step is unchanged.
+async function _aiParseDealers(text) {
+  if (!window.ai || typeof window.ai.ask !== 'function') return null;
+  const existing = _contacts.filter(c => c.type === 'vendor').map(c => ({
+    name: c.name || '', city: c.city || '', street: c.street || '', phone: c.phone || '',
+  }));
+  // Keep the context compact — name/city/street/phone is enough to judge dupes.
+  const existingList = existing.map((e, i) => (i + 1) + '. ' + e.name + ' | ' + [e.street, e.city].filter(Boolean).join(', ') + (e.phone ? ' | ' + e.phone : '')).join('\n');
+
+  // Domicile addresses — so the AI can assign the nearest site + estimate miles
+  // when the pasted block has no explicit "SITE Pref #" tag or stated distance.
+  const domiciles = _contacts.filter(c => c.type === 'domicile');
+  const domicileList = domiciles.map(d => '  ' + (d.name || '').trim() + ' = ' + [d.street, d.city, d.state, d.zip].filter(Boolean).join(', ')).join('\n');
+
+  const prompt =
+    'You are parsing truck-dealer entries pasted from a dealer-locator tool into a fleet app vendor book. ' +
+    'Extract EACH dealer into a structured record, and decide if it duplicates one of the EXISTING vendors ' +
+    '(same physical shop — judge by name + address + phone, not just identical text; different branches of the ' +
+    'same chain in different cities are NOT duplicates).\n\n' +
+    'For each dealer return these fields (omit a field if unknown):\n' +
+    '  name (string), company (string, usually same as name), makes (array of UPPERCASE make names), ' +
+    'cng (bool, true if the entry mentions CNG), mobile (bool, true if mobile service), ' +
+    'affiliation (string, e.g. "PACCAR", "Volvo Uptime", "DTNA (Service Tracker)", "Relay Garage/Reach"), ' +
+    'street, city, state (2-letter), zip, phone, email, contactPerson, hours, notes (short), ' +
+    'domicile (the SITE code explicitly before "Pref #" or "Specialist" in the text, e.g. ABE40, or null if none), ' +
+    'preference (integer after "Pref #", or null), ' +
+    'miles (number before "miles" in the text — distance from the domicile this list is for, or null if none stated), ' +
+    'doNotUse (bool, true if the entry says "Do Not Use"), ' +
+    'duplicateOf (the EXACT name from the EXISTING list it duplicates, or null).\n\n' +
+    'ASSIGNING A DOMICILE WHEN THE TEXT DOES NOT STATE ONE: I manage these domiciles (home yards) with addresses:\n' +
+    (domicileList || '  (none on file)') + '\n' +
+    'For EACH dealer, also return:\n' +
+    '  assignedDomicile = the domicile code that is GEOGRAPHICALLY NEAREST to the dealer address (choose from the domiciles above). ' +
+    'If the text already states a domicile (via Pref #), use that one. If you cannot tell, null.\n' +
+    '  estimatedMiles = your best estimate of road miles from that assigned domicile address to the dealer address ' +
+    '(a number). If the text already states miles, echo that number instead.\n' +
+    '  milesEstimated = true if YOU estimated the miles (text did not state them), false if the number came from the text.\n\n' +
+    'EXISTING VENDORS:\n' + (existingList || '(none)') + '\n\n' +
+    'PASTED DEALER TEXT:\n' + text + '\n\n' +
+    'RESPOND WITH JSON ONLY, no prose, in the form: {"dealers":[ {...}, {...} ]}';
+
+  let res;
+  try { res = await window.ai.ask(prompt); } catch (e) { return null; }
+  const raw = (res && res.text) ? res.text : (typeof res === 'string' ? res : '');
+  if (!raw) return null;
+  let parsed;
+  try {
+    const cleaned = raw.replace(/```json?\s*/gi, '').replace(/```\s*/g, '');
+    const m = cleaned.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    parsed = JSON.parse(m[0]);
+  } catch (e) { return null; }
+  const dealers = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.dealers) ? parsed.dealers : null);
+  if (!dealers || !dealers.length) return null;
+
+  // Map AI output into the vendor-record shape used by the preview + save path.
+  return dealers.map(d => {
+    const explicitDom = d.domicile ? String(d.domicile).toUpperCase().trim() : '';
+    const assignedDom = d.assignedDomicile ? String(d.assignedDomicile).toUpperCase().trim() : '';
+    // Precedence: explicit "SITE Pref #" tag in the text > AI-assigned nearest.
+    const dom = explicitDom || assignedDom;
+    const makes = Array.isArray(d.makes) ? d.makes.map(m => String(m).toUpperCase().trim()).filter(Boolean) : [];
+    // Miles precedence: explicit stated miles > AI estimate. milesEstimated flag
+    // reflects whether the final number is an estimate (for the "(estimated)" tag).
+    const statedMiles = (d.miles != null && Number.isFinite(+d.miles)) ? +d.miles : null;
+    const estMiles = (d.estimatedMiles != null && Number.isFinite(+d.estimatedMiles)) ? +d.estimatedMiles : null;
+    const finalMiles = statedMiles != null ? statedMiles : estMiles;
+    const milesEstimated = statedMiles == null && estMiles != null && (d.milesEstimated !== false);
+    const rec = {
+      type: 'vendor',
+      name: String(d.name || '').trim(),
+      company: String(d.company || d.name || '').trim(),
+      makes, make: makes[0] || '',
+      cng: !!d.cng, mobile: !!d.mobile,
+      affiliation: d.affiliation ? String(d.affiliation).trim() : '',
+      street: d.street || '', city: d.city || '', state: d.state || '', zip: d.zip ? String(d.zip) : '',
+      phone: d.phone || '', email: d.email || '', contactPerson: d.contactPerson || '',
+      hours: d.hours || '', notes: d.notes || '',
+      domiciles: dom ? [dom] : [], mileageByDomicile: {}, prefTags: [],
+      _doNotUse: !!d.doNotUse,
+      aiDuplicateOf: d.duplicateOf && String(d.duplicateOf).trim() ? String(d.duplicateOf).trim() : null,
+      _ai: true,
+      _assignedByAI: !explicitDom && !!assignedDom, // domicile inferred, not from text
+      _milesEstimated: !!milesEstimated,
+    };
+    if (dom) {
+      if (d.preference != null && Number.isFinite(+d.preference)) { rec.preference = +d.preference; rec.preferenceByDomicile = { [dom]: +d.preference }; }
+      if (finalMiles != null) rec.mileageByDomicile = { [dom]: finalMiles };
+    }
+    if (!rec.name) return null;
+    return rec;
+  }).filter(Boolean);
+}
+
 async function _load() {
   if (!window.contacts) return;
   _contacts = await window.contacts.getAll();
@@ -355,24 +779,34 @@ function _render() {
     </div>`;
 
   let listHtml = '';
+  let filterBarHtml = '';
+  let gridClass = '';
   if (_tab === 'vendors') {
-    listHtml = vendors.length ? vendors.map((c, i) => `
+    const filtered = _applyVendorFilters(vendors);
+    filterBarHtml = _vendorFilterBarHtml(vendors.length, filtered.length) + _pasteBoxHtml();
+    gridClass = ' cb-grid';
+    listHtml = filtered.length ? filtered.map((c, i) => `
       <div class="cb-card" data-idx="${i}" data-id="${c.id}">
         <div class="cb-card-top">
-          <div class="cb-card-name">${_esc(c.name)} ${_prefBadgeHtml(c)}</div>
+          <div class="cb-card-name">${_esc(c.name)} ${_prefBadgeHtml(c)} ${_capBadgeHtml(c)}</div>
           <div class="cb-card-company">${_esc(c.company || '')} ${_vendorMakesLabel(c)}</div>
         </div>
         <div class="cb-card-addr">${_esc(c.street || '')}${c.city ? ', ' + _esc(c.city) : ''} ${_esc(c.state || '')} ${_esc(c.zip || '')}</div>
         ${c.domiciles && c.domiciles.length ? '<div class="cb-card-meta" style="color:#58a6ff;">📍 ' + c.domiciles.join(', ') + '</div>' : ''}
+        ${_mileageBadgeHtml(c) ? '<div class="cb-card-meta">🧭 ' + _mileageBadgeHtml(c) + '</div>' : ''}
+        ${c.affiliation ? '<div class="cb-card-meta">🔗 ' + _esc(c.affiliation) + '</div>' : ''}
+        ${c.hours ? '<div class="cb-card-meta">🕐 ' + _esc(c.hours) + '</div>' : ''}
         ${c.phone ? '<div class="cb-card-meta">📞 ' + _esc(c.phone) + '</div>' : ''}
         ${c.email ? '<div class="cb-card-meta">📧 ' + _esc(c.email) + '</div>' : ''}
+        ${c.contactPerson ? '<div class="cb-card-meta">👤 ' + _esc(c.contactPerson) + '</div>' : ''}
+        ${c.notes ? '<div class="cb-card-meta" style="color:#8b949e;">📝 ' + _esc(c.notes) + '</div>' : ''}
         <div class="cb-card-actions">
           <button class="cb-btn cb-btn--use" data-action="use-address" data-id="${c.id}">📍 Use for Tow</button>
           ${c.email ? `<button class="cb-btn cb-btn--use" data-action="email-contact" data-id="${c.id}">📧 Email</button>` : ''}
           <button class="cb-btn cb-btn--use" data-action="edit" data-id="${c.id}">✏️ Edit</button>
           <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">✕</button>
         </div>
-      </div>`).join('') : '<div class="cb-empty">No vendors yet — add one below</div>';
+      </div>`).join('') : ('<div class="cb-empty">' + (vendors.length ? 'No vendors match these filters.' : 'No vendors yet — add one below') + '</div>');
 
     listHtml += `
       <div class="cb-add-form">
@@ -386,6 +820,14 @@ function _render() {
         <input class="cb-input" id="cb-v-preference" type="number" min="1" step="1" placeholder="Preference rank (1 = first choice, 2 = backup...) -- applies to every domicile above" />
         <input class="cb-input" id="cb-v-pref-overrides" placeholder="Override rank for specific domiciles, e.g. AVP40:1, ABE40:2 (optional)" />
         <div style="font-size:8px;color:#6e7681;margin-top:2px;">Preference applies to all domiciles listed above by default. Only use overrides if this vendor's rank actually differs by site. Dealer WO picks the lowest-ranked vendor for that domicile with fewer than 3 units already there.</div>
+        <input class="cb-input" id="cb-v-mileage" placeholder="Miles from each domicile, e.g. AVP40:4.3, ABE40:1.2 (optional)" />
+        <div style="font-size:8px;color:#6e7681;margin-top:2px;">Distance from each site. Shown nearest-first on the card and used to prefer closer vendors.</div>
+        <div class="cb-row" style="align-items:center;gap:12px;margin:4px 0;">
+          <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;"><input type="checkbox" id="cb-v-cng" style="margin:0" /> CNG accepted</label>
+          <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;"><input type="checkbox" id="cb-v-mobile" style="margin:0" /> Mobile service</label>
+        </div>
+        <input class="cb-input" id="cb-v-affiliation" placeholder="Affiliation / Integration (PACCAR, Volvo Uptime, DTNA, Relay Garage/Reach...)" />
+        <input class="cb-input" id="cb-v-hours" placeholder="Hours (M-F 7a-9p...)" />
         <input class="cb-input" id="cb-v-street" placeholder="Street address" />
         <div class="cb-row">
           <input class="cb-input" id="cb-v-city" placeholder="City" style="flex:2" />
@@ -394,6 +836,8 @@ function _render() {
         </div>
         <input class="cb-input" id="cb-v-phone" placeholder="Phone" />
         <input class="cb-input" id="cb-v-email" placeholder="Email (for direct email from chat)" />
+        <input class="cb-input" id="cb-v-contact-person" placeholder="Contact person (Service Manager: ...)" />
+        <input class="cb-input" id="cb-v-notes" placeholder="Notes (certifications, specialties, caveats...)" />
         <button class="cb-btn cb-btn--add" id="cb-add-vendor">Add Vendor</button>
       </div>`;
   } else if (_tab === 'domiciles') {
@@ -408,7 +852,9 @@ function _render() {
           <div class="cb-card-company">Home Yard</div>
         </div>
         <div class="cb-card-addr">${_esc(c.street || '')}${c.city ? ', ' + _esc(c.city) : ''} ${_esc(c.state || '')} ${_esc(c.zip || '')}</div>
+        ${c.gateCode ? '<div class="cb-card-meta">🔑 Gate Code: ' + _esc(c.gateCode) + '</div>' : ''}
         <div class="cb-card-actions">
+          <button class="cb-btn cb-btn--use" data-action="edit" data-id="${c.id}">✏️ Edit</button>
           <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">✕</button>
         </div>
       </div>`).join('') : '';
@@ -423,6 +869,7 @@ function _render() {
           <input class="cb-input" id="cb-d-state" placeholder="ST" style="flex:0.5" maxlength="2" />
           <input class="cb-input" id="cb-d-zip" placeholder="ZIP" style="flex:1" />
         </div>
+        <input class="cb-input" id="cb-d-gatecode" placeholder="Gate code (optional, e.g. #7466)" />
         <button class="cb-btn cb-btn--add" id="cb-add-domicile">Add Domicile</button>
       </div>`;
   } else {
@@ -459,7 +906,7 @@ function _render() {
       </div>`;
   }
 
-  _el.querySelector('.cb-body').innerHTML = tabsHtml + '<div class="cb-list">' + listHtml + '</div>';
+  _el.querySelector('.cb-body').innerHTML = tabsHtml + filterBarHtml + '<div class="cb-list' + gridClass + '">' + listHtml + '</div>';
 
   // Initialize live summary/warning for the Slack add form's editor block.
   if (_tab === 'slack') {
@@ -533,11 +980,41 @@ async function _addVendor() {
     domiciles: g('cb-v-domiciles').split(',').map(d => d.trim().toUpperCase()).filter(Boolean),
     street: g('cb-v-street'), city: g('cb-v-city'), state: g('cb-v-state'), zip: g('cb-v-zip'),
     phone: g('cb-v-phone'), email: g('cb-v-email'),
+    contactPerson: g('cb-v-contact-person'),
+    affiliation: g('cb-v-affiliation'), hours: g('cb-v-hours'), notes: g('cb-v-notes'),
+    cng: !!(document.getElementById('cb-v-cng') && document.getElementById('cb-v-cng').checked),
+    mobile: !!(document.getElementById('cb-v-mobile') && document.getElementById('cb-v-mobile').checked),
+    mileageByDomicile: _parseMileage(g('cb-v-mileage')) || {},
     preference: Number.isFinite(prefRaw) && prefRaw > 0 ? prefRaw : null,
     preferenceByDomicile: _parsePrefOverrides(g('cb-v-pref-overrides'))
   };
   if (!contact.name) return;
   await window.contacts.add(contact);
+  _load();
+}
+
+// Save all parsed paste-previews as vendors (add or merge via the service's
+// name dedupe + union). Skips "Do Not Use" blocks.
+async function _savePastedDealers() {
+  const list = _pastePreviews || [];
+  const toSave = list.filter(p => p && !p._doNotUse && p.name);
+  if (!toSave.length) return;
+  for (const p of toSave) {
+    const rec = Object.assign({}, p);
+    const dupOf = rec.aiDuplicateOf;
+    delete rec._doNotUse; delete rec.aiDuplicateOf; delete rec._ai;
+    delete rec._assignedByAI; delete rec._milesEstimated;
+    // If AI flagged this as a duplicate of an existing vendor whose NAME differs,
+    // merge onto that card: attach its id + keep its name so the service matches
+    // by id and unions domiciles/makes/mileage (no near-duplicate card).
+    if (dupOf) {
+      const match = _contacts.find(c => c.type === 'vendor' && (c.name || '').trim().toLowerCase() === String(dupOf).trim().toLowerCase());
+      if (match) { rec.id = match.id; rec.name = match.name; }
+    }
+    try { await window.contacts.add(rec); } catch (_) {}
+  }
+  _pastePreviews = null; _pasteText = '';
+  // Keep the box open so the user can paste the next batch immediately.
   _load();
 }
 
@@ -563,7 +1040,8 @@ async function _addDomicile() {
   const contact = {
     type: 'domicile',
     name: g('cb-d-name'),
-    street: g('cb-d-street'), city: g('cb-d-city'), state: g('cb-d-state'), zip: g('cb-d-zip')
+    street: g('cb-d-street'), city: g('cb-d-city'), state: g('cb-d-state'), zip: g('cb-d-zip'),
+    gateCode: g('cb-d-gatecode')
   };
   if (!contact.name) return;
   await window.contacts.add(contact);
@@ -576,6 +1054,38 @@ async function _editContact(id) {
   const card = _el.querySelector('[data-id="' + id + '"]');
   if (!card) return;
 
+  if (contact.type === 'domicile') {
+    card.innerHTML = `
+      <div class="cb-add-form" style="margin:0;border:none;padding:0;">
+        <input class="cb-input" id="edit-d-name" value="${_attr(contact.name)}" placeholder="Site code (ABE40, PHL40...)" />
+        <input class="cb-input" id="edit-d-street" value="${_attr(contact.street || '')}" placeholder="Street address" />
+        <div class="cb-row">
+          <input class="cb-input" id="edit-d-city" value="${_attr(contact.city || '')}" placeholder="City" style="flex:2" />
+          <input class="cb-input" id="edit-d-state" value="${_attr(contact.state || '')}" placeholder="ST" style="flex:0.5" maxlength="2" />
+          <input class="cb-input" id="edit-d-zip" value="${_attr(contact.zip || '')}" placeholder="ZIP" style="flex:1" />
+        </div>
+        <input class="cb-input" id="edit-d-gatecode" value="${_attr(contact.gateCode || '')}" placeholder="Gate code (optional, e.g. #7466)" />
+        <div style="font-size:8px;color:#6e7681;margin-top:2px;">This address is what the AI compares pasted dealers against to pick the nearest domicile. Keep it accurate. Gate code is used in tow comments.</div>
+        <div style="display:flex;gap:6px;margin-top:4px;">
+          <button class="cb-btn cb-btn--add" id="edit-save">Save</button>
+          <button class="cb-btn cb-btn--del" id="edit-cancel">Cancel</button>
+        </div>
+      </div>`;
+    card.querySelector('#edit-save').addEventListener('click', async () => {
+      const g = sel => (card.querySelector(sel) || {}).value || '';
+      contact.name   = g('#edit-d-name').trim();
+      contact.street = g('#edit-d-street').trim();
+      contact.city   = g('#edit-d-city').trim();
+      contact.state  = g('#edit-d-state').trim();
+      contact.zip    = g('#edit-d-zip').trim();
+      contact.gateCode = g('#edit-d-gatecode').trim();
+      await window.contacts.update(contact);
+      _load();
+    });
+    card.querySelector('#edit-cancel').addEventListener('click', () => _render());
+    return;
+  }
+
   if (contact.type === 'vendor') {
     card.innerHTML = `
       <div class="cb-add-form" style="margin:0;border:none;padding:0;">
@@ -585,6 +1095,13 @@ async function _editContact(id) {
         <input class="cb-input" id="edit-domiciles" value="${_attr((contact.domiciles || []).join(', '))}" placeholder="Domiciles this vendor serves (ABE40, PHL40...)" />
         <input class="cb-input" id="edit-preference" type="number" min="1" step="1" value="${_attr(contact.preference || '')}" placeholder="Preference rank (1 = first choice) -- applies to all domiciles above" />
         <input class="cb-input" id="edit-pref-overrides" value="${_attr(Object.entries(contact.preferenceByDomicile || {}).map(([s, r]) => s + ':' + r).join(', '))}" placeholder="Override rank for specific domiciles, e.g. AVP40:1, ABE40:2 (optional)" />
+        <input class="cb-input" id="edit-mileage" value="${_attr(Object.entries(contact.mileageByDomicile || {}).map(([s, mi]) => s + ':' + mi).join(', '))}" placeholder="Miles from each domicile, e.g. AVP40:4.3, ABE40:1.2" />
+        <div class="cb-row" style="align-items:center;gap:12px;margin:4px 0;">
+          <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;"><input type="checkbox" id="edit-cng" ${contact.cng ? 'checked' : ''} style="margin:0" /> CNG accepted</label>
+          <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;"><input type="checkbox" id="edit-mobile" ${contact.mobile ? 'checked' : ''} style="margin:0" /> Mobile service</label>
+        </div>
+        <input class="cb-input" id="edit-affiliation" value="${_attr(contact.affiliation || '')}" placeholder="Affiliation / Integration" />
+        <input class="cb-input" id="edit-hours" value="${_attr(contact.hours || '')}" placeholder="Hours" />
         <input class="cb-input" id="edit-street" value="${_attr(contact.street || '')}" placeholder="Street address" />
         <div class="cb-row">
           <input class="cb-input" id="edit-city" value="${_attr(contact.city || '')}" placeholder="City" style="flex:2" />
@@ -593,6 +1110,8 @@ async function _editContact(id) {
         </div>
         <input class="cb-input" id="edit-phone" value="${_attr(contact.phone || '')}" placeholder="Phone" />
         <input class="cb-input" id="edit-email" value="${_attr(contact.email || '')}" placeholder="Email" />
+        <input class="cb-input" id="edit-contact-person" value="${_attr(contact.contactPerson || '')}" placeholder="Contact person" />
+        <input class="cb-input" id="edit-notes" value="${_attr(contact.notes || '')}" placeholder="Notes" />
         <div style="display:flex;gap:6px;margin-top:4px;">
           <button class="cb-btn cb-btn--add" id="edit-save">Save</button>
           <button class="cb-btn cb-btn--del" id="edit-cancel">Cancel</button>
@@ -610,12 +1129,19 @@ async function _editContact(id) {
       const prefRaw = parseInt(g('#edit-preference'), 10);
       contact.preference = Number.isFinite(prefRaw) && prefRaw > 0 ? prefRaw : null;
       contact.preferenceByDomicile = _parsePrefOverrides(g('#edit-pref-overrides'));
+      contact.mileageByDomicile = _parseMileage(g('#edit-mileage')) || {};
+      contact.cng    = !!(card.querySelector('#edit-cng') && card.querySelector('#edit-cng').checked);
+      contact.mobile = !!(card.querySelector('#edit-mobile') && card.querySelector('#edit-mobile').checked);
+      contact.affiliation = g('#edit-affiliation').trim();
+      contact.hours  = g('#edit-hours').trim();
       contact.street = g('#edit-street').trim();
       contact.city   = g('#edit-city').trim();
       contact.state  = g('#edit-state').trim();
       contact.zip    = g('#edit-zip').trim();
       contact.phone  = g('#edit-phone').trim();
       contact.email  = g('#edit-email').trim();
+      contact.contactPerson = g('#edit-contact-person').trim();
+      contact.notes  = g('#edit-notes').trim();
       await window.contacts.update(contact);
       _load();
     });
@@ -702,6 +1228,34 @@ export function init() {
     const tab = e.target.closest('[data-tab]');
     if (tab) { _tab = tab.dataset.tab; _render(); return; }
 
+    // Vendor filter chips (domicile / CNG / paste). Make + miles are <select>s.
+    const vf = e.target.closest('[data-vf]');
+    if (vf && vf.tagName !== 'SELECT') {
+      const kind = vf.dataset.vf;
+      if (kind === 'dom') { _vfilter.domicile = vf.dataset.val || ''; _render(); return; }
+      if (kind === 'cng') { _vfilter.cng = !_vfilter.cng; _render(); return; }
+      if (kind === 'rg') { _vfilter.rg = !_vfilter.rg; _render(); return; }
+      if (kind === 'paste') { _pasteOpen = !_pasteOpen; if (!_pasteOpen) { _pastePreviews = null; _pasteText = ''; } _render(); return; }
+    }
+
+    // Paste-dealer box buttons.
+    if (e.target.id === 'cb-paste-parse') {
+      const ta = document.getElementById('cb-paste-text');
+      _pasteText = ta ? ta.value : '';
+      if (!_pasteText.trim()) { _pastePreviews = null; _render(); return; }
+      _pasteBusy = true; _pastePreviews = null; _render();
+      // AI first (parse + dedupe); fall back to local regex parser on any failure.
+      _aiParseDealers(_pasteText).then(aiRecs => {
+        if (aiRecs && aiRecs.length) { _pastePreviews = aiRecs; _pasteMode = 'ai'; }
+        else { _pastePreviews = _parseDealerBlocks(_pasteText); _pasteMode = 'local'; }
+      }).catch(() => {
+        _pastePreviews = _parseDealerBlocks(_pasteText); _pasteMode = 'local';
+      }).finally(() => { _pasteBusy = false; _render(); });
+      return;
+    }
+    if (e.target.id === 'cb-paste-close') { _pasteOpen = false; _pastePreviews = null; _pasteText = ''; _render(); return; }
+    if (e.target.id === 'cb-paste-save') { _savePastedDealers(); return; }
+
     // Multi-select "select all" (checks every visible individual box; does NOT
     // set the '*' wildcard — that's the separate "All" checkbox) / clear links.
     const allLink = e.target.closest('.cb-ms-allsel');
@@ -762,6 +1316,34 @@ export function init() {
 
   // Delegated change: identity-preset confirm + live summary refresh.
   _el.addEventListener('change', (e) => {
+    // Vendor make / miles filter dropdowns.
+    if (e.target.dataset && e.target.dataset.vf === 'make') { _vfilter.make = e.target.value || ''; _render(); return; }
+    if (e.target.dataset && e.target.dataset.vf === 'miles') { _vfilter.maxMiles = parseInt(e.target.value, 10) || 0; _render(); return; }
+
+    // Per-dealer domicile override in the paste preview.
+    if (e.target.dataset && e.target.dataset.pasteDom != null && e.target.dataset.pasteDom !== '') {
+      const idx = parseInt(e.target.dataset.pasteDom, 10);
+      const p = _pastePreviews && _pastePreviews[idx];
+      if (p) {
+        const newDom = (e.target.value || '').toUpperCase();
+        // Carry whatever mileage we had to the newly chosen site (if any).
+        const oldDom = (p.domiciles || [])[0];
+        const miles = oldDom && p.mileageByDomicile ? p.mileageByDomicile[oldDom] : null;
+        if (newDom) {
+          p.domiciles = [newDom];
+          p.mileageByDomicile = miles != null ? { [newDom]: miles } : {};
+          if (p.preferenceByDomicile && oldDom && p.preferenceByDomicile[oldDom] != null) {
+            p.preferenceByDomicile = { [newDom]: p.preferenceByDomicile[oldDom] };
+          }
+        } else {
+          p.domiciles = []; p.mileageByDomicile = {}; delete p.preferenceByDomicile;
+        }
+        p._assignedByAI = false; // user set it explicitly now
+        _render();
+      }
+      return;
+    }
+
     const root = _editorRootFor(e.target);
     if (!root) return;
     const prefix = _prefixFor(root);

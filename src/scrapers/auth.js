@@ -83,7 +83,12 @@ function parseMidwayCookies() {
     const name       = parts[5];
     const value      = parts.slice(6).join('\t');
 
-    if (!/amazon\.(com|dev)|a2z\.com/.test(domain)) continue;
+    // Accept all Midway/Amazon auth domains. FIX (2026-10-10): the old filter
+    // was /amazon\.(com|dev)|a2z\.com/ which DROPPED the amazon_enterprise_access
+    // cookie on `.auth.midway.aws.dev` (matches none of those) — confirmed from
+    // the live cookie file. AAP checks AEA across all four of its domains, so a
+    // dropped one weakens the session. Added aws.dev + a generic midway match.
+    if (!/amazon\.(com|dev)|a2z\.com|aws\.dev|midway/i.test(domain)) continue;
 
     if (expiry && expiry < now) {
       expired.push({ name, domain, expiredAgoMin: Math.round((now - expiry) / 60) });
@@ -672,26 +677,72 @@ async function ensureAuthenticated(mainWindow) {
 // Returns { ok, refreshed } — ok=true means the silent handshake landed on AAP
 // (session still valid, AEA refreshed). ok=false means the session itself is
 // gone and a real mwinit is required.
-async function refreshAeaSilently() {
+// Read the live AEA (amazon_enterprise_access) expiry FROM THE ELECTRON SESSION
+// cookie store (not the stale ~/.midway/cookie disk file). After a silent
+// handshake, AAP issues a fresh AEA into defaultSession — that is the real
+// source of truth for whether AEA is actually valid right now. Returns minutes
+// until the soonest live AEA expires, or null if none present.
+async function aeaSessionExpiryMin() {
   try {
-    // 1) Make sure the freshest cookies from disk are in the Electron session.
-    try { await injectCookies(); } catch (_) {}
-    // 2) Run the silent SSO handshake. If the session cookie is valid this
-    //    lands on AAP with a fresh AEA and NO prompt. If the session is truly
-    //    expired it settles on a login wall and returns false.
-    const landed = await probeSession();
-    if (!landed) {
-      logger.warn('[AuthManager] Silent AEA refresh: handshake did not land on AAP — session likely expired, real mwinit needed');
-      return { ok: false, refreshed: false };
+    const all = await electronSession.defaultSession.cookies.get({ name: 'amazon_enterprise_access' });
+    if (!all || !all.length) return null;
+    const now = Math.floor(Date.now() / 1000);
+    const soonest = all.reduce((min, c) => (c.expirationDate ? Math.min(min, c.expirationDate) : min), Infinity);
+    if (soonest === Infinity) return null;
+    return Math.round((soonest - now) / 60);
+  } catch (_) { return null; }
+}
+
+// How many times the silent handshake is attempted before we conclude the
+// session is genuinely rejected. A single failed probe is often a transient
+// SSO bounce / slow redirect, not a dead session — retrying (with a re-inject
+// + short backoff) rescues those WITHOUT ever prompting the user. Only a
+// consistent failure across all attempts escalates.
+const AEA_SILENT_RETRIES = 3;
+
+async function refreshAeaSilently() {
+  const before = await aeaSessionExpiryMin();
+  let lastErr = '';
+  for (let attempt = 1; attempt <= AEA_SILENT_RETRIES; attempt++) {
+    try {
+      // 1) Push the freshest cookies from disk into the Electron session.
+      try { await injectCookies(); } catch (_) {}
+      // 2) Run the silent SSO handshake. If the session cookie is valid this
+      //    lands on AAP with a fresh AEA and NO prompt. If the session is truly
+      //    expired it settles on a login wall and returns false.
+      const landed = await probeSession();
+      if (landed) {
+        // 3) Re-inject so any refreshed cookies (incl. a new AEA) are consistent.
+        try { await injectCookies(); } catch (_) {}
+        // 4) VERIFY against the LIVE session cookie store (truth), not the disk
+        //    file. The handshake writes the fresh AEA into defaultSession; the
+        //    disk file keeps the old expired AEA, so only this proves it worked.
+        const after = await aeaSessionExpiryMin();
+        logger.info('[AuthManager] AEA refresh OUTCOME: ok=true refreshed=true attempt=' + attempt + '/' + AEA_SILENT_RETRIES +
+          ' aeaBefore=' + (before === null ? 'none' : before + 'min') +
+          ' aeaAfter=' + (after === null ? 'unknown' : after + 'min') + ' (no prompt)');
+        return { ok: true, refreshed: true, aeaMin: after, attempts: attempt };
+      }
+      lastErr = 'handshake did not land on AAP';
+      logger.warn('[AuthManager] Silent AEA refresh attempt ' + attempt + '/' + AEA_SILENT_RETRIES + ' did not land on AAP' + (attempt < AEA_SILENT_RETRIES ? ' — retrying' : ''));
+    } catch (e) {
+      lastErr = e.message;
+      logger.warn('[AuthManager] Silent AEA refresh attempt ' + attempt + '/' + AEA_SILENT_RETRIES + ' error: ' + e.message);
     }
-    // 3) Re-inject so any refreshed cookies (incl. a new AEA) are consistent.
-    try { await injectCookies(); } catch (_) {}
-    logger.info('[AuthManager] Silent AEA refresh OK — AAP handshake completed with no prompt');
-    return { ok: true, refreshed: true };
-  } catch (e) {
-    logger.warn('[AuthManager] Silent AEA refresh error: ' + e.message);
-    return { ok: false, refreshed: false };
+    // Don't hammer: short backoff before the next attempt. Bail early if the
+    // machine went offline mid-retry (a dead network can't be fixed by retrying
+    // and must not be mistaken for a rejected session).
+    if (attempt < AEA_SILENT_RETRIES) {
+      if (_isOfflineNow()) { lastErr = 'offline mid-retry'; break; }
+      await new Promise((r) => setTimeout(r, 2000 * attempt));
+    }
   }
+  const after = await aeaSessionExpiryMin();
+  logger.warn('[AuthManager] AEA refresh OUTCOME: ok=false refreshed=false attempts=' + AEA_SILENT_RETRIES +
+    ' aeaBefore=' + (before === null ? 'none' : before + 'min') +
+    ' aeaAfter=' + (after === null ? 'none' : after + 'min') +
+    ' why="' + (lastErr || 'unknown') + '" — session likely expired, real mwinit may be needed');
+  return { ok: false, refreshed: false, aeaMin: after, why: lastErr };
 }
 
 // ── Reconnect watcher (re-probe the SAME session when internet returns) ───────
@@ -724,10 +775,12 @@ function startOnlineReauthWatch() {
         logger.info('[AuthManager] Reconnect re-verify OK — session still valid, no re-auth needed');
         return;
       }
-      // Confirmed online + session did NOT re-verify → genuine rejection.
+      // Confirmed online + session did NOT re-verify → climb the full ladder
+      // (VPN rung, then silent again, then mwinit as last resort) instead of a
+      // bare prompt. recoverAuth is defined below in this module.
       if (_isOfflineNow()) return; // dropped again mid-check; don't prompt
-      logger.warn('[AuthManager] Reconnect re-verify failed while online — session genuinely rejected, prompting mwinit');
-      try { await runMwinit(); } catch (e) { logger.warn('[AuthManager] Reconnect mwinit failed: ' + e.message); }
+      logger.warn('[AuthManager] Reconnect re-verify failed while online — escalating via recovery ladder');
+      try { await recoverAuth('reconnect:reverify-failed'); } catch (e) { logger.warn('[AuthManager] Reconnect recovery failed: ' + e.message); }
     } catch (e) {
       logger.warn('[AuthManager] Reconnect re-verify error: ' + e.message);
     } finally {
@@ -738,12 +791,98 @@ function startOnlineReauthWatch() {
   return _reauthUnsub;
 }
 
+// ── Centralized recovery ladder ───────────────────────────────────────────────
+// ONE place every "auth looks broken, what now?" decision routes through, so
+// the escalation policy isn't re-implemented (and divergent) across the 5+
+// callers (heartbeat, SSO-loop poller, reconnect watcher, rescan recovery, IPC
+// buttons). The ladder climbs from cheapest/least-intrusive to the only
+// user-interrupting rung, and STOPS at the first rung that recovers:
+//
+//   1. OFFLINE?        -> raw internet down (net.isOnline). Can't auth against a
+//                         dead network; a failure here is NOT a rejected session.
+//                         Return without prompting; the reconnect watcher retries.
+//   2. VPN DOWN?       -> corp resources need the tunnel. ensureVpn (non-blocking
+//                         reconnect) then re-probe. Still no prompt.
+//   3. SESSION VALID + probe failing -> the common case: the ~24h __Host-session
+//                         is fine but AEA lapsed, so AAP bounced us. refreshAeaSilently
+//                         (now retried internally) re-mints AEA with NO tap. Re-probe.
+//   4. LAST RESORT     -> session cookie genuinely expired on disk, OR the silent
+//                         refresh is exhausted while confirmed online. ONLY NOW
+//                         prompt mwinit (deduped via runMwinit's _mwinitInFlight).
+//
+// Returns { recovered, rung, prompted, reason } so callers can log/branch.
+// opts.allowPrompt (default true) lets a caller run the whole ladder but STOP
+// before the interactive rung (e.g. a background pass that must never prompt).
+async function recoverAuth(reason, opts) {
+  opts = opts || {};
+  const allowPrompt = opts.allowPrompt !== false;
+  const label = reason || 'unspecified';
+  logger.info('[AuthManager] recoverAuth START (reason=' + label + ', allowPrompt=' + allowPrompt + ')');
+
+  // Rung 1 — offline. A dead network is not a rejected session.
+  if (_isOfflineNow()) {
+    logger.info('[AuthManager] recoverAuth rung=offline — no internet; deferring (no prompt). Reconnect watcher will retry.');
+    return { recovered: false, rung: 'offline', prompted: false, reason: label };
+  }
+
+  // Rung 2 — VPN down. Kick a non-blocking reconnect, then re-probe once.
+  try {
+    const { checkVpnState, ensureVpn } = require('../utils/vpn');
+    const vpn = await checkVpnState();
+    if (vpn && !vpn.connected && vpn.status !== 'not-installed') {
+      logger.info('[AuthManager] recoverAuth rung=vpn — tunnel ' + vpn.status + '; reconnecting then re-probing (no prompt)');
+      try { await ensureVpn(logger.info); } catch (_) {}
+      if (await probeSession()) {
+        logger.info('[AuthManager] recoverAuth recovered at rung=vpn — session OK once tunnel was up');
+        return { recovered: true, rung: 'vpn', prompted: false, reason: label };
+      }
+    }
+  } catch (_) { /* vpn module unavailable — skip this rung */ }
+
+  // Rung 3 — session cookie valid but probe failing => AEA lapsed. Silent re-mint.
+  const state = checkMwinit();
+  if (state.ok) {
+    logger.info('[AuthManager] recoverAuth rung=silent — session cookie valid (expires ' + (state.expiresInMin === null ? 'session' : state.expiresInMin + 'min') + '); attempting silent AEA refresh (no prompt)');
+    const r = await refreshAeaSilently();
+    if (r && r.ok) {
+      logger.info('[AuthManager] recoverAuth recovered at rung=silent — AEA re-minted with no prompt');
+      return { recovered: true, rung: 'silent', prompted: false, reason: label };
+    }
+    // Silent refresh exhausted. If we somehow dropped offline during it, defer.
+    if (_isOfflineNow()) {
+      logger.info('[AuthManager] recoverAuth — went offline during silent refresh; deferring (no prompt)');
+      return { recovered: false, rung: 'offline', prompted: false, reason: label };
+    }
+  } else {
+    logger.warn('[AuthManager] recoverAuth — on-disk session cookie genuinely expired (' + (state.reason || 'expired') + ')');
+  }
+
+  // Rung 4 — last resort: prompt mwinit (deduped). Only reached when online, and
+  // either the disk session is truly expired OR the silent refresh is exhausted.
+  if (!allowPrompt) {
+    logger.info('[AuthManager] recoverAuth — recovery exhausted but allowPrompt=false; NOT prompting (caller will handle)');
+    return { recovered: false, rung: 'needs-prompt', prompted: false, reason: label };
+  }
+  logger.warn('[AuthManager] recoverAuth rung=mwinit — escalating to interactive mwinit (reason=' + label + ')');
+  try {
+    await runMwinit();
+    try { await injectCookies(); } catch (_) {}
+    logger.info('[AuthManager] recoverAuth recovered at rung=mwinit — re-auth completed');
+    return { recovered: true, rung: 'mwinit', prompted: true, reason: label };
+  } catch (e) {
+    logger.warn('[AuthManager] recoverAuth mwinit failed: ' + e.message);
+    return { recovered: false, rung: 'mwinit', prompted: true, reason: label, error: e.message };
+  }
+}
+
 module.exports = {
   checkMwinit,
   runMwinit,
+  recoverAuth, // FIX (2026-10): single centralized recovery ladder every caller routes through
   injectCookies, // FEATURE (2026-07-23): now accepts optional target session
   probeSession, // FIX (2026-07-21): exported so callers can replicate ensureAuthenticated's verification steps without its disabled auto-spawn branch
   refreshAeaSilently, // FIX (2026-09-30): silent AEA re-mint so one auth lasts the full ~24h session
+  aeaSessionExpiryMin, // FIX (2026-10-10): read live AEA expiry from the Electron session (truth), not the stale disk file
   ensureAuthenticated,
   pingRelayEndpoint,
   startOnlineReauthWatch, // FIX (2026-10): re-probe same session on reconnect; prompt only on confirmed-online rejection

@@ -126,6 +126,36 @@ expose('notes', {
   deleteUnit:(id)     => ipcRenderer.invoke('notes:delete-unit', id),
 });
 
+// ── OWA Inbox Triage (overlay) ──────────────────────────────────────────────
+expose('emailTriage', {
+  getConfig:    ()               => ipcRenderer.invoke('emailTriage:get-config'),
+  setConfig:    (patch)          => ipcRenderer.invoke('emailTriage:set-config', patch),
+  getResults:   ()               => ipcRenderer.invoke('emailTriage:get-results'),
+  run:          (opts)           => ipcRenderer.invoke('emailTriage:run', opts),
+  probe:        ()               => ipcRenderer.invoke('emailTriage:probe'),
+  draftReply:   (id, guidance)   => ipcRenderer.invoke('emailTriage:draft-reply', id, guidance),
+  sendReply:    (id, bodyText)   => ipcRenderer.invoke('emailTriage:send-reply', id, bodyText),
+  dismissReply: (id)             => ipcRenderer.invoke('emailTriage:dismiss-reply', id),
+  deleteEmail:  (id)             => ipcRenderer.invoke('emailTriage:delete', id),
+  keepEmail:    (id)             => ipcRenderer.invoke('emailTriage:keep', id),
+  deleteSuggested: ()            => ipcRenderer.invoke('emailTriage:delete-suggested'),
+  draftReadyDm: (id, unit)       => ipcRenderer.invoke('emailTriage:draft-ready-dm', id, unit),
+  sendReadyDm:  (id, unit, msg)  => ipcRenderer.invoke('emailTriage:send-ready-dm', id, unit, msg),
+  onUpdated:    (cb)             => on('emailTriage:updated', cb),
+});
+
+// ── Relay ↔ Offsite reconcile ───────────────────────────────────────────────
+expose('relayReconcile', {
+  getConfig:  ()            => ipcRenderer.invoke('relayReconcile:get-config'),
+  setConfig:  (patch)       => ipcRenderer.invoke('relayReconcile:set-config', patch),
+  getPending: ()            => ipcRenderer.invoke('relayReconcile:get-pending'),
+  confirm:    (id)          => ipcRenderer.invoke('relayReconcile:confirm', id),
+  dismiss:    (id)          => ipcRenderer.invoke('relayReconcile:dismiss', id),
+  runUnit:    (equipmentId) => ipcRenderer.invoke('relayReconcile:run-unit', equipmentId),
+  draftForSplit: (equipmentId, side) => ipcRenderer.invoke('relayReconcile:draft-for-split', equipmentId, side),
+  onUpdated:  (cb)          => on('relayReconcile:updated', cb),
+});
+
 // ── Long Dwell Units (Analytics tab) ──────────────────────────────────────
 expose('longDwell', {
   getAll:     ()            => ipcRenderer.invoke('long-dwell:get-all'),
@@ -263,6 +293,10 @@ expose('sp', {
   saveConfig:     (data)    => ipcRenderer.invoke('sp:save-config', data),
   getLists:       (siteUrl) => ipcRenderer.invoke('sp:get-lists', siteUrl),
   discoverSheets: (url) => ipcRenderer.invoke('sp:discover-sheets', url),
+  // TEMPORARY debug bridge for DBR Copy-All layout inspection — see
+  // sp:dump-grid handler in src/ipc/misc.js. Safe to remove once the real
+  // DBR sheet layout is known and Copy-All is aligned to it.
+  dumpGrid:       (opts)    => ipcRenderer.invoke('sp:dump-grid', opts),
 });
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
@@ -283,6 +317,18 @@ expose('aap', {
   createWR:         (payload, unit)          => ipcRenderer.invoke('aap:create-wr', payload, unit),
   onWRProgress:     (cb)                     => on('wr:progress', cb),
   openUrl:          (url)                    => ipcRenderer.invoke('aap:open-url', url),
+});
+
+// ── QuickSight DBR DATA (Daily Call) ──────────────────────────────────────────
+// captureAfp/captureDsp return raw page text (QuickSight's pivot-table DOM
+// has no stable selector shape); the renderer feeds that text to AI to
+// parse into structured rows, then calls saveParsed to persist the result.
+expose('quicksight', {
+  captureAfp:  () => ipcRenderer.invoke('quicksight:capture-afp'),
+  captureDsp:  () => ipcRenderer.invoke('quicksight:capture-dsp'),
+  saveParsed:  (payload) => ipcRenderer.invoke('quicksight:save-parsed', payload),
+  getCache:    () => ipcRenderer.invoke('quicksight:get-cache'),
+  getCacheDsp: () => ipcRenderer.invoke('quicksight:get-cache-dsp'),
 });
 
 // ── Geofence ──────────────────────────────────────────────────────────────────
@@ -318,6 +364,7 @@ expose('fleetScheduler', {
   runSpNow:        ()        => ipcRenderer.invoke('scheduler:run-sp-now'),
   runEmailTestNow: ()        => ipcRenderer.invoke('scheduler:run-email-test-now'),
   runEmailNow:     (slot)    => ipcRenderer.invoke('scheduler:run-email-now', slot),
+  runDbrNow:       (slot)    => ipcRenderer.invoke('scheduler:run-dbr-now', slot),
   retry:           (jobId)   => ipcRenderer.invoke('scheduler:retry', jobId),
   cancel:          (jobId)   => ipcRenderer.invoke('scheduler:cancel', jobId),
   reconcile:       (jobId)   => ipcRenderer.invoke('scheduler:reconcile', jobId),
@@ -347,7 +394,7 @@ expose('files', {
 expose('relay', {
   getCache:     ()   => ipcRenderer.invoke('relay:get-cache'),
   getUnitCache: (id) => ipcRenderer.invoke('relay:get-unit-cache', id),
-  refreshUnit:  (id) => ipcRenderer.invoke('relay:refresh-unit', id),
+  refreshUnit:  (id, opts) => ipcRenderer.invoke('relay:refresh-unit', id, opts),
 });
 
 // ── Credentials (UI-facing — never returns raw values) ──────────────────────
@@ -456,6 +503,9 @@ expose('dailyTasks', {
   update:    (data)  => ipcRenderer.invoke('tasks:update', data),
   remove:    (id)    => ipcRenderer.invoke('tasks:delete', id),
   generate:  ()      => ipcRenderer.invoke('tasks:generate'),
+  getActionConfig: ()        => ipcRenderer.invoke('tasks:get-action-config'),
+  setActionConfig: (patch)   => ipcRenderer.invoke('tasks:set-action-config', patch),
+  executeAction:   (taskId)  => ipcRenderer.invoke('tasks:execute-action', taskId),
 });
 
 // -- Bubble/mini-FAB window controls (2026-07-24) -- only meaningful when this

@@ -857,6 +857,71 @@ function registerMiscIPC(ctx) {
     return result;
   });
 
+  // TEMPORARY DEBUG HANDLER (added 2026-08-14, DBR DATA Copy-All alignment
+  // work): dumps the real row/column layout of a SharePoint tracker sheet
+  // so Copy-All's output can be aligned to the ACTUAL template instead of
+  // guessed. Reuses the exact same SP window reuse / auth pattern as
+  // sp:discover-sheets above. Safe to delete once the DBR sheet's layout is
+  // known and Copy-All is aligned to it.
+  handle('sp:dump-grid', async (_e, { url, sheetName, maxRow } = {}) => {
+    const { extractFilePath, dumpSheetGrid } = require('../../src/scrapers/sp_discover');
+    const { BrowserWindow } = require('electron');
+
+    const parsed = extractFilePath(url);
+    if (parsed.error) return { ok: false, error: parsed.error };
+
+    let spWin = BrowserWindow.getAllWindows().find(w =>
+      w.webContents.getURL().includes('sharepoint.com')
+    );
+    if (!spWin) {
+      spWin = new BrowserWindow({ show: false, width: 800, height: 600 });
+      let shown = false;
+      spWin.webContents.on('did-navigate', (_e2, navUrl) => {
+        if (!shown && /login\.microsoftonline\.com|oauth2\/authorize|midway-auth/i.test(navUrl)) {
+          shown = true;
+          spWin.show();
+          spWin.focus();
+        }
+      });
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          spWin.webContents.removeListener('did-navigate', onNav);
+          clearTimeout(timeoutId);
+          if (shown && !spWin.isDestroyed()) spWin.hide();
+          resolve();
+        };
+        const onNav = (_e2, navUrl) => {
+          if (navUrl.includes('amazon.sharepoint.com/sites/') && !navUrl.includes('login') && !navUrl.includes('oauth')) finish();
+        };
+        const timeoutId = setTimeout(() => finish(), 180000);
+        spWin.webContents.on('did-navigate', onNav);
+        spWin.webContents.on('did-fail-load', (_e2, code) => { if (code !== -3 && !done) finish(); });
+        spWin.loadURL('https://amazon.sharepoint.com/sites/AFP-FAS').catch(() => {});
+      });
+    }
+
+    let filePath = parsed.filePath;
+    const guidMatch = url.match(/sourcedoc=%7B([^%}]+)/i);
+    if (guidMatch && !filePath) {
+      const guid = decodeURIComponent(guidMatch[1]).replace(/[{}]/g, '');
+      try {
+        const guidPath = await spWin.webContents.executeJavaScript(
+          'fetch("https://amazon.sharepoint.com' + parsed.site + "/_api/web/GetFileById('" + guid + "')?$select=ServerRelativeUrl" + '", ' +
+          '{ credentials: "include", headers: { "Accept": "application/json;odata=verbose" } })' +
+          '.then(r => r.ok ? r.json() : null).then(d => d && d.d ? d.d.ServerRelativeUrl : null).catch(() => null)'
+        );
+        if (guidPath) filePath = guidPath;
+      } catch (e) { /* fall through — may still resolve via search below */ }
+    }
+    if (!filePath) return { ok: false, error: 'Could not resolve file path from URL' };
+
+    const result = await dumpSheetGrid(spWin, filePath, sheetName, maxRow);
+    return result;
+  });
+
   // BUG FIX (2026-07-16): the three handlers below were previously spliced
   // into the middle of the sp:discover-sheets handler's `if (!spWin) {...}`
   // block above (a file-corruption artifact, likely from a bad edit/merge).

@@ -97,6 +97,15 @@ const REGISTRY = {
   // last day we silently warmed each vendor portal so the morning pre-warm runs
   // once/day. See src/scrapers/vendor_session.js. Shape: { lastWarmedDay: {dtna:'YYYY-MM-DD'} }.
   vendorWarm:           () => path.join(P.dataDir, 'vendor-warm.json'),
+  // DBR DATA (Daily Call) — cached result of the last AFP QuickSight scrape.
+  // See src/scrapers/quicksight_dbr.js + src/ipc/scrapers.js 'quicksight:scrape'.
+  // Shape: { ok, domicile:[{domicile,uptimePct,unitsUnavailable}],
+  //          scac:[{scac,domicile,uptimePct,unitsUnavailable}], scrapedAt, error? }.
+  quicksightDbr:        () => path.join(P.dataDir, 'quicksight_dbr.json'),
+  // DBR DATA (Daily Call) — DSP section cache. Shape: { ok,
+  // scac:[{scac,uptimePct,unitsUnavailable,unitsUnavailableEstimated,assetCount,downtimePct}],
+  // scrapedAt, error? }.
+  quicksightDbrDsp:     () => path.join(P.dataDir, 'quicksight_dbr_dsp.json'),
   // Daily Tasks / Action Board (2026-10) — replaces the former Workflow
   // Intelligence recorder/library (Phase 8, removed). The "Workflow AI" tab is
   // now an AI-generated + manual daily task board. See src/ipc/daily-tasks.js.
@@ -173,6 +182,57 @@ const REGISTRY = {
   // backup is stored under schedulerLedgerBackup_v1.
   schedulerLedger:         () => path.join(P.dataDir, 'scheduler_ledger.json'),
   schedulerLedgerBackup_v1: () => path.join(P.dataDir, 'scheduler_ledger_backup_v1.json'),
+  // OWA Inbox Triage (2026-10) — see src/scrapers/owa_reader.js + email_triage.js.
+  // Config shape: { enabled, maxEmails, autoApplyUnitUpdates, scanOnOpen,
+  //   lastRunAt }. (Reading the inbox + AI triage; all mailbox/DM mutations are
+  //   still confirm-gated.)
+  emailTriageConfig:       () => path.join(P.dataDir, 'email_triage_config.json'),
+  // Triage results — the last read + AI-triaged inbox. Per-email records keep a
+  // STABLE id (OWA internetMessageId / conversationId) so the per-email "Reply"
+  // option persists across new mail and app restarts (an older email's reply
+  // option never disappears just because newer mail arrived). Shape:
+  //   { emails: [ { id, from, fromName, subject, receivedAt, importance,
+  //       summary, replySuggested, replyDraft?, replyState, attachments:[{name,
+  //       type,understood}], unitRefs:[{unit, update, ready}], triagedAt } ],
+  //     ranAt, authBlocked? }.
+  emailTriageResults:      () => path.join(P.dataDir, 'email_triage_results.json'),
+  // Deletion learning (2026-10) — records sender/subject patterns the user
+  // DELETES vs KEEPS so the AI triage leans toward their real junk habits and
+  // never re-suggests deleting something they chose to keep. Shape:
+  //   { deleted: { '<senderKey>': {count,lastAt,samples:[subj..]} },
+  //     kept:    { '<senderKey>': {count,lastAt} },
+  //     keywords:{ deleted:{word:count}, kept:{word:count} } }.
+  emailTriageLearning:     () => path.join(P.dataDir, 'email_triage_learning.json'),
+  // Relay ↔ Offsite reconcile (2026-10) — see src/scrapers/relay_reconcile.js.
+  // Config: { enabled, autoPostToRelay (MODE A vs MODE B), staleDays,
+  //   maxUnitsPerSync, minConfidence }.
+  relayReconcileConfig:    () => path.join(P.dataDir, 'relay_reconcile_config.json'),
+  // MODE B staging queue: Relay-comment / dealer-ask posts awaiting an explicit
+  // confirm before they are written to the real AAP work request. Shape:
+  //   { items: [ { id, equipmentId, serviceUrl, kind:'gap-fill'|'dealer-ask',
+  //       text, decision, stagedAt, state:'pending'|'posted'|'dismissed' } ] }.
+  relayReconcilePending:   () => path.join(P.dataDir, 'relay_reconcile_pending.json'),
+  // Dedup ledger so the same gap-fill / dealer-ask isn't re-staged or re-posted
+  // on every 5-min rescan. Keyed by equipmentId -> { lastGapSig, lastAskSig, lastAt }.
+  relayReconcileLog:       () => path.join(P.dataDir, 'relay_reconcile_log.json'),
+  // Fleet Action Board execution config (2026-10) — per-action MODE A/B switch.
+  // MODE A (default, all false) = the "Do it" button deep-links into the
+  // existing confirm-gated flow. MODE B (true) = one-click execute behind a
+  // single YES confirm. Shape: { autoExecute: { <action_slug>: bool } }.
+  fleetActionConfig:       () => path.join(P.dataDir, 'fleet_action_config.json'),
+  // Canonical state (2026-10) — the ONE AI-reconciled authoritative state
+  // record per unit, the single source of truth every reasoning surface reads.
+  // No new UI; a few key fields are mirrored onto fleetData rows so existing
+  // panels can read it. Two-tier: a cheap deterministic baseline is computed
+  // for EVERY unit each sync, upgraded by the AI reconcile for the units that
+  // need deeper reasoning (down/offsite/stale), bounded like the reconcile
+  // pass. The AI reconciles conflicts (AAP vs Relay vs Offsite) and records
+  // which source it trusted + confidence — there is no hardcoded precedence.
+  // See src/orcha/canonical_state.js. Shape:
+  //   { units: { <equipmentId>: { equipmentId, status, situation, nextStep,
+  //       source, confidence, stale, waitingOn, flags:[], aiReconciled,
+  //       updatedAt } }, updatedAt, lastReconcileAt }.
+  canonicalState:          () => path.join(P.dataDir, 'canonical_state.json'),
 };
 
 function _resolvePath(name) {

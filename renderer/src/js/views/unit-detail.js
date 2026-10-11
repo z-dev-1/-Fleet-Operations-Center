@@ -1079,6 +1079,44 @@ async function _injectAISplitDraft(webview, unit, side) {
     ).catch(function(){});
   }
 
+  // ── Live refresh gate (2026-10): the Split View button kicked a forced
+  // per-unit Relay + Offsite re-scrape (+ canonical re-reason) and stashed the
+  // promise on window.__splitRefresh. Await it (already time-capped by the
+  // caller) so the reconcile draft below is built from FRESH data, not the last
+  // full-sync snapshot. If it refreshed, note that so we can label the draft.
+  var _refreshed = false;
+  try {
+    if (window.__splitRefresh) {
+      var _rr = await window.__splitRefresh;
+      if (_rr && _rr.ok) _refreshed = true;
+    }
+  } catch (_re) { /* refresh failed — proceed with whatever data we have */ }
+
+  // ── Reconcile-first (2026-10): if the Relay↔Offsite reconcile engine is
+  // enabled, use its decision — the gap-fill (an Offsite update Relay is
+  // missing) for the Relay pane, or the escalated vendor follow-up / dealer-ask
+  // for the Offsite pane. This is the SAME reasoning that runs during sync, so
+  // Split View auto-fills exactly what would be posted. If the engine is off,
+  // low-confidence, or produces nothing, we fall through to the existing
+  // simple draft below (no regression).
+  try {
+    if (window.relayReconcile && window.relayReconcile.draftForSplit) {
+      var rec = await window.relayReconcile.draftForSplit(equipId, side);
+      if (rec && rec.ok && rec.text && rec.text.length > 10 && webview.isConnected) {
+        var _indLabel = _refreshed
+          ? '\\ud83d\\udd04 Live-refreshed reconcile draft'
+          : '\\u2705 Reconcile draft (Relay \\u2194 Offsite)';
+        webview.executeJavaScript(
+          '(function(){' + selector +
+          'if(ta){ta.focus();ta.value="";document.execCommand("insertText",false,' + JSON.stringify(rec.text) + ');ta.style.background="#e6f7ff";ta.blur();' +
+          'var ind=document.createElement("div");ind.id="ai-draft-indicator";ind.textContent="' + _indLabel + '";ind.style.cssText="font-size:11px;color:#3fb950;padding:4px 8px;margin-top:4px;";ta.parentElement.insertBefore(ind,ta.nextSibling);setTimeout(function(){if(ind)ind.remove();},4000);}' +
+          '})()'
+        ).catch(function(){});
+        return; // reconcile draft used — skip the generic AI draft below
+      }
+    }
+  } catch (e) { /* reconcile unavailable — fall through to the generic draft */ }
+
   // Show a small "AI drafting..." indicator near the textarea while waiting
   if (!webview.isConnected) return;
   webview.executeJavaScript(
@@ -1991,7 +2029,29 @@ function renderRepairPane(unit){
     if (btn) btn.addEventListener('click', function() {
       var rUrl = unit.serviceUrl || '';
       var oUrl = offsiteUrl || '';
-      window.__splitUnit = unit; _openInlineSplit(rUrl, oUrl, unit.equipmentId);
+      window.__splitUnit = unit;
+      // LIVE REFRESH ON OPEN: kick a forced single-unit Relay + Offsite re-scrape
+      // (+ canonical re-reason) so the drafts reflect the latest updates, not the
+      // last full-sync snapshot. Non-blocking: the panes open immediately with
+      // cached drafts; _injectAISplitDraft awaits this promise (window.__splitRefresh)
+      // before drafting, then shows a "live-refreshed" draft. Guarded + graceful:
+      // on failure/timeout the cached draft stands. Bounded so a hung scrape
+      // never blocks the pane forever.
+      try {
+        if (window.relay && window.relay.refreshUnit) {
+          var _rp = window.relay.refreshUnit(unit.equipmentId, { force: true, reconcile: true })
+            .then(function (r) { return (r && r.ok) ? r : null; })
+            .catch(function () { return null; });
+          // Cap the wait so panes don't hang on a slow/failed scrape.
+          window.__splitRefresh = Promise.race([
+            _rp,
+            new Promise(function (res) { setTimeout(function () { res(null); }, 35000); })
+          ]);
+        } else {
+          window.__splitRefresh = Promise.resolve(null);
+        }
+      } catch (_e) { window.__splitRefresh = Promise.resolve(null); }
+      _openInlineSplit(rUrl, oUrl, unit.equipmentId);
     });
   }, 100);
 

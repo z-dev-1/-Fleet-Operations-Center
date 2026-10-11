@@ -755,7 +755,14 @@ function initWindows(ctx) {
 
     mainWindow = new BrowserWindow({
       width: 900, height: 700,
-      minWidth: 600, minHeight: 500,
+      // BUG FIX (2026-10): minHeight:500 let the window shrink below what the
+      // UI actually needs (48px topbar + filterbar + KPI strip), which combined
+      // with dashboard-mode's old forced 60vh table height caused header
+      // content to be pushed out of view on shorter laptop screens. Raised the
+      // floor; the fleet.css dashboard-mode fix (removal of that 60vh floor) is
+      // the primary fix, this is just a safety margin so the window itself
+      // can't be squeezed smaller than the chrome needs.
+      minWidth: 600, minHeight: 600,
       title: 'Fleet Operations \u2014 Sign in\u2026',
       icon: getAppIconPath(), // FEATURE (2026-07-22): real app icon instead of default Electron icon in taskbar/titlebar
       backgroundColor: '#0d1117',
@@ -915,9 +922,30 @@ function initWindows(ctx) {
         }
       } else {
         logger.info('[startup] Cookies valid (' + state.count + ' cookies, expires in ' +
-          (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ')');
+          (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ', aea=' +
+          (state.aeaExpiresInMin === null ? 'expired/missing' : state.aeaExpiresInMin + 'min') + ')');
         // Push session status to renderer immediately so the auth badge is green on startup
         send('auth:mwinit-status', { ok: true, expiresInMin: state.expiresInMin });
+        // PROACTIVE SILENT AEA REFRESH (2026-10-10): the ~24h session is valid,
+        // but AAP enforces the short-lived AEA token server-side. If AEA has
+        // lapsed (aeaExpiresInMin === null) or is near expiry, loading AAP now
+        // would bounce into the SSO redirect loop and (historically) trigger an
+        // interactive mwinit — the "doesn't last 20h, re-auth every ~2h" bug.
+        // Re-mint AEA SILENTLY (Midway OIDC handshake, no WebAuthn tap) BEFORE
+        // loading AAP so the first load is clean and no prompt appears.
+        const aeaStale = (state.aeaExpiresInMin === null) || (state.aeaExpiresInMin < 45);
+        if (aeaStale) {
+          try {
+            const { refreshAeaSilently } = _getAuth();
+            logger.info('[startup] AEA stale (' + (state.aeaExpiresInMin === null ? 'expired/missing' : state.aeaExpiresInMin + 'min') + ') \u2014 silent refresh before loading AAP (no prompt)');
+            pushStatus('\uD83D\uDD04 Refreshing Midway session silently\u2026');
+            const r = await refreshAeaSilently();
+            logger.info('[startup] Startup silent AEA refresh: ok=' + r.ok + (r.aeaMin != null ? ' (AEA now ' + r.aeaMin + 'min)' : ''));
+            if (r.ok) pushStatus('\u2705 Midway session ready');
+          } catch (e) {
+            logger.warn('[startup] Startup silent AEA refresh failed (non-fatal): ' + e.message);
+          }
+        }
       }
 
       // Keep window invisible during AAP scrape
@@ -1054,63 +1082,69 @@ function initWindows(ctx) {
         if (_ssoCount >= 10 && !_mwinitRunning) {
           _mwinitRunning = true;
           clearInterval(_authPoller);
-          logger.warn('[auth-poll] SSO redirect loop \u2014 launching mwinit terminal');
-          pushStatus('\uD83D\uDD11 Session expired \u2014 complete Midway auth in the terminal window...');
+          logger.warn('[auth-poll] SSO redirect loop detected');
           try {
-            // FIX (2026-07-21): this recovery path was calling runMwinit() +
-            // injectCookies() directly, then doing a raw mainWindow.loadURL()
-            // with NO verification and NO retry -- a materially weaker flow
-            // than src/scrapers/auth.js's ensureAuthenticated(), which does
-            // inject -> verify via a real probe-window navigation -> verify
-            // via a relay-endpoint ping -> automatically retry injection once
-            // if the relay check fails. Confirmed via logs/auth.log:
-            // 2026-07-20 (working) sessions all logged the full "nav:" /
-            // "Probe landed:" / "Relay landed:" / "Session confirmed"
-            // sequence; 2026-07-21 (broken) attempts never did, because this
-            // path never called it. Injecting cookies successfully is
-            // necessary but not sufficient for AAP to actually accept the
-            // session -- only the probe/relay checks prove that.
-            //
-            // NOT delegating to ensureAuthenticated() wholesale: its own
-            // internal mwinit auto-spawn is deliberately disabled
-            // (`if (false /* DISABLED: mwinit auto-spawn causes boot loops */)`)
-            // per a prior fix, so calling it alone would silently skip
-            // spawning mwinit here. Keeping the explicit runMwinit() call
-            // below and adding the same probeSession()/pingRelayEndpoint()
-            // verification+retry ensureAuthenticated() does, without its
-            // disabled auto-spawn branch.
-            const { runMwinit, injectCookies, probeSession, pingRelayEndpoint } = _getAuth();
-
-            // ATTEMPT 1: standard mwinit
-            await runMwinit();
-            await injectCookies();
-
-            let pageOk = await probeSession();
-            if (!pageOk) {
-              // ATTEMPT 2: force mwinit (-f) clears stale server-side session.
-              // Fixes the "AAP rejected session" startup blocker that required
-              // manual mwinit -f + restart. Now happens automatically.
-              logger.warn('[auth-poll] probeSession failed after standard mwinit -- retrying with mwinit -f');
-              pushStatus('\uD83D\uDD04 Session still rejected -- retrying with mwinit -f (tap WebAuthn again)...');
-              await runMwinit(true);
-              await injectCookies();
-              pageOk = await probeSession();
+            // FIX (2026-10-10): an SSO loop is MOST OFTEN just an expired
+            // short-lived AEA token while the ~24h session cookie is still
+            // valid — NOT a dead session. Historically this path jumped
+            // straight to interactive mwinit (a WebAuthn tap) on EVERY loop,
+            // which is exactly why a single auth "didn't last 20h": every time
+            // AEA lapsed (~2-6h) the user got prompted again. Try the SILENT
+            // AEA re-mint FIRST (Midway OIDC handshake, no tap). If it lands on
+            // AAP, the session was fine — reload AAP and carry on with NO
+            // prompt. Only if the silent refresh fails (session genuinely dead)
+            // do we fall through to the interactive mwinit ladder below.
+            const { refreshAeaSilently } = _getAuth();
+            pushStatus('\uD83D\uDD04 Refreshing Midway session silently\u2026');
+            const silent = await refreshAeaSilently();
+            if (silent && silent.ok) {
+              logger.info('[auth-poll] SSO loop resolved by SILENT AEA refresh (no prompt) \u2014 reloading AAP');
+              pushStatus('\u2705 Session refreshed \u2014 no sign-in needed');
+              _ssoCount = 0;
+              _mwinitRunning = false;
+              mainWindow.loadURL(startUrl);
+              return;
             }
-            if (!pageOk) throw new Error('AAP rejected session after mwinit -f -- check VPN/network and restart');
-
-            let relayOk = await pingRelayEndpoint();
-            if (!relayOk) {
-              logger.warn('[auth-poll] Relay check failed -- re-injecting and retrying');
-              await injectCookies();
-              relayOk = await pingRelayEndpoint();
-            }
-            if (!relayOk) throw new Error('AAP relay rejected session -- try restarting the app');
-
-            logger.info('[auth-poll] session verified (page + relay probes passed) \u2014 reloading AAP');
-            pushStatus('\u2705 Midway auth complete \u2014 reloading AAP...');
-            mainWindow.loadURL(startUrl);
+            logger.warn('[auth-poll] Silent AEA refresh did not resolve the loop \u2014 session genuinely expired, launching mwinit');
           } catch (e) {
-            logger.error('[auth-poll] mwinit/verification failed:', e.message);
+            logger.warn('[auth-poll] Silent AEA refresh threw (' + e.message + ') \u2014 falling back to mwinit');
+          }
+          logger.warn('[auth-poll] SSO redirect loop \u2014 escalating via centralized recovery ladder');
+          pushStatus('\uD83D\uDD11 Resolving Midway session\u2026');
+          try {
+            // Route through the ONE centralized ladder (auth.recoverAuth): it
+            // re-checks offline/VPN, tries the silent AEA refresh again, and only
+            // prompts mwinit as the true last rung — then verifies via probe +
+            // relay before we reload AAP. This replaces the hand-rolled
+            // runMwinit -> probe -> mwinit -f -> relay sequence that used to live
+            // here (and diverged from the other callers' copies of it). If
+            // recoverAuth is unavailable for any reason, fall back to the old
+            // explicit sequence so this path can never silently do nothing.
+            const _auth = _getAuth();
+            if (_auth.recoverAuth) {
+              const res = await _auth.recoverAuth('auth-poll:sso-loop');
+              if (res && res.recovered) {
+                logger.info('[auth-poll] recovered via ladder (rung=' + res.rung + ') \u2014 reloading AAP');
+                pushStatus(res.prompted ? '\u2705 Midway auth complete \u2014 reloading AAP...' : '\u2705 Session refreshed \u2014 reloading AAP...');
+                mainWindow.loadURL(startUrl);
+              } else {
+                logger.warn('[auth-poll] ladder did not recover (rung=' + (res && res.rung) + ') \u2014 will retry on next poll');
+                if (res && res.rung === 'offline') pushStatus('\uD83D\uDCF6 Offline \u2014 will resume when the connection returns');
+              }
+            } else {
+              const { runMwinit, injectCookies, probeSession, pingRelayEndpoint } = _auth;
+              await runMwinit();
+              await injectCookies();
+              let pageOk = await probeSession();
+              if (!pageOk) { await runMwinit(true); await injectCookies(); pageOk = await probeSession(); }
+              if (!pageOk) throw new Error('AAP rejected session after mwinit -f -- check VPN/network and restart');
+              let relayOk = await pingRelayEndpoint();
+              if (!relayOk) { await injectCookies(); relayOk = await pingRelayEndpoint(); }
+              if (!relayOk) throw new Error('AAP relay rejected session -- try restarting the app');
+              mainWindow.loadURL(startUrl);
+            }
+          } catch (e) {
+            logger.error('[auth-poll] recovery failed:', e.message);
             pushError('\u26A0\uFE0F ' + e.message);
           }
         }

@@ -153,18 +153,53 @@ function gatherOperatorFacts(operator, cfg) {
   const addrMap = _domicileAddressMap();
   const domicileCode = (r) => String(r.domicileSite || '').trim().toUpperCase();
 
+  // Canonical state accessor — the single reconciled truth per unit. Required
+  // lazily so this module stays testable without the orcha stack.
+  let _canon; try { _canon = require('../orcha/canonical_state'); } catch (_) { _canon = null; }
+
   const down = rows.filter(_isDown).map((r) => {
     const code = domicileCode(r);
     const loc = addrMap[code] || '';
+    const reason = String(r.lifecycleReason || r.issueDetails || '').trim();
+    const latestUpdate = _latestTimelineLine(r);
+    // Canonical record (reconciled status/situation/next-step/stale). null for
+    // units not yet reconciled — the raw reason/timeline below then stand alone.
+    const canon = _canon ? _canon.getCanonical(r) : null;
     return {
       unit: String(r.equipmentId || '').trim(),
-      reason: String(r.lifecycleReason || r.issueDetails || '').trim(),
+      reason,
+      // Quick issue summary — a short "what's actually wrong" line. Prefers the
+      // AI-written issue summary, then the raw relay Issue Details. De-duped so
+      // it is NOT just a copy of the short lifecycle reason or the latest
+      // timeline update already shown. "" when nothing distinct is on file.
+      issueSummary: _issueSummary(r, reason, latestUpdate),
+      // Latest repair-timeline entry (the day-by-day narrative; last line is
+      // the most recent update). Falls back to the saved issue summary when no
+      // timeline exists yet. "" when neither is on file (never guessed).
+      latestUpdate,
       domicile: code,
       location: loc, // "" when no Contact Book address on file (never guessed)
+      // Canonical state fields — "" / false when no record yet (never guessed).
+      canonStatus: canon ? (_canon.statusLabel(canon.status)) : '',
+      canonNextStep: canon ? String(canon.nextStep || '').trim() : '',
+      canonStale: !!(canon && canon.stale),
+      canonWaitingOn: canon ? String(canon.waitingOn || '').trim() : '',
     };
   }).filter((d) => d.unit);
 
-  const flaggedCount = rows.filter((r) => !_isDown(r) && Number(r.riskScore || 0) >= threshold).length;
+  // Flagged (elevated-risk) units — now a LIST (unit + score + why), not just a
+  // count, so the briefing can name which units and the risk reason.
+  const flagged = rows
+    .filter((r) => !_isDown(r) && Number(r.riskScore || 0) >= threshold)
+    .map((r) => ({
+      unit: String(r.equipmentId || '').trim(),
+      score: Number(r.riskScore || 0),
+      reason: _riskReason(r),
+      domicile: domicileCode(r),
+    }))
+    .filter((f) => f.unit)
+    .sort((a, b) => b.score - a.score);
+  const flaggedCount = flagged.length;
   const activeCount = rows.filter((r) => !_isDown(r)).length;
 
   const domicileSet = new Map(); // code -> loc
@@ -181,11 +216,59 @@ function gatherOperatorFacts(operator, cfg) {
     totalUnits: rows.length,
     down,
     downCount: down.length,
+    flagged,
     flaggedCount,
     activeCount,
     domiciles,
     riskThreshold: threshold,
   };
+}
+
+// Most recent repair-timeline line for a unit (timeline is appended oldest ->
+// newest, so the LAST non-empty line is the latest update). Falls back to the
+// saved issue summary, then empty string. Trimmed to a Slack-friendly length.
+function _latestTimelineLine(r) {
+  const tl = String(r.repairTimeline || '').trim();
+  if (tl) {
+    const lines = tl.split('\n').map((s) => s.trim()).filter(Boolean);
+    if (lines.length) return lines[lines.length - 1].slice(0, 180);
+  }
+  const summary = String(r.issueSummary || r.savedNotes || '').trim();
+  return summary ? summary.slice(0, 180) : '';
+}
+
+// Quick "what's wrong" summary for a down unit. Prefers the AI-written issue
+// summary, then the raw relay Issue Details. Returns "" when the only text
+// available is already being shown as the short lifecycle reason or the latest
+// timeline update (so we don't print the same sentence twice). Trimmed to a
+// Slack-friendly length. Never invents — only uses fields present on the row.
+function _issueSummary(r, reason, latestUpdate) {
+  const raw = String(r.issueSummary || r.issueDetails || '').trim();
+  if (!raw) return '';
+  const summary = raw.slice(0, 220);
+  const norm = (s) => String(s || '').trim().toLowerCase();
+  const s = norm(summary);
+  // Skip if it's effectively the same text we already surface elsewhere.
+  if (s && (s === norm(reason) || s === norm(latestUpdate))) return '';
+  return summary;
+}
+
+// Human-readable "why flagged" for a risk unit: prefer the top Uptake insight
+// (title / subsystem), then the risk label, then a generic phrasing. Never
+// invents — only uses fields actually present on the row.
+function _riskReason(r) {
+  const insights = Array.isArray(r.insightsList) ? r.insightsList : [];
+  const active = insights.find((i) => i && (i.stillActive === undefined || i.stillActive)) || insights[0];
+  if (active) {
+    const title = String(active.title || '').trim();
+    const sub = String(active.subsystem || '').trim();
+    if (title && sub) return title + ' (' + sub + ')';
+    if (title) return title;
+    if (sub) return sub + ' alert';
+  }
+  const label = String(r.riskLabel || '').trim();
+  if (label) return label + ' risk';
+  return 'elevated predictive risk';
 }
 
 // ── Prompt (AI writes the whole message) ──────────────────────────────────────
@@ -201,17 +284,33 @@ function buildBriefingPrompt(facts, cfg, ownerTag, dateStr) {
 
   if (cfg.includeDown) {
     if (facts.downCount) {
-      lines.push('- Units currently DOWN (' + facts.downCount + '):');
+      lines.push('- Units currently DOWN (' + facts.downCount + '). For EACH, show the unit, its reason for being down, the domicile, a quick issue summary (when given), AND the latest update exactly as given (do not rephrase the latest update beyond light cleanup):');
       facts.down.forEach((d) => {
         const where = d.location ? (d.domicile + ' (' + d.location + ')') : d.domicile;
-        lines.push('    • ' + d.unit + (d.reason ? ' — ' + d.reason : '') + (where ? ' · ' + where : ''));
+        let line = '    • ' + d.unit + (d.reason ? ' — ' + d.reason : '') + (where ? ' · ' + where : '');
+        // Canonical state — the reconciled status + next step for this unit.
+        // When present it is the authoritative "where it stands"; show it so the
+        // partner sees one consistent status (never contradicting the raw lines).
+        if (d.canonStatus) line += '\n        Status: ' + d.canonStatus + (d.canonStale ? ' (no recent update)' : '');
+        if (d.canonNextStep) line += '\n        Next step: ' + d.canonNextStep;
+        if (d.issueSummary) line += '\n        Issue: ' + d.issueSummary;
+        if (d.latestUpdate) line += '\n        Latest update: ' + d.latestUpdate;
+        lines.push(line);
       });
     } else {
       lines.push('- Units currently DOWN: none (all units are running).');
     }
   }
   if (cfg.includeFlagged) {
-    lines.push('- Units flagged this week (risk score >= ' + facts.riskThreshold + '): ' + facts.flaggedCount + '.');
+    if (facts.flaggedCount) {
+      lines.push('- Units flagged this week with elevated risk (risk score >= ' + facts.riskThreshold + '). List EACH flagged unit with its risk score and the reason, then remind the partner to ensure a pre-trip inspection before dispatch:');
+      facts.flagged.forEach((f) => {
+        const where = f.domicile ? ' · ' + f.domicile : '';
+        lines.push('    • ' + f.unit + ' (risk ' + f.score + ')' + (f.reason ? ' — ' + f.reason : '') + where);
+      });
+    } else {
+      lines.push('- Units flagged this week (risk score >= ' + facts.riskThreshold + '): none.');
+    }
   }
   if (cfg.includeActive) {
     lines.push('- Active units: ' + facts.activeCount + ' (of ' + facts.totalUnits + ' total).');
@@ -233,7 +332,7 @@ function buildBriefingPrompt(facts, cfg, ownerTag, dateStr) {
   lines.push('MUST NOT:');
   lines.push('- Mention "Z", "Zila", "FAS", the internal requester, or any internal-only names/roles.');
   lines.push('- Invent any unit, count, address, date, price, or reason not listed above.');
-  lines.push('- Exceed ~10 short lines.');
+  lines.push('- Drop or summarize-away the per-unit detail — every down unit must show its reason, its quick issue summary (when one is given), AND its latest update; every flagged unit must show its score + reason. Length is fine; completeness matters more than brevity here.');
 
   if (cfg.tipEnabled) {
     const recent = _recentTips();
@@ -276,13 +375,29 @@ function _fallbackMessage(facts, cfg, ownerTag) {
   else parts.push(':sunny: Good morning — ' + facts.operator + ' fleet snapshot:');
   if (cfg.includeDown) {
     if (facts.downCount) {
-      parts.push(':red_circle: ' + facts.downCount + ' unit(s) down: ' +
-        facts.down.map((d) => d.unit + (d.reason ? ' (' + d.reason + ')' : '')).join(', '));
+      parts.push(':red_circle: ' + facts.downCount + ' unit(s) down:');
+      facts.down.forEach((d) => {
+        let line = '• ' + d.unit + (d.reason ? ' — ' + d.reason : '') + (d.domicile ? ' · ' + d.domicile : '');
+        if (d.canonStatus) line += '\n   Status: ' + d.canonStatus + (d.canonStale ? ' (no recent update)' : '');
+        if (d.canonNextStep) line += '\n   Next step: ' + d.canonNextStep;
+        if (d.issueSummary) line += '\n   Issue: ' + d.issueSummary;
+        if (d.latestUpdate) line += '\n   Latest: ' + d.latestUpdate;
+        parts.push(line);
+      });
     } else {
       parts.push(':green_circle: All units active — nothing down.');
     }
   }
-  if (cfg.includeFlagged) parts.push(':large_yellow_circle: ' + facts.flaggedCount + ' flagged this week (risk >= ' + facts.riskThreshold + ').');
+  if (cfg.includeFlagged) {
+    if (facts.flaggedCount) {
+      parts.push(':large_yellow_circle: ' + facts.flaggedCount + ' flagged this week (risk >= ' + facts.riskThreshold + ') — ensure pre-trip inspections before dispatch:');
+      facts.flagged.forEach((f) => {
+        parts.push('• ' + f.unit + ' (risk ' + f.score + ')' + (f.reason ? ' — ' + f.reason : ''));
+      });
+    } else {
+      parts.push(':large_yellow_circle: 0 flagged this week (risk >= ' + facts.riskThreshold + ').');
+    }
+  }
   if (cfg.includeActive) parts.push(':green_circle: ' + facts.activeCount + ' active units.');
   if (cfg.includeDomiciles && facts.domiciles.length) {
     parts.push(':round_pushpin: Domiciles: ' + facts.domiciles.map((d) => d.location ? (d.code + ' (' + d.location + ')') : d.code).join(', '));

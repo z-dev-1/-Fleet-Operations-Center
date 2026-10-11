@@ -90,20 +90,43 @@ const ASIST_SCRAPE = String.raw`
   // text, so the single most important update (repairs done, come get it) never
   // reached the timeline. Capture that text explicitly here.
   var responsesText = '';
+  // (a) Known container id (confirmed on some variants).
   var _respEl = document.getElementById('service_request_responses');
   if (_respEl && _respEl.innerText) responsesText = _respEl.innerText;
-  if (!responsesText) {
-    // Fallback: no known container id -> scan blocks for status-note keywords
-    // and keep the surrounding text. Covers ASIST page variants (Volvo/PACCAR).
-    var _statusRe = /(asset\s+is\s+ready|asset\s+ready|repairs?\s+(are\s+)?completed|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|case\s+status\s+set\s+to|work\s+order\s+completed|unit\s+is\s+ready)/i;
+  // (b) WIDENED (2026-10): the dated vendor<->us RESPONSE entries (the real
+  // back-and-forth: "Jose Mallen - Hunter Truck ... to Z SANTIAGO - Amazon
+  // Logistics / <date> / <message>") don't always live under that id. Try a set
+  // of candidate containers whose class/id looks like a responses/conversation
+  // feed, and keep the richest (longest) innerText. This is what lets the
+  // reconcile AI see who actually spoke last.
+  if (responsesText.length < 200) {
+    var _candSel = ['[id*=response]','[class*=response]','[id*=conversation]',
+                    '[class*=conversation]','[class*=comment]','[class*=message]',
+                    '[class*=thread]','[class*=activity]','[class*=feed]'];
+    var _best = responsesText;
+    for (var _ci = 0; _ci < _candSel.length; _ci++) {
+      var _els = document.querySelectorAll(_candSel[_ci]);
+      for (var _ei = 0; _ei < _els.length; _ei++) {
+        var _t = (_els[_ei] && _els[_ei].innerText) ? _els[_ei].innerText : '';
+        // Prefer blocks that actually look like a dated exchange.
+        if (_t.length > _best.length &&
+            /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d|\d{1,2}\/\d{1,2}\/\d{2,4}/.test(_t)) {
+          _best = _t;
+        }
+      }
+    }
+    if (_best.length > responsesText.length) responsesText = _best;
+  }
+  // (c) Keyword-window fallback — status phrases, keep the note + its date.
+  if (responsesText.length < 60) {
+    var _statusRe = /(asset\s+is\s+ready|asset\s+ready|repairs?\s+(are\s+)?completed|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|case\s+status\s+set\s+to|work\s+order\s+completed|unit\s+is\s+ready|freight|back\s*order|parts?\s+(on\s+order|ordered)|please\s+advise)/i;
     if (_statusRe.test(body)) {
-      // Grab a window of text around the first match so we keep the note + its date.
       var _mi = body.search(_statusRe);
-      var _from = Math.max(0, _mi - 300);
-      responsesText = body.slice(_from, _mi + 700);
+      var _from = Math.max(0, _mi - 400);
+      responsesText = body.slice(_from, _mi + 900);
     }
   }
-  responsesText = String(responsesText || '').replace(/\s+\n/g, '\n').trim().slice(0, 4000);
+  responsesText = String(responsesText || '').replace(/\s+\n/g, '\n').trim().slice(0, 6000);
   return{currentUrl:location.href,estimateLinks:estimateLinks,caseLinks:caseLinks,srLinks:srLinks,responseCaseLinks:responseCaseLinks,caseNumbers:caseNumbers,srNumbers:srNumbers,srStatus:rf('Status'),dealer:dealerName,complaint:rf('Complaint'),assetVin:rf('VIN'),unitNumber:rf('Unit Number'),responsesText:responsesText,pageText:body.substring(0,12000),pageReady:body.length>300};
 })()
 `;

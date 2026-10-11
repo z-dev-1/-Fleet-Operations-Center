@@ -680,14 +680,24 @@ async function resolveServiceUUID(equipmentId, partition) {
 
 // Pick best offsite URL — prefer estimates over service_requests, DTNA always wins for its domain.
 // No vendor-name dependency: trigger on URL presence alone.
+//
+// NEWEST-WINS (2026-10): the links are collected by scanning the Relay
+// conversation top-to-bottom, and that feed is OLDEST-FIRST, so when a unit's
+// offsite case is CANCELLED and a NEW one is opened the newer estimate/SR link
+// appears LATER in the comments. Picking [0] (the first/oldest) left Split View
+// pointing at the dead case (observed on 322468: stored the cancelled
+// 21262927 even though the live 21318595 was right there in the comments).
+// Prefer the LAST (most recent) link of each kind so we follow the current
+// case. Preference order between kinds (estimate > request > dtna) is unchanged.
 function pickOffsiteFromConversation(convData) {
   if (!convData) return null;
-  // Decisiv estimates (preferred)
-  if (convData.estimateLinks && convData.estimateLinks.length) return convData.estimateLinks[0];
-  // Decisiv service_requests (fallback)
-  if (convData.requestLinks  && convData.requestLinks.length)  return convData.requestLinks[0];
-  // DTNA Servicetracker
-  if (convData.dtnaLinks     && convData.dtnaLinks.length)     return convData.dtnaLinks[0];
+  const last = (arr) => (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null;
+  // Decisiv estimates (preferred) — newest in the thread.
+  if (convData.estimateLinks && convData.estimateLinks.length) return last(convData.estimateLinks);
+  // Decisiv service_requests (fallback) — newest in the thread.
+  if (convData.requestLinks  && convData.requestLinks.length)  return last(convData.requestLinks);
+  // DTNA Servicetracker — newest in the thread.
+  if (convData.dtnaLinks     && convData.dtnaLinks.length)     return last(convData.dtnaLinks);
   return null;
 }
 
@@ -1491,4 +1501,4 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
   });
 }
 
-module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage };
+module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage, pickOffsiteFromConversation };
