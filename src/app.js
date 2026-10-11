@@ -421,20 +421,28 @@ app.whenReady().then(async () => {
         }
 
         if (state.ok && state.expiresInMin !== null && state.expiresInMin < 15) {
-          log.info('[midway] Cookies expire in ' + state.expiresInMin + 'min -- auto-renewing');
+          // The ~24h session cookie itself is about to expire — that genuinely
+          // needs a fresh mwinit. Route through the ladder (it'll land on the
+          // mwinit rung since the session is near-dead) so offline/VPN are still
+          // honored first instead of prompting into a dead network.
+          log.info('[midway] Session cookie expires in ' + state.expiresInMin + 'min -- recovering');
           _midwayRenewalInFlight = true;
           _send('app:midway-renewing', { expiresIn: state.expiresInMin });
-          await _authModule.runMwinit();
-          await _authModule.injectCookies();
-          log.info('[midway] Auto-renewed successfully');
-          _send('app:midway-renewed', {});
+          const res = _authModule.recoverAuth
+            ? await _authModule.recoverAuth('heartbeat:session-expiring')
+            : (await _authModule.runMwinit(), await _authModule.injectCookies(), { recovered: true });
+          if (res && res.recovered) _send('app:midway-renewed', {});
         } else if (!state.ok) {
-          log.warn('[midway] Cookies expired -- launching mwinit');
+          // On-disk session genuinely expired. Route through the ladder — it
+          // defers silently if offline/VPN-down and only prompts mwinit as the
+          // true last rung.
+          log.warn('[midway] Session cookie expired -- recovering via ladder');
           _midwayRenewalInFlight = true;
           _send('app:midway-expired', {});
-          await _authModule.runMwinit();
-          await _authModule.injectCookies();
-          _send('app:midway-renewed', {});
+          const res = _authModule.recoverAuth
+            ? await _authModule.recoverAuth('heartbeat:session-expired')
+            : (await _authModule.runMwinit(), await _authModule.injectCookies(), { recovered: true });
+          if (res && res.recovered) _send('app:midway-renewed', {});
         }
       } catch (e) {
         log.error('[midway] Auto-refresh failed: ' + e.message);

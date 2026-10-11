@@ -1109,63 +1109,42 @@ function initWindows(ctx) {
           } catch (e) {
             logger.warn('[auth-poll] Silent AEA refresh threw (' + e.message + ') \u2014 falling back to mwinit');
           }
-          logger.warn('[auth-poll] SSO redirect loop \u2014 launching mwinit terminal');
-          pushStatus('\uD83D\uDD11 Session expired \u2014 complete Midway auth in the terminal window...');
+          logger.warn('[auth-poll] SSO redirect loop \u2014 escalating via centralized recovery ladder');
+          pushStatus('\uD83D\uDD11 Resolving Midway session\u2026');
           try {
-            // FIX (2026-07-21): this recovery path was calling runMwinit() +
-            // injectCookies() directly, then doing a raw mainWindow.loadURL()
-            // with NO verification and NO retry -- a materially weaker flow
-            // than src/scrapers/auth.js's ensureAuthenticated(), which does
-            // inject -> verify via a real probe-window navigation -> verify
-            // via a relay-endpoint ping -> automatically retry injection once
-            // if the relay check fails. Confirmed via logs/auth.log:
-            // 2026-07-20 (working) sessions all logged the full "nav:" /
-            // "Probe landed:" / "Relay landed:" / "Session confirmed"
-            // sequence; 2026-07-21 (broken) attempts never did, because this
-            // path never called it. Injecting cookies successfully is
-            // necessary but not sufficient for AAP to actually accept the
-            // session -- only the probe/relay checks prove that.
-            //
-            // NOT delegating to ensureAuthenticated() wholesale: its own
-            // internal mwinit auto-spawn is deliberately disabled
-            // (`if (false /* DISABLED: mwinit auto-spawn causes boot loops */)`)
-            // per a prior fix, so calling it alone would silently skip
-            // spawning mwinit here. Keeping the explicit runMwinit() call
-            // below and adding the same probeSession()/pingRelayEndpoint()
-            // verification+retry ensureAuthenticated() does, without its
-            // disabled auto-spawn branch.
-            const { runMwinit, injectCookies, probeSession, pingRelayEndpoint } = _getAuth();
-
-            // ATTEMPT 1: standard mwinit
-            await runMwinit();
-            await injectCookies();
-
-            let pageOk = await probeSession();
-            if (!pageOk) {
-              // ATTEMPT 2: force mwinit (-f) clears stale server-side session.
-              // Fixes the "AAP rejected session" startup blocker that required
-              // manual mwinit -f + restart. Now happens automatically.
-              logger.warn('[auth-poll] probeSession failed after standard mwinit -- retrying with mwinit -f');
-              pushStatus('\uD83D\uDD04 Session still rejected -- retrying with mwinit -f (tap WebAuthn again)...');
-              await runMwinit(true);
+            // Route through the ONE centralized ladder (auth.recoverAuth): it
+            // re-checks offline/VPN, tries the silent AEA refresh again, and only
+            // prompts mwinit as the true last rung — then verifies via probe +
+            // relay before we reload AAP. This replaces the hand-rolled
+            // runMwinit -> probe -> mwinit -f -> relay sequence that used to live
+            // here (and diverged from the other callers' copies of it). If
+            // recoverAuth is unavailable for any reason, fall back to the old
+            // explicit sequence so this path can never silently do nothing.
+            const _auth = _getAuth();
+            if (_auth.recoverAuth) {
+              const res = await _auth.recoverAuth('auth-poll:sso-loop');
+              if (res && res.recovered) {
+                logger.info('[auth-poll] recovered via ladder (rung=' + res.rung + ') \u2014 reloading AAP');
+                pushStatus(res.prompted ? '\u2705 Midway auth complete \u2014 reloading AAP...' : '\u2705 Session refreshed \u2014 reloading AAP...');
+                mainWindow.loadURL(startUrl);
+              } else {
+                logger.warn('[auth-poll] ladder did not recover (rung=' + (res && res.rung) + ') \u2014 will retry on next poll');
+                if (res && res.rung === 'offline') pushStatus('\uD83D\uDCF6 Offline \u2014 will resume when the connection returns');
+              }
+            } else {
+              const { runMwinit, injectCookies, probeSession, pingRelayEndpoint } = _auth;
+              await runMwinit();
               await injectCookies();
-              pageOk = await probeSession();
+              let pageOk = await probeSession();
+              if (!pageOk) { await runMwinit(true); await injectCookies(); pageOk = await probeSession(); }
+              if (!pageOk) throw new Error('AAP rejected session after mwinit -f -- check VPN/network and restart');
+              let relayOk = await pingRelayEndpoint();
+              if (!relayOk) { await injectCookies(); relayOk = await pingRelayEndpoint(); }
+              if (!relayOk) throw new Error('AAP relay rejected session -- try restarting the app');
+              mainWindow.loadURL(startUrl);
             }
-            if (!pageOk) throw new Error('AAP rejected session after mwinit -f -- check VPN/network and restart');
-
-            let relayOk = await pingRelayEndpoint();
-            if (!relayOk) {
-              logger.warn('[auth-poll] Relay check failed -- re-injecting and retrying');
-              await injectCookies();
-              relayOk = await pingRelayEndpoint();
-            }
-            if (!relayOk) throw new Error('AAP relay rejected session -- try restarting the app');
-
-            logger.info('[auth-poll] session verified (page + relay probes passed) \u2014 reloading AAP');
-            pushStatus('\u2705 Midway auth complete \u2014 reloading AAP...');
-            mainWindow.loadURL(startUrl);
           } catch (e) {
-            logger.error('[auth-poll] mwinit/verification failed:', e.message);
+            logger.error('[auth-poll] recovery failed:', e.message);
             pushError('\u26A0\uFE0F ' + e.message);
           }
         }
