@@ -1417,10 +1417,15 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
     // forever. Suppress the stored timeline for such units (the authoritative
     // archive-and-clear happens in repair-history.detectTransitions; this is the
     // safety gate that also covers units that returned BEFORE that ran).
+    // "In service" = AAP says available/active/in service/ready and NOT unavail
+    // (matches canonical_state.js's available test — AAP uses "Active" for a
+    // returned-to-service unit, not "Available", so an includes('avail') test
+    // alone misses them). No open WO = unplanned + planned both 0 (AAP writes
+    // "--" when none, which parseInt -> NaN -> 0), and no live Relay WR.
     const _lc = String(row.lifecycleState || row.atsState || '').toLowerCase();
-    const _isAvail = _lc.includes('avail') && !_lc.includes('unavail');
+    const _isInService = /avail|active|in service|ready/.test(_lc) && !_lc.includes('unavail');
     const _openWR = (parseInt(row.openUnplanned, 10) || 0) + (parseInt(row.openPlanned, 10) || 0);
-    const _activeNoWR = _isAvail && _openWR === 0 && !r.serviceUrl && !r.workRequestId;
+    const _activeNoWR = _isInService && _openWR === 0 && !r.serviceUrl && !r.workRequestId;
 
     return {
       ...row,

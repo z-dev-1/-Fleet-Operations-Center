@@ -19,13 +19,52 @@ const logger = require('../utils/logger')('repair-history');
 const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000;
 
 /**
- * Get all repair history for a unit
+ * Get all repair history for a unit.
+ *
+ * Merges two sources, both filtered to the last 3 months:
+ *  1. The structured repairHistory store ({date,summary,vendor,duration,
+ *     outcome,ts} events written by deep-scan + closeRepair).
+ *  2. ARCHIVED repair timelines (notesStore[id].timelineArchive[]) — when a
+ *     unit returns to service its live timeline is archived (archiveAndClear
+ *     Timeline) and removed from the Repair tab. The History tab is where that
+ *     repair narrative belongs, so each archived "MM/DD - text" line is surfaced
+ *     here as a history event (outcome 'completed', since the repair is closed).
+ *     Without this the archived narrative was written but never shown anywhere.
  */
 function getUnitHistory(equipmentId) {
+  const cutoff = Date.now() - THREE_MONTHS_MS;
   const all = store.load('repairHistory', {});
-  return (all[equipmentId] || []).filter(function(e) {
-    return (Date.now() - e.ts) < THREE_MONTHS_MS;
-  });
+  const events = (all[equipmentId] || []).filter(function(e) { return e.ts > cutoff; });
+
+  // Fold in archived timeline lines (best-effort; never throw).
+  try {
+    const ns = store.load('notesStore', {});
+    const u = ns[equipmentId];
+    const archives = (u && Array.isArray(u.timelineArchive)) ? u.timelineArchive : [];
+    const thisYear = new Date().getFullYear();
+    for (const arc of archives) {
+      const closedTs = arc.closedAt ? new Date(arc.closedAt).getTime() : Date.now();
+      String(arc.timeline || '').split('\n').forEach(function(line) {
+        const m = line.trim().match(/^(\d{1,2})\/(\d{1,2})\s*[-\u2013]\s*(.+)$/);
+        if (!m) return;
+        // Date the entry by its MM/DD (assume the archive's year), fall back to closedAt.
+        let ts = new Date(thisYear, parseInt(m[1], 10) - 1, parseInt(m[2], 10)).getTime();
+        if (isNaN(ts) || ts > Date.now() + 86400000) ts = closedTs;
+        if (ts <= cutoff) return;
+        events.push({
+          date: (m[1].padStart(2, '0')) + '/' + (m[2].padStart(2, '0')),
+          summary: m[3].trim().substring(0, 120),
+          vendor: '',
+          duration: '',
+          outcome: 'completed',
+          ts: ts,
+          _archived: true,
+        });
+      });
+    }
+  } catch (_) { /* archived timeline is a bonus source — never block history */ }
+
+  return events;
 }
 
 /**
@@ -115,6 +154,46 @@ function closeRepair(equipmentId, details) {
   archiveAndClearTimeline(equipmentId);
 }
 
+// Is this row currently in service with no open work order? AAP uses "Active"
+// (not "Available") for a returned-to-service unit, and writes "--" for zero
+// open WOs (parseInt -> NaN -> 0). Matches the gate in relay.mergeRelayIntoRows.
+function _isInServiceNoWR(r) {
+  const lc = String((r && (r.lifecycleState || r.atsState)) || '').toLowerCase();
+  const inService = /avail|active|in service|ready/.test(lc) && !lc.includes('unavail');
+  const openWR = (parseInt(r && r.openUnplanned, 10) || 0) + (parseInt(r && r.openPlanned, 10) || 0);
+  return inService && openWR === 0 && !(r && r.serviceUrl) && !(r && r.workRequestId);
+}
+
+/**
+ * sweepReturnedUnits(rows) — stateless cleanup run on every sync. Any unit that
+ * is currently in service with NO open work order but STILL has a stored repair
+ * timeline gets archived + cleared (so the narrative moves to the History tab
+ * instead of lingering on the Repair tab). Unlike detectTransitions this needs
+ * no previous-row comparison, so it also fixes units that returned to service
+ * BEFORE this logic existed (or across an app restart, where _prevRows is lost).
+ * Idempotent — archiveAndClearTimeline no-ops once the timeline is empty.
+ */
+function sweepReturnedUnits(currentRows) {
+  if (!Array.isArray(currentRows) || !currentRows.length) return 0;
+  let cleared = 0;
+  try {
+    const ns = store.load('notesStore', {});
+    for (const r of currentRows) {
+      if (!r || !r.equipmentId) continue;
+      const u = ns[r.equipmentId];
+      if (!u || !u.timeline || !u.timeline.trim()) continue; // nothing stored to clear
+      if (_isInServiceNoWR(r)) {
+        archiveAndClearTimeline(r.equipmentId);
+        cleared++;
+      }
+    }
+  } catch (e) {
+    logger.warn('sweepReturnedUnits failed (non-fatal): ' + e.message);
+  }
+  if (cleared) logger.info('sweepReturnedUnits archived + cleared ' + cleared + ' returned-to-service timeline(s)');
+  return cleared;
+}
+
 /**
  * Check for status transitions (call on every sync)
  * Detects units that went from unavailable to available
@@ -159,4 +238,4 @@ function getAllHistory() {
   return all;
 }
 
-module.exports = { getUnitHistory, addEvent, closeRepair, detectTransitions, getAllHistory, archiveAndClearTimeline };
+module.exports = { getUnitHistory, addEvent, closeRepair, detectTransitions, getAllHistory, archiveAndClearTimeline, sweepReturnedUnits };

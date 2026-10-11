@@ -218,6 +218,11 @@ function process(rows, send, opts) {
 
   // Detect repair completions (unavail -> available transitions)
   try { repairHistory.detectTransitions(rows, global._prevRows || []); } catch (e) {}
+  // Stateless sweep: archive + clear the stored timeline of any unit that is now
+  // in service with no open WO but still carries one (covers units that returned
+  // BEFORE transition-detection existed, or across a restart where _prevRows is
+  // lost). The archived narrative shows up in the unit's History tab.
+  try { repairHistory.sweepReturnedUnits(rows); } catch (e) {}
   global._prevRows = rows;
 
   // System health — REAL snapshot of live integration state (relay/AI, Midway
