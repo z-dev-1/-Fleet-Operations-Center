@@ -951,6 +951,10 @@ function renderHeader(unit){
     aapUrl?'<button class="dp-launcher" title="Open AAP" data-aap-url="'+aapUrl+'">\ud83d\udd17 AAP</button>':'',
     relayUrl?'<button class="dp-launcher" title="Open Relay WR" data-ext-url="'+relayUrl+'">\ud83d\udcc4 Relay</button>':'',
     offsiteUrl?'<button class="dp-launcher" title="Open Offsite Portal" data-ext-url="'+offsiteUrl+'">\ud83c\udfe6 Portal</button>':'',
+    // Daily Notes launcher: opens Relay + Offsite together in ONE inline split
+    // panel (single close button) via _openInlineSplit — no more two separate
+    // windows to close individually.
+    (relayUrl||offsiteUrl)?'<button id="dp-launch-daily" class="dp-launcher" title="Open Relay + Offsite side-by-side (Daily Notes)">\ud83d\udccb Daily</button>':'',
   ].filter(Boolean).join('');
 
   return '<div class="dp-header dp-header--'+hdrCls+'">'+
@@ -1174,6 +1178,41 @@ async function _injectAISplitDraft(webview, unit, side) {
     console.warn('[split-view] AI draft failed (' + side + '):', e.message);
     webview.executeJavaScript('(function(){var ind=document.getElementById("ai-draft-indicator");if(ind){ind.textContent="⚠️ AI unavailable — using template";setTimeout(function(){ind.remove();},3000);}})()').catch(function(){});
   }
+}
+
+// _openDailySplit(unit) — the shared "Daily Notes" action: open Relay + Offsite
+// together in ONE inline split panel (single close button) instead of two
+// separate OS windows. Mirrors the Repair tab's "Open Split View" button:
+// resolves both URLs, kicks a bounded live re-scrape so drafts are current, and
+// opens the inline split. Used by both the Actions "Daily Notes" button and the
+// header "Daily" launcher.
+function _openDailySplit(unit) {
+  if (!unit) return;
+  var relayUrl = unit.serviceUrl || unit.pageUrl || '';
+  var offsiteUrl = unit.asistSrUrl || unit.savedOffsiteUrl || unit.offsiteShopEventUrl || '';
+  if (!offsiteUrl && unit.offsiteShopEvent && /^\d+$/.test(String(unit.offsiteShopEvent).trim())) {
+    offsiteUrl = 'https://aap-na.corp.amazon.com/v2/offsite-events/' + String(unit.offsiteShopEvent).trim();
+  }
+  if (!relayUrl && !offsiteUrl) {
+    try { toast.show('warn', (unit.equipmentId || 'Unit') + ' — no Relay or Offsite to open', 3000); } catch (_) {}
+    return;
+  }
+  window.__splitUnit = unit;
+  // Live refresh on open (bounded, non-blocking) — same as the Repair split btn.
+  try {
+    if (window.relay && window.relay.refreshUnit) {
+      var _rp = window.relay.refreshUnit(unit.equipmentId, { force: true, reconcile: true })
+        .then(function (r) { return (r && r.ok) ? r : null; })
+        .catch(function () { return null; });
+      window.__splitRefresh = Promise.race([
+        _rp,
+        new Promise(function (res) { setTimeout(function () { res(null); }, 35000); }),
+      ]);
+    } else {
+      window.__splitRefresh = Promise.resolve(null);
+    }
+  } catch (_e) { window.__splitRefresh = Promise.resolve(null); }
+  _openInlineSplit(relayUrl, offsiteUrl, unit.equipmentId);
 }
 
 // ── repair pane ───────────────────────────────────────────────────────────────
@@ -2423,8 +2462,13 @@ function _renderUnit(unit) {
   // ── Daily Notes for this unit ────────────────────────────────────────────
   var actDailyNotes = document.getElementById('dp-act-daily-notes');
   if (actDailyNotes) {
-    actDailyNotes.addEventListener('click', function () { _runDailyNotesForUnit(unit); });
+    actDailyNotes.addEventListener('click', function () { _openDailySplit(unit); });
   }
+
+  // Header "Daily" launcher — same single-panel inline split as the Actions
+  // Daily Notes button (Relay + Offsite together, one close button).
+  var launchDaily = document.getElementById('dp-launch-daily');
+  if (launchDaily) launchDaily.addEventListener('click', function () { _openDailySplit(unit); });
 
   // S28: Orcha Deep Scan button — on-demand AI analysis for this unit
   var actOrchaDeep = document.getElementById('dp-act-orcha-deep');
