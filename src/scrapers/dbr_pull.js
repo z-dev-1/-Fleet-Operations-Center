@@ -259,15 +259,26 @@ function _computeGroup(groupRows, allRowsInGroup) {
 
   const flipUnits = unavail.filter(r => FLIP_SIGNAL.test(_unitText(r))).map(r => r.equipmentId || r.id || '?');
 
-  const unavailRows = unavail.map(r => ({
-    id: r.equipmentId || r.id || '?',
-    text: _unitText(r).trim().substring(0, 900),
-    daysOpen: _parseDaysOpen(r),
-    vendor: (r.vendor && r.vendor !== '--') ? r.vendor : null,
-    repairStatus: r.savedRepairStatus || null,
-    operator: (r.operator || '').toUpperCase().trim() || null,
-    make: (r.make || '').trim() || null,
-  }));
+  // Canonical state accessor — the single reconciled truth per unit. Lazy +
+  // defensive so DBR never fails if the orcha stack is unavailable.
+  let _canon; try { _canon = require('../orcha/canonical_state'); } catch (_) { _canon = null; }
+  const unavailRows = unavail.map(r => {
+    const c = _canon ? _canon.getCanonical(r) : null;
+    return {
+      id: r.equipmentId || r.id || '?',
+      text: _unitText(r).trim().substring(0, 900),
+      daysOpen: _parseDaysOpen(r),
+      vendor: (r.vendor && r.vendor !== '--') ? r.vendor : null,
+      repairStatus: r.savedRepairStatus || null,
+      operator: (r.operator || '').toUpperCase().trim() || null,
+      make: (r.make || '').trim() || null,
+      // Canonical reconciled status/next-step (null when no record yet).
+      canonStatus: c ? String(c.status || '').replace(/_/g, ' ') : null,
+      canonNextStep: c ? (c.nextStep || null) : null,
+      canonWaitingOn: c ? (c.waitingOn || null) : null,
+      canonStale: !!(c && c.stale),
+    };
+  });
 
   return { total, unavailCount: unavail.length, uptime, trends, barriers, flipUnits, unavailRows };
 }
@@ -282,8 +293,11 @@ function _dbrBuildReviewPrompt(label, computed) {
       u.vendor ? `Vendor: ${u.vendor}` : 'Vendor: unassigned',
       (u.daysOpen !== null && u.daysOpen !== undefined) ? `Days down: ${u.daysOpen}` : '',
       u.repairStatus ? `Repair status: ${u.repairStatus}` : '',
+      // Canonical reconciled truth — trust over the raw status when present.
+      u.canonStatus ? `Canonical: ${u.canonStatus}${u.canonStale ? ' (stale)' : ''}${u.canonWaitingOn ? ', waiting on ' + u.canonWaitingOn : ''}` : '',
     ].filter(Boolean).join(' | ');
-    return `[${u.id}]${meta ? ' ' + meta : ''}\n${(u.text || '(no issue text)').substring(0, perUnitBudget)}`;
+    const nextLine = u.canonNextStep ? `\nReconciled next step: ${u.canonNextStep}` : '';
+    return `[${u.id}]${meta ? ' ' + meta : ''}${nextLine}\n${(u.text || '(no issue text)').substring(0, perUnitBudget)}`;
   }).join('\n\n');
 
   return `You are filling in a fleet operations DBR (Daily Business Review) call sheet row for ${label}. You are a SUPPORTING / VERIFICATION source only — never invent information not present in the unit data below.

@@ -551,6 +551,18 @@ function _stripCosts(text) {
 // / fullConversation), truncated so a single unit's prompt stays reasonable.
 function _sourceContextForRow(row) {
   const parts = [];
+  // CANONICAL STATE (the single reconciled truth, mirrored onto the row). When
+  // present, lead with it so the AI anchors on the reconciled status / next
+  // step / who-we're-waiting-on rather than re-deriving from raw notes. The raw
+  // fields below remain as supporting detail / fallback.
+  if (row.canonicalStatus) {
+    const cs = [];
+    cs.push('Canonical status: ' + String(row.canonicalStatus).replace(/_/g, ' ') + (row.canonicalStale ? ' (STALE — no recent update)' : ''));
+    if (row.canonicalWaitingOn) cs.push('waiting on: ' + row.canonicalWaitingOn);
+    if (row.canonicalSituation) cs.push('situation: ' + _stripCosts(String(row.canonicalSituation)).slice(0, 300));
+    if (row.canonicalNextStep)  cs.push('reconciled next step: ' + _stripCosts(String(row.canonicalNextStep)).slice(0, 300));
+    parts.push('CANONICAL STATE (reconciled truth — trust over raw notes):\n' + cs.join('\n'));
+  }
   if (row.issueDetails)   parts.push('Issue: ' + _stripCosts(String(row.issueDetails)).slice(0, 300));
   if (row.issueSummary)   parts.push('Summary so far: ' + _stripCosts(String(row.issueSummary)).slice(0, 300));
   if (row.repairTimeline) parts.push('Repair timeline:\n' + _stripCosts(String(row.repairTimeline)).slice(0, 1200));

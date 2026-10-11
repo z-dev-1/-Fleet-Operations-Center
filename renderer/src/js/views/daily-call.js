@@ -1375,6 +1375,22 @@ function _wbrStats(units) {
       pmUnits.push(u.equipmentId);
     }
   }
+  // CANONICAL STATE breakdown — the reconciled status mix of the down units
+  // (mirrored onto rows as canonical* fields). Additive context the AI can use
+  // for the bridge; does NOT alter the verified counts above. Also tally how
+  // many are stale (no recent update) and how many we are waiting on US for.
+  const byCanon = {};
+  let canonStale = 0, waitingUs = 0, canonCovered = 0;
+  for (const u of units) {
+    if (!u.canonicalStatus) continue;
+    canonCovered++;
+    const s = String(u.canonicalStatus).replace(/_/g, ' ');
+    byCanon[s] = (byCanon[s] || 0) + 1;
+    if (u.canonicalStale) canonStale++;
+    if (u.canonicalWaitingOn === 'us') waitingUs++;
+  }
+  const canonStr = Object.entries(byCanon).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`).join(', ');
+
   const fuelStr = Object.entries(byFuel).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`).join(', ');
   const vendorStr = Object.entries(byVendor).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k}: ${n}`).join(', ');
   return [
@@ -1385,13 +1401,23 @@ function _wbrStats(units) {
       (unassigned ? `, unassigned ${unassigned}` : '') + (otherLoc ? `, other/unknown ${otherLoc}` : ''),
     `- Units per vendor/OEM: ${vendorStr || 'n/a'}`,
     `- Units flagged PM/inspection-related: ${pmUnits.length}${pmUnits.length ? ' (' + pmUnits.slice(0, 20).join(', ') + ')' : ''}`,
-  ].join('\n');
+  ].concat(canonCovered ? [
+    `- Reconciled status mix (canonical): ${canonStr || 'n/a'}` +
+      (canonStale ? `; ${canonStale} stale (no recent update)` : '') +
+      (waitingUs ? `; ${waitingUs} waiting on us` : ''),
+  ] : []).join('\n');
 }
 
 function _getWBRSites(rows) {
   const siteMap = {};
   _scopeRows(rows).forEach(r => {
-    if (!(r.lifecycleState || '').toLowerCase().includes('unavail')) return;
+    // Primary OOS gate: AAP lifecycle. ALSO include anything canonical state
+    // reconciled as down/stale (additive — can only add a unit, never drop one)
+    // so a still-down unit whose lifecycle lags isn't missed from the bridge.
+    const lifecycleDown = (r.lifecycleState || '').toLowerCase().includes('unavail');
+    const canonDown = !!(r.canonicalFlags && r.canonicalFlags.indexOf && r.canonicalFlags.indexOf('down') > -1) ||
+      (r.canonicalStatus && r.canonicalStatus !== 'available' && r.canonicalStatus !== 'unknown' && r.canonicalStale);
+    if (!lifecycleDown && !canonDown) return;
     const op = (r.operator || '').toUpperCase();
     const site = (r.domicileSite || '').toUpperCase();
     const key = op && site ? op + '/' + site : site || op || 'Unknown';
