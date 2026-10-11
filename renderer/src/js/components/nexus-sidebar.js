@@ -264,6 +264,11 @@ export function init() {
   bus.on('orcha:alerts', () => _render());
   bus.on('orcha:recommendations', () => _render());
   bus.on('orcha:tracker', () => _render());
+  // System Health — the health payload (overallScore + per-integration states)
+  // arrives on this event via the bridge. Without this listener the Health tab
+  // only ever showed its initial empty state ("0%" / "Waiting for health
+  // check...") because nothing re-rendered it when real data landed.
+  bus.on('orcha:health', () => _render());
   bus.on('orcha:drafts', (data) => {
     if (data && data.drafts) {
       for (const d of data.drafts) {
