@@ -1105,6 +1105,20 @@ function registerAIHandlers(ctx) {
     if (windows.length === 1) {
       windows[0].setBounds({ x: Math.floor(width * 0.1), y: topY, width: Math.floor(width * 0.8), height: winH });
     }
+
+    // Link the pair so closing EITHER window closes the other — the user keeps
+    // the two side-by-side windows but only has to click close once. A guard
+    // flag prevents the mutual 'closed' handlers from recursing.
+    if (windows.length === 2) {
+      let _closingPair = false;
+      const closeSibling = (other) => {
+        if (_closingPair) return;
+        _closingPair = true;
+        try { if (other && !other.isDestroyed()) other.close(); } catch (_) {}
+      };
+      windows[0].on('closed', () => closeSibling(windows[1]));
+      windows[1].on('closed', () => closeSibling(windows[0]));
+    }
     return { opened: windows.length };
   });
 
