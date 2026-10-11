@@ -64,7 +64,7 @@
 
 import bus   from '../bus.js';
 import state from '../state.js';
-import { quicksight } from '../bridge.js';
+import { quicksight, wbr as wbrBridge } from '../bridge.js';
 
 let _el = null;
 
@@ -1480,6 +1480,19 @@ function _renderWBR(rows) {
 
 async function _generateWBR(rows, progressCb) {
   const sites = _getWBRSites(rows);
+
+  // Capture this week's snapshot (so a manual Generate always logs the current
+  // week) and fetch the REAL Prior-Week / T6W comparison + unit movement from
+  // captured history. Best-effort — if the bridge/IPC is unavailable the WBR
+  // still generates, just without the comparison (falls back to the honest
+  // "enter manually" line). The whole fleet is snapshotted, not the scoped set.
+  let _wbrCmp = null;
+  try {
+    const allRows = (state.slice('fleet').rows) || rows;
+    if (wbrBridge && wbrBridge.capture) { try { await wbrBridge.capture(allRows); } catch (_) {} }
+    if (wbrBridge && wbrBridge.comparison) { _wbrCmp = await wbrBridge.comparison(allRows); }
+  } catch (e) { console.warn('[WBR] comparison fetch failed (non-fatal):', e.message); }
+
   let done = 0;
   for (const s of sites) {
     if (progressCb) progressCb(done, sites.length);
@@ -1494,11 +1507,31 @@ async function _generateWBR(rows, progressCb) {
 
       const stats = _wbrStats(s.units);
 
+      // Real Prior-Week / T6W comparison for THIS site (from captured history).
+      // Falls back to the honest "enter manually" text when there is no prior
+      // snapshot yet (cold start) or the comparison couldn't be fetched.
+      const siteCmp = _wbrCmp && _wbrCmp.sites ? _wbrCmp.sites[s.key] : null;
+      const priorWeekValue = (siteCmp && siteCmp.text)
+        ? siteCmp.text
+        : 'Prior-week / T6W comparison not available from tool data — enter manually.';
+      const hasRealCmp = !!(siteCmp && siteCmp.priorDown != null);
+      // Grounded "why" for units that newly went down this week (canonical).
+      const newlyDownWhy = (siteCmp && siteCmp.movement && siteCmp.movement.newlyDownWhy || [])
+        .filter(x => x && x.id)
+        .map(x => `${x.id}${x.status ? ' (' + String(x.status).replace(/_/g, ' ') + ')' : ''}${x.reason ? ' — ' + x.reason : ''}`)
+        .join('; ');
+      const movementBlock = hasRealCmp
+        ? `\nUNIT MOVEMENT (week-over-week, from captured snapshots — use for the Prior-Week bullet and actions, do NOT recount):\n` +
+          `- Newly down this week: ${siteCmp.movement.newlyDown.length}${newlyDownWhy ? ' — ' + newlyDownWhy : ''}\n` +
+          `- Returned to service since last week: ${siteCmp.movement.returned.length}\n` +
+          `- Still down from last week: ${siteCmp.movement.stillDown.length}\n`
+        : '';
+
       const prompt = `You are a fleet operations FAS writing a Weekly Bridge Report (WBR) for site ${s.key}.
 Write TWO fields — a Field Level Bridge (situation summary) and FAS Field Actions (what you're doing about it).
 
 ${stats}
-
+${movementBlock}
 The Field Level Bridge MUST be formatted as bullet points — ONE bullet per required item below, in THIS EXACT order, each starting with "• " and the bold label shown. Use the VERIFIED COUNTS above for every number — do NOT recount or estimate. This bullet layout is required so it copy-pastes cleanly.
 
 FORMAT THE BRIDGE EXACTLY LIKE THIS (fill in the values):
@@ -1509,14 +1542,16 @@ FORMAT THE BRIDGE EXACTLY LIKE THIS (fill in the values):
 • Estimate Delays (Amazon vs Vendor): <for units stuck on estimates, state whether AMAZON or the VENDOR is causing it — infer ONLY from timeline; if not stated write "cause not documented — verify">
 • OOS Units & ETC: <list each OOS unit with ETC; if no ETC in timeline write "unit ####: no ETC — pending">
 • Overdue PMs: <how many, how many days past due if timeline states it, and whether AMAZON or the PARTNER is root cause; if not in data write "days/root cause not documented — verify">
-• Prior-Week / T6W: Prior-week / T6W comparison not available from tool data — enter manually.
+• Prior-Week / T6W: ${priorWeekValue}
 
 Keep each bullet on its own line. Put multiple units within a bullet on the same line separated by "; " (do not add sub-bullets).
 
 RULES:
 - Ground EVERY number in the VERIFIED COUNTS block. The narrative (who caused a delay, ETCs, PM days-past-due) comes ONLY from the per-unit timelines below.
 - Do NOT invent or infer beyond what the timelines say. Where the data is missing, explicitly flag it as "not documented — verify" rather than guessing. The FAS will validate before submitting.
-- HISTORICAL NOTE: this tool has only current-week data — it does NOT store prior-week or T6W snapshots. NEVER fabricate last-week or T6W numbers; use the fixed Prior-Week / T6W bullet text shown above.
+- PRIOR-WEEK / T6W: ${hasRealCmp
+  ? 'Use the EXACT Prior-Week / T6W bullet text provided above verbatim — it is computed from real captured weekly snapshots (last-week vs this-week down counts, trailing-6-week average, and unit movement). Do NOT alter the numbers or invent additional historical figures beyond what is given.'
+  : 'No prior-week snapshot exists yet (first week of history capture). Use the fixed Prior-Week / T6W bullet text shown above verbatim and NEVER fabricate last-week or T6W numbers.'}
 - Be specific: include unit IDs, vendor names, days down, key blockers, ETCs.
 - Actions: what SPECIFIC actions you took or are taking TODAY. Write like you're reporting to leadership what you personally did this morning.
   * Name who you contacted (dealer name, vendor FM name, carrier, tech)

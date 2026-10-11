@@ -233,6 +233,15 @@ const REGISTRY = {
   //       source, confidence, stale, waitingOn, flags:[], aiReconciled,
   //       updatedAt } }, updatedAt, lastReconcileAt }.
   canonicalState:          () => path.join(P.dataDir, 'canonical_state.json'),
+  // WBR weekly metric history (2026-10) — rolling per-ISO-Monday-week snapshots
+  // of the per-site + fleet-total DOWN metrics (assets down, by-fuel, location
+  // split, per-vendor, PM-flagged, canonical status mix). Captured on the first
+  // sync of each week (Monday boundary) + on Generate WBR, latest-wins per week.
+  // Powers the WBR's real Prior-Week / Trailing-6-Week comparison + unit
+  // movement, replacing the former "enter manually" placeholder. See
+  // src/orcha/wbr_snapshot.js. Shape: { weeks: [ { week:'YYYY-Www', weekStart,
+  //   capturedAt, total:SiteMetrics, sites:{key:SiteMetrics} } ], updatedAt }.
+  wbrHistory:              () => path.join(P.dataDir, 'wbr_history.json'),
 };
 
 function _resolvePath(name) {

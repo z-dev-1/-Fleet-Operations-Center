@@ -590,6 +590,41 @@ function registerScrapersIPC(ctx) {
     return store.load('quicksightDbrDsp', { ok: false, scac: [], scrapedAt: null });
   });
 
+  // ── WBR weekly snapshot + comparison ────────────────────────────────────────
+  // wbr:capture records this week's per-site + fleet-total down metrics (used by
+  // the Generate WBR button so a manual run always logs the current week — the
+  // sync path also auto-captures). wbr:comparison returns the real Prior-Week /
+  // T6W comparison + unit movement computed from captured history + canonical
+  // state, so the WBR prompt can use real numbers instead of "enter manually".
+  handle('wbr:capture', (_e, payload) => {
+    try {
+      const wbr = require('../orcha/wbr_snapshot');
+      const store = require('../store');
+      const rows = (payload && Array.isArray(payload.rows) && payload.rows.length)
+        ? payload.rows
+        : ((store.load('fleetData', {}) || {}).rows || []);
+      return wbr.captureSnapshot(rows);
+    } catch (e) {
+      return { ok: false, reason: e.message };
+    }
+  });
+
+  handle('wbr:comparison', (_e, payload) => {
+    try {
+      const wbr = require('../orcha/wbr_snapshot');
+      const store = require('../store');
+      const rows = (payload && Array.isArray(payload.rows) && payload.rows.length)
+        ? payload.rows
+        : ((store.load('fleetData', {}) || {}).rows || []);
+      const current = wbr.computeWeekMetrics(rows);
+      // Canonical records (for grounded newly-down "why").
+      const canonicalUnits = ((store.load('canonicalState', {}) || {}).units) || {};
+      return wbr.buildComparison(current, { canonicalUnits });
+    } catch (e) {
+      return { coldStart: true, error: e.message, total: { text: 'comparison unavailable' }, sites: {} };
+    }
+  });
+
   logger.info('Scrapers IPC handlers registered');
 }
 

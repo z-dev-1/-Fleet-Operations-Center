@@ -331,6 +331,12 @@ expose('quicksight', {
   getCacheDsp: () => ipcRenderer.invoke('quicksight:get-cache-dsp'),
 });
 
+// ── WBR weekly snapshot + Prior-Week/T6W comparison (Daily Call) ──────────────
+expose('wbr', {
+  capture:    (rows) => ipcRenderer.invoke('wbr:capture', { rows }),
+  comparison: (rows) => ipcRenderer.invoke('wbr:comparison', { rows }),
+});
+
 // ── Geofence ──────────────────────────────────────────────────────────────────
 expose('geofence', {
   scrape:   () => ipcRenderer.invoke('geofence:scrape'),

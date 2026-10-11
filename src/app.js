@@ -203,6 +203,22 @@ app.whenReady().then(async () => {
       const rows = (d && d.rows) || [];
       if (rows.length) briefing.process(rows, _send);
     } catch(e) { /* advisory — don't block data push */ }
+
+    // WBR weekly snapshot capture — record this week's per-site + fleet-total
+    // down metrics so the WBR gets a REAL Prior-Week / T6W comparison. Capture
+    // ONLY on a full, fresh, non-partial sync (a partial relay/uptake batch has
+    // an incomplete row set and must never overwrite the week's truth). The
+    // snapshot engine keys by ISO Monday-week and dedupes latest-wins, so this
+    // naturally creates the week's entry on the first full sync of the week and
+    // refreshes it on later syncs. Best-effort — never blocks the data push.
+    try {
+      const isPartial = !!(d && d.partial);
+      const isCache   = !!(d && (d.usedCache || d.stale));
+      const rows = (d && d.rows) || [];
+      if (!isPartial && !isCache && d && d.syncedAt && rows.length) {
+        require('./orcha/wbr_snapshot').captureSnapshot(rows);
+      }
+    } catch (e) { /* advisory — never block the data push */ }
   }
   function _pushStatus(s) { _send('fleet:status', s); }
   function _pushError(e)  { _send('fleet:error',  e); }

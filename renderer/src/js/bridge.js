@@ -397,6 +397,12 @@ export const quicksight = {
   getCacheDsp: () => window.quicksight.getCacheDsp(),
 };
 
+// ── WBR weekly snapshot + Prior-Week/T6W comparison (Daily Call) ────────────
+export const wbr = {
+  capture:    (rows) => window.wbr.capture(rows),
+  comparison: (rows) => window.wbr.comparison(rows),
+};
+
 // ── Slack ──────────────────────────────────────────────────────────────────
 export const slack = {
   send:         (data) => window.slack.send(data),
