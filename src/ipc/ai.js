@@ -1085,6 +1085,43 @@ function registerAIHandlers(ctx) {
       });
       runAutoLoginLoop(relayWin, { label: 'ai-split-relay' });
       relayWin.loadURL(opts.relayUrl);
+      // After the Relay Garage page loads, auto-toggle the Conversation open and
+      // scroll to the latest comment so the user lands right on the thread
+      // instead of having to click "Toggle Comments" + scroll down every time.
+      // Best-effort: retries a few times (the button renders after data loads)
+      // and never throws. Mirrors the selector logic used by the inline split.
+      relayWin.webContents.on('did-finish-load', () => {
+        try {
+          relayWin.webContents.executeJavaScript(
+            '(function(){' +
+              'if(window.__fleetDailyConv)return;' +
+              'var tries=0;' +
+              'function go(){' +
+                'tries++;' +
+                'var done=false;' +
+                'var btns=document.querySelectorAll("button,a,[role=button]");' +
+                'for(var i=0;i<btns.length;i++){' +
+                  'if((btns[i].textContent||"").indexOf("Toggle Comments")>-1){btns[i].click();done=true;break;}' +
+                '}' +
+                'if(done){' +
+                  'window.__fleetDailyConv=true;' +
+                  // Give the comments a moment to render, then scroll to newest.
+                  'setTimeout(function(){' +
+                    'try{' +
+                      'var h1s=document.querySelectorAll("h1,h2,h3");var conv=null;' +
+                      'for(var j=0;j<h1s.length;j++){if((h1s[j].textContent||"").trim()==="Conversation"){conv=h1s[j];break;}}' +
+                      'var sc=document.querySelector(".rg-full-height-sheet")||(conv&&conv.closest("div"))||document.scrollingElement||document.body;' +
+                      'if(sc){sc.scrollTop=sc.scrollHeight;}' +
+                      'window.scrollTo(0,document.body.scrollHeight);' +
+                    '}catch(e){}' +
+                  '},1200);' +
+                '} else if(tries<10){ setTimeout(go,800); }' +
+              '}' +
+              'setTimeout(go,1000);' +
+            '})()'
+          ).catch(() => {});
+        } catch (_) {}
+      });
       windows.push(relayWin);
     }
 
