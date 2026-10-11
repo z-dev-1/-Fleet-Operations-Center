@@ -174,7 +174,7 @@ function _renderHealth() {
   const health = state.get('health');
   if (!health) return '<div class="nx-empty">Waiting for health check...</div>';
 
-  const statusIcon = { green: '🟢', yellow: '🟡', red: '🔴' };
+  const statusIcon = { green: '🟢', yellow: '🟡', red: '🔴', grey: '⚪' };
   return `
     <div class="nx-stat" style="margin-bottom:16px">
       <span class="nx-stat__value">${health.overallScore || 0}%</span>

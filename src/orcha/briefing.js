@@ -220,19 +220,19 @@ function process(rows, send, opts) {
   try { repairHistory.detectTransitions(rows, global._prevRows || []); } catch (e) {}
   global._prevRows = rows;
 
-  // System health score
-  send('orcha:health', {
-    overallScore: Math.max(0, 100 - (recs.filter(a => a.severity === 'critical').length * 5)),
-    lastSync: new Date().toISOString(),
-    totalUnits: rows.length,
-    unavailCount: recs.length,
-    integrations: {
-      relay: { status: 'green', label: 'Relay' },
-      ai:    { status: 'green', label: 'AI' },
-      sp:    { status: 'green', label: 'SharePoint' },
-      slack: { status: 'green', label: 'Slack' },
-    },
-  });
+  // System health — REAL snapshot of live integration state (relay/AI, Midway
+  // auth expiry, data freshness, canonical reconcile freshness, network, and
+  // the SharePoint/Slack push channels). Replaces the former hardcoded all-green
+  // block. Fully defensive: a signal that can't be read degrades to yellow
+  // rather than throwing or faking green.
+  try {
+    const { buildHealthSnapshot } = require('./health');
+    const snap = buildHealthSnapshot(rows);
+    snap.unavailCount = recs.length; // keep the existing field for consumers
+    send('orcha:health', snap);
+  } catch (e) {
+    logger.warn('[briefing] health snapshot failed: ' + e.message);
+  }
 
   // Proactive AI alerts — check for stalled units and risk jumps
   try {
