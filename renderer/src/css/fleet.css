@@ -1820,12 +1820,45 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
    All rules additive — no existing rules modified.
    ============================================================= */
 
-/* ── View shell ──────────────────────────────────────────────── */
-.view--vendors {
+/* ── Vendors is now a CENTERED MODAL OVERLAY (opened from the Dashboard Top
+      Vendors tile), not a nav view. #view-vendors is the backdrop. ───────── */
+.view--vendors.vm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9100;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0,0,0,.55);
+  flex-direction: row;
+}
+.view--vendors.vm-overlay.open { display: flex; }
+.vm-modal {
+  width: min(960px, 96vw);
+  max-height: 88vh;
+  background: var(--bg);
+  border: 1px solid var(--bdr);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.55);
+  display: flex;
   flex-direction: column;
-  height: 100%;
   overflow: hidden;
 }
+.vm-close-btn {
+  background: var(--el, rgba(255,255,255,.06)); border: 1px solid var(--bdr);
+  color: var(--txt2); cursor: pointer; font-size: 13px;
+  width: 28px; height: 28px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+}
+.vm-close-btn:hover { color: var(--txt); }
+
+/* "View all →" link in the Dashboard Top Vendors tile title */
+.fo-view-all {
+  float: right; background: none; border: none; cursor: pointer;
+  color: var(--acc2, #58a6ff); font-size: 10px; font-weight: 600; padding: 0;
+}
+.fo-view-all:hover { text-decoration: underline; }
 
 /* ── Panel (list + drill share this shell) ───────────────────── */
 .vm-panel {
@@ -1833,6 +1866,7 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
   flex: 1;
   overflow: hidden;
   display: flex;
+  min-height: 0;
 }
 
 /* ── Header ──────────────────────────────────────────────────── */

@@ -230,17 +230,19 @@ function _renderDrillTable(units) {
 
 // ── Full view HTML template ───────────────────────────────────────────────
 function _viewHtml() {
+  // #view-vendors is now a centered-overlay backdrop; .vm-modal is the panel.
   return `
+    <div class="vm-modal">
     <!-- LIST panel -->
     <div id="vm-list-panel" class="vm-panel">
       <div class="vm-header">
         <div class="vm-header__left">
-          <span class="vm-title">Vendors</span>
+          <span class="vm-title">🏢 Vendors</span>
           <span class="vm-subtitle">All vendors from relay-synced fleet data</span>
         </div>
         <div class="vm-header__actions">
           <input id="vm-search" class="vm-search-input" type="text" placeholder="Search vendors..." autocomplete="off" />
-          <button id="vm-back-fleet" class="detail-panel__btn">Back to Fleet</button>
+          <button id="vm-back-fleet" class="vm-close-btn" title="Close">✕</button>
         </div>
       </div>
       <div id="vm-list-summary"></div>
@@ -258,7 +260,7 @@ function _viewHtml() {
         </div>
         <div class="vm-header__actions">
           <button id="vm-drill-back-list"  class="detail-panel__btn detail-panel__btn--secondary">← Vendors</button>
-          <button id="vm-drill-back-fleet" class="detail-panel__btn">Back to Fleet</button>
+          <button id="vm-drill-back-fleet" class="vm-close-btn" title="Close">✕</button>
         </div>
       </div>
       <div id="vm-drill-summary"></div>
@@ -266,7 +268,24 @@ function _viewHtml() {
         <div id="vm-drill-content"></div>
       </div>
     </div>
+    </div>
   `;
+}
+
+// Open/close the vendors overlay (opened from the Dashboard Top Vendors tile).
+function _openOverlay() {
+  if (!_el) return;
+  // Always enter on the list panel.
+  _view = 'list';
+  _search = '';
+  const inp = _el.querySelector('#vm-search');
+  if (inp) inp.value = '';
+  _showPanel('list');
+  _update(state.slice('fleet').rows || []);
+  _el.classList.add('open');
+}
+function _closeOverlay() {
+  if (_el) _el.classList.remove('open');
 }
 
 // ── Render helpers ────────────────────────────────────────────────────────
@@ -341,8 +360,7 @@ function _update(rows) {
 export function init(container) {
   _el = document.createElement('div');
   _el.id = 'view-vendors';
-  _el.className = 'view view--vendors';
-  _el.style.display = 'none';
+  _el.className = 'view view--vendors vm-overlay';   // now a centered overlay
   _el.innerHTML = _viewHtml();
   container.appendChild(_el);
 
@@ -353,10 +371,8 @@ export function init(container) {
     _renderList(rows);
   });
 
-  // Back to fleet (list panel)
-  _el.querySelector('#vm-back-fleet').addEventListener('click', () => {
-    bus.emit('ui:view-change', { from: 'vendors', to: 'fleet' });
-  });
+  // Close (list panel ✕)
+  _el.querySelector('#vm-back-fleet').addEventListener('click', _closeOverlay);
 
   // Back to list (drill panel)
   _el.querySelector('#vm-drill-back-list').addEventListener('click', () => {
@@ -365,32 +381,19 @@ export function init(container) {
     _renderList(state.slice('fleet').rows || []);
   });
 
-  // Back to fleet (drill panel)
-  _el.querySelector('#vm-drill-back-fleet').addEventListener('click', () => {
-    bus.emit('ui:view-change', { from: 'vendors', to: 'fleet' });
-  });
+  // Close (drill panel ✕)
+  _el.querySelector('#vm-drill-back-fleet').addEventListener('click', _closeOverlay);
 
-  // Reactive on fleet data push
+  // Backdrop click (outside the modal) closes.
+  _el.addEventListener('click', (e) => { if (e.target === _el) _closeOverlay(); });
+
+  // Reactive on fleet data push (only re-render while open to avoid churn)
   bus.on('fleet:data', (data) => {
-    _update((data && data.rows) ? data.rows : []);
+    if (_el && _el.classList.contains('open')) _update((data && data.rows) ? data.rows : []);
   });
 
-  // Show/hide + refresh on view change
-  bus.on('ui:view-change', ({ to, from }) => {
-    _el.style.display = to === 'vendors' ? 'flex' : 'none';
-    if (to === 'vendors') {
-      // Always return to list when entering from outside
-      if (from !== 'vendors') {
-        _view = 'list';
-        _search = '';
-        const inp = _el.querySelector('#vm-search');
-        if (inp) inp.value = '';
-        _showPanel('list');
-      }
-      _update(state.slice('fleet').rows || []);
-    }
-  });
-
-  // Initial render
-  _update(state.slice('fleet').rows || []);
+  // Open from the Dashboard Top Vendors tile.
+  bus.on('ui:vendors-open', _openOverlay);
+  // Any nav view-change closes the overlay (so switching tabs dismisses it).
+  bus.on('ui:view-change', () => _closeOverlay());
 }

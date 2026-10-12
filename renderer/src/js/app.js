@@ -154,7 +154,8 @@ initStatusBar(document.getElementById('status-bar-mount'));
     if (to === 'settings') return;
     if (fleetView)         fleetView.style.display         = to === 'fleet'          ? 'flex' : 'none';
     if (analyticsView)     analyticsView.style.display     = to === 'analytics'      ? 'flex' : 'none';
-    if (vendorsView)       vendorsView.style.display       = to === 'vendors'        ? 'flex' : 'none';
+    // vendorsView is a self-managed centered overlay now (opened from the
+    // Dashboard Top Vendors tile via ui:vendors-open) — not toggled by nav.
     if (emailComposerView) emailComposerView.style.display = to === 'email-composer' ? 'flex' : 'none';
     if (schedulersView)    schedulersView.style.display    = to === 'schedulers'     ? 'flex' : 'none';
     if (dailyNotesView)    dailyNotesView.style.display    = to === 'daily-notes'    ? 'flex' : 'none';

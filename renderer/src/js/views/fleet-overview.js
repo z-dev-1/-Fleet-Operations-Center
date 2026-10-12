@@ -396,7 +396,7 @@ export function mount(container) {
         <div class="an-card"><div class="an-card__title">Asset Type Mix</div><div id="fo-bt"></div></div>
       </div>
       <div class="an-card"><div class="an-card__title">By Operator</div><div id="fo-operators"></div></div>
-      <div class="an-card"><div class="an-card__title">Top Vendors</div><div id="fo-vendors"></div></div>
+      <div class="an-card"><div class="an-card__title">Top Vendors <button id="fo-vendors-all" class="fo-view-all" type="button" title="Open full Vendors view">View all →</button></div><div id="fo-vendors"></div></div>
     </div>`;
   container.insertBefore(wrap, container.firstChild);
 
@@ -404,6 +404,14 @@ export function mount(container) {
   wrap.querySelector('#fo-header').addEventListener('click', () => {
     const isCollapsed = wrap.classList.toggle('fleet-overview--collapsed');
     localStorage.setItem('fleet_overview_collapsed', isCollapsed ? '1' : '0');
+  });
+
+  // "View all →" in the Top Vendors tile opens the full Vendors overlay.
+  wrap.addEventListener('click', (e) => {
+    if (e.target.closest('#fo-vendors-all')) {
+      e.stopPropagation();
+      bus.emit('ui:vendors-open');
+    }
   });
 
   // Delegated drill-down: any element carrying data-drill opens the modal.
