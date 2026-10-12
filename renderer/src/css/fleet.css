@@ -8612,6 +8612,52 @@ body {
 .tb-icon-btn, .tb-nav-item, .tb-avatar, .tb-ai-status,
 .tb-window-controls { -webkit-app-region: no-drag; }
 
+/* ── User Profile popover (avatar) + Managed Domiciles chip editor ───────── */
+.tb-profile-pop {
+  position: fixed; top: 44px; right: 12px; width: 300px;
+  background: var(--panel, #161b22); border: 1px solid var(--bdr, #30363d);
+  border-radius: 10px; padding: 14px; z-index: 9999;
+  box-shadow: 0 12px 32px rgba(0,0,0,.5);
+  display: flex; flex-direction: column; gap: 14px;
+  -webkit-app-region: no-drag;
+}
+.tbp-section { display: flex; flex-direction: column; gap: 6px; }
+.tbp-title { font-size: 12px; font-weight: 700; color: var(--txt, #e6edf3); }
+.tbp-hint { font-size: 9px; color: var(--mut, #8b949e); line-height: 1.5; margin-bottom: 2px; }
+.tbp-label { font-size: 9px; font-weight: 600; color: var(--txt2, #8b949e); text-transform: uppercase; letter-spacing: .4px; margin-top: 2px; }
+.tbp-input {
+  width: 100%; background: var(--card, #0d1117); border: 1px solid var(--bdr, #30363d);
+  border-radius: 5px; padding: 6px 8px; color: var(--txt, #c9d1d9); font-size: 11px;
+}
+.tbp-input:focus { outline: none; border-color: var(--acc, #58a6ff); }
+.tbp-chips { display: flex; flex-wrap: wrap; gap: 5px; min-height: 10px; }
+.tbp-chips-empty { font-size: 10px; color: var(--mut, #6e7681); font-style: italic; }
+.tbp-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--adim, rgba(88,166,255,.12)); border: 1px solid var(--acc, rgba(88,166,255,.4));
+  color: var(--acc2, #79c0ff); font-size: 10px; font-weight: 600; font-family: var(--mono, monospace);
+  padding: 3px 4px 3px 8px; border-radius: 12px;
+}
+.tbp-chip-x {
+  background: none; border: none; color: var(--acc2, #79c0ff); cursor: pointer;
+  font-size: 9px; line-height: 1; padding: 1px 3px; border-radius: 8px;
+}
+.tbp-chip-x:hover { background: rgba(248,81,73,.2); color: #f85149; }
+.tbp-dom-add { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+.tbp-dom-add .tbp-input { flex: 1; }
+.tbp-btn {
+  border-radius: 6px; font-size: 11px; font-weight: 600; padding: 7px 10px; cursor: pointer;
+  border: 1px solid var(--bdr, #30363d); background: var(--el, rgba(255,255,255,.06)); color: var(--txt2, #c9d1d9);
+}
+.tbp-btn--ghost { padding: 6px 10px; white-space: nowrap; }
+.tbp-btn--ghost:hover { color: var(--txt, #e6edf3); }
+.tbp-btn--save { background: rgba(63,185,80,.12); border-color: rgba(63,185,80,.4); color: #3fb950; }
+.tbp-btn--save:hover { background: rgba(63,185,80,.2); }
+.tbp-status { font-size: 10px; margin-top: -4px; }
+.tbp-status.ok { color: #3fb950; }
+.tbp-status.warn { color: #eab308; }
+.tbp-status.err { color: #f85149; }
+
 /* ── AI connectivity status pill (toolbar) ────────────────────────────────
    BUG FIX: bus.on('orcha:status', ...) in toolbar.js has always targeted
    #kpi-ai-dot / #kpi-ai-label, but neither the DOM markup nor this CSS ever

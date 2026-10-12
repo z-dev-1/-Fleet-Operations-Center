@@ -449,19 +449,9 @@ function _html() {
       <!-- ══ TAB 2: Integrations ══════════════════════════════════════════ -->
       <div id="sd-pane-integrations" style="display:none">
 
-        <!-- Domiciles -->
-        <div class="sd-section" id="sect-domiciles">
-          <div class="sd-section-title">Domiciles</div>
-          <div class="sd-field">
-            <div class="sd-label">Managed domiciles (one per line, or comma-separated)</div>
-            <textarea id="settings-domiciles" class="settings__textarea sd-input" placeholder="ABE40&#10;AVP40&#10;AUVTE01"></textarea>
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn primary" id="save-domiciles">Save</button>
-            <button class="sd-btn secondary" id="reset-domiciles">Reset defaults</button>
-          </div>
-          <div id="domicile-status" class="settings__status" style="display:none"></div>
-        </div>
+        <!-- Domiciles section moved (2026-08-14) to the 👤 User Profile popover
+             (toolbar avatar) as a chip editor. Same settings:save/reset-domiciles
+             backend (triggers a rescan). -->
 
         <!-- Midway Auth -->
         <div class="sd-section" id="sect-auth">
@@ -851,59 +841,8 @@ function _closeAIConfigOverlay() {
   if (ov) ov.classList.remove('open');
 }
 
-// ── Section: Domiciles ───────────────────────────────────────────────────────
-function _wireDomiciles() {
-  document.getElementById('save-domiciles').addEventListener('click', async () => {
-    const raw = document.getElementById('settings-domiciles').value;
-    // BUG FIX (2026-07-22): only split on commas -- a newline-separated
-    // list (one code per line, which is how the textarea's own
-    // placeholder now shows it, and how most people naturally type a
-    // list of site codes) collapsed into ONE array entry containing
-    // literal embedded newlines, e.g. ["ABE40\nAVP40\nAUVTE01"] instead
-    // of ["ABE40","AVP40","AUVTE01"]. Confirmed live in this exact
-    // installation's real settings.json before this fix. Any code
-    // downstream that expects individual clean domicile codes (the AAP
-    // scan URL builder, the sync engine) would silently fail to match
-    // anything against a single garbled multi-line string -- producing
-    // exactly the "I entered domiciles and it did nothing" symptom.
-    // Backend settings:save-domiciles (src/ipc/settings.js) already
-    // splits on /[\n,]+/ -- this now matches it exactly.
-    const codes = raw.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
-    const st = document.getElementById('domicile-status');
-    if (!codes.length) {
-      st.textContent = '\u26A0\uFE0F Enter at least one domicile code first'; st.style.display = 'block';
-      return;
-    }
-    try {
-      await settingsBridge.saveDomiciles(codes);
-      st.textContent = '\u2705 Saved'; st.style.display = 'block';
-      setTimeout(() => { st.style.display = 'none'; }, 2000);
-    } catch (e) {
-      st.textContent = '\u274C ' + (e.message || 'Save failed'); st.style.display = 'block';
-    }
-  });
-  document.getElementById('reset-domiciles').addEventListener('click', async () => {
-    // BUG FIX (2026-07-22): this called saveDomiciles([]) -- but the
-    // backend handler THROWS on an empty list ("domicile list cannot be
-    // empty", src/ipc/settings.js) and this had no .catch() anywhere, so
-    // "Reset defaults" has never once actually worked; it silently threw
-    // an unhandled promise rejection with zero visible feedback. The
-    // backend already has a dedicated, correct handler for exactly this
-    // (settings:reset-domiciles, returns DEFAULTS.DEFAULT_DOMICILES) --
-    // switched to that instead of trying to save an empty list.
-    try {
-      const result = await settingsBridge.resetDomiciles();
-      const codes = (result && result.domiciles) || [];
-      document.getElementById('settings-domiciles').value = codes.join('\n');
-      const st = document.getElementById('domicile-status');
-      st.textContent = '\u2705 Reset to defaults'; st.style.display = 'block';
-      setTimeout(() => { st.style.display = 'none'; }, 2000);
-    } catch (e) {
-      const st = document.getElementById('domicile-status');
-      st.textContent = '\u274C ' + (e.message || 'Reset failed'); st.style.display = 'block';
-    }
-  });
-}
+// _wireDomiciles() removed (2026-08-14): Domiciles editor moved to the 👤 User
+// Profile popover (toolbar.js). Same settings:save/reset-domiciles backend.
 
 // ── Section: Auth ────────────────────────────────────────────────────────────
 function _checkAuth() {
@@ -2606,10 +2545,8 @@ function _populate() {
     // UI prefs (theme, colors, sliders, font)
     if (all.ui_prefs) _applyUI(all.ui_prefs);
 
-    if (all.domiciles) {
-      const el = document.getElementById('settings-domiciles');
-      if (el) el.value = Array.isArray(all.domiciles) ? all.domiciles.join('\n') : all.domiciles;
-    }
+    // Domiciles populate removed (2026-08-14): editor moved to the 👤 User
+    // Profile popover, which loads from settings.getDomiciles() itself.
     if (all.orcha) {
       const o = all.orcha;
       const mode = document.getElementById('orcha-mode');
@@ -2716,7 +2653,6 @@ export function init() {
   // SP Workbook Discover/config wiring moved (2026-08-14) to the Scheduler
   // view's SharePoint Push gear overlay (renderer/src/js/views/schedulers.js).
 
-  _wireDomiciles();
   _wireAuth();
   _wireOrcha();
   _wireSlack();
