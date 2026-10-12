@@ -991,21 +991,17 @@ function _html() {
         <div class="ops-pane-header">
           <div class="ops-pane-header-left">
             <span class="ops-pane-title">Accounts</span>
-            <span class="ops-pane-sub">All logins in one place — vendor portals (encrypted) + other site credentials</span>
+            <span class="ops-pane-sub">Every login in one place — edit, reveal, test, or add new</span>
           </div>
+          <button class="ops-sync-btn" id="acct-add">+ Add account</button>
         </div>
 
-        <!-- ── Section A: Vendor Portals (encrypted keychain) ─────────────── -->
-        <div class="acct-group-title">🔐 Vendor Portals <span class="acct-group-note">saved securely (encrypted)</span></div>
-        <div class="acct-vendor-grid" id="acct-vendor-grid"><!-- vendor cards injected by _renderVendorCards() --></div>
-
-        <!-- ── Section B: Other site logins ───────────────────────────────── -->
-        <div class="acct-group-title" style="margin-top:18px">🔑 Other Site Logins <button class="sd-btn secondary acct-add-inline" id="acct-add">+ Add</button></div>
+        <!-- One unified, editable list (vendor portals seeded + any site you add) -->
         <div class="acct-list" id="acct-list">
-          <div class="acct-empty" id="acct-empty">
+          <div class="acct-empty" id="acct-empty" style="display:none">
             <span style="font-size:28px;opacity:.5">🔑</span>
-            <div class="ops-empty-title">No other site logins yet</div>
-            <div class="ops-empty-sub">Click <strong>+ Add</strong> to save a site credential.</div>
+            <div class="ops-empty-title">No accounts yet</div>
+            <div class="ops-empty-sub">Click <strong>+ Add account</strong> to save a login.</div>
           </div>
         </div>
 
@@ -1265,139 +1261,35 @@ function _wireAIConfig() {
   bus.on('ui:view-change', ({ to }) => { if (to === 'settings') setTimeout(_loadAIConfig, 150); });
 }
 
-// ── Section: Vendor Portal cards (rendered into the Accounts pane) ───────────
-// Vendor portals whose logins live in the ENCRYPTED keychain. Each card uses
-// the SAME element ids the existing _wireVendorAuth() wiring expects
-// (<id>-user / -pass / -save / -test / -clear / -status), so moving these into
-// the Accounts tab is a pure markup relocation — the save/test/clear/keychain
-// logic is unchanged. 'sso' vendors (Uptake) have no stored password, just a
-// sign-in test button.
-const _VENDOR_CARDS = [
-  { id: 'paccar',    name: 'PACCAR',               host: 'paccarpg.decisiv.net',        userLabel: 'Username' },
-  { id: 'volvo',     name: 'Volvo',                host: 'volvopg.asist.decisiv.net',   userLabel: 'Username' },
-  { id: 'record360', name: 'Record360',            host: 'dashboard.record360.com',     userLabel: 'Email' },
-  { id: 'aperia',    name: 'Aperia / Halo Tire',   host: 'amazon.aperiatech.com',       userLabel: 'Email' },
-  { id: 'reach24',   name: 'Reach24',              host: 'amazon.reach24.net',          userLabel: 'Email' },
-  { id: 'dtna',      name: 'DTNA Service Tracker', host: 'dtna.my.site.com',            userLabel: 'Username' },
-  { id: 'roadready', name: 'Road Ready',           host: 'roadready.fadv.com',          userLabel: 'Username' },
-  { id: 'velogic',   name: 'Velogic',              host: 'velogic.my.site.com',         userLabel: 'Username' },
-  { id: 'abs',       name: 'Access Billing Services', host: 'access-billing-services.com', userLabel: 'Username' },
-  { id: 'uptake',    name: 'Uptake',               host: 'fleet.uptake.com',            sso: true },
+// ── Known vendor portals (for the unified Accounts list) ─────────────────────
+// Each known vendor portal that the background scraper can auto-login to. These
+// are SEEDED as rows in the one Accounts list so they're always present. A row
+// is recognized as a vendor by matching its URL host against `host` here. The
+// `id` is the vendorId used by the keychain (vendor.<id>.username/password) and
+// by credentials:test-login — so saving a vendor row MIRRORS its user/pass into
+// the keychain to keep auto-login (getForHostname) working unchanged. 'sso'
+// vendors (Uptake) use Amazon Midway, no stored password — just a Test/Sign-in.
+const _VENDORS = [
+  { id: 'paccar',    name: 'PACCAR',                  host: 'paccarpg.decisiv.net' },
+  { id: 'volvo',     name: 'Volvo',                   host: 'volvopg.asist.decisiv.net' },
+  { id: 'record360', name: 'Record360',               host: 'dashboard.record360.com' },
+  { id: 'aperia',    name: 'Aperia / Halo Tire',      host: 'amazon.aperiatech.com' },
+  { id: 'reach24',   name: 'Reach24',                 host: 'amazon.reach24.net' },
+  { id: 'dtna',      name: 'DTNA Service Tracker',    host: 'dtna.my.site.com' },
+  { id: 'roadready', name: 'Road Ready',              host: 'roadready.fadv.com' },
+  { id: 'velogic',   name: 'Velogic',                 host: 'velogic.my.site.com' },
+  { id: 'abs',       name: 'Access Billing Services', host: 'access-billing-services.com' },
+  { id: 'uptake',    name: 'Uptake',                  host: 'fleet.uptake.com', sso: true },
 ];
+const _VENDOR_BY_ID = Object.fromEntries(_VENDORS.map(v => [v.id, v]));
 
-function _renderVendorCards() {
-  const grid = document.getElementById('acct-vendor-grid');
-  if (!grid) return;
-  grid.innerHTML = _VENDOR_CARDS.map((v) => {
-    if (v.sso) {
-      return (
-        '<div class="acct-card acct-card--vendor">' +
-          '<div class="acct-card-head"><span class="acct-card-name">' + _esc(v.name) + '</span>' +
-            '<span class="acct-card-host">' + _esc(v.host) + '</span></div>' +
-          '<div class="acct-card-sso-note">Amazon SSO — no password needed</div>' +
-          '<div class="acct-card-actions"><button class="sd-btn secondary" id="' + v.id + '-test">Sign in</button></div>' +
-          '<div id="' + v.id + '-status" class="settings__status" style="display:none"></div>' +
-        '</div>'
-      );
-    }
-    return (
-      '<div class="acct-card acct-card--vendor">' +
-        '<div class="acct-card-head"><span class="acct-card-name">' + _esc(v.name) + '</span>' +
-          '<span class="acct-card-host">' + _esc(v.host) + '</span></div>' +
-        '<div class="acct-card-field"><label>' + _esc(v.userLabel) + '</label>' +
-          '<input class="sd-input" id="' + v.id + '-user" placeholder="' + _esc(v.userLabel === 'Email' ? 'you@amazon.com' : 'portal username') + '"/></div>' +
-        '<div class="acct-card-field"><label>Password</label>' +
-          '<input class="sd-input" id="' + v.id + '-pass" type="password" placeholder="(encrypted)"/></div>' +
-        '<div class="acct-card-actions">' +
-          '<button class="sd-btn primary" id="' + v.id + '-save">Save</button>' +
-          '<button class="sd-btn secondary" id="' + v.id + '-test">Test login</button>' +
-          '<button class="sd-btn danger" id="' + v.id + '-clear">Clear</button>' +
-        '</div>' +
-        '<div id="' + v.id + '-status" class="settings__status" style="display:none"></div>' +
-      '</div>'
-    );
-  }).join('');
-}
-
-// ── Section: Vendor Auth ─────────────────────────────────────────────────────
-function _checkVendorCred(vendor, statusId) {
-  credsBridge.has(`vendor.${vendor}.username`).then((has) => {
-    const st = document.getElementById(statusId);
-    if (!st) return;
-    st.textContent = has ? `✅ Credentials saved` : '⚠️ Not configured';
-    st.style.display = 'block';
-    st.className = `settings__status settings__status--${has ? 'ok' : 'loading'}`;
-  }).catch(() => {});
-}
-
-function _wireVendorAuth() {
-  const ALL_VENDORS = ['paccar', 'volvo', 'record360', 'aperia', 'reach24', 'dtna', 'roadready', 'velogic', 'abs'];
-  ALL_VENDORS.forEach((v) => {
-    _checkVendorCred(v, `${v}-status`);
-
-    // Repopulate username field (password never retrieved — encrypted only)
-    settingsBridge.getAll().then((all) => {
-      const userEl = document.getElementById(`${v}-user`);
-      if (userEl && all && all[`${v}_user`]) userEl.value = all[`${v}_user`];
-    }).catch(() => {});
-
-    document.getElementById(`${v}-save`).addEventListener('click', async () => {
-      const user = document.getElementById(`${v}-user`).value.trim();
-      const pass = document.getElementById(`${v}-pass`).value;
-      if (!user || !pass) return;
-      await credsBridge.set(`vendor.${v}.username`, user);
-      await credsBridge.set(`vendor.${v}.password`, pass);
-      await settingsBridge.save(`${v}_user`, user);
-      document.getElementById(`${v}-pass`).value = '';
-      _checkVendorCred(v, `${v}-status`);
-    });
-
-    document.getElementById(`${v}-clear`).addEventListener('click', async () => {
-      await credsBridge.delete(`vendor.${v}.username`);
-      await credsBridge.delete(`vendor.${v}.password`);
-      await settingsBridge.save(`${v}_user`, '');
-      document.getElementById(`${v}-user`).value = '';
-      document.getElementById(`${v}-pass`).value = '';
-      _checkVendorCred(v, `${v}-status`);
-    });
-
-    // FEATURE (2026-07-22): opens the real vendor portal and attempts the
-    // exact same auto-login pass (src/orcha/auto-login.js) the background
-    // AAP/Relay scraper already uses in production for this host -- see
-    // src/ipc/credentials.js (credentials:test-login) for the full design.
-    const testBtn = document.getElementById(`${v}-test`);
-    if (testBtn) testBtn.addEventListener('click', async () => {
-      const st = document.getElementById(`${v}-status`);
-      if (st) { st.textContent = '\u23F3 Opening portal...'; st.style.display = 'block'; st.className = 'settings__status settings__status--loading'; }
-      try {
-        const r = await credsBridge.testLogin(v);
-        if (st) {
-          if (r && r.ok && r.attempted) { st.textContent = '\u2705 Login attempted -- check the window that opened'; st.className = 'settings__status settings__status--ok'; }
-          else if (r && r.closedByUser) { st.textContent = 'Window closed'; st.className = 'settings__status'; }
-          else { st.textContent = '\u26A0\uFE0F No saved credentials to try -- save above first'; st.className = 'settings__status settings__status--loading'; }
-        }
-      } catch (e) {
-        if (st) { st.textContent = '\u274C ' + e.message; st.className = 'settings__status settings__status--err'; st.style.display = 'block'; }
-      }
-    });
-  });
-
-  // Uptake -- Amazon SSO, no credentials to save/clear, just a sign-in test
-  const uptakeBtn = document.getElementById('uptake-test');
-  if (uptakeBtn) uptakeBtn.addEventListener('click', async () => {
-    const st = document.getElementById('uptake-status');
-    if (st) { st.textContent = '\u23F3 Opening Uptake...'; st.style.display = 'block'; st.className = 'settings__status settings__status--loading'; }
-    try {
-      const r = await credsBridge.testLogin('uptake');
-      if (st) {
-        if (r && r.ok && r.attempted) { st.textContent = '\u2705 SSO attempted -- check the window that opened'; st.className = 'settings__status settings__status--ok'; }
-        else if (r && r.closedByUser) { st.textContent = 'Window closed'; st.className = 'settings__status'; }
-        else { st.textContent = '\u26A0\uFE0F Could not sign in automatically -- requires Midway'; st.className = 'settings__status settings__status--loading'; }
-      }
-    } catch (e) {
-      if (st) { st.textContent = '\u274C ' + e.message; st.className = 'settings__status settings__status--err'; st.style.display = 'block'; }
-    }
-  });
+// Resolve a row's URL/host string to a known vendor (or null). Matches on
+// hostname substring so 'https://paccarpg.decisiv.net/x' maps to paccar.
+function _vendorForUrl(urlOrHost) {
+  const s = String(urlOrHost || '').toLowerCase();
+  if (!s) return null;
+  for (const v of _VENDORS) { if (s.indexOf(v.host) !== -1) return v; }
+  return null;
 }
 
 // ── Section: Slack ───────────────────────────────────────────────────────────
@@ -2504,16 +2396,34 @@ function _wireSectionAccordion(paneId) {
   });
 }
 
-// ── Section: Accounts (S11) ──────────────────────────────────────────────────
+// ── Section: Accounts — ONE unified editable list ────────────────────────────
+// Every login (seeded vendor portals + any site you add) is one editable card:
+// name, url, username, password (+eye reveal), 🔗 open, 🗑 remove, and — for a
+// row whose URL matches a known vendor portal — a "Test login" button + a 🔐
+// badge. The list persists to settings.accounts (plaintext, so the eye-reveal
+// works for everything). CRITICAL: a vendor row ALSO mirrors its user/pass into
+// the encrypted keychain (vendor.<id>.username/password) on save, so the
+// background auto-login (getForHostname) keeps working byte-for-byte unchanged.
 function _wireAccounts() {
-
   settingsBridge.getAll().then((all) => {
-    const rows = (all && Array.isArray(all.accounts)) ? all.accounts : [];
-    if (rows.length > 0) {
-      const empty = document.getElementById('acct-empty');
-      if (empty) empty.style.display = 'none';
-      rows.forEach((r) => _acctAddRow(r));
-    }
+    const saved = (all && Array.isArray(all.accounts)) ? all.accounts : [];
+
+    // Seed the known vendor portals so they're always in the one list. A saved
+    // row already covering a vendor host wins (keeps the user's edits); any
+    // vendor not yet present is added, prefilled with its known name/url + the
+    // keychain username mirror (<id>_user). Passwords are never prefilled (the
+    // keychain copy isn't retrievable) — the plaintext copy fills in once saved.
+    const rows = saved.slice();
+    _VENDORS.forEach((v) => {
+      const already = rows.some((r) => _vendorForUrl(r.url || r.name) && _vendorForUrl(r.url || r.name).id === v.id);
+      if (!already) {
+        rows.push({ name: v.name, url: 'https://' + v.host + '/', user: (all && all[`${v.id}_user`]) || '', pass: '' });
+      }
+    });
+
+    const empty = document.getElementById('acct-empty');
+    if (rows.length) { if (empty) empty.style.display = 'none'; rows.forEach((r) => _acctAddRow(r)); }
+    else if (empty) empty.style.display = 'flex';
   }).catch(() => {});
 
   document.getElementById('acct-add').addEventListener('click', () => {
@@ -2524,7 +2434,6 @@ function _wireAccounts() {
       if (inp) inp.focus();
     }
   });
-
 }
 
 function _acctAddRow(prefill = {}) {
@@ -2532,51 +2441,63 @@ function _acctAddRow(prefill = {}) {
   if (empty) empty.style.display = 'none';
 
   const list = document.getElementById('acct-list');
-  const id   = 'acct-' + Date.now();
+  const id   = 'acct-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
   const row  = document.createElement('div');
-  row.className = 'acct-row';
+  row.className = 'acct-card acct-row';
   row.id = id;
 
   const url  = prefill.url  || '';
   const name = prefill.name || '';
   const user = prefill.user || '';
   const pass = prefill.pass || '';
+  const vendor = _vendorForUrl(url || name);
 
-  row.innerHTML = `
-    <div class="acct-cell acct-cell-site">
-      <input class="acct-input acct-url"  type="url"  placeholder="https://..."     value="${_esc(url)}"  title="Site URL"/>
-      <input class="acct-input acct-name" type="text" placeholder="Site name"       value="${_esc(name)}" title="Display name"/>
-      <a class="acct-link" href="${_esc(url) || '#'}" title="Open site" style="${url ? '' : 'display:none'}" target="_blank">🔗</a>
-    </div>
-    <div class="acct-cell acct-cell-user">
-      <input class="acct-input" type="text" placeholder="username / email" value="${_esc(user)}"/>
-    </div>
-    <div class="acct-cell acct-cell-pass">
-      <input class="acct-input acct-pass" type="password" placeholder="password" value="${_esc(pass)}"/>
-      <button class="acct-eye" type="button" title="Show/hide">👁️</button>
-    </div>
-    <div class="acct-cell acct-cell-actions">
-      <span class="acct-save-badge" id="badge-${id}"></span>
-      <button class="acct-del" type="button" title="Remove">🗑</button>
-    </div>`;
+  const testBtn = vendor
+    ? '<button class="sd-btn secondary acct-test" type="button">' + (vendor.sso ? 'Sign in' : 'Test login') + '</button>'
+    : '';
+  const vendorBadge = vendor ? '<span class="acct-vendor-tag" title="Auto-login portal — syncs to secure keychain">🔐 ' + _esc(vendor.name) + '</span>' : '';
 
+  row.innerHTML =
+    '<div class="acct-card-row1">' +
+      '<input class="acct-input acct-name" type="text" placeholder="Account name" value="' + _esc(name) + '" title="Display name"/>' +
+      vendorBadge +
+      '<a class="acct-link" href="' + (_esc(url) || '#') + '" title="Open site" style="' + (url ? '' : 'display:none') + '" target="_blank">🔗</a>' +
+      '<span class="acct-save-badge" id="badge-' + id + '"></span>' +
+      '<button class="acct-del" type="button" title="Remove">🗑</button>' +
+    '</div>' +
+    '<input class="acct-input acct-url" type="url" placeholder="https://..." value="' + _esc(url) + '" title="Site URL"/>' +
+    '<div class="acct-card-row2">' +
+      '<input class="acct-input acct-user" type="text" placeholder="username / email" value="' + _esc(user) + '"/>' +
+      '<span class="acct-pass-wrap' + (vendor && vendor.sso ? ' acct-hide' : '') + '">' +
+        '<input class="acct-input acct-pass" type="password" placeholder="password" value="' + _esc(pass) + '"/>' +
+        '<button class="acct-eye" type="button" title="Show/hide">👁️</button>' +
+      '</span>' +
+    '</div>' +
+    (testBtn ? '<div class="acct-card-actions">' + testBtn + '<span class="acct-test-status settings__status" style="display:none"></span></div>' : '');
+
+  // URL change: update the open-link + re-detect vendor (so pasting a vendor
+  // URL turns a plain row into a recognized portal row on next render).
   row.querySelector('.acct-url').addEventListener('input', function () {
     const link = row.querySelector('.acct-link');
     const v = this.value.trim();
-    link.href = v || '#';
-    link.style.display = v ? '' : 'none';
+    if (link) { link.href = v || '#'; link.style.display = v ? '' : 'none'; }
     _acctAutoSave(row);
   });
-  row.querySelectorAll('.acct-input.acct-name, .acct-cell-user .acct-input').forEach((inp) => {
-    inp.addEventListener('input', () => _acctAutoSave(row));
-  });
+  row.querySelector('.acct-name').addEventListener('input', () => _acctAutoSave(row));
+  row.querySelector('.acct-user').addEventListener('input', () => _acctAutoSave(row));
   row.querySelector('.acct-pass').addEventListener('input', () => _acctAutoSave(row));
   row.querySelector('.acct-eye').addEventListener('click', function () {
     const inp = row.querySelector('.acct-pass');
     inp.type = inp.type === 'password' ? 'text' : 'password';
     this.textContent = inp.type === 'password' ? '👁️' : '🙈';
   });
-  row.querySelector('.acct-del').addEventListener('click', () => {
+  row.querySelector('.acct-del').addEventListener('click', async () => {
+    // If this was a vendor row, also clear its keychain keys so auto-login
+    // stops using stale creds for a portal the user removed.
+    const vend = _vendorForUrl((row.querySelector('.acct-url')?.value || '') || (row.querySelector('.acct-name')?.value || ''));
+    if (vend && !vend.sso) {
+      try { await credsBridge.delete('vendor.' + vend.id + '.username'); await credsBridge.delete('vendor.' + vend.id + '.password'); await settingsBridge.save(vend.id + '_user', ''); } catch (_) {}
+    }
     row.remove();
     if (!document.querySelectorAll('#acct-list .acct-row').length) {
       const e = document.getElementById('acct-empty');
@@ -2585,16 +2506,50 @@ function _acctAddRow(prefill = {}) {
     _acctPersist();
   });
 
+  // Test login (vendor rows only) — opens the real portal + runs the same
+  // auto-login pass the scraper uses. Saves first so it tests current creds.
+  const tb = row.querySelector('.acct-test');
+  if (tb && vendor) tb.addEventListener('click', async () => {
+    const st = row.querySelector('.acct-test-status');
+    if (st) { st.textContent = '⏳ Opening portal…'; st.style.display = 'inline'; st.className = 'acct-test-status settings__status settings__status--loading'; }
+    try {
+      await _acctMirrorVendor(row, vendor);               // ensure latest creds are in the keychain
+      const r = await credsBridge.testLogin(vendor.id);
+      if (st) {
+        if (r && r.ok && r.attempted) { st.textContent = '✅ Attempted — check the window'; st.className = 'acct-test-status settings__status settings__status--ok'; }
+        else if (r && r.closedByUser) { st.textContent = 'Window closed'; st.className = 'acct-test-status settings__status'; }
+        else { st.textContent = vendor.sso ? '⚠️ Requires Midway SSO' : '⚠️ Save a username + password first'; st.className = 'acct-test-status settings__status settings__status--loading'; }
+      }
+    } catch (e) {
+      if (st) { st.textContent = '❌ ' + e.message; st.className = 'acct-test-status settings__status settings__status--err'; }
+    }
+  });
+
   list.appendChild(row);
+}
+
+// Mirror a vendor row's user/pass into the encrypted keychain + username mirror,
+// so the background auto-login (getForHostname) uses the current credentials.
+async function _acctMirrorVendor(row, vendor) {
+  if (!vendor || vendor.sso) return;
+  const user = (row.querySelector('.acct-user')?.value || '').trim();
+  const pass = (row.querySelector('.acct-pass')?.value || '');
+  try {
+    if (user) { await credsBridge.set('vendor.' + vendor.id + '.username', user); await settingsBridge.save(vendor.id + '_user', user); }
+    if (pass) { await credsBridge.set('vendor.' + vendor.id + '.password', pass); }
+  } catch (_) {}
 }
 
 const _acctTimers = {};
 function _acctAutoSave(row) {
   const badge = row.querySelector('.acct-save-badge');
-  if (badge) { badge.textContent = 'saving...'; badge.className = 'acct-save-badge saving'; }
+  if (badge) { badge.textContent = 'saving…'; badge.className = 'acct-save-badge saving'; }
   clearTimeout(_acctTimers[row.id]);
-  _acctTimers[row.id] = setTimeout(() => {
+  _acctTimers[row.id] = setTimeout(async () => {
     _acctPersist();
+    // If this row is a known vendor, keep the keychain copy in sync too.
+    const vend = _vendorForUrl((row.querySelector('.acct-url')?.value || '') || (row.querySelector('.acct-name')?.value || ''));
+    if (vend && !vend.sso) { await _acctMirrorVendor(row, vend); }
     if (badge) {
       badge.textContent = '✅'; badge.className = 'acct-save-badge saved';
       setTimeout(() => { badge.textContent = ''; badge.className = 'acct-save-badge'; }, 2000);
@@ -2606,12 +2561,8 @@ function _acctPersist() {
   const rows = [...document.querySelectorAll('#acct-list .acct-row')].map((r) => ({
     name: (r.querySelector('.acct-name')?.value || '').trim(),
     url:  (r.querySelector('.acct-url')?.value  || '').trim(),
-    user: (r.querySelector('.acct-cell-user .acct-input')?.value || '').trim(),
-    // BUG FIX (2026-07-23): password was never included here, so it was
-    // never persisted -- every reload silently wiped it, which is why the
-    // eye/show-password toggle appeared "broken" (there was nothing saved
-    // to reveal). Not trimmed: leading/trailing spaces can be intentional
-    // in a password.
+    user: (r.querySelector('.acct-user')?.value || '').trim(),
+    // Password NOT trimmed: leading/trailing spaces can be intentional.
     pass: (r.querySelector('.acct-pass')?.value || ''),
   })).filter((r) => r.name || r.url || r.user);
   settingsBridge.save('accounts', rows).catch(() => {});
@@ -3395,8 +3346,6 @@ export function init() {
   _wireDomiciles();
   _wireAuth();
   _wireOrcha();
-  _renderVendorCards();
-  _wireVendorAuth();
   _wireSlack();
   _wirePartnerAutoReply();
   _wireOperatorChannels();

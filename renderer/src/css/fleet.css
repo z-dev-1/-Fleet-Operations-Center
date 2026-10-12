@@ -2883,62 +2883,36 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .dp-ai-result-footer{display:flex;justify-content:flex-end;margin-top:8px}
 
 
-/* ── Accounts section (S11) ────────────────────────────────────────────────── */
-/* Unified Accounts: vendor portal cards (encrypted) + other site logins. */
-.acct-group-title{display:flex;align-items:center;gap:10px;font-size:12px;font-weight:700;color:var(--txt);margin:4px 0 10px;text-transform:uppercase;letter-spacing:.04em}
-.acct-group-note{font-size:9px;font-weight:600;color:var(--mut);text-transform:none;letter-spacing:0;background:rgba(126,231,135,.12);color:var(--grn);padding:2px 7px;border-radius:10px}
-.acct-add-inline{margin-left:auto;font-size:10px;padding:3px 10px}
-.acct-vendor-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
-.acct-card{background:var(--card);border:1px solid var(--bdr);border-radius:10px;padding:12px 13px;display:flex;flex-direction:column;gap:8px}
-.acct-card--vendor{min-height:0}
-.acct-card-head{display:flex;flex-direction:column;gap:2px;margin-bottom:2px}
-.acct-card-name{font-size:12px;font-weight:700;color:var(--txt)}
-.acct-card-host{font-size:9px;color:var(--mut);font-family:var(--mono)}
-.acct-card-field{display:flex;flex-direction:column;gap:3px}
-.acct-card-field label{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
-.acct-card-field .sd-input{font-size:11px;padding:5px 8px}
-.acct-card-sso-note{font-size:10px;color:var(--mut);font-style:italic}
-.acct-card-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
-.acct-card-actions .sd-btn{font-size:10px;padding:4px 10px}
+/* ── Accounts — one unified editable list of login cards ─────────────────────── */
+.acct-list{display:flex;flex-direction:column;gap:10px}
+.acct-card{background:var(--card);border:1px solid var(--bdr);border-radius:10px;padding:11px 12px;display:flex;flex-direction:column;gap:7px}
+.acct-card-row1{display:flex;align-items:center;gap:8px}
+.acct-card-row1 .acct-name{flex:1;font-weight:600}
+.acct-vendor-tag{font-size:9px;font-weight:700;color:var(--grn);background:rgba(126,231,135,.12);padding:2px 7px;border-radius:10px;white-space:nowrap}
+.acct-link{text-decoration:none;font-size:14px;opacity:.8}
+.acct-link:hover{opacity:1}
+.acct-card-row2{display:flex;gap:8px}
+.acct-card-row2 .acct-user{flex:1}
+.acct-pass-wrap{flex:1;display:flex;align-items:center;gap:4px;position:relative}
+.acct-pass-wrap .acct-pass{flex:1}
+.acct-pass-wrap.acct-hide{display:none}
+.acct-eye{background:none;border:none;cursor:pointer;font-size:13px;padding:0 2px;opacity:.75}
+.acct-eye:hover{opacity:1}
+.acct-input{background:var(--el);border:1px solid var(--bdr);border-radius:6px;color:var(--txt);font-size:11px;padding:6px 9px;outline:none;width:100%;box-sizing:border-box}
+.acct-input:focus{border-color:var(--acc)}
+.acct-card-actions{display:flex;align-items:center;gap:8px;margin-top:1px}
+.acct-card-actions .sd-btn{font-size:10px;padding:4px 12px}
+.acct-test-status{font-size:10px}
+.acct-del{background:none;border:none;cursor:pointer;font-size:13px;opacity:.6;padding:0 2px}
+.acct-del:hover{opacity:1}
+.acct-save-badge{font-size:10px;color:var(--mut);min-width:14px;text-align:right}
+.acct-save-badge.saved{color:var(--grn)}
 
 .acct-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:32px 20px;border:1px dashed var(--bdr);border-radius:10px;text-align:center}
 .acct-empty__icon{font-size:26px;color:var(--mut);opacity:.5}
 .acct-empty__title{font-size:12px;font-weight:700;color:var(--txt2)}
 .acct-empty__sub{font-size:11px;color:var(--mut);line-height:1.6;max-width:300px}
 .acct-empty__sub strong{color:var(--txt2)}
-
-/* Column header pseudo-row */
-.acct-list{display:flex;flex-direction:column;gap:1px}
-.acct-list:not(:empty)::before{content:'Site\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0 Username\00a0/\00a0Email\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0\00a0 Password';display:block;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--mut);padding:0 4px 6px;border-bottom:1px solid var(--bdr);margin-bottom:4px}
-
-/* Each credential row */
-.acct-row{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:6px;align-items:center;padding:6px 4px;border-radius:7px;transition:background .15s}
-.acct-row:hover{background:rgba(255,255,255,.03)}
-.acct-cell{display:flex;align-items:center;gap:4px;min-width:0}
-
-/* Inputs */
-.acct-input{flex:1;min-width:0;background:transparent;border:none;border-bottom:1px solid transparent;color:var(--txt);font-size:11px;padding:3px 2px;outline:none;transition:border-color .15s;font-family:inherit}
-.acct-input:focus{border-bottom-color:var(--acc)}
-.acct-input::placeholder{color:var(--mut)}
-.acct-input.acct-url{font-size:10px;color:var(--txt2);font-family:var(--mono,monospace);max-width:120px}
-.acct-input.acct-name{font-weight:600;color:var(--txt)}
-
-/* ↗ open-site hyperlink button */
-.acct-link{display:flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:5px;background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);color:var(--acc2);font-size:10px;text-decoration:none;flex-shrink:0;transition:all .15s}
-.acct-link:hover{background:rgba(88,166,255,.18);border-color:#58a6ff}
-
-/* Eye / show-password toggle */
-.acct-eye{background:transparent;border:none;color:var(--mut);cursor:pointer;font-size:12px;padding:0 2px;flex-shrink:0;line-height:1;transition:color .15s}
-.acct-eye:hover{color:var(--txt2)}
-
-/* Delete row */
-.acct-del{background:transparent;border:none;color:var(--mut);cursor:pointer;font-size:11px;padding:2px 6px;border-radius:5px;flex-shrink:0;transition:all .15s}
-.acct-del:hover{color:#ff7b72;background:rgba(255,123,114,.1)}
-
-/* Auto-save badge */
-.acct-save-badge{font-size:9px;font-family:var(--mono,monospace);min-width:42px;text-align:right;transition:color .2s}
-.acct-save-badge.saving{color:var(--txt2)}
-.acct-save-badge.saved{color:#7ee787}
 
 /* ══ Settings Drawer ══════════════════════════════════════════════════════════ */
 
