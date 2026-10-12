@@ -17,7 +17,6 @@
 import bus                                         from '../bus.js';
 import state                                        from '../state.js';
 import { settings as settingsBridge }              from '../bridge.js';
-import { auth     as authBridge }                  from '../bridge.js';
 import { credentials as credsBridge }              from '../bridge.js';
 import { slack    as slackBridge }                 from '../bridge.js';
 import { sp       as spBridge }                    from '../bridge.js';
@@ -453,15 +452,9 @@ function _html() {
              (toolbar avatar) as a chip editor. Same settings:save/reset-domiciles
              backend (triggers a rescan). -->
 
-        <!-- Midway Auth -->
-        <div class="sd-section" id="sect-auth">
-          <div class="sd-section-title">Midway Auth</div>
-          <div id="auth-status" class="sd-status warn">⏳ Checking...</div>
-          <div class="sd-btn-row" style="margin-top:8px">
-            <button class="sd-btn primary" id="auth-mwinit">Run mwinit</button>
-            <button class="sd-btn secondary" id="auth-recheck">Re-check</button>
-          </div>
-        </div>
+        <!-- Midway Auth section removed (2026-08-14): run mwinit via Ctrl+M
+             (keyboard-shortcuts.js); session-expiry surfaces its own re-auth
+             modal (app.js fleet:auth-failure) + status-bar indicator. -->
 
         <!-- AI Config moved (2026-08-14) to #ai-config-overlay opened from
              the toolbar AI status pill (#tb-ai-status). -->
@@ -844,28 +837,8 @@ function _closeAIConfigOverlay() {
 // _wireDomiciles() removed (2026-08-14): Domiciles editor moved to the 👤 User
 // Profile popover (toolbar.js). Same settings:save/reset-domiciles backend.
 
-// ── Section: Auth ────────────────────────────────────────────────────────────
-function _checkAuth() {
-  authBridge.checkMidway().then((ok) => {
-    const el = document.getElementById('auth-status');
-    if (!el) return;
-    if (ok) {
-      el.textContent = '✅ Authenticated';
-      el.className = 'sd-status ok';
-    } else {
-      el.textContent = '⚠️ Not authenticated';
-      el.className = 'sd-status warn';
-    }
-  }).catch(() => {});
-}
-
-function _wireAuth() {
-  _checkAuth();
-  document.getElementById('auth-recheck').addEventListener('click', _checkAuth);
-  document.getElementById('auth-mwinit').addEventListener('click', () => {
-    authBridge.runMwinit().then(() => _checkAuth()).catch(() => {});
-  });
-}
+// _checkAuth()/_wireAuth() removed (2026-08-14): Midway Auth section moved out
+// of Settings — run mwinit via Ctrl+M; re-auth modal handles session expiry.
 
 // ── Section: Orcha ───────────────────────────────────────────────────────────
 function _wireOrcha() { _wireAIConfig(); }
@@ -2653,7 +2626,6 @@ export function init() {
   // SP Workbook Discover/config wiring moved (2026-08-14) to the Scheduler
   // view's SharePoint Push gear overlay (renderer/src/js/views/schedulers.js).
 
-  _wireAuth();
   _wireOrcha();
   _wireSlack();
   _wirePartnerAutoReply();
