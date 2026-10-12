@@ -16,7 +16,6 @@
 
 import bus                                         from '../bus.js';
 import state                                        from '../state.js';
-import * as notifSounds                            from '../notif-sounds.js';
 import { settings as settingsBridge }              from '../bridge.js';
 import { auth     as authBridge }                  from '../bridge.js';
 import { credentials as credsBridge }              from '../bridge.js';
@@ -477,38 +476,10 @@ function _html() {
         <!-- AI Config moved (2026-08-14) to #ai-config-overlay opened from
              the toolbar AI status pill (#tb-ai-status). -->
 
-        <!-- Notifications -->
-        <div class="sd-section" id="sect-notifications">
-          <div class="sd-section-title">Notifications</div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">OS notification on Midway auth failure</span>
-            <input type="checkbox" id="notif-auth-fail" checked/>
-          </div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">OS notification on sync complete</span>
-            <input type="checkbox" id="notif-sync-ok" checked/>
-          </div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">OS notification on sync error</span>
-            <input type="checkbox" id="notif-sync-err" checked/>
-          </div>
-          <!-- FEATURE (2026-07-22): sound notifications -- synthesized
-               tones (no audio asset files), a distinct pattern per
-               notification type, inferred automatically from each
-               notification's existing icon field. See
-               renderer/src/js/notif-sounds.js for the full design. -->
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">Sound notifications</span>
-            <input type="checkbox" id="notif-sounds-enabled" checked/>
-          </div>
-          <div class="sd-field">
-            <div class="sd-label">Volume</div>
-            <input type="range" id="notif-sounds-volume" min="0" max="100" value="50" style="width:100%"/>
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn secondary" id="notif-sounds-test" type="button">Test sounds</button>
-          </div>
-        </div>
+        <!-- Notifications section moved (2026-08-14) to the 🔔 notification
+             dropdown's ⚙ gear (renderer/src/js/components/notif-dropdown.js):
+             OS-notification toggles + sound on/off/volume + per-category sound
+             pickers. Persists to the same settings.notifications object. -->
 
         <!-- Email SMTP + Auto-Email Note sections removed (2026-08-14):
              user sends via OWA only, so the SMTP config is unused and the
@@ -1899,54 +1870,8 @@ function _wireAsana() {
 
 // ── Section: Fleet Ops Companion — removed (feature discontinued) ────────────
 
-// ── Section: Notifications ───────────────────────────────────────────────────
-function _wireNotifications() {
-  // BUG-AWARE (2026-07-22): settings:save fully REPLACES whatever value
-  // is stored under a key (confirmed in src/ipc/settings.js -- `s[key] =
-  // value`, not a merge) -- so every save here must include ALL fields
-  // under 'notifications', not just the one that changed, or the other
-  // toggles would silently get wiped back to undefined.
-  function _saveAll() {
-    const soundsEnabledEl = document.getElementById('notif-sounds-enabled');
-    const volumeEl = document.getElementById('notif-sounds-volume');
-    const volume = volumeEl ? (parseInt(volumeEl.value, 10) || 0) / 100 : 0.5;
-    const soundsEnabled = soundsEnabledEl ? !!soundsEnabledEl.checked : true;
-    settingsBridge.save('notifications', {
-      authFail:     document.getElementById('notif-auth-fail').checked,
-      syncOk:       document.getElementById('notif-sync-ok').checked,
-      syncErr:      document.getElementById('notif-sync-err').checked,
-      soundsEnabled,
-      soundVolume:  volume,
-    }).catch(() => {});
-    // FEATURE (2026-07-22): live-update the already-running notif sound
-    // module immediately -- no restart needed to see/hear the change.
-    bus.emit('notif-sounds:config', { enabled: soundsEnabled, volume });
-  }
-
-  ['notif-auth-fail', 'notif-sync-ok', 'notif-sync-err', 'notif-sounds-enabled'].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener('change', _saveAll);
-  });
-
-  const volumeEl = document.getElementById('notif-sounds-volume');
-  if (volumeEl) volumeEl.addEventListener('input', _saveAll);
-
-  const testBtn = document.getElementById('notif-sounds-test');
-  if (testBtn) testBtn.addEventListener('click', () => {
-    // Briefly force-enable playback for the test regardless of the
-    // current checkbox state, using whatever volume is currently set,
-    // so "Test sounds" always audibly demonstrates all 4 types even if
-    // the user is mid-way through deciding whether to enable them.
-    const volumeEl2 = document.getElementById('notif-sounds-volume');
-    const volume = volumeEl2 ? (parseInt(volumeEl2.value, 10) || 0) / 100 : 0.5;
-    const prevConfig = notifSounds.getConfig();
-    notifSounds.configure({ enabled: true, volume });
-    ['success', 'error', 'alert', 'message'].forEach((type, i) => {
-      setTimeout(() => notifSounds.play(type), i * 700);
-    });
-    setTimeout(() => notifSounds.configure(prevConfig), 4 * 700 + 300);
-  });
-}
+// _wireNotifications() removed (2026-08-14): Notifications settings moved to
+// the 🔔 dropdown ⚙ gear (notif-dropdown.js). Same settings.notifications keys.
 
 
 // ── Section Accordion (Integrations tab) ─────────────────────────────────────
@@ -2700,19 +2625,8 @@ function _populate() {
       if (a.workspace) { const el = document.getElementById('asana-workspace'); if (el) el.value = a.workspace; }
       if (a.project)   { const el = document.getElementById('asana-project');   if (el) el.value = a.project;   }
     }
-    if (all.notifications) {
-      const n = all.notifications;
-      const af = document.getElementById('notif-auth-fail');
-      const so = document.getElementById('notif-sync-ok');
-      const se = document.getElementById('notif-sync-err');
-      const sndEn = document.getElementById('notif-sounds-enabled');
-      const sndVol = document.getElementById('notif-sounds-volume');
-      if (af && n.authFail != null) af.checked = n.authFail;
-      if (so && n.syncOk   != null) so.checked = n.syncOk;
-      if (se && n.syncErr  != null) se.checked = n.syncErr;
-      if (sndEn) sndEn.checked = n.soundsEnabled !== false; // default ON if never set
-      if (sndVol && typeof n.soundVolume === 'number') sndVol.value = Math.round(n.soundVolume * 100);
-    }
+    // Notifications populate removed (2026-08-14): the Notifications UI moved
+    // to the 🔔 dropdown ⚙ gear, which reads settings.notifications itself.
   }).catch(() => {});
 }
 
@@ -2811,7 +2725,7 @@ export function init() {
   _wireDMAutoReply();
   _wireSP();
   _wireAsana();
-  _wireNotifications();
+
   _wireAccounts();
   _wireSectionAccordion('sd-pane-integrations');
   _wireSectionAccordion('sd-pane-ui');

@@ -14,6 +14,7 @@ const logger = require('../utils/logger')('briefing');
 const store  = require('../store');
 const crypto = require('crypto');
 const { runAnomalyDetection } = require('./anomaly');
+const { runTracker } = require('./tracker');
 const repairHistory = require('./repair-history');
 
 const BRIEFING_AI_TIMEOUT_MS = 45000;
@@ -215,6 +216,15 @@ function process(rows, send, opts) {
     message: a.message,
   }));
   if (recs.length) send('orcha:recommendations', { recommendations: recs });
+
+  // Workflow tracker (📍 Workflow tab). runTracker() was previously never
+  // called, so the renderer's tracker slice stayed at defaults and the tab
+  // showed only zeros. Compute + push it on every fleet data push, same as
+  // alerts/recommendations above.
+  try {
+    const trackerData = runTracker(rows);
+    if (trackerData) send('orcha:tracker', trackerData);
+  } catch (e) { logger.warn('[tracker] run failed: ' + e.message); }
 
   // Detect repair completions (unavail -> available transitions)
   try { repairHistory.detectTransitions(rows, global._prevRows || []); } catch (e) {}
