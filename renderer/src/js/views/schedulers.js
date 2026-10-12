@@ -19,7 +19,8 @@
  */
 
 import bus      from '../bus.js';
-import { settings as settingsBridge, sp as spBridge } from '../bridge.js';
+import state    from '../state.js';
+import { settings as settingsBridge, sp as spBridge, slack as slackBridge } from '../bridge.js';
 
 let _el        = null;
 let _tickTimer = null;
@@ -65,6 +66,7 @@ function _viewHtml() {
     + '<div class="sched-subtitle" id="sched-weekday-badge">\u2014</div></div>'
     + '<div class="sched-header__right"><div class="sched-clock" id="sched-clock">\u2014</div>'
     + '<span class="sched-tz" id="sched-tz"></span>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-cb-btn" title="Daily carrier briefing">\ud83d\udcc5 Briefing</button>'
     + '<button class="sched-btn sched-btn--ghost" id="sched-settings-btn" title="Scheduler settings">\u2699</button>'
     + '<button class="sched-btn sched-btn--back" id="sched-back">\u2190 Fleet</button></div>'
     + '</div>'
@@ -183,6 +185,35 @@ function _viewHtml() {
     + '<div id="sched-wb-results" style="display:none"><div class="sched-settings-group__title">Sheets found</div>'
     + '<div id="sched-wb-sheets-list"></div></div>'
     + '<div id="sched-wb-saved" class="sched-wb-saved"></div>'
+    + '</div></div></div>'
+
+    // Daily Carrier Briefing overlay (header button). Once a day posts an
+    // AI-written fleet snapshot + safety tip to each operator's carrier channel.
+    + '<div class="sched-settings-overlay" id="sched-cb-overlay" style="display:none">'
+    + '<div class="sched-settings-panel">'
+    + '<div class="sched-settings-head"><span class="sched-settings-title">\ud83d\udcc5 Daily Carrier Briefing</span>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-cb-close">\u2715</button></div>'
+    + '<div class="sched-settings-body">'
+    + '<div class="sched-settings-hint">Posts an AI-written fleet snapshot + safety tip to each operator\u2019s carrier channel (from Operator Channels), tagging the owner. Written from real fleet data \u2014 nothing invented. One message per operator per day.</div>'
+    + '<label class="sched-settings-field"><span>Enable daily briefing</span><input type="checkbox" id="sched-cb-enabled" /></label>'
+    + '<label class="sched-settings-field"><span>Send time</span><input class="sched-settings-input" type="time" id="sched-cb-send-time" /></label>'
+    + '<label class="sched-settings-field"><span>Timezone (IANA)</span><input class="sched-settings-input sched-cb-tz" type="text" id="sched-cb-timezone" placeholder="America/New_York" /></label>'
+
+    + '<div class="sched-settings-group"><div class="sched-settings-group__title">Include in snapshot</div>'
+    + '<label class="sched-settings-field"><span>Units down</span><input type="checkbox" id="sched-cb-inc-down" /></label>'
+    + '<label class="sched-settings-field"><span>Flagged this week</span><input type="checkbox" id="sched-cb-inc-flagged" /></label>'
+    + '<label class="sched-settings-field"><span>Active count</span><input type="checkbox" id="sched-cb-inc-active" /></label>'
+    + '<label class="sched-settings-field"><span>Domiciles</span><input type="checkbox" id="sched-cb-inc-domiciles" /></label>'
+    + '<label class="sched-settings-field"><span>Flagged threshold (risk \u2265)</span><input class="sched-settings-input" type="number" min="0" max="100" step="1" id="sched-cb-risk-threshold" /></label>'
+    + '<label class="sched-settings-field"><span>Include AI safety tip</span><input type="checkbox" id="sched-cb-tip-enabled" /></label></div>'
+
+    + '<label class="sched-settings-field"><span>Test operator</span>'
+    + '<select class="sched-settings-input" id="sched-cb-test-operator"><option value="">Auto (first mapped)</option></select></label>'
+    + '<div class="sched-settings-hint" id="sched-cb-run-info"></div>'
+    + '<div class="sched-settings-actions"><button class="sched-btn sched-btn--save" id="sched-cb-save">\u2713 Save</button>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-cb-test-btn">\ud83e\uddea Test to me</button>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-cb-runnow-btn">Run now (live)</button>'
+    + '<span class="sched-settings-status" id="sched-cb-status"></span></div>'
     + '</div></div></div>'
 
     // DBR DATA card — single daily slot fires BOTH AFP + DSP pulls; each
@@ -336,6 +367,10 @@ const _CSS = [
   '.sched-wb-card__del{background:none;border:none;color:#f85149;cursor:pointer;font-size:12px;line-height:1}',
   '.sched-wb-card__carriers{font-size:9px;color:var(--mut);margin-top:3px}',
   '.sched-wb-empty{font-size:10px;color:var(--mut)}',
+  // Carrier briefing overlay: text/select inputs need more width than numbers
+  '.sched-cb-tz{width:170px;text-align:left}',
+  '#sched-cb-timezone,#sched-cb-test-operator{width:180px;text-align:left}',
+  '#sched-cb-run-info{padding-top:2px}',
 ].join('\n');
 
 let _cssInjected = false;
@@ -848,6 +883,126 @@ async function _removeWorkbook(idx) {
   }).catch(() => {});
 }
 
+// ── Daily Carrier Briefing (header button overlay) ───────────────────────────
+// AI-written fleet snapshot + safety tip posted to each operator's carrier
+// channel once a day. Config persists via slackBridge.*BriefingConfig.
+function _cbStatus(msg, cls) {
+  const el = _q('sched-cb-status');
+  if (el) { el.textContent = msg || ''; el.className = 'sched-settings-status' + (cls ? ' sched-settings-status--' + cls : ''); }
+}
+function _cbCollect() {
+  return {
+    enabled: !!(_q('sched-cb-enabled') && _q('sched-cb-enabled').checked),
+    sendTime: (_q('sched-cb-send-time') ? _q('sched-cb-send-time').value : '').trim(),
+    timezone: (_q('sched-cb-timezone') ? _q('sched-cb-timezone').value : '').trim(),
+    includeDown: !!(_q('sched-cb-inc-down') && _q('sched-cb-inc-down').checked),
+    includeFlagged: !!(_q('sched-cb-inc-flagged') && _q('sched-cb-inc-flagged').checked),
+    includeActive: !!(_q('sched-cb-inc-active') && _q('sched-cb-inc-active').checked),
+    includeDomiciles: !!(_q('sched-cb-inc-domiciles') && _q('sched-cb-inc-domiciles').checked),
+    riskThreshold: parseInt(_q('sched-cb-risk-threshold') ? _q('sched-cb-risk-threshold').value : '', 10),
+    tipEnabled: !!(_q('sched-cb-tip-enabled') && _q('sched-cb-tip-enabled').checked),
+  };
+}
+function _cbApply(cfg) {
+  cfg = cfg || {};
+  const set = (id, prop, val) => { const el = _q(id); if (el) el[prop] = val; };
+  set('sched-cb-enabled', 'checked', !!cfg.enabled);
+  set('sched-cb-send-time', 'value', cfg.sendTime || '07:00');
+  set('sched-cb-timezone', 'value', cfg.timezone || 'America/New_York');
+  set('sched-cb-inc-down', 'checked', cfg.includeDown !== false);
+  set('sched-cb-inc-flagged', 'checked', cfg.includeFlagged !== false);
+  set('sched-cb-inc-active', 'checked', cfg.includeActive !== false);
+  set('sched-cb-inc-domiciles', 'checked', cfg.includeDomiciles !== false);
+  set('sched-cb-risk-threshold', 'value', (cfg.riskThreshold != null ? cfg.riskThreshold : 80));
+  set('sched-cb-tip-enabled', 'checked', cfg.tipEnabled !== false);
+  const runInfo = _q('sched-cb-run-info');
+  if (runInfo) {
+    const tz = cfg.timezone || 'America/New_York';
+    const t  = cfg.sendTime || '07:00';
+    runInfo.textContent = cfg.enabled
+      ? ('Enabled \u2014 sends daily at ' + t + ' ' + tz + ' to each mapped carrier channel.')
+      : 'Disabled \u2014 enable to send a daily briefing.';
+  }
+}
+async function _cbSave() {
+  try {
+    const saved = await slackBridge.saveBriefingConfig(_cbCollect());
+    _cbApply(saved);
+    return true;
+  } catch (e) { _cbStatus('Save failed: ' + (e && e.message || e), 'err'); return false; }
+}
+function _populateCbTestOperators() {
+  const sel = _q('sched-cb-test-operator');
+  if (!sel) return;
+  let ops = [];
+  try {
+    const rows = (state.slice('fleet').rows) || [];
+    const seen = {};
+    rows.forEach((r) => { const o = String(r.operator || '').trim().toUpperCase(); if (o) seen[o] = true; });
+    ops = Object.keys(seen).sort();
+  } catch (_) {}
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">Auto (first mapped)</option>'
+    + ops.map((o) => '<option value="' + _safe(o) + '">' + _safe(o) + '</option>').join('');
+  if (prev && ops.indexOf(prev) !== -1) sel.value = prev;
+}
+function _wireCarrierBriefing() {
+  const saveBtn   = _q('sched-cb-save');
+  const testBtn   = _q('sched-cb-test-btn');
+  const runNowBtn = _q('sched-cb-runnow-btn');
+  if (!saveBtn) return;
+
+  let _t = null;
+  const autoSave = () => { clearTimeout(_t); _t = setTimeout(_cbSave, 400); };
+  ['sched-cb-enabled', 'sched-cb-inc-down', 'sched-cb-inc-flagged', 'sched-cb-inc-active', 'sched-cb-inc-domiciles', 'sched-cb-tip-enabled']
+    .forEach((id) => { const el = _q(id); if (el) el.addEventListener('change', autoSave); });
+  ['sched-cb-send-time', 'sched-cb-timezone', 'sched-cb-risk-threshold']
+    .forEach((id) => { const el = _q(id); if (el) el.addEventListener('input', autoSave); });
+
+  saveBtn.addEventListener('click', async () => { if (await _cbSave()) _cbStatus('Saved \u2713', 'ok'); });
+
+  if (testBtn) testBtn.addEventListener('click', async () => {
+    testBtn.disabled = true; const orig = testBtn.textContent; testBtn.textContent = 'Sending\u2026';
+    try {
+      await _cbSave();
+      const opSel = _q('sched-cb-test-operator');
+      const chosenOp = opSel ? (opSel.value || '').trim() : '';
+      const res = await slackBridge.sendBriefingTest(chosenOp ? { operator: chosenOp } : {});
+      if (res && res.sent) _cbStatus('\uD83E\uDDEA Test sent to your Slack DM (' + (res.aiWritten ? 'AI-written' : 'fallback') + ') for ' + (res.operator || '') + '.', 'ok');
+      else _cbStatus('Test not sent: ' + ((res && res.reason) || 'unknown') + '.', 'err');
+    } catch (e) { _cbStatus('Test failed: ' + (e && e.message || e), 'err'); }
+    finally { testBtn.disabled = false; testBtn.textContent = orig; }
+  });
+
+  if (runNowBtn) runNowBtn.addEventListener('click', async () => {
+    if (!confirm('Post the briefing to ALL mapped carrier channels now? This sends live messages to carriers.')) return;
+    runNowBtn.disabled = true; const orig = runNowBtn.textContent; runNowBtn.textContent = 'Running\u2026';
+    try {
+      await _cbSave();
+      const res = await slackBridge.runBriefingNow();
+      const sent = (res && res.results || []).filter((r) => r.sent).length;
+      const total = (res && res.results || []).length;
+      _cbStatus('Posted ' + sent + '/' + total + ' carrier briefing(s).', sent ? 'ok' : 'err');
+    } catch (e) { _cbStatus('Run failed: ' + (e && e.message || e), 'err'); }
+    finally { runNowBtn.disabled = false; runNowBtn.textContent = orig; }
+  });
+
+  slackBridge.getBriefingConfig().then((cfg) => _cbApply(cfg)).catch(() => _cbApply({}));
+  _populateCbTestOperators();
+}
+async function _openCbOverlay() {
+  const ov = _q('sched-cb-overlay');
+  if (!ov) return;
+  _cbStatus('');
+  try { const cfg = await slackBridge.getBriefingConfig(); _cbApply(cfg); } catch (_) {}
+  _populateCbTestOperators();
+  ov.style.display = 'flex';
+}
+function _closeCbOverlay() {
+  const ov = _q('sched-cb-overlay');
+  if (ov) ov.style.display = 'none';
+}
+
 async function _runDbrNow() {
   await _guard(async () => {
     _toast('info', 'DBR pull started (AFP + DSP)...');
@@ -921,6 +1076,12 @@ export function init(container) {
   bind('sched-wb-discover', 'click', _wbDiscover);
   const _wov = _q('sched-wb-overlay');
   if (_wov) _wov.addEventListener('click', (e) => { if (e.target === _wov) _closeWbOverlay(); });
+  // Daily Carrier Briefing overlay (header button)
+  bind('sched-cb-btn', 'click', _openCbOverlay);
+  bind('sched-cb-close', 'click', _closeCbOverlay);
+  const _cbov = _q('sched-cb-overlay');
+  if (_cbov) _cbov.addEventListener('click', (e) => { if (e.target === _cbov) _closeCbOverlay(); });
+  _wireCarrierBriefing();
   _wireDelegatedActions(_el);
 
   // SP push progress bar (informational only — status of record is the ledger).

@@ -75,7 +75,6 @@ function _html() {
     <div class="sd-tabs">
       <button class="sd-tab active" data-pane="ui">UI &amp; App</button>
       <button class="sd-tab"        data-pane="integrations">Integrations</button>
-      <button class="sd-tab"        data-pane="scheduler">⏱ Scheduler</button>
       <button class="sd-tab"        data-pane="accounts">Accounts</button>
     </div>
 
@@ -808,82 +807,11 @@ function _html() {
       </div>
       <!-- end sd-pane-integrations -->
 
-      <!-- ══ TAB: Scheduler ════════════════════════════════════════════════ -->
-      <div id="sd-pane-scheduler" style="display:none">
-
-        <!-- Schedulers Config -->
-        <div class="sd-section">
-          <div class="sd-section-title">Schedulers – Config</div>
-          <div class="sd-field">
-            <div class="sd-label">Sync interval (minutes)</div>
-            <input class="sd-input" id="sched-interval" type="number" min="1" max="360" placeholder="5"/>
-            <div id="sched-status" class="sd-inline-status" style="margin-top:4px;font-size:11px;"></div>
-          </div>
-          <div class="sd-field">
-            <div class="sd-label">Default scheduler endpoint</div>
-            <input class="sd-input" id="sched-endpoint" placeholder="https://..."/>
-            <div class="sd-hint" style="margin-top:4px">Reserved for a future remote-scheduler integration — not yet functional.</div>
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn primary" id="save-sched">Save</button>
-          </div>
-        </div>
-
-        <!-- Daily Carrier Briefing -->
-        <div class="sd-section" id="sect-carrier-briefing">
-          <div class="sd-section-title">
-            <span style="font-size:11px">📅</span> Daily Carrier Briefing
-            <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">AI</span>
-          </div>
-          <div class="sd-hint" style="margin-bottom:10px">Once a day, posts an AI-written fleet snapshot and safety tip to each operator's carrier channel (from Operator Channels), tagging the owner. The AI writes the whole message from the real fleet data and Contact Book domicile addresses — nothing invented. One message per operator per day.</div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">Enable daily briefing</span>
-            <input type="checkbox" id="cb-enabled"/>
-          </div>
-          <div class="sd-field" style="margin-top:8px">
-            <label class="sd-label">Send time</label>
-            <input class="sd-input" id="cb-send-time" type="time" />
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Timezone (IANA)</label>
-            <input class="sd-input" id="cb-timezone" placeholder="America/New_York" />
-            <div class="sd-hint">e.g. America/New_York, America/Chicago, America/Los_Angeles.</div>
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Include in snapshot</label>
-            <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:4px">
-              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-down"/> Units down</label>
-              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-flagged"/> Flagged this week</label>
-              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-active"/> Active count</label>
-              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-domiciles"/> Domiciles</label>
-            </div>
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Flagged threshold (risk ≥)</label>
-            <input class="sd-input" id="cb-risk-threshold" type="number" min="0" max="100" step="1" />
-          </div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">Include AI safety tip</span>
-            <input type="checkbox" id="cb-tip-enabled"/>
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Test operator</label>
-            <select class="sd-input" id="cb-test-operator">
-              <option value="">Auto (first mapped operator)</option>
-            </select>
-            <div class="sd-hint" style="margin-top:4px">Pick which operator the test send uses. Populated from your current fleet operators.</div>
-          </div>
-          <div class="sd-hint" id="cb-run-info" style="margin-top:8px"></div>
-          <div class="sd-btn-row" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
-            <button class="sd-btn secondary" id="cb-test-btn" type="button">Send test to myself</button>
-            <button class="sd-btn secondary" id="cb-runnow-btn" type="button">Run now (live)</button>
-            <button class="sd-btn primary" id="cb-save">Save</button>
-          </div>
-          <div id="cb-status" class="sd-status" style="display:none;margin-top:8px"></div>
-        </div>
-
-      </div>
-      <!-- end sd-pane-scheduler -->
+      <!-- Scheduler settings tab removed (2026-08-14): everything moved to the
+           Scheduler VIEW (renderer/src/js/views/schedulers.js).
+           - Sync interval + freshness -> the ⚙ gear overlay on that page.
+           - Daily Carrier Briefing -> the 📅 Briefing header button overlay.
+           The dead "Default scheduler endpoint" field was dropped entirely. -->
 
       <!-- Operators & SP tab removed (2026-08-14): its only live content (the
            SharePoint Workbooks config) moved to the Scheduler view's SP Push
@@ -928,7 +856,7 @@ function _wireTabSwitching() {
       _drawer.querySelectorAll('.sd-tab').forEach((t) => t.classList.remove('active'));
       btn.classList.add('active');
       const pane = btn.dataset.pane;
-      ['ui', 'integrations', 'scheduler', 'accounts'].forEach((p) => {
+      ['ui', 'integrations', 'accounts'].forEach((p) => {
         const el = document.getElementById(`sd-pane-${p}`);
         if (el) el.style.display = p === pane ? 'block' : 'none';
       });
@@ -1228,58 +1156,10 @@ function _checkSlack() {
 // Same storage keys (autoEmailNote / autoEmailNoteOneShot) so behavior is
 // unchanged — the scheduler reads them fresh on every auto-send.
 
-// FEATURE (2026-07-16): "Schedulers – Config → Sync interval (minutes)" had
-// zero wiring anywhere -- no click handler, no IPC handler, no read path.
-// The main data sync (AAP/Uptake/Relay) ran on a hardcoded 5-minute timer
-// (DEFAULTS.SYNC_INTERVAL_MS in src/config/defaults.js) with no way to
-// change it from the UI. Now backed by settings:get-sync-interval /
-// settings:save-sync-interval (src/ipc/settings.js), which persist to the
-// settings store and immediately restart the live timer in src/app.js via
-// ctx.reloadSyncInterval -- no app restart required.
-// Note: the "Default scheduler endpoint" field in this same section maps
-// to no existing concept in the codebase and remains intentionally
-// unwired -- flagged with an in-UI hint rather than silently left broken.
-function _wireSchedulerConfig() {
-  var intervalEl = document.getElementById('sched-interval');
-  var saveBtn    = document.getElementById('save-sched');
-  var statusEl   = document.getElementById('sched-status');
-  if (!intervalEl || !saveBtn) return;
-
-  function showStatus(text, cls) {
-    if (!statusEl) return;
-    statusEl.textContent = text;
-    statusEl.className = 'sd-inline-status' + (cls ? ' ' + cls : '');
-    statusEl.style.color = cls === 'err' ? '#ef4444' : cls === 'warn' ? '#eab308' : cls === 'ok' ? '#22c55e' : '#8b949e';
-  }
-
-  settingsBridge.getSyncInterval().then((res) => {
-    var effective = (res && res.effectiveMinutes) || 5;
-    if (res && res.minutes) {
-      intervalEl.value = res.minutes;
-      showStatus('Currently syncing every ' + res.minutes + ' min (custom)', 'ok');
-    } else {
-      showStatus('Currently syncing every ' + effective + ' min (default)', '');
-    }
-  }).catch(() => {});
-
-  saveBtn.addEventListener('click', async () => {
-    var raw = (intervalEl.value || '').trim();
-    var minutes = parseInt(raw, 10);
-    if (!raw || isNaN(minutes)) { showStatus('⚠️ Enter a number of minutes first', 'warn'); return; }
-    try {
-      var result = await settingsBridge.saveSyncInterval(minutes);
-      if (result && result.ok) {
-        showStatus('✅ Saved — now syncing every ' + result.minutes + ' min (applied immediately)', 'ok');
-        toast.show('success', 'Sync interval updated to ' + result.minutes + ' min', 3000);
-      } else {
-        showStatus('❌ ' + ((result && result.error) || 'Save failed'), 'err');
-      }
-    } catch (e) {
-      showStatus('❌ ' + (e.message || 'Save failed'), 'err');
-      toast.show('error', 'Save failed: ' + e.message, 4000);
-    }
-  });
-}
+// _wireSchedulerConfig() removed (2026-08-14): the Schedulers-Config section
+// (sync interval) moved to the Scheduler view's ⚙ gear overlay. The dead
+// "Default scheduler endpoint" field was dropped. Sync interval is still
+// backed by settings:get/save-sync-interval, now driven from that overlay.
 
 function _wireSlack() {
   _checkSlack();
@@ -1863,162 +1743,9 @@ function _wireOperatorChannels() {
   });
 }
 
-// ── Daily Carrier Briefing ────────────────────────────────────────────────────
-function _wireCarrierBriefing() {
-  const enabledEl   = document.getElementById('cb-enabled');
-  const timeEl      = document.getElementById('cb-send-time');
-  const tzEl        = document.getElementById('cb-timezone');
-  const incDownEl   = document.getElementById('cb-inc-down');
-  const incFlagEl   = document.getElementById('cb-inc-flagged');
-  const incActiveEl = document.getElementById('cb-inc-active');
-  const incDomEl    = document.getElementById('cb-inc-domiciles');
-  const riskEl      = document.getElementById('cb-risk-threshold');
-  const tipEl       = document.getElementById('cb-tip-enabled');
-  const runInfoEl   = document.getElementById('cb-run-info');
-  const testBtn     = document.getElementById('cb-test-btn');
-  const runNowBtn   = document.getElementById('cb-runnow-btn');
-  const saveBtn     = document.getElementById('cb-save');
-  const statusEl    = document.getElementById('cb-status');
-  if (!enabledEl || !saveBtn) return;
-
-  let _saveTimer = null;
-
-  function showStatus(text, cls) {
-    if (!statusEl) return;
-    statusEl.textContent = text;
-    statusEl.className = 'sd-status ' + (cls || '');
-    statusEl.style.display = '';
-  }
-
-  function _collect() {
-    return {
-      enabled: !!enabledEl.checked,
-      sendTime: (timeEl.value || '').trim(),
-      timezone: (tzEl.value || '').trim(),
-      includeDown: !!incDownEl.checked,
-      includeFlagged: !!incFlagEl.checked,
-      includeActive: !!incActiveEl.checked,
-      includeDomiciles: !!incDomEl.checked,
-      riskThreshold: parseInt(riskEl.value, 10),
-      tipEnabled: !!tipEl.checked,
-    };
-  }
-
-  async function _save() {
-    try {
-      const saved = await slackBridge.saveBriefingConfig(_collect());
-      _apply(saved); // reflect normalized values back
-    } catch (e) {
-      showStatus('Save failed: ' + e.message, 'err');
-    }
-  }
-
-  // Debounced auto-save on any change.
-  function _autoSave() {
-    clearTimeout(_saveTimer);
-    _saveTimer = setTimeout(_save, 400);
-  }
-
-  function _apply(cfg) {
-    cfg = cfg || {};
-    enabledEl.checked   = !!cfg.enabled;
-    timeEl.value        = cfg.sendTime || '07:00';
-    tzEl.value          = cfg.timezone || 'America/New_York';
-    incDownEl.checked   = cfg.includeDown !== false;
-    incFlagEl.checked   = cfg.includeFlagged !== false;
-    incActiveEl.checked = cfg.includeActive !== false;
-    incDomEl.checked    = cfg.includeDomiciles !== false;
-    riskEl.value        = (cfg.riskThreshold != null ? cfg.riskThreshold : 80);
-    tipEl.checked       = cfg.tipEnabled !== false;
-  }
-
-  [enabledEl, incDownEl, incFlagEl, incActiveEl, incDomEl, tipEl].forEach((el) => {
-    if (el) el.addEventListener('change', _autoSave);
-  });
-  [timeEl, tzEl, riskEl].forEach((el) => {
-    if (el) el.addEventListener('input', _autoSave);
-  });
-
-  if (saveBtn) {
-    saveBtn.addEventListener('click', async () => {
-      await _save();
-      showStatus('\u2705 Saved', 'ok');
-    });
-  }
-
-  if (testBtn) {
-    testBtn.addEventListener('click', async () => {
-      testBtn.disabled = true;
-      const orig = testBtn.textContent;
-      testBtn.textContent = 'Sending...';
-      try {
-        await _save(); // persist current settings first so the test reflects them
-        const opSel = document.getElementById('cb-test-operator');
-        const chosenOp = opSel ? (opSel.value || '').trim() : '';
-        const res = await slackBridge.sendBriefingTest(chosenOp ? { operator: chosenOp } : {});
-        if (res && res.sent) showStatus('\uD83E\uDDEA Test sent to your Slack DM (' + (res.aiWritten ? 'AI-written' : 'fallback') + ') for ' + (res.operator || '') + '.', 'ok');
-        else showStatus('Test not sent: ' + ((res && res.reason) || 'unknown') + '.', 'err');
-      } catch (e) {
-        showStatus('Test failed: ' + e.message, 'err');
-      } finally {
-        testBtn.disabled = false;
-        testBtn.textContent = orig;
-      }
-    });
-  }
-
-  if (runNowBtn) {
-    runNowBtn.addEventListener('click', async () => {
-      if (!confirm('Post the briefing to ALL mapped carrier channels now? This sends live messages to carriers.')) return;
-      runNowBtn.disabled = true;
-      const orig = runNowBtn.textContent;
-      runNowBtn.textContent = 'Running...';
-      try {
-        await _save();
-        const res = await slackBridge.runBriefingNow();
-        const sent = (res && res.results || []).filter((r) => r.sent).length;
-        const total = (res && res.results || []).length;
-        showStatus('Posted ' + sent + '/' + total + ' carrier briefing(s).', sent ? 'ok' : 'err');
-      } catch (e) {
-        showStatus('Run failed: ' + e.message, 'err');
-      } finally {
-        runNowBtn.disabled = false;
-        runNowBtn.textContent = orig;
-      }
-    });
-  }
-
-  slackBridge.getBriefingConfig().then((cfg) => {
-    _apply(cfg);
-    if (runInfoEl) {
-      const tz = (cfg && cfg.timezone) || 'America/New_York';
-      const t  = (cfg && cfg.sendTime) || '07:00';
-      runInfoEl.textContent = (cfg && cfg.enabled)
-        ? ('Enabled — sends daily at ' + t + ' ' + tz + ' to each mapped carrier channel.')
-        : 'Disabled — enable to send a daily briefing.';
-    }
-  }).catch(() => { _apply({}); });
-
-  // Populate the "Test operator" dropdown from the user's REAL fleet operators
-  // (distinct, sorted) — not hardcoded. Keeps the current selection if valid.
-  _populateCbTestOperators();
-}
-
-function _populateCbTestOperators() {
-  const sel = document.getElementById('cb-test-operator');
-  if (!sel) return;
-  let ops = [];
-  try {
-    const rows = (state.slice('fleet').rows) || [];
-    const set = {};
-    rows.forEach((r) => { const o = String(r.operator || '').trim().toUpperCase(); if (o) set[o] = true; });
-    ops = Object.keys(set).sort();
-  } catch (_) {}
-  const prev = sel.value;
-  sel.innerHTML = '<option value="">Auto (first mapped operator)</option>' +
-    ops.map((o) => '<option value="' + _esc(o) + '">' + _esc(o) + '</option>').join('');
-  if (prev && ops.indexOf(prev) !== -1) sel.value = prev;
-}
+// _wireCarrierBriefing() + _populateCbTestOperators() removed (2026-08-14):
+// Daily Carrier Briefing moved to the Scheduler view header button overlay
+// (renderer/src/js/views/schedulers.js), same slackBridge briefing config.
 
 // ── SP: render operator accordion cards ──────────────────────────────────────
 
@@ -2943,10 +2670,6 @@ function _applyUI(prefs) {
 
 // ── Populate fields on open ──────────────────────────────────────────────────
 function _populate() {
-  // Refresh the carrier-briefing test-operator dropdown from current fleet
-  // operators each time the drawer opens (fleet data may have loaded after init).
-  try { _populateCbTestOperators(); } catch (_) {}
-
   settingsBridge.getAll().then((all) => {
     if (!all) return;
 
@@ -3105,15 +2828,12 @@ export function init() {
   _wireSlack();
   _wirePartnerAutoReply();
   _wireOperatorChannels();
-  _wireCarrierBriefing();
   _wireDMAutoReply();
-  _wireSchedulerConfig();
   _wireSP();
   _wireAsana();
   _wireNotifications();
   _wireAccounts();
   _wireSectionAccordion('sd-pane-integrations');
-  _wireSectionAccordion('sd-pane-scheduler');
   _wireSectionAccordion('sd-pane-ui');
 
   // Listen for settings open request

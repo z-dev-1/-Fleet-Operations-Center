@@ -3075,9 +3075,8 @@ body.ocean-mode{--bg:#0d1f2d;--panel:#0e2a3a;--card:#0f3040;--el:#0e4d4d;--bdr:#
 .ops-load-btn{white-space:nowrap;padding:5px 10px;border-radius:6px;font-size:10px;font-weight:600;background:var(--adim);border:1px solid rgba(88,166,255,.25);color:var(--acc2);cursor:pointer;margin-top:14px;transition:all .15s;font-family:var(--font)}
 .ops-load-btn:hover{background:rgba(88,166,255,.15);border-color:var(--acc)}
 
-/* Empty state */
-.ops-empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:36px 20px;border:1px dashed var(--bdr);border-radius:10px;text-align:center}
-.ops-empty-icon{font-size:28px;opacity:.5}
+/* Empty state (.ops-empty-state/.ops-empty-icon removed 2026-08-14 — unused
+   after the Operators & SP tab was retired; title/sub still used by Accounts) */
 .ops-empty-title{font-size:12px;font-weight:700;color:var(--txt2)}
 .ops-empty-sub{font-size:11px;color:var(--mut);line-height:1.6;max-width:320px}
 .ops-empty-sub strong{color:var(--txt2)}
