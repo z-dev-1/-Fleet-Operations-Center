@@ -132,7 +132,9 @@ function _viewHtml() {
     + '<div class="sched-card__head"><div class="sched-card__icon sched-card__icon--email">\ud83d\udce7</div>'
     + '<div><div class="sched-card__title">Auto Email</div><div class="sched-card__sub" id="sched-em-sub">Weekdays \u2014</div></div>'
     + '<label class="sched-toggle" title="Enable/disable scheduled email"><input type="checkbox" id="sched-em-enabled" /><span>On</span></label>'
+    + '<button class="sched-btn sched-btn--ghost sched-card__gear" id="sched-em-note-btn" title="Auto-email note">\u2699</button>'
     + '<div class="sched-card__badge" id="sched-em-badge">\u2014</div></div>'
+    + '<div class="sched-card__note-banner" id="sched-em-note-banner" style="display:none"></div>'
     + '<div class="sched-card__meta">'
     + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Last verified</span><span class="sched-card__meta-val" id="sched-em-last">\u2014</span></div>'
     + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Next</span><span class="sched-card__meta-val" id="sched-em-next">\u2014</span></div>'
@@ -147,6 +149,23 @@ function _viewHtml() {
     + '<button class="sched-btn sched-btn--ghost" id="sched-owa-auth">\ud83d\udd10 Authenticate OWA</button>'
     + '<button class="sched-btn sched-btn--ghost" id="sched-owa-sent">\ud83d\udce4 Sent Items</button>'
     + '</div></div>'
+
+    // Auto-Email Note overlay (gear on the Email card). Optional red-banner
+    // text injected at the top of every scheduled auto-send until cleared.
+    + '<div class="sched-settings-overlay" id="sched-note-overlay" style="display:none">'
+    + '<div class="sched-settings-panel">'
+    + '<div class="sched-settings-head"><span class="sched-settings-title">\ud83d\udce7 Auto-Email Note</span>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-note-close">\u2715</button></div>'
+    + '<div class="sched-settings-body">'
+    + '<div class="sched-settings-hint">Optional note included as a red banner at the top of every scheduled auto-send (AM / PM) until cleared.</div>'
+    + '<textarea class="sched-settings-input sched-note-textarea" id="sched-note-text" rows="3" placeholder="e.g. Units at EWR45 excluded due to site freeze"></textarea>'
+    + '<label class="sched-settings-field sched-note-oneshot"><span>Clear automatically after next auto-send</span>'
+    + '<input type="checkbox" id="sched-note-oneshot" /></label>'
+    + '<div class="sched-note-preview" id="sched-note-preview" style="display:none">NOTE: </div>'
+    + '<div class="sched-settings-actions"><button class="sched-btn sched-btn--save" id="sched-note-save">\u2713 Save note</button>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-note-clear">Clear note</button>'
+    + '<span class="sched-settings-status" id="sched-note-status"></span></div>'
+    + '</div></div></div>'
 
     // DBR DATA card — single daily slot fires BOTH AFP + DSP pulls; each
     // retries on its own until its "Data as of (PT)" shows today.
@@ -276,6 +295,12 @@ const _CSS = [
   '.sched-settings-status{font-size:11px;font-weight:600;color:var(--mut)}',
   '.sched-settings-status--ok{color:var(--acc2)}',
   '.sched-settings-status--err{color:#ff6b6b}',
+  // Auto-email note: gear on card head + inline banner + overlay textarea/preview
+  '.sched-card__gear{padding:2px 8px;min-width:0;line-height:1.1}',
+  '.sched-card__note-banner{margin:4px 0 0;padding:7px 10px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;color:#dc2626;font-weight:700;font-size:11px;line-height:1.4;word-break:break-word}',
+  '.sched-note-textarea{width:100%;text-align:left;resize:vertical;min-height:58px;font-family:inherit;line-height:1.45}',
+  '.sched-note-oneshot{justify-content:space-between}',
+  '.sched-note-preview{padding:9px 12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;color:#dc2626;font-weight:700;font-size:11px;line-height:1.4;word-break:break-word}',
 ].join('\n');
 
 let _cssInjected = false;
@@ -608,6 +633,74 @@ async function _saveSettingsOverlay() {
   }).catch((e) => { setStatus('Save failed: ' + (e && e.message || e), 'err'); _toast('error', 'Scheduler settings save failed'); });
 }
 
+// ── Auto-email note (gear on the Email card) ────────────────────────────────
+// Stored via settings keys autoEmailNote / autoEmailNoteOneShot — read fresh
+// by the scheduler on every auto-send, so edits take effect on the next slot.
+function _updateNotePreview() {
+  const txt = (_q('sched-note-text') ? _q('sched-note-text').value : '').trim();
+  const pv = _q('sched-note-preview');
+  if (!pv) return;
+  if (txt) { pv.textContent = 'NOTE: ' + txt; pv.style.display = ''; }
+  else { pv.style.display = 'none'; }
+}
+// Keep the small inline banner on the card in sync with the saved note.
+async function _refreshNoteBanner() {
+  const banner = _q('sched-em-note-banner');
+  if (!banner) return;
+  try {
+    const all = await settingsBridge.getAll();
+    const note = (all && all.autoEmailNote) ? String(all.autoEmailNote).trim() : '';
+    if (note) { banner.textContent = 'NOTE: ' + note; banner.style.display = ''; }
+    else { banner.style.display = 'none'; banner.textContent = ''; }
+  } catch (_) {}
+}
+async function _openNoteOverlay() {
+  const ov = _q('sched-note-overlay');
+  if (!ov) return;
+  const st = _q('sched-note-status'); if (st) { st.textContent = ''; st.className = 'sched-settings-status'; }
+  try {
+    const all = await settingsBridge.getAll();
+    const s = all || {};
+    const t = _q('sched-note-text'); if (t) t.value = s.autoEmailNote || '';
+    const o = _q('sched-note-oneshot'); if (o) o.checked = !!s.autoEmailNoteOneShot;
+  } catch (_) {}
+  _updateNotePreview();
+  ov.style.display = 'flex';
+}
+function _closeNoteOverlay() {
+  const ov = _q('sched-note-overlay');
+  if (ov) ov.style.display = 'none';
+}
+async function _saveNote() {
+  const st = _q('sched-note-status');
+  const setStatus = (msg, cls) => { if (st) { st.textContent = msg || ''; st.className = 'sched-settings-status' + (cls ? ' sched-settings-status--' + cls : ''); } };
+  const note = (_q('sched-note-text') ? _q('sched-note-text').value : '').trim();
+  if (!note) { setStatus('Enter a note first, or use Clear note', 'err'); return; }
+  await _guard(async () => {
+    const oneShot = !!(_q('sched-note-oneshot') && _q('sched-note-oneshot').checked);
+    await settingsBridge.save('autoEmailNote', note);
+    await settingsBridge.save('autoEmailNoteOneShot', oneShot);
+    setStatus('Saved \u2713' + (oneShot ? ' (one-time)' : ''), 'ok');
+    _toast('success', 'Auto-email note saved');
+    _refreshNoteBanner();
+    setTimeout(_closeNoteOverlay, 650);
+  }).catch((e) => { setStatus('Save failed: ' + (e && e.message || e), 'err'); _toast('error', 'Auto-email note save failed'); });
+}
+async function _clearNote() {
+  const st = _q('sched-note-status');
+  const setStatus = (msg, cls) => { if (st) { st.textContent = msg || ''; st.className = 'sched-settings-status' + (cls ? ' sched-settings-status--' + cls : ''); } };
+  await _guard(async () => {
+    const t = _q('sched-note-text'); if (t) t.value = '';
+    const o = _q('sched-note-oneshot'); if (o) o.checked = false;
+    _updateNotePreview();
+    await settingsBridge.save('autoEmailNote', '');
+    await settingsBridge.save('autoEmailNoteOneShot', false);
+    setStatus('Note cleared', 'ok');
+    _toast('info', 'Auto-email note cleared');
+    _refreshNoteBanner();
+  }).catch((e) => { setStatus('Clear failed: ' + (e && e.message || e), 'err'); });
+}
+
 async function _runDbrNow() {
   await _guard(async () => {
     _toast('info', 'DBR pull started (AFP + DSP)...');
@@ -666,6 +759,15 @@ export function init(container) {
   bind('sched-settings-save', 'click', _saveSettingsOverlay);
   const _ov = _q('sched-settings-overlay');
   if (_ov) _ov.addEventListener('click', (e) => { if (e.target === _ov) _closeSettingsOverlay(); });
+  // Auto-email note overlay (gear on the Email card)
+  bind('sched-em-note-btn', 'click', _openNoteOverlay);
+  bind('sched-note-close', 'click', _closeNoteOverlay);
+  bind('sched-note-save', 'click', _saveNote);
+  bind('sched-note-clear', 'click', _clearNote);
+  bind('sched-note-text', 'input', _updateNotePreview);
+  const _nov = _q('sched-note-overlay');
+  if (_nov) _nov.addEventListener('click', (e) => { if (e.target === _nov) _closeNoteOverlay(); });
+  _refreshNoteBanner();
   _wireDelegatedActions(_el);
 
   // SP push progress bar (informational only — status of record is the ledger).

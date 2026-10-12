@@ -21,7 +21,6 @@ import { settings as settingsBridge }              from '../bridge.js';
 import { auth     as authBridge }                  from '../bridge.js';
 import { credentials as credsBridge }              from '../bridge.js';
 import { slack    as slackBridge }                 from '../bridge.js';
-import { email    as emailBridge }                 from '../bridge.js';
 import { sp       as spBridge }                    from '../bridge.js';
 import { asana    as asanaBridge }                 from '../bridge.js';
 import toast                                       from '../components/toast.js';
@@ -601,65 +600,11 @@ function _html() {
           </div>
         </div>
 
-        <!-- Email SMTP -->
-        <div class="sd-section" id="sect-email">
-          <div class="sd-section-title">Email</div>
-          <div class="sd-row">
-            <div class="sd-field">
-              <div class="sd-label">Host</div>
-              <input class="sd-input" id="email-host" placeholder="smtp.corp.amazon.com"/>
-            </div>
-            <div class="sd-field">
-              <div class="sd-label">Port</div>
-              <input class="sd-input" id="email-port" type="number" placeholder="587"/>
-            </div>
-          </div>
-          <div class="sd-row">
-            <div class="sd-field">
-              <div class="sd-label">From</div>
-              <input class="sd-input" id="email-from" type="email" placeholder="you@amazon.com"/>
-            </div>
-            <div class="sd-field">
-              <div class="sd-label">Username</div>
-              <input class="sd-input" id="email-user" placeholder="LDAP user"/>
-            </div>
-          </div>
-          <div class="sd-field">
-            <div class="sd-label">Password</div>
-            <input class="sd-input" id="email-pass" type="password" placeholder="(encrypted)"/>
-          </div>
-          <div class="sd-field" style="margin-top:8px">
-            <div class="sd-label">Send Method</div>
-            <select class="sd-input" id="email-method">
-              <option value="auto">Auto (Graph → SMTP → OWA)</option>
-              <option value="graph">Microsoft Graph (no VPN needed)</option>
-              <option value="smtp">SMTP (VPN required)</option>
-              <option value="owa">OWA (in-app compose window)</option>
-            </select>
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn primary"    id="email-save">Save</button>
-            <button class="sd-btn secondary"  id="email-test">Send test</button>
-          </div>
-          <div id="email-status" class="settings__status" style="display:none"></div>
-        </div>
-
-        <!-- Auto-Email Note -->
-        <div class="sd-section" id="sect-auto-note">
-          <div class="sd-section-title">Auto-Email Note</div>
-          <div class="sd-hint" style="margin-bottom:10px">Optional note included as a red banner at the top of every scheduled auto-send (08:00 / 15:15) until cleared.</div>
-          <textarea class="sd-input" id="auto-note-text" rows="2" placeholder="e.g. 'Units at EWR45 excluded due to site freeze'" style="width:100%;resize:vertical;"></textarea>
-          <div class="sd-toggle-row" style="margin-top:8px">
-            <span class="sd-toggle-label">Clear automatically after next auto-send</span>
-            <input type="checkbox" id="auto-note-oneshot"/>
-          </div>
-          <div class="sd-btn-row" style="margin-top:8px">
-            <button class="sd-btn primary" id="auto-note-save">Save note</button>
-            <button class="sd-btn secondary" id="auto-note-clear">Clear note</button>
-          </div>
-          <div id="auto-note-status" class="sd-status" style="display:none;margin-top:8px"></div>
-          <div id="auto-note-preview" style="display:none;margin-top:10px;padding:10px 16px;color:#dc2626;font-weight:bold;font-family:Arial,sans-serif;font-size:12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:4px;word-break:break-word;">NOTE: </div>
-        </div>
+        <!-- Email SMTP + Auto-Email Note sections removed (2026-08-14):
+             user sends via OWA only, so the SMTP config is unused and the
+             send pipeline (src/ipc/ai.js) already falls through to OWA when
+             no SMTP password is set. The Auto-Email Note now lives in a gear
+             overlay on the Scheduler view's Email card. -->
 
         <!-- Slack -->
         <div class="sd-section" id="sect-slack">
@@ -1326,92 +1271,17 @@ function _checkSlack() {
   }).catch(() => {});
 }
 
-function _wireEmail() {
-  var saveBtn   = document.getElementById('email-save');
-  var testBtn   = document.getElementById('email-test');
-  var statusEl  = document.getElementById('email-status');
-  function showEmailStatus(text, cls) {
-    if (!statusEl) return;
-    statusEl.textContent = text;
-    statusEl.className = 'settings__status ' + (cls || '');
-    statusEl.style.display = '';
-    setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
-  }
-  if (saveBtn) saveBtn.addEventListener('click', async () => {
-    const methodEl = document.getElementById('email-method');
-    await emailBridge.saveConfig({
-      host:        document.getElementById('email-host').value.trim(),
-      port:        parseInt(document.getElementById('email-port').value, 10) || 587,
-      from:        document.getElementById('email-from').value.trim(),
-      user:        document.getElementById('email-user').value.trim(),
-      pass:        document.getElementById('email-pass').value,
-      emailMethod: methodEl ? methodEl.value : 'auto',
-    });
-    document.getElementById('email-pass').value = '';
-    const methodLabel = { auto: 'Auto', graph: 'Microsoft Graph', smtp: 'SMTP', owa: 'OWA' };
-    const sel = methodEl ? (methodLabel[methodEl.value] || methodEl.value) : 'Auto';
-    showEmailStatus('Saved — send method: ' + sel, 'ok');
-  });
-  if (testBtn) testBtn.addEventListener('click', () => {});
-}
+// _wireEmail() removed (2026-08-14): Email (SMTP) settings section deleted —
+// user sends via OWA only. Send pipeline falls through to OWA automatically.
 
 // FEATURE (2026-07-16): persisted note for scheduled auto-sends (08:00 /
 // 15:15). Stored via the generic settings:save IPC under keys
 // `autoEmailNote` / `autoEmailNoteOneShot` — read fresh by the scheduler in
 // src/app.js on every fire, so edits here take effect on the very next slot.
-function _wireAutoNote() {
-  var textEl    = document.getElementById('auto-note-text');
-  var oneShotEl = document.getElementById('auto-note-oneshot');
-  var saveBtn   = document.getElementById('auto-note-save');
-  var clearBtn  = document.getElementById('auto-note-clear');
-  var statusEl  = document.getElementById('auto-note-status');
-  var previewEl = document.getElementById('auto-note-preview');
-  if (!textEl || !saveBtn) return;
-
-  function _updateNotePreview() {
-    if (!previewEl) return;
-    var txt = (textEl.value || '').trim();
-    if (txt) { previewEl.textContent = 'NOTE: ' + txt; previewEl.style.display = ''; }
-    else { previewEl.style.display = 'none'; }
-  }
-  textEl.addEventListener('input', _updateNotePreview);
-
-  function showStatus(text, cls) {
-    if (!statusEl) return;
-    statusEl.textContent = text;
-    statusEl.className = 'sd-status ' + (cls || '');
-    statusEl.style.display = '';
-  }
-
-  // Populate current state on load
-  settingsBridge.getAll().then((all) => {
-    var s = all || {};
-    textEl.value = s.autoEmailNote || '';
-    if (oneShotEl) oneShotEl.checked = !!s.autoEmailNoteOneShot;
-    _updateNotePreview();
-    if (s.autoEmailNote) {
-      showStatus('✅ Active — will be included in the next scheduled auto-send' + (s.autoEmailNoteOneShot ? ' (one-time only)' : ''), 'ok');
-    }
-  }).catch(() => {});
-
-  saveBtn.addEventListener('click', async () => {
-    var note = (textEl.value || '').trim();
-    if (!note) { showStatus('⚠️ Enter a note first, or use "Clear note" to remove an existing one', 'warn'); return; }
-    await settingsBridge.save('autoEmailNote', note);
-    await settingsBridge.save('autoEmailNoteOneShot', !!(oneShotEl && oneShotEl.checked));
-    showStatus('✅ Saved — will be included in the next scheduled auto-send' + (oneShotEl && oneShotEl.checked ? ' (one-time only)' : ''), 'ok');
-    toast.show('success', 'Auto-email note saved', 2500);
-  });
-
-  clearBtn.addEventListener('click', async () => {
-    textEl.value = '';
-    if (oneShotEl) oneShotEl.checked = false;
-    await settingsBridge.save('autoEmailNote', '');
-    await settingsBridge.save('autoEmailNoteOneShot', false);
-    showStatus('Note cleared — future auto-sends will not include a note', '');
-    toast.show('info', 'Auto-email note cleared', 2500);
-  });
-}
+// _wireAutoNote() removed (2026-08-14): the Auto-Email Note moved to a gear
+// overlay on the Scheduler view's Email card (renderer/src/js/views/schedulers.js).
+// Same storage keys (autoEmailNote / autoEmailNoteOneShot) so behavior is
+// unchanged — the scheduler reads them fresh on every auto-send.
 
 // FEATURE (2026-07-16): "Schedulers – Config → Sync interval (minutes)" had
 // zero wiring anywhere -- no click handler, no IPC handler, no read path.
@@ -3151,18 +3021,7 @@ function _populate() {
       if (host && o.host) host.value = o.host;
       if (port && o.port) port.value = o.port;
     }
-    if (all.email) {
-      const e = all.email;
-      ['host','port','from','user'].forEach((f) => {
-        const el = document.getElementById(`email-${f}`);
-        if (el && e[f] != null) el.value = e[f];
-      });
-      // Restore saved send method
-      if (e.emailMethod) {
-        const mEl = document.getElementById('email-method');
-        if (mEl) mEl.value = e.emailMethod;
-      }
-    }
+    // Email SMTP populate removed (2026-08-14): OWA-only, section deleted.
     if (all.asana) {
       const a = all.asana;
       if (a.workspace) { const el = document.getElementById('asana-workspace'); if (el) el.value = a.workspace; }
@@ -3410,8 +3269,6 @@ export function init() {
   _wireOperatorChannels();
   _wireCarrierBriefing();
   _wireDMAutoReply();
-  _wireEmail();
-  _wireAutoNote();
   _wireSchedulerConfig();
   _wireSP();
   _wireAsana();
