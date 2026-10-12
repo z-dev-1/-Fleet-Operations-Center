@@ -175,6 +175,18 @@ function _permissionEditorHtml(p, c) {
       '<div class="' + p + '-createwr-group">' + capRadios('createwr', createWr) + '</div>' +
       vendorNote +
 
+      // "Covering" — delegate the FULL personal assistant to this person while
+      // you're out. When ON, a DM from this contact is answered with your
+      // "just me" assistant (not the limited partner persona). Sensitive:
+      // elevated access, not for vendors.
+      (isVendor ? '' :
+        '<div style="font-size:9px;color:#8b949e;margin:12px 0 3px">Covering</div>' +
+        '<label style="display:flex;align-items:flex-start;gap:6px;font-size:11px;cursor:pointer;margin:2px 0">' +
+          '<input type="checkbox" class="' + p + '-coverme" id="' + p + '-coverme"' + (c.coverMe ? ' checked' : '') + ' style="margin:2px 0 0"/>' +
+          '<span><strong>Covering for me (full assistant access)</strong><br/>' +
+          '<span style="color:#8b949e;font-size:9px">When ON, a Slack DM from this person is answered by your full personal assistant (same as your own "Just Me") while you\'re out. Fleet actions stay confirm-gated. Replies post from your Slack.</span></span>' +
+        '</label>') +
+
       '<div style="font-size:9px;color:#8b949e;margin:10px 0 3px">Communication preferences</div>' +
       '<div style="display:flex;flex-wrap:wrap;gap:10px">' +
         '<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">' +
@@ -214,6 +226,8 @@ function _readPermissionEditor(root, p) {
     permittedRequestTypes: ['unit_status', 'repair_update', 'follow_up', 'report', 'process_question', 'lifecycle_change', 'create_wr'],
     lifecyclePermission: isVendor ? 'not_allowed' : (lifeEl ? lifeEl.value : 'not_allowed'),
     createWrPermission: isVendor ? 'not_allowed' : (wrEl ? wrEl.value : 'not_allowed'),
+    // Covering: full personal-assistant delegation (never for vendors).
+    coverMe: isVendor ? false : !!(q('.' + p + '-coverme') && q('.' + p + '-coverme').checked),
     communicationPreferences: {
       slack: !!(q('.' + p + '-comm-slack') && q('.' + p + '-comm-slack').checked),
       email: !!(q('.' + p + '-comm-email') && q('.' + p + '-comm-email').checked),

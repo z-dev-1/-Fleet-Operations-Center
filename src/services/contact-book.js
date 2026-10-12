@@ -162,6 +162,9 @@ function sanitize(incoming) {
   // lifecycle changes or WR creation — they ask, the operator acts. Force both
   // to not_allowed regardless of what was submitted.
   if (out.identityType === 'vendor') { out.lifecyclePermission = 'not_allowed'; out.createWrPermission = 'not_allowed'; }
+  // Covering (full personal-assistant delegation) — coerce to boolean, and
+  // NEVER allow it for a vendor (same spirit as the vendor lock above).
+  if (out.coverMe !== undefined) out.coverMe = (out.identityType === 'vendor') ? false : !!out.coverMe;
   if (out.operators !== undefined) out.operators = _upperArrayOrEmpty(out.operators);
   if (out.domiciles !== undefined) out.domiciles = _upperArrayOrEmpty(out.domiciles);
   if (out.allowedDataCategories !== undefined) out.allowedDataCategories = _enumArrayOrEmpty(out.allowedDataCategories, DATA_CATS);

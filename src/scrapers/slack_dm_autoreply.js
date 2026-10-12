@@ -35,7 +35,19 @@
 
 const store = require('../store');
 const logger = require('../utils/logger').createLogger('slack_dm_autoreply');
-const { PERSONA_SYSTEM_PROMPT } = require('../orcha/slack-dm-persona');
+const { PERSONA_SYSTEM_PROMPT, COVERING_PREFACE } = require('../orcha/slack-dm-persona');
+
+// Does this Slack sender have the "Covering" permission (full assistant
+// delegation) set on their Contact Book entry? Best-effort, never throws.
+function _senderIsCovering(slackId) {
+  if (!slackId) return false;
+  try {
+    const store = require('../store');
+    const contacts = store.load('contacts', []) || [];
+    const c = contacts.find(x => x && x.slackId && String(x.slackId) === String(slackId));
+    return !!(c && c.coverMe === true && c.enabled !== false && c.identityType !== 'vendor');
+  } catch (_) { return false; }
+}
 const { trace } = require('./slack_decision_trace');
 // Shared inbound pipeline helpers: decoupled contact discovery, temporary
 // send-block registry, thread-scoped manual-reply detection, structured
@@ -520,7 +532,7 @@ async function _maybeAutoFlip(unitToken, tagPrefix) {
   }
 }
 
-async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
+async function _classifyAndDraft(messageText, historyMsgs, groupContext, covering) {
   // historyMsgs: optional array of strings ("Speaker: text") from recent
   // conversation, oldest-first, to give the AI context before replying.
   let contextBlock = '';
@@ -595,7 +607,8 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
   }
   const fleetContext = buildFleetContext(_fleetLookupText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true });
 
-  const prompt = _contextReset + PERSONA_SYSTEM_PROMPT + timeContext + groupBlock + contextBlock + _inheritedUnitNote + fleetContext + _jsonReminder + '\n\nIncoming DM:\n' + messageText;
+  const _persona = covering ? (COVERING_PREFACE + PERSONA_SYSTEM_PROMPT) : PERSONA_SYSTEM_PROMPT;
+  const prompt = _contextReset + _persona + timeContext + groupBlock + contextBlock + _inheritedUnitNote + fleetContext + _jsonReminder + '\n\nIncoming DM:\n' + messageText;
   // FIX (2026-07-24): was using sendOrchaChat() (direct WS-only, 90s timeout,
   // no fallback). If the Orcha WS server is not running or slow, EVERY DM call
   // timed out and sent the canned fallback reply. Switch to relay.ask() which
@@ -1094,7 +1107,8 @@ async function pollDMAutoReplyOnce(log) {
         // Enrich AI prompt with any links or files attached to this message
         const attachCtx = await _buildAttachmentContext(msg, downloadFileContent);
         const msgTextWithAttach = (msg.text || '') + attachCtx;
-        const draft = await _classifyAndDraft(msgTextWithAttach, historyMsgs, groupContext);
+        const _covering = _senderIsCovering(msg.userId);
+        const draft = await _classifyAndDraft(msgTextWithAttach, historyMsgs, groupContext, _covering);
 
         // AI explicitly held (identified a repeat, "Holding, unchanged." etc.) — skip
         // send and log entry; just let the watermark advance past this message.
@@ -1422,7 +1436,8 @@ async function pollDMAutoReplyOnce(log) {
             // Enrich AI prompt with any links or files in this thread reply
             const attachCtxT = await _buildAttachmentContext(reply, downloadFileContent);
             const replyTextWithAttach = (reply.text || '') + attachCtxT;
-            const draft = await _classifyAndDraft(replyTextWithAttach, threadContext, groupContextT);
+            const _coveringT = _senderIsCovering(reply.userId);
+            const draft = await _classifyAndDraft(replyTextWithAttach, threadContext, groupContextT, _coveringT);
 
             // PARITY WITH TOP-LEVEL (2026-09-02): thread replies now get the same
             // protections — AI held/skip, AI-unavailable fallback (retry, no
