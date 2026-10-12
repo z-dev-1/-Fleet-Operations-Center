@@ -474,96 +474,8 @@ function _html() {
           </div>
         </div>
 
-        <!-- AI Config -->
-        <div class="sd-section" id="sect-ai-config">
-          <div class="sd-section-title" style="display:flex;align-items:center;gap:8px">
-            🤖 AI Config
-            <span id="ai-config-live-status" style="font-size:10px;padding:2px 10px;border-radius:10px;background:#21262d;color:#8b949e;font-weight:500">⏳ checking...</span>
-          </div>
-
-          <!-- Preference selector -->
-          <div class="sd-field" style="margin-bottom:14px">
-            <div class="sd-label" style="margin-bottom:8px">Active AI</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-auto">
-                <input type="radio" name="ai-pref" value="auto" style="accent-color:#58a6ff"> Auto (fallback chain)
-              </label>
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-orcha">
-                <input type="radio" name="ai-pref" value="orcha" style="accent-color:#22c55e"> Orcha only
-              </label>
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-claude">
-                <input type="radio" name="ai-pref" value="claude" style="accent-color:#818cf8"> Claude Code only
-              </label>
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-balanced">
-                <input type="radio" name="ai-pref" value="balanced" style="accent-color:#f0a800"> Balanced (Orcha + Claude)
-              </label>
-            </div>
-            <div id="ai-pref-hint" style="margin-top:5px;font-size:10px;color:#6e7681;font-style:italic">Auto: tries Orcha first, falls back to Claude Code if quota is exceeded.</div>
-          </div>
-
-          <!-- Orcha subsection -->
-          <div style="border:1px solid var(--bdr);border-radius:6px;padding:10px 12px;margin-bottom:10px">
-            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">⚡ Orcha</div>
-            <div class="sd-row">
-              <div class="sd-field">
-                <div class="sd-label">Mode</div>
-                <select class="sd-select" id="orcha-mode">
-                  <option value="local">Local</option>
-                  <option value="remote">Remote</option>
-                </select>
-              </div>
-              <div class="sd-field">
-                <div class="sd-label">Host</div>
-                <input class="sd-input" id="orcha-host" placeholder="localhost"/>
-              </div>
-              <div class="sd-field">
-                <div class="sd-label">Port</div>
-                <input class="sd-input" id="orcha-port" type="number" placeholder="4799"/>
-              </div>
-            </div>
-            <div class="sd-field" style="margin-top:8px">
-              <div class="sd-label">Orcha Agent (model)</div>
-              <select class="sd-select" id="orcha-agent" style="font-size:11px">
-                <option value="orcha_default">Orcha — Claude Opus 4.6</option>
-                <option value="moon">Moon — Claude Sonnet 4.6</option>
-                <option value="mirror">Mirror — Claude Sonnet 4.6</option>
-                <option value="otter">Otter — Claude Sonnet 4.6</option>
-                <option value="tides_workflow_runner">Tides Workflow Runner — Claude Sonnet 4.6</option>
-              </select>
-              <div style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">The Orcha agent that answers AI requests. The model is chosen server-side by the agent (Orcha = Opus 4.6, others = Sonnet 4.6).</div>
-            </div>
-            <div class="sd-field" style="margin-top:8px">
-              <div class="sd-label">Fallback Model ID (Bedrock)</div>
-              <input class="sd-input" id="ai-model-id" placeholder="us.amazon.nova-pro-v1:0" style="font-family:monospace;font-size:10px"/>
-              <div style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">Bedrock model used only when Orcha WS is down and the app calls Bedrock directly. Leave blank to use the app default.</div>
-            </div>
-            <div class="sd-btn-row" style="margin-top:8px">
-              <button class="sd-btn secondary" id="test-orcha" style="font-size:11px">Test Orcha</button>
-            </div>
-            <div id="orcha-test-status" style="margin-top:4px;font-size:11px;min-height:14px"></div>
-          </div>
-
-          <!-- Claude Code subsection -->
-          <div style="border:1px solid var(--bdr);border-radius:6px;padding:10px 12px;margin-bottom:12px">
-            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">🧠 Claude Code</div>
-            <div class="sd-field">
-              <div class="sd-label">Binary (auto-detected)</div>
-              <input class="sd-input" id="claude-bin-path" placeholder="(auto)" readonly style="color:#6e7681;font-size:10px;font-family:monospace"/>
-            </div>
-            <div class="sd-field" style="margin-top:6px">
-              <div class="sd-label">Timeout (seconds)</div>
-              <input class="sd-input" id="claude-timeout" type="number" placeholder="60" style="width:80px"/>
-            </div>
-            <div class="sd-btn-row">
-              <button class="sd-btn secondary" id="test-claude" style="font-size:11px">Test Claude</button>
-            </div>
-            <div id="claude-test-status" style="margin-top:4px;font-size:11px;min-height:14px"></div>
-          </div>
-
-          <div class="sd-btn-row">
-            <button class="sd-btn primary" id="save-ai-config">Save AI Config</button>
-          </div>
-        </div>
+        <!-- AI Config moved (2026-08-14) to #ai-config-overlay opened from
+             the toolbar AI status pill (#tb-ai-status). -->
 
         <!-- Notifications -->
         <div class="sd-section" id="sect-notifications">
@@ -825,6 +737,103 @@ function _html() {
 
   </div>
   <!-- end settings-drawer -->
+
+  <!-- AI Config overlay (opened from the toolbar AI status pill) -->
+  <div id="ai-config-overlay" class="ai-config-overlay">
+    <div class="ai-config-panel">
+      <button class="ai-config-close" id="ai-config-close" title="Close">✕</button>
+        <!-- AI Config -->
+        <div class="sd-section" id="sect-ai-config">
+          <div class="sd-section-title" style="display:flex;align-items:center;gap:8px">
+            🤖 AI Config
+            <span id="ai-config-live-status" style="font-size:10px;padding:2px 10px;border-radius:10px;background:#21262d;color:#8b949e;font-weight:500">⏳ checking...</span>
+          </div>
+
+          <!-- Preference selector -->
+          <div class="sd-field" style="margin-bottom:14px">
+            <div class="sd-label" style="margin-bottom:8px">Active AI</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-auto">
+                <input type="radio" name="ai-pref" value="auto" style="accent-color:#58a6ff"> Auto (fallback chain)
+              </label>
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-orcha">
+                <input type="radio" name="ai-pref" value="orcha" style="accent-color:#22c55e"> Orcha only
+              </label>
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-claude">
+                <input type="radio" name="ai-pref" value="claude" style="accent-color:#818cf8"> Claude Code only
+              </label>
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-balanced">
+                <input type="radio" name="ai-pref" value="balanced" style="accent-color:#f0a800"> Balanced (Orcha + Claude)
+              </label>
+            </div>
+            <div id="ai-pref-hint" style="margin-top:5px;font-size:10px;color:#6e7681;font-style:italic">Auto: tries Orcha first, falls back to Claude Code if quota is exceeded.</div>
+          </div>
+
+          <!-- Orcha subsection -->
+          <div style="border:1px solid var(--bdr);border-radius:6px;padding:10px 12px;margin-bottom:10px">
+            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">⚡ Orcha</div>
+            <div class="sd-row">
+              <div class="sd-field">
+                <div class="sd-label">Mode</div>
+                <select class="sd-select" id="orcha-mode">
+                  <option value="local">Local</option>
+                  <option value="remote">Remote</option>
+                </select>
+              </div>
+              <div class="sd-field">
+                <div class="sd-label">Host</div>
+                <input class="sd-input" id="orcha-host" placeholder="localhost"/>
+              </div>
+              <div class="sd-field">
+                <div class="sd-label">Port</div>
+                <input class="sd-input" id="orcha-port" type="number" placeholder="4799"/>
+              </div>
+            </div>
+            <div class="sd-field" style="margin-top:8px">
+              <div class="sd-label">Orcha Agent (model)</div>
+              <select class="sd-select" id="orcha-agent" style="font-size:11px">
+                <option value="orcha_default">Orcha — Claude Opus 4.6</option>
+                <option value="moon">Moon — Claude Sonnet 4.6</option>
+                <option value="mirror">Mirror — Claude Sonnet 4.6</option>
+                <option value="otter">Otter — Claude Sonnet 4.6</option>
+                <option value="tides_workflow_runner">Tides Workflow Runner — Claude Sonnet 4.6</option>
+              </select>
+              <div style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">The Orcha agent that answers AI requests. The model is chosen server-side by the agent (Orcha = Opus 4.6, others = Sonnet 4.6).</div>
+            </div>
+            <div class="sd-field" style="margin-top:8px">
+              <div class="sd-label">Fallback Model ID (Bedrock)</div>
+              <input class="sd-input" id="ai-model-id" placeholder="us.amazon.nova-pro-v1:0" style="font-family:monospace;font-size:10px"/>
+              <div style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">Bedrock model used only when Orcha WS is down and the app calls Bedrock directly. Leave blank to use the app default.</div>
+            </div>
+            <div class="sd-btn-row" style="margin-top:8px">
+              <button class="sd-btn secondary" id="test-orcha" style="font-size:11px">Test Orcha</button>
+            </div>
+            <div id="orcha-test-status" style="margin-top:4px;font-size:11px;min-height:14px"></div>
+          </div>
+
+          <!-- Claude Code subsection -->
+          <div style="border:1px solid var(--bdr);border-radius:6px;padding:10px 12px;margin-bottom:12px">
+            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">🧠 Claude Code</div>
+            <div class="sd-field">
+              <div class="sd-label">Binary (auto-detected)</div>
+              <input class="sd-input" id="claude-bin-path" placeholder="(auto)" readonly style="color:#6e7681;font-size:10px;font-family:monospace"/>
+            </div>
+            <div class="sd-field" style="margin-top:6px">
+              <div class="sd-label">Timeout (seconds)</div>
+              <input class="sd-input" id="claude-timeout" type="number" placeholder="60" style="width:80px"/>
+            </div>
+            <div class="sd-btn-row">
+              <button class="sd-btn secondary" id="test-claude" style="font-size:11px">Test Claude</button>
+            </div>
+            <div id="claude-test-status" style="margin-top:4px;font-size:11px;min-height:14px"></div>
+          </div>
+
+          <div class="sd-btn-row">
+            <button class="sd-btn primary" id="save-ai-config">Save AI Config</button>
+          </div>
+        </div>
+    </div>
+  </div>
   `;
 }
 
@@ -854,6 +863,21 @@ function _open() {
 function _close() {
   _drawer.classList.remove('open');
   _overlay.classList.remove('open');
+}
+
+// AI Config overlay (toolbar AI pill). Separate from the settings drawer so it
+// can open standalone. Reuses the #sect-ai-config form + its existing wiring.
+function _openAIConfig() {
+  const ov = document.getElementById('ai-config-overlay');
+  if (!ov) return;
+  ov.classList.add('open');
+  // _loadAIConfig lives inside _wireAIConfig's scope; trigger a reload so the
+  // form reflects current config/live status when opened on its own.
+  bus.emit('ui:ai-config-reload');
+}
+function _closeAIConfigOverlay() {
+  const ov = document.getElementById('ai-config-overlay');
+  if (ov) ov.classList.remove('open');
 }
 
 // ── Section: Domiciles ───────────────────────────────────────────────────────
@@ -1071,6 +1095,8 @@ function _wireAIConfig() {
   // Load config when drawer opens
   _loadAIConfig();
   bus.on('ui:view-change', ({ to }) => { if (to === 'settings') setTimeout(_loadAIConfig, 150); });
+  // Reload when the standalone AI Config overlay is opened from the toolbar.
+  bus.on('ui:ai-config-reload', () => setTimeout(_loadAIConfig, 50));
 }
 
 // ── Known vendor portals (for the unified Accounts list) ─────────────────────
@@ -2740,6 +2766,18 @@ export function init() {
   // Wire close
   document.getElementById('sd-close-btn').addEventListener('click', _close);
   _overlay.addEventListener('click', _close);
+
+  // AI Config overlay (opened from the toolbar AI status pill #tb-ai-status
+  // via the ui:ai-config-toggle bus event). Shares all #sect-ai-config IDs,
+  // so _wireAIConfig()/_loadAIConfig() operate on it unchanged.
+  const _aiOv = document.getElementById('ai-config-overlay');
+  const _aiClose = document.getElementById('ai-config-close');
+  if (_aiClose) _aiClose.addEventListener('click', _closeAIConfigOverlay);
+  if (_aiOv) _aiOv.addEventListener('click', (e) => { if (e.target === _aiOv) _closeAIConfigOverlay(); });
+  bus.on('ui:ai-config-toggle', () => {
+    if (_aiOv && _aiOv.classList.contains('open')) _closeAIConfigOverlay();
+    else _openAIConfig();
+  });
 
   // Wire tabs
   _wireTabSwitching();

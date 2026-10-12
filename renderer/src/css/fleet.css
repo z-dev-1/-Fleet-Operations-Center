@@ -8242,14 +8242,53 @@ body {
 
 
 /* Settings drawer — use CSS vars so theme changes apply */
-.settings-drawer .sd-section-title { color: var(--txt2); }
-.settings-drawer .sd-label  { color: var(--txt); }
-.settings-drawer .sd-hint   { color: var(--txt2); }
-.settings-drawer .sd-input  { color: var(--txt); background: var(--el); border-color: var(--bdr); }
-.settings-drawer .sd-select { color: var(--txt); background: var(--el); border-color: var(--bdr); }
-.settings-drawer .sd-btn    { color: var(--txt2); }
+.settings-drawer .sd-section-title, .ai-config-panel .sd-section-title { color: var(--txt2); }
+.settings-drawer .sd-label,  .ai-config-panel .sd-label  { color: var(--txt); }
+.settings-drawer .sd-hint,   .ai-config-panel .sd-hint   { color: var(--txt2); }
+.settings-drawer .sd-input,  .ai-config-panel .sd-input  { color: var(--txt); background: var(--el); border-color: var(--bdr); }
+.settings-drawer .sd-select, .ai-config-panel .sd-select { color: var(--txt); background: var(--el); border-color: var(--bdr); }
+.settings-drawer .sd-btn,    .ai-config-panel .sd-btn    { color: var(--txt2); }
 .settings-drawer .acct-input { color: var(--txt); }
-.settings-drawer .sd-status { color: var(--txt2); }
+.settings-drawer .sd-status  { color: var(--txt2); }
+
+/* ── AI Config overlay (opened from the toolbar AI status pill) ───────────── */
+.ai-config-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9100;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0,0,0,.55);
+}
+.ai-config-overlay.open { display: flex; }
+.ai-config-panel {
+  position: relative;
+  width: min(600px, 95vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  background: linear-gradient(180deg, rgba(16,20,26,.98) 0%, rgba(13,17,23,.99) 100%);
+  border: 1px solid var(--bdr);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.6);
+  padding: 18px 18px 20px;
+}
+.ai-config-panel .sd-section { padding: 0; }
+.ai-config-close {
+  position: absolute;
+  top: 12px; right: 12px;
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  background: var(--el, rgba(255,255,255,.06));
+  border: 1px solid var(--bdr);
+  color: var(--txt2);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px;
+  z-index: 2;
+}
+.ai-config-close:hover { color: var(--txt); }
 
 /* Hide intel panel when empty */
 .ip-panel--hidden { display: none !important; }

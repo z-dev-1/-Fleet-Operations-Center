@@ -76,7 +76,7 @@ export function init(container) {
       
       <!-- Right side -->
       <div class="tb-right">
-        <span class="tb-ai-status" id="tb-ai-status" title="Orcha AI connection status">
+        <span class="tb-ai-status" id="tb-ai-status" title="AI settings — click to configure" style="cursor:pointer">
           <span class="tb-kpi-dot tb-kpi-dot--unknown" id="kpi-ai-dot"></span>
           <span id="kpi-ai-label">AI …</span>
         </span>
@@ -256,6 +256,12 @@ export function init(container) {
   // ── Settings ──────────────────────────────────────────────────────────────
   document.getElementById('tb-settings').addEventListener('click', () => {
     bus.emit('ui:view-change', { from: 'fleet', to: 'settings' });
+  });
+
+  // ── AI status pill → AI Config overlay ─────────────────────────────────────
+  const aiStatusEl = document.getElementById('tb-ai-status');
+  if (aiStatusEl) aiStatusEl.addEventListener('click', () => {
+    bus.emit('ui:ai-config-toggle');
   });
 
   // ── Sync ──────────────────────────────────────────────────────────────────
