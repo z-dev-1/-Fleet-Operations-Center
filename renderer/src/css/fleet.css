@@ -8565,7 +8565,7 @@ body {
 /* Make toolbar draggable */
 #topbar { -webkit-app-region: drag; }
 #topbar button, #topbar a, #topbar input,
-.tb-icon-btn, .tb-nav-item, .tb-avatar,
+.tb-icon-btn, .tb-nav-item, .tb-avatar, .tb-ai-status,
 .tb-window-controls { -webkit-app-region: no-drag; }
 
 /* ── AI connectivity status pill (toolbar) ────────────────────────────────
