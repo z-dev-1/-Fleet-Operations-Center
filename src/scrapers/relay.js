@@ -11,7 +11,7 @@
 const { BrowserWindow } = require('electron');
 const { P } = require('../config/paths');
 const logger = require('../utils/logger').createLogger('relay');
-const { enrichVolvoAsist, isUpgrade, SR_RE: SR_RE_MOD, openAndScrape } = require('./asist_enrich');
+const { enrichVolvoAsist, isUpgrade, SR_RE: SR_RE_MOD, openAndScrape, openAndScrapeEstimate } = require('./asist_enrich');
 const { partitionForUrl } = require('../orcha/auto-login');
 const { withRetry } = require('../utils/retry');    // H-1: per-unit retry
 // MODULE LOAD PROBE
@@ -1134,15 +1134,14 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
           if (!_offsitePageText && _estNotesUrl && /decisiv\.net\/fleet\/estimates\//i.test(_estNotesUrl)) {
             try {
               logger.info('[Relay] Phase3.6 scraping ESTIMATE comment thread for', equipmentId, '|', _estNotesUrl.slice(0, 80));
-              const _estPage = await openAndScrape(_estNotesUrl, partitionForUrl(_estNotesUrl));
+              // Notes-tab-aware scrape: clicks Notes, waits for the lazy-loaded
+              // comment thread, extracts ONLY the comments (not pricing/specs noise).
+              const _estPage = await openAndScrapeEstimate(_estNotesUrl, partitionForUrl(_estNotesUrl));
               if (_estPage) {
-                const _estStatus = (_estPage.responsesText || '').trim();
-                const _estBody = (_estPage.pageText || '').trim();
-                _offsitePageText = (_estStatus
-                  ? (_estStatus + (_estBody ? '\n\n--- Estimate page ---\n' + _estBody : ''))
-                  : _estBody).slice(0, 8000);
-                if (_offsitePageText) logger.info('[Relay] Phase3.6 ESTIMATE thread captured for', equipmentId, '|', _offsitePageText.length + 'ch | hasComments:', !!_estStatus);
-                else logger.info('[Relay] Phase3.6 ESTIMATE page returned no text for', equipmentId);
+                const _estStatus = (_estPage.commentThread || '').trim();
+                _offsitePageText = _estStatus.slice(0, 6000);
+                if (_offsitePageText) logger.info('[Relay] Phase3.6 ESTIMATE thread captured for', equipmentId, '|', _offsitePageText.length + 'ch | notesReady:', !!_estPage.notesReady);
+                else logger.info('[Relay] Phase3.6 ESTIMATE page returned no comments for', equipmentId);
               } else {
                 logger.warn('[Relay] Phase3.6 ESTIMATE page open failed for', equipmentId, '|', _estNotesUrl.slice(0, 80));
               }

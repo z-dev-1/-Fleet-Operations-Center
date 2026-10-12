@@ -148,6 +148,131 @@ async function pollScrape(win){for(let i=0;i<POLL_MAX;i++){await new Promise(r=>
 
 async function openAndScrape(url,partition){return new Promise(resolve=>{const win=new BrowserWindow({show:false,webPreferences:{partition,nodeIntegration:false,contextIsolation:true,webSecurity:true}});let res=false;const done=v=>{if(!res){res=true;resolve(v);}};const t=setTimeout(()=>{logger.warn('[ae] timeout',url.slice(0,60));if(!win.isDestroyed())win.destroy();done(null);},PAGE_LOAD_TIMEOUT+POLL_MAX*POLL_INTERVAL);attachAutoLogin(win,url,{maxRetries:2});win.webContents.once('did-finish-load',async()=>{try{const d=await pollScrape(win);clearTimeout(t);if(!win.isDestroyed())win.destroy();done(d);}catch(e){clearTimeout(t);if(!win.isDestroyed())win.destroy();done(null);}});win.webContents.on('did-fail-load',((_,c)=>{if(c!==-3){clearTimeout(t);if(!win.isDestroyed())win.destroy();done(null);}}));win.loadURL(url);});}
 
+// ── Decisiv FLEET ESTIMATE page — Notes/comment thread scrape ───────────────
+// The estimate page (PACCAR Insite / Volvo ASIST) renders tabs:
+//   Notes | Attachments | Case Info (VMRS) | Inspections
+// The dealer's status comments ("part was damaged, waiting for a new one") live
+// under the NOTES tab, which LAZY-LOADS ("Loading..."). The generic ASIST_SCRAPE
+// returned pageReady as soon as the estimate STRUCTURE (pricing/operations/asset
+// specs) rendered — before Notes loaded — so commentThread came back 0ch and
+// asistNotes was 10k of pricing noise. This dedicated script (a) clicks the
+// Notes tab, (b) reports whether the Notes COMMENT TEXT has actually rendered
+// (notesReady), and (c) extracts ONLY the Notes section — not the whole page.
+
+// Clicks the "Notes" tab by visible text (resilient to CSS-hash class churn).
+const ESTIMATE_CLICK_NOTES = String.raw`
+(function(){
+  // The estimate page is AngularJS; the Notes tab is #toolbutton_notes and its
+  // content lazy-renders into #notes_workspace via a renderNotes() call. Click
+  // by id first (most reliable), then fall back to text match.
+  var btn = document.getElementById('toolbutton_notes');
+  if(btn){ try{ btn.click(); return "clicked#toolbutton_notes"; }catch(e){} }
+  var els=[].slice.call(document.querySelectorAll("a,button,li,[role=tab],[class*=tab],[class*=Tab],span,div"));
+  for(var i=0;i<els.length;i++){
+    var t=(els[i].textContent||"").trim();
+    // Exact "Notes" (avoid "Attachments"/"Case Info"); the tab label is short.
+    if(/^notes$/i.test(t)){ try{ els[i].click(); return "clicked"; }catch(e){} }
+  }
+  return "no-notes-tab";
+})()
+`;
+
+// Reads the Notes/comment thread from the estimate page's #notes_workspace
+// container specifically. Confirmed via live DOM diagnostic: the dealer's
+// Notes render (lazy, via an AngularJS renderNotes() AJAX call) into
+// #notes_workspace, which initially shows "Loading..." then populates with the
+// dated comment entries. The old heuristic mis-grabbed the status metadata
+// panel because it rejected the still-"Loading..." notes container. Fix: read
+// #notes_workspace directly and treat "Loading..." (or the inlined renderNotes
+// function source) as NOT ready, so the poller keeps waiting until it fills in.
+const ESTIMATE_SCRAPE = String.raw`
+(function(){
+  var body = document.body ? document.body.innerText : '';
+  function clean(s){return (s||'').replace(/[\t ]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();}
+  // The Notes feed container (confirmed id from live DOM).
+  var ws = document.getElementById('notes_workspace');
+  var wsTxt = ws ? clean(ws.innerText || '') : '';
+  // "not loaded yet" = empty, the Loading placeholder, or the renderNotes()
+  // JS source that sits in the container before the AJAX content replaces it.
+  var stillLoading = !wsTxt
+    || /^\s*loading/i.test(wsTxt)
+    || /function\s+renderNotes\s*\(/.test(wsTxt)
+    || wsTxt.length < 40;
+  var best = stillLoading ? '' : wsTxt;
+  // Fallback: some estimate variants render notes into a sibling container.
+  if(!best){
+    var alt = document.querySelector('[id*=notes][id*=workspace], .notes-list, #notes_list, [class*=note-list]');
+    var altTxt = alt ? clean(alt.innerText || '') : '';
+    if(altTxt && !/^\s*loading/i.test(altTxt) && !/function\s+renderNotes/.test(altTxt) && altTxt.length>=40) best = altTxt;
+  }
+  var ready = best.length>=40;
+  return { commentThread: best.slice(0,6000), notesReady: ready, bodyLen: body.length,
+           wsFound: !!ws, wsLen: wsTxt.length, stillLoading: stillLoading };
+})()
+`;
+
+// Open an estimate page, settle past any auth redirect, click Notes, and poll
+// until the comment thread actually renders.
+//
+// ROOT CAUSE (confirmed 2026-10 via live DOM diag + comparison with Split
+// View): the dealer Notes render lazily into #notes_workspace via an AngularJS
+// renderNotes() call that only fires when the page has a REAL, PAINTED
+// viewport. Split View works because it shows the estimate URL in a visible,
+// CSS-sized <webview>. The old scraper used `new BrowserWindow({show:false})`
+// with NO size — an unpainted, zero-ish surface — so renderNotes() never fired
+// and #notes_workspace stayed stuck on "Loading...". Fix: give the window a
+// real size (1400x900, like Split View) and force it to paint even while
+// hidden (paintWhenInitiallyHidden + backgroundThrottling:false), positioned
+// far offscreen so it never flashes in front of the user.
+async function openAndScrapeEstimate(url, partition){
+  return new Promise(resolve=>{
+    const win=new BrowserWindow({
+      show:false,
+      width:1400, height:900, x:-4000, y:-4000, // offscreen so it never flashes
+      paintWhenInitiallyHidden:true,
+      webPreferences:{ partition, nodeIntegration:false, contextIsolation:true, webSecurity:true, backgroundThrottling:false, offscreen:false },
+    });
+    let res=false; const done=v=>{ if(!res){res=true;resolve(v);} };
+    const t=setTimeout(()=>{ logger.warn('[ae] estimate timeout', url.slice(0,60)); if(!win.isDestroyed())win.destroy(); done(null); }, PAGE_LOAD_TIMEOUT + (POLL_MAX+16)*POLL_INTERVAL);
+    attachAutoLogin(win,url,{maxRetries:2});
+    win.webContents.once('did-finish-load', async ()=>{
+      try{
+        // 1) Settle: wait until we're actually ON the estimate page (not mid
+        //    login redirect) and the estimate structure has rendered.
+        let settled=false;
+        for(let i=0;i<10;i++){
+          await new Promise(r=>setTimeout(r,800));
+          if(win.isDestroyed()) return done(null);
+          const u = win.webContents.getURL();
+          const onEst = /\/fleet\/estimates\//i.test(u);
+          const bodyLen = await win.webContents.executeJavaScript('document.body?document.body.innerText.length:0').catch(()=>0);
+          if(onEst && bodyLen>600){ settled=true; break; }
+        }
+        if(!settled) logger.warn('[ae] estimate did not settle (login/redirect?)', url.slice(0,60));
+        // 2) Click the Notes tab to trigger the renderNotes() AJAX.
+        const clickRes = await win.webContents.executeJavaScript('(function(){try{return '+ESTIMATE_CLICK_NOTES.trim()+'}catch(e){return "err";}})()').catch(()=>'err');
+        logger.info('[ae] estimate Notes tab:', clickRes);
+        // 3) Poll until #notes_workspace fills in (notesReady). Generous budget;
+        //    re-click Notes periodically in case the first activation dropped.
+        let out=null;
+        const EST_POLL_MAX = 30;
+        for(let i=0;i<EST_POLL_MAX;i++){
+          await new Promise(r=>setTimeout(r,POLL_INTERVAL));
+          if(win.isDestroyed()) return done(null);
+          const d = await win.webContents.executeJavaScript('(function(){try{return '+ESTIMATE_SCRAPE.trim()+'}catch(e){return{notesReady:false,commentThread:"",bodyLen:0};}})()').catch(()=>null);
+          if(d){ out=d; if(d.notesReady) break; }
+          if(i===2||i===6||i===12) await win.webContents.executeJavaScript('(function(){try{return '+ESTIMATE_CLICK_NOTES.trim()+'}catch(e){return "err";}})()').catch(()=>{});
+        }
+        if(out) logger.info('[ae] estimate scrape | wsFound:',out.wsFound,'| wsLen:',out.wsLen,'| stillLoading:',out.stillLoading,'| commentThread:',(out.commentThread||'').length+'ch');
+        clearTimeout(t); if(!win.isDestroyed())win.destroy();
+        done(out);
+      }catch(e){ clearTimeout(t); if(!win.isDestroyed())win.destroy(); done(null); }
+    });
+    win.webContents.on('did-fail-load',((_,c)=>{ if(c!==-3){ clearTimeout(t); if(!win.isDestroyed())win.destroy(); done(null); } }));
+    win.loadURL(url);
+  });
+}
+
 // Bounded chase through response-case links (SR -> Case# response -> maybe
 // another response -> ...) looking for an estimate link at each hop. Never
 // revisits a URL (visited Set) and stops after MAX_RESPONSE_HOPS regardless
@@ -189,18 +314,19 @@ async function enrichVolvoAsist(srUrl){
   // is exactly where dealer status updates live that never reach Relay.
   if(_isDirectEstimate){
     const estId=(srUrl.match(EST_RE)||[])[1]||'';
-    const est=await openAndScrape(srUrl,part);
+    // Use the Notes-tab-aware estimate scraper (waits for the lazy-loaded Notes
+    // comment thread; extracts ONLY the comments, not the pricing/specs body).
+    const est=await openAndScrapeEstimate(srUrl,part);
     if(!est){logger.warn('[ae] estimate page failed (direct)');return _empty(srUrl,'estimate page failed');}
-    const estComments=(est.responsesText||'').trim();
-    const estBody=(est.pageText||'').trim();
-    const offsiteText=(estComments
-      ? estComments+(estBody?'\n\n--- Estimate page ---\n'+estBody:'')
-      : estBody).slice(0,10000);
-    logger.info('[ae] DONE (direct estimate) | est:',estId,'| commentThread:',estComments.length+'ch');
+    const estComments=(est.commentThread||'').trim();
+    // offsiteText is the COMMENT THREAD only — not the estimate structure — so
+    // the AI timeline / card sees the dealer's actual status, not pricing noise.
+    const offsiteText=estComments.slice(0,6000);
+    logger.info('[ae] DONE (direct estimate) | est:',estId,'| commentThread:',estComments.length+'ch | notesReady:',!!est.notesReady);
     return{ok:true,srUrl,srNumber:'',caseNumber:estId,caseUrl:'',estimateUrl:srUrl,bestUrl:srUrl,
       bestLabel:estId?'Fleet Estimate | '+estId:'Fleet Estimate',source:'estimate',
-      scrapedAt:new Date().toISOString(),error:null,srStatus:est.srStatus||'',dealer:est.dealer||'',
-      complaint:est.complaint||'',assetVin:est.assetVin||'',unitNumber:est.unitNumber||'',
+      scrapedAt:new Date().toISOString(),error:null,srStatus:'',dealer:'',
+      complaint:'',assetVin:'',unitNumber:'',
       statusText:estComments,estimateComments:estComments,offsiteText};
   }
 
@@ -242,14 +368,14 @@ async function enrichVolvoAsist(srUrl){
   // mirrored to the SR Responses thread) were lost. Non-fatal: on failure we
   // fall back to the SR status thread exactly as before.
   let estimateComments = '';
-  let estBody = '';
   if (estUrl) {
     try {
-      const est = await openAndScrape(estUrl, part);
+      // Notes-tab-aware scrape: waits for the lazy-loaded Notes comment thread
+      // and extracts ONLY the comments (not the pricing/specs estimate body).
+      const est = await openAndScrapeEstimate(estUrl, part);
       if (est) {
-        estimateComments = (est.responsesText || '').trim();
-        estBody = (est.pageText || '').trim();
-        logger.info('[ae] estimate page scraped | commentThread:', estimateComments.length + 'ch');
+        estimateComments = (est.commentThread || '').trim();
+        logger.info('[ae] estimate page scraped | commentThread:', estimateComments.length + 'ch | notesReady:', !!est.notesReady);
       } else {
         logger.warn('[ae] estimate page open failed (chase):', estUrl.slice(0, 80));
       }
@@ -258,8 +384,9 @@ async function enrichVolvoAsist(srUrl){
 
   logger.info('[ae] DONE | src:',src,'case:',caseNum,'bestUrl:',bUrl.slice(0,80),'| srThread:',(sr.responsesText||'').length+'ch | estThread:',estimateComments.length+'ch');
   // Build offsite text for the timeline. Lead with the ESTIMATE comment thread
-  // (newest dealer status lives here) then the SR Responses thread, then SR body
-  // for context. estimateComments is also returned separately for the UI.
+  // (newest dealer status lives here) then the SR Responses thread for context.
+  // Drop the estimate STRUCTURE (pricing/specs/version) — that is noise that
+  // crowds the AI timeline. estimateComments is returned separately for the UI.
   const statusText = estimateComments || (sr.responsesText || '').trim();
   const srStatusThread = (sr.responsesText || '').trim();
   const srBody = (sr.pageText || '').trim();
@@ -267,8 +394,7 @@ async function enrichVolvoAsist(srUrl){
   if (estimateComments) parts.push('--- Estimate page comments ---\n' + estimateComments);
   if (srStatusThread && srStatusThread !== estimateComments) parts.push('--- Service Request responses ---\n' + srStatusThread);
   if (!estimateComments && srBody) parts.push('--- Service Request page ---\n' + srBody);
-  else if (estimateComments && estBody) parts.push('--- Estimate page ---\n' + estBody);
-  const offsiteText = parts.join('\n\n').slice(0, 12000) || srBody;
+  const offsiteText = parts.join('\n\n').slice(0, 8000) || srBody;
   return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',statusText,estimateComments,offsiteText};
 }
 
@@ -277,4 +403,4 @@ function isUpgrade(es,ns){return(SOURCE_RANK[ns]||0)>(SOURCE_RANK[es]||0);}
 
 // enrichVolvoAsist kept as the name for back-compat with existing callers;
 // enrichAsist is the accurate alias now that it handles Volvo AND PACCAR.
-module.exports={enrichVolvoAsist,enrichAsist:enrichVolvoAsist,isUpgrade,SOURCE_RANK,SR_RE,openAndScrape};
+module.exports={enrichVolvoAsist,enrichAsist:enrichVolvoAsist,isUpgrade,SOURCE_RANK,SR_RE,openAndScrape,openAndScrapeEstimate};
