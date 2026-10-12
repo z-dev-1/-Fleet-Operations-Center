@@ -19,7 +19,7 @@
  */
 
 import bus      from '../bus.js';
-import { settings as settingsBridge } from '../bridge.js';
+import { settings as settingsBridge, sp as spBridge } from '../bridge.js';
 
 let _el        = null;
 let _tickTimer = null;
@@ -110,6 +110,7 @@ function _viewHtml() {
     + '<div class="sched-card__head"><div class="sched-card__icon sched-card__icon--sp">\ud83d\udce4</div>'
     + '<div><div class="sched-card__title">SharePoint Push</div><div class="sched-card__sub" id="sched-sp-sub">Weekdays \u2014</div></div>'
     + '<label class="sched-toggle" title="Enable/disable scheduled SP push"><input type="checkbox" id="sched-sp-enabled" /><span>On</span></label>'
+    + '<button class="sched-btn sched-btn--ghost sched-card__gear" id="sched-sp-wb-btn" title="SharePoint workbooks">\u2699</button>'
     + '<div class="sched-card__badge" id="sched-sp-badge">\u2014</div></div>'
     + '<div class="sched-card__meta">'
     + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Last verified</span><span class="sched-card__meta-val" id="sched-sp-last">\u2014</span></div>'
@@ -165,6 +166,23 @@ function _viewHtml() {
     + '<div class="sched-settings-actions"><button class="sched-btn sched-btn--save" id="sched-note-save">\u2713 Save note</button>'
     + '<button class="sched-btn sched-btn--ghost" id="sched-note-clear">Clear note</button>'
     + '<span class="sched-settings-status" id="sched-note-status"></span></div>'
+    + '</div></div></div>'
+
+    // SharePoint Workbooks overlay (gear on the SP Push card). Paste an Excel
+    // URL -> Load sheets -> pick sheet + operator -> Save. Push targets these.
+    + '<div class="sched-settings-overlay" id="sched-wb-overlay" style="display:none">'
+    + '<div class="sched-settings-panel sched-settings-panel--wide">'
+    + '<div class="sched-settings-head"><span class="sched-settings-title">\ud83d\udcc4 SharePoint Workbooks</span>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-wb-close">\u2715</button></div>'
+    + '<div class="sched-settings-body">'
+    + '<div class="sched-settings-hint">Paste a SharePoint Excel URL \u2192 Load sheets \u2192 pick sheet + operator \u2192 Save. The app pushes fleet data to these workbooks.</div>'
+    + '<label class="sched-settings-field sched-wb-field"><span>SharePoint Excel URL</span></label>'
+    + '<input class="sched-settings-input sched-wb-input" id="sched-wb-url" placeholder="Paste SharePoint Excel file URL here\u2026" />'
+    + '<div class="sched-settings-actions"><button class="sched-btn sched-btn--save" id="sched-wb-discover">Load sheets</button>'
+    + '<span class="sched-settings-status" id="sched-wb-status"></span></div>'
+    + '<div id="sched-wb-results" style="display:none"><div class="sched-settings-group__title">Sheets found</div>'
+    + '<div id="sched-wb-sheets-list"></div></div>'
+    + '<div id="sched-wb-saved" class="sched-wb-saved"></div>'
     + '</div></div></div>'
 
     // DBR DATA card — single daily slot fires BOTH AFP + DSP pulls; each
@@ -301,6 +319,23 @@ const _CSS = [
   '.sched-note-textarea{width:100%;text-align:left;resize:vertical;min-height:58px;font-family:inherit;line-height:1.45}',
   '.sched-note-oneshot{justify-content:space-between}',
   '.sched-note-preview{padding:9px 12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;color:#dc2626;font-weight:700;font-size:11px;line-height:1.4;word-break:break-word}',
+  // SharePoint workbooks overlay
+  '.sched-settings-panel--wide{width:min(640px,96vw)}',
+  '.sched-wb-field{justify-content:flex-start}',
+  '.sched-wb-input{width:100%;text-align:left;font-family:inherit}',
+  '.sched-wb-sheet{display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--el);border:1px solid var(--bdr);border-radius:5px;margin-bottom:4px}',
+  '.sched-wb-sheet label{font-size:11px;color:var(--txt);flex:1;cursor:pointer}',
+  '.sched-wb-sheet input[type=text]{width:120px;background:var(--card);border:1px solid var(--bdr);border-radius:4px;padding:3px 6px;font-size:10px;color:var(--txt)}',
+  '.sched-wb-saverow{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}',
+  '.sched-wb-saverow input{background:var(--card);border:1px solid var(--bdr);border-radius:5px;padding:5px 8px;font-size:11px;color:var(--txt);width:160px}',
+  '.sched-wb-saved{margin-top:14px}',
+  '.sched-wb-saved__title{font-size:10px;font-weight:800;color:var(--acc2);text-transform:uppercase;letter-spacing:.7px;margin-bottom:6px}',
+  '.sched-wb-card{background:var(--el);border:1px solid var(--bdr);border-radius:6px;padding:8px 10px;margin-bottom:4px}',
+  '.sched-wb-card__head{display:flex;justify-content:space-between;align-items:center;gap:8px}',
+  '.sched-wb-card__name{font-size:11px;font-weight:700;color:var(--txt);word-break:break-word}',
+  '.sched-wb-card__del{background:none;border:none;color:#f85149;cursor:pointer;font-size:12px;line-height:1}',
+  '.sched-wb-card__carriers{font-size:9px;color:var(--mut);margin-top:3px}',
+  '.sched-wb-empty{font-size:10px;color:var(--mut)}',
 ].join('\n');
 
 let _cssInjected = false;
@@ -701,6 +736,118 @@ async function _clearNote() {
   }).catch((e) => { setStatus('Clear failed: ' + (e && e.message || e), 'err'); });
 }
 
+// ── SharePoint Workbooks (gear on the SP Push card) ──────────────────────────
+// Paste an Excel URL -> discover sheets -> pick sheet(s)+operator -> save into
+// spBridge config.workbooks[]. The SP push engine reads these targets.
+function _wbSetStatus(msg, cls) {
+  const el = _q('sched-wb-status');
+  if (el) { el.textContent = msg || ''; el.className = 'sched-settings-status' + (cls ? ' sched-settings-status--' + cls : ''); }
+}
+async function _openWbOverlay() {
+  const ov = _q('sched-wb-overlay');
+  if (!ov) return;
+  _wbSetStatus('');
+  const res = _q('sched-wb-results'); if (res) res.style.display = 'none';
+  const list = _q('sched-wb-sheets-list'); if (list) list.innerHTML = '';
+  await _renderSavedWorkbooks();
+  ov.style.display = 'flex';
+}
+function _closeWbOverlay() {
+  const ov = _q('sched-wb-overlay');
+  if (ov) ov.style.display = 'none';
+}
+async function _wbDiscover() {
+  const urlEl = _q('sched-wb-url');
+  const url = (urlEl ? urlEl.value : '').trim();
+  if (!url) { _wbSetStatus('Paste a SharePoint Excel URL first', 'err'); return; }
+  const btn = _q('sched-wb-discover');
+  const resultsDiv = _q('sched-wb-results');
+  const sheetsDiv  = _q('sched-wb-sheets-list');
+  if (btn) { btn.disabled = true; btn.textContent = 'Discovering\u2026'; }
+  _wbSetStatus('Discovering\u2026', '');
+  try {
+    let result;
+    try { result = await spBridge.discoverSheets(url); }
+    catch (err) { _wbSetStatus('IPC error: ' + (err && err.message || err), 'err'); return; }
+    if (!result || !result.ok) { _wbSetStatus((result && result.error) || 'Could not discover sheets', 'err'); return; }
+    if (resultsDiv) resultsDiv.style.display = '';
+    if (sheetsDiv) {
+      sheetsDiv.innerHTML = (result.sheets || []).map((s, i) =>
+        '<div class="sched-wb-sheet">'
+        + '<input type="checkbox" id="sched-sh-' + i + '" data-sheet="' + _safe(s.xmlFile || s.name) + '" data-name="' + _safe(s.name) + '" data-header="' + _safe(s.headerRow) + '" />'
+        + '<label for="sched-sh-' + i + '"><strong>' + _safe(s.name) + '</strong> <span style="color:var(--mut)">(' + _safe(s.xmlFile || '?') + ')</span> header: ' + _safe(s.headerRow) + '</label>'
+        + '<input type="text" placeholder="Operator" id="sched-op-' + i + '" />'
+        + '</div>'
+      ).join('');
+      sheetsDiv.innerHTML += '<div class="sched-wb-saverow"><input type="text" id="sched-wb-domicile" placeholder="Domicile (ABE40, AVP40\u2026)" /><button class="sched-btn sched-btn--save" id="sched-wb-save">\u2713 Save workbook config</button></div>';
+      const saveBtn = _q('sched-wb-save');
+      if (saveBtn) saveBtn.addEventListener('click', () => _wbSave(url, result, sheetsDiv));
+    }
+    _wbSetStatus((result.sheets || []).length + ' sheet(s) found', 'ok');
+  } catch (e) {
+    _wbSetStatus('Failed: ' + (e && e.message || e), 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Load sheets'; }
+  }
+}
+async function _wbSave(url, result, sheetsDiv) {
+  const checks = sheetsDiv.querySelectorAll('input[type=checkbox]:checked');
+  if (!checks.length) { _wbSetStatus('Select at least one sheet', 'err'); return; }
+  await _guard(async () => {
+    const carriers = [];
+    checks.forEach((cb) => {
+      const sheet = cb.dataset.sheet;
+      const headerRow = parseInt(cb.dataset.header || '16', 10);
+      const opInput = cb.closest('.sched-wb-sheet').querySelector('input[type=text]');
+      const operator = opInput ? opInput.value.trim().toUpperCase() : '';
+      carriers.push({ code: (operator || cb.dataset.name || 'DEFAULT').toUpperCase(), sheet: sheet, sheetName: cb.dataset.name || sheet, headerRow });
+    });
+    const domEl = _q('sched-wb-domicile');
+    const workbook = {
+      name: url.split('file=')[1] ? decodeURIComponent(url.split('file=')[1].split('&')[0]) : 'Workbook',
+      domicile: (domEl ? domEl.value.trim().toUpperCase() : '') || '',
+      path: result.filePath || url,
+      carriers,
+      headerRow: carriers[0].headerRow,
+    };
+    const existing = await spBridge.getConfig();
+    const workbooks = (existing && existing.workbooks) || [];
+    workbooks.push(workbook);
+    await spBridge.saveConfig(Object.assign({}, existing, { workbooks }));
+    _wbSetStatus('Saved: ' + workbook.name, 'ok');
+    _toast('success', 'Workbook saved: ' + workbook.name);
+    _renderSavedWorkbooks();
+  }).catch((e) => { _wbSetStatus('Save failed: ' + (e && e.message || e), 'err'); });
+}
+async function _renderSavedWorkbooks() {
+  const div = _q('sched-wb-saved');
+  if (!div) return;
+  let workbooks = [];
+  try { const cfg = await spBridge.getConfig(); workbooks = (cfg && cfg.workbooks) || []; } catch (_) {}
+  if (!workbooks.length) { div.innerHTML = '<div class="sched-wb-empty">No workbooks configured yet.</div>'; return; }
+  div.innerHTML = '<div class="sched-wb-saved__title">Saved workbooks</div>'
+    + workbooks.map((wb, i) =>
+      '<div class="sched-wb-card"><div class="sched-wb-card__head">'
+      + '<div class="sched-wb-card__name">' + _safe(wb.name) + '</div>'
+      + '<button class="sched-wb-card__del" data-wb-del="' + i + '" title="Remove">\u2715</button></div>'
+      + '<div class="sched-wb-card__carriers">' + _safe((wb.carriers || []).map((c) => c.code + ' \u2192 ' + (c.sheetName || c.sheet)).join(' | ')) + '</div>'
+      + '</div>'
+    ).join('');
+  div.querySelectorAll('button[data-wb-del]').forEach((b) => {
+    b.addEventListener('click', () => _removeWorkbook(parseInt(b.getAttribute('data-wb-del'), 10)));
+  });
+}
+async function _removeWorkbook(idx) {
+  await _guard(async () => {
+    const cfg = await spBridge.getConfig();
+    const workbooks = (cfg && cfg.workbooks) || [];
+    workbooks.splice(idx, 1);
+    await spBridge.saveConfig(Object.assign({}, cfg, { workbooks }));
+    _renderSavedWorkbooks();
+    _toast('info', 'Workbook removed');
+  }).catch(() => {});
+}
+
 async function _runDbrNow() {
   await _guard(async () => {
     _toast('info', 'DBR pull started (AFP + DSP)...');
@@ -768,6 +915,12 @@ export function init(container) {
   const _nov = _q('sched-note-overlay');
   if (_nov) _nov.addEventListener('click', (e) => { if (e.target === _nov) _closeNoteOverlay(); });
   _refreshNoteBanner();
+  // SharePoint workbooks overlay (gear on the SP Push card)
+  bind('sched-sp-wb-btn', 'click', _openWbOverlay);
+  bind('sched-wb-close', 'click', _closeWbOverlay);
+  bind('sched-wb-discover', 'click', _wbDiscover);
+  const _wov = _q('sched-wb-overlay');
+  if (_wov) _wov.addEventListener('click', (e) => { if (e.target === _wov) _closeWbOverlay(); });
   _wireDelegatedActions(_el);
 
   // SP push progress bar (informational only — status of record is the ledger).

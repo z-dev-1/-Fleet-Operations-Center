@@ -888,27 +888,10 @@ function _html() {
 
       <!-- ══ TAB 3: Operators & SP ═════════════════════════════════════════ -->
       <div id="sd-pane-operators" style="display:none">
-        <!-- Standalone SP Workbook Config -->
-        <div class="sd-section" id="sect-sp-workbooks">
-          <div class="sd-section-title">SharePoint Workbooks</div>
-          <div class="sd-hint" style="margin-bottom:10px">Paste a SharePoint Excel URL → Load sheets → Pick sheet + operator → Save. The app will push fleet data to these workbooks.</div>
-          <div class="sd-field">
-            <div class="sd-label">SharePoint Excel URL</div>
-            <input class="sd-input" id="sp-wb-url" placeholder="Paste SharePoint Excel file URL here..." style="width:100%" />
-          </div>
-          <div class="sd-btn-row" style="margin-top:6px">
-            <button class="sd-btn primary" id="sp-wb-discover">Load sheets</button>
-          </div>
-          <div id="sp-wb-results" style="margin-top:10px;display:none">
-            <div class="sd-field">
-              <div class="sd-label">Sheets found:</div>
-              <div id="sp-wb-sheets-list"></div>
-            </div>
-          </div>
-          <div id="sp-wb-saved" style="margin-top:12px"></div>
-        </div>
-
-
+        <!-- SharePoint Workbooks section moved (2026-08-14) to a gear overlay
+             on the Scheduler view's SharePoint Push card
+             (renderer/src/js/views/schedulers.js). Same spBridge config so
+             push targets are unchanged. -->
 
         <!-- Pane header -->
         <div class="ops-pane-header">
@@ -3151,115 +3134,8 @@ export function init() {
     });
   })();
 
-  // ── SP Workbook Discover ────────────────────────────────────────────────
-  document.getElementById('sp-wb-discover').addEventListener('click', async () => {
-    console.log('[SP Discover] Button clicked');
-    const urlInput = document.getElementById('sp-wb-url');
-    const url = (urlInput.value || '').trim();
-    console.log('[SP Discover] URL:', url);
-    console.log('[SP Discover] spBridge:', typeof spBridge.discoverSheets);
-    if (!url) { toast.show('warn', 'Paste a SharePoint Excel URL first', 2500); return; }
-    
-    const btn = document.getElementById('sp-wb-discover');
-    const resultsDiv = document.getElementById('sp-wb-results');
-    const sheetsDiv = document.getElementById('sp-wb-sheets-list');
-    
-    btn.disabled = true; btn.textContent = 'Discovering...';
-    try {
-      console.log('[SP Discover] Calling discoverSheets...');
-      let result;
-      try {
-        result = await spBridge.discoverSheets(url);
-      } catch(err) {
-        console.error('[SP Discover] IPC Error:', err);
-        toast.show('error', 'IPC Error: ' + (err.message || err), 4000);
-        return;
-      }
-      console.log('[SP Discover] Result:', JSON.stringify(result));
-      if (!result || !result.ok) {
-        toast.show('error', (result && result.error) || 'Could not discover sheets', 4000);
-        return;
-      }
-      resultsDiv.style.display = '';
-      sheetsDiv.innerHTML = result.sheets.map((s, i) => `
-        <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#161b22;border:1px solid #21262d;border-radius:4px;margin-bottom:4px;">
-          <input type="checkbox" id="sp-sh-${i}" data-sheet="${s.xmlFile || s.name}" data-name="${s.name}" data-header="${s.headerRow}" />
-          <label for="sp-sh-${i}" style="font-size:11px;color:#c9d1d9;flex:1;cursor:pointer;">
-            <strong>${s.name}</strong> <span style="color:#6e7681;">(${s.xmlFile || '?'})</span> <span style="color:#8b949e;">header: ${s.headerRow}</span>
-          </label>
-          <input style="width:60px;background:#0d1117;border:1px solid #30363d;border-radius:3px;padding:3px 6px;font-size:10px;color:#c9d1d9;" placeholder="Operator" id="sp-op-${i}" />
-        </div>
-      `).join('');
-      
-      sheetsDiv.innerHTML += `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;"><input class="sd-input" id="sp-wb-domicile" placeholder="Domicile (ABE40, AVP40...)" style="width:140px;" /><button class="sd-btn primary" id="sp-wb-save">Save workbook config</button></div>`;
-      
-      // Save handler
-      document.getElementById('sp-wb-save').addEventListener('click', async () => {
-        const checks = sheetsDiv.querySelectorAll('input[type=checkbox]:checked');
-        if (!checks.length) { toast.show('warn', 'Select at least one sheet', 2000); return; }
-        
-        const carriers = [];
-        checks.forEach((cb, idx) => {
-          const sheet = cb.dataset.sheet;
-          const headerRow = parseInt(cb.dataset.header || '16');
-          const opInput = cb.closest('div').querySelector('input[placeholder="Operator"]');
-          const operator = opInput ? opInput.value.trim().toUpperCase() : '';
-          carriers.push({ code: (operator || cb.dataset.name || 'DEFAULT').toUpperCase(), sheet: sheet, sheetName: cb.dataset.name || sheet, headerRow });
-        });
-        
-        const domicileInput = document.getElementById('sp-wb-domicile');
-        const workbook = {
-          name: url.split('file=')[1] ? decodeURIComponent(url.split('file=')[1].split('&')[0]) : 'Workbook',
-          domicile: (domicileInput ? domicileInput.value.trim().toUpperCase() : '') || '',
-          path: result.filePath || url,
-          carriers,
-          headerRow: carriers[0].headerRow
-        };
-        
-        // Load existing config and add
-        const existing = await spBridge.getConfig();
-        const workbooks = (existing && existing.workbooks) || [];
-        workbooks.push(workbook);
-        await spBridge.saveConfig({ ...existing, workbooks });
-        toast.show('success', 'Workbook saved: ' + workbook.name, 3000);
-        _renderSavedWorkbooks();
-      });
-      
-      toast.show('success', result.sheets.length + ' sheet(s) found', 2500);
-    } catch(e) {
-      toast.show('error', 'Failed: ' + (e.message || e), 4000);
-    } finally {
-      btn.disabled = false; btn.textContent = 'Load sheets';
-    }
-  });
-
-  // Render saved workbooks
-  async function _renderSavedWorkbooks() {
-    const cfg = await spBridge.getConfig();
-    const workbooks = (cfg && cfg.workbooks) || [];
-    const div = document.getElementById('sp-wb-saved');
-    if (!div) return;
-    if (!workbooks.length) { div.innerHTML = '<div style="font-size:10px;color:#484f58;">No workbooks configured yet.</div>'; return; }
-    div.innerHTML = '<div style="font-size:10px;font-weight:700;color:#8b949e;margin-bottom:6px;">SAVED WORKBOOKS</div>' +
-      workbooks.map((wb, i) => `
-        <div style="background:#161b22;border:1px solid #21262d;border-radius:4px;padding:8px 10px;margin-bottom:4px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div style="font-size:11px;font-weight:600;color:#c9d1d9;">${wb.name}</div>
-            <button onclick="window._removeWB(${i})" style="background:none;border:none;color:#f85149;cursor:pointer;font-size:11px;">✕</button>
-          </div>
-          <div style="font-size:9px;color:#6e7681;margin-top:2px;">${(wb.carriers||[]).map(c => c.code + ' → ' + (c.sheetName || c.sheet)).join(' | ')}</div>
-        </div>
-      `).join('');
-  }
-  window._removeWB = async (idx) => {
-    const cfg = await spBridge.getConfig();
-    const workbooks = (cfg && cfg.workbooks) || [];
-    workbooks.splice(idx, 1);
-    await spBridge.saveConfig({ ...cfg, workbooks });
-    _renderSavedWorkbooks();
-  };
-  _renderSavedWorkbooks();
-
+  // SP Workbook Discover/config wiring moved (2026-08-14) to the Scheduler
+  // view's SharePoint Push gear overlay (renderer/src/js/views/schedulers.js).
 
   _wireDomiciles();
   _wireAuth();
