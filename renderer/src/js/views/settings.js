@@ -76,6 +76,7 @@ function _html() {
     <div class="sd-tabs">
       <button class="sd-tab active" data-pane="ui">UI &amp; App</button>
       <button class="sd-tab"        data-pane="integrations">Integrations</button>
+      <button class="sd-tab"        data-pane="scheduler">⏱ Scheduler</button>
       <button class="sd-tab"        data-pane="operators">Operators &amp; SP</button>
       <button class="sd-tab"        data-pane="accounts">Accounts</button>
     </div>
@@ -600,24 +601,6 @@ function _html() {
           </div>
         </div>
 
-        <!-- Schedulers Config -->
-        <div class="sd-section" style="border-top:1px solid var(--bdr);padding-top:14px;margin-top:4px">
-          <div class="sd-section-title">Schedulers – Config</div>
-          <div class="sd-field">
-            <div class="sd-label">Sync interval (minutes)</div>
-            <input class="sd-input" id="sched-interval" type="number" min="1" max="360" placeholder="5"/>
-            <div id="sched-status" class="sd-inline-status" style="margin-top:4px;font-size:11px;"></div>
-          </div>
-          <div class="sd-field">
-            <div class="sd-label">Default scheduler endpoint</div>
-            <input class="sd-input" id="sched-endpoint" placeholder="https://..."/>
-            <div class="sd-hint" style="margin-top:4px">Reserved for a future remote-scheduler integration — not yet functional.</div>
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn primary" id="save-sched">Save</button>
-          </div>
-        </div>
-
         <!-- Email SMTP -->
         <div class="sd-section" id="sect-email">
           <div class="sd-section-title">Email</div>
@@ -742,51 +725,6 @@ function _html() {
             <button class="sd-btn primary" id="opc-save">Save</button>
           </div>
           <div id="opc-status" class="sd-status" style="display:none;margin-top:8px"></div>
-        </div>
-
-        <div class="sd-section" id="sect-carrier-briefing">
-          <div class="sd-section-title">
-            <span style="font-size:11px">📅</span> Daily Carrier Briefing
-            <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">AI</span>
-          </div>
-          <div class="sd-hint" style="margin-bottom:10px">Once a day, posts an AI-written fleet snapshot and safety tip to each operator's carrier channel (from Operator Channels above), tagging the owner. The AI writes the whole message from the real fleet data and Contact Book domicile addresses — nothing invented. One message per operator per day.</div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">Enable daily briefing</span>
-            <input type="checkbox" id="cb-enabled"/>
-          </div>
-          <div class="sd-field" style="margin-top:8px">
-            <label class="sd-label">Send time</label>
-            <input class="sd-input" id="cb-send-time" type="time" />
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Timezone (IANA)</label>
-            <input class="sd-input" id="cb-timezone" placeholder="America/New_York" />
-            <div class="sd-hint">e.g. America/New_York, America/Chicago, America/Los_Angeles.</div>
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Include in snapshot</label>
-            <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:4px">
-              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-down"/> Units down</label>
-              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-flagged"/> Flagged this week</label>
-              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-active"/> Active count</label>
-              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-domiciles"/> Domiciles</label>
-            </div>
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Flagged threshold (risk ≥)</label>
-            <input class="sd-input" id="cb-risk-threshold" type="number" min="0" max="100" step="1" />
-          </div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">Include AI safety tip</span>
-            <input type="checkbox" id="cb-tip-enabled"/>
-          </div>
-          <div class="sd-hint" id="cb-run-info" style="margin-top:8px"></div>
-          <div class="sd-btn-row" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
-            <button class="sd-btn secondary" id="cb-test-btn" type="button">Send test to myself</button>
-            <button class="sd-btn secondary" id="cb-runnow-btn" type="button">Run now (live)</button>
-            <button class="sd-btn primary" id="cb-save">Save</button>
-          </div>
-          <div id="cb-status" class="sd-status" style="display:none;margin-top:8px"></div>
         </div>
 
         <div class="sd-section" id="sect-dm-autoreply">
@@ -926,6 +864,83 @@ function _html() {
       </div>
       <!-- end sd-pane-integrations -->
 
+      <!-- ══ TAB: Scheduler ════════════════════════════════════════════════ -->
+      <div id="sd-pane-scheduler" style="display:none">
+
+        <!-- Schedulers Config -->
+        <div class="sd-section">
+          <div class="sd-section-title">Schedulers – Config</div>
+          <div class="sd-field">
+            <div class="sd-label">Sync interval (minutes)</div>
+            <input class="sd-input" id="sched-interval" type="number" min="1" max="360" placeholder="5"/>
+            <div id="sched-status" class="sd-inline-status" style="margin-top:4px;font-size:11px;"></div>
+          </div>
+          <div class="sd-field">
+            <div class="sd-label">Default scheduler endpoint</div>
+            <input class="sd-input" id="sched-endpoint" placeholder="https://..."/>
+            <div class="sd-hint" style="margin-top:4px">Reserved for a future remote-scheduler integration — not yet functional.</div>
+          </div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary" id="save-sched">Save</button>
+          </div>
+        </div>
+
+        <!-- Daily Carrier Briefing -->
+        <div class="sd-section" id="sect-carrier-briefing">
+          <div class="sd-section-title">
+            <span style="font-size:11px">📅</span> Daily Carrier Briefing
+            <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">AI</span>
+          </div>
+          <div class="sd-hint" style="margin-bottom:10px">Once a day, posts an AI-written fleet snapshot and safety tip to each operator's carrier channel (from Operator Channels), tagging the owner. The AI writes the whole message from the real fleet data and Contact Book domicile addresses — nothing invented. One message per operator per day.</div>
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">Enable daily briefing</span>
+            <input type="checkbox" id="cb-enabled"/>
+          </div>
+          <div class="sd-field" style="margin-top:8px">
+            <label class="sd-label">Send time</label>
+            <input class="sd-input" id="cb-send-time" type="time" />
+          </div>
+          <div class="sd-field">
+            <label class="sd-label">Timezone (IANA)</label>
+            <input class="sd-input" id="cb-timezone" placeholder="America/New_York" />
+            <div class="sd-hint">e.g. America/New_York, America/Chicago, America/Los_Angeles.</div>
+          </div>
+          <div class="sd-field">
+            <label class="sd-label">Include in snapshot</label>
+            <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:4px">
+              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-down"/> Units down</label>
+              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-flagged"/> Flagged this week</label>
+              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-active"/> Active count</label>
+              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-domiciles"/> Domiciles</label>
+            </div>
+          </div>
+          <div class="sd-field">
+            <label class="sd-label">Flagged threshold (risk ≥)</label>
+            <input class="sd-input" id="cb-risk-threshold" type="number" min="0" max="100" step="1" />
+          </div>
+          <div class="sd-toggle-row">
+            <span class="sd-toggle-label">Include AI safety tip</span>
+            <input type="checkbox" id="cb-tip-enabled"/>
+          </div>
+          <div class="sd-field">
+            <label class="sd-label">Test operator</label>
+            <select class="sd-input" id="cb-test-operator">
+              <option value="">Auto (first mapped operator)</option>
+            </select>
+            <div class="sd-hint" style="margin-top:4px">Pick which operator the test send uses. Populated from your current fleet operators.</div>
+          </div>
+          <div class="sd-hint" id="cb-run-info" style="margin-top:8px"></div>
+          <div class="sd-btn-row" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+            <button class="sd-btn secondary" id="cb-test-btn" type="button">Send test to myself</button>
+            <button class="sd-btn secondary" id="cb-runnow-btn" type="button">Run now (live)</button>
+            <button class="sd-btn primary" id="cb-save">Save</button>
+          </div>
+          <div id="cb-status" class="sd-status" style="display:none;margin-top:8px"></div>
+        </div>
+
+      </div>
+      <!-- end sd-pane-scheduler -->
+
       <!-- ══ TAB 3: Operators & SP ═════════════════════════════════════════ -->
       <div id="sd-pane-operators" style="display:none">
         <!-- Standalone SP Workbook Config -->
@@ -1023,7 +1038,7 @@ function _wireTabSwitching() {
       _drawer.querySelectorAll('.sd-tab').forEach((t) => t.classList.remove('active'));
       btn.classList.add('active');
       const pane = btn.dataset.pane;
-      ['ui', 'integrations', 'operators', 'accounts'].forEach((p) => {
+      ['ui', 'integrations', 'scheduler', 'operators', 'accounts'].forEach((p) => {
         const el = document.getElementById(`sd-pane-${p}`);
         if (el) el.style.display = p === pane ? 'block' : 'none';
       });
@@ -2123,7 +2138,9 @@ function _wireCarrierBriefing() {
       testBtn.textContent = 'Sending...';
       try {
         await _save(); // persist current settings first so the test reflects them
-        const res = await slackBridge.sendBriefingTest({});
+        const opSel = document.getElementById('cb-test-operator');
+        const chosenOp = opSel ? (opSel.value || '').trim() : '';
+        const res = await slackBridge.sendBriefingTest(chosenOp ? { operator: chosenOp } : {});
         if (res && res.sent) showStatus('\uD83E\uDDEA Test sent to your Slack DM (' + (res.aiWritten ? 'AI-written' : 'fallback') + ') for ' + (res.operator || '') + '.', 'ok');
         else showStatus('Test not sent: ' + ((res && res.reason) || 'unknown') + '.', 'err');
       } catch (e) {
@@ -2166,6 +2183,26 @@ function _wireCarrierBriefing() {
         : 'Disabled — enable to send a daily briefing.';
     }
   }).catch(() => { _apply({}); });
+
+  // Populate the "Test operator" dropdown from the user's REAL fleet operators
+  // (distinct, sorted) — not hardcoded. Keeps the current selection if valid.
+  _populateCbTestOperators();
+}
+
+function _populateCbTestOperators() {
+  const sel = document.getElementById('cb-test-operator');
+  if (!sel) return;
+  let ops = [];
+  try {
+    const rows = (state.slice('fleet').rows) || [];
+    const set = {};
+    rows.forEach((r) => { const o = String(r.operator || '').trim().toUpperCase(); if (o) set[o] = true; });
+    ops = Object.keys(set).sort();
+  } catch (_) {}
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">Auto (first mapped operator)</option>' +
+    ops.map((o) => '<option value="' + _esc(o) + '">' + _esc(o) + '</option>').join('');
+  if (prev && ops.indexOf(prev) !== -1) sel.value = prev;
 }
 
 // ── SP: render operator accordion cards ──────────────────────────────────────
@@ -2404,17 +2441,26 @@ function _wireSectionAccordion(paneId) {
 // works for everything). CRITICAL: a vendor row ALSO mirrors its user/pass into
 // the encrypted keychain (vendor.<id>.username/password) on save, so the
 // background auto-login (getForHostname) keeps working byte-for-byte unchanged.
+// Vendor ids the user has explicitly deleted from the Accounts list. Persisted
+// in settings (accountsRemovedVendors) so a deleted vendor stays gone instead
+// of being re-seeded every time Settings opens. Re-adding its URL via + Add
+// un-removes it. Loaded in _wireAccounts.
+let _removedVendors = [];
+
 function _wireAccounts() {
   settingsBridge.getAll().then((all) => {
     const saved = (all && Array.isArray(all.accounts)) ? all.accounts : [];
+    _removedVendors = (all && Array.isArray(all.accountsRemovedVendors)) ? all.accountsRemovedVendors.slice() : [];
 
     // Seed the known vendor portals so they're always in the one list. A saved
     // row already covering a vendor host wins (keeps the user's edits); any
     // vendor not yet present is added, prefilled with its known name/url + the
     // keychain username mirror (<id>_user). Passwords are never prefilled (the
     // keychain copy isn't retrievable) — the plaintext copy fills in once saved.
+    // A vendor the user has explicitly DELETED is NOT re-seeded.
     const rows = saved.slice();
     _VENDORS.forEach((v) => {
+      if (_removedVendors.indexOf(v.id) !== -1) return; // user deleted this one — stay gone
       const already = rows.some((r) => _vendorForUrl(r.url || r.name) && _vendorForUrl(r.url || r.name).id === v.id);
       if (!already) {
         rows.push({ name: v.name, url: 'https://' + v.host + '/', user: (all && all[`${v.id}_user`]) || '', pass: '' });
@@ -2492,11 +2538,15 @@ function _acctAddRow(prefill = {}) {
     this.textContent = inp.type === 'password' ? '👁️' : '🙈';
   });
   row.querySelector('.acct-del').addEventListener('click', async () => {
-    // If this was a vendor row, also clear its keychain keys so auto-login
-    // stops using stale creds for a portal the user removed.
     const vend = _vendorForUrl((row.querySelector('.acct-url')?.value || '') || (row.querySelector('.acct-name')?.value || ''));
-    if (vend && !vend.sso) {
-      try { await credsBridge.delete('vendor.' + vend.id + '.username'); await credsBridge.delete('vendor.' + vend.id + '.password'); await settingsBridge.save(vend.id + '_user', ''); } catch (_) {}
+    if (vend) {
+      // Remember this vendor as removed so it is NOT re-seeded next open, and
+      // (for non-sso) clear its keychain keys so auto-login drops the stale creds.
+      if (_removedVendors.indexOf(vend.id) === -1) _removedVendors.push(vend.id);
+      try { await settingsBridge.save('accountsRemovedVendors', _removedVendors); } catch (_) {}
+      if (!vend.sso) {
+        try { await credsBridge.delete('vendor.' + vend.id + '.username'); await credsBridge.delete('vendor.' + vend.id + '.password'); await settingsBridge.save(vend.id + '_user', ''); } catch (_) {}
+      }
     }
     row.remove();
     if (!document.querySelectorAll('#acct-list .acct-row').length) {
@@ -2547,9 +2597,14 @@ function _acctAutoSave(row) {
   clearTimeout(_acctTimers[row.id]);
   _acctTimers[row.id] = setTimeout(async () => {
     _acctPersist();
-    // If this row is a known vendor, keep the keychain copy in sync too.
+    // If this row is a known vendor, keep the keychain copy in sync too, and
+    // un-mark it as "removed" (the user re-added it by entering its URL).
     const vend = _vendorForUrl((row.querySelector('.acct-url')?.value || '') || (row.querySelector('.acct-name')?.value || ''));
-    if (vend && !vend.sso) { await _acctMirrorVendor(row, vend); }
+    if (vend) {
+      const ri = _removedVendors.indexOf(vend.id);
+      if (ri !== -1) { _removedVendors.splice(ri, 1); try { await settingsBridge.save('accountsRemovedVendors', _removedVendors); } catch (_) {} }
+      if (!vend.sso) { await _acctMirrorVendor(row, vend); }
+    }
     if (badge) {
       badge.textContent = '✅'; badge.className = 'acct-save-badge saved';
       setTimeout(() => { badge.textContent = ''; badge.className = 'acct-save-badge'; }, 2000);
@@ -3073,6 +3128,10 @@ function _applyUI(prefs) {
 
 // ── Populate fields on open ──────────────────────────────────────────────────
 function _populate() {
+  // Refresh the carrier-briefing test-operator dropdown from current fleet
+  // operators each time the drawer opens (fleet data may have loaded after init).
+  try { _populateCbTestOperators(); } catch (_) {}
+
   settingsBridge.getAll().then((all) => {
     if (!all) return;
 
@@ -3359,6 +3418,7 @@ export function init() {
   _wireNotifications();
   _wireAccounts();
   _wireSectionAccordion('sd-pane-integrations');
+  _wireSectionAccordion('sd-pane-scheduler');
   _wireSectionAccordion('sd-pane-ui');
   _wireSectionAccordion('sd-pane-operators');
 
