@@ -65,8 +65,37 @@ function _viewHtml() {
     + '<div class="sched-subtitle" id="sched-weekday-badge">\u2014</div></div>'
     + '<div class="sched-header__right"><div class="sched-clock" id="sched-clock">\u2014</div>'
     + '<span class="sched-tz" id="sched-tz"></span>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-settings-btn" title="Scheduler settings">\u2699</button>'
     + '<button class="sched-btn sched-btn--back" id="sched-back">\u2190 Fleet</button></div>'
     + '</div>'
+
+    // Scheduler settings overlay (gear) — global config knobs: sync interval +
+    // data-freshness policy. The per-card times/toggles stay on the cards.
+    + '<div class="sched-settings-overlay" id="sched-settings-overlay" style="display:none">'
+    + '<div class="sched-settings-panel">'
+    + '<div class="sched-settings-head"><span class="sched-settings-title">\u2699 Scheduler Settings</span>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-settings-close">\u2715</button></div>'
+    + '<div class="sched-settings-body">'
+
+    + '<div class="sched-settings-group"><div class="sched-settings-group__title">Fleet Sync</div>'
+    + '<label class="sched-settings-field"><span>Sync interval (minutes)</span>'
+    + '<input class="sched-settings-input" type="number" min="1" max="360" id="sched-set-interval" /></label>'
+    + '<div class="sched-settings-hint" id="sched-set-interval-hint"></div></div>'
+
+    + '<div class="sched-settings-group"><div class="sched-settings-group__title">Data Freshness Policy</div>'
+    + '<div class="sched-settings-hint">A scheduled push/email is blocked if the fleet data is older than this, to avoid sending stale numbers.</div>'
+    + '<label class="sched-settings-field"><span>SharePoint — max data age (min)</span>'
+    + '<input class="sched-settings-input" type="number" min="1" max="1440" id="sched-set-sp-age" /></label>'
+    + '<label class="sched-settings-field"><span>SharePoint — min rows</span>'
+    + '<input class="sched-settings-input" type="number" min="0" max="9999" id="sched-set-sp-rows" /></label>'
+    + '<label class="sched-settings-field"><span>Email — max data age (min)</span>'
+    + '<input class="sched-settings-input" type="number" min="1" max="1440" id="sched-set-em-age" /></label>'
+    + '<label class="sched-settings-field"><span>Email — min rows</span>'
+    + '<input class="sched-settings-input" type="number" min="0" max="9999" id="sched-set-em-rows" /></label></div>'
+
+    + '<div class="sched-settings-actions"><button class="sched-btn sched-btn--save" id="sched-settings-save">\u2713 Save settings</button>'
+    + '<span class="sched-settings-status" id="sched-settings-status"></span></div>'
+    + '</div></div></div>'
 
     + '<div class="sched-next-banner">'
     + '<span class="sched-next-banner__label">Fleet data:</span>'
@@ -229,6 +258,24 @@ const _CSS = [
   '.sched-time-input{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--txt);background:var(--card);border:1px solid var(--bdr);border-radius:5px;padding:4px 8px;width:90px}',
   '.sched-time-input:focus{outline:none;border-color:var(--acc)}',
   '.sched-btn--save{background:var(--adim);border-color:var(--acc);color:var(--acc2);margin-left:auto}',
+  // Scheduler settings gear overlay
+  '.sched-settings-overlay{position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:24px}',
+  '.sched-settings-panel{width:min(460px,94vw);max-height:88vh;overflow-y:auto;background:var(--card);border:1px solid var(--bdr);border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.5);display:flex;flex-direction:column}',
+  '.sched-settings-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 16px;border-bottom:1px solid var(--bdr);position:sticky;top:0;background:var(--card);z-index:1}',
+  '.sched-settings-title{font-size:14px;font-weight:800;color:var(--txt);letter-spacing:.3px}',
+  '.sched-settings-body{padding:14px 16px 16px;display:flex;flex-direction:column;gap:16px}',
+  '.sched-settings-group{display:flex;flex-direction:column;gap:9px;padding:12px;background:var(--el);border-radius:9px}',
+  '.sched-settings-group__title{font-size:10px;font-weight:800;color:var(--acc2);text-transform:uppercase;letter-spacing:.7px}',
+  '.sched-settings-field{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:var(--txt)}',
+  '.sched-settings-field>span{color:var(--mut);font-weight:600}',
+  '.sched-settings-input{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--txt);background:var(--card);border:1px solid var(--bdr);border-radius:5px;padding:5px 8px;width:92px;text-align:right}',
+  '.sched-settings-input:focus{outline:none;border-color:var(--acc)}',
+  '.sched-settings-hint{font-size:10px;color:var(--mut);line-height:1.45}',
+  '.sched-settings-actions{display:flex;align-items:center;gap:12px;padding-top:2px}',
+  '.sched-settings-actions .sched-btn--save{margin-left:0}',
+  '.sched-settings-status{font-size:11px;font-weight:600;color:var(--mut)}',
+  '.sched-settings-status--ok{color:var(--acc2)}',
+  '.sched-settings-status--err{color:#ff6b6b}',
 ].join('\n');
 
 let _cssInjected = false;
@@ -494,6 +541,73 @@ async function _saveDbrSlot() {
   } catch (e) { _toast('error', 'Save failed: ' + e.message); }
 }
 
+// ── Scheduler settings gear overlay ──────────────────────────────────────────
+// Global config knobs that aren't on the cards: fleet sync interval + the
+// data-freshness policy (SP/Email max data age + min rows).
+async function _openSettingsOverlay() {
+  const ov = _q('sched-settings-overlay');
+  if (!ov) return;
+  const setStatus = (msg) => { const s = _q('sched-settings-status'); if (s) { s.textContent = msg || ''; s.className = 'sched-settings-status'; } };
+  setStatus('');
+
+  // Fleet sync interval
+  try {
+    const si = await window.settings.getSyncInterval();
+    const intEl = _q('sched-set-interval');
+    const hintEl = _q('sched-set-interval-hint');
+    const eff = (si && typeof si.effectiveMinutes === 'number') ? si.effectiveMinutes : 5;
+    if (intEl) intEl.value = (si && typeof si.minutes === 'number') ? si.minutes : eff;
+    if (hintEl) hintEl.textContent = (si && typeof si.minutes === 'number')
+      ? 'Fleet data refreshes every ' + si.minutes + ' min.'
+      : 'Using default (' + eff + ' min). Set a value to override.';
+  } catch (_) {}
+
+  // Freshness policy (prefer live getState so it reflects any backend change)
+  let fr = _state && _state.freshness;
+  try { const st = await window.fleetScheduler.getState(); if (st && st.freshness) { fr = st.freshness; _state = st; } } catch (_) {}
+  const sp = (fr && fr.sp) || {}; const em = (fr && fr.email) || {};
+  const set = (id, v) => { const el = _q(id); if (el && v != null) el.value = v; };
+  set('sched-set-sp-age',  sp.maxDataAgeMin != null ? sp.maxDataAgeMin : 60);
+  set('sched-set-sp-rows', sp.minRows      != null ? sp.minRows      : 3);
+  set('sched-set-em-age',  em.maxDataAgeMin != null ? em.maxDataAgeMin : 45);
+  set('sched-set-em-rows', em.minRows      != null ? em.minRows      : 3);
+
+  ov.style.display = 'flex';
+}
+
+function _closeSettingsOverlay() {
+  const ov = _q('sched-settings-overlay');
+  if (ov) ov.style.display = 'none';
+}
+
+async function _saveSettingsOverlay() {
+  const statusEl = _q('sched-settings-status');
+  const setStatus = (msg, cls) => { if (statusEl) { statusEl.textContent = msg || ''; statusEl.className = 'sched-settings-status' + (cls ? ' sched-settings-status--' + cls : ''); } };
+  const numOr = (id, dflt) => { const el = _q(id); const n = el ? Number(el.value) : NaN; return Number.isFinite(n) ? n : dflt; };
+
+  await _guard(async () => {
+    setStatus('Saving\u2026', '');
+    // 1) Sync interval
+    const interval = numOr('sched-set-interval', NaN);
+    if (Number.isFinite(interval) && interval >= 1) {
+      const r = await window.settings.saveSyncInterval(Math.round(interval));
+      if (!(r && r.ok)) throw new Error('sync interval not saved');
+    }
+    // 2) Freshness policy (merge patch keyed by sp/email)
+    const patch = {
+      sp:    { maxDataAgeMin: numOr('sched-set-sp-age', 60), minRows: numOr('sched-set-sp-rows', 3) },
+      email: { maxDataAgeMin: numOr('sched-set-em-age', 45), minRows: numOr('sched-set-em-rows', 3) },
+    };
+    const fr = await window.fleetScheduler.setFreshness(patch);
+    if (fr && fr.freshness) _state && (_state.freshness = fr.freshness);
+
+    setStatus('Saved \u2713', 'ok');
+    _toast('success', 'Scheduler settings saved');
+    _refresh();
+    setTimeout(_closeSettingsOverlay, 650);
+  }).catch((e) => { setStatus('Save failed: ' + (e && e.message || e), 'err'); _toast('error', 'Scheduler settings save failed'); });
+}
+
 async function _runDbrNow() {
   await _guard(async () => {
     _toast('info', 'DBR pull started (AFP + DSP)...');
@@ -546,6 +660,12 @@ export function init(container) {
   bind('sched-dbr-save', 'click', _saveDbrSlot);
   bind('sched-dbr-trigger', 'click', _runDbrNow);
   bind('sched-dbr-enabled', 'change', (e) => _setEnabled('dbr', e.target.checked));
+  // Scheduler settings gear overlay
+  bind('sched-settings-btn', 'click', _openSettingsOverlay);
+  bind('sched-settings-close', 'click', _closeSettingsOverlay);
+  bind('sched-settings-save', 'click', _saveSettingsOverlay);
+  const _ov = _q('sched-settings-overlay');
+  if (_ov) _ov.addEventListener('click', (e) => { if (e.target === _ov) _closeSettingsOverlay(); });
   _wireDelegatedActions(_el);
 
   // SP push progress bar (informational only — status of record is the ledger).
