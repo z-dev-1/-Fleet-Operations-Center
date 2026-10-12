@@ -34,9 +34,12 @@ function _esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '
 
 function _render() {
   if (!_el) return;
+  // _el (#nexus-sidebar-mount) acts as the centered-overlay backdrop; the
+  // .nx-sidebar inside is the modal panel.
+  _el.classList.toggle('nx-overlay--open', _open);
   _el.innerHTML = `
     <div class="nx-sidebar${_open ? ' nx-sidebar--open' : ''}">
-      <button class="nx-sidebar__close" id="nx-sb-close">◂</button>
+      <button class="nx-sidebar__close" id="nx-sb-close">✕</button>
       <div class="nx-sidebar__tabs">
         ${TABS.map(t => {
           const b = t.badge();
@@ -50,6 +53,8 @@ function _render() {
       </div>
     </div>
   `;
+  // Backdrop click (on the mount itself, not the panel) closes.
+  _el.addEventListener('click', (e) => { if (e.target === _el) { _open = false; _render(); } }, { once: true });
   _wireEvents();
 }
 

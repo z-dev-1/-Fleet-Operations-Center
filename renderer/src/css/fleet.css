@@ -5918,31 +5918,36 @@ body::after {
 }
 #sd-overlay.open { opacity: 1; pointer-events: all; }
 
-/* ── Drawer Container ──────────────────────────────────────────────────────── */
+/* ── Drawer Container (now a CENTERED MODAL OVERLAY, was a right slide-in) ──── */
 .settings-drawer {
   position: fixed;
-  top: 0; right: 0; bottom: 0;
-  width: 420px;
+  top: 50%; left: 50%;
+  width: min(560px, 94vw);
+  max-height: 88vh;
   background: linear-gradient(180deg, rgba(16,20,26,.97) 0%, rgba(13,17,23,.99) 100%);
   backdrop-filter: blur(32px) saturate(1.6);
   -webkit-backdrop-filter: blur(32px) saturate(1.6);
-  border-left: 1px solid rgba(240,246,252,.06);
-  box-shadow: -20px 0 80px rgba(0,0,0,.6), 0 0 1px rgba(88,166,255,.08);
+  border: 1px solid rgba(240,246,252,.06);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.6), 0 0 1px rgba(88,166,255,.08);
   z-index: 9001;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transform: translateX(100%);
-  transition: transform .4s var(--transition-smooth, cubic-bezier(.22,1,.36,1));
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(.97);
+  transition: opacity .25s var(--transition-smooth, cubic-bezier(.22,1,.36,1)),
+              transform .25s var(--transition-smooth, cubic-bezier(.22,1,.36,1));
 }
-.settings-drawer.open { transform: translateX(0); }
+.settings-drawer.open { opacity: 1; pointer-events: auto; transform: translate(-50%, -50%) scale(1); }
 
-/* Left accent edge */
+/* Top accent edge */
 .settings-drawer::before {
   content: '';
-  position: absolute; top: 0; left: 0; bottom: 0;
-  width: 2px;
-  background: linear-gradient(180deg, 
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, 
     rgba(88,166,255,.5) 0%, 
     rgba(210,168,255,.4) 30%, 
     transparent 60%,
@@ -8329,21 +8334,46 @@ body {
 .cb-row { display: flex; gap: 6px; }
 
 /* Partner WR Review Queue */
+/* Incoming Work Requests is now a CENTERED MODAL OVERLAY (was a right drawer).
+   .wr-inbox is the full-screen backdrop; .wr-inbox-panel is the modal. */
 .wr-inbox {
   position: fixed;
-  top: 48px;
-  right: 0;
-  width: 420px;
-  bottom: 0;
+  inset: 0;
+  z-index: 9100;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0,0,0,.55);
+}
+.wr-inbox.open { display: flex; }
+.wr-inbox-panel {
+  width: min(560px, 94vw);
+  max-height: 88vh;
   background: var(--bg);
-  border-left: 1px solid var(--bdr);
-  z-index: 600;
+  border: 1px solid var(--bdr);
+  border-radius: 14px;
+  box-shadow: 0 18px 60px rgba(0,0,0,.5);
   display: flex;
   flex-direction: column;
-  transform: translateX(100%);
-  transition: transform 0.2s ease;
+  overflow: hidden;
 }
-.wr-inbox.open { transform: translateX(0); }
+.wr-inbox-header-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.wr-inbox-gear { background: none; border: none; color: var(--txt2); cursor: pointer; font-size: 15px; padding: 2px 4px; border-radius: 6px; }
+.wr-inbox-gear:hover { color: var(--txt); background: var(--el, rgba(255,255,255,.06)); }
+.wr-inbox-config { padding: 12px 14px; border-bottom: 1px solid var(--bdr); background: var(--el, rgba(255,255,255,.03)); display: flex; flex-direction: column; gap: 6px; }
+.wr-inbox-config-title { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .7px; color: var(--acc2, #58a6ff); margin-bottom: 2px; }
+.wr-inbox-config-label { font-size: 10px; color: var(--txt2); font-weight: 600; }
+.wr-inbox-config-input { background: var(--card, #0d1117); border: 1px solid var(--bdr); border-radius: 5px; padding: 6px 8px; font-size: 11px; color: var(--txt); width: 100%; }
+.wr-inbox-config-input:focus { outline: none; border-color: var(--acc, #58a6ff); }
+.wr-inbox-config-hint { font-size: 9px; color: var(--mut, #6e7681); }
+.wr-inbox-config-actions { display: flex; gap: 8px; margin-top: 4px; }
+.wr-inbox-cfg-btn { background: var(--el, rgba(255,255,255,.06)); border: 1px solid var(--bdr); border-radius: 6px; color: var(--txt); font-size: 11px; font-weight: 600; padding: 6px 10px; cursor: pointer; }
+.wr-inbox-cfg-btn--save { background: var(--adim, rgba(88,166,255,.12)); border-color: var(--acc, #58a6ff); color: var(--acc2, #79c0ff); }
+.wr-inbox-config-status { font-size: 11px; margin-top: 4px; }
+.wr-inbox-config-status.ok { color: #3fb950; }
+.wr-inbox-config-status.warn { color: #eab308; }
+.wr-inbox-config-status.err { color: #f85149; }
 .wr-inbox-header {
   display: flex;
   align-items: center;

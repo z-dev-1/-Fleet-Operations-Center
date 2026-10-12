@@ -754,29 +754,8 @@ function _html() {
           <div id="fas-audit-list" style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto"></div>
         </div>
 
-        <!-- Partner Forms -->
-        <div class="sd-section" id="sect-forms">
-          <div class="sd-section-title">Partner Work Request Forms</div>
-          <div class="sd-field">
-            <label class="sd-label">Google Sheets ID</label>
-            <input class="sd-input" id="forms-sheet-id" placeholder="Paste Sheet ID from URL..." />
-            <div class="sd-hint">From: docs.google.com/spreadsheets/d/<strong>[THIS ID]</strong>/edit</div>
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Poll Interval</label>
-            <select class="sd-select" id="forms-poll-interval">
-              <option value="30">Every 30 seconds</option>
-              <option value="60" selected>Every 60 seconds</option>
-              <option value="120">Every 2 minutes</option>
-              <option value="300">Every 5 minutes</option>
-            </select>
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn primary" id="forms-save">Save Forms Config</button>
-            <button class="sd-btn secondary" id="forms-poll-now">Poll Now</button>
-          </div>
-          <div id="forms-status" class="sd-status" style="margin-top:8px;display:none"></div>
-        </div>
+        <!-- Partner Work Request Forms section moved (2026-08-14) to the
+             Incoming Work Requests overlay (📋 toolbar) ⚙ gear. -->
 
         <!-- Asana -->
         <div class="sd-section" id="sect-asana">
@@ -2778,46 +2757,9 @@ export function init() {
 
   // Wire all integration sections
   
-  // ── Partner Forms (top-level, always registers) ─────────────────────────
-  (function _wireFormsTopLevel() {
-    const sheetInput = document.getElementById('forms-sheet-id');
-    const pollSelect = document.getElementById('forms-poll-interval');
-    const statusEl = document.getElementById('forms-status');
-    const savedCfg = JSON.parse(localStorage.getItem('fleet_forms_config') || '{}');
-    if (sheetInput && savedCfg.sheetId) sheetInput.value = savedCfg.sheetId;
-    if (pollSelect && savedCfg.pollInterval) pollSelect.value = savedCfg.pollInterval;
-
-    const saveBtn = document.getElementById('forms-save');
-    if (saveBtn) saveBtn.addEventListener('click', () => {
-      const cfg = { sheetId: (sheetInput.value || '').trim(), pollInterval: parseInt(pollSelect.value || '60', 10) };
-      localStorage.setItem('fleet_forms_config', JSON.stringify(cfg));
-      if (statusEl) { statusEl.textContent = '\u2705 Saved'; statusEl.style.display = ''; statusEl.className = 'sd-status ok'; }
-    });
-
-    const pollBtn = document.getElementById('forms-poll-now');
-    if (pollBtn) pollBtn.addEventListener('click', async () => {
-      let rawId = (sheetInput.value || '').trim();
-      if (!rawId) { if (statusEl) { statusEl.textContent = '\u26a0 Enter a Sheet ID first'; statusEl.style.display = ''; statusEl.className = 'sd-status warn'; } return; }
-      if (statusEl) { statusEl.textContent = '\u{1F504} Polling...'; statusEl.style.display = ''; statusEl.className = 'sd-status'; }
-      let gid = '0';
-      const gidMatch = rawId.match(/gid=(\d+)/);
-      if (gidMatch) gid = gidMatch[1];
-      let sheetId = rawId.replace(/\/edit.*$/, '').replace(/[?#].*$/, '').replace(/\/+$/, '').trim();
-      if (sheetId.includes('spreadsheets/d/')) sheetId = sheetId.split('spreadsheets/d/')[1].split('/')[0];
-      if (sheetId.includes('/')) sheetId = sheetId.split('/')[0];
-      const csvUrl = 'https://docs.google.com/spreadsheets/d/' + sheetId + '/export?format=tsv';
-      try {
-        const resp = await fetch(csvUrl);
-        if (!resp.ok) { statusEl.textContent = '\u274c HTTP ' + resp.status; statusEl.className = 'sd-status err'; statusEl.style.display = ''; return; }
-        const csv = await resp.text();
-        const rows = csv.split('\n').filter(r => r.trim());
-        statusEl.textContent = '\u2705 Connected! ' + (rows.length - 1) + ' row(s) found';
-        statusEl.className = 'sd-status ok'; statusEl.style.display = '';
-        const result = await window.partner.pollForms({ csvText: csv });
-        if (result && result.newCount > 0) { statusEl.textContent = '\u2705 ' + result.newCount + ' new request(s) — AI classifying...'; }
-      } catch(e) { statusEl.textContent = '\u274c ' + e.message; statusEl.className = 'sd-status err'; statusEl.style.display = ''; }
-    });
-  })();
+  // Partner Work Request Forms config moved (2026-08-14) to the Incoming Work
+  // Requests overlay (📋 toolbar) ⚙ gear. localStorage fleet_forms_config +
+  // config:forms-changed are unchanged; draft-inbox.js owns the wiring now.
 
   // SP Workbook Discover/config wiring moved (2026-08-14) to the Scheduler
   // view's SharePoint Push gear overlay (renderer/src/js/views/schedulers.js).
