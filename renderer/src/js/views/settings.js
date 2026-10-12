@@ -76,7 +76,6 @@ function _html() {
       <button class="sd-tab active" data-pane="ui">UI &amp; App</button>
       <button class="sd-tab"        data-pane="integrations">Integrations</button>
       <button class="sd-tab"        data-pane="scheduler">⏱ Scheduler</button>
-      <button class="sd-tab"        data-pane="operators">Operators &amp; SP</button>
       <button class="sd-tab"        data-pane="accounts">Accounts</button>
     </div>
 
@@ -886,46 +885,9 @@ function _html() {
       </div>
       <!-- end sd-pane-scheduler -->
 
-      <!-- ══ TAB 3: Operators & SP ═════════════════════════════════════════ -->
-      <div id="sd-pane-operators" style="display:none">
-        <!-- SharePoint Workbooks section moved (2026-08-14) to a gear overlay
-             on the Scheduler view's SharePoint Push card
-             (renderer/src/js/views/schedulers.js). Same spBridge config so
-             push targets are unchanged. -->
-
-        <!-- Pane header -->
-        <div class="ops-pane-header">
-          <div class="ops-pane-header-left">
-            <span class="ops-pane-title">Operators &amp; SharePoint</span>
-          </div>
-        </div>
-        <!-- FEATURE (2026-07-23): removed the dead "Sync Now" button and its
-             "Run a sync to load operators" label that used to live in the
-             pane header above. Neither one was ever wired up: the button
-             had no click listener anywhere, the label was never updated by
-             any code, and the one function that looked like it populated a
-             list here (_renderOperators, removed below) was never called
-             and referenced DOM ids (#ops-list, #ops-empty-state) that don't
-             exist in this template. The Operators tab's real data (the
-             per-operator SharePoint workbook cards above) is populated by a
-             separate, live mechanism, not by this button. -->
-        <!-- FEATURE (2026-07-22): removed the duplicate "Email — Global
-             SMTP" panel that lived here. It was 100% dead/broken: no event
-             listener ever wired the inputs or the "Send test email"
-             button, nothing populated the fields on load, and the one
-             function that referenced them (_opsEmailAutoSave) called an
-             undeclared variable (_opsEmailTimers) that would have thrown a
-             ReferenceError the instant it ran. Even setting that aside, it
-             saved into spConfig.email* fields that nothing else in the
-             codebase ever reads back -- a second, disconnected config that
-             could never actually be used to send mail.
-             The single real SMTP config is "Email (SMTP)" above (id
-             sect-email, wired by _wireEmail()) -- it writes to
-             email_config.json via emailBridge.saveConfig(), which is what
-             sendFleetEmail() (src/scrapers/email_sender.js) actually reads
-             from when sending a report over SMTP. -->
-      </div>
-      <!-- end sd-pane-operators -->
+      <!-- Operators & SP tab removed (2026-08-14): its only live content (the
+           SharePoint Workbooks config) moved to the Scheduler view's SP Push
+           gear overlay. Domiciles config lives in the Integrations tab. -->
 
       <!-- ══ TAB 4: Accounts ════════════════════════════════════════════════ -->
       <div id="sd-pane-accounts" style="display:none">
@@ -966,7 +928,7 @@ function _wireTabSwitching() {
       _drawer.querySelectorAll('.sd-tab').forEach((t) => t.classList.remove('active'));
       btn.classList.add('active');
       const pane = btn.dataset.pane;
-      ['ui', 'integrations', 'scheduler', 'operators', 'accounts'].forEach((p) => {
+      ['ui', 'integrations', 'scheduler', 'accounts'].forEach((p) => {
         const el = document.getElementById(`sd-pane-${p}`);
         if (el) el.style.display = p === pane ? 'block' : 'none';
       });
@@ -3153,7 +3115,6 @@ export function init() {
   _wireSectionAccordion('sd-pane-integrations');
   _wireSectionAccordion('sd-pane-scheduler');
   _wireSectionAccordion('sd-pane-ui');
-  _wireSectionAccordion('sd-pane-operators');
 
   // Listen for settings open request
   bus.on('ui:view-change', ({ to }) => {
