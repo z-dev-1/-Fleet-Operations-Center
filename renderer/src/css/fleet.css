@@ -2884,6 +2884,23 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 
 
 /* ── Accounts section (S11) ────────────────────────────────────────────────── */
+/* Unified Accounts: vendor portal cards (encrypted) + other site logins. */
+.acct-group-title{display:flex;align-items:center;gap:10px;font-size:12px;font-weight:700;color:var(--txt);margin:4px 0 10px;text-transform:uppercase;letter-spacing:.04em}
+.acct-group-note{font-size:9px;font-weight:600;color:var(--mut);text-transform:none;letter-spacing:0;background:rgba(126,231,135,.12);color:var(--grn);padding:2px 7px;border-radius:10px}
+.acct-add-inline{margin-left:auto;font-size:10px;padding:3px 10px}
+.acct-vendor-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.acct-card{background:var(--card);border:1px solid var(--bdr);border-radius:10px;padding:12px 13px;display:flex;flex-direction:column;gap:8px}
+.acct-card--vendor{min-height:0}
+.acct-card-head{display:flex;flex-direction:column;gap:2px;margin-bottom:2px}
+.acct-card-name{font-size:12px;font-weight:700;color:var(--txt)}
+.acct-card-host{font-size:9px;color:var(--mut);font-family:var(--mono)}
+.acct-card-field{display:flex;flex-direction:column;gap:3px}
+.acct-card-field label{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+.acct-card-field .sd-input{font-size:11px;padding:5px 8px}
+.acct-card-sso-note{font-size:10px;color:var(--mut);font-style:italic}
+.acct-card-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+.acct-card-actions .sd-btn{font-size:10px;padding:4px 10px}
+
 .acct-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:32px 20px;border:1px dashed var(--bdr);border-radius:10px;text-align:center}
 .acct-empty__icon{font-size:26px;color:var(--mut);opacity:.5}
 .acct-empty__title{font-size:12px;font-weight:700;color:var(--txt2)}

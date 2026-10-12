@@ -600,30 +600,6 @@ function _html() {
           </div>
         </div>
 
-        <!-- Credentials (keychain) -->
-        <div class="sd-section" id="sect-creds">
-          <div class="sd-section-title">Credentials (keychain)</div>
-          <div class="sd-row">
-            <div class="sd-field">
-              <div class="sd-label">Key</div>
-              <input class="sd-input" id="cred-key" placeholder="e.g. aap-password"/>
-            </div>
-            <div class="sd-field">
-              <div class="sd-label">Value</div>
-              <input class="sd-input" id="cred-val" type="password" placeholder="secret"/>
-            </div>
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn primary"    id="cred-save">Save Credential</button>
-            <button class="sd-btn danger"     id="cred-delete">Delete Key</button>
-          </div>
-          <div id="cred-status" class="settings__status" style="display:none"></div>
-          <div id="cred-list-wrap" class="settings-list-wrap" style="margin-top:10px">
-            <div class="settings-list-label">Stored keys:</div>
-            <div id="cred-list" class="settings-key-list"></div>
-          </div>
-        </div>
-
         <!-- Schedulers Config -->
         <div class="sd-section" style="border-top:1px solid var(--bdr);padding-top:14px;margin-top:4px">
           <div class="sd-section-title">Schedulers – Config</div>
@@ -641,108 +617,6 @@ function _html() {
             <button class="sd-btn primary" id="save-sched">Save</button>
           </div>
         </div>
-
-        <!-- Vendor Portal Credentials -->
-        <div class="sd-section" id="sect-vendor-creds">
-          <div class="sd-section-title">Vendor Portal Credentials</div>
-          <!-- PACCAR -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">PACCAR (paccarpg.decisiv.net)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="paccar-user" placeholder="portal username"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="paccar-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="paccar-save">Save</button><button class="sd-btn secondary" id="paccar-test">Test login</button><button class="sd-btn danger" id="paccar-clear">Clear</button></div>
-            <div id="paccar-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Volvo -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Volvo (volvopg.asist.decisiv.net)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="volvo-user" placeholder="portal username"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="volvo-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="volvo-save">Save</button><button class="sd-btn secondary" id="volvo-test">Test login</button><button class="sd-btn danger" id="volvo-clear">Clear</button></div>
-            <div id="volvo-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Record360 -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Record360 (dashboard.record360.com)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Email</div><input class="sd-input" id="record360-user" placeholder="you@amazon.com"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="record360-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="record360-save">Save</button><button class="sd-btn secondary" id="record360-test">Test login</button><button class="sd-btn danger" id="record360-clear">Clear</button></div>
-            <div id="record360-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Aperia / Halo -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Aperia / Halo Tire (amazon.aperiatech.com)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Email</div><input class="sd-input" id="aperia-user" placeholder="you@amazon.com"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="aperia-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="aperia-save">Save</button><button class="sd-btn secondary" id="aperia-test">Test login</button><button class="sd-btn danger" id="aperia-clear">Clear</button></div>
-            <div id="aperia-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Reach24 -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Reach24 (amazon.reach24.net)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Email</div><input class="sd-input" id="reach24-user" placeholder="you@amazon.com"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="reach24-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="reach24-save">Save</button><button class="sd-btn secondary" id="reach24-test">Test login</button><button class="sd-btn danger" id="reach24-clear">Clear</button></div>
-            <div id="reach24-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- DTNA -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">DTNA Service Tracker (dtna.my.site.com)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="dtna-user" placeholder="portal username"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="dtna-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="dtna-save">Save</button><button class="sd-btn secondary" id="dtna-test">Test login</button><button class="sd-btn danger" id="dtna-clear">Clear</button></div>
-            <div id="dtna-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Road Ready -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Road Ready (roadready.fadv.com)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="roadready-user" placeholder="portal username"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="roadready-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="roadready-save">Save</button><button class="sd-btn secondary" id="roadready-test">Test login</button><button class="sd-btn danger" id="roadready-clear">Clear</button></div>
-            <div id="roadready-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Velogic -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Velogic (velogic.my.site.com)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="velogic-user" placeholder="portal username"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="velogic-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="velogic-save">Save</button><button class="sd-btn secondary" id="velogic-test">Test login</button><button class="sd-btn danger" id="velogic-clear">Clear</button></div>
-            <div id="velogic-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Access Billing Services -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Access Billing Services (access-billing-services.com)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="abs-user" placeholder="portal username"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="abs-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="abs-save">Save</button><button class="sd-btn secondary" id="abs-test">Test login</button><button class="sd-btn danger" id="abs-clear">Clear</button></div>
-            <div id="abs-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Uptake -- Amazon SSO, no password needed (FEATURE 2026-07-22) -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Uptake (fleet.uptake.com) -- Amazon SSO, no password needed</div>
-            <div class="sd-btn-row"><button class="sd-btn secondary" id="uptake-test">Sign in to Uptake</button></div>
-            <div id="uptake-status" class="settings__status" style="display:none"></div>
-          </div>
-        </div>
-
 
         <!-- Email SMTP -->
         <div class="sd-section" id="sect-email">
@@ -1117,17 +991,21 @@ function _html() {
         <div class="ops-pane-header">
           <div class="ops-pane-header-left">
             <span class="ops-pane-title">Accounts</span>
-            <span class="ops-pane-sub">Site credentials – click a site name to open it</span>
+            <span class="ops-pane-sub">All logins in one place — vendor portals (encrypted) + other site credentials</span>
           </div>
-          <button class="ops-sync-btn" id="acct-add">+ Add account</button>
         </div>
 
-        <!-- Account rows -->
+        <!-- ── Section A: Vendor Portals (encrypted keychain) ─────────────── -->
+        <div class="acct-group-title">🔐 Vendor Portals <span class="acct-group-note">saved securely (encrypted)</span></div>
+        <div class="acct-vendor-grid" id="acct-vendor-grid"><!-- vendor cards injected by _renderVendorCards() --></div>
+
+        <!-- ── Section B: Other site logins ───────────────────────────────── -->
+        <div class="acct-group-title" style="margin-top:18px">🔑 Other Site Logins <button class="sd-btn secondary acct-add-inline" id="acct-add">+ Add</button></div>
         <div class="acct-list" id="acct-list">
           <div class="acct-empty" id="acct-empty">
             <span style="font-size:28px;opacity:.5">🔑</span>
-            <div class="ops-empty-title">No accounts yet</div>
-            <div class="ops-empty-sub">Click <strong>+ Add account</strong> to save a site credential.</div>
+            <div class="ops-empty-title">No other site logins yet</div>
+            <div class="ops-empty-sub">Click <strong>+ Add</strong> to save a site credential.</div>
           </div>
         </div>
 
@@ -1387,44 +1265,58 @@ function _wireAIConfig() {
   bus.on('ui:view-change', ({ to }) => { if (to === 'settings') setTimeout(_loadAIConfig, 150); });
 }
 
-// ── Section: Credentials ─────────────────────────────────────────────────────
-function _loadCredsList() {
-  credsBridge.list().then((keys) => {
-    const el = document.getElementById('cred-list');
-    if (!el) return;
-    el.innerHTML = '';
-    (keys || []).forEach((k) => {
-      const pill = document.createElement('span');
-      pill.className = 'settings-key-pill';
-      pill.textContent = k;
-      el.appendChild(pill);
-    });
-    const wrap = document.getElementById('cred-list-wrap');
-    if (wrap) wrap.style.display = (keys && keys.length) ? 'block' : 'none';
-  }).catch(() => {});
-}
+// ── Section: Vendor Portal cards (rendered into the Accounts pane) ───────────
+// Vendor portals whose logins live in the ENCRYPTED keychain. Each card uses
+// the SAME element ids the existing _wireVendorAuth() wiring expects
+// (<id>-user / -pass / -save / -test / -clear / -status), so moving these into
+// the Accounts tab is a pure markup relocation — the save/test/clear/keychain
+// logic is unchanged. 'sso' vendors (Uptake) have no stored password, just a
+// sign-in test button.
+const _VENDOR_CARDS = [
+  { id: 'paccar',    name: 'PACCAR',               host: 'paccarpg.decisiv.net',        userLabel: 'Username' },
+  { id: 'volvo',     name: 'Volvo',                host: 'volvopg.asist.decisiv.net',   userLabel: 'Username' },
+  { id: 'record360', name: 'Record360',            host: 'dashboard.record360.com',     userLabel: 'Email' },
+  { id: 'aperia',    name: 'Aperia / Halo Tire',   host: 'amazon.aperiatech.com',       userLabel: 'Email' },
+  { id: 'reach24',   name: 'Reach24',              host: 'amazon.reach24.net',          userLabel: 'Email' },
+  { id: 'dtna',      name: 'DTNA Service Tracker', host: 'dtna.my.site.com',            userLabel: 'Username' },
+  { id: 'roadready', name: 'Road Ready',           host: 'roadready.fadv.com',          userLabel: 'Username' },
+  { id: 'velogic',   name: 'Velogic',              host: 'velogic.my.site.com',         userLabel: 'Username' },
+  { id: 'abs',       name: 'Access Billing Services', host: 'access-billing-services.com', userLabel: 'Username' },
+  { id: 'uptake',    name: 'Uptake',               host: 'fleet.uptake.com',            sso: true },
+];
 
-function _wireCreds() {
-  _loadCredsList();
-  document.getElementById('cred-save').addEventListener('click', async () => {
-    const k = document.getElementById('cred-key').value.trim();
-    const v = document.getElementById('cred-val').value;
-    if (!k) return;
-    await credsBridge.set(k, v);
-    document.getElementById('cred-key').value = '';
-    document.getElementById('cred-val').value = '';
-    _loadCredsList();
-    const st = document.getElementById('cred-status');
-    st.textContent = '✓ Saved'; st.style.display = 'block';
-    setTimeout(() => { st.style.display = 'none'; }, 2000);
-  });
-  document.getElementById('cred-delete').addEventListener('click', async () => {
-    const k = document.getElementById('cred-key').value.trim();
-    if (!k) return;
-    await credsBridge.delete(k);
-    document.getElementById('cred-key').value = '';
-    _loadCredsList();
-  });
+function _renderVendorCards() {
+  const grid = document.getElementById('acct-vendor-grid');
+  if (!grid) return;
+  grid.innerHTML = _VENDOR_CARDS.map((v) => {
+    if (v.sso) {
+      return (
+        '<div class="acct-card acct-card--vendor">' +
+          '<div class="acct-card-head"><span class="acct-card-name">' + _esc(v.name) + '</span>' +
+            '<span class="acct-card-host">' + _esc(v.host) + '</span></div>' +
+          '<div class="acct-card-sso-note">Amazon SSO — no password needed</div>' +
+          '<div class="acct-card-actions"><button class="sd-btn secondary" id="' + v.id + '-test">Sign in</button></div>' +
+          '<div id="' + v.id + '-status" class="settings__status" style="display:none"></div>' +
+        '</div>'
+      );
+    }
+    return (
+      '<div class="acct-card acct-card--vendor">' +
+        '<div class="acct-card-head"><span class="acct-card-name">' + _esc(v.name) + '</span>' +
+          '<span class="acct-card-host">' + _esc(v.host) + '</span></div>' +
+        '<div class="acct-card-field"><label>' + _esc(v.userLabel) + '</label>' +
+          '<input class="sd-input" id="' + v.id + '-user" placeholder="' + _esc(v.userLabel === 'Email' ? 'you@amazon.com' : 'portal username') + '"/></div>' +
+        '<div class="acct-card-field"><label>Password</label>' +
+          '<input class="sd-input" id="' + v.id + '-pass" type="password" placeholder="(encrypted)"/></div>' +
+        '<div class="acct-card-actions">' +
+          '<button class="sd-btn primary" id="' + v.id + '-save">Save</button>' +
+          '<button class="sd-btn secondary" id="' + v.id + '-test">Test login</button>' +
+          '<button class="sd-btn danger" id="' + v.id + '-clear">Clear</button>' +
+        '</div>' +
+        '<div id="' + v.id + '-status" class="settings__status" style="display:none"></div>' +
+      '</div>'
+    );
+  }).join('');
 }
 
 // ── Section: Vendor Auth ─────────────────────────────────────────────────────
@@ -3503,7 +3395,7 @@ export function init() {
   _wireDomiciles();
   _wireAuth();
   _wireOrcha();
-  _wireCreds();
+  _renderVendorCards();
   _wireVendorAuth();
   _wireSlack();
   _wirePartnerAutoReply();
