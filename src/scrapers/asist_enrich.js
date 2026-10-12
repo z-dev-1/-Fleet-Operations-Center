@@ -25,6 +25,11 @@ const logger = require('../utils/logger')('asist-enrich');
 // both. (2026-08-17: extended from Volvo-only to include PACCAR.)
 const ASIST_DOMAIN = String.raw`(?:volvopg\.asist|paccarpg)\.decisiv\.net`;
 const SR_RE = new RegExp('https?://' + ASIST_DOMAIN + '/service_requests/([A-Za-z0-9_-]+)', 'i');
+// A direct Decisiv Fleet Estimate URL (PACCAR or Volvo). The dealer's own
+// status comments ("part was damaged, waiting for a new one") are posted ON
+// this estimate page and are frequently NOT mirrored into the Relay thread, so
+// we must open and scrape it directly — not just record the link.
+const EST_RE = new RegExp('https?://' + ASIST_DOMAIN + '/fleet/estimates/([A-Za-z0-9_-]+)', 'i');
 const PAGE_LOAD_TIMEOUT = 25000; const POLL_INTERVAL = 1000; const POLL_MAX = 20;
 const MAX_RESPONSE_HOPS = 3; // bounds the SR -> response-case -> response-case chase
 
@@ -118,8 +123,14 @@ const ASIST_SCRAPE = String.raw`
     if (_best.length > responsesText.length) responsesText = _best;
   }
   // (c) Keyword-window fallback — status phrases, keep the note + its date.
+  // WIDENED (2026-10): added common dealer-comment wording seen on PACCAR/Volvo
+  // ESTIMATE pages ("part was damaged", "waiting for a new one", "part(s) came
+  // in", "will update you") so a dealer status note posted only on the estimate
+  // (not the SR thread) still gets captured even if tiers (a)/(b) miss its
+  // container. Confirmed example (unit B62060, 10/12): "the part we received was
+  // damaged - we are waiting for new one to come in".
   if (responsesText.length < 60) {
-    var _statusRe = /(asset\s+is\s+ready|asset\s+ready|repairs?\s+(are\s+)?completed|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|case\s+status\s+set\s+to|work\s+order\s+completed|unit\s+is\s+ready|freight|back\s*order|parts?\s+(on\s+order|ordered)|please\s+advise)/i;
+    var _statusRe = /(asset\s+is\s+ready|asset\s+ready|repairs?\s+(are\s+)?(completed|started|in\s+progress)|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|case\s+status\s+set\s+to|work\s+order\s+completed|unit\s+is\s+ready|freight|back\s*order|parts?\s+(on\s+order|ordered|came\s+in|arrived|received|damaged)|waiting\s+(for|on)\s+(the\s+)?(part|new)|new\s+one\s+to\s+come|will\s+update\s+you|please\s+advise|estimate\s+approved|awaiting)/i;
     if (_statusRe.test(body)) {
       var _mi = body.search(_statusRe);
       var _from = Math.max(0, _mi - 400);
@@ -131,7 +142,7 @@ const ASIST_SCRAPE = String.raw`
 })()
 `;
 
-function _empty(srUrl,err){return{ok:false,srUrl:srUrl||'',srNumber:'',caseNumber:'',caseUrl:'',estimateUrl:'',bestUrl:srUrl||'',bestLabel:srUrl?'Service Request':'N/A',source:srUrl?'service_request':'none',scrapedAt:new Date().toISOString(),dealer:'',statusText:'',offsiteText:'',error:err||null};}
+function _empty(srUrl,err){return{ok:false,srUrl:srUrl||'',srNumber:'',caseNumber:'',caseUrl:'',estimateUrl:'',bestUrl:srUrl||'',bestLabel:srUrl?'Service Request':'N/A',source:srUrl?'service_request':'none',scrapedAt:new Date().toISOString(),dealer:'',statusText:'',estimateComments:'',offsiteText:'',error:err||null};}
 
 async function pollScrape(win){for(let i=0;i<POLL_MAX;i++){await new Promise(r=>setTimeout(r,POLL_INTERVAL));if(!win||win.isDestroyed())return null;try{const d=await win.webContents.executeJavaScript('(function(){try{return '+ASIST_SCRAPE.trim()+'}catch(e){return{pageReady:false};}})()');if(d&&d.pageReady)return d;}catch(_){}}return null;}
 
@@ -165,10 +176,34 @@ async function _chaseResponseLinks(startPage, partition, visited) {
 }
 
 async function enrichVolvoAsist(srUrl){
-  if(!srUrl||!SR_RE.test(srUrl))return _empty(srUrl,'not a Volvo/PACCAR ASIST SR URL');
+  const _isDirectEstimate = srUrl && EST_RE.test(srUrl);
+  if(!srUrl||(!SR_RE.test(srUrl)&&!_isDirectEstimate))return _empty(srUrl,'not a Volvo/PACCAR ASIST SR or estimate URL');
   const part=partitionForUrl(srUrl);
   if(!part)return _empty(srUrl,'no partition found');
-  logger.info('[ae] START',srUrl.slice(0,80));
+  logger.info('[ae] START',srUrl.slice(0,80),_isDirectEstimate?'(direct estimate)':'(service request)');
+
+  // ── Direct estimate URL path ────────────────────────────────────────────
+  // The offsite link is ALREADY a Fleet Estimate (common for PACCAR, where
+  // Relay stores the estimate URL directly). Skip the SR->Case->Estimate chase
+  // and scrape the estimate page's comment/activity thread straight away — that
+  // is exactly where dealer status updates live that never reach Relay.
+  if(_isDirectEstimate){
+    const estId=(srUrl.match(EST_RE)||[])[1]||'';
+    const est=await openAndScrape(srUrl,part);
+    if(!est){logger.warn('[ae] estimate page failed (direct)');return _empty(srUrl,'estimate page failed');}
+    const estComments=(est.responsesText||'').trim();
+    const estBody=(est.pageText||'').trim();
+    const offsiteText=(estComments
+      ? estComments+(estBody?'\n\n--- Estimate page ---\n'+estBody:'')
+      : estBody).slice(0,10000);
+    logger.info('[ae] DONE (direct estimate) | est:',estId,'| commentThread:',estComments.length+'ch');
+    return{ok:true,srUrl,srNumber:'',caseNumber:estId,caseUrl:'',estimateUrl:srUrl,bestUrl:srUrl,
+      bestLabel:estId?'Fleet Estimate | '+estId:'Fleet Estimate',source:'estimate',
+      scrapedAt:new Date().toISOString(),error:null,srStatus:est.srStatus||'',dealer:est.dealer||'',
+      complaint:est.complaint||'',assetVin:est.assetVin||'',unitNumber:est.unitNumber||'',
+      statusText:estComments,estimateComments:estComments,offsiteText};
+  }
+
   let srNum='',caseNum='',caseUrl='',estUrl='';
   const sr=await openAndScrape(srUrl,part);
   if(!sr){logger.warn('[ae] SR page failed');return _empty(srUrl,'SR page failed');}
@@ -199,18 +234,42 @@ async function enrichVolvoAsist(srUrl){
   if(estUrl){bUrl=estUrl;src='estimate';bLabel=caseNum?'Fleet Estimate | Case #'+caseNum:'Fleet Estimate';}
   else if(caseUrl){bUrl=caseUrl;src='case';bLabel=caseNum?'ASIST Case #'+caseNum:'ASIST Case';}
   else{bUrl=srUrl;src='service_request';bLabel=srNum?'ASIST SR '+srNum:'Service Request';}
-  logger.info('[ae] DONE | src:',src,'case:',caseNum,'bestUrl:',bUrl.slice(0,80),'| statusThread:',(sr.responsesText||'').length+'ch');
-  // Build the offsite text for the timeline. PREFER the SR status/Responses
-  // thread (where "Asset Ready / repairs completed" live) over the generic SR
-  // body, since the chase ends on the estimate page which never carries that
-  // note. statusText is the pure status thread; offsiteText leads with it then
-  // appends the SR body for extra context (deduped by the leading status text).
-  const statusText = (sr.responsesText || '').trim();
+
+  // ── Scrape the Fleet Estimate page's comment thread ─────────────────────
+  // Once the chase resolves an estimate URL, OPEN it and read its dealer
+  // comment/activity feed. Previously the chase stopped at discovering the URL
+  // and never opened it, so dealer comments posted only on the estimate (not
+  // mirrored to the SR Responses thread) were lost. Non-fatal: on failure we
+  // fall back to the SR status thread exactly as before.
+  let estimateComments = '';
+  let estBody = '';
+  if (estUrl) {
+    try {
+      const est = await openAndScrape(estUrl, part);
+      if (est) {
+        estimateComments = (est.responsesText || '').trim();
+        estBody = (est.pageText || '').trim();
+        logger.info('[ae] estimate page scraped | commentThread:', estimateComments.length + 'ch');
+      } else {
+        logger.warn('[ae] estimate page open failed (chase):', estUrl.slice(0, 80));
+      }
+    } catch (_ee) { logger.warn('[ae] estimate page scrape CATCH:', _ee.message); }
+  }
+
+  logger.info('[ae] DONE | src:',src,'case:',caseNum,'bestUrl:',bUrl.slice(0,80),'| srThread:',(sr.responsesText||'').length+'ch | estThread:',estimateComments.length+'ch');
+  // Build offsite text for the timeline. Lead with the ESTIMATE comment thread
+  // (newest dealer status lives here) then the SR Responses thread, then SR body
+  // for context. estimateComments is also returned separately for the UI.
+  const statusText = estimateComments || (sr.responsesText || '').trim();
+  const srStatusThread = (sr.responsesText || '').trim();
   const srBody = (sr.pageText || '').trim();
-  const offsiteText = statusText
-    ? (statusText + (srBody ? '\n\n--- Service Request page ---\n' + srBody : '')).slice(0, 10000)
-    : srBody;
-  return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',statusText,offsiteText};
+  const parts = [];
+  if (estimateComments) parts.push('--- Estimate page comments ---\n' + estimateComments);
+  if (srStatusThread && srStatusThread !== estimateComments) parts.push('--- Service Request responses ---\n' + srStatusThread);
+  if (!estimateComments && srBody) parts.push('--- Service Request page ---\n' + srBody);
+  else if (estimateComments && estBody) parts.push('--- Estimate page ---\n' + estBody);
+  const offsiteText = parts.join('\n\n').slice(0, 12000) || srBody;
+  return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',statusText,estimateComments,offsiteText};
 }
 
 const SOURCE_RANK={estimate:3,case:2,service_request:1,none:0};

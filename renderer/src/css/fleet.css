@@ -2288,6 +2288,15 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .dp-asist-ts  { font-size: 9px; color: var(--mut); width: 100%; }
 .dp-asist-empty { font-size: 11px; color: var(--mut); }
 .dp-asist-actions { margin-top: 6px; }
+.dp-asist-notes { width: 100%; margin-top: 6px; }
+.dp-asist-notes > summary { font-size: 10px; font-weight: 600; color: var(--acc2, #58a6ff); cursor: pointer; list-style: revert; }
+.dp-asist-notes > summary:hover { text-decoration: underline; }
+.dp-asist-notes__body {
+  margin: 6px 0 0; max-height: 240px; overflow-y: auto;
+  background: var(--card, #0d1117); border: 1px solid var(--bdr); border-radius: 6px;
+  padding: 8px 10px; font-size: 10px; line-height: 1.5; color: var(--txt2, #c9d1d9);
+  white-space: pre-wrap; word-break: break-word; font-family: var(--mono, monospace);
+}
 
 
 /* S25-12: dealer name in history tooltip */

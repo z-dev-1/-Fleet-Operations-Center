@@ -673,6 +673,15 @@ function _renderAsistContent(unit) {
     html += ' <a class="dp-asist-sr-link" href="'+ srHref +'" target="_blank" rel="noreferrer">'+'(SR)'+'</a>';
   }
   if (ts) html += '<div class="dp-asist-ts">Last enriched: '+_esc(ts.slice(0,10))+'</div>';
+  // Dealer comment thread scraped from the offsite estimate/SR page (asistNotes).
+  // This is where vendor status updates that never reach the Relay thread live
+  // (e.g. "part was damaged, waiting for a new one"). Show it raw so the latest
+  // dealer word is visible without opening Split View.
+  const notes = (unit.asistNotes || '').trim();
+  if (notes) {
+    html += '<details class="dp-asist-notes"><summary>📄 Dealer comments (offsite)</summary>'
+      + '<pre class="dp-asist-notes__body">' + _esc(notes.slice(0, 6000)) + '</pre></details>';
+  }
   html += '</div>';
   return html;
 }

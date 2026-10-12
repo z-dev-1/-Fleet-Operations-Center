@@ -769,16 +769,22 @@ async function scrapeServiceByUUID(uuid, partition) {
             logger.info('[Relay] scrapeServiceByUUID conv fetch failed for', uuid.slice(0,8), _ce2.message);
           }
 
-          // Phase 3.5 (secondary): if the offsite link is a Volvo/PACCAR ASIST
-          // service_request, chase it to the real Case/Fleet-Estimate so the
-          // secondary WR's Split View opens the right page like the primary does.
+          // Phase 3.5 (secondary): chase a Volvo/PACCAR ASIST service_request to
+          // its Case/Fleet-Estimate AND, for a direct /fleet/estimates/ link,
+          // open the estimate page to read its dealer comment thread — same as
+          // the primary scrapeUnitPage path (2026-10). Without this, Multi-WR /
+          // Planned units whose offsite link is a direct estimate URL (e.g.
+          // B62060) never captured dealer estimate comments on this path.
           let _secAsist = null;
           try {
-            if (_offsite && _offsite.url && SR_RE_MOD.test(_offsite.url)) {
-              logger.info('[Relay] scrapeServiceByUUID ASIST enrich for', uuid.slice(0,8), '|', _offsite.url.slice(0,80));
-              _secAsist = await enrichVolvoAsist(_offsite.url);
+            const _offUrl = _offsite && _offsite.url;
+            const _secIsSR  = _offUrl && SR_RE_MOD.test(_offUrl);
+            const _secIsEst = _offUrl && /(?:volvopg\.asist|paccarpg)\.decisiv\.net\/fleet\/estimates\//i.test(_offUrl);
+            if (_secIsSR || _secIsEst) {
+              logger.info('[Relay] scrapeServiceByUUID ASIST enrich for', uuid.slice(0,8), '|', (_secIsEst ? '(estimate) ' : '') + _offUrl.slice(0,80));
+              _secAsist = await enrichVolvoAsist(_offUrl);
               if (_secAsist && _secAsist.ok) {
-                logger.info('[Relay] scrapeServiceByUUID ASIST result | source:', _secAsist.source, '| url:', (_secAsist.bestUrl||'').slice(0,80));
+                logger.info('[Relay] scrapeServiceByUUID ASIST result | source:', _secAsist.source, '| url:', (_secAsist.bestUrl||'').slice(0,80), '| notes:', (_secAsist.offsiteText||'').length + 'ch');
               }
             }
           } catch (_ae2) {
@@ -797,6 +803,10 @@ async function scrapeServiceByUUID(uuid, partition) {
             asistSource:         (_finalOff && _finalOff.asistSource) || '',
             asistLabel:          (_finalOff && _finalOff.asistLabel)  || '',
             asistSrUrl:          (_finalOff && _finalOff.asistSrUrl)  || (_offsite && _offsite.url) || '',
+            // Carry the offsite dealer comment thread (estimate/SR) through so the
+            // secondary/Multi-WR path populates asistNotes just like the primary.
+            asistNotes:          (_secAsist && _secAsist.offsiteText) || '',
+            asistScrapedAt:      (_secAsist && _secAsist.scrapedAt)   || '',
             _serviceUUID: uuid,
             _cachedAt: Date.now(),
           });
@@ -1047,15 +1057,19 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
           let _asistEnrich = null;
           try {
             const _asistUrl = _finalOffsite && _finalOffsite.url;
-            // Fire for BOTH Volvo and PACCAR Decisiv service_request URLs.
-            // (2026-08-17: was Volvo-only; PACCAR uses the same Decisiv platform
-            // so the SR->Case->Estimate chase works for it too.)
-            const _isAsistSR = _asistUrl && /(?:volvopg\.asist|paccarpg)\.decisiv\.net\/service_requests\//i.test(_asistUrl);
-            const _prevSrc   = _finalOffsite && _finalOffsite.asistSource;
-            if (_isAsistSR && _prevSrc !== 'estimate') {
-              logger.info('[Relay] Phase3.5 ASIST enrich for', equipmentId, '|', _asistUrl.slice(0,80));
+            // Fire for BOTH Volvo and PACCAR Decisiv service_request URLs AND
+            // for direct /fleet/estimates/ URLs (common for PACCAR, where Relay
+            // stores the estimate link directly with no SR). enrichVolvoAsist
+            // now opens the estimate page and reads its dealer comment thread.
+            // (2026-08-17: PACCAR SRs; 2026-10: direct estimate URLs added so
+            // dealer comments posted only on the estimate — e.g. B62060's 10/12
+            // "part was damaged" — are captured, not just the Relay thread.)
+            const _isAsistSR  = _asistUrl && /(?:volvopg\.asist|paccarpg)\.decisiv\.net\/service_requests\//i.test(_asistUrl);
+            const _isAsistEst = _asistUrl && /(?:volvopg\.asist|paccarpg)\.decisiv\.net\/fleet\/estimates\//i.test(_asistUrl);
+            if (_isAsistSR || _isAsistEst) {
+              logger.info('[Relay] Phase3.5 ASIST enrich for', equipmentId, '|', (_isAsistEst ? '(estimate) ' : '') + _asistUrl.slice(0,80));
               _asistEnrich = await enrichVolvoAsist(_asistUrl);
-              logger.info('[Relay] Phase3.5 result | source:', _asistEnrich.source, '| url:', _asistEnrich.bestUrl.slice(0,80));
+              logger.info('[Relay] Phase3.5 result | source:', _asistEnrich.source, '| url:', _asistEnrich.bestUrl.slice(0,80), '| estThread:', (_asistEnrich.estimateComments||'').length + 'ch');
             }
           } catch (_ae) {
             logger.warn('[Relay] Phase3.5 ASIST enrich CATCH for', equipmentId, _ae.message);
@@ -1085,10 +1099,16 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
           // thread ("Asset Ready / repairs completed"), captured on the
           // service_request page (A1 fix). Prefer it.
           let _offsitePageText = (_asistEnrich && _asistEnrich.offsiteText) || '';
-          // Fallback re-scrape: if enrichment returned no text, scrape the
-          // SERVICE_REQUEST page (where the status thread lives) -- NOT the
-          // estimate page the chase ends on (which never carries the status
-          // note; scraping it was why asistNotes came back empty for B62281).
+          // Fallback re-scrape order: (1) the SERVICE_REQUEST page (where the
+          // status/Responses thread lives), then (2) the FLEET ESTIMATE page.
+          // History: estimate-page scraping was previously disabled (B62281 came
+          // back empty) because the old responsesText tiers missed the estimate
+          // comment container. That left PACCAR units whose offsite link is a
+          // DIRECT /fleet/estimates/ URL (no SR at all — e.g. B62060) with empty
+          // asistNotes, even though the dealer's latest comment IS on that page.
+          // Now re-enabled: enrichVolvoAsist opens the estimate page and the
+          // widened keyword tiers capture dealer wording ("part was damaged",
+          // "waiting for a new one"). We try SR first (richest), then estimate.
           const _srNotesUrl = (_finalOffsite && _finalOffsite.asistSrUrl) ||
                               (_asistEnrich && _asistEnrich.srUrl) ||
                               (_finalOffsite && _finalOffsite.url) || '';
@@ -1106,6 +1126,28 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
               }
             } catch (_oe) {
               logger.warn('[Relay] Phase3.6 SR status scrape failed for', equipmentId, _oe.message);
+            }
+          }
+          // (2) FLEET ESTIMATE page — the dealer comment thread. Fires when no SR
+          // text was captured and the offsite URL is a Decisiv estimate link.
+          const _estNotesUrl = (_finalOffsite && _finalOffsite.url) || '';
+          if (!_offsitePageText && _estNotesUrl && /decisiv\.net\/fleet\/estimates\//i.test(_estNotesUrl)) {
+            try {
+              logger.info('[Relay] Phase3.6 scraping ESTIMATE comment thread for', equipmentId, '|', _estNotesUrl.slice(0, 80));
+              const _estPage = await openAndScrape(_estNotesUrl, partitionForUrl(_estNotesUrl));
+              if (_estPage) {
+                const _estStatus = (_estPage.responsesText || '').trim();
+                const _estBody = (_estPage.pageText || '').trim();
+                _offsitePageText = (_estStatus
+                  ? (_estStatus + (_estBody ? '\n\n--- Estimate page ---\n' + _estBody : ''))
+                  : _estBody).slice(0, 8000);
+                if (_offsitePageText) logger.info('[Relay] Phase3.6 ESTIMATE thread captured for', equipmentId, '|', _offsitePageText.length + 'ch | hasComments:', !!_estStatus);
+                else logger.info('[Relay] Phase3.6 ESTIMATE page returned no text for', equipmentId);
+              } else {
+                logger.warn('[Relay] Phase3.6 ESTIMATE page open failed for', equipmentId, '|', _estNotesUrl.slice(0, 80));
+              }
+            } catch (_oe) {
+              logger.warn('[Relay] Phase3.6 ESTIMATE scrape failed for', equipmentId, _oe.message);
             }
           }
 
