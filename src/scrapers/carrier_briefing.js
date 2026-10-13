@@ -157,11 +157,18 @@ function gatherOperatorFacts(operator, cfg) {
   // lazily so this module stays testable without the orcha stack.
   let _canon; try { _canon = require('../orcha/canonical_state'); } catch (_) { _canon = null; }
 
+  // Carrier-facing redaction: strip personal names + dollar amounts from every
+  // field that reaches the carrier (this briefing posts to the carrier Slack).
+  // Keeps vendor/company names, dealer locations, case numbers, parts, dates.
+  // The stored row fields are NOT mutated — only the briefing facts are scrubbed
+  // — so the AI/reasoning layer still sees everything.
+  let _redact; try { _redact = require('../orcha/redact_sharing').redactForSharing; } catch (_) { _redact = (x) => x; }
+
   const down = rows.filter(_isDown).map((r) => {
     const code = domicileCode(r);
     const loc = addrMap[code] || '';
-    const reason = String(r.lifecycleReason || r.issueDetails || '').trim();
-    const latestUpdate = _latestTimelineLine(r);
+    const reason = _redact(String(r.lifecycleReason || r.issueDetails || '').trim());
+    const latestUpdate = _redact(_latestTimelineLine(r));
     // Canonical record (reconciled status/situation/next-step/stale). null for
     // units not yet reconciled — the raw reason/timeline below then stand alone.
     const canon = _canon ? _canon.getCanonical(r) : null;
@@ -172,7 +179,7 @@ function gatherOperatorFacts(operator, cfg) {
       // AI-written issue summary, then the raw relay Issue Details. De-duped so
       // it is NOT just a copy of the short lifecycle reason or the latest
       // timeline update already shown. "" when nothing distinct is on file.
-      issueSummary: _issueSummary(r, reason, latestUpdate),
+      issueSummary: _redact(_issueSummary(r, reason, latestUpdate)),
       // Latest repair-timeline entry (the day-by-day narrative; last line is
       // the most recent update). Falls back to the saved issue summary when no
       // timeline exists yet. "" when neither is on file (never guessed).
@@ -194,7 +201,7 @@ function gatherOperatorFacts(operator, cfg) {
     .map((r) => ({
       unit: String(r.equipmentId || '').trim(),
       score: Number(r.riskScore || 0),
-      reason: _riskReason(r),
+      reason: _redact(_riskReason(r)),
       domicile: domicileCode(r),
     }))
     .filter((f) => f.unit)
@@ -281,10 +288,11 @@ function buildBriefingPrompt(facts, cfg, ownerTag, dateStr) {
   lines.push('OPERATOR: ' + facts.operator + '.');
   lines.push('');
   lines.push('GROUNDED FACTS — use ONLY these; never invent a unit, number, location, date, or reason:');
+  lines.push('PRIVACY: these facts are already sanitized for the carrier. Do NOT add or infer any personal names or dollar amounts. Keep vendor/company names, dealer locations, case numbers, parts, and dates. If a fact reads oddly after sanitization, phrase around it — never reconstruct a removed name or price.');
 
   if (cfg.includeDown) {
     if (facts.downCount) {
-      lines.push('- Units currently DOWN (' + facts.downCount + '). For EACH, show the unit, its reason for being down, the domicile, a quick issue summary (when given), AND the latest update exactly as given (do not rephrase the latest update beyond light cleanup):');
+      lines.push('- Units currently DOWN (' + facts.downCount + '). For EACH, show the unit, its reason for being down, the domicile, a quick issue summary (when given), AND the latest update (light cleanup only — keep its meaning; do not add names or prices):');
       facts.down.forEach((d) => {
         const where = d.location ? (d.domicile + ' (' + d.location + ')') : d.domicile;
         let line = '    • ' + d.unit + (d.reason ? ' — ' + d.reason : '') + (where ? ' · ' + where : '');
@@ -331,6 +339,7 @@ function buildBriefingPrompt(facts, cfg, ownerTag, dateStr) {
   lines.push('');
   lines.push('MUST NOT:');
   lines.push('- Mention "Z", "Zila", "FAS", the internal requester, or any internal-only names/roles.');
+  lines.push('- Include ANY personal name (dealer advisors, our staff, anyone) or ANY dollar amount / price / cost. These are intentionally excluded from the carrier message.');
   lines.push('- Invent any unit, count, address, date, price, or reason not listed above.');
   lines.push('- Drop or summarize-away the per-unit detail — every down unit must show its reason, its quick issue summary (when one is given), AND its latest update; every flagged unit must show its score + reason. Length is fine; completeness matters more than brevity here.');
 

@@ -17,6 +17,7 @@ import { open as openWRModal }    from './wr-modal.js';
 import { open as openVendorReview } from './vendor-review-modal.js';
 import { open as openDealerWOModal } from './dealer-wo-modal.js';
 import toast         from '../components/toast.js';
+import { redactForSharing } from '../util/redact.js';
 
 let _panel    = null;
 let _unit     = null;
@@ -1835,7 +1836,12 @@ function renderRepairPane(unit){
   // parseConvo removed — AI timeline is the only source of truth
   _allConvoMsgs = [];
   // === ORCHA REPAIR TIMELINE (Source of Truth) ===
-  var aiTimeline = unit.repairTimeline || '';
+  // Carrier-facing backstop: the displayed timeline is the "official" status
+  // view, so scrub personal names + dollar amounts here too (the AI timeline
+  // already avoids them by construction; this catches any that slip through).
+  // Keeps vendor/company names, locations, case numbers, parts, dates. The raw
+  // "Dealer comments (offsite)" block (_renderAsistContent) is left untouched.
+  var aiTimeline = redactForSharing(unit.repairTimeline || '');
   var orchaNote = unit.savedNotes || '';
   var timelineHtml = '';
 
