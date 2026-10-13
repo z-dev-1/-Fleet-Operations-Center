@@ -120,9 +120,51 @@ function parseConversation(blob, opts) {
   // "Conversation" more than once). A real comment has prose; junk is labels.
   comments = comments.filter((c) => !_isOverviewJunk(c));
   if (!comments.length) return [];
+  // Normalize to OLDEST-FIRST by comment date. The Relay WR thread renders
+  // oldest-first (document order == chronological), but the Decisiv/ASIST
+  // estimate Notes feed renders NEWEST-first — so without this, parsed comments
+  // came back newest-first and every consumer that treats the LAST element as
+  // "most recent" (lastComment(), canonical _lastMeaningfulUpdate) surfaced the
+  // OLDEST note instead. Stable sort: comments whose dates are equal or
+  // unparseable keep their original document order, so a thread that's already
+  // chronological is left untouched.
+  comments = _sortOldestFirst(comments);
   // Newest-biased cap: keep the LAST `cap` comments (most recent exchange).
   if (comments.length > cap) comments = comments.slice(comments.length - cap);
   return comments;
+}
+
+// Parse a comment date string ("Oct 9, 2026 06:07 PM" or "10/12/26") to a
+// timestamp (ms). Returns NaN when it can't — those keep document order.
+function _parseCommentDate(d) {
+  const s = String(d == null ? '' : d).trim();
+  if (!s) return NaN;
+  const t = Date.parse(s);
+  if (!Number.isNaN(t)) return t;
+  // Numeric M/D/YY or M/D/YYYY (Date.parse handles most, but YY needs help).
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    let [, mo, da, yr] = m;
+    yr = yr.length === 2 ? 2000 + parseInt(yr, 10) : parseInt(yr, 10);
+    const dt = new Date(yr, parseInt(mo, 10) - 1, parseInt(da, 10));
+    if (!Number.isNaN(dt.getTime())) return dt.getTime();
+  }
+  return NaN;
+}
+
+// Stable chronological (oldest-first) sort. Equal/unparseable dates keep their
+// original relative order (decorate with index as tiebreaker).
+function _sortOldestFirst(comments) {
+  const decorated = comments.map((c, i) => ({ c, i, t: _parseCommentDate(c.date) }));
+  // If NO comment has a parseable date, don't reorder at all — trust document order.
+  if (!decorated.some((d) => !Number.isNaN(d.t))) return comments;
+  decorated.sort((a, b) => {
+    const at = Number.isNaN(a.t) ? Infinity : a.t;
+    const bt = Number.isNaN(b.t) ? Infinity : b.t;
+    if (at !== bt) return at - bt;      // older first
+    return a.i - b.i;                   // stable tiebreak
+  });
+  return decorated.map((d) => d.c);
 }
 
 // Core block parser: scan for the username → date → text → (share-type) pattern
