@@ -480,7 +480,12 @@ async function scrapeGarageList(url, equipmentId, partition) {
     const win = new BrowserWindow({
       show:        false,
       skipTaskbar: true,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, partition }
+      // Real painted viewport, offscreen (see note at the primary scrape
+      // window). Defensive hardening so lazy portal content can't silently
+      // fail to render in a hidden/unsized window.
+      width: 1400, height: 900, x: -4000, y: -4000,
+      paintWhenInitiallyHidden: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, partition, backgroundThrottling: false }
     });
 
     const done = (result) => {
@@ -710,7 +715,12 @@ async function scrapeServiceByUUID(uuid, partition) {
     let settled = false;
     const win = new BrowserWindow({
       show: false, skipTaskbar: true,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, partition }
+      // Real painted viewport, offscreen (see note at the primary scrape
+      // window). Defensive hardening so lazy portal content can't silently
+      // fail to render in a hidden/unsized window.
+      width: 1400, height: 900, x: -4000, y: -4000,
+      paintWhenInitiallyHidden: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, partition, backgroundThrottling: false }
     });
     const done = (data) => {
       if (settled) return;
@@ -910,7 +920,13 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
     const win = new BrowserWindow({
       show:        false,
       skipTaskbar: true,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, partition }
+      // Give the window a real, painted viewport (offscreen so it never
+      // flashes) — some vendor/portal pages gate lazy content rendering on a
+      // real paint, which a hidden/unsized window never gets. Mirrors the
+      // estimate-scrape fix (openAndScrapeEstimate). Defensive hardening.
+      width: 1400, height: 900, x: -4000, y: -4000,
+      paintWhenInitiallyHidden: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, partition, backgroundThrottling: false }
     });
 
     // Capture renderer console messages so we see the real JS error
