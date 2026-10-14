@@ -57,6 +57,10 @@ const REGISTRY = {
   operatorChannels: () => path.join(P.dataDir, 'operator-channels.json'),
   // Dedup ledger so a PM alert is fanned out to a carrier channel only once.
   pmAlertFanout:    () => path.join(P.dataDir, 'pm-alert-fanout.json'),
+  // Dedup ledger for the "unit ready for pickup → notify carrier" message
+  // (2026-10). See src/scrapers/ready_pickup_notify.js. Keyed by
+  // equipmentId + statusChangedAt so each distinct ready event is sent once.
+  readyPickupNotices: () => path.join(P.dataDir, 'ready-pickup-notices.json'),
   // Daily Carrier Briefing (2026-10). See src/scrapers/carrier_briefing.js.
   // Config shape: { enabled, sendTime:'HH:MM', timezone, includeDown,
   //   includeFlagged, includeActive, includeDomiciles, riskThreshold, tipEnabled }.

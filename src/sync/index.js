@@ -587,6 +587,28 @@ function createSyncEngine(ctx) {
             updatedAt: new Date().toISOString(),
             lastReconcileAt: Object.keys(_reconcileDecisions).length ? new Date().toISOString() : (prevCanon.lastReconcileAt || null),
           });
+
+          // Ready-for-pickup → notify the carrier/operator ONCE and ask them to
+          // decide pickup vs tow-back. Non-blocking, non-fatal: a cheap
+          // pre-filter avoids any work when nothing transitioned to ready this
+          // cycle, and the whole thing is fire-and-forget so it never delays the
+          // pushData below or throws into the sync.
+          try {
+            const readyNotify = require('../scrapers/ready_pickup_notify');
+            const anyFreshReady = Object.values(units).some(readyNotify._isFreshReady);
+            if (anyFreshReady) {
+              const slack = require('../scrapers/slack_send');
+              const { resolveOperatorEntry } = require('../scrapers/pm_alert_reply');
+              const deps = {
+                sendToChannel: slack.sendToChannel,
+                askOrcha: (p) => require('../orcha/relay').ask(p, {}),
+                resolveOperatorEntry,
+              };
+              Promise.resolve()
+                .then(() => readyNotify.notifyReadyUnits(units, deps))
+                .catch((e) => logger.warn('[canonical] ready-pickup notify error (non-fatal): ' + e.message));
+            }
+          } catch (e) { logger.warn('[canonical] ready-pickup hook error (non-fatal): ' + e.message); }
           // Mirror canonical fields onto the fleet rows (re-read + save so we
           // don't clobber any other post-sync writer). Overlay by equipmentId.
           const latest = store.load('fleetData', {});
