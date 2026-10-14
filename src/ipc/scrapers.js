@@ -223,14 +223,23 @@ function registerScrapersIPC(ctx) {
         logger.warn('Autofill timed out after 90s');
         done({ ok: false, message: 'Autofill timed out after 90 seconds -- AAP page may not have loaded, or the wizard reached an unexpected step.' });
       }, 90000);
+      // Guard so the engine is injected+run EXACTLY ONCE. The AAP wizard is a
+      // SPA; stepping through it (or an in-page section mount) can fire
+      // did-finish-load AGAIN while run() is still in progress. Without this
+      // guard that second event re-injected the engine and restarted it from
+      // STEP 1 -- an infinite loop that looked like "stuck", and left later
+      // area rows unfilled. 'settled' only flips after run() RETURNS, so it
+      // can't prevent a mid-run re-entry; this dedicated flag can.
+      let injected = false;
       aapWin.loadURL(url);
       aapWin.webContents.on('did-finish-load', async () => {
-        if (settled) return;
+        if (settled || injected) return;
         const curUrl = aapWin.isDestroyed() ? '' : aapWin.webContents.getURL();
         if (!/aap-na\.corp\.amazon\.com/i.test(curUrl)) {
           logger.info('[aap:autofill] Not on AAP yet (auth redirect?) -- waiting for next load...');
           return; // will fire again once the redirect chain settles
         }
+        injected = true; // from here on, ignore any further did-finish-load events
         try {
           const engineCode  = fs.readFileSync(ENGINE_FILE, 'utf8');
           const payloadJson = JSON.stringify(payload || {});

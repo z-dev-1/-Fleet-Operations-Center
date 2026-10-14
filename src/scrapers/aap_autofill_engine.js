@@ -754,24 +754,40 @@ const CreateWRAutofill = {
              if (p.areaPairs && p.areaPairs.length) {
                  const totalRows = p.areaPairs.filter(pair => pair.area).length;
 
-                 // Phase 1: click + (totalRows-1) times, wait for each new row
+                 // Phase 1: ADD ALL ROWS FIRST, then Phase 2 fills them. Nothing
+                 // is selected yet at this point, so the number of visible
+                 // "Enter a value..." comboboxes equals the number of Work-Area
+                 // rows -- we add "+" rows until that count reaches totalRows.
+                 //
+                 // Previously this added rows one-at-a-time with a fragile
+                 // count-grow wait and NO retry: a single dropped "+" click left
+                 // fewer rows than area pairs, so Phase 2's flat offset ran off the
+                 // end and later rows logged "input not found" (the "only 2 of 4
+                 // fill" bug). Now we loop-until-count-reached with retries.
+                 const _rowCount = () => Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
+                 const _findAddBtn = () => document.querySelector('BUTTON.css-1sm4msn') ||
+                     Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && b.querySelector('svg') && !(b.innerText || '').trim());
                  if (totalRows > 1) {
-                     for (let r = 0; r < totalRows - 1; r++) {
-                         const currentCount = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
-                         const addBtn = document.querySelector('BUTTON.css-1sm4msn') ||
-                             Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && b.querySelector('svg') && !(b.innerText || '').trim());
-                         if (addBtn) {
-                             addBtn.click();
-                             await this.waitFor(() => {
-                                 const now = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
-                                 return now > currentCount ? true : null;
-                             }, 4000, 80);
-                             // Give the newly-added row time to fully mount before
-                             // adding the next one — rushing this is what caused some
-                             // rows to be dropped on WRs with several area pairs.
-                             await this.sleep(500);
+                     const maxAttempts = (totalRows - 1) * 3 + 2;
+                     let attempts = 0;
+                     while (_rowCount() < totalRows && attempts < maxAttempts) {
+                         attempts++;
+                         const before = _rowCount();
+                         const addBtn = _findAddBtn();
+                         if (!addBtn) {
+                             this.log('Area rows: (+) add-row button not found (have ' + before + '/' + totalRows + ', attempt ' + attempts + ')');
+                             await this.sleep(400);
+                             continue;
                          }
+                         addBtn.click();
+                         // Wait for the row count to actually grow before adding more.
+                         const grew = await this.waitFor(() => (_rowCount() > before ? true : null), 4000, 80);
+                         if (!grew) this.log('Area rows: row did not appear after (+) click (have ' + _rowCount() + '/' + totalRows + ', attempt ' + attempts + ')');
+                         // Let the new row fully mount before the next click.
+                         await this.sleep(500);
                      }
+                     this.log('Area rows: ready with ' + _rowCount() + '/' + totalRows + ' row(s) before fill');
+                     if (_rowCount() < totalRows) this.log('Area rows: WARNING - could not create all ' + totalRows + ' rows; later pairs may not fill');
                  }
 
                   // Phase 2: fill all rows
