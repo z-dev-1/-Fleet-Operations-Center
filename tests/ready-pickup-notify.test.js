@@ -105,6 +105,29 @@ describe('notifyReadyUnits', () => {
     expect(deps.sendToChannel).toHaveBeenCalledTimes(2);
   });
 
+  it('does NOT notify when the canonical record already carries carrierNotifiedAt (flap-proof)', async () => {
+    // The canonical record carries carrierNotifiedAt forward across cycles even
+    // while the raw status flaps. If it's set, we must never re-message.
+    const { deps } = makeDeps();
+    const units = {
+      '322599': { equipmentId: '322599', status: 'ready_for_pickup', previousStatus: 'down', statusChangedAt: '2026-10-14T17:37:24.675Z', carrierNotifiedAt: '2026-10-14T16:18:00.000Z' },
+    };
+    const res = await readyNotify.notifyReadyUnits(units, deps);
+    expect(res.notified).toBe(0);
+    expect(deps.sendToChannel).not.toHaveBeenCalled();
+  });
+
+  it('sets carrierNotifiedAt (via markCarrierNotified) after a successful send', async () => {
+    const marked = [];
+    const { deps } = makeDeps({ markCarrierNotified: (id, at) => marked.push({ id, at }) });
+    const rec = { equipmentId: '322599', status: 'ready_for_pickup', previousStatus: 'in_repair', statusChangedAt: '2026-10-14T13:00:00Z' };
+    const res = await readyNotify.notifyReadyUnits({ '322599': rec }, deps);
+    expect(res.notified).toBe(1);
+    expect(marked).toHaveLength(1);
+    expect(marked[0].id).toBe('322599');
+    expect(rec.carrierNotifiedAt).toBeTruthy();      // in-memory record stamped too
+  });
+
   it('does NOT re-notify when the status merely FLAPS (ready→down→ready) within the cooldown', async () => {
     // Real-world bug: the upstream status oscillated ready_for_pickup -> down ->
     // ready_for_pickup across adjacent sync cycles (~80 min apart). The pure

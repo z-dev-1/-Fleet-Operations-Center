@@ -197,6 +197,24 @@ async function notifyReadyUnits(units, deps, log) {
     ? deps.loadLedger : () => { try { return store.load(LEDGER_KEY, {}) || {}; } catch (_) { return {}; } };
   const saveLedger = (deps && typeof deps.saveLedger === 'function')
     ? deps.saveLedger : (l) => { try { store.save(LEDGER_KEY, l); } catch (_) {} };
+  // Persist the carrierNotifiedAt flag back into the canonicalState store so it
+  // survives to the next sync cycle (the primary, flap-proof dedup). Injectable
+  // for tests; defaults to a store-backed read-modify-write on canonicalState.
+  const markCarrierNotified = (deps && typeof deps.markCarrierNotified === 'function')
+    ? deps.markCarrierNotified
+    : (equipmentId, at) => {
+        try {
+          const cs = store.load('canonicalState', {}) || {};
+          const u = cs.units || {};
+          const key = Object.keys(u).find((k) => String(k).toLowerCase() === String(equipmentId).toLowerCase());
+          if (key && u[key]) {
+            u[key].carrierNotifiedAt = at;
+            cs.units = u;
+            store.save('canonicalState', cs);
+          }
+        } catch (_) {}
+      };
+  if (deps && typeof deps.markCarrierNotified !== 'function') deps.markCarrierNotified = markCarrierNotified;
   const out = { considered: 0, notified: 0, skipped: 0 };
   if (!units || typeof units !== 'object') return out;
   if (typeof sendToChannel !== 'function' || typeof askOrcha !== 'function' || typeof resolveOperatorEntry !== 'function') {
@@ -217,6 +235,15 @@ async function notifyReadyUnits(units, deps, log) {
     // event never twice.
     const dedupKey = String(equipmentId).toLowerCase() + ':' + (rec.statusChangedAt || '');
     if (ledger[dedupKey]) { out.skipped++; continue; }
+
+    // CANONICAL FLAG (primary, flap-proof dedup): once we've notified the
+    // carrier for this ready episode, the canonical record carries
+    // carrierNotifiedAt forward across cycles — even while the raw status flaps
+    // ready->down->ready. If it's already set, we've handled this episode.
+    if (rec.carrierNotifiedAt) {
+      doLog('[ReadyPickup] ' + equipmentId + ': canonical carrierNotifiedAt already set (' + rec.carrierNotifiedAt + ') — skipping');
+      out.skipped++; continue;
+    }
 
     // COOLDOWN GUARD (fixes status-flapping re-sends): if we already notified
     // this SAME unit for a ready EVENT whose status-change time is within the
@@ -272,8 +299,16 @@ async function notifyReadyUnits(units, deps, log) {
     // Record the posted message ts + channel so the inbound reply handler can
     // correlate the carrier's reply (thread_ts === ts) back to this unit, and
     // 'awaitingReply' so it only answers until a reply is handled.
+    // Stamp the canonical record (primary, flap-proof dedup) and persist it so
+    // the flag survives to the next cycle. Mutate the in-memory record too so a
+    // duplicate in THIS same pass is also guarded.
+    const notifiedAt = new Date().toISOString();
+    rec.carrierNotifiedAt = notifiedAt;
+    try { if (typeof deps.markCarrierNotified === 'function') deps.markCarrierNotified(equipmentId, notifiedAt); }
+    catch (e) { doLog('[ReadyPickup] ' + equipmentId + ': canonical flag persist failed (' + e.message + ')'); }
+
     ledger[dedupKey] = {
-      at: new Date().toISOString(),
+      at: notifiedAt,
       statusChangedAt: rec.statusChangedAt || null,  // event time, for cooldown dedup across flapping
       channelId: entry.channelId,
       ts: postedTs,

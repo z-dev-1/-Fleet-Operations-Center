@@ -387,6 +387,11 @@ function computeCanonical(row) {
     previousStatus: null,
     statusChangedAt: null,
     statusChangeReason: '',
+    // Set by ready_pickup_notify after it messages the carrier that the unit is
+    // ready for pickup. Carried across cycles by diffAgainstPrior and CLEARED
+    // when the unit leaves ready_for_pickup — so the carrier is notified exactly
+    // ONCE per ready episode, no matter how much the raw status flaps.
+    carrierNotifiedAt: null,
     history: [],
     // Cheap change-detection proxy for next cycle (not displayed): length of the
     // relay conversation, so detectChangedUnits can see a new comment landed.
@@ -623,6 +628,15 @@ function diffAgainstPrior(record, prior) {
     if (hist.length > _HISTORY_CAP) hist.splice(0, hist.length - _HISTORY_CAP);
   }
   record.history = hist;
+
+  // Carrier-notify episode flag: carry the prior value forward ALWAYS, so once
+  // we've messaged the carrier that a unit is ready we never message again for
+  // the same episode — even while the raw status FLAPS (ready -> down -> ready
+  // across adjacent cycles). It is NOT cleared on a single non-ready reading
+  // (that would reintroduce the flapping double-send); the notifier's event-time
+  // cooldown handles when a genuinely NEW ready episode (days later) may notify
+  // again. Set by ready_pickup_notify after a successful send.
+  record.carrierNotifiedAt = (record.carrierNotifiedAt || prior.carrierNotifiedAt || null);
   return record;
 }
 
