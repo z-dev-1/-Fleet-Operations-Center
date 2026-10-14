@@ -386,6 +386,38 @@ function _applyFormSnapshot(s) {
   _wireTitleCount();
 }
 
+// Build the TOW work-order title with the correct DIRECTION. The AI already
+// parses towDirection + pickup/destination from the user's words; the old
+// template hardcoded "TOW <unit> to <dealer>" and ignored it, so a return tow
+// ("towed back FROM dealer TO home yard") came out backwards. Rules:
+//   return-to-yard : TOW <unit> from <pickup/dealer> to <destination/home yard>
+//   yard-to-yard   : TOW <unit> from <origin> to <destination>
+//   to-dealer      : TOW <unit> to <dealer>            (default)
+// Falls back cleanly to "TOW <unit> to <dealer>" when a name is missing.
+// Exported for unit testing.
+function _buildTowTitle(unit, plan, dealerName) {
+  const eq = (unit && (unit.equipmentId || unit.id)) || '';
+  const dir = (plan && plan.towDirection) || 'to-dealer';
+  const homeYard = (plan && plan.towDestName) || (unit && (unit.domicileSite || unit.site)) || '';
+  const pickup = (plan && plan.towPickupName) || dealerName || '';
+  const dest = (plan && plan.towDestName) || '';
+  let title;
+  if (dir === 'return-to-yard') {
+    // Unit is at the dealer; bring it home. Pickup = dealer, dest = home yard.
+    const from = pickup || dealerName || 'dealer';
+    const to = homeYard || 'home yard';
+    title = 'TOW ' + eq + ' from ' + from + ' to ' + to;
+  } else if (dir === 'yard-to-yard') {
+    const from = pickup || 'yard';
+    const to = dest || homeYard || 'yard';
+    title = 'TOW ' + eq + ' from ' + from + ' to ' + to;
+  } else {
+    // to-dealer (default): unit goes TO the dealer.
+    title = 'TOW ' + eq + ' to ' + (dealerName || dest || 'dealer');
+  }
+  return title.replace(/\s{2,}/g, ' ').trim().slice(0, 90);
+}
+
 // Build the two tabs' initial field snapshots from a tow plan + base form
 // state (whatever AI Fill / the user has typed so far). Mirrors the vendor
 // and title rules from _buildTowPayloads, but as EDITABLE form snapshots.
@@ -406,7 +438,7 @@ function _buildTabSnapshots(baseSnapshot) {
   repair.towWrapVisible = false;
 
   const tow = { ...baseSnapshot };
-  tow.title = ('TOW ' + (unit.equipmentId || unit.id || '') + ' to ' + dealerName).slice(0, 90);
+  tow.title = _buildTowTitle(unit, plan, dealerName);
   tow.vendor = rgIntegrated ? dealerName : (baseSnapshot.vendor || '');
   tow.areaPairs = [{ area: 'TOW', subcategory: 'MECHANICAL ISSUE' }];
   tow.urgent = true;
@@ -495,6 +527,9 @@ function _collectPayload() {
     towFromCity:   (_el('wr-tow-from-city')||{}).value||'',
     towFromState:  (_el('wr-tow-from-state')||{}).value||'',
     towFromZip:    (_el('wr-tow-from-zip')||{}).value||'',
+    // Tow direction (from the AI tow plan) so the submitted unit-location can
+    // reflect where the unit actually is (dealer on a return tow, not home yard).
+    towDirection:  (_towPlan && _towPlan.towDirection) || '',
   };
 }
 
@@ -579,6 +614,9 @@ async function _submitActiveTab(btn) {
     domicile: unit.site || unit.domicileSite || '',
     towStreet: snap.towStreet, towCity: snap.towCity, towState: snap.towState, towZip: snap.towZip,
     towFromStreet: snap.towFromStreet, towFromCity: snap.towFromCity, towFromState: snap.towFromState, towFromZip: snap.towFromZip,
+    // Tow direction drives the submitted unit-location (return-from-dealer =>
+    // unit is at the dealer/pickup, not the home yard). Only the tow tab has one.
+    towDirection: (key === 'tow' && _towPlan) ? (_towPlan.towDirection || 'to-dealer') : '',
     copiedFromWorkRequestId: key === 'tow' ? ((st.submitted.repair && st.submitted.repair.workRequestId) || null) : null,
     autoSubmit: true,
   };
@@ -673,6 +711,9 @@ async function _submitOneTabSilently(key) {
     domicile: unit.site || unit.domicileSite || '',
     towStreet: snap.towStreet, towCity: snap.towCity, towState: snap.towState, towZip: snap.towZip,
     towFromStreet: snap.towFromStreet, towFromCity: snap.towFromCity, towFromState: snap.towFromState, towFromZip: snap.towFromZip,
+    // Tow direction drives the submitted unit-location (return-from-dealer =>
+    // unit is at the dealer/pickup, not the home yard). Only the tow tab has one.
+    towDirection: (key === 'tow' && _towPlan) ? (_towPlan.towDirection || 'to-dealer') : '',
     copiedFromWorkRequestId: key === 'tow' ? ((st.submitted.repair && st.submitted.repair.workRequestId) || null) : null,
     autoSubmit: true,
   };
@@ -1408,7 +1449,11 @@ async function _runAIAssist() {
     + '- DEFAULT (no dealer/vendor named at all): hasRepair=true, isTow=false, vendor="" (empty — AAP auto-assigns the primary/default vendor). ONE work order. This is the common case: the user just states the problem.\n'
     + '- THE MOMENT A SPECIFIC DEALER/VENDOR IS NAMED as where the unit should go (e.g. "send to gabriellis", "needs to go to Allegiance Scranton", "to the pete store", "take it to <dealer>"): that MEANS the physical unit must be moved there -> isTow=true, towDirection="to-dealer", vendor = the EXACT dealer name from VENDOR BOOK. Naming a dealer as a destination IS the tow signal — the user does not need to separately say the word "tow".\n'
     + '- hasRepair=true whenever an actual mechanical problem/symptom is stated (e.g. "check engine light", "brakes", "won\'t start", "coolant leak"). Naming a dealer destination does NOT remove the repair — "unit has check engine light, needs to go to gabriellis from ABE40" = hasRepair=true AND isTow=true (repair WR + tow WR, both created).\n'
-    + '- "return tow from dealer to <SITE>" / "bring back to <SITE>/yard" -> isTow=true, towDirection="return-to-yard": pickup=dealer, destination=domicile.\n'
+    + '- DIRECTION IS CRITICAL — read the user\'s words and set towDirection + pickup/destination to match EXACTLY what they said (do not assume to-dealer):\n'
+    + '    * TO DEALER ("send/take/bring TO <dealer>", "needs to go to <dealer>"): towDirection="to-dealer", pickup=home domicile (<SITE>), destination=the named dealer.\n'
+    + '    * BACK TO YARD ("return tow from dealer", "bring/tow it BACK to <SITE>/home/yard", "from <dealer> to <SITE>", "pick up from dealer"): towDirection="return-to-yard", pickup=the DEALER (where the unit is now), destination=the home yard/<SITE>.\n'
+    + '    * BETWEEN YARDS ("from <SITE_A> to <SITE_B>", "move from one yard to another", neither end is a dealer): towDirection="yard-to-yard", pickup=the origin yard, destination=the target yard.\n'
+    + '    The words "from X to Y" mean pickup=X, destination=Y — honor that literally. "back"/"return" always means the unit is currently at the dealer and is coming home.\n'
     + '- Only the GENERIC phrase "send to dealer" with NO specific name and NO destination (just saying the make should decide) is NOT a tow — leave vendor by make convention below, isTow=false:\n'
     + '    Volvo/Mack\u2192"Volvo (ASIST)", Kenworth\u2192"Kenworth (PACCAR)", Peterbilt\u2192"Peterbilt (PACCAR)", Freightliner\u2192"Freightliner (DAIMLER)"\n'
     + '- Safety/brakes/fire \u2192 urgent=true\n'
@@ -1421,7 +1466,7 @@ async function _runAIAssist() {
     + '- COMMENTS when isTow=false (the normal case): describe what we need from the vendor to fix the problem. NO tow line.\n\n'
     + 'VALID AREAS/SUBCATEGORIES (use EXACT values):\n' + areaList + '\n\n'
     + 'Respond ONLY with valid JSON:\n'
-    + '{"title":"<=90 char summary","issue":"2-3 sentence description","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","urgent":false,"comments":"what we need (+ tow line only if isTow)","hasRepair":true,"isTow":false,"towDirection":"to-dealer|return-to-yard|","towPickup":{"name":"","street":"","city":"","state":"","zip":""},"towDestination":{"name":"","street":"","city":"","state":"","zip":""}}\n'
+    + '{"title":"<=90 char summary","issue":"2-3 sentence description","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","urgent":false,"comments":"what we need (+ tow line only if isTow)","hasRepair":true,"isTow":false,"towDirection":"to-dealer|return-to-yard|yard-to-yard|","towPickup":{"name":"","street":"","city":"","state":"","zip":""},"towDestination":{"name":"","street":"","city":"","state":"","zip":""}}\n'
     + 'areaPairs can have 1-4 pairs (the repair components). vendor: EXACT name from VENDOR BOOK if a dealer is named, else empty. Remember: naming ANY specific dealer as destination = isTow=true, no "tow" keyword required.';
 
   try {
@@ -1529,8 +1574,10 @@ async function _runAIAssist() {
                 || all.find(c => c.type === 'vendor' && (c.name || '').trim().toLowerCase().includes(key))
                 || all.find(c => c.type === 'vendor' && key.includes((c.name || '').trim().toLowerCase()) && (c.name || '').length > 4);
         }
-        _towPlan = { isTow: true, hasRepair: ai.hasRepair !== false, towDirection: ai.towDirection || 'to-dealer', dealer, dealerName };
-      } catch (_) { _towPlan = { isTow: true, hasRepair: ai.hasRepair !== false, towDirection: ai.towDirection || 'to-dealer', dealer: null, dealerName: ai.vendor || '' }; }
+        _towPlan = { isTow: true, hasRepair: ai.hasRepair !== false, towDirection: ai.towDirection || 'to-dealer', dealer, dealerName,
+          towPickupName: (ai.towPickup && ai.towPickup.name) || '', towDestName: (ai.towDestination && ai.towDestination.name) || '' };
+      } catch (_) { _towPlan = { isTow: true, hasRepair: ai.hasRepair !== false, towDirection: ai.towDirection || 'to-dealer', dealer: null, dealerName: ai.vendor || '',
+          towPickupName: (ai.towPickup && ai.towPickup.name) || '', towDestName: (ai.towDestination && ai.towDestination.name) || '' }; }
       // Visible signal that Submit will create MULTIPLE work orders.
       const _rgInt = _isRgIntegrated(_towPlan.dealer);
       const _dn = _towPlan.dealerName || '(none)';
