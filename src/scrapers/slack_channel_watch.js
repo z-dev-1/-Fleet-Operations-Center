@@ -821,6 +821,21 @@ async function pollChannelsOnce(log) {
       } catch (e) {
         doLog(`[SlackWatch] ${ch.name}: PM-alert scan error: ${e.message}`);
       }
+      // Ready-for-pickup REPLY handling (additive): if we posted a
+      // "unit ready — pickup or tow?" message to this channel and the carrier
+      // has replied in that thread, interpret pickup-vs-tow and acknowledge.
+      // Gated internally on the readyPickupNotices ledger (cheap no-op when
+      // there are no pending notices for this channel). Isolated + non-fatal.
+      try {
+        const readyNotify = require('./ready_pickup_notify');
+        await readyNotify.handleReadyReplies(
+          ch,
+          { readThreadReplies, sendToChannel, askOrcha, myUserId, resolveOperatorEntry: require('./pm_alert_reply').resolveOperatorEntry },
+          doLog
+        );
+      } catch (e) {
+        doLog(`[SlackWatch] ${ch.name}: ready-pickup reply scan error: ${e.message}`);
+      }
     }
 
     if (_earlyMode === 'justme') {

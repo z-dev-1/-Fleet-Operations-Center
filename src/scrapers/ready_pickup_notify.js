@@ -53,17 +53,51 @@ function _isFreshReady(rec) {
     && rec.previousStatus !== 'ready_for_pickup');
 }
 
-// Pull a short "freshest update" line (the dealer's ready message) + any ASIST
-// case reference from the canonical record / fleet row, for message context.
+// Derive the DEALER/VENDOR the unit is physically AT (its current location),
+// so the carrier knows where to pick it up / where it's being towed from.
+// Priority: dealerName field → subVendor field → the dealer name embedded in
+// the asistNotes comment header ("<Advisor> - <Dealer Name - Location> (Make)
+// (Role) to …") → vendor. 'asistLabel' is intentionally NOT used as a location
+// because it is just "Fleet Estimate | <case#>", not a place.
+function _deriveDealerLocation(row) {
+  if (!row) return '';
+  const direct = String(row.dealerName || '').trim();
+  if (direct) return direct;
+  const sub = String(row.subVendor || '').trim();
+  // Only trust subVendor if it isn't an obviously truncated stub.
+  if (sub && !/\.\.\.$/.test(sub) && sub.length >= 4) return sub;
+  // Extract from the asistNotes comment header: the first "<name> - <Dealer -
+  // Location> (Company) (Role) to" line. Capture the segment between the first
+  // " - " and the " (…) to" that follows.
+  const notes = String(row.asistNotes || '');
+  const m = notes.match(/[A-Za-z][\w.'-]*(?:\s+[A-Za-z][\w.'-]*)*\s+-\s+([A-Z][^\n(]*?)\s*\([^)]*\)\s*(?:\([^)]*\)\s*)?to\b/);
+  if (m && m[1]) return m[1].trim();
+  // Fall back to the truncated subVendor (better than nothing) then vendor.
+  if (sub) return sub.replace(/\.\.\.$/, '').trim();
+  return String(row.vendor || '').trim();
+}
+
+// Pull a short "freshest update" line (the dealer's ready message), the ASIST
+// case reference, the dealer/vendor LOCATION, and the offsite estimate URL from
+// the canonical record / fleet row, for message context.
 function _readyContext(rec, row) {
   const lmu = rec && rec.lastMeaningfulUpdate;
   const updateText = (lmu && lmu.text) || (row && (row.issueSummary || row.lifecycleReason)) || '';
   const blob = [updateText, row && row.asistNotes, row && row.asistLabel].filter(Boolean).join(' ');
   const caseMatch = String(blob).match(/\b(?:ASIST\s*case|case)\s*#?\s*(\d{6,12})\b/i)
-    || String(blob).match(/\bestimates?\/(\d{6,12})\b/i);
+    || String(blob).match(/\bestimates?\/(\d{6,12})\b/i)
+    || String((row && row.offsiteShopEvent) || '').match(/\b(\d{6,12})\b/);
   const asistCase = caseMatch ? caseMatch[1] : '';
-  const dealer = (row && (row.dealerName || row.asistLabel || row.vendor)) || '';
-  return { updateText: String(updateText).slice(0, 300), asistCase, dealer };
+  const dealerLocation = _deriveDealerLocation(row);
+  const offsiteUrl = (row && (row.offsiteShopEventUrl || row.asistSrUrl || row.savedOffsiteUrl)) || '';
+  return {
+    updateText: String(updateText).slice(0, 300),
+    asistCase,
+    // Keep `dealer` for backward compat; `dealerLocation` is the preferred field.
+    dealer: dealerLocation,
+    dealerLocation,
+    offsiteUrl,
+  };
 }
 
 // Build the AI prompt. Intent: tell the carrier their unit is repair-complete /
@@ -72,9 +106,10 @@ function buildReadyPrompt(unit, ctx, ownerTag) {
   const line = (k, v) => (v ? '- ' + k + ': ' + v : '');
   const details = [
     line('Unit / Asset ID', unit.equipmentId || unit.id),
-    line('Domicile / Home yard', unit.domicileSite || unit.domicile),
-    line('Dealer / Service location', ctx.dealer),
+    line('Home yard (domicile)', unit.domicileSite || unit.domicile),
+    line('CURRENT LOCATION — vendor/dealer the unit is AT', ctx.dealerLocation || ctx.dealer),
     line('ASIST case', ctx.asistCase),
+    line('Estimate / case link', ctx.offsiteUrl),
     line('Latest dealer update', ctx.updateText),
     line('Make', unit.make),
   ].filter(Boolean).join('\n');
@@ -86,15 +121,16 @@ function buildReadyPrompt(unit, ctx, ownerTag) {
     details,
     '',
     'The message MUST:',
-    '- State clearly that the unit is repair-complete / ready for pickup at the dealer/service location (name it if given).',
-    '- Reference the ASIST case number if one is given.',
+    '- State clearly that the unit is repair-complete / ready for pickup.',
+    '- Tell them WHERE the unit currently is — name the vendor/dealer location it is sitting at (the "CURRENT LOCATION" above). This is required so they know where to go or where it will be towed from.',
+    '- Reference the ASIST case number and include the estimate/case link if given.',
     '- ASK the carrier to decide and reply with ONE of: (a) they will PICK IT UP themselves, or (b) they want it TOWED BACK to their home yard. Make this choice explicit.',
     '- Be concise (2–4 short sentences), courteous, and partner-appropriate.',
     ownerTag ? ('- Begin by addressing the owner using EXACTLY this token so Slack tags them: ' + ownerTag) : '',
     '',
     'The message MUST NOT:',
     '- Mention "Z", "Zila", "FAS", the internal requester, or any internal-only names/roles.',
-    '- Invent a date, price, work order number, or any detail not provided above.',
+    '- Invent a date, price, work order number, location, or any detail not provided above.',
   ].filter(Boolean).join('\n');
 }
 
@@ -102,10 +138,12 @@ function buildReadyPrompt(unit, ctx, ownerTag) {
 // still told rather than getting nothing.
 function _fallbackMessage(unit, ctx, ownerTag) {
   const id = unit.equipmentId || unit.id || 'the unit';
-  const where = ctx.dealer ? (' at ' + ctx.dealer) : '';
+  const loc = ctx.dealerLocation || ctx.dealer;
+  const where = loc ? (' It is currently at ' + loc + '.') : '';
   const cs = ctx.asistCase ? (' (ASIST case ' + ctx.asistCase + ')') : '';
+  const link = ctx.offsiteUrl ? (' ' + ctx.offsiteUrl) : '';
   return (ownerTag ? ownerTag + ' ' : '') +
-    ':white_check_mark: Unit ' + id + ' has completed repairs and is ready for pickup' + where + cs + '. ' +
+    ':white_check_mark: Unit ' + id + ' has completed repairs and is ready for pickup' + cs + '.' + where + ' :round_pushpin:' + link + ' ' +
     ':truck: Please let us know whether you will pick it up, or if you would like it towed back to your home yard.';
 }
 
@@ -190,15 +228,29 @@ async function notifyReadyUnits(units, deps, log) {
     try { message = await _writeMessage(askOrcha, unit, ctx, ownerTag, doLog); }
     catch (e) { doLog('[ReadyPickup] ' + equipmentId + ': message build failed (' + e.message + ')'); out.skipped++; continue; }
 
+    let postedTs = null;
     try {
-      await sendToChannel(entry.channelId, message); // top-level (no thread)
-      doLog('[ReadyPickup] ' + equipmentId + ': notified ' + operator + ' channel ' + entry.channelId);
+      const res = await sendToChannel(entry.channelId, message); // top-level (no thread)
+      postedTs = (res && res.ts) || null;
+      doLog('[ReadyPickup] ' + equipmentId + ': notified ' + operator + ' channel ' + entry.channelId + (postedTs ? ' (ts ' + postedTs + ')' : ''));
     } catch (e) {
       doLog('[ReadyPickup] ' + equipmentId + ': send failed (' + e.message + ')');
       out.skipped++; continue; // do NOT record dedup on a failed send
     }
 
-    ledger[dedupKey] = { at: new Date().toISOString(), channelId: entry.channelId, unit: equipmentId, operator };
+    // Record the posted message ts + channel so the inbound reply handler can
+    // correlate the carrier's reply (thread_ts === ts) back to this unit, and
+    // 'awaitingReply' so it only answers until a reply is handled.
+    ledger[dedupKey] = {
+      at: new Date().toISOString(),
+      channelId: entry.channelId,
+      ts: postedTs,
+      unit: equipmentId,
+      operator,
+      dealerLocation: ctx.dealerLocation || ctx.dealer || '',
+      awaitingReply: !!postedTs,   // can only track a reply if we know the ts
+      answeredReplyTs: null,
+    };
     out.notified++;
   }
 
@@ -213,11 +265,153 @@ async function notifyReadyUnits(units, deps, log) {
   return out;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// INBOUND: the carrier replies in the ready-pickup thread (pickup vs tow-back).
+// Modeled on the PM-alert auto-reply (slack_channel_watch _pollPmAlertChannel +
+// pm_alert_reply.handleTaggedPmAlert): read the thread, let the AI interpret the
+// carrier's decision, post an acknowledgment in-thread. The carrier reply does
+// NOT tag us — we correlate by thread_ts === the ready message's ts (stored in
+// the ledger), so we only look at threads under messages we posted.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Prompt: given our ready-pickup message context + the carrier's reply text,
+// classify intent (pickup | tow-back | unclear) and write a short, professional
+// acknowledgment. Same guardrails: no Z/Zila/FAS, never invent.
+function buildReplyPrompt(entry, carrierReplyText, ownerTag) {
+  return [
+    'You are replying IN A SLACK THREAD to a carrier/operator partner who was told their unit finished repairs and is ready for pickup, and was asked to choose: they PICK IT UP themselves, or they want it TOWED BACK to their home yard. Read their reply and respond. Write ONLY the reply text — no preamble, no JSON, no markdown headers. Keep it 1–2 short sentences, professional, with at most one tasteful emoji.',
+    '',
+    'CONTEXT (use only what is given; never invent anything):',
+    '- Unit / Asset ID: ' + (entry.unit || ''),
+    entry.dealerLocation ? ('- Current location (vendor/dealer the unit is at): ' + entry.dealerLocation) : '',
+    '',
+    'THE CARRIER\'S REPLY:',
+    '"' + String(carrierReplyText || '').slice(0, 500) + '"',
+    '',
+    'DECIDE and reply:',
+    '- If they said they will PICK IT UP themselves: confirm, thank them, and (if a location is known) remind them it is at that location.',
+    '- If they want it TOWED BACK to their yard: confirm that a tow back to their home yard will be arranged.',
+    '- If their reply is UNCLEAR or asks something else: briefly ask them to confirm which they prefer — pickup themselves, or a tow back.',
+    ownerTag ? ('- You may address them with this token if natural: ' + ownerTag) : '',
+    '',
+    'MUST NOT: mention "Z", "Zila", "FAS", the internal requester, or invent a date/price/ETA/location not given above.',
+  ].filter(Boolean).join('\n');
+}
+
+async function _writeReply(askOrcha, entry, carrierReplyText, ownerTag, doLog) {
+  const prompt = buildReplyPrompt(entry, carrierReplyText, ownerTag);
+  let reply = '';
+  for (let attempt = 1; attempt <= AI_ATTEMPTS && !reply; attempt++) {
+    try {
+      const ai = await Promise.race([
+        askOrcha(prompt),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), AI_ATTEMPT_MS)),
+      ]);
+      reply = (ai && ai.text) ? String(ai.text).trim() : (typeof ai === 'string' ? ai.trim() : '');
+    } catch (e) {
+      doLog('[ReadyPickup] reply AI attempt ' + attempt + '/' + AI_ATTEMPTS + ' failed (' + e.message + ')');
+    }
+    if (!reply && attempt < AI_ATTEMPTS) await new Promise((r) => setTimeout(r, 1500));
+  }
+  if (!reply) reply = 'Thanks for the update — got it. Please confirm whether you will pick the unit up or would like it towed back to your yard, and we will take it from there.';
+  return reply;
+}
+
+// Does a thread reply look like it's FROM the carrier (not our own bot post)?
+// Our posts tag the owner and come from the authed user; a carrier reply is a
+// different user and is not our ready message itself.
+function _isCarrierReply(m, readyTs, myUserId) {
+  if (!m || !m.ts) return false;
+  if (m.ts === readyTs) return false;                 // the ready message itself
+  if (myUserId && String(m.userId || m.user || '') === String(myUserId)) return false; // our own reply
+  const t = String(m.text || '').trim();
+  if (!t) return false;
+  return true;
+}
+
+/**
+ * handleReadyReplies(ch, deps, log)
+ *   ch:   { id, name }
+ *   deps: { readThreadReplies, sendToChannel, askOrcha, myUserId,
+ *           resolveOperatorEntry?, loadLedger?, saveLedger? }
+ * For each ready-pickup notice on THIS channel still awaiting a reply, read the
+ * thread under its stored ts, and if the carrier has replied, AI-interpret
+ * pickup-vs-tow and post one acknowledgment in-thread. Marks the notice answered
+ * so we never reply twice. Non-throwing; returns { checked, answered }.
+ */
+async function handleReadyReplies(ch, deps, log) {
+  const doLog = log || ((m) => logger.info(m));
+  const { readThreadReplies, sendToChannel, askOrcha, myUserId } = deps || {};
+  const out = { checked: 0, answered: 0 };
+  if (!ch || !ch.id) return out;
+  if (typeof readThreadReplies !== 'function' || typeof sendToChannel !== 'function' || typeof askOrcha !== 'function') return out;
+
+  const loadLedger = (deps && typeof deps.loadLedger === 'function')
+    ? deps.loadLedger : () => { try { return store.load(LEDGER_KEY, {}) || {}; } catch (_) { return {}; } };
+  const saveLedger = (deps && typeof deps.saveLedger === 'function')
+    ? deps.saveLedger : (l) => { try { store.save(LEDGER_KEY, l); } catch (_) {} };
+  const resolveOperatorEntry = deps && deps.resolveOperatorEntry;
+
+  const ledger = loadLedger() || {};
+  // Only entries for THIS channel that are still awaiting a reply + have a ts.
+  const pending = Object.entries(ledger).filter(([, e]) =>
+    e && e.channelId === ch.id && e.ts && e.awaitingReply && !e.answeredReplyTs);
+  if (!pending.length) return out;
+
+  let changed = false;
+  for (const [key, entry] of pending) {
+    out.checked++;
+    let replies;
+    try { replies = await readThreadReplies(ch.id, entry.ts, 30); }
+    catch (e) { doLog('[ReadyPickup] ' + (entry.unit || '') + ': thread read failed (' + e.message + ')'); continue; }
+    if (!Array.isArray(replies) || !replies.length) continue;
+
+    // First carrier reply (chronological) that isn't ours / isn't the root.
+    const carrierReply = replies
+      .filter((m) => _isCarrierReply(m, entry.ts, myUserId))
+      .sort((a, b) => Number(a.ts) - Number(b.ts))[0];
+    if (!carrierReply) continue;
+
+    let ownerTag = '';
+    try {
+      if (typeof resolveOperatorEntry === 'function') {
+        const op = resolveOperatorEntry(entry.operator);
+        if (op && op.ownerId) ownerTag = '<@' + op.ownerId + '>';
+      }
+    } catch (_) {}
+
+    let reply;
+    try { reply = await _writeReply(askOrcha, entry, carrierReply.text, ownerTag, doLog); }
+    catch (e) { doLog('[ReadyPickup] ' + (entry.unit || '') + ': reply build failed (' + e.message + ')'); continue; }
+
+    try {
+      await sendToChannel(ch.id, reply, entry.ts); // in-thread
+      doLog('[ReadyPickup] ' + (entry.unit || '') + ': answered carrier reply in-thread (' + ch.id + ')');
+    } catch (e) {
+      doLog('[ReadyPickup] ' + (entry.unit || '') + ': reply send failed (' + e.message + ')');
+      continue; // retry next poll — do NOT mark answered
+    }
+
+    entry.answeredReplyTs = carrierReply.ts;
+    entry.awaitingReply = false;
+    entry.answeredAt = new Date().toISOString();
+    changed = true;
+    out.answered++;
+  }
+
+  if (changed) { try { saveLedger(ledger); } catch (_) {} }
+  return out;
+}
+
 module.exports = {
   notifyReadyUnits,
   buildReadyPrompt,
+  handleReadyReplies,
+  buildReplyPrompt,
   _isFreshReady,
+  _isCarrierReply,
   _readyContext,
+  _deriveDealerLocation,
   _fallbackMessage,
   LEDGER_KEY,
 };
