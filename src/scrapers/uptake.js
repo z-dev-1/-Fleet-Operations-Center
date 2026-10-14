@@ -724,9 +724,15 @@ async function apiFetchImage(win, url, deps = null) {
       });
       if (!res.ok) return { ok: false, status: res.status };
       const ct = res.headers.get('content-type') || '';
-      if (!/image\\//i.test(ct)) return { ok: false, status: res.status, error: 'not-image:' + ct };
+      // The media endpoint serves the PNG as binary/octet-stream (not image/*),
+      // so accept octet-stream too; reject only obvious non-binary (html/json).
+      if (/text\\/html|application\\/json/i.test(ct)) return { ok: false, status: res.status, error: 'not-image:' + ct };
       const buf = await res.arrayBuffer();
-      let binary = ''; const bytes = new Uint8Array(buf);
+      const bytes = new Uint8Array(buf);
+      // Verify it's actually a PNG (magic bytes 0x89 'P' 'N' 'G').
+      const isPng = bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47;
+      if (!isPng) return { ok: false, status: res.status, error: 'not-png:' + ct + ':' + bytes.length + 'b' };
+      let binary = '';
       for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
       return { ok: true, status: res.status, base64: btoa(binary), ct: ct };
     } catch (e) { return { ok: false, status: 0, error: String(e && e.message || e) }; }
@@ -740,18 +746,18 @@ async function apiFetchImage(win, url, deps = null) {
 }
 
 // Resolve an insight media file link (relative, e.g.
-// "supporting_evidence/<id>/1_fault_chart_fig.png") to candidate absolute URLs
-// to try. We don't yet know the exact media route, so return a few plausible
-// shapes; the first that returns an image wins.
+// "supporting_evidence/<id>/1_fault_chart_fig.png") to the media endpoint URL.
+// CONFIRMED from a live network capture (2026-10-14): the SPA fetches
+//   GET /api/media/insights?file=<mediaFileLink>
+// so ?file= is the real param. Keep the other shapes as fallbacks just in case.
 function mediaUrlCandidates(mediaFileLink) {
   const link = String(mediaFileLink || '').replace(/^\/+/, '');
   if (!link) return [];
   const enc = encodeURIComponent(link);
+  // CONFIRMED shape: /api/media/insights?file=<link> (returns the PNG as
+  // binary/octet-stream). Only this one is needed.
   return [
-    `${UPTAKE_API_BASE}/api/media/insights/${link}`,
-    `${UPTAKE_API_BASE}/api/media/insights?path=${enc}`,
-    `${UPTAKE_API_BASE}/api/media/insights?mediaFileLink=${enc}`,
-    `${UPTAKE_API_BASE}/api/media/${link}`,
+    `${UPTAKE_API_BASE}/api/media/insights?file=${enc}`,
   ];
 }
 
@@ -1015,15 +1021,13 @@ async function runApiScrape(deps) {
       flog(`[Uptake][API] ${i + 1}/${uuids.length} asset ${unitId}: ${insightsList.length} insight(s), risk=${riskScore}`);
     }
 
-    // ── 3. Screenshot pass — BOUNDED ──────────────────────────────────────
-    // The data above (all 173 assets, incl. 622086's full 3 insights) is the
-    // reliable, fast win. Screenshots are enrichment and were the slow part
-    // (navigate + capturePage per insight = 30+ min for ~600 insights). So we
-    // BOUND the pass: screenshot only HIGH-RISK insights (riskScore >= the
-    // threshold) — where a chart actually matters for triage — with an overall
-    // count + time cap so the pass stays a few minutes and never risks the
-    // master timeout. We still opportunistically try the fast media-PNG first
-    // (free if it ever resolves), then fall back to capturePage.
+    // ── 3. Screenshot pass — direct media PNG for ALL insights ────────────
+    // CONFIRMED the chart media URL: GET /api/media/insights?file=<link>. We
+    // fetch each insight's fault-chart PNG directly (fast binary fetch, no page
+    // render) — so we can screenshot EVERY insight, not just high-risk ones,
+    // in seconds instead of the ~30-min capturePage pass. capturePage remains
+    // only as a BOUNDED fallback for insights that have no media (rare), so a
+    // few slow captures can't blow up the run.
     let listShot = null;
     try {
       await navTo(UPTAKE_INSIGHTS_URL);
@@ -1042,24 +1046,17 @@ async function runApiScrape(deps) {
     };
 
     const allUnits = Object.values(unitMap);
-    let shotIdx = 0, mediaOk = 0, capOk = 0, mediaWinIdx = -1;
+    let shotIdx = 0, mediaOk = 0, capOk = 0, mediaWinIdx = -1, capAttempts = 0;
     const shotStart = Date.now();
     for (const u of allUnits) {
       if (win.isDestroyed() || deps.settled()) break;
-      if (shotIdx >= UPTAKE_API_SHOT_CAP) break;
-      if (Date.now() - shotStart > UPTAKE_API_SHOT_BUDGET_MS) break;
       for (let j = 0; j < u.insightsList.length; j++) {
         if (win.isDestroyed() || deps.settled()) break;
-        if (shotIdx >= UPTAKE_API_SHOT_CAP || (Date.now() - shotStart > UPTAKE_API_SHOT_BUDGET_MS)) break;
         const ins = u.insightsList[j];
-        // BOUND: only high-risk insights get a screenshot.
-        const r = (ins.riskScore != null ? ins.riskScore : u.riskScore);
-        if (!(Number(r) >= UPTAKE_API_SHOT_MIN_RISK)) continue;
-
         const label = `${u.id}_${shotIdx}`;
         let saved = null;
 
-        // 3a. Opportunistic fast path: direct media PNG (cheap if it resolves).
+        // 3a. PRIMARY: direct media PNG (fast — for ALL insights).
         if (ins._mediaPng) {
           const candidates = mediaUrlCandidates(ins._mediaPng);
           const order = mediaWinIdx >= 0
@@ -1070,13 +1067,17 @@ async function runApiScrape(deps) {
             const img = await apiFetchImage(win, cu, deps);
             if (img.ok && img.base64) {
               saved = saveB64Png(img.base64, label);
-              if (saved) { if (mediaWinIdx < 0) { mediaWinIdx = k; flog('[Uptake][API] media URL shape locked (candidate ' + k + ')'); } mediaOk++; break; }
+              if (saved) { if (mediaWinIdx < 0) { mediaWinIdx = k; flog('[Uptake][API] media URL confirmed (candidate ' + k + ')'); } mediaOk++; break; }
             }
           }
         }
 
-        // 3b. Reliable fallback: navigate + capturePage.
-        if (!saved && ins.url) {
+        // 3b. Fallback: capturePage — BOUNDED (only for no-media insights, and
+        // only up to the cap/budget so slow captures can't dominate).
+        if (!saved && ins.url
+            && capAttempts < UPTAKE_API_SHOT_CAP
+            && (Date.now() - shotStart) < UPTAKE_API_SHOT_BUDGET_MS) {
+          capAttempts++;
           try {
             await navTo(ins.url);
             await pollUntil(win, CHECK_DETAIL_READY, 600, 20);
@@ -1084,7 +1085,7 @@ async function runApiScrape(deps) {
             saved = await deps.captureScreenshot(win, `insight_${label}`);
             if (saved) capOk++;
           } catch (e) {
-            fwarn(`[Uptake][API] capturePage failed for ${u.id}/${ins.title}: ${e.message}`);
+            fwarn(`[Uptake][API] capturePage fallback failed for ${u.id}/${ins.title}: ${e.message}`);
           }
         }
 
@@ -1092,7 +1093,7 @@ async function runApiScrape(deps) {
         shotIdx++;
       }
     }
-    flog(`[Uptake][API] screenshots (bounded, risk>=${UPTAKE_API_SHOT_MIN_RISK}): ${mediaOk} media + ${capOk} capturePage, ${shotIdx} attempted in ${Math.round((Date.now() - shotStart) / 1000)}s`);
+    flog(`[Uptake][API] screenshots: ${mediaOk} via media-PNG + ${capOk} via capturePage fallback, ${shotIdx} insights in ${Math.round((Date.now() - shotStart) / 1000)}s`);
 
     // strip internal fields before returning
     allUnits.forEach(u => u.insightsList.forEach(ins => { delete ins._assetUuid; delete ins._insightId; delete ins._mediaPng; }));
