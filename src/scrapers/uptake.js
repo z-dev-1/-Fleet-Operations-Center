@@ -737,25 +737,39 @@ async function scrapeUptake() {
         // The list only renders the first screenful of rows, so ~half the fleet
         // was never discovered. Scroll to the bottom repeatedly until the row
         // count stops growing (or a safety cap), forcing every row into the DOM.
+        // PATIENCE FIX (2026-10): the list lazy-fetches the next chunk from the
+        // server on scroll. The old loop stopped after just 3 no-growth passes
+        // × 700ms (~2.1s) — if a single server chunk was slow, it looked like
+        // the end of the list and the scrape quit at ~35 rows instead of ~64
+        // (observed: 28 units captured vs the real ~54). Now: wait longer per
+        // pass, require MORE consecutive no-growth passes, and treat a pass as
+        // "growth" if EITHER the row count OR the page scrollHeight increased —
+        // so rows that lag behind a height bump don't trigger an early stop.
         let prevRowCount = -1;
+        let prevHeight = -1;
         let stableStreak = 0;
-        for (let scrollPass = 0; scrollPass < 40; scrollPass++) {
+        let scrollPass = 0;
+        for (; scrollPass < 60; scrollPass++) {
           if (win.isDestroyed()) break;
           let step;
           try { step = await win.webContents.executeJavaScript(SCROLL_LIST_STEP); }
-          catch(_) { step = { count: 0 }; }
-          const curr = step && step.count || 0;
-          if (curr <= prevRowCount) {
-            // No growth this pass. Require 3 consecutive no-growth passes to
-            // confirm the list is fully loaded (guards against lazy fetch lag).
-            if (++stableStreak >= 3) break;
-          } else {
+          catch(_) { step = { count: 0, height: 0 }; }
+          const curr = (step && step.count) || 0;
+          const currH = (step && step.height) || 0;
+          const grew = curr > prevRowCount || currH > prevHeight;
+          if (grew) {
             stableStreak = 0;
+          } else {
+            // No growth in rows OR height this pass. Require 6 consecutive
+            // no-growth passes to confirm the list is truly fully loaded
+            // (guards against slow lazy-fetch chunks mid-list).
+            if (++stableStreak >= 6) break;
           }
           prevRowCount = Math.max(prevRowCount, curr);
-          await sleep(700); // let the next chunk of rows fetch/render
+          prevHeight = Math.max(prevHeight, currH);
+          await sleep(1200); // let the next chunk of rows fetch/render
         }
-        flog(`[Uptake] List fully loaded after scroll: ~${prevRowCount} rows in DOM`);
+        flog(`[Uptake] List fully loaded after scroll: ~${prevRowCount} rows in DOM (${scrollPass + 1} pass(es))`);
         // Scroll back to top so the list screenshot captures the header.
         try { await win.webContents.executeJavaScript('window.scrollTo(0,0)'); } catch(_) {}
         await sleep(300);
