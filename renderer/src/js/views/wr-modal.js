@@ -284,7 +284,7 @@ function _buildHTML(unit) {
     <div class="wr-section">
       <div id="wr-tow-wrap" class="wr-section" style="display:none">\n      <div class="wr-section__title">\uD83D\uDE9B Tow Destination (where unit goes)</div>\n      <div class="wr-two-col" style="margin-bottom:6px"><label class="settings-label" style="flex:3"><select id="wr-tow-book" class="settings__select"><option value="">Quick-fill from vendor book...</option></select></label></div>\n      <div class="wr-two-col"><label class="settings-label" style="flex:3">Street<input id="wr-tow-street" class="settings__input" placeholder="Street" /></label><label class="settings-label" style="flex:2">City<input id="wr-tow-city" class="settings__input" placeholder="City" /></label></div>\n      <div class="wr-two-col" style="margin-top:4px"><label class="settings-label">State<input id="wr-tow-state" class="settings__input" placeholder="ST" maxlength="2" style="text-transform:uppercase" /></label><label class="settings-label">ZIP<input id="wr-tow-zip" class="settings__input" placeholder="00000" /></label></div>\n      <div class="wr-section__title" style="margin-top:12px">\uD83D\uDCCD Tow Pickup (where unit is now)</div>\n      <div class="wr-two-col" style="margin-bottom:6px"><label class="settings-label" style="flex:3"><select id="wr-tow-from-book" class="settings__select"><option value="">Quick-fill pickup location...</option></select></label></div>\n      <div class="wr-two-col"><label class="settings-label" style="flex:3">Street<input id="wr-tow-from-street" class="settings__input" placeholder="Pickup street" /></label><label class="settings-label" style="flex:2">City<input id="wr-tow-from-city" class="settings__input" placeholder="City" /></label></div>\n      <div class="wr-two-col" style="margin-top:4px"><label class="settings-label">State<input id="wr-tow-from-state" class="settings__input" placeholder="ST" maxlength="2" style="text-transform:uppercase" /></label><label class="settings-label">ZIP<input id="wr-tow-from-zip" class="settings__input" placeholder="00000" /></label></div>\n    </div>\n\n    <div class="wr-section__title">Attachments</div>
       <div class="wr-screenshot-row">
-        <button id="wr-attach-screenshot" class="detail-panel__btn detail-panel__btn--secondary">Attach latest Uptake screenshot</button>
+        <button id="wr-attach-screenshot" class="detail-panel__btn detail-panel__btn--secondary">Attach Uptake screenshots</button>
         <span id="wr-screenshot-label" class="wr-screenshot-label">None</span>
       </div>
       <div id="wr-dropzone" class="wr-dropzone">
@@ -963,32 +963,43 @@ function _readFilesAsAttachments(fileList) {
 // ── Wire: screenshot / attachments ───────────────────────────────
 function _wireScreenshot() {
   const btn = _el('wr-attach-screenshot');
+  const BTN_LABEL = 'Attach Uptake screenshots';
+  btn.textContent = BTN_LABEL;
   btn.addEventListener('click', async () => {
     btn.disabled = true; btn.textContent = 'Loading...';
     try {
-      // BUG FIX (2026-07-23): previously called files.getLatestScreenshot()
-      // with NO unit argument (and that IPC ignored any argument anyway) --
-      // it just grabbed whatever PNG was newest in the whole screenshots
-      // folder, which could belong to a completely different unit than the
-      // one this WR is for. The scraper already stores each unit's own
-      // screenshot path on the unit record (screenshotPath / screenshots[]);
-      // use that directly instead of a global "latest file" guess.
-      const path = (_unit && (_unit.screenshotPath || (_unit.screenshots || [])[0])) || null;
-      if (path) {
-        const dataUrl = await files.readAsDataUrl(path);
-        if (dataUrl) {
-          _addAttachment(path.split(/[/\\]/).pop(), dataUrl);
-          toast.show('success', 'Screenshot attached', 2000);
-        } else {
-          toast.show('warn', 'Could not read screenshot file', 3000);
-        }
-      } else {
+      // A unit can have MULTIPLE Uptake insights (e.g. 622086 has 3), and the
+      // scraper takes ONE screenshot per insight into unit.screenshots[]. This
+      // used to attach only screenshotPath || screenshots[0] — the first one —
+      // so the other insights' screenshots were silently dropped from the WR.
+      // Attach ALL of them (deduped by _addAttachment's identical-dataUrl guard).
+      const paths = Array.from(new Set(
+        [].concat(
+          (_unit && _unit.screenshotPath) ? [_unit.screenshotPath] : [],
+          (_unit && Array.isArray(_unit.screenshots)) ? _unit.screenshots : []
+        ).filter(Boolean)
+      ));
+      if (!paths.length) {
         toast.show('info', 'No Uptake screenshot found for this unit — run a sync first', 4000);
+        return;
+      }
+      let attached = 0, failed = 0;
+      for (const p of paths) {
+        try {
+          const dataUrl = await files.readAsDataUrl(p);
+          if (dataUrl) { _addAttachment(p.split(/[/\\]/).pop(), dataUrl); attached++; }
+          else failed++;
+        } catch (_) { failed++; }
+      }
+      if (attached) {
+        toast.show('success', attached + ' screenshot' + (attached > 1 ? 's' : '') + ' attached' + (failed ? ' (' + failed + ' unreadable)' : ''), 2500);
+      } else {
+        toast.show('warn', 'Could not read screenshot file' + (paths.length > 1 ? 's' : ''), 3000);
       }
     } catch (e) {
       toast.show('error', 'Screenshot load failed: ' + e.message);
     } finally {
-      btn.disabled = false; btn.textContent = 'Attach latest Uptake screenshot';
+      btn.disabled = false; btn.textContent = BTN_LABEL;
     }
   });
 
@@ -1665,11 +1676,20 @@ async function _runAIAssist() {
 async function _wireAutoUptake() {
   const unit = _unit || {};
   try {
-    const path = unit.screenshotPath || (unit.screenshots || [])[0];
-    if (!path) return;
-    const dataUrl = await files.readAsDataUrl(path);
-    if (dataUrl) {
-      _addAttachment(path.split(/[/\\]/).pop(), dataUrl);
+    // Attach ALL of this unit's Uptake insight screenshots (one per insight),
+    // not just the first — a unit with multiple insights should bring them all
+    // onto the WR. Deduped by _addAttachment's identical-dataUrl guard.
+    const paths = Array.from(new Set(
+      [].concat(
+        unit.screenshotPath ? [unit.screenshotPath] : [],
+        Array.isArray(unit.screenshots) ? unit.screenshots : []
+      ).filter(Boolean)
+    ));
+    for (const p of paths) {
+      try {
+        const dataUrl = await files.readAsDataUrl(p);
+        if (dataUrl) _addAttachment(p.split(/[/\\]/).pop(), dataUrl);
+      } catch (_) { /* skip unreadable, continue */ }
     }
   } catch(e) { /* silent -- manual attach is always still available */ }
 }

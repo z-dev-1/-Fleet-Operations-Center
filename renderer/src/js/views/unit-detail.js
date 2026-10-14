@@ -2149,7 +2149,31 @@ function renderIntelPane(unit){
           (mf?'<span>Factor: '+esc(mf)+'</span>':'')+
         '</div>':'')+
       '</div>';
-    }).join(''):
+    }).join('')+
+    // Copyable plain-text version of all insights. The Uptake "screenshot" is a
+    // PNG (not selectable), so this gives the same content as COPYABLE text —
+    // title/subsystem/status/dates/guidance/summary/recommended per insight.
+    (function(){
+      var txt=insights.map(function(ins,ix){
+        var L=[];
+        L.push('--- Insight '+(ix+1)+(ins.title?': '+ins.title:'')+' ---');
+        if(ins.subsystem)L.push('Subsystem: '+ins.subsystem);
+        if(ins.type||ins.insightType)L.push('Type: '+(ins.type||ins.insightType));
+        if(ins.status)L.push('Status: '+ins.status);
+        if(ins.firstSeen||ins.firstDetected)L.push('First seen: '+(ins.firstSeen||ins.firstDetected));
+        if(ins.lastSeen||ins.lastDetected)L.push('Last seen: '+(ins.lastSeen||ins.lastDetected));
+        if(ins.maintenanceFactor)L.push('Maintenance factor: '+ins.maintenanceFactor);
+        if(ins.summary)L.push('Summary: '+ins.summary);
+        if(ins.guidance)L.push('Guidance: '+ins.guidance);
+        if(ins.recommended)L.push('Recommended: '+ins.recommended);
+        if(ins.url)L.push('Link: '+ins.url);
+        return L.join('\n');
+      }).join('\n\n');
+      return '<details class="dp-insight-copy"><summary>\ud83d\udccb Copy insight text</summary>'+
+        '<div class="dp-insight-copy__bar"><button class="detail-panel__btn detail-panel__btn--secondary dp-insight-copy__btn" type="button">Copy all</button></div>'+
+        '<textarea class="dp-insight-copy__text" readonly rows="'+Math.min(24,Math.max(6,txt.split('\n').length))+'">'+esc(txt)+'</textarea>'+
+      '</details>';
+    })():
     '<div class="dp-empty-state"><span class="dp-empty-state__icon">\u26a1</span>No Uptake insights</div>';
 
   // screenshot
@@ -2344,6 +2368,20 @@ function _renderUnit(unit) {
   });
   _panel.querySelectorAll('[data-ext-url]').forEach(function(b) {
     b.addEventListener('click', function(e){ e.preventDefault(); var u=b.dataset.extUrl||b.getAttribute('data-ext-url'); if(u&&window.files) window.files.openExternal(u).catch(function(){}); });
+  });
+
+  // Copy-insight-text button (Intel pane): copy the full insight text block.
+  _panel.querySelectorAll('.dp-insight-copy__btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var det = btn.closest('.dp-insight-copy');
+      var ta = det && det.querySelector('.dp-insight-copy__text');
+      var val = ta ? ta.value : '';
+      if (!val) return;
+      (navigator.clipboard ? navigator.clipboard.writeText(val) : Promise.reject())
+        .catch(function(){ try { ta.focus(); ta.select(); document.execCommand('copy'); } catch(_){} });
+      var orig = btn.textContent; btn.textContent = '\u2713 Copied';
+      setTimeout(function(){ btn.textContent = orig; }, 1500);
+    });
   });
 
   // Split view for secondary ASIST/offsite WR cards

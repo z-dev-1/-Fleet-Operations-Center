@@ -2863,6 +2863,12 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .dp-insight-card__summary{font-size:11px;color:var(--txt);line-height:1.5}
 .dp-insight-card__action{font-size:10px;color:var(--acc2);font-weight:600}
 
+/* ── Copyable insight text (Uptake screenshots are PNGs, not selectable) ── */
+.dp-insight-copy{margin:8px 0}
+.dp-insight-copy>summary{cursor:pointer;font-size:11px;color:var(--acc2);font-weight:600;user-select:none}
+.dp-insight-copy__bar{margin:6px 0}
+.dp-insight-copy__text{width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;line-height:1.5;color:var(--txt);background:var(--el,#1c2128);border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px;resize:vertical;white-space:pre}
+
 /* ── Screenshot viewer ── */
 .dp-screenshot-wrap{border-radius:8px;overflow:hidden;border:1px solid var(--bdr);cursor:zoom-in;position:relative}
 .dp-screenshot-wrap img{width:100%;display:block}
