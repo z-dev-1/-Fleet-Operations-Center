@@ -105,6 +105,22 @@ describe('notifyReadyUnits', () => {
     expect(deps.sendToChannel).toHaveBeenCalledTimes(2);
   });
 
+  it('does NOT re-notify when the status merely FLAPS (ready→down→ready) within the cooldown', async () => {
+    // Real-world bug: the upstream status oscillated ready_for_pickup -> down ->
+    // ready_for_pickup across adjacent sync cycles (~80 min apart). The pure
+    // statusChangedAt dedup saw a "new" ready event each flap and re-messaged
+    // the carrier repeatedly. The cooldown must suppress the repeat.
+    const { deps } = makeDeps();
+    const first = { '322599': { equipmentId: '322599', status: 'ready_for_pickup', previousStatus: 'in_repair', statusChangedAt: '2026-10-14T16:17:54.364Z' } };
+    await readyNotify.notifyReadyUnits(first, deps);
+    // ~80 minutes later the same unit flaps back to ready (prev=down) — a NEW
+    // statusChangedAt, but NOT a genuine new ready event.
+    const flap = { '322599': { equipmentId: '322599', status: 'ready_for_pickup', previousStatus: 'down', statusChangedAt: '2026-10-14T17:37:24.675Z' } };
+    const res = await readyNotify.notifyReadyUnits(flap, deps);
+    expect(res.notified).toBe(0);
+    expect(deps.sendToChannel).toHaveBeenCalledTimes(1); // only the first ever sent
+  });
+
   it('prompt asks pickup vs tow-back AND includes the current vendor/dealer location', () => {
     const prompt = readyNotify.buildReadyPrompt(
       { equipmentId: '322599', domicileSite: 'AVP40', make: 'Peterbilt' },

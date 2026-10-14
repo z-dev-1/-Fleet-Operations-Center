@@ -31,6 +31,14 @@ const LEDGER_KEY = 'readyPickupNotices';
 const LEDGER_CAP = 2000;
 const AI_ATTEMPTS = 2;
 const AI_ATTEMPT_MS = 30000;
+// Per-unit cooldown. The upstream status can FLAP (ready_for_pickup -> down ->
+// ready_for_pickup) across adjacent sync cycles (observed ~80 min apart), which
+// the pure statusChangedAt dedup treats as a brand-new ready event every time
+// and re-messages the carrier. Suppress a repeat notice for the SAME unit
+// within this window regardless of statusChangedAt churn. 24h cleanly separates
+// flapping (minutes/hours apart) from a genuine re-ready (a unit picked up then
+// later back in for repair is days out, well beyond this window).
+const NOTIFY_COOLDOWN_MS = 24 * 3600 * 1000;  // 24 hours
 
 // Live fleet row for a unit (dealer/asist/domicile context for the message).
 function _fleetRow(equipmentId) {
@@ -210,6 +218,29 @@ async function notifyReadyUnits(units, deps, log) {
     const dedupKey = String(equipmentId).toLowerCase() + ':' + (rec.statusChangedAt || '');
     if (ledger[dedupKey]) { out.skipped++; continue; }
 
+    // COOLDOWN GUARD (fixes status-flapping re-sends): if we already notified
+    // this SAME unit for a ready EVENT whose status-change time is within the
+    // cooldown window of this one, do not message again. We compare EVENT times
+    // (statusChangedAt), not wall-clock, so flapping (ready→down→ready ~minutes
+    // apart → statusChangedAt bumps a little) is suppressed, while a genuine
+    // re-ready days later (a real repair cycle) still fires. One ready event per
+    // unit per window, not one per statusChangedAt value.
+    const unitKey = String(equipmentId).toLowerCase();
+    const thisEventMs = rec.statusChangedAt ? Date.parse(rec.statusChangedAt) : NaN;
+    const recentlyNotified = Object.values(ledger).some((e) => {
+      if (!e || String(e.unit || '').toLowerCase() !== unitKey) return false;
+      // Prefer the stored event time; fall back to the wall-clock 'at'.
+      const prevEventMs = e.statusChangedAt ? Date.parse(e.statusChangedAt)
+                        : (e.at ? Date.parse(e.at) : NaN);
+      if (!Number.isFinite(prevEventMs)) return false;
+      if (!Number.isFinite(thisEventMs)) return true; // no event time now → treat any prior notice as a dup
+      return Math.abs(thisEventMs - prevEventMs) < NOTIFY_COOLDOWN_MS;
+    });
+    if (recentlyNotified) {
+      doLog('[ReadyPickup] ' + equipmentId + ': already notified within cooldown (status likely flapped) — skipping');
+      out.skipped++; continue;
+    }
+
     const row = fleetRow(equipmentId) || {};
     const operator = row.operator || (rec && rec.operator) || '';
     if (!operator) { doLog('[ReadyPickup] ' + equipmentId + ': no operator — skipping'); out.skipped++; continue; }
@@ -243,6 +274,7 @@ async function notifyReadyUnits(units, deps, log) {
     // 'awaitingReply' so it only answers until a reply is handled.
     ledger[dedupKey] = {
       at: new Date().toISOString(),
+      statusChangedAt: rec.statusChangedAt || null,  // event time, for cooldown dedup across flapping
       channelId: entry.channelId,
       ts: postedTs,
       unit: equipmentId,
