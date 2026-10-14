@@ -498,12 +498,10 @@ const CreateWRAutofill = {
              }
 
 
-             // STEP 2: Location  -  location from payload
+             // STEP 2: Location  -  exact working script, location from payload
              this.log('--- STEP 2 ---');
 
-             // Click Off Site by label text (needed for both branches below:
-             // an off-site ADDRESS, and the legacy geofence path which also
-             // runs under "Off Site").
+             // Step 1: Click Off Site by label text
              const radios2 = document.querySelectorAll('input[type="radio"][name="answer"]');
              for (const radio of radios2) {
                  const label = radio.closest('label') || radio.parentElement;
@@ -514,69 +512,8 @@ const CreateWRAutofill = {
                  }
              }
 
-             // OFF-SITE ADDRESS BRANCH: when the unit is NOT in its yard (e.g.
-             // a return-from-dealer tow — the unit is sitting at the dealer),
-             // the Location step must be filled with the actual STREET/CITY/
-             // STATE/ZIP, NOT a yard geofence. The home domicile is simply the
-             // wrong place in that case. The renderer resolves this and sets
-             // p.offSite + p.locStreet/City/State/Zip.
-             const _locHasAddr = !!(p.locStreet || p.locCity || p.locState || p.locZip);
-             if (p.offSite && _locHasAddr) {
-                 this.log('LOCATION: off-site address branch (unit not in yard) — filling Street/City/State/Zip, skipping GeoFence');
-                 await this.sleep(400);
-                 // Fill a Location text field matched by its label (Street/City/
-                 // State/Zip Code), using the React-safe native-setter pattern.
-                 const fillLocField = async (labelRe, value) => {
-                     if (!value) return;
-                     const el = await this.waitFor(() => {
-                         const labels = Array.from(document.querySelectorAll('LABEL'));
-                         for (const l of labels) {
-                             if (!labelRe.test((l.innerText || l.textContent || '').trim())) continue;
-                             let inp = l.control || (l.htmlFor && document.getElementById(l.htmlFor));
-                             if (inp && inp.offsetParent) return inp;
-                             // Label with no htmlFor: take the next visible text input after it.
-                             let sib = l.parentElement ? l.parentElement.querySelector('INPUT[type="text"], INPUT:not([type])') : null;
-                             if (sib && sib.offsetParent) return sib;
-                         }
-                         // Fallback: match by placeholder.
-                         const byPh = Array.from(document.querySelectorAll('INPUT[type="text"], INPUT:not([type])'))
-                             .find(i => i.offsetParent && labelRe.test(i.placeholder || ''));
-                         return byPh || null;
-                     }, 5000, 80);
-                     if (!el) { this.log('LOCATION: WARNING - field for ' + labelRe + ' not found'); return; }
-                     el.click(); await this.sleep(40);
-                     try { el.focus(); } catch (e) {}
-                     const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                     try { ns.call(el, ''); el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
-                     try { ns.call(el, String(value)); } catch (e) { el.value = String(value); }
-                     ['input', 'change', 'keyup'].forEach(t => { try { el.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
-                     await this.sleep(70);
-                     try { el.dispatchEvent(new FocusEvent('blur', { bubbles: true })); el.blur(); } catch (e) {}
-                     this.log('LOCATION: ' + labelRe + ' = "' + el.value + '"');
-                 };
-                 // "State" must not match "Asset Location State" (the radio
-                 // group heading) — anchor to the standalone field labels.
-                 await fillLocField(/^street$/i,              p.locStreet || '');
-                 await fillLocField(/^city$/i,                p.locCity   || '');
-                 await fillLocField(/^state$/i,               p.locState  || '');
-                 await this.sleep(200);
-                 await fillLocField(/^zip(\s*code)?$/i,       p.locZip    || '');
-                 document.body.click();
-                 await this.sleep(400);
-                 // Re-assert Off Site — React can reset the radio after field edits.
-                 const radiosOff = document.querySelectorAll('input[type="radio"][name="answer"]');
-                 for (const radio of radiosOff) {
-                     const label = radio.closest('label') || radio.parentElement;
-                     if (label && label.innerText.trim().toLowerCase().includes('off site')) { radio.click(); break; }
-                 }
-                 // Fall through to the shared "Wait then Next → STEP 3" code below;
-                 // only the GeoFence combobox block is skipped for off-site.
-             }
-
-             // GeoFence combobox  -  recorder confirms class css-cmvgon.
-             // SKIPPED for the off-site address branch (unit is at a street
-             // address, not a yard geofence).
-             const geofenceInput = (p.offSite && _locHasAddr) ? null : await this.waitFor(() =>
+             // GeoFence combobox  -  recorder confirms class css-cmvgon
+             const geofenceInput = await this.waitFor(() =>
                  document.querySelector('INPUT.css-cmvgon[role="combobox"]') ||
                  document.querySelector('INPUT.css-cmvgon')
              , 5000, 80);
@@ -614,7 +551,7 @@ const CreateWRAutofill = {
                  } else {
                      this.log('GeoFence: WARNING option not found for "' + text + '"');
                  }
-             } else if (!(p.offSite && _locHasAddr)) {
+             } else {
                  this.log('GeoFence: WARNING combobox not found');
              }
 
@@ -754,40 +691,21 @@ const CreateWRAutofill = {
              if (p.areaPairs && p.areaPairs.length) {
                  const totalRows = p.areaPairs.filter(pair => pair.area).length;
 
-                 // Phase 1: ADD ALL ROWS FIRST, then Phase 2 fills them. Nothing
-                 // is selected yet at this point, so the number of visible
-                 // "Enter a value..." comboboxes equals the number of Work-Area
-                 // rows -- we add "+" rows until that count reaches totalRows.
-                 //
-                 // Previously this added rows one-at-a-time with a fragile
-                 // count-grow wait and NO retry: a single dropped "+" click left
-                 // fewer rows than area pairs, so Phase 2's flat offset ran off the
-                 // end and later rows logged "input not found" (the "only 2 of 4
-                 // fill" bug). Now we loop-until-count-reached with retries.
-                 const _rowCount = () => Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
-                 const _findAddBtn = () => document.querySelector('BUTTON.css-1sm4msn') ||
-                     Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && b.querySelector('svg') && !(b.innerText || '').trim());
+                 // Phase 1: click + (totalRows-1) times, wait for each new row
                  if (totalRows > 1) {
-                     const maxAttempts = (totalRows - 1) * 3 + 2;
-                     let attempts = 0;
-                     while (_rowCount() < totalRows && attempts < maxAttempts) {
-                         attempts++;
-                         const before = _rowCount();
-                         const addBtn = _findAddBtn();
-                         if (!addBtn) {
-                             this.log('Area rows: (+) add-row button not found (have ' + before + '/' + totalRows + ', attempt ' + attempts + ')');
-                             await this.sleep(400);
-                             continue;
+                     for (let r = 0; r < totalRows - 1; r++) {
+                         const currentCount = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
+                         const addBtn = document.querySelector('BUTTON.css-1sm4msn') ||
+                             Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && b.querySelector('svg') && !(b.innerText || '').trim());
+                         if (addBtn) {
+                             addBtn.click();
+                             await this.waitFor(() => {
+                                 const now = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
+                                 return now > currentCount ? true : null;
+                             }, 3000, 80);
+                             await this.sleep(100);
                          }
-                         addBtn.click();
-                         // Wait for the row count to actually grow before adding more.
-                         const grew = await this.waitFor(() => (_rowCount() > before ? true : null), 4000, 80);
-                         if (!grew) this.log('Area rows: row did not appear after (+) click (have ' + _rowCount() + '/' + totalRows + ', attempt ' + attempts + ')');
-                         // Let the new row fully mount before the next click.
-                         await this.sleep(500);
                      }
-                     this.log('Area rows: ready with ' + _rowCount() + '/' + totalRows + ' row(s) before fill');
-                     if (_rowCount() < totalRows) this.log('Area rows: WARNING - could not create all ' + totalRows + ' rows; later pairs may not fill');
                  }
 
                   // Phase 2: fill all rows
@@ -833,11 +751,8 @@ const CreateWRAutofill = {
                               await this.waitFor(() => {
                                   const ins = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent);
                                   return ins.length > inputOffset + 1 ? true : null;
-                              }, 4000, 80);
-                              // Let the subcategory list finish loading before we try
-                              // to fill it (more time here fixes the "some sub-areas
-                              // left blank" symptom on multi-area WRs).
-                              await this.sleep(600);
+                              }, 3000, 80);
+                              await this.sleep(300);
                           } else { this.log('Work Area [' + i + ']: no match for "' + pair.area + '"'); }
                       }
 
@@ -932,7 +847,7 @@ const CreateWRAutofill = {
                                       || btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase().includes(target))
                                       || null;
                               }, 4000, 80);
-                              if (subOpt) { this.click(subOpt); this.log('Sub Area [' + i + ']: clicked "' + (subOpt.innerText || '').trim() + '"'); await this.sleep(500); }
+                              if (subOpt) { this.click(subOpt); this.log('Sub Area [' + i + ']: clicked "' + (subOpt.innerText || '').trim() + '"'); await this.sleep(300); }
                               else { this.log('Sub Area [' + i + ']: no match for "' + pair.subcategory + '"'); }
                           } else { this.log('Sub Area [' + i + ']: input not found'); }
                       }
@@ -942,10 +857,6 @@ const CreateWRAutofill = {
                       // Position is picked); every other area only ever has 2 (Work Area,
                       // Subcategory). Advance the running offset accordingly for the next row.
                       inputOffset += isTires ? 3 : 2;
-                      // Settle before the next row so this row's committed values are
-                      // fully rendered — prevents the next row's field lookup from
-                      // racing a mid-render DOM (the "some rows left blank" symptom).
-                      await this.sleep(400);
                   }
              }
 
