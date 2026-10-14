@@ -2863,8 +2863,13 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .dp-insight-card__summary{font-size:11px;color:var(--txt);line-height:1.5}
 .dp-insight-card__action{font-size:10px;color:var(--acc2);font-weight:600}
 
-/* ── Copyable insight text (Uptake screenshots are PNGs, not selectable) ── */
-.dp-insight-copy{margin:8px 0}
+/* ── Per-insight Uptake screenshot + copyable text ── */
+.dp-shot-block{margin:10px 0;padding:8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:8px}
+.dp-shot-block__title{font-size:11px;font-weight:600;color:var(--txt);margin-bottom:6px}
+.dp-screenshot-card{position:relative;width:100%;min-height:60px;background:#1c2128;border-radius:6px;border:1px solid rgba(255,255,255,0.08);overflow:hidden}
+.dp-screenshot-meta{font-size:9px;color:rgba(255,255,255,0.35);text-align:right;padding:3px 8px 4px}
+/* Copyable insight text (Uptake screenshots are PNGs, not selectable) */
+.dp-insight-copy{margin:6px 0 0}
 .dp-insight-copy>summary{cursor:pointer;font-size:11px;color:var(--acc2);font-weight:600;user-select:none}
 .dp-insight-copy__bar{margin:6px 0}
 .dp-insight-copy__text{width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;line-height:1.5;color:var(--txt);background:var(--el,#1c2128);border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px;resize:vertical;white-space:pre}

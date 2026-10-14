@@ -276,6 +276,35 @@ async function captureScreenshot(win, label) {
   }
 }
 
+// ─── Prune stale screenshots ──────────────────────────────────────────────────
+// Every scrape writes NEW timestamped PNGs (uptake_<label>_<ts>.png) and never
+// removed the old ones, so the screenshots dir grew without bound (observed:
+// dozens of stale PNGs per unit). After a successful, non-empty scrape, delete
+// any uptake_*.png NOT referenced by THIS run's results — i.e. keep only the
+// current cache's images. Never throws (best-effort; caller guards on
+// units.length > 0 so a salvaged empty run never triggers this).
+function pruneScreenshots(units, listShotPath) {
+  const keep = new Set();
+  const addBase = (p) => { if (p) { try { keep.add(path.basename(p)); } catch (_) {} } };
+  addBase(listShotPath);
+  for (const u of (units || [])) {
+    if (!u) continue;
+    addBase(u.screenshotPath);
+    (Array.isArray(u.screenshots) ? u.screenshots : []).forEach(addBase);
+    (Array.isArray(u.insightsList) ? u.insightsList : []).forEach((ins) => addBase(ins && ins.screenshotPath));
+  }
+  let files;
+  try { files = fs.readdirSync(SCREENSHOTS_DIR); } catch (_) { return; }
+  let removed = 0;
+  for (const f of files) {
+    // Only ever touch our own uptake_*.png artifacts; leave everything else.
+    if (!/^uptake_.*\.png$/i.test(f)) continue;
+    if (keep.has(f)) continue;
+    try { fs.unlinkSync(path.join(SCREENSHOTS_DIR, f)); removed++; } catch (_) {}
+  }
+  if (removed) flog(`[Uptake] Pruned ${removed} stale screenshot(s); kept ${keep.size}`);
+}
+
 // ─── Click "Amazon SSO" ───────────────────────────────────────────────────────
 const CLICK_SSO_BUTTON = `(function() {
   try {
@@ -674,6 +703,12 @@ async function scrapeUptake() {
       try { win.destroy(); } catch(_) {}
       const arr = Array.isArray(units) ? units : [];
       flog(`[Uptake] Finished — ${arr.length} units`);
+      // Prune stale screenshots ONLY on a real, non-empty scrape — never when
+      // salvaging a partial/empty run (that would wipe the still-good cache's
+      // images). Keep exactly the files this run referenced.
+      if (arr.length > 0) {
+        try { pruneScreenshots(arr, screenshotPath); } catch (e) { fwarn('[Uptake] prune skipped:', e.message); }
+      }
       resolve({
         source:         'uptake',
         units:          arr,

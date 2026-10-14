@@ -2149,41 +2149,52 @@ function renderIntelPane(unit){
           (mf?'<span>Factor: '+esc(mf)+'</span>':'')+
         '</div>':'')+
       '</div>';
-    }).join('')+
-    // Copyable plain-text version of all insights. The Uptake "screenshot" is a
-    // PNG (not selectable), so this gives the same content as COPYABLE text —
-    // title/subsystem/status/dates/guidance/summary/recommended per insight.
-    (function(){
-      var txt=insights.map(function(ins,ix){
-        var L=[];
-        L.push('--- Insight '+(ix+1)+(ins.title?': '+ins.title:'')+' ---');
-        if(ins.subsystem)L.push('Subsystem: '+ins.subsystem);
-        if(ins.type||ins.insightType)L.push('Type: '+(ins.type||ins.insightType));
-        if(ins.status)L.push('Status: '+ins.status);
-        if(ins.firstSeen||ins.firstDetected)L.push('First seen: '+(ins.firstSeen||ins.firstDetected));
-        if(ins.lastSeen||ins.lastDetected)L.push('Last seen: '+(ins.lastSeen||ins.lastDetected));
-        if(ins.maintenanceFactor)L.push('Maintenance factor: '+ins.maintenanceFactor);
-        if(ins.summary)L.push('Summary: '+ins.summary);
-        if(ins.guidance)L.push('Guidance: '+ins.guidance);
-        if(ins.recommended)L.push('Recommended: '+ins.recommended);
-        if(ins.url)L.push('Link: '+ins.url);
-        return L.join('\n');
-      }).join('\n\n');
-      return '<details class="dp-insight-copy"><summary>\ud83d\udccb Copy insight text</summary>'+
-        '<div class="dp-insight-copy__bar"><button class="detail-panel__btn detail-panel__btn--secondary dp-insight-copy__btn" type="button">Copy all</button></div>'+
-        '<textarea class="dp-insight-copy__text" readonly rows="'+Math.min(24,Math.max(6,txt.split('\n').length))+'">'+esc(txt)+'</textarea>'+
-      '</details>';
-    })():
+    }).join(''):
     '<div class="dp-empty-state"><span class="dp-empty-state__icon">\u26a1</span>No Uptake insights</div>';
 
-  // screenshot
-  var shot=(unit.screenshots||[])[0]; var shotHtml='';
-  if(shot){
-    shotHtml='<div class="dp-section-title">Uptake Screenshot</div>' +
-      '<div id="dp-screenshot-card" style="position:relative;width:100%;margin:8px 0;min-height:100px;background:#1c2128;border-radius:6px;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">' +
-        '<img id="dp-screenshot-img" data-shot="'+esc(shot)+'" style="width:100%;height:auto;min-height:50px;display:block;border-radius:6px;" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Uptake screenshot loading..." />' +
-        '<div style="font-size:9px;color:rgba(255,255,255,0.35);margin-top:5px;text-align:right;padding:0 8px 4px;" id="dp-screenshot-meta">Loading...</div>' +
-      '</div>';
+  // Uptake screenshots — ONE PER INSIGHT. The scraper captures a screenshot per
+  // insight into unit.screenshots[] (same order as insightsList). The image is
+  // a PNG (its text is NOT selectable), so each screenshot is paired with that
+  // insight's COPYABLE text + a Copy button right here — so when you open a
+  // screenshot you can grab the exact text you need. Falls back gracefully if
+  // there are more/fewer screenshots than insights.
+  function _insightText(ins, ix) {
+    var L = [];
+    L.push('--- Insight ' + (ix + 1) + (ins && ins.title ? ': ' + ins.title : '') + ' ---');
+    if (ins) {
+      if (ins.subsystem) L.push('Subsystem: ' + ins.subsystem);
+      if (ins.type || ins.insightType) L.push('Type: ' + (ins.type || ins.insightType));
+      if (ins.status) L.push('Status: ' + ins.status);
+      if (ins.firstSeen || ins.firstDetected) L.push('First seen: ' + (ins.firstSeen || ins.firstDetected));
+      if (ins.lastSeen || ins.lastDetected) L.push('Last seen: ' + (ins.lastSeen || ins.lastDetected));
+      if (ins.maintenanceFactor) L.push('Maintenance factor: ' + ins.maintenanceFactor);
+      if (ins.summary) L.push('Summary: ' + ins.summary);
+      if (ins.guidance) L.push('Guidance: ' + ins.guidance);
+      if (ins.recommended) L.push('Recommended: ' + ins.recommended);
+      if (ins.url) L.push('Link: ' + ins.url);
+    }
+    return L.join('\n');
+  }
+  var shots = Array.isArray(unit.screenshots) ? unit.screenshots.filter(Boolean) : [];
+  var shotHtml = '';
+  if (shots.length) {
+    shotHtml = '<div class="dp-section-title">Uptake Screenshots <span class="dp-section-count">' + shots.length + '</span></div>' +
+      shots.map(function(s, ix) {
+        var ins = insights[ix] || null;
+        var label = (ins && ins.title) ? ins.title : ('Insight ' + (ix + 1));
+        var txt = _insightText(ins, ix);
+        return '<div class="dp-shot-block">' +
+          '<div class="dp-shot-block__title">' + esc(label) + '</div>' +
+          '<div class="dp-screenshot-card">' +
+            '<img class="dp-screenshot-img" data-shot="' + esc(s) + '" style="width:100%;height:auto;min-height:50px;display:block;border-radius:6px;cursor:zoom-in;" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Uptake screenshot loading..." />' +
+            '<div class="dp-screenshot-meta">Loading...</div>' +
+          '</div>' +
+          (txt ? '<details class="dp-insight-copy"><summary>\ud83d\udccb Copy this insight\u2019s text</summary>' +
+            '<div class="dp-insight-copy__bar"><button class="detail-panel__btn detail-panel__btn--secondary dp-insight-copy__btn" type="button">Copy</button></div>' +
+            '<textarea class="dp-insight-copy__text" readonly rows="' + Math.min(20, Math.max(5, txt.split('\n').length)) + '">' + esc(txt) + '</textarea>' +
+          '</details>' : '') +
+        '</div>';
+      }).join('');
   }
 
   // ask Orcha
@@ -2335,25 +2346,28 @@ function _renderUnit(unit) {
     });
   });
 
-  // Load uptake screenshot into Intel tab
-  var _ssImg = document.getElementById('dp-screenshot-img');
-  if (_ssImg && _ssImg.dataset.shot) {
-    window.files.readAsDataUrl(_ssImg.dataset.shot).then(function(d) {
-      if (d) {
-        _ssImg.src = d;
-        _ssImg.alt = 'Uptake Insight';
-        var m = document.getElementById('dp-screenshot-meta');
-        var ts = _ssImg.dataset.shot.match(/_(\d{13,})\.png$/);
-        if (ts && m) m.textContent = 'Captured: ' + new Date(parseInt(ts[1])).toLocaleString();
-        else if (m) m.textContent = '';
-        _ssImg.onclick = function() { window.files.openUptakeScreenshot(_ssImg.dataset.shot); };
-      } else {
-        _ssImg.alt = 'Screenshot file not found';
-        var m2 = document.getElementById('dp-screenshot-meta');
-        if (m2) m2.textContent = 'File not accessible';
-      }
-    }).catch(function(e) {
-      _ssImg.alt = 'Error: ' + (e.message || e);
+  // Load ALL uptake screenshots into Intel tab (one per insight). Each image
+  // lazy-loads its PNG as a data URL and opens full-size on click.
+  if (_panel && window.files && typeof window.files.readAsDataUrl === 'function') {
+    _panel.querySelectorAll('.dp-screenshot-img').forEach(function(img) {
+      var shotPath = img.dataset.shot;
+      if (!shotPath) return;
+      var metaEl = img.parentElement ? img.parentElement.querySelector('.dp-screenshot-meta') : null;
+      window.files.readAsDataUrl(shotPath).then(function(d) {
+        if (d) {
+          img.src = d;
+          img.alt = 'Uptake Insight';
+          var ts = shotPath.match(/_(\d{13,})\.png$/);
+          if (metaEl) metaEl.textContent = ts ? ('Captured: ' + new Date(parseInt(ts[1])).toLocaleString()) : '';
+          img.onclick = function() { if (window.files.openUptakeScreenshot) window.files.openUptakeScreenshot(shotPath); };
+        } else {
+          img.alt = 'Screenshot file not found';
+          if (metaEl) metaEl.textContent = 'File not accessible';
+        }
+      }).catch(function(e) {
+        img.alt = 'Error: ' + (e.message || e);
+        if (metaEl) metaEl.textContent = 'Load error';
+      });
     });
   }
 
