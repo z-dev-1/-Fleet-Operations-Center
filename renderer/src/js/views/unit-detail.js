@@ -2175,26 +2175,85 @@ function renderIntelPane(unit){
     }
     return L.join('\n');
   }
-  var shots = Array.isArray(unit.screenshots) ? unit.screenshots.filter(Boolean) : [];
+  // Build the per-insight screenshot blocks. An insight may now carry MORE than
+  // one chart (fault chart + line/trend chart) in ins.screenshots[]. So iterate
+  // INSIGHTS and render each insight's own charts under its text — this keeps
+  // the chart↔insight pairing correct even when counts differ. Falls back to
+  // the old positional flat unit.screenshots[] for cached data that predates
+  // per-insight ins.screenshots[].
+  function _shotCardHtml(s) {
+    return '<div class="dp-screenshot-card">' +
+      '<img class="dp-screenshot-img" data-shot="' + esc(s) + '" style="width:100%;height:auto;min-height:50px;display:block;border-radius:6px;cursor:zoom-in;" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Uptake screenshot loading..." />' +
+      '<div class="dp-screenshot-meta">Loading...</div>' +
+    '</div>';
+  }
+  function _copyHtml(txt) {
+    if (!txt) return '';
+    return '<details class="dp-insight-copy"><summary>\ud83d\udccb Copy this insight\u2019s text</summary>' +
+      '<div class="dp-insight-copy__bar"><button class="detail-panel__btn detail-panel__btn--secondary dp-insight-copy__btn" type="button">Copy</button></div>' +
+      '<textarea class="dp-insight-copy__text" readonly rows="' + Math.min(20, Math.max(5, txt.split('\n').length)) + '">' + esc(txt) + '</textarea>' +
+    '</details>';
+  }
+  // Visible details header shown ON TOP of each insight's chart: status/dates +
+  // Summary + Recommended Actions (the key text the chart image can't convey).
+  function _detailsHeaderHtml(ins) {
+    if (!ins) return '';
+    var rows = [];
+    var meta = [];
+    if (ins.status) meta.push('<b>Status:</b> ' + esc(ins.status));
+    var fs = ins.firstSeen || ins.firstDetected, ls = ins.lastSeen || ins.lastDetected;
+    if (fs) meta.push('<b>First:</b> ' + esc(String(fs).slice(0, 10)));
+    if (ls) meta.push('<b>Last:</b> ' + esc(String(ls).slice(0, 10)));
+    if (ins.subsystem) meta.push('<b>Subsystem:</b> ' + esc(ins.subsystem));
+    if (meta.length) rows.push('<div style="font-size:11px;color:rgba(255,255,255,0.6);margin-bottom:6px;">' + meta.join(' &nbsp;•&nbsp; ') + '</div>');
+    var summary = ins.summary || '';
+    var rec = ins.recommended || ins.guidance || '';
+    if (summary) rows.push('<div style="margin-bottom:6px;"><div style="font-size:11px;font-weight:700;color:#8ab4f8;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Summary</div><div style="font-size:12px;line-height:1.45;color:rgba(255,255,255,0.88);">' + esc(summary) + '</div></div>');
+    if (rec) rows.push('<div style="margin-bottom:4px;"><div style="font-size:11px;font-weight:700;color:#81c995;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Recommended Actions</div><div style="font-size:12px;line-height:1.45;color:rgba(255,255,255,0.88);white-space:pre-wrap;">' + esc(rec) + '</div></div>');
+    if (!rows.length) return '';
+    return '<div class="dp-insight-details" style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:10px 12px;margin-bottom:8px;">' + rows.join('') + '</div>';
+  }
+
+  var perInsightShots = Array.isArray(insights) &&
+    insights.some(function (ins) { return ins && Array.isArray(ins.screenshots) && ins.screenshots.length; });
+
   var shotHtml = '';
-  if (shots.length) {
-    shotHtml = '<div class="dp-section-title">Uptake Screenshots <span class="dp-section-count">' + shots.length + '</span></div>' +
-      shots.map(function(s, ix) {
-        var ins = insights[ix] || null;
-        var label = (ins && ins.title) ? ins.title : ('Insight ' + (ix + 1));
-        var txt = _insightText(ins, ix);
-        return '<div class="dp-shot-block">' +
-          '<div class="dp-shot-block__title">' + esc(label) + '</div>' +
-          '<div class="dp-screenshot-card">' +
-            '<img class="dp-screenshot-img" data-shot="' + esc(s) + '" style="width:100%;height:auto;min-height:50px;display:block;border-radius:6px;cursor:zoom-in;" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Uptake screenshot loading..." />' +
-            '<div class="dp-screenshot-meta">Loading...</div>' +
-          '</div>' +
-          (txt ? '<details class="dp-insight-copy"><summary>\ud83d\udccb Copy this insight\u2019s text</summary>' +
-            '<div class="dp-insight-copy__bar"><button class="detail-panel__btn detail-panel__btn--secondary dp-insight-copy__btn" type="button">Copy</button></div>' +
-            '<textarea class="dp-insight-copy__text" readonly rows="' + Math.min(20, Math.max(5, txt.split('\n').length)) + '">' + esc(txt) + '</textarea>' +
-          '</details>' : '') +
-        '</div>';
-      }).join('');
+  if (perInsightShots) {
+    var blocks = [];
+    var totalShots = 0;
+    insights.forEach(function (ins, ix) {
+      var insShots = (ins && Array.isArray(ins.screenshots) ? ins.screenshots : (ins && ins.screenshotPath ? [ins.screenshotPath] : [])).filter(Boolean);
+      if (!insShots.length) return;
+      totalShots += insShots.length;
+      var label = (ins && ins.title) ? ins.title : ('Insight ' + (ix + 1));
+      blocks.push(
+        '<div class="dp-shot-block">' +
+          '<div class="dp-shot-block__title">' + esc(label) + (insShots.length > 1 ? ' <span class="dp-section-count">' + insShots.length + ' charts</span>' : '') + '</div>' +
+          _detailsHeaderHtml(ins) +
+          insShots.map(_shotCardHtml).join('') +
+          _copyHtml(_insightText(ins, ix)) +
+        '</div>'
+      );
+    });
+    if (blocks.length) {
+      shotHtml = '<div class="dp-section-title">Uptake Screenshots <span class="dp-section-count">' + totalShots + '</span></div>' + blocks.join('');
+    }
+  } else {
+    // Legacy / cached data: positional pairing with the flat unit.screenshots[].
+    var shots = Array.isArray(unit.screenshots) ? unit.screenshots.filter(Boolean) : [];
+    if (shots.length) {
+      shotHtml = '<div class="dp-section-title">Uptake Screenshots <span class="dp-section-count">' + shots.length + '</span></div>' +
+        shots.map(function(s, ix) {
+          var ins = insights[ix] || null;
+          var label = (ins && ins.title) ? ins.title : ('Insight ' + (ix + 1));
+          return '<div class="dp-shot-block">' +
+            '<div class="dp-shot-block__title">' + esc(label) + '</div>' +
+            _detailsHeaderHtml(ins) +
+            _shotCardHtml(s) +
+            _copyHtml(_insightText(ins, ix)) +
+          '</div>';
+        }).join('');
+    }
   }
 
   // ask Orcha

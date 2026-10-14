@@ -732,9 +732,13 @@ async function apiFetchImage(win, url, deps = null) {
       // Verify it's actually a PNG (magic bytes 0x89 'P' 'N' 'G').
       const isPng = bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47;
       if (!isPng) return { ok: false, status: res.status, error: 'not-png:' + ct + ':' + bytes.length + 'b' };
-      let binary = '';
-      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-      return { ok: true, status: res.status, base64: btoa(binary), ct: ct };
+      // Chunked base64 — a per-byte String.fromCharCode loop blows up on the
+      // large charts (observed 6+ MB); build in 32KB chunks instead.
+      let binary = ''; const CH = 0x8000;
+      for (let i = 0; i < bytes.length; i += CH) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+      }
+      return { ok: true, status: res.status, base64: btoa(binary), ct: ct, bytes: bytes.length };
     } catch (e) { return { ok: false, status: 0, error: String(e && e.message || e) }; }
   })()`;
   try {
@@ -770,14 +774,17 @@ function mapApiInsight(el, assetUuid) {
   const url = (assetUuid && insightId)
     ? `${UPTAKE_API_BASE}/asset/${assetUuid}/insights/${insightId}`
     : '';
-  // Direct fault-chart image link (image/png) from the insight media array, so
-  // the screenshot pass can fetch the PNG directly instead of navigating +
-  // capturePage per insight. mediaFileLink is a relative path like
-  // "supporting_evidence/<insightId>/1_fault_chart_fig.png".
-  let mediaPng = '';
+  // ALL chart image links (image/png) from the insight media array, so the
+  // screenshot pass can fetch every chart directly (no page render). An insight
+  // can carry MORE than one PNG — e.g. "1_fault_chart_fig.png" AND
+  // "2_line_chart_fig.png" (a fault chart + a trend/line chart). We collect
+  // them all (sorted by the leading index) instead of just the first.
   const mediaArr = Array.isArray(ins.media) ? ins.media : [];
-  const pngEntry = mediaArr.find((m) => m && /image\/png/i.test(m.mediaDataType || '') && m.mediaFileLink);
-  if (pngEntry) mediaPng = pngEntry.mediaFileLink;
+  const mediaPngs = mediaArr
+    .filter((m) => m && m.mediaFileLink && (/image\/png/i.test(m.mediaDataType || '') || /\.png$/i.test(m.mediaFileLink)))
+    .map((m) => m.mediaFileLink)
+    .sort();   // "1_...png" before "2_...png"
+  const mediaPng = mediaPngs[0] || '';   // kept for backward compat
   return {
     title:             meta.title || '',
     url,
@@ -796,6 +803,7 @@ function mapApiInsight(el, assetUuid) {
     _assetUuid:        assetUuid,
     _insightId:        insightId,
     _mediaPng:         mediaPng,
+    _mediaPngs:        mediaPngs,
     severity:          ai.severity || meta.severity || '',
     riskScore:         (ai.riskScore != null ? ai.riskScore : null),
   };
@@ -1053,24 +1061,27 @@ async function runApiScrape(deps) {
       for (let j = 0; j < u.insightsList.length; j++) {
         if (win.isDestroyed() || deps.settled()) break;
         const ins = u.insightsList[j];
-        const label = `${u.id}_${shotIdx}`;
-        let saved = null;
+        let saved = null;        // -> ins.screenshotPath
+        const insShots = [];
 
-        // 3a. PRIMARY: direct media PNG (fast — for ALL insights).
-        if (ins._mediaPng) {
-          const candidates = mediaUrlCandidates(ins._mediaPng);
-          const order = mediaWinIdx >= 0
-            ? [mediaWinIdx] : candidates.map((_, k) => k);
-          for (const k of order) {
-            const cu = candidates[k];
-            if (!cu) continue;
-            const img = await apiFetchImage(win, cu, deps);
-            if (img.ok && img.base64) {
-              saved = saveB64Png(img.base64, label);
-              if (saved) { if (mediaWinIdx < 0) { mediaWinIdx = k; flog('[Uptake][API] media URL confirmed (candidate ' + k + ')'); } mediaOk++; break; }
-            }
+        // 3a. PRIMARY: fetch the insight's fault-chart PNG — the reliable
+        // raw-bytes path (the one that consistently hit ~582/619). ONE PNG per
+        // insight. (The Summary + Recommended Actions text is shown ABOVE the
+        // chart in the app UI (unit-detail Intel pane) rather than burned into
+        // the image — drawing text on the image via canvas proved unreliable at
+        // this volume. The text is also copyable there.)
+        const link = (Array.isArray(ins._mediaPngs) && ins._mediaPngs.length)
+          ? ins._mediaPngs[0] : ins._mediaPng;
+        if (link) {
+          const cu = mediaUrlCandidates(link)[0];
+          const img = cu ? await apiFetchImage(win, cu, deps) : { ok: false };
+          if (img.ok && img.base64) {
+            if (mediaWinIdx < 0) { mediaWinIdx = 0; flog('[Uptake][API] media confirmed (raw PNG)'); }
+            const file = saveB64Png(img.base64, `${u.id}_${shotIdx}`);
+            if (file) { insShots.push(file); mediaOk++; }
           }
         }
+        if (insShots.length) saved = insShots[0];
 
         // 3b. Fallback: capturePage — BOUNDED (only for no-media insights, and
         // only up to the cap/budget so slow captures can't dominate).
@@ -1082,21 +1093,25 @@ async function runApiScrape(deps) {
             await navTo(ins.url);
             await pollUntil(win, CHECK_DETAIL_READY, 600, 20);
             await sleep(1200);
-            saved = await deps.captureScreenshot(win, `insight_${label}`);
-            if (saved) capOk++;
+            const file = await deps.captureScreenshot(win, `insight_${u.id}_${shotIdx}`);
+            if (file) { insShots.push(file); saved = file; capOk++; }
           } catch (e) {
             fwarn(`[Uptake][API] capturePage fallback failed for ${u.id}/${ins.title}: ${e.message}`);
           }
         }
 
-        if (saved) { ins.screenshotPath = saved; u.screenshots.push(saved); }
+        if (saved) ins.screenshotPath = saved;        // primary chart
+        if (insShots.length) {
+          ins.screenshots = insShots.slice();          // ALL charts for this insight
+          insShots.forEach((f) => u.screenshots.push(f));
+        }
         shotIdx++;
       }
     }
     flog(`[Uptake][API] screenshots: ${mediaOk} via media-PNG + ${capOk} via capturePage fallback, ${shotIdx} insights in ${Math.round((Date.now() - shotStart) / 1000)}s`);
 
     // strip internal fields before returning
-    allUnits.forEach(u => u.insightsList.forEach(ins => { delete ins._assetUuid; delete ins._insightId; delete ins._mediaPng; }));
+    allUnits.forEach(u => u.insightsList.forEach(ins => { delete ins._assetUuid; delete ins._insightId; delete ins._mediaPng; delete ins._mediaPngs; }));
 
     flog(`[Uptake][API] Done — ${allUnits.length} units, risks: ${allUnits.filter(u => u.riskScore != null).length} found`);
     finish(allUnits, listShot);
