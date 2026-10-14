@@ -754,22 +754,28 @@ const CreateWRAutofill = {
              if (p.areaPairs && p.areaPairs.length) {
                  const totalRows = p.areaPairs.filter(pair => pair.area).length;
 
-                 // Phase 1: click + (totalRows-1) times, wait for each new row
+                 // Phase 1: add (totalRows-1) extra rows. Each "+" click reveals a
+                 // new Work Area combobox. RETRY each add up to 3x if the row did
+                 // not appear -- a single dropped click used to silently leave the
+                 // form with fewer rows than area pairs, so later pairs had nowhere
+                 // to go (the "sometimes only 2 of 3 fill" bug).
+                 const _comboCount = () => Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
                  if (totalRows > 1) {
                      for (let r = 0; r < totalRows - 1; r++) {
-                         const currentCount = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
-                         const addBtn = document.querySelector('BUTTON.css-1sm4msn') ||
-                             Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && b.querySelector('svg') && !(b.innerText || '').trim());
-                         if (addBtn) {
+                         let added = false;
+                         for (let attempt = 0; attempt < 3 && !added; attempt++) {
+                             const currentCount = _comboCount();
+                             const addBtn = document.querySelector('BUTTON.css-1sm4msn') ||
+                                 Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && b.querySelector('svg') && !(b.innerText || '').trim());
+                             if (!addBtn) { this.log('Area rows: add-row (+) button not found (attempt ' + (attempt + 1) + ')'); await this.sleep(300); continue; }
                              addBtn.click();
-                             await this.waitFor(() => {
-                                 const now = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
-                                 return now > currentCount ? true : null;
-                             }, 3000, 80);
-                             await this.sleep(100);
+                             added = !!(await this.waitFor(() => (_comboCount() > currentCount ? true : null), 3000, 80));
+                             if (!added) { this.log('Area rows: row ' + (r + 2) + ' did not appear, retrying (attempt ' + (attempt + 1) + ')'); await this.sleep(300); }
                          }
+                         await this.sleep(120);
                      }
                  }
+                 this.log('Area rows: expected ' + totalRows + ' row(s), have ' + _comboCount() + ' combobox(es) before fill');
 
                   // Phase 2: fill all rows
                   // BUG FIX (2026-07-23): previously used a fixed "2 inputs per row"
@@ -787,22 +793,39 @@ const CreateWRAutofill = {
                       this.log('Area pair [' + i + ']: ' + pair.area + ' / ' + pair.subcategory);
                       const isTires = /^tires$/i.test(pair.area.trim());
 
-                      const allInputs = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent);
-                      const workInput = allInputs[inputOffset] || null;
+                      // OFFSET GUARD: wait until this row's Work Area combobox exists
+                      // at inputOffset before touching it. Previously, if a prior
+                      // row's option was slow to render, allInputs[inputOffset] was
+                      // briefly undefined and the row was silently skipped -- which
+                      // then desynced every later row too. Waiting here keeps the
+                      // flat offset aligned with reality instead of drifting.
+                      await this.waitFor(() => {
+                          const ins = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent);
+                          return ins.length > inputOffset ? true : null;
+                      }, 4000, 80);
+                      const _comboInputs = () => Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent);
+                      const workInput = _comboInputs()[inputOffset] || null;
                       if (workInput) {
-                          try { workInput.focus(); } catch (e) {}
                           const ws = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
                           const workSearch = pair.area.toLowerCase();
-                          try { if (ws) ws.call(workInput, workSearch); else workInput.value = workSearch; } catch (e) { workInput.value = workSearch; }
-                          ['input', 'change', 'keyup'].forEach(t => { try { workInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
-                          // Exact match first, then includes  -  prevents "engine" matching "Check Engine Light"
-                          const workOpt = await this.waitFor(() => {
-                              const btns = Array.from(document.querySelectorAll('BUTTON[role="option"]'));
-                              const target = pair.area.toUpperCase();
-                              return btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase() === target)
-                                  || btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase().includes(target))
-                                  || null;
-                          }, 4000, 80);
+                          // RETRY the work-area type+match up to 2x -- the option list
+                          // can be slow to render; one empty poll used to drop the row.
+                          let workOpt = null;
+                          for (let attempt = 0; attempt < 2 && !workOpt; attempt++) {
+                              try { workInput.focus(); } catch (e) {}
+                              try { if (ws) ws.call(workInput, ''); else workInput.value = ''; workInput.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                              try { if (ws) ws.call(workInput, workSearch); else workInput.value = workSearch; } catch (e) { workInput.value = workSearch; }
+                              ['input', 'change', 'keyup'].forEach(t => { try { workInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
+                              // Exact match first, then includes  -  prevents "engine" matching "Check Engine Light"
+                              workOpt = await this.waitFor(() => {
+                                  const btns = Array.from(document.querySelectorAll('BUTTON[role="option"]'));
+                                  const target = pair.area.toUpperCase();
+                                  return btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase() === target)
+                                      || btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase().includes(target))
+                                      || null;
+                              }, 4000, 80);
+                              if (!workOpt && attempt === 0) this.log('Work Area [' + i + ']: no option yet, retrying type for "' + pair.area + '"');
+                          }
                           if (workOpt) {
                               this.click(workOpt);
                               this.log('Work Area [' + i + ']: clicked "' + (workOpt.innerText || '').trim() + '"');
@@ -894,31 +917,36 @@ const CreateWRAutofill = {
                               else { this.log('Tire Size [' + i + ']: dropdown did not open (scoped to own listbox)'); }
                           } else { this.log('Tire Size [' + i + ']: 3rd combobox not found'); }
                       } else if (pair.subcategory) {
-                          const allInputs2 = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent);
-                          const subInput = allInputs2[inputOffset + 1] || null;
+                          // Wait for the subcategory combobox (revealed after the work
+                          // area commits) to exist at inputOffset+1 before filling.
+                          await this.waitFor(() => (_comboInputs().length > inputOffset + 1 ? true : null), 3000, 80);
+                          const subInput = _comboInputs()[inputOffset + 1] || null;
                           if (subInput) {
-                              try { subInput.focus(); } catch (e) {}
                               const ss = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
                               const subSearch = pair.subcategory.toLowerCase();
-                              try { if (ss) ss.call(subInput, subSearch); else subInput.value = subSearch; } catch (e) { subInput.value = subSearch; }
-                              ['input', 'change', 'keyup'].forEach(t => { try { subInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
-                              // Exact match first
-                              const subOpt = await this.waitFor(() => {
-                                  const btns = Array.from(document.querySelectorAll('BUTTON[role="option"]'));
-                                  const target = pair.subcategory.toUpperCase();
-                                  return btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase() === target)
-                                      || btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase().includes(target))
-                                      || null;
-                              }, 4000, 80);
+                              // RETRY type+match up to 2x, and use waitForOption which
+                              // matches BUTTON[role=option] AND LI/[role=listitem] (some
+                              // subcategory lists render as LI, which the old BUTTON-only
+                              // matcher missed -> silent drop).
+                              let subOpt = null;
+                              for (let attempt = 0; attempt < 2 && !subOpt; attempt++) {
+                                  try { subInput.focus(); } catch (e) {}
+                                  try { if (ss) ss.call(subInput, ''); else subInput.value = ''; subInput.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                                  try { if (ss) ss.call(subInput, subSearch); else subInput.value = subSearch; } catch (e) { subInput.value = subSearch; }
+                                  ['input', 'change', 'keyup'].forEach(t => { try { subInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
+                                  subOpt = await this.waitForOption(pair.subcategory, 4000);
+                                  if (!subOpt && attempt === 0) this.log('Sub Area [' + i + ']: no option yet, retrying type for "' + pair.subcategory + '"');
+                              }
                               if (subOpt) { this.click(subOpt); this.log('Sub Area [' + i + ']: clicked "' + (subOpt.innerText || '').trim() + '"'); await this.sleep(300); }
                               else { this.log('Sub Area [' + i + ']: no match for "' + pair.subcategory + '"'); }
                           } else { this.log('Sub Area [' + i + ']: input not found'); }
                       }
 
-                      // Tires rows end up with 3 generic "Enter a value..." comboboxes over
-                      // their lifecycle (Work Area, Position, Size -- Size reveals only after
-                      // Position is picked); every other area only ever has 2 (Work Area,
-                      // Subcategory). Advance the running offset accordingly for the next row.
+                      // Advance past this row's comboboxes (Tires = 3: Work Area,
+                      // Position, Size; everything else = 2: Work Area, Subcategory).
+                      // The offset GUARD at the top of the next iteration waits for
+                      // the DOM to actually have this many before using the offset,
+                      // so a slow render pauses instead of desyncing later rows.
                       inputOffset += isTires ? 3 : 2;
                   }
              }
