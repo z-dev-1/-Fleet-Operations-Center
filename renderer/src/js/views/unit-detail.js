@@ -2137,7 +2137,7 @@ function renderIntelPane(unit){
           (subsystem?'<span class="dp-insight-card__type">'+esc(subsystem)+'</span>':'')+
           (type?'<span class="dp-insight-card__sub">'+esc(type)+'</span>':'')+
           (status?'<span class="dp-insight-card__status dp-insight-card__status--'+esc(status.toLowerCase())+'">'+esc(status)+'</span>':'')+
-          (ins.url?'<a class="dp-offsite-card__link" href="#" data-ext-url="'+esc(ins.url)+'" style="margin-left:auto">\u2197</a>':'')+
+          (ins.url?'<a class="dp-offsite-card__link" href="#" data-inapp-url="'+esc(ins.url)+'" title="Open insight in app" style="margin-left:auto">\u2197</a>':'')+
         '</div>'+
         (ins.title?'<div class="dp-insight-card__title">'+esc(ins.title)+'</div>':'')+
         (ins.summary?'<div class="dp-insight-card__summary">'+esc(ins.summary)+'</div>':'')+
@@ -2382,6 +2382,12 @@ function _renderUnit(unit) {
   });
   _panel.querySelectorAll('[data-ext-url]').forEach(function(b) {
     b.addEventListener('click', function(e){ e.preventDefault(); var u=b.dataset.extUrl||b.getAttribute('data-ext-url'); if(u&&window.files) window.files.openExternal(u).catch(function(){}); });
+  });
+
+  // In-app openers (e.g. Uptake insight ↗): open inside the app window
+  // (partition-aware via aap:open-url) instead of the external browser.
+  _panel.querySelectorAll('[data-inapp-url]').forEach(function(b) {
+    b.addEventListener('click', function(e){ e.preventDefault(); var u=b.dataset.inappUrl||b.getAttribute('data-inapp-url'); if(u&&window.aap&&window.aap.openUrl) window.aap.openUrl(u).catch(function(){}); });
   });
 
   // Copy-insight-text button (Intel pane): copy the full insight text block.

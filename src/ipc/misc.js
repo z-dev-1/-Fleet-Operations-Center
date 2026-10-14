@@ -406,16 +406,27 @@ function registerMiscIPC(ctx) {
   handle('aap:open-url', async (_e, url) => {
     if (!url || !/^https?:\/\//i.test(url)) return { ok: false, error: 'invalid url' };
     const { BrowserWindow, session } = require('electron');
+    // Partition-aware: a vendor URL (e.g. fleet.uptake.com) must open under its
+    // own persisted session (persist:vendor-uptake) where its SSO login already
+    // lives — otherwise the in-app window hits the vendor's login wall. AAP /
+    // non-vendor URLs fall back to defaultSession (same Midway cookies as the
+    // scraper window). Mirrors the window:split-view partition logic.
+    let _openSession = session.defaultSession;
+    try {
+      const { partitionForUrl } = require('../orcha/auto-login');
+      const _part = partitionForUrl(url);
+      if (_part) _openSession = session.fromPartition(_part);
+    } catch (_) { /* fall back to defaultSession */ }
     const win = new BrowserWindow({
       width: 1280, height: 860,
-      title: 'AAP Asset',
+      title: 'Fleet — External',
       icon: require('../config/app-icon').getAppIconPath(),
       backgroundColor: '#0d1117',
       center: true,
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
-        session: session.defaultSession,  // same Midway cookies as the scraper window
+        session: _openSession,  // vendor partition when applicable, else Midway default
       },
     });
     win.setMenuBarVisibility(false);
