@@ -498,10 +498,12 @@ const CreateWRAutofill = {
              }
 
 
-             // STEP 2: Location  -  exact working script, location from payload
+             // STEP 2: Location  -  location from payload
              this.log('--- STEP 2 ---');
 
-             // Step 1: Click Off Site by label text
+             // Click Off Site by label text (needed for both branches below:
+             // an off-site ADDRESS, and the legacy geofence path which also
+             // runs under "Off Site").
              const radios2 = document.querySelectorAll('input[type="radio"][name="answer"]');
              for (const radio of radios2) {
                  const label = radio.closest('label') || radio.parentElement;
@@ -512,8 +514,69 @@ const CreateWRAutofill = {
                  }
              }
 
-             // GeoFence combobox  -  recorder confirms class css-cmvgon
-             const geofenceInput = await this.waitFor(() =>
+             // OFF-SITE ADDRESS BRANCH: when the unit is NOT in its yard (e.g.
+             // a return-from-dealer tow — the unit is sitting at the dealer),
+             // the Location step must be filled with the actual STREET/CITY/
+             // STATE/ZIP, NOT a yard geofence. The home domicile is simply the
+             // wrong place in that case. The renderer resolves this and sets
+             // p.offSite + p.locStreet/City/State/Zip.
+             const _locHasAddr = !!(p.locStreet || p.locCity || p.locState || p.locZip);
+             if (p.offSite && _locHasAddr) {
+                 this.log('LOCATION: off-site address branch (unit not in yard) — filling Street/City/State/Zip, skipping GeoFence');
+                 await this.sleep(400);
+                 // Fill a Location text field matched by its label (Street/City/
+                 // State/Zip Code), using the React-safe native-setter pattern.
+                 const fillLocField = async (labelRe, value) => {
+                     if (!value) return;
+                     const el = await this.waitFor(() => {
+                         const labels = Array.from(document.querySelectorAll('LABEL'));
+                         for (const l of labels) {
+                             if (!labelRe.test((l.innerText || l.textContent || '').trim())) continue;
+                             let inp = l.control || (l.htmlFor && document.getElementById(l.htmlFor));
+                             if (inp && inp.offsetParent) return inp;
+                             // Label with no htmlFor: take the next visible text input after it.
+                             let sib = l.parentElement ? l.parentElement.querySelector('INPUT[type="text"], INPUT:not([type])') : null;
+                             if (sib && sib.offsetParent) return sib;
+                         }
+                         // Fallback: match by placeholder.
+                         const byPh = Array.from(document.querySelectorAll('INPUT[type="text"], INPUT:not([type])'))
+                             .find(i => i.offsetParent && labelRe.test(i.placeholder || ''));
+                         return byPh || null;
+                     }, 5000, 80);
+                     if (!el) { this.log('LOCATION: WARNING - field for ' + labelRe + ' not found'); return; }
+                     el.click(); await this.sleep(40);
+                     try { el.focus(); } catch (e) {}
+                     const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                     try { ns.call(el, ''); el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                     try { ns.call(el, String(value)); } catch (e) { el.value = String(value); }
+                     ['input', 'change', 'keyup'].forEach(t => { try { el.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
+                     await this.sleep(70);
+                     try { el.dispatchEvent(new FocusEvent('blur', { bubbles: true })); el.blur(); } catch (e) {}
+                     this.log('LOCATION: ' + labelRe + ' = "' + el.value + '"');
+                 };
+                 // "State" must not match "Asset Location State" (the radio
+                 // group heading) — anchor to the standalone field labels.
+                 await fillLocField(/^street$/i,              p.locStreet || '');
+                 await fillLocField(/^city$/i,                p.locCity   || '');
+                 await fillLocField(/^state$/i,               p.locState  || '');
+                 await this.sleep(200);
+                 await fillLocField(/^zip(\s*code)?$/i,       p.locZip    || '');
+                 document.body.click();
+                 await this.sleep(400);
+                 // Re-assert Off Site — React can reset the radio after field edits.
+                 const radiosOff = document.querySelectorAll('input[type="radio"][name="answer"]');
+                 for (const radio of radiosOff) {
+                     const label = radio.closest('label') || radio.parentElement;
+                     if (label && label.innerText.trim().toLowerCase().includes('off site')) { radio.click(); break; }
+                 }
+                 // Fall through to the shared "Wait then Next → STEP 3" code below;
+                 // only the GeoFence combobox block is skipped for off-site.
+             }
+
+             // GeoFence combobox  -  recorder confirms class css-cmvgon.
+             // SKIPPED for the off-site address branch (unit is at a street
+             // address, not a yard geofence).
+             const geofenceInput = (p.offSite && _locHasAddr) ? null : await this.waitFor(() =>
                  document.querySelector('INPUT.css-cmvgon[role="combobox"]') ||
                  document.querySelector('INPUT.css-cmvgon')
              , 5000, 80);
@@ -551,7 +614,7 @@ const CreateWRAutofill = {
                  } else {
                      this.log('GeoFence: WARNING option not found for "' + text + '"');
                  }
-             } else {
+             } else if (!(p.offSite && _locHasAddr)) {
                  this.log('GeoFence: WARNING combobox not found');
              }
 

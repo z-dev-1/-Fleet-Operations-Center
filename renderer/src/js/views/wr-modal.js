@@ -530,6 +530,17 @@ function _collectPayload() {
     // Tow direction (from the AI tow plan) so the submitted unit-location can
     // reflect where the unit actually is (dealer on a return tow, not home yard).
     towDirection:  (_towPlan && _towPlan.towDirection) || '',
+    // Off-site location for the AAP Location wizard step: when the unit is NOT
+    // in its yard (return/yard-to-yard tow) the wizard must select "Off Site
+    // (Address)" and type the pickup STREET/CITY/STATE/ZIP, not a geofence.
+    ...(() => { const l = _resolveWrLocation({
+          towDirection: (_towPlan && _towPlan.towDirection) || '',
+          towFromStreet: (_el('wr-tow-from-street')||{}).value||'',
+          towFromCity:   (_el('wr-tow-from-city')||{}).value||'',
+          towFromState:  (_el('wr-tow-from-state')||{}).value||'',
+          towFromZip:    (_el('wr-tow-from-zip')||{}).value||'',
+        });
+        return { offSite: l.offSite, locStreet: l.locStreet, locCity: l.locCity, locState: l.locState, locZip: l.locZip }; })(),
   };
 }
 
@@ -733,9 +744,34 @@ async function _submitOneTabSilently(key) {
 }
 
 // Build an aap.autofill-shaped payload from a tab snapshot (mirrors the
+// Resolve where the unit ACTUALLY is for the AAP Location wizard step.
+// In-yard (default / to-dealer tow): the unit is at its home yard, so the
+// wizard should pick the domicile GEOFENCE (On Site / Yard).
+// Off-site (return-from-dealer or yard-to-yard tow): the unit is at the tow
+// PICKUP location (the dealer), which is NOT a yard geofence — so the wizard
+// must select "Off Site (Address)" and type the STREET/CITY/STATE/ZIP instead.
+// Returns { offSite, locStreet, locCity, locState, locZip } the engine reads.
+function _resolveWrLocation(src) {
+  const dir = String((src && src.towDirection) || (_towPlan && _towPlan.towDirection) || '').toLowerCase();
+  const offSite = (dir === 'return-to-yard' || dir === 'yard-to-yard');
+  // Pickup = where the unit is NOW (dealer, on a return tow).
+  const locStreet = (src && src.towFromStreet) || '';
+  const locCity   = (src && src.towFromCity)   || '';
+  const locState  = (src && src.towFromState)  || '';
+  const locZip    = (src && src.towFromZip)    || '';
+  const hasAddr = !!(locStreet || locCity || locState || locZip);
+  return { offSite: offSite && hasAddr, locStreet, locCity, locState, locZip };
+}
+
 // fields _submitActiveTab sends to createWR, minus autoSubmit).
 function _snapshotToAutofillPayload(snap, copiedFromWorkRequestId) {
   const unit = _unit || {};
+  const towDirection = (snap && snap.towDirection) || (_towPlan && _towPlan.towDirection) || '';
+  const loc = _resolveWrLocation({
+    towDirection,
+    towFromStreet: snap.towFromStreet, towFromCity: snap.towFromCity,
+    towFromState: snap.towFromState, towFromZip: snap.towFromZip,
+  });
   return {
     unit: unit.id || unit.equipmentId || '',
     title: String(snap.title || '').slice(0, 90),
@@ -746,6 +782,9 @@ function _snapshotToAutofillPayload(snap, copiedFromWorkRequestId) {
     arcClaim: snap.arc || null, simNumber: snap.sim || null,
     attachments: _attachments.map(a => a.dataUrl), screenshotDataUrl: (_attachments[0] && _attachments[0].dataUrl) || null,
     domicile: unit.site || unit.domicileSite || '',
+    towDirection,
+    // Location for the wizard's Location step (off-site => address, not geofence).
+    offSite: loc.offSite, locStreet: loc.locStreet, locCity: loc.locCity, locState: loc.locState, locZip: loc.locZip,
     towStreet: snap.towStreet, towCity: snap.towCity, towState: snap.towState, towZip: snap.towZip,
     towFromStreet: snap.towFromStreet, towFromCity: snap.towFromCity, towFromState: snap.towFromState, towFromZip: snap.towFromZip,
     copiedFromWorkRequestId: copiedFromWorkRequestId || null,
