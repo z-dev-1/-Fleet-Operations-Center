@@ -646,6 +646,465 @@ const SCRAPE_AFTER_READMORE = `(function() {
 })()`;
 
 
+// ══════════════════════════════════════════════════════════════════════════════
+// API-BASED SCRAPE (UPTAKE_API=1) — reliable JSON path, DOM scrape stays fallback
+// ──────────────────────────────────────────────────────────────────────────────
+// Discovered 2026-10-14 (CDP netlog): the Uptake SPA is backed by a clean JSON
+// API authed by the SAME in-app Midway/AEA session cookies. Hitting it directly
+// is far more reliable than scraping a virtualized/Read-More DOM, and it fixes
+// the "missing insight" bug: the SPA's per-asset insights/search sends a ~30-day
+// lastDetectedLowerBound, which silently drops older insights (e.g. unit 622086's
+// 3rd insight, lastDetected 8/27). We widen that window so ALL instances return.
+//
+// Endpoints (host fleet.uptake.com):
+//   POST /api/asset-ui/v4/assets/insights?page=N&responseFormat=page&size=100&sort=endTs,desc  {insightQuery:{}}
+//   POST /api/asset-ui/v1/assets/<uuid>/insights/search?responseFormat=array&sort=startTs,desc  {insightQuery:{lastDetectedLowerBound}}
+//   GET  /api/asset-ui/assets/<uuid>/summary
+// Screenshots: navigate to /asset/<uuid>/insights/<insightId> and capturePage()
+// (same mechanism as the DOM path, but with exact IDs the API hands us).
+
+const UPTAKE_API_BASE = 'https://fleet.uptake.com';
+// How far back to look for per-asset insights. The SPA uses ~30d; we widen to
+// 365d so older-but-still-relevant insights (like 622086's) are not dropped.
+const UPTAKE_API_LOOKBACK_DAYS = 365;
+const UPTAKE_API_PAGE_SIZE = 100;
+// Bounded screenshot pass (screenshots are enrichment; the data is the win).
+const UPTAKE_API_SHOT_MIN_RISK = 80;      // only screenshot high-risk insights
+const UPTAKE_API_SHOT_CAP = 80;           // hard cap on total screenshots/run
+const UPTAKE_API_SHOT_BUDGET_MS = 5 * 60 * 1000;  // 5-min time budget for the pass
+
+// Run a fetch INSIDE the authed Uptake window so it carries the session cookies.
+// Returns { ok, status, json|text, error }. Never throws.
+async function apiFetch(win, url, method = 'GET', body = null, deps = null) {
+  const authHeader = deps && deps.authHeader;
+  const extra = (deps && deps.extraHeaders) || {};
+  const headersObj = Object.assign(
+    { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    authHeader ? { 'Authorization': authHeader } : {},
+    extra
+  );
+  const expr = `(async () => {
+    try {
+      const res = await fetch(${JSON.stringify(url)}, {
+        method: ${JSON.stringify(method)},
+        headers: ${JSON.stringify(headersObj)},
+        credentials: 'include',
+        ${body != null ? `body: ${JSON.stringify(JSON.stringify(body))},` : ''}
+      });
+      const ct = res.headers.get('content-type') || '';
+      const txt = await res.text();
+      let json = null;
+      if (/json/i.test(ct)) { try { json = JSON.parse(txt); } catch(_) {} }
+      return { ok: res.ok, status: res.status, json: json, text: json ? null : txt.slice(0, 2000) };
+    } catch (e) { return { ok: false, status: 0, error: String(e && e.message || e) }; }
+  })()`;
+  try {
+    const r = await win.webContents.executeJavaScript(expr);
+    return r || { ok: false, status: 0, error: 'no result' };
+  } catch (e) {
+    return { ok: false, status: 0, error: e.message };
+  }
+}
+
+// Fetch a binary (PNG) INSIDE the authed window and return it as a base64
+// string, so we can save the real fault-chart image directly instead of
+// navigating + capturePage per insight. Returns { ok, base64, status, error }.
+async function apiFetchImage(win, url, deps = null) {
+  const authHeader = deps && deps.authHeader;
+  const headersObj = Object.assign(
+    { 'Accept': 'image/png,image/*,*/*' },
+    authHeader ? { 'Authorization': authHeader } : {}
+  );
+  const expr = `(async () => {
+    try {
+      const res = await fetch(${JSON.stringify(url)}, {
+        method: 'GET',
+        headers: ${JSON.stringify(headersObj)},
+        credentials: 'include',
+      });
+      if (!res.ok) return { ok: false, status: res.status };
+      const ct = res.headers.get('content-type') || '';
+      if (!/image\\//i.test(ct)) return { ok: false, status: res.status, error: 'not-image:' + ct };
+      const buf = await res.arrayBuffer();
+      let binary = ''; const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      return { ok: true, status: res.status, base64: btoa(binary), ct: ct };
+    } catch (e) { return { ok: false, status: 0, error: String(e && e.message || e) }; }
+  })()`;
+  try {
+    const r = await win.webContents.executeJavaScript(expr);
+    return r || { ok: false, status: 0, error: 'no result' };
+  } catch (e) {
+    return { ok: false, status: 0, error: e.message };
+  }
+}
+
+// Resolve an insight media file link (relative, e.g.
+// "supporting_evidence/<id>/1_fault_chart_fig.png") to candidate absolute URLs
+// to try. We don't yet know the exact media route, so return a few plausible
+// shapes; the first that returns an image wins.
+function mediaUrlCandidates(mediaFileLink) {
+  const link = String(mediaFileLink || '').replace(/^\/+/, '');
+  if (!link) return [];
+  const enc = encodeURIComponent(link);
+  return [
+    `${UPTAKE_API_BASE}/api/media/insights/${link}`,
+    `${UPTAKE_API_BASE}/api/media/insights?path=${enc}`,
+    `${UPTAKE_API_BASE}/api/media/insights?mediaFileLink=${enc}`,
+    `${UPTAKE_API_BASE}/api/media/${link}`,
+  ];
+}
+
+// Map one API insights/search array element -> our insightsList entry shape.
+function mapApiInsight(el, assetUuid) {
+  const ai  = (el && el.assetInsight) || {};
+  const ins = ai.insight || {};
+  const meta = ins.insightMetadata || {};
+  const insightId = ins.insightId || ai.assetInsightId || '';
+  const url = (assetUuid && insightId)
+    ? `${UPTAKE_API_BASE}/asset/${assetUuid}/insights/${insightId}`
+    : '';
+  // Direct fault-chart image link (image/png) from the insight media array, so
+  // the screenshot pass can fetch the PNG directly instead of navigating +
+  // capturePage per insight. mediaFileLink is a relative path like
+  // "supporting_evidence/<insightId>/1_fault_chart_fig.png".
+  let mediaPng = '';
+  const mediaArr = Array.isArray(ins.media) ? ins.media : [];
+  const pngEntry = mediaArr.find((m) => m && /image\/png/i.test(m.mediaDataType || '') && m.mediaFileLink);
+  if (pngEntry) mediaPng = pngEntry.mediaFileLink;
+  return {
+    title:             meta.title || '',
+    url,
+    subsystem:         meta.riskFactor || '',
+    guidance:          meta.recommendedAction || '',
+    status:            el.actionState || '',
+    type:              meta.insightCategory || '',
+    maintenanceFactor: meta.riskFactor || '',
+    firstSeen:         ins.startTs || '',
+    lastSeen:          ins.endTs || '',
+    stillActive:       !!ins.visibleInUi,
+    summary:           meta.description || '',
+    recommended:       meta.recommendedAction || '',
+    screenshotPath:    '',
+    // internal — used by the screenshot pass, stripped from final shape only if needed
+    _assetUuid:        assetUuid,
+    _insightId:        insightId,
+    _mediaPng:         mediaPng,
+    severity:          ai.severity || meta.severity || '',
+    riskScore:         (ai.riskScore != null ? ai.riskScore : null),
+  };
+}
+
+// Build the per-asset attribute block from the API asset object.
+function mapApiAsset(assetObj) {
+  const a = (assetObj && assetObj.attributes) || {};
+  return {
+    vin:          a.Vin || a.vin || '',
+    model:        a.modelname || a.Model || '',
+    modelYear:    a['Model Year'] || a.yearmanufactured || '',
+    manufacturer: a.manufacturername || a.Make || '',
+    fuelType:     a.fueltype || a['Fuel Type'] || '',
+    operator:     a.operator || '',
+    domicile:     a.domicilesite || '',
+    assetType:    a.assettype || '',
+    tsp:          a.TSP || '',
+    customerName: (assetObj && assetObj.customerAssetName) || '',
+  };
+}
+
+// Core API scrape. deps = { win, finish, navTo, captureScreenshot, sleep, setLiveMap }
+async function runApiScrape(deps) {
+  const { win, finish, navTo, sleep, setLiveMap } = deps;
+  try {
+    flog('[Uptake][API] Starting API scrape (UPTAKE_API=1)...');
+
+    // ── 0. Capture the SPA's real auth via CDP ────────────────────────────
+    // The asset-ui API needs the Authorization bearer the SPA attaches via an
+    // in-memory interceptor (NOT in storage/cookies — confirmed: credentials-
+    // only fetch got 401). A JS fetch/XHR wrapper to sniff it raced the SPA
+    // and was flaky. Instead, attach the Chrome DevTools Protocol and read the
+    // Authorization header + userSavedFilterId straight off the SPA's OWN
+    // asset-ui requests on the wire — reliable, no race. Then re-navigate so
+    // the SPA fires those requests and we capture.
+    let capturedAuth = null;
+    let capturedFilterId = null;
+    let dbgAttached = false;
+    const dbg = win.webContents.debugger;
+    try {
+      if (dbg.isAttached()) {
+        // A prior attach (DevTools or a previous scrape cycle) is still live.
+        // Reuse it rather than failing — just (re)enable Network.
+        dbgAttached = false; // don't detach something we didn't attach
+      } else {
+        dbg.attach('1.3');
+        dbgAttached = true;
+      }
+      await dbg.sendCommand('Network.enable');
+      dbg.on('message', (_e, method, params) => {
+        try {
+          if (method !== 'Network.requestWillBeSent') return;
+          const u = (params.request && params.request.url) || '';
+          if (!/\/api\/asset-ui\//.test(u)) return;
+          const h = params.request.headers || {};
+          const a = h.Authorization || h.authorization;
+          if (a && /bearer/i.test(a)) capturedAuth = a;
+          const m = u.match(/userSavedFilterId=([0-9a-f-]+)/i);
+          if (m) capturedFilterId = m[1];
+        } catch (_) {}
+      });
+    } catch (e) {
+      fwarn('[Uptake][API] CDP attach failed (' + e.message + ') — cannot capture auth, aborting API path');
+      finish([], null);
+      return;
+    }
+
+    // Re-navigate so the SPA re-issues its authed asset-ui calls on the wire.
+    // The insights list route is what fires the saved-filter list call
+    // (v4/assets/insights?...userSavedFilterId=...). We must capture BOTH the
+    // bearer AND that filter id — the bearer alone appears on earlier
+    // unfiltered calls (summary/metadata), so breaking on auth-only misses the
+    // filter and would (dangerously) pull the whole tenant. So: wait for BOTH,
+    // and if only auth lands, nudge via a different route then back to force a
+    // fresh filtered list fetch.
+    try { await navTo(UPTAKE_INSIGHTS_URL); } catch (_) {}
+    let nudged = false;
+    for (let t = 0; t < 30 && !win.isDestroyed() && !deps.settled(); t++) {
+      await sleep(1500);
+      if (capturedAuth && capturedFilterId) break;
+      // Halfway through, if we have auth but still no filter, force the list to
+      // re-fetch by bouncing to the assets route and back to insights.
+      if (!capturedFilterId && capturedAuth && !nudged && t >= 6) {
+        nudged = true;
+        try { await navTo('https://fleet.uptake.com/assetsInsightsCases/assets'); } catch (_) {}
+        await sleep(1200);
+        try { await navTo(UPTAKE_INSIGHTS_URL); } catch (_) {}
+      }
+    }
+    try { if (dbgAttached) dbg.detach(); } catch (_) {}
+
+    deps.authHeader = capturedAuth;        // used by apiFetch below
+    deps.extraHeaders = {};
+    deps.filterId = capturedFilterId;      // scopes the fleet list to the user's saved filter
+    flog('[Uptake][API] captured bearer: ' + (capturedAuth ? ('yes (' + capturedAuth.length + ' chars)') : 'NO')
+      + ' | savedFilterId: ' + (capturedFilterId || 'none'));
+
+    // Verify the captured auth actually works against the API.
+    const probeUrl = `${UPTAKE_API_BASE}/api/asset-ui/v4/assets/insights`
+      + `?page=0&responseFormat=page&size=1&sort=endTs%2Cdesc`;
+    let authed = false;
+    for (let t = 0; t < 8 && !win.isDestroyed() && !deps.settled(); t++) {
+      const pr = await apiFetch(win, probeUrl, 'POST', { insightQuery: {} }, deps);
+      if (pr.ok && pr.json) { authed = true; break; }
+      await sleep(1500);
+    }
+    if (!authed) {
+      fwarn('[Uptake][API] API still not authorized after capturing SPA auth — aborting API path (DOM fallback remains)');
+      finish([], null);
+      return;
+    }
+    flog('[Uptake][API] session authed — fetching fleet insights...');
+
+    // ── 1. Fleet-wide insights list (paginated) ───────────────────────────
+    // Gives us the set of assets that currently have insights.
+    const assetUuids = new Set();
+    const assetObjById = {};   // uuid -> asset object (for attributes)
+    let page = 0, totalPages = 1, totalInsights = 0;
+    const filterQ = deps.filterId ? `&userSavedFilterId=${deps.filterId}` : '';
+    do {
+      const url = `${UPTAKE_API_BASE}/api/asset-ui/v4/assets/insights`
+        + `?page=${page}&responseFormat=page&size=${UPTAKE_API_PAGE_SIZE}&sort=endTs%2Cdesc${filterQ}`;
+      const r = await apiFetch(win, url, 'POST', { insightQuery: {} }, deps);
+      if (!r.ok || !r.json) {
+        fwarn(`[Uptake][API] fleet list page ${page} failed: status=${r.status} ${r.error || ''}`);
+        break;
+      }
+      const d = r.json;
+      const content = d.content || d.data || d.items || (Array.isArray(d) ? d : []);
+      if (page === 0) {
+        totalPages = d.totalPages || 1;
+        totalInsights = d.totalElements || content.length;
+        flog(`[Uptake][API] fleet insights: totalElements=${totalInsights} totalPages=${totalPages} (filter=${deps.filterId || 'NONE'})`);
+        // Safety: without the saved filter this returns the ENTIRE tenant
+        // (observed ~29k insights / 292 pages). That's not the user's fleet
+        // and must never be paged. Abort to the DOM fallback instead.
+        if (!deps.filterId && totalPages > 10) {
+          fwarn(`[Uptake][API] no saved filter captured and tenant list is huge (${totalInsights} insights) — aborting API path to avoid scraping the whole tenant`);
+          finish([], null);
+          return;
+        }
+      }
+      content.forEach(el => {
+        // v4 fleet-list elements have asset/insight at the TOP LEVEL (unlike the
+        // per-asset insights/search element, which nests them under
+        // `assetInsight`). Handle both shapes.
+        const asset = (el && el.asset) || (el && el.assetInsight && el.assetInsight.asset) || {};
+        const uuid = asset.assetId;
+        if (uuid) { assetUuids.add(uuid); if (!assetObjById[uuid]) assetObjById[uuid] = asset; }
+      });
+      page++;
+    } while (page < totalPages && page < 20 && !win.isDestroyed() && !deps.settled());
+
+    flog(`[Uptake][API] discovered ${assetUuids.size} unique assets with insights`);
+    if (!assetUuids.size) { finish([], null); return; }
+
+    // ── 2. Per-asset: insights/search (WIDE window) + summary ──────────────
+    const lowerBound = new Date(Date.now() - UPTAKE_API_LOOKBACK_DAYS * 86400000).toISOString();
+    const unitMap = {};
+    setLiveMap(unitMap);
+    const uuids = Array.from(assetUuids);
+    for (let i = 0; i < uuids.length; i++) {
+      if (win.isDestroyed() || deps.settled()) break;
+      const uuid = uuids[i];
+
+      // 2a. insights array (all instances within the wide window)
+      const searchUrl = `${UPTAKE_API_BASE}/api/asset-ui/v1/assets/${uuid}/insights/search`
+        + `?responseFormat=array&sort=startTs%2Cdesc`;
+      const sr = await apiFetch(win, searchUrl, 'POST', { insightQuery: { lastDetectedLowerBound: lowerBound } }, deps);
+      let arr = (sr.ok && Array.isArray(sr.json)) ? sr.json : [];
+
+      // asset attributes come from the search payload (richest) or the list
+      let assetObj = assetObjById[uuid];
+      if (arr.length && arr[0].assetInsight && arr[0].assetInsight.asset) {
+        assetObj = arr[0].assetInsight.asset;
+      }
+      const attrs = mapApiAsset(assetObj || {});
+      const unitId = attrs.customerName || (assetObj && assetObj.customerAssetName) || uuid;
+
+      // 2b. summary (risk score)
+      let riskScore = null, riskLabel = '';
+      const sumUrl = `${UPTAKE_API_BASE}/api/asset-ui/assets/${uuid}/summary`;
+      const sum = await apiFetch(win, sumUrl, 'GET', null, deps);
+      if (sum.ok && sum.json) {
+        const sj = sum.json;
+        const rs = sj.riskScore != null ? sj.riskScore
+                 : (sj.risk && sj.risk.score != null ? sj.risk.score : null);
+        if (rs != null) riskScore = Math.round(Number(rs));
+        riskLabel = sj.riskLabel || (sj.risk && sj.risk.label) || '';
+      }
+      // fallback: max insight riskScore if summary lacked one
+      if (riskScore == null && arr.length) {
+        const scores = arr.map(e => e.assetInsight && e.assetInsight.riskScore).filter(x => x != null);
+        if (scores.length) riskScore = Math.round(Math.max.apply(null, scores));
+      }
+
+      const insightsList = arr.map(el => mapApiInsight(el, uuid));
+      const subsystems = Array.from(new Set(insightsList.map(x => x.subsystem).filter(Boolean)));
+
+      unitMap[unitId] = {
+        id:           unitId,
+        assetUuid:    uuid,
+        riskScore:    riskScore,
+        riskLabel:    riskLabel,
+        openCases:    0,
+        insightCount: insightsList.length,
+        vin:          attrs.vin,
+        model:        attrs.model,
+        modelYear:    attrs.modelYear,
+        manufacturer: attrs.manufacturer,
+        fuelType:     attrs.fuelType,
+        tsp:          attrs.tsp,
+        operator:     attrs.operator,
+        domicile:     attrs.domicile,
+        assetType:    attrs.assetType,
+        region:       '',
+        lastDataDate: '',
+        insightsList: insightsList,
+        subsystems:   subsystems,
+        screenshots:  [],
+      };
+      flog(`[Uptake][API] ${i + 1}/${uuids.length} asset ${unitId}: ${insightsList.length} insight(s), risk=${riskScore}`);
+    }
+
+    // ── 3. Screenshot pass — BOUNDED ──────────────────────────────────────
+    // The data above (all 173 assets, incl. 622086's full 3 insights) is the
+    // reliable, fast win. Screenshots are enrichment and were the slow part
+    // (navigate + capturePage per insight = 30+ min for ~600 insights). So we
+    // BOUND the pass: screenshot only HIGH-RISK insights (riskScore >= the
+    // threshold) — where a chart actually matters for triage — with an overall
+    // count + time cap so the pass stays a few minutes and never risks the
+    // master timeout. We still opportunistically try the fast media-PNG first
+    // (free if it ever resolves), then fall back to capturePage.
+    let listShot = null;
+    try {
+      await navTo(UPTAKE_INSIGHTS_URL);
+      await sleep(1500);
+      listShot = await deps.captureScreenshot(win, 'insights_list');
+    } catch (_) {}
+
+    const saveB64Png = (base64, label) => {
+      try {
+        const buf = Buffer.from(base64, 'base64');
+        if (buf.length < 1000) return null;      // too small = not a real chart
+        const file = path.join(SCREENSHOTS_DIR, `uptake_insight_${label}_${Date.now()}.png`);
+        fs.writeFileSync(file, buf);
+        return file;
+      } catch (_) { return null; }
+    };
+
+    const allUnits = Object.values(unitMap);
+    let shotIdx = 0, mediaOk = 0, capOk = 0, mediaWinIdx = -1;
+    const shotStart = Date.now();
+    for (const u of allUnits) {
+      if (win.isDestroyed() || deps.settled()) break;
+      if (shotIdx >= UPTAKE_API_SHOT_CAP) break;
+      if (Date.now() - shotStart > UPTAKE_API_SHOT_BUDGET_MS) break;
+      for (let j = 0; j < u.insightsList.length; j++) {
+        if (win.isDestroyed() || deps.settled()) break;
+        if (shotIdx >= UPTAKE_API_SHOT_CAP || (Date.now() - shotStart > UPTAKE_API_SHOT_BUDGET_MS)) break;
+        const ins = u.insightsList[j];
+        // BOUND: only high-risk insights get a screenshot.
+        const r = (ins.riskScore != null ? ins.riskScore : u.riskScore);
+        if (!(Number(r) >= UPTAKE_API_SHOT_MIN_RISK)) continue;
+
+        const label = `${u.id}_${shotIdx}`;
+        let saved = null;
+
+        // 3a. Opportunistic fast path: direct media PNG (cheap if it resolves).
+        if (ins._mediaPng) {
+          const candidates = mediaUrlCandidates(ins._mediaPng);
+          const order = mediaWinIdx >= 0
+            ? [mediaWinIdx] : candidates.map((_, k) => k);
+          for (const k of order) {
+            const cu = candidates[k];
+            if (!cu) continue;
+            const img = await apiFetchImage(win, cu, deps);
+            if (img.ok && img.base64) {
+              saved = saveB64Png(img.base64, label);
+              if (saved) { if (mediaWinIdx < 0) { mediaWinIdx = k; flog('[Uptake][API] media URL shape locked (candidate ' + k + ')'); } mediaOk++; break; }
+            }
+          }
+        }
+
+        // 3b. Reliable fallback: navigate + capturePage.
+        if (!saved && ins.url) {
+          try {
+            await navTo(ins.url);
+            await pollUntil(win, CHECK_DETAIL_READY, 600, 20);
+            await sleep(1200);
+            saved = await deps.captureScreenshot(win, `insight_${label}`);
+            if (saved) capOk++;
+          } catch (e) {
+            fwarn(`[Uptake][API] capturePage failed for ${u.id}/${ins.title}: ${e.message}`);
+          }
+        }
+
+        if (saved) { ins.screenshotPath = saved; u.screenshots.push(saved); }
+        shotIdx++;
+      }
+    }
+    flog(`[Uptake][API] screenshots (bounded, risk>=${UPTAKE_API_SHOT_MIN_RISK}): ${mediaOk} media + ${capOk} capturePage, ${shotIdx} attempted in ${Math.round((Date.now() - shotStart) / 1000)}s`);
+
+    // strip internal fields before returning
+    allUnits.forEach(u => u.insightsList.forEach(ins => { delete ins._assetUuid; delete ins._insightId; delete ins._mediaPng; }));
+
+    flog(`[Uptake][API] Done — ${allUnits.length} units, risks: ${allUnits.filter(u => u.riskScore != null).length} found`);
+    finish(allUnits, listShot);
+  } catch (e) {
+    fwarn('[Uptake][API] runApiScrape error:', e.message);
+    finish([], null);
+  }
+}
+
 
 // ─── Main scrape function ─────────────────────────────────────────────────────
 async function scrapeUptake() {
@@ -682,6 +1141,100 @@ async function scrapeUptake() {
     if (DEBUG) {
       win.setPosition(100, 100);
       win.webContents.openDevTools({ mode: 'right' });
+    }
+
+    // ── TEMP API DISCOVERY PROBE (env-gated: UPTAKE_NETLOG=1) ────────────────
+    // Goal: find a RELIABLE JSON/GraphQL API behind the Uptake SPA that we
+    // could call directly instead of scraping the deduped/virtualized DOM
+    // (the DOM list collapses same-title insights, e.g. unit 622086's two
+    // "Engine Crankcase Breather Speed" rows -> only one scraped). This runs
+    // INSIDE the authenticated Uptake window, so it uses the real Midway/AEA
+    // session (no separate Chromium/login needed).
+    //
+    // webRequest alone can't read response BODIES, so we attach the Chrome
+    // DevTools Protocol (webContents.debugger) and enable Network to capture
+    // request + response body for every *.uptake.com API call. Everything is
+    // written to uptake-api-discovery.json for inspection. Zero effect unless
+    // UPTAKE_NETLOG=1. Fully wrapped in try/catch — never breaks a real scrape.
+    if (process.env.UPTAKE_NETLOG === '1') {
+      try {
+        const _path = require('path');
+        const _fs   = require('fs');
+        const _app  = require('electron').app;
+        const _outFile = _path.join(_app.getPath('userData'), 'uptake-api-discovery.json');
+        const _apiRe = /(?:^|\.)uptake\.com/i;
+        // skip static assets / telemetry noise; keep API/graphql/data calls
+        const _isApi = (u) =>
+          _apiRe.test(u) &&
+          /\/(api|graphql|insight|asset|case|fault|v\d|data|query)/i.test(u) &&
+          !/\.(js|css|png|jpg|jpeg|gif|svg|woff2?|ttf|ico|map)(\?|$)/i.test(u) &&
+          !/(segment|datadog|newrelic|sentry|analytics|telemetry|google|gtag)/i.test(u);
+
+        const _calls = new Map();   // requestId -> {method,url,reqBody,...}
+        const _dump = () => {
+          try {
+            const arr = Array.from(_calls.values());
+            const uniq = Array.from(new Set(arr.map(c => c.method + ' ' + (c.url||'').split('?')[0])));
+            _fs.writeFileSync(_outFile, JSON.stringify({
+              capturedAt: new Date().toISOString(),
+              uniqueEndpoints: uniq,
+              callCount: arr.length,
+              calls: arr,
+            }, null, 2));
+          } catch (_) {}
+        };
+
+        const dbg = win.webContents.debugger;
+        dbg.attach('1.3');
+        dbg.sendCommand('Network.enable');
+
+        dbg.on('message', (_e, method, params) => {
+          try {
+            if (method === 'Network.requestWillBeSent') {
+              const u = params.request && params.request.url || '';
+              if (_isApi(u)) {
+                _calls.set(params.requestId, {
+                  method: params.request.method,
+                  url: u,
+                  reqBody: params.request.postData || null,
+                  reqHeaders: {
+                    authorization: params.request.headers && params.request.headers['authorization'] ? '(present)' : undefined,
+                    'content-type': params.request.headers && params.request.headers['content-type'],
+                    accept: params.request.headers && params.request.headers['accept'],
+                  },
+                  status: null, respType: null, respBody: null,
+                });
+                flog('[Uptake][NETLOG]', params.request.method, u);
+              }
+            } else if (method === 'Network.responseReceived') {
+              const c = _calls.get(params.requestId);
+              if (c) {
+                c.status = params.response.status;
+                c.respType = params.response.mimeType;
+              }
+            } else if (method === 'Network.loadingFinished') {
+              const c = _calls.get(params.requestId);
+              if (c && /json|graphql|text/i.test(c.respType || '')) {
+                dbg.sendCommand('Network.getResponseBody', { requestId: params.requestId })
+                  .then((res) => {
+                    let body = res.body || '';
+                    if (res.base64Encoded) { try { body = Buffer.from(body, 'base64').toString('utf8'); } catch(_){} }
+                    // cap stored body so the file stays readable
+                    c.respBody = body.length > 20000 ? body.slice(0, 20000) + '…[truncated]' : body;
+                    flog('[Uptake][NETLOG]   <-', c.status, c.respType, '(' + body.length + ' bytes)', c.url.split('?')[0]);
+                    _dump();
+                  })
+                  .catch(() => {});
+              }
+            }
+          } catch (_) {}
+        });
+
+        dbg.on('detach', () => { try { _dump(); } catch(_){} });
+        flog('[Uptake][NETLOG] CDP API-discovery probe attached (UPTAKE_NETLOG=1) -> ' + _outFile);
+      } catch (e) {
+        fwarn('[Uptake][NETLOG] failed to attach CDP probe:', e.message);
+      }
     }
 
     const masterTimer = setTimeout(() => {
@@ -1036,8 +1589,21 @@ async function scrapeUptake() {
       if (FLEET_DOMAIN.test(url) && (!REALM_LOGIN.test(url) || REALM_CALLBACK.test(url))) {
         if (!authDone) {
           authDone = true;
-          flog('[Uptake] Auth done — starting scrape...');
-          runScrape();
+          if (process.env.UPTAKE_API === '1') {
+            flog('[Uptake] Auth done — starting API scrape (UPTAKE_API=1)...');
+            runApiScrape({
+              win,
+              finish,
+              navTo,
+              sleep,
+              captureScreenshot,
+              settled: () => settled,
+              setLiveMap: (m) => { _liveUnitMap = m; },
+            });
+          } else {
+            flog('[Uptake] Auth done — starting scrape...');
+            runScrape();
+          }
         }
         return;
       }
