@@ -37,6 +37,8 @@ const ESCALATION_LEVELS = ['SEV5', 'SEV4', 'SEV3', 'SEV2'];
 
 let _host = null;          // the element we render into
 let _data = { importedAt: null, columns: [], rows: {} };
+// Per-column filter text, keyed by column label (CSV columns) or manual key.
+let _filters = {};
 
 // ── HTML escaping ───────────────────────────────────────────────────────────
 function _esc(s) {
@@ -127,13 +129,38 @@ function _buildImportPayload(matrix) {
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────
-function _rowKeys() {
-  // Preserve import order (keys end in ::<index>) by sorting on the numeric tail.
+// All row keys in import order (unfiltered). Used for counts and TSV export.
+function _allRowKeys() {
   return Object.keys(_data.rows || {}).sort((a, b) => {
     const ai = parseInt(a.split('::').pop(), 10) || 0;
     const bi = parseInt(b.split('::').pop(), 10) || 0;
     return ai - bi;
   });
+}
+
+// Does this row match ALL active column filters? CSV columns match on their
+// value; manual columns match on the saved manual value. Case-insensitive
+// substring match.
+function _rowMatchesFilters(rowKey) {
+  const active = Object.entries(_filters).filter(([, v]) => String(v || '').trim() !== '');
+  if (!active.length) return true;
+  const r = _data.rows[rowKey] || {};
+  const csv = r.csv || {};
+  const manual = r.manual || {};
+  for (const [field, needleRaw] of active) {
+    const needle = String(needleRaw).trim().toLowerCase();
+    // field is either a CSV column label or a manual key (prefixed "m:").
+    let hay;
+    if (field.startsWith('m:')) hay = String(manual[field.slice(2)] || '');
+    else hay = String(csv[field] || '');
+    if (!hay.toLowerCase().includes(needle)) return false;
+  }
+  return true;
+}
+
+// Row keys after applying the active filters (used for rendering the body).
+function _rowKeys() {
+  return _allRowKeys().filter(_rowMatchesFilters);
 }
 
 function _manualCellHtml(rowKey, col, value) {
@@ -159,13 +186,25 @@ function _manualCellHtml(rowKey, col, value) {
 
 function _renderTable() {
   const cols = _data.columns || [];
-  const keys = _rowKeys();
-  if (!keys.length) {
-    return `<div class="an-empty">No imported CSV yet. Click <strong>Import CSV</strong> and pick the AAP long-dwell tracker export.</div>`;
+  if (!_allRowKeys().length) {
+    return `<div class="an-empty">No data yet. Click <strong>Fetch from AAP</strong> to pull the long-dwell tracker directly (no download), or <strong>Import CSV</strong> to load a downloaded export.</div>`;
   }
-  const headCsv    = cols.map((h) => `<th>${_esc(h)}</th>`).join('');
-  const headManual = MANUAL_COLS.map((c) => `<th class="ldc-manual-th">${_esc(c.label)}</th>`).join('');
-  const header = `<tr>${headCsv}${headManual}</tr>`;
+  const keys = _rowKeys();
+
+  // Row 1: column titles (sticky). Row 2: per-column filter inputs (sticky
+  // just below the titles). data-filter is the filter key: the CSV column
+  // label, or "m:<key>" for a manual column.
+  const titleCsv    = cols.map((h) => `<th>${_esc(h)}</th>`).join('');
+  const titleManual = MANUAL_COLS.map((c) => `<th class="ldc-manual-th">${_esc(c.label)}</th>`).join('');
+  const titleRow = `<tr class="ldc-head-titles">${titleCsv}${titleManual}</tr>`;
+
+  const filterCell = (key) => {
+    const v = _filters[key] || '';
+    return `<th class="ldc-filter-th"><input class="ldc-filter" type="text" data-filter="${_esc(key)}" value="${_esc(v)}" placeholder="\uD83D\uDD0D" /></th>`;
+  };
+  const filterCsv    = cols.map((h) => filterCell(h)).join('');
+  const filterManual = MANUAL_COLS.map((c) => filterCell('m:' + c.key)).join('');
+  const filterRow = `<tr class="ldc-head-filters">${filterCsv}${filterManual}</tr>`;
 
   const body = keys.map((rowKey) => {
     const r = _data.rows[rowKey] || {};
@@ -176,7 +215,11 @@ function _renderTable() {
     return `<tr data-rowkey="${_esc(rowKey)}">${csvCells}${manualCells}</tr>`;
   }).join('');
 
-  return `<div class="ldc-table-scroll"><table class="an-table ldc-table"><thead>${header}</thead><tbody>${body}</tbody></table></div>`;
+  const emptyMsg = !keys.length
+    ? `<tr><td class="ldc-no-match" colspan="${cols.length + MANUAL_COLS.length}">No rows match the current filters.</td></tr>`
+    : '';
+
+  return `<div class="ldc-table-scroll"><table class="an-table ldc-table"><thead>${titleRow}${filterRow}</thead><tbody>${body}${emptyMsg}</tbody></table></div>`;
 }
 
 function _renderToolbar() {
@@ -190,7 +233,8 @@ function _renderToolbar() {
       <div class="an-ld-toolbar-row">
         ${meta}
         <div class="an-ld-toolbar-actions">
-          <button id="ldc-import" class="ec-preset-btn" title="Import the AAP long-dwell tracker CSV (A\u2013M columns). Your filled-in columns are preserved on re-import.">\u2b06\uFE0F Import CSV</button>
+          <button id="ldc-fetch" class="ec-preset-btn ldc-fetch-btn" title="Pull the long-dwell tracker straight from AAP (no download). Uses your signed-in session; your filled-in columns are preserved.">\uD83D\uDD04 Fetch from AAP</button>
+          <button id="ldc-import" class="ec-preset-btn" title="Import a downloaded AAP long-dwell tracker CSV (A\u2013M columns). Your filled-in columns are preserved on re-import.">\u2b06\uFE0F Import CSV</button>
           <button id="ldc-copy" class="ec-preset-btn" title="Copy the full table (CSV + your filled columns) to paste into Excel/SharePoint">\uD83D\uDCCB Copy Table</button>
           ${keys.length ? '<button id="ldc-clear" class="ec-preset-btn" title="Clear the imported dataset">\u2715 Clear</button>' : ''}
         </div>
@@ -267,6 +311,28 @@ function _wire() {
     });
   }
 
+  const fetchBtn = _host.querySelector('#ldc-fetch');
+  if (fetchBtn) fetchBtn.addEventListener('click', async () => {
+    const orig = fetchBtn.innerHTML;
+    fetchBtn.disabled = true;
+    fetchBtn.innerHTML = '\u23F3 Fetching from AAP\u2026';
+    toast.show('info', 'Pulling the long-dwell tracker from AAP\u2026', 2500);
+    try {
+      const res = await csvBridge.fetchAap({});
+      if (res && res.ok) {
+        toast.show('success', `Fetched ${res.count} rows from AAP`, 3000);
+        await refresh();
+      } else {
+        toast.show('warn', (res && res.error) || 'AAP fetch failed', 6000);
+      }
+    } catch (e) {
+      toast.show('error', 'AAP fetch failed: ' + e.message, 6000);
+    } finally {
+      fetchBtn.disabled = false;
+      fetchBtn.innerHTML = orig;
+    }
+  });
+
   const copyBtn = _host.querySelector('#ldc-copy');
   if (copyBtn) copyBtn.addEventListener('click', async () => {
     if (!_rowKeys().length) { toast.show('warn', 'Nothing to copy \u2014 import a CSV first', 3000); return; }
@@ -311,7 +377,42 @@ function _wire() {
       const el = ev.target;
       if (el && el.tagName === 'TEXTAREA' && el.classList.contains('ldc-input')) save(el);
     }, true);
+
+    // Per-column filters — update _filters and re-render ONLY the tbody so the
+    // filter input keeps focus and the caret position. Debounced lightly.
+    let _filterTimer = null;
+    wrap.addEventListener('input', (ev) => {
+      const el = ev.target;
+      if (!el || !el.classList || !el.classList.contains('ldc-filter')) return;
+      const key = el.getAttribute('data-filter');
+      if (key == null) return;
+      _filters[key] = el.value;
+      clearTimeout(_filterTimer);
+      _filterTimer = setTimeout(() => _renderBodyOnly(), 120);
+    });
   }
+}
+
+// Re-render just the table body (keeps the sticky header + filter inputs, and
+// therefore keyboard focus, intact while typing a filter).
+function _renderBodyOnly() {
+  if (!_host) return;
+  const tbody = _host.querySelector('.ldc-table tbody');
+  if (!tbody) { _render(); return; }
+  const cols = _data.columns || [];
+  const keys = _rowKeys();
+  const body = keys.map((rowKey) => {
+    const r = _data.rows[rowKey] || {};
+    const csv = r.csv || {};
+    const manual = r.manual || {};
+    const csvCells = cols.map((h) => `<td class="ldc-csv-cell">${_esc(csv[h] || '')}</td>`).join('');
+    const manualCells = MANUAL_COLS.map((c) => `<td class="ldc-manual-cell">${_manualCellHtml(rowKey, c, manual[c.key])}</td>`).join('');
+    return `<tr data-rowkey="${_esc(rowKey)}">${csvCells}${manualCells}</tr>`;
+  }).join('');
+  const emptyMsg = !keys.length
+    ? `<tr><td class="ldc-no-match" colspan="${cols.length + MANUAL_COLS.length}">No rows match the current filters.</td></tr>`
+    : '';
+  tbody.innerHTML = body + emptyMsg;
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

@@ -354,10 +354,11 @@ export const longDwell = {
 
 // ── Long Dwell imported CSV (team-shared tracker) ──────────────────────────
 export const longDwellCsv = {
-  get:     ()        => window.longDwellCsv.get(),
-  import:  (payload) => window.longDwellCsv.import(payload),
-  saveRow: (payload) => window.longDwellCsv.saveRow(payload),
-  clear:   ()        => window.longDwellCsv.clear(),
+  get:      ()        => window.longDwellCsv.get(),
+  import:   (payload) => window.longDwellCsv.import(payload),
+  fetchAap: (opts)    => window.longDwellCsv.fetchAap(opts),
+  saveRow:  (payload) => window.longDwellCsv.saveRow(payload),
+  clear:    ()        => window.longDwellCsv.clear(),
 };
 
 // ── AI / Orcha ─────────────────────────────────────────────────────────────

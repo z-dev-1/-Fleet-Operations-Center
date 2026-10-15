@@ -170,10 +170,11 @@ expose('longDwell', {
 
 // ── Long Dwell imported CSV (team-shared tracker) ──────────────────────────
 expose('longDwellCsv', {
-  get:     ()        => ipcRenderer.invoke('long-dwell-csv:get'),
-  import:  (payload) => ipcRenderer.invoke('long-dwell-csv:import', payload),
-  saveRow: (payload) => ipcRenderer.invoke('long-dwell-csv:save-row', payload),
-  clear:   ()        => ipcRenderer.invoke('long-dwell-csv:clear'),
+  get:      ()        => ipcRenderer.invoke('long-dwell-csv:get'),
+  import:   (payload) => ipcRenderer.invoke('long-dwell-csv:import', payload),
+  fetchAap: (opts)    => ipcRenderer.invoke('long-dwell-csv:fetch-aap', opts),
+  saveRow:  (payload) => ipcRenderer.invoke('long-dwell-csv:save-row', payload),
+  clear:    ()        => ipcRenderer.invoke('long-dwell-csv:clear'),
 });
 
 // ── AI / Orcha ────────────────────────────────────────────────────────────────
