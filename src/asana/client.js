@@ -34,16 +34,38 @@ function saveConfig(config) {
   }
 }
 
+// Synchronous PAT lookup (env var or plaintext config). Kept for callers that
+// only need the PAT path; the async resolveToken() below is the real entry.
 function getToken() {
   return process.env.ASANA_PAT || loadConfig().pat || null;
 }
 
+// Resolve the best available auth token, async so OAuth can refresh.
+// Preference order:
+//   1. OAuth access token (when an OAuth user is logged in) — auto-refreshed.
+//   2. ASANA_PAT env var / plaintext PAT in asanaConfig (backward compatible).
+// Returns null when nothing is configured.
+async function resolveToken() {
+  try {
+    const oauth = require('./oauth');
+    if (oauth.isConfigured() && oauth.isActive()) {
+      const tok = await oauth.getAccessToken();
+      if (tok) return tok;
+      // OAuth configured + a user was active but the token couldn't be
+      // refreshed — fall through to PAT rather than hard-failing.
+    }
+  } catch (e) {
+    logger.warn('OAuth token resolve failed, falling back to PAT:', e.message);
+  }
+  return getToken();
+}
+
 // ── API REQUEST ───────────────────────────────────────────────────────────────
-function apiRequest(endpoint, method, body) {
+async function apiRequest(endpoint, method, body) {
+  const token = await resolveToken();
   return new Promise((resolve, reject) => {
-    const token = getToken();
     if (!token) {
-      reject(new Error('No Asana PAT configured. Set ASANA_PAT env var or configure in Settings.'));
+      reject(new Error('No Asana auth configured. Log in with Asana (OAuth) or set a PAT in Settings.'));
       return;
     }
 
@@ -95,10 +117,10 @@ function apiRequest(endpoint, method, body) {
 async function apiPaginate(endpoint) {
   let allResults = [];
   let nextPage   = endpoint;
+  const token = await resolveToken();   // resolve once (OAuth or PAT) for the whole page walk
   while (nextPage) {
     const raw = await new Promise((resolve, reject) => {
-      const token = getToken();
-      if (!token) { reject(new Error('No Asana PAT')); return; }
+      if (!token) { reject(new Error('No Asana auth configured. Log in with Asana or set a PAT.')); return; }
       const url = new URL(nextPage.startsWith('http') ? nextPage : ASANA_BASE_URL + nextPage);
       const options = {
         hostname: url.hostname, port: 443,
@@ -193,7 +215,7 @@ function hasStorageState() {
 }
 
 module.exports = {
-  loadConfig, saveConfig, getToken, checkAuth, hasStorageState,
+  loadConfig, saveConfig, getToken, resolveToken, checkAuth, hasStorageState,
   getMe, getWorkspaces, getProjects, getTasks, getTask, getTaskStories,
   createTask, updateTask, addComment, searchTasks, getSections, moveTaskToSection,
   apiRequest, apiPaginate,

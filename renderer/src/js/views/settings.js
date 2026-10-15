@@ -626,6 +626,29 @@ function _html() {
         <!-- Asana -->
         <div class="sd-section" id="sect-asana">
           <div class="sd-section-title">Asana</div>
+
+          <!-- OAuth 2.0 — recommended, multi-user ("Login with Asana") -->
+          <div class="sd-hint" style="margin-bottom:8px">Sign in with your own Asana account (recommended). Each teammate logs in with their own login — tokens are stored encrypted on this device.</div>
+          <div class="sd-row">
+            <div class="sd-field">
+              <div class="sd-label">OAuth Client ID</div>
+              <input class="sd-input" id="asana-oauth-client-id" placeholder="1200000000000000"/>
+            </div>
+            <div class="sd-field">
+              <div class="sd-label">OAuth Client Secret</div>
+              <input class="sd-input" id="asana-oauth-client-secret" type="password" placeholder="stored encrypted"/>
+            </div>
+          </div>
+          <div class="sd-hint" style="margin-bottom:8px">Redirect URI to register in your Asana app: <code>http://localhost:3000/auth/asana/callback</code></div>
+          <div class="sd-btn-row">
+            <button class="sd-btn secondary" id="asana-oauth-save">Save OAuth app</button>
+            <button class="sd-btn primary"   id="asana-oauth-login">Login with Asana</button>
+            <button class="sd-btn secondary" id="asana-oauth-logout">Logout</button>
+          </div>
+          <div id="asana-oauth-status" class="sd-status warn" style="margin-top:6px">\u26A0\uFE0F Not connected</div>
+
+          <div class="sd-divider" style="margin:14px 0;border-top:1px solid var(--line,#2a3344)"></div>
+          <div class="sd-hint" style="margin-bottom:8px">Or use a Personal Access Token (single user).</div>
           <div class="sd-field">
             <div class="sd-label">Personal Access Token</div>
             <input class="sd-input" id="asana-pat" type="password" placeholder="0/xxxxxxxx"/>
@@ -1778,6 +1801,75 @@ function _wireAsana() {
       st.style.display = 'block';
     }).catch(() => {});
   });
+
+  // ── OAuth 2.0 ("Login with Asana") — modeled on the Slack login flow ────────
+  _checkAsanaOAuth();
+
+  const saveOauthBtn = document.getElementById('asana-oauth-save');
+  if (saveOauthBtn) saveOauthBtn.addEventListener('click', async () => {
+    const clientId     = document.getElementById('asana-oauth-client-id').value.trim();
+    const clientSecret = document.getElementById('asana-oauth-client-secret').value.trim();
+    try {
+      const res = await asanaBridge.saveOauthConfig({ clientId, clientSecret });
+      document.getElementById('asana-oauth-client-secret').value = '';   // never keep secret in the field
+      if (res && res.ok) toast.show('success', 'Asana OAuth app saved', 2500);
+      else toast.show('warn', (res && res.error) || 'Could not save OAuth app', 4000);
+      _checkAsanaOAuth();
+    } catch (e) {
+      toast.show('error', 'Save failed: ' + e.message, 4000);
+    }
+  });
+
+  const loginBtn = document.getElementById('asana-oauth-login');
+  if (loginBtn) loginBtn.addEventListener('click', () => {
+    loginBtn.disabled = true;
+    const original = loginBtn.textContent;
+    loginBtn.textContent = 'Opening browser\u2026';
+    asanaBridge.oauthLogin().then((res) => {
+      if (res && res.ok) {
+        toast.show('success', 'Logged into Asana as ' + (res.user || res.email || 'you'), 3000);
+      } else {
+        toast.show('warn', (res && res.error) || 'Asana login was not completed', 4000);
+      }
+      _checkAsanaOAuth();
+    }).catch((e) => {
+      toast.show('error', 'Asana login failed: ' + e.message, 4000);
+    }).finally(() => {
+      loginBtn.disabled = false;
+      loginBtn.textContent = original;
+    });
+  });
+
+  const logoutBtn = document.getElementById('asana-oauth-logout');
+  if (logoutBtn) logoutBtn.addEventListener('click', () => {
+    asanaBridge.oauthLogout().then(() => {
+      toast.show('info', 'Logged out of Asana', 2500);
+      _checkAsanaOAuth();
+    }).catch((e) => toast.show('error', 'Logout failed: ' + e.message, 3000));
+  });
+}
+
+// Connected-status badge for Asana OAuth (mirrors _checkSlack). Never receives
+// a token — only { connected, user, email } from asana:oauth-status.
+function _checkAsanaOAuth() {
+  if (!window.asana || !window.asana.oauthStatus) return;
+  asanaBridge.oauthStatus().then((res) => {
+    const el = document.getElementById('asana-oauth-status');
+    if (!el) return;
+    if (!res || !res.configured) {
+      el.textContent = '\u26A0\uFE0F Not configured — add Client ID + Secret, then Save OAuth app';
+      el.className = 'sd-status warn';
+      return;
+    }
+    const ok = !!res.connected;
+    el.textContent = ok
+      ? ('\u2705 Connected as ' + (res.user || res.email || 'Asana user'))
+      : '\u26A0\uFE0F Not connected — click "Login with Asana"';
+    el.className = 'sd-status ' + (ok ? 'ok' : 'warn');
+    // Pre-fill the client id (public) so the user sees what's configured.
+    const idEl = document.getElementById('asana-oauth-client-id');
+    if (idEl && !idEl.value && res.clientId) idEl.value = res.clientId;
+  }).catch(() => {});
 }
 
 // ── Section: Fleet Ops Companion — removed (feature discontinued) ────────────

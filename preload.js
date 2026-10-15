@@ -477,6 +477,12 @@ expose('asana', {
   addComment:    (taskGid, text)       => ipcRenderer.invoke('asana:add-comment', taskGid, text),
   moveTask:      (taskGid, sectGid)    => ipcRenderer.invoke('asana:move-task', taskGid, sectGid),
   linkUnit:      (unitId, taskId)      => ipcRenderer.invoke('asana:link-unit', unitId, taskId),
+  // OAuth 2.0 ("Login with Asana"). oauthStatus never returns a token.
+  oauthStatus:     ()        => ipcRenderer.invoke('asana:oauth-status'),
+  oauthLogin:      ()        => ipcRenderer.invoke('asana:oauth-login'),
+  oauthLogout:     (gid)     => ipcRenderer.invoke('asana:oauth-logout', gid),
+  oauthSwitchUser: (gid)     => ipcRenderer.invoke('asana:oauth-switch-user', gid),
+  saveOauthConfig: (cfg)     => ipcRenderer.invoke('asana:save-oauth-config', cfg),
 });
 
 // -- Vendor / Dealer Work Order Engine (S23-8)

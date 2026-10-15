@@ -546,6 +546,12 @@ export const asana = {
   addComment:     (taskGid, text)    => window.asana.addComment(taskGid, text),
   moveTask:       (taskGid, sectGid) => window.asana.moveTask(taskGid, sectGid),
   linkUnit:       (unitId, taskId)   => window.asana.linkUnit(unitId, taskId),
+  // OAuth 2.0 ("Login with Asana")
+  oauthStatus:     ()      => window.asana.oauthStatus(),
+  oauthLogin:      ()      => window.asana.oauthLogin(),
+  oauthLogout:     (gid)   => window.asana.oauthLogout(gid),
+  oauthSwitchUser: (gid)   => window.asana.oauthSwitchUser(gid),
+  saveOauthConfig: (cfg)   => window.asana.saveOauthConfig(cfg),
 };
 
 // Microsoft Graph mail was removed (2026-09-02). Email uses SMTP/OWA only.

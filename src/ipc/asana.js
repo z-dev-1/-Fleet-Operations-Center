@@ -62,6 +62,29 @@ function registerAsanaIPC() {
     return asana.saveConfig(config);
   });
 
+  // ── OAuth 2.0 (multi-user "Login with Asana") ───────────────────────────────
+  // Secrets never cross the bridge: oauth-status returns only { connected,
+  // user, email, gid, users[] } — never a token. save-oauth-config takes the
+  // clientId/secret from Settings (secret is encrypted main-side).
+  const oauth = require('../asana/oauth');
+  handle('asana:oauth-status', async () => oauth.status());
+  handle('asana:oauth-login',  async () => oauth.login());
+  handle('asana:oauth-logout', async (_e, gid) => {
+    if (gid != null) _validateGid(gid, 'gid');
+    return oauth.logout(gid);
+  });
+  handle('asana:oauth-switch-user', async (_e, gid) => {
+    _validateGid(gid, 'gid');
+    return oauth.switchUser(gid);
+  });
+  handle('asana:save-oauth-config', async (_e, config) => {
+    requireObject(config, 'config');
+    if (config.clientId != null)     requireStringMax(config.clientId, 'clientId', 128);
+    if (config.clientSecret != null) requireStringMax(config.clientSecret, 'clientSecret', 256);
+    if (config.redirectUri != null)  requireStringMax(config.redirectUri, 'redirectUri', 256);
+    return oauth.saveOAuthConfig(config);
+  });
+
   // ── User ───────────────────────────────────────────────────────────────────
   handle('asana:get-me',          async () => asana.getMe());
 
