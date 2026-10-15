@@ -2141,8 +2141,19 @@ function renderIntelPane(unit){
         '</div>'+
         (ins.title?'<div class="dp-insight-card__title">'+esc(ins.title)+'</div>':'')+
         (ins.summary?'<div class="dp-insight-card__summary">'+esc(ins.summary)+'</div>':'')+
-        (ins.guidance?'<div class="dp-insight-card__action">\u27a1 '+esc(ins.guidance)+'</div>':'')+
-        (ins.recommended?'<div class="dp-insight-card__action">\ud83d\udd27 '+esc(ins.recommended)+'</div>':'')+
+        // guidance and recommended both derive from the same Uptake field
+        // (meta.recommendedAction), so render ONLY ONE to avoid the duplicated
+        // "Recommended Actions" block. Prefer `recommended`; fall back to
+        // `guidance`; and if they ever differ, show guidance separately only
+        // when it is NOT identical to recommended.
+        ((function(){
+          var rec = ins.recommended || ins.guidance || '';
+          var g   = ins.guidance || '';
+          var out = '';
+          if (rec) out += '<div class="dp-insight-card__action">\ud83d\udd27 '+esc(rec)+'</div>';
+          if (g && g !== rec && g !== ins.recommended) out += '<div class="dp-insight-card__action">\u27a1 '+esc(g)+'</div>';
+          return out;
+        })())+
         ((since||last||mf)?'<div class="dp-insight-card__meta">'+
           (since?'<span>First: '+esc(since)+'</span>':'')+
           (last?'<span>Last: '+esc(last)+'</span>':'')+
@@ -2169,8 +2180,11 @@ function renderIntelPane(unit){
       if (ins.lastSeen || ins.lastDetected) L.push('Last seen: ' + (ins.lastSeen || ins.lastDetected));
       if (ins.maintenanceFactor) L.push('Maintenance factor: ' + ins.maintenanceFactor);
       if (ins.summary) L.push('Summary: ' + ins.summary);
-      if (ins.guidance) L.push('Guidance: ' + ins.guidance);
-      if (ins.recommended) L.push('Recommended: ' + ins.recommended);
+      // guidance/recommended are the same source field — emit once (prefer
+      // recommended), and only add guidance if it genuinely differs.
+      var _rec = ins.recommended || ins.guidance || '';
+      if (_rec) L.push('Recommended: ' + _rec);
+      if (ins.guidance && ins.guidance !== _rec && ins.guidance !== ins.recommended) L.push('Guidance: ' + ins.guidance);
       if (ins.url) L.push('Link: ' + ins.url);
     }
     return L.join('\n');
