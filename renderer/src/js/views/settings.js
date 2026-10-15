@@ -618,6 +618,10 @@ function _html() {
           <div class="sd-section-title" style="margin-top:14px;font-size:11px">Shadow comparisons (FAS draft vs. what was sent)</div>
           <div class="sd-hint" style="margin-bottom:6px">Highest-divergence first. Nothing here was sent — this is evaluation only.</div>
           <div id="fas-audit-list" style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto"></div>
+
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">FAS Roster</div>
+          <div class="sd-hint" style="margin-bottom:6px">The full FAS personnel roster (FAS Name, Site Code, Email, Phone, Uptime Manager, Program, SCAC), pulled directly from the FAS roster page — every entry, not just the first 100. Filter any column and copy to Excel/SharePoint.</div>
+          <div id="fas-roster-host"></div>
         </div>
 
         <!-- Partner Work Request Forms section moved (2026-08-14) to the

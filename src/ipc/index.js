@@ -30,6 +30,7 @@ const { registerSetupIPC }       = require('./setup');
 const { registerDailyTasksIPC }  = require('./daily-tasks');
 const { registerLongDwellIPC }     = require('./long-dwell');
 const { registerLongDwellCsvIPC }  = require('./long-dwell-csv');
+const { registerFasRosterIPC }     = require('./fas-roster');
 const { registerSchedulerIPC }     = require('./scheduler');
 const { registerEmailTriageIPC }   = require('./email-triage');
 const { registerRelayReconcileIPC } = require('./relay-reconcile');
@@ -55,6 +56,7 @@ function registerAllIPC(ctx) {
   try { require('../scrapers/vendor_session').startWarmScheduler(); } catch (e) { logger.warn('vendor warm scheduler start failed: ' + e.message); }
   registerLongDwellIPC();
   registerLongDwellCsvIPC();
+  registerFasRosterIPC();
   registerSchedulerIPC(ctx);
   registerEmailTriageIPC(ctx);
   registerRelayReconcileIPC(ctx);

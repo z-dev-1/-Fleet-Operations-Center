@@ -177,6 +177,14 @@ expose('longDwellCsv', {
   clear:    ()        => ipcRenderer.invoke('long-dwell-csv:clear'),
 });
 
+// ── FAS Roster (scraped FAS personnel roster) ───────────────────────────────
+expose('fasRoster', {
+  get:            () => ipcRenderer.invoke('fas-roster:get'),
+  fetch:          () => ipcRenderer.invoke('fas-roster:fetch'),
+  clear:          () => ipcRenderer.invoke('fas-roster:clear'),
+  importContacts: () => ipcRenderer.invoke('fas-roster:import-contacts'),
+});
+
 // ── AI / Orcha ────────────────────────────────────────────────────────────────
 expose('ai', {
   suggest:          (unit)        => ipcRenderer.invoke('ai:suggest', unit),

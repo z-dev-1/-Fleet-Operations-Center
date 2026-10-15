@@ -470,6 +470,15 @@ export function initFasSettings() {
   _refreshProfiles();
   _refreshDrafts();
   _refreshPlaybook();
+
+  // FAS Roster table (self-contained module). Lazy-import so a load error in
+  // the roster view never blocks the rest of the FAS settings from wiring.
+  const rosterHost = document.getElementById('fas-roster-host');
+  if (rosterHost) {
+    import('./fas-roster.js')
+      .then((mod) => { try { mod.mount(rosterHost); } catch (_) {} })
+      .catch(() => {});
+  }
 }
 
 export { _refreshAudit as refreshFasAudit };

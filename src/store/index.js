@@ -95,6 +95,7 @@ const REGISTRY = {
   slackAutoReply:   () => path.join(P.dataDir, 'slack_auto_reply.json'), // FEATURE (2026-07-16)
   longDwellStore:   () => path.join(P.dataDir, 'long_dwell.json'), // FEATURE (2026-07-20): Analytics -> Long Dwell Units tab
   longDwellCsv:     () => path.join(P.dataDir, 'long_dwell_csv.json'), // FEATURE: imported AAP tracker CSV + team-filled N-R columns
+  fasRoster:        () => path.join(P.dataDir, 'fas_roster.json'),    // FEATURE: scraped FAS roster snapshot (FAS personnel)
   slackMentionThreads: () => path.join(P.dataDir, 'slack_mention_threads.json'), // thread-continuation tracking for channel watch
   bubbleConfig:     () => path.join(P.dataDir, 'bubble_config.json'),             // floating bubble opacity setting
 

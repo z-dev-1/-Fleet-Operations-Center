@@ -353,6 +353,13 @@ export const longDwell = {
 };
 
 // ── Long Dwell imported CSV (team-shared tracker) ──────────────────────────
+export const fasRoster = {
+  get:            () => window.fasRoster.get(),
+  fetch:          () => window.fasRoster.fetch(),
+  clear:          () => window.fasRoster.clear(),
+  importContacts: () => window.fasRoster.importContacts(),
+};
+
 export const longDwellCsv = {
   get:      ()        => window.longDwellCsv.get(),
   import:   (payload) => window.longDwellCsv.import(payload),
