@@ -546,12 +546,23 @@ export const asana = {
   addComment:     (taskGid, text)    => window.asana.addComment(taskGid, text),
   moveTask:       (taskGid, sectGid) => window.asana.moveTask(taskGid, sectGid),
   linkUnit:       (unitId, taskId)   => window.asana.linkUnit(unitId, taskId),
-  // OAuth 2.0 ("Login with Asana")
-  oauthStatus:     ()      => window.asana.oauthStatus(),
-  oauthLogin:      ()      => window.asana.oauthLogin(),
-  oauthLogout:     (gid)   => window.asana.oauthLogout(gid),
-  oauthSwitchUser: (gid)   => window.asana.oauthSwitchUser(gid),
-  saveOauthConfig: (cfg)   => window.asana.saveOauthConfig(cfg),
+  // Multi-user PAT manager
+  listUsers:      ()              => window.asana.listUsers(),
+  setupUser:      (alias, pat)    => window.asana.setupUser(alias, pat),
+  switchUser:     (alias)         => window.asana.switchUser(alias),
+  removeUser:     (alias)         => window.asana.removeUser(alias),
+  // Workflow helpers
+  getMyTasks:     (opts)          => window.asana.getMyTasks(opts),
+  getTodaysTasks: ()              => window.asana.getTodaysTasks(),
+  completeTask:   (gid)           => window.asana.completeTask(gid),
+  completeDaily:  (name, comment) => window.asana.completeDaily(name, comment),
+  batchComplete:  (names)         => window.asana.batchComplete(names),
+  createEscalation:(opts)         => window.asana.createEscalation(opts),
+  dailySummary:   ()              => window.asana.dailySummary(),
+  // Attachments
+  getAttachments: (gid)           => window.asana.getAttachments(gid),
+  uploadFile:     (gid, p)        => window.asana.uploadFile(gid, p),
+  linkExternal:   (gid, url, name)=> window.asana.linkExternal(gid, url, name),
 };
 
 // Microsoft Graph mail was removed (2026-09-02). Email uses SMTP/OWA only.

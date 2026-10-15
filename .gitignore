@@ -28,7 +28,6 @@ orcha_config.json
 credentials.enc
 asana_config.json
 asana_auth_state.json
-asana_oauth.json
 
 # Logs
 logs/

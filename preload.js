@@ -477,12 +477,23 @@ expose('asana', {
   addComment:    (taskGid, text)       => ipcRenderer.invoke('asana:add-comment', taskGid, text),
   moveTask:      (taskGid, sectGid)    => ipcRenderer.invoke('asana:move-task', taskGid, sectGid),
   linkUnit:      (unitId, taskId)      => ipcRenderer.invoke('asana:link-unit', unitId, taskId),
-  // OAuth 2.0 ("Login with Asana"). oauthStatus never returns a token.
-  oauthStatus:     ()        => ipcRenderer.invoke('asana:oauth-status'),
-  oauthLogin:      ()        => ipcRenderer.invoke('asana:oauth-login'),
-  oauthLogout:     (gid)     => ipcRenderer.invoke('asana:oauth-logout', gid),
-  oauthSwitchUser: (gid)     => ipcRenderer.invoke('asana:oauth-switch-user', gid),
-  saveOauthConfig: (cfg)     => ipcRenderer.invoke('asana:save-oauth-config', cfg),
+  // Multi-user PAT manager (list/metadata only — never a PAT value)
+  listUsers:     ()               => ipcRenderer.invoke('asana:list-users'),
+  setupUser:     (alias, pat)     => ipcRenderer.invoke('asana:setup-user', alias, pat),
+  switchUser:    (alias)          => ipcRenderer.invoke('asana:switch-user', alias),
+  removeUser:    (alias)          => ipcRenderer.invoke('asana:remove-user', alias),
+  // Workflow helpers (active user)
+  getMyTasks:    (opts)           => ipcRenderer.invoke('asana:get-my-tasks', opts),
+  getTodaysTasks:()               => ipcRenderer.invoke('asana:get-todays-tasks'),
+  completeTask:  (gid)            => ipcRenderer.invoke('asana:complete-task', gid),
+  completeDaily: (name, comment)  => ipcRenderer.invoke('asana:complete-daily', name, comment),
+  batchComplete: (names)          => ipcRenderer.invoke('asana:batch-complete', names),
+  createEscalation:(opts)         => ipcRenderer.invoke('asana:create-escalation', opts),
+  dailySummary:  ()               => ipcRenderer.invoke('asana:daily-summary'),
+  // Attachments
+  getAttachments:(gid)            => ipcRenderer.invoke('asana:get-attachments', gid),
+  uploadFile:    (gid, filePath)  => ipcRenderer.invoke('asana:upload-file', gid, filePath),
+  linkExternal:  (gid, url, name) => ipcRenderer.invoke('asana:link-external', gid, url, name),
 });
 
 // -- Vendor / Dealer Work Order Engine (S23-8)

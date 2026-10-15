@@ -13,7 +13,7 @@
  */
 
 const logger = require('../utils/logger')('ipc:asana');
-const { handle, requireString, requireStringMax, requireObject } = require('./_safe');
+const { handle, requireString, requireStringMax, requireObject, requireArrayMax } = require('./_safe');
 const { ConfigError } = require('../utils/errors');
 
 // ── Issue #21: key format validation (mirrors credentials.js pattern) ─────────
@@ -62,27 +62,58 @@ function registerAsanaIPC() {
     return asana.saveConfig(config);
   });
 
-  // ── OAuth 2.0 (multi-user "Login with Asana") ───────────────────────────────
-  // Secrets never cross the bridge: oauth-status returns only { connected,
-  // user, email, gid, users[] } — never a token. save-oauth-config takes the
-  // clientId/secret from Settings (secret is encrypted main-side).
-  const oauth = require('../asana/oauth');
-  handle('asana:oauth-status', async () => oauth.status());
-  handle('asana:oauth-login',  async () => oauth.login());
-  handle('asana:oauth-logout', async (_e, gid) => {
-    if (gid != null) _validateGid(gid, 'gid');
-    return oauth.logout(gid);
+  // ── Multi-user PAT manager ──────────────────────────────────────────────────
+  // list-users returns metadata ONLY (never a PAT); setup-user takes alias+PAT
+  // (PAT stored encrypted main-side) and auto-discovers the user's GIDs.
+  const ALIAS_MAX = 64;
+  const PAT_MAX    = 128;   // Asana PATs are ~40-80 chars
+  handle('asana:list-users',  async () => asana.listUsers());
+  handle('asana:setup-user',  async (_e, alias, pat) => {
+    requireStringMax(alias, 'alias', ALIAS_MAX);
+    requireStringMax(pat, 'pat', PAT_MAX);
+    return asana.setupUser(alias, pat);
   });
-  handle('asana:oauth-switch-user', async (_e, gid) => {
-    _validateGid(gid, 'gid');
-    return oauth.switchUser(gid);
+  handle('asana:switch-user', async (_e, alias) => {
+    requireStringMax(alias, 'alias', ALIAS_MAX);
+    return asana.switchUser(alias);
   });
-  handle('asana:save-oauth-config', async (_e, config) => {
-    requireObject(config, 'config');
-    if (config.clientId != null)     requireStringMax(config.clientId, 'clientId', 128);
-    if (config.clientSecret != null) requireStringMax(config.clientSecret, 'clientSecret', 256);
-    if (config.redirectUri != null)  requireStringMax(config.redirectUri, 'redirectUri', 256);
-    return oauth.saveOAuthConfig(config);
+  handle('asana:remove-user', async (_e, alias) => {
+    requireStringMax(alias, 'alias', ALIAS_MAX);
+    return asana.removeUser(alias);
+  });
+
+  // ── Workflow helpers (active user) ──────────────────────────────────────────
+  handle('asana:get-my-tasks',       async (_e, opts) => asana.getMyTasks(opts || {}));
+  handle('asana:get-todays-tasks',   async () => asana.getTodaysTasks());
+  handle('asana:complete-task',      async (_e, taskGid) => { _validateGid(taskGid, 'taskGid'); return asana.completeTask(taskGid); });
+  handle('asana:complete-daily',     async (_e, name, comment) => {
+    requireStringMax(name, 'taskName', 256);
+    if (comment != null) requireStringMax(comment, 'comment', MAX_COMMENT_LEN);
+    return asana.completeDailyTask(name, comment);
+  });
+  handle('asana:batch-complete',     async (_e, names) => {
+    requireArrayMax(names, 'taskNames', 50);
+    return asana.batchCompleteDailies(names);
+  });
+  handle('asana:create-escalation',  async (_e, opts) => {
+    requireObject(opts, 'opts');
+    _validateGid(opts.projectGid, 'projectGid');
+    return asana.createEscalation(opts);
+  });
+  handle('asana:daily-summary',      async () => asana.getDailySummary());
+
+  // ── Attachments ─────────────────────────────────────────────────────────────
+  handle('asana:get-attachments',    async (_e, taskGid) => { _validateGid(taskGid, 'taskGid'); return asana.getAttachments(taskGid); });
+  handle('asana:upload-file',        async (_e, taskGid, filePath) => {
+    _validateGid(taskGid, 'taskGid');
+    requireStringMax(filePath, 'filePath', 1024);
+    return asana.uploadFile(taskGid, filePath);
+  });
+  handle('asana:link-external',      async (_e, taskGid, url, name) => {
+    _validateGid(taskGid, 'taskGid');
+    requireStringMax(url, 'url', 2048);
+    if (name != null) requireStringMax(name, 'name', 256);
+    return asana.linkExternalFile(taskGid, url, name);
   });
 
   // ── User ───────────────────────────────────────────────────────────────────

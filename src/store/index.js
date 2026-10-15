@@ -78,7 +78,6 @@ const REGISTRY = {
   setupState:       () => P.setupState,
   asanaConfig:      () => P.asanaConfig,
   asanaAuthState:   () => P.asanaAuthState,
-  asanaOAuth:       () => P.asanaOAuth,
   // Bug B fix: _healthcheck now has a proper registered path instead of
   // relying on the removed absolute-path fallback.
   reminders:             () => path.join(P.dataDir, 'reminders.json'),

@@ -627,31 +627,26 @@ function _html() {
         <div class="sd-section" id="sect-asana">
           <div class="sd-section-title">Asana</div>
 
-          <!-- OAuth 2.0 — recommended, multi-user ("Login with Asana") -->
-          <div class="sd-hint" style="margin-bottom:8px">Sign in with your own Asana account (recommended). Each teammate logs in with their own login — tokens are stored encrypted on this device.</div>
+          <!-- Multi-user PAT manager: each teammate pastes their own PAT; we
+               auto-discover their GIDs and store the token encrypted. -->
+          <div class="sd-hint" style="margin-bottom:8px">Add a teammate: pick a short alias and paste their Asana Personal Access Token. The app auto-discovers their name, workspace, and task-list IDs. Tokens are stored encrypted on this device.</div>
           <div class="sd-row">
             <div class="sd-field">
-              <div class="sd-label">OAuth Client ID</div>
-              <input class="sd-input" id="asana-oauth-client-id" placeholder="1200000000000000"/>
+              <div class="sd-label">Alias</div>
+              <input class="sd-input" id="asana-user-alias" placeholder="gbates"/>
             </div>
             <div class="sd-field">
-              <div class="sd-label">OAuth Client Secret</div>
-              <input class="sd-input" id="asana-oauth-client-secret" type="password" placeholder="stored encrypted"/>
+              <div class="sd-label">Personal Access Token</div>
+              <input class="sd-input" id="asana-user-pat" type="password" placeholder="0/xxxxxxxx"/>
             </div>
           </div>
-          <div class="sd-hint" style="margin-bottom:8px">Redirect URI to register in your Asana app: <code>http://localhost:3000/auth/asana/callback</code></div>
           <div class="sd-btn-row">
-            <button class="sd-btn secondary" id="asana-oauth-save">Save OAuth app</button>
-            <button class="sd-btn primary"   id="asana-oauth-login">Login with Asana</button>
-            <button class="sd-btn secondary" id="asana-oauth-logout">Logout</button>
+            <button class="sd-btn primary" id="asana-user-add">Add / Set up user</button>
           </div>
-          <div id="asana-oauth-status" class="sd-status warn" style="margin-top:6px">\u26A0\uFE0F Not connected</div>
-
-          <div class="sd-divider" style="margin:14px 0;border-top:1px solid var(--line,#2a3344)"></div>
-          <div class="sd-hint" style="margin-bottom:8px">Or use a Personal Access Token (single user).</div>
-          <div class="sd-field">
-            <div class="sd-label">Personal Access Token</div>
-            <input class="sd-input" id="asana-pat" type="password" placeholder="0/xxxxxxxx"/>
+          <div id="asana-user-status" class="sd-status warn" style="margin-top:6px">\u26A0\uFE0F No Asana users configured</div>
+          <div class="sd-field" style="margin-top:10px">
+            <div class="sd-label">Configured users</div>
+            <div id="asana-user-list" style="font-size:13px"></div>
           </div>
           <div class="sd-row">
             <div class="sd-field">
@@ -1778,97 +1773,100 @@ async function _spSaveEmail(opName, domCode, to, cc) {
 function _wireSP() { /* SP wiring handled in operators tab */ }
 
 function _wireAsana() {
-  document.getElementById('asana-save').addEventListener('click', async () => {
+  // Default workspace/project (shared config, no secret here).
+  const saveBtn = document.getElementById('asana-save');
+  if (saveBtn) saveBtn.addEventListener('click', async () => {
     await asanaBridge.saveConfig({
-      pat:       document.getElementById('asana-pat').value,
       workspace: document.getElementById('asana-workspace').value.trim(),
       project:   document.getElementById('asana-project').value.trim(),
     });
-    document.getElementById('asana-pat').value = '';
     const st = document.getElementById('asana-status');
     st.textContent = '✓ Saved'; st.style.display = 'block';
     setTimeout(() => { st.style.display = 'none'; }, 2000);
   });
-  document.getElementById('asana-verify').addEventListener('click', () => {
-    // BUG FIX (2026-07-16): identical defect to the Slack status check
-    // above -- checkAuth() resolves to an object ({ ok: bool, ... }), not a
-    // boolean, so this always showed "Token valid" once the promise
-    // resolved regardless of actual state.
+  const verifyBtn = document.getElementById('asana-verify');
+  if (verifyBtn) verifyBtn.addEventListener('click', () => {
+    // checkAuth() resolves to an object ({ ok: bool, ... }); verify the ACTIVE
+    // user's PAT actually works, not just that a token exists.
     asanaBridge.checkAuth().then((res) => {
       const ok = !!(res && res.ok);
       const st = document.getElementById('asana-status');
-      st.textContent = ok ? '✅ Token valid' : '❌ Token invalid';
+      st.textContent = ok ? ('✅ Valid — ' + (res.user || 'connected')) : '❌ Token invalid';
       st.style.display = 'block';
     }).catch(() => {});
   });
 
-  // ── OAuth 2.0 ("Login with Asana") — modeled on the Slack login flow ────────
-  _checkAsanaOAuth();
+  // ── Multi-user PAT manager ──────────────────────────────────────────────────
+  _refreshAsanaUsers();
 
-  const saveOauthBtn = document.getElementById('asana-oauth-save');
-  if (saveOauthBtn) saveOauthBtn.addEventListener('click', async () => {
-    const clientId     = document.getElementById('asana-oauth-client-id').value.trim();
-    const clientSecret = document.getElementById('asana-oauth-client-secret').value.trim();
-    try {
-      const res = await asanaBridge.saveOauthConfig({ clientId, clientSecret });
-      document.getElementById('asana-oauth-client-secret').value = '';   // never keep secret in the field
-      if (res && res.ok) toast.show('success', 'Asana OAuth app saved', 2500);
-      else toast.show('warn', (res && res.error) || 'Could not save OAuth app', 4000);
-      _checkAsanaOAuth();
-    } catch (e) {
-      toast.show('error', 'Save failed: ' + e.message, 4000);
-    }
-  });
-
-  const loginBtn = document.getElementById('asana-oauth-login');
-  if (loginBtn) loginBtn.addEventListener('click', () => {
-    loginBtn.disabled = true;
-    const original = loginBtn.textContent;
-    loginBtn.textContent = 'Opening browser\u2026';
-    asanaBridge.oauthLogin().then((res) => {
+  const addBtn = document.getElementById('asana-user-add');
+  if (addBtn) addBtn.addEventListener('click', () => {
+    const alias = document.getElementById('asana-user-alias').value.trim();
+    const pat   = document.getElementById('asana-user-pat').value.trim();
+    if (!alias || !pat) { toast.show('warn', 'Enter both an alias and a PAT', 3000); return; }
+    addBtn.disabled = true;
+    const original = addBtn.textContent;
+    addBtn.textContent = 'Setting up\u2026';
+    asanaBridge.setupUser(alias, pat).then((res) => {
       if (res && res.ok) {
-        toast.show('success', 'Logged into Asana as ' + (res.user || res.email || 'you'), 3000);
+        document.getElementById('asana-user-pat').value = '';   // never keep the PAT in the field
+        document.getElementById('asana-user-alias').value = '';
+        toast.show('success', 'Added ' + (res.name || alias) + ' to Asana', 3000);
       } else {
-        toast.show('warn', (res && res.error) || 'Asana login was not completed', 4000);
+        toast.show('warn', (res && res.error) || 'Setup failed', 4000);
       }
-      _checkAsanaOAuth();
+      _refreshAsanaUsers();
     }).catch((e) => {
-      toast.show('error', 'Asana login failed: ' + e.message, 4000);
+      toast.show('error', 'Setup failed: ' + e.message, 4000);
     }).finally(() => {
-      loginBtn.disabled = false;
-      loginBtn.textContent = original;
+      addBtn.disabled = false;
+      addBtn.textContent = original;
     });
-  });
-
-  const logoutBtn = document.getElementById('asana-oauth-logout');
-  if (logoutBtn) logoutBtn.addEventListener('click', () => {
-    asanaBridge.oauthLogout().then(() => {
-      toast.show('info', 'Logged out of Asana', 2500);
-      _checkAsanaOAuth();
-    }).catch((e) => toast.show('error', 'Logout failed: ' + e.message, 3000));
   });
 }
 
-// Connected-status badge for Asana OAuth (mirrors _checkSlack). Never receives
-// a token — only { connected, user, email } from asana:oauth-status.
-function _checkAsanaOAuth() {
-  if (!window.asana || !window.asana.oauthStatus) return;
-  asanaBridge.oauthStatus().then((res) => {
-    const el = document.getElementById('asana-oauth-status');
-    if (!el) return;
-    if (!res || !res.configured) {
-      el.textContent = '\u26A0\uFE0F Not configured — add Client ID + Secret, then Save OAuth app';
-      el.className = 'sd-status warn';
-      return;
+// Render the configured-user list + active badge. Never receives a PAT value —
+// listUsers() returns only { alias, name, email, active }.
+function _refreshAsanaUsers() {
+  if (!window.asana || !window.asana.listUsers) return;
+  asanaBridge.listUsers().then((res) => {
+    const badge = document.getElementById('asana-user-status');
+    const list  = document.getElementById('asana-user-list');
+    const users = (res && res.users) || [];
+    if (badge) {
+      if (!users.length) {
+        badge.textContent = '\u26A0\uFE0F No Asana users configured';
+        badge.className = 'sd-status warn';
+      } else {
+        const active = users.find((u) => u.active);
+        badge.textContent = active
+          ? ('\u2705 Active: ' + (active.name || active.alias))
+          : ('\u2139\uFE0F ' + users.length + ' user(s) configured — none active');
+        badge.className = 'sd-status ' + (active ? 'ok' : 'warn');
+      }
     }
-    const ok = !!res.connected;
-    el.textContent = ok
-      ? ('\u2705 Connected as ' + (res.user || res.email || 'Asana user'))
-      : '\u26A0\uFE0F Not connected — click "Login with Asana"';
-    el.className = 'sd-status ' + (ok ? 'ok' : 'warn');
-    // Pre-fill the client id (public) so the user sees what's configured.
-    const idEl = document.getElementById('asana-oauth-client-id');
-    if (idEl && !idEl.value && res.clientId) idEl.value = res.clientId;
+    if (list) {
+      if (!users.length) { list.innerHTML = '<span style="color:var(--mut,#8794a6)">None yet.</span>'; return; }
+      list.innerHTML = users.map((u) => {
+        const name = u.name || u.alias;
+        const act  = u.active ? ' <strong style="color:var(--ok,#1b7f3b)">(active)</strong>' : '';
+        const sw   = u.active ? '' : '<button class="sd-btn secondary" data-asana-switch="' + u.alias + '" style="padding:2px 8px;font-size:11px">Switch</button>';
+        const rm   = '<button class="sd-btn secondary" data-asana-remove="' + u.alias + '" style="padding:2px 8px;font-size:11px">Remove</button>';
+        return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">'
+          + '<span style="flex:1">' + name + act + ' <span style="color:var(--mut,#8794a6)">(' + u.alias + ')</span></span>'
+          + sw + rm + '</div>';
+      }).join('');
+      list.querySelectorAll('[data-asana-switch]').forEach((b) => b.addEventListener('click', () => {
+        asanaBridge.switchUser(b.getAttribute('data-asana-switch'))
+          .then(() => { toast.show('info', 'Switched active user', 2000); _refreshAsanaUsers(); })
+          .catch((e) => toast.show('error', 'Switch failed: ' + e.message, 3000));
+      }));
+      list.querySelectorAll('[data-asana-remove]').forEach((b) => b.addEventListener('click', () => {
+        asanaBridge.removeUser(b.getAttribute('data-asana-remove'))
+          .then(() => { toast.show('info', 'Removed user', 2000); _refreshAsanaUsers(); })
+          .catch((e) => toast.show('error', 'Remove failed: ' + e.message, 3000));
+      }));
+    }
   }).catch(() => {});
 }
 
