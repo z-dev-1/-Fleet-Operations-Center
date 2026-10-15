@@ -477,6 +477,8 @@ expose('asana', {
   addComment:    (taskGid, text)       => ipcRenderer.invoke('asana:add-comment', taskGid, text),
   moveTask:      (taskGid, sectGid)    => ipcRenderer.invoke('asana:move-task', taskGid, sectGid),
   linkUnit:      (unitId, taskId)      => ipcRenderer.invoke('asana:link-unit', unitId, taskId),
+  // Midway-SSO one-time interactive sign-in
+  signIn:        ()               => ipcRenderer.invoke('asana:sign-in'),
   // Multi-user PAT manager (list/metadata only — never a PAT value)
   listUsers:     ()               => ipcRenderer.invoke('asana:list-users'),
   setupUser:     (alias, pat)     => ipcRenderer.invoke('asana:setup-user', alias, pat),

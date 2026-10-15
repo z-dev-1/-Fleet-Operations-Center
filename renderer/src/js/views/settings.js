@@ -629,9 +629,10 @@ function _html() {
 
           <!-- PRIMARY: Amazon Midway SSO. No PAT/OAuth needed — rides the same
                Midway session as AAP/Uptake. Requires a healthy AEA session. -->
-          <div class="sd-hint" style="margin-bottom:8px">Asana connects through your Amazon Midway SSO session — the same login as AAP/Uptake. No token needed. Requires a healthy Midway/AEA session (run mwinit if disconnected).</div>
+          <div class="sd-hint" style="margin-bottom:8px">Asana connects through your Amazon Midway SSO session — the same login as AAP/Uptake. No token needed. First time: click Connect, enter your Asana email in the window that opens, and complete SSO once. After that it logs in automatically.</div>
           <div class="sd-btn-row">
-            <button class="sd-btn primary" id="asana-midway-check">Check Asana connection</button>
+            <button class="sd-btn primary"   id="asana-midway-connect">Connect to Asana</button>
+            <button class="sd-btn secondary" id="asana-midway-check">Check connection</button>
           </div>
           <div id="asana-midway-status" class="sd-status warn" style="margin-top:6px">\u2139\uFE0F Not checked yet</div>
 
@@ -1783,6 +1784,30 @@ async function _spSaveEmail(opName, domCode, to, cc) {
 function _wireSP() { /* SP wiring handled in operators tab */ }
 
 function _wireAsana() {
+  // Midway SSO one-time interactive sign-in (opens a visible Asana login window).
+  const connectBtn = document.getElementById('asana-midway-connect');
+  if (connectBtn) connectBtn.addEventListener('click', () => {
+    const el = document.getElementById('asana-user-status');
+    connectBtn.disabled = true;
+    const original = connectBtn.textContent;
+    connectBtn.textContent = 'Opening sign-in\u2026';
+    if (el) { el.textContent = '\u23F3 Complete sign-in in the Asana window\u2026'; el.className = 'sd-status'; }
+    asanaBridge.signIn().then((res) => {
+      if (res && res.ok) {
+        toast.show('success', 'Connected to Asana' + (res.user ? ' as ' + res.user : ''), 3000);
+        if (el) { el.textContent = '\u2705 Connected via Amazon SSO' + (res.user ? ' as ' + res.user : ''); el.className = 'sd-status ok'; }
+      } else {
+        toast.show('warn', (res && res.error) || 'Sign-in was not completed', 4000);
+        if (el) { el.textContent = '\u26A0\uFE0F ' + ((res && res.error) || 'Sign-in not completed'); el.className = 'sd-status warn'; }
+      }
+    }).catch((e) => {
+      toast.show('error', 'Asana sign-in failed: ' + e.message, 4000);
+    }).finally(() => {
+      connectBtn.disabled = false;
+      connectBtn.textContent = original;
+    });
+  });
+
   // Midway SSO connection check (primary path — no token).
   const midwayBtn = document.getElementById('asana-midway-check');
   if (midwayBtn) midwayBtn.addEventListener('click', () => {

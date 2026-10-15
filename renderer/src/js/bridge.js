@@ -546,6 +546,8 @@ export const asana = {
   addComment:     (taskGid, text)    => window.asana.addComment(taskGid, text),
   moveTask:       (taskGid, sectGid) => window.asana.moveTask(taskGid, sectGid),
   linkUnit:       (unitId, taskId)   => window.asana.linkUnit(unitId, taskId),
+  // Midway-SSO one-time interactive sign-in
+  signIn:         ()              => window.asana.signIn(),
   // Multi-user PAT manager
   listUsers:      ()              => window.asana.listUsers(),
   setupUser:      (alias, pat)    => window.asana.setupUser(alias, pat),

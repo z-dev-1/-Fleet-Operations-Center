@@ -635,16 +635,7 @@ function _startAutoSync() {
   // cookies alone or needs a captured bearer. Writes asana-discovery.json.
   // Delayed so the main window's ensureAuthenticated/injectCookies has run.
   // Remove once the Asana Midway-session path is built.
-  log.info('[asana-discover] gate check: ASANA_DISCOVER=' + JSON.stringify(process.env.ASANA_DISCOVER));
-  if (process.env.ASANA_DISCOVER === '1') {
-    log.info('[asana-discover] scheduled — will run in 45s');
-    setTimeout(() => {
-      log.info('[asana-discover] starting probe now');
-      require('./asana/discover').runAsanaDiscovery()
-        .then((r) => log.info('[asana-discover] verdict: ' + (r && r.verdict)))
-        .catch((e) => log.warn('[asana-discover] failed: ' + e.message));
-    }, 45000);
-  }
+
 
   // ── 5g. Create tray ────────────────────────────────────────────────────────
   _windowApi.createTray();

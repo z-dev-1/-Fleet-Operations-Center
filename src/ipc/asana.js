@@ -56,6 +56,8 @@ function registerAsanaIPC() {
 
   // ── Auth + config ──────────────────────────────────────────────────────────
   handle('asana:check-auth',      async () => asana.checkAuth());
+  // Midway-SSO one-time interactive sign-in (opens a visible Asana login window).
+  handle('asana:sign-in',         async () => require('../asana/session').signIn());
   handle('asana:get-config',      ()       => asana.loadConfig());
   handle('asana:save-config',     (_e, config) => {
     requireObject(config, 'config');
