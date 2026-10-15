@@ -2194,26 +2194,6 @@ function renderIntelPane(unit){
       '<textarea class="dp-insight-copy__text" readonly rows="' + Math.min(20, Math.max(5, txt.split('\n').length)) + '">' + esc(txt) + '</textarea>' +
     '</details>';
   }
-  // Visible details header shown ON TOP of each insight's chart: status/dates +
-  // Summary + Recommended Actions (the key text the chart image can't convey).
-  function _detailsHeaderHtml(ins) {
-    if (!ins) return '';
-    var rows = [];
-    var meta = [];
-    if (ins.status) meta.push('<b>Status:</b> ' + esc(ins.status));
-    var fs = ins.firstSeen || ins.firstDetected, ls = ins.lastSeen || ins.lastDetected;
-    if (fs) meta.push('<b>First:</b> ' + esc(String(fs).slice(0, 10)));
-    if (ls) meta.push('<b>Last:</b> ' + esc(String(ls).slice(0, 10)));
-    if (ins.subsystem) meta.push('<b>Subsystem:</b> ' + esc(ins.subsystem));
-    if (meta.length) rows.push('<div style="font-size:11px;color:rgba(255,255,255,0.6);margin-bottom:6px;">' + meta.join(' &nbsp;•&nbsp; ') + '</div>');
-    var summary = ins.summary || '';
-    var rec = ins.recommended || ins.guidance || '';
-    if (summary) rows.push('<div style="margin-bottom:6px;"><div style="font-size:11px;font-weight:700;color:#8ab4f8;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Summary</div><div style="font-size:12px;line-height:1.45;color:rgba(255,255,255,0.88);">' + esc(summary) + '</div></div>');
-    if (rec) rows.push('<div style="margin-bottom:4px;"><div style="font-size:11px;font-weight:700;color:#81c995;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Recommended Actions</div><div style="font-size:12px;line-height:1.45;color:rgba(255,255,255,0.88);white-space:pre-wrap;">' + esc(rec) + '</div></div>');
-    if (!rows.length) return '';
-    return '<div class="dp-insight-details" style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:10px 12px;margin-bottom:8px;">' + rows.join('') + '</div>';
-  }
-
   var perInsightShots = Array.isArray(insights) &&
     insights.some(function (ins) { return ins && Array.isArray(ins.screenshots) && ins.screenshots.length; });
 
@@ -2229,7 +2209,6 @@ function renderIntelPane(unit){
       blocks.push(
         '<div class="dp-shot-block">' +
           '<div class="dp-shot-block__title">' + esc(label) + (insShots.length > 1 ? ' <span class="dp-section-count">' + insShots.length + ' charts</span>' : '') + '</div>' +
-          _detailsHeaderHtml(ins) +
           insShots.map(_shotCardHtml).join('') +
           _copyHtml(_insightText(ins, ix)) +
         '</div>'
@@ -2248,7 +2227,6 @@ function renderIntelPane(unit){
           var label = (ins && ins.title) ? ins.title : ('Insight ' + (ix + 1));
           return '<div class="dp-shot-block">' +
             '<div class="dp-shot-block__title">' + esc(label) + '</div>' +
-            _detailsHeaderHtml(ins) +
             _shotCardHtml(s) +
             _copyHtml(_insightText(ins, ix)) +
           '</div>';

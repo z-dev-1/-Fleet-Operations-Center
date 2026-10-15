@@ -135,6 +135,7 @@ export function init(container) {
         <button class="tb-pill" data-filter="unavailable">Unavailable</button>
         <button class="tb-pill" data-filter="offsite">Offsite</button>
         <button class="tb-pill" data-filter="high-risk">High Risk</button>
+        <button class="tb-pill" data-filter="has-risk">Has Score</button>
         <button class="tb-pill" data-filter="stuck">Stuck 14d+</button>
         <button class="tb-pill" data-filter="fleetnet">FleetNet</button>
       </div>
@@ -583,6 +584,9 @@ export function init(container) {
       } else if (f === 'high-risk') {
         if (lc) lc.value = '';
         bus.emit('ui:quick-filter', { filter: 'high-risk' });
+      } else if (f === 'has-risk') {
+        if (lc) lc.value = '';
+        bus.emit('ui:quick-filter', { filter: 'has-risk' });
       } else if (f === 'stuck') {
         if (lc) lc.value = '';
         bus.emit('ui:quick-filter', { filter: 'stuck' });

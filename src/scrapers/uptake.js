@@ -668,6 +668,13 @@ const UPTAKE_API_BASE = 'https://fleet.uptake.com';
 // 365d so older-but-still-relevant insights (like 622086's) are not dropped.
 const UPTAKE_API_LOOKBACK_DAYS = 365;
 const UPTAKE_API_PAGE_SIZE = 100;
+// Recent-detection window (DAYS) for per-asset insights. Uptake's own insights
+// tab (/asset/<uuid>/insights?preserveFilters=true) filters by
+// lastDetectedLowerBound = now - ~5 days and shows ONLY recently-detected
+// insights. Match that so our per-unit counts equal what you see on the asset
+// page (e.g. unit 922529 showed 8 all-history vs ~3 recent). Kept slightly
+// wider than 5d for a little tolerance.
+const UPTAKE_RECENT_DAYS = 7;
 // Bounded screenshot pass (screenshots are enrichment; the data is the win).
 const UPTAKE_API_SHOT_MIN_RISK = 80;      // only screenshot high-risk insights
 const UPTAKE_API_SHOT_CAP = 80;           // hard cap on total screenshots/run
@@ -826,6 +833,77 @@ function mapApiAsset(assetObj) {
   };
 }
 
+// Render the insight's details (Status/dates + Summary + Recommended Actions)
+// ABOVE its chart as an HTML page, then capturePage THAT — so the text is baked
+// INTO the saved PNG. We use native HTML + <img> rendering + capturePage (the
+// path that always worked), NOT canvas toDataURL on the raw buffer (which was
+// flaky at volume). Loads a local data: URL (no network), so it's fast.
+// Returns the saved file path, or null on failure.
+async function renderHeaderedShot(win, chartB64, h, deps) {
+  if (win.isDestroyed()) return null;
+  const esc = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const meta = [];
+  if (h.status)    meta.push('Status: ' + esc(h.status));
+  if (h.firstSeen) meta.push('First: ' + esc(String(h.firstSeen).slice(0, 10)));
+  if (h.lastSeen)  meta.push('Last: '  + esc(String(h.lastSeen).slice(0, 10)));
+  if (h.subsystem) meta.push('Subsystem: ' + esc(h.subsystem));
+  const recHtml = esc(h.recommended || '').replace(/\n/g, '<br>');
+  const html =
+    '<!doctype html><html><head><meta charset="utf-8"><style>' +
+    'html,body{margin:0;padding:0;background:#fff;}' +
+    '.wrap{width:900px;padding:22px 26px;font-family:Arial,Helvetica,sans-serif;color:#0b1324;box-sizing:border-box;}' +
+    '.ttl{font-size:22px;font-weight:700;margin:0 0 6px;}' +
+    '.meta{font-size:13px;color:#5b6b7f;margin:0 0 14px;}' +
+    '.h{font-size:14px;font-weight:700;color:#13518f;text-transform:uppercase;letter-spacing:.04em;margin:14px 0 4px;}' +
+    '.t{font-size:14px;line-height:1.5;color:#1c2733;white-space:pre-wrap;}' +
+    'hr{border:none;border-top:1px solid #e2e8f0;margin:16px 0;}' +
+    'img{display:block;width:100%;height:auto;}' +
+    '</style></head><body><div class="wrap">' +
+    (h.title ? '<div class="ttl">' + esc(h.title) + '</div>' : '') +
+    (meta.length ? '<div class="meta">' + meta.join(' &nbsp;•&nbsp; ') + '</div>' : '') +
+    (h.summary ? '<div class="h">Summary</div><div class="t">' + esc(h.summary) + '</div>' : '') +
+    (recHtml ? '<div class="h">Recommended Actions</div><div class="t">' + recHtml + '</div>' : '') +
+    '<hr>' +
+    '<img src="data:image/png;base64,' + chartB64 + '" />' +
+    '</div></body></html>';
+  try {
+    await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    // Wait for the <img> to decode + layout before measuring/capturing.
+    await (deps && deps.sleep ? deps.sleep(400) : new Promise(r => setTimeout(r, 400)));
+    try {
+      await win.webContents.executeJavaScript(
+        'new Promise(function(res){var i=document.images[0];if(!i||i.complete)return res(1);i.onload=i.onerror=function(){res(1)};setTimeout(res,2500);})'
+      );
+    } catch (_) {}
+    // capturePage() only grabs the VISIBLE viewport — a long text block pushes
+    // the chart below the fold and it gets cut off. Measure the full document
+    // height and resize the window to fit the WHOLE page before capturing.
+    let fullH = 900;
+    try {
+      fullH = await win.webContents.executeJavaScript(
+        'Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, 900)'
+      );
+    } catch (_) {}
+    fullH = Math.min(Math.ceil(fullH) + 24, 8000);   // cap for safety
+    try {
+      const [w] = win.getSize();
+      win.setSize(w, fullH);
+      await (deps && deps.sleep ? deps.sleep(250) : new Promise(r => setTimeout(r, 250)));
+    } catch (_) {}
+    const img = await win.webContents.capturePage();
+    const buf = img.toPNG();
+    // Restore the default window height for the next render.
+    try { const [w2] = win.getSize(); win.setSize(w2, 900); } catch (_) {}
+    if (!buf || buf.length < 2000) return null;
+    const file = path.join(SCREENSHOTS_DIR, `uptake_insight_${h._label || Date.now()}.png`);
+    fs.writeFileSync(file, buf);
+    return file;
+  } catch (_) {
+    return null;
+  }
+}
+
 // Core API scrape. deps = { win, finish, navTo, captureScreenshot, sleep, setLiveMap }
 async function runApiScrape(deps) {
   const { win, finish, navTo, sleep, setLiveMap } = deps;
@@ -843,6 +921,12 @@ async function runApiScrape(deps) {
     let capturedAuth = null;
     let capturedFilterId = null;
     let dbgAttached = false;
+    // DISCOVERY (UPTAKE_RISK_DISCOVER=1): capture the Risk Explorer API calls so
+    // we can learn where the real asset risk score comes from (NOT /summary,
+    // which has no risk field — the current max-insight-severity fallback is
+    // wrong, e.g. 922516 shows 80 but Uptake says 0/Very Low).
+    const _riskDiscover = process.env.UPTAKE_RISK_DISCOVER === '1';
+    const _riskReqs = new Map();   // requestId -> {method,url,body}
     const dbg = win.webContents.debugger;
     try {
       if (dbg.isAttached()) {
@@ -856,14 +940,39 @@ async function runApiScrape(deps) {
       await dbg.sendCommand('Network.enable');
       dbg.on('message', (_e, method, params) => {
         try {
-          if (method !== 'Network.requestWillBeSent') return;
-          const u = (params.request && params.request.url) || '';
-          if (!/\/api\/asset-ui\//.test(u)) return;
-          const h = params.request.headers || {};
-          const a = h.Authorization || h.authorization;
-          if (a && /bearer/i.test(a)) capturedAuth = a;
-          const m = u.match(/userSavedFilterId=([0-9a-f-]+)/i);
-          if (m) capturedFilterId = m[1];
+          if (method === 'Network.requestWillBeSent') {
+            const u = (params.request && params.request.url) || '';
+            if (/\/api\/asset-ui\//.test(u)) {
+              const h = params.request.headers || {};
+              const a = h.Authorization || h.authorization;
+              if (a && /bearer/i.test(a)) capturedAuth = a;
+              const m = u.match(/userSavedFilterId=([0-9a-f-]+)/i);
+              if (m) capturedFilterId = m[1];
+            }
+            // Discovery: record any asset-ui / common API call (we'll dump bodies).
+            if (_riskDiscover && /\/api\//.test(u) && !/\.(js|css|png|svg|woff2?)/i.test(u)) {
+              _riskReqs.set(params.requestId, { method: params.request.method, url: u, body: params.request.postData || null });
+            }
+          } else if (_riskDiscover && method === 'Network.loadingFinished') {
+            const r = _riskReqs.get(params.requestId);
+            if (r) {
+              dbg.sendCommand('Network.getResponseBody', { requestId: params.requestId })
+                .then((res) => {
+                  let b = res.body || '';
+                  if (res.base64Encoded) { try { b = Buffer.from(b, 'base64').toString('utf8'); } catch (_) {} }
+                  r.respBody = b.slice(0, 8000);
+                  try {
+                    const _p = require('path').join(require('electron').app.getPath('userData'), 'uptake-risk-discovery.json');
+                    const _fs = require('fs');
+                    let arr = [];
+                    try { arr = JSON.parse(_fs.readFileSync(_p, 'utf8')); } catch (_) {}
+                    arr.push(r);
+                    _fs.writeFileSync(_p, JSON.stringify(arr, null, 2));
+                  } catch (_) {}
+                })
+                .catch(() => {});
+            }
+          }
         } catch (_) {}
       });
     } catch (e) {
@@ -892,6 +1001,43 @@ async function runApiScrape(deps) {
         try { await navTo('https://fleet.uptake.com/assetsInsightsCases/assets'); } catch (_) {}
         await sleep(1200);
         try { await navTo(UPTAKE_INSIGHTS_URL); } catch (_) {}
+      }
+    }
+
+    // DISCOVERY: navigate to Risk Explorer so its API calls fire and get
+    // captured (to find the real asset risk-score endpoint). One-time, gated.
+    if (_riskDiscover) {
+      flog('[Uptake][API] RISK-DISCOVER: navigating to /RiskExplorer to capture risk API...');
+      try { await navTo('https://fleet.uptake.com/RiskExplorer'); } catch (_) {}
+      await sleep(8000);   // let the page load its risk data
+      flog('[Uptake][API] RISK-DISCOVER: navigating to asset /overview to capture insight API...');
+      try { await navTo('https://fleet.uptake.com/asset/6781c10d307fb463b5455b9e4117f33f/insights?preserveFilters=true'); } catch (_) {}
+      await sleep(8000);
+      flog('[Uptake][API] RISK-DISCOVER: capture window done — see uptake-risk-discovery.json');
+    }
+
+
+    // VERIFY (UPTAKE_VERIFY=1): confirm the recent-window insight count matches
+    // Uptake's own per-asset insights tab. Calls insights/count + search with the
+    // SAME lastDetectedLowerBound = now - UPTAKE_RECENT_DAYS for a few known units.
+    if (process.env.UPTAKE_VERIFY === '1') {
+      const _lb = new Date(Date.now() - UPTAKE_RECENT_DAYS * 86400000).toISOString();
+      const _units = [
+        { id: '922529', uuid: 'c7e6b0e48414bdc5ce3734969456e967' },
+        { id: '622086', uuid: '597f4d955408106272a8cd34b6b42c83' },
+        { id: '6781c10d', uuid: '6781c10d307fb463b5455b9e4117f33f' },
+      ];
+      flog('[Uptake][API] VERIFY lastDetectedLowerBound=' + _lb + ' (UPTAKE_RECENT_DAYS=' + UPTAKE_RECENT_DAYS + ')');
+      for (const _u of _units) {
+        try {
+          const _cUrl = UPTAKE_API_BASE + '/api/asset-ui/v1/assets/' + _u.uuid + '/insights/count';
+          const _cr = await apiFetch(win, _cUrl, 'POST', { insightQuery: { lastDetectedLowerBound: _lb } }, deps);
+          const _count = (_cr.ok && (_cr.json != null)) ? _cr.json : (_cr.text || '?');
+          const _sUrl = UPTAKE_API_BASE + '/api/asset-ui/v1/assets/' + _u.uuid + '/insights/search?responseFormat=array&sort=startTs%2Cdesc';
+          const _sr = await apiFetch(win, _sUrl, 'POST', { insightQuery: { lastDetectedLowerBound: _lb } }, deps);
+          const _arrLen = (_sr.ok && Array.isArray(_sr.json)) ? _sr.json.length : '?';
+          flog('[Uptake][API] VERIFY ' + _u.id + ': count=' + _count + ' searchArrayLen=' + _arrLen);
+        } catch (e) { fwarn('[Uptake][API] VERIFY ' + _u.id + ' failed: ' + e.message); }
       }
     }
     try { if (dbgAttached) dbg.detach(); } catch (_) {}
@@ -961,8 +1107,34 @@ async function runApiScrape(deps) {
     flog(`[Uptake][API] discovered ${assetUuids.size} unique assets with insights`);
     if (!assetUuids.size) { finish([], null); return; }
 
+    // ── 1b. REAL asset risk scores (Risk Explorer API) ────────────────────
+    // The authoritative asset risk score is NOT in /summary (which has no risk
+    // field). It comes from Risk Explorer: POST /api/asset-ui/v2/assets/risk/
+    // scores with the field `assetRiskScore`. Fetch the whole (filtered) fleet
+    // once and build uuid -> assetRiskScore so per-unit scores are CORRECT.
+    // (Previously we fell back to max-insight-severity, which wrongly showed
+    // high scores for low-risk assets, e.g. 922516=80 when Uptake says 0.)
+    const riskByUuid = {};
+    try {
+      let rp = 0, rPages = 1;
+      do {
+        const rUrl = `${UPTAKE_API_BASE}/api/asset-ui/v2/assets/risk/scores`
+          + `?page=${rp}&size=${UPTAKE_API_PAGE_SIZE}&sort=assetRiskScore%2Cdesc${filterQ}`;
+        const rr = await apiFetch(win, rUrl, 'POST', { serviceStatuses: ['ACTIVE'] }, deps);
+        if (!rr.ok || !rr.json) { fwarn(`[Uptake][API] risk/scores page ${rp} failed: status=${rr.status}`); break; }
+        const rc = rr.json.content || [];
+        if (rp === 0) rPages = rr.json.totalPages || 1;
+        rc.forEach(e => {
+          const uuid = e && e.asset && e.asset.assetId;
+          if (uuid && e.assetRiskScore != null) riskByUuid[uuid] = Math.round(Number(e.assetRiskScore));
+        });
+        rp++;
+      } while (rp < rPages && rp < 20 && !win.isDestroyed() && !deps.settled());
+      flog(`[Uptake][API] risk scores loaded for ${Object.keys(riskByUuid).length} assets`);
+    } catch (e) { fwarn('[Uptake][API] risk/scores fetch failed (non-fatal): ' + e.message); }
+
     // ── 2. Per-asset: insights/search (WIDE window) + summary ──────────────
-    const lowerBound = new Date(Date.now() - UPTAKE_API_LOOKBACK_DAYS * 86400000).toISOString();
+    const lowerBound = new Date(Date.now() - UPTAKE_RECENT_DAYS * 86400000).toISOString();
     const unitMap = {};
     setLiveMap(unitMap);
     const uuids = Array.from(assetUuids);
@@ -984,24 +1156,40 @@ async function runApiScrape(deps) {
       const attrs = mapApiAsset(assetObj || {});
       const unitId = attrs.customerName || (assetObj && assetObj.customerAssetName) || uuid;
 
-      // 2b. summary (risk score)
-      let riskScore = null, riskLabel = '';
-      const sumUrl = `${UPTAKE_API_BASE}/api/asset-ui/assets/${uuid}/summary`;
-      const sum = await apiFetch(win, sumUrl, 'GET', null, deps);
-      if (sum.ok && sum.json) {
-        const sj = sum.json;
-        const rs = sj.riskScore != null ? sj.riskScore
-                 : (sj.risk && sj.risk.score != null ? sj.risk.score : null);
-        if (rs != null) riskScore = Math.round(Number(rs));
-        riskLabel = sj.riskLabel || (sj.risk && sj.risk.label) || '';
-      }
-      // fallback: max insight riskScore if summary lacked one
-      if (riskScore == null && arr.length) {
-        const scores = arr.map(e => e.assetInsight && e.assetInsight.riskScore).filter(x => x != null);
-        if (scores.length) riskScore = Math.round(Math.max.apply(null, scores));
-      }
+      // 2b. risk score — the REAL asset risk score from Risk Explorer
+      // (assetRiskScore), looked up from the fleet-wide map fetched above.
+      // Do NOT fall back to insight severity (that wrongly inflates low-risk
+      // assets). If Risk Explorer has no entry for this asset, it's not scored
+      // -> null (0/Very Low), which is correct.
+      const riskScore = (riskByUuid[uuid] != null) ? riskByUuid[uuid] : null;
+      const riskLabel = '';
 
-      const insightsList = arr.map(el => mapApiInsight(el, uuid));
+      let insightsList = arr.map(el => mapApiInsight(el, uuid));
+      // ── Match the Uptake overview page (option B) ──────────────────────
+      // The /insights/search API does NOT reliably honor lastDetectedLowerBound
+      // (confirmed live: unit 922529 returned insights last-detected Jun/Jul/Aug
+      // despite a 7-day lowerBound). So we (1) enforce the recent window
+      // client-side on lastSeen (endTs), then (2) de-duplicate by insight title,
+      // keeping the most-recently-detected instance — which is what the asset
+      // overview shows (one row per ongoing insight type, not every detection).
+      const _windowMs = UPTAKE_RECENT_DAYS * 86400000;
+      const _cut = Date.now() - _windowMs;
+      const _ts = (v) => { const t = Date.parse(v || ''); return Number.isFinite(t) ? t : 0; };
+      insightsList = insightsList.filter(x => {
+        const t = _ts(x.lastSeen);
+        // keep if within the window; if the row has no parseable date, keep it
+        // (don't silently drop insights that simply lack an endTs).
+        return t === 0 || t >= _cut;
+      });
+      // De-dupe by title: keep the instance with the newest lastSeen.
+      const _byTitle = new Map();
+      for (const x of insightsList) {
+        const key = (x.title || x._insightId || '').trim().toLowerCase();
+        const prev = _byTitle.get(key);
+        if (!prev || _ts(x.lastSeen) > _ts(prev.lastSeen)) _byTitle.set(key, x);
+      }
+      insightsList = Array.from(_byTitle.values())
+        .sort((a, b) => _ts(b.lastSeen) - _ts(a.lastSeen));
       const subsystems = Array.from(new Set(insightsList.map(x => x.subsystem).filter(Boolean)));
 
       unitMap[unitId] = {
@@ -1054,61 +1242,78 @@ async function runApiScrape(deps) {
     };
 
     const allUnits = Object.values(unitMap);
-    let shotIdx = 0, mediaOk = 0, capOk = 0, mediaWinIdx = -1, capAttempts = 0;
+    let mediaOk = 0, capOk = 0, mediaWinIdx = -1;
     const shotStart = Date.now();
-    for (const u of allUnits) {
+
+    // Flatten (unit, insight) pairs with a stable per-insight label.
+    const tasks = [];
+    let idx = 0;
+    allUnits.forEach((u) => u.insightsList.forEach((ins) => {
+      const link = (Array.isArray(ins._mediaPngs) && ins._mediaPngs.length) ? ins._mediaPngs[0] : ins._mediaPng;
+      tasks.push({ u, ins, link, label: `${u.id}_${idx++}` });
+    }));
+
+    // ── PHASE A: fetch ALL chart PNGs (MUST run while the window is on the
+    // uptake origin — the media fetch is same-origin; after we navigate to a
+    // data: URL for compositing, cross-origin fetch from a null origin fails).
+    for (const t of tasks) {
       if (win.isDestroyed() || deps.settled()) break;
-      for (let j = 0; j < u.insightsList.length; j++) {
-        if (win.isDestroyed() || deps.settled()) break;
-        const ins = u.insightsList[j];
-        let saved = null;        // -> ins.screenshotPath
-        const insShots = [];
-
-        // 3a. PRIMARY: fetch the insight's fault-chart PNG — the reliable
-        // raw-bytes path (the one that consistently hit ~582/619). ONE PNG per
-        // insight. (The Summary + Recommended Actions text is shown ABOVE the
-        // chart in the app UI (unit-detail Intel pane) rather than burned into
-        // the image — drawing text on the image via canvas proved unreliable at
-        // this volume. The text is also copyable there.)
-        const link = (Array.isArray(ins._mediaPngs) && ins._mediaPngs.length)
-          ? ins._mediaPngs[0] : ins._mediaPng;
-        if (link) {
-          const cu = mediaUrlCandidates(link)[0];
-          const img = cu ? await apiFetchImage(win, cu, deps) : { ok: false };
-          if (img.ok && img.base64) {
-            if (mediaWinIdx < 0) { mediaWinIdx = 0; flog('[Uptake][API] media confirmed (raw PNG)'); }
-            const file = saveB64Png(img.base64, `${u.id}_${shotIdx}`);
-            if (file) { insShots.push(file); mediaOk++; }
-          }
-        }
-        if (insShots.length) saved = insShots[0];
-
-        // 3b. Fallback: capturePage — BOUNDED (only for no-media insights, and
-        // only up to the cap/budget so slow captures can't dominate).
-        if (!saved && ins.url
-            && capAttempts < UPTAKE_API_SHOT_CAP
-            && (Date.now() - shotStart) < UPTAKE_API_SHOT_BUDGET_MS) {
-          capAttempts++;
-          try {
-            await navTo(ins.url);
-            await pollUntil(win, CHECK_DETAIL_READY, 600, 20);
-            await sleep(1200);
-            const file = await deps.captureScreenshot(win, `insight_${u.id}_${shotIdx}`);
-            if (file) { insShots.push(file); saved = file; capOk++; }
-          } catch (e) {
-            fwarn(`[Uptake][API] capturePage fallback failed for ${u.id}/${ins.title}: ${e.message}`);
-          }
-        }
-
-        if (saved) ins.screenshotPath = saved;        // primary chart
-        if (insShots.length) {
-          ins.screenshots = insShots.slice();          // ALL charts for this insight
-          insShots.forEach((f) => u.screenshots.push(f));
-        }
-        shotIdx++;
+      if (!t.link) continue;
+      const cu = mediaUrlCandidates(t.link)[0];
+      const img = cu ? await apiFetchImage(win, cu, deps) : { ok: false };
+      if (img.ok && img.base64) {
+        if (mediaWinIdx < 0) { mediaWinIdx = 0; flog('[Uptake][API] media confirmed (raw PNG)'); }
+        t.chartB64 = img.base64;
       }
     }
-    flog(`[Uptake][API] screenshots: ${mediaOk} via media-PNG + ${capOk} via capturePage fallback, ${shotIdx} insights in ${Math.round((Date.now() - shotStart) / 1000)}s`);
+    const fetched = tasks.filter((t) => t.chartB64).length;
+    flog(`[Uptake][API] charts fetched: ${fetched}/${tasks.length}`);
+
+    // ── PHASE B: render each insight's details header ABOVE its chart (as an
+    // HTML page) and capturePage it — baking the text INTO the saved PNG. This
+    // navigates to data: URLs, so it runs AFTER all fetches are done.
+    for (const t of tasks) {
+      if (win.isDestroyed() || deps.settled()) break;
+      if (!t.chartB64) continue;
+      const file = await renderHeaderedShot(win, t.chartB64, {
+        title:       t.ins.title,
+        status:      t.ins.status,
+        firstSeen:   t.ins.firstSeen,
+        lastSeen:    t.ins.lastSeen,
+        subsystem:   t.ins.subsystem,
+        summary:     t.ins.summary,
+        recommended: t.ins.recommended || t.ins.guidance,
+        _label:      `${t.label}_${Date.now()}`,
+      }, deps);
+      const saved = file || saveB64Png(t.chartB64, t.label);  // fallback: raw chart
+      if (saved) {
+        t.ins.screenshotPath = saved;
+        t.ins.screenshots = [saved];
+        t.u.screenshots.push(saved);
+        mediaOk++;
+      }
+    }
+
+    // ── PHASE C: capturePage fallback for the few insights with NO media —
+    // BOUNDED (cap + time budget) so slow page captures can't dominate. Must
+    // re-navigate to the insight page (back on the uptake origin).
+    let capAttempts = 0;
+    for (const t of tasks) {
+      if (win.isDestroyed() || deps.settled()) break;
+      if (t.chartB64 || !t.ins.url) continue;
+      if (capAttempts >= UPTAKE_API_SHOT_CAP || (Date.now() - shotStart) > UPTAKE_API_SHOT_BUDGET_MS) break;
+      capAttempts++;
+      try {
+        await navTo(t.ins.url);
+        await pollUntil(win, CHECK_DETAIL_READY, 600, 20);
+        await sleep(1200);
+        const file = await deps.captureScreenshot(win, `insight_${t.label}`);
+        if (file) { t.ins.screenshotPath = file; t.ins.screenshots = [file]; t.u.screenshots.push(file); capOk++; }
+      } catch (e) {
+        fwarn(`[Uptake][API] capturePage fallback failed for ${t.u.id}/${t.ins.title}: ${e.message}`);
+      }
+    }
+    flog(`[Uptake][API] screenshots: ${mediaOk} via media+header + ${capOk} via capturePage fallback, ${tasks.length} insights in ${Math.round((Date.now() - shotStart) / 1000)}s`);
 
     // strip internal fields before returning
     allUnits.forEach(u => u.insightsList.forEach(ins => { delete ins._assetUuid; delete ins._insightId; delete ins._mediaPng; delete ins._mediaPngs; }));
