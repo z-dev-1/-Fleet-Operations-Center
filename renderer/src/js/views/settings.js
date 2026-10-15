@@ -627,9 +627,19 @@ function _html() {
         <div class="sd-section" id="sect-asana">
           <div class="sd-section-title">Asana</div>
 
-          <!-- Multi-user PAT manager: each teammate pastes their own PAT; we
-               auto-discover their GIDs and store the token encrypted. -->
-          <div class="sd-hint" style="margin-bottom:8px">Add a teammate: pick a short alias and paste their Asana Personal Access Token. The app auto-discovers their name, workspace, and task-list IDs. Tokens are stored encrypted on this device.</div>
+          <!-- PRIMARY: Amazon Midway SSO. No PAT/OAuth needed — rides the same
+               Midway session as AAP/Uptake. Requires a healthy AEA session. -->
+          <div class="sd-hint" style="margin-bottom:8px">Asana connects through your Amazon Midway SSO session — the same login as AAP/Uptake. No token needed. Requires a healthy Midway/AEA session (run mwinit if disconnected).</div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary" id="asana-midway-check">Check Asana connection</button>
+          </div>
+          <div id="asana-midway-status" class="sd-status warn" style="margin-top:6px">\u2139\uFE0F Not checked yet</div>
+
+          <div class="sd-divider" style="margin:14px 0;border-top:1px solid var(--line,#2a3344)"></div>
+
+          <!-- FALLBACK: Multi-user PAT manager (only works if your org allows
+               Personal Access Tokens; many Amazon-managed workspaces don't). -->
+          <div class="sd-hint" style="margin-bottom:8px">Fallback (only if PATs are allowed): add a teammate by alias + PAT. Auto-discovers their IDs; token stored encrypted.</div>
           <div class="sd-row">
             <div class="sd-field">
               <div class="sd-label">Alias</div>
@@ -1773,6 +1783,31 @@ async function _spSaveEmail(opName, domCode, to, cc) {
 function _wireSP() { /* SP wiring handled in operators tab */ }
 
 function _wireAsana() {
+  // Midway SSO connection check (primary path — no token).
+  const midwayBtn = document.getElementById('asana-midway-check');
+  if (midwayBtn) midwayBtn.addEventListener('click', () => {
+    const el = document.getElementById('asana-midway-status');
+    midwayBtn.disabled = true;
+    const original = midwayBtn.textContent;
+    midwayBtn.textContent = 'Checking\u2026';
+    if (el) { el.textContent = '\u23F3 Checking via Amazon SSO\u2026'; el.className = 'sd-status'; }
+    asanaBridge.checkAuth().then((res) => {
+      const ok = !!(res && res.ok);
+      if (el) {
+        el.textContent = ok
+          ? ('\u2705 Connected via Amazon SSO as ' + (res.user || res.email || 'you'))
+          : ('\u26A0\uFE0F Not connected: ' + ((res && res.error) || 'session unavailable') + ' — run mwinit / check AEA');
+        el.className = 'sd-status ' + (ok ? 'ok' : 'warn');
+      }
+      if (ok) toast.show('success', 'Asana connected via SSO', 2500);
+    }).catch((e) => {
+      if (el) { el.textContent = '\u26A0\uFE0F Check failed: ' + e.message; el.className = 'sd-status warn'; }
+    }).finally(() => {
+      midwayBtn.disabled = false;
+      midwayBtn.textContent = original;
+    });
+  });
+
   // Default workspace/project (shared config, no secret here).
   const saveBtn = document.getElementById('asana-save');
   if (saveBtn) saveBtn.addEventListener('click', async () => {

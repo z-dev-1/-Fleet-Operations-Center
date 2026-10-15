@@ -56,12 +56,36 @@ async function resolveToken() {
   return getToken();
 }
 
+// Decide which transport authenticates API calls:
+//   - 'midway': drive Asana inside an authed Electron window on the Midway SSO
+//     session (no PAT/OAuth — the only path when Amazon blocks tokens).
+//   - 'pat':    Node https with a Bearer PAT.
+// Rule: use Midway when explicitly configured (authMode==='midway') OR whenever
+// no PAT is available (so a token-blocked org "just works" via the session).
+async function _useMidway() {
+  const cfg = loadConfig();
+  if (cfg && cfg.authMode === 'pat') return false;
+  if (cfg && cfg.authMode === 'midway') return true;
+  // Auto: fall back to Midway session when there's no usable PAT.
+  const tok = await resolveToken();
+  return !tok;
+}
+
 // ── API REQUEST ───────────────────────────────────────────────────────────────
 async function apiRequest(endpoint, method, body) {
+  // Midway-session transport (no PAT): call Asana in-window with the SSO cookies.
+  if (await _useMidway()) {
+    const session = require('./session');
+    const path = endpoint.startsWith('http')
+      ? endpoint
+      : (endpoint.startsWith('/api/') ? endpoint : '/api/1.0' + endpoint);
+    return session.asanaApi(path, method || 'GET', body != null ? body : null);
+  }
+
   const token = await resolveToken();
   return new Promise((resolve, reject) => {
     if (!token) {
-      reject(new Error('No Asana auth configured. Add a user (PAT) in Settings.'));
+      reject(new Error('No Asana auth configured. Add a user (PAT) in Settings, or sign in via Midway.'));
       return;
     }
 
@@ -111,6 +135,25 @@ async function apiRequest(endpoint, method, body) {
 
 // ── PAGINATION HELPER ─────────────────────────────────────────────────────────
 async function apiPaginate(endpoint) {
+  // Midway-session transport: walk next_page via in-window fetch.
+  if (await _useMidway()) {
+    const session = require('./session');
+    let all = [];
+    let next = endpoint;
+    let guard = 0;
+    while (next && guard++ < 50) {
+      const path = next.startsWith('http') ? next : (next.startsWith('/api/') ? next : '/api/1.0' + next);
+      // asanaApi returns `data`; we need next_page too, so call the raw path and
+      // read the envelope via a dedicated full-response helper.
+      const full = await session.asanaApi(path, 'GET', null, { raw: true }).catch(() => null);
+      // asanaApi (raw) returns the whole json envelope { data, next_page }.
+      const data = full && full.data ? full.data : (Array.isArray(full) ? full : []);
+      all = all.concat(data);
+      next = (full && full.next_page && full.next_page.uri) ? full.next_page.uri : null;
+    }
+    return all;
+  }
+
   let allResults = [];
   let nextPage   = endpoint;
   const token = await resolveToken();   // resolve the active user's PAT once for the whole page walk
