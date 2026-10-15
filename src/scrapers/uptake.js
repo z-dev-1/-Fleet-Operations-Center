@@ -921,12 +921,6 @@ async function runApiScrape(deps) {
     let capturedAuth = null;
     let capturedFilterId = null;
     let dbgAttached = false;
-    // DISCOVERY (UPTAKE_RISK_DISCOVER=1): capture the Risk Explorer API calls so
-    // we can learn where the real asset risk score comes from (NOT /summary,
-    // which has no risk field — the current max-insight-severity fallback is
-    // wrong, e.g. 922516 shows 80 but Uptake says 0/Very Low).
-    const _riskDiscover = process.env.UPTAKE_RISK_DISCOVER === '1';
-    const _riskReqs = new Map();   // requestId -> {method,url,body}
     const dbg = win.webContents.debugger;
     try {
       if (dbg.isAttached()) {
@@ -948,29 +942,6 @@ async function runApiScrape(deps) {
               if (a && /bearer/i.test(a)) capturedAuth = a;
               const m = u.match(/userSavedFilterId=([0-9a-f-]+)/i);
               if (m) capturedFilterId = m[1];
-            }
-            // Discovery: record any asset-ui / common API call (we'll dump bodies).
-            if (_riskDiscover && /\/api\//.test(u) && !/\.(js|css|png|svg|woff2?)/i.test(u)) {
-              _riskReqs.set(params.requestId, { method: params.request.method, url: u, body: params.request.postData || null });
-            }
-          } else if (_riskDiscover && method === 'Network.loadingFinished') {
-            const r = _riskReqs.get(params.requestId);
-            if (r) {
-              dbg.sendCommand('Network.getResponseBody', { requestId: params.requestId })
-                .then((res) => {
-                  let b = res.body || '';
-                  if (res.base64Encoded) { try { b = Buffer.from(b, 'base64').toString('utf8'); } catch (_) {} }
-                  r.respBody = b.slice(0, 8000);
-                  try {
-                    const _p = require('path').join(require('electron').app.getPath('userData'), 'uptake-risk-discovery.json');
-                    const _fs = require('fs');
-                    let arr = [];
-                    try { arr = JSON.parse(_fs.readFileSync(_p, 'utf8')); } catch (_) {}
-                    arr.push(r);
-                    _fs.writeFileSync(_p, JSON.stringify(arr, null, 2));
-                  } catch (_) {}
-                })
-                .catch(() => {});
             }
           }
         } catch (_) {}
@@ -1004,42 +975,6 @@ async function runApiScrape(deps) {
       }
     }
 
-    // DISCOVERY: navigate to Risk Explorer so its API calls fire and get
-    // captured (to find the real asset risk-score endpoint). One-time, gated.
-    if (_riskDiscover) {
-      flog('[Uptake][API] RISK-DISCOVER: navigating to /RiskExplorer to capture risk API...');
-      try { await navTo('https://fleet.uptake.com/RiskExplorer'); } catch (_) {}
-      await sleep(8000);   // let the page load its risk data
-      flog('[Uptake][API] RISK-DISCOVER: navigating to asset /overview to capture insight API...');
-      try { await navTo('https://fleet.uptake.com/asset/6781c10d307fb463b5455b9e4117f33f/insights?preserveFilters=true'); } catch (_) {}
-      await sleep(8000);
-      flog('[Uptake][API] RISK-DISCOVER: capture window done — see uptake-risk-discovery.json');
-    }
-
-
-    // VERIFY (UPTAKE_VERIFY=1): confirm the recent-window insight count matches
-    // Uptake's own per-asset insights tab. Calls insights/count + search with the
-    // SAME lastDetectedLowerBound = now - UPTAKE_RECENT_DAYS for a few known units.
-    if (process.env.UPTAKE_VERIFY === '1') {
-      const _lb = new Date(Date.now() - UPTAKE_RECENT_DAYS * 86400000).toISOString();
-      const _units = [
-        { id: '922529', uuid: 'c7e6b0e48414bdc5ce3734969456e967' },
-        { id: '622086', uuid: '597f4d955408106272a8cd34b6b42c83' },
-        { id: '6781c10d', uuid: '6781c10d307fb463b5455b9e4117f33f' },
-      ];
-      flog('[Uptake][API] VERIFY lastDetectedLowerBound=' + _lb + ' (UPTAKE_RECENT_DAYS=' + UPTAKE_RECENT_DAYS + ')');
-      for (const _u of _units) {
-        try {
-          const _cUrl = UPTAKE_API_BASE + '/api/asset-ui/v1/assets/' + _u.uuid + '/insights/count';
-          const _cr = await apiFetch(win, _cUrl, 'POST', { insightQuery: { lastDetectedLowerBound: _lb } }, deps);
-          const _count = (_cr.ok && (_cr.json != null)) ? _cr.json : (_cr.text || '?');
-          const _sUrl = UPTAKE_API_BASE + '/api/asset-ui/v1/assets/' + _u.uuid + '/insights/search?responseFormat=array&sort=startTs%2Cdesc';
-          const _sr = await apiFetch(win, _sUrl, 'POST', { insightQuery: { lastDetectedLowerBound: _lb } }, deps);
-          const _arrLen = (_sr.ok && Array.isArray(_sr.json)) ? _sr.json.length : '?';
-          flog('[Uptake][API] VERIFY ' + _u.id + ': count=' + _count + ' searchArrayLen=' + _arrLen);
-        } catch (e) { fwarn('[Uptake][API] VERIFY ' + _u.id + ' failed: ' + e.message); }
-      }
-    }
     try { if (dbgAttached) dbg.detach(); } catch (_) {}
 
     deps.authHeader = capturedAuth;        // used by apiFetch below
@@ -1362,100 +1297,6 @@ async function scrapeUptake() {
     if (DEBUG) {
       win.setPosition(100, 100);
       win.webContents.openDevTools({ mode: 'right' });
-    }
-
-    // ── TEMP API DISCOVERY PROBE (env-gated: UPTAKE_NETLOG=1) ────────────────
-    // Goal: find a RELIABLE JSON/GraphQL API behind the Uptake SPA that we
-    // could call directly instead of scraping the deduped/virtualized DOM
-    // (the DOM list collapses same-title insights, e.g. unit 622086's two
-    // "Engine Crankcase Breather Speed" rows -> only one scraped). This runs
-    // INSIDE the authenticated Uptake window, so it uses the real Midway/AEA
-    // session (no separate Chromium/login needed).
-    //
-    // webRequest alone can't read response BODIES, so we attach the Chrome
-    // DevTools Protocol (webContents.debugger) and enable Network to capture
-    // request + response body for every *.uptake.com API call. Everything is
-    // written to uptake-api-discovery.json for inspection. Zero effect unless
-    // UPTAKE_NETLOG=1. Fully wrapped in try/catch — never breaks a real scrape.
-    if (process.env.UPTAKE_NETLOG === '1') {
-      try {
-        const _path = require('path');
-        const _fs   = require('fs');
-        const _app  = require('electron').app;
-        const _outFile = _path.join(_app.getPath('userData'), 'uptake-api-discovery.json');
-        const _apiRe = /(?:^|\.)uptake\.com/i;
-        // skip static assets / telemetry noise; keep API/graphql/data calls
-        const _isApi = (u) =>
-          _apiRe.test(u) &&
-          /\/(api|graphql|insight|asset|case|fault|v\d|data|query)/i.test(u) &&
-          !/\.(js|css|png|jpg|jpeg|gif|svg|woff2?|ttf|ico|map)(\?|$)/i.test(u) &&
-          !/(segment|datadog|newrelic|sentry|analytics|telemetry|google|gtag)/i.test(u);
-
-        const _calls = new Map();   // requestId -> {method,url,reqBody,...}
-        const _dump = () => {
-          try {
-            const arr = Array.from(_calls.values());
-            const uniq = Array.from(new Set(arr.map(c => c.method + ' ' + (c.url||'').split('?')[0])));
-            _fs.writeFileSync(_outFile, JSON.stringify({
-              capturedAt: new Date().toISOString(),
-              uniqueEndpoints: uniq,
-              callCount: arr.length,
-              calls: arr,
-            }, null, 2));
-          } catch (_) {}
-        };
-
-        const dbg = win.webContents.debugger;
-        dbg.attach('1.3');
-        dbg.sendCommand('Network.enable');
-
-        dbg.on('message', (_e, method, params) => {
-          try {
-            if (method === 'Network.requestWillBeSent') {
-              const u = params.request && params.request.url || '';
-              if (_isApi(u)) {
-                _calls.set(params.requestId, {
-                  method: params.request.method,
-                  url: u,
-                  reqBody: params.request.postData || null,
-                  reqHeaders: {
-                    authorization: params.request.headers && params.request.headers['authorization'] ? '(present)' : undefined,
-                    'content-type': params.request.headers && params.request.headers['content-type'],
-                    accept: params.request.headers && params.request.headers['accept'],
-                  },
-                  status: null, respType: null, respBody: null,
-                });
-                flog('[Uptake][NETLOG]', params.request.method, u);
-              }
-            } else if (method === 'Network.responseReceived') {
-              const c = _calls.get(params.requestId);
-              if (c) {
-                c.status = params.response.status;
-                c.respType = params.response.mimeType;
-              }
-            } else if (method === 'Network.loadingFinished') {
-              const c = _calls.get(params.requestId);
-              if (c && /json|graphql|text/i.test(c.respType || '')) {
-                dbg.sendCommand('Network.getResponseBody', { requestId: params.requestId })
-                  .then((res) => {
-                    let body = res.body || '';
-                    if (res.base64Encoded) { try { body = Buffer.from(body, 'base64').toString('utf8'); } catch(_){} }
-                    // cap stored body so the file stays readable
-                    c.respBody = body.length > 20000 ? body.slice(0, 20000) + '…[truncated]' : body;
-                    flog('[Uptake][NETLOG]   <-', c.status, c.respType, '(' + body.length + ' bytes)', c.url.split('?')[0]);
-                    _dump();
-                  })
-                  .catch(() => {});
-              }
-            }
-          } catch (_) {}
-        });
-
-        dbg.on('detach', () => { try { _dump(); } catch(_){} });
-        flog('[Uptake][NETLOG] CDP API-discovery probe attached (UPTAKE_NETLOG=1) -> ' + _outFile);
-      } catch (e) {
-        fwarn('[Uptake][NETLOG] failed to attach CDP probe:', e.message);
-      }
     }
 
     const masterTimer = setTimeout(() => {
@@ -1857,6 +1698,7 @@ function mergeUptakeIntoRows(aapRows, uptakeUnits) {
       if (numId) map[numId] = u;
     }
   });
+  const syncedAt = new Date().toISOString();   // when Uptake data was applied
   return aapRows.map(row => {
     const id = String(row.equipmentId || '').replace(/[^0-9]/g, '');
     const m  = map[id];
@@ -1881,6 +1723,7 @@ function mergeUptakeIntoRows(aapRows, uptakeUnits) {
       subsystems:   m.subsystems   || [],
       screenshots:  m.screenshots  || [],
       uptakeSynced: true,
+      uptakeSyncedAt: syncedAt,
     };
   });
 }

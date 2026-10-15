@@ -199,6 +199,35 @@ function _deriveWaitingOn(status) {
 const _EVIDENCE_CAP = 6;
 function _clipVal(v, n) { return _s(v).slice(0, n || 160); }
 
+// ── Uptake predictive-maintenance block ────────────────────────────────────────
+// mergeUptakeIntoRows() writes riskScore, riskLabel, insights (count),
+// insightsList, and subsystems onto the fleetData row BEFORE the canonical pass
+// runs. We fold a compact, deterministic summary of that onto the canonical
+// record so every surface reads Uptake's predictive signal from the one
+// authoritative place (not just the raw row). Never fabricates — only restates
+// what Uptake already produced. Returns null when the row has no Uptake data.
+const _UPTAKE_TOP_INSIGHTS = 5;
+function _buildUptake(row) {
+  const r = row || {};
+  if (!r.uptakeSynced && r.riskScore == null && !Array.isArray(r.insightsList)) return null;
+  const list = Array.isArray(r.insightsList) ? r.insightsList : [];
+  const rs = Number(r.riskScore);
+  const topInsights = list.slice(0, _UPTAKE_TOP_INSIGHTS).map((i) => ({
+    title:     _clipVal(i && (i.title || i.name), 120),
+    subsystem: _clipVal(i && i.subsystem, 60),
+    status:    _clipVal(i && i.status, 40),
+    lastSeen:  _s(i && (i.lastSeen || i.lastDetected)),
+  })).filter((i) => i.title);
+  return {
+    riskScore:    Number.isFinite(rs) ? rs : null,
+    riskLabel:    _clipVal(r.riskLabel, 60),
+    insightCount: list.length || (Number(r.insights) || 0),
+    subsystems:   Array.isArray(r.subsystems) ? r.subsystems.slice(0, 12) : [],
+    topInsights,
+    syncedAt:     _s(r.uptakeSyncedAt) || null,
+  };
+}
+
 function _buildEvidence(row, status, source) {
   const r = row || {};
   const ev = [];
@@ -224,6 +253,19 @@ function _buildEvidence(row, status, source) {
   // Timeline — the day-by-day narrative (last line is the most recent).
   const tl = _s(r.repairTimeline);
   if (tl) { const last = tl.split('\n').filter(Boolean).pop(); if (last) push('timeline', 'repairTimeline', last); }
+  // Uptake predictive signal — risk score + the top insight title(s). This is a
+  // forward-looking fact (a predicted/observed fault), tagged 'uptake' so it's
+  // distinguishable from the operational AAP/relay/offsite signals above.
+  const _rsEv = Number(r.riskScore);
+  if (Number.isFinite(_rsEv) && _rsEv > 0) {
+    const label = _s(r.riskLabel);
+    push('uptake', 'riskScore', _rsEv + (label ? ' (' + label + ')' : ''), _s(r.uptakeSyncedAt));
+  }
+  const _insList = Array.isArray(r.insightsList) ? r.insightsList : [];
+  if (_insList.length) {
+    const titles = _insList.slice(0, 3).map((i) => _s(i && (i.title || i.name))).filter(Boolean);
+    if (titles.length) push('uptake', 'insights', titles.join('; '), _s(r.uptakeSyncedAt));
+  }
   // Order: used-in-conclusion first, then by richness; cap.
   ev.sort((a, b) => (b.usedInConclusion ? 1 : 0) - (a.usedInConclusion ? 1 : 0));
   return ev.slice(0, _EVIDENCE_CAP);
@@ -381,6 +423,9 @@ function computeCanonical(row) {
     evidence: _buildEvidence(r, status, source),
     conflicts: _detectObviousConflicts(r, status, source),
     lastMeaningfulUpdate: _lastMeaningfulUpdate(r),
+    // Uptake predictive-maintenance summary (null when the unit has no Uptake
+    // data). Deterministic restatement of the merged row's riskScore/insights.
+    uptake: _buildUptake(r),
     // Temporal fields — filled by diffAgainstPrior() in buildAll against the
     // previous cycle's record. Defaults here so a standalone compute is complete.
     changedFields: [],
@@ -670,6 +715,12 @@ function mirrorFields(record) {
     canonicalAwaitingReply: r.awaitingReply || '',
     canonicalThreadOfRecord: r.threadOfRecord || '',
     canonicalQuestionOpen: !!(Array.isArray(r.flags) && r.flags.includes('question_open')),
+    // Lean Uptake predictive signal mirrored onto the row (full topInsights
+    // array stays in the canonicalState store; read it there when needed).
+    canonicalRiskScore: (r.uptake && Number.isFinite(r.uptake.riskScore)) ? r.uptake.riskScore : null,
+    canonicalRiskLabel: (r.uptake && r.uptake.riskLabel) || '',
+    canonicalInsightCount: (r.uptake && Number(r.uptake.insightCount)) || 0,
+    canonicalSubsystems: (r.uptake && Array.isArray(r.uptake.subsystems)) ? r.uptake.subsystems.slice() : [],
   };
 }
 
@@ -808,6 +859,18 @@ function fromRow(row) {
     awaitingReply: r.canonicalAwaitingReply || '',
     threadOfRecord: r.canonicalThreadOfRecord || '',
     updatedAt: r.canonicalUpdatedAt || null,
+    // Reconstruct the lean Uptake summary from the mirrored fields. The full
+    // topInsights array only lives in the canonicalState store; read it there
+    // when the detail is needed (getCanonical step 2).
+    uptake: (r.canonicalRiskScore != null || r.canonicalInsightCount)
+      ? {
+          riskScore:    Number.isFinite(r.canonicalRiskScore) ? r.canonicalRiskScore : null,
+          riskLabel:    r.canonicalRiskLabel || '',
+          insightCount: Number(r.canonicalInsightCount) || 0,
+          subsystems:   Array.isArray(r.canonicalSubsystems) ? r.canonicalSubsystems.slice() : [],
+          topInsights:  [],
+        }
+      : null,
   };
 }
 
