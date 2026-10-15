@@ -23,8 +23,11 @@ import bus   from '../bus.js';
 import state from '../state.js';
 import { longDwell as longDwellBridge, ai as aiBridge, relay as relayBridge, files as filesBridge } from '../bridge.js';
 import toast from '../components/toast.js';
+import * as longDwellCsv from './longdwell-csv.js';
 
 let _el = null;
+let _ldSubView = 'computed';   // 'computed' | 'imported' — Long Dwell sub-view toggle
+let _ldCsvMounted = false;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const _safe = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1378,8 +1381,15 @@ function _dashboardHtml() {
         <div class="an-card">
           <div class="an-card__title">Long Dwell Units</div>
           <div class="an-card__hint">Units currently unavailable and down for an extended period. Log the delay reason, escalation level, and a short status summary for leadership visibility.</div>
-          <div id="an-ld-toolbar-wrap"></div>
-          <div id="an-ld-table-wrap"></div>
+          <div class="sd-tabs an-ld-subtabs" style="margin-bottom:10px">
+            <button class="sd-tab active" data-an-ld-sub="computed">Computed (live fleet)</button>
+            <button class="sd-tab" data-an-ld-sub="imported">Imported CSV</button>
+          </div>
+          <div id="an-ld-computed-wrap">
+            <div id="an-ld-toolbar-wrap"></div>
+            <div id="an-ld-table-wrap"></div>
+          </div>
+          <div id="an-ld-csv-host" style="display:none"></div>
         </div>
       </div>
     </div>
@@ -1439,6 +1449,26 @@ export function init(container) {
   // (Overview tab removed — its KPI dashboard now lives on the Dashboard/fleet
   // view via fleet-overview.js. This view is Long Dwell only, so there is no
   // tab switching to wire.)
+
+  // Long Dwell sub-view toggle: "Computed (live fleet)" vs "Imported CSV".
+  // The imported-CSV table is a self-contained module (longdwell-csv.js) that
+  // mounts lazily the first time its tab is opened.
+  const _ldComputedWrap = _el.querySelector('#an-ld-computed-wrap');
+  const _ldCsvHost      = _el.querySelector('#an-ld-csv-host');
+  _el.querySelectorAll('[data-an-ld-sub]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const sub = btn.dataset.anLdSub;
+      if (sub === _ldSubView) return;
+      _ldSubView = sub;
+      _el.querySelectorAll('[data-an-ld-sub]').forEach((b) => b.classList.toggle('active', b.dataset.anLdSub === sub));
+      if (_ldComputedWrap) _ldComputedWrap.style.display = sub === 'computed' ? '' : 'none';
+      if (_ldCsvHost)      _ldCsvHost.style.display      = sub === 'imported' ? '' : 'none';
+      if (sub === 'imported' && _ldCsvHost) {
+        if (!_ldCsvMounted) { longDwellCsv.mount(_ldCsvHost); _ldCsvMounted = true; }
+        else { longDwellCsv.refresh(); }
+      }
+    });
+  });
 
   // Long Dwell table -- delegated events (table is rebuilt via innerHTML on
   // every _renderLongDwellTab() call, so listeners must live on the stable

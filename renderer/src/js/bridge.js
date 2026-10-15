@@ -352,6 +352,14 @@ export const longDwell = {
   setAiFillActive: (active) => window.longDwell.setAiFillActive(active),
 };
 
+// ── Long Dwell imported CSV (team-shared tracker) ──────────────────────────
+export const longDwellCsv = {
+  get:     ()        => window.longDwellCsv.get(),
+  import:  (payload) => window.longDwellCsv.import(payload),
+  saveRow: (payload) => window.longDwellCsv.saveRow(payload),
+  clear:   ()        => window.longDwellCsv.clear(),
+};
+
 // ── AI / Orcha ─────────────────────────────────────────────────────────────
 export const ai = {
   suggest:          (unit)       => window.ai.suggest(unit),

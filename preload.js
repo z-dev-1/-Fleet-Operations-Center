@@ -168,6 +168,14 @@ expose('longDwell', {
   setAiFillActive: (active) => ipcRenderer.invoke('longdwell:ai-fill-active', !!active),
 });
 
+// ── Long Dwell imported CSV (team-shared tracker) ──────────────────────────
+expose('longDwellCsv', {
+  get:     ()        => ipcRenderer.invoke('long-dwell-csv:get'),
+  import:  (payload) => ipcRenderer.invoke('long-dwell-csv:import', payload),
+  saveRow: (payload) => ipcRenderer.invoke('long-dwell-csv:save-row', payload),
+  clear:   ()        => ipcRenderer.invoke('long-dwell-csv:clear'),
+});
+
 // ── AI / Orcha ────────────────────────────────────────────────────────────────
 expose('ai', {
   suggest:          (unit)        => ipcRenderer.invoke('ai:suggest', unit),

@@ -29,6 +29,7 @@ const { registerVendorHistoryIPC } = require('./vendor-history');
 const { registerSetupIPC }       = require('./setup');
 const { registerDailyTasksIPC }  = require('./daily-tasks');
 const { registerLongDwellIPC }     = require('./long-dwell');
+const { registerLongDwellCsvIPC }  = require('./long-dwell-csv');
 const { registerSchedulerIPC }     = require('./scheduler');
 const { registerEmailTriageIPC }   = require('./email-triage');
 const { registerRelayReconcileIPC } = require('./relay-reconcile');
@@ -53,6 +54,7 @@ function registerAllIPC(ctx) {
   // (morning + on-demand) so Split View is ready without a manual sign-in.
   try { require('../scrapers/vendor_session').startWarmScheduler(); } catch (e) { logger.warn('vendor warm scheduler start failed: ' + e.message); }
   registerLongDwellIPC();
+  registerLongDwellCsvIPC();
   registerSchedulerIPC(ctx);
   registerEmailTriageIPC(ctx);
   registerRelayReconcileIPC(ctx);

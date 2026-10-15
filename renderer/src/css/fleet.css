@@ -9484,3 +9484,18 @@ body {
   flex-shrink: 0; padding: 1px 6px; border-radius: 8px; background: rgba(240, 168, 0, .12);
 }
 .fo-drill-empty { padding: 20px; text-align: center; color: var(--mut); font-style: italic; }
+
+/* ── Long Dwell imported-CSV table (longdwell-csv.js) ─────────────────────── */
+.an-ld-subtabs { display: flex; gap: 4px; }
+.ldc-toolbar { margin-bottom: 10px; }
+.ldc-meta { font-size: 12px; color: var(--txt2, #8b949e); }
+.ldc-table-scroll { overflow-x: auto; max-width: 100%; }
+.ldc-table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 11px; }
+.ldc-table th, .ldc-table td { vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--line, #2a3344); white-space: nowrap; }
+.ldc-table th { position: sticky; top: 0; background: var(--bg2, #11161d); z-index: 1; text-align: left; font-weight: 600; }
+.ldc-manual-th { color: var(--acc, #4ea1ff); }
+.ldc-csv-cell { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.ldc-manual-cell { background: rgba(78, 161, 255, 0.06); }
+.ldc-input { width: 100%; min-width: 120px; font-size: 11px; }
+.ldc-notes { min-width: 320px; white-space: normal; }
+.ldc-input.ldc-saved { outline: 2px solid var(--ok, #3fb950); transition: outline .2s; }
