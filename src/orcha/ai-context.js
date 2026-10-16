@@ -94,6 +94,13 @@ function buildFleetContext(messageText, opts = {}) {
   // the AI just couldn't see it. See _buildContactContext.
   context += _buildContactContext(messageText, rows);
 
+  // FAS roster — only for internal/allowed callers (the "just me" DM assistant
+  // and internal contacts), and only when the message is roster-relevant. Never
+  // exposed to external carrier/vendor contexts. Opt-in via opts.allowRoster.
+  if (opts.allowRoster) {
+    context += _buildRosterContext(messageText);
+  }
+
   if (!resolved.units.length && !resolved.groups.length) {
     // Nothing specific referenced — include ALL unavailable units with full
     // breakdown details (same fields as a specific-unit query) plus a condensed
@@ -280,6 +287,74 @@ function _buildContactContext(messageText, rows) {
   }
   s += '(Use this contact info to answer directly. If the specific contact/address/SCAC being asked about is NOT listed here, say you don\'t have it on file rather than guessing.)\n';
   return s;
+}
+
+// ── FAS roster context (only injected when the message is roster-relevant) ───
+// The roster can be ~300+ rows; we never dump it all. Only when a message is
+// about FAS personnel / coverage do we inject the MATCHING rows (by FAS name,
+// Site, or SCAC mentioned in the message). Returns '' otherwise so normal
+// questions aren't polluted with roster data.
+function _buildRosterContext(messageText) {
+  const text = String(messageText || '');
+  if (!text.trim()) return '';
+
+  // Is this a roster/FAS-personnel question at all? (who is the FAS, uptime
+  // manager, who covers a site/SCAC, a FAS person's email/phone, etc.)
+  const rosterIntent = /\bfas\b|uptime\s*manager|\bum\b|who('?s| is| handles| covers| owns| manages)|\bsr\.?\s*pm\b|\broster\b|point of contact|\bpoc\b/i.test(text);
+
+  const data = store.load('fasRoster', { rows: [] });
+  const rows = (data && Array.isArray(data.rows)) ? data.rows : [];
+  if (!rows.length) return '';
+
+  const upper = ' ' + text.toUpperCase().replace(/[^A-Z0-9]+/g, ' ') + ' ';
+  const tokenRe = (v) => new RegExp('(^| )' + String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '( |$)');
+  const g = (r, names) => { for (const n of names) { if (r[n] != null && String(r[n]).trim() !== '') return String(r[n]).trim(); } return ''; };
+
+  // Match roster rows the message references: by Site code, SCAC, or FAS name.
+  const matched = [];
+  for (const r of rows) {
+    const site = g(r, ['Site Code', 'Site']).toUpperCase();
+    const scac = g(r, ['SCAC']).toUpperCase();
+    const fas  = g(r, ['FAS Name', 'Name']);
+    const fasWords = fas.toUpperCase().split(/\s+/).filter((w) => w.length >= 3);
+    const hit = (site && tokenRe(site).test(upper))
+      || (scac && tokenRe(scac).test(upper))
+      || (fas && (upper.includes(' ' + fas.toUpperCase() + ' ') || fasWords.some((w) => tokenRe(w).test(upper))));
+    if (hit) matched.push(r);
+  }
+
+  // Only inject when there's a real match OR a clear roster-intent question.
+  if (!matched.length && !rosterIntent) return '';
+
+  const fmt = (r) => {
+    const bits = ['• ' + (g(r, ['FAS Name', 'Name']) || '(unknown FAS)')];
+    const sc = g(r, ['Site Code', 'Site']); const sx = g(r, ['SCAC']);
+    if (sc || sx) bits.push('    Site: ' + (sc || '?') + ' | SCAC: ' + (sx || '?'));
+    const em = g(r, ['Email']); const ph = g(r, ['Phone']); const lg = g(r, ['Login']);
+    if (em) bits.push('    Email: ' + em);
+    if (ph) bits.push('    Phone: ' + ph);
+    if (lg) bits.push('    Login: ' + lg);
+    const um = g(r, ['Uptime Manager']); const pm = g(r, ['Sr PM']); const prog = g(r, ['Program']);
+    if (um) bits.push('    Uptime Manager: ' + um);
+    if (pm) bits.push('    Sr PM: ' + pm);
+    if (prog) bits.push('    Program: ' + prog);
+    return bits.join('\n');
+  };
+
+  let out = '\n--- FAS ROSTER ---\n';
+  if (matched.length) {
+    // Dedup by (FAS+Site+SCAC) and cap so a broad match can't flood the prompt.
+    const seen = new Set();
+    const uniq = matched.filter((r) => {
+      const k = g(r, ['FAS Name']) + '|' + g(r, ['Site Code', 'Site']) + '|' + g(r, ['SCAC']);
+      if (seen.has(k)) return false; seen.add(k); return true;
+    }).slice(0, 25);
+    out += uniq.map(fmt).join('\n') + '\n';
+    out += '(FAS = the Fleet Asset Specialist for that Site+SCAC. Answer from these rows; if the specific person/site/SCAC asked about is NOT listed, say you don\'t have it on file.)\n';
+  } else {
+    out += 'No roster row matched that name/site/SCAC. Ask the user to clarify the site, SCAC, or FAS name rather than guessing.\n';
+  }
+  return out;
 }
 
 /**

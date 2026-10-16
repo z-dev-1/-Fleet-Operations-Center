@@ -694,7 +694,10 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext, coverin
     try { await _verifyUnitFresh(_verifyUnit); } catch (_) { /* best-effort */ }
   }
 
-  const fleetContext = buildFleetContext(_fleetLookupText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true });
+  // allowRoster: this is Z's own "just me" assistant (internal), so FAS roster
+  // personnel data may be surfaced — but only when the message is actually a
+  // roster question (see _buildRosterContext), never dumped wholesale.
+  const fleetContext = buildFleetContext(_fleetLookupText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true, allowRoster: true });
 
   const _persona = covering ? (COVERING_PREFACE + PERSONA_SYSTEM_PROMPT) : PERSONA_SYSTEM_PROMPT;
   const prompt = _contextReset + _persona + timeContext + groupBlock + contextBlock + _inheritedUnitNote + fleetContext + _jsonReminder + '\n\nIncoming DM:\n' + messageText;
