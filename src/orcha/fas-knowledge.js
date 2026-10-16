@@ -65,6 +65,34 @@ Flip BLOCKERS: WO completion not verified; failed PM or expired DOT inspection (
   • PM scheduling: MCS Scheduled Maintenance team. FAS escalates expired DOT, requests immediate service when PM due within 3 days, uses SM trailer Slack Escalation, flags Gas Tank sites for exemption. FAS does NOT build the schedule or assign PM WOs.
   • Accident repairs: ARC team (claims); MCS flags ARC-claimable in RG. FAS owns on-site investigation, photo comparison, ARC report creation, down-unit SIMs/cases. FAS does NOT process claims.
   • EOL decisions: MCS Estimation Evaluation determines EOL (calculator); L4H approves. FAS executes downstream (AFP: swap check + SIM folder; TOM DCs/YHs: tag out, EOL Quip Tracker, flip AAP to EOL, resolve SIM).
+
+── ESCALATION SEVERITY (SEV5–SEV2) — fleet MAINTENANCE severity (not RME/FC severity) ──
+This drives the Long Dwell "Escalation" column AND "should I escalate?" judgments. SEV2 = highest.
+  • SEV5 — MONITOR (0–3 days): WO open, vendor assigned, ETC set and not passed; repair progressing normally. FAS just logs it in the QUIP/daily tracker. No action unless it's a risk site or a power unit at a site with excess ≤1. Engaged: FAS only (passive).
+  • SEV4 — REQUEST STATUS / ETC (4–7 days): ETC approaching or just passed, OR vendor silent 2+ days, OR estimate sitting past SLA; vendor slow but still engaged. FAS calls/emails the vendor for an updated ETC, pings MCS buddy to check Reach/RG, updates the delay tracker with a reason. Engaged: FAS + vendor + MCS buddy.
+  • SEV3 — ACTIVE ESCALATION (7–14 days): ETC passed with no update, OR vendor non-responsive 3+ business days (HVE Playbook trigger), OR estimate rejected twice, OR parts delay with no ETA. Unit is now on the "Asset Down over 7D" list. FAS escalates to MCS Lead (WO pending estimate approval past SLA → MCS Lead), pushes the vendor hard, considers reassignment, documents in the FAS2UM SIM. Engaged: FAS + MCS Lead + vendor directly.
+  • SEV2 — LEADERSHIP + ASANA (14+ days OR any instant-bump trigger): repair stalled with no clear path, multiple barriers, vendor out of scope / reassignment needed, or a systemic pattern across units/sites. FAS files a Vendor Performance Escalation Asana, escalates to the Uptime Manager (UM); if UM can't resolve locally, UM takes it to the Vendor Performance (VP) team per the VP Escalation Matrix; loop in L4H/HVE if high-value. Engaged: FAS + UM + VP team + L4H (if HVE). VP team has a 24hr ack SLA on Asana intakes.
+
+INSTANT-BUMP TRIGGERS (apply a severity bump on Day 1, regardless of days down):
+  • No ETC within 24h of vendor assignment → SEV4 minimum.
+  • ETC passed with zero update → immediate SEV3; if it happens twice → SEV2.
+  • Vendor rejected / out of scope → immediate SEV3 (need reassignment via VRE override or MCS move).
+  • 3rd failed estimate submission (MCS already rejected twice) → escalates TO FAS; SEV2 territory (reassign vendor + file VP Asana).
+  • Multiple repair attempts on the same defect (quality issue) → SEV3 minimum; document for the VP Asana.
+  • DOT-critical safety item (brakes, air system, steering, frame/structural cracks, fifth wheel, DOT-noncompliant lights/electrical) → automatic SEV3 minimum (unit can't legally operate; failed DVIR keeps it Unavailable). If also at a risk site → immediate SEV2.
+  • Site at risk (FAS Master Dashboard: excess <1 for TOM power units, or Red Risk Flag for Trailer Gas Tank Model) → any down unit there gets +1 severity.
+  • AFP unit with partner escalation (via Resource Center) → SEV3 minimum (external SLA clock: 2hr ack / 72hr resolution; partner trust at stake).
+
+SEV2 / "needs leadership NOW" triggers: 14+ days down with no clear path; same vendor stalling on 3+ units across sites (network-level → transfer to Vendor Management); DOT-critical defect at a risk site (excess ≤1 power); estimate >$30K (L4H/HVE inherently involved); EOL evaluation needed; AFP partner escalated AND 72+ hours elapsed; vendor completely non-responsive 5+ business days.
+
+Vendor Performance Escalation Asana SOP: FAS identifies vendor barriers (SLA adherence, staffing, repair quality, behavior) → documents in FAS2UM SIM, tries local resolution first → if the UM can't resolve recurring issues locally, UM escalates to the VP team per the VP Escalation Matrix (24hr ack SLA). L4H technician specialists deep-dive estimates over $5,000.
+
+ESCALATION PATH / WHO FAS CONTACTS PER SEV:
+  • SEV5: nobody external — log in the QUIP/daily tracker ("Unit X, Vendor Y assigned, ETC <date>, monitoring").
+  • SEV4: vendor directly (phone + email) for an updated ETC; MCS buddy via Chime/Slack to check Reach/RG.
+  • SEV3: MCS Lead (email/Chime, owns WOs pending estimate approval past SLA); vendor shop manager directly (escalated tone); Mechanical Escalations Slack if needed; document in FAS2UM SIM.
+  • SEV2: Uptime Manager (email) + Vendor Performance team (VP Escalation Asana form) + L4H/HVE (Chime) for high-value units. Asana includes program, region, escalation type (repair quality / capacity-staffing / SLA adherence), prior documentation, FAS2UM SIM history, files. Vendor issues affecting multiple assets/AFPs → transfer to Vendor Management for network-level escalation to vendor corporate.
+Standing escalation addresses: PM-related → fleet-fas@amazon.com + scheduled-maintenance-trailers@amazon.com. AFP invoice/maintenance tracking → AFP-MX-Escalations QUIP.
 `;
 
 module.exports = { FAS_KNOWLEDGE };
