@@ -603,13 +603,8 @@ async function buildFleetDataset(opts = {}) {
     const unitNum = assetSummary.asset && assetSummary.asset.displayName;
     if (!wo && unitNum && opts.woFallback !== false && woFallbacks < (opts.woFallbackCap || assetEntries.length)) {
       try {
-        const res = await withTimeout(searchServices({ equipmentIds: [unitNum], page: 1 }), perCallMs);
-        const list = (res && res.serviceAggregates) || [];
-        if (list.length) {
-          list.sort((a, b) => ((woIsOpen(b) ? 1 : 0) - (woIsOpen(a) ? 1 : 0)) || (woTs(b) - woTs(a)));
-          wo = list[0];
-          woFallbacks++;
-        }
+        const found = await withTimeout(findOpenWO(unitNum), perCallMs);
+        if (found) { wo = found; woFallbacks++; }
       } catch (_) { /* no WO available */ }
     }
 
@@ -659,6 +654,35 @@ async function buildFleetDataset(opts = {}) {
   return { rows, count: rows.length, unavailableCount, filter: filterVals, syncedAt: new Date().toISOString(), source: 'aap-api' };
 }
 
+// Find a unit's CURRENT OPEN work order, unconstrained by the restrictive
+// DEFAULT_SEARCH_REQUEST (fleetIds/assetPrograms/lifecycleStates/status set).
+// CONFIRMED (2026-10-16): searching a unit with the default filter can return 0
+// WOs even when it has open ones (its program/status isn't in the default set),
+// which is why some units got no serviceUrl. Here we query by equipmentId with
+// the status filter and the narrowing filters CLEARED, see every WO, and pick
+// the open one (newest tiebreak). Returns the WO object or null.
+async function findOpenWO(unitNumber) {
+  const u = String(unitNumber || '').trim().toUpperCase();
+  if (!u) return null;
+  // CONFIRMED working query: equipmentIds + statuses:[] (clear ONLY the status
+  // filter). Keep the rest of DEFAULT_SEARCH_REQUEST intact — clearing fleetIds/
+  // assetPrograms/lifecycleStates made the endpoint return nothing (the body it
+  // needs got broken). `{ equipmentIds:[u], statuses:[] }` returned all WOs live.
+  const res = await searchServices({ equipmentIds: [u], statuses: [], page: 1 });
+  const list = (res && res.serviceAggregates) || [];
+  if (!list.length) return null;
+  const ts = (w) => Number(w.modifiedTimestamp || w.actualStartDateTime || w.scheduledDateTime || 0);
+  const isOpen = (w) => {
+    const s = (w && w.status && (w.status.value || w.status.displayText)) || '';
+    const completed = w && (w.completedDateTime || w.completedDate);
+    return (!completed && !/complet|closed|cancel/i.test(String(s)));
+  };
+  list.sort((a, b) => ((isOpen(b) ? 1 : 0) - (isOpen(a) ? 1 : 0)) || (ts(b) - ts(a)));
+  // Prefer an actually-open WO; if none are open, return null (don't link a
+  // closed WR — matches "no current work order").
+  return isOpen(list[0]) ? list[0] : null;
+}
+
 // ── Per-unit refresh: fresh data for ONE unit via the API ────────────────────
 // Replaces the (currently unused) per-unit relay scrape. Given a unit number,
 // resolves its current open WO + asset, returns a mapped fleet row with the
@@ -668,11 +692,8 @@ async function refreshUnit(unitNumber) {
   const u = String(unitNumber || '').trim().toUpperCase();
   if (!u) throw new Error('refreshUnit: no unit number');
 
-  // Find the unit's current open WO (filtered by equipmentId, open statuses).
-  const res = await searchServices({ equipmentIds: [u], page: 1 });
-  const list = (res && res.serviceAggregates) || [];
-  const woTs = (w) => Number(w.modifiedTimestamp || w.actualStartDateTime || w.scheduledDateTime || 0);
-  const wo = list.sort((a, b) => woTs(b) - woTs(a))[0] || null;
+  // Find the unit's current open WO (unconstrained by the default filter).
+  const wo = await findOpenWO(u);
 
   // Asset summary + full detail (VIN) via the aaid.
   let assetSummary = null, serviceDetail = null;
@@ -688,6 +709,12 @@ async function refreshUnit(unitNumber) {
     const d = mapper.assetDetailFields(full);
     row.vin = d.vin || row.vin;
     row.manufacturer = d.manufacturer || row.manufacturer;
+    row.engineManufacturer = d.engineManufacturer || row.engineManufacturer || '';
+    row.modelYear = d.modelYear || row.modelYear || '';
+    if (d.operator)     row.operator = d.operator;
+    if (d.owner)        row.owner = d.owner;
+    if (d.domicileSite) row.domicileSite = d.domicileSite;
+    if (d.bodyType)     row.bodyType = d.bodyType;
     if (d.odometerMiles !== '') row.odometerMiles = d.odometerMiles;
     if (d.engineHours !== '') row.engineHours = d.engineHours;
     // Asset lifecycle = source of truth.
