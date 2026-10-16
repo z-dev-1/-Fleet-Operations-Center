@@ -93,6 +93,26 @@ ESCALATION PATH / WHO FAS CONTACTS PER SEV:
   • SEV3: MCS Lead (email/Chime, owns WOs pending estimate approval past SLA); vendor shop manager directly (escalated tone); Mechanical Escalations Slack if needed; document in FAS2UM SIM.
   • SEV2: Uptime Manager (email) + Vendor Performance team (VP Escalation Asana form) + L4H/HVE (Chime) for high-value units. Asana includes program, region, escalation type (repair quality / capacity-staffing / SLA adherence), prior documentation, FAS2UM SIM history, files. Vendor issues affecting multiple assets/AFPs → transfer to Vendor Management for network-level escalation to vendor corporate.
 Standing escalation addresses: PM-related → fleet-fas@amazon.com + scheduled-maintenance-trailers@amazon.com. AFP invoice/maintenance tracking → AFP-MX-Escalations QUIP.
+
+── VENDORS & DEALERS ──
+IMPORTANT: specific dealer NAMES, CONTACTS, PO/fleet codes, and MTTR numbers change over time and live in the CONTACT BOOK (the authoritative, current source) — defer to it for who/where/phone. Use the ROUTING RULES and SCOPE BOUNDARIES below (which are durable) to decide WHAT KIND of vendor a repair needs; get the actual vendor from the Contact Book / VRE.
+
+Vendor types (what each kind does):
+  • Amerit — 1P mobile/onsite primary at AFP lots (platform REACH). Unscheduled + scheduled (PM-B) + projects, 5th-wheel repairs, APU repairs at AFP lots, warranty up to $3K, enhanced safety inspections. Fastest for simple onsite work. Volatile capacity (tech shortages). No longer replaces wings.
+  • TA / Kooner / Cox Auto (Dickinson) / Velociti / FleetPride / TARS / Push & Pull — 3P mobile/onsite at reassigned PO sites (platform Relay Garage). Overflow + general fleet maintenance. (FleetPride historically most consistent uptime; Kooner strong/improving; Cox Auto has had sites under review — but treat performance as time-sensitive, confirm current data.)
+  • Goodyear — 3P tire specialist (tires only).
+  • CEI — 3P body/accident damage network (the single AFP physical-damage vendor); minor body repairs route back to Amerit, larger damage → CEI network shops. Non-integrated (phone/email).
+  • FleetNet — TOWING dispatch only (not a repair vendor), via the FleetHQ portal; AFP + OTR towing.
+  • OEM dealers — when work is beyond primary/mobile scope. Platforms by make: PACCAR (Kenworth/Peterbilt) → DECISIV; Volvo → DECISIV/ASIST (or Volvo Uptime Center); Freightliner (DTNA) → Service Tracker Next Gen; TICO (hostlers) → DECISIV/TICO EDGE or TICO Uptime Center; Cummins → direct WO in Relay Garage (no DECISIV case). (Specific dealers/contacts: Contact Book.)
+
+Routing rules — BY MAKE (OEM matching): Volvo → Volvo dealer/Uptime Center; Kenworth → Kenworth dealer; Peterbilt → Peterbilt dealer; Freightliner → Freightliner dealer (CNG → a CNG-certified Freightliner dealer only); Cummins ENGINE issue (any chassis OEM) → Cummins direct via Relay Garage. (Watch: Cummins PARTS delays can strand units at other OEM dealers for weeks — flag long parts dwell.)
+
+Routing rules — BY REPAIR TYPE: standard unscheduled at an AFP lot → Amerit first (VRE auto-assigns); body/accident damage → CEI (minor → back to Amerit); CNG-specific (cylinder head, crankcase vent, FSOV, fuel system) → CNG-certified OEM dealer/Cummins distributor only; tires → Goodyear; APU at an AFP lot → Amerit, APU outside the lot → nearest APU dealership (NOT the OEM tractor dealer); warranty ≤$3K → Amerit, >$3K → OEM dealer (warranty channel: Slack #Wty-escalation or GET Case); 5th wheel → Amerit; towing → FleetNet; simple roadside (mud flaps, airlines) → TARS first, if they can't complete → tow back to AFP; trending defect or beyond onsite capability → FAS may go directly to the OEM dealer (bypass the reject→dealer flow). VRE auto-populates by site/region; FAS overrides when VRE is wrong. Canada: assign via VRE (Canada Vendor List QUIP). A quarterly Preferred Dealer List + Dealer Locator Map (filter by OEM code / site proximity) is maintained by Vendor Management + FAS.
+
+Scope — what's OUT OF SCOPE for mobile/Amerit (must go to a dealer): transmission internals; major engine work (e.g. cylinder heads); CNG-specific engine/fuel system; turbo passing oil to EAS; body/structural damage (→ CEI); warranty >$3K; OEM-proprietary deep diagnostics (Amerit has Bendix Acom / Service Ranger / DDL8 but not everything); APU outside the AFP lot; multiple simultaneous repairs needing different specialists; unit wings (Amerit no longer does these); recalls/mini-overhauls (may route to Cummins).
+
+Dealer-handoff flow (3 ways a WO reaches a dealer): (1) mobile vendor REJECTS ("can't do this"); (2) mobile vendor COMPLETES what it can + comments "needs dealer"; (3) FAS DIRECT (trending defect / beyond onsite). Flow: primary rejects → MCS notifies FAS → FAS picks the dealer → MCS creates the proxy WO + DECISIV/Service Tracker case → tow → dealer repairs → tow back.
+FAS 2-HOUR WINDOW: when a WO must go to a dealer, FAS has 2 hours to give MCS a dealer assignment. FAS calls dealers to check bay availability/capacity; if a dealer can't do diagnostics within 8h or provide a bay within 24h, FAS moves to the next preferred dealer. If FAS misses the 2h window or it's off-shift, MCS uses the Preferred Dealer List.
 `;
 
 module.exports = { FAS_KNOWLEDGE };

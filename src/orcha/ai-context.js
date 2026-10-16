@@ -369,7 +369,7 @@ function _buildKnowledgeContext(messageText) {
   const text = String(messageText || '');
   if (!text.trim()) return '';
   // Does this message need institutional/process knowledge to answer well?
-  const needsKnowledge = /\b(approve|approval|estimate|threshold|escalat|who\s+(owns|approves|handles|does|flips|schedules|decides)|eol|end of life|flip|lifecycle|reactivat|vre|vendor\s+(reassign|performance|assign)|pm\b|inspection|dot|sim\b|record360|reach|arc\b|accident|invoice|billing|dispute|credit|paragon|mcs|l3|l4h|hve|variance|rejection|sla|out of scope|my (job|role|lane)|can i|should i|am i allowed|who is responsible|process|procedure|policy)\b/i.test(text);
+  const needsKnowledge = /\b(approve|approval|estimate|threshold|escalat|who\s+(owns|approves|handles|does|flips|schedules|decides)|eol|end of life|flip|lifecycle|reactivat|vre|vendor\s+(reassign|performance|assign)|pm\b|inspection|dot|sim\b|record360|reach|arc\b|accident|invoice|billing|dispute|credit|paragon|mcs|l3|l4h|hve|variance|rejection|sla|out of scope|my (job|role|lane)|can i|should i|am i allowed|who is responsible|process|procedure|policy|which vendor|what vendor|who should (fix|repair|do)|dealer|amerit|cummins|cei\b|fleetnet|goodyear|tow|towing|cng|warranty|decisiv|asist|uptime center|mobile vendor|routing|scope)\b/i.test(text);
   if (!needsKnowledge) return '';
   let kb;
   try { kb = require('./fas-knowledge').FAS_KNOWLEDGE; } catch (_) { return ''; }
