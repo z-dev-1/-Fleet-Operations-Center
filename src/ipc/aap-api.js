@@ -9,8 +9,9 @@
 const logger = require('../utils/logger')('ipc:aap-api');
 const { handle, requireStringMax } = require('./_safe');
 
-function registerAapApiIPC() {
+function registerAapApiIPC(ctx) {
   const api = () => require('../scrapers/aap_api');
+  const store = require('../store');
 
   // Self-test / auth probe: the cheapest GET. Confirms the API path works end
   // to end (window auth + token capture not even needed for GET). Returns the
@@ -175,6 +176,59 @@ function registerAapApiIPC() {
         mismatches: mismatches.slice(0, 20),
       };
     } catch (e) {
+      return { ok: false, error: e.message, code: e.code || null };
+    }
+  });
+
+  // ── OPT-IN: load the live fleet FROM THE API (not the scrape) ──────────────
+  // Builds the full filtered fleet via the API, layers the enrichment the API
+  // does NOT provide (Uptake riskScore/insights + saved notes), persists to the
+  // same `fleetData` store, and pushes on the same `fleet:data` channel the
+  // scrape uses — so the table, filters, KPIs, and detail panel update
+  // identically. Keyed by equipmentId (unit number) for every merge. The scrape
+  // path is untouched and remains the fallback.
+  handle('fleet:load-via-api', async (_e, payload) => {
+    const opts = (payload && typeof payload === 'object') ? payload : {};
+    try {
+      logger.info('[load-via-api] building fleet dataset from API…');
+      const ds = await api().buildFleetDataset(opts);
+      let rows = ds.rows || [];
+
+      // 1) Uptake enrichment (riskScore/insights) by digit-normalized equipmentId.
+      //    ATS is truth for make/model, so this won't clobber API values.
+      try {
+        const uptakeUnits = (store.load('uptakeHash', {}).units) || [];
+        if (ctx && ctx.mergeUptakeIntoRows) rows = ctx.mergeUptakeIntoRows(rows, uptakeUnits);
+      } catch (e) { logger.warn('[load-via-api] uptake merge skipped: ' + e.message); }
+
+      // 2) Saved notes (timeline, repair status, etc.) by equipmentId. Pass an
+      //    EMPTY relayData so the relay merge does NOT override the API's
+      //    vendor/WO/offsite/comment fields — it only folds in notesStore and
+      //    lets the row's own offsite/PM fields pass through.
+      try {
+        const notesStore = store.load('notesStore', {});
+        if (ctx && ctx.mergeRelayIntoRows) rows = ctx.mergeRelayIntoRows(rows, {}, notesStore);
+      } catch (e) { logger.warn('[load-via-api] notes merge skipped: ' + e.message); }
+
+      const now = new Date().toISOString();
+      const outPayload = {
+        rows,
+        count: rows.length,
+        unavailableCount: ds.unavailableCount,
+        syncedAt: now,
+        scrapedAt: now,
+        stale: false,
+        source: 'aap-api',
+      };
+      // Persist + push through the SAME path the scrape uses.
+      store.save('fleetData', outPayload);
+      if (ctx) { ctx.lastData = outPayload; if (ctx.pushData) ctx.pushData(outPayload); }
+      logger.info('[load-via-api] pushed ' + rows.length + ' units ('
+        + ds.unavailableCount + ' unavailable) to the renderer');
+      return { ok: true, count: rows.length, unavailableCount: ds.unavailableCount };
+    } catch (e) {
+      logger.warn('[load-via-api] failed: ' + e.message);
+      if (ctx && ctx.pushError) ctx.pushError('API load failed: ' + e.message);
       return { ok: false, error: e.message, code: e.code || null };
     }
   });
