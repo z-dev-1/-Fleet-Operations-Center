@@ -113,6 +113,96 @@ Scope — what's OUT OF SCOPE for mobile/Amerit (must go to a dealer): transmiss
 
 Dealer-handoff flow (3 ways a WO reaches a dealer): (1) mobile vendor REJECTS ("can't do this"); (2) mobile vendor COMPLETES what it can + comments "needs dealer"; (3) FAS DIRECT (trending defect / beyond onsite). Flow: primary rejects → MCS notifies FAS → FAS picks the dealer → MCS creates the proxy WO + DECISIV/Service Tracker case → tow → dealer repairs → tow back.
 FAS 2-HOUR WINDOW: when a WO must go to a dealer, FAS has 2 hours to give MCS a dealer assignment. FAS calls dealers to check bay availability/capacity; if a dealer can't do diagnostics within 8h or provide a bay within 24h, FAS moves to the next preferred dealer. If FAS misses the 2h window or it's off-shift, MCS uses the Preferred Dealer List.
+
+── GLOSSARY / DOMAIN DECODER (what the terms, codes, teams, and statuses mean) ──
+Systems & platforms:
+  • REACH — legacy maintenance platform (reach24.net); some non-integrated vendors still track WOs via "Reach event numbers". Check for open Reach events before reactivating.
+  • Relay Garage (RG) — the central WO management system (WR creation, vendor assignment, estimate approval, repair tracking, verification). Primary FAS tool. Cards: PA, PV, NRA.
+  • DECISIV — OEM dealer portal for PACCAR (Kenworth + Peterbilt) and Volvo; MCS opens a case there; case # goes in the proxy WO comments.
+  • ASIST — Volvo's portal within the DECISIV ecosystem (Volvo dealer cases).
+  • Service Tracker Next Gen — Freightliner/DTNA dealer portal (separate from DECISIV; more workflow friction).
+  • Record360 — app-based inspection platform for new-unit intake + return inspections (checklists, photos, video); compare return vs handoff photos for carrier damage.
+  • PARAGON — route planning/scheduling (Amazon Transportation). NOT a FAS maintenance tool.
+  • VRE (Vendor Recommendation Engine) — auto-assigns vendors to WRs by repair type/location/capacity/proximity; override via a VRE Override SIM; config owned by Vendor Procurement.
+  • FleetHQ — FleetNet's towing dispatch portal (submit/track tows).
+  • QUIP — Amazon collaborative docs (handoff tracker, NRA backlog, Canada Vendor List, urgent PA tracker, ITR quip, etc.).
+  • SIM (Simple Issue Manager) — Amazon ticketing (sim.amazon.com): tractor-down, parts-delay (→ Uptime Manager), VRE override, Gas Tank, handoff, reactivation SIMs.
+  • AAP (Amazon Asset Portal, aap-na.corp.amazon.com) — fleet monitoring: lifecycle state, flips, DVIRs, GPS, defects.
+  • Reach Ready Report / Asset Ready Report — flags assets where the Decisiv/vendor case is complete but AAP still shows down (ready for tow back); MCS follow-up monitors hourly.
+  • FAS Master Dashboard — QuickSight dashboard: uptime, MTTR, down units, vendor performance, site health; drives bridge calls + bottom-10.
+  • OVAC (Operational Vendor Analysis Committee) — the metrics package tracking OEM dealer MTTR / open WRs / dwell / trends (P95 by OEM); drives escalation.
+  • YMS (Yard Management System) — real-time yard/dock-door visibility.
+  • R4C (Relay for Carriers) — carrier-facing portal; carriers see repair status/ETC/PMs and request updates (which hit the FAS queue, esp. on past-ETC "red" assets).
+  • PCT — trailer sensor system (TPMS + ABS); auto-creates WRs on a detected defect (semi-automated: downs the trailer + creates the WR).
+  • iTrace — audit system flagging missed Pending Verification actions ("Failing to Flip", "Incorrect Verification").
+
+Teams & roles:
+  • MCS (Maintenance Centralized Services) — central maintenance coordination (vendor assignment, follow-ups, estimate approval, verification, towing). FAS's primary partner.
+  • L3 — MCS Associate (front-line PA/PV/NRA/follow-up).
+  • L4 / L4H — MCS Lead / Process Lead (escalations, force complete/close, overrides). FAS's escalation path when stuck. (L4H also = the high-value approval tier in estimates — context dependent.)
+  • HVE (High Volume Event) — PEAK operational mode (elevated staffing, tighter SLAs, escalation protocols); per the MCS+FAS HVE Playbook. (Earlier "HVE leadership" in estimate approval = that high-value leadership path.)
+  • UM (Uptime Manager) — vendor/dealer performance escalation role; receives parts-delay SIMs + extended-dwell escalations.
+  • VP (Vendor Performance) — vendor accountability / performance reviews / SLA enforcement; MCS escalates chronic / "repair not sufficient" issues here.
+  • DSS (Driver/Downstream Support Services) — actions handoff SIMs, creates Reach events, schedules appointments, confirms carrier dates.
+  • ARC (Accident Reporting Center) — accident/claims; creates ARC reports + claim numbers for physical damage (→ FNOL).
+  • TOM (Transportation Operations Management) — on-site FC/Sort-Center ops; creates DVIR-based WRs, manages dock doors, moves yard assets.
+  • Vendor Procurement — owns VRE config (which vendor per site/repair type); FAS does NOT change VRE.
+  • MCS Buddy — dedicated MCS admin support for FAS (WO/SIM creation, vendor calls, system updates) so FAS can focus on site/dealer work.
+  • ROC (Relay Operations Center) — driver calls / safety escalations / carrier callbacks; creates WRs from breakdown calls.
+  • MMPM (Middle Mile Program Manager) — carrier relationships, allocation, handoff scheduling (works 4–6 weeks ahead).
+  • MMEO (Middle Mile Equipment Operations) — new-unit delivery dates, intake coordination, AAP status flips on intake.
+
+Program / status terms:
+  • AFP (Amazon Freight Partner) — Amazon owns the tractors, leases to independent carriers; FAS's primary fleet.
+  • DSP (Delivery Service Partner) — last-mile delivery vans (separate fleet, different vendors/metrics).
+  • TOM DCs / YHs — TOM-managed Distribution Centers + Yard-Hustler (hostler) sites.
+  • PO Sites — Primary-Onsite vendor sites (a mobile vendor is the assigned primary).
+  • APP (Amazon Parking Program) Lots — AFP tractor staging lots where Amerit operates onsite (Amerit is default unless VRE says otherwise).
+  • "Excess ≤1" / excess <0 — site has zero/negative spare assets → every WR there auto-Urgent (and bumps severity).
+  • Gas Tank Model (GTM) — network yard-trailer capacity monitor; auto-SIM when a site is >85% utilization within 3 days (actionable at >10% damaged trailers OR >90% capacity); 24/7 during PEAK.
+  • PEAK — Q4 surge (~Nov–Dec): tighter SLAs, HVE protocols, 30-min SM escalation SLA, same-day trailer PM.
+  • "To Be Returned" — repaired, being towed back to the carrier (flags if dwelling >4h).
+  • "Reconditioning" — AFP rental status while prepping a returned unit for next rental.
+  • "Ready to Rent" — passed inspection, repairs done, in the allocation pool.
+  • "Damage Moderate" / "Damage Severe" — AAP lifecycle reasons (Severe is mandatory for power units with reported defects).
+  • "Active/Healthy" (A/H) — operational/in-service; the target flip (needs repairs confirmed, no open WOs, no open defects, DVIR cleared).
+  • "Offsite Shop Repair" — at a dealer/external shop (flags if dwelling past repair-type SLA).
+
+Delay-reason codes (Long Dwell dropdown):
+  • PMR = PARTS DELAY (parts-driven dwell; the #1 long-dwell killer). Collect part #, ETA; SIM to Uptime Manager. (Not merely "pending manufacturer response" — it's the catch-all for any parts dwell.)
+  • MCS SW Miss = MCS Standard-Work miss (a process failure by MCS — missed follow-up/flip/SLA/SIM update), NOT a repair failure; MCS corrects + coaches.
+  • "Out of Scope for FAS" = an MCS NON-ACTIONABLE lifecycle status (campaign/recall, injection/out-of-state move, GPS malfunction, impound, Ordered, sensor malfunction, EOL, onsite/offsite wash). FAS can't flip these; follow up with the OWNING team, not the vendor.
+  • Pending Vendor Action — vendor has the WR but hasn't started/responded (no comment 3 days → FAS escalation).
+  • Pending TOM Action — TOM must move the asset off a dock door / confirm location / provide a photo.
+  • Pending FAS Action — FAS owes an action (dealer assignment within 2h, LP install request, readiness confirmation).
+  • Pending MMEO Action — usually license-plate SIM or new-unit delivery; follow up every 72h.
+
+Repair / unit / metric terms:
+  • CPM = Cost Per Mile (CNG ~2.3x diesel for engine/transmission defects).
+  • CEL = Check Engine Light (48h OEM follow-up SLA; "Major" → dealer).
+  • EAS = Exhaust After-treatment System (DPF/SCR/DEF); "turbo passing oil to EAS" → dealer scope.
+  • FSOV = Fuel Shut-Off Valve (CNG component; known Cummins defect area).
+  • PM-B (PMB) = Preventive Maintenance type B (Amerit at APP lots; trailer PM usually same-day).
+  • DVIR = Driver Vehicle Inspection Report (DOT pre/post-trip; defects auto-create WRs; all open DVIR defects must clear before reactivation).
+  • CNG = Compressed Natural Gas (needs CNG-certified dealers; higher CPM; FSOV/cylinder-head/crankcase failure modes).
+  • EOL = End of Life (AAP lifecycle; MCS non-actionable).
+  • SCAC = Standard Carrier Alpha Code (2–4 letters identifying the carrier/operator; bottom-10 tracked daily).
+  • MTTR = Mean Time To Repair (WR assigned → WO completed; definition varies by vendor).
+  • P95 = 95th percentile (used for OVAC MTTR — "worst realistic", outliers filtered).
+  • WR = Work Request (Amazon → vendor, created in RG; one per vendor per asset per defect).
+  • WO = Work Order (vendor-created after accepting a WR; line items + cost; a WR can have multiple WOs).
+  • ETC = Estimated Time to Complete (vendor's completion estimate; visible to carriers via R4C; past-ETC = red flag).
+  • NRA = No Recent Activity (RG card, no activity 3 days; FAS owns URGENT NRA M–F 07:00–16:00, MCS owns non-urgent).
+  • PA = Pending Assignment (RG card; WR awaiting vendor; 30-min SLA; low-complexity auto-assigned post-Aug-2026).
+  • PV = Pending Verification (RG card; completed WO awaiting MCS verification; <120-min SLA; check comments/photos → flip A/H).
+  • ERA = Emergency Roadside Assistance (TA's roadside program; also a rental-to-dealer billing/transport coordinator).
+  • ITR = In-Transit Recovery (tow a repaired trailer back; via MCS-ITR Slack workflow).
+  • DEA = Disruption Event Avoidance (customer-facing; DEA risk auto-triggers WR urgency — loaded trailer, dock door, site at capacity).
+  • DooD = Driving on Open Defect (hostlers only; certain non-DOT-critical defects let the unit stay active).
+  • FNOL = First Notice of Loss (accident claim step; CEI WOs email FNOL@CEINETWORK).
+  • DDEX = DOT Defect Classification SOP (if a defect is NON-DOT per DDEX, the event can be cancelled + asset flipped A/H).
+  • VRID = Vehicle Run Identification (whether a unit has an active run/load; check YMS/AAP/service overview).
+  • BOL = Bill of Lading (note defects on the BOL during intake if a unit arrives with an open defect).
 `;
 
 module.exports = { FAS_KNOWLEDGE };
