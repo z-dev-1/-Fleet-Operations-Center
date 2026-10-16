@@ -520,19 +520,26 @@ async function buildFleetDataset(opts = {}) {
   const filterVals = (filters || []).map((d) => String(d).trim().toUpperCase());
 
   // 1) ASSET SET — union of domicileSite-matched and operator-matched assets.
-  //    This is the app's fleet scope. Keyed by aaid; we keep the asset summary.
+  //    This is the app's fleet scope. Keyed by aaid. We request the master-data
+  //    fields IN BULK via fieldsToReturn (confirmed the search honors it), so
+  //    operator / owner / domicileSite / bodyType / VIN / make come back for
+  //    EVERY unit in the search result — no per-unit getAsset loop needed.
+  const BULK_FIELDS = ['displayName', 'operator', 'owner', 'domicileSite', 'bodyType',
+    'assetType', 'vin', 'manufacturerName', 'engineManufacturerName', 'program',
+    'lifecycleState', 'lifecycleStateReason'];
   const assetByAaid = new Map();    // aaid -> asset summary record
-  const assetByUnit = new Map();    // unit# -> asset summary record
   for (const key of ['domicileSite', 'operator']) {
     for (let page = 0; page < (opts.maxPages || 60); page++) {
-      const res = await searchAssets({ from: page * 150, fieldFilters: filterVals.length ? [{ key, values: filterVals }] : [] });
+      const res = await searchAssets({
+        from: page * 150,
+        fieldFilters: filterVals.length ? [{ key, values: filterVals }] : [],
+        fieldsToReturn: BULK_FIELDS,
+      });
       const list = (res && res.assets) || [];
       if (!list.length) break;
       for (const a of list) {
         const aaid = a && a.asset && a.asset.aaid;
-        const unit = a && a.asset && (a.asset.displayName || (a.asset.attributesText && a.asset.attributesText.vehicleId));
         if (aaid && !assetByAaid.has(aaid)) assetByAaid.set(aaid, a);
-        if (unit && !assetByUnit.has(String(unit).toUpperCase())) assetByUnit.set(String(unit).toUpperCase(), a);
       }
       if (list.length < 150) break;
       if (!filterVals.length) break; // unfiltered: don't page the whole fleet
@@ -592,17 +599,19 @@ async function buildFleetDataset(opts = {}) {
     row.lifecycleState = mapper.mapLifecycleState(assetSummary.asset && assetSummary.asset.lifecycleState) || row.lifecycleState;
     if (!wo) row.lifecycleReason = mapper.mapLifecycleReason(assetSummary.asset && assetSummary.asset.lifecycleStateReason) || row.lifecycleReason;
 
-    // VIN/model from the full single-asset endpoint (bounded).
-    if (opts.withVin !== false && aaid && detailDone <= detailCap) {
-      try {
-        const full = await withTimeout(getAsset(aaid), perCallMs);
-        const d = mapper.assetDetailFields(full);
-        row.vin = d.vin || row.vin;
-        row.manufacturer = d.manufacturer || row.manufacturer;
-        if (d.odometerMiles !== '') row.odometerMiles = d.odometerMiles;
-        if (d.engineHours !== '') row.engineHours = d.engineHours;
-      } catch (_) { /* leave VIN empty */ }
-    }
+    // ASSET MASTER DATA — read straight from the BULK search result's
+    // attributesText (operator, owner, domicileSite, bodyType, make, VIN). This
+    // populates every unit instantly with no per-unit getAsset call, and fixes
+    // the blank operator (incl. AKJJI), site, and box-truck body type.
+    const at = (assetSummary.asset && assetSummary.asset.attributesText) || {};
+    if (at.operator)     row.operator = at.operator;
+    if (at.owner)        row.owner = at.owner;
+    if (at.domicileSite) row.domicileSite = at.domicileSite;
+    if (at.bodyType)     row.bodyType = mapper.mapBodyType(at.bodyType, assetSummary.asset && assetSummary.asset.assetType);
+    if (at.vin)          row.vin = at.vin;
+    if (at.manufacturerName) row.manufacturer = at.manufacturerName;
+    if (at.engineManufacturerName) row.engineManufacturer = at.engineManufacturerName;
+
     rows.push(row);
   }
 

@@ -233,6 +233,39 @@ function registerAapApiIPC(ctx) {
     }
   });
 
+  // TEMP — locate operator / bodyType / domicileSite fields in BOTH the WO and
+  // the full asset for a unit, so the mapper reads the right paths. Remove after.
+  handle('aap-api:probe-fields', async (_e, payload) => {
+    const unit = String((payload && payload.unit) || '').trim().toUpperCase();
+    try {
+      const search = await api().searchServices({ page: 1, equipmentIds: [unit], statuses: [] });
+      const wo = ((search && search.serviceAggregates) || [])[0] || {};
+      const woHits = {};
+      for (const k of Object.keys(wo)) {
+        if (/operator|owner|carrier|scac|body|domicile|site|type|program|make|manufactur/i.test(k)) {
+          const v = wo[k];
+          woHits[k] = (v == null || typeof v !== 'object') ? String(v).slice(0, 50) : '{obj ' + Object.keys(v).slice(0,6).join(',') + '}';
+        }
+      }
+      let assetHits = [];
+      if (wo.aaid) {
+        const asset = await api().getAsset(wo.aaid);
+        (function scan(obj, path, depth) {
+          if (!obj || typeof obj !== 'object' || depth > 5) return;
+          for (const k of Object.keys(obj)) {
+            const p = path ? path + '.' + k : k;
+            const v = obj[k];
+            if (/operator|owner|carrier|scac|body|domicile|site|program|make|manufactur/i.test(k) && (v == null || typeof v !== 'object')) {
+              assetHits.push({ path: p, value: String(v).slice(0, 50) });
+            }
+            if (v && typeof v === 'object') scan(v, p, depth + 1);
+          }
+        })(asset, '', 0);
+      }
+      return { ok: true, unit, woHits, assetHits };
+    } catch (e) { return { ok: false, error: e.message, code: e.code || null }; }
+  });
+
   logger.info('AAP API IPC handlers registered');
 }
 

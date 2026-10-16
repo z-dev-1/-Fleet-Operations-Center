@@ -190,6 +190,7 @@ expose('aapApi', {
   refreshUnit:  (unit) => ipcRenderer.invoke('aap-api:refresh-unit', { unit }),
   loadLiveFleet: (opts) => ipcRenderer.invoke('fleet:load-via-api', opts),
   verifyVsStored: (opts) => ipcRenderer.invoke('aap-api:verify-vs-stored', opts),
+  probeFields:   (unit) => ipcRenderer.invoke('aap-api:probe-fields', { unit }),
 });
 
 // ── FAS Roster (scraped FAS personnel roster) ───────────────────────────────

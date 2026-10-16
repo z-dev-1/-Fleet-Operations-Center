@@ -118,15 +118,49 @@ function commentsToTimeline(comments, opts = {}) {
   return rows.join('\n');
 }
 
-// Pull VIN/model from a full single-asset response (asset.attributesText.*).
+// ── Body type (RAW enum → humanized, matching the scrape's display) ─────────
+// Confirmed values: DAY_CAB, SLEEPER, STANDARD (box truck body). Unknown falls
+// back to title-case.
+const BODY_TYPE = {
+  DAY_CAB: 'Day Cab',
+  SLEEPER: 'Sleeper',
+  STANDARD: 'Box Truck',   // box-truck body comes back as STANDARD — show "Box Truck"
+  BOX: 'Box Truck',
+  REEFER: 'Reefer',
+  FLATBED: 'Flatbed',
+};
+// assetType is passed so a STANDARD body on a non-box asset isn't mislabeled.
+function mapBodyType(raw, assetType) {
+  const k = String(raw || '').toUpperCase();
+  if (k === 'STANDARD') {
+    // STANDARD is the box-truck body; label it "Box Truck" (the assetType is
+    // boxTruck for these). For any non-box asset, fall back to title-case.
+    if (!assetType || /box/i.test(assetType)) return 'Box Truck';
+    return 'Standard';
+  }
+  return BODY_TYPE[k] || (raw ? _titleCaseEnum(raw) : '');
+}
+
+// Pull the master-data fields from a full single-asset response. CONFIRMED live
+// (2026-10-16): everything is under asset.attributesText.* (not the lightweight
+// search summary). This is where operator, owner, domicileSite, bodyType, make,
+// engine, VIN live — the reason those columns were blank before was that the
+// mapper read them off the WO/summary, which don't carry them.
 function assetDetailFields(full) {
   const a  = (full && full.asset) || {};
   const at = a.attributesText || {};
+  const ai = a.attributesInteger || {};
   const loc = (full && full.latestLocation) || {};
   return {
-    vin:   at.vin || '',
-    model: at.model || at.modelName || '',
-    manufacturer: at.manufacturer || at.make || '',
+    vin:          at.vin || '',
+    model:        at.model || at.modelName || '',
+    manufacturer: at.manufacturerName || at.manufacturer || at.make || '',
+    engineManufacturer: at.engineManufacturerName || at.engineManufacturer || '',
+    modelYear:    ai.yearManufactured || at.modelYear || '',
+    operator:     at.operator || '',
+    owner:        at.owner || '',
+    domicileSite: at.domicileSite || '',
+    bodyType:     mapBodyType(at.bodyType, a.assetType),
     odometerMiles: loc.odometerInMiles != null ? Math.round(Number(loc.odometerInMiles))
       : (loc.odometerInKm != null ? Math.round(Number(loc.odometerInKm) * 0.621371) : ''),
     engineHours: loc.engineHours != null ? loc.engineHours : '',
@@ -163,7 +197,9 @@ function toFleetRow(wo, assetSummary, serviceDetail) {
     assetType:       wo.assetType || aSum.assetType || '',
     assetUrl:        wo.aaid ? ('https://aap-na.corp.amazon.com/v2/asset/' + wo.aaid) : '',
     domicileSite:    wo.assetDomicileSite || '',
-    operator:        wo.operator || aSum.operator || '',   // may be blank; filled by asset merge/Uptake
+    operator:        wo.operator || aSum.operator || '',   // filled from asset.attributesText in enrichment
+    owner:           '',                                    // SCAC owner, filled from asset.attributesText
+    bodyType:        '',                                    // filled from asset.attributesText.bodyType
     program:         wo.assetProgram || '',
     lifecycleState:  mapLifecycleState(wo.lifecycleState || aSum.lifecycleState),
     lifecycleReason: mapLifecycleReason(wo.lifecycleStateReason || aSum.lifecycleStateReason),
@@ -215,6 +251,7 @@ module.exports = {
   mapVendor,
   mapLifecycleState,
   mapLifecycleReason,
+  mapBodyType,
   LIFECYCLE_STATE,
   LIFECYCLE_REASON,
   VENDOR_DISPLAY,
