@@ -264,7 +264,10 @@ function _isInMentionThread(channelId, threadTs) {
 }
 
 // ── AI classify + draft ──────────────────────────────────────────────────
-async function _classifyAndDraft(messageText, askOrcha, allowedOperators) {
+// allowRoster: true ONLY for INTERNAL senders (resolved from the Contact Book
+// at the call site). FAS roster personnel data is internal and must never be
+// exposed to carrier/vendor/unknown senders on a watched channel.
+async function _classifyAndDraft(messageText, askOrcha, allowedOperators, allowRoster) {
   // Inject local time so the AI uses the correct time-of-day greeting
   const _now = new Date();
   const _timeStr = _now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -273,7 +276,7 @@ async function _classifyAndDraft(messageText, askOrcha, allowedOperators) {
 
   // Inject live fleet data context so AI can give real, data-driven answers
   const { buildFleetContext } = require('../orcha/ai-context');
-  const fleetContext = buildFleetContext(messageText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true, allowedOperators: allowedOperators || [] });
+  const fleetContext = buildFleetContext(messageText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true, allowedOperators: allowedOperators || [], allowRoster: !!allowRoster });
 
   // CONTEXT RESET (2026-09-02): relay.ask() routes through fleet-brain, a
   // SINGLE persistent session whose rolling history is shared across every
@@ -1099,7 +1102,15 @@ async function pollChannelsOnce(log) {
           // else: fall through to legacy reply path (letLegacyReply honored)
         }
 
-        const draft = await _classifyAndDraft(msg.text, askOrcha, (ch && ch.operators) || []);
+        // Expose FAS roster personnel data ONLY to INTERNAL senders (resolved
+        // from the Contact Book). Carrier/vendor/unknown senders never get it.
+        let _allowRoster = false;
+        try {
+          const prof = require('../orcha/fas/sender-profiles').resolveSender(msg.userId, msg.userName || '');
+          _allowRoster = !!(prof && (prof.type === 'internal'));
+        } catch (_) { _allowRoster = false; }
+
+        const draft = await _classifyAndDraft(msg.text, askOrcha, (ch && ch.operators) || [], _allowRoster);
 
         // FEATURE (2026-07-22): always tag the person being responded to,
         // prepended at send-time rather than asking the AI to include it
