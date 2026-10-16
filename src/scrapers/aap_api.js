@@ -478,6 +478,180 @@ async function buildTrackerRows(opts = {}) {
   return rows;
 }
 
+// ── Build the full fleet dataset in the app's fleet-row shape ────────────────
+// Additive / opt-in: produces rows mapped to the SAME field names the renderer
+// + merges expect (see aap_api_mapper.toFleetRow), so this can feed the live
+// pipeline or be previewed side-by-side with the scrape before any switch.
+//
+// opts:
+//   domiciles   : array of site codes to filter (defaults to settings.domiciles)
+//   withComments: fetch per-WO service detail for the comment thread (default true)
+//   withVin     : fetch per-asset detail for VIN/model (default true)
+//   maxPages    : WO search page cap
+//   detailCap   : max per-unit detail GETs (bounds the comment/VIN enrichment)
+// VERIFIED MODEL (2026-10-16): the app's fleet set = ASSETS whose domicileSite
+// OR operator is in the configured filter list (settings.domiciles, which mixes
+// site codes AND operator/SCAC codes — exactly replicating the scrape's loose
+// `search=` behavior). The asset lifecycleState is the source of truth for
+// availability (matches the app's unavailable count). Work orders are attached
+// as enrichment (vendor, status, L1/L2, comment thread). A unit that is
+// UNAVAILABLE in asset lifecycle but has no open WO still appears — just as the
+// app shows it.
+//
+// opts:
+//   domiciles    : filter list (defaults to settings.domiciles)
+//   unavailableOnly : only return UNAVAILABLE units (default false → full fleet)
+//   withComments : fetch per-WO service detail for the comment thread (default true)
+//   withVin      : fetch per-asset detail for VIN/model (default true)
+//   detailCap    : cap per-unit detail GETs (bounds enrichment)
+async function buildFleetDataset(opts = {}) {
+  const mapper = require('./aap_api_mapper');
+
+  // Resolve the filter list from settings unless explicitly provided.
+  let filters = opts.domiciles;
+  if (!filters) {
+    try {
+      const store = require('../store');
+      const s = store.load('settings', {});
+      filters = (s.domiciles && s.domiciles.length) ? s.domiciles
+        : require('../config/defaults').DEFAULT_DOMICILES;
+    } catch (_) { filters = []; }
+  }
+  const filterVals = (filters || []).map((d) => String(d).trim().toUpperCase());
+
+  // 1) ASSET SET — union of domicileSite-matched and operator-matched assets.
+  //    This is the app's fleet scope. Keyed by aaid; we keep the asset summary.
+  const assetByAaid = new Map();    // aaid -> asset summary record
+  const assetByUnit = new Map();    // unit# -> asset summary record
+  for (const key of ['domicileSite', 'operator']) {
+    for (let page = 0; page < (opts.maxPages || 60); page++) {
+      const res = await searchAssets({ from: page * 150, fieldFilters: filterVals.length ? [{ key, values: filterVals }] : [] });
+      const list = (res && res.assets) || [];
+      if (!list.length) break;
+      for (const a of list) {
+        const aaid = a && a.asset && a.asset.aaid;
+        const unit = a && a.asset && (a.asset.displayName || (a.asset.attributesText && a.asset.attributesText.vehicleId));
+        if (aaid && !assetByAaid.has(aaid)) assetByAaid.set(aaid, a);
+        if (unit && !assetByUnit.has(String(unit).toUpperCase())) assetByUnit.set(String(unit).toUpperCase(), a);
+      }
+      if (list.length < 150) break;
+      if (!filterVals.length) break; // unfiltered: don't page the whole fleet
+    }
+  }
+
+  // Optionally narrow to UNAVAILABLE assets only.
+  const assetEntries = [...assetByAaid.values()].filter((a) => {
+    if (opts.unavailableOnly) return String(a.asset && a.asset.lifecycleState).toUpperCase() === 'UNAVAILABLE';
+    return true;
+  });
+
+  // 2) WORK ORDERS — fetch WOs for the same filter (both keys), index by aaid,
+  //    keeping the most-recent WO per unit as the "current" one.
+  const woByAaid = new Map();
+  const woTs = (w) => Number(w.modifiedTimestamp || w.actualStartDateTime || w.scheduledDateTime || 0);
+  const woReq = Object.assign({}, opts.searchRequest || {});
+  if (filterVals.length) woReq.assetDomicileSites = filterVals; // WO search accepts site+operator tokens here
+  const woList = await searchAllPages(woReq, { maxPages: opts.maxPages || 50 });
+  for (const w of woList) {
+    if (!w.aaid) continue;
+    const prev = woByAaid.get(w.aaid);
+    if (!prev || woTs(w) > woTs(prev)) woByAaid.set(w.aaid, w);
+  }
+
+  // 3) Build one fleet row per ASSET (the app's set). Attach the current WO if
+  //    the unit has one; units with no open WO still appear (lifecycle-driven).
+  const detailCap = opts.detailCap != null ? opts.detailCap : assetEntries.length;
+  const perCallMs = opts.detailPerCallMs || 8000;
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('detail-timeout')), ms))]);
+
+  const rows = [];
+  let detailDone = 0;
+  for (const assetSummary of assetEntries) {
+    const aaid = assetSummary.asset && assetSummary.asset.aaid;
+    const wo = (aaid && woByAaid.get(aaid)) || null;
+
+    // Enrich with the comment thread from the full service detail (bounded).
+    let serviceDetail = null;
+    if (wo && opts.withComments !== false && detailDone < detailCap && (wo.id || wo.workRequestId)) {
+      try { serviceDetail = await withTimeout(getService(wo.id || wo.workRequestId), perCallMs); detailDone++; }
+      catch (_) { /* leave comments empty */ }
+    }
+
+    // Map to the app's fleet-row shape. When there's no WO, synthesize a minimal
+    // WO-like object from the asset so lifecycle/site/unit still populate.
+    const woOrAsset = wo || {
+      assetDisplayName: assetSummary.asset && assetSummary.asset.displayName,
+      aaid,
+      assetType: assetSummary.asset && assetSummary.asset.assetType,
+      lifecycleState: assetSummary.asset && assetSummary.asset.lifecycleState,
+      lifecycleStateReason: assetSummary.asset && assetSummary.asset.lifecycleStateReason,
+    };
+    const row = mapper.toFleetRow(woOrAsset, assetSummary, serviceDetail);
+    // Asset lifecycle is the source of truth for availability — override the
+    // WO's (which may lag) with the asset's current state.
+    row.lifecycleState = mapper.mapLifecycleState(assetSummary.asset && assetSummary.asset.lifecycleState) || row.lifecycleState;
+    if (!wo) row.lifecycleReason = mapper.mapLifecycleReason(assetSummary.asset && assetSummary.asset.lifecycleStateReason) || row.lifecycleReason;
+
+    // VIN/model from the full single-asset endpoint (bounded).
+    if (opts.withVin !== false && aaid && detailDone <= detailCap) {
+      try {
+        const full = await withTimeout(getAsset(aaid), perCallMs);
+        const d = mapper.assetDetailFields(full);
+        row.vin = d.vin || row.vin;
+        row.manufacturer = d.manufacturer || row.manufacturer;
+        if (d.odometerMiles !== '') row.odometerMiles = d.odometerMiles;
+        if (d.engineHours !== '') row.engineHours = d.engineHours;
+      } catch (_) { /* leave VIN empty */ }
+    }
+    rows.push(row);
+  }
+
+  const unavailableCount = rows.filter((r) => /unavailable/i.test(String(r.lifecycleState || ''))).length;
+  logger.info('buildFleetDataset: ' + rows.length + ' units ('
+    + 'unavailable: ' + unavailableCount + ', filter: [' + filterVals.join(',') + '], '
+    + 'comments: ' + (opts.withComments !== false) + ', vin: ' + (opts.withVin !== false) + ')');
+  return { rows, count: rows.length, unavailableCount, filter: filterVals, syncedAt: new Date().toISOString(), source: 'aap-api' };
+}
+
+// ── Per-unit refresh: fresh data for ONE unit via the API ────────────────────
+// Replaces the (currently unused) per-unit relay scrape. Given a unit number,
+// resolves its current open WO + asset, returns a mapped fleet row with the
+// live comment thread. Used by the detail-panel refresh button.
+async function refreshUnit(unitNumber) {
+  const mapper = require('./aap_api_mapper');
+  const u = String(unitNumber || '').trim().toUpperCase();
+  if (!u) throw new Error('refreshUnit: no unit number');
+
+  // Find the unit's current open WO (filtered by equipmentId, open statuses).
+  const res = await searchServices({ equipmentIds: [u], page: 1 });
+  const list = (res && res.serviceAggregates) || [];
+  const woTs = (w) => Number(w.modifiedTimestamp || w.actualStartDateTime || w.scheduledDateTime || 0);
+  const wo = list.sort((a, b) => woTs(b) - woTs(a))[0] || null;
+
+  // Asset summary + full detail (VIN) via the aaid.
+  let assetSummary = null, serviceDetail = null;
+  const aaid = wo && wo.aaid;
+  if (wo && (wo.id || wo.workRequestId)) {
+    try { serviceDetail = await getService(wo.id || wo.workRequestId); } catch (_) {}
+  }
+  let full = null;
+  if (aaid) { try { full = await getAsset(aaid); } catch (_) {} }
+
+  const row = mapper.toFleetRow(wo || { assetDisplayName: u }, assetSummary, serviceDetail);
+  if (full) {
+    const d = mapper.assetDetailFields(full);
+    row.vin = d.vin || row.vin;
+    row.manufacturer = d.manufacturer || row.manufacturer;
+    if (d.odometerMiles !== '') row.odometerMiles = d.odometerMiles;
+    if (d.engineHours !== '') row.engineHours = d.engineHours;
+    // Asset lifecycle = source of truth.
+    const a = full.asset || {};
+    row.lifecycleState = mapper.mapLifecycleState(a.lifecycleState) || row.lifecycleState;
+    if (!wo) row.lifecycleReason = mapper.mapLifecycleReason(a.lifecycleStateReason) || row.lifecycleReason;
+  }
+  return row;
+}
+
 module.exports = {
   apiGet,
   apiPost,
@@ -485,6 +659,8 @@ module.exports = {
   searchAssets,
   getFleet,
   buildTrackerRows,
+  buildFleetDataset,
+  refreshUnit,
   getService,
   getAsset,
   getServiceMoves,

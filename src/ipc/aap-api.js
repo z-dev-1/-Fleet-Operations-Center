@@ -80,6 +80,105 @@ function registerAapApiIPC() {
     }
   });
 
+  // Build the full fleet dataset from the API in the app's fleet-row shape.
+  // Additive / opt-in — does NOT replace the live scrape; returns the rows so
+  // they can be previewed or (later) fed to the pipeline. opts passthrough:
+  // { domiciles, withComments, withVin, maxPages, detailCap }.
+  handle('aap-api:build-fleet', async (_e, payload) => {
+    const opts = (payload && typeof payload === 'object') ? payload : {};
+    try {
+      const ds = await api().buildFleetDataset(opts);
+      return { ok: true, count: ds.count, unavailableCount: ds.unavailableCount, filter: ds.filter, rows: ds.rows };
+    } catch (e) {
+      return { ok: false, error: e.message, code: e.code || null };
+    }
+  });
+
+  // Per-unit refresh — fresh single-unit data (open WO + asset + comment thread)
+  // via the API. Feeds the detail-panel refresh. Returns the mapped fleet row.
+  handle('aap-api:refresh-unit', async (_e, payload) => {
+    const unit = String((payload && payload.unit) || '').trim();
+    if (!unit) return { ok: false, error: 'no unit number' };
+    try {
+      const row = await api().refreshUnit(unit);
+      return { ok: true, row };
+    } catch (e) {
+      return { ok: false, error: e.message, code: e.code || null };
+    }
+  });
+
+  // Side-by-side VERIFY — build the API fleet dataset and compare its unit set +
+  // key fields against the stored (scrape) fleetData, so the user can confirm
+  // parity before switching the data source. Returns summary + mismatches.
+  handle('aap-api:verify-vs-stored', async (_e, payload) => {
+    const opts = (payload && typeof payload === 'object') ? payload : {};
+    try {
+      const store = require('../store');
+      const fd = store.load('fleetData', { rows: [] });
+      const stored = (fd.rows || []);
+      const storedByUnit = new Map(stored.map((r) => [String(r.equipmentId || '').toUpperCase(), r]));
+      const storedUnavail = stored.filter((r) => /unavailable/i.test(String(r.lifecycleState || '')));
+
+      // API dataset: skip the heavy comment/VIN enrichment for a fast parity check.
+      const ds = await api().buildFleetDataset(Object.assign({ withComments: false, withVin: false }, opts));
+      const apiByUnit = new Map(ds.rows.map((r) => [String(r.equipmentId || '').toUpperCase(), r]));
+      const apiUnavail = ds.rows.filter((r) => /unavailable/i.test(String(r.lifecycleState || '')));
+
+      const storedUnits = new Set(storedUnavail.map((r) => String(r.equipmentId || '').toUpperCase()));
+      const apiUnits = new Set(apiUnavail.map((r) => String(r.equipmentId || '').toUpperCase()));
+      const inBoth = [...storedUnits].filter((u) => apiUnits.has(u));
+      const onlyStored = [...storedUnits].filter((u) => !apiUnits.has(u));
+      const onlyApi = [...apiUnits].filter((u) => !storedUnits.has(u));
+
+      // Field-value mismatches among overlapping units (after mapping).
+      const mismatches = [];
+      for (const u of inBoth) {
+        const s = storedByUnit.get(u), a = apiByUnit.get(u);
+        const diff = {};
+        if ((s.lifecycleReason || '') !== (a.lifecycleReason || '')) diff.lifecycleReason = { stored: s.lifecycleReason, api: a.lifecycleReason };
+        if ((s.vendor || '') !== (a.vendor || '')) diff.vendor = { stored: s.vendor, api: a.vendor };
+        if ((s.domicileSite || '') !== (a.domicileSite || '')) diff.site = { stored: s.domicileSite, api: a.domicileSite };
+        if (Object.keys(diff).length) mismatches.push({ unit: u, diff });
+      }
+
+      // WHY are onlyStored units missing from the API unavailable set? For each,
+      // search the API UNFILTERED (any status, any site) and report what it finds
+      // so we can see if it's a status filter, a site filter, or genuinely absent.
+      const onlyStoredDiag = [];
+      for (const u of onlyStored.slice(0, 20)) {
+        try {
+          const res = await api().searchServices({ page: 1, equipmentIds: [u], statuses: [] });
+          const list = (res && res.serviceAggregates) || [];
+          const s = storedByUnit.get(u) || {};
+          onlyStoredDiag.push({
+            unit: u,
+            storedSite: s.domicileSite || '',
+            storedReason: s.lifecycleReason || '',
+            apiWoCount: list.length,
+            apiStatuses: [...new Set(list.map((w) => (w.status && w.status.value) || '?'))].slice(0, 6),
+            apiSites: [...new Set(list.map((w) => w.assetDomicileSite || '?'))].slice(0, 6),
+            apiLifecycle: [...new Set(list.map((w) => w.lifecycleState || '?'))].slice(0, 4),
+          });
+        } catch (e) { onlyStoredDiag.push({ unit: u, error: e.message }); }
+      }
+
+      return {
+        ok: true,
+        counts: {
+          storedUnavailable: storedUnavail.length,
+          apiUnavailable: apiUnavail.length,
+          apiTotalUnits: ds.rows.length,
+        },
+        overlap: { inBoth: inBoth.length, onlyStored, onlyApi: onlyApi.length, onlyApiSample: onlyApi.slice(0, 15) },
+        onlyStoredDiag,
+        mismatchCount: mismatches.length,
+        mismatches: mismatches.slice(0, 20),
+      };
+    } catch (e) {
+      return { ok: false, error: e.message, code: e.code || null };
+    }
+  });
+
   logger.info('AAP API IPC handlers registered');
 }
 

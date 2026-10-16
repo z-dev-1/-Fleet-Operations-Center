@@ -186,6 +186,9 @@ expose('aapApi', {
   asset:        (aaid) => ipcRenderer.invoke('aap-api:asset', { aaid }),
   avmCodes:     ()     => ipcRenderer.invoke('aap-api:avm-codes'),
   buildTracker: (opts) => ipcRenderer.invoke('aap-api:build-tracker', opts),
+  buildFleet:   (opts) => ipcRenderer.invoke('aap-api:build-fleet', opts),
+  refreshUnit:  (unit) => ipcRenderer.invoke('aap-api:refresh-unit', { unit }),
+  verifyVsStored: (opts) => ipcRenderer.invoke('aap-api:verify-vs-stored', opts),
 });
 
 // ── FAS Roster (scraped FAS personnel roster) ───────────────────────────────
