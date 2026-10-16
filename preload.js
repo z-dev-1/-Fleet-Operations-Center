@@ -177,6 +177,17 @@ expose('longDwellCsv', {
   clear:    ()        => ipcRenderer.invoke('long-dwell-csv:clear'),
 });
 
+// ── AAP direct JSON API (Relay Garage / work orders over Midway) ────────────
+expose('aapApi', {
+  selftest:     ()     => ipcRenderer.invoke('aap-api:selftest'),
+  search:       (req)  => ipcRenderer.invoke('aap-api:search', req),
+  searchAssets: (req)  => ipcRenderer.invoke('aap-api:search-assets', req),
+  service:      (id)   => ipcRenderer.invoke('aap-api:service', { serviceId: id }),
+  asset:        (aaid) => ipcRenderer.invoke('aap-api:asset', { aaid }),
+  avmCodes:     ()     => ipcRenderer.invoke('aap-api:avm-codes'),
+  buildTracker: (opts) => ipcRenderer.invoke('aap-api:build-tracker', opts),
+});
+
 // ── FAS Roster (scraped FAS personnel roster) ───────────────────────────────
 expose('fasRoster', {
   get:            () => ipcRenderer.invoke('fas-roster:get'),

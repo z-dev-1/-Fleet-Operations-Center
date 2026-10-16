@@ -57,6 +57,8 @@ function registerAllIPC(ctx) {
   registerLongDwellIPC();
   registerLongDwellCsvIPC();
   registerFasRosterIPC();
+  const { registerAapApiIPC } = require('./aap-api');
+  registerAapApiIPC();
   registerSchedulerIPC(ctx);
   registerEmailTriageIPC(ctx);
   registerRelayReconcileIPC(ctx);
