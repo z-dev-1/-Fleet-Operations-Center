@@ -552,17 +552,34 @@ async function buildFleetDataset(opts = {}) {
     return true;
   });
 
-  // 2) WORK ORDERS — fetch WOs for the same filter (both keys), index by aaid,
-  //    keeping the most-recent WO per unit as the "current" one.
+  // 2) WORK ORDERS — fetch WOs for the same filter, index by aaid, choosing the
+  //    CURRENT OPEN WO per unit. A unit accumulates many historical WOs; picking
+  //    "most recently modified" can land on a CLOSED one (and its serviceId gives
+  //    a Split-View URL to a closed WR). So prefer an OPEN-status WO, then break
+  //    ties by recency. (Bug fix: 321187/321186/321946 were getting the wrong /
+  //    no serviceUrl because a non-open WO won the most-recent tiebreak.)
+  const OPEN_STATUSES = new Set(['CREATED', 'PENDING', 'PENDING_REVIEW', 'SCHEDULED',
+    'WORK_IN_PROGRESS', 'WORK_ORDER_ASSIGNED', 'ESTIMATE_APPROVED',
+    'ESTIMATE_PENDING_APPROVAL', 'ESTIMATE_REJECTED']);
   const woByAaid = new Map();
   const woTs = (w) => Number(w.modifiedTimestamp || w.actualStartDateTime || w.scheduledDateTime || 0);
+  const woIsOpen = (w) => {
+    const s = (w && w.status && (w.status.value || w.status.displayText)) || '';
+    const completed = w && (w.completedDateTime || w.completedDate);
+    return OPEN_STATUSES.has(String(s).toUpperCase()) || (!completed && !/complet|closed|cancel/i.test(String(s)));
+  };
+  const woBetter = (cand, prev) => {
+    if (!prev) return true;
+    const co = woIsOpen(cand), po = woIsOpen(prev);
+    if (co !== po) return co;            // an open WO always beats a non-open one
+    return woTs(cand) > woTs(prev);      // otherwise newest wins
+  };
   const woReq = Object.assign({}, opts.searchRequest || {});
   if (filterVals.length) woReq.assetDomicileSites = filterVals; // WO search accepts site+operator tokens here
   const woList = await searchAllPages(woReq, { maxPages: opts.maxPages || 50 });
   for (const w of woList) {
     if (!w.aaid) continue;
-    const prev = woByAaid.get(w.aaid);
-    if (!prev || woTs(w) > woTs(prev)) woByAaid.set(w.aaid, w);
+    if (woBetter(w, woByAaid.get(w.aaid))) woByAaid.set(w.aaid, w);
   }
 
   // 3) Build one fleet row per ASSET (the app's set). Attach the current WO if
@@ -573,9 +590,28 @@ async function buildFleetDataset(opts = {}) {
 
   const rows = [];
   let detailDone = 0;
+  let woFallbacks = 0;
   for (const assetSummary of assetEntries) {
     const aaid = assetSummary.asset && assetSummary.asset.aaid;
-    const wo = (aaid && woByAaid.get(aaid)) || null;
+    let wo = (aaid && woByAaid.get(aaid)) || null;
+
+    // FALLBACK: the bulk site-filtered WO search can miss a unit's open WO
+    // (paged out, or the WO's domicile token didn't match the asset's). Without
+    // the WO we have no serviceUrl → Split View can't open the Relay pane. So
+    // for any in-scope unit that ended up with no WO, query its open WO directly
+    // by equipmentId (bounded). Confirmed fix for 321187/321186/321946.
+    const unitNum = assetSummary.asset && assetSummary.asset.displayName;
+    if (!wo && unitNum && opts.woFallback !== false && woFallbacks < (opts.woFallbackCap || assetEntries.length)) {
+      try {
+        const res = await withTimeout(searchServices({ equipmentIds: [unitNum], page: 1 }), perCallMs);
+        const list = (res && res.serviceAggregates) || [];
+        if (list.length) {
+          list.sort((a, b) => ((woIsOpen(b) ? 1 : 0) - (woIsOpen(a) ? 1 : 0)) || (woTs(b) - woTs(a)));
+          wo = list[0];
+          woFallbacks++;
+        }
+      } catch (_) { /* no WO available */ }
+    }
 
     // Enrich with the comment thread from the full service detail (bounded).
     let serviceDetail = null;
@@ -616,6 +652,7 @@ async function buildFleetDataset(opts = {}) {
   }
 
   const unavailableCount = rows.filter((r) => /unavailable/i.test(String(r.lifecycleState || ''))).length;
+  if (woFallbacks) logger.info('buildFleetDataset: ' + woFallbacks + ' per-unit WO fallbacks (bulk search missed their open WO)');
   logger.info('buildFleetDataset: ' + rows.length + ' units ('
     + 'unavailable: ' + unavailableCount + ', filter: [' + filterVals.join(',') + '], '
     + 'comments: ' + (opts.withComments !== false) + ', vin: ' + (opts.withVin !== false) + ')');
