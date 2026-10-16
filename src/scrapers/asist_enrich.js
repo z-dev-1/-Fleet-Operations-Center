@@ -138,11 +138,74 @@ const ASIST_SCRAPE = String.raw`
     }
   }
   responsesText = String(responsesText || '').replace(/\s+\n/g, '\n').trim().slice(0, 6000);
-  return{currentUrl:location.href,estimateLinks:estimateLinks,caseLinks:caseLinks,srLinks:srLinks,responseCaseLinks:responseCaseLinks,caseNumbers:caseNumbers,srNumbers:srNumbers,srStatus:rf('Status'),dealer:dealerName,complaint:rf('Complaint'),assetVin:rf('VIN'),unitNumber:rf('Unit Number'),responsesText:responsesText,pageText:body.substring(0,12000),pageReady:body.length>300};
+  // ── OFFSITE STATUS-BAR STAGE ───────────────────────────────────────────────
+  // The Decisiv SR page renders a horizontal progress tracker:
+  //   Arrival → Diagnosis → Approval → Repair → Ready
+  // The FURTHEST-RIGHT stage that is marked active/complete is the unit's true
+  // lifecycle position per the vendor. This is a clean structured signal that
+  // the free-text comment feed does NOT always carry (a unit can be truly ready
+  // without a "ready" comment, or carry an OLD "will be ready" note). We capture
+  // it so the assistant never claims a unit is "Ready" unless this bar actually
+  // reached the Ready node (or a comment explicitly confirms it). Resilient to
+  // CSS-hash churn: we match the stage LABELS by text, then look at each label's
+  // own node + a few ancestors for completed/active/done markers (class, aria,
+  // data-* attrs). If markers are ambiguous we fall back to the last stage whose
+  // label is immediately followed (in the ordered label list) by an incomplete
+  // one — i.e. the current step.
+  var offsiteStage = '';
+  var offsiteStageConfidence = '';
+  try {
+    var STAGE_ORDER = ['arrival','diagnosis','approval','repair','ready'];
+    // Find a DOM node whose trimmed text is exactly one of the stage labels.
+    var allEls = Array.from(document.querySelectorAll('*'));
+    var stageNodes = {}; // label -> element
+    for (var si = 0; si < allEls.length; si++) {
+      var el = allEls[si];
+      // Only consider leaf-ish nodes (few children) so we match the label chip,
+      // not a big container that happens to contain the word.
+      if (el.children && el.children.length > 2) continue;
+      var t = (el.textContent || '').trim().toLowerCase();
+      var idx = STAGE_ORDER.indexOf(t);
+      if (idx >= 0 && !stageNodes[t]) stageNodes[t] = el;
+    }
+    function isDoneOrActive(node) {
+      // Walk the label node + up to 4 ancestors; return 'done' if any marks the
+      // stage complete, 'active' if current, '' otherwise.
+      var n = node, best = '';
+      for (var d = 0; d < 5 && n; d++) {
+        var cls = String(n.className && n.className.baseVal != null ? n.className.baseVal : (n.className || '')).toLowerCase();
+        var aria = String((n.getAttribute && (n.getAttribute('aria-current') || n.getAttribute('aria-selected') || n.getAttribute('data-status') || n.getAttribute('data-state'))) || '').toLowerCase();
+        var blob = cls + ' ' + aria;
+        if (/complete|completed|done|finished|passed|checked|fulfilled/.test(blob)) return 'done';
+        if (/\bactive\b|\bcurrent\b|\bselected\b|in[-_ ]?progress|aria-current/.test(blob) || aria === 'true' || aria === 'step') best = best || 'active';
+        n = n.parentElement;
+      }
+      return best;
+    }
+    var lastDoneIdx = -1, activeIdx = -1;
+    for (var k = 0; k < STAGE_ORDER.length; k++) {
+      var lbl = STAGE_ORDER[k];
+      if (!stageNodes[lbl]) continue;
+      var st = isDoneOrActive(stageNodes[lbl]);
+      if (st === 'done') lastDoneIdx = k;
+      else if (st === 'active' && activeIdx < 0) activeIdx = k;
+    }
+    var chosenIdx = -1, conf = '';
+    if (activeIdx >= 0) { chosenIdx = activeIdx; conf = 'active-marker'; }
+    else if (lastDoneIdx >= 0) { chosenIdx = lastDoneIdx; conf = 'completed-marker'; }
+    // Last-resort: if NO markers were detected but the Ready label itself exists
+    // and the body text explicitly says the asset is ready, treat it as ready.
+    if (chosenIdx < 0 && stageNodes['ready'] &&
+        /asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed/i.test(body)) {
+      chosenIdx = 4; conf = 'text-fallback';
+    }
+    if (chosenIdx >= 0) { offsiteStage = STAGE_ORDER[chosenIdx]; offsiteStageConfidence = conf; }
+  } catch (_stageErr) { /* best-effort — leave offsiteStage empty */ }
+  return{currentUrl:location.href,estimateLinks:estimateLinks,caseLinks:caseLinks,srLinks:srLinks,responseCaseLinks:responseCaseLinks,caseNumbers:caseNumbers,srNumbers:srNumbers,srStatus:rf('Status'),dealer:dealerName,complaint:rf('Complaint'),assetVin:rf('VIN'),unitNumber:rf('Unit Number'),responsesText:responsesText,offsiteStage:offsiteStage,offsiteStageConfidence:offsiteStageConfidence,pageText:body.substring(0,12000),pageReady:body.length>300};
 })()
 `;
 
-function _empty(srUrl,err){return{ok:false,srUrl:srUrl||'',srNumber:'',caseNumber:'',caseUrl:'',estimateUrl:'',bestUrl:srUrl||'',bestLabel:srUrl?'Service Request':'N/A',source:srUrl?'service_request':'none',scrapedAt:new Date().toISOString(),dealer:'',statusText:'',estimateComments:'',offsiteText:'',error:err||null};}
+function _empty(srUrl,err){return{ok:false,srUrl:srUrl||'',srNumber:'',caseNumber:'',caseUrl:'',estimateUrl:'',bestUrl:srUrl||'',bestLabel:srUrl?'Service Request':'N/A',source:srUrl?'service_request':'none',scrapedAt:new Date().toISOString(),dealer:'',statusText:'',estimateComments:'',offsiteText:'',offsiteStage:'',error:err||null};}
 
 async function pollScrape(win){for(let i=0;i<POLL_MAX;i++){await new Promise(r=>setTimeout(r,POLL_INTERVAL));if(!win||win.isDestroyed())return null;try{const d=await win.webContents.executeJavaScript('(function(){try{return '+ASIST_SCRAPE.trim()+'}catch(e){return{pageReady:false};}})()');if(d&&d.pageReady)return d;}catch(_){}}return null;}
 
@@ -323,10 +386,13 @@ async function enrichVolvoAsist(srUrl){
     // the AI timeline / card sees the dealer's actual status, not pricing noise.
     const offsiteText=estComments.slice(0,6000);
     logger.info('[ae] DONE (direct estimate) | est:',estId,'| commentThread:',estComments.length+'ch | notesReady:',!!est.notesReady);
+    // Direct-estimate path never opens the SR page, so no status-bar stage is
+    // available; infer 'ready' ONLY if the estimate comments explicitly say so.
+    var _directStage = /asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed/i.test(estComments) ? 'ready' : '';
     return{ok:true,srUrl,srNumber:'',caseNumber:estId,caseUrl:'',estimateUrl:srUrl,bestUrl:srUrl,
       bestLabel:estId?'Fleet Estimate | '+estId:'Fleet Estimate',source:'estimate',
       scrapedAt:new Date().toISOString(),error:null,srStatus:'',dealer:'',
-      complaint:'',assetVin:'',unitNumber:'',
+      complaint:'',assetVin:'',unitNumber:'',offsiteStage:_directStage,
       statusText:estComments,estimateComments:estComments,offsiteText};
   }
 
@@ -395,7 +461,12 @@ async function enrichVolvoAsist(srUrl){
   if (srStatusThread && srStatusThread !== estimateComments) parts.push('--- Service Request responses ---\n' + srStatusThread);
   if (!estimateComments && srBody) parts.push('--- Service Request page ---\n' + srBody);
   const offsiteText = parts.join('\n\n').slice(0, 8000) || srBody;
-  return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',statusText,estimateComments,offsiteText};
+  // Prefer the SR page's structured status-bar stage; if that bar wasn't present
+  // but the resolved comment thread explicitly says ready, treat it as 'ready'.
+  let offsiteStage = sr.offsiteStage || '';
+  if (!offsiteStage && /asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed/i.test(statusText)) offsiteStage = 'ready';
+  logger.info('[ae] DONE | offsiteStage:', offsiteStage || '(none)', '| stageConf:', sr.offsiteStageConfidence || '-');
+  return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',offsiteStage,statusText,estimateComments,offsiteText};
 }
 
 const SOURCE_RANK={estimate:3,case:2,service_request:1,none:0};

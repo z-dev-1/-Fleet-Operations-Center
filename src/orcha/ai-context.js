@@ -454,6 +454,28 @@ function _buildUnitDetail(unitId, rows, notesStore, opts) {
   if (row.workDuration) detail += '  Days down: ' + row.workDuration + '\n';
   if (row.alternativeId) detail += '  Alt ID (dealer case): ' + row.alternativeId + '\n';
   if (row.offsiteShopEvent) detail += '  Offsite event: ' + row.offsiteShopEvent + '\n';
+
+  // READINESS SIGNAL — structured offsite status-bar stage + explicit comment
+  // evidence. The assistant must only claim a unit is "ready/complete/done" when
+  // one of these confirms it, never off an ambiguous or old free-text note.
+  const _stage = String(row.offsiteStage || '').toLowerCase();
+  if (_stage) {
+    const _stageLabel = _stage.charAt(0).toUpperCase() + _stage.slice(1);
+    detail += '  Offsite status bar: ' + _stageLabel +
+      (_stage === 'ready'
+        ? ' (vendor tracker shows READY)'
+        : ' (NOT yet at Ready — do NOT claim this unit is ready/done)') + '\n';
+  }
+  {
+    const _readyBlob = [row.asistNotes, row.fullConversation, row.repairTimeline]
+      .map(v => String(v || '')).join(' ');
+    const _readyMatch = _readyBlob.match(/(asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed|work\s+order\s+completed|unit\s+is\s+ready)/i);
+    if (_readyMatch) {
+      detail += '  Ready evidence (comment): "' + _readyMatch[0] + '"\n';
+    } else if (_stage && _stage !== 'ready') {
+      detail += '  Ready evidence: NONE — no comment confirms readiness; treat as still in repair\n';
+    }
+  }
   if (row.salesforceCase) detail += '  Salesforce case: ' + row.salesforceCase + '\n';
   if (row.dealerName) detail += '  Dealer: ' + row.dealerName + '\n';
 

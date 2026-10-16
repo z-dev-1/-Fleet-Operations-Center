@@ -348,12 +348,19 @@ function _findFleetRow(unitToken) {
 // can be stale (vendor said done days ago; unit still sitting / not delivered).
 function _looksReadyOrComplete(row) {
   if (!row) return false;
+  // Structured offsite status-bar stage is the strongest signal — if the vendor
+  // tracker shows Ready, always re-verify live before anyone hears "it's ready".
+  if (String(row.offsiteStage || '').toLowerCase() === 'ready') return true;
   const blob = [
     row.canonicalStatus, row.serviceState, row.relayStatus, row.lifecycleReason,
     row.completed ? 'completed' : '', row.repairStatus,
+    // Include the offsite dealer notes + comment feed: the real "asset is ready"
+    // confirmation frequently lives ONLY there, not in the AAP status fields.
+    String(row.asistNotes || '').slice(-600),
+    String(row.fullConversation || '').slice(-600),
     String(row.repairTimeline || '').slice(-400),
   ].join(' ').toLowerCase();
-  return /ready[ _-]?for[ _-]?pickup|ready to pick|awaiting pickup|picked up|\bcomplete|completed|repair done|work complete|\bclosed\b|resolved|back in service|available/.test(blob);
+  return /ready[ _-]?for[ _-]?pickup|ready to pick|awaiting pickup|picked up|asset is ready|unit is ready|\bcomplete|completed|repair done|work complete|\bclosed\b|resolved|back in service|available/.test(blob);
 }
 
 // VERIFY-BEFORE-CLAIMING: if a unit's cached repair data is stale OR already

@@ -1548,6 +1548,11 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       // estimate) with a thin '[no activity logged]' timeline. Now propagated so the
       // timeline builder always sees the offsite diagnosis/estimate notes.
       asistNotes:          r.asistNotes          || row.asistNotes          || '',
+      // Structured offsite status-bar stage (arrival|diagnosis|approval|repair|
+      // ready) captured from the Decisiv SR progress tracker. The authoritative
+      // "is this unit actually ready" signal — the free-text notes alone can lag
+      // or carry stale "will be ready" wording. Used to gate ready/complete claims.
+      offsiteStage:        r.offsiteStage        || row.offsiteStage        || '',
       dealerName:          r.dealerName          || row.dealerName          || '',
       subVendor:           r.dealerName || row.dealerName || r.geofence || row.geofence || '',
 
