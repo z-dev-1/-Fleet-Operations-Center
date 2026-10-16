@@ -94,11 +94,15 @@ function buildFleetContext(messageText, opts = {}) {
   // the AI just couldn't see it. See _buildContactContext.
   context += _buildContactContext(messageText, rows);
 
-  // FAS roster — only for internal/allowed callers (the "just me" DM assistant
-  // and internal contacts), and only when the message is roster-relevant. Never
-  // exposed to external carrier/vendor contexts. Opt-in via opts.allowRoster.
+  // FAS roster + institutional knowledge — only for internal/allowed callers
+  // (the "just me" DM assistant and internal contacts). Never exposed to
+  // external carrier/vendor contexts. Opt-in via opts.allowRoster.
   if (opts.allowRoster) {
     context += _buildRosterContext(messageText);
+    // FAS knowledge base: ownership / approval thresholds / escalation /
+    // process. Injected only when the message is a judgment/process/ownership
+    // question (not a plain status lookup) so routine answers stay lean.
+    context += _buildKnowledgeContext(messageText);
   }
 
   if (!resolved.units.length && !resolved.groups.length) {
@@ -355,6 +359,22 @@ function _buildRosterContext(messageText) {
     out += 'No roster row matched that name/site/SCAC. Ask the user to clarify the site, SCAC, or FAS name rather than guessing.\n';
   }
   return out;
+}
+
+// ── FAS knowledge base (ownership / approval / escalation / process) ─────────
+// Injected only when the message is a judgment/process/ownership question —
+// the hard ones raw data can't answer. Routine status lookups skip it so the
+// prompt stays lean.
+function _buildKnowledgeContext(messageText) {
+  const text = String(messageText || '');
+  if (!text.trim()) return '';
+  // Does this message need institutional/process knowledge to answer well?
+  const needsKnowledge = /\b(approve|approval|estimate|threshold|escalat|who\s+(owns|approves|handles|does|flips|schedules|decides)|eol|end of life|flip|lifecycle|reactivat|vre|vendor\s+(reassign|performance|assign)|pm\b|inspection|dot|sim\b|record360|reach|arc\b|accident|invoice|billing|dispute|credit|paragon|mcs|l3|l4h|hve|variance|rejection|sla|out of scope|my (job|role|lane)|can i|should i|am i allowed|who is responsible|process|procedure|policy)\b/i.test(text);
+  if (!needsKnowledge) return '';
+  let kb;
+  try { kb = require('./fas-knowledge').FAS_KNOWLEDGE; } catch (_) { return ''; }
+  if (!kb) return '';
+  return '\n' + kb + '\n(Answer ownership/approval/escalation/process questions STRICTLY from the FAS Knowledge Base above — it is authoritative. Attribute actions to the correct owner; never say FAS approves estimates. If the KB does not cover it, say so rather than guessing.)\n';
 }
 
 /**

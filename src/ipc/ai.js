@@ -302,10 +302,13 @@ async function processOrchaAction(userMsg, opts = {}) {
     // unit/site/operator OR uses fleet action/keyword language. When false (a
     // general question or drafting request), we DON'T inject the fleet report —
     // so the assistant answers naturally instead of forcing a fleet lens.
-    const _fleetKw = /\b(unit|units|fleet|truck|trailer|domicile|operator|vendor|unavailable|available|work\s*order|\bwr\b|flip|lifecycle|down|repair|uptake|risk\s*score|pm[\s-]?[bx]?\b|dot|sync|timeline|slack|email|send|report|update|summary|follow[\s-]?up|remind|schedule)\b/i;
+    const _fleetKw = /\b(unit|units|fleet|truck|trailer|domicile|operator|vendor|unavailable|available|work\s*order|\bwr\b|flip|lifecycle|down|repair|uptake|risk\s*score|pm[\s-]?[bx]?\b|dot|sync|timeline|slack|email|send|report|update|summary|follow[\s-]?up|remind|schedule|\bfas\b|uptime\s*manager|\bscac\b|\bpoc\b|who('?s| is| covers| handles| owns| manages)|roster|\bsr\.?\s*pm\b)\b/i;
     const _fleetRelevant = (_resolved.units.length > 0) || (_resolved.groups.length > 0) || _fleetKw.test(userMsg || '');
+    // allowRoster: this IS Z's own personal assistant (internal), so FAS roster
+    // personnel data may be surfaced — but only when the message is actually a
+    // roster question (see _buildRosterContext), never dumped wholesale.
     const richContext = _fleetRelevant ? buildFleetContext(userMsg, {
-      maxUnits: 8, includeTimeline: true, includePM: true, includeRisk: true,
+      maxUnits: 8, includeTimeline: true, includePM: true, includeRisk: true, allowRoster: true,
     }) : '';
 
     // siteReport still used by the EMAIL/SLACK *action* paths below (they attach
