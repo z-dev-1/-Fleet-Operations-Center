@@ -15,7 +15,7 @@
 import { longDwellCsv as csvBridge, ai as aiBridge, relay as relayBridge, longDwell as longDwellBridge } from '../bridge.js';
 import state from '../state.js';
 import toast from '../components/toast.js';
-import { _buildAIFillPrompt, _stripCosts, DELAY_REASONS as AI_DELAY_REASONS, ESCALATION_LEVELS as AI_ESCALATION_LEVELS } from '../longdwell-ai.js';
+import { _buildAIFillPrompt, _stripCosts, loadKnowledge, DELAY_REASONS as AI_DELAY_REASONS, ESCALATION_LEVELS as AI_ESCALATION_LEVELS } from '../longdwell-ai.js';
 
 // Match the computed Long Dwell fill's data-freshness window: refresh + deep
 // scan a unit whose relay data is older than this before summarizing.
@@ -742,4 +742,7 @@ export function mount(hostEl) {
   _host = hostEl;
   _render();
   refresh();
+  // Warm the FAS knowledge base (SEV/escalation rules) so AI-fill uses the
+  // authoritative single source of truth. Best-effort; non-blocking.
+  loadKnowledge();
 }

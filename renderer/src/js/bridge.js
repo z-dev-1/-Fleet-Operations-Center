@@ -373,6 +373,7 @@ export const longDwellCsv = {
 export const ai = {
   suggest:          (unit)       => window.ai.suggest(unit),
   ask:              (prompt)     => window.ai.ask(prompt),
+  getKnowledge:     ()           => window.ai.getKnowledge(),
   chat:             (prompt)     => window.ai.chat(prompt),
   deepProcess:      (unitIds)    => window.ai.deepProcess(unitIds),
   recordCorrection: (data)       => window.ai.recordCorrection(data),

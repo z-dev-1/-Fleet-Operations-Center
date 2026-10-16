@@ -1,5 +1,5 @@
 // ============================================================================
-// longdwell-ai.js � SHARED Long Dwell AI-fill prompt + helpers.
+// longdwell-ai.js � SHARED Long Dwell AI-fill prompt + helpers.
 //
 // Single source of truth for the AI-fill prompt that drafts delayReason /
 // escalationLevel / 7-field summary for a Long Dwell unit. Used by BOTH the
@@ -16,6 +16,23 @@ export const DELAY_REASONS = [
   'Reconditioning', 'Repaired',
 ];
 export const ESCALATION_LEVELS = ['SEV5', 'SEV4', 'SEV3', 'SEV2'];
+
+// ── FAS knowledge base (SINGLE SOURCE OF TRUTH, fetched from main) ───────────
+// The SEV rubric + escalation + ownership rules live in src/orcha/fas-knowledge.js
+// (main process). We fetch it once via the ai.getKnowledge() bridge and cache
+// it, then inject it into the AI-fill prompt — so the Long Dwell escalation
+// judgments use the SAME authoritative rules as the Slack assistant, never a
+// duplicated/drifting embedded rubric.
+let _kbCache = '';
+export async function loadKnowledge() {
+  try {
+    const { ai } = await import('./bridge.js');
+    const res = ai && ai.getKnowledge ? await ai.getKnowledge() : null;
+    if (res && res.ok && res.text) _kbCache = res.text;
+  } catch (_) { /* best-effort — prompt still works without it */ }
+  return _kbCache;
+}
+export function knowledgeText() { return _kbCache; }
 
 // Tidies text (collapses runs of whitespace) before it reaches the AI prompt
 // or the saved summary.
@@ -81,6 +98,10 @@ export function _buildAIFillPrompt(row, dd) {
   const _dow   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][_now.getDay()];
   const todayStr = _dow + ' ' + (_now.getMonth() + 1) + '/' + _now.getDate() + '/' + _now.getFullYear();
   return (
+    // FAS KNOWLEDGE BASE (single source of truth for SEV/escalation/ownership).
+    // Fetched from main via loadKnowledge(); empty string until loaded (the
+    // prompt still works, the SEV section just won't be present that one time).
+    (_kbCache ? (_kbCache + '\n\n') : '') +
     'You are Orcha, the AI brain for Fleet Operations. This unit is a LONG DWELL unit -- ' +
     'down and unavailable for an extended period -- and needs a leadership-facing status ' +
     'entry filled in for the Long Dwell Units report.\n\n' +
@@ -111,18 +132,11 @@ export function _buildAIFillPrompt(row, dd) {
     '1. delayReason -- pick EXACTLY ONE of this fixed list (verbatim, no variation):\n' +
     '   Primary Vendor, Parts Delay, Offsite Shop, Estimate Process, Payment, Speciality Vendor, ' +
     'Out of Scope for FAS, End of Life Review, PMR, MCS SW Miss, Weather, Towing, Reconditioning, Repaired\n\n' +
-    '2. escalationLevel -- pick EXACTLY ONE of: SEV5, SEV4, SEV3, SEV2 (SEV2 is the HIGHEST severity, SEV5 the lowest).\n\n' +
-    '   SEVERITY RUBRIC (use day count + ETC status + situation to decide):\n' +
-    '   SEV5 = 5-14 days down; vendor actively engaged; ETC exists OR repair clearly in progress -> Monitor only\n' +
-    '   SEV4 = 7-30 days down; ETC approaching or just passed; needs follow-up -> Request repair status and firm ETC\n' +
-    '   SEV3 = 14-60+ days down; ETC significantly past OR vendor unresponsive OR complex/multi-attempt repair OR EOL/SWAP pending -> Active escalation\n' +
-    '   SEV2 = 40-150+ days down; no resolution path; major component failure; parts severely backordered; leadership intervention required -> Leadership escalation, Asana ticket required\n\n' +
-    '   ESCALATION TRIGGERS (apply BEFORE finalizing the SEV level -- each trigger bumps up one level):\n' +
-    '   - No ETC at all -> bump up one SEV level (e.g. SEV4 becomes SEV3)\n' +
-    '   - ETC has passed with no update -> bump up one SEV level\n' +
-    '   - Vendor rejected repair or marked out of scope for primary vendor -> minimum SEV3, likely SEV2\n' +
-    '   - Multiple repair attempts or multiple vendor handoffs -> minimum SEV3\n' +
-    '   - DOT-critical safety item (brakes, air systems, steering) -> escalate one level faster than day count alone suggests\n\n' +
+    '2. escalationLevel -- pick EXACTLY ONE of: SEV5, SEV4, SEV3, SEV2 (SEV2 is the HIGHEST severity, SEV5 the lowest).\n' +
+    '   Decide the SEV STRICTLY from the "ESCALATION SEVERITY (SEV5-SEV2)" section of the FAS KNOWLEDGE\n' +
+    '   BASE included above — use its day ranges, its INSTANT-BUMP TRIGGERS (no ETC, passed ETC, out of\n' +
+    '   scope, 3rd failed estimate, repeat repairs, DOT-critical, risk site, AFP partner escalation), and\n' +
+    '   its SEV2/leadership criteria. That KB is the single source of truth for severity.\n\n' +
     '3. summary -- a STRUCTURED status block in EXACTLY this 7-field format, in this order,\n' +
     '   one field per line, each line starting with "\\u2022 " (bullet + space) then the label\n' +
     '   and a colon. Use a literal \\n between lines. This EXACT format is required for EVERY\n' +

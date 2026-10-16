@@ -190,6 +190,7 @@ expose('fasRoster', {
 expose('ai', {
   suggest:          (unit)        => ipcRenderer.invoke('ai:suggest', unit),
   ask:              (prompt)      => ipcRenderer.invoke('ai:ask', prompt),
+  getKnowledge:     ()            => ipcRenderer.invoke('fas-knowledge:get'),
   orchaAction:      (msg)         => ipcRenderer.invoke('ai:orcha-action', msg),
   sendEmail:   (data)   => ipcRenderer.invoke('ai:send-email', data),
   buildReport: (opts)   => ipcRenderer.invoke('ai:build-report', opts),

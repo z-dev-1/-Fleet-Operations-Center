@@ -961,6 +961,15 @@ function registerAIHandlers(ctx) {
     return text; // in case it's already an object
   });
 
+  // FAS knowledge base — the SINGLE SOURCE OF TRUTH for ownership / approval /
+  // escalation (SEV) / vendor-routing rules. Exposed so the renderer (Long
+  // Dwell AI-fill) injects the SAME authoritative rules the Slack assistant
+  // uses, instead of a duplicated embedded rubric that can drift.
+  handle('fas-knowledge:get', () => {
+    try { return { ok: true, text: require('../orcha/fas-knowledge').FAS_KNOWLEDGE || '' }; }
+    catch (e) { return { ok: false, error: e.message, text: '' }; }
+  });
+
   // Issue #13: response now includes `path` field ('chat' or 'fallback')
   // so the renderer knows which code path ran.
   // Phase 3: rate-limited to 1 concurrent call
