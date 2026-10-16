@@ -229,11 +229,12 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
   let knowledgeText = '';
   try {
     const auth = profiles.authorizationSummary(profile);
-    if (auth && auth.isInternal) {
-      // Only the RELEVANT KB sections (keeps the prompt within budget so it
-      // doesn't crowd out research/facts sections).
-      knowledgeText = require('../fas-knowledge').retrieveKnowledge(text, { maxSections: 3 }) || '';
-    }
+    // Internal senders → full KB (approval/escalation/ownership/vendor/glossary).
+    // External senders → SHAREABLE tier only (glossary + general vendor routing);
+    // internal-only sections (approval dollars, escalation internals, personnel)
+    // are withheld. Only the RELEVANT sections, to stay within the prompt budget.
+    const _aud = (auth && auth.isInternal) ? 'internal' : 'external';
+    knowledgeText = require('../fas-knowledge').retrieveKnowledge(text, { maxSections: 3, audience: _aud }) || '';
   } catch (_) { /* KB optional; never block a reply */ }
 
   // Coverage context (Zila's owned operators/SCAC + domiciles). INTERNAL senders

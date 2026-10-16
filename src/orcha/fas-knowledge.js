@@ -218,6 +218,15 @@ function _sections() {
   return { head, parts };
 }
 
+// Section headers that are SHAREABLE with external senders (carriers/vendors).
+// Everything else (approval dollar thresholds, escalation internals, ownership
+// map, what-FAS-can/can't, who-flips) is INTERNAL-ONLY. The glossary decodes
+// terms a carrier/vendor would encounter (ETC, DVIR, Offsite Shop Repair, etc.)
+// — a safe, high-value external aid. Vendor routing BASICS are shareable too
+// (general "transmission → dealer, tires → tire vendor" logic), without the
+// internal performance/contact specifics.
+const _SHAREABLE_HEADERS = ['GLOSSARY', 'VENDORS'];
+
 // Topic → keywords that should pull in a given section. Case-insensitive.
 const _SECTION_TOPICS = [
   { match: /approv|estimate|threshold|\$\d|dollar|l3\b|l4h|hve|variance|rejection|who approves/i, header: 'ESTIMATE APPROVAL' },
@@ -242,15 +251,23 @@ function retrieveKnowledge(messageText, opts = {}) {
   if (!text.trim()) return '';
   const { head, parts } = _sections();
   const maxSections = opts.maxSections || 3;
+  const external = opts.audience === 'external';
 
   const wanted = [];
   for (const topic of _SECTION_TOPICS) {
     if (!topic.match.test(text)) continue;
+    // For external senders, only allow the shareable sections.
+    if (external && !_SHAREABLE_HEADERS.some((h) => topic.header.toUpperCase().includes(h))) continue;
     const sec = parts.find((p) => p.startsWith('── ') && p.toUpperCase().includes(topic.header.toUpperCase()));
     if (sec && !wanted.includes(sec)) wanted.push(sec);
     if (wanted.length >= maxSections) break;
   }
   if (!wanted.length) return '';
+  // For externals, do NOT include the ROLE head verbatim (it's internal framing);
+  // just the shareable section bodies with a neutral label.
+  if (external) {
+    return '=== REFERENCE (fleet terms & general process) ===\n' + wanted.join('\n\n') + '\n';
+  }
   return '=== FAS KNOWLEDGE BASE (authoritative) ===\n' + head + '\n\n' + wanted.join('\n\n') + '\n';
 }
 

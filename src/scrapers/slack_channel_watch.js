@@ -274,9 +274,18 @@ async function _classifyAndDraft(messageText, askOrcha, allowedOperators, allowR
   const _dateStr = _now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   const timeContext = '\n\nCurrent local time: ' + _timeStr + ', ' + _dateStr + '.';
 
-  // Inject live fleet data context so AI can give real, data-driven answers
+  // Inject live fleet data context so AI can give real, data-driven answers.
+  // allowRoster (internal) → full FAS knowledge base + roster. For EXTERNAL
+  // senders we still pass the SHAREABLE knowledge tier (glossary + general
+  // process) so replies to carriers/vendors can accurately explain terms —
+  // internal-only sections (approval dollars, escalation, personnel) stay out.
   const { buildFleetContext } = require('../orcha/ai-context');
-  const fleetContext = buildFleetContext(messageText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true, allowedOperators: allowedOperators || [], allowRoster: !!allowRoster });
+  const fleetContext = buildFleetContext(messageText, {
+    maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true,
+    allowedOperators: allowedOperators || [],
+    allowRoster: !!allowRoster,
+    knowledgeAudience: allowRoster ? 'internal' : 'external',
+  });
 
   // CONTEXT RESET (2026-09-02): relay.ask() routes through fleet-brain, a
   // SINGLE persistent session whose rolling history is shared across every

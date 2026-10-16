@@ -94,15 +94,19 @@ function buildFleetContext(messageText, opts = {}) {
   // the AI just couldn't see it. See _buildContactContext.
   context += _buildContactContext(messageText, rows);
 
-  // FAS roster + institutional knowledge — only for internal/allowed callers
-  // (the "just me" DM assistant and internal contacts). Never exposed to
-  // external carrier/vendor contexts. Opt-in via opts.allowRoster.
+  // FAS roster — INTERNAL only (personnel data). Opt-in via opts.allowRoster.
   if (opts.allowRoster) {
     context += _buildRosterContext(messageText);
-    // FAS knowledge base: ownership / approval thresholds / escalation /
-    // process. Injected only when the message is a judgment/process/ownership
-    // question (not a plain status lookup) so routine answers stay lean.
-    context += _buildKnowledgeContext(messageText);
+  }
+  // FAS knowledge base — TWO-TIER by audience:
+  //   • opts.allowRoster (internal) → full KB (approval dollars, escalation,
+  //     ownership, vendor routing, glossary).
+  //   • opts.knowledgeAudience === 'external' → SHAREABLE tier only (glossary +
+  //     general vendor routing); internal-only sections withheld.
+  // Both only when the message is actually a judgment/process/term question.
+  const _kbAudience = opts.allowRoster ? 'internal' : (opts.knowledgeAudience === 'external' ? 'external' : null);
+  if (_kbAudience) {
+    context += _buildKnowledgeContext(messageText, _kbAudience);
   }
 
   if (!resolved.units.length && !resolved.groups.length) {
@@ -365,15 +369,19 @@ function _buildRosterContext(messageText) {
 // Injected only when the message is a judgment/process/ownership question —
 // the hard ones raw data can't answer. Routine status lookups skip it so the
 // prompt stays lean.
-function _buildKnowledgeContext(messageText) {
+function _buildKnowledgeContext(messageText, audience) {
   const text = String(messageText || '');
   if (!text.trim()) return '';
   // Does this message need institutional/process knowledge to answer well?
   const needsKnowledge = /\b(approve|approval|estimate|threshold|escalat|who\s+(owns|approves|handles|does|flips|schedules|decides)|eol|end of life|flip|lifecycle|reactivat|vre|vendor\s+(reassign|performance|assign)|pm\b|inspection|dot|sim\b|record360|reach|arc\b|accident|invoice|billing|dispute|credit|paragon|mcs|l3|l4h|hve|variance|rejection|sla|out of scope|my (job|role|lane)|can i|should i|am i allowed|who is responsible|process|procedure|policy|which vendor|what vendor|who should (fix|repair|do)|dealer|amerit|cummins|cei\b|fleetnet|goodyear|tow|towing|cng|warranty|decisiv|asist|uptime center|mobile vendor|routing|scope|relay garage|\brg\b|\bnra\b|\bpv\b|\bpa\b|\betc\b|\bwr\b|\bwo\b|\bscac\b|\bdvir\b|\bpmr\b|\bpmb?\b|\bdsp\b|\bafp\b|\btom\b|\bdss\b|\bmmeo\b|\bmmpm\b|\broc\b|\bitr\b|\bera\b|\bdea\b|\bdood\b|\bfnol\b|\bddex\b|\bvrid\b|\bbol\b|\bcpm\b|\bcel\b|\beas\b|\bfsov\b|\bmttr\b|\bp95\b|\bym s?\b|\br4c\b|\bpct\b|itrace|gas tank|peak|ready to rent|reconditioning|to be returned|damage (moderate|severe)|active\/healthy|a\/h|offsite shop|what (is|does|mean)|define|glossary|acronym)\b/i.test(text);
   if (!needsKnowledge) return '';
+  const ext = audience === 'external';
   let kb;
-  try { kb = require('./fas-knowledge').retrieveKnowledge(messageText, { maxSections: 3 }); } catch (_) { return ''; }
+  try { kb = require('./fas-knowledge').retrieveKnowledge(messageText, { maxSections: 3, audience: ext ? 'external' : 'internal' }); } catch (_) { return ''; }
   if (!kb) return '';
+  if (ext) {
+    return '\n' + kb + '\n(Use this reference to explain fleet terms and the general repair process accurately to the carrier/vendor. Do NOT disclose internal approval dollar thresholds, who-approves-what, escalation internals, or personnel — if asked, say that is handled internally.)\n';
+  }
   return '\n' + kb + '\n(Answer ownership/approval/escalation/process questions STRICTLY from the FAS Knowledge Base above — it is authoritative. Attribute actions to the correct owner; never say FAS approves estimates. If the KB does not cover it, say so rather than guessing.)\n';
 }
 
