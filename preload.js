@@ -189,6 +189,8 @@ expose('aapApi', {
   buildFleet:   (opts) => ipcRenderer.invoke('aap-api:build-fleet', opts),
   refreshUnit:  (unit) => ipcRenderer.invoke('aap-api:refresh-unit', { unit }),
   loadLiveFleet: (opts) => ipcRenderer.invoke('fleet:load-via-api', opts),
+  getDataSource: ()     => ipcRenderer.invoke('fleet:get-data-source'),
+  setDataSource: (source) => ipcRenderer.invoke('fleet:set-data-source', { source }),
   verifyVsStored: (opts) => ipcRenderer.invoke('aap-api:verify-vs-stored', opts),
 });
 

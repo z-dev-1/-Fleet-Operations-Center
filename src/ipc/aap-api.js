@@ -233,6 +233,45 @@ function registerAapApiIPC(ctx) {
     }
   });
 
+  // ── Data-source toggle (API default, scrape fallback) ─────────────────────
+  // Returns the current source and flips it. 'api' (default) | 'scrape'.
+  handle('fleet:get-data-source', () => {
+    const s = store.load('settings', {});
+    return { source: s.dataSource === 'scrape' ? 'scrape' : 'api' };
+  });
+
+  // Toggle (or set) the data source. When switched to 'api', immediately loads
+  // the fleet via the API so the change is visible right away. When 'scrape',
+  // triggers the existing rescan. Persisted to settings.dataSource.
+  handle('fleet:set-data-source', async (_e, payload) => {
+    const want = (payload && payload.source === 'scrape') ? 'scrape' : 'api';
+    const s = store.load('settings', {});
+    s.dataSource = want;
+    store.save('settings', s);
+    logger.info('[data-source] set to ' + want);
+    if (want === 'api') {
+      // Fast load (no comments — table is instant; comments load lazily per unit).
+      try {
+        const ds = await api().buildFleetDataset({ withComments: false });
+        let rows = ds.rows || [];
+        try { const uu = (store.load('uptakeHash', {}).units) || []; if (ctx && ctx.mergeUptakeIntoRows) rows = ctx.mergeUptakeIntoRows(rows, uu); } catch (_) {}
+        try { const ns = store.load('notesStore', {}); if (ctx && ctx.mergeRelayIntoRows) rows = ctx.mergeRelayIntoRows(rows, {}, ns); } catch (_) {}
+        const now = new Date().toISOString();
+        const out = { rows, count: rows.length, unavailableCount: ds.unavailableCount, syncedAt: now, scrapedAt: now, stale: false, source: 'aap-api' };
+        store.save('fleetData', out);
+        if (ctx) { ctx.lastData = out; if (ctx.pushData) ctx.pushData(out); }
+      } catch (e) {
+        logger.warn('[data-source] API load failed, falling back to scrape: ' + e.message);
+        if (ctx && ctx.triggerRescan) ctx.triggerRescan(true);
+        return { ok: false, source: want, error: e.message, fellBack: true };
+      }
+    } else {
+      // Scrape mode: kick the existing rescan.
+      if (ctx && ctx.triggerRescan) ctx.triggerRescan(true);
+    }
+    return { ok: true, source: want };
+  });
+
   logger.info('AAP API IPC handlers registered');
 }
 
