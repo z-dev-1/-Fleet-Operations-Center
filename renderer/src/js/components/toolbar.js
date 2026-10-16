@@ -651,7 +651,17 @@ export function init(container) {
         '<span class="tbp-chip">' + esc(d) + '<button class="tbp-chip-x" data-i="' + i + '" title="Remove">✕</button></span>'
       ).join('');
       chipsEl.querySelectorAll('.tbp-chip-x').forEach((b) => {
-        b.addEventListener('click', () => { _domiciles.splice(parseInt(b.dataset.i, 10), 1); _renderChips(); });
+        b.addEventListener('click', (e) => {
+          // stopPropagation: _renderChips() replaces this button's HTML during
+          // the click, detaching e.target from the DOM. Without this, the
+          // document-level outside-click closer then sees pop.contains(e.target)
+          // === false (target is detached) and closes the whole popover — so the
+          // removal looked like it "did nothing". Keep the click contained.
+          e.preventDefault();
+          e.stopPropagation();
+          _domiciles.splice(parseInt(b.dataset.i, 10), 1);
+          _renderChips();
+        });
       });
     }
     function _addDomicile(raw) {

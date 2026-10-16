@@ -36,10 +36,11 @@ function registerFasRosterIPC() {
   // Return the current roster snapshot.
   handle('fas-roster:get', () => store.load('fasRoster', EMPTY));
 
-  // Scrape the full roster from the FAS page and store the snapshot.
+  // Scrape BOTH roster sources (FAS web page + AFP-FAS SharePoint workbook),
+  // merge them by (Site + SCAC), and store the combined snapshot.
   handle('fas-roster:fetch', async () => {
-    const { fetchRoster } = require('../scrapers/fas_roster');
-    const res = await fetchRoster({});
+    const { fetchCombinedRoster } = require('../scrapers/fas_roster');
+    const res = await fetchCombinedRoster({});
     if (!res || !res.ok) {
       logger.warn('FAS roster fetch failed: ' + (res && (res.error || res.detail)));
       return { ok: false, error: (res && (res.detail || res.error)) || 'FAS roster fetch failed' };
@@ -55,10 +56,22 @@ function registerFasRosterIPC() {
       return obj;
     });
 
-    const data = { fetchedAt: new Date().toISOString(), columns, rows };
+    const data = { fetchedAt: new Date().toISOString(), columns, rows, sources: res.sources };
     store.save('fasRoster', data);
-    logger.info('FAS roster stored: ' + rows.length + ' rows, ' + columns.length + ' columns');
-    return { ok: true, count: rows.length, columns: columns.length };
+    logger.info('FAS roster stored: ' + rows.length + ' rows (web=' + (res.sources && res.sources.web) + ' sharepoint=' + (res.sources && res.sources.sharepoint) + ')');
+    return { ok: true, count: rows.length, columns: columns.length, sources: res.sources };
+  });
+
+  // Resolve FAS names (and uptime managers) for a batch of (scac, site) pairs.
+  // Used by the DBR renderer to fill its FAS column. Returns an array aligned
+  // with the input: [{ fas, um }, ...].
+  handle('fas-roster:resolve', (_e, pairs) => {
+    const roster = require('../orcha/fas/roster-lookup');
+    const list = Array.isArray(pairs) ? pairs : [];
+    return list.map((p) => ({
+      fas: roster.fasFor(p && p.scac, p && p.site),
+      um:  roster.umFor(p && p.scac, p && p.site),
+    }));
   });
 
   // Clear the stored snapshot.

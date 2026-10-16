@@ -9502,14 +9502,35 @@ body {
 .ldc-table thead tr.ldc-head-titles th { top: 0; }
 .ldc-table thead tr.ldc-head-filters th { top: 31px; font-weight: 400; padding: 3px 6px; z-index: 2; }
 .ldc-manual-th { color: var(--acc, #4ea1ff); }
+.ldc-sort-th { cursor: pointer; user-select: none; }
+.ldc-sort-th:hover { background: var(--bg1, #0d1117); }
+.ldc-sort-ind { color: var(--acc, #4ea1ff); font-size: 10px; }
 .ldc-filter-th { background: var(--bg1, #0d1117); }
 .ldc-filter { width: 100%; min-width: 90px; box-sizing: border-box; font-size: 11px; padding: 2px 6px;
   background: var(--bg2, #11161d); color: var(--txt, #e6edf3);
   border: 1px solid var(--line, #2a3344); border-radius: 4px; }
 .ldc-filter:focus { outline: none; border-color: var(--acc, #4ea1ff); }
 .ldc-no-match { text-align: center; color: var(--txt2, #8b949e); padding: 18px; font-style: italic; }
+/* Grouped FAS roster: name shown once (rowspan), a visible divider between
+   people, SCACs wrap within their site line. */
+.fr-grouped td { white-space: normal; }
+.fr-grouped tr.fr-person-start > td { border-top: 2px solid var(--acc, #4ea1ff); }
+.fr-name-cell { vertical-align: top; font-weight: 600; }
 .ldc-csv-cell { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
 .ldc-manual-cell { background: rgba(78, 161, 255, 0.06); }
 .ldc-input { width: 100%; min-width: 120px; font-size: 11px; }
 .ldc-notes { min-width: 320px; white-space: normal; }
+.ldc-sel-th { width: 46px; text-align: center; }
+.ldc-sel-cell { white-space: nowrap; text-align: center; }
+.ldc-sel-cell .ldc-sel { vertical-align: middle; cursor: pointer; }
+.ldc-copy-row { margin-left: 3px; cursor: pointer; border: 1px solid var(--line, #2a3344);
+  background: var(--bg2, #11161d); border-radius: 4px; font-size: 11px; line-height: 1; padding: 2px 4px; }
+.ldc-copy-row:hover { background: var(--acc, #4ea1ff); }
+.ldc-table tr.ldc-row-selected > td { background: rgba(78, 161, 255, 0.14); }
+.ldc-dr-cell { display: flex; align-items: center; gap: 4px; }
+.ldc-ai-row { flex: 0 0 auto; cursor: pointer; border: 1px solid var(--line, #2a3344);
+  background: var(--bg2, #11161d); color: var(--acc, #4ea1ff); border-radius: 4px;
+  font-size: 12px; line-height: 1; padding: 3px 5px; }
+.ldc-ai-row:hover:not(:disabled) { background: var(--acc, #4ea1ff); color: #0d1117; }
+.ldc-ai-row:disabled { opacity: 0.6; cursor: progress; }
 .ldc-input.ldc-saved { outline: 2px solid var(--ok, #3fb950); transition: outline .2s; }

@@ -358,6 +358,7 @@ export const fasRoster = {
   fetch:          () => window.fasRoster.fetch(),
   clear:          () => window.fasRoster.clear(),
   importContacts: () => window.fasRoster.importContacts(),
+  resolve:        (pairs) => window.fasRoster.resolve(pairs),
 };
 
 export const longDwellCsv = {

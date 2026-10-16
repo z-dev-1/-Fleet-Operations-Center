@@ -33,15 +33,88 @@ function _rowMatches(row) {
 }
 
 function _filteredRows() {
-  return (_data.rows || []).filter(_rowMatches);
+  const rows = _data.rows || [];
+  const active = Object.entries(_filters).filter(([, v]) => String(v || '').trim() !== '');
+  if (!active.length) return rows;
+
+  // Person-aware filtering: if ANY of a person's (Site+SCAC) rows matches ALL
+  // active filters, show that person's FULL block (so filtering by one SCAC
+  // still shows all of that person's sites/SCACs, per the display grouping).
+  const matchNames = new Set();
+  let hasNameFilter = false;
+  for (const [col] of active) if (col === 'FAS Name') hasNameFilter = true;
+
+  for (const r of rows) {
+    if (_rowMatches(r)) {
+      const nm = String(r['FAS Name'] || r['Name'] || '').trim().toLowerCase();
+      if (nm) matchNames.add(nm);
+    }
+  }
+  return rows.filter((r) => {
+    const nm = String(r['FAS Name'] || r['Name'] || '').trim().toLowerCase();
+    return nm && matchNames.has(nm);
+  });
+}
+
+// ── Grouping (one person; sites listed; SCACs grouped per site) ───────────────
+// Groups the flat per-(Site+SCAC) rows into:
+//   [ { name, email, phone, program, uptimeManager,
+//       sites: [ { site, scacs:[...] }, ... ] }, ... ]
+// Keeps the underlying per-combo data untouched (used by the lookup/auto-fill);
+// this grouping is DISPLAY ONLY.
+const _g = (r, names) => {
+  for (const n of names) { if (r[n] != null && String(r[n]).trim() !== '') return String(r[n]).trim(); }
+  return '';
+};
+
+function _groupByPerson(rows) {
+  const people = new Map(); // name -> { name, meta..., sites: Map(site -> Set(scac)) }
+  for (const r of rows) {
+    const name = _g(r, ['FAS Name', 'Name']);
+    const site = _g(r, ['Site Code', 'Site']);
+    const scac = _g(r, ['SCAC']);
+    const key = name || ('(' + site + '/' + scac + ')');
+    if (!people.has(key)) {
+      people.set(key, {
+        name,
+        email: _g(r, ['Email']),
+        phone: _g(r, ['Phone']),
+        program: _g(r, ['Program']),
+        uptimeManager: _g(r, ['Uptime Manager']),
+        sites: new Map(),
+      });
+    }
+    const p = people.get(key);
+    if (site) {
+      if (!p.sites.has(site)) p.sites.set(site, new Set());
+      if (scac) p.sites.get(site).add(scac);
+    }
+    // keep first-seen contact fields; fill blanks
+    if (!p.email) p.email = _g(r, ['Email']);
+    if (!p.phone) p.phone = _g(r, ['Phone']);
+    if (!p.program) p.program = _g(r, ['Program']);
+    if (!p.uptimeManager) p.uptimeManager = _g(r, ['Uptime Manager']);
+  }
+  // Shape into arrays, sorted by name.
+  return [...people.values()]
+    .map((p) => ({
+      ...p,
+      sites: [...p.sites.entries()]
+        .map(([site, scacs]) => ({ site, scacs: [...scacs].sort() }))
+        .sort((a, b) => a.site.localeCompare(b.site)),
+    }))
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────
 function _renderToolbar() {
   const total = (_data.rows || []).length;
+  const peopleCount = new Set((_data.rows || [])
+    .map((r) => String(r['FAS Name'] || r['Name'] || '').trim().toLowerCase())
+    .filter(Boolean)).size;
   const fetchedAt = _data.fetchedAt ? new Date(_data.fetchedAt).toLocaleString() : null;
   const meta = total
-    ? `<span class="ldc-meta"><strong>${total}</strong> people${fetchedAt ? ' \u00b7 fetched ' + _esc(fetchedAt) : ''}</span>`
+    ? `<span class="ldc-meta"><strong>${peopleCount}</strong> people \u00b7 ${total} combos${fetchedAt ? ' \u00b7 fetched ' + _esc(fetchedAt) : ''}</span>`
     : '';
   return `
     <div class="an-ld-toolbar ldc-toolbar">
@@ -57,27 +130,52 @@ function _renderToolbar() {
     </div>`;
 }
 
+// Grouped columns: Name once (rowspan), then one line per Site with its SCACs,
+// plus a few contact columns. The filter row keys on these display columns.
+const GROUP_COLS = ['FAS Name', 'Site Code', 'SCAC', 'Email', 'Phone', 'Program', 'Uptime Manager'];
+
+function _buildGroupBodyRows() {
+  const people = _groupByPerson(_filteredRows());
+  if (!people.length) {
+    return `<tr><td class="ldc-no-match" colspan="${GROUP_COLS.length}">No rows match the current filters.</td></tr>`;
+  }
+  const out = [];
+  for (const p of people) {
+    const siteRows = p.sites.length ? p.sites : [{ site: '', scacs: [] }];
+    const span = siteRows.length;
+    siteRows.forEach((sr, i) => {
+      const nameCell = i === 0
+        ? `<td class="fr-name-cell" rowspan="${span}"><strong>${_esc(p.name)}</strong></td>`
+        : '';
+      const metaCells = i === 0
+        ? `<td class="ldc-csv-cell" rowspan="${span}">${_esc(p.email)}</td>`
+          + `<td class="ldc-csv-cell" rowspan="${span}">${_esc(p.phone)}</td>`
+          + `<td class="ldc-csv-cell" rowspan="${span}">${_esc(p.program)}</td>`
+          + `<td class="ldc-csv-cell" rowspan="${span}">${_esc(p.uptimeManager)}</td>`
+        : '';
+      out.push(
+        `<tr class="${i === 0 ? 'fr-person-start' : ''}">`
+        + nameCell
+        + `<td class="ldc-csv-cell">${_esc(sr.site)}</td>`
+        + `<td class="ldc-csv-cell">${_esc(sr.scacs.join(', '))}</td>`
+        + metaCells
+        + `</tr>`
+      );
+    });
+  }
+  return out.join('');
+}
+
 function _renderTable() {
-  const cols = _data.columns || [];
   if (!(_data.rows || []).length) {
     return `<div class="an-empty">No roster yet. Click <strong>Fetch Roster</strong> to pull the full FAS roster.</div>`;
   }
-  const rows = _filteredRows();
-
-  const titleRow = `<tr class="ldc-head-titles">${cols.map((h) => `<th>${_esc(h)}</th>`).join('')}</tr>`;
-  const filterRow = `<tr class="ldc-head-filters">${cols.map((h) =>
+  const titleRow = `<tr class="ldc-head-titles">${GROUP_COLS.map((h) => `<th>${_esc(h)}</th>`).join('')}</tr>`;
+  const filterRow = `<tr class="ldc-head-filters">${GROUP_COLS.map((h) =>
     `<th class="ldc-filter-th"><input class="fr-filter" type="text" data-col="${_esc(h)}" value="${_esc(_filters[h] || '')}" placeholder="\uD83D\uDD0D" /></th>`
   ).join('')}</tr>`;
 
-  const body = rows.map((r) =>
-    `<tr>${cols.map((h) => `<td class="ldc-csv-cell">${_esc(r[h] || '')}</td>`).join('')}</tr>`
-  ).join('');
-
-  const emptyMsg = !rows.length
-    ? `<tr><td class="ldc-no-match" colspan="${cols.length}">No rows match the current filters.</td></tr>`
-    : '';
-
-  return `<div class="ldc-table-scroll"><table class="an-table ldc-table"><thead>${titleRow}${filterRow}</thead><tbody>${body}${emptyMsg}</tbody></table></div>`;
+  return `<div class="ldc-table-scroll"><table class="an-table ldc-table fr-grouped"><thead>${titleRow}${filterRow}</thead><tbody>${_buildGroupBodyRows()}</tbody></table></div>`;
 }
 
 function _render() {
@@ -90,23 +188,21 @@ function _renderBodyOnly() {
   if (!_host) return;
   const tbody = _host.querySelector('.ldc-table tbody');
   if (!tbody) { _render(); return; }
-  const cols = _data.columns || [];
-  const rows = _filteredRows();
-  const body = rows.map((r) =>
-    `<tr>${cols.map((h) => `<td class="ldc-csv-cell">${_esc(r[h] || '')}</td>`).join('')}</tr>`
-  ).join('');
-  const emptyMsg = !rows.length
-    ? `<tr><td class="ldc-no-match" colspan="${cols.length}">No rows match the current filters.</td></tr>`
-    : '';
-  tbody.innerHTML = body + emptyMsg;
+  tbody.innerHTML = _buildGroupBodyRows();
 }
 
-// ── Export ───────────────────────────────────────────────────────────────────
+// ── Export (grouped: name once, one line per site with its SCACs) ─────────────
 function _buildTsv() {
-  const cols = _data.columns || [];
-  const lines = [cols.join('\t')];
-  for (const r of _filteredRows()) {
-    lines.push(cols.map((h) => String(r[h] || '').replace(/\r?\n/g, ' ').trim()).join('\t'));
+  const people = _groupByPerson(_filteredRows());
+  const lines = [GROUP_COLS.join('\t')];
+  for (const p of people) {
+    const siteRows = p.sites.length ? p.sites : [{ site: '', scacs: [] }];
+    siteRows.forEach((sr, i) => {
+      const row = i === 0
+        ? [p.name, sr.site, sr.scacs.join(', '), p.email, p.phone, p.program, p.uptimeManager]
+        : ['', sr.site, sr.scacs.join(', '), '', '', '', ''];
+      lines.push(row.map((c) => String(c || '').replace(/\r?\n/g, ' ').trim()).join('\t'));
+    });
   }
   return lines.join('\n');
 }
@@ -132,7 +228,10 @@ function _wire() {
     try {
       const res = await rosterBridge.fetch();
       if (res && res.ok) {
-        toast.show('success', `Fetched ${res.count} people`, 3000);
+        const s = res.sources || {};
+        const srcNote = (s.web != null || s.sharepoint != null)
+          ? ` (web: ${s.web}, SharePoint: ${s.sharepoint})` : '';
+        toast.show('success', `Fetched ${res.count} roster rows${srcNote}`, 4500);
         await refresh();
       } else {
         toast.show('warn', (res && res.error) || 'Roster fetch failed', 6000);

@@ -30,6 +30,14 @@ const logger = require('../utils/logger')('fas-roster');
 
 const ROSTER_URL = 'https://fas.fieldmaintenance.roc.amazon.dev/roster';
 
+// Second source: the AFP-FAS SharePoint "PARTNERS" roster workbook. Same roster
+// data (sometimes complementary — a (site+SCAC) combo may exist in one source
+// but not the other), with richer columns (login, sr_pm, asset count). We merge
+// both into one combined roster (union by site+SCAC).
+const SP_SITE = '/sites/AFP-FAS';
+const SP_ROSTER_FILE = 'AFP FAS ROSTER- PARTNERS.xlsx';
+const SP_ROSTER_PAGE = 'https://amazon.sharepoint.com/sites/AFP-FAS';
+
 const _isSSO = (u) => /midway-auth\.amazon\.com|\/SSO\/redirect/i.test(u || '');
 
 // In-page scraper. Runs in the roster page's own context. Forces ALL rows to
@@ -304,4 +312,192 @@ async function fetchRoster(opts = {}) {
   });
 }
 
-module.exports = { fetchRoster, ROSTER_URL };
+/**
+ * fetchSharePointRoster — download + parse the AFP-FAS PARTNERS roster xlsx via
+ * an authenticated SharePoint window. Resolves with { ok, columns, rows } where
+ * rows are header-keyed objects (site, SCAC, fas_name, ...), or { ok:false }.
+ */
+async function fetchSharePointRoster(opts = {}) {
+  const timeoutMs = opts.timeoutMs || 90000;
+  const sp = require('./sp_discover');
+
+  try {
+    const { injectCookies } = require('./auth');
+    await injectCookies(session.defaultSession);
+  } catch (e) { logger.warn('cookie inject skipped: ' + e.message); }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (res) => {
+      if (settled) return; settled = true;
+      try { if (win && !win.isDestroyed()) win.destroy(); } catch (_) {}
+      resolve(res);
+    };
+
+    const win = new BrowserWindow({
+      width: 1200, height: 800, show: false, x: -3000, y: -3000, skipTaskbar: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, session: session.defaultSession },
+    });
+
+    const timeout = setTimeout(() => {
+      logger.warn('SharePoint roster timed out');
+      finish({ ok: false, error: 'timeout', detail: 'SharePoint roster did not respond in time.' });
+    }, timeoutMs);
+
+    const run = async () => {
+      let url = '';
+      try { url = win.webContents.getURL(); } catch (_) {}
+      if (_isSSO(url)) {
+        clearTimeout(timeout);
+        finish({ ok: false, error: 'auth', detail: 'Midway session expired for SharePoint.' });
+        return;
+      }
+      try {
+        // Resolve the file's server-relative path by name, then read the grid.
+        const filePath = await sp.findFileOnSite(win, SP_SITE, SP_ROSTER_FILE);
+        if (!filePath) { clearTimeout(timeout); finish({ ok: false, error: 'not-found', detail: 'Could not locate ' + SP_ROSTER_FILE + ' on SharePoint.' }); return; }
+        const grid = await sp.readXlsxGrid(win, filePath, {});
+        clearTimeout(timeout);
+        if (grid && grid.ok && Array.isArray(grid.rows)) {
+          logger.info('SharePoint roster: ' + grid.rows.length + ' rows, ' + (grid.headers || []).length + ' cols from ' + filePath);
+          finish({ ok: true, columns: grid.headers || [], rows: grid.rows });
+        } else {
+          finish({ ok: false, error: (grid && grid.error) || 'parse-failed', detail: (grid && grid.error) || 'Could not parse the roster workbook.' });
+        }
+      } catch (e) {
+        clearTimeout(timeout);
+        logger.error('SharePoint roster threw: ' + e.message);
+        finish({ ok: false, error: 'script', detail: e.message });
+      }
+    };
+
+    win.webContents.once('did-finish-load', run);
+    win.webContents.once('did-fail-load', (_e, code, desc) => { if (code === -3) return; logger.warn('SP did-fail-load: ' + code + ' ' + desc); });
+    win.loadURL(SP_ROSTER_PAGE);
+  });
+}
+
+// Unified roster columns we store (superset the lookup + Contact Book use).
+const UNIFIED_COLUMNS = [
+  'FAS Name', 'Site Code', 'SCAC', 'Email', 'Phone', 'Login',
+  'Uptime Manager', 'Uptime Manager Email', 'Sr PM', 'Program', 'Asset Count', 'Source',
+];
+
+const _ci = (row, names) => {
+  if (!row) return '';
+  const keys = Object.keys(row);
+  for (const n of names) {
+    const k = keys.find((kk) => kk.toLowerCase() === n.toLowerCase());
+    if (k && String(row[k]).trim() !== '') return String(row[k]).trim();
+  }
+  return '';
+};
+
+// Normalize a WEB-roster row (headers: FAS Name, Site Code, Email, Phone,
+// Uptime Manager, Program, SCAC) to the unified shape.
+function _fromWeb(r) {
+  return {
+    'FAS Name': _ci(r, ['FAS Name', 'Name']),
+    'Site Code': _ci(r, ['Site Code', 'Site']),
+    'SCAC': _ci(r, ['SCAC']),
+    'Email': _ci(r, ['Email', 'fas_email']),
+    'Phone': _ci(r, ['Phone', 'fas_phone']),
+    'Login': _ci(r, ['Login', 'fas_login']),
+    'Uptime Manager': _ci(r, ['Uptime Manager', 'uptime_manager']),
+    'Uptime Manager Email': _ci(r, ['Uptime Manager Email', 'uptime_manager_email']),
+    'Sr PM': _ci(r, ['Sr PM', 'sr_pm_name']),
+    'Program': _ci(r, ['Program']),
+    'Asset Count': _ci(r, ['Asset Count', 'asset count']),
+    'Source': 'web',
+  };
+}
+
+// Normalize a SHAREPOINT-roster row (headers: site, SCAC, fas_name, fas_email,
+// fas_login, fas_phone, fas_mailing_address, uptime_manager, uptime_manager_email,
+// uptime_manager_login, sr_pm_name, sr_pm_email, sr_pm_login, program, asset count).
+function _fromSharePoint(r) {
+  return {
+    'FAS Name': _ci(r, ['fas_name', 'FAS Name', 'Name']),
+    'Site Code': _ci(r, ['site', 'Site Code', 'Site']),
+    'SCAC': _ci(r, ['SCAC', 'scac']),
+    'Email': _ci(r, ['fas_email', 'Email']),
+    'Phone': _ci(r, ['fas_phone', 'Phone']),
+    'Login': _ci(r, ['fas_login', 'Login']),
+    'Uptime Manager': _ci(r, ['uptime_manager', 'Uptime Manager']),
+    'Uptime Manager Email': _ci(r, ['uptime_manager_email', 'Uptime Manager Email']),
+    'Sr PM': _ci(r, ['sr_pm_name', 'Sr PM']),
+    'Program': _ci(r, ['program', 'Program']),
+    'Asset Count': _ci(r, ['asset count', 'Asset Count']),
+    'Source': 'sharepoint',
+  };
+}
+
+// Merge both sources by (Site + SCAC). Union: every combo from either source.
+// When a combo exists in both, prefer the row with more filled fields (usually
+// SharePoint, which has richer columns), but keep a combined Source tag.
+function _mergeRosters(webRows, spRows) {
+  const key = (r) => (String(r['SCAC'] || '').trim().toUpperCase()) + '|' + (String(r['Site Code'] || '').trim().toUpperCase());
+  const filled = (r) => UNIFIED_COLUMNS.reduce((n, c) => n + (String(r[c] || '').trim() !== '' ? 1 : 0), 0);
+  const byKey = new Map();
+
+  const ingest = (rows, norm) => {
+    for (const raw of rows) {
+      const r = norm(raw);
+      if (!r['FAS Name'] && !r['SCAC'] && !r['Site Code']) continue;
+      const k = key(r);
+      const prev = byKey.get(k);
+      if (!prev) { byKey.set(k, r); continue; }
+      // Combo in both sources → keep the richer row, note combined source.
+      const winner = filled(r) >= filled(prev) ? r : prev;
+      const merged = { ...winner };
+      // Fill any blanks on the winner from the other row (don't lose data).
+      for (const c of UNIFIED_COLUMNS) {
+        if (String(merged[c] || '').trim() === '') {
+          const other = winner === r ? prev : r;
+          if (String(other[c] || '').trim() !== '') merged[c] = other[c];
+        }
+      }
+      merged['Source'] = 'both';
+      byKey.set(k, merged);
+    }
+  };
+  ingest(webRows || [], _fromWeb);
+  ingest(spRows || [], _fromSharePoint);
+
+  return [...byKey.values()];
+}
+
+/**
+ * fetchCombinedRoster — pull BOTH roster sources (web page + SharePoint
+ * workbook), normalize, and union by (Site + SCAC). Returns
+ * { ok, columns, rows, sources:{web, sharepoint} }. Succeeds if AT LEAST ONE
+ * source returns data (so a SharePoint hiccup doesn't block the web roster,
+ * and vice-versa); reports which sources failed.
+ */
+async function fetchCombinedRoster(opts = {}) {
+  const web = await fetchRoster(opts);
+  const sp  = await fetchSharePointRoster(opts);
+
+  const webRows = (web && web.ok && Array.isArray(web.rows)) ? web.rows : [];
+  const spRows  = (sp && sp.ok && Array.isArray(sp.rows)) ? sp.rows : [];
+
+  if (!webRows.length && !spRows.length) {
+    const why = [web && !web.ok ? ('web: ' + (web.detail || web.error)) : null,
+                 sp && !sp.ok ? ('sharepoint: ' + (sp.detail || sp.error)) : null].filter(Boolean).join('; ');
+    return { ok: false, error: why || 'Both roster sources returned no data.' };
+  }
+
+  const rows = _mergeRosters(webRows, spRows);
+  logger.info('combined roster: web=' + webRows.length + ' sharepoint=' + spRows.length + ' merged=' + rows.length);
+  return {
+    ok: true,
+    columns: UNIFIED_COLUMNS.slice(),
+    rows,
+    sources: {
+      web: web && web.ok ? webRows.length : ('failed: ' + ((web && (web.detail || web.error)) || 'unknown')),
+      sharepoint: sp && sp.ok ? spRows.length : ('failed: ' + ((sp && (sp.detail || sp.error)) || 'unknown')),
+    },
+  };
+}
+
+module.exports = { fetchRoster, fetchSharePointRoster, fetchCombinedRoster, ROSTER_URL };

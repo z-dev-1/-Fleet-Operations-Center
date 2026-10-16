@@ -835,7 +835,7 @@ function _dbrPanelHtml() {
 // bordered/formatted block.
 const DBR_SHEET_ROWS = { domicile: 10, scac: 14, dsp: 10 };
 
-function _dbrBuildTable(rowsData, sectionKind, idLabel, showDomicileCol, mySites, myCarriers) {
+function _dbrBuildTable(rowsData, sectionKind, idLabel, showDomicileCol, mySites, myCarriers, fasMap) {
   // Column order matches the real sheet exactly: AFP SCAC section shows
   // DOMICILE before SCAC (sectionKind 'scac' + showDomicileCol true is only
   // ever the AFP SCAC table — DSP's SCAC table has showDomicileCol false).
@@ -851,6 +851,14 @@ function _dbrBuildTable(rowsData, sectionKind, idLabel, showDomicileCol, mySites
     const mine = sectionKind === 'domicile'
       ? mySites.has(idKey)
       : (myCarriers.has(idKey) || (domicileKey && mySites.has(domicileKey)));
+
+    // FAS owner from the roster (SCAC + domicile). Falls back to the "Z"
+    // marker for the user's own rows when the roster has no match.
+    const _fk = (String(r.scac || '').trim().toUpperCase()) + '|' + (String(r.domicile || '').trim().toUpperCase());
+    const rosterFas = (fasMap && fasMap.get) ? (fasMap.get(_fk) || '') : '';
+    const fasCell = rosterFas
+      ? _dbrEsc(rosterFas)
+      : (mine ? '<strong style="color:#58a6ff">Z</strong>' : '');
     const unavailDisplay = r.unitsUnavailableEstimated ? ('~' + r.unitsUnavailable) : (r.unitsUnavailable != null ? r.unitsUnavailable : '');
     const rowDomId = 'dbr-row-' + sectionKind + '-' + idx;
     const review = mine ? _dbrReview[_dbrReviewKey(sectionKind, idVal)] : null;
@@ -860,7 +868,7 @@ function _dbrBuildTable(rowsData, sectionKind, idLabel, showDomicileCol, mySites
     };
     const idCells = showDomicileCol ? `<td>${_dbrEsc(r.domicile)}</td><td>${_dbrEsc(r.scac)}</td>` : `<td>${_dbrEsc(idVal)}</td>`;
     return `<tr id="${rowDomId}" data-dbr-section="${sectionKind}" data-dbr-key="${_dbrEsc(idVal)}" data-dbr-mine="${mine ? '1' : '0'}" data-dbr-has-domicile-col="${showDomicileCol ? '1' : '0'}">
-      <td>${mine ? '<strong style="color:#58a6ff">Z</strong>' : ''}</td>
+      <td>${fasCell}</td>
       ${idCells}
       <td>${_dbrEsc(_dbrPct(r.uptimePct))}</td>
       <td>${_dbrEsc(unavailDisplay)}</td>
@@ -1060,13 +1068,19 @@ async function _dbrRenderTables() {
   const { mySites, myCarriers } = await _loadMySitesAndCarriers();
   const data = _dbrData;
 
+  // Resolve the FAS owner (and uptime manager) for every DBR row from the
+  // scraped roster, keyed by (SCAC + domicile). One batched IPC call; result
+  // is a Map "SCAC|SITE" -> fasName the table builder reads. Degrades to the
+  // old "Z" marker when the roster has no match or isn't fetched yet.
+  const _fasMap = await _dbrBuildFasMap(data, _dbrDspData);
+
   if (!data || !data.ok) {
     const msg = data && data.error ? _dbrEsc(data.error) : 'No data yet — click "Scrape QuickSight (AFP)" above.';
     siteHost.innerHTML = `<div class="dc-empty">${msg}</div>`;
     scacHost.innerHTML = '';
   } else {
-    siteHost.innerHTML = _dbrBuildTable(data.domicile || [], 'domicile', 'DOMICILE', false, mySites, myCarriers);
-    scacHost.innerHTML = _dbrBuildTable(data.scac || [], 'scac', 'SCAC', true, mySites, myCarriers);
+    siteHost.innerHTML = _dbrBuildTable(data.domicile || [], 'domicile', 'DOMICILE', false, mySites, myCarriers, _fasMap);
+    scacHost.innerHTML = _dbrBuildTable(data.scac || [], 'scac', 'SCAC', true, mySites, myCarriers, _fasMap);
     _dbrWireTable(siteHost);
     _dbrWireTable(scacHost);
   }
@@ -1077,10 +1091,41 @@ async function _dbrRenderTables() {
       const dspMsg = dspData && dspData.error ? _dbrEsc(dspData.error) : 'No data yet — click "Scrape QuickSight (DSP)" above.';
       dspHost.innerHTML = `<div class="dc-empty">${dspMsg}</div>`;
     } else {
-      dspHost.innerHTML = _dbrBuildTable(dspData.scac || [], 'scac', 'SCAC', false, mySites, myCarriers);
+      dspHost.innerHTML = _dbrBuildTable(dspData.scac || [], 'scac', 'SCAC', false, mySites, myCarriers, _fasMap);
       _dbrWireTable(dspHost);
     }
   }
+}
+
+// Build a "SCAC|SITE" -> fasName map for all DBR rows via one batched roster
+// lookup. Returns an empty Map (so FAS falls back to the "Z" marker) if the
+// roster bridge is unavailable or hasn't been fetched.
+async function _dbrBuildFasMap(afp, dsp) {
+  const key = (scac, site) => (String(scac || '').trim().toUpperCase()) + '|' + (String(site || '').trim().toUpperCase());
+  const pairs = [];
+  const seen = new Set();
+  const add = (scac, site) => {
+    const k = key(scac, site);
+    if (seen.has(k)) return; seen.add(k);
+    pairs.push({ scac: scac || '', site: site || '', __k: k });
+  };
+  if (afp && afp.ok) {
+    (afp.domicile || []).forEach((r) => add('', r.domicile));
+    (afp.scac || []).forEach((r) => add(r.scac, r.domicile));
+  }
+  if (dsp && dsp.ok) (dsp.scac || []).forEach((r) => add(r.scac, ''));
+
+  const map = new Map();
+  if (!pairs.length) return map;
+  try {
+    const { fasRoster } = await import('../bridge.js');
+    if (!fasRoster || !fasRoster.resolve) return map;
+    const res = await fasRoster.resolve(pairs.map((p) => ({ scac: p.scac, site: p.site })));
+    if (Array.isArray(res)) {
+      res.forEach((r, i) => { if (r && r.fas) map.set(pairs[i].__k, r.fas); });
+    }
+  } catch (_) { /* roster bridge unavailable — fall back to "Z" marker */ }
+  return map;
 }
 
 async function _openDbrPanel() {

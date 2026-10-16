@@ -56,8 +56,16 @@ function buildFleetContext(messageText, opts = {}) {
   // AI answers instead of punting (these questions failed before this note).
   const _scacs = [...new Set(rows.map(r => (r.operator || '').toUpperCase().trim()).filter(Boolean))];
   if (_scacs.length) {
-    context += 'SCAC = operator. Known SCACs/operators in the fleet: ' + _scacs.join(', ') + '.\n';
+    context += 'SCAC = operator. Known SCACs/operators in the fleet (' + _scacs.length + '): ' + _scacs.join(', ') + '.\n';
   }
+  // Authoritative domicile count + list, computed LIVE from the fleet data so
+  // "how many domiciles/operators do I have" answers from the real scrape (not
+  // an inference from the few units shown, and not a stale configured list).
+  const _domiciles = [...new Set(rows.map(r => (r.domicileSite || r.domicile || r.site || '').toUpperCase().trim()).filter(Boolean))].sort();
+  if (_domiciles.length) {
+    context += 'Domiciles/sites in the fleet (' + _domiciles.length + '): ' + _domiciles.join(', ') + '.\n';
+  }
+  context += 'COUNTS (authoritative, from live fleet data): ' + _domiciles.length + ' domiciles, ' + _scacs.length + ' operators/SCACs, ' + rows.length + ' total units. When asked how many domiciles or operators, use THESE numbers.\n';
 
   // ── Resolve what the message is ABOUT ───────────────────────────────────
   // One intelligent resolver understands units, domicile SITES, and OPERATORS

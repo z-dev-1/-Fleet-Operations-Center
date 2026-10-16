@@ -30,6 +30,7 @@ const store  = require('../store');
 const logger = require('../utils/logger')('ipc:long-dwell-csv');
 const { handle, requireObject, requireStringMax } = require('./_safe');
 const { ConfigError } = require('../utils/errors');
+const _roster = require('../orcha/fas/roster-lookup'); // FAS/UM auto-fill by (SCAC + Site)
 
 // Column labels that are team-filled in-app (N–R). When fetching/importing the
 // AAP CSV we DROP these columns' values so the team's in-app edits always win.
@@ -109,6 +110,10 @@ function _csvToImportPayload(text) {
 // the unit number. This maps both exports' native column names into the
 // tracker's A–M column names and merges per unit.
 
+// Long Dwell shows only units down at least this many days. Units down fewer
+// than this are excluded from the imported tracker (not "long dwell" yet).
+const MIN_DAYS_DOWN = 5;
+
 // The tracker's A–M (CSV/read-only) columns, in display order.
 const TRACKER_COLUMNS = [
   'FAS', 'UM', 'Asset ID', 'Asset Type', 'Site', 'SCAC',
@@ -185,6 +190,8 @@ function _mergeToImportPayload(wrCsv, assetCsv) {
   }
 
   let _skippedFleetnetTow = 0;
+  let _skippedVelociti = 0;
+  let _skippedShortDwell = 0;
   const rows = [];
   for (const w of wr.rows) {
     const unitRaw = _field(w, ['Equipment ID', 'equipmentId', 'Equipment Id']);
@@ -196,9 +203,16 @@ function _mergeToImportPayload(wrCsv, assetCsv) {
     // L1 Area of Concern == Tow (case-insensitive). Other FleetNet repairs and
     // other tows are kept.
     const vendorVal = _field(w, ['Vendor']).toUpperCase();
+    const suppVal   = _field(w, ['Suppliers']).toUpperCase();
     const l1Val     = _field(w, ['L1 Area of Concern']).toUpperCase();
     if (/FLEET\s*NET/.test(vendorVal) && l1Val === 'TOW') {
       _skippedFleetnetTow++;
+      continue;
+    }
+    // Exclude VELOCITI orders entirely — they don't belong in the long-dwell
+    // tracker. Matches the vendor or supplier being VELOCITI.
+    if (/VELOCITI/.test(vendorVal) || /VELOCITI/.test(suppVal)) {
+      _skippedVelociti++;
       continue;
     }
 
@@ -218,15 +232,26 @@ function _mergeToImportPayload(wrCsv, assetCsv) {
     // the actual/expected start of the open WO; fall back to scheduled/modified.
     const downStart = _field(w, ['Actual start date time', 'Expected start date time', 'Scheduled date time', 'Last modified time']);
 
+    // Long Dwell = extended-down units only. Drop anything down fewer than
+    // MIN_DAYS_DOWN days. If the days can't be computed (no usable date), keep
+    // the row rather than silently dropping it.
+    const daysDown = _daysSince(downStart);
+    if (daysDown !== '' && Number(daysDown) < MIN_DAYS_DOWN) { _skippedShortDwell++; continue; }
+
+    // FAS / UM: auto-filled from the scraped FAS roster by (SCAC + Site).
+    // Blank when the roster has no confident match (or hasn't been fetched).
+    const fasName = _roster.fasFor(scac, site);
+    const umName  = _roster.umFor(scac, site);
+
     const mapped = {
-      'FAS': '',                                                             // not in either export — team fills
-      'UM': '',                                                              // not in either export — team fills
+      'FAS': fasName,                                                        // roster lookup (SCAC + Site); '' if no match
+      'UM': umName,                                                          // roster Uptime Manager (SCAC + Site); '' if no match
       'Asset ID': unitRaw,                                                   // human unit number (join key)
       'Asset Type': _field(w, ['Asset Type']) || _field(a, ['Asset type', 'Asset Type']),
       'Site': site,
       'SCAC': scac,
       'Lifecycle State Reason': _field(w, ['Lifecycle State Reason']) || _field(a, ['Lifecycle state reason']),
-      'Days Down': _daysSince(downStart),
+      'Days Down': daysDown,
       'RG Vendor Assigned': _field(w, ['Vendor', 'Suppliers']),
       'Vendor Delay Reason': _field(w, ['Delay reason codes']),
       'Expected ETC': expectedEtc,
@@ -243,7 +268,8 @@ function _mergeToImportPayload(wrCsv, assetCsv) {
     const matched = rows.filter((r) => assetByUnit.has(_unitKey(r.assetId))).length;
     logger.info('[merge] WR rows=' + wr.rows.length + ' asset rows=' + asset.rows.length
       + ' tracker rows=' + rows.length + ' joined-to-asset=' + matched
-      + ' skipped-fleetnet-tow=' + _skippedFleetnetTow);
+      + ' skipped-fleetnet-tow=' + _skippedFleetnetTow + ' skipped-velociti=' + _skippedVelociti
+      + ' skipped-under-' + MIN_DAYS_DOWN + 'd=' + _skippedShortDwell);
   } catch (_) {}
 
   return { columns: TRACKER_COLUMNS.slice(), rows };

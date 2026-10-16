@@ -183,6 +183,7 @@ expose('fasRoster', {
   fetch:          () => ipcRenderer.invoke('fas-roster:fetch'),
   clear:          () => ipcRenderer.invoke('fas-roster:clear'),
   importContacts: () => ipcRenderer.invoke('fas-roster:import-contacts'),
+  resolve:        (pairs) => ipcRenderer.invoke('fas-roster:resolve', pairs),
 });
 
 // ── AI / Orcha ────────────────────────────────────────────────────────────────
