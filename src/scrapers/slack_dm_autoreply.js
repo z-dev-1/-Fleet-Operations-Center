@@ -343,6 +343,87 @@ function _findFleetRow(unitToken) {
   return rows.find(r => (r.equipmentId || '').toUpperCase() === q) || null;
 }
 
+// Does this unit's CACHED data suggest it's ready/complete/picked-up? If so we
+// must re-verify with a live scrape before telling anyone, because that signal
+// can be stale (vendor said done days ago; unit still sitting / not delivered).
+function _looksReadyOrComplete(row) {
+  if (!row) return false;
+  const blob = [
+    row.canonicalStatus, row.serviceState, row.relayStatus, row.lifecycleReason,
+    row.completed ? 'completed' : '', row.repairStatus,
+    String(row.repairTimeline || '').slice(-400),
+  ].join(' ').toLowerCase();
+  return /ready[ _-]?for[ _-]?pickup|ready to pick|awaiting pickup|picked up|\bcomplete|completed|repair done|work complete|\bclosed\b|resolved|back in service|available/.test(blob);
+}
+
+// VERIFY-BEFORE-CLAIMING: if a unit's cached repair data is stale OR already
+// reads ready/complete, re-scrape THAT unit live (force) so the assistant
+// answers from fresh, verified data — never announcing a unit done off stale
+// cache. Reuses the exact scrape+merge+canonical-reconcile the relay:refresh-unit
+// IPC does, run in-process (the DM engine is in the main process). Best-effort:
+// any failure degrades to the existing cached row (never blocks the reply).
+const _VERIFY_FRESH_MS = 30 * 60 * 1000; // re-verify if cache older than 30 min
+let _dmVerifyLock = false;
+async function _verifyUnitFresh(unitToken, doLog) {
+  const log = doLog || (() => {});
+  const row = _findFleetRow(unitToken);
+  if (!row) return; // unknown unit — nothing to verify
+
+  const id = row.equipmentId;
+  const cache = store.load('relayCache', {})[id];
+  const ageMs = cache && cache._cachedAt ? (Date.now() - Number(cache._cachedAt)) : Infinity;
+  const stale = ageMs > _VERIFY_FRESH_MS;
+  const readyish = _looksReadyOrComplete(row);
+
+  // Only pay for a live scrape when it matters: the unit reads ready/complete
+  // (must confirm) OR the cache is stale (status may have changed).
+  if (!readyish && !stale) return;
+  if (_dmVerifyLock) { log('[SlackDM] verify skipped — another verify in progress'); return; }
+
+  _dmVerifyLock = true;
+  try {
+    log('[SlackDM] verifying ' + id + ' live (readyish=' + readyish + ' stale=' + stale + ')…');
+    const { scrapeUnitPage, mergeRelayIntoRows } = require('./relay');
+    const relayCache = store.load('relayCache', {});
+    delete relayCache[id]; // force a guaranteed live scrape (no within-TTL reuse)
+    const res = await scrapeUnitPage(id, '', relayCache);
+    if (!res) { log('[SlackDM] verify: scrape returned nothing for ' + id); return; }
+    relayCache[id] = res;
+    store.save('relayCache', relayCache);
+
+    // Re-merge the fresh entry into fleetData so buildFleetContext sees it.
+    const fd = store.load('fleetData', {});
+    const rows = Array.isArray(fd.rows) ? fd.rows : [];
+    const notesStore = store.load('notesStore', {});
+    const merged = mergeRelayIntoRows(rows, { [id]: res }, notesStore);
+    fd.rows = merged;
+    store.save('fleetData', fd);
+
+    // Re-run canonical reconciliation for just this unit so canonicalStatus
+    // reflects the fresh serviceState/completed (best-effort).
+    try {
+      const freshRow = merged.find((r) => (r.equipmentId || '').toUpperCase() === String(id).toUpperCase());
+      if (freshRow) {
+        const canonical = require('../orcha/canonical_state');
+        const built = canonical.buildAll([freshRow], {});
+        const rec = built && built.units && built.units[id];
+        if (rec) {
+          // Persist the canonical record and mirror its fields onto the stored
+          // fleet row so buildFleetContext reads the fresh canonicalStatus.
+          store.save('canonicalState', Object.assign(store.load('canonicalState', {}), { [id]: rec }));
+          Object.assign(freshRow, canonical.mirrorFields(rec));
+          store.save('fleetData', fd); // freshRow is a ref into fd.rows
+        }
+      }
+    } catch (e) { log('[SlackDM] verify: canonical reconcile skipped — ' + e.message); }
+    log('[SlackDM] verify complete for ' + id);
+  } catch (e) {
+    log('[SlackDM] verify failed for ' + unitToken + ' — ' + e.message);
+  } finally {
+    _dmVerifyLock = false;
+  }
+}
+
 // ── Create-WR drafting (Bucket 3, Option A: draft + Z-only approval) ────────
 // FEATURE (2026-08-27): grounding / predictive-maintenance alerts routinely ask
 // "please create the work order following the predictive maintenance process".
@@ -605,6 +686,14 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext, coverin
       }
     }
   }
+  // VERIFY-BEFORE-CLAIMING: if the message is about a unit that reads
+  // ready/complete (or whose cache is stale), re-scrape it live FIRST so the
+  // AI answers from fresh, verified data — not stale "unit done" cache.
+  const _verifyUnit = _unitTokenIn(_fleetLookupText) || _inheritedUnitUsed;
+  if (_verifyUnit) {
+    try { await _verifyUnitFresh(_verifyUnit); } catch (_) { /* best-effort */ }
+  }
+
   const fleetContext = buildFleetContext(_fleetLookupText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true });
 
   const _persona = covering ? (COVERING_PREFACE + PERSONA_SYSTEM_PROMPT) : PERSONA_SYSTEM_PROMPT;

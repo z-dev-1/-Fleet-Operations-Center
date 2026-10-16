@@ -9492,8 +9492,23 @@ body {
 .ldc-fetch-btn { border-color: var(--acc, #4ea1ff); color: var(--acc, #4ea1ff); font-weight: 600; }
 .ldc-fetch-btn:hover:not(:disabled) { background: var(--acc, #4ea1ff); color: #0d1117; }
 .ldc-fetch-btn:disabled { opacity: 0.6; cursor: progress; }
-/* Bounded scroll box so the sticky header stays visible while scrolling rows. */
-.ldc-table-scroll { overflow: auto; max-width: 100%; max-height: calc(100vh - 260px); }
+/* Bounded scroll box so the sticky header stays visible while scrolling rows,
+   AND the horizontal scrollbar is always at the bottom of the visible box
+   (not pushed off-screen under a tall table). overflow:auto on a height-capped
+   box keeps both scrollbars reachable. */
+.ldc-table-scroll {
+  overflow: auto;
+  max-width: 100%;
+  max-height: calc(100vh - 240px);
+  scrollbar-gutter: stable;
+}
+/* Make the scrollbars visibly chunky so the bottom one is easy to grab. */
+.ldc-table-scroll::-webkit-scrollbar { height: 14px; width: 12px; }
+.ldc-table-scroll::-webkit-scrollbar-thumb {
+  background: var(--line, #2a3344); border-radius: 7px; border: 3px solid transparent; background-clip: content-box;
+}
+.ldc-table-scroll::-webkit-scrollbar-thumb:hover { background: var(--acc, #4ea1ff); background-clip: content-box; }
+.ldc-table-scroll::-webkit-scrollbar-track { background: var(--bg1, #0d1117); }
 .ldc-table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; font-size: 11px; }
 .ldc-table th, .ldc-table td { vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--line, #2a3344); white-space: nowrap; }
 /* Two sticky header rows: titles pinned to the top, filter row pinned just
