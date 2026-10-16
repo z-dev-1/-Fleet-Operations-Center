@@ -372,7 +372,7 @@ function _buildKnowledgeContext(messageText) {
   const needsKnowledge = /\b(approve|approval|estimate|threshold|escalat|who\s+(owns|approves|handles|does|flips|schedules|decides)|eol|end of life|flip|lifecycle|reactivat|vre|vendor\s+(reassign|performance|assign)|pm\b|inspection|dot|sim\b|record360|reach|arc\b|accident|invoice|billing|dispute|credit|paragon|mcs|l3|l4h|hve|variance|rejection|sla|out of scope|my (job|role|lane)|can i|should i|am i allowed|who is responsible|process|procedure|policy|which vendor|what vendor|who should (fix|repair|do)|dealer|amerit|cummins|cei\b|fleetnet|goodyear|tow|towing|cng|warranty|decisiv|asist|uptime center|mobile vendor|routing|scope|relay garage|\brg\b|\bnra\b|\bpv\b|\bpa\b|\betc\b|\bwr\b|\bwo\b|\bscac\b|\bdvir\b|\bpmr\b|\bpmb?\b|\bdsp\b|\bafp\b|\btom\b|\bdss\b|\bmmeo\b|\bmmpm\b|\broc\b|\bitr\b|\bera\b|\bdea\b|\bdood\b|\bfnol\b|\bddex\b|\bvrid\b|\bbol\b|\bcpm\b|\bcel\b|\beas\b|\bfsov\b|\bmttr\b|\bp95\b|\bym s?\b|\br4c\b|\bpct\b|itrace|gas tank|peak|ready to rent|reconditioning|to be returned|damage (moderate|severe)|active\/healthy|a\/h|offsite shop|what (is|does|mean)|define|glossary|acronym)\b/i.test(text);
   if (!needsKnowledge) return '';
   let kb;
-  try { kb = require('./fas-knowledge').FAS_KNOWLEDGE; } catch (_) { return ''; }
+  try { kb = require('./fas-knowledge').retrieveKnowledge(messageText, { maxSections: 3 }); } catch (_) { return ''; }
   if (!kb) return '';
   return '\n' + kb + '\n(Answer ownership/approval/escalation/process questions STRICTLY from the FAS Knowledge Base above — it is authoritative. Attribute actions to the correct owner; never say FAS approves estimates. If the KB does not cover it, say so rather than guessing.)\n';
 }

@@ -205,4 +205,53 @@ Repair / unit / metric terms:
   • BOL = Bill of Lading (note defects on the BOL during intake if a unit arrives with an open defect).
 `;
 
-module.exports = { FAS_KNOWLEDGE };
+// Split the KB into labeled sections on the "── TITLE ──" headers so callers
+// can inject ONLY the relevant slice (the full KB is ~6KB and would crowd out
+// other prompt sections under a context budget).
+function _sections() {
+  const body = FAS_KNOWLEDGE;
+  // The ROLE line (before the first ── header) is always-include context.
+  const firstHeader = body.indexOf('\n── ');
+  const head = firstHeader > -1 ? body.slice(0, firstHeader).trim() : body.trim();
+  const rest = firstHeader > -1 ? body.slice(firstHeader) : '';
+  const parts = rest.split(/\n(?=── )/).map((s) => s.trim()).filter(Boolean);
+  return { head, parts };
+}
+
+// Topic → keywords that should pull in a given section. Case-insensitive.
+const _SECTION_TOPICS = [
+  { match: /approv|estimate|threshold|\$\d|dollar|l3\b|l4h|hve|variance|rejection|who approves/i, header: 'ESTIMATE APPROVAL' },
+  { match: /can (i|fas)|does fas|do i|fas (can|do|role|job|lane)|allowed|responsib|what (do|does) (i|fas)/i, header: 'WHAT FAS CAN' },
+  { match: /don'?t do|not do|never|can'?t|cannot|not my|out of scope|owner|owns|attribute/i, header: 'WHAT FAS DOES NOT DO' },
+  { match: /flip|active|healthy|a\/h|reactivat|back in service|to be returned|reconditioning|ready to rent|blocker|blocked/i, header: 'WHO FLIPS' },
+  { match: /owner|owns|who (owns|handles|does|schedules|decides)|vre|verification|invoice|billing|pm scheduling|accident|eol|ownership map/i, header: 'OWNERSHIP MAP' },
+  { match: /sev|escalat|severity|bump|leadership|asana|vp\b|uptime manager|\bum\b|non-?responsive|instant/i, header: 'ESCALATION SEVERITY' },
+  { match: /vendor|dealer|amerit|cummins|cei\b|fleetnet|goodyear|tow|cng|warranty|decisiv|asist|routing|mobile|scope|2-hour|two hour|which vendor/i, header: 'VENDORS' },
+  { match: /what (is|does|mean)|define|glossary|acronym|\brg\b|\bnra\b|\bpv\b|\bpa\b|\bdvir\b|\bpmr\b|\bscac\b|\bmttr\b|\bwr\b|\bwo\b|\betc\b|reach|record360|paragon|quip|\bsim\b|\baap\b|\btom\b|\bdss\b|\barc\b|\broc\b|\bmcs\b|\bafp\b|\bdsp\b/i, header: 'GLOSSARY' },
+];
+
+/**
+ * retrieveKnowledge(messageText, opts) — return ONLY the KB sections relevant
+ * to the message (plus the always-include ROLE line), so the prompt stays
+ * small. Falls back to the full KB when nothing specific matches but the text
+ * clearly needs knowledge. Returns '' when the message isn't knowledge-related.
+ * opts.maxSections (default 3) caps how many sections are included.
+ */
+function retrieveKnowledge(messageText, opts = {}) {
+  const text = String(messageText || '');
+  if (!text.trim()) return '';
+  const { head, parts } = _sections();
+  const maxSections = opts.maxSections || 3;
+
+  const wanted = [];
+  for (const topic of _SECTION_TOPICS) {
+    if (!topic.match.test(text)) continue;
+    const sec = parts.find((p) => p.startsWith('── ') && p.toUpperCase().includes(topic.header.toUpperCase()));
+    if (sec && !wanted.includes(sec)) wanted.push(sec);
+    if (wanted.length >= maxSections) break;
+  }
+  if (!wanted.length) return '';
+  return '=== FAS KNOWLEDGE BASE (authoritative) ===\n' + head + '\n\n' + wanted.join('\n\n') + '\n';
+}
+
+module.exports = { FAS_KNOWLEDGE, retrieveKnowledge };

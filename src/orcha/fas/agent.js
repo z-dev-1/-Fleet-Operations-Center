@@ -60,6 +60,7 @@ const SAFETY_RULES =
 const DECISION_CONTRACT =
   '\n\nYou are running inside a bounded research loop. On each step you may EITHER ask for more\n' +
   'evidence OR give a final answer. You have a limited number of research steps — spend them well.\n' +
+  '- KNOWLEDGE-BASE FIRST: if the question is about ownership, approval thresholds, escalation/SEV, a process, vendor routing, or what a term/acronym means, and the FAS KNOWLEDGE BASE section answers it, give decision:"answer" DIRECTLY from the KB on this step. Do NOT ASK_INTERNAL, do NOT escalate, and do NOT say you will "check with" anyone — you already have the authoritative answer (you ARE the FAS). Example: "who approves a $30K estimate?" → answer "$30K+ powered estimates are approved by L4H Leadership (HVE & EOL eval); FAS never approves, only escalates." from the KB.\n' +
   '- To research more, set "decision":"research_more" and put the READ tools you want in "research":\n' +
   '  [{"tool":"NAME","args":{"unit":"320160"}}]. Only these READ tools exist: ' + RESEARCH_TOOLS.join(', ') + '.\n' +
   '  Request a tool ONLY if the specific fact you need is not already in VERIFIED FACTS. Do not repeat a tool+args you already ran.\n' +
@@ -220,6 +221,21 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
     } catch (_) {}
   }
 
+  // FAS KNOWLEDGE BASE — authoritative ownership / approval / escalation /
+  // vendor-routing / glossary rules. INTERNAL senders only. This is what lets
+  // the agent ANSWER "who approves a $30K estimate?" directly instead of
+  // reaching for ASK_INTERNAL / AITeammate (which it must not do when the KB
+  // already has the answer).
+  let knowledgeText = '';
+  try {
+    const auth = profiles.authorizationSummary(profile);
+    if (auth && auth.isInternal) {
+      // Only the RELEVANT KB sections (keeps the prompt within budget so it
+      // doesn't crowd out research/facts sections).
+      knowledgeText = require('../fas-knowledge').retrieveKnowledge(text, { maxSections: 3 }) || '';
+    }
+  } catch (_) { /* KB optional; never block a reply */ }
+
   // Coverage context (Zila's owned operators/SCAC + domiciles). INTERNAL senders
   // only — never expose the full carrier roster to a carrier/vendor/unknown
   // sender. Compact + trusted (derived from our own synced fleet data). Marked
@@ -261,6 +277,7 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
     { key: 'attachments', label: 'SHARED FILES & LINKS', text: (input.attachments && String(input.attachments).trim())
         ? guard.wrapUntrusted('SHARED FILES & LINKS', String(input.attachments).trim())
         : '(no shared files or links)' },
+    { key: 'knowledge', label: 'FAS KNOWLEDGE BASE (authoritative — answer ownership/approval/escalation/process/glossary questions DIRECTLY from this; do NOT ASK_INTERNAL/escalate what it already covers)', text: knowledgeText },
     { key: 'playbook', label: 'FAS PLAYBOOK (apply these rules)', text: playbookText },
     { key: 'caseSummary', label: 'RELATED CASE MEMORY', text: caseText },
     { key: 'verifiedFacts', label: 'VERIFIED FACTS (source + freshness shown)', text: guard.wrapUntrusted('VERIFIED FACTS', factsText) },
