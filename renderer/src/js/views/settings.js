@@ -782,8 +782,10 @@ function _html() {
                 <button class="sd-btn secondary" id="refresh-orcha-agents" style="font-size:10px;padding:2px 8px">Refresh list</button>
               </div>
               <select class="sd-select" id="orcha-agent" style="font-size:11px">
-                <!-- Fallback defaults, shown until live discovery replaces them. -->
+                <!-- Fallback defaults, shown until live discovery replaces them
+                     with the real per-agent model read from ~/.orcha/agents. -->
                 <option value="orcha_default">Orcha — Claude Opus 4.6</option>
+                <option value="migration">Migration — Claude Opus 4.6</option>
                 <option value="moon">Moon — Claude Sonnet 4.6</option>
                 <option value="mirror">Mirror — Claude Sonnet 4.6</option>
                 <option value="otter">Otter — Claude Sonnet 4.6</option>
@@ -919,20 +921,11 @@ function _wireAIConfig() {
     if (toEl)  toEl.value  = Math.round((cfg.claudeTimeoutMs || 60000) / 1000);
   }
 
-  // Nice display name for an agent id when the CLI gives us only the id, or to
-  // annotate the known server-side model next to the discovered name.
-  const _AGENT_MODEL_NOTE = {
-    orcha_default: 'Claude Opus 4.6',
-    moon: 'Claude Sonnet 4.6',
-    mirror: 'Claude Sonnet 4.6',
-    otter: 'Claude Sonnet 4.6',
-    tides_workflow_runner: 'Claude Sonnet 4.6',
-  };
-
-  // Replace the Orcha-agent dropdown's options with the LIVE discovered list.
-  // Keeps `selected` chosen even if it isn't in the discovered set (so a saved
-  // agent id is never silently lost), and falls back to the hardcoded options
-  // already in the DOM if discovery is unavailable.
+  // Replace the Orcha-agent dropdown's options with the LIVE discovered list,
+  // including the REAL model each agent maps to (read from the agent's config
+  // file, not a hardcoded guess). Keeps `selected` chosen even if it isn't in
+  // the discovered set (so a saved agent id is never silently lost), and falls
+  // back to the hardcoded options already in the DOM if discovery is unavailable.
   async function _populateOrchaAgents(selected, opts) {
     const agentEl = document.getElementById('orcha-agent');
     const hintEl = document.getElementById('orcha-agent-hint');
@@ -949,18 +942,20 @@ function _wireAIConfig() {
     const agents = res.agents.slice();
     // Ensure the currently-selected agent is present even if discovery omitted it.
     if (want && !agents.some(a => a.id === want)) agents.unshift({ id: want, name: want });
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     agentEl.innerHTML = agents.map(a => {
-      const note = _AGENT_MODEL_NOTE[a.id];
-      const label = a.name + (note ? ' — ' + note : '');
+      // Prefer the live-discovered model label; fall back to nothing if unknown.
+      const label = a.name + (a.modelLabel ? ' — ' + a.modelLabel : '');
       const sel = a.id === want ? ' selected' : '';
-      // Basic escaping for safety.
-      const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
       return '<option value="' + esc(a.id) + '"' + sel + '>' + esc(label) + '</option>';
     }).join('');
     agentEl.value = want;
     if (hintEl) {
-      hintEl.textContent = 'The Orcha agent that answers AI requests (FAS, Fleet Chat, auto-reply). ' +
-        agents.length + ' agent(s) discovered live from your Orcha toolbox' + (res.cached ? ' (cached)' : '') + '.';
+      const picked = agents.find(a => a.id === want);
+      const pickedModel = picked && picked.modelLabel ? (' Current: ' + picked.modelLabel + '.') : '';
+      hintEl.textContent = 'The Orcha agent that answers AI requests (FAS, Fleet Chat, auto-reply); the model shown is ' +
+        'what each agent maps to server-side. ' + agents.length + ' agent(s) discovered live' +
+        (res.cached ? ' (cached)' : '') + '.' + pickedModel;
     }
   }
 

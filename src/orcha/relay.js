@@ -772,6 +772,8 @@ function testClaude() {
 const ORCHA_CLI = process.platform === 'win32'
   ? path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'orcha.cmd')
   : path.join(os.homedir(), '.toolbox', 'bin', 'orcha');
+// Per-agent config files (authoritative model/region per agent) live here.
+const ORCHA_AGENTS_DIR = path.join(os.homedir(), '.orcha', 'agents');
 let _agentCache = null;
 let _agentCacheAt = 0;
 const AGENT_CACHE_MS = 5 * 60 * 1000;
@@ -792,11 +794,36 @@ function _parseAgentLines(text) {
   return out;
 }
 
+// Turn a raw Orcha model id into a friendly label. e.g.
+// "claude-opus-4-6" -> "Claude Opus 4.6", "claude-sonnet-4-6" -> "Claude Sonnet 4.6".
+function _prettyModel(model) {
+  const m = String(model || '').trim();
+  if (!m) return '';
+  const cl = m.match(/^claude-(opus|sonnet|haiku)-(\d+)-(\d+)/i);
+  if (cl) return 'Claude ' + cl[1][0].toUpperCase() + cl[1].slice(1) + ' ' + cl[2] + '.' + cl[3];
+  const nova = m.match(/nova-(pro|lite|micro)/i);
+  if (nova) return 'Nova ' + nova[1][0].toUpperCase() + nova[1].slice(1);
+  return m; // unknown shape — show the raw id
+}
+
+// Read the authoritative model/region for one agent from its config file.
+// Returns { model, modelLabel, region } or {} if unreadable.
+function _agentModelInfo(id) {
+  try {
+    const p = path.join(ORCHA_AGENTS_DIR, id + '.json');
+    if (!fs.existsSync(p)) return {};
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const model = (j && typeof j.model === 'string') ? j.model : '';
+    return { model, modelLabel: _prettyModel(model), region: (j && j.region) || '' };
+  } catch (_) { return {}; }
+}
+
 /**
- * listAgents(opts) -> Promise<{ ok, agents: [{id,name}], cached?, error? }>
- * Runs `orcha --list-agents` and returns the discovered agents. Never throws;
- * on any failure returns ok:false with an empty list so the caller can fall
- * back to its built-in defaults.
+ * listAgents(opts) -> Promise<{ ok, agents: [{id,name,model,modelLabel,region}], cached?, error? }>
+ * Discovers agents via `orcha --list-agents`, then enriches each with the REAL
+ * model it maps to by reading ~/.orcha/agents/<id>.json (the authoritative
+ * per-agent config). Never throws; on failure returns ok:false + empty list so
+ * the caller can fall back to its built-in defaults.
  */
 function listAgents(opts = {}) {
   const now = Date.now();
@@ -815,9 +842,17 @@ function listAgents(opts = {}) {
           logger.warn('[relay] listAgents: no agents parsed (' + (err ? err.message : (stderr || 'empty output')) + ')');
           return resolve({ ok: false, agents: [], error: (err && err.message) || 'no agents found' });
         }
+        // Enrich with the REAL model each agent maps to (from its config file).
+        agents.forEach(a => {
+          const info = _agentModelInfo(a.id);
+          a.model = info.model || '';
+          a.modelLabel = info.modelLabel || '';
+          a.region = info.region || '';
+        });
         _agentCache = agents;
         _agentCacheAt = Date.now();
-        logger.info('[relay] listAgents: discovered ' + agents.length + ' agent(s): ' + agents.map(a => a.id).join(', '));
+        logger.info('[relay] listAgents: discovered ' + agents.length + ' agent(s): ' +
+          agents.map(a => a.id + (a.model ? '=' + a.model : '')).join(', '));
         resolve({ ok: true, agents });
       });
   });
