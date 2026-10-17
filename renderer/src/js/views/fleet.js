@@ -123,14 +123,15 @@ function _riskBadge(score) {
   return '<span class="badge badge--' + cls + '">' + n + '</span>';
 }
 
-// PM pill — only shown if due ≤60 days OR overdue. Returns '' if >60 days out.
+// PM pill — shows the due date for EVERY PM type that has one (matching the
+// unit-detail panel). Color-coded by urgency: overdue (red), ≤30d (yellow),
+// ≤60d (green), and far-out (>60d) muted so it's visible but low-emphasis.
 // val is: 'overdue' | 'Jul 8' | 'Aug 3' | '--'
 function _pmPill(label, val) {
-  if (!val || val === '--') return '';   // hide blanks entirely
+  if (!val || val === '--') return '';   // hide blanks only
 
   const v = val.toLowerCase();
-  let cls;
-  let daysOut = null;
+  let cls = 'pm-pill--ok';
 
   if (v === 'overdue') {
     cls = 'pm-pill--overdue';
@@ -142,13 +143,11 @@ function _pmPill(label, val) {
     let d = new Date(val + ' ' + today.getFullYear());
     if (!isNaN(d.getTime())) {
       if (d < today) d = new Date(val + ' ' + (today.getFullYear() + 1));
-      daysOut = Math.round((d - today) / 86400000);
-      if (daysOut > 60) return '';        // >60 days — hide pill
+      const daysOut = Math.round((d - today) / 86400000);
       cls = daysOut <= 0  ? 'pm-pill--overdue'
           : daysOut <= 30 ? 'pm-pill--soon'
-          :                 'pm-pill--ok';
-    } else {
-      cls = 'pm-pill--ok';
+          : daysOut <= 60 ? 'pm-pill--ok'
+          :                 'pm-pill--far';   // >60d: visible but muted (was hidden)
     }
   }
 

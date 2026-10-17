@@ -1038,6 +1038,32 @@ function initWindows(ctx) {
           rows = mergeRelayIntoRows(rows, {}, ns);
         } catch (e) { logger.warn('[data-source] notes merge skipped: ' + e.message); }
 
+        // CARRY-FORWARD per-unit enrichment that the bulk rebuild CANNOT
+        // reproduce (PM due dates + location from getAsset, offsite URL from WO
+        // comments, fetched lazily by hydration / PM-fill / refreshUnit). Without
+        // this, every recurring 5-min rebuild wiped PM/geo/offsite back to blank
+        // (observed: PM pills 201 -> 0 after the refresh). Overlay the previous
+        // fleetData's values for these fields by equipmentId; the fresh rebuild
+        // wins for everything else (lifecycle, WO, vendor, etc.).
+        try {
+          const prev = store.load('fleetData', null);
+          if (prev && Array.isArray(prev.rows) && prev.rows.length) {
+            const CARRY = ['pmBDue','pmXDue','dotDue','quarterlyLiftDue','pmB','pmX','dot','quarterlyLift',
+              'geofence','offsiteShopEventUrl','savedOffsiteUrl','offsiteShopEvent','asistSrUrl','asistLabel','asistSource','asistNotes','offsiteStage','dealerName'];
+            const prevById = new Map(prev.rows.map((r) => [r.equipmentId, r]));
+            for (const row of rows) {
+              const p = prevById.get(row.equipmentId);
+              if (!p) continue;
+              for (const k of CARRY) {
+                // carry prior value only when the fresh rebuild left it blank/'--'
+                if ((row[k] == null || row[k] === '' || row[k] === '--') && p[k] != null && p[k] !== '' && p[k] !== '--') {
+                  row[k] = p[k];
+                }
+              }
+            }
+          }
+        } catch (e) { logger.warn('[data-source] carry-forward merge skipped: ' + e.message); }
+
         const now = new Date().toISOString();
         const payload = {
           rows, count: rows.length, unavailableCount: ds.unavailableCount,

@@ -3230,6 +3230,12 @@ td .pm-pill {
   background: rgba(126,231,135,.08);
   border-color: rgba(126,231,135,.2);
 }
+/* Far out (>60 days) — muted grey, visible but low-emphasis */
+.pm-pill--far {
+  color: #8b949e;
+  background: rgba(139,148,158,.08);
+  border-color: rgba(139,148,158,.18);
+}
 
 /* ── WO Badge ───────────────────────────────────────────────────── */
 .wo-badge {
