@@ -525,10 +525,27 @@ async function listOpenDMs(limit, myUserId) {
   // Parallel name resolution — resolve all conversations.info calls at once
   // instead of sequentially. With 40 DMs, sequential calls at 8s timeout each
   // could take 40×8s=320s; parallel reduces that to max(one call) ≈ 8s.
-  const names = await Promise.all(
-    all.map(c => _resolveDmSenderName(c.id, myUserId).catch(() => null))
+  // Resolve each DM's display name AND detect the SELF-DM (the 1:1 IM with
+  // yourself — conversations.info.channel.user === my own user id). The caller
+  // treats the self-DM specially (lets you feed yourself links/attachments for
+  // the agent to research), so we surface an isSelf flag here.
+  const self = myUserId || await _getMyUserId();
+  const resolved = await Promise.all(
+    all.map(async (c) => {
+      let name = null, isSelf = false;
+      try {
+        if (!c.isGroup) {
+          const info = await slackWebApi('conversations.info', { channel: c.id });
+          const peer = info && info.ok && info.channel ? info.channel.user : null;
+          if (peer && self && peer === self) isSelf = true;
+        }
+      } catch (_) {}
+      try { name = await _resolveDmSenderName(c.id, myUserId); } catch (_) { name = null; }
+      if (isSelf && (!name || name === c.id)) name = 'You (self)';
+      return { name, isSelf };
+    })
   );
-  return all.map((c, i) => ({ channelId: c.id, name: names[i] || c.id, isGroup: c.isGroup, unread: c.unread }));
+  return all.map((c, i) => ({ channelId: c.id, name: resolved[i].name || c.id, isGroup: c.isGroup, unread: c.unread, isSelf: resolved[i].isSelf }));
 }
 
 async function readDMs(limit) {
@@ -809,4 +826,10 @@ async function uploadFileToChannel(channelId, opts) {
   return { ok: true, fileId: step1.file_id };
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, downloadFileContent, downloadFileBuffer, uploadFileToChannel };
+// Invisible sentinel the app prefixes onto any reply it posts into the SELF-DM,
+// so the next poll can recognize + skip its OWN replies there (otherwise a
+// self-DM reply — authored by your own user id — would be re-processed forever).
+// Zero-width characters: invisible in the Slack client, stable across fetches.
+const SELF_REPLY_MARKER = '\u200B\u2060'; // ZWSP + WORD JOINER
+
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, downloadFileContent, downloadFileBuffer, uploadFileToChannel, SELF_REPLY_MARKER };

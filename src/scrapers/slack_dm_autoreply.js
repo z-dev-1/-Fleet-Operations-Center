@@ -843,7 +843,19 @@ async function pollDMAutoReplyOnce(log) {
   const config = getDMAutoReplyConfig();
   if (!config.enabled) { doLog('[SlackDM] Disabled — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
 
-  const { listOpenDMs, readMessages, readThreadReplies, sendToChannel, checkLiveAuth, resolveUserName, downloadFileContent } = require('./slack_send');
+  const { listOpenDMs, readMessages, readThreadReplies, sendToChannel: _rawSendToChannel, checkLiveAuth, resolveUserName, downloadFileContent, SELF_REPLY_MARKER } = require('./slack_send');
+  const _SELF_REPLY_MARKER = SELF_REPLY_MARKER || '\u200B\u2060';
+  // Set of channel ids that are the SELF-DM (your own "just me" DM). Any reply
+  // posted into one gets the invisible marker prefixed so the next poll skips
+  // it (otherwise the reply, authored by your own user id, would be reprocessed
+  // forever). We wrap sendToChannel ONCE here so every call site is covered
+  // without threading the marker through each one.
+  const _selfDmIds = new Set();
+  const sendToChannel = (channelId, text, threadTs) => {
+    const t = (channelId && _selfDmIds.has(channelId) && typeof text === 'string' && text.indexOf(_SELF_REPLY_MARKER) === -1)
+      ? _SELF_REPLY_MARKER + text : text;
+    return _rawSendToChannel(channelId, t, threadTs);
+  };
 
   const auth = await checkLiveAuth();
   if (!auth || !auth.authenticated) { doLog('[SlackDM] Slack not authenticated — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
@@ -889,6 +901,10 @@ async function pollDMAutoReplyOnce(log) {
       });
     })
   );
+
+  // Register self-DM channel ids so the wrapped sendToChannel marks replies
+  // posted there (loop prevention for the self-DM link/attachment feature).
+  dms.forEach(d => { if (d && d.isSelf && d.channelId) _selfDmIds.add(d.channelId); });
 
   // ── PHASE 2: sequential process ──────────────────────────────────────────
   for (let _di = 0; _di < dms.length; _di++) {
@@ -937,7 +953,13 @@ async function pollDMAutoReplyOnce(log) {
         // message BEFORE it so the newest one flows into newMsgs and gets a
         // reply. Group DMs keep the safe backlog-baseline behavior.
         const _newest = messages[0];
-        const _newestFromOther = _newest && _newest.userId && _newest.userId !== myUserId;
+        // self-DM: "from other" doesn't apply (it's you), so qualify on the
+        // newest being YOUR link/attachment message instead.
+        const _newestFromOther = _newest && _newest.userId && (dm.isSelf
+          ? (_newest.userId === myUserId &&
+             ((Array.isArray(_newest.files) && _newest.files.length) || /https?:\/\//i.test(_newest.text || '')) &&
+             (typeof _newest.text !== 'string' || _newest.text.indexOf(_SELF_REPLY_MARKER) === -1))
+          : _newest.userId !== myUserId);
         const _newestAgeMs = _newest ? (Date.now() - parseFloat(_newest.ts) * 1000) : Infinity;
         const _replyToFirst = !dm.isGroup && _newestFromOther && _newestAgeMs < 10 * 60 * 1000;
         if (_replyToFirst) {
@@ -955,9 +977,29 @@ async function pollDMAutoReplyOnce(log) {
       }
       const _seenNow = seen;
 
+      // SELF-DM EXCEPTION: in your own "just me" DM, every message is authored
+      // by your user id, so the normal `userId !== myUserId` skip would drop
+      // everything. Instead, in the self-DM we PROCESS your messages — but only
+      // when they carry a link or a file attachment (so casual notes-to-self
+      // don't trigger the agent), and NEVER the app's own replies (which we tag
+      // with an invisible marker so we can recognize + skip them, preventing an
+      // infinite reply-to-self loop). Any other DM keeps the strict skip.
+      const _hasLinkOrFile = (m) =>
+        (m && Array.isArray(m.files) && m.files.length > 0) ||
+        /(<https?:\/\/|\bhttps?:\/\/)/i.test((m && m.text) || '');
+      const _isOwnMarkedReply = (m) =>
+        typeof (m && m.text) === 'string' && m.text.indexOf(_SELF_REPLY_MARKER) !== -1;
+
       const newMsgs = messages
         .filter(m => parseFloat(m.ts) > parseFloat(_seenNow.lastSeenTs))
-        .filter(m => m.userId && m.userId !== myUserId) // skip our own + system/empty-author messages
+        .filter(m => {
+          if (!m || !m.userId) return false;              // system/empty-author
+          if (dm.isSelf) {
+            // self-DM: keep your link/attachment messages, drop our own replies.
+            return !_isOwnMarkedReply(m) && _hasLinkOrFile(m);
+          }
+          return m.userId !== myUserId;                   // all other DMs: skip our own
+        })
         .reverse()
         .slice(0, MAX_MESSAGES_PER_POLL);
 
