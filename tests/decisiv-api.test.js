@@ -13,12 +13,17 @@ const require = createRequire(import.meta.url);
 const api = require('../src/scrapers/decisiv_api');
 
 describe('decisiv_api — host routing (originFor)', () => {
-  it('routes volvo and paccar URLs/vendors to the right origin', () => {
-    expect(api.originFor('https://volvopg.asist.decisiv.net/fleet/estimates/123')).toBe(api.HOSTS.volvo);
-    expect(api.originFor('https://paccarpg.decisiv.net/fleet/estimates/123')).toBe(api.HOSTS.paccar);
+  it('PRESERVES the actual host of a real URL (same-origin fetch requirement)', () => {
+    expect(api.originFor('https://volvopg.asist.decisiv.net/fleet/estimates/123')).toBe('https://volvopg.asist.decisiv.net');
+    // PACCAR confirmed-real host — must stay pssmfleet, not be rewritten.
+    expect(api.originFor('https://pssmfleet.decisiv.net/fleet/estimates/123')).toBe('https://pssmfleet.decisiv.net');
+    // PACCAR stale fallback host — preserved as-is when that's the real URL.
+    expect(api.originFor('https://paccarpg.decisiv.net/fleet/estimates/123')).toBe('https://paccarpg.decisiv.net');
+  });
+  it('falls back to a vendor default only for a bare vendor name', () => {
     expect(api.originFor('volvo')).toBe(api.HOSTS.volvo);
-    expect(api.originFor('paccar')).toBe(api.HOSTS.paccar);
-    expect(api.originFor('')).toBe(api.HOSTS.volvo); // default
+    expect(api.originFor('paccar')).toBe(api.HOSTS.paccar); // pssmfleet (confirmed-real)
+    expect(api.originFor('')).toBe(api.HOSTS.volvo);        // default
   });
 });
 

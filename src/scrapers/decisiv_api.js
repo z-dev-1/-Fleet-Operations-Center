@@ -43,11 +43,20 @@ let partitionForUrl, attachAutoLogin;
 try { ({ partitionForUrl, attachAutoLogin } = require('../orcha/auto-login')); }
 catch (_) { partitionForUrl = () => null; attachAutoLogin = () => {}; }
 
-// Hosts we support. Both run the Decisiv platform with identical API shapes.
+// Hosts we support. Volvo and PACCAR both run the Decisiv platform with
+// identical API shapes. PACCAR has TWO hosts in the app's config:
+//   pssmfleet.decisiv.net  — the CONFIRMED-REAL PACCAR host (see auto-login.js)
+//   paccarpg.decisiv.net   — a stale fallback kept only for old links
+// So we don't hard-pin a single PACCAR origin; originFor() PRESERVES the actual
+// host of whatever Decisiv URL it's given (so a pssmfleet estimate stays on
+// pssmfleet and the in-page fetch is same-origin), and only falls back to a
+// bare-vendor default when given 'paccar'/'volvo' with no URL.
 const HOSTS = {
-  volvo:  'https://volvopg.asist.decisiv.net',
-  paccar: 'https://paccarpg.decisiv.net',
+  volvo:   'https://volvopg.asist.decisiv.net',
+  paccar:  'https://pssmfleet.decisiv.net',   // confirmed-real PACCAR host
 };
+// Any host we recognize as a Decisiv API host (for same-origin validation).
+const KNOWN_HOST_RE = /^(?:volvopg\.asist|pssmfleet|paccarpg)\.decisiv\.net$/i;
 const DEFAULT_HOST = HOSTS.volvo;
 
 const WARM_IDLE_MS  = 3 * 60 * 1000;  // tear the window down after 3 min idle
@@ -70,10 +79,24 @@ function _withLock(fn) {
   return next;
 }
 
-// Map any Decisiv URL (or a bare 'volvo'/'paccar') to its API origin.
+// Map any Decisiv URL (or a bare 'volvo'/'paccar') to its API origin. When given
+// a real URL on a KNOWN Decisiv host we PRESERVE that exact host (so pssmfleet
+// vs paccarpg vs volvopg each stays itself and the fetch is same-origin). Only a
+// bare vendor name ('paccar'/'volvo') falls back to the default host for that
+// vendor.
 function originFor(urlOrVendor) {
   const s = String(urlOrVendor || '');
-  if (/paccarpg\.decisiv\.net/i.test(s) || /^paccar$/i.test(s)) return HOSTS.paccar;
+  // Real URL on a known host -> keep its origin exactly.
+  try {
+    const u = new URL(s);
+    if (KNOWN_HOST_RE.test(u.host)) return u.protocol + '//' + u.host;
+  } catch (_) { /* not a URL — fall through to vendor-name handling */ }
+  if (/pssmfleet\.decisiv\.net|paccarpg\.decisiv\.net/i.test(s)) {
+    // A bare host string (not a full URL).
+    const m = s.match(/(pssmfleet|paccarpg)\.decisiv\.net/i);
+    if (m) return 'https://' + m[0];
+  }
+  if (/^paccar$/i.test(s)) return HOSTS.paccar;
   if (/volvopg\.asist\.decisiv\.net/i.test(s) || /^volvo$/i.test(s)) return HOSTS.volvo;
   return DEFAULT_HOST;
 }

@@ -53,7 +53,13 @@ const MAX_RESPONSE_HOPS = 3; // bounds the SR -> response-case -> response-case 
 // Notes tab to render in an offscreen window — and returns the formatted thread
 // text, or '' to signal the caller to fall back to openAndScrapeEstimate().
 // Opt out with DECISIV_API=0.
-const EST_ID_RE = new RegExp('https?://' + ASIST_DOMAIN + '/fleet/estimates/(\\d+)', 'i');
+// Match a numeric estimate id on ANY Decisiv host — Volvo (volvopg.asist),
+// PACCAR confirmed-real (pssmfleet), and PACCAR stale fallback (paccarpg). This
+// is intentionally broader than ASIST_DOMAIN above (which the SR->Case chase
+// uses and doesn't yet include pssmfleet) so the JSON API is attempted for
+// PACCAR pssmfleet estimates too — the activity_logs endpoint is identical
+// across all Decisiv hosts.
+const EST_ID_RE = /https?:\/\/(?:volvopg\.asist|pssmfleet|paccarpg)\.decisiv\.net\/fleet\/estimates\/(\d+)/i;
 async function _estimateCommentsViaApi(estimateUrl) {
   if (process.env.DECISIV_API === '0') return '';
   const m = String(estimateUrl || '').match(EST_ID_RE);
