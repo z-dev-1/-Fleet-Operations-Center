@@ -1165,6 +1165,25 @@ function initWindows(ctx) {
           const api = require('../scrapers/aap_api');
           const mapper = require('../scrapers/aap_api_mapper');
           const { parsePMDates } = require('../scrapers/relay');
+          // Accumulate computed PM/geo fields by equipmentId. We apply them onto
+          // the LIVE store (not a stale snapshot) at each save, so concurrent
+          // background enrichers (Uptake re-merge, deep-scan) don't clobber each
+          // other — each only overlays its own fields by equipmentId.
+          const pmByUnit = {};   // equipmentId -> { pmBDue, pmB, ..., geofence }
+          const _applyToStore = () => {
+            try {
+              const cur = store.load('fleetData', null);
+              if (!cur || !Array.isArray(cur.rows)) return;
+              for (const row of cur.rows) {
+                const fields = pmByUnit[row.equipmentId];
+                if (fields) Object.assign(row, fields);
+              }
+              cur.syncedAt = new Date().toISOString();
+              store.save('fleetData', cur);
+              if (ctx) ctx.lastData = cur;
+              pushData(cur);
+            } catch (_) {}
+          };
           let done = 0;
           for (const r of todo) {
             try {
@@ -1173,29 +1192,26 @@ function initWindows(ctx) {
               const full = await api.getAsset(aaid);
               if (full) {
                 const pmRaw = mapper.pmDueFields(full);
-                // Only set PM fields that actually resolved — never clobber a
-                // previously-good value with null (a getAsset that lacked the
-                // maintenanceScheduleStatuses field would otherwise blank it).
                 const _hasPm = pmRaw.pmBDue || pmRaw.pmXDue || pmRaw.dotDue || pmRaw.quarterlyLiftDue;
+                const fields = {};
                 if (_hasPm) {
-                  for (const k of Object.keys(pmRaw)) { if (pmRaw[k]) r[k] = pmRaw[k]; }
-                  if (parsePMDates) { const pm = parsePMDates(pmRaw); r.pmB = pm.pmB; r.pmX = pm.pmX; r.dot = pm.dot; r.quarterlyLift = pm.quarterlyLift; }
+                  for (const k of Object.keys(pmRaw)) { if (pmRaw[k]) fields[k] = pmRaw[k]; }
+                  if (parsePMDates) { const pm = parsePMDates(pmRaw); fields.pmB = pm.pmB; fields.pmX = pm.pmX; fields.dot = pm.dot; fields.quarterlyLift = pm.quarterlyLift; }
                 }
-                // Location from the full asset's latestLocation.
                 const ll = (full.latestLocation) || (full.asset && full.asset.latestLocation) || {};
                 const gf = (g) => (Array.isArray(g) && g.length) ? (g[0] && (g[0].name || g[0].geofenceName || g[0])) : '';
                 const geo = gf(ll.geoFences) || ll.geofenceName || ll.yardBuildingID || '';
-                if (geo && !r.geofence) r.geofence = geo;
-                done++;
+                if (geo) fields.geofence = geo;
+                if (Object.keys(fields).length) { pmByUnit[r.equipmentId] = fields; done++; }
               }
             } catch (_) { /* skip */ }
-            // Throttle: pause briefly every few units, and re-push in chunks.
+            // Throttle: overlay onto the live store + push in chunks.
             if (done % 15 === 0 && done > 0) {
-              try { payload.syncedAt = new Date().toISOString(); store.save('fleetData', payload); if (ctx) ctx.lastData = payload; pushData(payload); } catch (_) {}
+              _applyToStore();
               await new Promise((res) => setTimeout(res, 1500));
             }
           }
-          try { payload.syncedAt = new Date().toISOString(); store.save('fleetData', payload); if (ctx) ctx.lastData = payload; pushData(payload); } catch (_) {}
+          _applyToStore();
           logger.info('[data-source] PM/location fill: enriched ' + done + ' units');
         } catch (e) { logger.warn('[data-source] PM/location fill failed: ' + e.message); }
         finally { _pmFillRunning = false; }
