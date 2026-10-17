@@ -1573,12 +1573,21 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       issueSummary:           n.issueSummary        || row.issueSummary || '',
       notesUpdatedAt:         n.updatedAt           || '',
 
-      relaySynced: Object.keys(r).length > 0,
-      // Planned WR for PM Failed / Expired Inspection units (secondary scrape)
-      _plannedWRData:   r._plannedWRData   || null,
-      _secondaryWRs:    r._secondaryWRs    || null,
+      // relaySynced is true if THIS relay entry has data OR the incoming row was
+      // already marked relay-synced by its source (the AAP/RG API marks rows it
+      // populated). Without the `|| row.relaySynced`, an empty relayData (API
+      // mode passes `{}`) would wrongly reset every API row to "No Relay WR data".
+      relaySynced: Object.keys(r).length > 0 || !!row.relaySynced,
+      // Planned WR for PM Failed / Expired Inspection units (secondary scrape).
+      // Preserve whatever the row already carried (the API attaches _secondaryWRs
+      // per unit) when the relay entry doesn't supply its own.
+      _plannedWRData:   r._plannedWRData   || row._plannedWRData || null,
+      _secondaryWRs:    r._secondaryWRs    || row._secondaryWRs  || null,
     };
   });
 }
 
-module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage, pickOffsiteFromConversation };
+module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage, pickOffsiteFromConversation,
+  // Exposed so the API path (src/scrapers/aap_api.js) can reuse the exact same
+  // PM date formatter for its pills (from asset.maintenanceScheduleStatuses).
+  parsePMDates: _parsePMDates, formatPmDate: _formatPmDate };

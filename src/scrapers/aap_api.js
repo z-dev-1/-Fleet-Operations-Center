@@ -42,6 +42,19 @@ const TOKEN_WAIT_MS  = 10000;           // how long to wait for a token on load
 
 const _isSSO = (u) => /midway-auth\.amazon\.com|\/SSO\/redirect/i.test(u || '');
 
+// Read a WO's status tolerant of the API's shapes. CONFIRMED (2026-10-16): the
+// live shape nests it under status.description.{value,displayText} (status.type
+// is "Alert" for cancelled). Older code read status.value/displayText directly,
+// which returned '' for every WO — so cancelled WOs were mis-classified as open.
+function _woStatusStr(wo) {
+  const s = (wo && wo.status) || {};
+  const d = s.description || s;
+  return String(d.value || d.displayText || '');
+}
+function _woIsCancelled(wo) {
+  return /cancel/i.test(_woStatusStr(wo));
+}
+
 let _win = null;
 let _token = null;
 let _warmTimer = null;
@@ -377,7 +390,7 @@ function _mapRow(wo, asset) {
     rentalStatus:    wo.assetRentalStatus || '',
     vendor:          wo.vendor || '',
     suppliers:       wo.suppliers || wo.providers || '',
-    status:          (wo.status && (wo.status.displayText || wo.status.value || wo.status.description)) || '',
+    status:          _woStatusStr(wo),
     subStatus:       wo.subStatus || '',
     isUrgent:        wo.isUrgent === true || wo.isUrgent === 'true',
     lifecycleState:  wo.lifecycleState || a.lifecycleState || '',
@@ -524,9 +537,15 @@ async function buildFleetDataset(opts = {}) {
   //    fields IN BULK via fieldsToReturn (confirmed the search honors it), so
   //    operator / owner / domicileSite / bodyType / VIN / make come back for
   //    EVERY unit in the search result — no per-unit getAsset loop needed.
+  // NOTE: maintenanceScheduleStatuses is NOT requestable here — the v2 asset
+  // search rejects it (HTTP 400). PM due dates come from per-unit getAsset()
+  // (hydration for down units + lazy refreshUnit on panel open) instead.
   const BULK_FIELDS = ['displayName', 'operator', 'owner', 'domicileSite', 'bodyType',
     'assetType', 'vin', 'manufacturerName', 'engineManufacturerName', 'program',
-    'lifecycleState', 'lifecycleStateReason'];
+    'lifecycleState', 'lifecycleStateReason',
+    // Location fields so EVERY unit shows a "Last Geofence" (geoFences are
+    // confirmed valid search fields — DEFAULT_ASSET_SEARCH_REQUEST requests them).
+    'geoFences', 'yardBuildingID', 'latestLocationTimestamp', 'geoPoint'];
   const assetByAaid = new Map();    // aaid -> asset summary record
   for (const key of ['domicileSite', 'operator']) {
     for (let page = 0; page < (opts.maxPages || 60); page++) {
@@ -564,7 +583,7 @@ async function buildFleetDataset(opts = {}) {
   const woByAaid = new Map();
   const woTs = (w) => Number(w.modifiedTimestamp || w.actualStartDateTime || w.scheduledDateTime || 0);
   const woIsOpen = (w) => {
-    const s = (w && w.status && (w.status.value || w.status.displayText)) || '';
+    const s = _woStatusStr(w);
     const completed = w && (w.completedDateTime || w.completedDate);
     return OPEN_STATUSES.has(String(s).toUpperCase()) || (!completed && !/complet|closed|cancel/i.test(String(s)));
   };
@@ -625,10 +644,42 @@ async function buildFleetDataset(opts = {}) {
       lifecycleStateReason: assetSummary.asset && assetSummary.asset.lifecycleStateReason,
     };
     const row = mapper.toFleetRow(woOrAsset, assetSummary, serviceDetail);
-    // Asset lifecycle is the source of truth for availability — override the
-    // WO's (which may lag) with the asset's current state.
-    row.lifecycleState = mapper.mapLifecycleState(assetSummary.asset && assetSummary.asset.lifecycleState) || row.lifecycleState;
-    if (!wo) row.lifecycleReason = mapper.mapLifecycleReason(assetSummary.asset && assetSummary.asset.lifecycleStateReason) || row.lifecycleReason;
+    // Asset lifecycle is the SOURCE OF TRUTH for availability. A WO's own
+    // lifecycleState/Reason can lag badly (a zombie "open" WO from years ago),
+    // so always override from the asset.
+    const _assetState = assetSummary.asset && assetSummary.asset.lifecycleState;
+    const _assetReason = assetSummary.asset && assetSummary.asset.lifecycleStateReason;
+    row.lifecycleState = mapper.mapLifecycleState(_assetState) || row.lifecycleState;
+    const _assetUnavailable = /unavail/i.test(String(_assetState || ''));
+    if (_assetUnavailable) {
+      // Unavailable: use the asset's reason (truth); only keep the WO-derived
+      // reason if the asset doesn't carry one.
+      row.lifecycleReason = mapper.mapLifecycleReason(_assetReason) || row.lifecycleReason;
+    } else {
+      // AVAILABLE / Active: the unit is in service — it has NO unavailable
+      // reason, and any WO the bulk search attached is HISTORICAL (a zombie
+      // "open" WO that was never closed). Clear the WO framing so the row shows
+      // as a clean in-service unit instead of "Active / Offsite Shop Repair"
+      // with a 2-year-old work order (124124). Asset master data stays.
+      row.lifecycleReason = '';
+      row.vendor = '';
+      row.serviceState = '';
+      row.subState = '';
+      row.serviceCategory = '';
+      row.issueDetails = '';
+      row.issueSummary = '';
+      row.workRequestId = '';
+      row.serviceUrl = '';
+      row._serviceId = '';
+      row.created = '';
+      row.completed = '';
+      row.repairTimeline = '';
+      row.fullConversation = '';
+      row.level1 = '';
+      row.level2 = '';
+      row.relaySynced = false;
+      wo = null; // ensure no secondary/detail logic treats it as having a WO
+    }
 
     // ASSET MASTER DATA — read straight from the BULK search result's
     // attributesText (operator, owner, domicileSite, bodyType, make, VIN). This
@@ -642,6 +693,36 @@ async function buildFleetDataset(opts = {}) {
     if (at.vin)          row.vin = at.vin;
     if (at.manufacturerName) row.manufacturer = at.manufacturerName;
     if (at.engineManufacturerName) row.engineManufacturer = at.engineManufacturerName;
+
+    // PM due dates — from the asset's maintenanceScheduleStatuses[] if the bulk
+    // search returned it (requested via BULK_FIELDS). Sets raw pm*Due fields +
+    // the short pills, same formatter as the scrape path.
+    try {
+      const mss = (assetSummary.asset && assetSummary.asset.maintenanceScheduleStatuses);
+      if (Array.isArray(mss) && mss.length) {
+        const pmRaw = mapper.pmDueFields({ maintenanceScheduleStatuses: mss });
+        Object.assign(row, pmRaw);
+        const { parsePMDates } = require('./relay');
+        if (parsePMDates) {
+          const pm = parsePMDates(pmRaw);
+          row.pmB = pm.pmB; row.pmX = pm.pmX; row.dot = pm.dot; row.quarterlyLift = pm.quarterlyLift;
+        }
+      }
+    } catch (_) { /* PM best-effort */ }
+
+    // LOCATION — the v2 asset search returns location fields (geoFences, etc.)
+    // requested via BULK_FIELDS, but their nesting varies. Try the common spots
+    // so every unit gets a "Last Geofence". Falls back to the domicile site.
+    try {
+      if (!row.geofence) {
+        const asset = assetSummary.asset || {};
+        const ll = assetSummary.latestLocation || asset.latestLocation || {};
+        const gf = (g) => (Array.isArray(g) && g.length) ? (g[0] && (g[0].name || g[0].geofenceName || g[0])) : '';
+        row.geofence = gf(ll.geoFences) || gf(asset.geoFences) || gf(assetSummary.geoFences)
+          || ll.geofenceName || ll.yardBuildingID || asset.yardBuildingID
+          || row.domicileSite || '';
+      }
+    } catch (_) { /* geofence best-effort */ }
 
     rows.push(row);
   }
@@ -664,23 +745,49 @@ async function buildFleetDataset(opts = {}) {
 async function findOpenWO(unitNumber) {
   const u = String(unitNumber || '').trim().toUpperCase();
   if (!u) return null;
-  // CONFIRMED working query: equipmentIds + statuses:[] (clear ONLY the status
-  // filter). Keep the rest of DEFAULT_SEARCH_REQUEST intact — clearing fleetIds/
-  // assetPrograms/lifecycleStates made the endpoint return nothing (the body it
-  // needs got broken). `{ equipmentIds:[u], statuses:[] }` returned all WOs live.
-  const res = await searchServices({ equipmentIds: [u], statuses: [], page: 1 });
-  const list = (res && res.serviceAggregates) || [];
-  if (!list.length) return null;
+
   const ts = (w) => Number(w.modifiedTimestamp || w.actualStartDateTime || w.scheduledDateTime || 0);
   const isOpen = (w) => {
-    const s = (w && w.status && (w.status.value || w.status.displayText)) || '';
+    const s = _woStatusStr(w);
     const completed = w && (w.completedDateTime || w.completedDate);
     return (!completed && !/complet|closed|cancel/i.test(String(s)));
   };
-  list.sort((a, b) => ((isOpen(b) ? 1 : 0) - (isOpen(a) ? 1 : 0)) || (ts(b) - ts(a)));
-  // Prefer an actually-open WO; if none are open, return null (don't link a
-  // closed WR — matches "no current work order").
-  return isOpen(list[0]) ? list[0] : null;
+  const pickOpen = (list) => {
+    if (!list || !list.length) return null;
+    list = list.slice().sort((a, b) => ((isOpen(b) ? 1 : 0) - (isOpen(a) ? 1 : 0)) || (ts(b) - ts(a)));
+    return isOpen(list[0]) ? list[0] : null;
+  };
+
+  // ATTEMPT 1 — fast path: query by equipmentId, clear ONLY the status filter.
+  // Works for the common case (unit's program/lifecycle/fleet match the default
+  // body). `{ equipmentIds:[u], statuses:[] }` returned all WOs live.
+  let res = await searchServices({ equipmentIds: [u], statuses: [], page: 1 });
+  let hit = pickOpen((res && res.serviceAggregates) || []);
+  if (hit) return hit;
+
+  // ATTEMPT 2 — widened: the default body also constrains category ('UNPLANNED'),
+  // lifecycleStates (['UNAVAILABLE']), assetPrograms (['DSP-MMBT','vupAfp']) and
+  // fleetIds. A unit whose OPEN WO falls outside ANY of those (e.g. a PLANNED
+  // DAMAGE work request, or a program/fleet not in the default set) is dropped
+  // by attempt 1 even though it has an open WO. CONFIRMED cases: 922483, B13014,
+  // 321186 — all Status=Scheduled, Sub=Created, WRSource=DAMAGE. Setting these
+  // dimensions to null (NOT [] — an empty array over-constrained the body and
+  // returned nothing) means "no filter on this dimension", so the unit's open WO
+  // is seen regardless of its category/program/lifecycle/fleet.
+  res = await searchServices({
+    equipmentIds: [u],
+    statuses: [],
+    category: null,
+    lifecycleStates: null,
+    assetPrograms: null,
+    fleetIds: null,
+    page: 1,
+  });
+  hit = pickOpen((res && res.serviceAggregates) || []);
+  if (hit) {
+    logger.info('findOpenWO: ' + u + ' resolved via widened query (outside default category/program/lifecycle/fleet)');
+  }
+  return hit;
 }
 
 // ── Per-unit refresh: fresh data for ONE unit via the API ────────────────────
@@ -692,8 +799,61 @@ async function refreshUnit(unitNumber) {
   const u = String(unitNumber || '').trim().toUpperCase();
   if (!u) throw new Error('refreshUnit: no unit number');
 
-  // Find the unit's current open WO (unconstrained by the default filter).
-  const wo = await findOpenWO(u);
+  // Fetch ALL of the unit's work orders (planned + unplanned, open + closed),
+  // unconstrained by the restrictive default filter. We show every WO as a card
+  // in the detail pane — a closed WO is still a work order worth seeing.
+  let allWOs = [];
+  try {
+    const r1 = await searchServices({ equipmentIds: [u], statuses: [], page: 1 });
+    allWOs = (r1 && r1.serviceAggregates) || [];
+    // If the restrictive body hid them, widen (same two-tier logic as findOpenWO).
+    if (!allWOs.length) {
+      const r2 = await searchServices({
+        equipmentIds: [u], statuses: [], category: null,
+        lifecycleStates: null, assetPrograms: null, fleetIds: null, page: 1,
+      });
+      allWOs = (r2 && r2.serviceAggregates) || [];
+    }
+  } catch (_) { allWOs = []; }
+
+  // Classify WOs. The search with statuses:[] returns the unit's ENTIRE WO
+  // history (every old completed/cancelled WO), so we must NOT show all of them
+  // — only the CURRENTLY-RELEVANT ones.
+  const _ts = (w) => Number(w.modifiedTimestamp || w.actualStartDateTime || w.scheduledDateTime || 0);
+  const _statusOf = (w) => _woStatusStr(w);
+  const _isCancelled = (w) => _woIsCancelled(w);
+  const _isOpen = (w) => {
+    const completed = w && (w.completedDateTime || w.completedDate);
+    return (!completed && !/complet|closed|cancel/i.test(_statusOf(w)));
+  };
+  // Is the ASSET itself unavailable? The WO aggregate carries the asset's
+  // lifecycleState; any WO row for this unit reflects it.
+  const _unitUnavailable = allWOs.some((w) => /unavail/i.test(String(w && w.lifecycleState || '')));
+
+  const openWOs = allWOs.filter(_isOpen).sort((a, b) => _ts(b) - _ts(a));
+
+  // Primary WO selection:
+  //  1) Newest OPEN work order (the normal case).
+  //  2) No open WO → newest NON-cancelled WO (a just-completed WO still shows so
+  //     the card/timeline render; its status pill reads its real state).
+  //  3) Only cancelled WOs left → show the newest cancelled one ONLY when the
+  //     unit is UNAVAILABLE and has no open WO (per rule: a cancelled WO is
+  //     hidden unless it's the single thing explaining an unavailable unit).
+  //     For an AVAILABLE unit, never surface a cancelled WO as the primary card.
+  const byRecency = allWOs.slice().sort((a, b) => _ts(b) - _ts(a));
+  let wo = openWOs[0] || null;
+  if (!wo) {
+    const newestNonCancelled = byRecency.find((w) => !_isCancelled(w)) || null;
+    if (newestNonCancelled) {
+      wo = newestNonCancelled;
+    } else if (_unitUnavailable) {
+      // Every WO is cancelled, but the unit is unavailable with no open WO —
+      // surface the newest cancelled WO as the last-resort explanation.
+      wo = byRecency[0] || null;
+    } else {
+      wo = null; // available unit, only cancelled history → show no WR card
+    }
+  }
 
   // Asset summary + full detail (VIN) via the aaid.
   let assetSummary = null, serviceDetail = null;
@@ -705,6 +865,26 @@ async function refreshUnit(unitNumber) {
   if (aaid) { try { full = await getAsset(aaid); } catch (_) {} }
 
   const row = mapper.toFleetRow(wo || { assetDisplayName: u }, assetSummary, serviceDetail);
+
+  // Attach ONLY the OTHER CURRENTLY-OPEN work orders as secondary cards (a unit
+  // with one open unplanned + one open planned WR shows both). We deliberately
+  // DO NOT list the unit's old completed/closed/cancelled WOs here — those are
+  // history, not current work, and listing them cluttered the pane with
+  // irrelevant cards (e.g. 322377 has ONE active WO but the full-history query
+  // returned many old closed ones). A just-closed WO only surfaces as the
+  // PRIMARY card (the openWOs[0]||newest fallback above), never as a secondary.
+  const primaryId = wo ? (wo.workRequestId || wo.id) : null;
+  const others = openWOs.filter((w) => (w.workRequestId || w.id) !== primaryId);
+  const secondary = [];
+  const SECONDARY_CAP = 6;
+  for (const w of others.slice(0, SECONDARY_CAP)) {
+    let sd = null;
+    const wid = w.workRequestId || w.id;
+    if (wid) { try { sd = await getService(wid); } catch (_) {} }
+    const entry = mapper.toSecondaryWR(w, sd);
+    if (entry) secondary.push(entry);
+  }
+  row._secondaryWRs = secondary.length ? secondary : [];
   if (full) {
     const d = mapper.assetDetailFields(full);
     row.vin = d.vin || row.vin;
@@ -721,6 +901,52 @@ async function refreshUnit(unitNumber) {
     const a = full.asset || {};
     row.lifecycleState = mapper.mapLifecycleState(a.lifecycleState) || row.lifecycleState;
     if (!wo) row.lifecycleReason = mapper.mapLifecycleReason(a.lifecycleStateReason) || row.lifecycleReason;
+
+    // PM due dates — from the asset's maintenanceScheduleStatuses[] (getAsset).
+    // Set the raw per-label fields (pmBDue/pmXDue/dotDue/quarterlyLiftDue) AND
+    // the short display pills (pmB/pmX/dot/quarterlyLift) via relay's parser so
+    // the detail panel + grid show them exactly like the scrape path did.
+    try {
+      const pmRaw = mapper.pmDueFields(full);
+      const _hasPm = pmRaw.pmBDue || pmRaw.pmXDue || pmRaw.dotDue || pmRaw.quarterlyLiftDue;
+      if (_hasPm) {
+        for (const k of Object.keys(pmRaw)) { if (pmRaw[k]) row[k] = pmRaw[k]; }
+        const { parsePMDates } = require('./relay');
+        if (parsePMDates) {
+          const pm = parsePMDates(pmRaw);
+          row.pmB = pm.pmB; row.pmX = pm.pmX; row.dot = pm.dot; row.quarterlyLift = pm.quarterlyLift;
+        }
+      }
+    } catch (_) { /* PM parse best-effort */ }
+  }
+
+  // ASSET-IS-TRUTH guard: if the unit is AVAILABLE/Active (not unavailable), it
+  // is in service — it has no current repair. A WO the history query attached
+  // (even one with an "open" status) is a stale/zombie WO. Clear the WR framing
+  // so an Active unit never shows "Active / Offsite Shop Repair" with an old
+  // work order (124124). Decide from the authoritative asset lifecycle (full),
+  // falling back to the WO aggregate's lifecycleState.
+  const _finalState = String(row.lifecycleState || '');
+  const _available = !/unavail/i.test(_finalState) && !!_finalState;
+  if (_available) {
+    row.lifecycleReason = '';
+    row.vendor = '';
+    row.serviceState = '';
+    row.subState = '';
+    row.serviceCategory = '';
+    row.issueDetails = '';
+    row.issueSummary = '';
+    row.workRequestId = '';
+    row.serviceUrl = '';
+    row._serviceId = '';
+    row.created = '';
+    row.completed = '';
+    row.repairTimeline = '';
+    row.fullConversation = '';
+    row.level1 = '';
+    row.level2 = '';
+    row.relaySynced = false;
+    row._secondaryWRs = [];
   }
   return row;
 }
@@ -742,5 +968,6 @@ module.exports = {
   getAvmCodes,
   getUserDetails,
   searchAllPages,
+  findOpenWO,
   dispose,
 };

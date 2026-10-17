@@ -77,10 +77,21 @@ function mapLifecycleState(raw)  { const k = String(raw || '').toUpperCase(); re
 function mapLifecycleReason(raw) { const k = String(raw || '').toUpperCase(); return LIFECYCLE_REASON[k] || (raw ? _titleCaseEnum(raw) : ''); }
 function mapVendor(raw)          { const k = String(raw || '').toUpperCase(); return VENDOR_DISPLAY[k] || (raw || ''); }
 
-function _epochToIso(ms) {
-  const n = Number(ms);
-  if (!n || Number.isNaN(n)) return '';
-  try { return new Date(n).toISOString(); } catch (_) { return ''; }
+// Accepts epoch milliseconds (number or numeric string) OR an ISO/date string.
+// Returns a clean ISO string, or '' if the input isn't a valid date — so the
+// UI never renders "Invalid Date".
+function _epochToIso(v) {
+  if (v == null || v === '') return '';
+  // Pure-numeric → treat as epoch ms.
+  if (typeof v === 'number' || /^\d+$/.test(String(v).trim())) {
+    const n = Number(v);
+    if (!n || Number.isNaN(n)) return '';
+    const d = new Date(n);
+    return Number.isNaN(d.getTime()) ? '' : d.toISOString();
+  }
+  // Otherwise try to parse as a date string (ISO, etc.).
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? '' : d.toISOString();
 }
 
 // Humanized "down for" duration from a start epoch, matching the scrape's
@@ -100,6 +111,138 @@ function _durationFrom(ms) {
 // timeline string (newest last), mirroring the repairTimeline format the app
 // already uses. Decodes common HTML entities from the API text. Optionally
 // drops internal-only comments for an external-facing view.
+
+// Extract PM due-date raw fields from an asset's maintenanceScheduleStatuses[]
+// (returned by GET /api/v1/assets/{aaid}). CONFIRMED live (2026-10-17): each
+// entry has maintenanceType (DOT|PM_A|PM_B|PM_X|QUARTERLY_LIFT|WASH|...),
+// nextDueDate ("2026-09-11" ISO), and dueDateDisplayFormat (DATE|MONTH_AND_YEAR).
+// We emit the same raw per-label fields the scrape produced (pmBDue/pmXDue/
+// dotDue/quarterlyLiftDue) in the "Mon D, YYYY" / "Mon YYYY" form that
+// relay.js _formatPmDate()/_parsePMDates() expect, so the PM pills render
+// identically (overdue | "Mon D" | --).
+const _PM_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function _isoToPmRaw(iso, monthOnly) {
+  if (!iso) return null;
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const y = Number(m[1]); const mo = Number(m[2]) - 1; const d = Number(m[3]);
+  if (mo < 0 || mo > 11) return null;
+  return monthOnly
+    ? (_PM_MONTHS[mo] + ' ' + y)              // "Feb 2027"
+    : (_PM_MONTHS[mo] + ' ' + d + ', ' + y);  // "Sep 11, 2026"
+}
+function pmDueFields(assetFull) {
+  const statuses = (assetFull && (assetFull.asset && assetFull.asset.maintenanceScheduleStatuses
+    || assetFull.maintenanceScheduleStatuses)) || [];
+  const out = { pmBDue: null, pmXDue: null, dotDue: null, quarterlyLiftDue: null };
+  if (!Array.isArray(statuses)) return out;
+  const KEY = { PM_B: 'pmBDue', PM_X: 'pmXDue', DOT: 'dotDue', QUARTERLY_LIFT: 'quarterlyLiftDue' };
+  for (const s of statuses) {
+    const key = KEY[String(s && s.maintenanceType || '').toUpperCase()];
+    if (!key || !s.nextDueDate) continue;
+    const monthOnly = String(s.dueDateDisplayFormat || '').toUpperCase() === 'MONTH_AND_YEAR';
+    const raw = _isoToPmRaw(s.nextDueDate, monthOnly);
+    if (raw) out[key] = raw;
+  }
+  return out;
+}
+
+// Resolve a unit's current location (geofence / site) for the "Last Geofence"
+// field. Prefers the WO's reported location, then the asset's latest-location
+// geofences, then the yard building, then the domicile site — so EVERY unit
+// shows something, not just ones with an open WO.
+function _pickLocation(wo, assetSummary) {
+  const aSum = (assetSummary && assetSummary.asset) || {};
+  const aLoc = (assetSummary && assetSummary.latestLocation) || {};
+  const wLoc = (wo && wo.latestLocation) || {};
+  const rLoc = (wo && wo.reportedLocation) || {};
+  const firstGeo = (g) => Array.isArray(g) && g.length ? (g[0] && (g[0].name || g[0].geofenceName || g[0])) : '';
+  return (
+    (rLoc && (rLoc.geofenceName || rLoc.code)) ||
+    firstGeo(wLoc.geoFences) || firstGeo(aLoc.geoFences) ||
+    (aLoc.geofenceName || aLoc.yardBuildingID || aLoc.lastKnownSite) ||
+    (aSum.attributesText && aSum.attributesText.domicileSite) ||
+    (wo && wo.assetDomicileSite) || ''
+  );
+}
+
+// Extract the best OFFSITE (Decisiv / Volvo ASIST / PACCAR estimate / DTNA)
+// URL from a service detail's comment thread. The AAP/RG API has NO offsite URL
+// field — but the dealer/offsite links are pasted into comments[].text (the
+// same place the scrape path's RELAY_CONVERSATION_SCRIPT harvested them from the
+// DOM). We replicate pickOffsiteFromConversation: prefer a Fleet Estimate, then
+// a Service Request, then DTNA; NEWEST-WINS (last match in the oldest-first
+// thread). Returns { url, label, source } or null. serviceDetail may be the
+// full aggregate (with workRequest.comments[]) or anything collectAllComments
+// can read.
+function extractOffsiteFromComments(serviceDetail) {
+  const comments = collectAllComments(serviceDetail);
+  if (!comments.length) return null;
+  // Oldest-first already (collectAllComments sorts ascending). Concatenate text.
+  const text = comments.map((c) => String(c.text || '')).join('\n');
+  const grabAll = (re) => {
+    const urls = []; let m; re.lastIndex = 0;
+    while ((m = re.exec(text)) !== null) {
+      const url = m[0].split(/[\s"'<>)]/)[0];
+      if (url) urls.push(url);
+    }
+    return urls;
+  };
+  const est = grabAll(/https?:\/\/[a-z0-9.\-]+decisiv\.net\/fleet\/estimates\/[A-Za-z0-9_\-]+/gi);
+  const req = grabAll(/https?:\/\/[a-z0-9.\-]+decisiv\.net\/service_requests\/[A-Za-z0-9_\-]+/gi);
+  const dtna = grabAll(/https?:\/\/dtna\.my\.site\.com\/Servicetracker\/s\/case\/[A-Za-z0-9_\-]+/gi);
+  // newest-wins: last element of the preferred non-empty list.
+  if (est.length)  return { url: est[est.length - 1],  label: 'Fleet Estimate', source: 'estimate' };
+  if (req.length)  return { url: req[req.length - 1],  label: 'Service Request', source: 'service_request' };
+  if (dtna.length) return { url: dtna[dtna.length - 1], label: 'DTNA Case', source: 'dtna' };
+  return null;
+}
+
+// Read a work order's human/enum status, tolerant of the API's shapes. CONFIRMED
+// (2026-10-16): the live shape is status.description.{displayText,value} with
+// status.type ("Alert" for cancelled, "Complete", "Neutral"). Older/other shapes
+// put displayText/value directly on status. Returns { value, displayText, type }.
+function woStatus(wo) {
+  const s = (wo && wo.status) || {};
+  const d = s.description || s;   // nested (current) or flat (legacy)
+  return {
+    value:       String(d.value || '').trim(),
+    displayText: String(d.displayText || '').trim(),
+    type:        String(s.type || '').trim(),
+  };
+}
+
+// Gather the COMPLETE comment thread from a service-detail response. For the
+// units checked, the whole conversation lives in workRequest.comments[], but a
+// service aggregate can also carry vendor-side comments under workOrders[] (and
+// occasionally a workRequests[] array). Collect from every location, dedupe by
+// timestamp+text, and sort oldest→newest so the timeline is the full thread.
+function collectAllComments(serviceDetail) {
+  if (!serviceDetail) return [];
+  const buckets = [];
+  const wr = serviceDetail.workRequest;
+  if (wr && Array.isArray(wr.comments)) buckets.push(wr.comments);
+  if (Array.isArray(serviceDetail.workRequests)) {
+    for (const w of serviceDetail.workRequests) if (w && Array.isArray(w.comments)) buckets.push(w.comments);
+  }
+  if (Array.isArray(serviceDetail.workOrders)) {
+    for (const w of serviceDetail.workOrders) if (w && Array.isArray(w.comments)) buckets.push(w.comments);
+  }
+  const seen = new Set();
+  const all = [];
+  for (const b of buckets) {
+    for (const c of b) {
+      if (!c || !c.text) continue;
+      const key = (c.timestamp || '') + '|' + c.text;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      all.push(c);
+    }
+  }
+  all.sort((a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0));
+  return all;
+}
+
 function commentsToTimeline(comments, opts = {}) {
   if (!Array.isArray(comments) || !comments.length) return '';
   const includeInternal = opts.includeInternal !== false; // default: include
@@ -182,11 +325,28 @@ function toFleetRow(wo, assetSummary, serviceDetail) {
     if (si && si.level2 && !l2.includes(si.level2)) l2.push(si.level2);
   }
 
-  // Comments → timeline (from the full service detail, if fetched).
-  const comments = (serviceDetail && serviceDetail.workRequest && serviceDetail.workRequest.comments) || [];
-  const timeline = commentsToTimeline(comments);
-  // A compact "conversation" blob for AI context (clean, not scraped page junk).
-  const fullConversation = timeline;
+  // Conversation → RAW feed for the AI timeline builder (deep-scan.js). We do
+  // NOT put raw comments into repairTimeline — that field is the AI-BUILT
+  // professional timeline (same as the scrape path). Instead we assemble a raw
+  // conversation blob into fullConversation for the AI to transform, EXCLUDING
+  // internal-only comments (carolddu [internal], VRE OVERRIDE, etc. — the API
+  // exposes an internalOnly flag the scrape path never had; honor it so those
+  // never surface). The deep-scan prompt header-strips from the word
+  // "Conversation", so prefix with it.
+  const extComments = collectAllComments(serviceDetail).filter((c) => !(c && c.internalOnly));
+  const fullConversation = extComments.length
+    ? ('Conversation\n' + commentsToTimeline(extComments, { includeInternal: false }))
+    : '';
+  // repairTimeline stays EMPTY here — runOrchaDeepScan builds it from
+  // fullConversation (+ offsite notes) and writes it back. mergeRelayIntoRows
+  // re-stamps any previously-built timeline from notesStore onto the row.
+  const timeline = '';
+
+  // OFFSITE URL — extracted from the comment thread (incl. internal comments,
+  // which is where the Decisiv/ASIST estimate link is usually pasted). Gives
+  // Split View its right pane + the offsite link for the detail card, and the
+  // URL the deep-scan uses to pull offsite notes for the AI timeline.
+  const _offsite = extractOffsiteFromComments(serviceDetail);
 
   const downStart = wo.actualStartDateTime || wo.expectedStartDateTime || wo.scheduledDateTime;
 
@@ -203,12 +363,24 @@ function toFleetRow(wo, assetSummary, serviceDetail) {
     program:         wo.assetProgram || '',
     lifecycleState:  mapLifecycleState(wo.lifecycleState || aSum.lifecycleState),
     lifecycleReason: mapLifecycleReason(wo.lifecycleStateReason || aSum.lifecycleStateReason),
-    geofence:        (loc.geoFences && loc.geoFences[0]) || '',
+    // Location: last-known geofence/site. Try the WO's reported location, the
+    // asset's latestLocation geoFences, the yard building, then the domicile.
+    geofence:        _pickLocation(wo, assetSummary),
+
+    // OFFSITE (Decisiv/ASIST) — extracted from the comment thread. These drive
+    // Split View's right pane + the offsite card, and give the deep-scan the URL
+    // to pull offsite notes for the AI timeline (same fields the scrape set).
+    offsiteShopEventUrl: _offsite ? _offsite.url : '',
+    offsiteShopEvent:    _offsite ? _offsite.label : '',
+    savedOffsiteUrl:     _offsite ? _offsite.url : '',
+    asistSrUrl:          (_offsite && _offsite.source === 'service_request') ? _offsite.url : '',
+    asistSource:         _offsite ? _offsite.source : '',
+    asistLabel:          _offsite ? _offsite.label : '',
 
     // WO / relay-equivalent
     vendor:          mapVendor(wo.vendor),
     suppliers:       wo.suppliers || wo.providers || '',
-    serviceState:    (wo.status && (wo.status.displayText || wo.status.value)) || '',
+    serviceState:    (function(){ const st = woStatus(wo); return st.displayText || st.value || ''; })(),
     subState:        wo.subStatus || '',
     workRequestId:   wo.workRequestId || wo.id || '',
     serviceUrl:      wo.workRequestId || wo.id ? ('https://aap-na.corp.amazon.com/v2/service/' + (wo.workRequestId || wo.id)) : '',
@@ -241,11 +413,62 @@ function toFleetRow(wo, assetSummary, serviceDetail) {
     // provenance
     _apiSourced:     true,
     _serviceId:      wo.id || wo.workRequestId || '',
+    // Mark the row as having live WO/Relay data so the detail pane renders the
+    // WR card (its gate is `relaySynced && (vendor||issueDetails||workRequestId)`)
+    // instead of the "No Relay WR data" empty state. The API IS the Relay source
+    // now, so any row that carries a vendor / issue / WR id is "relay-synced".
+    relaySynced:     !!(mapVendor(wo.vendor) || wo.damageDescription || wo.workRequestId || wo.id),
+  };
+}
+
+// Map ONE work-order aggregate into the lightweight "secondary WR card" shape
+// the unit-detail repair pane expects for its planned/unplanned extra cards
+// (unit._secondaryWRs[]). Includes CLOSED work orders — a WO is shown whether
+// it's open or closed (per product: "closed doesn't matter if it's still a
+// work order"). `serviceDetail` is optional (comment thread for that WO).
+function toSecondaryWR(wo, serviceDetail) {
+  if (!wo) return null;
+  const id = wo.workRequestId || wo.id || '';
+  const l1 = []; const l2 = [];
+  for (const si of (wo.suggestedItems || [])) {
+    if (si && si.level1 && !l1.includes(si.level1)) l1.push(si.level1);
+    if (si && si.level2 && !l2.includes(si.level2)) l2.push(si.level2);
+  }
+  const downStart = wo.actualStartDateTime || wo.expectedStartDateTime || wo.scheduledDateTime;
+  // External-only conversation (internal comments excluded) for the AI, NOT a
+  // raw dump shown directly. Prefixed "Conversation" for the deep-scan header-strip.
+  const extComments = collectAllComments(serviceDetail).filter((c) => !(c && c.internalOnly));
+  const cat = wo.category || '';
+  const _st = woStatus(wo);
+  return {
+    workRequestId:   id,
+    vendor:          mapVendor(wo.vendor),
+    serviceState:    _st.displayText || _st.value || '',
+    subState:        wo.subStatus || '',
+    serviceCategory: cat,
+    issueDetails:    wo.damageDescription || [l1.join('; '), l2.join('; ')].filter(Boolean).join(' / ') || '',
+    level1:          l1.join('; '),
+    level2:          l2.join('; '),
+    created:         _epochToIso(wo.scheduledDateTime || downStart),
+    completed:       _epochToIso(wo.completedDateTime),
+    totalCost:       wo.totalEstimatePendingApprovalCost != null ? wo.totalEstimatePendingApprovalCost : '',
+    // Raw feed for the AI (planned/secondary WR conversation) — not shown directly.
+    fullConversation: extComments.length ? ('Conversation\n' + commentsToTimeline(extComments, { includeInternal: false })) : '',
+    repairTimeline:  '',   // AI-built by deep-scan, never a raw dump
+    // 'planned' | 'unplanned' — drives the card's section title.
+    _wrType:         /plan/i.test(cat) && !/unplan/i.test(cat) ? 'planned' : 'unplanned',
+    // Split View: the Relay URL for THIS work order.
+    _serviceUUID:    id,
+    _relayUrl:       id ? ('https://aap-na.corp.amazon.com/v2/service/' + id) : '',
   };
 }
 
 module.exports = {
   toFleetRow,
+  toSecondaryWR,
+  woStatus,
+  pmDueFields,
+  extractOffsiteFromComments,
   commentsToTimeline,
   assetDetailFields,
   mapVendor,

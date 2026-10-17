@@ -2741,6 +2741,17 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .dp-header__meta{font-size:11px;color:var(--txt2);margin-bottom:8px}
 .dp-header__meta span+span::before{content:' · ';color:var(--mut)}
 .dp-header__vitals{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+/* PM due dates + location row in the detail header */
+.dp-header__pmloc{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}
+.dp-pm-loc{display:inline-flex;align-items:center;gap:4px;background:var(--el);border:1px solid var(--bdr);border-radius:6px;padding:3px 8px;font-size:10px;font-weight:600;color:var(--txt2)}
+.dp-pm-loc__icon{font-size:10px;opacity:.8}
+.dp-pm-pills{display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap}
+.dp-pm-pill{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:5px;font-size:10px;font-weight:600;white-space:nowrap;border:1px solid transparent}
+.dp-pm-pill__lbl{opacity:.6;font-size:9px;text-transform:uppercase;letter-spacing:.5px}
+.dp-pm-pill__val{font-family:var(--font-mono,'SF Mono',monospace);font-size:10px}
+.dp-pm-pill--overdue{color:#ff7b72;background:rgba(255,123,114,.10);border-color:rgba(255,123,114,.25)}
+.dp-pm-pill--soon{color:#e3b341;background:rgba(227,179,65,.10);border-color:rgba(227,179,65,.25)}
+.dp-pm-pill--ok{color:#7ee787;background:rgba(126,231,135,.08);border-color:rgba(126,231,135,.2)}
 
 /* ── Vital pills ── */
 .dp-vital{display:flex;align-items:center;gap:5px;background:var(--el);border:1px solid var(--bdr);border-radius:6px;padding:4px 9px;font-size:10px;font-weight:600;color:var(--txt2)}

@@ -748,7 +748,7 @@ function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').
 function riskColor(n){return n>=70?'red':n>=40?'org':'grn';}
 function downDays(unit){const ts=unit.created;if(!ts)return null;const t=new Date(ts).getTime();if(isNaN(t))return null;return Math.floor((Date.now()-t)/86400000);}
 function relTime(ts){if(!ts)return'';const d=Date.now()-new Date(ts).getTime();if(d<3600000)return Math.floor(d/60000)+'m ago';if(d<86400000)return Math.floor(d/3600000)+'h ago';return Math.floor(d/86400000)+'d ago';}
-function fmtDate(ts){if(!ts)return'';try{return new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});}catch(e){return ts;}}
+function fmtDate(ts){if(!ts)return'';try{var d=new Date(ts);if(isNaN(d.getTime()))return'';return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});}catch(e){return'';}}
 function parseConvo(raw){
   if(!raw||typeof raw!=='string')return[];
   // Filter to non-empty lines only
@@ -980,7 +980,40 @@ function renderHeader(unit){
     (meta?'<div class="dp-header__meta">'+meta+'</div>':'')+
     (unit.lifecycleReason?'<div class="dp-header__reason">\u2192 '+esc(unit.lifecycleReason)+'</div>':'')+
     '<div class="dp-header__vitals">'+vitals+'</div>'+
+    _pmLocationRow(unit)+
   '</div>';
+}
+
+// PM due-date pills + current location, shown in the detail header. PM values
+// come from unit.pmB/pmX/dot/quarterlyLift (API: asset.maintenanceScheduleStatuses;
+// scrape: parsed dueDate). Shows ALL set PM types (not hidden at 60 days like the
+// grid), color-coded overdue/soon/ok. Location from unit.geofence || domicileSite.
+function _pmLocationRow(unit){
+  function pill(label,val){
+    if(!val||val==='--')return '';
+    var cls='dp-pm-pill--ok';
+    var v=String(val).toLowerCase();
+    if(v==='overdue'){ cls='dp-pm-pill--overdue'; }
+    else {
+      // val is "Mon D" (no year) — assume the NEXT occurrence: if that month/day
+      // already passed this year, it's next year. Avoids the grid's this-year
+      // misparse that flagged future dates as overdue.
+      var now=new Date(); now.setHours(0,0,0,0);
+      var d=new Date(val+' '+now.getFullYear());
+      if(!isNaN(d.getTime())){
+        if(d< now) d=new Date(val+' '+(now.getFullYear()+1));
+        var days=Math.round((d-now)/86400000);
+        cls=days<=0?'dp-pm-pill--overdue':days<=30?'dp-pm-pill--soon':'dp-pm-pill--ok';
+      }
+    }
+    return '<span class="dp-pm-pill '+cls+'"><span class="dp-pm-pill__lbl">'+esc(label)+'</span>'+
+           '<span class="dp-pm-pill__val">'+esc(val)+'</span></span>';
+  }
+  var pills=[pill('PM B',unit.pmB),pill('PM X',unit.pmX),pill('DOT',unit.dot),pill('Qtrly Lift',unit.quarterlyLift)].filter(Boolean).join('');
+  var loc=unit.geofence||unit.domicileSite||unit.domicile||'';
+  var locChip=loc?'<span class="dp-pm-loc"><span class="dp-pm-loc__icon">\ud83d\udccd</span>'+esc(loc)+'</span>':'';
+  if(!pills&&!locChip)return '';
+  return '<div class="dp-header__pmloc">'+locChip+(pills?'<span class="dp-pm-pills">'+pills+'</span>':'')+'</div>';
 }
 
 // ── tabs ──────────────────────────────────────────────────────────────────────
@@ -2327,8 +2360,11 @@ async function _runDailyNotesForUnit(unit) {
   const unitId = unit.equipmentId || unit.id || '';
   if (!unitId) { toast.show('warn', 'No unit selected', 2500); return; }
 
-  const altId = unit.alternativeId || unit.altId || '';
-  if (!altId) { toast.show('warn', unitId + ' has no Alt ID', 3000); return; }
+  // NOTE: this action opens the Relay + Offsite split windows — exactly like
+  // "Open Split View". It only needs the URLs, NOT an Alt ID. The old
+  // `if (!altId) return` gate was blocking it in API mode (the API path doesn't
+  // populate alternativeId), even though the URLs were available. Removed so it
+  // behaves the same as Split View and proceeds on the URLs alone.
 
   // Collect URLs
   const relayUrl    = unit.serviceUrl || unit.pageUrl || '';
@@ -2797,6 +2833,93 @@ export function init(container) {
   bus.on('ui:unit-select', ({ unit }) => {
     _renderUnit(unit);
     requestAnimationFrame(() => _panel.classList.add('detail-panel--open'));
+
+    // LAZY per-unit API refresh (API mode): the bulk fleet load skips comments
+    // AND the multi-WO (planned/unplanned) detail for speed. When a unit opens,
+    // pull its fresh comment thread + ALL its work orders from the API and
+    // re-render. Best-effort; never blocks the panel (already rendered above).
+    try {
+      if (window.aapApi && window.aapApi.refreshUnit && unit && unit.equipmentId) {
+        // Only when the row looks API-sourced or is missing its timeline/WO set.
+        const needsDetail = unit._apiSourced || !unit.repairTimeline || !unit._secondaryWRs;
+        if (needsDetail) {
+          const _targetId = unit.equipmentId;
+          window.aapApi.refreshUnit(_targetId).then((res) => {
+            if (!res || res.ok === false || !res.row) return;
+            // Only patch if the user is still on this same unit.
+            if (!_unit || _unit.equipmentId !== _targetId) return;
+            if (!_panel || !_panel.classList.contains('detail-panel--open')) return;
+            const fresh = res.row;
+            // ASSET-IS-TRUTH: if the fresh row reports the unit as in-service
+            // (relaySynced:false — the API cleared the WO framing because the
+            // asset is Active), ADOPT those cleared values instead of falling
+            // back to the stale _unit WO data. Otherwise the "x || _unit.x"
+            // fallbacks below would re-show the old work order (124124 showing
+            // "Active / Offsite Shop Repair" with a 2-year-old WO).
+            const _freshAvailable = fresh.relaySynced === false;
+            const patched = _freshAvailable
+              ? Object.assign({}, _unit, {
+                  relaySynced: false,
+                  lifecycleState: fresh.lifecycleState || _unit.lifecycleState,
+                  lifecycleReason: '',
+                  vendor: '', serviceState: '', subState: '', serviceCategory: '',
+                  issueDetails: '', issueSummary: '', workRequestId: '', serviceUrl: '',
+                  _serviceId: '', created: '', completed: '', level1: '', level2: '',
+                  repairTimeline: '', fullConversation: '',
+                  vin: fresh.vin || _unit.vin,
+                  pmB: fresh.pmB || _unit.pmB, pmX: fresh.pmX || _unit.pmX,
+                  dot: fresh.dot || _unit.dot, quarterlyLift: fresh.quarterlyLift || _unit.quarterlyLift,
+                  _secondaryWRs: [],
+                })
+              : Object.assign({}, _unit, {
+                  relaySynced:    fresh.relaySynced != null ? fresh.relaySynced : _unit.relaySynced,
+                  lifecycleState: fresh.lifecycleState || _unit.lifecycleState,
+                  lifecycleReason: fresh.lifecycleReason != null ? fresh.lifecycleReason : _unit.lifecycleReason,
+                  vendor:         fresh.vendor || _unit.vendor,
+                  serviceState:   fresh.serviceState || _unit.serviceState,
+                  subState:       fresh.subState || _unit.subState,
+                  serviceCategory: fresh.serviceCategory || _unit.serviceCategory,
+                  issueDetails:   fresh.issueDetails || _unit.issueDetails,
+                  issueSummary:   fresh.issueSummary || _unit.issueSummary,
+                  workRequestId:  fresh.workRequestId || _unit.workRequestId,
+                  serviceUrl:     fresh.serviceUrl || _unit.serviceUrl,
+                  _serviceId:     fresh._serviceId || _unit._serviceId,
+                  created:        fresh.created || _unit.created,
+                  completed:      fresh.completed || _unit.completed,
+                  level1:         fresh.level1 || _unit.level1,
+                  level2:         fresh.level2 || _unit.level2,
+                  repairTimeline: fresh.repairTimeline || _unit.repairTimeline,
+                  vin:            fresh.vin || _unit.vin,
+                  geofence:       fresh.geofence || _unit.geofence,
+                  pmB: fresh.pmB || _unit.pmB, pmX: fresh.pmX || _unit.pmX,
+                  dot: fresh.dot || _unit.dot, quarterlyLift: fresh.quarterlyLift || _unit.quarterlyLift,
+                  // Offsite (Decisiv/ASIST) — gives Split View its right pane immediately.
+                  offsiteShopEventUrl: fresh.offsiteShopEventUrl || _unit.offsiteShopEventUrl,
+                  savedOffsiteUrl:     fresh.savedOffsiteUrl || _unit.savedOffsiteUrl,
+                  offsiteShopEvent:    fresh.offsiteShopEvent || _unit.offsiteShopEvent,
+                  asistSrUrl:          fresh.asistSrUrl || _unit.asistSrUrl,
+                  asistLabel:          fresh.asistLabel || _unit.asistLabel,
+                  asistSource:         fresh.asistSource || _unit.asistSource,
+                  _secondaryWRs:  fresh._secondaryWRs || _unit._secondaryWRs,
+                });
+            // Preserve the active tab across the re-render.
+            const activeEl = _panel.querySelector('.dp-tab.active');
+            const activeTab = activeEl && activeEl.dataset ? activeEl.dataset.tab : null;
+            _renderUnit(patched);
+            if (activeTab) {
+              const btn = _panel.querySelector('.dp-tab[data-tab="' + activeTab + '"]');
+              const pane = document.getElementById('dp-pane-' + activeTab);
+              if (btn && pane) {
+                _panel.querySelectorAll('.dp-tab').forEach((t) => t.classList.remove('active'));
+                _panel.querySelectorAll('.dp-pane').forEach((p) => p.classList.remove('active'));
+                btn.classList.add('active');
+                pane.classList.add('active');
+              }
+            }
+          }).catch(() => { /* best-effort */ });
+        }
+      }
+    } catch (_) { /* best-effort; panel already rendered */ }
   });
 
   bus.on('ui:unit-deselect', () => {

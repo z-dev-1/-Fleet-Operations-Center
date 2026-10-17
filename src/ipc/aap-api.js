@@ -250,20 +250,32 @@ function registerAapApiIPC(ctx) {
     store.save('settings', s);
     logger.info('[data-source] set to ' + want);
     if (want === 'api') {
-      // Fast load (no comments — table is instant; comments load lazily per unit).
-      try {
-        const ds = await api().buildFleetDataset({ withComments: false });
-        let rows = ds.rows || [];
-        try { const uu = (store.load('uptakeHash', {}).units) || []; if (ctx && ctx.mergeUptakeIntoRows) rows = ctx.mergeUptakeIntoRows(rows, uu); } catch (_) {}
-        try { const ns = store.load('notesStore', {}); if (ctx && ctx.mergeRelayIntoRows) rows = ctx.mergeRelayIntoRows(rows, {}, ns); } catch (_) {}
-        const now = new Date().toISOString();
-        const out = { rows, count: rows.length, unavailableCount: ds.unavailableCount, syncedAt: now, scrapedAt: now, stale: false, source: 'aap-api' };
-        store.save('fleetData', out);
-        if (ctx) { ctx.lastData = out; if (ctx.pushData) ctx.pushData(out); }
-      } catch (e) {
-        logger.warn('[data-source] API load failed, falling back to scrape: ' + e.message);
-        if (ctx && ctx.triggerRescan) ctx.triggerRescan(true);
-        return { ok: false, source: want, error: e.message, fellBack: true };
+      // Prefer the shared window-side loader (same build+merge+push the startup
+      // and recurring API refresh use) so there's ONE code path. Fall back to an
+      // inline build if it isn't wired yet.
+      if (ctx && ctx._loadFleetViaApiStartup) {
+        try { await ctx._loadFleetViaApiStartup('toggle'); }
+        catch (e) {
+          logger.warn('[data-source] API load failed, falling back to scrape: ' + e.message);
+          if (ctx && ctx.triggerRescan) ctx.triggerRescan(true);
+          return { ok: false, source: want, error: e.message, fellBack: true };
+        }
+      } else {
+        // Fast load (no comments — table is instant; comments load lazily per unit).
+        try {
+          const ds = await api().buildFleetDataset({ withComments: false });
+          let rows = ds.rows || [];
+          try { const uu = (store.load('uptakeHash', {}).units) || []; if (ctx && ctx.mergeUptakeIntoRows) rows = ctx.mergeUptakeIntoRows(rows, uu); } catch (_) {}
+          try { const ns = store.load('notesStore', {}); if (ctx && ctx.mergeRelayIntoRows) rows = ctx.mergeRelayIntoRows(rows, {}, ns); } catch (_) {}
+          const now = new Date().toISOString();
+          const out = { rows, count: rows.length, unavailableCount: ds.unavailableCount, syncedAt: now, scrapedAt: now, stale: false, source: 'aap-api' };
+          store.save('fleetData', out);
+          if (ctx) { ctx.lastData = out; if (ctx.pushData) ctx.pushData(out); }
+        } catch (e) {
+          logger.warn('[data-source] API load failed, falling back to scrape: ' + e.message);
+          if (ctx && ctx.triggerRescan) ctx.triggerRescan(true);
+          return { ok: false, source: want, error: e.message, fellBack: true };
+        }
       }
     } else {
       // Scrape mode: kick the existing rescan.

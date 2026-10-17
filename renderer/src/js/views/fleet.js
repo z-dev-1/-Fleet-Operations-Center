@@ -135,9 +135,14 @@ function _pmPill(label, val) {
   if (v === 'overdue') {
     cls = 'pm-pill--overdue';
   } else {
-    const d = new Date(val + ' ' + new Date().getFullYear());
+    const today = new Date(); today.setHours(0,0,0,0);
+    // val is "Mon D" with NO year — assume the NEXT occurrence. If that month/day
+    // already passed this year, roll to next year (so an "Apr 14" due date in a
+    // future year isn't misread as this-year overdue).
+    let d = new Date(val + ' ' + today.getFullYear());
     if (!isNaN(d.getTime())) {
-      daysOut = Math.round((d - new Date().setHours(0,0,0,0)) / 86400000);
+      if (d < today) d = new Date(val + ' ' + (today.getFullYear() + 1));
+      daysOut = Math.round((d - today) / 86400000);
       if (daysOut > 60) return '';        // >60 days — hide pill
       cls = daysOut <= 0  ? 'pm-pill--overdue'
           : daysOut <= 30 ? 'pm-pill--soon'

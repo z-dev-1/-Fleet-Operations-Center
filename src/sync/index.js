@@ -148,6 +148,30 @@ function createSyncEngine(ctx) {
       } catch (_) {}
       return _finish();
     }
+    // ── API MODE (default): skip the scrape sync entirely ──────────────────
+    // When the user is on the direct AAP/RG JSON API (settings.dataSource !==
+    // 'scrape'), runFullSync must NOT open AAP/Uptake/Relay BrowserWindows
+    // (which trigger AEA) and must NOT overwrite the API-sourced fleetData with
+    // scrape-derived partial pushes. Redirect to the API loader instead.
+    try {
+      const _s = store.load('settings', {});
+      if (_s.dataSource !== 'scrape') {
+        logger.info('[data-source] API mode — runFullSync redirected to API refresh (no scrape)');
+        ctx.pushStatus('\uD83D\uDD04 Refreshing fleet via API…');
+        if (ctx._loadFleetViaApiStartup) {
+          try { await ctx._loadFleetViaApiStartup('sync'); } catch (e) { logger.warn('[data-source] API sync refresh failed: ' + e.message); }
+        }
+        ctx.isSyncing = false;
+        try {
+          const _fd = store.load('fleetData', {});
+          _result.ok = true;
+          if (_fd && _fd.syncedAt) { _result.syncedAt = _fd.syncedAt; _result.rowCount = Array.isArray(_fd.rows) ? _fd.rows.length : 0; _result.dataAgeMs = Date.now() - new Date(_fd.syncedAt).getTime(); }
+          _result.sourcesUpdated.push('aap-api');
+        } catch (_) {}
+        return _finish();
+      }
+    } catch (_) {}
+
     ctx.isSyncing = true;
     logger.info('Starting sync...');
 

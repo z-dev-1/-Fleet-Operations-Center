@@ -260,6 +260,14 @@ function initWindows(ctx) {
   let _rescanInProgress = false;
   let _rescanHitSSO     = false; // set when a rescan window lands on Midway SSO (dead session)
   let _appReady         = false;
+  let _startupScrapeStarted = false; // hoisted so API mode can hard-block the scrape loop
+  let _uptakeRefreshing = false;     // hoisted: guards the background Uptake API refresh
+  let _deepScanRunning  = false;     // hoisted: guards the background Orcha AI timeline build
+  let _lastDeepScanAt   = 0;         // hoisted: throttles the AI timeline build to once / 20 min
+  let _autoSyncStarted  = false;     // hoisted: ensures the auto-sync timer starts exactly once
+  let _pmFillRunning    = false;     // hoisted: guards the background PM/location fill
+  let _lastPmFillAt     = 0;         // hoisted: throttles the PM/location fill to once/hour
+  const RESCAN_INTERVAL_MS = 5 * 60 * 1000; // hoisted: _showApp reads it synchronously in API mode
 
   // Lazy-load scrapers to avoid circular require at module load
   function _getAap()  { return require('../scrapers/aap'); }
@@ -270,6 +278,20 @@ function initWindows(ctx) {
     return (settings.domiciles && settings.domiciles.length)
       ? settings.domiciles
       : require('../config/defaults').DEFAULT_DOMICILES;
+  }
+
+  // ── Data source mode ────────────────────────────────────────────────────
+  // The direct AAP/RG JSON API is the DEFAULT fleet data source. The legacy
+  // BrowserWindow scrape (which depends on AEA and can bounce into Midway SSO
+  // loops) is used ONLY when the user explicitly opts into 'scrape' mode via
+  // the status-bar sync pill toggle. When API mode is active we must NOT load
+  // the AAP scan URL in the main window, NOT run the startup/rescan scrape
+  // loops, and NOT let scrape writers overwrite the API-sourced fleetData.
+  function _apiMode() {
+    try {
+      const s = store.load('settings', {});
+      return s.dataSource !== 'scrape';   // default (undefined) => API
+    } catch (_) { return true; }
   }
 
   // ── Bubble ────────────────────────────────────────────────────────────────
@@ -890,6 +912,35 @@ function initWindows(ctx) {
     if (scrapeDomiciles.length > 6) {
       logger.info('Startup: ' + scrapeDomiciles.length + ' domiciles configured; scraping first 6 now, rest via chunked rescan');
     }
+    // ── API MODE (default): skip the AAP BrowserWindow scrape entirely ──────
+    // The direct AAP/RG JSON API is the default source. Don't load the AAP scan
+    // URL (which triggers AEA/SSO churn) — show the Fleet UI immediately and
+    // kick off the API load. The scrape pipeline is used only in 'scrape' mode.
+    if (_apiMode()) {
+      logger.info('[data-source] API mode \u2014 skipping AAP scrape, loading Fleet UI + API data');
+      _startupScrapeStarted = true;   // hard-block the scrape loop in _onMainWindowNav
+      try { send('auth:mwinit-status', { ok: true }); } catch (_) {}
+      // Expose the API loader on ctx NOW (before the early return) so the
+      // scheduler-driven runFullSync() + the status-bar toggle can trigger an
+      // API refresh. _loadFleetViaApiStartup is a hoisted function declaration,
+      // so it's safe to reference here even though it's defined further down.
+      if (ctx) ctx._loadFleetViaApiStartup = _loadFleetViaApiStartup;
+      // Paint the app UI right away from cache (if any), then load live via API.
+      _showApp();
+      _loadFleetViaApiStartup();
+      // Start the scheduler-driven auto-sync timer. In API mode _showApp() loads
+      // the renderer BEFORE the did-finish-load listener (registered later in
+      // this function) is attached, so that event is missed and startAutoSync
+      // never fires on its own — kick it off directly here. Guarded to run once.
+      try {
+        if (!_autoSyncStarted) {
+          _autoSyncStarted = true;
+          if (ctx && ctx.startAutoSync) ctx.startAutoSync();
+        }
+      } catch (e) { logger.warn('[data-source] startAutoSync failed: ' + e.message); }
+      return;
+    }
+
     logger.info('Loading AAP in main window: ' + startUrl.substring(0, 80));
 
     // ── Midway pre-flight: check actual cookie expiry, run mwinit if needed ──
@@ -956,8 +1007,250 @@ function initWindows(ctx) {
       mainWindow.loadURL(startUrl);
     })();
 
+    // ── API-mode fleet load (default source) ───────────────────────────────
+    // Builds the fleet dataset from the direct AAP/RG JSON API, merges Uptake +
+    // saved notes (same enrichment the scrape path uses), persists to the SAME
+    // fleetData store and pushes on the SAME fleet:data channel — so the table,
+    // filters, KPIs, Split View and detail panel render identically. Comments
+    // are NOT fetched here (table is instant); a unit's thread loads lazily via
+    // refreshUnit when its detail panel opens. Called once at startup in API
+    // mode, and on the recurring API refresh timer.
+    async function _loadFleetViaApiStartup(reason) {
+      try {
+        logger.info('[data-source] API load (' + (reason || 'startup') + '): building fleet dataset…');
+        pushStatus('\uD83D\uDD04 Loading fleet via API…');
+        const api = require('../scrapers/aap_api');
+        const { mergeUptakeIntoRows } = require('../scrapers/uptake');
+        const { mergeRelayIntoRows } = require('../scrapers/relay');
+        const ds  = await api.buildFleetDataset({ withComments: false });
+        let rows  = ds.rows || [];
+
+        // Enrich from the CACHED Uptake units immediately (never block the table
+        // on a live Uptake refresh). Uptake data is layered by equipmentId.
+        try {
+          const uu = (store.load('uptakeHash', {}).units) || [];
+          if (uu.length) rows = mergeUptakeIntoRows(rows, uu);
+        } catch (e) { logger.warn('[data-source] uptake merge skipped: ' + e.message); }
+        // Saved notes by equipmentId. EMPTY relayData so the API's vendor/WO/
+        // offsite/comment fields pass through unmodified.
+        try {
+          const ns = store.load('notesStore', {});
+          rows = mergeRelayIntoRows(rows, {}, ns);
+        } catch (e) { logger.warn('[data-source] notes merge skipped: ' + e.message); }
+
+        const now = new Date().toISOString();
+        const payload = {
+          rows, count: rows.length, unavailableCount: ds.unavailableCount,
+          scrapedAt: now, syncedAt: now, stale: false, source: 'aap-api',
+        };
+        store.save('fleetData', payload);
+        if (ctx) ctx.lastData = payload;
+        pushData(payload);   // TABLE PAINTS NOW — instant, no Uptake wait.
+        logger.info('[data-source] API load: pushed ' + rows.length + ' units (' + ds.unavailableCount + ' unavailable)');
+        pushStatus('\u2705 ' + rows.length + ' units \u2014 ' + ds.unavailableCount + ' unavailable (API)');
+
+        // BACKGROUND: if the Uptake cache is stale (>1h), refresh it via Uptake's
+        // OWN REST API (src/scrapers/uptake.js), then re-merge + re-push. This is
+        // NOT awaited — the table is already live; Uptake risk scores fold in when
+        // ready. Guarded so only one Uptake refresh runs at a time.
+        _maybeRefreshUptakeAsync(ds, mergeUptakeIntoRows, mergeRelayIntoRows);
+
+        // BACKGROUND: AI repair-timeline build. The API provides raw WO comments
+        // in fullConversation (+ offsite asistNotes); the OFFICIAL timeline shown
+        // to partners is built by Orcha (deep-scan.js), NOT a raw comment dump.
+        // Same builder the scrape sync used. Non-blocking; writes repairTimeline
+        // + notesStore and re-pushes when done.
+        _maybeRunDeepScanAsync(payload);
+
+        // BACKGROUND: PM + location for the REST of the fleet (available units).
+        // The bulk asset search can't return maintenanceScheduleStatuses (HTTP
+        // 400), so fetch getAsset per unit — throttled, low priority, re-pushing
+        // in chunks — so every unit eventually shows PM due dates + location in
+        // the table. Guarded to run once per load cycle.
+        _maybeFillPmAllAsync(payload);
+      } catch (e) {
+        logger.warn('[data-source] API load failed: ' + e.message);
+        pushError('API load failed: ' + e.message);
+      }
+    }
+
+    // Background AI timeline build (Orcha deep-scan) + re-push. Non-blocking.
+    // Guarded so only one runs at a time.
+    //
+    // The bulk fleet load uses withComments:false (fast), so down units have no
+    // fullConversation yet. The AI timeline needs it — so FIRST hydrate each
+    // down unit's conversation via the API (refreshUnit returns fullConversation
+    // + _secondaryWRs' conversations, internal comments already excluded), THEN
+    // hand the rows to runOrchaDeepScan which transforms them into the official
+    // partner-facing timeline (exactly the scrape path's behavior).
+    function _maybeRunDeepScanAsync(payload) {
+      if (_deepScanRunning) return;
+      // Don't re-run the full AI build more than once per 20 min — it's a heavy
+      // per-unit hydrate + AI call. The 5-min API refresh keeps the table fresh;
+      // the AI timeline doesn't need rebuilding that often.
+      if (_lastDeepScanAt && (Date.now() - _lastDeepScanAt) < 20 * 60 * 1000) return;
+      const rows = (payload && payload.rows) || [];
+      const downRows = rows.filter((r) => /unavail/i.test(String(r.lifecycleState || '')) || /offsite/i.test(String(r.lifecycleReason || '')));
+      if (!downRows.length) return;
+      _deepScanRunning = true;
+      _lastDeepScanAt = Date.now();
+      logger.info('[data-source] AI timeline build: hydrating ' + downRows.length + ' down units\u2019 conversations, then Orcha deep-scan…');
+      (async () => {
+        try {
+          const api = require('../scrapers/aap_api');
+          // Hydrate the down units via getAsset (PM due dates) + their WO
+          // conversations (bounded). PM is fetched even when the conversation is
+          // already cached, so the pills fill in. Mutates the rows in `payload`.
+          let hydrated = 0;
+          for (const r of downRows) {
+            try {
+              // api.refreshUnit() returns the mapped row directly. It calls
+              // getAsset(), which carries maintenanceScheduleStatuses — so this
+              // is where the PM due-date pills get populated for the table
+              // (the bulk asset search does NOT return that field).
+              const fr = await api.refreshUnit(r.equipmentId);
+              if (fr && fr.fullConversation) { r.fullConversation = fr.fullConversation; hydrated++; }
+              if (fr && fr._secondaryWRs) r._secondaryWRs = fr._secondaryWRs;
+              // PM due dates (raw + pills), offsite URL (Split View right pane),
+              // and location — all from getAsset + the WO comment thread.
+              if (fr) {
+                for (const k of ['pmBDue', 'pmXDue', 'dotDue', 'quarterlyLiftDue', 'pmB', 'pmX', 'dot', 'quarterlyLift',
+                                 'offsiteShopEventUrl', 'savedOffsiteUrl', 'offsiteShopEvent', 'asistSrUrl', 'asistLabel', 'asistSource', 'geofence']) {
+                  if (fr[k] != null && fr[k] !== '' && fr[k] !== '--') r[k] = fr[k];
+                }
+                if (fr.vin && !r.vin) r.vin = fr.vin;
+              }
+            } catch (_) { /* skip this unit */ }
+          }
+          // Persist + push the hydrated rows NOW (PM pills + conversations) so the
+          // saved fleetData + table reflect them even before the AI timeline
+          // finishes. (The deep-scan below only pushData()s; it doesn't save.)
+          try {
+            payload.syncedAt = new Date().toISOString();
+            store.save('fleetData', payload);
+            if (ctx) ctx.lastData = payload;
+            pushData(payload);
+          } catch (_) {}
+          logger.info('[data-source] AI timeline build: hydrated ' + hydrated + ' conversations + PM — running Orcha deep-scan');
+          const { runOrchaDeepScan } = require('../orcha/deep-scan');
+          await runOrchaDeepScan(rows, {
+            pushData,
+            pushStatus,
+            payload,
+            uptakeCount: (store.load('uptakeHash', {}).units || []).length,
+            relayCount: 0,
+          });
+        } catch (e) {
+          logger.warn('[data-source] deep-scan error (non-fatal): ' + e.message);
+        } finally { _deepScanRunning = false; }
+      })();
+    }
+
+    // Background PM + location fill for ALL units (throttled). getAsset per unit
+    // — only the ones still missing PM — in small chunks with a pause between,
+    // re-pushing so the table fills progressively. Runs once per load cycle,
+    // throttled to once/hour (PM/location change slowly). Non-blocking.
+    function _maybeFillPmAllAsync(payload) {
+      if (_pmFillRunning) return;
+      if (_lastPmFillAt && (Date.now() - _lastPmFillAt) < 60 * 60 * 1000) return;
+      const rows = (payload && payload.rows) || [];
+      // Units still lacking PM pills (down units were already filled by hydration).
+      const todo = rows.filter((r) => r.equipmentId && !(r.pmBDue || r.dotDue || r.pmXDue || r.quarterlyLiftDue));
+      if (!todo.length) return;
+      _pmFillRunning = true;
+      _lastPmFillAt = Date.now();
+      logger.info('[data-source] PM/location fill: ' + todo.length + ' units to enrich (throttled background)');
+      (async () => {
+        try {
+          const api = require('../scrapers/aap_api');
+          const mapper = require('../scrapers/aap_api_mapper');
+          const { parsePMDates } = require('../scrapers/relay');
+          let done = 0;
+          for (const r of todo) {
+            try {
+              const aaid = r.assetId || r.aaid;
+              if (!aaid) continue;
+              const full = await api.getAsset(aaid);
+              if (full) {
+                const pmRaw = mapper.pmDueFields(full);
+                // Only set PM fields that actually resolved — never clobber a
+                // previously-good value with null (a getAsset that lacked the
+                // maintenanceScheduleStatuses field would otherwise blank it).
+                const _hasPm = pmRaw.pmBDue || pmRaw.pmXDue || pmRaw.dotDue || pmRaw.quarterlyLiftDue;
+                if (_hasPm) {
+                  for (const k of Object.keys(pmRaw)) { if (pmRaw[k]) r[k] = pmRaw[k]; }
+                  if (parsePMDates) { const pm = parsePMDates(pmRaw); r.pmB = pm.pmB; r.pmX = pm.pmX; r.dot = pm.dot; r.quarterlyLift = pm.quarterlyLift; }
+                }
+                // Location from the full asset's latestLocation.
+                const ll = (full.latestLocation) || (full.asset && full.asset.latestLocation) || {};
+                const gf = (g) => (Array.isArray(g) && g.length) ? (g[0] && (g[0].name || g[0].geofenceName || g[0])) : '';
+                const geo = gf(ll.geoFences) || ll.geofenceName || ll.yardBuildingID || '';
+                if (geo && !r.geofence) r.geofence = geo;
+                done++;
+              }
+            } catch (_) { /* skip */ }
+            // Throttle: pause briefly every few units, and re-push in chunks.
+            if (done % 15 === 0 && done > 0) {
+              try { payload.syncedAt = new Date().toISOString(); store.save('fleetData', payload); if (ctx) ctx.lastData = payload; pushData(payload); } catch (_) {}
+              await new Promise((res) => setTimeout(res, 1500));
+            }
+          }
+          try { payload.syncedAt = new Date().toISOString(); store.save('fleetData', payload); if (ctx) ctx.lastData = payload; pushData(payload); } catch (_) {}
+          logger.info('[data-source] PM/location fill: enriched ' + done + ' units');
+        } catch (e) { logger.warn('[data-source] PM/location fill failed: ' + e.message); }
+        finally { _pmFillRunning = false; }
+      })();
+    }
+
+    // Background Uptake refresh (via Uptake REST API) + re-push. Non-blocking.
+    function _maybeRefreshUptakeAsync(ds) {
+      try {
+        const hash = store.load('uptakeHash', {});
+        const ageMs = hash.scrapedAt ? (Date.now() - new Date(hash.scrapedAt).getTime()) : Infinity;
+        const stale = !(Array.isArray(hash.units) && hash.units.length) || ageMs > 3600 * 1000;
+        if (!stale || _uptakeRefreshing) return;
+        _uptakeRefreshing = true;
+        logger.info('[data-source] Uptake cache stale (' + (isFinite(ageMs) ? Math.round(ageMs / 60000) + 'min' : 'empty') + ') — background refresh via Uptake API');
+        const { scrapeUptake, mergeUptakeIntoRows } = require('../scrapers/uptake');
+        const { mergeRelayIntoRows } = require('../scrapers/relay');
+        (async () => {
+          try {
+            const res = await scrapeUptake();
+            if (res && Array.isArray(res.units) && res.units.length) {
+              store.save('uptakeHash', {
+                units: res.units, count: res.units.length,
+                scrapedAt: res.scrapedAt || new Date().toISOString(),
+              });
+              logger.info('[data-source] Uptake API: ' + res.units.length + ' units refreshed + cached — re-merging');
+              // Re-merge onto the CURRENT fleet rows and re-push so risk scores appear.
+              const cur = store.load('fleetData', null);
+              if (cur && Array.isArray(cur.rows)) {
+                let rows2 = mergeUptakeIntoRows(cur.rows, res.units);
+                try { rows2 = mergeRelayIntoRows(rows2, {}, store.load('notesStore', {})); } catch (_) {}
+                const now2 = new Date().toISOString();
+                const p2 = { rows: rows2, count: rows2.length, unavailableCount: cur.unavailableCount, scrapedAt: now2, syncedAt: now2, stale: false, source: 'aap-api' };
+                store.save('fleetData', p2);
+                if (ctx) ctx.lastData = p2;
+                pushData(p2);
+                logger.info('[data-source] Uptake re-merge pushed (' + rows2.length + ' units)');
+              }
+            }
+          } catch (e) { logger.warn('[data-source] background Uptake refresh failed: ' + e.message); }
+          finally { _uptakeRefreshing = false; }
+        })();
+      } catch (e) { _uptakeRefreshing = false; logger.warn('[data-source] Uptake refresh scheduling failed: ' + e.message); }
+    }
+    // Expose on ctx so toggle/IPC can trigger a refresh the same way.
+    if (ctx) ctx._loadFleetViaApiStartup = _loadFleetViaApiStartup;
+
     function _showApp() {
       _appReady = true;
+      // In API mode the fleet comes from the direct JSON API, not the chunked
+      // scrape rescan — skip scheduling the scrape backfill/recurring rescan.
+      if (_apiMode()) {
+        logger.info('[data-source] API mode \u2014 scheduling recurring API refresh (no scrape rescan)');
+        setInterval(() => { _loadFleetViaApiStartup('refresh'); }, RESCAN_INTERVAL_MS);
+      } else {
       // Startup shows only the first 6 domiciles for a fast first paint; the
       // chunked rescan backfills the remaining domiciles. Run that FIRST backfill
       // almost immediately (~5s) instead of after 90s so all configured
@@ -968,6 +1261,7 @@ function initWindows(ctx) {
       setTimeout(() => {
         setInterval(() => triggerLiveRescan(false), RESCAN_INTERVAL_MS);
       }, RESCAN_INTERVAL_MS);
+      }
       logger.info('Switching to Fleet Operations app...');
       if (process.env.NODE_ENV === 'development') {
         mainWindow.loadURL('http://localhost:5173');
@@ -996,8 +1290,6 @@ function initWindows(ctx) {
       }catch(e){}
       _showApp();
     }
-    let _startupScrapeStarted = false;
-
     function _onMainWindowNav(url) {
       if (!url) url = mainWindow.webContents.getURL();
       logger.info('Main window loaded: ' + url.substring(0, 80));
@@ -1213,7 +1505,12 @@ function initWindows(ctx) {
 
     mainWindow.webContents.on('did-finish-load', () => {
       const url = mainWindow.webContents.getURL();
-      if (url.includes('index.html') || url.startsWith('file://')) {
+      // Start the scheduler-driven auto-sync once the Fleet UI (renderer) is
+      // loaded. Match the dev server (localhost:5173) too, not just the packaged
+      // index.html/file:// — otherwise the sync-interval timer never starts in
+      // dev and the scheduler's Fleet Sync never fires on its own.
+      if ((url.includes('index.html') || url.startsWith('file://') || url.includes('localhost:5173') || url.includes('dist/renderer')) && !_autoSyncStarted) {
+        _autoSyncStarted = true;
         if (ctx.startAutoSync) ctx.startAutoSync(); else if (startAutoSync) startAutoSync();
       }
     });
@@ -1249,7 +1546,8 @@ function initWindows(ctx) {
     });
 
     // ── Live rescan: off-screen BrowserWindow every 5 min ────────────────────
-    const RESCAN_INTERVAL_MS = 5 * 60 * 1000;
+    // RESCAN_INTERVAL_MS is declared at initWindows scope (hoisted) so _showApp
+    // can read it synchronously at startup in API mode without a TDZ error.
 
     // The AAP dashboard hard-caps the domicile/search filter at 6 sites — pass
     // more and the page returns an EMPTY result set. To support fleets spread
@@ -1354,6 +1652,14 @@ function initWindows(ctx) {
     }
 
     async function triggerLiveRescan(force) {
+      // In API mode the scrape is disabled entirely — redirect any rescan
+      // request (timer, F5, aap:rescan IPC) to an API refresh instead so the
+      // AAP BrowserWindow never opens and can't bounce into AEA/SSO.
+      if (_apiMode()) {
+        logger.info('[data-source] API mode \u2014 rescan request redirected to API refresh');
+        if (ctx && ctx._loadFleetViaApiStartup) { try { await ctx._loadFleetViaApiStartup('rescan'); } catch (_) {} }
+        return;
+      }
       if (!_appReady)         { logger.info('Rescan skipped \u2014 app not ready'); return; }
       if (_rescanInProgress)  { logger.info('Rescan already in progress'); return; }
       // Skip the TIMER-driven rescan while a Long Dwell AI Fill is running -- a
