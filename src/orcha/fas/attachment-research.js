@@ -46,17 +46,26 @@ function _bedrock() { try { return require('../../scrapers/bedrock'); } catch (_
 // to a simple token scan if that module isn't loadable (avoids a require cycle
 // hard-failure — evidence.js requires THIS module).
 function _extractUnits(text) {
+  // Prefer fleet-validated units (resolveMessageEntities only returns tokens
+  // that match a real equipmentId in synced fleetData) — those are safe to
+  // research immediately.
+  let validated = [];
   try {
     const ev = require('./evidence');
     if (ev && typeof ev.resolveMessageEntities === 'function') {
       const r = ev.resolveMessageEntities(text || '');
-      return Array.isArray(r.units) ? r.units : [];
+      validated = Array.isArray(r.units) ? r.units : [];
     }
-  } catch (_) { /* fall through */ }
-  const out = [];
+  } catch (_) { /* fall through to token scan */ }
+  // Also keep raw unit-shaped tokens as CANDIDATES. When fleet data is empty or
+  // the attachment references a unit not in the current sync, validated[] is
+  // empty and we'd otherwise drop a legit id — the raw candidates still get fed
+  // to GET_UNIT, which re-validates + authorizes per unit (so a bogus token
+  // simply yields "no record", it can't widen scope or fabricate a unit).
+  const candidates = [];
   const re = /\b([A-Za-z]?\d{4,8})\b/g; let m;
-  while ((m = re.exec(String(text || ''))) !== null) out.push(m[1]);
-  return [...new Set(out)].slice(0, 10);
+  while ((m = re.exec(String(text || ''))) !== null) candidates.push(m[1]);
+  return [...new Set([...validated, ...candidates])].slice(0, 10);
 }
 
 function _isTextual(file) {
