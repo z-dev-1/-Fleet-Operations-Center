@@ -1651,13 +1651,12 @@ async function scrapeUptake() {
       if (FLEET_DOMAIN.test(url) && (!REALM_LOGIN.test(url) || REALM_CALLBACK.test(url))) {
         if (!authDone) {
           authDone = true;
-          // DOM scrape is the DEFAULT (restores the pre-API-integration
-          // behavior: full per-insight screenshot build-up + full expanded
-          // SUMMARY/RECOMMENDED text from the insight detail panel). The JSON
-          // API path (faster, but screenshots only the chart PNG and uses the
-          // short generic meta.description) is opt-in via UPTAKE_API=1.
-          if (process.env.UPTAKE_API === '1') {
-            flog('[Uptake] Auth done — starting API scrape (UPTAKE_API=1)...');
+          // API path is the DEFAULT (fast, reliable JSON). Set UPTAKE_API=0 to
+          // force the legacy DOM scrape. The API path now captures the full
+          // unit-specific insight text + all per-insight chart screenshots to
+          // match the DOM build-up.
+          if (process.env.UPTAKE_API !== '0') {
+            flog('[Uptake] Auth done — starting API scrape (default; set UPTAKE_API=0 for DOM)...');
             runApiScrape({
               win,
               finish,
@@ -1668,7 +1667,7 @@ async function scrapeUptake() {
               setLiveMap: (m) => { _liveUnitMap = m; },
             });
           } else {
-            flog('[Uptake] Auth done — starting DOM scrape (default; full screenshots + text)...');
+            flog('[Uptake] Auth done — starting legacy DOM scrape (UPTAKE_API=0)...');
             runScrape();
           }
         }
