@@ -33,6 +33,35 @@ const EST_RE = new RegExp('https?://' + ASIST_DOMAIN + '/fleet/estimates/([A-Za-
 const PAGE_LOAD_TIMEOUT = 25000; const POLL_INTERVAL = 1000; const POLL_MAX = 20;
 const MAX_RESPONSE_HOPS = 3; // bounds the SR -> response-case -> response-case chase
 
+// ── API-first estimate comment thread (2026-10) ─────────────────────────────
+// The dealer<->us comment thread we used to DOM-scrape out of the AngularJS
+// #notes_workspace container is also served as clean JSON by Decisiv's own API:
+//   GET /mobilecomm/api/estimates/{id}/activity_logs
+// (discovered via a live network capture of the ASIST estimate page). This
+// helper tries that API first — far more reliable than waiting for the lazy
+// Notes tab to render in an offscreen window — and returns the formatted thread
+// text, or '' to signal the caller to fall back to openAndScrapeEstimate().
+// Opt out with DECISIV_API=0.
+const EST_ID_RE = new RegExp('https?://' + ASIST_DOMAIN + '/fleet/estimates/(\\d+)', 'i');
+async function _estimateCommentsViaApi(estimateUrl) {
+  if (process.env.DECISIV_API === '0') return '';
+  const m = String(estimateUrl || '').match(EST_ID_RE);
+  const estId = m && m[1];
+  if (!estId) return ''; // id isn't numeric (API keys on the numeric estimate id)
+  try {
+    const api = require('./decisiv_api');
+    const res = await api.getEstimateComments(estId, { srUrl: estimateUrl });
+    if (res && res.ok && res.text) {
+      logger.info('[ae] estimate comments via API | est:', estId, '| notes:', res.count);
+      return res.text;
+    }
+    logger.info('[ae] estimate API returned no notes (est ' + estId + ') -> DOM fallback');
+  } catch (e) {
+    logger.warn('[ae] estimate API error (est ' + estId + '), DOM fallback:', e.message);
+  }
+  return '';
+}
+
 const ASIST_SCRAPE = String.raw`
 (function() {
   var body = document.body ? document.body.innerText : '';
@@ -377,15 +406,20 @@ async function enrichVolvoAsist(srUrl){
   // is exactly where dealer status updates live that never reach Relay.
   if(_isDirectEstimate){
     const estId=(srUrl.match(EST_RE)||[])[1]||'';
-    // Use the Notes-tab-aware estimate scraper (waits for the lazy-loaded Notes
-    // comment thread; extracts ONLY the comments, not the pricing/specs body).
-    const est=await openAndScrapeEstimate(srUrl,part);
-    if(!est){logger.warn('[ae] estimate page failed (direct)');return _empty(srUrl,'estimate page failed');}
-    const estComments=(est.commentThread||'').trim();
+    // API-FIRST: pull the comment thread straight from Decisiv's JSON API. If it
+    // yields nothing (non-numeric id, API/session error) fall back to the
+    // Notes-tab DOM scrape (waits for the lazy #notes_workspace to render).
+    let estComments = (await _estimateCommentsViaApi(srUrl)).trim();
+    let est = null;
+    if (!estComments) {
+      est = await openAndScrapeEstimate(srUrl,part);
+      if(!est){logger.warn('[ae] estimate page failed (direct)');return _empty(srUrl,'estimate page failed');}
+      estComments=(est.commentThread||'').trim();
+    }
     // offsiteText is the COMMENT THREAD only — not the estimate structure — so
     // the AI timeline / card sees the dealer's actual status, not pricing noise.
     const offsiteText=estComments.slice(0,6000);
-    logger.info('[ae] DONE (direct estimate) | est:',estId,'| commentThread:',estComments.length+'ch | notesReady:',!!est.notesReady);
+    logger.info('[ae] DONE (direct estimate) | est:',estId,'| commentThread:',estComments.length+'ch | via:',(est?'dom':'api'));
     // Direct-estimate path never opens the SR page, so no status-bar stage is
     // available; infer 'ready' ONLY if the estimate comments explicitly say so.
     var _directStage = /asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed/i.test(estComments) ? 'ready' : '';
@@ -435,17 +469,21 @@ async function enrichVolvoAsist(srUrl){
   // fall back to the SR status thread exactly as before.
   let estimateComments = '';
   if (estUrl) {
-    try {
-      // Notes-tab-aware scrape: waits for the lazy-loaded Notes comment thread
-      // and extracts ONLY the comments (not the pricing/specs estimate body).
-      const est = await openAndScrapeEstimate(estUrl, part);
-      if (est) {
-        estimateComments = (est.commentThread || '').trim();
-        logger.info('[ae] estimate page scraped | commentThread:', estimateComments.length + 'ch | notesReady:', !!est.notesReady);
-      } else {
-        logger.warn('[ae] estimate page open failed (chase):', estUrl.slice(0, 80));
-      }
-    } catch (_ee) { logger.warn('[ae] estimate page scrape CATCH:', _ee.message); }
+    // API-FIRST: Decisiv's JSON activity_logs endpoint for this estimate.
+    try { estimateComments = (await _estimateCommentsViaApi(estUrl)).trim(); } catch (_) {}
+    if (!estimateComments) {
+      try {
+        // Fallback: Notes-tab-aware DOM scrape (waits for the lazy-loaded Notes
+        // comment thread; extracts ONLY the comments, not pricing/specs).
+        const est = await openAndScrapeEstimate(estUrl, part);
+        if (est) {
+          estimateComments = (est.commentThread || '').trim();
+          logger.info('[ae] estimate page scraped (DOM) | commentThread:', estimateComments.length + 'ch | notesReady:', !!est.notesReady);
+        } else {
+          logger.warn('[ae] estimate page open failed (chase):', estUrl.slice(0, 80));
+        }
+      } catch (_ee) { logger.warn('[ae] estimate page scrape CATCH:', _ee.message); }
+    }
   }
 
   logger.info('[ae] DONE | src:',src,'case:',caseNum,'bestUrl:',bUrl.slice(0,80),'| srThread:',(sr.responsesText||'').length+'ch | estThread:',estimateComments.length+'ch');
