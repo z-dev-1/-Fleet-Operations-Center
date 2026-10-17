@@ -391,6 +391,85 @@ function runMwinit(force) {
   return _mwinitInFlight;
 }
 
+// Read the soonest AEA (amazon_enterprise_access) expiry FROM THE COOKIE FILE,
+// in minutes, or null when no live AEA cookie is on disk. Used to detect the
+// "session valid but AEA missing/lapsed" state and to verify a refresh landed.
+function aeaFileExpiryMin() {
+  try {
+    const { cookies } = parseMidwayCookies();
+    const now = Math.floor(Date.now() / 1000);
+    const aea = cookies.filter(c => c.name === 'amazon_enterprise_access' && c.expirationDate);
+    if (!aea.length) return null;
+    const soonest = aea.reduce((min, c) => Math.min(min, c.expirationDate), Infinity);
+    return soonest === Infinity ? null : Math.round((soonest - now) / 60);
+  } catch (_) { return null; }
+}
+
+// ── Refresh ONLY the AEA posture cookie via `mwinit --refresh-aea` ──────────────
+// The missing middle rung of the recovery ladder. AEA (amazon_enterprise_access)
+// is a short-lived (~6h) posture cookie AAP enforces server-side; when it lapses
+// the long-lived Midway session is still valid, so a FULL interactive mwinit
+// (PIN + WebAuthn tap) is overkill. `mwinit --refresh-aea` re-mints just the AEA
+// cookie into ~/.midway/cookie, reusing the live session — usually with NO tap.
+// This is exactly the command that fixes the "AAP session expired, cookie file
+// has session but no AEA" state (confirmed live 2026-10-17). Returns
+// { ok, aeaMin } — ok=true means a live AEA cookie is now on disk.
+let _aeaRefreshInFlight = null;
+function refreshAeaViaMwinit() {
+  if (_aeaRefreshInFlight) return _aeaRefreshInFlight;
+  if (_isOfflineNow()) return Promise.resolve({ ok: false, skipped: 'offline' });
+  _aeaRefreshInFlight = new Promise((resolve) => {
+    logger.info('[AuthManager] Spawning mwinit --refresh-aea (AEA posture refresh, no full re-auth)...');
+    const batchPath = require('path').join(require('os').tmpdir(), 'fleet_mwinit_aea.bat');
+    try {
+      fs.writeFileSync(batchPath, [
+        '@echo off',
+        'echo Fleet Operations - refreshing AAP enterprise-access (AEA) cookie...',
+        'echo.',
+        'mwinit --refresh-aea',
+        'echo.',
+        'echo AEA refresh step complete - this window will close in 3 seconds.',
+        'timeout /t 3 /nobreak > nul',
+        'exit',
+      ].join('\r\n'));
+    } catch (e) {
+      _aeaRefreshInFlight = null;
+      resolve({ ok: false, error: 'batch-write:' + e.message });
+      return;
+    }
+    const child = spawn('cmd.exe', ['/c', 'start', 'cmd.exe', '/c', batchPath], { detached: true, stdio: 'ignore', shell: false });
+    child.unref();
+
+    // Success = a live AEA cookie now present on disk (and not already expired).
+    // Poll the file; AEA-only refresh is fast and usually needs no WebAuthn tap,
+    // so a 90s budget is plenty (full mwinit keeps its own 3-min budget).
+    const started = Date.now();
+    const AEA_REFRESH_TIMEOUT_MS = 90 * 1000;
+    let baselineMtimeMs = 0;
+    try { baselineMtimeMs = fs.statSync(COOKIE_FILE).mtimeMs; } catch (_) {}
+    const poll = setInterval(() => {
+      try {
+        let rewritten = false;
+        try { rewritten = fs.statSync(COOKIE_FILE).mtimeMs > baselineMtimeMs; } catch (_) {}
+        const aeaMin = aeaFileExpiryMin();
+        if (rewritten && aeaMin != null && aeaMin > 0) {
+          clearInterval(poll);
+          logger.info('[AuthManager] mwinit --refresh-aea complete — AEA now ' + aeaMin + 'min');
+          resolve({ ok: true, aeaMin });
+          return;
+        }
+        if (Date.now() - started > AEA_REFRESH_TIMEOUT_MS) {
+          clearInterval(poll);
+          logger.warn('[AuthManager] mwinit --refresh-aea did not produce an AEA cookie within budget');
+          resolve({ ok: false, aeaMin: aeaFileExpiryMin() });
+        }
+      } catch (_) { /* transient FS error while file is written */ }
+    }, 1500);
+  });
+  _aeaRefreshInFlight.finally(() => { _aeaRefreshInFlight = null; });
+  return _aeaRefreshInFlight;
+}
+
 // ── Probe AAP session by URL (no DOM — too fragile) ──────────────────────────
 async function probeSession() {
   return new Promise((resolve) => {
@@ -913,6 +992,8 @@ module.exports = {
   injectCookies, // FEATURE (2026-07-23): now accepts optional target session
   probeSession, // FIX (2026-07-21): exported so callers can replicate ensureAuthenticated's verification steps without its disabled auto-spawn branch
   refreshAeaSilently, // FIX (2026-09-30): silent AEA re-mint so one auth lasts the full ~24h session
+  refreshAeaViaMwinit, // FIX (2026-10-17): middle recovery rung — `mwinit --refresh-aea` re-mints just the AEA posture cookie (no full re-auth) when session is valid but AEA lapsed
+  aeaFileExpiryMin, // FIX (2026-10-17): soonest AEA expiry from the cookie FILE (to detect session-valid-but-AEA-missing)
   aeaSessionExpiryMin, // FIX (2026-10-10): read live AEA expiry from the Electron session (truth), not the stale disk file
   ensureAuthenticated,
   pingRelayEndpoint,
