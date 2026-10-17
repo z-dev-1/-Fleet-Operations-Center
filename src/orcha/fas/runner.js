@@ -198,13 +198,24 @@ async function handleInbound(input, deps) {
   // autonomous reply — queue for human review instead.
   const evFacts = (decision._evidence && decision._evidence.verifiedFacts) || [];
   const staleEvidence = evFacts.some(f => f && f.stale === true);
-  const canAutoSend =
+  // SELF-DM: the operator's own "just me" DM is a personal research/notes
+  // surface — there is no third party to protect, so the approval gates
+  // (confidence floor, conflict/missing-fact hold, stale hold, approval-level
+  // action) are unnecessary there. Auto-send ANY terminal answer with a real
+  // reply so the operator actually sees the research in Slack instead of it
+  // silently queuing. Still never auto-sends an empty/failed reply, and still
+  // loop-safe (the DM caller marks self-DM sends). All OTHER senders keep the
+  // full gating below unchanged.
+  const _selfDmAnswer = !!input.isSelf &&
+    decision.decision === 'answer' &&
+    typeof decision.reply === 'string' && decision.reply.trim().length > 0;
+  const canAutoSend = _selfDmAnswer || (
     decision.decision === 'answer' &&
     typeof decision.reply === 'string' && decision.reply.trim().length > 0 &&
     (decision.confidence == null || decision.confidence >= AUTO_SEND_MIN_CONFIDENCE) &&
     !_hasApprovalLevelAction(decision) &&
     !gapsOrConflicts &&
-    !staleEvidence;
+    !staleEvidence);
 
   if (canAutoSend) {
     // PART 3: reply + its (low-risk) actions are ONE transaction. Execute the
