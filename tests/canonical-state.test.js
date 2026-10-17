@@ -504,6 +504,128 @@ describe('canonical_state — next-action intent', () => {
   });
 });
 
+describe('canonical_state — multidimensional axes (dimensions)', () => {
+  it('every record carries a normalized dimensions block with all 5 axes', () => {
+    const rec = canonical.computeCanonical({ equipmentId: 'DM0', lifecycleState: 'Available' });
+    expect(rec.dimensions).toBeTruthy();
+    for (const dim of canonical.DIMENSIONS) {
+      expect(rec.dimensions).toHaveProperty(dim);
+      const axis = rec.dimensions[dim];
+      expect(axis).toHaveProperty('value');
+      expect(axis).toHaveProperty('confidence');
+      expect(axis).toHaveProperty('source');
+      expect(canonical.isValidDimensionValue(dim, axis.value)).toBe(true);
+    }
+  });
+
+  it('availability is independent of repair phase', () => {
+    // Down AND awaiting_parts at once — the flat status can only say one thing,
+    // the axes say both.
+    const rec = canonical.computeCanonical({ equipmentId: 'DM1', lifecycleState: 'Unavailable', serviceState: 'Awaiting parts on order', vendor: 'Amerit' });
+    expect(rec.status).toBe('awaiting_parts');          // rollup
+    expect(rec.dimensions.availability.value).toBe('down');
+    expect(rec.dimensions.phase.value).toBe('awaiting_parts');
+    expect(rec.dimensions.waitingOn.value).toBe('parts');
+    expect(rec.dimensions.location.value).toBe('at_vendor'); // down + vendor assigned
+  });
+
+  it('an available unit reports phase none and location at_yard', () => {
+    const rec = canonical.computeCanonical({ equipmentId: 'DM2', lifecycleState: 'Available' });
+    expect(rec.dimensions.availability.value).toBe('available');
+    expect(rec.dimensions.phase.value).toBe('none');
+    expect(rec.dimensions.location.value).toBe('at_yard');
+    expect(rec.dimensions.waitingOn.value).toBe('none');
+  });
+
+  it('a fresh offsite thread puts location offsite with offsite provenance', () => {
+    const rec = canonical.computeCanonical({ equipmentId: 'DM3', lifecycleState: 'Unavailable', asistNotes: 'Dealer: parts arrived', asistScrapedAt: new Date().toISOString() });
+    expect(rec.dimensions.location.value).toBe('offsite');
+    expect(rec.dimensions.location.source).toBe('offsite');
+  });
+
+  it('in-transit text drives the location axis to in_transit', () => {
+    const rec = canonical.computeCanonical({ equipmentId: 'DM4', lifecycleState: 'Unavailable', serviceState: 'Being towed to dealer' });
+    expect(rec.dimensions.location.value).toBe('in_transit');
+    expect(rec.status).toBe('in_transit');
+  });
+
+  it('risk axis buckets the Uptake score (high/medium/low/none)', () => {
+    expect(canonical._deriveRisk({ riskScore: 92 })).toBe('high');
+    expect(canonical._deriveRisk({ riskScore: 60 })).toBe('medium');
+    expect(canonical._deriveRisk({ riskScore: 20 })).toBe('low');
+    expect(canonical._deriveRisk({ riskScore: 0 })).toBe('none');
+    expect(canonical._deriveRisk({})).toBe('none');
+    const rec = canonical.computeCanonical({ equipmentId: 'DM5', lifecycleState: 'Unavailable', riskScore: 92 });
+    expect(rec.dimensions.risk.value).toBe('high');
+    expect(rec.dimensions.risk.source).toBe('uptake');
+  });
+
+  it('reconcileCanonical sharpens the phase/waitingOn axes and lifts their confidence', () => {
+    const rec = canonical.reconcileCanonical(
+      { equipmentId: 'DM6', lifecycleState: 'Unavailable', vendor: 'Amerit' },
+      { decision: { equipmentId: 'DM6', currentStatus: 'Waiting on DEF pump parts', nextStep: 'chase dealer', lastCommentBy: 'us', confidence: 0.84, relayHasLatest: false, missingUpdate: 'parts on order' } }
+    );
+    expect(rec.dimensions.phase.value).toBe('awaiting_parts');
+    expect(rec.dimensions.phase.confidence).toBeCloseTo(0.84, 2);
+    expect(rec.dimensions.waitingOn.value).toBe('vendor'); // we spoke last
+    expect(rec.dimensions.waitingOn.confidence).toBeCloseTo(0.84, 2);
+    // offsite was trusted -> location axis lifts to the decision confidence too
+    expect(rec.dimensions.location.source).toBe('offsite');
+    expect(rec.dimensions.location.confidence).toBeCloseTo(0.84, 2);
+  });
+
+  it('mirrorFields exposes lean per-axis values and fromRow reconstructs them', () => {
+    const base = canonical.computeCanonical({ equipmentId: 'DM7', lifecycleState: 'Unavailable', serviceState: 'awaiting parts', vendor: 'Amerit', riskScore: 85 });
+    const m = canonical.mirrorFields(base);
+    expect(m.canonicalAvailability).toBe('down');
+    expect(m.canonicalPhase).toBe('awaiting_parts');
+    expect(m.canonicalLocation).toBe('at_vendor');
+    expect(m.canonicalRisk).toBe('high');
+    const row = Object.assign({ equipmentId: 'DM7' }, m);
+    const rec = canonical.fromRow(row);
+    expect(rec.dimensions.availability.value).toBe('down');
+    expect(rec.dimensions.phase.value).toBe('awaiting_parts');
+    expect(rec.dimensions.location.value).toBe('at_vendor');
+    expect(rec.dimensions.risk.value).toBe('high');
+    expect(rec.dimensions.risk.source).toBe('uptake');
+  });
+
+  it('_normalizeDimensions coerces out-of-vocabulary values to honest defaults', () => {
+    const out = canonical._normalizeDimensions({
+      availability: { value: 'bogus', confidence: 0.9, source: 'x' },
+      phase: { value: 'in_repair' },
+      // location/waitingOn/risk missing entirely
+    });
+    expect(out.availability.value).toBe('unknown'); // coerced
+    expect(out.phase.value).toBe('in_repair');       // valid -> kept
+    expect(out.location.value).toBe('unknown');      // missing -> default
+    expect(out.waitingOn.value).toBe('none');
+    expect(out.risk.value).toBe('none');
+  });
+
+  it('signalTokens surfaces the informative axes (skipping none/unknown noise)', () => {
+    const base = canonical.computeCanonical({ equipmentId: 'DM8', lifecycleState: 'Unavailable', serviceState: 'awaiting parts', vendor: 'Amerit', riskScore: 90 });
+    const row = Object.assign({ equipmentId: 'DM8' }, canonical.mirrorFields(base));
+    const store = { load() { throw new Error('use mirror'); } };
+    const tokens = canonical.signalTokens(row, { store });
+    expect(tokens).toContain('avail=down');
+    expect(tokens).toContain('phase=awaiting_parts');
+    expect(tokens).toContain('loc=at_vendor');
+    expect(tokens).toContain('risk=high');
+  });
+
+  it('buildAll mirrors the axes onto every row', () => {
+    const { mirrored } = canonical.buildAll([
+      { equipmentId: 'BA1', lifecycleState: 'Available' },
+      { equipmentId: 'BA2', lifecycleState: 'Unavailable', serviceState: 'in repair', vendor: 'Amerit' },
+    ], {});
+    const r2 = mirrored.find(r => r.equipmentId === 'BA2');
+    expect(r2.canonicalAvailability).toBe('down');
+    expect(r2.canonicalPhase).toBe('in_repair');
+    expect(r2.canonicalLocation).toBe('at_vendor');
+  });
+});
+
 describe('relay_reconcile_apply — reply_to_vendor is always confirm-gated', () => {
   it('a reply_to_vendor decision is STAGED even when MODE A auto-post is on', async () => {
     const apply = require('../src/scrapers/relay_reconcile_apply');

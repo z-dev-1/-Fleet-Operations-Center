@@ -53,6 +53,37 @@ const STATUSES = [
 
 function isValidStatus(s) { return STATUSES.includes(String(s || '')); }
 
+// ── Multidimensional axes (independent dimensions) ─────────────────────────────
+// The flat `status` enum collapses a unit to ONE state, but reality is
+// orthogonal: a unit can be down AND awaiting_parts AND at a vendor all at once.
+// We model that as independent AXES, each derived on its own from the fields
+// already on the row. `status` stays as the back-compat rollup (availability +
+// phase); every existing consumer keeps reading it unchanged. New consumers can
+// read `record.dimensions` to reason on any single axis.
+//
+// Each axis value comes with its own {value, confidence, source} so a surface
+// can show per-axis provenance (e.g. location trusted to AAP GPS while phase
+// trusted to the offsite thread).
+const DIMENSIONS = ['availability', 'phase', 'location', 'waitingOn', 'risk'];
+
+const DIMENSION_VALUES = {
+  // Is the unit usable? (independent of WHY it's down)
+  availability: ['available', 'down', 'decommissioned', 'unknown'],
+  // Where is the repair in its lifecycle? ('none' = not in a repair flow)
+  phase:        ['none', 'diagnosing', 'awaiting_parts', 'awaiting_estimate_approval', 'in_repair', 'complete', 'unknown'],
+  // Physically, where is the unit?
+  location:     ['at_yard', 'in_transit', 'at_vendor', 'offsite', 'unknown'],
+  // Who owes the next move?
+  waitingOn:    ['us', 'vendor', 'parts', 'approval', 'none'],
+  // Predictive risk (from Uptake).
+  risk:         ['high', 'medium', 'low', 'none'],
+};
+
+function isValidDimensionValue(dim, val) {
+  const allowed = DIMENSION_VALUES[dim];
+  return Array.isArray(allowed) && allowed.includes(String(val || ''));
+}
+
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
 // Clean "mojibake" — text already UTF-8 but decoded once-or-twice as
@@ -189,6 +220,129 @@ function _deriveWaitingOn(status) {
     case 'ready_for_pickup': return 'us';
     default: return '';
   }
+}
+
+// ── Independent-axis derivers (deterministic) ───────────────────────────────────
+// Each reads only fields already on the row and returns a bare value from its
+// DIMENSION_VALUES vocabulary. _buildDimensions wraps them with {value,
+// confidence, source}. None of these fabricate — unknown/none is the honest
+// default when the row doesn't say.
+
+// AVAILABILITY — is the unit usable? This is purely the AAP lifecycle signal
+// plus the terminal "decommissioned" read; it deliberately ignores repair
+// sub-state (that's the `phase` axis).
+function _deriveAvailability(row, status) {
+  const r = row || {};
+  if (status === 'decommissioned') return 'decommissioned';
+  const life = _lc(r.lifecycleState || r.atsState);
+  if (life.includes('unavail')) return 'down';
+  if (_has(life, /avail|active|in service|ready/)) return 'available';
+  // No lifecycle signal — fall back to the rollup status.
+  if (status === 'available') return 'available';
+  if (status && status !== 'unknown') return 'down'; // any repair state implies down
+  return 'unknown';
+}
+
+// PHASE — where the repair is in its lifecycle, independent of availability.
+// Reuses the same text signals as _deriveStatus but ONLY for the repair axis,
+// so a unit that's back to available can still report its last phase as
+// 'complete'.
+function _derivePhase(row, status) {
+  const r = row || {};
+  // Map the rollup status straight through when it already names a phase.
+  switch (status) {
+    case 'awaiting_parts':              return 'awaiting_parts';
+    case 'awaiting_estimate_approval':  return 'awaiting_estimate_approval';
+    case 'in_repair':                   return 'in_repair';
+    case 'ready_for_pickup':            return 'complete';
+    case 'available':                   return 'none';
+    case 'decommissioned':              return 'none';
+    default: break;
+  }
+  const blob = [r.serviceState, r.completed, r.lifecycleReason, r.relayStatus, r.issueSummary, r.correction].map(_lc).join(' | ');
+  if (_has(blob, /\bcomplete|completed|repair done|work complete|closed|resolved\b/)) return 'complete';
+  if (_has(blob, /estimate.*(approv|authoriz)|awaiting approval|pending approval|approval needed|needs approval/)) return 'awaiting_estimate_approval';
+  if (_has(blob, /awaiting part|waiting on part|parts? on order|part ordered|backorder|parts? delay/)) return 'awaiting_parts';
+  if (_has(blob, /in repair|in progress|being (repaired|serviced|worked)|under repair|in (the )?shop/)) return 'in_repair';
+  if (_has(blob, /diagnos|teardown|inspect|assess|troubleshoot/)) return 'diagnosing';
+  // Down with no repair detail yet, or genuinely indeterminate.
+  if (isDown(r)) return 'unknown';
+  return 'none';
+}
+
+// LOCATION — physically where the unit is. GPS/geofence aren't parsed here
+// (the canonical row doesn't carry them uniformly), so we read the textual
+// signals: in-transit/tow language, an active offsite vendor thread, or a
+// vendor assignment implying it's at the shop. Default at_yard when available.
+function _deriveLocation(row, status) {
+  const r = row || {};
+  const blob = [r.serviceState, r.relayStatus, r.lifecycleReason, r.issueSummary, r.correction, r.repairTimeline].map(_lc).join(' | ');
+  if (_has(blob, /in transit|towing|being towed|en route|transport|on (a )?(tow|hook)/)) return 'in_transit';
+  if (status === 'in_transit') return 'in_transit';
+  // A fresh offsite vendor thread means it's physically offsite at that vendor.
+  const daysSince = _daysSinceOffsite(r);
+  const hasOffsite = !!(_s(r.asistNotes) || _s(r.asistLabel) || _s(r.offsiteShopEvent));
+  if (hasOffsite && daysSince !== null && daysSince <= 14) return 'offsite';
+  // Down + assigned to a vendor => at the vendor's shop.
+  if (isDown(r) && _s(r.vendor) && _s(r.vendor) !== '--') return 'at_vendor';
+  if (status === 'available') return 'at_yard';
+  return 'unknown';
+}
+
+// RISK — predictive-maintenance risk bucket from the Uptake score merged onto
+// the row. Thresholds mirror the high_risk flag (>=80) and a soft mid band.
+function _deriveRisk(row) {
+  const rs = Number(row && row.riskScore);
+  if (!Number.isFinite(rs) || rs <= 0) return 'none';
+  if (rs >= 80) return 'high';
+  if (rs >= 50) return 'medium';
+  return 'low';
+}
+
+// Assemble the multidimensional block. Each axis carries its own provenance:
+//   availability/phase -> the record's trusted `source` (they're read from the
+//                         same operational signals that chose it)
+//   location           -> offsite when an offsite read drove it, else the source
+//   waitingOn          -> same as the record (derived from status/decision)
+//   risk               -> 'uptake' when a score exists, else 'none'
+// confidence is the deterministic baseline (0.5); reconcileCanonical raises the
+// axes the AI actually sharpened.
+function _buildDimensions(row, status, source, waitingOn, conf) {
+  const r = row || {};
+  const c = Number.isFinite(conf) ? conf : 0.5;
+  const availability = _deriveAvailability(r, status);
+  const phase = _derivePhase(r, status);
+  const location = _deriveLocation(r, status);
+  const risk = _deriveRisk(r);
+  const wait = waitingOn || _deriveWaitingOn(status) || 'none';
+  const locSource = (location === 'offsite') ? 'offsite' : source;
+  return {
+    availability: { value: availability, confidence: c, source },
+    phase:        { value: phase,        confidence: c, source },
+    location:     { value: location,     confidence: c, source: locSource },
+    waitingOn:    { value: wait,         confidence: c, source },
+    risk:         { value: risk,         confidence: risk === 'none' ? c : 0.8, source: risk === 'none' ? source : 'uptake' },
+  };
+}
+
+// Validate/normalize a dimensions block so a value out of vocabulary never
+// leaks into the record. Returns a clean block; coerces bad values to the
+// dimension's honest default.
+function _normalizeDimensions(dims) {
+  const d = dims || {};
+  const DEFAULTS = { availability: 'unknown', phase: 'unknown', location: 'unknown', waitingOn: 'none', risk: 'none' };
+  const out = {};
+  for (const dim of DIMENSIONS) {
+    const axis = d[dim] || {};
+    let value = axis.value;
+    if (!isValidDimensionValue(dim, value)) value = DEFAULTS[dim];
+    out[dim] = {
+      value,
+      confidence: Number.isFinite(axis.confidence) ? axis.confidence : 0.5,
+      source: _s(axis.source) || '',
+    };
+  }
+  return out;
 }
 
 // ── Evidence (the facts the conclusion rests on, by source) ────────────────────
@@ -404,6 +558,11 @@ function computeCanonical(row) {
   return {
     equipmentId,
     status,
+    // Independent axes — the multidimensional view. `status` above stays the
+    // back-compat rollup; `dimensions` lets a consumer reason on any single axis
+    // (availability / phase / location / waitingOn / risk) with per-axis
+    // provenance. Deterministic baseline (confidence 0.5); the AI tier sharpens.
+    dimensions: _buildDimensions(r, status, source, waitingOn, 0.5),
     situation,
     nextStep: '',          // deterministic tier doesn't guess a next step
     source,                // provenance: where the trusted signal came from
@@ -547,9 +706,22 @@ function reconcileCanonical(row, opts) {
     lastMeaningfulUpdate = { source: 'offsite', text: _clipVal(decision.missingUpdate, 300), at: _s(decision.decidedAt) };
   }
 
+  // Rebuild the independent axes from the AI-sharpened status/source/waitingOn.
+  // The axes the decision actually reasoned over (phase via the sharpened
+  // status, waitingOn, and availability) inherit the decision's confidence; the
+  // others keep the deterministic baseline. Location also lifts to the
+  // decision's confidence when the AI trusted offsite (it read the thread).
+  const finalStatus = isValidStatus(status) ? status : base.status;
+  const dimensions = _buildDimensions(row, finalStatus, source, waitingOn, confidence);
+  dimensions.phase.confidence = confidence;
+  dimensions.waitingOn.confidence = confidence;
+  dimensions.availability.confidence = confidence;
+  if (source === 'offsite') dimensions.location.confidence = confidence;
+
   return {
     equipmentId: base.equipmentId,
-    status: isValidStatus(status) ? status : base.status,
+    status: finalStatus,
+    dimensions,
     situation: situation.slice(0, 400),
     nextStep: nextStep.slice(0, 400),
     source,
@@ -692,8 +864,16 @@ function diffAgainstPrior(record, prior) {
  */
 function mirrorFields(record) {
   const r = record || {};
+  const dims = _normalizeDimensions(r.dimensions);
   return {
     canonicalStatus: r.status || 'unknown',
+    // Lean per-axis VALUES mirrored onto the row so the grid/Slack can read any
+    // single dimension without touching the store. The full {value,confidence,
+    // source} objects stay in the canonicalState store (read it for provenance).
+    canonicalAvailability: dims.availability.value,
+    canonicalPhase: dims.phase.value,
+    canonicalLocation: dims.location.value,
+    canonicalRisk: dims.risk.value,
     canonicalSituation: r.situation || '',
     canonicalNextStep: r.nextStep || '',
     canonicalSource: r.source || '',
@@ -844,13 +1024,28 @@ function detectChangedUnits(rows, prior) {
 function fromRow(row) {
   const r = row || {};
   if (r.canonicalStatus == null && r.canonicalUpdatedAt == null) return null;
+  const _conf = Number.isFinite(r.canonicalConfidence) ? r.canonicalConfidence : 0.5;
+  const _src = r.canonicalSource || '';
+  // Reconstruct the independent axes from the lean mirrored values. Per-axis
+  // confidence/source aren't mirrored (they live in the store record), so we
+  // fill the record's overall confidence + trusted source as a reasonable read;
+  // callers needing exact per-axis provenance should read the store (step 2 of
+  // getCanonical). Values are normalized back into vocabulary.
+  const dimensions = _normalizeDimensions({
+    availability: { value: r.canonicalAvailability, confidence: _conf, source: _src },
+    phase:        { value: r.canonicalPhase,        confidence: _conf, source: _src },
+    location:     { value: r.canonicalLocation,     confidence: _conf, source: (r.canonicalLocation === 'offsite' ? 'offsite' : _src) },
+    waitingOn:    { value: r.canonicalWaitingOn || 'none', confidence: _conf, source: _src },
+    risk:         { value: r.canonicalRisk,         confidence: _conf, source: (r.canonicalRisk && r.canonicalRisk !== 'none' ? 'uptake' : _src) },
+  });
   return {
     equipmentId: _s(r.equipmentId),
     status: r.canonicalStatus || 'unknown',
+    dimensions,
     situation: r.canonicalSituation || '',
     nextStep: r.canonicalNextStep || '',
     source: r.canonicalSource || '',
-    confidence: Number.isFinite(r.canonicalConfidence) ? r.canonicalConfidence : 0.5,
+    confidence: _conf,
     stale: !!r.canonicalStale,
     waitingOn: r.canonicalWaitingOn || '',
     flags: Array.isArray(r.canonicalFlags) ? r.canonicalFlags.slice() : [],
@@ -919,6 +1114,14 @@ function signalTokens(rowOrId, opts) {
   const rec = getCanonical(rowOrId, opts);
   if (!rec) return '';
   const t = ['canon=' + (rec.status || 'unknown')];
+  // Independent axes (only emit the informative ones — skip none/unknown noise).
+  const d = rec.dimensions;
+  if (d) {
+    if (d.availability && !['unknown'].includes(d.availability.value)) t.push('avail=' + d.availability.value);
+    if (d.phase && !['none', 'unknown'].includes(d.phase.value)) t.push('phase=' + d.phase.value);
+    if (d.location && !['unknown'].includes(d.location.value)) t.push('loc=' + d.location.value);
+    if (d.risk && d.risk.value !== 'none') t.push('risk=' + d.risk.value);
+  }
   if (rec.source) t.push('src=' + rec.source);
   if (Number.isFinite(rec.confidence)) t.push('conf=' + rec.confidence.toFixed(2));
   if (rec.stale) t.push('STALE');
@@ -933,7 +1136,10 @@ function signalTokens(rowOrId, opts) {
 module.exports = {
   STATUSES,
   TRACKED_FIELDS,
+  DIMENSIONS,
+  DIMENSION_VALUES,
   isValidStatus,
+  isValidDimensionValue,
   isDown,
   computeCanonical,
   reconcileCanonical,
@@ -949,6 +1155,12 @@ module.exports = {
   _deriveStatus,
   _deriveSource,
   _deriveFlags,
+  _deriveAvailability,
+  _derivePhase,
+  _deriveLocation,
+  _deriveRisk,
+  _buildDimensions,
+  _normalizeDimensions,
   _daysSinceOffsite,
   _statusFromDecision,
   _waitingOnFromDecision,
