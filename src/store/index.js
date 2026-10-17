@@ -264,10 +264,89 @@ function _resolvePath(name) {
   throw new Error(`Unknown store: "${name}" — add it to REGISTRY in store/index.js`);
 }
 
+// ── Critical transactional state → SQLite ───────────────────────────────────
+// These store keys hold exactly-once / lease / idempotency ledgers whose
+// correctness depends on crash-atomic writes and race-free read-modify-write —
+// guarantees the JSON file store cannot give (a crash mid-write can tear the
+// whole document; a non-mutexed load→save can let two callers both "win").
+//
+// For these keys ONLY, load/save/exists/delete and update/updateAsync route
+// through the built-in SQLite engine (store/sqlite_engine.js, backed by
+// node:sqlite). The whole-document contract is preserved byte-for-byte: each
+// key is one JSON document, now stored as one atomic row instead of a file. No
+// caller changes; inbound-claim.js, scheduler/ledger.js, fas/executor.js and
+// their tests keep calling store.* exactly as before.
+//
+// If the runtime lacks node:sqlite, the engine reports unavailable and we fall
+// back to the JSON file store transparently — the app never hard-fails.
+const SQLITE_KEYS = new Set([
+  'schedulerLedger',
+  'schedulerLedgerBackup_v1',
+  'fasInboundClaims',
+  'fasIdempotency',
+]);
+
+let _sqlite = null;
+function _engine() {
+  if (_sqlite === null) {
+    try { _sqlite = require('./sqlite_engine'); } catch (_) { _sqlite = false; }
+  }
+  return _sqlite || null;
+}
+
+// True when `name` should be served by SQLite AND the engine is actually
+// available on this runtime. Any failure path falls back to JSON files.
+function _useSqlite(name) {
+  if (!SQLITE_KEYS.has(name)) return false;
+  const eng = _engine();
+  try { return !!(eng && eng.isAvailable()); } catch (_) { return false; }
+}
+
+// One-time import of a pre-existing JSON document into SQLite on first touch.
+// If the key already has a SQLite row, this is a no-op. If a legacy JSON file
+// exists and SQLite has no row yet, copy the JSON doc in (the JSON file is left
+// in place as an automatic, untouched backup of the pre-migration state).
+const _migratedKeys = new Set();
+function _migrateJsonToSqlite(name) {
+  if (_migratedKeys.has(name)) return;
+  _migratedKeys.add(name);
+  const eng = _engine();
+  if (!eng) return;
+  try {
+    if (eng.hasDoc(name)) return; // already in SQLite
+    const filePath = _resolvePath(name);
+    if (!fs.existsSync(filePath)) return; // nothing to import
+    const raw = fs.readFileSync(filePath, 'utf8');
+    if (!raw || !raw.trim()) return;
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch (_) {
+      // Try the .bak from the JSON store's own recovery path.
+      const bak = filePath + '.bak';
+      if (!fs.existsSync(bak)) return;
+      try { parsed = JSON.parse(fs.readFileSync(bak, 'utf8')); } catch (_) { return; }
+    }
+    eng.writeDoc(name, parsed);
+    logger.info('migrated transactional store "' + name + '" from JSON into SQLite');
+  } catch (e) {
+    logger.warn('migration of "' + name + '" into SQLite failed (keeping JSON): ' + e.message);
+  }
+}
+
 /**
  * load(name, defaultValue?) — reads and parses JSON, returns default on any error
  */
 function load(key, fallback) {
+  if (_useSqlite(key)) {
+    _migrateJsonToSqlite(key);
+    try {
+      const doc = _engine().readDoc(key);
+      if (doc !== undefined) return doc;
+      return fallback !== undefined ? fallback : null;
+    } catch (e) {
+      logger.warn('SQLite load("' + key + '") failed, falling back to JSON: ' + e.message);
+      // fall through to the JSON path below
+    }
+  }
   const filePath = _resolvePath(key);
   if (!fs.existsSync(filePath)) return fallback !== undefined ? fallback : null;
   try {
@@ -289,6 +368,14 @@ function load(key, fallback) {
  * save(name, data) — atomic write (write to .tmp then rename)
  */
 function save(key, data) {
+  if (_useSqlite(key)) {
+    _migrateJsonToSqlite(key);
+    try { _engine().writeDoc(key, data); return; }
+    catch (e) {
+      logger.warn('SQLite save("' + key + '") failed, falling back to JSON: ' + e.message);
+      // fall through to the JSON path below
+    }
+  }
   const filePath = _resolvePath(key);
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -328,6 +415,24 @@ function save(key, data) {
  * use updateAsync() below which serializes access per-store.
  */
 function update(name, mergeFn, defaultValue = {}) {
+  if (_useSqlite(name)) {
+    _migrateJsonToSqlite(name);
+    try {
+      // Whole read-modify-write inside ONE IMMEDIATE transaction: crash-atomic
+      // and serialized against concurrent writers by SQLite itself.
+      const eng = _engine();
+      return eng.tx(() => {
+        const cur = eng.readDoc(name);
+        const current = (cur === undefined) ? defaultValue : cur;
+        const updated = mergeFn(current);
+        eng.writeDoc(name, updated);
+        return updated;
+      });
+    } catch (e) {
+      logger.warn('SQLite update("' + name + '") failed, falling back to JSON: ' + e.message);
+      // fall through to the JSON path below
+    }
+  }
   const current = load(name, defaultValue);
   const updated = mergeFn(current);
   save(name, updated);
@@ -354,6 +459,12 @@ async function updateAsync(name, mergeFn, defaultValue = {}) {
 
   try {
     await prev; // wait for prior operation to complete
+    // For SQLite-backed transactional keys, the per-key mutex above already
+    // serializes callers in-process, so we don't need to hold a DB transaction
+    // open across the (possibly async) merge — which node:sqlite's synchronous
+    // transaction API can't do anyway. load() reads from SQLite; the final
+    // save() is a single atomic row write (crash-atomic). Non-SQLite keys keep
+    // the original JSON read-modify-write.
     const current = load(name, defaultValue);
     const updated = await mergeFn(current);
     save(name, updated);
@@ -364,11 +475,24 @@ async function updateAsync(name, mergeFn, defaultValue = {}) {
 }
 
 function exists(name) {
+  if (_useSqlite(name)) {
+    try {
+      _migrateJsonToSqlite(name);
+      if (_engine().hasDoc(name)) return true;
+      // Not in SQLite yet — a legacy JSON file still counts as "exists".
+    } catch (_) {}
+  }
   try { return fs.existsSync(_resolvePath(name)); } catch (_) { return false; }
 }
 
 function del(name) {
+  if (_useSqlite(name)) {
+    try { _engine().deleteDoc(name); } catch (e) {
+      logger.warn('SQLite delete("' + name + '") failed: ' + e.message);
+    }
+    // Also remove any legacy JSON file so a later fallback can't resurrect it.
+  }
   try { fs.unlinkSync(_resolvePath(name)); } catch (_) {}
 }
 
-module.exports = { load, save, update, updateAsync, exists, delete: del, REGISTRY };
+module.exports = { load, save, update, updateAsync, exists, delete: del, REGISTRY, SQLITE_KEYS };
