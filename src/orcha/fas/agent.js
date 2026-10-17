@@ -485,7 +485,23 @@ async function runAgent(input) {
     decision._mode = cfg.mode;
     decision._loop = { steps, maxSteps, toolCalls, research: extraResearch };
     if (lastAssembled) decision._budget = { used: lastAssembled.usedChars, budget: lastAssembled.budget, dropped: lastAssembled.dropped };
-    decision._aborted = controller.signal.aborted;
+    // ABORT HANDLING: the runtime deadline (maxRuntimeMs) can fire DURING the
+    // optional review/refine pass — AFTER the loop has already produced a
+    // complete, valid terminal decision. In that case the answer is fully
+    // usable and must NOT be thrown away as an "AI aborted" failure (which
+    // dumps a great reply into manual-review and sends the user a canned
+    // fallback). Only treat the abort as a failure when we do NOT have a
+    // usable terminal reply. A usable decision = a terminal type with a
+    // non-empty reply and not a parse-fallback.
+    const _aborted = controller.signal.aborted;
+    const _hasUsableAnswer = !decision._fallback &&
+      ['answer', 'act', 'clarify', 'escalate'].includes(decision.decision) &&
+      typeof decision.reply === 'string' && decision.reply.trim().length > 0;
+    decision._aborted = _aborted && !_hasUsableAnswer;
+    if (_aborted && _hasUsableAnswer) {
+      decision._abortedAfterAnswer = true; // telemetry: ran long but answer stands
+      logger.info('[fas-agent] runtime deadline hit after a complete answer — keeping the answer (not failing to manual-review)');
+    }
     return decision;
   } finally {
     clearTimeout(deadline);
