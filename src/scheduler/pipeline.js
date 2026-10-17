@@ -380,6 +380,82 @@ function _redactSp(r) {
     workbooksFailed: r.workbooksFailed, rowsVerified: r.rowsVerified, readBack: r.readBack };
 }
 
+// ── DBR DATA job (AFP / DSP QuickSight pull) ───────────────────────────────────
+// Two INDEPENDENT channels (dbr-afp / dbr-dsp) so each source retries on its
+// own — AFP fresh-for-today while DSP isn't yet means only DSP keeps retrying.
+//
+// This does NOT use _syncAndGate (that's the FLEET sync + age-window freshness
+// for SP/email). DBR has its OWN scrape + its OWN freshness rule: the
+// dashboard's "Data as of (PT)" must be TODAY. dbr_pull.pullAfp()/pullDsp()
+// does the scrape, the today-PT gate, the AI parse, and the per-row review in
+// one call, returning:
+//   { ok:true,  fresh:true,  rowCount, data }  -> COMPLETED (stamps slot; stops)
+//   { ok:false, stale:true,  dataAsOf }         -> BLOCKED_STALE_DATA (sweep retries)
+//   { ok:false, error }                         -> scheduleRetry (transient scrape/parse fail)
+//
+// State path (honoring the ledger TRANSITIONS map — running has no direct edge
+// to blocked-stale-data, so the stale gate happens in VALIDATING):
+//   QUEUED -> VALIDATING -(pull)->
+//       stale -> BLOCKED_STALE_DATA
+//       ok    -> RUNNING -> VERIFYING -> COMPLETED
+//       error -> scheduleRetry
+function _dbrChannelFor(kind) {
+  return kind === 'dsp' ? ledger.CHANNELS.DBR_DSP : ledger.CHANNELS.DBR_AFP;
+}
+
+async function _runDbrJob(ctx, kind, spec) {
+  const channel = _dbrChannelFor(kind);
+  const label = kind === 'dsp' ? 'DSP' : 'AFP';
+  const { job, created } = await ledger.getOrCreateJob({ ...spec, channel });
+  if (!created) {
+    if (job.state === ledger.STATES.COMPLETED) { logger.info('DBR ' + label + ' already completed today — no-op'); return { skipped: 'already-completed', job }; }
+    if (ledger.PAUSED_STATES.includes(job.state) && job.state !== ledger.STATES.RETRY) { logger.info('DBR ' + label + ' in ' + job.state + ' — not auto-rerun'); return { skipped: job.state, job }; }
+  }
+  const lease = await ledger.acquireLease(channel, job.jobId);
+  if (!lease.ok) { logger.info('DBR ' + label + ' channel busy — skipping'); return { skipped: 'channel-busy', job }; }
+
+  try {
+    await ledger.transition(job.jobId, ledger.STATES.VALIDATING, {}, 'dbr pull + today-PT freshness gate');
+    const dbr = require('../scrapers/dbr_pull');
+    const res = kind === 'dsp' ? await dbr.pullDsp() : await dbr.pullAfp();
+
+    // Not-today-yet -> block so the recovery sweep re-attempts until the
+    // dashboard publishes today's (PT) data. This is the "keep retrying until
+    // populated" behavior, per-source.
+    if (res && res.stale) {
+      const b = await ledger.transition(job.jobId, ledger.STATES.BLOCKED_STALE_DATA,
+        { error: { class: 'stale-data', message: 'DBR ' + label + ' data as of ' + (res.dataAsOf || 'unknown') + ' is not today (PT)' } },
+        'blocked: DBR ' + label + ' not fresh for today');
+      _notify(ctx, b.ok ? b.job : ledger.getJob(job.jobId), { reasons: ['DBR ' + label + ' not fresh for today (PT)'] });
+      return { blocked: 'stale-data', dataAsOf: res.dataAsOf || null, job: ledger.getJob(job.jobId) };
+    }
+
+    // Scrape/parse failed (auth, timeout, bad text) -> transient retry.
+    if (!res || !res.ok) {
+      const rt = await ledger.scheduleRetry(job.jobId, { class: classifyError((res && res.error) || 'dbr pull failed'), message: (res && res.error) || 'dbr pull failed' });
+      if (rt.exhausted) _notify(ctx, ledger.getJob(job.jobId));
+      return { failed: (res && res.error) || 'dbr pull failed', job: ledger.getJob(job.jobId) };
+    }
+
+    // Fresh + parsed + saved. VALIDATING -> RUNNING -> VERIFYING -> COMPLETED.
+    await ledger.transition(job.jobId, ledger.STATES.RUNNING, {}, 'dbr parsed + reviewed');
+    await ledger.transition(job.jobId, ledger.STATES.VERIFYING,
+      { deliveryResult: { ok: true, rowCount: res.rowCount, dataAsOf: (res.data && res.data.dataAsOf) || null } }, 'dbr verify');
+    const done = await ledger.transition(job.jobId, ledger.STATES.COMPLETED, {}, 'DBR ' + label + ' fresh-for-today, ' + res.rowCount + ' rows');
+    _notify(ctx, done.ok ? done.job : ledger.getJob(job.jobId));
+    return { ok: true, rowCount: res.rowCount, job: ledger.getJob(job.jobId) };
+  } catch (e) {
+    logger.error('DBR ' + label + ' job error:', e.message);
+    await ledger.scheduleRetry(job.jobId, { class: classifyError(e.message), message: e.message });
+    return { error: e.message, job: ledger.getJob(job.jobId) };
+  } finally {
+    await ledger.releaseLease(channel, job.jobId);
+  }
+}
+
+function runDbrAfpJob(ctx, spec) { return _runDbrJob(ctx, 'afp', spec); }
+function runDbrDspJob(ctx, spec) { return _runDbrJob(ctx, 'dsp', spec); }
+
 // ── Email job (one job per operator/domicile/series scope) ──────────────────────
 // The scheduler creates ONE logical email trigger per slot; this function fans
 // it out into per-scope jobs (operator × domicile × SOS/EOS), each with its own
@@ -559,5 +635,6 @@ async function recover(ctx) {
 
 Object.assign(module.exports, {
   runSharePointJob, runEmailSlot, recover,
+  runDbrAfpJob, runDbrDspJob,
   _buildScopeEmail, _syncAndGate, _redactSync, _redactSp, _redactOwa,
 });

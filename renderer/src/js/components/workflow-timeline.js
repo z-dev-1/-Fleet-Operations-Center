@@ -25,7 +25,7 @@ let _mountEl = null;
 let _currentUnit = null;
 
 function _getUnitTracker(unitId) {
-  const tracker = state.get('tracker');
+  const tracker = state.slice('tracker');
   if (!tracker || !tracker.tracked) return null;
   return tracker.tracked.find(t => t.equipmentId === unitId);
 }

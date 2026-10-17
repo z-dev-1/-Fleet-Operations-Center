@@ -30,13 +30,20 @@ const pipeline = require('./pipeline');
 let _ctx                = null;
 let _spScheduleTimer    = null;
 let _emailScheduleTimer = null;
+let _dbrScheduleTimer   = null;
 
 // Slot defaults — used when no saved config exists
 const DEFAULT_SP_SLOTS    = [{ h: 7,  m: 30, label: '07:30' }, { h: 15, m: 30, label: '15:30' }];
 const DEFAULT_EMAIL_SLOTS = [{ h: 8,  m: 0,  label: '08:00' }, { h: 15, m: 15, label: '15:15' }];
+// DBR DATA pull — a SINGLE daily slot (used to fire BOTH the AFP and DSP
+// channels). DSP data historically publishes later than AFP, so the per-source
+// freshness gate + recovery sweep retry each independently until each shows
+// today's (PT) data.
+const DEFAULT_DBR_SLOTS   = [{ h: 7, m: 0, label: '07:00' }];
 
 let SP_SLOTS    = DEFAULT_SP_SLOTS.slice();
 let EMAIL_SLOTS = DEFAULT_EMAIL_SLOTS.slice();
+let DBR_SLOTS   = DEFAULT_DBR_SLOTS.slice();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function _todayPrefix() {
@@ -54,6 +61,9 @@ function _isWeekday() {
 function _enabled(channel) {
   const s = store.load('settings', {}) || {};
   const e = s.schedulerEnabled;
+  // DBR defaults OFF (opt-in) — it only runs once the user configures + enables
+  // it. SP/email default ON (their legacy behavior).
+  if (channel === 'dbr') return !!(e && e.dbr === true);
   if (!e || typeof e !== 'object') return true; // default ON
   return channel === 'sp' ? e.sp !== false : e.email !== false;
 }
@@ -65,6 +75,11 @@ function _loadScheduleSlots() {
       SP_SLOTS    = saved.sp;
       EMAIL_SLOTS = saved.email;
       logger.info('Scheduler slots loaded from config — SP:', SP_SLOTS.map(s=>s.label), 'Email:', EMAIL_SLOTS.map(s=>s.label));
+    }
+    // DBR slot is optional (feature is opt-in); fall back to default if unset.
+    if (saved && Array.isArray(saved.dbr) && saved.dbr.length) {
+      DBR_SLOTS = saved.dbr;
+      logger.info('Scheduler slots loaded — DBR:', DBR_SLOTS.map(s=>s.label));
     }
   } catch (e) {
     logger.warn('Could not load scheduler slot config, using defaults:', e.message);
@@ -136,6 +151,39 @@ function _fireEmail(dateKey, slot, origin, testMode) {
     .catch(e => { logger.error('Auto-email error:', e.message); _ctx.pushStatus('\u274C Auto-email error: ' + e.message); });
 }
 
+// ── Scheduled DBR DATA pull (AFP + DSP) ────────────────────────────────────────
+// One slot fires BOTH independent channels. Each channel self-gates on
+// today-PT freshness and self-retries via the recovery sweep, so AFP can
+// complete while DSP keeps retrying (and vice versa).
+function _scheduleAutoDbr() {
+  if (_dbrScheduleTimer) clearInterval(_dbrScheduleTimer);
+  _dbrScheduleTimer = setInterval(() => {
+    if (!_isWeekday() || !_enabled('dbr')) return;
+    const now  = new Date();
+    const slot = DBR_SLOTS.find(s => s.h === now.getHours() && s.m === now.getMinutes());
+    if (!slot) return;
+    const dateKey = _todayPrefix();
+    // Fire each channel only if its OWN slot hasn't completed today.
+    if (!ledger.isSlotCompleted(ledger.CHANNELS.DBR_AFP, dateKey, slot.label)) _fireDbr('afp', dateKey, slot, 'scheduled');
+    if (!ledger.isSlotCompleted(ledger.CHANNELS.DBR_DSP, dateKey, slot.label)) _fireDbr('dsp', dateKey, slot, 'scheduled');
+  }, 30000);
+}
+
+function _fireDbr(kind, dateKey, slot, origin) {
+  const label = kind === 'dsp' ? 'DSP' : 'AFP';
+  logger.info('DBR ' + label + ' pull (' + origin + '): slot=' + slot.label);
+  _ctx.pushStatus('\uD83D\uDCCA DBR ' + label + ': ' + slot.label + ' (' + origin + ')...');
+  const run = kind === 'dsp' ? pipeline.runDbrDspJob : pipeline.runDbrAfpJob;
+  run(_ctx, { dateKey, slotLabel: slot.label, origin, testMode: false })
+    .then(r => {
+      if (r.ok) _ctx.pushStatus('\u2705 DBR ' + label + ' pulled (' + (r.rowCount != null ? r.rowCount + ' rows' : 'ok') + ')');
+      else if (r.blocked) _ctx.pushStatus('\u23F3 DBR ' + label + ' not ready yet (data as of ' + (r.dataAsOf || '?') + ') — will retry');
+      else if (r.skipped) logger.info('DBR ' + label + ' skipped: ' + r.skipped);
+      else _ctx.pushStatus('\u26A0\uFE0F DBR ' + label + ' pull did not complete (' + slot.label + ')');
+    })
+    .catch(e => { logger.error('DBR ' + label + ' error:', e.message); _ctx.pushStatus('\u274C DBR ' + label + ' error: ' + e.message); });
+}
+
 // ── Missed-slot catch-up ──────────────────────────────────────────────────────
 function _catchUpMissedSlots() {
   if (!_isWeekday()) return;
@@ -157,6 +205,22 @@ function _catchUpMissedSlots() {
     if (ledger.isSlotCompleted(ledger.CHANNELS.SHAREPOINT, dateKey, slot.label)) return;
     logger.info('Catch-up: missed SP slot ' + slot.label + ' (' + missedBy + 'min ago)');
     setTimeout(() => _fireSP(dateKey, slot, 'catchup'), 10000);
+  });
+
+  // DBR: a slot missed earlier today (app wasn't running at slot time) still
+  // fires each not-yet-completed channel. DBR commonly isn't fresh until later
+  // in the day, so use a WIDER catch-up window than SP/email's 120min — a slot
+  // set for 07:00 should still fire if the app opens at (say) 10:00 so the
+  // recovery sweep can then retry until the data publishes.
+  if (_enabled('dbr')) DBR_SLOTS.forEach(slot => {
+    const missedBy = currentMinutes - (slot.h * 60 + slot.m);
+    if (missedBy <= 0 || missedBy > RECOVERY_WINDOW_MIN) return; // within the 4h recovery window
+    ['afp', 'dsp'].forEach(kind => {
+      const ch = kind === 'dsp' ? ledger.CHANNELS.DBR_DSP : ledger.CHANNELS.DBR_AFP;
+      if (ledger.isSlotCompleted(ch, dateKey, slot.label)) return;
+      logger.info('Catch-up: missed DBR ' + kind.toUpperCase() + ' slot ' + slot.label + ' (' + missedBy + 'min ago)');
+      setTimeout(() => _fireDbr(kind, dateKey, slot, 'catchup'), kind === 'dsp' ? 20000 : 15000);
+    });
   });
 }
 
@@ -225,6 +289,33 @@ async function _recoverBlockedSlots() {
         _fireSP(dateKey, slot, 'recovery');
       }
     }
+
+    // ── DBR: recover each channel independently ──
+    // This is the mechanism that satisfies "keep retrying until the data
+    // populates for today": a DBR job that found not-today data sits in
+    // BLOCKED_STALE_DATA; this sweep re-queues + re-fires it. The per-source
+    // freshness gate means AFP stops (COMPLETED) as soon as its data is fresh
+    // while DSP keeps getting retried until ITS data publishes.
+    if (_enabled('dbr')) {
+      for (const slot of DBR_SLOTS) {
+        const slotMin = slot.h * 60 + slot.m;
+        const age = now - slotMin;
+        if (age <= 0 || age > RECOVERY_WINDOW_MIN) continue;
+        for (const kind of ['afp', 'dsp']) {
+          const ch = kind === 'dsp' ? ledger.CHANNELS.DBR_DSP : ledger.CHANNELS.DBR_AFP;
+          if (ledger.isSlotCompleted(ch, dateKey, slot.label)) continue;
+          const blocked = ledger.listJobs({ channel: ch, dateKey, testMode: false })
+            .filter(j => j.slotLabel === slot.label && recoverableStates.includes(j.state));
+          if (!blocked.length) continue;
+          for (const j of blocked) {
+            await ledger.transition(j.jobId, ledger.STATES.QUEUED, { attempts: 0, nextRetryAt: null }, 'auto-recovery re-queue');
+          }
+          logger.info('Auto-recovery: re-attempting blocked DBR ' + kind.toUpperCase() + ' slot ' + slot.label + ' (' + blocked.length + ' job(s), ' + age + 'min late)');
+          _ctx.pushStatus('\u267B\uFE0F Auto-recovery: retrying ' + slot.label + ' DBR ' + kind.toUpperCase() + '...');
+          _fireDbr(kind, dateKey, slot, 'recovery');
+        }
+      }
+    }
   } finally {
     _recoverInFlight = false;
   }
@@ -290,6 +381,32 @@ async function runEmailNow(slotLabel) {
   return pipeline.runEmailSlot(_ctx, { dateKey, slotLabel: slot.label, origin: ledger.ORIGINS.MANUAL, testMode: false, useExistingIfFresh: true });
 }
 
+// "Pull DBR now" — manual on-demand pull of BOTH AFP and DSP (the "Pull All"
+// button). Re-queues any of today's blocked/failed DBR jobs for the chosen
+// label so a manual run isn't skipped as "paused", then fires both channels.
+// Returns { afp, dsp } with each channel's run result.
+async function runDbrNow(slotLabel) {
+  const dateKey = _todayPrefix();
+  const label = slotLabel || ('manual-' + new Date().toTimeString().slice(0, 5));
+  const requeueStates = [ledger.STATES.BLOCKED_STALE_DATA, ledger.STATES.BLOCKED_AUTH, ledger.STATES.RETRY, ledger.STATES.PARTIAL_FAILURE, ledger.STATES.FAILED];
+  const out = {};
+  for (const kind of ['afp', 'dsp']) {
+    const ch = kind === 'dsp' ? ledger.CHANNELS.DBR_DSP : ledger.CHANNELS.DBR_AFP;
+    const blocked = ledger.listJobs({ channel: ch, dateKey, testMode: false })
+      .filter(j => j.slotLabel === label && requeueStates.includes(j.state));
+    for (const j of blocked) {
+      await ledger.transition(j.jobId, ledger.STATES.QUEUED, { attempts: 0, nextRetryAt: null }, 'manual DBR re-run');
+    }
+    const run = kind === 'dsp' ? pipeline.runDbrDspJob : pipeline.runDbrAfpJob;
+    try {
+      out[kind] = await run(_ctx, { dateKey, slotLabel: label, origin: ledger.ORIGINS.MANUAL, testMode: false });
+    } catch (e) {
+      out[kind] = { error: e.message };
+    }
+  }
+  return out;
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 function start(ctx) {
   _ctx = ctx;
@@ -300,6 +417,7 @@ function start(ctx) {
   Promise.resolve().then(() => pipeline.recover(_ctx)).catch(e => logger.warn('Recovery failed: ' + e.message));
   _scheduleAutoSPPush();
   _scheduleAutoEmail();
+  _scheduleAutoDbr();
   _catchUpMissedSlots();
   // Auto-recovery sweep: re-attempt today's still-blocked slots (stale-data /
   // auth) once conditions may have improved. Every 2 min; also once shortly
@@ -309,18 +427,20 @@ function start(ctx) {
   setTimeout(() => { _recoverBlockedSlots().catch(() => {}); }, 60000);
   // Prune old ledger entries occasionally.
   ledger.pruneOldJobs().catch(() => {});
-  logger.info('Schedulers started — SP:', SP_SLOTS.map(s=>s.label), 'Email:', EMAIL_SLOTS.map(s=>s.label));
+  logger.info('Schedulers started — SP:', SP_SLOTS.map(s=>s.label), 'Email:', EMAIL_SLOTS.map(s=>s.label), 'DBR:', DBR_SLOTS.map(s=>s.label), '(dbr enabled=' + _enabled('dbr') + ')');
 }
 
 function stop() {
   if (_spScheduleTimer)    { clearInterval(_spScheduleTimer);    _spScheduleTimer    = null; }
   if (_emailScheduleTimer) { clearInterval(_emailScheduleTimer); _emailScheduleTimer = null; }
+  if (_dbrScheduleTimer)   { clearInterval(_dbrScheduleTimer);   _dbrScheduleTimer   = null; }
   if (_recoverTimer)       { clearInterval(_recoverTimer);       _recoverTimer       = null; }
 }
 
 function reload(newSlots) {
   if (newSlots && newSlots.sp)    SP_SLOTS    = newSlots.sp;
   if (newSlots && newSlots.email) EMAIL_SLOTS = newSlots.email;
+  if (newSlots && Array.isArray(newSlots.dbr) && newSlots.dbr.length) DBR_SLOTS = newSlots.dbr;
   stop();
   start(_ctx);
   logger.info('Schedulers reloaded with new slot config');
@@ -380,9 +500,10 @@ function getState() {
     enabled: {
       sp: _enabled('sp'),
       email: _enabled('email'),
+      dbr: _enabled('dbr'),
     },
-    slots: { sp: SP_SLOTS, email: EMAIL_SLOTS },
-    nextSlot: { sp: _nextSlot(SP_SLOTS), email: _nextSlot(EMAIL_SLOTS) },
+    slots: { sp: SP_SLOTS, email: EMAIL_SLOTS, dbr: DBR_SLOTS },
+    nextSlot: { sp: _nextSlot(SP_SLOTS), email: _nextSlot(EMAIL_SLOTS), dbr: _nextSlot(DBR_SLOTS) },
     freshness: settings.schedulerFreshness || require('./freshness').DEFAULT_POLICY,
     data: {
       rowCount: Array.isArray(fd.rows) ? fd.rows.length : 0,
@@ -391,6 +512,8 @@ function getState() {
     },
     sharepoint: byChannel(ledger.CHANNELS.SHAREPOINT),
     email: byChannel(ledger.CHANNELS.EMAIL),
+    dbrAfp: byChannel(ledger.CHANNELS.DBR_AFP),
+    dbrDsp: byChannel(ledger.CHANNELS.DBR_DSP),
     jobsToday: jobsToday.map(_jobSummary),
     completedSlots: ledgerState.completedSlots,
     migrationVersion: ledgerState.migrationVersion,
@@ -415,7 +538,7 @@ function _jobSummary(j) {
 
 function setEnabled(patch) {
   const s = store.load('settings', {}) || {};
-  s.schedulerEnabled = Object.assign({ sp: true, email: true }, s.schedulerEnabled || {}, patch || {});
+  s.schedulerEnabled = Object.assign({ sp: true, email: true, dbr: false }, s.schedulerEnabled || {}, patch || {});
   store.save('settings', s);
   return s.schedulerEnabled;
 }
@@ -427,4 +550,4 @@ function setFreshness(patch) {
   return s.schedulerFreshness;
 }
 
-module.exports = { start, stop, reload, catchUp, runSpNow, runNextEmailAsTest, runEmailNow, recoverBlockedSlots: _recoverBlockedSlots, getState, setEnabled, setFreshness, _jobSummary };
+module.exports = { start, stop, reload, catchUp, runSpNow, runNextEmailAsTest, runEmailNow, runDbrNow, recoverBlockedSlots: _recoverBlockedSlots, getState, setEnabled, setFreshness, _jobSummary };

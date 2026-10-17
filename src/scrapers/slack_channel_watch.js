@@ -264,16 +264,28 @@ function _isInMentionThread(channelId, threadTs) {
 }
 
 // ── AI classify + draft ──────────────────────────────────────────────────
-async function _classifyAndDraft(messageText, askOrcha, allowedOperators) {
+// allowRoster: true ONLY for INTERNAL senders (resolved from the Contact Book
+// at the call site). FAS roster personnel data is internal and must never be
+// exposed to carrier/vendor/unknown senders on a watched channel.
+async function _classifyAndDraft(messageText, askOrcha, allowedOperators, allowRoster) {
   // Inject local time so the AI uses the correct time-of-day greeting
   const _now = new Date();
   const _timeStr = _now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
   const _dateStr = _now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   const timeContext = '\n\nCurrent local time: ' + _timeStr + ', ' + _dateStr + '.';
 
-  // Inject live fleet data context so AI can give real, data-driven answers
+  // Inject live fleet data context so AI can give real, data-driven answers.
+  // allowRoster (internal) → full FAS knowledge base + roster. For EXTERNAL
+  // senders we still pass the SHAREABLE knowledge tier (glossary + general
+  // process) so replies to carriers/vendors can accurately explain terms —
+  // internal-only sections (approval dollars, escalation, personnel) stay out.
   const { buildFleetContext } = require('../orcha/ai-context');
-  const fleetContext = buildFleetContext(messageText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true, allowedOperators: allowedOperators || [] });
+  const fleetContext = buildFleetContext(messageText, {
+    maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true,
+    allowedOperators: allowedOperators || [],
+    allowRoster: !!allowRoster,
+    knowledgeAudience: allowRoster ? 'internal' : 'external',
+  });
 
   // CONTEXT RESET (2026-09-02): relay.ask() routes through fleet-brain, a
   // SINGLE persistent session whose rolling history is shared across every
@@ -821,6 +833,21 @@ async function pollChannelsOnce(log) {
       } catch (e) {
         doLog(`[SlackWatch] ${ch.name}: PM-alert scan error: ${e.message}`);
       }
+      // Ready-for-pickup REPLY handling (additive): if we posted a
+      // "unit ready — pickup or tow?" message to this channel and the carrier
+      // has replied in that thread, interpret pickup-vs-tow and acknowledge.
+      // Gated internally on the readyPickupNotices ledger (cheap no-op when
+      // there are no pending notices for this channel). Isolated + non-fatal.
+      try {
+        const readyNotify = require('./ready_pickup_notify');
+        await readyNotify.handleReadyReplies(
+          ch,
+          { readThreadReplies, sendToChannel, askOrcha, myUserId, resolveOperatorEntry: require('./pm_alert_reply').resolveOperatorEntry },
+          doLog
+        );
+      } catch (e) {
+        doLog(`[SlackWatch] ${ch.name}: ready-pickup reply scan error: ${e.message}`);
+      }
     }
 
     if (_earlyMode === 'justme') {
@@ -1046,6 +1073,7 @@ async function pollChannelsOnce(log) {
             const _fr = await _fasRunner.handleInbound({
               engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
               channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text,
+              files: msg.files || [],
             }, { sendToChannel });
             if (_fr && _fr.letLegacyReply) {
               // Runner asked us to let legacy reply (error-failsafe / ai-failed-
@@ -1084,7 +1112,15 @@ async function pollChannelsOnce(log) {
           // else: fall through to legacy reply path (letLegacyReply honored)
         }
 
-        const draft = await _classifyAndDraft(msg.text, askOrcha, (ch && ch.operators) || []);
+        // Expose FAS roster personnel data ONLY to INTERNAL senders (resolved
+        // from the Contact Book). Carrier/vendor/unknown senders never get it.
+        let _allowRoster = false;
+        try {
+          const prof = require('../orcha/fas/sender-profiles').resolveSender(msg.userId, msg.userName || '');
+          _allowRoster = !!(prof && (prof.type === 'internal'));
+        } catch (_) { _allowRoster = false; }
+
+        const draft = await _classifyAndDraft(msg.text, askOrcha, (ch && ch.operators) || [], _allowRoster);
 
         // FEATURE (2026-07-22): always tag the person being responded to,
         // prepended at send-time rather than asking the AI to include it
@@ -1105,6 +1141,7 @@ async function pollChannelsOnce(log) {
             await _fasRunner.handleInbound({
               engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
               channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text, actualReply: draft.reply,
+              files: msg.files || [],
             });
           } catch (_e) { /* shadow comparison must never break the live path */ }
         }

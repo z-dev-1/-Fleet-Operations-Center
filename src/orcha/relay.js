@@ -761,4 +761,101 @@ function testClaude() {
   } catch (_) {}
 })();
 
-module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setClaudeTimeout, testClaude };
+// ── AGENT DISCOVERY ────────────────────────────────────────────────────────
+// The Orcha agent (chosen in Settings → AI → Orcha Agent) determines the
+// server-side model that answers every AI request. Rather than hardcode the
+// agent list in the Settings UI (which goes stale when the Orcha team adds or
+// removes agents), discover it live from the toolbox: `orcha --list-agents`
+// prints one agent per line as "Display Name (agent_id)". We parse that into
+// [{ id, name }] so the dropdown always reflects exactly what THIS machine can
+// actually call. Cached briefly so opening Settings repeatedly is cheap.
+const ORCHA_CLI = process.platform === 'win32'
+  ? path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'orcha.cmd')
+  : path.join(os.homedir(), '.toolbox', 'bin', 'orcha');
+// Per-agent config files (authoritative model/region per agent) live here.
+const ORCHA_AGENTS_DIR = path.join(os.homedir(), '.orcha', 'agents');
+let _agentCache = null;
+let _agentCacheAt = 0;
+const AGENT_CACHE_MS = 5 * 60 * 1000;
+
+function _parseAgentLines(text) {
+  const out = [];
+  const seen = new Set();
+  String(text || '').split(/\r?\n/).forEach((raw) => {
+    const line = raw.trim();
+    // Match "Display Name (agent_id)" — id is lowercase/underscore/digits.
+    const m = line.match(/^(.*?)\s*\(([a-z0-9][a-z0-9_-]*)\)\s*$/i);
+    if (m) {
+      const name = m[1].trim();
+      const id = m[2].trim();
+      if (id && !seen.has(id)) { seen.add(id); out.push({ id, name: name || id }); }
+    }
+  });
+  return out;
+}
+
+// Turn a raw Orcha model id into a friendly label. e.g.
+// "claude-opus-4-6" -> "Claude Opus 4.6", "claude-sonnet-4-6" -> "Claude Sonnet 4.6".
+function _prettyModel(model) {
+  const m = String(model || '').trim();
+  if (!m) return '';
+  const cl = m.match(/^claude-(opus|sonnet|haiku)-(\d+)-(\d+)/i);
+  if (cl) return 'Claude ' + cl[1][0].toUpperCase() + cl[1].slice(1) + ' ' + cl[2] + '.' + cl[3];
+  const nova = m.match(/nova-(pro|lite|micro)/i);
+  if (nova) return 'Nova ' + nova[1][0].toUpperCase() + nova[1].slice(1);
+  return m; // unknown shape — show the raw id
+}
+
+// Read the authoritative model/region for one agent from its config file.
+// Returns { model, modelLabel, region } or {} if unreadable.
+function _agentModelInfo(id) {
+  try {
+    const p = path.join(ORCHA_AGENTS_DIR, id + '.json');
+    if (!fs.existsSync(p)) return {};
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const model = (j && typeof j.model === 'string') ? j.model : '';
+    return { model, modelLabel: _prettyModel(model), region: (j && j.region) || '' };
+  } catch (_) { return {}; }
+}
+
+/**
+ * listAgents(opts) -> Promise<{ ok, agents: [{id,name,model,modelLabel,region}], cached?, error? }>
+ * Discovers agents via `orcha --list-agents`, then enriches each with the REAL
+ * model it maps to by reading ~/.orcha/agents/<id>.json (the authoritative
+ * per-agent config). Never throws; on failure returns ok:false + empty list so
+ * the caller can fall back to its built-in defaults.
+ */
+function listAgents(opts = {}) {
+  const now = Date.now();
+  if (!opts.force && _agentCache && (now - _agentCacheAt < AGENT_CACHE_MS)) {
+    return Promise.resolve({ ok: true, agents: _agentCache, cached: true });
+  }
+  return new Promise((resolve) => {
+    if (!fs.existsSync(ORCHA_CLI)) {
+      return resolve({ ok: false, agents: [], error: 'orcha CLI not found (toolbox not installed)' });
+    }
+    execFile(ORCHA_CLI, ['--list-agents'],
+      { timeout: 15000, maxBuffer: 256 * 1024, shell: process.platform === 'win32' },
+      (err, stdout, stderr) => {
+        const agents = _parseAgentLines(stdout);
+        if (!agents.length) {
+          logger.warn('[relay] listAgents: no agents parsed (' + (err ? err.message : (stderr || 'empty output')) + ')');
+          return resolve({ ok: false, agents: [], error: (err && err.message) || 'no agents found' });
+        }
+        // Enrich with the REAL model each agent maps to (from its config file).
+        agents.forEach(a => {
+          const info = _agentModelInfo(a.id);
+          a.model = info.model || '';
+          a.modelLabel = info.modelLabel || '';
+          a.region = info.region || '';
+        });
+        _agentCache = agents;
+        _agentCacheAt = Date.now();
+        logger.info('[relay] listAgents: discovered ' + agents.length + ' agent(s): ' +
+          agents.map(a => a.id + (a.model ? '=' + a.model : '')).join(', '));
+        resolve({ ok: true, agents });
+      });
+  });
+}
+
+module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setClaudeTimeout, testClaude, listAgents };

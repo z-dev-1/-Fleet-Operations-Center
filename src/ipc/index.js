@@ -29,7 +29,11 @@ const { registerVendorHistoryIPC } = require('./vendor-history');
 const { registerSetupIPC }       = require('./setup');
 const { registerDailyTasksIPC }  = require('./daily-tasks');
 const { registerLongDwellIPC }     = require('./long-dwell');
+const { registerLongDwellCsvIPC }  = require('./long-dwell-csv');
+const { registerFasRosterIPC }     = require('./fas-roster');
 const { registerSchedulerIPC }     = require('./scheduler');
+const { registerEmailTriageIPC }   = require('./email-triage');
+const { registerRelayReconcileIPC } = require('./relay-reconcile');
 const logger = require('../utils/logger')('ipc');
 
 function registerAllIPC(ctx) {
@@ -51,7 +55,13 @@ function registerAllIPC(ctx) {
   // (morning + on-demand) so Split View is ready without a manual sign-in.
   try { require('../scrapers/vendor_session').startWarmScheduler(); } catch (e) { logger.warn('vendor warm scheduler start failed: ' + e.message); }
   registerLongDwellIPC();
+  registerLongDwellCsvIPC();
+  registerFasRosterIPC();
+  const { registerAapApiIPC } = require('./aap-api');
+  registerAapApiIPC(ctx);
   registerSchedulerIPC(ctx);
+  registerEmailTriageIPC(ctx);
+  registerRelayReconcileIPC(ctx);
   const { registerContactsHandlers } = require('./contacts');
   registerContactsHandlers();
   logger.info('All IPC handlers registered');

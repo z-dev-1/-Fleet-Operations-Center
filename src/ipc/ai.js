@@ -22,7 +22,14 @@ const fs     = require('fs');
 const { handle, requireString, requireStringMax, requireArrayMax } = require('./_safe');
 const { ConfigError } = require('../utils/errors');
 
-// ── Phase 3: IPC rate limiter for expensive AI operations ────────────────────
+// Module-scope handle to the app ctx (set in registerAIHandlers). Lets the
+// standalone processOrchaAction() — which has no ctx of its own — reach the
+// real runners (ctx.runFullSync) so the Slack SYNC/SP_PUSH/DBR intents can
+// actually EXECUTE instead of just echoing a status string. Null until the
+// AI handlers register (always true before any Slack message is processed).
+let _appCtx = null;
+
+// -- Phase 3: IPC rate limiter for expensive AI operations --
 // Prevents renderer from flooding AI backends (Bedrock $$, Orcha WS) with
 // concurrent requests. Simple per-channel concurrency cap: excess calls queue
 // and resolve in order. No external dependency.
@@ -46,7 +53,7 @@ function _createLimiter(maxConcurrent) {
 const _aiAskLimit  = _createLimiter(1);  // max 1 concurrent ai:ask
 const _aiChatLimit = _createLimiter(1);  // max 1 concurrent ai:chat
 
-// ── Issue #15 / #8: size caps ────────────────────────────────────────────────
+// -- Issue #15 / #8: size caps --
 const MAX_PROMPT_LEN       = 32000;   // characters — ai:ask, ai:chat
 const MAX_DAILY_NOTES_BATCH = 100;   // units    — daily-notes:run
 const MAX_SUGGEST_KEYS      = 100;   // keys on unit object for ai:suggest (raised S28: enriched units have ~71 keys)
@@ -78,7 +85,7 @@ function _salvageReply(raw) {
   return raw;
 }
 
-// ── Site / unit email report builder ──────────────────────────────────────────
+// -- Site / unit email report builder --
 // Returns plain-text (not HTML) so the body renders correctly in OWA/mailto.
 // Called from the EMAIL action handler when userMsg references a site or unit.
 function _buildEmailReport(userMsg, rows, notesStore, allowedOperators) {
@@ -199,7 +206,7 @@ function _buildEmailReport(userMsg, rows, notesStore, allowedOperators) {
   return lines.join('\n');
 }
 
-// ── Unified Orcha action handler (used by bubble + main + phone companion) ──
+// -- Unified Orcha action handler (used by bubble + main + phone companion) --
 // Builds the full fleet-context prompt (per-unit detail, contacts, memory,
 // reminders), calls the AI, parses {reply, actions:[...]}, executes safe
 // actions immediately, and returns pendingConfirm items for anything that
@@ -295,10 +302,13 @@ async function processOrchaAction(userMsg, opts = {}) {
     // unit/site/operator OR uses fleet action/keyword language. When false (a
     // general question or drafting request), we DON'T inject the fleet report —
     // so the assistant answers naturally instead of forcing a fleet lens.
-    const _fleetKw = /\b(unit|units|fleet|truck|trailer|domicile|operator|vendor|unavailable|available|work\s*order|\bwr\b|flip|lifecycle|down|repair|uptake|risk\s*score|pm[\s-]?[bx]?\b|dot|sync|timeline|slack|email|send|report|update|summary|follow[\s-]?up|remind|schedule)\b/i;
+    const _fleetKw = /\b(unit|units|fleet|truck|trailer|domicile|operator|vendor|unavailable|available|work\s*order|\bwr\b|flip|lifecycle|down|repair|uptake|risk\s*score|pm[\s-]?[bx]?\b|dot|sync|timeline|slack|email|send|report|update|summary|follow[\s-]?up|remind|schedule|\bfas\b|uptime\s*manager|\bscac\b|\bpoc\b|who('?s| is| covers| handles| owns| manages| approves| approve)|roster|\bsr\.?\s*pm\b|approve|approval|estimate|escalat|\bsev[2-5]\b|threshold|out of scope|dealer|amerit|cummins|cei\b|fleetnet|tow|cng|warranty|decisiv|\beol\b|\bnra\b|\bpv\b|\bdvir\b|\bpmr\b|\bmttr\b|reconditioning|ready to rent|offsite|what (is|does|mean)|define|glossary|acronym|process|procedure|who (do|should) i|can i|am i allowed)\b/i;
     const _fleetRelevant = (_resolved.units.length > 0) || (_resolved.groups.length > 0) || _fleetKw.test(userMsg || '');
+    // allowRoster: this IS Z's own personal assistant (internal), so FAS roster
+    // personnel data may be surfaced — but only when the message is actually a
+    // roster question (see _buildRosterContext), never dumped wholesale.
     const richContext = _fleetRelevant ? buildFleetContext(userMsg, {
-      maxUnits: 8, includeTimeline: true, includePM: true, includeRisk: true,
+      maxUnits: 8, includeTimeline: true, includePM: true, includeRisk: true, allowRoster: true,
     }) : '';
 
     // siteReport still used by the EMAIL/SLACK *action* paths below (they attach
@@ -345,7 +355,7 @@ async function processOrchaAction(userMsg, opts = {}) {
 
     
     const d = new Date(); const dateStr = String(d.getMonth()+1).padStart(2,'0')+'/'+String(d.getDate()).padStart(2,'0'); const timeStr = String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
-    const prompt = 'You are Z\'s personal AI assistant. You are talking privately with Z (this is Z\'s own channel — never a partner or customer). Be genuinely helpful with ANYTHING Z asks: general questions, thinking a problem through, explaining something, writing or drafting messages/emails/notes, brainstorming, or day-to-day help — exactly like a capable assistant chatting with the person they work for. You ALSO have live fleet data and can take fleet actions (below), so when Z asks about a unit, site, operator, or wants to send/update/create something, use that. But you are NOT limited to fleet topics — answer normal questions normally, conversationally, without forcing a fleet angle. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nHOW TO RESPOND:\n- Talk like a sharp, warm, concise human assistant. Match Z\'s tone.\n- For a general question or request (not about the fleet): just answer or help directly — draft the email, explain the thing, think it through. No greeting boilerplate, no fleet framing.\n- For DRAFTING (email/message/note): write the actual draft Z asked for, ready to use. If Z wants it sent to someone, use the SLACK/EMAIL action; if Z just wants the text, return the draft in your reply so Z can copy it.\n- HONESTY: For general knowledge, answer as best you can and be upfront when you are not certain rather than making something up.\n- INTERNAL AMAZON GUIDANCE: You have a lifeline to an internal Amazon AI agent called AITeammate. When Z asks something that needs INTERNAL Amazon knowledge you don\'t reliably have — a specific Amazon/ATS process, policy, tool, system, acronym, escalation path, "how do I do X in [internal tool]", or anything internal you\'d otherwise have to guess at — do NOT guess. Return an ASK_INTERNAL action with the question phrased clearly for the agent, and keep your "reply" short (e.g. "Let me check on that — one sec."). The system will relay it to AITeammate and give you its answer to pass back to Z. Use this for genuinely internal/uncertain things; for general knowledge or fleet-data questions you can already answer, just answer directly and do NOT use ASK_INTERNAL.\n\nFLEET WORK (when the message IS about the fleet):\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- If a DETAILED FLEET REPORT is provided below, that is your full and only source of truth for that site/operator/unit -- it has every unit status, vendor, down time, ETC/PM, issue details and full repair timeline/notes, plus the uptake rate (% available), AND -- separately -- any Uptake (fleet.uptake.com) predictive-maintenance risk score/label and full insight details (title, subsystem, guidance, active/resolved, first/last seen) under an UPTAKE INSIGHTS section for units that have been scraped by that third-party telematics tool. Uptake rate and Uptake insights are two different things -- do not conflate them, report both when present. Use ALL of it when relevant to what was asked: whether the user is asking a question (summarize thoroughly -- status, vendor, timeline, issue, uptake rate, uptake risk/insights) or sending it to someone (the system attaches the whole report; your job is just the intro line). Same data either way -- only the framing changes.\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- VISUAL FORMATTING (for multi-unit summaries/reports only, NOT short replies): lead each unavailable-unit line with ONE status emoji matching its repair state -- 🔧 in repair/work in progress, ⏳ waiting on vendor/parts/estimate/approval, ✅ repair complete/ready, ⚠️ blocked/no tech/needs dealer/accident, 🚛 towing/transport. Use 🔴 before an Uptake risk score >= 70. Header line can start with 📋. Use Slack bold (*single asterisk*), NOT double asterisk. Exactly one emoji per unit line -- do not stuff emojis or add them to short conversational replies.\n- Never add recommendations or suggestions unless user explicitly asks\n\nCRITICAL — SEND vs ASK:\n- "send update/report/data/notes to [person] for [site]" = YOU are DELIVERING fleet info TO them.\n  Write the message as the person SENDING the report, not asking for one.\n  Your message body is just a 1-sentence intro — the system attaches the real data automatically.\n  WRONG: "Could you provide an update on AVP40?" (that is asking them)\n  RIGHT:  "Here is the latest AVP40 fleet status and notes, as requested." (that is delivering)\n- Only generate a question/follow-up when the user explicitly says "ask", "follow up", or "check on".\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle_or_email,message:text}), SYNC, SP_PUSH, EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable,reason:text}) — changes the unit REAL lifecycle in AAP (available=Active, unavailable=Unavailable); reason optional, defaults to Healthy for Active; user confirms before it commits, PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text}), ASK_INTERNAL({type:ASK_INTERNAL,question:text}) — relay an internal-Amazon question to the AITeammate agent and return its guidance\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Send to whoever the user specifies. If user gives an email address or a name not in KNOWN SLACK CONTACTS, use it directly as recipient — the system will resolve it. NEVER refuse or ask for confirmation because someone is not in the contact list. Just attempt the send.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent FLEET data (unit status, numbers, vendors, dates). For general (non-fleet) questions, answer normally from your own knowledge.\\n\\n'+(_fleetRelevant?(richContext+(siteReport?'\\n\\nDETAILED FLEET REPORT (for delivery/attachment):\\n'+siteReport:'')+notFoundNote):'')+reminderText+memoryContext+contactList+emailContactList+'\\nUser: '+userMsg;
+    const prompt = 'You are Z\'s personal AI assistant. You are talking privately with Z (this is Z\'s own channel — never a partner or customer). Be genuinely helpful with ANYTHING Z asks: general questions, thinking a problem through, explaining something, writing or drafting messages/emails/notes, brainstorming, or day-to-day help — exactly like a capable assistant chatting with the person they work for. You ALSO have live fleet data and can take fleet actions (below), so when Z asks about a unit, site, operator, or wants to send/update/create something, use that. But you are NOT limited to fleet topics — answer normal questions normally, conversationally, without forcing a fleet angle. DATE:'+dateStr+' TIME (24h):'+timeStr+'\n\nHOW TO RESPOND:\n- Talk like a sharp, warm, concise human assistant. Match Z\'s tone.\n- For a general question or request (not about the fleet): just answer or help directly — draft the email, explain the thing, think it through. No greeting boilerplate, no fleet framing.\n- For DRAFTING (email/message/note): write the actual draft Z asked for, ready to use. If Z wants it sent to someone, use the SLACK/EMAIL action; if Z just wants the text, return the draft in your reply so Z can copy it.\n- HONESTY: For general knowledge, answer as best you can and be upfront when you are not certain rather than making something up.\n- FAS KNOWLEDGE BASE FIRST: If a "=== FAS KNOWLEDGE BASE ===" section appears below, it is AUTHORITATIVE and it is your own knowledge (you ARE the FAS). For ANY question about ownership, estimate approval thresholds, who approves what, escalation/SEV levels, a process, vendor routing, or what a term/acronym means — if the KB answers it, ANSWER DIRECTLY from the KB and do NOT use ASK_INTERNAL. Example: "who approves 30k est?" → the KB says $30,000+ powered estimates are approved by L4H Leadership (HVE & EOL eval); FAS never approves, only escalates — so just answer that. Never defer a KB-answerable question to AITeammate.\n- INTERNAL AMAZON GUIDANCE: You have a lifeline to an internal Amazon AI agent called AITeammate. ONLY when Z asks something internal that the FAS KNOWLEDGE BASE and fleet data do NOT cover — a specific Amazon/ATS process, tool, or system you genuinely don\'t have — do NOT guess; return an ASK_INTERNAL action with the question phrased clearly, and keep your "reply" short (e.g. "Let me check on that — one sec."). For general knowledge, fleet-data questions, OR anything the FAS KNOWLEDGE BASE covers, answer directly and do NOT use ASK_INTERNAL.\n\nFLEET WORK (when the message IS about the fleet):\n- New messages (send/slack/message): ALWAYS start with appropriate greeting (Good morning/Good afternoon/Good evening based on time of day) then the content\n- Replies: Skip the greeting, just respond directly\n- Match what the user asks: update=status update, summary=brief summary, info=key details, follow-up=check on progress\n- If about a unit: focus on that unit only\n- If about a domicile/operator: focus on all units at that site/operator\n- If a DETAILED FLEET REPORT is provided below, that is your full and only source of truth for that site/operator/unit -- it has every unit status, vendor, down time, ETC/PM, issue details and full repair timeline/notes, plus the uptake rate (% available), AND -- separately -- any Uptake (fleet.uptake.com) predictive-maintenance risk score/label and full insight details (title, subsystem, guidance, active/resolved, first/last seen) under an UPTAKE INSIGHTS section for units that have been scraped by that third-party telematics tool. Uptake rate and Uptake insights are two different things -- do not conflate them, report both when present. Use ALL of it when relevant to what was asked: whether the user is asking a question (summarize thoroughly -- status, vendor, timeline, issue, uptake rate, uptake risk/insights) or sending it to someone (the system attaches the whole report; your job is just the intro line). Same data either way -- only the framing changes.\n- Keep Slack messages concise (3-5 sentences max), professional fleet language\n- VISUAL FORMATTING (for multi-unit summaries/reports only, NOT short replies): lead each unavailable-unit line with ONE status emoji matching its repair state -- 🔧 in repair/work in progress, ⏳ waiting on vendor/parts/estimate/approval, ✅ repair complete/ready, ⚠️ blocked/no tech/needs dealer/accident, 🚚 towing/transport. Use 🔴 before an Uptake risk score >= 70. Use Slack bold (*single asterisk*), NOT double asterisk. Exactly one emoji per unit line -- do not stuff emojis or add them to short conversational replies.\n- Never add recommendations or suggestions unless user explicitly asks\n\nCRITICAL — SEND vs ASK:\n- "send update/report/data/notes to [person] for [site]" = YOU are DELIVERING fleet info TO them.\n  Write the message as the person SENDING the report, not asking for one.\n  Your message body is just a 1-sentence intro — the system attaches the real data automatically.\n  WRONG: "Could you provide an update on AVP40?" (that is asking them)\n  RIGHT:  "Here is the latest AVP40 fleet status and notes, as requested." (that is delivering)\n- Only generate a question/follow-up when the user explicitly says "ask", "follow up", or "check on".\n\nACTIONS (JSON): TIMELINE({type:TIMELINE,unit:ID,entry:MM/DD-note}), SLACK({type:SLACK,recipient:handle_or_email,message:text}), SYNC (runs a REAL fleet sync, reports unit counts; for `sync`/`refresh fleet`/`pull latest`), SP_PUSH (runs the REAL SharePoint push; for `push to sharepoint`/`update the sheet`), DBR_PULL({type:DBR_PULL}) (runs the DBR pull for AFP+DSP; for `pull dbr`/`get dbr data`), BRIEFING({type:BRIEFING,operator:OPTIONAL_SCAC}) (posts the daily carrier briefing now; include operator to scope to one carrier, omit for all; for `send the briefing`), REVIEW_QUEUE({type:REVIEW_QUEUE}) (lists work-requests awaiting approval; for `show my review queue`), APPROVE_WR({type:APPROVE_WR,id:REVIEW_ID}) (submits a queued WR to AAP after confirm; for `approve <id>`), EMAIL_TRIAGE({type:EMAIL_TRIAGE}) (reads my Outlook inbox and AI-triages it: what is important, what to reply to, deletable noise, and any fleet-unit updates found; for `triage my inbox`, `check my email`, `what is in my inbox`), EMAIL, READ_SLACK, REMIND({type:REMIND,unit:ID,when:YYYY-MM-DD,note:text}), DAILY_NOTES, DRAFT_FOLLOWUPS, CREATE_WR({type:CREATE_WR,unit:ID,issue:text}), MOVE_UNIT({type:MOVE_UNIT,unit:ID,status:available|unavailable,reason:text}) — changes the unit REAL lifecycle in AAP (available=Active, unavailable=Unavailable); reason optional, defaults to Healthy for Active; user confirms before it commits, PIN({type:PIN,unit:ID}), UNPIN({type:UNPIN,unit:ID}), SCHEDULE({type:SCHEDULE,action:text,cron:text}), EMAIL({type:EMAIL,to:email,subject:text,body:text}), ASK_INTERNAL({type:ASK_INTERNAL,question:text}) — relay an internal-Amazon question to the AITeammate agent and return its guidance\n\nRESPOND WITH JSON ONLY: {"reply":"your brief confirmation","actions":[...]}\n\nRULES:\n- actions=[] if just answering a question\n- Do EXACTLY what user asks. No extras.\n- SLACK: Send to whoever the user specifies. If user gives an email address or a name not in KNOWN SLACK CONTACTS, use it directly as recipient — the system will resolve it. NEVER refuse or ask for confirmation because someone is not in the contact list. Just attempt the send.\n- SLACK message style: greeting (if new msg) + context + status/update/summary as requested. Sign off naturally.\n- TIMELINE: professional fleet note, MM/DD - 1-2 sentences max.\n- Never invent FLEET data (unit status, numbers, vendors, dates). For general (non-fleet) questions, answer normally from your own knowledge.\\n\\n'+(_fleetRelevant?(richContext+(siteReport?'\\n\\nDETAILED FLEET REPORT (for delivery/attachment):\\n'+siteReport:'')+notFoundNote):'')+reminderText+memoryContext+contactList+emailContactList+'\\nUser: '+userMsg;
     try {
       logger.info('[ai:orcha-action] Calling relay.ask (' + prompt.length + ' chars)...');
       const aiText = await relay.ask(prompt, { signal: opts.signal, requestId: opts.requestId });
@@ -416,8 +426,145 @@ async function processOrchaAction(userMsg, opts = {}) {
           });
           results.push('Ready to send Slack message to ' + (matchedContact ? matchedContact.name : a.recipient) + ' — confirm below.');
         }
-        if (a.type==='SYNC') results.push('Sync triggered');
-        if (a.type==='SP_PUSH') results.push('SP push triggered');
+        if (a.type==='SYNC') {
+          // Actually run a fleet sync (was previously a no-op status string).
+          try {
+            if (_appCtx && typeof _appCtx.runFullSync === 'function') {
+              const sr = await _appCtx.runFullSync();
+              const after = store.load('fleetData', {});
+              const n = Array.isArray(after.rows) ? after.rows.length : 0;
+              const unavailN = (after.rows || []).filter(r => (r.lifecycleState||'').toLowerCase().includes('unavail')).length;
+              results.push('Fleet synced — ' + n + ' units (' + unavailN + ' unavailable).' + (sr && sr.usedCache ? ' (served from cache)' : ''));
+            } else {
+              results.push('Sync unavailable: fleet engine not ready yet. Try again in a moment.');
+            }
+          } catch (e) { results.push('Sync failed: ' + e.message); }
+        }
+        if (a.type==='SP_PUSH') {
+          // Actually run the real, read-back-verified SharePoint push.
+          try {
+            const scheduler = require('../scheduler');
+            const r = await scheduler.runSpNow();
+            if (r && r.ok) results.push('SharePoint push verified.');
+            else if (r && r.blocked) results.push('SharePoint push blocked: ' + r.blocked + '. (Usually stale fleet data — sync first, then retry.)');
+            else if (r && r.skipped) results.push('SharePoint push skipped: ' + r.skipped + '.');
+            else if (r && r.partial) results.push('SharePoint push partial: ' + r.partial + '.');
+            else results.push('SharePoint push did not verify — check the Schedulers view for detail.');
+          } catch (e) { results.push('SharePoint push failed: ' + e.message); }
+        }
+        if (a.type==='EMAIL_TRIAGE') {
+          // Read-only: scan the Outlook inbox + AI-triage, then post a digest to
+          // Slack. Mailbox/DM mutations (sending a reply, DMing an operator) are
+          // NOT done from here — those stay in the in-app overlay behind explicit
+          // buttons. Here we only surface what the triage found.
+          try {
+            const triage = require('../scrapers/email_triage');
+            const res = await triage.runTriage({});
+            if (res && res.authBlocked) {
+              results.push('📨 Inbox triage: Outlook needs a sign-in. Open Outlook on the web once, then try again.');
+            } else {
+              const emails = Array.isArray(res && res.emails) ? res.emails : [];
+              const high = emails.filter(e => e.importance === 'high');
+              const replies = emails.filter(e => e.replySuggested && (e.replyState === 'none' || !e.replyState));
+              const deletes = emails.filter(e => e.deleteSuggested);
+              const unitEmails = emails.filter(e => (e.unitRefs || []).length);
+              const lines = ['📨 Inbox triage — ' + emails.length + ' email(s) scanned:'];
+              if (high.length) {
+                lines.push('📌 Important (' + high.length + '):');
+                high.slice(0, 8).forEach(e => lines.push('  • ' + (e.fromName || e.from) + ' — ' + e.subject + (e.summary ? ' · ' + e.summary.slice(0, 140) : '')));
+              }
+              if (unitEmails.length) {
+                lines.push('🚚 Fleet-unit updates found:');
+                unitEmails.slice(0, 8).forEach(e => {
+                  (e.unitRefs || []).forEach(u => {
+                    lines.push('  • ' + u.unit + (u.update ? ' — ' + u.update : '') + (u.ready ? ' (READY for pickup)' : '') + (e.unitUpdateApplied ? ' [added to timeline]' : ''));
+                  });
+                });
+              }
+              if (replies.length) {
+                lines.push('✉️ Suggested replies (' + replies.length + ') — open the 📨 Inbox Triage panel in the app to draft/send:');
+                replies.slice(0, 6).forEach(e => lines.push('  • ' + (e.fromName || e.from) + ' — ' + e.subject));
+              }
+              if (deletes.length) lines.push('🗑️ ' + deletes.length + ' deletable (noise) — review in the app.');
+              if (lines.length === 1) lines.push('Nothing notable — no important mail, unit updates, or replies needed.');
+              results.push(lines.join('\n'));
+            }
+          } catch (e) { results.push('Inbox triage failed: ' + e.message); }
+        }
+        if (a.type==='DBR_PULL') {
+          // Pull DBR (AFP + DSP) on demand. Each source is today-PT freshness
+          // gated; a not-ready source reports "will retry" rather than failing.
+          try {
+            const scheduler = require('../scheduler');
+            const r = await scheduler.runDbrNow();
+            const describe = (x, name) => {
+              if (!x) return name + ': —';
+              if (x.ok) return name + ': ' + (x.rowCount != null ? x.rowCount + ' rows' : 'ok');
+              if (x.blocked) return name + ': not published for today yet — will keep retrying';
+              if (x.skipped) return name + ': ' + x.skipped;
+              if (x.failed || x.error) return name + ': failed';
+              return name + ': done';
+            };
+            results.push('DBR pull — ' + describe(r && r.afp, 'AFP') + ' · ' + describe(r && r.dsp, 'DSP') + '.');
+          } catch (e) { results.push('DBR pull failed: ' + e.message); }
+        }
+        if (a.type==='BRIEFING') {
+          // Run the daily carrier briefing on demand (force bypasses the
+          // once-per-day dedup). Optional a.operator scopes to one operator.
+          try {
+            const cb = require('../scrapers/carrier_briefing');
+            const { sendToChannel, openConversation, checkLiveAuth } = require('../scrapers/slack_send');
+            const deps = { sendToChannel, openConversation, checkLiveAuth };
+            if (a.operator && String(a.operator).trim()) {
+              const r = await cb.sendOperatorBriefing(String(a.operator).trim(), deps, { force: true }, (m)=>logger.info(m));
+              results.push(r && r.sent ? ('Carrier briefing posted for ' + a.operator + '.') : ('Carrier briefing not sent for ' + a.operator + ': ' + ((r && r.reason) || 'unknown') + '.'));
+            } else {
+              const r = await cb.runDailyBriefing(deps, { force: true }, (m)=>logger.info(m));
+              const sent = (r && r.results) ? r.results.filter(x => x.sent).length : 0;
+              const total = (r && r.results) ? r.results.length : 0;
+              results.push('Carrier briefing run — ' + sent + '/' + total + ' operators posted.');
+            }
+          } catch (e) { results.push('Carrier briefing failed: ' + e.message); }
+        }
+        if (a.type==='REVIEW_QUEUE') {
+          // List pending work-request review items so they can be approved.
+          try {
+            const review = store.load('partnerWRs_review', []) || [];
+            // Pending = anything not yet submitted/cancelled. 'ready' items are
+            // classified and one "approve <id>" away from AAP; 'pending'/
+            // 'classifying' still need the Review tab to finish.
+            const pending = review.filter(x => x && x.status !== 'submitted' && x.status !== 'cancelled' && x.status !== 'rejected');
+            if (!pending.length) {
+              results.push('Review queue is empty — nothing waiting for approval.');
+            } else {
+              const lines = pending.slice(0, 15).map(x => {
+                const ready = x.status === 'ready' ? ' ✅ready' : (' (' + (x.status || '?') + ')');
+                return '• ' + (x.id || '?') + ' — ' + (x.unit || '?') + (x.aiTitle || x.issue ? ' — ' + String(x.aiTitle || x.issue).slice(0, 60) : '') + (x.aiVendor ? ' [' + x.aiVendor + ']' : '') + ready;
+              });
+              results.push('Pending review (' + pending.length + '):\n' + lines.join('\n') + '\nReply "approve <id>" to submit a ✅ready one to AAP.');
+            }
+          } catch (e) { results.push('Could not read review queue: ' + e.message); }
+        }
+        if (a.type==='APPROVE_WR' && a.id) {
+          // Approve/submit a queued work request to AAP. Routed through
+          // pendingConfirm so it needs an explicit YES before mutating AAP —
+          // same safety gate as Slack/email/lifecycle.
+          try {
+            const review = store.load('partnerWRs_review', []) || [];
+            const item = review.find(x => x && String(x.id) === String(a.id));
+            if (!item) {
+              results.push('No review item found with id ' + a.id + '. Reply "show review queue" to list ids.');
+            } else {
+              pendingConfirm.push({
+                id: 'pc' + Date.now() + Math.random().toString(36).slice(2, 6),
+                channel: 'approve-wr',
+                recipientName: 'WR ' + item.id + ' (' + (item.unit || '?') + ')',
+                reviewId: item.id,
+              });
+              results.push('Ready to submit WR ' + item.id + ' for ' + (item.unit || '?') + ' to AAP — confirm below.');
+            }
+          } catch (e) { results.push('Approve failed: ' + e.message); }
+        }
         if (a.type==='EMAIL') {
           try {
             let toAddr = (a.to || '').trim();
@@ -668,7 +815,7 @@ async function processOrchaAction(userMsg, opts = {}) {
     } catch(e) { return {ok:false,text:'Error:'+e.message,action:'chat'}; }
 }
 
-// ── Confirmed send ─────────────────────────────────────────────────────────
+// -- Confirmed send --
 // processOrchaAction() never sends directly -- it returns a pendingConfirm
 // item (recipient + real report body) and the caller (FAB renderer or phone
 // companion) must get an explicit confirmation before this runs. Nothing
@@ -736,6 +883,34 @@ async function confirmSend(item) {
       }
       return { ok: false, error: (lr && lr.message) || 'AAP did not confirm the lifecycle change' };
     }
+    if (item.channel === 'approve-wr') {
+      // Approve a queued work request -> submit it to AAP via the SAME
+      // createWorkRequest() path the Review UI uses. The review item (once
+      // AI-classified) carries req.payload + req.unit, which is exactly what
+      // createWorkRequest(payload, unit, log) expects. Gated behind confirm.
+      try {
+        const review = store.load('partnerWRs_review', []) || [];
+        const item2 = review.find(x => x && String(x.id) === String(item.reviewId));
+        if (!item2) return { ok: false, error: 'Review item ' + item.reviewId + ' no longer in the queue.' };
+        if (!item2.payload) return { ok: false, error: 'WR ' + item.reviewId + ' is not classified/ready yet — open the Review tab to finish it first.' };
+        const fd = store.load('fleetData', {}) || {};
+        const unit = (fd.rows || []).find(r => r.equipmentId === item2.unit) || { equipmentId: item2.unit };
+        const { createWorkRequest } = require('../scrapers/aap_create_wr');
+        const r = await createWorkRequest(item2.payload, unit, (m) => logger.info('[approve-wr] ' + m));
+        if (r && (r.ok || r.success || r.workRequestId)) {
+          // Mark the review item submitted so it leaves the pending list.
+          try {
+            const rev2 = store.load('partnerWRs_review', []) || [];
+            const idx = rev2.findIndex(x => x && String(x.id) === String(item.reviewId));
+            if (idx !== -1) { rev2[idx].status = 'submitted'; rev2[idx].submittedAt = new Date().toISOString(); if (r.workRequestId) rev2[idx].workRequestId = r.workRequestId; store.save('partnerWRs_review', rev2); }
+          } catch (_) {}
+          return { ok: true, message: 'WR ' + item.reviewId + ' submitted to AAP for ' + item2.unit + (r.workRequestId ? ' (WR ' + r.workRequestId + ')' : '') };
+        }
+        return { ok: false, error: (r && (r.error || r.message)) || 'AAP did not confirm the WR submission' };
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    }
     return { ok: false, error: 'Unknown channel: ' + item.channel };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -743,6 +918,7 @@ async function confirmSend(item) {
 }
 
 function registerAIHandlers(ctx) {
+  _appCtx = ctx; // expose to processOrchaAction (Slack SYNC/SP_PUSH/DBR runners)
   const { suggestDropdowns, askOrcha, sendOrchaChat, loadOrchaConfig, saveOrchaConfig } = require('../../src/scrapers/orcha_ws');
   const relay = require('../orcha/relay');
   const send  = ctx.sendToWindow;
@@ -761,7 +937,7 @@ function registerAIHandlers(ctx) {
   // Phase 3: rate-limited to 1 concurrent call
   // FIX (2026-08-17): was using askOrcha (WS-only, no fallback) which hangs
   // when the Orcha WS queue is busy. Switch to relay.ask — the full automatic
-  // chain (Orcha WS → CLI → Claude Code → Bedrock) so ai:ask is reliable for
+  // chain (Orcha WS -> CLI -> Claude Code -> Bedrock) so ai:ask is reliable for
   // all callers (Daily Call AI Review, WBR Generate, etc.)
   handle('ai:ask', async (_e, prompt) => {
     requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
@@ -783,6 +959,15 @@ function registerAIHandlers(ctx) {
     // Normalize: relay.ask returns a raw string; callers expect { ok, text }
     if (typeof text === 'string') return { ok: true, text };
     return text; // in case it's already an object
+  });
+
+  // FAS knowledge base — the SINGLE SOURCE OF TRUTH for ownership / approval /
+  // escalation (SEV) / vendor-routing rules. Exposed so the renderer (Long
+  // Dwell AI-fill) injects the SAME authoritative rules the Slack assistant
+  // uses, instead of a duplicated embedded rubric that can drift.
+  handle('fas-knowledge:get', () => {
+    try { return { ok: true, text: require('../orcha/fas-knowledge').FAS_KNOWLEDGE || '' }; }
+    catch (e) { return { ok: false, error: e.message, text: '' }; }
   });
 
   // Issue #13: response now includes `path` field ('chat' or 'fallback')
@@ -831,8 +1016,13 @@ function registerAIHandlers(ctx) {
   handle('orcha:status',        () => relay.getStatus());
   handle('orcha:mwinit',        async () => relay.runMwinit());
   handle('orcha:refresh-creds', () => { relay.refreshCredentials(); return { ok: true }; });
+  // Live agent discovery — powers the Settings → AI → Orcha Agent dropdown so
+  // it reflects exactly the agents this machine's toolbox can call (instead of
+  // a hardcoded list that goes stale). Never throws; returns ok:false on any
+  // failure so the UI can fall back to its built-in defaults.
+  handle('orcha:list-agents',   async (_e, opts) => relay.listAgents(opts || {}));
 
-  // ── AI Config (preference + per-backend config) ────────────────────────
+  // -- AI Config (preference + per-backend config) --
   // Returns full config: preference, orcha settings, claude settings + live status
   handle('ai:get-ai-config', () => {
     const orchaCfg = (() => {
@@ -912,6 +1102,43 @@ function registerAIHandlers(ctx) {
       });
       runAutoLoginLoop(relayWin, { label: 'ai-split-relay' });
       relayWin.loadURL(opts.relayUrl);
+      // After the Relay Garage page loads, auto-toggle the Conversation open and
+      // scroll to the latest comment so the user lands right on the thread
+      // instead of having to click "Toggle Comments" + scroll down every time.
+      // Best-effort: retries a few times (the button renders after data loads)
+      // and never throws. Mirrors the selector logic used by the inline split.
+      relayWin.webContents.on('did-finish-load', () => {
+        try {
+          relayWin.webContents.executeJavaScript(
+            '(function(){' +
+              'if(window.__fleetDailyConv)return;' +
+              'var tries=0;' +
+              'function go(){' +
+                'tries++;' +
+                'var done=false;' +
+                'var btns=document.querySelectorAll("button,a,[role=button]");' +
+                'for(var i=0;i<btns.length;i++){' +
+                  'if((btns[i].textContent||"").indexOf("Toggle Comments")>-1){btns[i].click();done=true;break;}' +
+                '}' +
+                'if(done){' +
+                  'window.__fleetDailyConv=true;' +
+                  // Give the comments a moment to render, then scroll to newest.
+                  'setTimeout(function(){' +
+                    'try{' +
+                      'var h1s=document.querySelectorAll("h1,h2,h3");var conv=null;' +
+                      'for(var j=0;j<h1s.length;j++){if((h1s[j].textContent||"").trim()==="Conversation"){conv=h1s[j];break;}}' +
+                      'var sc=document.querySelector(".rg-full-height-sheet")||(conv&&conv.closest("div"))||document.scrollingElement||document.body;' +
+                      'if(sc){sc.scrollTop=sc.scrollHeight;}' +
+                      'window.scrollTo(0,document.body.scrollHeight);' +
+                    '}catch(e){}' +
+                  '},1200);' +
+                '} else if(tries<10){ setTimeout(go,800); }' +
+              '}' +
+              'setTimeout(go,1000);' +
+            '})()'
+          ).catch(() => {});
+        } catch (_) {}
+      });
       windows.push(relayWin);
     }
 
@@ -931,6 +1158,20 @@ function registerAIHandlers(ctx) {
 
     if (windows.length === 1) {
       windows[0].setBounds({ x: Math.floor(width * 0.1), y: topY, width: Math.floor(width * 0.8), height: winH });
+    }
+
+    // Link the pair so closing EITHER window closes the other — the user keeps
+    // the two side-by-side windows but only has to click close once. A guard
+    // flag prevents the mutual 'closed' handlers from recursing.
+    if (windows.length === 2) {
+      let _closingPair = false;
+      const closeSibling = (other) => {
+        if (_closingPair) return;
+        _closingPair = true;
+        try { if (other && !other.isDestroyed()) other.close(); } catch (_) {}
+      };
+      windows[0].on('closed', () => closeSibling(windows[1]));
+      windows[1].on('closed', () => closeSibling(windows[0]));
     }
     return { opened: windows.length };
   });
@@ -1006,10 +1247,10 @@ function registerAIHandlers(ctx) {
     logger.info('[AI] Timeline appended for ' + data.unitId + ': ' + data.entry.substring(0, 60));
     return { ok: true };
   });
-  // ── Unified Orcha action handler (used by bubble + main) ────────────────
+  // -- Unified Orcha action handler (used by bubble + main) --
   handle('ai:orcha-action', async (_e, userMsg) => processOrchaAction(userMsg));
 
-  // ── Confirmed send ─────────────────────────────────────────────────────────
+  // -- Confirmed send --
   // ai:orcha-action never sends directly — it returns a pendingConfirm item
   // (recipient + real report body) and the renderer shows Send/Cancel buttons.
   // This handler fires ONLY after the user explicitly clicks Send. Regardless
@@ -1074,7 +1315,7 @@ function registerAIHandlers(ctx) {
     // Microsoft Graph was removed (2026-09-02) — email uses SMTP or OWA only.
     // A legacy 'graph' method value degrades to the auto (SMTP -> OWA) cascade.
 
-    // ── SMTP ───────────────────────────────────────────────────────────────
+    // -- SMTP --
     if (method === 'smtp' || ((method === 'auto' || method === 'graph') && (cfg.password || cfg.pass) && (cfg.password || cfg.pass).trim())) {
       const res = await sendFleetEmail({ to: data.to, subject: data.subject || 'Message from Fleet Operations Center', htmlBody });
       if (res.ok) return { ok: true, method: 'smtp' };
@@ -1082,12 +1323,12 @@ function registerAIHandlers(ctx) {
       if (method === 'smtp') return { ok: false, error: res.error || 'SMTP failed' };
     }
 
-    // ── OWA ────────────────────────────────────────────────────────────────
+    // -- OWA --
     return openOWACompose();
   });
 
 
-  // ── ai:build-report ──────────────────────────────────────────────────────────
+  // -- ai:build-report --
   // Called by the renderer's direct data-send interceptor BEFORE the AI ever
   // sees the message. Extracts the site/operator from the query, pulls matching
   // rows from the fleet store, and returns the plain-text report that the compose

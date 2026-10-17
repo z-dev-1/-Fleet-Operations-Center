@@ -267,7 +267,13 @@ async function runOrchaDeepScan(mergedRows, opts) {
       // Never push an EMPTY rows array -- the renderer would REPLACE the whole
       // fleet with [] and zero the grid. Only push when we actually have rows.
       if (pushData && typeof pushData === 'function' && Array.isArray(mergedRows) && mergedRows.length) {
-        pushData({ ...payload, rows: mergedRows, _partial: 'deep-scan' });
+        // Stamp a FRESH syncedAt so the main-process _pushData stale-guard
+        // (drops pushes older than the last) never rejects this enriched push.
+        // Reusing the load-time payload.syncedAt made the deep-scan + Uptake
+        // re-merge pushes get dropped behind each other, so the grid never got
+        // the merged risk scores / PM (the priority drawer, on a different path,
+        // did). now() keeps the latest enrichment winning.
+        pushData({ ...payload, rows: mergedRows, syncedAt: new Date().toISOString(), _partial: 'deep-scan' });
       }
       logger.info('[DS] Incremental save after ' + Math.min(i + DS_BATCH_SIZE, unitsToProcess.length) + '/' + unitsToProcess.length + ' units');
     } catch (e) {
@@ -411,6 +417,9 @@ async function runOrchaDeepScan(mergedRows, opts) {
   }
 
   payload.rows = mergedRows;
+  // Fresh syncedAt so this final enriched push isn't dropped by the stale-guard
+  // behind an interleaved background push (Uptake re-merge / PM fill).
+  payload.syncedAt = new Date().toISOString();
   // Never push an EMPTY rows array (would REPLACE the fleet with [] and zero the
   // grid). A 0-unit scan has nothing to push.
   if (Array.isArray(mergedRows) && mergedRows.length) {
@@ -512,6 +521,26 @@ async function _processUnit(u, notesStore, askOrcha) {
       }
     } catch (e) {
       logger.warn('[DS] Offsite enrich failed for ' + u.equipmentId + ': ' + e.message);
+    }
+  }
+  // DTNA (Daimler/Freightliner) Servicetracker: its case comment feed is a
+  // Salesforce Lightning community — scrape the rendered feed (see dtna_enrich).
+  // Same offsiteText/timeline path as Decisiv; feeds the AI timeline identically.
+  if (!offsiteText && offsiteUrl && /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(offsiteUrl)) {
+    try {
+      const { enrichDtna } = require('../scrapers/dtna_enrich');
+      const dr = await enrichDtna(offsiteUrl);
+      if (dr && dr.ok && dr.offsiteText) {
+        offsiteText = dr.offsiteText.substring(0, 3000);
+        u.asistScrapedAt = dr.scrapedAt;
+        u.asistSource = 'dtna';
+        u.asistLabel = dr.bestLabel || 'DTNA Case';
+        u.asistSrUrl = offsiteUrl;
+        if (dr.offsiteStage) u.offsiteStage = dr.offsiteStage;
+        logger.info('[DS] DTNA case enriched (live) for ' + u.equipmentId + ' | ' + offsiteText.length + 'ch');
+      }
+    } catch (e) {
+      logger.warn('[DS] DTNA enrich failed for ' + u.equipmentId + ': ' + e.message);
     }
   }
   const today = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' });

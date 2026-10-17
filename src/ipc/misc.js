@@ -406,16 +406,27 @@ function registerMiscIPC(ctx) {
   handle('aap:open-url', async (_e, url) => {
     if (!url || !/^https?:\/\//i.test(url)) return { ok: false, error: 'invalid url' };
     const { BrowserWindow, session } = require('electron');
+    // Partition-aware: a vendor URL (e.g. fleet.uptake.com) must open under its
+    // own persisted session (persist:vendor-uptake) where its SSO login already
+    // lives — otherwise the in-app window hits the vendor's login wall. AAP /
+    // non-vendor URLs fall back to defaultSession (same Midway cookies as the
+    // scraper window). Mirrors the window:split-view partition logic.
+    let _openSession = session.defaultSession;
+    try {
+      const { partitionForUrl } = require('../orcha/auto-login');
+      const _part = partitionForUrl(url);
+      if (_part) _openSession = session.fromPartition(_part);
+    } catch (_) { /* fall back to defaultSession */ }
     const win = new BrowserWindow({
       width: 1280, height: 860,
-      title: 'AAP Asset',
+      title: 'Fleet — External',
       icon: require('../config/app-icon').getAppIconPath(),
       backgroundColor: '#0d1117',
       center: true,
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
-        session: session.defaultSession,  // same Midway cookies as the scraper window
+        session: _openSession,  // vendor partition when applicable, else Midway default
       },
     });
     win.setMenuBarVisibility(false);
@@ -857,6 +868,71 @@ function registerMiscIPC(ctx) {
     return result;
   });
 
+  // TEMPORARY DEBUG HANDLER (added 2026-08-14, DBR DATA Copy-All alignment
+  // work): dumps the real row/column layout of a SharePoint tracker sheet
+  // so Copy-All's output can be aligned to the ACTUAL template instead of
+  // guessed. Reuses the exact same SP window reuse / auth pattern as
+  // sp:discover-sheets above. Safe to delete once the DBR sheet's layout is
+  // known and Copy-All is aligned to it.
+  handle('sp:dump-grid', async (_e, { url, sheetName, maxRow } = {}) => {
+    const { extractFilePath, dumpSheetGrid } = require('../../src/scrapers/sp_discover');
+    const { BrowserWindow } = require('electron');
+
+    const parsed = extractFilePath(url);
+    if (parsed.error) return { ok: false, error: parsed.error };
+
+    let spWin = BrowserWindow.getAllWindows().find(w =>
+      w.webContents.getURL().includes('sharepoint.com')
+    );
+    if (!spWin) {
+      spWin = new BrowserWindow({ show: false, width: 800, height: 600 });
+      let shown = false;
+      spWin.webContents.on('did-navigate', (_e2, navUrl) => {
+        if (!shown && /login\.microsoftonline\.com|oauth2\/authorize|midway-auth/i.test(navUrl)) {
+          shown = true;
+          spWin.show();
+          spWin.focus();
+        }
+      });
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          spWin.webContents.removeListener('did-navigate', onNav);
+          clearTimeout(timeoutId);
+          if (shown && !spWin.isDestroyed()) spWin.hide();
+          resolve();
+        };
+        const onNav = (_e2, navUrl) => {
+          if (navUrl.includes('amazon.sharepoint.com/sites/') && !navUrl.includes('login') && !navUrl.includes('oauth')) finish();
+        };
+        const timeoutId = setTimeout(() => finish(), 180000);
+        spWin.webContents.on('did-navigate', onNav);
+        spWin.webContents.on('did-fail-load', (_e2, code) => { if (code !== -3 && !done) finish(); });
+        spWin.loadURL('https://amazon.sharepoint.com/sites/AFP-FAS').catch(() => {});
+      });
+    }
+
+    let filePath = parsed.filePath;
+    const guidMatch = url.match(/sourcedoc=%7B([^%}]+)/i);
+    if (guidMatch && !filePath) {
+      const guid = decodeURIComponent(guidMatch[1]).replace(/[{}]/g, '');
+      try {
+        const guidPath = await spWin.webContents.executeJavaScript(
+          'fetch("https://amazon.sharepoint.com' + parsed.site + "/_api/web/GetFileById('" + guid + "')?$select=ServerRelativeUrl" + '", ' +
+          '{ credentials: "include", headers: { "Accept": "application/json;odata=verbose" } })' +
+          '.then(r => r.ok ? r.json() : null).then(d => d && d.d ? d.d.ServerRelativeUrl : null).catch(() => null)'
+        );
+        if (guidPath) filePath = guidPath;
+      } catch (e) { /* fall through — may still resolve via search below */ }
+    }
+    if (!filePath) return { ok: false, error: 'Could not resolve file path from URL' };
+
+    const result = await dumpSheetGrid(spWin, filePath, sheetName, maxRow);
+    return result;
+  });
+
   // BUG FIX (2026-07-16): the three handlers below were previously spliced
   // into the middle of the sp:discover-sheets handler's `if (!spWin) {...}`
   // block above (a file-corruption artifact, likely from a bad edit/merge).
@@ -879,6 +955,114 @@ function registerMiscIPC(ctx) {
     const { getUnitHistory, getAllHistory } = require('../orcha/repair-history');
     if (equipmentId) return getUnitHistory(equipmentId);
     return getAllHistory();
+  });
+
+  // Breakdown history for the unit-detail History tab: one record per repair
+  // cycle, each with an AI 'analysis' one-liner + a quick overall 'summary' of
+  // the unit's breakdown pattern. AI output is cached per breakdown signature
+  // (and per summary signature) so it is generated once, not on every panel
+  // open. Grounded strictly in the recorded events; deterministic fallback when
+  // AI is unavailable so the tab always renders.
+  handle('breakdown-history:get', async (_e, equipmentId, row) => {
+    const store = require('../store');
+    const { buildBreakdowns } = require('../orcha/repair-history');
+    const id = String(equipmentId || '').trim();
+    if (!id) return { breakdowns: [], summary: '' };
+
+    const breakdowns = buildBreakdowns(id, row || null);
+    if (!breakdowns.length) return { breakdowns: [], summary: '' };
+
+    const cache = store.load('breakdownAnalysis', { bySig: {}, summaries: {} }) || { bySig: {}, summaries: {} };
+    cache.bySig = cache.bySig || {};
+    cache.summaries = cache.summaries || {};
+    let relay = null;
+    try { relay = require('../orcha/relay'); } catch (_) {}
+
+    function _fmt(b) {
+      const back = b.ongoing ? 'ongoing' : (b.backDate || 'returned');
+      const dur = b.days != null ? b.days + 'd' : (b.ongoing ? 'ongoing' : '?');
+      return b.downDate + ' \u2192 ' + back + ' (' + dur + ')';
+    }
+    // Deterministic one-line fallback — grounded, no AI.
+    function _fallbackAnalysis(b) {
+      const parts = [];
+      parts.push(b.rootCause ? b.rootCause.replace(/\.$/, '') : 'Repair');
+      if (b.vendor) parts.push('handled by ' + b.vendor);
+      if (b.days != null && !b.ongoing) parts.push('down ' + b.days + ' day' + (b.days === 1 ? '' : 's'));
+      else if (b.ongoing) parts.push('still down');
+      return parts.join('; ') + '.';
+    }
+
+    // Per-breakdown AI analysis (cached by sig).
+    let aiGenerated = 0;
+    for (const b of breakdowns) {
+      const cached = cache.bySig[b.sig];
+      if (cached && cached.analysis) { b.analysis = cached.analysis; continue; }
+
+      let analysis = '';
+      if (relay && relay.ask && b.events.length) {
+        const evText = b.events.slice(-25).map(function (e) { return e.date + ': ' + e.text; }).join('\n');
+        const prompt =
+          'You are a fleet maintenance analyst. Below is the recorded event log for ONE breakdown of unit ' + id +
+          ' (' + _fmt(b) + (b.vendor ? ', vendor ' + b.vendor : '') + ').\n\n' +
+          'Write ONE concise analysis sentence (max 40 words) stating the ROOT CAUSE (the actual mechanical/parts failure) and how the repair went ' +
+          '(key delay or blocker, and resolution if closed). Ground it STRICTLY in the events — do NOT invent parts, causes, dates, names, or costs. ' +
+          'If the root cause is not stated, say "root cause not documented". No preamble, no bullet points, just the sentence.\n\n' +
+          'EVENTS:\n' + evText;
+        try {
+          const txt = await Promise.race([
+            relay.ask(prompt),
+            new Promise(function (res) { setTimeout(function () { res(''); }, 20000); }),
+          ]);
+          analysis = String(txt || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        } catch (_) { analysis = ''; }
+      }
+      if (!analysis) analysis = _fallbackAnalysis(b);
+      else aiGenerated++;
+      b.analysis = analysis;
+      cache.bySig[b.sig] = { analysis: analysis, at: new Date().toISOString() };
+    }
+
+    // Overall summary (cached by the ordered set of breakdown sigs).
+    const sigKey = breakdowns.map(function (b) { return b.sig; }).join(',');
+    let summary = '';
+    const sc = cache.summaries[id];
+    if (sc && sc.sigKey === sigKey && sc.summary) {
+      summary = sc.summary;
+    } else {
+      const totalDays = breakdowns.reduce(function (s, b) { return s + (b.days || 0); }, 0);
+      const openCount = breakdowns.filter(function (b) { return b.ongoing; }).length;
+      if (relay && relay.ask) {
+        const list = breakdowns.map(function (b) { return '- ' + _fmt(b) + ': ' + (b.analysis || b.rootCause); }).join('\n');
+        const prompt =
+          'You are a fleet maintenance analyst. Here is the breakdown history for unit ' + id + ' (last 3 months, newest first):\n' +
+          list + '\n\n' +
+          'Write ONE short summary sentence (max 35 words) of this unit\'s breakdown pattern — how many breakdowns, total days down, any recurring component/vendor theme, and whether it is currently down. ' +
+          'Ground STRICTLY in the data above; do NOT invent. No preamble.';
+        try {
+          const txt = await Promise.race([
+            relay.ask(prompt),
+            new Promise(function (res) { setTimeout(function () { res(''); }, 20000); }),
+          ]);
+          summary = String(txt || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        } catch (_) { summary = ''; }
+      }
+      if (!summary) {
+        summary = breakdowns.length + ' breakdown' + (breakdowns.length === 1 ? '' : 's') +
+          ' in the last 3 months' + (totalDays ? ', ' + totalDays + ' total days down' : '') +
+          (openCount ? ' \u2014 currently down.' : '.');
+      }
+      cache.summaries[id] = { summary: summary, sigKey: sigKey, at: new Date().toISOString() };
+    }
+
+    try { store.save('breakdownAnalysis', cache); } catch (_) {}
+
+    // Strip the heavy events[] from the payload sent to the renderer (it only
+    // needs the display fields + analysis).
+    const payload = breakdowns.map(function (b) {
+      return { downDate: b.downDate, backDate: b.backDate, days: b.days, ongoing: b.ongoing, reportedIssue: b.reportedIssue, rootCause: b.rootCause, vendor: b.vendor, analysis: b.analysis };
+    });
+    return { breakdowns: payload, summary: summary, aiGenerated: aiGenerated };
   });
 
   // Morning briefing — manual regenerate (bypasses the once-per-day guard).

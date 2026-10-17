@@ -17,6 +17,8 @@ import { init as initNotifDropdown }      from './components/notif-dropdown.js';
 import { init as initOrchaFab }           from './components/orcha-fab.js';
 import { init as initNexusSidebar }       from './components/nexus-sidebar.js';
 import { init as initMorningBriefing }   from './components/morning-briefing.js';
+import { init as initEmailTriage }        from './components/email-triage-overlay.js';
+import { init as initRelayReconcile }     from './components/relay-reconcile-overlay.js';
 import { init as initContactBook }       from './components/contact-book.js';
 import { init as initDraftInbox }         from './components/draft-inbox.js';
 import { init as initTimeline }           from './components/workflow-timeline.js';
@@ -106,6 +108,8 @@ function boot() {
 initDraftInbox();
 initNexusSidebar();
   initMorningBriefing();
+  initEmailTriage();
+  initRelayReconcile();
   initContactBook();
   initTimeline();
 initStatusBar(document.getElementById('status-bar-mount'));
@@ -150,7 +154,8 @@ initStatusBar(document.getElementById('status-bar-mount'));
     if (to === 'settings') return;
     if (fleetView)         fleetView.style.display         = to === 'fleet'          ? 'flex' : 'none';
     if (analyticsView)     analyticsView.style.display     = to === 'analytics'      ? 'flex' : 'none';
-    if (vendorsView)       vendorsView.style.display       = to === 'vendors'        ? 'flex' : 'none';
+    // vendorsView is a self-managed centered overlay now (opened from the
+    // Dashboard Top Vendors tile via ui:vendors-open) — not toggled by nav.
     if (emailComposerView) emailComposerView.style.display = to === 'email-composer' ? 'flex' : 'none';
     if (schedulersView)    schedulersView.style.display    = to === 'schedulers'     ? 'flex' : 'none';
     if (dailyNotesView)    dailyNotesView.style.display    = to === 'daily-notes'    ? 'flex' : 'none';

@@ -21,6 +21,7 @@
 import { aap, files, relay } from '../bridge.js';
 import bus from '../bus.js';
 import toast           from '../components/toast.js';
+import { open as openDealerWOModal } from './dealer-wo-modal.js';
 
 // ── Vendor list (mirrors aap_create_wr.js VENDOR_IDS) ─────────────────────
 const VENDORS = [
@@ -72,6 +73,19 @@ let _areaCount = 1;
 let _progUnsub = null;
 let _towAddrUnsub = null; // BUG FIX (2026-07-16): see _wireTow() below
 let _attachments = []; // FEATURE (2026-07-23): [{name, dataUrl}] -- auto-attach + manual + drag-drop
+// Tow orchestration plan, set by _runAIAssist when it detects a tow-to-dealer
+// scenario. When present, Submit runs the multi-WR flow (repair + tow (+ dealer
+// WO)) via deterministic aap.createWR with auto-submit, instead of the single
+// AI-wizard runAdaptive path. Cleared after each submit.
+let _towPlan = null; // { isTow, towDirection, dealer: <vendor contact>, dealerName }
+// Multi-tab state for a tow-to-dealer request. ONE shared form; the tab bar
+// just swaps which work-order's data is loaded into it (snapshot current tab
+// -> load target tab), so no DOM/fields are duplicated and the no-dealer
+// single-WR path is completely untouched when this is null.
+//   { active: 'repair'|'tow', repair: {...fields}, tow: {...fields},
+//     submitted: { repair: null|{workRequestId}, tow: null|{workRequestId} },
+//     rgIntegrated, dealerName, hasRepair }
+let _wrTabState = null;
 let _copyFromWrId = null; // set by the "+ 2nd WR (reuse data)" flow -> AAP copiedFromWorkRequestId
 
 // Resolve the unit's EXISTING work-request id (raw UUID) from the unit record,
@@ -148,10 +162,11 @@ function _buildHTML(unit) {
     <!-- Work Details -->
     <div class="wr-section">
       <div class="wr-section__title" style="display:flex;justify-content:space-between;align-items:center;">Work Details <button id="wr-ai-assist" type="button" class="detail-panel__btn detail-panel__btn--secondary" style="font-size:9px;padding:2px 8px;">✨ AI Fill</button></div>
-      <label class="settings-label">WR Title <span id="wr-title-count" class="wr-title-count" style="float:right;font-size:9px;opacity:.6">0/90</span>
-        <input id="wr-title" class="settings__input" type="text" maxlength="90"
-          placeholder="Type title then press Enter or click AI Fill..."
-          value="${_safeAttr((unit.pmStatus || unit.issueDetails || '').slice(0, 90))}" />
+      <div id="wr-tabbar-host"></div>
+      <label class="settings-label">WR Title <span id="wr-title-count" class="wr-title-count" style="float:right;font-size:9px;opacity:.6">0 (AI will summarize to 90)</span>
+        <input id="wr-title" class="settings__input" type="text"
+          placeholder="Type your request in full — AI Fill will summarize it to 90 chars..."
+          value="${_safeAttr(unit.pmStatus || unit.issueDetails || '')}" />
       </label>
       <label class="settings-label" style="margin-top:6px">Issue Description
         <textarea id="wr-issue" class="settings__textarea" rows="3"
@@ -269,7 +284,7 @@ function _buildHTML(unit) {
     <div class="wr-section">
       <div id="wr-tow-wrap" class="wr-section" style="display:none">\n      <div class="wr-section__title">\uD83D\uDE9B Tow Destination (where unit goes)</div>\n      <div class="wr-two-col" style="margin-bottom:6px"><label class="settings-label" style="flex:3"><select id="wr-tow-book" class="settings__select"><option value="">Quick-fill from vendor book...</option></select></label></div>\n      <div class="wr-two-col"><label class="settings-label" style="flex:3">Street<input id="wr-tow-street" class="settings__input" placeholder="Street" /></label><label class="settings-label" style="flex:2">City<input id="wr-tow-city" class="settings__input" placeholder="City" /></label></div>\n      <div class="wr-two-col" style="margin-top:4px"><label class="settings-label">State<input id="wr-tow-state" class="settings__input" placeholder="ST" maxlength="2" style="text-transform:uppercase" /></label><label class="settings-label">ZIP<input id="wr-tow-zip" class="settings__input" placeholder="00000" /></label></div>\n      <div class="wr-section__title" style="margin-top:12px">\uD83D\uDCCD Tow Pickup (where unit is now)</div>\n      <div class="wr-two-col" style="margin-bottom:6px"><label class="settings-label" style="flex:3"><select id="wr-tow-from-book" class="settings__select"><option value="">Quick-fill pickup location...</option></select></label></div>\n      <div class="wr-two-col"><label class="settings-label" style="flex:3">Street<input id="wr-tow-from-street" class="settings__input" placeholder="Pickup street" /></label><label class="settings-label" style="flex:2">City<input id="wr-tow-from-city" class="settings__input" placeholder="City" /></label></div>\n      <div class="wr-two-col" style="margin-top:4px"><label class="settings-label">State<input id="wr-tow-from-state" class="settings__input" placeholder="ST" maxlength="2" style="text-transform:uppercase" /></label><label class="settings-label">ZIP<input id="wr-tow-from-zip" class="settings__input" placeholder="00000" /></label></div>\n    </div>\n\n    <div class="wr-section__title">Attachments</div>
       <div class="wr-screenshot-row">
-        <button id="wr-attach-screenshot" class="detail-panel__btn detail-panel__btn--secondary">Attach latest Uptake screenshot</button>
+        <button id="wr-attach-screenshot" class="detail-panel__btn detail-panel__btn--secondary">Attach Uptake screenshots</button>
         <span id="wr-screenshot-label" class="wr-screenshot-label">None</span>
       </div>
       <div id="wr-dropzone" class="wr-dropzone">
@@ -305,6 +320,165 @@ function _buildHTML(unit) {
   </div>
 
 </div>`;
+}
+
+// ── Tab snapshot / load (multi-tab tow UI) ─────────────────────────────────
+// Captures the FULL live form state (not just the createWR payload shape) so
+// switching tabs restores exact UI state, including the number of area rows.
+function _snapshotForm() {
+  const areaPairs = [];
+  for (let i = 0; i < _areaCount; i++) {
+    const aEl = _el('wr-area-' + i), sEl = _el('wr-sub-' + i);
+    if (!aEl && !sEl) continue;
+    areaPairs.push({ area: (aEl && aEl.value) || '', subcategory: (sEl && sEl.value) || '' });
+  }
+  const condEl = document.querySelector('input[name="wr-condition"]:checked');
+  return {
+    title: (_el('wr-title') || {}).value || '',
+    issue: (_el('wr-issue') || {}).value || '',
+    vendor: (_el('wr-vendor') || {}).value || '',
+    urgent: !!(_el('wr-urgent') || {}).checked,
+    urgencyReason: (_el('wr-urgency-reason') || {}).value || '',
+    condition: condEl ? condEl.value : '',
+    areaPairs,
+    contactName: (_el('wr-contact-name') || {}).value || '',
+    contactPhone: (_el('wr-contact-phone') || {}).value || '',
+    comments: (_el('wr-comments') || {}).value || '',
+    internal: !!(_el('wr-internal') || {}).checked,
+    arc: (_el('wr-arc') || {}).value || '',
+    sim: (_el('wr-sim') || {}).value || '',
+    towStreet: (_el('wr-tow-street') || {}).value || '',
+    towCity: (_el('wr-tow-city') || {}).value || '',
+    towState: (_el('wr-tow-state') || {}).value || '',
+    towZip: (_el('wr-tow-zip') || {}).value || '',
+    towFromStreet: (_el('wr-tow-from-street') || {}).value || '',
+    towFromCity: (_el('wr-tow-from-city') || {}).value || '',
+    towFromState: (_el('wr-tow-from-state') || {}).value || '',
+    towFromZip: (_el('wr-tow-from-zip') || {}).value || '',
+    towWrapVisible: !!(_el('wr-tow-wrap') && _el('wr-tow-wrap').style.display !== 'none'),
+  };
+}
+
+function _applyFormSnapshot(s) {
+  if (!s) return;
+  const rowsContainer = _el('wr-area-rows');
+  // Rebuild area rows to match the snapshot's count exactly.
+  if (rowsContainer) {
+    rowsContainer.innerHTML = (s.areaPairs.length ? s.areaPairs : [{ area: '', subcategory: '' }])
+      .map((p, i) => _areaPairRow(i, p.area, p.subcategory)).join('');
+    _areaCount = Math.max(1, s.areaPairs.length);
+  }
+  const set = (id, v) => { const el = _el(id); if (el) el.value = v; };
+  set('wr-title', s.title); set('wr-issue', s.issue); set('wr-vendor', s.vendor);
+  const u = _el('wr-urgent'); if (u) u.checked = !!s.urgent;
+  const urw = _el('wr-urgency-reason-wrap'); if (urw) urw.style.display = s.urgent ? '' : 'none';
+  set('wr-urgency-reason', s.urgencyReason);
+  const safeEl = _el('wr-condition-safe'), unsafeEl = _el('wr-condition-unsafe');
+  if (safeEl) safeEl.checked = s.condition === 'Safe to Move';
+  if (unsafeEl) unsafeEl.checked = s.condition === 'Unsafe to Move';
+  set('wr-contact-name', s.contactName); set('wr-contact-phone', s.contactPhone);
+  set('wr-comments', s.comments);
+  const i2 = _el('wr-internal'); if (i2) i2.checked = !!s.internal;
+  set('wr-arc', s.arc); set('wr-sim', s.sim);
+  set('wr-tow-street', s.towStreet); set('wr-tow-city', s.towCity); set('wr-tow-state', s.towState); set('wr-tow-zip', s.towZip);
+  set('wr-tow-from-street', s.towFromStreet); set('wr-tow-from-city', s.towFromCity); set('wr-tow-from-state', s.towFromState); set('wr-tow-from-zip', s.towFromZip);
+  const tw = _el('wr-tow-wrap'); if (tw) tw.style.display = s.towWrapVisible ? '' : 'none';
+  _wireTitleCount();
+}
+
+// Build the TOW work-order title with the correct DIRECTION. The AI already
+// parses towDirection + pickup/destination from the user's words; the old
+// template hardcoded "TOW <unit> to <dealer>" and ignored it, so a return tow
+// ("towed back FROM dealer TO home yard") came out backwards. Rules:
+//   return-to-yard : TOW <unit> from <pickup/dealer> to <destination/home yard>
+//   yard-to-yard   : TOW <unit> from <origin> to <destination>
+//   to-dealer      : TOW <unit> to <dealer>            (default)
+// Falls back cleanly to "TOW <unit> to <dealer>" when a name is missing.
+// Exported for unit testing.
+function _buildTowTitle(unit, plan, dealerName) {
+  const eq = (unit && (unit.equipmentId || unit.id)) || '';
+  const dir = (plan && plan.towDirection) || 'to-dealer';
+  const homeYard = (plan && plan.towDestName) || (unit && (unit.domicileSite || unit.site)) || '';
+  const pickup = (plan && plan.towPickupName) || dealerName || '';
+  const dest = (plan && plan.towDestName) || '';
+  let title;
+  if (dir === 'return-to-yard') {
+    // Unit is at the dealer; bring it home. Pickup = dealer, dest = home yard.
+    const from = pickup || dealerName || 'dealer';
+    const to = homeYard || 'home yard';
+    title = 'TOW ' + eq + ' from ' + from + ' to ' + to;
+  } else if (dir === 'yard-to-yard') {
+    const from = pickup || 'yard';
+    const to = dest || homeYard || 'yard';
+    title = 'TOW ' + eq + ' from ' + from + ' to ' + to;
+  } else {
+    // to-dealer (default): unit goes TO the dealer.
+    title = 'TOW ' + eq + ' to ' + (dealerName || dest || 'dealer');
+  }
+  return title.replace(/\s{2,}/g, ' ').trim().slice(0, 90);
+}
+
+// Build the two tabs' initial field snapshots from a tow plan + base form
+// state (whatever AI Fill / the user has typed so far). Mirrors the vendor
+// and title rules from _buildTowPayloads, but as EDITABLE form snapshots.
+function _buildTabSnapshots(baseSnapshot) {
+  const unit = _unit || {};
+  const plan = _towPlan;
+  const dealer = plan.dealer;
+  const dealerName = (dealer && dealer.name) || plan.dealerName || 'dealer';
+  const rgIntegrated = _isRgIntegrated(dealer);
+  const makeVendor = _makeVendorFor(unit);
+  const hasRepair = plan.hasRepair !== false;
+
+  const repair = { ...baseSnapshot };
+  repair.title = rgIntegrated ? baseSnapshot.title : 'Relay Garage Repair Work Order - Dealer Tracking';
+  repair.vendor = rgIntegrated ? dealerName : makeVendor;
+  repair.areaPairs = (baseSnapshot.areaPairs || []).filter(p => (p.area || '').toUpperCase() !== 'TOW');
+  if (!repair.areaPairs.length) repair.areaPairs = baseSnapshot.areaPairs;
+  repair.towWrapVisible = false;
+
+  const tow = { ...baseSnapshot };
+  tow.title = _buildTowTitle(unit, plan, dealerName);
+  tow.vendor = rgIntegrated ? dealerName : (baseSnapshot.vendor || '');
+  tow.areaPairs = [{ area: 'TOW', subcategory: 'MECHANICAL ISSUE' }];
+  tow.urgent = true;
+  tow.urgencyReason = baseSnapshot.urgencyReason || 'DEA - Asset Shortage';
+  tow.towWrapVisible = true;
+
+  return { repair, tow, rgIntegrated, dealerName, hasRepair };
+}
+
+// ── Tab bar (only rendered when _wrTabState is set) ────────────────────────
+function _renderTabBar() {
+  const host = _el('wr-tabbar-host');
+  if (!host) return;
+  if (!_wrTabState) { host.innerHTML = ''; return; }
+  const st = _wrTabState;
+  const tabLabel = (key, label) => {
+    const done = st.submitted[key];
+    return '<button type="button" class="wr-tab-btn' + (st.active === key ? ' active' : '') + (done ? ' done' : '') + '" data-tab="' + key + '">' +
+      (done ? '✓ ' : '') + _esc_wr(label) + '</button>';
+  };
+  host.innerHTML = '<div class="wr-tabbar">' +
+    tabLabel('repair', st.hasRepair ? 'Repair / Dealer Tracking' : 'Repair (skipped)') +
+    tabLabel('tow', 'Tow') +
+    '<span class="wr-tabbar-note">' + (st.rgIntegrated ? _esc_wr(st.dealerName) + ' is RG-integrated — no Dealer WO' : 'Dealer WO opens after both are submitted') + '</span>' +
+    '<button type="button" id="wr-submit-all" class="detail-panel__btn detail-panel__btn--secondary" style="margin-left:auto">Submit All (' + (st.hasRepair ? '2' : '1') + ')</button>' +
+    '</div>';
+  const submitAllBtn = _el('wr-submit-all');
+  if (submitAllBtn) submitAllBtn.addEventListener('click', () => _submitAllTabs());
+  host.querySelectorAll('.wr-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => _switchTab(btn.dataset.tab));
+  });
+}
+function _esc_wr(s) { return _safe(s); }
+
+function _switchTab(key) {
+  if (!_wrTabState || _wrTabState.active === key) return;
+  _wrTabState[_wrTabState.active] = _snapshotForm();
+  _wrTabState.active = key;
+  _applyFormSnapshot(_wrTabState[key]);
+  _renderTabBar();
 }
 
 // ── Payload collector ─────────────────────────────────────────────────────
@@ -353,7 +527,326 @@ function _collectPayload() {
     towFromCity:   (_el('wr-tow-from-city')||{}).value||'',
     towFromState:  (_el('wr-tow-from-state')||{}).value||'',
     towFromZip:    (_el('wr-tow-from-zip')||{}).value||'',
+    // Tow direction (from the AI tow plan) so the submitted unit-location can
+    // reflect where the unit actually is (dealer on a return tow, not home yard).
+    towDirection:  (_towPlan && _towPlan.towDirection) || '',
+    // Off-site location for the AAP Location wizard step: when the unit is NOT
+    // in its yard (return/yard-to-yard tow) the wizard must select "Off Site
+    // (Address)" and type the pickup STREET/CITY/STATE/ZIP, not a geofence.
+    ...(() => { const l = _resolveWrLocation({
+          towDirection: (_towPlan && _towPlan.towDirection) || '',
+          towFromStreet: (_el('wr-tow-from-street')||{}).value||'',
+          towFromCity:   (_el('wr-tow-from-city')||{}).value||'',
+          towFromState:  (_el('wr-tow-from-state')||{}).value||'',
+          towFromZip:    (_el('wr-tow-from-zip')||{}).value||'',
+        });
+        return { offSite: l.offSite, locStreet: l.locStreet, locCity: l.locCity, locState: l.locState, locZip: l.locZip }; })(),
   };
+}
+
+// ── Tow orchestration (multi-WR) ──────────────────────────────────────────
+// Fired from _doSubmit when _towPlan is set (AI detected a tow-to-dealer).
+// Creates, auto-submitted via the deterministic aap.createWR 3-step API:
+//   1. a REPAIR work request
+//   2. a TOW work request (linked to the repair via copiedFromWorkRequestId)
+// Then, if the chosen dealer is NOT Relay-Garage/Reach integrated, opens the
+// Dealer WO modal pre-filled so the user can submit that too.
+//
+// Vendor + title rules (confirmed with user):
+//   Case A — dealer IS RG-integrated (affiliation contains Relay Garage/Reach):
+//     repair WR vendor = the dealer itself; NO Dealer WO.
+//   Case B — dealer NOT RG-integrated:
+//     repair WR vendor = unit's MAKE (Volvo/Kenworth/Peterbilt/Freightliner),
+//     repair WR title = fixed "Relay Garage Repair Work Order - Dealer Tracking";
+//     then open the Dealer WO modal.
+const _MAKE_VENDOR = [
+  { re: /volvo|mack/i,            vendor: 'Volvo (ASIST)' },
+  { re: /kenworth|kwne/i,         vendor: 'Kenworth (PACCAR)' },
+  { re: /peterbilt/i,             vendor: 'Peterbilt (PACCAR)' },
+  { re: /freightliner|western/i,  vendor: 'Freightliner (DAIMLER)' },
+];
+function _makeVendorFor(unit) {
+  const hay = [unit && unit.manufacturer, unit && unit.make, unit && unit.model].map(s => String(s||'')).join(' ');
+  const hit = _MAKE_VENDOR.find(m => m.re.test(hay));
+  return hit ? hit.vendor : '';
+}
+function _isRgIntegrated(dealer) {
+  return !!(dealer && /relay\s*garage|reach/i.test(String(dealer.affiliation || '')));
+}
+
+// Case B: open the Dealer WO modal pre-filled (shared by both paths).
+function _openDealerWOForTow(dealerName) {
+  const unit = _unit || {};
+  const vendorKey = _detectVendorKeyLocal(unit);
+  if (vendorKey && typeof openDealerWOModal === 'function') {
+    const unitForWO = { ...unit, _towDealerName: dealerName };
+    setTimeout(() => {
+      openDealerWOModal(unitForWO, vendorKey, async (formData) => {
+        try {
+          const fn = vendorKey === 'paccar' ? (window.vendor && window.vendor.startPaccar) : (window.vendor && window.vendor.startVolvo);
+          if (fn) await fn(unitForWO, formData);
+        } catch (e) { toast.show('error', 'Dealer WO workflow failed: ' + e.message, 5000); }
+      });
+    }, 600);
+  } else {
+    toast.show('info', dealerName + ' has no automated Dealer WO — submit it manually in the dealer portal.', 7000);
+  }
+}
+
+// Submit the CURRENTLY ACTIVE tab's live (edited) fields as one real WR via
+// the deterministic createWR path. Marks that tab done; once BOTH tabs are
+// done, opens the Dealer WO for a non-RG dealer (unchanged flow).
+async function _submitActiveTab(btn) {
+  const st = _wrTabState;
+  const key = st.active;
+  const unit = _unit || {};
+  st[key] = _snapshotForm(); // capture any edits made on this tab
+  const snap = st[key];
+
+  if (!window.confirm('Create and SUBMIT this ' + (key === 'repair' ? 'Repair' : 'Tow') + ' work order: "' + (snap.title || '').slice(0, 90) + '"?')) return;
+
+  const origText = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Submitting ' + key + '...';
+  const resultEl = _el('wr-result');
+  resultEl.style.display = 'none';
+  _el('wr-progress-wrap').style.display = '';
+  if (_progUnsub) { _progUnsub(); _progUnsub = null; }
+  _progUnsub = aap.onWRProgress(_logProgress);
+
+  const payload = {
+    unit: unit.id || unit.equipmentId || '',
+    title: String(snap.title || '').slice(0, 90),
+    issue: snap.issue, vendor: snap.vendor,
+    urgent: snap.urgent ? 'Yes' : 'No', urgencyReason: snap.urgent ? snap.urgencyReason : '',
+    areaPairs: snap.areaPairs, contactName: snap.contactName, contactPhone: snap.contactPhone,
+    comments: snap.comments, shareWith: snap.internal ? 'internal' : 'all',
+    arcClaim: snap.arc || null, simNumber: snap.sim || null,
+    attachments: _attachments.map(a => a.dataUrl), screenshotDataUrl: (_attachments[0] && _attachments[0].dataUrl) || null,
+    domicile: unit.site || unit.domicileSite || '',
+    towStreet: snap.towStreet, towCity: snap.towCity, towState: snap.towState, towZip: snap.towZip,
+    towFromStreet: snap.towFromStreet, towFromCity: snap.towFromCity, towFromState: snap.towFromState, towFromZip: snap.towFromZip,
+    // Tow direction drives the submitted unit-location (return-from-dealer =>
+    // unit is at the dealer/pickup, not the home yard). Only the tow tab has one.
+    towDirection: (key === 'tow' && _towPlan) ? (_towPlan.towDirection || 'to-dealer') : '',
+    copiedFromWorkRequestId: key === 'tow' ? ((st.submitted.repair && st.submitted.repair.workRequestId) || null) : null,
+    autoSubmit: true,
+  };
+
+  try {
+    _logProgress('[' + key + '] Creating work request...');
+    const res = await aap.createWR(payload, unit);
+    if (_progUnsub) { _progUnsub(); _progUnsub = null; }
+    if (!res || !res.ok) { _showError((key === 'repair' ? 'Repair' : 'Tow') + ' WR failed: ' + ((res && res.error) || 'unknown')); return; }
+    _logProgress('[' + key + '] Created: ' + res.workRequestId);
+    st.submitted[key] = { workRequestId: res.workRequestId };
+    toast.show('success', (key === 'repair' ? 'Repair' : 'Tow') + ' WR ' + res.workRequestId + ' created', 5000);
+    _renderTabBar();
+    await _afterTabSubmitted();
+  } catch (e) {
+    if (_progUnsub) { _progUnsub(); _progUnsub = null; }
+    _showError((key === 'repair' ? 'Repair' : 'Tow') + ' WR failed: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = origText;
+  }
+}
+
+// After a tab submits: if the OTHER required tab is also done (or not
+// needed), open the Dealer WO for a non-RG dealer and finish up.
+async function _afterTabSubmitted() {
+  const st = _wrTabState;
+  if (!st) return;
+  const repairDone = !st.hasRepair || !!st.submitted.repair;
+  const towDone = !!st.submitted.tow;
+  if (repairDone && towDone) {
+    const resultEl = _el('wr-result');
+    const parts = [];
+    if (st.submitted.repair) parts.push('Repair WR ' + st.submitted.repair.workRequestId);
+    if (st.submitted.tow) parts.push('Tow WR ' + st.submitted.tow.workRequestId);
+    if (resultEl) {
+      resultEl.innerHTML = '<div class="wr-result--success"><span class="wr-result__icon">✓</span><span>Created ' + _safe(parts.join(' + ')) +
+        (st.rgIntegrated ? ' (RG-integrated — assigned in RG).' : '. Opening Dealer WO…') + '</span></div>';
+      resultEl.style.display = '';
+    }
+    if (!st.rgIntegrated) _openDealerWOForTow(st.dealerName);
+    const unit = _unit || {};
+    const _eqId = unit && (unit.equipmentId || unit.id);
+    if (_eqId && relay && typeof relay.refreshUnit === 'function') relay.refreshUnit(_eqId).catch(() => {});
+    if (st.rgIntegrated) setTimeout(() => _close(), 3500);
+  }
+}
+
+// "Submit All" — runs the repair tab then the tow tab in sequence (each via
+// the SAME per-tab submit as a single click would), using whatever is
+// currently loaded/edited in _wrTabState for each (switches tabs as needed).
+async function _submitAllTabs() {
+  const st = _wrTabState;
+  if (!st) return;
+  if (!window.confirm('Submit All will create and SUBMIT ' + (st.hasRepair ? '2 work orders (Repair + Tow)' : '1 work order (Tow)') +
+    (st.rgIntegrated ? '.' : ', then open the Dealer WO.') + ' Continue?')) return;
+  const allBtn = _el('wr-submit-all');
+  if (allBtn) { allBtn.disabled = true; allBtn.textContent = 'Submitting…'; }
+  try {
+    if (st.hasRepair && !st.submitted.repair) {
+      if (st.active !== 'repair') { st[st.active] = _snapshotForm(); st.active = 'repair'; _applyFormSnapshot(st.repair); _renderTabBar(); }
+      await _submitOneTabSilently('repair');
+    }
+    if (!st.submitted.tow) {
+      if (st.active !== 'tow') { st[st.active] = _snapshotForm(); st.active = 'tow'; _applyFormSnapshot(st.tow); _renderTabBar(); }
+      await _submitOneTabSilently('tow');
+    }
+  } finally {
+    if (allBtn) { allBtn.disabled = false; allBtn.textContent = 'Submit All'; }
+  }
+}
+
+// Same as _submitActiveTab's core but WITHOUT its own confirm dialog (Submit
+// All already confirmed once for the whole batch) and operating on a named
+// tab rather than always "the active one" at call time.
+async function _submitOneTabSilently(key) {
+  const st = _wrTabState;
+  const unit = _unit || {};
+  st[key] = _snapshotForm();
+  const snap = st[key];
+  _el('wr-progress-wrap').style.display = '';
+  if (_progUnsub) { _progUnsub(); _progUnsub = null; }
+  _progUnsub = aap.onWRProgress(_logProgress);
+  const payload = {
+    unit: unit.id || unit.equipmentId || '',
+    title: String(snap.title || '').slice(0, 90),
+    issue: snap.issue, vendor: snap.vendor,
+    urgent: snap.urgent ? 'Yes' : 'No', urgencyReason: snap.urgent ? snap.urgencyReason : '',
+    areaPairs: snap.areaPairs, contactName: snap.contactName, contactPhone: snap.contactPhone,
+    comments: snap.comments, shareWith: snap.internal ? 'internal' : 'all',
+    arcClaim: snap.arc || null, simNumber: snap.sim || null,
+    attachments: _attachments.map(a => a.dataUrl), screenshotDataUrl: (_attachments[0] && _attachments[0].dataUrl) || null,
+    domicile: unit.site || unit.domicileSite || '',
+    towStreet: snap.towStreet, towCity: snap.towCity, towState: snap.towState, towZip: snap.towZip,
+    towFromStreet: snap.towFromStreet, towFromCity: snap.towFromCity, towFromState: snap.towFromState, towFromZip: snap.towFromZip,
+    // Tow direction drives the submitted unit-location (return-from-dealer =>
+    // unit is at the dealer/pickup, not the home yard). Only the tow tab has one.
+    towDirection: (key === 'tow' && _towPlan) ? (_towPlan.towDirection || 'to-dealer') : '',
+    copiedFromWorkRequestId: key === 'tow' ? ((st.submitted.repair && st.submitted.repair.workRequestId) || null) : null,
+    autoSubmit: true,
+  };
+  try {
+    _logProgress('[' + key + '] Creating work request...');
+    const res = await aap.createWR(payload, unit);
+    if (!res || !res.ok) { _showError((key === 'repair' ? 'Repair' : 'Tow') + ' WR failed: ' + ((res && res.error) || 'unknown')); return; }
+    _logProgress('[' + key + '] Created: ' + res.workRequestId);
+    st.submitted[key] = { workRequestId: res.workRequestId };
+    _renderTabBar();
+    await _afterTabSubmitted();
+  } catch (e) {
+    _showError((key === 'repair' ? 'Repair' : 'Tow') + ' WR failed: ' + e.message);
+  } finally {
+    if (_progUnsub) { _progUnsub(); _progUnsub = null; }
+  }
+}
+
+// Build an aap.autofill-shaped payload from a tab snapshot (mirrors the
+// Resolve where the unit ACTUALLY is for the AAP Location wizard step.
+// In-yard (default / to-dealer tow): the unit is at its home yard, so the
+// wizard should pick the domicile GEOFENCE (On Site / Yard).
+// Off-site (return-from-dealer or yard-to-yard tow): the unit is at the tow
+// PICKUP location (the dealer), which is NOT a yard geofence — so the wizard
+// must select "Off Site (Address)" and type the STREET/CITY/STATE/ZIP instead.
+// Returns { offSite, locStreet, locCity, locState, locZip } the engine reads.
+function _resolveWrLocation(src) {
+  const dir = String((src && src.towDirection) || (_towPlan && _towPlan.towDirection) || '').toLowerCase();
+  const offSite = (dir === 'return-to-yard' || dir === 'yard-to-yard');
+  // Pickup = where the unit is NOW (dealer, on a return tow).
+  const locStreet = (src && src.towFromStreet) || '';
+  const locCity   = (src && src.towFromCity)   || '';
+  const locState  = (src && src.towFromState)  || '';
+  const locZip    = (src && src.towFromZip)    || '';
+  const hasAddr = !!(locStreet || locCity || locState || locZip);
+  return { offSite: offSite && hasAddr, locStreet, locCity, locState, locZip };
+}
+
+// fields _submitActiveTab sends to createWR, minus autoSubmit).
+function _snapshotToAutofillPayload(snap, copiedFromWorkRequestId) {
+  const unit = _unit || {};
+  const towDirection = (snap && snap.towDirection) || (_towPlan && _towPlan.towDirection) || '';
+  const loc = _resolveWrLocation({
+    towDirection,
+    towFromStreet: snap.towFromStreet, towFromCity: snap.towFromCity,
+    towFromState: snap.towFromState, towFromZip: snap.towFromZip,
+  });
+  return {
+    unit: unit.id || unit.equipmentId || '',
+    title: String(snap.title || '').slice(0, 90),
+    issue: snap.issue, vendor: snap.vendor,
+    urgent: snap.urgent ? 'Yes' : 'No', urgencyReason: snap.urgent ? snap.urgencyReason : '',
+    areaPairs: snap.areaPairs, contactName: snap.contactName, contactPhone: snap.contactPhone,
+    comments: snap.comments, shareWith: snap.internal ? 'internal' : 'all',
+    arcClaim: snap.arc || null, simNumber: snap.sim || null,
+    attachments: _attachments.map(a => a.dataUrl), screenshotDataUrl: (_attachments[0] && _attachments[0].dataUrl) || null,
+    domicile: unit.site || unit.domicileSite || '',
+    towDirection,
+    // Location for the wizard's Location step (off-site => address, not geofence).
+    offSite: loc.offSite, locStreet: loc.locStreet, locCity: loc.locCity, locState: loc.locState, locZip: loc.locZip,
+    towStreet: snap.towStreet, towCity: snap.towCity, towState: snap.towState, towZip: snap.towZip,
+    towFromStreet: snap.towFromStreet, towFromCity: snap.towFromCity, towFromState: snap.towFromState, towFromZip: snap.towFromZip,
+    copiedFromWorkRequestId: copiedFromWorkRequestId || null,
+  };
+}
+
+// Autofill the CURRENTLY ACTIVE tab only — same "Open in AAP (autofill)"
+// mechanism as the single-WR path (aap.autofill opens a window + fills, you
+// review/submit there). Marks the tab done once the window settles; opens
+// the Dealer WO once BOTH required tabs are done, same as Submit.
+async function _autofillActiveTab(btn) {
+  if (!_unit || !_unit.assetUrl) { toast.show('warn', 'No AAP URL for this unit — run a scan first', 4000); return; }
+  const st = _wrTabState;
+  const key = st.active;
+  st[key] = _snapshotForm();
+  const snap = st[key];
+  if (!window.confirm('Open AAP and autofill this ' + (key === 'repair' ? 'Repair' : 'Tow') + ' work order: "' + (snap.title || '').slice(0, 90) + '"? You will review and Submit it there.')) return;
+
+  const NEW_WR_URL = 'https://aap-na.corp.amazon.com/v2/page/891a81dc-538d-4f10-be93-441545840a24';
+  const origText = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Autofilling ' + key + '…';
+  const stopBtn = _el('wr-stop-autofill');
+  const onStopClick = async () => { if (stopBtn) stopBtn.disabled = true; await aap.stopAutofill(); toast.show('info', 'Autofill stopped.', 3000); };
+  if (stopBtn) { stopBtn.style.display = ''; stopBtn.disabled = false; stopBtn.addEventListener('click', onStopClick); }
+
+  const copiedFrom = key === 'tow' ? ((st.submitted.repair && st.submitted.repair.workRequestId) || null) : null;
+  const payload = _snapshotToAutofillPayload(snap, copiedFrom);
+  try {
+    toast.show('info', 'Opening AAP to autofill the ' + key + ' WR — review and Submit it in that window…', 5000);
+    const result = await aap.autofill(NEW_WR_URL, payload);
+    if (result && result.ok === false) {
+      toast.show('error', key + ' autofill: ' + (result.message || 'stopped') + ' — finish it manually in the AAP window.', 7000);
+    } else {
+      toast.show('success', (result && result.message) || (key + ' WR autofilled — review & submit in AAP.'), 4000);
+      // We can't know the real workRequestId from autofill (user submits
+      // manually in the AAP window), so mark the tab "attempted" rather than
+      // carrying a workRequestId — still lets the Dealer WO open once both
+      // tabs have been through autofill.
+      st.submitted[key] = { workRequestId: null, viaAutofill: true };
+      _renderTabBar();
+      await _afterTabSubmitted();
+    }
+  } catch (e) {
+    toast.show('error', 'Autofill failed: ' + e.message, 5000);
+  } finally {
+    btn.disabled = false; btn.textContent = origText;
+    if (stopBtn) { stopBtn.style.display = 'none'; stopBtn.removeEventListener('click', onStopClick); }
+  }
+}
+
+// "Autofill All" via Submit All's button is covered by _submitAllTabs for the
+// createWR path; for autofill, Submit All is intentionally the createWR path
+// (per user: Submit = auto-submit). The per-tab autofill button above covers
+// the "open in AAP, I'll submit it" case for each WR individually.
+
+// Local copy of unit-detail's vendorKey derivation (paccar/volvo/null).
+function _detectVendorKeyLocal(unit) {
+  const hay = [unit && unit.manufacturer, unit && unit.make, unit && unit.vendor, unit && unit.model]
+    .map(s => String(s || '').toLowerCase()).join(' ');
+  if (/kenworth|peterbilt|paccar|kwne/.test(hay)) return 'paccar';
+  if (/volvo/.test(hay)) return 'volvo';
+  return null;
 }
 
 // ── Progress log ──────────────────────────────────────────────────────────
@@ -470,32 +963,43 @@ function _readFilesAsAttachments(fileList) {
 // ── Wire: screenshot / attachments ───────────────────────────────
 function _wireScreenshot() {
   const btn = _el('wr-attach-screenshot');
+  const BTN_LABEL = 'Attach Uptake screenshots';
+  btn.textContent = BTN_LABEL;
   btn.addEventListener('click', async () => {
     btn.disabled = true; btn.textContent = 'Loading...';
     try {
-      // BUG FIX (2026-07-23): previously called files.getLatestScreenshot()
-      // with NO unit argument (and that IPC ignored any argument anyway) --
-      // it just grabbed whatever PNG was newest in the whole screenshots
-      // folder, which could belong to a completely different unit than the
-      // one this WR is for. The scraper already stores each unit's own
-      // screenshot path on the unit record (screenshotPath / screenshots[]);
-      // use that directly instead of a global "latest file" guess.
-      const path = (_unit && (_unit.screenshotPath || (_unit.screenshots || [])[0])) || null;
-      if (path) {
-        const dataUrl = await files.readAsDataUrl(path);
-        if (dataUrl) {
-          _addAttachment(path.split(/[/\\]/).pop(), dataUrl);
-          toast.show('success', 'Screenshot attached', 2000);
-        } else {
-          toast.show('warn', 'Could not read screenshot file', 3000);
-        }
-      } else {
+      // A unit can have MULTIPLE Uptake insights (e.g. 622086 has 3), and the
+      // scraper takes ONE screenshot per insight into unit.screenshots[]. This
+      // used to attach only screenshotPath || screenshots[0] — the first one —
+      // so the other insights' screenshots were silently dropped from the WR.
+      // Attach ALL of them (deduped by _addAttachment's identical-dataUrl guard).
+      const paths = Array.from(new Set(
+        [].concat(
+          (_unit && _unit.screenshotPath) ? [_unit.screenshotPath] : [],
+          (_unit && Array.isArray(_unit.screenshots)) ? _unit.screenshots : []
+        ).filter(Boolean)
+      ));
+      if (!paths.length) {
         toast.show('info', 'No Uptake screenshot found for this unit — run a sync first', 4000);
+        return;
+      }
+      let attached = 0, failed = 0;
+      for (const p of paths) {
+        try {
+          const dataUrl = await files.readAsDataUrl(p);
+          if (dataUrl) { _addAttachment(p.split(/[/\\]/).pop(), dataUrl); attached++; }
+          else failed++;
+        } catch (_) { failed++; }
+      }
+      if (attached) {
+        toast.show('success', attached + ' screenshot' + (attached > 1 ? 's' : '') + ' attached' + (failed ? ' (' + failed + ' unreadable)' : ''), 2500);
+      } else {
+        toast.show('warn', 'Could not read screenshot file' + (paths.length > 1 ? 's' : ''), 3000);
       }
     } catch (e) {
       toast.show('error', 'Screenshot load failed: ' + e.message);
     } finally {
-      btn.disabled = false; btn.textContent = 'Attach latest Uptake screenshot';
+      btn.disabled = false; btn.textContent = BTN_LABEL;
     }
   });
 
@@ -533,15 +1037,18 @@ function _wireScreenshot() {
   _renderAttachments();
 }
 
-// ── Wire: title character counter (90-char limit) ─────────────────────────
+// ── Wire: title character counter ──────────────────────────────────────────
+// Typing is UNRESTRICTED — the title field is where the user describes their
+// full request/intent; AI Fill reads it and produces the final <=90-char
+// summary title. Only the AI's OUTPUT is capped (see _runAIAssist / _doSubmit).
 function _wireTitleCount() {
   const titleEl = _el('wr-title');
   const countEl = _el('wr-title-count');
   if (!titleEl || !countEl) return;
   const update = () => {
     const n = (titleEl.value || '').length;
-    countEl.textContent = n + '/90';
-    countEl.style.color = n >= 90 ? 'var(--err,#c0392b)' : (n >= 80 ? 'var(--warn,#b8860b)' : '');
+    countEl.textContent = n <= 90 ? (n + '/90') : (n + ' chars — AI Fill will summarize to 90');
+    countEl.style.color = n > 90 ? 'var(--acc,#58a6ff)' : (n >= 80 ? 'var(--warn,#b8860b)' : '');
   };
   titleEl.addEventListener('input', update);
   update();
@@ -564,7 +1071,29 @@ function _wireSubmit() {
     _copyFromWrId = opts.copyFromWrId || null;
     const payload = _collectPayload();
     if (!payload.title)  { toast.show('warn', 'WR title required', 3000); _copyFromWrId = null; return; }
-    if (payload.title.length > 90) { toast.show('warn', 'WR title must be 90 characters or fewer', 3000); _copyFromWrId = null; return; }
+    // Title is unrestricted while typing; _collectPayload() already caps the
+    // SUBMITTED value at 90 chars (AI Fill produces a proper summary — this
+    // slice is just a safety net if the user submits without running it).
+
+    // Safety net: if the title clearly implies a tow-to-dealer but AI Fill
+    // hasn't run yet (no _towPlan), tell the user to run AI Fill so the
+    // multi-WR plan is built, rather than silently creating a single WR.
+    if (!_towPlan && !opts.copyFromWrId) {
+      const t = (payload.title || '').toLowerCase();
+      const looksTow = /(^|\b)(tow|needs to go to|send (it |unit )?to|take (it|unit) to|return tow|back to (the )?yard|haul to)\b/.test(t);
+      if (looksTow) {
+        toast.show('warn', 'This looks like a tow-to-dealer. Press Enter in the title or click ✨ AI Fill first so it can set up the repair + tow work orders.', 7000);
+        return;
+      }
+    }
+
+    // Multi-tab tow: Submit acts on the CURRENTLY ACTIVE TAB ONLY (its live,
+    // possibly-edited fields) via the deterministic createWR, auto-submitted.
+    // When both tabs are submitted, opens the Dealer WO for non-RG dealers.
+    if (_wrTabState && !opts.copyFromWrId) {
+      await _submitActiveTab(btn);
+      return;
+    }
     if (opts.copyFromWrId) {
       // A second WR must have a DIFFERENT title from the existing WR it copies,
       // so it's a distinct request (e.g. a Dealer Tracking Event). We don't
@@ -587,40 +1116,75 @@ function _wireSubmit() {
     _progUnsub = aap.onWRProgress(_logProgress);
 
     // Submit WR drives the LIVE AI wizard (adaptive agent): opens AAP, reads
-    // the wizard each step, fills only real current options, re-reads after
-    // every step, and STOPS at Review — it never submits automatically. The
-    // user reviews and clicks Submit in the AAP window. (autoSubmit:false)
-    btn.textContent = 'AI filling in AAP…';
+    // Submit WR now creates the work order DIRECTLY via AAP's VRE
+    // recommendation API (PUT /vre/recommendation/UNPLANNED/ACTIVE), two-phase:
+    //   Phase 1 — ask AAP which vendor it recommends (nothing committed).
+    //   Phase 2 — commit the WO with the confirmed vendor (the operator's
+    //             picked vendor if they chose one, else the recommended one,
+    //             confirmed via a prompt).
+    // The "Open in AAP (autofill)" button is the untouched manual backup.
+    btn.textContent = 'Creating WR in AAP…';
     try {
-      const result = await aap.runAdaptive({ ...payload, autoSubmit: false });
+      // The VRE API needs the asset id, which lives on the unit's AAP asset URL.
+      const assetUrl = _unit && _unit.assetUrl;
+      if (!assetUrl) {
+        _showError('No AAP asset URL for this unit — run a scan first, or use "Open in AAP (autofill)".');
+        return;
+      }
+
+      // ── Phase 1: get the vendor recommendation ──────────────────────────
+      const rec = await aap.createWorkOrder({ ...payload, assetUrl, confirmVendor: false });
+      if (!rec || !rec.ok) {
+        _showError((rec && (rec.error || rec.message)) || 'AAP did not return a vendor recommendation.');
+        return;
+      }
+      const recommendedVendor = (rec.recommendation && rec.recommendation.vendor) || '';
+
+      // Vendor the operator picked in the form (display string → code is done
+      // backend-side). If they left it blank, fall back to AAP's recommendation.
+      const pickedDisplay = (payload.vendor || '').trim();
+      const commitVendor  = pickedDisplay || recommendedVendor;
+
+      if (!commitVendor) {
+        _showError('AAP could not recommend a vendor and none was selected. Pick a vendor and try again.');
+        return;
+      }
+
+      // Confirm before committing. If the operator picked a vendor that differs
+      // from AAP's recommendation, surface both so they can decide.
+      const confirmMsg = pickedDisplay
+        ? ('Create this work order and assign vendor "' + pickedDisplay + '"?' +
+           (recommendedVendor && recommendedVendor.toUpperCase() !== pickedDisplay.split(' (')[0].toUpperCase()
+             ? '\n\n(AAP recommended: ' + recommendedVendor + ')' : ''))
+        : ('AAP recommends vendor "' + recommendedVendor + '".\n\nCreate this work order with that vendor?');
+      if (!window.confirm(confirmMsg)) {
+        if (_progUnsub) { _progUnsub(); _progUnsub = null; }
+        toast.show('info', 'Work order not created — vendor not confirmed.', 4000);
+        return;
+      }
+
+      // ── Phase 2: commit the work order with the confirmed vendor ────────
+      btn.textContent = 'Submitting WR…';
+      const result = await aap.createWorkOrder({
+        ...payload, assetUrl, confirmVendor: true, vendor: commitVendor,
+      });
       if (_progUnsub) { _progUnsub(); _progUnsub = null; }
 
-      if (result && result.ok && result.readyToSubmit) {
-        resultEl.innerHTML = `
-          <div class="wr-result--success">
-            <span class="wr-result__icon">✓</span>
-            <span>Filled in AAP — review the AAP window and click <strong>Submit</strong> to finish. Nothing was submitted automatically.</span>
-          </div>`;
-        resultEl.style.display = '';
-        toast.show('success', 'WR filled in AAP — review & submit there', 7000);
-      } else if (result && result.ok) {
-        // A real submit/confirmation (only if autoSubmit was ever turned on).
+      if (result && result.ok) {
         const wrId = result.workRequestId || '';
         resultEl.innerHTML = `
           <div class="wr-result--success">
             <span class="wr-result__icon">✓</span>
-            <span>WR ${_safe(wrId)}</span>
+            <span>Work order created${wrId ? ' — WR ' + _safe(wrId) : ''} (vendor ${_safe(result.vendor || commitVendor)})</span>
           </div>`;
         resultEl.style.display = '';
-        toast.show('success', 'WR ' + wrId, 6000);
+        toast.show('success', 'WR created' + (wrId ? ' ' + wrId : ''), 6000);
         const _eqId = _unit && (_unit.equipmentId || _unit.id);
         if (_eqId && relay && typeof relay.refreshUnit === 'function') {
           relay.refreshUnit(_eqId).catch(() => {});
         }
       } else {
-        // Agent got stuck — AAP window stays open in WATCH MODE for the user
-        // to finish manually (the agent learns from what they do).
-        _showError((result && (result.error || result.message)) || 'AI could not finish the wizard — finish it in the AAP window.');
+        _showError((result && (result.error || result.message)) || 'AAP rejected the work order.');
       }
     } catch (e) {
       if (_progUnsub) { _progUnsub(); _progUnsub = null; }
@@ -656,6 +1220,9 @@ function _wireSubmit() {
   // _autofillFallback() the post-error 'Try AAP autofill instead' button
   // already uses correctly.
   fallbackBtn.addEventListener('click', async () => {
+    // Multi-tab tow: autofill the CURRENTLY ACTIVE tab only (same mechanism,
+    // per-WR) instead of a single combined autofill window.
+    if (_wrTabState) { await _autofillActiveTab(fallbackBtn); return; }
     await _autofillFallback(_collectPayload());
   });
 }
@@ -742,6 +1309,8 @@ function _close() {
   _areaCount = 1;
   _attachments = [];
   _copyFromWrId = null;
+  _towPlan   = null;
+  _wrTabState = null;
 }
 
 
@@ -776,52 +1345,44 @@ async function _wireTow() {
   const vendors = all.filter(c => c.type === 'vendor' && c.street);
   const domiciles = all.filter(c => c.type === 'domicile' && c.street);
 
-  // Populate tow destination (vendors/dealers)
-  towBook.innerHTML = '<option value="">Select destination...</option>';
-  if (vendors.length) {
-    vendors.forEach(v => {
-      const o = document.createElement('option');
-      o.value = JSON.stringify(v);
-      o.textContent = v.name + ' — ' + v.street + ', ' + (v.city || '') + ' ' + (v.state || '');
-      towBook.appendChild(o);
-    });
-  }
-  // Also add domiciles as tow destination options
-  if (domiciles.length) {
-    const og = document.createElement('optgroup');
-    og.label = 'HOME YARDS';
-    domiciles.forEach(d => {
-      const o = document.createElement('option');
-      o.value = JSON.stringify(d);
-      o.textContent = d.name + ' — ' + d.street + ', ' + (d.city || '') + ' ' + (d.state || '');
-      og.appendChild(o);
-    });
-    towBook.appendChild(og);
-  }
+  // Option 2: prioritize vendors near the unit's domicile (nearest-first) at
+  // the top of the tow dropdowns; everything else stays available below.
+  const unitSite = ((_unit && (_unit.domicileSite || _unit.site)) || '').toUpperCase();
+  const _towMi = (v) => (v.mileageByDomicile && v.mileageByDomicile[unitSite] != null) ? v.mileageByDomicile[unitSite] : null;
+  const _towServes = (v) => unitSite && (
+    (Array.isArray(v.domiciles) && v.domiciles.map(d => String(d).toUpperCase()).indexOf(unitSite) !== -1) ||
+    (v.mileageByDomicile && v.mileageByDomicile[unitSite] != null)
+  );
+  const _towNear = unitSite ? vendors.filter(_towServes).slice().sort((a, b) => {
+    const ma = _towMi(a), mb = _towMi(b);
+    if (ma == null && mb == null) return (a.name || '').localeCompare(b.name || '');
+    if (ma == null) return 1; if (mb == null) return -1; return ma - mb;
+  }) : [];
+  const _towOther = vendors.filter(v => _towNear.indexOf(v) === -1);
+  const _towVLabel = (v) => { const mi = _towMi(v); return v.name + (mi != null ? ' (' + mi + ' mi)' : '') + ' - ' + v.street + ', ' + (v.city || '') + ' ' + (v.state || ''); };
+  const _towDLabel = (d) => d.name + ' - ' + d.street + ', ' + (d.city || '') + ' ' + (d.state || '');
+  const _towGroup = (sel, lbl, items, labeler) => {
+    if (!items.length) return;
+    const og = document.createElement('optgroup'); og.label = lbl;
+    items.forEach(c => { const o = document.createElement('option'); o.value = JSON.stringify(c); o.textContent = labeler(c); og.appendChild(o); });
+    sel.appendChild(og);
+  };
 
-  // Populate tow pickup (domiciles + vendors)
+  // Populate tow destination: nearest vendors for the unit's domicile FIRST,
+  // then the rest, then home yards. Nothing hidden.
+  towBook.innerHTML = '<option value="">Select destination...</option>';
+  if (_towNear.length) _towGroup(towBook, 'NEAREST \u2014 ' + unitSite, _towNear, _towVLabel);
+  _towGroup(towBook, _towNear.length ? 'OTHER VENDORS' : 'VENDORS', _towOther, _towVLabel);
+  _towGroup(towBook, 'HOME YARDS', domiciles, _towDLabel);
+
+  // Populate tow pickup: unit's own yard first, then other yards, then vendors.
   fromBook.innerHTML = '<option value="">Select pickup location...</option>';
-  if (domiciles.length) {
-    const og = document.createElement('optgroup');
-    og.label = 'HOME YARDS';
-    domiciles.forEach(d => {
-      const o = document.createElement('option');
-      o.value = JSON.stringify(d);
-      o.textContent = d.name + ' — ' + d.street + ', ' + (d.city || '') + ' ' + (d.state || '');
-      og.appendChild(o);
-    });
-    fromBook.appendChild(og);
-  }
-  if (vendors.length) {
-    const og = document.createElement('optgroup');
-    og.label = 'VENDORS';
-    vendors.forEach(v => {
-      const o = document.createElement('option');
-      o.value = JSON.stringify(v);
-      o.textContent = v.name + ' — ' + v.street + ', ' + (v.city || '') + ' ' + (v.state || '');
-      og.appendChild(o);
-    });
-    fromBook.appendChild(og);
+  {
+    const _hy = unitSite ? domiciles.filter(d => (d.name || '').toUpperCase().indexOf(unitSite) !== -1) : [];
+    const _oy = domiciles.filter(d => _hy.indexOf(d) === -1);
+    _towGroup(fromBook, _hy.length ? "UNIT'S YARD" : 'HOME YARDS', _hy, _towDLabel);
+    if (_hy.length) _towGroup(fromBook, 'OTHER HOME YARDS', _oy, _towDLabel);
+    _towGroup(fromBook, 'VENDORS', [].concat(_towNear, _towOther), _towVLabel);
   }
 
   towBook.addEventListener('change', () => {
@@ -938,38 +1499,60 @@ async function _runAIAssist() {
   // the injected noise.
   const areaList = Object.entries(AREA_SUBS).map(([a, s]) => a + ': ' + s.join(', ')).join('\n');
   
-  // Load vendor book for AI context
+  // Load vendor + domicile book for AI context (vendors for dealer matching,
+  // domiciles for tow pickup address + gate code).
   let vendorBookCtx = '';
+  let domicileBookCtx = '';
   if (window.contacts) {
     try {
       const allContacts = await window.contacts.getAll();
       const vendors = allContacts.filter(v => v.type === 'vendor' && v.street);
       if (vendors.length) {
-        vendorBookCtx = '\nVENDOR BOOK (pick dealer by unit domicile + make):\n' +
-          vendors.map(v => v.name + ' | Make: ' + ((Array.isArray(v.makes) && v.makes.length ? v.makes.join('/') : v.make) || 'ANY') + ' | Domiciles: ' + (v.domiciles || []).join(',') + ' | ' + v.street + ', ' + (v.city||'') + ' ' + (v.state||'')).join('\n') +
-          '\nWhen user says "send to dealer": pick the vendor from this book that matches unit make AND domicile. If no match, leave vendor empty.\n';
+        vendorBookCtx = '\nVENDOR BOOK (pick dealer by unit domicile + make; "miles" = distance from that site):\n' +
+          vendors.map(v => {
+            const miStr = v.mileageByDomicile ? Object.entries(v.mileageByDomicile).map(([s, m]) => s + ':' + m + 'mi').join(' ') : '';
+            return v.name + ' | Make: ' + ((Array.isArray(v.makes) && v.makes.length ? v.makes.join('/') : v.make) || 'ANY') + ' | Domiciles: ' + (v.domiciles || []).join(',') + (miStr ? ' | ' + miStr : '') + ' | ' + v.street + ', ' + (v.city||'') + ' ' + (v.state||'') + ' ' + (v.zip||'');
+          }).join('\n') +
+          '\nWhen user names a dealer (e.g. "gabriellis", "to the pete store"): match it to the closest-named vendor in this book that serves the unit domicile. If user says "send to dealer" with no name, pick the vendor matching unit make AND domicile (nearest first). If no match, leave vendor empty.\n';
+      }
+      const domiciles = allContacts.filter(d => d.type === 'domicile' && d.street);
+      if (domiciles.length) {
+        domicileBookCtx = '\nDOMICILE BOOK (home yards — use for tow PICKUP/RETURN address + gate code):\n' +
+          domiciles.map(d => d.name + ' | ' + d.street + ', ' + (d.city||'') + ' ' + (d.state||'') + ' ' + (d.zip||'') + ' | Gate Code: ' + (d.gateCode ? d.gateCode : 'None')).join('\n') + '\n';
       }
     } catch(e) {}
   }
 
   const prompt = 'You are a fleet maintenance work request assistant for Amazon Transportation.\n\n'
-    + 'User typed this WR title: "' + title + '"\n\n'
-    + 'UNIT: ' + unitId + ' | Make: ' + make + ' | Site: ' + site + '\n'
+    + 'User typed this WR title (free text — interpret their intent): "' + title + '"\n\n'
+    + 'UNIT: ' + unitId + ' | Make: ' + make + ' | Site (home domicile): ' + site + '\n'
     + (notes ? 'Notes: ' + notes + '\n' : '')
     + (uptake ? 'Uptake Insights: ' + uptake + '\n' : '')
     + vendorBookCtx
-    + '\nRULES:\n'
-    + '- "Tow" = Area=TOW, sub=MECHANICAL ISSUE or ACCIDENT/RECOVERY, vendor=FleetNet (FLEETNET), urgent=true\n'
-    + '- Vendor: LEAVE EMPTY by default (AAP auto-assigns). Only fill if user says "send to dealer" or "send to [vendor name]"\n'
-    + '- If user says "send to dealer": Volvo/Mack\u2192"Volvo (ASIST)", Kenworth\u2192"Kenworth (PACCAR)", Peterbilt\u2192"Peterbilt (PACCAR)", Freightliner\u2192"Freightliner (DAIMLER)"\n'
+    + domicileBookCtx
+    + '\nRULES — READ CAREFULLY, this decides whether ONE or MULTIPLE work orders get created:\n'
+    + '- DEFAULT (no dealer/vendor named at all): hasRepair=true, isTow=false, vendor="" (empty — AAP auto-assigns the primary/default vendor). ONE work order. This is the common case: the user just states the problem.\n'
+    + '- THE MOMENT A SPECIFIC DEALER/VENDOR IS NAMED as where the unit should go (e.g. "send to gabriellis", "needs to go to Allegiance Scranton", "to the pete store", "take it to <dealer>"): that MEANS the physical unit must be moved there -> isTow=true, towDirection="to-dealer", vendor = the EXACT dealer name from VENDOR BOOK. Naming a dealer as a destination IS the tow signal — the user does not need to separately say the word "tow".\n'
+    + '- hasRepair=true whenever an actual mechanical problem/symptom is stated (e.g. "check engine light", "brakes", "won\'t start", "coolant leak"). Naming a dealer destination does NOT remove the repair — "unit has check engine light, needs to go to gabriellis from ABE40" = hasRepair=true AND isTow=true (repair WR + tow WR, both created).\n'
+    + '- DIRECTION IS CRITICAL — read the user\'s words and set towDirection + pickup/destination to match EXACTLY what they said (do not assume to-dealer):\n'
+    + '    * TO DEALER ("send/take/bring TO <dealer>", "needs to go to <dealer>"): towDirection="to-dealer", pickup=home domicile (<SITE>), destination=the named dealer.\n'
+    + '    * BACK TO YARD ("return tow from dealer", "bring/tow it BACK to <SITE>/home/yard", "from <dealer> to <SITE>", "pick up from dealer"): towDirection="return-to-yard", pickup=the DEALER (where the unit is now), destination=the home yard/<SITE>.\n'
+    + '    * BETWEEN YARDS ("from <SITE_A> to <SITE_B>", "move from one yard to another", neither end is a dealer): towDirection="yard-to-yard", pickup=the origin yard, destination=the target yard.\n'
+    + '    The words "from X to Y" mean pickup=X, destination=Y — honor that literally. "back"/"return" always means the unit is currently at the dealer and is coming home.\n'
+    + '- Only the GENERIC phrase "send to dealer" with NO specific name and NO destination (just saying the make should decide) is NOT a tow — leave vendor by make convention below, isTow=false:\n'
+    + '    Volvo/Mack\u2192"Volvo (ASIST)", Kenworth\u2192"Kenworth (PACCAR)", Peterbilt\u2192"Peterbilt (PACCAR)", Freightliner\u2192"Freightliner (DAIMLER)"\n'
     + '- Safety/brakes/fire \u2192 urgent=true\n'
     + '- For Predictive Maintenance: title must include "Predictive Maintenance", reference Uptake data in comments\n'
-    + '- EXCEPTION \u2014 if the title clearly says it is TRACKING/MONITORING ONLY (e.g. "tracking only", "dealer tracking only", "monitor only", "no repair"): this is NOT a repair, so return areaPairs=[] and base issue/comments only on the referenced data (if it says "uptake", use ONLY the Uptake Insights above). Otherwise ALWAYS choose the matching component area/subcategory pair(s).\n\n'
+    + '- EXCEPTION \u2014 if the title clearly says TRACKING/MONITORING ONLY: return areaPairs=[] and base issue/comments only on the referenced data.\n'
+    + '- TITLE: produce a clean, specific summary of what the user asked, MAX 90 characters.\n'
+    + '- COMMENTS when isTow=true: FIRST state the reason the unit is down / the mechanical issue in a sentence (if hasRepair), THEN append EXACTLY this structured line:\n'
+    + '    "Requesting unit be picked up from domicile site <PICKUP_SITE> ; <PICKUP_ADDRESS> and tow unit to dealer service shop <DEALER_NAME> <DEALER_ADDRESS> || <SITE> Gate Code: <CODE or None> || Key Location: <phrase meaning the key is in the unit or with onsite staff>"\n'
+    + '  Use the real addresses from the DOMICILE/VENDOR books. If gate code is None, write "Gate Code: None". For return-to-yard, swap pickup/destination accordingly (pickup=dealer, destination=domicile) but keep the same overall phrasing.\n'
+    + '- COMMENTS when isTow=false (the normal case): describe what we need from the vendor to fix the problem. NO tow line.\n\n'
     + 'VALID AREAS/SUBCATEGORIES (use EXACT values):\n' + areaList + '\n\n'
     + 'Respond ONLY with valid JSON:\n'
-    + '{"title":"improved title","issue":"2-3 sentence description","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","urgent":false,"comments":"what we need from vendor"}\n'
-    + 'areaPairs can have 1-4 pairs if multiple systems are affected.\n'
-    + 'vendor: LEAVE EMPTY unless user explicitly says "send to dealer" or names a specific vendor. AAP auto-assigns default vendor.';
+    + '{"title":"<=90 char summary","issue":"2-3 sentence description","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","urgent":false,"comments":"what we need (+ tow line only if isTow)","hasRepair":true,"isTow":false,"towDirection":"to-dealer|return-to-yard|yard-to-yard|","towPickup":{"name":"","street":"","city":"","state":"","zip":""},"towDestination":{"name":"","street":"","city":"","state":"","zip":""}}\n'
+    + 'areaPairs can have 1-4 pairs (the repair components). vendor: EXACT name from VENDOR BOOK if a dealer is named, else empty. Remember: naming ANY specific dealer as destination = isTow=true, no "tow" keyword required.';
 
   try {
     // Client-side timeout so a slow/stuck AI backend never leaves AI Fill
@@ -1039,7 +1622,77 @@ async function _runAIAssist() {
       _el('wr-urgency-reason').value = 'DEA - Asset Shortage';
     }
     if (ai.comments) { const el = _el('wr-comments'); if (el) el.value = ai.comments; }
-    
+
+    // Tow intent: reveal the tow section and fill pickup + destination addresses
+    // from the AI's resolved locations (it pulled real addresses from the
+    // domicile/vendor books). This complements the TOW-area reveal above.
+    if (ai.isTow) {
+      const towWrap = _el('wr-tow-wrap');
+      if (towWrap) towWrap.style.display = '';
+      const setAddr = (prefix, loc) => {
+        if (!loc) return;
+        const s = _el(prefix + '-street'); if (s && loc.street) s.value = loc.street;
+        const c = _el(prefix + '-city');   if (c && loc.city)   c.value = loc.city;
+        const st = _el(prefix + '-state'); if (st && loc.state) st.value = loc.state;
+        const z = _el(prefix + '-zip');    if (z && loc.zip)    z.value = loc.zip;
+      };
+      // wr-tow-* = destination (where unit goes); wr-tow-from-* = pickup.
+      setAddr('wr-tow-from', ai.towPickup);
+      setAddr('wr-tow', ai.towDestination);
+      // Keep share-with-vendor ON for tows (comments carry gate/key info the
+      // dealer needs) — ensure "Internal only" is unchecked.
+      const internal = _el('wr-internal'); if (internal) internal.checked = false;
+
+      // Record a tow-orchestration plan so Submit creates BOTH the repair WR
+      // and the tow WR (and a Dealer WO when the dealer is not RG-integrated).
+      // Resolve the dealer the AI chose from the Contact Book so we can read
+      // its affiliation (RG-integrated?) and real address.
+      try {
+        const dealerName = (ai.towDirection === 'return-to-yard')
+          ? ((ai.towPickup && ai.towPickup.name) || ai.vendor || '')
+          : ((ai.towDestination && ai.towDestination.name) || ai.vendor || '');
+        let dealer = null;
+        if (dealerName && window.contacts) {
+          const all = await window.contacts.getAll();
+          const key = String(dealerName).trim().toLowerCase();
+          dealer = all.find(c => c.type === 'vendor' && (c.name || '').trim().toLowerCase() === key)
+                || all.find(c => c.type === 'vendor' && (c.name || '').trim().toLowerCase().includes(key))
+                || all.find(c => c.type === 'vendor' && key.includes((c.name || '').trim().toLowerCase()) && (c.name || '').length > 4);
+        }
+        _towPlan = { isTow: true, hasRepair: ai.hasRepair !== false, towDirection: ai.towDirection || 'to-dealer', dealer, dealerName,
+          towPickupName: (ai.towPickup && ai.towPickup.name) || '', towDestName: (ai.towDestination && ai.towDestination.name) || '' };
+      } catch (_) { _towPlan = { isTow: true, hasRepair: ai.hasRepair !== false, towDirection: ai.towDirection || 'to-dealer', dealer: null, dealerName: ai.vendor || '',
+          towPickupName: (ai.towPickup && ai.towPickup.name) || '', towDestName: (ai.towDestination && ai.towDestination.name) || '' }; }
+      // Visible signal that Submit will create MULTIPLE work orders.
+      const _rgInt = _isRgIntegrated(_towPlan.dealer);
+      const _dn = _towPlan.dealerName || '(none)';
+      let _msg;
+      if (!_towPlan.dealer) {
+        _msg = '🔗 Tow detected to "' + _dn + '" but that dealer is NOT in your Contact Book — add it so RG-integration can be detected. Submit will still create a tow WR.';
+      } else if (_rgInt) {
+        _msg = '🔗 2 tabs: ' + (_towPlan.hasRepair ? 'Repair (to ' + _towPlan.dealer.name + ') + ' : '') + 'Tow. ' + _towPlan.dealer.name + ' is RG-INTEGRATED — no Dealer WO. Review each tab, then Submit All.';
+      } else {
+        _msg = '🔗 2 tabs: ' + (_towPlan.hasRepair ? 'Repair (dealer tracking) + ' : '') + 'Tow. Dealer WO opens for ' + _towPlan.dealer.name + ' after both submit.';
+      }
+      toast.show('info', _msg, 8000);
+
+      // Build the editable 2-tab state from the CURRENT form (whatever AI
+      // Fill just wrote) and switch into the Repair tab.
+      const baseSnap = _snapshotForm();
+      const tabs = _buildTabSnapshots(baseSnap);
+      _wrTabState = {
+        active: 'repair',
+        repair: tabs.repair, tow: tabs.tow,
+        submitted: { repair: null, tow: null },
+        rgIntegrated: tabs.rgIntegrated, dealerName: tabs.dealerName, hasRepair: tabs.hasRepair,
+      };
+      _applyFormSnapshot(_wrTabState.repair);
+      _renderTabBar();
+    } else {
+      _towPlan = null; // not a tow — normal single-WR submit
+      if (_wrTabState) { _wrTabState = null; _renderTabBar(); }
+    }
+
     toast.show('success', '✨ AI filled — review and submit', 3000);
   } catch(e) {
     toast.show('error', 'AI failed: ' + e.message, 4000);
@@ -1058,11 +1711,20 @@ async function _runAIAssist() {
 async function _wireAutoUptake() {
   const unit = _unit || {};
   try {
-    const path = unit.screenshotPath || (unit.screenshots || [])[0];
-    if (!path) return;
-    const dataUrl = await files.readAsDataUrl(path);
-    if (dataUrl) {
-      _addAttachment(path.split(/[/\\]/).pop(), dataUrl);
+    // Attach ALL of this unit's Uptake insight screenshots (one per insight),
+    // not just the first — a unit with multiple insights should bring them all
+    // onto the WR. Deduped by _addAttachment's identical-dataUrl guard.
+    const paths = Array.from(new Set(
+      [].concat(
+        unit.screenshotPath ? [unit.screenshotPath] : [],
+        Array.isArray(unit.screenshots) ? unit.screenshots : []
+      ).filter(Boolean)
+    ));
+    for (const p of paths) {
+      try {
+        const dataUrl = await files.readAsDataUrl(p);
+        if (dataUrl) _addAttachment(p.split(/[/\\]/).pop(), dataUrl);
+      } catch (_) { /* skip unreadable, continue */ }
     }
   } catch(e) { /* silent -- manual attach is always still available */ }
 }

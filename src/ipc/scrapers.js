@@ -33,6 +33,7 @@ const GEOFENCE_IPC_TIMEOUT = 200_000; // Stage 5 C-1: IPC belt -- scraper has ow
 // Module-level: survive across IPC calls within the same process lifetime.
 let _wrLock       = false;   // aap:create-wr
 let _adaptiveLock = false;   // aap:adaptive
+let _wrApiLock    = false;   // aap:create-wr-api (VRE recommendation WO create)
 let _activeAutofillWin = null; // aap:autofill -- lets aap:autofill-stop force-close it
 let _uptakeLock   = false;   // H-3: uptake:scrape
 let _relayLock    = false;   // H-3: relay:scrape
@@ -145,6 +146,38 @@ function registerScrapersIPC(ctx) {
     }
   });
 
+  // ── aap:create-wr-api ─────────────────────────────────────────────────────
+  // API-based WO creation via the VRE recommendation endpoint (replaces the
+  // "Submit WR" button's old adaptive-agent path). Two-phase:
+  //   confirmVendor !== true  → Phase 1: returns a vendor recommendation.
+  //   confirmVendor === true  → Phase 2: commits the WO with the chosen vendor.
+  // The "Open in AAP (autofill)" backup button (aap:autofill) is untouched.
+  handle('aap:create-wr-api', async (_e, payload) => {
+    if (_wrApiLock) {
+      throw new ScraperError('aap:create-wr-api operation already in progress', 'aap:create-wr-api');
+    }
+    requireObject(payload, 'payload');
+    _wrApiLock = true;
+    try {
+      const aapApi = require('../../src/scrapers/aap_api');
+      const logs = [];
+      const log  = (msg) => { logs.push(msg); logger.info(msg); if (send) send('wr:progress', msg); };
+      log(payload.confirmVendor
+        ? 'Creating work order in AAP (committing with vendor ' + (payload.vendor || '—') + ')…'
+        : 'Asking AAP for a vendor recommendation…');
+      const result = await aapApi.createWorkOrder(payload);
+      if (result && result.phase === 'recommend') {
+        log('AAP recommended vendor: ' + (result.recommendation.vendor || '(none)') +
+            (result.recommendation.ruleName ? ' [' + result.recommendation.ruleName + ']' : ''));
+      } else if (result && result.phase === 'commit') {
+        log('Work order created' + (result.workRequestId ? ': ' + result.workRequestId : ''));
+      }
+      return { ...result, logs };
+    } finally {
+      _wrApiLock = false;
+    }
+  });
+
   // ── aap:autofill ────────────────────────────────────────────────────────
   // Issue #2: enginePath pinned — renderer cannot supply an arbitrary file path
   // BUG FIX (2026-07-16): this handler previously resolved the
@@ -223,14 +256,23 @@ function registerScrapersIPC(ctx) {
         logger.warn('Autofill timed out after 90s');
         done({ ok: false, message: 'Autofill timed out after 90 seconds -- AAP page may not have loaded, or the wizard reached an unexpected step.' });
       }, 90000);
+      // Guard so the engine is injected+run EXACTLY ONCE. The AAP wizard is a
+      // SPA; stepping through it (or an in-page section mount) can fire
+      // did-finish-load AGAIN while run() is still in progress. Without this
+      // guard that second event re-injected the engine and restarted it from
+      // STEP 1 -- an infinite loop that looked like "stuck", and left later
+      // area rows unfilled. 'settled' only flips after run() RETURNS, so it
+      // can't prevent a mid-run re-entry; this dedicated flag can.
+      let injected = false;
       aapWin.loadURL(url);
       aapWin.webContents.on('did-finish-load', async () => {
-        if (settled) return;
+        if (settled || injected) return;
         const curUrl = aapWin.isDestroyed() ? '' : aapWin.webContents.getURL();
         if (!/aap-na\.corp\.amazon\.com/i.test(curUrl)) {
           logger.info('[aap:autofill] Not on AAP yet (auth redirect?) -- waiting for next load...');
           return; // will fire again once the redirect chain settles
         }
+        injected = true; // from here on, ignore any further did-finish-load events
         try {
           const engineCode  = fs.readFileSync(ENGINE_FILE, 'utf8');
           const payloadJson = JSON.stringify(payload || {});
@@ -428,9 +470,15 @@ function registerScrapersIPC(ctx) {
   // not needed here (single unit, own window), but we guard against concurrent
   // per-unit refreshes with a small lock.
   let _refreshUnitLock = false;
-  handle('relay:refresh-unit', async (_e, equipmentId) => {
+  handle('relay:refresh-unit', async (_e, equipmentId, opts) => {
     const store = require('../store');
     const id = String(equipmentId || '').trim();
+    opts = opts || {};
+    // force: bypass the relay TTL cache so this is a GUARANTEED live scrape
+    // (used by Split View "refresh on open"). reconcile: re-run canonical state
+    // for the unit after the fresh merge so the drafts reflect current data.
+    const force = !!opts.force;
+    const doReconcile = opts.reconcile !== false; // default on for this path
     if (!id) throw new ScraperError('equipmentId required', 'relay:refresh-unit');
     if (_refreshUnitLock) {
       // Don't hard-fail — return the current cache so the caller can proceed.
@@ -441,6 +489,11 @@ function registerScrapersIPC(ctx) {
     try {
       const { scrapeUnitPage, mergeRelayIntoRows } = require('../../src/scrapers/relay');
       const relayCache = store.load('relayCache', {});
+      // Force a live scrape by dropping this unit's cache entry first — there is
+      // no bypass flag on scrapeUnitPage, so deleting the entry is the clean way
+      // to guarantee a fresh Relay WR + ASIST pass (scrapeUnitPage runs the
+      // ASIST enrich internally, so this refreshes BOTH Relay and Offsite).
+      if (force) { delete relayCache[id]; }
       // partition '' == default session (Midway cookies already injected), same
       // as scrapeRelay uses for the batch path.
       const res = await scrapeUnitPage(id, '', relayCache);
@@ -481,12 +534,136 @@ function registerScrapersIPC(ctx) {
           try { ctx.pushData({ rows: [freshRow], partialMerge: true, _partial: 'relay-refresh-unit' }); } catch (_) {}
         }
       }
-      logger.info('relay:refresh-unit done for ' + id + (res && res._noWR ? ' (no WR)' : ''));
+      // Re-run canonical state for THIS unit off the fresh row so the Split View
+      // drafts (relayNote / dealerAsk) and canonical record reflect current data
+      // immediately, not the last full-sync snapshot. Reconcile is AI; keep it
+      // best-effort and non-fatal — a scrape refresh must never fail because the
+      // AI was slow/unavailable. Persists canonicalState + mirrors onto the row.
+      if (doReconcile && freshRow) {
+        try {
+          const reconcile = require('../scrapers/relay_reconcile');
+          const canonical = require('../orcha/canonical_state');
+          const cfg = reconcile.getConfig();
+          let decision = null;
+          if (cfg.enabled && reconcile.hasReconcilableData(freshRow)) {
+            try { decision = await reconcile.reconcileUnit(freshRow, { cfg }); } catch (_) {}
+          }
+          const prevCanon = store.load('canonicalState', {}) || {};
+          const prior = (prevCanon.units && prevCanon.units[id]) ? { [id]: prevCanon.units[id] } : {};
+          const built = canonical.buildAll([freshRow], { decisions: decision ? { [id]: decision } : {}, prior });
+          const rec = built.units[id];
+          if (rec) {
+            // Merge the one unit's record into the canonicalState store.
+            const units = Object.assign({}, prevCanon.units || {}, { [id]: rec });
+            store.save('canonicalState', { units, updatedAt: new Date().toISOString(), lastReconcileAt: decision ? new Date().toISOString() : (prevCanon.lastReconcileAt || null) });
+            // Mirror canonical fields onto the pushed row so the renderer sees them.
+            if (freshRow) Object.assign(freshRow, canonical.mirrorFields(rec));
+          }
+        } catch (ce) { logger.warn('relay:refresh-unit canonical re-run failed (non-fatal): ' + ce.message); }
+      }
+      logger.info('relay:refresh-unit done for ' + id + (force ? ' [forced]' : '') + (res && res._noWR ? ' (no WR)' : ''));
       return { ok: true, unit: freshRow, cache: relayCache[id] || null };
     } catch (e) {
       throw new ScraperError(e.message, 'relay:refresh-unit', { equipmentId: id });
     } finally {
       _refreshUnitLock = false;
+    }
+  });
+
+  // ── quicksight:capture-afp / capture-dsp ─────────────────────────────────
+  // DBR DATA (Daily Call): opens the AFP/DSP QuickSight dashboards and
+  // returns the RENDERED PAGE TEXT (not structured data — QuickSight's
+  // pivot-table DOM has no stable selector shape, confirmed via live
+  // iteration). The renderer (daily-call.js) hands this text to AI to parse
+  // into the DBR table rows. See src/scrapers/quicksight_dbr.js.
+  //
+  // Caching: quicksight:save-parsed / quicksight:get-cache let the renderer
+  // persist whatever STRUCTURED result it got back from AI, so re-opening
+  // the DBR panel doesn't need a fresh scrape+AI-call every time.
+  let _quicksightLock = false;
+  handle('quicksight:capture-afp', async () => {
+    if (_quicksightLock) {
+      throw new ScraperError('quicksight:capture-afp operation already in progress', 'quicksight:capture-afp');
+    }
+    _quicksightLock = true;
+    try {
+      const { captureAfpText } = require('../../src/scrapers/quicksight_dbr');
+      return await captureAfpText();
+    } catch (e) {
+      throw new ScraperError(e.message, 'quicksight:capture-afp');
+    } finally {
+      _quicksightLock = false;
+    }
+  });
+
+  let _quicksightDspLock = false;
+  handle('quicksight:capture-dsp', async () => {
+    if (_quicksightDspLock) {
+      throw new ScraperError('quicksight:capture-dsp operation already in progress', 'quicksight:capture-dsp');
+    }
+    _quicksightDspLock = true;
+    try {
+      const { captureDspText } = require('../../src/scrapers/quicksight_dbr');
+      return await captureDspText();
+    } catch (e) {
+      throw new ScraperError(e.message, 'quicksight:capture-dsp');
+    } finally {
+      _quicksightDspLock = false;
+    }
+  });
+
+  // Renderer calls this after AI successfully parses the captured text, so
+  // the structured result survives a panel close/reopen without re-scraping.
+  handle('quicksight:save-parsed', (_e, payload) => {
+    requireObject(payload, 'payload');
+    const store = require('../store');
+    if (payload.kind === 'dsp') store.save('quicksightDbrDsp', payload.data);
+    else store.save('quicksightDbr', payload.data);
+    return { ok: true };
+  });
+
+  handle('quicksight:get-cache', () => {
+    const store = require('../store');
+    return store.load('quicksightDbr', { ok: false, domicile: [], scac: [], scrapedAt: null });
+  });
+
+  handle('quicksight:get-cache-dsp', () => {
+    const store = require('../store');
+    return store.load('quicksightDbrDsp', { ok: false, scac: [], scrapedAt: null });
+  });
+
+  // ── WBR weekly snapshot + comparison ────────────────────────────────────────
+  // wbr:capture records this week's per-site + fleet-total down metrics (used by
+  // the Generate WBR button so a manual run always logs the current week — the
+  // sync path also auto-captures). wbr:comparison returns the real Prior-Week /
+  // T6W comparison + unit movement computed from captured history + canonical
+  // state, so the WBR prompt can use real numbers instead of "enter manually".
+  handle('wbr:capture', (_e, payload) => {
+    try {
+      const wbr = require('../orcha/wbr_snapshot');
+      const store = require('../store');
+      const rows = (payload && Array.isArray(payload.rows) && payload.rows.length)
+        ? payload.rows
+        : ((store.load('fleetData', {}) || {}).rows || []);
+      return wbr.captureSnapshot(rows);
+    } catch (e) {
+      return { ok: false, reason: e.message };
+    }
+  });
+
+  handle('wbr:comparison', (_e, payload) => {
+    try {
+      const wbr = require('../orcha/wbr_snapshot');
+      const store = require('../store');
+      const rows = (payload && Array.isArray(payload.rows) && payload.rows.length)
+        ? payload.rows
+        : ((store.load('fleetData', {}) || {}).rows || []);
+      const current = wbr.computeWeekMetrics(rows);
+      // Canonical records (for grounded newly-down "why").
+      const canonicalUnits = ((store.load('canonicalState', {}) || {}).units) || {};
+      return wbr.buildComparison(current, { canonicalUnits });
+    } catch (e) {
+      return { coldStart: true, error: e.message, total: { text: 'comparison unavailable' }, sites: {} };
     }
   });
 

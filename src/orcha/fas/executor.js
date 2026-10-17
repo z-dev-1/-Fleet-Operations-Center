@@ -262,12 +262,17 @@ const LEASE_MS = 5 * 60 * 1000;              // 5 min in-flight lease
 const VERIFY_HOLD_MS = 24 * 60 * 60 * 1000;  // 24h
 
 function _loadIdem() { const m = store.load('fasIdempotency', {}); return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {}; }
-function _saveIdem(m) {
+// Bound the ledger in-place (mutates m). Shared by the save path and the
+// in-transaction claim path so both keep the map capped.
+function _capIdem(m) {
   const keys = Object.keys(m);
   if (keys.length > IDEM_CAP) {
     keys.sort((a, b) => Date.parse(m[a].at || 0) - Date.parse(m[b].at || 0));
     for (let i = 0; i < keys.length - IDEM_CAP; i++) delete m[keys[i]];
   }
+}
+function _saveIdem(m) {
+  _capIdem(m);
   store.save('fasIdempotency', m);
 }
 function _recordIdem(key, entry) {
@@ -276,12 +281,10 @@ function _recordIdem(key, entry) {
   m[key] = { ...(m[key] || {}), ...entry, at: now() };
   _saveIdem(m);
 }
-// Is a key currently blocking (done, or a live in-flight/verifying lease)?
-// Returns { blocked, reason, entry } — used to decide whether to run.
-function _idemBlock(key) {
-  if (!key) return { blocked: false };
-  const m = _loadIdem();
-  const e = m[key];
+// PURE block-decision over a ledger entry (no I/O). Shared by _idemBlock (read
+// path) and _claimForExecution (transactional path) so the "is this blocked?"
+// rule is defined in exactly ONE place and can run INSIDE a transaction.
+function _blockDecision(e) {
   if (!e) return { blocked: false };
   if (e.status === 'done') return { blocked: true, reason: 'already completed (idempotent)', entry: e };
   const leaseUntil = e.leaseUntil ? Date.parse(e.leaseUntil) : 0;
@@ -294,6 +297,48 @@ function _idemBlock(key) {
   }
   // Otherwise (failed, expired lease, stale verifying) -> not blocking; recoverable.
   return { blocked: false, entry: e };
+}
+
+// Is a key currently blocking (done, or a live in-flight/verifying lease)?
+// Returns { blocked, reason, entry } — used to decide whether to run.
+function _idemBlock(key) {
+  if (!key) return { blocked: false };
+  const e = _loadIdem()[key];
+  return _blockDecision(e);
+}
+
+/**
+ * _claimForExecution(key) — ATOMIC check-then-claim in ONE transaction.
+ *
+ * This is the real exactly-once guard: the "is it blocked?" check and the
+ * "claim it" write happen inside a single store.update() (BEGIN IMMEDIATE on
+ * the SQLite-backed fasIdempotency key), so two actions can never both pass the
+ * duplicate check and both execute. Prior code read the ledger in _idemBlock,
+ * then AGAIN in _claimIdem, leaving a window where two callers both saw "free"
+ * and both claimed.
+ *
+ * Returns:
+ *   { ok:true, claimed:true }                         — claim acquired, go run
+ *   { ok:false, blocked:true, reason, entry }         — already done/in-flight
+ */
+function _claimForExecution(key) {
+  if (!key) return { ok: true, claimed: true };
+  let outcome = { ok: false, blocked: true, reason: 'unknown' };
+  store.update('fasIdempotency', (raw) => {
+    const m = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+    const decision = _blockDecision(m[key]);
+    if (decision.blocked) {
+      outcome = { ok: false, blocked: true, reason: decision.reason, entry: decision.entry };
+      return m; // no mutation — leave the ledger as-is
+    }
+    // Free (new, failed, expired lease, or stale verifying) -> claim it NOW,
+    // inside this same transaction, so no concurrent caller can also claim.
+    m[key] = { ...(m[key] || {}), status: 'claimed', at: now(), leaseUntil: new Date(Date.now() + LEASE_MS).toISOString() };
+    _capIdem(m);
+    outcome = { ok: true, claimed: true, entry: m[key] };
+    return m;
+  }, {});
+  return outcome;
 }
 
 // Current ledger verdict for an action (used by the runner's Part-7 resume of a
@@ -314,19 +359,11 @@ function lifecycleVerdictFor(name, args) {
 
 // Atomically claim a key for execution with a lease. Returns false if another
 // live claim exists (prevents double execution from two windows / rapid clicks).
+// Delegates to the single-transaction check-then-claim so the decision and the
+// write are one atomic unit (see _claimForExecution).
 function _claimIdem(key) {
   if (!key) return true;
-  const m = _loadIdem();
-  const e = m[key];
-  const leaseUntil = e && e.leaseUntil ? Date.parse(e.leaseUntil) : 0;
-  if (e && (e.status === 'done' ||
-      ((e.status === 'claimed' || e.status === 'executing') && leaseUntil > Date.now()) ||
-      (e.status === 'verifying' && (Date.now() - (Date.parse(e.at || 0) || 0)) < VERIFY_HOLD_MS))) {
-    return false; // already terminal or live in-flight
-  }
-  m[key] = { ...(e || {}), status: 'claimed', at: now(), leaseUntil: new Date(Date.now() + LEASE_MS).toISOString() };
-  _saveIdem(m);
-  return true;
+  return _claimForExecution(key).ok;
 }
 
 // Reconcile in-flight ledger entries after a restart: expired claims (crash
@@ -429,17 +466,16 @@ async function executeVerified(name, args, ctx) {
     try { idemKey = action.idempotencyKey(args || {}); } catch (_) { idemKey = null; }
   }
   if (idemKey) {
-    const block = _idemBlock(idemKey);
-    if (block.blocked) {
-      _audit({ action: name, status: 'idempotent-skip', idemKey, reason: block.reason });
-      const priorDone = block.entry && block.entry.status === 'done';
-      return { status: priorDone ? 'done' : (block.entry ? block.entry.status : 'blocked'),
-        verified: priorDone, idempotent: true, evidence: block.reason,
-        priorResult: block.entry && block.entry.result };
-    }
-    if (!_claimIdem(idemKey)) {
-      _audit({ action: name, status: 'claim-lost', idemKey });
-      return { status: 'blocked', error: 'action already in-flight (concurrent claim)' };
+    // ATOMIC check-then-claim: the block decision AND the claim write happen in
+    // ONE transaction (BEGIN IMMEDIATE on the SQLite-backed ledger), so two
+    // concurrent actions can never both pass the duplicate check and run.
+    const claim = _claimForExecution(idemKey);
+    if (!claim.ok) {
+      _audit({ action: name, status: 'idempotent-skip', idemKey, reason: claim.reason });
+      const priorDone = claim.entry && claim.entry.status === 'done';
+      return { status: priorDone ? 'done' : (claim.entry ? claim.entry.status : 'blocked'),
+        verified: priorDone, idempotent: true, evidence: claim.reason,
+        priorResult: claim.entry && claim.entry.result };
     }
     _recordIdem(idemKey, { status: 'executing', leaseUntil: new Date(Date.now() + LEASE_MS).toISOString() });
   }
@@ -588,4 +624,4 @@ function _safeArgs(args) {
   return a;
 }
 
-module.exports = { routeAction, executeVerified, approveQueued, rejectQueued, getQueue, reconcileInFlight, reconcileVerifyingLifecycle, lifecycleVerdictFor, clearIdem, _idemBlock, _claimIdem, classifyEquipment, _powerUnitGate, _authorizeUnitAction };
+module.exports = { routeAction, executeVerified, approveQueued, rejectQueued, getQueue, reconcileInFlight, reconcileVerifyingLifecycle, lifecycleVerdictFor, clearIdem, _idemBlock, _claimIdem, _claimForExecution, classifyEquipment, _powerUnitGate, _authorizeUnitAction };

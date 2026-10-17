@@ -203,6 +203,22 @@ app.whenReady().then(async () => {
       const rows = (d && d.rows) || [];
       if (rows.length) briefing.process(rows, _send);
     } catch(e) { /* advisory — don't block data push */ }
+
+    // WBR weekly snapshot capture — record this week's per-site + fleet-total
+    // down metrics so the WBR gets a REAL Prior-Week / T6W comparison. Capture
+    // ONLY on a full, fresh, non-partial sync (a partial relay/uptake batch has
+    // an incomplete row set and must never overwrite the week's truth). The
+    // snapshot engine keys by ISO Monday-week and dedupes latest-wins, so this
+    // naturally creates the week's entry on the first full sync of the week and
+    // refreshes it on later syncs. Best-effort — never blocks the data push.
+    try {
+      const isPartial = !!(d && d.partial);
+      const isCache   = !!(d && (d.usedCache || d.stale));
+      const rows = (d && d.rows) || [];
+      if (!isPartial && !isCache && d && d.syncedAt && rows.length) {
+        require('./orcha/wbr_snapshot').captureSnapshot(rows);
+      }
+    } catch (e) { /* advisory — never block the data push */ }
   }
   function _pushStatus(s) { _send('fleet:status', s); }
   function _pushError(e)  { _send('fleet:error',  e); }
@@ -370,18 +386,43 @@ app.whenReady().then(async () => {
           // (the SSO auth-poll / probe-failure ladder) handle it WHEN IT REALLY
           // HAPPENS. A genuine 20h session expiry is handled by the
           // expiresInMin < 15 branch below (~once/day).
-          const aeaMin = state.aeaExpiresInMin;
-          // AEA (~6h) is what AAP actually enforces and expires long before the
+          // Prefer the LIVE AEA expiry from the Electron session cookie store
+          // (the truth AAP actually uses) over the disk-file value. The disk
+          // file keeps the OLD expired AEA after a silent refresh, so reading
+          // disk alone makes AEA look permanently expired and causes needless
+          // refreshes every tick. The session value reflects the real, refreshed
+          // AEA. Fall back to the disk value if the session read is unavailable.
+          let aeaMin = state.aeaExpiresInMin;
+          try {
+            const liveAea = await _authModule.aeaSessionExpiryMin();
+            if (liveAea !== null && liveAea !== undefined) aeaMin = liveAea;
+          } catch (_) {}
+          // AEA (~2-6h) is what AAP actually enforces and expires long before the
           // ~24h session — that is why a single auth wasn't lasting 20h. When
           // AEA is near expiry, SILENTLY re-mint it via the Midway OIDC
           // handshake (no WebAuthn tap) so the session keeps working for its
           // full ~24h life. Otherwise just do the cheap keep-alive re-inject.
-          const AEA_SILENT_REFRESH_AHEAD_MIN = 20;
-          if (aeaMin !== null && aeaMin < AEA_SILENT_REFRESH_AHEAD_MIN) {
+          //
+          // CRITICAL FIX (2026-10-10): the condition was `aeaMin !== null &&
+          // aeaMin < 20`. But checkMwinit() DROPS expired AEA cookies, so once
+          // AEA actually lapses, aeaExpiresInMin becomes NULL — which made this
+          // branch FALSE and fell through to a cheap re-inject that does NOT
+          // re-mint AEA. Result: the instant AEA expired, the app stopped
+          // silently refreshing it and just waited for AAP to bounce us into an
+          // interactive mwinit — the exact "re-auth every ~2h" loop. Confirmed
+          // from the live cookie file: AEA 3.8h lifetime, expired → aeaMin=null
+          // → silent refresh never fired. Now: refresh silently when AEA is near
+          // expiry OR already expired/missing (null). `null` means "AEA is gone,
+          // re-mint it NOW while the 24h session is still valid", not "do
+          // nothing". The lookahead is widened so a sleeping/flapping heartbeat
+          // can't miss the window.
+          const AEA_SILENT_REFRESH_AHEAD_MIN = 45;
+          const aeaNeedsRefresh = (aeaMin === null) || (aeaMin < AEA_SILENT_REFRESH_AHEAD_MIN);
+          if (aeaNeedsRefresh) {
             try {
-              log.info('[midway] AEA near expiry (' + aeaMin + 'min) — refreshing silently (no prompt)...');
+              log.info('[midway] AEA ' + (aeaMin === null ? 'expired/missing' : 'near expiry (' + aeaMin + 'min)') + ' — refreshing silently (no prompt)...');
               const r = await _authModule.refreshAeaSilently();
-              log.info('[midway] Silent AEA refresh result: ok=' + r.ok);
+              log.info('[midway] Silent AEA refresh result: ok=' + r.ok + ' refreshed=' + r.refreshed);
             } catch (e) {
               log.warn('[midway] Silent AEA refresh failed: ' + e.message);
             }
@@ -396,20 +437,28 @@ app.whenReady().then(async () => {
         }
 
         if (state.ok && state.expiresInMin !== null && state.expiresInMin < 15) {
-          log.info('[midway] Cookies expire in ' + state.expiresInMin + 'min -- auto-renewing');
+          // The ~24h session cookie itself is about to expire — that genuinely
+          // needs a fresh mwinit. Route through the ladder (it'll land on the
+          // mwinit rung since the session is near-dead) so offline/VPN are still
+          // honored first instead of prompting into a dead network.
+          log.info('[midway] Session cookie expires in ' + state.expiresInMin + 'min -- recovering');
           _midwayRenewalInFlight = true;
           _send('app:midway-renewing', { expiresIn: state.expiresInMin });
-          await _authModule.runMwinit();
-          await _authModule.injectCookies();
-          log.info('[midway] Auto-renewed successfully');
-          _send('app:midway-renewed', {});
+          const res = _authModule.recoverAuth
+            ? await _authModule.recoverAuth('heartbeat:session-expiring')
+            : (await _authModule.runMwinit(), await _authModule.injectCookies(), { recovered: true });
+          if (res && res.recovered) _send('app:midway-renewed', {});
         } else if (!state.ok) {
-          log.warn('[midway] Cookies expired -- launching mwinit');
+          // On-disk session genuinely expired. Route through the ladder — it
+          // defers silently if offline/VPN-down and only prompts mwinit as the
+          // true last rung.
+          log.warn('[midway] Session cookie expired -- recovering via ladder');
           _midwayRenewalInFlight = true;
           _send('app:midway-expired', {});
-          await _authModule.runMwinit();
-          await _authModule.injectCookies();
-          _send('app:midway-renewed', {});
+          const res = _authModule.recoverAuth
+            ? await _authModule.recoverAuth('heartbeat:session-expired')
+            : (await _authModule.runMwinit(), await _authModule.injectCookies(), { recovered: true });
+          if (res && res.recovered) _send('app:midway-renewed', {});
         }
       } catch (e) {
         log.error('[midway] Auto-refresh failed: ' + e.message);
@@ -581,6 +630,13 @@ function _startAutoSync() {
     _windowApi.startZoomReminders();
   }
 
+  // ── ONE-SHOT Asana auth discovery (env-gated: ASANA_DISCOVER=1) ───────────
+  // Determines whether app.asana.com's API works on the Midway SSO session
+  // cookies alone or needs a captured bearer. Writes asana-discovery.json.
+  // Delayed so the main window's ensureAuthenticated/injectCookies has run.
+  // Remove once the Asana Midway-session path is built.
+
+
   // ── 5g. Create tray ────────────────────────────────────────────────────────
   _windowApi.createTray();
   log.info('Tray created');
@@ -593,6 +649,43 @@ function _startAutoSync() {
     log.info('System resumed from sleep — checking missed slots (15s delay)');
     setTimeout(() => scheduler.catchUp(), 15000);
   });
+
+  // ── 5i-2. Keep running while the workstation is LOCKED ─────────────────────
+  // A powerSaveBlocker('prevent-app-suspension') stops the OS from suspending
+  // the app / throttling its timers when the screen locks or the display turns
+  // off — so the 5-min fleet sync, the scheduler slots (SP/email/DBR), Slack
+  // polling, and the hidden scraper windows keep running while the computer is
+  // locked. NOTE: this prevents APP suspension and display-idle throttling; it
+  // does NOT stop a full system SLEEP (lid close / power sleep) — on real sleep
+  // the whole machine halts and the resume handler above catches up on wake.
+  // 'prevent-app-suspension' is deliberately used (not 'prevent-display-sleep')
+  // so the monitor can still turn off normally; we only keep the app alive.
+  try {
+    const { powerSaveBlocker } = require('electron');
+    let _psbId = powerSaveBlocker.start('prevent-app-suspension');
+    log.info('powerSaveBlocker started (prevent-app-suspension) id=' + _psbId + ' active=' + powerSaveBlocker.isStarted(_psbId));
+    _ctx.powerSaveBlockerId = _psbId;
+    // Belt-and-suspenders: if the OS ever drops the blocker across a
+    // suspend/resume cycle, re-arm it on resume so locked operation stays
+    // protected for the next lock.
+    powerMonitor.on('resume', () => {
+      try {
+        if (!powerSaveBlocker.isStarted(_psbId)) {
+          _psbId = powerSaveBlocker.start('prevent-app-suspension');
+          _ctx.powerSaveBlockerId = _psbId;
+          log.info('powerSaveBlocker re-armed after resume id=' + _psbId);
+        }
+      } catch (e) { log.warn('powerSaveBlocker re-arm failed (non-fatal): ' + e.message); }
+    });
+  } catch (e) {
+    log.warn('powerSaveBlocker start failed (non-fatal): ' + e.message);
+  }
+
+  // Lock/unlock visibility (helps diagnose "did it keep working while locked?").
+  try {
+    powerMonitor.on('lock-screen', () => log.info('Workstation LOCKED — app continues (powerSaveBlocker active)'));
+    powerMonitor.on('unlock-screen', () => log.info('Workstation UNLOCKED'));
+  } catch (_) { /* lock-screen events are Windows/macOS only */ }
 
   // ── 5j. Digital FAS coverage profile — derive Zila's domiciles+operators ───
   // (SCAC/carriers) from the authoritative synced fleetData at startup, then on

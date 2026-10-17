@@ -150,18 +150,29 @@ function registerSettingsIPC(ctx) {
 
   handle('settings:save-schedule-slots', (_e, slots) => {
     if (!slots || typeof slots !== 'object') throw new ConfigError('slots must be an object', 'slots');
+    const toSlot = (s, type, i) => {
+      const h = parseInt(s.h, 10), m = parseInt(s.m, 10);
+      if (isNaN(h) || h < 0 || h > 23) throw new ConfigError(type + '[' + i + '].h out of range', type);
+      if (isNaN(m) || m < 0 || m > 59) throw new ConfigError(type + '[' + i + '].m out of range', type);
+      const label = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+      return { h, m, label };
+    };
     const clean = { sp: [], email: [] };
     ['sp', 'email'].forEach(type => {
       const arr = slots[type];
       if (!Array.isArray(arr) || arr.length !== 2) throw new ConfigError(type + ' must have exactly 2 slots', type);
-      clean[type] = arr.map((s, i) => {
-        const h = parseInt(s.h, 10), m = parseInt(s.m, 10);
-        if (isNaN(h) || h < 0 || h > 23) throw new ConfigError(type + '[' + i + '].h out of range', type);
-        if (isNaN(m) || m < 0 || m > 59) throw new ConfigError(type + '[' + i + '].m out of range', type);
-        const label = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
-        return { h, m, label };
-      });
+      clean[type] = arr.map((s, i) => toSlot(s, type, i));
     });
+    // DBR is OPTIONAL (opt-in feature) and takes 1 slot (fires both AFP+DSP).
+    // Only persist it when provided; preserve any previously-saved dbr slot
+    // if this save call omits it, so saving sp/email doesn't wipe dbr.
+    if (Array.isArray(slots.dbr)) {
+      if (slots.dbr.length < 1) throw new ConfigError('dbr must have at least 1 slot', 'dbr');
+      clean.dbr = slots.dbr.map((s, i) => toSlot(s, 'dbr', i));
+    } else {
+      const prev = (store.load('settings', {}) || {}).schedulerSlots;
+      if (prev && Array.isArray(prev.dbr)) clean.dbr = prev.dbr;
+    }
     const s = store.load('settings', {});
     s.schedulerSlots = clean;
     store.save('settings', s);

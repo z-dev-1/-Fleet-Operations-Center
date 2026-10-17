@@ -60,6 +60,7 @@ const SAFETY_RULES =
 const DECISION_CONTRACT =
   '\n\nYou are running inside a bounded research loop. On each step you may EITHER ask for more\n' +
   'evidence OR give a final answer. You have a limited number of research steps — spend them well.\n' +
+  '- KNOWLEDGE-BASE FIRST: if the question is about ownership, approval thresholds, escalation/SEV, a process, vendor routing, or what a term/acronym means, and the FAS KNOWLEDGE BASE section answers it, give decision:"answer" DIRECTLY from the KB on this step. Do NOT ASK_INTERNAL, do NOT escalate, and do NOT say you will "check with" anyone — you already have the authoritative answer (you ARE the FAS). Example: "who approves a $30K estimate?" → answer "$30K+ powered estimates are approved by L4H Leadership (HVE & EOL eval); FAS never approves, only escalates." from the KB.\n' +
   '- To research more, set "decision":"research_more" and put the READ tools you want in "research":\n' +
   '  [{"tool":"NAME","args":{"unit":"320160"}}]. Only these READ tools exist: ' + RESEARCH_TOOLS.join(', ') + '.\n' +
   '  Request a tool ONLY if the specific fact you need is not already in VERIFIED FACTS. Do not repeat a tool+args you already ran.\n' +
@@ -84,6 +85,26 @@ function _factsToText(facts) {
     .map(f => '- ' + f.field + ': ' + (typeof f.value === 'object' ? JSON.stringify(f.value) : f.value) +
       '  [' + (f.source || '?') + ' @ ' + (f.retrievedAt || '?') + ']')
     .join('\n');
+}
+
+// Build the "SHARED FILES & LINKS" prompt block. Combines the legacy inline
+// attachment-context string (links/previews/text-file snippets the DM path
+// already builds) with an explicit list of any links/files the FAS evidence
+// stage COULD NOT read — so the agent acknowledges a shared item and asks for
+// it / says it couldn't open it, instead of silently ignoring the attachment
+// (the behavior behind the "failing on png/pdf" stalls). Untrusted content is
+// fenced with wrapUntrusted; the refusal list is trusted system text.
+function _attachmentsBlock(input, evidence) {
+  const parts = [];
+  const legacy = input && input.attachments && String(input.attachments).trim();
+  if (legacy) parts.push(guard.wrapUntrusted('SHARED FILES & LINKS', legacy));
+  const refs = (evidence && Array.isArray(evidence.linkRefusals)) ? evidence.linkRefusals : [];
+  if (refs.length) {
+    const lines = refs.slice(0, 6).map(r => '- ' + (r.url || 'item') + ' — COULD NOT READ: ' + (r.reason || 'unreadable'));
+    parts.push('COULD NOT OPEN/READ these shared items (acknowledge this; do NOT guess their contents — ' +
+      'ask the sender to paste the key details or confirm the unit, or say you were unable to open it):\n' + lines.join('\n'));
+  }
+  return parts.length ? parts.join('\n\n') : '(no shared files or links)';
 }
 
 function _parseDecision(raw, evidence) {
@@ -220,6 +241,22 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
     } catch (_) {}
   }
 
+  // FAS KNOWLEDGE BASE — authoritative ownership / approval / escalation /
+  // vendor-routing / glossary rules. INTERNAL senders only. This is what lets
+  // the agent ANSWER "who approves a $30K estimate?" directly instead of
+  // reaching for ASK_INTERNAL / AITeammate (which it must not do when the KB
+  // already has the answer).
+  let knowledgeText = '';
+  try {
+    const auth = profiles.authorizationSummary(profile);
+    // Internal senders → full KB (approval/escalation/ownership/vendor/glossary).
+    // External senders → SHAREABLE tier only (glossary + general vendor routing);
+    // internal-only sections (approval dollars, escalation internals, personnel)
+    // are withheld. Only the RELEVANT sections, to stay within the prompt budget.
+    const _aud = (auth && auth.isInternal) ? 'internal' : 'external';
+    knowledgeText = require('../fas-knowledge').retrieveKnowledge(text, { maxSections: 3, audience: _aud }) || '';
+  } catch (_) { /* KB optional; never block a reply */ }
+
   // Coverage context (Zila's owned operators/SCAC + domiciles). INTERNAL senders
   // only — never expose the full carrier roster to a carrier/vendor/unknown
   // sender. Compact + trusted (derived from our own synced fleet data). Marked
@@ -258,9 +295,10 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
     { key: 'conversation', label: 'IMMEDIATE CONVERSATION', text: guard.wrapUntrusted('CONVERSATION', convoText) },
     // Shared files / link previews / attachment contents (from the Slack
     // message). Untrusted, like the message. Empty when nothing was shared.
-    { key: 'attachments', label: 'SHARED FILES & LINKS', text: (input.attachments && String(input.attachments).trim())
-        ? guard.wrapUntrusted('SHARED FILES & LINKS', String(input.attachments).trim())
-        : '(no shared files or links)' },
+    // Also list any links/files we COULD NOT read, so the agent acknowledges
+    // the shared item and asks/says so rather than silently ignoring it.
+    { key: 'attachments', label: 'SHARED FILES & LINKS', text: _attachmentsBlock(input, evidence) },
+    { key: 'knowledge', label: 'FAS KNOWLEDGE BASE (authoritative — answer ownership/approval/escalation/process/glossary questions DIRECTLY from this; do NOT ASK_INTERNAL/escalate what it already covers)', text: knowledgeText },
     { key: 'playbook', label: 'FAS PLAYBOOK (apply these rules)', text: playbookText },
     { key: 'caseSummary', label: 'RELATED CASE MEMORY', text: caseText },
     { key: 'verifiedFacts', label: 'VERIFIED FACTS (source + freshness shown)', text: guard.wrapUntrusted('VERIFIED FACTS', factsText) },
@@ -382,7 +420,9 @@ async function runAgent(input) {
 
   try {
     // ── STEP 0: deterministic scoped evidence baseline ────────────────────
-    const evidence = await buildEvidence({ profile, text, mode });
+    // Pass the raw Slack file objects so the evidence builder can read shared
+    // attachments (PNG/PDF/HTML/CSV) and surface any unit ids they reference.
+    const evidence = await buildEvidence({ profile, text, mode, files: input.files || [] });
     const ctx = { profile, mode, _evidence: evidence, approvedAutomaticActions: cfg.approvedAutomaticActions || [] };
     const extraResearch = [];
     const seen = new Set();

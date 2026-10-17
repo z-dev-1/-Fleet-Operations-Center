@@ -11,7 +11,7 @@
  */
 
 import bus                        from '../bus.js';
-import { fleet as fleetBridge }   from '../bridge.js';
+import { fleet as fleetBridge, settings as settingsBridge } from '../bridge.js';
 
 let _suppressFilterEvents = false;
 
@@ -20,7 +20,6 @@ const TAB_VIEW = {
   'fleet-table': 'fleet',
   dashboard:  'fleet',
   analytics:  'analytics',
-  vendors:    'vendors',
   scheduler:  'schedulers',
   'email-composer': 'email-composer',
   'daily-call': 'daily-call',
@@ -59,9 +58,6 @@ export function init(container) {
         <button class="tb-tab" data-view="analytics">
           <span class="tb-tab-icon">⏳</span> Long Dwell
         </button>
-        <button class="tb-tab" data-view="vendors">
-          <span class="tb-tab-icon">🏢</span> Vendors
-        </button>
         <button class="tb-tab" data-view="scheduler">
           <span class="tb-tab-icon">⏱</span> Scheduler
         </button>
@@ -76,7 +72,7 @@ export function init(container) {
       
       <!-- Right side -->
       <div class="tb-right">
-        <span class="tb-ai-status" id="tb-ai-status" title="Orcha AI connection status">
+        <span class="tb-ai-status" id="tb-ai-status" title="AI settings — click to configure" style="cursor:pointer">
           <span class="tb-kpi-dot tb-kpi-dot--unknown" id="kpi-ai-dot"></span>
           <span id="kpi-ai-label">AI …</span>
         </span>
@@ -88,6 +84,8 @@ export function init(container) {
         <div class="tb-icon-btn" id="tb-intel" title="Intelligence Panel">🧠</div>
         <div class="tb-icon-btn" id="tb-contacts" title="Contact Book">📇</div>
         <div class="tb-icon-btn" id="tb-inbox" title="Incoming Work Requests">📋<span class="tb-notif-badge" id="tb-inbox-badge" style="display:none">0</span></div>
+        <div class="tb-icon-btn" id="tb-email-triage" title="Inbox Triage (AI)">📨</div>
+        <div class="tb-icon-btn" id="tb-relay-reconcile" title="Relay ↔ Offsite updates (AI)">🔁</div>
         <div class="tb-icon-btn" id="tb-notif" title="Notifications">
           🔔<span class="tb-notif-badge" id="tb-notif-badge" style="display:none">0</span>
         </div>
@@ -137,6 +135,7 @@ export function init(container) {
         <button class="tb-pill" data-filter="unavailable">Unavailable</button>
         <button class="tb-pill" data-filter="offsite">Offsite</button>
         <button class="tb-pill" data-filter="high-risk">High Risk</button>
+        <button class="tb-pill" data-filter="has-risk">Has Score</button>
         <button class="tb-pill" data-filter="stuck">Stuck 14d+</button>
         <button class="tb-pill" data-filter="fleetnet">FleetNet</button>
       </div>
@@ -237,11 +236,29 @@ export function init(container) {
     bus.emit('ui:inbox-toggle');
   });
 
+  // ── Inbox Triage (AI) overlay toggle ───────────────────────────────
+  const emailTriageBtn = document.getElementById('tb-email-triage');
+  if (emailTriageBtn) emailTriageBtn.addEventListener('click', () => {
+    bus.emit('ui:email-triage-toggle');
+  });
+
+  // ── Relay ↔ Offsite reconcile overlay toggle ───────────────────────
+  const relayReconcileBtn = document.getElementById('tb-relay-reconcile');
+  if (relayReconcileBtn) relayReconcileBtn.addEventListener('click', () => {
+    bus.emit('ui:relay-reconcile-toggle');
+  });
+
   
 
   // ── Settings ──────────────────────────────────────────────────────────────
   document.getElementById('tb-settings').addEventListener('click', () => {
     bus.emit('ui:view-change', { from: 'fleet', to: 'settings' });
+  });
+
+  // ── AI status pill → AI Config overlay ─────────────────────────────────────
+  const aiStatusEl = document.getElementById('tb-ai-status');
+  if (aiStatusEl) aiStatusEl.addEventListener('click', () => {
+    bus.emit('ui:ai-config-toggle');
   });
 
   // ── Sync ──────────────────────────────────────────────────────────────────
@@ -567,6 +584,9 @@ export function init(container) {
       } else if (f === 'high-risk') {
         if (lc) lc.value = '';
         bus.emit('ui:quick-filter', { filter: 'high-risk' });
+      } else if (f === 'has-risk') {
+        if (lc) lc.value = '';
+        bus.emit('ui:quick-filter', { filter: 'has-risk' });
       } else if (f === 'stuck') {
         if (lc) lc.value = '';
         bus.emit('ui:quick-filter', { filter: 'stuck' });
@@ -585,34 +605,120 @@ export function init(container) {
     if (pop) { pop.remove(); return; }
 
     const profile = JSON.parse(localStorage.getItem('fleet_user_profile') || '{}');
+    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
     pop = document.createElement('div');
     pop.id = 'tb-profile-pop';
-    pop.style.cssText = 'position:fixed;top:44px;right:12px;width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;z-index:9999;box-shadow:0 8px 24px rgba(0,0,0,0.4);';
+    pop.className = 'tb-profile-pop';
     pop.innerHTML = `
-      <div style="font-size:12px;font-weight:700;color:#e6edf3;margin-bottom:10px;">👤 User Profile</div>
-      <div style="font-size:9px;color:#8b949e;margin-bottom:8px;">Used as default contact for Work Requests</div>
-      <input id="up-name" class="sd-input" style="width:100%;margin-bottom:6px;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:6px 8px;color:#c9d1d9;font-size:11px;" placeholder="Your name" value="${profile.name || ''}" />
-      <input id="up-phone" class="sd-input" style="width:100%;margin-bottom:6px;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:6px 8px;color:#c9d1d9;font-size:11px;" placeholder="Phone (1-555-000-0000)" value="${profile.phone || ''}" />
-      <input id="up-email" class="sd-input" style="width:100%;margin-bottom:10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:6px 8px;color:#c9d1d9;font-size:11px;" placeholder="Email (optional)" value="${profile.email || ''}" />
-      <button id="up-save" style="width:100%;background:rgba(63,185,80,0.1);border:1px solid rgba(63,185,80,0.3);border-radius:4px;color:#3fb950;font-size:10px;font-weight:600;padding:6px;cursor:pointer;">Save</button>
+      <div class="tbp-section">
+        <div class="tbp-title">👤 User Profile</div>
+        <div class="tbp-hint">Used as the default contact on Work Requests.</div>
+        <label class="tbp-label">Name</label>
+        <input id="up-name" class="tbp-input" placeholder="Your name" value="${esc(profile.name)}" />
+        <label class="tbp-label">Phone</label>
+        <input id="up-phone" class="tbp-input" placeholder="1-555-000-0000" value="${esc(profile.phone)}" />
+        <label class="tbp-label">Email</label>
+        <input id="up-email" class="tbp-input" placeholder="you@amazon.com (optional)" value="${esc(profile.email)}" />
+      </div>
+
+      <div class="tbp-section">
+        <div class="tbp-title">📍 Managed Domiciles</div>
+        <div class="tbp-hint">The AAP sites this app pulls fleet data for. Changing these re-scans the fleet.</div>
+        <div class="tbp-chips" id="up-dom-chips"></div>
+        <div class="tbp-dom-add">
+          <input id="up-dom-input" class="tbp-input" placeholder="Add a site code (e.g. ABE40) + Enter" />
+          <button id="up-dom-reset" class="tbp-btn tbp-btn--ghost" type="button" title="Reset to defaults">Reset</button>
+        </div>
+      </div>
+
+      <button id="up-save" class="tbp-btn tbp-btn--save">Save</button>
+      <div id="up-status" class="tbp-status" style="display:none"></div>
     `;
     document.body.appendChild(pop);
 
-    document.getElementById('up-save').addEventListener('click', () => {
+    // ── Domicile chip editor ──────────────────────────────────────────────
+    let _domiciles = [];
+    const chipsEl = pop.querySelector('#up-dom-chips');
+    const domInput = pop.querySelector('#up-dom-input');
+
+    function _renderChips() {
+      if (!_domiciles.length) {
+        chipsEl.innerHTML = '<span class="tbp-chips-empty">No sites — the app will pull ALL fleets.</span>';
+        return;
+      }
+      chipsEl.innerHTML = _domiciles.map((d, i) =>
+        '<span class="tbp-chip">' + esc(d) + '<button class="tbp-chip-x" data-i="' + i + '" title="Remove">✕</button></span>'
+      ).join('');
+      chipsEl.querySelectorAll('.tbp-chip-x').forEach((b) => {
+        b.addEventListener('click', (e) => {
+          // stopPropagation: _renderChips() replaces this button's HTML during
+          // the click, detaching e.target from the DOM. Without this, the
+          // document-level outside-click closer then sees pop.contains(e.target)
+          // === false (target is detached) and closes the whole popover — so the
+          // removal looked like it "did nothing". Keep the click contained.
+          e.preventDefault();
+          e.stopPropagation();
+          _domiciles.splice(parseInt(b.dataset.i, 10), 1);
+          _renderChips();
+        });
+      });
+    }
+    function _addDomicile(raw) {
+      (raw || '').split(/[\n,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean).forEach((code) => {
+        if (!_domiciles.includes(code)) _domiciles.push(code);
+      });
+      _renderChips();
+    }
+    // Load current domiciles from the backend (source of truth, not localStorage).
+    settingsBridge.getDomiciles().then((list) => { _domiciles = Array.isArray(list) ? list.slice() : []; _renderChips(); }).catch(() => _renderChips());
+
+    domInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); _addDomicile(domInput.value); domInput.value = ''; }
+    });
+    domInput.addEventListener('blur', () => { if (domInput.value.trim()) { _addDomicile(domInput.value); domInput.value = ''; } });
+
+    pop.querySelector('#up-dom-reset').addEventListener('click', () => {
+      settingsBridge.resetDomiciles().then((r) => {
+        _domiciles = (r && r.domiciles) || [];
+        _renderChips();
+        _showStatus('✅ Domiciles reset to defaults — re-scanning', 'ok');
+      }).catch((e) => _showStatus('❌ ' + (e.message || 'Reset failed'), 'err'));
+    });
+
+    function _showStatus(text, cls) {
+      const st = pop.querySelector('#up-status');
+      if (!st) return;
+      st.textContent = text; st.className = 'tbp-status ' + (cls || ''); st.style.display = '';
+    }
+
+    // ── Save (profile → localStorage, domiciles → backend) ─────────────────
+    pop.querySelector('#up-save').addEventListener('click', async () => {
       const p = {
-        name: document.getElementById('up-name').value.trim(),
-        phone: document.getElementById('up-phone').value.trim(),
-        email: document.getElementById('up-email').value.trim()
+        name:  pop.querySelector('#up-name').value.trim(),
+        phone: pop.querySelector('#up-phone').value.trim(),
+        email: pop.querySelector('#up-email').value.trim(),
       };
       localStorage.setItem('fleet_user_profile', JSON.stringify(p));
-      // Update avatar initials
       const av = document.getElementById('tb-avatar');
       if (av && p.name) {
         const parts = p.name.split(' ');
         av.textContent = (parts[0][0] + (parts[1] ? parts[1][0] : '')).toUpperCase();
       }
-      pop.remove();
+      // Domiciles: only call the backend (which triggers a rescan) when the
+      // list actually has codes. An empty list is rejected by the backend, so
+      // guide the user to Reset instead of silently failing.
+      try {
+        if (_domiciles.length) {
+          await settingsBridge.saveDomiciles(_domiciles);
+          _showStatus('✅ Saved', 'ok');
+          setTimeout(() => pop.remove(), 700);
+        } else {
+          _showStatus('⚠️ Add at least one site, or click Reset for defaults', 'warn');
+        }
+      } catch (e) {
+        _showStatus('❌ ' + (e.message || 'Save failed'), 'err');
+      }
     });
 
     // Close on outside click

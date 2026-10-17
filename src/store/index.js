@@ -57,6 +57,10 @@ const REGISTRY = {
   operatorChannels: () => path.join(P.dataDir, 'operator-channels.json'),
   // Dedup ledger so a PM alert is fanned out to a carrier channel only once.
   pmAlertFanout:    () => path.join(P.dataDir, 'pm-alert-fanout.json'),
+  // Dedup ledger for the "unit ready for pickup → notify carrier" message
+  // (2026-10). See src/scrapers/ready_pickup_notify.js. Keyed by
+  // equipmentId + statusChangedAt so each distinct ready event is sent once.
+  readyPickupNotices: () => path.join(P.dataDir, 'ready-pickup-notices.json'),
   // Daily Carrier Briefing (2026-10). See src/scrapers/carrier_briefing.js.
   // Config shape: { enabled, sendTime:'HH:MM', timezone, includeDown,
   //   includeFlagged, includeActive, includeDomiciles, riskThreshold, tipEnabled }.
@@ -90,6 +94,8 @@ const REGISTRY = {
   retentionHistory: () => P.retentionHistory,
   slackAutoReply:   () => path.join(P.dataDir, 'slack_auto_reply.json'), // FEATURE (2026-07-16)
   longDwellStore:   () => path.join(P.dataDir, 'long_dwell.json'), // FEATURE (2026-07-20): Analytics -> Long Dwell Units tab
+  longDwellCsv:     () => path.join(P.dataDir, 'long_dwell_csv.json'), // FEATURE: imported AAP tracker CSV + team-filled N-R columns
+  fasRoster:        () => path.join(P.dataDir, 'fas_roster.json'),    // FEATURE: scraped FAS roster snapshot (FAS personnel)
   slackMentionThreads: () => path.join(P.dataDir, 'slack_mention_threads.json'), // thread-continuation tracking for channel watch
   bubbleConfig:     () => path.join(P.dataDir, 'bubble_config.json'),             // floating bubble opacity setting
 
@@ -97,6 +103,15 @@ const REGISTRY = {
   // last day we silently warmed each vendor portal so the morning pre-warm runs
   // once/day. See src/scrapers/vendor_session.js. Shape: { lastWarmedDay: {dtna:'YYYY-MM-DD'} }.
   vendorWarm:           () => path.join(P.dataDir, 'vendor-warm.json'),
+  // DBR DATA (Daily Call) — cached result of the last AFP QuickSight scrape.
+  // See src/scrapers/quicksight_dbr.js + src/ipc/scrapers.js 'quicksight:scrape'.
+  // Shape: { ok, domicile:[{domicile,uptimePct,unitsUnavailable}],
+  //          scac:[{scac,domicile,uptimePct,unitsUnavailable}], scrapedAt, error? }.
+  quicksightDbr:        () => path.join(P.dataDir, 'quicksight_dbr.json'),
+  // DBR DATA (Daily Call) — DSP section cache. Shape: { ok,
+  // scac:[{scac,uptimePct,unitsUnavailable,unitsUnavailableEstimated,assetCount,downtimePct}],
+  // scrapedAt, error? }.
+  quicksightDbrDsp:     () => path.join(P.dataDir, 'quicksight_dbr_dsp.json'),
   // Daily Tasks / Action Board (2026-10) — replaces the former Workflow
   // Intelligence recorder/library (Phase 8, removed). The "Workflow AI" tab is
   // now an AI-generated + manual daily task board. See src/ipc/daily-tasks.js.
@@ -173,6 +188,73 @@ const REGISTRY = {
   // backup is stored under schedulerLedgerBackup_v1.
   schedulerLedger:         () => path.join(P.dataDir, 'scheduler_ledger.json'),
   schedulerLedgerBackup_v1: () => path.join(P.dataDir, 'scheduler_ledger_backup_v1.json'),
+  // OWA Inbox Triage (2026-10) — see src/scrapers/owa_reader.js + email_triage.js.
+  // Config shape: { enabled, maxEmails, autoApplyUnitUpdates, scanOnOpen,
+  //   lastRunAt }. (Reading the inbox + AI triage; all mailbox/DM mutations are
+  //   still confirm-gated.)
+  emailTriageConfig:       () => path.join(P.dataDir, 'email_triage_config.json'),
+  // Triage results — the last read + AI-triaged inbox. Per-email records keep a
+  // STABLE id (OWA internetMessageId / conversationId) so the per-email "Reply"
+  // option persists across new mail and app restarts (an older email's reply
+  // option never disappears just because newer mail arrived). Shape:
+  //   { emails: [ { id, from, fromName, subject, receivedAt, importance,
+  //       summary, replySuggested, replyDraft?, replyState, attachments:[{name,
+  //       type,understood}], unitRefs:[{unit, update, ready}], triagedAt } ],
+  //     ranAt, authBlocked? }.
+  emailTriageResults:      () => path.join(P.dataDir, 'email_triage_results.json'),
+  // Deletion learning (2026-10) — records sender/subject patterns the user
+  // DELETES vs KEEPS so the AI triage leans toward their real junk habits and
+  // never re-suggests deleting something they chose to keep. Shape:
+  //   { deleted: { '<senderKey>': {count,lastAt,samples:[subj..]} },
+  //     kept:    { '<senderKey>': {count,lastAt} },
+  //     keywords:{ deleted:{word:count}, kept:{word:count} } }.
+  emailTriageLearning:     () => path.join(P.dataDir, 'email_triage_learning.json'),
+  // Relay ↔ Offsite reconcile (2026-10) — see src/scrapers/relay_reconcile.js.
+  // Config: { enabled, autoPostToRelay (MODE A vs MODE B), staleDays,
+  //   maxUnitsPerSync, minConfidence }.
+  relayReconcileConfig:    () => path.join(P.dataDir, 'relay_reconcile_config.json'),
+  // MODE B staging queue: Relay-comment / dealer-ask posts awaiting an explicit
+  // confirm before they are written to the real AAP work request. Shape:
+  //   { items: [ { id, equipmentId, serviceUrl, kind:'gap-fill'|'dealer-ask',
+  //       text, decision, stagedAt, state:'pending'|'posted'|'dismissed' } ] }.
+  relayReconcilePending:   () => path.join(P.dataDir, 'relay_reconcile_pending.json'),
+  // Dedup ledger so the same gap-fill / dealer-ask isn't re-staged or re-posted
+  // on every 5-min rescan. Keyed by equipmentId -> { lastGapSig, lastAskSig, lastAt }.
+  relayReconcileLog:       () => path.join(P.dataDir, 'relay_reconcile_log.json'),
+  // Fleet Action Board execution config (2026-10) — per-action MODE A/B switch.
+  // MODE A (default, all false) = the "Do it" button deep-links into the
+  // existing confirm-gated flow. MODE B (true) = one-click execute behind a
+  // single YES confirm. Shape: { autoExecute: { <action_slug>: bool } }.
+  fleetActionConfig:       () => path.join(P.dataDir, 'fleet_action_config.json'),
+  // Canonical state (2026-10) — the ONE AI-reconciled authoritative state
+  // record per unit, the single source of truth every reasoning surface reads.
+  // No new UI; a few key fields are mirrored onto fleetData rows so existing
+  // panels can read it. Two-tier: a cheap deterministic baseline is computed
+  // for EVERY unit each sync, upgraded by the AI reconcile for the units that
+  // need deeper reasoning (down/offsite/stale), bounded like the reconcile
+  // pass. The AI reconciles conflicts (AAP vs Relay vs Offsite) and records
+  // which source it trusted + confidence — there is no hardcoded precedence.
+  // See src/orcha/canonical_state.js. Shape:
+  //   { units: { <equipmentId>: { equipmentId, status, situation, nextStep,
+  //       source, confidence, stale, waitingOn, flags:[], aiReconciled,
+  //       updatedAt } }, updatedAt, lastReconcileAt }.
+  canonicalState:          () => path.join(P.dataDir, 'canonical_state.json'),
+  // WBR weekly metric history (2026-10) — rolling per-ISO-Monday-week snapshots
+  // of the per-site + fleet-total DOWN metrics (assets down, by-fuel, location
+  // split, per-vendor, PM-flagged, canonical status mix). Captured on the first
+  // sync of each week (Monday boundary) + on Generate WBR, latest-wins per week.
+  // Powers the WBR's real Prior-Week / Trailing-6-Week comparison + unit
+  // movement, replacing the former "enter manually" placeholder. See
+  // src/orcha/wbr_snapshot.js. Shape: { weeks: [ { week:'YYYY-Www', weekStart,
+  //   capturedAt, total:SiteMetrics, sites:{key:SiteMetrics} } ], updatedAt }.
+  wbrHistory:              () => path.join(P.dataDir, 'wbr_history.json'),
+  // Cached AI analysis for the unit-detail History tab's per-breakdown records
+  // (2026-10). Keyed so a breakdown's analysis is generated once and reused on
+  // every panel open. See src/ipc/misc.js 'breakdown-history:get' +
+  // src/orcha/repair-history.js buildBreakdowns. Shape:
+  //   { bySig: { '<sig>': { analysis, at } },
+  //     summaries: { '<equipmentId>': { summary, sigKey, at } } }.
+  breakdownAnalysis:       () => path.join(P.dataDir, 'breakdown_analysis.json'),
 };
 
 function _resolvePath(name) {
@@ -182,10 +264,89 @@ function _resolvePath(name) {
   throw new Error(`Unknown store: "${name}" — add it to REGISTRY in store/index.js`);
 }
 
+// ── Critical transactional state → SQLite ───────────────────────────────────
+// These store keys hold exactly-once / lease / idempotency ledgers whose
+// correctness depends on crash-atomic writes and race-free read-modify-write —
+// guarantees the JSON file store cannot give (a crash mid-write can tear the
+// whole document; a non-mutexed load→save can let two callers both "win").
+//
+// For these keys ONLY, load/save/exists/delete and update/updateAsync route
+// through the built-in SQLite engine (store/sqlite_engine.js, backed by
+// node:sqlite). The whole-document contract is preserved byte-for-byte: each
+// key is one JSON document, now stored as one atomic row instead of a file. No
+// caller changes; inbound-claim.js, scheduler/ledger.js, fas/executor.js and
+// their tests keep calling store.* exactly as before.
+//
+// If the runtime lacks node:sqlite, the engine reports unavailable and we fall
+// back to the JSON file store transparently — the app never hard-fails.
+const SQLITE_KEYS = new Set([
+  'schedulerLedger',
+  'schedulerLedgerBackup_v1',
+  'fasInboundClaims',
+  'fasIdempotency',
+]);
+
+let _sqlite = null;
+function _engine() {
+  if (_sqlite === null) {
+    try { _sqlite = require('./sqlite_engine'); } catch (_) { _sqlite = false; }
+  }
+  return _sqlite || null;
+}
+
+// True when `name` should be served by SQLite AND the engine is actually
+// available on this runtime. Any failure path falls back to JSON files.
+function _useSqlite(name) {
+  if (!SQLITE_KEYS.has(name)) return false;
+  const eng = _engine();
+  try { return !!(eng && eng.isAvailable()); } catch (_) { return false; }
+}
+
+// One-time import of a pre-existing JSON document into SQLite on first touch.
+// If the key already has a SQLite row, this is a no-op. If a legacy JSON file
+// exists and SQLite has no row yet, copy the JSON doc in (the JSON file is left
+// in place as an automatic, untouched backup of the pre-migration state).
+const _migratedKeys = new Set();
+function _migrateJsonToSqlite(name) {
+  if (_migratedKeys.has(name)) return;
+  _migratedKeys.add(name);
+  const eng = _engine();
+  if (!eng) return;
+  try {
+    if (eng.hasDoc(name)) return; // already in SQLite
+    const filePath = _resolvePath(name);
+    if (!fs.existsSync(filePath)) return; // nothing to import
+    const raw = fs.readFileSync(filePath, 'utf8');
+    if (!raw || !raw.trim()) return;
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch (_) {
+      // Try the .bak from the JSON store's own recovery path.
+      const bak = filePath + '.bak';
+      if (!fs.existsSync(bak)) return;
+      try { parsed = JSON.parse(fs.readFileSync(bak, 'utf8')); } catch (_) { return; }
+    }
+    eng.writeDoc(name, parsed);
+    logger.info('migrated transactional store "' + name + '" from JSON into SQLite');
+  } catch (e) {
+    logger.warn('migration of "' + name + '" into SQLite failed (keeping JSON): ' + e.message);
+  }
+}
+
 /**
  * load(name, defaultValue?) — reads and parses JSON, returns default on any error
  */
 function load(key, fallback) {
+  if (_useSqlite(key)) {
+    _migrateJsonToSqlite(key);
+    try {
+      const doc = _engine().readDoc(key);
+      if (doc !== undefined) return doc;
+      return fallback !== undefined ? fallback : null;
+    } catch (e) {
+      logger.warn('SQLite load("' + key + '") failed, falling back to JSON: ' + e.message);
+      // fall through to the JSON path below
+    }
+  }
   const filePath = _resolvePath(key);
   if (!fs.existsSync(filePath)) return fallback !== undefined ? fallback : null;
   try {
@@ -207,6 +368,14 @@ function load(key, fallback) {
  * save(name, data) — atomic write (write to .tmp then rename)
  */
 function save(key, data) {
+  if (_useSqlite(key)) {
+    _migrateJsonToSqlite(key);
+    try { _engine().writeDoc(key, data); return; }
+    catch (e) {
+      logger.warn('SQLite save("' + key + '") failed, falling back to JSON: ' + e.message);
+      // fall through to the JSON path below
+    }
+  }
   const filePath = _resolvePath(key);
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -246,6 +415,24 @@ function save(key, data) {
  * use updateAsync() below which serializes access per-store.
  */
 function update(name, mergeFn, defaultValue = {}) {
+  if (_useSqlite(name)) {
+    _migrateJsonToSqlite(name);
+    try {
+      // Whole read-modify-write inside ONE IMMEDIATE transaction: crash-atomic
+      // and serialized against concurrent writers by SQLite itself.
+      const eng = _engine();
+      return eng.tx(() => {
+        const cur = eng.readDoc(name);
+        const current = (cur === undefined) ? defaultValue : cur;
+        const updated = mergeFn(current);
+        eng.writeDoc(name, updated);
+        return updated;
+      });
+    } catch (e) {
+      logger.warn('SQLite update("' + name + '") failed, falling back to JSON: ' + e.message);
+      // fall through to the JSON path below
+    }
+  }
   const current = load(name, defaultValue);
   const updated = mergeFn(current);
   save(name, updated);
@@ -272,6 +459,12 @@ async function updateAsync(name, mergeFn, defaultValue = {}) {
 
   try {
     await prev; // wait for prior operation to complete
+    // For SQLite-backed transactional keys, the per-key mutex above already
+    // serializes callers in-process, so we don't need to hold a DB transaction
+    // open across the (possibly async) merge — which node:sqlite's synchronous
+    // transaction API can't do anyway. load() reads from SQLite; the final
+    // save() is a single atomic row write (crash-atomic). Non-SQLite keys keep
+    // the original JSON read-modify-write.
     const current = load(name, defaultValue);
     const updated = await mergeFn(current);
     save(name, updated);
@@ -282,11 +475,24 @@ async function updateAsync(name, mergeFn, defaultValue = {}) {
 }
 
 function exists(name) {
+  if (_useSqlite(name)) {
+    try {
+      _migrateJsonToSqlite(name);
+      if (_engine().hasDoc(name)) return true;
+      // Not in SQLite yet — a legacy JSON file still counts as "exists".
+    } catch (_) {}
+  }
   try { return fs.existsSync(_resolvePath(name)); } catch (_) { return false; }
 }
 
 function del(name) {
+  if (_useSqlite(name)) {
+    try { _engine().deleteDoc(name); } catch (e) {
+      logger.warn('SQLite delete("' + name + '") failed: ' + e.message);
+    }
+    // Also remove any legacy JSON file so a later fallback can't resurrect it.
+  }
   try { fs.unlinkSync(_resolvePath(name)); } catch (_) {}
 }
 
-module.exports = { load, save, update, updateAsync, exists, delete: del, REGISTRY };
+module.exports = { load, save, update, updateAsync, exists, delete: del, REGISTRY, SQLITE_KEYS };

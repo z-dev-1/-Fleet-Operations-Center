@@ -30,6 +30,7 @@ let _relayMap = {};
 let _sortKey             = null;
 let _sortDir             = 'asc';
 let _quickFilterHighRisk = false;
+let _hasRiskScore        = false; // "Has Score" quick-filter: only units with a real Uptake risk score (>0)
 let _showFleetNet        = false; // FleetNet units hidden by default; shown via the FleetNet quick-filter pill
 let _selectedId          = null;   // persists highlight across re-renders
 let _selectedIds         = new Set(); // S28: multi-select for bulk ops
@@ -122,27 +123,31 @@ function _riskBadge(score) {
   return '<span class="badge badge--' + cls + '">' + n + '</span>';
 }
 
-// PM pill — only shown if due ≤60 days OR overdue. Returns '' if >60 days out.
+// PM pill — shows the due date for EVERY PM type that has one (matching the
+// unit-detail panel). Color-coded by urgency: overdue (red), ≤30d (yellow),
+// ≤60d (green), and far-out (>60d) muted so it's visible but low-emphasis.
 // val is: 'overdue' | 'Jul 8' | 'Aug 3' | '--'
 function _pmPill(label, val) {
-  if (!val || val === '--') return '';   // hide blanks entirely
+  if (!val || val === '--') return '';   // hide blanks only
 
   const v = val.toLowerCase();
-  let cls;
-  let daysOut = null;
+  let cls = 'pm-pill--ok';
 
   if (v === 'overdue') {
     cls = 'pm-pill--overdue';
   } else {
-    const d = new Date(val + ' ' + new Date().getFullYear());
+    const today = new Date(); today.setHours(0,0,0,0);
+    // val is "Mon D" with NO year — assume the NEXT occurrence. If that month/day
+    // already passed this year, roll to next year (so an "Apr 14" due date in a
+    // future year isn't misread as this-year overdue).
+    let d = new Date(val + ' ' + today.getFullYear());
     if (!isNaN(d.getTime())) {
-      daysOut = Math.round((d - new Date().setHours(0,0,0,0)) / 86400000);
-      if (daysOut > 60) return '';        // >60 days — hide pill
+      if (d < today) d = new Date(val + ' ' + (today.getFullYear() + 1));
+      const daysOut = Math.round((d - today) / 86400000);
       cls = daysOut <= 0  ? 'pm-pill--overdue'
           : daysOut <= 30 ? 'pm-pill--soon'
-          :                 'pm-pill--ok';
-    } else {
-      cls = 'pm-pill--ok';
+          : daysOut <= 60 ? 'pm-pill--ok'
+          :                 'pm-pill--far';   // >60d: visible but muted (was hidden)
     }
   }
 
@@ -195,7 +200,7 @@ function _filterSortKey(rows) {
   return rows.length + '|' + first + '|' + last + '|' +
     JSON.stringify(_filters) + '|' + _search + '|' +
     _sortKey + '|' + _sortDir + '|' +
-    _quickFilterHighRisk + '|' + _showFleetNet;
+    _quickFilterHighRisk + '|' + _hasRiskScore + '|' + _showFleetNet;
 }
 
 function _applyFiltersAndSort(rows) {
@@ -209,6 +214,9 @@ function _applyFiltersAndSort(rows) {
 
     // Quick filter: high-risk
     if (_quickFilterHighRisk && (row.riskScore || 0) < 70) return false;
+
+    // Quick filter: has-risk — only units that actually have an Uptake score (>0)
+    if (_hasRiskScore && !((row.riskScore || 0) > 0)) return false;
 
     for (const [field, value] of Object.entries(_filters)) {
       if (!value) continue;
@@ -756,10 +764,13 @@ export function init(container) {
       _filters['lifecycleReason'] = 'offsite';
     } else if (filter === 'high-risk') {
       _quickFilterHighRisk = true;
+    } else if (filter === 'has-risk') {
+      _hasRiskScore = true;
     } else if (filter === 'fleetnet') {
       _showFleetNet = true;
     }
     if (filter !== 'high-risk') _quickFilterHighRisk = false;
+    if (filter !== 'has-risk') _hasRiskScore = false;
     if (filter !== 'fleetnet') _showFleetNet = false;
     _renderRows(_allRows);
   });

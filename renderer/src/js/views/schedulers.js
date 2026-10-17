@@ -19,7 +19,8 @@
  */
 
 import bus      from '../bus.js';
-import { settings as settingsBridge } from '../bridge.js';
+import state    from '../state.js';
+import { settings as settingsBridge, sp as spBridge, slack as slackBridge } from '../bridge.js';
 
 let _el        = null;
 let _tickTimer = null;
@@ -65,8 +66,38 @@ function _viewHtml() {
     + '<div class="sched-subtitle" id="sched-weekday-badge">\u2014</div></div>'
     + '<div class="sched-header__right"><div class="sched-clock" id="sched-clock">\u2014</div>'
     + '<span class="sched-tz" id="sched-tz"></span>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-cb-btn" title="Daily carrier briefing">\ud83d\udcc5 Briefing</button>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-settings-btn" title="Scheduler settings">\u2699</button>'
     + '<button class="sched-btn sched-btn--back" id="sched-back">\u2190 Fleet</button></div>'
     + '</div>'
+
+    // Scheduler settings overlay (gear) — global config knobs: sync interval +
+    // data-freshness policy. The per-card times/toggles stay on the cards.
+    + '<div class="sched-settings-overlay" id="sched-settings-overlay" style="display:none">'
+    + '<div class="sched-settings-panel">'
+    + '<div class="sched-settings-head"><span class="sched-settings-title">\u2699 Scheduler Settings</span>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-settings-close">\u2715</button></div>'
+    + '<div class="sched-settings-body">'
+
+    + '<div class="sched-settings-group"><div class="sched-settings-group__title">Fleet Sync</div>'
+    + '<label class="sched-settings-field"><span>Sync interval (minutes)</span>'
+    + '<input class="sched-settings-input" type="number" min="1" max="360" id="sched-set-interval" /></label>'
+    + '<div class="sched-settings-hint" id="sched-set-interval-hint"></div></div>'
+
+    + '<div class="sched-settings-group"><div class="sched-settings-group__title">Data Freshness Policy</div>'
+    + '<div class="sched-settings-hint">A scheduled push/email is blocked if the fleet data is older than this, to avoid sending stale numbers.</div>'
+    + '<label class="sched-settings-field"><span>SharePoint — max data age (min)</span>'
+    + '<input class="sched-settings-input" type="number" min="1" max="1440" id="sched-set-sp-age" /></label>'
+    + '<label class="sched-settings-field"><span>SharePoint — min rows</span>'
+    + '<input class="sched-settings-input" type="number" min="0" max="9999" id="sched-set-sp-rows" /></label>'
+    + '<label class="sched-settings-field"><span>Email — max data age (min)</span>'
+    + '<input class="sched-settings-input" type="number" min="1" max="1440" id="sched-set-em-age" /></label>'
+    + '<label class="sched-settings-field"><span>Email — min rows</span>'
+    + '<input class="sched-settings-input" type="number" min="0" max="9999" id="sched-set-em-rows" /></label></div>'
+
+    + '<div class="sched-settings-actions"><button class="sched-btn sched-btn--save" id="sched-settings-save">\u2713 Save settings</button>'
+    + '<span class="sched-settings-status" id="sched-settings-status"></span></div>'
+    + '</div></div></div>'
 
     + '<div class="sched-next-banner">'
     + '<span class="sched-next-banner__label">Fleet data:</span>'
@@ -81,6 +112,7 @@ function _viewHtml() {
     + '<div class="sched-card__head"><div class="sched-card__icon sched-card__icon--sp">\ud83d\udce4</div>'
     + '<div><div class="sched-card__title">SharePoint Push</div><div class="sched-card__sub" id="sched-sp-sub">Weekdays \u2014</div></div>'
     + '<label class="sched-toggle" title="Enable/disable scheduled SP push"><input type="checkbox" id="sched-sp-enabled" /><span>On</span></label>'
+    + '<button class="sched-btn sched-btn--ghost sched-card__gear" id="sched-sp-wb-btn" title="SharePoint workbooks">\u2699</button>'
     + '<div class="sched-card__badge" id="sched-sp-badge">\u2014</div></div>'
     + '<div class="sched-card__meta">'
     + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Last verified</span><span class="sched-card__meta-val" id="sched-sp-last">\u2014</span></div>'
@@ -103,7 +135,9 @@ function _viewHtml() {
     + '<div class="sched-card__head"><div class="sched-card__icon sched-card__icon--email">\ud83d\udce7</div>'
     + '<div><div class="sched-card__title">Auto Email</div><div class="sched-card__sub" id="sched-em-sub">Weekdays \u2014</div></div>'
     + '<label class="sched-toggle" title="Enable/disable scheduled email"><input type="checkbox" id="sched-em-enabled" /><span>On</span></label>'
+    + '<button class="sched-btn sched-btn--ghost sched-card__gear" id="sched-em-note-btn" title="Auto-email note">\u2699</button>'
     + '<div class="sched-card__badge" id="sched-em-badge">\u2014</div></div>'
+    + '<div class="sched-card__note-banner" id="sched-em-note-banner" style="display:none"></div>'
     + '<div class="sched-card__meta">'
     + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Last verified</span><span class="sched-card__meta-val" id="sched-em-last">\u2014</span></div>'
     + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Next</span><span class="sched-card__meta-val" id="sched-em-next">\u2014</span></div>'
@@ -117,6 +151,89 @@ function _viewHtml() {
     + '<button class="sched-btn sched-btn--primary" id="sched-em-test">\ud83e\uddea Run Next Slot as Test</button>'
     + '<button class="sched-btn sched-btn--ghost" id="sched-owa-auth">\ud83d\udd10 Authenticate OWA</button>'
     + '<button class="sched-btn sched-btn--ghost" id="sched-owa-sent">\ud83d\udce4 Sent Items</button>'
+    + '</div></div>'
+
+    // Auto-Email Note overlay (gear on the Email card). Optional red-banner
+    // text injected at the top of every scheduled auto-send until cleared.
+    + '<div class="sched-settings-overlay" id="sched-note-overlay" style="display:none">'
+    + '<div class="sched-settings-panel">'
+    + '<div class="sched-settings-head"><span class="sched-settings-title">\ud83d\udce7 Auto-Email Note</span>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-note-close">\u2715</button></div>'
+    + '<div class="sched-settings-body">'
+    + '<div class="sched-settings-hint">Optional note included as a red banner at the top of every scheduled auto-send (AM / PM) until cleared.</div>'
+    + '<textarea class="sched-settings-input sched-note-textarea" id="sched-note-text" rows="3" placeholder="e.g. Units at EWR45 excluded due to site freeze"></textarea>'
+    + '<label class="sched-settings-field sched-note-oneshot"><span>Clear automatically after next auto-send</span>'
+    + '<input type="checkbox" id="sched-note-oneshot" /></label>'
+    + '<div class="sched-note-preview" id="sched-note-preview" style="display:none">NOTE: </div>'
+    + '<div class="sched-settings-actions"><button class="sched-btn sched-btn--save" id="sched-note-save">\u2713 Save note</button>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-note-clear">Clear note</button>'
+    + '<span class="sched-settings-status" id="sched-note-status"></span></div>'
+    + '</div></div></div>'
+
+    // SharePoint Workbooks overlay (gear on the SP Push card). Paste an Excel
+    // URL -> Load sheets -> pick sheet + operator -> Save. Push targets these.
+    + '<div class="sched-settings-overlay" id="sched-wb-overlay" style="display:none">'
+    + '<div class="sched-settings-panel sched-settings-panel--wide">'
+    + '<div class="sched-settings-head"><span class="sched-settings-title">\ud83d\udcc4 SharePoint Workbooks</span>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-wb-close">\u2715</button></div>'
+    + '<div class="sched-settings-body">'
+    + '<div class="sched-settings-hint">Paste a SharePoint Excel URL \u2192 Load sheets \u2192 pick sheet + operator \u2192 Save. The app pushes fleet data to these workbooks.</div>'
+    + '<label class="sched-settings-field sched-wb-field"><span>SharePoint Excel URL</span></label>'
+    + '<input class="sched-settings-input sched-wb-input" id="sched-wb-url" placeholder="Paste SharePoint Excel file URL here\u2026" />'
+    + '<div class="sched-settings-actions"><button class="sched-btn sched-btn--save" id="sched-wb-discover">Load sheets</button>'
+    + '<span class="sched-settings-status" id="sched-wb-status"></span></div>'
+    + '<div id="sched-wb-results" style="display:none"><div class="sched-settings-group__title">Sheets found</div>'
+    + '<div id="sched-wb-sheets-list"></div></div>'
+    + '<div id="sched-wb-saved" class="sched-wb-saved"></div>'
+    + '</div></div></div>'
+
+    // Daily Carrier Briefing overlay (header button). Once a day posts an
+    // AI-written fleet snapshot + safety tip to each operator's carrier channel.
+    + '<div class="sched-settings-overlay" id="sched-cb-overlay" style="display:none">'
+    + '<div class="sched-settings-panel">'
+    + '<div class="sched-settings-head"><span class="sched-settings-title">\ud83d\udcc5 Daily Carrier Briefing</span>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-cb-close">\u2715</button></div>'
+    + '<div class="sched-settings-body">'
+    + '<div class="sched-settings-hint">Posts an AI-written fleet snapshot + safety tip to each operator\u2019s carrier channel (from Operator Channels), tagging the owner. Written from real fleet data \u2014 nothing invented. One message per operator per day.</div>'
+    + '<label class="sched-settings-field"><span>Enable daily briefing</span><input type="checkbox" id="sched-cb-enabled" /></label>'
+    + '<label class="sched-settings-field"><span>Send time</span><input class="sched-settings-input" type="time" id="sched-cb-send-time" /></label>'
+    + '<label class="sched-settings-field"><span>Timezone (IANA)</span><input class="sched-settings-input sched-cb-tz" type="text" id="sched-cb-timezone" placeholder="America/New_York" /></label>'
+
+    + '<div class="sched-settings-group"><div class="sched-settings-group__title">Include in snapshot</div>'
+    + '<label class="sched-settings-field"><span>Units down</span><input type="checkbox" id="sched-cb-inc-down" /></label>'
+    + '<label class="sched-settings-field"><span>Flagged this week</span><input type="checkbox" id="sched-cb-inc-flagged" /></label>'
+    + '<label class="sched-settings-field"><span>Active count</span><input type="checkbox" id="sched-cb-inc-active" /></label>'
+    + '<label class="sched-settings-field"><span>Domiciles</span><input type="checkbox" id="sched-cb-inc-domiciles" /></label>'
+    + '<label class="sched-settings-field"><span>Flagged threshold (risk \u2265)</span><input class="sched-settings-input" type="number" min="0" max="100" step="1" id="sched-cb-risk-threshold" /></label>'
+    + '<label class="sched-settings-field"><span>Include AI safety tip</span><input type="checkbox" id="sched-cb-tip-enabled" /></label></div>'
+
+    + '<label class="sched-settings-field"><span>Test operator</span>'
+    + '<select class="sched-settings-input" id="sched-cb-test-operator"><option value="">Auto (first mapped)</option></select></label>'
+    + '<div class="sched-settings-hint" id="sched-cb-run-info"></div>'
+    + '<div class="sched-settings-actions"><button class="sched-btn sched-btn--save" id="sched-cb-save">\u2713 Save</button>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-cb-test-btn">\ud83e\uddea Test to me</button>'
+    + '<button class="sched-btn sched-btn--ghost" id="sched-cb-runnow-btn">Run now (live)</button>'
+    + '<span class="sched-settings-status" id="sched-cb-status"></span></div>'
+    + '</div></div></div>'
+
+    // DBR DATA card — single daily slot fires BOTH AFP + DSP pulls; each
+    // retries on its own until its "Data as of (PT)" shows today.
+    + '<div class="sched-card" id="sched-card-dbr">'
+    + '<div class="sched-card__head"><div class="sched-card__icon sched-card__icon--sp">\ud83d\udcca</div>'
+    + '<div><div class="sched-card__title">DBR DATA Pull</div><div class="sched-card__sub" id="sched-dbr-sub">Weekdays \u2014</div></div>'
+    + '<label class="sched-toggle" title="Enable/disable scheduled DBR pull"><input type="checkbox" id="sched-dbr-enabled" /><span>On</span></label>'
+    + '<div class="sched-card__badge" id="sched-dbr-badge">\u2014</div></div>'
+    + '<div class="sched-card__meta">'
+    + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">AFP last</span><span class="sched-card__meta-val" id="sched-dbr-afp-last">\u2014</span></div>'
+    + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">DSP last</span><span class="sched-card__meta-val" id="sched-dbr-dsp-last">\u2014</span></div>'
+    + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Next</span><span class="sched-card__meta-val" id="sched-dbr-next">\u2014</span></div>'
+    + '</div>'
+    + '<div class="sched-time-editor">'
+    + '<span class="sched-time-editor__label">Run at</span><input class="sched-time-input" type="time" id="sched-dbr-time" />'
+    + '<button class="sched-btn sched-btn--save" id="sched-dbr-save">\u2713 Save</button></div>'
+    + '<div class="sched-card__sub" style="font-size:9px;padding:0 2px">AFP + DSP are pulled independently. A source that isn\'t published for today yet keeps retrying until it is.</div>'
+    + '<div class="sched-card__actions">'
+    + '<button class="sched-btn sched-btn--primary" id="sched-dbr-trigger">\ud83d\udcca Pull DBR Now (AFP + DSP)</button>'
     + '</div></div>'
 
     + '</div>'   // /sched-grid
@@ -209,6 +326,51 @@ const _CSS = [
   '.sched-time-input{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--txt);background:var(--card);border:1px solid var(--bdr);border-radius:5px;padding:4px 8px;width:90px}',
   '.sched-time-input:focus{outline:none;border-color:var(--acc)}',
   '.sched-btn--save{background:var(--adim);border-color:var(--acc);color:var(--acc2);margin-left:auto}',
+  // Scheduler settings gear overlay
+  '.sched-settings-overlay{position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:24px}',
+  '.sched-settings-panel{width:min(460px,94vw);max-height:88vh;overflow-y:auto;background:var(--card);border:1px solid var(--bdr);border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.5);display:flex;flex-direction:column}',
+  '.sched-settings-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 16px;border-bottom:1px solid var(--bdr);position:sticky;top:0;background:var(--card);z-index:1}',
+  '.sched-settings-title{font-size:14px;font-weight:800;color:var(--txt);letter-spacing:.3px}',
+  '.sched-settings-body{padding:14px 16px 16px;display:flex;flex-direction:column;gap:16px}',
+  '.sched-settings-group{display:flex;flex-direction:column;gap:9px;padding:12px;background:var(--el);border-radius:9px}',
+  '.sched-settings-group__title{font-size:10px;font-weight:800;color:var(--acc2);text-transform:uppercase;letter-spacing:.7px}',
+  '.sched-settings-field{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:var(--txt)}',
+  '.sched-settings-field>span{color:var(--mut);font-weight:600}',
+  '.sched-settings-input{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--txt);background:var(--card);border:1px solid var(--bdr);border-radius:5px;padding:5px 8px;width:92px;text-align:right}',
+  '.sched-settings-input:focus{outline:none;border-color:var(--acc)}',
+  '.sched-settings-hint{font-size:10px;color:var(--mut);line-height:1.45}',
+  '.sched-settings-actions{display:flex;align-items:center;gap:12px;padding-top:2px}',
+  '.sched-settings-actions .sched-btn--save{margin-left:0}',
+  '.sched-settings-status{font-size:11px;font-weight:600;color:var(--mut)}',
+  '.sched-settings-status--ok{color:var(--acc2)}',
+  '.sched-settings-status--err{color:#ff6b6b}',
+  // Auto-email note: gear on card head + inline banner + overlay textarea/preview
+  '.sched-card__gear{padding:2px 8px;min-width:0;line-height:1.1}',
+  '.sched-card__note-banner{margin:4px 0 0;padding:7px 10px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;color:#dc2626;font-weight:700;font-size:11px;line-height:1.4;word-break:break-word}',
+  '.sched-note-textarea{width:100%;text-align:left;resize:vertical;min-height:58px;font-family:inherit;line-height:1.45}',
+  '.sched-note-oneshot{justify-content:space-between}',
+  '.sched-note-preview{padding:9px 12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;color:#dc2626;font-weight:700;font-size:11px;line-height:1.4;word-break:break-word}',
+  // SharePoint workbooks overlay
+  '.sched-settings-panel--wide{width:min(640px,96vw)}',
+  '.sched-wb-field{justify-content:flex-start}',
+  '.sched-wb-input{width:100%;text-align:left;font-family:inherit}',
+  '.sched-wb-sheet{display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--el);border:1px solid var(--bdr);border-radius:5px;margin-bottom:4px}',
+  '.sched-wb-sheet label{font-size:11px;color:var(--txt);flex:1;cursor:pointer}',
+  '.sched-wb-sheet input[type=text]{width:120px;background:var(--card);border:1px solid var(--bdr);border-radius:4px;padding:3px 6px;font-size:10px;color:var(--txt)}',
+  '.sched-wb-saverow{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}',
+  '.sched-wb-saverow input{background:var(--card);border:1px solid var(--bdr);border-radius:5px;padding:5px 8px;font-size:11px;color:var(--txt);width:160px}',
+  '.sched-wb-saved{margin-top:14px}',
+  '.sched-wb-saved__title{font-size:10px;font-weight:800;color:var(--acc2);text-transform:uppercase;letter-spacing:.7px;margin-bottom:6px}',
+  '.sched-wb-card{background:var(--el);border:1px solid var(--bdr);border-radius:6px;padding:8px 10px;margin-bottom:4px}',
+  '.sched-wb-card__head{display:flex;justify-content:space-between;align-items:center;gap:8px}',
+  '.sched-wb-card__name{font-size:11px;font-weight:700;color:var(--txt);word-break:break-word}',
+  '.sched-wb-card__del{background:none;border:none;color:#f85149;cursor:pointer;font-size:12px;line-height:1}',
+  '.sched-wb-card__carriers{font-size:9px;color:var(--mut);margin-top:3px}',
+  '.sched-wb-empty{font-size:10px;color:var(--mut)}',
+  // Carrier briefing overlay: text/select inputs need more width than numbers
+  '.sched-cb-tz{width:170px;text-align:left}',
+  '#sched-cb-timezone,#sched-cb-test-operator{width:180px;text-align:left}',
+  '#sched-cb-run-info{padding-top:2px}',
 ].join('\n');
 
 let _cssInjected = false;
@@ -243,6 +405,7 @@ function _render() {
   _rBanner();
   _rChannelCard('sp', _state.sharepoint, _state.slots.sp, _state.nextSlot.sp, _state.enabled.sp);
   _rChannelCard('em', _state.email, _state.slots.email, _state.nextSlot.email, _state.enabled.email);
+  _rDbrCard();
   _rAttention();
   _rJobs();
   _rAudit();
@@ -286,6 +449,30 @@ function _rChannelCard(pfx, ch, slots, next, enabled) {
   if (fail) fail.textContent = ch.lastFailure ? _fmtDT(ch.lastFailure.updatedAt) : '\u2014';
   const en = _q('sched-' + pfx + '-enabled');
   if (en) en.checked = !!enabled;
+}
+
+function _rDbrCard() {
+  const slots = _state.slots.dbr || [];
+  const sub = _q('sched-dbr-sub');
+  if (sub) sub.textContent = 'Weekdays ' + (slots.map(s => s.label).join(' \u00b7 ') || '\u2014');
+  const en = _q('sched-dbr-enabled');
+  if (en) en.checked = !!(_state.enabled && _state.enabled.dbr);
+  const next = _state.nextSlot && _state.nextSlot.dbr;
+  const nextEl = _q('sched-dbr-next');
+  if (nextEl) nextEl.textContent = next ? (next.label + (next.when === 'today' ? '' : ' (' + next.when + ')')) : '\u2014';
+  // Per-source last-verified + a badge reflecting the worst current state.
+  const afp = _state.dbrAfp || {}, dsp = _state.dbrDsp || {};
+  const afpLast = _q('sched-dbr-afp-last');
+  if (afpLast) afpLast.textContent = afp.lastVerified ? _fmtDT(afp.lastVerified.updatedAt) : '\u2014';
+  const dspLast = _q('sched-dbr-dsp-last');
+  if (dspLast) dspLast.textContent = dsp.lastVerified ? _fmtDT(dsp.lastVerified.updatedAt) : '\u2014';
+  const badge = _q('sched-dbr-badge');
+  if (badge) {
+    const activeOf = (ch) => (ch.active && ch.active[0]) || (ch.blockedStale && ch.blockedStale[0]) || (ch.retrying && ch.retrying[0]) || null;
+    const a = activeOf(afp) || activeOf(dsp);
+    const stateVal = a ? a.state : ((afp.lastVerified && dsp.lastVerified) ? 'completed' : (afp.lastFailure || dsp.lastFailure ? 'retry' : null));
+    badge.innerHTML = _badge(stateVal);
+  }
 }
 
 function _jobScopeLabel(j) {
@@ -384,7 +571,8 @@ async function _runEmailTest() {
 }
 async function _setEnabled(channel, on) {
   await window.fleetScheduler.setEnabled({ [channel]: on });
-  _toast('success', (channel === 'sp' ? 'SharePoint' : 'Email') + ' scheduler ' + (on ? 'enabled' : 'disabled'));
+  const name = channel === 'sp' ? 'SharePoint' : channel === 'dbr' ? 'DBR pull' : 'Email';
+  _toast('success', name + ' scheduler ' + (on ? 'enabled' : 'disabled'));
 }
 function _wireDelegatedActions(root) {
   root.addEventListener('click', async (e) => {
@@ -411,6 +599,8 @@ function _populateTimeInputs() {
   if (sp[1]) set('sched-sp-pm', _toTimeStr(sp[1].h, sp[1].m));
   if (em[0]) set('sched-em-am', _toTimeStr(em[0].h, em[0].m));
   if (em[1]) set('sched-em-pm', _toTimeStr(em[1].h, em[1].m));
+  const dbr = _state.slots.dbr || [];
+  if (dbr[0]) set('sched-dbr-time', _toTimeStr(dbr[0].h, dbr[0].m));
 }
 async function _saveSlots(type) {
   const amEl = _q('sched-' + (type === 'sp' ? 'sp' : 'em') + '-am');
@@ -428,6 +618,409 @@ async function _saveSlots(type) {
     if (result && result.ok) { _toast('success', (type === 'sp' ? 'SP' : 'Email') + ' times saved'); _refresh(); }
     else _toast('error', 'Save failed: ' + ((result && result.error) || 'unknown'));
   } catch (e) { _toast('error', 'Save failed: ' + e.message); }
+}
+
+// DBR has ONE slot (fires both AFP + DSP). Preserve the current sp/email
+// slots in the save payload so saving the DBR time doesn't disturb them.
+async function _saveDbrSlot() {
+  const el = _q('sched-dbr-time');
+  if (!el) return;
+  const t = _hm(el.value);
+  const slot = { h: t.h, m: t.m, label: _toTimeStr(t.h, t.m) };
+  const cur = _state ? _state.slots : { sp: [], email: [] };
+  const newSlots = { sp: cur.sp, email: cur.email, dbr: [slot] };
+  try {
+    const result = await settingsBridge.saveScheduleSlots(newSlots);
+    if (result && result.ok) { _toast('success', 'DBR pull time saved'); _refresh(); }
+    else _toast('error', 'Save failed: ' + ((result && result.error) || 'unknown'));
+  } catch (e) { _toast('error', 'Save failed: ' + e.message); }
+}
+
+// ── Scheduler settings gear overlay ──────────────────────────────────────────
+// Global config knobs that aren't on the cards: fleet sync interval + the
+// data-freshness policy (SP/Email max data age + min rows).
+async function _openSettingsOverlay() {
+  const ov = _q('sched-settings-overlay');
+  if (!ov) return;
+  const setStatus = (msg) => { const s = _q('sched-settings-status'); if (s) { s.textContent = msg || ''; s.className = 'sched-settings-status'; } };
+  setStatus('');
+
+  // Fleet sync interval
+  try {
+    const si = await window.settings.getSyncInterval();
+    const intEl = _q('sched-set-interval');
+    const hintEl = _q('sched-set-interval-hint');
+    const eff = (si && typeof si.effectiveMinutes === 'number') ? si.effectiveMinutes : 5;
+    if (intEl) intEl.value = (si && typeof si.minutes === 'number') ? si.minutes : eff;
+    if (hintEl) hintEl.textContent = (si && typeof si.minutes === 'number')
+      ? 'Fleet data refreshes every ' + si.minutes + ' min.'
+      : 'Using default (' + eff + ' min). Set a value to override.';
+  } catch (_) {}
+
+  // Freshness policy (prefer live getState so it reflects any backend change)
+  let fr = _state && _state.freshness;
+  try { const st = await window.fleetScheduler.getState(); if (st && st.freshness) { fr = st.freshness; _state = st; } } catch (_) {}
+  const sp = (fr && fr.sp) || {}; const em = (fr && fr.email) || {};
+  const set = (id, v) => { const el = _q(id); if (el && v != null) el.value = v; };
+  set('sched-set-sp-age',  sp.maxDataAgeMin != null ? sp.maxDataAgeMin : 60);
+  set('sched-set-sp-rows', sp.minRows      != null ? sp.minRows      : 3);
+  set('sched-set-em-age',  em.maxDataAgeMin != null ? em.maxDataAgeMin : 45);
+  set('sched-set-em-rows', em.minRows      != null ? em.minRows      : 3);
+
+  ov.style.display = 'flex';
+}
+
+function _closeSettingsOverlay() {
+  const ov = _q('sched-settings-overlay');
+  if (ov) ov.style.display = 'none';
+}
+
+async function _saveSettingsOverlay() {
+  const statusEl = _q('sched-settings-status');
+  const setStatus = (msg, cls) => { if (statusEl) { statusEl.textContent = msg || ''; statusEl.className = 'sched-settings-status' + (cls ? ' sched-settings-status--' + cls : ''); } };
+  const numOr = (id, dflt) => { const el = _q(id); const n = el ? Number(el.value) : NaN; return Number.isFinite(n) ? n : dflt; };
+
+  await _guard(async () => {
+    setStatus('Saving\u2026', '');
+    // 1) Sync interval
+    const interval = numOr('sched-set-interval', NaN);
+    if (Number.isFinite(interval) && interval >= 1) {
+      const r = await window.settings.saveSyncInterval(Math.round(interval));
+      if (!(r && r.ok)) throw new Error('sync interval not saved');
+    }
+    // 2) Freshness policy (merge patch keyed by sp/email)
+    const patch = {
+      sp:    { maxDataAgeMin: numOr('sched-set-sp-age', 60), minRows: numOr('sched-set-sp-rows', 3) },
+      email: { maxDataAgeMin: numOr('sched-set-em-age', 45), minRows: numOr('sched-set-em-rows', 3) },
+    };
+    const fr = await window.fleetScheduler.setFreshness(patch);
+    if (fr && fr.freshness) _state && (_state.freshness = fr.freshness);
+
+    setStatus('Saved \u2713', 'ok');
+    _toast('success', 'Scheduler settings saved');
+    _refresh();
+    setTimeout(_closeSettingsOverlay, 650);
+  }).catch((e) => { setStatus('Save failed: ' + (e && e.message || e), 'err'); _toast('error', 'Scheduler settings save failed'); });
+}
+
+// ── Auto-email note (gear on the Email card) ────────────────────────────────
+// Stored via settings keys autoEmailNote / autoEmailNoteOneShot — read fresh
+// by the scheduler on every auto-send, so edits take effect on the next slot.
+function _updateNotePreview() {
+  const txt = (_q('sched-note-text') ? _q('sched-note-text').value : '').trim();
+  const pv = _q('sched-note-preview');
+  if (!pv) return;
+  if (txt) { pv.textContent = 'NOTE: ' + txt; pv.style.display = ''; }
+  else { pv.style.display = 'none'; }
+}
+// Keep the small inline banner on the card in sync with the saved note.
+async function _refreshNoteBanner() {
+  const banner = _q('sched-em-note-banner');
+  if (!banner) return;
+  try {
+    const all = await settingsBridge.getAll();
+    const note = (all && all.autoEmailNote) ? String(all.autoEmailNote).trim() : '';
+    if (note) { banner.textContent = 'NOTE: ' + note; banner.style.display = ''; }
+    else { banner.style.display = 'none'; banner.textContent = ''; }
+  } catch (_) {}
+}
+async function _openNoteOverlay() {
+  const ov = _q('sched-note-overlay');
+  if (!ov) return;
+  const st = _q('sched-note-status'); if (st) { st.textContent = ''; st.className = 'sched-settings-status'; }
+  try {
+    const all = await settingsBridge.getAll();
+    const s = all || {};
+    const t = _q('sched-note-text'); if (t) t.value = s.autoEmailNote || '';
+    const o = _q('sched-note-oneshot'); if (o) o.checked = !!s.autoEmailNoteOneShot;
+  } catch (_) {}
+  _updateNotePreview();
+  ov.style.display = 'flex';
+}
+function _closeNoteOverlay() {
+  const ov = _q('sched-note-overlay');
+  if (ov) ov.style.display = 'none';
+}
+async function _saveNote() {
+  const st = _q('sched-note-status');
+  const setStatus = (msg, cls) => { if (st) { st.textContent = msg || ''; st.className = 'sched-settings-status' + (cls ? ' sched-settings-status--' + cls : ''); } };
+  const note = (_q('sched-note-text') ? _q('sched-note-text').value : '').trim();
+  if (!note) { setStatus('Enter a note first, or use Clear note', 'err'); return; }
+  await _guard(async () => {
+    const oneShot = !!(_q('sched-note-oneshot') && _q('sched-note-oneshot').checked);
+    await settingsBridge.save('autoEmailNote', note);
+    await settingsBridge.save('autoEmailNoteOneShot', oneShot);
+    setStatus('Saved \u2713' + (oneShot ? ' (one-time)' : ''), 'ok');
+    _toast('success', 'Auto-email note saved');
+    _refreshNoteBanner();
+    setTimeout(_closeNoteOverlay, 650);
+  }).catch((e) => { setStatus('Save failed: ' + (e && e.message || e), 'err'); _toast('error', 'Auto-email note save failed'); });
+}
+async function _clearNote() {
+  const st = _q('sched-note-status');
+  const setStatus = (msg, cls) => { if (st) { st.textContent = msg || ''; st.className = 'sched-settings-status' + (cls ? ' sched-settings-status--' + cls : ''); } };
+  await _guard(async () => {
+    const t = _q('sched-note-text'); if (t) t.value = '';
+    const o = _q('sched-note-oneshot'); if (o) o.checked = false;
+    _updateNotePreview();
+    await settingsBridge.save('autoEmailNote', '');
+    await settingsBridge.save('autoEmailNoteOneShot', false);
+    setStatus('Note cleared', 'ok');
+    _toast('info', 'Auto-email note cleared');
+    _refreshNoteBanner();
+  }).catch((e) => { setStatus('Clear failed: ' + (e && e.message || e), 'err'); });
+}
+
+// ── SharePoint Workbooks (gear on the SP Push card) ──────────────────────────
+// Paste an Excel URL -> discover sheets -> pick sheet(s)+operator -> save into
+// spBridge config.workbooks[]. The SP push engine reads these targets.
+function _wbSetStatus(msg, cls) {
+  const el = _q('sched-wb-status');
+  if (el) { el.textContent = msg || ''; el.className = 'sched-settings-status' + (cls ? ' sched-settings-status--' + cls : ''); }
+}
+async function _openWbOverlay() {
+  const ov = _q('sched-wb-overlay');
+  if (!ov) return;
+  _wbSetStatus('');
+  const res = _q('sched-wb-results'); if (res) res.style.display = 'none';
+  const list = _q('sched-wb-sheets-list'); if (list) list.innerHTML = '';
+  await _renderSavedWorkbooks();
+  ov.style.display = 'flex';
+}
+function _closeWbOverlay() {
+  const ov = _q('sched-wb-overlay');
+  if (ov) ov.style.display = 'none';
+}
+async function _wbDiscover() {
+  const urlEl = _q('sched-wb-url');
+  const url = (urlEl ? urlEl.value : '').trim();
+  if (!url) { _wbSetStatus('Paste a SharePoint Excel URL first', 'err'); return; }
+  const btn = _q('sched-wb-discover');
+  const resultsDiv = _q('sched-wb-results');
+  const sheetsDiv  = _q('sched-wb-sheets-list');
+  if (btn) { btn.disabled = true; btn.textContent = 'Discovering\u2026'; }
+  _wbSetStatus('Discovering\u2026', '');
+  try {
+    let result;
+    try { result = await spBridge.discoverSheets(url); }
+    catch (err) { _wbSetStatus('IPC error: ' + (err && err.message || err), 'err'); return; }
+    if (!result || !result.ok) { _wbSetStatus((result && result.error) || 'Could not discover sheets', 'err'); return; }
+    if (resultsDiv) resultsDiv.style.display = '';
+    if (sheetsDiv) {
+      sheetsDiv.innerHTML = (result.sheets || []).map((s, i) =>
+        '<div class="sched-wb-sheet">'
+        + '<input type="checkbox" id="sched-sh-' + i + '" data-sheet="' + _safe(s.xmlFile || s.name) + '" data-name="' + _safe(s.name) + '" data-header="' + _safe(s.headerRow) + '" />'
+        + '<label for="sched-sh-' + i + '"><strong>' + _safe(s.name) + '</strong> <span style="color:var(--mut)">(' + _safe(s.xmlFile || '?') + ')</span> header: ' + _safe(s.headerRow) + '</label>'
+        + '<input type="text" placeholder="Operator" id="sched-op-' + i + '" />'
+        + '</div>'
+      ).join('');
+      sheetsDiv.innerHTML += '<div class="sched-wb-saverow"><input type="text" id="sched-wb-domicile" placeholder="Domicile (ABE40, AVP40\u2026)" /><button class="sched-btn sched-btn--save" id="sched-wb-save">\u2713 Save workbook config</button></div>';
+      const saveBtn = _q('sched-wb-save');
+      if (saveBtn) saveBtn.addEventListener('click', () => _wbSave(url, result, sheetsDiv));
+    }
+    _wbSetStatus((result.sheets || []).length + ' sheet(s) found', 'ok');
+  } catch (e) {
+    _wbSetStatus('Failed: ' + (e && e.message || e), 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Load sheets'; }
+  }
+}
+async function _wbSave(url, result, sheetsDiv) {
+  const checks = sheetsDiv.querySelectorAll('input[type=checkbox]:checked');
+  if (!checks.length) { _wbSetStatus('Select at least one sheet', 'err'); return; }
+  await _guard(async () => {
+    const carriers = [];
+    checks.forEach((cb) => {
+      const sheet = cb.dataset.sheet;
+      const headerRow = parseInt(cb.dataset.header || '16', 10);
+      const opInput = cb.closest('.sched-wb-sheet').querySelector('input[type=text]');
+      const operator = opInput ? opInput.value.trim().toUpperCase() : '';
+      carriers.push({ code: (operator || cb.dataset.name || 'DEFAULT').toUpperCase(), sheet: sheet, sheetName: cb.dataset.name || sheet, headerRow });
+    });
+    const domEl = _q('sched-wb-domicile');
+    const workbook = {
+      name: url.split('file=')[1] ? decodeURIComponent(url.split('file=')[1].split('&')[0]) : 'Workbook',
+      domicile: (domEl ? domEl.value.trim().toUpperCase() : '') || '',
+      path: result.filePath || url,
+      carriers,
+      headerRow: carriers[0].headerRow,
+    };
+    const existing = await spBridge.getConfig();
+    const workbooks = (existing && existing.workbooks) || [];
+    workbooks.push(workbook);
+    await spBridge.saveConfig(Object.assign({}, existing, { workbooks }));
+    _wbSetStatus('Saved: ' + workbook.name, 'ok');
+    _toast('success', 'Workbook saved: ' + workbook.name);
+    _renderSavedWorkbooks();
+  }).catch((e) => { _wbSetStatus('Save failed: ' + (e && e.message || e), 'err'); });
+}
+async function _renderSavedWorkbooks() {
+  const div = _q('sched-wb-saved');
+  if (!div) return;
+  let workbooks = [];
+  try { const cfg = await spBridge.getConfig(); workbooks = (cfg && cfg.workbooks) || []; } catch (_) {}
+  if (!workbooks.length) { div.innerHTML = '<div class="sched-wb-empty">No workbooks configured yet.</div>'; return; }
+  div.innerHTML = '<div class="sched-wb-saved__title">Saved workbooks</div>'
+    + workbooks.map((wb, i) =>
+      '<div class="sched-wb-card"><div class="sched-wb-card__head">'
+      + '<div class="sched-wb-card__name">' + _safe(wb.name) + '</div>'
+      + '<button class="sched-wb-card__del" data-wb-del="' + i + '" title="Remove">\u2715</button></div>'
+      + '<div class="sched-wb-card__carriers">' + _safe((wb.carriers || []).map((c) => c.code + ' \u2192 ' + (c.sheetName || c.sheet)).join(' | ')) + '</div>'
+      + '</div>'
+    ).join('');
+  div.querySelectorAll('button[data-wb-del]').forEach((b) => {
+    b.addEventListener('click', () => _removeWorkbook(parseInt(b.getAttribute('data-wb-del'), 10)));
+  });
+}
+async function _removeWorkbook(idx) {
+  await _guard(async () => {
+    const cfg = await spBridge.getConfig();
+    const workbooks = (cfg && cfg.workbooks) || [];
+    workbooks.splice(idx, 1);
+    await spBridge.saveConfig(Object.assign({}, cfg, { workbooks }));
+    _renderSavedWorkbooks();
+    _toast('info', 'Workbook removed');
+  }).catch(() => {});
+}
+
+// ── Daily Carrier Briefing (header button overlay) ───────────────────────────
+// AI-written fleet snapshot + safety tip posted to each operator's carrier
+// channel once a day. Config persists via slackBridge.*BriefingConfig.
+function _cbStatus(msg, cls) {
+  const el = _q('sched-cb-status');
+  if (el) { el.textContent = msg || ''; el.className = 'sched-settings-status' + (cls ? ' sched-settings-status--' + cls : ''); }
+}
+function _cbCollect() {
+  return {
+    enabled: !!(_q('sched-cb-enabled') && _q('sched-cb-enabled').checked),
+    sendTime: (_q('sched-cb-send-time') ? _q('sched-cb-send-time').value : '').trim(),
+    timezone: (_q('sched-cb-timezone') ? _q('sched-cb-timezone').value : '').trim(),
+    includeDown: !!(_q('sched-cb-inc-down') && _q('sched-cb-inc-down').checked),
+    includeFlagged: !!(_q('sched-cb-inc-flagged') && _q('sched-cb-inc-flagged').checked),
+    includeActive: !!(_q('sched-cb-inc-active') && _q('sched-cb-inc-active').checked),
+    includeDomiciles: !!(_q('sched-cb-inc-domiciles') && _q('sched-cb-inc-domiciles').checked),
+    riskThreshold: parseInt(_q('sched-cb-risk-threshold') ? _q('sched-cb-risk-threshold').value : '', 10),
+    tipEnabled: !!(_q('sched-cb-tip-enabled') && _q('sched-cb-tip-enabled').checked),
+  };
+}
+function _cbApply(cfg) {
+  cfg = cfg || {};
+  const set = (id, prop, val) => { const el = _q(id); if (el) el[prop] = val; };
+  set('sched-cb-enabled', 'checked', !!cfg.enabled);
+  set('sched-cb-send-time', 'value', cfg.sendTime || '07:00');
+  set('sched-cb-timezone', 'value', cfg.timezone || 'America/New_York');
+  set('sched-cb-inc-down', 'checked', cfg.includeDown !== false);
+  set('sched-cb-inc-flagged', 'checked', cfg.includeFlagged !== false);
+  set('sched-cb-inc-active', 'checked', cfg.includeActive !== false);
+  set('sched-cb-inc-domiciles', 'checked', cfg.includeDomiciles !== false);
+  set('sched-cb-risk-threshold', 'value', (cfg.riskThreshold != null ? cfg.riskThreshold : 80));
+  set('sched-cb-tip-enabled', 'checked', cfg.tipEnabled !== false);
+  const runInfo = _q('sched-cb-run-info');
+  if (runInfo) {
+    const tz = cfg.timezone || 'America/New_York';
+    const t  = cfg.sendTime || '07:00';
+    runInfo.textContent = cfg.enabled
+      ? ('Enabled \u2014 sends daily at ' + t + ' ' + tz + ' to each mapped carrier channel.')
+      : 'Disabled \u2014 enable to send a daily briefing.';
+  }
+}
+async function _cbSave() {
+  try {
+    const saved = await slackBridge.saveBriefingConfig(_cbCollect());
+    _cbApply(saved);
+    return true;
+  } catch (e) { _cbStatus('Save failed: ' + (e && e.message || e), 'err'); return false; }
+}
+function _populateCbTestOperators() {
+  const sel = _q('sched-cb-test-operator');
+  if (!sel) return;
+  let ops = [];
+  try {
+    const rows = (state.slice('fleet').rows) || [];
+    const seen = {};
+    rows.forEach((r) => { const o = String(r.operator || '').trim().toUpperCase(); if (o) seen[o] = true; });
+    ops = Object.keys(seen).sort();
+  } catch (_) {}
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">Auto (first mapped)</option>'
+    + ops.map((o) => '<option value="' + _safe(o) + '">' + _safe(o) + '</option>').join('');
+  if (prev && ops.indexOf(prev) !== -1) sel.value = prev;
+}
+function _wireCarrierBriefing() {
+  const saveBtn   = _q('sched-cb-save');
+  const testBtn   = _q('sched-cb-test-btn');
+  const runNowBtn = _q('sched-cb-runnow-btn');
+  if (!saveBtn) return;
+
+  let _t = null;
+  const autoSave = () => { clearTimeout(_t); _t = setTimeout(_cbSave, 400); };
+  ['sched-cb-enabled', 'sched-cb-inc-down', 'sched-cb-inc-flagged', 'sched-cb-inc-active', 'sched-cb-inc-domiciles', 'sched-cb-tip-enabled']
+    .forEach((id) => { const el = _q(id); if (el) el.addEventListener('change', autoSave); });
+  ['sched-cb-send-time', 'sched-cb-timezone', 'sched-cb-risk-threshold']
+    .forEach((id) => { const el = _q(id); if (el) el.addEventListener('input', autoSave); });
+
+  saveBtn.addEventListener('click', async () => { if (await _cbSave()) _cbStatus('Saved \u2713', 'ok'); });
+
+  if (testBtn) testBtn.addEventListener('click', async () => {
+    testBtn.disabled = true; const orig = testBtn.textContent; testBtn.textContent = 'Sending\u2026';
+    try {
+      await _cbSave();
+      const opSel = _q('sched-cb-test-operator');
+      const chosenOp = opSel ? (opSel.value || '').trim() : '';
+      const res = await slackBridge.sendBriefingTest(chosenOp ? { operator: chosenOp } : {});
+      if (res && res.sent) _cbStatus('\uD83E\uDDEA Test sent to your Slack DM (' + (res.aiWritten ? 'AI-written' : 'fallback') + ') for ' + (res.operator || '') + '.', 'ok');
+      else _cbStatus('Test not sent: ' + ((res && res.reason) || 'unknown') + '.', 'err');
+    } catch (e) { _cbStatus('Test failed: ' + (e && e.message || e), 'err'); }
+    finally { testBtn.disabled = false; testBtn.textContent = orig; }
+  });
+
+  if (runNowBtn) runNowBtn.addEventListener('click', async () => {
+    if (!confirm('Post the briefing to ALL mapped carrier channels now? This sends live messages to carriers.')) return;
+    runNowBtn.disabled = true; const orig = runNowBtn.textContent; runNowBtn.textContent = 'Running\u2026';
+    try {
+      await _cbSave();
+      const res = await slackBridge.runBriefingNow();
+      const sent = (res && res.results || []).filter((r) => r.sent).length;
+      const total = (res && res.results || []).length;
+      _cbStatus('Posted ' + sent + '/' + total + ' carrier briefing(s).', sent ? 'ok' : 'err');
+    } catch (e) { _cbStatus('Run failed: ' + (e && e.message || e), 'err'); }
+    finally { runNowBtn.disabled = false; runNowBtn.textContent = orig; }
+  });
+
+  slackBridge.getBriefingConfig().then((cfg) => _cbApply(cfg)).catch(() => _cbApply({}));
+  _populateCbTestOperators();
+}
+async function _openCbOverlay() {
+  const ov = _q('sched-cb-overlay');
+  if (!ov) return;
+  _cbStatus('');
+  try { const cfg = await slackBridge.getBriefingConfig(); _cbApply(cfg); } catch (_) {}
+  _populateCbTestOperators();
+  ov.style.display = 'flex';
+}
+function _closeCbOverlay() {
+  const ov = _q('sched-cb-overlay');
+  if (ov) ov.style.display = 'none';
+}
+
+async function _runDbrNow() {
+  await _guard(async () => {
+    _toast('info', 'DBR pull started (AFP + DSP)...');
+    const r = await window.fleetScheduler.runDbrNow();
+    const res = r && r.result;
+    if (!res) { _toast('error', 'DBR pull failed to start'); return; }
+    const describe = (x, name) => {
+      if (!x) return name + ': —';
+      if (x.state === 'ok') return name + ': ' + (x.rowCount != null ? x.rowCount + ' rows' : 'ok');
+      if (x.state === 'not-ready') return name + ': not ready yet (data as of ' + (x.dataAsOf || '?') + ') — will retry';
+      if (x.state === 'skipped') return name + ': ' + x.skipped;
+      if (x.state === 'failed' || x.state === 'error') return name + ': failed';
+      return name + ': ' + x.state;
+    };
+    const msg = describe(res.afp, 'AFP') + ' \u00b7 ' + describe(res.dsp, 'DSP');
+    const anyNotReady = (res.afp && res.afp.state === 'not-ready') || (res.dsp && res.dsp.state === 'not-ready');
+    _toast(anyNotReady ? 'warning' : 'success', msg);
+  });
 }
 
 // ── Tick ──────────────────────────────────────────────────────────────────
@@ -459,6 +1052,36 @@ export function init(container) {
   bind('sched-em-save', 'click', () => _saveSlots('email'));
   bind('sched-sp-enabled', 'change', (e) => _setEnabled('sp', e.target.checked));
   bind('sched-em-enabled', 'change', (e) => _setEnabled('email', e.target.checked));
+  bind('sched-dbr-save', 'click', _saveDbrSlot);
+  bind('sched-dbr-trigger', 'click', _runDbrNow);
+  bind('sched-dbr-enabled', 'change', (e) => _setEnabled('dbr', e.target.checked));
+  // Scheduler settings gear overlay
+  bind('sched-settings-btn', 'click', _openSettingsOverlay);
+  bind('sched-settings-close', 'click', _closeSettingsOverlay);
+  bind('sched-settings-save', 'click', _saveSettingsOverlay);
+  const _ov = _q('sched-settings-overlay');
+  if (_ov) _ov.addEventListener('click', (e) => { if (e.target === _ov) _closeSettingsOverlay(); });
+  // Auto-email note overlay (gear on the Email card)
+  bind('sched-em-note-btn', 'click', _openNoteOverlay);
+  bind('sched-note-close', 'click', _closeNoteOverlay);
+  bind('sched-note-save', 'click', _saveNote);
+  bind('sched-note-clear', 'click', _clearNote);
+  bind('sched-note-text', 'input', _updateNotePreview);
+  const _nov = _q('sched-note-overlay');
+  if (_nov) _nov.addEventListener('click', (e) => { if (e.target === _nov) _closeNoteOverlay(); });
+  _refreshNoteBanner();
+  // SharePoint workbooks overlay (gear on the SP Push card)
+  bind('sched-sp-wb-btn', 'click', _openWbOverlay);
+  bind('sched-wb-close', 'click', _closeWbOverlay);
+  bind('sched-wb-discover', 'click', _wbDiscover);
+  const _wov = _q('sched-wb-overlay');
+  if (_wov) _wov.addEventListener('click', (e) => { if (e.target === _wov) _closeWbOverlay(); });
+  // Daily Carrier Briefing overlay (header button)
+  bind('sched-cb-btn', 'click', _openCbOverlay);
+  bind('sched-cb-close', 'click', _closeCbOverlay);
+  const _cbov = _q('sched-cb-overlay');
+  if (_cbov) _cbov.addEventListener('click', (e) => { if (e.target === _cbov) _closeCbOverlay(); });
+  _wireCarrierBriefing();
   _wireDelegatedActions(_el);
 
   // SP push progress bar (informational only — status of record is the ledger).

@@ -248,6 +248,7 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
             asistScrapedAt:      (_finalOffsite && _finalOffsite.asistScrapedAt) || '',
             dealerName:          (_finalOffsite && _finalOffsite.dealerName)     || '',
             asistNotes:          (_asistEnrich && _asistEnrich.offsiteText)     || '',
+            offsiteStage:        (_asistEnrich && _asistEnrich.offsiteStage)    || '',
             salesforceCase:      convSalesforce   ? convSalesforce.caseNumber   : (wrData.salesforceCase      || ''),
             salesforceCaseUrl:   convSalesforce   ? convSalesforce.url          : (wrData.salesforceCaseUrl   || ''),
             fullConversation:    _convData && _convData.fullConversation ? _convData.fullConversation : '',

@@ -6,6 +6,7 @@
  * Enter           → Open selected unit's detail panel
  * Escape          → Close detail drawer / modal / settings
  * Ctrl+R / Cmd+R  → Force sync
+ * Ctrl+M / Cmd+M  → Run Midway auth (mwinit)
  * Ctrl+1-5        → Switch views (Fleet, Analytics, Vendors, Settings, WI)
  */
 
@@ -39,6 +40,17 @@ export function initKeyboardShortcuts() {
       e.preventDefault();
       if (window.fleet && window.fleet.forceSync) window.fleet.forceSync();
       bus.emit('ui:toast', { type: 'info', message: 'Sync triggered', duration: 1500 });
+      return;
+    }
+
+    // Ctrl+M / Cmd+M → Run Midway auth (mwinit). Global so it works even while
+    // typing — a stale Midway session blocks everything else anyway.
+    if (e[MOD] && (e.key === 'm' || e.key === 'M')) {
+      e.preventDefault();
+      if (window.auth && window.auth.runMwinit) {
+        bus.emit('ui:toast', { type: 'info', message: '🔑 Running Midway auth (mwinit)…', duration: 2500 });
+        window.auth.runMwinit().catch(() => {});
+      }
       return;
     }
 

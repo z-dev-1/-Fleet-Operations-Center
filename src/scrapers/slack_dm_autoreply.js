@@ -35,7 +35,19 @@
 
 const store = require('../store');
 const logger = require('../utils/logger').createLogger('slack_dm_autoreply');
-const { PERSONA_SYSTEM_PROMPT } = require('../orcha/slack-dm-persona');
+const { PERSONA_SYSTEM_PROMPT, COVERING_PREFACE } = require('../orcha/slack-dm-persona');
+
+// Does this Slack sender have the "Covering" permission (full assistant
+// delegation) set on their Contact Book entry? Best-effort, never throws.
+function _senderIsCovering(slackId) {
+  if (!slackId) return false;
+  try {
+    const store = require('../store');
+    const contacts = store.load('contacts', []) || [];
+    const c = contacts.find(x => x && x.slackId && String(x.slackId) === String(slackId));
+    return !!(c && c.coverMe === true && c.enabled !== false && c.identityType !== 'vendor');
+  } catch (_) { return false; }
+}
 const { trace } = require('./slack_decision_trace');
 // Shared inbound pipeline helpers: decoupled contact discovery, temporary
 // send-block registry, thread-scoped manual-reply detection, structured
@@ -331,6 +343,94 @@ function _findFleetRow(unitToken) {
   return rows.find(r => (r.equipmentId || '').toUpperCase() === q) || null;
 }
 
+// Does this unit's CACHED data suggest it's ready/complete/picked-up? If so we
+// must re-verify with a live scrape before telling anyone, because that signal
+// can be stale (vendor said done days ago; unit still sitting / not delivered).
+function _looksReadyOrComplete(row) {
+  if (!row) return false;
+  // Structured offsite status-bar stage is the strongest signal — if the vendor
+  // tracker shows Ready, always re-verify live before anyone hears "it's ready".
+  if (String(row.offsiteStage || '').toLowerCase() === 'ready') return true;
+  const blob = [
+    row.canonicalStatus, row.serviceState, row.relayStatus, row.lifecycleReason,
+    row.completed ? 'completed' : '', row.repairStatus,
+    // Include the offsite dealer notes + comment feed: the real "asset is ready"
+    // confirmation frequently lives ONLY there, not in the AAP status fields.
+    String(row.asistNotes || '').slice(-600),
+    String(row.fullConversation || '').slice(-600),
+    String(row.repairTimeline || '').slice(-400),
+  ].join(' ').toLowerCase();
+  return /ready[ _-]?for[ _-]?pickup|ready to pick|awaiting pickup|picked up|asset is ready|unit is ready|\bcomplete|completed|repair done|work complete|\bclosed\b|resolved|back in service|available/.test(blob);
+}
+
+// VERIFY-BEFORE-CLAIMING: if a unit's cached repair data is stale OR already
+// reads ready/complete, re-scrape THAT unit live (force) so the assistant
+// answers from fresh, verified data — never announcing a unit done off stale
+// cache. Reuses the exact scrape+merge+canonical-reconcile the relay:refresh-unit
+// IPC does, run in-process (the DM engine is in the main process). Best-effort:
+// any failure degrades to the existing cached row (never blocks the reply).
+const _VERIFY_FRESH_MS = 30 * 60 * 1000; // re-verify if cache older than 30 min
+let _dmVerifyLock = false;
+async function _verifyUnitFresh(unitToken, doLog) {
+  const log = doLog || (() => {});
+  const row = _findFleetRow(unitToken);
+  if (!row) return; // unknown unit — nothing to verify
+
+  const id = row.equipmentId;
+  const cache = store.load('relayCache', {})[id];
+  const ageMs = cache && cache._cachedAt ? (Date.now() - Number(cache._cachedAt)) : Infinity;
+  const stale = ageMs > _VERIFY_FRESH_MS;
+  const readyish = _looksReadyOrComplete(row);
+
+  // Only pay for a live scrape when it matters: the unit reads ready/complete
+  // (must confirm) OR the cache is stale (status may have changed).
+  if (!readyish && !stale) return;
+  if (_dmVerifyLock) { log('[SlackDM] verify skipped — another verify in progress'); return; }
+
+  _dmVerifyLock = true;
+  try {
+    log('[SlackDM] verifying ' + id + ' live (readyish=' + readyish + ' stale=' + stale + ')…');
+    const { scrapeUnitPage, mergeRelayIntoRows } = require('./relay');
+    const relayCache = store.load('relayCache', {});
+    delete relayCache[id]; // force a guaranteed live scrape (no within-TTL reuse)
+    const res = await scrapeUnitPage(id, '', relayCache);
+    if (!res) { log('[SlackDM] verify: scrape returned nothing for ' + id); return; }
+    relayCache[id] = res;
+    store.save('relayCache', relayCache);
+
+    // Re-merge the fresh entry into fleetData so buildFleetContext sees it.
+    const fd = store.load('fleetData', {});
+    const rows = Array.isArray(fd.rows) ? fd.rows : [];
+    const notesStore = store.load('notesStore', {});
+    const merged = mergeRelayIntoRows(rows, { [id]: res }, notesStore);
+    fd.rows = merged;
+    store.save('fleetData', fd);
+
+    // Re-run canonical reconciliation for just this unit so canonicalStatus
+    // reflects the fresh serviceState/completed (best-effort).
+    try {
+      const freshRow = merged.find((r) => (r.equipmentId || '').toUpperCase() === String(id).toUpperCase());
+      if (freshRow) {
+        const canonical = require('../orcha/canonical_state');
+        const built = canonical.buildAll([freshRow], {});
+        const rec = built && built.units && built.units[id];
+        if (rec) {
+          // Persist the canonical record and mirror its fields onto the stored
+          // fleet row so buildFleetContext reads the fresh canonicalStatus.
+          store.save('canonicalState', Object.assign(store.load('canonicalState', {}), { [id]: rec }));
+          Object.assign(freshRow, canonical.mirrorFields(rec));
+          store.save('fleetData', fd); // freshRow is a ref into fd.rows
+        }
+      }
+    } catch (e) { log('[SlackDM] verify: canonical reconcile skipped — ' + e.message); }
+    log('[SlackDM] verify complete for ' + id);
+  } catch (e) {
+    log('[SlackDM] verify failed for ' + unitToken + ' — ' + e.message);
+  } finally {
+    _dmVerifyLock = false;
+  }
+}
+
 // ── Create-WR drafting (Bucket 3, Option A: draft + Z-only approval) ────────
 // FEATURE (2026-08-27): grounding / predictive-maintenance alerts routinely ask
 // "please create the work order following the predictive maintenance process".
@@ -520,7 +620,7 @@ async function _maybeAutoFlip(unitToken, tagPrefix) {
   }
 }
 
-async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
+async function _classifyAndDraft(messageText, historyMsgs, groupContext, covering) {
   // historyMsgs: optional array of strings ("Speaker: text") from recent
   // conversation, oldest-first, to give the AI context before replying.
   let contextBlock = '';
@@ -593,9 +693,21 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
       }
     }
   }
-  const fleetContext = buildFleetContext(_fleetLookupText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true });
+  // VERIFY-BEFORE-CLAIMING: if the message is about a unit that reads
+  // ready/complete (or whose cache is stale), re-scrape it live FIRST so the
+  // AI answers from fresh, verified data — not stale "unit done" cache.
+  const _verifyUnit = _unitTokenIn(_fleetLookupText) || _inheritedUnitUsed;
+  if (_verifyUnit) {
+    try { await _verifyUnitFresh(_verifyUnit); } catch (_) { /* best-effort */ }
+  }
 
-  const prompt = _contextReset + PERSONA_SYSTEM_PROMPT + timeContext + groupBlock + contextBlock + _inheritedUnitNote + fleetContext + _jsonReminder + '\n\nIncoming DM:\n' + messageText;
+  // allowRoster: this is Z's own "just me" assistant (internal), so FAS roster
+  // personnel data may be surfaced — but only when the message is actually a
+  // roster question (see _buildRosterContext), never dumped wholesale.
+  const fleetContext = buildFleetContext(_fleetLookupText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true, allowRoster: true });
+
+  const _persona = covering ? (COVERING_PREFACE + PERSONA_SYSTEM_PROMPT) : PERSONA_SYSTEM_PROMPT;
+  const prompt = _contextReset + _persona + timeContext + groupBlock + contextBlock + _inheritedUnitNote + fleetContext + _jsonReminder + '\n\nIncoming DM:\n' + messageText;
   // FIX (2026-07-24): was using sendOrchaChat() (direct WS-only, 90s timeout,
   // no fallback). If the Orcha WS server is not running or slow, EVERY DM call
   // timed out and sent the canned fallback reply. Switch to relay.ask() which
@@ -978,6 +1090,7 @@ async function pollDMAutoReplyOnce(log) {
               engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
               channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
               isGroup: !!dm.isGroup, conversation: historyMsgs, attachments: _fasAttach,
+              files: msg.files || [],
             }, { sendToChannel });
             if (_fr && _fr.letLegacyReply) {
               // Runner asked us to let the legacy engine reply (error-failsafe /
@@ -1094,7 +1207,8 @@ async function pollDMAutoReplyOnce(log) {
         // Enrich AI prompt with any links or files attached to this message
         const attachCtx = await _buildAttachmentContext(msg, downloadFileContent);
         const msgTextWithAttach = (msg.text || '') + attachCtx;
-        const draft = await _classifyAndDraft(msgTextWithAttach, historyMsgs, groupContext);
+        const _covering = _senderIsCovering(msg.userId);
+        const draft = await _classifyAndDraft(msgTextWithAttach, historyMsgs, groupContext, _covering);
 
         // AI explicitly held (identified a repeat, "Holding, unchanged." etc.) — skip
         // send and log entry; just let the watermark advance past this message.
@@ -1185,7 +1299,7 @@ async function pollDMAutoReplyOnce(log) {
               engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
               channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
               isGroup: !!dm.isGroup, conversation: historyMsgs, actualReply: draft.reply,
-              attachments: attachCtx,
+              attachments: attachCtx, files: msg.files || [],
             });
           } catch (_e) { /* shadow comparison must never break the live path */ }
         }
@@ -1390,6 +1504,7 @@ async function pollDMAutoReplyOnce(log) {
                   engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
                   channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
                   isGroup: !!dm.isGroup, conversation: threadContext, attachments: _fasAttachT,
+                  files: reply.files || [],
                 }, { sendToChannel });
                 if (_fr && _fr.outcome === 'auto-send-failed') {
                   // Delivery failed — nothing committed; retry this reply later.
@@ -1422,7 +1537,8 @@ async function pollDMAutoReplyOnce(log) {
             // Enrich AI prompt with any links or files in this thread reply
             const attachCtxT = await _buildAttachmentContext(reply, downloadFileContent);
             const replyTextWithAttach = (reply.text || '') + attachCtxT;
-            const draft = await _classifyAndDraft(replyTextWithAttach, threadContext, groupContextT);
+            const _coveringT = _senderIsCovering(reply.userId);
+            const draft = await _classifyAndDraft(replyTextWithAttach, threadContext, groupContextT, _coveringT);
 
             // PARITY WITH TOP-LEVEL (2026-09-02): thread replies now get the same
             // protections — AI held/skip, AI-unavailable fallback (retry, no
@@ -1451,7 +1567,7 @@ async function pollDMAutoReplyOnce(log) {
                   engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
                   channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
                   isGroup: !!dm.isGroup, conversation: threadContext, actualReply: draft.reply,
-                  attachments: attachCtxT,
+                  attachments: attachCtxT, files: reply.files || [],
                 });
               } catch (_e) { /* shadow comparison must never break the live path */ }
             }

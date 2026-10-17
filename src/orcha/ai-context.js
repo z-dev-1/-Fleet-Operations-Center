@@ -56,8 +56,16 @@ function buildFleetContext(messageText, opts = {}) {
   // AI answers instead of punting (these questions failed before this note).
   const _scacs = [...new Set(rows.map(r => (r.operator || '').toUpperCase().trim()).filter(Boolean))];
   if (_scacs.length) {
-    context += 'SCAC = operator. Known SCACs/operators in the fleet: ' + _scacs.join(', ') + '.\n';
+    context += 'SCAC = operator. Known SCACs/operators in the fleet (' + _scacs.length + '): ' + _scacs.join(', ') + '.\n';
   }
+  // Authoritative domicile count + list, computed LIVE from the fleet data so
+  // "how many domiciles/operators do I have" answers from the real scrape (not
+  // an inference from the few units shown, and not a stale configured list).
+  const _domiciles = [...new Set(rows.map(r => (r.domicileSite || r.domicile || r.site || '').toUpperCase().trim()).filter(Boolean))].sort();
+  if (_domiciles.length) {
+    context += 'Domiciles/sites in the fleet (' + _domiciles.length + '): ' + _domiciles.join(', ') + '.\n';
+  }
+  context += 'COUNTS (authoritative, from live fleet data): ' + _domiciles.length + ' domiciles, ' + _scacs.length + ' operators/SCACs, ' + rows.length + ' total units. When asked how many domiciles or operators, use THESE numbers.\n';
 
   // ── Resolve what the message is ABOUT ───────────────────────────────────
   // One intelligent resolver understands units, domicile SITES, and OPERATORS
@@ -85,6 +93,21 @@ function buildFleetContext(messageText, opts = {}) {
   // the contacts store was never injected into the prompt — the data exists,
   // the AI just couldn't see it. See _buildContactContext.
   context += _buildContactContext(messageText, rows);
+
+  // FAS roster — INTERNAL only (personnel data). Opt-in via opts.allowRoster.
+  if (opts.allowRoster) {
+    context += _buildRosterContext(messageText);
+  }
+  // FAS knowledge base — TWO-TIER by audience:
+  //   • opts.allowRoster (internal) → full KB (approval dollars, escalation,
+  //     ownership, vendor routing, glossary).
+  //   • opts.knowledgeAudience === 'external' → SHAREABLE tier only (glossary +
+  //     general vendor routing); internal-only sections withheld.
+  // Both only when the message is actually a judgment/process/term question.
+  const _kbAudience = opts.allowRoster ? 'internal' : (opts.knowledgeAudience === 'external' ? 'external' : null);
+  if (_kbAudience) {
+    context += _buildKnowledgeContext(messageText, _kbAudience);
+  }
 
   if (!resolved.units.length && !resolved.groups.length) {
     // Nothing specific referenced — include ALL unavailable units with full
@@ -274,6 +297,94 @@ function _buildContactContext(messageText, rows) {
   return s;
 }
 
+// ── FAS roster context (only injected when the message is roster-relevant) ───
+// The roster can be ~300+ rows; we never dump it all. Only when a message is
+// about FAS personnel / coverage do we inject the MATCHING rows (by FAS name,
+// Site, or SCAC mentioned in the message). Returns '' otherwise so normal
+// questions aren't polluted with roster data.
+function _buildRosterContext(messageText) {
+  const text = String(messageText || '');
+  if (!text.trim()) return '';
+
+  // Is this a roster/FAS-personnel question at all? (who is the FAS, uptime
+  // manager, who covers a site/SCAC, a FAS person's email/phone, etc.)
+  const rosterIntent = /\bfas\b|uptime\s*manager|\bum\b|who('?s| is| handles| covers| owns| manages)|\bsr\.?\s*pm\b|\broster\b|point of contact|\bpoc\b/i.test(text);
+
+  const data = store.load('fasRoster', { rows: [] });
+  const rows = (data && Array.isArray(data.rows)) ? data.rows : [];
+  if (!rows.length) return '';
+
+  const upper = ' ' + text.toUpperCase().replace(/[^A-Z0-9]+/g, ' ') + ' ';
+  const tokenRe = (v) => new RegExp('(^| )' + String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '( |$)');
+  const g = (r, names) => { for (const n of names) { if (r[n] != null && String(r[n]).trim() !== '') return String(r[n]).trim(); } return ''; };
+
+  // Match roster rows the message references: by Site code, SCAC, or FAS name.
+  const matched = [];
+  for (const r of rows) {
+    const site = g(r, ['Site Code', 'Site']).toUpperCase();
+    const scac = g(r, ['SCAC']).toUpperCase();
+    const fas  = g(r, ['FAS Name', 'Name']);
+    const fasWords = fas.toUpperCase().split(/\s+/).filter((w) => w.length >= 3);
+    const hit = (site && tokenRe(site).test(upper))
+      || (scac && tokenRe(scac).test(upper))
+      || (fas && (upper.includes(' ' + fas.toUpperCase() + ' ') || fasWords.some((w) => tokenRe(w).test(upper))));
+    if (hit) matched.push(r);
+  }
+
+  // Only inject when there's a real match OR a clear roster-intent question.
+  if (!matched.length && !rosterIntent) return '';
+
+  const fmt = (r) => {
+    const bits = ['• ' + (g(r, ['FAS Name', 'Name']) || '(unknown FAS)')];
+    const sc = g(r, ['Site Code', 'Site']); const sx = g(r, ['SCAC']);
+    if (sc || sx) bits.push('    Site: ' + (sc || '?') + ' | SCAC: ' + (sx || '?'));
+    const em = g(r, ['Email']); const ph = g(r, ['Phone']); const lg = g(r, ['Login']);
+    if (em) bits.push('    Email: ' + em);
+    if (ph) bits.push('    Phone: ' + ph);
+    if (lg) bits.push('    Login: ' + lg);
+    const um = g(r, ['Uptime Manager']); const pm = g(r, ['Sr PM']); const prog = g(r, ['Program']);
+    if (um) bits.push('    Uptime Manager: ' + um);
+    if (pm) bits.push('    Sr PM: ' + pm);
+    if (prog) bits.push('    Program: ' + prog);
+    return bits.join('\n');
+  };
+
+  let out = '\n--- FAS ROSTER ---\n';
+  if (matched.length) {
+    // Dedup by (FAS+Site+SCAC) and cap so a broad match can't flood the prompt.
+    const seen = new Set();
+    const uniq = matched.filter((r) => {
+      const k = g(r, ['FAS Name']) + '|' + g(r, ['Site Code', 'Site']) + '|' + g(r, ['SCAC']);
+      if (seen.has(k)) return false; seen.add(k); return true;
+    }).slice(0, 25);
+    out += uniq.map(fmt).join('\n') + '\n';
+    out += '(FAS = the Fleet Asset Specialist for that Site+SCAC. Answer from these rows; if the specific person/site/SCAC asked about is NOT listed, say you don\'t have it on file.)\n';
+  } else {
+    out += 'No roster row matched that name/site/SCAC. Ask the user to clarify the site, SCAC, or FAS name rather than guessing.\n';
+  }
+  return out;
+}
+
+// ── FAS knowledge base (ownership / approval / escalation / process) ─────────
+// Injected only when the message is a judgment/process/ownership question —
+// the hard ones raw data can't answer. Routine status lookups skip it so the
+// prompt stays lean.
+function _buildKnowledgeContext(messageText, audience) {
+  const text = String(messageText || '');
+  if (!text.trim()) return '';
+  // Does this message need institutional/process knowledge to answer well?
+  const needsKnowledge = /\b(approve|approval|estimate|threshold|escalat|who\s+(owns|approves|handles|does|flips|schedules|decides)|eol|end of life|flip|lifecycle|reactivat|vre|vendor\s+(reassign|performance|assign)|pm\b|inspection|dot|sim\b|record360|reach|arc\b|accident|invoice|billing|dispute|credit|paragon|mcs|l3|l4h|hve|variance|rejection|sla|out of scope|my (job|role|lane)|can i|should i|am i allowed|who is responsible|process|procedure|policy|which vendor|what vendor|who should (fix|repair|do)|dealer|amerit|cummins|cei\b|fleetnet|goodyear|tow|towing|cng|warranty|decisiv|asist|uptime center|mobile vendor|routing|scope|relay garage|\brg\b|\bnra\b|\bpv\b|\bpa\b|\betc\b|\bwr\b|\bwo\b|\bscac\b|\bdvir\b|\bpmr\b|\bpmb?\b|\bdsp\b|\bafp\b|\btom\b|\bdss\b|\bmmeo\b|\bmmpm\b|\broc\b|\bitr\b|\bera\b|\bdea\b|\bdood\b|\bfnol\b|\bddex\b|\bvrid\b|\bbol\b|\bcpm\b|\bcel\b|\beas\b|\bfsov\b|\bmttr\b|\bp95\b|\bym s?\b|\br4c\b|\bpct\b|itrace|gas tank|peak|ready to rent|reconditioning|to be returned|damage (moderate|severe)|active\/healthy|a\/h|offsite shop|what (is|does|mean)|define|glossary|acronym)\b/i.test(text);
+  if (!needsKnowledge) return '';
+  const ext = audience === 'external';
+  let kb;
+  try { kb = require('./fas-knowledge').retrieveKnowledge(messageText, { maxSections: 3, audience: ext ? 'external' : 'internal' }); } catch (_) { return ''; }
+  if (!kb) return '';
+  if (ext) {
+    return '\n' + kb + '\n(Use this reference to explain fleet terms and the general repair process accurately to the carrier/vendor. Do NOT disclose internal approval dollar thresholds, who-approves-what, escalation internals, or personnel — if asked, say that is handled internally.)\n';
+  }
+  return '\n' + kb + '\n(Answer ownership/approval/escalation/process questions STRICTLY from the FAS Knowledge Base above — it is authoritative. Attribute actions to the correct owner; never say FAS approves estimates. If the KB does not cover it, say so rather than guessing.)\n';
+}
+
 /**
  * buildUnitContext(unitId) — Build full context for a single specific unit
  */
@@ -317,12 +428,54 @@ function _buildUnitDetail(unitId, rows, notesStore, opts) {
   const ns = notesStore[unitId] || {};
   let detail = '\n[' + unitId + ']\n';
   detail += '  Status: ' + (row.lifecycleState || '?') + ' | Reason: ' + (row.lifecycleReason || '?') + '\n';
+
+  // Canonical state — the single reconciled truth for this unit. Surface it
+  // right under the raw status so the AI answers "what's up with unit X" from
+  // ONE authoritative read (reconciled status, next step, who we're waiting on,
+  // freshness) instead of re-deriving from raw fields. Absent only for units
+  // not yet reconciled. Required lazily so this module stays testable.
+  try {
+    const canon = require('./canonical_state').getCanonical(row);
+    if (canon) {
+      const C = require('./canonical_state');
+      let line = '  Canonical state: ' + C.statusLabel(canon.status);
+      if (canon.stale) line += ' (STALE — no recent update)';
+      if (canon.waitingOn) line += ' | waiting on: ' + canon.waitingOn;
+      if (Number.isFinite(canon.confidence)) line += ' | confidence: ' + canon.confidence.toFixed(2);
+      detail += line + '\n';
+      if (canon.situation) detail += '  Situation: ' + canon.situation + '\n';
+      if (canon.nextStep) detail += '  Next step: ' + canon.nextStep + '\n';
+    }
+  } catch (_) { /* no canonical record — raw fields below stand alone */ }
+
   detail += '  Vendor: ' + (row.vendor || 'none') + ' | Make: ' + (row.manufacturer || row.make || '?') + ' | Body: ' + (row.bodyType || row.assetType || '?') + '\n';
   detail += '  Site: ' + (row.domicileSite || '?') + ' | Operator: ' + (row.operator || '?') + '\n';
 
   if (row.workDuration) detail += '  Days down: ' + row.workDuration + '\n';
   if (row.alternativeId) detail += '  Alt ID (dealer case): ' + row.alternativeId + '\n';
   if (row.offsiteShopEvent) detail += '  Offsite event: ' + row.offsiteShopEvent + '\n';
+
+  // READINESS SIGNAL — structured offsite status-bar stage + explicit comment
+  // evidence. The assistant must only claim a unit is "ready/complete/done" when
+  // one of these confirms it, never off an ambiguous or old free-text note.
+  const _stage = String(row.offsiteStage || '').toLowerCase();
+  if (_stage) {
+    const _stageLabel = _stage.charAt(0).toUpperCase() + _stage.slice(1);
+    detail += '  Offsite status bar: ' + _stageLabel +
+      (_stage === 'ready'
+        ? ' (vendor tracker shows READY)'
+        : ' (NOT yet at Ready — do NOT claim this unit is ready/done)') + '\n';
+  }
+  {
+    const _readyBlob = [row.asistNotes, row.fullConversation, row.repairTimeline]
+      .map(v => String(v || '')).join(' ');
+    const _readyMatch = _readyBlob.match(/(asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed|work\s+order\s+completed|unit\s+is\s+ready)/i);
+    if (_readyMatch) {
+      detail += '  Ready evidence (comment): "' + _readyMatch[0] + '"\n';
+    } else if (_stage && _stage !== 'ready') {
+      detail += '  Ready evidence: NONE — no comment confirms readiness; treat as still in repair\n';
+    }
+  }
   if (row.salesforceCase) detail += '  Salesforce case: ' + row.salesforceCase + '\n';
   if (row.dealerName) detail += '  Dealer: ' + row.dealerName + '\n';
 

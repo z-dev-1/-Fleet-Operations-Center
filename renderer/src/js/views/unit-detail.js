@@ -17,6 +17,7 @@ import { open as openWRModal }    from './wr-modal.js';
 import { open as openVendorReview } from './vendor-review-modal.js';
 import { open as openDealerWOModal } from './dealer-wo-modal.js';
 import toast         from '../components/toast.js';
+import { redactForSharing } from '../util/redact.js';
 
 let _panel    = null;
 let _unit     = null;
@@ -673,6 +674,15 @@ function _renderAsistContent(unit) {
     html += ' <a class="dp-asist-sr-link" href="'+ srHref +'" target="_blank" rel="noreferrer">'+'(SR)'+'</a>';
   }
   if (ts) html += '<div class="dp-asist-ts">Last enriched: '+_esc(ts.slice(0,10))+'</div>';
+  // Dealer comment thread scraped from the offsite estimate/SR page (asistNotes).
+  // This is where vendor status updates that never reach the Relay thread live
+  // (e.g. "part was damaged, waiting for a new one"). Show it raw so the latest
+  // dealer word is visible without opening Split View.
+  const notes = (unit.asistNotes || '').trim();
+  if (notes) {
+    html += '<details class="dp-asist-notes"><summary>📄 Dealer comments (offsite)</summary>'
+      + '<pre class="dp-asist-notes__body">' + _esc(notes.slice(0, 6000)) + '</pre></details>';
+  }
   html += '</div>';
   return html;
 }
@@ -736,9 +746,9 @@ function _wireDealerWOBtn(unit) {
 // ── helpers ───────────────────────────────────────────────────────────────────
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function riskColor(n){return n>=70?'red':n>=40?'org':'grn';}
-function downDays(unit){const ts=unit.created;if(!ts)return null;return Math.floor((Date.now()-new Date(ts).getTime())/86400000);}
+function downDays(unit){const ts=unit.created;if(!ts)return null;const t=new Date(ts).getTime();if(isNaN(t))return null;return Math.floor((Date.now()-t)/86400000);}
 function relTime(ts){if(!ts)return'';const d=Date.now()-new Date(ts).getTime();if(d<3600000)return Math.floor(d/60000)+'m ago';if(d<86400000)return Math.floor(d/3600000)+'h ago';return Math.floor(d/86400000)+'d ago';}
-function fmtDate(ts){if(!ts)return'';try{return new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});}catch(e){return ts;}}
+function fmtDate(ts){if(!ts)return'';try{var d=new Date(ts);if(isNaN(d.getTime()))return'';return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});}catch(e){return'';}}
 function parseConvo(raw){
   if(!raw||typeof raw!=='string')return[];
   // Filter to non-empty lines only
@@ -951,6 +961,10 @@ function renderHeader(unit){
     aapUrl?'<button class="dp-launcher" title="Open AAP" data-aap-url="'+aapUrl+'">\ud83d\udd17 AAP</button>':'',
     relayUrl?'<button class="dp-launcher" title="Open Relay WR" data-ext-url="'+relayUrl+'">\ud83d\udcc4 Relay</button>':'',
     offsiteUrl?'<button class="dp-launcher" title="Open Offsite Portal" data-ext-url="'+offsiteUrl+'">\ud83c\udfe6 Portal</button>':'',
+    // Daily Notes launcher: opens Relay + Offsite together in ONE inline split
+    // panel (single close button) via _openInlineSplit — no more two separate
+    // windows to close individually.
+    (relayUrl||offsiteUrl)?'<button id="dp-launch-daily" class="dp-launcher" title="Open Relay + Offsite side-by-side (Daily Notes)">\ud83d\udccb Daily</button>':'',
   ].filter(Boolean).join('');
 
   return '<div class="dp-header dp-header--'+hdrCls+'">'+
@@ -966,7 +980,40 @@ function renderHeader(unit){
     (meta?'<div class="dp-header__meta">'+meta+'</div>':'')+
     (unit.lifecycleReason?'<div class="dp-header__reason">\u2192 '+esc(unit.lifecycleReason)+'</div>':'')+
     '<div class="dp-header__vitals">'+vitals+'</div>'+
+    _pmLocationRow(unit)+
   '</div>';
+}
+
+// PM due-date pills + current location, shown in the detail header. PM values
+// come from unit.pmB/pmX/dot/quarterlyLift (API: asset.maintenanceScheduleStatuses;
+// scrape: parsed dueDate). Shows ALL set PM types (not hidden at 60 days like the
+// grid), color-coded overdue/soon/ok. Location from unit.geofence || domicileSite.
+function _pmLocationRow(unit){
+  function pill(label,val){
+    if(!val||val==='--')return '';
+    var cls='dp-pm-pill--ok';
+    var v=String(val).toLowerCase();
+    if(v==='overdue'){ cls='dp-pm-pill--overdue'; }
+    else {
+      // val is "Mon D" (no year) — assume the NEXT occurrence: if that month/day
+      // already passed this year, it's next year. Avoids the grid's this-year
+      // misparse that flagged future dates as overdue.
+      var now=new Date(); now.setHours(0,0,0,0);
+      var d=new Date(val+' '+now.getFullYear());
+      if(!isNaN(d.getTime())){
+        if(d< now) d=new Date(val+' '+(now.getFullYear()+1));
+        var days=Math.round((d-now)/86400000);
+        cls=days<=0?'dp-pm-pill--overdue':days<=30?'dp-pm-pill--soon':'dp-pm-pill--ok';
+      }
+    }
+    return '<span class="dp-pm-pill '+cls+'"><span class="dp-pm-pill__lbl">'+esc(label)+'</span>'+
+           '<span class="dp-pm-pill__val">'+esc(val)+'</span></span>';
+  }
+  var pills=[pill('PM B',unit.pmB),pill('PM X',unit.pmX),pill('DOT',unit.dot),pill('Qtrly Lift',unit.quarterlyLift)].filter(Boolean).join('');
+  var loc=unit.geofence||unit.domicileSite||unit.domicile||'';
+  var locChip=loc?'<span class="dp-pm-loc"><span class="dp-pm-loc__icon">\ud83d\udccd</span>'+esc(loc)+'</span>':'';
+  if(!pills&&!locChip)return '';
+  return '<div class="dp-header__pmloc">'+locChip+(pills?'<span class="dp-pm-pills">'+pills+'</span>':'')+'</div>';
 }
 
 // ── tabs ──────────────────────────────────────────────────────────────────────
@@ -1078,6 +1125,44 @@ async function _injectAISplitDraft(webview, unit, side) {
       '},1000)'
     ).catch(function(){});
   }
+
+  // ── Live refresh gate (2026-10): the Split View button kicked a forced
+  // per-unit Relay + Offsite re-scrape (+ canonical re-reason) and stashed the
+  // promise on window.__splitRefresh. Await it (already time-capped by the
+  // caller) so the reconcile draft below is built from FRESH data, not the last
+  // full-sync snapshot. If it refreshed, note that so we can label the draft.
+  var _refreshed = false;
+  try {
+    if (window.__splitRefresh) {
+      var _rr = await window.__splitRefresh;
+      if (_rr && _rr.ok) _refreshed = true;
+    }
+  } catch (_re) { /* refresh failed — proceed with whatever data we have */ }
+
+  // ── Reconcile-first (2026-10): if the Relay↔Offsite reconcile engine is
+  // enabled, use its decision — the gap-fill (an Offsite update Relay is
+  // missing) for the Relay pane, or the escalated vendor follow-up / dealer-ask
+  // for the Offsite pane. This is the SAME reasoning that runs during sync, so
+  // Split View auto-fills exactly what would be posted. If the engine is off,
+  // low-confidence, or produces nothing, we fall through to the existing
+  // simple draft below (no regression).
+  try {
+    if (window.relayReconcile && window.relayReconcile.draftForSplit) {
+      var rec = await window.relayReconcile.draftForSplit(equipId, side);
+      if (rec && rec.ok && rec.text && rec.text.length > 10 && webview.isConnected) {
+        var _indLabel = _refreshed
+          ? '\\ud83d\\udd04 Live-refreshed reconcile draft'
+          : '\\u2705 Reconcile draft (Relay \\u2194 Offsite)';
+        webview.executeJavaScript(
+          '(function(){' + selector +
+          'if(ta){ta.focus();ta.value="";document.execCommand("insertText",false,' + JSON.stringify(rec.text) + ');ta.style.background="#e6f7ff";ta.blur();' +
+          'var ind=document.createElement("div");ind.id="ai-draft-indicator";ind.textContent="' + _indLabel + '";ind.style.cssText="font-size:11px;color:#3fb950;padding:4px 8px;margin-top:4px;";ta.parentElement.insertBefore(ind,ta.nextSibling);setTimeout(function(){if(ind)ind.remove();},4000);}' +
+          '})()'
+        ).catch(function(){});
+        return; // reconcile draft used — skip the generic AI draft below
+      }
+    }
+  } catch (e) { /* reconcile unavailable — fall through to the generic draft */ }
 
   // Show a small "AI drafting..." indicator near the textarea while waiting
   if (!webview.isConnected) return;
@@ -1784,7 +1869,12 @@ function renderRepairPane(unit){
   // parseConvo removed — AI timeline is the only source of truth
   _allConvoMsgs = [];
   // === ORCHA REPAIR TIMELINE (Source of Truth) ===
-  var aiTimeline = unit.repairTimeline || '';
+  // Carrier-facing backstop: the displayed timeline is the "official" status
+  // view, so scrub personal names + dollar amounts here too (the AI timeline
+  // already avoids them by construction; this catches any that slip through).
+  // Keeps vendor/company names, locations, case numbers, parts, dates. The raw
+  // "Dealer comments (offsite)" block (_renderAsistContent) is left untouched.
+  var aiTimeline = redactForSharing(unit.repairTimeline || '');
   var orchaNote = unit.savedNotes || '';
   var timelineHtml = '';
 
@@ -1991,7 +2081,29 @@ function renderRepairPane(unit){
     if (btn) btn.addEventListener('click', function() {
       var rUrl = unit.serviceUrl || '';
       var oUrl = offsiteUrl || '';
-      window.__splitUnit = unit; _openInlineSplit(rUrl, oUrl, unit.equipmentId);
+      window.__splitUnit = unit;
+      // LIVE REFRESH ON OPEN: kick a forced single-unit Relay + Offsite re-scrape
+      // (+ canonical re-reason) so the drafts reflect the latest updates, not the
+      // last full-sync snapshot. Non-blocking: the panes open immediately with
+      // cached drafts; _injectAISplitDraft awaits this promise (window.__splitRefresh)
+      // before drafting, then shows a "live-refreshed" draft. Guarded + graceful:
+      // on failure/timeout the cached draft stands. Bounded so a hung scrape
+      // never blocks the pane forever.
+      try {
+        if (window.relay && window.relay.refreshUnit) {
+          var _rp = window.relay.refreshUnit(unit.equipmentId, { force: true, reconcile: true })
+            .then(function (r) { return (r && r.ok) ? r : null; })
+            .catch(function () { return null; });
+          // Cap the wait so panes don't hang on a slow/failed scrape.
+          window.__splitRefresh = Promise.race([
+            _rp,
+            new Promise(function (res) { setTimeout(function () { res(null); }, 35000); })
+          ]);
+        } else {
+          window.__splitRefresh = Promise.resolve(null);
+        }
+      } catch (_e) { window.__splitRefresh = Promise.resolve(null); }
+      _openInlineSplit(rUrl, oUrl, unit.equipmentId);
     });
   }, 100);
 
@@ -2058,12 +2170,23 @@ function renderIntelPane(unit){
           (subsystem?'<span class="dp-insight-card__type">'+esc(subsystem)+'</span>':'')+
           (type?'<span class="dp-insight-card__sub">'+esc(type)+'</span>':'')+
           (status?'<span class="dp-insight-card__status dp-insight-card__status--'+esc(status.toLowerCase())+'">'+esc(status)+'</span>':'')+
-          (ins.url?'<a class="dp-offsite-card__link" href="#" data-ext-url="'+esc(ins.url)+'" style="margin-left:auto">\u2197</a>':'')+
+          (ins.url?'<a class="dp-offsite-card__link" href="#" data-inapp-url="'+esc(ins.url)+'" title="Open insight in app" style="margin-left:auto">\u2197</a>':'')+
         '</div>'+
         (ins.title?'<div class="dp-insight-card__title">'+esc(ins.title)+'</div>':'')+
         (ins.summary?'<div class="dp-insight-card__summary">'+esc(ins.summary)+'</div>':'')+
-        (ins.guidance?'<div class="dp-insight-card__action">\u27a1 '+esc(ins.guidance)+'</div>':'')+
-        (ins.recommended?'<div class="dp-insight-card__action">\ud83d\udd27 '+esc(ins.recommended)+'</div>':'')+
+        // guidance and recommended both derive from the same Uptake field
+        // (meta.recommendedAction), so render ONLY ONE to avoid the duplicated
+        // "Recommended Actions" block. Prefer `recommended`; fall back to
+        // `guidance`; and if they ever differ, show guidance separately only
+        // when it is NOT identical to recommended.
+        ((function(){
+          var rec = ins.recommended || ins.guidance || '';
+          var g   = ins.guidance || '';
+          var out = '';
+          if (rec) out += '<div class="dp-insight-card__action">\ud83d\udd27 '+esc(rec)+'</div>';
+          if (g && g !== rec && g !== ins.recommended) out += '<div class="dp-insight-card__action">\u27a1 '+esc(g)+'</div>';
+          return out;
+        })())+
         ((since||last||mf)?'<div class="dp-insight-card__meta">'+
           (since?'<span>First: '+esc(since)+'</span>':'')+
           (last?'<span>Last: '+esc(last)+'</span>':'')+
@@ -2073,14 +2196,89 @@ function renderIntelPane(unit){
     }).join(''):
     '<div class="dp-empty-state"><span class="dp-empty-state__icon">\u26a1</span>No Uptake insights</div>';
 
-  // screenshot
-  var shot=(unit.screenshots||[])[0]; var shotHtml='';
-  if(shot){
-    shotHtml='<div class="dp-section-title">Uptake Screenshot</div>' +
-      '<div id="dp-screenshot-card" style="position:relative;width:100%;margin:8px 0;min-height:100px;background:#1c2128;border-radius:6px;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">' +
-        '<img id="dp-screenshot-img" data-shot="'+esc(shot)+'" style="width:100%;height:auto;min-height:50px;display:block;border-radius:6px;" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Uptake screenshot loading..." />' +
-        '<div style="font-size:9px;color:rgba(255,255,255,0.35);margin-top:5px;text-align:right;padding:0 8px 4px;" id="dp-screenshot-meta">Loading...</div>' +
-      '</div>';
+  // Uptake screenshots — ONE PER INSIGHT. The scraper captures a screenshot per
+  // insight into unit.screenshots[] (same order as insightsList). The image is
+  // a PNG (its text is NOT selectable), so each screenshot is paired with that
+  // insight's COPYABLE text + a Copy button right here — so when you open a
+  // screenshot you can grab the exact text you need. Falls back gracefully if
+  // there are more/fewer screenshots than insights.
+  function _insightText(ins, ix) {
+    var L = [];
+    L.push('--- Insight ' + (ix + 1) + (ins && ins.title ? ': ' + ins.title : '') + ' ---');
+    if (ins) {
+      if (ins.subsystem) L.push('Subsystem: ' + ins.subsystem);
+      if (ins.type || ins.insightType) L.push('Type: ' + (ins.type || ins.insightType));
+      if (ins.status) L.push('Status: ' + ins.status);
+      if (ins.firstSeen || ins.firstDetected) L.push('First seen: ' + (ins.firstSeen || ins.firstDetected));
+      if (ins.lastSeen || ins.lastDetected) L.push('Last seen: ' + (ins.lastSeen || ins.lastDetected));
+      if (ins.maintenanceFactor) L.push('Maintenance factor: ' + ins.maintenanceFactor);
+      if (ins.summary) L.push('Summary: ' + ins.summary);
+      // guidance/recommended are the same source field — emit once (prefer
+      // recommended), and only add guidance if it genuinely differs.
+      var _rec = ins.recommended || ins.guidance || '';
+      if (_rec) L.push('Recommended: ' + _rec);
+      if (ins.guidance && ins.guidance !== _rec && ins.guidance !== ins.recommended) L.push('Guidance: ' + ins.guidance);
+      if (ins.url) L.push('Link: ' + ins.url);
+    }
+    return L.join('\n');
+  }
+  // Build the per-insight screenshot blocks. An insight may now carry MORE than
+  // one chart (fault chart + line/trend chart) in ins.screenshots[]. So iterate
+  // INSIGHTS and render each insight's own charts under its text — this keeps
+  // the chart↔insight pairing correct even when counts differ. Falls back to
+  // the old positional flat unit.screenshots[] for cached data that predates
+  // per-insight ins.screenshots[].
+  function _shotCardHtml(s) {
+    return '<div class="dp-screenshot-card">' +
+      '<img class="dp-screenshot-img" data-shot="' + esc(s) + '" style="width:100%;height:auto;min-height:50px;display:block;border-radius:6px;cursor:zoom-in;" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Uptake screenshot loading..." />' +
+      '<div class="dp-screenshot-meta">Loading...</div>' +
+    '</div>';
+  }
+  function _copyHtml(txt) {
+    if (!txt) return '';
+    return '<details class="dp-insight-copy"><summary>\ud83d\udccb Copy this insight\u2019s text</summary>' +
+      '<div class="dp-insight-copy__bar"><button class="detail-panel__btn detail-panel__btn--secondary dp-insight-copy__btn" type="button">Copy</button></div>' +
+      '<textarea class="dp-insight-copy__text" readonly rows="' + Math.min(20, Math.max(5, txt.split('\n').length)) + '">' + esc(txt) + '</textarea>' +
+    '</details>';
+  }
+  var perInsightShots = Array.isArray(insights) &&
+    insights.some(function (ins) { return ins && Array.isArray(ins.screenshots) && ins.screenshots.length; });
+
+  var shotHtml = '';
+  if (perInsightShots) {
+    var blocks = [];
+    var totalShots = 0;
+    insights.forEach(function (ins, ix) {
+      var insShots = (ins && Array.isArray(ins.screenshots) ? ins.screenshots : (ins && ins.screenshotPath ? [ins.screenshotPath] : [])).filter(Boolean);
+      if (!insShots.length) return;
+      totalShots += insShots.length;
+      var label = (ins && ins.title) ? ins.title : ('Insight ' + (ix + 1));
+      blocks.push(
+        '<div class="dp-shot-block">' +
+          '<div class="dp-shot-block__title">' + esc(label) + (insShots.length > 1 ? ' <span class="dp-section-count">' + insShots.length + ' charts</span>' : '') + '</div>' +
+          insShots.map(_shotCardHtml).join('') +
+          _copyHtml(_insightText(ins, ix)) +
+        '</div>'
+      );
+    });
+    if (blocks.length) {
+      shotHtml = '<div class="dp-section-title">Uptake Screenshots <span class="dp-section-count">' + totalShots + '</span></div>' + blocks.join('');
+    }
+  } else {
+    // Legacy / cached data: positional pairing with the flat unit.screenshots[].
+    var shots = Array.isArray(unit.screenshots) ? unit.screenshots.filter(Boolean) : [];
+    if (shots.length) {
+      shotHtml = '<div class="dp-section-title">Uptake Screenshots <span class="dp-section-count">' + shots.length + '</span></div>' +
+        shots.map(function(s, ix) {
+          var ins = insights[ix] || null;
+          var label = (ins && ins.title) ? ins.title : ('Insight ' + (ix + 1));
+          return '<div class="dp-shot-block">' +
+            '<div class="dp-shot-block__title">' + esc(label) + '</div>' +
+            _shotCardHtml(s) +
+            _copyHtml(_insightText(ins, ix)) +
+          '</div>';
+        }).join('');
+    }
   }
 
   // ask Orcha
@@ -2125,51 +2323,30 @@ function renderActionsPane(unit){
       '<div class="dp-lc-row"><select id="dp-lc-state" class="detail-panel__select"><option value="Active">Active</option><option value="Unavailable">Unavailable</option><option value="Ordered">Ordered</option><option value="End of Life">End of Life</option></select>'+
       '<input id="dp-lc-reason" class="detail-panel__input" type="text" placeholder="Reason..."/></div>'+
       '<div class="dp-lc-row"><button id="dp-lc-confirm" class="detail-panel__btn">Confirm</button><button id="dp-lc-cancel" class="detail-panel__btn detail-panel__btn--secondary">Cancel</button></div>'+
+    '</div>'+ /* close #dp-lc-form — was MISSING, so the final </div> closed this form instead of #dp-pane-actions, leaving the Actions pane open and swallowing the entire History pane inside it (History rendered with offsetHeight 0 = blank). */
     '<div class="dp-section-title" style="margin-top:10px">Dealer Work Order</div>'+
     '<div id="dp-vnd-ai-suggest" class="dp-vnd-ai-suggest"></div>'+
     '<div id="dp-vendor-section" class="dp-vendor-section"><p class="dp-empty">Loading eligibility\u2026</p></div>'+
     '<div id="dp-vnd-history-strip" class="dp-vnd-history-strip"></div>'+
+    // Notes — moved here from the History tab so History stays a clean
+    // breakdown record. Same #dp-notes / #dp-save-notes IDs so _wireNotes works.
+    '<div class="dp-section-title" style="margin-top:10px">Notes</div>'+
+    '<textarea id="dp-notes" class="dp-notes-area" placeholder="Add notes...">'+esc(unit.savedNotes||'')+'</textarea>'+
+    '<div class="dp-notes-footer"><button id="dp-save-notes" class="detail-panel__btn">Save</button><span id="dp-notes-saved" class="dp-notes-saved">Saved \u2713</span></div>'+
   '</div>';
 }
 
 // ── history pane ──────────────────────────────────────────────────────────────
 function renderHistoryPane(unit){
-  var sources=[
-    {label:'AAP',      ts:unit.lastDataDate,   icon:'\ud83d\udd17'},
-    {label:'Relay',    ts:unit.relaySynced?new Date().toISOString():null, icon:'\ud83d\udcc4'},
-    {label:'Uptake',   ts:unit.uptakeSynced?unit.lastDataDate:null,       icon:'\u26a1'},
-    {label:'ASIST',    ts:unit.asistScrapedAt,  icon:'\ud83c\udfe6'},
-    {label:'Notes',    ts:unit.notesUpdatedAt,  icon:'\ud83d\udcdd'},
-  ];
-  var syncRows=sources.map(function(s){
-    var age=s.ts?Date.now()-new Date(s.ts).getTime():null;
-    var cls=age===null?'none':age>86400000?'old':'ok';
-    return '<div class="dp-sync-row">'+
-      '<div class="dp-sync-dot dp-sync-dot--'+cls+'"></div>'+
-      '<span class="dp-sync-icon">'+s.icon+'</span>'+
-      '<span class="dp-sync-source">'+s.label+'</span>'+
-      '<span class="dp-sync-time">'+(s.ts?relTime(s.ts):'Never')+'</span>'+
-    '</div>';
-  }).join('');
-
-  // unit timeline summary
-  var timeline=[
-    unit.created?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--open"></span><span class="dp-tl-label">WR Opened</span><span class="dp-tl-date">'+fmtDate(unit.created)+'</span></div>':'',
-    unit.workDuration?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--etc"></span><span class="dp-tl-label">Work Duration</span><span class="dp-tl-date">'+esc(unit.workDuration)+'</span></div>':'',
-    unit.needBy?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--needby"></span><span class="dp-tl-label">Need By</span><span class="dp-tl-date">'+esc(unit.needBy)+'</span></div>':'',
-    unit.completed?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--closed"></span><span class="dp-tl-label">Completed</span><span class="dp-tl-date">'+fmtDate(unit.completed)+'</span></div>':'',
-    unit.notesUpdatedAt?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--note"></span><span class="dp-tl-label">Notes Updated</span><span class="dp-tl-date">'+relTime(unit.notesUpdatedAt)+'</span></div>':'',
-  ].filter(Boolean).join('');
-
+  // Breakdown History — one card per down->up repair cycle, newest first, each
+  // with an AI analysis line + a quick AI summary of the unit's pattern at top.
+  // Populated async by _wireHistoryPane via window.fleet.breakdownHistory().
+  // (Data Sync / Timeline / Notes were removed from here — Notes moved to the
+  // Actions tab — so History is purely a clean record of breakdowns by date.)
   return '<div class="dp-pane" id="dp-pane-history">'+
-    '<div class="dp-section-title">Repair History <span class="dp-section-sub">(last 3 months)</span></div>'+
-    '<div id="dp-repair-history" class="dp-repair-history"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading repair history\u2026</div></div>'+
-    '<div class="dp-section-title">Data Sync</div>'+
-    '<div class="dp-sync-panel">'+syncRows+'</div>'+
-    (timeline?'<div class="dp-section-title">Timeline</div><div class="dp-timeline">'+timeline+'</div>':'')+
-    '<div class="dp-section-title">Notes</div>'+
-    '<textarea id="dp-notes" class="dp-notes-area" placeholder="Add notes...">'+esc(unit.savedNotes||'')+'</textarea>'+
-    '<div class="dp-notes-footer"><button id="dp-save-notes" class="detail-panel__btn">Save</button><span id="dp-notes-saved" class="dp-notes-saved">Saved \u2713</span></div>'+
+    '<div class="dp-section-title">Breakdown History <span class="dp-section-sub">(last 3 months)</span></div>'+
+    '<div id="dp-breakdown-summary" class="dp-breakdown-summary"></div>'+
+    '<div id="dp-breakdown-list" class="dp-breakdown-list"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading breakdown history\u2026</div></div>'+
   '</div>';
 }
 
@@ -2183,8 +2360,11 @@ async function _runDailyNotesForUnit(unit) {
   const unitId = unit.equipmentId || unit.id || '';
   if (!unitId) { toast.show('warn', 'No unit selected', 2500); return; }
 
-  const altId = unit.alternativeId || unit.altId || '';
-  if (!altId) { toast.show('warn', unitId + ' has no Alt ID', 3000); return; }
+  // NOTE: this action opens the Relay + Offsite split windows — exactly like
+  // "Open Split View". It only needs the URLs, NOT an Alt ID. The old
+  // `if (!altId) return` gate was blocking it in API mode (the API path doesn't
+  // populate alternativeId), even though the URLs were available. Removed so it
+  // behaves the same as Split View and proceeds on the URLs alone.
 
   // Collect URLs
   const relayUrl    = unit.serviceUrl || unit.pageUrl || '';
@@ -2253,25 +2433,28 @@ function _renderUnit(unit) {
     });
   });
 
-  // Load uptake screenshot into Intel tab
-  var _ssImg = document.getElementById('dp-screenshot-img');
-  if (_ssImg && _ssImg.dataset.shot) {
-    window.files.readAsDataUrl(_ssImg.dataset.shot).then(function(d) {
-      if (d) {
-        _ssImg.src = d;
-        _ssImg.alt = 'Uptake Insight';
-        var m = document.getElementById('dp-screenshot-meta');
-        var ts = _ssImg.dataset.shot.match(/_(\d{13,})\.png$/);
-        if (ts && m) m.textContent = 'Captured: ' + new Date(parseInt(ts[1])).toLocaleString();
-        else if (m) m.textContent = '';
-        _ssImg.onclick = function() { window.files.openUptakeScreenshot(_ssImg.dataset.shot); };
-      } else {
-        _ssImg.alt = 'Screenshot file not found';
-        var m2 = document.getElementById('dp-screenshot-meta');
-        if (m2) m2.textContent = 'File not accessible';
-      }
-    }).catch(function(e) {
-      _ssImg.alt = 'Error: ' + (e.message || e);
+  // Load ALL uptake screenshots into Intel tab (one per insight). Each image
+  // lazy-loads its PNG as a data URL and opens full-size on click.
+  if (_panel && window.files && typeof window.files.readAsDataUrl === 'function') {
+    _panel.querySelectorAll('.dp-screenshot-img').forEach(function(img) {
+      var shotPath = img.dataset.shot;
+      if (!shotPath) return;
+      var metaEl = img.parentElement ? img.parentElement.querySelector('.dp-screenshot-meta') : null;
+      window.files.readAsDataUrl(shotPath).then(function(d) {
+        if (d) {
+          img.src = d;
+          img.alt = 'Uptake Insight';
+          var ts = shotPath.match(/_(\d{13,})\.png$/);
+          if (metaEl) metaEl.textContent = ts ? ('Captured: ' + new Date(parseInt(ts[1])).toLocaleString()) : '';
+          img.onclick = function() { if (window.files.openUptakeScreenshot) window.files.openUptakeScreenshot(shotPath); };
+        } else {
+          img.alt = 'Screenshot file not found';
+          if (metaEl) metaEl.textContent = 'File not accessible';
+        }
+      }).catch(function(e) {
+        img.alt = 'Error: ' + (e.message || e);
+        if (metaEl) metaEl.textContent = 'Load error';
+      });
     });
   }
 
@@ -2286,6 +2469,26 @@ function _renderUnit(unit) {
   });
   _panel.querySelectorAll('[data-ext-url]').forEach(function(b) {
     b.addEventListener('click', function(e){ e.preventDefault(); var u=b.dataset.extUrl||b.getAttribute('data-ext-url'); if(u&&window.files) window.files.openExternal(u).catch(function(){}); });
+  });
+
+  // In-app openers (e.g. Uptake insight ↗): open inside the app window
+  // (partition-aware via aap:open-url) instead of the external browser.
+  _panel.querySelectorAll('[data-inapp-url]').forEach(function(b) {
+    b.addEventListener('click', function(e){ e.preventDefault(); var u=b.dataset.inappUrl||b.getAttribute('data-inapp-url'); if(u&&window.aap&&window.aap.openUrl) window.aap.openUrl(u).catch(function(){}); });
+  });
+
+  // Copy-insight-text button (Intel pane): copy the full insight text block.
+  _panel.querySelectorAll('.dp-insight-copy__btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var det = btn.closest('.dp-insight-copy');
+      var ta = det && det.querySelector('.dp-insight-copy__text');
+      var val = ta ? ta.value : '';
+      if (!val) return;
+      (navigator.clipboard ? navigator.clipboard.writeText(val) : Promise.reject())
+        .catch(function(){ try { ta.focus(); ta.select(); document.execCommand('copy'); } catch(_){} });
+      var orig = btn.textContent; btn.textContent = '\u2713 Copied';
+      setTimeout(function(){ btn.textContent = orig; }, 1500);
+    });
   });
 
   // Split view for secondary ASIST/offsite WR cards
@@ -2387,6 +2590,11 @@ function _renderUnit(unit) {
     actDailyNotes.addEventListener('click', function () { _runDailyNotesForUnit(unit); });
   }
 
+  // Header "Daily" launcher — opens the Relay + Offsite windows (same as the
+  // Actions Daily Notes button), just reachable from the top header.
+  var launchDaily = document.getElementById('dp-launch-daily');
+  if (launchDaily) launchDaily.addEventListener('click', function () { _runDailyNotesForUnit(unit); });
+
   // S28: Orcha Deep Scan button — on-demand AI analysis for this unit
   var actOrchaDeep = document.getElementById('dp-act-orcha-deep');
   if (actOrchaDeep) {
@@ -2476,144 +2684,64 @@ function _renderUnit(unit) {
 }
 
 // ── _wireHistoryPane ───────────────────────────────────────────────────────
-// Builds a clean 3-month repair-history list for the History tab:
-//   MM/DD/YYYY - short description
-// Merges three per-unit sources into dated entries, then dedupes so the SAME
-// work order + vendor collapses to one line that shows the LATEST known root
-// cause (cause/correction) instead of repeating the original complaint:
-//   1) structured repairHistory store (window.fleet.repairHistory) — dated events
-//   2) each work order on the row (primary WO + _plannedWRData + _secondaryWRs)
-//   3) repairTimeline lines (MM/DD - text) as a fallback for anything else
-// Everything is filtered to the last ~90 days and sorted newest-first.
+// Populates the History tab's Breakdown History: one card per down->up repair
+// cycle (date down -> date back . duration . root cause . vendor) plus an AI
+// analysis line each, with a quick AI summary of the unit's pattern at top.
+// All computed server-side by the breakdown-history:get IPC (buildBreakdowns +
+// cached AI); this just fetches and renders. Honest empty state when none.
 function _wireHistoryPane(unit) {
-  var host = document.getElementById('dp-repair-history');
-  if (!host) return;
+  var list    = document.getElementById('dp-breakdown-list');
+  var summary = document.getElementById('dp-breakdown-summary');
+  if (!list) return;
 
-  var NINETY_DAYS = 90 * 24 * 60 * 60 * 1000;
-  var now = Date.now();
-  var thisYear = new Date().getFullYear();
+  function fmtDateShort(ymd) {
+    if (!ymd) return '';
+    var p = String(ymd).split('-');
+    if (p.length !== 3) return esc(ymd);
+    return parseInt(p[1], 10) + '/' + parseInt(p[2], 10) + '/' + p[0].slice(2);
+  }
 
-  // Parse a date-ish value into a JS timestamp (ms) or null.
-  function toTs(v) {
-    if (!v) return null;
-    if (typeof v === 'number') return v;
-    var s = String(v).trim();
-    if (!s) return null;
-    // MM/DD (no year) -> assume current year
-    var md = s.match(/^(\d{1,2})\/(\d{1,2})$/);
-    if (md) {
-      var t = new Date(thisYear, parseInt(md[1], 10) - 1, parseInt(md[2], 10)).getTime();
-      // if that lands in the future (e.g. Dec date early next year), roll back a year
-      return t > now + 86400000 ? new Date(thisYear - 1, parseInt(md[1], 10) - 1, parseInt(md[2], 10)).getTime() : t;
+  function renderCard(b) {
+    var back = b.ongoing
+      ? '<span class="dp-bd-ongoing">ongoing</span>'
+      : '<span class="dp-bd-date">' + fmtDateShort(b.backDate) + '</span>';
+    var dur = b.days != null ? b.days + 'd' : (b.ongoing ? 'still down' : '?');
+    var vend = b.vendor ? '<span class="dp-bd-vendor">' + esc(b.vendor) + '</span>' : '';
+    var analysis = b.analysis
+      ? '<div class="dp-bd-analysis"><span class="dp-bd-analysis-label">Analysis:</span> ' + esc(b.analysis) + '</div>'
+      : '';
+    return '<div class="dp-bd-card' + (b.ongoing ? ' dp-bd-card--ongoing' : '') + '">' +
+      '<div class="dp-bd-head">' +
+        '<span class="dp-bd-dates"><span class="dp-bd-date">' + fmtDateShort(b.downDate) + '</span>' +
+          '<span class="dp-bd-arrow"> \u2192 </span>' + back + '</span>' +
+        '<span class="dp-bd-dur">' + esc(dur) + '</span>' +
+      '</div>' +
+      (b.reportedIssue ? '<div class="dp-bd-reported"><span class="dp-bd-field-label">Reported:</span> ' + esc(b.reportedIssue) + '</div>' : '') +
+      '<div class="dp-bd-cause"><span class="dp-bd-field-label">Root cause:</span> ' + esc(b.rootCause || 'Repair') + '</div>' +
+      (vend ? '<div class="dp-bd-meta">' + vend + '</div>' : '') +
+      analysis +
+    '</div>';
+  }
+
+  var fetch = (window.fleet && window.fleet.breakdownHistory)
+    ? window.fleet.breakdownHistory(unit.equipmentId, unit).catch(function(e) { return { breakdowns: [], summary: '', error: (e && e.message) || 'error' }; })
+    : Promise.resolve({ breakdowns: [], summary: '' });
+
+  fetch.then(function(res) {
+    res = res || {};
+    var bds = res.breakdowns || [];
+    if (summary) {
+      summary.innerHTML = res.summary
+        ? '<div class="dp-bd-summary-text">' + esc(res.summary) + '</div>'
+        : '';
     }
-    var d = new Date(s);
-    return isNaN(d.getTime()) ? null : d.getTime();
-  }
-
-  function fmtMDY(ts) {
-    var d = new Date(ts);
-    return (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
-  }
-
-  function shorten(txt) {
-    var s = String(txt || '').replace(/\s+/g, ' ').trim();
-    return s.length > 140 ? s.slice(0, 138) + '\u2026' : s;
-  }
-
-  // Collect raw candidate entries: { ts, desc, vendor, woKey, isRoot }
-  function collect(store) {
-    var out = [];
-
-    // (1) structured repair-history store
-    (store || []).forEach(function(e) {
-      var ts = toTs(e.date) || e.ts || null;
-      if (ts == null) return;
-      out.push({ ts: ts, desc: e.summary || '', vendor: e.vendor || '', woKey: '', isRoot: e.outcome === 'completed' });
-    });
-
-    // (2) work orders on the row
-    function pushWO(wo, tag) {
-      if (!wo) return;
-      var ts = toTs(wo.created) || toTs(wo.completed);
-      if (ts == null) return;
-      var woKey = (wo.workRequestId || wo.alternativeId || wo.vendorWorkOrderId || '') + '|' + (wo.vendor || '');
-      // root cause = cause/correction if present, else the reported issue
-      var root = (wo.cause || wo.correction || '').trim();
-      var desc = root || wo.issueDetails || wo.issueSummary || tag || 'Work order';
-      out.push({ ts: ts, desc: desc, vendor: wo.vendor || '', woKey: woKey.trim() === '|' ? '' : woKey, isRoot: !!root });
-    }
-    pushWO(unit, 'Primary WR');
-    pushWO(unit._plannedWRData, 'Planned WR');
-    (unit._secondaryWRs || []).forEach(function(w) { pushWO(w, 'Secondary WR'); });
-
-    // (3) repairTimeline lines (MM/DD - text)
-    var tl = (unit.repairTimeline || '').split('\n');
-    tl.forEach(function(line) {
-      var m = line.trim().match(/^(\d{1,2}\/\d{1,2})\s*[-\u2013]\s*(.+)$/);
-      if (!m) return;
-      var ts = toTs(m[1]);
-      if (ts == null) return;
-      out.push({ ts: ts, desc: m[2], vendor: '', woKey: '', isRoot: false });
-    });
-
-    return out;
-  }
-
-  function dedupe(entries) {
-    // Merge by work-order key: keep ONE row per WO+vendor, preferring the entry
-    // that carries a root cause and the most recent date.
-    var byWO = {};
-    var loose = [];
-    entries.forEach(function(en) {
-      if (!en.woKey) { loose.push(en); return; }
-      var cur = byWO[en.woKey];
-      if (!cur) { byWO[en.woKey] = en; return; }
-      // prefer root-cause entry; then prefer newer date
-      if ((en.isRoot && !cur.isRoot) || (en.isRoot === cur.isRoot && en.ts > cur.ts)) {
-        byWO[en.woKey] = en;
-      }
-    });
-    var merged = Object.keys(byWO).map(function(k) { return byWO[k]; }).concat(loose);
-    // drop near-duplicate loose lines (same day + same text)
-    var seen = {};
-    return merged.filter(function(en) {
-      var key = fmtMDY(en.ts) + '::' + shorten(en.desc).toLowerCase();
-      if (seen[key]) return false;
-      seen[key] = true;
-      return true;
-    });
-  }
-
-  function render(entries) {
-    var recent = entries
-      .filter(function(en) { return en.ts != null && (now - en.ts) < NINETY_DAYS && en.ts <= now + 86400000; })
-      .sort(function(a, b) { return b.ts - a.ts; });
-
-    if (!recent.length) {
-      host.innerHTML = '<div class="dp-empty" style="color:var(--mut);font-style:italic">No repair events in the last 3 months.</div>';
+    if (!bds.length) {
+      list.innerHTML = '<div class="dp-empty" style="color:var(--mut);font-style:italic">No breakdowns in the last 3 months.</div>';
       return;
     }
-    host.innerHTML = recent.map(function(en) {
-      var vend = en.vendor ? ' <span class="dp-rh-vendor">' + esc(en.vendor) + '</span>' : '';
-      return '<div class="dp-rh-item">' +
-        '<span class="dp-rh-date">' + esc(fmtMDY(en.ts)) + '</span>' +
-        '<span class="dp-rh-dash"> \u2014 </span>' +
-        '<span class="dp-rh-text">' + esc(shorten(en.desc)) + '</span>' + vend +
-      '</div>';
-    }).join('');
-  }
-
-  // Fetch the structured store async, then merge with row-derived entries.
-  var fetchStore = (window.fleet && window.fleet.repairHistory)
-    ? window.fleet.repairHistory(unit.equipmentId).catch(function() { return []; })
-    : Promise.resolve([]);
-
-  fetchStore.then(function(store) {
-    try {
-      render(dedupe(collect(store || [])));
-    } catch (e) {
-      host.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to build history: ' + esc(e.message || 'error') + '</div>';
-    }
+    list.innerHTML = bds.map(renderCard).join('');
+  }).catch(function(e) {
+    list.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to load breakdown history: ' + esc((e && e.message) || 'error') + '</div>';
   });
 }
 
@@ -2705,6 +2833,93 @@ export function init(container) {
   bus.on('ui:unit-select', ({ unit }) => {
     _renderUnit(unit);
     requestAnimationFrame(() => _panel.classList.add('detail-panel--open'));
+
+    // LAZY per-unit API refresh (API mode): the bulk fleet load skips comments
+    // AND the multi-WO (planned/unplanned) detail for speed. When a unit opens,
+    // pull its fresh comment thread + ALL its work orders from the API and
+    // re-render. Best-effort; never blocks the panel (already rendered above).
+    try {
+      if (window.aapApi && window.aapApi.refreshUnit && unit && unit.equipmentId) {
+        // Only when the row looks API-sourced or is missing its timeline/WO set.
+        const needsDetail = unit._apiSourced || !unit.repairTimeline || !unit._secondaryWRs;
+        if (needsDetail) {
+          const _targetId = unit.equipmentId;
+          window.aapApi.refreshUnit(_targetId).then((res) => {
+            if (!res || res.ok === false || !res.row) return;
+            // Only patch if the user is still on this same unit.
+            if (!_unit || _unit.equipmentId !== _targetId) return;
+            if (!_panel || !_panel.classList.contains('detail-panel--open')) return;
+            const fresh = res.row;
+            // ASSET-IS-TRUTH: if the fresh row reports the unit as in-service
+            // (relaySynced:false — the API cleared the WO framing because the
+            // asset is Active), ADOPT those cleared values instead of falling
+            // back to the stale _unit WO data. Otherwise the "x || _unit.x"
+            // fallbacks below would re-show the old work order (124124 showing
+            // "Active / Offsite Shop Repair" with a 2-year-old WO).
+            const _freshAvailable = fresh.relaySynced === false;
+            const patched = _freshAvailable
+              ? Object.assign({}, _unit, {
+                  relaySynced: false,
+                  lifecycleState: fresh.lifecycleState || _unit.lifecycleState,
+                  lifecycleReason: '',
+                  vendor: '', serviceState: '', subState: '', serviceCategory: '',
+                  issueDetails: '', issueSummary: '', workRequestId: '', serviceUrl: '',
+                  _serviceId: '', created: '', completed: '', level1: '', level2: '',
+                  repairTimeline: '', fullConversation: '',
+                  vin: fresh.vin || _unit.vin,
+                  pmB: fresh.pmB || _unit.pmB, pmX: fresh.pmX || _unit.pmX,
+                  dot: fresh.dot || _unit.dot, quarterlyLift: fresh.quarterlyLift || _unit.quarterlyLift,
+                  _secondaryWRs: [],
+                })
+              : Object.assign({}, _unit, {
+                  relaySynced:    fresh.relaySynced != null ? fresh.relaySynced : _unit.relaySynced,
+                  lifecycleState: fresh.lifecycleState || _unit.lifecycleState,
+                  lifecycleReason: fresh.lifecycleReason != null ? fresh.lifecycleReason : _unit.lifecycleReason,
+                  vendor:         fresh.vendor || _unit.vendor,
+                  serviceState:   fresh.serviceState || _unit.serviceState,
+                  subState:       fresh.subState || _unit.subState,
+                  serviceCategory: fresh.serviceCategory || _unit.serviceCategory,
+                  issueDetails:   fresh.issueDetails || _unit.issueDetails,
+                  issueSummary:   fresh.issueSummary || _unit.issueSummary,
+                  workRequestId:  fresh.workRequestId || _unit.workRequestId,
+                  serviceUrl:     fresh.serviceUrl || _unit.serviceUrl,
+                  _serviceId:     fresh._serviceId || _unit._serviceId,
+                  created:        fresh.created || _unit.created,
+                  completed:      fresh.completed || _unit.completed,
+                  level1:         fresh.level1 || _unit.level1,
+                  level2:         fresh.level2 || _unit.level2,
+                  repairTimeline: fresh.repairTimeline || _unit.repairTimeline,
+                  vin:            fresh.vin || _unit.vin,
+                  geofence:       fresh.geofence || _unit.geofence,
+                  pmB: fresh.pmB || _unit.pmB, pmX: fresh.pmX || _unit.pmX,
+                  dot: fresh.dot || _unit.dot, quarterlyLift: fresh.quarterlyLift || _unit.quarterlyLift,
+                  // Offsite (Decisiv/ASIST) — gives Split View its right pane immediately.
+                  offsiteShopEventUrl: fresh.offsiteShopEventUrl || _unit.offsiteShopEventUrl,
+                  savedOffsiteUrl:     fresh.savedOffsiteUrl || _unit.savedOffsiteUrl,
+                  offsiteShopEvent:    fresh.offsiteShopEvent || _unit.offsiteShopEvent,
+                  asistSrUrl:          fresh.asistSrUrl || _unit.asistSrUrl,
+                  asistLabel:          fresh.asistLabel || _unit.asistLabel,
+                  asistSource:         fresh.asistSource || _unit.asistSource,
+                  _secondaryWRs:  fresh._secondaryWRs || _unit._secondaryWRs,
+                });
+            // Preserve the active tab across the re-render.
+            const activeEl = _panel.querySelector('.dp-tab.active');
+            const activeTab = activeEl && activeEl.dataset ? activeEl.dataset.tab : null;
+            _renderUnit(patched);
+            if (activeTab) {
+              const btn = _panel.querySelector('.dp-tab[data-tab="' + activeTab + '"]');
+              const pane = document.getElementById('dp-pane-' + activeTab);
+              if (btn && pane) {
+                _panel.querySelectorAll('.dp-tab').forEach((t) => t.classList.remove('active'));
+                _panel.querySelectorAll('.dp-pane').forEach((p) => p.classList.remove('active'));
+                btn.classList.add('active');
+                pane.classList.add('active');
+              }
+            }
+          }).catch(() => { /* best-effort */ });
+        }
+      }
+    } catch (_) { /* best-effort; panel already rendered */ }
   });
 
   bus.on('ui:unit-deselect', () => {
