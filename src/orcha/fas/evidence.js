@@ -77,8 +77,31 @@ async function buildEvidence({ profile, text, question, factsNeeded, mode }) {
   const missingFacts = [];
   const sources = new Set();
   const denied = [];
+  const linkRefusals = [];
 
   const ctx = { profile, mode: mode || 'disabled' };
+
+  // ── Resolve shared links FIRST, so an AAP work-order/asset link can REVEAL a
+  // unit id that then gets the same full unit research below. This is what lets
+  // "here's an AAP link" messages (no unit typed) still produce verified unit
+  // facts — the link is resolved via the AAP JSON API (incl. the conversation),
+  // its unit id is extracted, and that unit is merged into the research set.
+  let linkUnits = [];
+  if (linkResearch) {
+    try {
+      const lr = await linkResearch.researchLinks(text || question || '');
+      (lr.evidence || []).forEach(f => { verifiedFacts.push(f); if (f.source) sources.add(f.source); });
+      (lr.refused || []).forEach(r => linkRefusals.push(r));
+      linkUnits = Array.isArray(lr.units) ? lr.units : [];
+    } catch (e) { /* link research is best-effort */ }
+  }
+  // Merge link-discovered units into the research set (dedup, authorization is
+  // still enforced per-unit by GET_UNIT below — a link can't widen scope).
+  if (linkUnits.length) {
+    const have = new Set(entities.units.map(x => String(x).toUpperCase()));
+    for (const lu of linkUnits) { if (lu && !have.has(String(lu).toUpperCase())) { entities.units.push(lu); have.add(String(lu).toUpperCase()); } }
+  }
+
   const primaryUnit = entities.units[0] || null;
 
   // Per-unit evidence (only for the units actually referenced).
@@ -149,16 +172,6 @@ async function buildEvidence({ profile, text, question, factsNeeded, mode }) {
 
   // Prompt-injection scan on the incoming message (untrusted).
   const injection = guard.detectInjection(text || question || '');
-
-  // Approved-link research: fetch ONLY allowlisted domains, treat as untrusted.
-  const linkRefusals = [];
-  if (linkResearch) {
-    try {
-      const lr = await linkResearch.researchLinks(text || question || '');
-      (lr.evidence || []).forEach(f => { verifiedFacts.push(f); sources.add(f.source); });
-      (lr.refused || []).forEach(r => linkRefusals.push(r));
-    } catch (e) { /* link research is best-effort */ }
-  }
 
   // ── CONFLICT DETECTION across the collected sources ──────────────────────
   // Surface contradictions so the AI reasons about them instead of picking one
