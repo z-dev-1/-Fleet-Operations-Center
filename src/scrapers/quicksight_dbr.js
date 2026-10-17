@@ -246,7 +246,11 @@ async function _capturePageText(url, readyCheckExpr, label) {
     win = new BrowserWindow({
       show: false, skipTaskbar: true,
       width: 1600, height: 1200,
-      webPreferences: { nodeIntegration: false, contextIsolation: true },
+      // Keep rendering at full speed while hidden AND while the workstation is
+      // locked — QuickSight's SPA needs a live, non-throttled surface to finish
+      // its (slow) visual render; a throttled hidden window stalls on lock.
+      paintWhenInitiallyHidden: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, backgroundThrottling: false },
     });
 
     logger.info('Loading ' + label + ' QuickSight dashboard...');

@@ -127,10 +127,16 @@ async function _ensureWindow() {
 
   const win = new BrowserWindow({
     width: 1400, height: 800, show: false, x: -3000, y: -3000, skipTaskbar: true,
+    // paintWhenInitiallyHidden + backgroundThrottling:false keep this hidden
+    // window rendering/executing at full speed even when the screen is off or
+    // the workstation is LOCKED — without these, Chromium throttles a hidden,
+    // display-inactive window and the fleet API load stalls while locked.
+    paintWhenInitiallyHidden: true,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       session: session.defaultSession,
+      backgroundThrottling: false,
     },
   });
   _win = win;

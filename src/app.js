@@ -650,6 +650,43 @@ function _startAutoSync() {
     setTimeout(() => scheduler.catchUp(), 15000);
   });
 
+  // ── 5i-2. Keep running while the workstation is LOCKED ─────────────────────
+  // A powerSaveBlocker('prevent-app-suspension') stops the OS from suspending
+  // the app / throttling its timers when the screen locks or the display turns
+  // off — so the 5-min fleet sync, the scheduler slots (SP/email/DBR), Slack
+  // polling, and the hidden scraper windows keep running while the computer is
+  // locked. NOTE: this prevents APP suspension and display-idle throttling; it
+  // does NOT stop a full system SLEEP (lid close / power sleep) — on real sleep
+  // the whole machine halts and the resume handler above catches up on wake.
+  // 'prevent-app-suspension' is deliberately used (not 'prevent-display-sleep')
+  // so the monitor can still turn off normally; we only keep the app alive.
+  try {
+    const { powerSaveBlocker } = require('electron');
+    let _psbId = powerSaveBlocker.start('prevent-app-suspension');
+    log.info('powerSaveBlocker started (prevent-app-suspension) id=' + _psbId + ' active=' + powerSaveBlocker.isStarted(_psbId));
+    _ctx.powerSaveBlockerId = _psbId;
+    // Belt-and-suspenders: if the OS ever drops the blocker across a
+    // suspend/resume cycle, re-arm it on resume so locked operation stays
+    // protected for the next lock.
+    powerMonitor.on('resume', () => {
+      try {
+        if (!powerSaveBlocker.isStarted(_psbId)) {
+          _psbId = powerSaveBlocker.start('prevent-app-suspension');
+          _ctx.powerSaveBlockerId = _psbId;
+          log.info('powerSaveBlocker re-armed after resume id=' + _psbId);
+        }
+      } catch (e) { log.warn('powerSaveBlocker re-arm failed (non-fatal): ' + e.message); }
+    });
+  } catch (e) {
+    log.warn('powerSaveBlocker start failed (non-fatal): ' + e.message);
+  }
+
+  // Lock/unlock visibility (helps diagnose "did it keep working while locked?").
+  try {
+    powerMonitor.on('lock-screen', () => log.info('Workstation LOCKED — app continues (powerSaveBlocker active)'));
+    powerMonitor.on('unlock-screen', () => log.info('Workstation UNLOCKED'));
+  } catch (_) { /* lock-screen events are Windows/macOS only */ }
+
   // ── 5j. Digital FAS coverage profile — derive Zila's domiciles+operators ───
   // (SCAC/carriers) from the authoritative synced fleetData at startup, then on
   // a periodic safety refresh. Sync-complete also refreshes it (see sync/index).
