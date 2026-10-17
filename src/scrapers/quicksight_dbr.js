@@ -56,9 +56,19 @@ const DSP_DASHBOARD_URL =
 const QUICKSIGHT_HOST_RE = /quicksight\.aws\.amazon\.com/i;
 const SSO_HOST_RE        = /midway|login\.amazon|signin|sso\.amazon|oidc|oauth|\/auth\//i;
 
-const PAGE_LOAD_TIMEOUT = 45000; // QuickSight SPA + embedded iframe can be slow to settle
-const DOM_POLL_INTERVAL = 1000;
-const DOM_POLL_MAX      = 40;    // ~40s of polling for real content to render
+// Budgets are env-overridable so a very slow link can be given more room
+// without a code change (QS_LOAD_MS / QS_READY_MS, in milliseconds).
+// SLOW-NETWORK FIX (2026-10-17): the old fixed 45s load + 40s poll gave up
+// before QuickSight finished on slow connections — the capture returned early,
+// so the DBR pull "failed" even though the dashboard would have rendered given
+// more time. Budgets raised AND the readiness wait is now progress-aware (keeps
+// waiting while the page is visibly still loading, see pollUntilReady) instead
+// of bailing at a fixed try count.
+const PAGE_LOAD_TIMEOUT = Number(process.env.QS_LOAD_MS) || 90000; // was 45s
+const DOM_POLL_INTERVAL = 1500;
+const READY_BUDGET_MS   = Number(process.env.QS_READY_MS) || 180000; // up to 3 min for content to render on slow links
+// Kept for the back-compat pollUntil signature; readiness now uses READY_BUDGET_MS.
+const DOM_POLL_MAX      = Math.ceil(READY_BUDGET_MS / DOM_POLL_INTERVAL);
 
 let _qsLock = false; // re-entrancy guard, mirrors _uptakeLock / _relayLock
 
@@ -95,6 +105,58 @@ async function pollUntil(win, expr, intervalMs = DOM_POLL_INTERVAL, maxTries = D
     } catch (_) {}
     await sleep(intervalMs);
   }
+  return false;
+}
+
+// Snapshot of page "progress" signals, evaluated in-page: how much text has
+// rendered, and whether QuickSight is still visibly loading (spinner / loading
+// text / the data-query overlay). Used so the readiness wait is PATIENT on slow
+// networks — it keeps waiting as long as the page is still making progress,
+// and only gives up once the budget is spent.
+const PROGRESS_PROBE = `
+(function(){
+  var t = document.body ? (document.body.innerText || '') : '';
+  var loading = /\\bloading\\b|please wait|retrieving|fetching/i.test(t)
+    || !!document.querySelector('[class*="loading" i],[class*="spinner" i],[class*="Spinner"],[data-automation-id*="loading" i],[aria-busy="true"]');
+  return { len: t.length, loading: loading };
+})()`;
+
+// ── Progress-aware readiness wait (slow-network resilient) ────────────────
+// Resolves true as soon as readyCheckExpr passes. Otherwise keeps polling until
+// READY_BUDGET_MS is exhausted — but it will NOT give up early just because a
+// fixed try-count elapsed: as long as the page is still loading or its text is
+// still growing, it keeps waiting within the budget. Only a page that has gone
+// quiet (no spinner, text not growing) AND has blown the budget is treated as a
+// genuine timeout.
+async function pollUntilReady(win, readyCheckExpr, label) {
+  const deadline = Date.now() + READY_BUDGET_MS;
+  let lastLen = 0;
+  let lastProgressAt = Date.now();
+  // If the page stops making ANY progress for this long AND the ready check
+  // still fails, conclude it's stuck (not just slow) and stop early.
+  const STALL_MS = 45000;
+  while (Date.now() < deadline) {
+    if (win.isDestroyed()) return false;
+    try {
+      const ready = await win.webContents.executeJavaScript(readyCheckExpr);
+      if (ready) return true;
+    } catch (_) {}
+    let prog = null;
+    try { prog = await win.webContents.executeJavaScript(PROGRESS_PROBE); } catch (_) {}
+    if (prog) {
+      const growing = prog.len > lastLen;
+      if (growing || prog.loading) lastProgressAt = Date.now();
+      lastLen = prog.len;
+      // Stuck: no growth and not loading for STALL_MS → give up early (don't
+      // burn the whole 3-min budget on a genuinely broken/empty page).
+      if (!growing && !prog.loading && (Date.now() - lastProgressAt) > STALL_MS) {
+        logger.warn('[' + label + '] page stalled (no progress for ' + Math.round(STALL_MS/1000) + 's) — giving up before budget');
+        return false;
+      }
+    }
+    await sleep(DOM_POLL_INTERVAL);
+  }
+  logger.warn('[' + label + '] readiness budget (' + Math.round(READY_BUDGET_MS/1000) + 's) exhausted');
   return false;
 }
 
@@ -190,19 +252,35 @@ async function _capturePageText(url, readyCheckExpr, label) {
     logger.info('Loading ' + label + ' QuickSight dashboard...');
     const loadPromise = win.loadURL(url);
     await Promise.race([loadPromise, sleep(PAGE_LOAD_TIMEOUT)]);
-    await waitForLoadQuiet(win, PAGE_LOAD_TIMEOUT, 1200);
+    // Longer quiet window: on a slow link the SPA fires did-finish-load in
+    // widely-spaced bursts; 1.2s was short enough to "settle" mid-load. The
+    // real content wait is pollUntilReady below, so being generous here is safe.
+    await waitForLoadQuiet(win, PAGE_LOAD_TIMEOUT, 2500);
 
-    const curUrl = win.isDestroyed() ? '' : win.webContents.getURL();
+    // SSO check — but on a slow link we may still be MID-redirect through
+    // Midway when the load quiets, which is NOT a failure. Wait up to ~30s for
+    // the redirect chain to land on QuickSight before concluding "not logged
+    // in". Only a URL that STAYS on the SSO/login host is a real auth failure.
+    let curUrl = win.isDestroyed() ? '' : win.webContents.getURL();
     if (SSO_HOST_RE.test(curUrl) && !QUICKSIGHT_HOST_RE.test(curUrl)) {
-      logger.warn('Landed on SSO/login page, not QuickSight:', curUrl);
-      return { ok: false, error: 'Not logged in to QuickSight/Midway — open the dashboard once in a browser to establish SSO, then retry.' };
+      const ssoDeadline = Date.now() + 30000;
+      while (Date.now() < ssoDeadline && !win.isDestroyed()) {
+        await sleep(2000);
+        curUrl = win.webContents.getURL();
+        if (QUICKSIGHT_HOST_RE.test(curUrl)) break;         // landed on QS — good
+        if (!SSO_HOST_RE.test(curUrl)) break;               // moved off SSO host
+      }
+      if (SSO_HOST_RE.test(curUrl) && !QUICKSIGHT_HOST_RE.test(curUrl)) {
+        logger.warn('Stuck on SSO/login page, not QuickSight:', curUrl);
+        return { ok: false, error: 'Not logged in to QuickSight/Midway — open the dashboard once in a browser to establish SSO, then retry.' };
+      }
     }
 
-    logger.info('Polling for ' + label + ' content to render...');
-    const ready = await pollUntil(win, readyCheckExpr, DOM_POLL_INTERVAL, DOM_POLL_MAX);
+    logger.info('Polling for ' + label + ' content to render (patient; up to ' + Math.round(READY_BUDGET_MS / 1000) + 's on slow links)...');
+    const ready = await pollUntilReady(win, readyCheckExpr, label);
     if (!ready) {
       logger.warn('Timed out waiting for ' + label + ' content to appear.');
-      return { ok: false, error: 'Timed out waiting for the ' + label + ' dashboard to load. Try again, or verify the dashboard URL is still correct.' };
+      return { ok: false, error: 'Timed out waiting for the ' + label + ' dashboard to load (slow network?). It kept trying for ' + Math.round(READY_BUDGET_MS / 1000) + 's — retry on a better connection, or set QS_READY_MS higher.' };
     }
 
     const text = await win.webContents.executeJavaScript(GET_BODY_TEXT);
