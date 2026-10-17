@@ -626,6 +626,64 @@ describe('canonical_state — multidimensional axes (dimensions)', () => {
   });
 });
 
+describe('canonical_state — Decisiv "Asset Ready" vs "towed out" (domain rule)', () => {
+  it('"Case status set to Asset Ready" is the guaranteed ready-for-pickup marker', () => {
+    expect(canonical._isReadyForPickup('Case status set to Asset Ready.')).toBe(true);
+    const rec = canonical.computeCanonical({ equipmentId: 'AR1', lifecycleState: 'Unavailable', serviceState: 'Case status set to Asset Ready' });
+    expect(rec.status).toBe('ready_for_pickup');
+    expect(rec.dimensions.phase.value).toBe('complete');
+  });
+
+  it('the full completion note (Asset is Ready / ready for pickup) reads as ready', () => {
+    const note = 'Asset is Ready.\nNOTE: Repairs on your unit have been completed, and the vehicle is now ready for pickup.\nCase status set to Asset Ready.';
+    expect(canonical._isReadyForPickup(note)).toBe(true);
+    const rec = canonical.computeCanonical({ equipmentId: 'AR2', lifecycleState: 'Unavailable', serviceState: note });
+    expect(rec.status).toBe('ready_for_pickup');
+  });
+
+  it('"ready to be towed out" is an INBOUND tow — NEVER ready for pickup', () => {
+    const note = 'FAS HAS CONFIRMED WITH POC- UNIT IS ON SITE AND READY TO BE TOWED OUT';
+    expect(canonical._isTowOut(note)).toBe(true);
+    expect(canonical._isReadyForPickup(note)).toBe(false);
+    const rec = canonical.computeCanonical({ equipmentId: 'TO1', lifecycleState: 'Unavailable', serviceState: note });
+    expect(rec.status).toBe('in_transit');          // tow TO the dealer, not ready
+    expect(rec.status).not.toBe('ready_for_pickup');
+  });
+
+  it('"asset is ready to be towed out" does NOT get swallowed as ready', () => {
+    // The dangerous case: a loose "asset is ready" prefix in front of tow-out.
+    const note = 'asset is ready to be towed out to the dealer';
+    expect(canonical._isReadyForPickup(note)).toBe(false);
+    const rec = canonical.computeCanonical({ equipmentId: 'TO2', lifecycleState: 'Unavailable', serviceState: note });
+    expect(rec.status).toBe('in_transit');
+  });
+
+  it('other inbound-tow phrasings map to in_transit, not ready', () => {
+    for (const note of ['needs to go to the dealer', 'tow it out to the shop', 'staged for a tow', 'awaiting tow to vendor']) {
+      expect(canonical._isReadyForPickup(note)).toBe(false);
+      const rec = canonical.computeCanonical({ equipmentId: 'TOx', lifecycleState: 'Unavailable', serviceState: note });
+      expect(rec.status).toBe('in_transit');
+    }
+  });
+
+  it('the AI decision path also refuses to mark a tow-out as ready', () => {
+    const rec = canonical.reconcileCanonical(
+      { equipmentId: 'TO3', lifecycleState: 'Unavailable' },
+      { decision: { equipmentId: 'TO3', currentStatus: 'unit is on site and ready to be towed out', nextStep: 'arrange tow to dealer', confidence: 0.8 } }
+    );
+    expect(rec.status).toBe('in_transit');
+    expect(rec.status).not.toBe('ready_for_pickup');
+  });
+
+  it('the AI decision path DOES mark a real Asset Ready as ready_for_pickup', () => {
+    const rec = canonical.reconcileCanonical(
+      { equipmentId: 'AR3', lifecycleState: 'Unavailable' },
+      { decision: { equipmentId: 'AR3', currentStatus: 'Case status set to Asset Ready', nextStep: 'arrange pickup', confidence: 0.9 } }
+    );
+    expect(rec.status).toBe('ready_for_pickup');
+  });
+});
+
 describe('relay_reconcile_apply — reply_to_vendor is always confirm-gated', () => {
   it('a reply_to_vendor decision is STAGED even when MODE A auto-post is on', async () => {
     const apply = require('../src/scrapers/relay_reconcile_apply');

@@ -16,6 +16,17 @@
 const { BrowserWindow } = require('electron');
 const { partitionForUrl, attachAutoLogin } = require('../orcha/auto-login');
 const logger = require('../utils/logger')('asist-enrich');
+// Single-sourced domain rule: "Case status set to Asset Ready" (the guaranteed
+// completion marker) + ready-for-pickup prose == ready; "ready to be towed out"
+// (inbound tow to the dealer, repair not started) is explicitly NOT ready.
+let _canon; try { _canon = require('../orcha/canonical_state'); } catch (_) { _canon = null; }
+function _stageReady(text) {
+  if (_canon && typeof _canon._isReadyForPickup === 'function') return _canon._isReadyForPickup(text);
+  // Fallback if canonical_state is unavailable: inline guard.
+  const t = String(text || '');
+  if (/ready\s+to\s+be\s+towed|tow(ed)?\s+out\s+to|needs?\s+to\s+(be\s+towed|go\s+to)|staged\s+for\s+(a\s+)?tow|ready\s+for\s+tow|awaiting\s+tow\s+to/i.test(t)) return false;
+  return /case\s+status\s+set\s+to\s+asset\s+ready|asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed/i.test(t);
+}
 
 // Both Volvo and PACCAR use the Decisiv platform with identical URL shapes:
 //   Volvo:  https://volvopg.asist.decisiv.net/service_requests/<id>
@@ -224,8 +235,14 @@ const ASIST_SCRAPE = String.raw`
     else if (lastDoneIdx >= 0) { chosenIdx = lastDoneIdx; conf = 'completed-marker'; }
     // Last-resort: if NO markers were detected but the Ready label itself exists
     // and the body text explicitly says the asset is ready, treat it as ready.
-    if (chosenIdx < 0 && stageNodes['ready'] &&
-        /asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed/i.test(body)) {
+    // GUARD (2026-10): "ready to be towed out" means the unit must be towed TO
+    // the dealer (inbound, repair NOT started) — the OPPOSITE of ready-for-
+    // pickup. Exclude tow-out phrasing so it can never set the Ready stage, and
+    // require the guaranteed completion marker ("Case status set to Asset
+    // Ready") or an unambiguous ready-for-pickup phrase.
+    var _towOut = /ready\s+to\s+be\s+towed|tow(ed)?\s+out\s+to|tow(ed)?\s+(it\s+)?(out\s+)?to\s+(the\s+)?(dealer|shop|vendor)|needs?\s+to\s+(be\s+towed|go\s+to\s+(the\s+)?(dealer|shop))|staged\s+for\s+(a\s+)?tow|ready\s+for\s+tow|awaiting\s+tow\s+to/i;
+    var _readyNow = /case\s+status\s+set\s+to\s+asset\s+ready|asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed/i;
+    if (chosenIdx < 0 && stageNodes['ready'] && !_towOut.test(body) && _readyNow.test(body)) {
       chosenIdx = 4; conf = 'text-fallback';
     }
     if (chosenIdx >= 0) { offsiteStage = STAGE_ORDER[chosenIdx]; offsiteStageConfidence = conf; }
@@ -421,8 +438,10 @@ async function enrichVolvoAsist(srUrl){
     const offsiteText=estComments.slice(0,6000);
     logger.info('[ae] DONE (direct estimate) | est:',estId,'| commentThread:',estComments.length+'ch | via:',(est?'dom':'api'));
     // Direct-estimate path never opens the SR page, so no status-bar stage is
-    // available; infer 'ready' ONLY if the estimate comments explicitly say so.
-    var _directStage = /asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed/i.test(estComments) ? 'ready' : '';
+    // available; infer 'ready' ONLY on a genuine completion signal ("Case
+    // status set to Asset Ready" / ready-for-pickup) — never on "ready to be
+    // towed out" (that's an inbound tow TO the dealer, repair not started).
+    var _directStage = _stageReady(estComments) ? 'ready' : '';
     return{ok:true,srUrl,srNumber:'',caseNumber:estId,caseUrl:'',estimateUrl:srUrl,bestUrl:srUrl,
       bestLabel:estId?'Fleet Estimate | '+estId:'Fleet Estimate',source:'estimate',
       scrapedAt:new Date().toISOString(),error:null,srStatus:'',dealer:'',
@@ -502,7 +521,7 @@ async function enrichVolvoAsist(srUrl){
   // Prefer the SR page's structured status-bar stage; if that bar wasn't present
   // but the resolved comment thread explicitly says ready, treat it as 'ready'.
   let offsiteStage = sr.offsiteStage || '';
-  if (!offsiteStage && /asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed/i.test(statusText)) offsiteStage = 'ready';
+  if (!offsiteStage && _stageReady(statusText)) offsiteStage = 'ready';
   logger.info('[ae] DONE | offsiteStage:', offsiteStage || '(none)', '| stageConf:', sr.offsiteStageConfidence || '-');
   return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',offsiteStage,statusText,estimateComments,offsiteText};
 }

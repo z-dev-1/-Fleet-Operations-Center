@@ -122,6 +122,36 @@ function isDown(row) {
   return _lc(row && (row.lifecycleState || row.atsState)).includes('unavail');
 }
 
+// ── Decisiv/ASIST "ready" vs "tow-out" disambiguation (domain rule) ─────────────
+// CONFIRMED by operations: on a Decisiv/ASIST case, the GUARANTEED completion
+// marker is the case-status line "Case status set to Asset Ready" (optionally
+// with the prose "Asset is Ready ... ready for pickup"). THAT means the repair
+// is finished and the unit can be picked up.
+//
+// CRITICAL: "ready to be towed out" is the OPPOSITE situation — the unit is
+// staged at its HOME YARD to be towed OUT to the dealer (inbound tow; repair
+// hasn't started). It must NEVER be read as ready-for-pickup, or we'd fire a
+// "come get your unit" carrier notification on a unit that isn't even at the
+// shop yet.
+//
+// READY_RE   : the authoritative repair-complete / ready-for-pickup signals.
+// TOW_OUT_RE : the inbound "needs to be towed to the dealer" signals.
+// We test TOW_OUT_RE FIRST everywhere so the tow-out phrasing can never be
+// swallowed by a loose "ready" match (e.g. "asset is ready to be towed out").
+const TOW_OUT_RE = /ready\s+to\s+be\s+towed(\s+out)?|towed?\s+out\s+to|tow(ed)?\s+(it\s+)?(out\s+)?to\s+(the\s+)?(dealer|shop|vendor)|needs?\s+to\s+(be\s+towed|go\s+to\s+(the\s+)?(dealer|shop))|staged\s+for\s+(a\s+)?tow|ready\s+for\s+tow(\s+out)?|awaiting\s+tow\s+to/i;
+// The guaranteed completion marker + the common prose variants.
+const READY_RE = /case\s+status\s+set\s+to\s+asset\s+ready|\basset\s+is\s+ready\b|\basset\s+ready\b|ready\s+for\s+pick\s*-?\s*up|ready\s+to\s+be\s+picked\s+up|awaiting\s+pick\s*-?\s*up|ready\s+to\s+pick\s+up/i;
+
+// Does this text indicate a genuine repair-complete / ready-for-pickup state?
+// Tow-out phrasing wins (returns false) so an inbound tow is never "ready".
+function _isReadyForPickup(text) {
+  const t = String(text || '');
+  if (TOW_OUT_RE.test(t)) return false;        // inbound tow — NOT ready
+  return READY_RE.test(t);
+}
+// Does this text indicate the unit needs to be towed TO the dealer (inbound)?
+function _isTowOut(text) { return TOW_OUT_RE.test(String(text || '')); }
+
 // Days since the offsite thread was last scraped (freshness proxy), falling
 // back to a leading day-count in workDuration. Mirrors relay_reconcile.
 function _daysSinceOffsite(row) {
@@ -149,8 +179,15 @@ function _deriveStatus(row) {
   // Decommissioned / retired — terminal, check first.
   if (_has(blob, /decommission|retired|totaled|sold|salvage|scrapp?ed/)) return 'decommissioned';
 
-  // Ready / complete — a finished repair is the clearest state.
-  if (_has(blob, /ready for pickup|ready for pick-up|awaiting pickup|ready to pick/)) return 'ready_for_pickup';
+  // INBOUND TOW (home yard -> dealer) — check BEFORE "ready"/"complete" so a
+  // note like "asset is ready to be towed out" is read as a pending tow TO the
+  // dealer, NOT as a finished repair ready for pickup. Repair hasn't started.
+  if (_isTowOut(blob)) return 'in_transit';
+
+  // Ready / complete — a finished repair is the clearest state. Uses the
+  // domain rule (_isReadyForPickup): the guaranteed marker is "Case status set
+  // to Asset Ready"; tow-out phrasing is already excluded above.
+  if (_isReadyForPickup(blob)) return 'ready_for_pickup';
   if (_has(blob, /\bcomplete|completed|repair done|work complete|closed|resolved\b/)) {
     // Completed but still flagged unavailable in AAP => treat as ready for pickup,
     // not "available", until lifecycle clears.
@@ -610,7 +647,10 @@ function computeCanonical(row) {
 function _statusFromDecision(decision, baseStatus) {
   const d = decision || {};
   const txt = _lc(d.currentStatus + ' ' + d.nextStep);
-  if (d.completed || _has(txt, /ready for pickup|ready to pick|awaiting pickup/)) return 'ready_for_pickup';
+  // Inbound tow (home yard -> dealer) first — never let it read as ready.
+  if (_isTowOut(txt)) return 'in_transit';
+  // Ready for pickup only on a genuine completion signal (tow-out excluded).
+  if (d.completed || _isReadyForPickup(txt)) return 'ready_for_pickup';
   if (_has(txt, /\bcomplete|completed|repair done|closed|resolved\b/)) return 'ready_for_pickup';
   if (_has(txt, /in transit|towing|being towed|en route/)) return 'in_transit';
   if (_has(txt, /estimate.*(approv|authoriz)|awaiting approval|pending approval|approval needed/)) return 'awaiting_estimate_approval';
@@ -1155,6 +1195,10 @@ module.exports = {
   _deriveStatus,
   _deriveSource,
   _deriveFlags,
+  _isReadyForPickup,
+  _isTowOut,
+  READY_RE,
+  TOW_OUT_RE,
   _deriveAvailability,
   _derivePhase,
   _deriveLocation,
