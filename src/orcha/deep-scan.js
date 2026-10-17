@@ -523,6 +523,26 @@ async function _processUnit(u, notesStore, askOrcha) {
       logger.warn('[DS] Offsite enrich failed for ' + u.equipmentId + ': ' + e.message);
     }
   }
+  // DTNA (Daimler/Freightliner) Servicetracker: its case comment feed is a
+  // Salesforce Lightning community — scrape the rendered feed (see dtna_enrich).
+  // Same offsiteText/timeline path as Decisiv; feeds the AI timeline identically.
+  if (!offsiteText && offsiteUrl && /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(offsiteUrl)) {
+    try {
+      const { enrichDtna } = require('../scrapers/dtna_enrich');
+      const dr = await enrichDtna(offsiteUrl);
+      if (dr && dr.ok && dr.offsiteText) {
+        offsiteText = dr.offsiteText.substring(0, 3000);
+        u.asistScrapedAt = dr.scrapedAt;
+        u.asistSource = 'dtna';
+        u.asistLabel = dr.bestLabel || 'DTNA Case';
+        u.asistSrUrl = offsiteUrl;
+        if (dr.offsiteStage) u.offsiteStage = dr.offsiteStage;
+        logger.info('[DS] DTNA case enriched (live) for ' + u.equipmentId + ' | ' + offsiteText.length + 'ch');
+      }
+    } catch (e) {
+      logger.warn('[DS] DTNA enrich failed for ' + u.equipmentId + ': ' + e.message);
+    }
+  }
   const today = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' });
 
   const prompt =
