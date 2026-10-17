@@ -265,6 +265,7 @@ function initWindows(ctx) {
   let _deepScanRunning  = false;     // hoisted: guards the background Orcha AI timeline build
   let _lastDeepScanAt   = 0;         // hoisted: throttles the AI timeline build to once / 20 min
   let _autoSyncStarted  = false;     // hoisted: ensures the auto-sync timer starts exactly once
+  let _reauthInFlight   = false;     // hoisted: guards the interactive mwinit re-auth (one at a time)
   let _pmFillRunning    = false;     // hoisted: guards the background PM/location fill
   let _lastPmFillAt     = 0;         // hoisted: throttles the PM/location fill to once/hour
   const RESCAN_INTERVAL_MS = 5 * 60 * 1000; // hoisted: _showApp reads it synchronously in API mode
@@ -992,9 +993,19 @@ function initWindows(ctx) {
             pushStatus('\uD83D\uDD04 Refreshing Midway session silently\u2026');
             const r = await refreshAeaSilently();
             logger.info('[startup] Startup silent AEA refresh: ok=' + r.ok + (r.aeaMin != null ? ' (AEA now ' + r.aeaMin + 'min)' : ''));
-            if (r.ok) pushStatus('\u2705 Midway session ready');
+            if (r.ok) { pushStatus('\u2705 Midway session ready'); }
+            else {
+              // Silent re-mint couldn't land on AAP — the session is likely
+              // rejected server-side even though cookie timestamps read valid.
+              // Flip the badge + warn so the first failed load's interactive
+              // mwinit (see _loadFleetViaApiStartup catch) isn't a surprise.
+              logger.warn('[startup] silent AEA refresh did not land on AAP — session may be rejected; a real mwinit may be needed');
+              try { send('auth:mwinit-status', { ok: false, reason: 'Midway session needs refresh (mwinit)' }); } catch (_) {}
+              pushStatus('\u26A0\uFE0F Midway session needs refresh \u2014 will prompt mwinit on first load');
+            }
           } catch (e) {
             logger.warn('[startup] Startup silent AEA refresh failed (non-fatal): ' + e.message);
+            try { send('auth:mwinit-status', { ok: false, reason: 'Midway refresh failed (mwinit)' }); } catch (_) {}
           }
         }
       }
@@ -1095,8 +1106,70 @@ function initWindows(ctx) {
         // the table. Guarded to run once per load cycle.
         _maybeFillPmAllAsync(payload);
       } catch (e) {
-        logger.warn('[data-source] API load failed: ' + e.message);
-        pushError('API load failed: ' + e.message);
+        // A SERVER-REJECTED Midway session (bounced to the SSO login wall) is
+        // the one failure the timestamp-based checkMwinit() can't see: the
+        // cookie file still looks "valid" by expiry, so startup never prompts —
+        // yet every AAP load fails with "session expired". Detect that here and
+        // drive a REAL interactive mwinit (+ flip the auth badge), so the user
+        // is actually told to re-auth instead of staring at a silent failure.
+        const sessionRejected = (e && (e.code === 'MIDWAY_SESSION_INVALID')) ||
+          /session expired|session rejected|re-authenticate/i.test(e && e.message || '');
+        if (sessionRejected) {
+          logger.warn('[data-source] API load failed — AAP session REJECTED server-side (timestamps looked valid): ' + e.message);
+          try { send('auth:mwinit-status', { ok: false, reason: 'AAP session rejected — mwinit needed' }); } catch (_) {}
+          pushError('AAP session expired — re-authenticating (complete mwinit in the terminal)…');
+          if (!_reauthInFlight) {
+            _reauthInFlight = true;
+            (async () => {
+              try {
+                const { runMwinit, injectCookies, probeSession, refreshAeaSilently, checkMwinit } = _getAuth();
+                const st = checkMwinit();
+                // AAP rejects on the short-lived AEA token, which mwinit does
+                // NOT mint. So: if Midway cookies are still timestamp-valid, the
+                // failure is AEA — re-mint it SILENTLY first (no terminal). Only
+                // fall back to interactive mwinit when cookies are genuinely
+                // expired. This avoids a pointless mwinit loop on an AEA lapse.
+                let fixed = false;
+                if (st.ok) {
+                  logger.info('[data-source] cookies timestamp-valid — attempting silent AEA re-mint (no mwinit)');
+                  pushStatus('\uD83D\uDD04 Refreshing AAP enterprise-access token…');
+                  try { const r = await refreshAeaSilently(); fixed = !!(r && r.ok); } catch (_) {}
+                }
+                if (!fixed) {
+                  logger.warn('[data-source] silent AEA re-mint failed or cookies expired — interactive mwinit');
+                  pushStatus('\uD83D\uDD11 AAP session needs re-auth — complete mwinit in the terminal…');
+                  await runMwinit();                 // interactive: spawns the mwinit terminal
+                  await injectCookies();
+                  try { const r2 = await refreshAeaSilently(); fixed = !!(r2 && r2.ok); } catch (_) {}
+                }
+                await injectCookies();
+                let ok = false;
+                try { ok = await probeSession(); } catch (_) {}
+                try { require('../scrapers/aap_api').dispose(); } catch (_) {}  // drop the stale warm window
+                if (ok) {
+                  try { send('auth:mwinit-status', { ok: true }); } catch (_) {}
+                  logger.info('[data-source] re-auth verified — retrying fleet load');
+                  _loadFleetViaApiStartup('post-reauth');
+                } else {
+                  // Still rejected after both paths — stop looping. Tell the user
+                  // plainly; AEA posture (e.g. AEA extension / enterprise access)
+                  // may need attention outside the app.
+                  try { send('auth:mwinit-status', { ok: false, reason: 'AAP still rejecting after mwinit + AEA refresh' }); } catch (_) {}
+                  pushError('AAP still rejecting the session after mwinit. This is an AEA (enterprise-access) issue, not Midway — open AAP in a browser to complete the AEA handshake, then click Sync.');
+                  logger.error('[data-source] session still rejected after mwinit + silent AEA — AEA posture issue, not re-looping');
+                }
+              } catch (err) {
+                logger.error('[data-source] interactive re-auth failed: ' + err.message);
+                pushError('Re-auth failed: ' + err.message + ' — run mwinit in a terminal, then Sync.');
+              } finally {
+                _reauthInFlight = false;
+              }
+            })();
+          }
+        } else {
+          logger.warn('[data-source] API load failed: ' + e.message);
+          pushError('API load failed: ' + e.message);
+        }
       }
     }
 
