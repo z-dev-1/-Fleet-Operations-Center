@@ -318,6 +318,76 @@ async function searchAllPages(baseRequest, opts = {}) {
   return all;
 }
 
+// ── Long Dwell sources via the JSON API (replaces the CSV /download path) ────
+// Returns { wrRows, assetRows } as arrays of plain objects keyed by the SAME
+// header names the CSV exports use — so ipc/long-dwell-csv.js _mergeToImportPayload
+// can consume them unchanged (no CSV parsing, no BrowserWindow, no token capture;
+// reuses the already-authenticated API client). WR = the open-WO list (the
+// tracker's row driver); asset = fleet master data (site/operator/lifecycle).
+async function buildLongDwellSources(opts = {}) {
+  const woStatusStr = _woStatusStr;
+  // 1) Work orders — the exact DEFAULT_SEARCH_REQUEST filter the CSV export used
+  //    (UNPLANNED, open statuses, UNAVAILABLE, DSP-MMBT/vupAfp, the fleet IDs).
+  const woList = await searchAllPages(opts.searchRequest || {}, { maxPages: opts.maxPages || 50 });
+  const _epochIso = (ms) => { const n = Number(ms); if (!n || Number.isNaN(n)) return ''; try { return new Date(n).toISOString(); } catch (_) { return ''; } };
+  const wrRows = woList.map((w) => {
+    const l1 = []; const l2 = [];
+    for (const si of (w.suggestedItems || [])) {
+      if (si && si.level1 && !l1.includes(si.level1)) l1.push(si.level1);
+      if (si && si.level2 && !l2.includes(si.level2)) l2.push(si.level2);
+    }
+    return {
+      'Equipment ID':             w.assetDisplayName || '',
+      'Asset Type':               w.assetType || '',
+      'Lifecycle State Reason':   w.lifecycleStateReason || '',
+      'Vendor':                   w.vendor || '',
+      'Suppliers':                Array.isArray(w.suppliers) ? w.suppliers.join('; ') : (w.suppliers || w.providers || ''),
+      'Delay reason codes':       Array.isArray(w.delayReasonCodes) ? w.delayReasonCodes.join('; ') : (w.delayReasonCodes || ''),
+      'L1 Area of Concern':       l1.join('; '),
+      'L2 Area of Concern':       l2.join('; '),
+      'Asset Domicile Site':      w.assetDomicileSite || '',
+      'Reported location':        (w.reportedLocation && (w.reportedLocation.geofenceName || w.reportedLocation.code)) || '',
+      'Status':                   woStatusStr(w),
+      'Expected completed date time': _epochIso(w.expectedCompletedDateTime),
+      'Scheduled date time':      _epochIso(w.scheduledDateTime),
+      'Actual start date time':   _epochIso(w.actualStartDateTime),
+      'Expected start date time': _epochIso(w.expectedStartDateTime),
+      'Last modified time':       _epochIso(w.modifiedTimestamp),
+    };
+  });
+
+  // 2) Asset master data — all tractors/boxTrucks in the configured fleets,
+  //    keyed by Equipment ID, for the site/operator/lifecycle join.
+  const assetByAaid = new Map();
+  const ASSET_FIELDS = ['displayName', 'operator', 'owner', 'domicileSite', 'assetType', 'lifecycleState', 'lifecycleStateReason'];
+  for (let page = 0; page < (opts.maxPages || 60); page++) {
+    let res;
+    try { res = await searchAssets({ from: page * 150, fieldsToReturn: ASSET_FIELDS }); }
+    catch (e) { logger.warn('buildLongDwellSources: asset search page ' + page + ' failed: ' + e.message); break; }
+    const list = (res && res.assets) || [];
+    if (!list.length) break;
+    for (const a of list) {
+      const aaid = a && a.asset && a.asset.aaid;
+      if (aaid && !assetByAaid.has(aaid)) assetByAaid.set(aaid, a);
+    }
+    if (list.length < 150) break;
+  }
+  const assetRows = [...assetByAaid.values()].map((a) => {
+    const at = (a.asset && a.asset.attributesText) || {};
+    const asset = a.asset || {};
+    return {
+      'Equipment ID':          at.displayName || asset.displayName || '',
+      'Domicile site':         at.domicileSite || '',
+      'Operator':              at.operator || '',
+      'Asset type':            asset.assetType || '',
+      'Lifecycle state reason': asset.lifecycleStateReason || at.lifecycleStateReason || '',
+    };
+  });
+
+  logger.info('buildLongDwellSources: ' + wrRows.length + ' WR rows, ' + assetRows.length + ' asset rows (API)');
+  return { wrRows, assetRows };
+}
+
 // ── Pipeline: build a work-order dataset joined to asset master data ─────────
 // Confirmed field names (from live response shapes 2026-10-16):
 //   WORK ORDER (serviceAggregates[]):
@@ -969,5 +1039,6 @@ module.exports = {
   getUserDetails,
   searchAllPages,
   findOpenWO,
+  buildLongDwellSources,
   dispose,
 };

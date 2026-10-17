@@ -176,8 +176,16 @@ function _daysSince(dateStr) {
 function _mergeToImportPayload(wrCsv, assetCsv) {
   const wr    = _parseToObjects(wrCsv);
   const asset = _parseToObjects(assetCsv);
+  return _mergeRowObjects(wr.rows, asset.rows);
+}
 
-
+// Core merge over pre-parsed ROW OBJECTS (header-name keyed). Shared by the CSV
+// path (_mergeToImportPayload) and the API path (buildLongDwellSources), so the
+// exclusions (FleetNet-tow, VELOCITI), ≥MIN_DAYS_DOWN filter, A–M mapping, and
+// roster FAS/UM lookup are defined ONCE.
+function _mergeRowObjects(wrRows, assetRows) {
+  const wr    = { rows: Array.isArray(wrRows) ? wrRows : [] };
+  const asset = { rows: Array.isArray(assetRows) ? assetRows : [] };
 
   // Build an asset lookup keyed by the UNIT NUMBER. BOTH exports carry an
   // "Equipment ID" column (the human unit number, e.g. 520024) — that's the
@@ -344,6 +352,32 @@ function registerLongDwellCsvIPC() {
   // are carried forward).
   handle('long-dwell-csv:fetch-aap', async (_e, payload) => {
     const opts = (payload && typeof payload === 'object') ? payload : {};
+
+    // ── PRIMARY: JSON API path (fast, no CSV, no extra window, reuses the
+    //    already-authenticated AAP API client). Pulls the WR + asset lists as
+    //    structured objects and merges them the same way the CSV path does.
+    try {
+      const api = require('../scrapers/aap_api');
+      const ld  = require('../scrapers/aap_longdwell');
+      const src = await api.buildLongDwellSources({
+        searchRequest: opts.searchRequest || ld.DEFAULT_SEARCH_REQUEST,
+      });
+      if (src && Array.isArray(src.wrRows) && src.wrRows.length) {
+        const importPayload = _mergeRowObjects(src.wrRows, src.assetRows);
+        if (importPayload && importPayload.rows.length) {
+          const applied = _applyImport(importPayload);
+          logger.info('Long Dwell via API: imported ' + applied.count + ' rows');
+          return { ok: true, count: applied.count, columns: applied.columns, source: 'aap-api' };
+        }
+        logger.warn('Long Dwell API: WR rows present but 0 merged — falling back to CSV export');
+      } else {
+        logger.warn('Long Dwell API: no WR rows — falling back to CSV export');
+      }
+    } catch (e) {
+      logger.warn('Long Dwell API path failed (' + e.message + ') — falling back to CSV export');
+    }
+
+    // ── FALLBACK: the legacy CSV /download export (BrowserWindow + CSRF token).
     const { fetchBothSources } = require('../scrapers/aap_longdwell');
     const res = await fetchBothSources(opts);
     if (!res || !res.ok) {
@@ -359,8 +393,8 @@ function registerLongDwellCsvIPC() {
       return { ok: false, error: 'AAP returned data from both sources but no rows could be merged (unit-number join found no matches).' };
     }
     const applied = _applyImport(importPayload);
-    logger.info('AAP two-source merge imported ' + applied.count + ' rows');
-    return { ok: true, count: applied.count, columns: applied.columns, source: 'aap' };
+    logger.info('AAP two-source merge (CSV fallback) imported ' + applied.count + ' rows');
+    return { ok: true, count: applied.count, columns: applied.columns, source: 'aap-csv' };
   });
 
   // Save one manual field edit for one row.

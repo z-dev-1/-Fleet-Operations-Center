@@ -225,7 +225,7 @@ function _manualCellHtml(rowKey, col, value) {
 function _renderTable() {
   const cols = _data.columns || [];
   if (!_allRowKeys().length) {
-    return `<div class="an-empty">No data yet. Click <strong>Fetch from AAP</strong> to pull the long-dwell tracker directly (no download), or <strong>Import CSV</strong> to load a downloaded export.</div>`;
+    return `<div class="an-empty">No data yet. Click <strong>Fetch from AAP</strong> to pull the long-dwell tracker directly via the API (no download). <strong>Import CSV</strong> is a fallback for a manually-downloaded export.</div>`;
   }
   const keys = _rowKeys();
 
@@ -270,9 +270,9 @@ function _renderToolbar() {
       <div class="an-ld-toolbar-row">
         ${meta}
         <div class="an-ld-toolbar-actions">
-          <button id="ldc-fetch" class="ec-preset-btn ldc-fetch-btn" title="Pull the long-dwell tracker straight from AAP (no download). Uses your signed-in session; your filled-in columns are preserved.">\uD83D\uDD04 Fetch from AAP</button>
+          <button id="ldc-fetch" class="ec-preset-btn ec-preset-btn--primary ldc-fetch-btn" title="Pull the long-dwell tracker straight from AAP via the API (no download). Falls back to the CSV export if the API is unavailable. Uses your signed-in session; your filled-in columns are preserved.">\uD83D\uDD04 Fetch from AAP</button>
           ${keys.length ? '<button id="ldc-ai-all" class="ec-preset-btn" title="AI-fill Delay Reason, Escalation, and Notes for every row that\u2019s still blank (from live repair data).">\u2728 AI Fill All (blank)</button>' : ''}
-          <button id="ldc-import" class="ec-preset-btn" title="Import a downloaded AAP long-dwell tracker CSV (A\u2013M columns). Your filled-in columns are preserved on re-import.">\u2b06\uFE0F Import CSV</button>
+          <button id="ldc-import" class="ec-preset-btn ec-preset-btn--ghost" title="Fallback: import a manually-downloaded AAP long-dwell tracker CSV (A\u2013M columns). Your filled-in columns are preserved on re-import.">\u2b06\uFE0F Import CSV</button>
           <button id="ldc-copy" class="ec-preset-btn" title="Copy selected rows (or the whole filtered table if none selected) to paste into Excel/SharePoint">\uD83D\uDCCB Copy${_selected.size ? ' (' + _selected.size + ')' : ' Table'}</button>
           ${keys.length ? '<button id="ldc-clear" class="ec-preset-btn" title="Clear the imported dataset">\u2715 Clear</button>' : ''}
         </div>

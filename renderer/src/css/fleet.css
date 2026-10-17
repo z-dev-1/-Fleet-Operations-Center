@@ -1303,6 +1303,21 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
   white-space: nowrap;
 }
 .ec-preset-btn:hover { border-color: var(--acc); }
+/* Primary action (Fetch from AAP) — filled accent so it reads as the default. */
+.ec-preset-btn--primary {
+  background: var(--acc);
+  color: #0d1117;
+  border-color: var(--acc);
+  font-weight: 700;
+}
+.ec-preset-btn--primary:hover { filter: brightness(1.08); }
+/* Ghost / fallback action (Import CSV) — muted so it reads as secondary. */
+.ec-preset-btn--ghost {
+  color: var(--mut, #8b949e);
+  border-color: var(--bdr);
+  background: transparent;
+}
+.ec-preset-btn--ghost:hover { color: var(--txt2, #c9d1d9); border-color: var(--mut, #8b949e); }
 
 /* ── Actions row ─────────────────────────────────────────── */
 .ec-actions {
