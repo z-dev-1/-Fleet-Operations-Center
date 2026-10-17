@@ -1016,6 +1016,11 @@ function registerAIHandlers(ctx) {
   handle('orcha:status',        () => relay.getStatus());
   handle('orcha:mwinit',        async () => relay.runMwinit());
   handle('orcha:refresh-creds', () => { relay.refreshCredentials(); return { ok: true }; });
+  // Live agent discovery — powers the Settings → AI → Orcha Agent dropdown so
+  // it reflects exactly the agents this machine's toolbox can call (instead of
+  // a hardcoded list that goes stale). Never throws; returns ok:false on any
+  // failure so the UI can fall back to its built-in defaults.
+  handle('orcha:list-agents',   async (_e, opts) => relay.listAgents(opts || {}));
 
   // -- AI Config (preference + per-backend config) --
   // Returns full config: preference, orcha settings, claude settings + live status

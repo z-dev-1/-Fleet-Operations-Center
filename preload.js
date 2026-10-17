@@ -113,6 +113,7 @@ expose('settings', {
   getOperators:  ()        => ipcRenderer.invoke('settings:get-operators'),
   saveOperators: (ops)     => ipcRenderer.invoke('settings:save-operators', ops),
   getOrchaConfig:    ()        => ipcRenderer.invoke('orcha:get-config'),
+  listOrchaAgents:   (opts)    => ipcRenderer.invoke('orcha:list-agents', opts),
   getScheduleSlots:  ()        => ipcRenderer.invoke('settings:get-schedule-slots'),
   saveScheduleSlots: (slots)   => ipcRenderer.invoke('settings:save-schedule-slots', slots),
   getSyncInterval:   ()        => ipcRenderer.invoke('settings:get-sync-interval'),

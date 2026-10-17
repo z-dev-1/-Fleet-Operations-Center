@@ -777,15 +777,19 @@ function _html() {
               </div>
             </div>
             <div class="sd-field" style="margin-top:8px">
-              <div class="sd-label">Orcha Agent (model)</div>
+              <div class="sd-label" style="display:flex;align-items:center;justify-content:space-between">
+                <span>Orcha Agent (model)</span>
+                <button class="sd-btn secondary" id="refresh-orcha-agents" style="font-size:10px;padding:2px 8px">Refresh list</button>
+              </div>
               <select class="sd-select" id="orcha-agent" style="font-size:11px">
+                <!-- Fallback defaults, shown until live discovery replaces them. -->
                 <option value="orcha_default">Orcha — Claude Opus 4.6</option>
                 <option value="moon">Moon — Claude Sonnet 4.6</option>
                 <option value="mirror">Mirror — Claude Sonnet 4.6</option>
                 <option value="otter">Otter — Claude Sonnet 4.6</option>
                 <option value="tides_workflow_runner">Tides Workflow Runner — Claude Sonnet 4.6</option>
               </select>
-              <div style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">The Orcha agent that answers AI requests. The model is chosen server-side by the agent (Orcha = Opus 4.6, others = Sonnet 4.6).</div>
+              <div id="orcha-agent-hint" style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">The Orcha agent that answers AI requests (FAS, Fleet Chat, auto-reply). The model is chosen server-side by the agent. This list is discovered live from your Orcha toolbox.</div>
             </div>
             <div class="sd-field" style="margin-top:8px">
               <div class="sd-label">Fallback Model ID (Bedrock)</div>
@@ -897,9 +901,14 @@ function _wireAIConfig() {
     if (modeEl) modeEl.value = cfg.mode || 'local';
     if (hostEl) hostEl.value = cfg.host || '';
     if (portEl) portEl.value = cfg.port || 4799;
-    // Orcha agent (selects the server-side model) — defaults to orcha_default (Opus 4.6)
+    // Orcha agent (selects the server-side model) — defaults to orcha_default.
+    // Populate the dropdown LIVE from `orcha --list-agents` so it always shows
+    // exactly the agents this machine can call (the hardcoded <option>s are
+    // just a fallback shown until/unless discovery succeeds).
     const agentEl = document.getElementById('orcha-agent');
-    if (agentEl) agentEl.value = cfg.orchaAgentId || 'orcha_default';
+    const wanted = cfg.orchaAgentId || 'orcha_default';
+    if (agentEl) agentEl.value = wanted;
+    _populateOrchaAgents(wanted);
     // Model ID (Bedrock fallback leg) — blank field means "use app default"
     const modelEl = document.getElementById('ai-model-id');
     if (modelEl) modelEl.value = cfg.modelId || '';
@@ -908,6 +917,51 @@ function _wireAIConfig() {
     const toEl   = document.getElementById('claude-timeout');
     if (binEl) binEl.value = cfg.claudeBin || '(auto)';
     if (toEl)  toEl.value  = Math.round((cfg.claudeTimeoutMs || 60000) / 1000);
+  }
+
+  // Nice display name for an agent id when the CLI gives us only the id, or to
+  // annotate the known server-side model next to the discovered name.
+  const _AGENT_MODEL_NOTE = {
+    orcha_default: 'Claude Opus 4.6',
+    moon: 'Claude Sonnet 4.6',
+    mirror: 'Claude Sonnet 4.6',
+    otter: 'Claude Sonnet 4.6',
+    tides_workflow_runner: 'Claude Sonnet 4.6',
+  };
+
+  // Replace the Orcha-agent dropdown's options with the LIVE discovered list.
+  // Keeps `selected` chosen even if it isn't in the discovered set (so a saved
+  // agent id is never silently lost), and falls back to the hardcoded options
+  // already in the DOM if discovery is unavailable.
+  async function _populateOrchaAgents(selected, opts) {
+    const agentEl = document.getElementById('orcha-agent');
+    const hintEl = document.getElementById('orcha-agent-hint');
+    if (!agentEl || !window.ai || !window.ai.listOrchaAgents) return;
+    let res = null;
+    try { res = await window.ai.listOrchaAgents(opts || {}); } catch (_) { res = null; }
+    if (!res || !res.ok || !Array.isArray(res.agents) || !res.agents.length) {
+      if (hintEl && res && res.error) {
+        hintEl.textContent = 'Could not discover agents live (' + res.error + ') — showing built-in defaults.';
+      }
+      return; // keep the hardcoded fallback options already in the DOM
+    }
+    const want = selected || agentEl.value || 'orcha_default';
+    const agents = res.agents.slice();
+    // Ensure the currently-selected agent is present even if discovery omitted it.
+    if (want && !agents.some(a => a.id === want)) agents.unshift({ id: want, name: want });
+    agentEl.innerHTML = agents.map(a => {
+      const note = _AGENT_MODEL_NOTE[a.id];
+      const label = a.name + (note ? ' — ' + note : '');
+      const sel = a.id === want ? ' selected' : '';
+      // Basic escaping for safety.
+      const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      return '<option value="' + esc(a.id) + '"' + sel + '>' + esc(label) + '</option>';
+    }).join('');
+    agentEl.value = want;
+    if (hintEl) {
+      hintEl.textContent = 'The Orcha agent that answers AI requests (FAS, Fleet Chat, auto-reply). ' +
+        agents.length + ' agent(s) discovered live from your Orcha toolbox' + (res.cached ? ' (cached)' : '') + '.';
+    }
   }
 
   function _updateLiveStatus(st) {
@@ -988,6 +1042,16 @@ function _wireAIConfig() {
     } catch (e) {
       if (statusEl) { statusEl.textContent = '❌ ' + e.message; statusEl.style.color = '#ef4444'; }
     } finally { testOrchaBtn.disabled = false; testOrchaBtn.textContent = 'Test Orcha'; }
+  });
+
+  // ── Refresh Orcha agent list (live discovery via `orcha --list-agents`) ──
+  const refreshAgentsBtn = document.getElementById('refresh-orcha-agents');
+  if (refreshAgentsBtn) refreshAgentsBtn.addEventListener('click', async () => {
+    const agentEl = document.getElementById('orcha-agent');
+    const keep = agentEl ? agentEl.value : null;
+    refreshAgentsBtn.disabled = true; refreshAgentsBtn.textContent = 'Refreshing...';
+    try { await _populateOrchaAgents(keep, { force: true }); }
+    finally { refreshAgentsBtn.disabled = false; refreshAgentsBtn.textContent = 'Refresh list'; }
   });
 
   // ── Test Claude ───────────────────────────────────────────────────────
