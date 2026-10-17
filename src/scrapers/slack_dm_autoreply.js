@@ -1090,6 +1090,7 @@ async function pollDMAutoReplyOnce(log) {
               engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
               channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
               isGroup: !!dm.isGroup, conversation: historyMsgs, attachments: _fasAttach,
+              files: msg.files || [],
             }, { sendToChannel });
             if (_fr && _fr.letLegacyReply) {
               // Runner asked us to let the legacy engine reply (error-failsafe /
@@ -1298,7 +1299,7 @@ async function pollDMAutoReplyOnce(log) {
               engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
               channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
               isGroup: !!dm.isGroup, conversation: historyMsgs, actualReply: draft.reply,
-              attachments: attachCtx,
+              attachments: attachCtx, files: msg.files || [],
             });
           } catch (_e) { /* shadow comparison must never break the live path */ }
         }
@@ -1503,6 +1504,7 @@ async function pollDMAutoReplyOnce(log) {
                   engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
                   channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
                   isGroup: !!dm.isGroup, conversation: threadContext, attachments: _fasAttachT,
+                  files: reply.files || [],
                 }, { sendToChannel });
                 if (_fr && _fr.outcome === 'auto-send-failed') {
                   // Delivery failed — nothing committed; retry this reply later.
@@ -1565,7 +1567,7 @@ async function pollDMAutoReplyOnce(log) {
                   engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
                   channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
                   isGroup: !!dm.isGroup, conversation: threadContext, actualReply: draft.reply,
-                  attachments: attachCtxT,
+                  attachments: attachCtxT, files: reply.files || [],
                 });
               } catch (_e) { /* shadow comparison must never break the live path */ }
             }

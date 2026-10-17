@@ -1073,6 +1073,7 @@ async function pollChannelsOnce(log) {
             const _fr = await _fasRunner.handleInbound({
               engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
               channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text,
+              files: msg.files || [],
             }, { sendToChannel });
             if (_fr && _fr.letLegacyReply) {
               // Runner asked us to let legacy reply (error-failsafe / ai-failed-
@@ -1140,6 +1141,7 @@ async function pollChannelsOnce(log) {
             await _fasRunner.handleInbound({
               engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
               channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text, actualReply: draft.reply,
+              files: msg.files || [],
             });
           } catch (_e) { /* shadow comparison must never break the live path */ }
         }

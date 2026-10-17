@@ -87,6 +87,26 @@ function _factsToText(facts) {
     .join('\n');
 }
 
+// Build the "SHARED FILES & LINKS" prompt block. Combines the legacy inline
+// attachment-context string (links/previews/text-file snippets the DM path
+// already builds) with an explicit list of any links/files the FAS evidence
+// stage COULD NOT read — so the agent acknowledges a shared item and asks for
+// it / says it couldn't open it, instead of silently ignoring the attachment
+// (the behavior behind the "failing on png/pdf" stalls). Untrusted content is
+// fenced with wrapUntrusted; the refusal list is trusted system text.
+function _attachmentsBlock(input, evidence) {
+  const parts = [];
+  const legacy = input && input.attachments && String(input.attachments).trim();
+  if (legacy) parts.push(guard.wrapUntrusted('SHARED FILES & LINKS', legacy));
+  const refs = (evidence && Array.isArray(evidence.linkRefusals)) ? evidence.linkRefusals : [];
+  if (refs.length) {
+    const lines = refs.slice(0, 6).map(r => '- ' + (r.url || 'item') + ' — COULD NOT READ: ' + (r.reason || 'unreadable'));
+    parts.push('COULD NOT OPEN/READ these shared items (acknowledge this; do NOT guess their contents — ' +
+      'ask the sender to paste the key details or confirm the unit, or say you were unable to open it):\n' + lines.join('\n'));
+  }
+  return parts.length ? parts.join('\n\n') : '(no shared files or links)';
+}
+
 function _parseDecision(raw, evidence) {
   const fallback = {
     decision: 'clarify',
@@ -275,9 +295,9 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
     { key: 'conversation', label: 'IMMEDIATE CONVERSATION', text: guard.wrapUntrusted('CONVERSATION', convoText) },
     // Shared files / link previews / attachment contents (from the Slack
     // message). Untrusted, like the message. Empty when nothing was shared.
-    { key: 'attachments', label: 'SHARED FILES & LINKS', text: (input.attachments && String(input.attachments).trim())
-        ? guard.wrapUntrusted('SHARED FILES & LINKS', String(input.attachments).trim())
-        : '(no shared files or links)' },
+    // Also list any links/files we COULD NOT read, so the agent acknowledges
+    // the shared item and asks/says so rather than silently ignoring it.
+    { key: 'attachments', label: 'SHARED FILES & LINKS', text: _attachmentsBlock(input, evidence) },
     { key: 'knowledge', label: 'FAS KNOWLEDGE BASE (authoritative — answer ownership/approval/escalation/process/glossary questions DIRECTLY from this; do NOT ASK_INTERNAL/escalate what it already covers)', text: knowledgeText },
     { key: 'playbook', label: 'FAS PLAYBOOK (apply these rules)', text: playbookText },
     { key: 'caseSummary', label: 'RELATED CASE MEMORY', text: caseText },
@@ -400,7 +420,9 @@ async function runAgent(input) {
 
   try {
     // ── STEP 0: deterministic scoped evidence baseline ────────────────────
-    const evidence = await buildEvidence({ profile, text, mode });
+    // Pass the raw Slack file objects so the evidence builder can read shared
+    // attachments (PNG/PDF/HTML/CSV) and surface any unit ids they reference.
+    const evidence = await buildEvidence({ profile, text, mode, files: input.files || [] });
     const ctx = { profile, mode, _evidence: evidence, approvedAutomaticActions: cfg.approvedAutomaticActions || [] };
     const extraResearch = [];
     const seen = new Set();

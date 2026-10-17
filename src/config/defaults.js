@@ -41,6 +41,18 @@ module.exports = {
   AI_REGION:             'us-east-1',
   AI_BEDROCK_REGION:     'us-east-1',
   AI_MAX_TOKENS:         4096,
+  // A STRONGER model used ONLY for high-value, non-latency-critical Bedrock
+  // calls — specifically FAS attachment/vision reading (reading a shared
+  // screenshot or PDF and pulling out unit ids / WO data / the conversation).
+  // Kept separate from AI_MODEL_ID on purpose: the global default stays on the
+  // fast Nova Pro so the latency-sensitive relay features (Slack auto-reply
+  // 20s, Daily Call AI Review 25s, Fleet Chat 60s) are NOT slowed down — see
+  // the 2026-08-17 revert note above. Claude Sonnet reads images/PDFs far
+  // better than Nova Pro while staying much faster/cheaper than Opus. If the
+  // account/region can't serve this model, bedrock.js falls back to
+  // AI_MODEL_ID automatically (so this can never hard-break a feature).
+  // To use Opus instead, set this to e.g. 'us.anthropic.claude-opus-4-1-...'.
+  AI_VISION_MODEL_ID:    'us.anthropic.claude-sonnet-4-20250514-v1:0',
 
   // ── Priority engine ───────────────────────────────────────────────────────
   PRIORITY_STALE_DAYS:    3,

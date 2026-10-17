@@ -17,6 +17,7 @@ const caseStore = require('./case-store');
 const store = require('../../store');
 const guard = require('./injection-guard');
 let linkResearch; try { linkResearch = require('./link-research'); } catch (_) { linkResearch = null; }
+let attachmentResearch; try { attachmentResearch = require('./attachment-research'); } catch (_) { attachmentResearch = null; }
 
 let _resolveEntities;
 try { _resolveEntities = require('../ai-context').resolveEntities; } catch (_) { _resolveEntities = null; }
@@ -55,7 +56,7 @@ function resolveMessageEntities(text) {
  * factsNeeded (optional) is a hint list of tool names to run; if omitted we
  * infer sensible defaults from the resolved entities.
  */
-async function buildEvidence({ profile, text, question, factsNeeded, mode }) {
+async function buildEvidence({ profile, text, question, factsNeeded, mode, files }) {
   const entities = resolveMessageEntities(text || question || '');
   const fd = store.load('fleetData', {});
   const syncedAt = (fd && (fd.syncedAt || fd.updatedAt)) || null;
@@ -81,11 +82,13 @@ async function buildEvidence({ profile, text, question, factsNeeded, mode }) {
 
   const ctx = { profile, mode: mode || 'disabled' };
 
-  // ── Resolve shared links FIRST, so an AAP work-order/asset link can REVEAL a
-  // unit id that then gets the same full unit research below. This is what lets
-  // "here's an AAP link" messages (no unit typed) still produce verified unit
-  // facts — the link is resolved via the AAP JSON API (incl. the conversation),
-  // its unit id is extracted, and that unit is merged into the research set.
+  // ── Resolve shared links AND file attachments FIRST, so an AAP work-order/
+  // asset link, a shared screenshot (PNG), or a PDF can REVEAL a unit id that
+  // then gets the same full unit research below. This is what lets "here's an
+  // AAP link" / "here's a screenshot" messages (no unit typed) still produce
+  // verified unit facts — the link is resolved via the AAP JSON API (incl. the
+  // conversation) and attachments are read (text decode, or Bedrock vision for
+  // images/PDFs), their unit ids extracted, and those units merged into the set.
   let linkUnits = [];
   if (linkResearch) {
     try {
@@ -95,11 +98,21 @@ async function buildEvidence({ profile, text, question, factsNeeded, mode }) {
       linkUnits = Array.isArray(lr.units) ? lr.units : [];
     } catch (e) { /* link research is best-effort */ }
   }
-  // Merge link-discovered units into the research set (dedup, authorization is
-  // still enforced per-unit by GET_UNIT below — a link can't widen scope).
+  // Read shared file attachments (PNG/PDF/HTML/CSV/...) the same way.
+  if (attachmentResearch && Array.isArray(files) && files.length) {
+    try {
+      const ar = await attachmentResearch.researchAttachments(files);
+      (ar.evidence || []).forEach(f => { verifiedFacts.push(f); if (f.source) sources.add(f.source); });
+      (ar.refused || []).forEach(r => linkRefusals.push({ url: 'attachment:' + (r.file || '?'), reason: r.reason }));
+      (ar.units || []).forEach(u => { if (u) linkUnits.push(u); });
+    } catch (e) { /* attachment research is best-effort */ }
+  }
+  // Merge link/attachment-discovered units into the research set (dedup,
+  // authorization is still enforced per-unit by GET_UNIT below — a shared link
+  // or file can't widen scope).
   if (linkUnits.length) {
     const have = new Set(entities.units.map(x => String(x).toUpperCase()));
-    for (const lu of linkUnits) { if (lu && !have.has(String(lu).toUpperCase())) { entities.units.push(lu); have.add(String(lu).toUpperCase()); } }
+    for (const lu of [...new Set(linkUnits)]) { if (lu && !have.has(String(lu).toUpperCase())) { entities.units.push(lu); have.add(String(lu).toUpperCase()); } }
   }
 
   const primaryUnit = entities.units[0] || null;
