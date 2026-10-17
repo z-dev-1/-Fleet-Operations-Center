@@ -352,6 +352,7 @@ expose('aap', {
   adaptiveExtract:  (opts)                   => ipcRenderer.invoke('adaptive:extract', opts),
   adaptiveScanBatch:(units)                  => ipcRenderer.invoke('adaptive:scan-batch', units),
   createWR:         (payload, unit)          => ipcRenderer.invoke('aap:create-wr', payload, unit),
+  createWorkOrder:  (payload)                => ipcRenderer.invoke('aap:create-wr-api', payload),
   onWRProgress:     (cb)                     => on('wr:progress', cb),
   openUrl:          (url)                    => ipcRenderer.invoke('aap:open-url', url),
 });

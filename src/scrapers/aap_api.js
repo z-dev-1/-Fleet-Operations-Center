@@ -233,6 +233,7 @@ async function _request(method, path, body) {
 
 function apiGet(path)        { return _request('GET',  path, null); }
 function apiPost(path, body) { return _request('POST', path, body); }
+function apiPut(path, body)  { return _request('PUT',  path, body); }
 
 // Endpoint 1: paginated bulk WORK-ORDER search (serviceaggregates). Returns the
 // raw response (caller reads the list + pagination). The endpoint 500s on a
@@ -1021,9 +1022,215 @@ async function refreshUnit(unitNumber) {
   return row;
 }
 
+// ── Work-order creation (VRE recommendation API) ─────────────────────────────
+// Creates an UNPLANNED / ACTIVE work order via the same endpoint the AAP web
+// app uses when you build a WR by hand:
+//
+//   PUT /api/v1/vre/recommendation/UNPLANNED/ACTIVE
+//
+// Two-phase flow (mirrors the web app exactly):
+//   Phase 1 — PUT the body with vendor:"UNASSIGNED". VRE returns a vendor
+//             recommendation (recommendation.vendors[].vendor, ruleName,
+//             autoAssignable). Nothing is committed yet.
+//   Phase 2 — PUT the SAME body again with vendor set to the confirmed code
+//             (the recommended one, or an operator override). This commits
+//             the work order.
+//
+// The caller (WR wizard Submit) can stop after Phase 1 to let the operator
+// confirm/override the vendor, then call again with confirmVendor set.
+
+const CREATE_WO_PATH = '/api/v1/vre/recommendation/UNPLANNED/ACTIVE';
+
+// Default urgency-reason mapping from the wizard's human label → API enum.
+function _mapUrgencyReason(label) {
+  const t = String(label || '').toLowerCase();
+  if (/shortage|dea/.test(t))              return 'DEA_ASSET_SHORTAGE';
+  if (/safety/.test(t))                    return 'SAFETY';
+  if (/regulat|complian/.test(t))          return 'REGULATORY';
+  return 'OTHER';
+}
+
+// Vendor display string → API vendor CODE. 'Volvo (ASIST)' → 'VOLVO',
+// 'TA' → 'TA'. Empty/falsy → 'UNASSIGNED' (Phase-1 sentinel).
+function _vendorCode(vendorName) {
+  const raw = String(vendorName || '').trim();
+  if (!raw) return 'UNASSIGNED';
+  return raw.split(' (')[0].trim().toUpperCase();
+}
+
+// Pull the aaid out of a /v2/asset/<aaid> URL, or pass through a bare id.
+function _aaidFromUrl(assetUrl) {
+  const u = String(assetUrl || '');
+  if (!u) return '';
+  if (u.includes('/v2/asset/')) {
+    return u.split('/v2/asset/')[1].split('?')[0].split('/')[0];
+  }
+  return u; // already a bare aaid
+}
+
+// Best-effort current location for the WO body. Prefers the asset's live GPS
+// (latestLocation.geoPoint); falls back to a known domicile coordinate, then to
+// a zeroed coordinate so the request still forms. Street/city are not available
+// from the asset API — we leave them blank unless the caller supplies off-site
+// address fields.
+function _buildLocation(assetFull, opts) {
+  const loc = {
+    latitude: null, longitude: null,
+    street: '', city: '', subRegion: '', country: 'US', postalCode: '', timeZone: '',
+  };
+  // Off-site address typed in the wizard wins (unit is away from its yard).
+  if (opts && opts.offSite) {
+    loc.street     = opts.locStreet || '';
+    loc.city       = opts.locCity   || '';
+    loc.subRegion  = opts.locState  || '';
+    loc.postalCode = opts.locZip    || '';
+  }
+  const gp = assetFull && assetFull.latestLocation && assetFull.latestLocation.geoPoint;
+  if (gp && (gp.latitude != null || gp.lat != null)) {
+    loc.latitude  = gp.latitude  != null ? gp.latitude  : gp.lat;
+    loc.longitude = gp.longitude != null ? gp.longitude : gp.lng;
+  }
+  // Domicile fallback coords if GPS missing.
+  if (loc.latitude == null && opts && opts.domicile) {
+    let DOM = null;
+    try { DOM = require('./aap_create_wr').DOMICILE_COORDS; } catch (_) {}
+    const d = DOM && (DOM[opts.domicile] || DOM[String(opts.domicile).toUpperCase()]);
+    if (d) { loc.latitude = d.latitude; loc.longitude = d.longitude; }
+  }
+  return loc;
+}
+
+// Build the CREATE_WORK_ORDER_BODY from a wizard payload + resolved asset.
+// vendorCode is 'UNASSIGNED' for Phase 1 or the confirmed code for Phase 2.
+function _buildWoBody(opts, assetFull, vendorCode) {
+  const now = Date.now();
+  const nowIso   = new Date(now).toISOString();
+  const needByIso = new Date(now + 24 * 3600 * 1000).toISOString();
+  const aaid = opts.aaid || _aaidFromUrl(opts.assetUrl);
+
+  const suggestedItems = (opts.areaPairs || [])
+    .filter(p => p && (p.area || p.subcategory))
+    .map(p => ({ level1: p.area || '', level2: p.subcategory || '', level3: '' }));
+
+  const comments = [];
+  if (opts.comments) comments.push(String(opts.comments));
+
+  const urgent = String(opts.urgent || '').toLowerCase() === 'yes';
+  const calltype = (opts && opts.offSite) ? 'OFFSITE' : (opts.calltype || 'ONSITE');
+
+  return {
+    aaid,
+    title: String(opts.title || '').slice(0, 90),
+    calltype,
+    currentLocation: _buildLocation(assetFull, opts),
+    destination: null,
+    urgent,
+    urgencyReason: urgent ? _mapUrgencyReason(opts.urgencyReason) : null,
+    severity: urgent ? 'HIGH' : 'LOW',
+    tireIssue: suggestedItems.some(s => /tire/i.test(s.level1)) || false,
+    assetLoaded: false,
+    assetRefrigerated: false,
+    arcClaimNumber: opts.arcClaim || null,
+    simNumber: opts.simNumber || null,
+    assetAvailableDateTime: nowIso,
+    needByDateTime: needByIso,
+    damageDescription: String(opts.issue || '') || null,
+    comments,
+    suggestedItems,
+    vendor: vendorCode,
+    supplierId: null,
+    sourceNotificationIds: [],
+    source: 'FLEET_OPS_CENTER',
+    relatedAsset: null,
+  };
+}
+
+// Read the recommended vendor from a VRE recommendation response.
+function _readRecommendation(resp) {
+  const rec = resp && resp.recommendation;
+  const vendors = (rec && Array.isArray(rec.vendors)) ? rec.vendors : [];
+  const top = vendors[0] || null;
+  return {
+    vendor: top ? (top.vendor || '') : '',
+    ruleName: rec ? (rec.ruleName || '') : '',
+    autoAssignable: rec ? !!rec.autoAssignable : false,
+    vendors: vendors.map(v => v && v.vendor).filter(Boolean),
+    raw: rec || null,
+  };
+}
+
+/**
+ * createWorkOrder(opts) — build + submit an UNPLANNED/ACTIVE work order.
+ *
+ * opts (from the WR wizard payload, plus a few resolved fields):
+ *   assetUrl | aaid        the unit's /v2/asset/<aaid> URL, or bare aaid
+ *   title, issue, comments
+ *   areaPairs[]            [{ area, subcategory }] → suggestedItems
+ *   urgent ('Yes'/'No'), urgencyReason
+ *   arcClaim, simNumber
+ *   domicile               site code for coord fallback
+ *   offSite, locStreet/City/State/Zip   off-site address (unit away from yard)
+ *   vendor                 operator's chosen vendor DISPLAY string (optional)
+ *   confirmVendor          when true, run Phase 2 (commit) with `vendor`.
+ *                          when false/omitted, run Phase 1 only and return the
+ *                          recommendation for operator confirmation.
+ *
+ * Returns:
+ *   Phase 1 (recommend):  { ok, phase:'recommend', recommendation:{vendor,ruleName,autoAssignable,vendors[]} }
+ *   Phase 2 (commit):     { ok, phase:'commit', vendor, autoAssignable, workRequestId, raw }
+ */
+async function createWorkOrder(opts = {}) {
+  const aaid = opts.aaid || _aaidFromUrl(opts.assetUrl);
+  if (!aaid) {
+    throw Object.assign(new Error('createWorkOrder: no aaid (need assetUrl or aaid)'), { code: 'NO_AAID' });
+  }
+
+  // Resolve the asset once for location + VIN context (best-effort).
+  let assetFull = null;
+  try { assetFull = await getAsset(aaid); } catch (e) {
+    logger.warn('createWorkOrder: getAsset failed, using fallback location: ' + e.message);
+  }
+
+  const wantCommit = !!opts.confirmVendor;
+
+  if (!wantCommit) {
+    // ── Phase 1: ask VRE for a vendor recommendation ──────────────────────
+    const body = _buildWoBody({ ...opts, aaid }, assetFull, 'UNASSIGNED');
+    const resp = await apiPut(CREATE_WO_PATH, body);
+    const recommendation = _readRecommendation(resp);
+    logger.info('createWorkOrder Phase 1 (recommend) aaid=' + aaid +
+      ' vendor=' + recommendation.vendor + ' rule=' + recommendation.ruleName +
+      ' autoAssignable=' + recommendation.autoAssignable);
+    return { ok: true, phase: 'recommend', aaid, recommendation };
+  }
+
+  // ── Phase 2: commit with the confirmed vendor ───────────────────────────
+  const vendorCode = _vendorCode(opts.vendor);
+  const body = _buildWoBody({ ...opts, aaid }, assetFull, vendorCode);
+  const resp = await apiPut(CREATE_WO_PATH, body);
+  const recommendation = _readRecommendation(resp);
+  const workRequestId =
+    (resp && (resp.workRequestId || resp.workOrderId || resp.id ||
+      (resp.workOrder && resp.workOrder.id) ||
+      (recommendation.raw && recommendation.raw.workRequestId))) || '';
+  logger.info('createWorkOrder Phase 2 (commit) aaid=' + aaid +
+    ' vendor=' + vendorCode + ' workRequestId=' + workRequestId);
+  return {
+    ok: true,
+    phase: 'commit',
+    aaid,
+    vendor: vendorCode,
+    autoAssignable: recommendation.autoAssignable,
+    workRequestId,
+    raw: resp || null,
+  };
+}
+
 module.exports = {
   apiGet,
   apiPost,
+  apiPut,
+  createWorkOrder,
   searchServices,
   searchAssets,
   getFleet,

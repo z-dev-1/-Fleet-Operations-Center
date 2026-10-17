@@ -33,6 +33,7 @@ const GEOFENCE_IPC_TIMEOUT = 200_000; // Stage 5 C-1: IPC belt -- scraper has ow
 // Module-level: survive across IPC calls within the same process lifetime.
 let _wrLock       = false;   // aap:create-wr
 let _adaptiveLock = false;   // aap:adaptive
+let _wrApiLock    = false;   // aap:create-wr-api (VRE recommendation WO create)
 let _activeAutofillWin = null; // aap:autofill -- lets aap:autofill-stop force-close it
 let _uptakeLock   = false;   // H-3: uptake:scrape
 let _relayLock    = false;   // H-3: relay:scrape
@@ -142,6 +143,38 @@ function registerScrapersIPC(ctx) {
       return { ...result, logs };
     } finally {
       _adaptiveLock = false;
+    }
+  });
+
+  // ── aap:create-wr-api ─────────────────────────────────────────────────────
+  // API-based WO creation via the VRE recommendation endpoint (replaces the
+  // "Submit WR" button's old adaptive-agent path). Two-phase:
+  //   confirmVendor !== true  → Phase 1: returns a vendor recommendation.
+  //   confirmVendor === true  → Phase 2: commits the WO with the chosen vendor.
+  // The "Open in AAP (autofill)" backup button (aap:autofill) is untouched.
+  handle('aap:create-wr-api', async (_e, payload) => {
+    if (_wrApiLock) {
+      throw new ScraperError('aap:create-wr-api operation already in progress', 'aap:create-wr-api');
+    }
+    requireObject(payload, 'payload');
+    _wrApiLock = true;
+    try {
+      const aapApi = require('../../src/scrapers/aap_api');
+      const logs = [];
+      const log  = (msg) => { logs.push(msg); logger.info(msg); if (send) send('wr:progress', msg); };
+      log(payload.confirmVendor
+        ? 'Creating work order in AAP (committing with vendor ' + (payload.vendor || '—') + ')…'
+        : 'Asking AAP for a vendor recommendation…');
+      const result = await aapApi.createWorkOrder(payload);
+      if (result && result.phase === 'recommend') {
+        log('AAP recommended vendor: ' + (result.recommendation.vendor || '(none)') +
+            (result.recommendation.ruleName ? ' [' + result.recommendation.ruleName + ']' : ''));
+      } else if (result && result.phase === 'commit') {
+        log('Work order created' + (result.workRequestId ? ': ' + result.workRequestId : ''));
+      }
+      return { ...result, logs };
+    } finally {
+      _wrApiLock = false;
     }
   });
 

@@ -1116,40 +1116,75 @@ function _wireSubmit() {
     _progUnsub = aap.onWRProgress(_logProgress);
 
     // Submit WR drives the LIVE AI wizard (adaptive agent): opens AAP, reads
-    // the wizard each step, fills only real current options, re-reads after
-    // every step, and STOPS at Review — it never submits automatically. The
-    // user reviews and clicks Submit in the AAP window. (autoSubmit:false)
-    btn.textContent = 'AI filling in AAP…';
+    // Submit WR now creates the work order DIRECTLY via AAP's VRE
+    // recommendation API (PUT /vre/recommendation/UNPLANNED/ACTIVE), two-phase:
+    //   Phase 1 — ask AAP which vendor it recommends (nothing committed).
+    //   Phase 2 — commit the WO with the confirmed vendor (the operator's
+    //             picked vendor if they chose one, else the recommended one,
+    //             confirmed via a prompt).
+    // The "Open in AAP (autofill)" button is the untouched manual backup.
+    btn.textContent = 'Creating WR in AAP…';
     try {
-      const result = await aap.runAdaptive({ ...payload, autoSubmit: false });
+      // The VRE API needs the asset id, which lives on the unit's AAP asset URL.
+      const assetUrl = _unit && _unit.assetUrl;
+      if (!assetUrl) {
+        _showError('No AAP asset URL for this unit — run a scan first, or use "Open in AAP (autofill)".');
+        return;
+      }
+
+      // ── Phase 1: get the vendor recommendation ──────────────────────────
+      const rec = await aap.createWorkOrder({ ...payload, assetUrl, confirmVendor: false });
+      if (!rec || !rec.ok) {
+        _showError((rec && (rec.error || rec.message)) || 'AAP did not return a vendor recommendation.');
+        return;
+      }
+      const recommendedVendor = (rec.recommendation && rec.recommendation.vendor) || '';
+
+      // Vendor the operator picked in the form (display string → code is done
+      // backend-side). If they left it blank, fall back to AAP's recommendation.
+      const pickedDisplay = (payload.vendor || '').trim();
+      const commitVendor  = pickedDisplay || recommendedVendor;
+
+      if (!commitVendor) {
+        _showError('AAP could not recommend a vendor and none was selected. Pick a vendor and try again.');
+        return;
+      }
+
+      // Confirm before committing. If the operator picked a vendor that differs
+      // from AAP's recommendation, surface both so they can decide.
+      const confirmMsg = pickedDisplay
+        ? ('Create this work order and assign vendor "' + pickedDisplay + '"?' +
+           (recommendedVendor && recommendedVendor.toUpperCase() !== pickedDisplay.split(' (')[0].toUpperCase()
+             ? '\n\n(AAP recommended: ' + recommendedVendor + ')' : ''))
+        : ('AAP recommends vendor "' + recommendedVendor + '".\n\nCreate this work order with that vendor?');
+      if (!window.confirm(confirmMsg)) {
+        if (_progUnsub) { _progUnsub(); _progUnsub = null; }
+        toast.show('info', 'Work order not created — vendor not confirmed.', 4000);
+        return;
+      }
+
+      // ── Phase 2: commit the work order with the confirmed vendor ────────
+      btn.textContent = 'Submitting WR…';
+      const result = await aap.createWorkOrder({
+        ...payload, assetUrl, confirmVendor: true, vendor: commitVendor,
+      });
       if (_progUnsub) { _progUnsub(); _progUnsub = null; }
 
-      if (result && result.ok && result.readyToSubmit) {
-        resultEl.innerHTML = `
-          <div class="wr-result--success">
-            <span class="wr-result__icon">✓</span>
-            <span>Filled in AAP — review the AAP window and click <strong>Submit</strong> to finish. Nothing was submitted automatically.</span>
-          </div>`;
-        resultEl.style.display = '';
-        toast.show('success', 'WR filled in AAP — review & submit there', 7000);
-      } else if (result && result.ok) {
-        // A real submit/confirmation (only if autoSubmit was ever turned on).
+      if (result && result.ok) {
         const wrId = result.workRequestId || '';
         resultEl.innerHTML = `
           <div class="wr-result--success">
             <span class="wr-result__icon">✓</span>
-            <span>WR ${_safe(wrId)}</span>
+            <span>Work order created${wrId ? ' — WR ' + _safe(wrId) : ''} (vendor ${_safe(result.vendor || commitVendor)})</span>
           </div>`;
         resultEl.style.display = '';
-        toast.show('success', 'WR ' + wrId, 6000);
+        toast.show('success', 'WR created' + (wrId ? ' ' + wrId : ''), 6000);
         const _eqId = _unit && (_unit.equipmentId || _unit.id);
         if (_eqId && relay && typeof relay.refreshUnit === 'function') {
           relay.refreshUnit(_eqId).catch(() => {});
         }
       } else {
-        // Agent got stuck — AAP window stays open in WATCH MODE for the user
-        // to finish manually (the agent learns from what they do).
-        _showError((result && (result.error || result.message)) || 'AI could not finish the wizard — finish it in the AAP window.');
+        _showError((result && (result.error || result.message)) || 'AAP rejected the work order.');
       }
     } catch (e) {
       if (_progUnsub) { _progUnsub(); _progUnsub = null; }

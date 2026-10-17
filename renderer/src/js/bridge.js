@@ -402,6 +402,7 @@ export const aap = {
   adaptiveExtract:   (opts)                => window.aap.adaptiveExtract(opts),
   adaptiveScanBatch: (units)               => window.aap.adaptiveScanBatch(units),
   createWR:          (payload, unit)       => window.aap.createWR(payload, unit),
+  createWorkOrder:   (payload)             => window.aap.createWorkOrder(payload),
   onWRProgress:      (cb)                  => window.aap.onWRProgress(cb),
   openUrl:           (url)                 => window.aap.openUrl(url),
 };
