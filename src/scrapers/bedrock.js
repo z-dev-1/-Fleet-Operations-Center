@@ -282,15 +282,21 @@ async function readFileWithVision(file, opts) {
   const prompt = instruction.replace('%%NAME%%', tmpName);
   const cleanup = () => { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {} };
 
+  // Honor the user's chosen Claude-lane model (Settings → AI → Claude Code →
+  // Model) for attachment reading too, so screenshots/PDFs are read by the same
+  // model the user picked. opts.model overrides; blank = claude-code default.
+  let claudeModel = opts.model || '';
+  if (!claudeModel) { try { claudeModel = require('../orcha/relay').getClaudeModel() || ''; } catch (_) {} }
+
   return new Promise((resolve) => {
     let settled = false;
     const finish = (res) => { if (settled) return; settled = true; cleanup(); try { proc.kill(); } catch (_) {} resolve(res); };
     let proc;
     try {
-      proc = spawn(CLAUDE_BIN,
-        ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
-         '--no-session-persistence', '--bare', '--allowedTools', 'Read', '--dangerously-skip-permissions'],
-        { cwd: tmpDir, stdio: ['pipe', 'pipe', 'pipe'] });
+      const _va = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+         '--no-session-persistence', '--bare', '--allowedTools', 'Read', '--dangerously-skip-permissions'];
+      if (claudeModel) _va.push('--model', claudeModel);
+      proc = spawn(CLAUDE_BIN, _va, { cwd: tmpDir, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (e) {
       cleanup();
       return resolve({ ok: false, kind: cls.kind, error: 'claude-code spawn failed: ' + e.message });

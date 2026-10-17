@@ -812,6 +812,20 @@ function _html() {
               <input class="sd-input" id="claude-bin-path" placeholder="(auto)" readonly style="color:#6e7681;font-size:10px;font-family:monospace"/>
             </div>
             <div class="sd-field" style="margin-top:6px">
+              <div class="sd-label" style="display:flex;align-items:center;justify-content:space-between">
+                <span>Model</span>
+                <button class="sd-btn secondary" id="detect-claude-model" style="font-size:10px;padding:2px 8px">Detect current</button>
+              </div>
+              <select class="sd-select" id="claude-model" style="font-size:11px">
+                <option value="">Default (let Claude Code decide)</option>
+                <option value="claude-opus-5-5">Opus 5.5 — smartest, slow</option>
+                <option value="claude-sonnet-5-5">Sonnet 5.5 — balanced (recommended)</option>
+                <option value="claude-haiku-5-5">Haiku 5.5 — fastest</option>
+                <option value="claude-fable-5-1">Fable 5.1</option>
+              </select>
+              <div id="claude-model-hint" style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">Model for the Claude Code lane (fallback AI + attachment/screenshot reading). Blank = Claude Code's own default.</div>
+            </div>
+            <div class="sd-field" style="margin-top:6px">
               <div class="sd-label">Timeout (seconds)</div>
               <input class="sd-input" id="claude-timeout" type="number" placeholder="60" style="width:80px"/>
             </div>
@@ -919,6 +933,17 @@ function _wireAIConfig() {
     const toEl   = document.getElementById('claude-timeout');
     if (binEl) binEl.value = cfg.claudeBin || '(auto)';
     if (toEl)  toEl.value  = Math.round((cfg.claudeTimeoutMs || 60000) / 1000);
+    // Claude-lane model. If the saved id isn't one of the known options, add it
+    // so the selection is never silently lost.
+    const cmEl = document.getElementById('claude-model');
+    if (cmEl) {
+      const saved = cfg.claudeModelId || '';
+      if (saved && !Array.from(cmEl.options).some(o => o.value === saved)) {
+        const opt = document.createElement('option');
+        opt.value = saved; opt.textContent = saved; cmEl.appendChild(opt);
+      }
+      cmEl.value = saved;
+    }
   }
 
   // Replace the Orcha-agent dropdown's options with the LIVE discovered list,
@@ -1014,6 +1039,7 @@ function _wireAIConfig() {
       port:            parseInt((document.getElementById('orcha-port') || {}).value, 10) || 4799,
       orchaAgentId:    (document.getElementById('orcha-agent') || {}).value || 'orcha_default',
       modelId:         ((document.getElementById('ai-model-id') || {}).value || '').trim(),
+      claudeModelId:   ((document.getElementById('claude-model') || {}).value || '').trim(),
       claudeTimeoutMs: toSecs * 1000,
     });
     toast.show('success', 'AI config saved — active: ' + pref, 2500);
@@ -1047,6 +1073,24 @@ function _wireAIConfig() {
     refreshAgentsBtn.disabled = true; refreshAgentsBtn.textContent = 'Refreshing...';
     try { await _populateOrchaAgents(keep, { force: true }); }
     finally { refreshAgentsBtn.disabled = false; refreshAgentsBtn.textContent = 'Refresh list'; }
+  });
+
+  // ── Detect the Claude Code lane's current model ─────────────────────────
+  const detectClaudeBtn = document.getElementById('detect-claude-model');
+  if (detectClaudeBtn) detectClaudeBtn.addEventListener('click', async () => {
+    const hintEl = document.getElementById('claude-model-hint');
+    detectClaudeBtn.disabled = true; detectClaudeBtn.textContent = 'Detecting...';
+    if (hintEl) hintEl.textContent = '⏳ Asking Claude Code what it is running on...';
+    try {
+      const r = await window.ai.detectClaudeModel();
+      if (r && r.ok && r.model) {
+        if (hintEl) hintEl.textContent = 'Currently running on: ' + r.model + '. (This is the model when "Default" is selected; pick a specific one above to pin it.)';
+      } else {
+        if (hintEl) hintEl.textContent = 'Could not detect the current model' + (r && r.error ? ' (' + r.error + ')' : '') + '.';
+      }
+    } catch (e) {
+      if (hintEl) hintEl.textContent = 'Detection failed: ' + e.message;
+    } finally { detectClaudeBtn.disabled = false; detectClaudeBtn.textContent = 'Detect current'; }
   });
 
   // ── Test Claude ───────────────────────────────────────────────────────

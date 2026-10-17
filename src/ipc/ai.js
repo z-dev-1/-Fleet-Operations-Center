@@ -1021,6 +1021,9 @@ function registerAIHandlers(ctx) {
   // a hardcoded list that goes stale). Never throws; returns ok:false on any
   // failure so the UI can fall back to its built-in defaults.
   handle('orcha:list-agents',   async (_e, opts) => relay.listAgents(opts || {}));
+  // Ask the Claude Code lane which model it's actually running on (for the
+  // Settings → AI → Claude Code "Detect current" button).
+  handle('claude:detect-model', async () => relay.detectClaudeModel());
 
   // -- AI Config (preference + per-backend config) --
   // Returns full config: preference, orcha settings, claude settings + live status
@@ -1068,6 +1071,9 @@ function registerAIHandlers(ctx) {
       // so honor it explicitly when the key is present rather than dropping it.
       modelId:         (config.modelId !== undefined ? config.modelId : (existing.modelId || '')),
       claudeTimeoutMs: config.claudeTimeoutMs  || 60000,
+      // Claude Code lane model (passed as `--model`). Empty = claude-code
+      // default. Applies to the Claude fallback lane AND attachment reading.
+      claudeModelId:   (config.claudeModelId !== undefined ? config.claudeModelId : (existing.claudeModelId || '')),
     };
     const tmp = P.orchaConfig + '.tmp';
     fs.mkdirSync(require('path').dirname(P.orchaConfig), { recursive: true });
@@ -1075,7 +1081,8 @@ function registerAIHandlers(ctx) {
     fs.renameSync(tmp, P.orchaConfig);
     relay.setPreference(merged.aiPreference);
     relay.setClaudeTimeout(merged.claudeTimeoutMs);
-    logger.info('[AI Config] Saved. preference=' + merged.aiPreference + ', agent=' + merged.orchaAgentId + ', modelId=' + (merged.modelId || '(default)') + ', claudeTimeoutMs=' + merged.claudeTimeoutMs);
+    relay.setClaudeModel(merged.claudeModelId);
+    logger.info('[AI Config] Saved. preference=' + merged.aiPreference + ', agent=' + merged.orchaAgentId + ', modelId=' + (merged.modelId || '(default)') + ', claudeModel=' + (merged.claudeModelId || '(default)') + ', claudeTimeoutMs=' + merged.claudeTimeoutMs);
     return { ok: true, preference: merged.aiPreference };
   });
 

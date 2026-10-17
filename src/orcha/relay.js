@@ -393,6 +393,10 @@ const CLAUDE_BIN = process.platform === 'win32'
   ? path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'claude.exe')
   : path.join(os.homedir(), '.toolbox', 'bin', 'claude');
 let CLAUDE_TIMEOUT_MS = 60000; // mutable — updated by setClaudeTimeout() when Settings change
+// Optional model id for the Claude Code lane (passed as `--model`). Empty =
+// let claude-code use its own default. Set from Settings (claudeModelId) so the
+// user can pin a specific Claude model for the fallback lane + attachment reads.
+let CLAUDE_MODEL_ID = '';
 
 // 3-worker pool — lets up to 3 concurrent AI calls run in parallel.
 // When DM poll, WR autofill, and long-dwell fill all fire at once, each gets
@@ -454,23 +458,23 @@ function _ensureClaudeProcess(worker) {
   if (!fs.existsSync(CLAUDE_BIN)) {
     throw new Error('claude-code not installed — run: toolbox install claude-code');
   }
-  logger.info('claude-code[' + worker.id + ']: spawning process');
+  logger.info('claude-code[' + worker.id + ']: spawning process' + (CLAUDE_MODEL_ID ? ' (model ' + CLAUDE_MODEL_ID + ')' : ''));
   // --system-prompt: override default coding-assistant persona with a strict
   // headless-API framing so all callers get reliable JSON/plain-text output
   // without explanations or markdown fences (see original rationale above).
-  const proc = spawn(
-    CLAUDE_BIN,
-    ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json',
-     '--verbose', '--no-session-persistence',
-     '--system-prompt',
+  // --model (optional): pin the Claude-lane model when the user chose one in
+  // Settings; omitted entirely when blank so claude-code uses its own default.
+  const _args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json',
+     '--verbose', '--no-session-persistence'];
+  if (CLAUDE_MODEL_ID) _args.push('--model', CLAUDE_MODEL_ID);
+  _args.push('--system-prompt',
      'You are a headless automation API, not an interactive coding assistant. ' +
      'Every message you receive contains its own complete formatting instructions ' +
      '(e.g. "respond with only a JSON array"). Follow those instructions exactly and ' +
      'output nothing else -- no explanations, no markdown code fences, no tool calls, ' +
      'no restating the request. If a message asks for JSON, your entire response must ' +
-     'be valid JSON and nothing more.'],
-    { stdio: ['pipe', 'pipe', 'pipe'] }
-  );
+     'be valid JSON and nothing more.');
+  const proc = spawn(CLAUDE_BIN, _args, { stdio: ['pipe', 'pipe', 'pipe'] });
   worker.stdoutBuf = '';
 
   proc.stdout.on('data', (chunk) => {
@@ -735,6 +739,35 @@ function setClaudeTimeout(ms) {
   logger.info('Claude timeout set to: ' + clamped + 'ms');
 }
 
+// -- CLAUDE MODEL (fallback-lane model selection) ------------------------
+// Pin the Claude Code lane to a specific model (passed as `--model`). Empty
+// means "let claude-code use its default". Runtime switch — persisted to
+// orchaConfig as claudeModelId. Also consumed by bedrock.readFileWithVision
+// (attachment reading) so the chosen model applies there too.
+function setClaudeModel(id) {
+  CLAUDE_MODEL_ID = (typeof id === 'string' ? id.trim() : '');
+  logger.info('Claude model set to: ' + (CLAUDE_MODEL_ID || '(default)'));
+}
+function getClaudeModel() { return CLAUDE_MODEL_ID; }
+
+// detectClaudeModel() — ask the Claude Code lane which model it's actually
+// running on right now. claude's "models" reply is conversational prose, so we
+// just extract a recognizable model id / name from it rather than relying on a
+// rigid format. Best-effort: returns { ok, model?, raw?, error? }.
+function detectClaudeModel() {
+  const q = 'In one short line, output ONLY the id of the model you are currently running as, e.g. ' +
+    'claude-opus-5-5. No other words.';
+  return _tryClaudeCode(q)
+    .then(text => {
+      const raw = String(text || '').trim();
+      // Pull a claude-* / nova-* style id, else the first token.
+      const m = raw.match(/\b((?:global\.|us\.)?(?:anthropic\.)?claude-[a-z0-9.\-\[\]]+|[a-z]+-(?:opus|sonnet|haiku|fable|pro|lite|micro)-[0-9.\-]+)\b/i);
+      const model = m ? m[1] : (raw.split(/\s+/)[0] || '');
+      return { ok: !!model, model, raw: raw.slice(0, 200) };
+    })
+    .catch(e => ({ ok: false, error: e.message }));
+}
+
 function setPreference(pref) {
   const valid = ['auto', 'orcha', 'claude', 'balanced'];
   _aiPreference = valid.includes(pref) ? pref : 'auto';
@@ -757,6 +790,7 @@ function testClaude() {
       const cfg = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
       if (cfg && cfg.aiPreference) setPreference(cfg.aiPreference);
       if (cfg && cfg.claudeTimeoutMs > 0) CLAUDE_TIMEOUT_MS = cfg.claudeTimeoutMs;
+      if (cfg && typeof cfg.claudeModelId === 'string') CLAUDE_MODEL_ID = cfg.claudeModelId.trim();
     }
   } catch (_) {}
 })();
@@ -858,4 +892,4 @@ function listAgents(opts = {}) {
   });
 }
 
-module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setClaudeTimeout, testClaude, listAgents };
+module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents };
