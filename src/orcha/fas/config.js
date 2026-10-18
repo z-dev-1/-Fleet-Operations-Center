@@ -19,6 +19,7 @@ const DEFAULTS = {
   retry: { maxRetries: 4, baseBackoffMs: 30000, maxBackoffMs: 15 * 60 * 1000 }, // bounded AI retry w/ backoff
   contextBudgetChars: 24000,    // configurable context budget (provider-independent)
   approvedAutomaticActions: [], // action tool names allowed to run automatically in autonomous mode
+  useLifecycleApi: false,       // MOVE_UNIT via the AAP JSON API (version-locked PUT + DVIR auto-clear + source read-back). OFF until tested; falls back to browser automation.
   approvedLinkDomains: [        // Stage 3 allowlist (used later)
     'aap-na.corp.amazon.com',
     'fleet.uptake.com',
