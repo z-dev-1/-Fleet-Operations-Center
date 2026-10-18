@@ -336,12 +336,21 @@ function registerScrapersIPC(ctx) {
         const api = require('../scrapers/aap_lifecycle_api');
         const wantActive = String(state).trim().toUpperCase() === 'ACTIVE';
         const r = wantActive
-          ? await api.setLifecycleActiveWithDvir({ unit: equipmentId, reason: reason || 'HEALTHY' })
-          : await api.setLifecycleApi({ unit: equipmentId, state, reason: reason || '' });
+          ? await api.setLifecycleActiveWithDvir({ unit: equipmentId, assetUrl, reason: reason || 'HEALTHY' })
+          : await api.setLifecycleApi({ unit: equipmentId, assetUrl, state, reason: reason || '' });
+        // Explicit, durable write-back line so the result is unambiguous in the
+        // log (and the UI toast via `message`): VERIFIED / UNCERTAIN / etc.
+        try {
+          const L = require('../utils/logger').createLogger('ipc:scrapers');
+          L.info('[LIFECYCLE-RESULT] ' + equipmentId + ' -> ' + String(state).toUpperCase() +
+            ' : ' + String((r && r.status) || 'unknown').toUpperCase() +
+            (r && r.verified ? ' (VERIFIED' + (r.version ? ' v' + r.version : '') + ', via api)' : '') +
+            (r && r.dvirCleared && r.dvirCleared.length ? ' [DVIR cleared: ' + r.dvirCleared.length + ']' : ''));
+        } catch (_) {}
         // Map to the UI's { success, message } contract.
         if (r && (r.status === 'done' || r.status === 'noop') && r.verified) {
-          return { success: true, via: 'api', verifiedState: r.to && r.to.state, newState: r.to && r.to.state,
-            message: r.status === 'noop' ? (equipmentId + ' is already ' + (r.to && r.to.state) + ' (verified)') : (equipmentId + ' set to ' + (r.to && r.to.state) + ' (verified)'),
+          return { success: true, via: 'api', verifiedState: r.to && r.to.state, newState: r.to && r.to.state, version: r.version,
+            message: r.status === 'noop' ? (equipmentId + ' is already ' + (r.to && r.to.state) + ' \u2014 verified, no change') : (equipmentId + ' set to ' + (r.to && r.to.state) + ' \u2014 VERIFIED' + (r.version ? ' (v' + r.version + ')' : '')),
             dvirCleared: r.dvirCleared };
         }
         if (r && r.status === 'execution_uncertain') {

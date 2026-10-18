@@ -131,8 +131,8 @@ const MOVE_UNIT = {
         // Flipping to ACTIVE auto-clears a blocking DVIR first (the "DVIR error"
         // fix); other states use the plain flip.
         const r = wantActive
-          ? await api.setLifecycleActiveWithDvir({ unit: args.unit, aaid: args.aaid, reason: args.reason || 'HEALTHY' })
-          : await api.setLifecycleApi({ unit: args.unit, aaid: args.aaid, state: args.state, reason: args.reason || '' });
+          ? await api.setLifecycleActiveWithDvir({ unit: args.unit, aaid: args.aaid, assetUrl: args.assetUrl, reason: args.reason || 'HEALTHY' })
+          : await api.setLifecycleApi({ unit: args.unit, aaid: args.aaid, assetUrl: args.assetUrl, state: args.state, reason: args.reason || '' });
         if (r && (r.status === 'done' || r.status === 'noop') && r.verified) {
           // Pass the source read-back so verify() confirms from source.
           return { ok: true, result: { via: 'api', success: true, verifiedState: (r.to && r.to.state) || r.sourceReadback && r.sourceReadback.state, newState: r.to && r.to.state, dvirCleared: r.dvirCleared }, };

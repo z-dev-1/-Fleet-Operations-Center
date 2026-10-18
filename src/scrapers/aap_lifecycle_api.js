@@ -140,17 +140,34 @@ function _openWrForAaid(aaid) {
   } catch (_) { return ''; }
 }
 
+// Pull an aaid out of any assetUrl string (e.g. /v2/asset/aaid_...).
+function _aaidFromUrl(url) {
+  const m = String(url || '').match(/aaid_[0-9a-f-]{8,}/i);
+  return m ? m[0] : null;
+}
+
 /**
- * resolveAaid(unitOrAaid) -> { aaid, row? } | { error }
- * Accepts an aaid directly, or an equipment number resolved via fleetData /
- * asset search. NEVER guesses — returns an error if it can't resolve exactly.
+ * resolveAaid(unitOrAaid, opts) -> { aaid, row? } | { error }
+ * Resolution order (local-first, network only as a last resort):
+ *   1. token already an aaid
+ *   2. opts.assetUrl contains an aaid (the manual button passes this directly)
+ *   3. fleet cache row (by equipmentId) -> aaid from its assetUrl/aaid
+ *   4. asset-search endpoint (network; only if online)
+ * NEVER guesses — returns an error if it can't resolve exactly.
  */
-async function resolveAaid(unitOrAaid) {
+async function resolveAaid(unitOrAaid, opts) {
+  opts = opts || {};
   const token = String(unitOrAaid || '').trim();
+  // (2) An explicitly-passed assetUrl is the most reliable, no-network source —
+  //     check it BEFORE anything else so the manual button never needs a search.
+  const fromOpt = _aaidFromUrl(opts.assetUrl);
+  if (fromOpt) return { aaid: fromOpt };
   if (!token) return { error: 'no unit specified' };
+  // (1) token is itself an aaid.
   if (AAID_RE.test(token)) return { aaid: token };
 
-  // Try the local fleet cache first (cheap, no network).
+  // (3) Local fleet cache (cheap, no network) — match by equipmentId, then pull
+  //     the aaid from the row's aaid/assetUrl.
   if (store) {
     try {
       const rows = (store.load('fleetData', {}) || {}).rows || [];
@@ -161,7 +178,8 @@ async function resolveAaid(unitOrAaid) {
     } catch (_) {}
   }
 
-  // Fall back to the asset-search endpoint by displayName / vehicleId.
+  // (4) Network fallback: asset-search by displayName / vehicleId. Guarded so an
+  //     offline/transient failure returns a clear error, not a crash.
   try {
     const res = await aap.searchAssets({ query: token });
     const list = (res && (res.assets || res.results || res.content || res.items || res.data)) || [];
@@ -197,7 +215,7 @@ async function setLifecycleApi(args) {
   if (BLOCKED_STATES.includes(state)) return { ok: false, status: 'blocked', error: 'state ' + state + ' is not permitted' };
   if (!ALLOWED_STATES.includes(state)) return { ok: false, status: 'failed', error: 'unknown/invalid state: ' + state };
 
-  const r = await resolveAaid(args.aaid || args.unit);
+  const r = await resolveAaid(args.aaid || args.unit, { assetUrl: args.assetUrl });
   if (r.error) return { ok: false, status: 'failed', error: r.error };
   const aaid = r.aaid;
 
@@ -390,13 +408,16 @@ async function clearAllOpenDvirs(unitOrAaid, opts) {
  */
 async function setLifecycleActiveWithDvir(args) {
   args = args || {};
-  const first = await setLifecycleApi({ unit: args.unit, aaid: args.aaid, state: 'ACTIVE', reason: args.reason || 'HEALTHY' });
+  const first = await setLifecycleApi({ unit: args.unit, aaid: args.aaid, assetUrl: args.assetUrl, state: 'ACTIVE', reason: args.reason || 'HEALTHY' });
   if (first.ok) return first;
   // If it failed and there are open DVIRs, clear them and retry once.
-  const open = await getOpenDvirs(args.aaid || args.unit);
+  const resolved = await resolveAaid(args.aaid || args.unit, { assetUrl: args.assetUrl });
+  if (resolved.error) return first;
+  const open = await getOpenDvirs(resolved.aaid);
   if (open.ok && (open.blocking.length || open.open.length)) {
     logger.info('[aap-lifecycle] flip blocked; clearing ' + (open.blocking.length || open.open.length) + ' DVIR(s) then retrying');
     const clr = await clearAllOpenDvirs(open.aaid);
+    if (!clr.ok) return { ...first, dvirClearFailed: true, dvirError: clr.error, needsWorkOrder: clr.needsWorkOrder };
     const retry = await setLifecycleApi({ aaid: open.aaid, state: 'ACTIVE', reason: args.reason || 'HEALTHY' });
     return { ...retry, dvirCleared: clr.cleared, dvirFailed: clr.failed };
   }

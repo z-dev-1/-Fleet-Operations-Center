@@ -67,6 +67,14 @@ describe('aap_lifecycle_api — resolution + valid values', () => {
     const r = await lifecycle.resolveAaid(AAID);
     expect(r.aaid).toBe(AAID);
   });
+  it('resolves from a passed assetUrl WITHOUT any network call (manual-button path)', async () => {
+    // Even with no fleet cache + no network, an assetUrl resolves locally.
+    store.save('fleetData', { rows: [] });
+    const searchSpy = vi.spyOn(aap, 'searchAssets');
+    const r = await lifecycle.resolveAaid('122149', { assetUrl: 'https://aap-na.corp.amazon.com/v2/asset/' + AAID });
+    expect(r.aaid).toBe(AAID);
+    expect(searchSpy).not.toHaveBeenCalled();   // no network search needed
+  });
   it('END_OF_LIFE is never an allowed state', async () => {
     const states = await lifecycle.getValidStates('fleet');
     expect(states).not.toContain('END_OF_LIFE');
