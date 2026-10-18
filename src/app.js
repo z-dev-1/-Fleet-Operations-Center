@@ -396,10 +396,18 @@ app.whenReady().then(async () => {
           // refreshes every tick. The session value reflects the real, refreshed
           // AEA. Fall back to the disk value if the session read is unavailable.
           let aeaMin = state.aeaExpiresInMin;
+          let _liveAeaDiag = null;
           try {
             const liveAea = await _authModule.aeaSessionExpiryMin();
+            _liveAeaDiag = liveAea;
             if (liveAea !== null && liveAea !== undefined) aeaMin = liveAea;
           } catch (_) {}
+          // TEMP DIAG (AEA): print the live Electron-session AEA state so we can
+          // see definitively whether the app's session has the posture cookie.
+          // null => the Electron session has NO amazon_enterprise_access cookie
+          // (the device posture seam isn't delivering it to the app) => that is
+          // exactly why AAP rejects. A number => AEA IS present (look elsewhere).
+          log.info('[AEA-DIAG] live session AEA(min)=' + _liveAeaDiag + ' | disk AEA(min)=' + state.aeaExpiresInMin + ' | sessionOk=' + state.ok);
           // AEA (~2-6h) is what AAP actually enforces and expires long before the
           // ~24h session — that is why a single auth wasn't lasting 20h. When
           // AEA is near expiry, SILENTLY re-mint it via the Midway OIDC
