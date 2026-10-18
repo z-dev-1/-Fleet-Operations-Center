@@ -75,9 +75,15 @@ class HttpCoordStore {
         let data = '';
         res.on('data', (c) => { if (data.length < 5 * 1024 * 1024) data += c; });
         res.on('end', () => {
-          if (res.statusCode < 200 || res.statusCode >= 300) return resolve({ ok: false, status: res.statusCode, error: 'http ' + res.statusCode });
-          try { resolve({ ok: true, body: data ? JSON.parse(data) : {} }); }
-          catch (e) { resolve({ ok: false, error: 'bad json: ' + e.message }); }
+          // Parse the body even on non-2xx so typed conflicts (409 STALE_LEADER)
+          // surface to the caller instead of a generic 'http 409'.
+          let parsed = null;
+          try { parsed = data ? JSON.parse(data) : {}; } catch (_) { parsed = null; }
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            return resolve({ ok: false, status: res.statusCode, error: 'http ' + res.statusCode, body: parsed });
+          }
+          if (parsed === null) return resolve({ ok: false, error: 'bad json' });
+          resolve({ ok: true, body: parsed });
         });
       });
       req.on('error', (e) => resolve({ ok: false, error: e.message }));
@@ -123,17 +129,28 @@ class HttpCoordStore {
 
   async appendEvent(evt) {
     const r = await this._request('POST', '/events/append', evt);
-    if (!r.ok) { logger.warn('[cluster-http] appendEvent failed: ' + r.error); return { ok: false, seq: 0 }; }
+    if (!r.ok) {
+      // Item 3: a 409 STALE_LEADER means the coordinator fenced us out — we are
+      // no longer the valid leader (someone else holds a higher token). Surface
+      // it typed so the lease loop can demote/fail closed, NOT retry.
+      if (r.status === 409 && r.body && r.body.error) {
+        logger.warn('[cluster-http] appendEvent fenced: ' + r.body.error + ' currentToken=' + r.body.currentToken);
+        return { ok: false, fenced: true, error: r.body.error, currentLeader: r.body.currentLeader, currentToken: r.body.currentToken };
+      }
+      logger.warn('[cluster-http] appendEvent failed: ' + r.error);
+      return { ok: false, seq: 0 };
+    }
     return r.body;
   }
 
   async readEventsSince(seq, limit) {
     const r = await this._request('GET', '/events?since=' + (seq || 0) + '&limit=' + (limit || 1000));
-    if (!r.ok) { logger.warn('[cluster-http] readEventsSince failed: ' + r.error); return { events: [], lastSeq: seq || 0 }; }
-    return r.body;
+    if (!r.ok) { logger.warn('[cluster-http] readEventsSince failed: ' + r.error); return { events: [], lastSeq: seq || 0, _degraded: true }; }
+    return r.body;   // includes oldestSeq + now from the coordinator (items 4/6)
   }
 
-  // Liveness probe for the dashboard / startup check.
+  // Liveness probe for the dashboard / startup check. Returns the coordinator's
+  // authoritative `now` + head seq when reachable, { ok:false } otherwise.
   async ping() { const r = await this._request('GET', '/health'); return r.ok ? (r.body || { ok: true }) : { ok: false, error: r.error }; }
 }
 

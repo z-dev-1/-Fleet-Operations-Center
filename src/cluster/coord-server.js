@@ -60,6 +60,37 @@ function _readBody(req) {
   });
 }
 
+// Stamp the coordinator's authoritative clock onto a leadership response.
+function _withNow(coord, obj) {
+  if (obj && typeof obj === 'object') { try { obj.now = coord.now(); } catch (_) {} }
+  return obj;
+}
+
+// Current event-log head sequence (best-effort).
+async function _headSeq(coord) {
+  try { const r = await coord.readEventsSince(Number.MAX_SAFE_INTEGER - 1, 1); return r && typeof r.lastSeq === 'number' ? r.lastSeq : 0; }
+  catch (_) { return 0; }
+}
+
+// Item 3 — coordinator-side fencing of event appends. The coordinator reads its
+// OWN authoritative leadership record and only accepts the append if the writer
+// is the CURRENT leader holding the CURRENT fencing token AND the lease has not
+// expired by coordinator time. Otherwise returns a typed STALE_LEADER conflict.
+async function _fenceWrite(coord, body) {
+  const rec = await coord.getLeadership();
+  const now = coord.now();
+  const curLeader = rec && rec.leader;
+  const curToken = rec && rec.fencingToken;
+  const leaseLive = rec && rec.expiresAt && rec.expiresAt > now;
+  if (!rec || !curLeader || !leaseLive) {
+    return { ok: false, error: 'NO_LIVE_LEADER', currentLeader: curLeader || null, currentToken: curToken != null ? curToken : null, now };
+  }
+  if (body.instanceId !== curLeader || body.token !== curToken) {
+    return { ok: false, error: 'STALE_LEADER', currentLeader: curLeader, currentToken: curToken, now };
+  }
+  return { ok: true };
+}
+
 function createServer(opts) {
   opts = opts || {};
   const coord = opts.coord || _makeBackingStore();
@@ -80,21 +111,36 @@ function createServer(opts) {
       const u = new URL(req.url, 'http://localhost');
       const p = u.pathname;
 
-      if (req.method === 'GET' && p === '/health') return send(200, { ok: true, now: coord.now(), ts: new Date().toISOString() });
-      if (req.method === 'GET' && p === '/leadership') { const record = await coord.getLeadership(); return send(200, { record }); }
+      // Item 4: coordinator time is AUTHORITATIVE — every response that affects
+      // lease decisions carries the server's `now` so clients can detect skew
+      // and never let a local clock decide another machine's lease expired.
+      if (req.method === 'GET' && p === '/health') return send(200, { ok: true, now: coord.now(), headSeq: await _headSeq(coord), ts: new Date().toISOString() });
+      if (req.method === 'GET' && p === '/leadership') { const record = await coord.getLeadership(); return send(200, { record, now: coord.now(), headSeq: await _headSeq(coord) }); }
       if (req.method === 'GET' && p === '/events') {
         const since = parseInt(u.searchParams.get('since') || '0', 10) || 0;
         const limit = parseInt(u.searchParams.get('limit') || '1000', 10) || 1000;
         const out = await coord.readEventsSince(since, limit);
+        // Item 6: expose the OLDEST retained seq so a client can detect a
+        // sync gap (its cursor fell behind the capped window).
+        if (typeof coord.oldestSeq === 'function') { try { out.oldestSeq = await coord.oldestSeq(); } catch (_) {} }
+        out.now = coord.now();
         return send(200, out);
       }
       if (req.method === 'POST') {
         const body = await _readBody(req);
-        if (p === '/leadership/acquire') return send(200, await coord.tryAcquireLeadership(body.instanceId, body.mode, body.leaseMs, body.opts));
-        if (p === '/leadership/renew') return send(200, await coord.renewLeadership(body.instanceId, body.token, body.leaseMs));
-        if (p === '/leadership/heartbeat') return send(200, await coord.heartbeat(body.instanceId, body.token));
-        if (p === '/leadership/release') return send(200, await coord.releaseLeadership(body.instanceId, body.token));
-        if (p === '/events/append') return send(200, await coord.appendEvent(body));
+        if (p === '/leadership/acquire') return send(200, _withNow(coord, await coord.tryAcquireLeadership(body.instanceId, body.mode, body.leaseMs, body.opts)));
+        if (p === '/leadership/renew') return send(200, _withNow(coord, await coord.renewLeadership(body.instanceId, body.token, body.leaseMs)));
+        if (p === '/leadership/heartbeat') return send(200, _withNow(coord, await coord.heartbeat(body.instanceId, body.token)));
+        if (p === '/leadership/release') return send(200, _withNow(coord, await coord.releaseLeadership(body.instanceId, body.token)));
+        if (p === '/events/append') {
+          // Item 3: the COORDINATOR independently fences event writes — a write
+          // from a non-leader or a stale token is rejected with 409 STALE_LEADER,
+          // regardless of client-side checks. A paused laptop (token 42) can
+          // never append after the DevSpace takes over (token 43).
+          const fence = await _fenceWrite(coord, body);
+          if (!fence.ok) return send(409, fence);
+          return send(200, await coord.appendEvent(body));
+        }
       }
       send(404, { error: 'not found' });
     } catch (e) {

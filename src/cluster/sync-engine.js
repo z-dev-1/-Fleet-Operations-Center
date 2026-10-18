@@ -101,6 +101,9 @@ class SyncEngine {
     this._isLeader = typeof opts.isLeader === 'function' ? opts.isLeader : () => true;
     this._getToken = typeof opts.getToken === 'function' ? opts.getToken : () => null;
     this._onApplied = typeof opts.onApplied === 'function' ? opts.onApplied : () => {};
+    // Item 3: called when the coordinator fences our write (stale leader) so the
+    // facade can demote immediately and stop production.
+    this._onFenced = typeof opts.onFenced === 'function' ? opts.onFenced : null;
     this._now = opts.now || (() => Date.now());
     this.lastSyncSeq = 0;
   }
@@ -139,6 +142,15 @@ class SyncEngine {
     const r = await this.coord.appendEvent({
       key, version, doc, instanceId: this.instanceId, token: this._getToken(), ts: this._now(),
     });
+    // Item 3: the coordinator fenced us out (STALE_LEADER) — a higher token
+    // holder exists. We are NOT the valid leader anymore. Signal the facade to
+    // demote/fail closed; do NOT treat this as a successful publish.
+    if (r && r.fenced) {
+      logger.warn('[cluster-sync] publish FENCED (' + r.error + ') — stale leader, signalling demotion');
+      if (typeof this._onFenced === 'function') { try { this._onFenced(r); } catch (_) {} }
+      return { ok: false, fenced: true, error: r.error };
+    }
+    if (!r || r.ok === false) { logger.warn('[cluster-sync] publish failed for ' + key); return { ok: false }; }
     logger.info('[cluster-sync] published ' + key + ' v' + version + ' seq=' + r.seq);
     return { ok: true, seq: r.seq, version };
   }
@@ -152,7 +164,11 @@ class SyncEngine {
    */
   async pull(limit) {
     if (!this.coord) return { ok: false, skipped: 'no-coord', applied: 0 };
-    const { events, lastSeq } = await this.coord.readEventsSince(this.lastSyncSeq, limit || 2000);
+    const res = await this.coord.readEventsSince(this.lastSyncSeq, limit || 2000);
+    const events = (res && res.events) || [];
+    const lastSeq = res && res.lastSeq;
+    const oldestSeq = res && res.oldestSeq;   // item 6: for gap detection
+    const _degraded = !!(res && res._degraded); // item 1: coordinator unreachable
     let applied = 0, skipped = 0;
     for (const e of events) {
       // Advance the cursor regardless so we never reprocess, even when skipping.
@@ -172,7 +188,7 @@ class SyncEngine {
       }
     }
     if (applied) logger.info('[cluster-sync] applied ' + applied + ' event(s) (skipped ' + skipped + '), cursor=' + this.lastSyncSeq);
-    return { ok: true, applied, skipped, lastSeq, cursor: this.lastSyncSeq };
+    return { ok: true, applied, skipped, lastSeq, oldestSeq, _degraded, cursor: this.lastSyncSeq };
   }
 
   getState() {

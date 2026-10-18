@@ -88,8 +88,12 @@ describe('cluster Stage 8 — shared HTTP coordinator (real cross-process failov
 
   it('event log is shared: one client publishes, the other reads it incrementally', async () => {
     const A = client('A'), B = client('B');
-    await A.appendEvent({ key: 'fleetData', version: 1, doc: { rows: [{ equipmentId: '999' }] }, instanceId: 'A', token: 1 });
-    await A.appendEvent({ key: 'canonicalState', version: 1, doc: { units: {} }, instanceId: 'A', token: 1 });
+    // A must be the valid leader before it can append — the coordinator now
+    // fences event writes to the current fencing-token holder (hardening item 3).
+    const acq = await A.tryAcquireLeadership('A', 'ACTIVE', 30000);
+    const tok = acq.record.fencingToken;
+    await A.appendEvent({ key: 'fleetData', version: 1, doc: { rows: [{ equipmentId: '999' }] }, instanceId: 'A', token: tok });
+    await A.appendEvent({ key: 'canonicalState', version: 1, doc: { units: {} }, instanceId: 'A', token: tok });
     const got = await B.readEventsSince(0, 100);
     expect(got.events.length).toBe(2);
     expect(got.events[0].doc.rows[0].equipmentId).toBe('999');

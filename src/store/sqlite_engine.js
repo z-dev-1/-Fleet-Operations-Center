@@ -102,6 +102,13 @@ function _ensureDb() {
     db.exec('PRAGMA journal_mode = WAL;');
     db.exec('PRAGMA synchronous = NORMAL;');
     db.exec('PRAGMA foreign_keys = ON;');
+    // busy_timeout: when a second connection (e.g. the coord-server's own
+    // store, the standby daemon, and the app all touching SQLite on one host)
+    // finds the DB write-locked, wait up to 5s for the lock to clear instead of
+    // failing immediately with SQLITE_BUSY. Essential under dual-instance
+    // contention. Transactions MUST stay short (never held across HTTP/Slack/
+    // AAP/Claude/Playwright/OWA/network/AI work) so this timeout is ample.
+    db.exec('PRAGMA busy_timeout = 5000;');
     db.exec(`CREATE TABLE IF NOT EXISTS kv (
       key        TEXT PRIMARY KEY,
       doc        TEXT NOT NULL,

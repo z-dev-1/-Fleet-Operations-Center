@@ -81,6 +81,16 @@ function _freshState() {
     coordKind: 'local',       // 'local' | 'http' — which coordinator backend (Stage 8)
     _applying: false,         // true while applying pulled docs (publish guard, Stage 9)
     aeaKeepalive: null,       // AEA keep-alive module when running (Stage 12)
+    // ── Hardening (Stage 15) ──────────────────────────────────────────────
+    coordUrl: null,           // configured shared-coordinator URL (or null)
+    sharedCoordConfigured: false, // true when a shared coordinator URL is set
+    coordinatorReachable: true,   // last-contact health (false → DEGRADED)
+    lastCoordContactAt: null, // ts of last successful coordinator contact
+    coordHeadSeq: 0,          // coordinator's current event-log head seq
+    coordNow: null,           // coordinator's authoritative clock (last seen)
+    leadershipState: 'FOLLOWER',  // FOLLOWER | LEADER_SYNCING | PRODUCTION_READY
+    productionReady: false,   // item 2: gates mayRunProduction() when leader
+    syncGap: false,           // item 6: cursor fell behind the retained window
   };
 }
 const FAILOVER_HISTORY_CAP = 50;
@@ -161,21 +171,39 @@ function init(opts) {
   //   - otherwise                     → LocalCoordStore (single-host / harness).
   // The URL comes from opts, settings.cluster.coordUrl, or FLEET_COORD_URL.
   const coordUrl = opts.coordUrl || _resolveCoordUrl();
+  _state.coordUrl = coordUrl || null;
   if (opts.coord) {
+    // Injected coord (tests / harness). Treat as whatever kind it declares.
     _state.coord = opts.coord;
+    _state.coordKind = opts.coordKind || (coordUrl ? 'http' : 'local');
+    _state.sharedCoordConfigured = !!coordUrl || _state.coordKind === 'http';
   } else if (coordUrl) {
+    // Item 1 — SHARED coordinator configured: ONLY HttpCoordStore is valid.
+    // NEVER fall back to LocalCoordStore, which would let the laptop and the
+    // DevSpace form independent leadership universes and both act. If the
+    // client can't even be constructed, we stay fail-closed (no coord) and the
+    // cluster reports DEGRADED / coordinatorReachable:false — production will
+    // not run because mayRunProduction() requires a reachable coordinator +
+    // confirmed leadership. We do NOT substitute a local store.
+    _state.sharedCoordConfigured = true;
     try {
       _state.coord = new HttpCoordStore({ baseUrl: coordUrl, token: opts.coordToken, now: opts.now });
       _state.coordKind = 'http';
-      logger.info('[cluster] using SHARED HTTP coordinator at ' + coordUrl);
+      logger.info('[cluster] using SHARED HTTP coordinator at ' + coordUrl + ' (NO local fallback)');
     } catch (e) {
-      logger.warn('[cluster] HTTP coordinator unavailable (' + e.message + ') — falling back to local coord-store');
-      _state.coord = new LocalCoordStore({ store: opts.store, now: opts.now });
-      _state.coordKind = 'local';
+      // Construction failed (bad URL) — remain fail-closed, NOT local.
+      _state.coord = null;
+      _state.coordKind = 'http';
+      _state.coordinatorReachable = false;
+      logger.warn('[cluster] SHARED coordinator could not be initialized (' + e.message + ') — FAIL CLOSED (no local fallback)');
     }
   } else {
+    // No shared coordinator configured → LocalCoordStore is the correct backend
+    // for single-machine / dev / test mode (unchanged legacy behavior).
     _state.coord = new LocalCoordStore({ store: opts.store, now: opts.now });
     _state.coordKind = 'local';
+    _state.sharedCoordConfigured = false;
+    _state.coordinatorReachable = true;   // local store is always "reachable"
   }
 
   gate.setEnabled(cfg.enabled);
@@ -232,6 +260,17 @@ function start(opts) {
     getToken: () => _state.fencingToken,
     now: lo.now,
     onApplied: (key, version) => { _state.lastSyncSeq = _state.sync ? _state.sync.lastSyncSeq : _state.lastSyncSeq; },
+    // Item 3: a fenced publish means a higher-token leader exists → we are a
+    // stale leader. Fail closed immediately: drop readiness and demote the
+    // lease so no further production work or writes occur.
+    onFenced: () => {
+      _state.productionReady = false;
+      _state.leadershipState = 'FOLLOWER';
+      if (_state.lease && _state.lease.isLeader()) {
+        try { _state.lease._demote('fenced-stale-leader'); } catch (_) {}
+        _onLeaseChange({ type: 'demoted', reason: 'fenced-stale-leader', state: _state.lease.getState() });
+      }
+    },
   });
   // Stage 9: auto-publish shared-operational key writes. Register a store
   // write hook so that whenever the LEADER commits a change to a shared key,
@@ -278,7 +317,24 @@ function start(opts) {
     const syncMs = lo.syncMs || 15000;
     const tick = async () => {
       if (!_state.sync) return;
-      try { await pullSharedState(); } catch (_) {}
+      try {
+        const r = await pullSharedState();
+        // Track coordinator health from the pull result (item 1/5). A degraded
+        // read (coordinator unreachable) flips health so mayRunProduction()
+        // fails closed when a SHARED coordinator is configured.
+        if (r && r._degraded) {
+          _state.coordinatorReachable = false;
+        } else if (r && r.ok) {
+          _state.coordinatorReachable = true;
+          _state.lastCoordContactAt = Date.now();
+          if (typeof r.lastSeq === 'number') _state.coordHeadSeq = r.lastSeq;
+          if (typeof r.oldestSeq === 'number' && _state.sync && _state.sync.lastSyncSeq > 0 && _state.sync.lastSyncSeq < (r.oldestSeq - 1)) {
+            _state.syncGap = true;
+          } else if (r.oldestSeq !== undefined) {
+            _state.syncGap = false;
+          }
+        }
+      } catch (_) { if (_state.sharedCoordConfigured) _state.coordinatorReachable = false; }
       if (_state._syncTimer != null) _state._syncTimer = setT(tick, syncMs);
     };
     _state._syncTimer = setT(tick, syncMs);
@@ -305,6 +361,24 @@ function _onLeaseChange(evt) {
   _state.fencingToken = s.isLeader ? s.fencingToken : null;
   _state.leaseExpiresAt = s.isLeader ? s.leaseExpiresAt : null;
   if (s.lastHeartbeatAt) _state.lastHeartbeatAt = s.lastHeartbeatAt;
+
+  // Item 2 — PROMOTION READINESS BARRIER.
+  // On PROMOTE: do NOT allow production yet. Enter LEADER_SYNCING, block
+  // production, and kick a catch-up that only flips productionReady=true once
+  // the local sync cursor reaches the coordinator's event-log head.
+  if (evt && evt.type === 'promoted') {
+    _state.leadershipState = 'LEADER_SYNCING';
+    _state.productionReady = false;
+    logger.info('[cluster] PROMOTED → LEADER_SYNCING (production blocked until caught up) token=' + _state.fencingToken);
+    _runPromotionCatchup().catch((e) => logger.warn('[cluster] promotion catch-up error: ' + (e && e.message)));
+  }
+  // On DEMOTE / loss: immediately fail closed — no production, back to FOLLOWER.
+  if (evt && evt.type === 'demoted') {
+    _state.leadershipState = 'FOLLOWER';
+    _state.productionReady = false;
+    logger.warn('[cluster] DEMOTED → FOLLOWER (' + (evt.reason || '') + ') — production stopped');
+  }
+
   // Record promote/demote transitions for the Instance Management history pane.
   if (evt && (evt.type === 'promoted' || evt.type === 'demoted')) {
     _state.failoverHistory.unshift({
@@ -313,6 +387,67 @@ function _onLeaseChange(evt) {
     });
     if (_state.failoverHistory.length > FAILOVER_HISTORY_CAP) _state.failoverHistory.length = FAILOVER_HISTORY_CAP;
   }
+}
+
+// Item 2 — drain the shared event log until the local sync cursor reaches the
+// coordinator's head, reconciling all SHARED_KEYS, THEN set productionReady.
+// Item 6 — if our cursor is behind the OLDEST retained event (capped-log gap),
+// do NOT claim readiness: flag syncGap and stay blocked until reconciled.
+// Bounded loop so a storm of concurrent writes can't spin forever; if we can't
+// converge we remain LEADER_SYNCING (production stays blocked = fail closed).
+async function _runPromotionCatchup() {
+  if (!_state.sync || !_state.coord) {
+    // No sync engine/coord (e.g. tests without one) → nothing to catch up on;
+    // a legacy/local single host is trivially "ready".
+    _state.leadershipState = 'PRODUCTION_READY';
+    _state.productionReady = true;
+    return;
+  }
+  const maxRounds = 8;
+  for (let round = 0; round < maxRounds; round++) {
+    // Still the leader? If we lost it mid-catch-up, abort (demote path handles it).
+    if (!isLeader()) { _state.productionReady = false; return; }
+    // Read head + oldest from the coordinator (authoritative).
+    let head = 0, oldest = 0;
+    try {
+      const probe = await _state.coord.readEventsSince(Number.MAX_SAFE_INTEGER - 1, 1);
+      head = (probe && typeof probe.lastSeq === 'number') ? probe.lastSeq : 0;
+      oldest = (probe && typeof probe.oldestSeq === 'number') ? probe.oldestSeq : 0;
+      _state.coordinatorReachable = true;
+      _state.lastCoordContactAt = Date.now();
+    } catch (_) {
+      // Can't reach the coordinator → cannot confirm catch-up → stay blocked.
+      _state.coordinatorReachable = false;
+      _state.productionReady = false;
+      return;
+    }
+    _state.coordHeadSeq = head;
+    // Item 6: sync gap — our cursor is older than the oldest retained event, so
+    // we've missed events the log no longer holds. Do NOT silently continue.
+    if (oldest > 0 && _state.sync.lastSyncSeq > 0 && _state.sync.lastSyncSeq < (oldest - 1)) {
+      _state.syncGap = true;
+      _state.productionReady = false;
+      logger.warn('[cluster] SYNC_GAP on promotion: cursor=' + _state.sync.lastSyncSeq +
+        ' < oldestRetained=' + oldest + ' — readiness BLOCKED until reconciliation');
+      return;
+    }
+    _state.syncGap = false;
+    // Drain everything we're missing (applies all SHARED_KEYS incl. the critical
+    // ledgers: fasInboundClaims/fasIdempotency/schedulerLedger/slack*/fleetData/
+    // canonicalState — all on the allowlist already).
+    await pullSharedState(100000);
+    // Caught up when our cursor has reached the head we just read.
+    if (_state.sync.lastSyncSeq >= head) {
+      _state.leadershipState = 'PRODUCTION_READY';
+      _state.productionReady = true;
+      logger.info('[cluster] LEADER_SYNCING → PRODUCTION_READY (cursor=' + _state.sync.lastSyncSeq + ' head=' + head + ')');
+      return;
+    }
+    // else: head advanced while we drained (leader writes elsewhere shouldn't
+    // happen since WE are leader, but be robust) — loop again.
+  }
+  // Didn't converge within the bound → stay blocked (fail closed).
+  logger.warn('[cluster] promotion catch-up did not converge — staying LEADER_SYNCING (production blocked)');
 }
 
 // ── Public API the rest of the app uses ──────────────────────────────────────
@@ -348,7 +483,14 @@ function assertCanSideEffect(kind) { return gate.assertCanSideEffect(kind); }
 // so the laptop and the Dev Space never run the same production operation.
 function mayRunProduction() {
   if (!_state.enabled) return true;   // legacy single-host
-  return isLeader();
+  // Item 1: a configured shared coordinator that is currently unreachable means
+  // we cannot confirm single-leader safety → FAIL CLOSED, never act.
+  if (_state.sharedCoordConfigured && _state.coordinatorReachable === false) return false;
+  // Item 2: production requires BOTH leadership AND having finished the
+  // post-promotion catch-up (productionReady). A freshly-promoted standby that
+  // is still LEADER_SYNCING must not act yet.
+  if (!isLeader()) return false;
+  return _state.productionReady === true;
 }
 
 // mayLivePull() — may THIS instance pull LIVE AAP read data itself (vs relying
@@ -399,6 +541,35 @@ function _setLease(token, expiresAt) {
     if (token != null) { _state.lease.role = 'leader'; _state.lease.fencingToken = token; _state.lease.leaseExpiresAt = expiresAt; }
     else { _state.lease.role = 'follower'; _state.lease.fencingToken = null; _state.lease.leaseExpiresAt = null; }
   }
+  // Readiness mirrors the held lease for the direct-set path (tests + the
+  // local-coordinator single-host case, where there is no cross-machine log to
+  // drain). With a SHARED coordinator, promotion goes through _onLeaseChange →
+  // _runPromotionCatchup instead, which is the barrier that matters.
+  if (token != null) {
+    if (_state.sharedCoordConfigured) {
+      // Shared mode: honor the barrier — only ready after catch-up. Kick it.
+      if (!_state.productionReady) { _state.leadershipState = 'LEADER_SYNCING'; _runPromotionCatchup().catch(() => {}); }
+    } else {
+      _state.leadershipState = 'PRODUCTION_READY';
+      _state.productionReady = true;
+    }
+  } else {
+    _state.leadershipState = 'FOLLOWER';
+    _state.productionReady = false;
+  }
+}
+
+// Derive a single human-readable cluster-health label (item 5).
+function _clusterHealth() {
+  if (!_state.enabled) return 'Healthy';                 // legacy single-host
+  if (_state.sharedCoordConfigured && _state.coordinatorReachable === false) return 'Coordinator Unreachable';
+  if (_state.syncGap) return 'Degraded';
+  if (isLeader()) {
+    if (_state.leadershipState === 'LEADER_SYNCING') return 'Leader Syncing';
+    if (_state.productionReady) return 'Production Ready';
+    return 'Leader Syncing';
+  }
+  return 'Standby';
 }
 
 function getStatus() {
@@ -414,6 +585,19 @@ function getStatus() {
     lastSyncSeq: _state.lastSyncSeq,
     capabilities: gate.getCapabilities(),
     coordKind: _state.coordKind,
+    // ── Hardening surface (items 1,2,5,6) ─────────────────────────────────
+    coordUrl: _state.coordUrl,
+    sharedCoordConfigured: _state.sharedCoordConfigured,
+    coordinatorReachable: _state.coordinatorReachable,
+    lastCoordContactAt: _state.lastCoordContactAt,
+    leadershipState: _state.leadershipState,
+    productionReady: mayRunProduction() ? true : _state.productionReady && isLeader(),
+    mayRunProduction: mayRunProduction(),
+    syncCursor: _state.sync ? _state.sync.lastSyncSeq : _state.lastSyncSeq,
+    coordinatorHeadSeq: _state.coordHeadSeq,
+    syncLag: Math.max(0, (_state.coordHeadSeq || 0) - (_state.sync ? _state.sync.lastSyncSeq : _state.lastSyncSeq)),
+    syncGap: _state.syncGap,
+    clusterHealth: _clusterHealth(),
   };
 }
 
@@ -447,7 +631,25 @@ async function getDashboard() {
       isLeader: self.isLeader, fencingToken: self.fencingToken,
       lastHeartbeatAt: self.lastHeartbeatAt, capabilities: self.capabilities,
       appVersion: _appVersion(),
+      // Hardening surface (item 5)
+      leadershipState: self.leadershipState,
+      productionReady: self.productionReady,
+      mayRunProduction: self.mayRunProduction,
+      clusterHealth: self.clusterHealth,
     },
+    coordinator: {
+      kind: _state.coordKind,
+      url: _state.coordUrl,
+      sharedConfigured: _state.sharedCoordConfigured,
+      reachable: _state.coordinatorReachable,
+      lastContactAt: _state.lastCoordContactAt ? new Date(_state.lastCoordContactAt).toISOString() : null,
+      headSeq: _state.coordHeadSeq,
+      coordNow: _state.coordNow,
+      syncCursor: _state.sync ? _state.sync.lastSyncSeq : _state.lastSyncSeq,
+      syncLag: Math.max(0, (_state.coordHeadSeq || 0) - (_state.sync ? _state.sync.lastSyncSeq : _state.lastSyncSeq)),
+      syncGap: _state.syncGap,
+    },
+    health: _clusterHealth(),
     leader: shared ? {
       instanceId: shared.leader, mode: shared.mode, fencingToken: shared.fencingToken,
       acquiredAt: shared.acquiredAt ? new Date(shared.acquiredAt).toISOString() : null,

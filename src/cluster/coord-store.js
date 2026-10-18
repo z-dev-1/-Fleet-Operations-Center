@@ -181,8 +181,21 @@ class LocalCoordStore {
   async readEventsSince(seq, limit) {
     const log = this._store.load(EVENTLOG_KEY, { seq: 0, events: [] });
     const from = Number.isFinite(seq) ? seq : 0;
-    const out = (log.events || []).filter(e => e.seq > from).slice(0, limit || 1000);
-    return { events: out, lastSeq: log.seq || 0 };
+    const events = log.events || [];
+    const out = events.filter(e => e.seq > from).slice(0, limit || 1000);
+    // Item 6: report the OLDEST retained seq so a consumer can detect that its
+    // cursor fell behind the capped window (a sync gap) and must reconcile via
+    // a full checkpoint instead of silently continuing with incomplete state.
+    const oldestSeq = events.length ? events[0].seq : 0;
+    return { events: out, lastSeq: log.seq || 0, oldestSeq };
+  }
+
+  // Oldest event seq still retained in the capped log (0 if empty). Used for
+  // sync-gap detection at the coordinator.
+  async oldestSeq() {
+    const log = this._store.load(EVENTLOG_KEY, { seq: 0, events: [] });
+    const events = log.events || [];
+    return events.length ? events[0].seq : 0;
   }
 
   // Prefer the store's async serialized update when available (per-key mutex /
