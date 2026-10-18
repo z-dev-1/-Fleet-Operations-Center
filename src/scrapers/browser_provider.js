@@ -217,12 +217,18 @@ async function _openPlaywright(url, opts) {
     engine: 'playwright',
     url: () => { try { return page.url(); } catch (_) { return cur; } },
     // Playwright's page.evaluate runs a function; we receive a SCRIPT STRING
-    // (same contract aap_api uses for Electron). Wrap it so the string body is
-    // evaluated and its completion value returned — identical semantics to
-    // webContents.executeJavaScript(scriptString).
+    // (same contract aap_api uses for Electron). The aap_api scripts are
+    // self-invoking expressions that end in a trailing `;`, e.g.
+    //   (async function(){ ... })();
+    // so the body is `return <that-expression>;` — a valid function body whose
+    // trailing semicolon just ends the return statement. (The earlier
+    // `return (<src>)` wrapper produced `return (...;)` → SyntaxError on the
+    // inner `;`.) new Function returns the IIFE's value (a Promise for the
+    // async ones); Playwright awaits thenables, matching Electron's
+    // executeJavaScript(scriptString) semantics exactly.
     evaluate: (script) => page.evaluate(
       // eslint-disable-next-line no-new-func
-      (src) => (new Function('return (' + src + ')'))(), script),
+      (src) => (new Function('return ' + src))(), script),
     close: () => { context.close().catch(() => {}); },
   };
 }
