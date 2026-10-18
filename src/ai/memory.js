@@ -62,15 +62,23 @@ function remember(mem) {
 
   const origin = ORIGINS.includes(mem.origin) ? mem.origin : 'ai_inferred';
   const confidence = typeof mem.confidence === 'number' ? Math.max(0, Math.min(1, mem.confidence)) : (origin === 'operator_confirmed' ? 1 : 0.6);
+  // Governance (spec §12): optional TTL for volatile facts + supersede link.
+  const expiresAt = mem.expiresAt ? _coerceExpiry(mem.expiresAt) : null;
 
   const arr = _load();
-  // Dedupe: same type+entity+fact -> update (confirm/refresh) instead of adding.
+  // Dedupe: same type+entity+fact -> MERGE (confirm/refresh + bump support).
   const key = type + '|' + entity.toLowerCase() + '|' + fact.toLowerCase();
   const existing = arr.find((m) => (m.type + '|' + String(m.entity).toLowerCase() + '|' + String(m.fact).toLowerCase()) === key);
   if (existing) {
     // An operator confirmation UPGRADES an ai_inferred memory; never downgrade.
     if (origin === 'operator_confirmed') { existing.origin = 'operator_confirmed'; existing.confidence = Math.max(existing.confidence || 0, confidence); }
+    else {
+      // Repeated AI support strengthens an inference (spec §12 precedence tier).
+      existing.supportCount = (existing.supportCount || 1) + 1;
+      existing.confidence = Math.min(0.9, (existing.confidence || 0.6) + 0.05);
+    }
     existing.lastConfirmedAt = _now();
+    if (expiresAt) existing.expiresAt = expiresAt;
     if (mem.source) existing.source = String(mem.source).slice(0, 80);
     _save(arr);
     return { ok: true, id: existing.id, updated: true };
@@ -82,12 +90,29 @@ function remember(mem) {
     source: mem.source ? String(mem.source).slice(0, 80) : (origin === 'operator_confirmed' ? 'operator' : 'ai'),
     origin,
     confidence,
+    supportCount: 1,                 // # of times this inference has been supported
     createdAt: _now(),
     lastConfirmedAt: origin === 'operator_confirmed' ? _now() : null,
+    expiresAt,                       // TTL for volatile facts (null = durable)
+    supersedes: mem.supersedes || null, // id of a memory this replaces
+    corrections: [],                 // correction history (spec §12)
   };
   arr.unshift(rec);
+  // If this supersedes another memory, mark the old one superseded (not deleted,
+  // for correction history/audit) so retrieval ignores it.
+  if (rec.supersedes) {
+    const old = arr.find((m) => m.id === rec.supersedes);
+    if (old) { old.supersededBy = rec.id; old.supersededAt = _now(); }
+  }
   _save(arr);
   return { ok: true, id: rec.id };
+}
+
+// Coerce a TTL spec to an ISO expiry: a number = ms-from-now; a string = ISO.
+function _coerceExpiry(v) {
+  if (typeof v === 'number' && isFinite(v)) return new Date(Date.now() + v).toISOString();
+  const ms = Date.parse(v);
+  return isNaN(ms) ? null : new Date(ms).toISOString();
 }
 
 /**
@@ -114,6 +139,72 @@ function forget(id) {
   return true;
 }
 
+// ── GOVERNANCE (spec §12) ─────────────────────────────────────────────────────
+
+/**
+ * supersede(oldId, newMem) -> { ok, id?, error? }
+ * Record a NEW memory that replaces an outdated one. The old memory is marked
+ * superseded (kept for correction history) and dropped from retrieval.
+ */
+function supersede(oldId, newMem) {
+  const r = remember({ ...(newMem || {}), supersedes: oldId });
+  return r;
+}
+
+/**
+ * recordCorrection(id, correction) -> boolean
+ * Append a correction to a memory's history (spec §12 correction history). Does
+ * not change behavior on its own; it is structured learning data.
+ */
+function recordCorrection(id, correction) {
+  const arr = _load();
+  const m = arr.find((x) => x.id === id);
+  if (!m) return false;
+  m.corrections = Array.isArray(m.corrections) ? m.corrections : [];
+  m.corrections.push({ at: _now(), note: String((correction && correction.note) || '').slice(0, 300), by: (correction && correction.by) || 'operator' });
+  _save(arr);
+  return true;
+}
+
+/**
+ * pruneExpired() -> { removed } — drop memories past their TTL. Volatile fleet
+ * status should never linger as permanent memory (spec §12).
+ */
+function pruneExpired() {
+  const arr = _load();
+  const next = arr.filter((m) => !(m.expiresAt && Date.parse(m.expiresAt) <= Date.now()));
+  const removed = arr.length - next.length;
+  if (removed) _save(next);
+  return { removed };
+}
+
+/**
+ * decay(opts) -> { decayed } — apply confidence decay to AI-inferred memories
+ * that have not been confirmed recently (spec §12 confidence decay). Operator-
+ * confirmed and verified-source memories are NOT decayed. Half-life default 30d.
+ */
+function decay(opts) {
+  opts = opts || {};
+  const halfLifeMs = _posInt(opts.halfLifeMs, 30 * 24 * 3600 * 1000);
+  const floor = typeof opts.floor === 'number' ? opts.floor : 0.2;
+  const arr = _load();
+  let decayed = 0;
+  for (const m of arr) {
+    if (m.origin === 'operator_confirmed' || _isVerifiedSource(m)) continue;
+    const base = Date.parse(m.lastConfirmedAt || m.createdAt || 0) || 0;
+    if (!base) continue;
+    const age = Date.now() - base;
+    if (age <= 0) continue;
+    const factor = Math.pow(0.5, age / halfLifeMs);
+    const next = Math.max(floor, (m.confidence != null ? m.confidence : 0.6) * factor);
+    if (next < (m.confidence || 0)) { m.confidence = Number(next.toFixed(3)); decayed++; }
+  }
+  if (decayed) _save(arr);
+  return { decayed };
+}
+
+function _posInt(v, d) { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : d; }
+
 // ── RETRIEVAL ────────────────────────────────────────────────────────────────
 // Pull memories relevant to the current task/entities from BOTH the owned store
 // and the existing sources, normalize to one shape, and rank with
@@ -129,9 +220,17 @@ function _norm(type, entity, fact, origin, source, confidence, extra) {
   };
 }
 
-// Owned store memories matching the query.
+// Is a memory currently live? (not superseded, not expired)
+function _isLive(m) {
+  if (!m) return false;
+  if (m.supersededBy) return false;
+  if (m.expiresAt && Date.parse(m.expiresAt) <= Date.now()) return false;
+  return true;
+}
+
+// Owned store memories matching the query (live only — superseded/expired skipped).
 function _fromOwned(q) {
-  const arr = _load();
+  const arr = _load().filter(_isLive);
   const units = (q.units || []).map((u) => String(u).toLowerCase());
   const vendors = (q.vendors || []).map((v) => String(v).toLowerCase());
   const sites = (q.sites || []).map((s) => String(s).toLowerCase());
@@ -239,9 +338,21 @@ function retrieve(query, opts) {
 // Rank score: operator_confirmed memories always outrank ai_inferred (spec #4),
 // then higher confidence wins.
 function _rank(m) {
-  const originScore = m.origin === 'operator_confirmed' ? 1000 : 0;
+  // Spec §12 four-tier precedence: operator_confirmed > verified-source derived
+  // > repeated AI-supported inference > single AI inference. Confidence is the
+  // within-tier tiebreak.
+  let tier;
+  if (m.origin === 'operator_confirmed') tier = 3000;
+  else if (_isVerifiedSource(m)) tier = 2000;
+  else if ((m.supportCount || 1) >= 2) tier = 1000;
+  else tier = 0;
   const conf = typeof m.confidence === 'number' ? m.confidence : 0.5;
-  return originScore + conf * 100;
+  return tier + conf * 100;
+}
+function _isVerifiedSource(m) {
+  const s = String(m.source || '').toLowerCase();
+  if (!s || s === 'ai') return false;
+  return /fas_case|learned_preference|operator_correction|aap|relay|uptake|decisiv|canonical|fleetdata/.test(s);
 }
 
 /**
@@ -258,4 +369,8 @@ function retrieveContext(query, opts) {
   }).join('\n');
 }
 
-module.exports = { remember, confirm, forget, retrieve, retrieveContext, CATEGORIES, ORIGINS, STORE_KEY };
+module.exports = {
+  remember, confirm, forget, retrieve, retrieveContext,
+  supersede, recordCorrection, pruneExpired, decay,
+  CATEGORIES, ORIGINS, STORE_KEY,
+};
