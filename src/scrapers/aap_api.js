@@ -187,7 +187,11 @@ function _requestScript(method, url, bodyLiteral) {
             var txt = xhr.responseText || '';
             var json = null;
             try { json = JSON.parse(txt); } catch (e) {}
-            resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, json: json, text: json ? null : txt.slice(0, 1000) });
+            var okStatus = xhr.status >= 200 && xhr.status < 300;
+            // On error, always include the FULL raw body (not just when json is
+            // null) so structured error detail (errors[], cause, fieldName)
+            // isn't lost behind a generic top-level message.
+            resolve({ ok: okStatus, status: xhr.status, json: json, text: (json && okStatus) ? null : txt.slice(0, 4000) });
           }
         };
         xhr.onerror = function () { resolve({ ok: false, status: 0, netErr: true }); };
@@ -206,7 +210,13 @@ async function _request(method, path, body) {
     const r = await page.evaluate(script);
     _scheduleTeardown();
     if (!r || !r.ok) {
-      const detail = (r && (r.text || r.error)) || ('HTTP ' + (r && r.status));
+      // Surface the server's error body — AAP returns a JSON error object on 4xx
+      // (validation details). We now capture the FULL raw text on error, so
+      // prefer that (it carries errors[]/cause detail a top-level message hides).
+      let detail = (r && r.text) || '';
+      if (!detail && r && r.json) { try { detail = JSON.stringify(r.json); } catch (_) {} }
+      if (!detail && r && r.error) detail = r.error;
+      if (!detail) detail = 'HTTP ' + (r && r.status);
       // A 401/403 or an SSO redirect body means the session lapsed mid-call.
       if (r && (r.status === 401 || r.status === 403)) {
         throw Object.assign(new Error('AAP API ' + r.status + ' (session rejected)'), { code: 'MIDWAY_SESSION_INVALID' });
@@ -248,6 +258,14 @@ function searchAssets(assetSearchRequest) {
 // Fleet definitions + lifecycle schemas.
 function getFleet(fleetId) {
   return apiGet('/api/v1/fleet/' + encodeURIComponent(fleetId));
+}
+
+// Latest known GPS location for an asset. The WR wizard calls this to fill the
+// VRE recommendation's currentLocation (real lat/long + reverse-geocoded
+// address). VRE's geofence rules depend on real coordinates — a null/zero
+// coordinate makes the engine reject the request.
+function getLocationLatest(aaid) {
+  return apiGet('/api/v1/locationHistories/latest/' + encodeURIComponent(aaid));
 }
 
 // Endpoint 2: full service aggregate (comments, estimates, AVM codes).
@@ -1146,7 +1164,11 @@ function _aaidFromUrl(assetUrl) {
 function _buildLocation(assetFull, opts) {
   const loc = {
     latitude: null, longitude: null,
-    street: '', city: '', subRegion: '', country: 'US', postalCode: '', timeZone: '',
+    // Wizard sends full country name + a real IANA timeZone. Default to US East
+    // (most of the fleet) when we can't reverse-geocode; VRE reads COUNTRY/STATE
+    // rule attributes from these.
+    street: '', city: '', subRegion: '', country: 'United States', postalCode: '',
+    timeZone: 'America/New_York',
   };
   // Off-site address typed in the wizard wins (unit is away from its yard).
   if (opts && opts.offSite) {
@@ -1155,18 +1177,43 @@ function _buildLocation(assetFull, opts) {
     loc.subRegion  = opts.locState  || '';
     loc.postalCode = opts.locZip    || '';
   }
-  const gp = assetFull && assetFull.latestLocation && assetFull.latestLocation.geoPoint;
-  if (gp && (gp.latitude != null || gp.lat != null)) {
-    loc.latitude  = gp.latitude  != null ? gp.latitude  : gp.lat;
-    loc.longitude = gp.longitude != null ? gp.longitude : gp.lng;
+  // Prefer the live location-latest payload (same source the wizard uses). It
+  // carries geoPoint + a reverse-geocoded address + timeZone.
+  const llRaw = opts && opts.locationLatest;
+  const ll = llRaw && (llRaw.location || llRaw.geoPoint || llRaw);
+  if (ll) {
+    const lat = ll.latitude != null ? ll.latitude : ll.lat;
+    const lng = ll.longitude != null ? ll.longitude : (ll.lng != null ? ll.lng : ll.lon);
+    if (lat != null) loc.latitude = lat;
+    if (lng != null) loc.longitude = lng;
+    if (!opts.offSite) {
+      if (ll.street)     loc.street = ll.street;
+      if (ll.city)       loc.city = ll.city;
+      if (ll.subRegion || ll.state) loc.subRegion = ll.subRegion || ll.state;
+      if (ll.postalCode || ll.zip)  loc.postalCode = ll.postalCode || ll.zip;
+      if (ll.country)    loc.country = ll.country;
+      if (ll.timeZone)   loc.timeZone = ll.timeZone;
+    }
   }
-  // Domicile fallback coords if GPS missing.
+  // Asset's own latestLocation.geoPoint as a secondary source.
+  if (loc.latitude == null) {
+    const gp = assetFull && assetFull.latestLocation && assetFull.latestLocation.geoPoint;
+    if (gp && (gp.latitude != null || gp.lat != null)) {
+      loc.latitude  = gp.latitude  != null ? gp.latitude  : gp.lat;
+      loc.longitude = gp.longitude != null ? gp.longitude : gp.lng;
+    }
+  }
+  // Domicile fallback coords if GPS still missing.
   if (loc.latitude == null && opts && opts.domicile) {
     let DOM = null;
     try { DOM = require('./aap_create_wr').DOMICILE_COORDS; } catch (_) {}
     const d = DOM && (DOM[opts.domicile] || DOM[String(opts.domicile).toUpperCase()]);
     if (d) { loc.latitude = d.latitude; loc.longitude = d.longitude; }
   }
+  // VRE rejects null coordinates. As a last resort send 0,0 (the request still
+  // forms; geofence rules simply won't match, which is acceptable for Phase 1).
+  if (loc.latitude == null) loc.latitude = 0;
+  if (loc.longitude == null) loc.longitude = 0;
   return loc;
 }
 
@@ -1174,8 +1221,9 @@ function _buildLocation(assetFull, opts) {
 // vendorCode is 'UNASSIGNED' for Phase 1 or the confirmed code for Phase 2.
 function _buildWoBody(opts, assetFull, vendorCode) {
   const now = Date.now();
-  const nowIso   = new Date(now).toISOString();
-  const needByIso = new Date(now + 24 * 3600 * 1000).toISOString();
+  // Match the wizard: whole-second ISO (no millis), needBy = now + 4h.
+  const nowIso   = new Date(Math.floor(now / 1000) * 1000).toISOString();
+  const needByIso = new Date(Math.floor(now / 1000) * 1000 + 4 * 3600 * 1000).toISOString();
   const aaid = opts.aaid || _aaidFromUrl(opts.assetUrl);
 
   // areaPairs values are now AAP AVM CODES (L1/L2/L3) from the WR modal's live
@@ -1191,17 +1239,34 @@ function _buildWoBody(opts, assetFull, vendorCode) {
   if (opts.comments) comments.push(String(opts.comments));
 
   const urgent = String(opts.urgent || '').toLowerCase() === 'yes';
-  const calltype = (opts && opts.offSite) ? 'OFFSITE' : (opts.calltype || 'ONSITE');
+  // callType enum (confirmed live): [OFFSITE, ROADSIDE, YARD]. 'ONSITE' is NOT
+  // valid. NOTE: the real AAP wizard sends the field LOWERCASE as `calltype`
+  // (the 400 validator echoes it as `callType`, but the accepted request body
+  // from the live wizard capture uses `calltype`). A unit at its domicile is
+  // YARD; a unit away from the yard is OFFSITE. Caller may force one.
+  const _ct = String(opts.callType || opts.calltype || '').trim().toUpperCase();
+  const VALID_CALLTYPES = ['OFFSITE', 'ROADSIDE', 'YARD'];
+  const calltype = VALID_CALLTYPES.includes(_ct)
+    ? _ct
+    : (opts && opts.offSite ? 'OFFSITE' : 'YARD');
 
+  // Body shape mirrors the real wizard's accepted /vre/recommendation request
+  // EXACTLY (captured live 2026-10-18). Key fixes vs. our earlier (rejected)
+  // body: field is `calltype` (lowercase); `destination` is a full zeroed
+  // object (NOT null); NO `source` field; currentLocation carries real GPS +
+  // full address + timeZone. suggestedItems level1/level2 are DISPLAY NAMES
+  // ("Chassis", "Check Engine Light") — not avmCodes.
   return {
     aaid,
     title: String(opts.title || '').slice(0, 90),
     calltype,
     currentLocation: _buildLocation(assetFull, opts),
-    destination: null,
+    destination: {
+      latitude: 0, longitude: 0,
+      street: '', city: '', subRegion: '', country: '', postalCode: '',
+    },
     urgent,
     urgencyReason: urgent ? _mapUrgencyReason(opts.urgencyReason) : null,
-    severity: urgent ? 'HIGH' : 'LOW',
     tireIssue: suggestedItems.some(s => /tire/i.test(s.level1)) || false,
     assetLoaded: false,
     assetRefrigerated: false,
@@ -1214,8 +1279,9 @@ function _buildWoBody(opts, assetFull, vendorCode) {
     suggestedItems,
     vendor: vendorCode,
     supplierId: null,
-    sourceNotificationIds: [],
-    source: 'FLEET_OPS_CENTER',
+    sourceNotificationIds: null,
+    source: null, // wizard sends source:null (NOT omitted, NOT a string)
+    severity: urgent ? 'HIGH' : 'LOW',
     relatedAsset: null,
   };
 }
@@ -1265,6 +1331,15 @@ async function createWorkOrder(opts = {}) {
   try { assetFull = await getAsset(aaid); } catch (e) {
     logger.warn('createWorkOrder: getAsset failed, using fallback location: ' + e.message);
   }
+  // Fetch the live latest GPS location (same source the wizard uses) so the VRE
+  // currentLocation carries real coordinates — VRE rejects null/zero coords.
+  if (opts.locationLatest == null) {
+    try {
+      const ll = await getLocationLatest(aaid);
+      opts = { ...opts, locationLatest: ll };
+    }
+    catch (e) { logger.warn('createWorkOrder: getLocationLatest failed: ' + e.message); }
+  }
 
   const wantCommit = !!opts.confirmVendor;
 
@@ -1290,6 +1365,23 @@ async function createWorkOrder(opts = {}) {
       (recommendation.raw && recommendation.raw.workRequestId))) || '';
   logger.info('createWorkOrder Phase 2 (commit) aaid=' + aaid +
     ' vendor=' + vendorCode + ' workRequestId=' + workRequestId);
+
+  // Upload attachments to the just-created WR (best-effort — a failed upload
+  // never fails the WR). opts.attachments = [{ name, dataUrl }] from the modal.
+  let attachmentResults = null;
+  if (workRequestId && Array.isArray(opts.attachments) && opts.attachments.length) {
+    try {
+      attachmentResults = await uploadWrAttachments(workRequestId, opts.attachments, {
+        vendor: vendorCode,
+        maintenanceType: 'UNPLANNED',
+        workState: 'ACTIVE',
+      });
+    } catch (e) {
+      logger.warn('createWorkOrder: attachment upload batch failed: ' + e.message);
+      attachmentResults = [{ ok: false, error: e.message }];
+    }
+  }
+
   return {
     ok: true,
     phase: 'commit',
@@ -1297,8 +1389,207 @@ async function createWorkOrder(opts = {}) {
     vendor: vendorCode,
     autoAssignable: recommendation.autoAssignable,
     workRequestId,
+    attachments: attachmentResults,
     raw: resp || null,
   };
+}
+
+// ── VRE Phase-1 recommendation MATRIX (diagnostic, commits NOTHING) ─────────
+// Exercises the live VRE recommendation endpoint across the full combination
+// matrix a user can produce in the WR modal — urgent/non-urgent, tires, tow,
+// multi-area, and (when a real L1/L2 tree is available) real avmCode display
+// names — WITHOUT creating any work order (every call is Phase 1,
+// vendor:'UNASSIGNED'). Returns one row per scenario with the recommended
+// vendor / rule / autoAssignable (or the error), so we can confirm the whole
+// matrix works in one run. opts: { assetUrl|aaid, domicile, assetType }.
+async function vreRecommendMatrix(opts = {}) {
+  const aaid = opts.aaid || _aaidFromUrl(opts.assetUrl);
+  if (!aaid) throw Object.assign(new Error('vreRecommendMatrix: no aaid'), { code: 'NO_AAID' });
+
+  // Scenarios use DISPLAY names for suggestedItems (confirmed correct live:
+  // "Chassis", "Check Engine Light", "Tires", etc. — not avmCodes).
+  const scenarios = [
+    { label: 'single area, non-urgent',   areaPairs: [{ area: 'Check Engine Light', subcategory: 'CEL Engine Position' }], urgent: 'No'  },
+    { label: 'single area, URGENT',       areaPairs: [{ area: 'Check Engine Light', subcategory: 'CEL Engine Position' }], urgent: 'Yes', urgencyReason: 'DEA - Asset Shortage' },
+    { label: 'multi-area, non-urgent',    areaPairs: [{ area: 'Chassis', subcategory: 'Reservoir and Lines' }, { area: 'Check Engine Light', subcategory: 'CEL Engine Position' }], urgent: 'No' },
+    { label: 'TIRES, non-urgent',         areaPairs: [{ area: 'Tires', subcategory: 'Steer Left' }], urgent: 'No'  },
+    { label: 'TIRES, URGENT',             areaPairs: [{ area: 'Tires', subcategory: 'Steer Left' }], urgent: 'Yes', urgencyReason: 'DEA - Asset Shortage' },
+    { label: 'TOW, urgent (passthrough)', areaPairs: [{ area: 'TOW', subcategory: 'MECHANICAL ISSUE' }], urgent: 'Yes', urgencyReason: 'DEA - Asset Shortage' },
+    { label: 'Brakes, non-urgent',        areaPairs: [{ area: 'Brakes', subcategory: 'Air Brake Assembly' }], urgent: 'No' },
+    { label: 'no area (bare rec)',        areaPairs: [], urgent: 'No' },
+  ];
+
+  logger.info('[vre-matrix] starting ' + scenarios.length + ' scenarios for ' + aaid + ' (Phase 1 only — NOTHING committed)');
+  const rows = [];
+  for (const s of scenarios) {
+    try {
+      const rec = await createWorkOrder({
+        assetUrl: opts.assetUrl, aaid,
+        title: 'VRE matrix: ' + s.label,
+        issue: 'recommendation test — not submitted',
+        areaPairs: s.areaPairs,
+        urgent: s.urgent,
+        urgencyReason: s.urgencyReason,
+        confirmVendor: false, // Phase 1 ONLY
+      });
+      const r = rec && rec.recommendation;
+      logger.info('[vre-matrix] ✅ ' + s.label + ' → vendor=' + (r && r.vendor) +
+        ' rule=' + (r && r.ruleName) + ' autoAssignable=' + (r && r.autoAssignable));
+      rows.push({ scenario: s.label, ok: true, vendor: r && r.vendor, ruleName: r && r.ruleName, autoAssignable: r && r.autoAssignable });
+    } catch (e) {
+      const msg = (e && e.message) || String(e);
+      logger.warn('[vre-matrix] ✗ ' + s.label + ' → ' + msg.slice(0, 300));
+      rows.push({ scenario: s.label, ok: false, error: msg.slice(0, 400) });
+    }
+  }
+  const okCount = rows.filter((r) => r.ok).length;
+  logger.info('[vre-matrix] DONE ' + okCount + '/' + rows.length + ' scenarios OK\n' + JSON.stringify(rows, null, 2));
+  return { ok: okCount > 0, aaid, okCount, total: rows.length, rows };
+}
+
+// ── WR document upload (attachments) ────────────────────────────────────────
+// Reconstructed from the live AAP bundle (FileUploadPreview + doc client). The
+// real 3-step flow:
+//   1. POST /api/v1/doc/uploadLink  { serviceEntityIdCategory, serviceEntityId,
+//        documentType, vendor, filename, fileType, maintenanceType, workState }
+//      → returns { uploadLink, documentId, ... } (uploadLink = presigned S3 URL)
+//   2. PUT <uploadLink>  <raw file bytes>  header Content-Type: <mime>
+//   3. POST /api/v1/doc/associateDocument  { ... }  (links doc → work request)
+// fileType is the extension UPPERCASED (file.type.split('/').pop().toUpperCase()
+// e.g. image/png → PNG). Enum defaults (documentType/serviceEntityIdCategory/
+// maintenanceType/workState) are best-effort from the bundle and logged on the
+// first live run so we can lock them to reality.
+const DOC_UPLOAD_LINK_PATH = '/api/v1/doc/uploadLink';
+const DOC_ASSOCIATE_PATH   = '/api/v1/doc/associateDocument';
+
+// Derive AAP's fileType token from a mime or filename. image/png → 'PNG'.
+function _fileTypeToken(mimeOrName) {
+  const s = String(mimeOrName || '');
+  let ext = '';
+  if (s.includes('/')) ext = s.split('/').pop();          // mime: image/png → png
+  else if (s.includes('.')) ext = s.split('.').pop();     // name: foo.png  → png
+  ext = ext.split(';')[0].trim();
+  if (/jpe?g/i.test(ext)) return 'JPG';
+  return ext.toUpperCase() || 'PNG';
+}
+
+// Step 1: ask AAP for a presigned upload link for one file.
+// opts: { serviceEntityId (WR id, required), serviceEntityIdCategory, documentType,
+//         vendor, filename, mime, maintenanceType, workState }
+async function getDocumentUploadLink(opts = {}) {
+  const body = {
+    serviceEntityIdCategory: opts.serviceEntityIdCategory || 'WORK_REQUEST',
+    serviceEntityId:         opts.serviceEntityId || '',
+    documentType:            opts.documentType || 'WORK_REQUEST_DOCUMENT',
+    vendor:                  opts.vendor || null,
+    filename:                opts.filename || 'attachment',
+    fileType:                _fileTypeToken(opts.mime || opts.filename),
+    maintenanceType:         opts.maintenanceType || 'UNPLANNED',
+    workState:               opts.workState || 'ACTIVE',
+  };
+  const resp = await apiPost(DOC_UPLOAD_LINK_PATH, body);
+  return resp; // { uploadLink, documentId, ... }
+}
+
+// Step 2: PUT the raw file bytes to the presigned S3 URL. `bytes` is a Buffer
+// or base64 string; `mime` sets the Content-Type. This goes to an arbitrary S3
+// host (not AAP_ORIGIN), so it's a raw PUT via the browser page context.
+async function uploadDocumentFile(uploadLink, bytes, mime) {
+  if (!uploadLink) throw Object.assign(new Error('uploadDocumentFile: no uploadLink'), { code: 'NO_UPLOAD_LINK' });
+  const b64 = Buffer.isBuffer(bytes) ? bytes.toString('base64') : String(bytes || '');
+  // Run the PUT inside the authenticated AAP page so cookies/CSRF are present.
+  const script = `(async function () {
+    try {
+      var bin = atob(${JSON.stringify(b64)});
+      var len = bin.length, arr = new Uint8Array(len);
+      for (var i = 0; i < len; i++) arr[i] = bin.charCodeAt(i);
+      var xhr = new XMLHttpRequest();
+      xhr.open('PUT', ${JSON.stringify(uploadLink)}, true);
+      xhr.setRequestHeader('Content-Type', ${JSON.stringify(mime || 'application/octet-stream')});
+      return await new Promise(function (resolve) {
+        xhr.onreadystatechange = function () {
+          if (xhr.readyState === 4) resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, text: (xhr.responseText || '').slice(0, 500) });
+        };
+        xhr.onerror = function () { resolve({ ok: false, status: 0, netErr: true }); };
+        xhr.send(arr.buffer);
+      });
+    } catch (e) { return { ok: false, status: -1, error: e.message }; }
+  })();`;
+  return _withLock(async () => {
+    const page = await _ensureWindow();
+    const r = await page.evaluate(script);
+    _scheduleTeardown();
+    if (!r || !r.ok) {
+      throw Object.assign(new Error('S3 upload failed: HTTP ' + (r && r.status) + (r && r.text ? ' ' + r.text : '')),
+        { code: 'S3_UPLOAD_FAILED', status: r && r.status });
+    }
+    return r;
+  });
+}
+
+// Step 3: link an uploaded document to the work request.
+async function associateDocument(opts = {}) {
+  const body = {
+    documentId:      opts.documentId || '',
+    serviceEntityId: opts.serviceEntityId || '',
+    serviceEntityIdCategory: opts.serviceEntityIdCategory || 'WORK_REQUEST',
+  };
+  return apiPost(DOC_ASSOCIATE_PATH, body);
+}
+
+// High-level: upload a list of attachments to a just-created WR. Each attachment
+// is { name, dataUrl } (dataUrl = "data:<mime>;base64,<...>" as produced by the
+// WR modal's FileReader). Best-effort: failures are collected, not thrown, so a
+// bad attachment never sinks a successfully-created WR. Logs the first link
+// request+response so we can confirm the enum values live.
+async function uploadWrAttachments(workRequestId, attachments, opts = {}) {
+  const list = Array.isArray(attachments) ? attachments : [];
+  const out = [];
+  let loggedShape = false;
+  for (let i = 0; i < list.length; i++) {
+    const att = list[i] || {};
+    const name = att.name || ('attachment-' + (i + 1));
+    try {
+      // Parse the data URL → mime + raw bytes.
+      const du = String(att.dataUrl || '');
+      const m = du.match(/^data:([^;]+);base64,(.*)$/);
+      if (!m) { out.push({ name, ok: false, error: 'not a base64 data URL' }); continue; }
+      const mime = m[1];
+      const buf = Buffer.from(m[2], 'base64');
+
+      const link = await getDocumentUploadLink({
+        serviceEntityId: workRequestId,
+        serviceEntityIdCategory: opts.serviceEntityIdCategory,
+        documentType: opts.documentType,
+        vendor: opts.vendor || null,
+        filename: name,
+        mime,
+        maintenanceType: opts.maintenanceType,
+        workState: opts.workState,
+      });
+      if (!loggedShape) {
+        loggedShape = true;
+        logger.info('[doc-upload] first uploadLink response shape:\n' + JSON.stringify(link, null, 2));
+      }
+      const uploadLink = link && (link.uploadLink || link.url || link.preSignedUrl || link.presignedUrl);
+      const documentId = link && (link.documentId || link.docId || link.id);
+      if (!uploadLink) { out.push({ name, ok: false, error: 'no uploadLink in response' }); continue; }
+
+      await uploadDocumentFile(uploadLink, buf, mime);
+
+      // Associate only if the upload-link step didn't already bind to the WR.
+      if (documentId) {
+        try { await associateDocument({ documentId, serviceEntityId: workRequestId, serviceEntityIdCategory: opts.serviceEntityIdCategory }); }
+        catch (e) { logger.warn('[doc-upload] associate failed for ' + name + ': ' + e.message); }
+      }
+      logger.info('[doc-upload] uploaded ' + name + ' → WR ' + workRequestId + (documentId ? ' (doc ' + documentId + ')' : ''));
+      out.push({ name, ok: true, documentId: documentId || null });
+    } catch (e) {
+      logger.warn('[doc-upload] FAILED ' + name + ': ' + (e && e.message));
+      out.push({ name, ok: false, error: (e && e.message) || String(e) });
+    }
+  }
+  return out;
 }
 
 module.exports = {
@@ -1306,6 +1597,11 @@ module.exports = {
   apiPost,
   apiPut,
   createWorkOrder,
+  vreRecommendMatrix,
+  getDocumentUploadLink,
+  uploadDocumentFile,
+  associateDocument,
+  uploadWrAttachments,
   searchServices,
   searchAssets,
   getFleet,

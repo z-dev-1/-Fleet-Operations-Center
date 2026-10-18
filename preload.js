@@ -195,6 +195,7 @@ expose('aapApi', {
   avmCodes:     ()     => ipcRenderer.invoke('aap-api:avm-codes'),
   vendors:      (opts) => ipcRenderer.invoke('aap-api:vendors', { opts }),
   avmTree:      (equipmentType, opts) => ipcRenderer.invoke('aap-api:avm-tree', { equipmentType, opts }),
+  vreMatrix:    (unit) => ipcRenderer.invoke('aap-api:vre-matrix', { unit }),
   buildTracker: (opts) => ipcRenderer.invoke('aap-api:build-tracker', opts),
   buildFleet:   (opts) => ipcRenderer.invoke('aap-api:build-fleet', opts),
   refreshUnit:  (unit) => ipcRenderer.invoke('aap-api:refresh-unit', { unit }),

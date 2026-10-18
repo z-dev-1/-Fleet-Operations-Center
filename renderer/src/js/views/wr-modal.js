@@ -129,6 +129,11 @@ let _areaCount = 1;
 // { l1, l2ByParent, l3ByParent, reasons } from window.aapApi.avmTree.
 let _avmTree   = null;
 let _vendorList = null; // [{vendorName, wrEnabled, ...}] from window.aapApi.vendors
+// FEATURE: live AAP VRE vendor recommendation for THIS unit, fetched once per
+// modal-open via a Phase-1 (commit-nothing) createWorkOrder call. Shape:
+// { ok, phase:'recommend', recommendation:{ vendor, ruleName, autoAssignable, vendors:[...] } }.
+// null until the on-open recommendation lands (or stays null when offline / no assetUrl).
+let _vreRec    = null;
 let _progUnsub = null;
 let _towAddrUnsub = null; // BUG FIX (2026-07-16): see _wireTow() below
 let _attachments = []; // FEATURE (2026-07-23): [{name, dataUrl}] -- auto-attach + manual + drag-drop
@@ -642,6 +647,13 @@ function _collectPayload() {
           towFromZip:    (_el('wr-tow-from-zip')||{}).value||'',
         });
         return { offSite: l.offSite, locStreet: l.locStreet, locCity: l.locCity, locState: l.locState, locZip: l.locZip }; })(),
+    // Supplier: only present when a supplierRequired vendor is selected (the
+    // Supplier <select> is visible). Carries the chosen supplierId (or string).
+    ...(() => {
+      const supWrap = _el('wr-supplier-wrap'), supSel = _el('wr-supplier');
+      const visible = !!(supWrap && supWrap.style.display !== 'none' && supSel);
+      return visible ? { supplierId: (supSel.value || '').trim() } : {};
+    })(),
   };
 }
 
@@ -1266,6 +1278,12 @@ function _wireSubmit() {
     _copyFromWrId = opts.copyFromWrId || null;
     const payload = _collectPayload();
     if (!payload.title)  { toast.show('warn', 'WR title required', 3000); _copyFromWrId = null; return; }
+    // Supplier guard: a vendor flagged supplierRequired must have a supplier
+    // chosen before we commit anything. Block (no commit) and prompt the user.
+    if (_supplierMissing()) {
+      toast.show('warn', 'This vendor requires a supplier — pick one', 4000);
+      _copyFromWrId = null; return;
+    }
     // Title is unrestricted while typing; _collectPayload() already caps the
     // SUBMITTED value at 90 chars (AI Fill produces a proper summary — this
     // slice is just a safety net if the user submits without running it).
@@ -1507,6 +1525,7 @@ function _close() {
   _towPlan   = null;
   _wrTabState = null;
   _avmTree   = null;
+  _vreRec    = null; // recommendation is unit-specific — clear it on close.
   // _vendorList is intentionally kept (6h-cached, vendor set is unit-agnostic).
 }
 
@@ -1971,6 +1990,11 @@ async function _loadLiveLookups(unit) {
   } catch (_) { /* keep fallback */ }
   _renderVendorOptions(prevVendor);
 
+  // FEATURE: fire ONE Phase-1 (commit-nothing) VRE recommendation for this
+  // unit now that vendors are loaded. Non-blocking + fully guarded — the modal
+  // stays usable if this fails / the unit has no AAP asset URL / we're offline.
+  _loadVreRecommendation(unit).catch(() => {});
+
   // AVM category tree (drives the cascading selects).
   try {
     if (window.aapApi && typeof window.aapApi.avmTree === 'function') {
@@ -2002,11 +2026,211 @@ function _refreshAreaRowsFromTree() {
   _syncTowWrap();
 }
 
+// ── Live VRE vendor recommendation (on-open, commit-nothing) ────────────────
+// Fires ONE Phase-1 createWorkOrder call (confirmVendor:false — commits
+// nothing) to ask AAP which vendor it recommends for THIS unit, using whatever
+// the form currently holds (title/issue may be placeholders, area rows may be
+// empty — a bare recommendation is valid). Stores the result in _vreRec, then
+// renders the recommendation line, pre-selects the recommended vendor (unless
+// the user/relay already picked one), and refreshes the override + supplier UI.
+// Fully guarded + non-blocking: silently falls back when there's no asset URL
+// or the call fails, leaving the modal fully usable.
+async function _loadVreRecommendation(unit) {
+  const u = unit || _unit || {};
+  const assetUrl = u && u.assetUrl;
+  if (!assetUrl) return; // no AAP asset context — nothing to recommend against.
+  try {
+    if (!(window.aap && typeof window.aap.createWorkOrder === 'function')) return;
+    const titleEl = _el('wr-title'), issueEl = _el('wr-issue');
+    const title = (titleEl && titleEl.value || '').trim() || 'Work request';
+    const issue = (issueEl && issueEl.value || '').trim();
+    // Collect current area rows (may be empty — that's fine for a bare rec).
+    const rawRows = [];
+    for (let i = 0; i < 4; i++) {
+      const aEl = _el('wr-area-' + i), sEl = _el('wr-sub-' + i), ssEl = _el('wr-subsub-' + i);
+      if (!aEl && !sEl && !ssEl) continue;
+      rawRows.push({ area: (aEl && aEl.value) || '', subcategory: (sEl && sEl.value) || '', subSubcategory: (ssEl && ssEl.value) || '' });
+    }
+    const areaPairs = buildAreaPairsPayload(rawRows);
+    const rec = await aap.createWorkOrder({
+      assetUrl, title, issue, areaPairs, urgent: 'No', confirmVendor: false,
+    });
+    // Guard against a late-arriving response after the modal was closed/reopened.
+    if (!_overlay) return;
+    if (rec && rec.ok && rec.recommendation) {
+      _vreRec = rec;
+      _preselectRecommendedVendor();
+    }
+  } catch (_) { /* silent — modal stays usable without a recommendation */ }
+  // Always refresh the dependent UI (rec line hides itself when empty).
+  _renderVendorRecLine();
+  _updateVendorOverrideBadge();
+  _syncSupplierSelect();
+}
+
+// Look up the recommended vendor name from _vreRec. Returns '' when none.
+function _recommendedVendorName() {
+  return (_vreRec && _vreRec.recommendation && _vreRec.recommendation.vendor) || '';
+}
+
+// Normalize a vendor string for comparison: lowercase + strip the display
+// suffix after a ' (' (so "Volvo (ASIST)" compares as "volvo"). The matrix
+// recommends by code/display name; options may carry the display suffix.
+function _vendorCodePart(s) {
+  return String(s || '').split(' (')[0].trim().toLowerCase();
+}
+
+// Render / update the "AAP recommends: <vendor> (rule: <ruleName>)" line
+// directly under the Vendor <select>. Creates the element if missing; hides it
+// when there is no recommended vendor.
+function _renderVendorRecLine() {
+  const sel = _el('wr-vendor');
+  if (!sel) return;
+  let line = _el('wr-vendor-rec');
+  if (!line) {
+    line = document.createElement('div');
+    line.id = 'wr-vendor-rec';
+    line.className = 'wr-vendor-rec';
+    line.style.cssText = 'font-size:10px;opacity:.75;margin-top:3px';
+    // Place directly under the vendor select (inside its label when possible).
+    const host = sel.parentNode || sel;
+    if (sel.nextSibling) host.insertBefore(line, sel.nextSibling);
+    else host.appendChild(line);
+  }
+  const rec = _vreRec && _vreRec.recommendation;
+  const vendor = _recommendedVendorName();
+  if (!vendor) { line.style.display = 'none'; line.textContent = ''; return; }
+  const ruleName = (rec && rec.ruleName) || '';
+  let txt = 'AAP recommends: ' + vendor + (ruleName ? ' (rule: ' + ruleName + ')' : '');
+  if (rec && rec.autoAssignable) txt += ' · auto-assignable';
+  line.textContent = txt; // textContent = inherently escaped, no injection.
+  line.style.display = '';
+}
+
+// Pre-select the recommended vendor in the wr-vendor dropdown, but ONLY if the
+// user/relay has not already chosen one (don't overwrite a non-empty value).
+// Matches case-insensitively against option values, same style as the relay
+// pre-select in open().
+function _preselectRecommendedVendor() {
+  const sel = _el('wr-vendor');
+  if (!sel) return;
+  const vendor = _recommendedVendorName();
+  if (!vendor) { _renderVendorRecLine(); _updateVendorOverrideBadge(); _syncSupplierSelect(); return; }
+  if (!sel.value) { // respect an existing (relay / user) selection.
+    const want = _vendorCodePart(vendor);
+    const match = Array.from(sel.options).find((o) => o.value && _vendorCodePart(o.value) === want)
+      || Array.from(sel.options).find((o) => o.value && o.value.toUpperCase().includes(vendor.toUpperCase()));
+    if (match) sel.value = match.value;
+  }
+  _renderVendorRecLine();
+  _updateVendorOverrideBadge();
+  _syncSupplierSelect();
+}
+
+// Show/hide the "Override — not AAP-recommended" badge next to the vendor
+// select. Shown when the current selection differs from the recommended vendor
+// (comparing the code part); hidden when they match or there's no recommendation.
+function _updateVendorOverrideBadge() {
+  const sel = _el('wr-vendor');
+  if (!sel) return;
+  let badge = _el('wr-vendor-override');
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.id = 'wr-vendor-override';
+    badge.className = 'badge badge--risk-medium wr-vendor-override';
+    badge.style.cssText = 'font-size:9px;margin-left:6px';
+    badge.textContent = 'Override — not AAP-recommended';
+    const recLine = _el('wr-vendor-rec');
+    if (recLine && recLine.parentNode) recLine.parentNode.insertBefore(badge, recLine.nextSibling);
+    else {
+      const host = sel.parentNode || sel;
+      if (sel.nextSibling) host.insertBefore(badge, sel.nextSibling); else host.appendChild(badge);
+    }
+  }
+  const rec = _recommendedVendorName();
+  const cur = (sel.value || '').trim();
+  const isOverride = !!rec && !!cur && _vendorCodePart(cur) !== _vendorCodePart(rec);
+  badge.style.display = isOverride ? '' : 'none';
+}
+
+// Find a vendor record in _vendorList by name (case-insensitive). Null when
+// not found / list not loaded.
+function _vendorRecordByName(name) {
+  const want = _vendorCodePart(name);
+  if (!want) return null;
+  return (_vendorList || []).find((v) => v && v.vendorName &&
+    (_vendorCodePart(v.vendorName) === want || String(v.vendorName).toLowerCase() === String(name).toLowerCase())) || null;
+}
+
+// Show a required Supplier <select> when the selected vendor has
+// supplierRequired === true; populate it from that vendor's suppliers[]
+// (strings OR {supplierId, supplierName}). Hide + clear it otherwise. The
+// select is created right after the vendor select if missing.
+function _syncSupplierSelect() {
+  const sel = _el('wr-vendor');
+  if (!sel) return;
+  let supWrap = _el('wr-supplier-wrap');
+  let supSel = _el('wr-supplier');
+  if (!supSel) {
+    supWrap = document.createElement('label');
+    supWrap.id = 'wr-supplier-wrap';
+    supWrap.className = 'settings-label';
+    supWrap.style.cssText = 'display:block;margin-top:6px';
+    supWrap.innerHTML = 'Supplier <span style="color:var(--err,#f85149)">*</span>' +
+      '<select id="wr-supplier" class="settings__select"></select>';
+    // Insert after the override badge / rec line / vendor select, whichever exists.
+    const anchor = _el('wr-vendor-override') || _el('wr-vendor-rec') || sel;
+    const host = anchor.parentNode || sel.parentNode || sel;
+    if (anchor.nextSibling) host.insertBefore(supWrap, anchor.nextSibling);
+    else host.appendChild(supWrap);
+    supSel = _el('wr-supplier');
+  }
+  const rec = _vendorRecordByName(sel.value);
+  const required = !!(rec && rec.supplierRequired === true);
+  if (!required) {
+    supWrap.style.display = 'none';
+    if (supSel) supSel.innerHTML = '';
+    return;
+  }
+  const suppliers = (rec && Array.isArray(rec.suppliers)) ? rec.suppliers : [];
+  const opts = ['<option value="">-- Select supplier --</option>'];
+  for (const s of suppliers) {
+    let val, label;
+    if (s && typeof s === 'object') { val = s.supplierId != null ? s.supplierId : (s.supplierName || ''); label = s.supplierName || String(val); }
+    else { val = s; label = s; }
+    opts.push('<option value="' + _safeAttr(val) + '">' + _safe(label) + '</option>');
+  }
+  if (supSel) supSel.innerHTML = opts.join('');
+  supWrap.style.display = '';
+}
+
+// Wire the vendor <select> change event to keep the override badge + supplier
+// select in sync as the user picks vendors. Idempotent via a dataset flag.
+function _wireVendorRecUI() {
+  const sel = _el('wr-vendor');
+  if (!sel || sel.dataset.recWired === '1') return;
+  sel.dataset.recWired = '1';
+  sel.addEventListener('change', () => {
+    _updateVendorOverrideBadge();
+    _syncSupplierSelect();
+  });
+}
+
+// Whether the currently-selected vendor requires a supplier and none is chosen.
+function _supplierMissing() {
+  const supWrap = _el('wr-supplier-wrap');
+  const supSel = _el('wr-supplier');
+  const visible = !!(supWrap && supWrap.style.display !== 'none' && supSel);
+  if (!visible) return false;
+  return !(supSel.value || '').trim();
+}
+
 export function open(unit) {
   if (_overlay) _close();
   _unit      = unit;
   _areaCount = 1;
   _avmTree   = null;
+  _vreRec    = null; // recommendation is per-unit — reset before fetching this unit's.
   // Keep the vendor list across opens (6h-cached backend anyway); clear only
   // the tree since equipmentType can differ per unit.
 
@@ -2031,6 +2255,7 @@ export function open(unit) {
   _wireAIAssist();
   _wireAutoUptake();
   _wireTow();
+  _wireVendorRecUI();
 
   // Pre-select vendor from relay data if available (against the fallback list;
   // _loadLiveLookups below preserves this selection when the live list lands).
@@ -2040,6 +2265,10 @@ export function open(unit) {
       .find(o => o.value.toUpperCase().includes(relayVendor));
     if (match) _el('wr-vendor').value = match.value;
   }
+  // Reflect any relay/user pre-select in the override badge + supplier select
+  // immediately (the recommendation line/pre-select arrives later, async).
+  _updateVendorOverrideBadge();
+  _syncSupplierSelect();
 
   // Auto-populate vendors + category tree LIVE from AAP as soon as the modal
   // opens. Non-blocking — the modal is usable immediately with fallbacks and

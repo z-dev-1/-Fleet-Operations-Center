@@ -297,6 +297,36 @@ function registerAapApiIPC(ctx) {
     return { ok: true, source: want };
   });
 
+  // VRE RECOMMENDATION MATRIX (diagnostic, commits NOTHING). Runs the full
+  // combination matrix (urgent/non-urgent, tires, tow, multi-area, bare) live
+  // against the real VRE endpoint for a unit and returns one row per scenario.
+  // Triggerable from the renderer (window.aapApi.vreMatrix(unit)) OR at startup
+  // via env VRE_MATRIX_UNIT. Phase 1 only — no work order is ever created.
+  async function _runVreMatrix(unit) {
+    const u = String(unit || '').trim();
+    if (!u) return { ok: false, error: 'unit required' };
+    const fd = store.load('fleetData', { rows: [] });
+    const rows = (fd && Array.isArray(fd.rows)) ? fd.rows : [];
+    const row = rows.find((r) => String(r.equipmentId || r.assetId || r.id) === u);
+    if (!row) return { ok: false, error: 'unit ' + u + ' not found in stored fleetData (' + rows.length + ' rows)' };
+    if (!row.assetUrl) return { ok: false, error: 'unit ' + u + ' has no assetUrl — run a sync first' };
+    logger.info('[vre-matrix] unit ' + u + ' — running recommendation matrix (nothing committed)');
+    return api().vreRecommendMatrix({ assetUrl: row.assetUrl, domicile: row.domicileSite, assetType: row.assetType });
+  }
+  handle('aap-api:vre-matrix', async (_e, payload) => {
+    try { return await _runVreMatrix(payload && payload.unit); }
+    catch (e) { return { ok: false, error: e.message, code: e.code || null }; }
+  });
+  const _vreMatrixUnit = String(process.env.VRE_MATRIX_UNIT || '').trim();
+  if (_vreMatrixUnit) {
+    setTimeout(async () => {
+      try {
+        const res = await _runVreMatrix(_vreMatrixUnit);
+        logger.info('[vre-matrix] (startup) SUMMARY ' + _vreMatrixUnit + ':\n' + JSON.stringify(res, null, 2));
+      } catch (e) { logger.warn('[vre-matrix] (startup) FAILED ' + _vreMatrixUnit + ': ' + e.message); }
+    }, 8000); // let auth + first sync settle
+  }
+
   logger.info('AAP API IPC handlers registered');
 }
 
