@@ -19,7 +19,7 @@ const AAID = 'aaid_078a7023-b0a3-4ca2-b2b6-3620e56f3954';
 
 function seedFleet() {
   store.save('fleetData', { syncedAt: new Date().toISOString(), rows: [
-    { equipmentId: '324040', assetUrl: 'https://aap-na.corp.amazon.com/v2/asset/' + AAID, lifecycleState: 'Unavailable' },
+    { equipmentId: '324040', assetUrl: 'https://aap-na.corp.amazon.com/v2/asset/' + AAID, lifecycleState: 'Unavailable', workRequestId: 'WR-77' },
   ] });
 }
 
@@ -122,7 +122,7 @@ describe('aap_lifecycle_api — flip with verified read-back', () => {
 describe('aap_lifecycle_api — DVIR read + clear', () => {
   it('reads open DVIRs and clears a blocking one, verifying hasOpenIssues:false', async () => {
     // Override apiGet to serve an open DVIR, and apiPost to clear it.
-    const openResp = { components: [{ name: 'TIRES', items: [{ dvirId: 'dv1', component: 'TIRES', condition: 'NOT_DRIVABLE', lifecycle: 'OPEN_ISSUE' }] }] };
+    const openResp = { components: [{ name: 'TIRES', items: [{ dvirId: 'dv1', component: 'TIRES', condition: 'NOT_DRIVABLE', lifecycle: 'OPEN_ISSUE', dvirVersion: 7 }] }] };
     const clearedResp = { components: [] };
     let cleared = false;
     aap.apiGet.mockImplementation(async (p) => {
@@ -130,8 +130,9 @@ describe('aap_lifecycle_api — DVIR read + clear', () => {
       if (/\/dvir\//.test(p) && /openIssuesOnly=true/.test(p)) return cleared ? clearedResp : openResp;
       return { components: [] };
     });
-    vi.spyOn(aap, 'apiPost').mockImplementation(async (p) => {
-      if (/\/dvir\/dv1\/component\/TIRES/.test(p)) { cleared = true; return { id: 'dv1', condition: 'DRIVABLE', lifecycle: 'CLOSED_NO_DRIVER_INSPECTION_REQUIRED', hasOpenIssues: false, version: 3 }; }
+    let postedBody = null;
+    vi.spyOn(aap, 'apiPost').mockImplementation(async (p, body) => {
+      if (/\/dvir\/dv1\/component\/TIRES/.test(p)) { cleared = true; postedBody = body; return { id: 'dv1', condition: 'DRIVABLE', lifecycle: 'CLOSED_NO_DRIVER_INSPECTION_REQUIRED', hasOpenIssues: false, version: 8 }; }
       return {};
     });
 
@@ -139,17 +140,53 @@ describe('aap_lifecycle_api — DVIR read + clear', () => {
     expect(open.ok).toBe(true);
     expect(open.blocking.length).toBe(1);
     expect(open.blocking[0].component).toBe('TIRES');
+    expect(open.blocking[0].version).toBe(7);            // dvirVersion threaded through
 
+    // No WR supplied -> auto-pulls the unit's REAL open WR from fleet data (option 3).
     const clr = await lifecycle.clearAllOpenDvirs(AAID);
     expect(clr.ok).toBe(true);
     expect(clr.cleared.length).toBe(1);
     expect(clr.remaining).toBe(0);                        // confirmed clear via re-read
+    // The POST body matches the CONFIRMED capture shape; workOrderNumber is the
+    // unit's real open WR (WR-77 from fleet data), not a placeholder.
+    expect(postedBody).toEqual({
+      aaid: AAID, version: 7, lifecycle: 'CLOSED_NO_DRIVER_INSPECTION_REQUIRED',
+      outcome: 'REPAIRS_MADE', workOrderNumber: 'WR-77', comment: 'Cleared on return to service',
+    });
+  });
+
+  it('auto-clear needs a work order: errors (needsWorkOrder) when the unit has no open WR and none supplied', async () => {
+    // Remove the WR from the seeded unit.
+    store.save('fleetData', { syncedAt: new Date().toISOString(), rows: [
+      { equipmentId: '324040', assetUrl: 'https://aap-na.corp.amazon.com/v2/asset/' + AAID, lifecycleState: 'Unavailable' },
+    ] });
+    const openResp = { components: [{ name: 'TIRES', items: [{ dvirId: 'dv1', component: 'TIRES', condition: 'NOT_DRIVABLE', lifecycle: 'OPEN_ISSUE', dvirVersion: 7 }] }] };
+    aap.apiGet.mockImplementation(async (p) => {
+      if (/userInterface\/fields/.test(p)) return { userInterfaceFieldDefinitionMap: {} };
+      if (/\/dvir\//.test(p) && /openIssuesOnly=true/.test(p)) return openResp;
+      return { components: [] };
+    });
+    const clr = await lifecycle.clearAllOpenDvirs(AAID);
+    expect(clr.ok).toBe(false);
+    expect(clr.needsWorkOrder).toBe(true);
+  });
+
+  it('clearDvir REJECTS when a required field (workOrderNumber / comment) is missing', async () => {
+    const r1 = await lifecycle.clearDvir({ aaid: AAID, dvirId: 'dv1', component: 'TIRES', version: 1, outcome: 'REPAIRS_MADE', comment: 'x' });
+    expect(r1.ok).toBe(false);
+    expect(r1.error).toMatch(/workOrderNumber required/);
+    const r2 = await lifecycle.clearDvir({ aaid: AAID, dvirId: 'dv1', component: 'TIRES', version: 1, outcome: 'REPAIRS_MADE', workOrderNumber: 'WR-1' });
+    expect(r2.ok).toBe(false);
+    expect(r2.error).toMatch(/comment required/);
+    const r3 = await lifecycle.clearDvir({ aaid: AAID, dvirId: 'dv1', component: 'TIRES', version: 1, workOrderNumber: 'WR-1', comment: 'x' });
+    expect(r3.ok).toBe(false);
+    expect(r3.error).toMatch(/outcome required/);
   });
 
   it('setLifecycleActiveWithDvir clears a blocking DVIR then flips to ACTIVE', async () => {
     let dvirCleared = false;
     let putAttempts = 0;
-    const openResp = { components: [{ name: 'TIRES', items: [{ dvirId: 'dv1', component: 'TIRES', condition: 'NOT_DRIVABLE', lifecycle: 'OPEN_ISSUE' }] }] };
+    const openResp = { components: [{ name: 'TIRES', items: [{ dvirId: 'dv1', component: 'TIRES', condition: 'NOT_DRIVABLE', lifecycle: 'OPEN_ISSUE', dvirVersion: 2 }] }] };
     aap.apiGet.mockImplementation(async (p) => {
       if (/userInterface\/fields/.test(p)) return { userInterfaceFieldDefinitionMap: { lifecycleState: { values: ['ACTIVE', 'UNAVAILABLE'] }, lifecycleStateReason: { values: lifecycle.SUPPORTED_REASONS } } };
       if (/\/dvir\//.test(p) && /openIssuesOnly=true/.test(p)) return dvirCleared ? { components: [] } : openResp;

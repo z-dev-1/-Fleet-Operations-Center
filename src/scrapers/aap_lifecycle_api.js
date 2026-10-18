@@ -127,6 +127,19 @@ function _aaidFromRow(row) {
   return m ? m[0] : null;
 }
 
+// Resolve the unit's REAL open work-request number from fleet data by aaid
+// (option 3: use the actual WR on the DVIR clear, never a placeholder).
+// Returns '' when no usable WR is on file.
+function _openWrForAaid(aaid) {
+  if (!store || !aaid) return '';
+  try {
+    const rows = (store.load('fleetData', {}) || {}).rows || [];
+    const row = rows.find((r) => _aaidFromRow(r) === aaid);
+    const wr = row && String(row.workRequestId || '').trim();
+    return (wr && wr !== '--') ? wr : '';
+  } catch (_) { return ''; }
+}
+
 /**
  * resolveAaid(unitOrAaid) -> { aaid, row? } | { error }
  * Accepts an aaid directly, or an equipment number resolved via fleetData /
@@ -279,27 +292,54 @@ async function getOpenDvirs(unitOrAaid) {
       // An OPEN/blocking issue is one whose lifecycle is an open state (not PASSED).
       const lc = _norm(it.lifecycle);
       const blocking = lc === 'OPEN_ISSUE' || lc === 'PENDING_OPEN_ITEM' || lc === 'PENDING_DRIVER_INSPECTION' || lc === 'WORK_IN_PROGRESS' || _norm(it.condition) === 'NOT_DRIVABLE';
-      open.push({ dvirId: it.dvirId, component: it.component, condition: it.condition, lifecycle: it.lifecycle, blocking });
+      // dvirVersion is the per-item optimistic-lock version the clear POST needs.
+      open.push({ dvirId: it.dvirId, component: it.component, condition: it.condition, lifecycle: it.lifecycle, version: it.dvirVersion, blocking });
     });
   });
   return { ok: true, aaid, open, blocking: open.filter((o) => o.blocking) };
 }
 
 /**
- * clearDvir({ dvirId, component, outcome? }) -> { ok, verified, hasOpenIssues, error? }
- * POST /api/v1/dvir/{dvirId}/component/{component}. Verifies via the response
- * (hasOpenIssues:false). Body defaults to the UI's resolve values; the exact
- * body is confirmable via one write-body capture — DVIR_CLEAR_BODY centralizes it.
+ * clearDvir({ aaid, dvirId, component, version, outcome?, workOrderNumber?, comment? })
+ *   -> { ok, verified, hasOpenIssues, error? }
+ *
+ * POST /api/v1/dvir/{dvirId}/component/{component} with the CONFIRMED body shape
+ * (from live capture):
+ *   { aaid, version, lifecycle, outcome, workOrderNumber, comment }
+ * - aaid    : the UNIT's asset id
+ * - version : the DVIR ITEM's current dvirVersion (optimistic lock)
+ * - lifecycle: CLOSED_NO_DRIVER_INSPECTION_REQUIRED (close it out)
+ * - outcome : REPAIRS_MADE | REPAIRS_NOT_NECESSARY
+ * - workOrderNumber / comment : free text (optional; default empty)
+ * Verifies via the response (hasOpenIssues:false).
  */
-const DVIR_CLEAR_BODY = { condition: 'DRIVABLE', lifecycle: 'CLOSED_NO_DRIVER_INSPECTION_REQUIRED', outcome: 'REPAIRS_MADE' };
+const DVIR_CLEAR_LIFECYCLE = 'CLOSED_NO_DRIVER_INSPECTION_REQUIRED';
+const DVIR_OUTCOMES = ['REPAIRS_MADE', 'REPAIRS_NOT_NECESSARY'];
 
+// EVERY field in the clear body is REQUIRED by AAP (confirmed: the UI sends a
+// value for all six, incl. workOrderNumber + comment). We therefore reject the
+// call if any required field is missing, rather than send a blank AAP rejects.
 async function clearDvir(args) {
   args = args || {};
   const dvirId = String(args.dvirId || '').trim();
   const component = String(args.component || '').trim();
-  if (!dvirId || !component) return { ok: false, error: 'dvirId and component required' };
-  const body = { ...DVIR_CLEAR_BODY };
-  if (args.outcome) body.outcome = _norm(args.outcome);
+  const aaid = String(args.aaid || '').trim();
+  const workOrderNumber = args.workOrderNumber != null ? String(args.workOrderNumber).trim() : '';
+  const comment = args.comment != null ? String(args.comment).trim() : '';
+  const lifecycle = String(args.lifecycle || DVIR_CLEAR_LIFECYCLE).trim();
+  const outcome = _norm(args.outcome);
+
+  // All six fields required.
+  if (!dvirId) return { ok: false, error: 'dvirId required' };
+  if (!component) return { ok: false, error: 'component required' };
+  if (!aaid) return { ok: false, error: 'aaid required' };
+  if (args.version == null) return { ok: false, error: 'DVIR version required (optimistic lock)' };
+  if (!lifecycle) return { ok: false, error: 'lifecycle required' };
+  if (!DVIR_OUTCOMES.includes(outcome)) return { ok: false, error: 'outcome required (one of ' + DVIR_OUTCOMES.join(', ') + ')' };
+  if (!workOrderNumber) return { ok: false, error: 'workOrderNumber required' };
+  if (!comment) return { ok: false, error: 'comment required' };
+
+  const body = { aaid, version: args.version, lifecycle, outcome, workOrderNumber, comment };
   let resp;
   try { resp = await aap.apiPost('/api/v1/dvir/' + encodeURIComponent(dvirId) + '/component/' + encodeURIComponent(component), body); }
   catch (e) { return { ok: false, dvirId, component, error: 'DVIR clear failed: ' + e.message }; }
@@ -312,13 +352,27 @@ async function clearDvir(args) {
  * Clears every BLOCKING open DVIR for a unit, then re-reads to confirm none
  * remain. Used as the auto pre-step when a flip-to-ACTIVE is blocked by a DVIR.
  */
-async function clearAllOpenDvirs(unitOrAaid) {
+async function clearAllOpenDvirs(unitOrAaid, opts) {
+  opts = opts || {};
   const open = await getOpenDvirs(unitOrAaid);
   if (!open.ok) return { ok: false, error: open.error };
   const targets = open.blocking.length ? open.blocking : open.open;
+  // All clear fields are REQUIRED by AAP. For the auto-clear flow (flip-to-
+  // Active), the workOrderNumber is pulled from the unit's REAL open work
+  // request (option 3) — never a placeholder. If the caller supplies one it
+  // wins; otherwise we look it up from fleet data by aaid. If NO WR can be
+  // resolved, we do NOT invent one — we return an error asking for it.
+  let workOrderNumber = opts.workOrderNumber != null ? String(opts.workOrderNumber).trim() : '';
+  if (!workOrderNumber) workOrderNumber = _openWrForAaid(open.aaid);
+  if (!workOrderNumber) {
+    return { ok: false, needsWorkOrder: true, aaid: open.aaid,
+      error: 'no open work request found for this unit to reference on the DVIR clear — supply a workOrderNumber' };
+  }
+  const comment = opts.comment != null ? String(opts.comment).trim() : 'Cleared on return to service';
+  const outcome = opts.outcome || 'REPAIRS_MADE';
   const cleared = [], failed = [];
   for (const d of targets) {
-    const r = await clearDvir({ dvirId: d.dvirId, component: d.component });
+    const r = await clearDvir({ aaid: open.aaid, dvirId: d.dvirId, component: d.component, version: d.version, outcome, workOrderNumber, comment });
     if (r.ok) cleared.push({ dvirId: d.dvirId, component: d.component });
     else failed.push({ dvirId: d.dvirId, component: d.component, error: r.error });
   }
@@ -350,7 +404,8 @@ async function setLifecycleActiveWithDvir(args) {
 }
 
 module.exports = {
-  ALLOWED_STATES, BLOCKED_STATES, SUPPORTED_REASONS, DVIR_CLEAR_BODY,
+  ALLOWED_STATES, BLOCKED_STATES, SUPPORTED_REASONS,
+  DVIR_CLEAR_LIFECYCLE, DVIR_OUTCOMES,
   refreshValidValues, getValidReasons, getSupportedReasons, getValidStates,
   resolveAaid, setLifecycleApi,
   getOpenDvirs, clearDvir, clearAllOpenDvirs, setLifecycleActiveWithDvir,
