@@ -26,6 +26,25 @@ const store  = require('../store');
 const ledger = require('./ledger');
 const pipeline = require('./pipeline');
 
+// ── Dual-instance leader gate ──────────────────────────────────────────────
+// A scheduled production job (SP push / email / DBR) may fire ONLY on the
+// instance that currently holds the production leadership lease. When the
+// cluster feature is OFF (legacy single-host) this is always true, so behavior
+// is unchanged. When ON, a STANDBY/non-leader instance's timers keep ticking
+// but every fire is skipped here — the single hard guarantee that the laptop
+// and the Dev Space never run the same scheduled job at once. Lazy-required so
+// the scheduler never hard-depends on the cluster module loading first.
+function _mayFireProductionJob(channelLabel) {
+  let cluster;
+  try { cluster = require('../cluster'); } catch (_) { return true; } // cluster absent → legacy
+  try {
+    if (typeof cluster.mayRunProduction !== 'function') return true;
+    if (cluster.mayRunProduction()) return true;                      // leader (or flag OFF)
+    logger.info('[scheduler] skipping ' + (channelLabel || 'job') + ' — not the production leader (standby)');
+    return false;
+  } catch (_) { return true; }
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────
 let _ctx                = null;
 let _spScheduleTimer    = null;
@@ -102,6 +121,7 @@ function _scheduleAutoSPPush() {
 }
 
 function _fireSP(dateKey, slot, origin) {
+  if (!_mayFireProductionJob('SP push ' + slot.label)) return;
   logger.info('SP push (' + origin + '): slot=' + slot.label);
   _ctx.pushStatus('\uD83D\uDCE8 SP Push: ' + slot.label + ' (' + origin + ')...');
   pipeline.runSharePointJob(_ctx, { dateKey, slotLabel: slot.label, origin, testMode: false })
@@ -130,6 +150,7 @@ function _scheduleAutoEmail() {
 }
 
 function _fireEmail(dateKey, slot, origin, testMode) {
+  if (!_mayFireProductionJob('email ' + slot.label)) return;
   logger.info('Auto-email (' + origin + (testMode ? '/test' : '') + '): slot=' + slot.label);
   _ctx.pushStatus('\uD83D\uDCE7 Auto-email: ' + slot.label + (testMode ? ' [TEST]' : '') + ' (' + origin + ')...');
   // Status-only renderer event (execution now owned by the main process).
@@ -171,6 +192,7 @@ function _scheduleAutoDbr() {
 
 function _fireDbr(kind, dateKey, slot, origin) {
   const label = kind === 'dsp' ? 'DSP' : 'AFP';
+  if (!_mayFireProductionJob('DBR ' + label + ' ' + slot.label)) return;
   logger.info('DBR ' + label + ' pull (' + origin + '): slot=' + slot.label);
   _ctx.pushStatus('\uD83D\uDCCA DBR ' + label + ': ' + slot.label + ' (' + origin + ')...');
   const run = kind === 'dsp' ? pipeline.runDbrDspJob : pipeline.runDbrAfpJob;

@@ -197,6 +197,16 @@ function isLeader() {
 function canSideEffect(kind) { return gate.canSideEffect(kind); }
 function assertCanSideEffect(kind) { return gate.assertCanSideEffect(kind); }
 
+// mayRunProduction() — the single predicate every background producer (the
+// scheduler's SP/email/DBR fires, the Slack poll loops) checks before doing
+// production work. True when the cluster is OFF (legacy single-host) OR this
+// instance currently holds the leadership lease. False on a standby/non-leader
+// so the laptop and the Dev Space never run the same production operation.
+function mayRunProduction() {
+  if (!_state.enabled) return true;   // legacy single-host
+  return isLeader();
+}
+
 // Internal: used by the (future) lease loop to record the held token.
 function _setLease(token, expiresAt) { _state.fencingToken = token; _state.leaseExpiresAt = expiresAt; }
 
@@ -227,7 +237,7 @@ function getLeaseState() { return _state.lease ? _state.lease.getState() : null;
 
 module.exports = {
   init, start, stop, isEnabled, getInstanceId, getDeviceId, getRole, getCoord, isLeader,
-  canSideEffect, assertCanSideEffect, getStatus, getLeaseState, _setLease, MODES: gate.MODES, _reset,
+  canSideEffect, assertCanSideEffect, mayRunProduction, getStatus, getLeaseState, _setLease, MODES: gate.MODES, _reset,
   // expose the coord-store ctor for the harness/tests
   LocalCoordStore,
 };

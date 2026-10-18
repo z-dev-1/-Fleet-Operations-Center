@@ -18,6 +18,23 @@ const store  = require('../store'); // BUG FIX (2026-07-16): was missing entirel
 const logger = require('../utils/logger')('ipc:slack');
 const { handle, requireString, requireStringMax } = require('./_safe');
 
+// ── Dual-instance leader gate for Slack polling ─────────────────────────────
+// The Slack poll loops (channel watch + DM auto-reply) READ messages and SEND
+// production replies. They may run ONLY on the instance holding the production
+// leadership lease, so the laptop and the Dev Space never double-reply. When
+// the cluster flag is OFF (legacy single-host) this is always allowed, so the
+// current behavior is unchanged. When ON and this instance is a standby, the
+// poll is skipped entirely (no read, no reply). Lazy-required to avoid a hard
+// load-order dependency on the cluster module.
+function _mayPollSlack() {
+  let cluster;
+  try { cluster = require('../cluster'); } catch (_) { return true; }
+  try {
+    if (typeof cluster.mayRunProduction !== 'function') return true;
+    return cluster.mayRunProduction();
+  } catch (_) { return true; }
+}
+
 // ── Issue #5: Slack field caps ───────────────────────────────────────────────
 const MAX_RECIPIENT_LEN = 128;    // Slack channel name / user handle
 // Slack's real chat.postMessage text-field limit is 40,000 characters --
@@ -327,6 +344,7 @@ function registerSlackIPC(ctx) {
   });
 
   handle('slack:poll-channel-watch', async () => {
+    if (!_mayPollSlack()) return { skipped: 'standby — not the production leader' };
     const { pollChannelsOnce } = require('../../src/scrapers/slack_channel_watch');
     return pollChannelsOnce((msg) => logger.info(msg));
   });
@@ -372,6 +390,7 @@ function registerSlackIPC(ctx) {
   });
 
   handle('slack:poll-dm-autoreply', async () => {
+    if (!_mayPollSlack()) return { skipped: 'standby — not the production leader' };
     const { pollDMAutoReplyOnce } = require('../../src/scrapers/slack_dm_autoreply');
     const result = await pollDMAutoReplyOnce((msg) => logger.info(msg));
     // CHAT HEAD (2026-07-24): a DM that the AI couldn't confidently
