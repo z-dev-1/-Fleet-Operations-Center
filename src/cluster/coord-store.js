@@ -55,9 +55,13 @@ class LocalCoordStore {
   constructor(deps) {
     // deps.store is injectable for tests; defaults to the app store.
     this._store = (deps && deps.store) || require('../store');
+    // deps.now is injectable so the lease TTL/expiry logic can share the SAME
+    // clock as the LeaseManager in deterministic failover tests. Defaults to
+    // the real wall clock in production.
+    this._clock = (deps && typeof deps.now === 'function') ? deps.now : (() => Date.now());
   }
 
-  now() { return Date.now(); }
+  now() { return this._clock(); }
 
   async getLeadership() {
     try { return this._store.load(LEADERSHIP_KEY, null); } catch (_) { return null; }

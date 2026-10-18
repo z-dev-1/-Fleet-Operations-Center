@@ -34,6 +34,7 @@ const os = require('os');
 const crypto = require('crypto');
 const gate = require('./mode-gate');
 const { LocalCoordStore } = require('./coord-store');
+const { LeaseManager } = require('./lease-manager');
 let logger; try { logger = require('../utils/logger')('cluster'); } catch (_) { logger = { info() {}, warn() {} }; }
 
 // ── Instance identity (stable per machine+install, unique per instance) ──────
@@ -62,6 +63,7 @@ function _freshState() {
     lastHeartbeatAt: null,
     lastSyncSeq: 0,
     coord: null,
+    lease: null,              // LeaseManager instance (Stage 2), when enabled
   };
 }
 let _state = _freshState();
@@ -105,7 +107,7 @@ function init(opts) {
 
   _state.enabled = cfg.enabled;
   _state.instanceId = (opts.instanceId) || (_state.deviceId + '-' + crypto.randomBytes(3).toString('hex'));
-  _state.coord = (opts.coord) || new LocalCoordStore({ store: opts.store });
+  _state.coord = (opts.coord) || new LocalCoordStore({ store: opts.store, now: opts.now });
 
   gate.setEnabled(cfg.enabled);
   gate.setCapabilities(cfg.capabilities);
@@ -119,7 +121,54 @@ function init(opts) {
   } else {
     logger.info('[cluster] init (disabled — legacy single-host) instance=' + _state.instanceId);
   }
+  // Keep the facade-level lease options (used by start()).
+  _state._leaseOpts = {
+    leaseMs: opts.leaseMs, heartbeatMs: opts.heartbeatMs, pollMs: opts.pollMs,
+    now: opts.now, setTimer: opts.setTimer, clearTimer: opts.clearTimer,
+  };
   return getStatus();
+}
+
+/**
+ * start(opts) — begin the heartbeat + lease loop (Stage 2). No-op when the
+ * cluster flag is OFF (legacy single-host stays leader-by-default with no
+ * timers). Safe to call once after init() during app bootstrap.
+ *
+ * The LeaseManager drives active/standby failover; its onChange updates the
+ * facade's held fencing token so isLeader()/the mode gate reflect reality:
+ * a leader holds a token (production writes allowed); a follower holds none
+ * (production writes fail closed).
+ */
+function start(opts) {
+  opts = opts || {};
+  if (!_state.enabled) return getStatus();          // legacy: nothing to run
+  if (_state.lease) return getStatus();             // already started
+  const lo = { ..._state._leaseOpts, ...opts };
+  _state.lease = new LeaseManager({
+    coord: _state.coord,
+    instanceId: _state.instanceId,
+    mode: getRole(),
+    leaseMs: lo.leaseMs, heartbeatMs: lo.heartbeatMs, pollMs: lo.pollMs,
+    now: lo.now, setTimer: lo.setTimer, clearTimer: lo.clearTimer,
+    onChange: _onLeaseChange,
+  });
+  _state.lease.start();
+  return getStatus();
+}
+
+async function stop() {
+  if (_state.lease) { try { await _state.lease.stop(); } catch (_) {} _state.lease = null; }
+  _state.fencingToken = null;
+  _state.leaseExpiresAt = null;
+}
+
+// React to lease state transitions: mirror the held token onto the facade so
+// isLeader() + the mode gate see it. A follower (no token) fails writes closed.
+function _onLeaseChange(evt) {
+  const s = (evt && evt.state) || {};
+  _state.fencingToken = s.isLeader ? s.fencingToken : null;
+  _state.leaseExpiresAt = s.isLeader ? s.leaseExpiresAt : null;
+  if (s.lastHeartbeatAt) _state.lastHeartbeatAt = s.lastHeartbeatAt;
 }
 
 // ── Public API the rest of the app uses ──────────────────────────────────────
@@ -138,6 +187,9 @@ function getCoord() { return _state.coord; }
 // rather than letting an un-leased instance act.
 function isLeader() {
   if (!_state.enabled) return true;             // legacy single-host = always leader
+  // When the lease loop is running it is authoritative; otherwise fall back to
+  // the held token (set directly in tests via _setLease).
+  if (_state.lease) return _state.lease.isLeader();
   return getRole() === 'ACTIVE' && _state.fencingToken != null;
 }
 
@@ -164,11 +216,18 @@ function getStatus() {
 }
 
 // Test/reset hook.
-function _reset() { _state = _freshState(); gate._reset(); }
+function _reset() {
+  if (_state.lease) { try { _state.lease._running = false; if (_state.lease._timer != null) _state.lease._clearTimer(_state.lease._timer); } catch (_) {} }
+  _state = _freshState();
+  gate._reset();
+}
+
+// Expose the lease manager's live state in getStatus when running.
+function getLeaseState() { return _state.lease ? _state.lease.getState() : null; }
 
 module.exports = {
-  init, isEnabled, getInstanceId, getDeviceId, getRole, getCoord, isLeader,
-  canSideEffect, assertCanSideEffect, getStatus, _setLease, MODES: gate.MODES, _reset,
+  init, start, stop, isEnabled, getInstanceId, getDeviceId, getRole, getCoord, isLeader,
+  canSideEffect, assertCanSideEffect, getStatus, getLeaseState, _setLease, MODES: gate.MODES, _reset,
   // expose the coord-store ctor for the harness/tests
   LocalCoordStore,
 };
