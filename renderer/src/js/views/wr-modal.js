@@ -963,14 +963,20 @@ function _detectVendorKeyLocal(unit) {
 }
 
 // ── Progress log ──────────────────────────────────────────────────────────
-function _logProgress(msg) {
+function _logProgress(msg, status) {
   const wrap = _el('wr-progress-wrap');
   const log  = _el('wr-progress-log');
   if (!log) return;
   if (wrap) wrap.style.display = '';
   const line = document.createElement('div');
   line.className = 'wr-progress-line';
-  line.textContent = msg;
+  // Optional status (2nd arg): 'ok' → green ✓ prefix, 'err' → red ✗, 'run' →
+  // a spinner-ish ⋯. Lets each submit step show its own success confirmation
+  // in the progress panel instead of only one line at the very end.
+  const icon = status === 'ok' ? '✓ ' : status === 'err' ? '✗ ' : status === 'run' ? '⋯ ' : '';
+  line.textContent = icon + msg;
+  if (status === 'ok')  line.style.color = 'var(--ok,#3fb950)';
+  if (status === 'err') line.style.color = 'var(--err,#f85149)';
   log.appendChild(line);
   log.scrollTop = log.scrollHeight;
 }
@@ -1346,12 +1352,17 @@ function _wireSubmit() {
       }
 
       // ── Phase 1: get the vendor recommendation ──────────────────────────
+      _logProgress('Requesting AAP vendor recommendation…', 'run');
       const rec = await aap.createWorkOrder({ ...payload, assetUrl, confirmVendor: false });
       if (!rec || !rec.ok) {
+        _logProgress('Vendor recommendation failed', 'err');
         _showError((rec && (rec.error || rec.message)) || 'AAP did not return a vendor recommendation.');
         return;
       }
       const recommendedVendor = (rec.recommendation && rec.recommendation.vendor) || '';
+      const _recRule = (rec.recommendation && rec.recommendation.ruleName) || '';
+      _logProgress('Recommendation received: ' + (recommendedVendor || '(none)') +
+        (_recRule ? ' (rule: ' + _recRule + ')' : ''), 'ok');
 
       // Vendor the operator picked in the form (display string → code is done
       // backend-side). If they left it blank, fall back to AAP's recommendation.
@@ -1378,6 +1389,8 @@ function _wireSubmit() {
 
       // ── Phase 2: commit the work order with the confirmed vendor ────────
       btn.textContent = 'Submitting WR…';
+      const _attachCount = Array.isArray(payload.attachments) ? payload.attachments.length : 0;
+      _logProgress('Creating work order with vendor ' + commitVendor + '…', 'run');
       const result = await aap.createWorkOrder({
         ...payload, assetUrl, confirmVendor: true, vendor: commitVendor,
       });
@@ -1385,18 +1398,40 @@ function _wireSubmit() {
 
       if (result && result.ok) {
         const wrId = result.workRequestId || '';
+        _logProgress('Work order created' + (wrId ? ' — WR ' + wrId : '') +
+          ' (vendor ' + (result.vendor || commitVendor) + ')', 'ok');
+
+        // Per-attachment confirmation. result.attachments = [{name, ok, error}]
+        // from the backend upload step (present only when attachments were sent).
+        const atts = Array.isArray(result.attachments) ? result.attachments : [];
+        let attachOk = 0, attachFail = 0;
+        for (const a of atts) {
+          if (a && a.ok) { attachOk++; _logProgress('Attachment uploaded: ' + (a.name || 'file'), 'ok'); }
+          else { attachFail++; _logProgress('Attachment FAILED: ' + ((a && a.name) || 'file') + (a && a.error ? ' — ' + a.error : ''), 'err'); }
+        }
+        if (_attachCount && !atts.length) {
+          _logProgress(_attachCount + ' attachment(s) queued — upload result not reported', 'run');
+        }
+
+        // Build the final result banner, summarizing attachments when present.
+        let attachSummary = '';
+        if (atts.length) {
+          attachSummary = ' · ' + attachOk + '/' + atts.length + ' file' + (atts.length > 1 ? 's' : '') + ' uploaded' +
+            (attachFail ? ' (' + attachFail + ' failed)' : '');
+        }
         resultEl.innerHTML = `
           <div class="wr-result--success">
             <span class="wr-result__icon">✓</span>
-            <span>Work order created${wrId ? ' — WR ' + _safe(wrId) : ''} (vendor ${_safe(result.vendor || commitVendor)})</span>
+            <span>Work order created${wrId ? ' — WR ' + _safe(wrId) : ''} (vendor ${_safe(result.vendor || commitVendor)})${_safe(attachSummary)}</span>
           </div>`;
         resultEl.style.display = '';
-        toast.show('success', 'WR created' + (wrId ? ' ' + wrId : ''), 6000);
+        toast.show('success', 'WR created' + (wrId ? ' ' + wrId : '') + (attachSummary || ''), 6000);
         const _eqId = _unit && (_unit.equipmentId || _unit.id);
         if (_eqId && relay && typeof relay.refreshUnit === 'function') {
           relay.refreshUnit(_eqId).catch(() => {});
         }
       } else {
+        _logProgress('Work order creation failed', 'err');
         _showError((result && (result.error || result.message)) || 'AAP rejected the work order.');
       }
     } catch (e) {
