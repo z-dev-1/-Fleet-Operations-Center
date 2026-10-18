@@ -35,6 +35,7 @@
 const schemas = require('./schemas');
 const trace = require('./trace');
 let router; try { router = require('./router'); } catch (_) { router = null; }
+let memory; try { memory = require('./memory'); } catch (_) { memory = null; }
 let logger; try { logger = require('../utils/logger').createLogger('ai-core'); } catch (_) { logger = { info() {}, warn() {} }; }
 
 // Lazy FAS requires so AiCore never hard-fails to load if a submodule is mid-
@@ -277,10 +278,15 @@ function _attachmentFiles(att) {
 // from the FAS decision so there is no divergence in meaning.
 function _toStructuredDecision(d, request, validated) {
   const ev = (d && d._evidence) || {};
+  const entities = _entitiesFrom(d, request);
   return {
     intent: _intentFrom(d),              // derived label; underlying value is d.decision
     decision: d && d.decision,           // FAS terminal decision (answer/act/clarify/escalate)
-    entities: _entitiesFrom(d, request),
+    entities,
+    // Relevant durable memory (spec #4), retrieved ONLY for the resolved
+    // entities. Advisory context surfaced on the result; operator-confirmed
+    // memory outranks ai-inferred. Best-effort; never blocks.
+    relevantMemory: _relevantMemory(entities),
     answer: (d && typeof d.reply === 'string') ? d.reply : '',
     confidence: d && typeof d.confidence === 'number' ? d.confidence : null,
     reason: (d && d.reason) || '',
@@ -305,6 +311,16 @@ function _intentFrom(d) {
   if (d.decision === 'clarify') return 'clarification';
   if (d.decision === 'escalate') return 'escalation';
   return 'answer';
+}
+
+function _relevantMemory(entities) {
+  if (!memory) return [];
+  try {
+    return memory.retrieve(
+      { units: entities.units, sites: entities.sites, vendors: entities.vendors, includeGlobal: false },
+      { limit: 8 }
+    );
+  } catch (_) { return []; }
 }
 
 function _entitiesFrom(d, request) {

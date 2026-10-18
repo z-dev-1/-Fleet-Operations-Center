@@ -157,6 +157,14 @@ const REGISTRY = {
   // Kept SEPARATE from fasAuditLog so this additive layer never competes with
   // the FAS audit behavior the app already relies on. See src/ai/trace.js.
   aiTraceLog:              () => path.join(P.dataDir, 'ai_trace_log.json'),
+  // Unified AI Core durable memory (2026-10, spec #4) — concise, structured,
+  // retrieval-oriented memories by category (unit/vendor/site/workflow/
+  // correction/operator_preference/contact_comm). Holds NET-NEW ai_inferred and
+  // operator_confirmed memories; it does NOT replace the existing memory sources
+  // (orchaCorrections, orchaVendorRules, vendorHistory, fasCases, notesStore),
+  // which the memory service also reads and ranks. Operator-confirmed memory
+  // always outranks ai_inferred. See src/ai/memory.js.
+  aiMemory:                () => path.join(P.dataDir, 'ai_memory.json'),
   // Digital FAS coverage profile (2026-09) — Zila's assigned coverage derived
   // from the distinct operators (SCAC/carrier) + domiciles present in the
   // authoritative synced fleetData. Verified-vs-stale tracked; refreshed on
