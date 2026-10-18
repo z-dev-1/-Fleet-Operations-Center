@@ -34,6 +34,7 @@
 
 const schemas = require('./schemas');
 const trace = require('./trace');
+let router; try { router = require('./router'); } catch (_) { router = null; }
 let logger; try { logger = require('../utils/logger').createLogger('ai-core'); } catch (_) { logger = { info() {}, warn() {} }; }
 
 // Lazy FAS requires so AiCore never hard-fails to load if a submodule is mid-
@@ -101,12 +102,21 @@ async function run(request) {
   const meta = request.metadata || {};
   const actor = request.actor || {};
 
+  // TASK-AWARE ROUTING (spec #6): classify the task and record a RECOMMENDED
+  // lane/model on the trace. This is ADVISORY observability — it does NOT force
+  // the relay to change lanes or duplicate calls; the proven relay fallback
+  // cascade still owns actual execution. Best-effort; never blocks a request.
+  let routing = null;
+  try { if (router) routing = router.route(request); } catch (_) { routing = null; }
+
   const tr = trace.start({
     requestId: meta.requestId,
     source: request.source || 'unknown',
     actor,
-    taskType: (request.task && request.task.taskType) || null,
+    taskType: (routing && routing.task && routing.task.taskType) || (request.task && request.task.taskType) || null,
+    lane: routing && routing.recommendation ? routing.recommendation.lane : null,
   });
+  if (routing && routing.recommendation) tr.setModel(routing.recommendation.modelHint, routing.recommendation.lane);
 
   const fas = _fas();
   if (!fas.agent || typeof fas.agent.runAgent !== 'function') {
@@ -165,6 +175,7 @@ async function run(request) {
     raw: finalDecision,          // full FAS decision for callers that need _evidence etc.
     source: request.source || 'unknown',
     failSafe: validated.failSafe,
+    routing,                     // advisory task classification + lane recommendation (spec #6)
   });
 }
 
@@ -358,6 +369,7 @@ function _result(fields) {
     decision: fields.decision || null,   // standardized structured decision
     raw: fields.raw || null,             // full FAS decision (for callers needing _evidence)
     failSafe: !!fields.failSafe,
+    routing: fields.routing || null,     // { task, recommendation } (advisory)
     error: fields.error || null,
   };
 }
