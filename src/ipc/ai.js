@@ -1025,6 +1025,33 @@ function registerAIHandlers(ctx) {
   // Settings → AI → Claude Code "Detect current" button).
   handle('claude:detect-model', async () => relay.detectClaudeModel());
 
+  // ── Instance Management (dual-instance cluster) — Stage 7 ──────────────────
+  // Read-only status for the dashboard + the control actions. Every control
+  // routes through the cluster backend, which enforces leadership/authorization
+  // (e.g. handoff only works if WE are the leader) — a UI click cannot bypass
+  // those rules. All wrapped so a disabled/absent cluster never throws.
+  const _cluster = () => { try { return require('../cluster'); } catch (_) { return null; } };
+  handle('cluster:get-dashboard', async () => {
+    const c = _cluster(); if (!c) return { enabled: false, unavailable: true };
+    try { return await c.getDashboard(); } catch (e) { return { enabled: false, error: e.message }; }
+  });
+  handle('cluster:set-auto-failover', (_e, on) => {
+    const c = _cluster(); if (!c) return { ok: false, error: 'cluster unavailable' };
+    return c.setAutoFailover(!!on);
+  });
+  handle('cluster:handoff', async () => {
+    const c = _cluster(); if (!c) return { ok: false, error: 'cluster unavailable' };
+    return c.handoffLeadership();
+  });
+  handle('cluster:set-mode', (_e, mode) => {
+    const c = _cluster(); if (!c) return { ok: false, error: 'cluster unavailable' };
+    return c.setModeRuntime(String(mode || ''));
+  });
+  handle('cluster:reconcile', async () => {
+    const c = _cluster(); if (!c) return { ok: false, error: 'cluster unavailable' };
+    return c.requestReconcile();
+  });
+
   // -- AI Config (preference + per-backend config) --
   // Returns full config: preference, orcha settings, claude settings + live status
   handle('ai:get-ai-config', () => {

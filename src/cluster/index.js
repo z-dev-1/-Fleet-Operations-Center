@@ -68,8 +68,11 @@ function _freshState() {
     sync: null,               // SyncEngine instance (Stage 4), when enabled
     _syncTimer: null,         // periodic sync-pull timer handle (Stage 5)
     _clearSyncTimer: null,
+    failoverHistory: [],      // recent promote/demote/takeover events (Stage 7)
+    autoFailover: true,       // can be toggled from the dashboard (Stage 7)
   };
 }
+const FAILOVER_HISTORY_CAP = 50;
 let _state = _freshState();
 
 // Resolve the feature flag + initial mode from settings/env. Kept tiny and
@@ -204,6 +207,14 @@ function _onLeaseChange(evt) {
   _state.fencingToken = s.isLeader ? s.fencingToken : null;
   _state.leaseExpiresAt = s.isLeader ? s.leaseExpiresAt : null;
   if (s.lastHeartbeatAt) _state.lastHeartbeatAt = s.lastHeartbeatAt;
+  // Record promote/demote transitions for the Instance Management history pane.
+  if (evt && (evt.type === 'promoted' || evt.type === 'demoted')) {
+    _state.failoverHistory.unshift({
+      type: evt.type, reason: evt.reason || '', token: evt.token != null ? evt.token : null,
+      instanceId: _state.instanceId, at: new Date().toISOString(),
+    });
+    if (_state.failoverHistory.length > FAILOVER_HISTORY_CAP) _state.failoverHistory.length = FAILOVER_HISTORY_CAP;
+  }
 }
 
 // ── Public API the rest of the app uses ──────────────────────────────────────
@@ -261,8 +272,18 @@ async function pullSharedState(limit) {
 function isSharedKey(key) { return isShared(key); }
 function getSyncState() { return _state.sync ? _state.sync.getState() : null; }
 
-// Internal: used by the (future) lease loop to record the held token.
-function _setLease(token, expiresAt) { _state.fencingToken = token; _state.leaseExpiresAt = expiresAt; }
+// Internal/test shim: record a held lease on the facade. When a lease manager
+// is running it is authoritative for isLeader(), so keep the two in sync by
+// reflecting the token onto it too (otherwise the facade and the lease loop
+// could disagree).
+function _setLease(token, expiresAt) {
+  _state.fencingToken = token;
+  _state.leaseExpiresAt = expiresAt;
+  if (_state.lease) {
+    if (token != null) { _state.lease.role = 'leader'; _state.lease.fencingToken = token; _state.lease.leaseExpiresAt = expiresAt; }
+    else { _state.lease.role = 'follower'; _state.lease.fencingToken = null; _state.lease.leaseExpiresAt = null; }
+  }
+}
 
 function getStatus() {
   return {
@@ -289,11 +310,103 @@ function _reset() {
 // Expose the lease manager's live state in getStatus when running.
 function getLeaseState() { return _state.lease ? _state.lease.getState() : null; }
 
+// ── Instance Management dashboard (Stage 7) ─────────────────────────────────
+// getDashboard() — a single read the UI renders. Combines THIS instance's local
+// status with the SHARED leadership record from the coordination store (so the
+// dashboard can show who the current leader is, even when that's the OTHER
+// instance). Read-only; never mutates coordination state.
+async function getDashboard() {
+  const self = getStatus();
+  let shared = null;
+  try { if (_state.coord) shared = await _state.coord.getLeadership(); } catch (_) {}
+  const sy = getSyncState();
+  const now = Date.now();
+  const leaseLive = !!(shared && shared.expiresAt && shared.expiresAt > now);
+  return {
+    enabled: _state.enabled,
+    autoFailover: _state.autoFailover,
+    self: {
+      instanceId: self.instanceId, deviceId: self.deviceId, role: self.role,
+      isLeader: self.isLeader, fencingToken: self.fencingToken,
+      lastHeartbeatAt: self.lastHeartbeatAt, capabilities: self.capabilities,
+      appVersion: _appVersion(),
+    },
+    leader: shared ? {
+      instanceId: shared.leader, mode: shared.mode, fencingToken: shared.fencingToken,
+      acquiredAt: shared.acquiredAt ? new Date(shared.acquiredAt).toISOString() : null,
+      expiresAt: shared.expiresAt ? new Date(shared.expiresAt).toISOString() : null,
+      heartbeatAt: shared.heartbeatAt ? new Date(shared.heartbeatAt).toISOString() : null,
+      live: leaseLive,
+      isSelf: !!(shared.leader && shared.leader === self.instanceId),
+    } : null,
+    sync: { lastSyncSeq: sy ? sy.lastSyncSeq : _state.lastSyncSeq, sharedKeyCount: sy ? sy.sharedKeyCount : 0 },
+    failoverHistory: _state.failoverHistory.slice(0, 20),
+  };
+}
+
+function _appVersion() {
+  try { const { app } = require('electron'); return app && app.getVersion ? app.getVersion() : null; }
+  catch (_) { try { return require('../../package.json').version; } catch (__) { return null; } }
+}
+
+// setAutoFailover(on) — toggle whether this instance's lease loop is allowed to
+// take over. When OFF, a standby will NOT acquire leadership even if the lease
+// expires (the operator has chosen manual control). Backend-enforced.
+function setAutoFailover(on) {
+  _state.autoFailover = !!on;
+  if (_state.lease) _state.lease.setAutoFailover(_state.autoFailover);
+  logger.info('[cluster] autoFailover = ' + _state.autoFailover);
+  return { ok: true, autoFailover: _state.autoFailover };
+}
+
+// handoffLeadership() — SAFE manual handoff: only the CURRENT leader may release
+// its lease, which lets the standby take over on its next poll. Returns an
+// error (never force-steals) if we aren't the leader — so a UI click can't
+// bypass the backend's leadership rules.
+async function handoffLeadership() {
+  if (!_state.enabled) return { ok: false, error: 'cluster disabled' };
+  if (!isLeader()) return { ok: false, error: 'not the current leader — cannot hand off' };
+  if (!_state.lease) return { ok: false, error: 'lease manager not running' };
+  try {
+    await _state.coord.releaseLeadership(_state.instanceId, _state.fencingToken);
+    _state.lease._demote('manual-handoff');
+    _onLeaseChange({ type: 'demoted', reason: 'manual-handoff', state: _state.lease.getState() });
+    logger.info('[cluster] manual leadership handoff by ' + _state.instanceId);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// setModeRuntime(mode) — switch ACTIVE/STANDBY/DEVELOPMENT at runtime. Enforced
+// in the backend gate (not just the UI). DEVELOPMENT demotes any held lease so
+// a dev instance never keeps leadership.
+function setModeRuntime(mode) {
+  if (!gate.MODES.includes(mode)) return { ok: false, error: 'invalid mode' };
+  gate.setMode(mode);
+  _state.role = gate.getMode();
+  if (_state.lease) _state.lease.mode = mode;
+  if (mode === 'DEVELOPMENT' && isLeader() && _state.lease) {
+    // A dev instance must not hold production leadership.
+    handoffLeadership().catch(() => {});
+  }
+  logger.info('[cluster] runtime mode -> ' + mode);
+  return { ok: true, mode };
+}
+
+// requestReconcile() — force a full sync pull now (the dashboard's "reconcile"
+// button). Pulls every missed event and applies it. No-op when disabled.
+async function requestReconcile() {
+  if (!_state.enabled || !_state.sync) return { ok: false, skipped: 'disabled' };
+  const r = await pullSharedState(100000);
+  return { ok: true, applied: r.applied, cursor: r.cursor };
+}
+
 module.exports = {
   init, start, stop, isEnabled, getInstanceId, getDeviceId, getRole, getCoord, isLeader,
   canSideEffect, assertCanSideEffect, mayRunProduction,
   publishSharedKey, pullSharedState, isSharedKey, getSyncState,
   getStatus, getLeaseState, _setLease, MODES: gate.MODES, _reset,
+  // Stage 7 — Instance Management dashboard + controls
+  getDashboard, setAutoFailover, handoffLeadership, setModeRuntime, requestReconcile,
   // expose the coord-store ctor for the harness/tests
   LocalCoordStore,
 };

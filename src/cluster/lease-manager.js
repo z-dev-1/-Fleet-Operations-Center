@@ -63,6 +63,7 @@ class LeaseManager {
     this._onChange = typeof opts.onChange === 'function' ? opts.onChange : () => {};
 
     this.role = 'follower';        // 'leader' | 'follower'
+    this._autoFailover = opts.autoFailover !== false;  // dashboard toggle (default on)
     this.fencingToken = null;
     this.leaseExpiresAt = null;
     this.lastHeartbeatAt = null;
@@ -72,6 +73,12 @@ class LeaseManager {
   }
 
   isLeader() { return this.role === 'leader' && this.fencingToken != null; }
+
+  // Operator toggle (from the Instance Management dashboard). When auto-failover
+  // is OFF, a follower will NOT acquire leadership even if the lease expires —
+  // the operator has taken manual control. A current leader keeps renewing
+  // (turning it off doesn't abdicate; it only prevents NEW takeovers).
+  setAutoFailover(on) { this._autoFailover = (on !== false); }
 
   getState() {
     return {
@@ -197,6 +204,14 @@ class LeaseManager {
       return;
     }
     // No live leader (none, or the lease EXPIRED), or it's already us → acquire.
+    // BUT if auto-failover is OFF (operator took manual control), a follower
+    // must NOT take over even on expiry — only an instance that is ALREADY the
+    // leader re-acquires. This is the dashboard's "disable automatic failover".
+    const alreadyMine = cur && cur.leader === this.instanceId;
+    if (!this._autoFailover && !alreadyMine) {
+      this._onChange({ type: 'standby', leader: cur && cur.leader, reason: 'auto-failover-disabled', state: this.getState() });
+      return;
+    }
     // BOTH ACTIVE and STANDBY do this: an ACTIVE grabs an idle lease eagerly;
     // a STANDBY takes over precisely because the primary's lease has lapsed
     // (laptop asleep/off/crashed) — that IS the failover. CAS makes a race

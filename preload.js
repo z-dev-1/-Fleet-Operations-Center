@@ -115,6 +115,12 @@ expose('settings', {
   getOrchaConfig:    ()        => ipcRenderer.invoke('orcha:get-config'),
   listOrchaAgents:   (opts)    => ipcRenderer.invoke('orcha:list-agents', opts),
   detectClaudeModel: ()        => ipcRenderer.invoke('claude:detect-model'),
+  // Instance Management (dual-instance cluster) — Stage 7
+  clusterGetDashboard:  ()      => ipcRenderer.invoke('cluster:get-dashboard'),
+  clusterSetAutoFailover: (on)  => ipcRenderer.invoke('cluster:set-auto-failover', on),
+  clusterHandoff:       ()      => ipcRenderer.invoke('cluster:handoff'),
+  clusterSetMode:       (mode)  => ipcRenderer.invoke('cluster:set-mode', mode),
+  clusterReconcile:     ()      => ipcRenderer.invoke('cluster:reconcile'),
   getScheduleSlots:  ()        => ipcRenderer.invoke('settings:get-schedule-slots'),
   saveScheduleSlots: (slots)   => ipcRenderer.invoke('settings:save-schedule-slots', slots),
   getSyncInterval:   ()        => ipcRenderer.invoke('settings:get-sync-interval'),
