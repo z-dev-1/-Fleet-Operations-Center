@@ -79,11 +79,19 @@ function canSideEffect(kind) {
   if (!allowed.has(kind)) {
     return { ok: false, reason: 'mode ' + mode + ' does not permit "' + kind + '"' };
   }
-  // Capability gate: browser-bound classes require a local browser. On a
-  // headless host these FAIL CLOSED (never faked, never double-run elsewhere).
-  const needsBrowser = kind === 'browser' || kind === 'fleet-mutate' || kind === 'sp-push' || kind === 'email-send';
+  // Capability gate. Browser-bound classes (lifecycle DOM flips, SharePoint
+  // push, the OWA-browser mailer) require a local authenticated Chromium — on a
+  // headless host they FAIL CLOSED (never faked, never double-run elsewhere).
+  const needsBrowser = kind === 'browser' || kind === 'fleet-mutate' || kind === 'sp-push';
   if (needsBrowser && !_capabilities.browser) {
     return { ok: false, reason: '"' + kind + '" requires a local browser which this host lacks (headless) — failing closed' };
+  }
+  // Email is special: it CAN go via a browser (OWA) OR headlessly via SMTP.
+  // So 'email-send' is permitted when the host has EITHER a browser OR an
+  // explicitly-enabled smtp capability — otherwise it fails closed. (The SMTP
+  // adapter itself also re-checks its own enable flag, defense in depth.)
+  if (kind === 'email-send' && !_capabilities.browser && !_capabilities.smtp) {
+    return { ok: false, reason: 'email-send needs a local browser (OWA) or enabled SMTP capability — neither present, failing closed' };
   }
   return { ok: true, reason: 'permitted in ' + mode };
 }
