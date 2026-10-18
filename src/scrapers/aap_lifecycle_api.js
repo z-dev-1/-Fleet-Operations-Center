@@ -218,6 +218,7 @@ async function setLifecycleApi(args) {
   const r = await resolveAaid(args.aaid || args.unit, { assetUrl: args.assetUrl });
   if (r.error) return { ok: false, status: 'failed', error: r.error };
   const aaid = r.aaid;
+  logger.info('[aap-lifecycle] resolved aaid=' + aaid + ' for ' + (args.unit || args.aaid || '?') + ' (len=' + aaid.length + ')');
 
   // Validate the reason against AAP's live valid list (auto-remembered).
   let fleetId = null;
@@ -225,7 +226,15 @@ async function setLifecycleApi(args) {
   try { asset = await aap.getAsset(aaid); } catch (e) {
     return { ok: false, status: 'failed', aaid, error: 'could not read asset: ' + e.message };
   }
-  if (!asset || !asset.aaid) return { ok: false, status: 'failed', aaid, error: 'asset not found' };
+  // The single-asset GET may return the asset directly OR wrapped in { asset }.
+  if (asset && asset.asset && !asset.aaid) asset = asset.asset;
+  if (!asset || !asset.aaid) {
+    // Diagnostic: show what the GET actually returned so we can see the shape.
+    let shape = 'null';
+    try { shape = asset ? ('keys=' + Object.keys(asset).slice(0, 12).join(',')) : 'null'; } catch (_) {}
+    logger.warn('[aap-lifecycle] getAsset(' + aaid + ') returned no .aaid — ' + shape);
+    return { ok: false, status: 'failed', aaid, error: 'asset not found (getAsset returned ' + shape + ')' };
+  }
   fleetId = asset.fleetId || null;
 
   const from = { state: asset.lifecycleState || null, reason: asset.lifecycleStateReason || null };

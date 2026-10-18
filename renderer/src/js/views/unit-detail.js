@@ -115,9 +115,29 @@ function _wireLifecycleForm(unit) {
   const actionsEl= document.getElementById('dp-quick-actions');
   if (!btn || !form || !cancelEl || !confirmEl || !actionsEl) return;
 
+  const stateEl  = document.getElementById('dp-lc-state');
+  const reasonEl = document.getElementById('dp-lc-reason');
+
+  // Auto-populate the reason based on the chosen state. Active -> Healthy;
+  // Unavailable -> Off-site Shop Repair (the common default). The operator can
+  // still pick any reason from the dropdown.
+  function _autoReason() {
+    if (!stateEl || !reasonEl) return;
+    const st = (stateEl.value || '').toLowerCase();
+    const want = st === 'active' ? 'HEALTHY' : (st.includes('unavail') ? 'OFFSITE_SHOP_REPAIR' : reasonEl.value);
+    if (want && [...reasonEl.options].some((o) => o.value === want)) reasonEl.value = want;
+  }
+  if (stateEl) stateEl.addEventListener('change', _autoReason);
+
   btn.addEventListener('click', () => {
     actionsEl.style.display = 'none';
     form.style.display = 'flex';
+    // Prefill the state with the unit's CURRENT state, then auto-set its reason.
+    if (stateEl) {
+      const cur = (unit.lifecycleState || '').toLowerCase();
+      stateEl.value = cur.includes('unavail') ? 'Unavailable' : (cur === 'ordered' ? 'Ordered' : 'Active');
+    }
+    _autoReason();
   });
 
   cancelEl.addEventListener('click', () => {
@@ -2320,8 +2340,21 @@ function renderActionsPane(unit){
 // _wireLifecycleForm -- that failure was being reported to the user as a
 // SUCCESS. Fixed to the 4 real AAP states.
 '<div id="dp-lc-form" class="dp-lc-form" style="display:none">'+
-      '<div class="dp-lc-row"><select id="dp-lc-state" class="detail-panel__select"><option value="Active">Active</option><option value="Unavailable">Unavailable</option><option value="Ordered">Ordered</option><option value="End of Life">End of Life</option></select>'+
-      '<input id="dp-lc-reason" class="detail-panel__input" type="text" placeholder="Reason..."/></div>'+
+      '<div class="dp-lc-row"><select id="dp-lc-state" class="detail-panel__select"><option value="Active">Active</option><option value="Unavailable">Unavailable</option><option value="Ordered">Ordered</option></select>'+
+      '<select id="dp-lc-reason" class="detail-panel__select">'+
+        '<option value="HEALTHY">Healthy</option>'+
+        '<option value="OFFSITE_SHOP_REPAIR">Off-site Shop Repair</option>'+
+        '<option value="PM_FAILED">PM Failed</option>'+
+        '<option value="PREVENTATIVE_MAINTENANCE">Preventative Maintenance</option>'+
+        '<option value="PARTS_DELAY">Parts Delay</option>'+
+        '<option value="DAMAGED_MODERATE">Damaged - Moderate</option>'+
+        '<option value="SENSOR_DETECTED_DAMAGE">Sensor Detected Damage</option>'+
+        '<option value="SAFETY_INSPECTION_POST_ACCIDENT">Safety Inspection Post Accident</option>'+
+        '<option value="LICENSE_OR_PERMIT_ISSUE">License or Permit Issue</option>'+
+        '<option value="IMPOUNDED_TOW">Impounded / Tow</option>'+
+        '<option value="GPS_MALFUNCTIONING">GPS Malfunctioning</option>'+
+        '<option value="CAMPAIGN">Campaign</option>'+
+      '</select></div>'+
       '<div class="dp-lc-row"><button id="dp-lc-confirm" class="detail-panel__btn">Confirm</button><button id="dp-lc-cancel" class="detail-panel__btn detail-panel__btn--secondary">Cancel</button></div>'+
     '</div>'+ /* close #dp-lc-form — was MISSING, so the final </div> closed this form instead of #dp-pane-actions, leaving the Actions pane open and swallowing the entire History pane inside it (History rendered with offsetHeight 0 = blank). */
     '<div class="dp-section-title" style="margin-top:10px">Dealer Work Order</div>'+

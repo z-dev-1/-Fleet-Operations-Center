@@ -365,10 +365,28 @@ function registerScrapersIPC(ctx) {
         try { require('../utils/logger').createLogger('ipc:scrapers').warn('[aap:set-lifecycle] API path threw (' + e.message + '); falling back'); } catch (_) {}
       }
     }
-    // FALLBACK: proven BrowserWindow automation.
+    // FALLBACK: proven BrowserWindow automation. The UI now sends the AAP
+    // reason CODE (e.g. OFFSITE_SHOP_REPAIR) for the API path; the browser
+    // automation matches by the dropdown's VISIBLE text, so translate code ->
+    // friendly label here. Unknown/plain values pass through unchanged.
+    const _REASON_FRIENDLY = {
+      HEALTHY: 'Healthy',
+      OFFSITE_SHOP_REPAIR: 'Off-site storage',
+      PM_FAILED: 'PM Failed',
+      PREVENTATIVE_MAINTENANCE: 'Preventative Maintenance',
+      PARTS_DELAY: 'Parts Delay',
+      DAMAGED_MODERATE: 'Damaged-Moderate',
+      SENSOR_DETECTED_DAMAGE: 'Sensor Detected Damage',
+      SAFETY_INSPECTION_POST_ACCIDENT: 'Safety Inspection Post Accident',
+      LICENSE_OR_PERMIT_ISSUE: 'License or Permit Issue',
+      IMPOUNDED_TOW: 'Impounded/Tow',
+      GPS_MALFUNCTIONING: 'GPS Malfunctioning',
+      CAMPAIGN: 'Campaign',
+    };
+    const fallbackReason = _REASON_FRIENDLY[String(reason || '').trim().toUpperCase()] || reason || '';
     const { setLifecycleState } = require('../scrapers/setLifecycle');
     try {
-      return await setLifecycleState({ equipmentId, assetUrl, state, reason: reason || '' });
+      return await setLifecycleState({ equipmentId, assetUrl, state, reason: fallbackReason });
     } catch (e) {
       throw new ScraperError(e.message, 'aap:set-lifecycle', { equipmentId, state });
     }

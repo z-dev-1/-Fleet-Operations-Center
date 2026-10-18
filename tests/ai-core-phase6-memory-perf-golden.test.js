@@ -107,10 +107,14 @@ describe('Phase 6 — model performance learning (spec §8)', () => {
   });
 
   it('laneScore rewards success and penalizes corrections once enough samples exist', () => {
+    // Start from a clean trace store so aggregation isn't affected by traces
+    // seeded in earlier cases (makes the comparison deterministic).
+    store.save('aiTraceLog', []);
     seedTraces('claude-sonnet', 'multi_source_reasoning', 25, { lane: 'claude' });            // clean
     seedTraces('orcha', 'multi_source_reasoning', 25, { lane: 'orcha', correctionIncorrect: true }); // corrected
-    const claude = performance.laneScore('claude', 'multi_source_reasoning', { minSamples: 20 });
-    const orcha = performance.laneScore('orcha', 'multi_source_reasoning', { minSamples: 20 });
+    // Explicit high limit so all 50 traces are aggregated regardless of defaults.
+    const claude = performance.laneScore('claude', 'multi_source_reasoning', { minSamples: 20, limit: 1000 });
+    const orcha = performance.laneScore('orcha', 'multi_source_reasoning', { minSamples: 20, limit: 1000 });
     expect(claude).toBeGreaterThan(orcha);
   });
 
