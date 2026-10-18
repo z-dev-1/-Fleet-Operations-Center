@@ -150,6 +150,13 @@ const REGISTRY = {
   fasKnowledgeDrafts:      () => path.join(P.dataDir, 'fas_knowledge_drafts.json'),
   fasConfig:               () => path.join(P.dataDir, 'fas_config.json'),
   fasAuditLog:             () => path.join(P.dataDir, 'fas_audit_log.json'),
+  // Unified AI Core structured trace (2026-10, spec #9) — one operational trace
+  // per AiCore request (source, actor, task, tools, evidence sources+freshness,
+  // latency, fallbacks, validation, action proposals/outcomes, verification,
+  // errors, optional later operator correction). Bounded ring, newest-first.
+  // Kept SEPARATE from fasAuditLog so this additive layer never competes with
+  // the FAS audit behavior the app already relies on. See src/ai/trace.js.
+  aiTraceLog:              () => path.join(P.dataDir, 'ai_trace_log.json'),
   // Digital FAS coverage profile (2026-09) — Zila's assigned coverage derived
   // from the distinct operators (SCAC/carrier) + domiciles present in the
   // authoritative synced fleetData. Verified-vs-stale tracked; refreshed on
