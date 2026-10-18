@@ -62,14 +62,73 @@ const URGENCY_REASONS = [
 // (295/75R22.5), so it's not modeled as a data field here; see the
 // corresponding instruction added to aap_wizard_knowledge.js instead.
 const AREA_SUBS = {"BODY":["AIR FILTERS","BATTERY BOX","BODY CAB COMPONENTS","BODY COMPONENTS","BRACKET","BULKHEAD","BUMPER ASSEMBLY","CAB","CARGO BOX","CARGO RESTRAINT","CORNER CAP ASSEMBLY","COWL ASSEMBLY","DEFLECTOR","EXTERIOR LIGHTS","EXTERIOR PANEL ASSEMBLY","FAIRINGS","FASTENERS","FLOOR ASSEMBLY","FRAME ASSEMBLY","GLASS ASSEMBLY","HOOD","INTERIOR TRIM","MIRRORS AND VISOR","MUD FLAPS","ROLL-UP DOOR","ROOF ASSEMBLY","RUNNING BOARDS","SEAT ASSEMBLY","SIDE DOOR ASSEMBLY","TAILGATE","WINDSHIELD","WIPER SYSTEM"],"BRAKES":["AIR BRAKE ASSEMBLY","AIR COMPRESSOR","AIR HOSE ASSEMBLY","AIR TANK ASSEMBLY","AIR VALVE ASSEMBLY","ANTILOCK ASSEMBLY","AXLE BRAKES","BRAKE CHAMBER","BRAKE LINES AND FITTINGS","DRAIN VALVE","ELECTRIC BRAKES ASSEMBLY","GLADHAND ASSEMBLY","HYDRAULIC BRAKE ASSEMBLY","MASTER BRAKE CYLINDER ASSEMBLY","PARKING BRAKE ASSEMBLY","PEDAL ASSEMBLY","POWER BRAKE ASSEMBLY"],"CHASSIS":["ADJUSTER","CHASSIS ASSEMBLY","IDLER","LUBRICATION ASSEMBLY","RESERVOIR AND LINES","ROLLER","TRACK","UNDERCARRIAGE","WHEEL END DISCONNECT ASSEMBLY"],"CHECK ENGINE LIGHT":["CEL AIR TEMPERATURE","CEL AMBIENT TEMPERATURE","CEL BOOST PRESSURE","CEL CAMSHAFT POSITION","CEL COOLANT TEMPERATURE","CEL CRANKCASE PRESSURE","CEL ENGINE POSITION","CEL FUEL PRESSURE","CEL FUEL TEMPERATURE","CEL IDLE","CEL MANIFOLD PRESSURE","CEL MASS AIR FLOW","CEL OIL TEMPERATURE","CEL OVERALL ISSUE","CEL OXYGEN ISSUE","CEL OXYGEN SENSOR","CEL SENSOR KNOCK","CEL SPEED"],"DEVICE INSTALLATION":["FLEETEDGE-AI BOX","GEOTAB","HALO GATEWAY","HALO SENSOR","HALO TIRE INFLATOR (GEN 1 and GEN 2)","NETRADYNE","XIRGO-HARP"],"DEVICE REMOVAL":["FLEETEDGE-AI BOX","GEOTAB","HALO GATEWAY","HALO SENSOR","HALO TIRE INFLATOR (GEN 1 and GEN 2)","NETRADYNE","XIRGO-HARP"],"DEVICE REPLACMENT":["FLEETEDGE-AI BOX","GEOTAB","HALO GATEWAY","HALO SENSOR","HALO TIRE INFLATOR (GEN 1 and GEN 2)","NETRADYNE","XIRGO-HARP"],"DOORS":["DOOR ASSEMBLY","DOOR HINGE ASSEMBLY","SODE DOOR COMPONENT"],"DRIVETRAIN":["AIR CYLINDERS","AUXILIARY ASSEMBLY","AXLE","CHAIN DRIVE","DIFFERENTIAL","DRIVETRAIN ASSEMBLY","FINAL DRIVE ASSEMBLY","GEARS AND BEARINGS","MANIFOLD","PARKING LOCK ASSEMBLY","RETARDER","SHAFT","SHAFT ASSEMBLY","TRANSFER CASE"],"ELECTRICAL":["ADAS","ALTERNATOR ASSEMBLY","BACKUP WARNING SYSTEM","BATTERIES AND CABLES","BULBS, FUSES","CHARGING SYSTEM","DISTRIBUTOR ASSEMBLY","ECU","EV CHARGING SYSTEM","ELECTRICAL SYSTEM","GPS TRACKING","HORN, ANTI-THEFT","IGNITION SYSTEM","INSTRUMENT CLUSTER","LIGHTING SYSTEM","MODULES","OIL PRESSURE WARNING","PRE-HEATER","REGULATOR","SENSOR","SENSORS","SHUTDOWN DEVICES","SOLENOID","STARTER ASSEMBLY","SURVEILLANCE SYSTEM","SWITCHES","WARNING INDICATORS","WIRE HARDNESS"],"ENGINE":["AIR CLEANER","AIR INTAKE","BATTERY ASSEMBLY","CAMSHAFT ASSEMBLY","CARBURETOR","COOLANT","COOLING SYSTEM","CRANKCASE ASSEMBLY","CRANKSHAFT ASSEMBLY","CYLINDER BLOCK ASSEMBLY","DEF ASSEMBLY","ELECTRIC MOTOR ASSEMBLY","ELECTRONIC ENGINE CONTROLS","ENGINE ASSEMBLY","ENGINE SHUTDOWN","FILTERS","FLYWHEEL","INJECTOR","OIL FILTER ASSEMBLY","OIL PAN ASSEMBLY","OIL PUMP ASSEMBLY","PISTONS AND RINGS ASSEMBLY","RADIATOR","RETARDER ASSEMBLY","SPEED CONTROL SYSTEM","THROTTLE BODY","TIMING ASSEMBLY","WATER PUMP"],"EXHAUST":["EXHAUST SYSTEM","MUFFLER EXHAUST PIPE ASSEMBLY"],"FIFTH WHEEL":["FIFTH WHEEL COMPONENTS"],"FUEL":["EVAPORATIVE CONTROL SYSTEM","FUEL PUMP","FUEL TANK SYSTEM","HEATER ASSEMBLY","INJECTORS","TANK ASSEMBLY"],"HVAC":["AIR CONDITIONING","BELTS","DEFROSTER","HVAC ASSEMBLY","HEATING"],"INTERIOR":["AIR BAGS AND INTERIOR SAFETY EQUIPMENT","CAB ACCESSORIES","DISPLAYS AND SIGNS","INSTRUMENT PANEL","INTERIOR PANELS","LIGHTS","MOLDINGS","SLEEPER COMPONENTS"],"SUSPENTION":["ACTIVE SUSPENSION ASSEMBLY","AIR SPRING ASSEMBLY","AIR SUSPENSION ASSEMBLY","FRONT SUSPENSION ASSEMBLY","REAR SUSPENSION ASSEMBLY","RIDE HEIGHT ASSEMBLY","SHOCK ABSORBERS","SLEEPER SUSPENSION","SPRINGS ASSEMBLY","STABILIZER ASSEMBLY","STRUTS ASSEMBLY","SUSPENSION ASSEMBLY","TANDEM SUSPENSION ASSEMBLY"],"TIRES":["Drive Left Front Inside","Drive Left Front Outside","Drive Left Rear Inside","Drive Left Rear Outside","Drive Right Front Inside","Drive Right Front Outside","Drive Right Rear Inside","Drive Right Rear Outside","Steer Left","Steer Right"],"TOW":["MECHANICAL ISSUE","IMPOUND","ABANDONED EQUIPMENT","ACCIDENT/RECOVERY"],"TRANSMISSION":["CVT","CLUTCH","CONVERTER","ELECTRIC VEHICLE","MANUAL TRANSMISSION","SERVO ASSEMBLY","SOLENOID ASSEMBLY","TORQUE ASSEMBLY","TRANSMISSION ASSEMBLY","TRANSMISSION BRAKE","TRANSMISSION CASE","TRANSMISSION COVER","TRANSMISSION EXTERNAL CONTROL","TRANSMISSION OIL PUMP ASSEMBLY","TRANSMISSION PUMP","TRANSMISSION SPLITTER","VALVE BIDY"]};
-const AREA_TEMPLATES = Object.keys(AREA_SUBS);
+// ── Live AVM lookups (cascading category dropdowns) ─────────────────────────
+// The Component-Area rows are three cascading <select>s — Category (L1) ->
+// Sub-category (L2) -> Sub-sub-category (L3) — populated LIVE from AAP's
+// avmCodes tree (window.aapApi.avmTree) so they always match the real wizard.
+// Option VALUE = AAP code, LABEL = displayName. L3 only shows for L2 codes that
+// actually have children (e.g. Tires); it stays hidden otherwise.
+//
+// TOW is special: it is NOT an avmCode but the tow flow (AI Fill, the tow tab)
+// needs it to keep working, so we inject a synthetic TOW L1 option + its reason
+// list as L2 so a user can still pick TOW manually and the submit passes it
+// straight through (level1:'TOW', level2:<reason>).
+const TOW_L1_CODE = 'TOW';
+const TOW_REASONS = AREA_SUBS.TOW || ['MECHANICAL ISSUE', 'IMPOUND', 'ABANDONED EQUIPMENT', 'ACCIDENT/RECOVERY'];
 
+// Derive the avmCodes equipmentType token from a unit's body/asset fields,
+// mirroring aap_api.js avmTypeFor (there is no renderer avmTypeFor — this is
+// the renderer-side equivalent). box -> 'boxTruck'; tractor/sleeper/day cab ->
+// 'tractor'; anything else -> 'boxTruck' (a usable default). Exported for tests.
+export function avmTypeForUnit(unit) {
+  const u = unit || {};
+  const hay = [u.bodyType, u.assetType, u.assetDefinitionKey, u.equipmentType, u.type]
+    .filter(Boolean).join(' ').toLowerCase();
+  if (/box/.test(hay)) return 'boxTruck';
+  if (/tractor|sleeper|day\s*cab|daycab/.test(hay)) return 'tractor';
+  return 'boxTruck';
+}
 
+// Build the <option> list for a cascading select from an array of
+// {code,displayName} items, pre-selecting `selected` (a code) when present.
+// Exported for tests. `placeholder` is the empty-value first option label.
+export function avmOptionsHtml(items, selected, placeholder) {
+  const opts = ['<option value="">' + _safe(placeholder || '-- Select --') + '</option>'];
+  for (const it of (items || [])) {
+    const code = (it && it.code != null) ? String(it.code) : '';
+    const name = (it && (it.displayName || it.code)) || '';
+    const sel = (selected != null && String(selected) === code) ? ' selected' : '';
+    opts.push('<option value="' + _safeAttr(code) + '"' + sel + '>' + _safe(name) + '</option>');
+  }
+  return opts.join('');
+}
+
+// Normalize collected area rows into the submit payload shape, dropping empty
+// rows and keeping TOW as a passthrough. Each row in -> {area, subcategory,
+// subSubcategory} with codes; TOW rows pass straight through (not avmCodes).
+// Exported for tests (the payload-shape proof).
+export function buildAreaPairsPayload(rows) {
+  const out = [];
+  for (const r of (rows || [])) {
+    if (!r) continue;
+    const area = String(r.area || '').trim();
+    const sub = String(r.subcategory || '').trim();
+    const subSub = String(r.subSubcategory || '').trim();
+    if (!area && !sub) continue;
+    out.push({ area, subcategory: sub, subSubcategory: subSub });
+  }
+  return out;
+}
 
 // ── Module state ──────────────────────────────────────────────────────────
 let _overlay   = null;
 let _unit      = null;
 let _areaCount = 1;
+// Live AVM tree + vendor list, fetched once per modal-open and cached on the
+// module so cascading is instant (no refetch per row). _avmTree is the parsed
+// { l1, l2ByParent, l3ByParent, reasons } from window.aapApi.avmTree.
+let _avmTree   = null;
+let _vendorList = null; // [{vendorName, wrEnabled, ...}] from window.aapApi.vendors
 let _progUnsub = null;
 let _towAddrUnsub = null; // BUG FIX (2026-07-16): see _wireTow() below
 let _attachments = []; // FEATURE (2026-07-23): [{name, dataUrl}] -- auto-attach + manual + drag-drop
@@ -128,13 +187,47 @@ function _riskBadge(score) {
   return `<span class="badge badge--risk-${tier.toLowerCase()}">${tier}</span>`;
 }
 
-function _areaPairRow(idx, area, sub) {
+// Build the L1 (Category) option list from the live tree + the synthetic TOW
+// option. Falls back to an empty list (just the placeholder) when the tree
+// hasn't loaded yet / is offline.
+function _l1Options(selected) {
+  const l1 = (_avmTree && Array.isArray(_avmTree.l1)) ? _avmTree.l1.slice() : [];
+  const items = l1.concat([{ code: TOW_L1_CODE, displayName: 'TOW' }]);
+  return avmOptionsHtml(items, selected, '-- Category --');
+}
+
+// L2 options for a given L1 code. TOW's "sub-categories" are its reasons.
+function _l2ItemsFor(l1code) {
+  if (String(l1code) === TOW_L1_CODE) {
+    return TOW_REASONS.map((r) => ({ code: r, displayName: r }));
+  }
+  return (_avmTree && _avmTree.l2ByParent && _avmTree.l2ByParent[l1code]) || [];
+}
+
+// L3 options for a given L2 code (empty/undefined => no L3, select hidden).
+function _l3ItemsFor(l2code) {
+  return (_avmTree && _avmTree.l3ByParent && _avmTree.l3ByParent[l2code]) || [];
+}
+
+// Three cascading selects: Category (L1) -> Sub-category (L2) -> Sub-sub (L3).
+// `area`/`sub`/`subSub` are AAP codes (for snapshot restore). The L3 select is
+// hidden unless the current L2 code actually has children.
+function _areaPairRow(idx, area, sub, subSub) {
+  const l2Items = area ? _l2ItemsFor(area) : [];
+  const l3Items = sub ? _l3ItemsFor(sub) : [];
+  const showL3 = l3Items.length > 0;
   return `
     <div class="wr-area-row" id="wr-area-row-${idx}">
-      <input class="settings__input wr-area-input" id="wr-area-${idx}" type="text"
-        placeholder="Area" value="${_safeAttr(area)}" list="wr-area-datalist" />
-      <input class="settings__input wr-area-input" id="wr-sub-${idx}" type="text"
-        placeholder="Subcategory" value="${_safeAttr(sub)}" />
+      <select class="settings__select wr-area-input" id="wr-area-${idx}" data-idx="${idx}">
+        ${_l1Options(area)}
+      </select>
+      <select class="settings__select wr-area-input" id="wr-sub-${idx}" data-idx="${idx}">
+        ${avmOptionsHtml(l2Items, sub, '-- Sub-category --')}
+      </select>
+      <select class="settings__select wr-area-input" id="wr-subsub-${idx}" data-idx="${idx}"
+        style="${showL3 ? '' : 'display:none'}">
+        ${avmOptionsHtml(l3Items, subSub, '-- Sub-sub-category --')}
+      </select>
       <button class="wr-area-remove" data-idx="${idx}" title="Remove">×</button>
     </div>`;
 }
@@ -229,10 +322,7 @@ function _buildHTML(unit) {
         Component Areas
         <span class="wr-section__hint">up to 4 pairs</span>
       </div>
-      <datalist id="wr-area-datalist">
-        ${AREA_TEMPLATES.map(a => `<option value="${a}">`).join('')}
-      </datalist>
-      <div id="wr-area-rows">${_areaPairRow(0, '', '')}</div>
+      <div id="wr-area-rows">${_areaPairRow(0, '', '', '')}</div>
       <button id="wr-add-area" class="detail-panel__btn detail-panel__btn--secondary" style="margin-top:6px">+ Add area</button>
     </div>
 
@@ -328,9 +418,13 @@ function _buildHTML(unit) {
 function _snapshotForm() {
   const areaPairs = [];
   for (let i = 0; i < _areaCount; i++) {
-    const aEl = _el('wr-area-' + i), sEl = _el('wr-sub-' + i);
-    if (!aEl && !sEl) continue;
-    areaPairs.push({ area: (aEl && aEl.value) || '', subcategory: (sEl && sEl.value) || '' });
+    const aEl = _el('wr-area-' + i), sEl = _el('wr-sub-' + i), ssEl = _el('wr-subsub-' + i);
+    if (!aEl && !sEl && !ssEl) continue;
+    areaPairs.push({
+      area: (aEl && aEl.value) || '',
+      subcategory: (sEl && sEl.value) || '',
+      subSubcategory: (ssEl && ssEl.value) || '',
+    });
   }
   const condEl = document.querySelector('input[name="wr-condition"]:checked');
   return {
@@ -364,9 +458,10 @@ function _applyFormSnapshot(s) {
   const rowsContainer = _el('wr-area-rows');
   // Rebuild area rows to match the snapshot's count exactly.
   if (rowsContainer) {
-    rowsContainer.innerHTML = (s.areaPairs.length ? s.areaPairs : [{ area: '', subcategory: '' }])
-      .map((p, i) => _areaPairRow(i, p.area, p.subcategory)).join('');
+    rowsContainer.innerHTML = (s.areaPairs.length ? s.areaPairs : [{ area: '', subcategory: '', subSubcategory: '' }])
+      .map((p, i) => _areaPairRow(i, p.area, p.subcategory, p.subSubcategory)).join('');
     _areaCount = Math.max(1, s.areaPairs.length);
+    _wireAreaCascade();
   }
   const set = (id, v) => { const el = _el(id); if (el) el.value = v; };
   set('wr-title', s.title); set('wr-issue', s.issue); set('wr-vendor', s.vendor);
@@ -483,15 +578,21 @@ function _switchTab(key) {
 
 // ── Payload collector ─────────────────────────────────────────────────────
 function _collectPayload() {
-  const areaPairs = [];
+  // Read the three cascading selects per row (values are AAP codes; TOW is a
+  // passthrough). buildAreaPairsPayload drops empty rows + normalizes the shape.
+  const rawRows = [];
   for (let i = 0; i < 4; i++) {
     const aEl = _el('wr-area-' + i);
     const sEl = _el('wr-sub-'  + i);
-    if (!aEl && !sEl) continue;
-    const area = (aEl && aEl.value || '').trim();
-    const sub  = (sEl && sEl.value || '').trim();
-    if (area || sub) areaPairs.push({ area, subcategory: sub });
+    const ssEl = _el('wr-subsub-' + i);
+    if (!aEl && !sEl && !ssEl) continue;
+    rawRows.push({
+      area: (aEl && aEl.value) || '',
+      subcategory: (sEl && sEl.value) || '',
+      subSubcategory: (ssEl && ssEl.value) || '',
+    });
   }
+  const areaPairs = buildAreaPairsPayload(rawRows);
 
   // FEATURE (2026-07-23): attachments are now a list (_attachments module
   // state, populated by auto-attach, the manual Uptake-screenshot button,
@@ -876,17 +977,111 @@ function _wireAreaRows() {
     if (rows.querySelectorAll('.wr-area-row').length > 1) {
       row.remove();
     } else {
-      // Last row — clear values rather than remove
-      const a = _el('wr-area-' + idx); if (a) a.value = '';
-      const s = _el('wr-sub-'  + idx); if (s) s.value = '';
+      // Last row — reset the selects rather than remove the row.
+      const a = _el('wr-area-' + idx); if (a) a.selectedIndex = 0;
+      _repopulateL2(idx);
     }
   });
 
   _el('wr-add-area').addEventListener('click', () => {
     const current = rows.querySelectorAll('.wr-area-row').length;
     if (current >= 4) { toast.show('warn', 'Maximum 4 area pairs', 2000); return; }
-    rows.insertAdjacentHTML('beforeend', _areaPairRow(_areaCount++, '', ''));
+    rows.insertAdjacentHTML('beforeend', _areaPairRow(_areaCount++, '', '', ''));
   });
+
+  _wireAreaCascade();
+}
+
+// Delegated cascade handler for the 3 category selects. Picking L1 repopulates
+// L2 (and resets/hides L3); picking L2 repopulates + SHOWS L3 only when that L2
+// has children. Idempotent — safe to call again after rows are rebuilt (it
+// clears its own prior listener via a dataset flag on the container).
+function _wireAreaCascade() {
+  const rows = _el('wr-area-rows');
+  if (!rows || rows.dataset.cascadeWired === '1') return;
+  rows.dataset.cascadeWired = '1';
+  rows.addEventListener('change', (e) => {
+    const sel = e.target;
+    if (!sel || sel.tagName !== 'SELECT') return;
+    const idx = parseInt(sel.dataset.idx, 10);
+    if (Number.isNaN(idx)) return;
+    if (sel.id === 'wr-area-' + idx) {
+      _repopulateL2(idx);
+      _syncTowWrap();
+    } else if (sel.id === 'wr-sub-' + idx) {
+      _repopulateL3(idx);
+    }
+  });
+}
+
+// Repopulate row `idx`'s L2 select from the chosen L1 code, then reset L3.
+function _repopulateL2(idx) {
+  const aEl = _el('wr-area-' + idx);
+  const sEl = _el('wr-sub-' + idx);
+  if (!sEl) return;
+  const items = aEl ? _l2ItemsFor(aEl.value) : [];
+  sEl.innerHTML = avmOptionsHtml(items, '', '-- Sub-category --');
+  _repopulateL3(idx);
+}
+
+// Repopulate + show/hide row `idx`'s L3 select from the chosen L2 code. Hidden
+// (and emptied) when the L2 has no children.
+function _repopulateL3(idx) {
+  const sEl = _el('wr-sub-' + idx);
+  const ssEl = _el('wr-subsub-' + idx);
+  if (!ssEl) return;
+  const items = sEl ? _l3ItemsFor(sEl.value) : [];
+  if (items.length) {
+    ssEl.innerHTML = avmOptionsHtml(items, '', '-- Sub-sub-category --');
+    ssEl.style.display = '';
+  } else {
+    ssEl.innerHTML = avmOptionsHtml([], '', '-- Sub-sub-category --');
+    ssEl.style.display = 'none';
+  }
+}
+
+// Resolve an AI-provided area/sub (which may be a display name OR a code) to a
+// matching option CODE in `items`. Case-insensitive match on code or
+// displayName. Returns '' when no match. Keeps AI Fill working now that the
+// selects are code-valued while the AI prompt still speaks in display text.
+function _resolveAvmCode(items, value) {
+  const v = String(value || '').trim();
+  if (!v) return '';
+  const vl = v.toLowerCase();
+  const hit = (items || []).find((it) =>
+    String(it.code || '').toLowerCase() === vl ||
+    String(it.displayName || '').toLowerCase() === vl);
+  return hit ? String(hit.code) : '';
+}
+
+// Apply an AI-provided {area, subcategory} (display text or codes) to row `idx`:
+// resolve L1, repopulate + resolve L2, repopulate + show L3 if present. TOW is a
+// passthrough (its synthetic code IS 'TOW' and its L2 values are the reasons).
+function _applyAiAreaToRow(idx, area, subcategory) {
+  const aEl = _el('wr-area-' + idx);
+  const sEl = _el('wr-sub-' + idx);
+  if (!aEl) return;
+  // L1: TOW passes straight through; otherwise resolve against the live L1 list.
+  const l1Items = (_avmTree && Array.isArray(_avmTree.l1)) ? _avmTree.l1.concat([{ code: TOW_L1_CODE, displayName: 'TOW' }]) : [{ code: TOW_L1_CODE, displayName: 'TOW' }];
+  const l1code = String(area).trim().toUpperCase() === TOW_L1_CODE ? TOW_L1_CODE : _resolveAvmCode(l1Items, area);
+  aEl.value = l1code;
+  _repopulateL2(idx);
+  if (!sEl) return;
+  const l2code = _resolveAvmCode(_l2ItemsFor(l1code), subcategory);
+  sEl.value = l2code;
+  _repopulateL3(idx);
+}
+
+// Show/hide the Tow Destination section based on whether any row's L1 is TOW.
+function _syncTowWrap() {
+  const wrap = _el('wr-tow-wrap');
+  if (!wrap) return;
+  let isTow = false;
+  for (let i = 0; i < 4; i++) {
+    const aEl = _el('wr-area-' + i);
+    if (aEl && String(aEl.value) === TOW_L1_CODE) { isTow = true; break; }
+  }
+  wrap.style.display = isTow ? '' : 'none';
 }
 
 // ── Wire: urgency ─────────────────────────────────────────────────────────
@@ -1311,6 +1506,8 @@ function _close() {
   _copyFromWrId = null;
   _towPlan   = null;
   _wrTabState = null;
+  _avmTree   = null;
+  // _vendorList is intentionally kept (6h-cached, vendor set is unit-agnostic).
 }
 
 
@@ -1402,18 +1599,11 @@ async function _wireTow() {
     _el('wr-tow-from-zip').value = loc.zip || '';
   });
 
-  // Show/hide tow section based on area input
-  const checkTow = () => {
-    const areaEl = _el('wr-area-0');
-    const isTow = areaEl && areaEl.value.toUpperCase() === 'TOW';
-    const wrap = _el('wr-tow-wrap');
-    if (wrap) wrap.style.display = isTow ? '' : 'none';
-  };
-  const areaEl = _el('wr-area-0');
-  if (areaEl) {
-    areaEl.addEventListener('input', checkTow);
-    areaEl.addEventListener('change', checkTow);
-  }
+  // Show/hide the tow section when a row's Category is TOW. The area rows are
+  // now cascading <select>s rebuilt on snapshot restore, so this is driven by
+  // the delegated cascade handler (_syncTowWrap) rather than a per-element
+  // listener that would be lost on rebuild.
+  _syncTowWrap();
 
   // Auto-fill pickup from unit domicile
   const unit = _unit || {};
@@ -1590,8 +1780,8 @@ async function _runAIAssist() {
     // stale/guessed values behind.
     const pairs = ai.areaPairs || (ai.area ? [{ area: ai.area, subcategory: ai.subcategory }] : []);
     if (!pairs.length) {
-      const a0 = _el('wr-area-0'); if (a0) a0.value = '';
-      const s0 = _el('wr-sub-0');  if (s0) s0.value = '';
+      const a0 = _el('wr-area-0'); if (a0) a0.selectedIndex = 0;
+      _repopulateL2(0); // resets L2 + hides/empties L3
     }
     const rowsContainer = _el('wr-area-rows');
     pairs.forEach((pair, i) => {
@@ -1599,12 +1789,12 @@ async function _runAIAssist() {
         // Add new row if needed
         const existing = _el('wr-area-' + i);
         if (!existing) {
-          rowsContainer.insertAdjacentHTML('beforeend', _areaPairRow(_areaCount++, '', ''));
+          rowsContainer.insertAdjacentHTML('beforeend', _areaPairRow(_areaCount++, '', '', ''));
         }
       }
-      const aEl = _el('wr-area-' + i);
-      const sEl = _el('wr-sub-' + i);
-      if (aEl) aEl.value = pair.area || '';
+      // AI returns display text; resolve it to the live tree's codes and drive
+      // the cascading selects (L1 -> L2 -> L3).
+      _applyAiAreaToRow(i, pair.area || '', pair.subcategory || '');
       // Show tow section if area is TOW
       if (i === 0 && (pair.area || '').toUpperCase() === 'TOW') {
         const towWrap = _el('wr-tow-wrap');
@@ -1614,7 +1804,6 @@ async function _runAIAssist() {
         _el('wr-urgency-reason-wrap').style.display = '';
         _el('wr-urgency-reason').value = 'DEA - Asset Shortage';
       }
-      if (sEl) sEl.value = pair.subcategory || '';
     });
     if (ai.urgent) {
       _el('wr-urgent').checked = true;
@@ -1729,10 +1918,97 @@ async function _wireAutoUptake() {
   } catch(e) { /* silent -- manual attach is always still available */ }
 }
 
+// ── Live lookups: vendors + AVM category tree ──────────────────────────────
+// Fetched once when the modal opens (the + Create WR / AAP work request button
+// in the unit-detail Actions tab). Vendors populate the Vendor dropdown
+// (filtered to wrEnabled), the avmTree drives the cascading category selects.
+// Both are cached on the module so cascading is instant. Everything falls back
+// gracefully when offline (hardcoded VENDORS; empty tree => just placeholders).
+
+// Populate the Vendor <select> LIVE, filtered to wrEnabled vendors. Preserves
+// any currently selected value. Falls back to the hardcoded VENDORS list when
+// the live call fails or returns nothing, so the modal is never empty offline.
+function _renderVendorOptions(selectedValue) {
+  const sel = _el('wr-vendor');
+  if (!sel) return;
+  const keep = selectedValue != null ? selectedValue : sel.value;
+  let names;
+  const live = (_vendorList || []).filter((v) => v && v.wrEnabled).map((v) => v.vendorName).filter(Boolean);
+  // De-dupe while preserving order.
+  const seen = new Set();
+  const liveUnique = live.filter((n) => { const k = n.toUpperCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+  names = liveUnique.length ? liveUnique : VENDORS;
+  const opts = ['<option value="">-- Select vendor --</option>']
+    .concat(names.map((v) => '<option value="' + _safeAttr(v) + '">' + _safe(v) + '</option>'));
+  sel.innerHTML = opts.join('');
+  // Restore the prior selection if it still exists; else leave on placeholder.
+  if (keep && Array.from(sel.options).some((o) => o.value === keep)) sel.value = keep;
+}
+
+// Fetch vendors + avmTree for this unit and render the live dropdowns. Non-
+// blocking: the modal opens immediately with fallbacks, this upgrades it when
+// the data arrives. Shows a brief loading hint on the vendor select.
+async function _loadLiveLookups(unit) {
+  const equipmentType = avmTypeForUnit(unit);
+  const vendorSel = _el('wr-vendor');
+  const prevVendor = vendorSel ? vendorSel.value : '';
+  if (vendorSel) {
+    const loading = document.createElement('option');
+    loading.value = ''; loading.textContent = 'Loading vendors…'; loading.disabled = true;
+    // Non-destructive hint: prepend without wiping the fallback list.
+    vendorSel.insertBefore(loading, vendorSel.firstChild);
+    vendorSel.selectedIndex = 0;
+  }
+
+  // Vendors.
+  try {
+    if (window.aapApi && typeof window.aapApi.vendors === 'function') {
+      const res = await window.aapApi.vendors();
+      if (res && res.ok && Array.isArray(res.vendors) && res.vendors.length) {
+        _vendorList = res.vendors;
+      }
+    }
+  } catch (_) { /* keep fallback */ }
+  _renderVendorOptions(prevVendor);
+
+  // AVM category tree (drives the cascading selects).
+  try {
+    if (window.aapApi && typeof window.aapApi.avmTree === 'function') {
+      const res = await window.aapApi.avmTree(equipmentType);
+      if (res && res.ok && res.tree) _avmTree = res.tree;
+    }
+  } catch (_) { /* keep empty tree (selects show placeholders + TOW only) */ }
+
+  // Rebuild the area rows now the tree is available, preserving current picks.
+  _refreshAreaRowsFromTree();
+}
+
+// Re-render all area rows from the (now-loaded) tree, preserving each row's
+// current L1/L2/L3 selection so a user who picked before the tree arrived
+// keeps their choice. Called after the live tree loads.
+function _refreshAreaRowsFromTree() {
+  const rows = _el('wr-area-rows');
+  if (!rows) return;
+  const current = [];
+  for (let i = 0; i < _areaCount; i++) {
+    const aEl = _el('wr-area-' + i), sEl = _el('wr-sub-' + i), ssEl = _el('wr-subsub-' + i);
+    if (!aEl && !sEl && !ssEl) continue;
+    current.push({ area: (aEl && aEl.value) || '', subcategory: (sEl && sEl.value) || '', subSubcategory: (ssEl && ssEl.value) || '' });
+  }
+  const list = current.length ? current : [{ area: '', subcategory: '', subSubcategory: '' }];
+  rows.innerHTML = list.map((p, i) => _areaPairRow(i, p.area, p.subcategory, p.subSubcategory)).join('');
+  _areaCount = Math.max(1, list.length);
+  _wireAreaCascade();
+  _syncTowWrap();
+}
+
 export function open(unit) {
   if (_overlay) _close();
   _unit      = unit;
   _areaCount = 1;
+  _avmTree   = null;
+  // Keep the vendor list across opens (6h-cached backend anyway); clear only
+  // the tree since equipmentType can differ per unit.
 
   _overlay           = document.createElement('div');
   _overlay.id        = 'wr-modal-overlay';
@@ -1756,13 +2032,20 @@ export function open(unit) {
   _wireAutoUptake();
   _wireTow();
 
-  // Pre-select vendor from relay data if available
+  // Pre-select vendor from relay data if available (against the fallback list;
+  // _loadLiveLookups below preserves this selection when the live list lands).
   const relayVendor = (unit.relayVendor || unit.vendor || '').toUpperCase();
   if (relayVendor) {
     const match = Array.from(_el('wr-vendor').options)
       .find(o => o.value.toUpperCase().includes(relayVendor));
     if (match) _el('wr-vendor').value = match.value;
   }
+
+  // Auto-populate vendors + category tree LIVE from AAP as soon as the modal
+  // opens. Non-blocking — the modal is usable immediately with fallbacks and
+  // upgrades in place when the data arrives. Runs after the relay pre-select so
+  // it captures + preserves that selection.
+  _loadLiveLookups(unit).catch(() => {});
 
   // Pre-fill contact from user profile
   const _profile = JSON.parse(localStorage.getItem('fleet_user_profile') || '{}');

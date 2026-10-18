@@ -193,6 +193,8 @@ expose('aapApi', {
   service:      (id)   => ipcRenderer.invoke('aap-api:service', { serviceId: id }),
   asset:        (aaid) => ipcRenderer.invoke('aap-api:asset', { aaid }),
   avmCodes:     ()     => ipcRenderer.invoke('aap-api:avm-codes'),
+  vendors:      (opts) => ipcRenderer.invoke('aap-api:vendors', { opts }),
+  avmTree:      (equipmentType, opts) => ipcRenderer.invoke('aap-api:avm-tree', { equipmentType, opts }),
   buildTracker: (opts) => ipcRenderer.invoke('aap-api:build-tracker', opts),
   buildFleet:   (opts) => ipcRenderer.invoke('aap-api:build-fleet', opts),
   refreshUnit:  (unit) => ipcRenderer.invoke('aap-api:refresh-unit', { unit }),

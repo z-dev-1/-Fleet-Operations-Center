@@ -69,6 +69,19 @@ function registerAapApiIPC(ctx) {
     catch (e) { return { ok: false, error: e.message, code: e.code || null }; }
   });
 
+  // WR WIZARD LIVE LOOKUPS (auto-populate vendor + category dropdowns, always
+  // current). Both read-only + cached in the API client.
+  handle('aap-api:vendors', async (_e, payload) => {
+    try { return { ok: true, vendors: await api().getVendorConfigs((payload && payload.opts) || {}) }; }
+    catch (e) { return { ok: false, error: e.message, code: e.code || null }; }
+  });
+  handle('aap-api:avm-tree', async (_e, payload) => {
+    try {
+      const type = (payload && (payload.equipmentType || payload.type)) || 'boxTruck';
+      return { ok: true, equipmentType: type, tree: await api().getAvmTree(type, (payload && payload.opts) || {}) };
+    } catch (e) { return { ok: false, error: e.message, code: e.code || null }; }
+  });
+
   // FULL PIPELINE — fetch all open work orders + index all assets, join by
   // aaid, return mapped tracker rows. opts: { searchRequest, maxPages }.
   handle('aap-api:build-tracker', async (_e, payload) => {

@@ -149,8 +149,13 @@ describe('Stage 15 — promotion readiness barrier (no production until caught u
     // Immediately after _setLease in shared mode: LEADER_SYNCING, not ready.
     const mid = cluster.getStatus();
     expect(['LEADER_SYNCING', 'PRODUCTION_READY']).toContain(mid.leadershipState);
-    // Let the async catch-up finish.
-    await tick(); await tick();
+    // Let the async catch-up finish. Poll instead of a fixed wait so this is
+    // not flaky under full-suite load (catch-up can take >60ms when the event
+    // loop is busy).
+    for (let i = 0; i < 100; i++) {
+      if (cluster.getStatus().leadershipState === 'PRODUCTION_READY') break;
+      await tick();
+    }
     const after = cluster.getStatus();
     expect(after.leadershipState).toBe('PRODUCTION_READY');
     expect(after.productionReady).toBe(true);

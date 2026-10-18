@@ -285,6 +285,88 @@ function getUserDetails() {
   return apiGet('/api/v1/user/details');
 }
 
+// ── WR WIZARD LIVE LOOKUPS (vendors + category tree) ─────────────────────────
+// These power the Create-WR modal's auto-populating dropdowns so vendors +
+// categories + sub-categories always match AAP (self-updating). Cached briefly
+// so opening the wizard repeatedly is instant; each returns the live data on a
+// cache miss. All read-only (GET).
+
+const _wrLookupCache = { vendors: null, avm: {} }; // avm keyed by equipmentType
+const _WR_CACHE_MS = 6 * 60 * 60 * 1000; // refresh at most every 6h
+
+// Map an asset's assetType/bodyType to the avmCodes path token. Confirmed:
+// box trucks use 'boxTruck'. Tractors use 'tractor' (day-cab + sleeper share
+// the tractor code set). Falls back to 'boxTruck' when unknown so the wizard
+// always has a usable list.
+function avmTypeFor(assetOrType) {
+  const a = assetOrType || {};
+  const hay = (typeof a === 'string' ? a : [a.assetType, a.bodyType, a.assetDefinitionKey, (a.attributesText && a.attributesText.bodyType)].filter(Boolean).join(' ')).toLowerCase();
+  if (/box/.test(hay)) return 'boxTruck';
+  if (/tractor|sleeper|day\s*cab|dayCab/.test(hay)) return 'tractor';
+  if (/box/.test(hay)) return 'boxTruck';
+  return 'boxTruck';
+}
+
+/**
+ * getVendorConfigs(opts) -> array of vendor configs from AAP (cached).
+ * Each: { vendorId, vendorName, uuid, suppliers[], supplierRequired,
+ *         enabledFeatures[], wrEnabled }. The live vendor list for the WR modal.
+ */
+async function getVendorConfigs(opts = {}) {
+  const now = Date.now();
+  if (!opts.force && _wrLookupCache.vendors && (now - _wrLookupCache.vendors.at) < _WR_CACHE_MS) {
+    return _wrLookupCache.vendors.list;
+  }
+  const raw = await apiGet('/api/v1/vendorConfigsByFilter?tenant=middleMile');
+  const arr = Array.isArray(raw) ? raw : (raw && raw.vendorConfigs) || [];
+  const list = arr.map((v) => ({
+    vendorId: v.vendorId,
+    vendorName: v.vendorName || v.vendorId,
+    uuid: v.uuid || null,
+    suppliers: Array.isArray(v.suppliers) ? v.suppliers : [],
+    supplierRequired: !!v.supplierRequired,
+    enabledFeatures: Array.isArray(v.enabledFeatures) ? v.enabledFeatures : [],
+    // Only vendors enabled for unplanned WR creation should appear in the WR
+    // dropdown (skill/eligibility at the vendor level).
+    wrEnabled: (Array.isArray(v.enabledFeatures) ? v.enabledFeatures : []).some((f) => /WORK_REQUEST_CREATION|UNPLANNED/.test(String(f))),
+  }));
+  _wrLookupCache.vendors = { list, at: now };
+  return list;
+}
+
+/**
+ * getAvmTree(equipmentType, opts) -> {
+ *   l1: [{code,displayName}],
+ *   l2ByParent: { L1CODE: [{code,displayName}] },
+ *   l3ByParent: { L2CODE: [{code,displayName}] },
+ *   reasons: [{code,displayName}]
+ * }  (cached per equipmentType). Powers cascading category -> sub-category ->
+ * sub-sub-category -> reason-for-repair dropdowns, always current.
+ */
+async function getAvmTree(equipmentType, opts = {}) {
+  const type = equipmentType || 'boxTruck';
+  const now = Date.now();
+  const cached = _wrLookupCache.avm[type];
+  if (!opts.force && cached && (now - cached.at) < _WR_CACHE_MS) return cached.tree;
+
+  const raw = await apiGet('/api/v1/avmCodes/' + encodeURIComponent(type));
+  const l1 = (raw && raw.l1Codes || []).map((c) => ({ code: c.code, displayName: c.displayName || c.code }));
+  const l2ByParent = {};
+  (raw && raw.l2Codes || []).forEach((c) => {
+    const item = { code: c.code, displayName: c.displayName || c.code };
+    (Array.isArray(c.l1Parents) ? c.l1Parents : []).forEach((p) => { (l2ByParent[p] = l2ByParent[p] || []).push(item); });
+  });
+  const l3ByParent = {};
+  (raw && raw.l3Codes || []).forEach((c) => {
+    const item = { code: c.code, displayName: c.displayName || c.code };
+    (Array.isArray(c.l2Parents) ? c.l2Parents : []).forEach((p) => { (l3ByParent[p] = l3ByParent[p] || []).push(item); });
+  });
+  const reasons = (raw && raw.reasonsForRepair || []).map((r) => (typeof r === 'string' ? { code: r, displayName: r } : { code: r.code, displayName: r.displayName || r.code }));
+  const tree = { l1, l2ByParent, l3ByParent, reasons };
+  _wrLookupCache.avm[type] = { tree, at: now };
+  return tree;
+}
+
 // Pull every page of a search (100/page). Returns the concatenated list of
 // service aggregates. Caps at maxPages to stay bounded. The exact list/field
 // names depend on the response shape — we read common envelope keys and the
@@ -1096,9 +1178,14 @@ function _buildWoBody(opts, assetFull, vendorCode) {
   const needByIso = new Date(now + 24 * 3600 * 1000).toISOString();
   const aaid = opts.aaid || _aaidFromUrl(opts.assetUrl);
 
+  // areaPairs values are now AAP AVM CODES (L1/L2/L3) from the WR modal's live
+  // cascading dropdowns — level1=area, level2=subcategory, level3=subSubcategory
+  // (L3 is '' for the common case; only categories like Tires carry an L3).
+  // TOW is a passthrough (not an avmCode) and still flows straight through as
+  // level1='TOW', level2=<tow reason>.
   const suggestedItems = (opts.areaPairs || [])
     .filter(p => p && (p.area || p.subcategory))
-    .map(p => ({ level1: p.area || '', level2: p.subcategory || '', level3: '' }));
+    .map(p => ({ level1: p.area || '', level2: p.subcategory || '', level3: p.subSubcategory || '' }));
 
   const comments = [];
   if (opts.comments) comments.push(String(opts.comments));
@@ -1232,6 +1319,9 @@ module.exports = {
   getDvirs,
   getAvmCodes,
   getUserDetails,
+  getVendorConfigs,
+  getAvmTree,
+  avmTypeFor,
   searchAllPages,
   findOpenWO,
   buildLongDwellSources,

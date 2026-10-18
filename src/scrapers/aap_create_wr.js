@@ -274,11 +274,15 @@ async function createWorkRequest(payload, unit, log) {
     log('[CreateWR] Resolved supplierId for "' + vendorName + '": ' + supplierId);
   }
 
-  // Build suggestedItems from areaPairs
+  // Build suggestedItems from areaPairs. Values are now AAP AVM CODES (the WR
+  // modal's live cascading dropdowns emit codes, not display text): area=L1
+  // code, subcategory=L2 code, subSubcategory=L3 code ('' when the L2 has no
+  // children — the common case). TOW stays a passthrough (area:'TOW',
+  // subcategory:<tow reason>) — it is NOT an avmCode and flows straight through.
   const suggestedItems = (payload.areaPairs || []).map(pair => ({
     level1: pair.area || '',
     level2: pair.subcategory || '',
-    level3: ''
+    level3: pair.subSubcategory || ''
   }));
 
   // Build comments array
