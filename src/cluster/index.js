@@ -149,6 +149,20 @@ function _resolveCoordUrl() {
   return null;
 }
 
+// The shared-coordinator bearer token. Resolved from env FLEET_COORD_TOKEN or
+// settings.cluster.coordToken so the laptop app can be configured entirely via
+// settings (no env var needed on the GUI launcher). The DevSpace standby sets
+// it via env. Returns undefined when not configured (open coordinator).
+function _resolveCoordToken() {
+  if (process.env.FLEET_COORD_TOKEN) return process.env.FLEET_COORD_TOKEN;
+  try {
+    const store = require('../store');
+    const c = (store.load('settings', {}) || {}).cluster || {};
+    if (c.coordToken && typeof c.coordToken === 'string') return c.coordToken;
+  } catch (_) {}
+  return undefined;
+}
+
 /**
  * init(opts) — wire the facade. SAFE to call unconditionally at bootstrap.
  * When the flag is OFF this only sets identity and leaves the gate in its
@@ -187,7 +201,7 @@ function init(opts) {
     // confirmed leadership. We do NOT substitute a local store.
     _state.sharedCoordConfigured = true;
     try {
-      _state.coord = new HttpCoordStore({ baseUrl: coordUrl, token: opts.coordToken, now: opts.now });
+      _state.coord = new HttpCoordStore({ baseUrl: coordUrl, token: opts.coordToken || _resolveCoordToken(), now: opts.now });
       _state.coordKind = 'http';
       logger.info('[cluster] using SHARED HTTP coordinator at ' + coordUrl + ' (NO local fallback)');
     } catch (e) {
@@ -370,6 +384,7 @@ function _onLeaseChange(evt) {
     _state.leadershipState = 'LEADER_SYNCING';
     _state.productionReady = false;
     logger.info('[cluster] PROMOTED → LEADER_SYNCING (production blocked until caught up) token=' + _state.fencingToken);
+    _seedFleetFilter();   // Stage 16: publish our desktop fleet scope as leader
     _runPromotionCatchup().catch((e) => logger.warn('[cluster] promotion catch-up error: ' + (e && e.message)));
   }
   // On DEMOTE / loss: immediately fail closed — no production, back to FOLLOWER.
@@ -387,6 +402,22 @@ function _onLeaseChange(evt) {
     });
     if (_state.failoverHistory.length > FAILOVER_HISTORY_CAP) _state.failoverHistory.length = FAILOVER_HISTORY_CAP;
   }
+}
+
+// Stage 16 — publish THIS leader's fleet domicile filter (from settings.
+// domiciles) into the shared clusterFleetFilter key, so a promoted standby
+// pulls/shows the SAME fleet scope as the desktop app. Called when we become
+// leader. Only the filter list crosses machines — device settings stay local.
+// The store write-hook (Stage 9) auto-publishes the write because we're leader.
+function _seedFleetFilter() {
+  try {
+    const store = require('../store');
+    const s = store.load('settings', {}) || {};
+    if (!Array.isArray(s.domiciles) || !s.domiciles.length) return;  // nothing to seed (headless box)
+    const cur = store.load('clusterFleetFilter', null);
+    if (cur && JSON.stringify(cur.domiciles) === JSON.stringify(s.domiciles)) return;  // unchanged
+    store.save('clusterFleetFilter', { domiciles: s.domiciles, from: _state.instanceId, at: new Date().toISOString() });
+  } catch (_) {}
 }
 
 // Item 2 — drain the shared event log until the local sync cursor reaches the
@@ -546,6 +577,7 @@ function _setLease(token, expiresAt) {
   // drain). With a SHARED coordinator, promotion goes through _onLeaseChange →
   // _runPromotionCatchup instead, which is the barrier that matters.
   if (token != null) {
+    _seedFleetFilter();   // Stage 16: publish our desktop fleet scope as leader
     if (_state.sharedCoordConfigured) {
       // Shared mode: honor the barrier — only ready after catch-up. Kick it.
       if (!_state.productionReady) { _state.leadershipState = 'LEADER_SYNCING'; _runPromotionCatchup().catch(() => {}); }

@@ -66,6 +66,11 @@ const SHARED_KEYS = [
   'slackDMReplies', 'slackChannelReplies',
   'slackDMThreadReplyCount', 'slackMentionThreads',
   'slackJustMePendingConfirm', 'slackInboundLifecycle',
+  // Fleet view scope (Stage 16) — the leader's domicile filter list, so a
+  // promoted standby pulls/shows the SAME fleet scope as the laptop desktop app
+  // (not the headless host's default). Device credentials/settings stay local;
+  // ONLY this filter list crosses, via a dedicated shared key.
+  'clusterFleetFilter',
 ];
 const SHARED_SET = new Set(SHARED_KEYS);
 

@@ -265,6 +265,10 @@ const REGISTRY = {
   //   { bySig: { '<sig>': { analysis, at } },
   //     summaries: { '<equipmentId>': { summary, sigKey, at } } }.
   breakdownAnalysis:       () => path.join(P.dataDir, 'breakdown_analysis.json'),
+  // Stage 16: the leader's fleet domicile-filter list, shared via the cluster
+  // sync engine so a promoted standby pulls/shows the SAME fleet scope as the
+  // desktop app (device-specific settings stay local; only this list crosses).
+  clusterFleetFilter:      () => path.join(P.dataDir, 'cluster_fleet_filter.json'),
 };
 
 function _resolvePath(name) {

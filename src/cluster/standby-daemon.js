@@ -106,7 +106,16 @@ async function _tickFleet() {
     const s = store.load('settings', {}) || {};
     if (s.dataSource === 'scrape') return;     // honor scrape-mode opt-out
     const api = require('../scrapers/aap_api');
-    const ds = await api.buildFleetDataset({ withComments: false });
+    // Stage 16: use the SYNCED fleet filter (the leader/desktop app's domicile
+    // list) so the standby pulls the SAME fleet scope as the desktop, not this
+    // headless host's default. Falls back to local settings.domiciles if the
+    // synced filter hasn't arrived yet.
+    let domiciles;
+    try {
+      const f = store.load('clusterFleetFilter', null);
+      if (f && Array.isArray(f.domiciles) && f.domiciles.length) domiciles = f.domiciles;
+    } catch (_) {}
+    const ds = await api.buildFleetDataset(domiciles ? { withComments: false, domiciles } : { withComments: false });
     let rows = ds.rows || [];
     try { const uu = (store.load('uptakeHash', {}).units) || []; if (uu.length) rows = require('../scrapers/uptake').mergeUptakeIntoRows(rows, uu); } catch (_) {}
     try { const ns = store.load('notesStore', {}); rows = require('../scrapers/relay').mergeRelayIntoRows(rows, {}, ns); } catch (_) {}
