@@ -53,7 +53,7 @@ describe('Stage 13 — leader publishes Slack config; standby does not', () => {
 
   it('a LEADER auto-publishes a slackDMAutoReplyConfig write to the event log', async () => {
     cluster.init({ enabled: true, mode: 'ACTIVE', force: true });
-    cluster.start({ setTimer: () => 0, clearTimer: () => {}, noSyncTimer: true });
+    cluster.start({ setTimer: () => 0, clearTimer: () => {}, noSyncTimer: true, publishDebounceMs: 5 });
     const coord = cluster.getCoord();
     const a = await coord.tryAcquireLeadership(cluster.getInstanceId(), 'ACTIVE', 30000);
     cluster._setLease(a.record.fencingToken, a.record.expiresAt);

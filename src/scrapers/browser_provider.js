@@ -104,29 +104,54 @@ async function _openElectron(url, opts) {
   });
 
   const loadMs = (opts && opts.loadMs) || 45000;
+  // AAP's HEALTHY auth flow for a VALID session redirects THROUGH midway-auth's
+  // OIDC handshake before landing back on AAP:
+  //   aap-na.../v2/page/...  →  midway-auth.../SSO/redirect?...redirect_uri=<aap>  →  back to aap-na...
+  // So we must NOT declare the session invalid just because an intermediate
+  // did-finish-load fired on a midway-auth URL. Judge ONLY by where navigation
+  // SETTLES: debounce after the last did-finish-load, then check the final URL.
+  // (This mirrors auth.js probeSession's settle logic — the Stage-10 refactor
+  // originally checked the FIRST load event, which wrongly reported a valid
+  // session as expired mid-handshake. Regression fix.)
+  const isAAPHost = (u) => { try { return /(^|\.)aap-na\.corp\.amazon\.com$/i.test(new URL(u).hostname); } catch (_) { return false; } };
   const result = await new Promise((resolve) => {
     let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    const t = setTimeout(() => finish({ ok: false, error: 'timeout' }), loadMs);
-    win.webContents.once('did-finish-load', () => { clearTimeout(t); finish({ ok: true }); });
+    let settleTimer = null;
+    const finish = (v) => { if (!done) { done = true; clearTimeout(hardT); clearTimeout(settleTimer); resolve(v); } };
+    const hardT = setTimeout(() => finish({ ok: false, error: 'timeout' }), loadMs);
+    const scheduleSettle = () => {
+      clearTimeout(settleTimer);
+      // Whatever we're on when navigation goes quiet for 2.5s is the FINAL
+      // landing. Handshake hops keep navigating and keep resetting this.
+      settleTimer = setTimeout(() => {
+        let cur = ''; try { cur = win.webContents.getURL(); } catch (_) {}
+        if (isAAPHost(cur)) finish({ ok: true, url: cur });
+        else if (_isSSO(cur)) finish({ ok: false, error: 'auth', url: cur });
+        else finish({ ok: isAAPHost(cur), url: cur });
+      }, 2500);
+    };
+    win.webContents.on('did-finish-load', () => {
+      let cur = ''; try { cur = win.webContents.getURL(); } catch (_) {}
+      if (isAAPHost(cur)) { finish({ ok: true, url: cur }); return; }  // landed on AAP → done
+      scheduleSettle();                                               // else wait for settle
+    });
+    win.webContents.on('did-navigate', () => scheduleSettle());
     win.webContents.once('did-fail-load', (_e, code, desc) => {
       if (code === -3) return;               // aborted sub-resource; ignore
-      clearTimeout(t); finish({ ok: false, error: 'load:' + code + ':' + desc });
+      scheduleSettle();                       // transient fail mid-handshake — let it settle
     });
     win.loadURL(url);
   });
 
+  if (!result.ok && result.error === 'auth') {
+    try { if (!win.isDestroyed()) win.destroy(); } catch (_) {}
+    throw Object.assign(new Error('AAP session expired (Midway/AEA) — re-authenticate'),
+      { code: 'MIDWAY_SESSION_INVALID' });
+  }
   if (!result.ok) {
     try { if (!win.isDestroyed()) win.destroy(); } catch (_) {}
     throw Object.assign(new Error('AAP page failed to load: ' + result.error),
       { code: 'AAP_PAGE_LOAD_FAILED' });
-  }
-  let cur = '';
-  try { cur = win.webContents.getURL(); } catch (_) {}
-  if (_isSSO(cur)) {
-    try { if (!win.isDestroyed()) win.destroy(); } catch (_) {}
-    throw Object.assign(new Error('AAP session expired (Midway/AEA) — re-authenticate'),
-      { code: 'MIDWAY_SESSION_INVALID' });
   }
 
   return {

@@ -91,6 +91,8 @@ function _freshState() {
     leadershipState: 'FOLLOWER',  // FOLLOWER | LEADER_SYNCING | PRODUCTION_READY
     productionReady: false,   // item 2: gates mayRunProduction() when leader
     syncGap: false,           // item 6: cursor fell behind the retained window
+    _dirtyKeys: null,         // coalesced-publish dirty set (Stage 16 fix)
+    _publishTimer: null,      // debounce timer handle for coalesced publish
   };
 }
 const FAILOVER_HISTORY_CAP = 50;
@@ -295,12 +297,37 @@ function start(opts) {
   try {
     const store = opts.store || require('../store');
     if (typeof store.setWriteHook === 'function') {
+      // COALESCED publish (Stage 16 fix): high-churn shared keys (e.g.
+      // slackDMAutoReplyConfig — a watermark advances per thread, dozens of
+      // times a second) must NOT fire one coordinator POST per write, or they
+      // flood the coordinator + bloat the event log (observed: 30+ publishes of
+      // one key in <1s). Instead, mark the key dirty and publish the LATEST
+      // state once per debounce window. Only the newest doc matters (sync is
+      // last-writer-wins by version), so coalescing loses nothing.
+      // The debounce uses a REAL timer (not the injected lease setTimer), so it
+      // fires independently of the lease loop. Unref'd so it never holds the
+      // process open. Tests can shrink the window via opts.publishDebounceMs.
+      const PUBLISH_DEBOUNCE_MS = lo.publishDebounceMs != null ? lo.publishDebounceMs : 2000;
+      const setT = (fn, ms) => setTimeout(fn, ms);
+      const flushDirty = () => {
+        _state._publishTimer = null;
+        if (!_state.enabled || !isLeader()) { _state._dirtyKeys && _state._dirtyKeys.clear(); return; }
+        const keys = _state._dirtyKeys ? [..._state._dirtyKeys] : [];
+        if (_state._dirtyKeys) _state._dirtyKeys.clear();
+        for (const k of keys) {
+          Promise.resolve().then(() => publishSharedKey(k)).catch(() => {});
+        }
+      };
       store.setWriteHook((key) => {
         if (_state._applying) return;                 // don't re-publish an applied doc
         if (!_state.enabled || !isLeader()) return;   // only the leader publishes
         if (!isShared(key)) return;                    // only shared-operational keys
-        // Fire-and-forget; publish is best-effort and must not block the write.
-        Promise.resolve().then(() => publishSharedKey(key)).catch(() => {});
+        if (!_state._dirtyKeys) _state._dirtyKeys = new Set();
+        _state._dirtyKeys.add(key);                    // coalesce: newest state wins
+        if (_state._publishTimer == null) {
+          _state._publishTimer = setT(flushDirty, PUBLISH_DEBOUNCE_MS);
+          if (_state._publishTimer && _state._publishTimer.unref) _state._publishTimer.unref();
+        }
       });
     }
   } catch (_) {}
@@ -359,6 +386,8 @@ function start(opts) {
 
 async function stop() {
   if (_state.aeaKeepalive) { try { _state.aeaKeepalive.stop(); } catch (_) {} _state.aeaKeepalive = null; }
+  if (_state._publishTimer != null) { try { (_state._clearSyncTimer || clearTimeout)(_state._publishTimer); } catch (_) {} _state._publishTimer = null; }
+  if (_state._dirtyKeys) { try { _state._dirtyKeys.clear(); } catch (_) {} }
   try { const store = require('../store'); if (store.setWriteHook) store.setWriteHook(null); } catch (_) {}
   if (_state._syncTimer != null && _state._clearSyncTimer) { try { _state._clearSyncTimer(_state._syncTimer); } catch (_) {} }
   _state._syncTimer = null;

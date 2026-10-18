@@ -901,6 +901,66 @@ function startOnlineReauthWatch() {
   return _reauthUnsub;
 }
 
+// ── AEA posture-agent self-heal (Windows) ────────────────────────────────────
+// ROOT CAUSE (observed 2026-10-18): AAP kept rejecting the session even with a
+// valid Midway session, VPN up, and AAP reachable — because the Amazon
+// Enterprise Access posture agent (EnterpriseAccessConsoleApp.exe) had THREE
+// stuck instances all timing out when queried for the AEA JWT
+// ("AEA get_aea_jwt timed out after 2 seconds / AEA JSON is empty"). No amount
+// of silent-refresh / mwinit --refresh-aea helps, because every rung queries
+// the SAME hung agent. The manual fix was: kill the duplicate
+// EnterpriseAccessConsoleApp.exe processes + restart the itacsvc service, after
+// which the agent produced a valid JWT ({"Status":"Success"}).
+//
+// This automates that fix so the app self-heals without the user ever touching
+// Task Manager. Windows-only (the agent only exists there); a no-op elsewhere.
+// Returns true if it attempted a restart (caller then re-probes).
+let _aeaAgentRestartInFlight = false;
+let _lastAeaAgentRestartAt = 0;
+async function restartAeaAgent() {
+  if (process.platform !== 'win32') return false;         // agent is Windows-only
+  if (_aeaAgentRestartInFlight) return false;             // don't stack restarts
+  // Rate-limit: at most once per 2 min, so a flapping agent can't get into a
+  // kill/respawn loop that itself starves the posture query.
+  if (Date.now() - _lastAeaAgentRestartAt < 120000) {
+    logger.info('[AuthManager] AEA agent restart skipped — restarted <2min ago');
+    return false;
+  }
+  _aeaAgentRestartInFlight = true;
+  _lastAeaAgentRestartAt = Date.now();
+  logger.warn('[AuthManager] AEA posture agent appears stuck — restarting EnterpriseAccessConsoleApp + itacsvc (self-heal)');
+  try {
+    const { spawn } = require('child_process');
+    // Kill ALL EnterpriseAccessConsoleApp.exe instances (duplicates are the bug),
+    // then nudge the itacsvc service to respawn a single clean agent. Use
+    // taskkill/powershell via cmd so it works without extra deps. Best-effort:
+    // each step is independent and failures are logged, not fatal.
+    const run = (cmd) => new Promise((resolve) => {
+      try {
+        const c = spawn('cmd.exe', ['/c', cmd], { windowsHide: true, stdio: 'ignore' });
+        const t = setTimeout(() => { try { c.kill(); } catch (_) {} resolve(false); }, 15000);
+        c.on('exit', () => { clearTimeout(t); resolve(true); });
+        c.on('error', () => { clearTimeout(t); resolve(false); });
+      } catch (_) { resolve(false); }
+    });
+    await run('taskkill /F /IM EnterpriseAccessConsoleApp.exe /T');
+    // Restart the host service so a fresh single agent comes up. net stop/start
+    // may need elevation; if it can't, the killed agent is typically auto-
+    // respawned by the service anyway, so this is a best-effort nudge.
+    await run('net stop itacsvc & net start itacsvc');
+    // Give the fresh agent a moment to initialize + attach to the TPM before
+    // anyone queries it for the posture JWT.
+    await new Promise((r) => setTimeout(r, 6000));
+    logger.info('[AuthManager] AEA agent restart complete — fresh agent should now mint the posture JWT');
+    return true;
+  } catch (e) {
+    logger.warn('[AuthManager] AEA agent restart error: ' + e.message);
+    return false;
+  } finally {
+    _aeaAgentRestartInFlight = false;
+  }
+}
+
 // ── Centralized recovery ladder ───────────────────────────────────────────────
 // ONE place every "auth looks broken, what now?" decision routes through, so
 // the escalation policy isn't re-implemented (and divergent) across the 5+
@@ -963,6 +1023,25 @@ async function recoverAuth(reason, opts) {
       logger.info('[AuthManager] recoverAuth — went offline during silent refresh; deferring (no prompt)');
       return { recovered: false, rung: 'offline', prompted: false, reason: label };
     }
+
+    // Rung 3.5 — AEA AGENT SELF-HEAL. Session cookie is valid + online + VPN up,
+    // yet the silent AEA re-mint failed. The dominant cause (confirmed 2026-10)
+    // is a STUCK Enterprise Access posture agent (duplicate/hung
+    // EnterpriseAccessConsoleApp.exe instances timing out the posture query).
+    // Restart the agent automatically and retry the silent refresh ONCE — this
+    // is the app doing, on its own, what previously required manually killing
+    // the processes. Only if THIS still fails do we fall through to the
+    // interactive mwinit prompt. Windows-only; a no-op (returns false) elsewhere.
+    const restarted = await restartAeaAgent();
+    if (restarted) {
+      logger.info('[AuthManager] recoverAuth rung=aea-agent — agent restarted; retrying silent AEA refresh');
+      const r2 = await refreshAeaSilently();
+      if (r2 && r2.ok) {
+        logger.info('[AuthManager] recoverAuth recovered at rung=aea-agent — posture agent self-healed, AEA re-minted, no prompt');
+        return { recovered: true, rung: 'aea-agent', prompted: false, reason: label };
+      }
+      logger.warn('[AuthManager] recoverAuth — silent refresh still failing after AEA agent restart; escalating');
+    }
   } else {
     logger.warn('[AuthManager] recoverAuth — on-disk session cookie genuinely expired (' + (state.reason || 'expired') + ')');
   }
@@ -990,6 +1069,7 @@ module.exports = {
   parseMidwayCookies, // Stage 10: browser_provider seeds a headless Playwright context from the same parsed cookies
   runMwinit,
   recoverAuth, // FIX (2026-10): single centralized recovery ladder every caller routes through
+  restartAeaAgent, // FIX (2026-10-18): self-heal a stuck Enterprise Access posture agent (duplicate/hung EnterpriseAccessConsoleApp.exe) so AAP recovers with no manual Task Manager step
   injectCookies, // FEATURE (2026-07-23): now accepts optional target session
   probeSession, // FIX (2026-07-21): exported so callers can replicate ensureAuthenticated's verification steps without its disabled auto-spawn branch
   refreshAeaSilently, // FIX (2026-09-30): silent AEA re-mint so one auth lasts the full ~24h session

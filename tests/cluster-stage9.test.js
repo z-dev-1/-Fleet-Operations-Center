@@ -26,7 +26,7 @@ describe('cluster Stage 9 — auto-publish shared-key writes via store write hoo
 
   it('a LEADER auto-publishes when a shared-operational key is saved', async () => {
     cluster.init({ enabled: true, mode: 'ACTIVE', force: true });
-    cluster.start({ setTimer: () => 0, clearTimer: () => {}, noSyncTimer: true });
+    cluster.start({ setTimer: () => 0, clearTimer: () => {}, noSyncTimer: true, publishDebounceMs: 5 });
     const coord = cluster.getCoord();
     const a = await coord.tryAcquireLeadership(cluster.getInstanceId(), 'ACTIVE', 30000);
     cluster._setLease(a.record.fencingToken, a.record.expiresAt);
