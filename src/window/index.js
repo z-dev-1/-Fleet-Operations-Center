@@ -1034,6 +1034,26 @@ function initWindows(ctx) {
     // mode, and on the recurring API refresh timer.
     async function _loadFleetViaApiStartup(reason) {
       try {
+        // Stage 11: cluster live-pull gate. This is the single chokepoint every
+        // recurring live AAP read converges on (the 5-min API timer, the rescan
+        // redirect, app.js auto-sync via sync/index.js, and the scheduler
+        // pipeline's runFullSync all funnel here). A host that may NOT pull live
+        // (a non-capable standby) skips the live pull and keeps whatever the
+        // cluster sync engine already applied as a snapshot. A capable host
+        // (the laptop, or a headless DevSpace standby advertising aapLivePull
+        // via browser_provider) proceeds exactly as before. When the cluster
+        // flag is OFF, mayLivePull() is true → byte-for-byte unchanged behavior.
+        // This is a READ gate, independent of leadership/production writes.
+        try {
+          const cluster = require('../cluster');
+          if (typeof cluster.mayLivePull === 'function' && !cluster.mayLivePull()) {
+            logger.info('[data-source] API load (' + (reason || 'startup') +
+              ') skipped — host is not live-pull capable (standby); using synced snapshot');
+            pushStatus('\uD83D\uDD04 Standby — showing synced fleet snapshot');
+            return;
+          }
+        } catch (_) { /* cluster not wired → behave as legacy single-host */ }
+
         logger.info('[data-source] API load (' + (reason || 'startup') + '): building fleet dataset…');
         pushStatus('\uD83D\uDD04 Loading fleet via API…');
         const api = require('../scrapers/aap_api');
