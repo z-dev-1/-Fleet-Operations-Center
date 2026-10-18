@@ -305,6 +305,22 @@ function _engine() {
   return _sqlite || null;
 }
 
+// ── Post-write hook (dual-instance sync, Stage 9) ───────────────────────────
+// A consumer (the cluster) can register a callback invoked AFTER every
+// successful save(). This lets the leader auto-publish shared-operational key
+// changes to the coordination event log WITHOUT every write call site knowing
+// about the cluster — and WITHOUT the store taking a hard dependency on the
+// cluster module (which would be a require cycle: cluster → store). The hook is
+// best-effort and fully swallowed: a sync-publish failure must NEVER break a
+// local store write. No-op until the cluster registers one (so the legacy
+// single-host app is unaffected).
+let _onWrite = null;
+function setWriteHook(fn) { _onWrite = (typeof fn === 'function') ? fn : null; }
+function _fireWriteHook(key) {
+  if (!_onWrite) return;
+  try { _onWrite(key); } catch (_) { /* never let sync break a write */ }
+}
+
 // True when `name` should be served by SQLite AND the engine is actually
 // available on this runtime. Any failure path falls back to JSON files.
 function _useSqlite(name) {
@@ -381,7 +397,7 @@ function load(key, fallback) {
 function save(key, data) {
   if (_useSqlite(key)) {
     _migrateJsonToSqlite(key);
-    try { _engine().writeDoc(key, data); return; }
+    try { _engine().writeDoc(key, data); _fireWriteHook(key); return; }
     catch (e) {
       logger.warn('SQLite save("' + key + '") failed, falling back to JSON: ' + e.message);
       // fall through to the JSON path below
@@ -416,6 +432,7 @@ function save(key, data) {
     try { fs.unlinkSync(tmpPath); } catch (_) {}
     throw e;
   }
+  _fireWriteHook(key);
 }
 
 /**
@@ -506,4 +523,4 @@ function del(name) {
   try { fs.unlinkSync(_resolvePath(name)); } catch (_) {}
 }
 
-module.exports = { load, save, update, updateAsync, exists, delete: del, REGISTRY, SQLITE_KEYS };
+module.exports = { load, save, update, updateAsync, exists, delete: del, REGISTRY, SQLITE_KEYS, setWriteHook };

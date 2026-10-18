@@ -72,6 +72,7 @@ function _freshState() {
     failoverHistory: [],      // recent promote/demote/takeover events (Stage 7)
     autoFailover: true,       // can be toggled from the dashboard (Stage 7)
     coordKind: 'local',       // 'local' | 'http' — which coordinator backend (Stage 8)
+    _applying: false,         // true while applying pulled docs (publish guard, Stage 9)
   };
 }
 const FAILOVER_HISTORY_CAP = 50;
@@ -208,6 +209,24 @@ function start(opts) {
     now: lo.now,
     onApplied: (key, version) => { _state.lastSyncSeq = _state.sync ? _state.sync.lastSyncSeq : _state.lastSyncSeq; },
   });
+  // Stage 9: auto-publish shared-operational key writes. Register a store
+  // write hook so that whenever the LEADER commits a change to a shared key,
+  // it is published to the event log automatically — no write call site needs
+  // to know about the cluster. Guarded against the apply→save→publish loop:
+  // while the sync engine is APPLYING a pulled doc, _applying is true and we
+  // skip publishing (the change came FROM the log, don't echo it back).
+  try {
+    const store = opts.store || require('../store');
+    if (typeof store.setWriteHook === 'function') {
+      store.setWriteHook((key) => {
+        if (_state._applying) return;                 // don't re-publish an applied doc
+        if (!_state.enabled || !isLeader()) return;   // only the leader publishes
+        if (!isShared(key)) return;                    // only shared-operational keys
+        // Fire-and-forget; publish is best-effort and must not block the write.
+        Promise.resolve().then(() => publishSharedKey(key)).catch(() => {});
+      });
+    }
+  } catch (_) {}
   _state.lease.start();
   // Stage 5: periodic sync pull so EVERY instance (leader + standby) stays
   // current from the event log. Interval is injectable for tests; defaults to
@@ -229,6 +248,7 @@ function start(opts) {
 }
 
 async function stop() {
+  try { const store = require('../store'); if (store.setWriteHook) store.setWriteHook(null); } catch (_) {}
   if (_state._syncTimer != null && _state._clearSyncTimer) { try { _state._clearSyncTimer(_state._syncTimer); } catch (_) {} }
   _state._syncTimer = null;
   if (_state.lease) { try { await _state.lease.stop(); } catch (_) {} _state.lease = null; }
@@ -302,9 +322,16 @@ async function publishSharedKey(key) {
 // apply any committed changes it is missing. No-op when the cluster is OFF.
 async function pullSharedState(limit) {
   if (!_state.enabled || !_state.sync) return { ok: false, skipped: 'disabled', applied: 0 };
-  const r = await _state.sync.pull(limit);
-  if (r && typeof r.cursor === 'number') _state.lastSyncSeq = r.cursor;
-  return r;
+  // Mark that we're APPLYING pulled docs so the store write hook doesn't
+  // re-publish them back to the log (apply→save→publish loop prevention).
+  _state._applying = true;
+  try {
+    const r = await _state.sync.pull(limit);
+    if (r && typeof r.cursor === 'number') _state.lastSyncSeq = r.cursor;
+    return r;
+  } finally {
+    _state._applying = false;
+  }
 }
 function isSharedKey(key) { return isShared(key); }
 function getSyncState() { return _state.sync ? _state.sync.getState() : null; }

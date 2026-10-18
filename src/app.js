@@ -75,6 +75,9 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   log.info('Shutting down...');
   scheduler.stop();
+  // Release the cluster leadership lease on a clean quit so a standby can take
+  // over immediately (no TTL wait). No-op when the cluster is disabled.
+  try { require('./cluster').stop(); } catch (_) {}
 });
 
 // ── 5. Ready ──────────────────────────────────────────────────────────────
@@ -693,6 +696,25 @@ function _startAutoSync() {
   // Preserves last verified coverage if a refresh is empty/failed. Non-fatal.
   try { require('./orcha/fas/coverage').start(); log.info('FAS coverage profile started'); }
   catch (e) { log.warn('FAS coverage start failed (non-fatal):', e.message); }
+
+  // ── 5k. Dual-instance cluster (active/standby failover) ────────────────────
+  // Flag-gated and OFF by default: unless settings.cluster.enabled (or env
+  // FLEET_CLUSTER=1) is set, cluster.init() leaves everything in legacy
+  // single-host mode (always leader, nothing gated) and start() runs no timers,
+  // so this block is a no-op for the normal app. When enabled, this ACTIVE
+  // laptop instance joins the shared coordinator (if settings.cluster.coordUrl
+  // is set) and runs the lease + sync loops; the leader gate then governs the
+  // schedulers / Slack pollers / production side-effects wired in Stages 3–9.
+  try {
+    const cluster = require('./cluster');
+    cluster.init({ mode: 'ACTIVE' });
+    if (cluster.isEnabled()) {
+      cluster.start();
+      log.info('[cluster] dual-instance cluster started (ACTIVE). coordKind=' + cluster.getStatus().coordKind);
+    } else {
+      log.info('[cluster] dual-instance disabled (legacy single-host)');
+    }
+  } catch (e) { log.warn('[cluster] init/start failed (non-fatal, staying single-host):', e.message); }
 
   log.info('Bootstrap complete');
 
