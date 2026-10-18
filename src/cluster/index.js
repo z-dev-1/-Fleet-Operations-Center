@@ -66,6 +66,8 @@ function _freshState() {
     coord: null,
     lease: null,              // LeaseManager instance (Stage 2), when enabled
     sync: null,               // SyncEngine instance (Stage 4), when enabled
+    _syncTimer: null,         // periodic sync-pull timer handle (Stage 5)
+    _clearSyncTimer: null,
   };
 }
 let _state = _freshState();
@@ -167,11 +169,30 @@ function start(opts) {
     onApplied: (key, version) => { _state.lastSyncSeq = _state.sync ? _state.sync.lastSyncSeq : _state.lastSyncSeq; },
   });
   _state.lease.start();
+  // Stage 5: periodic sync pull so EVERY instance (leader + standby) stays
+  // current from the event log. Interval is injectable for tests; defaults to
+  // a real timer. Skipped entirely when no setTimer is wired AND we're in a
+  // test that drives pull() manually (opts.noSyncTimer).
+  if (!opts.noSyncTimer) {
+    const setT = lo.setTimer || ((fn, ms) => setTimeout(fn, ms));
+    const clrT = lo.clearTimer || ((h) => clearTimeout(h));
+    const syncMs = lo.syncMs || 15000;
+    const tick = async () => {
+      if (!_state.sync) return;
+      try { await pullSharedState(); } catch (_) {}
+      if (_state._syncTimer != null) _state._syncTimer = setT(tick, syncMs);
+    };
+    _state._syncTimer = setT(tick, syncMs);
+    _state._clearSyncTimer = clrT;
+  }
   return getStatus();
 }
 
 async function stop() {
+  if (_state._syncTimer != null && _state._clearSyncTimer) { try { _state._clearSyncTimer(_state._syncTimer); } catch (_) {} }
+  _state._syncTimer = null;
   if (_state.lease) { try { await _state.lease.stop(); } catch (_) {} _state.lease = null; }
+  _state.sync = null;
   _state.fencingToken = null;
   _state.leaseExpiresAt = null;
 }
