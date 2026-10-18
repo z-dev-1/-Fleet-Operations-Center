@@ -188,6 +188,20 @@ const REGISTRY = {
   // backup is stored under schedulerLedgerBackup_v1.
   schedulerLedger:         () => path.join(P.dataDir, 'scheduler_ledger.json'),
   schedulerLedgerBackup_v1: () => path.join(P.dataDir, 'scheduler_ledger_backup_v1.json'),
+  // Dual-instance coordination (Stage 1) — the local coordination-store backend.
+  // clusterLeadership holds the single leadership record (leader, fencingToken,
+  // lease expiry, mode, heartbeat); SQLite-backed so compare-and-set acquire/
+  // renew is atomic exactly like the scheduler ledger. clusterEventLog is the
+  // append-only incremental-sync log (shared-operational key changes).
+  clusterLeadership:       () => path.join(P.dataDir, 'cluster_leadership.json'),
+  clusterEventLog:         () => path.join(P.dataDir, 'cluster_event_log.json'),
+  // Dual-instance coordination (Stage 1) — the local coordination-store backend.
+  // clusterLeadership holds the single leadership record (leader, fencingToken,
+  // lease expiry, mode, heartbeat); it is SQLite-backed so compare-and-set
+  // acquire/renew is atomic exactly like the scheduler ledger. clusterEventLog
+  // is the append-only incremental-sync log (shared-operational key changes).
+  clusterLeadership:       () => path.join(P.dataDir, 'cluster_leadership.json'),
+  clusterEventLog:         () => path.join(P.dataDir, 'cluster_event_log.json'),
   // OWA Inbox Triage (2026-10) — see src/scrapers/owa_reader.js + email_triage.js.
   // Config shape: { enabled, maxEmails, autoApplyUnitUpdates, scanOnOpen,
   //   lastRunAt }. (Reading the inbox + AI triage; all mailbox/DM mutations are
@@ -282,6 +296,7 @@ function _resolvePath(name) {
 const SQLITE_KEYS = new Set([
   'schedulerLedger',
   'schedulerLedgerBackup_v1',
+  'clusterLeadership',   // atomic CAS for the leadership lease / fencing token
   'fasInboundClaims',
   'fasIdempotency',
 ]);
