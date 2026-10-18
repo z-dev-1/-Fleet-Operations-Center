@@ -49,7 +49,13 @@ const MODE_ALLOWS = {
 let _enabled = false;         // cluster feature flag (OFF = legacy behavior)
 let _mode = 'ACTIVE';         // current role
 let _capabilities = {         // what THIS host can physically do
-  browser: true,              // local authenticated Chromium available?
+  browser: true,              // local authenticated Chromium for WRITES (DOM
+                              // flips, SP push, OWA). Headless hosts: false.
+  aapLivePull: undefined,     // can this host pull LIVE AAP READS? On the
+                              // laptop this rides on `browser`. On a headless
+                              // host it can still be true via headless Playwright
+                              // (Stage 10) even though `browser` (writes) is
+                              // false. Left undefined → derived from `browser`.
 };
 
 function setEnabled(on) { _enabled = !!on; }
@@ -113,10 +119,38 @@ function assertCanSideEffect(kind) {
   return true;
 }
 
+/**
+ * canLivePull() -> { ok:boolean, reason:string }
+ * May THIS host pull LIVE AAP reads right now? This is a READ capability, NOT a
+ * side-effect — so it is deliberately independent of mode write-permissions: a
+ * STANDBY may refresh live read data (it just may not WRITE). It is also
+ * independent of the `browser` (writes) capability: a headless host can read
+ * live via headless Playwright (Stage 10) while `browser` stays false so writes
+ * keep failing closed.
+ *
+ * Resolution order for the capability:
+ *   1. explicit `aapLivePull` capability (true/false), if set;
+ *   2. otherwise derived from `browser` (the laptop case — a local browser that
+ *      does writes can obviously also read).
+ * DEVELOPMENT mode is still allowed to read authorized production data per the
+ * spec, so live reads are permitted in every mode when the host is capable.
+ */
+function canLivePull() {
+  if (!_enabled) return { ok: true, reason: 'cluster-disabled (legacy single-host)' };
+  const cap = (_capabilities.aapLivePull !== undefined)
+    ? !!_capabilities.aapLivePull
+    : !!_capabilities.browser;
+  if (!cap) {
+    return { ok: false, reason: 'host cannot pull live AAP (no local browser and headless live-pull not available) — using synced snapshots' };
+  }
+  return { ok: true, reason: 'live pull available' };
+}
+
 // Test/reset hook.
-function _reset() { _enabled = false; _mode = 'ACTIVE'; _capabilities = { browser: true }; }
+function _reset() { _enabled = false; _mode = 'ACTIVE'; _capabilities = { browser: true, aapLivePull: undefined }; }
 
 module.exports = {
   MODES, setEnabled, isEnabled, setMode, getMode,
-  setCapabilities, getCapabilities, canSideEffect, assertCanSideEffect, _reset,
+  setCapabilities, getCapabilities, canSideEffect, assertCanSideEffect,
+  canLivePull, _reset,
 };

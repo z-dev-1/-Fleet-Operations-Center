@@ -19,9 +19,16 @@
  * CAPABILITY FACTS (verified 2026-10 against the Amazon DevSpace standby host):
  *   - browser:false on a headless host ($DISPLAY empty) → lifecycle DOM flips,
  *     SharePoint push, OWA send fail closed there.
- *   - aapLivePull:false on the DevSpace → AAP needs AEA browser step-up the
- *     headless box can't satisfy (307 → midway-auth AEA gateway). The standby
- *     relies on SYNCED fleet snapshots, not live pull.
+ *   - aapLivePull: CORRECTED 2026-08. Earlier belief was that a headless box
+ *     can't satisfy AEA (curl got bounced to the midway-auth AEA gateway). A
+ *     headless *browser* (Playwright chromium-headless-shell) seeded with the
+ *     box's own ~/.midway/cookie DOES satisfy AEA — proven on the DevSpace
+ *     (landing 200, API 200, real JSON). So the standby CAN pull live AAP reads
+ *     via the Stage-10 browser_provider when playwright is installed + opted in
+ *     (FLEET_HEADLESS_BROWSER=1) + a fresh midway cookie exists. WRITES (DOM
+ *     flips, SP push, OWA) remain fail-closed on headless. Live reads are still
+ *     bounded by the ~18h AEA/session lifetime (needs interactive mwinit -o to
+ *     renew). Absent that, the standby falls back to SYNCED fleet snapshots.
  *   - smtp:true is possible (ballard.amazon.com:1587 via nodemailer) — pending
  *     port-reachability confirmation; a later stage adds the adapter.
  *   These are advertised flags; the coordination/lease/sync code is identical
@@ -94,9 +101,25 @@ function _resolveConfig() {
   if (process.env.FLEET_CLUSTER === '1') cfg.enabled = true;
   if (process.env.FLEET_CLUSTER === '0') cfg.enabled = false;
   if (process.env.FLEET_CLUSTER_MODE && gate.MODES.includes(process.env.FLEET_CLUSTER_MODE)) cfg.mode = process.env.FLEET_CLUSTER_MODE;
-  // A headless host (no DISPLAY on Linux) cannot do browser side-effects.
+  // A headless host (no DISPLAY on Linux) cannot do browser side-effects
+  // (DOM lifecycle flips, SharePoint push, OWA send) — those stay fail-closed.
+  const headless = (process.platform === 'linux' && !process.env.DISPLAY);
   if (cfg.capabilities.browser === undefined) {
-    cfg.capabilities.browser = !(process.platform === 'linux' && !process.env.DISPLAY);
+    cfg.capabilities.browser = !headless;
+  }
+  // Stage 10: LIVE AAP READS are a separate capability. On the laptop they ride
+  // on `browser`. On a headless host they can STILL be available via a headless
+  // Playwright provider (proven on the DevSpace), even though write-`browser` is
+  // false. Probe the provider so the standby advertises live-pull only when it
+  // can actually do it (playwright installed + opted-in + a midway cookie present).
+  if (cfg.capabilities.aapLivePull === undefined) {
+    if (!headless) {
+      cfg.capabilities.aapLivePull = cfg.capabilities.browser;  // laptop: same as browser
+    } else {
+      let live = false;
+      try { live = require('../scrapers/browser_provider').kind() === 'playwright'; } catch (_) {}
+      cfg.capabilities.aapLivePull = live;
+    }
   }
   return cfg;
 }
@@ -310,6 +333,17 @@ function mayRunProduction() {
   return isLeader();
 }
 
+// mayLivePull() — may THIS instance pull LIVE AAP read data itself (vs relying
+// on synced snapshots)? Stage 10. This is a READ gate, independent of
+// leadership and of production side-effects: a STANDBY that is capable (headless
+// Playwright on the DevSpace) is allowed to refresh its own live reads so it
+// shows current data, even though it never WRITES. True when the cluster is OFF
+// (legacy single-host) or the mode-gate's read capability says the host can.
+function mayLivePull() {
+  if (!_state.enabled) return true;   // legacy single-host
+  return gate.canLivePull().ok;
+}
+
 // ── Shared-state sync (Stage 4) ─────────────────────────────────────────────
 // publishSharedKey(key) — the leader calls this AFTER committing a change to a
 // shared-operational store key, to broadcast it to the other instance. No-op
@@ -467,7 +501,7 @@ async function requestReconcile() {
 
 module.exports = {
   init, start, stop, isEnabled, getInstanceId, getDeviceId, getRole, getCoord, isLeader,
-  canSideEffect, assertCanSideEffect, mayRunProduction,
+  canSideEffect, assertCanSideEffect, mayRunProduction, mayLivePull,
   publishSharedKey, pullSharedState, isSharedKey, getSyncState,
   getStatus, getLeaseState, _setLease, MODES: gate.MODES, _reset,
   // Stage 7 — Instance Management dashboard + controls

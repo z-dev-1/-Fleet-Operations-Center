@@ -28,7 +28,11 @@
  * when idle. All requests are serialized through it.
  */
 
-const { BrowserWindow, session } = require('electron');
+// Stage 10: the browser is now obtained through browser_provider, which picks
+// Electron (laptop, has a display) or headless Playwright (DevSpace standby,
+// seeds ~/.midway/cookie). The token-capture + XHR-in-page logic below is
+// engine-agnostic — it only needs a page with evaluate()/url()/close().
+const provider = require('./browser_provider');
 const logger = require('../utils/logger')('aap-api');
 
 const AAP_ORIGIN = 'https://aap-na.corp.amazon.com';
@@ -55,7 +59,7 @@ function _woIsCancelled(wo) {
   return /cancel/i.test(_woStatusStr(wo));
 }
 
-let _win = null;
+let _page = null;          // provider page: { evaluate, url, close, engine }
 let _token = null;
 let _warmTimer = null;
 let _lock = Promise.resolve();
@@ -75,9 +79,12 @@ function _scheduleTeardown() {
 
 function dispose() {
   if (_warmTimer) { clearTimeout(_warmTimer); _warmTimer = null; }
-  try { if (_win && !_win.isDestroyed()) _win.destroy(); } catch (_) {}
-  _win = null;
+  try { if (_page) _page.close(); } catch (_) {}
+  _page = null;
   _token = null;
+  // Release the shared headless Playwright browser (no-op on the Electron path,
+  // where openPage creates a per-call BrowserWindow that _page.close() destroys).
+  try { if (provider.kind() === 'playwright') provider.shutdown(); } catch (_) {}
 }
 
 // In-page bootstrap: hook XHR.setRequestHeader to capture the live
@@ -109,73 +116,48 @@ function _waitTokenScript(ms) {
   })();`;
 }
 
-// Ensure a warm, authenticated AAP window exists with the token captured.
+// Ensure a warm, authenticated AAP page exists with the token captured. The
+// page is obtained from browser_provider (Electron window on the laptop; a
+// headless Playwright context on the DevSpace). Cookie seeding happens INSIDE
+// the provider per-engine (Electron injects into session.defaultSession;
+// Playwright seeds ~/.midway/cookie into the context), so there's no engine
+// branching here — the token-capture + XHR logic is identical on both.
 async function _ensureWindow() {
-  // Seed the freshest Midway/AEA cookies into the default session first.
+  if (_page && _token) { _scheduleTeardown(); return _page; }
+  if (_page) { try { _page.close(); } catch (_) {} _page = null; }
+
+  let page;
   try {
-    const { injectCookies } = require('./auth');
-    await injectCookies(session.defaultSession);
+    page = await provider.openPage(TOKEN_PAGE_URL, { loadMs: PAGE_LOAD_MS });
   } catch (e) {
-    logger.warn('cookie inject skipped: ' + e.message);
-  }
-
-  if (_win && !_win.isDestroyed() && _token) {
-    _scheduleTeardown();
-    return _win;
-  }
-  if (_win && !_win.isDestroyed()) { try { _win.destroy(); } catch (_) {} _win = null; }
-
-  const win = new BrowserWindow({
-    width: 1400, height: 800, show: false, x: -3000, y: -3000, skipTaskbar: true,
-    // paintWhenInitiallyHidden + backgroundThrottling:false keep this hidden
-    // window rendering/executing at full speed even when the screen is off or
-    // the workstation is LOCKED — without these, Chromium throttles a hidden,
-    // display-inactive window and the fleet API load stalls while locked.
-    paintWhenInitiallyHidden: true,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      session: session.defaultSession,
-      backgroundThrottling: false,
-    },
-  });
-  _win = win;
-
-  const loaded = await new Promise((resolve) => {
-    let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    const t = setTimeout(() => finish({ ok: false, error: 'timeout' }), PAGE_LOAD_MS);
-    win.webContents.once('did-finish-load', async () => {
-      clearTimeout(t);
-      let url = '';
-      try { url = win.webContents.getURL(); } catch (_) {}
-      if (_isSSO(url)) { finish({ ok: false, error: 'auth' }); return; }
-      try {
-        await win.webContents.executeJavaScript(_HOOK_SCRIPT, true);
-        const tok = await win.webContents.executeJavaScript(_waitTokenScript(TOKEN_WAIT_MS), true);
-        finish({ ok: true, token: tok || null, url });
-      } catch (e) {
-        finish({ ok: false, error: 'script:' + e.message });
-      }
-    });
-    win.webContents.once('did-fail-load', (_e, code, desc) => {
-      if (code === -3) return;
-      clearTimeout(t);
-      finish({ ok: false, error: 'load:' + code + ':' + desc });
-    });
-    win.loadURL(TOKEN_PAGE_URL);
-  });
-
-  if (!loaded.ok) {
     dispose();
-    const msg = loaded.error === 'auth'
-      ? 'AAP session expired (Midway/AEA). Open the main window to re-authenticate, then retry.'
-      : 'AAP API window failed to load: ' + loaded.error;
-    throw Object.assign(new Error(msg), { code: loaded.error === 'auth' ? 'MIDWAY_SESSION_INVALID' : 'AAP_API_LOAD_FAILED' });
+    // Normalize provider errors to the codes callers already handle.
+    if (e && e.code === 'MIDWAY_SESSION_INVALID') {
+      throw Object.assign(new Error(
+        'AAP session expired (Midway/AEA). ' +
+        (provider.kind() === 'playwright' ? 'Run mwinit -o on this host, then retry.'
+                                          : 'Open the main window to re-authenticate, then retry.')),
+        { code: 'MIDWAY_SESSION_INVALID' });
+    }
+    throw Object.assign(new Error('AAP API page failed to load: ' + (e && e.message)),
+      { code: 'AAP_API_LOAD_FAILED' });
   }
-  _token = loaded.token; // may be null for pure-GET usage; POST will re-check
+  _page = page;
+
+  // Install the XHR hook + wait briefly for a token-bearing XHR to fire. The
+  // page already loaded authenticated (provider rejected on an SSO bounce).
+  try {
+    await page.evaluate(_HOOK_SCRIPT);
+    const tok = await page.evaluate(_waitTokenScript(TOKEN_WAIT_MS));
+    _token = tok || null;   // may be null for pure-GET usage; POST re-checks
+  } catch (e) {
+    dispose();
+    throw Object.assign(new Error('AAP API token capture failed: ' + (e && e.message)),
+      { code: 'AAP_API_LOAD_FAILED' });
+  }
+
   _scheduleTeardown();
-  return win;
+  return _page;
 }
 
 // Run a single HTTP request INSIDE the authenticated AAP page (so cookies + the
@@ -217,11 +199,11 @@ function _requestScript(method, url, bodyLiteral) {
 
 async function _request(method, path, body) {
   return _withLock(async () => {
-    const win = await _ensureWindow();
+    const page = await _ensureWindow();
     const url = path.startsWith('http') ? path : (AAP_ORIGIN + path);
     const bodyLiteral = body != null ? JSON.stringify(JSON.stringify(body)) : 'null';
     const script = _requestScript(method, url, bodyLiteral);
-    const r = await win.webContents.executeJavaScript(script, true);
+    const r = await page.evaluate(script);
     _scheduleTeardown();
     if (!r || !r.ok) {
       const detail = (r && (r.text || r.error)) || ('HTTP ' + (r && r.status));
