@@ -2041,7 +2041,18 @@ function initWindows(ctx) {
     if (ctx.runFullSync) ctx.runFullSync();
   });
 
-  ipcMain.on('win:minimize', () => { if (mainWindow) mainWindow.minimize(); });
+  ipcMain.on('win:minimize', () => {
+    if (!mainWindow) return;
+    mainWindow.minimize();
+    // FIX (minimize-FAB): on a frameless (frame:false) window, programmatic
+    // mainWindow.minimize() does NOT reliably emit the 'minimize' event on
+    // Windows — so the on('minimize') handler that shows the desktop bubble
+    // never ran, and the FAB didn't appear. Show the bubble directly from the
+    // IPC that we KNOW fired (the custom titlebar minimize button). Guarded so
+    // it's a no-op if the event path DID fire (showBubble early-returns when a
+    // live bubbleWin already exists).
+    setTimeout(() => { try { showBubble(); } catch (err) { logger.error('showBubble on win:minimize: ' + err.message); } }, 300);
+  });
   ipcMain.on('win:maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
   ipcMain.on('win:close', () => { if (mainWindow) mainWindow.close(); });
   ipcMain.on('win:show',  () => { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); } });
