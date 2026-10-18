@@ -324,6 +324,39 @@ function registerScrapersIPC(ctx) {
     requireString(equipmentId, 'equipmentId');
     requireString(assetUrl, 'assetUrl');
     requireString(state, 'state');
+    // PREFERRED PATH (gated by fasConfig.useLifecycleApi, OFF by default): the
+    // AAP JSON API — version-locked PUT + source read-back, and auto-clears a
+    // blocking DVIR when going ACTIVE. Falls back to the proven browser
+    // automation on any failure or when the flag is off. The manual detail-page
+    // button and the AI MOVE_UNIT path now share the same API path.
+    let useApi = false;
+    try { useApi = require('../orcha/fas/config').get().useLifecycleApi === true; } catch (_) { useApi = false; }
+    if (useApi) {
+      try {
+        const api = require('../scrapers/aap_lifecycle_api');
+        const wantActive = String(state).trim().toUpperCase() === 'ACTIVE';
+        const r = wantActive
+          ? await api.setLifecycleActiveWithDvir({ unit: equipmentId, reason: reason || 'HEALTHY' })
+          : await api.setLifecycleApi({ unit: equipmentId, state, reason: reason || '' });
+        // Map to the UI's { success, message } contract.
+        if (r && (r.status === 'done' || r.status === 'noop') && r.verified) {
+          return { success: true, via: 'api', verifiedState: r.to && r.to.state, newState: r.to && r.to.state,
+            message: r.status === 'noop' ? (equipmentId + ' is already ' + (r.to && r.to.state) + ' (verified)') : (equipmentId + ' set to ' + (r.to && r.to.state) + ' (verified)'),
+            dvirCleared: r.dvirCleared };
+        }
+        if (r && r.status === 'execution_uncertain') {
+          return { success: false, via: 'api', uncertain: true, message: 'EXECUTION_UNCERTAIN: the change may have applied but could not be verified — re-check before relying on it.' };
+        }
+        if (r && r.needsWorkOrder) {
+          return { success: false, via: 'api', needsWorkOrder: true, message: 'Open DVIR must be cleared but no open work request was found to reference — supply a WR number.' };
+        }
+        // API failed -> fall through to the browser-automation fallback.
+        try { require('../utils/logger').createLogger('ipc:scrapers').warn('[aap:set-lifecycle] API path failed (' + (r && (r.error || r.status)) + '); falling back to browser automation'); } catch (_) {}
+      } catch (e) {
+        try { require('../utils/logger').createLogger('ipc:scrapers').warn('[aap:set-lifecycle] API path threw (' + e.message + '); falling back'); } catch (_) {}
+      }
+    }
+    // FALLBACK: proven BrowserWindow automation.
     const { setLifecycleState } = require('../scrapers/setLifecycle');
     try {
       return await setLifecycleState({ equipmentId, assetUrl, state, reason: reason || '' });
