@@ -317,13 +317,43 @@ function registerAapApiIPC(ctx) {
     try { return await _runVreMatrix(payload && payload.unit); }
     catch (e) { return { ok: false, error: e.message, code: e.code || null }; }
   });
-  const _vreMatrixUnit = String(process.env.VRE_MATRIX_UNIT || '').trim();
-  if (_vreMatrixUnit) {
+  // DOC-UPLOAD STEP-1 PROBE (diagnostic, uploads NOTHING). Requesting a
+  // presigned uploadLink is read-only — it does NOT create a WR and does NOT
+  // attach a file (we never do the S3 PUT here). Validates our uploadLink
+  // request body + enum values against a REAL existing WR id and logs the
+  // response shape. Set DOC_PROBE_UNIT to a unit that already has an open WR.
+  const _docProbeUnit = String(process.env.DOC_PROBE_UNIT || '').trim();
+  if (_docProbeUnit) {
     setTimeout(async () => {
       try {
-        const res = await _runVreMatrix(_vreMatrixUnit);
-        logger.info('[vre-matrix] (startup) SUMMARY ' + _vreMatrixUnit + ':\n' + JSON.stringify(res, null, 2));
-      } catch (e) { logger.warn('[vre-matrix] (startup) FAILED ' + _vreMatrixUnit + ': ' + e.message); }
+        const fd = store.load('fleetData', { rows: [] });
+        const rows = (fd && Array.isArray(fd.rows)) ? fd.rows : [];
+        const row = rows.find((r) => String(r.equipmentId || r.assetId || r.id) === _docProbeUnit);
+        if (!row) { logger.warn('[doc-probe] unit ' + _docProbeUnit + ' not found'); return; }
+        if (!row.workRequestId) { logger.warn('[doc-probe] unit ' + _docProbeUnit + ' has no open workRequestId'); return; }
+        logger.info('[doc-probe] requesting uploadLink for WR ' + row.workRequestId + ' (NO file uploaded, NO WR created)');
+        const resp = await api().getDocumentUploadLink({
+          serviceEntityId: row.workRequestId,
+          vendor: (row.vendor || '').split(' (')[0] || null,
+          filename: 'probe-test.png',
+          mime: 'image/png',
+        });
+        logger.info('[doc-probe] uploadLink RESPONSE:\n' + JSON.stringify(resp, null, 2));
+      } catch (e) {
+        logger.warn('[doc-probe] FAILED: ' + e.message + (e.code ? ' (' + e.code + ')' : ''));
+      }
+    }, 9000);
+  }
+
+  const _vreMatrixUnits = String(process.env.VRE_MATRIX_UNIT || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (_vreMatrixUnits.length) {
+    setTimeout(async () => {
+      for (const u of _vreMatrixUnits) {
+        try {
+          const res = await _runVreMatrix(u);
+          logger.info('[vre-matrix] (startup) SUMMARY ' + u + ':\n' + JSON.stringify(res, null, 2));
+        } catch (e) { logger.warn('[vre-matrix] (startup) FAILED ' + u + ': ' + e.message); }
+      }
     }, 8000); // let auth + first sync settle
   }
 

@@ -1373,8 +1373,9 @@ async function createWorkOrder(opts = {}) {
     try {
       attachmentResults = await uploadWrAttachments(workRequestId, opts.attachments, {
         vendor: vendorCode,
-        maintenanceType: 'UNPLANNED',
-        workState: 'ACTIVE',
+        // enum defaults (documentType OTHER, workState IN_PROGRESS,
+        // serviceEntityIdCategory WORK_REQUEST_DOCUMENT) live in
+        // getDocumentUploadLink, confirmed against AAP validation.
       });
     } catch (e) {
       logger.warn('createWorkOrder: attachment upload batch failed: ' + e.message);
@@ -1443,8 +1444,40 @@ async function vreRecommendMatrix(opts = {}) {
     }
   }
   const okCount = rows.filter((r) => r.ok).length;
+
+  // ── Override PREVIEW (read-only, commits NOTHING) ─────────────────────────
+  // Shows what an OVERRIDE would do without committing: the AAP-recommended
+  // vendor vs. a sample override vendor (the first wrEnabled vendor that ISN'T
+  // the recommendation), and whether that override vendor requires a supplier
+  // (read from the live vendor config). A real override only differs from the
+  // recommendation at Phase-2 COMMIT (which creates a WR) — so this previews
+  // the decision without creating anything.
+  let override = null;
+  try {
+    const recommended = (rows.find((r) => r.ok && r.vendor) || {}).vendor || '';
+    const vendors = await getVendorConfigs();
+    const wrEnabled = (vendors || []).filter((v) => v && v.wrEnabled);
+    const codeOf = (s) => String(s || '').split(' (')[0].trim().toLowerCase();
+    const sample = wrEnabled.find((v) => codeOf(v.vendorName) !== codeOf(recommended)) || wrEnabled[0] || null;
+    if (sample) {
+      override = {
+        recommendedVendor: recommended,
+        overrideVendor: sample.vendorName,
+        isOverride: codeOf(sample.vendorName) !== codeOf(recommended),
+        supplierRequired: !!sample.supplierRequired,
+        suppliers: Array.isArray(sample.suppliers) ? sample.suppliers : [],
+        note: 'Override would COMMIT a WR with this vendor (Phase 2). Not executed here.',
+      };
+      logger.info('[vre-matrix] OVERRIDE PREVIEW: recommended=' + recommended +
+        ' → override=' + sample.vendorName + ' (isOverride=' + override.isOverride +
+        ', supplierRequired=' + override.supplierRequired + ', suppliers=' + override.suppliers.length + ')');
+    }
+  } catch (e) {
+    logger.warn('[vre-matrix] override preview failed: ' + e.message);
+  }
+
   logger.info('[vre-matrix] DONE ' + okCount + '/' + rows.length + ' scenarios OK\n' + JSON.stringify(rows, null, 2));
-  return { ok: okCount > 0, aaid, okCount, total: rows.length, rows };
+  return { ok: okCount > 0, aaid, okCount, total: rows.length, rows, override };
 }
 
 // ── WR document upload (attachments) ────────────────────────────────────────
@@ -1477,16 +1510,22 @@ function _fileTypeToken(mimeOrName) {
 // opts: { serviceEntityId (WR id, required), serviceEntityIdCategory, documentType,
 //         vendor, filename, mime, maintenanceType, workState }
 async function getDocumentUploadLink(opts = {}) {
+  // Enum values confirmed live by AAP's validation (2026-10-18):
+  //   serviceEntityIdCategory ∈ {SERVICE_EVENT_DOCUMENT, WORK_REQUEST_DOCUMENT, WORK_ORDER_DOCUMENT}
+  //   documentType ∈ {PARTS, ESTIMATE, DAMAGE, ACCIDENT, OTHER, INSPECTION, COMPLIANCE, COMPLETION, ASSET_IDENTIFICATION}
+  //   workState ∈ {IN_PROGRESS, COMPLETED, AFTER, FAILED, BEFORE}
+  //   maintenanceType is a large PM-type enum — NOT applicable to a WR document, so omit it.
   const body = {
-    serviceEntityIdCategory: opts.serviceEntityIdCategory || 'WORK_REQUEST',
+    serviceEntityIdCategory: opts.serviceEntityIdCategory || 'WORK_REQUEST_DOCUMENT',
     serviceEntityId:         opts.serviceEntityId || '',
-    documentType:            opts.documentType || 'WORK_REQUEST_DOCUMENT',
+    documentType:            opts.documentType || 'OTHER',
     vendor:                  opts.vendor || null,
     filename:                opts.filename || 'attachment',
     fileType:                _fileTypeToken(opts.mime || opts.filename),
-    maintenanceType:         opts.maintenanceType || 'UNPLANNED',
-    workState:               opts.workState || 'ACTIVE',
+    workState:               opts.workState || 'IN_PROGRESS',
   };
+  // Only include maintenanceType if a caller explicitly supplies a valid one.
+  if (opts.maintenanceType) body.maintenanceType = opts.maintenanceType;
   const resp = await apiPost(DOC_UPLOAD_LINK_PATH, body);
   return resp; // { uploadLink, documentId, ... }
 }
@@ -1527,12 +1566,16 @@ async function uploadDocumentFile(uploadLink, bytes, mime) {
   });
 }
 
-// Step 3: link an uploaded document to the work request.
+// Step 3 (usually unnecessary): link an uploaded document to the work request.
+// CONFIRMED LIVE 2026-10-18: the uploadLink response is just {uploadLink,
+// uploadTime} with NO documentId — the association is implicit in the S3 key
+// (keyed by aaid + the serviceEntityId passed to uploadLink), so uploadWrAttach-
+// ments only calls this if a documentId actually comes back (it doesn't today).
 async function associateDocument(opts = {}) {
   const body = {
     documentId:      opts.documentId || '',
     serviceEntityId: opts.serviceEntityId || '',
-    serviceEntityIdCategory: opts.serviceEntityIdCategory || 'WORK_REQUEST',
+    serviceEntityIdCategory: opts.serviceEntityIdCategory || 'WORK_REQUEST_DOCUMENT',
   };
   return apiPost(DOC_ASSOCIATE_PATH, body);
 }
