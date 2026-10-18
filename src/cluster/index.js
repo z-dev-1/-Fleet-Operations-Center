@@ -36,6 +36,7 @@ const gate = require('./mode-gate');
 const { LocalCoordStore } = require('./coord-store');
 const { LeaseManager } = require('./lease-manager');
 const { SyncEngine, isShared } = require('./sync-engine');
+const { HttpCoordStore } = require('./http-coord-store');
 let logger; try { logger = require('../utils/logger')('cluster'); } catch (_) { logger = { info() {}, warn() {} }; }
 
 // ── Instance identity (stable per machine+install, unique per instance) ──────
@@ -70,6 +71,7 @@ function _freshState() {
     _clearSyncTimer: null,
     failoverHistory: [],      // recent promote/demote/takeover events (Stage 7)
     autoFailover: true,       // can be toggled from the dashboard (Stage 7)
+    coordKind: 'local',       // 'local' | 'http' — which coordinator backend (Stage 8)
   };
 }
 const FAILOVER_HISTORY_CAP = 50;
@@ -98,6 +100,20 @@ function _resolveConfig() {
   return cfg;
 }
 
+// The SHARED coordinator URL, if configured (settings.cluster.coordUrl or env
+// FLEET_COORD_URL). When present, the cluster uses the HTTP coordinator so the
+// laptop and the DevSpace coordinate through ONE authoritative record. When
+// absent, it stays on the single-host LocalCoordStore.
+function _resolveCoordUrl() {
+  if (process.env.FLEET_COORD_URL) return process.env.FLEET_COORD_URL;
+  try {
+    const store = require('../store');
+    const c = (store.load('settings', {}) || {}).cluster || {};
+    if (c.coordUrl && typeof c.coordUrl === 'string') return c.coordUrl;
+  } catch (_) {}
+  return null;
+}
+
 /**
  * init(opts) — wire the facade. SAFE to call unconditionally at bootstrap.
  * When the flag is OFF this only sets identity and leaves the gate in its
@@ -114,7 +130,28 @@ function init(opts) {
 
   _state.enabled = cfg.enabled;
   _state.instanceId = (opts.instanceId) || (_state.deviceId + '-' + crypto.randomBytes(3).toString('hex'));
-  _state.coord = (opts.coord) || new LocalCoordStore({ store: opts.store, now: opts.now });
+  // Coordinator backend selection (Stage 8):
+  //   - opts.coord (tests)            → use as-is.
+  //   - a coordinator URL configured  → HttpCoordStore (SHARED, cross-machine).
+  //   - otherwise                     → LocalCoordStore (single-host / harness).
+  // The URL comes from opts, settings.cluster.coordUrl, or FLEET_COORD_URL.
+  const coordUrl = opts.coordUrl || _resolveCoordUrl();
+  if (opts.coord) {
+    _state.coord = opts.coord;
+  } else if (coordUrl) {
+    try {
+      _state.coord = new HttpCoordStore({ baseUrl: coordUrl, token: opts.coordToken, now: opts.now });
+      _state.coordKind = 'http';
+      logger.info('[cluster] using SHARED HTTP coordinator at ' + coordUrl);
+    } catch (e) {
+      logger.warn('[cluster] HTTP coordinator unavailable (' + e.message + ') — falling back to local coord-store');
+      _state.coord = new LocalCoordStore({ store: opts.store, now: opts.now });
+      _state.coordKind = 'local';
+    }
+  } else {
+    _state.coord = new LocalCoordStore({ store: opts.store, now: opts.now });
+    _state.coordKind = 'local';
+  }
 
   gate.setEnabled(cfg.enabled);
   gate.setCapabilities(cfg.capabilities);
@@ -297,6 +334,7 @@ function getStatus() {
     lastHeartbeatAt: _state.lastHeartbeatAt,
     lastSyncSeq: _state.lastSyncSeq,
     capabilities: gate.getCapabilities(),
+    coordKind: _state.coordKind,
   };
 }
 
