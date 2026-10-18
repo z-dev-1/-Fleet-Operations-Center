@@ -153,12 +153,24 @@ class LocalCoordStore {
   }
 
   // Append-only incremental event log (shared-operational store changes).
+  // Carries the full document payload (`doc`) so a reconnecting / standby
+  // instance can APPLY the change locally, plus a monotonic per-key `version`
+  // for last-writer-wins conflict resolution. Device-specific keys must never
+  // be appended here (the sync engine enforces the allowlist).
   async appendEvent(evt) {
     let seq = 0;
     await this._update(EVENTLOG_KEY, (cur) => {
       const log = (cur && typeof cur === 'object' && Array.isArray(cur.events)) ? cur : { seq: 0, events: [] };
       seq = (log.seq || 0) + 1;
-      const e = { seq, key: evt.key, version: evt.version || null, instanceId: evt.instanceId || null, token: evt.token || null, ts: evt.ts || this.now() };
+      const e = {
+        seq,
+        key: evt.key,
+        version: evt.version || null,
+        doc: evt.doc !== undefined ? evt.doc : null,
+        instanceId: evt.instanceId || null,
+        token: evt.token || null,
+        ts: evt.ts || this.now(),
+      };
       const events = log.events.concat(e);
       if (events.length > EVENTLOG_CAP) events.splice(0, events.length - EVENTLOG_CAP);
       return { seq, events };

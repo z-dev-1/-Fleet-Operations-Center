@@ -35,6 +35,7 @@ const crypto = require('crypto');
 const gate = require('./mode-gate');
 const { LocalCoordStore } = require('./coord-store');
 const { LeaseManager } = require('./lease-manager');
+const { SyncEngine, isShared } = require('./sync-engine');
 let logger; try { logger = require('../utils/logger')('cluster'); } catch (_) { logger = { info() {}, warn() {} }; }
 
 // ── Instance identity (stable per machine+install, unique per instance) ──────
@@ -64,6 +65,7 @@ function _freshState() {
     lastSyncSeq: 0,
     coord: null,
     lease: null,              // LeaseManager instance (Stage 2), when enabled
+    sync: null,               // SyncEngine instance (Stage 4), when enabled
   };
 }
 let _state = _freshState();
@@ -152,6 +154,18 @@ function start(opts) {
     now: lo.now, setTimer: lo.setTimer, clearTimer: lo.clearTimer,
     onChange: _onLeaseChange,
   });
+  // Stage 4: the sync engine shares committed operational state via the event
+  // log. It PRODUCES only when we're the leader (isLeader) and CONSUMES always
+  // (so a standby stays current and a reconnecting instance catches up).
+  _state.sync = new SyncEngine({
+    coord: _state.coord,
+    store: opts.store,
+    instanceId: _state.instanceId,
+    isLeader: () => isLeader(),
+    getToken: () => _state.fencingToken,
+    now: lo.now,
+    onApplied: (key, version) => { _state.lastSyncSeq = _state.sync ? _state.sync.lastSyncSeq : _state.lastSyncSeq; },
+  });
   _state.lease.start();
   return getStatus();
 }
@@ -207,6 +221,25 @@ function mayRunProduction() {
   return isLeader();
 }
 
+// ── Shared-state sync (Stage 4) ─────────────────────────────────────────────
+// publishSharedKey(key) — the leader calls this AFTER committing a change to a
+// shared-operational store key, to broadcast it to the other instance. No-op
+// when the cluster is OFF, the key isn't shared, or we aren't the leader.
+async function publishSharedKey(key) {
+  if (!_state.enabled || !_state.sync) return { ok: false, skipped: 'disabled' };
+  return _state.sync.publish(key);
+}
+// pullSharedState() — every instance calls this (on a timer + on reconnect) to
+// apply any committed changes it is missing. No-op when the cluster is OFF.
+async function pullSharedState(limit) {
+  if (!_state.enabled || !_state.sync) return { ok: false, skipped: 'disabled', applied: 0 };
+  const r = await _state.sync.pull(limit);
+  if (r && typeof r.cursor === 'number') _state.lastSyncSeq = r.cursor;
+  return r;
+}
+function isSharedKey(key) { return isShared(key); }
+function getSyncState() { return _state.sync ? _state.sync.getState() : null; }
+
 // Internal: used by the (future) lease loop to record the held token.
 function _setLease(token, expiresAt) { _state.fencingToken = token; _state.leaseExpiresAt = expiresAt; }
 
@@ -237,7 +270,9 @@ function getLeaseState() { return _state.lease ? _state.lease.getState() : null;
 
 module.exports = {
   init, start, stop, isEnabled, getInstanceId, getDeviceId, getRole, getCoord, isLeader,
-  canSideEffect, assertCanSideEffect, mayRunProduction, getStatus, getLeaseState, _setLease, MODES: gate.MODES, _reset,
+  canSideEffect, assertCanSideEffect, mayRunProduction,
+  publishSharedKey, pullSharedState, isSharedKey, getSyncState,
+  getStatus, getLeaseState, _setLease, MODES: gate.MODES, _reset,
   // expose the coord-store ctor for the harness/tests
   LocalCoordStore,
 };
