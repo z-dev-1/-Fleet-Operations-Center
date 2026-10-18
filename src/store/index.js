@@ -165,6 +165,12 @@ const REGISTRY = {
   // which the memory service also reads and ranks. Operator-confirmed memory
   // always outranks ai_inferred. See src/ai/memory.js.
   aiMemory:                () => path.join(P.dataDir, 'ai_memory.json'),
+  // Unified AI Core durable action receipts (2026-10, spec §19) — one durable
+  // record per executed production action: type, entity, requester, approver,
+  // executing instance, fencing token, timings, source read-back, verified
+  // flag. AI replies reference the executor result via these; never assume
+  // success. Bounded ring. See src/ai/actions.js.
+  aiActionReceipts:        () => path.join(P.dataDir, 'ai_action_receipts.json'),
   // Digital FAS coverage profile (2026-09) — Zila's assigned coverage derived
   // from the distinct operators (SCAC/carrier) + domiciles present in the
   // authoritative synced fleetData. Verified-vs-stale tracked; refreshed on
