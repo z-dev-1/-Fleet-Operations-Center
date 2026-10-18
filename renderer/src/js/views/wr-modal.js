@@ -1774,18 +1774,22 @@ async function _runAIAssist() {
     + (uptake ? 'Uptake Insights: ' + uptake + '\n' : '')
     + vendorBookCtx
     + domicileBookCtx
-    + '\nRULES — READ CAREFULLY, this decides whether ONE or MULTIPLE work orders get created:\n'
-    + '- DEFAULT (no dealer/vendor named at all): hasRepair=true, isTow=false, vendor="" (empty — AAP auto-assigns the primary/default vendor). ONE work order. This is the common case: the user just states the problem.\n'
-    + '- THE MOMENT A SPECIFIC DEALER/VENDOR IS NAMED as where the unit should go (e.g. "send to gabriellis", "needs to go to Allegiance Scranton", "to the pete store", "take it to <dealer>"): that MEANS the physical unit must be moved there -> isTow=true, towDirection="to-dealer", vendor = the EXACT dealer name from VENDOR BOOK. Naming a dealer as a destination IS the tow signal — the user does not need to separately say the word "tow".\n'
-    + '- hasRepair=true whenever an actual mechanical problem/symptom is stated (e.g. "check engine light", "brakes", "won\'t start", "coolant leak"). Naming a dealer destination does NOT remove the repair — "unit has check engine light, needs to go to gabriellis from ABE40" = hasRepair=true AND isTow=true (repair WR + tow WR, both created).\n'
-    + '- DIRECTION IS CRITICAL — read the user\'s words and set towDirection + pickup/destination to match EXACTLY what they said (do not assume to-dealer):\n'
-    + '    * TO DEALER ("send/take/bring TO <dealer>", "needs to go to <dealer>"): towDirection="to-dealer", pickup=home domicile (<SITE>), destination=the named dealer.\n'
-    + '    * BACK TO YARD ("return tow from dealer", "bring/tow it BACK to <SITE>/home/yard", "from <dealer> to <SITE>", "pick up from dealer"): towDirection="return-to-yard", pickup=the DEALER (where the unit is now), destination=the home yard/<SITE>.\n'
-    + '    * BETWEEN YARDS ("from <SITE_A> to <SITE_B>", "move from one yard to another", neither end is a dealer): towDirection="yard-to-yard", pickup=the origin yard, destination=the target yard.\n'
-    + '    The words "from X to Y" mean pickup=X, destination=Y — honor that literally. "back"/"return" always means the unit is currently at the dealer and is coming home.\n'
-    + '- Only the GENERIC phrase "send to dealer" with NO specific name and NO destination (just saying the make should decide) is NOT a tow — leave vendor by make convention below, isTow=false:\n'
-    + '    Volvo/Mack\u2192"Volvo (ASIST)", Kenworth\u2192"Kenworth (PACCAR)", Peterbilt\u2192"Peterbilt (PACCAR)", Freightliner\u2192"Freightliner (DAIMLER)"\n'
-    + '- Safety/brakes/fire \u2192 urgent=true\n'
+    + '\nRULES — READ CAREFULLY. Interpret the user\'s words LITERALLY. Do not add intent they did not state. This decides ONE vs MULTIPLE work orders, the vendor, and urgency:\n'
+    + '- URGENCY IS EXPLICIT ONLY: set urgent=true ONLY if the user literally says "urgent" (or "emergency"/"ASAP"/"priority"). If they do NOT say it, urgent=false — EVEN for brakes/safety/fire. Never infer urgency from the problem type. When urgent=true and no reason was given, urgencyReason="DEA - Asset Shortage".\n'
+    + '- VENDOR = OVERRIDE vs AAP RECOMMENDATION:\n'
+    + '    * If the user NAMES a vendor/dealer to assign or send to ("assign to KWNE", "send to Kenworth dealer", "to Cummins Bristol", "gabriellis"): that is an OPERATOR OVERRIDE — set vendor = the EXACT matching name from the VENDOR BOOK.\n'
+    + '    * If the user names a BRAND/MAKE dealer with NO specific location ("send to Kenworth dealer", "to the pete store", "take it to a Freightliner dealer"): choose the CLOSEST vendor of that brand to the unit\'s domicile <SITE> using the VENDOR BOOK mileage (lowest "<SITE>:Nmi"). Set vendor to that exact closest vendor name.\n'
+    + '    * If the user names NO vendor at all: vendor="" (empty). Leave it to AAP\'s recommendation — do NOT guess a vendor.\n'
+    + '- MOVING THE UNIT = TOW. Naming a dealer as a DESTINATION the unit must go to ("send/take/bring/needs to go TO <dealer>", "from <X> to <dealer>") means the physical unit is towed there -> isTow=true. Naming a dealer is the tow signal; the word "tow" is not required.\n'
+    + '- REPAIR vs TOW-ONLY (hasRepair):\n'
+    + '    * hasRepair=true when a mechanical problem/symptom is stated ("check engine light", "air leak", "brakes", "won\'t start"). A named dealer destination does NOT remove the repair — "air leak, send to Cummins Bristol from ABE" = hasRepair=true AND isTow=true (TWO work orders: the repair WR with vendor=Cummins, plus the tow WR).\n'
+    + '    * hasRepair=false when the user ONLY asks to move the unit and states NO mechanical problem — e.g. "tow back from dealer", "return tow from the shop", "bring it back to the yard". That is a TOW-ONLY request: isTow=true, hasRepair=false, areaPairs=[] (no repair WR, tow WR only).\n'
+    + '- TOW DIRECTION — read the words literally; do not assume to-dealer:\n'
+    + '    * TO DEALER ("send/take/bring TO <dealer>", "from <SITE> to <dealer>"): towDirection="to-dealer", pickup=home domicile <SITE>, destination=the named dealer (use its address; if the user typed a full address like "Cummins Bristol 2727 Ford Road Bristol PA 19007", use THAT address for the destination).\n'
+    + '    * BACK TO YARD ("tow back from dealer", "return tow", "bring/tow it BACK to <SITE>/home/yard", "from <dealer> to <SITE>", "pick up from dealer"): towDirection="return-to-yard", pickup=the DEALER (where the unit is now), destination=the home yard <SITE>.\n'
+    + '    * BETWEEN YARDS ("from <SITE_A> to <SITE_B>", neither end a dealer): towDirection="yard-to-yard", pickup=origin yard, destination=target yard.\n'
+    + '    "from X to Y" means pickup=X, destination=Y — honor it literally. "back"/"return" means the unit is at the dealer and is coming home.\n'
+    + '- INTEGRATED VENDORS (automated dealer workflow via Decisiv/portal): Kenworth (PACCAR), Peterbilt (PACCAR), Volvo (ASIST), Mack (ASIST), Freightliner (DAIMLER). When the chosen/override vendor is one of these AND the unit is being sent to that dealer (to-dealer tow), set needsDealerWorkOrder=true (a dealer WO/tracking event is also needed). For non-integrated vendors, needsDealerWorkOrder=false.\n'
     + '- For Predictive Maintenance: title must include "Predictive Maintenance", reference Uptake data in comments\n'
     + '- EXCEPTION \u2014 if the title clearly says TRACKING/MONITORING ONLY: return areaPairs=[] and base issue/comments only on the referenced data.\n'
     + '- TITLE: produce a clean, specific summary of what the user asked, MAX 90 characters.\n'
@@ -1795,8 +1799,8 @@ async function _runAIAssist() {
     + '- COMMENTS when isTow=false (the normal case): describe what we need from the vendor to fix the problem. NO tow line.\n\n'
     + 'VALID AREAS/SUBCATEGORIES (use EXACT values):\n' + areaList + '\n\n'
     + 'Respond ONLY with valid JSON:\n'
-    + '{"title":"<=90 char summary","issue":"2-3 sentence description","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","urgent":false,"comments":"what we need (+ tow line only if isTow)","hasRepair":true,"isTow":false,"towDirection":"to-dealer|return-to-yard|yard-to-yard|","towPickup":{"name":"","street":"","city":"","state":"","zip":""},"towDestination":{"name":"","street":"","city":"","state":"","zip":""}}\n'
-    + 'areaPairs can have 1-4 pairs (the repair components). vendor: EXACT name from VENDOR BOOK if a dealer is named, else empty. Remember: naming ANY specific dealer as destination = isTow=true, no "tow" keyword required.';
+    + '{"title":"<=90 char summary","issue":"2-3 sentence description","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","vendorIsOverride":false,"urgent":false,"urgencyReason":"","comments":"what we need (+ tow line only if isTow)","hasRepair":true,"isTow":false,"needsDealerWorkOrder":false,"towDirection":"to-dealer|return-to-yard|yard-to-yard|","towPickup":{"name":"","street":"","city":"","state":"","zip":""},"towDestination":{"name":"","street":"","city":"","state":"","zip":""}}\n'
+    + 'Set vendorIsOverride=true when YOU set vendor because the user named one (an override); false when vendor is empty (defer to AAP). areaPairs can have 1-4 pairs; empty [] for tow-only. urgent=true ONLY if the user literally said urgent. Remember: naming ANY specific dealer as destination = isTow=true (no "tow" keyword needed); "tow back"/"return" with no stated problem = tow-only (hasRepair=false, areaPairs=[]).';
 
   try {
     // Client-side timeout so a slow/stuck AI backend never leaves AI Fill
@@ -1849,20 +1853,29 @@ async function _runAIAssist() {
       // AI returns display text; resolve it to the live tree's codes and drive
       // the cascading selects (L1 -> L2 -> L3).
       _applyAiAreaToRow(i, pair.area || '', pair.subcategory || '');
-      // Show tow section if area is TOW
+      // Show tow section if area is TOW. Do NOT force urgent here — urgency is
+      // explicit-only (set below strictly from ai.urgent, which the prompt
+      // only returns true when the user literally said "urgent").
       if (i === 0 && (pair.area || '').toUpperCase() === 'TOW') {
         const towWrap = _el('wr-tow-wrap');
         if (towWrap) towWrap.style.display = '';
-        // Auto-set urgent
-        _el('wr-urgent').checked = true;
-        _el('wr-urgency-reason-wrap').style.display = '';
-        _el('wr-urgency-reason').value = 'DEA - Asset Shortage';
       }
     });
-    if (ai.urgent) {
-      _el('wr-urgent').checked = true;
-      _el('wr-urgency-reason-wrap').style.display = '';
-      _el('wr-urgency-reason').value = 'DEA - Asset Shortage';
+    // Urgency: EXPLICIT ONLY. Mirror exactly what the AI returned (the prompt
+    // sets urgent=true only when the user literally said urgent). When not
+    // urgent, make sure the box is unchecked + reason hidden.
+    {
+      const urgentEl = _el('wr-urgent');
+      const reasonWrap = _el('wr-urgency-reason-wrap');
+      const reasonEl = _el('wr-urgency-reason');
+      if (ai.urgent) {
+        if (urgentEl) urgentEl.checked = true;
+        if (reasonWrap) reasonWrap.style.display = '';
+        if (reasonEl) reasonEl.value = (ai.urgencyReason && String(ai.urgencyReason).trim()) || 'DEA - Asset Shortage';
+      } else {
+        if (urgentEl) urgentEl.checked = false;
+        if (reasonWrap) reasonWrap.style.display = 'none';
+      }
     }
     if (ai.comments) { const el = _el('wr-comments'); if (el) el.value = ai.comments; }
 
