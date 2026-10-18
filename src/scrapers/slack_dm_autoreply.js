@@ -540,7 +540,19 @@ function _maybeDraftWR(unitToken) {
 // Given the resolved fleet row, decide whether an auto-flip is allowed and
 // perform it. Returns an object that overrides the draft reply/scope, or null
 // if this isn't actually a flip we should handle (let the normal AI reply stand).
-async function _maybeAutoFlip(unitToken, tagPrefix) {
+//
+// PHASE D (spec #5/#12): the actual lifecycle mutation NO LONGER calls
+// setLifecycleState() directly. It is routed through the Digital FAS verified
+// executor (MOVE_UNIT), which enforces requester-authorization, the power-unit
+// gate, idempotency, and — critically — SOURCE READ-BACK VERIFICATION before
+// any success is claimed. "Done — flipped" is only said when the executor
+// returns a VERIFIED done. If the write may have landed but could not be
+// verified, we return EXECUTION_UNCERTAIN wording and escalate — never a blind
+// "Done". The AI/Slack path only PROPOSES; Digital FAS is the sole executor.
+//
+// senderId/senderName identify the ORIGINAL REQUESTER so the executor can gate
+// the action on that person's real permissions (never widened here).
+async function _maybeAutoFlip(unitToken, tagPrefix, senderId, senderName) {
   const row = _findFleetRow(unitToken);
   // Unknown unit — let the AI's normal reply handle it (it'll ask for the unit #).
   if (!row) return null;
@@ -585,36 +597,99 @@ async function _maybeAutoFlip(unitToken, tagPrefix) {
     };
   }
 
-  // Allowed — perform the flip to Active / Healthy (UI convention).
+  // Allowed to PROPOSE the flip — route through the Digital FAS verified
+  // executor instead of mutating AAP directly. The executor re-checks the
+  // requester's authorization + the power-unit gate, applies idempotency, runs
+  // the real MOVE_UNIT action, then VERIFIES via AAP read-back. We report the
+  // outcome truthfully based on the executor's status — never "Done" unless the
+  // source confirmed it.
   try {
-    const { setLifecycleState } = require('./setLifecycle');
-    logger.info(`[SlackDM] Auto-flip: ${unitId} ${state}/${reason} -> Active (Healthy)`);
-    const res = await setLifecycleState({ equipmentId: unitId, assetUrl: row.assetUrl, state: 'Active', reason: 'Healthy' });
-    if (res && res.success) {
+    let executor, profilesMod;
+    try { executor = require('../orcha/fas/executor'); } catch (_) { executor = null; }
+    try { profilesMod = require('../orcha/fas/sender-profiles'); } catch (_) { profilesMod = null; }
+    if (!executor || !profilesMod) {
+      // Digital FAS layer unavailable — do NOT fall back to a direct mutation.
+      // Escalate for manual action rather than bypass verification.
+      logger.warn(`[SlackDM] Auto-flip: Digital FAS executor unavailable for ${unitId} — escalating (no direct mutation)`);
       return {
-        reply: `Done — ${unitId} is flipped back to active 👍`,
-        inScope: true,
-        category: null,
-        title: null,
-        _flip: { unitId, action: 'flipped' },
+        reply: `I can't complete the flip on ${unitId} automatically right now — I'll take care of it and follow up.`,
+        inScope: false, category: 'action', title: `Flip pending (executor unavailable): ${unitId}`,
+        _flip: { unitId, action: 'executor-unavailable' },
       };
     }
-    // Automation ran but AAP didn't confirm — escalate with the failure detail.
+
+    // Resolve the ORIGINAL REQUESTER's profile + an immutable snapshot so the
+    // executor gates on THEIR real permissions (spec #5/#8). The AI/Slack path
+    // can never widen them. The approver context is the same requester here
+    // (an internal operator's own DM, or a scoped carrier) — the executor
+    // enforces lifecycle 3-state + per-unit scope regardless.
+    const requesterProfile = profilesMod.resolveSender(senderId || '', senderName || '');
+    const requesterSnapshot = {
+      slackId: requesterProfile.slackId || senderId || '',
+      contactId: requesterProfile.contactId || null,
+      name: requesterProfile.name || senderName || '',
+      identityType: requesterProfile.type,
+      enabled: requesterProfile.enabled !== false,
+      operators: (requesterProfile.operators || []).slice(),
+      domiciles: (requesterProfile.domiciles || []).slice(),
+      allowedDataCategories: (requesterProfile.allowedDataCategories || []).slice(),
+      permittedRequestTypes: (requesterProfile.permittedRequestTypes || []).slice(),
+      lifecyclePermission: requesterProfile.lifecyclePermission || 'not_allowed',
+      createWrPermission: requesterProfile.createWrPermission || 'not_allowed',
+      capturedAt: new Date().toISOString(),
+    };
+
+    logger.info(`[SlackDM] Auto-flip via Digital FAS: ${unitId} ${state}/${reason} -> Active (Healthy) [requester=${requesterSnapshot.slackId || 'unknown'}]`);
+    const r = await executor.executeVerified(
+      'MOVE_UNIT',
+      { unit: unitId, assetUrl: row.assetUrl, state: 'Active', reason: 'Healthy', slackId: senderId || '' },
+      { profile: requesterProfile, requesterSnapshot }
+    );
+
+    // VERIFIED success — the executor confirmed the state via AAP read-back
+    // (or an idempotent prior done). Only now may we say "Done".
+    if (r && r.status === 'done' && r.verified) {
+      return {
+        reply: `Done — ${unitId} is flipped back to active 👍`,
+        inScope: true, category: null, title: null,
+        _flip: { unitId, action: 'flipped', verified: true },
+      };
+    }
+
+    // EXECUTION_UNCERTAIN — the write may have landed but could not be verified
+    // yet (deferred AAP read-back / awaiting sync reconcile). NEVER claim
+    // success. Tell the truth and escalate so it's reconciled/retried safely;
+    // the executor holds it in a verifying state (not re-applied).
+    if (r && (r.status === 'verifying' || r.deferred)) {
+      return {
+        reply: `I submitted the flip on ${unitId} but couldn't confirm it actually landed yet — I'll verify it went through and follow up before I call it complete.`,
+        inScope: false, category: 'action', title: `Flip EXECUTION_UNCERTAIN: ${unitId}`,
+        _flip: { unitId, action: 'execution-uncertain', status: r.status },
+      };
+    }
+
+    // BLOCKED by authorization / power-unit gate — explain, do not flip.
+    if (r && r.status === 'blocked') {
+      return {
+        reply: `I can't flip ${unitId} automatically — ${r.error || 'it is not authorized for an automatic lifecycle change'}. I'll review it and follow up.`,
+        inScope: false, category: 'action', title: `Flip blocked: ${unitId}`,
+        _flip: { unitId, action: 'blocked-exec', reason: r.error },
+      };
+    }
+
+    // FAILED / UNVERIFIED — the action ran but did not succeed or did not
+    // verify. Truthful failure, escalate.
     return {
-      reply: `Tried to flip ${unitId} but it didn't go through (${(res && res.message) || 'AAP did not confirm'}). ` +
+      reply: `Tried to flip ${unitId} but it didn't go through (${(r && r.error) || 'not confirmed'}). ` +
              `Let me look into it and get it flipped.`,
-      inScope: false,
-      category: 'action',
-      title: `Flip failed: ${unitId}`,
-      _flip: { unitId, action: 'failed', message: res && res.message },
+      inScope: false, category: 'action', title: `Flip failed: ${unitId}`,
+      _flip: { unitId, action: 'failed', status: r && r.status, message: r && r.error },
     };
   } catch (e) {
     logger.warn(`[SlackDM] Auto-flip threw for ${unitId}: ${e.message}`);
     return {
       reply: `Ran into a snag flipping ${unitId} — I'll get it sorted and follow up.`,
-      inScope: false,
-      category: 'action',
-      title: `Flip error: ${unitId}`,
+      inScope: false, category: 'action', title: `Flip error: ${unitId}`,
       _flip: { unitId, action: 'error', message: e.message },
     };
   }
@@ -1318,7 +1393,7 @@ async function pollDMAutoReplyOnce(log) {
         // overrides the AI draft so the reply reflects what actually happened.
         const _flipUnit = _detectFlipRequest(msg.text || '', historyMsgs);
         if (_flipUnit) {
-          const flipResult = await _maybeAutoFlip(_flipUnit, msg.userId ? `<@${msg.userId}> ` : '');
+          const flipResult = await _maybeAutoFlip(_flipUnit, msg.userId ? `<@${msg.userId}> ` : '', msg.userId, dm.name);
           if (flipResult) {
             draft.reply    = flipResult.reply;
             draft.inScope  = flipResult.inScope;
@@ -1759,4 +1834,9 @@ module.exports = {
   // Test-only: expose the restored thread-reply baseline so restart-recovery
   // (loading slackDMThreadReplyCount at startup) can be asserted.
   _getThreadReplyCountForTest: () => _threadReplyCount,
+  // Test-only (Phase D): the auto-flip handler, now routed through the Digital
+  // FAS verified executor. Exposed so the no-direct-mutation + verified-success
+  // + EXECUTION_UNCERTAIN behavior can be asserted.
+  _maybeAutoFlip,
+  _detectFlipRequest,
 };
