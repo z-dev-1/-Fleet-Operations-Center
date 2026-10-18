@@ -173,4 +173,59 @@ function _modelHint(lane, task) {
   return 'auto (relay balanced)';
 }
 
-module.exports = { classifyTask, recommendLane, route, LANES, TASK_TYPES };
+/**
+ * decide(request, opts) -> { task, recommendation, effectiveLane, userOverride,
+ *                            preference, rationale }
+ * Make routing a REAL decision a caller can honor (spec §7), while PRESERVING
+ * the user's model-preference controls: if the user pinned a concrete lane
+ * (relay preference 'orcha' or 'claude'), that OVERRIDES automatic routing;
+ * 'auto'/'balanced' let the task-aware recommendation drive.
+ *
+ * opts.performance (optional, spec §8): a { laneScore(lane, taskType) -> number
+ * | null } hook so later phases can nudge the choice by historical success.
+ * It is ADVISORY and only used to break a tie between equally-eligible lanes;
+ * it never overrides health or an explicit user preference, and a null/low
+ * sample returns null (no influence).
+ */
+function decide(request, opts) {
+  opts = opts || {};
+  const { task, recommendation } = route(request, opts);
+  const preference = opts.preference || _relayPreference();
+
+  // User pinned a concrete lane -> honor it (constrains/overrides automatic).
+  if (preference === 'orcha' || preference === 'claude') {
+    return {
+      task, recommendation,
+      effectiveLane: preference,
+      userOverride: true,
+      preference,
+      rationale: 'user preference "' + preference + '" overrides automatic routing',
+    };
+  }
+
+  // auto / balanced -> use the task-aware recommendation (already health-adjusted).
+  let effectiveLane = recommendation.lane;
+  let rationale = recommendation.rationale;
+
+  // Optional performance tie-break (spec §8, advisory only).
+  if (typeof opts.performance === 'function' && (effectiveLane === 'auto')) {
+    try {
+      const health = (opts.laneHealth) || _laneHealth(opts);
+      const candidates = ['orcha', 'claude'].filter((l) => health[l] !== false);
+      let best = null, bestScore = -1;
+      for (const l of candidates) {
+        const s = opts.performance(l, task.taskType);
+        if (typeof s === 'number' && s > bestScore) { bestScore = s; best = l; }
+      }
+      if (best) { effectiveLane = best; rationale += '; performance tie-break -> ' + best + ' (score ' + bestScore.toFixed(2) + ')'; }
+    } catch (_) { /* advisory only */ }
+  }
+
+  return { task, recommendation, effectiveLane, userOverride: false, preference, rationale };
+}
+
+function _relayPreference() {
+  try { const s = require('../orcha/relay').getStatus(); return s && s.preference; } catch (_) { return 'auto'; }
+}
+
+module.exports = { classifyTask, recommendLane, route, decide, LANES, TASK_TYPES };
