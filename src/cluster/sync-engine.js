@@ -52,6 +52,20 @@ const SHARED_KEYS = [
   'longDwellStore',
   // Cross-host dedup ledgers (so an action fires once fleet-wide)
   'fasInboundClaims', 'fasIdempotency', 'carrierBriefingLog',
+  // Slack auto-reply state (Stage 13) — MUST sync so a promoted standby
+  // continues EXACTLY where the leader left off: the config keys carry the
+  // enabled flag + per-thread/channel `lastSeenTs` watermark (so the standby
+  // answers only NEW messages, never catches up on history), and the reply
+  // logs are the fleet-wide dedup ledger (so a message answered on one host is
+  // never re-answered on the other). Thread-reply-count + pending-confirm +
+  // inbound lifecycle keep thread awareness and in-flight state consistent
+  // across failover. Together with the leader gate (_mayPollSlack) and the
+  // engines' first-sight baseline, this is what makes leader-time Slack parity
+  // safe — no double-reply, no catch-up storm.
+  'slackDMAutoReplyConfig', 'slackChannelWatchConfig',
+  'slackDMReplies', 'slackChannelReplies',
+  'slackDMThreadReplyCount', 'slackMentionThreads',
+  'slackJustMePendingConfirm', 'slackInboundLifecycle',
 ];
 const SHARED_SET = new Set(SHARED_KEYS);
 
