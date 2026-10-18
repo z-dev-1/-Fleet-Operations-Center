@@ -29,6 +29,34 @@ const { ConfigError } = require('../utils/errors');
 // AI handlers register (always true before any Slack message is processed).
 let _appCtx = null;
 
+// ── AI Core observability wrapper (spec §9/§4 migration) ────────────────────
+// Phase 4: route UI/Fleet-Chat/DBR/WBR AI surfaces THROUGH AI Core for a
+// standardized operational trace + task-aware routing classification, WITHOUT
+// changing the underlying reasoning path (the relay cascade still answers).
+// Best-effort: tracing never breaks a surface. Low-level non-AI helpers are
+// deliberately NOT wrapped.
+let _aiTrace; try { _aiTrace = require('../ai/trace'); } catch (_) { _aiTrace = null; }
+let _aiRouter; try { _aiRouter = require('../ai/router'); } catch (_) { _aiRouter = null; }
+async function _withAiCore(source, message, fn) {
+  if (!_aiTrace) return fn();
+  let routing = null;
+  try { if (_aiRouter) routing = _aiRouter.route({ source, message }); } catch (_) {}
+  const tr = _aiTrace.start({
+    source,
+    taskType: routing && routing.task ? routing.task.taskType : null,
+    lane: routing && routing.recommendation ? routing.recommendation.lane : null,
+  });
+  if (routing && routing.recommendation) { try { tr.setModel(routing.recommendation.modelHint, routing.recommendation.lane); } catch (_) {} }
+  try {
+    const res = await fn();
+    tr.setValidation(true, false).setOutcome('answer').finish({ outcome: 'answer' });
+    return res;
+  } catch (e) {
+    tr.setError(e).setOutcome('error').finish({ outcome: 'error' });
+    throw e;
+  }
+}
+
 // -- Phase 3: IPC rate limiter for expensive AI operations --
 // Prevents renderer from flooding AI backends (Bedrock $$, Orcha WS) with
 // concurrent requests. Simple per-channel concurrency cap: excess calls queue
@@ -941,6 +969,9 @@ function registerAIHandlers(ctx) {
   // all callers (Daily Call AI Review, WBR Generate, etc.)
   handle('ai:ask', async (_e, prompt) => {
     requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
+    // Phase 4: traced through AI Core (source 'ui') for observability + task
+    // routing classification. Reasoning path (relay cascade) is UNCHANGED.
+    return _withAiCore('ui', prompt, async () => {
     // FIX: ai:ask runs through a single-slot limiter (_aiAskLimit). If the
     // underlying relay.ask HANGS (Orcha WS down + claude-code stalling), the one
     // slot is never released, so the NEXT ai:ask (e.g. the next WR's AI Fill)
@@ -959,6 +990,7 @@ function registerAIHandlers(ctx) {
     // Normalize: relay.ask returns a raw string; callers expect { ok, text }
     if (typeof text === 'string') return { ok: true, text };
     return text; // in case it's already an object
+    });
   });
 
   // FAS knowledge base — the SINGLE SOURCE OF TRUTH for ownership / approval /
@@ -975,7 +1007,8 @@ function registerAIHandlers(ctx) {
   // Phase 3: rate-limited to 1 concurrent call
   handle('ai:chat', async (_e, prompt) => {
     requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
-    return _aiChatLimit(async () => {
+    // Phase 4: Fleet Chat traced through AI Core (source 'fleet_chat').
+    return _withAiCore('fleet_chat', prompt, async () => _aiChatLimit(async () => {
     // Inject Orcha system directive into every chat call
     const { ORCHA_DIRECTIVE } = require('../orcha/system-prompt');
     // Inject live fleet data summary
@@ -1000,7 +1033,7 @@ function registerAIHandlers(ctx) {
       if (typeof result === 'string') return { ok: true, text: result, path: 'fallback' };
       return { ...result, path: 'fallback' };
     }
-    });
+    }));
   });
 
   // Orcha config
