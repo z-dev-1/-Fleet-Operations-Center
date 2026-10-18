@@ -85,9 +85,20 @@ class LeaseManager {
     };
   }
 
-  // Eligible to hold leadership? Only ACTIVE instances lead; STANDBY/DEV never
-  // do (they must never perform production side-effects).
-  _eligible() { return this.mode === 'ACTIVE'; }
+  // Eligible to HOLD leadership (i.e. to fail over when the leader dies)?
+  // ACTIVE and STANDBY are BOTH eligible — that is the whole point of a
+  // standby: it takes over when the primary's lease expires. The difference is
+  // a PREFERENCE (see _tickFollower), NOT an eligibility block. Once a STANDBY
+  // becomes leader, the MODE GATE still governs WHAT it may do — browser/AEA
+  // tasks fail closed on a headless host — so "a standby performs no
+  // side-effects it can't safely do" is enforced there, not by refusing to
+  // lead. DEVELOPMENT is the ONLY mode that must never lead (isolated dev).
+  _eligible() { return this.mode === 'ACTIVE' || this.mode === 'STANDBY'; }
+
+  // Does this instance PREFER to hold the lease proactively (ACTIVE), or only
+  // take over when there is no live leader (STANDBY)? Both can lead; this only
+  // affects whether we grab an idle lease eagerly vs. wait as the backup.
+  _prefersLeadership() { return this.mode === 'ACTIVE'; }
 
   start() {
     if (this._running) return;
@@ -170,7 +181,7 @@ class LeaseManager {
   }
 
   async _tickFollower() {
-    // STANDBY/DEV never acquire leadership — they only observe.
+    // DEVELOPMENT never acquires leadership — it only observes (isolated dev).
     if (!this._eligible()) {
       const cur = await this.coord.getLeadership();
       this._onChange({ type: 'observe', leader: cur && cur.leader, state: this.getState() });
@@ -180,18 +191,21 @@ class LeaseManager {
     const now = this._now();
     const leaseLive = cur && cur.expiresAt && cur.expiresAt > now && cur.leader;
     if (leaseLive && cur.leader !== this.instanceId) {
-      // Someone else holds a LIVE lease — stay follower. (No heartbeat-only
-      // takeover: we wait for genuine expiry.)
+      // Someone else holds a LIVE lease — stay follower regardless of our mode.
+      // (No heartbeat-only takeover: we wait for genuine expiry — spec §3.)
       this._onChange({ type: 'standby', leader: cur.leader, state: this.getState() });
       return;
     }
-    // Either no leader, the lease has EXPIRED, or it's already us → try CAS
-    // acquire. CAS makes a two-follower race safe: exactly one wins.
-    const a = await this.coord.tryAcquireLeadership(this.instanceId, 'ACTIVE', this.leaseMs);
+    // No live leader (none, or the lease EXPIRED), or it's already us → acquire.
+    // BOTH ACTIVE and STANDBY do this: an ACTIVE grabs an idle lease eagerly;
+    // a STANDBY takes over precisely because the primary's lease has lapsed
+    // (laptop asleep/off/crashed) — that IS the failover. CAS makes a race
+    // safe: exactly one wins. The instance's real mode is recorded on the lease.
+    const a = await this.coord.tryAcquireLeadership(this.instanceId, this.mode, this.leaseMs);
     if (a.ok) {
-      this._promote(a.record, 'acquired');
+      this._promote(a.record, this._prefersLeadership() ? 'acquired' : 'failover-takeover');
     } else {
-      // Lost the race (another follower won) — remain follower.
+      // Lost the race (another instance won) — remain follower.
       this._onChange({ type: 'standby', leader: a.record && a.record.leader, state: this.getState() });
     }
   }

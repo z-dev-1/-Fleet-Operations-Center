@@ -99,12 +99,30 @@ describe('cluster Stage 2 — lease manager (deterministic failover harness)', (
     expect(A.fencingToken).toBe(1);
   });
 
-  it('STANDBY-mode instance NEVER acquires leadership, even when no leader exists', async () => {
+  it('STANDBY takes over when NO live leader exists (that IS failover)', async () => {
     const S = mgr('S', 'STANDBY');
-    await S._tickOnce();                   // no leader present, but S is standby-only
-    expect(S.isLeader()).toBe(false);
+    await S._tickOnce();                   // no leader present → standby must take over
+    expect(S.isLeader()).toBe(true);
+    expect(S.fencingToken).toBe(1);
     const cur = await coord.getLeadership();
-    expect(cur).toBeNull();               // nothing acquired
+    expect(cur.leader).toBe('S');
+    expect(cur.mode).toBe('STANDBY');      // the lease records the real mode
+  });
+
+  it('STANDBY does NOT take over while a primary holds a LIVE lease', async () => {
+    const A = mgr('A', 'ACTIVE'); const S = mgr('S', 'STANDBY');
+    await A._tickOnce();                   // A (primary) leads
+    await S._tickOnce();                   // S sees a live leader → stays follower
+    expect(A.isLeader()).toBe(true);
+    expect(S.isLeader()).toBe(false);
+  });
+
+  it('DEVELOPMENT mode NEVER acquires leadership, even with no leader', async () => {
+    const D = mgr('D', 'DEVELOPMENT');
+    await D._tickOnce();
+    expect(D.isLeader()).toBe(false);
+    const cur = await coord.getLeadership();
+    expect(cur).toBeNull();               // dev instance never leads
   });
 
   it('two eligible followers racing for an empty lease: exactly one wins (CAS)', async () => {
