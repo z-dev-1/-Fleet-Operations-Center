@@ -80,6 +80,7 @@ function _freshState() {
     autoFailover: true,       // can be toggled from the dashboard (Stage 7)
     coordKind: 'local',       // 'local' | 'http' — which coordinator backend (Stage 8)
     _applying: false,         // true while applying pulled docs (publish guard, Stage 9)
+    aeaKeepalive: null,       // AEA keep-alive module when running (Stage 12)
   };
 }
 const FAILOVER_HISTORY_CAP = 50;
@@ -250,6 +251,22 @@ function start(opts) {
       });
     }
   } catch (_) {}
+  // Stage 12: unattended AEA keep-alive. On a host that pulls live AAP reads,
+  // refresh the short-lived AEA posture cookie on a timer so the standby stays
+  // live for the whole ~20h session window with no human interaction. No-op
+  // unless opted in (FLEET_AEA_KEEPALIVE / settings.cluster.aeaKeepalive), and
+  // only meaningful where live pull is possible — so gate on mayLivePull().
+  try {
+    if (mayLivePull()) {
+      const keepalive = require('./aea-keepalive');
+      _state.aeaKeepalive = keepalive;
+      keepalive.start({
+        checkMs: lo.aeaCheckMs, minAeaMin: lo.aeaMinMin,
+        setTimer: lo.setTimer, clearTimer: lo.clearTimer,
+      });
+    }
+  } catch (e) { logger.warn('[cluster] AEA keep-alive not started: ' + e.message); }
+
   _state.lease.start();
   // Stage 5: periodic sync pull so EVERY instance (leader + standby) stays
   // current from the event log. Interval is injectable for tests; defaults to
@@ -271,6 +288,7 @@ function start(opts) {
 }
 
 async function stop() {
+  if (_state.aeaKeepalive) { try { _state.aeaKeepalive.stop(); } catch (_) {} _state.aeaKeepalive = null; }
   try { const store = require('../store'); if (store.setWriteHook) store.setWriteHook(null); } catch (_) {}
   if (_state._syncTimer != null && _state._clearSyncTimer) { try { _state._clearSyncTimer(_state._syncTimer); } catch (_) {} }
   _state._syncTimer = null;
@@ -439,6 +457,7 @@ async function getDashboard() {
       isSelf: !!(shared.leader && shared.leader === self.instanceId),
     } : null,
     sync: { lastSyncSeq: sy ? sy.lastSyncSeq : _state.lastSyncSeq, sharedKeyCount: sy ? sy.sharedKeyCount : 0 },
+    aeaKeepalive: _state.aeaKeepalive ? _state.aeaKeepalive.getState() : null,
     failoverHistory: _state.failoverHistory.slice(0, 20),
   };
 }
