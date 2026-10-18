@@ -987,6 +987,7 @@ async function recoverAuth(reason, opts) {
 
 module.exports = {
   checkMwinit,
+  parseMidwayCookies, // Stage 10: browser_provider seeds a headless Playwright context from the same parsed cookies
   runMwinit,
   recoverAuth, // FIX (2026-10): single centralized recovery ladder every caller routes through
   injectCookies, // FEATURE (2026-07-23): now accepts optional target session
