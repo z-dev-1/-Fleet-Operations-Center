@@ -58,6 +58,17 @@ let _fasShadow; try { _fasShadow = require('../orcha/fas/shadow'); } catch (_) {
 // Digital FAS UNIFIED runner — decides per-mode who owns the reply (shadow =
 // legacy; approval = queue + legacy silent; autonomous = auto-send or queue).
 let _fasRunner; try { _fasRunner = require('../orcha/fas/runner'); } catch (_) { _fasRunner = null; }
+// Unified AI Core (Phase C): every inbound Slack message is routed through
+// aiCore.handleInbound, which delegates ENTIRELY to the FAS runner (identical
+// behavior) and adds a standardized trace. If AiCore is unavailable we fall
+// back to the FAS runner directly so Slack handling never breaks. _aiInbound()
+// is the single seam the call sites use.
+let _aiCore; try { _aiCore = require('../ai/core'); } catch (_) { _aiCore = null; }
+function _aiInbound(input, deps) {
+  if (_aiCore && typeof _aiCore.handleInbound === 'function') return _aiCore.handleInbound(input, deps);
+  if (_fasRunner && typeof _fasRunner.handleInbound === 'function') return _fasRunner.handleInbound(input, deps);
+  return Promise.resolve({ mode: 'disabled', letLegacyReply: true, outcome: 'no-runner' });
+}
 // Durable, atomic exactly-once inbound-message claim (spec v2). Acquired BEFORE
 // either engine processes a message so FAS + legacy can never both reply, a
 // retry/restart can't duplicate, and a technical fallback transfers ownership
@@ -1203,7 +1214,7 @@ async function pollDMAutoReplyOnce(log) {
             // contents — previously the FAS path was blind to these, which
             // thinned its answers and lowered its confidence.
             const _fasAttach = await _buildAttachmentContext(msg, downloadFileContent);
-            const _fr = await _fasRunner.handleInbound({
+            const _fr = await _aiInbound({
               engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
               channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
               isGroup: !!dm.isGroup, conversation: historyMsgs, attachments: _fasAttach,
@@ -1412,7 +1423,7 @@ async function pollDMAutoReplyOnce(log) {
         // never suppress or replace the legacy reply here.
         if (_fasRunner && _fasMode === 'shadow') {
           try {
-            await _fasRunner.handleInbound({
+            await _aiInbound({
               engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
               channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
               isGroup: !!dm.isGroup, conversation: historyMsgs, actualReply: draft.reply,
@@ -1617,7 +1628,7 @@ async function pollDMAutoReplyOnce(log) {
                 // recoverable review item and commits nothing — we do NOT advance
                 // latestThreadReplyTs so this reply is retried next poll.
                 const _fasAttachT = await _buildAttachmentContext(reply, downloadFileContent);
-                const _fr = await _fasRunner.handleInbound({
+                const _fr = await _aiInbound({
                   engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
                   channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
                   isGroup: !!dm.isGroup, conversation: threadContext, attachments: _fasAttachT,
@@ -1680,7 +1691,7 @@ async function pollDMAutoReplyOnce(log) {
             // In Shadow, record the comparison only — never suppress/replace.
             if (_fasRunner && _fasModeT === 'shadow') {
               try {
-                await _fasRunner.handleInbound({
+                await _aiInbound({
                   engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
                   channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
                   isGroup: !!dm.isGroup, conversation: threadContext, actualReply: draft.reply,

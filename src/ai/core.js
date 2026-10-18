@@ -191,24 +191,34 @@ async function run(request) {
  */
 async function handleInbound(request, deps) {
   request = request || {};
-  const src = _sourceMeta(request.source);
+
+  const fas = _fas();
+  if (!fas.runner || typeof fas.runner.handleInbound !== 'function') {
+    return { mode: 'disabled', letLegacyReply: true, outcome: 'ai-core-unavailable' };
+  }
+
+  // DUAL-SHAPE INPUT (Phase C migration seam). The live Slack call sites pass
+  // the FAS runner's NATIVE input shape ({ engine, slackId, senderName,
+  // channelId, ts, text, ... }). Detect that and pass it through UNCHANGED so a
+  // call site can swap `_fasRunner.handleInbound(x, deps)` ->
+  // `aiCore.handleInbound(x, deps)` with identical arguments and identical
+  // behavior — only adding a trace. The AiCore-shaped request
+  // ({ actor, source, message, metadata }) path is used by newer callers.
+  const isNativeRunnerInput = ('engine' in request || 'text' in request) &&
+    !('source' in request) && !('message' in request);
+
   const meta = request.metadata || {};
   const actor = request.actor || {};
 
   const tr = trace.start({
-    requestId: meta.requestId,
-    source: request.source || 'slack_dm',
-    actor,
+    requestId: meta.requestId || request.requestId,
+    source: isNativeRunnerInput ? _sourceFromEngine(request) : (request.source || 'slack_dm'),
+    actor: isNativeRunnerInput ? { slackId: request.slackId, name: request.senderName } : actor,
     taskType: (request.task && request.task.taskType) || null,
   });
 
-  const fas = _fas();
-  if (!fas.runner || typeof fas.runner.handleInbound !== 'function') {
-    tr.setError('FAS runner unavailable').setOutcome('error').finish({ outcome: 'error' });
-    return { mode: 'disabled', letLegacyReply: true, outcome: 'ai-core-unavailable', requestId: tr.requestId };
-  }
-
-  const input = {
+  const src = _sourceMeta(request.source);
+  const input = isNativeRunnerInput ? request : {
     engine: src.engine,
     slackId: actor.slackId || '',
     senderName: actor.name || actor.slackId || '',
@@ -242,6 +252,17 @@ async function handleInbound(request, deps) {
 }
 
 // ── Normalizers ──────────────────────────────────────────────────────────────
+
+// Derive a trace `source` label from a native runner input's engine/isSelf/
+// isGroup so traces are consistent regardless of which input shape was used.
+function _sourceFromEngine(input) {
+  if (input.isSelf) return 'self_dm';
+  const engine = input.engine || 'dm';
+  if (engine === 'channel' || input.isGroup) return 'slack_channel';
+  if (engine === 'report') return 'dbr';
+  if (input.threadTs) return 'slack_dm_thread';
+  return 'slack_dm';
+}
 
 function _normalizeConversation(convo) {
   if (!Array.isArray(convo)) return [];

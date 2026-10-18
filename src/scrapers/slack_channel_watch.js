@@ -34,6 +34,16 @@ const { trace } = require('./slack_decision_trace');
 let _fasShadow; try { _fasShadow = require('../orcha/fas/shadow'); } catch (_) { _fasShadow = { runShadow: () => {} }; }
 // Digital FAS UNIFIED runner — per-mode reply ownership (see orcha/fas/runner.js).
 let _fasRunner; try { _fasRunner = require('../orcha/fas/runner'); } catch (_) { _fasRunner = null; }
+// Unified AI Core (Phase C): route inbound through aiCore.handleInbound, which
+// delegates ENTIRELY to the FAS runner (identical behavior) + adds a trace.
+// Falls back to the FAS runner directly if AiCore is unavailable so channel
+// watch never breaks.
+let _aiCore; try { _aiCore = require('../ai/core'); } catch (_) { _aiCore = null; }
+function _aiInbound(input, deps) {
+  if (_aiCore && typeof _aiCore.handleInbound === 'function') return _aiCore.handleInbound(input, deps);
+  if (_fasRunner && typeof _fasRunner.handleInbound === 'function') return _fasRunner.handleInbound(input, deps);
+  return Promise.resolve({ mode: 'disabled', letLegacyReply: true, outcome: 'no-runner' });
+}
 // Shared inbound helpers: contact discovery, temporary send-block registry,
 // structured lifecycle observability (same module the DM engine uses).
 const inbound = require('./slack_inbound_support');
@@ -1070,7 +1080,7 @@ async function pollChannelsOnce(log) {
             // confirms a ts. On delivery failure the runner queues a recoverable
             // review item and commits nothing — we do NOT advance the channel
             // watermark so this message is retried next poll.
-            const _fr = await _fasRunner.handleInbound({
+            const _fr = await _aiInbound({
               engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
               channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text,
               files: msg.files || [],
@@ -1138,7 +1148,7 @@ async function pollChannelsOnce(log) {
         // Shadow, record the comparison only — never suppress/replace.
         if (_fasRunner && _fasModeC === 'shadow') {
           try {
-            await _fasRunner.handleInbound({
+            await _aiInbound({
               engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
               channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text, actualReply: draft.reply,
               files: msg.files || [],
