@@ -71,6 +71,17 @@ const SHARED_KEYS = [
   // (not the headless host's default). Device credentials/settings stay local;
   // ONLY this filter list crosses, via a dedicated shared key.
   'clusterFleetFilter',
+  // Unified AI Core operational state (spec §26) — shared so a promoted standby
+  // reasons from the SAME durable memory, evaluation history, and action
+  // receipts the leader built. These are OPERATIONAL AI state, NOT secrets:
+  //   - aiMemory       : durable memories that affect fleet reasoning
+  //   - aiTraceLog     : AI evaluation/trace records (metadata only, no secrets,
+  //                      no hidden chain-of-thought)
+  //   - aiActionReceipts: durable receipts of executed production actions
+  // Device-specific AI state (provider credentials, Claude session ids, Orcha
+  // connection info, local model settings, local caches) stays LOCAL via the
+  // DEVICE_KEYS / orchaConfig / credentials paths and is never synced.
+  'aiMemory', 'aiTraceLog', 'aiActionReceipts',
 ];
 const SHARED_SET = new Set(SHARED_KEYS);
 

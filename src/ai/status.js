@@ -144,6 +144,39 @@ function _attachments() {
  *     overall: { status: 'up'|'degraded'|'down', reasons: [] }
  *   }
  */
+// Component health (spec §25): each new AI subsystem reports healthy/degraded/
+// unavailable so the surface is actionable. Guarded probes only.
+function _components() {
+  const probe = (reqPath, name) => _safe(() => { require(reqPath); return 'Healthy'; }, 'Unavailable');
+  let memoryOk = 'Unavailable', traceOk = 'Unavailable', toolsOk = 'Unavailable';
+  const toolCount = _safe(() => require('./tools').names().length, 0);
+  if (toolCount > 0) toolsOk = 'Healthy';
+  memoryOk = _safe(() => { require('./memory'); return 'Healthy'; }, 'Unavailable');
+  traceOk = _safe(() => { require('./trace'); return 'Healthy'; }, 'Unavailable');
+  return {
+    aiCore: probe('./core', 'AI Core'),
+    toolRegistry: toolsOk,
+    toolCount,
+    memory: memoryOk,
+    traceStore: traceOk,
+    digitalFas: _safe(() => { require('../orcha/fas/executor'); return 'Healthy'; }, 'Unavailable'),
+    router: _safe(() => { require('./router'); return 'Healthy'; }, 'Unavailable'),
+  };
+}
+
+// Queue depth + P95 latency from recent traces (spec §25).
+function _throughput(metricsLimit) {
+  const recs = _safe(() => require('./trace').recent(metricsLimit || 200), []);
+  const lats = recs.map((r) => r.latencyMs).filter((n) => typeof n === 'number').sort((a, b) => a - b);
+  const p95 = lats.length ? lats[Math.min(lats.length - 1, Math.floor(lats.length * 0.95))] : null;
+  // Active requests / queue depth from the relay concurrency surface if exposed.
+  let queue = null, active = null;
+  const rs = _safe(() => require('../orcha/relay').getStatus(), null);
+  if (rs && typeof rs.activeCount === 'number') active = rs.activeCount;
+  if (rs && typeof rs.queueLength === 'number') queue = rs.queueLength;
+  return { p95LatencyMs: p95, activeRequests: active, queueDepth: queue };
+}
+
 function snapshot(opts) {
   opts = opts || {};
   const lanes = _lanes();
@@ -151,6 +184,8 @@ function snapshot(opts) {
   const reliability = _reliability();
   const cluster = _cluster();
   const attachments = _attachments();
+  const components = _components();
+  const throughput = _throughput(opts.metricsLimit);
   const metrics = _safe(() => evalMod.metrics({ limit: opts.metricsLimit || 200 }), {});
 
   // Overall roll-up: UP if any reasoning lane is up; DEGRADED if only fallback
@@ -167,6 +202,15 @@ function snapshot(opts) {
   }
   if (metrics && metrics.fallbackRate != null && metrics.fallbackRate > 0.5) { if (overallStatus === 'up') overallStatus = 'degraded'; reasons.push('high fallback rate'); }
 
+  // Actionable rate roll-up (spec §25) from the eval metrics.
+  const rates = {
+    toolSuccess: metrics && metrics.toolSuccessRate != null ? metrics.toolSuccessRate : null,
+    schemaSuccess: metrics && metrics.sampleSize ? Number((1 - (metrics.errorRate || 0)).toFixed(3)) : null,
+    fallback: metrics && metrics.fallbackRate != null ? metrics.fallbackRate : null,
+    correction: metrics && metrics.correctionRate != null ? metrics.correctionRate : null,
+    answerSuccess: metrics && metrics.answerSuccessRate != null ? metrics.answerSuccessRate : null,
+  };
+
   return {
     at: new Date().toISOString(),
     lanes,
@@ -174,7 +218,30 @@ function snapshot(opts) {
     reliability,
     cluster,
     attachments,
+    components,
+    throughput,
+    rates,
     metrics,
+    // A flat, display-ready component table (spec §25).
+    board: {
+      'AI Core': components.aiCore,
+      'Fleet Brain': lanes.fleetBrain.status === 'up' ? 'Healthy' : (lanes.fleetBrain.status === 'unknown' ? 'Unknown' : 'Down'),
+      'Orcha WS': lanes.orcha.status === 'up' ? 'Healthy' : (lanes.orcha.status === 'unknown' ? 'Unknown' : 'Down'),
+      'Claude Code': lanes.claude.status === 'up' ? 'Healthy' : (lanes.claude.status === 'unknown' ? 'Unknown' : 'Down'),
+      'Bedrock': lanes.bedrock.status === 'fallback' ? 'Available' : 'Unknown',
+      'Tool Registry': components.toolRegistry,
+      'Memory': components.memory,
+      'Trace Store': components.traceStore,
+      'Digital FAS': components.digitalFas,
+      'Cluster Role': cluster.role,
+      'Production Ready': cluster.productionActionsAllowed ? 'Yes' : 'No',
+      'Queue': throughput.queueDepth != null ? throughput.queueDepth : '-',
+      'P95 latency': throughput.p95LatencyMs != null ? (throughput.p95LatencyMs + 'ms') : '-',
+      'Tool success': rates.toolSuccess != null ? Math.round(rates.toolSuccess * 100) + '%' : '-',
+      'Schema success': rates.schemaSuccess != null ? Math.round(rates.schemaSuccess * 100) + '%' : '-',
+      'Fallback rate': rates.fallback != null ? Math.round(rates.fallback * 100) + '%' : '-',
+      'Correction rate': rates.correction != null ? Math.round(rates.correction * 100) + '%' : '-',
+    },
     overall: { status: overallStatus, reasons },
   };
 }
