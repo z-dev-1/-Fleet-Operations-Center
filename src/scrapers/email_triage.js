@@ -184,10 +184,17 @@ function buildTriagePrompt(emails, unitIds) {
   const lines = [];
   lines.push('You are an executive assistant triaging a fleet operations manager\'s email inbox. For EACH email, decide importance, whether it warrants a reply, whether it is deletable noise, and whether it references a fleet unit with a status update.');
   lines.push('');
+  lines.push('Reason like a Fleet Asset Specialist: an email is OPERATIONAL EVIDENCE, not automatically truth and not automatically an action. For each email decide whether it is even in THIS FAS\'s scope, what type it is, whether it carries NEW facts vs repeats known ones, who owns the next step, and only THEN what should happen.');
+  lines.push('');
   lines.push('Return STRICT JSON ONLY, no prose, no markdown, in this exact shape:');
-  lines.push('{"emails":[{"id":"<the id>","summary":"1-2 sentence plain summary INCLUDING what any attached files/pictures appear to be based on their names/types","importance":"high|normal|low","importanceWhy":"short reason","replySuggested":true|false,"deleteSuggested":true|false,"unitRefs":[{"unit":"<equipmentId>","update":"MM/DD - short status note for the unit timeline","ready":true|false}]}]}');
+  lines.push('{"emails":[{"id":"<the id>","summary":"1-2 sentence plain summary INCLUDING what any attached files/pictures appear to be based on their names/types","scope":"mine|shared_team|other_fas|other_region|informational|unknown","category":"action_request|question|fleet_status_update|repair_blocker|ready_for_pickup|estimate_or_approval|tow_or_move_request|vendor_escalation|maintenance_pm|compliance|site_operations|data_report|audit|policy_or_process|meeting|informational|automated_notification|noise|unknown","intent":"request_action|request_information|request_approval|provide_update|provide_data|confirm_completion|report_problem|escalate|assign_work|follow_up|answer_question|acknowledgement|fyi|none","priority":"critical|high|normal|low|hidden","informationType":"new|status_change|duplicate|confirmation|contradiction|stale|insufficient","actionOwner":"me|vendor|site|operator|manager|internal_team|other_fas|other_team|system|unknown","actionType":"reply|review_estimate|approve_or_decline|provide_information|request_vendor_update|schedule_tow|arrange_pickup|move_unit|create_work_request|update_repair_status|notify_operator|review_attachment|investigate|escalate|assign_to_other_team|no_action","decisionRequired":true|false,"decisionQuestion":"when a HUMAN authority decision is needed (approve a cost/estimate, authorize a tow, accept an aftermarket part) the exact question — else empty","questions":[{"text":"the exact question asked of us","askedBy":"sender","answerableFromData":true|false,"requiresHumanDecision":true|false,"resolved":true|false}],"replyNeeded":true|false,"importance":"high|normal|low","importanceWhy":"short reason","replySuggested":true|false,"deleteSuggested":true|false,"unitRefs":[{"unit":"<equipmentId>","update":"MM/DD - short status note for the unit timeline","ready":true|false}]}]}');
   lines.push('');
   lines.push('RULES:');
+  lines.push('- SCOPE FIRST: a mention of "fleet"/a unit number/a vendor does NOT make an email this FAS\'s work. scope=mine needs real evidence — a unit in the VALID UNIT IDS list, explicit assignment ("your unit", the user\'s name), or a direct request to us. A unit NOT in the valid list is NOT ours — do not create an action for it. Being CC\'d on a broad distro is weak; explicit assignment overrides it. If you cannot tell, scope=unknown — never invent ownership. Out-of-scope / other-region / other-FAS email must not become a personal action.');
+  lines.push('- NEW vs KNOWN: informationType=duplicate when the email just repeats what we already know; status_change when it genuinely advances the repair; stale when it describes an OLDER state than what we already have (never regress); new when it adds a fact we did not have. Only new/status_change should update a unit.');
+  lines.push('- OWNERSHIP + NEVER CHASE WHEN WE ARE THE BLOCKER: if a dealer "submitted an estimate, awaiting approval" then actionOwner=internal_team/me, actionType=review_estimate, decisionRequired=true — do NOT draft a vendor follow-up. If WE asked the vendor and have no reply, actionOwner=vendor, actionType=request_vendor_update.');
+  lines.push('- AUTHORITY vs INFORMATION: "what is the ETC?" may be answerable from data (answerableFromData=true). "Approve $14,000 engine replacement?" is an authority decision — decisionRequired=true, set decisionQuestion, and NEVER invent an approval.');
+  lines.push('- THREAD AWARENESS: if a question was already answered later in the thread, mark that question resolved=true and do NOT set replyNeeded for it. "Thank you" after a resolved thread needs no action.');
   lines.push('- importance high = time-sensitive, from a person, needs action (dealer/vendor/operator updates, approvals, escalations). low = newsletters, automated notifications, no-reply, marketing, calendar spam.');
   lines.push('- deleteSuggested true ONLY for clear noise (newsletters, automated notifications, marketing, auto-replies). NEVER suggest deleting a real person\'s message or anything referencing a unit.');
   lines.push('- replySuggested true when a human is asking a question or expecting a response.');
@@ -248,6 +255,113 @@ function _parseJson(text) {
   return null;
 }
 
+// Read the per-unit canonical record (the two-channel reconcile state) from the
+// store, keyed by equipmentId. Best-effort; null when not present.
+function _canonFor(unitId) {
+  try {
+    const canon = ((store.load('canonicalState', {}) || {}).units) || {};
+    return canon[String(unitId || '').trim()] || null;
+  } catch (_) { return null; }
+}
+
+// Build the rich Digital FAS emailDecision (spec §24) for one email, layering
+// the deterministic intel core UNDER the AI's values (AI sharpens; deterministic
+// is the grounded fallback + validation boundary). Also maps everything back to
+// the legacy fields (§25) so the existing overlay keeps working unchanged.
+function _buildDecision(email, v, rows, unitRefs) {
+  let intel; try { intel = require('./email_intel'); } catch (_) { intel = null; }
+  const text = String(email.subject || '') + ' ' + String(email.bodyText || email.summary || '');
+
+  // Scope — prefer a valid AI scope, else derive deterministically.
+  const scopeInfo = intel ? intel.deriveScope(email, rows, {
+    ccOnly: !!email.ccOnly, explicitlyAssigned: !!(v && v.explicitlyAssigned),
+  }) : { scope: 'unknown', inFleet: [], outOfFleet: [] };
+  let scope = (intel && intel.isScope(v && v.scope)) ? v.scope : scopeInfo.scope;
+  // A validated in-fleet unit is strong evidence for 'mine' — never let the AI
+  // downgrade a real owned unit below 'mine' without explicit other-assignment.
+  if ((unitRefs && unitRefs.length) && scope === 'unknown') scope = 'mine';
+
+  const category = (intel && intel.isCategory(v && v.category)) ? v.category : (intel ? intel.classifyCategory(email) : 'unknown');
+  const intent = (intel && intel.isIntent(v && v.intent)) ? v.intent : (intel ? intel.classifyIntent(email, category) : 'none');
+
+  // Canonical comparison for the first referenced unit (the primary one).
+  const primaryUnit = unitRefs && unitRefs.length ? unitRefs[0].unit : '';
+  const canon = primaryUnit ? _canonFor(primaryUnit) : null;
+  const observedAtMs = Date.parse(email.receivedText || '') || 0;
+  const emailFact = {
+    phase: (v && v.repairPhase) || '',
+    text: (unitRefs && unitRefs[0] && unitRefs[0].update) || String(v && v.summary || ''),
+    ready: !!(unitRefs && unitRefs[0] && unitRefs[0].ready),
+    observedAtMs,
+  };
+  let informationType = (intel && intel.isInformationType(v && v.informationType)) ? v.informationType
+    : (intel ? intel.deriveInformationType(emailFact, canon) : (canon ? 'duplicate' : 'new'));
+
+  const priority = (intel && intel.isPriority(v && v.priority)) ? v.priority : (intel ? intel.derivePriority(email, scope, category) : 'normal');
+  const relevanceScore = Number.isFinite(v && v.relevanceScore) ? Math.max(0, Math.min(1, v.relevanceScore))
+    : (intel ? intel.scoreRelevance(email, scopeInfo, category) : 0.5);
+
+  const actionOwner = (intel && intel.isActionOwner(v && v.actionOwner)) ? v.actionOwner : (intel ? intel.deriveActionOwner(category, intent, canon) : 'unknown');
+  const actionType = (intel && intel.isActionType(v && v.actionType)) ? v.actionType : (intel ? intel.deriveActionType(category, intent, canon) : 'no_action');
+
+  // Decision required (human judgment — cost/approval). AI may flag it; infer it
+  // for approval categories with a dollar figure or explicit approval ask.
+  let decisionRequired = !!(v && v.decisionRequired);
+  let decisionQuestion = String((v && v.decisionQuestion) || '').trim().slice(0, 400);
+  if (!decisionRequired && (category === 'estimate_or_approval' || intent === 'request_approval')) {
+    decisionRequired = true;
+    if (!decisionQuestion) decisionQuestion = /\$\s?\d/.test(text) ? 'Approve the estimate/cost in this email?' : 'Approve the request in this email?';
+  }
+
+  // Questions (§7): accept the AI's array (sanitized), else empty.
+  const questions = Array.isArray(v && v.questions) ? v.questions.slice(0, 8).map((q) => ({
+    text: String(q && q.text || '').trim().slice(0, 400),
+    askedBy: String(q && q.askedBy || email.fromName || email.from || '').trim().slice(0, 120),
+    answerableFromData: !!(q && q.answerableFromData),
+    requiresHumanDecision: !!(q && q.requiresHumanDecision),
+    resolved: !!(q && q.resolved),
+  })).filter((q) => q.text) : [];
+
+  // Data payload (§15/§16).
+  const dataPayload = intel ? intel.detectDataPayload(email, rows) : { detected: false };
+
+  // Conflict flag: email contradicts fresher canonical evidence.
+  const hasConflict = informationType === 'contradiction';
+
+  // canonicalImpact (§24): whether this should update the unit, and with what.
+  const shouldUpdate = (scope === 'mine') && ['new', 'status_change'].includes(informationType)
+    && !decisionRequired && !['question', 'action_request', 'estimate_or_approval'].includes(category);
+  const canonicalImpact = {
+    shouldUpdate,
+    repairPhase: (v && v.repairPhase) || (canon && canon.repairPhase) || '',
+    waitingOn: (v && v.waitingOn) || (canon && canon.waitingOnFine) || '',
+    timelineUpdate: shouldUpdate ? ((unitRefs && unitRefs[0] && unitRefs[0].update) || '') : '',
+  };
+
+  // Surfacing / notify (§21/§26). Out-of-scope + noise do not pollute the board.
+  const shouldSurface = !(scope === 'other_region' || scope === 'informational' || category === 'noise' || priority === 'hidden');
+  const shouldNotify = category === 'ready_for_pickup' && scope === 'mine';
+
+  const confidence = Number.isFinite(v && v.confidence) ? Math.max(0, Math.min(1, v.confidence)) : (v && v.summary ? 0.7 : 0.4);
+
+  // replyNeeded (§23) — a real question/request to us that we owe a response to.
+  const replyNeeded = !!(v && (v.replyNeeded != null ? v.replyNeeded : v.replySuggested))
+    || (scope === 'mine' && (category === 'question' || intent === 'request_information') && actionOwner === 'me');
+
+  return {
+    scope, category, intent, priority, relevanceScore, informationType,
+    actionRequired: actionType !== 'no_action' && shouldSurface,
+    actionType, actionOwner,
+    decisionRequired, decisionQuestion,
+    questions, dataPayload, canonicalImpact,
+    hasConflict, shouldSurface, shouldNotify, confidence,
+    replyNeeded,
+    units: (unitRefs || []).map((u) => u.unit),
+    sites: Array.from(new Set((unitRefs || []).map((u) => u.domicile).filter(Boolean))),
+    receivedAt: email.receivedText || '',
+  };
+}
+
 // Validate + sanitize one AI verdict against a known email + fleet rows.
 function _mergeVerdict(email, verdict, rows) {
   const v = verdict || {};
@@ -269,6 +383,16 @@ function _mergeVerdict(email, verdict, rows) {
       ready: !!ur.ready,
     });
   }
+
+  // Build the rich Digital FAS decision (spec §24) + legacy-field mapping (§25).
+  const decision = _buildDecision(email, v, rows, unitRefs);
+  // Backward-compat: map the rich model back onto the fields the overlay reads.
+  //   importance  <- derived from priority (critical/high -> high; low/hidden -> low)
+  //   replySuggested <- replyNeeded ; deleteSuggested stays, but NEVER for in-scope noise
+  const mappedImportance = (decision.priority === 'critical' || decision.priority === 'high') ? 'high'
+    : (decision.priority === 'low' || decision.priority === 'hidden') ? 'low' : importance;
+  const deleteSuggested = !!v.deleteSuggested && decision.scope !== 'mine' && unitRefs.length === 0;
+
   return {
     id: email.id,
     from: email.from,
@@ -278,11 +402,14 @@ function _mergeVerdict(email, verdict, rows) {
     folder: email.folder || 'Inbox',
     attachments: email.attachments || [],
     summary: String(v.summary || '').trim().slice(0, 600),
-    importance,
+    // Legacy fields (preserved for the existing overlay) ─────────────────────
+    importance: mappedImportance,
     importanceWhy: String(v.importanceWhy || '').trim().slice(0, 200),
-    replySuggested: !!v.replySuggested,
-    deleteSuggested: !!v.deleteSuggested,
+    replySuggested: decision.replyNeeded,
+    deleteSuggested,
     unitRefs,
+    // Rich Digital FAS decision (spec §24) ───────────────────────────────────
+    decision,
     triagedAt: new Date().toISOString(),
   };
 }
@@ -303,12 +430,16 @@ function _fallbackVerdict(email, rows) {
       unitRefs.push({ unit: id, operator: String(r.operator || '').trim(), domicile: String(r.domicileSite || '').trim(), update: '', ready });
     }
   }
+  // Deterministic decision even without the AI (spec §29: fail safe, not silent).
+  const decision = _buildDecision(email, {}, rows, unitRefs);
+  const mappedImportance = (decision.priority === 'critical' || decision.priority === 'high') ? 'high'
+    : (decision.priority === 'low' || decision.priority === 'hidden') ? 'low' : 'normal';
   return {
     id: email.id, from: email.from, fromName: email.fromName, subject: email.subject,
     receivedText: email.receivedText, folder: email.folder || 'Inbox', attachments: email.attachments || [],
     summary: '(AI unavailable) ' + String(email.subject || '').slice(0, 200),
-    importance: 'normal', importanceWhy: 'AI triage unavailable', replySuggested: false,
-    deleteSuggested: false, unitRefs, triagedAt: new Date().toISOString(), aiUnavailable: true,
+    importance: mappedImportance, importanceWhy: 'AI triage unavailable', replySuggested: decision.replyNeeded,
+    deleteSuggested: false, unitRefs, decision, triagedAt: new Date().toISOString(), aiUnavailable: true,
   };
 }
 
@@ -466,19 +597,35 @@ function applyPendingUnitUpdates(results) {
   if (!results || !Array.isArray(results.emails)) return 0;
   let actions = null;
   try { actions = require('./email_actions'); } catch (_) { return 0; }
-  let applied = 0;
+  let intel = null; try { intel = require('./email_intel'); } catch (_) { intel = null; }
+  let applied = 0, staged = 0;
   for (const em of results.emails) {
     if (em.unitUpdateApplied) continue;
     const refs = Array.isArray(em.unitRefs) ? em.unitRefs : [];
+    if (!refs.length) continue;
+
+    // ── §17: STOP blind auto-apply. Only auto-apply when the Digital FAS gate
+    //    passes (in scope + genuinely new/non-stale/non-conflicting + high
+    //    confidence + factual + no human decision). Otherwise record it as
+    //    staged (left pending for explicit review) — NEVER silently applied.
+    if (intel && em.decision) {
+      const gate = intel.shouldAutoApply(em.decision, { minConfidence: 0.75 });
+      if (!gate.apply) {
+        em.autoApplyBlocked = gate.reason;   // bookkeeping so the overlay can show WHY it was staged
+        staged++;
+        continue;
+      }
+    }
+
     let didApply = false;
     for (const ref of refs) {
       if (!ref.unit || !ref.update) continue;
       const r = actions.applyUnitTimelineUpdate(ref.unit, ref.update);
       if (r && r.ok) { didApply = true; applied++; }
     }
-    if (didApply) em.unitUpdateApplied = true;
+    if (didApply) { em.unitUpdateApplied = true; em.autoApplyBlocked = null; }
   }
-  if (applied) store.save('emailTriageResults', results);
+  if (applied || staged) store.save('emailTriageResults', results);
   return applied;
 }
 
@@ -565,4 +712,6 @@ module.exports = {
   _batchEmails,
   _parseJson,
   _autoTick,
+  _buildDecision,
+  _canonFor,
 };
