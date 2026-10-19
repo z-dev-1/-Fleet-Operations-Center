@@ -537,9 +537,30 @@ function registerScrapersIPC(ctx) {
     requireString(payload.equipmentId, 'payload.equipmentId');
     _woLock = true;
     try {
-      const { scrapeWorkOrder } = require('../../src/scrapers/aap_wo_scraper');
       const logs = [];
       const log  = (msg) => { logs.push(msg); logger.info(msg); if (send) send('wo:progress', msg); };
+
+      // API-FIRST: the serviceaggregate JSON carries all core WO-detail fields
+      // (vendor, state, urgency, issue, L1/L2/L3, altId, vendor WO, offsite URL,
+      // full conversation). Instant + robust vs. the 3-phase DOM scrape. Fall
+      // back to the browser scraper only if the API path errors or finds no WO
+      // (e.g. vendor-PDF doc-scan vendors that need the Documents tab).
+      try {
+        const api = require('../../src/scrapers/aap_api');
+        if (typeof api.getWorkOrderDetailViaApi === 'function') {
+          const apiResult = await api.getWorkOrderDetailViaApi(payload.equipmentId);
+          if (apiResult && !apiResult.error && !apiResult.noWO) {
+            log('[wo:scrape] API-first: resolved WO detail via JSON (no browser) for ' + payload.equipmentId);
+            return { ok: true, result: apiResult, logs };
+          }
+          log('[wo:scrape] API path returned ' + (apiResult && apiResult.error ? ('error: ' + apiResult.error) : 'no open WO') + ' — falling back to DOM scrape');
+        }
+      } catch (e) {
+        log('[wo:scrape] API path threw, falling back to DOM scrape: ' + e.message);
+      }
+
+      // Fallback: legacy DOM scrape.
+      const { scrapeWorkOrder } = require('../../src/scrapers/aap_wo_scraper');
       const woOpts = {};
       if (payload.serviceUrl) woOpts.serviceUrl = payload.serviceUrl;
       const result = await scrapeWorkOrder(payload.equipmentId, woOpts);

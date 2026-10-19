@@ -1142,6 +1142,119 @@ async function refreshUnit(unitNumber) {
   return row;
 }
 
+// ── WORK-ORDER DETAIL (API-first) ────────────────────────────────────────────
+// API replacement for aap_wo_scraper.scrapeWorkOrder(equipmentId). The scraper
+// loaded /v2/service/<uuid> in a hidden BrowserWindow and did a 3-phase DOM
+// scrape (WR label fields → Work Orders tab → Toggle Comments) that took
+// seconds per unit and broke on any AAP UI change. But the serviceaggregate
+// JSON (GET /api/v1/serviceaggregates/{id}) carries ALL of it as structured
+// fields (confirmed live 2026-10-19): workRequest{ vendor, state/subState,
+// isUrgent, damageDescription, title, alternateUniqueId, needByDateTime,
+// createdBy, suggestedItem[L1/L2/L3], reportedLocation }, vendorWorkOrderIds[],
+// and the full comment thread (workRequest.comments[] + workOrders[].comments[])
+// from which the mapper already extracts fullConversation + the offsite URL.
+//
+// This returns the SAME object shape scrapeWorkOrder produced, so wo:scrape can
+// prefer it with the DOM scraper as fallback. The only fields the API cannot
+// provide are the vendor-PDF doc-scan cause/correction/cost for
+// Kooner/Cummins/Cox (Phase-4 Documents tab) and the Salesforce deep link —
+// those stay scraper-only edge cases; the API covers the core for every unit.
+async function getWorkOrderDetailViaApi(equipmentId) {
+  const mapper = require('./aap_api_mapper');
+  const u = String(equipmentId || '').trim();
+  if (!u) return { error: 'no equipmentId', equipmentId: '' };
+
+  // Resolve the unit's current open WO (two-tier widen, same as findOpenWO).
+  let wo = null;
+  try {
+    let r1 = await searchServices({ equipmentIds: [u.toUpperCase()], statuses: [], page: 1 });
+    let list = (r1 && r1.serviceAggregates) || [];
+    if (!list.length) {
+      const r2 = await searchServices({ equipmentIds: [u.toUpperCase()], statuses: [], category: null, lifecycleStates: null, assetPrograms: null, fleetIds: null, page: 1 });
+      list = (r2 && r2.serviceAggregates) || [];
+    }
+    const ts = (w) => Number(w.modifiedTimestamp || w.actualStartDateTime || w.scheduledDateTime || 0);
+    const isOpen = (w) => { const done = w && (w.completedDateTime || w.completedDate); return !done && !/complet|closed|cancel/i.test(_woStatusStr(w)); };
+    const open = list.filter(isOpen).sort((a, b) => ts(b) - ts(a));
+    wo = open[0] || list.slice().sort((a, b) => ts(b) - ts(a))[0] || null;
+  } catch (e) {
+    return { error: 'WO search failed: ' + e.message, equipmentId: u };
+  }
+  if (!wo) return { noWO: true, equipmentId: u, scrapedAt: new Date().toISOString() };
+
+  const serviceId = wo.id || wo.workRequestId;
+
+  // Full service detail (comments + estimates + nested workRequest).
+  let detail = null;
+  try { detail = await getService(serviceId); } catch (_) { /* best-effort */ }
+
+  const wr = (detail && detail.workRequest) || {};
+  const loc = wr.reportedLocation || {};
+  const si = Array.isArray(wr.suggestedItem) && wr.suggestedItem[0] ? wr.suggestedItem[0] : {};
+  const ms = (t) => (t ? new Date(Number(t)).toISOString() : '');
+
+  // Full conversation + offsite URL via the proven mapper helpers.
+  let fullConversation = '';
+  let offsite = null;
+  try {
+    const row = mapper.toFleetRow(wo, { asset: { displayName: u, aaid: wo.aaid } }, detail);
+    fullConversation = row.fullConversation || '';
+  } catch (_) { /* leave blank */ }
+  try { offsite = mapper.extractOffsiteFromComments(detail); } catch (_) {}
+
+  // Vendor WO + cost from the vendor work order(s) / line items when present.
+  const woArr = (detail && detail.workOrders) || [];
+  const firstWO = woArr[0] || {};
+  const vendorWorkOrderId = (Array.isArray(detail && detail.vendorWorkOrderIds) && detail.vendorWorkOrderIds[0])
+    || (Array.isArray(wo.vendorWorkOrderIds) && wo.vendorWorkOrderIds[0]) || firstWO.vendorWorkOrderId || '';
+  const lineItems = (detail && detail.workOrderLineItems) || firstWO.lineItems || [];
+  const totalCost = firstWO.totalCost || firstWO.cost ||
+    (Array.isArray(lineItems) && lineItems.reduce((s, li) => s + (Number(li && (li.cost || li.amount)) || 0), 0)) || '';
+
+  let offsiteUrl = offsite ? offsite.url : '';
+  if (!offsiteUrl && wr.caseNumber) offsiteUrl = 'https://aap-na.corp.amazon.com/v2/offsite-events/' + String(wr.caseNumber).trim();
+
+  return {
+    // identity
+    equipmentId:         wr.assetDisplayName || detail && detail.assetDisplayName || u,
+    workRequestId:       wr.id || serviceId || '',
+    serviceUrl:          'https://aap-na.corp.amazon.com/v2/service/' + serviceId,
+    _serviceUUID:        serviceId,
+    // WR fields
+    vendor:              wr.vendor || wo.vendor || (detail && detail.vendor) || '',
+    serviceState:        wr.state || (detail && detail.state) || '',
+    subState:            wr.subState || (detail && detail.subState) || '',
+    category:            (detail && detail.category) || si.level1 || '',
+    urgent:              (wr.isUrgent != null ? wr.isUrgent : (detail && detail.isUrgent)) ? 'Urgent' : '',
+    needBy:              ms(wr.needByDateTime),
+    created:            ms(wr.createdDateTime),
+    completed:           ms(wr.completedDateTime),
+    createdBy:           wr.createdBy || '',
+    lifecycleState:      (detail && detail.lifecycleState) || wo.lifecycleState || '',
+    lifecycleReason:     (detail && detail.lifecycleStateReason) || wo.lifecycleStateReason || '',
+    issueDetails:        wr.damageDescription || wr.title || '',
+    // category tree (L1/L2/L3)
+    level1:              si.level1 || '',
+    level2:              si.level2 || '',
+    level3:              si.level3 || '',
+    // alt id
+    altId:               wr.alternateUniqueId || '',
+    alternativeId:       wr.alternateUniqueId || '',
+    // vendor work order
+    vendorWorkOrderId:   vendorWorkOrderId || '',
+    cause:               firstWO.cause || '',
+    correction:          firstWO.correction || '',
+    totalCost:           totalCost || '',
+    // offsite
+    offsiteShopEvent:    (offsite && offsite.caseNumber) || wr.caseNumber || '',
+    offsiteShopEventUrl: offsiteUrl || '',
+    // full conversation
+    fullConversation:    fullConversation,
+    source:              'aap-api',
+    scrapedAt:           new Date().toISOString(),
+  };
+}
+
 // ── Work-order creation (VRE recommendation API) ─────────────────────────────
 // Creates an UNPLANNED / ACTIVE work order via the same endpoint the AAP web
 // app uses when you build a WR by hand:
@@ -2112,6 +2225,7 @@ module.exports = {
   findOpenWO,
   buildLongDwellSources,
   getFleetGeofencesViaApi, // API-first live geofence + GPS (replaces geofence_scraper DOM scrape)
+  getWorkOrderDetailViaApi, // API-first WO detail (replaces aap_wo_scraper DOM scrape)
   getLocationLatest,
   dispose,
 };
