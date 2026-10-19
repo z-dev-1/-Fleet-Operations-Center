@@ -1267,8 +1267,20 @@ function _buildWoBody(opts, assetFull, vendorCode) {
     .filter(p => p && (p.area || p.subcategory))
     .map(p => ({ level1: p.area || '', level2: p.subcategory || '', level3: p.subSubcategory || '' }));
 
+  // AAP's CreateRepairInput.comments is a list of Comment OBJECTS, not strings
+  // (confirmed by a live 500: "Cannot construct instance of Comment ... no
+  // String-argument constructor ... from String value"). The service-aggregate
+  // GET shows the Comment shape as { timestamp, text, createdBy, internalOnly }.
+  // Build that shape. `shareWith:'internal'` -> internalOnly true.
   const comments = [];
-  if (opts.comments) comments.push(String(opts.comments));
+  if (opts.comments && String(opts.comments).trim()) {
+    comments.push({
+      text: String(opts.comments).trim(),
+      internalOnly: String(opts.shareWith || '').toLowerCase() === 'internal',
+      createdBy: opts.createdBy || null,
+      timestamp: nowIso,
+    });
+  }
 
   const urgent = String(opts.urgent || '').toLowerCase() === 'yes';
   // callType enum (confirmed live): [OFFSITE, ROADSIDE, YARD]. 'ONSITE' is NOT
@@ -1306,7 +1318,11 @@ function _buildWoBody(opts, assetFull, vendorCode) {
     simNumber: opts.simNumber || null,
     assetAvailableDateTime: nowIso,
     needByDateTime: needByIso,
-    damageDescription: String(opts.issue || '') || null,
+    // damageDescription is NON-nullable (confirmed by a live 500). Never send
+    // null: fall back to the title, then a safe generic string.
+    damageDescription: (String(opts.issue || '').trim() ||
+      String(opts.title || '').trim() ||
+      'Repair requested via Fleet Ops Center'),
     comments,
     suggestedItems,
     vendor: vendorCode,
