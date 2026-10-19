@@ -1,6 +1,19 @@
 # Midway Auth Health Supervisor — Design & Plan
 
-Status: proposed (grounded in the current code)
+Status: IMPLEMENTED — Phases A–E all shipped (wrapper design, `src/auth/midway-health-supervisor.js`)
+
+Phase status:
+- A — Primitives & verification: DONE (commit df201cb)
+- B — Supervisor + state machine + one lock + ensureHealthy (incl. #6 verify-before-HEALTHY): DONE (026957b)
+- C — Persistent convergence (bounded backoff, onReconnect, WAITING_FOR_USER): DONE (f3d3295)
+- D — Caller migration (auth.js AEA-mwinit rung, hardened restartAeaAgent, window startup/preflight/data-source/auth-poll all routed through the supervisor): DONE (63358a5, c7a8588)
+- E — Health UI panel + background monitor + IPC: DONE
+  - `src/ipc/auth-health.js` (get / retry / run-mwinit), registered in `src/ipc/index.js`
+  - preload `auth.healthGet/healthRetry/healthRunMwinit` + renderer `bridge.js` auth bridge
+  - Settings → Integrations → "Midway / AAP Auth Health" panel (state, AAP-target-verified, session/AEA remaining, "VPN not required", next auto-retry, recovery history; Refresh / Retry now / Run mwinit buttons)
+  - `startHealthMonitor()`/`stopHealthMonitor()` in the supervisor (periodic real-target verify + offline→online `onReconnect()`), started once from the window preflight; cancelled by `shutdown()`
+  - tests: `tests/midway-auth-supervisor-phase-e.test.js`
+
 Branch: `feature/owa-triage-midway-fixes`
 
 ## The core bug this fixes (confirmed live)

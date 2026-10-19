@@ -999,6 +999,13 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         }
       }
 
+      // Start the ONE background health monitor (spec #20). It periodically
+      // verifies against the real AAP target and re-verifies on reconnect,
+      // arming bounded auto-recovery when genuinely degraded (no prompt).
+      // Idempotent, so safe even if preflight re-runs.
+      try { if (supervisor && typeof supervisor.startHealthMonitor === 'function') supervisor.startHealthMonitor(); }
+      catch (e) { logger.warn('[startup] health monitor start failed: ' + e.message); }
+
       // Keep window invisible during AAP scrape
       mainWindow.setPosition(-3000, -3000);
       // Window hidden during scrape via position

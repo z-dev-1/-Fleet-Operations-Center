@@ -507,6 +507,10 @@ export const sp = {
 export const auth = {
   runMwinit:   () => window.auth.runMwinit(),
   checkMidway: () => window.auth.checkMidway(),
+  // Auth health supervisor (Phase E).
+  healthGet:       () => window.auth.healthGet(),
+  healthRetry:     () => window.auth.healthRetry(),
+  healthRunMwinit: () => window.auth.healthRunMwinit(),
 };
 
 // ── Email ──────────────────────────────────────────────────────────────────

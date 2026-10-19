@@ -34,6 +34,7 @@ const { registerFasRosterIPC }     = require('./fas-roster');
 const { registerSchedulerIPC }     = require('./scheduler');
 const { registerEmailTriageIPC }   = require('./email-triage');
 const { registerRelayReconcileIPC } = require('./relay-reconcile');
+const { registerAuthHealthIPC }    = require('./auth-health');
 const logger = require('../utils/logger')('ipc');
 
 function registerAllIPC(ctx) {
@@ -64,6 +65,7 @@ function registerAllIPC(ctx) {
   registerRelayReconcileIPC(ctx);
   const { registerContactsHandlers } = require('./contacts');
   registerContactsHandlers();
+  registerAuthHealthIPC(ctx);
   logger.info('All IPC handlers registered');
 }
 

@@ -417,8 +417,76 @@ async function onReconnect() {
   return ensureHealthyConverging({ reason: 'reconnect', allowPrompt: false });
 }
 
+// ── Background health monitor (spec #20) ─────────────────────────────────────
+// A single periodic verifier owned by the supervisor (keeps the single-
+// supervisor invariant). It:
+//   - subscribes to offline→online transitions and routes them through
+//     onReconnect() (no prompt, verifies the real target);
+//   - on an interval, verifies health against the REAL AAP target and, if the
+//     session is genuinely degraded while online, arms bounded auto-recovery
+//     via ensureHealthyConverging (no prompt — interactive mwinit stays a
+//     user-driven action).
+// Idempotent: a second call tears down the prior monitor first. No-op if a
+// retry/recovery is already in flight for a given tick.
+let _monitorTimer = null;
+let _monitorUnsub = null;
+let _monitorInFlight = false;
+const _MONITOR_INTERVAL_MS = 5 * 60 * 1000; // 5 min; retries use their own backoff
+
+function startHealthMonitor(opts) {
+  opts = opts || {};
+  const intervalMs = typeof opts.intervalMs === 'number' ? opts.intervalMs : _MONITOR_INTERVAL_MS;
+  stopHealthMonitor();
+  _shuttingDown = false;
+
+  // Offline→online: re-verify the SAME session (no prompt, no VPN assumption).
+  try {
+    const offline = require('../orcha/offline');
+    if (offline && typeof offline.onChange === 'function') {
+      _monitorUnsub = offline.onChange((status) => {
+        if (status !== 'online') return;
+        setTimeout(() => { onReconnect().catch(() => {}); }, 2500);
+      });
+    }
+  } catch (_) { /* offline module optional */ }
+
+  const tick = async () => {
+    if (_shuttingDown || _monitorInFlight) return;
+    if (_deps.isOffline()) return;              // offline: wait for reconnect
+    if (_authRecoveryInFlight) return;          // a recovery is already running
+    _monitorInFlight = true;
+    try {
+      const v = await verifyHealthy({});
+      if (v && v.healthy) {
+        if (_state !== STATE.HEALTHY) { _setState(STATE.HEALTHY, 'monitor: verified'); _failStreak = 0; _clearRetry(); }
+        _lastSnapshot = await buildSnapshot({ state: _state, api: v.api, verify: v });
+        return;
+      }
+      // Genuinely degraded while online. AAP 5xx is a server problem, not auth —
+      // ensureHealthyConverging already short-circuits that case without a ladder.
+      await ensureHealthyConverging({ reason: 'monitor:degraded', allowPrompt: false });
+    } catch (e) {
+      logger.warn('[auth-supervisor] monitor tick error: ' + (e && e.message || e));
+    } finally {
+      _monitorInFlight = false;
+    }
+  };
+
+  _monitorTimer = setInterval(tick, intervalMs);
+  if (_monitorTimer && _monitorTimer.unref) _monitorTimer.unref();
+  logger.info('[auth-supervisor] background health monitor started (interval ' + Math.round(intervalMs / 1000) + 's)');
+  // Kick an initial verify shortly after start (deferred so startup isn't blocked).
+  setTimeout(() => { tick().catch(() => {}); }, 3000);
+  return () => stopHealthMonitor();
+}
+
+function stopHealthMonitor() {
+  if (_monitorTimer) { try { clearInterval(_monitorTimer); } catch (_) {} _monitorTimer = null; }
+  if (_monitorUnsub) { try { _monitorUnsub(); } catch (_) {} _monitorUnsub = null; }
+}
+
 /** shutdown() — cancel pending retries cleanly (spec #27). */
-function shutdown() { _shuttingDown = true; _clearRetry(); }
+function shutdown() { _shuttingDown = true; _clearRetry(); stopHealthMonitor(); }
 function _resetConvergence() { _shuttingDown = false; _failStreak = 0; _clearRetry(); _timers.set = (fn, ms) => setTimeout(fn, ms); _timers.clear = (h) => clearTimeout(h); }
 
 // ── Injectable deps (spec #26) so the ladder/verification are deterministically
@@ -445,6 +513,7 @@ module.exports = {
   ensureHealthy,
   ensureHealthyConverging,
   onReconnect,
+  startHealthMonitor, stopHealthMonitor,
   shutdown,
   getState, getSnapshot, getHistory,
   _setDeps, _setTimers, _reset,

@@ -360,6 +360,10 @@ expose('auth', {
   runMwinit:     ()   => ipcRenderer.invoke('auth:run-mwinit'),
   onMwinitStatus:(cb) => on('auth:mwinit-status', cb),
   checkMidway:   ()   => ipcRenderer.invoke('auth:check-midway'),
+  // Auth health supervisor (Phase E) — read-only snapshot + manual recovery.
+  healthGet:       ()   => ipcRenderer.invoke('auth-health:get'),
+  healthRetry:     ()   => ipcRenderer.invoke('auth-health:retry'),
+  healthRunMwinit: ()   => ipcRenderer.invoke('auth-health:run-mwinit'),
 });
 
 // ── AAP actions ───────────────────────────────────────────────────────────────

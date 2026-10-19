@@ -456,6 +456,22 @@ function _html() {
              (keyboard-shortcuts.js); session-expiry surfaces its own re-auth
              modal (app.js fleet:auth-failure) + status-bar indicator. -->
 
+        <!-- Auth Health (Phase E) — the single Midway/AAP self-healing
+             supervisor. Health = verified authenticated access to the REAL AAP
+             target, not VPN state and not cookie existence. -->
+        <div class="sd-section" id="sect-auth-health">
+          <div class="sd-section-title">Midway / AAP Auth Health</div>
+          <div id="auth-health-state" class="sd-status warn" style="margin-bottom:8px">\u2139\uFE0F Not checked yet</div>
+          <div id="auth-health-grid" class="sd-hint" style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin-bottom:8px"></div>
+          <div class="sd-hint" style="margin-bottom:8px">VPN is <b>not required</b> for Midway/AAP auth. Health is verified by a real authenticated call to the AAP target.</div>
+          <div class="sd-btn-row">
+            <button class="sd-btn secondary" id="auth-health-refresh">Refresh</button>
+            <button class="sd-btn primary"   id="auth-health-retry">Retry now</button>
+            <button class="sd-btn secondary" id="auth-health-mwinit">Run mwinit</button>
+          </div>
+          <div id="auth-health-history" class="sd-hint" style="margin-top:10px"></div>
+        </div>
+
         <!-- AI Config moved (2026-08-14) to #ai-config-overlay opened from
              the toolbar AI status pill (#tb-ai-status). -->
 
@@ -2401,6 +2417,139 @@ function _syncSwatchesToTheme(theme) {
   });
 }
 
+// ── Section: Auth Health (Phase E) ───────────────────────────────────────────
+// Renders the single Midway/AAP self-healing supervisor's live state. Health is
+// defined by a VERIFIED authenticated call to the real AAP target — not VPN,
+// not cookie existence. The panel is read-only except for three actions:
+// Refresh (re-read snapshot), Retry now (silent convergence), Run mwinit
+// (interactive escalation).
+function _fmtMin(m) {
+  if (typeof m !== 'number' || !isFinite(m)) return '—';
+  if (m <= 0) return 'expired';
+  if (m < 60) return Math.round(m) + ' min';
+  const h = Math.floor(m / 60), r = Math.round(m % 60);
+  return r ? `${h}h ${r}m` : `${h}h`;
+}
+
+function _authHealthStateClass(state) {
+  switch (state) {
+    case 'HEALTHY':          return 'ok';
+    case 'DEGRADED':
+    case 'RECOVERING':
+    case 'COOLDOWN':
+    case 'UNKNOWN':          return 'warn';
+    case 'WAITING_FOR_USER':
+    case 'OFFLINE':
+    case 'FAILED':           return 'err';
+    default:                 return 'warn';
+  }
+}
+
+function _authHealthLabel(state) {
+  const map = {
+    HEALTHY:          '\u2705 Healthy — AAP target verified',
+    DEGRADED:         '\u26A0\uFE0F Degraded — auto-recovery armed',
+    RECOVERING:       '\u231B Recovering…',
+    COOLDOWN:         '\u23F3 Cooldown — waiting before next retry',
+    WAITING_FOR_USER: '\uD83D\uDD11 Waiting for you — run mwinit (PIN + YubiKey)',
+    OFFLINE:          '\uD83D\uDCF6 Offline — will re-verify on reconnect',
+    FAILED:           '\u274C Failed — manual mwinit required',
+    UNKNOWN:          '\u2139\uFE0F Not checked yet',
+  };
+  return map[state] || ('\u2139\uFE0F ' + (state || 'Unknown'));
+}
+
+function _renderAuthHealth(res) {
+  const stateEl = document.getElementById('auth-health-state');
+  const gridEl  = document.getElementById('auth-health-grid');
+  const histEl  = document.getElementById('auth-health-history');
+  if (!stateEl || !gridEl) return;
+
+  if (!res || !res.ok) {
+    stateEl.className = 'sd-status err';
+    stateEl.textContent = '\u274C Auth supervisor unavailable' + (res && res.error ? ' (' + res.error + ')' : '');
+    gridEl.innerHTML = '';
+    if (histEl) histEl.innerHTML = '';
+    return;
+  }
+
+  const state = res.state || (res.snapshot && res.snapshot.state) || 'UNKNOWN';
+  stateEl.className = 'sd-status ' + _authHealthStateClass(state);
+  stateEl.textContent = _authHealthLabel(state);
+
+  const s = res.snapshot || {};
+  const smoke = s.aapApiSmokeTest || null;
+  const verified = !!(smoke && smoke.ok);
+  const rows = [
+    ['AAP target verified', verified ? 'yes' : 'no' + (smoke && smoke.class ? ' (' + smoke.class + ')' : '')],
+    ['Internet', s.internet && s.internet.online ? 'online' : 'offline'],
+    ['VPN', (s.vpn && s.vpn.connected === true ? 'connected' : s.vpn && s.vpn.connected === false ? 'not connected' : 'unknown') + ' — not required'],
+    ['Midway session', s.diskSession ? _fmtMin(s.diskSession.expiresInMin) + ' left' : '—'],
+    ['AEA cookie', s.diskAea ? _fmtMin(s.diskAea.expiresInMin) + ' left' : '—'],
+    ['Next auto-retry', s.nextRetryAt ? new Date(s.nextRetryAt).toLocaleTimeString() : '—'],
+    ['Checked', s.at ? new Date(s.at).toLocaleTimeString() : '—'],
+  ];
+  gridEl.innerHTML = rows.map(([k, v]) =>
+    `<div style="opacity:.75">${k}</div><div><b>${v}</b></div>`
+  ).join('');
+
+  if (histEl) {
+    const hist = Array.isArray(res.history) ? res.history.slice(-5).reverse() : [];
+    if (!hist.length) { histEl.innerHTML = ''; }
+    else {
+      histEl.innerHTML = '<div style="opacity:.75;margin-bottom:4px">Recent recovery attempts</div>' +
+        hist.map((h) => {
+          const when = h.at ? new Date(h.at).toLocaleTimeString() : '';
+          const outcome = h.result || (h.recovered ? 'recovered' : 'failed');
+          const note = h.note || h.reason || '';
+          return `<div style="font-size:11px;opacity:.85">• ${when} — ${outcome}${note ? ' (' + note + ')' : ''}</div>`;
+        }).join('');
+    }
+  }
+}
+
+function _loadAuthHealth() {
+  if (!authBridge.healthGet) return;
+  const stateEl = document.getElementById('auth-health-state');
+  if (stateEl) { stateEl.className = 'sd-status warn'; stateEl.textContent = '\u231B Checking…'; }
+  authBridge.healthGet().then(_renderAuthHealth).catch((e) => {
+    _renderAuthHealth({ ok: false, error: e && e.message });
+  });
+}
+
+function _wireAuthHealth() {
+  const refreshBtn = document.getElementById('auth-health-refresh');
+  const retryBtn   = document.getElementById('auth-health-retry');
+  const mwinitBtn  = document.getElementById('auth-health-mwinit');
+  if (!refreshBtn) return; // section not present
+
+  refreshBtn.addEventListener('click', _loadAuthHealth);
+
+  if (retryBtn) retryBtn.addEventListener('click', () => {
+    if (!authBridge.healthRetry) return;
+    retryBtn.disabled = true;
+    const orig = retryBtn.textContent;
+    retryBtn.textContent = 'Retrying…';
+    authBridge.healthRetry().then((r) => _renderAuthHealth(r && r.snapshot ? { ok: true, state: r.state, snapshot: r.snapshot, history: [] } : null) || _loadAuthHealth())
+      .catch(() => {})
+      .finally(() => { retryBtn.disabled = false; retryBtn.textContent = orig; _loadAuthHealth(); });
+  });
+
+  if (mwinitBtn) mwinitBtn.addEventListener('click', () => {
+    if (!authBridge.healthRunMwinit) return;
+    mwinitBtn.disabled = true;
+    const orig = mwinitBtn.textContent;
+    mwinitBtn.textContent = 'Running mwinit…';
+    authBridge.healthRunMwinit().catch(() => {})
+      .finally(() => { mwinitBtn.disabled = false; mwinitBtn.textContent = orig; _loadAuthHealth(); });
+  });
+
+  // Live update when the supervisor pushes an mwinit status change.
+  try { bus.on('auth:mwinit-status', () => _loadAuthHealth()); } catch (_) {}
+
+  _loadAuthHealth();
+}
+
 function _wireUITab() {
   // ── Template cards ──────────────────────────────────────────────────────
   _drawer.querySelectorAll('.sd-template').forEach((card) => {
@@ -2933,6 +3082,7 @@ export function init() {
   _wireAsana();
 
   _wireAccounts();
+  _wireAuthHealth();
   _wireSectionAccordion('sd-pane-integrations');
   _wireSectionAccordion('sd-pane-ui');
 
