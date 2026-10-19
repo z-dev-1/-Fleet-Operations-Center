@@ -169,6 +169,7 @@ const REGISTRY = {
   // always outranks ai_inferred. See src/ai/memory.js.
   aiMemory:                () => path.join(P.dataDir, 'ai_memory.json'),
   aiEvidenceCache:         () => path.join(P.dataDir, 'ai_evidence_cache.json'), // Phase 6: dedup cache for processed attachments/URLs (compact extraction only)
+  wrCommitOnce:            () => path.join(P.dataDir, 'wr_commit_once.json'), // idempotency guard for operator-consented one-shot WR commits
   // Unified AI Core durable action receipts (2026-10, spec §19) — one durable
   // record per executed production action: type, entity, requester, approver,
   // executing instance, fencing token, timings, source read-back, verified

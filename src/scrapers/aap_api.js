@@ -1272,12 +1272,16 @@ function _buildWoBody(opts, assetFull, vendorCode) {
   // String-argument constructor ... from String value"). The service-aggregate
   // GET shows the Comment shape as { timestamp, text, createdBy, internalOnly }.
   // Build that shape. `shareWith:'internal'` -> internalOnly true.
+  // createdBy is REQUIRED non-null on each Comment (confirmed by a live 400:
+  // "comments.N.member.createdBy ... must not be null"). Use the contact name,
+  // then the operator alias, then a safe default — never null.
+  const _commentAuthor = String(opts.createdBy || opts.contactName || opts.operatorAlias || 'Fleet Ops Center').trim() || 'Fleet Ops Center';
   const comments = [];
   if (opts.comments && String(opts.comments).trim()) {
     comments.push({
       text: String(opts.comments).trim(),
       internalOnly: String(opts.shareWith || '').toLowerCase() === 'internal',
-      createdBy: opts.createdBy || null,
+      createdBy: _commentAuthor,
       timestamp: nowIso,
     });
   }
@@ -1326,7 +1330,11 @@ function _buildWoBody(opts, assetFull, vendorCode) {
     comments,
     suggestedItems,
     vendor: vendorCode,
-    supplierId: null,
+    // Preferred supplier (branch/location) the modal selected. supplierRequired
+    // vendors (COX, Gabrielli, KWNE, Allegiance) need this; it was previously
+    // hardcoded null, dropping the operator's supplier choice. Phase 1
+    // (UNASSIGNED) still sends null — a recommendation has no supplier yet.
+    supplierId: (vendorCode && vendorCode !== 'UNASSIGNED' && opts.supplierId) ? String(opts.supplierId) : null,
     sourceNotificationIds: null,
     source: null, // wizard sends source:null (NOT omitted, NOT a string)
     severity: urgent ? 'HIGH' : 'LOW',
@@ -1413,6 +1421,23 @@ async function createWorkOrder(opts = {}) {
       (recommendation.raw && recommendation.raw.workRequestId))) || '';
   logger.info('createWorkOrder Phase 2 (commit) aaid=' + aaid +
     ' vendor=' + vendorCode + ' workRequestId=' + workRequestId);
+  // HONESTY GUARD: the /vre/recommendation endpoint RETURNS A RECOMMENDATION,
+  // not a commit receipt. If no workRequestId/serviceId came back, the WR was
+  // NOT created — do NOT report success. A real commit needs the dedicated
+  // submit endpoint (TODO: capture the wizard's final create call). Surface
+  // this truthfully so callers never claim a WR exists when it doesn't.
+  if (!workRequestId) {
+    logger.warn('createWorkOrder: NO workRequestId returned — the recommendation endpoint did not create a WR. Submit endpoint not yet wired.');
+    return {
+      ok: false,
+      phase: 'commit-unconfirmed',
+      aaid,
+      vendor: vendorCode,
+      recommendation,
+      error: 'AAP returned a recommendation but no work-request id — the WR was NOT created. The final submit endpoint is not implemented yet (the /vre/recommendation PUT only recommends).',
+      raw: resp || null,
+    };
+  }
 
   // Upload attachments to the just-created WR (best-effort — a failed upload
   // never fails the WR). opts.attachments = [{ name, dataUrl }] from the modal.
