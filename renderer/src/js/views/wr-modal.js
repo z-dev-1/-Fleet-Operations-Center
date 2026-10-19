@@ -1767,19 +1767,37 @@ async function _runAIAssist() {
     } catch(e) {}
   }
 
+  // AAP LIVE VENDOR LIST — the EXACT values the vendor dropdown is populated
+  // with (from window.aapApi.vendors()). These are the only valid override
+  // values; many are vendor + LOCATION entries (e.g. "Gabrielli Truck Sales &
+  // Service - Rockaway"). The AI must pick the override from THIS list so it
+  // matches a real dropdown option. Flag integrated vendors (wrEnabled).
+  let aapVendorCtx = '';
+  try {
+    const live = (_vendorList || []).map((v) => v && v.vendorName).filter(Boolean);
+    if (live.length) {
+      aapVendorCtx = '\nAAP VENDOR LIST (these are the EXACT dropdown values — any vendor override MUST be one of these verbatim; many include a LOCATION after a dash):\n'
+        + live.join('\n') + '\n';
+    }
+  } catch (_) {}
+
   const prompt = 'You are a fleet maintenance work request assistant for Amazon Transportation.\n\n'
     + 'User typed this WR title (free text — interpret their intent): "' + title + '"\n\n'
     + 'UNIT: ' + unitId + ' | Make: ' + make + ' | Site (home domicile): ' + site + '\n'
     + (notes ? 'Notes: ' + notes + '\n' : '')
     + (uptake ? 'Uptake Insights: ' + uptake + '\n' : '')
+    + aapVendorCtx
     + vendorBookCtx
     + domicileBookCtx
     + '\nRULES — READ CAREFULLY. Interpret the user\'s words LITERALLY. Do not add intent they did not state. This decides ONE vs MULTIPLE work orders, the vendor, and urgency:\n'
     + '- URGENCY IS EXPLICIT ONLY: set urgent=true ONLY if the user literally says "urgent" (or "emergency"/"ASAP"/"priority"). If they do NOT say it, urgent=false — EVEN for brakes/safety/fire. Never infer urgency from the problem type. When urgent=true and no reason was given, urgencyReason="DEA - Asset Shortage".\n'
-    + '- VENDOR = OVERRIDE vs AAP RECOMMENDATION:\n'
-    + '    * If the user NAMES a vendor/dealer to assign or send to ("assign to KWNE", "send to Kenworth dealer", "to Cummins Bristol", "gabriellis"): that is an OPERATOR OVERRIDE — set vendor = the EXACT matching name from the VENDOR BOOK.\n'
-    + '    * If the user names a BRAND/MAKE dealer with NO specific location ("send to Kenworth dealer", "to the pete store", "take it to a Freightliner dealer"): choose the CLOSEST vendor of that brand to the unit\'s domicile <SITE> using the VENDOR BOOK mileage (lowest "<SITE>:Nmi"). Set vendor to that exact closest vendor name.\n'
-    + '    * If the user names NO vendor at all: vendor="" (empty). Leave it to AAP\'s recommendation — do NOT guess a vendor.\n'
+    + '- VENDOR = OVERRIDE vs AAP RECOMMENDATION. The vendor MUST be chosen from the AAP VENDOR LIST above (verbatim), never invented:\n'
+    + '    * THE USER\'S NAMED VENDOR ALWAYS WINS over the unit\'s make. If the unit is a Freightliner but the user says "send to Kenworth" or "to Cummins", pick Kenworth / Cummins — honor what they SAID, not the make.\n'
+    + '    * NAMED VENDOR + LOCATION ("send to Gabrielli Truck Sales & Service - Rockaway", "Allegiance Truck Centers - Flemington", "Cummins Bristol"): find the AAP VENDOR LIST entry that matches BOTH the vendor name AND the location (the part after the dash). Set vendor = that EXACT full entry (with the location). This is an OPERATOR OVERRIDE (vendorIsOverride=true).\n'
+    + '    * NAMED VENDOR, LOCATION NOT SPECIFIED ("send to Gabrielli", "assign to Kenworth dealer", "to the pete store"): from the AAP VENDOR LIST, pick the entry for that vendor whose LOCATION is CLOSEST to the unit\'s domicile <SITE> (use the VENDOR BOOK mileage "<SITE>:Nmi" to decide which location is nearest; if only one location exists for that vendor, use it). Set vendor = that exact full entry. Override (vendorIsOverride=true).\n'
+    + '    * GENERIC "send to dealer" with NO vendor name at all: THEN fall back to the unit\'s make — pick the AAP VENDOR LIST entry for the unit\'s make closest to <SITE> (Freightliner unit -> a Freightliner dealer, etc.). Override (vendorIsOverride=true).\n'
+    + '    * NO dealer/vendor mentioned at all (just a problem stated): vendor="" (empty), vendorIsOverride=false. Leave it to AAP\'s recommendation — do NOT guess.\n'
+    + '    * ALWAYS output the vendor EXACTLY as it appears in the AAP VENDOR LIST (including the " - <Location>" suffix). If no list entry reasonably matches what the user named, leave vendor="" and say so in comments rather than inventing one.\n'
     + '- MOVING THE UNIT = TOW. Naming a dealer as a DESTINATION the unit must go to ("send/take/bring/needs to go TO <dealer>", "from <X> to <dealer>") means the physical unit is towed there -> isTow=true. Naming a dealer is the tow signal; the word "tow" is not required.\n'
     + '- REPAIR vs TOW-ONLY (hasRepair):\n'
     + '    * hasRepair=true when a mechanical problem/symptom is stated ("check engine light", "air leak", "brakes", "won\'t start"). A named dealer destination does NOT remove the repair — "air leak, send to Cummins Bristol from ABE" = hasRepair=true AND isTow=true (TWO work orders: the repair WR with vendor=Cummins, plus the tow WR).\n'
@@ -1824,12 +1842,38 @@ async function _runAIAssist() {
     {
       const sel = _el('wr-vendor');
       if (sel) {
-        if (ai.vendor && String(ai.vendor).trim()) {
-          const opt = Array.from(sel.options).find(o => o.value === ai.vendor || o.value.toUpperCase().includes((ai.vendor||'').toUpperCase()));
+        const want = String(ai.vendor || '').trim();
+        if (want) {
+          const opts = Array.from(sel.options).filter((o) => o.value);
+          const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+          const w = norm(want);
+          // 1) exact value, 2) exact normalized, 3) option contains the AI value
+          //    (or vice-versa), 4) best token-overlap (handles "Gabrielli ...
+          //    Rockaway" vs the dropdown's full "Gabrielli Truck Sales & Service
+          //    - Rockaway"), so vendor+location overrides land on the right row.
+          let opt = opts.find((o) => o.value === want)
+            || opts.find((o) => norm(o.value) === w)
+            || opts.find((o) => norm(o.value).includes(w) || w.includes(norm(o.value)));
+          if (!opt) {
+            const wTokens = new Set(w.split(' ').filter((t) => t.length > 2));
+            let best = null, bestScore = 0;
+            for (const o of opts) {
+              const oTokens = norm(o.value).split(' ').filter((t) => t.length > 2);
+              const score = oTokens.reduce((n, t) => n + (wTokens.has(t) ? 1 : 0), 0);
+              if (score > bestScore) { bestScore = score; best = o; }
+            }
+            // Require at least 2 shared significant tokens (vendor + location)
+            // so we don't mis-match on a single common word.
+            if (best && bestScore >= 2) opt = best;
+          }
           if (opt) sel.value = opt.value;
+          else _logProgress && _logProgress('AI vendor "' + want + '" not found in the AAP vendor list — pick it manually', 'err');
         } else {
-          sel.selectedIndex = 0; // default (AAP auto-assign)
+          sel.selectedIndex = 0; // default (AAP auto-assign / recommendation)
         }
+        // Reflect the pick in the override badge + supplier UI immediately.
+        if (typeof _updateVendorOverrideBadge === 'function') _updateVendorOverrideBadge();
+        if (typeof _syncSupplierSelect === 'function') _syncSupplierSelect();
       }
     }
     // Fill area/subcategory pairs (up to 4). If the AI decided this title needs
