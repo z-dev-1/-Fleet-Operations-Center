@@ -101,6 +101,33 @@ async function _ask(prompt, opts) {
 }
 
 // ── 2. Reply drafting + sending ────────────────────────────────────────────────
+// Build a compact GROUNDED-CONTEXT block for the reply from the canonical state
+// of any in-scope unit the email references (spec §23). This lets the reply
+// ANSWER the real question using app truth (current phase, who we're waiting on,
+// latest meaningful update, open question) instead of a generic acknowledgement.
+// Read-only; returns '' when there's no canonical context to add.
+function _replyContextBlock(email) {
+  try {
+    const refs = Array.isArray(email && email.unitRefs) ? email.unitRefs : [];
+    if (!refs.length) return '';
+    const canon = ((store.load('canonicalState', {}) || {}).units) || {};
+    const blocks = [];
+    for (const ref of refs.slice(0, 3)) {
+      const rec = ref && ref.unit ? canon[ref.unit] : null;
+      if (!rec) continue;
+      const bits = [];
+      if (rec.situation) bits.push('status: ' + String(rec.situation).slice(0, 160));
+      if (rec.repairPhase && rec.repairPhase !== 'unknown') bits.push('repair phase: ' + rec.repairPhase);
+      if (rec.waitingOnFine && rec.waitingOnFine !== 'unknown') bits.push('waiting on: ' + rec.waitingOnFine);
+      if (rec.nextStep) bits.push('next step: ' + String(rec.nextStep).slice(0, 120));
+      if (rec.lastMeaningfulUpdate && rec.lastMeaningfulUpdate.text) bits.push('latest update: ' + String(rec.lastMeaningfulUpdate.text).slice(0, 160));
+      if (bits.length) blocks.push('Unit ' + ref.unit + ' — ' + bits.join('; ') + '.');
+    }
+    if (!blocks.length) return '';
+    return '\nGROUNDED FLEET CONTEXT (use ONLY these app facts to answer; do NOT invent anything beyond them):\n' + blocks.map((b) => '- ' + b).join('\n') + '\n';
+  } catch (_) { return ''; }
+}
+
 function _buildReplyPrompt(email, guidance) {
   const atts = (email.attachments || []).map((a) => a.name + ' [' + a.type + ']').join(', ');
   const lines = [];
@@ -114,9 +141,13 @@ function _buildReplyPrompt(email, guidance) {
   lines.push('Subject: ' + (email.subject || '(no subject)'));
   if (atts) lines.push('Attachments: ' + atts);
   lines.push('Body: ' + String(email.bodyText || email.summary || '').slice(0, 2000));
+  // §23: fold in grounded canonical fleet context so the reply can actually
+  // ANSWER a status/ETC question from app truth rather than a generic reply.
+  const ctx = _replyContextBlock(email);
+  if (ctx) lines.push(ctx);
   if (guidance) { lines.push(''); lines.push('WHAT THE REPLY SHOULD SAY (follow this intent): ' + guidance); }
   lines.push('');
-  lines.push('Write the reply now. Do not invent facts, prices, dates, or commitments not supported by the original email or the intent above.');
+  lines.push('Write the reply now. Answer the actual question using the grounded fleet context above when it applies. Do not invent facts, prices, dates, or commitments not supported by the original email or the context above. If the question requires an authority decision (approving a cost, authorizing a tow) that the context does not settle, do NOT fabricate approval — write that it is under review.');
   return lines.join('\n');
 }
 
@@ -319,5 +350,6 @@ module.exports = {
   getEmailEvidence,
   _resolveOperator,
   _buildReplyPrompt,
+  _replyContextBlock,
   _buildReadyDmPrompt,
 };
