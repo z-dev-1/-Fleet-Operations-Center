@@ -140,7 +140,12 @@ async function readAttachment(file) {
     return { ok: false, reason: 'cannot read ' + (dl.mimetype || name) + ' (vision/document reader unavailable)' };
   }
   const vis = await bd.readFileWithVision({ name, mimetype: dl.mimetype, buffer: dl.buffer });
-  if (vis && vis.ok && vis.text) return { ok: true, kind: vis.kind || 'binary', title: name, text: vis.text };
+  if (vis && vis.ok && vis.text) {
+    // Surface the downloaded bytes + precise kind so researchAttachments can run
+    // Phase-6 STRUCTURED analysis (document/image intelligence) WITHOUT a second
+    // download. The generic transcription (text) is kept as the fallback/base.
+    return { ok: true, kind: vis.kind || 'binary', title: name, text: vis.text, buffer: dl.buffer, mimetype: dl.mimetype };
+  }
   return { ok: false, reason: (vis && vis.error) || 'could not read file content' };
 }
 
@@ -178,6 +183,27 @@ async function researchAttachments(files) {
         retrievedAt: new Date().toISOString(),
       });
       logger.info('[fas-attach] read ' + label + ' (' + (r.kind || '?') + ')' + (found.length ? ' units=' + found.join(',') : ''));
+
+      // PHASE 6: STRUCTURED intelligence on binary files, reusing the bytes we
+      // already downloaded (no second fetch). Images -> damage/screenshot
+      // classification with confidence; documents -> typed invoice/estimate/
+      // inspection field extraction. Adds a structured evidence fact alongside
+      // the transcription and harvests any unit/VIN ids for per-unit research.
+      // Best-effort: a structured-analysis failure never drops the base read.
+      if (r.buffer && r.buffer.length && (r.kind === 'image' || r.kind === 'document')) {
+        try {
+          const st = await _structuredAnalyze(file, r);
+          if (st && st.ok) {
+            (st.units || []).forEach(u => { if (u) units.push(u); });
+            evidence.push({
+              field: r.kind === 'image' ? 'imageAnalysis' : 'documentAnalysis',
+              value: st.value,
+              source: st.source,
+              retrievedAt: new Date().toISOString(),
+            });
+          }
+        } catch (e) { logger.warn('[fas-attach] structured analysis failed for ' + label + ' (non-fatal): ' + e.message); }
+      }
     } else {
       refused.push({ file: label, reason: (r && r.reason) || 'unreadable' });
       logger.warn('[fas-attach] could not read ' + label + ' — ' + ((r && r.reason) || 'unreadable'));
@@ -186,4 +212,43 @@ async function researchAttachments(files) {
   return { evidence, units: [...new Set(units)], refused };
 }
 
-module.exports = { readAttachment, researchAttachments, _htmlToText, _isTextual, _extractUnits };
+// Run Phase-6 structured intelligence on an already-downloaded binary. Returns
+// { ok, value, source, units } where value is a compact structured object the
+// evidence builder/agent can reason over. Pure routing by kind; guarded.
+async function _structuredAnalyze(file, r) {
+  const fileForIntel = { name: (file && file.name) || r.title, mimetype: r.mimetype, buffer: r.buffer, id: file && file.id, size: file && (file.size || file.filesize) };
+  if (r.kind === 'image') {
+    let img; try { img = require('../../ai/image-intelligence'); } catch (_) { return null; }
+    const a = await img.analyzeImage(fileForIntel);
+    if (!a || !a.ok) return null;
+    return {
+      ok: true,
+      source: a.source || ('slack-image:' + fileForIntel.name),
+      units: a.units || [],
+      value: {
+        imageType: a.imageType, confidence: a.confidence, summary: a.summary,
+        damage: a.damage || undefined,
+        visibleText: a.visibleText ? String(a.visibleText).slice(0, 2000) : undefined,
+        units: (a.units && a.units.length) ? a.units : undefined,
+        // Always carry the safety caveat forward for damage photos (spec #34).
+        safetyNote: a.damage ? 'Visual observation only — NOT a mechanical/safety determination.' : undefined,
+      },
+    };
+  }
+  // document
+  let doc; try { doc = require('../../ai/document-intelligence'); } catch (_) { return null; }
+  const d = await doc.extractDocument(fileForIntel);
+  if (!d || !d.ok) return null;
+  return {
+    ok: true,
+    source: d.source || ('slack-document:' + fileForIntel.name),
+    units: d.units || [],
+    value: {
+      documentType: d.documentType, summary: d.summary, fields: d.fields,
+      units: (d.units && d.units.length) ? d.units : undefined,
+      vins: (d.identifiers && d.identifiers.vins && d.identifiers.vins.length) ? d.identifiers.vins : undefined,
+    },
+  };
+}
+
+module.exports = { readAttachment, researchAttachments, _structuredAnalyze, _htmlToText, _isTextual, _extractUnits };

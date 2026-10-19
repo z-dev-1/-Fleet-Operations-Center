@@ -189,11 +189,36 @@ replacement has equivalent tests (spec Phase 10 / invariants).
   `store/index.js`, `tests/fas-contact-sync.test.js` (16 tests). Full suite:
   1164 passing.
 
-- **P6 — Structured multimodal intelligence (#32–#36,#56,#62).** Add typed
-  extraction (`document-intelligence`), damage/screenshot classification with
-  confidence (`image-intelligence`), `url-intelligence`, `evidence-normalizer`,
-  and a file/URL cache — layered on top of the existing attachment/link readers
-  (reuse `bedrock.readFileWithVision`, don't duplicate download). Tests #30–#58.
+- **P6 — Structured multimodal intelligence (#32–#37,#51–#57,#62). ✅ DONE.**
+  Layered a STRUCTURED extraction step on top of the existing vision reader
+  (`bedrock.readFileWithVision`, which accepts `opts.prompt`) and the existing
+  attachment download — no duplicate fetch/model call. New modules in `src/ai/`:
+  - `document-intelligence.js`: typed doc extraction — classifies documentType
+    (repair_estimate / invoice / dot_inspection / pm_inspection / work_order /
+    vendor_report / recall / quote / towing_invoice / accident / policy_sop /
+    other) and extracts fields (unit, VIN, vendor, dates, invoice/WO #, mileage,
+    amount, repair items, inspection result/defects, pass/fail) each with its own
+    confidence; harvests unit/VIN identifiers for per-unit research (#51/#52).
+  - `image-intelligence.js`: classifies image type (vehicle_damage /
+    dashboard_warning / component / tire / inspection_form / app_screenshot /
+    text_screenshot / document_photo / unrelated / uncertain); for damage photos
+    extracts side/area/observations/severity + confidence (#34); reads visible
+    text from screenshots (#36/#37); `consolidateDamage` merges multiple photos
+    (#35). CRITICAL: never a safety certification — safety-claim language is
+    stripped defensively (#34).
+  - `evidence-cache.js`: dedup cache keyed by fileId+size / content-hash / URL,
+    stores only the compact extraction (never raw bytes), TTL-gated (files long,
+    URLs short) (#56/#62).
+  Wired into `orcha/fas/attachment-research.js`: `readAttachment` now returns the
+  already-downloaded buffer + precise kind, and `researchAttachments` routes
+  binary files to image/document intelligence, adding a structured
+  `imageAnalysis`/`documentAnalysis` evidence fact alongside the base
+  transcription and merging extracted unit ids. (URL intelligence #38–#44 was
+  already covered by `link-research.js`: extractUrls/classify/fetchApproved +
+  AAP deep-link API resolution.) Files: `src/ai/document-intelligence.js` (new),
+  `src/ai/image-intelligence.js` (new), `src/ai/evidence-cache.js` (new),
+  `orcha/fas/attachment-research.js`, `store/index.js`,
+  `tests/fas-multimodal-intel.test.js` (12 tests). Full suite: 1176 passing.
 
 - **P7 — Single Gateway (#3).** `src/slack/gateway.js` as the one normalizer;
   point both engines' inbound at it (transport stays in the engines). Tests for

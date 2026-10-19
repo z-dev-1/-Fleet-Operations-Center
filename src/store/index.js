@@ -168,6 +168,7 @@ const REGISTRY = {
   // which the memory service also reads and ranks. Operator-confirmed memory
   // always outranks ai_inferred. See src/ai/memory.js.
   aiMemory:                () => path.join(P.dataDir, 'ai_memory.json'),
+  aiEvidenceCache:         () => path.join(P.dataDir, 'ai_evidence_cache.json'), // Phase 6: dedup cache for processed attachments/URLs (compact extraction only)
   // Unified AI Core durable action receipts (2026-10, spec §19) — one durable
   // record per executed production action: type, entity, requester, approver,
   // executing instance, fencing token, timings, source read-back, verified
