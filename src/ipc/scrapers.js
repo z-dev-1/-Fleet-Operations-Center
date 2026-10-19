@@ -457,17 +457,70 @@ function registerScrapersIPC(ctx) {
     requireObject(payload, "payload");
     _wrLock = true;
     try {
-      const { createWorkRequest } = require("../scrapers/aap_create_wr");
       const log = (msg) => {
-        logger.info(msg);
+        logger.info(typeof msg === 'string' ? msg : JSON.stringify(msg));
         try {
           const wins = require("electron").BrowserWindow.getAllWindows();
           const main = wins.find(w => !w.isDestroyed() && w.webContents.getURL().includes("localhost:5173"));
-          if (main) main.webContents.send("wr:progress", { message: msg });
+          if (main) main.webContents.send("wr:progress", { message: (typeof msg === 'string' ? msg : JSON.stringify(msg)) });
         } catch(e) {}
       };
-      const result = await createWorkRequest(payload, unit, log);
-      return result;
+
+      // ROUTE THROUGH THE HARDENED API PATH (2026-10-19). The old
+      // aap_create_wr.createWorkRequest uses a browser ses.fetch to /createRepair
+      // that returns HTTP 403 (auth) — confirmed live on the TOW submit. The
+      // aap_api.createWorkOrder path runs inside the authenticated AAP page with
+      // the captured a2z token (works), AND adds vendor resolution + self-healing
+      // + business-error messages. Unify every WR (repair AND tow) on it.
+      const aapApi = require("../../src/scrapers/aap_api");
+
+      // Map the modal/tow payload into createWorkOrder opts.
+      const opts = {
+        assetUrl: (unit && unit.assetUrl) || '',
+        aaid: (unit && unit.aaid) || undefined,
+        title: payload.title,
+        issue: payload.issue,
+        comments: payload.comments,
+        shareWith: payload.shareWith,
+        areaPairs: payload.areaPairs || [],
+        urgent: payload.urgent,
+        urgencyReason: payload.urgencyReason,
+        arcClaim: payload.arcClaim,
+        simNumber: payload.simNumber,
+        vendor: payload.vendor,
+        contactName: payload.contactName,
+        contactPhone: payload.contactPhone,
+        attachments: (payload.attachments || []).map((d, i) => (typeof d === 'string' ? { name: 'attachment-' + (i + 1), dataUrl: d } : d)),
+        domicile: (unit && (unit.site || unit.domicileSite)) || payload.domicile || '',
+        copiedFromWorkRequestId: payload.copiedFromWorkRequestId || null,
+        confirmVendor: true, // modal auto-submits → commit directly
+      };
+
+      // TOW LOCATION: for a return-to-yard / yard-to-yard tow the unit is NOT at
+      // its home yard — it's at the tow PICKUP (the dealer). Tell createWorkOrder
+      // via its off-site address fields so currentLocation reflects where the
+      // unit actually is. For a to-dealer tow the unit is still at the home yard,
+      // so leave the GPS/domicile location as-is.
+      const dir = String(payload.towDirection || '').toLowerCase();
+      if (dir === 'return-to-yard' || dir === 'yard-to-yard') {
+        const pickup = [payload.towFromStreet, payload.towFromCity, payload.towFromState, payload.towFromZip].map(s => String(s || '').trim());
+        if (pickup.some(Boolean)) {
+          opts.offSite = true;
+          opts.locStreet = payload.towFromStreet || '';
+          opts.locCity   = payload.towFromCity   || '';
+          opts.locState  = payload.towFromState  || '';
+          opts.locZip    = payload.towFromZip    || '';
+          log('[create-wr] tow direction "' + dir + '" — unit is at pickup, using off-site location: ' + pickup.filter(Boolean).join(', '));
+        }
+      }
+
+      const result = await aapApi.createWorkOrder(opts);
+      // Normalize to the shape the modal expects ({ ok, workRequestId, error }).
+      if (result && result.phase === 'commit' && result.workRequestId) {
+        log('Work order created: ' + result.workRequestId);
+        return { ok: true, workRequestId: result.workRequestId, vendor: result.vendor, raw: result };
+      }
+      return { ok: false, error: (result && result.error) || 'WR not created', aapMessage: result && result.aapMessage, businessRule: result && result.businessRule, raw: result };
     } finally {
       _wrLock = false;
     }

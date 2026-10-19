@@ -1998,7 +1998,28 @@ function _buildCreateRepairBody(opts, assetFull, vendorCode, recoResp) {
   // lat/long/address stay as-is. Missing geofence fields are sent as the
   // wizard does (nulls), which AAP accepts.
   const currentLocation = Object.assign({}, base.currentLocation);
+  // OFF-SITE / TOW-PICKUP GUARD (2026-10-19): when the caller marked this
+  // off-site (opts.offSite — e.g. a return-to-yard tow where the unit is sitting
+  // at the DEALER, not its home yard), the base currentLocation already carries
+  // the correct pickup address from _buildLocation. DO NOT overwrite it with the
+  // unit's live-GPS yard geofence — that was the bug: a tow for 321963 at
+  // TransEdge Allentown got stamped with the live geofence "116FCLGQY_ITR" +
+  // GPS, clobbering the pickup address. Skip the yard enrichment entirely here.
+  const _offSite = !!(opts && opts.offSite);
+  if (_offSite) {
+    // Unit is away from its yard (tow pickup / off-site). Keep the pickup address
+    // from _buildLocation; record it as yardLocation and clear the yard-geofence
+    // fields so we don't claim it's at a known Amazon yard.
+    const addrParts = [currentLocation.street, currentLocation.city, currentLocation.subRegion].filter(Boolean).join(', ');
+    currentLocation.yardLocation = addrParts || currentLocation.yardLocation || null;
+    currentLocation.geofenceName = null;
+    currentLocation.code = null;
+    currentLocation.type = null;
+    currentLocation.deviceTelemetryData = { engineHours: null, odometer: null };
+    try { logger.info('[create-wr] off-site location kept (tow pickup / away from yard): ' + (addrParts || '(address)')); } catch (_) {}
+  }
   try {
+    if (_offSite) throw '__skip_yard__';   // skip yard enrichment when off-site
     const llRaw = opts && opts.locationLatest;
     const ll = (llRaw && (llRaw.location || llRaw)) || {};
     const gfArr = (ll.geoFences || (assetFull && assetFull.geoFences)) || [];
