@@ -1731,16 +1731,21 @@ async function createWorkOrder(opts = {}) {
   // is optional — a missing contact never fails the WR (it already exists).
   let driverConnection = null;
   const _contactName = String(opts.contactName || '').trim();
-  const _contactPhone = String(opts.contactPhone || '').trim();
+  // NORMALIZE the phone the SAME way the proven wizard path does
+  // (aap_create_wr.js): strip everything except digits and dashes. Sending a
+  // raw "(716) 614-2167" made AAP's createDriverConnection drop/not-store the
+  // number (confirmed: the number wasn't landing on the WR). The working path
+  // sends "7166142167" / "1-716..." — digits + dashes only.
+  const _contactPhone = String(opts.contactPhone || '').replace(/[^\d-]/g, '').trim();
   if (_contactName || _contactPhone) {
     try {
       driverConnection = await apiPost(CREATE_DRIVER_CONNECTION_PATH, {
         workRequestId,
-        driverName: _contactName || null,
+        driverName: _contactName || 'Fleet Ops Center',
         driverPhoneNumber: _contactPhone || null,
         aaid,
       });
-      logger.info('createWorkOrder: attached contact to WR ' + workRequestId);
+      logger.info('createWorkOrder: attached contact to WR ' + workRequestId + ' (driver=' + (_contactName || 'Fleet Ops Center') + ', phone=' + (_contactPhone || 'none') + ')');
     } catch (e) {
       logger.warn('createWorkOrder: createDriverConnection failed (non-fatal, WR exists): ' + e.message);
       driverConnection = { ok: false, error: e.message };
@@ -1959,13 +1964,34 @@ function _buildCreateRepairBody(opts, assetFull, vendorCode, recoResp) {
     const llRaw = opts && opts.locationLatest;
     const ll = (llRaw && (llRaw.location || llRaw)) || {};
     const gfArr = (ll.geoFences || (assetFull && assetFull.geoFences)) || [];
-    const gf = Array.isArray(gfArr) && gfArr.length ? gfArr[0] : null;
-    currentLocation.yardLocation = ll.yardLocation || (assetFull && assetFull.yardLocation) || null;
-    currentLocation.yardLocationType = ll.yardLocationType || null;
+    // Pick the YARD/FACILITY geofence — NOT just geoFences[0], which is often a
+    // shuttle route or region (confirmed live for B62049: [0]="SNY8-SHUTTLE",
+    // but the real yard is "ROC5" / "ROC5-MMRO"). Preference order:
+    //   1) the geofence whose name matches the unit's domicile site code
+    //      (e.g. domicile "ROC5" → geofence "ROC5" or "ROC5-MMRO"/"ROC5-...")
+    //   2) a maintenance/yard facility geofence (*-MMRO)
+    //   3) an Amazon SortCenter-category geofence
+    //   4) a short all-caps site-style code (<=6 chars, letters+digits, no
+    //      spaces/underscores — e.g. "ABE40", "ROC5") — excludes
+    //      route/region names like "SNY8-SHUTTLE" or "250_SHEPARD_RD"
+    //   5) fall back to the first geofence (previous behavior)
+    const gfList = Array.isArray(gfArr) ? gfArr.filter(Boolean) : [];
+    const nm = (g) => String((g && (g.name || g.geofenceName)) || '');
+    const dom = String(opts.domicile || '').trim().toUpperCase();
+    const isSiteCode = (s) => /^[A-Z]{2,4}\d{0,3}$/.test(s) || /^[A-Z]{3,4}\d-MMRO$/i.test(s);
+    let gf =
+      (dom && gfList.find((g) => { const n = nm(g).toUpperCase(); return n === dom || n.startsWith(dom + '-') || n.startsWith(dom); })) ||
+      gfList.find((g) => /-MMRO$/i.test(nm(g))) ||
+      gfList.find((g) => /sortcenter/i.test(String(g && g.category || ''))) ||
+      gfList.find((g) => isSiteCode(nm(g).toUpperCase())) ||
+      (gfList.length ? gfList[0] : null);
+    currentLocation.yardLocation = ll.yardLocation || (assetFull && assetFull.yardLocation) || (gf ? nm(gf) : null);
+    currentLocation.yardLocationType = ll.yardLocationType || (assetFull && assetFull.yardLocationType) || null;
     currentLocation.geofenceName = (gf && (gf.name || gf.geofenceName)) || null;
-    currentLocation.code = (gf && gf.code) || opts.domicile || null;
+    currentLocation.code = (gf && gf.code) || (gf ? nm(gf) : null) || opts.domicile || null;
     currentLocation.type = (gf && gf.type) || 'AMAZON_FACILITY';
     currentLocation.deviceTelemetryData = { engineHours: null, odometer: null };
+    try { logger.info('[create-wr] yard geofence selected for ' + (opts.aaid || '?') + ': "' + currentLocation.geofenceName + '" (from ' + gfList.length + ' geofences; domicile=' + (dom || 'n/a') + ')'); } catch (_) {}
   } catch (_) { /* keep the base location */ }
   // comments need externalConsumers:[] (the wizard always sends it).
   const comments = (base.comments || []).map((c) => ({
@@ -2278,6 +2304,7 @@ module.exports = {
   _resolveVendorCode,           // exported: resolve vendor display name -> live AAP vendorId
   _vendorCode,                  // exported: naive fallback vendor code
   _setVendorListForTest,        // test seam: inject a vendor-config list
+  _buildCreateRepairBody,       // exported: build the /createRepair body (yard/location mapping tests)
   vreRecommendMatrix,
   getDocumentUploadLink,
   uploadDocumentFile,
