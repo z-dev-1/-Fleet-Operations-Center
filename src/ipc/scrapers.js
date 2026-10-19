@@ -227,6 +227,53 @@ function registerScrapersIPC(ctx) {
       });
 
       _activeAutofillWin = aapWin;
+
+      // ── WR-CREATE NETWORK CAPTURE (observe-only; env-gated AAP_WR_CAPTURE=1)
+      // Attaches the Chrome DevTools Protocol network domain to THIS autofill
+      // window and records every POST/PUT/PATCH (url + request body + response),
+      // flagging the call whose response carries a workRequestId/serviceId —
+      // i.e. the real WR-create endpoint. Changes NOTHING about the autofill;
+      // it only watches the network so we can wire the API submit path.
+      // Captures are appended to logs/aap_wr_capture.json.
+      if (String(process.env.AAP_WR_CAPTURE || '').trim() === '1') {
+        try {
+          const dbg = aapWin.webContents.debugger;
+          dbg.attach('1.3');
+          const reqs = new Map(); // requestId -> { url, method, body }
+          const _isAap = (u) => /aap-na\.corp\.amazon\.com|towtruck|assetlifecycle|serviceaggregate|\bvre\b|work.?request|repair/i.test(String(u || ''));
+          dbg.on('message', async (_e, method, params) => {
+            try {
+              if (method === 'Network.requestWillBeSent') {
+                const r = params.request || {};
+                if (r.method && r.method !== 'GET' && _isAap(r.url)) {
+                  reqs.set(params.requestId, { url: r.url, method: r.method, body: (r.postData || '').slice(0, 20000) });
+                }
+              } else if (method === 'Network.responseReceived') {
+                const info = reqs.get(params.requestId);
+                if (info) info.status = params.response && params.response.status;
+              } else if (method === 'Network.loadingFinished') {
+                const info = reqs.get(params.requestId);
+                if (!info) return;
+                let bodyText = '';
+                try { const b = await dbg.sendCommand('Network.getResponseBody', { requestId: params.requestId }); bodyText = (b && b.body) ? String(b.body).slice(0, 20000) : ''; } catch (_) {}
+                const createdWR = /"(workRequestId|serviceId|workOrderId)"\s*:\s*"[^"]+"/i.test(bodyText);
+                const rec = { at: new Date().toISOString(), url: info.url, method: info.method, status: info.status, requestBody: info.body, responseBody: bodyText, createdWR };
+                try {
+                  const _logsDir = require('../config/paths').P.logsDir;
+                  const capFile = p.join(_logsDir, 'aap_wr_capture.json');
+                  let arr = []; try { arr = JSON.parse(fs.readFileSync(capFile, 'utf8')); if (!Array.isArray(arr)) arr = []; } catch (_) {}
+                  arr.push(rec); fs.writeFileSync(capFile, JSON.stringify(arr, null, 2));
+                } catch (_) {}
+                logger.info('[aap-wr-capture] ' + (createdWR ? '★ WR-CREATE ' : '') + rec.method + ' ' + rec.url + ' -> ' + rec.status);
+                reqs.delete(params.requestId);
+              }
+            } catch (_) { /* observer must never affect the autofill */ }
+          });
+          dbg.sendCommand('Network.enable').catch(() => {});
+          logger.info('[aap-wr-capture] attached to autofill window — create the WR and click Submit; captures -> logs/aap_wr_capture.json');
+        } catch (e) { logger.warn('[aap-wr-capture] attach failed (non-fatal): ' + e.message); }
+      }
+
       // FIX (2026-07-23): AAP's WR wizard form has an unsaved-changes guard.
       // Without this, clicking the native close button (or the new Stop
       // button below) while mid-form can trigger a native "Leave Site?"

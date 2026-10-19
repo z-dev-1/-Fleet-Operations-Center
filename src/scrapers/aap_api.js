@@ -1160,6 +1160,13 @@ async function refreshUnit(unitNumber) {
 // confirm/override the vendor, then call again with confirmVendor set.
 
 const CREATE_WO_PATH = '/api/v1/vre/recommendation/UNPLANNED/ACTIVE';
+// REAL work-request creation endpoints (captured live 2026-10-19 from the AAP
+// wizard's Create/Submit flow). The /vre/recommendation PUT above ONLY
+// recommends; the WR is actually created by POST /createRepair (which returns
+// the workRequestId), then the contact is attached via POST
+// /createDriverConnection. This is the clean API path the wizard itself uses.
+const CREATE_REPAIR_PATH = '/api/v1/createRepair';
+const CREATE_DRIVER_CONNECTION_PATH = '/api/v1/createDriverConnection';
 
 // Default urgency-reason mapping from the wizard's human label → API enum.
 function _mapUrgencyReason(label) {
@@ -1412,44 +1419,61 @@ async function createWorkOrder(opts = {}) {
 
   // ── Phase 2: commit with the confirmed vendor ───────────────────────────
   const vendorCode = _vendorCode(opts.vendor);
-  const body = _buildWoBody({ ...opts, aaid }, assetFull, vendorCode);
-  const resp = await apiPut(CREATE_WO_PATH, body);
-  const recommendation = _readRecommendation(resp);
+
+  // STEP A: get the VRE recommendation (read-only) — it carries the
+  // recommendationInfo (groupingId/ruleName/ruleId/supplier) that the real
+  // /createRepair body requires to link the recommendation to the created WR.
+  const recoResp = await apiPut(CREATE_WO_PATH, _buildWoBody({ ...opts, aaid }, assetFull, 'UNASSIGNED'));
+  const recommendation = _readRecommendation(recoResp);
+
+  // STEP B: build + POST the REAL create body to /createRepair. This is the
+  // call that actually creates the WR (captured live from the wizard). It
+  // returns the workRequestId.
+  const createBody = _buildCreateRepairBody({ ...opts, aaid }, assetFull, vendorCode, recoResp);
+  const resp = await apiPost(CREATE_REPAIR_PATH, createBody);
   const workRequestId =
     (resp && (resp.workRequestId || resp.workOrderId || resp.id ||
-      (resp.workOrder && resp.workOrder.id) ||
-      (recommendation.raw && recommendation.raw.workRequestId))) || '';
-  logger.info('createWorkOrder Phase 2 (commit) aaid=' + aaid +
+      (resp.workOrder && resp.workOrder.id))) || '';
+  logger.info('createWorkOrder Phase 2 (createRepair) aaid=' + aaid +
     ' vendor=' + vendorCode + ' workRequestId=' + workRequestId);
-  // HONESTY GUARD: the /vre/recommendation endpoint RETURNS A RECOMMENDATION,
-  // not a commit receipt. If no workRequestId/serviceId came back, the WR was
-  // NOT created — do NOT report success. A real commit needs the dedicated
-  // submit endpoint (TODO: capture the wizard's final create call). Surface
-  // this truthfully so callers never claim a WR exists when it doesn't.
+
+  // HONESTY GUARD: no workRequestId back = the WR was NOT created. Never claim
+  // success. (Should not happen now that we POST /createRepair, but keep the
+  // guard so a future AAP change can't silently fake a success.)
   if (!workRequestId) {
-    logger.warn('createWorkOrder: NO workRequestId returned — the recommendation endpoint did not create a WR. Submit endpoint not yet wired.');
+    logger.warn('createWorkOrder: /createRepair returned no workRequestId — WR NOT created.');
     return {
-      ok: false,
-      phase: 'commit-unconfirmed',
-      aaid,
-      vendor: vendorCode,
-      recommendation,
-      error: 'AAP returned a recommendation but no work-request id — the WR was NOT created. The final submit endpoint is not implemented yet (the /vre/recommendation PUT only recommends).',
+      ok: false, phase: 'create-failed', aaid, vendor: vendorCode, recommendation,
+      error: 'AAP /createRepair returned no work-request id — the WR was NOT created.',
       raw: resp || null,
     };
   }
 
-  // Upload attachments to the just-created WR (best-effort — a failed upload
-  // never fails the WR). opts.attachments = [{ name, dataUrl }] from the modal.
+  // STEP C: attach the contact/driver (separate call the wizard makes). Contact
+  // is optional — a missing contact never fails the WR (it already exists).
+  let driverConnection = null;
+  const _contactName = String(opts.contactName || '').trim();
+  const _contactPhone = String(opts.contactPhone || '').trim();
+  if (_contactName || _contactPhone) {
+    try {
+      driverConnection = await apiPost(CREATE_DRIVER_CONNECTION_PATH, {
+        workRequestId,
+        driverName: _contactName || null,
+        driverPhoneNumber: _contactPhone || null,
+        aaid,
+      });
+      logger.info('createWorkOrder: attached contact to WR ' + workRequestId);
+    } catch (e) {
+      logger.warn('createWorkOrder: createDriverConnection failed (non-fatal, WR exists): ' + e.message);
+      driverConnection = { ok: false, error: e.message };
+    }
+  }
+
+  // STEP D: upload attachments to the just-created WR (best-effort).
   let attachmentResults = null;
   if (workRequestId && Array.isArray(opts.attachments) && opts.attachments.length) {
     try {
-      attachmentResults = await uploadWrAttachments(workRequestId, opts.attachments, {
-        vendor: vendorCode,
-        // enum defaults (documentType OTHER, workState IN_PROGRESS,
-        // serviceEntityIdCategory WORK_REQUEST_DOCUMENT) live in
-        // getDocumentUploadLink, confirmed against AAP validation.
-      });
+      attachmentResults = await uploadWrAttachments(workRequestId, opts.attachments, { vendor: vendorCode });
     } catch (e) {
       logger.warn('createWorkOrder: attachment upload batch failed: ' + e.message);
       attachmentResults = [{ ok: false, error: e.message }];
@@ -1463,8 +1487,97 @@ async function createWorkOrder(opts = {}) {
     vendor: vendorCode,
     autoAssignable: recommendation.autoAssignable,
     workRequestId,
+    suggestedItemIds: (resp && resp.suggestedItemIds) || [],
+    driverConnection,
     attachments: attachmentResults,
     raw: resp || null,
+  };
+}
+
+// Build the REAL /createRepair request body (captured live from the AAP wizard
+// 2026-10-19). It extends the recommendation body with: comments carrying
+// externalConsumers[], the chosen vendor+supplierId, and a recommendationInfo
+// block (groupingId/ruleName/ruleId/supplier) copied from the VRE response so
+// AAP links the created WR to its recommendation. recoResp is the raw VRE
+// recommendation response (for recommendationInfo); may be null.
+function _buildCreateRepairBody(opts, assetFull, vendorCode, recoResp) {
+  const base = _buildWoBody(opts, assetFull, vendorCode);
+  // Enrich currentLocation with the yard/geofence fields the wizard's
+  // /createRepair body carries (geofenceName/code/type + yardLocation +
+  // deviceTelemetryData). Best-effort from locationLatest/asset; the base
+  // lat/long/address stay as-is. Missing geofence fields are sent as the
+  // wizard does (nulls), which AAP accepts.
+  const currentLocation = Object.assign({}, base.currentLocation);
+  try {
+    const llRaw = opts && opts.locationLatest;
+    const ll = (llRaw && (llRaw.location || llRaw)) || {};
+    const gfArr = (ll.geoFences || (assetFull && assetFull.geoFences)) || [];
+    const gf = Array.isArray(gfArr) && gfArr.length ? gfArr[0] : null;
+    currentLocation.yardLocation = ll.yardLocation || (assetFull && assetFull.yardLocation) || null;
+    currentLocation.yardLocationType = ll.yardLocationType || null;
+    currentLocation.geofenceName = (gf && (gf.name || gf.geofenceName)) || null;
+    currentLocation.code = (gf && gf.code) || opts.domicile || null;
+    currentLocation.type = (gf && gf.type) || 'AMAZON_FACILITY';
+    currentLocation.deviceTelemetryData = { engineHours: null, odometer: null };
+  } catch (_) { /* keep the base location */ }
+  // comments need externalConsumers:[] (the wizard always sends it).
+  const comments = (base.comments || []).map((c) => ({
+    text: c.text,
+    internalOnly: c.internalOnly,
+    externalConsumers: [],
+    timestamp: c.timestamp,
+    createdBy: c.createdBy,
+  }));
+  // recommendationInfo: pull the matching recommended vendor entry from the VRE
+  // response so groupingId/ruleName/ruleId/supplier are consistent. Falls back
+  // to nulls if the recommendation wasn't available.
+  const rec = (recoResp && recoResp.recommendation) || {};
+  const vendorsArr = Array.isArray(rec.vendors) ? rec.vendors : [];
+  const chosen = vendorsArr.find((v) => _vendorCode(v.vendor) === vendorCode) || vendorsArr[0] || null;
+  const supplierObj = chosen && chosen.supplier;
+  const recommendationInfo = {
+    vendor: (chosen && chosen.vendor) || vendorCode,
+    vendorOpenWRCount: (chosen && chosen.openWorkRequestCount) != null ? chosen.openWorkRequestCount : null,
+    vendorDistanceToAsset: null,
+    multiVendorDecisionReason: rec.multiVendorDecisionReason || null,
+    supplier: supplierObj ? ((chosen.vendor || vendorCode) + '-' + (supplierObj.name || '')) : null,
+    ruleName: rec.ruleName || null,
+    groupingId: rec.groupingId || null,
+    ruleId: rec.ruleId || null,
+    recommendationOverridden: !!opts.vendorIsOverride,
+    recommendationOverrideReason: opts.overrideReason || null,
+  };
+  const supplierId = (vendorCode && vendorCode !== 'UNASSIGNED' && opts.supplierId)
+    ? String(opts.supplierId)
+    : (supplierObj && supplierObj.id) || null;
+  return {
+    aaid: base.aaid,
+    title: base.title,
+    calltype: base.calltype,
+    currentLocation,
+    urgent: base.urgent,
+    urgencyReason: base.urgencyReason,
+    tireIssue: base.tireIssue,
+    assetLoaded: base.assetLoaded,
+    assetRefrigerated: base.assetRefrigerated,
+    arcClaimNumber: base.arcClaimNumber,
+    simNumber: base.simNumber,
+    assetAvailableDateTime: base.assetAvailableDateTime,
+    needByDateTime: base.needByDateTime,
+    damageDescription: base.damageDescription,
+    suggestedItems: base.suggestedItems,
+    comments,
+    vendor: vendorCode,
+    supplierId,
+    sourceNotificationIds: null,
+    source: null,
+    severity: base.severity,
+    recommendationInfo,
+    copiedFromWorkRequestId: opts.copiedFromWorkRequestId || null,
+    dvirId: opts.dvirId || null,
+    relatedAsset: null,
+    campaign: null,
+    maintenanceTypes: null,
   };
 }
 
