@@ -1732,4 +1732,14 @@ function mergeUptakeIntoRows(aapRows, uptakeUnits) {
   });
 }
 
-module.exports = { scrapeUptake, mergeUptakeIntoRows };
+module.exports = {
+  scrapeUptake,
+  mergeUptakeIntoRows,
+  // ── test seams (pure functions; no Electron/DOM/network side effects) ────
+  // Exported so the API-path response mappers — the shape translation from the
+  // asset-ui JSON to our unit/insight model — can be unit-tested directly.
+  // Not part of the scraper's runtime surface.
+  mapApiInsight,
+  mapApiAsset,
+  mediaUrlCandidates,
+};
