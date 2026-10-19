@@ -1290,12 +1290,56 @@ function _mapUrgencyReason(label) {
   return 'OTHER';
 }
 
-// Vendor display string → API vendor CODE. 'Volvo (ASIST)' → 'VOLVO',
-// 'TA' → 'TA'. Empty/falsy → 'UNASSIGNED' (Phase-1 sentinel).
+// Vendor display string → API vendor CODE (naive fallback). 'Volvo (ASIST)' →
+// 'VOLVO'. Empty/falsy → 'UNASSIGNED' (Phase-1 sentinel). NOTE: uppercasing the
+// display name is only a GUESS — AAP's VendorConfigDynamo id is NOT always the
+// uppercased name (confirmed live 2026-10-19: "Amerit" → naive "AMERIT" → 400
+// "Could not load VendorConfigDynamo with id AMERIT"). Prefer _resolveVendorCode
+// which matches against the live vendor-config list; this stays as the fallback
+// when the list is unavailable.
 function _vendorCode(vendorName) {
   const raw = String(vendorName || '').trim();
   if (!raw) return 'UNASSIGNED';
   return raw.split(' (')[0].trim().toUpperCase();
+}
+
+// Resolve a vendor display string to the ACTUAL AAP vendorId using the live
+// vendor-config list (getVendorConfigs). This is what prevents the
+// "Could not load VendorConfigDynamo with id <X>" 400 — AAP only accepts a
+// vendorId that exists in its config store, which is often NOT the uppercased
+// display name. Matching is tolerant: exact vendorId, exact vendorName, then
+// case-insensitive / stripped (" (ASIST)" suffix, non-alphanumerics) compares.
+// Falls back to the naive _vendorCode(name) if nothing matches or the list
+// can't be fetched, so behavior never regresses to worse than before.
+function _normVendor(s) { return String(s || '').toLowerCase().replace(/\s*\(.*$/, '').replace(/[^a-z0-9]/g, '').trim(); }
+// Test seam: tests inject a vendor-config list so _resolveVendorCode's matching
+// can be verified without a live AAP call. null => use the live getVendorConfigs.
+let _vendorListForTest = null;
+function _setVendorListForTest(list) { _vendorListForTest = Array.isArray(list) ? list : null; }
+async function _resolveVendorCode(vendorName) {
+  const raw = String(vendorName || '').trim();
+  if (!raw) return 'UNASSIGNED';
+  if (raw.toUpperCase() === 'UNASSIGNED') return 'UNASSIGNED';
+  let list = [];
+  if (_vendorListForTest) { list = _vendorListForTest; }
+  else { try { list = await getVendorConfigs(); } catch (_) { list = []; } }
+  if (Array.isArray(list) && list.length) {
+    const want = _normVendor(raw);
+    // 1) exact vendorId (case-insensitive)
+    let hit = list.find((v) => String(v.vendorId || '').toLowerCase() === raw.toLowerCase());
+    // 2) exact vendorName (case-insensitive)
+    if (!hit) hit = list.find((v) => String(v.vendorName || '').toLowerCase() === raw.toLowerCase());
+    // 3) normalized vendorId / vendorName match (strips "(ASIST)", punctuation)
+    if (!hit) hit = list.find((v) => _normVendor(v.vendorId) === want || _normVendor(v.vendorName) === want);
+    // 4) normalized startsWith either way (e.g. "AMERITFLT" vs "AMERIT")
+    if (!hit) hit = list.find((v) => { const id = _normVendor(v.vendorId), nm = _normVendor(v.vendorName); return id.startsWith(want) || want.startsWith(id) || nm.startsWith(want) || want.startsWith(nm); });
+    if (hit && hit.vendorId) {
+      logger.info('[vendor-resolve] "' + raw + '" -> vendorId "' + hit.vendorId + '" (via live vendor config)');
+      return hit.vendorId;
+    }
+    logger.warn('[vendor-resolve] "' + raw + '" not found in ' + list.length + ' live vendor configs — using naive code "' + _vendorCode(raw) + '"');
+  }
+  return _vendorCode(raw);
 }
 
 // Pull the aaid out of a /v2/asset/<aaid> URL, or pass through a bare id.
@@ -1635,7 +1679,9 @@ async function createWorkOrder(opts = {}) {
   }
 
   // ── Phase 2: commit with the confirmed vendor ───────────────────────────
-  const vendorCode = _vendorCode(opts.vendor);
+  // Resolve against the LIVE vendor-config list so we send AAP the real
+  // vendorId (not a naive uppercase that VendorConfigDynamo may not have).
+  const vendorCode = await _resolveVendorCode(opts.vendor);
 
   // STEP A: get the VRE recommendation (read-only) — it carries the
   // recommendationInfo (groupingId/ruleName/ruleId/supplier) that the real
@@ -1649,7 +1695,7 @@ async function createWorkOrder(opts = {}) {
   // deterministic correction and retry. If it still can't be fixed, return a
   // PRECISE diagnosis of where it got stuck — never a generic "failed".
   const createBody = _buildCreateRepairBody({ ...opts, aaid }, assetFull, vendorCode, recoResp);
-  const healed = await _postCreateRepairWithHealing(createBody, { aaid, vendorCode });
+  const healed = await _postCreateRepairWithHealing(createBody, { aaid, vendorCode, vendorName: opts.vendor });
   if (!healed.ok) {
     logger.warn('createWorkOrder: /createRepair could not be healed — stuck at field "' + (healed.stuckField || '?') + '"');
     return {
@@ -1753,6 +1799,35 @@ async function _postCreateRepairWithHealing(body, ctx) {
       if (e && e.code === 'MIDWAY_SESSION_INVALID') {
         return { ok: false, stuckField: null, aapMessage: msg, corrections, error: 'AAP session rejected — re-auth needed (not a body fix).' };
       }
+
+      // VENDOR CONFIG mismatch (confirmed live): AAP 400 "Could not load
+      // VendorConfigDynamo with id AMERIT". The vendor code we sent is not a
+      // real vendorId in AAP's config store. Re-resolve it against the LIVE
+      // vendor-config list and retry with the correct id. Force-refresh the
+      // cache first in case it was stale.
+      const vcm = msg.match(/VendorConfigDynamo with id\s+([A-Za-z0-9_\- ]+)/i);
+      if (vcm && attempt < _CREATE_HEAL_MAX) {
+        const badCode = vcm[1].trim();
+        try { await getVendorConfigs({ force: true }); } catch (_) {}
+        // Resolve from the original human vendor name if we have it; else from the bad code.
+        const resolved = await _resolveVendorCode(ctx.vendorName || badCode);
+        if (resolved && resolved !== 'UNASSIGNED' && resolved.toUpperCase() !== badCode.toUpperCase()) {
+          const b = JSON.parse(JSON.stringify(current || {}));
+          b.vendor = resolved;
+          if (b.recommendationInfo && b.recommendationInfo.vendor !== undefined) b.recommendationInfo.vendor = resolved;
+          current = b;
+          corrections.push('re-resolved vendor "' + badCode + '" -> "' + resolved + '" from live vendor config');
+          logger.info('[create-heal] vendor "' + badCode + '" invalid — re-resolved to "' + resolved + '", retrying');
+          if (ctx) ctx.vendorCode = resolved;
+          continue;
+        }
+        // Couldn't find a better code — surface a precise, actionable diagnosis.
+        return {
+          ok: false, stuckField: 'vendor', aapMessage: msg.slice(0, 600), corrections,
+          error: 'Vendor code "' + badCode + '" is not a valid AAP vendor. It was not found in the live vendor-config list — pick the vendor from the dropdown (which is sourced from AAP) rather than typing it.',
+        };
+      }
+
       const field = _parseAapErrorField(msg);
       logger.warn('[create-heal] attempt ' + attempt + ' failed; AAP field="' + (field || '?') + '" msg=' + msg.slice(0, 180));
       if (!field || attempt >= _CREATE_HEAL_MAX) {
@@ -2200,6 +2275,9 @@ module.exports = {
   createWorkOrder,
   _parseAapErrorField,          // exported for self-healing unit tests
   _correctCreateRepairField,    // exported for self-healing unit tests
+  _resolveVendorCode,           // exported: resolve vendor display name -> live AAP vendorId
+  _vendorCode,                  // exported: naive fallback vendor code
+  _setVendorListForTest,        // test seam: inject a vendor-config list
   vreRecommendMatrix,
   getDocumentUploadLink,
   uploadDocumentFile,

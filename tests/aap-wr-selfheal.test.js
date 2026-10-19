@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const aap = require('../src/scrapers/aap_api');
@@ -65,5 +65,46 @@ describe('AAP self-heal — _correctCreateRepairField', () => {
     const body = { damageDescription: null, title: 'T' };
     aap._correctCreateRepairField(body, 'damageDescription', MSG_DAMAGE_NULL);
     expect(body.damageDescription).toBeNull(); // original untouched
+  });
+});
+
+// ── Vendor code resolution (fixes "Could not load VendorConfigDynamo with id X") ──
+// The naive _vendorCode uppercases the display name, but AAP's real vendorId is
+// often mixed-case (confirmed live: "Amerit" has vendorId "Amerit", not
+// "AMERIT"). _resolveVendorCode matches against the live vendor-config list.
+describe('AAP vendor code — _resolveVendorCode (live-list match)', () => {
+  // A representative slice of the real live list (confirmed 2026-10-19).
+  const LIST = [
+    { vendorId: 'VOLVO', vendorName: 'Volvo' },
+    { vendorId: 'FREIGHTLINER', vendorName: 'Freightliner' },
+    { vendorId: 'Amerit', vendorName: 'Amerit' },
+    { vendorId: 'Blue Beacon', vendorName: 'Blue Beacon' },
+    { vendorId: 'ROAD_ONE', vendorName: 'Road One' },
+    { vendorId: 'TOM', vendorName: 'Tom' },
+  ];
+  beforeEach(() => aap._setVendorListForTest(LIST));
+  afterEach(() => aap._setVendorListForTest(null));
+
+  it('mixed-case vendor resolves to the EXACT vendorId, not uppercased', async () => {
+    expect(await aap._resolveVendorCode('Amerit')).toBe('Amerit');       // not 'AMERIT'
+    expect(await aap._resolveVendorCode('amerit')).toBe('Amerit');       // case-insensitive
+  });
+  it('multi-word mixed-case vendor resolves exactly', async () => {
+    expect(await aap._resolveVendorCode('Blue Beacon')).toBe('Blue Beacon');
+  });
+  it('uppercase vendors still resolve to their uppercase id', async () => {
+    expect(await aap._resolveVendorCode('Volvo')).toBe('VOLVO');
+    expect(await aap._resolveVendorCode('Volvo (ASIST)')).toBe('VOLVO'); // strips " (ASIST)"
+  });
+  it('empty / UNASSIGNED passthrough', async () => {
+    expect(await aap._resolveVendorCode('')).toBe('UNASSIGNED');
+    expect(await aap._resolveVendorCode('UNASSIGNED')).toBe('UNASSIGNED');
+  });
+  it('unknown vendor falls back to the naive uppercase code (no throw)', async () => {
+    expect(await aap._resolveVendorCode('Nonexistent Shop')).toBe('NONEXISTENT SHOP');
+  });
+  it('with NO live list available, falls back to naive code', async () => {
+    aap._setVendorListForTest([]);
+    expect(await aap._resolveVendorCode('Amerit')).toBe('AMERIT'); // naive fallback
   });
 });
