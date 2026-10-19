@@ -200,6 +200,136 @@ async function buildSnapshot(opts) {
   return snap;
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// PHASE B — state machine + one global lock + ensureHealthy() (spec #3/#4/#6/#19)
+// ══════════════════════════════════════════════════════════════════════════
+
+let _state = STATE.UNKNOWN;
+let _authRecoveryInFlight = null;   // THE single global recovery lock (spec #4)
+let _lastSnapshot = null;
+const _HISTORY_CAP = 30;
+const _history = [];                // bounded recovery history (spec #25)
+
+function getState() { return _state; }
+function getSnapshot() { return _lastSnapshot; }
+function getHistory() { return _history.slice(); }
+
+function _setState(next, reason) {
+  if (next === _state) return;
+  logger.info('[auth-supervisor] state ' + _state + ' -> ' + next + (reason ? ' (' + reason + ')' : ''));
+  _state = next;
+}
+
+function _recordHistory(entry) {
+  _history.unshift(Object.assign({ at: new Date().toISOString() }, entry));
+  if (_history.length > _HISTORY_CAP) _history.length = _HISTORY_CAP;
+}
+
+/**
+ * ensureHealthy({ reason, allowPrompt=true, forceVerify=false }) ->
+ *   { ok, state, recovered, rung, prompted, verified, latencyMs, class?, reason?, via? }
+ *
+ * THE caller contract (spec #18/#19). Every Midway-dependent subsystem calls
+ * this instead of inventing its own recovery. Behavior:
+ *   1. If a recovery is already running, AWAIT it (single global lock, spec #4).
+ *   2. RUNG 0 — verify the REAL target first (API smoke + probe). If healthy,
+ *      return HEALTHY immediately — regardless of VPN (spec #1/#8 Rung 0).
+ *   3. Otherwise run the recovery ladder (delegated to auth.recoverAuth, the
+ *      proven rungs) and then RE-VERIFY against the real target. Only a passing
+ *      verification yields recovered:true / HEALTHY (spec #6 — no false success).
+ *
+ * This NEVER returns HEALTHY on cookie/command completion alone.
+ */
+async function ensureHealthy(opts) {
+  opts = opts || {};
+  // Single global lock: concurrent callers share ONE workflow (spec #4).
+  if (_authRecoveryInFlight) {
+    return _authRecoveryInFlight.then((r) => Object.assign({}, r, { coalesced: true }));
+  }
+  _authRecoveryInFlight = _runEnsureHealthy(opts);
+  try { return await _authRecoveryInFlight; }
+  finally { _authRecoveryInFlight = null; }
+}
+
+async function _runEnsureHealthy(opts) {
+  const t0 = Date.now();
+  const reason = opts.reason || 'unspecified';
+  const allowPrompt = opts.allowPrompt !== false;
+
+  // Offline is NOT a rejected session (spec #1 Rung 1): defer, never prompt.
+  if (_deps.isOffline()) {
+    _setState(STATE.OFFLINE, 'no internet');
+    _lastSnapshot = await buildSnapshot({ state: _state });
+    return _result(false, { state: _state, recovered: false, rung: 'offline', prompted: false, verified: false, latencyMs: Date.now() - t0, reason: 'offline' });
+  }
+
+  // RUNG 0 — verify the real target FIRST (spec #8). Healthy = done, regardless
+  // of VPN. forceVerify forces a fresh check even if we think we're healthy.
+  const v0 = await verifyHealthy({ forceProbe: !!opts.forceVerify });
+  if (v0.healthy) {
+    _setState(STATE.HEALTHY, 'verified at rung 0');
+    _lastSnapshot = await buildSnapshot({ state: _state, api: v0.api, verify: v0 });
+    return _result(true, { state: _state, recovered: false, rung: 'verify', prompted: false, verified: true, via: v0.via, latencyMs: Date.now() - t0 });
+  }
+
+  // Not healthy -> DEGRADED, then run the proven recovery ladder.
+  _setState(STATE.DEGRADED, 'verify failed: ' + (v0.class || 'unknown'));
+  const failClass = v0.class || FAIL.AAP_AUTH_REJECTED;
+
+  // An AAP SERVER error (500) is NOT an auth problem — do not run the ladder
+  // or prompt (spec #17). Surface as degraded-but-not-auth and let the caller
+  // retry later.
+  if (failClass === FAIL.AAP_SERVER_ERROR) {
+    _lastSnapshot = await buildSnapshot({ state: _state, api: v0.api, verify: v0 });
+    _recordHistory({ reason, initialState: STATE.DEGRADED, attempts: [], result: STATE.DEGRADED, failClass, note: 'AAP 5xx — server error, not auth' });
+    return _result(false, { state: _state, recovered: false, rung: 'none', prompted: false, verified: false, class: failClass, reason: 'AAP server error (not auth)', latencyMs: Date.now() - t0 });
+  }
+
+  _setState(STATE.RECOVERING, 'running ladder');
+  const auth = _deps.auth || _auth();
+  let ladder = { recovered: false, rung: 'unavailable', prompted: false };
+  if (auth && typeof auth.recoverAuth === 'function') {
+    try { ladder = await auth.recoverAuth(reason, { allowPrompt }); }
+    catch (e) { ladder = { recovered: false, rung: 'error', prompted: false, error: e.message }; }
+  }
+
+  // #6 FIX — NEVER trust the ladder's self-reported recovered flag. RE-VERIFY
+  // against the real AAP target. Only a passing verification = HEALTHY.
+  const v1 = await verifyHealthy({ forceProbe: true });
+  const verified = !!v1.healthy;
+
+  _recordHistory({
+    reason, initialState: STATE.DEGRADED,
+    attempts: [ladder.rung].filter(Boolean),
+    result: verified ? STATE.HEALTHY : STATE.COOLDOWN,
+    verifiedBy: verified ? v1.via : [],
+    ladderReported: !!ladder.recovered,
+    durationMs: Date.now() - t0,
+  });
+
+  if (verified) {
+    _setState(STATE.HEALTHY, 'verified after ladder rung=' + ladder.rung);
+    _lastSnapshot = await buildSnapshot({ state: _state, api: v1.api, verify: v1 });
+    return _result(true, { state: _state, recovered: true, rung: ladder.rung, prompted: !!ladder.prompted, verified: true, via: v1.via, latencyMs: Date.now() - t0 });
+  }
+
+  // Ladder ran (maybe even reported recovered) but AAP still rejects → NOT
+  // healthy. If it needs a prompt we weren't allowed to give, say so; else
+  // this is where Phase C's bounded COOLDOWN auto-retry takes over.
+  const needsPrompt = ladder.rung === 'needs-prompt' || (!allowPrompt && !verified);
+  _setState(needsPrompt && !allowPrompt ? STATE.WAITING_FOR_USER : STATE.COOLDOWN,
+    verified ? 'verified' : 'still rejected after ladder');
+  _lastSnapshot = await buildSnapshot({ state: _state, api: v1.api, verify: v1 });
+  return _result(false, {
+    state: _state, recovered: false, rung: ladder.rung, prompted: !!ladder.prompted,
+    verified: false, class: v1.class || failClass,
+    reason: ladder.error || (v1.class ? ('AAP still ' + v1.class) : 'AAP still rejected after recovery'),
+    latencyMs: Date.now() - t0,
+  });
+}
+
+function _result(ok, fields) { return Object.assign({ ok: !!ok }, fields); }
+
 // ── Injectable deps (spec #26) so the ladder/verification are deterministically
 // testable without a live box. Defaults point at the live implementations. ─────
 const _deps = {
@@ -208,7 +338,10 @@ const _deps = {
   auth: null,     // null -> lazy require('../scrapers/auth')
 };
 function _setDeps(d) { if (d && typeof d === 'object') Object.assign(_deps, d); }
-function _reset() { _deps.isOffline = () => _isOfflineNow(); _deps.aapApi = null; _deps.auth = null; }
+function _reset() {
+  _deps.isOffline = () => _isOfflineNow(); _deps.aapApi = null; _deps.auth = null;
+  _state = STATE.UNKNOWN; _authRecoveryInFlight = null; _lastSnapshot = null; _history.length = 0;
+}
 
 module.exports = {
   STATE, FAIL,
@@ -216,5 +349,7 @@ module.exports = {
   apiSmokeTest,
   verifyHealthy,
   buildSnapshot,
+  ensureHealthy,
+  getState, getSnapshot, getHistory,
   _setDeps, _reset,
 };
