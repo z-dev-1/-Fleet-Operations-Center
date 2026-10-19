@@ -853,8 +853,70 @@ const NO_WR_RETRY_MS = 15 * 60 * 1000; // 15 min
 // got a new vendor/offsite update.
 const _resolvedLastUpdated = {};
 
+// Map the API-first WO detail (aap_api.getWorkOrderDetailViaApi) to the relay
+// CACHE shape that mergeRelayIntoRows + the detail panel read. The API covers
+// the core WR/WO fields + full conversation + the offsite URL extracted from
+// comments. The deep Volvo-ASIST page enrichment (asistNotes/asistSrUrl, the
+// 8000-char dealer-page text) is NOT available via API — those are left blank
+// here and the DOM fallback still fills them when needed.
+function _relayCacheFromApi(api) {
+  if (!api || api.noWO || api.error) return null;
+  return {
+    vendor:              api.vendor || '',
+    serviceState:        api.serviceState || '',
+    subState:            api.subState || '',
+    category:            api.category || '',
+    issueDetails:        api.issueDetails || '',
+    urgent:              api.urgent || '',
+    needBy:              api.needBy || '',
+    created:             api.created || '',
+    completed:           api.completed || '',
+    createdBy:           api.createdBy || '',
+    lifecycleReason:     api.lifecycleReason || '',
+    alternativeId:       api.altId || api.alternativeId || '',
+    workRequestId:       api.workRequestId || '',
+    pageUrl:             api.serviceUrl || '',
+    vendorWorkOrderId:   api.vendorWorkOrderId || '',
+    fullConversation:    api.fullConversation || '',
+    offsiteShopEvent:    api.offsiteShopEvent || '',
+    offsiteShopEventUrl: api.offsiteShopEventUrl || '',
+    _serviceUUID:        api._serviceUUID || '',
+    _cachedAt:           Date.now(),
+    _via:                'aap-api',
+  };
+}
+
 async function scrapeUnitPage(equipmentId, partition, relayCache) {
   logger.info('[Relay] scrapeUnitPage called for', equipmentId);
+
+  // API-FIRST (2026-10-19): the serviceaggregate JSON carries all the core WR/WO
+  // fields + full conversation + offsite URL that this per-unit Relay scrape
+  // produced via a multi-phase DOM scrape. Try it first — instant, no browser,
+  // robust. Fall back to the DOM scrape only if the API finds no WO / errors, or
+  // when deep Volvo-ASIST offsite enrichment is required (not available via API).
+  try {
+    const aap = require('./aap_api');
+    if (typeof aap.getWorkOrderDetailViaApi === 'function') {
+      const apiRes = await aap.getWorkOrderDetailViaApi(equipmentId);
+      const mapped = _relayCacheFromApi(apiRes);
+      if (mapped && mapped.workRequestId) {
+        // If the WR's vendor is a Volvo/PACCAR ASIST integrated vendor AND it has
+        // an offsite case, the detail panel wants the deep ASIST enrichment that
+        // only the DOM path produces — let it fall through to the scrape for those.
+        const needsAsist = /volvo|asist|paccar|kenworth|peterbilt|mack/i.test(mapped.vendor) && !!mapped.offsiteShopEventUrl;
+        if (!needsAsist) {
+          logger.info('[Relay] API-first WO detail for ' + equipmentId + ' (vendor=' + mapped.vendor + ', state=' + mapped.serviceState + ') — no browser');
+          return mapped;
+        }
+        logger.info('[Relay] API-first resolved ' + equipmentId + ' but vendor needs ASIST deep-enrichment — using DOM scrape');
+      } else if (apiRes && apiRes.noWO) {
+        logger.info('[Relay] API-first: no open WO for ' + equipmentId + ' — negative-caching');
+        return { _noWR: true, _cachedAt: Date.now() };
+      }
+    }
+  } catch (e) {
+    logger.info('[Relay] API-first path failed for ' + equipmentId + ' (' + e.message + ') — falling back to DOM scrape');
+  }
 
   // Negative-cache check: skip the expensive garage-page dance entirely if
   // we already confirmed recently that this unit has no findable WR.
