@@ -64,6 +64,11 @@ let _fasRunner; try { _fasRunner = require('../orcha/fas/runner'); } catch (_) {
 // back to the FAS runner directly so Slack handling never breaks. _aiInbound()
 // is the single seam the call sites use.
 let _aiCore; try { _aiCore = require('../ai/core'); } catch (_) { _aiCore = null; }
+// Phase 7: the ONE Slack inbound gateway — builds the FAS runner input from a
+// raw inbound through a single normalizer so every surface is normalized the
+// same way (isGroup/isSelf/mentioned/participants/surface). Transport/dedupe/
+// send stays here; only normalization moved to the gateway.
+let _gateway; try { _gateway = require('../slack/gateway'); } catch (_) { _gateway = null; }
 function _aiInbound(input, deps) {
   if (_aiCore && typeof _aiCore.handleInbound === 'function') return _aiCore.handleInbound(input, deps);
   if (_fasRunner && typeof _fasRunner.handleInbound === 'function') return _fasRunner.handleInbound(input, deps);
@@ -1214,12 +1219,14 @@ async function pollDMAutoReplyOnce(log) {
             // contents — previously the FAS path was blind to these, which
             // thinned its answers and lowered its confidence.
             const _fasAttach = await _buildAttachmentContext(msg, downloadFileContent);
-            const _fr = await _aiInbound({
-              engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
-              channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
-              isGroup: !!dm.isGroup, conversation: historyMsgs, attachments: _fasAttach,
-              files: msg.files || [], isSelf: !!dm.isSelf,
-            }, { sendToChannel });
+            const _fr = await _aiInbound(_gateway
+              ? _gateway.buildRunnerInput({ engine: 'dm', conv: dm, message: msg }, { conversation: historyMsgs, attachments: _fasAttach })
+              : {
+                engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
+                channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
+                isGroup: !!dm.isGroup, conversation: historyMsgs, attachments: _fasAttach,
+                files: msg.files || [], isSelf: !!dm.isSelf,
+              }, { sendToChannel });
             if (_fr && _fr.letLegacyReply) {
               // Runner asked us to let the legacy engine reply (error-failsafe /
               // ai-failed-shadow). Fall through — do NOT mark FAS-handled and do
@@ -1434,12 +1441,14 @@ async function pollDMAutoReplyOnce(log) {
         // never suppress or replace the legacy reply here.
         if (_fasRunner && _fasMode === 'shadow') {
           try {
-            await _aiInbound({
-              engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
-              channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
-              isGroup: !!dm.isGroup, conversation: historyMsgs, actualReply: draft.reply,
-              attachments: attachCtx, files: msg.files || [], isSelf: !!dm.isSelf,
-            });
+            await _aiInbound(_gateway
+              ? _gateway.buildRunnerInput({ engine: 'dm', conv: dm, message: msg }, { conversation: historyMsgs, attachments: attachCtx, actualReply: draft.reply })
+              : {
+                engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
+                channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
+                isGroup: !!dm.isGroup, conversation: historyMsgs, actualReply: draft.reply,
+                attachments: attachCtx, files: msg.files || [], isSelf: !!dm.isSelf,
+              });
           } catch (_e) { /* shadow comparison must never break the live path */ }
         }
 
@@ -1639,12 +1648,14 @@ async function pollDMAutoReplyOnce(log) {
                 // recoverable review item and commits nothing — we do NOT advance
                 // latestThreadReplyTs so this reply is retried next poll.
                 const _fasAttachT = await _buildAttachmentContext(reply, downloadFileContent);
-                const _fr = await _aiInbound({
-                  engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
-                  channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
-                  isGroup: !!dm.isGroup, conversation: threadContext, attachments: _fasAttachT,
-                  files: reply.files || [], isSelf: !!dm.isSelf,
-                }, { sendToChannel });
+                const _fr = await _aiInbound(_gateway
+                  ? _gateway.buildRunnerInput({ engine: 'dm-thread', conv: dm, message: reply, parentTs: parentMsg.ts, isThreadReply: true }, { conversation: threadContext, attachments: _fasAttachT })
+                  : {
+                    engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
+                    channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
+                    isGroup: !!dm.isGroup, conversation: threadContext, attachments: _fasAttachT,
+                    files: reply.files || [], isSelf: !!dm.isSelf,
+                  }, { sendToChannel });
                 if (_fr && _fr.outcome === 'auto-send-failed') {
                   // Delivery failed — nothing committed; retry this reply later.
                   doLog(`[SlackDM] ${dm.name}: FAS autonomous thread delivery failed ${reply.ts} — deferring for retry`);
@@ -1702,12 +1713,14 @@ async function pollDMAutoReplyOnce(log) {
             // In Shadow, record the comparison only — never suppress/replace.
             if (_fasRunner && _fasModeT === 'shadow') {
               try {
-                await _aiInbound({
-                  engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
-                  channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
-                  isGroup: !!dm.isGroup, conversation: threadContext, actualReply: draft.reply,
-                  attachments: attachCtxT, files: reply.files || [], isSelf: !!dm.isSelf,
-                });
+                await _aiInbound(_gateway
+                  ? _gateway.buildRunnerInput({ engine: 'dm-thread', conv: dm, message: reply, parentTs: parentMsg.ts, isThreadReply: true }, { conversation: threadContext, attachments: attachCtxT, actualReply: draft.reply })
+                  : {
+                    engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
+                    channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
+                    isGroup: !!dm.isGroup, conversation: threadContext, actualReply: draft.reply,
+                    attachments: attachCtxT, files: reply.files || [], isSelf: !!dm.isSelf,
+                  });
               } catch (_e) { /* shadow comparison must never break the live path */ }
             }
 

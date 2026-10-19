@@ -39,6 +39,8 @@ let _fasRunner; try { _fasRunner = require('../orcha/fas/runner'); } catch (_) {
 // Falls back to the FAS runner directly if AiCore is unavailable so channel
 // watch never breaks.
 let _aiCore; try { _aiCore = require('../ai/core'); } catch (_) { _aiCore = null; }
+// Phase 7: the ONE Slack inbound gateway — unified inbound normalization.
+let _gateway; try { _gateway = require('../slack/gateway'); } catch (_) { _gateway = null; }
 function _aiInbound(input, deps) {
   if (_aiCore && typeof _aiCore.handleInbound === 'function') return _aiCore.handleInbound(input, deps);
   if (_fasRunner && typeof _fasRunner.handleInbound === 'function') return _fasRunner.handleInbound(input, deps);
@@ -1080,15 +1082,19 @@ async function pollChannelsOnce(log) {
             // confirms a ts. On delivery failure the runner queues a recoverable
             // review item and commits nothing — we do NOT advance the channel
             // watermark so this message is retried next poll.
-            const _fr = await _aiInbound({
-              engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
-              channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text,
-              files: msg.files || [],
-              // Phase 2/3: a channel is a GROUP surface (audience resolver uses
-              // this), and `mentioned` lets the channel-registry decide whether
-              // a feed channel should ingest silently vs reply (spec #46/#64).
-              isGroup: true, mentioned: !!mentioned,
-            }, { sendToChannel });
+            // Phase 7: build the runner input through the ONE gateway. A channel
+            // is a GROUP surface (audience resolver), and `mentioned` lets the
+            // channel-registry decide ingest-vs-reply (spec #46/#64). We thread
+            // from the message ts (channel replies open a thread on the message).
+            const _chanRaw = { engine: 'channel', conv: { channelId: ch.id, name: ch.name, isGroup: true, isSlackConnect: !!ch.isSlackConnect },
+              message: { userId: msg.userId, ts: msg.ts, threadTs: msg.ts, text: msg.text, files: msg.files || [] }, mentioned: !!mentioned };
+            const _fr = await _aiInbound(_gateway
+              ? _gateway.buildRunnerInput(_chanRaw, {})
+              : {
+                engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
+                channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text,
+                files: msg.files || [], isGroup: true, mentioned: !!mentioned,
+              }, { sendToChannel });
             if (_fr && _fr.letLegacyReply) {
               // Runner asked us to let legacy reply (error-failsafe / ai-failed-
               // shadow). Fall through to the legacy classify+reply below; do NOT
@@ -1161,11 +1167,16 @@ async function pollChannelsOnce(log) {
         // Shadow, record the comparison only — never suppress/replace.
         if (_fasRunner && _fasModeC === 'shadow') {
           try {
-            await _aiInbound({
-              engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
-              channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text, actualReply: draft.reply,
-              files: msg.files || [],
-            });
+            await _aiInbound(_gateway
+              ? _gateway.buildRunnerInput(
+                  { engine: 'channel', conv: { channelId: ch.id, name: ch.name, isGroup: true, isSlackConnect: !!ch.isSlackConnect },
+                    message: { userId: msg.userId, ts: msg.ts, threadTs: msg.ts, text: msg.text, files: msg.files || [] }, mentioned: !!mentioned },
+                  { actualReply: draft.reply })
+              : {
+                engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
+                channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text, actualReply: draft.reply,
+                files: msg.files || [],
+              });
           } catch (_e) { /* shadow comparison must never break the live path */ }
         }
 

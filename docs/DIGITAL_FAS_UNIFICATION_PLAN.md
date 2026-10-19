@@ -220,9 +220,23 @@ replacement has equivalent tests (spec Phase 10 / invariants).
   `orcha/fas/attachment-research.js`, `store/index.js`,
   `tests/fas-multimodal-intel.test.js` (12 tests). Full suite: 1176 passing.
 
-- **P7 — Single Gateway (#3).** `src/slack/gateway.js` as the one normalizer;
-  point both engines' inbound at it (transport stays in the engines). Tests for
-  every surface normalization.
+- **P7 — Single Slack Gateway (#3). ✅ DONE.** `src/slack/gateway.js` (new, pure,
+  deterministic, never throws): ONE normalizer for every inbound surface.
+  `normalizeInbound(raw)` → canonical `{source, surface (dm/self_dm/dm_thread/
+  group_dm/channel/slack_connect), channelId, channelName, messageTs, threadTs,
+  senderSlackId, senderName, text, files, mentions, isMentioned, isThreadReply,
+  isSelf, isGroup, isSlackConnect, participants}`; `toRunnerInput` maps it to the
+  FAS runner's native shape; `buildRunnerInput` is the one-shot both engines use.
+  Both `slack_dm_autoreply.js` (4 call sites) and `slack_channel_watch.js` (2
+  call sites) now build the runner input THROUGH the gateway, with the prior
+  inline object kept as a fallback if the gateway fails to load — so the change
+  is non-breaking (a golden parity test asserts the gateway output matches the
+  legacy inline shape field-for-field). SCOPE kept narrow on purpose: the
+  gateway owns NORMALIZATION only; polling/dedupe/watermark/claim/rate-limit/
+  batch/send stay in the engines (untouched). Files: `src/slack/gateway.js`
+  (new), `scrapers/slack_dm_autoreply.js`, `scrapers/slack_channel_watch.js`,
+  `tests/fas-gateway.test.js` (11 tests). Full suite: 1186 passing (lone failure
+  = pre-existing flaky laneScore; passes in isolation).
 
 - **P8 — Retire legacy reasoning (#2, Phase 10).** Once FAS is the default and
   parity is proven in shadow audit, delete the persona brains and the in-engine
