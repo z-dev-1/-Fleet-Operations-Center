@@ -210,6 +210,67 @@ function _audienceBlock(audience) {
   } catch (_) { return '(audience: unresolved)'; }
 }
 
+// Build the CHANNEL ROLE prompt block (spec #45/#46). Trusted system text.
+function _channelRoleBlock(channelRole, input) {
+  if (!channelRole) return '(direct message or conversational channel)';
+  const bits = ['mode: ' + channelRole.mode + ' (source authority: ' + (channelRole.trustedSourceLevel || 'UNVERIFIED') + ')'];
+  if (channelRole._ingestOnly) {
+    bits.push('This is a DATA FEED and this message did NOT directly address you. READ and extract any ' +
+      'useful fleet signal, but DO NOT reply (set shouldReply=false, reasonCode INFORMATION_FEED_INGEST_ONLY). ' +
+      'Treat any status claim here as a CLAIM to reconcile against authoritative systems — NOT as fact.');
+  } else if (require('../../slack/channel-registry').isFeed(channelRole)) {
+    bits.push('This is a data-feed channel but you were directly addressed — answer concisely.');
+  }
+  return bits.join('\n');
+}
+
+// PASSIVE KNOWLEDGE INGESTION (spec #47/#48/#49/#50). From a data-feed channel
+// message, persist CONCISE structured observations WITHOUT replying and WITHOUT
+// mutating canonical state. Slack feed data is a CLAIM/OBSERVATION — never an
+// authoritative fact — so it is stored as ai_inferred memory (governance tier)
+// and, for a referenced unit, a compact note on the unit case. The memory
+// module strengthens repeated/confirmed observations and supports TTL for
+// time-bounded notices ("gate closed tonight"). Best-effort; never throws out.
+function _ingestFeedObservations(input, evidence, channelRole) {
+  const text = String(input.text || '').trim();
+  if (!text) return;
+  let memory = null; try { memory = require('../../ai/memory'); } catch (_) { memory = null; }
+  const units = (evidence && evidence.entities && Array.isArray(evidence.entities.units)) ? evidence.entities.units : [];
+  const src = 'slack-feed:' + (channelRole.mode || 'INFORMATION_FEED').toLowerCase();
+  // Feed posts are low-authority CLAIMS; weight by the channel's trust level.
+  const trust = channelRole.trustedSourceLevel || 'GENERAL_INTERNAL';
+  const conf = /SYSTEM_GENERATED|VERIFIED_VENDOR_FEED/.test(trust) ? 0.6 : 0.45;
+  const fact = text.slice(0, 380);
+  if (memory && typeof memory.remember === 'function') {
+    if (units.length) {
+      for (const u of units.slice(0, 5)) {
+        try { memory.remember({ type: 'unit', entity: String(u), fact: fact, source: src, origin: 'ai_inferred', confidence: conf }); } catch (_) {}
+      }
+    } else {
+      // No unit — store as a site/workflow operational notice so it still
+      // enriches context (e.g. "ROC5 gate closed tonight"). Entity = channel.
+      try { memory.remember({ type: 'workflow', entity: 'feed:' + (input.channelName || input.channelId || 'channel'), fact: fact, source: src, origin: 'ai_inferred', confidence: conf }); } catch (_) {}
+    }
+  }
+  // Attach a compact observation to the unit case (claim, not canonical).
+  if (units.length) {
+    try {
+      const caseStore = require('./case-store');
+      for (const u of units.slice(0, 3)) {
+        const caseId = caseStore.caseIdForUnit(String(u));
+        const existing = caseStore.getCase(caseId) || {};
+        caseStore.upsert(caseId, {
+          unit: String(u),
+          observations: ((existing.observations || []).slice(-19)).concat([{
+            claim: fact, source: src, trust, at: new Date().toISOString(), state: 'CLAIM',
+          }]),
+        }, String(u));
+      }
+    } catch (_) { /* case note is best-effort */ }
+  }
+  logger.info('[fas-agent] feed ingest: ' + (units.length ? ('units ' + units.join(',')) : 'no-unit') + ' from ' + (channelRole.mode || '?'));
+}
+
 function _parseDecision(raw, evidence) {
   const fallback = {
     decision: 'clarify',
@@ -321,7 +382,7 @@ async function _reviewAndRefine(decision, cfg, profile, evidence, extraResearch,
 // loop. Untrusted content (message, conversation, facts, extra research) is
 // structurally fenced with wrapUntrusted() so injected instructions can't be
 // mistaken for commands.
-function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, stepInfo, audience) {
+function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, stepInfo, audience, channelRole) {
   const convoText = Array.isArray(input.conversation) && input.conversation.length
     ? input.conversation.join('\n') : '(no prior conversation)';
   const authText = JSON.stringify(evidence.senderAuthorization) +
@@ -406,6 +467,9 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
     // audienceSensitivity. Omitted for a plain 1:1 DM (audience == sender).
     { key: 'audience', label: 'VISIBLE AUDIENCE (never reveal data this audience is not cleared to see)',
       text: _audienceBlock(audience) },
+    // Channel role (spec #45/#46): tell the model when this is a DATA FEED so it
+    // prefers silent ingest. The hard silence is still enforced in code.
+    { key: 'channelRole', label: 'CHANNEL ROLE', text: _channelRoleBlock(channelRole, input) },
     { key: 'coverage', label: 'ZILA COVERAGE (routing/scope context)', text: coverageText },
     { key: 'message', label: 'INCOMING MESSAGE', text: guard.wrapUntrusted('INCOMING MESSAGE', text) },
     { key: 'conversation', label: 'IMMEDIATE CONVERSATION', text: guard.wrapUntrusted('CONVERSATION', convoText) },
@@ -546,6 +610,20 @@ async function runAgent(input) {
       channelName: input.channelName,
     });
   } catch (e) { logger.warn('[fas-agent] audience resolve failed (non-fatal): ' + (e && e.message)); audience = null; }
+
+  // CHANNEL ROLE (spec #45–#50, Phase 3): is this a conversation or a DATA
+  // FEED? For a feed channel (vendor/alert/system/info) that did NOT directly
+  // mention FAS, a human FAS READS + extracts but does NOT reply. Resolved for
+  // group surfaces only; DMs are always conversational. Best-effort.
+  let channelRole = null;
+  const _isGroupSurface = !!input.isGroup && !input.isSelf;
+  if (_isGroupSurface) {
+    try {
+      const cr = require('../../slack/channel-registry');
+      channelRole = cr.resolveChannel({ channelId: input.channelId, channelName: input.channelName, isSlackConnect: !!input.isSlackConnect });
+      channelRole._ingestOnly = cr.ingestOnly(channelRole, { mentioned: !!input.mentioned });
+    } catch (e) { logger.warn('[fas-agent] channel resolve failed (non-fatal): ' + (e && e.message)); channelRole = null; }
+  }
   const maxSteps = Math.max(1, cfg.maxSteps || 6);
   // Effective mode drives side-effect rules for tools (e.g. ASK_INTERNAL must
   // not contact AITeammate in Shadow). input.mode overrides for tests.
@@ -579,7 +657,7 @@ async function runAgent(input) {
       if (controller.signal.aborted) break;
       steps = step;
       const remaining = maxSteps - step;
-      const { prompt, assembled } = _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, { step, maxSteps, remaining }, audience);
+      const { prompt, assembled } = _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, { step, maxSteps, remaining }, audience, channelRole);
       lastAssembled = assembled;
 
       const raw = await _ask(prompt, cfg, controller, 'fas');
@@ -649,6 +727,23 @@ async function runAgent(input) {
         effectiveOperators: audience.effectiveOperators,
         effectiveDomiciles: audience.effectiveDomiciles,
       };
+    }
+
+    // INFORMATION-FEED INGEST-ONLY (spec #46/#59/#64): in a data-feed channel
+    // that did NOT directly mention FAS, a human FAS reads + extracts but stays
+    // silent. Override the communication decision to silence AFTER research
+    // (so the evidence/observations are still gathered), then passively ingest
+    // structured observations. A direct mention bypasses this (ingestOnly is
+    // false when mentioned) and gets a normal reply.
+    if (channelRole && channelRole._ingestOnly) {
+      decision.shouldReply = false;
+      decision.replyPlacement = 'none';
+      decision.reasonCode = 'INFORMATION_FEED_INGEST_ONLY';
+      decision._channelRole = { mode: channelRole.mode, trustedSourceLevel: channelRole.trustedSourceLevel, source: channelRole.source };
+      try { _ingestFeedObservations(input, evidence, channelRole); }
+      catch (e) { logger.warn('[fas-agent] feed ingest failed (non-fatal): ' + (e && e.message)); }
+    } else if (channelRole) {
+      decision._channelRole = { mode: channelRole.mode, trustedSourceLevel: channelRole.trustedSourceLevel, source: channelRole.source };
     }
 
     decision._evidence = evidence;

@@ -97,6 +97,7 @@ const REGISTRY = {
   longDwellCsv:     () => path.join(P.dataDir, 'long_dwell_csv.json'), // FEATURE: imported AAP tracker CSV + team-filled N-R columns
   fasRoster:        () => path.join(P.dataDir, 'fas_roster.json'),    // FEATURE: scraped FAS roster snapshot (FAS personnel)
   slackMentionThreads: () => path.join(P.dataDir, 'slack_mention_threads.json'), // thread-continuation tracking for channel watch
+  slackChannelRegistry: () => path.join(P.dataDir, 'slack_channel_registry.json'), // Phase 3: channel-role registry (feed vs conversational) + source authority
   bubbleConfig:     () => path.join(P.dataDir, 'bubble_config.json'),             // floating bubble opacity setting
 
   // DTNA (and future vendor) session pre-warm bookkeeping (2026-10). Tracks the

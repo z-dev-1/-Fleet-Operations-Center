@@ -1084,6 +1084,10 @@ async function pollChannelsOnce(log) {
               engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
               channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text,
               files: msg.files || [],
+              // Phase 2/3: a channel is a GROUP surface (audience resolver uses
+              // this), and `mentioned` lets the channel-registry decide whether
+              // a feed channel should ingest silently vs reply (spec #46/#64).
+              isGroup: true, mentioned: !!mentioned,
             }, { sendToChannel });
             if (_fr && _fr.letLegacyReply) {
               // Runner asked us to let legacy reply (error-failsafe / ai-failed-

@@ -121,10 +121,26 @@ replacement has equivalent tests (spec Phase 10 / invariants).
   Files: `src/slack/audience-resolver.js` (new), `orcha/fas/agent.js`,
   `tests/fas-audience-resolver.test.js` (13 tests). Full suite: 1119 passing.
 
-- **P3 — Channel registry + information-feed ingest (#45–#50,#60,#61).**
-  `channelRegistry` store + classifier; INFORMATION_FEED/SYSTEM_FEED → ingest
-  structured observations silently (CLAIM/OBSERVATION/VERIFIED_FACT states), no
-  reply unless directly mentioned. Tests #49,#50,#51.
+- **P3 — Channel registry + information-feed ingest (#45–#50,#60,#61,#64). ✅ DONE.**
+  `src/slack/channel-registry.js` (new) + `slackChannelRegistry` store. Modes:
+  CONVERSATIONAL / OPERATIONAL / INFORMATION_FEED / ALERT_FEED / VENDOR_FEED /
+  SYSTEM_FEED / MIXED, each with a reply policy + source-authority tier
+  (UNVERIFIED → SYSTEM_GENERATED). Name classifier SUGGESTS a mode (marked
+  `source:'inferred'`); only an operator confirmation sets a trusted level, and
+  an AI/auto upsert can never raise trust above the classifier (spec #14/#60/#65).
+  Slack Connect downgrades source authority to PARTNER_CHANNEL. Wired into the
+  agent: for a feed channel the message did NOT directly mention FAS, the
+  decision is forced to silence (`reasonCode:INFORMATION_FEED_INGEST_ONLY`) AFTER
+  research, and `_ingestFeedObservations` persists a CONCISE claim into
+  `ai/memory` (ai_inferred, weighted by the channel's trust level, TTL-capable)
+  + a compact `state:'CLAIM'` note on the unit case — NEVER flipping canonical
+  state (spec #47/#50). A direct mention bypasses ingest-only and gets a normal
+  reply. The channel surface now also passes `isGroup`+`mentioned` to the runner
+  (also completing the Phase 2 group-audience wiring for channels). CHANNEL ROLE
+  prompt block added (defense in depth). Files: `src/slack/channel-registry.js`
+  (new), `orcha/fas/agent.js`, `orcha/fas/runner.js`,
+  `scrapers/slack_channel_watch.js`, `store/index.js`,
+  `tests/fas-channel-registry.test.js` (14 tests). Full suite: 1133 passing.
 
 - **P4 — Deterministic permission policy module (#10–#16).** Extract policy from
   `sender-profiles` into `orcha/fas/permission-policy.js` with confidence tiers;

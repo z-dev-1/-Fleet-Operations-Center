@@ -138,6 +138,14 @@ async function handleInbound(input, deps) {
       text: input.text, conversation: input.conversation || [], isGroup: !!input.isGroup,
       attachments: input.attachments || '',
       files: Array.isArray(input.files) ? input.files : [],
+      // Phase 2/3 context so the agent can resolve audience + channel role.
+      isSelf: !!input.isSelf,
+      channelId: input.channelId || '',
+      channelName: input.channelName || '',
+      mentioned: !!input.mentioned,
+      surface: input.surface,
+      participants: Array.isArray(input.participants) ? input.participants : undefined,
+      isSlackConnect: !!input.isSlackConnect,
     });
     // PART 3: DO NOT route or execute actions here. Proposed actions are
     // carried on the decision and become part of the SINGLE reply+action
