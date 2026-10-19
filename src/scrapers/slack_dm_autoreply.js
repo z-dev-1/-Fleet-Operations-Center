@@ -1276,13 +1276,33 @@ async function pollDMAutoReplyOnce(log) {
               inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'queued', reason: inbound.REASON.QUEUED_REVIEW, detail: (_fr && _fr.outcome) || 'handled' });
             }
           } catch (e) {
-            // FAS threw -> genuine technical failure. Transfer the durable claim
-            // to legacy and fall through to the legacy reply below (do NOT mark
-            // handled), so an AI/runner failure still gets a real reply attempt.
-            _fasOwned = false;
-            if (_inboundClaim && _claimKey) _inboundClaim.transferToLegacy(_claimKey, 'fas-exception: ' + e.message);
-            doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) threw on ${msg.ts}: ${e.message} — falling back to legacy reply`);
-            inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'ai-failed', reason: inbound.REASON.LEGACY_FALLBACK, detail: e.message });
+            // FAS threw -> genuine technical failure.
+            // PHASE 8: when legacy reasoning is RETIRED (default), the legacy
+            // persona brain must NOT answer even on a FAS failure — a broken AI
+            // goes to MANUAL REVIEW (visible, recoverable), not a second
+            // competing brain. FAS retains the claim. Only when the retirement
+            // switch is OFF (temporary rollback) do we fall back to legacy.
+            let _retire = true;
+            try { _retire = require('../orcha/fas/config').get().retireLegacyReasoning !== false; } catch (_) {}
+            if (_retire) {
+              if (_inboundClaim && _claimKey) _inboundClaim.markOwnedQueued(_claimKey);
+              try { require('../orcha/fas/runner')._queueManualReview
+                ? require('../orcha/fas/runner')._queueManualReview({ engine: 'dm', slackId: msg.userId, senderName: dm.name, channelId: dm.channelId, ts: msg.ts, text: msg.text }, { decision: 'clarify' }, 'FAS runtime error: ' + e.message)
+                : null; } catch (_) {}
+              _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
+                ts: msg.ts, replyTs: null, question: msg.text, reply: '(FAS error — manual review; legacy retired)',
+                inScope: true, category: 'fas-error', title: 'FAS error — manual review', createdAt: new Date().toISOString(), status: 'fas-error-manual-review' });
+              doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) threw on ${msg.ts}: ${e.message} — legacy RETIRED, queued manual review`);
+              inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'queued', reason: inbound.REASON.QUEUED_REVIEW, detail: 'fas-error (legacy retired)' });
+              // _fasOwned stays true -> watermark advances, legacy never runs.
+            } else {
+              // ROLLBACK PATH (retireLegacyReasoning:false): transfer the claim
+              // to legacy and fall through to the legacy reply below.
+              _fasOwned = false;
+              if (_inboundClaim && _claimKey) _inboundClaim.transferToLegacy(_claimKey, 'fas-exception: ' + e.message);
+              doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) threw on ${msg.ts}: ${e.message} — falling back to legacy reply`);
+              inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'ai-failed', reason: inbound.REASON.LEGACY_FALLBACK, detail: e.message });
+            }
           }
           if (_fasOwned) {
             _saveThreadSeen(dm.channelId, dm.name, msg.ts, !!dm.isGroup);

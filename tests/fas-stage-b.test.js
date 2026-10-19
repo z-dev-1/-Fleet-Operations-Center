@@ -30,10 +30,12 @@ beforeEach(() => { seed(); });
 afterEach(() => { vi.restoreAllMocks(); try { fs.rmSync(tmpDir, { recursive: true }); } catch (_) {} fs.mkdirSync(tmpDir, { recursive: true }); });
 
 describe('FAS Stage B — config', () => {
-  it('defaults to shadow mode, disabled, with caps', () => {
+  it('Phase 8 defaults: FAS primary (enabled, approval), legacy retired, with caps', () => {
     const c = config.get();
-    expect(c.mode).toBe('shadow');
-    expect(c.enabled).toBe(false);
+    // Phase 8 flipped the default from shadow/disabled to FAS-primary.
+    expect(c.enabled).toBe(true);
+    expect(c.mode).toBe('approval');
+    expect(c.retireLegacyReasoning).toBe(true);
     expect(c.maxSteps).toBeGreaterThan(0);
     expect(c.maxRuntimeMs).toBeGreaterThan(0);
     expect(c.retry.maxRetries).toBeGreaterThan(0);
@@ -113,7 +115,7 @@ describe('FAS Stage B — agent loop (mocked AI)', () => {
     expect(d.reply).toContain('320160');
     expect(d._evidence).toBeTruthy();
     expect(d._evidence.caseId).toBe('unit-320160');
-    expect(d._mode).toBe('shadow'); // Stage B default — no actions executed
+    expect(d._mode).toBe('approval'); // Phase 8 default; the agent still executes NO actions (proposals only)
     // The prompt the model saw must NOT contain unrelated fleet dumps — evidence is scoped.
     expect(d._evidence.verifiedFacts.some(f => f.field === 'lifecycleState')).toBe(true);
   });

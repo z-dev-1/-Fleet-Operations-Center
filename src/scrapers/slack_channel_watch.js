@@ -1128,11 +1128,25 @@ async function pollChannelsOnce(log) {
               doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) owned ${msg.ts} (${(_fr && _fr.outcome) || 'handled'}) — legacy skipped`);
             }
           } catch (e) {
-            // FAS threw -> honor the runner's letLegacyReply-on-error design by
-            // falling through to the legacy reply below instead of only logging
-            // a silent review item.
-            _fasOwnedC = false;
-            doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) threw ${msg.ts}: ${e.message} — falling back to legacy reply`);
+            // FAS threw.
+            // PHASE 8: when legacy reasoning is RETIRED (default), the legacy
+            // partner persona brain must NOT answer even on a FAS failure — a
+            // broken AI goes to manual review, not a second competing brain.
+            // FAS keeps ownership (watermark advances). Only the rollback switch
+            // (retireLegacyReasoning:false) falls back to legacy.
+            let _retireC = true;
+            try { _retireC = require('../orcha/fas/config').get().retireLegacyReasoning !== false; } catch (_) {}
+            if (_retireC) {
+              try { const _r = require('../orcha/fas/runner'); if (_r._queueManualReview) _r._queueManualReview({ engine: 'channel', slackId: msg.userId, senderName: ch.name, channelId: ch.id, ts: msg.ts, text: msg.text }, { decision: 'clarify' }, 'FAS runtime error: ' + e.message); } catch (_) {}
+              _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
+                replyTs: null, question: msg.text, reply: '(FAS error — manual review; legacy retired)',
+                wasMentioned: mentioned, inScope: true, category: 'fas-error', title: 'FAS error — manual review', createdAt: new Date().toISOString(), status: 'fas-error-manual-review' });
+              doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) threw ${msg.ts}: ${e.message} — legacy RETIRED, queued manual review`);
+              // _fasOwnedC stays true -> watermark advances, legacy never runs.
+            } else {
+              _fasOwnedC = false;
+              doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) threw ${msg.ts}: ${e.message} — falling back to legacy reply`);
+            }
           }
           if (_fasOwnedC) {
             _saveChannelLastSeen(ch.id, msg.ts);

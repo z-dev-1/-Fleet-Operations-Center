@@ -761,4 +761,4 @@ function getReplyQueue(status) {
   return _loadQueue().filter(x => x.kind === 'reply' && (!status || x.status === status));
 }
 
-module.exports = { handleInbound, approveReply, rejectReply, getReplyQueue, resumeVerifiedTransactions, confirmAutonomousSend, _finalizeSendAndCommit, _buildRequesterSnapshot, _divergence, _hasApprovalLevelAction, _extractPromise, _validateDueAt, _nextBusinessDueAt, AUTO_SEND_MIN_CONFIDENCE };
+module.exports = { handleInbound, approveReply, rejectReply, getReplyQueue, resumeVerifiedTransactions, confirmAutonomousSend, _finalizeSendAndCommit, _buildRequesterSnapshot, _queueManualReview, _divergence, _hasApprovalLevelAction, _extractPromise, _validateDueAt, _nextBusinessDueAt, AUTO_SEND_MIN_CONFIDENCE };

@@ -1,6 +1,8 @@
 # Digital FAS — Single Slack Reasoning Agent: Unification Plan
 
-Status: proposed (grounded in the current code as of this session)
+Status: ALL 8 PHASES COMPLETE (P1–P8 shipped + tested). Live app held in SHADOW
+mode for parity validation; flip to `approval`/`autonomous` when the parity
+report (scripts/fas-parity-report.js) looks good.
 Branch: `feature/owa-triage-midway-fixes`
 
 ## 1. Where the code actually is today
@@ -238,10 +240,28 @@ replacement has equivalent tests (spec Phase 10 / invariants).
   `tests/fas-gateway.test.js` (11 tests). Full suite: 1186 passing (lone failure
   = pre-existing flaky laneScore; passes in isolation).
 
-- **P8 — Retire legacy reasoning (#2, Phase 10).** Once FAS is the default and
-  parity is proven in shadow audit, delete the persona brains and the in-engine
-  AI reply generation; keep polling/dedupe/batching/backoff/send. Flip default
-  config to FAS-primary.
+- **P8 — Retire legacy reasoning (#2, Phase 10). ✅ DONE (reversible).**
+  Flipped the FAS config DEFAULT to FAS-primary: `enabled:true`, `mode:'approval'`
+  (FAS drafts + queues for operator approval; set `autonomous` to auto-send
+  confident verified low-risk answers), and a new `retireLegacyReasoning:true`
+  switch. When retired (default), the legacy DM/partner PERSONA reasoning no
+  longer answers: on a FAS failure in a primary mode, both engines now queue a
+  VISIBLE manual-review item (via `runner._queueManualReview`) and keep the
+  claim — they do NOT fall through to the legacy persona brain. The legacy
+  `_classifyAndDraft` / persona modules are KEPT (not deleted) as a one-release
+  rollback: set `retireLegacyReasoning:false` to re-enable the legacy fallback.
+  Shadow/disabled modes are unchanged (legacy still owns the reply there — that
+  is how parity is validated). Transport/reliability (polling, dedupe,
+  watermarks, exactly-once claims, rate-limit/backoff, batching, send) is
+  entirely untouched — only the REASONING fallback is gated. Also added
+  `scripts/fas-parity-report.js` (shadow audit summary + readiness verdict) so
+  retirement is data-driven. Files: `orcha/fas/config.js`, `orcha/fas/runner.js`
+  (export `_queueManualReview`), `scrapers/slack_dm_autoreply.js`,
+  `scrapers/slack_channel_watch.js`, `tests/fas-phase8-retire-legacy.test.js`
+  (5 tests), `tests/fas-stage-b.test.js` (defaults updated). Full suite: 1192
+  passing. NOTE: the LIVE app is intentionally left in `shadow` mode for parity
+  validation; flipping it to `approval` is a one-line config change once the
+  parity report looks good.
 
 ## 4. Non-negotiable invariants carried through every phase
 
