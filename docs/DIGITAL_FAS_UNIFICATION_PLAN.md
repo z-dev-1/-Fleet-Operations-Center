@@ -101,10 +101,25 @@ replacement has equivalent tests (spec Phase 10 / invariants).
   (18 golden tests). Full suite: 1105 passing (the one failure is the
   pre-existing flaky `laneScore` full-load test; passes in isolation).
 
-- **P2 — Audience resolver (#7).** `src/slack/audience-resolver.js`: resolve
-  conversation type + participants + effective (most-conservative) data scope;
-  feed it to the agent so a response never exposes data the visible audience
-  isn't cleared for. Tests #17,#18,#55.
+- **P2 — Audience resolver (#7). ✅ DONE.** `src/slack/audience-resolver.js`
+  (pure, deterministic, no Slack calls / no mutation): resolves the VISIBLE
+  audience for a conversation and the most-conservative effective scope.
+  `resolveAudience({surface, sender, participants, isSlackConnect})` →
+  `{audienceSensitivity (internal|internal_external_mixed|external_partner|unknown),
+  effectiveOperators/Domiciles (intersection; '*' is identity), effectiveDataCategories,
+  withholdInternalOnly, externalPresent, conservative, ...}`. 1:1 DM / self-DM →
+  audience is the sender. Multi-party without a known participant list, or any
+  Slack Connect channel → CONSERVATIVE (assume a hidden external viewer; withhold
+  internal-only). Scope is the INTERSECTION across known participants (most
+  restrictive wins). `applyAudienceCeiling` strips internal-only facts
+  (operator/site summaries, Uptake) from sender-scoped evidence; it can only
+  remove. Wired into `agent.runAgent`: resolves audience, applies the ceiling to
+  evidence after `buildEvidence`, adds a VISIBLE AUDIENCE prompt block (defense
+  in depth), and sets `decision.audienceSensitivity` AUTHORITATIVELY from code so
+  the model can never under-report it (verified: model says "internal" + carrier
+  present → code forces "internal_external_mixed"). AiCore result surfaces it.
+  Files: `src/slack/audience-resolver.js` (new), `orcha/fas/agent.js`,
+  `tests/fas-audience-resolver.test.js` (13 tests). Full suite: 1119 passing.
 
 - **P3 — Channel registry + information-feed ingest (#45–#50,#60,#61).**
   `channelRegistry` store + classifier; INFORMATION_FEED/SYSTEM_FEED → ingest

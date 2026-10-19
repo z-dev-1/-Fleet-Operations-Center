@@ -189,6 +189,27 @@ function _attachmentsBlock(input, evidence) {
   return parts.length ? parts.join('\n\n') : '(no shared files or links)';
 }
 
+// Build the VISIBLE AUDIENCE prompt block from a resolved audience (spec #7).
+// Trusted system text (derived from the Contact Book, not user content). For a
+// 1:1 DM the audience is just the sender, so we keep it terse. When an external
+// or unknown viewer is (or may be) present, the block explicitly tells the
+// model to withhold internal-only data and gives the effective scope.
+function _audienceBlock(audience) {
+  if (!audience) return '(audience: sender only)';
+  try {
+    const ar = require('../../slack/audience-resolver');
+    const parts = [ar.summaryForPrompt(audience)];
+    if (audience.withholdInternalOnly) {
+      parts.push('DO NOT reveal internal-only information (operator/site summaries, Uptake insights, ' +
+        'internal process internals, internal URLs). A partner/vendor/unknown person can see this reply.');
+    }
+    if (audience.conservative) {
+      parts.push('You cannot enumerate everyone who can see this — treat it as if an external partner is present.');
+    }
+    return parts.filter(Boolean).join('\n');
+  } catch (_) { return '(audience: unresolved)'; }
+}
+
 function _parseDecision(raw, evidence) {
   const fallback = {
     decision: 'clarify',
@@ -300,7 +321,7 @@ async function _reviewAndRefine(decision, cfg, profile, evidence, extraResearch,
 // loop. Untrusted content (message, conversation, facts, extra research) is
 // structurally fenced with wrapUntrusted() so injected instructions can't be
 // mistaken for commands.
-function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, stepInfo) {
+function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, stepInfo, audience) {
   const convoText = Array.isArray(input.conversation) && input.conversation.length
     ? input.conversation.join('\n') : '(no prior conversation)';
   const authText = JSON.stringify(evidence.senderAuthorization) +
@@ -379,6 +400,12 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
     { key: 'loop', label: 'RESEARCH BUDGET', text: 'Step ' + stepInfo.step + ' of max ' + stepInfo.maxSteps + '. Research steps remaining: ' + stepInfo.remaining + '.' },
     { key: 'sender', label: 'SENDER', text: profile.name + ' (' + profile.type + ', ' + (profile.org || 'no org') + ')' },
     { key: 'authorization', label: 'AUTHORIZATION + SCOPE', text: authText },
+    // EFFECTIVE AUDIENCE (spec #7): who can SEE this response. The hard data
+    // restriction is enforced in code (effective scope/categories); this block
+    // makes the model reason about it too (defense in depth) and set
+    // audienceSensitivity. Omitted for a plain 1:1 DM (audience == sender).
+    { key: 'audience', label: 'VISIBLE AUDIENCE (never reveal data this audience is not cleared to see)',
+      text: _audienceBlock(audience) },
     { key: 'coverage', label: 'ZILA COVERAGE (routing/scope context)', text: coverageText },
     { key: 'message', label: 'INCOMING MESSAGE', text: guard.wrapUntrusted('INCOMING MESSAGE', text) },
     { key: 'conversation', label: 'IMMEDIATE CONVERSATION', text: guard.wrapUntrusted('CONVERSATION', convoText) },
@@ -499,6 +526,26 @@ async function runAgent(input) {
   const cfg = config.get();
   const profile = profiles.resolveSender(input.slackId, input.senderName);
   const text = input.text || '';
+  // EFFECTIVE AUDIENCE (spec #7, Phase 2): who can SEE the response. On a
+  // multi-party / Slack Connect surface this is the most-conservative scope +
+  // sensitivity across everyone present — never just the sender. Used to (a)
+  // tell the model what it must withhold, and (b) authoritatively set
+  // decision.audienceSensitivity in code (the model can't under-report it).
+  // Best-effort: a resolver failure must never block a reply.
+  let audience = null;
+  try {
+    const ar = require('../../slack/audience-resolver');
+    audience = ar.resolveAudience({
+      surface: input.surface || (input.isSelf ? 'self_dm' : (input.isGroup ? 'channel' : 'dm')),
+      sender: profile,
+      participants: Array.isArray(input.participants) ? input.participants : undefined,
+      isSlackConnect: !!input.isSlackConnect,
+      isGroup: !!input.isGroup,
+      isSelf: !!input.isSelf,
+      channelId: input.channelId,
+      channelName: input.channelName,
+    });
+  } catch (e) { logger.warn('[fas-agent] audience resolve failed (non-fatal): ' + (e && e.message)); audience = null; }
   const maxSteps = Math.max(1, cfg.maxSteps || 6);
   // Effective mode drives side-effect rules for tools (e.g. ASK_INTERNAL must
   // not contact AITeammate in Shadow). input.mode overrides for tests.
@@ -511,7 +558,14 @@ async function runAgent(input) {
     // ── STEP 0: deterministic scoped evidence baseline ────────────────────
     // Pass the raw Slack file objects so the evidence builder can read shared
     // attachments (PNG/PDF/HTML/CSV) and surface any unit ids they reference.
-    const evidence = await buildEvidence({ profile, text, mode, files: input.files || [] });
+    let evidence = await buildEvidence({ profile, text, mode, files: input.files || [] });
+    // AUDIENCE CEILING (spec #7): tighten the sender-scoped evidence to what the
+    // VISIBLE AUDIENCE may receive — strip internal-only facts when an external/
+    // unknown viewer is (or may be) present. Only removes facts, never adds.
+    if (audience) {
+      try { evidence = require('../../slack/audience-resolver').applyAudienceCeiling(evidence, audience); }
+      catch (e) { logger.warn('[fas-agent] audience ceiling failed (non-fatal): ' + (e && e.message)); }
+    }
     const ctx = { profile, mode, _evidence: evidence, approvedAutomaticActions: cfg.approvedAutomaticActions || [] };
     const extraResearch = [];
     const seen = new Set();
@@ -525,7 +579,7 @@ async function runAgent(input) {
       if (controller.signal.aborted) break;
       steps = step;
       const remaining = maxSteps - step;
-      const { prompt, assembled } = _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, { step, maxSteps, remaining });
+      const { prompt, assembled } = _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, { step, maxSteps, remaining }, audience);
       lastAssembled = assembled;
 
       const raw = await _ask(prompt, cfg, controller, 'fas');
@@ -577,8 +631,25 @@ async function runAgent(input) {
     const _comm = _normalizeCommunication(decision, !!input.isGroup, !!input.isSelf);
     decision.shouldReply = _comm.shouldReply;
     decision.replyPlacement = _comm.replyPlacement;
-    decision.audienceSensitivity = _comm.audienceSensitivity;
     decision.reasonCode = _comm.reasonCode;
+    // AUDIENCE is authoritative from CODE, not the model (spec #7): the
+    // code-resolved audienceSensitivity overrides whatever the model guessed,
+    // so it can never UNDER-report (e.g. claim "internal" when a partner is in
+    // the room). Falls back to the model's normalized value only if the
+    // resolver was unavailable.
+    decision.audienceSensitivity = (audience && audience.audienceSensitivity) || _comm.audienceSensitivity;
+    if (audience) {
+      decision._audience = {
+        sensitivity: audience.audienceSensitivity,
+        surface: audience.surface,
+        participantsKnown: audience.participantsKnown,
+        externalPresent: audience.externalPresent,
+        withholdInternalOnly: audience.withholdInternalOnly,
+        conservative: audience.conservative,
+        effectiveOperators: audience.effectiveOperators,
+        effectiveDomiciles: audience.effectiveDomiciles,
+      };
+    }
 
     decision._evidence = evidence;
     decision._profile = { slackId: profile.slackId, name: profile.name, type: profile.type };
