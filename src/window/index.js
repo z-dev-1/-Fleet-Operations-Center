@@ -273,6 +273,10 @@ function initWindows(ctx) {
   // Lazy-load scrapers to avoid circular require at module load
   function _getAap()  { return require('../scrapers/aap'); }
   function _getAuth() { return require('../scrapers/auth'); }
+// Phase D: the ONE auth health authority. All session-rejection recovery routes
+// through the supervisor (target-verified, single-lock, bounded auto-retry) so
+// no caller runs its own competing ladder.
+function _getAuthSupervisor() { try { return require('../auth/midway-health-supervisor'); } catch (_) { return null; } }
 
   function getDomiciles() {
     const settings = store.load('settings', {});
@@ -1142,48 +1146,53 @@ function initWindows(ctx) {
         // then retry the load once. Guarded so only one ladder runs at a time.
         const sessionRejected = (e && e.code === 'MIDWAY_SESSION_INVALID') ||
           /session expired|session rejected|re-authenticate/i.test(e && e.message || '');
-        if (sessionRejected && !_reauthInFlight) {
+        const _supervisor = _getAuthSupervisor();
+        if (sessionRejected && _supervisor && typeof _supervisor.ensureHealthyConverging === 'function') {
+          // Phase D: delegate to the ONE supervisor. It owns the global lock
+          // (so no second ladder runs — _reauthInFlight is subsumed), runs the
+          // proven rungs (silent AEA → mwinit --refresh-aea → AEA-agent self-heal
+          // → interactive mwinit), VERIFIES against the real AAP target (not
+          // just a probe / mwinit completion), and on failure ARMS a bounded
+          // auto-retry so it converges back to HEALTHY on its own instead of
+          // staying stuck. VPN is never a gate.
+          logger.warn('[data-source] API load failed — AAP session rejected; delegating to auth supervisor: ' + e.message);
+          try { send('auth:mwinit-status', { ok: false, reason: 'AAP session rejected — recovering' }); } catch (_) {}
+          pushError('AAP session expired — recovering enterprise-access (AEA)…');
+          (async () => {
+            try {
+              const r = await _supervisor.ensureHealthyConverging({ reason: 'data-source-api-load', allowPrompt: true });
+              try { require('../scrapers/aap_api').dispose(); } catch (_) {}  // drop stale warm window
+              if (r && r.ok && r.verified) {
+                try { send('auth:mwinit-status', { ok: true }); } catch (_) {}
+                logger.info('[data-source] supervisor recovered (rung=' + r.rung + ') — retrying fleet load');
+                _loadFleetViaApiStartup('post-reauth');
+              } else {
+                try { send('auth:mwinit-status', { ok: false, reason: (r && r.reason) || 'AAP still rejecting' }); } catch (_) {}
+                const when = (r && r.nextRetryAt) ? (' Auto-retry scheduled.') : '';
+                pushError('AAP still rejecting the session (' + ((r && r.state) || 'unhealthy') + ').' + when + ' Or run `mwinit --refresh-aea` (or `mwinit -f`) in a terminal, then click Sync.');
+                logger.error('[data-source] supervisor did not reach HEALTHY: ' + ((r && r.reason) || r && r.class || 'unknown') + ' (state=' + (r && r.state) + ')');
+              }
+            } catch (err) {
+              logger.error('[data-source] supervisor recovery error: ' + err.message);
+              pushError('Re-auth failed: ' + err.message + ' — run `mwinit --refresh-aea` in a terminal, then Sync.');
+            }
+          })();
+        } else if (sessionRejected && !_reauthInFlight) {
+          // FALLBACK (supervisor unavailable): the legacy hand-rolled ladder.
           _reauthInFlight = true;
-          logger.warn('[data-source] API load failed — AAP session rejected; starting recovery ladder: ' + e.message);
+          logger.warn('[data-source] API load failed — AAP session rejected; legacy recovery ladder: ' + e.message);
           try { send('auth:mwinit-status', { ok: false, reason: 'AAP session rejected — recovering' }); } catch (_) {}
           pushError('AAP session expired — refreshing enterprise-access (AEA)…');
           (async () => {
             try {
-              const { refreshAeaSilently, refreshAeaViaMwinit, runMwinit, injectCookies, probeSession, checkMwinit } = _getAuth();
-              let fixed = false;
-              // Rung 1: silent re-mint (no prompt).
-              try { const r1 = await refreshAeaSilently(); fixed = !!(r1 && r1.ok); } catch (_) {}
-              // Rung 2 (A): mwinit --refresh-aea — AEA-only, usually no tap.
-              if (!fixed) {
-                pushStatus('\uD83D\uDD04 Refreshing AAP enterprise-access cookie (mwinit --refresh-aea)…');
-                try { const r2 = await refreshAeaViaMwinit(); fixed = !!(r2 && r2.ok); } catch (_) {}
-                if (fixed) { try { await injectCookies(); } catch (_) {} }
-              }
-              // Rung 3 (B, fallback): full interactive mwinit — only if the
-              // Midway session itself is expired, not just AEA.
-              if (!fixed) {
-                const st = checkMwinit();
-                if (!st.ok) {
-                  pushStatus('\uD83D\uDD11 Midway session expired — complete mwinit in the terminal…');
-                  try { await runMwinit(); await injectCookies(); const r3 = await refreshAeaViaMwinit(); fixed = !!(r3 && r3.ok) || true; } catch (_) {}
-                }
-              }
-              // Verify + retry.
-              try { await injectCookies(); } catch (_) {}
-              let ok = false;
-              try { ok = await probeSession(); } catch (_) {}
-              try { require('../scrapers/aap_api').dispose(); } catch (_) {}  // drop stale warm window
-              if (ok) {
-                try { send('auth:mwinit-status', { ok: true }); } catch (_) {}
-                logger.info('[data-source] recovery succeeded — retrying fleet load');
-                _loadFleetViaApiStartup('post-reauth');
-              } else {
-                try { send('auth:mwinit-status', { ok: false, reason: 'AAP still rejecting after AEA refresh + mwinit' }); } catch (_) {}
-                pushError('AAP still rejecting the session. Run `mwinit --refresh-aea` (or `mwinit -f`) in a terminal, then click Sync.');
-                logger.error('[data-source] recovery ladder exhausted — AAP still rejected');
-              }
+              const sup = _getAuthSupervisor();
+              const r = sup ? await sup.ensureHealthyConverging({ reason: 'data-source-legacy', allowPrompt: true }) : null;
+              const ok = !!(r && r.ok && r.verified);
+              try { require('../scrapers/aap_api').dispose(); } catch (_) {}
+              if (ok) { try { send('auth:mwinit-status', { ok: true }); } catch (_) {} _loadFleetViaApiStartup('post-reauth'); }
+              else { pushError('AAP still rejecting the session. Run `mwinit --refresh-aea` (or `mwinit -f`) in a terminal, then click Sync.'); }
             } catch (err) {
-              logger.error('[data-source] recovery ladder error: ' + err.message);
+              logger.error('[data-source] recovery error: ' + err.message);
               pushError('Re-auth failed: ' + err.message + ' — run `mwinit --refresh-aea` in a terminal, then Sync.');
             } finally {
               _reauthInFlight = false;

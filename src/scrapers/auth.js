@@ -420,49 +420,71 @@ function refreshAeaViaMwinit() {
   if (_isOfflineNow()) return Promise.resolve({ ok: false, skipped: 'offline' });
   _aeaRefreshInFlight = new Promise((resolve) => {
     logger.info('[AuthManager] Spawning mwinit --refresh-aea (AEA posture refresh, no full re-auth)...');
-    const batchPath = require('path').join(require('os').tmpdir(), 'fleet_mwinit_aea.bat');
+    // Run mwinit DIRECTLY with piped stdio so we can READ its output. This is
+    // the critical fix: `mwinit --refresh-aea` is non-interactive, but when the
+    // underlying Midway SESSION is no longer valid it prints
+    //   "Not refreshing AEA cookie because Midway cookie file does not contain
+    //    a valid Midway session"
+    // and writes NO AEA cookie. The old detached-batch spawn used stdio:'ignore'
+    // and only polled the cookie file, so it never learned WHY nothing landed —
+    // it just timed out and the caller retried the (hopeless) silent handshake.
+    // Now we detect that message and return sessionInvalid:true so the recovery
+    // ladder stops the silent loop and surfaces a full-re-auth (YubiKey) prompt.
+    let child;
     try {
-      fs.writeFileSync(batchPath, [
-        '@echo off',
-        'echo Fleet Operations - refreshing AAP enterprise-access (AEA) cookie...',
-        'echo.',
-        'mwinit --refresh-aea',
-        'echo.',
-        'echo AEA refresh step complete - this window will close in 3 seconds.',
-        'timeout /t 3 /nobreak > nul',
-        'exit',
-      ].join('\r\n'));
+      child = spawn('mwinit', ['--refresh-aea'], { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
     } catch (e) {
       _aeaRefreshInFlight = null;
-      resolve({ ok: false, error: 'batch-write:' + e.message });
+      resolve({ ok: false, error: 'spawn:' + e.message });
       return;
     }
-    const child = spawn('cmd.exe', ['/c', 'start', 'cmd.exe', '/c', batchPath], { detached: true, stdio: 'ignore', shell: false });
-    child.unref();
+    let outBuf = '';
+    try {
+      child.stdout.on('data', (d) => { outBuf += d.toString(); });
+      child.stderr.on('data', (d) => { outBuf += d.toString(); });
+    } catch (_) { /* stdio may be unavailable in some envs */ }
 
-    // Success = a live AEA cookie now present on disk (and not already expired).
-    // Poll the file; AEA-only refresh is fast and usually needs no WebAuthn tap,
-    // so a 90s budget is plenty (full mwinit keeps its own 3-min budget).
     const started = Date.now();
     const AEA_REFRESH_TIMEOUT_MS = 90 * 1000;
     let baselineMtimeMs = 0;
     try { baselineMtimeMs = fs.statSync(COOKIE_FILE).mtimeMs; } catch (_) {}
+    let settled = false;
+    const finish = (v) => { if (settled) return; settled = true; try { clearInterval(poll); } catch (_) {} try { clearTimeout(killTimer); } catch (_) {} resolve(v); };
+
+    // Detect the "session invalid" message the instant mwinit prints it.
+    const SESSION_INVALID_RE = /does not contain a valid Midway session|no valid Midway session|not refreshing AEA/i;
+    child.on('exit', () => {
+      // On exit, decide from the cookie file + the captured message.
+      const aeaMin = aeaFileExpiryMin();
+      if (aeaMin != null && aeaMin > 0) {
+        logger.info('[AuthManager] mwinit --refresh-aea complete — AEA now ' + aeaMin + 'min');
+        finish({ ok: true, aeaMin });
+        return;
+      }
+      if (SESSION_INVALID_RE.test(outBuf)) {
+        logger.warn('[AuthManager] mwinit --refresh-aea reports the Midway SESSION is invalid — AEA cannot be minted. A full `mwinit` (YubiKey tap) is required.');
+        finish({ ok: false, sessionInvalid: true, aeaMin: null, mwinitMessage: outBuf.trim().slice(0, 300) });
+        return;
+      }
+      logger.warn('[AuthManager] mwinit --refresh-aea produced no AEA cookie: ' + (outBuf.trim().slice(0, 200) || '(no output)'));
+      finish({ ok: false, aeaMin: aeaFileExpiryMin(), mwinitMessage: outBuf.trim().slice(0, 300) });
+    });
+    child.on('error', (e) => finish({ ok: false, error: 'proc:' + e.message }));
+
+    // Safety: bound it (should exit well under this). If mwinit ever blocks on
+    // a prompt (it shouldn't for --refresh-aea), kill it so we never hang.
+    const killTimer = setTimeout(() => { try { child.kill(); } catch (_) {} }, AEA_REFRESH_TIMEOUT_MS);
+    if (killTimer.unref) killTimer.unref();
+
+    // Also poll the cookie file as a secondary success signal (in case exit is
+    // delayed on some platforms), but the exit handler is the primary path.
     const poll = setInterval(() => {
       try {
         let rewritten = false;
         try { rewritten = fs.statSync(COOKIE_FILE).mtimeMs > baselineMtimeMs; } catch (_) {}
         const aeaMin = aeaFileExpiryMin();
-        if (rewritten && aeaMin != null && aeaMin > 0) {
-          clearInterval(poll);
-          logger.info('[AuthManager] mwinit --refresh-aea complete — AEA now ' + aeaMin + 'min');
-          resolve({ ok: true, aeaMin });
-          return;
-        }
-        if (Date.now() - started > AEA_REFRESH_TIMEOUT_MS) {
-          clearInterval(poll);
-          logger.warn('[AuthManager] mwinit --refresh-aea did not produce an AEA cookie within budget');
-          resolve({ ok: false, aeaMin: aeaFileExpiryMin() });
-        }
+        if (rewritten && aeaMin != null && aeaMin > 0) { logger.info('[AuthManager] mwinit --refresh-aea complete — AEA now ' + aeaMin + 'min'); finish({ ok: true, aeaMin }); return; }
+        if (Date.now() - started > AEA_REFRESH_TIMEOUT_MS) { finish({ ok: false, aeaMin: aeaFileExpiryMin(), mwinitMessage: outBuf.trim().slice(0, 300) }); }
       } catch (_) { /* transient FS error while file is written */ }
     }, 1500);
   });
@@ -917,6 +939,10 @@ function startOnlineReauthWatch() {
 // Returns true if it attempted a restart (caller then re-probes).
 let _aeaAgentRestartInFlight = false;
 let _lastAeaAgentRestartAt = 0;
+// Separate attempt / verified timestamps (spec #11) — a restart attempt that
+// did not verify must not be treated as a successful restart.
+let _lastAeaAgentRestartAttemptAt = 0;
+let _lastAeaAgentRestartVerifiedAt = 0;
 async function restartAeaAgent() {
   if (process.platform !== 'win32') return false;         // agent is Windows-only
   if (_aeaAgentRestartInFlight) return false;             // don't stack restarts
@@ -948,11 +974,48 @@ async function restartAeaAgent() {
     // may need elevation; if it can't, the killed agent is typically auto-
     // respawned by the service anyway, so this is a best-effort nudge.
     await run('net stop itacsvc & net start itacsvc');
-    // Give the fresh agent a moment to initialize + attach to the TPM before
-    // anyone queries it for the posture JWT.
-    await new Promise((r) => setTimeout(r, 6000));
-    logger.info('[AuthManager] AEA agent restart complete — fresh agent should now mint the posture JWT');
-    return true;
+
+    // SPEC #11: do NOT trust "taskkill returned" as success. VERIFY the agent
+    // actually became healthy — i.e. the duplicate/hung condition is resolved
+    // (no more than one EnterpriseAccessConsoleApp.exe running) — by polling
+    // `tasklist` until it is responsive OR a bounded timeout. Track the attempt
+    // vs the VERIFIED outcome separately so a failed restart never masquerades
+    // as a successful one (and never starts a cooldown as if it worked).
+    _lastAeaAgentRestartAttemptAt = Date.now();
+    const procCount = () => new Promise((resolve) => {
+      try {
+        const c = spawn('cmd.exe', ['/c', 'tasklist /FI "IMAGENAME eq EnterpriseAccessConsoleApp.exe" /NH'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+        let out = '';
+        c.stdout.on('data', (d) => { out += d.toString(); });
+        const t = setTimeout(() => { try { c.kill(); } catch (_) {} resolve(null); }, 5000);
+        c.on('exit', () => { clearTimeout(t); const m = out.match(/EnterpriseAccessConsoleApp\.exe/gi); resolve(m ? m.length : 0); });
+        c.on('error', () => { clearTimeout(t); resolve(null); });
+      } catch (_) { resolve(null); }
+    });
+    // Poll for readiness: a single (or zero, about to respawn) clean instance,
+    // up to ~15s. "Responsive" = not the duplicate/hung multi-instance state.
+    let verified = false;
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const n = await procCount();
+      // null = couldn't query (tasklist unavailable) -> fall back to a single
+      // settle wait and treat as attempted-but-unverified.
+      if (n === null) { await new Promise((r) => setTimeout(r, 4000)); break; }
+      if (n <= 1) { verified = true; break; }   // duplicate condition resolved
+      logger.info('[AuthManager] AEA agent still shows ' + n + ' instances — waiting for the duplicate/hung condition to clear');
+    }
+    if (verified) {
+      _lastAeaAgentRestartVerifiedAt = Date.now();
+      logger.info('[AuthManager] AEA agent restart VERIFIED — single clean agent; posture JWT should mint now');
+    } else {
+      logger.warn('[AuthManager] AEA agent restart attempted but NOT verified responsive within budget');
+    }
+    // Return whether the restart was VERIFIED (not merely attempted). The caller
+    // (recoverAuth) retries the silent refresh regardless, but a true here means
+    // the agent is genuinely healthy; a false lets the ladder escalate without
+    // falsely cooling down on an unverified restart (spec #12).
+    return verified;
   } catch (e) {
     logger.warn('[AuthManager] AEA agent restart error: ' + e.message);
     return false;
@@ -1024,7 +1087,24 @@ async function recoverAuth(reason, opts) {
       return { recovered: false, rung: 'offline', prompted: false, reason: label };
     }
 
-    // Rung 3.5 — AEA AGENT SELF-HEAL. Session cookie is valid + online + VPN up,
+    // Rung 3.25 — AEA-ONLY re-mint via `mwinit --refresh-aea` (no WebAuthn tap).
+    // Cheaper than restarting the posture agent; the proven middle rung that
+    // re-mints JUST the AEA cookie when the session is valid but AEA lapsed.
+    // It now reports sessionInvalid when mwinit itself says the session is gone
+    // — in that case silent/agent repair cannot help, so jump to the prompt.
+    try {
+      const rA = await refreshAeaViaMwinit();
+      if (rA && rA.ok) {
+        try { await injectCookies(undefined, { skipAea: true }); } catch (_) {}
+        logger.info('[AuthManager] recoverAuth recovered at rung=aea-mwinit — AEA re-minted (no tap)');
+        return { recovered: true, rung: 'aea-mwinit', prompted: false, reason: label };
+      }
+      if (rA && rA.sessionInvalid) {
+        logger.warn('[AuthManager] recoverAuth — mwinit --refresh-aea reports session invalid; AEA repair cannot help, escalating to interactive mwinit');
+        // Skip the agent rung (it cannot fix a dead session) and fall straight
+        // through to the interactive mwinit rung below.
+      } else {
+        // Rung 3.5 — AEA AGENT SELF-HEAL. Session cookie is valid + online + VPN up,
     // yet the silent AEA re-mint failed. The dominant cause (confirmed 2026-10)
     // is a STUCK Enterprise Access posture agent (duplicate/hung
     // EnterpriseAccessConsoleApp.exe instances timing out the posture query).
@@ -1032,16 +1112,24 @@ async function recoverAuth(reason, opts) {
     // is the app doing, on its own, what previously required manually killing
     // the processes. Only if THIS still fails do we fall through to the
     // interactive mwinit prompt. Windows-only; a no-op (returns false) elsewhere.
-    const restarted = await restartAeaAgent();
-    if (restarted) {
-      logger.info('[AuthManager] recoverAuth rung=aea-agent — agent restarted; retrying silent AEA refresh');
+    // restartAeaAgent now returns true only when the restart was VERIFIED
+    // (duplicate/hung condition resolved). But even an UNVERIFIED attempt may
+    // have helped, so retry the silent refresh whenever a restart was attempted
+    // (not skipped by the rate-limit) — the silent refresh + real-target verify
+    // is the actual proof of recovery, not the restart itself (spec #11/#12).
+    const verifiedRestart = await restartAeaAgent();
+    const attemptedRestart = verifiedRestart || (Date.now() - _lastAeaAgentRestartAttemptAt < 30000);
+    if (attemptedRestart) {
+      logger.info('[AuthManager] recoverAuth rung=aea-agent — agent restart ' + (verifiedRestart ? 'VERIFIED' : 'attempted (unverified)') + '; retrying silent AEA refresh');
       const r2 = await refreshAeaSilently();
       if (r2 && r2.ok) {
         logger.info('[AuthManager] recoverAuth recovered at rung=aea-agent — posture agent self-healed, AEA re-minted, no prompt');
         return { recovered: true, rung: 'aea-agent', prompted: false, reason: label };
       }
       logger.warn('[AuthManager] recoverAuth — silent refresh still failing after AEA agent restart; escalating');
-    }
+      }
+      } // end: AEA-mwinit did not short-circuit to prompt (agent rung ran)
+    } catch (_) { /* AEA-only rung unavailable — fall through to prompt */ }
   } else {
     logger.warn('[AuthManager] recoverAuth — on-disk session cookie genuinely expired (' + (state.reason || 'expired') + ')');
   }
