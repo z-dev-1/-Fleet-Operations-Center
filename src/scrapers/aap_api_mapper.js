@@ -410,6 +410,13 @@ function toFleetRow(wo, assetSummary, serviceDetail) {
     vin:             '',
     manufacturer:    '',
 
+    // Open WR counts (the U/P column). The asset record carries NO such field
+    // (confirmed via getAsset + asset search). These are populated AFTER the
+    // mapper in buildFleetDataset, from per-category open-WO tallies keyed by
+    // aaid. Default to 0 here; the real values overwrite them.
+    openUnplanned:   0,
+    openPlanned:     0,
+
     // provenance
     _apiSourced:     true,
     _serviceId:      wo.id || wo.workRequestId || '',

@@ -69,7 +69,7 @@ const COLS = [
   { key: 'lifecycleState', label: 'Status',       width: '110px', sortable: true  },
   { key: 'lifecycleReason',label: 'Relay Status', width: '150px', sortable: true  },
   { key: 'riskScore',      label: 'Score',        width: '70px',  sortable: true  },
-  { key: '_wos',           label: 'WOs',          width: '70px',  sortable: false },
+  { key: '_wos',           label: 'U/P',          width: '70px',  sortable: false },
   { key: '_pmDates',       label: 'PM Dates',     width: '120px', sortable: false },
   { key: 'duration',       label: 'Duration',     width: '90px',  sortable: true  },
   { key: 'vendor',         label: 'Vendor',       width: '130px', sortable: true  },

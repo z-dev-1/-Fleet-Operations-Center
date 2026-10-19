@@ -360,6 +360,67 @@ function registerAapApiIPC(ctx) {
     }, 9000);
   }
 
+  // U/P-COUNT PROBE (diagnostic, read-only). Discovers the REAL AAP field names
+  // for open Unplanned/Planned work-request counts. Fetches the FULL asset
+  // (getAsset) and logs every top-level key + any key that looks WR/count
+  // related, AND dumps the distinct wo.category values from the WO search for
+  // that unit. Set UP_PROBE_UNIT to a unit that HAS open WRs (e.g. 320160).
+  const _upProbeUnit = String(process.env.UP_PROBE_UNIT || '').trim();
+  if (_upProbeUnit) {
+    setTimeout(async () => {
+      try {
+        // Resolve aaid by asset search on displayName (stored rows don't keep aaid).
+        let aaid = null;
+        let searchSample = null;
+        try {
+          const sres = await api().searchAssets({ from: 0, fieldFilters: [{ key: 'displayName', values: [_upProbeUnit] }] });
+          const list = (sres && sres.assets) || [];
+          const hit = list.find((a) => String(a.asset && a.asset.displayName) === _upProbeUnit) || list[0];
+          searchSample = hit;
+          aaid = hit && hit.asset && hit.asset.aaid;
+          if (hit) {
+            logger.info('[up-probe] asset-SEARCH record top keys: ' + JSON.stringify(Object.keys(hit)));
+            logger.info('[up-probe] asset-SEARCH record FULL:\n' + JSON.stringify(hit, null, 2).slice(0, 6000));
+          }
+        } catch (e) { logger.warn('[up-probe] asset search failed: ' + e.message); }
+        if (!aaid) { logger.warn('[up-probe] could not resolve aaid for unit ' + _upProbeUnit); return; }
+        logger.info('[up-probe] fetching full asset for unit ' + _upProbeUnit + ' aaid=' + aaid);
+        const asset = await api().getAsset(aaid);
+        const dumpKeys = (obj, prefix) => {
+          const out = [];
+          for (const k of Object.keys(obj || {})) {
+            const v = obj[k];
+            const path = prefix ? prefix + '.' + k : k;
+            if (/work|wr|plan|request|count|unplan|open/i.test(k)) {
+              out.push(path + ' = ' + JSON.stringify(Array.isArray(v) ? { __array_len: v.length, sample: v.slice(0, 2) } : v));
+            }
+            if (v && typeof v === 'object' && !Array.isArray(v) && prefix.split('.').length < 2) {
+              out.push(...dumpKeys(v, path));
+            }
+          }
+          return out;
+        };
+        logger.info('[up-probe] asset TOP-LEVEL keys: ' + JSON.stringify(Object.keys(asset || {})));
+        if (asset && asset.asset) logger.info('[up-probe] asset.asset keys: ' + JSON.stringify(Object.keys(asset.asset)));
+        logger.info('[up-probe] WR/count-looking fields:\n' + (dumpKeys(asset, '').join('\n') || '(none matched work|wr|plan|request|count|open)'));
+        // WO-category angle: category is NON-nullable — must search each value.
+        const OPEN_WO_STATUSES = ['CREATED', 'PENDING', 'PENDING_REVIEW', 'SCHEDULED',
+          'WORK_IN_PROGRESS', 'WORK_ORDER_ASSIGNED', 'ESTIMATE_APPROVED',
+          'ESTIMATE_PENDING_APPROVAL', 'ESTIMATE_REJECTED'];
+        for (const cat of ['UNPLANNED', 'PLANNED']) {
+          try {
+            const wos = await api().searchAllPages({ equipmentIds: [_upProbeUnit], statuses: OPEN_WO_STATUSES, category: cat }, { maxPages: 5 });
+            const sObj = (wos || [])[0] && (wos[0].status);
+            logger.info('[up-probe] ' + cat + ' OPEN WOs for ' + _upProbeUnit + ' = ' + (wos || []).length +
+              '; sample status obj=' + JSON.stringify(sObj));
+          } catch (e) { logger.warn('[up-probe] ' + cat + ' WO search failed: ' + e.message); }
+        }
+      } catch (e) {
+        logger.warn('[up-probe] FAILED: ' + e.message + (e.code ? ' (' + e.code + ')' : ''));
+      }
+    }, 9000);
+  }
+
   const _vreMatrixUnits = String(process.env.VRE_MATRIX_UNIT || '').split(',').map((s) => s.trim()).filter(Boolean);
   if (_vreMatrixUnits.length) {
     setTimeout(async () => {

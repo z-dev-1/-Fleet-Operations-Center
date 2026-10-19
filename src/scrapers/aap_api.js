@@ -702,6 +702,10 @@ async function buildFleetDataset(opts = {}) {
   const BULK_FIELDS = ['displayName', 'operator', 'owner', 'domicileSite', 'bodyType',
     'assetType', 'vin', 'manufacturerName', 'engineManufacturerName', 'program',
     'lifecycleState', 'lifecycleStateReason',
+    // NOTE: the asset search does NOT carry open-WR counts (confirmed: only
+    // displayName/yard/latestLocation come back). The U/P column is populated
+    // from per-category open-WO tallies instead (see openUnplannedByAaid /
+    // openPlannedByAaid below).
     // Location fields so EVERY unit shows a "Last Geofence" (geoFences are
     // confirmed valid search fields — DEFAULT_ASSET_SEARCH_REQUEST requests them).
     'geoFences', 'yardBuildingID', 'latestLocationTimestamp', 'geoPoint'];
@@ -760,6 +764,29 @@ async function buildFleetDataset(opts = {}) {
     if (woBetter(w, woByAaid.get(w.aaid))) woByAaid.set(w.aaid, w);
   }
 
+  // U/P COLUMN — open WORK-REQUEST counts per asset, by category. The asset
+  // record carries NO open-WR count fields (confirmed via getAsset + asset
+  // search: only displayName/yard/latestLocation come back). The ONLY reliable
+  // source is the WO search itself, counting OPEN WOs per aaid for each
+  // category. `category` is NON-nullable on the search body, so we run one pass
+  // per value. The UNPLANNED open set is already `woList` above (the default
+  // searchRequest is UNPLANNED + the open-status list); we add a PLANNED pass.
+  // Counts are indexed by aaid and attached to each row below.
+  const openUnplannedByAaid = new Map();
+  const openPlannedByAaid = new Map();
+  for (const w of woList) {
+    if (w && w.aaid && woIsOpen(w)) openUnplannedByAaid.set(w.aaid, (openUnplannedByAaid.get(w.aaid) || 0) + 1);
+  }
+  try {
+    const plannedReq = Object.assign({}, woReq, { category: 'PLANNED' });
+    const plannedList = await searchAllPages(plannedReq, { maxPages: opts.maxPages || 50 });
+    for (const w of plannedList) {
+      if (w && w.aaid && woIsOpen(w)) openPlannedByAaid.set(w.aaid, (openPlannedByAaid.get(w.aaid) || 0) + 1);
+    }
+  } catch (e) {
+    try { logger.warn('buildFleetDataset: PLANNED WO count pass failed: ' + e.message); } catch (_) { /* noop */ }
+  }
+
   // 3) Build one fleet row per ASSET (the app's set). Attach the current WO if
   //    the unit has one; units with no open WO still appear (lifecycle-driven).
   const detailCap = opts.detailCap != null ? opts.detailCap : assetEntries.length;
@@ -803,6 +830,11 @@ async function buildFleetDataset(opts = {}) {
       lifecycleStateReason: assetSummary.asset && assetSummary.asset.lifecycleStateReason,
     };
     const row = mapper.toFleetRow(woOrAsset, assetSummary, serviceDetail);
+    // U/P column: open unplanned / planned WR counts for THIS asset, from the
+    // per-category open-WO tallies built above (the asset record itself has no
+    // such field). Keyed by aaid.
+    row.openUnplanned = (aaid && openUnplannedByAaid.get(aaid)) || 0;
+    row.openPlanned = (aaid && openPlannedByAaid.get(aaid)) || 0;
     // Asset lifecycle is the SOURCE OF TRUTH for availability. A WO's own
     // lifecycleState/Reason can lag badly (a zombie "open" WO from years ago),
     // so always override from the asset.
