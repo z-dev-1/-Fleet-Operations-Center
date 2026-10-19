@@ -1560,11 +1560,20 @@ function _buildWoBody(opts, assetFull, vendorCode) {
   // (the 400 validator echoes it as `callType`, but the accepted request body
   // from the live wizard capture uses `calltype`). A unit at its domicile is
   // YARD; a unit away from the yard is OFFSITE. Caller may force one.
+  // callType derivation (from 45 real WRs, 2026-10-19):
+  //   YARD     — repair at the home yard (reportedLocation.type AMAZON_FACILITY). Default (37/45).
+  //   OFFSITE  — unit is at / going to a dealer: ANY TOW, or an off-site repair
+  //              (reportedLocation.type OTHER). (2/45 + the tow)
+  //   ROADSIDE — a mobile vendor comes to the unit (reportedLocation.type null). (6/45)
+  // A caller may force one via opts.callType. A TOW is ALWAYS OFFSITE (confirmed
+  // by the hand-made tow WR). Off-site (unit away from yard) is OFFSITE.
   const _ct = String(opts.callType || opts.calltype || '').trim().toUpperCase();
   const VALID_CALLTYPES = ['OFFSITE', 'ROADSIDE', 'YARD'];
+  const _isTowReq = (suggestedItems || []).some((s) => /^tow$/i.test(String(s.level1 || '')));
   const calltype = VALID_CALLTYPES.includes(_ct)
     ? _ct
-    : (opts && opts.offSite ? 'OFFSITE' : 'YARD');
+    : (_isTowReq || (opts && opts.offSite) ? 'OFFSITE'
+       : (opts && opts.roadside ? 'ROADSIDE' : 'YARD'));
 
   // Body shape mirrors the real wizard's accepted /vre/recommendation request
   // EXACTLY (captured live 2026-10-18). Key fixes vs. our earlier (rejected)
@@ -2012,11 +2021,13 @@ function _buildCreateRepairBody(opts, assetFull, vendorCode, recoResp) {
     // fields so we don't claim it's at a known Amazon yard.
     const addrParts = [currentLocation.street, currentLocation.city, currentLocation.subRegion].filter(Boolean).join(', ');
     currentLocation.yardLocation = addrParts || currentLocation.yardLocation || null;
-    currentLocation.geofenceName = null;
-    currentLocation.code = null;
-    currentLocation.type = null;
+    // OFFSITE reportedLocation.type is "OTHER" with a human name (confirmed from
+    // the hand-made tow WR: code/geofenceName = the dealer name, type=OTHER).
+    currentLocation.code = opts.vendorLocationName || (opts.vendor ? String(opts.vendor).split(' (')[0] : null) || 'Off-site';
+    currentLocation.geofenceName = currentLocation.code;
+    currentLocation.type = 'OTHER';
     currentLocation.deviceTelemetryData = { engineHours: null, odometer: null };
-    try { logger.info('[create-wr] off-site location kept (tow pickup / away from yard): ' + (addrParts || '(address)')); } catch (_) {}
+    try { logger.info('[create-wr] off-site location (type=OTHER): ' + (addrParts || '(address)')); } catch (_) {}
   }
   try {
     if (_offSite) throw '__skip_yard__';   // skip yard enrichment when off-site

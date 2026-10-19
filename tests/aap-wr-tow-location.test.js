@@ -25,8 +25,10 @@ describe('createRepair tow location — off-site pickup wins over live-GPS yard 
     expect(cl.street).toBe('1407 Bulldog Drive');
     expect(cl.city).toBe('Allentown');
     expect(cl.subRegion).toBe('PA');
-    // …and the live-GPS yard geofence must NOT have clobbered it.
-    expect(cl.geofenceName).toBeNull();
+    // …and the live-GPS yard geofence must NOT have clobbered it. Off-site uses
+    // type OTHER with a dealer/vendor name (matches the hand-made ref WR), NOT
+    // the live-GPS yard geofence "116FCLGQY_ITR".
+    expect(cl.type).toBe('OTHER');
     expect(cl.geofenceName).not.toBe('116FCLGQY_ITR');
     expect(cl.yardLocation).toContain('1407 Bulldog Drive');
   });
@@ -40,9 +42,10 @@ describe('createRepair tow location — off-site pickup wins over live-GPS yard 
       towToStreet: '2906 William Penn Hwy', towToCity: 'Easton', towToState: 'PA', towToZip: '18045',
     };
     const body = aap._buildCreateRepairBody(opts, { aaid: 'aaid_9cfd07ce', latestLocation: LL }, 'FLEETNET', null);
-    // Pickup (reportedLocation/currentLocation) = the dealer.
+    // Pickup (reportedLocation/currentLocation) = the dealer, type OTHER.
     expect(body.currentLocation.street).toBe('1407 Bulldog Dr');
-    expect(body.currentLocation.geofenceName).toBeNull();
+    expect(body.currentLocation.type).toBe('OTHER');
+    expect(body.calltype).toBe('OFFSITE'); // a tow is always OFFSITE
     // Destination = the home yard, as a SEPARATE object, type AMAZON_FACILITY.
     expect(body.destination).toBeTruthy();
     expect(body.destination.street).toBe('2906 William Penn Hwy');
@@ -50,6 +53,18 @@ describe('createRepair tow location — off-site pickup wins over live-GPS yard 
     expect(body.destination.type).toBe('AMAZON_FACILITY');
     expect(body.destination.code).toBe('EOFE01');
     expect(body.isTransloadingRequired).toBe(false);
+  });
+
+  it('callType: yard repair = YARD; tow = OFFSITE (derived from real-WR logic)', () => {
+    const yard = aap._buildCreateRepairBody(
+      { aaid: 'x', domicile: 'EOFE01', locationLatest: LL, areaPairs: [{ area: 'Engine', subcategory: 'Engine Assembly' }] },
+      { aaid: 'x', latestLocation: LL }, 'VOLVO', null);
+    expect(yard.calltype).toBe('YARD');
+    const tow = aap._buildCreateRepairBody(
+      { aaid: 'x', domicile: 'EOFE01', locationLatest: LL, areaPairs: [{ area: 'TOW', subcategory: 'MECHANICAL ISSUE' }],
+        offSite: true, locStreet: '1 A St', towDirection: 'return-to-yard', towToStreet: '2 B St', towToCity: 'Easton', towToState: 'PA', towToZip: '18045' },
+      { aaid: 'x', latestLocation: LL }, 'FLEETNET', null);
+    expect(tow.calltype).toBe('OFFSITE');
   });
 
   it('non-tow WR has no destination field set', () => {
