@@ -952,71 +952,50 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
     // Reads ~/.midway/cookie expiry timestamps — no hardcoded hour thresholds.
     // Spawns a visible cmd.exe terminal automatically when any cookie is expired.
     (async function _midwayPreFlight() {
-      const { checkMwinit, runMwinit, injectCookies } = _getAuth();
+      const { checkMwinit } = _getAuth();
       const state = checkMwinit();
+      const supervisor = _getAuthSupervisor();
 
-      if (!state.ok) {
-        logger.warn('[startup] ' + state.reason + ' \u2014 launching mwinit terminal');
-        pushStatus('\uD83D\uDD11 Midway session expired \u2014 complete auth in the terminal window...');
+      // Cheap short-circuit: disk session valid AND AEA comfortably fresh → push
+      // green status and skip any work. (Health is still verified lazily on the
+      // first real AAP read, which routes through the supervisor.)
+      const aeaFresh = typeof state.aeaExpiresInMin === 'number' && state.aeaExpiresInMin >= 45;
+      if (state.ok && aeaFresh) {
+        logger.info('[startup] Cookies valid (' + state.count + ' cookies, session ' +
+          (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ', aea ' + state.aeaExpiresInMin + 'min)');
+        send('auth:mwinit-status', { ok: true, expiresInMin: state.expiresInMin });
+      } else if (supervisor && typeof supervisor.ensureHealthy === 'function') {
+        // DELEGATE the whole startup recovery to the ONE supervisor (spec #18):
+        // it runs the verified ladder (silent AEA → mwinit --refresh-aea →
+        // AEA-agent self-heal → interactive mwinit), verifies against the real
+        // AAP target, and only prompts when the session is genuinely expired.
+        // Replaces the old hand-rolled check→mwinit→probe→silent→refresh-aea
+        // sequence that duplicated the ladder.
+        logger.info('[startup] auth needs attention (session ' + (state.ok ? 'ok' : state.reason) + ', aea ' + (state.aeaExpiresInMin == null ? 'missing' : state.aeaExpiresInMin + 'min') + ') — delegating to supervisor');
+        pushStatus('\uD83D\uDD04 Verifying Midway session\u2026');
         try {
-          await runMwinit();
-          await injectCookies();
-          // Verify the session actually works after standard mwinit
-          const { probeSession } = _getAuth();
-          const startupPageOk = await probeSession();
-          if (!startupPageOk) {
-            logger.warn('[startup] probeSession failed after standard mwinit -- retrying with mwinit -f');
-            pushStatus('\uD83D\uDD04 Session still rejected -- retrying with mwinit -f (tap WebAuthn again)...');
-            await runMwinit(true);
-            await injectCookies();
+          const r = await supervisor.ensureHealthy({ reason: 'startup', allowPrompt: true });
+          if (r && r.ok && r.verified) {
+            send('auth:mwinit-status', { ok: true });
+            pushStatus('\u2705 Midway session ready');
+          } else {
+            send('auth:mwinit-status', { ok: false, reason: (r && r.reason) || 'session not verified' });
+            if (r && r.state === supervisor.STATE.WAITING_FOR_USER) pushStatus('\uD83D\uDD11 Complete mwinit in the terminal to finish sign-in\u2026');
+            else pushStatus('\u26A0\uFE0F Midway session not verified\u2014' + ((r && r.reason) || 'will auto-retry'));
           }
-          logger.info('[startup] mwinit complete \u2014 loading AAP');
-          pushStatus('\u2705 Midway auth complete \u2014 loading AAP...');
         } catch (e) {
-          logger.error('[startup] mwinit failed:', e.message);
-          pushError('\u26A0\uFE0F mwinit failed: ' + e.message + ' \u2014 try running mwinit -f in a terminal');
+          logger.error('[startup] supervisor ensureHealthy failed: ' + e.message);
+          pushError('\u26A0\uFE0F Auth check failed: ' + e.message + ' \u2014 try running mwinit -f in a terminal');
         }
       } else {
-        logger.info('[startup] Cookies valid (' + state.count + ' cookies, expires in ' +
-          (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ', aea=' +
-          (state.aeaExpiresInMin === null ? 'expired/missing' : state.aeaExpiresInMin + 'min') + ')');
-        // Push session status to renderer immediately so the auth badge is green on startup
-        send('auth:mwinit-status', { ok: true, expiresInMin: state.expiresInMin });
-        // PROACTIVE SILENT AEA REFRESH (2026-10-10): the ~24h session is valid,
-        // but AAP enforces the short-lived AEA token server-side. If AEA has
-        // lapsed (aeaExpiresInMin === null) or is near expiry, loading AAP now
-        // would bounce into the SSO redirect loop and (historically) trigger an
-        // interactive mwinit — the "doesn't last 20h, re-auth every ~2h" bug.
-        // Re-mint AEA SILENTLY (Midway OIDC handshake, no WebAuthn tap) BEFORE
-        // loading AAP so the first load is clean and no prompt appears.
-        const aeaStale = (state.aeaExpiresInMin === null) || (state.aeaExpiresInMin < 45);
-        if (aeaStale) {
-          try {
-            const { refreshAeaSilently } = _getAuth();
-            logger.info('[startup] AEA stale (' + (state.aeaExpiresInMin === null ? 'expired/missing' : state.aeaExpiresInMin + 'min') + ') \u2014 silent refresh before loading AAP (no prompt)');
-            pushStatus('\uD83D\uDD04 Refreshing Midway session silently\u2026');
-            const r = await refreshAeaSilently();
-            logger.info('[startup] Startup silent AEA refresh: ok=' + r.ok + (r.aeaMin != null ? ' (AEA now ' + r.aeaMin + 'min)' : ''));
-            if (r.ok) { pushStatus('\u2705 Midway session ready'); }
-            else {
-              // RUNG A (2026-10-17): the silent OIDC handshake couldn't re-mint
-              // AEA (the app's isolated session can't complete the AEA posture
-              // check). Escalate to `mwinit --refresh-aea`, which re-mints JUST
-              // the AEA cookie into ~/.midway/cookie using the live session —
-              // usually with NO WebAuthn tap. This is the exact fix for the
-              // "session valid, AEA missing" state and avoids a full re-auth.
-              logger.info('[startup] silent AEA refresh failed \u2014 trying `mwinit --refresh-aea` (AEA-only)');
-              pushStatus('\uD83D\uDD04 Refreshing AAP enterprise-access cookie\u2026');
-              try {
-                const { refreshAeaViaMwinit, injectCookies } = _getAuth();
-                const ra = await refreshAeaViaMwinit();
-                if (ra && ra.ok) { try { await injectCookies(undefined, { skipAea: true }); } catch (_) {} try { await injectCookies(); } catch (_) {} pushStatus('\u2705 AAP enterprise-access refreshed'); }
-                else { logger.warn('[startup] `mwinit --refresh-aea` did not produce AEA \u2014 a full mwinit may be needed on first load'); }
-              } catch (e2) { logger.warn('[startup] mwinit --refresh-aea failed (non-fatal): ' + e2.message); }
-            }
-          } catch (e) {
-            logger.warn('[startup] Startup silent AEA refresh failed (non-fatal): ' + e.message);
-          }
+        // FALLBACK (supervisor unavailable): minimal legacy behavior.
+        const { runMwinit, injectCookies } = _getAuth();
+        if (!state.ok) {
+          pushStatus('\uD83D\uDD11 Midway session expired \u2014 complete auth in the terminal window...');
+          try { await runMwinit(); await injectCookies(); pushStatus('\u2705 Midway auth complete'); }
+          catch (e) { pushError('\u26A0\uFE0F mwinit failed: ' + e.message + ' \u2014 try running mwinit -f in a terminal'); }
+        } else {
+          send('auth:mwinit-status', { ok: true, expiresInMin: state.expiresInMin });
         }
       }
 
@@ -1522,65 +1501,40 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
           _mwinitRunning = true;
           clearInterval(_authPoller);
           logger.warn('[auth-poll] SSO redirect loop detected');
+          logger.warn('[auth-poll] SSO redirect loop \u2014 delegating to the ONE auth supervisor');
+          pushStatus('\uD83D\uDD04 Resolving Midway session\u2026');
           try {
-            // FIX (2026-10-10): an SSO loop is MOST OFTEN just an expired
-            // short-lived AEA token while the ~24h session cookie is still
-            // valid — NOT a dead session. Historically this path jumped
-            // straight to interactive mwinit (a WebAuthn tap) on EVERY loop,
-            // which is exactly why a single auth "didn't last 20h": every time
-            // AEA lapsed (~2-6h) the user got prompted again. Try the SILENT
-            // AEA re-mint FIRST (Midway OIDC handshake, no tap). If it lands on
-            // AAP, the session was fine — reload AAP and carry on with NO
-            // prompt. Only if the silent refresh fails (session genuinely dead)
-            // do we fall through to the interactive mwinit ladder below.
-            const { refreshAeaSilently } = _getAuth();
-            pushStatus('\uD83D\uDD04 Refreshing Midway session silently\u2026');
-            const silent = await refreshAeaSilently();
-            if (silent && silent.ok) {
-              logger.info('[auth-poll] SSO loop resolved by SILENT AEA refresh (no prompt) \u2014 reloading AAP');
-              pushStatus('\u2705 Session refreshed \u2014 no sign-in needed');
-              _ssoCount = 0;
-              _mwinitRunning = false;
-              mainWindow.loadURL(startUrl);
-              return;
-            }
-            logger.warn('[auth-poll] Silent AEA refresh did not resolve the loop \u2014 session genuinely expired, launching mwinit');
-          } catch (e) {
-            logger.warn('[auth-poll] Silent AEA refresh threw (' + e.message + ') \u2014 falling back to mwinit');
-          }
-          logger.warn('[auth-poll] SSO redirect loop \u2014 escalating via centralized recovery ladder');
-          pushStatus('\uD83D\uDD11 Resolving Midway session\u2026');
-          try {
-            // Route through the ONE centralized ladder (auth.recoverAuth): it
-            // re-checks offline/VPN, tries the silent AEA refresh again, and only
-            // prompts mwinit as the true last rung — then verifies via probe +
-            // relay before we reload AAP. This replaces the hand-rolled
-            // runMwinit -> probe -> mwinit -f -> relay sequence that used to live
-            // here (and diverged from the other callers' copies of it). If
-            // recoverAuth is unavailable for any reason, fall back to the old
-            // explicit sequence so this path can never silently do nothing.
-            const _auth = _getAuth();
-            if (_auth.recoverAuth) {
-              const res = await _auth.recoverAuth('auth-poll:sso-loop');
-              if (res && res.recovered) {
-                logger.info('[auth-poll] recovered via ladder (rung=' + res.rung + ') \u2014 reloading AAP');
-                pushStatus(res.prompted ? '\u2705 Midway auth complete \u2014 reloading AAP...' : '\u2705 Session refreshed \u2014 reloading AAP...');
-                mainWindow.loadURL(startUrl);
-              } else {
-                logger.warn('[auth-poll] ladder did not recover (rung=' + (res && res.rung) + ') \u2014 will retry on next poll');
-                if (res && res.rung === 'offline') pushStatus('\uD83D\uDCF6 Offline \u2014 will resume when the connection returns');
-              }
+            // Delegate to the supervisor (spec #18): it runs the verified ladder
+            // (silent AEA → mwinit --refresh-aea → AEA-agent self-heal →
+            // interactive mwinit only if the session is truly dead), VERIFIES
+            // against the real AAP target, and arms a bounded auto-retry on
+            // failure. Replaces the hand-rolled silent-refresh + recoverAuth +
+            // explicit-mwinit sequence that used to live here. Falls back to the
+            // centralized recoverAuth ladder if the supervisor is unavailable.
+            const supervisor = _getAuthSupervisor();
+            let recovered = false, prompted = false, offline = false, stateReason = '';
+            if (supervisor && typeof supervisor.ensureHealthyConverging === 'function') {
+              const r = await supervisor.ensureHealthyConverging({ reason: 'auth-poll:sso-loop', allowPrompt: true });
+              recovered = !!(r && r.ok && r.verified);
+              prompted = !!(r && r.prompted);
+              offline = !!(r && r.state === supervisor.STATE.OFFLINE);
+              stateReason = (r && (r.reason || r.state)) || '';
             } else {
-              const { runMwinit, injectCookies, probeSession, pingRelayEndpoint } = _auth;
-              await runMwinit();
-              await injectCookies();
-              let pageOk = await probeSession();
-              if (!pageOk) { await runMwinit(true); await injectCookies(); pageOk = await probeSession(); }
-              if (!pageOk) throw new Error('AAP rejected session after mwinit -f -- check VPN/network and restart');
-              let relayOk = await pingRelayEndpoint();
-              if (!relayOk) { await injectCookies(); relayOk = await pingRelayEndpoint(); }
-              if (!relayOk) throw new Error('AAP relay rejected session -- try restarting the app');
+              const _auth = _getAuth();
+              const res = _auth.recoverAuth ? await _auth.recoverAuth('auth-poll:sso-loop') : { recovered: false };
+              recovered = !!(res && res.recovered); prompted = !!(res && res.prompted); offline = (res && res.rung === 'offline');
+            }
+            try { require('../scrapers/aap_api').dispose(); } catch (_) {}
+            if (recovered) {
+              logger.info('[auth-poll] supervisor recovered the SSO loop \u2014 reloading AAP');
+              pushStatus(prompted ? '\u2705 Midway auth complete \u2014 reloading AAP...' : '\u2705 Session refreshed \u2014 reloading AAP...');
+              _ssoCount = 0;
               mainWindow.loadURL(startUrl);
+            } else if (offline) {
+              pushStatus('\uD83D\uDCF6 Offline \u2014 will resume when the connection returns');
+            } else {
+              logger.warn('[auth-poll] supervisor did not recover (' + stateReason + ') \u2014 bounded auto-retry armed');
+              pushStatus('\u26A0\uFE0F Midway session not verified \u2014 auto-retrying\u2026');
             }
           } catch (e) {
             logger.error('[auth-poll] recovery failed:', e.message);
