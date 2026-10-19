@@ -82,6 +82,29 @@ function _divergence(a, b) {
   return union ? 1 - inter / union : 0;
 }
 
+// EFFECTIVE THREAD TARGET (spec #6): translate the agent's semantic
+// replyPlacement into the Slack threadTs to send with.
+//   - 'thread'    → reply in a thread: continue the existing thread if the
+//                   inbound was already threaded, else START one from this
+//                   message's ts (so a specific channel question gets a thread
+//                   instead of noise in the main channel).
+//   - 'top_level' → channel-wide: force NO thread (undefined).
+//   - 'dm'        → a DM: keep the inbound thread if it was a DM thread reply,
+//                   else top-level of the DM.
+//   - default/none/unknown → preserve the inbound threadTs (backward compatible
+//                   with the pre-placement behavior).
+// `input` carries { threadTs, ts, isGroup }.
+function _threadTsForPlacement(placement, input) {
+  const inThread = input && input.threadTs ? input.threadTs : null;
+  const ts = input && input.ts ? input.ts : null;
+  switch (placement) {
+    case 'top_level': return undefined;                 // explicit channel-wide
+    case 'thread':    return inThread || ts || undefined; // continue or start a thread
+    case 'dm':        return inThread || undefined;       // DM: keep its thread if any
+    default:          return inThread || undefined;       // backward compatible
+  }
+}
+
 // Does the decision propose any approval-level (mutating/outbound) action?
 function _hasApprovalLevelAction(decision) {
   if (!Array.isArray(decision.actions) || !decision.actions.length) return false;
@@ -169,6 +192,26 @@ async function handleInbound(input, deps) {
     return { mode, letLegacyReply: false, decision, outcome: 'manual-review', approvalId: item.id, failReason, actionOutcomes, audit };
   }
 
+  // Record the communication decision on the audit base (spec #5/#6/#66).
+  base.shouldReply = decision.shouldReply !== false;
+  base.replyPlacement = decision.replyPlacement || null;
+  base.audienceSensitivity = decision.audienceSensitivity || null;
+  base.reasonCode = decision.reasonCode || null;
+
+  // ── SILENCE GATE (spec #4/#5/#22/#23/#59): when FAS is PRIMARY and it
+  // decided a human in its role would NOT speak here (shouldReply=false /
+  // placement=none), send nothing AND keep the legacy bot silent too — a quiet
+  // FAS must not be undercut by the legacy auto-reply blurting out. Does NOT
+  // apply in shadow/disabled (legacy owns that cycle; the field is recorded for
+  // evaluation only). Case memory is untouched (nothing was promised/sent).
+  const _fasSilent = decision.shouldReply === false || decision.replyPlacement === 'none';
+  if (_fasSilent && (mode === 'approval' || mode === 'autonomous')) {
+    const audit = { ...base, outcome: 'no-reply', reason: decision.reason || '', reasonCode: decision.reasonCode || 'NO_RESPONSE_NEEDED' };
+    _appendAudit(audit);
+    logger.info('[fas-runner] FAS chose silence (' + (decision.reasonCode || 'NO_RESPONSE_NEEDED') + ') for ' + (input.ts || '?') + ' — legacy suppressed');
+    return { mode, letLegacyReply: false, decision, outcome: 'no-reply', actionOutcomes, audit };
+  }
+
   // ── SHADOW: legacy replies; we only record the comparison. ────────────────
   if (mode === 'shadow') {
     const audit = { ...base, actualReply: input.actualReply || '',
@@ -235,10 +278,12 @@ async function handleInbound(input, deps) {
     // If a send path is available here, send now and commit ONLY on a confirmed
     // ts; on failure, queue a recoverable review item and commit nothing.
     const autoSend = (deps && deps.sendToChannel) || null;
+    // Effective thread target from the agent's semantic placement (spec #6).
+    const _effThreadTs = _threadTsForPlacement(decision.replyPlacement, input);
     if (autoSend) {
       const tagged = (input.slackId ? '<@' + input.slackId + '> ' : '') + decision.reply;
       let sr;
-      try { sr = await autoSend(input.channelId, tagged, input.threadTs || undefined); }
+      try { sr = await autoSend(input.channelId, tagged, _effThreadTs); }
       catch (e) { sr = null; decision._sendError = e.message; }
       if (sr && sr.ts) {
         const audit = { ...base, outcome: 'auto-sent', actionOutcomes: execRes.outcomes, sentTs: sr.ts };
@@ -257,7 +302,11 @@ async function handleInbound(input, deps) {
     // confirmAutonomousSend() ONLY after Slack confirms — NOT here.
     const audit = { ...base, outcome: 'auto-sent-pending-delivery', actionOutcomes: execRes.outcomes };
     _appendAudit(audit);
-    return { mode, letLegacyReply: false, fasReply: decision.reply, decision, outcome: 'auto-sent', _pendingCaseCommit: true, actionOutcomes: execRes.outcomes, audit };
+    // Surface the effective thread target + placement so the DM/channel caller
+    // sends in the right place (thread vs top-level) — spec #6.
+    return { mode, letLegacyReply: false, fasReply: decision.reply, fasThreadTs: _effThreadTs,
+      replyPlacement: decision.replyPlacement, decision, outcome: 'auto-sent',
+      _pendingCaseCommit: true, actionOutcomes: execRes.outcomes, audit };
   }
 
   const item = _queueReply(input, decision);
@@ -314,7 +363,12 @@ function _queueReply(input, decision, extra) {
     engine: input.engine || 'dm',
     channelId: input.channelId || '',
     channelName: input.channelName || '',
-    threadTs: input.threadTs || null,
+    // Thread target derives from the agent's semantic replyPlacement (spec #6)
+    // so an approved reply lands where a human would put it (thread vs
+    // top-level), not just wherever the inbound happened to be. Falls back to
+    // the inbound threadTs when placement is absent (backward compatible).
+    threadTs: (_threadTsForPlacement(decision.replyPlacement, input) ?? (input.threadTs || null)) || null,
+    replyPlacement: decision.replyPlacement || null,
     ts: input.ts || '',
     slackId: input.slackId || '',
     senderName: input.senderName || '',

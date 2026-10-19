@@ -1246,6 +1246,17 @@ async function pollDMAutoReplyOnce(log) {
               _markRetry(msg.ts);
               inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'retry', reason: inbound.REASON.SEND_FAILED_RETRY });
               continue;
+            } else if (_fr && _fr.outcome === 'no-reply') {
+              // FAS decided a human in its role would NOT reply here (spec
+              // #4/#5). This is a TERMINAL, deliberate silence — nothing queued,
+              // nothing sent, and legacy must stay silent too. Mark the claim
+              // delivered-as-silence so no retry/legacy path resurrects it.
+              if (_inboundClaim && _claimKey) _inboundClaim.markDelivered(_claimKey, 'no-reply:' + ((_fr.decision && _fr.decision.reasonCode) || 'NO_RESPONSE_NEEDED'));
+              _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
+                ts: msg.ts, replyTs: null, question: msg.text, reply: '(FAS chose silence: ' + ((_fr.decision && _fr.decision.reasonCode) || 'NO_RESPONSE_NEEDED') + ')',
+                inScope: true, category: null, title: 'FAS no-reply', createdAt: new Date().toISOString(), status: 'fas-no-reply' });
+              doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) chose silence for ${msg.ts} (${(_fr.decision && _fr.decision.reasonCode) || 'NO_RESPONSE_NEEDED'}) — legacy suppressed`);
+              inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'sent', reason: inbound.REASON.SENT, detail: 'no-reply' });
             } else {
               // Queued for approval, manual-review (AI failure), or clarify. FAS
               // RETAINS ownership of the durable claim (legacy must never take a

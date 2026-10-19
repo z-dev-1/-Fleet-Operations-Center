@@ -1101,6 +1101,15 @@ async function pollChannelsOnce(log) {
               _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
                 replyTs: _fr.sent.ts, question: msg.text, reply: _txt, wasMentioned: mentioned,
                 inScope: true, category: null, title: 'FAS autonomous channel reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
+            } else if (_fr && _fr.outcome === 'no-reply') {
+              // FAS decided a human in its role would NOT speak up in this
+              // channel message (spec #4/#5/#22/#23) — deliberate silence.
+              // Terminal: watermark advances (below), nothing sent, legacy
+              // suppressed. This is the "don't behave like a noisy bot" path.
+              _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
+                replyTs: null, question: msg.text, reply: '(FAS chose silence: ' + ((_fr.decision && _fr.decision.reasonCode) || 'NO_RESPONSE_NEEDED') + ')',
+                wasMentioned: mentioned, inScope: true, category: null, title: 'FAS no-reply', createdAt: new Date().toISOString(), status: 'fas-no-reply' });
+              doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) chose silence for ${msg.ts} (${(_fr.decision && _fr.decision.reasonCode) || 'NO_RESPONSE_NEEDED'}) — legacy suppressed`);
             } else {
               // Queued for approval, manual-review (AI failure), or clarify.
               _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,

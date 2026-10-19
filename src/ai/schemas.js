@@ -21,6 +21,20 @@
 // agent.js exactly so a FAS decision validates unchanged.
 const DECISION_TYPES = ['answer', 'research_more', 'act', 'clarify', 'escalate'];
 
+// Communication-decision enums (spec #5/#6/#67). OPTIONAL fields — validated
+// for enum correctness only WHEN present, never required, so a decision that
+// predates them (or omits them) still validates. Kept in sync with
+// orcha/fas/agent.js (the source of truth for the agent's output).
+const REPLY_PLACEMENTS = ['dm', 'thread', 'top_level', 'none'];
+const AUDIENCE_SENSITIVITIES = ['internal', 'internal_external_mixed', 'external_partner', 'unknown'];
+const REASON_CODES = [
+  'DIRECT_MENTION', 'DIRECT_QUESTION', 'THREAD_CONTINUATION', 'ROLE_RELEVANT_REQUEST', 'ACTION_REQUEST',
+  'CORRECT_CRITICAL_INFO', 'GENERAL_CHANNEL_CHATTER', 'DIRECTED_TO_OTHER_PERSON', 'ANSWER_ALREADY_PROVIDED',
+  'NO_RESPONSE_NEEDED', 'INSUFFICIENT_AUDIENCE_PERMISSION', 'MANUAL_REPLY_ALREADY_SENT', 'DUPLICATE_MESSAGE',
+  'BOT_SELF_MESSAGE', 'AMBIGUOUS_REQUIRES_CLARIFICATION', 'INFORMATION_FEED_INGEST_ONLY',
+  'URL_RESEARCH_REQUIRED', 'ATTACHMENT_RESEARCH_REQUIRED',
+];
+
 // Canonical AiCore decision schema (documentation + validation reference). This
 // is the "main decision schema" from spec #7, expressed over the FIELDS the FAS
 // agent already returns. Extra underscore-prefixed fields (_evidence, _loop,
@@ -88,6 +102,21 @@ function validateDecision(obj) {
     const r = _validateToolCall(tc); if (!r.ok) errors.push('actions[' + i + ']: ' + r.error);
   });
   if (obj.followUp != null && !_isPlainObject(obj.followUp)) errors.push('followUp must be an object');
+  // Communication-decision fields — OPTIONAL; enum-checked only when present.
+  if (obj.shouldReply != null && typeof obj.shouldReply !== 'boolean') errors.push('shouldReply must be a boolean');
+  if (obj.replyPlacement != null && !REPLY_PLACEMENTS.includes(obj.replyPlacement)) {
+    errors.push('replyPlacement must be one of ' + REPLY_PLACEMENTS.join(', '));
+  }
+  if (obj.audienceSensitivity != null && !AUDIENCE_SENSITIVITIES.includes(obj.audienceSensitivity)) {
+    errors.push('audienceSensitivity must be one of ' + AUDIENCE_SENSITIVITIES.join(', '));
+  }
+  if (obj.reasonCode != null && !REASON_CODES.includes(obj.reasonCode)) {
+    errors.push('reasonCode must be one of the defined reason codes');
+  }
+  // Consistency: a false shouldReply or 'none' placement must agree.
+  if (obj.shouldReply === false && obj.replyPlacement != null && obj.replyPlacement !== 'none') {
+    errors.push('replyPlacement must be "none" when shouldReply is false');
+  }
 
   return errors.length ? { ok: false, errors } : { ok: true, decision: obj };
 }
@@ -132,6 +161,14 @@ function repairDecision(obj) {
   if (out.research != null) out.research = clean(out.research);
   if (out.actions != null) out.actions = clean(out.actions);
   if (out.followUp != null && !_isPlainObject(out.followUp)) { out.followUp = { required: false }; repaired = true; }
+  // Communication fields: drop bad enum values (defaults get re-applied by the
+  // agent's _normalizeCommunication), and reconcile an inconsistent pair rather
+  // than fail. Conservative: an invalid placement with shouldReply:false -> none.
+  if (out.shouldReply != null && typeof out.shouldReply !== 'boolean') { delete out.shouldReply; repaired = true; }
+  if (out.replyPlacement != null && !REPLY_PLACEMENTS.includes(out.replyPlacement)) { delete out.replyPlacement; repaired = true; }
+  if (out.audienceSensitivity != null && !AUDIENCE_SENSITIVITIES.includes(out.audienceSensitivity)) { delete out.audienceSensitivity; repaired = true; }
+  if (out.reasonCode != null && !REASON_CODES.includes(out.reasonCode)) { delete out.reasonCode; repaired = true; }
+  if (out.shouldReply === false && out.replyPlacement != null && out.replyPlacement !== 'none') { out.replyPlacement = 'none'; repaired = true; }
 
   const v = validateDecision(out);
   // A usable decision needs a real terminal reply (research_more is not terminal).

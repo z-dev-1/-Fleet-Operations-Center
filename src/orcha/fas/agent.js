@@ -67,10 +67,92 @@ const DECISION_CONTRACT =
   '- When you have enough (or evidence is missing/stale/conflicting and cannot be resolved), give a FINAL decision:\n' +
   '  "answer" (routine sourced reply), "act" (propose a mutating action for approval), "clarify" (ask ONE question), or "escalate".\n' +
   '- Mutating actions go in "actions" (NOT "research"); they are executed & verified separately, never by you.\n\n' +
+  // ── COMMUNICATION DECISION (human relevance + placement; spec #4/#5/#6) ────
+  'COMMUNICATION DECISION — decide like an experienced human FAS who is PRESENT in this conversation,\n' +
+  'not a bot that answers everything. Set these fields on your FINAL decision:\n' +
+  '- "shouldReply": true ONLY if a competent human in your role would actually speak up here. Set FALSE for:\n' +
+  '  casual chatter between other people, messages clearly directed at someone else, pure announcements needing\n' +
+  '  no response, or a question another person already answered correctly. In a DM to you, shouldReply is\n' +
+  '  normally true. Observing a message is NOT a reason to reply.\n' +
+  '- "replyPlacement": where a human would put the response:\n' +
+  '  "dm" (direct message), "thread" (reply inside an existing/!new thread — the usual choice for a specific\n' +
+  '  question or ongoing discussion in a channel), "top_level" (a channel-wide announcement/correction that\n' +
+  '  everyone needs to see), or "none" (say nothing). If shouldReply is false, replyPlacement MUST be "none".\n' +
+  '  In a DM, use "dm". Do NOT blindly thread everything, and do NOT blindly post top-level.\n' +
+  '- "audienceSensitivity": who can SEE this response — "internal" (Amazon only), "external_partner" (a carrier/\n' +
+  '  vendor or Slack Connect participant can see it), "internal_external_mixed" (both internal and external people\n' +
+  '  are present), or "unknown". When external or mixed, never expose internal-only data even if the asker is internal.\n' +
+  '- "reasonCode": ONE machine code for WHY you are replying or staying silent, from exactly this set:\n' +
+  '  DIRECT_MENTION, DIRECT_QUESTION, THREAD_CONTINUATION, ROLE_RELEVANT_REQUEST, ACTION_REQUEST,\n' +
+  '  CORRECT_CRITICAL_INFO, GENERAL_CHANNEL_CHATTER, DIRECTED_TO_OTHER_PERSON, ANSWER_ALREADY_PROVIDED,\n' +
+  '  NO_RESPONSE_NEEDED, INSUFFICIENT_AUDIENCE_PERMISSION, AMBIGUOUS_REQUIRES_CLARIFICATION,\n' +
+  '  INFORMATION_FEED_INGEST_ONLY, URL_RESEARCH_REQUIRED, ATTACHMENT_RESEARCH_REQUIRED.\n' +
+  'If you choose a silent reasonCode (GENERAL_CHANNEL_CHATTER, DIRECTED_TO_OTHER_PERSON, ANSWER_ALREADY_PROVIDED,\n' +
+  'NO_RESPONSE_NEEDED, INFORMATION_FEED_INGEST_ONLY) then shouldReply MUST be false and replyPlacement "none".\n\n' +
   'Respond with ONE valid JSON object only, no text before or after:\n' +
   '{"decision":"answer|research_more|act|clarify|escalate","confidence":0.0,"reason":"brief operational reason",' +
+  '"shouldReply":true,"replyPlacement":"dm|thread|top_level|none","audienceSensitivity":"internal|internal_external_mixed|external_partner|unknown","reasonCode":"DIRECT_QUESTION",' +
   '"research":[{"tool":"NAME","args":{}}],"actions":[{"tool":"NAME","args":{}}],' +
   '"reply":"the exact Slack message to send as Zila","followUp":{"required":false,"owner":"","dueAt":null}}';
+
+// Allowed enums for the communication-decision fields (spec #5/#6/#67). Kept
+// here so the parser and the schema validator agree on one source of truth.
+const REPLY_PLACEMENTS = ['dm', 'thread', 'top_level', 'none'];
+const AUDIENCE_SENSITIVITIES = ['internal', 'internal_external_mixed', 'external_partner', 'unknown'];
+const REASON_CODES = [
+  'DIRECT_MENTION', 'DIRECT_QUESTION', 'THREAD_CONTINUATION', 'ROLE_RELEVANT_REQUEST', 'ACTION_REQUEST',
+  'CORRECT_CRITICAL_INFO', 'GENERAL_CHANNEL_CHATTER', 'DIRECTED_TO_OTHER_PERSON', 'ANSWER_ALREADY_PROVIDED',
+  'NO_RESPONSE_NEEDED', 'INSUFFICIENT_AUDIENCE_PERMISSION', 'MANUAL_REPLY_ALREADY_SENT', 'DUPLICATE_MESSAGE',
+  'BOT_SELF_MESSAGE', 'AMBIGUOUS_REQUIRES_CLARIFICATION', 'INFORMATION_FEED_INGEST_ONLY',
+  'URL_RESEARCH_REQUIRED', 'ATTACHMENT_RESEARCH_REQUIRED',
+];
+// Reason codes that MEAN silence — if the model gives one of these, we force
+// shouldReply=false / placement=none regardless of what else it said.
+const SILENT_REASON_CODES = new Set([
+  'GENERAL_CHANNEL_CHATTER', 'DIRECTED_TO_OTHER_PERSON', 'ANSWER_ALREADY_PROVIDED', 'NO_RESPONSE_NEEDED',
+  'INSUFFICIENT_AUDIENCE_PERMISSION', 'MANUAL_REPLY_ALREADY_SENT', 'DUPLICATE_MESSAGE', 'BOT_SELF_MESSAGE',
+  'INFORMATION_FEED_INGEST_ONLY',
+]);
+
+/**
+ * Normalize + reconcile the communication-decision fields into a consistent
+ * shape, defaulting sensibly for DMs vs groups and keeping shouldReply /
+ * replyPlacement / reasonCode mutually consistent. Additive: a decision that
+ * omits these still gets safe defaults (DM → reply in dm; group → reply in
+ * thread), so existing behavior/tests are preserved.
+ */
+function _normalizeCommunication(p, isGroup, isSelf) {
+  const out = {};
+  // shouldReply: honor explicit boolean; otherwise default by surface/decision.
+  let shouldReply = typeof p.shouldReply === 'boolean' ? p.shouldReply : undefined;
+  let placement = REPLY_PLACEMENTS.includes(p.replyPlacement) ? p.replyPlacement : undefined;
+  let reasonCode = REASON_CODES.includes(p.reasonCode) ? p.reasonCode : undefined;
+  const audience = AUDIENCE_SENSITIVITIES.includes(p.audienceSensitivity) ? p.audienceSensitivity : 'unknown';
+
+  // A silent reason code is authoritative for silence.
+  if (reasonCode && SILENT_REASON_CODES.has(reasonCode)) { shouldReply = false; placement = 'none'; }
+  // placement:none implies silence; shouldReply:false implies placement none.
+  if (placement === 'none') shouldReply = false;
+  if (shouldReply === false) placement = 'none';
+
+  // Defaults when the model didn't specify (backward compatible).
+  if (shouldReply === undefined) {
+    // Default: reply in DM/self-DM; in a group, reply unless it's a non-answer
+    // we have nothing to send for. (The runner still gates sending by mode.)
+    shouldReply = true;
+  }
+  if (placement === undefined) {
+    placement = shouldReply ? (isGroup && !isSelf ? 'thread' : 'dm') : 'none';
+  }
+  if (reasonCode === undefined) {
+    reasonCode = shouldReply ? (isGroup ? 'ROLE_RELEVANT_REQUEST' : 'DIRECT_QUESTION') : 'NO_RESPONSE_NEEDED';
+  }
+  out.shouldReply = shouldReply;
+  out.replyPlacement = placement;
+  out.audienceSensitivity = audience;
+  out.reasonCode = reasonCode;
+  return out;
+}
 
 function _factsToText(facts) {
   // Newest first + surface conflicts/holds first so budget trimming keeps them.
@@ -127,6 +209,13 @@ function _parseDecision(raw, evidence) {
       decision: ['answer', 'research_more', 'act', 'clarify', 'escalate'].includes(p.decision) ? p.decision : 'answer',
       confidence: typeof p.confidence === 'number' ? p.confidence : 0.5,
       reason: String(p.reason || '').slice(0, 300),
+      // Communication-decision fields (spec #5/#6). Carried through RAW here and
+      // normalized/defaulted once on the terminal decision in runAgent (so the
+      // review pass can't desync them). Absent -> undefined (defaults applied later).
+      shouldReply: typeof p.shouldReply === 'boolean' ? p.shouldReply : undefined,
+      replyPlacement: REPLY_PLACEMENTS.includes(p.replyPlacement) ? p.replyPlacement : undefined,
+      audienceSensitivity: AUDIENCE_SENSITIVITIES.includes(p.audienceSensitivity) ? p.audienceSensitivity : undefined,
+      reasonCode: REASON_CODES.includes(p.reasonCode) ? p.reasonCode : undefined,
       research: Array.isArray(p.research) ? p.research.slice(0, 8) : [],
       actions: Array.isArray(p.actions) ? p.actions.slice(0, 8) : [],
       reply: p.reply,
@@ -480,6 +569,17 @@ async function runAgent(input) {
       decision = await _reviewAndRefine(decision, cfg, profile, evidence, extraResearch, controller);
     }
 
+    // COMMUNICATION DECISION (spec #5/#6): normalize shouldReply / replyPlacement
+    // / audienceSensitivity / reasonCode into a consistent shape with sensible
+    // surface defaults. Done AFTER the review pass so a refined reply keeps the
+    // same placement. A clarify/escalate still replies (it asks/raises) — only
+    // an explicit silent decision suppresses the reply.
+    const _comm = _normalizeCommunication(decision, !!input.isGroup, !!input.isSelf);
+    decision.shouldReply = _comm.shouldReply;
+    decision.replyPlacement = _comm.replyPlacement;
+    decision.audienceSensitivity = _comm.audienceSensitivity;
+    decision.reasonCode = _comm.reasonCode;
+
     decision._evidence = evidence;
     decision._profile = { slackId: profile.slackId, name: profile.name, type: profile.type };
     decision._mode = cfg.mode;
@@ -508,4 +608,8 @@ async function runAgent(input) {
   }
 }
 
-module.exports = { runAgent, _parseDecision, _execResearch, SAFETY_RULES };
+module.exports = {
+  runAgent, _parseDecision, _execResearch, SAFETY_RULES,
+  _normalizeCommunication,
+  REPLY_PLACEMENTS, AUDIENCE_SENSITIVITIES, REASON_CODES, SILENT_REASON_CODES,
+};

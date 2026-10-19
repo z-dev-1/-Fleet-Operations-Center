@@ -303,6 +303,11 @@ function _toStructuredDecision(d, request, validated) {
   return {
     intent: _intentFrom(d),              // derived label; underlying value is d.decision
     decision: d && d.decision,           // FAS terminal decision (answer/act/clarify/escalate)
+    // Communication decision (spec #5/#6): human relevance + placement + audience.
+    shouldReply: d && typeof d.shouldReply === 'boolean' ? d.shouldReply : true,
+    replyPlacement: (d && d.replyPlacement) || null,
+    audienceSensitivity: (d && d.audienceSensitivity) || null,
+    reasonCode: (d && d.reasonCode) || null,
     entities,
     // Relevant durable memory (spec #4), retrieved ONLY for the resolved
     // entities. Advisory context surfaced on the result; operator-confirmed
