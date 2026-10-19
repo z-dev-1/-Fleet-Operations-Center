@@ -1786,6 +1786,34 @@ async function createWorkOrder(opts = {}) {
 //
 // Returns { ok:true, resp, corrections[] } or
 //         { ok:false, stuckField, aapMessage, corrections[], error, raw }.
+// Recognize AAP BUSINESS-RULE rejections — legitimate "can't do that" 400s that
+// are NOT body/field errors and must NOT be retried or framed as "stuck". Returns
+// { reason, message } (a clean user-facing message) or null if not a known rule.
+function _classifyCreateBusinessError(msg) {
+  const m = String(msg || '');
+  // Duplicate open WR against the same asset+vendor (confirmed live 2026-10-19):
+  //   "There are existing open DAMAGE work requests against this asset: <aaid>
+  //    and vendor: <V>, that prevents opening a new request"
+  if (/existing open .*work requests? against this asset/i.test(m)) {
+    const vm = m.match(/vendor:\s*([A-Za-z0-9_\- ]+?)(?:,|\s+that|\s*$)/i);
+    const vendor = vm ? vm[1].trim() : '';
+    return {
+      reason: 'duplicate-open-wr',
+      message: 'This unit already has an OPEN work request' + (vendor ? ' with vendor ' + vendor : '') +
+        '. AAP will not open a second one until that WR is closed or cancelled. Open the existing WR instead of creating a new one.',
+    };
+  }
+  // Asset not eligible / wrong lifecycle for a WR.
+  if (/asset is not (eligible|available)|cannot create .*for an? (active|retired|disposed)/i.test(m)) {
+    return { reason: 'asset-ineligible', message: 'AAP will not accept a work request for this asset in its current state: ' + m.replace(/^AAP API \d+:\s*/, '').slice(0, 220) };
+  }
+  // Vendor not enabled for WR creation.
+  if (/vendor .*(not enabled|not eligible|does not support).*work request/i.test(m)) {
+    return { reason: 'vendor-not-wr-enabled', message: 'The selected vendor is not enabled for work-request creation in AAP. Pick a different vendor.' };
+  }
+  return null;
+}
+
 const _CREATE_HEAL_MAX = 4;
 async function _postCreateRepairWithHealing(body, ctx) {
   ctx = ctx || {};
@@ -1831,6 +1859,16 @@ async function _postCreateRepairWithHealing(body, ctx) {
           ok: false, stuckField: 'vendor', aapMessage: msg.slice(0, 600), corrections,
           error: 'Vendor code "' + badCode + '" is not a valid AAP vendor. It was not found in the live vendor-config list — pick the vendor from the dropdown (which is sourced from AAP) rather than typing it.',
         };
+      }
+
+      // AAP BUSINESS RULES — not a body/field problem and NOT self-fixable.
+      // These are legitimate "no, you can't do that" responses from AAP. Surface
+      // a clean, plain-English message (NOT "stuck at /createRepair ... could not
+      // be mapped to a field", which makes a normal rule look like a crash).
+      const biz = _classifyCreateBusinessError(msg);
+      if (biz) {
+        logger.info('[create-heal] AAP business rule (not a bug): ' + biz.reason);
+        return { ok: false, businessRule: true, stuckField: null, aapMessage: msg.slice(0, 600), corrections, error: biz.message };
       }
 
       const field = _parseAapErrorField(msg);
@@ -2239,17 +2277,58 @@ async function associateDocument(opts = {}) {
   return apiPost(DOC_ASSOCIATE_PATH, body);
 }
 
+// PRIMARY attachment path — POST /updateWorkRequest { workRequestId, images:[dataUrl] }.
+// This is the SERVER-SIDE path the proven wizard flow used (aap_create_wr.js
+// STEP 3): AAP accepts the base64 data URLs directly and stores them, no
+// presigned-S3 PUT and no browser-cross-origin upload. The newer doc/uploadLink
+// → S3 PUT path was leaving every documentStatuses entry at
+// {uploadComplete:false} (confirmed live 2026-10-19 across 40 WRs — the S3 PUT
+// never completed), so this is the reliable path. images is the array of
+// "data:<mime>;base64,<...>" strings.
+const UPDATE_WORK_REQUEST_PATH = '/api/v1/updateWorkRequest';
+async function updateWorkRequestImages(workRequestId, dataUrls) {
+  const images = (Array.isArray(dataUrls) ? dataUrls : []).filter((u) => typeof u === 'string' && u.startsWith('data:'));
+  if (!workRequestId || !images.length) return { ok: false, error: 'no workRequestId or images' };
+  const resp = await apiPost(UPDATE_WORK_REQUEST_PATH, { workRequestId, images });
+  return { ok: true, resp, count: images.length };
+}
+
 // High-level: upload a list of attachments to a just-created WR. Each attachment
 // is { name, dataUrl } (dataUrl = "data:<mime>;base64,<...>" as produced by the
 // WR modal's FileReader). Best-effort: failures are collected, not thrown, so a
-// bad attachment never sinks a successfully-created WR. Logs the first link
-// request+response so we can confirm the enum values live.
+// bad attachment never sinks a successfully-created WR.
+//
+// STRATEGY (2026-10-19): try the PROVEN server-side updateWorkRequest {images}
+// path FIRST (one call, no S3 PUT). Only if that fails fall back to the
+// presigned doc/uploadLink → S3 flow. This fixes attachments that were silently
+// not completing (documentStatuses stuck at uploadComplete:false).
 async function uploadWrAttachments(workRequestId, attachments, opts = {}) {
   const list = Array.isArray(attachments) ? attachments : [];
+
+  // PRIMARY: updateWorkRequest { images:[dataUrl...] }.
+  const dataUrls = list.map((a) => (a && (a.dataUrl || a))).filter((u) => typeof u === 'string' && u.startsWith('data:'));
+  if (dataUrls.length) {
+    try {
+      const r = await updateWorkRequestImages(workRequestId, dataUrls);
+      if (r && r.ok) {
+        logger.info('[doc-upload] attached ' + dataUrls.length + ' image(s) to WR ' + workRequestId + ' via updateWorkRequest (server-side, no S3)');
+        return list.map((a, i) => ({ name: (a && a.name) || ('attachment-' + (i + 1)), ok: true, via: 'updateWorkRequest' }));
+      }
+    } catch (e) {
+      logger.warn('[doc-upload] updateWorkRequest images path failed (' + e.message + ') — falling back to presigned S3 flow');
+    }
+  }
+
+  // FALLBACK: presigned doc/uploadLink → S3 PUT → associate.
   const out = [];
   let loggedShape = false;
   for (let i = 0; i < list.length; i++) {
-    const att = list[i] || {};
+    const raw = list[i];
+    // Accept BOTH shapes: a bare dataUrl STRING (what the WR modal actually
+    // sends — _attachments.map(a => a.dataUrl)) OR a { name, dataUrl } object.
+    // The old code only handled the object shape, so string dataURLs failed with
+    // "not a base64 data URL" (confirmed live 2026-10-19 on WR f85a6136).
+    const att = (typeof raw === 'string') ? { name: 'attachment-' + (i + 1), dataUrl: raw } : (raw || {});
     const name = att.name || ('attachment-' + (i + 1));
     try {
       // Parse the data URL → mime + raw bytes.
@@ -2306,6 +2385,7 @@ module.exports = {
   _setVendorListForTest,        // test seam: inject a vendor-config list
   _buildCreateRepairBody,       // exported: build the /createRepair body (yard/location mapping tests)
   vreRecommendMatrix,
+  updateWorkRequestImages,      // server-side attachment path (images[] data URLs)
   getDocumentUploadLink,
   uploadDocumentFile,
   associateDocument,

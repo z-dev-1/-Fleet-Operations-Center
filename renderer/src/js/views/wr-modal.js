@@ -1736,7 +1736,11 @@ async function _runAIAssist() {
   const make = unit.manufacturer || '';
   const site = unit.domicileSite || unit.site || '';
   const notes = (unit.savedNotes || '').substring(0, 500);
-  const uptake = _uptakeText(unit);
+  // Cap the Uptake insight text — a unit's full guidance can be thousands of
+  // chars and pushed the whole prompt past ai:ask's 32000-char limit (confirmed
+  // live: "use uptake data" → prompt 32027 → ConfigError → no fill). 2500 chars
+  // is plenty for the AI to summarize the insight into the WR.
+  const uptake = _uptakeText(unit).substring(0, 2500);
   
   // BUG FIX (2026-07-16): this .join(...) call's separator argument was NOT
   // '\n' -- it was corrupted into a huge string containing a large block of
@@ -1834,14 +1838,44 @@ async function _runAIAssist() {
     + 'vendor = the top-level company ONLY (e.g. "Gabrielli", "KWNE", "Allegiance and Ascendance", "COX") — NOT the location. vendorLocation = the branch/city the user named if any (e.g. "Rockaway", "Flemington", "Bristol", "NY/NJ") else "". The app maps vendorLocation to the preferred-supplier location and auto-picks the CLOSEST location when vendorLocation is empty.\n'
     + 'Set vendorIsOverride=true when YOU set vendor because the user named one (an override); false when vendor is empty (defer to AAP). areaPairs can have 1-4 pairs; empty [] for tow-only. urgent=true ONLY if the user literally said urgent. Remember: naming ANY specific dealer as destination = isTow=true (no "tow" keyword needed); "tow back"/"return" with no stated problem = tow-only (hasRepair=false, areaPairs=[]).';
 
+  // FINAL SAFETY CLAMP: ai:ask rejects prompts over 32000 chars (ConfigError →
+  // no fill). Keep a margin under that. If we're over, trim the LARGEST
+  // variable sections (vendor/domicile books + uptake text) rather than the
+  // rules, so the AI still gets the instructions + area list. Trim from the end
+  // of the context block, preserving the rules header and the JSON schema tail.
+  const AI_PROMPT_MAX = 31000;
+  let safePrompt = prompt;
+  if (safePrompt.length > AI_PROMPT_MAX) {
+    const over = safePrompt.length - AI_PROMPT_MAX;
+    // The big optional context blocks sit between the UNIT line and the RULES
+    // section; drop that middle chunk first (vendor/domicile/uptake context).
+    const rulesIdx = safePrompt.indexOf('\nRULES — READ CAREFULLY');
+    if (rulesIdx > 0) {
+      const head = safePrompt.slice(0, rulesIdx);
+      const tail = safePrompt.slice(rulesIdx);
+      const trimmedHead = head.length > over + 40 ? head.slice(0, head.length - over - 40) + '\n…(context trimmed to fit)\n' : head;
+      safePrompt = trimmedHead + tail;
+    }
+    // If still over (rules/area list themselves are huge), hard-clamp the end.
+    if (safePrompt.length > AI_PROMPT_MAX) safePrompt = safePrompt.slice(0, AI_PROMPT_MAX);
+    try { console.warn('[wr-modal] AI prompt clamped from ' + prompt.length + ' to ' + safePrompt.length + ' chars'); } catch (_) {}
+  }
+
   try {
     // Client-side timeout so a slow/stuck AI backend never leaves AI Fill
     // spinning (and never blocks the NEXT unit's fill). The main-process
     // ai:ask has its own hard timeout + slot release; this is the UI guard.
     const result = await Promise.race([
-      window.ai.ask(prompt),
+      window.ai.ask(safePrompt),
       new Promise((_, rej) => setTimeout(() => rej(new Error('AI Fill timed out — the AI service may be unavailable')), 95000)),
     ]);
+    // Explicit backend rejection (e.g. ai:ask ConfigError "prompt exceeds
+    // maximum length"): surface a clear message instead of a silent no-fill.
+    if (result && result.ok === false && result.error) {
+      try { console.error('[wr-modal] AI Fill backend error: ' + result.error + ' (code=' + (result.code || '?') + ')'); } catch (_) {}
+      toast.show('error', 'AI Fill: ' + result.error, 5000);
+      return;
+    }
     // Normalize the AI response to a STRING before parsing. window.ai.ask can
     // return a bare string, { text }, or (for some backends/inputs) an object
     // whose `text`/`content`/`message` is itself an object or where the JSON is
