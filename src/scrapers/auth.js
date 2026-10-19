@@ -1050,6 +1050,14 @@ async function recoverAuth(reason, opts) {
   opts = opts || {};
   const allowPrompt = opts.allowPrompt !== false;
   const label = reason || 'unspecified';
+  // Tracks whether the ladder POSITIVELY established that the on-disk / live
+  // Midway SESSION is genuinely expired or missing (vs. a silent AEA rung that
+  // merely failed). Only a true here justifies WAITING_FOR_USER upstream — a
+  // silent-rung failure with allowPrompt=false must NOT be treated as "user
+  // required" (that is the stuck-recovery bug). Set when checkMwinit says the
+  // disk session is expired, or when `mwinit --refresh-aea` itself reports no
+  // valid Midway session.
+  let _sessionInvalid = false;
   logger.info('[AuthManager] recoverAuth START (reason=' + label + ', allowPrompt=' + allowPrompt + ')');
 
   // Rung 1 — offline. A dead network is not a rejected session.
@@ -1100,6 +1108,7 @@ async function recoverAuth(reason, opts) {
         return { recovered: true, rung: 'aea-mwinit', prompted: false, reason: label };
       }
       if (rA && rA.sessionInvalid) {
+        _sessionInvalid = true;   // authoritative: the Midway SESSION is gone
         logger.warn('[AuthManager] recoverAuth — mwinit --refresh-aea reports session invalid; AEA repair cannot help, escalating to interactive mwinit');
         // Skip the agent rung (it cannot fix a dead session) and fall straight
         // through to the interactive mwinit rung below.
@@ -1131,24 +1140,38 @@ async function recoverAuth(reason, opts) {
       } // end: AEA-mwinit did not short-circuit to prompt (agent rung ran)
     } catch (_) { /* AEA-only rung unavailable — fall through to prompt */ }
   } else {
+    _sessionInvalid = true;   // authoritative: on-disk Midway session expired
     logger.warn('[AuthManager] recoverAuth — on-disk session cookie genuinely expired (' + (state.reason || 'expired') + ')');
   }
 
   // Rung 4 — last resort: prompt mwinit (deduped). Only reached when online, and
   // either the disk session is truly expired OR the silent refresh is exhausted.
   if (!allowPrompt) {
-    logger.info('[AuthManager] recoverAuth — recovery exhausted but allowPrompt=false; NOT prompting (caller will handle)');
-    return { recovered: false, rung: 'needs-prompt', prompted: false, reason: label };
+    logger.info('[AuthManager] recoverAuth — recovery exhausted but allowPrompt=false; NOT prompting (caller will handle). sessionInvalid=' + _sessionInvalid);
+    // requiresInteractiveAuth is TRUE only when we positively established the
+    // session is gone. A silent-rung exhaustion with a still-valid session is
+    // NOT a user requirement — the supervisor should COOLDOWN + retry, not sit
+    // in WAITING_FOR_USER forever (the stuck-recovery bug).
+    return { recovered: false, rung: 'needs-prompt', prompted: false, reason: label, sessionInvalid: _sessionInvalid, requiresInteractiveAuth: _sessionInvalid };
   }
   logger.warn('[AuthManager] recoverAuth rung=mwinit — escalating to interactive mwinit (reason=' + label + ')');
   try {
-    await runMwinit();
+    const mw = await runMwinit();
+    // runMwinit skips when offline (returns { skipped:'offline' }); that is not
+    // a completed re-auth — treat it as deferred, not recovered.
+    if (mw && mw.skipped === 'offline') {
+      return { recovered: false, rung: 'offline', prompted: false, reason: label };
+    }
     try { await injectCookies(); } catch (_) {}
     logger.info('[AuthManager] recoverAuth recovered at rung=mwinit — re-auth completed');
-    return { recovered: true, rung: 'mwinit', prompted: true, reason: label };
+    // requiresInteractiveAuth reflects whether the SESSION was genuinely gone
+    // (the only thing that justifies WAITING_FOR_USER). A mwinit run that
+    // completed should let the supervisor re-verify; it does NOT by itself
+    // force a user-gate on the next cycle.
+    return { recovered: true, rung: 'mwinit', prompted: true, reason: label, sessionInvalid: _sessionInvalid, requiresInteractiveAuth: _sessionInvalid };
   } catch (e) {
     logger.warn('[AuthManager] recoverAuth mwinit failed: ' + e.message);
-    return { recovered: false, rung: 'mwinit', prompted: true, reason: label, error: e.message };
+    return { recovered: false, rung: 'mwinit', prompted: true, reason: label, error: e.message, sessionInvalid: _sessionInvalid, requiresInteractiveAuth: _sessionInvalid };
   }
 }
 

@@ -289,6 +289,12 @@ app.whenReady().then(async () => {
 
   // ── Midway auto-refresh — check every 5 minutes, renew 15 min before expiry ──
   const _authModule = require('./scrapers/auth');
+  // Recovery DECISIONS route through the ONE supervisor (spec #13). The
+  // heartbeat may still do the CHEAP, non-policy keep-alive (silent AEA re-mint
+  // + cookie re-inject) itself, but any "the session is expiring/expired, what
+  // now?" decision is delegated so it is VERIFIED against the real AAP target
+  // and arms bounded auto-retry instead of a one-shot recoverAuth.
+  const _authSupervisor = (() => { try { return require('./auth/midway-health-supervisor'); } catch (_) { return null; } })();
   let _midwayRefreshTimer = null;
   let _midwayRenewalInFlight = false; // FIX (2026-07-21): see note below
   function _midwayAutoRefresh() {
@@ -452,24 +458,27 @@ app.whenReady().then(async () => {
           // needs a fresh mwinit. Route through the ladder (it'll land on the
           // mwinit rung since the session is near-dead) so offline/VPN are still
           // honored first instead of prompting into a dead network.
-          log.info('[midway] Session cookie expires in ' + state.expiresInMin + 'min -- recovering');
+          log.info('[midway] Session cookie expires in ' + state.expiresInMin + 'min -- delegating to supervisor');
           _midwayRenewalInFlight = true;
           _send('app:midway-renewing', { expiresIn: state.expiresInMin });
-          const res = _authModule.recoverAuth
-            ? await _authModule.recoverAuth('heartbeat:session-expiring')
-            : (await _authModule.runMwinit(), await _authModule.injectCookies(), { recovered: true });
-          if (res && res.recovered) _send('app:midway-renewed', {});
+          const res = _authSupervisor && _authSupervisor.ensureHealthyConverging
+            ? (await _authSupervisor.ensureHealthyConverging({ reason: 'heartbeat:session-expiring', allowPrompt: true, forceVerify: true }))
+            : (_authModule.recoverAuth ? await _authModule.recoverAuth('heartbeat:session-expiring') : { recovered: false });
+          const renewed = (res && (res.verified || res.recovered));
+          if (renewed) _send('app:midway-renewed', {});
         } else if (!state.ok) {
-          // On-disk session genuinely expired. Route through the ladder — it
-          // defers silently if offline/VPN-down and only prompts mwinit as the
-          // true last rung.
-          log.warn('[midway] Session cookie expired -- recovering via ladder');
+          // On-disk session genuinely expired. Delegate to the supervisor — it
+          // defers silently if offline, never gates on VPN, VERIFIES against the
+          // real AAP target, and arms bounded auto-retry; it only prompts mwinit
+          // as the true last rung when the session is genuinely dead.
+          log.warn('[midway] Session cookie expired -- delegating to supervisor');
           _midwayRenewalInFlight = true;
           _send('app:midway-expired', {});
-          const res = _authModule.recoverAuth
-            ? await _authModule.recoverAuth('heartbeat:session-expired')
-            : (await _authModule.runMwinit(), await _authModule.injectCookies(), { recovered: true });
-          if (res && res.recovered) _send('app:midway-renewed', {});
+          const res = _authSupervisor && _authSupervisor.ensureHealthyConverging
+            ? (await _authSupervisor.ensureHealthyConverging({ reason: 'heartbeat:session-expired', allowPrompt: true, forceVerify: true }))
+            : (_authModule.recoverAuth ? await _authModule.recoverAuth('heartbeat:session-expired') : { recovered: false });
+          const renewed = (res && (res.verified || res.recovered));
+          if (renewed) _send('app:midway-renewed', {});
         }
       } catch (e) {
         log.error('[midway] Auto-refresh failed: ' + e.message);

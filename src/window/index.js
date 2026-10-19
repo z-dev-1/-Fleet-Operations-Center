@@ -956,25 +956,25 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
       const state = checkMwinit();
       const supervisor = _getAuthSupervisor();
 
-      // Cheap short-circuit: disk session valid AND AEA comfortably fresh → push
-      // green status and skip any work. (Health is still verified lazily on the
-      // first real AAP read, which routes through the supervisor.)
-      const aeaFresh = typeof state.aeaExpiresInMin === 'number' && state.aeaExpiresInMin >= 45;
-      if (state.ok && aeaFresh) {
-        logger.info('[startup] Cookies valid (' + state.count + ' cookies, session ' +
-          (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ', aea ' + state.aeaExpiresInMin + 'min)');
-        send('auth:mwinit-status', { ok: true, expiresInMin: state.expiresInMin });
-      } else if (supervisor && typeof supervisor.ensureHealthy === 'function') {
-        // DELEGATE the whole startup recovery to the ONE supervisor (spec #18):
-        // it runs the verified ladder (silent AEA → mwinit --refresh-aea →
-        // AEA-agent self-heal → interactive mwinit), verifies against the real
-        // AAP target, and only prompts when the session is genuinely expired.
-        // Replaces the old hand-rolled check→mwinit→probe→silent→refresh-aea
-        // sequence that duplicated the ladder.
-        logger.info('[startup] auth needs attention (session ' + (state.ok ? 'ok' : state.reason) + ', aea ' + (state.aeaExpiresInMin == null ? 'missing' : state.aeaExpiresInMin + 'min') + ') — delegating to supervisor');
+      if (supervisor && typeof supervisor.ensureHealthyConverging === 'function') {
+        // DELEGATE startup entirely to the ONE supervisor (spec #3/#4/#18).
+        //
+        // NO cookie-only short-circuit: disk cookies (even a fresh-looking AEA)
+        // are EVIDENCE, not proof. They do not establish that Electron has the
+        // cookies, that live AEA is valid, that the posture agent is healthy, or
+        // that AAP accepts the session. The authoritative question is: can the
+        // REAL authenticated AAP target succeed? So we always VERIFY against the
+        // target. The API smoke test is cheap (one read-only GET), so this does
+        // not meaningfully slow startup.
+        //
+        // ensureHealthyConverging (not ensureHealthy) so that if startup
+        // recovery fails, bounded auto-retry is ARMED automatically — startup is
+        // NOT a one-shot health check. forceVerify makes it a fresh real-target
+        // check even if we think we are healthy.
+        logger.info('[startup] verifying Midway via supervisor (disk session ' + (state.ok ? 'ok' : state.reason) + ', aea ' + (state.aeaExpiresInMin == null ? 'missing' : state.aeaExpiresInMin + 'min') + ') — cookies are evidence only');
         pushStatus('\uD83D\uDD04 Verifying Midway session\u2026');
         try {
-          const r = await supervisor.ensureHealthy({ reason: 'startup', allowPrompt: true });
+          const r = await supervisor.ensureHealthyConverging({ reason: 'startup', allowPrompt: true, forceVerify: true });
           if (r && r.ok && r.verified) {
             send('auth:mwinit-status', { ok: true });
             pushStatus('\u2705 Midway session ready');
@@ -984,7 +984,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
             else pushStatus('\u26A0\uFE0F Midway session not verified\u2014' + ((r && r.reason) || 'will auto-retry'));
           }
         } catch (e) {
-          logger.error('[startup] supervisor ensureHealthy failed: ' + e.message);
+          logger.error('[startup] supervisor ensureHealthyConverging failed: ' + e.message);
           pushError('\u26A0\uFE0F Auth check failed: ' + e.message + ' \u2014 try running mwinit -f in a terminal');
         }
       } else {
@@ -1521,7 +1521,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
             const supervisor = _getAuthSupervisor();
             let recovered = false, prompted = false, offline = false, stateReason = '';
             if (supervisor && typeof supervisor.ensureHealthyConverging === 'function') {
-              const r = await supervisor.ensureHealthyConverging({ reason: 'auth-poll:sso-loop', allowPrompt: true });
+              const r = await supervisor.ensureHealthyConverging({ reason: 'auth-poll:sso-loop', allowPrompt: true, forceVerify: true });
               recovered = !!(r && r.ok && r.verified);
               prompted = !!(r && r.prompted);
               offline = !!(r && r.state === supervisor.STATE.OFFLINE);
@@ -1861,34 +1861,31 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
       }
 
       // If any chunk landed on Midway SSO, the AAP session is dead server-side
-      // (AEA token lapsed) even if the 20h cookie is still valid. Proactively
-      // recover here so the NEXT rescan (5 min later) isn't another bounced,
-      // 0-row cycle: re-inject the freshest cookies first (fixes it silently
-      // when the cookie file still has a live AEA), and only escalate to a full
-      // mwinit -- the one path that needs the WebAuthn tap -- when the AEA on
-      // disk is itself dead. This is what makes the fix self-healing without
-      // waiting for the user to notice stale data.
+      // (AEA token lapsed) even if the 20h cookie is still valid. Recovery is
+      // NOT a rescan decision — it belongs to the ONE auth supervisor (spec
+      // #5/#13). Rescan does not re-inject cookies, inspect AEA freshness, or
+      // run mwinit itself; it just hands auth ownership to the supervisor, which
+      // runs the verified ladder, VERIFIES against the real AAP target, and arms
+      // bounded auto-retry so the next rescan isn't another bounced 0-row cycle.
       if (_rescanHitSSO) {
         _rescanHitSSO = false;
-        try {
-          const { injectCookies, checkMwinit, runMwinit } = _getAuth();
-          logger.warn('[rescan] session was invalid -- attempting proactive recovery (re-inject)');
-          await injectCookies();
-          const st = checkMwinit();
-          const aeaDead = !st.ok || (st.aeaExpiresInMin !== null && st.aeaExpiresInMin <= 0);
-          if (aeaDead) {
-            logger.warn('[rescan] AEA token dead (aeaExpiresInMin=' +
-              (st.aeaExpiresInMin) + ', ok=' + st.ok + ') -- launching mwinit to recover');
-            pushStatus('\uD83D\uDD11 Session expired \u2014 complete Midway auth in the terminal window...');
-            await runMwinit();
-            await injectCookies();
-            logger.info('[rescan] recovery mwinit complete -- session refreshed');
-          } else {
-            logger.info('[rescan] re-inject recovery done (AEA still valid on disk, aeaExpiresInMin=' +
-              st.aeaExpiresInMin + ') -- next rescan should succeed');
+        const supervisor = _getAuthSupervisor();
+        if (supervisor && typeof supervisor.ensureHealthyConverging === 'function') {
+          try {
+            logger.warn('[rescan] landed on SSO -- delegating recovery to auth supervisor (single owner)');
+            const r = await supervisor.ensureHealthyConverging({ reason: 'rescan:sso', allowPrompt: true, forceVerify: true });
+            if (r && r.ok && r.verified) {
+              logger.info('[rescan] supervisor recovered + verified against AAP -- next rescan should succeed');
+            } else if (r && r.state === supervisor.STATE.WAITING_FOR_USER) {
+              pushStatus('\uD83D\uDD11 Session expired \u2014 complete Midway auth in the terminal window...');
+            } else {
+              logger.warn('[rescan] supervisor did not verify (' + ((r && r.reason) || 'unknown') + ') -- bounded auto-retry armed');
+            }
+          } catch (e) {
+            logger.warn('[rescan] supervisor recovery error: ' + e.message);
           }
-        } catch (e) {
-          logger.warn('[rescan] proactive recovery failed: ' + e.message);
+        } else {
+          logger.warn('[rescan] auth supervisor unavailable -- skipping proactive recovery (next rescan will re-detect)');
         }
       }
     }

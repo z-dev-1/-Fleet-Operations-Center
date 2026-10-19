@@ -316,15 +316,38 @@ async function _runEnsureHealthy(opts) {
   }
 
   // Ladder ran (maybe even reported recovered) but AAP still rejects → NOT
-  // healthy. If it needs a prompt we weren't allowed to give, say so; else
-  // this is where Phase C's bounded COOLDOWN auto-retry takes over.
-  const needsPrompt = ladder.rung === 'needs-prompt' || (!allowPrompt && !verified);
-  _setState(needsPrompt && !allowPrompt ? STATE.WAITING_FOR_USER : STATE.COOLDOWN,
-    verified ? 'verified' : 'still rejected after ladder');
+  // healthy. The ONLY thing that justifies WAITING_FOR_USER is a POSITIVE
+  // determination that interactive user auth is genuinely required — i.e. the
+  // supervisor established that the real Midway SESSION is expired/missing, or
+  // mwinit itself reported no valid session. A background pass that merely was
+  // not allowed to prompt (allowPrompt=false) must NEVER become
+  // WAITING_FOR_USER: that falsely trips the retry gate and strands auth
+  // forever (the stuck-recovery bug). Use the structured signals recoverAuth
+  // now surfaces; do NOT infer "user required" from allowPrompt alone.
+  // Only POSITIVE signals that interactive user auth is genuinely required.
+  // Notably NOT "mwinit already ran but AAP still rejects": the user already
+  // acted, so that must COOLDOWN + retry, not strand in WAITING_FOR_USER. And
+  // NOT "allowPrompt was false": that is the stuck-recovery bug.
+  const actuallyNeedsUser =
+    ladder.requiresInteractiveAuth === true ||
+    ladder.sessionInvalid === true ||
+    failClass === FAIL.MIDWAY_SESSION_EXPIRED;
+
+  const nextState = actuallyNeedsUser ? STATE.WAITING_FOR_USER : STATE.COOLDOWN;
+  _setState(nextState, actuallyNeedsUser ? 'interactive mwinit genuinely required' : 'still rejected after silent ladder (will retry)');
   _lastSnapshot = await buildSnapshot({ state: _state, api: v1.api, verify: v1 });
+  logger.info('[auth-supervisor] ensureHealthy result' +
+    ' state=' + _state +
+    ' reason=' + (v1.class || failClass) +
+    ' allowPrompt=' + allowPrompt +
+    ' rung=' + ladder.rung +
+    ' verified=' + verified +
+    ' requiresUser=' + actuallyNeedsUser +
+    ' retryStreak=' + _failStreak);
   return _result(false, {
     state: _state, recovered: false, rung: ladder.rung, prompted: !!ladder.prompted,
     verified: false, class: v1.class || failClass,
+    requiresUser: actuallyNeedsUser,
     reason: ladder.error || (v1.class ? ('AAP still ' + v1.class) : 'AAP still rejected after recovery'),
     latencyMs: Date.now() - t0,
   });
@@ -380,7 +403,12 @@ function _scheduleRetry(reason) {
   _failStreak += 1;
   const delay = _backoffFor(_failStreak);
   _nextRetryAt = new Date(Date.now() + delay).toISOString();
-  logger.info('[auth-supervisor] scheduling auto-retry #' + _failStreak + ' in ' + Math.round(delay / 1000) + 's (reason=' + (reason || 'converge') + ')');
+  logger.info('[auth-supervisor] retry armed' +
+    ' state=' + _state +
+    ' reason=' + (reason || 'converge') +
+    ' retryStreak=' + _failStreak +
+    ' nextRetry=' + Math.round(delay / 1000) + 's' +
+    ' requiresUser=false');
   _retryTimer = _timers.set(async () => {
     _retryTimer = null; _nextRetryAt = null;
     if (_shuttingDown || _deps.isOffline()) { _scheduleRetry('deferred'); return; }
@@ -400,9 +428,48 @@ function _scheduleRetry(reason) {
  */
 async function ensureHealthyConverging(opts) {
   const r = await ensureHealthy(opts || {});
-  if (r.ok && r.verified) { _failStreak = 0; _clearRetry(); }
-  else if (_state !== STATE.OFFLINE && _state !== STATE.WAITING_FOR_USER) { _scheduleRetry(r.reason || r.class); }
+  if (r.ok && r.verified) {
+    _failStreak = 0; _clearRetry();
+  } else if (_isTerminalForRetry()) {
+    // OFFLINE (reconnect watcher owns online-return), WAITING_FOR_USER (real
+    // user action required), or shutting down — do NOT auto-retry.
+    _clearRetry();
+  } else {
+    // Any non-terminal unhealthy state (DEGRADED / RECOVERING / COOLDOWN) MUST
+    // keep converging with bounded backoff until verified HEALTHY.
+    _scheduleRetry(r.reason || r.class);
+  }
   return Object.assign({}, r, { nextRetryAt: _nextRetryAt });
+}
+
+/**
+ * A state in which the supervisor legitimately stops auto-retrying:
+ *   - OFFLINE           — the reconnect watcher re-arms on online-return
+ *   - WAITING_FOR_USER  — genuine interactive user action is required
+ *   - shutting down
+ * Everything else (DEGRADED / RECOVERING / COOLDOWN / UNKNOWN) must converge.
+ */
+function _isTerminalForRetry() {
+  return _shuttingDown || _state === STATE.OFFLINE || _state === STATE.WAITING_FOR_USER;
+}
+
+/**
+ * ensureRecoveryArmed() — WATCHDOG / defense-in-depth (spec #12/#20). Detects the
+ * illegal "stuck" condition — unhealthy + online + not shutting down + no real
+ * user gate + no recovery in flight + no retry timer — and arms a convergence
+ * retry so a future missed-scheduling bug can never strand auth silently.
+ * Idempotent: it will NOT create a duplicate timer (relies on _scheduleRetry's
+ * single-timer guard). Safe to call from the monitor tick and on reconnect.
+ */
+function ensureRecoveryArmed() {
+  if (_shuttingDown) return false;
+  if (_state === STATE.HEALTHY || _state === STATE.OFFLINE || _state === STATE.WAITING_FOR_USER) return false;
+  if (_deps.isOffline()) return false;         // offline: reconnect watcher owns it
+  if (_authRecoveryInFlight) return false;     // a recovery is already running
+  if (_retryTimer != null) return false;       // a retry is already armed
+  logger.warn('[auth-supervisor] WATCHDOG: unhealthy (' + _state + ') while online with no retry armed and no recovery in flight — arming convergence');
+  _scheduleRetry('watchdog');
+  return true;
 }
 
 /**
@@ -453,6 +520,9 @@ function startHealthMonitor(opts) {
   const tick = async () => {
     if (_shuttingDown || _monitorInFlight) return;
     if (_deps.isOffline()) return;              // offline: wait for reconnect
+    // WATCHDOG first (spec #12): even if a prior pass somehow left us unhealthy
+    // with no armed retry, re-arm convergence. Cheap and idempotent.
+    try { ensureRecoveryArmed(); } catch (_) {}
     if (_authRecoveryInFlight) return;          // a recovery is already running
     _monitorInFlight = true;
     try {
@@ -512,6 +582,7 @@ module.exports = {
   buildSnapshot,
   ensureHealthy,
   ensureHealthyConverging,
+  ensureRecoveryArmed,
   onReconnect,
   startHealthMonitor, stopHealthMonitor,
   shutdown,
