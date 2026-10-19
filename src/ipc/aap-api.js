@@ -317,6 +317,21 @@ function registerAapApiIPC(ctx) {
     try { return await _runVreMatrix(payload && payload.unit); }
     catch (e) { return { ok: false, error: e.message, code: e.code || null }; }
   });
+  // VENDOR-CONFIG PROBE (diagnostic, read-only). Logs the RAW supplier/location
+  // shape for a few named vendors so we can see whether suppliers[] carry a
+  // location + distance (needed for 'preferred vendor location' auto-pick).
+  // Gated by VENDOR_PROBE=1.
+  if (String(process.env.VENDOR_PROBE || '').trim() === '1') {
+    setTimeout(async () => {
+      try {
+        const vendors = await api().getVendorConfigs({ force: true });
+        const want = /gabrielli|kwne|allegiance|cox/i;
+        const hits = (vendors || []).filter((v) => want.test(String(v.vendorName || '')));
+        logger.info('[vendor-probe] matched ' + hits.length + ' vendors; raw supplier shapes:\n' +
+          JSON.stringify(hits.map((v) => ({ vendorName: v.vendorName, supplierRequired: v.supplierRequired, suppliers: v.suppliers })), null, 2));
+      } catch (e) { logger.warn('[vendor-probe] failed: ' + e.message); }
+    }, 9000);
+  }
   // DOC-UPLOAD STEP-1 PROBE (diagnostic, uploads NOTHING). Requesting a
   // presigned uploadLink is read-only — it does NOT create a WR and does NOT
   // attach a file (we never do the S3 PUT here). Validates our uploadLink

@@ -1791,13 +1791,13 @@ async function _runAIAssist() {
     + domicileBookCtx
     + '\nRULES — READ CAREFULLY. Interpret the user\'s words LITERALLY. Do not add intent they did not state. This decides ONE vs MULTIPLE work orders, the vendor, and urgency:\n'
     + '- URGENCY IS EXPLICIT ONLY: set urgent=true ONLY if the user literally says "urgent" (or "emergency"/"ASAP"/"priority"). If they do NOT say it, urgent=false — EVEN for brakes/safety/fire. Never infer urgency from the problem type. When urgent=true and no reason was given, urgencyReason="DEA - Asset Shortage".\n'
-    + '- VENDOR = OVERRIDE vs AAP RECOMMENDATION. The vendor MUST be chosen from the AAP VENDOR LIST above (verbatim), never invented:\n'
-    + '    * THE USER\'S NAMED VENDOR ALWAYS WINS over the unit\'s make. If the unit is a Freightliner but the user says "send to Kenworth" or "to Cummins", pick Kenworth / Cummins — honor what they SAID, not the make.\n'
-    + '    * NAMED VENDOR + LOCATION ("send to Gabrielli Truck Sales & Service - Rockaway", "Allegiance Truck Centers - Flemington", "Cummins Bristol"): find the AAP VENDOR LIST entry that matches BOTH the vendor name AND the location (the part after the dash). Set vendor = that EXACT full entry (with the location). This is an OPERATOR OVERRIDE (vendorIsOverride=true).\n'
-    + '    * NAMED VENDOR, LOCATION NOT SPECIFIED ("send to Gabrielli", "assign to Kenworth dealer", "to the pete store"): from the AAP VENDOR LIST, pick the entry for that vendor whose LOCATION is CLOSEST to the unit\'s domicile <SITE> (use the VENDOR BOOK mileage "<SITE>:Nmi" to decide which location is nearest; if only one location exists for that vendor, use it). Set vendor = that exact full entry. Override (vendorIsOverride=true).\n'
-    + '    * GENERIC "send to dealer" with NO vendor name at all: THEN fall back to the unit\'s make — pick the AAP VENDOR LIST entry for the unit\'s make closest to <SITE> (Freightliner unit -> a Freightliner dealer, etc.). Override (vendorIsOverride=true).\n'
-    + '    * NO dealer/vendor mentioned at all (just a problem stated): vendor="" (empty), vendorIsOverride=false. Leave it to AAP\'s recommendation — do NOT guess.\n'
-    + '    * ALWAYS output the vendor EXACTLY as it appears in the AAP VENDOR LIST (including the " - <Location>" suffix). If no list entry reasonably matches what the user named, leave vendor="" and say so in comments rather than inventing one.\n'
+    + '- VENDOR vs LOCATION (two separate fields): vendor = the COMPANY from the AAP VENDOR LIST (verbatim, no location); vendorLocation = the branch/city the user named (or ""). AAP then shows a "preferred vendor location" picker for that vendor\'s branches.\n'
+    + '    * THE USER\'S NAMED VENDOR ALWAYS WINS over the unit\'s make. Freightliner unit + "send to Kenworth"/"to Cummins" -> vendor=KWNE/Cummins. Honor what they SAID, not the make.\n'
+    + '    * NAMED VENDOR + LOCATION ("send to Gabrielli Rockaway", "Allegiance Flemington", "Cummins Bristol", "Cox NY/NJ"): vendor = the company from the list (e.g. "Gabrielli", "Allegiance and Ascendance", "COX"), vendorLocation = the branch ("Rockaway", "Flemington", "Bristol", "NY/NJ"), vendorIsOverride=true.\n'
+    + '    * NAMED VENDOR, NO LOCATION ("send to Gabrielli", "assign to Kenworth dealer"): vendor = that company, vendorLocation="" (the app auto-picks the CLOSEST branch to the asset), vendorIsOverride=true.\n'
+    + '    * GENERIC "send to dealer" with NO vendor name: fall back to the unit\'s make — vendor = the AAP VENDOR LIST company matching the unit make, vendorLocation="", vendorIsOverride=true.\n'
+    + '    * NO dealer/vendor mentioned (just a problem): vendor="", vendorLocation="", vendorIsOverride=false — defer to AAP\'s recommendation, do NOT guess.\n'
+    + '    * vendor MUST be an exact company from the AAP VENDOR LIST. If nothing matches what the user named, leave vendor="" and note it in comments rather than inventing one.\n'
     + '- MOVING THE UNIT = TOW. Naming a dealer as a DESTINATION the unit must go to ("send/take/bring/needs to go TO <dealer>", "from <X> to <dealer>") means the physical unit is towed there -> isTow=true. Naming a dealer is the tow signal; the word "tow" is not required.\n'
     + '- REPAIR vs TOW-ONLY (hasRepair):\n'
     + '    * hasRepair=true when a mechanical problem/symptom is stated ("check engine light", "air leak", "brakes", "won\'t start"). A named dealer destination does NOT remove the repair — "air leak, send to Cummins Bristol from ABE" = hasRepair=true AND isTow=true (TWO work orders: the repair WR with vendor=Cummins, plus the tow WR).\n'
@@ -1817,7 +1817,8 @@ async function _runAIAssist() {
     + '- COMMENTS when isTow=false (the normal case): describe what we need from the vendor to fix the problem. NO tow line.\n\n'
     + 'VALID AREAS/SUBCATEGORIES (use EXACT values):\n' + areaList + '\n\n'
     + 'Respond ONLY with valid JSON:\n'
-    + '{"title":"<=90 char summary","issue":"2-3 sentence description","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","vendorIsOverride":false,"urgent":false,"urgencyReason":"","comments":"what we need (+ tow line only if isTow)","hasRepair":true,"isTow":false,"needsDealerWorkOrder":false,"towDirection":"to-dealer|return-to-yard|yard-to-yard|","towPickup":{"name":"","street":"","city":"","state":"","zip":""},"towDestination":{"name":"","street":"","city":"","state":"","zip":""}}\n'
+    + '{"title":"<=90 char summary","issue":"2-3 sentence description","areaPairs":[{"area":"EXACT area","subcategory":"EXACT sub"}],"vendor":"","vendorLocation":"","vendorIsOverride":false,"urgent":false,"urgencyReason":"","comments":"what we need (+ tow line only if isTow)","hasRepair":true,"isTow":false,"needsDealerWorkOrder":false,"towDirection":"to-dealer|return-to-yard|yard-to-yard|","towPickup":{"name":"","street":"","city":"","state":"","zip":""},"towDestination":{"name":"","street":"","city":"","state":"","zip":""}}\n'
+    + 'vendor = the top-level company ONLY (e.g. "Gabrielli", "KWNE", "Allegiance and Ascendance", "COX") — NOT the location. vendorLocation = the branch/city the user named if any (e.g. "Rockaway", "Flemington", "Bristol", "NY/NJ") else "". The app maps vendorLocation to the preferred-supplier location and auto-picks the CLOSEST location when vendorLocation is empty.\n'
     + 'Set vendorIsOverride=true when YOU set vendor because the user named one (an override); false when vendor is empty (defer to AAP). areaPairs can have 1-4 pairs; empty [] for tow-only. urgent=true ONLY if the user literally said urgent. Remember: naming ANY specific dealer as destination = isTow=true (no "tow" keyword needed); "tow back"/"return" with no stated problem = tow-only (hasRepair=false, areaPairs=[]).';
 
   try {
@@ -1874,6 +1875,19 @@ async function _runAIAssist() {
         // Reflect the pick in the override badge + supplier UI immediately.
         if (typeof _updateVendorOverrideBadge === 'function') _updateVendorOverrideBadge();
         if (typeof _syncSupplierSelect === 'function') _syncSupplierSelect();
+        // If the user named a specific LOCATION ("Rockaway", "Flemington"),
+        // select that preferred-supplier branch; otherwise _syncSupplierSelect
+        // already auto-picked the closest.
+        const loc = String(ai.vendorLocation || '').trim();
+        if (loc && typeof _supplierIdForNamedLocation === 'function') {
+          const supSel = _el('wr-supplier');
+          const supId = _supplierIdForNamedLocation(loc);
+          if (supSel && supId && Array.from(supSel.options).some((o) => o.value === supId)) {
+            supSel.value = supId;
+          } else if (supId === '' && loc) {
+            _logProgress && _logProgress('Location "' + loc + '" not found for ' + (want || 'vendor') + ' — closest branch selected; adjust if needed', 'run');
+          }
+        }
       }
     }
     // Fill area/subcategory pairs (up to 4). If the AI decided this title needs
@@ -2284,16 +2298,72 @@ function _syncSupplierSelect() {
     if (supSel) supSel.innerHTML = '';
     return;
   }
-  const suppliers = (rec && Array.isArray(rec.suppliers)) ? rec.suppliers : [];
-  const opts = ['<option value="">-- Select supplier --</option>'];
-  for (const s of suppliers) {
-    let val, label;
-    if (s && typeof s === 'object') { val = s.supplierId != null ? s.supplierId : (s.supplierName || ''); label = s.supplierName || String(val); }
-    else { val = s; label = s; }
-    opts.push('<option value="' + _safeAttr(val) + '">' + _safe(label) + '</option>');
+  // Supplier = the vendor LOCATION (confirmed live shape: {id, name, latitude,
+  // longitude, vendorSystemSupplierId, ...}). Compute distance from the asset's
+  // GPS to each location (same "Approx. N miles" AAP shows), sort nearest-first,
+  // and auto-select the closest — mirroring AAP highlighting the nearest branch.
+  const suppliers = (rec && Array.isArray(rec.suppliers)) ? rec.suppliers.slice() : [];
+  const gps = _assetGps();
+  const withDist = suppliers.map((s) => {
+    const o = (s && typeof s === 'object') ? s : { name: String(s), id: String(s) };
+    const mi = (gps && o.latitude != null && o.longitude != null)
+      ? _haversineMiles(gps.lat, gps.lng, Number(o.latitude), Number(o.longitude)) : null;
+    return { raw: o, id: o.id != null ? o.id : (o.supplierId != null ? o.supplierId : o.name), name: o.name || String(o.id || ''), mi };
+  });
+  // Sort nearest-first (unknown distances last).
+  withDist.sort((a, b) => (a.mi == null) - (b.mi == null) || (a.mi || 0) - (b.mi || 0));
+  const prev = supSel ? supSel.value : '';
+  const opts = ['<option value="">-- Select a preferred vendor location --</option>'];
+  for (const s of withDist) {
+    const miTxt = s.mi != null ? ('  ·  ~' + s.mi.toFixed(1) + ' mi') : '';
+    opts.push('<option value="' + _safeAttr(s.id) + '">' + _safe(s.name + miTxt) + '</option>');
   }
-  if (supSel) supSel.innerHTML = opts.join('');
+  if (supSel) {
+    supSel.innerHTML = opts.join('');
+    // Restore a prior pick if still valid; else auto-select the CLOSEST location
+    // (first after the nearest-first sort), matching AAP's default highlight.
+    if (prev && Array.from(supSel.options).some((o) => o.value === prev)) supSel.value = prev;
+    else if (withDist.length && withDist[0].mi != null) supSel.value = String(withDist[0].id);
+  }
   supWrap.style.display = '';
+}
+
+// Asset GPS for supplier-distance math. Prefers the VRE recommendation's
+// currentLocation (fetched live on open), falls back to the unit's stored
+// geoPoint. Returns {lat,lng} or null.
+function _assetGps() {
+  try {
+    const ll = _unit && (_unit.latestLocation || _unit.geoPoint || _unit.location);
+    const gp = (ll && (ll.geoPoint || ll)) || null;
+    const lat = gp && (gp.latitude != null ? gp.latitude : gp.lat);
+    const lng = gp && (gp.longitude != null ? gp.longitude : (gp.lng != null ? gp.lng : gp.lon));
+    if (lat != null && lng != null) return { lat: Number(lat), lng: Number(lng) };
+  } catch (_) {}
+  return null;
+}
+
+// Great-circle distance in miles (same metric AAP's "Approx. N miles" uses).
+function _haversineMiles(lat1, lon1, lat2, lon2) {
+  const R = 3958.7613; // earth radius, miles
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Given a free-text location the user named ("Flemington", "Rockaway"), find
+// the matching supplier id within the selected vendor's locations. Returns '' .
+function _supplierIdForNamedLocation(locText) {
+  const rec = _vendorRecordByName((_el('wr-vendor') || {}).value);
+  const suppliers = (rec && Array.isArray(rec.suppliers)) ? rec.suppliers : [];
+  const want = String(locText || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (!want || !suppliers.length) return '';
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  // Match the location against the supplier NAME (which includes the branch).
+  const hit = suppliers.find((s) => norm(s.name).includes(want))
+    || suppliers.find((s) => want.includes(norm(s.city)) && norm(s.city))
+    || suppliers.find((s) => norm(s.name).split(' ').some((t) => t === want));
+  return hit ? String(hit.id != null ? hit.id : hit.name) : '';
 }
 
 // Wire the vendor <select> change event to keep the override badge + supplier
