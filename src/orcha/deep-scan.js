@@ -545,10 +545,37 @@ async function _processUnit(u, notesStore, askOrcha) {
   }
   const today = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' });
 
+  // ── Reconciliation hint (spec §31) ──────────────────────────────────────────
+  // The Relay↔Offsite reconcile engine already established a TRUSTED canonical
+  // state for this unit (repairPhase, waitingOn, threadOfRecord, the open
+  // question, and whether a human decision is pending). Feed that to the timeline
+  // builder as GROUND TRUTH so it doesn't independently re-decide the phase from
+  // scratch — it should write a timeline CONSISTENT with the reconciled state.
+  // Best-effort + read-only: if there's no canonical record yet, the block is
+  // empty and the builder works exactly as before.
+  let reconcileHint = '';
+  try {
+    const canon = ((store.load('canonicalState', {}) || {}).units) || {};
+    const rec = canon[u.equipmentId];
+    if (rec && rec.aiReconciled) {
+      const bits = [];
+      if (rec.repairPhase && rec.repairPhase !== 'unknown') bits.push('repair phase = ' + rec.repairPhase);
+      if (rec.waitingOnFine && rec.waitingOnFine !== 'unknown') bits.push('waiting on ' + rec.waitingOnFine);
+      if (rec.threadOfRecordFine) bits.push('live conversation is in ' + rec.threadOfRecordFine);
+      if (rec.awaitingReply) bits.push('OPEN QUESTION from vendor still owed an answer: "' + String(rec.awaitingReply).slice(0, 160) + '"');
+      if (rec.decisionRequired) bits.push('a HUMAN DECISION is pending' + (rec.decisionQuestion ? ' (' + String(rec.decisionQuestion).slice(0, 160) + ')' : ''));
+      if (bits.length) {
+        reconcileHint =
+          '\nRECONCILED CANONICAL STATE (trusted — the reconcile engine already determined this; make the timeline CONSISTENT with it, do NOT contradict it):\n' +
+          '  ' + bits.join('; ') + '.\n';
+      }
+    }
+  } catch (_) { /* no canonical record — proceed without the hint */ }
+
   const prompt =
     'You are Orcha, the AI brain for Fleet Operations. Generate the OFFICIAL repair timeline for unit ' + u.equipmentId + '.\n\n' +
     'PURPOSE:\n' +
-    'This timeline is the official repair status report sent directly to business partners and management. Every line must be a professional coordinator update — NOT a message transcript.\n\n' +
+    'This timeline is the official repair status report sent directly to business partners and management. Every line must be a professional coordinator update — NOT a message transcript. Write every entry in INTERNAL third-person status-log voice (e.g. "Requested updated parts ETA from dealer; response pending." / "Dealer submitted repair estimate; internal approval pending."). NEVER write vendor-facing language ("can you confirm...", "please advise") into the timeline.\n\n' +
     'VOICE:\n' +
     'Write as a fleet maintenance coordinator providing status updates to partners. Professional, concise, actionable. Each entry answers: what is the current repair state and what happens next.\n\n' +
     'CRITICAL RULES:\n' +
@@ -630,6 +657,7 @@ async function _processUnit(u, notesStore, askOrcha) {
     'WO Created: ' + (u.created || '--') + '\n' +
     (u.serviceState ? 'WO State: ' + u.serviceState + '\n' : '') +
     (u.issueDetails ? 'Issue: ' + u.issueDetails.substring(0, 300) + '\n' : '') +
+    reconcileHint +
     '\nRELAY GARAGE CONVERSATION (Unplanned WR):\n' +
     (fullConv || '(no conversation)') + '\n\n' +
     (plannedConv ? 'RELAY GARAGE CONVERSATION (Planned WR -- ' + (u._plannedWRData.vendor || 'vendor unknown') + '):\n' + plannedConv + '\n\n' : '') +
