@@ -559,7 +559,7 @@ function _html() {
             <span style="font-size:11px">🤖</span> Digital Fleet Asset Specialist
             <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">AGENT</span>
           </div>
-          <div class="sd-hint" style="margin-bottom:10px">A permission-aware agent that researches scoped fleet data, applies FAS judgment, and drafts replies. Starts in <strong>Shadow</strong> mode — it drafts and compares against your real replies but sends nothing.</div>
+          <div class="sd-hint" style="margin-bottom:10px">The single Slack reasoning agent: researches scoped fleet data, applies FAS judgment, decides whether/where to reply, and drafts or sends replies per mode. <strong>Approval</strong> is the default — FAS drafts and queues for your approval; <strong>Shadow</strong> drafts and compares only (sends nothing); <strong>Autonomous</strong> auto-sends verified low-risk answers.</div>
           <div class="sd-toggle-row">
             <span class="sd-toggle-label">Enable FAS agent</span>
             <input type="checkbox" id="fas-enabled"/>
@@ -567,11 +567,15 @@ function _html() {
           <div class="sd-field" style="margin-top:8px">
             <label class="sd-label">Mode</label>
             <select class="sd-select" id="fas-mode">
-              <option value="shadow">Shadow — draft &amp; compare, send nothing</option>
-              <option value="approval">Approval — propose, execute only after approval</option>
-              <option value="autonomous">Autonomous — auto-handle verified low-risk</option>
+              <option value="shadow">Shadow — draft &amp; compare, send nothing (legacy still replies)</option>
+              <option value="approval">Approval — FAS drafts, you approve each send (legacy retired)</option>
+              <option value="autonomous">Autonomous — auto-send verified low-risk (legacy retired)</option>
             </select>
-            <div class="sd-hint">New installs default to Shadow. Approval/Autonomous also require per-action permissions.</div>
+            <div class="sd-hint">Default: Approval. Shadow keeps the legacy auto-reply live for parity comparison; Approval/Autonomous make FAS the only reasoning engine.</div>
+          </div>
+          <div class="sd-toggle-row" style="margin-top:8px">
+            <span class="sd-toggle-label">Retire legacy reasoning<span class="sd-hint" style="display:block;opacity:.6;font-weight:400">When on (recommended), the old DM/partner persona reply engines never answer on their own — a FAS failure goes to manual review, not a legacy auto-reply. Turn off only as a temporary rollback.</span></span>
+            <input type="checkbox" id="fas-retire-legacy"/>
           </div>
           <div class="sd-field">
             <label class="sd-label">Max agent steps</label>
@@ -618,6 +622,43 @@ function _html() {
           <div class="sd-section-title" style="margin-top:14px;font-size:11px">Shadow comparisons (FAS draft vs. what was sent)</div>
           <div class="sd-hint" style="margin-bottom:6px">Highest-divergence first. Nothing here was sent — this is evaluation only.</div>
           <div id="fas-audit-list" style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto"></div>
+
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Channel roles (conversation vs data feed)</div>
+          <div class="sd-hint" style="margin-bottom:6px">Classify channels FAS watches. <strong>Feed</strong> channels (vendor/alert/system/info) are read silently — FAS ingests the data and only replies when directly @-mentioned. <strong>Conversational</strong> channels get normal replies. Auto-detected roles are suggestions until you confirm them here.</div>
+          <div class="sd-row" style="gap:6px;align-items:flex-end;flex-wrap:wrap">
+            <div class="sd-field" style="flex:1;min-width:120px"><div class="sd-label">Channel ID</div><input class="sd-input" id="fas-chan-id" placeholder="C0123ABCD"/></div>
+            <div class="sd-field" style="flex:1;min-width:120px"><div class="sd-label">Name</div><input class="sd-input" id="fas-chan-name" placeholder="vendor-repair-feed"/></div>
+            <div class="sd-field" style="flex:1;min-width:140px"><div class="sd-label">Mode</div>
+              <select class="sd-select" id="fas-chan-mode">
+                <option value="CONVERSATIONAL">Conversational</option>
+                <option value="OPERATIONAL">Operational</option>
+                <option value="INFORMATION_FEED">Information feed</option>
+                <option value="ALERT_FEED">Alert feed</option>
+                <option value="VENDOR_FEED">Vendor feed</option>
+                <option value="SYSTEM_FEED">System feed</option>
+                <option value="MIXED">Mixed</option>
+              </select>
+            </div>
+            <div class="sd-field" style="flex:1;min-width:150px"><div class="sd-label">Reply policy</div>
+              <select class="sd-select" id="fas-chan-reply">
+                <option value="normal">Normal</option>
+                <option value="only_if_directly_mentioned">Only if @-mentioned</option>
+                <option value="never">Never</option>
+              </select>
+            </div>
+            <div class="sd-btn-row"><button class="sd-btn secondary" id="fas-chan-detect">Auto-detect</button><button class="sd-btn primary" id="fas-chan-save">Save channel</button></div>
+          </div>
+          <div id="fas-chan-list" style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow:auto;margin-top:6px"></div>
+
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Identity domain mappings (auto-classification)</div>
+          <div class="sd-hint" style="margin-bottom:6px">Map an email domain to a carrier (with SCAC) or vendor so FAS classifies new senders from that domain automatically. @amazon.com is always internal. One mapping per line as <code>domain = SCAC</code> (carrier) or <code>domain = vendorName</code> (vendor).</div>
+          <div class="sd-field"><div class="sd-label">Carrier domains (domain = SCAC)</div><textarea class="sd-input" id="fas-map-carrier" rows="3" placeholder="examplecarrier.com = TUZR" style="resize:vertical"></textarea></div>
+          <div class="sd-field"><div class="sd-label">Vendor domains (domain = vendor name)</div><textarea class="sd-input" id="fas-map-vendor" rows="3" placeholder="amerit.com = Amerit Fleet" style="resize:vertical"></textarea></div>
+          <div class="sd-btn-row"><button class="sd-btn primary" id="fas-map-save">Save mappings</button></div>
+
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Identity change log (auto-maintenance)</div>
+          <div class="sd-hint" style="margin-bottom:6px">Every automatic identity/permission change FAS made, with the evidence and confidence that drove it. Read-only audit trail.</div>
+          <div id="fas-identity-log" style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow:auto"></div>
 
           <div class="sd-section-title" style="margin-top:14px;font-size:11px">FAS Roster</div>
           <div class="sd-hint" style="margin-bottom:6px">The full FAS personnel roster (FAS Name, Site Code, Email, Phone, Uptime Manager, Program, SCAC), pulled directly from the FAS roster page — every entry, not just the first 100. Filter any column and copy to Excel/SharePoint.</div>

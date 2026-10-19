@@ -325,6 +325,14 @@ expose('slack', {
   fasGetKnowledgeDrafts:  (status) => ipcRenderer.invoke('fas:get-knowledge-drafts', status),
   fasApproveKnowledgeDraft:(data)  => ipcRenderer.invoke('fas:approve-knowledge-draft', data),
   fasRejectKnowledgeDraft:(id)     => ipcRenderer.invoke('fas:reject-knowledge-draft', id),
+  // Phase 3/5 settings surfaces.
+  fasGetChannels:         ()       => ipcRenderer.invoke('fas:get-channels'),
+  fasSaveChannel:         (rec)    => ipcRenderer.invoke('fas:save-channel', rec),
+  fasClassifyChannel:     (name)   => ipcRenderer.invoke('fas:classify-channel', name),
+  fasGetIdentityChangelog:(limit)  => ipcRenderer.invoke('fas:get-identity-changelog', limit),
+  fasGetIdentityMappings: ()       => ipcRenderer.invoke('fas:get-identity-mappings'),
+  fasSaveIdentityMappings:(maps)   => ipcRenderer.invoke('fas:save-identity-mappings', maps),
+  fasSyncSender:          (id)     => ipcRenderer.invoke('fas:sync-sender', id),
 });
 
 // Microsoft Graph mail was removed (2026-09-02) — it does not work in the

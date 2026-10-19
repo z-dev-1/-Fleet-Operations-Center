@@ -482,6 +482,14 @@ export const slack = {
   fasGetKnowledgeDrafts:  (status) => window.slack.fasGetKnowledgeDrafts(status),
   fasApproveKnowledgeDraft:(data)  => window.slack.fasApproveKnowledgeDraft(data),
   fasRejectKnowledgeDraft:(id)     => window.slack.fasRejectKnowledgeDraft(id),
+  // Phase 3/5 settings surfaces.
+  fasGetChannels:         ()       => window.slack.fasGetChannels(),
+  fasSaveChannel:         (rec)    => window.slack.fasSaveChannel(rec),
+  fasClassifyChannel:     (name)   => window.slack.fasClassifyChannel(name),
+  fasGetIdentityChangelog:(limit)  => window.slack.fasGetIdentityChangelog(limit),
+  fasGetIdentityMappings: ()       => window.slack.fasGetIdentityMappings(),
+  fasSaveIdentityMappings:(maps)   => window.slack.fasSaveIdentityMappings(maps),
+  fasSyncSender:          (id)     => window.slack.fasSyncSender(id),
 };
 
 // ── SharePoint ─────────────────────────────────────────────────────────────
