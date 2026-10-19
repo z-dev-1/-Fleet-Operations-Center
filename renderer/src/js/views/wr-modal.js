@@ -1842,8 +1842,22 @@ async function _runAIAssist() {
       window.ai.ask(prompt),
       new Promise((_, rej) => setTimeout(() => rej(new Error('AI Fill timed out — the AI service may be unavailable')), 95000)),
     ]);
-    const text = (result && result.text) ? result.text : (result || '');
-    const match = text.match(/\{[\s\S]*\}/);
+    // Normalize the AI response to a STRING before parsing. window.ai.ask can
+    // return a bare string, { text }, or (for some backends/inputs) an object
+    // whose `text`/`content`/`message` is itself an object or where the JSON is
+    // at the top level. Coercing with String() on a non-string gave "[object
+    // Object]" and then text.match crashed ("text.match is not a function")
+    // for inputs that happened to hit that shape — worked for others by luck.
+    let text = '';
+    if (typeof result === 'string') text = result;
+    else if (result && typeof result.text === 'string') text = result.text;
+    else if (result && typeof result.content === 'string') text = result.content;
+    else if (result && typeof result.message === 'string') text = result.message;
+    else if (result && result.text && typeof result.text === 'object') { try { text = JSON.stringify(result.text); } catch (_) { text = ''; } }
+    else if (result && typeof result === 'object') { try { text = JSON.stringify(result); } catch (_) { text = ''; } }
+    else text = String(result || '');
+
+    const match = typeof text === 'string' ? text.match(/\{[\s\S]*\}/) : null;
     if (!match) { toast.show('warn', 'AI returned no data (AI service may be down) — fill fields manually', 4000); return; }
     const ai = JSON.parse(match[0]);
     
@@ -2022,6 +2036,9 @@ async function _runAIAssist() {
 
     toast.show('success', '✨ AI filled — review and submit', 3000);
   } catch(e) {
+    // Forward the REAL error + stack to the main log (console-message bridge)
+    // so AI-Fill failures are diagnosable, not just a transient toast.
+    try { console.error('[wr-modal] AI Fill failed: ' + (e && e.message) + ' | stack: ' + (e && e.stack || '')); } catch (_) {}
     toast.show('error', 'AI failed: ' + e.message, 4000);
   } finally {
     btn.disabled = false; btn.textContent = '✨ AI Fill';
