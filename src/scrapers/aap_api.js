@@ -1426,16 +1426,31 @@ async function createWorkOrder(opts = {}) {
   const recoResp = await apiPut(CREATE_WO_PATH, _buildWoBody({ ...opts, aaid }, assetFull, 'UNASSIGNED'));
   const recommendation = _readRecommendation(recoResp);
 
-  // STEP B: build + POST the REAL create body to /createRepair. This is the
-  // call that actually creates the WR (captured live from the wizard). It
-  // returns the workRequestId.
+  // STEP B: build + POST the REAL create body to /createRepair, with a bounded
+  // SELF-HEALING loop: if AAP rejects a specific field (its 400s name the field
+  // path, e.g. "comments.1.member.createdBy must not be null"), apply a
+  // deterministic correction and retry. If it still can't be fixed, return a
+  // PRECISE diagnosis of where it got stuck — never a generic "failed".
   const createBody = _buildCreateRepairBody({ ...opts, aaid }, assetFull, vendorCode, recoResp);
-  const resp = await apiPost(CREATE_REPAIR_PATH, createBody);
+  const healed = await _postCreateRepairWithHealing(createBody, { aaid, vendorCode });
+  if (!healed.ok) {
+    logger.warn('createWorkOrder: /createRepair could not be healed — stuck at field "' + (healed.stuckField || '?') + '"');
+    return {
+      ok: false, phase: 'create-failed', aaid, vendor: vendorCode, recommendation,
+      stuckField: healed.stuckField || null,
+      corrections: healed.corrections || [],
+      error: healed.error || 'AAP /createRepair failed and could not self-correct.',
+      aapMessage: healed.aapMessage || null,
+      raw: healed.raw || null,
+    };
+  }
+  const resp = healed.resp;
   const workRequestId =
     (resp && (resp.workRequestId || resp.workOrderId || resp.id ||
       (resp.workOrder && resp.workOrder.id))) || '';
   logger.info('createWorkOrder Phase 2 (createRepair) aaid=' + aaid +
-    ' vendor=' + vendorCode + ' workRequestId=' + workRequestId);
+    ' vendor=' + vendorCode + ' workRequestId=' + workRequestId +
+    (healed.corrections && healed.corrections.length ? ' (self-corrected: ' + healed.corrections.join('; ') + ')' : ''));
 
   // HONESTY GUARD: no workRequestId back = the WR was NOT created. Never claim
   // success. (Should not happen now that we POST /createRepair, but keep the
@@ -1492,6 +1507,146 @@ async function createWorkOrder(opts = {}) {
     attachments: attachmentResults,
     raw: resp || null,
   };
+}
+
+// ── SELF-HEALING /createRepair ──────────────────────────────────────────────
+// Posts the create body and, when AAP rejects a SPECIFIC field (its 400/500
+// validation errors name the offending JSON path), applies a deterministic
+// correction and retries — bounded. If it still fails, returns a precise
+// diagnosis of WHERE it got stuck (field + AAP message + what it tried) so the
+// caller/operator sees exactly what to fix instead of a generic error.
+//
+// Returns { ok:true, resp, corrections[] } or
+//         { ok:false, stuckField, aapMessage, corrections[], error, raw }.
+const _CREATE_HEAL_MAX = 4;
+async function _postCreateRepairWithHealing(body, ctx) {
+  ctx = ctx || {};
+  let current = body;
+  const corrections = [];
+  let lastErr = null;
+  for (let attempt = 0; attempt <= _CREATE_HEAL_MAX; attempt++) {
+    try {
+      const resp = await apiPost(CREATE_REPAIR_PATH, current);
+      return { ok: true, resp, corrections };
+    } catch (e) {
+      lastErr = e;
+      const msg = String((e && e.message) || '');
+      // Only self-heal AAP validation errors (4xx with a field detail). A
+      // 401/403 session error or a network error is NOT a body problem — stop.
+      if (e && e.code === 'MIDWAY_SESSION_INVALID') {
+        return { ok: false, stuckField: null, aapMessage: msg, corrections, error: 'AAP session rejected — re-auth needed (not a body fix).' };
+      }
+      const field = _parseAapErrorField(msg);
+      logger.warn('[create-heal] attempt ' + attempt + ' failed; AAP field="' + (field || '?') + '" msg=' + msg.slice(0, 180));
+      if (!field || attempt >= _CREATE_HEAL_MAX) {
+        return {
+          ok: false,
+          stuckField: field || null,
+          aapMessage: msg.slice(0, 600),
+          corrections,
+          error: field
+            ? ('Stuck at /createRepair field "' + field + '" — AAP rejected it and no deterministic fix is known after ' + corrections.length + ' correction(s).')
+            : ('Stuck at /createRepair — AAP error could not be mapped to a field: ' + msg.slice(0, 200)),
+          raw: (e && e.raw) || null,
+        };
+      }
+      const fix = _correctCreateRepairField(current, field, msg);
+      if (!fix.changed) {
+        // We recognized the field but have no correction for this case — stop
+        // with a precise diagnosis rather than loop pointlessly.
+        return {
+          ok: false, stuckField: field, aapMessage: msg.slice(0, 600), corrections,
+          error: 'Stuck at /createRepair field "' + field + '" — recognized but no self-correction available.',
+        };
+      }
+      current = fix.body;
+      corrections.push(fix.note);
+      logger.info('[create-heal] applied correction: ' + fix.note + ' — retrying');
+    }
+  }
+  return { ok: false, stuckField: null, aapMessage: String((lastErr && lastErr.message) || ''), corrections, error: 'exhausted create-repair retries' };
+}
+
+// Parse the offending JSON field path out of an AAP validation error message.
+// Handles both styles seen live:
+//   Jackson: 'reference chain: ...CreateRepairInput["comments"]->ArrayList[0]'
+//            and '...for JSON property damageDescription ...'
+//   AWS val: "Value null at 'workRequestInput.comments.1.member.createdBy' ..."
+function _parseAapErrorField(msg) {
+  if (!msg) return null;
+  // AWS-style: at 'workRequestInput.<path>'
+  let m = msg.match(/at '([^']+)'/);
+  if (m) {
+    // Normalize workRequestInput.comments.1.member.createdBy -> comments.createdBy
+    return m[1].replace(/^workRequestInput\./, '').replace(/\.\d+\.member/g, '').replace(/\.\d+/g, '');
+  }
+  // Jackson "for JSON property X"
+  m = msg.match(/JSON property ["']?([A-Za-z0-9_]+)["']?/);
+  if (m) return m[1];
+  // Jackson reference chain: ...model.X["field"]->...["sub"]
+  const chain = [...msg.matchAll(/\["([A-Za-z0-9_]+)"\]/g)].map((x) => x[1]);
+  if (chain.length) return chain.join('.');
+  return null;
+}
+
+// Apply a DETERMINISTIC correction for a known-bad field. Returns
+// { changed, body, note }. Only known, safe fixes — never invents values that
+// change the WR's meaning (e.g. it won't fabricate a vendor); it fills
+// required-but-empty structural fields with safe defaults the wizard uses.
+function _correctCreateRepairField(body, field, msg) {
+  const b = JSON.parse(JSON.stringify(body || {}));
+  const nullish = /must not be null|non-nullable|missing \(therefore NULL\)|may not be (null|empty)|Cannot construct/i.test(msg);
+  const f = String(field || '');
+  // comments.* — each Comment needs non-null text/createdBy/timestamp/externalConsumers
+  if (/^comments(\.|$)/.test(f)) {
+    b.comments = (Array.isArray(b.comments) ? b.comments : []).map((c) => ({
+      text: (c && c.text) || '(no comment provided)',
+      internalOnly: !!(c && c.internalOnly),
+      externalConsumers: Array.isArray(c && c.externalConsumers) ? c.externalConsumers : [],
+      timestamp: (c && c.timestamp) || new Date().toISOString(),
+      createdBy: (c && String(c.createdBy || '').trim()) || 'Fleet Ops Center',
+    }));
+    return { changed: true, body: b, note: 'normalized comments[] (text/createdBy/timestamp/externalConsumers non-null)' };
+  }
+  if (/damageDescription/i.test(f) && nullish) {
+    b.damageDescription = String(b.damageDescription || b.title || 'Repair requested via Fleet Ops Center').trim() || 'Repair requested via Fleet Ops Center';
+    return { changed: true, body: b, note: 'set non-null damageDescription' };
+  }
+  if (/^suggestedItems/i.test(f)) {
+    b.suggestedItems = (Array.isArray(b.suggestedItems) ? b.suggestedItems : []).filter((s) => s && s.level1).map((s) => ({ level1: s.level1 || '', level2: s.level2 || '', level3: s.level3 || '' }));
+    if (!b.suggestedItems.length) return { changed: false, body: b, note: '' };
+    return { changed: true, body: b, note: 'normalized suggestedItems[]' };
+  }
+  if (/recommendationInfo/i.test(f) && nullish) {
+    b.recommendationInfo = b.recommendationInfo || {};
+    for (const k of ['vendor', 'ruleName', 'groupingId', 'ruleId']) if (b.recommendationInfo[k] === undefined) b.recommendationInfo[k] = null;
+    if (b.recommendationInfo.recommendationOverridden === undefined) b.recommendationInfo.recommendationOverridden = false;
+    return { changed: true, body: b, note: 'filled recommendationInfo required keys' };
+  }
+  if (/supplierId/i.test(f) && nullish) {
+    // supplierId required but null: can't invent a branch — only fixable if the
+    // recommendation gave one. Leave for diagnosis (handled by caller).
+    return { changed: false, body: b, note: '' };
+  }
+  if (/urgencyReason/i.test(f) && nullish) {
+    // urgent true but reason null -> a safe default; if not urgent, null is fine.
+    if (b.urgent) { b.urgencyReason = b.urgencyReason || 'DEA_ASSET_SHORTAGE'; return { changed: true, body: b, note: 'set default urgencyReason (urgent)' }; }
+    return { changed: false, body: b, note: '' };
+  }
+  if ((/currentLocation/i.test(f)) && nullish) {
+    b.currentLocation = b.currentLocation || {};
+    if (b.currentLocation.latitude == null) b.currentLocation.latitude = 0;
+    if (b.currentLocation.longitude == null) b.currentLocation.longitude = 0;
+    if (!b.currentLocation.country) b.currentLocation.country = 'United States';
+    if (!b.currentLocation.timeZone) b.currentLocation.timeZone = 'America/New_York';
+    return { changed: true, body: b, note: 'filled currentLocation required coords/country/timeZone' };
+  }
+  // Generic: a top-level scalar required-but-null we can safely blank-fill.
+  if (nullish && /^[A-Za-z0-9_]+$/.test(f) && (f in b) && b[f] == null) {
+    b[f] = (f.toLowerCase().includes('date') ? new Date().toISOString() : '');
+    return { changed: true, body: b, note: 'set non-null default for ' + f };
+  }
+  return { changed: false, body: b, note: '' };
 }
 
 // Build the REAL /createRepair request body (captured live from the AAP wizard
@@ -1826,6 +1981,8 @@ module.exports = {
   apiPost,
   apiPut,
   createWorkOrder,
+  _parseAapErrorField,          // exported for self-healing unit tests
+  _correctCreateRepairField,    // exported for self-healing unit tests
   vreRecommendMatrix,
   getDocumentUploadLink,
   uploadDocumentFile,

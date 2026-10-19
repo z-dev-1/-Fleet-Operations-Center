@@ -1431,8 +1431,21 @@ function _wireSubmit() {
           relay.refreshUnit(_eqId).catch(() => {});
         }
       } else {
+        // Self-healing diagnosis: when the backend got STUCK on a specific
+        // field, show exactly where + what it tried to correct, so the problem
+        // is actionable instead of a generic "failed".
+        if (result && result.stuckField) {
+          _logProgress('Stuck at field "' + result.stuckField + '"', 'err');
+        }
+        if (result && Array.isArray(result.corrections) && result.corrections.length) {
+          _logProgress('Auto-corrections attempted: ' + result.corrections.join('; '), 'run');
+        }
         _logProgress('Work order creation failed', 'err');
-        _showError((result && (result.error || result.message)) || 'AAP rejected the work order.');
+        const diag = (result && result.stuckField)
+          ? ('Stuck at "' + result.stuckField + '". ' + ((result.error || '')) +
+             (result.aapMessage ? ' AAP said: ' + String(result.aapMessage).slice(0, 220) : ''))
+          : ((result && (result.error || result.message)) || 'AAP rejected the work order.');
+        _showError(diag);
       }
     } catch (e) {
       if (_progUnsub) { _progUnsub(); _progUnsub = null; }
