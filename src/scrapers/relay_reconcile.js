@@ -142,7 +142,7 @@ function buildReconcilePrompt(brief, cfg) {
     ' Reason like a human coordinator — do not just summarize.');
   lines.push('');
   lines.push('Return STRICT JSON ONLY (no prose, no markdown), exactly this shape:');
-  lines.push('{"relayHasLatest":true|false,"missingUpdate":"the specific NEW update present in Offsite but NOT yet in Relay — empty string if none or if no Offsite","currentStatus":"one-line real current status synthesized from ALL sources","nextStep":"the concrete next action","lastCommentBy":"vendor|us|unknown — who sent the most recent comment in the thread","lastCommentWhen":"the date of that last comment if shown, else empty","lastCommentGist":"a few words on what that last comment said","nextActionType":"reply_to_vendor|request_update|post_to_relay|none — SEE THE NEXT-ACTION RULE","awaitingReply":"when nextActionType=reply_to_vendor: the exact question the vendor asked us that still needs OUR answer — else empty","weOweReply":true|false,"threadOfRecord":"relay|offsite — which thread the live back-and-forth is happening in","isStale":true|false,"dealerAsk":"the EXACT message to post to the vendor — a chase for what we are waiting on (request_update) OR our answer to their question (reply_to_vendor) — grounded in what is already known; empty if none needed","relayNote":"a FACTUAL INTERNAL status log line to post in Relay Garage (see the RELAY NOTE rule) — third person, past tense, NOT addressed to the vendor; empty if nothing to log","confidence":0.0-1.0,"reasoning":"1-2 sentences","conflicts":[{"field":"status|eta|parts|location","positions":[{"source":"aap|relay|offsite","value":"what that source says"}],"resolution":"aap|relay|offsite — which source you trusted","reason":"why that source wins (e.g. fresher)"}],"statusChangeReason":"if the status appears to have CHANGED from the prior updates, the grounded reason — else empty string"}');
+  lines.push('{"relayHasLatest":true|false,"missingUpdate":"the specific NEW update present in Offsite but NOT yet in Relay — empty string if none or if no Offsite","currentStatus":"one-line real current status synthesized from ALL sources","repairPhase":"one of: awaiting_vendor|appointment_scheduled|vehicle_arrived|diagnosis|diagnosis_complete|awaiting_estimate|awaiting_approval|awaiting_parts|parts_backordered|parts_received|repair_in_progress|road_test|quality_check|ready_for_pickup|pickup_scheduled|repair_complete|reroute_required|closed|unknown — SEE THE PHASE RULE","waitingOn":"one of: vendor|internal|approval|parts|transportation|pickup|customer|fleet|nobody|unknown — who/what is blocking progress","nextStep":"the concrete next action","lastCommentBy":"vendor|us|unknown — who sent the most recent comment in the thread","lastCommentWhen":"the date of that last comment if shown, else empty","lastCommentGist":"a few words on what that last comment said","nextActionType":"reply_to_vendor|request_update|post_to_relay|none — SEE THE NEXT-ACTION RULE","awaitingReply":"when nextActionType=reply_to_vendor: the exact question the vendor asked us that still needs OUR answer — else empty","weOweReply":true|false,"decisionRequired":true|false,"decisionQuestion":"when a HUMAN judgment is required (cost/approval we cannot safely answer from data), the exact question — else empty","threadOfRecord":"offsite|relay_integrated_vendor|relay_internal|none — SEE THE THREAD RULE","isStale":true|false,"dealerAsk":"the EXACT message to post to the vendor — a chase for what we are waiting on (request_update) OR our answer to their question (reply_to_vendor) — grounded in what is already known; empty if none needed OR if a human decision is required","relayNote":"a FACTUAL INTERNAL status log line to post in Relay Garage (see the RELAY NOTE rule) — third person, past tense, NOT addressed to the vendor; empty if nothing to log","confidence":0.0-1.0,"reasoning":"1-2 sentences","conflicts":[{"field":"status|eta|parts|location","positions":[{"source":"aap|relay|offsite","value":"what that source says"}],"resolution":"aap|relay|offsite — which source you trusted","reason":"why that source wins (e.g. fresher)"}],"statusChangeReason":"if the status appears to have CHANGED from the prior updates, the grounded reason — else empty string"}');
   lines.push('');
   lines.push('RULES:');
   lines.push('- Use ONLY the data below. NEVER invent a part, date, ETC, price, vendor, or status that is not present. If a field is blank, treat it as unknown.');
@@ -159,7 +159,10 @@ function buildReconcilePrompt(brief, cfg) {
   lines.push('    * request_update — WE sent the last message (we answered their question, or we asked them something), so the ball is in THEIR court and they owe US the next thing. dealerAsk = a chase for THAT specific thing. CRITICAL: do NOT re-ask or re-authorize what we already said. If we already told them "get us the freight estimate," the chase is "any update on that freight estimate / revised ETC?" — NOT "please advise whether to use freight" (we already advised). You are NEVER "awaiting our own guidance" — if we spoke last, we are waiting on them.');
   lines.push('    * post_to_relay — the only gap is that Offsite has an update Relay lacks (no open question either way); the action is to write that update into Relay internally. No vendor message needed (dealerAsk="").');
   lines.push('    * none — current/complete, or the vendor JUST updated us and nothing is owed yet.');
-  lines.push('  threadOfRecord = where the live back-and-forth is (offsite if the exchange is in the Offsite portal, relay if in Relay). A reply/chase to the vendor must go to THAT thread.');
+  lines.push('- PHASE RULE (repairPhase): set the SINGLE phase the evidence supports. NEVER infer a more advanced phase than the text shows — "estimate submitted, awaiting approval" is awaiting_approval (NOT repair_in_progress); "preparing estimate" is awaiting_estimate; "parts ordered" is awaiting_parts; "parts backordered/no ETA" is parts_backordered; "parts arrived" is parts_received; "in the bay / repairs underway" is repair_in_progress; "repairs complete, ready for pickup" is ready_for_pickup; "we cannot do this repair / needs OEM dealer" is reroute_required. If the text is vague, use unknown. A unit "ready to be towed OUT to the dealer" has NOT started repair -> awaiting_vendor, never ready.');
+  lines.push('- WAITING-ON RULE (waitingOn): who/what blocks progress, and it must MATCH the action. If the dealer submitted an estimate and is waiting for us -> approval (and we do NOT chase the vendor). If the dealer ordered parts -> parts. If repairs are done and the unit needs pickup -> pickup. If the vendor has not answered OUR question -> internal (WE owe the move). If the vendor owes us the next update -> vendor.');
+  lines.push('- NEVER CHASE WHEN WE ARE THE BLOCKER (critical): if Offsite says "estimate submitted, waiting for approval" then repairPhase=awaiting_approval, waitingOn=approval, nextActionType=post_to_relay, dealerAsk="" (do NOT ask the vendor for another update). The relayNote states the dealer submitted an estimate awaiting approval and that internal review is required. The same applies to any "waiting on us" state (expedited-freight approval, OEM-vs-aftermarket direction): surface decisionRequired=true with the decisionQuestion and leave dealerAsk empty until a human decides.');
+  lines.push('- THREAD RULE (threadOfRecord): decide from the actual thread participants, NOT the platform name. offsite = a live vendor/dealer conversation exists in the Offsite portal. relay_integrated_vendor = no Offsite portal but the Relay thread contains VENDOR-authored comments (the vendor talks inside Relay). relay_internal = Relay comments are internal-only coordination notes. none = nothing to reconcile. A vendor-facing message must only be routed to a thread the vendor actually participates in.');
   lines.push('- dealerAsk / FOLLOW-UP: when you do produce a vendor message, make it specific — reference the known issue/vendor and the date of the relevant note — e.g. "Following up on the DEF pump repair — no update since our 10/3 note. Can you confirm current status and a revised ETC?". Do NOT ask for anything the thread already answered. If nextActionType=none set dealerAsk="".');
   lines.push('- RELAY NOTE (critical — this is DIFFERENT from dealerAsk): relayNote is an INTERNAL status log posted in our own tracking system, NOT a message to the vendor. It must be written in the THIRD PERSON and PAST/FACTUAL tense — a record of where things stand, NOT a request. NEVER address the vendor, NEVER write "can you confirm" / "please advise" / "provide an ETA" in relayNote. It must: (1) state the current situation and the known parts/ETC facts; (2) CREDIT the vendor\'s most recent update if a vendor comment exists — summarize what they said and when (e.g. "Per Kenworth 10/06, waiting on a clamp that is on backorder."); NEVER say "no vendor engagement"/"no vendor response" when the offsite/relay thread shows a vendor comment; (3) note what WE have done; (4) if we are chasing the vendor, END with "Update requested, pending response." Example relayNote: "Exhaust clamp and gasket on order since 09/30, no ETA. Per Kenworth of PA (Stephanie Bean) 10/06, awaiting a clamp currently on backorder. 10 days down; final repairs and DOT inspection still pending. Update requested, pending response." The dealerAsk for the SAME unit is the opposite voice (addressed TO the vendor). Produce BOTH.');
   lines.push('- CONFLICTS: only when two sources genuinely DISAGREE about the same fact (e.g. AAP lifecycle still says unavailable but Offsite says the repair is complete; or Relay shows an older ETC than Offsite). For each real disagreement add one conflicts[] entry listing each source\'s position, which source you trusted (resolution), and why (reason — usually "fresher"/"more specific"). If there is no genuine disagreement, return "conflicts":[]. NEVER invent a source that is not in the data below.');
@@ -225,6 +228,39 @@ function _parseJson(text) {
   return null;
 }
 
+// ── Integrated-vendor detection (spec §6) ────────────────────────────────────
+// Many vendors communicate DIRECTLY inside Relay Garage (integrated vendors), so
+// Relay is not always internal-only. Decide whether the Relay thread contains
+// vendor-authored comments vs internal-only notes, using the structured
+// author/side classification from convo_parse (NOT a fragile hardcoded name
+// list). Returns true when at least one Relay comment is vendor-authored.
+function _relayHasVendorComments(brief) {
+  const arr = brief && brief.relayComments;
+  if (!Array.isArray(arr) || !arr.length) return false;
+  return arr.some((c) => c && c.side === 'vendor');
+}
+
+// Derive the expanded threadOfRecord (spec §5) from where the live back-and-
+// forth actually is — NOT from the platform name alone:
+//   offsite                 — a live Offsite/Decisiv/ASIST vendor thread exists.
+//   relay_integrated_vendor — no Offsite portal, but the Relay thread carries
+//                             vendor-authored comments (vendor talks in Relay).
+//   relay_internal          — Relay comments are internal-only coordination.
+//   none                    — nothing to reconcile.
+// `aiValue` is the AI's threadOfRecord (accepts the old relay|offsite too).
+function _deriveThreadOfRecord(brief, aiValue) {
+  const EXPANDED = ['offsite', 'relay_integrated_vendor', 'relay_internal', 'none'];
+  // If the AI already returned an expanded value, trust it.
+  if (EXPANDED.includes(String(aiValue))) return aiValue;
+  const hasOffsite = !!brief.offsiteNotes;
+  const hasRelay = !!(brief.relayConversation || (brief.relayComments && brief.relayComments.length));
+  // Legacy AI value 'offsite' -> offsite; 'relay' needs refining below.
+  if (String(aiValue) === 'offsite' && hasOffsite) return 'offsite';
+  if (hasOffsite) return 'offsite';
+  if (hasRelay) return _relayHasVendorComments(brief) ? 'relay_integrated_vendor' : 'relay_internal';
+  return 'none';
+}
+
 // Normalize + sanity-bound a raw AI verdict into a trusted decision object.
 function _normalizeDecision(brief, raw, cfg) {
   const v = raw || {};
@@ -254,13 +290,37 @@ function _normalizeDecision(brief, raw, cfg) {
   // Classify what WE must do next, derived from the last exchange. Trust the
   // AI's call, but sanity-reconcile it with the deterministic signals so a
   // malformed verdict can't produce a nonsensical action.
+  // Core routing intents (what the apply layer switches on — unchanged set so
+  // existing routing keeps working). The richer spec §19 vocabulary is carried
+  // separately in `actionDetail` (derived below) and never breaks this switch.
   const ALLOWED_INTENTS = ['reply_to_vendor', 'request_update', 'post_to_relay', 'none'];
-  let nextActionType = ALLOWED_INTENTS.includes(String(v.nextActionType)) ? v.nextActionType : '';
+  // Expanded vocabulary (spec §19) the AI may return; each maps to a core intent.
+  const RICH_TO_CORE = {
+    reply_to_vendor: 'reply_to_vendor',
+    request_vendor_update: 'request_update',
+    request_update: 'request_update',
+    post_internal_update: 'post_to_relay',
+    post_to_relay: 'post_to_relay',
+    review_estimate: 'post_to_relay',          // internal action, no vendor chase
+    approve_estimate: 'post_to_relay',
+    internal_decision_required: 'post_to_relay',
+    arrange_pickup: 'post_to_relay',
+    reroute_vendor: 'post_to_relay',
+    close_work_order: 'none',
+    none: 'none',
+  };
+  const rawAction = String(v.nextActionType || '');
+  // If the AI returned a rich value, fold it to the core routing value.
+  let nextActionType = ALLOWED_INTENTS.includes(rawAction) ? rawAction
+    : (RICH_TO_CORE[rawAction] || '');
   const weOweReply = (nextActionType === 'reply_to_vendor') ? true : !!v.weOweReply;
   const awaitingReply = weOweReply ? str(v.awaitingReply, 600) : '';
-  const threadOfRecord = (String(v.threadOfRecord) === 'offsite') ? 'offsite'
-    : (String(v.threadOfRecord) === 'relay') ? 'relay'
-    : (brief.offsiteNotes ? 'offsite' : 'relay'); // default to where a thread exists
+  // Expanded threadOfRecord (spec §5/§6): offsite | relay_integrated_vendor |
+  // relay_internal | none — derived from where the live exchange actually is,
+  // with integrated-vendor detection. Backward-compat alias `threadOfRecordLegacy`
+  // keeps the old relay|offsite values for any caller not yet migrated.
+  const threadOfRecord = _deriveThreadOfRecord(brief, v.threadOfRecord);
+  const threadOfRecordLegacy = (threadOfRecord === 'offsite') ? 'offsite' : 'relay';
   // Fall back / reconcile when the AI didn't give a usable intent:
   if (!nextActionType) {
     if (completed) nextActionType = 'none';
@@ -279,6 +339,72 @@ function _normalizeDecision(brief, raw, cfg) {
   // post_to_relay/none. For reply_to_vendor it may legitimately be empty when the
   // answer is a judgment call — the open question is surfaced via awaitingReply.
   const dealerAsk = followUpNeeded ? str(v.dealerAsk, 1000) : '';
+
+  // ── repairPhase (spec §3) — first-class, grounded ──────────────────────────
+  // Prefer the AI's value when it's a valid phase; otherwise derive it
+  // deterministically from the known text. NEVER over-infer: a completed WO is
+  // closed/complete; everything else falls back to the signal-based deriver.
+  const rp = require('./repair_phase');
+  const phaseBlob = [
+    brief.offsiteNotes, brief.relayConversation, brief.relayTimeline,
+    brief.serviceState, brief.completed, brief.lifecycleReason,
+    brief.issueSummary, brief.correction, missingUpdate, str(v.currentStatus, 400),
+  ].filter(Boolean).join(' | ');
+  let repairPhase = rp.isRepairPhase(v.repairPhase) ? v.repairPhase : '';
+  if (!repairPhase) repairPhase = rp.derivePhase(phaseBlob, { closed: completed });
+  if (completed && (repairPhase === 'unknown' || repairPhase === 'awaiting_vendor')) {
+    // AAP says the WO is done but the text was vague — treat as complete, not a
+    // regressed early phase.
+    repairPhase = 'repair_complete';
+  }
+
+  // ── waitingOn (spec §4) — expanded enum, materially drives the action ──────
+  // Prefer the AI's value when valid; otherwise derive from the phase. Then
+  // reconcile with who-spoke-last for the "awaiting" phases: if WE spoke last we
+  // are waiting on the vendor (never on ourselves).
+  let waitingOn = rp.isWaitingOn(v.waitingOn) ? v.waitingOn : '';
+  if (!waitingOn) waitingOn = rp.deriveWaitingOn(repairPhase, lastCommentBy);
+  if (completed) waitingOn = (repairPhase === 'ready_for_pickup' || repairPhase === 'repair_complete') ? 'pickup' : 'nobody';
+  // An unanswered vendor question means we owe the next move (internal), not them.
+  if (weOweReply && waitingOn === 'vendor') waitingOn = 'internal';
+
+  // ── decisionRequired / decisionQuestion (spec §13/§25) ─────────────────────
+  // A human judgment is required when the vendor asked something that is NOT
+  // safely answerable from data (cost/approval). The AI flags it; we also infer
+  // it when there's an unanswered vendor question but no grounded answer text.
+  let decisionRequired = !!v.decisionRequired;
+  let decisionQuestion = str(v.decisionQuestion, 400);
+  if (!decisionRequired && weOweReply && awaitingReply && !dealerAsk) {
+    // We owe a reply, the open question is known, but we have no grounded answer
+    // -> a human must decide. Never invent the answer.
+    decisionRequired = true;
+    if (!decisionQuestion) decisionQuestion = awaitingReply;
+  }
+  if (decisionRequired && !decisionQuestion) decisionQuestion = awaitingReply || str(v.currentStatus, 200);
+
+  // ── actionDetail (spec §19) — the richer action vocabulary ─────────────────
+  // Carried ALONGSIDE the core nextActionType (which the apply layer routes on).
+  // Prefer the AI's rich value when valid; otherwise derive from phase/decision.
+  const RICH_ACTIONS = ['reply_to_vendor', 'request_vendor_update', 'post_internal_update',
+    'review_estimate', 'approve_estimate', 'internal_decision_required',
+    'arrange_pickup', 'reroute_vendor', 'close_work_order', 'none'];
+  // Accept the AI's rich action verbatim ONLY when it's a concrete (non-'none')
+  // value. When it's 'none' (or absent), derive from phase/decision so a
+  // phase-implied action (e.g. ready_for_pickup -> arrange_pickup) is not lost.
+  let actionDetail = (RICH_ACTIONS.includes(rawAction) && rawAction !== 'none') ? rawAction : '';
+  if (!actionDetail) {
+    if (completed) actionDetail = 'close_work_order';
+    else if (repairPhase === 'closed') actionDetail = 'close_work_order';
+    else if (decisionRequired) actionDetail = 'internal_decision_required';
+    else if (nextActionType === 'reply_to_vendor') actionDetail = 'reply_to_vendor';
+    else if (repairPhase === 'awaiting_approval') actionDetail = 'review_estimate';
+    else if (repairPhase === 'reroute_required') actionDetail = 'reroute_vendor';
+    else if (repairPhase === 'ready_for_pickup' || repairPhase === 'repair_complete' || repairPhase === 'pickup_scheduled') actionDetail = 'arrange_pickup';
+    else if (nextActionType === 'request_update') actionDetail = 'request_vendor_update';
+    else if (nextActionType === 'post_to_relay') actionDetail = 'post_internal_update';
+    else actionDetail = 'none';
+  }
+
   return {
     equipmentId: brief.equipmentId,
     relayHasLatest: !!v.relayHasLatest,
@@ -289,9 +415,15 @@ function _normalizeDecision(brief, raw, cfg) {
     lastCommentWhen: str(v.lastCommentWhen, 60),
     lastCommentGist: str(v.lastCommentGist, 200),
     nextActionType,
+    actionDetail,
     awaitingReply,
     weOweReply,
     threadOfRecord,
+    threadOfRecordLegacy,
+    repairPhase,
+    waitingOn,
+    decisionRequired,
+    decisionQuestion,
     isStale,
     followUpNeeded,
     dealerAsk,
@@ -300,6 +432,13 @@ function _normalizeDecision(brief, raw, cfg) {
     // if relayNote reads like a request, we still keep it but the apply/Split
     // layers prefer it over dealerAsk for the Relay pane. Empty is fine.
     relayNote: str(v.relayNote, 1200),
+    // ── Spec §18 canonical aliases (two-surface output) ───────────────────────
+    // vendorMessage is the external/vendor-facing text (== dealerAsk until all
+    // callers migrate). relayMessage mirrors relayNote for symmetry. Keeping
+    // BOTH names means existing dealerAsk/relayNote readers and any new
+    // vendorMessage/relayMessage readers both work.
+    vendorMessage: dealerAsk,
+    relayMessage: str(v.relayNote, 1200),
     confidence: conf,
     reasoning: str(v.reasoning, 500),
     // Audit fields for canonical state (optional; sanitized downstream by
@@ -319,6 +458,20 @@ function _fallbackDecision(brief, cfg) {
   const daysSince = _daysSinceOffsite(brief);
   const completed = /complete|closed|ready|done|cancel/i.test(brief.serviceState + ' ' + brief.completed);
   const isStale = !completed && daysSince !== null && daysSince >= cfg.staleDays;
+  // Deterministic phase/waitingOn from the known text (no AI, no fabrication).
+  const rp = require('./repair_phase');
+  const phaseBlob = [
+    brief.offsiteNotes, brief.relayConversation, brief.relayTimeline,
+    brief.serviceState, brief.completed, brief.lifecycleReason,
+    brief.issueSummary, brief.correction,
+  ].filter(Boolean).join(' | ');
+  let repairPhase = rp.derivePhase(phaseBlob, { closed: completed });
+  if (completed && (repairPhase === 'unknown' || repairPhase === 'awaiting_vendor')) repairPhase = 'repair_complete';
+  const waitingOn = completed
+    ? ((repairPhase === 'ready_for_pickup' || repairPhase === 'repair_complete') ? 'pickup' : 'nobody')
+    : rp.deriveWaitingOn(repairPhase, 'unknown');
+  const threadOfRecord = _deriveThreadOfRecord(brief, null);
+  const _fbDealerAsk = isStale ? ('No recent update on ' + (brief.equipmentId) + (brief.vendor ? ' at ' + brief.vendor : '') + ' — can you confirm current repair status and ETC?') : '';
   return {
     equipmentId: brief.equipmentId,
     relayHasLatest: null,
@@ -332,15 +485,25 @@ function _fallbackDecision(brief, cfg) {
     // update; otherwise do nothing. We can't detect an unanswered question
     // without the AI, so never guess reply_to_vendor here.
     nextActionType: isStale && !completed ? 'request_update' : 'none',
+    actionDetail: completed ? 'close_work_order' : (isStale ? 'request_vendor_update' : 'none'),
     awaitingReply: '',
     weOweReply: false,
-    threadOfRecord: brief.offsiteNotes ? 'offsite' : 'relay',
+    threadOfRecord,
+    threadOfRecordLegacy: (threadOfRecord === 'offsite') ? 'offsite' : 'relay',
+    repairPhase,
+    waitingOn,
+    decisionRequired: false,
+    decisionQuestion: '',
     isStale,
     followUpNeeded: isStale,
-    dealerAsk: isStale ? ('No recent update on ' + (brief.equipmentId) + (brief.vendor ? ' at ' + brief.vendor : '') + ' — can you confirm current repair status and ETC?') : '',
+    dealerAsk: _fbDealerAsk,
+    vendorMessage: _fbDealerAsk,
     // Factual internal note (no AI): state what's known + that we chased, never a
     // vendor-addressed request.
     relayNote: isStale
+      ? ((brief.lifecycleReason || 'Repair') + (brief.vendor ? ' at ' + brief.vendor : '') + '; no update in ' + (daysSince != null ? daysSince + ' day(s)' : 'a while') + '. Update requested, pending response.')
+      : '',
+    relayMessage: isStale
       ? ((brief.lifecycleReason || 'Repair') + (brief.vendor ? ' at ' + brief.vendor : '') + '; no update in ' + (daysSince != null ? daysSince + ' day(s)' : 'a while') + '. Update requested, pending response.')
       : '',
     confidence: 0,
@@ -393,4 +556,6 @@ module.exports = {
   _normalizeDecision,
   _fallbackDecision,
   _parseJson,
+  _deriveThreadOfRecord,
+  _relayHasVendorComments,
 };
