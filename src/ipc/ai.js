@@ -888,6 +888,73 @@ async function confirmSend(item) {
     }
     if (item.channel === 'lifecycle') {
       // Real AAP lifecycle mutation, gated behind the confirm click.
+      // The conversational MOVE_UNIT path now shares the SAME API-first-with-
+      // browser-fallback behaviour as the detail-page button (aap:set-lifecycle
+      // in ipc/scrapers.js): the version-locked JSON API + source read-back
+      // (and auto-clear of a blocking DVIR when going Active), falling back to
+      // the proven BrowserWindow automation on any failure or when the
+      // fasConfig.useLifecycleApi flag is off (it is off by default).
+      const _applied = (st, rsn) => {
+        try {
+          const fd = store.load('fleetData', {});
+          const t = (fd.rows||[]).find(r => r.equipmentId === item.equipmentId);
+          if (t) {
+            t.lifecycleState = st;
+            if (rsn) t.lifecycleReason = rsn;
+            store.save('fleetData', fd);
+          }
+          const _w = require('electron').BrowserWindow.getAllWindows()[0];
+          if (_w) _w.webContents.send('fleet:refresh');
+        } catch (_) {}
+      };
+
+      // item.reason arrives here as the friendly label the MOVE_UNIT handler
+      // built (e.g. 'Healthy', 'Off-site Shop Repair'). The API module wants
+      // the AAP reason CODE; the browser automation wants the friendly text.
+      const _REASON_CODE = {
+        'healthy': 'HEALTHY',
+        'off-site shop repair': 'OFFSITE_SHOP_REPAIR',
+        'offsite shop repair': 'OFFSITE_SHOP_REPAIR',
+        'pm failed': 'PM_FAILED',
+        'preventative maintenance': 'PREVENTATIVE_MAINTENANCE',
+        'parts delay': 'PARTS_DELAY',
+        'damaged-moderate': 'DAMAGED_MODERATE',
+        'sensor detected damage': 'SENSOR_DETECTED_DAMAGE',
+        'safety inspection post accident': 'SAFETY_INSPECTION_POST_ACCIDENT',
+        'license or permit issue': 'LICENSE_OR_PERMIT_ISSUE',
+        'impounded/tow': 'IMPOUNDED_TOW',
+        'gps malfunctioning': 'GPS_MALFUNCTIONING',
+        'campaign': 'CAMPAIGN',
+      };
+      const _friendlyReason = String(item.reason || '').trim();
+      const _codeReason = _REASON_CODE[_friendlyReason.toLowerCase()] || _friendlyReason.toUpperCase().replace(/[\s/]+/g, '_');
+
+      let useApi = false;
+      try { useApi = require('../orcha/fas/config').get().useLifecycleApi === true; } catch (_) { useApi = false; }
+      if (useApi) {
+        try {
+          const api = require('../scrapers/aap_lifecycle_api');
+          const wantActive = String(item.state).trim().toUpperCase() === 'ACTIVE';
+          const r = wantActive
+            ? await api.setLifecycleActiveWithDvir({ unit: item.equipmentId, assetUrl: item.assetUrl, reason: _codeReason || 'HEALTHY' })
+            : await api.setLifecycleApi({ unit: item.equipmentId, assetUrl: item.assetUrl, state: item.state, reason: _codeReason || '' });
+          if (r && (r.status === 'done' || r.status === 'noop') && r.verified) {
+            _applied(item.state, item.reason);
+            return { ok: true, message: 'Unit ' + item.equipmentId + ' set to ' + item.state + (item.reason ? ' - ' + item.reason : '') + ' in AAP \u2014 VERIFIED' + (r.version ? ' (v' + r.version + ')' : '') + (r.dvirCleared && r.dvirCleared.length ? ' [DVIR cleared: ' + r.dvirCleared.length + ']' : '') };
+          }
+          if (r && r.status === 'execution_uncertain') {
+            return { ok: false, error: 'EXECUTION_UNCERTAIN: the change may have applied but could not be verified \u2014 re-check before relying on it.' };
+          }
+          if (r && r.needsWorkOrder) {
+            return { ok: false, error: 'Open DVIR must be cleared but no open work request was found to reference \u2014 supply a WR number.' };
+          }
+          try { logger.warn('[lifecycle-confirm] API path failed (' + (r && (r.error || r.status)) + '); falling back to browser automation'); } catch (_) {}
+        } catch (e) {
+          try { logger.warn('[lifecycle-confirm] API path threw (' + e.message + '); falling back'); } catch (_) {}
+        }
+      }
+
+      // FALLBACK: proven BrowserWindow automation (gets the friendly reason text).
       const { setLifecycleState } = require('../scrapers/setLifecycle');
       const lr = await setLifecycleState({
         equipmentId: item.equipmentId,
@@ -896,17 +963,7 @@ async function confirmSend(item) {
         reason:      item.reason || '',
       });
       if (lr && lr.success) {
-        try {
-          const fd = store.load('fleetData', {});
-          const t = (fd.rows||[]).find(r => r.equipmentId === item.equipmentId);
-          if (t) {
-            t.lifecycleState = item.state;
-            if (item.reason) t.lifecycleReason = item.reason;
-            store.save('fleetData', fd);
-          }
-          const _w = require('electron').BrowserWindow.getAllWindows()[0];
-          if (_w) _w.webContents.send('fleet:refresh');
-        } catch (_) {}
+        _applied(item.state, item.reason);
         return { ok: true, message: 'Unit ' + item.equipmentId + ' set to ' + item.state + (item.reason ? ' - ' + item.reason : '') + ' in AAP' };
       }
       return { ok: false, error: (lr && lr.message) || 'AAP did not confirm the lifecycle change' };
