@@ -9,6 +9,7 @@ afterEach(() => sup._reset());
 function deps({ offline = false, smoke, probe = false, recoverAuth } = {}) {
   return {
     isOffline: () => offline,
+    checkVpnState: async () => ({ connected: false, status: 'disconnected' }), // no real spawn
     aapApi: { getUserDetails: smoke },
     auth: {
       probeSession: async () => probe,

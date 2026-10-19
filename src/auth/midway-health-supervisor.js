@@ -189,11 +189,13 @@ async function buildSnapshot(opts) {
       };
     }
   } catch (_) { /* best-effort */ }
-  // VPN: CONTEXT ONLY. Best-effort read; never gates anything.
+  // VPN: CONTEXT ONLY. Best-effort read; never gates anything. Injectable so
+  // tests don't shell out to the real VPN checker (which spawns a process).
   try {
-    const vpn = require('../utils/vpn');
-    if (vpn && typeof vpn.checkVpnState === 'function') {
-      const v = await vpn.checkVpnState();
+    const checkVpn = _deps.checkVpnState ||
+      (() => { try { const vpn = require('../utils/vpn'); return vpn && vpn.checkVpnState; } catch (_) { return null; } })();
+    if (typeof checkVpn === 'function') {
+      const v = await checkVpn();
       snap.vpn = { connected: !!(v && v.connected), status: (v && v.status) || null, required: false };
     }
   } catch (_) { /* vpn module optional */ }
@@ -330,17 +332,108 @@ async function _runEnsureHealthy(opts) {
 
 function _result(ok, fields) { return Object.assign({ ok: !!ok }, fields); }
 
+// ══════════════════════════════════════════════════════════════════════════
+// PHASE C — persistent convergence (spec #9/#10/#23). A failed recovery must
+// NOT leave auth stuck until some external event. Schedule a bounded-backoff
+// auto-retry that re-enters ensureHealthy until verified HEALTHY. Reset on
+// success. Never retry while offline, waiting on the user, or shutting down.
+// ══════════════════════════════════════════════════════════════════════════
+
+// Backoff schedule (ms): 30s, 1m, 2m, 5m, then capped ~10–15m. Jittered.
+const _BACKOFF_MS = [30000, 60000, 120000, 300000, 600000, 900000];
+let _retryTimer = null;
+let _failStreak = 0;
+let _nextRetryAt = null;
+let _shuttingDown = false;
+
+// Injectable timer seam (spec #26).
+const _timers = {
+  set: (fn, ms) => setTimeout(fn, ms),
+  clear: (h) => clearTimeout(h),
+};
+function _setTimers(t) { if (t && t.set) _timers.set = t.set; if (t && t.clear) _timers.clear = t.clear; }
+
+function _jitter(ms) { return Math.round(ms * (0.85 + Math.random() * 0.3)); } // ±15%
+
+function _backoffFor(streak) {
+  const idx = Math.min(Math.max(streak - 1, 0), _BACKOFF_MS.length - 1);
+  return _jitter(_BACKOFF_MS[idx]);
+}
+
+function _clearRetry() {
+  if (_retryTimer != null) { try { _timers.clear(_retryTimer); } catch (_) {} _retryTimer = null; }
+  _nextRetryAt = null;
+}
+
+/**
+ * Schedule the NEXT bounded auto-retry after a failed pass. No-op when shutting
+ * down, when a prompt is pending (WAITING_FOR_USER — the user is the gate), or
+ * when offline (the reconnect watcher re-arms on online). Single timer only.
+ */
+function _scheduleRetry(reason) {
+  if (_shuttingDown) return;
+  if (_state === STATE.WAITING_FOR_USER) return;   // don't hammer while user acts
+  if (_state === STATE.HEALTHY) { _failStreak = 0; _clearRetry(); return; }
+  if (_deps.isOffline()) { _clearRetry(); return; } // reconnect watcher handles online-return
+  if (_retryTimer != null) return;                 // one pending retry at a time
+
+  _failStreak += 1;
+  const delay = _backoffFor(_failStreak);
+  _nextRetryAt = new Date(Date.now() + delay).toISOString();
+  logger.info('[auth-supervisor] scheduling auto-retry #' + _failStreak + ' in ' + Math.round(delay / 1000) + 's (reason=' + (reason || 'converge') + ')');
+  _retryTimer = _timers.set(async () => {
+    _retryTimer = null; _nextRetryAt = null;
+    if (_shuttingDown || _deps.isOffline()) { _scheduleRetry('deferred'); return; }
+    try {
+      const r = await ensureHealthy({ reason: 'auto-retry#' + _failStreak, allowPrompt: false });
+      if (r.ok && r.verified) { _failStreak = 0; _clearRetry(); logger.info('[auth-supervisor] auto-retry converged to HEALTHY'); }
+      else { _scheduleRetry('still-unhealthy'); }
+    } catch (e) { logger.warn('[auth-supervisor] auto-retry error: ' + e.message); _scheduleRetry('retry-error'); }
+  }, delay);
+  if (_retryTimer && _retryTimer.unref) _retryTimer.unref();
+}
+
+/**
+ * ensureHealthyConverging(opts) — like ensureHealthy, but on failure it ARMS
+ * the bounded auto-retry so auth converges back to HEALTHY on its own (spec #9).
+ * This is what long-lived callers / the background monitor use.
+ */
+async function ensureHealthyConverging(opts) {
+  const r = await ensureHealthy(opts || {});
+  if (r.ok && r.verified) { _failStreak = 0; _clearRetry(); }
+  else if (_state !== STATE.OFFLINE && _state !== STATE.WAITING_FOR_USER) { _scheduleRetry(r.reason || r.class); }
+  return Object.assign({}, r, { nextRetryAt: _nextRetryAt });
+}
+
+/**
+ * onReconnect() — call when the network transitions offline→online (spec #10).
+ * Does NOT assume auth is stale and does NOT prompt: it verifies the real
+ * target after a brief settle and only recovers if needed.
+ */
+async function onReconnect() {
+  if (_shuttingDown) return { ok: false, reason: 'shutting-down' };
+  logger.info('[auth-supervisor] reconnect — verifying real target (no prompt, no VPN assumption)');
+  _failStreak = 0; _clearRetry();
+  return ensureHealthyConverging({ reason: 'reconnect', allowPrompt: false });
+}
+
+/** shutdown() — cancel pending retries cleanly (spec #27). */
+function shutdown() { _shuttingDown = true; _clearRetry(); }
+function _resetConvergence() { _shuttingDown = false; _failStreak = 0; _clearRetry(); _timers.set = (fn, ms) => setTimeout(fn, ms); _timers.clear = (h) => clearTimeout(h); }
+
 // ── Injectable deps (spec #26) so the ladder/verification are deterministically
 // testable without a live box. Defaults point at the live implementations. ─────
 const _deps = {
   isOffline: () => _isOfflineNow(),
   aapApi: null,   // null -> lazy require('../scrapers/aap_api')
   auth: null,     // null -> lazy require('../scrapers/auth')
+  checkVpnState: null, // null -> lazy require('../utils/vpn').checkVpnState (context only)
 };
 function _setDeps(d) { if (d && typeof d === 'object') Object.assign(_deps, d); }
 function _reset() {
-  _deps.isOffline = () => _isOfflineNow(); _deps.aapApi = null; _deps.auth = null;
+  _deps.isOffline = () => _isOfflineNow(); _deps.aapApi = null; _deps.auth = null; _deps.checkVpnState = null;
   _state = STATE.UNKNOWN; _authRecoveryInFlight = null; _lastSnapshot = null; _history.length = 0;
+  _resetConvergence();
 }
 
 module.exports = {
@@ -350,6 +443,10 @@ module.exports = {
   verifyHealthy,
   buildSnapshot,
   ensureHealthy,
+  ensureHealthyConverging,
+  onReconnect,
+  shutdown,
   getState, getSnapshot, getHistory,
-  _setDeps, _reset,
+  _setDeps, _setTimers, _reset,
+  _scheduleRetry, _backoffFor,  // exported for convergence tests
 };
