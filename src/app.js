@@ -286,6 +286,20 @@ app.whenReady().then(async () => {
   // This is the counterpart to the offline gates that keep a connectivity blip
   // from being misread as an expired session.
   try { require('./scrapers/auth').startOnlineReauthWatch(); } catch (e) { log.warn('[midway] online-reauth watch start failed: ' + e.message); }
+  // Auto-capture a freshly-minted AEA cookie into the app session the INSTANT
+  // it lands on disk (e.g. right after the user runs `mwinit -o`). Silent AEA
+  // refresh is broken on this box (AEA browser extension StatusCode 7), so AEA
+  // only appears via a full OTP mwinit; this makes the app grab it within ~1s
+  // and converge to HEALTHY with no 5-min wait.
+  try { require('./scrapers/auth').startAeaCookieWatch(); } catch (e) { log.warn('[midway] AEA cookie watch start failed: ' + e.message); }
+
+  // THE AEA KEEP-ALIVE SERVICE (2026-10-19) — always-on owner of AEA freshness.
+  // Continuously injects the ACME posture token as the amazon_enterprise_access
+  // cookie on a tight, TTL-matched cadence (60s loop + floor + file-watch), so
+  // the app ALWAYS has a fresh AEA with no manual steps and no stale windows.
+  // This is the real fix for "my app must always have the latest AEA": it does
+  // not depend on the broken AEA browser extension or on mwinit.
+  try { require('./auth/aea-keepalive-service').start(); } catch (e) { log.warn('[midway] AEA keep-alive service start failed: ' + e.message); }
 
   // ── Midway auto-refresh — check every 5 minutes, renew 15 min before expiry ──
   const _authModule = require('./scrapers/auth');

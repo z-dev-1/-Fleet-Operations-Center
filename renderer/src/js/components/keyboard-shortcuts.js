@@ -43,11 +43,30 @@ export function initKeyboardShortcuts() {
       return;
     }
 
-    // Ctrl+M / Cmd+M → Run Midway auth (mwinit). Global so it works even while
-    // typing — a stale Midway session blocks everything else anyway.
+    // Ctrl+M / Cmd+M → Fix Midway/AAP auth via the ONE supervisor. Global so it
+    // works even while typing — a stale session blocks everything else anyway.
+    // This runs the FULL recovery ladder (silent AEA refresh → mwinit
+    // --refresh-aea → AEA posture-agent self-heal → interactive mwinit only if
+    // genuinely needed) and VERIFIES against the real AAP target — instead of
+    // blindly spawning an interactive mwinit. So a lapsed AEA (the common case)
+    // self-heals with NO YubiKey tap, and the tap only happens when the session
+    // is truly dead. Falls back to the bare runMwinit if the supervisor bridge
+    // is unavailable.
     if (e[MOD] && (e.key === 'm' || e.key === 'M')) {
       e.preventDefault();
-      if (window.auth && window.auth.runMwinit) {
+      if (window.auth && window.auth.healthRunMwinit) {
+        bus.emit('ui:toast', { type: 'info', message: '🔑 Fixing Midway/AAP auth (refresh AEA + mwinit if needed)…', duration: 2500 });
+        window.auth.healthRunMwinit().then((r) => {
+          if (r && r.ok && r.verified) {
+            bus.emit('ui:toast', { type: 'success', message: '✅ Midway/AAP auth verified', duration: 2500 });
+          } else if (r && r.state === 'WAITING_FOR_USER') {
+            bus.emit('ui:toast', { type: 'warn', message: '🔑 Complete mwinit in the terminal (PIN + security key)', duration: 4000 });
+          } else {
+            bus.emit('ui:toast', { type: 'warn', message: '⚠️ Auth not verified yet — auto-retrying', duration: 3000 });
+          }
+        }).catch(() => {});
+      } else if (window.auth && window.auth.runMwinit) {
+        // Fallback: bare interactive mwinit (older bridge without the supervisor).
         bus.emit('ui:toast', { type: 'info', message: '🔑 Running Midway auth (mwinit)…', duration: 2500 });
         window.auth.runMwinit().catch(() => {});
       }

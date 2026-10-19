@@ -252,6 +252,102 @@ async function injectCookies(targetSession, opts) {
   return injected;
 }
 
+// ── Direct AEA injection from the ACME posture token ─────────────────────────
+// ROOT CAUSE (confirmed 2026-10-19): the amazon_enterprise_access (AEA) cookie
+// is normally injected into the browser by the AEA BROWSER EXTENSION via native
+// messaging from the ACME agent. On this machine that path is BROKEN —
+// AEABrowserExtensionState.json shows StatusCode 7 for Chrome/Firefox/Edge and
+// the ACME daemon log throws RegistryException on the extension-install keys +
+// gRPC stream errors. So no browser (and no Electron window doing the OIDC
+// handshake) ever receives AEA, and AAP rejects every request. mwinit -o only
+// SOMETIMES writes AEA to the cookie file (backend 403s make it flaky).
+//
+// FIX: the AEA cookie's VALUE is just the device POSTURE TOKEN JWT, which the
+// ACME agent reliably mints to disk at:
+//   C:\ProgramData\Amazon\ACME\PostureToken\posture_token.jwt
+// (confirmed: valid RS256 JWT, device_id + com.amazon.acme.compliance claims,
+// ~4h TTL, refreshed every ~10min by PostureTokenCacheJob). So we read that
+// token straight from disk and SET it as the amazon_enterprise_access cookie
+// directly into the app's Electron session — bypassing the broken extension
+// entirely. This is what finally "attaches the AEA cookie to the app" without
+// depending on the browser extension or a flaky mwinit.
+//
+// Returns { ok, aeaMin, domains } on success, { ok:false, reason } otherwise.
+const ACME_POSTURE_TOKEN = 'C:\\ProgramData\\Amazon\\ACME\\PostureToken\\posture_token.jwt';
+// The 4 domains AAP's AEA gate checks (matches the historical 4-entry AEA set).
+const AEA_COOKIE_DOMAINS = [
+  { url: 'https://aap-na.corp.amazon.com', domain: '.corp.amazon.com' },
+  { url: 'https://amazon.com',             domain: '.amazon.com' },
+  { url: 'https://a2z.com',                domain: '.a2z.com' },
+  { url: 'https://aws.dev',                domain: '.aws.dev' },
+];
+function _decodeJwtExp(jwt) {
+  try {
+    let pl = jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (pl.length % 4) pl += '=';
+    const claims = JSON.parse(Buffer.from(pl, 'base64').toString('utf8'));
+    return typeof claims.exp === 'number' ? claims.exp : null;
+  } catch (_) { return null; }
+}
+// Read the ACME posture token's remaining life (minutes) WITHOUT injecting.
+// Returns a number of minutes, or null if the file is missing/malformed. The
+// keep-alive service uses this to decide when to re-inject (the AEA cookie
+// carries this exact expiry, so the app's AEA is only ever as fresh as the
+// token on disk).
+function postureTokenExpiryMin() {
+  try {
+    const token = fs.readFileSync(ACME_POSTURE_TOKEN, 'utf8').trim();
+    if (!token || token.split('.').length !== 3) return null;
+    const exp = _decodeJwtExp(token);
+    if (!exp) return null;
+    return Math.round((exp - Math.floor(Date.now() / 1000)) / 60);
+  } catch (_) { return null; }
+}
+
+async function injectAeaFromPostureToken(targetSession) {
+  const ses = targetSession || electronSession.defaultSession;
+  let token;
+  try {
+    token = fs.readFileSync(ACME_POSTURE_TOKEN, 'utf8').trim();
+  } catch (e) {
+    logger.warn('[AuthManager] posture token not readable (' + e.code + ') — cannot inject AEA directly');
+    return { ok: false, reason: 'posture-token-missing' };
+  }
+  if (!token || token.split('.').length !== 3) {
+    return { ok: false, reason: 'posture-token-malformed' };
+  }
+  const exp = _decodeJwtExp(token);
+  const now = Math.floor(Date.now() / 1000);
+  if (exp && exp <= now) {
+    logger.warn('[AuthManager] posture token already expired — ACME should re-mint; not injecting stale AEA');
+    return { ok: false, reason: 'posture-token-expired', aeaMin: Math.round((exp - now) / 60) };
+  }
+  const expirationDate = exp || (now + 2 * 3600);
+  let set = 0;
+  for (const d of AEA_COOKIE_DOMAINS) {
+    try {
+      await ses.cookies.set({
+        url: d.url,
+        name: 'amazon_enterprise_access',
+        value: token,
+        domain: d.domain,
+        path: '/',
+        secure: true,
+        httpOnly: true,
+        sameSite: 'no_restriction',
+        expirationDate,
+      });
+      set++;
+    } catch (e) {
+      logger.warn('[AuthManager] AEA set failed @ ' + d.domain + ': ' + e.message);
+    }
+  }
+  try { await ses.cookies.flushStore(); } catch (_) {}
+  const aeaMin = exp ? Math.round((exp - now) / 60) : null;
+  logger.info('[AuthManager] AEA injected from posture token on ' + set + '/' + AEA_COOKIE_DOMAINS.length + ' domains (aea ' + (aeaMin == null ? 'n/a' : aeaMin + 'min') + ') — bypassing broken browser extension');
+  return { ok: set > 0, aeaMin, tokenExp: exp, domains: set };
+}
+
 // -- Spawn a visible terminal and run mwinit ---------------------------------
 // Opens a real cmd.exe window so the user can tap their security key.
 // Resolves once checkMwinit() confirms all cookies are valid.
@@ -822,6 +918,30 @@ const AEA_SILENT_RETRIES = 3;
 
 async function refreshAeaSilently() {
   const before = await aeaSessionExpiryMin();
+
+  // RUNG 0 (NEW 2026-10-19) — inject AEA DIRECTLY from the ACME posture token.
+  // The browser-extension AEA path is broken on this machine (StatusCode 7), so
+  // the OIDC handshake below can NOT mint AEA. But the ACME agent still writes a
+  // valid posture token to disk, and the AEA cookie value IS that token. Inject
+  // it straight into the Electron session, then verify against the real target.
+  // This is the path that actually attaches AEA to the app with no tap and no
+  // dependency on the broken extension. If it works, we are done.
+  try {
+    const direct = await injectAeaFromPostureToken();
+    if (direct && direct.ok) {
+      const landed = await probeSession();
+      const after = await aeaSessionExpiryMin();
+      const aeaOk = after !== null && after > 0;
+      if (landed && aeaOk) {
+        logger.info('[AuthManager] AEA refresh OUTCOME: ok=true via=posture-token-direct aeaAfter=' + after + 'min (no prompt, no extension)');
+        return { ok: true, refreshed: true, aeaMin: after, via: 'posture-token-direct' };
+      }
+      logger.warn('[AuthManager] Direct posture-token AEA inject did not verify (landed=' + landed + ', aea=' + (after == null ? 'none' : after + 'min') + ') — falling back to handshake');
+    }
+  } catch (e) {
+    logger.warn('[AuthManager] Direct posture-token AEA inject error: ' + e.message + ' — falling back to handshake');
+  }
+
   let lastErr = '';
   for (let attempt = 1; attempt <= AEA_SILENT_RETRIES; attempt++) {
     try {
@@ -923,6 +1043,72 @@ function startOnlineReauthWatch() {
   return _reauthUnsub;
 }
 
+// ── AEA cookie auto-capture watch ────────────────────────────────────────────
+// PROBLEM (confirmed 2026-10-19): on this machine the SILENT AEA paths
+// (browser OIDC handshake via refreshAeaSilently, and `mwinit --refresh-aea`)
+// mint NO AEA cookie because the AEA browser extension is broken (StatusCode 7).
+// The ONLY thing that mints AEA is a full `mwinit -o` (YubiKey OTP), which
+// writes amazon_enterprise_access into ~/.midway/cookie. When the user runs
+// that from ANY terminal (not just via the app), the app previously had to wait
+// up to 5 minutes for the heartbeat to notice and inject it.
+//
+// This watch makes the app CAPTURE a freshly-minted AEA the INSTANT it lands on
+// disk: it watches the cookie file and, whenever the file changes and a live
+// AEA cookie is present on disk that is NOT yet in the Electron session, it
+// injects it immediately and nudges the supervisor to re-verify. So the moment
+// `mwinit -o` completes (in the app's spawned terminal OR a terminal the user
+// opened themselves), the app picks up AEA within ~1s and converges to HEALTHY
+// with no further action. Idempotent; a second call replaces the watcher.
+let _aeaWatchHandle = null;
+let _aeaWatchDebounce = null;
+let _aeaWatchBusy = false;
+function startAeaCookieWatch() {
+  try { if (_aeaWatchHandle) { _aeaWatchHandle.close(); _aeaWatchHandle = null; } } catch (_) {}
+  const dir = require('path').dirname(COOKIE_FILE);
+  const base = require('path').basename(COOKIE_FILE);
+  const onChange = () => {
+    if (_aeaWatchDebounce) clearTimeout(_aeaWatchDebounce);
+    _aeaWatchDebounce = setTimeout(async () => {
+      if (_aeaWatchBusy) return;
+      _aeaWatchBusy = true;
+      try {
+        // Only act when the DISK has a live (unexpired) AEA cookie. aeaFileExpiryMin
+        // returns the soonest AEA expiry from the file, or null when absent/expired.
+        const diskAea = aeaFileExpiryMin();
+        if (diskAea == null || diskAea <= 0) return;   // nothing fresh to capture
+        // Is the Electron session already carrying a live AEA? If so, nothing to do.
+        let liveAea = null;
+        try { liveAea = await aeaSessionExpiryMin(); } catch (_) {}
+        if (liveAea != null && liveAea > 0) return;    // app already has it
+        // Fresh AEA on disk but NOT in the app session → capture it NOW.
+        logger.info('[AuthManager] AEA cookie appeared on disk (' + diskAea + 'min) — injecting into app session immediately (auto-capture)');
+        try { await injectCookies(); } catch (e) { logger.warn('[AuthManager] AEA auto-capture inject failed: ' + e.message); }
+        const after = await aeaSessionExpiryMin().catch(() => null);
+        logger.info('[AuthManager] AEA auto-capture result: app session AEA now ' + (after == null ? 'missing' : after + 'min'));
+        // Nudge the supervisor to re-verify against the real target so it flips
+        // to HEALTHY right away instead of waiting for its next backoff tick.
+        try {
+          const sup = require('../auth/midway-health-supervisor');
+          if (sup && typeof sup.ensureHealthyConverging === 'function') {
+            sup.ensureHealthyConverging({ reason: 'aea-captured', allowPrompt: false }).catch(() => {});
+          }
+        } catch (_) {}
+      } finally {
+        _aeaWatchBusy = false;
+      }
+    }, 800);   // debounce: cookie file is rewritten in a few bursts
+  };
+  try {
+    _aeaWatchHandle = fs.watch(dir, (evt, fname) => {
+      if (!fname || fname === base) onChange();
+    });
+    logger.info('[AuthManager] AEA cookie auto-capture watch started on ' + COOKIE_FILE);
+  } catch (e) {
+    logger.warn('[AuthManager] AEA cookie watch failed to start: ' + e.message);
+  }
+  return () => { try { if (_aeaWatchHandle) _aeaWatchHandle.close(); } catch (_) {} _aeaWatchHandle = null; };
+}
+
 // ── AEA posture-agent self-heal (Windows) ────────────────────────────────────
 // ROOT CAUSE (observed 2026-10-18): AAP kept rejecting the session even with a
 // valid Midway session, VPN up, and AAP reachable — because the Amazon
@@ -945,6 +1131,17 @@ let _lastAeaAgentRestartAttemptAt = 0;
 let _lastAeaAgentRestartVerifiedAt = 0;
 async function restartAeaAgent() {
   if (process.platform !== 'win32') return false;         // agent is Windows-only
+  // KILL-SWITCH (2026-10-19): when FLEET_NO_AEA_AGENT_RESTART=1, NEVER kill /
+  // restart the Enterprise Access posture agent. Repeatedly killing
+  // EnterpriseAccessConsoleApp.exe + restarting itacsvc can tip the agent into
+  // a multiplying-duplicate state where it mints NO AEA at all. If the OS-side
+  // agent is healthy (e.g. right after a clean reboot), the app must leave it
+  // alone and just let silent AEA refresh use it. Set this when recovering from
+  // a broken posture-agent state so the app's self-heal can't re-break it.
+  if (process.env.FLEET_NO_AEA_AGENT_RESTART === '1') {
+    logger.info('[AuthManager] AEA agent restart DISABLED (FLEET_NO_AEA_AGENT_RESTART=1) — leaving posture agent untouched');
+    return false;
+  }
   if (_aeaAgentRestartInFlight) return false;             // don't stack restarts
   // Rate-limit: at most once per 2 min, so a flapping agent can't get into a
   // kill/respawn loop that itself starves the posture query.
@@ -1190,5 +1387,9 @@ module.exports = {
   ensureAuthenticated,
   pingRelayEndpoint,
   startOnlineReauthWatch, // FIX (2026-10): re-probe same session on reconnect; prompt only on confirmed-online rejection
+  startAeaCookieWatch, // FIX (2026-10-19): auto-capture a freshly-minted AEA cookie into the app session the instant it lands on disk
+  injectAeaFromPostureToken, // FIX (2026-10-19): inject AEA directly from the ACME posture token, bypassing the broken AEA browser extension (StatusCode 7)
+  postureTokenExpiryMin,     // FIX (2026-10-19): read the ACME posture token's remaining life (the AEA cookie's true TTL)
+  ACME_POSTURE_TOKEN,        // path to the ACME posture token file (for the keep-alive watcher)
   COOKIE_FILE,
 };

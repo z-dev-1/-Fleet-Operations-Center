@@ -18,6 +18,7 @@ import bus                                         from '../bus.js';
 import state                                        from '../state.js';
 import { settings as settingsBridge }              from '../bridge.js';
 import { credentials as credsBridge }              from '../bridge.js';
+import { auth     as authBridge }                  from '../bridge.js';
 import { slack    as slackBridge }                 from '../bridge.js';
 import { sp       as spBridge }                    from '../bridge.js';
 import { asana    as asanaBridge }                 from '../bridge.js';

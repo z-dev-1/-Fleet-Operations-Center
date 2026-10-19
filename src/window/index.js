@@ -266,6 +266,8 @@ function initWindows(ctx) {
   let _lastDeepScanAt   = 0;         // hoisted: throttles the AI timeline build to once / 20 min
   let _autoSyncStarted  = false;     // hoisted: ensures the auto-sync timer starts exactly once
   let _reauthInFlight   = false;     // hoisted: guards the AEA/mwinit recovery ladder (one at a time)
+  let _apiLoadInFlight  = false;     // hoisted: single-flight guard for _loadFleetViaApiStartup (no concurrent builds)
+  let _apiLoadPendingReason = null;  // hoisted: a load requested while one was in flight → one trailing refresh
   let _pmFillRunning    = false;     // hoisted: guards the background PM/location fill
   let _lastPmFillAt     = 0;         // hoisted: throttles the PM/location fill to once/hour
   const RESCAN_INTERVAL_MS = 5 * 60 * 1000; // hoisted: _showApp reads it synchronously in API mode
@@ -1023,6 +1025,21 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
     // refreshUnit when its detail panel opens. Called once at startup in API
     // mode, and on the recurring API refresh timer.
     async function _loadFleetViaApiStartup(reason) {
+      // SINGLE-FLIGHT GUARD (2026-10-19): only ONE fleet build may run at a
+      // time. Without this, a burst of callers — e.g. several AAP reads that
+      // all failed while auth was down and then each fire a 'post-reauth' retry
+      // when the supervisor recovers — launch concurrent buildFleetDataset()
+      // runs that race on the shared AAP warm window (and one sibling calling
+      // aap_api.dispose() mid-build), so none completes and the table never
+      // repaints. If a build is already in flight, remember that another was
+      // requested and run exactly ONE follow-up when the current one finishes
+      // (coalescing the whole burst into a single trailing refresh).
+      if (_apiLoadInFlight) {
+        _apiLoadPendingReason = reason || 'coalesced';
+        logger.info('[data-source] API load (' + (reason || 'startup') + ') skipped — a build is already in flight (coalescing)');
+        return;
+      }
+      _apiLoadInFlight = true;
       try {
         // Stage 11: cluster live-pull gate. This is the single chokepoint every
         // recurring live AAP read converges on (the 5-min API timer, the rescan
@@ -1187,6 +1204,17 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         } else {
           logger.warn('[data-source] API load failed: ' + e.message);
           pushError('API load failed: ' + e.message);
+        }
+      } finally {
+        // Release the single-flight guard. If other callers asked for a load
+        // while this one was running, run exactly ONE trailing refresh now so
+        // the latest data lands — without stacking the whole burst.
+        _apiLoadInFlight = false;
+        if (_apiLoadPendingReason) {
+          const nextReason = _apiLoadPendingReason;
+          _apiLoadPendingReason = null;
+          logger.info('[data-source] running coalesced follow-up fleet load (' + nextReason + ')');
+          setTimeout(() => { _loadFleetViaApiStartup(nextReason); }, 250);
         }
       }
     }
