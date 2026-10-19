@@ -493,6 +493,13 @@ function registerScrapersIPC(ctx) {
         attachments: (payload.attachments || []).map((d, i) => (typeof d === 'string' ? { name: 'attachment-' + (i + 1), dataUrl: d } : d)),
         domicile: (unit && (unit.site || unit.domicileSite)) || payload.domicile || '',
         copiedFromWorkRequestId: payload.copiedFromWorkRequestId || null,
+        // TOW: pass the DESTINATION (where the unit is going) + direction so the
+        // create body can set AAP's separate `destination` field + transloading
+        // flag (AAP stores tow pickup in reportedLocation and the target in a
+        // distinct `destination` object — confirmed from a hand-made ref WR).
+        towDirection: payload.towDirection || '',
+        towToStreet: payload.towStreet || '', towToCity: payload.towCity || '',
+        towToState: payload.towState || '', towToZip: payload.towZip || '',
         confirmVendor: true, // modal auto-submits → commit directly
       };
 
@@ -502,6 +509,12 @@ function registerScrapersIPC(ctx) {
       // unit actually is. For a to-dealer tow the unit is still at the home yard,
       // so leave the GPS/domicile location as-is.
       const dir = String(payload.towDirection || '').toLowerCase();
+      // DIAGNOSTIC: log exactly what pickup/destination/offSite arrived, so a
+      // swapped pickup/destination is unambiguous in the log.
+      log('[create-wr] tow fields: dir=' + (dir || 'none') +
+        ' | pickup(towFrom)=' + [payload.towFromStreet, payload.towFromCity, payload.towFromState, payload.towFromZip].filter(Boolean).join(', ') +
+        ' | destination(tow)=' + [payload.towStreet, payload.towCity, payload.towState, payload.towZip].filter(Boolean).join(', ') +
+        ' | offSite=' + payload.offSite + ' loc=' + [payload.locStreet, payload.locCity, payload.locState, payload.locZip].filter(Boolean).join(', '));
       if (dir === 'return-to-yard' || dir === 'yard-to-yard') {
         const pickup = [payload.towFromStreet, payload.towFromCity, payload.towFromState, payload.towFromZip].map(s => String(s || '').trim());
         if (pickup.some(Boolean)) {

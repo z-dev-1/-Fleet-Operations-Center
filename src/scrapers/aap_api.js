@@ -2082,11 +2082,46 @@ function _buildCreateRepairBody(opts, assetFull, vendorCode, recoResp) {
   const supplierId = (vendorCode && vendorCode !== 'UNASSIGNED' && opts.supplierId)
     ? String(opts.supplierId)
     : (supplierObj && supplierObj.id) || null;
+
+  // TOW DESTINATION (confirmed from a hand-made reference WR 2026-10-19): AAP
+  // stores the tow PICKUP in reportedLocation/currentLocation and the TARGET in
+  // a SEPARATE top-level `destination` object, plus `isTransloadingRequired`.
+  // We previously sent neither — so a tow WR had no destination and the single
+  // location was wrong. Build `destination` from the tow-to address (the home
+  // yard for a return tow). type AMAZON_FACILITY + code=domicile when going to a
+  // yard; OTHER when a free address.
+  const _isTow = (base.suggestedItems || []).some((s) => /^tow$/i.test(String(s.level1 || '')));
+  let destination = null;
+  if (_isTow) {
+    const dStreet = opts.towToStreet || '';
+    const dCity = opts.towToCity || '';
+    const dState = opts.towToState || '';
+    const dZip = opts.towToZip || '';
+    const dir = String(opts.towDirection || '').toLowerCase();
+    // Return-to-yard / yard-to-yard: destination is a known Amazon yard (the
+    // unit's domicile). To-dealer: destination is the dealer address (OTHER).
+    const toYard = (dir === 'return-to-yard' || dir === 'yard-to-yard');
+    const domCode = String(opts.domicile || '').trim().toUpperCase();
+    if (dStreet || dCity) {
+      destination = {
+        code: toYard ? (domCode || null) : (opts.vendor ? String(opts.vendor).split(' (')[0] : null),
+        type: toYard ? 'AMAZON_FACILITY' : 'OTHER',
+        geofenceName: toYard ? (domCode || null) : null,
+        latitude: null, longitude: null,
+        yardLocation: null, yardLocationType: null,
+        street: dStreet, city: dCity, subRegion: dState, country: 'US',
+        postalCode: dZip, timeZone: null, deviceTelemetryData: null,
+      };
+    }
+  }
+
   return {
     aaid: base.aaid,
     title: base.title,
     calltype: base.calltype,
     currentLocation,
+    destination: destination,                       // tow target (null for non-tow)
+    isTransloadingRequired: _isTow ? !!opts.transloadingRequired : false,
     urgent: base.urgent,
     urgencyReason: base.urgencyReason,
     tireIssue: base.tireIssue,

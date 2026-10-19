@@ -31,6 +31,34 @@ describe('createRepair tow location — off-site pickup wins over live-GPS yard 
     expect(cl.yardLocation).toContain('1407 Bulldog Drive');
   });
 
+  it('return-to-yard tow sets a separate destination (home yard) + isTransloadingRequired', () => {
+    const opts = {
+      aaid: 'aaid_9cfd07ce', domicile: 'EOFE01', locationLatest: LL,
+      areaPairs: [{ area: 'TOW', subcategory: 'MECHANICAL ISSUE' }],
+      offSite: true, locStreet: '1407 Bulldog Dr', locCity: 'Allentown', locState: 'PA', locZip: '18104',
+      towDirection: 'return-to-yard',
+      towToStreet: '2906 William Penn Hwy', towToCity: 'Easton', towToState: 'PA', towToZip: '18045',
+    };
+    const body = aap._buildCreateRepairBody(opts, { aaid: 'aaid_9cfd07ce', latestLocation: LL }, 'FLEETNET', null);
+    // Pickup (reportedLocation/currentLocation) = the dealer.
+    expect(body.currentLocation.street).toBe('1407 Bulldog Dr');
+    expect(body.currentLocation.geofenceName).toBeNull();
+    // Destination = the home yard, as a SEPARATE object, type AMAZON_FACILITY.
+    expect(body.destination).toBeTruthy();
+    expect(body.destination.street).toBe('2906 William Penn Hwy');
+    expect(body.destination.city).toBe('Easton');
+    expect(body.destination.type).toBe('AMAZON_FACILITY');
+    expect(body.destination.code).toBe('EOFE01');
+    expect(body.isTransloadingRequired).toBe(false);
+  });
+
+  it('non-tow WR has no destination field set', () => {
+    const opts = { aaid: 'x', domicile: 'EOFE01', locationLatest: LL, areaPairs: [{ area: 'Engine', subcategory: 'CEL' }] };
+    const body = aap._buildCreateRepairBody(opts, { aaid: 'x', latestLocation: LL }, 'VOLVO', null);
+    expect(body.destination).toBeNull();
+    expect(body.isTransloadingRequired).toBe(false);
+  });
+
   it('on-site (not a return tow): still picks the yard geofence as before', () => {
     const opts = {
       aaid: 'x', domicile: 'EOFE01', locationLatest: LL,
