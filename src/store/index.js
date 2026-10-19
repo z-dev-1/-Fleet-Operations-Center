@@ -98,6 +98,8 @@ const REGISTRY = {
   fasRoster:        () => path.join(P.dataDir, 'fas_roster.json'),    // FEATURE: scraped FAS roster snapshot (FAS personnel)
   slackMentionThreads: () => path.join(P.dataDir, 'slack_mention_threads.json'), // thread-continuation tracking for channel watch
   slackChannelRegistry: () => path.join(P.dataDir, 'slack_channel_registry.json'), // Phase 3: channel-role registry (feed vs conversational) + source authority
+  slackIdentityMappings: () => path.join(P.dataDir, 'slack_identity_mappings.json'), // Phase 5: operator-maintained email-domain -> carrier/vendor/SCAC maps for classification
+  slackIdentityChangeLog: () => path.join(P.dataDir, 'slack_identity_change_log.json'), // Phase 5: provenance log of auto identity/permission changes
   bubbleConfig:     () => path.join(P.dataDir, 'bubble_config.json'),             // floating bubble opacity setting
 
   // DTNA (and future vendor) session pre-warm bookkeeping (2026-10). Tracks the

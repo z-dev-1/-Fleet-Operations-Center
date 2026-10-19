@@ -163,10 +163,31 @@ replacement has equivalent tests (spec Phase 10 / invariants).
   (15 tests). Full suite: 1147 passing (lone failure = pre-existing flaky
   laneScore; passes in isolation).
 
-- **P5 — Profile enrichment + identity resolver (#8,#9,#11,#15,#16).**
-  `src/slack/profile-enrichment.js` (users.info), `identity-resolver.js`,
-  `contact-sync.js`; TTL/first-contact/force-refresh policy; Contact Book
-  auto-maintenance with provenance. Tests #1–#6.
+- **P5 — Profile enrichment + identity resolver + contact-sync (#8,#9,#11,#15,#16). ✅ DONE.**
+  `slack_send.fetchUserProfile` (new) — full `users.info` profile (email, domain,
+  title, tz, admin/owner/bot/guest flags, deactivated, custom fields), provenance
+  stamped, invents nothing. `src/slack/profile-enrichment.js`: separates identity
+  enrichment from authorization (authz stays every-message + local; enrichment is
+  TTL-gated ~24h) — `shouldEnrich` fires on first-contact / stale / missing-
+  critical-field / force / high-risk; otherwise skips (no Slack call).
+  `src/slack/identity-resolver.js`: classifies an enriched profile into
+  `{identityType, confidence, evidence}` from verified email domain / known
+  SCAC-vendor domain maps / org / title — a prior operator-confirmed identity
+  outranks inference (conf 1.0); bot/deactivated/guest downgrade confidence;
+  assigns NO permissions. `src/slack/contact-sync.js`: orchestrates enrich →
+  classify → policy.evaluate → Contact Book `upsert({operator:false})`. SAFE
+  metadata always applied; identity+permissions applied only at AUTO_APPLY
+  (≥0.95); SUGGEST stores a proposal and keeps effective conservative; DEFAULT
+  changes nothing but metadata. trusted_autonomous is NEVER written (Phase 4 gate
+  on the automated path downgrades it — verified). Every identity change logged
+  with provenance (`slackIdentityChangeLog`). Wired into discovery
+  (`slack_inbound_support.discoverOneSender`) as a fire-and-forget, TTL-gated
+  enrichment that never blocks discovery or the reply path. New stores:
+  `slackIdentityMappings`, `slackIdentityChangeLog`. Files: `slack_send.js`,
+  `src/slack/profile-enrichment.js` (new), `src/slack/identity-resolver.js` (new),
+  `src/slack/contact-sync.js` (new), `scrapers/slack_inbound_support.js`,
+  `store/index.js`, `tests/fas-contact-sync.test.js` (16 tests). Full suite:
+  1164 passing.
 
 - **P6 — Structured multimodal intelligence (#32–#36,#56,#62).** Add typed
   extraction (`document-intelligence`), damage/screenshot classification with

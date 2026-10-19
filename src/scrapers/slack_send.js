@@ -400,6 +400,56 @@ async function resolveUserName(userId) {
   }
 }
 
+// FEATURE (Phase 5): full Slack profile fetch for identity enrichment. Calls
+// users.info and returns the useful, ACTUALLY-AVAILABLE workspace profile
+// fields (spec #8). Captures source provenance; invents nothing. Returns null
+// on any failure (the caller falls back to the existing Contact Book record).
+// NOTE: deliberately a SEPARATE function from resolveUserName (which only needs
+// a display name + caches aggressively) so enrichment can run on its own TTL.
+async function fetchUserProfile(userId) {
+  if (!userId) return null;
+  let u;
+  try { u = await slackWebApi('users.info', { user: userId }); }
+  catch (_) { return null; }
+  if (!u || !u.ok || !u.user) return null;
+  const user = u.user;
+  const p = user.profile || {};
+  // Custom profile fields (users.profile.fields) come back keyed by field id;
+  // surface them by label when present, else by id. Never fabricated.
+  const customFields = {};
+  try {
+    const fields = p.fields && typeof p.fields === 'object' ? p.fields : {};
+    for (const k of Object.keys(fields)) {
+      const f = fields[k];
+      if (f && (f.value != null && String(f.value).trim())) customFields[f.label || k] = f.value;
+    }
+  } catch (_) { /* fields optional */ }
+  return {
+    slackId: user.id || userId,
+    realName: p.real_name || user.real_name || '',
+    displayName: p.display_name || user.name || '',
+    email: p.email || '',
+    emailDomain: (p.email && p.email.includes('@')) ? p.email.split('@')[1].toLowerCase() : '',
+    title: p.title || '',
+    phone: p.phone || '',
+    timezone: user.tz || '',
+    timezoneLabel: user.tz_label || '',
+    statusText: p.status_text || '',
+    imageUrl: p.image_192 || p.image_72 || '',
+    team: user.team_id || '',
+    isAdmin: !!user.is_admin,
+    isOwner: !!user.is_owner,
+    isBot: !!user.is_bot,
+    isAppUser: !!user.is_app_user,
+    isRestricted: !!user.is_restricted,          // single-channel/multi-channel guest
+    isUltraRestricted: !!user.is_ultra_restricted,
+    deleted: !!user.deleted,                      // deactivated account
+    customFields,
+    retrievedAt: new Date().toISOString(),
+    source: 'slack.users.info',
+  };
+}
+
 // Own userId (Z), fetched lazily via auth.test and cached for the process
 // lifetime -- needed to exclude Z from the joined member-name list when
 // resolving a GROUP DM's display name (see below), without every caller
@@ -832,4 +882,4 @@ async function uploadFileToChannel(channelId, opts) {
 // Zero-width characters: invisible in the Slack client, stable across fetches.
 const SELF_REPLY_MARKER = '\u200B\u2060'; // ZWSP + WORD JOINER
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, downloadFileContent, downloadFileBuffer, uploadFileToChannel, SELF_REPLY_MARKER };
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, fetchUserProfile, downloadFileContent, downloadFileBuffer, uploadFileToChannel, SELF_REPLY_MARKER };
