@@ -430,4 +430,17 @@ function registerLongDwellCsvIPC() {
   logger.info('Long-dwell CSV IPC handlers registered');
 }
 
-module.exports = { registerLongDwellCsvIPC, MANUAL_FIELDS };
+module.exports = {
+  registerLongDwellCsvIPC,
+  MANUAL_FIELDS,
+  // ── test seams (pure functions; no electron/store side effects) ──────────
+  // Exported so the merge/join/exclusion logic the API + CSV paths share can be
+  // unit-tested directly. Not part of the IPC surface.
+  _mergeRowObjects,
+  _mergeToImportPayload,
+  _parseToObjects,
+  _unitKey,
+  _daysSince,
+  MIN_DAYS_DOWN,
+  TRACKER_COLUMNS,
+};
