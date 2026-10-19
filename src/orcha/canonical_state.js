@@ -614,6 +614,17 @@ function computeCanonical(row) {
     nextActionType: 'none',
     awaitingReply: '',
     threadOfRecord: '',
+    threadOfRecordFine: '',
+    // Two-channel reconcile fields — deterministic defaults; the AI tier
+    // (reconcileCanonical) fills these in. Keeps the record shape consistent so
+    // every consumer can read them unconditionally.
+    repairPhase: 'unknown',
+    waitingOnFine: 'unknown',
+    actionDetail: 'none',
+    decisionRequired: false,
+    decisionQuestion: '',
+    relayNote: '',
+    vendorMessage: '',
     // Audit trail — the facts behind the conclusion, the freshest real update,
     // and any obvious cross-source disagreement (deterministic).
     evidence: _buildEvidence(r, status, source),
@@ -757,6 +768,19 @@ function reconcileCanonical(row, opts) {
   dimensions.waitingOn.confidence = confidence;
   dimensions.availability.confidence = confidence;
   if (source === 'offsite') dimensions.location.confidence = confidence;
+  // When the decision carried a FINE repairPhase, project it onto the coarse
+  // phase axis so the axis reflects the sharper reconcile (e.g. parts_backordered
+  // -> awaiting_parts) instead of the deterministic read. Only override with a
+  // valid projection; never regress the axis to 'unknown' from a known baseline.
+  try {
+    const rp = require('../scrapers/repair_phase');
+    if (rp.isRepairPhase(decision.repairPhase) && decision.repairPhase !== 'unknown') {
+      const coarse = rp.toCanonicalPhase(decision.repairPhase);
+      if (isValidDimensionValue('phase', coarse) && coarse !== 'unknown') {
+        dimensions.phase.value = coarse;
+      }
+    }
+  } catch (_) { /* repair_phase unavailable — keep the derived phase */ }
 
   return {
     equipmentId: base.equipmentId,
@@ -775,7 +799,20 @@ function reconcileCanonical(row, opts) {
     // which thread the exchange is in. These drive the apply + Split View routing.
     nextActionType: ['reply_to_vendor', 'request_update', 'post_to_relay', 'none'].includes(decision.nextActionType) ? decision.nextActionType : 'none',
     awaitingReply: _clipVal(decision.awaitingReply, 300),
-    threadOfRecord: decision.threadOfRecord === 'relay' ? 'relay' : (decision.threadOfRecord === 'offsite' ? 'offsite' : ''),
+    // Coarse threadOfRecord kept for existing consumers (relay|offsite|''); the
+    // expanded 4-value value lives in threadOfRecordFine.
+    threadOfRecord: (decision.threadOfRecord === 'offsite') ? 'offsite'
+      : (decision.threadOfRecord && decision.threadOfRecord !== 'none' ? 'relay' : ''),
+    threadOfRecordFine: ['offsite', 'relay_integrated_vendor', 'relay_internal', 'none'].includes(decision.threadOfRecord) ? decision.threadOfRecord : '',
+    // ── Two-channel reconcile fields (spec §18) folded into canonical state ───
+    // so every surface (Action Board / Split View / Deep Scan) reads ONE record.
+    repairPhase: _clipVal(decision.repairPhase, 40) || 'unknown',
+    waitingOnFine: _clipVal(decision.waitingOn, 20) || 'unknown',
+    actionDetail: _clipVal(decision.actionDetail, 40) || 'none',
+    decisionRequired: !!decision.decisionRequired,
+    decisionQuestion: _clipVal(decision.decisionQuestion, 400),
+    relayNote: _clipVal(decision.relayNote, 1200),
+    vendorMessage: _clipVal(decision.vendorMessage || decision.dealerAsk, 1000),
     evidence: evidence.slice(0, _EVIDENCE_CAP + 2),
     conflicts,
     lastMeaningfulUpdate,

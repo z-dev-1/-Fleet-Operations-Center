@@ -113,14 +113,52 @@ function loadPending() {
 }
 function _savePending(p) { store.save('relayReconcilePending', p); }
 
-function _stage(decision, kind, text) {
+// ── Destination routing (spec §20/§33/§34) ──────────────────────────────────
+// Decide WHERE a candidate message should go, from the decision's threadOfRecord
+// and the message kind — NOT the platform name alone. The §34 destinations:
+//   relay_internal — an internal Relay status note (gap-fill / relayNote).
+//   relay_vendor   — a vendor-facing message into the Relay vendor thread
+//                    (integrated vendor talks inside Relay).
+//   offsite        — a vendor-facing message into the Offsite/Decisiv portal.
+//   human_decision — a judgment call; a human must decide before anything sends.
+// SAFETY: a vendor-facing message is NEVER routed into a relay_internal thread
+// (the vendor does not read it there) — it becomes human_decision instead, so we
+// never silently send to the wrong platform.
+function _destinationFor(decision, kind) {
+  const tor = String(decision.threadOfRecord || '');
+  // Internal notes always go to the internal Relay record.
+  if (kind === 'gap-fill') return 'relay_internal';
+  // A reply/chase to the vendor goes to wherever the vendor actually is.
+  if (kind === 'reply-to-vendor' || kind === 'dealer-ask') {
+    if (decision.decisionRequired) return 'human_decision';
+    if (tor === 'offsite') return 'offsite';
+    if (tor === 'relay_integrated_vendor') return 'relay_vendor';
+    // relay_internal / none: the vendor does NOT participate here. Never auto-
+    // route a vendor message into an internal-only thread — require a human to
+    // pick the destination.
+    return 'human_decision';
+  }
+  return 'human_decision';
+}
+
+function _stage(decision, kind, text, destination) {
   const p = loadPending();
+  const dest = destination || _destinationFor(decision, kind);
   const item = {
     id: 'rr_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     equipmentId: decision.equipmentId,
     serviceUrl: decision._serviceUrl || '',
     workRequestId: decision._workRequestId || '',
-    kind, // 'gap-fill' | 'dealer-ask'
+    kind, // 'gap-fill' | 'dealer-ask' | 'reply-to-vendor'
+    // Spec §34 pending-action fields.
+    destination: dest,                                  // relay_internal|relay_vendor|offsite|human_decision
+    repairPhase: decision.repairPhase || '',
+    waitingOn: decision.waitingOn || '',
+    threadOfRecord: decision.threadOfRecord || '',
+    decisionRequired: !!decision.decisionRequired,
+    decisionQuestion: decision.decisionQuestion || '',
+    reason: decision.statusChangeReason || decision.reasoning || '',
+    sourceEvidence: decision.lastCommentGist || '',
     text,
     vendor: decision.vendor || '',
     dealerName: decision.dealerName || '',
@@ -232,43 +270,71 @@ async function applyReconcile(decision, opts) {
       out.posts.push({ kind: c.kind, action: 'duplicate' });
       continue;
     }
+    // ── Destination routing (spec §20/§33) ──────────────────────────────────
+    // Resolve WHERE this message goes. Only messages whose destination is a
+    // Relay surface (relay_internal / relay_vendor — both live in the Relay WR)
+    // may ever auto-post via _postToRelay. An offsite vendor message or a
+    // human_decision must ALWAYS stage — we never silently send a vendor message
+    // to the wrong platform.
+    const destination = _destinationFor(decision, c.kind);
+    const canAutoPostDest = (destination === 'relay_internal' || destination === 'relay_vendor');
     // A reply to a vendor question is a judgment call -> ALWAYS stage, never
     // auto-post, regardless of MODE A. Low-confidence decisions also never
     // auto-post (staged for review even in MODE A; timeline already has status).
-    if (cfg.autoPostToRelay && !lowConfidence && !c.forceStage) {
+    if (cfg.autoPostToRelay && !lowConfidence && !c.forceStage && canAutoPostDest) {
       const r = await _postToRelay(decision, c.text);
       if (r.ok) {
         _markHandled(decision.equipmentId, dedupKind, c.text, c.followUpCount);
-        out.posts.push({ kind: c.kind, action: 'posted' });
-        logger.info('[relay-reconcile] MODE A posted ' + c.kind + ' to Relay for ' + decision.equipmentId);
+        out.posts.push({ kind: c.kind, action: 'posted', destination });
+        logger.info('[relay-reconcile] MODE A posted ' + c.kind + ' to ' + destination + ' for ' + decision.equipmentId);
       } else {
-        out.posts.push({ kind: c.kind, action: 'skipped', error: r.error });
+        out.posts.push({ kind: c.kind, action: 'skipped', destination, error: r.error });
         logger.warn('[relay-reconcile] MODE A post failed for ' + decision.equipmentId + ': ' + r.error);
       }
     } else {
-      // MODE B (or low-confidence, or a reply-to-vendor): stage for explicit confirm.
-      _stage(decision, c.kind, c.text);
+      // MODE B (or low-confidence, or a reply-to-vendor, or a non-Relay
+      // destination): stage for explicit confirm with the resolved destination.
+      _stage(decision, c.kind, c.text, destination);
       _markHandled(decision.equipmentId, dedupKind, c.text, c.followUpCount);
-      out.posts.push({ kind: c.kind, action: 'staged', reason: c.forceStage ? 'reply-needs-confirm' : undefined });
-      logger.info('[relay-reconcile] staged ' + c.kind + ' for ' + decision.equipmentId + ' (confirm to post)');
+      const reason = c.forceStage ? 'reply-needs-confirm'
+        : (!canAutoPostDest ? ('destination-' + destination) : undefined);
+      out.posts.push({ kind: c.kind, action: 'staged', destination, reason });
+      logger.info('[relay-reconcile] staged ' + c.kind + ' -> ' + destination + ' for ' + decision.equipmentId + ' (confirm to route/post)');
     }
   }
   return out;
 }
 
 // ── Confirm / dismiss a staged post (MODE B) ────────────────────────────────
-async function confirmPending(id) {
+async function confirmPending(id, opts) {
+  opts = opts || {};
   const p = loadPending();
   const item = p.items.find((it) => it.id === id);
   if (!item) return { ok: false, error: 'pending item not found' };
   if (item.state !== 'pending') return { ok: false, error: 'item already ' + item.state };
+  // Destination governs what "confirm" means (spec §33). Relay destinations
+  // (relay_internal / relay_vendor) write into the Relay WR comment — the only
+  // surface with safe automatic write support today. An offsite vendor message
+  // has no safe auto-write path yet, and a human_decision must not be sent as a
+  // message at all — both are refused here (unless the caller explicitly forces
+  // a Relay post after manually routing). This prevents silently sending a
+  // vendor message to the wrong platform.
+  const dest = String(item.destination || 'relay_internal');
+  if (dest === 'offsite' && !opts.forceRelayPost) {
+    return { ok: false, needsManualRoute: true, destination: dest,
+      error: 'This is a vendor message for the Offsite portal, which has no automatic send yet — copy it into the Offsite thread manually, then dismiss.' };
+  }
+  if (dest === 'human_decision' && !opts.forceRelayPost) {
+    return { ok: false, needsDecision: true, destination: dest,
+      error: 'This item requires a human decision (' + (item.decisionQuestion || 'judgment call') + ') before anything is sent.' };
+  }
   const r = await _postToRelay({ _serviceUrl: item.serviceUrl, _workRequestId: item.workRequestId, equipmentId: item.equipmentId }, item.text);
   if (r.ok) {
     item.state = 'posted';
     item.postedAt = new Date().toISOString();
     _savePending(p);
     _notifyRenderer(p);
-    return { ok: true, message: 'Posted to Relay for ' + item.equipmentId };
+    return { ok: true, message: 'Posted to Relay (' + dest + ') for ' + item.equipmentId };
   }
   return { ok: false, error: r.error };
 }
@@ -298,4 +364,5 @@ module.exports = {
   _escalate,
   _stage,
   _sig,
+  _destinationFor,
 };
