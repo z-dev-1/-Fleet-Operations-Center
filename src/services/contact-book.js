@@ -153,11 +153,31 @@ function _enumArrayOrEmpty(v, allowed) {
  * only touched when present on `incoming` (so a partial update doesn't wipe
  * fields the caller didn't send).
  */
-function sanitize(incoming) {
+function sanitize(incoming, opts) {
   const out = { ...(incoming || {}) };
   if (out.identityType !== undefined && !VALID_IDENTITY.includes(out.identityType)) out.identityType = 'unknown';
   if (out.lifecyclePermission !== undefined && !LIFECYCLE_PERMS.includes(out.lifecyclePermission)) out.lifecyclePermission = 'not_allowed';
   if (out.createWrPermission !== undefined && !CREATE_WR_PERMS.includes(out.createWrPermission)) out.createWrPermission = 'not_allowed';
+  // DETERMINISTIC POLICY GATE (spec #14, Phase 4): trusted_autonomous for
+  // lifecycle / create-WR can ONLY be set by an OPERATOR. Any automated / AI /
+  // discovery write (opts.operator !== true) that tries to set trusted_autonomous
+  // is downgraded to may_request, so inference can never persist trusted
+  // autonomy to the Contact Book. Operator UI edits (the default) are unaffected.
+  const _operatorWrite = !opts || opts.operator !== false;
+  if (!_operatorWrite) {
+    try {
+      const policy = require('../orcha/fas/permission-policy');
+      const gated = policy.sanitizeContactPermissionWrite(
+        { lifecyclePermission: out.lifecyclePermission, createWrPermission: out.createWrPermission },
+        'automated');
+      if (out.lifecyclePermission !== undefined) out.lifecyclePermission = gated.lifecyclePermission;
+      if (out.createWrPermission !== undefined) out.createWrPermission = gated.createWrPermission;
+    } catch (_) {
+      // Policy module unavailable -> fail safe: strip trusted directly.
+      if (out.lifecyclePermission === 'trusted_autonomous') out.lifecyclePermission = 'may_request';
+      if (out.createWrPermission === 'trusted_autonomous') out.createWrPermission = 'may_request';
+    }
+  }
   // VENDOR LOCK: a vendor (mechanic) can never be trusted/autonomous for
   // lifecycle changes or WR creation — they ask, the operator acts. Force both
   // to not_allowed regardless of what was submitted.
@@ -220,7 +240,10 @@ function _persist(all, eventPayload) {
 function upsert(incoming, opts) {
   opts = opts || {};
   if (!incoming || typeof incoming !== 'object') return { ok: false, error: 'contact object required' };
-  const clean = sanitize(incoming);
+  // opts.operator defaults to TRUE (the IPC/UI write paths are operator edits).
+  // Automated writers (Phase 5 contact-sync, discovery) pass { operator: false }
+  // so the policy gate strips any trusted_autonomous they try to set.
+  const clean = sanitize(incoming, { operator: opts.operator !== false });
   const all = _load();
 
   // Match by id first, then by case-insensitive slackId.

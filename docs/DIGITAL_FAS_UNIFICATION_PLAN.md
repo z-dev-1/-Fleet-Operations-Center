@@ -142,10 +142,26 @@ replacement has equivalent tests (spec Phase 10 / invariants).
   `scrapers/slack_channel_watch.js`, `store/index.js`,
   `tests/fas-channel-registry.test.js` (14 tests). Full suite: 1133 passing.
 
-- **P4 — Deterministic permission policy module (#10–#16).** Extract policy from
-  `sender-profiles` into `orcha/fas/permission-policy.js` with confidence tiers;
-  keep `sender-profiles` as the resolver that calls it. Tests for #11–#16, "AI
-  cannot grant trust", "high-risk cannot auto-expand".
+- **P4 — Deterministic permission policy module (#10–#16). ✅ DONE.**
+  `src/orcha/fas/permission-policy.js` (new, pure + deterministic). Separates
+  the three concerns: Slack enrichment ("who they appear to be") → AI
+  classification ("what the evidence suggests") → THIS engine ("what a VERIFIED
+  category is ALLOWED to do"). `evaluate(classification, {trustedActors})` maps a
+  classification `{identityType, confidence, evidence, scope}` to a SAFE profile +
+  a confidence-tier disposition: ≥0.95 AUTO_APPLY, 0.75–0.949 SUGGEST (effective
+  stays conservative/unknown, proposal saved for review), <0.75 DEFAULT (unknown,
+  never widened). HARD INVARIANTS enforced in code: classification NEVER produces
+  `trusted_autonomous` (tops out at may_request); trusted autonomy only via an
+  explicit operator `trustedActors` map (`canGrantTrusted` = operator /
+  operator_trusted_map only); vendor is hard-locked not_allowed. Defense in
+  depth: `sanitizeContactPermissionWrite` wired into `services/contact-book.js`
+  `sanitize()` — any NON-operator write (`opts.operator===false`: discovery /
+  Phase-5 contact-sync / automation) that tries to set trusted_autonomous is
+  downgraded to may_request before it can persist; operator UI edits are
+  unaffected (default operator=true). Files: `src/orcha/fas/permission-policy.js`
+  (new), `services/contact-book.js`, `tests/fas-permission-policy.test.js`
+  (15 tests). Full suite: 1147 passing (lone failure = pre-existing flaky
+  laneScore; passes in isolation).
 
 - **P5 — Profile enrichment + identity resolver (#8,#9,#11,#15,#16).**
   `src/slack/profile-enrichment.js` (users.info), `identity-resolver.js`,
