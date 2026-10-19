@@ -245,6 +245,13 @@ const REGISTRY = {
   //     kept:    { '<senderKey>': {count,lastAt} },
   //     keywords:{ deleted:{word:count}, kept:{word:count} } }.
   emailTriageLearning:     () => path.join(P.dataDir, 'email_triage_learning.json'),
+  // Email as a canonical EVIDENCE source (2026-10, Digital FAS) — per-unit
+  // email evidence items (spec §6 shape) keyed by equipmentId, newest-first,
+  // bounded. Feeds canonical reconcile / Split View; never an independent
+  // truth system. Shape: { '<equipmentId>': [ { source:'email', field, value,
+  //   observedAt, messageId, conversationId, sender, informationType,
+  //   usedInConclusion, isConflict } ] }.
+  emailEvidence:           () => path.join(P.dataDir, 'email_evidence.json'),
   // Relay ↔ Offsite reconcile (2026-10) — see src/scrapers/relay_reconcile.js.
   // Config: { enabled, autoPostToRelay (MODE A vs MODE B), staleDays,
   //   maxUnitsPerSync, minConfidence }.

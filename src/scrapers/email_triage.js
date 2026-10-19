@@ -604,6 +604,14 @@ function applyPendingUnitUpdates(results) {
     const refs = Array.isArray(em.unitRefs) ? em.unitRefs : [];
     if (!refs.length) continue;
 
+    // ── §6: record email as a canonical EVIDENCE source for in-scope units
+    //    (safe, storage-only, deduped by messageId). This happens regardless of
+    //    whether the update auto-applies — evidence is always captured so
+    //    canonical reconcile / Split View can see it and detect conflicts.
+    if (!em.emailEvidenceRecorded && em.decision) {
+      try { actions.recordEmailEvidence(em.decision, em); em.emailEvidenceRecorded = true; } catch (_) {}
+    }
+
     // ── §17: STOP blind auto-apply. Only auto-apply when the Digital FAS gate
     //    passes (in scope + genuinely new/non-stale/non-conflicting + high
     //    confidence + factual + no human decision). Otherwise record it as

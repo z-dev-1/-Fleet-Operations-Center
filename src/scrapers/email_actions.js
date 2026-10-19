@@ -237,12 +237,86 @@ async function sendReadyDm(unitRef, message, opts) {
   }
 }
 
+// ── 4. Email as a canonical EVIDENCE source (spec §6) ──────────────────────────
+// Email is ONE evidence source among AAP/Relay/Offsite/Uptake/Slack — not an
+// independent truth system. This records the structured email evidence (the §6
+// shape) into a per-unit `emailEvidence` store so canonical reconcile can read
+// it as one more source, and flags a CONFLICT (instead of overwriting) when the
+// email contradicts fresher canonical evidence. It NEVER mutates the unit
+// timeline or canonical state directly — the §17 safe-apply gate + the existing
+// confirm-gated applyUnitTimelineUpdate remain the only writers.
+//
+// buildEmailEvidence(decision, email, unitRef) -> the §6 evidence object.
+function buildEmailEvidence(decision, email, unitRef) {
+  const d = decision || {};
+  const observedAt = String((email && email.receivedText) || d.receivedAt || '').trim();
+  return {
+    source: 'email',
+    field: 'repairUpdate',
+    value: String((unitRef && unitRef.update) || (email && email.summary) || '').trim().slice(0, 400),
+    observedAt,
+    messageId: String((email && email.id) || '').trim(),
+    conversationId: String((email && email.convId) || '').trim(),
+    sender: String((email && email.from) || (email && email.fromName) || '').trim().slice(0, 160),
+    informationType: d.informationType || 'insufficient',
+    // usedInConclusion: only true when the email actually carries a usable,
+    // non-stale, non-duplicate fact for an in-scope unit.
+    usedInConclusion: d.scope === 'mine' && ['new', 'status_change'].includes(d.informationType),
+    isConflict: d.informationType === 'contradiction' || !!d.hasConflict,
+  };
+}
+
+// recordEmailEvidence(decision, email) -> { recorded, conflicts } — persists one
+// evidence item per referenced in-scope unit into store 'emailEvidence'
+// (keyed by equipmentId, newest-first, bounded). Deduplicates by messageId +
+// unit so re-triaging the same email never double-records. Pure storage —
+// no timeline/canonical mutation here.
+function recordEmailEvidence(decision, email) {
+  const d = decision || {};
+  const units = Array.isArray(d.units) ? d.units : [];
+  if (d.scope !== 'mine' || !units.length) return { recorded: 0, conflicts: 0 };
+  const refs = Array.isArray(email && email.unitRefs) ? email.unitRefs : [];
+  const refByUnit = {};
+  for (const r of refs) if (r && r.unit) refByUnit[r.unit] = r;
+
+  let ev = {};
+  try { ev = store.load('emailEvidence', {}) || {}; } catch (_) { ev = {}; }
+  let recorded = 0, conflicts = 0;
+  for (const unit of units) {
+    const item = buildEmailEvidence(d, email, refByUnit[unit]);
+    if (!item.value) continue;
+    const list = Array.isArray(ev[unit]) ? ev[unit] : [];
+    // Dedup by messageId (same email never recorded twice for the same unit).
+    if (item.messageId && list.some((x) => x.messageId === item.messageId)) continue;
+    list.unshift(item);
+    ev[unit] = list.slice(0, 30); // bounded history per unit
+    recorded++;
+    if (item.isConflict) conflicts++;
+  }
+  if (recorded) {
+    try { store.save('emailEvidence', ev); } catch (e) { logger.warn('[email-actions] emailEvidence save failed: ' + e.message); }
+  }
+  return { recorded, conflicts };
+}
+
+// Read the recorded email evidence for a unit (newest-first). For canonical
+// reconcile / Split View consumption.
+function getEmailEvidence(unitId) {
+  try {
+    const ev = store.load('emailEvidence', {}) || {};
+    return Array.isArray(ev[String(unitId || '').trim()]) ? ev[String(unitId || '').trim()] : [];
+  } catch (_) { return []; }
+}
+
 module.exports = {
   applyUnitTimelineUpdate,
   draftReply,
   sendReply,
   draftReadyDm,
   sendReadyDm,
+  buildEmailEvidence,
+  recordEmailEvidence,
+  getEmailEvidence,
   _resolveOperator,
   _buildReplyPrompt,
   _buildReadyDmPrompt,
