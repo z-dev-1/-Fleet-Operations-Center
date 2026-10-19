@@ -1256,6 +1256,110 @@ function _buildLocation(assetFull, opts) {
   return loc;
 }
 
+// ── LIVE GEOFENCE (API-first) ────────────────────────────────────────────────
+// API replacement for geofence_scraper.js. The DOM scraper loaded the Fleet
+// Monitoring page, waited 8s for the React table, scrolled virtualized rows and
+// scraped { equipmentId, geofence, latLong }. But the v2 asset search already
+// returns geoFences + geoPoint for EVERY unit in a single bulk call (the same
+// BULK_FIELDS the fleet grid uses). So this gets the live geofence + GPS for the
+// whole fleet via JSON — no browser, no 8s wait, no virtualized-scroll hacks —
+// and writes the SAME cache shape the scraper did, so every consumer is unchanged.
+//
+// Returns { ok, count, units: [{ equipmentId, geofence, latLong }] }.
+function _firstGeofenceName(g) {
+  if (Array.isArray(g) && g.length) {
+    const g0 = g[0];
+    return (g0 && (g0.name || g0.geofenceName)) || (typeof g0 === 'string' ? g0 : '') || '';
+  }
+  return '';
+}
+function _latLongStr(geoPoint) {
+  if (!geoPoint) return '';
+  const lat = geoPoint.latitude != null ? geoPoint.latitude : geoPoint.lat;
+  const lng = geoPoint.longitude != null ? geoPoint.longitude : (geoPoint.lng != null ? geoPoint.lng : geoPoint.lon);
+  if (lat == null || lng == null) return '';
+  const n = (v) => (typeof v === 'number' ? v.toFixed(6) : String(v));
+  return n(lat) + ', ' + n(lng);
+}
+
+async function getFleetGeofencesViaApi(opts = {}) {
+  // Same domicile filter resolution the fleet build uses.
+  let filters = opts.domiciles;
+  if (!filters) {
+    try {
+      const store = require('../store');
+      const s = store.load('settings', {});
+      filters = (s.domiciles && s.domiciles.length) ? s.domiciles
+        : require('../config/defaults').DEFAULT_DOMICILES;
+    } catch (_) { filters = []; }
+  }
+  const filterVals = (filters || []).map((d) => String(d).trim().toUpperCase());
+  // IMPORTANT: 'assetType' MUST be in fieldsToReturn. The v2 asset search 500s
+  // ("Cannot invoke String.equals ... assetType is null") when assetType is
+  // filtered on but NOT requested back — confirmed live 2026-10-19 (identical
+  // fieldFilters returned 150 assets WITH assetType in fieldsToReturn, but 500
+  // without it).
+  const FIELDS = ['assetType', 'displayName', 'lifecycleState', 'geoFences',
+    'yardBuildingID', 'latestLocationTimestamp', 'geoPoint'];
+
+  // The v2 asset search REQUIRES an assetType fieldFilter (a missing/null
+  // assetType returns HTTP 500 "Cannot invoke String.equals ... assetType is
+  // null"). DEFAULT_ASSET_SEARCH_REQUEST carries that filter, but our per-call
+  // fieldFilters shallow-overwrite it — so we must MERGE our domicile/operator
+  // filter WITH the base assetType filter, not replace it.
+  let baseAssetTypeFilter = [{ key: 'assetType', values: ['tractor', 'boxTruck'] }];
+  try {
+    const base = require('./aap_longdwell').DEFAULT_ASSET_SEARCH_REQUEST;
+    if (base && Array.isArray(base.fieldFilters)) {
+      const at = base.fieldFilters.filter((f) => f && f.key === 'assetType');
+      if (at.length) baseAssetTypeFilter = at;
+    }
+  } catch (_) { /* fall back to the hardcoded assetType filter above */ }
+
+  const byEquip = new Map();    // equipmentId -> { equipmentId, geofence, latLong }
+  // Union of domicileSite- and operator-matched assets (same scope as the grid).
+  for (const key of ['domicileSite', 'operator']) {
+    for (let page = 0; page < (opts.maxPages || 60); page++) {
+      let res;
+      try {
+        const fieldFilters = baseAssetTypeFilter.concat(
+          filterVals.length ? [{ key, values: filterVals }] : []
+        );
+        res = await searchAssets({
+          from: page * 150,
+          fieldFilters,
+          fieldsToReturn: FIELDS,
+        });
+      } catch (e) {
+        logger.warn('[geofence-api] asset search failed (' + key + ' p' + page + '): ' + e.message);
+        break;
+      }
+      const list = (res && res.assets) || [];
+      if (!list.length) break;
+      for (const a of list) {
+        const asset = (a && a.asset) || {};
+        const equipmentId = asset.displayName || asset.equipmentId || '';
+        if (!equipmentId) continue;
+        const ll = a.latestLocation || asset.latestLocation || {};
+        const geofence = _firstGeofenceName(ll.geoFences) || _firstGeofenceName(asset.geoFences)
+          || _firstGeofenceName(a.geoFences) || ll.geofenceName || ll.yardBuildingID
+          || asset.yardBuildingID || '';
+        const latLong = _latLongStr(ll.geoPoint || asset.geoPoint || a.geoPoint);
+        // Keep the first (or upgrade if we later find coordinates for a unit that had none).
+        const prev = byEquip.get(equipmentId);
+        if (!prev) byEquip.set(equipmentId, { equipmentId, geofence, latLong });
+        else {
+          if (!prev.geofence && geofence) prev.geofence = geofence;
+          if (!prev.latLong && latLong) prev.latLong = latLong;
+        }
+      }
+    }
+  }
+  const units = Array.from(byEquip.values());
+  logger.info('[geofence-api] resolved ' + units.length + ' units (geofence + GPS) via JSON API — no browser');
+  return { ok: true, count: units.length, units, source: 'aap-api' };
+}
+
 // Build the CREATE_WORK_ORDER_BODY from a wizard payload + resolved asset.
 // vendorCode is 'UNASSIGNED' for Phase 1 or the confirmed code for Phase 2.
 function _buildWoBody(opts, assetFull, vendorCode) {
@@ -2007,5 +2111,7 @@ module.exports = {
   searchAllPages,
   findOpenWO,
   buildLongDwellSources,
+  getFleetGeofencesViaApi, // API-first live geofence + GPS (replaces geofence_scraper DOM scrape)
+  getLocationLatest,
   dispose,
 };
