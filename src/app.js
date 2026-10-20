@@ -699,32 +699,15 @@ function _startAutoSync() {
     let _psbId = powerSaveBlocker.start('prevent-app-suspension');
     log.info('powerSaveBlocker started (prevent-app-suspension) id=' + _psbId + ' active=' + powerSaveBlocker.isStarted(_psbId));
     _ctx.powerSaveBlockerId = _psbId;
-    // ── Keep the DISPLAY awake (hard-on whenever the app runs) ───────────────
-    // A SECOND blocker, 'prevent-display-sleep', keeps the monitor lit and
-    // resets the OS display-idle timer — so the screen never dims/sleeps and an
-    // IDLE-TIMEOUT screen lock never fires while the app is running. This is
-    // separate from the 'prevent-app-suspension' blocker above (that one keeps
-    // the app's timers alive; this one keeps the screen on). NOTE: this prevents
-    // an idle-display lock, but it CANNOT override a corporate GPO inactivity
-    // lock (that is an OS security policy no app can suppress). Non-fatal if it
-    // can't start.
-    let _dispId = powerSaveBlocker.start('prevent-display-sleep');
-    log.info('powerSaveBlocker started (prevent-display-sleep) id=' + _dispId + ' active=' + powerSaveBlocker.isStarted(_dispId));
-    _ctx.displaySleepBlockerId = _dispId;
-    // Belt-and-suspenders: if the OS ever drops a blocker across a
-    // suspend/resume cycle, re-arm BOTH on resume so locked operation + the
-    // display-on guarantee stay protected for the next lock.
+    // Belt-and-suspenders: if the OS ever drops the blocker across a
+    // suspend/resume cycle, re-arm it on resume so locked operation stays
+    // protected for the next lock.
     powerMonitor.on('resume', () => {
       try {
         if (!powerSaveBlocker.isStarted(_psbId)) {
           _psbId = powerSaveBlocker.start('prevent-app-suspension');
           _ctx.powerSaveBlockerId = _psbId;
           log.info('powerSaveBlocker re-armed after resume id=' + _psbId);
-        }
-        if (!powerSaveBlocker.isStarted(_dispId)) {
-          _dispId = powerSaveBlocker.start('prevent-display-sleep');
-          _ctx.displaySleepBlockerId = _dispId;
-          log.info('display-sleep blocker re-armed after resume id=' + _dispId);
         }
       } catch (e) { log.warn('powerSaveBlocker re-arm failed (non-fatal): ' + e.message); }
     });
