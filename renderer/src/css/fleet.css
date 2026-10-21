@@ -9529,24 +9529,41 @@ body {
    (not pushed off-screen under a tall table). overflow:auto on a height-capped
    box keeps both scrollbars reachable. */
 .ldc-table-scroll {
-  overflow: auto;
+  overflow-x: scroll;        /* ALWAYS show the horizontal scrollbar (never hidden) */
+  overflow-y: auto;
   max-width: 100%;
   max-height: calc(100vh - 240px);
   scrollbar-gutter: stable;
 }
+/* Force the horizontal scrollbar to ALWAYS render (even when the table fits and
+   there's nothing to scroll). The trick: keep overflow-x: scroll AND give the
+   track + thumb a solid, always-painted background with a reserved height, so
+   Chromium doesn't collapse the bar when the content doesn't overflow. */
+.ldc-table-scroll { scrollbar-width: auto; }         /* Firefox: always-visible, normal width */
 /* Make the scrollbars visibly chunky so the bottom one is easy to grab. */
-.ldc-table-scroll::-webkit-scrollbar { height: 14px; width: 12px; }
+.ldc-table-scroll::-webkit-scrollbar {
+  height: 14px; width: 12px;
+  background: var(--bg1, #0d1117);                    /* track always painted */
+}
+.ldc-table-scroll::-webkit-scrollbar-track {
+  background: var(--bg1, #0d1117);
+  border-top: 1px solid var(--line, #2a3344);         /* a hairline so the empty track is still visible */
+}
 .ldc-table-scroll::-webkit-scrollbar-thumb {
   background: var(--line, #2a3344); border-radius: 7px; border: 3px solid transparent; background-clip: content-box;
+  min-width: 40px;                                    /* keep a grabbable thumb even at full width */
 }
 .ldc-table-scroll::-webkit-scrollbar-thumb:hover { background: var(--acc, #4ea1ff); background-clip: content-box; }
-.ldc-table-scroll::-webkit-scrollbar-track { background: var(--bg1, #0d1117); }
+.ldc-table-scroll::-webkit-scrollbar-corner { background: var(--bg1, #0d1117); }
 .ldc-table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; font-size: 11px; }
 .ldc-table th, .ldc-table td { vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--line, #2a3344); white-space: nowrap; }
 /* Two sticky header rows: titles pinned to the top, filter row pinned just
    below. z-index keeps them above the scrolling body cells. */
 .ldc-table thead th { position: sticky; background: var(--bg2, #11161d); z-index: 2; text-align: left; font-weight: 600; }
 .ldc-table thead tr.ldc-head-titles th { top: 0; }
+/* `top` is set in JS (_applyFrozenColumns) to the measured title-row height so
+   the filter row stays pinned right below it at any text size. Fallback 31px
+   covers the first paint before JS runs. */
 .ldc-table thead tr.ldc-head-filters th { top: 31px; font-weight: 400; padding: 3px 6px; z-index: 2; }
 .ldc-manual-th { color: var(--acc, #4ea1ff); }
 .ldc-sort-th { cursor: pointer; user-select: none; }
@@ -9574,10 +9591,60 @@ body {
   background: var(--bg2, #11161d); border-radius: 4px; font-size: 11px; line-height: 1; padding: 2px 4px; }
 .ldc-copy-row:hover { background: var(--acc, #4ea1ff); }
 .ldc-table tr.ldc-row-selected > td { background: rgba(78, 161, 255, 0.14); }
-.ldc-dr-cell { display: flex; align-items: center; gap: 4px; }
+.ldc-dr-cell { display: flex; align-items: flex-start; gap: 4px; }
+/* Vertical stack: AI-fill (✨) on top, copy-3-columns (📋3) directly under it. */
+.ldc-dr-btns { display: flex; flex-direction: column; gap: 3px; flex: 0 0 auto; }
 .ldc-ai-row { flex: 0 0 auto; cursor: pointer; border: 1px solid var(--line, #2a3344);
   background: var(--bg2, #11161d); color: var(--acc, #4ea1ff); border-radius: 4px;
   font-size: 12px; line-height: 1; padding: 3px 5px; }
 .ldc-ai-row:hover:not(:disabled) { background: var(--acc, #4ea1ff); color: #0d1117; }
 .ldc-ai-row:disabled { opacity: 0.6; cursor: progress; }
+/* Copy-last-3-columns button — matches the AI button's size, sits beneath it. */
+.ldc-copy3-row { flex: 0 0 auto; cursor: pointer; border: 1px solid var(--line, #2a3344);
+  background: var(--bg2, #11161d); color: var(--txt2, #8b949e); border-radius: 4px;
+  font-size: 10px; line-height: 1; padding: 3px 4px; white-space: nowrap; }
+.ldc-copy3-row:hover { background: var(--acc, #4ea1ff); color: #0d1117; }
+
+/* ── Auto-fetch schedule panel (gear) ─────────────────────────────────────── */
+.ldc-sched-panel {
+  margin-top: 8px; border: 1px solid var(--line, #2a3344); border-radius: 8px;
+  background: var(--bg2, #11161d); padding: 12px 14px;
+}
+.ldc-sched-inner { display: flex; flex-direction: column; gap: 10px; font-size: 12px; }
+.ldc-sched-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ldc-sched-enable { font-size: 13px; }
+.ldc-sched-lbl { min-width: 42px; color: var(--txt2, #8b949e); font-weight: 600; }
+.ldc-sched-days { display: flex; gap: 10px; flex-wrap: wrap; }
+.ldc-sched-day { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.ldc-sched-aifill { display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; color: var(--acc, #4ea1ff); }
+.ldc-sched-actions { margin-top: 2px; }
+.ldc-sched-status { font-size: 11px; color: var(--ok, #3fb950); }
 .ldc-input.ldc-saved { outline: 2px solid var(--ok, #3fb950); transition: outline .2s; }
+
+/* ── Frozen (locked) columns ──────────────────────────────────────────────────
+   The selection column + the first 3 CSV data columns stay pinned to the left
+   while the rest of the table scrolls horizontally. The `left` offset for each
+   pinned column is set at render time (JS, _applyFrozenColumns) because column
+   widths vary. Body cells sit at z-index 3; the sticky HEADER cells of pinned
+   columns must beat the sticky thead (z-index 2) AND the body (3), so they get
+   z-index 5. A right border + solid background mark the freeze boundary. */
+.ldc-table td.ldc-frozen,
+.ldc-table th.ldc-frozen {
+  position: sticky;
+  z-index: 3;
+  /* SOLID (opaque) background is mandatory: scrolling columns slide UNDER the
+     frozen cells, so any transparency would let them show through. */
+  background: var(--bg2, #11161d);
+}
+.ldc-table thead th.ldc-frozen { z-index: 5; }
+/* Row-hover tints every cell translucently; force frozen cells to stay opaque
+   so the scrolling columns never bleed through on hover. */
+.ldc-table tbody tr:hover td.ldc-frozen { background: #171d26; }
+/* Keep selected-row highlight visible on frozen body cells too (opaque). */
+.ldc-table tr.ldc-row-selected > td.ldc-frozen { background: #1b2740; }
+.ldc-table tbody tr.ldc-row-selected:hover td.ldc-frozen { background: #22304d; }
+/* Visible boundary line on the last frozen column. */
+.ldc-table td.ldc-frozen-last,
+.ldc-table th.ldc-frozen-last {
+  border-right: 2px solid var(--acc, #4ea1ff);
+}

@@ -52,6 +52,15 @@ function _applyFontSize(size) {
       document.body.style.zoom = String(scale);
     }
   } catch (_) {}
+  // CSS `zoom` does NOT fire a window 'resize', so views that size themselves to
+  // the viewport (e.g. the Long Dwell CSV table's scroll box) can't react to a
+  // font-size change on their own. Broadcast it so they can re-fit. Deferred a
+  // frame so layout reflects the new zoom before listeners measure.
+  try {
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new CustomEvent('fleet:font-size-changed', { detail: { size, scale } }));
+    });
+  } catch (_) {}
 }
 
 // ── HTML ─────────────────────────────────────────────────────────────────────

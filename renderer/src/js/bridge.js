@@ -362,11 +362,14 @@ export const fasRoster = {
 };
 
 export const longDwellCsv = {
-  get:      ()        => window.longDwellCsv.get(),
-  import:   (payload) => window.longDwellCsv.import(payload),
-  fetchAap: (opts)    => window.longDwellCsv.fetchAap(opts),
-  saveRow:  (payload) => window.longDwellCsv.saveRow(payload),
-  clear:    ()        => window.longDwellCsv.clear(),
+  get:          ()        => window.longDwellCsv.get(),
+  import:       (payload) => window.longDwellCsv.import(payload),
+  fetchAap:     (opts)    => window.longDwellCsv.fetchAap(opts),
+  saveRow:      (payload) => window.longDwellCsv.saveRow(payload),
+  clear:        ()        => window.longDwellCsv.clear(),
+  getSchedule:  ()        => window.longDwellCsv.getSchedule(),
+  saveSchedule: (payload) => window.longDwellCsv.saveSchedule(payload),
+  onScheduledFetched: (cb) => window.longDwellCsv.onScheduledFetched(cb),
 };
 
 // ── AI / Orcha ─────────────────────────────────────────────────────────────

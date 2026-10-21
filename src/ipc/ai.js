@@ -82,7 +82,12 @@ const _aiAskLimit  = _createLimiter(1);  // max 1 concurrent ai:ask
 const _aiChatLimit = _createLimiter(1);  // max 1 concurrent ai:chat
 
 // -- Issue #15 / #8: size caps --
-const MAX_PROMPT_LEN       = 32000;   // characters — ai:ask, ai:chat
+// NOTE: the Long Dwell AI-fill prompt injects the full FAS knowledge base
+// (~32K chars on its own) PLUS the ownership rubric, per-unit source context,
+// and the 7-field format spec — so the old 32000 cap rejected EVERY long-dwell
+// AI-fill call ("prompt exceeds maximum length"). Raised to 64000 to fit the
+// KB + rubric + context with headroom, while still bounding runaway prompts.
+const MAX_PROMPT_LEN       = 64000;   // characters — ai:ask, ai:chat
 const MAX_DAILY_NOTES_BATCH = 100;   // units    — daily-notes:run
 const MAX_SUGGEST_KEYS      = 100;   // keys on unit object for ai:suggest (raised S28: enriched units have ~71 keys)
 

@@ -178,11 +178,20 @@ expose('longDwell', {
 
 // ── Long Dwell imported CSV (team-shared tracker) ──────────────────────────
 expose('longDwellCsv', {
-  get:      ()        => ipcRenderer.invoke('long-dwell-csv:get'),
-  import:   (payload) => ipcRenderer.invoke('long-dwell-csv:import', payload),
-  fetchAap: (opts)    => ipcRenderer.invoke('long-dwell-csv:fetch-aap', opts),
-  saveRow:  (payload) => ipcRenderer.invoke('long-dwell-csv:save-row', payload),
-  clear:    ()        => ipcRenderer.invoke('long-dwell-csv:clear'),
+  get:         ()        => ipcRenderer.invoke('long-dwell-csv:get'),
+  import:      (payload) => ipcRenderer.invoke('long-dwell-csv:import', payload),
+  fetchAap:    (opts)    => ipcRenderer.invoke('long-dwell-csv:fetch-aap', opts),
+  saveRow:     (payload) => ipcRenderer.invoke('long-dwell-csv:save-row', payload),
+  clear:       ()        => ipcRenderer.invoke('long-dwell-csv:clear'),
+  getSchedule: ()        => ipcRenderer.invoke('long-dwell-csv:get-schedule'),
+  saveSchedule:(payload) => ipcRenderer.invoke('long-dwell-csv:save-schedule', payload),
+  // Main fires this after a SCHEDULED fetch completes so the renderer can
+  // refresh the table and (if configured) run AI-fill-all on blank rows.
+  onScheduledFetched: (cb) => {
+    const h = (_e, data) => { try { cb(data); } catch (_) {} };
+    ipcRenderer.on('long-dwell-csv:scheduled-fetched', h);
+    return () => ipcRenderer.removeListener('long-dwell-csv:scheduled-fetched', h);
+  },
 });
 
 // ── AAP direct JSON API (Relay Garage / work orders over Midway) ────────────

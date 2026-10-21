@@ -32,6 +32,11 @@ const MANUAL_COLS = [
 ];
 const MANUAL_KEYS = MANUAL_COLS.map((c) => c.key);
 
+// How many LEADING table cells to freeze (pin) on horizontal scroll. The first
+// cell is the selection/checkbox column, so freezing the "first 3 columns" of
+// actual CSV data means pinning 1 (selection) + 3 (CSV) = 4 cells.
+const FROZEN_CELL_COUNT = 4;
+
 // Dropdown options for Delay Reason — mirrors the existing Long Dwell enum.
 const DELAY_REASONS = [
   'Primary Vendor', 'Parts Delay', 'Offsite Shop', 'Estimate Process',
@@ -57,6 +62,39 @@ function _esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ── AI JSON sanitizer ────────────────────────────────────────────────────────
+// The AI's JSON reply frequently contains characters that are illegal in strict
+// JSON and make JSON.parse throw: (1) RAW control chars — literal newlines and
+// tabs INSIDE string values (the multi-line "summary" block), and (2) curly
+// "smart" quotes. This repairs both so a retry parse succeeds:
+//   - escape bare newlines/carriage-returns/tabs that fall INSIDE a JSON string
+//     (tracked by a simple in-string state machine that respects backslash
+//     escaping), leaving structural whitespace between tokens untouched;
+//   - normalize smart quotes to straight ASCII.
+function _sanitizeAiJson(s) {
+  let str = String(s == null ? '' : s)
+    // Normalize curly/smart quotes and dashes that models emit.
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'");
+  let out = '';
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (esc) { out += c; esc = false; continue; }
+    if (c === '\\') { out += c; esc = true; continue; }
+    if (c === '"') { inStr = !inStr; out += c; continue; }
+    if (inStr) {
+      // Escape raw control chars that are illegal inside a JSON string literal.
+      if (c === '\n') { out += '\\n'; continue; }
+      if (c === '\r') { out += '\\r'; continue; }
+      if (c === '\t') { out += '\\t'; continue; }
+    }
+    out += c;
+  }
+  return out;
 }
 
 // ── RFC-4180-ish CSV parser ─────────────────────────────────────────────────
@@ -205,8 +243,15 @@ function _manualCellHtml(rowKey, col, value) {
       .concat(DELAY_REASONS.map((o) => `<option value="${_esc(o)}" ${o === v ? 'selected' : ''}>${_esc(o)}</option>`))
       .join('');
     // Per-row AI Fill button sits with Delay Reason (the first manual column):
-    // one click fills Delay Reason + Escalation + Notes for this row.
-    return `<div class="ldc-dr-cell"><button class="ldc-ai-row" data-rowkey="${_esc(rowKey)}" title="AI-fill Delay Reason, Escalation & Notes for this unit">\u2728</button>`
+    // one click fills Delay Reason + Escalation + Notes for this row. Directly
+    // BELOW it, a copy button (3) copies this row's LAST 3 manual columns
+    // (Support Team POC, Asana Link, Required Notes) as tab-separated values so
+    // pasting into SharePoint/Excel lands them in 3 separate cells.
+    return `<div class="ldc-dr-cell">`
+      + `<div class="ldc-dr-btns">`
+      + `<button class="ldc-ai-row" data-rowkey="${_esc(rowKey)}" title="AI-fill Delay Reason, Escalation & Notes for this unit">\u2728</button>`
+      + `<button class="ldc-copy3-row" data-rowkey="${_esc(rowKey)}" title="Copy the last 3 columns (Support Team POC, Asana Link, Required Notes) \u2014 pastes as 3 cells in SharePoint/Excel">\uD83D\uDCCB3</button>`
+      + `</div>`
       + `<select class="settings__select ldc-input" data-rowkey="${_esc(rowKey)}" data-field="delayReason">${opts}</select></div>`;
   }
   if (col.key === 'escalationAction') {
@@ -275,9 +320,40 @@ function _renderToolbar() {
           <button id="ldc-import" class="ec-preset-btn ec-preset-btn--ghost" title="Fallback: import a manually-downloaded AAP long-dwell tracker CSV (A\u2013M columns). Your filled-in columns are preserved on re-import.">\u2b06\uFE0F Import CSV</button>
           <button id="ldc-copy" class="ec-preset-btn" title="Copy selected rows (or the whole filtered table if none selected) to paste into Excel/SharePoint">\uD83D\uDCCB Copy${_selected.size ? ' (' + _selected.size + ')' : ' Table'}</button>
           ${keys.length ? '<button id="ldc-clear" class="ec-preset-btn" title="Clear the imported dataset">\u2715 Clear</button>' : ''}
+          <button id="ldc-sched" class="ec-preset-btn" title="Auto-fetch schedule: pick days + time to automatically pull from AAP, then AI-fill your blank rows.">\u2699\uFE0F Schedule</button>
         </div>
       </div>
+      <div id="ldc-sched-panel" class="ldc-sched-panel" style="display:none"></div>
       <input id="ldc-file" type="file" accept=".csv,text/csv" style="display:none" />
+    </div>`;
+}
+
+// Build the schedule panel's inner HTML from a saved schedule object.
+const _DOW = [
+  { d: 1, label: 'Mon' }, { d: 2, label: 'Tue' }, { d: 3, label: 'Wed' },
+  { d: 4, label: 'Thu' }, { d: 5, label: 'Fri' }, { d: 6, label: 'Sat' }, { d: 0, label: 'Sun' },
+];
+function _schedPanelHtml(sched) {
+  const s = sched || { enabled: false, days: [1, 2, 3, 4, 5], time: '07:00', aiFill: true };
+  const dayBtns = _DOW.map(({ d, label }) =>
+    `<label class="ldc-sched-day"><input type="checkbox" class="ldc-sched-dow" value="${d}" ${s.days && s.days.includes(d) ? 'checked' : ''}/> ${label}</label>`
+  ).join('');
+  return `
+    <div class="ldc-sched-inner">
+      <label class="ldc-sched-row ldc-sched-enable">
+        <input type="checkbox" id="ldc-sched-enabled" ${s.enabled ? 'checked' : ''}/>
+        <strong>Auto-fetch from AAP on a schedule</strong>
+      </label>
+      <div class="ldc-sched-row"><span class="ldc-sched-lbl">Days</span><div class="ldc-sched-days">${dayBtns}</div></div>
+      <div class="ldc-sched-row">
+        <span class="ldc-sched-lbl">Time</span>
+        <input type="time" id="ldc-sched-time" class="settings__input" value="${_esc(s.time || '07:00')}" />
+        <label class="ldc-sched-aifill"><input type="checkbox" id="ldc-sched-aifill" ${s.aiFill !== false ? 'checked' : ''}/> then AI-fill my blank rows</label>
+      </div>
+      <div class="ldc-sched-row ldc-sched-actions">
+        <button id="ldc-sched-save" class="ec-preset-btn ec-preset-btn--primary">Save schedule</button>
+        <span id="ldc-sched-status" class="ldc-sched-status"></span>
+      </div>
     </div>`;
 }
 
@@ -285,6 +361,48 @@ function _render() {
   if (!_host) return;
   _host.innerHTML = _renderToolbar() + '<div id="ldc-table-wrap">' + _renderTable() + '</div>';
   _wire();
+  _bindFrozenResize();
+  // Apply frozen columns immediately (first paint), then again AFTER layout has
+  // settled. The big table's final width (and therefore the horizontal scroll
+  // overflow + its scrollbar) isn't computed on the same tick innerHTML is set,
+  // which made the bottom scrollbar take a beat to appear. Forcing a reflow and
+  // re-measuring on the next frame makes it render right away.
+  _applyFrozenColumns();
+  requestAnimationFrame(() => {
+    const box = _host && _host.querySelector('.ldc-table-scroll');
+    if (box) { void box.offsetWidth; }   // force reflow so overflow is computed now
+    _fitScrollHeight();
+    _applyFrozenColumns();
+  });
+}
+
+// Keep the scroll box's BOTTOM (and its horizontal scrollbar) inside the view
+// at any TEXT SIZE. Text size is applied as CSS `zoom` on #app (see
+// settings.js _applyFontSize), with #app sized to exactly ONE real viewport via
+// height:calc(100vh/scale). The CSS max-height:calc(100vh - 240px) on the box
+// does NOT track that: when zoomed up, the box grew past the visible area and
+// its bottom scrollbar slid out of view.
+//
+// We measure in the box's OWN (zoomed) coordinate space — NOT window.innerHeight
+// (which isn't scaled by `zoom` and gives wrong numbers inside a zoomed #app).
+// The reference is #app's rendered height (guaranteed = one viewport) expressed
+// in the box's local px: bottom-of-app minus top-of-box, via getBoundingClientRect
+// which already reports zoom-local coordinates for both. A few px gutter leaves
+// room for the bar. Re-run on render and on resize/zoom.
+function _fitScrollHeight() {
+  if (!_host) return;
+  const box = _host.querySelector('.ldc-table-scroll');
+  if (!box) return;
+  const appEl = document.getElementById('app');
+  const appRect = appEl ? appEl.getBoundingClientRect() : null;
+  const boxRect = box.getBoundingClientRect();
+  const BOTTOM_GUTTER = 18;                       // room for the bar + a little margin
+  // appRect.bottom and boxRect.top are both in the same (zoom-local) space, so
+  // their difference is the correct available height at any zoom.
+  const avail = appRect ? (appRect.bottom - boxRect.top) : (window.innerHeight - boxRect.top);
+  const h = Math.max(160, Math.floor(avail - BOTTOM_GUTTER));
+  box.style.height = h + 'px';
+  box.style.maxHeight = h + 'px';
 }
 
 // ── Export (TSV so it pastes into Excel/SharePoint cleanly) ──────────────────
@@ -445,7 +563,16 @@ async function _aiFillRow(rowKey, btn, onStatus) {
     const jm = textOut.match(/\{[\s\S]*\}/);
     if (!jm) throw new Error('AI response was not JSON');
     let parsed;
-    try { parsed = JSON.parse(jm[0]); } catch (e) { throw new Error('Could not parse AI JSON: ' + e.message); }
+    try {
+      parsed = JSON.parse(jm[0]);
+    } catch (e1) {
+      // The AI often returns JSON whose string values contain RAW control chars
+      // (literal newlines/tabs inside the multi-line "summary") and smart
+      // quotes — both illegal in strict JSON, so JSON.parse throws. Sanitize and
+      // retry before giving up.
+      try { parsed = JSON.parse(_sanitizeAiJson(jm[0])); }
+      catch (e2) { throw new Error('Could not parse AI JSON: ' + e1.message); }
+    }
 
     let delayReason = String(parsed.delayReason || '').trim();
     let escalation  = String(parsed.escalationLevel || '').trim().toUpperCase();
@@ -591,6 +718,36 @@ function _wire() {
     catch (e) { toast.show('error', 'Clear failed: ' + e.message, 3000); }
   });
 
+  // Schedule gear — toggle the panel; lazily load the saved schedule into it.
+  const schedBtn   = _host.querySelector('#ldc-sched');
+  const schedPanel = _host.querySelector('#ldc-sched-panel');
+  if (schedBtn && schedPanel) {
+    schedBtn.addEventListener('click', async () => {
+      const showing = schedPanel.style.display !== 'none';
+      if (showing) { schedPanel.style.display = 'none'; return; }
+      let sched;
+      try { sched = await csvBridge.getSchedule(); } catch (_) { sched = null; }
+      schedPanel.innerHTML = _schedPanelHtml(sched);
+      schedPanel.style.display = '';
+      const saveBtn = schedPanel.querySelector('#ldc-sched-save');
+      if (saveBtn) saveBtn.addEventListener('click', async () => {
+        const enabled = schedPanel.querySelector('#ldc-sched-enabled').checked;
+        const days = Array.from(schedPanel.querySelectorAll('.ldc-sched-dow:checked')).map((c) => parseInt(c.value, 10));
+        const time = schedPanel.querySelector('#ldc-sched-time').value || '07:00';
+        const aiFill = schedPanel.querySelector('#ldc-sched-aifill').checked;
+        if (enabled && !days.length) { toast.show('warn', 'Pick at least one day', 2500); return; }
+        try {
+          await csvBridge.saveSchedule({ enabled, days, time, aiFill });
+          const statusEl = schedPanel.querySelector('#ldc-sched-status');
+          if (statusEl) statusEl.textContent = enabled
+            ? `Saved — will fetch at ${time} on ${days.length} day(s)${aiFill ? ' + AI-fill' : ''}.`
+            : 'Saved — auto-fetch is OFF.';
+          toast.show('success', 'Schedule saved', 2000);
+        } catch (e) { toast.show('error', 'Save failed: ' + e.message, 3000); }
+      });
+    });
+  }
+
   // Inline edits on the manual columns — save on change (selects/inputs) and
   // on blur (textarea), persisted per row via the bridge. Delegated on the
   // stable table wrapper so it survives re-renders.
@@ -643,6 +800,25 @@ function _wire() {
       ev.stopPropagation();
       const rowKey = aiBtn.getAttribute('data-rowkey');
       if (rowKey) _aiFillRow(rowKey, aiBtn);
+    });
+
+    // Per-row "copy last 3 columns" (📋3) — copies Support Team POC, Asana Link
+    // and Required Notes as TAB-separated values so pasting into SharePoint/Excel
+    // fills 3 adjacent cells. Delegated so it survives re-renders.
+    wrap.addEventListener('click', async (ev) => {
+      const c3 = ev.target && ev.target.closest ? ev.target.closest('.ldc-copy3-row') : null;
+      if (!c3) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const rowKey = c3.getAttribute('data-rowkey');
+      if (!rowKey) return;
+      const manual = (_data.rows[rowKey] || {}).manual || {};
+      // Last 3 manual columns, in display order. Newlines→space and tabs→space
+      // inside each cell so the TAB delimiter stays a clean 3-cell boundary.
+      const last3 = ['supportPOC', 'asanaLink', 'notes']
+        .map((k) => String(manual[k] || '').replace(/\r?\n/g, ' ').replace(/\t/g, ' ').trim());
+      await _copyText(last3.join('\t'));
+      toast.show('success', 'Copied 3 columns \u2014 paste into SharePoint', 1800);
     });
 
     // Per-row Copy (📋 in the selection column) — copies that one row (header +
@@ -714,6 +890,81 @@ function _renderBodyOnly() {
     ? `<tr><td class="ldc-no-match" colspan="${cols.length + MANUAL_COLS.length + 1}">No rows match the current filters.</td></tr>`
     : '';
   tbody.innerHTML = body + emptyMsg;
+  _applyFrozenColumns();
+}
+
+// ── Frozen columns ───────────────────────────────────────────────────────────
+// Pin the first FROZEN_CELL_COUNT cells (selection column + first 3 CSV columns)
+// to the left so they stay visible while the rest scrolls horizontally. Column
+// widths vary, so we MEASURE each pinned column from the header row and set the
+// cumulative `left` offset on every cell in that column (header + body). Runs
+// after each render and on resize. Safe to call when there's no table yet.
+function _applyFrozenColumns() {
+  if (!_host) return;
+  const table = _host.querySelector('.ldc-table');
+  if (!table) return;
+
+  // Use the title header row as the width reference (one cell per column).
+  const headRow = table.querySelector('thead tr.ldc-head-titles');
+  if (!headRow) return;
+
+  // Pin the FILTER (search) row directly below the TITLE row. Its sticky `top`
+  // must equal the title row's REAL height — a hardcoded CSS `top: 31px` was
+  // wrong whenever the title row wasn't exactly 31px tall (e.g. at a larger text
+  // size), which let the filter row drift/scroll away. Measure and set it here
+  // so it stays pinned at any text size.
+  const filterRow = table.querySelector('thead tr.ldc-head-filters');
+  if (filterRow) {
+    const titleH = Math.round(headRow.getBoundingClientRect().height);
+    Array.from(filterRow.children).forEach((th) => { th.style.top = titleH + 'px'; });
+  }
+
+  const headCells = Array.from(headRow.children);
+  const n = Math.min(FROZEN_CELL_COUNT, headCells.length);
+  if (n <= 0) return;
+
+  // Cumulative left offset for each frozen column index.
+  const lefts = [];
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    lefts[i] = acc;
+    acc += headCells[i].getBoundingClientRect().width;
+  }
+
+  // Apply to every row (header rows + body rows): tag the first n cells sticky,
+  // set their left offset, and mark the boundary cell. Clear any stale tags on
+  // cells beyond the frozen range (column count can change between imports).
+  const rows = table.querySelectorAll('tr');
+  rows.forEach((tr) => {
+    const cells = tr.children;
+    for (let i = 0; i < cells.length; i++) {
+      const cell = cells[i];
+      if (i < n) {
+        cell.classList.add('ldc-frozen');
+        cell.classList.toggle('ldc-frozen-last', i === n - 1);
+        cell.style.left = lefts[i] + 'px';
+      } else if (cell.classList.contains('ldc-frozen')) {
+        cell.classList.remove('ldc-frozen', 'ldc-frozen-last');
+        cell.style.left = '';
+      }
+    }
+  });
+}
+
+// Re-measure frozen columns on window resize (column widths can change). One
+// listener for the module; guarded so it only acts while a table is mounted.
+let _frozenResizeBound = false;
+function _bindFrozenResize() {
+  if (_frozenResizeBound) return;
+  _frozenResizeBound = true;
+  let _t = null;
+  const _refit = () => { clearTimeout(_t); _t = setTimeout(() => { _fitScrollHeight(); _applyFrozenColumns(); }, 80); };
+  // Window resize (also fires on Electron zoom-factor change).
+  window.addEventListener('resize', _refit);
+  // App text-size change (CSS `zoom` on #app) — does NOT fire 'resize', so
+  // settings.js broadcasts this custom event; re-fit so the bottom scrollbar
+  // stays in view at the new text size.
+  window.addEventListener('fleet:font-size-changed', _refit);
 }
 
 // Single source of truth for a body row's HTML (selection column + CSV cells +
@@ -738,6 +989,7 @@ export async function refresh() {
 }
 
 // Mount into a host element and load current data.
+let _schedListenerBound = false;
 export function mount(hostEl) {
   _host = hostEl;
   _render();
@@ -745,4 +997,20 @@ export function mount(hostEl) {
   // Warm the FAS knowledge base (SEV/escalation rules) so AI-fill uses the
   // authoritative single source of truth. Best-effort; non-blocking.
   loadKnowledge();
+
+  // Listen for a SCHEDULED fetch completing in main: reload the table, and if
+  // the schedule asked for it, run AI-fill-all on the blank rows. Bound once.
+  if (!_schedListenerBound && csvBridge.onScheduledFetched) {
+    _schedListenerBound = true;
+    csvBridge.onScheduledFetched(async (data) => {
+      try {
+        await refresh();   // pull the freshly-fetched rows into the table
+        toast.show('info', `Auto-fetched ${data && data.count != null ? data.count : ''} rows from AAP`, 3000);
+        if (data && data.aiFill) {
+          const btn = _host && _host.querySelector('#ldc-ai-all');
+          await _aiFillAll(btn || null);   // fill blank rows, same as the manual button
+        }
+      } catch (e) { toast.show('error', 'Scheduled fill failed: ' + e.message, 4000); }
+    });
+  }
 }

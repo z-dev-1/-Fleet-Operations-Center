@@ -332,9 +332,135 @@ function _applyImport(payload) {
   return { count: incoming.length, columns: columns.length };
 }
 
+// Shared AAP fetch+import used by BOTH the manual "Fetch from AAP" button and
+// the scheduler. Tries the fast JSON API path first, falls back to the legacy
+// CSV export. Returns { ok, count, columns, source } or { ok:false, error }.
+async function _fetchAapAndImport(opts = {}) {
+  // ── PRIMARY: JSON API path (fast, no CSV, no extra window, reuses the
+  //    already-authenticated AAP API client).
+  try {
+    const api = require('../scrapers/aap_api');
+    const ld  = require('../scrapers/aap_longdwell');
+    const src = await api.buildLongDwellSources({
+      searchRequest: opts.searchRequest || ld.DEFAULT_SEARCH_REQUEST,
+    });
+    if (src && Array.isArray(src.wrRows) && src.wrRows.length) {
+      const importPayload = _mergeRowObjects(src.wrRows, src.assetRows);
+      if (importPayload && importPayload.rows.length) {
+        const applied = _applyImport(importPayload);
+        logger.info('Long Dwell via API: imported ' + applied.count + ' rows');
+        return { ok: true, count: applied.count, columns: applied.columns, source: 'aap-api' };
+      }
+      logger.warn('Long Dwell API: WR rows present but 0 merged — falling back to CSV export');
+    } else {
+      logger.warn('Long Dwell API: no WR rows — falling back to CSV export');
+    }
+  } catch (e) {
+    logger.warn('Long Dwell API path failed (' + e.message + ') — falling back to CSV export');
+  }
+
+  // ── FALLBACK: the legacy CSV /download export (BrowserWindow + CSRF token).
+  const { fetchBothSources } = require('../scrapers/aap_longdwell');
+  const res = await fetchBothSources(opts);
+  if (!res || !res.ok) {
+    logger.warn('AAP fetch failed: ' + (res && res.error));
+    return { ok: false, error: (res && res.error) || 'AAP fetch failed' };
+  }
+  const importPayload = _mergeToImportPayload(res.wrCsv, res.assetCsv);
+  if (!importPayload || !importPayload.rows.length) {
+    const wrFirst    = String(res.wrCsv || '').split(/\r?\n/).slice(0, 2).join(' || ');
+    const assetFirst = String(res.assetCsv || '').split(/\r?\n/).slice(0, 2).join(' || ');
+    logger.warn('AAP merge produced no rows. WR first lines: ' + wrFirst.slice(0, 600));
+    logger.warn('AAP merge produced no rows. Asset first lines: ' + assetFirst.slice(0, 600));
+    return { ok: false, error: 'AAP returned data from both sources but no rows could be merged (unit-number join found no matches).' };
+  }
+  const applied = _applyImport(importPayload);
+  logger.info('AAP two-source merge (CSV fallback) imported ' + applied.count + ' rows');
+  return { ok: true, count: applied.count, columns: applied.columns, source: 'aap-csv' };
+}
+
+// ── Auto-fetch scheduler ─────────────────────────────────────────────────────
+// Default schedule (disabled until the user turns it on in the gear panel).
+// days: 0=Sun..6=Sat. time: "HH:MM" 24h local. aiFill: run AI-fill-all (blank
+// rows) in the renderer right after a successful fetch.
+const DEFAULT_SCHEDULE = { enabled: false, days: [1, 2, 3, 4, 5], time: '07:00', aiFill: true };
+
+function _loadSchedule() {
+  const s = store.load('longDwellSchedule', DEFAULT_SCHEDULE) || DEFAULT_SCHEDULE;
+  return {
+    enabled: !!s.enabled,
+    days: Array.isArray(s.days) ? s.days.filter((d) => d >= 0 && d <= 6) : DEFAULT_SCHEDULE.days,
+    time: /^\d{2}:\d{2}$/.test(s.time || '') ? s.time : DEFAULT_SCHEDULE.time,
+    aiFill: s.aiFill !== false,
+  };
+}
+
+let _schedTimer = null;
+let _lastRunMinuteKey = null;   // guards against double-firing within the same minute
+
+// Fire the scheduled run: fetch from AAP, then (if enabled + a window is open)
+// tell the renderer to AI-fill the blank rows.
+async function _runScheduledFetch(sched) {
+  logger.info('[ld-schedule] scheduled run starting (aiFill=' + sched.aiFill + ')');
+  let fetchRes;
+  try { fetchRes = await _fetchAapAndImport({}); }
+  catch (e) { logger.warn('[ld-schedule] fetch threw: ' + e.message); return; }
+  if (!fetchRes || !fetchRes.ok) { logger.warn('[ld-schedule] fetch failed: ' + (fetchRes && fetchRes.error)); return; }
+  logger.info('[ld-schedule] fetched ' + fetchRes.count + ' rows (' + fetchRes.source + ')');
+  // Notify the renderer so the open table refreshes, and — if configured —
+  // kick off AI-fill-all for blank rows (AI-fill lives in the renderer because
+  // it needs the signed-in session + live fleet state).
+  try {
+    const win = require('electron').BrowserWindow.getAllWindows()[0];
+    if (win && win.webContents) {
+      win.webContents.send('long-dwell-csv:scheduled-fetched', { count: fetchRes.count, aiFill: !!sched.aiFill });
+    } else {
+      logger.warn('[ld-schedule] no window open — fetched data saved; AI-fill will run next time the tab is opened');
+    }
+  } catch (e) { logger.warn('[ld-schedule] renderer notify failed: ' + e.message); }
+}
+
+// Check once a minute whether NOW matches the schedule.
+function _scheduleTick() {
+  const sched = _loadSchedule();
+  if (!sched.enabled) return;
+  const now = new Date();
+  const dow = now.getDay();
+  if (!sched.days.includes(dow)) return;
+  const hhmm = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+  if (hhmm !== sched.time) return;
+  const minuteKey = now.toDateString() + ' ' + hhmm;
+  if (_lastRunMinuteKey === minuteKey) return;   // already ran this minute
+  _lastRunMinuteKey = minuteKey;
+  _runScheduledFetch(sched);
+}
+
+function _startScheduler() {
+  if (_schedTimer) return;
+  // Align to the top of each minute-ish; a 30s tick guarantees we never miss
+  // the matching minute even with timer drift.
+  _schedTimer = setInterval(_scheduleTick, 30 * 1000);
+  logger.info('[ld-schedule] scheduler started (30s tick)');
+}
+
 function registerLongDwellCsvIPC() {
   // Return the whole imported dataset (CSV rows + saved manual annotations).
   handle('long-dwell-csv:get', () => store.load('longDwellCsv', { importedAt: null, columns: [], rows: {} }));
+
+  // Schedule get/save for the auto-fetch gear panel.
+  handle('long-dwell-csv:get-schedule', () => _loadSchedule());
+  handle('long-dwell-csv:save-schedule', (_e, payload) => {
+    const p = (payload && typeof payload === 'object') ? payload : {};
+    const next = {
+      enabled: !!p.enabled,
+      days: Array.isArray(p.days) ? [...new Set(p.days.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort() : DEFAULT_SCHEDULE.days,
+      time: /^\d{2}:\d{2}$/.test(p.time || '') ? p.time : DEFAULT_SCHEDULE.time,
+      aiFill: p.aiFill !== false,
+    };
+    store.save('longDwellSchedule', next);
+    logger.info('[ld-schedule] saved: ' + JSON.stringify(next));
+    return { ok: true, schedule: next };
+  });
 
   // Replace the dataset with a freshly imported CSV. Preserves any existing
   // manual annotations whose rowKey still exists in the new import, so a
@@ -352,49 +478,7 @@ function registerLongDwellCsvIPC() {
   // are carried forward).
   handle('long-dwell-csv:fetch-aap', async (_e, payload) => {
     const opts = (payload && typeof payload === 'object') ? payload : {};
-
-    // ── PRIMARY: JSON API path (fast, no CSV, no extra window, reuses the
-    //    already-authenticated AAP API client). Pulls the WR + asset lists as
-    //    structured objects and merges them the same way the CSV path does.
-    try {
-      const api = require('../scrapers/aap_api');
-      const ld  = require('../scrapers/aap_longdwell');
-      const src = await api.buildLongDwellSources({
-        searchRequest: opts.searchRequest || ld.DEFAULT_SEARCH_REQUEST,
-      });
-      if (src && Array.isArray(src.wrRows) && src.wrRows.length) {
-        const importPayload = _mergeRowObjects(src.wrRows, src.assetRows);
-        if (importPayload && importPayload.rows.length) {
-          const applied = _applyImport(importPayload);
-          logger.info('Long Dwell via API: imported ' + applied.count + ' rows');
-          return { ok: true, count: applied.count, columns: applied.columns, source: 'aap-api' };
-        }
-        logger.warn('Long Dwell API: WR rows present but 0 merged — falling back to CSV export');
-      } else {
-        logger.warn('Long Dwell API: no WR rows — falling back to CSV export');
-      }
-    } catch (e) {
-      logger.warn('Long Dwell API path failed (' + e.message + ') — falling back to CSV export');
-    }
-
-    // ── FALLBACK: the legacy CSV /download export (BrowserWindow + CSRF token).
-    const { fetchBothSources } = require('../scrapers/aap_longdwell');
-    const res = await fetchBothSources(opts);
-    if (!res || !res.ok) {
-      logger.warn('AAP fetch failed: ' + (res && res.error));
-      return { ok: false, error: (res && res.error) || 'AAP fetch failed' };
-    }
-    const importPayload = _mergeToImportPayload(res.wrCsv, res.assetCsv);
-    if (!importPayload || !importPayload.rows.length) {
-      const wrFirst    = String(res.wrCsv || '').split(/\r?\n/).slice(0, 2).join(' || ');
-      const assetFirst = String(res.assetCsv || '').split(/\r?\n/).slice(0, 2).join(' || ');
-      logger.warn('AAP merge produced no rows. WR first lines: ' + wrFirst.slice(0, 600));
-      logger.warn('AAP merge produced no rows. Asset first lines: ' + assetFirst.slice(0, 600));
-      return { ok: false, error: 'AAP returned data from both sources but no rows could be merged (unit-number join found no matches).' };
-    }
-    const applied = _applyImport(importPayload);
-    logger.info('AAP two-source merge (CSV fallback) imported ' + applied.count + ' rows');
-    return { ok: true, count: applied.count, columns: applied.columns, source: 'aap-csv' };
+    return _fetchAapAndImport(opts);
   });
 
   // Save one manual field edit for one row.
@@ -427,6 +511,7 @@ function registerLongDwellCsvIPC() {
     return { ok: true };
   });
 
+  _startScheduler();
   logger.info('Long-dwell CSV IPC handlers registered');
 }
 
