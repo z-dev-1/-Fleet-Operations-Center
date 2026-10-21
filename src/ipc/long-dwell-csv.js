@@ -420,19 +420,26 @@ async function _runScheduledFetch(sched) {
   } catch (e) { logger.warn('[ld-schedule] renderer notify failed: ' + e.message); }
 }
 
-// Check once a minute whether NOW matches the schedule.
+// Check once a minute whether NOW matches the schedule. Fully guarded: this
+// runs on a timer, so an unhandled throw here becomes an UNCAUGHT EXCEPTION
+// that can take down the whole main process (and with it the Orcha WS server).
+// Never let a tick throw.
 function _scheduleTick() {
-  const sched = _loadSchedule();
-  if (!sched.enabled) return;
-  const now = new Date();
-  const dow = now.getDay();
-  if (!sched.days.includes(dow)) return;
-  const hhmm = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
-  if (hhmm !== sched.time) return;
-  const minuteKey = now.toDateString() + ' ' + hhmm;
-  if (_lastRunMinuteKey === minuteKey) return;   // already ran this minute
-  _lastRunMinuteKey = minuteKey;
-  _runScheduledFetch(sched);
+  try {
+    const sched = _loadSchedule();
+    if (!sched.enabled) return;
+    const now = new Date();
+    const dow = now.getDay();
+    if (!sched.days.includes(dow)) return;
+    const hhmm = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+    if (hhmm !== sched.time) return;
+    const minuteKey = now.toDateString() + ' ' + hhmm;
+    if (_lastRunMinuteKey === minuteKey) return;   // already ran this minute
+    _lastRunMinuteKey = minuteKey;
+    _runScheduledFetch(sched);
+  } catch (e) {
+    try { logger.warn('[ld-schedule] tick error (non-fatal): ' + e.message); } catch (_) {}
+  }
 }
 
 function _startScheduler() {

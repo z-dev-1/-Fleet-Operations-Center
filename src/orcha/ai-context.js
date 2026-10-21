@@ -455,26 +455,28 @@ function _buildUnitDetail(unitId, rows, notesStore, opts) {
   if (row.alternativeId) detail += '  Alt ID (dealer case): ' + row.alternativeId + '\n';
   if (row.offsiteShopEvent) detail += '  Offsite event: ' + row.offsiteShopEvent + '\n';
 
-  // READINESS SIGNAL — structured offsite status-bar stage + explicit comment
-  // evidence. The assistant must only claim a unit is "ready/complete/done" when
-  // one of these confirms it, never off an ambiguous or old free-text note.
+  // READINESS SIGNAL — the OFFSITE EVENT is the source of truth for repair
+  // readiness, NOT AAP. AAP's lifecycle state routinely lags: a unit can be
+  // fully repaired and ready offsite while AAP still shows Unavailable/Offsite/
+  // Damaged for days until someone flips it. So readiness is judged from the
+  // offsite status bar + the dealer's own comments; AAP status is reported
+  // separately and must NOT be used to contradict a genuine offsite "ready".
   const _stage = String(row.offsiteStage || '').toLowerCase();
-  if (_stage) {
-    const _stageLabel = _stage.charAt(0).toUpperCase() + _stage.slice(1);
-    detail += '  Offsite status bar: ' + _stageLabel +
-      (_stage === 'ready'
-        ? ' (vendor tracker shows READY)'
-        : ' (NOT yet at Ready — do NOT claim this unit is ready/done)') + '\n';
-  }
-  {
-    const _readyBlob = [row.asistNotes, row.fullConversation, row.repairTimeline]
-      .map(v => String(v || '')).join(' ');
-    const _readyMatch = _readyBlob.match(/(asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed|work\s+order\s+completed|unit\s+is\s+ready)/i);
-    if (_readyMatch) {
-      detail += '  Ready evidence (comment): "' + _readyMatch[0] + '"\n';
-    } else if (_stage && _stage !== 'ready') {
-      detail += '  Ready evidence: NONE — no comment confirms readiness; treat as still in repair\n';
+  const _readyBlob = [row.asistNotes, row.fullConversation, row.repairTimeline]
+    .map(v => String(v || '')).join(' ');
+  const _readyMatch = _readyBlob.match(/(asset\s+is\s+ready|ready\s+to\s+be\s+picked\s+up|ready\s+for\s+pick\s*up|repairs?\s+(are\s+)?completed|work\s+order\s+completed|unit\s+is\s+ready)/i);
+  if (_stage || _readyMatch) {
+    detail += '  READINESS (offsite event is source of truth):\n';
+    if (_stage) {
+      const _stageLabel = _stage.charAt(0).toUpperCase() + _stage.slice(1);
+      detail += '    - Offsite status bar: ' + _stageLabel +
+        (_stage === 'ready' ? ' (vendor tracker shows READY)' : ' (NOT yet at Ready)') + '\n';
     }
+    detail += '    - Dealer comment: ' + (_readyMatch ? '"' + _readyMatch[0] + '" present' : 'no explicit ready comment yet') + '\n';
+    const _offsiteReady = _stage === 'ready' || !!_readyMatch;
+    detail += '    - VERDICT: ' + (_offsiteReady
+      ? 'READY per the offsite event (repair complete). Safe to say the unit is ready even if AAP still shows it Unavailable — AAP just has not been flipped yet.'
+      : 'NOT ready yet per the offsite event — still in repair.') + '\n';
   }
   if (row.salesforceCase) detail += '  Salesforce case: ' + row.salesforceCase + '\n';
   if (row.dealerName) detail += '  Dealer: ' + row.dealerName + '\n';

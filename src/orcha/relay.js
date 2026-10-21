@@ -55,6 +55,10 @@ let _status       = 'unknown'; // 'connected' | 'expired' | 'error' | 'unknown'
 let _requestCount = 0;
 let _errorCount   = 0;
 let _aiPreference = 'auto'; // 'auto' | 'orcha' | 'claude' | 'balanced'
+// Orcha agent id used for every WS/headless request (Settings -> AI -> Orcha
+// Agent). The agent selects the server-side model. Was hardcoded to
+// 'orcha_default' in both transports, so the Settings dropdown had no effect.
+let _orchaAgentId = 'orcha_default';
 
 // ── CONCURRENCY ───────────────────────────────────────────────────────────────
 const MAX_CONCURRENT = 5;
@@ -321,7 +325,7 @@ function _tryWS(prompt, opts = {}) {
       let msg; try { msg = JSON.parse(raw); } catch (_) { return; }
       switch (msg.type) {
         case 'connected':
-          ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet AI', agent_id: 'orcha_default', session_id: sessionId }));
+          ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet AI', agent_id: _orchaAgentId, session_id: sessionId }));
           break;
         case 'session_created':
           clearTimeout(timer);
@@ -363,7 +367,7 @@ function _tryHeadless(prompt, opts = {}) {
       fs.writeFileSync(tmpFile, prompt, 'utf8');
     } catch (e) { return reject(new Error('Failed to write temp prompt: ' + e.message)); }
 
-    const args  = ['--headless', '--agent', 'orcha_default', '--prompt-file', tmpFile];
+    const args  = ['--headless', '--agent', _orchaAgentId, '--prompt-file', tmpFile];
     const timer = setTimeout(() => reject(new Error('Headless timeout')), TIMEOUT_MS);
 
     // Node's execFile accepts a native AbortSignal via options.signal (v15.7+):
@@ -775,6 +779,15 @@ function setPreference(pref) {
 }
 function getPreference() { return _aiPreference; }
 
+// setAgent() -- select which Orcha agent answers WS/headless requests.
+// Runtime switch; persisted to orchaConfig as orchaAgentId by ipc/ai.js.
+function setAgent(id) {
+  const v = (typeof id === 'string') ? id.trim() : '';
+  _orchaAgentId = /^[a-z0-9][a-z0-9_-]*$/i.test(v) ? v : 'orcha_default';
+  logger.info('Orcha agent set to: ' + _orchaAgentId);
+}
+function getAgent() { return _orchaAgentId; }
+
 // testClaude() — direct health-check of the Claude Code path
 function testClaude() {
   return _tryClaudeCode('Reply with exactly one word: ONLINE')
@@ -789,6 +802,7 @@ function testClaude() {
     if (fs.existsSync(P.orchaConfig)) {
       const cfg = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
       if (cfg && cfg.aiPreference) setPreference(cfg.aiPreference);
+      if (cfg && typeof cfg.orchaAgentId === 'string' && cfg.orchaAgentId.trim()) setAgent(cfg.orchaAgentId);
       if (cfg && cfg.claudeTimeoutMs > 0) CLAUDE_TIMEOUT_MS = cfg.claudeTimeoutMs;
       if (cfg && typeof cfg.claudeModelId === 'string') CLAUDE_MODEL_ID = cfg.claudeModelId.trim();
     }
@@ -892,4 +906,4 @@ function listAgents(opts = {}) {
   });
 }
 
-module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents };
+module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setAgent, getAgent, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents };

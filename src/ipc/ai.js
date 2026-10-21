@@ -1202,6 +1202,7 @@ function registerAIHandlers(ctx) {
     fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf8');
     fs.renameSync(tmp, P.orchaConfig);
     relay.setPreference(merged.aiPreference);
+    relay.setAgent(merged.orchaAgentId);
     relay.setClaudeTimeout(merged.claudeTimeoutMs);
     relay.setClaudeModel(merged.claudeModelId);
     logger.info('[AI Config] Saved. preference=' + merged.aiPreference + ', agent=' + merged.orchaAgentId + ', modelId=' + (merged.modelId || '(default)') + ', claudeModel=' + (merged.claudeModelId || '(default)') + ', claudeTimeoutMs=' + merged.claudeTimeoutMs);
