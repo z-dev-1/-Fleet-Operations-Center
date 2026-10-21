@@ -59,6 +59,12 @@ let _aiPreference = 'auto'; // 'auto' | 'orcha' | 'claude' | 'balanced'
 // Agent). The agent selects the server-side model. Was hardcoded to
 // 'orcha_default' in both transports, so the Settings dropdown had no effect.
 let _orchaAgentId = 'orcha_default';
+// Bedrock fallback (direct Claude via Bedrock SDK) is OFF by default: this
+// account's Isengard role lacks bedrock:InvokeModel, so the call always fails
+// with "not authorized" — it only added latency + log noise to every failure.
+// Kept behind a flag (env FLEET_ENABLE_BEDROCK=1) so it can be re-enabled if the
+// role is ever granted Bedrock access, without ripping out the code.
+const _bedrockEnabled = process.env.FLEET_ENABLE_BEDROCK === '1';
 
 // ── CONCURRENCY ───────────────────────────────────────────────────────────────
 const MAX_CONCURRENT = 5;
@@ -254,19 +260,25 @@ async function ask(prompt, opts = {}) {
           } catch (ccErr) { logger.warn('[' + requestId + '] claude-code fallback failed: ' + ccErr.message); }
         }
 
-        // BEDROCK FALLBACK: direct Claude call via Bedrock SDK
-        try {
-          const { askBedrock } = require('../scrapers/bedrock');
-          logger.info('[' + requestId + '] Bedrock attempt ' + attempt);
-          const brText = await askBedrock(prompt);
-          if (brText) {
-            _markLaneHealthy('claude');
-            _lastHealthy = Date.now(); _status = 'connected-bedrock';
-            _saveStatus();
-            logger.info('[' + requestId + '] OK via Bedrock fallback (' + brText.length + ' chars)');
-            return brText;
-          }
-        } catch (brErr) { logger.warn('[' + requestId + '] Bedrock failed: ' + brErr.message); }
+        // BEDROCK FALLBACK: direct Claude call via Bedrock SDK.
+        // Disabled by default (see _bedrockEnabled above) because this account
+        // is not authorized for bedrock:InvokeModel — the call always fails and
+        // just slowed down every "all transports failed" path. Set
+        // FLEET_ENABLE_BEDROCK=1 to re-enable if the role gains Bedrock access.
+        if (_bedrockEnabled) {
+          try {
+            const { askBedrock } = require('../scrapers/bedrock');
+            logger.info('[' + requestId + '] Bedrock attempt ' + attempt);
+            const brText = await askBedrock(prompt);
+            if (brText) {
+              _markLaneHealthy('claude');
+              _lastHealthy = Date.now(); _status = 'connected-bedrock';
+              _saveStatus();
+              logger.info('[' + requestId + '] OK via Bedrock fallback (' + brText.length + ' chars)');
+              return brText;
+            }
+          } catch (brErr) { logger.warn('[' + requestId + '] Bedrock failed: ' + brErr.message); }
+        }
         throw new Error('All transports failed');
       } catch (e) {
         const msg = e.message || String(e);
