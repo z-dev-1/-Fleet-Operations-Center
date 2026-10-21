@@ -440,13 +440,40 @@ let CLAUDE_MODEL_ID = '';
 // Serializing to ONE worker removes the self-inflicted file-lock race; jobs run
 // one at a time but actually COMPLETE instead of sabotaging each other. Override
 // with env FLEET_CLAUDE_POOL if more concurrency is ever wanted again.
-const WORKER_POOL_SIZE = Math.max(1, parseInt(process.env.FLEET_CLAUDE_POOL || '1', 10) || 1);
+// Pool size is now RUNTIME-ADJUSTABLE from Settings -> AI (setClaudePoolSize),
+// persisted as claudePoolSize in orchaConfig, with env FLEET_CLAUDE_POOL as the
+// initial default. Default 1 because parallel claude.exe workers race on a
+// startup file (os error 32) — see the pool-fix commit. 1-5 allowed.
+let WORKER_POOL_SIZE = Math.min(5, Math.max(1, parseInt(process.env.FLEET_CLAUDE_POOL || '1', 10) || 1));
 const CLAUDE_IDLE_KILL_MS = 10 * 60 * 1000; // kill warm process after 10min idle
 function _makeWorker(id) {
   return { id, proc: null, busy: false, currentJob: null, stdoutBuf: '', idleTimer: null };
 }
-const _workers = Array.from({ length: WORKER_POOL_SIZE }, (_, i) => _makeWorker(i));
+let _workers = Array.from({ length: WORKER_POOL_SIZE }, (_, i) => _makeWorker(i));
 const _claudeQueue = [];
+
+// Resize the Claude worker pool at runtime. Growing adds idle workers (they
+// spawn lazily on the next job); shrinking kills + drops the extra workers once
+// they're free (a busy one finishes its current job first, then is pruned on
+// the next resize/idle). Clamped to 1-5. Safe to call repeatedly.
+function setClaudePoolSize(n) {
+  const size = Math.min(5, Math.max(1, parseInt(n, 10) || 1));
+  if (size === WORKER_POOL_SIZE) return WORKER_POOL_SIZE;
+  if (size > WORKER_POOL_SIZE) {
+    for (let i = WORKER_POOL_SIZE; i < size; i++) _workers.push(_makeWorker(i));
+  } else {
+    // Remove workers from the tail; kill any process they hold.
+    const removed = _workers.splice(size);
+    for (const w of removed) {
+      try { if (w.idleTimer) clearTimeout(w.idleTimer); } catch (_) {}
+      if (w.proc) { _killClaudeTree(w.proc); w.proc = null; }
+    }
+  }
+  WORKER_POOL_SIZE = size;
+  logger.info('Claude worker pool size set to: ' + WORKER_POOL_SIZE);
+  return WORKER_POOL_SIZE;
+}
+function getClaudePoolSize() { return WORKER_POOL_SIZE; }
 
 // Windows-safe process-tree kill. Node's proc.kill() only terminates the
 // immediate handle; on Windows the Toolbox claude.exe spawns child workers
@@ -871,6 +898,7 @@ function testClaude() {
       const cfg = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
       if (cfg && cfg.aiPreference) setPreference(cfg.aiPreference);
       if (cfg && typeof cfg.orchaAgentId === 'string' && cfg.orchaAgentId.trim()) setAgent(cfg.orchaAgentId);
+      if (cfg && cfg.claudePoolSize > 0) setClaudePoolSize(cfg.claudePoolSize);
       if (cfg && cfg.claudeTimeoutMs > 0) CLAUDE_TIMEOUT_MS = cfg.claudeTimeoutMs;
       if (cfg && typeof cfg.claudeModelId === 'string') CLAUDE_MODEL_ID = cfg.claudeModelId.trim();
     }
@@ -974,4 +1002,4 @@ function listAgents(opts = {}) {
   });
 }
 
-module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setAgent, getAgent, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents };
+module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setAgent, getAgent, setClaudePoolSize, getClaudePoolSize, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents };

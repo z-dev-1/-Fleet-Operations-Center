@@ -896,6 +896,17 @@ function _html() {
               <div class="sd-label">Timeout (seconds)</div>
               <input class="sd-input" id="claude-timeout" type="number" placeholder="60" style="width:80px"/>
             </div>
+            <div class="sd-field" style="margin-top:6px">
+              <div class="sd-label">Parallel workers</div>
+              <select class="sd-input" id="claude-pool" style="width:80px">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+              </select>
+              <div id="claude-pool-hint" style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">How many Claude Code processes run at once. 1 (recommended) avoids a startup file-lock race that caused intermittent timeouts; higher = more concurrency if your machine handles it.</div>
+            </div>
             <div class="sd-btn-row">
               <button class="sd-btn secondary" id="test-claude" style="font-size:11px">Test Claude</button>
             </div>
@@ -1000,6 +1011,8 @@ function _wireAIConfig() {
     const toEl   = document.getElementById('claude-timeout');
     if (binEl) binEl.value = cfg.claudeBin || '(auto)';
     if (toEl)  toEl.value  = Math.round((cfg.claudeTimeoutMs || 60000) / 1000);
+    const poolEl = document.getElementById('claude-pool');
+    if (poolEl) poolEl.value = String(Math.min(5, Math.max(1, cfg.claudePoolSize || 1)));
     // Claude-lane model. If the saved id isn't one of the known options, add it
     // so the selection is never silently lost.
     const cmEl = document.getElementById('claude-model');
@@ -1099,6 +1112,7 @@ function _wireAIConfig() {
   if (saveBtn) saveBtn.addEventListener('click', async () => {
     const pref    = (document.querySelector('input[name="ai-pref"]:checked') || {}).value || 'auto';
     const toSecs  = parseInt((document.getElementById('claude-timeout') || {}).value, 10) || 60;
+    const poolN   = parseInt((document.getElementById('claude-pool') || {}).value, 10) || 1;
     await window.ai.saveAIConfig({
       aiPreference:    pref,
       mode:            (document.getElementById('orcha-mode') || {}).value || 'local',
@@ -1108,6 +1122,7 @@ function _wireAIConfig() {
       modelId:         ((document.getElementById('ai-model-id') || {}).value || '').trim(),
       claudeModelId:   ((document.getElementById('claude-model') || {}).value || '').trim(),
       claudeTimeoutMs: toSecs * 1000,
+      claudePoolSize:  Math.min(5, Math.max(1, poolN)),
     });
     toast.show('success', 'AI config saved — active: ' + pref, 2500);
     window.ai.status().then(_updateLiveStatus).catch(() => {});

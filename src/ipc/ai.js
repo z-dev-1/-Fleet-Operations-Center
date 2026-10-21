@@ -1169,6 +1169,7 @@ function registerAIHandlers(ctx) {
       modelId:          orchaCfg.modelId || '',
       claudeBin,
       claudeTimeoutMs:  orchaCfg.claudeTimeoutMs || 60000,
+      claudePoolSize:   relay.getClaudePoolSize ? relay.getClaudePoolSize() : (orchaCfg.claudePoolSize || 1),
       claudeAvailable:  require('fs').existsSync(claudeBin),
     };
   });
@@ -1196,6 +1197,9 @@ function registerAIHandlers(ctx) {
       // Claude Code lane model (passed as `--model`). Empty = claude-code
       // default. Applies to the Claude fallback lane AND attachment reading.
       claudeModelId:   (config.claudeModelId !== undefined ? config.claudeModelId : (existing.claudeModelId || '')),
+      // Number of parallel Claude Code worker processes (1-5). Default 1 avoids
+      // the startup file-lock race between parallel claude.exe workers.
+      claudePoolSize:  Math.min(5, Math.max(1, parseInt(config.claudePoolSize, 10) || existing.claudePoolSize || 1)),
     };
     const tmp = P.orchaConfig + '.tmp';
     fs.mkdirSync(require('path').dirname(P.orchaConfig), { recursive: true });
@@ -1203,6 +1207,7 @@ function registerAIHandlers(ctx) {
     fs.renameSync(tmp, P.orchaConfig);
     relay.setPreference(merged.aiPreference);
     relay.setAgent(merged.orchaAgentId);
+    if (relay.setClaudePoolSize) relay.setClaudePoolSize(merged.claudePoolSize);
     relay.setClaudeTimeout(merged.claudeTimeoutMs);
     relay.setClaudeModel(merged.claudeModelId);
     logger.info('[AI Config] Saved. preference=' + merged.aiPreference + ', agent=' + merged.orchaAgentId + ', modelId=' + (merged.modelId || '(default)') + ', claudeModel=' + (merged.claudeModelId || '(default)') + ', claudeTimeoutMs=' + merged.claudeTimeoutMs);
