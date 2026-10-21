@@ -16,6 +16,16 @@ const { spawn, execFile } = require('child_process');
 const { P }  = require('../config/paths');
 const logger = require('../utils/logger')('relay');
 
+// ── Claude Code diagnostics ───────────────────────────────────────────────────
+// "Works then crashes" was traced to claude-code jobs intermittently HANGING
+// past the timeout (not a hard credential failure). This optional debug layer
+// captures WHY a job stalls: per-job phase timing (dispatch -> first stdout ->
+// result), full (untruncated) stderr, and a dump on timeout. Off by default;
+// enable with env FLEET_CLAUDE_DEBUG=1. Writes to the normal relay logger so it
+// lands in relay.log alongside the existing lines.
+const CLAUDE_DEBUG = process.env.FLEET_CLAUDE_DEBUG === '1';
+function _cdbg(msg) { if (CLAUDE_DEBUG) logger.info('[claude-dbg] ' + msg); }
+
 const fleetBrain = require('./fleet-brain');
 // Wire fleet-brain's local fallback AFTER _tryClaudeCode is defined below.
 // setImmediate defers to end-of-tick so the function reference is valid.
@@ -419,7 +429,18 @@ let CLAUDE_MODEL_ID = '';
 // its own Claude Code process instead of queuing behind the others.
 // Kill-after-job is preserved per worker (prevents context bleed across
 // unrelated callers — same correctness guarantee as the old single-worker design).
-const WORKER_POOL_SIZE = 3;
+// POOL SIZE 1 (was 3): diagnostics (FLEET_CLAUDE_DEBUG) proved that 3 parallel
+// claude.exe processes RACE on startup to write the same file —
+//   "failed to copy production safety rules to
+//    ~/.claude/rules/amazon-production-safety-do-not-delete.md: The process
+//    cannot access the file because it is being used by another process (os error 32)"
+// — and that contention (plus a slow Midway credential probe) pushed first-stdout
+// to 35-53s, blowing the 60s timeout intermittently ("works then crashes", and
+// deep-scan units silently kept stale timelines when their job was killed).
+// Serializing to ONE worker removes the self-inflicted file-lock race; jobs run
+// one at a time but actually COMPLETE instead of sabotaging each other. Override
+// with env FLEET_CLAUDE_POOL if more concurrency is ever wanted again.
+const WORKER_POOL_SIZE = Math.max(1, parseInt(process.env.FLEET_CLAUDE_POOL || '1', 10) || 1);
 const CLAUDE_IDLE_KILL_MS = 10 * 60 * 1000; // kill warm process after 10min idle
 function _makeWorker(id) {
   return { id, proc: null, busy: false, currentJob: null, stdoutBuf: '', idleTimer: null };
@@ -490,10 +511,22 @@ function _ensureClaudeProcess(worker) {
      'output nothing else -- no explanations, no markdown code fences, no tool calls, ' +
      'no restating the request. If a message asks for JSON, your entire response must ' +
      'be valid JSON and nothing more.');
+  const _spawnT0 = Date.now();
   const proc = spawn(CLAUDE_BIN, _args, { stdio: ['pipe', 'pipe', 'pipe'] });
   worker.stdoutBuf = '';
+  worker.stderrBuf = '';              // full stderr for this process (debug dumps)
+  worker._firstStdoutAt = 0;         // when the first stdout byte arrived
+  _cdbg('worker[' + worker.id + '] spawned pid=' + proc.pid + ' in ' + (Date.now() - _spawnT0) + 'ms'
+    + (CLAUDE_MODEL_ID ? ' model=' + CLAUDE_MODEL_ID : ''));
 
   proc.stdout.on('data', (chunk) => {
+    if (!worker._firstStdoutAt) {
+      worker._firstStdoutAt = Date.now();
+      if (worker.currentJob && worker.currentJob._dispatchedAt) {
+        _cdbg('worker[' + worker.id + '] pid=' + proc.pid + ' first stdout after '
+          + (worker._firstStdoutAt - worker.currentJob._dispatchedAt) + 'ms');
+      }
+    }
     worker.stdoutBuf += chunk.toString();
     const lines = worker.stdoutBuf.split('\n');
     worker.stdoutBuf = lines.pop();
@@ -504,6 +537,9 @@ function _ensureClaudeProcess(worker) {
       if (obj.type === 'result' && worker.currentJob) {
         const job = worker.currentJob;
         clearTimeout(job._timer);
+        if (CLAUDE_DEBUG && job._dispatchedAt) {
+          _cdbg('worker[' + worker.id + '] RESULT in ' + (Date.now() - job._dispatchedAt) + 'ms is_error=' + !!obj.is_error + ' len=' + ((obj.result || '').length));
+        }
         worker.currentJob = null;
         worker.busy = false;
         if (obj.is_error) {
@@ -523,7 +559,13 @@ function _ensureClaudeProcess(worker) {
     }
   });
 
-  proc.stderr.on('data', (d) => logger.warn('claude-code[' + worker.id + '] stderr: ' + d.toString().slice(0, 300)));
+  proc.stderr.on('data', (d) => {
+    const s = d.toString();
+    // Keep the full stderr for this process so a timeout dump shows the REAL
+    // last words (the truncated warn below often cuts off the actual error).
+    if (CLAUDE_DEBUG) { worker.stderrBuf = (worker.stderrBuf + s).slice(-4000); }
+    logger.warn('claude-code[' + worker.id + '] stderr: ' + s.slice(0, 300));
+  });
 
   proc.on('exit', (code) => {
     // Guard: if this worker's proc was already replaced (killed after a
@@ -568,10 +610,24 @@ function _processClaudeQueue() {
     const job = _claudeQueue.shift();
     worker.currentJob = job;
     worker.busy = true;
+    job._dispatchedAt = Date.now();
+    _cdbg('worker[' + worker.id + '] dispatch job (prompt ' + (job.prompt ? job.prompt.length : 0) + ' chars, timeout ' + Math.round(CLAUDE_TIMEOUT_MS / 1000) + 's)');
     job._timer = setTimeout(() => {
       // Kill-on-timeout: prevents a stale/late response being matched to a
       // later job on the same worker (same correctness guarantee as before).
       logger.warn('claude-code[' + worker.id + ']: job timed out — killing process');
+      // DIAGNOSTIC DUMP: classify WHERE it stalled so "works then crashes" has
+      // evidence instead of a guess. Did the process ever emit stdout? What was
+      // its full stderr? How long did it actually run vs. the timeout?
+      if (CLAUDE_DEBUG) {
+        const ran = Date.now() - (job._dispatchedAt || Date.now());
+        const gotStdout = worker._firstStdoutAt ? ('yes, after ' + (worker._firstStdoutAt - job._dispatchedAt) + 'ms') : 'NO stdout at all';
+        const phase = worker._firstStdoutAt ? 'STALLED MID-RESPONSE (started replying then hung)' : 'STALLED BEFORE ANY OUTPUT (spawn/auth/startup hang)';
+        _cdbg('TIMEOUT worker[' + worker.id + '] pid=' + (worker.proc ? worker.proc.pid : '?')
+          + ' ran=' + ran + 'ms | first stdout: ' + gotStdout + ' | phase: ' + phase);
+        _cdbg('TIMEOUT worker[' + worker.id + '] full stderr: ' + (worker.stderrBuf || '(none captured)'));
+        _cdbg('TIMEOUT worker[' + worker.id + '] partial stdout buffer: ' + ((worker.stdoutBuf || '').slice(-500) || '(empty)'));
+      }
       if (worker.proc) { _killClaudeTree(worker.proc); }
       worker.proc = null;
       worker.currentJob = null;
