@@ -216,7 +216,7 @@ async function buildEvidence({ profile, text, question, factsNeeded, mode, files
   const _rowFor = (unit) => _fleetRows.find(r => String(r.equipmentId || '').trim().toUpperCase() === String(unit || '').trim().toUpperCase()) || null;
   const _senderCaseId = caseStore.caseIdForSender(profile.slackId);
   function _caseInScope(c) {
-    if (profile.type === 'internal' || profile.type === 'manager') return true;
+    if (profile.type === 'internal' || profile.type === 'manager' || profile.type === 'mcs') return true;
     if (c.caseId && c.caseId === _senderCaseId) return true; // the sender's own case
     if (!c.unit) return false; // sender-less/unit-less case -> external can't see
     const row = _rowFor(c.unit);

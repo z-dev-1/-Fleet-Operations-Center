@@ -40,6 +40,7 @@ const _attr = (s) => _esc(s).replace(/"/g, '&quot;');
 // 3-state capabilities (lifecycle change, create work request).
 const IDENTITY_TYPES = [
   { value: 'internal', label: 'Internal (Amazon team)' },
+  { value: 'mcs',      label: 'MCS Buddy (your assistant)' },
   { value: 'carrier',  label: 'Carrier / SCAC partner' },
   { value: 'vendor',   label: 'Vendor / dealer (mechanic)' },
   { value: 'unknown',  label: 'Unknown / untriaged' },
@@ -54,9 +55,10 @@ const ALL_SCOPE = '*';
 // Vendors (mechanics) can never be trusted/autonomous for lifecycle or WR
 // creation — they ask, you act.
 const _isVendor = (id) => id === 'vendor';
-// Only `unknown` defaults to all-scope; carrier/internal/vendor start empty and
-// mean NO data until scoped.
-const _defaultAllScope = (id) => id === 'unknown';
+// `unknown` and `mcs` default to all-scope (MCS is the FAS's assistant and
+// helps across the whole fleet); carrier/internal/vendor start empty and mean
+// NO data until scoped.
+const _defaultAllScope = (id) => id === 'unknown' || id === 'mcs';
 
 // Operator codes (SCAC) from the latest fleet scan, for the data-scope picker.
 function _fleetOperators() {
@@ -291,8 +293,8 @@ function _applyPresetToEditor(root, p, identity) {
   const synthetic = {
     identityType: identity,
     enabled: cur.enabled,
-    operators: (identity === 'unknown' && !cur.operators.length && !cur.domiciles.length) ? [ALL_SCOPE] : cur.operators,
-    domiciles: (identity === 'unknown' && !cur.operators.length && !cur.domiciles.length) ? [ALL_SCOPE] : cur.domiciles,
+    operators: (_defaultAllScope(identity) && !cur.operators.length && !cur.domiciles.length) ? [ALL_SCOPE] : cur.operators,
+    domiciles: (_defaultAllScope(identity) && !cur.operators.length && !cur.domiciles.length) ? [ALL_SCOPE] : cur.domiciles,
     lifecyclePermission: cur.lifecyclePermission,
     createWrPermission: cur.createWrPermission,
     communicationPreferences: cur.communicationPreferences,
@@ -379,9 +381,9 @@ function _slackScopeBadge(c) {
   const ops = Array.isArray(c.operators) ? c.operators : [];
   const doms = Array.isArray(c.domiciles) ? c.domiciles : [];
   const identity = c.identityType || 'unknown';
-  // Unknown with no explicit scope defaults to all-scope ('*').
+  // Unknown/MCS with no explicit scope defaults to all-scope ('*').
   const allScope = ops.indexOf('*') !== -1 || doms.indexOf('*') !== -1 ||
-    (identity === 'unknown' && !ops.length && !doms.length);
+    (_defaultAllScope(identity) && !ops.length && !doms.length);
   if (allScope) return '<div class="cb-card-meta" style="color:#3fb950">🔓 All fleet (all SCAC + domiciles)</div>';
   const parts = [];
   if (ops.length) parts.push(ops.join(', '));
@@ -867,6 +869,7 @@ function _render() {
         </div>
         <div class="cb-card-addr">${_esc(c.street || '')}${c.city ? ', ' + _esc(c.city) : ''} ${_esc(c.state || '')} ${_esc(c.zip || '')}</div>
         ${c.gateCode ? '<div class="cb-card-meta">🔑 Gate Code: ' + _esc(c.gateCode) + '</div>' : ''}
+        ${c.keyLocation ? '<div class="cb-card-meta">🗝️ Keys: ' + _esc(c.keyLocation) + '</div>' : ''}
         <div class="cb-card-actions">
           <button class="cb-btn cb-btn--use" data-action="edit" data-id="${c.id}">✏️ Edit</button>
           <button class="cb-btn cb-btn--del" data-action="delete" data-id="${c.id}">✕</button>
@@ -884,6 +887,7 @@ function _render() {
           <input class="cb-input" id="cb-d-zip" placeholder="ZIP" style="flex:1" />
         </div>
         <input class="cb-input" id="cb-d-gatecode" placeholder="Gate code (optional, e.g. #7466)" />
+        <input class="cb-input" id="cb-d-keyloc" placeholder="Key location (optional, e.g. lockbox by door / front office)" />
         <button class="cb-btn cb-btn--add" id="cb-add-domicile">Add Domicile</button>
       </div>`;
   } else {
@@ -1055,7 +1059,7 @@ async function _addDomicile() {
     type: 'domicile',
     name: g('cb-d-name'),
     street: g('cb-d-street'), city: g('cb-d-city'), state: g('cb-d-state'), zip: g('cb-d-zip'),
-    gateCode: g('cb-d-gatecode')
+    gateCode: g('cb-d-gatecode'), keyLocation: g('cb-d-keyloc')
   };
   if (!contact.name) return;
   await window.contacts.add(contact);
@@ -1079,7 +1083,8 @@ async function _editContact(id) {
           <input class="cb-input" id="edit-d-zip" value="${_attr(contact.zip || '')}" placeholder="ZIP" style="flex:1" />
         </div>
         <input class="cb-input" id="edit-d-gatecode" value="${_attr(contact.gateCode || '')}" placeholder="Gate code (optional, e.g. #7466)" />
-        <div style="font-size:8px;color:#6e7681;margin-top:2px;">This address is what the AI compares pasted dealers against to pick the nearest domicile. Keep it accurate. Gate code is used in tow comments.</div>
+        <input class="cb-input" id="edit-d-keyloc" value="${_attr(contact.keyLocation || '')}" placeholder="Key location (optional, e.g. lockbox by door / front office)" />
+        <div style="font-size:8px;color:#6e7681;margin-top:2px;">This address is what the AI compares pasted dealers against to pick the nearest domicile. Keep it accurate. Gate code + key location are shared with your MCS buddy for dealer-send requests.</div>
         <div style="display:flex;gap:6px;margin-top:4px;">
           <button class="cb-btn cb-btn--add" id="edit-save">Save</button>
           <button class="cb-btn cb-btn--del" id="edit-cancel">Cancel</button>
@@ -1093,6 +1098,7 @@ async function _editContact(id) {
       contact.state  = g('#edit-d-state').trim();
       contact.zip    = g('#edit-d-zip').trim();
       contact.gateCode = g('#edit-d-gatecode').trim();
+      contact.keyLocation = g('#edit-d-keyloc').trim();
       await window.contacts.update(contact);
       _load();
     });

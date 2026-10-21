@@ -30,7 +30,9 @@ let logger; try { logger = require('../utils/logger').createLogger('contact-book
 const STORE_KEY = 'contacts';
 
 // FOUR identities only (2026-09: manager removed — internal covers it).
-const VALID_IDENTITY = ['internal', 'carrier', 'vendor', 'unknown'];
+// 'mcs' = MCS Buddy (the FAS's internal assistant). Must be here or sanitize()
+// silently resets a saved MCS contact back to 'unknown'.
+const VALID_IDENTITY = ['internal', 'mcs', 'carrier', 'vendor', 'unknown'];
 const DATA_CATS = ['unit_status', 'repair_timeline', 'work_orders', 'pm_status', 'uptake', 'vendor_contact', 'site_summary', 'operator_summary'];
 const REQ_TYPES = ['unit_status', 'repair_update', 'follow_up', 'report', 'process_question', 'lifecycle_change', 'create_wr'];
 // The two sensitive capabilities are each a 3-state field (NOT booleans, NOT in

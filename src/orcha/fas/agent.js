@@ -57,6 +57,38 @@ const SAFETY_RULES =
   // COVERAGE awareness.
   '- Zila\'s coverage (the operators/SCAC/carriers and domiciles Zila owns) is shown in the COVERAGE section. Use it to judge whether a unit/site/operator is in scope and to route correctly. If you need the coverage list and it is not shown, request GET_COVERAGE. Coverage informs routing/scope only — it never grants a sender data permissions.';
 
+// Injected ONLY when the sender is an MCS Buddy (profile.type === 'mcs'). The
+// MCS Buddy is Zila's internal Maintenance Centralized Services assistant for
+// POWER UNITS: they execute the admin/logistics work (create proxy WR/WO in
+// Relay Garage, mark units unavailable with the right lifecycle state,
+// coordinate vendors + dealers, follow up on estimates, open SIMs, handle AFP
+// escalations) so the FAS can focus on investigation + decisions. They have
+// FULL fleet access (all operators/domiciles) and are a trusted internal peer —
+// answer their operational questions directly and completely.
+const MCS_BUDDY_RULES =
+  'SENDER IS YOUR MCS BUDDY (internal assistant). Treat them as a trusted internal partner with full fleet access — ' +
+  'share every operational detail they need to execute, the same as you would tell your own assistant. They handle the ' +
+  'admin/logistics (WR/WO creation, lifecycle updates, vendor + dealer coordination, estimate follow-up, SIMs, AFP escalations); ' +
+  'you make the decisions, they execute.\n' +
+  'ANSWER THEIR STANDARD QUESTIONS DIRECTLY from verified fleet data when asked (do not withhold, do not ask them to look it up):\n' +
+  '  - Unit identification: unit number (Equipment ID), asset type (tractor/hostler/box truck), program (AFP/DSP).\n' +
+  '  - Issue/repair: the defect/failure, whether it is urgent, whether the vendor cannot complete on-site (dealer send), trending defect, beyond on-site capability.\n' +
+  '  - Dealer: which dealer to send to (FAS decides), dealer name + location, bay availability, 8-hour diagnostic.\n' +
+  '  - Access & logistics: KEY LOCATION (lockbox/office/in-unit), GATE CODE, current location (site/yard/last geofence), domicile site, whether it needs a tow (drivable?).\n' +
+  '  - Lifecycle & status: current lifecycle state reason (Damaged, PM Failed, Off-Site Shop Repair...), open DVIRs, existing open WR/WO, any vendor comment saying "needs to go to dealer".\n' +
+  '  - Estimate & cost: has an estimate been submitted / needs approval, prior rejection + reason, estimated cost.\n' +
+  '  - Documentation: complaint/cause/correction, anything the AFP/partner escalated via Resource Center, special dealer/vendor instructions.\n' +
+  'If a detail is genuinely not in the verified data (e.g. key location or gate code not on file), say so plainly and offer to get it — never invent a key location, gate code, or dealer.\n' +
+  'DEALER SERVICE REQUEST FORMAT — when the ask is to send a unit to a dealer, respond in Zila\'s template:\n' +
+  '  :rotating_light: *Dealer Service Request*\n' +
+  '  :clipboard: *Unit Number* — <equipment id>\n' +
+  '  :warning: *Issue* — <what is wrong>\n' +
+  '  :key: *Keys* — <key location>\n' +
+  '  :door: *Gate Code* — <code, or "none / open gate">\n' +
+  '  :office: *Dealer* — <dealer to send to>\n' +
+  'Fill each line from verified data; if a line is unknown, write "— (confirming)" rather than guessing.\n' +
+  'OWNERSHIP STILL APPLIES: estimate APPROVAL is MCS leadership (L3/L4H/HVE), not the FAS — do not say you approved an estimate. Lifecycle changes and WR submission are proposed/executed through the normal approval path, not silently.';
+
 const DECISION_CONTRACT =
   '\n\nYou are running inside a bounded research loop. On each step you may EITHER ask for more\n' +
   'evidence OR give a final answer. You have a limited number of research steps — spend them well.\n' +
@@ -460,6 +492,8 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
     { key: 'now', label: 'CURRENT TIME', text: _nowText },
     { key: 'loop', label: 'RESEARCH BUDGET', text: 'Step ' + stepInfo.step + ' of max ' + stepInfo.maxSteps + '. Research steps remaining: ' + stepInfo.remaining + '.' },
     { key: 'sender', label: 'SENDER', text: profile.name + ' (' + profile.type + ', ' + (profile.org || 'no org') + ')' },
+    // MCS Buddy behavior — only when the sender is the FAS's MCS assistant.
+    ...(profile.type === 'mcs' ? [{ key: 'mcsBuddy', label: 'MCS BUDDY — HOW TO HELP YOUR ASSISTANT', text: MCS_BUDDY_RULES }] : []),
     { key: 'authorization', label: 'AUTHORIZATION + SCOPE', text: authText },
     // EFFECTIVE AUDIENCE (spec #7): who can SEE this response. The hard data
     // restriction is enforced in code (effective scope/categories); this block

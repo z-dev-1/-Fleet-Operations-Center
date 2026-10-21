@@ -1160,7 +1160,9 @@ async function pollChannelsOnce(log) {
         let _allowRoster = false;
         try {
           const prof = require('../orcha/fas/sender-profiles').resolveSender(msg.userId, msg.userName || '');
-          _allowRoster = !!(prof && (prof.type === 'internal'));
+          // mcs (the FAS's assistant) is internal — gets roster, full KB, and
+          // sensitive site fields (gate code / key location) like internal.
+          _allowRoster = !!(prof && (prof.type === 'internal' || prof.type === 'mcs'));
         } catch (_) { _allowRoster = false; }
 
         const draft = await _classifyAndDraft(msg.text, askOrcha, (ch && ch.operators) || [], _allowRoster);

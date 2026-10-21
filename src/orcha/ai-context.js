@@ -92,7 +92,9 @@ function buildFleetContext(messageText, opts = {}) {
   // "address for Horwith?", "James Amerit contact info") used to fail because
   // the contacts store was never injected into the prompt — the data exists,
   // the AI just couldn't see it. See _buildContactContext.
-  context += _buildContactContext(messageText, rows);
+  // Internal audiences (FAS/MCS — same signal as allowRoster) may see sensitive
+  // site fields (gate code, key location); external carriers/vendors may NOT.
+  context += _buildContactContext(messageText, rows, { internal: !!opts.allowRoster });
 
   // FAS roster — INTERNAL only (personnel data). Opt-in via opts.allowRoster.
   if (opts.allowRoster) {
@@ -226,7 +228,8 @@ function _buildGroupSummary(group, allRows, opts) {
 //      POC / contact / who / where) but nothing matched by name, inject a
 //      compact directory of ALL vendors + sites (small: <15 entries) so the AI
 //      can still find e.g. "Horwith" even if it isn't a fleet-data vendor token.
-function _buildContactContext(messageText, rows) {
+function _buildContactContext(messageText, rows, ctxOpts = {}) {
+  const _internal = !!ctxOpts.internal;   // gate sensitive site fields
   if (!messageText) return '';
   let contacts = [];
   try { contacts = store.load('contacts', []) || []; } catch (_) { contacts = []; }
@@ -264,6 +267,11 @@ function _buildContactContext(messageText, rows) {
     if (addr) bits.push('    Address: ' + addr);
     if (c.phone) bits.push('    Phone: ' + c.phone);
     if (c.email) bits.push('    Email: ' + c.email);
+    // Gate code + key location are SENSITIVE site-access facts — surface them
+    // ONLY to internal/MCS audiences (so the AI can fill an MCS buddy's
+    // dealer-send template), NEVER to an external carrier/vendor.
+    if (_internal && c.gateCode) bits.push('    Gate code: ' + c.gateCode);
+    if (_internal && c.keyLocation) bits.push('    Key location: ' + c.keyLocation);
     if (c.domiciles) bits.push('    Serves: ' + c.domiciles);
     if (c.makes || c.make) bits.push('    Makes: ' + (c.makes || c.make));
     return bits.join('\n');

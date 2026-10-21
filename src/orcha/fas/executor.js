@@ -123,7 +123,8 @@ function _authorizeUnitAction(name, args, profile, action) {
     return { ok: false, reason: 'sender not authorized for request type ' + action.requires };
   }
   // 2) Lifecycle / WR-submission require internal/operator authority.
-  const isInternal = !!(profile && profile.type === 'internal');
+  //    mcs (FAS assistant) counts as internal for this authority check.
+  const isInternal = !!(profile && (profile.type === 'internal' || profile.type === 'mcs'));
   if (INTERNAL_ONLY_ACTIONS.has(name) && !isInternal) {
     return { ok: false, reason: name + ' requires internal/operator approval' };
   }
@@ -167,7 +168,8 @@ function _authorizeUnitAction(name, args, profile, action) {
 //                         autonomous gate is enforced separately in routeAction)
 function _requesterAuthorize(name, args, snapshot) {
   if (!snapshot) return { ok: true, requesterResult: 'no-snapshot' }; // internal operator-initiated
-  const isInternal = snapshot.identityType === 'internal';
+  // mcs (the FAS's assistant) has the same internal authority scope as internal.
+  const isInternal = snapshot.identityType === 'internal' || snapshot.identityType === 'mcs';
   const action = actions.getAction(name);
   const requires = action && action.requires;
 

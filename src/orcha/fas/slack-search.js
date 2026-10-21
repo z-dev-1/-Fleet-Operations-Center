@@ -135,7 +135,7 @@ function searchSlack(query, profile, opts) {
   const fromMs = query.fromMs || 0;
   const toMs = query.toMs || Infinity;
 
-  const isInternal = profile && (profile.type === 'internal' || profile.type === 'manager');
+  const isInternal = profile && (profile.type === 'internal' || profile.type === 'manager' || profile.type === 'mcs');
   const scopeOk = typeof opts.scopeCheck === 'function' ? opts.scopeCheck : (p, m) => {
     // Default authorization re-filter: internal sees all; external sees only
     // messages tied to THEIR operators/domiciles (when the message carries

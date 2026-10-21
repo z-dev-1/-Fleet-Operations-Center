@@ -29,7 +29,9 @@
 
 let logger; try { logger = require('../../utils/logger').createLogger('fas-policy'); } catch (_) { logger = { info() {}, warn() {} }; }
 
-const VALID_TYPES = ['internal', 'carrier', 'vendor', 'unknown'];
+// 'mcs' = MCS Buddy (the FAS's internal assistant) — see sender-profiles.js.
+// Treated like 'internal': all-scope, full data.
+const VALID_TYPES = ['internal', 'mcs', 'carrier', 'vendor', 'unknown'];
 const DATA_CATEGORIES = ['unit_status', 'repair_timeline', 'work_orders', 'pm_status', 'uptake', 'vendor_contact', 'site_summary', 'operator_summary'];
 const REQUEST_TYPES = ['unit_status', 'repair_update', 'follow_up', 'report', 'process_question', 'lifecycle_change', 'create_wr'];
 const THREE_STATE = ['not_allowed', 'may_request', 'trusted_autonomous'];
@@ -67,7 +69,8 @@ function _normScope(arr) {
  *                      with lifecycle/WR locked off.
  */
 function _defaultScopeFor(type) {
-  return (type === 'internal' || type === 'unknown') ? [ALL_SCOPE] : [];
+  // mcs = the FAS's assistant → all-scope, same as internal.
+  return (type === 'internal' || type === 'mcs' || type === 'unknown') ? [ALL_SCOPE] : [];
 }
 
 /**
