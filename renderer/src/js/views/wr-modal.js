@@ -325,7 +325,7 @@ function _buildHTML(unit) {
     <div class="wr-section">
       <div class="wr-section__title">
         Component Areas
-        <span class="wr-section__hint">up to 4 pairs</span>
+        <span class="wr-section__hint">add as many as the repair needs</span>
       </div>
       <div id="wr-area-rows">${_areaPairRow(0, '', '', '')}</div>
       <button id="wr-add-area" class="detail-panel__btn detail-panel__btn--secondary" style="margin-top:6px">+ Add area</button>
@@ -585,18 +585,22 @@ function _switchTab(key) {
 function _collectPayload() {
   // Read the three cascading selects per row (values are AAP codes; TOW is a
   // passthrough). buildAreaPairsPayload drops empty rows + normalizes the shape.
+  // Iterate the ACTUAL rows in the DOM (ids are non-contiguous after adds/
+  // removes, and there is no fixed max), reading each row's three selects by
+  // its data-idx. buildAreaPairsPayload drops empty rows + normalizes the shape.
   const rawRows = [];
-  for (let i = 0; i < 4; i++) {
-    const aEl = _el('wr-area-' + i);
-    const sEl = _el('wr-sub-'  + i);
-    const ssEl = _el('wr-subsub-' + i);
-    if (!aEl && !sEl && !ssEl) continue;
+  const rowsEl = _el('wr-area-rows');
+  const domRows = rowsEl ? rowsEl.querySelectorAll('.wr-area-row') : [];
+  domRows.forEach((rowEl) => {
+    // Each row renders exactly three selects in order: L1 area, L2 sub, L3 sub-sub.
+    const sels = rowEl.querySelectorAll('select.wr-area-input');
+    if (!sels.length) return;
     rawRows.push({
-      area: (aEl && aEl.value) || '',
-      subcategory: (sEl && sEl.value) || '',
-      subSubcategory: (ssEl && ssEl.value) || '',
+      area: (sels[0] && sels[0].value) || '',
+      subcategory: (sels[1] && sels[1].value) || '',
+      subSubcategory: (sels[2] && sels[2].value) || '',
     });
-  }
+  });
   const areaPairs = buildAreaPairsPayload(rawRows);
 
   // FEATURE (2026-07-23): attachments are now a list (_attachments module
@@ -1002,8 +1006,11 @@ function _wireAreaRows() {
   });
 
   _el('wr-add-area').addEventListener('click', () => {
+    // No fixed cap — a unit can have any number of component areas. Keep a
+    // sanity ceiling only to prevent runaway UI; the AAP WR accepts the full
+    // suggestedItems list we send.
     const current = rows.querySelectorAll('.wr-area-row').length;
-    if (current >= 4) { toast.show('warn', 'Maximum 4 area pairs', 2000); return; }
+    if (current >= 50) { toast.show('warn', 'That is a lot of areas — 50 max per request', 2500); return; }
     rows.insertAdjacentHTML('beforeend', _areaPairRow(_areaCount++, '', '', ''));
   });
 
@@ -1095,10 +1102,12 @@ function _syncTowWrap() {
   const wrap = _el('wr-tow-wrap');
   if (!wrap) return;
   let isTow = false;
-  for (let i = 0; i < 4; i++) {
-    const aEl = _el('wr-area-' + i);
-    if (aEl && String(aEl.value) === TOW_L1_CODE) { isTow = true; break; }
-  }
+  const rowsEl = _el('wr-area-rows');
+  const domRows = rowsEl ? rowsEl.querySelectorAll('.wr-area-row') : [];
+  domRows.forEach((rowEl) => {
+    const aEl = rowEl.querySelector('select.wr-area-input'); // first select = L1
+    if (aEl && String(aEl.value) === TOW_L1_CODE) isTow = true;
+  });
   wrap.style.display = isTow ? '' : 'none';
 }
 
@@ -2215,12 +2224,15 @@ async function _loadVreRecommendation(unit) {
     const title = (titleEl && titleEl.value || '').trim() || 'Work request';
     const issue = (issueEl && issueEl.value || '').trim();
     // Collect current area rows (may be empty — that's fine for a bare rec).
+    // Iterate the actual DOM rows (no fixed cap).
     const rawRows = [];
-    for (let i = 0; i < 4; i++) {
-      const aEl = _el('wr-area-' + i), sEl = _el('wr-sub-' + i), ssEl = _el('wr-subsub-' + i);
-      if (!aEl && !sEl && !ssEl) continue;
-      rawRows.push({ area: (aEl && aEl.value) || '', subcategory: (sEl && sEl.value) || '', subSubcategory: (ssEl && ssEl.value) || '' });
-    }
+    const recRowsEl = _el('wr-area-rows');
+    const recDomRows = recRowsEl ? recRowsEl.querySelectorAll('.wr-area-row') : [];
+    recDomRows.forEach((rowEl) => {
+      const sels = rowEl.querySelectorAll('select.wr-area-input');
+      if (!sels.length) return;
+      rawRows.push({ area: (sels[0] && sels[0].value) || '', subcategory: (sels[1] && sels[1].value) || '', subSubcategory: (sels[2] && sels[2].value) || '' });
+    });
     const areaPairs = buildAreaPairsPayload(rawRows);
     const rec = await aap.createWorkOrder({
       assetUrl, title, issue, areaPairs, urgent: 'No', confirmVendor: false,
