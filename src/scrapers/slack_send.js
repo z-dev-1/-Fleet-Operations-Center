@@ -63,18 +63,28 @@ function logout() {
   return { ok: true };
 }
 
-/**
- * Call Slack Web API
- * Uses full cookie header (all cookies) + xoxc token in body
- */
-function slackWebApi(method, params = {}) {
+// ── Slack rate-limit handling ───────────────────────────────────────────────
+// Slack Web API is rate-limited per method (conversations.replies especially,
+// Tier 3 ~50/min, and it 429s HARD under bursts). Previously slackWebApi fired
+// every call immediately and ignored HTTP status, so a 429 surfaced as a hard
+// "ratelimited" error and thread fetches were dropped. We now:
+//   1. SERIALIZE all calls through a single-lane queue with a minimum spacing
+//      between requests (so bursts of conversations.replies can't stampede), and
+//   2. HONOR the Retry-After header on a 429 (wait, then retry, bounded).
+// This is the single chokepoint for every Slack call, so it fixes replies,
+// history, and postMessage alike with no call-site changes.
+const _SLACK_MIN_INTERVAL_MS = 350;  // ~170 calls/min ceiling, well under bursts
+const _SLACK_MAX_RETRIES = 4;
+let _slackChain = Promise.resolve();  // serializes requests
+let _slackLastAt = 0;
+
+function _slackRawRequest(method, params) {
   const config = getConfig();
   if (!config || !config.token || !config.allCookieHeader) {
-    throw new Error('Slack not configured — please sign in first');
+    return Promise.reject(new Error('Slack not configured — please sign in first'));
   }
-
-  params.token = config.token;
-  const postData = Object.entries(params)
+  const p = Object.assign({}, params, { token: config.token });
+  const postData = Object.entries(p)
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join('&');
 
@@ -92,20 +102,68 @@ function slackWebApi(method, params = {}) {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
+        // Surface a 429 with its Retry-After so the caller can back off. Slack
+        // sends 429 either as an HTTP status OR as {ok:false,error:'ratelimited'}.
+        const retryAfter = parseInt(res.headers['retry-after'], 10);
+        if (res.statusCode === 429) {
+          return resolve({ __rateLimited: true, retryAfter: isNaN(retryAfter) ? null : retryAfter });
+        }
         try {
-          resolve(JSON.parse(data));
+          const parsed = JSON.parse(data);
+          if (parsed && parsed.ok === false && parsed.error === 'ratelimited') {
+            return resolve({ __rateLimited: true, retryAfter: isNaN(retryAfter) ? null : retryAfter });
+          }
+          resolve(parsed);
         } catch (e) {
           reject(new Error(`Slack parse error: ${data.substring(0, 300)}`));
         }
       });
     });
     req.on('error', reject);
-    req.setTimeout(8000, () => {
+    req.setTimeout(15000, () => {
       req.destroy(new Error('Slack API timeout: ' + method));
     });
     req.write(postData);
     req.end();
   });
+}
+
+const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * Call Slack Web API — serialized + rate-limit aware.
+ * Uses full cookie header (all cookies) + xoxc token in body.
+ */
+function slackWebApi(method, params = {}) {
+  // Chain onto the shared lane so calls are spaced and a 429 backoff on one
+  // call also holds back the next (prevents a thundering herd of replies).
+  const run = _slackChain.then(async () => {
+    for (let attempt = 0; attempt <= _SLACK_MAX_RETRIES; attempt++) {
+      // enforce minimum spacing since the previous request started
+      const wait = _SLACK_MIN_INTERVAL_MS - (Date.now() - _slackLastAt);
+      if (wait > 0) await _sleep(wait);
+      _slackLastAt = Date.now();
+
+      const res = await _slackRawRequest(method, params);
+      if (!res || !res.__rateLimited) return res; // normal result
+
+      if (attempt === _SLACK_MAX_RETRIES) {
+        // Give up gracefully in Slack's own shape so callers handle it as before.
+        logger.warn('[slack] ' + method + ' rate-limited after ' + (_SLACK_MAX_RETRIES + 1) + ' attempts — giving up');
+        return { ok: false, error: 'ratelimited' };
+      }
+      // Honor Retry-After, else exponential backoff (1s, 2s, 4s, 8s) + jitter.
+      const backoff = res.retryAfter != null
+        ? (res.retryAfter * 1000 + 250)
+        : (Math.pow(2, attempt) * 1000 + Math.floor(Math.random() * 300));
+      logger.info('[slack] ' + method + ' 429 — backing off ' + Math.round(backoff) + 'ms (attempt ' + (attempt + 1) + ')');
+      await _sleep(backoff);
+    }
+  });
+  // Keep the lane alive even if this call rejects, so one failure doesn't stall
+  // every subsequent Slack request.
+  _slackChain = run.then(() => undefined, () => undefined);
+  return run;
 }
 
 /**
