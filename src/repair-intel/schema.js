@@ -80,6 +80,9 @@ CREATE TABLE IF NOT EXISTS ri_repair_event (
   wait_capacity_ms      INTEGER,
   wait_transfer_ms      INTEGER,
   wait_return_ms        INTEGER,
+  -- Parts / back-order (from delayReasonCodes + lifecycle reason; NOT fabricated)
+  delay_reason_codes    TEXT,                   -- raw delay reason codes, joined
+  parts_on_order        INTEGER DEFAULT 0,      -- 1 if a parts-delay / back-order signal is present
   -- Vendor scope
   in_scope              TEXT,                   -- yes/no/unknown
   out_of_scope_reason   TEXT,
@@ -191,6 +194,7 @@ function ensureSchema() {
     const ok = engine.exec(DDL);
     if (!ok) { logger.warn('could not create repair-intel schema (SQLite unavailable)'); return false; }
     engine.exec(INDEXES);
+    _migrate();
     _ensured = true;
     logger.info('repair-intel schema ready (v' + SCHEMA_VERSION + ')');
     return true;
@@ -198,6 +202,21 @@ function ensureSchema() {
     logger.error('ensureSchema failed: ' + e.message);
     return false;
   }
+}
+
+// Additive, idempotent column migrations for tables created by an EARLIER
+// schema version (CREATE TABLE IF NOT EXISTS won't add new columns). Each ADD
+// COLUMN is wrapped so an "already exists" error is ignored — safe to run every
+// startup. Add new columns here when the shape grows.
+function _migrate() {
+  const adds = [
+    "ALTER TABLE ri_repair_event ADD COLUMN delay_reason_codes TEXT",
+    "ALTER TABLE ri_repair_event ADD COLUMN parts_on_order INTEGER DEFAULT 0",
+  ];
+  for (const sql of adds) {
+    try { engine.exec(sql); } catch (e) { /* duplicate column name — already migrated */ }
+  }
+  try { engine.exec('CREATE INDEX IF NOT EXISTS ix_ev_parts_order ON ri_repair_event(parts_on_order)'); } catch (_) {}
 }
 
 module.exports = { ensureSchema, SCHEMA_VERSION, DDL, INDEXES };

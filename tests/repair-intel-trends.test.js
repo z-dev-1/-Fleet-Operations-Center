@@ -76,6 +76,18 @@ describe('repair-intel trends (fleet aggregation)', () => {
     expect(pm.totals.events).toBe(1);
   });
 
+  it('rolls up parts / back-order from delay reason codes', () => {
+    // Add a unit with a PARTS_DELAY signal; it should appear in backorder only.
+    store.upsertEvent(store.normalizeWorkOrder(wo({ workRequestId: 'BO1', assetDisplayName: 'U9', vendor: 'Acme Repair',
+      suggestedItems: [{ level1: 'Engine' }], delayReasonCodes: ['PARTS_DELAY'] })));
+    const d = trends.buildTrends({});
+    expect(d.backorder).toBeTruthy();
+    expect(d.backorder.events).toBeGreaterThanOrEqual(1);
+    expect(d.backorder.byComponent.some(c => /engine/i.test(c.key))).toBe(true);
+    // a non-parts event is not counted as back-order
+    expect(d.backorder.events).toBeLessThan(d.totals.events);
+  });
+
   it('builds monthly buckets and filter options', () => {
     const d = trends.buildTrends({});
     expect(Array.isArray(d.monthly)).toBe(true);

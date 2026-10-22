@@ -45,6 +45,21 @@ function _classifyWoType(wo) {
 }
 
 const _n = (v) => (v == null || v === '' ? null : Number(v));
+
+// Parts / back-order signal. Honest: derived ONLY from the delay reason codes
+// and lifecycle reason the API actually returns (PARTS_DELAY / BACK_ORDER /
+// WAITING/AWAITING PARTS, etc.) — never inferred/guessed. Returns { codes, flag }.
+const _PARTS_RE = /PARTS?[_ ]?(DELAY|ORDER|BACK|HOLD|WAIT)|BACK[_ ]?ORDER|AWAIT.*PART|WAIT.*PART|PART.*AWAIT|PART.*BACK/i;
+function _partsSignal(wo) {
+  const codes = [];
+  if (Array.isArray(wo.delayReasonCodes)) codes.push(...wo.delayReasonCodes);
+  else if (wo.delayReasonCodes) codes.push(String(wo.delayReasonCodes));
+  const lcReason = String(wo.lifecycleStateReason || wo.lifecycleReason || '');
+  const subStatus = String((wo.subStatus && (wo.subStatus.value || wo.subStatus)) || wo.substatus || '');
+  const haystack = codes.join(' ') + ' ' + lcReason + ' ' + subStatus;
+  const flag = _PARTS_RE.test(haystack) ? 1 : 0;
+  return { codes: codes.length ? codes.join('; ') : (lcReason || null), flag };
+}
 function _epoch(v) {
   if (v == null || v === '') return null;
   if (typeof v === 'number') return v;
@@ -130,6 +145,8 @@ function normalizeWorkOrder(wo, asset) {
     verification_result: null,
     outstanding_issues: null,
     cancellation_reason: Array.isArray(wo.delayReasonCodes) && _classifyStatus(wo) === 'cancelled' ? wo.delayReasonCodes.join('; ') : null,
+    delay_reason_codes: _partsSignal(wo).codes,
+    parts_on_order:   _partsSignal(wo).flag,
     total_elapsed_ms: dt.total_elapsed_ms,
     hands_on_ms:      dt.hands_on_ms,
     wait_diagnosis_ms: dt.wait_diagnosis_ms,
@@ -157,6 +174,7 @@ function normalizeWorkOrder(wo, asset) {
   row.raw_hash = crypto.createHash('sha1').update(JSON.stringify([
     row.status, row.vendor, row.repair_category, row.repair_component, row.reported_complaint,
     row.reported_at, row.repair_completed_at, row.modified_at, row.estimate_cost,
+    row.parts_on_order, row.delay_reason_codes,
   ])).digest('hex');
   return row;
 }
@@ -166,7 +184,7 @@ const _COLS = [
   'domicile','operator','mileage_at_repair','vendor','repair_location','repair_category','repair_component','repair_subcategory',
   'wo_type','status','reported_at','created_at','repair_start_at','repair_completed_at','return_to_service_at','cancelled_at','modified_at',
   'reported_complaint','symptoms','tech_findings','diagnosed_problem','confirmed_root_cause','suspected_root_cause','corrective_actions',
-  'outcome','complaint_resolved','verification_result','outstanding_issues','cancellation_reason',
+  'outcome','complaint_resolved','verification_result','outstanding_issues','cancellation_reason','delay_reason_codes','parts_on_order',
   'total_elapsed_ms','hands_on_ms','wait_diagnosis_ms','wait_parts_ms','wait_approval_ms','wait_capacity_ms','wait_transfer_ms','wait_return_ms',
   'in_scope','out_of_scope_reason','dealer_required','specialist_required','transferred','receiving_vendor','transfer_date','transfer_result',
   'estimate_cost','invoiced_cost','source_refs','source_conflict','excluded_vendor','raw_hash','first_seen_at','last_synced_at',

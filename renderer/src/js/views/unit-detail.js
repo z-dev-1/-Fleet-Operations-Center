@@ -2892,10 +2892,18 @@ function _wireRepairIntel(unit) {
     fn(equipmentId).then(function(res){
       res = res || {};
       setBusy(false);
-      if (res.ok === false && res.error) toast.show('warn', equipmentId + ': ' + res.error, 4000);
+      if (res.ok === false && res.error) toast.show('warn', equipmentId + ': ' + res.error, 5000);
       else if (res.sync) {
         var sy = res.sync;
-        toast.show('info', equipmentId + ' synced: +' + (sy.added||0) + ' new, ' + (sy.updated||0) + ' updated' + (sy.excluded ? ', ' + sy.excluded + ' excluded' : ''), 3500);
+        if ((sy.errors && sy.errors.length)) {
+          toast.show('warn', equipmentId + ': ' + sy.errors[0], 5000);
+        } else if ((sy.retrieved || 0) === 0) {
+          toast.show('info', equipmentId + ': no repair work orders found in the last 12 months (or session/VPN not ready).', 5000);
+        } else {
+          toast.show('info', equipmentId + ' synced: ' + sy.retrieved + ' WOs \u2014 +' + (sy.added||0) + ' new, ' + (sy.updated||0) + ' updated' + (sy.excluded ? ', ' + sy.excluded + ' excluded' : ''), 4000);
+        }
+      } else {
+        toast.show('info', equipmentId + ': sync returned no data.', 4000);
       }
       renderStatus(res);
       renderReport(res.report, res.ai);

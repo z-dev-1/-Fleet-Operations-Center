@@ -93,6 +93,13 @@ function buildTrends(opts = {}) {
     'FROM ri_repair_event' + where.sql + ' GROUP BY o',
     where.params);
 
+  // Back-order / parts-delay rollup (honest: only events the API flagged via
+  // delay reason codes / lifecycle reason; carries its denominator).
+  const partsWhere = { sql: where.sql + (where.sql ? ' AND ' : ' WHERE ') + 'parts_on_order = 1', params: where.params };
+  const partsTotal = _one('SELECT COUNT(*) AS n, COUNT(DISTINCT equipment_id) AS units FROM ri_repair_event' + partsWhere.sql, partsWhere.params) || {};
+  const partsByComponent = _groupBy('repair_component', partsWhere, opts.limit || 10);
+  const partsByVendor = _groupBy('vendor', partsWhere, opts.limit || 10);
+
   const eventsN = totals.events || 0;
   return {
     ok: true,
@@ -116,6 +123,13 @@ function buildTrends(opts = {}) {
     byMake:     _groupBy('make', where, opts.limit || 10),
     monthly:    _monthly(where),
     outcomes:   outcomes.map(r => ({ key: r.o, count: r.n })),
+    backorder: {
+      events: partsTotal.n || 0,
+      units: partsTotal.units || 0,
+      pctOfEvents: eventsN ? Math.round(((partsTotal.n || 0) / eventsN) * 100) : 0,
+      byComponent: partsByComponent,
+      byVendor: partsByVendor,
+    },
   };
 }
 

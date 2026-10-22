@@ -91,6 +91,27 @@ function _outcomes(outcomes) {
     '<div class="dp-ri-chips">' + items + '</div></div>';
 }
 
+function _backorderCard(bo) {
+  if (!bo || !bo.events) {
+    return '<div class="tr-card tr-card--wide"><div class="tr-card-title">\uD83D\uDCE6 Parts / back-order</div>' +
+      '<div class="dp-empty" style="color:var(--mut)">No parts-delay / back-order signals in this window.</div></div>';
+  }
+  function miniRank(title, rows) {
+    if (!rows || !rows.length) return '';
+    var max = Math.max.apply(null, rows.map(function(r){ return r.count; })) || 1;
+    var items = rows.slice(0, 8).map(function(r){
+      var pct = Math.round((r.count / max) * 100);
+      return '<div class="tr-rank"><div class="tr-rank-head"><span class="tr-rank-key">' + esc(r.key) + '</span>' +
+        '<span class="tr-rank-n">' + r.count + '</span></div>' +
+        '<div class="tr-rank-bar"><div class="tr-rank-fill tr-rank-fill--bo" style="width:' + pct + '%"></div></div></div>';
+    }).join('');
+    return '<div class="tr-bo-col"><div class="tr-bo-subtitle">' + esc(title) + '</div>' + items + '</div>';
+  }
+  return '<div class="tr-card tr-card--wide"><div class="tr-card-title">\uD83D\uDCE6 Parts / back-order ' +
+    '<span class="dp-ri-sub-note">(' + bo.events + ' events \u00b7 ' + bo.units + ' units \u00b7 ' + bo.pctOfEvents + '% of events \u00b7 from delay-reason/lifecycle signals only)</span></div>' +
+    '<div class="tr-bo-cols">' + miniRank('By component', bo.byComponent) + miniRank('By vendor', bo.byVendor) + '</div></div>';
+}
+
 function _render(data) {
   var body = _el.querySelector('#tr-body');
   if (!body) return;
@@ -110,6 +131,7 @@ function _render(data) {
     _stat('PM', t.pm) +
     _stat('Downtime (hrs)', t.downtimeHours != null ? t.downtimeHours : 'Unknown', t.downtimeCoverage + '% coverage') +
     _stat('Est. cost', t.estimateCostTotal != null ? ('$' + t.estimateCostTotal.toLocaleString()) : 'Unknown', t.costCoverage + '% coverage') +
+    (data.backorder ? _stat('Parts / back-order', data.backorder.events, data.backorder.pctOfEvents + '% of events') : '') +
   '</div>';
 
   var grid = '<div class="tr-grid">' +
@@ -121,6 +143,7 @@ function _render(data) {
     _rankList('By domicile', data.byDomicile) +
     _rankList('By operator', data.byOperator) +
     _rankList('By make', data.byMake) +
+    _backorderCard(data.backorder) +
   '</div>';
 
   body.innerHTML = stats + grid +
