@@ -77,6 +77,19 @@ function mapLifecycleState(raw)  { const k = String(raw || '').toUpperCase(); re
 function mapLifecycleReason(raw) { const k = String(raw || '').toUpperCase(); return LIFECYCLE_REASON[k] || (raw ? _titleCaseEnum(raw) : ''); }
 function mapVendor(raw)          { const k = String(raw || '').toUpperCase(); return VENDOR_DISPLAY[k] || (raw || ''); }
 
+// Vendors EXCLUDED from the Fleet Repair Intelligence feature (unit history,
+// trends, vendor-network): Velocity/Velociti, Fleetnet, Goodyear. This is the
+// SINGLE canonical chokepoint — every WO's vendor already flows through the
+// mapper, so the repair-history collector/service calls isExcludedVendor() here
+// instead of scattering the filter. Matches on the normalized (raw or display)
+// vendor string. (Mirrors the existing aap_wo_scraper SKIP_VENDORS convention,
+// and ADDS goodyear which that list was missing.)
+const EXCLUDED_VENDORS = ['velocity', 'velociti', 'fleetnet', 'fleet net', 'goodyear'];
+function isExcludedVendor(raw) {
+  const v = String(raw || '').toLowerCase().replace(/[^a-z]/g, '');
+  return EXCLUDED_VENDORS.some((x) => v.includes(x.replace(/[^a-z]/g, '')));
+}
+
 // Accepts epoch milliseconds (number or numeric string) OR an ISO/date string.
 // Returns a clean ISO string, or '' if the input isn't a valid date — so the
 // UI never renders "Invalid Date".
@@ -479,6 +492,8 @@ module.exports = {
   commentsToTimeline,
   assetDetailFields,
   mapVendor,
+  isExcludedVendor,
+  EXCLUDED_VENDORS,
   mapLifecycleState,
   mapLifecycleReason,
   mapBodyType,

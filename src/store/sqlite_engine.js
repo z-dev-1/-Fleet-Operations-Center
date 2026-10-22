@@ -187,9 +187,36 @@ function close() {
   _initFailed = false;
 }
 
+// ── Relational seam ───────────────────────────────────────────────────────────
+// The kv API above stores whole JSON docs. Features that need real relational
+// tables + indexed aggregation (e.g. the repair-history / trends engine) use
+// these to run DDL/DML against the SAME WAL database, so there is ONE db file,
+// one writer, and the same short-transaction + busy_timeout guarantees. Callers
+// MUST keep transactions short and NEVER do API/AI/network work inside tx().
+// Returns null when SQLite is unavailable (caller should degrade gracefully).
+
+/** Run arbitrary DDL/SQL (CREATE TABLE/INDEX, PRAGMA). No-op if unavailable. */
+function exec(sql) {
+  const db = _ensureDb();
+  if (!db) return false;
+  db.exec(sql);
+  return true;
+}
+
+/** Return a cached prepared statement, or null if SQLite is unavailable. */
+function prepare(sql) {
+  const db = _ensureDb();
+  if (!db) return null;
+  return _prep(sql);
+}
+
+/** Raw handle for advanced callers (e.g. multi-statement migrations). */
+function getDb() { return _ensureDb(); }
+
 module.exports = {
   isAvailable,
   readDoc, writeDoc, deleteDoc, hasDoc, tx,
+  exec, prepare, getDb,
   close,
   _currentDbPath,
 };
