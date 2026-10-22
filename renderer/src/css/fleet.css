@@ -9789,10 +9789,34 @@ body {
 .tr-rank-bar { height: 5px; border-radius: 3px; background: rgba(139,148,158,.15); overflow: hidden; }
 .tr-rank-fill { height: 100%; background: linear-gradient(90deg, var(--acc, #58a6ff), var(--acc2, #79c0ff)); border-radius: 3px; }
 
-.tr-mchart { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 6px; }
+.tr-mchart { display: flex; align-items: flex-end; gap: 4px; height: 140px; padding-top: 16px; }
 .tr-mbar { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; gap: 3px; }
-.tr-mbar-fill { width: 70%; min-height: 2px; background: linear-gradient(180deg, var(--acc2, #79c0ff), var(--acc, #58a6ff)); border-radius: 3px 3px 0 0; }
+.tr-mbar--click { cursor: pointer; border-radius: 4px; transition: background .12s; }
+.tr-mbar--click:hover { background: rgba(88,166,255,.10); }
+.tr-mbar-n { font-size: 9px; color: var(--txt2); font-family: var(--mono); }
+.tr-mstack { width: 72%; min-height: 4px; display: flex; flex-direction: column-reverse; border-radius: 3px 3px 0 0; overflow: hidden; }
+.tr-mseg { width: 100%; }
+.tr-mseg--done { background: #3fb950; }
+.tr-mseg--prog { background: var(--acc, #58a6ff); }
+.tr-mseg--cancel { background: #f85149; }
+.tr-mseg--xfer { background: #a371f7; }
+.tr-mseg--other { background: #8b949e; }
 .tr-mbar-lbl { font-size: 8.5px; color: var(--mut); font-family: var(--mono); white-space: nowrap; }
+.tr-mlegend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; align-items: center; }
+.tr-mlg { font-size: 10px; color: var(--txt2); display: inline-flex; align-items: center; gap: 4px; }
+.tr-mlg::before { content: ''; width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+.tr-mlg--done::before { background: #3fb950; }
+.tr-mlg--prog::before { background: var(--acc, #58a6ff); }
+.tr-mlg--cancel::before { background: #f85149; }
+.tr-mlg--xfer::before { background: #a371f7; }
+.tr-mtable { margin-top: 10px; font-size: 11px; }
+.tr-mtr { display: grid; grid-template-columns: 1.3fr repeat(8, 1fr); gap: 4px; padding: 4px 6px; border-bottom: 1px solid rgba(48,54,61,.4); }
+.tr-mtr span:first-child { font-family: var(--mono); color: var(--txt); }
+.tr-mtr span:not(:first-child) { text-align: right; color: var(--txt2); font-family: var(--mono); }
+.tr-mtr--head { color: var(--mut); font-size: 9.5px; text-transform: uppercase; letter-spacing: .03em; border-bottom: 1px solid rgba(48,54,61,.7); }
+.tr-mtr--head span { color: var(--mut) !important; }
+.tr-mtr--click { cursor: pointer; }
+.tr-mtr--click:hover { background: rgba(88,166,255,.10); }
 
 /* ── Trends: Vendor Network Intelligence (Phase 6) ────────────────────────── */
 .tr-section-title { font-size: 14px; font-weight: 800; color: var(--txt); margin: 18px 0 10px; }

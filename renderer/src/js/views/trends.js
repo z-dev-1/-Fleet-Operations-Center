@@ -77,15 +77,48 @@ function _monthlyChart(monthly) {
   if (!monthly || !monthly.length) return '';
   var max = Math.max.apply(null, monthly.map(function(m){ return m.count; })) || 1;
   var bars = monthly.map(function(m){
-    var h = Math.max(2, Math.round((m.count / max) * 100));
+    var h = Math.max(6, Math.round((m.count / max) * 100));
     var label = m.month ? m.month.slice(2) : '';
-    return '<div class="tr-mbar" title="' + esc(m.month) + ': ' + m.count + ' events">' +
-      '<div class="tr-mbar-fill" style="height:' + h + '%"></div>' +
+    // stacked segments: completed / in-progress / cancelled / other, sized by share
+    function seg(n, cls) { return n ? '<div class="tr-mseg ' + cls + '" style="flex:' + n + '"></div>' : ''; }
+    var other = Math.max(0, m.count - (m.completed||0) - (m.inProgress||0) - (m.cancelled||0) - (m.transferred||0));
+    var stack = '<div class="tr-mstack" style="height:' + h + '%">' +
+      seg(m.completed, 'tr-mseg--done') +
+      seg(m.inProgress, 'tr-mseg--prog') +
+      seg(m.cancelled, 'tr-mseg--cancel') +
+      seg(m.transferred, 'tr-mseg--xfer') +
+      seg(other, 'tr-mseg--other') +
+    '</div>';
+    var tip = m.month + '\n' + m.count + ' repairs \u00b7 ' + (m.unitsAffected||0) + ' units\n' +
+      (m.completed||0) + ' completed, ' + (m.inProgress||0) + ' in progress, ' + (m.cancelled||0) + ' cancelled' +
+      (m.transferred ? ', ' + m.transferred + ' transferred' : '') + '\n' +
+      (m.pm||0) + ' PM \u00b7 ' + (m.partsHold||0) + ' parts-hold' +
+      (m.avgDowntimeHours != null ? '\navg downtime ' + m.avgDowntimeHours + 'h (' + m.downtimeCoverage + '% coverage)' : '');
+    return '<div class="tr-mbar tr-mbar--click" data-month="' + esc(m.month) + '" title="' + esc(tip) + '">' +
+      '<div class="tr-mbar-n">' + m.count + '</div>' +
+      stack +
       '<div class="tr-mbar-lbl">' + esc(label) + '</div>' +
     '</div>';
   }).join('');
-  return '<div class="tr-card tr-card--wide"><div class="tr-card-title">Repair volume by month</div>' +
-    '<div class="tr-mchart">' + bars + '</div></div>';
+  var legend = '<div class="tr-mlegend">' +
+    '<span class="tr-mlg tr-mlg--done">completed</span>' +
+    '<span class="tr-mlg tr-mlg--prog">in progress</span>' +
+    '<span class="tr-mlg tr-mlg--cancel">cancelled</span>' +
+    '<span class="tr-mlg tr-mlg--xfer">transferred</span>' +
+    '<span class="dp-ri-sub-note">click a month for its events</span>' +
+  '</div>';
+  // Compact per-month numbers table under the chart (the "data right inside").
+  var tbl = '<div class="tr-mtable"><div class="tr-mtr tr-mtr--head">' +
+    '<span>Month</span><span>Repairs</span><span>Units</span><span>Done</span><span>In prog</span><span>Cancel</span><span>PM</span><span>Parts</span><span>Avg dt</span></div>' +
+    monthly.slice().reverse().map(function(m){
+      return '<div class="tr-mtr tr-mtr--click" data-month="' + esc(m.month) + '">' +
+        '<span>' + esc(m.month) + '</span><span>' + m.count + '</span><span>' + (m.unitsAffected||0) + '</span>' +
+        '<span>' + (m.completed||0) + '</span><span>' + (m.inProgress||0) + '</span><span>' + (m.cancelled||0) + '</span>' +
+        '<span>' + (m.pm||0) + '</span><span>' + (m.partsHold||0) + '</span>' +
+        '<span>' + (m.avgDowntimeHours != null ? m.avgDowntimeHours + 'h' : '\u2014') + '</span></div>';
+    }).join('') + '</div>';
+  return '<div class="tr-card tr-card--wide"><div class="tr-card-title">Repair volume by month <span class="dp-ri-sub-note">(status breakdown \u00b7 click any month or row)</span></div>' +
+    '<div class="tr-mchart">' + bars + '</div>' + legend + tbl + '</div>';
 }
 
 function _outcomes(outcomes) {
@@ -403,10 +436,13 @@ export function init(container) {
   _el.querySelectorAll('.tr-filters select').forEach(function(sel){
     sel.addEventListener('change', _load);
   });
-  // Delegated click: any clickable ranked row drills into the units behind it.
+  // Delegated click: ranked rows drill by their dimension; month bars/rows drill
+  // by month. Everything that represents data is clickable.
   _el.addEventListener('click', function(ev){
-    var row = ev.target.closest && ev.target.closest('.tr-rank--click');
-    if (row && row.dataset.dim) { _openDrill(row.dataset.dim, row.dataset.val); }
+    var rank = ev.target.closest && ev.target.closest('.tr-rank--click');
+    if (rank && rank.dataset.dim) { _openDrill(rank.dataset.dim, rank.dataset.val); return; }
+    var month = ev.target.closest && ev.target.closest('[data-month]');
+    if (month && month.dataset.month) { _openDrill('month', month.dataset.month); return; }
   });
 
   // Lazy-load on first reveal so startup stays fast and empty engines are fine.

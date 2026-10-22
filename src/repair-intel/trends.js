@@ -59,15 +59,41 @@ function _groupBy(col, where, limit) {
   return rows.map(r => ({ key: r.k, count: r.n, downtimeHours: r.dtn ? Math.round(r.dt / HOUR_MS) : null, downtimeCoverage: r.n ? Math.round((r.dtn / r.n) * 100) : 0 }));
 }
 
-// Month buckets (YYYY-MM) of repair-event volume over the window.
+// Month buckets (YYYY-MM) with a full status breakdown per month. Everything
+// here is a real count from the stored work orders — no fabrication. "inProgress"
+// = open/reopened (not completed/cancelled/transferred). "unitsAffected" = how
+// many DISTINCT units had a repair reported that month (the closest honest proxy
+// for "how many went down that month" — the engine does not store historical
+// fleet availability snapshots, so we do NOT claim a fleet-availability %).
 function _monthly(where) {
-  // node:sqlite has strftime; reported_at is epoch ms -> seconds for date().
   const rows = _rows(
-    "SELECT strftime('%Y-%m', reported_at/1000, 'unixepoch') AS ym, COUNT(*) AS n " +
+    "SELECT strftime('%Y-%m', reported_at/1000, 'unixepoch') AS ym, " +
+    'COUNT(*) AS n, ' +
+    'COUNT(DISTINCT equipment_id) AS units, ' +
+    "SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed, " +
+    "SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) AS cancelled, " +
+    "SUM(CASE WHEN status='transferred' THEN 1 ELSE 0 END) AS transferred, " +
+    "SUM(CASE WHEN status IN ('open','reopened') THEN 1 ELSE 0 END) AS inProgress, " +
+    "SUM(CASE WHEN wo_type='PM' THEN 1 ELSE 0 END) AS pm, " +
+    "SUM(CASE WHEN parts_on_order=1 THEN 1 ELSE 0 END) AS partsHold, " +
+    'SUM(CASE WHEN total_elapsed_ms IS NOT NULL THEN total_elapsed_ms ELSE 0 END) AS dt, ' +
+    'SUM(CASE WHEN total_elapsed_ms IS NOT NULL THEN 1 ELSE 0 END) AS dtn ' +
     'FROM ri_repair_event' + where.sql + (where.sql ? ' AND ' : ' WHERE ') + 'reported_at IS NOT NULL ' +
     'GROUP BY ym ORDER BY ym ASC',
     where.params);
-  return rows.map(r => ({ month: r.ym, count: r.n }));
+  return rows.map(r => ({
+    month: r.ym,
+    count: r.n,
+    unitsAffected: r.units,
+    completed: r.completed,
+    cancelled: r.cancelled,
+    transferred: r.transferred,
+    inProgress: r.inProgress,
+    pm: r.pm,
+    partsHold: r.partsHold,
+    avgDowntimeHours: r.dtn ? Math.round((r.dt / r.dtn) / HOUR_MS) : null,
+    downtimeCoverage: r.n ? Math.round((r.dtn / r.n) * 100) : 0,
+  }));
 }
 
 // Build the full fleet Trends payload for a filter spec.
@@ -154,17 +180,26 @@ const _DRILL_COLS = {
 
 function drillEvents(dimension, value, opts = {}) {
   if (!ensureSchema()) return { ok: false, error: 'sqlite unavailable' };
-  const col = _DRILL_COLS[dimension];
-  if (!col) return { ok: false, error: 'unknown dimension: ' + dimension };
   const since = opts.sinceMs != null ? opts.sinceMs : 0; // default: all stored
   const extra = [];
   const params = { val: String(value), since };
+  // "month" is not a column — match the YYYY-MM bucket via strftime. Otherwise
+  // the dimension must be a whitelisted column.
+  let matchClause;
+  if (dimension === 'month') {
+    matchClause = "strftime('%Y-%m', reported_at/1000, 'unixepoch') = @val";
+  } else {
+    const col = _DRILL_COLS[dimension];
+    if (!col) return { ok: false, error: 'unknown dimension: ' + dimension };
+    matchClause = col + ' = @val';
+  }
   // optional combined filters (same whitelist as _where)
+  const drillCol = _DRILL_COLS[dimension]; // undefined for month
   const eqCols = { domicile: 'domicile', operator: 'operator', vendor: 'vendor', make: 'make',
     model: 'model', category: 'repair_category', woType: 'wo_type', equipmentId: 'equipment_id',
     component: 'repair_component' };
   for (const [key, c] of Object.entries(eqCols)) {
-    if (opts[key] && c !== col) { extra.push(c + ' = @f_' + key); params['f_' + key] = String(opts[key]); }
+    if (opts[key] && c !== drillCol) { extra.push(c + ' = @f_' + key); params['f_' + key] = String(opts[key]); }
   }
   if (dimension === 'partsOnOrder' || opts.partsOnOrder) extra.push('parts_on_order = 1');
   const sql =
@@ -172,7 +207,7 @@ function drillEvents(dimension, value, opts = {}) {
     'repair_category, repair_component, reported_complaint, cancellation_reason, delay_reason_codes, ' +
     'parts_on_order, out_of_scope_reason, in_scope, confirmed_root_cause, suspected_root_cause, ' +
     'outcome, corrective_actions, reported_at, repair_completed_at, estimate_cost, source_refs ' +
-    'FROM ri_repair_event WHERE excluded_vendor = 0 AND ' + col + ' = @val ' +
+    'FROM ri_repair_event WHERE excluded_vendor = 0 AND ' + matchClause + ' ' +
     'AND (reported_at IS NULL OR reported_at >= @since)' +
     (extra.length ? ' AND ' + extra.join(' AND ') : '') +
     ' ORDER BY equipment_id ASC, COALESCE(reported_at, created_at, 0) DESC';

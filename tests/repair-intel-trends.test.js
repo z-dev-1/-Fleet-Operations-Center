@@ -102,6 +102,27 @@ describe('repair-intel trends (fleet aggregation)', () => {
     expect(res.units.every(u => u.events.every(e => e.vendor !== 'Goodyear Commercial'))).toBe(true);
   });
 
+  it('monthly buckets carry a full status breakdown', () => {
+    const d = trends.buildTrends({});
+    const m = d.monthly.find(x => x.count > 0);
+    expect(m).toBeTruthy();
+    // every breakdown field present and numeric
+    for (const k of ['completed', 'cancelled', 'inProgress', 'pm', 'unitsAffected']) {
+      expect(typeof m[k]).toBe('number');
+    }
+    // completed + cancelled + inProgress + transferred <= total
+    expect((m.completed + m.cancelled + m.inProgress + m.transferred)).toBeLessThanOrEqual(m.count);
+  });
+
+  it('drills into a specific month', () => {
+    const d = trends.buildTrends({});
+    const m = d.monthly.find(x => x.count > 0);
+    const res = trends.drillEvents('month', m.month);
+    expect(res.ok).toBe(true);
+    expect(res.totalEvents).toBe(m.count);
+    expect(res.units.length).toBe(m.unitsAffected);
+  });
+
   it('builds monthly buckets and filter options', () => {
     const d = trends.buildTrends({});
     expect(Array.isArray(d.monthly)).toBe(true);
