@@ -14,6 +14,7 @@
 
 import bus from '../bus.js';
 import toast from '../components/toast.js';
+import state from '../state.js';
 
 let _el = null;
 let _loaded = false;
@@ -277,13 +278,22 @@ function _wireDrillClose(host) {
 
 function _openUnit(unitId) {
   if (!unitId) return;
-  // Reuse the fleet row if we have it so the detail panel opens fully populated.
+  // Reuse the FULL fleet row from renderer state so the detail panel opens
+  // populated (same source fleet.js uses). Fall back to a minimal object +
+  // a toast so the click is never a silent no-op.
   var row = null;
   try {
-    var rows = (window.__fleetRows || (window.fleet && window.fleet._rows)) || [];
-    row = rows.find && rows.find(function(r){ return String(r.equipmentId || r.id) === String(unitId); });
+    var rows = (state.slice('fleet') && state.slice('fleet').rows) || [];
+    row = rows.find(function(r){ return String(r.equipmentId || r.id) === String(unitId); });
   } catch (_) {}
-  bus.emit('ui:unit-select', { unit: row || { equipmentId: unitId, id: unitId } });
+  if (row) {
+    bus.emit('ui:unit-select', { unit: row });
+  } else {
+    // Unit not in the current fleet view (e.g. filtered out / different domicile).
+    // Open with what we have and let the detail panel's API refresh hydrate it.
+    bus.emit('ui:unit-select', { unit: { equipmentId: unitId, id: unitId, _apiSourced: true } });
+    toast.show('info', 'Opening ' + unitId + ' \u2014 loading its live detail\u2026', 2500);
+  }
 }
 
 function _openDrill(dim, val) {
@@ -419,7 +429,7 @@ function _renderNetwork(data) {
     var rrCls = rr && rr.repeatRatePct >= 30 ? 'tr-vn-rr--bad' : (rr && rr.repeatRatePct >= 15 ? 'tr-vn-rr--warn' : '');
     var out = (v.outcomes || []).slice(0, 4).map(function(o){ return '<span class="dp-ri-chip">' + esc(o.key) + ' ' + o.count + '</span>'; }).join('');
     return '<div class="tr-vn-card">' +
-      '<div class="tr-vn-head"><span class="tr-vn-name">' + esc(v.vendor) + '</span>' +
+      '<div class="tr-vn-head"><button class="tr-vn-name tr-rank--click" data-dim="vendor" data-val="' + esc(v.vendor) + '" title="Drill into this vendor\u2019s events">' + esc(v.vendor) + ' \u2197</button>' +
         '<span class="tr-vn-events">' + v.events + ' events \u00b7 ' + v.units + ' units</span></div>' +
       '<div class="tr-vn-metrics">' +
         '<span>Downtime: ' + (v.downtimeHours != null ? v.downtimeHours + 'h' : 'Unknown') + (v.downtimeCoverage < 100 ? ' (' + v.downtimeCoverage + '%)' : '') + '</span>' +
@@ -433,7 +443,7 @@ function _renderNetwork(data) {
 
   var mv = (data.multiVendor || []).slice(0, 12).map(function(c){
     var vs = c.vendors.slice(0, 5).map(function(x){ return esc(x.vendor) + ' (' + x.count + ')'; }).join(', ');
-    return '<div class="tr-mv-row"><span class="tr-mv-comp">' + esc(c.component) + '</span>' +
+    return '<div class="tr-mv-row"><button class="tr-mv-comp tr-rank--click" data-dim="component" data-val="' + esc(c.component) + '" title="Drill into this component\u2019s events">' + esc(c.component) + ' \u2197</button>' +
       '<span class="tr-mv-count">' + c.vendorCount + ' vendors</span>' +
       '<span class="tr-mv-list">' + vs + '</span></div>';
   }).join('');
