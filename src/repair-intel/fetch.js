@@ -44,9 +44,14 @@ const YEAR_MS = 365 * 24 * 3600 * 1000;
 function _historyBody(opts = {}) {
   const u = String((opts.equipmentIds && opts.equipmentIds[0]) || '').trim().toUpperCase();
   if (opts.widened) {
-    // ATTEMPT 2 — clear the restrictive dimensions (null = no filter on them).
-    return { equipmentIds: [u], statuses: [], category: null,
-      lifecycleStates: null, assetPrograms: null, fleetIds: null, page: 1 };
+    // ATTEMPT 2 — widen the dimensions that over-constrain, but DO NOT null the
+    // fields the API declares non-nullable. The live endpoint 500s on
+    // fleetIds:null AND category:null ("KotlinInvalidNullException"), so we omit
+    // those (searchServices keeps the valid defaults) and only clear the
+    // nullable dimensions (lifecycleStates, assetPrograms) that scope out a
+    // unit whose WOs are completed/cancelled or in a different program.
+    return { equipmentIds: [u], statuses: [],
+      lifecycleStates: null, assetPrograms: null, page: 1 };
   }
   // ATTEMPT 1 — fast path: just scope to the unit + all statuses.
   return { equipmentIds: [u], statuses: [], page: 1 };

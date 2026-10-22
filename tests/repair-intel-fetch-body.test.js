@@ -16,13 +16,14 @@ describe('repair-intel fetch _historyBody', () => {
     expect('category' in body).toBe(false);
   });
 
-  it('widened variant nulls the restrictive dimensions to catch out-of-default WOs', () => {
+  it('widened variant clears only NULLABLE dimensions, never non-nullable fleetIds/category', () => {
     const body = fetch._historyBody({ equipmentIds: ['U1'], widened: true });
     expect(body.equipmentIds).toEqual(['U1']);
     expect(body.statuses).toEqual([]);
-    expect(body.category).toBeNull();
     expect(body.lifecycleStates).toBeNull();
     expect(body.assetPrograms).toBeNull();
-    expect(body.fleetIds).toBeNull();
+    // The API 500s on null fleetIds/category — the widened body must NOT send them.
+    expect('fleetIds' in body).toBe(false);
+    expect('category' in body).toBe(false);
   });
 });
