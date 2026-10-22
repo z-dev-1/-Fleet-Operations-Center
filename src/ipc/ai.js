@@ -1040,7 +1040,14 @@ function registerAIHandlers(ctx) {
     // queues behind it forever and "fails as if stuck on the first WR". Guard
     // every call with a hard timeout + AbortSignal so a slow/stuck backend call
     // fails fast, RELEASES the slot, and each WR's AI Fill is independent.
-    const AI_ASK_TIMEOUT_MS = 90000; // 90s hard cap per ai:ask
+    // 180s hard cap per ai:ask. The relay.ask cascade can try BOTH lanes
+    // (Orcha WS, then the claude-code fallback whose credential check adds
+    // ~30-50s), and interactive fills often contend with background AI jobs
+    // (briefing / relay-reconcile / deep-scan), so a working-but-slow call can
+    // run well past 90s. The old 90s cap aborted those mid-flight ("Aborted by
+    // caller"). 180s lets a genuinely-working call finish while still failing a
+    // truly stuck backend fast enough to release the single ai:ask slot.
+    const AI_ASK_TIMEOUT_MS = 180000;
     const text = await _aiAskLimit(() => {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), AI_ASK_TIMEOUT_MS);

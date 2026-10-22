@@ -681,8 +681,24 @@ async function _aiFillRow(unitId, tr, onStatus) {
     if (btn && onStatus === undefined) btn.textContent = '\u2728 Filling...';
     const dd = _downDays(row);
     const prompt = _buildAIFillPrompt(row, dd == null ? 0 : dd);
-    const result = await aiBridge.ask(prompt);
-    if (!result || result.ok === false) throw new Error((result && result.error) || 'AI call failed');
+    // The AI lane can be busy/slow (Claude credential stall + contention with
+    // background jobs), which surfaces as an abort/timeout. Retry ONCE after a
+    // short pause — the second attempt usually lands on the warm Orcha lane.
+    let result;
+    try {
+      result = await aiBridge.ask(prompt);
+      if (!result || result.ok === false) throw new Error((result && result.error) || 'AI call failed');
+    } catch (firstErr) {
+      const msg = String((firstErr && firstErr.message) || firstErr || '');
+      if (/abort|timed out|timeout/i.test(msg)) {
+        if (btn && onStatus === undefined) btn.textContent = '\u2728 Retrying...';
+        await new Promise(r => setTimeout(r, 1500));
+        result = await aiBridge.ask(prompt);
+        if (!result || result.ok === false) throw new Error((result && result.error) || 'AI call failed (after retry)');
+      } else {
+        throw firstErr;
+      }
+    }
     const text = result.text || '';
     const jm = text.match(/\{[\s\S]*\}/);
     if (!jm) throw new Error('AI response was not JSON');
