@@ -167,6 +167,28 @@ describe('repair-intel trends (fleet aggregation)', () => {
     expect(res.offenders.some(o => o.equipmentId === 'WU1')).toBe(false);
   });
 
+  it('unitHealth ranks worst-first with transparent factors', () => {
+    // From the seeded data: U-REPEAT has 3 airbag repeats -> should outrank
+    // single-repair units. Scores are 0-100, worst first.
+    const res = trends.unitHealth();
+    expect(res.ok).toBe(true);
+    expect(res.units.length).toBeGreaterThan(0);
+    // worst-first ordering (non-increasing raw/score)
+    for (let i = 1; i < res.units.length; i++) {
+      expect(res.units[i - 1].raw).toBeGreaterThanOrEqual(res.units[i].raw);
+    }
+    // top unit carries factors + a 0-100 score + a grade
+    const worst = res.units[0];
+    expect(worst.score).toBeGreaterThanOrEqual(0);
+    expect(worst.score).toBeLessThanOrEqual(100);
+    expect(['critical', 'watch', 'fair', 'good']).toContain(worst.grade);
+    expect(Array.isArray(worst.factors)).toBe(true);
+    // the repeat-failure unit should be at/near the top and flag its repeats
+    const rep = res.units.find(u => u.equipmentId === 'U-REPEAT');
+    expect(rep).toBeTruthy();
+    expect(rep.repeatFailures).toBeGreaterThanOrEqual(1);
+  });
+
   it('builds monthly buckets and filter options', () => {
     const d = trends.buildTrends({});
     expect(Array.isArray(d.monthly)).toBe(true);

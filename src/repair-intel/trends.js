@@ -326,6 +326,111 @@ function _tallyVals(arr) {
   return Object.entries(m).map(([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count);
 }
 
+// ── Unit Health Scoreboard ──────────────────────────────────────────────────
+// A transparent, maintenance-focused composite score per unit, ranked worst ->
+// best. EVERY factor is a real figure from the stored work orders — nothing is
+// invented. The score is a weighted sum normalized to 0-100 (higher = needs
+// more attention), and we return the raw driving factors so the UI can show
+// WHY a unit scores the way it does (no black box). Repeat failures dominate
+// because a component that keeps coming back is the clearest maintenance signal.
+const _HEALTH_WEIGHTS = {
+  corrective: 3,        // each corrective repair
+  repeatFailure: 12,    // each (component seen 2+ times) group — the big one
+  openUnresolved: 8,    // each currently-open / reopened event
+  partsHold: 4,         // each parts/back-order event
+  downtimePer100h: 6,   // per 100h of known downtime
+  costPer10k: 3,        // per $10k estimate cost
+  recentBoost: 5,       // each corrective event in the last 90 days (recency)
+};
+
+function unitHealth(opts = {}) {
+  if (!ensureSchema()) return { ok: false, error: 'sqlite unavailable' };
+  const where = _where(Object.assign({ sinceMs: opts.sinceMs != null ? opts.sinceMs : 0 }, opts));
+  const rows = _rows(
+    'SELECT equipment_id, make, model, domicile, operator, vendor, repair_component, wo_type, ' +
+    'status, total_elapsed_ms, estimate_cost, parts_on_order, reported_at, repair_completed_at ' +
+    'FROM ri_repair_event' + where.sql,
+    where.params);
+  if (!rows.length) return { ok: true, units: [], window: { sinceMs: where.params.since } };
+
+  const now = Date.now();
+  const RECENT_MS = 90 * 24 * HOUR_MS;
+  const byUnit = {};
+  for (const r of rows) {
+    const u = r.equipment_id; if (!u) continue;
+    const s = byUnit[u] || (byUnit[u] = {
+      equipmentId: u, make: r.make, model: r.model, domicile: r.domicile, operator: r.operator,
+      events: 0, corrective: 0, pm: 0, open: 0, partsHold: 0, downtimeMs: 0, cost: 0,
+      recentCorrective: 0, vendors: {}, compCounts: {}, lastAt: 0,
+    });
+    s.events++;
+    if (r.wo_type === 'PM') s.pm++; else s.corrective++;
+    if (r.status === 'open' || r.status === 'reopened') s.open++;
+    if (r.parts_on_order) s.partsHold++;
+    if (r.total_elapsed_ms != null) s.downtimeMs += r.total_elapsed_ms;
+    if (typeof r.estimate_cost === 'number') s.cost += r.estimate_cost;
+    if (r.reported_at && (now - r.reported_at) <= RECENT_MS && r.wo_type !== 'PM') s.recentCorrective++;
+    if (r.reported_at && r.reported_at > s.lastAt) s.lastAt = r.reported_at;
+    if (r.vendor) s.vendors[r.vendor] = (s.vendors[r.vendor] || 0) + 1;
+    for (const c of String(r.repair_component || '').split(';').map(x => x.trim()).filter(Boolean)) {
+      s.compCounts[c] = (s.compCounts[c] || 0) + 1;
+    }
+  }
+
+  const list = Object.values(byUnit).map(s => {
+    // repeat-failure groups = components this unit saw 2+ times
+    const repeatGroups = Object.entries(s.compCounts).filter(([, n]) => n >= 2);
+    const repeatFailures = repeatGroups.length;
+    const downtimeHours = Math.round(s.downtimeMs / HOUR_MS);
+    const topComponent = Object.entries(s.compCounts).sort((a, b) => b[1] - a[1])[0];
+    const topVendor = Object.entries(s.vendors).sort((a, b) => b[1] - a[1])[0];
+
+    // weighted raw score (unbounded), then we normalize across the fleet below
+    const raw =
+      s.corrective * _HEALTH_WEIGHTS.corrective +
+      repeatFailures * _HEALTH_WEIGHTS.repeatFailure +
+      s.open * _HEALTH_WEIGHTS.openUnresolved +
+      s.partsHold * _HEALTH_WEIGHTS.partsHold +
+      (downtimeHours / 100) * _HEALTH_WEIGHTS.downtimePer100h +
+      (s.cost / 10000) * _HEALTH_WEIGHTS.costPer10k +
+      s.recentCorrective * _HEALTH_WEIGHTS.recentBoost;
+
+    // human-readable factor list (only the ones that contributed)
+    const factors = [];
+    if (repeatFailures) factors.push(repeatFailures + ' repeat-failure component' + (repeatFailures > 1 ? 's' : ''));
+    if (s.corrective) factors.push(s.corrective + ' corrective repair' + (s.corrective > 1 ? 's' : ''));
+    if (s.open) factors.push(s.open + ' open');
+    if (s.partsHold) factors.push(s.partsHold + ' parts-hold');
+    if (downtimeHours) factors.push(downtimeHours + 'h downtime');
+    if (s.cost) factors.push('$' + Math.round(s.cost).toLocaleString() + ' est');
+    if (s.recentCorrective) factors.push(s.recentCorrective + ' in last 90d');
+
+    return {
+      equipmentId: s.equipmentId, make: s.make, model: s.model, domicile: s.domicile, operator: s.operator,
+      events: s.events, corrective: s.corrective, pm: s.pm, open: s.open, partsHold: s.partsHold,
+      repeatFailures, downtimeHours, cost: Math.round(s.cost), recentCorrective: s.recentCorrective,
+      topComponent: topComponent ? { key: topComponent[0], count: topComponent[1] } : null,
+      topVendor: topVendor ? { key: topVendor[0], count: topVendor[1] } : null,
+      lastAt: s.lastAt, raw, factors,
+    };
+  });
+
+  // Normalize raw -> 0-100 against the worst unit in the set (relative health).
+  const maxRaw = Math.max.apply(null, list.map(u => u.raw)) || 1;
+  for (const u of list) {
+    u.score = Math.round((u.raw / maxRaw) * 100);
+    u.grade = u.score >= 70 ? 'critical' : u.score >= 40 ? 'watch' : u.score >= 15 ? 'fair' : 'good';
+  }
+  list.sort((a, b) => b.raw - a.raw || a.equipmentId.localeCompare(b.equipmentId)); // worst first
+  return {
+    ok: true,
+    window: { sinceMs: where.params.since },
+    totalUnits: list.length,
+    units: opts.limit ? list.slice(0, opts.limit) : list,
+    weights: _HEALTH_WEIGHTS,
+  };
+}
+
 // ── Deep slice analytics ────────────────────────────────────────────────────
 // The repetitive-fault engine. For a grouping column (L1 component, L2
 // sub-component, vendor, make, model), compute per group:
@@ -437,4 +542,4 @@ function filterOptions() {
   };
 }
 
-module.exports = { buildTrends, filterOptions, drillEvents, deepSlice, repeatOffenders, YEAR_MS };
+module.exports = { buildTrends, filterOptions, drillEvents, deepSlice, repeatOffenders, unitHealth, YEAR_MS };

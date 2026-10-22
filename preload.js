@@ -661,4 +661,5 @@ expose('repairIntel', {
   // Deep repetitive-fault slice + repeat offenders.
   deepSlice:  (groupBy, opts) => ipcRenderer.invoke('repair-trends:deep-slice', groupBy, opts || {}),
   repeatOffenders: (opts)     => ipcRenderer.invoke('repair-trends:repeat-offenders', opts || {}),
+  unitHealth: (opts)          => ipcRenderer.invoke('repair-trends:unit-health', opts || {}),
 });

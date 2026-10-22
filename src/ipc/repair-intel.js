@@ -138,6 +138,11 @@ function registerRepairIntelIPC(ctx) {
     return trends.repeatOffenders(opts || {});
   });
 
+  // Unit Health Scoreboard: composite maintenance score per unit, worst->best.
+  handle('repair-trends:unit-health', async (opts) => {
+    return trends.unitHealth(opts || {});
+  });
+
   // ── Vendor scope / network intelligence (deterministic) ───────────────────
   // Per-vendor scorecards + repeat-failure rates + multi-vendor-per-component
   // signals. Excluded vendors filtered at the query layer. Advisory only.

@@ -338,7 +338,11 @@ function _render(data) {
     _backorderCard(data.backorder) +
   '</div>';
 
-  body.innerHTML = stats + grid +
+  body.innerHTML = stats +
+    '<div class="tr-section-title">\uD83C\uDFE5 Unit Health Scoreboard <span class="dp-ri-sub-note">(worst \u2192 best \u00b7 composite maintenance score from real repair signals \u00b7 click a unit)</span>' +
+      '<span class="tr-health-toggle" id="tr-health-toggle" title="Show best-health units too">show all</span></div>' +
+    '<div id="tr-health"><div class="dp-empty" style="color:var(--mut);font-style:italic">Scoring units\u2026</div></div>' +
+    grid +
     '<div class="tr-section-title">\uD83D\uDD0E Repetitive Fault Analysis <span class="dp-ri-sub-note">(same component coming back \u00b7 is it many units once, or one unit many times?)</span></div>' +
     '<div class="tr-slice-controls">' +
       '<label class="tr-slice-lbl">Break down by</label>' +
@@ -355,6 +359,52 @@ function _render(data) {
     '<div id="tr-offenders"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading repeat offenders\u2026</div></div>' +
     '<div class="tr-section-title">\uD83D\uDD17 Vendor Network Intelligence <span class="dp-ri-sub-note">(deterministic \u00b7 patterns to review, not proof of fault \u00b7 advisory only)</span></div>' +
     '<div id="tr-network"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading vendor network\u2026</div></div>';
+}
+
+var _healthShowAll = false;
+function _renderHealth(res) {
+  var host = _el.querySelector('#tr-health');
+  if (!host) return;
+  if (!res || res.ok === false) { host.innerHTML = '<div class="dp-empty" style="color:var(--mut)">' + esc((res && res.error) || 'no data') + '</div>'; return; }
+  var units = res.units || [];
+  if (!units.length) { host.innerHTML = '<div class="dp-empty" style="color:var(--mut)">No units scored yet.</div>'; return; }
+
+  // Worst-first. By default show the ones that need attention (score>=15),
+  // capped at 15 rows; "show all" reveals the healthy tail too.
+  var shown = _healthShowAll ? units : units.filter(function(u){ return u.score >= 15; }).slice(0, 15);
+  if (!shown.length) shown = units.slice(0, 10); // everything is healthy — show top 10 anyway
+
+  var gradeLabel = { critical: 'CRITICAL', watch: 'WATCH', fair: 'FAIR', good: 'GOOD' };
+  var rows = shown.map(function(u, i){
+    var meta = [u.make, u.model, u.domicile].filter(Boolean).join(' \u00b7 ');
+    var factors = (u.factors || []).map(function(f){ return '<span class="tr-hf">' + esc(f) + '</span>'; }).join('');
+    return '<div class="tr-hrow tr-hrow--' + esc(u.grade) + '">' +
+      '<div class="tr-hrank">#' + (i + 1) + '</div>' +
+      '<div class="tr-hscore"><div class="tr-hscore-num">' + u.score + '</div>' +
+        '<div class="tr-hgrade tr-hgrade--' + esc(u.grade) + '">' + gradeLabel[u.grade] + '</div></div>' +
+      '<div class="tr-hbarwrap"><div class="tr-hbar tr-hbar--' + esc(u.grade) + '" style="width:' + Math.max(3, u.score) + '%"></div></div>' +
+      '<div class="tr-hbody">' +
+        '<div class="tr-hhead"><button class="tr-unit-open tr-hunit" data-unit="' + esc(u.equipmentId) + '">' + esc(u.equipmentId) + '</button>' +
+          (meta ? '<span class="tr-hmeta">' + esc(meta) + '</span>' : '') +
+          (u.topComponent ? '<span class="tr-hmeta">worst: ' + esc(u.topComponent.key) + ' \u00d7' + u.topComponent.count + '</span>' : '') + '</div>' +
+        '<div class="tr-hfactors">' + factors + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  var summary = '<div class="tr-hsummary">Scoring ' + res.totalUnits + ' unit' + (res.totalUnits === 1 ? '' : 's') +
+    ' \u00b7 ' + units.filter(function(u){return u.grade==='critical';}).length + ' critical, ' +
+    units.filter(function(u){return u.grade==='watch';}).length + ' watch \u00b7 ' +
+    'score blends repeat failures, corrective volume, open/parts-hold, downtime, cost & recency (higher = needs attention)</div>';
+  host.innerHTML = summary + '<div class="tr-htable">' + rows + '</div>';
+  host.querySelectorAll('.tr-unit-open').forEach(function(b){ b.addEventListener('click', function(){ _openUnit(b.dataset.unit); }); });
+}
+
+function _loadHealth() {
+  if (!window.repairIntel || !window.repairIntel.unitHealth) return;
+  var host = _el.querySelector('#tr-health');
+  if (host) host.innerHTML = '<div class="dp-empty" style="color:var(--mut);font-style:italic">Scoring units\u2026</div>';
+  window.repairIntel.unitHealth(_collectFilters()).then(_renderHealth).catch(function(e){ _renderHealth({ ok: false, error: (e && e.message) || 'error' }); });
 }
 
 function _renderDeepSlice(res) {
@@ -476,6 +526,9 @@ function _load() {
   window.repairIntel.trends(f).then(function(data){
     _render(data);
     if (data && data.ok !== false && data.totals && data.totals.events) {
+      _loadHealth();
+      var ht = _el.querySelector('#tr-health-toggle');
+      if (ht && !ht._wired) { ht._wired = true; ht.addEventListener('click', function(){ _healthShowAll = !_healthShowAll; ht.textContent = _healthShowAll ? 'show attention only' : 'show all'; _loadHealth(); }); }
       if (window.repairIntel.network) window.repairIntel.network(f).then(_renderNetwork).catch(function(e){ _renderNetwork({ ok: false, error: (e && e.message) || 'error' }); });
       // Deep slice (honor the group-by selector) + repeat offenders.
       var byEl = _el.querySelector('#tr-slice-by');
