@@ -2765,14 +2765,15 @@ function _wireRepairIntel(unit) {
     if (!statusEl) return;
     var cp = res && res.checkpoint;
     if (!cp) {
-      statusEl.innerHTML = '<span class="dp-ri-status-cold">Not synced yet \u2014 click <b>Build Full History</b> to pull the last 12 months.</span>';
+      statusEl.innerHTML = '<span class="dp-ri-status-cold">Not synced yet \u2014 click <b>Build Full History</b> to pull this unit\u2019s repair history from AAP.</span>';
       return;
     }
     var last = cp.last_incr_sync_at || cp.last_full_sync_at;
     var cov = '';
     try { var c = cp.source_coverage ? JSON.parse(cp.source_coverage) : null; if (c && c.relay) cov = ' \u00b7 source: ' + esc(c.relay); } catch (_) {}
+    var span = (res.report && res.report.spanDays) ? ' \u00b7 history spans ' + res.report.spanDays + ' days' : '';
     statusEl.innerHTML = '<span class="dp-ri-status-ok">Last synced ' + esc(fmtAgo(last)) + ' (' + esc(fmtDate(last)) + ')' +
-      (cp.records_total != null ? ' \u00b7 ' + cp.records_total + ' records' : '') + cov + '</span>' +
+      (cp.records_total != null ? ' \u00b7 ' + cp.records_total + ' records' : '') + span + cov + '</span>' +
       (cp.last_error ? '<span class="dp-ri-status-err"> \u00b7 ' + esc(String(cp.last_error).slice(0,120)) + '</span>' : '');
   }
 
@@ -2809,7 +2810,7 @@ function _wireRepairIntel(unit) {
       return '<div class="dp-ri-stat ' + (cls||'') + '"><div class="dp-ri-stat-val">' + esc(String(val)) + '</div><div class="dp-ri-stat-lbl">' + esc(label) + '</div></div>';
     }
     if (!s.totalRepairEvents) {
-      reportEl.innerHTML = aiHtml + '<div class="dp-empty" style="color:var(--mut);font-style:italic">No repair history on record for the last 12 months. Click <b>Build Full History</b> to pull it from AAP.</div>';
+      reportEl.innerHTML = aiHtml + '<div class="dp-empty" style="color:var(--mut);font-style:italic">No repair history stored yet. Click <b>Build Full History</b> to pull it from AAP.</div>';
       return;
     }
     var stats = '<div class="dp-ri-stats">' +

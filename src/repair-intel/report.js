@@ -162,14 +162,29 @@ function timeline(events) {
     }));
 }
 
-// Build the full deterministic report for one unit.
+// Build the full deterministic report for one unit. By default it shows ALL
+// stored events (the engine only stores what the API returned), so a unit whose
+// repairs are older than 12 months still shows its real history. A caller can
+// pass opts.sinceMs to narrow the window.
 function buildUnitReport(equipmentId, opts = {}) {
   const events = store.eventsForUnit(equipmentId, opts);
+  // Report the ACTUAL span of the events shown (honest — not a fixed "365").
+  let oldest = null, newest = null;
+  for (const e of events) {
+    const t = e.reported_at || e.created_at;
+    if (!t) continue;
+    if (oldest == null || t < oldest) oldest = t;
+    if (newest == null || t > newest) newest = t;
+  }
+  const spanDays = (oldest != null && newest != null) ? Math.max(1, Math.round((newest - oldest) / (24 * HOUR_MS))) : 0;
   // Parts across this unit's events (for the summary's top-parts).
   const parts = []; // parts are loaded per-event elsewhere; summary tolerates empty
   return {
     equipmentId: String(equipmentId),
-    windowDays: 365,
+    windowDays: opts.sinceMs != null ? Math.round((Date.now() - opts.sinceMs) / (24 * HOUR_MS)) : null,
+    spanDays,
+    oldestAt: oldest,
+    newestAt: newest,
     generatedAt: Date.now(),
     executiveSummary: executiveSummary(events, parts),
     repeatFailures: repeatFailures(events),

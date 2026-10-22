@@ -238,7 +238,11 @@ function setParts(eventId, equipmentId, parts) {
 // Goodyear) unless includeExcluded is passed.
 function eventsForUnit(equipmentId, opts = {}) {
   if (!ensureSchema()) return [];
-  const windowStart = opts.sinceMs || (Date.now() - 365 * 24 * 3600 * 1000);
+  // Default to ALL stored events (the engine only ever stores what the API
+  // actually returned for this unit, so there is nothing to hide). A caller can
+  // still pass an explicit sinceMs to narrow the window. NOTE: use `!= null` so
+  // an explicit sinceMs:0 means "from epoch 0" (all), not the falsy-|| fallback.
+  const windowStart = (opts.sinceMs != null) ? opts.sinceMs : 0;
   const incl = opts.includeExcluded ? '' : ' AND excluded_vendor = 0';
   const stmt = engine.prepare(
     'SELECT * FROM ri_repair_event WHERE equipment_id = ?' + incl +
