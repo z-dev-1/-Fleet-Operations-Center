@@ -225,9 +225,14 @@ async function _buildAttachmentContext(msg, downloadFn) {
           '\n--- file content end ---'
         );
       } else if (file.name) {
-        // Not a readable format (image, PDF, binary) — name it so AI knows
-        parts.push('Shared file (not readable): ' + file.name +
-          (file.mimetype ? ' (' + file.mimetype + ')' : ''));
+        // Still nothing extractable (e.g. a photo with no caption). Name it +
+        // type + size so the AI can acknowledge it and ask for specifics rather
+        // than ignore it silently.
+        const kb = file.size ? Math.round(file.size / 1024) + 'KB' : '';
+        const isImg = (file.mimetype || '').toLowerCase().startsWith('image/');
+        parts.push('Shared file (content not machine-readable): ' + file.name +
+          (file.mimetype ? ' [' + file.mimetype + (kb ? ', ' + kb : '') + ']' : '') +
+          (isImg ? ' — this is an image; ask the sender to describe it or paste key details as text if needed.' : ''));
       }
     } catch (_) {
       if (file.name) parts.push('Shared file (fetch failed): ' + file.name);

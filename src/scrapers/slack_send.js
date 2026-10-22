@@ -771,9 +771,8 @@ async function processAutoReplies(messages, rules) {
  * Returns: { name, mimetype, content } or null.
  */
 async function downloadFileContent(file) {
-  if (!file || !file.url_private) return null;
+  if (!file) return null;
 
-  // Only attempt to read human-readable text formats
   const mime = (file.mimetype || '').toLowerCase();
   const name = (file.name    || '').toLowerCase();
   const isReadable =
@@ -786,7 +785,36 @@ async function downloadFileContent(file) {
     name.endsWith('.csv')    ||
     name.endsWith('.json')   ||
     name.endsWith('.log');
-  if (!isReadable) return null;
+
+  // FIX (2026-10): previously returned null for ANY non-text file (PDF, image,
+  // xlsx, docx), so the AI never saw vendor estimates / photos / spreadsheets —
+  // the "struggles with attachments" gap. Slack ITSELF indexes many documents
+  // and exposes extracted text on the file object WITHOUT a download:
+  //   - file.plain_text        (full extracted text, e.g. PDFs Slack has OCR'd)
+  //   - file.preview_plain_text / file.preview (first-page/preview text)
+  //   - file.preview_highlight (HTML preview — strip tags as a last resort)
+  // Use that for non-text files so the AI can read the content. We also call
+  // files.info when the shared payload lacks the preview (history/replies often
+  // omit it). Images still can't be OCR'd here, but we surface title/alt text.
+  if (!isReadable) {
+    let f = file;
+    const hasPreview = f.plain_text || f.preview_plain_text || f.preview;
+    if (!hasPreview && f.id) {
+      try {
+        const info = await slackWebApi('files.info', { file: f.id });
+        if (info && info.ok && info.file) f = info.file;
+      } catch (_) { /* best effort */ }
+    }
+    const extracted = f.plain_text || f.preview_plain_text || f.preview ||
+      (f.preview_highlight ? String(f.preview_highlight).replace(/<[^>]+>/g, '') : '') ||
+      // image: no text to read, but give the AI the alt/title so it's not blind
+      (mime.startsWith('image/') ? (f.alt_txt || f.title || '') : '');
+    if (extracted && String(extracted).trim()) {
+      return { name: file.name, mimetype: mime, content: String(extracted).slice(0, 32768) };
+    }
+    return null; // genuinely nothing readable (e.g. a photo with no caption)
+  }
+  if (!file.url_private) return null;
 
   const config = getConfig();
   if (!config || !config.token) return null;
