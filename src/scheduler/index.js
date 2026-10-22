@@ -449,6 +449,10 @@ function start(ctx) {
   setTimeout(() => { _recoverBlockedSlots().catch(() => {}); }, 60000);
   // Prune old ledger entries occasionally.
   ledger.pruneOldJobs().catch(() => {});
+  // Repair Intelligence background worker: leader-gated, self-yielding engine
+  // refresh (incremental sync + advisory AI) so the 12-month history stays
+  // fresh without manual clicks. Fully guarded; no-ops when SQLite/API absent.
+  try { require('../repair-intel/background').start(); } catch (e) { logger.warn('repair-intel background start failed (non-fatal): ' + e.message); }
   logger.info('Schedulers started — SP:', SP_SLOTS.map(s=>s.label), 'Email:', EMAIL_SLOTS.map(s=>s.label), 'DBR:', DBR_SLOTS.map(s=>s.label), '(dbr enabled=' + _enabled('dbr') + ')');
 }
 
@@ -457,6 +461,7 @@ function stop() {
   if (_emailScheduleTimer) { clearInterval(_emailScheduleTimer); _emailScheduleTimer = null; }
   if (_dbrScheduleTimer)   { clearInterval(_dbrScheduleTimer);   _dbrScheduleTimer   = null; }
   if (_recoverTimer)       { clearInterval(_recoverTimer);       _recoverTimer       = null; }
+  try { require('../repair-intel/background').stop(); } catch (_) {}
 }
 
 function reload(newSlots) {
