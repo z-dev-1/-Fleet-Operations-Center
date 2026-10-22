@@ -254,9 +254,86 @@ function saveCheckpoint(cp) {
   }, ['equipment_id','last_full_sync_at','last_incr_sync_at','last_modified_seen','window_start_at','source_coverage','last_error','records_total','updated_at']));
 }
 
+// ── AI write-back (Phase 4) ───────────────────────────────────────────────────
+// The AI layer may ONLY fill interpretive columns (suspected cause, corrective
+// actions, outcome, complaint_resolved, verification/outstanding, scope hints).
+// It must NEVER write confirmed_root_cause or any numeric/duration/cost column —
+// those stay source-derived. This helper enforces that allow-list.
+const _AI_WRITABLE = new Set([
+  'symptoms','tech_findings','diagnosed_problem','suspected_root_cause','corrective_actions',
+  'outcome','complaint_resolved','verification_result','outstanding_issues',
+  'in_scope','out_of_scope_reason','specialist_required','receiving_vendor','transfer_result',
+]);
+
+function applyAiToEvent(sourceId, ai) {
+  if (!ensureSchema() || !sourceId || !ai || typeof ai !== 'object') return false;
+  const cols = Object.keys(ai).filter(k => _AI_WRITABLE.has(k) && ai[k] != null && ai[k] !== '');
+  if (!cols.length) return false;
+  const set = cols.map(c => c + ' = @' + c).join(', ');
+  const stmt = engine.prepare('UPDATE ri_repair_event SET ' + set + ' WHERE source_id = @source_id');
+  if (!stmt) return false;
+  const params = { source_id: String(sourceId) };
+  for (const c of cols) params[c] = ai[c];
+  stmt.run(params);
+  return true;
+}
+
+// Per-unit AI analysis cache (narrative report). Keyed by equipment_id; carries
+// the evidence_hash it was built from so the UI/engine can skip re-analysis
+// when the underlying events have not changed.
+function getAiAnalysis(equipmentId) {
+  if (!ensureSchema()) return null;
+  const s = engine.prepare('SELECT * FROM ri_ai_analysis WHERE equipment_id = ?');
+  return s ? s.get(String(equipmentId)) : null;
+}
+
+function saveAiAnalysis(rec) {
+  if (!ensureSchema() || !rec || !rec.equipmentId) return;
+  const stmt = engine.prepare(`INSERT INTO ri_ai_analysis
+    (equipment_id, report_json, evidence_hash, analysis_version, model_id, analyzed_at)
+    VALUES (@equipment_id,@report_json,@evidence_hash,@analysis_version,@model_id,@analyzed_at)
+    ON CONFLICT(equipment_id) DO UPDATE SET
+      report_json=excluded.report_json, evidence_hash=excluded.evidence_hash,
+      analysis_version=excluded.analysis_version, model_id=excluded.model_id,
+      analyzed_at=excluded.analyzed_at`);
+  if (stmt) stmt.run({
+    equipment_id: String(rec.equipmentId),
+    report_json: rec.reportJson ? (typeof rec.reportJson === 'string' ? rec.reportJson : JSON.stringify(rec.reportJson)) : null,
+    evidence_hash: rec.evidenceHash || null,
+    analysis_version: rec.analysisVersion || 1,
+    model_id: rec.modelId || null,
+    analyzed_at: Date.now(),
+  });
+}
+
+// Replace advisory recommendations for a scope+key (idempotent: clear + insert).
+// Recommendations are ADVISORY ONLY — they never alter canonical readiness.
+function replaceRecommendations(scope, scopeKey, recs) {
+  if (!ensureSchema() || !Array.isArray(recs)) return;
+  engine.prepare('DELETE FROM ri_recommendation WHERE scope = ? AND scope_key = ? AND dismissed = 0').run(scope, String(scopeKey));
+  const ins = engine.prepare(`INSERT INTO ri_recommendation
+    (scope, scope_key, kind, finding, reason, recommended_action, owner, priority, confidence, incident_count, period_start_at, period_end_at, supporting_wos, created_at, dismissed)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)`);
+  const now = Date.now();
+  for (const r of recs) {
+    ins.run(scope, String(scopeKey), r.kind || 'monitor', r.finding || null, r.reason || null,
+      r.recommendedAction || null, r.owner || null, r.priority || 'low', r.confidence || 'low',
+      r.incidentCount || null, r.periodStartAt || null, r.periodEndAt || null,
+      r.supportingWos ? JSON.stringify(r.supportingWos) : null, now);
+  }
+}
+
+function getRecommendations(scope, scopeKey) {
+  if (!ensureSchema()) return [];
+  const s = engine.prepare('SELECT * FROM ri_recommendation WHERE scope = ? AND scope_key = ? AND dismissed = 0 ORDER BY created_at DESC');
+  return s ? s.all(scope, String(scopeKey)) : [];
+}
+
 module.exports = {
   EXCLUDED_VENDORS, _isExcludedVendor,
   normalizeWorkOrder, upsertEvent, setParts,
   eventsForUnit, getCheckpoint, saveCheckpoint,
+  applyAiToEvent, getAiAnalysis, saveAiAnalysis,
+  replaceRecommendations, getRecommendations,
   _classifyStatus, _classifyWoType, _downtime,
 };

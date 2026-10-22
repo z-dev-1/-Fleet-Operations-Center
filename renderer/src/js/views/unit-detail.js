@@ -2776,15 +2776,40 @@ function _wireRepairIntel(unit) {
       (cp.last_error ? '<span class="dp-ri-status-err"> \u00b7 ' + esc(String(cp.last_error).slice(0,120)) + '</span>' : '');
   }
 
-  function renderReport(rep) {
+  function renderAi(ai) {
+    if (!ai || (!ai.summary && !(ai.recommendations && ai.recommendations.length))) return '';
+    var sum = ai.summary
+      ? '<div class="dp-ri-ai-summary">' + esc(ai.summary) + '</div>'
+      : '';
+    var recs = (ai.recommendations || []).map(function(r){
+      var pr = (r.priority || 'low');
+      return '<div class="dp-ri-rec dp-ri-rec--' + esc(pr) + '">' +
+        '<div class="dp-ri-rec-head"><span class="dp-ri-rec-kind">' + esc(r.kind || 'monitor') + '</span>' +
+          '<span class="dp-ri-rec-pri">' + esc(pr) + '</span></div>' +
+        '<div class="dp-ri-rec-finding">' + esc(r.finding || '') + '</div>' +
+        (r.recommendedAction ? '<div class="dp-ri-rec-action"><b>Action:</b> ' + esc(r.recommendedAction) + '</div>' : '') +
+        (r.reason ? '<div class="dp-ri-rec-reason">' + esc(r.reason) + '</div>' : '') +
+      '</div>';
+    }).join('');
+    var recBlock = recs
+      ? '<div class="dp-ri-sub">Advisory recommendations <span class="dp-ri-sub-note">(advisory only \u2014 never changes readiness)</span></div>' + recs
+      : '';
+    return '<div class="dp-ri-ai">' +
+      '<div class="dp-ri-sub">AI analysis <span class="dp-ri-sub-note">(narrative on top of the deterministic facts)</span></div>' +
+      sum + recBlock +
+    '</div>';
+  }
+
+  function renderReport(rep, ai) {
     if (!rep) { reportEl.innerHTML = '<div class="dp-empty" style="color:var(--mut)">No report.</div>'; return; }
+    var aiHtml = renderAi(ai);
     var s = rep.executiveSummary || {};
     var eff = s.effectiveness || {};
     function stat(label, val, cls) {
       return '<div class="dp-ri-stat ' + (cls||'') + '"><div class="dp-ri-stat-val">' + esc(String(val)) + '</div><div class="dp-ri-stat-lbl">' + esc(label) + '</div></div>';
     }
     if (!s.totalRepairEvents) {
-      reportEl.innerHTML = '<div class="dp-empty" style="color:var(--mut);font-style:italic">No repair history on record for the last 12 months. Click <b>Build Full History</b> to pull it from AAP.</div>';
+      reportEl.innerHTML = aiHtml + '<div class="dp-empty" style="color:var(--mut);font-style:italic">No repair history on record for the last 12 months. Click <b>Build Full History</b> to pull it from AAP.</div>';
       return;
     }
     var stats = '<div class="dp-ri-stats">' +
@@ -2844,7 +2869,7 @@ function _wireRepairIntel(unit) {
     }).join('');
     var tlBlock = '<div class="dp-ri-sub">Repair timeline <span class="dp-ri-sub-note">(newest first, up to 40)</span></div>' + (tl || '<div class="dp-empty">None.</div>');
 
-    reportEl.innerHTML = stats + cov + catsBlock + effBlock + rfBlock + tlBlock;
+    reportEl.innerHTML = aiHtml + stats + cov + catsBlock + effBlock + rfBlock + tlBlock;
   }
 
   function setBusy(busy, msg) {
@@ -2856,7 +2881,7 @@ function _wireRepairIntel(unit) {
     window.repairIntel.get(equipmentId).then(function(res){
       res = res || {};
       renderStatus(res);
-      renderReport(res.report);
+      renderReport(res.report, res.ai);
     }).catch(function(e){
       reportEl.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to load report: ' + esc((e && e.message) || 'error') + '</div>';
     });
@@ -2873,7 +2898,7 @@ function _wireRepairIntel(unit) {
         toast.show('info', equipmentId + ' synced: +' + (sy.added||0) + ' new, ' + (sy.updated||0) + ' updated' + (sy.excluded ? ', ' + sy.excluded + ' excluded' : ''), 3500);
       }
       renderStatus(res);
-      renderReport(res.report);
+      renderReport(res.report, res.ai);
     }).catch(function(e){
       setBusy(false);
       toast.show('error', 'Sync failed: ' + ((e && e.message) || 'error'), 4000);
@@ -2887,10 +2912,11 @@ function _wireRepairIntel(unit) {
     window.repairIntel.refreshAi(equipmentId).then(function(res){
       setBusy(false);
       res = res || {};
-      if (res.pending) toast.show('info', 'AI analysis is not available yet (coming in a later phase).', 3500);
+      if (res.pending) toast.show('info', 'AI lane is busy or offline right now \u2014 the deterministic report is still current. Try again shortly.', 4500);
       else if (res.ok === false && res.error) toast.show('warn', res.error, 3500);
-      if (res.report) renderReport(res.report);
-      load();
+      else if (res.ok) toast.show('info', 'AI analysis updated for ' + equipmentId, 3000);
+      if (res.report) renderReport(res.report, res.ai);
+      else load();
     }).catch(function(e){ setBusy(false); toast.show('error', 'AI refresh failed: ' + ((e && e.message)||'error'), 4000); });
   });
 

@@ -33,6 +33,28 @@ function registerRepairIntelIPC(ctx) {
     });
   }
 
+  // Shape the cached AI narrative + recommendations for the renderer (null when
+  // not yet analyzed). Deterministic report is always present regardless.
+  function _cachedAi(id) {
+    try {
+      const rec = store.getAiAnalysis(id);
+      const recs = store.getRecommendations('unit', id) || [];
+      let payload = null;
+      if (rec && rec.report_json) { try { payload = JSON.parse(rec.report_json); } catch (_) {} }
+      if (!payload && !recs.length) return null;
+      return {
+        summary: payload ? payload.summary : '',
+        recommendations: recs.map(r => ({
+          kind: r.kind, finding: r.finding, reason: r.reason, recommendedAction: r.recommended_action,
+          priority: r.priority, confidence: r.confidence,
+          supportingWos: (() => { try { return JSON.parse(r.supporting_wos || '[]'); } catch (_) { return []; } })(),
+        })),
+        analyzedAt: rec ? rec.analyzed_at : null,
+        modelId: rec ? rec.model_id : null,
+      };
+    } catch (_) { return null; }
+  }
+
   // Read the cached deterministic report for a unit (no network). Also returns
   // the sync checkpoint so the UI can show coverage / last-sync status.
   handle('repair-history:get', async (equipmentId) => {
@@ -40,7 +62,8 @@ function registerRepairIntelIPC(ctx) {
     if (!id) return { ok: false, error: 'no equipment id' };
     const rep = report.buildUnitReport(id);
     const checkpoint = store.getCheckpoint(id) || null;
-    return { ok: true, report: rep, checkpoint, synced: !!checkpoint };
+    const ai = _cachedAi(id);
+    return { ok: true, report: rep, checkpoint, synced: !!checkpoint, ai };
   });
 
   // Full 365-day build: sync from AAP then return the fresh report. This hits
@@ -51,7 +74,7 @@ function registerRepairIntelIPC(ctx) {
     const sync = await fetch.syncUnit(id, { incremental: false });
     const rep = report.buildUnitReport(id);
     const checkpoint = store.getCheckpoint(id) || null;
-    return { ok: sync.ok, sync, report: rep, checkpoint, synced: !!checkpoint };
+    return { ok: sync.ok, sync, report: rep, checkpoint, synced: !!checkpoint, ai: _cachedAi(id) };
   });
 
   // Incremental: only pull work orders modified since the last checkpoint.
@@ -61,7 +84,7 @@ function registerRepairIntelIPC(ctx) {
     const sync = await fetch.syncUnit(id, { incremental: true });
     const rep = report.buildUnitReport(id);
     const checkpoint = store.getCheckpoint(id) || null;
-    return { ok: sync.ok, sync, report: rep, checkpoint, synced: !!checkpoint };
+    return { ok: sync.ok, sync, report: rep, checkpoint, synced: !!checkpoint, ai: _cachedAi(id) };
   });
 
   // Phase 4 placeholder: AI narrative/classification refresh. Returns a clear
@@ -74,9 +97,10 @@ function registerRepairIntelIPC(ctx) {
       if (analysis && typeof analysis.analyzeUnit === 'function') {
         const res = await analysis.analyzeUnit(id, { force: true });
         const rep = report.buildUnitReport(id);
-        return { ok: true, analysis: res, report: rep };
+        if (res && res.ok === false) return { ok: false, pending: !!res.pending, error: res.error, report: rep, ai: _cachedAi(id) };
+        return { ok: true, analysis: res, report: rep, ai: _cachedAi(id) };
       }
-    } catch (_) { /* analysis.js not built yet (Phase 4) */ }
+    } catch (err) { logger.warn('analysis load/run failed: ' + err.message); }
     return { ok: false, pending: true, error: 'AI analysis not available yet' };
   });
 

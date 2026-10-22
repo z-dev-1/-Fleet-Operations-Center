@@ -9745,3 +9745,17 @@ body {
 .dp-ri-tl-cat { font-size: 11.5px; color: var(--txt); font-weight: 600; }
 .dp-ri-tl-complaint { font-size: 11.5px; color: var(--txt2); line-height: 1.4; margin: 2px 0; word-break: break-word; }
 .dp-ri-tl-meta { font-size: 10.5px; color: var(--mut); }
+
+/* ── Repair Intelligence: AI narrative + advisory recommendations ─────────── */
+.dp-ri-ai { margin-bottom: 8px; }
+.dp-ri-ai-summary { font-size: 12.5px; line-height: 1.5; color: var(--txt); background: rgba(88,166,255,.06); border: 1px solid rgba(88,166,255,.25); border-radius: 8px; padding: 9px 11px; }
+.dp-ri-rec { border: 1px solid rgba(48,54,61,.7); border-left-width: 3px; border-radius: 8px; padding: 7px 10px; margin-bottom: 6px; background: rgba(255,255,255,.02); }
+.dp-ri-rec--low { border-left-color: var(--mut, #8b949e); }
+.dp-ri-rec--medium { border-left-color: #d29922; }
+.dp-ri-rec--high { border-left-color: #f85149; }
+.dp-ri-rec-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 3px; }
+.dp-ri-rec-kind { font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--acc2, #79c0ff); font-weight: 700; }
+.dp-ri-rec-pri { font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--mut); }
+.dp-ri-rec-finding { font-size: 12px; color: var(--txt); font-weight: 600; line-height: 1.4; }
+.dp-ri-rec-action { font-size: 11.5px; color: var(--txt2); line-height: 1.45; margin-top: 3px; }
+.dp-ri-rec-reason { font-size: 11px; color: var(--mut); line-height: 1.45; margin-top: 2px; font-style: italic; }
