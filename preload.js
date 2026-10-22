@@ -656,4 +656,7 @@ expose('repairIntel', {
   drill:      (dimension, value, opts) => ipcRenderer.invoke('repair-trends:drill', dimension, value, opts || {}),
   // Vendor scope / network intelligence (scorecards + repeat rates + signals).
   network:    (opts)        => ipcRenderer.invoke('repair-network:get', opts || {}),
+  // Deep repetitive-fault slice + repeat offenders.
+  deepSlice:  (groupBy, opts) => ipcRenderer.invoke('repair-trends:deep-slice', groupBy, opts || {}),
+  repeatOffenders: (opts)     => ipcRenderer.invoke('repair-trends:repeat-offenders', opts || {}),
 });

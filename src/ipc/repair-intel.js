@@ -126,6 +126,18 @@ function registerRepairIntelIPC(ctx) {
     return trends.drillEvents(String(dimension || ''), value, opts || {});
   });
 
+  // Deep slice: per-component (L1/L2)/vendor/make repetitive-fault analysis —
+  // events vs distinct units vs repeat ratio, the repeating units, and the
+  // make/vendor cross-tab. The "is it 10 units once or 1 unit 10x" engine.
+  handle('repair-trends:deep-slice', async (groupBy, opts) => {
+    return trends.deepSlice(String(groupBy || 'subcomponent'), opts || {});
+  });
+
+  // Repeat offenders: units with the same component 2+ times (fleet-wide).
+  handle('repair-trends:repeat-offenders', async (opts) => {
+    return trends.repeatOffenders(opts || {});
+  });
+
   // ── Vendor scope / network intelligence (deterministic) ───────────────────
   // Per-vendor scorecards + repeat-failure rates + multi-vendor-per-component
   // signals. Excluded vendors filtered at the query layer. Advisory only.

@@ -292,6 +292,99 @@ function _tallyVals(arr) {
   return Object.entries(m).map(([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count);
 }
 
+// ── Deep slice analytics ────────────────────────────────────────────────────
+// The repetitive-fault engine. For a grouping column (L1 component, L2
+// sub-component, vendor, make, model), compute per group:
+//   events        total repair events
+//   units         DISTINCT units affected
+//   repeatRatio   events / units  (>1 = same units coming back = a REAL pattern)
+//   repeatUnits   the units that had this >1 time, with their counts
+// This is what separates "10 different units each had an airbag issue once"
+// (units=10, ratio=1.0) from "1 unit had 10 airbag repairs" (units=1, ratio=10).
+const _SLICE_COLS = {
+  component: 'repair_component',       // L1
+  subcomponent: 'repair_subcategory',  // L2 (windshield, air brake assembly, ...)
+  category: 'repair_category',
+  vendor: 'vendor',
+  make: 'make',
+  model: 'model',
+  domicile: 'domicile',
+  operator: 'operator',
+};
+
+function deepSlice(groupBy, opts = {}) {
+  if (!ensureSchema()) return { ok: false, error: 'sqlite unavailable' };
+  const col = _SLICE_COLS[groupBy] || _SLICE_COLS.subcomponent;
+  const where = _where(Object.assign({ sinceMs: opts.sinceMs != null ? opts.sinceMs : 0 }, opts));
+  // Pull the grouping key + unit for every matching event, compute in JS so we
+  // can split a 'A; B' multi-value cell into its parts (suggestedItems join).
+  const rows = _rows(
+    'SELECT ' + col + ' AS k, equipment_id AS u, make, vendor, status FROM ri_repair_event' +
+    where.sql + (where.sql ? ' AND ' : ' WHERE ') + col + " IS NOT NULL AND " + col + " <> '' ",
+    where.params);
+
+  const groups = {};
+  for (const r of rows) {
+    // a cell may hold multiple component families ('Engine; Coolant') — count each
+    const keys = String(r.k).split(';').map(s => s.trim()).filter(Boolean);
+    for (const key of keys) {
+      const g = groups[key] || (groups[key] = { key, events: 0, unitCounts: {}, makeCounts: {}, vendorCounts: {} });
+      g.events++;
+      g.unitCounts[r.u] = (g.unitCounts[r.u] || 0) + 1;
+      if (r.make) g.makeCounts[r.make] = (g.makeCounts[r.make] || 0) + 1;
+      if (r.vendor) g.vendorCounts[r.vendor] = (g.vendorCounts[r.vendor] || 0) + 1;
+    }
+  }
+
+  const out = Object.values(groups).map(g => {
+    const units = Object.keys(g.unitCounts);
+    const repeatUnits = units.filter(u => g.unitCounts[u] > 1)
+      .map(u => ({ equipmentId: u, count: g.unitCounts[u] }))
+      .sort((a, b) => b.count - a.count);
+    return {
+      key: g.key,
+      events: g.events,
+      units: units.length,
+      repeatRatio: units.length ? Math.round((g.events / units.length) * 100) / 100 : 0,
+      repeatUnitCount: repeatUnits.length,
+      repeatUnits: repeatUnits.slice(0, 10),
+      topMakes: _topEntries(g.makeCounts, 4),
+      topVendors: _topEntries(g.vendorCounts, 4),
+    };
+  }).sort((a, b) =>
+    // surface the strongest repeat patterns first, then raw volume
+    (b.repeatRatio - a.repeatRatio) || (b.events - a.events)
+  );
+
+  return { ok: true, groupBy, groups: out.slice(0, opts.limit || 40) };
+}
+
+function _topEntries(obj, n) {
+  return Object.entries(obj).map(([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count).slice(0, n || 5);
+}
+
+// Repeat offenders: units that had the SAME component (L1) 2+ times in the
+// window — the clearest "same unit keeps coming back" signal, fleet-wide.
+function repeatOffenders(opts = {}) {
+  if (!ensureSchema()) return { ok: false, error: 'sqlite unavailable' };
+  const where = _where(Object.assign({ sinceMs: opts.sinceMs != null ? opts.sinceMs : 0 }, opts));
+  const rows = _rows(
+    'SELECT equipment_id AS u, repair_component AS c, make, vendor FROM ri_repair_event' +
+    where.sql + (where.sql ? ' AND ' : ' WHERE ') + "repair_component IS NOT NULL AND repair_component <> '' ",
+    where.params);
+  const byUnitComp = {};
+  for (const r of rows) {
+    for (const comp of String(r.c).split(';').map(s => s.trim()).filter(Boolean)) {
+      const k = r.u + '\u0000' + comp;
+      const e = byUnitComp[k] || (byUnitComp[k] = { equipmentId: r.u, component: comp, count: 0, make: r.make, vendor: r.vendor });
+      e.count++;
+    }
+  }
+  const offenders = Object.values(byUnitComp).filter(e => e.count >= 2)
+    .sort((a, b) => b.count - a.count || a.equipmentId.localeCompare(b.equipmentId));
+  return { ok: true, offenders: offenders.slice(0, opts.limit || 40) };
+}
+
 // Distinct values for a whitelisted filter column (to populate dropdowns).
 function filterOptions() {
   if (!ensureSchema()) return {};
@@ -310,4 +403,4 @@ function filterOptions() {
   };
 }
 
-module.exports = { buildTrends, filterOptions, drillEvents, YEAR_MS };
+module.exports = { buildTrends, filterOptions, drillEvents, deepSlice, repeatOffenders, YEAR_MS };

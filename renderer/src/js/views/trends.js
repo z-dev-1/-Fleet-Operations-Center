@@ -312,8 +312,75 @@ function _render(data) {
   '</div>';
 
   body.innerHTML = stats + grid +
+    '<div class="tr-section-title">\uD83D\uDD0E Repetitive Fault Analysis <span class="dp-ri-sub-note">(same component coming back \u00b7 is it many units once, or one unit many times?)</span></div>' +
+    '<div class="tr-slice-controls">' +
+      '<label class="tr-slice-lbl">Break down by</label>' +
+      '<select id="tr-slice-by" class="tb-select">' +
+        '<option value="subcomponent">Sub-component (L2: windshield, air brake assembly\u2026)</option>' +
+        '<option value="component">Component (L1: Engine, Brakes\u2026)</option>' +
+        '<option value="vendor">Vendor</option>' +
+        '<option value="make">Make</option>' +
+        '<option value="model">Model</option>' +
+      '</select>' +
+    '</div>' +
+    '<div id="tr-slice"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading deep slice\u2026</div></div>' +
+    '<div class="tr-section-title">\u267B\uFE0F Repeat Offenders <span class="dp-ri-sub-note">(units with the same component 2+ times)</span></div>' +
+    '<div id="tr-offenders"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading repeat offenders\u2026</div></div>' +
     '<div class="tr-section-title">\uD83D\uDD17 Vendor Network Intelligence <span class="dp-ri-sub-note">(deterministic \u00b7 patterns to review, not proof of fault \u00b7 advisory only)</span></div>' +
     '<div id="tr-network"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading vendor network\u2026</div></div>';
+}
+
+function _renderDeepSlice(res) {
+  var host = _el.querySelector('#tr-slice');
+  if (!host) return;
+  if (!res || res.ok === false) { host.innerHTML = '<div class="dp-empty" style="color:var(--mut)">' + esc((res && res.error) || 'no data') + '</div>'; return; }
+  var groups = res.groups || [];
+  if (!groups.length) { host.innerHTML = '<div class="dp-empty" style="color:var(--mut)">No data.</div>'; return; }
+  var rows = groups.map(function(g){
+    var ratioCls = g.repeatRatio >= 2 ? 'tr-ratio--hot' : (g.repeatRatio > 1 ? 'tr-ratio--warn' : '');
+    var repeatUnits = (g.repeatUnits || []).map(function(u){
+      return '<button class="tr-chip-unit" data-unit="' + esc(u.equipmentId) + '" title="Open unit">' + esc(u.equipmentId) + ' \u00d7' + u.count + '</button>';
+    }).join('');
+    var makes = (g.topMakes || []).map(function(m){ return esc(m.key) + '(' + m.count + ')'; }).join(', ');
+    var vendors = (g.topVendors || []).map(function(v){ return esc(v.key) + '(' + v.count + ')'; }).join(', ');
+    return '<div class="tr-slice-row">' +
+      '<div class="tr-slice-main">' +
+        '<button class="tr-slice-key" data-dim="' + esc(res.groupBy === 'subcomponent' ? 'subcomponent' : res.groupBy) + '" data-val="' + esc(g.key) + '" title="Drill into these events">' + esc(g.key) + ' \u2197</button>' +
+        '<span class="tr-slice-metrics">' +
+          '<span class="tr-slice-m">' + g.events + ' events</span>' +
+          '<span class="tr-slice-m">' + g.units + ' unit' + (g.units===1?'':'s') + '</span>' +
+          '<span class="tr-slice-ratio ' + ratioCls + '">' + g.repeatRatio.toFixed(2) + '\u00d7 per unit</span>' +
+          (g.repeatUnitCount ? '<span class="tr-slice-m tr-slice-m--warn">' + g.repeatUnitCount + ' repeating</span>' : '') +
+        '</span>' +
+      '</div>' +
+      (repeatUnits ? '<div class="tr-slice-units"><span class="tr-slice-sub">Repeating units:</span> ' + repeatUnits + '</div>' : '') +
+      ((makes || vendors) ? '<div class="tr-slice-xtab">' + (makes ? '<span class="tr-slice-sub">Makes:</span> ' + makes + '  ' : '') + (vendors ? '<span class="tr-slice-sub">Vendors:</span> ' + vendors : '') + '</div>' : '') +
+    '</div>';
+  }).join('');
+  host.innerHTML = '<div class="tr-card tr-card--wide">' + rows + '</div>';
+  // wire unit chips -> open unit
+  host.querySelectorAll('.tr-chip-unit').forEach(function(b){ b.addEventListener('click', function(){ _openUnit(b.dataset.unit); }); });
+  // wire key -> drill
+  host.querySelectorAll('.tr-slice-key').forEach(function(b){ b.addEventListener('click', function(){ _openDrill(b.dataset.dim, b.dataset.val); }); });
+}
+
+function _renderOffenders(res) {
+  var host = _el.querySelector('#tr-offenders');
+  if (!host) return;
+  if (!res || res.ok === false) { host.innerHTML = '<div class="dp-empty" style="color:var(--mut)">' + esc((res && res.error) || 'no data') + '</div>'; return; }
+  var off = res.offenders || [];
+  if (!off.length) { host.innerHTML = '<div class="dp-empty" style="color:var(--mut)">No unit has repeated the same component yet.</div>'; return; }
+  var rows = off.map(function(o){
+    return '<div class="tr-off-row">' +
+      '<button class="tr-chip-unit" data-unit="' + esc(o.equipmentId) + '">' + esc(o.equipmentId) + '</button>' +
+      '<span class="tr-off-comp">' + esc(o.component) + '</span>' +
+      '<span class="tr-off-count">\u00d7' + o.count + '</span>' +
+      (o.make ? '<span class="tr-off-meta">' + esc(o.make) + '</span>' : '') +
+      (o.vendor ? '<span class="tr-off-meta">' + esc(o.vendor) + '</span>' : '') +
+    '</div>';
+  }).join('');
+  host.innerHTML = '<div class="tr-card tr-card--wide">' + rows + '</div>';
+  host.querySelectorAll('.tr-chip-unit').forEach(function(b){ b.addEventListener('click', function(){ _openUnit(b.dataset.unit); }); });
 }
 
 function _renderNetwork(data) {
@@ -381,15 +448,25 @@ function _load() {
   var f = _collectFilters();
   window.repairIntel.trends(f).then(function(data){
     _render(data);
-    // Network block only renders when the body produced one (i.e. there is data).
-    if (data && data.ok !== false && data.totals && data.totals.events && window.repairIntel.network) {
-      window.repairIntel.network(f).then(_renderNetwork).catch(function(e){
-        _renderNetwork({ ok: false, error: (e && e.message) || 'error' });
-      });
+    if (data && data.ok !== false && data.totals && data.totals.events) {
+      if (window.repairIntel.network) window.repairIntel.network(f).then(_renderNetwork).catch(function(e){ _renderNetwork({ ok: false, error: (e && e.message) || 'error' }); });
+      // Deep slice (honor the group-by selector) + repeat offenders.
+      var byEl = _el.querySelector('#tr-slice-by');
+      var groupBy = byEl ? byEl.value : 'subcomponent';
+      if (byEl && !byEl._sliceWired) { byEl._sliceWired = true; byEl.addEventListener('change', function(){ _loadSlice(byEl.value); }); }
+      _loadSlice(groupBy);
+      if (window.repairIntel.repeatOffenders) window.repairIntel.repeatOffenders(f).then(_renderOffenders).catch(function(e){ _renderOffenders({ ok: false, error: (e && e.message) || 'error' }); });
     }
   }).catch(function(e){
     _render({ ok: false, error: (e && e.message) || 'error' });
   });
+}
+
+function _loadSlice(groupBy) {
+  if (!window.repairIntel || !window.repairIntel.deepSlice) return;
+  var host = _el.querySelector('#tr-slice');
+  if (host) host.innerHTML = '<div class="dp-empty" style="color:var(--mut);font-style:italic">Loading deep slice\u2026</div>';
+  window.repairIntel.deepSlice(groupBy, _collectFilters()).then(_renderDeepSlice).catch(function(e){ _renderDeepSlice({ ok: false, error: (e && e.message) || 'error' }); });
 }
 
 function _populateFilters() {

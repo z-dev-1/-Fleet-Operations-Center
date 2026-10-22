@@ -123,6 +123,40 @@ describe('repair-intel trends (fleet aggregation)', () => {
     expect(res.units.length).toBe(m.unitsAffected);
   });
 
+  it('deepSlice distinguishes one-unit-many-times from many-units-once', () => {
+    // Seed a clean scenario: unit U-REPEAT gets 3 airbag repairs; 3 distinct
+    // units each get ONE wiper repair. Airbag ratio should be 3.0 (1 unit),
+    // wiper ratio 1.0 (3 units).
+    for (let i = 0; i < 3; i++) {
+      store.upsertEvent(store.normalizeWorkOrder(wo({ workRequestId: 'AB' + i, assetDisplayName: 'U-REPEAT',
+        suggestedItems: [{ level1: 'Airbag' }], reportedDateTime: new Date(Date.now() - (10 + i) * DAY).toISOString() })));
+    }
+    ['WU1', 'WU2', 'WU3'].forEach((u, i) => {
+      store.upsertEvent(store.normalizeWorkOrder(wo({ workRequestId: 'WP' + i, assetDisplayName: u,
+        suggestedItems: [{ level1: 'Wiper' }] })));
+    });
+    const slice = trends.deepSlice('component');
+    const airbag = slice.groups.find(g => g.key === 'Airbag');
+    const wiper = slice.groups.find(g => g.key === 'Wiper');
+    expect(airbag.events).toBe(3);
+    expect(airbag.units).toBe(1);
+    expect(airbag.repeatRatio).toBe(3);        // one unit, three times
+    expect(airbag.repeatUnits[0].equipmentId).toBe('U-REPEAT');
+    expect(wiper.events).toBe(3);
+    expect(wiper.units).toBe(3);
+    expect(wiper.repeatRatio).toBe(1);         // three units, once each
+    expect(wiper.repeatUnitCount).toBe(0);
+  });
+
+  it('repeatOffenders lists units with the same component 2+ times', () => {
+    const res = trends.repeatOffenders();
+    const ab = res.offenders.find(o => o.equipmentId === 'U-REPEAT' && o.component === 'Airbag');
+    expect(ab).toBeTruthy();
+    expect(ab.count).toBe(3);
+    // a once-only unit must not appear
+    expect(res.offenders.some(o => o.equipmentId === 'WU1')).toBe(false);
+  });
+
   it('builds monthly buckets and filter options', () => {
     const d = trends.buildTrends({});
     expect(Array.isArray(d.monthly)).toBe(true);
