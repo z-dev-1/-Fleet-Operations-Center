@@ -121,11 +121,33 @@ function buildTrends(opts = {}) {
     where.params);
 
   // Back-order / parts-delay rollup (honest: only events the API flagged via
-  // delay reason codes / lifecycle reason; carries its denominator).
+  // delay reason codes / lifecycle reason; carries its denominator). We break it
+  // down by the COMPONENT/SUB-COMPONENT on hold and by the specific DELAY REASON
+  // (Sourcing parts / Parts on back order / Awaiting estimate ...) — that is the
+  // real "which parts" signal the API gives. The exact part number is NOT a
+  // structured field; the per-event complaint text (shown on drill) names it
+  // when documented, and the AI layer extracts it as "suspected" when present.
   const partsWhere = { sql: where.sql + (where.sql ? ' AND ' : ' WHERE ') + 'parts_on_order = 1', params: where.params };
   const partsTotal = _one('SELECT COUNT(*) AS n, COUNT(DISTINCT equipment_id) AS units FROM ri_repair_event' + partsWhere.sql, partsWhere.params) || {};
   const partsByComponent = _groupBy('repair_component', partsWhere, opts.limit || 10);
+  const partsBySub = _groupBy('repair_subcategory', partsWhere, opts.limit || 10);
   const partsByVendor = _groupBy('vendor', partsWhere, opts.limit || 10);
+  // Delay-reason breakdown: split the 'A; B' joined codes and tally each.
+  const partsReasonRows = _rows('SELECT delay_reason_codes AS c FROM ri_repair_event' + partsWhere.sql + ' AND delay_reason_codes IS NOT NULL', partsWhere.params);
+  const reasonTally = {};
+  for (const r of partsReasonRows) {
+    for (const code of String(r.c).split(/[;,]/).map(s => s.trim()).filter(Boolean)) {
+      reasonTally[code] = (reasonTally[code] || 0) + 1;
+    }
+  }
+  const partsByReason = Object.entries(reasonTally).map(([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count).slice(0, 10);
+  // Specific back-ordered PARTS extracted from comment threads (suspected).
+  const partRows = _rows('SELECT backordered_parts AS p FROM ri_repair_event' + partsWhere.sql + ' AND backordered_parts IS NOT NULL', partsWhere.params);
+  const partTally = {};
+  for (const r of partRows) {
+    try { for (const it of JSON.parse(r.p)) { if (it && it.part) partTally[it.part] = (partTally[it.part] || 0) + 1; } } catch (_) {}
+  }
+  const partsByPart = Object.entries(partTally).map(([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count).slice(0, 12);
 
   const eventsN = totals.events || 0;
   return {
@@ -155,6 +177,9 @@ function buildTrends(opts = {}) {
       units: partsTotal.units || 0,
       pctOfEvents: eventsN ? Math.round(((partsTotal.n || 0) / eventsN) * 100) : 0,
       byComponent: partsByComponent,
+      bySubcomponent: partsBySub,
+      byReason: partsByReason,
+      byPart: partsByPart,   // specific parts named in comments (suspected)
       byVendor: partsByVendor,
     },
   };
@@ -182,12 +207,19 @@ function drillEvents(dimension, value, opts = {}) {
   if (!ensureSchema()) return { ok: false, error: 'sqlite unavailable' };
   const since = opts.sinceMs != null ? opts.sinceMs : 0; // default: all stored
   const extra = [];
-  const params = { val: String(value), since };
+  const params = { since };
+  // Only bind @val when the match clause actually uses it (node:sqlite rejects
+  // an unused named parameter). partsOnOrder matches a flag, not a value.
+  if (dimension !== 'partsOnOrder') params.val = String(value);
   // "month" is not a column — match the YYYY-MM bucket via strftime. Otherwise
   // the dimension must be a whitelisted column.
   let matchClause;
   if (dimension === 'month') {
     matchClause = "strftime('%Y-%m', reported_at/1000, 'unixepoch') = @val";
+  } else if (dimension === 'partsOnOrder') {
+    matchClause = 'parts_on_order = 1';
+  } else if (dimension === 'subcomponent') {
+    matchClause = 'repair_subcategory = @val';
   } else {
     const col = _DRILL_COLS[dimension];
     if (!col) return { ok: false, error: 'unknown dimension: ' + dimension };
@@ -205,7 +237,7 @@ function drillEvents(dimension, value, opts = {}) {
   const sql =
     'SELECT equipment_id, work_order_id, service_id, amz_id, vendor, status, wo_type, ' +
     'repair_category, repair_component, reported_complaint, cancellation_reason, delay_reason_codes, ' +
-    'parts_on_order, out_of_scope_reason, in_scope, confirmed_root_cause, suspected_root_cause, ' +
+    'parts_on_order, backordered_parts, out_of_scope_reason, in_scope, confirmed_root_cause, suspected_root_cause, ' +
     'outcome, corrective_actions, reported_at, repair_completed_at, estimate_cost, source_refs ' +
     'FROM ri_repair_event WHERE excluded_vendor = 0 AND ' + matchClause + ' ' +
     'AND (reported_at IS NULL OR reported_at >= @since)' +
@@ -214,14 +246,15 @@ function drillEvents(dimension, value, opts = {}) {
   const rows = _rows(sql, params);
   // Shape for the renderer: one object per event with a stable work-order URL.
   const events = rows.map(r => {
-    let url = null;
-    try { const sr = JSON.parse(r.source_refs || '{}'); url = sr.relay || null; } catch (_) {}
+    let url = null, offsiteUrl = null;
+    try { const sr = JSON.parse(r.source_refs || '{}'); url = sr.relay || null; offsiteUrl = sr.offsite || null; } catch (_) {}
     if (!url && r.service_id) url = 'https://aap-na.corp.amazon.com/v2/service/' + r.service_id;
     return {
       equipmentId: r.equipment_id,
       workOrderId: r.work_order_id,
       serviceId: r.service_id,
       amzId: r.amz_id,
+      offsiteUrl,
       vendor: r.vendor,
       status: r.status,
       woType: r.wo_type,
@@ -238,6 +271,7 @@ function drillEvents(dimension, value, opts = {}) {
       correctiveActions: r.corrective_actions,
       outcome: r.outcome,
       partsOnOrder: !!r.parts_on_order,
+      backorderedParts: (() => { try { return r.backordered_parts ? JSON.parse(r.backordered_parts) : null; } catch (_) { return null; } })(),
       reportedAt: r.reported_at,
       completedAt: r.repair_completed_at,
       estimateCost: (typeof r.estimate_cost === 'number') ? r.estimate_cost : null,

@@ -86,6 +86,16 @@ describe('repair-intel trends (fleet aggregation)', () => {
     expect(d.backorder.byComponent.some(c => /engine/i.test(c.key))).toBe(true);
     // a non-parts event is not counted as back-order
     expect(d.backorder.events).toBeLessThan(d.totals.events);
+    // the "which part/system + reason" breakdowns are present
+    expect(Array.isArray(d.backorder.byReason)).toBe(true);
+    expect(d.backorder.byReason.some(r => /parts/i.test(r.key))).toBe(true);
+    expect(Array.isArray(d.backorder.bySubcomponent)).toBe(true);
+    // drilling parts-on-order returns the events (with complaint naming the part)
+    const drill = trends.drillEvents('partsOnOrder', 'x', { sinceMs: 0 });
+    expect(drill.ok).toBe(true);
+    expect(drill.totalEvents).toBeGreaterThanOrEqual(1);
+    // every drilled event is genuinely flagged parts-on-order
+    expect(drill.units.every(u => u.events.every(e => e.partsOnOrder === true))).toBe(true);
   });
 
   it('drills into a component trend and returns the units + why fields', () => {

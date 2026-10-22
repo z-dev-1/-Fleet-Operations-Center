@@ -147,8 +147,19 @@ function _backorderCard(bo) {
     return '<div class="tr-bo-col"><div class="tr-bo-subtitle">' + esc(title) + '</div>' + items + '</div>';
   }
   return '<div class="tr-card tr-card--wide"><div class="tr-card-title">\uD83D\uDCE6 Parts / back-order ' +
-    '<span class="dp-ri-sub-note">(' + bo.events + ' events \u00b7 ' + bo.units + ' units \u00b7 ' + bo.pctOfEvents + '% of events \u00b7 from delay-reason/lifecycle signals only)</span></div>' +
-    '<div class="tr-bo-cols">' + miniRank('By component', bo.byComponent) + miniRank('By vendor', bo.byVendor) + '</div></div>';
+    '<span class="dp-ri-sub-note">(' + bo.events + ' events \u00b7 ' + bo.units + ' units \u00b7 ' + bo.pctOfEvents + '% of events)</span>' +
+    ' <button class="tr-bo-drill" data-dim="partsOnOrder" title="See every back-ordered event, its component + complaint">view all \u2197</button></div>' +
+    '<div class="tr-bo-note">The exact part number is not a structured API field \u2014 these show WHICH system is on hold + the delay reason; each event\u2019s complaint (on drill) names the part when documented.</div>' +
+    ((bo.byPart && bo.byPart.length)
+      ? '<div class="tr-bo-parts"><span class="tr-slice-sub">Parts named in comments (suspected):</span> ' +
+          bo.byPart.map(function(p){ return '<span class="tr-why tr-why--parts">' + esc(p.key) + ' \u00d7' + p.count + '</span>'; }).join(' ') + '</div>'
+      : '') +
+    '<div class="tr-bo-cols">' +
+      miniRank('Delay reason', bo.byReason) +
+      miniRank('Component on hold (L1)', bo.byComponent) +
+      miniRank('Sub-component on hold (L2)', bo.bySubcomponent) +
+      miniRank('By vendor', bo.byVendor) +
+    '</div></div>';
 }
 
 function fmtDate(ms) {
@@ -192,6 +203,9 @@ function _renderDrill(res, dim, val) {
       var why = [];
       if (e.cancellationReason) why.push('<span class="tr-why tr-why--cancel">Cancelled: ' + esc(e.cancellationReason) + '</span>');
       if (e.delayReason) why.push('<span class="tr-why tr-why--delay">Delay: ' + esc(e.delayReason) + '</span>');
+      if (e.backorderedParts && e.backorderedParts.length) {
+        why.push('<span class="tr-why tr-why--parts" title="suspected part(s) from the comment thread">\uD83D\uDCE6 Back-ordered: ' + esc(e.backorderedParts.map(function(p){ return p.part; }).join(', ')) + '</span>');
+      }
       if (e.outOfScopeReason) why.push('<span class="tr-why tr-why--scope">Out of scope: ' + esc(e.outOfScopeReason) + '</span>');
       if (e.rootCause) why.push('<span class="tr-why tr-why--root">Root cause: ' + esc(e.rootCause) + '</span>');
       if (e.correctiveActions) why.push('<span class="tr-why">Action: ' + esc(e.correctiveActions) + '</span>');
@@ -200,12 +214,15 @@ function _renderDrill(res, dim, val) {
       var open = e.url
         ? '<button class="tr-ev-open" data-url="' + esc(e.url) + '" title="Open work order in AAP">open WO \u2197</button>'
         : '';
+      var offsite = e.offsiteUrl
+        ? '<button class="tr-ev-open tr-ev-offsite" data-url="' + esc(e.offsiteUrl) + '" title="Open offsite / dealer event in AAP">offsite \u2197</button>'
+        : '';
       return '<div class="tr-ev">' +
         '<div class="tr-ev-head"><span class="tr-ev-date">' + esc(fmtDate(e.reportedAt)) + '</span>' +
           '<span class="tr-ev-status tr-ev-status--' + esc(e.status||'') + '">' + esc(e.status||'') + '</span>' +
           '<span class="tr-ev-cat">' + esc(e.category || '') + (e.component ? ' / ' + esc(e.component) : '') + '</span>' +
           '<span class="tr-ev-vend">' + esc(e.vendor || 'vendor n/a') + '</span>' +
-          (e.partsOnOrder ? '<span class="tr-ev-parts">\uD83D\uDCE6 parts</span>' : '') + open + '</div>' +
+          (e.partsOnOrder ? '<span class="tr-ev-parts">\uD83D\uDCE6 parts</span>' : '') + open + offsite + '</div>' +
         (e.complaint ? '<div class="tr-ev-complaint">' + esc(String(e.complaint).slice(0, 600)) + '</div>' : '<div class="tr-ev-complaint tr-ev-none">No complaint text recorded.</div>') +
         (why.length ? '<div class="tr-ev-why">' + why.join('') + '</div>' : '') +
       '</div>';
@@ -520,6 +537,8 @@ export function init(container) {
     if (rank && rank.dataset.dim) { _openDrill(rank.dataset.dim, rank.dataset.val); return; }
     var month = ev.target.closest && ev.target.closest('[data-month]');
     if (month && month.dataset.month) { _openDrill('month', month.dataset.month); return; }
+    var bo = ev.target.closest && ev.target.closest('.tr-bo-drill');
+    if (bo) { _openDrill('partsOnOrder', 'Parts on back-order'); return; }
   });
 
   // Lazy-load on first reveal so startup stays fast and empty engines are fine.

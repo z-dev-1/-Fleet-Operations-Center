@@ -212,6 +212,7 @@ function _migrate() {
   const adds = [
     "ALTER TABLE ri_repair_event ADD COLUMN delay_reason_codes TEXT",
     "ALTER TABLE ri_repair_event ADD COLUMN parts_on_order INTEGER DEFAULT 0",
+    "ALTER TABLE ri_repair_event ADD COLUMN backordered_parts TEXT", // JSON [{part,phrase,at}] from comments
   ];
   for (const sql of adds) {
     try { engine.exec(sql); } catch (e) { /* duplicate column name — already migrated */ }

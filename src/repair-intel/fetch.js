@@ -123,6 +123,7 @@ async function syncUnit(equipmentId, opts = {}) {
   //    we only need it for the comment thread the AI phase reads later, so we do
   //    NOT fetch detail for every WO here (keeps Phase 1 cheap). Structured
   //    fields come from the aggregate itself.
+  const partsOnOrderIds = []; // source ids flagged parts-on-order — hydrate for part names
   for (const wo of aggregates) {
     try {
       const vendor = wo && wo.vendor;
@@ -134,7 +135,30 @@ async function syncUnit(equipmentId, opts = {}) {
       if (r === 'added') result.added++;
       else if (r === 'updated') result.updated++;
       else if (r === 'unchanged') result.unchanged++;
+      if (row.parts_on_order && row.source_id) partsOnOrderIds.push(row.source_id);
     } catch (e) { result.errors.push('normalize/upsert ' + (wo && (wo.id || wo.workRequestId)) + ': ' + e.message); }
+  }
+
+  // 3b) Back-ordered PARTS from comments. The API has no structured parts field,
+  //     so for the events flagged parts-on-order we hydrate the WO detail (the
+  //     comment thread) and deterministically extract the suspected part name(s).
+  //     Bounded: only flagged events, capped, each hydrate hard-timeout'd. Fully
+  //     best-effort — a failure never fails the sync.
+  if (partsOnOrderIds.length && !opts.skipPartsExtract) {
+    const { extractBackorderedParts } = require('./parts-extract');
+    const cap = opts.partsExtractCap || 15;
+    let extracted = 0;
+    for (const sid of partsOnOrderIds.slice(0, cap)) {
+      try {
+        const detail = await _timed(hydrateWoDetail(sid));
+        const comments = (detail && mapper.collectAllComments) ? mapper.collectAllComments(detail) : null;
+        if (comments && comments.length) {
+          const items = extractBackorderedParts(comments);
+          if (items.length) { store.setBackorderedParts(sid, items); extracted++; }
+        }
+      } catch (e) { /* best-effort per WO */ }
+    }
+    if (extracted) logger.info('[' + eq + '] extracted back-ordered parts for ' + extracted + '/' + Math.min(partsOnOrderIds.length, cap) + ' flagged WOs');
   }
 
   // 4) Checkpoint (incremental cursor + coverage). Never truncates prior data.

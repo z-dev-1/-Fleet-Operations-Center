@@ -107,7 +107,11 @@ function normalizeWorkOrder(wo, asset) {
     source_id:        sourceId,
     work_order_id:    String(wo.workRequestId || wo.id || '') || null,
     service_id:       String(wo.id || '') || null,
-    offsite_id:       null,                  // set during offsite reconcile
+    // Offsite/dealer event id. The aggregate carries caseNumber / alternateUniqueId
+    // (the amz-xxxx case). The AI/detail layer can later confirm a true offsite
+    // event from the comment thread; here we capture the id + build the AAP
+    // offsite-events URL so an offsite WO is linkable from day one.
+    offsite_id:       String(wo.caseNumber || wo.alternateUniqueId || '').trim() || null,
     amz_id:           String(wo.aaid || '') || null,
     equipment_id:     String(wo.assetDisplayName || a.equipmentId || wo.equipmentId || '').trim() || null,
     vin:              a.vin || null,
@@ -165,7 +169,10 @@ function normalizeWorkOrder(wo, asset) {
     transfer_result:  null,
     estimate_cost:    _n(wo.totalEstimatePendingApprovalCost),
     invoiced_cost:    null,                  // API does not expose actual invoiced cost
-    source_refs:      JSON.stringify({ relay: wo.workRequestId || wo.id ? ('https://aap-na.corp.amazon.com/v2/service/' + (wo.workRequestId || wo.id)) : null }),
+    source_refs:      JSON.stringify({
+      relay: wo.workRequestId || wo.id ? ('https://aap-na.corp.amazon.com/v2/service/' + (wo.workRequestId || wo.id)) : null,
+      offsite: (wo.caseNumber || wo.alternateUniqueId) ? ('https://aap-na.corp.amazon.com/v2/offsite-events/' + String(wo.caseNumber || wo.alternateUniqueId).trim()) : null,
+    }),
     source_conflict:  null,
     excluded_vendor:  _isExcludedVendor(vendor) ? 1 : 0,
     first_seen_at:    Date.now(),
@@ -221,6 +228,16 @@ function _params(row, cols) {
   const o = {};
   for (const c of cols) { const v = row[c]; o[c] = (v === undefined ? null : v); }
   return o;
+}
+
+// Store the SUSPECTED back-ordered parts extracted from a WO's comment thread
+// (array of {part, phrase, at}). Deterministic evidence from comments — stored
+// as JSON on the event. Safe to call repeatedly (overwrites with latest).
+function setBackorderedParts(sourceId, items) {
+  if (!ensureSchema() || !sourceId) return;
+  const json = (Array.isArray(items) && items.length) ? JSON.stringify(items) : null;
+  const stmt = engine.prepare('UPDATE ri_repair_event SET backordered_parts = ? WHERE source_id = ?');
+  if (stmt) stmt.run(json, String(sourceId));
 }
 
 // Replace the parts for an event (idempotent: delete + insert).
@@ -353,7 +370,7 @@ function getRecommendations(scope, scopeKey) {
 
 module.exports = {
   EXCLUDED_VENDORS, _isExcludedVendor,
-  normalizeWorkOrder, upsertEvent, setParts,
+  normalizeWorkOrder, upsertEvent, setParts, setBackorderedParts,
   eventsForUnit, getCheckpoint, saveCheckpoint,
   applyAiToEvent, getAiAnalysis, saveAiAnalysis,
   replaceRecommendations, getRecommendations,

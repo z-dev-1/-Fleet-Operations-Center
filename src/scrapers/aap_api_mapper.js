@@ -489,6 +489,7 @@ module.exports = {
   woStatus,
   pmDueFields,
   extractOffsiteFromComments,
+  collectAllComments,
   commentsToTimeline,
   assetDetailFields,
   mapVendor,
