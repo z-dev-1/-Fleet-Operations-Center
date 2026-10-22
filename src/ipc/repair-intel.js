@@ -119,6 +119,13 @@ function registerRepairIntelIPC(ctx) {
     return { ok: true, options: trends.filterOptions() };
   });
 
+  // Drill into a trend: the units + events behind a clicked dimension/value,
+  // with each event's failure complaint + "why" (delay/cancellation/scope/root
+  // cause) and a work-order URL. This is the investigate-the-trend path.
+  handle('repair-trends:drill', async (dimension, value, opts) => {
+    return trends.drillEvents(String(dimension || ''), value, opts || {});
+  });
+
   // ── Vendor scope / network intelligence (deterministic) ───────────────────
   // Per-vendor scorecards + repeat-failure rates + multi-vendor-per-component
   // signals. Excluded vendors filtered at the query layer. Advisory only.

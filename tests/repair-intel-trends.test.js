@@ -88,6 +88,20 @@ describe('repair-intel trends (fleet aggregation)', () => {
     expect(d.backorder.events).toBeLessThan(d.totals.events);
   });
 
+  it('drills into a component trend and returns the units + why fields', () => {
+    const res = trends.drillEvents('component', 'Brakes');
+    expect(res.ok).toBe(true);
+    // Brakes were on U1 and U2 (and excluded Goodyear U3 must NOT appear).
+    expect(res.unitCount).toBeGreaterThanOrEqual(2);
+    const u1 = res.units.find(u => u.equipmentId === 'U1');
+    expect(u1).toBeTruthy();
+    expect(u1.events[0]).toHaveProperty('complaint');
+    expect(u1.events[0]).toHaveProperty('delayReason');
+    expect(u1.events[0]).toHaveProperty('url');
+    // no excluded vendor leaks in
+    expect(res.units.every(u => u.events.every(e => e.vendor !== 'Goodyear Commercial'))).toBe(true);
+  });
+
   it('builds monthly buckets and filter options', () => {
     const d = trends.buildTrends({});
     expect(Array.isArray(d.monthly)).toBe(true);

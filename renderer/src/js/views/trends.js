@@ -36,7 +36,8 @@ function _shellHtml() {
       '<select id="tr-f-wotype" class="tb-select"><option value="">All Types</option><option value="PM">PM</option><option value="unplanned">Unplanned</option><option value="planned">Planned</option><option value="dealer">Dealer</option><option value="roadside">Roadside</option><option value="offsite">Offsite</option></select>' +
       '<button id="tr-clear" class="detail-panel__btn detail-panel__btn--ghost">Clear</button>' +
     '</div>' +
-    '<div id="tr-body" class="tr-body"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading fleet trends\u2026</div></div>';
+    '<div id="tr-body" class="tr-body"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading fleet trends\u2026</div></div>' +
+    '<div id="tr-drill" class="tr-drill" style="display:none"></div>';
 }
 
 function _sel(id, placeholder) {
@@ -53,13 +54,16 @@ function _rankList(title, rows, opts) {
   opts = opts || {};
   if (!rows || !rows.length) return '<div class="tr-card"><div class="tr-card-title">' + esc(title) + '</div><div class="dp-empty">No data.</div></div>';
   var max = Math.max.apply(null, rows.map(function(r){ return r.count; })) || 1;
+  var dim = opts.dimension || '';
   var items = rows.map(function(r){
     var pct = Math.round((r.count / max) * 100);
     var dt = (opts.showDowntime && r.downtimeHours != null)
       ? '<span class="tr-rank-dt">' + r.downtimeHours + 'h' + (r.downtimeCoverage < 100 ? ' \u00b7 ' + r.downtimeCoverage + '%' : '') + '</span>'
       : '';
-    return '<div class="tr-rank">' +
-      '<div class="tr-rank-head"><span class="tr-rank-key">' + esc(r.key) + '</span>' +
+    // Clickable when a dimension is given — drills into the units behind it.
+    var clickable = dim ? ' tr-rank--click" data-dim="' + esc(dim) + '" data-val="' + esc(r.key) + '"' : '"';
+    return '<div class="tr-rank' + clickable + ' title="' + (dim ? 'Click to see the units that trended for this' : '') + '">' +
+      '<div class="tr-rank-head"><span class="tr-rank-key">' + esc(r.key) + (dim ? ' \u2197' : '') + '</span>' +
         '<span class="tr-rank-n">' + r.count + dt + '</span></div>' +
       '<div class="tr-rank-bar"><div class="tr-rank-fill" style="width:' + pct + '%"></div></div>' +
     '</div>';
@@ -112,6 +116,95 @@ function _backorderCard(bo) {
     '<div class="tr-bo-cols">' + miniRank('By component', bo.byComponent) + miniRank('By vendor', bo.byVendor) + '</div></div>';
 }
 
+function fmtDate(ms) {
+  if (!ms) return 'Unknown';
+  try { var d = new Date(ms); return (d.getMonth()+1)+'/'+d.getDate()+'/'+String(d.getFullYear()).slice(2); }
+  catch (_) { return 'Unknown'; }
+}
+
+// Render the drill-down: units that trended for the clicked thing, each with its
+// events' failure complaint + the "why" (delay/cancel/scope/root cause), and a
+// clickable work-order link.
+function _renderDrill(res, dim, val) {
+  var host = _el.querySelector('#tr-drill');
+  if (!host) return;
+  host.style.display = 'block';
+  if (!res || res.ok === false) {
+    host.innerHTML = '<div class="tr-drill-head"><span>' + esc(dim) + ': ' + esc(val) + '</span><button class="tr-drill-close">\u2715</button></div>' +
+      '<div class="dp-empty" style="color:var(--mut)">Could not load: ' + esc((res && res.error) || 'error') + '</div>';
+    _wireDrillClose(host);
+    return;
+  }
+  var unitsHtml = (res.units || []).map(function(u){
+    var evs = u.events.map(function(e){
+      var why = [];
+      if (e.cancellationReason) why.push('<span class="tr-why tr-why--cancel">Cancelled: ' + esc(e.cancellationReason) + '</span>');
+      if (e.delayReason) why.push('<span class="tr-why tr-why--delay">Delay: ' + esc(e.delayReason) + '</span>');
+      if (e.outOfScopeReason) why.push('<span class="tr-why tr-why--scope">Out of scope: ' + esc(e.outOfScopeReason) + '</span>');
+      if (e.rootCause) why.push('<span class="tr-why tr-why--root">Root cause: ' + esc(e.rootCause) + '</span>');
+      if (e.outcome) why.push('<span class="tr-why">Outcome: ' + esc(e.outcome) + '</span>');
+      var open = e.url
+        ? '<button class="tr-ev-open" data-url="' + esc(e.url) + '" title="Open work order in AAP">open WO \u2197</button>'
+        : '';
+      return '<div class="tr-ev">' +
+        '<div class="tr-ev-head"><span class="tr-ev-date">' + esc(fmtDate(e.reportedAt)) + '</span>' +
+          '<span class="tr-ev-status tr-ev-status--' + esc(e.status||'') + '">' + esc(e.status||'') + '</span>' +
+          '<span class="tr-ev-vend">' + esc(e.vendor || 'vendor n/a') + '</span>' +
+          (e.partsOnOrder ? '<span class="tr-ev-parts">\uD83D\uDCE6 parts</span>' : '') + open + '</div>' +
+        (e.complaint ? '<div class="tr-ev-complaint">' + esc(String(e.complaint).slice(0, 400)) + '</div>' : '<div class="tr-ev-complaint tr-ev-none">No complaint text recorded.</div>') +
+        (why.length ? '<div class="tr-ev-why">' + why.join('') + '</div>' : '') +
+      '</div>';
+    }).join('');
+    return '<div class="tr-unit">' +
+      '<div class="tr-unit-head"><button class="tr-unit-open" data-unit="' + esc(u.equipmentId) + '">' + esc(u.equipmentId) + '</button>' +
+        '<span class="tr-unit-count">' + u.count + ' event' + (u.count === 1 ? '' : 's') + '</span></div>' +
+      evs +
+    '</div>';
+  }).join('');
+  host.innerHTML =
+    '<div class="tr-drill-head"><span><b>' + esc(val) + '</b> \u2014 ' + res.unitCount + ' unit' + (res.unitCount === 1 ? '' : 's') + ', ' + res.totalEvents + ' event' + (res.totalEvents === 1 ? '' : 's') +
+      ' <span class="dp-ri-sub-note">(' + esc(dim) + ' trend \u00b7 click a unit to open it, or open its work order)</span></span>' +
+      '<button class="tr-drill-close">\u2715</button></div>' +
+    (unitsHtml || '<div class="dp-empty">No events.</div>');
+  _wireDrillClose(host);
+  // unit -> open the unit detail panel (same bus event the fleet table uses)
+  host.querySelectorAll('.tr-unit-open').forEach(function(btn){
+    btn.addEventListener('click', function(){ _openUnit(btn.dataset.unit); });
+  });
+  // work order -> open in AAP
+  host.querySelectorAll('.tr-ev-open').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var url = btn.dataset.url;
+      if (url && window.aap && window.aap.openUrl) window.aap.openUrl(url);
+      else if (url && window.open) window.open(url, '_blank');
+    });
+  });
+}
+
+function _wireDrillClose(host) {
+  var c = host.querySelector('.tr-drill-close');
+  if (c) c.addEventListener('click', function(){ host.style.display = 'none'; host.innerHTML = ''; });
+}
+
+function _openUnit(unitId) {
+  if (!unitId) return;
+  // Reuse the fleet row if we have it so the detail panel opens fully populated.
+  var row = null;
+  try {
+    var rows = (window.__fleetRows || (window.fleet && window.fleet._rows)) || [];
+    row = rows.find && rows.find(function(r){ return String(r.equipmentId || r.id) === String(unitId); });
+  } catch (_) {}
+  bus.emit('ui:unit-select', { unit: row || { equipmentId: unitId, id: unitId } });
+}
+
+function _openDrill(dim, val) {
+  var host = _el.querySelector('#tr-drill');
+  if (host) { host.style.display = 'block'; host.innerHTML = '<div class="tr-drill-head"><span>Loading ' + esc(val) + '\u2026</span></div>'; }
+  if (!window.repairIntel || !window.repairIntel.drill) { _renderDrill({ ok: false, error: 'bridge unavailable' }, dim, val); return; }
+  window.repairIntel.drill(dim, val, _collectFilters()).then(function(res){ _renderDrill(res, dim, val); })
+    .catch(function(e){ _renderDrill({ ok: false, error: (e && e.message) || 'error' }, dim, val); });
+}
+
 function _render(data) {
   var body = _el.querySelector('#tr-body');
   if (!body) return;
@@ -137,12 +230,12 @@ function _render(data) {
   var grid = '<div class="tr-grid">' +
     _monthlyChart(data.monthly) +
     _outcomes(data.outcomes) +
-    _rankList('Top vendors', data.byVendor, { showDowntime: true }) +
-    _rankList('Top categories', data.byCategory, { showDowntime: true }) +
-    _rankList('Top components', data.byComponent) +
-    _rankList('By domicile', data.byDomicile) +
-    _rankList('By operator', data.byOperator) +
-    _rankList('By make', data.byMake) +
+    _rankList('Top vendors', data.byVendor, { showDowntime: true, dimension: 'vendor' }) +
+    _rankList('Top categories', data.byCategory, { showDowntime: true, dimension: 'category' }) +
+    _rankList('Top components', data.byComponent, { dimension: 'component' }) +
+    _rankList('By domicile', data.byDomicile, { dimension: 'domicile' }) +
+    _rankList('By operator', data.byOperator, { dimension: 'operator' }) +
+    _rankList('By make', data.byMake, { dimension: 'make' }) +
     _backorderCard(data.backorder) +
   '</div>';
 
@@ -267,6 +360,11 @@ export function init(container) {
   });
   _el.querySelectorAll('.tr-filters select').forEach(function(sel){
     sel.addEventListener('change', _load);
+  });
+  // Delegated click: any clickable ranked row drills into the units behind it.
+  _el.addEventListener('click', function(ev){
+    var row = ev.target.closest && ev.target.closest('.tr-rank--click');
+    if (row && row.dataset.dim) { _openDrill(row.dataset.dim, row.dataset.val); }
   });
 
   // Lazy-load on first reveal so startup stays fast and empty engines are fine.

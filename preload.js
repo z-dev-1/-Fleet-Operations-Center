@@ -652,6 +652,8 @@ expose('repairIntel', {
   // Fleet-wide Trends dashboard (deterministic aggregation; opts = filter spec).
   trends:     (opts)        => ipcRenderer.invoke('repair-trends:get', opts || {}),
   trendFilters: ()          => ipcRenderer.invoke('repair-trends:filters'),
+  // Drill into a clicked trend -> the units + events behind it (with the why).
+  drill:      (dimension, value, opts) => ipcRenderer.invoke('repair-trends:drill', dimension, value, opts || {}),
   // Vendor scope / network intelligence (scorecards + repeat rates + signals).
   network:    (opts)        => ipcRenderer.invoke('repair-network:get', opts || {}),
 });

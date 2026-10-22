@@ -133,6 +133,89 @@ function buildTrends(opts = {}) {
   };
 }
 
+// ── Drill-down ────────────────────────────────────────────────────────────────
+// Given a dimension + value (what the user clicked on in a ranked list), return
+// the actual EVENTS behind that trend — unit #, dates, status, the failure
+// complaint, and the "why" fields (delay reason, cancellation reason, scope/root
+// cause when the AI layer has filled them). This is what turns "brakes x12" into
+// "these 9 units, here's each one's failure + why, click to open the work order".
+const _DRILL_COLS = {
+  category: 'repair_category',
+  component: 'repair_component',
+  vendor: 'vendor',
+  domicile: 'domicile',
+  operator: 'operator',
+  make: 'make',
+  model: 'model',
+  status: 'status',
+  outcome: 'outcome',
+};
+
+function drillEvents(dimension, value, opts = {}) {
+  if (!ensureSchema()) return { ok: false, error: 'sqlite unavailable' };
+  const col = _DRILL_COLS[dimension];
+  if (!col) return { ok: false, error: 'unknown dimension: ' + dimension };
+  const since = opts.sinceMs != null ? opts.sinceMs : 0; // default: all stored
+  const extra = [];
+  const params = { val: String(value), since };
+  // optional combined filters (same whitelist as _where)
+  const eqCols = { domicile: 'domicile', operator: 'operator', vendor: 'vendor', make: 'make',
+    model: 'model', category: 'repair_category', woType: 'wo_type' };
+  for (const [key, c] of Object.entries(eqCols)) {
+    if (opts[key] && c !== col) { extra.push(c + ' = @f_' + key); params['f_' + key] = String(opts[key]); }
+  }
+  if (dimension === 'partsOnOrder' || opts.partsOnOrder) extra.push('parts_on_order = 1');
+  const sql =
+    'SELECT equipment_id, work_order_id, service_id, amz_id, vendor, status, wo_type, ' +
+    'repair_category, repair_component, reported_complaint, cancellation_reason, delay_reason_codes, ' +
+    'parts_on_order, out_of_scope_reason, in_scope, confirmed_root_cause, suspected_root_cause, ' +
+    'outcome, corrective_actions, reported_at, repair_completed_at, estimate_cost, source_refs ' +
+    'FROM ri_repair_event WHERE excluded_vendor = 0 AND ' + col + ' = @val ' +
+    'AND (reported_at IS NULL OR reported_at >= @since)' +
+    (extra.length ? ' AND ' + extra.join(' AND ') : '') +
+    ' ORDER BY equipment_id ASC, COALESCE(reported_at, created_at, 0) DESC';
+  const rows = _rows(sql, params);
+  // Shape for the renderer: one object per event with a stable work-order URL.
+  const events = rows.map(r => {
+    let url = null;
+    try { const sr = JSON.parse(r.source_refs || '{}'); url = sr.relay || null; } catch (_) {}
+    if (!url && r.service_id) url = 'https://aap-na.corp.amazon.com/v2/service/' + r.service_id;
+    return {
+      equipmentId: r.equipment_id,
+      workOrderId: r.work_order_id,
+      serviceId: r.service_id,
+      amzId: r.amz_id,
+      vendor: r.vendor,
+      status: r.status,
+      woType: r.wo_type,
+      category: r.repair_category,
+      component: r.repair_component,
+      complaint: r.reported_complaint,
+      // the "why" — honest: these come straight from the source (delay/cancel) or
+      // the AI layer (root cause / scope), null when not documented.
+      delayReason: r.delay_reason_codes,
+      cancellationReason: r.cancellation_reason,
+      outOfScopeReason: r.out_of_scope_reason,
+      inScope: r.in_scope,
+      rootCause: r.confirmed_root_cause || (r.suspected_root_cause ? 'suspected: ' + r.suspected_root_cause : null),
+      correctiveActions: r.corrective_actions,
+      outcome: r.outcome,
+      partsOnOrder: !!r.parts_on_order,
+      reportedAt: r.reported_at,
+      completedAt: r.repair_completed_at,
+      estimateCost: (typeof r.estimate_cost === 'number') ? r.estimate_cost : null,
+      url,
+    };
+  });
+  // Unit roll-up: which units trended for this, and how many times each.
+  const byUnit = {};
+  for (const e of events) { (byUnit[e.equipmentId] || (byUnit[e.equipmentId] = [])).push(e); }
+  const units = Object.entries(byUnit)
+    .map(([equipmentId, evs]) => ({ equipmentId, count: evs.length, events: evs }))
+    .sort((a, b) => b.count - a.count || a.equipmentId.localeCompare(b.equipmentId));
+  return { ok: true, dimension, value: String(value), totalEvents: events.length, unitCount: units.length, units };
+}
+
 // Distinct values for a whitelisted filter column (to populate dropdowns).
 function filterOptions() {
   if (!ensureSchema()) return {};
@@ -149,4 +232,4 @@ function filterOptions() {
   };
 }
 
-module.exports = { buildTrends, filterOptions, YEAR_MS };
+module.exports = { buildTrends, filterOptions, drillEvents, YEAR_MS };
