@@ -1171,13 +1171,78 @@ function _renderAttachments() {
   }
 }
 
+// AAP accepts PNG/JPEG (and PDF) attachments. A user may drop a HEIC/webp/gif/
+// bmp/tiff image that AAP would reject, so we normalize images to PNG BEFORE
+// they go on the attachment list. PNG/JPEG pass through untouched; PDFs pass
+// through. Anything the browser can decode is re-encoded to PNG via a canvas
+// (no dependency). HEIC can't be decoded client-side — we keep it but warn so
+// it's never a silent rejected upload.
+const _ALLOWED_IMG = /^image\/(png|jpeg|jpg)$/i;
+
+function _dataUrlToPng(dataUrl) {
+  // Returns a Promise<string|null> — PNG data URL, or null if the browser
+  // couldn't decode the source (e.g. HEIC).
+  return new Promise((resolve) => {
+    try {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth || img.width;
+          canvas.height = img.naturalHeight || img.height;
+          if (!canvas.width || !canvas.height) return resolve(null);
+          const ctx = canvas.getContext('2d');
+          // white matte so transparency doesn't go black on JPEG-origin alpha
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0);
+          resolve(canvas.toDataURL('image/png'));
+        } catch (_) { resolve(null); }
+      };
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    } catch (_) { resolve(null); }
+  });
+}
+
+function _pngName(name) {
+  return String(name || 'attachment').replace(/\.[^.]+$/, '') + '.png';
+}
+
 // Read one or more browser File objects (from <input type=file> or a drop
-// event) via FileReader -- purely renderer-side, no IPC needed.
+// event) via FileReader -- purely renderer-side, no IPC needed. Images in a
+// non-AAP format are auto-converted to PNG before attaching.
 function _readFilesAsAttachments(fileList) {
   Array.from(fileList || []).forEach(file => {
     const reader = new FileReader();
-    reader.onload = () => _addAttachment(file.name, reader.result);
     reader.onerror = () => toast.show('warn', 'Could not read "' + file.name + '"', 3000);
+    reader.onload = async () => {
+      const dataUrl = reader.result;
+      const mime = (file.type || '').toLowerCase();
+      const name = (file.name || '').toLowerCase();
+      const looksImage = mime.startsWith('image/') || /^data:image\//i.test(String(dataUrl)) ||
+        /\.(heic|heif|webp|gif|bmp|tif|tiff|avif)$/i.test(name);
+      // PDFs and already-allowed images attach as-is.
+      if (mime === 'application/pdf' || name.endsWith('.pdf') || _ALLOWED_IMG.test(mime)) {
+        _addAttachment(file.name, dataUrl);
+        return;
+      }
+      // Any other image type -> convert to PNG.
+      if (looksImage) {
+        const png = await _dataUrlToPng(dataUrl);
+        if (png) {
+          _addAttachment(_pngName(file.name), png);
+          toast.show('info', 'Converted "' + file.name + '" to PNG for upload', 2500);
+        } else {
+          // Browser can't decode it (commonly HEIC). Keep it but be honest.
+          _addAttachment(file.name, dataUrl);
+          toast.show('warn', '"' + file.name + '" is a format AAP may reject (e.g. HEIC). Convert it to PNG/JPEG first for a reliable upload.', 5000);
+        }
+        return;
+      }
+      // Non-image, non-PDF (rare, input accepts image/*,.pdf) — attach as-is.
+      _addAttachment(file.name, dataUrl);
+    };
     reader.readAsDataURL(file);
   });
 }
