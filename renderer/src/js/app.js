@@ -40,6 +40,7 @@ import { init as initNotesLinks }         from './views/notes-links.js';
 import { init as initRcaQueue }           from './views/rca-queue.js';
 import { init as initDailyCall }          from './views/daily-call.js';
 import { init as initWorkflowIntel }      from './views/workflow-intelligence.js';
+import { init as initTrends }             from './views/trends.js';
 
 function boot() {
   // Global error boundary — prevent white screen
@@ -133,6 +134,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
   initRcaQueue(viewsMount);
   initDailyCall(viewsMount);
   initWorkflowIntel(viewsMount);
+  initTrends(viewsMount);
 
   // ── Settings drawer ────────────────────────────────────────────────────────
   initSettings();
@@ -149,6 +151,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
   const rcaQueueView      = document.getElementById('view-rca-queue');
   const dailyCallView     = document.getElementById('view-daily-call');
   const workflowIntelView = document.getElementById('view-workflow-intel');
+  const trendsView        = document.getElementById('view-trends');
 
   bus.on('ui:view-change', ({ to }) => {
     if (to === 'settings') return;
@@ -163,6 +166,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
     if (rcaQueueView)      rcaQueueView.style.display      = to === 'rca-queue'      ? 'flex' : 'none';
     if (dailyCallView)     dailyCallView.style.display     = to === 'daily-call'     ? 'flex' : 'none';
     if (workflowIntelView) workflowIntelView.style.display = to === 'workflow-intel' ? 'flex' : 'none';
+    if (trendsView)        trendsView.style.display        = to === 'trends'         ? 'flex' : 'none';
   });
 
   bus.on('ui:view-change', () => bus.emit('ui:unit-deselect'));

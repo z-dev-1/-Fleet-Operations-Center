@@ -1,0 +1,88 @@
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import os from 'os';
+import path from 'path';
+import fs from 'fs';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+
+const { setDataDir } = require('../src/config/paths');
+const engine = require('../src/store/sqlite_engine');
+const store = require('../src/repair-intel/store');
+const trends = require('../src/repair-intel/trends');
+
+const DAY = 24 * 3600 * 1000;
+let tmpDir;
+
+function wo(o) {
+  return Object.assign({
+    workRequestId: 'WR' + Math.random().toString(36).slice(2),
+    assetDisplayName: 'U1',
+    vendor: 'Acme Repair',
+    category: 'Unplanned Repair',
+    status: { description: { value: 'COMPLETED' } },
+    suggestedItems: [{ level1: 'Brakes' }],
+    assetDomicileSite: 'ABE1',
+    operator: 'DSP-A',
+    reportedDateTime: new Date(Date.now() - 40 * DAY).toISOString(),
+    completedDateTime: new Date(Date.now() - 39 * DAY).toISOString(),
+    totalEstimatePendingApprovalCost: 300,
+  }, o);
+}
+
+describe('repair-intel trends (fleet aggregation)', () => {
+  beforeAll(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ri-trends-'));
+    setDataDir(tmpDir);
+    engine.close();
+    // 3 units, 2 vendors, 2 domiciles, a PM, and one excluded (Goodyear).
+    store.upsertEvent(store.normalizeWorkOrder(wo({ workRequestId: 'T1', assetDisplayName: 'U1', vendor: 'Acme Repair', assetDomicileSite: 'ABE1' })));
+    store.upsertEvent(store.normalizeWorkOrder(wo({ workRequestId: 'T2', assetDisplayName: 'U2', vendor: 'Acme Repair', assetDomicileSite: 'ABE1',
+      reportedDateTime: new Date(Date.now() - 100 * DAY).toISOString(), completedDateTime: new Date(Date.now() - 99 * DAY).toISOString() })));
+    store.upsertEvent(store.normalizeWorkOrder(wo({ workRequestId: 'T3', assetDisplayName: 'U3', vendor: 'Beta Fleet', assetDomicileSite: 'DEN2', operator: 'DSP-B' })));
+    store.upsertEvent(store.normalizeWorkOrder(wo({ workRequestId: 'T4', assetDisplayName: 'U1', category: 'Preventive Maintenance', suggestedItems: [{ level1: 'Oil' }] })));
+    store.upsertEvent(store.normalizeWorkOrder(wo({ workRequestId: 'T5', assetDisplayName: 'U2', vendor: 'Goodyear Commercial' }))); // excluded
+  });
+  afterAll(() => {
+    try { engine.close(); } catch (_) {}
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  });
+
+  it('totals exclude excluded vendors and count units/PM/corrective', () => {
+    const d = trends.buildTrends({});
+    expect(d.ok).toBe(true);
+    expect(d.totals.events).toBe(4);      // Goodyear excluded
+    expect(d.totals.units).toBe(3);
+    expect(d.totals.pm).toBe(1);
+    expect(d.totals.corrective).toBe(3);
+    expect(d.totals.downtimeHours).toBeGreaterThan(0);
+    expect(d.totals.downtimeCoverage).toBe(100);
+    expect(d.totals.estimateCostTotal).toBe(1200); // 4 x 300
+  });
+
+  it('groups by vendor and domicile correctly', () => {
+    const d = trends.buildTrends({});
+    const acme = d.byVendor.find(v => v.key === 'Acme Repair');
+    expect(acme.count).toBe(3);
+    expect(d.byVendor.find(v => v.key === 'Goodyear Commercial')).toBeUndefined();
+    const abe = d.byDomicile.find(v => v.key === 'ABE1');
+    expect(abe.count).toBe(3);
+  });
+
+  it('applies filters', () => {
+    const d = trends.buildTrends({ vendor: 'Beta Fleet' });
+    expect(d.totals.events).toBe(1);
+    expect(d.totals.units).toBe(1);
+    const pm = trends.buildTrends({ woType: 'PM' });
+    expect(pm.totals.events).toBe(1);
+  });
+
+  it('builds monthly buckets and filter options', () => {
+    const d = trends.buildTrends({});
+    expect(Array.isArray(d.monthly)).toBe(true);
+    expect(d.monthly.length).toBeGreaterThanOrEqual(1);
+    const opts = trends.filterOptions();
+    expect(opts.vendors).toContain('Acme Repair');
+    expect(opts.vendors).not.toContain('Goodyear Commercial');
+    expect(opts.domiciles).toContain('ABE1');
+  });
+});

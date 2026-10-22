@@ -649,4 +649,7 @@ expose('repairIntel', {
   build:      (equipmentId) => ipcRenderer.invoke('repair-history:build', equipmentId),
   fetchNew:   (equipmentId) => ipcRenderer.invoke('repair-history:fetch-new', equipmentId),
   refreshAi:  (equipmentId) => ipcRenderer.invoke('repair-history:refresh-ai', equipmentId),
+  // Fleet-wide Trends dashboard (deterministic aggregation; opts = filter spec).
+  trends:     (opts)        => ipcRenderer.invoke('repair-trends:get', opts || {}),
+  trendFilters: ()          => ipcRenderer.invoke('repair-trends:filters'),
 });

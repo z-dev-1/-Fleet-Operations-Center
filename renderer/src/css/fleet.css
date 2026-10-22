@@ -9759,3 +9759,37 @@ body {
 .dp-ri-rec-finding { font-size: 12px; color: var(--txt); font-weight: 600; line-height: 1.4; }
 .dp-ri-rec-action { font-size: 11.5px; color: var(--txt2); line-height: 1.45; margin-top: 3px; }
 .dp-ri-rec-reason { font-size: 11px; color: var(--mut); line-height: 1.45; margin-top: 2px; font-style: italic; }
+
+/* ── Fleet Repair Trends dashboard (Phase 5) ──────────────────────────────── */
+.view--trends { flex-direction: column; padding: 16px 20px; overflow-y: auto; gap: 12px; }
+.tr-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.tr-title { font-size: 16px; font-weight: 800; color: var(--txt); }
+.tr-sub { font-size: 11px; font-weight: 400; color: var(--mut); font-style: italic; margin-left: 6px; }
+.tr-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.tr-body { display: flex; flex-direction: column; gap: 12px; }
+
+.tr-stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+@media (max-width: 1100px) { .tr-stats { grid-template-columns: repeat(3, 1fr); } }
+.tr-stat { border: 1px solid rgba(48,54,61,.7); border-radius: 10px; padding: 10px 12px; background: rgba(255,255,255,.02); text-align: center; }
+.tr-stat-val { font-size: 22px; font-weight: 800; color: var(--txt); font-family: var(--mono); }
+.tr-stat-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--mut); margin-top: 2px; }
+.tr-stat-note { font-size: 9.5px; color: var(--mut); font-style: italic; margin-top: 2px; }
+
+.tr-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+@media (max-width: 1100px) { .tr-grid { grid-template-columns: 1fr; } }
+.tr-card { border: 1px solid rgba(48,54,61,.7); border-radius: 10px; padding: 12px 14px; background: rgba(255,255,255,.02); }
+.tr-card--wide { grid-column: 1 / -1; }
+.tr-card-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--acc2, #79c0ff); margin-bottom: 8px; }
+
+.tr-rank { margin-bottom: 7px; }
+.tr-rank-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+.tr-rank-key { font-size: 12px; color: var(--txt); text-transform: capitalize; word-break: break-word; }
+.tr-rank-n { font-size: 11px; font-weight: 700; color: var(--txt2); white-space: nowrap; font-family: var(--mono); }
+.tr-rank-dt { color: var(--mut); font-weight: 400; margin-left: 6px; }
+.tr-rank-bar { height: 5px; border-radius: 3px; background: rgba(139,148,158,.15); overflow: hidden; }
+.tr-rank-fill { height: 100%; background: linear-gradient(90deg, var(--acc, #58a6ff), var(--acc2, #79c0ff)); border-radius: 3px; }
+
+.tr-mchart { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 6px; }
+.tr-mbar { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; gap: 3px; }
+.tr-mbar-fill { width: 70%; min-height: 2px; background: linear-gradient(180deg, var(--acc2, #79c0ff), var(--acc, #58a6ff)); border-radius: 3px 3px 0 0; }
+.tr-mbar-lbl { font-size: 8.5px; color: var(--mut); font-family: var(--mono); white-space: nowrap; }

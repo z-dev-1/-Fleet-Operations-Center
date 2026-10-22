@@ -22,6 +22,7 @@ function registerRepairIntelIPC(ctx) {
   const report = require('../repair-intel/report');
   const fetch = require('../repair-intel/fetch');
   const store = require('../repair-intel/store');
+  const trends = require('../repair-intel/trends');
 
   function handle(ch, fn) {
     ipcMain.handle(ch, async (e, ...args) => {
@@ -102,6 +103,19 @@ function registerRepairIntelIPC(ctx) {
       }
     } catch (err) { logger.warn('analysis load/run failed: ' + err.message); }
     return { ok: false, pending: true, error: 'AI analysis not available yet' };
+  });
+
+  // ── Trends dashboard (fleet-wide deterministic aggregation) ───────────────
+  // opts is a plain filter spec from the renderer; trends.js only interpolates
+  // whitelisted columns and binds everything else, so there is no SQL-injection
+  // surface. Returns totals + top-N groupings + monthly volume + outcomes.
+  handle('repair-trends:get', async (opts) => {
+    return trends.buildTrends(opts || {});
+  });
+
+  // Distinct filter values to populate the Trends dropdowns.
+  handle('repair-trends:filters', async () => {
+    return { ok: true, options: trends.filterOptions() };
   });
 
   logger.info('repair-intel IPC registered');

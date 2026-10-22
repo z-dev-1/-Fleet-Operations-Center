@@ -20,6 +20,7 @@ const TAB_VIEW = {
   'fleet-table': 'fleet',
   dashboard:  'fleet',
   analytics:  'analytics',
+  trends:     'trends',
   scheduler:  'schedulers',
   'email-composer': 'email-composer',
   'daily-call': 'daily-call',
@@ -57,6 +58,9 @@ export function init(container) {
         </button>
         <button class="tb-tab" data-view="analytics">
           <span class="tb-tab-icon">⏳</span> Long Dwell
+        </button>
+        <button class="tb-tab" data-view="trends">
+          <span class="tb-tab-icon">📈</span> Trends
         </button>
         <button class="tb-tab" data-view="scheduler">
           <span class="tb-tab-icon">⏱</span> Scheduler
