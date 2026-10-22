@@ -123,7 +123,53 @@ function _render(data) {
     _rankList('By make', data.byMake) +
   '</div>';
 
-  body.innerHTML = stats + grid;
+  body.innerHTML = stats + grid +
+    '<div class="tr-section-title">\uD83D\uDD17 Vendor Network Intelligence <span class="dp-ri-sub-note">(deterministic \u00b7 patterns to review, not proof of fault \u00b7 advisory only)</span></div>' +
+    '<div id="tr-network"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading vendor network\u2026</div></div>';
+}
+
+function _renderNetwork(data) {
+  var host = _el.querySelector('#tr-network');
+  if (!host) return;
+  if (!data || data.ok === false) {
+    host.innerHTML = '<div class="dp-empty" style="color:var(--mut)">Vendor network unavailable: ' + esc((data && data.error) || 'no data') + '.</div>';
+    return;
+  }
+  var cards = data.scorecards || [];
+  if (!cards.length) { host.innerHTML = '<div class="dp-empty" style="color:var(--mut)">No vendor data yet.</div>'; return; }
+
+  // repeat-rate lookup
+  var rrMap = {};
+  (data.repeatRates || []).forEach(function(r){ rrMap[r.vendor] = r; });
+
+  var scHtml = cards.slice(0, 20).map(function(v){
+    var rr = rrMap[v.vendor];
+    var rrCls = rr && rr.repeatRatePct >= 30 ? 'tr-vn-rr--bad' : (rr && rr.repeatRatePct >= 15 ? 'tr-vn-rr--warn' : '');
+    var out = (v.outcomes || []).slice(0, 4).map(function(o){ return '<span class="dp-ri-chip">' + esc(o.key) + ' ' + o.count + '</span>'; }).join('');
+    return '<div class="tr-vn-card">' +
+      '<div class="tr-vn-head"><span class="tr-vn-name">' + esc(v.vendor) + '</span>' +
+        '<span class="tr-vn-events">' + v.events + ' events \u00b7 ' + v.units + ' units</span></div>' +
+      '<div class="tr-vn-metrics">' +
+        '<span>Downtime: ' + (v.downtimeHours != null ? v.downtimeHours + 'h' : 'Unknown') + (v.downtimeCoverage < 100 ? ' (' + v.downtimeCoverage + '%)' : '') + '</span>' +
+        (v.avgDowntimeHours != null ? '<span>Avg: ' + v.avgDowntimeHours + 'h</span>' : '') +
+        (v.estimateCostTotal != null ? '<span>Est $' + v.estimateCostTotal.toLocaleString() + (v.costCoverage < 100 ? ' (' + v.costCoverage + '%)' : '') + '</span>' : '') +
+        (rr ? '<span class="tr-vn-rr ' + rrCls + '">Repeat: ' + rr.repeatRatePct + '% (' + rr.repeats + '/' + rr.basis + ')</span>' : '') +
+      '</div>' +
+      (out ? '<div class="dp-ri-chips">' + out + '</div>' : '') +
+    '</div>';
+  }).join('');
+
+  var mv = (data.multiVendor || []).slice(0, 12).map(function(c){
+    var vs = c.vendors.slice(0, 5).map(function(x){ return esc(x.vendor) + ' (' + x.count + ')'; }).join(', ');
+    return '<div class="tr-mv-row"><span class="tr-mv-comp">' + esc(c.component) + '</span>' +
+      '<span class="tr-mv-count">' + c.vendorCount + ' vendors</span>' +
+      '<span class="tr-mv-list">' + vs + '</span></div>';
+  }).join('');
+  var mvBlock = mv
+    ? '<div class="tr-card tr-card--wide"><div class="tr-card-title">Components spread across multiple vendors <span class="dp-ri-sub-note">(scope / referral churn signal)</span></div>' + mv + '</div>'
+    : '';
+
+  host.innerHTML = '<div class="tr-vn-grid">' + scHtml + '</div>' + mvBlock;
 }
 
 function _collectFilters() {
@@ -143,7 +189,16 @@ function _load() {
   }
   var body = _el.querySelector('#tr-body');
   if (body) body.innerHTML = '<div class="dp-empty" style="color:var(--mut);font-style:italic">Loading fleet trends\u2026</div>';
-  window.repairIntel.trends(_collectFilters()).then(_render).catch(function(e){
+  var f = _collectFilters();
+  window.repairIntel.trends(f).then(function(data){
+    _render(data);
+    // Network block only renders when the body produced one (i.e. there is data).
+    if (data && data.ok !== false && data.totals && data.totals.events && window.repairIntel.network) {
+      window.repairIntel.network(f).then(_renderNetwork).catch(function(e){
+        _renderNetwork({ ok: false, error: (e && e.message) || 'error' });
+      });
+    }
+  }).catch(function(e){
     _render({ ok: false, error: (e && e.message) || 'error' });
   });
 }

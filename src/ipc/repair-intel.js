@@ -23,6 +23,7 @@ function registerRepairIntelIPC(ctx) {
   const fetch = require('../repair-intel/fetch');
   const store = require('../repair-intel/store');
   const trends = require('../repair-intel/trends');
+  const vendorNetwork = require('../repair-intel/vendor-network');
 
   function handle(ch, fn) {
     ipcMain.handle(ch, async (e, ...args) => {
@@ -116,6 +117,13 @@ function registerRepairIntelIPC(ctx) {
   // Distinct filter values to populate the Trends dropdowns.
   handle('repair-trends:filters', async () => {
     return { ok: true, options: trends.filterOptions() };
+  });
+
+  // ── Vendor scope / network intelligence (deterministic) ───────────────────
+  // Per-vendor scorecards + repeat-failure rates + multi-vendor-per-component
+  // signals. Excluded vendors filtered at the query layer. Advisory only.
+  handle('repair-network:get', async (opts) => {
+    return vendorNetwork.buildNetwork(opts || {});
   });
 
   logger.info('repair-intel IPC registered');
