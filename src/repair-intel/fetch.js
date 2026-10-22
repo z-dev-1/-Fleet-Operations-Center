@@ -43,6 +43,12 @@ const HISTORY_STATUSES = [
   'COMPLETED', 'CLOSED', 'CANCELLED', 'REOPENED', 'TRANSFERRED', 'DONE',
 ];
 
+// `category` is a NON-NULLABLE field on the API (null => 500
+// "KotlinInvalidNullException ... category"). The valid values are the
+// work-request categories UNPLANNED and PLANNED, so to capture the FULL repair
+// history we run one search per category and merge (syncUnit loops HISTORY_CATEGORIES).
+const HISTORY_CATEGORIES = ['UNPLANNED', 'PLANNED'];
+
 function _historyBody(opts = {}) {
   const now = Date.now();
   const modifiedFrom = opts.sinceMs != null ? opts.sinceMs : (now - YEAR_MS);
@@ -50,7 +56,7 @@ function _historyBody(opts = {}) {
   try { base = require('../scrapers/aap_longdwell').DEFAULT_SEARCH_REQUEST || {}; } catch (_) { base = {}; }
   // Clone so we never mutate the shared default.
   const body = JSON.parse(JSON.stringify(base));
-  body.category = null;                 // all categories (PM + planned + unplanned)
+  body.category = opts.category || 'UNPLANNED'; // REQUIRED non-null; one per call
   body.statuses = HISTORY_STATUSES;     // include completed/cancelled history
   body.subStatuses = [];
   body.urgencyFilter = 'ALL';
@@ -85,26 +91,39 @@ async function syncUnit(equipmentId, opts = {}) {
   if (opts.incremental && cp && cp.last_modified_seen) sinceMs = cp.last_modified_seen;
 
   // 1) Bulk WO list for this unit over the window (deterministic, no AI).
-  // Hard-timeout the API call so a stalled session (VPN/token) can never hang
-  // the whole operation — the UI must always get a result back.
+  // The API requires a non-null `category`, so we query each HISTORY_CATEGORY
+  // (UNPLANNED + PLANNED) and merge. Each call is hard-timeout'd so a stalled
+  // session (VPN/token) can never hang the whole operation.
   logger.info('[' + eq + '] sync ' + (opts.incremental ? 'incr' : 'full') + ' start (since=' + (sinceMs || 'default') + ')');
-  let aggregates = [];
-  try {
-    const search = api.searchAllPages(_historyBody({ sinceMs, equipmentIds: [eq] }), { maxPages: opts.maxPages || 20 });
-    const timeoutMs = opts.timeoutMs || 90000;
-    aggregates = await Promise.race([
-      search,
-      new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error('AAP search timed out after ' + Math.round(timeoutMs/1000) + 's (session/VPN?)'), { code: 'AAP_TIMEOUT' })), timeoutMs)),
-    ]);
-    result.coverage.relay = 'ok';
-  } catch (e) {
-    result.coverage.relay = 'failed';
-    result.errors.push('relay search failed: ' + e.message);
-    logger.warn('[' + eq + '] relay search failed: ' + e.message);
-    return result; // can't proceed without the list; prior history preserved
+  const timeoutMs = opts.timeoutMs || 90000;
+  const byId = new Map();
+  let anyOk = false;
+  for (const category of HISTORY_CATEGORIES) {
+    try {
+      const search = api.searchAllPages(_historyBody({ sinceMs, equipmentIds: [eq], category }), { maxPages: opts.maxPages || 20 });
+      const list = await Promise.race([
+        search,
+        new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error('AAP search timed out after ' + Math.round(timeoutMs / 1000) + 's (session/VPN?)'), { code: 'AAP_TIMEOUT' })), timeoutMs)),
+      ]);
+      anyOk = true;
+      for (const wo of (list || [])) {
+        const sid = String((wo && (wo.workRequestId || wo.id)) || '').trim();
+        if (sid && !byId.has(sid)) byId.set(sid, wo);
+      }
+      logger.info('[' + eq + '] category ' + category + ': ' + (list ? list.length : 0) + ' work orders');
+    } catch (e) {
+      result.errors.push(category + ' search failed: ' + e.message);
+      logger.warn('[' + eq + '] ' + category + ' search failed: ' + e.message);
+    }
   }
+  if (!anyOk) {
+    result.coverage.relay = 'failed';
+    return result; // every category call failed; prior history preserved
+  }
+  result.coverage.relay = 'ok';
+  const aggregates = Array.from(byId.values());
   result.retrieved = aggregates.length;
-  logger.info('[' + eq + '] retrieved ' + aggregates.length + ' work orders');
+  logger.info('[' + eq + '] retrieved ' + aggregates.length + ' work orders (merged across categories)');
 
   // 2) Asset master fields (VIN/make/model/year/odometer) — one call, reused.
   let asset = {};
