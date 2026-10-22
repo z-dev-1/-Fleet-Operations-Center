@@ -9648,3 +9648,52 @@ body {
 .ldc-table th.ldc-frozen-last {
   border-right: 2px solid var(--acc, #4ea1ff);
 }
+
+/* ── Baseball Card overlay ────────────────────────────────────────────────── */
+.bbcard-overlay {
+  position: fixed; inset: 0; z-index: 10000;
+  background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center;
+}
+.bbcard-panel {
+  width: min(680px, 92vw); max-height: 88vh; display: flex; flex-direction: column;
+  background: var(--bg2, #11161d); border: 1px solid var(--line, #2a3344); border-radius: 10px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.5); overflow: hidden;
+}
+.bbcard-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line, #2a3344); }
+.bbcard-title { font-size: 15px; font-weight: 700; color: var(--txt, #e6edf3); }
+.bbcard-close { background: none; border: none; color: var(--txt2, #8b949e); font-size: 16px; cursor: pointer; }
+.bbcard-close:hover { color: var(--txt, #e6edf3); }
+.bbcard-hint { padding: 10px 16px; font-size: 11px; color: var(--txt2, #8b949e); border-bottom: 1px solid var(--line, #2a3344); }
+.bbcard-body { padding: 12px 16px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+.bbc-section { margin-bottom: 14px; }
+.bbc-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--acc, #4ea1ff); margin-bottom: 6px; }
+.bbc-field { display: block; margin-bottom: 8px; }
+.bbc-label { display: block; font-size: 11px; color: var(--txt2, #8b949e); margin-bottom: 2px; }
+.bbc-ai-tag { display: inline-block; margin-left: 6px; font-size: 9px; font-weight: 700; color: #0d1117; background: var(--acc, #4ea1ff); border-radius: 3px; padding: 1px 4px; vertical-align: middle; }
+.bbc-input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 5px 8px; background: var(--bg1, #0d1117); border: 1px solid var(--line, #2a3344); border-radius: 5px; color: var(--txt, #e6edf3); }
+.bbc-input:focus { outline: none; border-color: var(--acc, #4ea1ff); }
+.bbc-textarea { resize: vertical; min-height: 40px; }
+.bbc-field-row { display: flex; align-items: flex-start; gap: 6px; }
+.bbc-field-row .bbc-input { flex: 1 1 auto; }
+.bbc-ai-btn { flex: 0 0 auto; cursor: pointer; border: 1px solid var(--line, #2a3344); background: var(--bg2, #11161d); color: var(--acc, #4ea1ff); border-radius: 5px; font-size: 13px; line-height: 1; padding: 5px 7px; }
+.bbc-ai-btn:hover:not(:disabled) { background: var(--acc, #4ea1ff); color: #0d1117; }
+.bbc-ai-btn:disabled { opacity: 0.6; cursor: progress; }
+.bbc-hint-src { font-size: 9px; color: var(--txt2, #8b949e); margin-left: 6px; font-style: italic; }
+.bbc-interview { margin-top: 6px; padding: 8px; border: 1px dashed var(--acc, #4ea1ff); border-radius: 6px; background: rgba(78,161,255,0.06); }
+.bbc-iv-q { font-size: 11px; color: var(--acc, #4ea1ff); margin-bottom: 6px; line-height: 1.5; }
+.bbc-iv-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.bbc-iv-hint { font-size: 10px; color: var(--txt2, #8b949e); font-style: italic; }
+.bbc-preview-pane { border-top: 2px solid var(--acc, #4ea1ff); padding: 12px 16px; max-height: 40vh; overflow-y: auto; background: var(--bg1, #0d1117); }
+.bbc-preview-title { font-size: 12px; font-weight: 700; color: var(--acc, #4ea1ff); margin-bottom: 4px; }
+.bbc-prev-summary { font-size: 11px; color: var(--txt2, #8b949e); margin-bottom: 8px; }
+.bbc-prev-sec { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--acc, #4ea1ff); margin: 10px 0 4px; }
+.bbc-prev-row { display: flex; gap: 10px; padding: 3px 0; border-bottom: 1px solid rgba(48,54,61,.4); font-size: 11px; }
+.bbc-prev-label { flex: 0 0 38%; color: var(--txt2, #8b949e); }
+.bbc-prev-val { flex: 1 1 auto; color: var(--txt, #e6edf3); white-space: pre-wrap; }
+.bbc-prev-empty { color: #6e7681; font-style: italic; }
+.bbcard-actions { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line, #2a3344); flex-wrap: wrap; }
+.bbc-status { font-size: 11px; margin-left: auto; }
+.bbc-status.ok { color: var(--ok, #3fb950); }
+.bbc-status.err { color: #f85149; }
+.bbc-status.warn { color: #d29922; }

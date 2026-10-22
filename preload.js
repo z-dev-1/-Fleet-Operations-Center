@@ -194,6 +194,18 @@ expose('longDwellCsv', {
   },
 });
 
+// ── Baseball Card (AFP FAS performance profile + docx export) ───────────────
+expose('baseballCard', {
+  get:           ()      => ipcRenderer.invoke('baseball-card:get'),
+  save:          (card)  => ipcRenderer.invoke('baseball-card:save', card),
+  autofill:      (opts)  => ipcRenderer.invoke('baseball-card:autofill', opts),
+  aiField:       (opts)  => ipcRenderer.invoke('baseball-card:ai-field', opts),
+  signinAtoZ:    ()      => ipcRenderer.invoke('baseball-card:signin-atoz'),
+  fetchPhonetool:(opts)  => ipcRenderer.invoke('baseball-card:fetch-phonetool', opts),
+  preview:       (card)  => ipcRenderer.invoke('baseball-card:preview', card),
+  export:        (opts)  => ipcRenderer.invoke('baseball-card:export', opts),
+});
+
 // ── AAP direct JSON API (Relay Garage / work orders over Midway) ────────────
 expose('aapApi', {
   selftest:     ()     => ipcRenderer.invoke('aap-api:selftest'),

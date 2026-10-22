@@ -632,10 +632,22 @@ export function init(container) {
         </div>
       </div>
 
+      <div class="tbp-section">
+        <div class="tbp-title">🪪 Baseball Card</div>
+        <div class="tbp-hint">Your AFP FAS performance card. AI fills what the app knows (name, sites, SCACs, fleet size, vendor); you fill the rest. Export the filled .docx anytime.</div>
+        <button id="up-bbcard" class="tbp-btn tbp-btn--ghost" type="button">Open Baseball Card</button>
+      </div>
+
       <button id="up-save" class="tbp-btn tbp-btn--save">Save</button>
       <div id="up-status" class="tbp-status" style="display:none"></div>
     `;
     document.body.appendChild(pop);
+
+    // ── Baseball Card panel ───────────────────────────────────────────────
+    pop.querySelector('#up-bbcard').addEventListener('click', () => {
+      const prof = JSON.parse(localStorage.getItem('fleet_user_profile') || '{}');
+      _openBaseballCard(prof.name || '');
+    });
 
     // ── Domicile chip editor ──────────────────────────────────────────────
     let _domiciles = [];
@@ -732,4 +744,305 @@ export function init(container) {
     }, 50);
   });
 
+}
+
+// ── Baseball Card modal ────────────────────────────────────────────────────────
+// Full overlay to view/edit/export the AFP FAS performance card. EVERY field
+// has its own ✨ button:
+//   data  = AI fills from app data / Phonetool (never invented)
+//   prose = AI rewrites the user's rough note into the required format
+//   user  = plain entry (✨ still offers a polish)
+// Reporting-chain order: Skip-Level (top) → Manager → You.
+const BBCARD_SECTIONS = [
+  { title: 'Identity', fields: [
+    { key: 'name', label: 'Name', ai: 'data' },
+    { key: 'alias', label: 'Alias (alias@)', ai: 'data', hint: 'from Phonetool' },
+    { key: 'managerId', label: 'Manager', ai: 'data', hint: 'from Phonetool' },
+    { key: 'hireDate', label: 'Amazon Hire Date (MM/YYYY)', ai: 'data', hint: 'from Phonetool' },
+    { key: 'geoFlex', label: 'Geographic Flexibility (Yes/No — preferred locations)', ai: 'prose' },
+    { key: 'mentors', label: 'Mentors (name(s) + relationship)', ai: 'prose' },
+  ]},
+  { title: 'Portfolio Overview', fields: [
+    { key: 'regionZone', label: 'Region / Zone (domicile city + state)', ai: 'data' },
+    { key: 'sites', label: 'Assigned Sites', ai: 'data' },
+    { key: 'fleetSize', label: 'Fleet Size', ai: 'data' },
+    { key: 'operators', label: 'Operators / SCACs', ai: 'data' },
+    { key: 'primaryVendor', label: 'Primary Vendor (COX / TA / Amerit)', ai: 'data' },
+  ]},
+  { title: 'Reporting Chain (Skip → Manager → You)', fields: [
+    { key: 'skipLevelId', label: 'Skip-Level (top)', ai: 'data', hint: 'from Phonetool' },
+    { key: 'managerId2', label: 'Manager', ai: 'data', hint: 'from Phonetool' },
+  ]},
+  { title: 'Summary', fields: [
+    { key: 'summaryName', label: 'Summary — Name', ai: 'data' },
+    { key: 'summaryYears', label: 'Summary — Years at Amazon', ai: 'data', hint: 'from Phonetool' },
+    { key: 'summaryMonths', label: 'Summary — Months', ai: 'data', hint: 'from Phonetool tenure' },
+    { key: 'summaryContext', label: 'Summary — current role context', ai: 'prose', area: true },
+  ]},
+  { title: 'Super Powers — Top 3 Leadership Principles', fields: [
+    { key: 'lp1Name', label: 'LP 1 (auto-picked)', ai: 'user' },
+    { key: 'lp1Desc', label: 'LP 1 — rough note → ✨ picks the LP + writes it', ai: 'lp', area: true },
+    { key: 'lp2Name', label: 'LP 2 (auto-picked)', ai: 'user' },
+    { key: 'lp2Desc', label: 'LP 2 — rough note → ✨ (different LP)', ai: 'lp', area: true },
+    { key: 'lp3Name', label: 'LP 3 (auto-picked)', ai: 'user' },
+    { key: 'lp3Desc', label: 'LP 3 — rough note → ✨ (different LP)', ai: 'lp', area: true },
+  ]},
+  { title: 'Growth Ideas — LP-backed', fields: [
+    { key: 'growth1Name', label: 'Growth LP 1 (auto-picked)', ai: 'user' },
+    { key: 'growth1Desc', label: 'Growth 1 — rough note → ✨ picks the LP + writes it', ai: 'lp', area: true },
+    { key: 'growth2Name', label: 'Growth LP 2 (auto-picked)', ai: 'user' },
+    { key: 'growth2Desc', label: 'Growth 2 — rough note → ✨ (different LP)', ai: 'lp', area: true },
+    { key: 'growth3Name', label: 'Growth LP 3 (optional)', ai: 'user' },
+    { key: 'growth3Desc', label: 'Growth 3 — rough note → ✨ (optional)', ai: 'lp', area: true },
+  ]},
+  { title: 'Biggest Accomplishments (STAR)', fields: [
+    { key: 'accomp1', label: 'Accomplishment 1', ai: 'prose', area: true },
+    { key: 'accomp2', label: 'Accomplishment 2', ai: 'prose', area: true },
+    { key: 'accomp3', label: 'Accomplishment 3', ai: 'prose', area: true },
+    { key: 'accomp4', label: 'Accomplishment 4', ai: 'prose', area: true },
+  ]},
+  { title: 'Accomplishments Outside Core Role', fields: [
+    { key: 'outside1', label: 'Contribution 1', ai: 'prose' },
+    { key: 'outside2', label: 'Contribution 2', ai: 'prose' },
+    { key: 'outside3', label: 'Contribution 3', ai: 'prose' },
+  ]},
+  { title: 'Current Initiatives / Actions', fields: [
+    { key: 'init1', label: 'Initiative 1', ai: 'prose' },
+    { key: 'init1Out', label: 'Initiative 1 — target outcome', ai: 'user' },
+    { key: 'init1Time', label: 'Initiative 1 — timeline', ai: 'user' },
+    { key: 'init2', label: 'Initiative 2', ai: 'prose' },
+    { key: 'init2Out', label: 'Initiative 2 — target outcome', ai: 'user' },
+    { key: 'init2Time', label: 'Initiative 2 — timeline', ai: 'user' },
+    { key: 'init3', label: 'Initiative 3', ai: 'prose' },
+    { key: 'init3Out', label: 'Initiative 3 — target outcome', ai: 'user' },
+    { key: 'init3Time', label: 'Initiative 3 — timeline', ai: 'user' },
+  ]},
+  { title: 'Tenure & Development', fields: [
+    { key: 'startDate', label: 'Start Date (MM/YYYY)', ai: 'data', hint: 'from Phonetool' },
+    { key: 'timeInRole', label: 'Time in Role (X years, X months)', ai: 'user' },
+    { key: 'previousRoles', label: 'Previous Roles (✨ dedupes + may ask about other roles)', ai: 'data', hint: 'from Phonetool' },
+    { key: 'developmentGoals', label: 'Development Goals', ai: 'prose', area: true },
+  ]},
+  { title: 'Personal / Fun Facts', fields: [
+    { key: 'funFacts', label: 'Hobbies / interests / fun fact', ai: 'prose', area: true },
+  ]},
+];
+
+function _openBaseballCard(profileName) {
+  if (document.getElementById('bbcard-overlay')) return;
+  const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const ov = document.createElement('div');
+  ov.id = 'bbcard-overlay';
+  ov.className = 'bbcard-overlay';
+
+  const sectionsHtml = BBCARD_SECTIONS.map((sec) => {
+    const rows = sec.fields.map((f) => {
+      const inputId = 'bbc-' + f.key;
+      const tagTitle = f.ai === 'data' ? 'AI fills this from app data / Phonetool (never invented)'
+        : f.ai === 'lp' ? 'Type a rough note, then ✨ — AI picks the best-fit Leadership Principle (distinct from your others) and writes the entry'
+        : f.ai === 'prose' ? 'Type a rough note, then ✨ — AI rewrites it professionally in the right format'
+        : 'Your entry — ✨ offers a professional polish';
+      const tagLabel = f.ai === 'data' ? 'AI' : (f.ai === 'prose' || f.ai === 'lp') ? '✨' : '✎';
+      const hint = f.hint ? '<span class="bbc-hint-src">' + esc(f.hint) + '</span>' : '';
+      const aiBtn = '<button class="bbc-ai-btn" type="button" data-aikey="' + f.key + '" data-aimode="' + (f.ai || 'user') + '" title="' + tagTitle + '">✨</button>';
+      const control = f.area
+        ? '<textarea id="' + inputId + '" class="bbc-input bbc-textarea" rows="2" data-key="' + f.key + '"></textarea>'
+        : '<input id="' + inputId + '" class="bbc-input" type="text" data-key="' + f.key + '" />';
+      return '<label class="bbc-field"><span class="bbc-label">' + esc(f.label) +
+        ' <span class="bbc-ai-tag" title="' + tagTitle + '">' + tagLabel + '</span>' + hint + '</span>' +
+        '<div class="bbc-field-row">' + control + aiBtn + '</div></label>';
+    }).join('');
+    return '<div class="bbc-section"><div class="bbc-section-title">' + esc(sec.title) + '</div>' + rows + '</div>';
+  }).join('');
+
+  ov.innerHTML =
+    '<div class="bbcard-panel">' +
+      '<div class="bbcard-head">' +
+        '<div class="bbcard-title">🪪 AFP FAS Baseball Card</div>' +
+        '<button id="bbc-close" class="bbcard-close" title="Close">✕</button>' +
+      '</div>' +
+      '<div class="bbcard-hint">Each field has its own <b>✨</b>. <b>AI</b> fields fill from the app/Phonetool (never invented). <b>✨</b> (prose) fields: type a rough note and ✨ rewrites it professionally in the right format (STAR, third-person LP, etc.). Use <b>Fetch Phonetool</b> for manager, skip-level, hire date, alias & previous roles, then <b>AI Fill All</b>, then Download the filled .docx.</div>' +
+      '<div class="bbcard-body">' + sectionsHtml + '</div>' +
+      '<div class="bbcard-actions">' +
+        '<button id="bbc-atoz" class="tbp-btn tbp-btn--ghost">🔐 Sign in to A to Z</button>' +
+        '<button id="bbc-phonetool" class="tbp-btn tbp-btn--ghost">🔎 Fetch Phonetool</button>' +
+        '<button id="bbc-ai" class="tbp-btn tbp-btn--ghost">✨ AI Fill All (data)</button>' +
+        '<button id="bbc-save" class="tbp-btn tbp-btn--save">Save</button>' +
+        '<button id="bbc-preview" class="tbp-btn tbp-btn--ghost">👁 Preview</button>' +
+        '<button id="bbc-export" class="tbp-btn tbp-btn--save">⬇ Download .docx</button>' +
+        '<span id="bbc-status" class="bbc-status"></span>' +
+      '</div>' +
+      '<div id="bbc-preview-pane" class="bbc-preview-pane" style="display:none"></div>' +
+    '</div>';
+  document.body.appendChild(ov);
+
+  const setVal = (key, v) => { const el = ov.querySelector('[data-key="' + key + '"]'); if (el) el.value = v == null ? '' : v; };
+  const getAll = () => {
+    const out = {};
+    ov.querySelectorAll('[data-key]').forEach((el) => { out[el.getAttribute('data-key')] = el.value; });
+    return out;
+  };
+  const status = (t, cls) => { const s = ov.querySelector('#bbc-status'); if (s) { s.textContent = t; s.className = 'bbc-status ' + (cls || ''); } };
+
+  // Interview UI: show the AI's clarifying questions under a field with an
+  // answer box plus an explicit "Submit answers" button (clearer than
+  // re-clicking ✨; Ctrl+Enter also submits).
+  function _showInterview(key, questions, btn) {
+    _clearInterview(key);
+    const field = btn && btn.closest ? btn.closest('.bbc-field') : null;
+    if (!field) return;
+    const box = document.createElement('div');
+    box.className = 'bbc-interview';
+    box.id = 'bbc-iv-' + key;
+    box.innerHTML = '<div class="bbc-iv-q">💬 ' + (questions || []).map(q => '• ' + esc(q)).join('<br>') + '</div>' +
+      '<textarea id="bbc-q-' + key + '" class="bbc-input bbc-textarea" rows="2" placeholder="Type your answer here…"></textarea>' +
+      '<div class="bbc-iv-actions">' +
+        '<button type="button" class="tbp-btn tbp-btn--save bbc-iv-submit" data-key="' + key + '">➤ Submit answer</button>' +
+        '<span class="bbc-iv-hint">or press Ctrl+Enter</span>' +
+      '</div>';
+    field.appendChild(box);
+    const ta = box.querySelector('#bbc-q-' + key);
+    if (ta) {
+      ta.focus();
+      ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); btn.click(); } });
+    }
+    const sub = box.querySelector('.bbc-iv-submit');
+    if (sub) sub.addEventListener('click', () => btn.click()); // re-run ✨ with the typed answer
+  }
+  function _clearInterview(key) { const b = ov.querySelector('#bbc-iv-' + key); if (b) b.remove(); }
+
+  // Load saved card into the fields.
+  (async () => {
+    try { const card = await window.baseballCard.get(); if (card) Object.keys(card).forEach((k) => setVal(k, card[k])); }
+    catch (_) {}
+  })();
+
+  ov.querySelector('#bbc-close').addEventListener('click', () => ov.remove());
+  ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+
+  // AI fill — fills ONLY known fields that are still blank; never overwrites.
+  ov.querySelector('#bbc-ai').addEventListener('click', async () => {
+    status('Filling…');
+    try {
+      // Save current edits first so autofill merges onto them.
+      await window.baseballCard.save(getAll());
+      const res = await window.baseballCard.autofill({ profileName: profileName || '' });
+      if (res && res.ok && res.card) {
+        Object.keys(res.card).forEach((k) => setVal(k, res.card[k]));
+        status('✅ Filled ' + ((res.filled && res.filled.length) || 0) + ' field(s) from app data', 'ok');
+      } else { status('Nothing to fill', 'warn'); }
+    } catch (e) { status('❌ ' + (e.message || 'AI fill failed'), 'err'); }
+  });
+
+  // Sign in to A to Z — opens the login window; persists the session so
+  // Fetch Phonetool works. A to Z is a separate login from Midway/AAP.
+  ov.querySelector('#bbc-atoz').addEventListener('click', async () => {
+    status('Opening A to Z sign-in…');
+    try {
+      const res = await window.baseballCard.signinAtoZ();
+      if (res && res.ok) status('✅ Signed in to A to Z — now click Fetch Phonetool', 'ok');
+      else status('⚠️ ' + ((res && res.detail) || 'Sign-in not completed'), 'warn');
+    } catch (e) { status('❌ ' + (e.message || 'Sign-in failed'), 'err'); }
+  });
+
+  // Shared Phonetool fetch (optionally auto-triggered after a sign-in).
+  async function _doFetchPhonetool() {
+    status('Fetching Phonetool…');
+    const res = await window.baseballCard.fetchPhonetool({ user: 'zilasant' });
+    if (res && res.ok) {
+      await window.baseballCard.save(getAll());
+      const af = await window.baseballCard.autofill({ profileName: profileName || '' });
+      if (af && af.card) Object.keys(af.card).forEach((k) => setVal(k, af.card[k]));
+      const got = Object.keys(res.data || {}).filter(k => res.data[k]);
+      status(got.length ? '✅ Phonetool: ' + got.join(', ') : '⚠️ Phonetool returned nothing readable — fill manually', got.length ? 'ok' : 'warn');
+      return true;
+    }
+    // Not signed in to A to Z → offer to sign in, then retry once.
+    if (res && res.error === 'atoz-login') {
+      status('🔐 A to Z sign-in required — opening login…', 'warn');
+      const si = await window.baseballCard.signinAtoZ();
+      if (si && si.ok) { return _doFetchPhonetool(); }
+      status('⚠️ Sign in to A to Z, then click Fetch Phonetool again', 'warn');
+      return false;
+    }
+    status('❌ ' + ((res && res.detail) || (res && res.error) || 'Phonetool fetch failed'), 'err');
+    return false;
+  }
+
+  ov.querySelector('#bbc-phonetool').addEventListener('click', async () => {
+    try { await _doFetchPhonetool(); } catch (e) { status('❌ ' + (e.message || 'Phonetool failed'), 'err'); }
+  });
+
+  // Per-field ✨: data fields pull from app data; prose fields rewrite the note.
+  ov.querySelectorAll('.bbc-ai-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const key = btn.getAttribute('data-aikey');
+      const el = ov.querySelector('[data-key="' + key + '"]');
+      const note = el ? el.value : '';
+      const orig = btn.textContent;
+      btn.disabled = true; btn.textContent = '…';
+      status('🤖 AI thinking… (can take up to a minute)', 'warn');
+      try {
+        // Include any answers the user typed into this field's interview box.
+        const qbox = ov.querySelector('#bbc-q-' + key);
+        const answers = qbox ? qbox.value.trim() : '';
+        const res = await window.baseballCard.aiField({ key, note, answers, profileName: profileName || '', card: getAll() });
+        if (res && res.ok && res.needsAnswers) {
+          // Interviewer asked clarifying questions — show them inline for answers.
+          _showInterview(key, res.questions || [], btn);
+          status('💬 The AI needs a bit more — answer below, then ✨ again', 'warn');
+        } else if (res && res.ok && res.value != null) {
+          setVal(key, res.value);
+          _clearInterview(key);
+          if (res.lpNameKey && res.lpName) { setVal(res.lpNameKey, res.lpName); status('✅ ' + res.lpName + ' — written', 'ok'); }
+          else status('✅ Filled ' + key, 'ok');
+        } else {
+          status('⚠️ ' + ((res && res.error) || 'nothing to fill for ' + key), 'warn');
+        }
+      } catch (e) { status('❌ ' + (e.message || 'AI failed'), 'err'); }
+      finally { btn.disabled = false; btn.textContent = orig; }
+    });
+  });
+
+  ov.querySelector('#bbc-save').addEventListener('click', async () => {
+    try { await window.baseballCard.save(getAll()); status('✅ Saved', 'ok'); }
+    catch (e) { status('❌ ' + (e.message || 'Save failed'), 'err'); }
+  });
+
+  // Preview — show exactly what will export (filled values + which fields stay
+  // as [placeholder]) before writing the .docx.
+  ov.querySelector('#bbc-preview').addEventListener('click', async () => {
+    status('Building preview…');
+    const pane = ov.querySelector('#bbc-preview-pane');
+    try {
+      const res = await window.baseballCard.preview(getAll());
+      if (!res || !res.ok) { status('❌ Preview failed', 'err'); return; }
+      const secMap = {};
+      BBCARD_SECTIONS.forEach(s => s.fields.forEach(f => { secMap[f.key] = s.title; }));
+      let html = '<div class="bbc-preview-title">👁 Export Preview — this is what the .docx will contain</div>';
+      let curSec = '';
+      res.items.forEach(it => {
+        const sec = secMap[it.key] || 'Other';
+        if (sec !== curSec) { html += '<div class="bbc-prev-sec">' + esc(sec) + '</div>'; curSec = sec; }
+        const val = it.filled ? esc(it.value) : '<span class="bbc-prev-empty">[will stay blank / placeholder]</span>';
+        html += '<div class="bbc-prev-row"><span class="bbc-prev-label">' + esc(it.label) + '</span><span class="bbc-prev-val">' + val + '</span></div>';
+      });
+      const filledN = res.items.filter(i => i.filled).length;
+      html = '<div class="bbc-prev-summary">' + filledN + ' of ' + res.items.length + ' fields filled</div>' + html;
+      pane.innerHTML = html;
+      pane.style.display = '';
+      pane.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      status('✅ Preview ready — review below, then Download', 'ok');
+    } catch (e) { status('❌ ' + (e.message || 'Preview failed'), 'err'); }
+  });
+
+  ov.querySelector('#bbc-export').addEventListener('click', async () => {
+    status('Exporting…');
+    try {
+      await window.baseballCard.save(getAll());
+      const res = await window.baseballCard.export({});
+      if (res && res.ok) status('✅ Downloaded: ' + res.path, 'ok');
+      else status('❌ ' + ((res && res.error) || 'Export failed'), 'err');
+    } catch (e) { status('❌ ' + (e.message || 'Export failed'), 'err'); }
+  });
 }

@@ -30,6 +30,7 @@ const { registerSetupIPC }       = require('./setup');
 const { registerDailyTasksIPC }  = require('./daily-tasks');
 const { registerLongDwellIPC }     = require('./long-dwell');
 const { registerLongDwellCsvIPC }  = require('./long-dwell-csv');
+const { registerBaseballCardIPC }  = require('./baseball-card');
 const { registerFasRosterIPC }     = require('./fas-roster');
 const { registerSchedulerIPC }     = require('./scheduler');
 const { registerEmailTriageIPC }   = require('./email-triage');
@@ -57,6 +58,7 @@ function registerAllIPC(ctx) {
   try { require('../scrapers/vendor_session').startWarmScheduler(); } catch (e) { logger.warn('vendor warm scheduler start failed: ' + e.message); }
   registerLongDwellIPC();
   registerLongDwellCsvIPC();
+  registerBaseballCardIPC();
   registerFasRosterIPC();
   const { registerAapApiIPC } = require('./aap-api');
   registerAapApiIPC(ctx);
