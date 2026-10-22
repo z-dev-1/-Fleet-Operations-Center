@@ -62,7 +62,12 @@ function _historyBody(opts = {}) {
   body.urgencyFilter = 'ALL';
   body.modifiedFromEpochMs = modifiedFrom;
   body.modifiedToEpochMs = opts.toMs != null ? opts.toMs : now;
-  body.sortConfig = { sortColumn: 'ModifiedDate', sortDirection: 'descending' };
+  // Keep the proven sortConfig from DEFAULT_SEARCH_REQUEST (ScheduledDate) — the
+  // API's ServiceAggregateColumn enum rejected 'ModifiedDate'. Only fall back to
+  // a safe default if the base body had none.
+  if (!body.sortConfig || !body.sortConfig.sortColumn) {
+    body.sortConfig = { sortColumn: 'ScheduledDate', sortDirection: 'descending' };
+  }
   body.page = 1;
   // Scope to one unit. equipmentIds on the body narrows the (fleetId-scoped)
   // search to this unit only.

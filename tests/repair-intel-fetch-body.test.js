@@ -25,5 +25,8 @@ describe('repair-intel fetch _historyBody', () => {
     expect(body.equipmentIds).toEqual(['U1']);
     // rolling window present
     expect(typeof body.modifiedFromEpochMs).toBe('number');
+    // sortColumn must be a valid enum — never the rejected 'ModifiedDate'.
+    expect(body.sortConfig.sortColumn).not.toBe('ModifiedDate');
+    expect(body.sortConfig.sortColumn).toBeTruthy();
   });
 });
