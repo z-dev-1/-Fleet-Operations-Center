@@ -9853,3 +9853,12 @@ body {
 .tr-why--delay { background: rgba(210,153,34,.16); color: #d29922; }
 .tr-why--scope { background: rgba(163,113,247,.16); color: #a371f7; }
 .tr-why--root { background: rgba(63,185,80,.14); color: #56d364; }
+
+/* ── Trends drill: cross-unit rollups + per-unit root-cause glance ────────── */
+.tr-rollups { padding: 10px 14px; border-bottom: 1px solid rgba(48,54,61,.5); display: flex; flex-direction: column; gap: 6px; }
+.tr-roll { display: flex; flex-wrap: wrap; gap: 5px; align-items: baseline; }
+.tr-roll-t { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--mut); font-weight: 700; margin-right: 4px; min-width: 70px; }
+.tr-ev-cat { font-size: 10.5px; color: var(--txt); font-weight: 600; }
+.tr-unit-filter { background: transparent; border: 1px solid rgba(88,166,255,.3); color: var(--acc2,#79c0ff); font-size: 9.5px; border-radius: 6px; padding: 1px 7px; cursor: pointer; white-space: nowrap; }
+.tr-unit-filter:hover { background: rgba(88,166,255,.15); }
+.tr-unit-rc { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; }

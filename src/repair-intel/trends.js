@@ -30,7 +30,8 @@ function _where(opts = {}) {
   if (opts.toMs != null) { clauses.push('(reported_at IS NULL OR reported_at <= @to)'); params.to = opts.toMs; }
   if (!opts.includeExcluded) clauses.push('excluded_vendor = 0');
   const eqCols = { domicile: 'domicile', operator: 'operator', vendor: 'vendor', make: 'make',
-    model: 'model', status: 'status', woType: 'wo_type', category: 'repair_category' };
+    model: 'model', status: 'status', woType: 'wo_type', category: 'repair_category',
+    equipmentId: 'equipment_id', component: 'repair_component' };
   for (const [key, col] of Object.entries(eqCols)) {
     if (opts[key]) { clauses.push(col + ' = @' + key); params[key] = String(opts[key]); }
   }
@@ -160,7 +161,8 @@ function drillEvents(dimension, value, opts = {}) {
   const params = { val: String(value), since };
   // optional combined filters (same whitelist as _where)
   const eqCols = { domicile: 'domicile', operator: 'operator', vendor: 'vendor', make: 'make',
-    model: 'model', category: 'repair_category', woType: 'wo_type' };
+    model: 'model', category: 'repair_category', woType: 'wo_type', equipmentId: 'equipment_id',
+    component: 'repair_component' };
   for (const [key, c] of Object.entries(eqCols)) {
     if (opts[key] && c !== col) { extra.push(c + ' = @f_' + key); params['f_' + key] = String(opts[key]); }
   }
@@ -211,9 +213,48 @@ function drillEvents(dimension, value, opts = {}) {
   const byUnit = {};
   for (const e of events) { (byUnit[e.equipmentId] || (byUnit[e.equipmentId] = [])).push(e); }
   const units = Object.entries(byUnit)
-    .map(([equipmentId, evs]) => ({ equipmentId, count: evs.length, events: evs }))
+    .map(([equipmentId, evs]) => ({
+      equipmentId,
+      count: evs.length,
+      // per-unit distinct root causes + statuses so each unit row is a glance.
+      rootCauses: _distinctVals(evs.map(e => e.rootCause)),
+      statuses: _tallyVals(evs.map(e => e.status)),
+      vendors: _distinctVals(evs.map(e => e.vendor)),
+      lastReportedAt: Math.max.apply(null, evs.map(e => e.reportedAt || 0)),
+      events: evs,
+    }))
     .sort((a, b) => b.count - a.count || a.equipmentId.localeCompare(b.equipmentId));
-  return { ok: true, dimension, value: String(value), totalEvents: events.length, unitCount: units.length, units };
+
+  // Cross-unit rollups for the clicked trend (the "everything" summary).
+  const rootCauseRollup = _tallyVals(events.map(e => e.rootCause).filter(Boolean));
+  const whyRollup = _tallyVals([].concat(
+    events.filter(e => e.delayReason).map(e => 'delay: ' + e.delayReason),
+    events.filter(e => e.cancellationReason).map(e => 'cancelled: ' + e.cancellationReason),
+    events.filter(e => e.outOfScopeReason).map(e => 'out-of-scope: ' + e.outOfScopeReason)
+  ));
+  const statusRollup = _tallyVals(events.map(e => e.status));
+  const docCoverage = events.length ? Math.round((events.filter(e => e.rootCause).length / events.length) * 100) : 0;
+
+  return {
+    ok: true, dimension, value: String(value),
+    totalEvents: events.length, unitCount: units.length,
+    rootCauseRollup, whyRollup, statusRollup,
+    rootCauseCoverage: docCoverage, // % of events with a documented/AI root cause
+    units,
+  };
+}
+
+// Distinct non-empty values, order-preserving.
+function _distinctVals(arr) {
+  const seen = new Set(); const out = [];
+  for (const v of arr) { if (v && !seen.has(v)) { seen.add(v); out.push(v); } }
+  return out;
+}
+// Count occurrences -> [{key,count}] sorted desc.
+function _tallyVals(arr) {
+  const m = {};
+  for (const v of arr) { if (v) m[v] = (m[v] || 0) + 1; }
+  return Object.entries(m).map(([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count);
 }
 
 // Distinct values for a whitelisted filter column (to populate dropdowns).
@@ -229,6 +270,8 @@ function filterOptions() {
     vendors:   distinct('vendor'),
     makes:     distinct('make'),
     categories:distinct('repair_category'),
+    components:distinct('repair_component'),
+    units:     distinct('equipment_id'),
   };
 }
 

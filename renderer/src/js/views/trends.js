@@ -28,11 +28,13 @@ function _shellHtml() {
       '<div class="tr-head-actions"><button id="tr-refresh" class="detail-panel__btn">\u21BB Refresh</button></div>' +
     '</div>' +
     '<div class="tr-filters" id="tr-filters">' +
+      _sel('tr-f-unit', 'All Units') +
       _sel('tr-f-domicile', 'All Domiciles') +
       _sel('tr-f-operator', 'All Operators') +
       _sel('tr-f-vendor', 'All Vendors') +
       _sel('tr-f-make', 'All Makes') +
       _sel('tr-f-category', 'All Categories') +
+      _sel('tr-f-component', 'All Components') +
       '<select id="tr-f-wotype" class="tb-select"><option value="">All Types</option><option value="PM">PM</option><option value="unplanned">Unplanned</option><option value="planned">Planned</option><option value="dealer">Dealer</option><option value="roadside">Roadside</option><option value="offsite">Offsite</option></select>' +
       '<button id="tr-clear" class="detail-panel__btn detail-panel__btn--ghost">Clear</button>' +
     '</div>' +
@@ -135,6 +137,23 @@ function _renderDrill(res, dim, val) {
     _wireDrillClose(host);
     return;
   }
+  // ── cross-unit rollups (the "everything at a glance" for this trend) ──────
+  function chips(title, rows, cls) {
+    if (!rows || !rows.length) return '';
+    var items = rows.slice(0, 10).map(function(r){
+      return '<span class="tr-why ' + (cls||'') + '">' + esc(r.key) + ' \u00d7' + r.count + '</span>';
+    }).join('');
+    return '<div class="tr-roll"><span class="tr-roll-t">' + esc(title) + '</span>' + items + '</div>';
+  }
+  var rc = res.rootCauseRollup || [];
+  var rollups = '<div class="tr-rollups">' +
+    (rc.length
+      ? chips('Root causes', rc, 'tr-why--root')
+      : '<div class="tr-roll"><span class="tr-roll-t">Root causes</span><span class="dp-ri-sub-note">not documented yet for ' + (100 - (res.rootCauseCoverage||0)) + '% of events \u2014 run AI analysis on these units to populate</span></div>') +
+    chips('Why (delay / cancel / scope)', res.whyRollup, 'tr-why--delay') +
+    chips('Status', res.statusRollup) +
+  '</div>';
+
   var unitsHtml = (res.units || []).map(function(u){
     var evs = u.events.map(function(e){
       var why = [];
@@ -142,34 +161,54 @@ function _renderDrill(res, dim, val) {
       if (e.delayReason) why.push('<span class="tr-why tr-why--delay">Delay: ' + esc(e.delayReason) + '</span>');
       if (e.outOfScopeReason) why.push('<span class="tr-why tr-why--scope">Out of scope: ' + esc(e.outOfScopeReason) + '</span>');
       if (e.rootCause) why.push('<span class="tr-why tr-why--root">Root cause: ' + esc(e.rootCause) + '</span>');
+      if (e.correctiveActions) why.push('<span class="tr-why">Action: ' + esc(e.correctiveActions) + '</span>');
       if (e.outcome) why.push('<span class="tr-why">Outcome: ' + esc(e.outcome) + '</span>');
+      if (e.estimateCost != null) why.push('<span class="tr-why">Est $' + e.estimateCost + '</span>');
       var open = e.url
         ? '<button class="tr-ev-open" data-url="' + esc(e.url) + '" title="Open work order in AAP">open WO \u2197</button>'
         : '';
       return '<div class="tr-ev">' +
         '<div class="tr-ev-head"><span class="tr-ev-date">' + esc(fmtDate(e.reportedAt)) + '</span>' +
           '<span class="tr-ev-status tr-ev-status--' + esc(e.status||'') + '">' + esc(e.status||'') + '</span>' +
+          '<span class="tr-ev-cat">' + esc(e.category || '') + (e.component ? ' / ' + esc(e.component) : '') + '</span>' +
           '<span class="tr-ev-vend">' + esc(e.vendor || 'vendor n/a') + '</span>' +
           (e.partsOnOrder ? '<span class="tr-ev-parts">\uD83D\uDCE6 parts</span>' : '') + open + '</div>' +
-        (e.complaint ? '<div class="tr-ev-complaint">' + esc(String(e.complaint).slice(0, 400)) + '</div>' : '<div class="tr-ev-complaint tr-ev-none">No complaint text recorded.</div>') +
+        (e.complaint ? '<div class="tr-ev-complaint">' + esc(String(e.complaint).slice(0, 600)) + '</div>' : '<div class="tr-ev-complaint tr-ev-none">No complaint text recorded.</div>') +
         (why.length ? '<div class="tr-ev-why">' + why.join('') + '</div>' : '') +
       '</div>';
     }).join('');
+    // per-unit root-cause glance (distinct) + a "scope whole view to this unit"
+    var rcChips = (u.rootCauses || []).slice(0, 4).map(function(c){ return '<span class="tr-why tr-why--root">' + esc(c) + '</span>'; }).join('');
     return '<div class="tr-unit">' +
-      '<div class="tr-unit-head"><button class="tr-unit-open" data-unit="' + esc(u.equipmentId) + '">' + esc(u.equipmentId) + '</button>' +
-        '<span class="tr-unit-count">' + u.count + ' event' + (u.count === 1 ? '' : 's') + '</span></div>' +
+      '<div class="tr-unit-head">' +
+        '<button class="tr-unit-open" data-unit="' + esc(u.equipmentId) + '" title="Open this unit\u2019s detail panel">' + esc(u.equipmentId) + '</button>' +
+        '<span class="tr-unit-count">' + u.count + ' event' + (u.count === 1 ? '' : 's') + '</span>' +
+        '<button class="tr-unit-filter" data-unit="' + esc(u.equipmentId) + '" title="Filter the whole Trends view to this unit">filter view \u2192</button>' +
+        (rcChips ? '<span class="tr-unit-rc">' + rcChips + '</span>' : '') +
+      '</div>' +
       evs +
     '</div>';
   }).join('');
+
   host.innerHTML =
     '<div class="tr-drill-head"><span><b>' + esc(val) + '</b> \u2014 ' + res.unitCount + ' unit' + (res.unitCount === 1 ? '' : 's') + ', ' + res.totalEvents + ' event' + (res.totalEvents === 1 ? '' : 's') +
-      ' <span class="dp-ri-sub-note">(' + esc(dim) + ' trend \u00b7 click a unit to open it, or open its work order)</span></span>' +
+      ' <span class="dp-ri-sub-note">(' + esc(dim) + ' trend \u00b7 click a unit to open it, "filter view" to scope everything to it, or open its work order)</span></span>' +
       '<button class="tr-drill-close">\u2715</button></div>' +
+    rollups +
     (unitsHtml || '<div class="dp-empty">No events.</div>');
   _wireDrillClose(host);
   // unit -> open the unit detail panel (same bus event the fleet table uses)
   host.querySelectorAll('.tr-unit-open').forEach(function(btn){
     btn.addEventListener('click', function(){ _openUnit(btn.dataset.unit); });
+  });
+  // "filter view" -> set the unit filter dropdown and reload the whole view
+  host.querySelectorAll('.tr-unit-filter').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var sel = _el.querySelector('#tr-f-unit');
+      if (sel) { sel.value = btn.dataset.unit; }
+      host.style.display = 'none'; host.innerHTML = '';
+      _load();
+    });
   });
   // work order -> open in AAP
   host.querySelectorAll('.tr-ev-open').forEach(function(btn){
@@ -291,8 +330,9 @@ function _renderNetwork(data) {
 function _collectFilters() {
   function v(id) { var e = _el.querySelector('#' + id); return e ? e.value : ''; }
   _filters = {
+    equipmentId: v('tr-f-unit'),
     domicile: v('tr-f-domicile'), operator: v('tr-f-operator'), vendor: v('tr-f-vendor'),
-    make: v('tr-f-make'), category: v('tr-f-category'), woType: v('tr-f-wotype'),
+    make: v('tr-f-make'), category: v('tr-f-category'), component: v('tr-f-component'), woType: v('tr-f-wotype'),
   };
   Object.keys(_filters).forEach(function(k){ if (!_filters[k]) delete _filters[k]; });
   return _filters;
@@ -335,11 +375,13 @@ function _populateFilters() {
       list.forEach(function(v){ var opt = document.createElement('option'); opt.value = v; opt.textContent = v; sel.appendChild(opt); });
       sel.value = cur;
     }
+    fill('tr-f-unit', o.units);
     fill('tr-f-domicile', o.domiciles);
     fill('tr-f-operator', o.operators);
     fill('tr-f-vendor', o.vendors);
     fill('tr-f-make', o.makes);
     fill('tr-f-category', o.categories);
+    fill('tr-f-component', o.components);
   }).catch(function(){});
 }
 
@@ -353,7 +395,7 @@ export function init(container) {
 
   _el.querySelector('#tr-refresh').addEventListener('click', function(){ _populateFilters(); _load(); });
   _el.querySelector('#tr-clear').addEventListener('click', function(){
-    ['tr-f-domicile','tr-f-operator','tr-f-vendor','tr-f-make','tr-f-category','tr-f-wotype'].forEach(function(id){
+    ['tr-f-unit','tr-f-domicile','tr-f-operator','tr-f-vendor','tr-f-make','tr-f-category','tr-f-component','tr-f-wotype'].forEach(function(id){
       var e = _el.querySelector('#' + id); if (e) e.value = '';
     });
     _load();
