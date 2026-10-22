@@ -169,8 +169,19 @@ function _buildSystemContext() {
     '- Primary Component, Technician Failure Code, Primary Cause Code, Work Accomplished Code\n' +
     '- Maintenance Code: PM (preventive), UM (unscheduled), MOD (modification)\n' +
     '- Controllable: Y/N\n' +
-    fleetSummary + '\n\n' +
+    fleetSummary +
+    _repairIntelContext() + '\n\n' +
     'RESPOND CONCISELY. You are an operational tool, not a chatbot. Facts over filler.';
+}
+
+// Compact, deterministic repair-intelligence snapshot (12-month engine). Lazy-
+// required and fully guarded so it can NEVER break the Brain's context build;
+// returns '' when the engine is empty or unavailable.
+function _repairIntelContext() {
+  try {
+    const { brainContext } = require('../repair-intel/brain-context');
+    return brainContext() || '';
+  } catch (_) { return ''; }
 }
 
 // ─── PORT RESOLUTION ────────────────────────────────────────────────────────
