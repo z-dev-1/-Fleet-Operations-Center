@@ -1229,14 +1229,23 @@ function _readFilesAsAttachments(fileList) {
       }
       // Any other image type -> convert to PNG.
       if (looksImage) {
-        const png = await _dataUrlToPng(dataUrl);
+        let png = await _dataUrlToPng(dataUrl);
+        if (!png && (window.files && window.files.heicToPng) &&
+            (/^image\/(heic|heif)$/i.test(mime) || /\.(heic|heif)$/i.test(name) || !mime)) {
+          // Browser canvas can't decode HEIC — convert in the main process via
+          // the pure-JS heic-convert library, then attach the PNG it returns.
+          try {
+            const res = await window.files.heicToPng(dataUrl);
+            if (res && res.ok && res.dataUrl) png = res.dataUrl;
+          } catch (_) { /* fall through to warning */ }
+        }
         if (png) {
           _addAttachment(_pngName(file.name), png);
           toast.show('info', 'Converted "' + file.name + '" to PNG for upload', 2500);
         } else {
-          // Browser can't decode it (commonly HEIC). Keep it but be honest.
+          // Genuinely could not convert — keep it but be honest.
           _addAttachment(file.name, dataUrl);
-          toast.show('warn', '"' + file.name + '" is a format AAP may reject (e.g. HEIC). Convert it to PNG/JPEG first for a reliable upload.', 5000);
+          toast.show('warn', '"' + file.name + '" could not be converted. Try exporting it as PNG/JPEG first.', 5000);
         }
         return;
       }

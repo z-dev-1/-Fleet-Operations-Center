@@ -1089,6 +1089,26 @@ function registerMiscIPC(ctx) {
     return getQueueCount();
   });
 
+  // HEIC → PNG conversion. The renderer <canvas> cannot decode HEIC (iPhone
+  // photos), so WR-modal attachments route HEIC here. heic-convert is pure JS
+  // (no native build), runs in this main process, and returns a PNG buffer.
+  // Input: a data URL or base64 string; output: { ok, dataUrl } PNG.
+  handle('image:heic-to-png', async (_e, input) => {
+    try {
+      if (!input || typeof input !== 'string') return { ok: false, error: 'no image data' };
+      // Strip a data URL prefix if present, decode to a Buffer.
+      const b64 = input.includes(',') ? input.split(',')[1] : input;
+      const inputBuffer = Buffer.from(b64, 'base64');
+      const convert = require('heic-convert');
+      const pngBuffer = await convert({ buffer: inputBuffer, format: 'PNG' });
+      const dataUrl = 'data:image/png;base64,' + Buffer.from(pngBuffer).toString('base64');
+      return { ok: true, dataUrl };
+    } catch (e) {
+      logger.warn('[image] HEIC->PNG failed: ' + e.message);
+      return { ok: false, error: e.message };
+    }
+  });
+
   // Start the screenshots retention scheduler (prune >7-day-old captures now +
   // daily). Keeps the ~16GB screenshots folder from growing unbounded.
   try { startScreenshotPruneScheduler(); } catch (e) { logger.warn('[screenshots] scheduler start failed: ' + e.message); }

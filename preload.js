@@ -476,6 +476,8 @@ expose('files', {
   readAsDataUrl:        (p) => ipcRenderer.invoke('file:read-dataurl', p),
   openExternal:         (u) => ipcRenderer.invoke('shell:open-external', u),
   openRelayUrl:         (u) => ipcRenderer.invoke('relay:open-url', u),
+  // HEIC -> PNG conversion (main process, pure-JS heic-convert).
+  heicToPng:            (dataUrl) => ipcRenderer.invoke('image:heic-to-png', dataUrl),
 });
 
 // ── Relay cache (S28: wiring fix — exposes relay data to renderer) ────────────
