@@ -9697,3 +9697,51 @@ body {
 .bbc-status.ok { color: var(--ok, #3fb950); }
 .bbc-status.err { color: #f85149; }
 .bbc-status.warn { color: #d29922; }
+
+/* ── Fleet Repair Intelligence (History tab: 12-month report) ──────────────── */
+.dp-ri-controls { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.dp-ri-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.detail-panel__btn--ghost { background: transparent; opacity: .85; }
+.detail-panel__btn--ghost:hover { opacity: 1; }
+.detail-panel__btn:disabled { opacity: .4; cursor: not-allowed; }
+.dp-ri-status { font-size: 11px; line-height: 1.5; color: var(--mut); }
+.dp-ri-status-ok { color: var(--txt2); }
+.dp-ri-status-cold { color: var(--mut); }
+.dp-ri-status-busy { color: var(--acc, #58a6ff); font-weight: 600; }
+.dp-ri-status-err { color: #d29922; }
+.dp-ri-report { display: flex; flex-direction: column; gap: 4px; }
+
+.dp-ri-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 6px; }
+.dp-ri-stat { border: 1px solid rgba(48,54,61,.7); border-radius: 8px; padding: 7px 9px; background: rgba(255,255,255,.02); text-align: center; }
+.dp-ri-stat-val { font-size: 18px; font-weight: 800; color: var(--txt); font-family: var(--mono); }
+.dp-ri-stat-lbl { font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--mut); margin-top: 2px; }
+.dp-ri-stat--warn .dp-ri-stat-val { color: #d29922; }
+.dp-ri-note { font-size: 10.5px; color: var(--mut); font-style: italic; margin: 2px 0 6px; line-height: 1.4; }
+
+.dp-ri-sub { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--acc2, #79c0ff); margin: 10px 0 5px; }
+.dp-ri-sub-note { color: var(--mut); font-weight: 400; text-transform: none; letter-spacing: 0; font-style: italic; }
+.dp-ri-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 4px; }
+.dp-ri-chip { font-size: 10.5px; padding: 2px 8px; border-radius: 10px; background: rgba(139,148,158,.15); color: var(--txt2); white-space: nowrap; }
+.dp-ri-chip--ok { background: rgba(63,185,80,.16); color: #56d364; }
+.dp-ri-chip--warn { background: rgba(210,153,34,.16); color: #d29922; }
+.dp-ri-chip--bad { background: rgba(248,81,73,.16); color: #f85149; }
+
+.dp-ri-rf { border: 1px solid rgba(210,153,34,.4); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; background: rgba(210,153,34,.05); }
+.dp-ri-rf-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.dp-ri-rf-comp { font-weight: 700; color: var(--txt); text-transform: capitalize; }
+.dp-ri-rf-count { font-size: 11px; font-weight: 700; color: #d29922; white-space: nowrap; }
+.dp-ri-rf-list { margin: 5px 0 0; padding-left: 16px; }
+.dp-ri-rf-list li { font-size: 11px; color: var(--txt2); line-height: 1.5; }
+
+.dp-ri-tl { border: 1px solid rgba(48,54,61,.7); border-radius: 8px; padding: 7px 10px; margin-bottom: 5px; background: rgba(255,255,255,.02); }
+.dp-ri-tl-head { display: flex; align-items: baseline; gap: 8px; }
+.dp-ri-tl-date { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--txt); }
+.dp-ri-tl-vend { font-size: 10.5px; color: var(--mut); flex: 1; }
+.dp-ri-tl-status { font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em; padding: 1px 7px; border-radius: 8px; background: rgba(139,148,158,.15); color: var(--txt2); white-space: nowrap; }
+.dp-ri-status-completed { background: rgba(63,185,80,.16); color: #56d364; }
+.dp-ri-status-cancelled { background: rgba(248,81,73,.14); color: #f85149; }
+.dp-ri-status-open { background: rgba(88,166,255,.16); color: var(--acc2, #79c0ff); }
+.dp-ri-tl-body { margin-top: 3px; }
+.dp-ri-tl-cat { font-size: 11.5px; color: var(--txt); font-weight: 600; }
+.dp-ri-tl-complaint { font-size: 11.5px; color: var(--txt2); line-height: 1.4; margin: 2px 0; word-break: break-word; }
+.dp-ri-tl-meta { font-size: 10.5px; color: var(--mut); }

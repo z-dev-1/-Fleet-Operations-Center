@@ -36,6 +36,7 @@ const { registerSchedulerIPC }     = require('./scheduler');
 const { registerEmailTriageIPC }   = require('./email-triage');
 const { registerRelayReconcileIPC } = require('./relay-reconcile');
 const { registerAuthHealthIPC }    = require('./auth-health');
+const { registerRepairIntelIPC }   = require('./repair-intel');
 const logger = require('../utils/logger')('ipc');
 
 function registerAllIPC(ctx) {
@@ -68,6 +69,7 @@ function registerAllIPC(ctx) {
   const { registerContactsHandlers } = require('./contacts');
   registerContactsHandlers();
   registerAuthHealthIPC(ctx);
+  registerRepairIntelIPC(ctx);
   logger.info('All IPC handlers registered');
 }
 

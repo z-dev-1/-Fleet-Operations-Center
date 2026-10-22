@@ -638,3 +638,15 @@ expose('bubble', {
 });
 
 // ── Fleet Ops Companion — removed in Phase 6 (feature no longer used) ────────
+
+// ── Fleet Repair Intelligence (12-month unit repair history + report) ────────
+// Deterministic per-unit report (counts, durations, repeat failures,
+// effectiveness, timeline) built from the ri_repair_event store. build/fetchNew
+// hit the AAP API; get reads the cached report only. refreshAi is the Phase 4
+// AI narrative pass (returns pending until that layer ships).
+expose('repairIntel', {
+  get:        (equipmentId) => ipcRenderer.invoke('repair-history:get', equipmentId),
+  build:      (equipmentId) => ipcRenderer.invoke('repair-history:build', equipmentId),
+  fetchNew:   (equipmentId) => ipcRenderer.invoke('repair-history:fetch-new', equipmentId),
+  refreshAi:  (equipmentId) => ipcRenderer.invoke('repair-history:refresh-ai', equipmentId),
+});

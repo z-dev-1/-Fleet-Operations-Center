@@ -2377,7 +2377,18 @@ function renderHistoryPane(unit){
   // (Data Sync / Timeline / Notes were removed from here — Notes moved to the
   // Actions tab — so History is purely a clean record of breakdowns by date.)
   return '<div class="dp-pane" id="dp-pane-history">'+
-    '<div class="dp-section-title">Breakdown History <span class="dp-section-sub">(last 3 months)</span></div>'+
+    // ── Repair Intelligence: 12-month deterministic report ──────────────────
+    '<div class="dp-ri-controls">'+
+      '<div class="dp-ri-btns">'+
+        '<button id="dp-ri-build" class="detail-panel__btn" title="Pull the full 365-day repair history from AAP">Build Full History</button>'+
+        '<button id="dp-ri-fetch" class="detail-panel__btn detail-panel__btn--ghost" title="Only pull work orders changed since the last sync">Fetch New Data Only</button>'+
+        '<button id="dp-ri-ai" class="detail-panel__btn detail-panel__btn--ghost" title="Re-run the AI narrative analysis">Refresh AI Analysis</button>'+
+      '</div>'+
+      '<div id="dp-ri-status" class="dp-ri-status"></div>'+
+    '</div>'+
+    '<div id="dp-ri-report" class="dp-ri-report"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading repair intelligence\u2026</div></div>'+
+    // ── Legacy 3-month breakdown cards (kept as a quick recent view) ─────────
+    '<div class="dp-section-title" style="margin-top:14px">Recent Breakdowns <span class="dp-section-sub">(last 3 months)</span></div>'+
     '<div id="dp-breakdown-summary" class="dp-breakdown-summary"></div>'+
     '<div id="dp-breakdown-list" class="dp-breakdown-list"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading breakdown history\u2026</div></div>'+
   '</div>';
@@ -2557,7 +2568,9 @@ function _renderUnit(unit) {
   // ── notes ──────────────────────────────────────────────────────────────────
   _wireNotes(unit);
 
-  // ── history tab: 3-month repair history list ───────────────────────────────
+  // ── history tab: 12-month repair intelligence report + controls ───────────
+  _wireRepairIntel(unit);
+  // ── history tab: 3-month repair history list (recent breakdowns) ──────────
   _wireHistoryPane(unit);
 
   // ── action buttons (new layout IDs) ───────────────────────────────────────
@@ -2714,6 +2727,174 @@ function _renderUnit(unit) {
       bandEl.innerHTML = '<span class="dp-status-band__icon">&#9888;</span><span class="dp-status-band__text">AI brief unavailable -- Orcha unreachable.</span>';
     });
   }
+}
+
+// ── _wireRepairIntel ─────────────────────────────────────────────────────────
+// Drives the 12-month Fleet Repair Intelligence report in the History tab:
+// loads the cached deterministic report (window.repairIntel.get), renders the
+// executive summary + repeat-failure groups + timeline, and wires the three
+// controls (Build Full History / Fetch New Data Only / Refresh AI Analysis).
+// Nothing here is AI — the numbers are deterministic; AI only adds narrative.
+function _wireRepairIntel(unit) {
+  var reportEl = document.getElementById('dp-ri-report');
+  var statusEl = document.getElementById('dp-ri-status');
+  var btnBuild = document.getElementById('dp-ri-build');
+  var btnFetch = document.getElementById('dp-ri-fetch');
+  var btnAi    = document.getElementById('dp-ri-ai');
+  if (!reportEl) return;
+  var equipmentId = unit.equipmentId || unit.id || '';
+  if (!window.repairIntel) {
+    reportEl.innerHTML = '<div class="dp-empty" style="color:var(--mut)">Repair intelligence unavailable.</div>';
+    return;
+  }
+
+  function fmtDate(ms) {
+    if (!ms) return 'Unknown';
+    try { var d = new Date(ms); return (d.getMonth()+1)+'/'+d.getDate()+'/'+String(d.getFullYear()).slice(2); }
+    catch (_) { return 'Unknown'; }
+  }
+  function fmtAgo(ms) {
+    if (!ms) return '';
+    var days = Math.round((Date.now() - ms) / 86400000);
+    if (days <= 0) return 'today';
+    if (days === 1) return '1 day ago';
+    return days + ' days ago';
+  }
+
+  function renderStatus(res) {
+    if (!statusEl) return;
+    var cp = res && res.checkpoint;
+    if (!cp) {
+      statusEl.innerHTML = '<span class="dp-ri-status-cold">Not synced yet \u2014 click <b>Build Full History</b> to pull the last 12 months.</span>';
+      return;
+    }
+    var last = cp.last_incr_sync_at || cp.last_full_sync_at;
+    var cov = '';
+    try { var c = cp.source_coverage ? JSON.parse(cp.source_coverage) : null; if (c && c.relay) cov = ' \u00b7 source: ' + esc(c.relay); } catch (_) {}
+    statusEl.innerHTML = '<span class="dp-ri-status-ok">Last synced ' + esc(fmtAgo(last)) + ' (' + esc(fmtDate(last)) + ')' +
+      (cp.records_total != null ? ' \u00b7 ' + cp.records_total + ' records' : '') + cov + '</span>' +
+      (cp.last_error ? '<span class="dp-ri-status-err"> \u00b7 ' + esc(String(cp.last_error).slice(0,120)) + '</span>' : '');
+  }
+
+  function renderReport(rep) {
+    if (!rep) { reportEl.innerHTML = '<div class="dp-empty" style="color:var(--mut)">No report.</div>'; return; }
+    var s = rep.executiveSummary || {};
+    var eff = s.effectiveness || {};
+    function stat(label, val, cls) {
+      return '<div class="dp-ri-stat ' + (cls||'') + '"><div class="dp-ri-stat-val">' + esc(String(val)) + '</div><div class="dp-ri-stat-lbl">' + esc(label) + '</div></div>';
+    }
+    if (!s.totalRepairEvents) {
+      reportEl.innerHTML = '<div class="dp-empty" style="color:var(--mut);font-style:italic">No repair history on record for the last 12 months. Click <b>Build Full History</b> to pull it from AAP.</div>';
+      return;
+    }
+    var stats = '<div class="dp-ri-stats">' +
+      stat('Repair events', s.totalRepairEvents) +
+      stat('Corrective', s.correctiveRepairs) +
+      stat('PM', s.pmEvents) +
+      stat('Repeat-failure groups', s.repeatFailureGroups, s.repeatFailureGroups ? 'dp-ri-stat--warn' : '') +
+      stat('Unresolved / repeated', s.unresolvedIssues, s.unresolvedIssues ? 'dp-ri-stat--warn' : '') +
+      stat('Known downtime (hrs)', s.totalKnownDowntimeHours != null ? s.totalKnownDowntimeHours : 'Unknown') +
+    '</div>';
+
+    var cov = (s.downtimeCoveragePct != null)
+      ? '<div class="dp-ri-note">Downtime computed for ' + s.downtimeCoveragePct + '% of events (rest lack timestamps \u2014 shown as Unknown, never estimated).</div>'
+      : '';
+
+    var topCats = (s.topCategories || []).map(function(c){ return '<span class="dp-ri-chip">' + esc(c.key) + ' \u00d7' + c.count + '</span>'; }).join('');
+    var catsBlock = topCats ? '<div class="dp-ri-sub">Top categories</div><div class="dp-ri-chips">' + topCats + '</div>' : '';
+
+    var effBlock = '<div class="dp-ri-sub">Repair effectiveness <span class="dp-ri-sub-note">(evidence-based; a closed WO is not assumed resolved)</span></div>' +
+      '<div class="dp-ri-chips">' +
+        '<span class="dp-ri-chip dp-ri-chip--ok">resolved ' + (eff.resolved||0) + '</span>' +
+        '<span class="dp-ri-chip dp-ri-chip--warn">resolved-repeated ' + (eff.resolvedRepeated||0) + '</span>' +
+        '<span class="dp-ri-chip">partial ' + (eff.partial||0) + '</span>' +
+        '<span class="dp-ri-chip dp-ri-chip--bad">unresolved ' + (eff.unresolved||0) + '</span>' +
+        '<span class="dp-ri-chip">referred ' + (eff.referred||0) + '</span>' +
+        '<span class="dp-ri-chip">cancelled ' + (eff.cancelled||0) + '</span>' +
+        '<span class="dp-ri-chip">unknown ' + (eff.unknown||0) + '</span>' +
+      '</div>';
+
+    var rf = (rep.repeatFailures || []).map(function(g){
+      var wos = (g.workOrders || []).slice(0, 6).map(function(w){
+        return '<li>' + esc(fmtDate(w.reportedAt)) + ' \u00b7 ' + esc(w.vendor || 'vendor n/a') + ' \u00b7 ' + esc(w.status || '') + '</li>';
+      }).join('');
+      return '<div class="dp-ri-rf">' +
+        '<div class="dp-ri-rf-head"><span class="dp-ri-rf-comp">' + esc(g.component) + '</span>' +
+          '<span class="dp-ri-rf-count">' + g.count + ' events</span></div>' +
+        '<ul class="dp-ri-rf-list">' + wos + '</ul>' +
+      '</div>';
+    }).join('');
+    var rfBlock = rf
+      ? '<div class="dp-ri-sub">Repeat failures <span class="dp-ri-sub-note">(same component recurring \u2014 pattern to investigate, not proof of defect)</span></div>' + rf
+      : '';
+
+    var tl = (rep.timeline || []).slice(0, 40).map(function(e){
+      var dur = e.durationHours != null ? (e.durationHours + 'h') : 'Unknown';
+      var cost = e.estimateCost != null ? (' \u00b7 est $' + e.estimateCost) : '';
+      return '<div class="dp-ri-tl">' +
+        '<div class="dp-ri-tl-head"><span class="dp-ri-tl-date">' + esc(fmtDate(e.reportedAt)) + '</span>' +
+          '<span class="dp-ri-tl-vend">' + esc(e.vendor || 'vendor n/a') + '</span>' +
+          '<span class="dp-ri-tl-status dp-ri-status-' + esc(e.status||'') + '">' + esc(e.status||'') + '</span></div>' +
+        '<div class="dp-ri-tl-body">' +
+          '<span class="dp-ri-tl-cat">' + esc(e.category || '') + (e.component ? ' / ' + esc(e.component) : '') + '</span>' +
+          (e.complaint ? '<div class="dp-ri-tl-complaint">' + esc(e.complaint) + '</div>' : '') +
+          '<div class="dp-ri-tl-meta">' + esc(dur) + cost + (e.rootCause ? ' \u00b7 ' + esc(e.rootCause) : '') + '</div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+    var tlBlock = '<div class="dp-ri-sub">Repair timeline <span class="dp-ri-sub-note">(newest first, up to 40)</span></div>' + (tl || '<div class="dp-empty">None.</div>');
+
+    reportEl.innerHTML = stats + cov + catsBlock + effBlock + rfBlock + tlBlock;
+  }
+
+  function setBusy(busy, msg) {
+    [btnBuild, btnFetch, btnAi].forEach(function(b){ if (b) b.disabled = !!busy; });
+    if (busy && statusEl) statusEl.innerHTML = '<span class="dp-ri-status-busy">' + esc(msg || 'Working\u2026') + '</span>';
+  }
+
+  function load(initial) {
+    window.repairIntel.get(equipmentId).then(function(res){
+      res = res || {};
+      renderStatus(res);
+      renderReport(res.report);
+    }).catch(function(e){
+      reportEl.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to load report: ' + esc((e && e.message) || 'error') + '</div>';
+    });
+  }
+
+  function runSync(fn, label) {
+    setBusy(true, label);
+    fn(equipmentId).then(function(res){
+      res = res || {};
+      setBusy(false);
+      if (res.ok === false && res.error) toast.show('warn', equipmentId + ': ' + res.error, 4000);
+      else if (res.sync) {
+        var sy = res.sync;
+        toast.show('info', equipmentId + ' synced: +' + (sy.added||0) + ' new, ' + (sy.updated||0) + ' updated' + (sy.excluded ? ', ' + sy.excluded + ' excluded' : ''), 3500);
+      }
+      renderStatus(res);
+      renderReport(res.report);
+    }).catch(function(e){
+      setBusy(false);
+      toast.show('error', 'Sync failed: ' + ((e && e.message) || 'error'), 4000);
+    });
+  }
+
+  if (btnBuild) btnBuild.addEventListener('click', function(){ runSync(window.repairIntel.build, 'Building full 12-month history\u2026'); });
+  if (btnFetch) btnFetch.addEventListener('click', function(){ runSync(window.repairIntel.fetchNew, 'Fetching new data\u2026'); });
+  if (btnAi) btnAi.addEventListener('click', function(){
+    setBusy(true, 'Refreshing AI analysis\u2026');
+    window.repairIntel.refreshAi(equipmentId).then(function(res){
+      setBusy(false);
+      res = res || {};
+      if (res.pending) toast.show('info', 'AI analysis is not available yet (coming in a later phase).', 3500);
+      else if (res.ok === false && res.error) toast.show('warn', res.error, 3500);
+      if (res.report) renderReport(res.report);
+      load();
+    }).catch(function(e){ setBusy(false); toast.show('error', 'AI refresh failed: ' + ((e && e.message)||'error'), 4000); });
+  });
+
+  load(true);
 }
 
 // ── _wireHistoryPane ───────────────────────────────────────────────────────
