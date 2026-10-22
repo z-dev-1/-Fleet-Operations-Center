@@ -2898,7 +2898,7 @@ function _wireRepairIntel(unit) {
         if ((sy.errors && sy.errors.length)) {
           toast.show('warn', equipmentId + ': ' + sy.errors[0], 5000);
         } else if ((sy.retrieved || 0) === 0) {
-          toast.show('info', equipmentId + ': no repair work orders found in the last 12 months (or session/VPN not ready).', 5000);
+          toast.show('info', equipmentId + ': no work orders returned by AAP for this unit.', 5000);
         } else {
           toast.show('info', equipmentId + ' synced: ' + sy.retrieved + ' WOs \u2014 +' + (sy.added||0) + ' new, ' + (sy.updated||0) + ' updated' + (sy.excluded ? ', ' + sy.excluded + ' excluded' : ''), 4000);
         }

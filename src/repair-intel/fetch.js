@@ -26,54 +26,30 @@ const { ensureSchema } = require('./schema');
 const YEAR_MS = 365 * 24 * 3600 * 1000;
 
 // Build the WIDENED search body for a rolling window. Nulling the restrictive
-// dimensions is required (empty [] over-constrains and returns nothing).
-//
-// CRITICAL: the AAP /serviceaggregates/search endpoint REQUIRES fleetIds (the
-// 9 fleet UUIDs) and a NON-EMPTY statuses list — a bare/over-cleared body
-// returns nothing (or 500s). So we START from the proven DEFAULT_SEARCH_REQUEST
-// (which carries the fleetIds the whole app uses) and only WIDEN it for history:
-//   - category: null         -> include PM/planned/unplanned (not just UNPLANNED)
-//   - statuses: FULL set      -> include COMPLETED/CANCELLED (the bulk of history),
-//                                not just the 8 open statuses the default uses
-//   - equipmentIds: [unit]    -> scope to one unit
-//   - modified window         -> rolling 365d (full) or since-checkpoint (incr)
-const HISTORY_STATUSES = [
-  'CREATED', 'ESTIMATE_APPROVED', 'ESTIMATE_PENDING_APPROVAL', 'ESTIMATE_REJECTED',
-  'PENDING', 'PENDING_REVIEW', 'SCHEDULED', 'WORK_IN_PROGRESS', 'WORK_ORDER_ASSIGNED',
-  'COMPLETED', 'CLOSED', 'CANCELLED', 'REOPENED', 'TRANSFERRED', 'DONE',
-];
-
-// `category` is a NON-NULLABLE field on the API (null => 500
-// "KotlinInvalidNullException ... category"). The valid values are the
-// work-request categories UNPLANNED and PLANNED, so to capture the FULL repair
-// history we run one search per category and merge (syncUnit loops HISTORY_CATEGORIES).
-const HISTORY_CATEGORIES = ['UNPLANNED', 'PLANNED'];
-
+// Per-unit history query. This MIRRORS the proven findOpenWO/refreshUnit path
+// in aap_api.js, which is the ONLY query shape confirmed to return a unit's full
+// work-order history live. Key facts learned the hard way from the live API:
+//   - searchServices() shallow-merges the given fields OVER DEFAULT_SEARCH_REQUEST,
+//     so we pass ONLY the few fields we want to change — NOT the whole default body.
+//   - `statuses: []` (empty) means "all statuses" and returns the unit's ENTIRE
+//     history (open + completed + cancelled). A specific status LIST returned 0.
+//   - `category` is non-nullable in the DEFAULT body shape, so ATTEMPT 1 leaves
+//     the default category in place; ATTEMPT 2 (widened) nulls category + the
+//     other dimensions to catch WOs outside the default program/fleet/lifecycle.
+//   - the unit number must be UPPERCASE.
+// We do NOT send a modified-date window here: `statuses:[]` already returns the
+// full history, and the default body has no date filter — adding one risks the
+// same over-constraint that returned 0. The 365-day scoping is applied when we
+// read back for the report (eventsForUnit's window), not at fetch time.
 function _historyBody(opts = {}) {
-  const now = Date.now();
-  const modifiedFrom = opts.sinceMs != null ? opts.sinceMs : (now - YEAR_MS);
-  let base = {};
-  try { base = require('../scrapers/aap_longdwell').DEFAULT_SEARCH_REQUEST || {}; } catch (_) { base = {}; }
-  // Clone so we never mutate the shared default.
-  const body = JSON.parse(JSON.stringify(base));
-  body.category = opts.category || 'UNPLANNED'; // REQUIRED non-null; one per call
-  body.statuses = HISTORY_STATUSES;     // include completed/cancelled history
-  body.subStatuses = [];
-  body.urgencyFilter = 'ALL';
-  body.modifiedFromEpochMs = modifiedFrom;
-  body.modifiedToEpochMs = opts.toMs != null ? opts.toMs : now;
-  // Keep the proven sortConfig from DEFAULT_SEARCH_REQUEST (ScheduledDate) — the
-  // API's ServiceAggregateColumn enum rejected 'ModifiedDate'. Only fall back to
-  // a safe default if the base body had none.
-  if (!body.sortConfig || !body.sortConfig.sortColumn) {
-    body.sortConfig = { sortColumn: 'ScheduledDate', sortDirection: 'descending' };
+  const u = String((opts.equipmentIds && opts.equipmentIds[0]) || '').trim().toUpperCase();
+  if (opts.widened) {
+    // ATTEMPT 2 — clear the restrictive dimensions (null = no filter on them).
+    return { equipmentIds: [u], statuses: [], category: null,
+      lifecycleStates: null, assetPrograms: null, fleetIds: null, page: 1 };
   }
-  body.page = 1;
-  // Scope to one unit. equipmentIds on the body narrows the (fleetId-scoped)
-  // search to this unit only.
-  if (opts.equipmentIds) body.equipmentIds = opts.equipmentIds;
-  if (opts.assetDomicileSites) body.assetDomicileSites = opts.assetDomicileSites;
-  return body;
+  // ATTEMPT 1 — fast path: just scope to the unit + all statuses.
+  return { equipmentIds: [u], statuses: [], page: 1 };
 }
 
 // Fetch the full/incremental repair history for ONE unit. Returns a structured
@@ -95,40 +71,37 @@ async function syncUnit(equipmentId, opts = {}) {
   const cp = store.getCheckpoint(eq);
   if (opts.incremental && cp && cp.last_modified_seen) sinceMs = cp.last_modified_seen;
 
-  // 1) Bulk WO list for this unit over the window (deterministic, no AI).
-  // The API requires a non-null `category`, so we query each HISTORY_CATEGORY
-  // (UNPLANNED + PLANNED) and merge. Each call is hard-timeout'd so a stalled
-  // session (VPN/token) can never hang the whole operation.
-  logger.info('[' + eq + '] sync ' + (opts.incremental ? 'incr' : 'full') + ' start (since=' + (sinceMs || 'default') + ')');
+  // 1) Unit's full WO history. Two-tier, mirroring the proven refreshUnit path:
+  //    ATTEMPT 1 (fast): { equipmentIds:[u], statuses:[] } — returns the unit's
+  //    entire history when its WOs fall inside the default program/fleet.
+  //    ATTEMPT 2 (widened): nulls category/lifecycle/program/fleet to catch WOs
+  //    outside the default set. Each call is hard-timeout'd so a stalled session
+  //    can never hang the operation.
+  logger.info('[' + eq + '] sync ' + (opts.incremental ? 'incr' : 'full') + ' start');
   const timeoutMs = opts.timeoutMs || 90000;
-  const byId = new Map();
-  let anyOk = false;
-  for (const category of HISTORY_CATEGORIES) {
-    try {
-      const search = api.searchAllPages(_historyBody({ sinceMs, equipmentIds: [eq], category }), { maxPages: opts.maxPages || 20 });
-      const list = await Promise.race([
-        search,
-        new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error('AAP search timed out after ' + Math.round(timeoutMs / 1000) + 's (session/VPN?)'), { code: 'AAP_TIMEOUT' })), timeoutMs)),
-      ]);
-      anyOk = true;
-      for (const wo of (list || [])) {
-        const sid = String((wo && (wo.workRequestId || wo.id)) || '').trim();
-        if (sid && !byId.has(sid)) byId.set(sid, wo);
-      }
-      logger.info('[' + eq + '] category ' + category + ': ' + (list ? list.length : 0) + ' work orders');
-    } catch (e) {
-      result.errors.push(category + ' search failed: ' + e.message);
-      logger.warn('[' + eq + '] ' + category + ' search failed: ' + e.message);
+  const _timed = (p) => Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error('AAP search timed out after ' + Math.round(timeoutMs / 1000) + 's'), { code: 'AAP_TIMEOUT' })), timeoutMs)),
+  ]);
+
+  let aggregates = [];
+  try {
+    aggregates = await _timed(api.searchAllPages(_historyBody({ equipmentIds: [eq] }), { maxPages: opts.maxPages || 20 }));
+    // Fall back to the widened query if the fast path found nothing (the unit's
+    // WOs may be in a program/fleet/category outside the default body).
+    if (!aggregates.length) {
+      logger.info('[' + eq + '] fast path 0 WOs — trying widened query');
+      aggregates = await _timed(api.searchAllPages(_historyBody({ equipmentIds: [eq], widened: true }), { maxPages: opts.maxPages || 20 }));
     }
-  }
-  if (!anyOk) {
+    result.coverage.relay = 'ok';
+  } catch (e) {
     result.coverage.relay = 'failed';
-    return result; // every category call failed; prior history preserved
+    result.errors.push('relay search failed: ' + e.message);
+    logger.warn('[' + eq + '] relay search failed: ' + e.message);
+    return result; // prior history preserved
   }
-  result.coverage.relay = 'ok';
-  const aggregates = Array.from(byId.values());
   result.retrieved = aggregates.length;
-  logger.info('[' + eq + '] retrieved ' + aggregates.length + ' work orders (merged across categories)');
+  logger.info('[' + eq + '] retrieved ' + aggregates.length + ' work orders');
 
   // 2) Asset master fields (VIN/make/model/year/odometer) — one call, reused.
   let asset = {};
