@@ -5,7 +5,8 @@
  * Arrow Up/Down   → Navigate fleet table rows
  * Enter           → Open selected unit's detail panel
  * Escape          → Close detail drawer / modal / settings
- * Ctrl+R / Cmd+R  → Force sync
+ * Ctrl+R / Cmd+R  → Restart the app (main process, src/window/index.js)
+ * Ctrl+Shift+R    → Force sync
  * Ctrl+M / Cmd+M  → Run Midway auth (mwinit)
  * Ctrl+1-5        → Switch views (Fleet, Analytics, Vendors, Settings, WI)
  */
@@ -35,8 +36,9 @@ export function initKeyboardShortcuts() {
       return;
     }
 
-    // Ctrl+R / Cmd+R → Force sync
-    if (e[MOD] && e.key === 'r') {
+    // Ctrl+Shift+R / Cmd+Shift+R → Force sync. (Plain Ctrl+R now RESTARTS the
+    // app — handled in the main process so it works even if the UI is frozen.)
+    if (e[MOD] && e.shiftKey && (e.key === 'R' || e.key === 'r')) {
       e.preventDefault();
       if (window.fleet && window.fleet.forceSync) window.fleet.forceSync();
       bus.emit('ui:toast', { type: 'info', message: 'Sync triggered', duration: 1500 });

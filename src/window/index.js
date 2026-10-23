@@ -1588,6 +1588,25 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
     }, 1000);
 
     mainWindow.webContents.on('before-input-event', (_event, input) => {
+      // Ctrl+R (Cmd+R on mac) — RESTART THE WHOLE APP (main + renderer), the
+      // same as a manual stop/start. Handled here in the main process so it
+      // still works when the renderer is frozen. Force sync moved to
+      // Ctrl+Shift+R (handled in the renderer's keyboard-shortcuts.js).
+      // The close handler below always cancels close (hide-to-bubble), so
+      // app.quit() would be blocked — run the before-quit cleanup (scheduler
+      // stop, cluster lease release) explicitly, then relaunch + exit.
+      if (input.type === 'keyDown' && !input.isAutoRepeat && (input.control || input.meta) &&
+          !input.shift && !input.alt && String(input.key).toLowerCase() === 'r') {
+        _event.preventDefault();
+        logger.info('[shortcut] Ctrl+R \u2014 restarting app');
+        try { pushStatus('\uD83D\uDD04 Restarting app...'); } catch (_) {}
+        setTimeout(() => {
+          try { app.emit('before-quit'); } catch (e) { logger.warn('[shortcut] before-quit cleanup failed: ' + e.message); }
+          app.relaunch();
+          app.exit(0);
+        }, 300);
+        return;
+      }
       if (input.key === 'F12' && input.type === 'keyDown') {
         if (mainWindow.webContents.isDevToolsOpened()) {
           mainWindow.webContents.closeDevTools();
