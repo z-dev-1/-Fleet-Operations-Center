@@ -716,6 +716,15 @@ async function buildFleetDataset(opts = {}) {
         from: page * 150,
         fieldFilters: filterVals.length ? [{ key, values: filterVals }] : [],
         fieldsToReturn: BULK_FIELDS,
+        // DEFAULT_ASSET_SEARCH_REQUEST only asks for ACTIVE + UNAVAILABLE, so
+        // units in the ORDERED lifecycle (on-order / not yet in service) were
+        // never returned. Request all three — the same set the original
+        // scrape path (aap.js) and aap_lifecycle_api ALLOWED_STATES use.
+        lifecycleStates: [
+          { state: 'ACTIVE', reasons: [] },
+          { state: 'UNAVAILABLE', reasons: [] },
+          { state: 'ORDERED', reasons: [] },
+        ],
       });
       const list = (res && res.assets) || [];
       if (!list.length) break;

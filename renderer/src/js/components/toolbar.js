@@ -120,6 +120,7 @@ export function init(container) {
           <option value="">All States</option>
           <option value="available">Available</option>
           <option value="unavailable">Unavailable</option>
+          <option value="ordered">Ordered</option>
           <option value="decommissioned">Decommissioned</option>
           <option value="in_maintenance">In Maintenance</option>
         </select>
