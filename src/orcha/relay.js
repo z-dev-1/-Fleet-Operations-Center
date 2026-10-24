@@ -16,6 +16,16 @@ const { spawn, execFile } = require('child_process');
 const { P }  = require('../config/paths');
 const logger = require('../utils/logger')('relay');
 
+// ── Claude Code diagnostics ───────────────────────────────────────────────────
+// "Works then crashes" was traced to claude-code jobs intermittently HANGING
+// past the timeout (not a hard credential failure). This optional debug layer
+// captures WHY a job stalls: per-job phase timing (dispatch -> first stdout ->
+// result), full (untruncated) stderr, and a dump on timeout. Off by default;
+// enable with env FLEET_CLAUDE_DEBUG=1. Writes to the normal relay logger so it
+// lands in relay.log alongside the existing lines.
+const CLAUDE_DEBUG = process.env.FLEET_CLAUDE_DEBUG === '1';
+function _cdbg(msg) { if (CLAUDE_DEBUG) logger.info('[claude-dbg] ' + msg); }
+
 const fleetBrain = require('./fleet-brain');
 // Wire fleet-brain's local fallback AFTER _tryClaudeCode is defined below.
 // setImmediate defers to end-of-tick so the function reference is valid.
@@ -55,6 +65,16 @@ let _status       = 'unknown'; // 'connected' | 'expired' | 'error' | 'unknown'
 let _requestCount = 0;
 let _errorCount   = 0;
 let _aiPreference = 'auto'; // 'auto' | 'orcha' | 'claude' | 'balanced'
+// Orcha agent id used for every WS/headless request (Settings -> AI -> Orcha
+// Agent). The agent selects the server-side model. Was hardcoded to
+// 'orcha_default' in both transports, so the Settings dropdown had no effect.
+let _orchaAgentId = 'orcha_default';
+// Bedrock fallback (direct Claude via Bedrock SDK) is OFF by default: this
+// account's Isengard role lacks bedrock:InvokeModel, so the call always fails
+// with "not authorized" — it only added latency + log noise to every failure.
+// Kept behind a flag (env FLEET_ENABLE_BEDROCK=1) so it can be re-enabled if the
+// role is ever granted Bedrock access, without ripping out the code.
+const _bedrockEnabled = process.env.FLEET_ENABLE_BEDROCK === '1';
 
 // ── CONCURRENCY ───────────────────────────────────────────────────────────────
 const MAX_CONCURRENT = 5;
@@ -250,19 +270,25 @@ async function ask(prompt, opts = {}) {
           } catch (ccErr) { logger.warn('[' + requestId + '] claude-code fallback failed: ' + ccErr.message); }
         }
 
-        // BEDROCK FALLBACK: direct Claude call via Bedrock SDK
-        try {
-          const { askBedrock } = require('../scrapers/bedrock');
-          logger.info('[' + requestId + '] Bedrock attempt ' + attempt);
-          const brText = await askBedrock(prompt);
-          if (brText) {
-            _markLaneHealthy('claude');
-            _lastHealthy = Date.now(); _status = 'connected-bedrock';
-            _saveStatus();
-            logger.info('[' + requestId + '] OK via Bedrock fallback (' + brText.length + ' chars)');
-            return brText;
-          }
-        } catch (brErr) { logger.warn('[' + requestId + '] Bedrock failed: ' + brErr.message); }
+        // BEDROCK FALLBACK: direct Claude call via Bedrock SDK.
+        // Disabled by default (see _bedrockEnabled above) because this account
+        // is not authorized for bedrock:InvokeModel — the call always fails and
+        // just slowed down every "all transports failed" path. Set
+        // FLEET_ENABLE_BEDROCK=1 to re-enable if the role gains Bedrock access.
+        if (_bedrockEnabled) {
+          try {
+            const { askBedrock } = require('../scrapers/bedrock');
+            logger.info('[' + requestId + '] Bedrock attempt ' + attempt);
+            const brText = await askBedrock(prompt);
+            if (brText) {
+              _markLaneHealthy('claude');
+              _lastHealthy = Date.now(); _status = 'connected-bedrock';
+              _saveStatus();
+              logger.info('[' + requestId + '] OK via Bedrock fallback (' + brText.length + ' chars)');
+              return brText;
+            }
+          } catch (brErr) { logger.warn('[' + requestId + '] Bedrock failed: ' + brErr.message); }
+        }
         throw new Error('All transports failed');
       } catch (e) {
         const msg = e.message || String(e);
@@ -321,7 +347,7 @@ function _tryWS(prompt, opts = {}) {
       let msg; try { msg = JSON.parse(raw); } catch (_) { return; }
       switch (msg.type) {
         case 'connected':
-          ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet AI', agent_id: 'orcha_default', session_id: sessionId }));
+          ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet AI', agent_id: _orchaAgentId, session_id: sessionId }));
           break;
         case 'session_created':
           clearTimeout(timer);
@@ -363,7 +389,7 @@ function _tryHeadless(prompt, opts = {}) {
       fs.writeFileSync(tmpFile, prompt, 'utf8');
     } catch (e) { return reject(new Error('Failed to write temp prompt: ' + e.message)); }
 
-    const args  = ['--headless', '--agent', 'orcha_default', '--prompt-file', tmpFile];
+    const args  = ['--headless', '--agent', _orchaAgentId, '--prompt-file', tmpFile];
     const timer = setTimeout(() => reject(new Error('Headless timeout')), TIMEOUT_MS);
 
     // Node's execFile accepts a native AbortSignal via options.signal (v15.7+):
@@ -393,19 +419,61 @@ const CLAUDE_BIN = process.platform === 'win32'
   ? path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'claude.exe')
   : path.join(os.homedir(), '.toolbox', 'bin', 'claude');
 let CLAUDE_TIMEOUT_MS = 60000; // mutable — updated by setClaudeTimeout() when Settings change
+// Optional model id for the Claude Code lane (passed as `--model`). Empty =
+// let claude-code use its own default. Set from Settings (claudeModelId) so the
+// user can pin a specific Claude model for the fallback lane + attachment reads.
+let CLAUDE_MODEL_ID = '';
 
 // 3-worker pool — lets up to 3 concurrent AI calls run in parallel.
 // When DM poll, WR autofill, and long-dwell fill all fire at once, each gets
 // its own Claude Code process instead of queuing behind the others.
 // Kill-after-job is preserved per worker (prevents context bleed across
 // unrelated callers — same correctness guarantee as the old single-worker design).
-const WORKER_POOL_SIZE = 3;
+// POOL SIZE 1 (was 3): diagnostics (FLEET_CLAUDE_DEBUG) proved that 3 parallel
+// claude.exe processes RACE on startup to write the same file —
+//   "failed to copy production safety rules to
+//    ~/.claude/rules/amazon-production-safety-do-not-delete.md: The process
+//    cannot access the file because it is being used by another process (os error 32)"
+// — and that contention (plus a slow Midway credential probe) pushed first-stdout
+// to 35-53s, blowing the 60s timeout intermittently ("works then crashes", and
+// deep-scan units silently kept stale timelines when their job was killed).
+// Serializing to ONE worker removes the self-inflicted file-lock race; jobs run
+// one at a time but actually COMPLETE instead of sabotaging each other. Override
+// with env FLEET_CLAUDE_POOL if more concurrency is ever wanted again.
+// Pool size is now RUNTIME-ADJUSTABLE from Settings -> AI (setClaudePoolSize),
+// persisted as claudePoolSize in orchaConfig, with env FLEET_CLAUDE_POOL as the
+// initial default. Default 1 because parallel claude.exe workers race on a
+// startup file (os error 32) — see the pool-fix commit. 1-5 allowed.
+let WORKER_POOL_SIZE = Math.min(5, Math.max(1, parseInt(process.env.FLEET_CLAUDE_POOL || '1', 10) || 1));
 const CLAUDE_IDLE_KILL_MS = 10 * 60 * 1000; // kill warm process after 10min idle
 function _makeWorker(id) {
   return { id, proc: null, busy: false, currentJob: null, stdoutBuf: '', idleTimer: null };
 }
-const _workers = Array.from({ length: WORKER_POOL_SIZE }, (_, i) => _makeWorker(i));
+let _workers = Array.from({ length: WORKER_POOL_SIZE }, (_, i) => _makeWorker(i));
 const _claudeQueue = [];
+
+// Resize the Claude worker pool at runtime. Growing adds idle workers (they
+// spawn lazily on the next job); shrinking kills + drops the extra workers once
+// they're free (a busy one finishes its current job first, then is pruned on
+// the next resize/idle). Clamped to 1-5. Safe to call repeatedly.
+function setClaudePoolSize(n) {
+  const size = Math.min(5, Math.max(1, parseInt(n, 10) || 1));
+  if (size === WORKER_POOL_SIZE) return WORKER_POOL_SIZE;
+  if (size > WORKER_POOL_SIZE) {
+    for (let i = WORKER_POOL_SIZE; i < size; i++) _workers.push(_makeWorker(i));
+  } else {
+    // Remove workers from the tail; kill any process they hold.
+    const removed = _workers.splice(size);
+    for (const w of removed) {
+      try { if (w.idleTimer) clearTimeout(w.idleTimer); } catch (_) {}
+      if (w.proc) { _killClaudeTree(w.proc); w.proc = null; }
+    }
+  }
+  WORKER_POOL_SIZE = size;
+  logger.info('Claude worker pool size set to: ' + WORKER_POOL_SIZE);
+  return WORKER_POOL_SIZE;
+}
+function getClaudePoolSize() { return WORKER_POOL_SIZE; }
 
 // Windows-safe process-tree kill. Node's proc.kill() only terminates the
 // immediate handle; on Windows the Toolbox claude.exe spawns child workers
@@ -454,26 +522,38 @@ function _ensureClaudeProcess(worker) {
   if (!fs.existsSync(CLAUDE_BIN)) {
     throw new Error('claude-code not installed — run: toolbox install claude-code');
   }
-  logger.info('claude-code[' + worker.id + ']: spawning process');
+  logger.info('claude-code[' + worker.id + ']: spawning process' + (CLAUDE_MODEL_ID ? ' (model ' + CLAUDE_MODEL_ID + ')' : ''));
   // --system-prompt: override default coding-assistant persona with a strict
   // headless-API framing so all callers get reliable JSON/plain-text output
   // without explanations or markdown fences (see original rationale above).
-  const proc = spawn(
-    CLAUDE_BIN,
-    ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json',
-     '--verbose', '--no-session-persistence',
-     '--system-prompt',
+  // --model (optional): pin the Claude-lane model when the user chose one in
+  // Settings; omitted entirely when blank so claude-code uses its own default.
+  const _args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json',
+     '--verbose', '--no-session-persistence'];
+  if (CLAUDE_MODEL_ID) _args.push('--model', CLAUDE_MODEL_ID);
+  _args.push('--system-prompt',
      'You are a headless automation API, not an interactive coding assistant. ' +
      'Every message you receive contains its own complete formatting instructions ' +
      '(e.g. "respond with only a JSON array"). Follow those instructions exactly and ' +
      'output nothing else -- no explanations, no markdown code fences, no tool calls, ' +
      'no restating the request. If a message asks for JSON, your entire response must ' +
-     'be valid JSON and nothing more.'],
-    { stdio: ['pipe', 'pipe', 'pipe'] }
-  );
+     'be valid JSON and nothing more.');
+  const _spawnT0 = Date.now();
+  const proc = spawn(CLAUDE_BIN, _args, { stdio: ['pipe', 'pipe', 'pipe'] });
   worker.stdoutBuf = '';
+  worker.stderrBuf = '';              // full stderr for this process (debug dumps)
+  worker._firstStdoutAt = 0;         // when the first stdout byte arrived
+  _cdbg('worker[' + worker.id + '] spawned pid=' + proc.pid + ' in ' + (Date.now() - _spawnT0) + 'ms'
+    + (CLAUDE_MODEL_ID ? ' model=' + CLAUDE_MODEL_ID : ''));
 
   proc.stdout.on('data', (chunk) => {
+    if (!worker._firstStdoutAt) {
+      worker._firstStdoutAt = Date.now();
+      if (worker.currentJob && worker.currentJob._dispatchedAt) {
+        _cdbg('worker[' + worker.id + '] pid=' + proc.pid + ' first stdout after '
+          + (worker._firstStdoutAt - worker.currentJob._dispatchedAt) + 'ms');
+      }
+    }
     worker.stdoutBuf += chunk.toString();
     const lines = worker.stdoutBuf.split('\n');
     worker.stdoutBuf = lines.pop();
@@ -484,6 +564,9 @@ function _ensureClaudeProcess(worker) {
       if (obj.type === 'result' && worker.currentJob) {
         const job = worker.currentJob;
         clearTimeout(job._timer);
+        if (CLAUDE_DEBUG && job._dispatchedAt) {
+          _cdbg('worker[' + worker.id + '] RESULT in ' + (Date.now() - job._dispatchedAt) + 'ms is_error=' + !!obj.is_error + ' len=' + ((obj.result || '').length));
+        }
         worker.currentJob = null;
         worker.busy = false;
         if (obj.is_error) {
@@ -503,7 +586,13 @@ function _ensureClaudeProcess(worker) {
     }
   });
 
-  proc.stderr.on('data', (d) => logger.warn('claude-code[' + worker.id + '] stderr: ' + d.toString().slice(0, 300)));
+  proc.stderr.on('data', (d) => {
+    const s = d.toString();
+    // Keep the full stderr for this process so a timeout dump shows the REAL
+    // last words (the truncated warn below often cuts off the actual error).
+    if (CLAUDE_DEBUG) { worker.stderrBuf = (worker.stderrBuf + s).slice(-4000); }
+    logger.warn('claude-code[' + worker.id + '] stderr: ' + s.slice(0, 300));
+  });
 
   proc.on('exit', (code) => {
     // Guard: if this worker's proc was already replaced (killed after a
@@ -548,10 +637,24 @@ function _processClaudeQueue() {
     const job = _claudeQueue.shift();
     worker.currentJob = job;
     worker.busy = true;
+    job._dispatchedAt = Date.now();
+    _cdbg('worker[' + worker.id + '] dispatch job (prompt ' + (job.prompt ? job.prompt.length : 0) + ' chars, timeout ' + Math.round(CLAUDE_TIMEOUT_MS / 1000) + 's)');
     job._timer = setTimeout(() => {
       // Kill-on-timeout: prevents a stale/late response being matched to a
       // later job on the same worker (same correctness guarantee as before).
       logger.warn('claude-code[' + worker.id + ']: job timed out — killing process');
+      // DIAGNOSTIC DUMP: classify WHERE it stalled so "works then crashes" has
+      // evidence instead of a guess. Did the process ever emit stdout? What was
+      // its full stderr? How long did it actually run vs. the timeout?
+      if (CLAUDE_DEBUG) {
+        const ran = Date.now() - (job._dispatchedAt || Date.now());
+        const gotStdout = worker._firstStdoutAt ? ('yes, after ' + (worker._firstStdoutAt - job._dispatchedAt) + 'ms') : 'NO stdout at all';
+        const phase = worker._firstStdoutAt ? 'STALLED MID-RESPONSE (started replying then hung)' : 'STALLED BEFORE ANY OUTPUT (spawn/auth/startup hang)';
+        _cdbg('TIMEOUT worker[' + worker.id + '] pid=' + (worker.proc ? worker.proc.pid : '?')
+          + ' ran=' + ran + 'ms | first stdout: ' + gotStdout + ' | phase: ' + phase);
+        _cdbg('TIMEOUT worker[' + worker.id + '] full stderr: ' + (worker.stderrBuf || '(none captured)'));
+        _cdbg('TIMEOUT worker[' + worker.id + '] partial stdout buffer: ' + ((worker.stdoutBuf || '').slice(-500) || '(empty)'));
+      }
       if (worker.proc) { _killClaudeTree(worker.proc); }
       worker.proc = null;
       worker.currentJob = null;
@@ -735,12 +838,50 @@ function setClaudeTimeout(ms) {
   logger.info('Claude timeout set to: ' + clamped + 'ms');
 }
 
+// -- CLAUDE MODEL (fallback-lane model selection) ------------------------
+// Pin the Claude Code lane to a specific model (passed as `--model`). Empty
+// means "let claude-code use its default". Runtime switch — persisted to
+// orchaConfig as claudeModelId. Also consumed by bedrock.readFileWithVision
+// (attachment reading) so the chosen model applies there too.
+function setClaudeModel(id) {
+  CLAUDE_MODEL_ID = (typeof id === 'string' ? id.trim() : '');
+  logger.info('Claude model set to: ' + (CLAUDE_MODEL_ID || '(default)'));
+}
+function getClaudeModel() { return CLAUDE_MODEL_ID; }
+
+// detectClaudeModel() — ask the Claude Code lane which model it's actually
+// running on right now. claude's "models" reply is conversational prose, so we
+// just extract a recognizable model id / name from it rather than relying on a
+// rigid format. Best-effort: returns { ok, model?, raw?, error? }.
+function detectClaudeModel() {
+  const q = 'In one short line, output ONLY the id of the model you are currently running as, e.g. ' +
+    'claude-opus-5-5. No other words.';
+  return _tryClaudeCode(q)
+    .then(text => {
+      const raw = String(text || '').trim();
+      // Pull a claude-* / nova-* style id, else the first token.
+      const m = raw.match(/\b((?:global\.|us\.)?(?:anthropic\.)?claude-[a-z0-9.\-\[\]]+|[a-z]+-(?:opus|sonnet|haiku|fable|pro|lite|micro)-[0-9.\-]+)\b/i);
+      const model = m ? m[1] : (raw.split(/\s+/)[0] || '');
+      return { ok: !!model, model, raw: raw.slice(0, 200) };
+    })
+    .catch(e => ({ ok: false, error: e.message }));
+}
+
 function setPreference(pref) {
   const valid = ['auto', 'orcha', 'claude', 'balanced'];
   _aiPreference = valid.includes(pref) ? pref : 'auto';
   logger.info('AI preference set to: ' + _aiPreference);
 }
 function getPreference() { return _aiPreference; }
+
+// setAgent() -- select which Orcha agent answers WS/headless requests.
+// Runtime switch; persisted to orchaConfig as orchaAgentId by ipc/ai.js.
+function setAgent(id) {
+  const v = (typeof id === 'string') ? id.trim() : '';
+  _orchaAgentId = /^[a-z0-9][a-z0-9_-]*$/i.test(v) ? v : 'orcha_default';
+  logger.info('Orcha agent set to: ' + _orchaAgentId);
+}
+function getAgent() { return _orchaAgentId; }
 
 // testClaude() — direct health-check of the Claude Code path
 function testClaude() {
@@ -756,9 +897,109 @@ function testClaude() {
     if (fs.existsSync(P.orchaConfig)) {
       const cfg = JSON.parse(fs.readFileSync(P.orchaConfig, 'utf8'));
       if (cfg && cfg.aiPreference) setPreference(cfg.aiPreference);
+      if (cfg && typeof cfg.orchaAgentId === 'string' && cfg.orchaAgentId.trim()) setAgent(cfg.orchaAgentId);
+      if (cfg && cfg.claudePoolSize > 0) setClaudePoolSize(cfg.claudePoolSize);
       if (cfg && cfg.claudeTimeoutMs > 0) CLAUDE_TIMEOUT_MS = cfg.claudeTimeoutMs;
+      if (cfg && typeof cfg.claudeModelId === 'string') CLAUDE_MODEL_ID = cfg.claudeModelId.trim();
     }
   } catch (_) {}
 })();
 
-module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setClaudeTimeout, testClaude };
+// ── AGENT DISCOVERY ────────────────────────────────────────────────────────
+// The Orcha agent (chosen in Settings → AI → Orcha Agent) determines the
+// server-side model that answers every AI request. Rather than hardcode the
+// agent list in the Settings UI (which goes stale when the Orcha team adds or
+// removes agents), discover it live from the toolbox: `orcha --list-agents`
+// prints one agent per line as "Display Name (agent_id)". We parse that into
+// [{ id, name }] so the dropdown always reflects exactly what THIS machine can
+// actually call. Cached briefly so opening Settings repeatedly is cheap.
+const ORCHA_CLI = process.platform === 'win32'
+  ? path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'orcha.cmd')
+  : path.join(os.homedir(), '.toolbox', 'bin', 'orcha');
+// Per-agent config files (authoritative model/region per agent) live here.
+const ORCHA_AGENTS_DIR = path.join(os.homedir(), '.orcha', 'agents');
+let _agentCache = null;
+let _agentCacheAt = 0;
+const AGENT_CACHE_MS = 5 * 60 * 1000;
+
+function _parseAgentLines(text) {
+  const out = [];
+  const seen = new Set();
+  String(text || '').split(/\r?\n/).forEach((raw) => {
+    const line = raw.trim();
+    // Match "Display Name (agent_id)" — id is lowercase/underscore/digits.
+    const m = line.match(/^(.*?)\s*\(([a-z0-9][a-z0-9_-]*)\)\s*$/i);
+    if (m) {
+      const name = m[1].trim();
+      const id = m[2].trim();
+      if (id && !seen.has(id)) { seen.add(id); out.push({ id, name: name || id }); }
+    }
+  });
+  return out;
+}
+
+// Turn a raw Orcha model id into a friendly label. e.g.
+// "claude-opus-4-6" -> "Claude Opus 4.6", "claude-sonnet-4-6" -> "Claude Sonnet 4.6".
+function _prettyModel(model) {
+  const m = String(model || '').trim();
+  if (!m) return '';
+  const cl = m.match(/^claude-(opus|sonnet|haiku)-(\d+)-(\d+)/i);
+  if (cl) return 'Claude ' + cl[1][0].toUpperCase() + cl[1].slice(1) + ' ' + cl[2] + '.' + cl[3];
+  const nova = m.match(/nova-(pro|lite|micro)/i);
+  if (nova) return 'Nova ' + nova[1][0].toUpperCase() + nova[1].slice(1);
+  return m; // unknown shape — show the raw id
+}
+
+// Read the authoritative model/region for one agent from its config file.
+// Returns { model, modelLabel, region } or {} if unreadable.
+function _agentModelInfo(id) {
+  try {
+    const p = path.join(ORCHA_AGENTS_DIR, id + '.json');
+    if (!fs.existsSync(p)) return {};
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const model = (j && typeof j.model === 'string') ? j.model : '';
+    return { model, modelLabel: _prettyModel(model), region: (j && j.region) || '' };
+  } catch (_) { return {}; }
+}
+
+/**
+ * listAgents(opts) -> Promise<{ ok, agents: [{id,name,model,modelLabel,region}], cached?, error? }>
+ * Discovers agents via `orcha --list-agents`, then enriches each with the REAL
+ * model it maps to by reading ~/.orcha/agents/<id>.json (the authoritative
+ * per-agent config). Never throws; on failure returns ok:false + empty list so
+ * the caller can fall back to its built-in defaults.
+ */
+function listAgents(opts = {}) {
+  const now = Date.now();
+  if (!opts.force && _agentCache && (now - _agentCacheAt < AGENT_CACHE_MS)) {
+    return Promise.resolve({ ok: true, agents: _agentCache, cached: true });
+  }
+  return new Promise((resolve) => {
+    if (!fs.existsSync(ORCHA_CLI)) {
+      return resolve({ ok: false, agents: [], error: 'orcha CLI not found (toolbox not installed)' });
+    }
+    execFile(ORCHA_CLI, ['--list-agents'],
+      { timeout: 15000, maxBuffer: 256 * 1024, shell: process.platform === 'win32' },
+      (err, stdout, stderr) => {
+        const agents = _parseAgentLines(stdout);
+        if (!agents.length) {
+          logger.warn('[relay] listAgents: no agents parsed (' + (err ? err.message : (stderr || 'empty output')) + ')');
+          return resolve({ ok: false, agents: [], error: (err && err.message) || 'no agents found' });
+        }
+        // Enrich with the REAL model each agent maps to (from its config file).
+        agents.forEach(a => {
+          const info = _agentModelInfo(a.id);
+          a.model = info.model || '';
+          a.modelLabel = info.modelLabel || '';
+          a.region = info.region || '';
+        });
+        _agentCache = agents;
+        _agentCacheAt = Date.now();
+        logger.info('[relay] listAgents: discovered ' + agents.length + ' agent(s): ' +
+          agents.map(a => a.id + (a.model ? '=' + a.model : '')).join(', '));
+        resolve({ ok: true, agents });
+      });
+  });
+}
+
+module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setAgent, getAgent, setClaudePoolSize, getClaudePoolSize, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents };

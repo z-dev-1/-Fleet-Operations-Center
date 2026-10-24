@@ -123,6 +123,15 @@ function _unitSignalLine(r) {
     } else { age = ';no-update-logged'; }
     parts.push('OFFSITE' + age);
   }
+  // Canonical state — the ONE reconciled truth for this unit (status/source/
+  // confidence/stale/waitingOn/next-step). This is the richest grounding we
+  // have: the AI reconciled Relay vs Offsite into it. Appended last so it
+  // anchors the line; absent only for rows that predate the first canonical
+  // pass (then the raw signals above still stand on their own).
+  try {
+    const tokens = require('../orcha/canonical_state').signalTokens(r);
+    if (tokens) parts.push(tokens);
+  } catch (_) {}
   return parts.join(' ');
 }
 
@@ -143,51 +152,58 @@ function _buildPrompt(lines) {
     'You are the fleet operations coordinator\'s assistant. Review the ENTIRE fleet snapshot below and produce a PRIORITIZED daily action list that minimizes vehicle downtime.',
     '',
     'Each unit is one line of signals:',
-    '  <id> <up|DOWN> [<days>d] ["reason"] [vendor=X|NO-VENDOR] [risk=N] [@domicile] [PM-OVERDUE] [OFFSITE;last-update=Nd-ago|;no-update-logged]',
+    '  <id> <up|DOWN> [<days>d] ["reason"] [vendor=X|NO-VENDOR] [risk=N] [@domicile] [PM-OVERDUE] [OFFSITE;last-update=Nd-ago|;no-update-logged] [canon=<status> src=<source> conf=<0-1> STALE wait=<who> ai-reconciled next="<next step>"]',
+    '',
+    'The canon=... tokens are the CANONICAL STATE — the single reconciled truth for the unit (status, which source it came from, confidence, whether it is stale, who we are waiting on, and the reconciled next step). When present, trust canon= over the raw signals, and prefer its next="..." as the action to take. (It is absent only for units not yet reconciled.)',
     '',
     'FLEET SNAPSHOT (every unit; use ONLY this data — never invent a unit, number, vendor, or date):',
     lines.join('\n'),
     '',
     'Decide which units genuinely need action and write as many actions as the priorities warrant (do not pad; do not cap artificially). Favor actions that reduce downtime: assign a vendor to a DOWN unit with NO-VENDOR; follow up / escalate units down many days or stale OFFSITE with no recent update; chase overdue PM; preventive attention on high risk.',
     '',
-    'Respond with ONLY a JSON array (no prose, no code fences). Each item:',
-    '{"unitId":"<id>","action":"<short_slug e.g. assign_vendor|follow_up|escalate|schedule_pm|preventive_wr|chase_offsite|update_status>","urgency":"high|medium|low","text":"<one concise action sentence a coordinator would do today>","reason":"<the grounding fact from the snapshot>"}',
-    'Order the array by priority (highest first). If nothing needs action, return [].',
+    'Respond with ONLY strict JSON (no prose, no code fences) in exactly this shape — an object with an "actions" array:',
+    '{"actions":[{"unitId":"<id>","action":"<short_slug e.g. assign_vendor|follow_up|escalate|schedule_pm|preventive_wr|chase_offsite|update_status>","urgency":"high|medium|low","text":"<one concise action sentence a coordinator would do today>","reason":"<the grounding fact from the snapshot>"}]}',
+    'Order actions by priority (highest first). If nothing needs action, return {"actions":[]}.',
   ].join('\n');
 }
 
+// Sanitize a raw array of AI action objects into the candidate shape. Shared by
+// both the reason()-core path (which hands us data.actions) and the legacy
+// raw-text path.
+function _sanitizeActions(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter((x) => x && (x.unitId || x.text))
+    .map((x) => ({
+      unitId: String(x.unitId || '').trim(),
+      action: String(x.action || 'action').trim().toLowerCase().replace(/\s+/g, '_').slice(0, 40),
+      urgency: ['high', 'medium', 'low'].includes(String(x.urgency || '').toLowerCase()) ? String(x.urgency).toLowerCase() : 'medium',
+      text: String(x.text || '').trim().slice(0, 300),
+      reason: String(x.reason || '').trim().slice(0, 300),
+    }))
+    .filter((x) => x.text || x.unitId);
+}
+
+// Legacy raw-text parse (kept as a tolerant fallback): strips code fences, finds
+// the first [...] or {"actions":[...]} and sanitizes it.
 function _parseAiActions(raw) {
   if (!raw) return [];
-  let txt = String(raw).trim();
-  // Strip code fences if present.
-  txt = txt.replace(/^```(?:json)?/i, '').replace(/```$/,'').trim();
-  // Extract the first JSON array if there's surrounding prose.
+  let txt = String(raw).trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  // Prefer an object with an actions array.
+  const objStart = txt.indexOf('{');
+  if (objStart !== -1) {
+    const objEnd = txt.lastIndexOf('}');
+    if (objEnd > objStart) {
+      try {
+        const obj = JSON.parse(txt.slice(objStart, objEnd + 1));
+        if (obj && Array.isArray(obj.actions)) return _sanitizeActions(obj.actions);
+      } catch (_) {}
+    }
+  }
   const start = txt.indexOf('[');
   const end = txt.lastIndexOf(']');
   if (start === -1 || end === -1 || end < start) return [];
-  try {
-    const arr = JSON.parse(txt.slice(start, end + 1));
-    if (!Array.isArray(arr)) return [];
-    return arr
-      .filter((x) => x && (x.unitId || x.text))
-      .map((x) => ({
-        unitId: String(x.unitId || '').trim(),
-        action: String(x.action || 'action').trim().toLowerCase().replace(/\s+/g, '_').slice(0, 40),
-        urgency: ['high', 'medium', 'low'].includes(String(x.urgency || '').toLowerCase()) ? String(x.urgency).toLowerCase() : 'medium',
-        text: String(x.text || '').trim().slice(0, 300),
-        reason: String(x.reason || '').trim().slice(0, 300),
-      }))
-      .filter((x) => x.text || x.unitId);
-  } catch (_) { return []; }
-}
-
-async function _askAIOnce(prompt) {
-  const relay = require('../orcha/relay');
-  const raw = await Promise.race([
-    relay.ask(prompt),
-    new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), _AI_ATTEMPT_MS)),
-  ]);
-  return (typeof raw === 'string') ? raw : (raw && raw.text ? String(raw.text) : '');
+  try { return _sanitizeActions(JSON.parse(txt.slice(start, end + 1))); } catch (_) { return []; }
 }
 
 // Reasons over the full fleet. Batches the snapshot if it exceeds the prompt
@@ -206,21 +222,28 @@ async function _generateViaAI() {
   }
   if (cur.length) batches.push(cur);
 
+  const { reason } = require('../orcha/reason');
   const all = [];
   let anySuccess = false;
   for (let b = 0; b < batches.length; b++) {
     const prompt = _buildPrompt(batches[b]);
     let got = null;
     for (let attempt = 1; attempt <= _AI_ATTEMPTS && got === null; attempt++) {
-      try {
-        const txt = await _askAIOnce(prompt);
-        const actions = _parseAiActions(txt);
-        got = actions; // parsed (possibly empty) = this batch succeeded
+      // Shared reasoning core: strict-JSON object with an "actions" array,
+      // bounded timeout, never throws (ok:false on miss). On the rare chance
+      // the model emits a bare array instead of {actions:[...]}, fall back to
+      // the tolerant raw-text parse of r.raw so a good answer isn't lost.
+      const r = await reason({ prompt, expectArray: 'actions', timeoutMs: _AI_ATTEMPT_MS, label: 'tasks' });
+      let actions = null;
+      if (r.ok) actions = _sanitizeActions(r.data.actions);
+      else if (r.raw) { const salv = _parseAiActions(r.raw); if (salv.length) actions = salv; }
+      if (actions !== null) {
+        got = actions; // got a usable (possibly empty) result = batch succeeded
         anySuccess = true;
         logger.info('[tasks] AI batch ' + (b + 1) + '/' + batches.length + ': ' + actions.length + ' action(s) from ' + batches[b].length + ' units (attempt ' + attempt + ')');
-      } catch (e) {
-        logger.warn('[tasks] AI batch ' + (b + 1) + '/' + batches.length + ' attempt ' + attempt + '/' + _AI_ATTEMPTS + ' failed (' + e.message + ')');
-        if (attempt < _AI_ATTEMPTS) await new Promise((r) => setTimeout(r, 1500));
+      } else {
+        logger.warn('[tasks] AI batch ' + (b + 1) + '/' + batches.length + ' attempt ' + attempt + '/' + _AI_ATTEMPTS + ' miss (' + (r.error || 'no actions') + ')');
+        if (attempt < _AI_ATTEMPTS) await new Promise((rr) => setTimeout(rr, 1500));
       }
     }
     if (got) all.push(...got);
@@ -338,10 +361,138 @@ async function _generate() {
   return s;
 }
 
+// ── Continuous (sync-triggered) regeneration ─────────────────────────────────
+// Makes the board "always reasoning": the sync pipeline calls this after every
+// successful sync so the action list reflects the freshest fleet data — not
+// just the 7am run. THROTTLED so a 5-min rescan loop can't regenerate every
+// cycle (which would hammer the AI), and OVERLAP-GUARDED so two runs never race.
+const SYNC_REGEN_THROTTLE_MS = 25 * 60 * 1000; // regenerate at most ~every 25 min on sync
+let _generateInFlight = false;
+
+async function generateNow(opts) {
+  opts = opts || {};
+  if (_generateInFlight) { logger.info('[tasks] generateNow skipped — generation already in flight'); return null; }
+  if (!opts.force) {
+    const s = _load();
+    if (s.lastGeneratedAt) {
+      const age = Date.now() - Date.parse(s.lastGeneratedAt);
+      if (Number.isFinite(age) && age < SYNC_REGEN_THROTTLE_MS) {
+        return null; // regenerated recently — skip this sync's run (throttle)
+      }
+    }
+  }
+  _generateInFlight = true;
+  try {
+    return await _generate();
+  } catch (e) {
+    logger.warn('[tasks] generateNow failed: ' + e.message);
+    return null;
+  } finally {
+    _generateInFlight = false;
+  }
+}
+
+// ── Fleet Action execution config (per-action MODE A/B) ─────────────────────
+const _ACTION_SLUGS = ['assign_vendor', 'create_wr', 'preventive_wr', 'follow_up', 'escalate', 'chase_offsite', 'update_status', 'schedule_pm'];
+function _loadActionConfig() {
+  const c = store.load('fleetActionConfig', null);
+  const autoExecute = (c && c.autoExecute && typeof c.autoExecute === 'object') ? c.autoExecute : {};
+  const out = { autoExecute: {} };
+  for (const s of _ACTION_SLUGS) out.autoExecute[s] = !!autoExecute[s]; // default all OFF (MODE A)
+  return out;
+}
+function _saveActionConfig(patch) {
+  const cur = _loadActionConfig();
+  const next = { autoExecute: { ...cur.autoExecute } };
+  if (patch && patch.autoExecute && typeof patch.autoExecute === 'object') {
+    for (const s of _ACTION_SLUGS) if (s in patch.autoExecute) next.autoExecute[s] = !!patch.autoExecute[s];
+  }
+  store.save('fleetActionConfig', next);
+  return next;
+}
+
+// Find an AI task by id across the persisted list.
+function _findTask(id) {
+  const s = _load();
+  return (s.ai || []).find((t) => t.id === id) || (s.manual || []).find((t) => t.id === id) || null;
+}
+
+// MODE B executor: actually PERFORM the action for a task via the existing
+// engines, all of which are themselves confirm/stage-gated for live writes.
+// Returns { ok, message } / { ok:false, error }. Marks the task done on success.
+async function _executeAction(taskId) {
+  const task = _findTask(taskId);
+  if (!task) return { ok: false, error: 'task not found' };
+  const action = String(task.action || '').toLowerCase();
+  const unitId = String(task.unitId || '').trim();
+  if (!unitId) return { ok: false, error: 'task has no unit' };
+
+  const fd = store.load('fleetData', {}) || {};
+  const row = (fd.rows || []).find((r) => String(r.equipmentId || '').trim() === unitId);
+  if (!row) return { ok: false, error: 'unit ' + unitId + ' not in fleet data — sync first' };
+
+  const _markDone = () => {
+    try {
+      const s = _load();
+      const t = (s.ai || []).find((x) => x.id === taskId);
+      if (t) { t.done = true; t.resolvedAt = new Date().toISOString(); t.updatedAt = t.resolvedAt; _save(s); }
+    } catch (_) {}
+  };
+
+  try {
+    // Follow-up / escalate / chase / status-sync -> run the Relay↔Offsite
+    // reconcile for this unit; its apply layer stages (MODE B) or posts
+    // (MODE A) the comment to the Relay WR + updates the timeline. Already gated.
+    if (['follow_up', 'escalate', 'chase_offsite', 'update_status'].includes(action)) {
+      const reconcile = require('../scrapers/relay_reconcile');
+      const apply = require('../scrapers/relay_reconcile_apply');
+      const decision = await reconcile.reconcileUnit(row, {});
+      if (!decision) return { ok: false, error: 'no reconcile decision' };
+      const r = await apply.applyReconcile(decision, {});
+      _markDone();
+      const staged = (r.posts || []).filter((p) => p.action === 'staged').length;
+      const posted = (r.posts || []).filter((p) => p.action === 'posted').length;
+      return { ok: true, message: 'Reconciled ' + unitId + (posted ? ' — posted to Relay' : staged ? ' — staged ' + staged + ' update(s) for confirm' : ' — timeline updated') };
+    }
+    // Create WR / preventive WR -> real AAP work request via the existing
+    // creator. Grounded payload only (no invented fields).
+    if (['create_wr', 'preventive_wr'].includes(action)) {
+      const { createWorkRequest } = require('../scrapers/aap_create_wr');
+      const payload = {
+        unit: unitId,
+        title: (action === 'preventive_wr' ? 'Preventive — ' : '') + (row.issueSummary || row.lifecycleReason || 'Work Request').slice(0, 80),
+        issue: row.issueDetails || row.issueSummary || row.lifecycleReason || 'See fleet record',
+        vendor: row.vendor && row.vendor !== '--' ? row.vendor : '',
+        domicile: row.domicileSite || '',
+      };
+      const log = (m) => logger.info('[tasks:exec][create_wr] ' + m);
+      const r = await createWorkRequest(payload, row, log);
+      if (r && r.ok) { _markDone(); return { ok: true, message: 'Work Request created for ' + unitId + (r.workRequestId ? ' (' + r.workRequestId + ')' : '') }; }
+      return { ok: false, error: (r && r.error) || 'createWorkRequest failed' };
+    }
+    // assign_vendor / schedule_pm -> no safe headless executor; MODE B is not
+    // supported for these (they need the human form). Tell the caller to use
+    // the deep-link (MODE A) instead.
+    return { ok: false, error: 'Action "' + action + '" has no one-click executor — use the in-app flow (Do it opens it).' };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 // ── IPC ───────────────────────────────────────────────────────────────────────
 function registerDailyTasksIPC(ctx) {
   handle('tasks:list', async () => {
     return _load();
+  });
+
+  // Per-action MODE A/B config.
+  handle('tasks:get-action-config', () => _loadActionConfig());
+  handle('tasks:set-action-config', (_e, patch) => _saveActionConfig(patch || {}));
+
+  // MODE B one-click execute (renderer confirm-gates before calling this).
+  handle('tasks:execute-action', async (_e, taskId) => {
+    requireString(taskId, 'taskId');
+    return _executeAction(taskId);
   });
 
   // Add a manual task: { text, due?, unitId? }
@@ -471,4 +622,4 @@ function _startScheduler() {
   logger.info('[tasks] morning scheduler started (generates ~' + MORNING_HOUR + ':00 ' + DEFAULT_TZ + ')');
 }
 
-module.exports = { registerDailyTasksIPC };
+module.exports = { registerDailyTasksIPC, generateNow };

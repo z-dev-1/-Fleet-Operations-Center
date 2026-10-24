@@ -267,7 +267,13 @@ async function runOrchaDeepScan(mergedRows, opts) {
       // Never push an EMPTY rows array -- the renderer would REPLACE the whole
       // fleet with [] and zero the grid. Only push when we actually have rows.
       if (pushData && typeof pushData === 'function' && Array.isArray(mergedRows) && mergedRows.length) {
-        pushData({ ...payload, rows: mergedRows, _partial: 'deep-scan' });
+        // Stamp a FRESH syncedAt so the main-process _pushData stale-guard
+        // (drops pushes older than the last) never rejects this enriched push.
+        // Reusing the load-time payload.syncedAt made the deep-scan + Uptake
+        // re-merge pushes get dropped behind each other, so the grid never got
+        // the merged risk scores / PM (the priority drawer, on a different path,
+        // did). now() keeps the latest enrichment winning.
+        pushData({ ...payload, rows: mergedRows, syncedAt: new Date().toISOString(), _partial: 'deep-scan' });
       }
       logger.info('[DS] Incremental save after ' + Math.min(i + DS_BATCH_SIZE, unitsToProcess.length) + '/' + unitsToProcess.length + ' units');
     } catch (e) {
@@ -411,6 +417,9 @@ async function runOrchaDeepScan(mergedRows, opts) {
   }
 
   payload.rows = mergedRows;
+  // Fresh syncedAt so this final enriched push isn't dropped by the stale-guard
+  // behind an interleaved background push (Uptake re-merge / PM fill).
+  payload.syncedAt = new Date().toISOString();
   // Never push an EMPTY rows array (would REPLACE the fleet with [] and zero the
   // grid). A 0-unit scan has nothing to push.
   if (Array.isArray(mergedRows) && mergedRows.length) {
@@ -514,12 +523,59 @@ async function _processUnit(u, notesStore, askOrcha) {
       logger.warn('[DS] Offsite enrich failed for ' + u.equipmentId + ': ' + e.message);
     }
   }
+  // DTNA (Daimler/Freightliner) Servicetracker: its case comment feed is a
+  // Salesforce Lightning community — scrape the rendered feed (see dtna_enrich).
+  // Same offsiteText/timeline path as Decisiv; feeds the AI timeline identically.
+  if (!offsiteText && offsiteUrl && /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(offsiteUrl)) {
+    try {
+      const { enrichDtna } = require('../scrapers/dtna_enrich');
+      const dr = await enrichDtna(offsiteUrl);
+      if (dr && dr.ok && dr.offsiteText) {
+        offsiteText = dr.offsiteText.substring(0, 3000);
+        u.asistScrapedAt = dr.scrapedAt;
+        u.asistSource = 'dtna';
+        u.asistLabel = dr.bestLabel || 'DTNA Case';
+        u.asistSrUrl = offsiteUrl;
+        if (dr.offsiteStage) u.offsiteStage = dr.offsiteStage;
+        logger.info('[DS] DTNA case enriched (live) for ' + u.equipmentId + ' | ' + offsiteText.length + 'ch');
+      }
+    } catch (e) {
+      logger.warn('[DS] DTNA enrich failed for ' + u.equipmentId + ': ' + e.message);
+    }
+  }
   const today = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' });
+
+  // ── Reconciliation hint (spec §31) ──────────────────────────────────────────
+  // The Relay↔Offsite reconcile engine already established a TRUSTED canonical
+  // state for this unit (repairPhase, waitingOn, threadOfRecord, the open
+  // question, and whether a human decision is pending). Feed that to the timeline
+  // builder as GROUND TRUTH so it doesn't independently re-decide the phase from
+  // scratch — it should write a timeline CONSISTENT with the reconciled state.
+  // Best-effort + read-only: if there's no canonical record yet, the block is
+  // empty and the builder works exactly as before.
+  let reconcileHint = '';
+  try {
+    const canon = ((store.load('canonicalState', {}) || {}).units) || {};
+    const rec = canon[u.equipmentId];
+    if (rec && rec.aiReconciled) {
+      const bits = [];
+      if (rec.repairPhase && rec.repairPhase !== 'unknown') bits.push('repair phase = ' + rec.repairPhase);
+      if (rec.waitingOnFine && rec.waitingOnFine !== 'unknown') bits.push('waiting on ' + rec.waitingOnFine);
+      if (rec.threadOfRecordFine) bits.push('live conversation is in ' + rec.threadOfRecordFine);
+      if (rec.awaitingReply) bits.push('OPEN QUESTION from vendor still owed an answer: "' + String(rec.awaitingReply).slice(0, 160) + '"');
+      if (rec.decisionRequired) bits.push('a HUMAN DECISION is pending' + (rec.decisionQuestion ? ' (' + String(rec.decisionQuestion).slice(0, 160) + ')' : ''));
+      if (bits.length) {
+        reconcileHint =
+          '\nRECONCILED CANONICAL STATE (trusted — the reconcile engine already determined this; make the timeline CONSISTENT with it, do NOT contradict it):\n' +
+          '  ' + bits.join('; ') + '.\n';
+      }
+    }
+  } catch (_) { /* no canonical record — proceed without the hint */ }
 
   const prompt =
     'You are Orcha, the AI brain for Fleet Operations. Generate the OFFICIAL repair timeline for unit ' + u.equipmentId + '.\n\n' +
     'PURPOSE:\n' +
-    'This timeline is the official repair status report sent directly to business partners and management. Every line must be a professional coordinator update — NOT a message transcript.\n\n' +
+    'This timeline is the official repair status report sent directly to business partners and management. Every line must be a professional coordinator update — NOT a message transcript. Write every entry in INTERNAL third-person status-log voice (e.g. "Requested updated parts ETA from dealer; response pending." / "Dealer submitted repair estimate; internal approval pending."). NEVER write vendor-facing language ("can you confirm...", "please advise") into the timeline.\n\n' +
     'VOICE:\n' +
     'Write as a fleet maintenance coordinator providing status updates to partners. Professional, concise, actionable. Each entry answers: what is the current repair state and what happens next.\n\n' +
     'CRITICAL RULES:\n' +
@@ -601,6 +657,7 @@ async function _processUnit(u, notesStore, askOrcha) {
     'WO Created: ' + (u.created || '--') + '\n' +
     (u.serviceState ? 'WO State: ' + u.serviceState + '\n' : '') +
     (u.issueDetails ? 'Issue: ' + u.issueDetails.substring(0, 300) + '\n' : '') +
+    reconcileHint +
     '\nRELAY GARAGE CONVERSATION (Unplanned WR):\n' +
     (fullConv || '(no conversation)') + '\n\n' +
     (plannedConv ? 'RELAY GARAGE CONVERSATION (Planned WR -- ' + (u._plannedWRData.vendor || 'vendor unknown') + '):\n' + plannedConv + '\n\n' : '') +

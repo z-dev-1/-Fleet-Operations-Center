@@ -214,17 +214,44 @@ async function createWorkRequest(payload, unit, log) {
   }
   log('[CreateWR] AAID: ' + aaid);
 
-  // Resolve location
+  // Resolve location = WHERE THE UNIT ACTUALLY IS NOW.
+  //
+  // Default: the unit's home domicile geofence (correct for a repair at the
+  // yard, or a to-dealer tow where the unit starts at the yard).
+  //
+  // EXCEPTION — return-from-dealer / yard-to-yard tow: the unit is NOT at the
+  // home yard, it's at the tow PICKUP location (the dealer, for a return tow).
+  // Submitting the home geofence here was the bug — it told Relay the unit was
+  // at AVP40 when it was actually sitting at the dealer. We have the pickup
+  // address in the payload (towFrom*), so use it. We don't geocode, so instead
+  // of a false home geofence we record the pickup STREET ADDRESS in
+  // yardLocation and clear geofenceCode (no coords -> null lat/long), which is
+  // the honest "it's at this address, not a known yard" signal.
   const domicile = (unit.site || payload.domicile || 'ABE40').toUpperCase();
-  let currentLocation = DOMICILE_COORDS[domicile] || DOMICILE_COORDS['ABE40'];
+  const _dir = String(payload.towDirection || '').toLowerCase();
+  const _pickupParts = [payload.towFromStreet, payload.towFromCity, payload.towFromState, payload.towFromZip]
+    .map(s => String(s || '').trim()).filter(Boolean);
+  const _pickupAddr = _pickupParts.join(', ');
+  const _unitIsAtPickup = (_dir === 'return-to-yard' || _dir === 'yard-to-yard') && _pickupAddr.length > 0;
 
-  // Current location = where unit is now
-  currentLocation = {
-    latitude: currentLocation.latitude,
-    longitude: currentLocation.longitude,
-    yardLocation: null,
-    geofenceCode: domicile
-  };
+  let currentLocation;
+  if (_unitIsAtPickup) {
+    currentLocation = {
+      latitude: null,
+      longitude: null,
+      yardLocation: _pickupAddr,  // the dealer/pickup address the unit is at
+      geofenceCode: null          // NOT the home yard
+    };
+    log('[CreateWR] Tow direction "' + _dir + '" -- unit is at PICKUP, submitting location: ' + _pickupAddr);
+  } else {
+    const base = DOMICILE_COORDS[domicile] || DOMICILE_COORDS['ABE40'];
+    currentLocation = {
+      latitude: base.latitude,
+      longitude: base.longitude,
+      yardLocation: null,
+      geofenceCode: domicile
+    };
+  }
 
   // TOW handling: if area is TOW, always urgent + FleetNet vendor
   const isTow = (payload.areaPairs || []).some(p => p.area === 'TOW');
@@ -247,11 +274,15 @@ async function createWorkRequest(payload, unit, log) {
     log('[CreateWR] Resolved supplierId for "' + vendorName + '": ' + supplierId);
   }
 
-  // Build suggestedItems from areaPairs
+  // Build suggestedItems from areaPairs. Values are now AAP AVM CODES (the WR
+  // modal's live cascading dropdowns emit codes, not display text): area=L1
+  // code, subcategory=L2 code, subSubcategory=L3 code ('' when the L2 has no
+  // children — the common case). TOW stays a passthrough (area:'TOW',
+  // subcategory:<tow reason>) — it is NOT an avmCode and flows straight through.
   const suggestedItems = (payload.areaPairs || []).map(pair => ({
     level1: pair.area || '',
     level2: pair.subcategory || '',
-    level3: ''
+    level3: pair.subSubcategory || ''
   }));
 
   // Build comments array

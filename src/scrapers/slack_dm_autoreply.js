@@ -35,7 +35,19 @@
 
 const store = require('../store');
 const logger = require('../utils/logger').createLogger('slack_dm_autoreply');
-const { PERSONA_SYSTEM_PROMPT } = require('../orcha/slack-dm-persona');
+const { PERSONA_SYSTEM_PROMPT, COVERING_PREFACE } = require('../orcha/slack-dm-persona');
+
+// Does this Slack sender have the "Covering" permission (full assistant
+// delegation) set on their Contact Book entry? Best-effort, never throws.
+function _senderIsCovering(slackId) {
+  if (!slackId) return false;
+  try {
+    const store = require('../store');
+    const contacts = store.load('contacts', []) || [];
+    const c = contacts.find(x => x && x.slackId && String(x.slackId) === String(slackId));
+    return !!(c && c.coverMe === true && c.enabled !== false && c.identityType !== 'vendor');
+  } catch (_) { return false; }
+}
 const { trace } = require('./slack_decision_trace');
 // Shared inbound pipeline helpers: decoupled contact discovery, temporary
 // send-block registry, thread-scoped manual-reply detection, structured
@@ -46,6 +58,22 @@ let _fasShadow; try { _fasShadow = require('../orcha/fas/shadow'); } catch (_) {
 // Digital FAS UNIFIED runner — decides per-mode who owns the reply (shadow =
 // legacy; approval = queue + legacy silent; autonomous = auto-send or queue).
 let _fasRunner; try { _fasRunner = require('../orcha/fas/runner'); } catch (_) { _fasRunner = null; }
+// Unified AI Core (Phase C): every inbound Slack message is routed through
+// aiCore.handleInbound, which delegates ENTIRELY to the FAS runner (identical
+// behavior) and adds a standardized trace. If AiCore is unavailable we fall
+// back to the FAS runner directly so Slack handling never breaks. _aiInbound()
+// is the single seam the call sites use.
+let _aiCore; try { _aiCore = require('../ai/core'); } catch (_) { _aiCore = null; }
+// Phase 7: the ONE Slack inbound gateway — builds the FAS runner input from a
+// raw inbound through a single normalizer so every surface is normalized the
+// same way (isGroup/isSelf/mentioned/participants/surface). Transport/dedupe/
+// send stays here; only normalization moved to the gateway.
+let _gateway; try { _gateway = require('../slack/gateway'); } catch (_) { _gateway = null; }
+function _aiInbound(input, deps) {
+  if (_aiCore && typeof _aiCore.handleInbound === 'function') return _aiCore.handleInbound(input, deps);
+  if (_fasRunner && typeof _fasRunner.handleInbound === 'function') return _fasRunner.handleInbound(input, deps);
+  return Promise.resolve({ mode: 'disabled', letLegacyReply: true, outcome: 'no-runner' });
+}
 // Durable, atomic exactly-once inbound-message claim (spec v2). Acquired BEFORE
 // either engine processes a message so FAS + legacy can never both reply, a
 // retry/restart can't duplicate, and a technical fallback transfers ownership
@@ -197,9 +225,14 @@ async function _buildAttachmentContext(msg, downloadFn) {
           '\n--- file content end ---'
         );
       } else if (file.name) {
-        // Not a readable format (image, PDF, binary) — name it so AI knows
-        parts.push('Shared file (not readable): ' + file.name +
-          (file.mimetype ? ' (' + file.mimetype + ')' : ''));
+        // Still nothing extractable (e.g. a photo with no caption). Name it +
+        // type + size so the AI can acknowledge it and ask for specifics rather
+        // than ignore it silently.
+        const kb = file.size ? Math.round(file.size / 1024) + 'KB' : '';
+        const isImg = (file.mimetype || '').toLowerCase().startsWith('image/');
+        parts.push('Shared file (content not machine-readable): ' + file.name +
+          (file.mimetype ? ' [' + file.mimetype + (kb ? ', ' + kb : '') + ']' : '') +
+          (isImg ? ' — this is an image; ask the sender to describe it or paste key details as text if needed.' : ''));
       }
     } catch (_) {
       if (file.name) parts.push('Shared file (fetch failed): ' + file.name);
@@ -331,6 +364,94 @@ function _findFleetRow(unitToken) {
   return rows.find(r => (r.equipmentId || '').toUpperCase() === q) || null;
 }
 
+// Does this unit's CACHED data suggest it's ready/complete/picked-up? If so we
+// must re-verify with a live scrape before telling anyone, because that signal
+// can be stale (vendor said done days ago; unit still sitting / not delivered).
+function _looksReadyOrComplete(row) {
+  if (!row) return false;
+  // Structured offsite status-bar stage is the strongest signal — if the vendor
+  // tracker shows Ready, always re-verify live before anyone hears "it's ready".
+  if (String(row.offsiteStage || '').toLowerCase() === 'ready') return true;
+  const blob = [
+    row.canonicalStatus, row.serviceState, row.relayStatus, row.lifecycleReason,
+    row.completed ? 'completed' : '', row.repairStatus,
+    // Include the offsite dealer notes + comment feed: the real "asset is ready"
+    // confirmation frequently lives ONLY there, not in the AAP status fields.
+    String(row.asistNotes || '').slice(-600),
+    String(row.fullConversation || '').slice(-600),
+    String(row.repairTimeline || '').slice(-400),
+  ].join(' ').toLowerCase();
+  return /ready[ _-]?for[ _-]?pickup|ready to pick|awaiting pickup|picked up|asset is ready|unit is ready|\bcomplete|completed|repair done|work complete|\bclosed\b|resolved|back in service|available/.test(blob);
+}
+
+// VERIFY-BEFORE-CLAIMING: if a unit's cached repair data is stale OR already
+// reads ready/complete, re-scrape THAT unit live (force) so the assistant
+// answers from fresh, verified data — never announcing a unit done off stale
+// cache. Reuses the exact scrape+merge+canonical-reconcile the relay:refresh-unit
+// IPC does, run in-process (the DM engine is in the main process). Best-effort:
+// any failure degrades to the existing cached row (never blocks the reply).
+const _VERIFY_FRESH_MS = 30 * 60 * 1000; // re-verify if cache older than 30 min
+let _dmVerifyLock = false;
+async function _verifyUnitFresh(unitToken, doLog) {
+  const log = doLog || (() => {});
+  const row = _findFleetRow(unitToken);
+  if (!row) return; // unknown unit — nothing to verify
+
+  const id = row.equipmentId;
+  const cache = store.load('relayCache', {})[id];
+  const ageMs = cache && cache._cachedAt ? (Date.now() - Number(cache._cachedAt)) : Infinity;
+  const stale = ageMs > _VERIFY_FRESH_MS;
+  const readyish = _looksReadyOrComplete(row);
+
+  // Only pay for a live scrape when it matters: the unit reads ready/complete
+  // (must confirm) OR the cache is stale (status may have changed).
+  if (!readyish && !stale) return;
+  if (_dmVerifyLock) { log('[SlackDM] verify skipped — another verify in progress'); return; }
+
+  _dmVerifyLock = true;
+  try {
+    log('[SlackDM] verifying ' + id + ' live (readyish=' + readyish + ' stale=' + stale + ')…');
+    const { scrapeUnitPage, mergeRelayIntoRows } = require('./relay');
+    const relayCache = store.load('relayCache', {});
+    delete relayCache[id]; // force a guaranteed live scrape (no within-TTL reuse)
+    const res = await scrapeUnitPage(id, '', relayCache);
+    if (!res) { log('[SlackDM] verify: scrape returned nothing for ' + id); return; }
+    relayCache[id] = res;
+    store.save('relayCache', relayCache);
+
+    // Re-merge the fresh entry into fleetData so buildFleetContext sees it.
+    const fd = store.load('fleetData', {});
+    const rows = Array.isArray(fd.rows) ? fd.rows : [];
+    const notesStore = store.load('notesStore', {});
+    const merged = mergeRelayIntoRows(rows, { [id]: res }, notesStore);
+    fd.rows = merged;
+    store.save('fleetData', fd);
+
+    // Re-run canonical reconciliation for just this unit so canonicalStatus
+    // reflects the fresh serviceState/completed (best-effort).
+    try {
+      const freshRow = merged.find((r) => (r.equipmentId || '').toUpperCase() === String(id).toUpperCase());
+      if (freshRow) {
+        const canonical = require('../orcha/canonical_state');
+        const built = canonical.buildAll([freshRow], {});
+        const rec = built && built.units && built.units[id];
+        if (rec) {
+          // Persist the canonical record and mirror its fields onto the stored
+          // fleet row so buildFleetContext reads the fresh canonicalStatus.
+          store.save('canonicalState', Object.assign(store.load('canonicalState', {}), { [id]: rec }));
+          Object.assign(freshRow, canonical.mirrorFields(rec));
+          store.save('fleetData', fd); // freshRow is a ref into fd.rows
+        }
+      }
+    } catch (e) { log('[SlackDM] verify: canonical reconcile skipped — ' + e.message); }
+    log('[SlackDM] verify complete for ' + id);
+  } catch (e) {
+    log('[SlackDM] verify failed for ' + unitToken + ' — ' + e.message);
+  } finally {
+    _dmVerifyLock = false;
+  }
+}
+
 // ── Create-WR drafting (Bucket 3, Option A: draft + Z-only approval) ────────
 // FEATURE (2026-08-27): grounding / predictive-maintenance alerts routinely ask
 // "please create the work order following the predictive maintenance process".
@@ -440,7 +561,19 @@ function _maybeDraftWR(unitToken) {
 // Given the resolved fleet row, decide whether an auto-flip is allowed and
 // perform it. Returns an object that overrides the draft reply/scope, or null
 // if this isn't actually a flip we should handle (let the normal AI reply stand).
-async function _maybeAutoFlip(unitToken, tagPrefix) {
+//
+// PHASE D (spec #5/#12): the actual lifecycle mutation NO LONGER calls
+// setLifecycleState() directly. It is routed through the Digital FAS verified
+// executor (MOVE_UNIT), which enforces requester-authorization, the power-unit
+// gate, idempotency, and — critically — SOURCE READ-BACK VERIFICATION before
+// any success is claimed. "Done — flipped" is only said when the executor
+// returns a VERIFIED done. If the write may have landed but could not be
+// verified, we return EXECUTION_UNCERTAIN wording and escalate — never a blind
+// "Done". The AI/Slack path only PROPOSES; Digital FAS is the sole executor.
+//
+// senderId/senderName identify the ORIGINAL REQUESTER so the executor can gate
+// the action on that person's real permissions (never widened here).
+async function _maybeAutoFlip(unitToken, tagPrefix, senderId, senderName) {
   const row = _findFleetRow(unitToken);
   // Unknown unit — let the AI's normal reply handle it (it'll ask for the unit #).
   if (!row) return null;
@@ -485,42 +618,105 @@ async function _maybeAutoFlip(unitToken, tagPrefix) {
     };
   }
 
-  // Allowed — perform the flip to Active / Healthy (UI convention).
+  // Allowed to PROPOSE the flip — route through the Digital FAS verified
+  // executor instead of mutating AAP directly. The executor re-checks the
+  // requester's authorization + the power-unit gate, applies idempotency, runs
+  // the real MOVE_UNIT action, then VERIFIES via AAP read-back. We report the
+  // outcome truthfully based on the executor's status — never "Done" unless the
+  // source confirmed it.
   try {
-    const { setLifecycleState } = require('./setLifecycle');
-    logger.info(`[SlackDM] Auto-flip: ${unitId} ${state}/${reason} -> Active (Healthy)`);
-    const res = await setLifecycleState({ equipmentId: unitId, assetUrl: row.assetUrl, state: 'Active', reason: 'Healthy' });
-    if (res && res.success) {
+    let executor, profilesMod;
+    try { executor = require('../orcha/fas/executor'); } catch (_) { executor = null; }
+    try { profilesMod = require('../orcha/fas/sender-profiles'); } catch (_) { profilesMod = null; }
+    if (!executor || !profilesMod) {
+      // Digital FAS layer unavailable — do NOT fall back to a direct mutation.
+      // Escalate for manual action rather than bypass verification.
+      logger.warn(`[SlackDM] Auto-flip: Digital FAS executor unavailable for ${unitId} — escalating (no direct mutation)`);
       return {
-        reply: `Done — ${unitId} is flipped back to active 👍`,
-        inScope: true,
-        category: null,
-        title: null,
-        _flip: { unitId, action: 'flipped' },
+        reply: `I can't complete the flip on ${unitId} automatically right now — I'll take care of it and follow up.`,
+        inScope: false, category: 'action', title: `Flip pending (executor unavailable): ${unitId}`,
+        _flip: { unitId, action: 'executor-unavailable' },
       };
     }
-    // Automation ran but AAP didn't confirm — escalate with the failure detail.
+
+    // Resolve the ORIGINAL REQUESTER's profile + an immutable snapshot so the
+    // executor gates on THEIR real permissions (spec #5/#8). The AI/Slack path
+    // can never widen them. The approver context is the same requester here
+    // (an internal operator's own DM, or a scoped carrier) — the executor
+    // enforces lifecycle 3-state + per-unit scope regardless.
+    const requesterProfile = profilesMod.resolveSender(senderId || '', senderName || '');
+    const requesterSnapshot = {
+      slackId: requesterProfile.slackId || senderId || '',
+      contactId: requesterProfile.contactId || null,
+      name: requesterProfile.name || senderName || '',
+      identityType: requesterProfile.type,
+      enabled: requesterProfile.enabled !== false,
+      operators: (requesterProfile.operators || []).slice(),
+      domiciles: (requesterProfile.domiciles || []).slice(),
+      allowedDataCategories: (requesterProfile.allowedDataCategories || []).slice(),
+      permittedRequestTypes: (requesterProfile.permittedRequestTypes || []).slice(),
+      lifecyclePermission: requesterProfile.lifecyclePermission || 'not_allowed',
+      createWrPermission: requesterProfile.createWrPermission || 'not_allowed',
+      capturedAt: new Date().toISOString(),
+    };
+
+    logger.info(`[SlackDM] Auto-flip via Digital FAS: ${unitId} ${state}/${reason} -> Active (Healthy) [requester=${requesterSnapshot.slackId || 'unknown'}]`);
+    const r = await executor.executeVerified(
+      'MOVE_UNIT',
+      { unit: unitId, assetUrl: row.assetUrl, state: 'Active', reason: 'Healthy', slackId: senderId || '' },
+      { profile: requesterProfile, requesterSnapshot }
+    );
+
+    // VERIFIED success — the executor confirmed the state via AAP read-back
+    // (or an idempotent prior done). Only now may we say "Done".
+    if (r && r.status === 'done' && r.verified) {
+      return {
+        reply: `Done — ${unitId} is flipped back to active 👍`,
+        inScope: true, category: null, title: null,
+        _flip: { unitId, action: 'flipped', verified: true },
+      };
+    }
+
+    // EXECUTION_UNCERTAIN — the write may have landed but could not be verified
+    // yet (deferred AAP read-back / awaiting sync reconcile). NEVER claim
+    // success. Tell the truth and escalate so it's reconciled/retried safely;
+    // the executor holds it in a verifying state (not re-applied).
+    if (r && (r.status === 'verifying' || r.deferred)) {
+      return {
+        reply: `I submitted the flip on ${unitId} but couldn't confirm it actually landed yet — I'll verify it went through and follow up before I call it complete.`,
+        inScope: false, category: 'action', title: `Flip EXECUTION_UNCERTAIN: ${unitId}`,
+        _flip: { unitId, action: 'execution-uncertain', status: r.status },
+      };
+    }
+
+    // BLOCKED by authorization / power-unit gate — explain, do not flip.
+    if (r && r.status === 'blocked') {
+      return {
+        reply: `I can't flip ${unitId} automatically — ${r.error || 'it is not authorized for an automatic lifecycle change'}. I'll review it and follow up.`,
+        inScope: false, category: 'action', title: `Flip blocked: ${unitId}`,
+        _flip: { unitId, action: 'blocked-exec', reason: r.error },
+      };
+    }
+
+    // FAILED / UNVERIFIED — the action ran but did not succeed or did not
+    // verify. Truthful failure, escalate.
     return {
-      reply: `Tried to flip ${unitId} but it didn't go through (${(res && res.message) || 'AAP did not confirm'}). ` +
+      reply: `Tried to flip ${unitId} but it didn't go through (${(r && r.error) || 'not confirmed'}). ` +
              `Let me look into it and get it flipped.`,
-      inScope: false,
-      category: 'action',
-      title: `Flip failed: ${unitId}`,
-      _flip: { unitId, action: 'failed', message: res && res.message },
+      inScope: false, category: 'action', title: `Flip failed: ${unitId}`,
+      _flip: { unitId, action: 'failed', status: r && r.status, message: r && r.error },
     };
   } catch (e) {
     logger.warn(`[SlackDM] Auto-flip threw for ${unitId}: ${e.message}`);
     return {
       reply: `Ran into a snag flipping ${unitId} — I'll get it sorted and follow up.`,
-      inScope: false,
-      category: 'action',
-      title: `Flip error: ${unitId}`,
+      inScope: false, category: 'action', title: `Flip error: ${unitId}`,
       _flip: { unitId, action: 'error', message: e.message },
     };
   }
 }
 
-async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
+async function _classifyAndDraft(messageText, historyMsgs, groupContext, covering) {
   // historyMsgs: optional array of strings ("Speaker: text") from recent
   // conversation, oldest-first, to give the AI context before replying.
   let contextBlock = '';
@@ -593,9 +789,21 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext) {
       }
     }
   }
-  const fleetContext = buildFleetContext(_fleetLookupText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true });
+  // VERIFY-BEFORE-CLAIMING: if the message is about a unit that reads
+  // ready/complete (or whose cache is stale), re-scrape it live FIRST so the
+  // AI answers from fresh, verified data — not stale "unit done" cache.
+  const _verifyUnit = _unitTokenIn(_fleetLookupText) || _inheritedUnitUsed;
+  if (_verifyUnit) {
+    try { await _verifyUnitFresh(_verifyUnit); } catch (_) { /* best-effort */ }
+  }
 
-  const prompt = _contextReset + PERSONA_SYSTEM_PROMPT + timeContext + groupBlock + contextBlock + _inheritedUnitNote + fleetContext + _jsonReminder + '\n\nIncoming DM:\n' + messageText;
+  // allowRoster: this is Z's own "just me" assistant (internal), so FAS roster
+  // personnel data may be surfaced — but only when the message is actually a
+  // roster question (see _buildRosterContext), never dumped wholesale.
+  const fleetContext = buildFleetContext(_fleetLookupText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true, allowRoster: true });
+
+  const _persona = covering ? (COVERING_PREFACE + PERSONA_SYSTEM_PROMPT) : PERSONA_SYSTEM_PROMPT;
+  const prompt = _contextReset + _persona + timeContext + groupBlock + contextBlock + _inheritedUnitNote + fleetContext + _jsonReminder + '\n\nIncoming DM:\n' + messageText;
   // FIX (2026-07-24): was using sendOrchaChat() (direct WS-only, 90s timeout,
   // no fallback). If the Orcha WS server is not running or slow, EVERY DM call
   // timed out and sent the canned fallback reply. Switch to relay.ask() which
@@ -731,7 +939,19 @@ async function pollDMAutoReplyOnce(log) {
   const config = getDMAutoReplyConfig();
   if (!config.enabled) { doLog('[SlackDM] Disabled — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
 
-  const { listOpenDMs, readMessages, readThreadReplies, sendToChannel, checkLiveAuth, resolveUserName, downloadFileContent } = require('./slack_send');
+  const { listOpenDMs, readMessages, readThreadReplies, sendToChannel: _rawSendToChannel, checkLiveAuth, resolveUserName, downloadFileContent, SELF_REPLY_MARKER } = require('./slack_send');
+  const _SELF_REPLY_MARKER = SELF_REPLY_MARKER || '\u200B\u2060';
+  // Set of channel ids that are the SELF-DM (your own "just me" DM). Any reply
+  // posted into one gets the invisible marker prefixed so the next poll skips
+  // it (otherwise the reply, authored by your own user id, would be reprocessed
+  // forever). We wrap sendToChannel ONCE here so every call site is covered
+  // without threading the marker through each one.
+  const _selfDmIds = new Set();
+  const sendToChannel = (channelId, text, threadTs) => {
+    const t = (channelId && _selfDmIds.has(channelId) && typeof text === 'string' && text.indexOf(_SELF_REPLY_MARKER) === -1)
+      ? _SELF_REPLY_MARKER + text : text;
+    return _rawSendToChannel(channelId, t, threadTs);
+  };
 
   const auth = await checkLiveAuth();
   if (!auth || !auth.authenticated) { doLog('[SlackDM] Slack not authenticated — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
@@ -777,6 +997,10 @@ async function pollDMAutoReplyOnce(log) {
       });
     })
   );
+
+  // Register self-DM channel ids so the wrapped sendToChannel marks replies
+  // posted there (loop prevention for the self-DM link/attachment feature).
+  dms.forEach(d => { if (d && d.isSelf && d.channelId) _selfDmIds.add(d.channelId); });
 
   // ── PHASE 2: sequential process ──────────────────────────────────────────
   for (let _di = 0; _di < dms.length; _di++) {
@@ -825,7 +1049,13 @@ async function pollDMAutoReplyOnce(log) {
         // message BEFORE it so the newest one flows into newMsgs and gets a
         // reply. Group DMs keep the safe backlog-baseline behavior.
         const _newest = messages[0];
-        const _newestFromOther = _newest && _newest.userId && _newest.userId !== myUserId;
+        // self-DM: "from other" doesn't apply (it's you), so qualify on the
+        // newest being YOUR link/attachment message instead.
+        const _newestFromOther = _newest && _newest.userId && (dm.isSelf
+          ? (_newest.userId === myUserId &&
+             ((Array.isArray(_newest.files) && _newest.files.length) || /https?:\/\//i.test(_newest.text || '')) &&
+             (typeof _newest.text !== 'string' || _newest.text.indexOf(_SELF_REPLY_MARKER) === -1))
+          : _newest.userId !== myUserId);
         const _newestAgeMs = _newest ? (Date.now() - parseFloat(_newest.ts) * 1000) : Infinity;
         const _replyToFirst = !dm.isGroup && _newestFromOther && _newestAgeMs < 10 * 60 * 1000;
         if (_replyToFirst) {
@@ -843,9 +1073,29 @@ async function pollDMAutoReplyOnce(log) {
       }
       const _seenNow = seen;
 
+      // SELF-DM EXCEPTION: in your own "just me" DM, every message is authored
+      // by your user id, so the normal `userId !== myUserId` skip would drop
+      // everything. Instead, in the self-DM we PROCESS your messages — but only
+      // when they carry a link or a file attachment (so casual notes-to-self
+      // don't trigger the agent), and NEVER the app's own replies (which we tag
+      // with an invisible marker so we can recognize + skip them, preventing an
+      // infinite reply-to-self loop). Any other DM keeps the strict skip.
+      const _hasLinkOrFile = (m) =>
+        (m && Array.isArray(m.files) && m.files.length > 0) ||
+        /(<https?:\/\/|\bhttps?:\/\/)/i.test((m && m.text) || '');
+      const _isOwnMarkedReply = (m) =>
+        typeof (m && m.text) === 'string' && m.text.indexOf(_SELF_REPLY_MARKER) !== -1;
+
       const newMsgs = messages
         .filter(m => parseFloat(m.ts) > parseFloat(_seenNow.lastSeenTs))
-        .filter(m => m.userId && m.userId !== myUserId) // skip our own + system/empty-author messages
+        .filter(m => {
+          if (!m || !m.userId) return false;              // system/empty-author
+          if (dm.isSelf) {
+            // self-DM: keep your link/attachment messages, drop our own replies.
+            return !_isOwnMarkedReply(m) && _hasLinkOrFile(m);
+          }
+          return m.userId !== myUserId;                   // all other DMs: skip our own
+        })
         .reverse()
         .slice(0, MAX_MESSAGES_PER_POLL);
 
@@ -974,11 +1224,14 @@ async function pollDMAutoReplyOnce(log) {
             // contents — previously the FAS path was blind to these, which
             // thinned its answers and lowered its confidence.
             const _fasAttach = await _buildAttachmentContext(msg, downloadFileContent);
-            const _fr = await _fasRunner.handleInbound({
-              engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
-              channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
-              isGroup: !!dm.isGroup, conversation: historyMsgs, attachments: _fasAttach,
-            }, { sendToChannel });
+            const _fr = await _aiInbound(_gateway
+              ? _gateway.buildRunnerInput({ engine: 'dm', conv: dm, message: msg }, { conversation: historyMsgs, attachments: _fasAttach })
+              : {
+                engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
+                channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
+                isGroup: !!dm.isGroup, conversation: historyMsgs, attachments: _fasAttach,
+                files: msg.files || [], isSelf: !!dm.isSelf,
+              }, { sendToChannel });
             if (_fr && _fr.letLegacyReply) {
               // Runner asked us to let the legacy engine reply (error-failsafe /
               // ai-failed-shadow). Fall through — do NOT mark FAS-handled and do
@@ -1005,6 +1258,17 @@ async function pollDMAutoReplyOnce(log) {
               _markRetry(msg.ts);
               inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'retry', reason: inbound.REASON.SEND_FAILED_RETRY });
               continue;
+            } else if (_fr && _fr.outcome === 'no-reply') {
+              // FAS decided a human in its role would NOT reply here (spec
+              // #4/#5). This is a TERMINAL, deliberate silence — nothing queued,
+              // nothing sent, and legacy must stay silent too. Mark the claim
+              // delivered-as-silence so no retry/legacy path resurrects it.
+              if (_inboundClaim && _claimKey) _inboundClaim.markDelivered(_claimKey, 'no-reply:' + ((_fr.decision && _fr.decision.reasonCode) || 'NO_RESPONSE_NEEDED'));
+              _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
+                ts: msg.ts, replyTs: null, question: msg.text, reply: '(FAS chose silence: ' + ((_fr.decision && _fr.decision.reasonCode) || 'NO_RESPONSE_NEEDED') + ')',
+                inScope: true, category: null, title: 'FAS no-reply', createdAt: new Date().toISOString(), status: 'fas-no-reply' });
+              doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) chose silence for ${msg.ts} (${(_fr.decision && _fr.decision.reasonCode) || 'NO_RESPONSE_NEEDED'}) — legacy suppressed`);
+              inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'sent', reason: inbound.REASON.SENT, detail: 'no-reply' });
             } else {
               // Queued for approval, manual-review (AI failure), or clarify. FAS
               // RETAINS ownership of the durable claim (legacy must never take a
@@ -1017,13 +1281,33 @@ async function pollDMAutoReplyOnce(log) {
               inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'queued', reason: inbound.REASON.QUEUED_REVIEW, detail: (_fr && _fr.outcome) || 'handled' });
             }
           } catch (e) {
-            // FAS threw -> genuine technical failure. Transfer the durable claim
-            // to legacy and fall through to the legacy reply below (do NOT mark
-            // handled), so an AI/runner failure still gets a real reply attempt.
-            _fasOwned = false;
-            if (_inboundClaim && _claimKey) _inboundClaim.transferToLegacy(_claimKey, 'fas-exception: ' + e.message);
-            doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) threw on ${msg.ts}: ${e.message} — falling back to legacy reply`);
-            inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'ai-failed', reason: inbound.REASON.LEGACY_FALLBACK, detail: e.message });
+            // FAS threw -> genuine technical failure.
+            // PHASE 8: when legacy reasoning is RETIRED (default), the legacy
+            // persona brain must NOT answer even on a FAS failure — a broken AI
+            // goes to MANUAL REVIEW (visible, recoverable), not a second
+            // competing brain. FAS retains the claim. Only when the retirement
+            // switch is OFF (temporary rollback) do we fall back to legacy.
+            let _retire = true;
+            try { _retire = require('../orcha/fas/config').get().retireLegacyReasoning !== false; } catch (_) {}
+            if (_retire) {
+              if (_inboundClaim && _claimKey) _inboundClaim.markOwnedQueued(_claimKey);
+              try { require('../orcha/fas/runner')._queueManualReview
+                ? require('../orcha/fas/runner')._queueManualReview({ engine: 'dm', slackId: msg.userId, senderName: dm.name, channelId: dm.channelId, ts: msg.ts, text: msg.text }, { decision: 'clarify' }, 'FAS runtime error: ' + e.message)
+                : null; } catch (_) {}
+              _appendReplyLog({ id: dm.channelId + ':' + msg.ts, channelId: dm.channelId, channelName: dm.name,
+                ts: msg.ts, replyTs: null, question: msg.text, reply: '(FAS error — manual review; legacy retired)',
+                inScope: true, category: 'fas-error', title: 'FAS error — manual review', createdAt: new Date().toISOString(), status: 'fas-error-manual-review' });
+              doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) threw on ${msg.ts}: ${e.message} — legacy RETIRED, queued manual review`);
+              inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'queued', reason: inbound.REASON.QUEUED_REVIEW, detail: 'fas-error (legacy retired)' });
+              // _fasOwned stays true -> watermark advances, legacy never runs.
+            } else {
+              // ROLLBACK PATH (retireLegacyReasoning:false): transfer the claim
+              // to legacy and fall through to the legacy reply below.
+              _fasOwned = false;
+              if (_inboundClaim && _claimKey) _inboundClaim.transferToLegacy(_claimKey, 'fas-exception: ' + e.message);
+              doLog(`[SlackDM] ${dm.name}: FAS(${_fasMode}) threw on ${msg.ts}: ${e.message} — falling back to legacy reply`);
+              inbound.lifecycle({ engine: 'dm', channelId: dm.channelId, ts: msg.ts, senderId: msg.userId, stage: 'ai-failed', reason: inbound.REASON.LEGACY_FALLBACK, detail: e.message });
+            }
           }
           if (_fasOwned) {
             _saveThreadSeen(dm.channelId, dm.name, msg.ts, !!dm.isGroup);
@@ -1094,7 +1378,8 @@ async function pollDMAutoReplyOnce(log) {
         // Enrich AI prompt with any links or files attached to this message
         const attachCtx = await _buildAttachmentContext(msg, downloadFileContent);
         const msgTextWithAttach = (msg.text || '') + attachCtx;
-        const draft = await _classifyAndDraft(msgTextWithAttach, historyMsgs, groupContext);
+        const _covering = _senderIsCovering(msg.userId);
+        const draft = await _classifyAndDraft(msgTextWithAttach, historyMsgs, groupContext, _covering);
 
         // AI explicitly held (identified a repeat, "Holding, unchanged." etc.) — skip
         // send and log entry; just let the watermark advance past this message.
@@ -1162,7 +1447,7 @@ async function pollDMAutoReplyOnce(log) {
         // overrides the AI draft so the reply reflects what actually happened.
         const _flipUnit = _detectFlipRequest(msg.text || '', historyMsgs);
         if (_flipUnit) {
-          const flipResult = await _maybeAutoFlip(_flipUnit, msg.userId ? `<@${msg.userId}> ` : '');
+          const flipResult = await _maybeAutoFlip(_flipUnit, msg.userId ? `<@${msg.userId}> ` : '', msg.userId, dm.name);
           if (flipResult) {
             draft.reply    = flipResult.reply;
             draft.inScope  = flipResult.inScope;
@@ -1181,12 +1466,14 @@ async function pollDMAutoReplyOnce(log) {
         // never suppress or replace the legacy reply here.
         if (_fasRunner && _fasMode === 'shadow') {
           try {
-            await _fasRunner.handleInbound({
-              engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
-              channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
-              isGroup: !!dm.isGroup, conversation: historyMsgs, actualReply: draft.reply,
-              attachments: attachCtx,
-            });
+            await _aiInbound(_gateway
+              ? _gateway.buildRunnerInput({ engine: 'dm', conv: dm, message: msg }, { conversation: historyMsgs, attachments: attachCtx, actualReply: draft.reply })
+              : {
+                engine: 'dm', slackId: msg.userId, senderName: dm.name, channelName: dm.name,
+                channelId: dm.channelId, threadTs: msg.threadTs || null, ts: msg.ts, text: msg.text,
+                isGroup: !!dm.isGroup, conversation: historyMsgs, actualReply: draft.reply,
+                attachments: attachCtx, files: msg.files || [], isSelf: !!dm.isSelf,
+              });
           } catch (_e) { /* shadow comparison must never break the live path */ }
         }
 
@@ -1386,11 +1673,14 @@ async function pollDMAutoReplyOnce(log) {
                 // recoverable review item and commits nothing — we do NOT advance
                 // latestThreadReplyTs so this reply is retried next poll.
                 const _fasAttachT = await _buildAttachmentContext(reply, downloadFileContent);
-                const _fr = await _fasRunner.handleInbound({
-                  engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
-                  channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
-                  isGroup: !!dm.isGroup, conversation: threadContext, attachments: _fasAttachT,
-                }, { sendToChannel });
+                const _fr = await _aiInbound(_gateway
+                  ? _gateway.buildRunnerInput({ engine: 'dm-thread', conv: dm, message: reply, parentTs: parentMsg.ts, isThreadReply: true }, { conversation: threadContext, attachments: _fasAttachT })
+                  : {
+                    engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
+                    channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
+                    isGroup: !!dm.isGroup, conversation: threadContext, attachments: _fasAttachT,
+                    files: reply.files || [], isSelf: !!dm.isSelf,
+                  }, { sendToChannel });
                 if (_fr && _fr.outcome === 'auto-send-failed') {
                   // Delivery failed — nothing committed; retry this reply later.
                   doLog(`[SlackDM] ${dm.name}: FAS autonomous thread delivery failed ${reply.ts} — deferring for retry`);
@@ -1422,7 +1712,8 @@ async function pollDMAutoReplyOnce(log) {
             // Enrich AI prompt with any links or files in this thread reply
             const attachCtxT = await _buildAttachmentContext(reply, downloadFileContent);
             const replyTextWithAttach = (reply.text || '') + attachCtxT;
-            const draft = await _classifyAndDraft(replyTextWithAttach, threadContext, groupContextT);
+            const _coveringT = _senderIsCovering(reply.userId);
+            const draft = await _classifyAndDraft(replyTextWithAttach, threadContext, groupContextT, _coveringT);
 
             // PARITY WITH TOP-LEVEL (2026-09-02): thread replies now get the same
             // protections — AI held/skip, AI-unavailable fallback (retry, no
@@ -1447,12 +1738,14 @@ async function pollDMAutoReplyOnce(log) {
             // In Shadow, record the comparison only — never suppress/replace.
             if (_fasRunner && _fasModeT === 'shadow') {
               try {
-                await _fasRunner.handleInbound({
-                  engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
-                  channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
-                  isGroup: !!dm.isGroup, conversation: threadContext, actualReply: draft.reply,
-                  attachments: attachCtxT,
-                });
+                await _aiInbound(_gateway
+                  ? _gateway.buildRunnerInput({ engine: 'dm-thread', conv: dm, message: reply, parentTs: parentMsg.ts, isThreadReply: true }, { conversation: threadContext, attachments: attachCtxT, actualReply: draft.reply })
+                  : {
+                    engine: 'dm-thread', slackId: reply.userId, senderName: dm.name, channelName: dm.name,
+                    channelId: dm.channelId, threadTs: parentMsg.ts, ts: reply.ts, text: reply.text,
+                    isGroup: !!dm.isGroup, conversation: threadContext, actualReply: draft.reply,
+                    attachments: attachCtxT, files: reply.files || [], isSelf: !!dm.isSelf,
+                  });
               } catch (_e) { /* shadow comparison must never break the live path */ }
             }
 
@@ -1601,4 +1894,9 @@ module.exports = {
   // Test-only: expose the restored thread-reply baseline so restart-recovery
   // (loading slackDMThreadReplyCount at startup) can be asserted.
   _getThreadReplyCountForTest: () => _threadReplyCount,
+  // Test-only (Phase D): the auto-flip handler, now routed through the Digital
+  // FAS verified executor. Exposed so the no-direct-mutation + verified-success
+  // + EXECUTION_UNCERTAIN behavior can be asserted.
+  _maybeAutoFlip,
+  _detectFlipRequest,
 };

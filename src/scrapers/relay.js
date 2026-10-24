@@ -11,7 +11,7 @@
 const { BrowserWindow } = require('electron');
 const { P } = require('../config/paths');
 const logger = require('../utils/logger').createLogger('relay');
-const { enrichVolvoAsist, isUpgrade, SR_RE: SR_RE_MOD, openAndScrape } = require('./asist_enrich');
+const { enrichVolvoAsist, isUpgrade, SR_RE: SR_RE_MOD, openAndScrape, openAndScrapeEstimate } = require('./asist_enrich');
 const { partitionForUrl } = require('../orcha/auto-login');
 const { withRetry } = require('../utils/retry');    // H-1: per-unit retry
 // MODULE LOAD PROBE
@@ -480,7 +480,12 @@ async function scrapeGarageList(url, equipmentId, partition) {
     const win = new BrowserWindow({
       show:        false,
       skipTaskbar: true,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, partition }
+      // Real painted viewport, offscreen (see note at the primary scrape
+      // window). Defensive hardening so lazy portal content can't silently
+      // fail to render in a hidden/unsized window.
+      width: 1400, height: 900, x: -4000, y: -4000,
+      paintWhenInitiallyHidden: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, partition, backgroundThrottling: false }
     });
 
     const done = (result) => {
@@ -680,14 +685,24 @@ async function resolveServiceUUID(equipmentId, partition) {
 
 // Pick best offsite URL — prefer estimates over service_requests, DTNA always wins for its domain.
 // No vendor-name dependency: trigger on URL presence alone.
+//
+// NEWEST-WINS (2026-10): the links are collected by scanning the Relay
+// conversation top-to-bottom, and that feed is OLDEST-FIRST, so when a unit's
+// offsite case is CANCELLED and a NEW one is opened the newer estimate/SR link
+// appears LATER in the comments. Picking [0] (the first/oldest) left Split View
+// pointing at the dead case (observed on 322468: stored the cancelled
+// 21262927 even though the live 21318595 was right there in the comments).
+// Prefer the LAST (most recent) link of each kind so we follow the current
+// case. Preference order between kinds (estimate > request > dtna) is unchanged.
 function pickOffsiteFromConversation(convData) {
   if (!convData) return null;
-  // Decisiv estimates (preferred)
-  if (convData.estimateLinks && convData.estimateLinks.length) return convData.estimateLinks[0];
-  // Decisiv service_requests (fallback)
-  if (convData.requestLinks  && convData.requestLinks.length)  return convData.requestLinks[0];
-  // DTNA Servicetracker
-  if (convData.dtnaLinks     && convData.dtnaLinks.length)     return convData.dtnaLinks[0];
+  const last = (arr) => (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null;
+  // Decisiv estimates (preferred) — newest in the thread.
+  if (convData.estimateLinks && convData.estimateLinks.length) return last(convData.estimateLinks);
+  // Decisiv service_requests (fallback) — newest in the thread.
+  if (convData.requestLinks  && convData.requestLinks.length)  return last(convData.requestLinks);
+  // DTNA Servicetracker — newest in the thread.
+  if (convData.dtnaLinks     && convData.dtnaLinks.length)     return last(convData.dtnaLinks);
   return null;
 }
 
@@ -700,7 +715,12 @@ async function scrapeServiceByUUID(uuid, partition) {
     let settled = false;
     const win = new BrowserWindow({
       show: false, skipTaskbar: true,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, partition }
+      // Real painted viewport, offscreen (see note at the primary scrape
+      // window). Defensive hardening so lazy portal content can't silently
+      // fail to render in a hidden/unsized window.
+      width: 1400, height: 900, x: -4000, y: -4000,
+      paintWhenInitiallyHidden: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, partition, backgroundThrottling: false }
     });
     const done = (data) => {
       if (settled) return;
@@ -759,16 +779,22 @@ async function scrapeServiceByUUID(uuid, partition) {
             logger.info('[Relay] scrapeServiceByUUID conv fetch failed for', uuid.slice(0,8), _ce2.message);
           }
 
-          // Phase 3.5 (secondary): if the offsite link is a Volvo/PACCAR ASIST
-          // service_request, chase it to the real Case/Fleet-Estimate so the
-          // secondary WR's Split View opens the right page like the primary does.
+          // Phase 3.5 (secondary): chase a Volvo/PACCAR ASIST service_request to
+          // its Case/Fleet-Estimate AND, for a direct /fleet/estimates/ link,
+          // open the estimate page to read its dealer comment thread — same as
+          // the primary scrapeUnitPage path (2026-10). Without this, Multi-WR /
+          // Planned units whose offsite link is a direct estimate URL (e.g.
+          // B62060) never captured dealer estimate comments on this path.
           let _secAsist = null;
           try {
-            if (_offsite && _offsite.url && SR_RE_MOD.test(_offsite.url)) {
-              logger.info('[Relay] scrapeServiceByUUID ASIST enrich for', uuid.slice(0,8), '|', _offsite.url.slice(0,80));
-              _secAsist = await enrichVolvoAsist(_offsite.url);
+            const _offUrl = _offsite && _offsite.url;
+            const _secIsSR  = _offUrl && SR_RE_MOD.test(_offUrl);
+            const _secIsEst = _offUrl && /(?:volvopg\.asist|paccarpg)\.decisiv\.net\/fleet\/estimates\//i.test(_offUrl);
+            if (_secIsSR || _secIsEst) {
+              logger.info('[Relay] scrapeServiceByUUID ASIST enrich for', uuid.slice(0,8), '|', (_secIsEst ? '(estimate) ' : '') + _offUrl.slice(0,80));
+              _secAsist = await enrichVolvoAsist(_offUrl);
               if (_secAsist && _secAsist.ok) {
-                logger.info('[Relay] scrapeServiceByUUID ASIST result | source:', _secAsist.source, '| url:', (_secAsist.bestUrl||'').slice(0,80));
+                logger.info('[Relay] scrapeServiceByUUID ASIST result | source:', _secAsist.source, '| url:', (_secAsist.bestUrl||'').slice(0,80), '| notes:', (_secAsist.offsiteText||'').length + 'ch');
               }
             }
           } catch (_ae2) {
@@ -787,6 +813,10 @@ async function scrapeServiceByUUID(uuid, partition) {
             asistSource:         (_finalOff && _finalOff.asistSource) || '',
             asistLabel:          (_finalOff && _finalOff.asistLabel)  || '',
             asistSrUrl:          (_finalOff && _finalOff.asistSrUrl)  || (_offsite && _offsite.url) || '',
+            // Carry the offsite dealer comment thread (estimate/SR) through so the
+            // secondary/Multi-WR path populates asistNotes just like the primary.
+            asistNotes:          (_secAsist && _secAsist.offsiteText) || '',
+            asistScrapedAt:      (_secAsist && _secAsist.scrapedAt)   || '',
             _serviceUUID: uuid,
             _cachedAt: Date.now(),
           });
@@ -823,8 +853,70 @@ const NO_WR_RETRY_MS = 15 * 60 * 1000; // 15 min
 // got a new vendor/offsite update.
 const _resolvedLastUpdated = {};
 
+// Map the API-first WO detail (aap_api.getWorkOrderDetailViaApi) to the relay
+// CACHE shape that mergeRelayIntoRows + the detail panel read. The API covers
+// the core WR/WO fields + full conversation + the offsite URL extracted from
+// comments. The deep Volvo-ASIST page enrichment (asistNotes/asistSrUrl, the
+// 8000-char dealer-page text) is NOT available via API — those are left blank
+// here and the DOM fallback still fills them when needed.
+function _relayCacheFromApi(api) {
+  if (!api || api.noWO || api.error) return null;
+  return {
+    vendor:              api.vendor || '',
+    serviceState:        api.serviceState || '',
+    subState:            api.subState || '',
+    category:            api.category || '',
+    issueDetails:        api.issueDetails || '',
+    urgent:              api.urgent || '',
+    needBy:              api.needBy || '',
+    created:             api.created || '',
+    completed:           api.completed || '',
+    createdBy:           api.createdBy || '',
+    lifecycleReason:     api.lifecycleReason || '',
+    alternativeId:       api.altId || api.alternativeId || '',
+    workRequestId:       api.workRequestId || '',
+    pageUrl:             api.serviceUrl || '',
+    vendorWorkOrderId:   api.vendorWorkOrderId || '',
+    fullConversation:    api.fullConversation || '',
+    offsiteShopEvent:    api.offsiteShopEvent || '',
+    offsiteShopEventUrl: api.offsiteShopEventUrl || '',
+    _serviceUUID:        api._serviceUUID || '',
+    _cachedAt:           Date.now(),
+    _via:                'aap-api',
+  };
+}
+
 async function scrapeUnitPage(equipmentId, partition, relayCache) {
   logger.info('[Relay] scrapeUnitPage called for', equipmentId);
+
+  // API-FIRST (2026-10-19): the serviceaggregate JSON carries all the core WR/WO
+  // fields + full conversation + offsite URL that this per-unit Relay scrape
+  // produced via a multi-phase DOM scrape. Try it first — instant, no browser,
+  // robust. Fall back to the DOM scrape only if the API finds no WO / errors, or
+  // when deep Volvo-ASIST offsite enrichment is required (not available via API).
+  try {
+    const aap = require('./aap_api');
+    if (typeof aap.getWorkOrderDetailViaApi === 'function') {
+      const apiRes = await aap.getWorkOrderDetailViaApi(equipmentId);
+      const mapped = _relayCacheFromApi(apiRes);
+      if (mapped && mapped.workRequestId) {
+        // If the WR's vendor is a Volvo/PACCAR ASIST integrated vendor AND it has
+        // an offsite case, the detail panel wants the deep ASIST enrichment that
+        // only the DOM path produces — let it fall through to the scrape for those.
+        const needsAsist = /volvo|asist|paccar|kenworth|peterbilt|mack/i.test(mapped.vendor) && !!mapped.offsiteShopEventUrl;
+        if (!needsAsist) {
+          logger.info('[Relay] API-first WO detail for ' + equipmentId + ' (vendor=' + mapped.vendor + ', state=' + mapped.serviceState + ') — no browser');
+          return mapped;
+        }
+        logger.info('[Relay] API-first resolved ' + equipmentId + ' but vendor needs ASIST deep-enrichment — using DOM scrape');
+      } else if (apiRes && apiRes.noWO) {
+        logger.info('[Relay] API-first: no open WO for ' + equipmentId + ' — negative-caching');
+        return { _noWR: true, _cachedAt: Date.now() };
+      }
+    }
+  } catch (e) {
+    logger.info('[Relay] API-first path failed for ' + equipmentId + ' (' + e.message + ') — falling back to DOM scrape');
+  }
 
   // Negative-cache check: skip the expensive garage-page dance entirely if
   // we already confirmed recently that this unit has no findable WR.
@@ -890,7 +982,13 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
     const win = new BrowserWindow({
       show:        false,
       skipTaskbar: true,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, partition }
+      // Give the window a real, painted viewport (offscreen so it never
+      // flashes) — some vendor/portal pages gate lazy content rendering on a
+      // real paint, which a hidden/unsized window never gets. Mirrors the
+      // estimate-scrape fix (openAndScrapeEstimate). Defensive hardening.
+      width: 1400, height: 900, x: -4000, y: -4000,
+      paintWhenInitiallyHidden: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, partition, backgroundThrottling: false }
     });
 
     // Capture renderer console messages so we see the real JS error
@@ -1037,15 +1135,19 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
           let _asistEnrich = null;
           try {
             const _asistUrl = _finalOffsite && _finalOffsite.url;
-            // Fire for BOTH Volvo and PACCAR Decisiv service_request URLs.
-            // (2026-08-17: was Volvo-only; PACCAR uses the same Decisiv platform
-            // so the SR->Case->Estimate chase works for it too.)
-            const _isAsistSR = _asistUrl && /(?:volvopg\.asist|paccarpg)\.decisiv\.net\/service_requests\//i.test(_asistUrl);
-            const _prevSrc   = _finalOffsite && _finalOffsite.asistSource;
-            if (_isAsistSR && _prevSrc !== 'estimate') {
-              logger.info('[Relay] Phase3.5 ASIST enrich for', equipmentId, '|', _asistUrl.slice(0,80));
+            // Fire for BOTH Volvo and PACCAR Decisiv service_request URLs AND
+            // for direct /fleet/estimates/ URLs (common for PACCAR, where Relay
+            // stores the estimate link directly with no SR). enrichVolvoAsist
+            // now opens the estimate page and reads its dealer comment thread.
+            // (2026-08-17: PACCAR SRs; 2026-10: direct estimate URLs added so
+            // dealer comments posted only on the estimate — e.g. B62060's 10/12
+            // "part was damaged" — are captured, not just the Relay thread.)
+            const _isAsistSR  = _asistUrl && /(?:volvopg\.asist|paccarpg)\.decisiv\.net\/service_requests\//i.test(_asistUrl);
+            const _isAsistEst = _asistUrl && /(?:volvopg\.asist|paccarpg)\.decisiv\.net\/fleet\/estimates\//i.test(_asistUrl);
+            if (_isAsistSR || _isAsistEst) {
+              logger.info('[Relay] Phase3.5 ASIST enrich for', equipmentId, '|', (_isAsistEst ? '(estimate) ' : '') + _asistUrl.slice(0,80));
               _asistEnrich = await enrichVolvoAsist(_asistUrl);
-              logger.info('[Relay] Phase3.5 result | source:', _asistEnrich.source, '| url:', _asistEnrich.bestUrl.slice(0,80));
+              logger.info('[Relay] Phase3.5 result | source:', _asistEnrich.source, '| url:', _asistEnrich.bestUrl.slice(0,80), '| estThread:', (_asistEnrich.estimateComments||'').length + 'ch');
             }
           } catch (_ae) {
             logger.warn('[Relay] Phase3.5 ASIST enrich CATCH for', equipmentId, _ae.message);
@@ -1075,10 +1177,16 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
           // thread ("Asset Ready / repairs completed"), captured on the
           // service_request page (A1 fix). Prefer it.
           let _offsitePageText = (_asistEnrich && _asistEnrich.offsiteText) || '';
-          // Fallback re-scrape: if enrichment returned no text, scrape the
-          // SERVICE_REQUEST page (where the status thread lives) -- NOT the
-          // estimate page the chase ends on (which never carries the status
-          // note; scraping it was why asistNotes came back empty for B62281).
+          // Fallback re-scrape order: (1) the SERVICE_REQUEST page (where the
+          // status/Responses thread lives), then (2) the FLEET ESTIMATE page.
+          // History: estimate-page scraping was previously disabled (B62281 came
+          // back empty) because the old responsesText tiers missed the estimate
+          // comment container. That left PACCAR units whose offsite link is a
+          // DIRECT /fleet/estimates/ URL (no SR at all — e.g. B62060) with empty
+          // asistNotes, even though the dealer's latest comment IS on that page.
+          // Now re-enabled: enrichVolvoAsist opens the estimate page and the
+          // widened keyword tiers capture dealer wording ("part was damaged",
+          // "waiting for a new one"). We try SR first (richest), then estimate.
           const _srNotesUrl = (_finalOffsite && _finalOffsite.asistSrUrl) ||
                               (_asistEnrich && _asistEnrich.srUrl) ||
                               (_finalOffsite && _finalOffsite.url) || '';
@@ -1096,6 +1204,27 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
               }
             } catch (_oe) {
               logger.warn('[Relay] Phase3.6 SR status scrape failed for', equipmentId, _oe.message);
+            }
+          }
+          // (2) FLEET ESTIMATE page — the dealer comment thread. Fires when no SR
+          // text was captured and the offsite URL is a Decisiv estimate link.
+          const _estNotesUrl = (_finalOffsite && _finalOffsite.url) || '';
+          if (!_offsitePageText && _estNotesUrl && /decisiv\.net\/fleet\/estimates\//i.test(_estNotesUrl)) {
+            try {
+              logger.info('[Relay] Phase3.6 scraping ESTIMATE comment thread for', equipmentId, '|', _estNotesUrl.slice(0, 80));
+              // Notes-tab-aware scrape: clicks Notes, waits for the lazy-loaded
+              // comment thread, extracts ONLY the comments (not pricing/specs noise).
+              const _estPage = await openAndScrapeEstimate(_estNotesUrl, partitionForUrl(_estNotesUrl));
+              if (_estPage) {
+                const _estStatus = (_estPage.commentThread || '').trim();
+                _offsitePageText = _estStatus.slice(0, 6000);
+                if (_offsitePageText) logger.info('[Relay] Phase3.6 ESTIMATE thread captured for', equipmentId, '|', _offsitePageText.length + 'ch | notesReady:', !!_estPage.notesReady);
+                else logger.info('[Relay] Phase3.6 ESTIMATE page returned no comments for', equipmentId);
+              } else {
+                logger.warn('[Relay] Phase3.6 ESTIMATE page open failed for', equipmentId, '|', _estNotesUrl.slice(0, 80));
+              }
+            } catch (_oe) {
+              logger.warn('[Relay] Phase3.6 ESTIMATE scrape failed for', equipmentId, _oe.message);
             }
           }
 
@@ -1399,6 +1528,24 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
     const n  = notes[row.equipmentId] || {};
     const pm = _parsePMDates(row);
 
+    // Return-to-service gate for the repair timeline: a unit that is now
+    // Available with NO open work order (unplanned + planned both 0) should not
+    // keep showing an old repair timeline. Historically mergeRelayIntoRows
+    // re-stamped notesStore[id].timeline onto every fresh row purely by
+    // equipmentId, so a returned-to-service unit carried its stale timeline
+    // forever. Suppress the stored timeline for such units (the authoritative
+    // archive-and-clear happens in repair-history.detectTransitions; this is the
+    // safety gate that also covers units that returned BEFORE that ran).
+    // "In service" = AAP says available/active/in service/ready and NOT unavail
+    // (matches canonical_state.js's available test — AAP uses "Active" for a
+    // returned-to-service unit, not "Available", so an includes('avail') test
+    // alone misses them). No open WO = unplanned + planned both 0 (AAP writes
+    // "--" when none, which parseInt -> NaN -> 0), and no live Relay WR.
+    const _lc = String(row.lifecycleState || row.atsState || '').toLowerCase();
+    const _isInService = /avail|active|in service|ready/.test(_lc) && !_lc.includes('unavail');
+    const _openWR = (parseInt(row.openUnplanned, 10) || 0) + (parseInt(row.openPlanned, 10) || 0);
+    const _activeNoWR = _isInService && _openWR === 0 && !r.serviceUrl && !r.workRequestId;
+
     return {
       ...row,
 
@@ -1429,7 +1576,7 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       workDuration:        r.workDuration      || row.workDuration      || '',
       issueDetails:        r.issueDetails      || row.issueDetails      || '',
       issueSummary:        n.issueSummary      || row.issueSummary    || '',
-      repairTimeline:      n.timeline          || row.repairTimeline  || '',
+      repairTimeline:      _activeNoWR ? '' : (n.timeline || row.repairTimeline || ''),
       _orchaProcessed:     row._orchaProcessed || false,
       alternativeId:       r.alternativeId     || row.alternativeId     || '',
       serviceUrl:         r.pageUrl           || row.serviceUrl        || '',
@@ -1463,6 +1610,11 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       // estimate) with a thin '[no activity logged]' timeline. Now propagated so the
       // timeline builder always sees the offsite diagnosis/estimate notes.
       asistNotes:          r.asistNotes          || row.asistNotes          || '',
+      // Structured offsite status-bar stage (arrival|diagnosis|approval|repair|
+      // ready) captured from the Decisiv SR progress tracker. The authoritative
+      // "is this unit actually ready" signal — the free-text notes alone can lag
+      // or carry stale "will be ready" wording. Used to gate ready/complete claims.
+      offsiteStage:        r.offsiteStage        || row.offsiteStage        || '',
       dealerName:          r.dealerName          || row.dealerName          || '',
       subVendor:           r.dealerName || row.dealerName || r.geofence || row.geofence || '',
 
@@ -1483,12 +1635,21 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       issueSummary:           n.issueSummary        || row.issueSummary || '',
       notesUpdatedAt:         n.updatedAt           || '',
 
-      relaySynced: Object.keys(r).length > 0,
-      // Planned WR for PM Failed / Expired Inspection units (secondary scrape)
-      _plannedWRData:   r._plannedWRData   || null,
-      _secondaryWRs:    r._secondaryWRs    || null,
+      // relaySynced is true if THIS relay entry has data OR the incoming row was
+      // already marked relay-synced by its source (the AAP/RG API marks rows it
+      // populated). Without the `|| row.relaySynced`, an empty relayData (API
+      // mode passes `{}`) would wrongly reset every API row to "No Relay WR data".
+      relaySynced: Object.keys(r).length > 0 || !!row.relaySynced,
+      // Planned WR for PM Failed / Expired Inspection units (secondary scrape).
+      // Preserve whatever the row already carried (the API attaches _secondaryWRs
+      // per unit) when the relay entry doesn't supply its own.
+      _plannedWRData:   r._plannedWRData   || row._plannedWRData || null,
+      _secondaryWRs:    r._secondaryWRs    || row._secondaryWRs  || null,
     };
   });
 }
 
-module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage };
+module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage, pickOffsiteFromConversation,
+  // Exposed so the API path (src/scrapers/aap_api.js) can reuse the exact same
+  // PM date formatter for its pills (from asset.maintenanceScheduleStatuses).
+  parsePMDates: _parsePMDates, formatPmDate: _formatPmDate };

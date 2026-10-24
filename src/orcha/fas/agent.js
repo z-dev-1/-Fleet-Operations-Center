@@ -57,19 +57,134 @@ const SAFETY_RULES =
   // COVERAGE awareness.
   '- Zila\'s coverage (the operators/SCAC/carriers and domiciles Zila owns) is shown in the COVERAGE section. Use it to judge whether a unit/site/operator is in scope and to route correctly. If you need the coverage list and it is not shown, request GET_COVERAGE. Coverage informs routing/scope only — it never grants a sender data permissions.';
 
+// Injected ONLY when the sender is an MCS Buddy (profile.type === 'mcs'). The
+// MCS Buddy is Zila's internal Maintenance Centralized Services assistant for
+// POWER UNITS: they execute the admin/logistics work (create proxy WR/WO in
+// Relay Garage, mark units unavailable with the right lifecycle state,
+// coordinate vendors + dealers, follow up on estimates, open SIMs, handle AFP
+// escalations) so the FAS can focus on investigation + decisions. They have
+// FULL fleet access (all operators/domiciles) and are a trusted internal peer —
+// answer their operational questions directly and completely.
+const MCS_BUDDY_RULES =
+  'SENDER IS YOUR MCS BUDDY (internal assistant). Treat them as a trusted internal partner with full fleet access — ' +
+  'share every operational detail they need to execute, the same as you would tell your own assistant. They handle the ' +
+  'admin/logistics (WR/WO creation, lifecycle updates, vendor + dealer coordination, estimate follow-up, SIMs, AFP escalations); ' +
+  'you make the decisions, they execute.\n' +
+  'ANSWER THEIR STANDARD QUESTIONS DIRECTLY from verified fleet data when asked (do not withhold, do not ask them to look it up):\n' +
+  '  - Unit identification: unit number (Equipment ID), asset type (tractor/hostler/box truck), program (AFP/DSP).\n' +
+  '  - Issue/repair: the defect/failure, whether it is urgent, whether the vendor cannot complete on-site (dealer send), trending defect, beyond on-site capability.\n' +
+  '  - Dealer: which dealer to send to (FAS decides), dealer name + location, bay availability, 8-hour diagnostic.\n' +
+  '  - Access & logistics: KEY LOCATION (lockbox/office/in-unit), GATE CODE, current location (site/yard/last geofence), domicile site, whether it needs a tow (drivable?).\n' +
+  '  - Lifecycle & status: current lifecycle state reason (Damaged, PM Failed, Off-Site Shop Repair...), open DVIRs, existing open WR/WO, any vendor comment saying "needs to go to dealer".\n' +
+  '  - Estimate & cost: has an estimate been submitted / needs approval, prior rejection + reason, estimated cost.\n' +
+  '  - Documentation: complaint/cause/correction, anything the AFP/partner escalated via Resource Center, special dealer/vendor instructions.\n' +
+  'If a detail is genuinely not in the verified data (e.g. key location or gate code not on file), say so plainly and offer to get it — never invent a key location, gate code, or dealer.\n' +
+  'DEALER SERVICE REQUEST FORMAT — when the ask is to send a unit to a dealer, respond in Zila\'s template:\n' +
+  '  :rotating_light: *Dealer Service Request*\n' +
+  '  :clipboard: *Unit Number* — <equipment id>\n' +
+  '  :warning: *Issue* — <what is wrong>\n' +
+  '  :key: *Keys* — <key location>\n' +
+  '  :door: *Gate Code* — <code, or "none / open gate">\n' +
+  '  :office: *Dealer* — <dealer to send to>\n' +
+  'Fill each line from verified data; if a line is unknown, write "— (confirming)" rather than guessing.\n' +
+  'OWNERSHIP STILL APPLIES: estimate APPROVAL is MCS leadership (L3/L4H/HVE), not the FAS — do not say you approved an estimate. Lifecycle changes and WR submission are proposed/executed through the normal approval path, not silently.';
+
 const DECISION_CONTRACT =
   '\n\nYou are running inside a bounded research loop. On each step you may EITHER ask for more\n' +
   'evidence OR give a final answer. You have a limited number of research steps — spend them well.\n' +
+  '- KNOWLEDGE-BASE FIRST: if the question is about ownership, approval thresholds, escalation/SEV, a process, vendor routing, or what a term/acronym means, and the FAS KNOWLEDGE BASE section answers it, give decision:"answer" DIRECTLY from the KB on this step. Do NOT ASK_INTERNAL, do NOT escalate, and do NOT say you will "check with" anyone — you already have the authoritative answer (you ARE the FAS). Example: "who approves a $30K estimate?" → answer "$30K+ powered estimates are approved by L4H Leadership (HVE & EOL eval); FAS never approves, only escalates." from the KB.\n' +
   '- To research more, set "decision":"research_more" and put the READ tools you want in "research":\n' +
   '  [{"tool":"NAME","args":{"unit":"320160"}}]. Only these READ tools exist: ' + RESEARCH_TOOLS.join(', ') + '.\n' +
   '  Request a tool ONLY if the specific fact you need is not already in VERIFIED FACTS. Do not repeat a tool+args you already ran.\n' +
   '- When you have enough (or evidence is missing/stale/conflicting and cannot be resolved), give a FINAL decision:\n' +
   '  "answer" (routine sourced reply), "act" (propose a mutating action for approval), "clarify" (ask ONE question), or "escalate".\n' +
   '- Mutating actions go in "actions" (NOT "research"); they are executed & verified separately, never by you.\n\n' +
+  // ── COMMUNICATION DECISION (human relevance + placement; spec #4/#5/#6) ────
+  'COMMUNICATION DECISION — decide like an experienced human FAS who is PRESENT in this conversation,\n' +
+  'not a bot that answers everything. Set these fields on your FINAL decision:\n' +
+  '- "shouldReply": true ONLY if a competent human in your role would actually speak up here. Set FALSE for:\n' +
+  '  casual chatter between other people, messages clearly directed at someone else, pure announcements needing\n' +
+  '  no response, or a question another person already answered correctly. In a DM to you, shouldReply is\n' +
+  '  normally true. Observing a message is NOT a reason to reply.\n' +
+  '- "replyPlacement": where a human would put the response:\n' +
+  '  "dm" (direct message), "thread" (reply inside an existing/!new thread — the usual choice for a specific\n' +
+  '  question or ongoing discussion in a channel), "top_level" (a channel-wide announcement/correction that\n' +
+  '  everyone needs to see), or "none" (say nothing). If shouldReply is false, replyPlacement MUST be "none".\n' +
+  '  In a DM, use "dm". Do NOT blindly thread everything, and do NOT blindly post top-level.\n' +
+  '- "audienceSensitivity": who can SEE this response — "internal" (Amazon only), "external_partner" (a carrier/\n' +
+  '  vendor or Slack Connect participant can see it), "internal_external_mixed" (both internal and external people\n' +
+  '  are present), or "unknown". When external or mixed, never expose internal-only data even if the asker is internal.\n' +
+  '- "reasonCode": ONE machine code for WHY you are replying or staying silent, from exactly this set:\n' +
+  '  DIRECT_MENTION, DIRECT_QUESTION, THREAD_CONTINUATION, ROLE_RELEVANT_REQUEST, ACTION_REQUEST,\n' +
+  '  CORRECT_CRITICAL_INFO, GENERAL_CHANNEL_CHATTER, DIRECTED_TO_OTHER_PERSON, ANSWER_ALREADY_PROVIDED,\n' +
+  '  NO_RESPONSE_NEEDED, INSUFFICIENT_AUDIENCE_PERMISSION, AMBIGUOUS_REQUIRES_CLARIFICATION,\n' +
+  '  INFORMATION_FEED_INGEST_ONLY, URL_RESEARCH_REQUIRED, ATTACHMENT_RESEARCH_REQUIRED.\n' +
+  'If you choose a silent reasonCode (GENERAL_CHANNEL_CHATTER, DIRECTED_TO_OTHER_PERSON, ANSWER_ALREADY_PROVIDED,\n' +
+  'NO_RESPONSE_NEEDED, INFORMATION_FEED_INGEST_ONLY) then shouldReply MUST be false and replyPlacement "none".\n\n' +
   'Respond with ONE valid JSON object only, no text before or after:\n' +
   '{"decision":"answer|research_more|act|clarify|escalate","confidence":0.0,"reason":"brief operational reason",' +
+  '"shouldReply":true,"replyPlacement":"dm|thread|top_level|none","audienceSensitivity":"internal|internal_external_mixed|external_partner|unknown","reasonCode":"DIRECT_QUESTION",' +
   '"research":[{"tool":"NAME","args":{}}],"actions":[{"tool":"NAME","args":{}}],' +
   '"reply":"the exact Slack message to send as Zila","followUp":{"required":false,"owner":"","dueAt":null}}';
+
+// Allowed enums for the communication-decision fields (spec #5/#6/#67). Kept
+// here so the parser and the schema validator agree on one source of truth.
+const REPLY_PLACEMENTS = ['dm', 'thread', 'top_level', 'none'];
+const AUDIENCE_SENSITIVITIES = ['internal', 'internal_external_mixed', 'external_partner', 'unknown'];
+const REASON_CODES = [
+  'DIRECT_MENTION', 'DIRECT_QUESTION', 'THREAD_CONTINUATION', 'ROLE_RELEVANT_REQUEST', 'ACTION_REQUEST',
+  'CORRECT_CRITICAL_INFO', 'GENERAL_CHANNEL_CHATTER', 'DIRECTED_TO_OTHER_PERSON', 'ANSWER_ALREADY_PROVIDED',
+  'NO_RESPONSE_NEEDED', 'INSUFFICIENT_AUDIENCE_PERMISSION', 'MANUAL_REPLY_ALREADY_SENT', 'DUPLICATE_MESSAGE',
+  'BOT_SELF_MESSAGE', 'AMBIGUOUS_REQUIRES_CLARIFICATION', 'INFORMATION_FEED_INGEST_ONLY',
+  'URL_RESEARCH_REQUIRED', 'ATTACHMENT_RESEARCH_REQUIRED',
+];
+// Reason codes that MEAN silence — if the model gives one of these, we force
+// shouldReply=false / placement=none regardless of what else it said.
+const SILENT_REASON_CODES = new Set([
+  'GENERAL_CHANNEL_CHATTER', 'DIRECTED_TO_OTHER_PERSON', 'ANSWER_ALREADY_PROVIDED', 'NO_RESPONSE_NEEDED',
+  'INSUFFICIENT_AUDIENCE_PERMISSION', 'MANUAL_REPLY_ALREADY_SENT', 'DUPLICATE_MESSAGE', 'BOT_SELF_MESSAGE',
+  'INFORMATION_FEED_INGEST_ONLY',
+]);
+
+/**
+ * Normalize + reconcile the communication-decision fields into a consistent
+ * shape, defaulting sensibly for DMs vs groups and keeping shouldReply /
+ * replyPlacement / reasonCode mutually consistent. Additive: a decision that
+ * omits these still gets safe defaults (DM → reply in dm; group → reply in
+ * thread), so existing behavior/tests are preserved.
+ */
+function _normalizeCommunication(p, isGroup, isSelf) {
+  const out = {};
+  // shouldReply: honor explicit boolean; otherwise default by surface/decision.
+  let shouldReply = typeof p.shouldReply === 'boolean' ? p.shouldReply : undefined;
+  let placement = REPLY_PLACEMENTS.includes(p.replyPlacement) ? p.replyPlacement : undefined;
+  let reasonCode = REASON_CODES.includes(p.reasonCode) ? p.reasonCode : undefined;
+  const audience = AUDIENCE_SENSITIVITIES.includes(p.audienceSensitivity) ? p.audienceSensitivity : 'unknown';
+
+  // A silent reason code is authoritative for silence.
+  if (reasonCode && SILENT_REASON_CODES.has(reasonCode)) { shouldReply = false; placement = 'none'; }
+  // placement:none implies silence; shouldReply:false implies placement none.
+  if (placement === 'none') shouldReply = false;
+  if (shouldReply === false) placement = 'none';
+
+  // Defaults when the model didn't specify (backward compatible).
+  if (shouldReply === undefined) {
+    // Default: reply in DM/self-DM; in a group, reply unless it's a non-answer
+    // we have nothing to send for. (The runner still gates sending by mode.)
+    shouldReply = true;
+  }
+  if (placement === undefined) {
+    placement = shouldReply ? (isGroup && !isSelf ? 'thread' : 'dm') : 'none';
+  }
+  if (reasonCode === undefined) {
+    reasonCode = shouldReply ? (isGroup ? 'ROLE_RELEVANT_REQUEST' : 'DIRECT_QUESTION') : 'NO_RESPONSE_NEEDED';
+  }
+  out.shouldReply = shouldReply;
+  out.replyPlacement = placement;
+  out.audienceSensitivity = audience;
+  out.reasonCode = reasonCode;
+  return out;
+}
 
 function _factsToText(facts) {
   // Newest first + surface conflicts/holds first so budget trimming keeps them.
@@ -84,6 +199,108 @@ function _factsToText(facts) {
     .map(f => '- ' + f.field + ': ' + (typeof f.value === 'object' ? JSON.stringify(f.value) : f.value) +
       '  [' + (f.source || '?') + ' @ ' + (f.retrievedAt || '?') + ']')
     .join('\n');
+}
+
+// Build the "SHARED FILES & LINKS" prompt block. Combines the legacy inline
+// attachment-context string (links/previews/text-file snippets the DM path
+// already builds) with an explicit list of any links/files the FAS evidence
+// stage COULD NOT read — so the agent acknowledges a shared item and asks for
+// it / says it couldn't open it, instead of silently ignoring the attachment
+// (the behavior behind the "failing on png/pdf" stalls). Untrusted content is
+// fenced with wrapUntrusted; the refusal list is trusted system text.
+function _attachmentsBlock(input, evidence) {
+  const parts = [];
+  const legacy = input && input.attachments && String(input.attachments).trim();
+  if (legacy) parts.push(guard.wrapUntrusted('SHARED FILES & LINKS', legacy));
+  const refs = (evidence && Array.isArray(evidence.linkRefusals)) ? evidence.linkRefusals : [];
+  if (refs.length) {
+    const lines = refs.slice(0, 6).map(r => '- ' + (r.url || 'item') + ' — COULD NOT READ: ' + (r.reason || 'unreadable'));
+    parts.push('COULD NOT OPEN/READ these shared items (acknowledge this; do NOT guess their contents — ' +
+      'ask the sender to paste the key details or confirm the unit, or say you were unable to open it):\n' + lines.join('\n'));
+  }
+  return parts.length ? parts.join('\n\n') : '(no shared files or links)';
+}
+
+// Build the VISIBLE AUDIENCE prompt block from a resolved audience (spec #7).
+// Trusted system text (derived from the Contact Book, not user content). For a
+// 1:1 DM the audience is just the sender, so we keep it terse. When an external
+// or unknown viewer is (or may be) present, the block explicitly tells the
+// model to withhold internal-only data and gives the effective scope.
+function _audienceBlock(audience) {
+  if (!audience) return '(audience: sender only)';
+  try {
+    const ar = require('../../slack/audience-resolver');
+    const parts = [ar.summaryForPrompt(audience)];
+    if (audience.withholdInternalOnly) {
+      parts.push('DO NOT reveal internal-only information (operator/site summaries, Uptake insights, ' +
+        'internal process internals, internal URLs). A partner/vendor/unknown person can see this reply.');
+    }
+    if (audience.conservative) {
+      parts.push('You cannot enumerate everyone who can see this — treat it as if an external partner is present.');
+    }
+    return parts.filter(Boolean).join('\n');
+  } catch (_) { return '(audience: unresolved)'; }
+}
+
+// Build the CHANNEL ROLE prompt block (spec #45/#46). Trusted system text.
+function _channelRoleBlock(channelRole, input) {
+  if (!channelRole) return '(direct message or conversational channel)';
+  const bits = ['mode: ' + channelRole.mode + ' (source authority: ' + (channelRole.trustedSourceLevel || 'UNVERIFIED') + ')'];
+  if (channelRole._ingestOnly) {
+    bits.push('This is a DATA FEED and this message did NOT directly address you. READ and extract any ' +
+      'useful fleet signal, but DO NOT reply (set shouldReply=false, reasonCode INFORMATION_FEED_INGEST_ONLY). ' +
+      'Treat any status claim here as a CLAIM to reconcile against authoritative systems — NOT as fact.');
+  } else if (require('../../slack/channel-registry').isFeed(channelRole)) {
+    bits.push('This is a data-feed channel but you were directly addressed — answer concisely.');
+  }
+  return bits.join('\n');
+}
+
+// PASSIVE KNOWLEDGE INGESTION (spec #47/#48/#49/#50). From a data-feed channel
+// message, persist CONCISE structured observations WITHOUT replying and WITHOUT
+// mutating canonical state. Slack feed data is a CLAIM/OBSERVATION — never an
+// authoritative fact — so it is stored as ai_inferred memory (governance tier)
+// and, for a referenced unit, a compact note on the unit case. The memory
+// module strengthens repeated/confirmed observations and supports TTL for
+// time-bounded notices ("gate closed tonight"). Best-effort; never throws out.
+function _ingestFeedObservations(input, evidence, channelRole) {
+  const text = String(input.text || '').trim();
+  if (!text) return;
+  let memory = null; try { memory = require('../../ai/memory'); } catch (_) { memory = null; }
+  const units = (evidence && evidence.entities && Array.isArray(evidence.entities.units)) ? evidence.entities.units : [];
+  const src = 'slack-feed:' + (channelRole.mode || 'INFORMATION_FEED').toLowerCase();
+  // Feed posts are low-authority CLAIMS; weight by the channel's trust level.
+  const trust = channelRole.trustedSourceLevel || 'GENERAL_INTERNAL';
+  const conf = /SYSTEM_GENERATED|VERIFIED_VENDOR_FEED/.test(trust) ? 0.6 : 0.45;
+  const fact = text.slice(0, 380);
+  if (memory && typeof memory.remember === 'function') {
+    if (units.length) {
+      for (const u of units.slice(0, 5)) {
+        try { memory.remember({ type: 'unit', entity: String(u), fact: fact, source: src, origin: 'ai_inferred', confidence: conf }); } catch (_) {}
+      }
+    } else {
+      // No unit — store as a site/workflow operational notice so it still
+      // enriches context (e.g. "ROC5 gate closed tonight"). Entity = channel.
+      try { memory.remember({ type: 'workflow', entity: 'feed:' + (input.channelName || input.channelId || 'channel'), fact: fact, source: src, origin: 'ai_inferred', confidence: conf }); } catch (_) {}
+    }
+  }
+  // Attach a compact observation to the unit case (claim, not canonical).
+  if (units.length) {
+    try {
+      const caseStore = require('./case-store');
+      for (const u of units.slice(0, 3)) {
+        const caseId = caseStore.caseIdForUnit(String(u));
+        const existing = caseStore.getCase(caseId) || {};
+        caseStore.upsert(caseId, {
+          unit: String(u),
+          observations: ((existing.observations || []).slice(-19)).concat([{
+            claim: fact, source: src, trust, at: new Date().toISOString(), state: 'CLAIM',
+          }]),
+        }, String(u));
+      }
+    } catch (_) { /* case note is best-effort */ }
+  }
+  logger.info('[fas-agent] feed ingest: ' + (units.length ? ('units ' + units.join(',')) : 'no-unit') + ' from ' + (channelRole.mode || '?'));
 }
 
 function _parseDecision(raw, evidence) {
@@ -106,6 +323,13 @@ function _parseDecision(raw, evidence) {
       decision: ['answer', 'research_more', 'act', 'clarify', 'escalate'].includes(p.decision) ? p.decision : 'answer',
       confidence: typeof p.confidence === 'number' ? p.confidence : 0.5,
       reason: String(p.reason || '').slice(0, 300),
+      // Communication-decision fields (spec #5/#6). Carried through RAW here and
+      // normalized/defaulted once on the terminal decision in runAgent (so the
+      // review pass can't desync them). Absent -> undefined (defaults applied later).
+      shouldReply: typeof p.shouldReply === 'boolean' ? p.shouldReply : undefined,
+      replyPlacement: REPLY_PLACEMENTS.includes(p.replyPlacement) ? p.replyPlacement : undefined,
+      audienceSensitivity: AUDIENCE_SENSITIVITIES.includes(p.audienceSensitivity) ? p.audienceSensitivity : undefined,
+      reasonCode: REASON_CODES.includes(p.reasonCode) ? p.reasonCode : undefined,
       research: Array.isArray(p.research) ? p.research.slice(0, 8) : [],
       actions: Array.isArray(p.actions) ? p.actions.slice(0, 8) : [],
       reply: p.reply,
@@ -190,7 +414,7 @@ async function _reviewAndRefine(decision, cfg, profile, evidence, extraResearch,
 // loop. Untrusted content (message, conversation, facts, extra research) is
 // structurally fenced with wrapUntrusted() so injected instructions can't be
 // mistaken for commands.
-function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, stepInfo) {
+function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, stepInfo, audience, channelRole) {
   const convoText = Array.isArray(input.conversation) && input.conversation.length
     ? input.conversation.join('\n') : '(no prior conversation)';
   const authText = JSON.stringify(evidence.senderAuthorization) +
@@ -219,6 +443,22 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
       if (secs.length) playbookText = secs.map(s => '• ' + s.title + ': ' + s.body).join('\n');
     } catch (_) {}
   }
+
+  // FAS KNOWLEDGE BASE — authoritative ownership / approval / escalation /
+  // vendor-routing / glossary rules. INTERNAL senders only. This is what lets
+  // the agent ANSWER "who approves a $30K estimate?" directly instead of
+  // reaching for ASK_INTERNAL / AITeammate (which it must not do when the KB
+  // already has the answer).
+  let knowledgeText = '';
+  try {
+    const auth = profiles.authorizationSummary(profile);
+    // Internal senders → full KB (approval/escalation/ownership/vendor/glossary).
+    // External senders → SHAREABLE tier only (glossary + general vendor routing);
+    // internal-only sections (approval dollars, escalation internals, personnel)
+    // are withheld. Only the RELEVANT sections, to stay within the prompt budget.
+    const _aud = (auth && auth.isInternal) ? 'internal' : 'external';
+    knowledgeText = require('../fas-knowledge').retrieveKnowledge(text, { maxSections: 3, audience: _aud }) || '';
+  } catch (_) { /* KB optional; never block a reply */ }
 
   // Coverage context (Zila's owned operators/SCAC + domiciles). INTERNAL senders
   // only — never expose the full carrier roster to a carrier/vendor/unknown
@@ -252,15 +492,27 @@ function _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, ste
     { key: 'now', label: 'CURRENT TIME', text: _nowText },
     { key: 'loop', label: 'RESEARCH BUDGET', text: 'Step ' + stepInfo.step + ' of max ' + stepInfo.maxSteps + '. Research steps remaining: ' + stepInfo.remaining + '.' },
     { key: 'sender', label: 'SENDER', text: profile.name + ' (' + profile.type + ', ' + (profile.org || 'no org') + ')' },
+    // MCS Buddy behavior — only when the sender is the FAS's MCS assistant.
+    ...(profile.type === 'mcs' ? [{ key: 'mcsBuddy', label: 'MCS BUDDY — HOW TO HELP YOUR ASSISTANT', text: MCS_BUDDY_RULES }] : []),
     { key: 'authorization', label: 'AUTHORIZATION + SCOPE', text: authText },
+    // EFFECTIVE AUDIENCE (spec #7): who can SEE this response. The hard data
+    // restriction is enforced in code (effective scope/categories); this block
+    // makes the model reason about it too (defense in depth) and set
+    // audienceSensitivity. Omitted for a plain 1:1 DM (audience == sender).
+    { key: 'audience', label: 'VISIBLE AUDIENCE (never reveal data this audience is not cleared to see)',
+      text: _audienceBlock(audience) },
+    // Channel role (spec #45/#46): tell the model when this is a DATA FEED so it
+    // prefers silent ingest. The hard silence is still enforced in code.
+    { key: 'channelRole', label: 'CHANNEL ROLE', text: _channelRoleBlock(channelRole, input) },
     { key: 'coverage', label: 'ZILA COVERAGE (routing/scope context)', text: coverageText },
     { key: 'message', label: 'INCOMING MESSAGE', text: guard.wrapUntrusted('INCOMING MESSAGE', text) },
     { key: 'conversation', label: 'IMMEDIATE CONVERSATION', text: guard.wrapUntrusted('CONVERSATION', convoText) },
     // Shared files / link previews / attachment contents (from the Slack
     // message). Untrusted, like the message. Empty when nothing was shared.
-    { key: 'attachments', label: 'SHARED FILES & LINKS', text: (input.attachments && String(input.attachments).trim())
-        ? guard.wrapUntrusted('SHARED FILES & LINKS', String(input.attachments).trim())
-        : '(no shared files or links)' },
+    // Also list any links/files we COULD NOT read, so the agent acknowledges
+    // the shared item and asks/says so rather than silently ignoring it.
+    { key: 'attachments', label: 'SHARED FILES & LINKS', text: _attachmentsBlock(input, evidence) },
+    { key: 'knowledge', label: 'FAS KNOWLEDGE BASE (authoritative — answer ownership/approval/escalation/process/glossary questions DIRECTLY from this; do NOT ASK_INTERNAL/escalate what it already covers)', text: knowledgeText },
     { key: 'playbook', label: 'FAS PLAYBOOK (apply these rules)', text: playbookText },
     { key: 'caseSummary', label: 'RELATED CASE MEMORY', text: caseText },
     { key: 'verifiedFacts', label: 'VERIFIED FACTS (source + freshness shown)', text: guard.wrapUntrusted('VERIFIED FACTS', factsText) },
@@ -372,6 +624,40 @@ async function runAgent(input) {
   const cfg = config.get();
   const profile = profiles.resolveSender(input.slackId, input.senderName);
   const text = input.text || '';
+  // EFFECTIVE AUDIENCE (spec #7, Phase 2): who can SEE the response. On a
+  // multi-party / Slack Connect surface this is the most-conservative scope +
+  // sensitivity across everyone present — never just the sender. Used to (a)
+  // tell the model what it must withhold, and (b) authoritatively set
+  // decision.audienceSensitivity in code (the model can't under-report it).
+  // Best-effort: a resolver failure must never block a reply.
+  let audience = null;
+  try {
+    const ar = require('../../slack/audience-resolver');
+    audience = ar.resolveAudience({
+      surface: input.surface || (input.isSelf ? 'self_dm' : (input.isGroup ? 'channel' : 'dm')),
+      sender: profile,
+      participants: Array.isArray(input.participants) ? input.participants : undefined,
+      isSlackConnect: !!input.isSlackConnect,
+      isGroup: !!input.isGroup,
+      isSelf: !!input.isSelf,
+      channelId: input.channelId,
+      channelName: input.channelName,
+    });
+  } catch (e) { logger.warn('[fas-agent] audience resolve failed (non-fatal): ' + (e && e.message)); audience = null; }
+
+  // CHANNEL ROLE (spec #45–#50, Phase 3): is this a conversation or a DATA
+  // FEED? For a feed channel (vendor/alert/system/info) that did NOT directly
+  // mention FAS, a human FAS READS + extracts but does NOT reply. Resolved for
+  // group surfaces only; DMs are always conversational. Best-effort.
+  let channelRole = null;
+  const _isGroupSurface = !!input.isGroup && !input.isSelf;
+  if (_isGroupSurface) {
+    try {
+      const cr = require('../../slack/channel-registry');
+      channelRole = cr.resolveChannel({ channelId: input.channelId, channelName: input.channelName, isSlackConnect: !!input.isSlackConnect });
+      channelRole._ingestOnly = cr.ingestOnly(channelRole, { mentioned: !!input.mentioned });
+    } catch (e) { logger.warn('[fas-agent] channel resolve failed (non-fatal): ' + (e && e.message)); channelRole = null; }
+  }
   const maxSteps = Math.max(1, cfg.maxSteps || 6);
   // Effective mode drives side-effect rules for tools (e.g. ASK_INTERNAL must
   // not contact AITeammate in Shadow). input.mode overrides for tests.
@@ -382,7 +668,16 @@ async function runAgent(input) {
 
   try {
     // ── STEP 0: deterministic scoped evidence baseline ────────────────────
-    const evidence = await buildEvidence({ profile, text, mode });
+    // Pass the raw Slack file objects so the evidence builder can read shared
+    // attachments (PNG/PDF/HTML/CSV) and surface any unit ids they reference.
+    let evidence = await buildEvidence({ profile, text, mode, files: input.files || [] });
+    // AUDIENCE CEILING (spec #7): tighten the sender-scoped evidence to what the
+    // VISIBLE AUDIENCE may receive — strip internal-only facts when an external/
+    // unknown viewer is (or may be) present. Only removes facts, never adds.
+    if (audience) {
+      try { evidence = require('../../slack/audience-resolver').applyAudienceCeiling(evidence, audience); }
+      catch (e) { logger.warn('[fas-agent] audience ceiling failed (non-fatal): ' + (e && e.message)); }
+    }
     const ctx = { profile, mode, _evidence: evidence, approvedAutomaticActions: cfg.approvedAutomaticActions || [] };
     const extraResearch = [];
     const seen = new Set();
@@ -396,7 +691,7 @@ async function runAgent(input) {
       if (controller.signal.aborted) break;
       steps = step;
       const remaining = maxSteps - step;
-      const { prompt, assembled } = _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, { step, maxSteps, remaining });
+      const { prompt, assembled } = _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, { step, maxSteps, remaining }, audience, channelRole);
       lastAssembled = assembled;
 
       const raw = await _ask(prompt, cfg, controller, 'fas');
@@ -440,16 +735,81 @@ async function runAgent(input) {
       decision = await _reviewAndRefine(decision, cfg, profile, evidence, extraResearch, controller);
     }
 
+    // COMMUNICATION DECISION (spec #5/#6): normalize shouldReply / replyPlacement
+    // / audienceSensitivity / reasonCode into a consistent shape with sensible
+    // surface defaults. Done AFTER the review pass so a refined reply keeps the
+    // same placement. A clarify/escalate still replies (it asks/raises) — only
+    // an explicit silent decision suppresses the reply.
+    const _comm = _normalizeCommunication(decision, !!input.isGroup, !!input.isSelf);
+    decision.shouldReply = _comm.shouldReply;
+    decision.replyPlacement = _comm.replyPlacement;
+    decision.reasonCode = _comm.reasonCode;
+    // AUDIENCE is authoritative from CODE, not the model (spec #7): the
+    // code-resolved audienceSensitivity overrides whatever the model guessed,
+    // so it can never UNDER-report (e.g. claim "internal" when a partner is in
+    // the room). Falls back to the model's normalized value only if the
+    // resolver was unavailable.
+    decision.audienceSensitivity = (audience && audience.audienceSensitivity) || _comm.audienceSensitivity;
+    if (audience) {
+      decision._audience = {
+        sensitivity: audience.audienceSensitivity,
+        surface: audience.surface,
+        participantsKnown: audience.participantsKnown,
+        externalPresent: audience.externalPresent,
+        withholdInternalOnly: audience.withholdInternalOnly,
+        conservative: audience.conservative,
+        effectiveOperators: audience.effectiveOperators,
+        effectiveDomiciles: audience.effectiveDomiciles,
+      };
+    }
+
+    // INFORMATION-FEED INGEST-ONLY (spec #46/#59/#64): in a data-feed channel
+    // that did NOT directly mention FAS, a human FAS reads + extracts but stays
+    // silent. Override the communication decision to silence AFTER research
+    // (so the evidence/observations are still gathered), then passively ingest
+    // structured observations. A direct mention bypasses this (ingestOnly is
+    // false when mentioned) and gets a normal reply.
+    if (channelRole && channelRole._ingestOnly) {
+      decision.shouldReply = false;
+      decision.replyPlacement = 'none';
+      decision.reasonCode = 'INFORMATION_FEED_INGEST_ONLY';
+      decision._channelRole = { mode: channelRole.mode, trustedSourceLevel: channelRole.trustedSourceLevel, source: channelRole.source };
+      try { _ingestFeedObservations(input, evidence, channelRole); }
+      catch (e) { logger.warn('[fas-agent] feed ingest failed (non-fatal): ' + (e && e.message)); }
+    } else if (channelRole) {
+      decision._channelRole = { mode: channelRole.mode, trustedSourceLevel: channelRole.trustedSourceLevel, source: channelRole.source };
+    }
+
     decision._evidence = evidence;
     decision._profile = { slackId: profile.slackId, name: profile.name, type: profile.type };
     decision._mode = cfg.mode;
     decision._loop = { steps, maxSteps, toolCalls, research: extraResearch };
     if (lastAssembled) decision._budget = { used: lastAssembled.usedChars, budget: lastAssembled.budget, dropped: lastAssembled.dropped };
-    decision._aborted = controller.signal.aborted;
+    // ABORT HANDLING: the runtime deadline (maxRuntimeMs) can fire DURING the
+    // optional review/refine pass — AFTER the loop has already produced a
+    // complete, valid terminal decision. In that case the answer is fully
+    // usable and must NOT be thrown away as an "AI aborted" failure (which
+    // dumps a great reply into manual-review and sends the user a canned
+    // fallback). Only treat the abort as a failure when we do NOT have a
+    // usable terminal reply. A usable decision = a terminal type with a
+    // non-empty reply and not a parse-fallback.
+    const _aborted = controller.signal.aborted;
+    const _hasUsableAnswer = !decision._fallback &&
+      ['answer', 'act', 'clarify', 'escalate'].includes(decision.decision) &&
+      typeof decision.reply === 'string' && decision.reply.trim().length > 0;
+    decision._aborted = _aborted && !_hasUsableAnswer;
+    if (_aborted && _hasUsableAnswer) {
+      decision._abortedAfterAnswer = true; // telemetry: ran long but answer stands
+      logger.info('[fas-agent] runtime deadline hit after a complete answer — keeping the answer (not failing to manual-review)');
+    }
     return decision;
   } finally {
     clearTimeout(deadline);
   }
 }
 
-module.exports = { runAgent, _parseDecision, _execResearch, SAFETY_RULES };
+module.exports = {
+  runAgent, _parseDecision, _execResearch, SAFETY_RULES,
+  _normalizeCommunication,
+  REPLY_PLACEMENTS, AUDIENCE_SENSITIVITIES, REASON_CODES, SILENT_REASON_CODES,
+};

@@ -17,6 +17,8 @@ import { init as initNotifDropdown }      from './components/notif-dropdown.js';
 import { init as initOrchaFab }           from './components/orcha-fab.js';
 import { init as initNexusSidebar }       from './components/nexus-sidebar.js';
 import { init as initMorningBriefing }   from './components/morning-briefing.js';
+import { init as initEmailTriage }        from './components/email-triage-overlay.js';
+import { init as initRelayReconcile }     from './components/relay-reconcile-overlay.js';
 import { init as initContactBook }       from './components/contact-book.js';
 import { init as initDraftInbox }         from './components/draft-inbox.js';
 import { init as initTimeline }           from './components/workflow-timeline.js';
@@ -38,6 +40,7 @@ import { init as initNotesLinks }         from './views/notes-links.js';
 import { init as initRcaQueue }           from './views/rca-queue.js';
 import { init as initDailyCall }          from './views/daily-call.js';
 import { init as initWorkflowIntel }      from './views/workflow-intelligence.js';
+import { init as initTrends }             from './views/trends.js';
 
 function boot() {
   // Global error boundary — prevent white screen
@@ -106,6 +109,8 @@ function boot() {
 initDraftInbox();
 initNexusSidebar();
   initMorningBriefing();
+  initEmailTriage();
+  initRelayReconcile();
   initContactBook();
   initTimeline();
 initStatusBar(document.getElementById('status-bar-mount'));
@@ -129,6 +134,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
   initRcaQueue(viewsMount);
   initDailyCall(viewsMount);
   initWorkflowIntel(viewsMount);
+  initTrends(viewsMount);
 
   // ── Settings drawer ────────────────────────────────────────────────────────
   initSettings();
@@ -145,12 +151,14 @@ initStatusBar(document.getElementById('status-bar-mount'));
   const rcaQueueView      = document.getElementById('view-rca-queue');
   const dailyCallView     = document.getElementById('view-daily-call');
   const workflowIntelView = document.getElementById('view-workflow-intel');
+  const trendsView        = document.getElementById('view-trends');
 
   bus.on('ui:view-change', ({ to }) => {
     if (to === 'settings') return;
     if (fleetView)         fleetView.style.display         = to === 'fleet'          ? 'flex' : 'none';
     if (analyticsView)     analyticsView.style.display     = to === 'analytics'      ? 'flex' : 'none';
-    if (vendorsView)       vendorsView.style.display       = to === 'vendors'        ? 'flex' : 'none';
+    // vendorsView is a self-managed centered overlay now (opened from the
+    // Dashboard Top Vendors tile via ui:vendors-open) — not toggled by nav.
     if (emailComposerView) emailComposerView.style.display = to === 'email-composer' ? 'flex' : 'none';
     if (schedulersView)    schedulersView.style.display    = to === 'schedulers'     ? 'flex' : 'none';
     if (dailyNotesView)    dailyNotesView.style.display    = to === 'daily-notes'    ? 'flex' : 'none';
@@ -158,6 +166,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
     if (rcaQueueView)      rcaQueueView.style.display      = to === 'rca-queue'      ? 'flex' : 'none';
     if (dailyCallView)     dailyCallView.style.display     = to === 'daily-call'     ? 'flex' : 'none';
     if (workflowIntelView) workflowIntelView.style.display = to === 'workflow-intel' ? 'flex' : 'none';
+    if (trendsView)        trendsView.style.display        = to === 'trends'         ? 'flex' : 'none';
   });
 
   bus.on('ui:view-change', () => bus.emit('ui:unit-deselect'));
