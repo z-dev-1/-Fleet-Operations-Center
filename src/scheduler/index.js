@@ -105,6 +105,23 @@ function _loadScheduleSlots() {
   }
 }
 
+// ── Once-per-slot fire guard ──────────────────────────────────────────────────
+// The slot timers tick every 30s and match on hour+minute, so BOTH ticks inside
+// the slot minute matched (e.g. 07:25:20 and 07:25:50). isSlotCompleted() is
+// still false while the first run is in progress, so the slot fired twice and
+// every SOS/EOS email was sent twice. A slot may now auto-fire (scheduled or
+// catch-up) at most once per day per process. Manual "run now" and the blocked
+// slot auto-recovery do not use this guard.
+const _firedSlots = new Set();
+function _claimSlotFire(channel, dateKey, label) {
+  const k = channel + '|' + dateKey + '|' + label;
+  if (_firedSlots.has(k)) return false;
+  _firedSlots.add(k);
+  // Keep the set small: drop keys from previous days.
+  for (const old of _firedSlots) if (!old.includes('|' + dateKey + '|')) _firedSlots.delete(old);
+  return true;
+}
+
 // ── Scheduled SP push ─────────────────────────────────────────────────────────
 function _scheduleAutoSPPush() {
   if (_spScheduleTimer) clearInterval(_spScheduleTimer);
@@ -116,6 +133,7 @@ function _scheduleAutoSPPush() {
     const dateKey = _todayPrefix();
     // Ledger-backed completed-slot dedup (survives restart).
     if (ledger.isSlotCompleted(ledger.CHANNELS.SHAREPOINT, dateKey, slot.label)) return;
+    if (!_claimSlotFire('sp', dateKey, slot.label)) return;
     _fireSP(dateKey, slot, 'scheduled');
   }, 30000);
 }
@@ -145,6 +163,7 @@ function _scheduleAutoEmail() {
     if (!slot) return;
     const dateKey = _todayPrefix();
     if (ledger.isSlotCompleted(ledger.CHANNELS.EMAIL, dateKey, slot.label)) return;
+    if (!_claimSlotFire('email', dateKey, slot.label)) return;
     _fireEmail(dateKey, slot, 'scheduled', false);
   }, 30000);
 }
@@ -161,6 +180,7 @@ function _fireEmail(dateKey, slot, origin, testMode) {
     .then(r => {
       if (r.blocked === 'no-test-recipient') { _ctx.pushStatus('\u26D4 Test email blocked: configure a test recipient first'); return; }
       if (r.skipped === 'no-recipients') { _ctx.pushStatus('\u26A0\uFE0F Auto-email: no recipients configured'); return; }
+      if (r.skipped === 'in-flight') { logger.info('Auto-email ' + slot.label + ' (' + origin + '): already running — duplicate trigger ignored'); return; }
       const outs = r.outcomes || [];
       const sent = outs.filter(o => o.state === ledger.STATES.COMPLETED).length;
       const blockedAuth = outs.some(o => o.state === ledger.STATES.BLOCKED_AUTH);
@@ -185,8 +205,8 @@ function _scheduleAutoDbr() {
     if (!slot) return;
     const dateKey = _todayPrefix();
     // Fire each channel only if its OWN slot hasn't completed today.
-    if (!ledger.isSlotCompleted(ledger.CHANNELS.DBR_AFP, dateKey, slot.label)) _fireDbr('afp', dateKey, slot, 'scheduled');
-    if (!ledger.isSlotCompleted(ledger.CHANNELS.DBR_DSP, dateKey, slot.label)) _fireDbr('dsp', dateKey, slot, 'scheduled');
+    if (!ledger.isSlotCompleted(ledger.CHANNELS.DBR_AFP, dateKey, slot.label) && _claimSlotFire('dbr-afp', dateKey, slot.label)) _fireDbr('afp', dateKey, slot, 'scheduled');
+    if (!ledger.isSlotCompleted(ledger.CHANNELS.DBR_DSP, dateKey, slot.label) && _claimSlotFire('dbr-dsp', dateKey, slot.label)) _fireDbr('dsp', dateKey, slot, 'scheduled');
   }, 30000);
 }
 
@@ -217,6 +237,7 @@ function _catchUpMissedSlots() {
     const missedBy = currentMinutes - (slot.h * 60 + slot.m);
     if (missedBy <= 0 || missedBy > 120) return;
     if (ledger.isSlotCompleted(ledger.CHANNELS.EMAIL, dateKey, slot.label)) return;
+    if (!_claimSlotFire('email', dateKey, slot.label)) return;
     logger.info('Catch-up: missed email slot ' + slot.label + ' (' + missedBy + 'min ago)');
     setTimeout(() => _fireEmail(dateKey, slot, 'catchup', false), 5000);
   });
@@ -225,6 +246,7 @@ function _catchUpMissedSlots() {
     const missedBy = currentMinutes - (slot.h * 60 + slot.m);
     if (missedBy <= 0 || missedBy > 120) return;
     if (ledger.isSlotCompleted(ledger.CHANNELS.SHAREPOINT, dateKey, slot.label)) return;
+    if (!_claimSlotFire('sp', dateKey, slot.label)) return;
     logger.info('Catch-up: missed SP slot ' + slot.label + ' (' + missedBy + 'min ago)');
     setTimeout(() => _fireSP(dateKey, slot, 'catchup'), 10000);
   });
@@ -240,6 +262,7 @@ function _catchUpMissedSlots() {
     ['afp', 'dsp'].forEach(kind => {
       const ch = kind === 'dsp' ? ledger.CHANNELS.DBR_DSP : ledger.CHANNELS.DBR_AFP;
       if (ledger.isSlotCompleted(ch, dateKey, slot.label)) return;
+      if (!_claimSlotFire('dbr-' + kind, dateKey, slot.label)) return;
       logger.info('Catch-up: missed DBR ' + kind.toUpperCase() + ' slot ' + slot.label + ' (' + missedBy + 'min ago)');
       setTimeout(() => _fireDbr(kind, dateKey, slot, 'catchup'), kind === 'dsp' ? 20000 : 15000);
     });

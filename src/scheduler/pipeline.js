@@ -462,7 +462,26 @@ function runDbrDspJob(ctx, spec) { return _runDbrJob(ctx, 'dsp', spec); }
 // idempotency key, delivery + verification, snapshot commit, and note-clear
 // contribution. The one-shot note is cleared only after ALL production scopes
 // for the slot verified sent.
+// In-process guards. The ledger lease is re-entrant for the SAME job (it only
+// blocks a different job), so it could not stop a second concurrent run of a
+// slot — e.g. the 30s scheduler tick firing twice inside the slot minute —
+// and every SOS/EOS email went out twice. These sets make a concurrent second
+// run a no-op instead of a duplicate send.
+const _emailSlotsInFlight = new Set();
+const _emailJobsInFlight  = new Set();
+
 async function runEmailSlot(ctx, slotSpec) {
+  const slotKey = [slotSpec.dateKey, slotSpec.slotLabel, slotSpec.testMode ? 'T' : 'P'].join('|');
+  if (_emailSlotsInFlight.has(slotKey)) {
+    logger.warn('Email slot ' + slotSpec.slotLabel + ' already running (' + (slotSpec.origin || '?') + ' trigger ignored) — no duplicate send');
+    return { skipped: 'in-flight', outcomes: [] };
+  }
+  _emailSlotsInFlight.add(slotKey);
+  try { return await _runEmailSlotInner(ctx, slotSpec); }
+  finally { _emailSlotsInFlight.delete(slotKey); }
+}
+
+async function _runEmailSlotInner(ctx, slotSpec) {
   const opEmails = _loadOpEmails();
   const spEmails = (store.load('spConfig', {}) || {}).emails || {};
   const recipients = resolveRecipients(opEmails, spEmails);
@@ -522,6 +541,16 @@ async function _runOneEmailScope(ctx, o) {
     if (job.state === ledger.STATES.COMPLETED) return { state: job.state, scope: o.scope, skipped: 'already-completed' };
     if (ledger.PAUSED_STATES.includes(job.state) && job.state !== ledger.STATES.RETRY) return { state: job.state, scope: o.scope, skipped: job.state };
   }
+  if (_emailJobsInFlight.has(job.jobId)) {
+    logger.warn('Email job ' + job.idempotencyKey + ' already running — skipping duplicate run');
+    return { state: job.state, scope: o.scope, skipped: 'in-flight' };
+  }
+  _emailJobsInFlight.add(job.jobId);
+  try { return await _runOneEmailScopeLeased(ctx, o, job); }
+  finally { _emailJobsInFlight.delete(job.jobId); }
+}
+
+async function _runOneEmailScopeLeased(ctx, o, job) {
   const lease = await ledger.acquireLease(ledger.CHANNELS.EMAIL, job.jobId);
   if (!lease.ok) return { state: job.state, scope: o.scope, skipped: 'channel-busy' };
 

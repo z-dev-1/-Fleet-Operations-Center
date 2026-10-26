@@ -361,12 +361,22 @@ function computeBackoffMs(attempts) {
   return table[Math.min(attempts, table.length - 1)];
 }
 
+const NO_RETRY_STATES = [STATES.DELIVERY_UNCERTAIN, STATES.SENT, STATES.COMPLETED];
+
 async function scheduleRetry(jobId, errInfo) {
   let result = { ok: false };
   await store.updateAsync(LEDGER_KEY, (raw) => {
     const led = _normLedger(raw);
     const job = led.jobs[jobId];
     if (!job) { result = { ok: false, error: 'not-found' }; return led; }
+    // Never let a retry overwrite a state that means "this was (probably)
+    // delivered". A concurrent/late failure used to flip delivery-uncertain
+    // back to retry, which later RE-SENT an email the recipient already had.
+    if (NO_RETRY_STATES.includes(job.state)) {
+      if (errInfo) job.errors.push({ at: _iso(), class: errInfo.class || 'transient', message: 'retry suppressed (state=' + job.state + '): ' + String(errInfo.message || errInfo).slice(0, 400) });
+      result = { ok: false, skipped: job.state, job };
+      return led;
+    }
     job.attempts += 1;
     if (job.attempts >= job.maxAttempts) {
       job.state = STATES.FAILED;
