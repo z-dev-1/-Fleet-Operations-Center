@@ -590,6 +590,17 @@ function _hourInZone(tz) {
 }
 
 let _tickRunning = false;
+// AI-retry backoff. Previously a rule-based fallback left the day unmarked, so
+// the 60s tick re-ran the FULL AI generation (2 batches x 2 attempts of ~14K
+// char prompts) every minute for as long as the AI was down — 60+ timeouts an
+// hour, all queued on the single-lane Orcha WS ahead of interactive AI (Long
+// Dwell fill, briefing). Now: after an AI miss, wait AI_RETRY_COOLDOWN_MS before
+// retrying, and give up for the day after AI_MAX_DAILY_TRIES misses (the rule-
+// based list stays; the manual Generate button still works any time).
+const AI_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
+const AI_MAX_DAILY_TRIES = 4;
+let _aiMiss = { day: null, count: 0, lastAt: 0 };
+
 async function _tick() {
   if (_tickRunning) return; // AI generation can take a while — never overlap
   try {
@@ -597,14 +608,24 @@ async function _tick() {
     const today = _todayInZone(DEFAULT_TZ);
     if (s.lastGeneratedDay === today) return;        // already generated today
     if (_hourInZone(DEFAULT_TZ) < MORNING_HOUR) return; // wait until morning
+    if (_aiMiss.day !== today) _aiMiss = { day: today, count: 0, lastAt: 0 };
+    if (_aiMiss.count >= AI_MAX_DAILY_TRIES) return;  // gave up AI for today
+    if (_aiMiss.lastAt && Date.now() - _aiMiss.lastAt < AI_RETRY_COOLDOWN_MS) return; // cooling down
     _tickRunning = true;
-    logger.info('[tasks] morning auto-generation for ' + today);
+    logger.info('[tasks] morning auto-generation for ' + today +
+      (_aiMiss.count ? ' (AI retry ' + (_aiMiss.count + 1) + '/' + AI_MAX_DAILY_TRIES + ')' : ''));
     const ns = await _generate();
     // Only mark the day done if AI actually authored the list; a rule-based
-    // fallback leaves the day open so the next tick retries AI.
+    // fallback leaves the day open so a LATER tick (after the cooldown) retries.
     if (ns.lastGenSource === 'ai') {
       ns.lastGeneratedDay = today;
       _save(ns);
+      _aiMiss = { day: today, count: 0, lastAt: 0 };
+    } else {
+      _aiMiss.count++;
+      _aiMiss.lastAt = Date.now();
+      logger.info('[tasks] AI miss ' + _aiMiss.count + '/' + AI_MAX_DAILY_TRIES +
+        (_aiMiss.count >= AI_MAX_DAILY_TRIES ? ' — keeping rule-based tasks for today' : ' — next AI retry in ' + Math.round(AI_RETRY_COOLDOWN_MS / 60000) + ' min'));
     }
   } catch (e) {
     logger.warn('[tasks] scheduler tick failed: ' + e.message);
