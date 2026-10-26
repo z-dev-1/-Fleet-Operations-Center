@@ -277,6 +277,7 @@ function connect() {
   _ws.on('error', (err) => {
     clearTimeout(connectTimer);
     _failCount++;
+    _ensureLocalOrcha();
     const logFn = _failCount <= 5 ? 'warn' : 'info';
     logger[logFn]('WS error (attempt ' + _failCount + '): ' + (err.message || 'unknown'));
     _connected = false;
@@ -595,6 +596,19 @@ function getStatus() {
   };
 }
 
-function init() { connect(); }
+// Keep ONE background Orcha alive on this machine (only for a localhost URL;
+// remote mode is someone else's server). Throttled + never spawns while any
+// Orcha process exists, so it can't create the duplicate-daemon fight.
+function _ensureLocalOrcha() {
+  try {
+    const m = _getWsUrl().match(/^ws:\/\/(localhost|127\.0\.0\.1):(\d+)/);
+    if (!m) return;
+    require('./orcha-supervisor').ensureRunning(parseInt(m[2], 10))
+      .then((st) => { if (st === 'spawned') logger.info('Orcha supervisor started a background agent — will connect when it is up'); })
+      .catch(() => {});
+  } catch (_) {}
+}
+
+function init() { _ensureLocalOrcha(); connect(); }
 
 module.exports = { init, ask, chat, getSessionId, getStatus, resetSession, setLocalAskFn };

@@ -245,15 +245,11 @@ async function ask(prompt, opts = {}) {
           _saveStatus();
           return text;
         }
-        logger.info('[' + requestId + '] CLI attempt ' + attempt);
-        const cliText = await _tryHeadless(prompt, { signal }).catch(() => null);
-        if (cliText) {
-          _markLaneHealthy('orcha');
-          _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
-          logger.info('[' + requestId + '] OK via CLI fallback (' + cliText.length + ' chars)');
-          _saveStatus();
-          return cliText;
-        }
+        // Headless CLI fallback (`orcha --headless`) intentionally removed from
+        // the cascade: each call launched a full extra Orcha + daemon that was
+        // never cleaned up, and those copies killed each other's agent on port
+        // 4799. orcha-supervisor.js now keeps ONE background agent alive and
+        // fleet-brain reaches it over the WebSocket.
         // Skip Claude Code fallback when preference is 'orcha'
         if (_aiPreference !== 'orcha') {
           // CLAUDE CODE FALLBACK: claude -p via Cecelia shared account
@@ -370,44 +366,6 @@ function _tryWS(prompt, opts = {}) {
             done(new Error(msg.error || 'Orcha WS error'));
           break;
       }
-    });
-  });
-}
-
-// ── HEADLESS CLI ─────────────────────────────────────────────────────────────
-function _tryHeadless(prompt, opts = {}) {
-  const signal = opts.signal;
-  return new Promise((resolve, reject) => {
-    if (signal && signal.aborted) return reject(new Error('Aborted before start'));
-    const orchaPath = process.platform === 'win32'
-      ? path.join(os.homedir(), 'AppData', 'Local', 'Toolbox', 'bin', 'orcha.cmd')
-      : path.join(os.homedir(), '.toolbox', 'bin', 'orcha');
-
-    const tmpFile = path.join(P.dataDir, '_headless_prompt.txt');
-    try {
-      fs.mkdirSync(P.dataDir, { recursive: true });
-      fs.writeFileSync(tmpFile, prompt, 'utf8');
-    } catch (e) { return reject(new Error('Failed to write temp prompt: ' + e.message)); }
-
-    const args  = ['--headless', '--agent', _orchaAgentId, '--prompt-file', tmpFile];
-    const timer = setTimeout(() => reject(new Error('Headless timeout')), TIMEOUT_MS);
-
-    // Node's execFile accepts a native AbortSignal via options.signal (v15.7+):
-    // aborting kills the child process for us, which is exactly what a
-    // caller-triggered cancellation needs here.
-    const execOpts = { maxBuffer: 1024 * 1024, timeout: TIMEOUT_MS, shell: process.platform === 'win32' };
-    if (signal) execOpts.signal = signal;
-
-    execFile(orchaPath, args, execOpts, (err, stdout, stderr) => {
-      clearTimeout(timer);
-      try { fs.unlinkSync(tmpFile); } catch (_) {}
-      if (err) {
-        const msg = (signal && signal.aborted) ? 'Aborted by caller' : ('Headless error: ' + (err.message || stderr || 'unknown'));
-        return reject(new Error(msg));
-      }
-      const text = (stdout || '').trim();
-      if (!text) return reject(new Error('Headless returned empty'));
-      resolve(text);
     });
   });
 }
