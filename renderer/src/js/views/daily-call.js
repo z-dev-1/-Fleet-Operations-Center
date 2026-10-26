@@ -305,8 +305,14 @@ function _computeGroup(groupRows, allRowsInGroup) {
 // backoff. A result with ok===false or a non-JSON body is NOT retried here
 // (that's a real AI answer, handled by the caller) — only timeouts/throws are.
 async function _askAIWithRetry(prompt, opts) {
-  const maxRetries = (opts && Number.isInteger(opts.maxRetries)) ? opts.maxRetries : 2;
-  const timeoutMs  = (opts && opts.timeoutMs) || 90000;
+  // The main-process ai:ask cap is 180s (relay cascade + single-lane Orcha
+  // queue waits). A shorter renderer timeout abandoned answers that were still
+  // coming AND fired a duplicate prompt into the same queue while the first was
+  // still running — that is what made WBR sites "cut off". Wait slightly longer
+  // than the backend cap, and retry only once (the backend already falls back
+  // between lanes internally).
+  const maxRetries = (opts && Number.isInteger(opts.maxRetries)) ? opts.maxRetries : 1;
+  const timeoutMs  = (opts && opts.timeoutMs) || 185000;
   const label      = (opts && opts.label) || '';
   let lastErr = null;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -1325,14 +1331,27 @@ export function init(container) {
     btn.disabled = true;
     const statusEl = _el.querySelector('#dc-wbr-status');
     const rows = state.slice('fleet').rows || [];
-    await _generateWBR(rows, (done, total) => {
-      btn.textContent = `🤖 Generating ${done}/${total}...`;
-      if (statusEl) statusEl.textContent = '';
-    });
-    btn.disabled = false;
-    btn.textContent = orig;
-    if (statusEl) statusEl.textContent = '✓ Generated';
-    setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 3000);
+    let result = null;
+    try {
+      result = await _generateWBR(rows, (done, total, msg) => {
+        btn.textContent = `🤖 Generating ${done}/${total}...`;
+        if (statusEl) statusEl.textContent = msg ? '(' + msg + ')' : 'AI can take up to ~3 min per site when busy';
+      });
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+    const failedSites = (result && result.failed) || [];
+    if (statusEl) {
+      if (!failedSites.length) {
+        statusEl.textContent = '✓ Generated';
+        setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 3000);
+      } else {
+        // Keep this visible — the user needs to know which sites to fill/retry.
+        statusEl.textContent = '⚠ ' + (result.total - failedSites.length) + '/' + result.total +
+          ' filled — AI did not finish: ' + failedSites.join(', ') + ' (Generate again to retry, or fill manually)';
+      }
+    }
     _renderWBR(rows);
   });
 
@@ -1539,6 +1558,7 @@ async function _generateWBR(rows, progressCb) {
   } catch (e) { console.warn('[WBR] comparison fetch failed (non-fatal):', e.message); }
 
   let done = 0;
+  const failed = []; // site keys the AI could not fill (reported back to the UI)
   for (const s of sites) {
     if (progressCb) progressCb(done, sites.length);
     try {
@@ -1631,19 +1651,65 @@ RESPOND WITH JSON ONLY:
         console.warn('[WBR] AI failed for', s.key, 'after retries:', retryErr.message);
       }
       const raw = res && res.text ? res.text : (typeof res === 'string' ? res : '');
-      const jm = (raw || '').match(/\{[\s\S]*\}/);
-      if (jm) {
-        const parsed = JSON.parse(jm[0]);
+      const parsed = _parseWbrJson(raw);
+      if (parsed && (parsed.bridge || parsed.actions)) {
         if (parsed.bridge) _wbrSet(s.key, 'bridge', parsed.bridge);
         if (parsed.actions) _wbrSet(s.key, 'actions', parsed.actions);
+      } else {
+        console.warn('[WBR] could not parse AI response for', s.key, '(' + (raw || '').length + ' chars)');
+        failed.push(s.key);
       }
     } catch (e) {
       // AI failed for this site after retry — leave empty, user can fill manually
       console.warn('[WBR] AI generation failed for', s.key, e.message);
+      if (!failed.includes(s.key)) failed.push(s.key);
     }
     done++;
   }
   if (progressCb) progressCb(done, sites.length);
+  return { total: sites.length, failed };
+}
+
+// Tolerant parser for the WBR {"bridge","actions"} reply. Models often put RAW
+// newlines inside the JSON strings (the bridge is multi-line bullets), which
+// makes strict JSON.parse throw and the whole site silently stays blank. Try,
+// in order: strict parse of the outermost {...}; the same with raw control
+// characters escaped inside string literals; then a field-by-field extraction.
+function _parseWbrJson(raw) {
+  const text = String(raw || '').replace(/^\s*```(?:json)?/i, '').replace(/```\s*$/, '');
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  const body = (start >= 0 && end > start) ? text.slice(start, end + 1) : '';
+  if (body) {
+    try { return JSON.parse(body); } catch (_) { /* try repaired */ }
+    // Escape raw newlines / tabs that appear INSIDE string literals.
+    let out = '', inStr = false, esc = false;
+    for (const ch of body) {
+      if (inStr) {
+        if (esc) { out += ch; esc = false; continue; }
+        if (ch === '\\') { out += ch; esc = true; continue; }
+        if (ch === '"') { out += ch; inStr = false; continue; }
+        if (ch === '\n') { out += '\\n'; continue; }
+        if (ch === '\r') { continue; }
+        if (ch === '\t') { out += '\\t'; continue; }
+        out += ch;
+      } else {
+        if (ch === '"') inStr = true;
+        out += ch;
+      }
+    }
+    try { return JSON.parse(out); } catch (_) { /* fall through */ }
+  }
+  // Last resort: pull each field's string value directly (handles a reply that
+  // was cut off after "bridge" or has stray text around the JSON).
+  function grab(key) {
+    const m = text.match(new RegExp('"' + key + '"\\s*:\\s*"([\\s\\S]*?)"\\s*(?:,\\s*"[a-zA-Z_]+"\\s*:|\\}\\s*$|$)'));
+    if (!m) return '';
+    return m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\t/g, '\t').trim();
+  }
+  const bridge = grab('bridge');
+  const actions = grab('actions');
+  return (bridge || actions) ? { bridge, actions } : null;
 }
 
 // Quote a value for a spreadsheet TSV cell. A cell containing a newline, tab,
