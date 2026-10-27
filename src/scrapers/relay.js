@@ -1541,6 +1541,20 @@ function _newerOffsite(cacheEntry, row) {
     : { asistNotes: cText, asistScrapedAt: c.asistScrapedAt || w.asistScrapedAt || '' };
 }
 
+// WR conversation: the row's copy wins only when it was fetched (live API
+// hydrate, row._convFetchedAt) AFTER the relay cache entry was scraped
+// (r._cachedAt). Otherwise previous behavior: cache first, row as fallback.
+function _newerConversation(cacheEntry, row) {
+  const c = cacheEntry || {}, w = row || {};
+  const cText = c.fullConversation || '', wText = w.fullConversation || '';
+  if (!wText) return cText;
+  if (!cText) return wText;
+  const wt = w._convFetchedAt ? new Date(w._convFetchedAt).getTime() : NaN;
+  const ct = typeof c._cachedAt === 'number' ? c._cachedAt : (c._cachedAt ? new Date(c._cachedAt).getTime() : NaN);
+  if (Number.isFinite(wt) && (!Number.isFinite(ct) || wt > ct)) return wText;
+  return cText;
+}
+
 function mergeRelayIntoRows(aapRows, relayData, notesStore) {
   const relay = relayData || {};
   const notes = notesStore || {};
@@ -1611,7 +1625,10 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       serviceState:        r.serviceState      || row.serviceState      || '',
       salesforceCase:      r.salesforceCase     || row.salesforceCase    || '',
       salesforceCaseUrl:   r.salesforceCaseUrl  || row.salesforceCaseUrl || '',
-      fullConversation:    r.fullConversation   || row.fullConversation  || '',
+      // Newer conversation wins (2026-10-27): the AI-timeline hydrate pulls the
+      // LIVE WR conversation from the AAP API and stamps _convFetchedAt; the
+      // relay DOM cache can be hours old (4h TTL, longer if not re-scraped).
+      fullConversation:    _newerConversation(r, row),
       integratedMethod:    r.integratedMethod  || row.integratedMethod  || '',
       serviceCategory:     r.category          || row.serviceCategory   || '',
       created:             r.created           || row.created           || '',
@@ -1674,7 +1691,7 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
   });
 }
 
-module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage, pickOffsiteFromConversation, _newerOffsite,
+module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage, pickOffsiteFromConversation, _newerOffsite, _newerConversation,
   // Exposed so the API path (src/scrapers/aap_api.js) can reuse the exact same
   // PM date formatter for its pills (from asset.maintenanceScheduleStatuses).
   parsePMDates: _parsePMDates, formatPmDate: _formatPmDate };

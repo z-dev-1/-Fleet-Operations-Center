@@ -130,6 +130,22 @@ describe('relay merge keeps the NEWER offsite notes', () => {
   });
 });
 
+describe('relay merge keeps the NEWER WR conversation (Relay Garage)', () => {
+  const { _newerConversation } = require('../src/scrapers/relay.js');
+  const cachedAt = Date.now() - 6 * HOUR;
+  it('live API conversation fetched after the relay scrape wins', () => {
+    expect(_newerConversation({ fullConversation: 'old', _cachedAt: cachedAt }, { fullConversation: 'live', _convFetchedAt: new Date().toISOString() })).toBe('live');
+  });
+  it('a relay scrape newer than the row wins', () => {
+    expect(_newerConversation({ fullConversation: 'fresh scrape', _cachedAt: Date.now() }, { fullConversation: 'older', _convFetchedAt: new Date(cachedAt).toISOString() })).toBe('fresh scrape');
+  });
+  it('undated row keeps the old cache-first behavior; empties fall back', () => {
+    expect(_newerConversation({ fullConversation: 'cache', _cachedAt: cachedAt }, { fullConversation: 'row' })).toBe('cache');
+    expect(_newerConversation({}, { fullConversation: 'row' })).toBe('row');
+    expect(_newerConversation({ fullConversation: 'cache' }, {})).toBe('cache');
+  });
+});
+
 describe('timelineInputSignature', () => {
   it('changes when dealer notes or the WR conversation change, not otherwise', () => {
     const a = timelineInputSignature(unit({ asistNotes: STALE_NOTES }));

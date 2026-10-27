@@ -1254,7 +1254,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
               // is where the PM due-date pills get populated for the table
               // (the bulk asset search does NOT return that field).
               const fr = await api.refreshUnit(r.equipmentId);
-              if (fr && fr.fullConversation) { r.fullConversation = fr.fullConversation; hydrated++; }
+              if (fr && fr.fullConversation) { r.fullConversation = fr.fullConversation; r._convFetchedAt = new Date().toISOString(); hydrated++; }
               if (fr && fr._secondaryWRs) r._secondaryWRs = fr._secondaryWRs;
               // PM due dates (raw + pills), offsite URL (Split View right pane),
               // and location — all from getAsset + the WO comment thread.
