@@ -248,8 +248,13 @@ export function liveLifecycleText(live) {
 async function _refreshLiveLC(unit) {
   const sub = document.getElementById('dp-act-lc-sub');
   const line = document.getElementById('dp-lc-live');
-  if (!unit || !unit.assetUrl || !aap.getLifecycle) {
+  if (!unit || !unit.assetUrl) {
     if (line) line.textContent = 'Live AAP status unavailable (no asset link)';
+    return null;
+  }
+  if (!(window.aap && typeof window.aap.getLifecycle === 'function')) {
+    // App core hasn't been restarted since this feature was added.
+    if (line) line.textContent = 'Live AAP check needs an app restart (Ctrl+R) — showing last sync';
     return null;
   }
   if (sub) sub.textContent = (unit.lifecycleState || '') + ' · checking AAP…';
@@ -368,6 +373,7 @@ function _wireAttachToWR(unit) {
     upBtn.disabled = true; clrBtn.disabled = true; upBtn.textContent = 'Uploading…';
     result.textContent = '';
     try {
+      if (!(window.aap && typeof window.aap.attachToWR === 'function')) throw new Error('needs an app restart (Ctrl+R) first');
       const r = await aap.attachToWR(wrId, files);
       const res = (r && Array.isArray(r.results)) ? r.results : [];
       const okN = res.filter((x) => x && x.ok).length;

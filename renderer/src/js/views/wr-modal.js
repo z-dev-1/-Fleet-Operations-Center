@@ -210,8 +210,8 @@ function _initFlipUI(unit) {
   let cbTouched = false;
   cb.addEventListener('change', () => { cbTouched = true; sel.disabled = !cb.checked; });
   // Replace the last-sync status with the LIVE AAP status as soon as it lands.
-  if (unit && unit.assetUrl && aap.getLifecycle) {
-    aap.getLifecycle(unit.equipmentId || unit.id, unit.assetUrl).then((live) => {
+  if (unit && unit.assetUrl && window.aap && typeof window.aap.getLifecycle === 'function') {
+    Promise.resolve().then(() => aap.getLifecycle(unit.equipmentId || unit.id, unit.assetUrl)).then((live) => {
       if (!live || !live.ok || _unit !== unit) return;
       const st = live.stateLabel || live.state || '';
       const rs = live.reasonLabel || live.reason || '';
@@ -260,7 +260,7 @@ async function _maybeFlipUnavailable(wrId) {
     let r = await aap.setLifecycle(eqId, unit.assetUrl, 'Unavailable', reason);
     // Confirm with a LIVE read-back from AAP (the browser-automation fallback
     // can't verify on its own; the API path already did, this double-checks).
-    if (aap.getLifecycle) {
+    if (window.aap && typeof window.aap.getLifecycle === 'function') {
       try {
         const live = await aap.getLifecycle(eqId, unit.assetUrl);
         if (live && live.ok) {
