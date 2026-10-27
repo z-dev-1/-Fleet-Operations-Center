@@ -563,7 +563,7 @@ function registerScrapersIPC(ctx) {
     try {
       const { attachToOpenWr } = require('../scrapers/wr_attach');
       const r = await attachToOpenWr(req);
-      logger.info('[attach-to-wr] WR ' + (r.workRequestId || '?') + ': ' +
+      logger.info('[attach-to-wr] WR ' + (r.workRequestId || '?') + ' (' + ((r.results || []).length) + ' file(s)): ' +
         (r.ok ? 'all ' + r.results.length + ' uploaded' : (r.partial ? 'partial' : 'failed')) +
         (r.error ? ' (' + r.error + ')' : ''));
       return r;

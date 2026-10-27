@@ -5,7 +5,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const { validateAttachRequest, attachToOpenWr } = require('../src/scrapers/wr_attach');
+const { validateAttachRequest, attachToOpenWr, findVendorCode } = require('../src/scrapers/wr_attach');
+const SVC = async () => ({ serviceAggregate: { workRequest: { workRequestId: 'x', vendor: 'AMERIT' } } });
 
 vi.mock('../renderer/src/js/bridge.js', () => ({ notes: {}, ai: {}, aap: {}, relay: {}, vendor: {}, files: {} }));
 vi.mock('../renderer/src/js/bus.js', () => ({ default: { on() {}, emit() {}, off() {} } }));
@@ -47,27 +48,55 @@ describe('validateAttachRequest', () => {
 describe('attachToOpenWr', () => {
   it('uploads to the given WR and reports all-ok', async () => {
     const upload = vi.fn(async (id, atts) => atts.map((a) => ({ name: a.name, ok: true })));
-    const r = await attachToOpenWr({ workRequestId: WR, attachments: [{ name: 'a.png', dataUrl: PNG }, { name: 'b.pdf', dataUrl: PDF }] }, { uploadWrAttachments: upload });
-    expect(upload).toHaveBeenCalledWith(WR, [{ name: 'a.png', dataUrl: PNG }, { name: 'b.pdf', dataUrl: PDF }], {});
+    const r = await attachToOpenWr({ workRequestId: WR, attachments: [{ name: 'a.png', dataUrl: PNG }, { name: 'b.pdf', dataUrl: PDF }] }, { uploadWrAttachments: upload, getService: SVC });
+    expect(upload).toHaveBeenCalledWith(WR, [{ name: 'a.png', dataUrl: PNG }, { name: 'b.pdf', dataUrl: PDF }], { vendor: 'AMERIT', skipImagesPath: true });
     expect(r.ok).toBe(true);
     expect(r.partial).toBe(false);
   });
   it('reports partial success', async () => {
     const upload = async () => [{ name: 'a', ok: true }, { name: 'b', ok: false, error: 'x' }];
-    const r = await attachToOpenWr({ workRequestId: WR, attachments: [{ dataUrl: PNG }, { dataUrl: PNG }] }, { uploadWrAttachments: upload });
+    const r = await attachToOpenWr({ workRequestId: WR, attachments: [{ dataUrl: PNG }, { dataUrl: PNG }] }, { uploadWrAttachments: upload, getService: SVC });
     expect(r.ok).toBe(false);
     expect(r.partial).toBe(true);
   });
   it('never uploads an invalid request', async () => {
     const upload = vi.fn();
-    const r = await attachToOpenWr({ workRequestId: 'bad', attachments: [{ dataUrl: PNG }] }, { uploadWrAttachments: upload });
+    const r = await attachToOpenWr({ workRequestId: 'bad', attachments: [{ dataUrl: PNG }] }, { uploadWrAttachments: upload, getService: SVC });
     expect(r.ok).toBe(false);
     expect(upload).not.toHaveBeenCalled();
   });
   it('turns an upload exception into a failed result', async () => {
-    const r = await attachToOpenWr({ workRequestId: WR, attachments: [{ dataUrl: PNG }] }, { uploadWrAttachments: async () => { throw new Error('403'); } });
+    const r = await attachToOpenWr({ workRequestId: WR, attachments: [{ dataUrl: PNG }] }, { uploadWrAttachments: async () => { throw new Error('403'); }, getService: SVC });
     expect(r.ok).toBe(false);
     expect(r.error).toBe('403');
+  });
+});
+
+describe('vendor lookup for the upload-link call', () => {
+  it('finds the vendor code at any depth', () => {
+    expect(findVendorCode({ a: { b: [{ vendor: 'COX' }] } })).toBe('COX');
+    expect(findVendorCode({ vendorId: 'AMERIT' })).toBe('AMERIT');
+    expect(findVendorCode({ vendor: '' , x: { vendor: 'TA' } })).toBe('TA');
+    expect(findVendorCode(null)).toBe('');
+  });
+  it('passes the WR vendor and skips the broken images path', async () => {
+    const upload = vi.fn(async (id, atts) => atts.map((a) => ({ name: a.name, ok: true })));
+    await attachToOpenWr({ workRequestId: WR, attachments: [{ name: 'a.png', dataUrl: PNG }] }, { uploadWrAttachments: upload, getService: SVC });
+    expect(upload.mock.calls[0][2]).toEqual({ vendor: 'AMERIT', skipImagesPath: true });
+  });
+  it('uses a caller-supplied vendor without calling AAP', async () => {
+    const getService = vi.fn();
+    const upload = vi.fn(async (id, atts) => atts.map(() => ({ ok: true })));
+    await attachToOpenWr({ workRequestId: WR, vendor: 'COX', attachments: [{ dataUrl: PNG }] }, { uploadWrAttachments: upload, getService });
+    expect(getService).not.toHaveBeenCalled();
+    expect(upload.mock.calls[0][2].vendor).toBe('COX');
+  });
+  it('fails clearly (no upload) when the WR has no vendor', async () => {
+    const upload = vi.fn();
+    const r = await attachToOpenWr({ workRequestId: WR, attachments: [{ dataUrl: PNG }] }, { uploadWrAttachments: upload, getService: async () => ({ workRequest: {} }) });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/vendor/i);
+    expect(upload).not.toHaveBeenCalled();
   });
 });
 

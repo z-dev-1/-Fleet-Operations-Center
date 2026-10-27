@@ -49,13 +49,44 @@ function validateAttachRequest(req) {
 /**
  * attachToOpenWr(req, deps?) -> { ok, workRequestId, results:[{name, ok, error?}], error? }
  */
+// AAP's raw vendor code (e.g. "AMERIT") from a serviceaggregates response.
+// The shape nests the work request at varying depths, so search breadth-first
+// for the first non-empty string `vendor` (or vendorId) field.
+function findVendorCode(detail) {
+  const queue = [detail];
+  let guard = 0;
+  while (queue.length && guard++ < 2000) {
+    const n = queue.shift();
+    if (!n || typeof n !== 'object') continue;
+    for (const k of ['vendor', 'vendorId', 'vendorCode']) {
+      if (typeof n[k] === 'string' && n[k].trim()) return n[k].trim();
+    }
+    for (const v of Object.values(n)) if (v && typeof v === 'object') queue.push(v);
+  }
+  return '';
+}
+
 async function attachToOpenWr(req, deps) {
   const v = validateAttachRequest(req);
   if (!v.ok) return { ok: false, error: v.error, results: [] };
-  const upload = (deps && deps.uploadWrAttachments) || require('./aap_api').uploadWrAttachments;
+  const api = (deps && deps.api) || null;
+  const upload = (deps && deps.uploadWrAttachments) || (api && api.uploadWrAttachments) || require('./aap_api').uploadWrAttachments;
+  const getService = (deps && deps.getService) || (api && api.getService) || require('./aap_api').getService;
+
+  // AAP's upload-link call requires the WR's vendor (non-null) — the create
+  // flow has it in hand; for an existing WR, read it from AAP.
+  let vendor = String((req && req.vendor) || '').trim();
+  if (!vendor) {
+    try { vendor = findVendorCode(await getService(v.workRequestId)); } catch (_) { vendor = ''; }
+  }
+  if (!vendor) {
+    return { ok: false, workRequestId: v.workRequestId, results: [],
+      error: 'Could not find the vendor on WR ' + v.workRequestId.slice(0, 8) + ' — AAP needs it to accept documents. Assign a vendor first.' };
+  }
+
   let results;
   try {
-    results = await upload(v.workRequestId, v.attachments, {});
+    results = await upload(v.workRequestId, v.attachments, { vendor, skipImagesPath: true });
   } catch (e) {
     return { ok: false, workRequestId: v.workRequestId, error: e.message, results: [] };
   }
@@ -65,4 +96,4 @@ async function attachToOpenWr(req, deps) {
     workRequestId: v.workRequestId, results };
 }
 
-module.exports = { validateAttachRequest, attachToOpenWr, MAX_FILES, MAX_TOTAL_BYTES };
+module.exports = { validateAttachRequest, attachToOpenWr, findVendorCode, MAX_FILES, MAX_TOTAL_BYTES };

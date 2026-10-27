@@ -2382,8 +2382,11 @@ async function uploadWrAttachments(workRequestId, attachments, opts = {}) {
   const list = Array.isArray(attachments) ? attachments : [];
 
   // PRIMARY: updateWorkRequest { images:[dataUrl...] }.
+  // opts.skipImagesPath: AAP's current updateWorkRequest rejects string images
+  // with HTTP 500 ("Cannot construct instance of ...Image ... from String
+  // value", seen live 2026-10-27), so callers can go straight to uploadLink.
   const dataUrls = list.map((a) => (a && (a.dataUrl || a))).filter((u) => typeof u === 'string' && u.startsWith('data:'));
-  if (dataUrls.length) {
+  if (dataUrls.length && !opts.skipImagesPath) {
     try {
       const r = await updateWorkRequestImages(workRequestId, dataUrls);
       if (r && r.ok) {
