@@ -151,6 +151,121 @@ let _towPlan = null; // { isTow, towDirection, dealer: <vendor contact>, dealerN
 //     rgIntegrated, dealerName, hasRepair }
 let _wrTabState = null;
 let _copyFromWrId = null; // set by the "+ 2nd WR (reuse data)" flow -> AAP copiedFromWorkRequestId
+// "Set unit to Unavailable after the WR is created". Flips at most ONCE per
+// modal-open (a repair + tow pair should not flip twice).
+let _flipDone = false;
+let _flipReasonTouched = false; // user picked a reason → stop auto-suggesting
+
+// ── Flip-to-Unavailable after WR create ────────────────────────────────────
+const _FLIP_LABELS = {
+  DAMAGED_MODERATE: 'Damaged - Moderate', OFFSITE_SHOP_REPAIR: 'Off-site Shop Repair',
+  PARTS_DELAY: 'Parts Delay', PM_FAILED: 'PM Failed', PREVENTATIVE_MAINTENANCE: 'Preventative Maintenance',
+  SENSOR_DETECTED_DAMAGE: 'Sensor Detected Damage', SAFETY_INSPECTION_POST_ACCIDENT: 'Safety Inspection Post Accident',
+  LICENSE_OR_PERMIT_ISSUE: 'License or Permit Issue', IMPOUNDED_TOW: 'Impounded / Tow',
+  GPS_MALFUNCTIONING: 'GPS Malfunctioning', CAMPAIGN: 'Campaign',
+};
+
+function _unitLifecycle(unit) {
+  const u = unit || {};
+  return {
+    state: String(u.lifecycleState || u.atsState || '').trim(),
+    reason: String(u.lifecycleReason || u.lifecycleStateReason || u.relayStatus || '').trim(),
+  };
+}
+
+// Suggest a reason from the WR text. Most WRs are damage, so that's the default;
+// only clear-cut keywords pick something else. Never overrides a manual pick.
+export function suggestFlipReason(text) {
+  const t = String(text || '').toLowerCase();
+  if (/\b(pm|preventative|preventive)\b/.test(t) && !/\bpm fail/.test(t)) return 'PREVENTATIVE_MAINTENANCE';
+  if (/\bpm fail(ed)?\b/.test(t)) return 'PM_FAILED';
+  if (/\b(recall|campaign)\b/.test(t)) return 'CAMPAIGN';
+  if (/\b(accident|collision)\b/.test(t)) return 'SAFETY_INSPECTION_POST_ACCIDENT';
+  if (/\b(registration|permit|license|plate)\b/.test(t)) return 'LICENSE_OR_PERMIT_ISSUE';
+  if (/\bgps\b/.test(t)) return 'GPS_MALFUNCTIONING';
+  return 'DAMAGED_MODERATE';
+}
+
+function _initFlipUI(unit) {
+  _flipDone = false;
+  _flipReasonTouched = false;
+  const cb = _el('wr-flip-unavail');
+  const sel = _el('wr-flip-reason');
+  const note = _el('wr-flip-note');
+  if (!cb || !sel) return;
+  const lc = _unitLifecycle(unit);
+  const alreadyDown = /unavail/i.test(lc.state);
+  // Already Unavailable → default OFF (no point changing a reason by accident).
+  cb.checked = !alreadyDown;
+  if (note) {
+    note.textContent = lc.state
+      ? ('Currently ' + lc.state + (lc.reason ? ' - ' + lc.reason : '') + (alreadyDown ? ' (left unchecked)' : ''))
+      : 'Current AAP status unknown';
+  }
+  if (!unit || !unit.assetUrl) {
+    cb.checked = false; cb.disabled = true;
+    if (note) note.textContent = 'No AAP asset link for this unit — status flip unavailable (run a sync).';
+  }
+  sel.disabled = !cb.checked;
+  cb.addEventListener('change', () => { sel.disabled = !cb.checked; });
+  sel.addEventListener('change', () => { _flipReasonTouched = true; });
+  const title = _el('wr-title');
+  const issue = _el('wr-issue');
+  if (title) title.addEventListener('input', _resuggestFlipReason);
+  if (issue) issue.addEventListener('input', _resuggestFlipReason);
+}
+
+function _resuggestFlipReason() {
+  const sel = _el('wr-flip-reason');
+  if (!sel || _flipReasonTouched) return;
+  const title = _el('wr-title');
+  const issue = _el('wr-issue');
+  sel.value = suggestFlipReason(((title && title.value) || '') + ' ' + ((issue && issue.value) || ''));
+}
+
+// Text appended to the submit confirm so the flip is never a surprise.
+function _flipConfirmText() {
+  const cb = _el('wr-flip-unavail');
+  const sel = _el('wr-flip-reason');
+  if (_flipDone || !cb || !cb.checked || !sel) return '';
+  _resuggestFlipReason(); // AI Fill sets fields in code (no input event) — refresh now
+  return '\n\nThen set the unit to Unavailable - ' + (_FLIP_LABELS[sel.value] || sel.value) + ' in AAP.';
+}
+
+// Called after a WR is created. Never throws; the WR stays created either way.
+async function _maybeFlipUnavailable(wrId) {
+  const cb = _el('wr-flip-unavail');
+  const sel = _el('wr-flip-reason');
+  if (_flipDone || !cb || !cb.checked || !sel) return;
+  const unit = _unit || {};
+  const eqId = unit.equipmentId || unit.id || '';
+  if (!eqId || !unit.assetUrl) { _logProgress('Unit status not changed: no AAP asset link for this unit', 'err'); return; }
+  _flipDone = true; // claim before awaiting so a concurrent submit can't double-flip
+  const reason = sel.value || 'DAMAGED_MODERATE';
+  const label = _FLIP_LABELS[reason] || reason;
+  _logProgress('Setting ' + eqId + ' to Unavailable - ' + label + '…', 'run');
+  try {
+    const r = await aap.setLifecycle(eqId, unit.assetUrl, 'Unavailable', reason);
+    if (r && r.success) {
+      _logProgress((r.message || (eqId + ' set to Unavailable')) , 'ok');
+      toast.show('success', eqId + ' → Unavailable - ' + label, 5000);
+      cb.checked = false; cb.disabled = true; sel.disabled = true;
+      const note = _el('wr-flip-note');
+      if (note) note.textContent = 'Set to Unavailable - ' + label + (wrId ? ' after WR ' + wrId : '');
+    } else if (r && r.uncertain) {
+      _logProgress('Status change could not be verified — check the unit in AAP before relying on it', 'err');
+      toast.show('warn', eqId + ': status change unverified — check AAP', 7000);
+    } else {
+      _flipDone = false; // nothing changed → allow a retry from a later submit
+      _logProgress('Status change failed: ' + ((r && r.message) || 'unknown') + ' (the WR was still created)', 'err');
+      toast.show('error', eqId + ': WR created, but status change failed — set it manually', 7000);
+    }
+  } catch (e) {
+    _flipDone = false;
+    _logProgress('Status change failed: ' + e.message + ' (the WR was still created)', 'err');
+    toast.show('error', eqId + ': WR created, but status change failed — set it manually', 7000);
+  }
+}
 
 // Resolve the unit's EXISTING work-request id (raw UUID) from the unit record,
 // so a second WR can be linked to it via AAP's copiedFromWorkRequestId.
@@ -355,6 +470,31 @@ function _buildHTML(unit) {
         <input id="wr-internal" type="checkbox" />
         Internal only (not shared with vendor)
       </label>
+    </div>
+
+    <!-- Unit status: flip the unit in AAP after the WR is created -->
+    <div class="wr-section">
+      <div class="wr-section__title">Unit status</div>
+      <label class="settings-label settings-label--inline">
+        <input id="wr-flip-unavail" type="checkbox" />
+        Set unit to Unavailable after the WR is created
+      </label>
+      <label class="settings-label" style="margin-top:4px">Reason
+        <select id="wr-flip-reason" class="settings__select" aria-label="Unavailable reason">
+          <option value="DAMAGED_MODERATE">Damaged - Moderate</option>
+          <option value="OFFSITE_SHOP_REPAIR">Off-site Shop Repair</option>
+          <option value="PARTS_DELAY">Parts Delay</option>
+          <option value="PM_FAILED">PM Failed</option>
+          <option value="PREVENTATIVE_MAINTENANCE">Preventative Maintenance</option>
+          <option value="SENSOR_DETECTED_DAMAGE">Sensor Detected Damage</option>
+          <option value="SAFETY_INSPECTION_POST_ACCIDENT">Safety Inspection Post Accident</option>
+          <option value="LICENSE_OR_PERMIT_ISSUE">License or Permit Issue</option>
+          <option value="IMPOUNDED_TOW">Impounded / Tow</option>
+          <option value="GPS_MALFUNCTIONING">GPS Malfunctioning</option>
+          <option value="CAMPAIGN">Campaign</option>
+        </select>
+      </label>
+      <div id="wr-flip-note" class="wr-screenshot-label" style="margin-top:4px"></div>
     </div>
 
     <!-- Optional -->
@@ -720,7 +860,7 @@ async function _submitActiveTab(btn) {
   st[key] = _snapshotForm(); // capture any edits made on this tab
   const snap = st[key];
 
-  if (!window.confirm('Create and SUBMIT this ' + (key === 'repair' ? 'Repair' : 'Tow') + ' work order: "' + (snap.title || '').slice(0, 90) + '"?')) return;
+  if (!window.confirm('Create and SUBMIT this ' + (key === 'repair' ? 'Repair' : 'Tow') + ' work order: "' + (snap.title || '').slice(0, 90) + '"?' + _flipConfirmText())) return;
 
   const origText = btn.textContent;
   btn.disabled = true; btn.textContent = 'Submitting ' + key + '...';
@@ -758,6 +898,7 @@ async function _submitActiveTab(btn) {
     st.submitted[key] = { workRequestId: res.workRequestId };
     toast.show('success', (key === 'repair' ? 'Repair' : 'Tow') + ' WR ' + res.workRequestId + ' created', 5000);
     _renderTabBar();
+    await _maybeFlipUnavailable(res.workRequestId);
     await _afterTabSubmitted();
   } catch (e) {
     if (_progUnsub) { _progUnsub(); _progUnsub = null; }
@@ -799,7 +940,7 @@ async function _submitAllTabs() {
   const st = _wrTabState;
   if (!st) return;
   if (!window.confirm('Submit All will create and SUBMIT ' + (st.hasRepair ? '2 work orders (Repair + Tow)' : '1 work order (Tow)') +
-    (st.rgIntegrated ? '.' : ', then open the Dealer WO.') + ' Continue?')) return;
+    (st.rgIntegrated ? '.' : ', then open the Dealer WO.') + ' Continue?' + _flipConfirmText())) return;
   const allBtn = _el('wr-submit-all');
   if (allBtn) { allBtn.disabled = true; allBtn.textContent = 'Submitting…'; }
   try {
@@ -852,6 +993,7 @@ async function _submitOneTabSilently(key) {
     _logProgress('[' + key + '] Created: ' + res.workRequestId);
     st.submitted[key] = { workRequestId: res.workRequestId };
     _renderTabBar();
+    await _maybeFlipUnavailable(res.workRequestId);
     await _afterTabSubmitted();
   } catch (e) {
     _showError((key === 'repair' ? 'Repair' : 'Tow') + ' WR failed: ' + e.message);
@@ -1464,7 +1606,8 @@ function _wireSubmit() {
            (recommendedVendor && recommendedVendor.toUpperCase() !== pickedDisplay.split(' (')[0].toUpperCase()
              ? '\n\n(AAP recommended: ' + recommendedVendor + ')' : ''))
         : ('AAP recommends vendor "' + recommendedVendor + '".\n\nCreate this work order with that vendor?');
-      if (!window.confirm(confirmMsg)) {
+      const confirmFull = confirmMsg + _flipConfirmText();
+      if (!window.confirm(confirmFull)) {
         if (_progUnsub) { _progUnsub(); _progUnsub = null; }
         toast.show('info', 'Work order not created — vendor not confirmed.', 4000);
         return;
@@ -1509,6 +1652,7 @@ function _wireSubmit() {
           </div>`;
         resultEl.style.display = '';
         toast.show('success', 'WR created' + (wrId ? ' ' + wrId : '') + (attachSummary || ''), 6000);
+        await _maybeFlipUnavailable(wrId);
         const _eqId = _unit && (_unit.equipmentId || _unit.id);
         if (_eqId && relay && typeof relay.refreshUnit === 'function') {
           relay.refreshUnit(_eqId).catch(() => {});
@@ -1655,6 +1799,8 @@ function _close() {
   _copyFromWrId = null;
   _towPlan   = null;
   _wrTabState = null;
+  _flipDone  = false;
+  _flipReasonTouched = false;
   _avmTree   = null;
   _vreRec    = null; // recommendation is unit-specific — clear it on close.
   // _vendorList is intentionally kept (6h-cached, vendor set is unit-agnostic).
@@ -2568,6 +2714,7 @@ export function open(unit) {
   _wireAutoUptake();
   _wireTow();
   _wireVendorRecUI();
+  _initFlipUI(unit);
 
   // Pre-select vendor from relay data if available (against the fallback list;
   // _loadLiveLookups below preserves this selection when the live list lands).
