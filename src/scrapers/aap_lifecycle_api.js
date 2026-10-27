@@ -192,6 +192,32 @@ async function resolveAaid(unitOrAaid, opts) {
   return { error: 'could not resolve unit ' + token + ' to an asset id' };
 }
 
+// ── Live lifecycle read ───────────────────────────────────────────────────────
+/**
+ * getLiveLifecycle({ unit, assetUrl }) -> { ok, state, reason, stateLabel, reasonLabel, version, aaid, at } | { ok:false, error }
+ * Reads the unit's CURRENT lifecycle straight from AAP (no cache), so the UI
+ * can show what AAP really says and confirm a change actually landed.
+ */
+async function getLiveLifecycle(args) {
+  args = args || {};
+  const r = await resolveAaid(args.unit, { assetUrl: args.assetUrl });
+  if (r.error) return { ok: false, error: r.error };
+  let asset;
+  try { asset = await aap.getAsset(r.aaid); } catch (e) { return { ok: false, aaid: r.aaid, error: 'could not read asset: ' + e.message }; }
+  if (asset && asset.asset && !asset.aaid) asset = asset.asset;
+  if (!asset || !asset.aaid) return { ok: false, aaid: r.aaid, error: 'asset not found' };
+  let mapper = null;
+  try { mapper = require('./aap_api_mapper'); } catch (_) {}
+  const state = asset.lifecycleState || '';
+  const reason = asset.lifecycleStateReason || '';
+  return {
+    ok: true, aaid: r.aaid, state, reason, version: asset.version,
+    stateLabel: (mapper && mapper.mapLifecycleState) ? mapper.mapLifecycleState(state) : state,
+    reasonLabel: (mapper && mapper.mapLifecycleReason) ? mapper.mapLifecycleReason(reason) : reason,
+    at: new Date().toISOString(),
+  };
+}
+
 // ── Lifecycle flip (read-modify-write PUT + verified read-back) ───────────────
 
 const _norm = (s) => String(s || '').trim().toUpperCase();
@@ -437,6 +463,6 @@ module.exports = {
   ALLOWED_STATES, BLOCKED_STATES, SUPPORTED_REASONS,
   DVIR_CLEAR_LIFECYCLE, DVIR_OUTCOMES,
   refreshValidValues, getValidReasons, getSupportedReasons, getValidStates,
-  resolveAaid, setLifecycleApi,
+  resolveAaid, setLifecycleApi, getLiveLifecycle,
   getOpenDvirs, clearDvir, clearAllOpenDvirs, setLifecycleActiveWithDvir,
 };

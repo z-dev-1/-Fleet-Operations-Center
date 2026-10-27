@@ -398,6 +398,7 @@ expose('aap', {
   createWR:         (payload, unit)          => ipcRenderer.invoke('aap:create-wr', payload, unit),
   createWorkOrder:  (payload)                => ipcRenderer.invoke('aap:create-wr-api', payload),
   attachToWR:       (workRequestId, attachments) => ipcRenderer.invoke('aap:attach-to-wr', { workRequestId, attachments }),
+  getLifecycle:     (id, url)                => ipcRenderer.invoke('aap:get-lifecycle', { equipmentId: id, assetUrl: url }),
   onWRProgress:     (cb)                     => on('wr:progress', cb),
   openUrl:          (url)                    => ipcRenderer.invoke('aap:open-url', url),
 });

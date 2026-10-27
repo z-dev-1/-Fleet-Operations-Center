@@ -227,6 +227,48 @@ function _wireAISuggest(unit) {
   }
 }
 
+// ── Live lifecycle (read straight from AAP) ─────────────────────────────────
+const _lcNorm = (s) => String(s || '').trim().toUpperCase().replace(/[\s/-]+/g, '_');
+// Does the LIVE AAP lifecycle match what was requested? State must match; the
+// reason must match too when one was requested.
+export function lifecycleMatches(live, wantState, wantReason) {
+  if (!live || !live.ok) return false;
+  if (_lcNorm(live.state) !== _lcNorm(wantState)) return false;
+  return !wantReason || _lcNorm(live.reason) === _lcNorm(wantReason);
+}
+export function liveLifecycleText(live) {
+  if (!live || !live.ok) return '';
+  const st = live.stateLabel || live.state || '?';
+  const rs = live.reasonLabel || live.reason || '';
+  return st + (rs ? ' · ' + rs : '');
+}
+
+// Fetch the live lifecycle and reflect it on the Lifecycle tile + form.
+// Updates the in-memory unit so the rest of the panel matches AAP.
+async function _refreshLiveLC(unit) {
+  const sub = document.getElementById('dp-act-lc-sub');
+  const line = document.getElementById('dp-lc-live');
+  if (!unit || !unit.assetUrl || !aap.getLifecycle) {
+    if (line) line.textContent = 'Live AAP status unavailable (no asset link)';
+    return null;
+  }
+  if (sub) sub.textContent = (unit.lifecycleState || '') + ' · checking AAP…';
+  let live = null;
+  try { live = await aap.getLifecycle(unit.equipmentId, unit.assetUrl); } catch (e) { live = { ok: false, error: e.message }; }
+  if (live && live.ok) {
+    const txt = liveLifecycleText(live);
+    const appHad = (unit.lifecycleState || '') + (unit.lifecycleReason ? ' · ' + unit.lifecycleReason : '');
+    if (sub) { sub.textContent = '● LIVE ' + (live.stateLabel || live.state); sub.title = 'AAP now: ' + txt + (appHad ? '\nApp had: ' + appHad : ''); }
+    if (line) line.textContent = 'AAP live: ' + txt + ' (checked ' + new Date(live.at || Date.now()).toLocaleTimeString() + ')';
+    unit.lifecycleState = live.stateLabel || live.state || unit.lifecycleState;
+    unit.lifecycleReason = live.reasonLabel || live.reason || unit.lifecycleReason;
+  } else {
+    if (sub) { sub.textContent = (unit.lifecycleState || '') + ' (not live)'; sub.title = 'Live check failed: ' + ((live && live.error) || 'unknown'); }
+    if (line) line.textContent = 'Live AAP check failed: ' + ((live && live.error) || 'unknown') + ' — showing last sync';
+  }
+  return live;
+}
+
 // ── Attach documents to an open WR ─────────────────────────────────────────
 // The unit's OPEN work requests (primary + secondary cards). Completed /
 // closed / cancelled ones are skipped — a just-closed WR can still be the
@@ -2452,7 +2494,7 @@ function renderActionsPane(unit){
       '<button class="dp-action-btn dp-action-btn--primary" id="dp-act-create-wr"><span class="dp-action-btn__icon">\u2795</span>Create WR<span class="dp-action-btn__sub">AAP work request</span></button>'+
       '<button class="dp-action-btn" id="dp-act-dealer-wo"><span class="dp-action-btn__icon">\ud83c\udfe6</span>Dealer WO<span class="dp-action-btn__sub">PACCAR / Volvo / DTNA</span></button>'+
       '<button class="dp-action-btn" id="dp-act-aap"><span class="dp-action-btn__icon">\ud83d\udd17</span>Open AAP<span class="dp-action-btn__sub">Asset page</span></button>'+
-      '<button class="dp-action-btn" id="dp-act-lc"><span class="dp-action-btn__icon">\ud83d\udd04</span>Lifecycle<span class="dp-action-btn__sub">'+esc(unit.lifecycleState||'')+'</span></button>'+
+      '<button class="dp-action-btn" id="dp-act-lc"><span class="dp-action-btn__icon">\ud83d\udd04</span>Lifecycle<span class="dp-action-btn__sub" id="dp-act-lc-sub" aria-live="polite">'+esc(unit.lifecycleState||'')+'</span></button>'+
       '<button class="dp-action-btn dp-action-btn--notes" id="dp-act-daily-notes"><span class="dp-action-btn__icon">\ud83d\udccb</span>Daily Notes<span class="dp-action-btn__sub">AI note + split view</span></button>'+
       '<button class="dp-action-btn dp-action-btn--orcha" id="dp-act-orcha-deep"><span class="dp-action-btn__icon">\u26a1</span>Orcha Scan<span class="dp-action-btn__sub">AI deep analysis</span></button>'+
     '</div>'+
@@ -2467,6 +2509,8 @@ function renderActionsPane(unit){
 // _wireLifecycleForm -- that failure was being reported to the user as a
 // SUCCESS. Fixed to the 4 real AAP states.
 '<div id="dp-lc-form" class="dp-lc-form" style="display:none">'+
+      '<div id="dp-lc-live" class="dp-lc-row" aria-live="polite" style="font-size:12px;opacity:.85">AAP live: checking…</div>'+
+      '<div id="dp-lc-result" class="dp-lc-row" aria-live="polite" style="font-size:12px"></div>'+
       '<div class="dp-lc-row"><select id="dp-lc-state" class="detail-panel__select"><option value="Active">Active</option><option value="Unavailable">Unavailable</option><option value="Ordered">Ordered</option></select>'+
       '<select id="dp-lc-reason" class="detail-panel__select">'+
         '<option value="HEALTHY">Healthy</option>'+
@@ -2742,7 +2786,13 @@ function _renderUnit(unit) {
 
   var actLC  = document.getElementById('dp-act-lc');
   var lcForm = document.getElementById('dp-lc-form');
-  if (actLC && lcForm) actLC.addEventListener('click', function(){ lcForm.style.display = lcForm.style.display==='none'?'flex':'none'; });
+  // Live status on panel open, and again whenever the form is opened.
+  _refreshLiveLC(unit);
+  if (actLC && lcForm) actLC.addEventListener('click', function(){
+    var opening = lcForm.style.display==='none';
+    lcForm.style.display = opening?'flex':'none';
+    if (opening) { var rl=document.getElementById('dp-lc-result'); if(rl) rl.textContent=''; _refreshLiveLC(unit); }
+  });
   var lcCancel = document.getElementById('dp-lc-cancel');
   if (lcCancel && lcForm) lcCancel.addEventListener('click', function(){ lcForm.style.display='none'; });
   var lcConfirm = document.getElementById('dp-lc-confirm');
@@ -2751,10 +2801,31 @@ function _renderUnit(unit) {
       if (!unit.assetUrl) { toast.show('warn','No AAP URL',3000); return; }
       var lcState  = (document.getElementById('dp-lc-state')||{}).value;
       var lcReason = ((document.getElementById('dp-lc-reason')||{}).value||'').trim();
+      var resEl = document.getElementById('dp-lc-result');
+      var reasonLabel = (function(){ var s=document.getElementById('dp-lc-reason'); return s && s.options[s.selectedIndex] ? s.options[s.selectedIndex].text : lcReason; })();
       lcConfirm.disabled=true; lcConfirm.textContent='Saving...';
-      try { await aap.setLifecycle(unit.equipmentId,unit.assetUrl,lcState,lcReason); toast.show('success','Lifecycle changed to '+lcState); if(lcForm)lcForm.style.display='none'; }
-      catch(e) { toast.show('error','Lifecycle change failed: '+e.message); }
-      finally { lcConfirm.disabled=false; lcConfirm.textContent='Confirm'; }
+      if (resEl) { resEl.style.color=''; resEl.textContent='Saving to AAP…'; }
+      var r = null;
+      try { r = await aap.setLifecycle(unit.equipmentId,unit.assetUrl,lcState,lcReason); }
+      catch(e) { r = { success:false, message:e.message }; }
+      // Don't trust the save call alone: read the unit back LIVE from AAP and
+      // confirm the state (and reason) actually changed.
+      lcConfirm.textContent='Confirming…';
+      if (resEl) resEl.textContent='Checking AAP to confirm…';
+      var live = await _refreshLiveLC(unit);
+      var confirmed = lifecycleMatches(live, lcState, lcReason);
+      var want = lcState + (lcReason ? ' · ' + reasonLabel : '');
+      if (confirmed) {
+        toast.show('success', unit.equipmentId + ' confirmed live in AAP: ' + want, 5000);
+        if (resEl) { resEl.style.color='var(--ok,#3fb950)'; resEl.textContent='✓ Confirmed live in AAP: ' + liveLifecycleText(live); }
+      } else if (live && live.ok) {
+        toast.show('error', unit.equipmentId + ': AAP still shows ' + liveLifecycleText(live) + ' — change did not take' + (r && r.message ? ' (' + r.message + ')' : ''), 8000);
+        if (resEl) { resEl.style.color='var(--err,#f85149)'; resEl.textContent='✗ Not changed. AAP shows ' + liveLifecycleText(live) + (r && r.message ? ' — ' + r.message : ''); }
+      } else {
+        toast.show('warn', unit.equipmentId + ': could not confirm in AAP' + (r && r.message ? ' (' + r.message + ')' : '') + ' — check the unit before relying on it', 8000);
+        if (resEl) { resEl.style.color='var(--warn,#d29922)'; resEl.textContent='⚠ Unconfirmed: ' + ((r && r.message) || 'live check failed'); }
+      }
+      lcConfirm.disabled=false; lcConfirm.textContent='Confirm';
     });
   }
 

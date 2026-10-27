@@ -207,7 +207,19 @@ function _initFlipUI(unit) {
     if (note) note.textContent = 'No AAP asset link for this unit — status flip unavailable (run a sync).';
   }
   sel.disabled = !cb.checked;
-  cb.addEventListener('change', () => { sel.disabled = !cb.checked; });
+  let cbTouched = false;
+  cb.addEventListener('change', () => { cbTouched = true; sel.disabled = !cb.checked; });
+  // Replace the last-sync status with the LIVE AAP status as soon as it lands.
+  if (unit && unit.assetUrl && aap.getLifecycle) {
+    aap.getLifecycle(unit.equipmentId || unit.id, unit.assetUrl).then((live) => {
+      if (!live || !live.ok || _unit !== unit) return;
+      const st = live.stateLabel || live.state || '';
+      const rs = live.reasonLabel || live.reason || '';
+      const down = /unavail/i.test(st);
+      if (!cbTouched && !_flipDone) { cb.checked = !down; sel.disabled = !cb.checked; }
+      if (note && !_flipDone) note.textContent = 'AAP live: ' + st + (rs ? ' - ' + rs : '') + (down ? ' (left unchecked)' : '');
+    }).catch(() => {});
+  }
   sel.addEventListener('change', () => { _flipReasonTouched = true; });
   const title = _el('wr-title');
   const issue = _el('wr-issue');
@@ -245,7 +257,22 @@ async function _maybeFlipUnavailable(wrId) {
   const label = _FLIP_LABELS[reason] || reason;
   _logProgress('Setting ' + eqId + ' to Unavailable - ' + label + '…', 'run');
   try {
-    const r = await aap.setLifecycle(eqId, unit.assetUrl, 'Unavailable', reason);
+    let r = await aap.setLifecycle(eqId, unit.assetUrl, 'Unavailable', reason);
+    // Confirm with a LIVE read-back from AAP (the browser-automation fallback
+    // can't verify on its own; the API path already did, this double-checks).
+    if (aap.getLifecycle) {
+      try {
+        const live = await aap.getLifecycle(eqId, unit.assetUrl);
+        if (live && live.ok) {
+          const okLive = /^unavailable$/i.test(String(live.state || '').trim()) &&
+            String(live.reason || '').trim().toUpperCase() === reason;
+          const liveTxt = (live.stateLabel || live.state) + (live.reasonLabel || live.reason ? ' - ' + (live.reasonLabel || live.reason) : '');
+          if (okLive) r = { ...(r || {}), success: true, message: eqId + ' confirmed live in AAP: ' + liveTxt };
+          else if (r && r.success) r = { success: false, uncertain: true, message: 'save reported OK but AAP shows ' + liveTxt };
+          else r = { ...(r || {}), message: ((r && r.message) || 'not changed') + ' — AAP shows ' + liveTxt };
+        }
+      } catch (_) { /* keep the save result */ }
+    }
     if (r && r.success) {
       _logProgress((r.message || (eqId + ' set to Unavailable')) , 'ok');
       toast.show('success', eqId + ' → Unavailable - ' + label, 5000);

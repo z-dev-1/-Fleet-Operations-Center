@@ -407,6 +407,7 @@ export const aap = {
   createWR:          (payload, unit)       => window.aap.createWR(payload, unit),
   createWorkOrder:   (payload)             => window.aap.createWorkOrder(payload),
   attachToWR:        (wrId, attachments)   => window.aap.attachToWR(wrId, attachments),
+  getLifecycle:      (id, url)             => window.aap.getLifecycle(id, url),
   onWRProgress:      (cb)                  => window.aap.onWRProgress(cb),
   openUrl:           (url)                 => window.aap.openUrl(url),
 };

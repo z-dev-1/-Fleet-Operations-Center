@@ -541,6 +541,15 @@ function registerScrapersIPC(ctx) {
   });
 
 
+  // ── aap:get-lifecycle ───────────────────────────────────────────────────
+  // LIVE read of a unit's lifecycle state/reason straight from AAP (no cache).
+  // Read-only. Used to show the real status and to confirm a change landed.
+  handle('aap:get-lifecycle', async (_e, req) => {
+    requireObject(req, 'req');
+    const api = require('../scrapers/aap_lifecycle_api');
+    return api.getLiveLifecycle({ unit: String(req.equipmentId || ''), assetUrl: String(req.assetUrl || '') });
+  });
+
   // ── aap:attach-to-wr ────────────────────────────────────────────────────
   // Add documents (PNG/JPEG/PDF) to an EXISTING open work request. Same upload
   // the create flow uses after a new WR. Re-entrancy locked so a double click
