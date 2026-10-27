@@ -13,7 +13,7 @@
 import bus           from '../bus.js';
 import state         from '../state.js';
 import { notes, ai, aap, relay, vendor } from '../bridge.js';
-import { open as openWRModal }    from './wr-modal.js';
+import { open as openWRModal, readFileAsAttachment } from './wr-modal.js';
 import { open as openVendorReview } from './vendor-review-modal.js';
 import { open as openDealerWOModal } from './dealer-wo-modal.js';
 import toast         from '../components/toast.js';
@@ -225,6 +225,133 @@ function _wireAISuggest(unit) {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const q = askInput.value.trim(); if (q) _runSuggest(q); }
     });
   }
+}
+
+// ── Attach documents to an open WR ─────────────────────────────────────────
+// The unit's OPEN work requests (primary + secondary cards). Completed /
+// closed / cancelled ones are skipped — a just-closed WR can still be the
+// primary card, and documents shouldn't land on it by accident.
+const _UUID_IN = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i;
+export function openWrChoices(unit) {
+  const u = unit || {};
+  const out = [];
+  const seen = new Set();
+  const add = (w, kind) => {
+    if (!w) return;
+    const m = String(w.workRequestId || w._serviceUUID || w.serviceUrl || '').match(_UUID_IN);
+    if (!m || seen.has(m[0].toLowerCase())) return;
+    const st = String(w.serviceState || '');
+    if (w.completed || /complet|closed|cancel/i.test(st)) return;
+    seen.add(m[0].toLowerCase());
+    const desc = String(w.issueDetails || w.issueSummary || w.serviceCategory || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    out.push({ id: m[0], kind, label: m[0].slice(0, 8) + (st ? ' · ' + st : '') + (desc ? ' · ' + desc : '') });
+  };
+  add(u, 'primary');
+  (Array.isArray(u._secondaryWRs) ? u._secondaryWRs : []).forEach((w) => add(w, 'secondary'));
+  return out;
+}
+
+function _attachSectionHtml(unit) {
+  const choices = openWrChoices(unit);
+  if (!choices.length) {
+    return '<div class="dp-section-title" style="margin-top:10px">Attach to open WR</div>' +
+      '<p class="dp-empty" id="dp-wra-none">No open work request on this unit.</p>';
+  }
+  return '<div class="dp-section-title" style="margin-top:10px">Attach to open WR</div>' +
+    '<div class="dp-lc-form" id="dp-wra" style="display:flex;flex-direction:column;gap:6px">' +
+      '<label class="settings-label">Work request' +
+        '<select id="dp-wra-wr" class="detail-panel__select" aria-label="Work request to attach to">' +
+          choices.map((c) => '<option value="' + esc(c.id) + '">' + esc(c.label) + '</option>').join('') +
+        '</select></label>' +
+      '<div id="dp-wra-drop" class="wr-dropzone" tabindex="0" role="button" aria-label="Add files: drop here or press Enter to browse">' +
+        '<span>Drag files here, or <button id="dp-wra-browse" type="button" class="wr-dropzone__browse">browse…</button> (PNG, JPEG, PDF)</span>' +
+        '<input id="dp-wra-input" type="file" multiple accept="image/*,.pdf" style="display:none" />' +
+      '</div>' +
+      '<div id="dp-wra-list" class="wr-attach-list" aria-live="polite"></div>' +
+      '<div class="dp-lc-row"><button id="dp-wra-upload" class="detail-panel__btn" disabled>Upload</button>' +
+        '<button id="dp-wra-clear" class="detail-panel__btn detail-panel__btn--secondary" disabled>Clear</button></div>' +
+      '<div id="dp-wra-result" class="wr-screenshot-label" aria-live="polite"></div>' +
+    '</div>';
+}
+
+function _wireAttachToWR(unit) {
+  const drop = document.getElementById('dp-wra-drop');
+  if (!drop) return;
+  const input  = document.getElementById('dp-wra-input');
+  const browse = document.getElementById('dp-wra-browse');
+  const list   = document.getElementById('dp-wra-list');
+  const upBtn  = document.getElementById('dp-wra-upload');
+  const clrBtn = document.getElementById('dp-wra-clear');
+  const sel    = document.getElementById('dp-wra-wr');
+  const result = document.getElementById('dp-wra-result');
+  let files = []; // [{ name, dataUrl }]
+
+  const render = () => {
+    list.innerHTML = files.map((f, i) =>
+      '<div class="wr-attach-item"><span>' + esc(f.name) + '</span> ' +
+      '<button type="button" class="wr-dropzone__browse" data-wra-rm="' + i + '" aria-label="Remove ' + esc(f.name) + '">✕</button></div>').join('');
+    upBtn.disabled = !files.length;
+    clrBtn.disabled = !files.length;
+  };
+  const addFiles = async (fileList) => {
+    for (const file of Array.from(fileList || [])) {
+      const att = await readFileAsAttachment(file);
+      if (!att) { toast.show('warn', 'Could not read "' + file.name + '"', 3000); continue; }
+      if (att.warn) { toast.show('warn', '"' + file.name + '" ' + att.warn, 5000); continue; }
+      files.push({ name: att.name, dataUrl: att.dataUrl });
+    }
+    result.textContent = '';
+    render();
+  };
+
+  browse.addEventListener('click', (e) => { e.stopPropagation(); input.click(); });
+  drop.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } });
+  input.addEventListener('change', () => { addFiles(input.files); input.value = ''; });
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('wr-dropzone--over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('wr-dropzone--over'));
+  drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('wr-dropzone--over'); addFiles(e.dataTransfer && e.dataTransfer.files); });
+  list.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-wra-rm]');
+    if (!b) return;
+    files.splice(parseInt(b.getAttribute('data-wra-rm'), 10), 1);
+    render();
+  });
+  clrBtn.addEventListener('click', () => { files = []; result.textContent = ''; render(); });
+
+  upBtn.addEventListener('click', async () => {
+    const wrId = sel.value;
+    const label = (sel.options[sel.selectedIndex] || {}).text || wrId;
+    if (!wrId || !files.length) return;
+    if (!window.confirm('Upload ' + files.length + ' file' + (files.length > 1 ? 's' : '') + ' to WR ' + label + '?')) return;
+    upBtn.disabled = true; clrBtn.disabled = true; upBtn.textContent = 'Uploading…';
+    result.textContent = '';
+    try {
+      const r = await aap.attachToWR(wrId, files);
+      const res = (r && Array.isArray(r.results)) ? r.results : [];
+      const okN = res.filter((x) => x && x.ok).length;
+      if (r && r.ok) {
+        result.textContent = '✓ ' + okN + ' file' + (okN > 1 ? 's' : '') + ' uploaded to WR ' + wrId.slice(0, 8);
+        toast.show('success', okN + ' file' + (okN > 1 ? 's' : '') + ' attached to WR ' + wrId.slice(0, 8), 5000);
+        files = [];
+      } else if (r && r.partial) {
+        const failed = res.filter((x) => !(x && x.ok)).map((x) => (x && x.name) || 'file');
+        result.textContent = '⚠ ' + okN + '/' + res.length + ' uploaded. Failed: ' + failed.join(', ');
+        toast.show('warn', 'Some files failed to upload', 5000);
+        // keep only the failed ones so a retry doesn't re-upload the good ones
+        const failedSet = new Set(failed);
+        files = files.filter((f) => failedSet.has(f.name));
+      } else {
+        result.textContent = '✗ Upload failed: ' + ((r && r.error) || 'unknown');
+        toast.show('error', 'Upload failed: ' + ((r && r.error) || 'unknown'), 6000);
+      }
+    } catch (e) {
+      result.textContent = '✗ Upload failed: ' + e.message;
+      toast.show('error', 'Upload failed: ' + e.message, 6000);
+    } finally {
+      upBtn.textContent = 'Upload';
+      render();
+    }
+  });
 }
 
 // S11: Create WR -> openWRModal (full modal with vendor/urgency/areas/screenshot)
@@ -2357,6 +2484,7 @@ function renderActionsPane(unit){
       '</select></div>'+
       '<div class="dp-lc-row"><button id="dp-lc-confirm" class="detail-panel__btn">Confirm</button><button id="dp-lc-cancel" class="detail-panel__btn detail-panel__btn--secondary">Cancel</button></div>'+
     '</div>'+ /* close #dp-lc-form — was MISSING, so the final </div> closed this form instead of #dp-pane-actions, leaving the Actions pane open and swallowing the entire History pane inside it (History rendered with offsetHeight 0 = blank). */
+    _attachSectionHtml(unit)+
     '<div class="dp-section-title" style="margin-top:10px">Dealer Work Order</div>'+
     '<div id="dp-vnd-ai-suggest" class="dp-vnd-ai-suggest"></div>'+
     '<div id="dp-vendor-section" class="dp-vendor-section"><p class="dp-empty">Loading eligibility\u2026</p></div>'+
@@ -2629,6 +2757,9 @@ function _renderUnit(unit) {
       finally { lcConfirm.disabled=false; lcConfirm.textContent='Confirm'; }
     });
   }
+
+  // ── Attach documents to an open WR ───────────────────────────────────────
+  _wireAttachToWR(unit);
 
   // ── Daily Notes for this unit ────────────────────────────────────────────
   var actDailyNotes = document.getElementById('dp-act-daily-notes');

@@ -92,6 +92,7 @@ window.aap = {
   adaptiveExtract:   noopAsync,
   adaptiveScanBatch: noopAsync,
   createWR:          noopAsync,
+  attachToWR:        noopAsync,
   onWRProgress:      noop,
   openUrl:           noop,
 };

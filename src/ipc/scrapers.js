@@ -34,6 +34,7 @@ const GEOFENCE_IPC_TIMEOUT = 200_000; // Stage 5 C-1: IPC belt -- scraper has ow
 let _wrLock       = false;   // aap:create-wr
 let _adaptiveLock = false;   // aap:adaptive
 let _wrApiLock    = false;   // aap:create-wr-api (VRE recommendation WO create)
+let _wrAttachLock = false;   // aap:attach-to-wr (add documents to an open WR)
 let _activeAutofillWin = null; // aap:autofill -- lets aap:autofill-stop force-close it
 let _uptakeLock   = false;   // H-3: uptake:scrape
 let _relayLock    = false;   // H-3: relay:scrape
@@ -539,6 +540,28 @@ function registerScrapersIPC(ctx) {
     }
   });
 
+
+  // ── aap:attach-to-wr ────────────────────────────────────────────────────
+  // Add documents (PNG/JPEG/PDF) to an EXISTING open work request. Same upload
+  // the create flow uses after a new WR. Re-entrancy locked so a double click
+  // can't upload the same files twice.
+  handle('aap:attach-to-wr', async (_e, req) => {
+    if (_wrAttachLock) {
+      throw new ScraperError('aap:attach-to-wr operation already in progress', 'aap:attach-to-wr');
+    }
+    requireObject(req, 'req');
+    _wrAttachLock = true;
+    try {
+      const { attachToOpenWr } = require('../scrapers/wr_attach');
+      const r = await attachToOpenWr(req);
+      logger.info('[attach-to-wr] WR ' + (r.workRequestId || '?') + ': ' +
+        (r.ok ? 'all ' + r.results.length + ' uploaded' : (r.partial ? 'partial' : 'failed')) +
+        (r.error ? ' (' + r.error + ')' : ''));
+      return r;
+    } finally {
+      _wrAttachLock = false;
+    }
+  });
 
   // ── uptake:scrape ────────────────────────────────────────────────────────
   // H-3: IPC-level concurrency guard mirrors the scraper's own _uptakeLock.

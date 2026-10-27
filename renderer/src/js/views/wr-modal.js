@@ -1354,10 +1354,13 @@ function _pngName(name) {
 // Read one or more browser File objects (from <input type=file> or a drop
 // event) via FileReader -- purely renderer-side, no IPC needed. Images in a
 // non-AAP format are auto-converted to PNG before attaching.
-function _readFilesAsAttachments(fileList) {
-  Array.from(fileList || []).forEach(file => {
+// Shared (also used by the unit-detail "Attach to open WR" section): read one
+// File and normalize it for AAP. Resolves { name, dataUrl, converted, warn }
+// or null if the file could not be read at all.
+export function readFileAsAttachment(file) {
+  return new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onerror = () => toast.show('warn', 'Could not read "' + file.name + '"', 3000);
+    reader.onerror = () => resolve(null);
     reader.onload = async () => {
       const dataUrl = reader.result;
       const mime = (file.type || '').toLowerCase();
@@ -1366,8 +1369,7 @@ function _readFilesAsAttachments(fileList) {
         /\.(heic|heif|webp|gif|bmp|tif|tiff|avif)$/i.test(name);
       // PDFs and already-allowed images attach as-is.
       if (mime === 'application/pdf' || name.endsWith('.pdf') || _ALLOWED_IMG.test(mime)) {
-        _addAttachment(file.name, dataUrl);
-        return;
+        return resolve({ name: file.name, dataUrl });
       }
       // Any other image type -> convert to PNG.
       if (looksImage) {
@@ -1381,20 +1383,24 @@ function _readFilesAsAttachments(fileList) {
             if (res && res.ok && res.dataUrl) png = res.dataUrl;
           } catch (_) { /* fall through to warning */ }
         }
-        if (png) {
-          _addAttachment(_pngName(file.name), png);
-          toast.show('info', 'Converted "' + file.name + '" to PNG for upload', 2500);
-        } else {
-          // Genuinely could not convert — keep it but be honest.
-          _addAttachment(file.name, dataUrl);
-          toast.show('warn', '"' + file.name + '" could not be converted. Try exporting it as PNG/JPEG first.', 5000);
-        }
-        return;
+        if (png) return resolve({ name: _pngName(file.name), dataUrl: png, converted: true });
+        // Genuinely could not convert — keep it but be honest.
+        return resolve({ name: file.name, dataUrl, warn: 'could not be converted. Try exporting it as PNG/JPEG first.' });
       }
       // Non-image, non-PDF (rare, input accepts image/*,.pdf) — attach as-is.
-      _addAttachment(file.name, dataUrl);
+      resolve({ name: file.name, dataUrl });
     };
     reader.readAsDataURL(file);
+  });
+}
+
+function _readFilesAsAttachments(fileList) {
+  Array.from(fileList || []).forEach(async (file) => {
+    const att = await readFileAsAttachment(file);
+    if (!att) { toast.show('warn', 'Could not read "' + file.name + '"', 3000); return; }
+    _addAttachment(att.name, att.dataUrl);
+    if (att.converted) toast.show('info', 'Converted "' + file.name + '" to PNG for upload', 2500);
+    if (att.warn) toast.show('warn', '"' + file.name + '" ' + att.warn, 5000);
   });
 }
 

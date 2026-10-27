@@ -406,6 +406,7 @@ export const aap = {
   adaptiveScanBatch: (units)               => window.aap.adaptiveScanBatch(units),
   createWR:          (payload, unit)       => window.aap.createWR(payload, unit),
   createWorkOrder:   (payload)             => window.aap.createWorkOrder(payload),
+  attachToWR:        (wrId, attachments)   => window.aap.attachToWR(wrId, attachments),
   onWRProgress:      (cb)                  => window.aap.onWRProgress(cb),
   openUrl:           (url)                 => window.aap.openUrl(url),
 };
