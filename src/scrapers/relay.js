@@ -1237,7 +1237,9 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
             asistSource:         (_finalOffsite && _finalOffsite.asistSource)    || '',
             asistLabel:          (_finalOffsite && _finalOffsite.asistLabel)     || '',
             asistSrUrl:          (_finalOffsite && _finalOffsite.asistSrUrl)     || '',
-            asistScrapedAt:      (_finalOffsite && _finalOffsite.asistScrapedAt) || '',
+            // Stamp WHEN the offsite text was fetched so the timeline build can
+            // tell fresh notes from days-old cache (was blank → cache trusted forever).
+            asistScrapedAt:      (_finalOffsite && _finalOffsite.asistScrapedAt) || (_offsitePageText ? new Date().toISOString() : ''),
             dealerName:          (_finalOffsite && _finalOffsite.dealerName)     || '',
             asistNotes:          _offsitePageText || '',
             salesforceCase:      convSalesforce   ? convSalesforce.caseNumber   : (wrData.salesforceCase      || ''),
@@ -1519,6 +1521,26 @@ function _parsePMDates(row) {
 }
 
 
+// Pick the offsite notes (asistNotes + asistScrapedAt) from whichever source
+// was fetched more recently. Undated text loses to dated text; if neither is
+// dated, the relay cache wins (previous behavior).
+function _newerOffsite(cacheEntry, row) {
+  const c = cacheEntry || {}, w = row || {};
+  const ct = c.asistScrapedAt ? new Date(c.asistScrapedAt).getTime() : NaN;
+  const wt = w.asistScrapedAt ? new Date(w.asistScrapedAt).getTime() : NaN;
+  const cText = c.asistNotes || '', wText = w.asistNotes || '';
+  let useRow;
+  if (Number.isFinite(ct) && Number.isFinite(wt)) useRow = wt > ct;
+  else if (Number.isFinite(wt)) useRow = true;
+  else if (Number.isFinite(ct)) useRow = false;
+  else useRow = !cText;
+  if (useRow && !wText) useRow = false; // never trade real text for nothing
+  if (!useRow && !cText && wText) useRow = true;
+  return useRow
+    ? { asistNotes: wText, asistScrapedAt: w.asistScrapedAt || c.asistScrapedAt || '' }
+    : { asistNotes: cText, asistScrapedAt: c.asistScrapedAt || w.asistScrapedAt || '' };
+}
+
 function mergeRelayIntoRows(aapRows, relayData, notesStore) {
   const relay = relayData || {};
   const notes = notesStore || {};
@@ -1601,7 +1623,10 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       asistSource:         r.asistSource         || row.asistSource         || '',
       asistLabel:          r.asistLabel          || row.asistLabel          || '',
       asistSrUrl:          r.asistSrUrl          || row.asistSrUrl          || '',
-      asistScrapedAt:      r.asistScrapedAt      || row.asistScrapedAt      || '',
+      // Newer offsite text wins (2026-10-27): the timeline build can re-scrape
+      // ASIST live and stamp the ROW; the relay cache may still hold an older
+      // copy. Blindly preferring the cache put days-old notes back every sync.
+      asistScrapedAt:      _newerOffsite(r, row).asistScrapedAt || '',
       // BUG FIX (2026-08-24): asistNotes (the 8000-char offsite Decisiv/ASIST page
       // text captured by Phase 3.6) was scraped and stored in relay_cache.json but
       // NEVER carried through this merge, so it arrived at the deep-scan AI as empty.
@@ -1609,7 +1634,7 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       // page (e.g. 39546: RENTAL WR with no Relay comments but a full Volvo ASIST
       // estimate) with a thin '[no activity logged]' timeline. Now propagated so the
       // timeline builder always sees the offsite diagnosis/estimate notes.
-      asistNotes:          r.asistNotes          || row.asistNotes          || '',
+      asistNotes:          _newerOffsite(r, row).asistNotes || '',
       // Structured offsite status-bar stage (arrival|diagnosis|approval|repair|
       // ready) captured from the Decisiv SR progress tracker. The authoritative
       // "is this unit actually ready" signal — the free-text notes alone can lag
@@ -1649,7 +1674,7 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
   });
 }
 
-module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage, pickOffsiteFromConversation,
+module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage, pickOffsiteFromConversation, _newerOffsite,
   // Exposed so the API path (src/scrapers/aap_api.js) can reuse the exact same
   // PM date formatter for its pills (from asset.maintenanceScheduleStatuses).
   parsePMDates: _parsePMDates, formatPmDate: _formatPmDate };

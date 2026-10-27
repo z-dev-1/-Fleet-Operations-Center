@@ -696,6 +696,31 @@ function registerScrapersIPC(ctx) {
   // not needed here (single unit, own window), but we guard against concurrent
   // per-unit refreshes with a small lock.
   let _refreshUnitLock = false;
+  // Signature of the timeline INPUTS each unit was last rebuilt from (this run).
+  const _timelineInputSig = new Map();
+  function _maybeRebuildTimeline(row) {
+    try {
+      const id = String(row.equipmentId || '').trim();
+      const down = /unavail/i.test(String(row.lifecycleState || '')) || /offsite/i.test(String(row.lifecycleReason || ''));
+      if (!id || !down) return;
+      const { timelineInputSignature } = require('../orcha/timeline-freshness');
+      const sig = timelineInputSignature(row);
+      if (!sig || _timelineInputSig.get(id) === sig) return;
+      _timelineInputSig.set(id, sig);
+      const { rebuildUnitTimeline } = require('../orcha/deep-scan');
+      logger.info('[timeline] inputs changed for ' + id + ' — rebuilding its timeline now');
+      rebuildUnitTimeline(row, {
+        pushData: ctx.pushData,
+        pushStatus: typeof ctx.pushStatus === 'function' ? ctx.pushStatus : null,
+      }).then((r) => {
+        if (r && r.ok) logger.info('[timeline] rebuilt ' + id + ' (' + String(r.timeline || '').length + 'ch)');
+        else if (r && r.skipped) logger.info('[timeline] rebuild for ' + id + ' skipped: ' + r.skipped);
+      }).catch((e) => {
+        _timelineInputSig.delete(id); // allow a retry on the next open
+        logger.warn('[timeline] rebuild failed for ' + id + ': ' + e.message);
+      });
+    } catch (e) { logger.warn('[timeline] rebuild trigger error: ' + e.message); }
+  }
   handle('relay:refresh-unit', async (_e, equipmentId, opts) => {
     const store = require('../store');
     const id = String(equipmentId || '').trim();
@@ -788,6 +813,12 @@ function registerScrapersIPC(ctx) {
         } catch (ce) { logger.warn('relay:refresh-unit canonical re-run failed (non-fatal): ' + ce.message); }
       }
       logger.info('relay:refresh-unit done for ' + id + (force ? ' [forced]' : '') + (res && res._noWR ? ' (no WR)' : ''));
+      // Keep the AI timeline CURRENT: if the data the timeline is built from
+      // (offsite notes + WR conversation) changed since this unit's last
+      // rebuild, rebuild just this unit now in the background. Previously a
+      // refresh pulled fresh dealer notes but the timeline waited for the next
+      // full deep-scan (≥20 min, and that scan used stale cache).
+      if (freshRow && opts.rebuildTimeline !== false) _maybeRebuildTimeline(freshRow);
       return { ok: true, unit: freshRow, cache: relayCache[id] || null };
     } catch (e) {
       throw new ScraperError(e.message, 'relay:refresh-unit', { equipmentId: id });

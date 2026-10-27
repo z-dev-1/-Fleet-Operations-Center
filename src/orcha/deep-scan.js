@@ -65,6 +65,27 @@ function _withTimeout(promise, ms, label) {
  * @param {Array}  mergedRows - All merged unit rows (mutated in place)
  * @param {object} opts       - { pushData, pushStatus, payload, uptakeCount, relayCount }
  */
+// Cached offsite (ASIST/DTNA) notes are trusted for this long; older or
+// undated → the timeline build re-scrapes live. Opening a unit always fetches
+// fresh notes and rebuilds that unit right away (relay:refresh-unit).
+const OFFSITE_CACHE_FRESH_MS = 2 * 60 * 60 * 1000;
+function isOffsiteCacheFresh(u, now) {
+  const t = u && u.asistScrapedAt ? new Date(u.asistScrapedAt).getTime() : NaN;
+  if (!Number.isFinite(t)) return false;
+  return ((now || Date.now()) - t) < OFFSITE_CACHE_FRESH_MS;
+}
+
+// Write back ONLY the entries this run changed, on top of what's on disk now.
+// A deep-scan holds its own in-memory copy of notesStore for minutes; saving
+// that whole copy would silently undo a concurrent single-unit rebuild (or a
+// user edit) made in the meantime.
+function _saveChangedNotes(notesStore, changedIds) {
+  if (!changedIds || !changedIds.size) return;
+  const disk = store.load('notesStore', {}) || {};
+  for (const id of changedIds) disk[id] = notesStore[id];
+  store.save('notesStore', disk);
+}
+
 async function runOrchaDeepScan(mergedRows, opts) {
   const { pushData, pushStatus, payload } = opts;
   const uptakeCount = opts.uptakeCount || 0;
@@ -83,6 +104,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
     };
 
   const notesStore = store.load('notesStore', {});
+  const _changedIds = new Set(); // units whose notesStore entry this run changed
 
   // Filter: units that need attention
   // Uses lifecycleState + lifecycleReason — atsState does not exist on merged rows
@@ -252,7 +274,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
         }
       }
 
-      if (isChanged) notesStore[val.equipmentId] = ns;
+      if (isChanged) { notesStore[val.equipmentId] = ns; _changedIds.add(val.equipmentId); }
     }
 
     // Persist INCREMENTALLY after each group of 5 (not only at end of batch).
@@ -263,7 +285,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
     // already-computed timeline in that stall. Saving per-group means results
     // reach disk (and the UI on next push) as soon as they're generated.
     try {
-      store.save('notesStore', notesStore);
+      _saveChangedNotes(notesStore, _changedIds);
       // Never push an EMPTY rows array -- the renderer would REPLACE the whole
       // fleet with [] and zero the grid. Only push when we actually have rows.
       if (pushData && typeof pushData === 'function' && Array.isArray(mergedRows) && mergedRows.length) {
@@ -281,9 +303,8 @@ async function runOrchaDeepScan(mergedRows, opts) {
     }
   }
 
-  // Final save (idempotent — captures any last-group changes and downstream
-  // notification-flag writes below).
-  store.save('notesStore', notesStore);
+  // Final save (idempotent — captures any last-group changes).
+  _saveChangedNotes(notesStore, _changedIds);
 
   // ── Repair-complete detection ─────────────────────────────────────────────
   // After processing timelines, check each unit's latest entries for
@@ -329,6 +350,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
       // Mark notified today
       if (!notesStore[unitId]) notesStore[unitId] = {};
       notesStore[unitId]._repairDoneNotifDate = _today;
+      _changedIds.add(unitId);
     }
 
     // Out-of-scope / needs dealer — check last 3 timeline lines
@@ -345,9 +367,12 @@ async function runOrchaDeepScan(mergedRows, opts) {
         });
         if (!notesStore[unitId]) notesStore[unitId] = {};
         notesStore[unitId]._outOfScopeNotifDate = _today;
+        _changedIds.add(unitId);
       }
     }
   }
+  // Persist the once-per-day notification flags set just above.
+  try { _saveChangedNotes(notesStore, _changedIds); } catch (_) {}
 
   // Send notifications for units detected as repair-complete
   if (_repairDoneUnits.length) {
@@ -502,18 +527,29 @@ async function _processUnit(u, notesStore, askOrcha) {
   // timeline instead of '[no activity logged]'.
   // Lowered gate (2026-10): a terse but critical status note like "Asset Ready.
   // REPAIRS ARE COMPLETED." must not be skipped. >10 chars is enough signal.
-  if (u.asistNotes && u.asistNotes.trim().length > 10) {
-    offsiteText = u.asistNotes.substring(0, 3000);
-    logger.info('[DS] Offsite text from cached asistNotes for ' + u.equipmentId + ' | ' + offsiteText.length + 'ch');
+  // FRESHNESS (2026-10-27): cached notes are only trusted while they're recent.
+  // Unit 320160's timeline said "no dealer update since 10/22" while ASIST had
+  // 10/22, 10/26 and 10/27 updates — the cache was days old and was used
+  // forever because it existed. Stale or undated cache → re-scrape live below
+  // (falls back to the cache if the live scrape fails).
+  const _cacheFresh = isOffsiteCacheFresh(u);
+  const _canLive = !!(offsiteUrl && (/decisiv\.net/i.test(offsiteUrl) || /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(offsiteUrl)));
+  const _cachedText = (u.asistNotes && u.asistNotes.trim().length > 10) ? u.asistNotes : '';
+  if (_cachedText && (_cacheFresh || !_canLive)) {
+    offsiteText = _cachedText.substring(0, 3000);
+    logger.info('[DS] Offsite text from cached asistNotes for ' + u.equipmentId + ' | ' + offsiteText.length + 'ch' + (_cacheFresh ? '' : ' (stale, no live source)'));
+  } else if (_cachedText) {
+    logger.info('[DS] Cached asistNotes for ' + u.equipmentId + ' are stale (scraped ' + (u.asistScrapedAt || 'never') + ') — re-scraping live');
   }
-  // FALLBACK: only re-scrape live if we have a Decisiv URL but no cached text yet.
+  // LIVE: re-scrape when there's no usable (fresh) cached text.
   if (!offsiteText && offsiteUrl && /decisiv\.net/i.test(offsiteUrl)) {
     try {
       const { enrichVolvoAsist } = require('../scrapers/asist_enrich');
       const enrichResult = await enrichVolvoAsist(offsiteUrl);
       if (enrichResult && enrichResult.ok && enrichResult.offsiteText) {
         offsiteText = enrichResult.offsiteText.substring(0, 3000);
-        u.asistScrapedAt = enrichResult.scrapedAt;
+        u.asistNotes = enrichResult.offsiteText.slice(0, 8000); // keep the row's cache current
+        u.asistScrapedAt = enrichResult.scrapedAt || new Date().toISOString();
         u.asistSource = enrichResult.source;
         u.asistLabel = enrichResult.bestLabel;
         u.asistSrUrl = enrichResult.bestUrl || offsiteUrl;
@@ -532,7 +568,8 @@ async function _processUnit(u, notesStore, askOrcha) {
       const dr = await enrichDtna(offsiteUrl);
       if (dr && dr.ok && dr.offsiteText) {
         offsiteText = dr.offsiteText.substring(0, 3000);
-        u.asistScrapedAt = dr.scrapedAt;
+        u.asistNotes = dr.offsiteText.slice(0, 8000); // keep the row's cache current
+        u.asistScrapedAt = dr.scrapedAt || new Date().toISOString();
         u.asistSource = 'dtna';
         u.asistLabel = dr.bestLabel || 'DTNA Case';
         u.asistSrUrl = offsiteUrl;
@@ -542,6 +579,12 @@ async function _processUnit(u, notesStore, askOrcha) {
     } catch (e) {
       logger.warn('[DS] DTNA enrich failed for ' + u.equipmentId + ': ' + e.message);
     }
+  }
+  // Live re-scrape failed/unavailable → fall back to the (stale) cached notes
+  // rather than building the timeline with no dealer notes at all.
+  if (!offsiteText && _cachedText) {
+    offsiteText = _cachedText.substring(0, 3000);
+    logger.info('[DS] Live offsite refresh failed for ' + u.equipmentId + ' — using stale cached asistNotes (' + offsiteText.length + 'ch)');
   }
   const today = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' });
 
@@ -859,4 +902,25 @@ function _filterHiddenEntries(timelineText, hiddenEntries) {
   return lines.join('\n');
 }
 
-module.exports = { runOrchaDeepScan, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature };
+// ── Single-unit rebuild ───────────────────────────────────────────────────────
+// Rebuild ONE unit's timeline now (e.g. right after its offsite/WR data was
+// refreshed on open). Pushes the row as a partialMerge so the grid is never
+// replaced by a 1-row list. One rebuild per unit at a time.
+const _unitRebuilds = new Set();
+async function rebuildUnitTimeline(row, opts) {
+  opts = opts || {};
+  const id = row && String(row.equipmentId || '').trim();
+  if (!id || _unitRebuilds.has(id)) return { ok: false, skipped: id ? 'in-progress' : 'no-unit' };
+  _unitRebuilds.add(id);
+  try {
+    const push = typeof opts.pushData === 'function'
+      ? (p) => opts.pushData({ rows: (p && p.rows) || [row], partialMerge: true, _partial: 'timeline-rebuild' })
+      : null;
+    await runOrchaDeepScan([row], { pushData: push, pushStatus: opts.pushStatus || (() => {}), payload: {} });
+    return { ok: true, timeline: row.repairTimeline || '' };
+  } finally {
+    _unitRebuilds.delete(id);
+  }
+}
+
+module.exports = { runOrchaDeepScan, rebuildUnitTimeline, isOffsiteCacheFresh, OFFSITE_CACHE_FRESH_MS, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature };
