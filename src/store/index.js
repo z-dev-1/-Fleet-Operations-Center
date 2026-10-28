@@ -300,6 +300,10 @@ const REGISTRY = {
   //   { bySig: { '<sig>': { analysis, at } },
   //     summaries: { '<equipmentId>': { summary, sigKey, at } } }.
   breakdownAnalysis:       () => path.join(P.dataDir, 'breakdown_analysis.json'),
+  // RCA (Root Cause Analysis custom form) submissions made through the Relay
+  // template API, keyed by AAP WR id — drives the History-tab "RCA done" check.
+  // Shape: { '<workOrderId>': { equipmentId, at, responseId, source:'app'|'aap', mode } }
+  rcaSubmissions:          () => path.join(P.dataDir, 'rca_submissions.json'),
   // Stage 16: the leader's fleet domicile-filter list, shared via the cluster
   // sync engine so a promoted standby pulls/shows the SAME fleet scope as the
   // desktop app (device-specific settings stay local; only this list crosses).

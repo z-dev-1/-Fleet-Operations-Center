@@ -149,7 +149,7 @@ function executiveSummary(events, parts) {
 function timeline(events) {
   return events.slice().sort((a, b) => (b.reported_at || b.created_at || 0) - (a.reported_at || a.created_at || 0))
     .map(e => ({
-      reportedAt: e.reported_at, workOrderId: e.work_order_id, amzId: e.amz_id, vendor: e.vendor,
+      reportedAt: e.reported_at, completedAt: e.repair_completed_at || null, workOrderId: e.work_order_id, amzId: e.amz_id, vendor: e.vendor,
       category: e.repair_category, component: e.repair_component, status: e.status, woType: e.wo_type,
       complaint: e.reported_complaint,
       // AI-filled when available; otherwise explicitly "Unknown".

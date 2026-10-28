@@ -16,6 +16,10 @@ import { notes, ai, aap, relay, vendor } from '../bridge.js';
 import { open as openWRModal, readFileAsAttachment } from './wr-modal.js';
 import { open as openVendorReview } from './vendor-review-modal.js';
 import { open as openDealerWOModal } from './dealer-wo-modal.js';
+import { open as openRcaModal } from './rca-modal.js';
+
+// RCA button shows on COMPLETED Repair timeline cards completed within this window.
+const RCA_WINDOW_MS = 9 * 24 * 60 * 60 * 1000;
 import toast         from '../components/toast.js';
 import { redactForSharing } from '../util/redact.js';
 
@@ -3062,13 +3066,20 @@ function _wireRepairIntel(unit) {
       ? '<div class="dp-ri-sub">Repeat failures <span class="dp-ri-sub-note">(same component recurring \u2014 pattern to investigate, not proof of defect)</span></div>' + rf
       : '';
 
+    rcaEntries = {};
     var tl = (rep.timeline || []).slice(0, 40).map(function(e){
       var dur = e.durationHours != null ? (e.durationHours + 'h') : 'Unknown';
       var cost = e.estimateCost != null ? (' \u00b7 est $' + e.estimateCost) : '';
+      // RCA button: completed work orders, completed within the last 9 days.
+      var rcaHtml = '';
+      if (_rcaEligible(e)) {
+        rcaEntries[e.workOrderId] = e;
+        rcaHtml = '<button class="dp-rca-btn" data-wo="' + esc(e.workOrderId) + '" title="Fill the AAP Root Cause Analysis form for this work order">RCA</button>';
+      }
       return '<div class="dp-ri-tl">' +
         '<div class="dp-ri-tl-head"><span class="dp-ri-tl-date">' + esc(fmtDate(e.reportedAt)) + '</span>' +
           '<span class="dp-ri-tl-vend">' + esc(e.vendor || 'vendor n/a') + '</span>' +
-          '<span class="dp-ri-tl-status dp-ri-status-' + esc(e.status||'') + '">' + esc(e.status||'') + '</span></div>' +
+          '<span class="dp-ri-tl-status dp-ri-status-' + esc(e.status||'') + '">' + esc(e.status||'') + '</span>' + rcaHtml + '</div>' +
         '<div class="dp-ri-tl-body">' +
           '<span class="dp-ri-tl-cat">' + esc(e.category || '') + (e.component ? ' / ' + esc(e.component) : '') + '</span>' +
           (e.complaint ? '<div class="dp-ri-tl-complaint">' + esc(e.complaint) + '</div>' : '') +
@@ -3079,6 +3090,48 @@ function _wireRepairIntel(unit) {
     var tlBlock = '<div class="dp-ri-sub">Repair timeline <span class="dp-ri-sub-note">(newest first, up to 40)</span></div>' + (tl || '<div class="dp-empty">None.</div>');
 
     reportEl.innerHTML = aiHtml + stats + cov + catsBlock + effBlock + rfBlock + tlBlock;
+    _wireRcaButtons();
+  }
+
+  // ── RCA buttons on the Repair timeline cards ───────────────────────────────
+  var rcaEntries = {};
+  // Completed work orders only, completed within the last 9 days.
+  function _rcaEligible(e) {
+    if (!e || !e.workOrderId || !/^[0-9a-f-]{36}$/i.test(e.workOrderId)) return false;
+    if (String(e.status || '').toLowerCase() !== 'completed') return false;
+    var done = Number(e.completedAt) || 0;
+    return done > 0 && (Date.now() - done) <= RCA_WINDOW_MS;
+  }
+  function _markRcaDone(btn, at, source) {
+    if (!btn) return;
+    btn.classList.add('dp-rca-btn--done');
+    var when = at ? fmtDate(Date.parse(at)) : '';
+    btn.innerHTML = '\u2713 RCA done' + (when && when !== 'Unknown' ? ' <span class="dp-rca-when">' + esc(when) + '</span>' : '');
+    btn.title = 'RCA ' + (source === 'aap' ? 'found in AAP' : 'submitted from this app') + (when ? ' on ' + when : '') + ' \u2014 click to view or update';
+  }
+  function _wireRcaButtons() {
+    var btns = reportEl.querySelectorAll('.dp-rca-btn');
+    if (!btns.length) return;
+    btns.forEach(function(btn){
+      btn.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        var entry = rcaEntries[btn.dataset.wo];
+        if (!entry) return;
+        openRcaModal({ unit: unit, entry: entry, onDone: function(r){ _markRcaDone(btn, r && r.at, 'app'); } });
+      });
+    });
+    if (!window.rca) return;
+    var ids = Object.keys(rcaEntries);
+    var apply = function(res){
+      var st = (res && res.statuses) || {};
+      btns.forEach(function(btn){
+        var s = st[btn.dataset.wo];
+        if (s && s.done) _markRcaDone(btn, s.at, s.source);
+      });
+    };
+    // Local record first (instant), then ask AAP for RCAs filled in elsewhere.
+    window.rca.status(ids, { live: false }).then(apply).catch(function(){});
+    window.rca.status(ids, { live: true }).then(apply).catch(function(){});
   }
 
   function setBusy(busy, msg) {

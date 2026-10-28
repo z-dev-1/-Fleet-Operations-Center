@@ -766,6 +766,46 @@ function _startAutoSync() {
 
   log.info('Bootstrap complete');
 
+  // One-shot READ-ONLY RCA API self-test (dev aid): FLEET_RCA_SELFTEST=<wrUuid>.
+  // GETs the RCA template + that WR's saved responses through the AAP page and
+  // logs the outcome. Never submits anything.
+  if (process.env.FLEET_RCA_SELFTEST && /^[a-f0-9-]{36}$/i.test(process.env.FLEET_RCA_SELFTEST)) {
+    setTimeout(async () => {
+      log.info('[rca-selftest] starting for WR ' + process.env.FLEET_RCA_SELFTEST);
+      try {
+        const rca = require('./rca/client');
+        const tpl = await rca.getTemplate({ force: true, wrId: process.env.FLEET_RCA_SELFTEST });
+        log.info('[rca-selftest] template OK: ' + tpl.templateId + ' v' + tpl.version + ', ' + tpl.fields.length + ' fields');
+        const list = await rca.getResponses(process.env.FLEET_RCA_SELFTEST);
+        log.info('[rca-selftest] responses for WR: ' + list.length + (list[0] ? ' keys=' + Object.keys(list[0]).join(',') : ''));
+        if (process.env.FLEET_RCA_SELFTEST_DUMP === '1') {
+          // Read-only: dump the raw AAP WR detail + asset to %TEMP% for field mapping.
+          const aapApi = require('./scrapers/aap_api');
+          const fs = require('fs'), path = require('path'), os = require('os');
+          const svc = await aapApi.getService(process.env.FLEET_RCA_SELFTEST);
+          fs.writeFileSync(path.join(os.tmpdir(), 'rca_dump_service.json'), JSON.stringify(svc, null, 1));
+          const aaid = svc && (svc.aaid || (svc.workRequest && svc.workRequest.aaid) || (svc.asset && svc.asset.aaid));
+          if (aaid) fs.writeFileSync(path.join(os.tmpdir(), 'rca_dump_asset.json'), JSON.stringify(await aapApi.getAsset(aaid), null, 1));
+          log.info('[rca-selftest] dumped service' + (aaid ? ' + asset ' + aaid : ' (no aaid found)'));
+        }
+        if (process.env.FLEET_RCA_SELFTEST_DRAFT === '1') {
+          // Read-only: build the autofill draft (AAP GET + AI) and report coverage.
+          const engine = require('./store/sqlite_engine');
+          const row = engine.prepare('SELECT equipment_id FROM ri_repair_event WHERE source_id = ?').get(process.env.FLEET_RCA_SELFTEST);
+          const d = await require('./rca/autofill').buildDraft({ equipmentId: row && row.equipment_id, workOrderId: process.env.FLEET_RCA_SELFTEST, unit: {} });
+          const { normalizeResponse } = require('./rca/template');
+          const missing = d.ok ? normalizeResponse(d.template, d.values).errors.map((e) => e.field) : [];
+          log.info('[rca-selftest] draft ok=' + d.ok + ' unit=' + (row && row.equipment_id) + ' fields=' + Object.keys(d.values || {}).length +
+            ' sources=' + JSON.stringify(d.sources || {}) + ' aiError=' + (d.aiError || 'none') + ' stillRequired=' + missing.join(',') +
+            ' warnings=' + (d.warnings || []).length + (d.error ? ' error=' + d.error : ''));
+          const lockedVals = {};
+          (d.locked || []).forEach((k) => { lockedVals[k] = d.values && d.values[k]; });
+          log.info('[rca-selftest] AAP prefill (locked): ' + JSON.stringify(lockedVals) + ' workOrders=' + JSON.stringify(d.workOrders) + ' selected=' + d.selectedWorkOrder);
+        }
+      } catch (e) { log.warn('[rca-selftest] FAILED: ' + ((e && e.code) || '') + ' ' + ((e && e.message) || String(e)) + ' ' + ((e && e.stack) || '').split('\n').slice(0, 3).join(' | ')); }
+    }, Number(process.env.FLEET_RCA_SELFTEST_DELAY_MS || 45000));
+  }
+
 }).catch((err) => {
   log.error('FATAL: app.whenReady() threw:', err.message, err.stack);
   app.quit();

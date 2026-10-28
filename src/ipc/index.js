@@ -70,6 +70,8 @@ function registerAllIPC(ctx) {
   registerContactsHandlers();
   registerAuthHealthIPC(ctx);
   registerRepairIntelIPC(ctx);
+  // AAP Root Cause Analysis form via the Relay template API (History-tab RCA button).
+  try { require('./rca').registerRcaIPC(); } catch (e) { logger.warn('RCA IPC registration failed: ' + e.message); }
   logger.info('All IPC handlers registered');
 }
 

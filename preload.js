@@ -665,3 +665,13 @@ expose('repairIntel', {
   repeatOffenders: (opts)     => ipcRenderer.invoke('repair-trends:repeat-offenders', opts || {}),
   unitHealth: (opts)          => ipcRenderer.invoke('repair-trends:unit-health', opts || {}),
 });
+
+// ── AAP Root Cause Analysis (RCA) form via the Relay template API ────────────
+// status: which WRs already have an RCA (local record; live:true also asks
+// Relay). draft: pre-filled answers for review. submit: validate + save to AAP
+// (only from an explicit user click in the RCA modal).
+expose('rca', {
+  status: (workOrderIds, opts) => ipcRenderer.invoke('rca:status', workOrderIds || [], opts || {}),
+  draft:  (args)               => ipcRenderer.invoke('rca:draft', args || {}),
+  submit: (args)               => ipcRenderer.invoke('rca:submit', args || {}),
+});

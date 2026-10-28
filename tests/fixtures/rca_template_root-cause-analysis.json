@@ -1,0 +1,557 @@
+{
+  "templateId": "root-cause-analysis",
+  "version": 0,
+  "templateName": "Root Cause Analysis",
+  "modifiedBy": "iachri@amazon.com",
+  "modifiedOn": "2025-07-10T18:16:04.862660998Z",
+  "modifiedReason": "Initial create",
+  "fields": [
+    {
+      "fieldType": "selectInput",
+      "propertyName": "weekNumber",
+      "displayName": "Week Number",
+      "selectOptions": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+        "15",
+        "16",
+        "17",
+        "18",
+        "19",
+        "20",
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "27",
+        "28",
+        "29",
+        "30",
+        "31",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37",
+        "38",
+        "39",
+        "40",
+        "41",
+        "42",
+        "43",
+        "44",
+        "45",
+        "46",
+        "47",
+        "48",
+        "49",
+        "50",
+        "51",
+        "52"
+      ],
+      "allowsMultiple": false
+    },
+    {
+      "fieldType": "textInput",
+      "propertyName": "site",
+      "displayName": "Site"
+    },
+    {
+      "fieldType": "textInput",
+      "propertyName": "vehicleId",
+      "displayName": "Vehicle ID"
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "assetType",
+      "displayName": "Asset Type",
+      "selectOptions": [
+        "Box truck",
+        "Hostler",
+        "Tractor"
+      ],
+      "allowsMultiple": false
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "fuelType",
+      "displayName": "Fuel Type",
+      "selectOptions": [
+        "CNG",
+        "Diesel",
+        "EV"
+      ],
+      "allowsMultiple": false
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "program",
+      "displayName": "Program",
+      "selectOptions": [
+        "AFP Solo 1",
+        "AFP Solo 2",
+        "DSP",
+        "TOM - NorthWest",
+        "TOM - SoCal",
+        "TOM - SouthWest",
+        "TOM - South",
+        "TOM - SouthEast",
+        "TOM - Eastern Seaboard",
+        "TOM - Canada",
+        "TOM - GreatLakes",
+        "TOM - Mountain"
+      ],
+      "allowsMultiple": false
+    },
+    {
+      "fieldType": "textInput",
+      "propertyName": "scac",
+      "displayName": "SCAC",
+      "helperText": "If TOM, state 'TOM'"
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "vendor",
+      "displayName": "Vendor",
+      "selectOptions": [
+        "Amerit",
+        "COX",
+        "FleetPride",
+        "Kooner",
+        "TA",
+        "FNA",
+        "VELOCITI",
+        "3rd Party",
+        "OEM",
+        "GoodYear",
+        "BYD",
+        "Dealer",
+        "Cummins",
+        "DSP Managed"
+      ],
+      "allowsMultiple": false
+    },
+    {
+      "fieldType": "dateInput",
+      "propertyName": "workOrderCompletionDate",
+      "displayName": "Work Order Completed Date"
+    },
+    {
+      "fieldType": "textInput",
+      "propertyName": "workOrderNumber",
+      "displayName": "Work Order Number"
+    },
+    {
+      "fieldType": "textInput",
+      "propertyName": "totalCostOfWorkOrder",
+      "displayName": "Total Cost of Work Order",
+      "helperText": "If no value can be located, please enter 0.00",
+      "textInputType": "number"
+    },
+    {
+      "fieldType": "booleanInput",
+      "propertyName": "dealOrOemRepair",
+      "displayName": "Was this a dealer/OEM repair?"
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "oemReason",
+      "displayName": "OEM Reason",
+      "selectOptions": [
+        "Lack of Skill",
+        "Lack of Tools",
+        "Lack of Software",
+        "Warranty",
+        "Lack of facility"
+      ],
+      "required": false,
+      "dependsOn": {
+        "dealOrOemRepair": [
+          true
+        ]
+      }
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "maintenanceCodes",
+      "displayName": "Maintenance Codes",
+      "selectOptions": [
+        "01 Breakdown",
+        "02 Routine",
+        "03 Noted During PM or Inspection",
+        "04 Tow Event",
+        "05 Pre-Delivery"
+      ],
+      "allowsMultiple": false,
+      "helperText": "Purpose\nCode Key 14 Identifying what caused a piece of equipment to come in for repair is essential to proper equipment management. VMRS provides for the segregation of this activity in one of the three following areas:\n1. Maintenance—This represents all monies spent on equipment to keep it operational, and could be used to affect management’s decision to purchase that piece of equipment again. Monies spent in this category directly influence the replacement decision.\n2. Management Decision—This category identifies and isolates all monies spent which are neither the equipment’s nor manufacturer’s fault and over which management has direct control. An example would be the cost of adding new logos onto a piece of equipment.\n3. Outside Influence—Those items, over which neither the manufacturer nor the user have direct control, are classified in this category."
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "workAccomplishedCodes",
+      "displayName": "Work Accomplished Codes",
+      "selectOptions": [
+        "01 Adjust",
+        "02 Clean",
+        "03 Replace New",
+        "04 Replace Rebuilt",
+        "05 Replace Used",
+        "06 Inspect",
+        "07 Lubricate",
+        "08 Overhaul",
+        "09 Troubleshooting",
+        "14 Install",
+        "15 Paint Prep, & Repaint",
+        "17 Add Fluids",
+        "18 Road Test",
+        "19 Rewire / Wire",
+        "20 Towing",
+        "21 Fabricate/Weld/Burn",
+        "24 Repair",
+        "25 Remove",
+        "30 Work Incomplete",
+        "31 Rotate",
+        "32 Torque",
+        "33 Tighten",
+        "44 Flush",
+        "51 Rebuild",
+        "58 Diagnose",
+        "95 Reprogram",
+        "98 In Frame Overhaul",
+        "99 Out of Chassis Overhaul"
+      ],
+      "allowsMultiple": false,
+      "helperText": "Purpose: Code Key 15 Classifying the work performed by the mechanic is important. For example, there is considerable difference between inspecting, adjusting, or repairing brakes. The original VMRS Codes Committee determined, and rightfully so, that use of such terms as major and minor would not suffice, as these terms left too much interpretation to the user. As a result, a series of two-digit work accomplished codes were developed. Each code specifically identifies what work was accomplished by the mechanic at the time the work was performed."
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "primaryComponents",
+      "displayName": "Primary Component(s)",
+      "selectOptions": [
+        "Cab, Climate Control, Instrumentation, and Aerodynamic Devices",
+        "Chassis",
+        "Electrical",
+        "Engine/Motor Systems",
+        "Accessories"
+      ],
+      "allowsMultiple": true,
+      "helperText": "Purpose: Code 31 uses a series of three-digit descriptor codes that readily and consistently identify the specific systems involved. While these codes are the heart of the “common language” of VMRS and are a vital part of the VMRS concept, they are by themselves nothing more than coding conventions designed for use at all levels within the industry, from fleets to mechanics to manufacturers to suppliers of parts."
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "cabClimateControlInstrumentationAeroCodes",
+      "displayName": "Cab, Climate-Control, Instrumentation, Aero Codes",
+      "selectOptions": [
+        "001 Air Conditioning, Heating, and Ventilating System",
+        "002 Cab and Sheet Metal",
+        "003 Instruments, Gauges (All), and Meters",
+        "004 Aerodynamic Devices"
+      ],
+      "allowsMultiple": true,
+      "required": false,
+      "dependsOn": {
+        "primaryComponents": [
+          "Cab, Climate Control, Instrumentation, and Aerodynamic Devices"
+        ]
+      }
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "systemVmrs3",
+      "displayName": "System (VMRS3)",
+      "selectOptions": [
+        "001-HVAC",
+        "002 Cab and Sheet metal",
+        "003 Gauges ,Warning",
+        "004 Aerodynamics",
+        "011 Axles Front—Non-Driven",
+        "012 Axles Rear—Non-Driven",
+        "013 Brakes",
+        "014 Frame",
+        "015 Steering",
+        "016 Suspension",
+        "017 Tires",
+        "018 Wheels, Rim, Hubs, and Bearings",
+        "019 Automatic/Manual Chassis Lubricator",
+        "021 Axle Driven—Front Steering",
+        "022 Axle Driven—Rear",
+        "023 Clutch",
+        "024 Drive Shaft(s)",
+        "025 Transfer Case",
+        "026 Transmission—Main, Manual",
+        "027 Transmission—Main, Automatic",
+        "029 Auxiliary Section (Transmission—Main, Manual",
+        "031 Charging System",
+        "032 Cranking",
+        "033 ignition",
+        "034 lighting Systems",
+        "041 Air intake",
+        "042 Cooling system",
+        "043 Exhaust System",
+        "044 Fuel system",
+        "045 Engine",
+        "051 General Accessories",
+        "052 Electrical Accessories",
+        "053 Expandable items",
+        "054 Horns and Reverse alarms",
+        "055 Cargo Handling",
+        "059 Vehicle coupling (Fifth wheels)",
+        "121 Final Drive",
+        "143 CNG fueling system",
+        "151 Auxiliary Power Unit (APU)"
+      ],
+      "allowsMultiple": true,
+      "required": false,
+      "dependsOn": {
+        "primaryComponents": [
+          "Chassis"
+        ]
+      }
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "electricalCodes",
+      "displayName": "Electrical Codes",
+      "selectOptions": [
+        "031 Charging System",
+        "032 Cranking System",
+        "033 Ignition System",
+        "034 Lighting Systems",
+        "036 Supplemental Information Devices",
+        "037 Modules/Relays - Electrical"
+      ],
+      "allowsMultiple": true,
+      "required": false,
+      "dependsOn": {
+        "primaryComponents": [
+          "Electrical"
+        ]
+      }
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "engineMotorSystemsCodes",
+      "displayName": "Engine/Motor Systems Codes",
+      "selectOptions": [
+        "041 Air Intake System",
+        "042 Cooling System",
+        "043 Exhaust System",
+        "044 Fuel System",
+        "045 Power Plant",
+        "046 Electric Propulsion System",
+        "047 Filter Kits (Multi-piece)",
+        "048 Powertrain-Electric, Hybrid",
+        "141 Hydrogen Fuel Cell",
+        "142 LNG Engine Fuel System",
+        "143 CNG Engine Fuel System Accessories"
+      ],
+      "allowsMultiple": true,
+      "required": false,
+      "dependsOn": {
+        "primaryComponents": [
+          "Engine/Motor Systems"
+        ]
+      }
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "accessoriesCodes",
+      "displayName": "Accessories Codes",
+      "selectOptions": [
+        "051 General Accessories (for power units, trailers, etc.)",
+        "052 Electrical Accessories (for power units, trailers, etc.)",
+        "053 Expendable Items (for power units, trailers, etc.)",
+        "054 Horns and Mounting and Reverse Signal Alarms",
+        "055 Cargo Handling, Restraints and Lift Systems (for power units, trailers, etc.)",
+        "056 Power Take Off",
+        "057 Spare Wheel Mounting",
+        "058 Winch (for power units, trailers, etc.)",
+        "059 Vehicle Coupling",
+        "151 Auxiliary Power Unit (APU)",
+        "152 Onboard Lavatory",
+        "153 Stationary Generator",
+        "154 Medical Devices"
+      ],
+      "allowsMultiple": true,
+      "required": false,
+      "dependsOn": {
+        "primaryComponents": [
+          "Accessories"
+        ]
+      }
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "technicianFailureCodes",
+      "displayName": "Technician Failure Codes",
+      "selectOptions": [
+        "00 No Failure",
+        "01 Battered, Hammered",
+        "02 Burned, Scorched, Melted, Blistered",
+        "03 Crushed, Pinched, Folded, Crimped",
+        "04 Dented",
+        "05 Elongated, Stretched",
+        "06 Faded, Dulled Finish",
+        "07 Improper Fluid Level",
+        "08 Improper Electrical Value",
+        "09 Insufficient Clearance, Rubs",
+        "10 Bent",
+        "11 Binds, Sticks",
+        "12 Broken",
+        "13 Chipped, Pitted",
+        "14 Cracked",
+        "15 Foreign Material Present",
+        "16 Glazed",
+        "17 Insufficient Lubrication",
+        "18 Leaking",
+        "19 Loose",
+        "20 Lubrication or Oil Soaked",
+        "21 Misadjusted",
+        "22 Misaligned",
+        "23 Not Connected",
+        "24 Not Drilled",
+        "25 Out of Balance",
+        "26 Out of Round",
+        "27 Overheated",
+        "28 Part Improperly Installed",
+        "29 Part Omitted",
+        "30 Poor Fit, Wrong Size",
+        "31 Poor Metal Finish",
+        "32 Porosity",
+        "33 Registers Incorrectly",
+        "34 Rough",
+        "35 Rusted or Corroded",
+        "36 Scored or Scratched",
+        "37 Seized",
+        "38 Shorted",
+        "39 Soiled or Stained",
+        "40 Stripped / Cross Threaded",
+        "41 Torn, Punctured or Split",
+        "42 Warped, Twisted",
+        "43 Weak",
+        "44 Worn",
+        "45 Wrong Part",
+        "46 Lost or Missing",
+        "47 High Pressure",
+        "48 Low Pressure",
+        "49 Cut or Rubbed"
+      ],
+      "allowsMultiple": true,
+      "helperText": "Purpose:\nVMRS has the additional capability of identifying why a mechanic or supervisor thinks a part failed and why. It is a two-character alpha-numeric code. An example of a technician part failure code is:\n22 = Part Misaligned."
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "primaryCauseCode",
+      "displayName": "Primary Cause Code",
+      "selectOptions": [
+        "Technician Error",
+        "Asset Design Defect",
+        "Component Manufacturing Defect",
+        "Preventative Maintenance Quality",
+        "Preventative Maintenance Gap",
+        "Electrical/Power Failure",
+        "Operational Process Failure",
+        "Operator Failure",
+        "Collision/Impact",
+        "Driver/Operator Abuse"
+      ],
+      "allowsMultiple": true,
+      "helperText": "Technician Error - Improper or Failed Previous Repair\nAsset Design Defect - Poor design caused failure\nComponent Manufacturing Defect - Part was incorrectly manufactured\nPreventative Maintenance Quality - PM was not performed as prescribed or with low quality\nPreventative Maintenance Gap - PM routine is insufficient\nElectrical/Power Failure - NOT Communication or Code Failure\nOperational Process Failure - Driven By Process Mistake\nOperator Failure - Driven By Operator/Driver Mistake\nCollision/Impact - Asset struck another object or vice versa\nDriver/Operator Abuse - Driver caused damaged (non-collison)"
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "secondaryCauseCode",
+      "displayName": "Secondary Cause Code",
+      "selectOptions": [
+        "Technician Error",
+        "Asset Design Defect",
+        "Component Manufacturing Defect",
+        "Preventative Maintenance Quality",
+        "Preventative Maintenance Gap",
+        "Electrical/Power Failure",
+        "Operational Process Failure",
+        "Operator Failure",
+        "Collision/Impact",
+        "Driver/Operator Abuse"
+      ],
+      "allowsMultiple": true,
+      "required": false,
+      "helperText": "This field should only be filled in if there is more than 1 cause.\nTechnician Error - Improper or Failed Previous Repair\nAsset Design Defect - Poor design caused failure\nComponent Manufacturing Defect - Part was incorrectly manufactured\nPreventative Maintenance Quality - PM was not performed as prescribed or with low quality\nPreventative Maintenance Gap - PM routine is insufficient\nElectrical/Power Failure - NOT Communication or Code Failure\nOperational Process Failure - Driven By Process Mistake\nOperator Failure - Driven By Operator/Driver Mistake\nCollision/Impact - Asset struck another object or vice versa\nDriver/Operator Abuse - Driver caused damaged (non-collison)"
+    },
+    {
+      "fieldType": "textInput",
+      "propertyName": "complaint",
+      "displayName": "Complaint?",
+      "helperText": "What was the initial defect that was reported on the DVIR?"
+    },
+    {
+      "fieldType": "textInput",
+      "propertyName": "cause",
+      "displayName": "Cause?",
+      "helperText": "What did the maintenance tech determine to be the root cause of the defect?"
+    },
+    {
+      "fieldType": "textInput",
+      "propertyName": "correction",
+      "displayName": "Correction?",
+      "helperText": "What work did the maintenance tech perform to correct the defect?"
+    },
+    {
+      "fieldType": "textInput",
+      "propertyName": "downtimeHours",
+      "displayName": "Downtime Hours?",
+      "helperText": "This should be a numerical representation of the total hours of downtime and should be formatted as follows:\n25.50",
+      "textInputType": "number"
+    },
+    {
+      "fieldType": "dateInput",
+      "propertyName": "dateOfLastPMPerformed",
+      "displayName": "Date of Last PM Performed",
+      "helperText": "The date of the last PM service. (This includes PM's that were completed more than 30 days before)"
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "controllable",
+      "displayName": "Controllable",
+      "selectOptions": [
+        "Amazon Controllable",
+        "Driver Controllable",
+        "Vendor Controllable"
+      ],
+      "allowsMultiple": false,
+      "helperText": "Amazon Controllable - Amazon Maintenance Team.\nVendor Controllable - 3p Vendor Responsible.\nDriver Controllable - Driver Team. The following defects are classified as driver controllable and should be attributed to the driver team: body damage, damaged mirrors, airlines (when ripped off), tire sidewall damage, 5th wheel plate or handle damages, damaged mud flaps, and drained batteries that have been installed within the past 6 months."
+    },
+    {
+      "fieldType": "selectInput",
+      "propertyName": "driverDescription",
+      "displayName": "Driver Description",
+      "selectOptions": [
+        "Yes",
+        "No",
+        "N/A"
+      ],
+      "allowsMultiple": false,
+      "helperText": "Does drivers description of defect match VRMS system coding?"
+    },
+    {
+      "fieldType": "textInput",
+      "propertyName": "fasComments",
+      "displayName": "FAS Comments (Reason)",
+      "required": false
+    }
+  ]
+}

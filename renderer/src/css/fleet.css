@@ -9746,6 +9746,45 @@ body {
 .dp-ri-tl-complaint { font-size: 11.5px; color: var(--txt2); line-height: 1.4; margin: 2px 0; word-break: break-word; }
 .dp-ri-tl-meta { font-size: 10.5px; color: var(--mut); }
 
+/* ── RCA button on Repair timeline cards + RCA form modal ── */
+.dp-rca-btn { align-self: center; font-size: 10px; font-weight: 700; letter-spacing: .03em; padding: 2px 9px; border-radius: 6px; border: 1px solid rgba(88,166,255,.45); background: rgba(88,166,255,.12); color: var(--acc2, #79c0ff); cursor: pointer; white-space: nowrap; transition: background .15s, border-color .15s; }
+.dp-rca-btn:hover { background: rgba(88,166,255,.22); border-color: rgba(88,166,255,.7); }
+.dp-rca-btn:focus-visible { outline: 2px solid var(--acc, #58a6ff); outline-offset: 1px; }
+.dp-rca-btn--done { border-color: rgba(63,185,80,.5); background: rgba(63,185,80,.14); color: #56d364; }
+.dp-rca-btn--done:hover { background: rgba(63,185,80,.24); border-color: rgba(63,185,80,.75); }
+.dp-rca-when { font-weight: 500; opacity: .8; margin-left: 2px; }
+
+.rca-form { font-size: 12px; color: var(--txt2, #8b949e); }
+.rca-loading { padding: 18px 0; text-align: center; color: var(--mut, #6e7681); font-style: italic; }
+.rca-meta { margin-bottom: 8px; font-size: 11px; }
+.rca-meta a { color: var(--acc, #58a6ff); }
+.rca-notes { margin-bottom: 10px; padding: 7px 10px; border-radius: 7px; border: 1px solid rgba(210,153,34,.45); background: rgba(210,153,34,.1); color: #e3b341; font-size: 11px; line-height: 1.5; }
+.rca-banner-err { margin-bottom: 10px; padding: 7px 10px; border-radius: 7px; border: 1px solid rgba(248,81,73,.5); background: rgba(248,81,73,.1); color: #ff7b72; font-size: 11.5px; }
+.rca-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.rca-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.rca-field:has(textarea), .rca-field:has(.rca-multi) { grid-column: 1 / -1; }
+.rca-label { font-size: 11px; font-weight: 600; color: var(--txt, #e6edf3); display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.rca-req { color: #ff7b72; }
+.rca-src { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 0 5px; border-radius: 6px; }
+.rca-src--ai { background: rgba(163,113,247,.18); color: #d2a8ff; }
+.rca-src--data { background: rgba(63,185,80,.16); color: #56d364; }
+.rca-src--saved { background: rgba(88,166,255,.16); color: #79c0ff; }
+.rca-src--default { background: rgba(139,148,158,.18); color: var(--txt2, #8b949e); }
+.rca-src--aap { background: rgba(240,136,62,.18); color: #ffa657; }
+.rca-src--rule { background: rgba(210,153,34,.2); color: #e3b341; }
+.rca-field--locked .rca-input, .rca-field--locked .rca-multi { opacity: .75; cursor: not-allowed; }
+.rca-wo { margin-bottom: 10px; display: flex; flex-direction: column; gap: 3px; max-width: 360px; }
+.rca-input { width: 100%; box-sizing: border-box; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--bdr, #30363d); background: var(--el, #21262d); color: var(--txt, #e6edf3); font-size: 12px; font-family: inherit; }
+.rca-input:focus { outline: none; border-color: var(--acc, #58a6ff); box-shadow: 0 0 0 2px rgba(88,166,255,.25); }
+textarea.rca-input { resize: vertical; line-height: 1.4; }
+.rca-multi { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 2px 10px; max-height: 150px; overflow-y: auto; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--bdr, #30363d); background: var(--el, #21262d); }
+.rca-check { font-size: 11px; color: var(--txt, #e6edf3); display: flex; align-items: flex-start; gap: 5px; cursor: pointer; line-height: 1.35; }
+.rca-check input { margin-top: 2px; }
+.rca-hint { font-size: 10px; color: var(--mut, #6e7681); line-height: 1.35; }
+.rca-err { font-size: 10.5px; color: #ff7b72; }
+.rca-err:empty { display: none; }
+.rca-field--bad .rca-input, .rca-field--bad .rca-multi { border-color: #f85149; }
+
 /* ── Repair Intelligence: AI narrative + advisory recommendations ─────────── */
 .dp-ri-ai { margin-bottom: 8px; }
 .dp-ri-ai-summary { font-size: 12.5px; line-height: 1.5; color: var(--txt); background: rgba(88,166,255,.06); border: 1px solid rgba(88,166,255,.25); border-radius: 8px; padding: 9px 11px; }
