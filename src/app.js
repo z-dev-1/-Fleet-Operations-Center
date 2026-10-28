@@ -779,13 +779,18 @@ function _startAutoSync() {
         const list = await rca.getResponses(process.env.FLEET_RCA_SELFTEST);
         log.info('[rca-selftest] responses for WR: ' + list.length + (list[0] ? ' keys=' + Object.keys(list[0]).join(',') : ''));
         if (process.env.FLEET_RCA_SELFTEST_DUMP === '1') {
-          // Read-only: dump the raw AAP WR detail + asset to %TEMP% for field mapping.
+          // Read-only: dump the raw AAP WR detail (+ asset for the first) to %TEMP%.
+          // FLEET_RCA_DUMP_IDS=<id,id,...> dumps extra WRs as rca_dump_service_<id8>.json.
           const aapApi = require('./scrapers/aap_api');
           const fs = require('fs'), path = require('path'), os = require('os');
           const svc = await aapApi.getService(process.env.FLEET_RCA_SELFTEST);
           fs.writeFileSync(path.join(os.tmpdir(), 'rca_dump_service.json'), JSON.stringify(svc, null, 1));
           const aaid = svc && (svc.aaid || (svc.workRequest && svc.workRequest.aaid) || (svc.asset && svc.asset.aaid));
           if (aaid) fs.writeFileSync(path.join(os.tmpdir(), 'rca_dump_asset.json'), JSON.stringify(await aapApi.getAsset(aaid), null, 1));
+          for (const extra of String(process.env.FLEET_RCA_DUMP_IDS || '').split(',').map((s) => s.trim()).filter((s) => /^[0-9a-f-]{36}$/i.test(s))) {
+            try { fs.writeFileSync(path.join(os.tmpdir(), 'rca_dump_service_' + extra.slice(0, 8) + '.json'), JSON.stringify(await aapApi.getService(extra), null, 1)); }
+            catch (e) { log.warn('[rca-selftest] dump ' + extra + ' failed: ' + e.message); }
+          }
           log.info('[rca-selftest] dumped service' + (aaid ? ' + asset ' + aaid : ' (no aaid found)'));
         }
         if (process.env.FLEET_RCA_SELFTEST_DRAFT === '1') {

@@ -1287,6 +1287,19 @@ const CREATE_WO_PATH = '/api/v1/vre/recommendation/UNPLANNED/ACTIVE';
 // recommends; the WR is actually created by POST /createRepair (which returns
 // the workRequestId), then the contact is attached via POST
 // /createDriverConnection. This is the clean API path the wizard itself uses.
+// AAP stores the driver phone as "<countryCode>-<number>" (what its own wizard
+// sends after you pick "+1" and type the number) and splits on the FIRST dash
+// when displaying. So "716-614-2167" showed as country 716 / number "614…"
+// (partial) and a bare "7166142167" had no country code (blank). Normalize any
+// typed format — "(716) 614-2167", "716.614.2167", "+1 716…", "1-716…" — to
+// "1-7166142167". Non-US-length input falls back to digits only.
+function toAapPhone(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
+  if (d.length === 10) return '1-' + d;
+  return d;
+}
+
 const CREATE_REPAIR_PATH = '/api/v1/createRepair';
 const CREATE_DRIVER_CONNECTION_PATH = '/api/v1/createDriverConnection';
 
@@ -1754,7 +1767,7 @@ async function createWorkOrder(opts = {}) {
   // raw "(716) 614-2167" made AAP's createDriverConnection drop/not-store the
   // number (confirmed: the number wasn't landing on the WR). The working path
   // sends "7166142167" / "1-716..." — digits + dashes only.
-  const _contactPhone = String(opts.contactPhone || '').replace(/[^\d-]/g, '').trim();
+  const _contactPhone = toAapPhone(opts.contactPhone);
   if (_contactName || _contactPhone) {
     try {
       driverConnection = await apiPost(CREATE_DRIVER_CONNECTION_PATH, {

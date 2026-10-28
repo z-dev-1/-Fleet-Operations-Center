@@ -268,7 +268,7 @@ function commentsToTimeline(comments, opts = {}) {
       const ts = c.timestamp ? new Date(c.timestamp) : null;
       const date = ts && !isNaN(ts) ? (String(ts.getMonth() + 1).padStart(2, '0') + '/' + String(ts.getDate()).padStart(2, '0')) : '';
       const who = c.createdBy ? (' ' + c.createdBy) : '';
-      const tag = c.internalOnly ? ' [internal]' : '';
+      const tag = (c.internalOnly && opts.tagInternal !== false) ? ' [internal]' : '';
       return (date ? date + ' -' : '-') + who + tag + ': ' + decode(c.text);
     });
   return rows.join('\n');
@@ -341,14 +341,16 @@ function toFleetRow(wo, assetSummary, serviceDetail) {
   // Conversation → RAW feed for the AI timeline builder (deep-scan.js). We do
   // NOT put raw comments into repairTimeline — that field is the AI-BUILT
   // professional timeline (same as the scrape path). Instead we assemble a raw
-  // conversation blob into fullConversation for the AI to transform, EXCLUDING
-  // internal-only comments (carolddu [internal], VRE OVERRIDE, etc. — the API
-  // exposes an internalOnly flag the scrape path never had; honor it so those
-  // never surface). The deep-scan prompt header-strips from the word
-  // "Conversation", so prefix with it.
-  const extComments = collectAllComments(serviceDetail).filter((c) => !(c && c.internalOnly));
+  // conversation blob into fullConversation for the AI to transform.
+  // INCLUDES internal-only comments, untagged — exactly what the page-scrape
+  // path fed the timeline before the API switch (fd0aac7, 10/16). Excluding
+  // them dropped the FAS team's own updates (shop calls, ETCs, POs), which are
+  // usually internal, so timelines stalled with "[no update logged]"
+  // (confirmed on 321186/321187, 2026-10-27). The deep-scan prompt
+  // header-strips from the word "Conversation", so prefix with it.
+  const extComments = collectAllComments(serviceDetail);
   const fullConversation = extComments.length
-    ? ('Conversation\n' + commentsToTimeline(extComments, { includeInternal: false }))
+    ? ('Conversation\n' + commentsToTimeline(extComments, { includeInternal: true, tagInternal: false }))
     : '';
   // repairTimeline stays EMPTY here — runOrchaDeepScan builds it from
   // fullConversation (+ offsite notes) and writes it back. mergeRelayIntoRows
@@ -455,9 +457,10 @@ function toSecondaryWR(wo, serviceDetail) {
     if (si && si.level2 && !l2.includes(si.level2)) l2.push(si.level2);
   }
   const downStart = wo.actualStartDateTime || wo.expectedStartDateTime || wo.scheduledDateTime;
-  // External-only conversation (internal comments excluded) for the AI, NOT a
-  // raw dump shown directly. Prefixed "Conversation" for the deep-scan header-strip.
-  const extComments = collectAllComments(serviceDetail).filter((c) => !(c && c.internalOnly));
+  // Full conversation (internal comments included, untagged — same as the page
+  // scrape path saw it) for the AI, NOT a raw dump shown directly. Prefixed
+  // "Conversation" for the deep-scan header-strip.
+  const extComments = collectAllComments(serviceDetail);
   const cat = wo.category || '';
   const _st = woStatus(wo);
   return {
@@ -473,7 +476,7 @@ function toSecondaryWR(wo, serviceDetail) {
     completed:       _epochToIso(wo.completedDateTime),
     totalCost:       wo.totalEstimatePendingApprovalCost != null ? wo.totalEstimatePendingApprovalCost : '',
     // Raw feed for the AI (planned/secondary WR conversation) — not shown directly.
-    fullConversation: extComments.length ? ('Conversation\n' + commentsToTimeline(extComments, { includeInternal: false })) : '',
+    fullConversation: extComments.length ? ('Conversation\n' + commentsToTimeline(extComments, { includeInternal: true, tagInternal: false })) : '',
     repairTimeline:  '',   // AI-built by deep-scan, never a raw dump
     // 'planned' | 'unplanned' — drives the card's section title.
     _wrType:         /plan/i.test(cat) && !/unplan/i.test(cat) ? 'planned' : 'unplanned',

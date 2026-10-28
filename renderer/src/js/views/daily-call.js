@@ -290,6 +290,9 @@ function _computeGroup(groupRows, allRowsInGroup) {
     repairStatus: r.savedRepairStatus || null,
     operator: (r.operator || '').toUpperCase().trim() || null,
     make: (r.make || '').trim() || null,
+    // DBR Trends header ("10 OOS; 9 CNG, 1 Diesel") + reason grouping ("OSR; ...").
+    fuelType: (r.fuelType || '').trim() || null,
+    lifecycleReason: (r.lifecycleReason || '').trim() || null,
   }));
 
   return {
@@ -589,6 +592,8 @@ function _dbrBuildReviewPrompt(label, computed) {
     const meta = [
       u.operator ? `SCAC: ${u.operator}` : '',
       u.make ? `Make: ${u.make}` : '',
+      u.fuelType ? `Fuel: ${u.fuelType}` : '',
+      u.lifecycleReason ? `Reason: ${u.lifecycleReason}` : '',
       u.vendor ? `Vendor: ${u.vendor}` : 'Vendor: unassigned',
       (u.daysOpen !== null && u.daysOpen !== undefined) ? `Days down: ${u.daysOpen}` : '',
       u.repairStatus ? `Repair status: ${u.repairStatus}` : '',
@@ -598,7 +603,7 @@ function _dbrBuildReviewPrompt(label, computed) {
 
   return `You are filling in a fleet operations DBR (Daily Business Review) call sheet row for ${label}. You are a SUPPORTING / VERIFICATION source only — never invent information not present in the unit data below.
 
-${rows.length} unavailable (OOS) unit(s) at this ${label}. Per-unit data below (SCAC, Make, Vendor, Days down, Repair status, and raw issue/notes text).
+${rows.length} unavailable (OOS) unit(s) at this ${label}. Per-unit data below (SCAC, Make, Fuel, lifecycle Reason, Vendor, Days down, Repair status, and raw issue/notes text).
 
 UNIT DATA:
 ${unitLines}
@@ -609,16 +614,24 @@ Fill FIVE fields using the EXACT logic below. Follow each step in order — this
 TRENDS — "What patterns do I see?"
 ══════════════════════════════════════
 Work through this ANALYSIS SILENTLY (do not print your reasoning, counts-that-didn't-qualify, or "no single system reaches 3+" explanations into the output — the output is ONLY the final verdict, nothing else):
-1. Count the OOS units (shown above).
-2. Group units by SYSTEM (the broad component area the issue text points to — e.g. CHASSIS, ELECTRICAL, ENGINE, TRANSMISSION, BRAKES, HVAC, BODY/CAB, TIRES, SUSPENSION, DEF/EMISSIONS, PM/INSPECTION).
-3. Group by ISSUE TYPE within the data (the specific failure, e.g. "misfire", "no start", "oil leak"). Flag it as a trend ONLY if 3 OR MORE units share the SAME specific issue type. 2 units sharing an issue is NOT a trend.
-4. Group by MAKE (the OEM/manufacturer). Flag it ONLY if ONE make accounts for the clear majority AND has 3 or more units.
-5. If NONE of system/issue-type/make reaches 3+ units sharing the same thing, the ENTIRE output must be exactly the two words "No trends" — nothing else. Do not explain why, do not list the systems you checked, do not mention counts that fell short.
+1. Count the OOS units (shown above) and split them by Fuel (e.g. CNG, Diesel, Electric). Units with no Fuel shown are left out of the split.
+2. Group units by SYSTEM (the broad component area the issue text points to). Use these UPPERCASE names: ENGINE/MOTOR SYSTEMS, CHASSIS, ELECTRICAL, TRANSMISSION/DRIVETRAIN, BRAKES, HVAC, BODY/CAB, TIRES/WHEELS, SUSPENSION/STEERING, DEF/EMISSIONS, FUEL SYSTEM, PM/INSPECTION.
+3. Group units by VENDOR. Within a vendor, count each blocker type (Parts, Estimate, Diag, Tech/Bay) and the units whose vendor ETC is TODAY.
+4. Group units by lifecycle Reason. Abbreviate: Offsite Shop Repair = OSR, Onsite Repair = Onsite, Parts Delay = Parts, Expired Inspection = Insp, PM Failed = PM Fail; other reasons keep their name.
+5. THE 3+ RULE: a group is a trend ONLY if 3 OR MORE units share it (same system, same vendor, same reason+system, or same specific issue like "misfire"). 2 units is NOT a trend.
+6. If NO group reaches 3+ units, the ENTIRE output must be exactly the two words "No trends" — nothing else. Do not explain why, do not list what you checked, do not print the OOS/fuel line.
 
-OUTPUT RULES — this field gets typed directly into a spreadsheet cell, so it must be SHORT:
-- If no trend qualifies: output EXACTLY "No trends" and nothing more.
-- If a trend DOES qualify (3+ units, same system/issue/make): output ONLY that trend, in this terse style: "3 misfire (59080, 9010424, 39582)" or "CHASSIS (3) — 59080, 9010424, 39582". One line per qualifying trend. Still cite real unit IDs.
-- NEVER include your work, your rejected candidates, or a sentence explaining the absence of a trend. The field is either "No trends" or a short list of qualifying trends — nothing in between.
+OUTPUT FORMAT (only when at least one 3+ trend exists). Plain text, one item per line, in this order. Include a line ONLY if it qualifies; never print a line for a group under 3 units:
+Line 1 — header (always first when there is any trend): "<N> OOS; <count> <fuel>, <count> <fuel>"   e.g. "10 OOS; 9 CNG, 1 Diesel"
+Vendor lines — for each VENDOR with 3+ OOS units: "<Vendor>; <count> <blocker type>; <count> ETC today; <unit IDs with ETC today>"   e.g. "Amerit; 4 Parts; 2 ETC today; 221019, 521054". Only list the blocker types/ETC parts that apply; drop a part if its count is 0.
+Reason lines — for each lifecycle Reason where 3+ units share the same system: "<Reason abbr>; <count> <System> Related"   e.g. "OSR; 3 Engine Related"
+System lines — for each SYSTEM with 3+ units: "<SYSTEM>: <count> units", then ONE line per unit in that system, indented with "  - ", giving the unit ID and a quick 3-8 word reason taken from that unit's issue text:
+  ENGINE/MOTOR SYSTEMS: 5 units
+    - 521054: misfire cyl 3, injector replaced
+    - 221019: coolant leak at water pump
+List systems largest first. Every unit ID must be a real ID from UNIT DATA, and every reason must come from that unit's own text (never invented).
+
+- NEVER include your work, your rejected candidates, or a sentence explaining the absence of a trend. The field is either "No trends" or the lines above — nothing in between.
 
 ══════════════════════════════════════
 BARRIERS — "What's blocking each unit?"
@@ -671,7 +684,7 @@ STRICT RULES:
 - Do not invent, guess, or extrapolate beyond what the unit data actually states.
 - Follow the step-by-step logic exactly — do not skip steps or substitute your own judgment for the stated thresholds (3+ units for any trend claim, 14 days for escalation, HVE escalated twice for stuck estimates, etc).
 
-RESPOND WITH JSON ONLY, no markdown, no explanation outside the JSON:
+RESPOND WITH JSON ONLY, no markdown, no explanation outside the JSON. Multi-line values (like the trends block) must use \\n for line breaks inside the JSON string:
 {"trends":"","barriers":"","expectedFlips":"","actions":"","helpNeeded":""}`;
 }
 
@@ -692,7 +705,9 @@ function _dbrNormalizeTrendsText(raw) {
   if (!text) return '';
   const looksLikeNoTrend = /\bno\s+trends?\b/i.test(text);
   if (looksLikeNoTrend && text.length > 20) return 'No trends';
-  return text.substring(0, 400);
+  // Multi-line trend block (header + vendor/reason/system lines + per-unit
+  // reasons) — keep line breaks, drop markdown bullets/bold the model may add.
+  return text.replace(/\*\*/g, '').replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').substring(0, 2000);
 }
 
 // Same safety net as _dbrNormalizeTrendsText, for Help Needed: the default
@@ -792,6 +807,7 @@ function _dbrPanelHtml() {
 
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
           <button id="dbr-scrape" class="detail-panel__btn">↺ Scrape QuickSight (AFP)</button>
+          <button id="dbr-ai-fill" class="detail-panel__btn detail-panel__btn--secondary" title="Re-run the AI on YOUR AFP rows (Trends/Barriers/Flips/Actions/Help) using the data already shown — no new scrape needed">✨ Fill with AI (AFP)</button>
           <span id="dbr-status" style="font-size:11px;color:var(--mut);"></span>
         </div>
         <div style="font-size:10px;color:var(--mut);margin-bottom:10px;">
@@ -810,6 +826,7 @@ function _dbrPanelHtml() {
 
         <div style="display:flex;align-items:center;gap:10px;margin:20px 0 10px;">
           <button id="dbr-scrape-dsp" class="detail-panel__btn">↺ Scrape QuickSight (DSP)</button>
+          <button id="dbr-ai-fill-dsp" class="detail-panel__btn detail-panel__btn--secondary" title="Re-run the AI on YOUR DSP rows using the data already shown — no new scrape needed">✨ Fill with AI (DSP)</button>
           <span id="dbr-status-dsp" style="font-size:11px;color:var(--mut);"></span>
         </div>
         <div style="font-size:10px;color:var(--mut);margin-bottom:10px;">
@@ -1190,6 +1207,51 @@ async function _openDbrPanel() {
   } catch (e) { /* no cache yet — fine */ }
   try { _dbrDspData = await quicksight.getCacheDsp(); } catch (e) { /* no cache yet — fine */ }
   await _dbrRenderTables();
+
+  // ✨ Fill with AI — re-runs the per-row AI review on the rows ALREADY in the
+  // table (last scrape or cache). The review only ran inside the Scrape
+  // handlers and isn't persisted, so a panel opened from cache never filled.
+  // Clears this section's old review results first so every "mine" row is
+  // re-asked fresh (e.g. after a prompt/format change or new fleet data).
+  const wireAiFill = (btnId, statusNode, getSections) => {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const sections = getSections().filter(s => Array.isArray(s.rows) && s.rows.length);
+      if (!sections.length) {
+        if (statusNode) statusNode.textContent = 'Nothing to fill yet — scrape QuickSight first.';
+        return;
+      }
+      const orig = btn.textContent;
+      btn.disabled = true; btn.textContent = '✨ Filling…';
+      try {
+        for (const s of sections) {
+          for (const r of s.rows) {
+            const idVal = s.kind === 'domicile' ? r.domicile : r.scac;
+            delete _dbrReview[_dbrReviewKey(s.kind, idVal)];
+          }
+        }
+        await _dbrRenderTables();
+        if (statusNode) statusNode.textContent = '✨ AI is filling your rows…';
+        const { mySites, myCarriers } = await _loadMySitesAndCarriers();
+        for (const s of sections) {
+          await _dbrRunReviewsForSection(s.rows, s.kind, mySites, myCarriers, () => _dbrRenderTables());
+        }
+        if (statusNode) statusNode.textContent = '✅ AI fill complete — ' + new Date().toLocaleTimeString();
+      } catch (e) {
+        if (statusNode) statusNode.textContent = 'AI fill failed: ' + e.message;
+      } finally {
+        btn.disabled = false; btn.textContent = orig;
+      }
+    });
+  };
+  wireAiFill('dbr-ai-fill', statusEl, () => [
+    { kind: 'domicile', rows: (_dbrData && _dbrData.domicile) || [] },
+    { kind: 'scac', rows: (_dbrData && _dbrData.scac) || [] },
+  ]);
+  wireAiFill('dbr-ai-fill-dsp', document.getElementById('dbr-status-dsp'), () => [
+    { kind: 'scac', rows: (_dbrDspData && _dbrDspData.scac) || [] },
+  ]);
 
   const dspScrapeBtn = document.getElementById('dbr-scrape-dsp');
   const dspStatusEl = document.getElementById('dbr-status-dsp');

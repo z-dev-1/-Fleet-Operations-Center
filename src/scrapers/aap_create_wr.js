@@ -372,7 +372,7 @@ async function createWorkRequest(payload, unit, log) {
     workRequestId: workRequestId,
     aaid: aaid,
     driverName: payload.contactName || 'Z',
-    driverPhoneNumber: (payload.contactPhone || '').replace(/[^\d-]/g, '') || '1-7166142167'
+    driverPhoneNumber: toAapPhone(payload.contactPhone) || '1-7166142167'
   };
 
   log('[CreateWR] Step 2: createDriverConnection');
@@ -490,4 +490,14 @@ async function addConversationNote(wrIdOrUrl,text){
   }catch(e){return{ok:false,error:e.message};}
 }
 
-module.exports = { createWorkRequest, addConversationNote, VENDOR_IDS, VENDOR_PORTAL_URLS, DOMICILE_COORDS, capWrTitle, normalizeCopiedFromId, WR_TITLE_MAX };
+// AAP stores the driver phone as "<countryCode>-<number>" and splits on the
+// FIRST dash when displaying ("716-614-2167" → partial, "7166142167" → blank).
+// Normalize any typed format to "1-7166142167". Same rule as aap_api.js.
+function toAapPhone(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
+  if (d.length === 10) return '1-' + d;
+  return d;
+}
+
+module.exports = { createWorkRequest, addConversationNote, VENDOR_IDS, VENDOR_PORTAL_URLS, DOMICILE_COORDS, capWrTitle, normalizeCopiedFromId, WR_TITLE_MAX, toAapPhone };

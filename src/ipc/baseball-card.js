@@ -32,6 +32,20 @@ const { handle, requireObject } = require('./_safe');
 //   'prose' — AI rewrites the user's rough note into the required format
 //   'user'  — plain user entry (AI still offers a polish via 'prose' default)
 // `source` tags where a data field comes from. `format` guides the prose AI.
+
+// Biggest Accomplishments: the template asks for "data and STAR format (2-3
+// sentences each)". The AI must return the WHOLE line: a short title, an em
+// dash, then Situation/Task → Action → Result-with-metric sentences.
+const STAR_FORMAT =
+  'STAR method with EXPLICIT labels. Output exactly these 5 lines separated by \\n (newline), nothing else:\n' +
+  '<Short title, 3-8 words>\n' +
+  'Situation: <1 sentence — the context/problem, with data>\n' +
+  'Task: <1 sentence — what Z was responsible for / the goal>\n' +
+  'Action: <1-2 sentences — what Z specifically did>\n' +
+  'Result: <1 sentence — the outcome with a concrete metric (%, $, hours, units, days, count)>\n' +
+  'Past tense, professional, implied subject or third person. All four labels (Situation, Task, Action, Result) are REQUIRED. ' +
+  'No bullets, quotes, or markdown. Never invent metrics — if Z gave none for the Result, ask for one.';
+
 const FIELDS = [
   // ── Identity ──
   { key: 'name',        label: 'Name',                         token: '[Full Name]',                    occ: 1, mode: 'data', source: 'profile' },
@@ -69,11 +83,12 @@ const FIELDS = [
   { key: 'growth3Name', label: 'Growth 3 — LP (optional)',     token: '[LP Name]', occ: 6, mode: 'user' },
   { key: 'growth3Desc', label: 'Growth 3 — plan (optional)',  token: '[What you are doing to develop in this area]', occ: 3, mode: 'lp', lpNameKey: 'growth3Name', lpGroup: 'growth', format: 'Third person development plan, 1 sentence.' },
   // ── Biggest Accomplishments (STAR) ──
-  { key: 'accomp1',  label: 'Accomplishment 1 (STAR)',          token: '[Accomplishment 1]', occ: 1, mode: 'prose', format: 'Rewrite in STAR format (Situation, Task, Action, Result) as ONE line with concrete data/metrics. Format: "Launched/Implemented X. Successfully <outcome>. Partnered with <who> to <result with data>."' },
-  // accomplishment 1's inline sub-tokens ([X],[outcome],[who],[result with data]) are part of the same STAR line; fill them from accomp1 by clearing to blank (the whole line is replaced via accomp1 text in the paragraph). We map them so they don't linger.
-  { key: 'accomp2',  label: 'Accomplishment 2 (STAR)',          token: '[Situation, Task, Action, Result with metrics]', occ: 1, mode: 'prose', format: 'STAR format, one line, with metrics.' },
-  { key: 'accomp3',  label: 'Accomplishment 3 (STAR)',          token: '[Situation, Task, Action, Result with metrics]', occ: 2, mode: 'prose', format: 'STAR format, one line, with metrics.' },
-  { key: 'accomp4',  label: 'Accomplishment 4 (STAR)',          token: '[Situation, Task, Action, Result with metrics]', occ: 3, mode: 'prose', format: 'STAR format, one line, with metrics.' },
+  // The whole "[Accomplishment N] — ..." template line is rewritten on export
+  // (see _replaceAccomplishments), so these values are the COMPLETE line.
+  { key: 'accomp1',  label: 'Accomplishment 1 (STAR)',          token: '[Accomplishment 1]', occ: 1, mode: 'prose', star: 1, format: STAR_FORMAT },
+  { key: 'accomp2',  label: 'Accomplishment 2 (STAR)',          token: '[Situation, Task, Action, Result with metrics]', occ: 1, mode: 'prose', star: 2, format: STAR_FORMAT },
+  { key: 'accomp3',  label: 'Accomplishment 3 (STAR)',          token: '[Situation, Task, Action, Result with metrics]', occ: 2, mode: 'prose', star: 3, format: STAR_FORMAT },
+  { key: 'accomp4',  label: 'Accomplishment 4 (STAR)',          token: '[Situation, Task, Action, Result with metrics]', occ: 3, mode: 'prose', star: 4, format: STAR_FORMAT },
   // Accomplishment 1 header token + its inline tokens
   { key: 'accomp1Title', label: 'Accomplishment 1 — title',     token: '[Accomplishment 1]', occ: 1, mode: 'user', _dupOf: 'accomp1' },
   // ── Accomplishments Outside Core Role ──
@@ -81,13 +96,13 @@ const FIELDS = [
   { key: 'outside2', label: 'Outside-role contribution 2',      token: '[Additional contribution outside day-to-day FAS responsibilities]', occ: 1, mode: 'prose', format: 'One short professional line.' },
   { key: 'outside3', label: 'Outside-role contribution 3',      token: '[Additional contribution]', occ: 1, mode: 'prose', format: 'One short professional line.' },
   // ── Current Initiatives (3 rows: initiative / outcome / timeline) ──
-  { key: 'init1',     label: 'Initiative 1',                    token: '[Initiative 1]', occ: 1, mode: 'prose', format: 'Short initiative name/description, professional.' },
+  { key: 'init1',     label: 'Initiative 1',                    token: '[Initiative 1]', occ: 1, mode: 'prose', init: 1, format: 'Short initiative name/description, professional.' },
   { key: 'init1Out',  label: 'Initiative 1 — target outcome',   token: '[Expected result]', occ: 1, mode: 'user' },
   { key: 'init1Time', label: 'Initiative 1 — timeline',         token: '[Date]', occ: 1, mode: 'user' },
-  { key: 'init2',     label: 'Initiative 2',                    token: '[Initiative 2]', occ: 1, mode: 'prose', format: 'Short initiative name/description.' },
+  { key: 'init2',     label: 'Initiative 2',                    token: '[Initiative 2]', occ: 1, mode: 'prose', init: 2, format: 'Short initiative name/description.' },
   { key: 'init2Out',  label: 'Initiative 2 — target outcome',   token: '[Expected result]', occ: 2, mode: 'user' },
   { key: 'init2Time', label: 'Initiative 2 — timeline',         token: '[Date]', occ: 2, mode: 'user' },
-  { key: 'init3',     label: 'Initiative 3',                    token: '[Initiative 3]', occ: 1, mode: 'prose', format: 'Short initiative name/description.' },
+  { key: 'init3',     label: 'Initiative 3',                    token: '[Initiative 3]', occ: 1, mode: 'prose', init: 3, format: 'Short initiative name/description.' },
   { key: 'init3Out',  label: 'Initiative 3 — target outcome',   token: '[Expected result]', occ: 3, mode: 'user' },
   { key: 'init3Time', label: 'Initiative 3 — timeline',         token: '[Date]', occ: 3, mode: 'user' },
   // ── Tenure & Development ──
@@ -99,10 +114,77 @@ const FIELDS = [
   { key: 'funFacts',  label: 'Hobbies / interests / fun fact',  token: '[Hobbies, interests, fun fact about this person]', occ: 1, mode: 'prose', format: 'A warm, brief, professional-appropriate fun-fact line from the user\'s rough note.' },
 ];
 
-// Inline sub-tokens inside the Accomplishment-1 STAR line. When accomp1 is
-// filled we also clear these so the line reads cleanly (the user types the whole
-// STAR sentence into accomp1). Mapped to blank-on-fill.
-const ACCOMP1_INLINE = ['[X]', '[outcome]', '[who]', '[result with data]'];
+const STAR_LABELS = ['Situation', 'Task', 'Action', 'Result'];
+
+// Parse an AI/user STAR entry into { title, parts:[{label,text}] }. Labels may
+// arrive inline or on separate lines, in any case, with markdown — all
+// normalized. No labels found → parts is empty and `title` holds the raw line.
+function _parseStar(s) {
+  const raw = String(s || '')
+    .replace(/\*\*|__|`/g, '')
+    .replace(/^\s*[-•*]\s*/gm, '')
+    .trim()
+    .replace(/^["']|["']$/g, '');
+  const one = (t) => String(t || '').replace(/\s*\r?\n+\s*/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  const re = /\b(Situation|Task|Action|Result)s?\s*:\s*/gi;
+  const hits = [];
+  let m;
+  while ((m = re.exec(raw)) !== null) hits.push({ label: m[1], start: m.index, end: re.lastIndex });
+  if (!hits.length) return { title: one(raw), parts: [] };
+  const title = one(raw.slice(0, hits[0].start)).replace(/\s*[—–:-]+\s*$/, '');
+  const parts = hits.map((h, i) => ({
+    label: STAR_LABELS.find(l => l.toLowerCase() === h.label.toLowerCase()),
+    text: one(raw.slice(h.end, i + 1 < hits.length ? hits[i + 1].start : raw.length)),
+  })).filter(p => p.text);
+  return { title, parts };
+}
+
+// Canonical stored/displayed form: title line, then one "Label: text" per line.
+function _cleanStarLine(s) {
+  const { title, parts } = _parseStar(s);
+  if (!parts.length) return title;
+  return [title, ...parts.map(p => p.label + ': ' + p.text)].filter(Boolean).join('\n');
+}
+
+// Rewrite each "[Accomplishment N] — <template guidance>" paragraph with the
+// card's accompN value. The template line contains extra literal text/tokens
+// ("Launched/Implemented [X]. Successfully [outcome]...", "[Situation, Task,
+// ...]") so a single-token swap left junk behind — replace the paragraph's runs
+// instead, keeping its list numbering (pPr) and run font (rPr). A leading
+// "Title — " is rendered bold, the STAR sentences regular. Blank → untouched.
+function _replaceAccomplishments(xml, card) {
+  return xml.replace(/<w:p[ >][\s\S]*?<\/w:p>/g, (para) => {
+    const text = para.replace(/<[^>]+>/g, '');
+    const m = text.match(/\[Accomplishment (\d)\]/);
+    if (!m) return para;
+    const f = FIELDS.find(x => x.star === Number(m[1]));
+    const val = f ? _cleanStarLine(card[f.key]) : '';
+    if (!val) return para;
+
+    const open = (para.match(/^<w:p[ >][^>]*>|^<w:p>/) || ['<w:p>'])[0];
+    const pPr = (para.match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [''])[0];
+    const runsOnly = pPr ? para.replace(pPr, '') : para;
+    const rPrRaw = (runsOnly.match(/<w:rPr>[\s\S]*?<\/w:rPr>/) || ['<w:rPr></w:rPr>'])[0];
+    const rPrBold = rPrRaw.replace('<w:rPr>', '<w:rPr><w:b /><w:bCs />');
+    const run = (rPr, t) => '<w:r>' + rPr + '<w:t xml:space="preserve">' + _xmlEscape(t) + '</w:t></w:r>';
+
+    const BR = '<w:r>' + rPrRaw + '<w:br /></w:r>';
+    const star = _parseStar(val);
+    let body;
+    if (star.parts.length) {
+      // Bold title, then each "Situation: / Task: / Action: / Result:" on its
+      // own line (line breaks inside the same numbered list item), label bold.
+      const segs = [];
+      if (star.title) segs.push(run(rPrBold, star.title));
+      for (const p of star.parts) segs.push(run(rPrBold, p.label + ': ') + run(rPrRaw, p.text));
+      body = segs.join(BR);
+    } else {
+      const tm = val.match(/^(.{3,90}?)\s+[—–-]{1,2}\s+(.+)$/);
+      body = tm ? run(rPrBold, tm[1]) + run(rPrRaw, ' — ' + tm[2]) : run(rPrRaw, val);
+    }
+    return open + pPr + body + '</w:p>';
+  });
+}
 
 const TEMPLATE_PATH = () => {
   const candidates = [
@@ -347,6 +429,39 @@ async function _aiPreviousRoles(note, prevAnswers, card) {
   }
 }
 
+// Current Initiatives row: from ONE rough note in the Initiative box, write all
+// three columns — initiative name, target outcome, timeline. Never asks
+// questions (the user wants a one-click fill). Returns null on AI failure.
+async function _aiInitiative(note, card) {
+  const raw = String(note || '').trim();
+  if (!raw) return null;
+  const today = new Date();
+  const todayStr = (today.getMonth() + 1) + '/' + today.getDate() + '/' + today.getFullYear();
+  const ctx = _roleContext(card);
+  const prompt =
+    'You are filling one row of the "CURRENT INITIATIVES / ACTIONS" table on an AFP Fleet Asset Specialist (FAS) performance "baseball card". ' +
+    'The table has three columns: Initiative | Target Outcome | Timeline. From Z\'s rough note, write all three.\n' +
+    'Rules:\n' +
+    '- initiative: short professional name/description of the initiative (max ~12 words).\n' +
+    '- outcome: the expected result in one concise professional sentence (max ~20 words). Use any numbers/targets Z gave; do NOT invent specific numbers that Z did not give — describe the outcome qualitatively instead.\n' +
+    '- timeline: when it will be done. If Z gave a date/quarter/month, use it. Otherwise give a realistic target from today (' + todayStr + ') as "MM/YYYY" or "Q# YYYY". Short, no sentence.\n' +
+    'CONTEXT:\n' + (ctx || '(none)') + '\n\n' +
+    'Z\'S NOTE: ' + raw + '\n\n' +
+    'Respond as STRICT JSON only: {"initiative":"...","outcome":"...","timeline":"..."}. No other text.';
+  try {
+    const resp = await _askTimed(prompt, 400);
+    const jm = String(resp || '').match(/\{[\s\S]*\}/);
+    if (!jm) return null;
+    const p = JSON.parse(jm[0]);
+    const clean = (s, n) => String(s || '').replace(/\s*\r?\n+\s*/g, ' ').trim().replace(/^["']|["']$/g, '').slice(0, n);
+    const out = { initiative: clean(p.initiative, 300), outcome: clean(p.outcome, 400), timeline: clean(p.timeline, 60) };
+    return out.initiative ? out : null;
+  } catch (e) {
+    logger.warn('AI initiative fill failed (non-fatal): ' + e.message);
+    return null;
+  }
+}
+
 // ── AI prose rewrite (for 'prose' fields) ─────────────────────────────────────
 // Takes the user's rough note + the field's required format and asks the AI to
 // rewrite it professionally. Returns '' on any failure (never blocks).
@@ -442,18 +557,16 @@ function _replaceTokens(documentXml, card) {
 
   // Group all fields by their token, building { token -> { occ -> value } }.
   // Blank values and _dupOf helper fields are skipped (placeholder stays).
+  // STAR accomplishments rewrite their whole template line first (their
+  // placeholders are then gone, so the generic pass below can't touch them).
+  xml = _replaceAccomplishments(xml, card);
+
   const byToken = {};
   for (const f of FIELDS) {
-    if (f._dupOf) continue;
+    if (f._dupOf || f.star) continue;
     const val = String(card[f.key] || '').trim();
     if (!val) continue;
     (byToken[f.token] || (byToken[f.token] = {}))[f.occ] = _xmlEscape(val);
-  }
-
-  // If accomplishment 1 was filled, clear its inline sub-tokens (occ 1 each) so
-  // the STAR line reads cleanly (the whole sentence lives in accomp1).
-  if (String(card.accomp1 || '').trim()) {
-    for (const t of ACCOMP1_INLINE) (byToken[t] || (byToken[t] = {}))[1] = '';
   }
 
   for (const token of Object.keys(byToken)) {
@@ -524,10 +637,25 @@ function registerBaseballCardIPC() {
       return { ok: true, needsAnswers: true, questions: r.questions, lpNameKey: f.lpNameKey };
     }
 
+    if (f.init) {
+      // Initiative row: one note → initiative + target outcome + timeline.
+      if (!String(note || '').trim()) return { ok: false, error: 'type the initiative first, then ✨ fills the row' };
+      const r = await _aiInitiative(note, formCard);
+      if (!r) return { ok: false, error: 'AI could not fill this initiative — try again' };
+      const extra = {};
+      extra['init' + f.init + 'Out'] = r.outcome;
+      extra['init' + f.init + 'Time'] = r.timeline;
+      return { ok: true, value: r.initiative, extra };
+    }
+
     if (f.mode === 'prose') {
       // Interview-style: may ask questions, else writes the entry.
-      const r = await _aiInterview({ note, goal: f.label + ' — ' + (f.format || ''), format: f.format, prevAnswers, card: formCard });
-      if (r.done) return { ok: true, value: r.value };
+      const goal = f.star
+        ? ('Biggest Accomplishment #' + f.star + ' for the card, written with the STAR method (Situation, Task, Action, Result) and real data. ' +
+           'Turn Z\'s rough note into a short title plus labeled "Situation:", "Task:", "Action:", "Result:" lines; if the note has no measurable result, ask for the metric.')
+        : (f.label + ' — ' + (f.format || ''));
+      const r = await _aiInterview({ note, goal, format: f.format, prevAnswers, card: formCard });
+      if (r.done) return { ok: true, value: f.star ? _cleanStarLine(r.value) : r.value };
       return { ok: true, needsAnswers: true, questions: r.questions };
     }
 

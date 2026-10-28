@@ -999,7 +999,11 @@ function _openBaseballCard(profileName) {
         } else if (res && res.ok && res.value != null) {
           setVal(key, res.value);
           _clearInterview(key);
+          // Some fields fill companions too (e.g. Initiative → outcome + timeline).
+          const extraKeys = res.extra && typeof res.extra === 'object' ? Object.keys(res.extra).filter(k => res.extra[k]) : [];
+          extraKeys.forEach(k => setVal(k, res.extra[k]));
           if (res.lpNameKey && res.lpName) { setVal(res.lpNameKey, res.lpName); status('✅ ' + res.lpName + ' — written', 'ok'); }
+          else if (extraKeys.length) status('✅ Filled ' + key + ' + target outcome + timeline', 'ok');
           else status('✅ Filled ' + key, 'ok');
         } else {
           status('⚠️ ' + ((res && res.error) || 'nothing to fill for ' + key), 'warn');
