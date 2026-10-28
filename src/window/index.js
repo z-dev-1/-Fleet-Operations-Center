@@ -294,11 +294,13 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
   // the status-bar sync pill toggle. When API mode is active we must NOT load
   // the AAP scan URL in the main window, NOT run the startup/rescan scrape
   // loops, and NOT let scrape writers overwrite the API-sourced fleetData.
+  // RETIRED SCRAPE (2026-10-28): the API is the only fleet source. The legacy
+  // settings.dataSource='scrape' value is ignored; the scrape branches below
+  // are kept as a disabled backup, reachable only via FLEET_LEGACY_SCRAPE=1.
+  // See src/config/data-source.js.
   function _apiMode() {
-    try {
-      const s = store.load('settings', {});
-      return s.dataSource !== 'scrape';   // default (undefined) => API
-    } catch (_) { return true; }
+    try { return require('../config/data-source').isApiMode(); }
+    catch (_) { return true; }
   }
 
   // ── Bubble ────────────────────────────────────────────────────────────────

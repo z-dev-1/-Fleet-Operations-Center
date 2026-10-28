@@ -154,8 +154,9 @@ function createSyncEngine(ctx) {
     // (which trigger AEA) and must NOT overwrite the API-sourced fleetData with
     // scrape-derived partial pushes. Redirect to the API loader instead.
     try {
-      const _s = store.load('settings', {});
-      if (_s.dataSource !== 'scrape') {
+      // RETIRED SCRAPE (2026-10-28): always API unless the dev-only
+      // FLEET_LEGACY_SCRAPE=1 backup is set (src/config/data-source.js).
+      if (require('../config/data-source').isApiMode()) {
         logger.info('[data-source] API mode — runFullSync redirected to API refresh (no scrape)');
         ctx.pushStatus('\uD83D\uDD04 Refreshing fleet via API…');
         if (ctx._loadFleetViaApiStartup) {

@@ -104,7 +104,8 @@ async function _tickFleet() {
   try {
     const store = require('../store');
     const s = store.load('settings', {}) || {};
-    if (s.dataSource === 'scrape') return;     // honor scrape-mode opt-out
+    // RETIRED SCRAPE (2026-10-28): legacy settings.dataSource='scrape' is ignored.
+    if (!require('../config/data-source').isApiMode()) return;
     const api = require('../scrapers/aap_api');
     // Stage 16: use the SYNCED fleet filter (the leader/desktop app's domicile
     // list) so the standby pulls the SAME fleet scope as the desktop, not this

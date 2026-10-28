@@ -248,19 +248,25 @@ function registerAapApiIPC(ctx) {
 
   // ── Data-source toggle (API default, scrape fallback) ─────────────────────
   // Returns the current source and flips it. 'api' (default) | 'scrape'.
+  // RETIRED SCRAPE (2026-10-28): the API is the only fleet source
+  // (src/config/data-source.js). Reports the effective source, not the legacy
+  // settings value.
   handle('fleet:get-data-source', () => {
-    const s = store.load('settings', {});
-    return { source: s.dataSource === 'scrape' ? 'scrape' : 'api' };
+    const ds = require('../config/data-source');
+    return { source: ds.isApiMode() ? 'api' : 'scrape', scrapeRetired: true };
   });
 
   // Toggle (or set) the data source. When switched to 'api', immediately loads
   // the fleet via the API so the change is visible right away. When 'scrape',
   // triggers the existing rescan. Persisted to settings.dataSource.
   handle('fleet:set-data-source', async (_e, payload) => {
-    const want = (payload && payload.source === 'scrape') ? 'scrape' : 'api';
-    const s = store.load('settings', {});
-    s.dataSource = want;
-    store.save('settings', s);
+    // RETIRED SCRAPE (2026-10-28): 'scrape' can no longer be selected. Any
+    // request is treated as 'api' (reload via API). settings.dataSource is NOT
+    // rewritten, so no stored data changes.
+    if (payload && payload.source === 'scrape') {
+      logger.warn('[data-source] request to switch to scrape REFUSED — scraping is retired; staying on API');
+    }
+    const want = 'api';
     logger.info('[data-source] set to ' + want);
     if (want === 'api') {
       // Prefer the shared window-side loader (same build+merge+push the startup

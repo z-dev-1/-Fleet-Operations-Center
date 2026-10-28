@@ -595,6 +595,13 @@ function registerScrapersIPC(ctx) {
   // H-3: IPC-level concurrency guard mirrors the scraper's own _relayLock.
   // aapRows + relayCache pulled from store — callers do not need to supply them.
   handle('relay:scrape', async () => {
+    // RETIRED SCRAPE (2026-10-28): the bulk Relay scrape was part of the old
+    // scrape sync; fleet data now comes from the API. Kept as a disabled backup
+    // (FLEET_LEGACY_SCRAPE=1 only). Not exposed in preload, so no UI calls it.
+    if (require('../config/data-source').isApiMode()) {
+      logger.info('[data-source] relay:scrape refused — bulk scrape retired (API-only)');
+      return { ok: false, retired: true, error: 'Bulk Relay scrape is retired — fleet data comes from the API.' };
+    }
     if (_relayLock) {
       throw new ScraperError('relay:scrape operation already in progress', 'relay:scrape');
     }
