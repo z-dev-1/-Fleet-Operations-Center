@@ -33,6 +33,7 @@ const { isSetupComplete } = require('../../setup/state');
 const { buildWRUrls } = require('./wr_capture');
 
 const ROOT_DIR = path.join(__dirname, '..', '..');
+const { OFFSITE_FIELDS, offsiteUrlOf, clearOffsite } = require('../utils/offsite-owner');
 
 // ── Field map: AAP table column header → camelCase property ─────────────────
 const AAP_FIELD_MAP = {
@@ -1095,17 +1096,35 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         try {
           const prev = store.load('fleetData', null);
           if (prev && Array.isArray(prev.rows) && prev.rows.length) {
-            const CARRY = ['pmBDue','pmXDue','dotDue','quarterlyLiftDue','pmB','pmX','dot','quarterlyLift',
-              'geofence','offsiteShopEventUrl','savedOffsiteUrl','offsiteShopEvent','asistSrUrl','asistLabel','asistSource','asistNotes','offsiteStage','dealerName'];
+            // UNIT-level enrichment: true for the asset regardless of which WR is open.
+            const CARRY_UNIT = ['pmBDue','pmXDue','dotDue','quarterlyLiftDue','pmB','pmX','dot','quarterlyLift','geofence'];
+            // WR-level enrichment: the offsite (dealer estimate / SR / DTNA case)
+            // and its scraped dealer notes belong to ONE work request. Carry them
+            // ONLY when the open WR is unchanged — otherwise a completed WO's
+            // offsite stuck to the unit forever (B12260/B62049/B62064, 10/28).
+            const CARRY_WR = OFFSITE_FIELDS;
+            const blank = (v) => v == null || v === '' || v === '--';
             const prevById = new Map(prev.rows.map((r) => [r.equipmentId, r]));
             for (const row of rows) {
               const p = prevById.get(row.equipmentId);
               if (!p) continue;
-              for (const k of CARRY) {
+              for (const k of CARRY_UNIT) {
                 // carry prior value only when the fresh rebuild left it blank/'--'
-                if ((row[k] == null || row[k] === '' || row[k] === '--') && p[k] != null && p[k] !== '' && p[k] !== '--') {
-                  row[k] = p[k];
+                if (blank(row[k]) && !blank(p[k])) row[k] = p[k];
+              }
+              // Conversation: the bulk rebuild is withComments:false, so without
+              // this every 5-min refresh blanked fullConversation until hydration
+              // re-fetched it. Same-WR only (a conversation is per WR too).
+              const sameWR = !!(row.workRequestId && p.workRequestId === row.workRequestId);
+              if (sameWR) {
+                if (blank(row.fullConversation) && !blank(p.fullConversation)) {
+                  row.fullConversation = p.fullConversation;
+                  if (p._convFetchedAt) row._convFetchedAt = p._convFetchedAt;
                 }
+                for (const k of CARRY_WR) {
+                  if (blank(row[k]) && !blank(p[k])) row[k] = p[k];
+                }
+                if (p._offsiteWrId && blank(row._offsiteWrId)) row._offsiteWrId = p._offsiteWrId;
               }
             }
           }
@@ -1250,6 +1269,9 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
           // conversations (bounded). PM is fetched even when the conversation is
           // already cached, so the pills fill in. Mutates the rows in `payload`.
           let hydrated = 0;
+          const _offsiteCleared = [];
+          let _relayCacheForOffsite = {};
+          try { _relayCacheForOffsite = store.load('relayCache', {}) || {}; } catch (_) {}
           for (const r of downRows) {
             try {
               // api.refreshUnit() returns the mapped row directly. It calls
@@ -1262,11 +1284,46 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
               // PM due dates (raw + pills), offsite URL (Split View right pane),
               // and location — all from getAsset + the WO comment thread.
               if (fr) {
-                for (const k of ['pmBDue', 'pmXDue', 'dotDue', 'quarterlyLiftDue', 'pmB', 'pmX', 'dot', 'quarterlyLift',
-                                 'offsiteShopEventUrl', 'savedOffsiteUrl', 'offsiteShopEvent', 'asistSrUrl', 'asistLabel', 'asistSource', 'geofence']) {
+                for (const k of ['pmBDue', 'pmXDue', 'dotDue', 'quarterlyLiftDue', 'pmB', 'pmX', 'dot', 'quarterlyLift', 'geofence']) {
                   if (fr[k] != null && fr[k] !== '' && fr[k] !== '--') r[k] = fr[k];
                 }
                 if (fr.vin && !r.vin) r.vin = fr.vin;
+
+                // OFFSITE OWNERSHIP (2026-10-28): the offsite belongs to the WR
+                // whose comments contain it. fr is the unit's CURRENT WR with its
+                // live comment thread, so it is the authority — but only when it
+                // is the same WR the row is showing.
+                const sameWR = !!(fr.workRequestId && r.workRequestId && fr.workRequestId === r.workRequestId);
+                if (sameWR) {
+                  const frUrl = offsiteUrlOf(fr);
+                  const rowUrl = offsiteUrlOf(r);
+                  if (frUrl) {
+                    // Current WR names an offsite. If it's a DIFFERENT link than the
+                    // row had, drop the old link's dealer notes before taking the new one.
+                    if (rowUrl && rowUrl !== frUrl) clearOffsite(r);
+                    for (const k of ['offsiteShopEventUrl', 'savedOffsiteUrl', 'offsiteShopEvent', 'asistSrUrl', 'asistLabel', 'asistSource']) {
+                      if (fr[k] != null && fr[k] !== '' && fr[k] !== '--') r[k] = fr[k];
+                    }
+                    r._offsiteWrId = fr.workRequestId;
+                  } else if (rowUrl) {
+                    // Current WR's comments don't name the row's offsite. Keep it
+                    // only if something ties it to THIS WR; otherwise it's left over
+                    // from a previous (completed) WO — clear it + its dealer notes.
+                    const base = rowUrl.split('?')[0];
+                    const secs = Array.isArray(fr._secondaryWRs) ? fr._secondaryWRs : [];
+                    const inThisWr = String(fr.fullConversation || '').includes(base);
+                    const inOpenSecondary = secs.some((s) => offsiteUrlOf(s) === rowUrl || String((s && s.fullConversation) || '').includes(base));
+                    const rc = _relayCacheForOffsite[r.equipmentId] || {};
+                    const relayConfirms = !!(rc.workRequestId && rc.workRequestId === r.workRequestId && offsiteUrlOf(rc) === rowUrl);
+                    const stamped = r._offsiteWrId === r.workRequestId;
+                    if (inThisWr || inOpenSecondary || relayConfirms || stamped) {
+                      if (!r._offsiteWrId) r._offsiteWrId = r.workRequestId;
+                    } else {
+                      clearOffsite(r);
+                      _offsiteCleared.push(r.equipmentId + ' (' + base.replace(/^https?:\/\//, '') + ')');
+                    }
+                  }
+                }
               }
             } catch (_) { /* skip this unit */ }
           }
@@ -1279,6 +1336,9 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
             if (ctx) ctx.lastData = payload;
             pushData(payload);
           } catch (_) {}
+          if (_offsiteCleared.length) {
+            logger.info('[offsite] cleared ' + _offsiteCleared.length + ' offsite link(s) not tied to the unit\u2019s current WR: ' + _offsiteCleared.join(', '));
+          }
           logger.info('[data-source] AI timeline build: hydrated ' + hydrated + ' conversations + PM — running Orcha deep-scan');
           const { runOrchaDeepScan } = require('../orcha/deep-scan');
           await runOrchaDeepScan(rows, {

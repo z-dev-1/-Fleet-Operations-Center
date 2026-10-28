@@ -766,6 +766,13 @@ function _startAutoSync() {
 
   log.info('Bootstrap complete');
 
+  // READ-ONLY timeline freshness audit (dev aid): FLEET_TIMELINE_AUDIT=1.
+  // Never writes AAP or app data — only %TEMP%\timeline_audit*.json.
+  if (process.env.FLEET_TIMELINE_AUDIT === '1') {
+    try { require('./dev/timeline-audit').start({ log }); }
+    catch (e) { log.warn('[timeline-audit] could not start: ' + e.message); }
+  }
+
   // One-shot READ-ONLY RCA API self-test (dev aid): FLEET_RCA_SELFTEST=<wrUuid>.
   // GETs the RCA template + that WR's saved responses through the AAP page and
   // logs the outcome. Never submits anything.

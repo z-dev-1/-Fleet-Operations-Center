@@ -1640,6 +1640,9 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       asistSource:         r.asistSource         || row.asistSource         || '',
       asistLabel:          r.asistLabel          || row.asistLabel          || '',
       asistSrUrl:          r.asistSrUrl          || row.asistSrUrl          || '',
+      // Which WR the offsite belongs to (src/utils/offsite-owner.js). A Relay page
+      // scrape reads the offsite off ONE WR's page, so stamp that WR.
+      _offsiteWrId:        r.offsiteShopEventUrl ? (r.workRequestId || row.workRequestId || '') : (row._offsiteWrId || ''),
       // Newer offsite text wins (2026-10-27): the timeline build can re-scrape
       // ASIST live and stamp the ROW; the relay cache may still hold an older
       // copy. Blindly preferring the cache put days-old notes back every sync.
