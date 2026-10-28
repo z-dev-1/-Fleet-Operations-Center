@@ -10,6 +10,7 @@
 
 import modal from '../components/modal.js';
 import toast from '../components/toast.js';
+import bus   from '../bus.js';
 
 const DISPLAY_ONLY = new Set(['textHeaderLabel', 'textBodyLabel']);
 const LONG_TEXT = new Set(['complaint', 'cause', 'correction', 'fasComments']);
@@ -184,6 +185,7 @@ export function open({ unit, entry, onDone }) {
 
     if (res && res.ok) {
       toast.show('success', 'RCA ' + (res.mode === 'update' ? 'updated' : 'submitted') + ' for ' + equipmentId, 3500);
+      try { bus.emit('rca:submitted', { equipmentId, workOrderId }); } catch (_) {}
       modal.close();
       if (onDone) onDone({ at: res.at, mode: res.mode });
       return;

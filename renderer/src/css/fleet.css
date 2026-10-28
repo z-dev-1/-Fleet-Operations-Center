@@ -1573,6 +1573,8 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
 .an-kpi--avail   { border-left: 3px solid var(--grn, #3fb950); }
 .an-kpi--risk    { border-left: 3px solid #f0a800; }
 .an-kpi--synced  { border-left: 3px solid var(--mut); }
+.an-kpi--rca     { border-left: 3px solid #a371f7; }
+.an-kpi__pct--warn { color: #ff7b72; }
 
 /* ── Two-col grid ────────────────────────────────────────────── */
 .an-grid-2 {
@@ -6743,6 +6745,29 @@ input[type="checkbox"]:checked::after {
   box-shadow: inset 3px 0 0 var(--red, #ff7b72);
 }
 
+/* RCA-to-do badge next to unit ID (completed WO in the last 9 days, no RCA yet) */
+.rca-due-badge {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 15px;
+  letter-spacing: .3px;
+  vertical-align: middle;
+  color: #d2b8ff;
+  background: rgba(163, 113, 247, .16);
+  border: 1px solid rgba(163, 113, 247, .55);
+  cursor: pointer;
+}
+.rca-due-badge:hover { background: rgba(163, 113, 247, .32); }
+.rca-due-badge--urgent {
+  color: #ffb3ad;
+  background: rgba(255, 123, 114, .16);
+  border-color: rgba(255, 123, 114, .6);
+}
+
 /* Breach flag next to unit ID */
 .breach-flag {
   font-size: 11px;
@@ -9753,6 +9778,9 @@ body {
 .dp-rca-btn--done { border-color: rgba(63,185,80,.5); background: rgba(63,185,80,.14); color: #56d364; }
 .dp-rca-btn--done:hover { background: rgba(63,185,80,.24); border-color: rgba(63,185,80,.75); }
 .dp-rca-when { font-weight: 500; opacity: .8; margin-left: 2px; }
+/* Highlight when arriving from an "RCA to do" link */
+.dp-rca-btn--flash { animation: dp-rca-flash 0.6s ease-in-out 3; }
+@keyframes dp-rca-flash { 0%,100% { box-shadow: 0 0 0 0 rgba(163,113,247,0); } 50% { box-shadow: 0 0 0 4px rgba(163,113,247,.55); } }
 
 .rca-form { font-size: 12px; color: var(--txt2, #8b949e); }
 .rca-loading { padding: 18px 0; text-align: center; color: var(--mut, #6e7681); font-style: italic; }

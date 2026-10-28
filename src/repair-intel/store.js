@@ -368,7 +368,21 @@ function getRecommendations(scope, scopeKey) {
   return s ? s.all(scope, String(scopeKey)) : [];
 }
 
+// Fleet-wide: every COMPLETED work order finished at/after `sinceMs` (excluded
+// vendors skipped — same rule as the per-unit report the History tab shows).
+// Used by the overview's "RCA to do" count.
+function completedSince(sinceMs) {
+  if (!ensureSchema()) return [];
+  const s = engine.prepare(
+    "SELECT equipment_id, work_order_id, vendor, repair_component, repair_category, reported_complaint," +
+    " repair_completed_at, domicile, operator FROM ri_repair_event" +
+    " WHERE status = 'completed' AND excluded_vendor = 0 AND work_order_id IS NOT NULL" +
+    " AND repair_completed_at IS NOT NULL AND repair_completed_at >= ? ORDER BY repair_completed_at ASC");
+  return s ? s.all(Number(sinceMs) || 0) : [];
+}
+
 module.exports = {
+  completedSince,
   EXCLUDED_VENDORS, _isExcludedVendor,
   normalizeWorkOrder, upsertEvent, setParts, setBackorderedParts,
   eventsForUnit, getCheckpoint, saveCheckpoint,

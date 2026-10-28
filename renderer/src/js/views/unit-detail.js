@@ -20,6 +20,9 @@ import { open as openRcaModal } from './rca-modal.js';
 
 // RCA button shows on COMPLETED Repair timeline cards completed within this window.
 const RCA_WINDOW_MS = 9 * 24 * 60 * 60 * 1000;
+// Set by ui:unit-select when the user came from an "RCA to do" link: the WO whose
+// RCA form should open as soon as its button renders. Expires after 30s.
+let _pendingRca = null;
 import toast         from '../components/toast.js';
 import { redactForSharing } from '../util/redact.js';
 
@@ -3120,6 +3123,17 @@ function _wireRepairIntel(unit) {
         openRcaModal({ unit: unit, entry: entry, onDone: function(r){ _markRcaDone(btn, r && r.at, 'app'); } });
       });
     });
+    // Came here from an "RCA to do" link → jump straight to that WO's RCA.
+    if (_pendingRca && Date.now() < _pendingRca.until && _pendingRca.unit === String(unit.equipmentId)) {
+      var target = Array.prototype.find.call(btns, function(b){ return b.dataset.wo === _pendingRca.wo; });
+      if (target) {
+        _pendingRca = null;
+        try { target.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) {}
+        target.classList.add('dp-rca-btn--flash');
+        setTimeout(function(){ target.classList.remove('dp-rca-btn--flash'); }, 2400);
+        setTimeout(function(){ target.click(); }, 450);
+      }
+    }
     if (!window.rca) return;
     var ids = Object.keys(rcaEntries);
     var apply = function(res){
@@ -3340,9 +3354,20 @@ export function init(container) {
   _panel.className = 'detail-panel';
   document.body.appendChild(_panel);
 
-  bus.on('ui:unit-select', ({ unit }) => {
+  bus.on('ui:unit-select', ({ unit, tab, rcaWorkOrderId }) => {
+    // "RCA to do" badge / overview line: once that WO's RCA button renders on
+    // the History tab, scroll to it and open its RCA form (see _wireRcaButtons).
+    _pendingRca = rcaWorkOrderId ? { wo: String(rcaWorkOrderId), unit: String(unit && unit.equipmentId || ''), until: Date.now() + 30000 } : null;
     _renderUnit(unit);
     requestAnimationFrame(() => _panel.classList.add('detail-panel--open'));
+    // Optional: open on a specific tab (e.g. the overview's "RCA to do" list
+    // opens straight on History, where the RCA button is).
+    if (tab) {
+      requestAnimationFrame(() => {
+        const btn = _panel && _panel.querySelector('.dp-tab[data-tab="' + String(tab).replace(/"/g, '') + '"]');
+        if (btn) btn.click();
+      });
+    }
 
     // LAZY per-unit API refresh (API mode): the bulk fleet load skips comments
     // AND the multi-WO (planned/unplanned) detail for speed. When a unit opens,

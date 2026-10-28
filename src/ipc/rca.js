@@ -82,6 +82,60 @@ function registerRcaIPC() {
     return { ok: true, statuses };
   });
 
+  // Fleet-wide "RCA to do" (2026-10-28): every COMPLETED work order finished in
+  // the last 9 days that has no RCA yet — the SAME rule as the History tab's RCA
+  // button (unit-detail.js _rcaEligible), so the overview count and the button
+  // always agree. opts.live also asks AAP (bounded, 10-min cache) whether an RCA
+  // was filled in elsewhere, and drops those.
+  const TODO_WINDOW_MS = 9 * 24 * 60 * 60 * 1000;
+  const TODO_LIVE_MAX = 40;
+  handle('rca:todo', async (opts = {}) => {
+    const now = Date.now();
+    let events = [];
+    try { events = require('../repair-intel/store').completedSince(now - TODO_WINDOW_MS); }
+    catch (e) { logger.warn('[rca] todo query failed: ' + e.message); return { ok: false, error: e.message, items: [] }; }
+    const local = _load();
+    const seen = new Set();
+    let items = [];
+    for (const e of events) {
+      const wo = String(e.work_order_id || '');
+      if (!_isId(wo) || seen.has(wo) || local[wo]) continue;
+      seen.add(wo);
+      const done = Number(e.repair_completed_at) || 0;
+      items.push({
+        equipmentId: String(e.equipment_id || ''), workOrderId: wo,
+        vendor: e.vendor || '', component: e.repair_component || e.repair_category || '',
+        complaint: e.reported_complaint || '', site: e.domicile || '', operator: e.operator || '',
+        completedAt: done,
+        daysLeft: Math.max(0, Math.ceil((done + TODO_WINDOW_MS - now) / 86400000)),
+      });
+    }
+    if (opts.live && items.length) {
+      const doneLive = new Set();
+      let checked = 0;
+      for (const it of items) {
+        const c = _live.get(it.workOrderId);
+        if (c && (now - c.checkedAt) < LIVE_TTL_MS) { if (c.done) doneLive.add(it.workOrderId); continue; }
+        if (checked >= TODO_LIVE_MAX) continue;
+        checked++;
+        try {
+          const found = await client.findRcaResponse(it.workOrderId);
+          const at = found ? (found.modifiedOn || found.createdOn || null) : null;
+          _live.set(it.workOrderId, { done: !!found, at, checkedAt: Date.now() });
+          if (found) {
+            doneLive.add(it.workOrderId);
+            _record(it.workOrderId, { at: at || new Date().toISOString(), responseId: client.responseIdOf(found), source: 'aap' });
+          }
+        } catch (e) {
+          logger.warn('[rca] todo live check failed: ' + e.message);
+          break; // auth/page problem — keep the local-only answer
+        }
+      }
+      items = items.filter((it) => !doneLive.has(it.workOrderId));
+    }
+    return { ok: true, items, windowDays: 9 };
+  });
+
   handle('rca:draft', async (args) => {
     const a = args || {};
     if (!_isId(a.workOrderId)) return { ok: false, error: 'Invalid work order id' };

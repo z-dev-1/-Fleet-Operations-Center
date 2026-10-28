@@ -18,6 +18,7 @@ import { relay, ai } from '../bridge.js';
 import { showContextMenu } from '../components/context-menu.js';
 import { aap } from '../bridge.js';
 import { mount as mountOverview } from './fleet-overview.js';
+import rcaTodo from '../rca-todo.js';
 
 // Current filter/search applied client-side
 const _filters = {};
@@ -395,7 +396,15 @@ function _buildRowsHtml(filtered, startIdx, endIdx) {
             else if (_p >= 0.6) breachFlag = '<span class="breach-flag breach-flag--warn" title="Breach risk (' + Math.round(_d) + 'd / ' + _SLA_TARGET_DAYS + 'd)">⚠️</span>';
           }
         }
-        const inner = '<span class="uid uid--white">' + val + '</span>' + breachFlag;
+        // RCA to do: completed WO in the last 9 days with no RCA yet (rca-todo.js).
+        let rcaBadge = '';
+        const _rcaItems = rcaTodo.forUnit(row.equipmentId);
+        if (_rcaItems.length) {
+          const _minLeft = Math.min.apply(null, _rcaItems.map((i) => i.daysLeft));
+          rcaBadge = '<span class="rca-due-badge' + (_minLeft <= 2 ? ' rca-due-badge--urgent' : '') + '" title="RCA to do: ' +
+            _rcaItems.length + ' completed work order' + (_rcaItems.length === 1 ? '' : 's') + ' · ' + _minLeft + ' day' + (_minLeft === 1 ? '' : 's') + ' left \u2014 click to open the RCA" role="button" tabindex="0">RCA</span>';
+        }
+        const inner = '<span class="uid uid--white">' + val + '</span>' + breachFlag + rcaBadge;
         if (row.assetUrl) {
           content = '<a class="eq-link" href="#" data-url="' + row.assetUrl + '">' + inner + '</a>';
         } else {
@@ -463,6 +472,28 @@ function _buildRowsHtml(filtered, startIdx, endIdx) {
 
 /** Wire click/context/checkbox handlers on visible rows */
 function _wireRowEvents(filtered) {
+  // RCA badge → open the unit on History and straight into the RCA form for its
+  // most urgent work order. Handled on the badge itself (before the unit-ID link,
+  // which would otherwise open the AAP asset page).
+  _tbodyEl.querySelectorAll('.rca-due-badge').forEach((b) => {
+    b.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); b.click(); }
+    });
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const tr = b.closest('.fleet-table__row');
+      const unitId = tr && tr.dataset.id;
+      const unit = unitId && filtered.find((r) => r.equipmentId === unitId);
+      if (!unit) return;
+      const next = rcaTodo.forUnit(unitId).sort((x, y) => x.daysLeft - y.daysLeft)[0];
+      _selectedId = unitId;
+      _tbodyEl.querySelectorAll('.fleet-table__row').forEach(r =>
+        r.classList.toggle('row--selected', r.dataset.id === unitId));
+      bus.emit('ui:unit-select', { unit, tab: 'history', rcaWorkOrderId: next ? next.workOrderId : null });
+    });
+  });
+
   _tbodyEl.querySelectorAll('a.eq-link, a.wr-link').forEach((a) => {
     a.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -729,6 +760,10 @@ export function init(container) {
     const rows = fleetSlice.rows || [];
     _loadRelayCache(rows);
   });
+
+  // RCA to do list changed → repaint so the RCA badges stay current.
+  bus.on('rca:todo', () => { if (_allRows && _allRows.length) _renderRows(_allRows); });
+  rcaTodo.start();
 
   // S9: syncing overlay
   bus.on('state:sync', (syncSlice) => {

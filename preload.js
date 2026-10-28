@@ -672,6 +672,7 @@ expose('repairIntel', {
 // (only from an explicit user click in the RCA modal).
 expose('rca', {
   status: (workOrderIds, opts) => ipcRenderer.invoke('rca:status', workOrderIds || [], opts || {}),
+  todo:   (opts)               => ipcRenderer.invoke('rca:todo', opts || {}),
   draft:  (args)               => ipcRenderer.invoke('rca:draft', args || {}),
   submit: (args)               => ipcRenderer.invoke('rca:submit', args || {}),
 });
