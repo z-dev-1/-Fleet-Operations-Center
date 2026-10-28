@@ -1125,6 +1125,15 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
                   if (blank(row[k]) && !blank(p[k])) row[k] = p[k];
                 }
                 if (p._offsiteWrId && blank(row._offsiteWrId)) row._offsiteWrId = p._offsiteWrId;
+                // Extra open WOs (secondary / planned WR cards in the unit panel).
+                // The bulk rebuild doesn't fetch them, so every 5-min refresh
+                // emptied _secondaryWRs and the extra WO cards vanished until the
+                // next hydration (up to ~20 min). Hydration still replaces them
+                // with live data (including [] when a secondary WO closes).
+                if ((!Array.isArray(row._secondaryWRs) || !row._secondaryWRs.length) && Array.isArray(p._secondaryWRs) && p._secondaryWRs.length) {
+                  row._secondaryWRs = p._secondaryWRs;
+                }
+                if (!row._plannedWRData && p._plannedWRData) row._plannedWRData = p._plannedWRData;
               }
             }
           }

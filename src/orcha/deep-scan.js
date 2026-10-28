@@ -33,6 +33,39 @@ function _woFingerprint(row) {
   return crypto.createHash('sha1').update(parts.map(p => String(p || '')).join('\u0001')).digest('hex').slice(0, 16);
 }
 
+// Fingerprint of EVERYTHING the AI timeline is built from (2026-10-28). If a
+// unit's inputs are unchanged since its last successful build, the full scan
+// skips it — the 20-min pass used to re-send every down unit to the AI and
+// rewrite notesStore ~every 40s with no new information. Includes today's date
+// so each unit is still rebuilt at least once a day.
+function _aiInputSig(u, ns) {
+  const secs = Array.isArray(u._secondaryWRs) ? u._secondaryWRs : [];
+  const parts = [
+    new Date().toISOString().slice(0, 10),
+    u.workRequestId, u.lifecycleState, u.lifecycleReason, u.vendor, u.serviceState,
+    u.fullConversation || u.lastConversation || u.conversation || '',
+    (u._plannedWRData && u._plannedWRData.fullConversation) || '',
+    secs.map((w) => (w.workRequestId || '') + '|' + (w.fullConversation || '')).join('\u0002'),
+    u.offsiteShopEventUrl || u.asistSrUrl || '', u.asistNotes || '',
+    JSON.stringify((ns && ns.manualEntries) || null), JSON.stringify((ns && ns.hiddenEntries) || null),
+  ];
+  return crypto.createHash('sha1').update(parts.map((p) => String(p || '')).join('\u0001')).digest('hex').slice(0, 16);
+}
+
+// Deterministic tail (2026-10-28): the prompt says gap ranges go only BETWEEN
+// actual events, but the AI sometimes appends a trailing "MM/DD-MM/DD -
+// [no update logged]" after the last real update and sometimes doesn't, so the
+// end of the timeline flipped on every rebuild. Enforce the rule in code.
+function _stripTrailingGapFillers(text) {
+  if (!text) return text;
+  const lines = String(text).split('\n');
+  while (lines.length && (/^\s*$/.test(lines[lines.length - 1]) || /\[no (update|activity) logged\]\s*$/i.test(lines[lines.length - 1]))) {
+    if (lines.length === 1) break; // never strip the only line
+    lines.pop();
+  }
+  return lines.join('\n');
+}
+
 // Deep-scan batch size. MUST match the claude-code worker pool (WORKER_POOL_SIZE=3
 // in relay.js). Processing 5 units in parallel while only 3 claude workers exist
 // meant 5 AI calls fought over 3 workers every batch — the extra 2 queued, and the
@@ -127,6 +160,24 @@ async function runOrchaDeepScan(mergedRows, opts) {
     return false;
   });
 
+  // SKIP UNCHANGED (2026-10-28): drop units whose AI inputs are identical to
+  // their last successful build. Never skipped: forced single-unit rebuilds
+  // (opening a unit), units with no stored timeline yet, and units whose offsite
+  // notes are stale but live-scrapable (the live re-scrape may bring news).
+  const _skipped = [];
+  if (!opts.force) {
+    for (let k = unitsToProcess.length - 1; k >= 0; k--) {
+      const u = unitsToProcess[k];
+      const ns = notesStore[u.equipmentId] || {};
+      if (!ns.timeline || !ns._dsInputSig) continue;
+      const offUrl = u.offsiteShopEventUrl || u.asistSrUrl || '';
+      const liveScrapable = /decisiv\.net/i.test(offUrl) || /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(offUrl);
+      if (liveScrapable && !isOffsiteCacheFresh(u)) continue;
+      if (ns._dsInputSig === _aiInputSig(u, ns)) { _skipped.push(u.equipmentId); unitsToProcess.splice(k, 1); }
+    }
+    if (_skipped.length) logger.info('[DS] skipping ' + _skipped.length + ' unit(s) with unchanged inputs since their last build');
+  }
+
   logger.info('Orcha Deep Scan: processing ' + unitsToProcess.length + ' units...');
   pushStatus('\uD83E\uDDE0 Orcha analyzing ' + unitsToProcess.length + ' units...');
   let improved = 0;
@@ -175,7 +226,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
           // AI regenerates the timeline purely from raw vendor/WO comments -- it has no
           // awareness of previously manually-added lines. Merge them back in so a rescan
           // never silently discards user-entered timeline entries (immutable truth).
-          const _rowTl = _sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(_stripCosts(val.timeline), ns.manualEntries), ns.hiddenEntries));
+          const _rowTl = _stripTrailingGapFillers(_sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(_stripCosts(val.timeline), ns.manualEntries), ns.hiddenEntries)));
           if (!_isPlaceholderRow(_rowTl) || _isPlaceholderRow(row.repairTimeline)) {
             row.repairTimeline = _rowTl;
           }
@@ -216,7 +267,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
       };
       const _prevTl = ns.timeline || '';
       if (val.timeline) {
-        const _merged = _sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(val.timeline, ns.manualEntries), ns.hiddenEntries));
+        const _merged = _stripTrailingGapFillers(_sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(val.timeline, ns.manualEntries), ns.hiddenEntries)));
         // Only accept the new timeline if it is NOT a placeholder, OR the stored
         // one is already empty/placeholder too (nothing better to protect).
         if (!_isPlaceholder(_merged) || _isPlaceholder(_prevTl)) {
@@ -272,6 +323,13 @@ async function runOrchaDeepScan(mergedRows, opts) {
         } catch (_hErr) {
           logger.warn('[DS] repair-history write failed for ' + val.equipmentId + ': ' + _hErr.message);
         }
+      }
+
+      // Record the inputs this successful build used (computed AFTER processing,
+      // since a live offsite re-scrape may have refreshed asistNotes on the row).
+      if (row && val.timeline) {
+        const _sig = _aiInputSig(row, ns);
+        if (ns._dsInputSig !== _sig) { ns._dsInputSig = _sig; isChanged = true; }
       }
 
       if (isChanged) { notesStore[val.equipmentId] = ns; _changedIds.add(val.equipmentId); }
@@ -916,11 +974,12 @@ async function rebuildUnitTimeline(row, opts) {
     const push = typeof opts.pushData === 'function'
       ? (p) => opts.pushData({ rows: (p && p.rows) || [row], partialMerge: true, _partial: 'timeline-rebuild' })
       : null;
-    await runOrchaDeepScan([row], { pushData: push, pushStatus: opts.pushStatus || (() => {}), payload: {} });
+    // force: an explicit single-unit rebuild (unit opened / inputs changed) must never be skipped.
+    await runOrchaDeepScan([row], { pushData: push, pushStatus: opts.pushStatus || (() => {}), payload: {}, force: true });
     return { ok: true, timeline: row.repairTimeline || '' };
   } finally {
     _unitRebuilds.delete(id);
   }
 }
 
-module.exports = { runOrchaDeepScan, rebuildUnitTimeline, isOffsiteCacheFresh, OFFSITE_CACHE_FRESH_MS, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature };
+module.exports = { runOrchaDeepScan, rebuildUnitTimeline, isOffsiteCacheFresh, OFFSITE_CACHE_FRESH_MS, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature, _stripTrailingGapFillers, _aiInputSig };
