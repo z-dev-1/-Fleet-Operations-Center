@@ -1951,6 +1951,7 @@ async function _wireTow() {
 // ── AI Assist — auto-fill from title ──────────────────────────────────────
 let _aiTimer = null;
 let _aiRunning = false; // BUG FIX (2026-07-16): see keydown/run guard below
+let _aiCancel = null;   // set while AI Fill waits; a second click calls it to cancel
 function _wireAIAssist() {
   const titleEl = _el('wr-title');
   const btn = _el('wr-ai-assist');
@@ -1966,7 +1967,8 @@ function _wireAIAssist() {
   // now strictly user-triggered.
   btn.addEventListener('click', () => _runAIAssist());
   titleEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); _runAIAssist(); }
+    // Enter starts a fill but never cancels one (only a button click cancels).
+    if (e.key === 'Enter') { e.preventDefault(); if (!_aiRunning) _runAIAssist(); }
   });
 }
 
@@ -1984,14 +1986,21 @@ async function _runAIAssist() {
   // -- guards against ANY overlapping call (double Enter, button click
   // mid-flight, etc.) actually executing concurrently and racing to
   // overwrite each other's field writes.
-  if (_aiRunning) { toast.show('info', 'AI Fill already running\u2026', 1500); return; }
+  // Clicking AI Fill again while it's waiting/working cancels this fill.
+  if (_aiRunning) {
+    if (typeof _aiCancel === 'function') { _aiCancel(); toast.show('info', 'AI Fill cancelled', 1500); }
+    else toast.show('info', 'AI Fill already running\u2026', 1500);
+    return;
+  }
   _aiRunning = true;
   const titleEl = _el('wr-title');
   const btn = _el('wr-ai-assist');
   const title = (titleEl.value || '').trim();
   if (!title) { toast.show('warn', 'Type a title first', 2000); _aiRunning = false; return; }
 
-  btn.disabled = true; btn.textContent = '⏳ AI...';
+  // Stays clickable while running: a second click cancels (see _aiCancel).
+  // The _aiRunning guard above still prevents a second concurrent fill.
+  btn.textContent = '⏳ AI...';
   
   const unit = _unit || {};
   const unitId = unit.id || unit.equipmentId || '';
@@ -2127,10 +2136,41 @@ async function _runAIAssist() {
     // Client-side timeout so a slow/stuck AI backend never leaves AI Fill
     // spinning (and never blocks the NEXT unit's fill). The main-process
     // ai:ask has its own hard timeout + slot release; this is the UI guard.
-    const result = await Promise.race([
-      window.ai.ask(safePrompt),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('AI Fill timed out — the AI service may be unavailable')), 95000)),
-    ]);
+    // QUEUE-AWARE WAIT (2026-10-28): AI Fill used to give up after a flat 95s
+    // that started at the click — but the request usually spent most of that
+    // WAITING behind background AI jobs (briefings, timeline rebuilds), so it
+    // "timed out" without the AI ever starting on it. Now: priority:'high'
+    // puts it ahead of queued background work, the button shows whether it's
+    // queued or working, and it only fails on a real stall (the main process
+    // caps the actual AI work at 180s; this outer cap is just a safety net).
+    // Clicking the button again cancels.
+    const AI_FILL_SAFETY_MS = 6 * 60 * 1000;
+    const _started = Date.now();
+    let _poll = null;
+    const _label = (txt) => { if (btn) btn.textContent = txt; };
+    const _secs = () => Math.round((Date.now() - _started) / 1000);
+    const _tick = async () => {
+      let s = null;
+      try { s = window.ai.queueStatus ? await window.ai.queueStatus() : null; } catch (_) {}
+      const queued = !!(s && s.ok && (s.askQueued > 0 || s.brainQueue > 1 || s.relayWaiting > 0));
+      _label((queued ? '\u23F3 Queued \u2014 you\u2019re next' : '\uD83E\uDD16 AI working') + ' \u00B7 ' + _secs() + 's (click to cancel)');
+    };
+    _tick();
+    _poll = setInterval(_tick, 1500);
+    let _cancelReject = null;
+    const _cancelled = new Promise((_, rej) => { _cancelReject = rej; });
+    _aiCancel = () => { if (_cancelReject) _cancelReject(Object.assign(new Error('cancelled'), { cancelled: true })); };
+    let result;
+    try {
+      result = await Promise.race([
+        window.ai.ask(safePrompt, { priority: 'high' }),
+        _cancelled,
+        new Promise((_, rej) => setTimeout(() => rej(new Error('AI Fill timed out after ' + Math.round(AI_FILL_SAFETY_MS / 60000) + ' min — the AI service may be unavailable')), AI_FILL_SAFETY_MS)),
+      ]);
+    } finally {
+      clearInterval(_poll);
+      _aiCancel = null;
+    }
     // Explicit backend rejection (e.g. ai:ask ConfigError "prompt exceeds
     // maximum length"): surface a clear message instead of a silent no-fill.
     if (result && result.ok === false && result.error) {
@@ -2334,6 +2374,7 @@ async function _runAIAssist() {
   } catch(e) {
     // Forward the REAL error + stack to the main log (console-message bridge)
     // so AI-Fill failures are diagnosable, not just a transient toast.
+    if (e && e.cancelled) return; // user clicked to cancel — no error toast
     try { console.error('[wr-modal] AI Fill failed: ' + (e && e.message) + ' | stack: ' + (e && e.stack || '')); } catch (_) {}
     toast.show('error', 'AI failed: ' + e.message, 4000);
   } finally {

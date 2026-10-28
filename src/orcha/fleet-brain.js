@@ -558,8 +558,16 @@ function ask(prompt, opts) {
       req.onAbort = () => _abortRequest(req, new Error('Aborted by caller'));
       signal.addEventListener('abort', req.onAbort, { once: true });
     }
-    _queue.push(req);
-    logger.info('[' + requestId + '] queued (queueLength=' + _queue.length + ')');
+    // priority 'high' (interactive, e.g. WR AI Fill) goes ahead of queued
+    // background requests, behind other high ones. Never preempts the active one.
+    req.high = opts.priority === 'high';
+    if (req.high) {
+      const at = _queue.findIndex((q) => !q.high);
+      _queue.splice(at === -1 ? _queue.length : at, 0, req);
+    } else {
+      _queue.push(req);
+    }
+    logger.info('[' + requestId + '] queued' + (req.high ? ' (priority)' : '') + ' (queueLength=' + _queue.length + ')');
     if (!_wsUsable()) _armHandoff(req);
     if (!_ws || _ws.readyState !== WebSocket.OPEN) {
       connect();

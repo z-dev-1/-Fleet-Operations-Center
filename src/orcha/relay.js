@@ -122,16 +122,23 @@ function _pickLane() {
   return _claudeBusy < _orchaBusy ? 'claude' : 'orcha';
 }
 
-function _acquireSlot() {
+// priority 'high' (interactive user actions) waits ahead of normal background
+// calls, behind other high ones. Entries are { go, high }.
+function _acquireSlot(priority) {
+  const high = priority === 'high';
   return new Promise(resolve => {
-    if (_activeCount < MAX_CONCURRENT) { _activeCount++; resolve(); }
-    else _waitQueue.push(resolve);
+    if (_activeCount < MAX_CONCURRENT) { _activeCount++; resolve(); return; }
+    if (high) {
+      const at = _waitQueue.findIndex((w) => !w.high);
+      _waitQueue.splice(at === -1 ? _waitQueue.length : at, 0, { go: resolve, high });
+    } else _waitQueue.push({ go: resolve, high });
   });
 }
 function _releaseSlot() {
   _activeCount--;
-  if (_waitQueue.length > 0 && _activeCount < MAX_CONCURRENT) { _activeCount++; _waitQueue.shift()(); }
+  if (_waitQueue.length > 0 && _activeCount < MAX_CONCURRENT) { _activeCount++; _waitQueue.shift().go(); }
 }
+function queueStats() { return { active: _activeCount, waiting: _waitQueue.length, max: MAX_CONCURRENT }; }
 
 // ── ASK ───────────────────────────────────────────────────────────────────────
 async function ask(prompt, opts = {}) {
@@ -139,7 +146,7 @@ async function ask(prompt, opts = {}) {
   const requestId = opts.requestId || ('rl' + (++_reqSeq));
   if (signal && signal.aborted) throw new Error('Aborted before start');
 
-  await _acquireSlot();
+  await _acquireSlot(opts.priority);
   _requestCount++;
   // Set true when balanced mode routes this call to the Orcha lane, so the
   // outer finally can decrement _orchaBusy exactly once (per-call local — must
@@ -206,7 +213,7 @@ async function ask(prompt, opts = {}) {
       const _fbStatus = fleetBrain.getStatus ? fleetBrain.getStatus() : {};
       if (!_fbStatus || !_fbStatus.ready) throw new Error('fleet-brain not ready');
       logger.info('[' + requestId + '] Fleet Brain attempt started');
-      const text = await fleetBrain.ask(prompt, { signal, requestId });
+      const text = await fleetBrain.ask(prompt, { signal, requestId, priority: opts.priority });
       if (text) {
         const via = _fbStatus.localMode ? 'fleet-brain/local' : 'fleet-brain/ws';
         _markLaneHealthy(_fbStatus.localMode ? 'claude' : 'orcha');
@@ -960,4 +967,4 @@ function listAgents(opts = {}) {
   });
 }
 
-module.exports = { ask, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setAgent, getAgent, setClaudePoolSize, getClaudePoolSize, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents };
+module.exports = { ask, queueStats, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setAgent, getAgent, setClaudePoolSize, getClaudePoolSize, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents };

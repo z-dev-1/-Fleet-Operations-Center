@@ -61,22 +61,31 @@ async function _withAiCore(source, message, fn) {
 // Prevents renderer from flooding AI backends (Bedrock $$, Orcha WS) with
 // concurrent requests. Simple per-channel concurrency cap: excess calls queue
 // and resolve in order. No external dependency.
+// PRIORITY (2026-10-28): opts.priority === 'high' (user-clicked actions like
+// WR AI Fill) queues AHEAD of normal background calls, behind other high ones.
+// limit.stats() exposes { active, queued } for the UI's "queued" indicator.
 function _createLimiter(maxConcurrent) {
   let active = 0;
-  const queue = [];
-  return function limit(fn) {
+  const queue = []; // [{ run, high }]
+  function limit(fn, opts) {
+    const high = !!(opts && opts.priority === 'high');
     return new Promise((resolve, reject) => {
       const run = () => {
         active++;
         fn().then(resolve, reject).finally(() => {
           active--;
-          if (queue.length > 0) queue.shift()();
+          if (queue.length > 0) queue.shift().run();
         });
       };
       if (active < maxConcurrent) run();
-      else queue.push(run);
+      else if (high) {
+        const at = queue.findIndex((q) => !q.high);
+        queue.splice(at === -1 ? queue.length : at, 0, { run, high });
+      } else queue.push({ run, high });
     });
-  };
+  }
+  limit.stats = () => ({ active, queued: queue.length, queuedHigh: queue.filter((q) => q.high).length });
+  return limit;
 }
 const _aiAskLimit  = _createLimiter(1);  // max 1 concurrent ai:ask
 const _aiChatLimit = _createLimiter(1);  // max 1 concurrent ai:chat
@@ -1029,8 +1038,11 @@ function registerAIHandlers(ctx) {
   // when the Orcha WS queue is busy. Switch to relay.ask — the full automatic
   // chain (Orcha WS -> CLI -> Claude Code -> Bedrock) so ai:ask is reliable for
   // all callers (Daily Call AI Review, WBR Generate, etc.)
-  handle('ai:ask', async (_e, prompt) => {
+  handle('ai:ask', async (_e, prompt, askOpts) => {
     requireStringMax(prompt, 'prompt', MAX_PROMPT_LEN);
+    // priority:'high' = an interactive, user-clicked request (WR AI Fill): it
+    // jumps ahead of queued background AI work at every queue it passes through.
+    const _priority = (askOpts && askOpts.priority === 'high') ? 'high' : 'normal';
     // Phase 4: traced through AI Core (source 'ui') for observability + task
     // routing classification. Reasoning path (relay cascade) is UNCHANGED.
     return _withAiCore('ui', prompt, async () => {
@@ -1052,14 +1064,28 @@ function registerAIHandlers(ctx) {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), AI_ASK_TIMEOUT_MS);
       return Promise.race([
-        relay.ask(prompt, { signal: ac.signal }),
+        relay.ask(prompt, { signal: ac.signal, priority: _priority }),
         new Promise((_, rej) => setTimeout(() => rej(new Error('ai:ask timed out after ' + (AI_ASK_TIMEOUT_MS / 1000) + 's')), AI_ASK_TIMEOUT_MS + 2000)),
       ]).finally(() => clearTimeout(timer));
-    });
+    }, { priority: _priority });
     // Normalize: relay.ask returns a raw string; callers expect { ok, text }
     if (typeof text === 'string') return { ok: true, text };
     return text; // in case it's already an object
     });
+  });
+
+  // Live AI queue depth for the UI ("Queued — N ahead" on WR AI Fill).
+  handle('ai:queue-status', () => {
+    const a = _aiAskLimit.stats();
+    let r = {}, b = {};
+    try { r = relay.queueStats ? relay.queueStats() : {}; } catch (_) {}
+    try { const fb = require('../orcha/fleet-brain'); b = fb.getStatus ? fb.getStatus() : {}; } catch (_) {}
+    return {
+      ok: true,
+      askActive: a.active, askQueued: a.queued, askQueuedHigh: a.queuedHigh,
+      relayActive: r.active || 0, relayWaiting: r.waiting || 0,
+      brainQueue: b.queueLength || 0,
+    };
   });
 
   // FAS knowledge base — the SINGLE SOURCE OF TRUTH for ownership / approval /
