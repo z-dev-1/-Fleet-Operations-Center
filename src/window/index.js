@@ -918,7 +918,8 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
     // after _showApp() then backfills the remaining chunks into the full dataset.
     const startupDomiciles = scrapeDomiciles.slice(0, 6);
     const startUrl        = buildScanURL(startupDomiciles);
-    if (scrapeDomiciles.length > 6) {
+    if (scrapeDomiciles.length > 6 && !_apiMode()) {
+      // Legacy scrape backup only — in API mode nothing is scraped.
       logger.info('Startup: ' + scrapeDomiciles.length + ' domiciles configured; scraping first 6 now, rest via chunked rescan');
     }
     // ── API MODE (default): skip the AAP BrowserWindow scrape entirely ──────

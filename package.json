@@ -50,12 +50,18 @@
       "icon": "assets/icon.icns"
     },
     "files": [
-      "dist/",
-      "src/",
-      "scrapers/",
+      "renderer/src/**/*",
+      "dist/renderer/**/*",
+      "src/**/*",
+      "setup/**/*",
+      "assets/**/*",
       "main.js",
       "preload.js",
-      "package.json"
+      "package.json",
+      "!dist/win-unpacked/**",
+      "!**/*.bak*",
+      "!src/asana/_test_ops.js",
+      "!src/scrapers/aap_custom_form_probe.js"
     ],
     "extraResources": [
       {
