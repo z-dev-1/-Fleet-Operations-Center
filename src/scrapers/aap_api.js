@@ -229,6 +229,22 @@ async function _request(method, path, body) {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
+/**
+ * evaluateInPage(script) -> result of running `script` inside the app's warm,
+ * authenticated AAP page (the same live session every AAP API call uses,
+ * kept fresh by the AEA keepalive + auth supervisor). Serialized through the
+ * same lock. Used by rca/midway_token.js to mint the aap-na Midway id_token
+ * exactly as AAP's own page does, instead of from the cookie file.
+ */
+async function evaluateInPage(script) {
+  return _withLock(async () => {
+    const page = await _ensureWindow();
+    const r = await page.evaluate(script);
+    _scheduleTeardown();
+    return r;
+  });
+}
+
 function apiGet(path)        { return _request('GET',  path, null); }
 function apiPost(path, body) { return _request('POST', path, body); }
 function apiPut(path, body)  { return _request('PUT',  path, body); }
@@ -2466,6 +2482,7 @@ async function uploadWrAttachments(workRequestId, attachments, opts = {}) {
 }
 
 module.exports = {
+  evaluateInPage,
   apiGet,
   apiPost,
   apiPut,
