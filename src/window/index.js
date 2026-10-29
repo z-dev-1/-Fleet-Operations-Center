@@ -1359,7 +1359,16 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
           });
         } catch (e) {
           logger.warn('[data-source] deep-scan error (non-fatal): ' + e.message);
-        } finally { _deepScanRunning = false; }
+        } finally {
+          _deepScanRunning = false;
+          // CANONICAL PASS in API mode (2026-10-28): it only ran in the legacy
+          // scrape sync, so canonical state froze on 10-16. Runs after every
+          // API load + deep-scan (even if deep-scan failed) and saves the
+          // deep-scan's Decisiv case stage so Ready is known. Non-fatal.
+          try {
+            require('../orcha/canonical_runner').runCanonicalPass({ scannedRows: rows, pushData, ctx });
+          } catch (e) { logger.warn('[canonical] API-mode pass error (non-fatal): ' + e.message); }
+        }
       })();
     }
 

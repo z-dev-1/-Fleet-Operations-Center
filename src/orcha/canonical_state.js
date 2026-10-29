@@ -152,6 +152,29 @@ function _isReadyForPickup(text) {
 // Does this text indicate the unit needs to be towed TO the dealer (inbound)?
 function _isTowOut(text) { return TOW_OUT_RE.test(String(text || '')); }
 
+// ── Volvo / PACCAR dealer case stage (Decisiv API), 2026-10-28 ──────────────
+// row.offsiteStage (arrival|diagnosis|approval|repair|ready) + detail + since,
+// read from Decisiv's case_repair_status_changes.json. offsiteStageSince is
+// ONLY set when the stage came from the API (never from screen reading), so
+// it marks a trustworthy stage. When present it is the source of truth for
+// READY: Ready -> ready_for_pickup; any other stage means the repair is NOT
+// done, so a "ready" that only came from note wording is downgraded.
+const DECISIV_STAGES = ['arrival', 'diagnosis', 'approval', 'repair', 'ready'];
+function _apiStage(r) {
+  const stg = _lc(r && r.offsiteStage).trim();
+  return (r && r.offsiteStageSince && DECISIV_STAGES.indexOf(stg) >= 0) ? stg : '';
+}
+function _stageOverride(r, status) {
+  const stg = _apiStage(r);
+  if (!stg) return status;
+  if (stg === 'ready') return 'ready_for_pickup';
+  if (status !== 'ready_for_pickup') return status;           // only veto a text-only "ready"
+  const det = _lc(r.offsiteStageDetail);
+  if (/part/.test(det)) return 'awaiting_parts';             // e.g. "Hold (parts)"
+  if (stg === 'approval' && !/approved/.test(det)) return 'awaiting_estimate_approval';
+  return 'in_repair';
+}
+
 // Days since the offsite thread was last scraped (freshness proxy), falling
 // back to a leading day-count in workDuration. Mirrors relay_reconcile.
 function _daysSinceOffsite(row) {
@@ -581,7 +604,7 @@ function computeCanonical(row) {
   const r = row || {};
   const equipmentId = _s(r.equipmentId);
   if (!equipmentId) return null;
-  const status = _deriveStatus(r);
+  const status = _stageOverride(r, _deriveStatus(r));
   const flags = _deriveFlags(r, status);
   const stale = flags.includes('stale');
   const source = _deriveSource(r);
@@ -707,8 +730,9 @@ function reconcileCanonical(row, opts) {
     }
     return base;
   }
-  // Fold the AI reconcile decision in.
-  const status = _statusFromDecision(decision, base.status);
+  // Fold the AI reconcile decision in. The Decisiv API stage still has the
+  // final say on Ready (see _stageOverride).
+  const status = _stageOverride(row, _statusFromDecision(decision, base.status));
   const situation = _s(decision.currentStatus) || base.situation;
   const nextStep = _s(decision.nextStep) || base.nextStep;
   const confidence = Number.isFinite(decision.confidence) ? decision.confidence : base.confidence;
@@ -1230,6 +1254,7 @@ module.exports = {
   signalTokens,
   // exported for tests / reuse
   _deriveStatus,
+  _stageOverride,
   _deriveSource,
   _deriveFlags,
   _isReadyForPickup,
