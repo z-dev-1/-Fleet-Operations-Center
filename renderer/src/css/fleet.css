@@ -10033,3 +10033,17 @@ textarea.rca-input { resize: vertical; line-height: 1.4; }
 .tr-hfactors { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
 .tr-hf { font-size: 10px; padding: 1px 7px; border-radius: 8px; background: rgba(139,148,158,.14); color: var(--txt2); }
 @media (max-width: 760px) { .tr-hrow { grid-template-columns: 28px 46px 1fr; } .tr-hbarwrap { display: none; } }
+
+/* ── Repair tab: tighter spacing above the timeline (2026-10-29) ──
+   Scoped to #dp-pane-repair only. Cuts the pane gap, section-title margins,
+   WO card padding, and split-view row padding so less scrolling is needed. */
+#dp-pane-repair { gap: 6px !important; padding-top: 8px !important; }
+#dp-pane-repair > .dp-section-title { margin-top: 4px !important; margin-bottom: 0 !important; padding: 2px 0 !important; }
+#dp-pane-repair > .dp-section-title:first-child { margin-top: 0 !important; }
+#dp-pane-repair > .dp-stage { margin-top: 0; }
+#dp-pane-repair .dp-wo-card { padding: 8px 10px !important; gap: 4px !important; margin-bottom: 0 !important; }
+#dp-pane-repair .dp-wo-card__header { margin-bottom: 2px; }
+#dp-pane-repair .dp-wo-card__fields { margin-top: 4px; gap: 4px; }
+#dp-pane-repair .dp-wo-card__dates { margin-top: 4px; }
+#dp-pane-repair .dp-split-view-row { padding: 0 !important; }
+#dp-pane-repair .dp-split-view-btn { padding: 5px 10px; font-size: 11px; }
