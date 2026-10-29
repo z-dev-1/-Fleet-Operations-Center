@@ -166,7 +166,14 @@ class VolvoWorkflow extends VendorWorkflow {
    * @param {string}  options.dealerState    e.g. 'NJ'
    * @param {object}  options.fillOpts       { complaint, notes, contact:{firstName,lastName,email,phone}, breakdownCity, breakdownState }
    */
-  async run(unit, altId, { approveSignal, workflowId, dealerName, dealerCity, dealerState, fillOpts } = {}) {
+  async run(unit, altId, opts = {}) {
+    // API path (2026-10-28): create the SR through ASIST's own endpoints
+    // (see ./api.js) instead of driving the portal UI. The portal flow below
+    // stays as a fallback: VOLVO_PORTAL_FLOW=1 to use it.
+    if (process.env.VOLVO_PORTAL_FLOW !== '1') {
+      return require('./api').runApi(this, unit, altId, opts);
+    }
+    const { approveSignal, workflowId, dealerName, dealerCity, dealerState, fillOpts } = opts;
     const eqId       = unit.unitNumber || unit.equipmentId || unit.id || 'unknown';
     const unitNumber = eqId;
     logger.info('[volvo][' + (workflowId || '') + '] run() unit:', eqId, 'dealer:', dealerName || 'unspecified');

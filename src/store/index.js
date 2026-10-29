@@ -108,6 +108,11 @@ const REGISTRY = {
   // last day we silently warmed each vendor portal so the morning pre-warm runs
   // once/day. See src/scrapers/vendor_session.js. Shape: { lastWarmedDay: {dtna:'YYYY-MM-DD'} }.
   vendorWarm:           () => path.join(P.dataDir, 'vendor-warm.json'),
+  // Volvo ASIST vehicle-id cache (2026-10-28). ASIST forms use its own internal
+  // vehicle id, not the unit number; looked up once per unit via
+  // /fleet/search.json then remembered. See src/vendors/volvo/api.js.
+  // Shape: { [unitNumber]: { vehicleId, display, savedAt } }.
+  volvoVehicleIds:      () => path.join(P.dataDir, 'volvo_vehicle_ids.json'),
   // DBR DATA (Daily Call) — cached result of the last AFP QuickSight scrape.
   // See src/scrapers/quicksight_dbr.js + src/ipc/scrapers.js 'quicksight:scrape'.
   // Shape: { ok, domicile:[{domicile,uptimePct,unitsUnavailable}],

@@ -33,8 +33,11 @@
  * The window is opened per-host (volvopg vs paccarpg), kept warm briefly, and
  * torn down when idle. All requests are serialized through it.
  *
- * SAFETY: read-only. This module only issues GETs against activity_logs /
- * contacts endpoints. It never POSTs, approves, or mutates a Decisiv record.
+ * SAFETY: the functions in THIS module only issue GETs (activity_logs /
+ * contacts / apiGet). The one exception is withWindow(), which hands the warm
+ * authenticated window to a caller — src/vendors/volvo/api.js uses it to read
+ * the Request Service form and, ONLY after the operator clicks Approve in the
+ * review modal, POST the new service request.
  */
 
 const { BrowserWindow } = require('electron');
@@ -343,9 +346,33 @@ async function getEstimateComments(estimateId, opts = {}) {
   }
 }
 
+/**
+ * apiGet(urlOrVendor, path) -> parsed JSON from a Decisiv JSON endpoint,
+ * run inside the warm authenticated window (same auth as the calls above).
+ */
+async function apiGet(urlOrVendor, path) {
+  return _apiGet(originFor(urlOrVendor), path);
+}
+
+/**
+ * withWindow(urlOrVendor, fn) -> fn(win, { origin, token }) under the shared
+ * lock, with the warm authenticated window for that host. The caller may
+ * navigate the window and run scripts in it. Do NOT call apiGet() from inside
+ * fn (same lock -> deadlock).
+ */
+async function withWindow(urlOrVendor, fn) {
+  const origin = originFor(urlOrVendor);
+  return _withLock(async () => {
+    const win = await _ensureWindow(origin);
+    try { return await fn(win, { origin, token: _tokens[origin] || '' }); }
+    finally { _scheduleTeardown(origin); }
+  });
+}
+
 module.exports = {
   HOSTS, originFor,
   getActivityLogs, getEstimateContacts, getEstimateComments,
+  apiGet, withWindow,
   formatActivityLogs,
   dispose,
   // exported for tests

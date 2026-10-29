@@ -26,12 +26,39 @@
  */
 
 import state from '../state.js';
+import { files } from '../bridge.js';
+import { readFileAsAttachment } from './wr-modal.js';
 
 let _overlay    = null;
 let _unit       = null;
 let _vendorKey  = null;
 let _onSubmit   = null;
-let _lastResolvedVendor = null; // { id, name } -- for vendor-load tracking on submit
+let _lastResolvedVendor = null; // { id, name, address } -- vendor-load tracking + Volvo assign line
+let _attachments = [];          // Volvo: [{ name, dataUrl }] -- auto Uptake screenshots + user files
+
+// ── Volvo (ASIST API path, 2026-10-28) helpers ───────────────────────────────
+// "Please assign unit to <dealer> <address> for service" -- the last line of
+// the Volvo Issue Details. "for Mobile service" when the job is mobile.
+const _ASSIGN_RE = /^Please assign unit to .*$/m;
+function _addrLine(c) {
+  if (!c) return '';
+  // "462 Harleysville Pike, Souderton PA 18964"
+  const cityStZip = [String(c.city || '').trim(), String(c.state || '').trim(), String(c.zip || '').trim()]
+    .filter(Boolean).join(' ');
+  return [String(c.street || '').trim(), cityStZip].filter(Boolean).join(', ');
+}
+function _assignLine(dealerName, dealerAddr, mobile) {
+  const who = [String(dealerName || '').trim(), String(dealerAddr || '').trim()].filter(Boolean).join(' ');
+  return 'Please assign unit to ' + (who || '(dealer)') + ' for ' + (mobile ? 'Mobile service' : 'service');
+}
+// Mentions of mobile work in the issue text (ignoring the assign line itself).
+function _mentionsMobile(text) {
+  return /\bmobile\s+(maint\w*|service|repair|tech\w*|mechanic|unit)\b/i.test(String(text || '').replace(_ASSIGN_RE, ''));
+}
+function _setAssignLine(text, line) {
+  const t = String(text || '');
+  return _ASSIGN_RE.test(t) ? t.replace(_ASSIGN_RE, line) : (t.replace(/\s+$/, '') + '\n' + line);
+}
 
 const _esc  = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const _attr = (s) => _esc(s).replace(/"/g, '&quot;');
@@ -87,21 +114,24 @@ function _buildStructuredIssue(unit, profile, domicile, complaint) {
 // produces the structured Issue Details block (from the user profile +
 // whatever raw issue text the unit has) so the user never sees a blank/
 // unstructured field — they just fill City/State + Dealer and edit as needed.
-function _minimalDefaults(unit) {
+function _minimalDefaults(unit, vendorKey) {
   let profile = {};
   try { profile = JSON.parse(localStorage.getItem('fleet_user_profile') || '{}'); } catch (_) {}
   const { first, last } = _splitName(profile.name);
   const rawComplaint = (unit && (unit.issueDetails || unit.issueSummary)) || '';
+  let issue = _buildStructuredIssue(unit, profile, null, rawComplaint);
+  const mobile = vendorKey === 'volvo' && _mentionsMobile(issue);
+  if (vendorKey === 'volvo') issue = _setAssignLine(issue, _assignLine('', '', mobile));
   return {
-    cityState: '', dealer: '',
+    cityState: '', dealer: '', breakdownLocation: '', mobile,
     firstName: first, lastName: last,
     phone: profile.phone || '', email: profile.email || '',
-    issue: _buildStructuredIssue(unit, profile, null, rawComplaint),
+    issue,
     date: new Date().toISOString().slice(0, 10), ackCheck: true,
   };
 }
 
-async function _resolveDefaults(unit) {
+async function _resolveDefaults(unit, vendorKey) {
   let profile = {};
   try { profile = JSON.parse(localStorage.getItem('fleet_user_profile') || '{}'); } catch (_) {}
   const { first, last } = _splitName(profile.name);
@@ -165,7 +195,10 @@ async function _resolveDefaults(unit) {
     }
   } catch (_) {}
 
-  _lastResolvedVendor = vendorContact ? { id: vendorContact.id, name: vendorContact.company || vendorContact.name || '' } : null;
+  _lastResolvedVendor = vendorContact ? {
+    id: vendorContact.id, name: vendorContact.company || vendorContact.name || '',
+    address: _addrLine(vendorContact), mobile: !!vendorContact.mobile,
+  } : null;
 
   // AI-synthesized issue description: combine issueDetails + repairTimeline into
   // a concise, dealer-ready description the tech can act on immediately.
@@ -210,9 +243,21 @@ async function _resolveDefaults(unit) {
   // Structured FAS pickup-confirmation Issue Details. The "Compliant:" line
   // uses the AI-synthesized issue (folds in the CEL/complaint, the prior
   // vendor's out-of-scope rejection, and shared diagnostic notes).
-  const structuredIssue = _buildStructuredIssue(unit, profile, domicile, issue);
+  let structuredIssue = _buildStructuredIssue(unit, profile, domicile, issue);
+
+  // Volvo: add the "Please assign unit to <dealer> <address> for service"
+  // line; "Mobile service" when the dealer is a mobile vendor or the issue
+  // text says it's mobile maintenance.
+  let mobile = false;
+  if (vendorKey === 'volvo') {
+    mobile = !!(_lastResolvedVendor && _lastResolvedVendor.mobile) || _mentionsMobile(structuredIssue);
+    structuredIssue = _setAssignLine(structuredIssue, _assignLine(
+      _lastResolvedVendor && _lastResolvedVendor.name, _lastResolvedVendor && _lastResolvedVendor.address, mobile));
+  }
 
   return {
+    breakdownLocation: _addrLine(domicile),
+    mobile,
     cityState: domicile
       ? [String(domicile.city || '').trim(), String(domicile.state || '').trim()]
           .filter(Boolean).join(', ')
@@ -290,7 +335,34 @@ function _buildHTML(unit, vendorKey, d) {
       <div class="wr-section__title">Issue Details</div>
       <textarea id="dwo-issue" class="settings__textarea" rows="13"
         placeholder="Full defect / complaint details...">${_esc(d.issue)}</textarea>
+      ${vendorKey === 'volvo' ? `<div style="font-size:11px;opacity:.7;margin-top:4px">Sent to ASIST as the Complaint, Notes and attachment Description.</div>` : ''}
     </div>
+
+    ${vendorKey === 'volvo' ? `
+    <div class="wr-section">
+      <div class="wr-section__title">Volvo ASIST</div>
+      <label class="settings-label">Breakdown Location <span style="opacity:.6">(domicile address)</span>
+        <input id="dwo-breakdown-location" class="settings__input" type="text"
+          placeholder="Street, City ST ZIP" value="${_attr(d.breakdownLocation)}" />
+      </label>
+      <label class="settings-label settings-label--inline" style="margin-top:6px">
+        <input id="dwo-mobile" type="checkbox" ${d.mobile ? 'checked' : ''} />
+        Mobile service <span style="opacity:.6">(changes the last line to "for Mobile service")</span>
+      </label>
+      <div style="font-size:11px;opacity:.7;margin-top:4px">Auth Number = the AMZ dealer-tracking number (you can correct it on the review screen). Requested Appointment Time = when this WO is created.</div>
+    </div>
+
+    <div class="wr-section">
+      <div class="wr-section__title">Attachments</div>
+      <div class="wr-screenshot-row">
+        <button id="dwo-attach-uptake" type="button" class="detail-panel__btn detail-panel__btn--secondary">Attach Uptake screenshots</button>
+      </div>
+      <div id="dwo-dropzone" class="wr-dropzone">
+        <span>Drag files here, or <button id="dwo-attach-browse" type="button" class="wr-dropzone__browse">browse…</button></span>
+        <input id="dwo-attach-file-input" type="file" multiple accept="image/*,.pdf" style="display:none" />
+      </div>
+      <div id="dwo-attach-list" class="wr-attach-list"></div>
+    </div>` : ''}
 
     <div id="dwo-result" class="wr-result" style="display:none"></div>
 
@@ -320,7 +392,96 @@ function _collectFormData() {
     phone:     (_el('dwo-phone').value || '').trim(),
     email:     (_el('dwo-email').value || '').trim(),
     issue:     (_el('dwo-issue').value || '').trim(),
+    // Volvo-only fields (absent for PACCAR -> empty / false / [])
+    breakdownLocation: ((_el('dwo-breakdown-location') || {}).value || '').trim(),
+    mobile:    !!(_el('dwo-mobile') || {}).checked,
+    attachments: _attachments.map(a => ({ name: a.name, dataUrl: a.dataUrl })),
   };
+}
+
+// ── Volvo attachments + assign line wiring ───────────────────────────────────
+function _addAttachment(name, dataUrl) {
+  if (!dataUrl || _attachments.some(a => a.dataUrl === dataUrl)) return;
+  _attachments.push({ name: name || 'attachment', dataUrl });
+  _renderAttachments();
+}
+function _renderAttachments() {
+  const list = _el('dwo-attach-list');
+  if (!list) return;
+  list.innerHTML = _attachments.map((a, i) =>
+    '<div class="wr-attach-chip"><span class="wr-attach-chip__name">' + _esc(a.name) + '</span>' +
+    '<button type="button" class="wr-attach-chip__remove" data-idx="' + i + '" title="Remove" aria-label="Remove ' + _attr(a.name) + '">×</button></div>').join('');
+  list.querySelectorAll('.wr-attach-chip__remove').forEach(btn => {
+    btn.addEventListener('click', () => { _attachments.splice(Number(btn.dataset.idx), 1); _renderAttachments(); });
+  });
+}
+function _uptakePaths(unit) {
+  return Array.from(new Set([].concat(
+    unit && unit.screenshotPath ? [unit.screenshotPath] : [],
+    unit && Array.isArray(unit.screenshots) ? unit.screenshots : []
+  ).filter(Boolean)));
+}
+async function _attachUptake(unit, { quiet } = {}) {
+  const paths = _uptakePaths(unit);
+  if (!paths.length) {
+    const r = _el('dwo-result');
+    if (!quiet && r) { r.style.display = 'block'; r.textContent = 'No Uptake screenshot stored for this unit (run a sync first).'; }
+    return 0;
+  }
+  let n = 0;
+  for (const p of paths) {
+    try { const dataUrl = await files.readAsDataUrl(p); if (dataUrl) { _addAttachment(p.split(/[/\\]/).pop(), dataUrl); n++; } }
+    catch (_) { /* unreadable file -- skip */ }
+  }
+  return n;
+}
+function _addFiles(fileList) {
+  Array.from(fileList || []).forEach(async (file) => {
+    const att = await readFileAsAttachment(file);
+    if (att && !att.warn) _addAttachment(att.name, att.dataUrl);
+    else {
+      const r = _el('dwo-result');
+      if (r) { r.style.display = 'block'; r.textContent = '"' + file.name + '" could not be attached' + (att && att.warn ? ' (' + att.warn + ')' : '') + '.'; }
+    }
+  });
+}
+function _wireVolvo(unit) {
+  if (!_el('dwo-attach-list')) return; // not the Volvo form
+  // Uptake screenshots auto-attach (same rule as the WR form: whenever this
+  // unit has stored Uptake screenshots). User can remove them.
+  _attachUptake(unit, { quiet: true }).catch(() => {});
+  const up = _el('dwo-attach-uptake');
+  if (up) up.addEventListener('click', () => _attachUptake(unit).catch(() => {}));
+  const input = _el('dwo-attach-file-input');
+  const browse = _el('dwo-attach-browse');
+  if (browse && input) {
+    browse.addEventListener('click', () => input.click());
+    input.addEventListener('change', () => { _addFiles(input.files); input.value = ''; });
+  }
+  const dz = _el('dwo-dropzone');
+  if (dz) {
+    ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('wr-dropzone--active'); }));
+    ['dragleave', 'dragend'].forEach(ev => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove('wr-dropzone--active'); }));
+    dz.addEventListener('drop', (e) => {
+      e.preventDefault(); dz.classList.remove('wr-dropzone--active');
+      if (e.dataTransfer && e.dataTransfer.files) _addFiles(e.dataTransfer.files);
+    });
+  }
+  // Keep the "Please assign unit to ..." line in sync with the Dealer field
+  // and the Mobile checkbox. Typing "mobile maintenance" in the issue ticks it.
+  const issueEl = _el('dwo-issue'), dealerEl = _el('dwo-dealer'), mobileEl = _el('dwo-mobile');
+  const sync = () => {
+    if (!issueEl || !mobileEl) return;
+    const name = dealerEl ? dealerEl.value : '';
+    const addr = (_lastResolvedVendor && _lastResolvedVendor.name === String(name).trim()) ? _lastResolvedVendor.address : '';
+    const next = _setAssignLine(issueEl.value, _assignLine(name, addr, mobileEl.checked));
+    if (next !== issueEl.value) issueEl.value = next;
+  };
+  if (mobileEl) mobileEl.addEventListener('change', sync);
+  if (dealerEl) dealerEl.addEventListener('change', sync);
+  if (issueEl && mobileEl) issueEl.addEventListener('input', () => {
+    if (!mobileEl.checked && _mentionsMobile(issueEl.value)) { mobileEl.checked = true; sync(); }
+  });
 }
 
 function _wireSubmit() {
@@ -362,6 +523,7 @@ export function open(unit, vendorKey, onSubmit) {
     _unit      = unit;
     _vendorKey = vendorKey;
     _onSubmit  = onSubmit;
+    _attachments = [];
 
     _overlay           = document.createElement('div');
     _overlay.id        = 'dwo-modal-overlay';
@@ -384,6 +546,7 @@ export function open(unit, vendorKey, onSubmit) {
       const closeBtn = _el('dwo-close');  if (closeBtn)  closeBtn.addEventListener('click', close);
       const cancelBtn = _el('dwo-cancel'); if (cancelBtn) cancelBtn.addEventListener('click', close);
       _wireSubmit();
+      _wireVolvo(unit);
       setTimeout(() => { const t = _el('dwo-city-state'); if (t) t.focus(); }, 50);
     } catch (e) {
       console.error('[dealer-wo-modal] render failed:', e);
@@ -400,11 +563,11 @@ export function open(unit, vendorKey, onSubmit) {
     if (_settled) return;
     _settled = true;
     console.warn('[dealer-wo-modal] _resolveDefaults slow — rendering with minimal defaults');
-    _renderWith(_minimalDefaults(unit));
+    _renderWith(_minimalDefaults(unit, vendorKey));
   }, 6000);
 
   Promise.resolve()
-    .then(() => _resolveDefaults(unit))
+    .then(() => _resolveDefaults(unit, vendorKey))
     .then((d) => {
       if (_settled) return; // timeout already rendered
       _settled = true;
@@ -416,7 +579,7 @@ export function open(unit, vendorKey, onSubmit) {
       _settled = true;
       clearTimeout(_fallbackTimer);
       console.error('[dealer-wo-modal] _resolveDefaults failed:', e);
-      _renderWith(_minimalDefaults(unit));
+      _renderWith(_minimalDefaults(unit, vendorKey));
     });
 }
 
@@ -427,4 +590,5 @@ export function close() {
   _vendorKey = null;
   _onSubmit  = null;
   _lastResolvedVendor = null;
+  _attachments = [];
 }
