@@ -629,8 +629,9 @@ function createSyncEngine(ctx) {
                 askOrcha: (p) => require('../orcha/relay').ask(p, {}),
                 resolveOperatorEntry,
               };
-              Promise.resolve()
-                .then(() => readyNotify.notifyReadyUnits(units, deps))
+              // Shared queue with the Decisiv stage-Ready trigger (deep-scan)
+              // so the two can never send for one unit at the same time.
+              readyNotify.enqueue(() => readyNotify.notifyReadyUnits(units, deps))
                 .catch((e) => logger.warn('[canonical] ready-pickup notify error (non-fatal): ' + e.message));
             }
           } catch (e) { logger.warn('[canonical] ready-pickup hook error (non-fatal): ' + e.message); }

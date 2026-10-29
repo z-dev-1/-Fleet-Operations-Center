@@ -40,6 +40,23 @@ const AI_ATTEMPT_MS = 30000;
 // later back in for repair is days out, well beyond this window).
 const NOTIFY_COOLDOWN_MS = 24 * 3600 * 1000;  // 24 hours
 
+// ── HARD GATE (operator rule, 2026-10-28) ─────────────────────────────────────
+// NO carrier message (ready notice OR in-thread auto-reply) goes out unless the
+// unit has an offsite VOLVO or PACCAR work order (Decisiv host) AND that case's
+// stage, read from the Decisiv API, is READY. offsiteStageSince is only ever
+// set from the API, so it proves the stage wasn't guessed from the screen.
+// Notes wording alone can never message a carrier: on 10-28 the word "closed"
+// in "...after the shutoff valve is closed" sent B12343 a false ready notice.
+const DECISIV_OFFSITE_RE = /https?:\/\/(?:volvopg\.asist|volvo\.asist|pssmfleet|paccarpg)\.decisiv\.net\//i;
+function decisivReadyGate(row) {
+  const r = row || {};
+  const url = [r.offsiteShopEventUrl, r.asistSrUrl, r.savedOffsiteUrl].filter(Boolean).join(' ');
+  if (!DECISIV_OFFSITE_RE.test(url)) return { ok: false, why: 'no Volvo/PACCAR offsite work order' };
+  if (String(r.offsiteStage || '').toLowerCase() !== 'ready') return { ok: false, why: 'dealer case stage is ' + (r.offsiteStage || 'unknown') + ', not Ready' };
+  if (!r.offsiteStageSince) return { ok: false, why: 'Ready stage not confirmed by the Decisiv API' };
+  return { ok: true, why: '' };
+}
+
 // Live fleet row for a unit (dealer/asist/domicile context for the message).
 function _fleetRow(equipmentId) {
   try {
@@ -268,7 +285,21 @@ async function notifyReadyUnits(units, deps, log) {
       out.skipped++; continue;
     }
 
-    const row = fleetRow(equipmentId) || {};
+    // The stage trigger passes the live in-memory row (deep-scan hasn't saved
+    // it yet); otherwise read the stored fleet row.
+    const row = Object.assign({}, fleetRow(equipmentId) || {}, rec._row || {});
+    const gate = decisivReadyGate(row);
+    if (!gate.ok) {
+      doLog('[ReadyPickup] ' + equipmentId + ': NOT notifying — ' + gate.why);
+      out.skipped++; continue;
+    }
+    // Already sent for this exact Decisiv Ready event by the stage trigger
+    // (notifyStageReadyUnits keys the ledger on unit:<Ready changed_at>).
+    if (rec._source !== 'offsite-stage' && String(row.offsiteStage || '').toLowerCase() === 'ready' && row.offsiteStageSince
+        && ledger[unitKey + ':' + row.offsiteStageSince]) {
+      doLog('[ReadyPickup] ' + equipmentId + ': already notified from the dealer case Ready stage — skipping');
+      out.skipped++; continue;
+    }
     const operator = row.operator || (rec && rec.operator) || '';
     if (!operator) { doLog('[ReadyPickup] ' + equipmentId + ': no operator — skipping'); out.skipped++; continue; }
 
@@ -317,6 +348,7 @@ async function notifyReadyUnits(units, deps, log) {
       dealerLocation: ctx.dealerLocation || ctx.dealer || '',
       awaitingReply: !!postedTs,   // can only track a reply if we know the ts
       answeredReplyTs: null,
+      gate: 'decisiv-ready',       // passed the hard gate -> replies may be answered
     };
     out.notified++;
   }
@@ -330,6 +362,122 @@ async function notifyReadyUnits(units, deps, log) {
 
   if (out.notified) doLog('[ReadyPickup] cycle: ' + out.notified + ' notified, ' + out.skipped + ' skipped, ' + out.considered + ' fresh-ready');
   return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE TRIGGER (2026-10-28): Volvo / PACCAR dealer case reached READY.
+// The Decisiv case stage (Arrival > Diagnosis > Approval > Repair > Ready),
+// read from Decisiv's API (asist_enrich -> deep-scan sets row.offsiteStage /
+// offsiteStageDetail / offsiteStageSince), is the most solid "repair done"
+// signal we have -- stronger than the notes-text inference that drives
+// ready_for_pickup. offsiteStageSince is ONLY set when the stage came from the
+// API, so a screen-read guess can never trigger a carrier message.
+//
+// Guards (this sends real Slack messages to carriers):
+//   - Ready must have been set within STAGE_READY_FRESH_MS (no blasting units
+//     that have sat at Ready for days the first time this runs)
+//   - one notice per Ready event: ledger key unit:<Ready changed_at>
+//   - skip if the canonical record already carries carrierNotifiedAt, or the
+//     unit got ANY ready notice in the last STAGE_RECENT_NOTICE_MS (the notes
+//     trigger may have sent it already)
+// Message / channel lookup / ledger / reply handling = the same as notifyReadyUnits.
+const STAGE_READY_FRESH_MS   = 48 * 3600 * 1000;
+const STAGE_RECENT_NOTICE_MS = 72 * 3600 * 1000;
+
+/**
+ * stageReadyCandidates(rows, canonicalUnits, ledger, nowMs) -> { [equipmentId]: rec }
+ * Pure: picks fleet rows whose API case stage is a FRESH Ready not yet notified.
+ */
+function stageReadyCandidates(rows, canonicalUnits, ledger, nowMs) {
+  const out = {};
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const canon = canonicalUnits || {};
+  const led = ledger || {};
+  const canonOf = (id) => {
+    const k = Object.keys(canon).find((x) => String(x).toLowerCase() === String(id).toLowerCase());
+    return k ? canon[k] : null;
+  };
+  for (const r of (Array.isArray(rows) ? rows : [])) {
+    if (!r || !r.equipmentId) continue;
+    if (String(r.offsiteStage || '').toLowerCase() !== 'ready' || !r.offsiteStageSince) continue;
+    const sinceMs = Date.parse(r.offsiteStageSince);
+    if (!Number.isFinite(sinceMs) || now - sinceMs > STAGE_READY_FRESH_MS || sinceMs - now > 3600 * 1000) continue;
+    const unitKey = String(r.equipmentId).toLowerCase();
+    if (led[unitKey + ':' + r.offsiteStageSince]) continue;
+    const recentNotice = Object.values(led).some((e) => e && String(e.unit || '').toLowerCase() === unitKey
+      && e.at && Number.isFinite(Date.parse(e.at)) && now - Date.parse(e.at) < STAGE_RECENT_NOTICE_MS);
+    if (recentNotice) continue;
+    const c = canonOf(r.equipmentId);
+    if (c && c.carrierNotifiedAt) continue;
+    const detail = String(r.offsiteStageDetail || '').trim();
+    out[r.equipmentId] = {
+      equipmentId: r.equipmentId,
+      status: 'ready_for_pickup',
+      previousStatus: 'offsite_stage',         // satisfies _isFreshReady (a real transition)
+      statusChangedAt: r.offsiteStageSince,    // the Decisiv Ready event time = dedup key
+      carrierNotifiedAt: null,
+      operator: r.operator || (c && c.operator) || '',
+      lastMeaningfulUpdate: { text: 'Dealer case status: Ready' + (detail ? ' (' + detail + ')' : '') + ' since ' + r.offsiteStageSince },
+      _source: 'offsite-stage',
+      _row: r,
+    };
+  }
+  return out;
+}
+
+// ONE queue for every ready-notice send (notes trigger + stage trigger), so
+// two triggers can never read the same ledger and both send for one unit.
+let _queue = Promise.resolve();
+function enqueue(fn) {
+  const next = _queue.then(fn, fn);
+  _queue = next.then(() => {}, () => {});
+  return next;
+}
+
+// Production deps (Slack send + AI writer + operator channel map + canonical
+// units for the carrierNotifiedAt check). Lazily required.
+function _defaultStageDeps() {
+  const slack = require('./slack_send');
+  const { resolveOperatorEntry } = require('./pm_alert_reply');
+  return {
+    sendToChannel: slack.sendToChannel,
+    askOrcha: (p) => require('../orcha/relay').ask(p, {}),
+    resolveOperatorEntry,
+  };
+}
+function _canonicalUnits() {
+  try { return (store.load('canonicalState', {}) || {}).units || {}; } catch (_) { return {}; }
+}
+
+/**
+ * onStageUpdate(row, deps?) -> Promise of counts (never throws).
+ * Called by deep-scan right after a Volvo/PACCAR case stage is read from the
+ * Decisiv API. Cheap no-op unless the row is a fresh, un-notified API Ready.
+ */
+function onStageUpdate(row, deps, log) {
+  try {
+    if (!row || String(row.offsiteStage || '').toLowerCase() !== 'ready' || !row.offsiteStageSince) {
+      return Promise.resolve({ considered: 0, notified: 0, skipped: 0 });
+    }
+    return enqueue(() => notifyStageReadyUnits([row], _canonicalUnits(), deps || _defaultStageDeps(), log))
+      .catch((e) => { logger.warn('[ReadyPickup] stage-ready notify error (non-fatal): ' + e.message); return { considered: 0, notified: 0, skipped: 0 }; });
+  } catch (e) {
+    logger.warn('[ReadyPickup] stage-ready hook error (non-fatal): ' + e.message);
+    return Promise.resolve({ considered: 0, notified: 0, skipped: 0 });
+  }
+}
+
+/** notifyStageReadyUnits(rows, canonicalUnits, deps, log) -> same counts as notifyReadyUnits. */
+async function notifyStageReadyUnits(rows, canonicalUnits, deps, log) {
+  const doLog = log || ((m) => logger.info(m));
+  const loadLedger = (deps && typeof deps.loadLedger === 'function')
+    ? deps.loadLedger : () => { try { return store.load(LEDGER_KEY, {}) || {}; } catch (_) { return {}; } };
+  const now = deps && typeof deps.now === 'function' ? deps.now() : Date.now();
+  const recs = stageReadyCandidates(rows, canonicalUnits, loadLedger(), now);
+  const n = Object.keys(recs).length;
+  if (!n) return { considered: 0, notified: 0, skipped: 0 };
+  doLog('[ReadyPickup] dealer case stage reached Ready: ' + Object.keys(recs).join(', '));
+  return notifyReadyUnits(recs, deps, doLog);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -420,9 +568,12 @@ async function handleReadyReplies(ch, deps, log) {
   const resolveOperatorEntry = deps && deps.resolveOperatorEntry;
 
   const ledger = loadLedger() || {};
-  // Only entries for THIS channel that are still awaiting a reply + have a ts.
+  // Only entries for THIS channel that are still awaiting a reply + have a ts,
+  // AND that passed the Volvo/PACCAR Decisiv-Ready hard gate when sent. Older
+  // notes-based notices (e.g. the false B12343 notice on 10-28) never get an
+  // automatic in-thread reply.
   const pending = Object.entries(ledger).filter(([, e]) =>
-    e && e.channelId === ch.id && e.ts && e.awaitingReply && !e.answeredReplyTs);
+    e && e.channelId === ch.id && e.ts && e.awaitingReply && !e.answeredReplyTs && e.gate === 'decisiv-ready');
   if (!pending.length) return out;
 
   let changed = false;
@@ -472,6 +623,11 @@ async function handleReadyReplies(ch, deps, log) {
 
 module.exports = {
   notifyReadyUnits,
+  notifyStageReadyUnits,
+  stageReadyCandidates,
+  onStageUpdate,
+  enqueue,
+  decisivReadyGate,
   buildReadyPrompt,
   handleReadyReplies,
   buildReplyPrompt,

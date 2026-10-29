@@ -22,10 +22,19 @@ const require = createRequire(import.meta.url);
 
 const readyNotify = require('../src/scrapers/ready_pickup_notify');
 
+// Units that may be messaged must pass the hard gate (2026-10-28): an offsite
+// Volvo/PACCAR (Decisiv) work order whose API case stage is Ready.
+const DECISIV_READY = { offsiteShopEventUrl: 'https://pssmfleet.decisiv.net/fleet/estimates/21318589',
+  offsiteStage: 'ready', offsiteStageDetail: 'Asset Ready', offsiteStageSince: '2026-10-14T12:00:00Z' };
 const FLEET = {
-  '322599': { equipmentId: '322599', operator: 'AZNG', domicileSite: 'AVP40', dealerName: 'Kenworth Northeast - Rochester', asistNotes: 'Dealer reports repairs complete and the unit ready for pickup. ASIST case 21318589 set to Asset Ready.' },
-  'B10000': { equipmentId: 'B10000', operator: 'AZNG', domicileSite: 'ABE40' },
-  'B20000': { equipmentId: 'B20000', operator: 'NOCHAN', domicileSite: 'ABE40' },
+  '322599': { equipmentId: '322599', operator: 'AZNG', domicileSite: 'AVP40', dealerName: 'Kenworth Northeast - Rochester', asistNotes: 'Dealer reports repairs complete and the unit ready for pickup. ASIST case 21318589 set to Asset Ready.', ...DECISIV_READY },
+  'B10000': { equipmentId: 'B10000', operator: 'AZNG', domicileSite: 'ABE40', ...DECISIV_READY, offsiteShopEventUrl: 'https://volvopg.asist.decisiv.net/fleet/estimates/21350186' },
+  'B20000': { equipmentId: 'B20000', operator: 'NOCHAN', domicileSite: 'ABE40', ...DECISIV_READY },
+  // No offsite at all / non-Decisiv offsite / Decisiv but not Ready -> never messaged
+  'N1': { equipmentId: 'N1', operator: 'AZNG', domicileSite: 'ABE40', issueSummary: 'leak continues after the shutoff valve is closed' },
+  'N2': { equipmentId: 'N2', operator: 'AZNG', offsiteShopEventUrl: 'https://dtna.my.site.com/Servicetracker/s/case/500X', offsiteStage: 'ready', offsiteStageSince: '2026-10-14T12:00:00Z' },
+  'N3': { equipmentId: 'N3', operator: 'AZNG', offsiteShopEventUrl: 'https://volvopg.asist.decisiv.net/fleet/estimates/1', offsiteStage: 'repair', offsiteStageDetail: 'Road Test', offsiteStageSince: '2026-10-14T12:00:00Z' },
+  'N4': { equipmentId: 'N4', operator: 'AZNG', offsiteShopEventUrl: 'https://volvopg.asist.decisiv.net/fleet/estimates/2', offsiteStage: 'ready' },
 };
 
 let _ledger;
@@ -212,7 +221,7 @@ describe('handleReadyReplies (inbound carrier reply)', () => {
       '322599:t1': {
         at: '2026-10-14T13:00:00Z', channelId: 'C_AZNG', ts: '1700.1', unit: '322599',
         operator: 'AZNG', dealerLocation: "Bergey's Truck Centers - New Castle",
-        awaitingReply: true, answeredReplyTs: null, ...extra,
+        awaitingReply: true, answeredReplyTs: null, gate: 'decisiv-ready', ...extra,
       },
     };
   }
@@ -278,5 +287,109 @@ describe('handleReadyReplies (inbound carrier reply)', () => {
     expect(prompt).toMatch(/TOWED BACK/i);
     expect(prompt).toContain('322599');
     expect(prompt).toContain("we'll send a driver to grab it");
+  });
+});
+
+// ── Dealer case stage = READY trigger (Volvo/PACCAR, Decisiv API), 2026-10-28 ──
+describe('stage-ready trigger (Decisiv case stage reached Ready)', () => {
+  const NOW = Date.parse('2026-10-29T12:00:00Z');
+  const readyRow = (over = {}) => ({ equipmentId: '322599', operator: 'AZNG', offsiteStage: 'ready',
+    offsiteShopEventUrl: 'https://volvopg.asist.decisiv.net/fleet/estimates/21350186',
+    offsiteStageDetail: 'Asset Ready', offsiteStageSince: '2026-10-29T09:00:00Z', dealerName: 'Kenworth Northeast - Rochester', ...over });
+
+  it('a fresh API Ready notifies the operator once, keyed on the Ready time', async () => {
+    const { deps, sent } = makeDeps({ now: () => NOW, markCarrierNotified: () => {} });
+    const res = await readyNotify.notifyStageReadyUnits([readyRow()], {}, deps);
+    expect(res.notified).toBe(1);
+    expect(sent.length).toBe(1);
+    expect(sent[0].channelId).toBe('C_AZNG');
+    expect(_ledger['322599:2026-10-29T09:00:00Z']).toBeTruthy();
+    // same Ready event again -> no second message
+    const again = await readyNotify.notifyStageReadyUnits([readyRow()], {}, deps);
+    expect(again.notified).toBe(0);
+    expect(sent.length).toBe(1);
+  });
+
+  it('never fires on a screen-read guess (no offsiteStageSince) or a non-Ready stage', () => {
+    expect(Object.keys(readyNotify.stageReadyCandidates([readyRow({ offsiteStageSince: '' })], {}, {}, NOW))).toEqual([]);
+    expect(Object.keys(readyNotify.stageReadyCandidates([readyRow({ offsiteStage: 'repair' })], {}, {}, NOW))).toEqual([]);
+  });
+
+  it('does not blast units that have sat at Ready for days (48h window)', () => {
+    expect(Object.keys(readyNotify.stageReadyCandidates([readyRow({ offsiteStageSince: '2026-10-25T09:00:00Z' })], {}, {}, NOW))).toEqual([]);
+    expect(Object.keys(readyNotify.stageReadyCandidates([readyRow({ offsiteStageSince: '2026-10-28T13:00:00Z' })], {}, {}, NOW))).toEqual(['322599']);
+  });
+
+  it('no double message: skips if the notes trigger already notified (canonical flag or a recent ledger entry)', () => {
+    expect(Object.keys(readyNotify.stageReadyCandidates([readyRow()], { '322599': { carrierNotifiedAt: '2026-10-29T10:00:00Z' } }, {}, NOW))).toEqual([]);
+    const ledger = { '322599:2026-10-28T20:00:00Z': { unit: '322599', at: '2026-10-28T20:05:00Z', statusChangedAt: '2026-10-28T20:00:00Z' } };
+    expect(Object.keys(readyNotify.stageReadyCandidates([readyRow()], {}, ledger, NOW))).toEqual([]);
+  });
+
+  it('the notes trigger skips a Ready event the stage trigger already sent', async () => {
+    _ledger = { '322599:2026-10-29T09:00:00Z': { unit: '322599', at: '2026-10-25T09:05:00Z', statusChangedAt: '2026-10-25T09:00:00Z' } };
+    const { deps, sent } = makeDeps({ fleetRow: () => readyRow(), markCarrierNotified: () => {} });
+    const units = { '322599': { equipmentId: '322599', status: 'ready_for_pickup', previousStatus: 'in_repair', statusChangedAt: '2026-10-30T13:00:00Z' } };
+    const res = await readyNotify.notifyReadyUnits(units, deps);
+    expect(res.notified).toBe(0);
+    expect(sent.length).toBe(0);
+  });
+
+  it('onStageUpdate is a cheap no-op for non-Ready rows and never throws', async () => {
+    const r1 = await readyNotify.onStageUpdate({ equipmentId: 'X', offsiteStage: 'repair', offsiteStageSince: '2026-10-29T09:00:00Z' });
+    expect(r1.notified).toBe(0);
+    const r2 = await readyNotify.onStageUpdate(null);
+    expect(r2.notified).toBe(0);
+  });
+
+  it('onStageUpdate notifies through the shared queue', async () => {
+    const { deps, sent } = makeDeps({ now: () => NOW, markCarrierNotified: () => {} });
+    const res = await readyNotify.onStageUpdate(readyRow({ equipmentId: 'B10000', offsiteStageSince: '2026-10-29T08:00:00Z' }), deps);
+    expect(res.notified).toBe(1);
+    expect(sent.length).toBe(1);
+  });
+});
+
+// ── HARD GATE: only Volvo/PACCAR offsite + Decisiv API stage Ready (2026-10-28) ──
+describe('hard gate: no carrier message unless Volvo/PACCAR offsite case is Ready (API)', () => {
+  const fresh = (id) => ({ [id]: { equipmentId: id, status: 'ready_for_pickup', previousStatus: 'in_repair', statusChangedAt: '2026-10-29T03:05:45Z' } });
+
+  it('REGRESSION B12343: notes-only "ready" (no offsite) sends nothing', async () => {
+    const { deps, sent } = makeDeps();
+    const res = await readyNotify.notifyReadyUnits(fresh('N1'), deps);
+    expect(res.notified).toBe(0);
+    expect(sent.length).toBe(0);
+  });
+  it('a non-Volvo/PACCAR offsite (DTNA) sends nothing, even if marked ready', async () => {
+    const { deps, sent } = makeDeps();
+    await readyNotify.notifyReadyUnits(fresh('N2'), deps);
+    expect(sent.length).toBe(0);
+  });
+  it('a Volvo/PACCAR case that is not at Ready sends nothing', async () => {
+    const { deps, sent } = makeDeps();
+    await readyNotify.notifyReadyUnits(fresh('N3'), deps);
+    expect(sent.length).toBe(0);
+  });
+  it('a screen-read Ready (no API confirmation) sends nothing', async () => {
+    const { deps, sent } = makeDeps();
+    await readyNotify.notifyReadyUnits(fresh('N4'), deps);
+    expect(sent.length).toBe(0);
+  });
+  it('gate function: Volvo + PACCAR hosts accepted, everything else refused', () => {
+    expect(readyNotify.decisivReadyGate(FLEET['322599']).ok).toBe(true);
+    expect(readyNotify.decisivReadyGate(FLEET['B10000']).ok).toBe(true);
+    for (const id of ['N1', 'N2', 'N3', 'N4']) expect(readyNotify.decisivReadyGate(FLEET[id]).ok).toBe(false);
+    expect(readyNotify.decisivReadyGate(null).ok).toBe(false);
+  });
+  it('a notice that did not pass the gate (e.g. the old B12343 one) never gets an auto-reply', async () => {
+    const ledger = { 'b12343:x': { at: '2026-10-29T03:06:06Z', channelId: 'C_AUVTE', ts: '1793243165.982599', unit: 'B12343', awaitingReply: true, answeredReplyTs: null } };
+    const sendToChannel = vi.fn();
+    const res = await readyNotify.handleReadyReplies({ id: 'C_AUVTE', name: 'auvte' }, {
+      readThreadReplies: vi.fn(async () => [{ ts: '1793243200.1', user: 'U_CARRIER', text: 'we will pick it up' }]),
+      sendToChannel, askOrcha: vi.fn(async () => 'ok'), myUserId: 'U_ME',
+      loadLedger: () => ledger, saveLedger: () => {},
+    });
+    expect(res.checked).toBe(0);
+    expect(sendToChannel).not.toHaveBeenCalled();
   });
 });
