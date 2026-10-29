@@ -613,10 +613,12 @@ async function _processUnit(u, notesStore, askOrcha) {
         u.asistSrUrl = enrichResult.bestUrl || offsiteUrl;
         // Case stage (Arrival..Ready) + detail, now read from Decisiv's API.
         // Previously never copied here, so the live path lost it (DTNA did).
-        if (enrichResult.offsiteStage) {
-          u.offsiteStage = enrichResult.offsiteStage;
+        // ...or the API said the dealer set NO status yet (clears an old guess).
+        if (enrichResult.offsiteStage || enrichResult.offsiteStageConfidence === 'api') {
+          u.offsiteStage = enrichResult.offsiteStage || '';
           u.offsiteStageDetail = enrichResult.offsiteStageDetail || '';
           u.offsiteStageSince = enrichResult.offsiteStageSince || '';
+          u._stageReadAt = new Date().toISOString(); // newer read wins on save
           // Dealer case just reached READY (API-confirmed) -> notify the
           // operator once (fresh, deduped, queued; never blocks the scan).
           if (u.offsiteStage === 'ready' && u.offsiteStageSince) {

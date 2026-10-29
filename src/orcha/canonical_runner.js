@@ -32,6 +32,14 @@ const DS_FIELDS = ['offsiteStage', 'offsiteStageDetail', 'offsiteStageSince',
  * the scanned value is non-empty AND the offsite still belongs to the same WR
  * (_offsiteWrId), so a cleared/stale offsite is never resurrected.
  */
+// Copy a field GROUP only when the scanned copy was read MORE RECENTLY than
+// what's already stored. FIX (2026-10-28): deep-scan works on rows loaded
+// before it started; a stage refresh that saved "322504 = no status" was then
+// overwritten by the deep-scan's stale in-memory "ready". Newer read wins.
+const NOTE_FIELDS  = ['asistNotes', 'asistScrapedAt', 'asistSource', 'asistLabel', 'asistSrUrl'];
+const STAGE_FIELDS = ['offsiteStage', 'offsiteStageDetail', 'offsiteStageSince', '_stageReadAt'];
+const _t = (v) => { const n = v ? Date.parse(v) : NaN; return Number.isFinite(n) ? n : 0; };
+
 function overlayDeepScanFields(liveRows, scannedRows) {
   if (!Array.isArray(liveRows) || !Array.isArray(scannedRows) || !scannedRows.length) return 0;
   const byId = new Map();
@@ -42,9 +50,14 @@ function overlayDeepScanFields(liveRows, scannedRows) {
     if (!s || s === r) continue;
     if (String(s._offsiteWrId || '') !== String(r._offsiteWrId || '')) continue;
     let touched = false;
-    for (const k of DS_FIELDS) {
-      const v = s[k];
-      if (v != null && v !== '' && v !== r[k]) { r[k] = v; touched = true; }
+    // Notes: newer asistScrapedAt wins.
+    if (_t(s.asistScrapedAt) > _t(r.asistScrapedAt)) {
+      for (const k of NOTE_FIELDS) if (s[k] != null && s[k] !== r[k]) { r[k] = s[k]; touched = true; }
+    }
+    // Stage trio (incl. an API "no status" answer = empty stage): newer
+    // _stageReadAt wins, copied together so stage/detail/since never mix.
+    if (_t(s._stageReadAt) > _t(r._stageReadAt)) {
+      for (const k of STAGE_FIELDS) if ((s[k] == null ? '' : s[k]) !== (r[k] == null ? '' : r[k])) { r[k] = s[k] == null ? '' : s[k]; touched = true; }
     }
     if (touched) n++;
   }

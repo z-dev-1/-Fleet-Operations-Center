@@ -146,6 +146,10 @@ describe('decisiv_api: case status summary', () => {
       { milestone: 'diagnosis', repair_statuses: [{ status: 'Diagnosing', changed_at: 'x' }] }, { milestone: 'ready', repair_statuses: [] }]);
     expect(s).toMatchObject({ stage: 'diagnosis', status: 'Diagnosing' });
   });
+  it('dealer never set a status (real 21405062 / unit 322504 response) -> empty, not an error', () => {
+    const resp = ['arrival', 'diagnosis', 'approval', 'repair', 'ready'].map((m) => ({ milestone: m, milestone_display: m, current: false, repair_statuses: [] }));
+    expect(api.summarizeCaseStatus(resp)).toEqual({ stage: '', stageDisplay: '', status: '', since: '', history: [], empty: true });
+  });
   it('unusable input -> null (caller keeps the old fallback)', () => {
     expect(api.summarizeCaseStatus(null)).toBe(null);
     expect(api.summarizeCaseStatus([])).toBe(null);

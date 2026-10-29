@@ -403,6 +403,14 @@ function summarizeCaseStatus(segments) {
       history.push({ stage, status: String(s && s.status || ''), at: String(s && s.changed_at || '') });
     }
   }
+  // The dealer has NEVER set a repair status (verified 10-28, Volvo case
+  // 21405062 / unit 322504: all 5 milestones present, none current, every
+  // repair_statuses empty). That is a real answer -- "no stage yet" -- not an
+  // error, and it must clear any old guessed stage (322504 showed a false Ready).
+  const allKnown = segments.every((s) => s && STAGES.includes(String(s.milestone || '').toLowerCase()));
+  if (allKnown && !history.length && !segments.some((s) => s && s.current === true)) {
+    return { stage: '', stageDisplay: '', status: '', since: '', history: [], empty: true };
+  }
   let cur = segments.find(s => s && s.current === true);
   if (!cur) cur = [...segments].reverse().find(s => s && Array.isArray(s.repair_statuses) && s.repair_statuses.length);
   if (!cur) return null;
@@ -422,8 +430,23 @@ function summarizeCaseStatus(segments) {
 /** Never throws: { ok, ...summary } or { ok:false, error }. */
 async function getCaseStatusSummary(estimateId, opts = {}) {
   try {
-    const sum = summarizeCaseStatus(await getCaseStatus(estimateId, opts));
-    if (!sum) return { ok: false, error: 'no current milestone in response' };
+    const raw = await getCaseStatus(estimateId, opts);
+    const sum = summarizeCaseStatus(raw);
+    if (!sum) {
+      // Log the SHAPE (not people's data) so unreadable cases can be mapped.
+      let sample = '';
+      try {
+        sample = Array.isArray(raw)
+          ? 'array[' + raw.length + '] ' + JSON.stringify(raw.map((m) => ({ milestone: m && m.milestone, current: m && m.current, statuses: m && Array.isArray(m.repair_statuses) ? m.repair_statuses.length : typeof (m && m.repair_statuses) })))
+          : (raw && typeof raw === 'object' ? 'object keys: ' + Object.keys(raw).join(',') : typeof raw + ' ' + String(raw).slice(0, 80));
+      } catch (_) {}
+      logger.warn('[decisiv-api] case status est=' + estimateId + ' unreadable: ' + String(sample).slice(0, 500));
+      return { ok: false, error: 'no current milestone in response' };
+    }
+    if (sum.empty) {
+      logger.info('[decisiv-api] case status est=' + estimateId + ' -> no status set by the dealer yet');
+      return { ok: true, ...sum };
+    }
     logger.info('[decisiv-api] case status est=' + estimateId + ' -> ' + sum.stage + (sum.status ? ' / ' + sum.status : '') + (sum.since ? ' since ' + sum.since : ''));
     return { ok: true, ...sum };
   } catch (e) {

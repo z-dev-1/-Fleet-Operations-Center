@@ -2126,7 +2126,10 @@ function renderRepairPane(unit){
   // Volvo / PACCAR case stage from Decisiv's API (2026-10-28):
   // Arrival > Diagnosis > Approval > Repair > Ready, plus detail + since-when.
   var stageHtml='';
-  var _stg=String(unit.offsiteStage||'').toLowerCase();
+  // Only a stage CONFIRMED by the Decisiv API (offsiteStageSince is set only by
+  // the API). A stage guessed from note wording (e.g. 322504 "ready" on 10-28
+  // while the case was in diagnosis) is never shown.
+  var _stg=unit.offsiteStageSince?String(unit.offsiteStage||'').toLowerCase():'';
   var _STAGES=['arrival','diagnosis','approval','repair','ready'];
   var _si=_STAGES.indexOf(_stg);
   if(_si>=0){
@@ -2141,6 +2144,9 @@ function renderRepairPane(unit){
       ((unit.offsiteStageDetail||_since)?'<div class="dp-stage__detail">'+
         esc(unit.offsiteStageDetail||'')+(_since?(unit.offsiteStageDetail?' \u00b7 ':'')+'since '+esc(_since):'')+'</div>':'')+
     '</div>';
+  } else if (!unit.offsiteStage && /no status set by the dealer/i.test(String(unit.offsiteStageDetail||''))) {
+    // Decisiv API answered: the dealer hasn't set any repair status yet.
+    stageHtml='<div class="dp-stage" role="note"><div class="dp-stage__detail">'+esc(unit.offsiteStageDetail)+'</div></div>';
   }
   var offsiteHtml=offsiteUrl?
     '<div class="dp-section-title">Offsite Event</div>'+
@@ -2151,7 +2157,6 @@ function renderRepairPane(unit){
         (staleOffsite?'<span class="dp-offsite-card__stale">\u26a0 stale</span>':'')+
       '</div>'+
       (unit.dealerName?'<div class="dp-offsite-card__dealer">'+esc(unit.dealerName)+'</div>':'')+
-      stageHtml+
       (scrapedAt?'<div class="dp-offsite-card__ts">Enriched '+fmtDate(scrapedAt)+'</div>':'')+
     '</div>':'';
 
@@ -2330,6 +2335,8 @@ function renderRepairPane(unit){
   }, 100);
 
   return '<div class="dp-pane active" id="dp-pane-repair">'+
+    // Dealer case stage sits at the top so it's visible without scrolling.
+    (stageHtml?'<div class="dp-section-title">Dealer Case Stage</div>'+stageHtml:'')+
     '<div class="dp-section-title">Work Request</div>'+woCard+plannedWRCard+secondaryWRCards+splitViewBtn+durBar+timelineHtml+offsiteHtml+
   '</div>';
 }

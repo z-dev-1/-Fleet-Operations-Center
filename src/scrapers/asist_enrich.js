@@ -95,6 +95,11 @@ async function _caseStatusViaApi(estimateUrl) {
 }
 // Fields every enrich result carries for the stage (empty when unknown).
 function _stageFields(api, fallbackStage, fallbackConf) {
+  if (api && api.empty) {
+    // Dealer never set a status: a real API answer. Clears any guessed stage.
+    return { offsiteStage: '', offsiteStageConfidence: 'api',
+      offsiteStageDetail: 'No status set by the dealer yet', offsiteStageSince: '' };
+  }
   if (api) {
     return { offsiteStage: api.stage, offsiteStageConfidence: 'api',
       offsiteStageDetail: api.status || '', offsiteStageSince: api.since || '' };

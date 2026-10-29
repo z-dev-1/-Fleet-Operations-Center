@@ -1169,6 +1169,14 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         // in chunks — so every unit eventually shows PM due dates + location in
         // the table. Guarded to run once per load cycle.
         _maybeFillPmAllAsync(payload);
+        // Quick Volvo/PACCAR case-stage refresh (2026-10-28): reads only the
+        // Decisiv status API (not notes / AI), at most every 15 min, so the
+        // stage + Ready are current without waiting on deep-scan's 2h notes
+        // cache. Saves + runs the canonical pass. Non-blocking, non-fatal.
+        try {
+          require('../orcha/stage_refresh').refreshStages({ pushData, ctx })
+            .catch((e) => logger.warn('[stage-refresh] error (non-fatal): ' + e.message));
+        } catch (e) { logger.warn('[stage-refresh] hook error (non-fatal): ' + e.message); }
       } catch (e) {
         // A server-REJECTED AAP session (bounced to the SSO login wall) is the
         // one failure the timestamp-based checkMwinit() can't see — the cookie
@@ -1340,6 +1348,14 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
           // saved fleetData + table reflect them even before the AI timeline
           // finishes. (The deep-scan below only pushData()s; it doesn't save.)
           try {
+            // FIX (2026-10-28): `payload` was loaded BEFORE the 15-min stage
+            // refresh may have saved newer Volvo/PACCAR stages (322504 "no
+            // status" was wiped back to a stale "ready" by this save). Pull any
+            // NEWER stage/notes reads from the stored copy first.
+            try {
+              const _cur = (store.load('fleetData', {}) || {}).rows || [];
+              require('../orcha/canonical_runner').overlayDeepScanFields(payload.rows || [], _cur);
+            } catch (_) {}
             payload.syncedAt = new Date().toISOString();
             store.save('fleetData', payload);
             if (ctx) ctx.lastData = payload;

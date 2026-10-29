@@ -1242,6 +1242,13 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
             asistScrapedAt:      (_finalOffsite && _finalOffsite.asistScrapedAt) || (_offsitePageText ? new Date().toISOString() : ''),
             dealerName:          (_finalOffsite && _finalOffsite.dealerName)     || '',
             asistNotes:          _offsitePageText || '',
+            // Volvo/PACCAR case stage from the Decisiv API (2026-10-28) -- was
+            // never passed on here, so opening a unit read the stage and lost it.
+            offsiteStage:        (_asistEnrich && _asistEnrich.offsiteStage)       || '',
+            offsiteStageDetail:  (_asistEnrich && _asistEnrich.offsiteStageDetail) || '',
+            offsiteStageSince:   (_asistEnrich && _asistEnrich.offsiteStageSince)  || '',
+            offsiteStageConfidence: (_asistEnrich && _asistEnrich.offsiteStageConfidence) || '',
+            _stageReadAt:        (_asistEnrich && _asistEnrich.offsiteStageConfidence === 'api') ? new Date().toISOString() : '',
             salesforceCase:      convSalesforce   ? convSalesforce.caseNumber   : (wrData.salesforceCase      || ''),
             salesforceCaseUrl:   convSalesforce   ? convSalesforce.url          : (wrData.salesforceCaseUrl   || ''),
             fullConversation:    _convData && _convData.fullConversation ? _convData.fullConversation : '',
@@ -1659,7 +1666,25 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       // ready) captured from the Decisiv SR progress tracker. The authoritative
       // "is this unit actually ready" signal — the free-text notes alone can lag
       // or carry stale "will be ready" wording. Used to gate ready/complete claims.
-      offsiteStage:        r.offsiteStage        || row.offsiteStage        || '',
+      // Case stage trio (2026-10-28): stage + detail + since come from the
+      // Decisiv API. Keep them TOGETHER from one source: an entry WITH an API
+      // time wins; an older/screen-read entry (no time) never overwrites a row
+      // that already has an API stage.
+      // An API answer of "no status set yet" (confidence 'api', no stage) is
+      // also authoritative and clears an old guessed stage.
+      // A row whose stage was read MORE RECENTLY (_stageReadAt) than this
+      // cache entry keeps its own stage (e.g. the 15-min stage refresh ran
+      // after the unit was opened).
+      ...((row._stageReadAt && Date.parse(row._stageReadAt) > Date.parse(r._stageReadAt || 0))
+        ? { offsiteStage: row.offsiteStage || '', offsiteStageDetail: row.offsiteStageDetail || '', offsiteStageSince: row.offsiteStageSince || '', _stageReadAt: row._stageReadAt }
+        : (r.offsiteStageConfidence === 'api' && !r.offsiteStage)
+        ? { offsiteStage: '', offsiteStageDetail: r.offsiteStageDetail || '', offsiteStageSince: '', _stageReadAt: r._stageReadAt || '' }
+        : (r.offsiteStageSince || !row.offsiteStageSince)
+        ? { offsiteStage: r.offsiteStage || row.offsiteStage || '',
+            offsiteStageDetail: r.offsiteStageSince ? (r.offsiteStageDetail || '') : (row.offsiteStageDetail || ''),
+            offsiteStageSince: r.offsiteStageSince || row.offsiteStageSince || '',
+            _stageReadAt: r._stageReadAt || row._stageReadAt || '' }
+        : { offsiteStage: row.offsiteStage || '', offsiteStageDetail: row.offsiteStageDetail || '', offsiteStageSince: row.offsiteStageSince || '', _stageReadAt: row._stageReadAt || '' }),
       dealerName:          r.dealerName          || row.dealerName          || '',
       subVendor:           r.dealerName || row.dealerName || r.geofence || row.geofence || '',
 

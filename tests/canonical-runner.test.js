@@ -38,13 +38,29 @@ describe('canonical: Decisiv API stage decides Ready', () => {
 });
 
 describe('overlayDeepScanFields', () => {
-  it('copies stage + notes onto stored rows for the same WR only', () => {
+  it('copies stage + notes onto stored rows for the same WR only (newer read)', () => {
     const live = [{ equipmentId: 'A', _offsiteWrId: 'w1' }, { equipmentId: 'B', _offsiteWrId: 'w2', offsiteStage: '' }];
-    const scanned = [{ equipmentId: 'A', _offsiteWrId: 'w1', offsiteStage: 'ready', offsiteStageSince: SINCE, asistNotes: 'Asset ready' },
-      { equipmentId: 'B', _offsiteWrId: 'OLD', offsiteStage: 'ready', offsiteStageSince: SINCE }];
+    const scanned = [{ equipmentId: 'A', _offsiteWrId: 'w1', offsiteStage: 'ready', offsiteStageSince: SINCE, _stageReadAt: '2026-10-29T04:00:00Z',
+      asistNotes: 'Asset ready', asistScrapedAt: '2026-10-29T04:00:00Z' },
+    { equipmentId: 'B', _offsiteWrId: 'OLD', offsiteStage: 'ready', offsiteStageSince: SINCE, _stageReadAt: '2026-10-29T04:00:00Z' }];
     expect(runner.overlayDeepScanFields(live, scanned)).toBe(1);
     expect(live[0]).toMatchObject({ offsiteStage: 'ready', offsiteStageSince: SINCE, asistNotes: 'Asset ready' });
     expect(live[1].offsiteStage).toBe(''); // offsite moved to another WR -> not resurrected
+  });
+
+  it('REGRESSION 322504: a stale deep-scan copy never overwrites a newer stage read', () => {
+    // stage refresh saved "no status" at 04:02; deep-scan (rows loaded earlier) finished at 04:05
+    const live = [{ equipmentId: '322504', _offsiteWrId: 'w', offsiteStage: '', offsiteStageDetail: 'No status set by the dealer yet', offsiteStageSince: '', _stageReadAt: '2026-10-29T04:02:55Z' }];
+    const stale = [{ equipmentId: '322504', _offsiteWrId: 'w', offsiteStage: 'ready', offsiteStageDetail: '', offsiteStageSince: '' }];
+    expect(runner.overlayDeepScanFields(live, stale)).toBe(0);
+    expect(live[0]).toMatchObject({ offsiteStage: '', offsiteStageDetail: 'No status set by the dealer yet' });
+  });
+
+  it('a newer deep-scan read (incl. "no status") does replace an older one', () => {
+    const live = [{ equipmentId: 'X', _offsiteWrId: 'w', offsiteStage: 'ready', _stageReadAt: '2026-10-29T03:00:00Z' }];
+    const fresh = [{ equipmentId: 'X', _offsiteWrId: 'w', offsiteStage: '', offsiteStageDetail: 'No status set by the dealer yet', offsiteStageSince: '', _stageReadAt: '2026-10-29T04:00:00Z' }];
+    expect(runner.overlayDeepScanFields(live, fresh)).toBe(1);
+    expect(live[0].offsiteStage).toBe('');
   });
 });
 
@@ -114,7 +130,7 @@ describe('runCanonicalPass', () => {
     const store = fakeStore({ fleetData: { rows: [{ equipmentId: 'U1', lifecycleState: 'Unavailable', _offsiteWrId: 'w1' }] }, canonicalState: { updatedAt: new Date(NOW - 60000).toISOString(), units: {} } });
     const pushed = [];
     const res = runner.runCanonicalPass({
-      scannedRows: [{ equipmentId: 'U1', _offsiteWrId: 'w1', offsiteStage: 'repair', offsiteStageDetail: 'Road Test', offsiteStageSince: SINCE }],
+      scannedRows: [{ equipmentId: 'U1', _offsiteWrId: 'w1', offsiteStage: 'repair', offsiteStageDetail: 'Road Test', offsiteStageSince: SINCE, _stageReadAt: '2026-10-29T13:59:00Z' }],
       pushData: (p) => pushed.push(p),
       deps: { store, readyNotify: fakeNotify(), notifyDeps: {}, now: () => NOW, log: { info() {}, warn() {} } },
     });

@@ -15,7 +15,7 @@
 const OFFSITE_FIELDS = [
   'offsiteShopEventUrl', 'savedOffsiteUrl', 'offsiteShopEvent', 'savedOffsiteEvent',
   'asistSrUrl', 'asistLabel', 'asistSource', 'asistNotes', 'asistScrapedAt',
-  'offsiteStage', 'offsiteStageDetail', 'offsiteStageSince', 'dealerName',
+  'offsiteStage', 'offsiteStageDetail', 'offsiteStageSince', '_stageReadAt', 'dealerName',
 ];
 
 function offsiteUrlOf(row) {
