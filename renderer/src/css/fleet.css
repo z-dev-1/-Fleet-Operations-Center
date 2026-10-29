@@ -4871,6 +4871,15 @@ td:has(.pm-pills-row) {
 .dp-offsite-card__link:hover { text-decoration: underline; }
 .dp-offsite-card__stale { font-size: 9px; color: var(--org); }
 .dp-offsite-card__dealer { font-size: 10px; color: var(--txt2); margin-top: 3px; }
+/* Volvo/PACCAR case stage (Decisiv API): Arrival > Diagnosis > Approval > Repair > Ready */
+.dp-stage { margin-top: 6px; }
+.dp-stage__steps { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; font-size: 10px; }
+.dp-stage__step { padding: 1px 6px; border-radius: 4px; color: var(--mut); border: 1px solid transparent; }
+.dp-stage__step--done { color: var(--txt2); }
+.dp-stage__step--current { color: var(--txt); background: var(--adim); border-color: var(--acc2); font-weight: 600; }
+.dp-stage--ready .dp-stage__step--current { color: #fff; background: #238636; border-color: #2ea043; }
+.dp-stage__sep { color: var(--mut); font-size: 10px; }
+.dp-stage__detail { font-size: 10px; color: var(--txt2); margin-top: 3px; }
 .dp-offsite-card__ts    { font-size: 9px; color: var(--mut); margin-top: 2px; }
 .dp-offsite-card__src-badge { font-size: 9px; padding: 1px 6px; border-radius: 4px; background: var(--adim); color: var(--acc2); }
 

@@ -2123,6 +2123,25 @@ function renderRepairPane(unit){
   var src=unit.asistSource||'';
   var scrapedAt=unit.asistScrapedAt||'';
   var staleOffsite=scrapedAt&&(Date.now()-new Date(scrapedAt).getTime())>86400000;
+  // Volvo / PACCAR case stage from Decisiv's API (2026-10-28):
+  // Arrival > Diagnosis > Approval > Repair > Ready, plus detail + since-when.
+  var stageHtml='';
+  var _stg=String(unit.offsiteStage||'').toLowerCase();
+  var _STAGES=['arrival','diagnosis','approval','repair','ready'];
+  var _si=_STAGES.indexOf(_stg);
+  if(_si>=0){
+    var _steps=_STAGES.map(function(s,i){
+      var cls='dp-stage__step'+(i<_si?' dp-stage__step--done':'')+(i===_si?' dp-stage__step--current':'');
+      return '<span class="'+cls+'"'+(i===_si?' aria-current="step"':'')+'>'+esc(s.charAt(0).toUpperCase()+s.slice(1))+'</span>';
+    }).join('<span class="dp-stage__sep" aria-hidden="true">\u203a</span>');
+    var _since='';
+    try{ var _sd=new Date(unit.offsiteStageSince); if(unit.offsiteStageSince&&!isNaN(_sd.getTime())) _since=_sd.toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch(_e){}
+    stageHtml='<div class="dp-stage'+(_stg==='ready'?' dp-stage--ready':'')+'" role="group" aria-label="Dealer case stage">'+
+      '<div class="dp-stage__steps">'+_steps+'</div>'+
+      ((unit.offsiteStageDetail||_since)?'<div class="dp-stage__detail">'+
+        esc(unit.offsiteStageDetail||'')+(_since?(unit.offsiteStageDetail?' \u00b7 ':'')+'since '+esc(_since):'')+'</div>':'')+
+    '</div>';
+  }
   var offsiteHtml=offsiteUrl?
     '<div class="dp-section-title">Offsite Event</div>'+
     '<div class="dp-offsite-card">'+
@@ -2132,6 +2151,7 @@ function renderRepairPane(unit){
         (staleOffsite?'<span class="dp-offsite-card__stale">\u26a0 stale</span>':'')+
       '</div>'+
       (unit.dealerName?'<div class="dp-offsite-card__dealer">'+esc(unit.dealerName)+'</div>':'')+
+      stageHtml+
       (scrapedAt?'<div class="dp-offsite-card__ts">Enriched '+fmtDate(scrapedAt)+'</div>':'')+
     '</div>':'';
 
@@ -3435,6 +3455,10 @@ export function init(container) {
                   asistSrUrl:          fresh.asistSrUrl || _unit.asistSrUrl,
                   asistLabel:          fresh.asistLabel || _unit.asistLabel,
                   asistSource:         fresh.asistSource || _unit.asistSource,
+                  // Case stage moves forward (Repair -> Ready): fresh wins.
+                  offsiteStage:        fresh.offsiteStage || _unit.offsiteStage,
+                  offsiteStageDetail:  fresh.offsiteStageDetail || _unit.offsiteStageDetail,
+                  offsiteStageSince:   fresh.offsiteStageSince || _unit.offsiteStageSince,
                   _secondaryWRs:  fresh._secondaryWRs || _unit._secondaryWRs,
                 });
             // Preserve the active tab across the re-render.

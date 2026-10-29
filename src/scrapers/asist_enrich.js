@@ -79,6 +79,30 @@ async function _estimateCommentsViaApi(estimateUrl) {
   return '';
 }
 
+// API-FIRST case stage (2026-10-28): Arrival/Diagnosis/Approval/Repair/Ready
+// + the detail status ("Road Test", "Hold (parts)") and since-when, straight
+// from Decisiv's case_repair_status_changes.json (same JSON the page's bar
+// uses). Returns null -> caller keeps the old screen-read stage as fallback.
+async function _caseStatusViaApi(estimateUrl) {
+  if (process.env.DECISIV_API === '0') return null;
+  const m = String(estimateUrl || '').match(EST_ID_RE);
+  const estId = m && m[1];
+  if (!estId) return null;
+  try {
+    const res = await require('./decisiv_api').getCaseStatusSummary(estId, { srUrl: estimateUrl });
+    return res && res.ok ? res : null;
+  } catch (_) { return null; }
+}
+// Fields every enrich result carries for the stage (empty when unknown).
+function _stageFields(api, fallbackStage, fallbackConf) {
+  if (api) {
+    return { offsiteStage: api.stage, offsiteStageConfidence: 'api',
+      offsiteStageDetail: api.status || '', offsiteStageSince: api.since || '' };
+  }
+  return { offsiteStage: fallbackStage || '', offsiteStageConfidence: fallbackStage ? (fallbackConf || 'page') : '',
+    offsiteStageDetail: '', offsiteStageSince: '' };
+}
+
 const ASIST_SCRAPE = String.raw`
 (function() {
   var body = document.body ? document.body.innerText : '';
@@ -448,10 +472,14 @@ async function enrichVolvoAsist(srUrl){
     // status set to Asset Ready" / ready-for-pickup) — never on "ready to be
     // towed out" (that's an inbound tow TO the dealer, repair not started).
     var _directStage = _stageReady(estComments) ? 'ready' : '';
+    // API stage first (real Arrival..Ready position); text inference is the fallback.
+    const _stg = _stageFields(await _caseStatusViaApi(srUrl), _directStage, 'text-fallback');
+    logger.info('[ae] DONE (direct estimate) | offsiteStage:', _stg.offsiteStage || '(none)', '| stageConf:', _stg.offsiteStageConfidence || '-',
+      _stg.offsiteStageDetail ? '| detail: ' + _stg.offsiteStageDetail + ' since ' + _stg.offsiteStageSince : '');
     return{ok:true,srUrl,srNumber:'',caseNumber:estId,caseUrl:'',estimateUrl:srUrl,bestUrl:srUrl,
       bestLabel:estId?'Fleet Estimate | '+estId:'Fleet Estimate',source:'estimate',
       scrapedAt:new Date().toISOString(),error:null,srStatus:'',dealer:'',
-      complaint:'',assetVin:'',unitNumber:'',offsiteStage:_directStage,
+      complaint:'',assetVin:'',unitNumber:'',..._stg,
       statusText:estComments,estimateComments:estComments,offsiteText};
   }
 
@@ -526,10 +554,15 @@ async function enrichVolvoAsist(srUrl){
   const offsiteText = parts.join('\n\n').slice(0, 8000) || srBody;
   // Prefer the SR page's structured status-bar stage; if that bar wasn't present
   // but the resolved comment thread explicitly says ready, treat it as 'ready'.
-  let offsiteStage = sr.offsiteStage || '';
-  if (!offsiteStage && _stageReady(statusText)) offsiteStage = 'ready';
-  logger.info('[ae] DONE | offsiteStage:', offsiteStage || '(none)', '| stageConf:', sr.offsiteStageConfidence || '-');
-  return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',offsiteStage,statusText,estimateComments,offsiteText};
+  // Stage: Decisiv API first (when we resolved an estimate), then the SR page's
+  // status bar, then an explicit "ready" in the comment thread.
+  let _pageStage = sr.offsiteStage || '';
+  let _pageConf = sr.offsiteStageConfidence || '';
+  if (!_pageStage && _stageReady(statusText)) { _pageStage = 'ready'; _pageConf = 'text-fallback'; }
+  const _stg = _stageFields(estUrl ? await _caseStatusViaApi(estUrl) : null, _pageStage, _pageConf);
+  logger.info('[ae] DONE | offsiteStage:', _stg.offsiteStage || '(none)', '| stageConf:', _stg.offsiteStageConfidence || '-',
+    _stg.offsiteStageDetail ? '| detail: ' + _stg.offsiteStageDetail + ' since ' + _stg.offsiteStageSince : '');
+  return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',..._stg,statusText,estimateComments,offsiteText};
 }
 
 const SOURCE_RANK={estimate:3,case:2,service_request:1,none:0};

@@ -478,6 +478,8 @@ function _buildUnitDetail(unitId, rows, notesStore, opts) {
     if (_stage) {
       const _stageLabel = _stage.charAt(0).toUpperCase() + _stage.slice(1);
       detail += '    - Offsite status bar: ' + _stageLabel +
+        (row.offsiteStageDetail ? ' / ' + row.offsiteStageDetail : '') +
+        (row.offsiteStageSince ? ' since ' + String(row.offsiteStageSince).replace('T', ' ').slice(0, 16) : '') +
         (_stage === 'ready' ? ' (vendor tracker shows READY)' : ' (NOT yet at Ready)') + '\n';
     }
     detail += '    - Dealer comment: ' + (_readyMatch ? '"' + _readyMatch[0] + '" present' : 'no explicit ready comment yet') + '\n';

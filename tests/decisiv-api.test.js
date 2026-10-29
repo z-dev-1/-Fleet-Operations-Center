@@ -97,3 +97,83 @@ describe('decisiv_api — formatActivityLogs', () => {
     expect(api.formatActivityLogs({ notes: [] })).toEqual({ text: '', count: 0, newest: '' });
   });
 });
+
+// ── Case status (case_repair_status_changes.json), 2026-10-28 ───────────────
+// Fixtures = the real responses captured read-only from Volvo ASIST case
+// 21350186 and PACCAR pssmfleet case 21467830.
+const VOLVO_21350186 = [
+  { milestone: 'arrival', milestone_display: 'Arrival', current: false, repair_statuses: [{ status: 'Checked-in', changed_at: '2026-10-12T14:53:48-04:00', current: false }] },
+  { milestone: 'diagnosis', milestone_display: 'Diagnosis', current: false, repair_statuses: [{ status: 'Diagnosing', changed_at: '2026-10-13T07:21:10-04:00', current: false }] },
+  { milestone: 'approval', milestone_display: 'Approval', current: false, repair_statuses: [{ status: 'Hold (auth)', changed_at: '2026-10-15T09:04:38-04:00', current: false }] },
+  { milestone: 'repair', milestone_display: 'Repair', current: false, repair_statuses: [{ status: 'Hold (parts)', changed_at: '2026-10-15T09:45:25-04:00', current: false }] },
+  { milestone: 'approval', milestone_display: 'Approval', current: false, repair_statuses: [
+    { status: 'Approved', changed_at: '2026-10-15T16:19:30-04:00', current: false },
+    { status: 'Hold (auth)', changed_at: '2026-10-15T20:19:00-04:00', current: false },
+    { status: 'Approved', changed_at: '2026-10-16T10:00:07-04:00', current: false }] },
+  { milestone: 'repair', milestone_display: 'Repair', current: true, repair_statuses: [
+    { status: 'Working', changed_at: '2026-10-21T12:57:31-04:00', current: false },
+    { status: 'Road Test', changed_at: '2026-10-28T18:26:37-04:00', current: true }] },
+  { milestone: 'ready', milestone_display: 'Ready', current: false, repair_statuses: [] },
+];
+
+describe('decisiv_api: case status summary', () => {
+  it('Volvo: current stage + detail + since, even with repeated approval/repair', () => {
+    const s = api.summarizeCaseStatus(VOLVO_21350186);
+    expect(s.stage).toBe('repair');
+    expect(s.stageDisplay).toBe('Repair');
+    expect(s.status).toBe('Road Test');
+    expect(s.since).toBe('2026-10-28T18:26:37-04:00');
+    expect(s.history.length).toBe(9);
+    expect(s.history[0]).toEqual({ stage: 'arrival', status: 'Checked-in', at: '2026-10-12T14:53:48-04:00' });
+  });
+  it('PACCAR shape: Approval / Approved', () => {
+    const s = api.summarizeCaseStatus([
+      { milestone: 'arrival', current: false, repair_statuses: [{ status: 'Checked-in', changed_at: '2026-10-20T08:00:00-04:00' }] },
+      { milestone: 'diagnosis', current: false, repair_statuses: [{ status: 'Diagnosing', changed_at: '2026-10-21T08:00:00-04:00' }] },
+      { milestone: 'approval', milestone_display: 'Approval', current: true, repair_statuses: [{ status: 'Approved', changed_at: '2026-10-24T18:05:58-04:00', current: true }] },
+      { milestone: 'repair', current: false, repair_statuses: [] },
+      { milestone: 'ready', current: false, repair_statuses: [] },
+    ]);
+    expect(s).toMatchObject({ stage: 'approval', status: 'Approved', since: '2026-10-24T18:05:58-04:00' });
+  });
+  it('Ready when the ready segment is current', () => {
+    const s = api.summarizeCaseStatus([{ milestone: 'repair', current: false, repair_statuses: [{ status: 'Working' }] },
+      { milestone: 'ready', milestone_display: 'Ready', current: true, repair_statuses: [{ status: 'Asset Ready', changed_at: '2026-10-29T09:00:00-04:00', current: true }] }]);
+    expect(s).toMatchObject({ stage: 'ready', status: 'Asset Ready' });
+  });
+  it('no current flag: falls back to the last segment that has statuses', () => {
+    const s = api.summarizeCaseStatus([{ milestone: 'arrival', repair_statuses: [{ status: 'Checked-in' }] },
+      { milestone: 'diagnosis', repair_statuses: [{ status: 'Diagnosing', changed_at: 'x' }] }, { milestone: 'ready', repair_statuses: [] }]);
+    expect(s).toMatchObject({ stage: 'diagnosis', status: 'Diagnosing' });
+  });
+  it('unusable input -> null (caller keeps the old fallback)', () => {
+    expect(api.summarizeCaseStatus(null)).toBe(null);
+    expect(api.summarizeCaseStatus([])).toBe(null);
+    expect(api.summarizeCaseStatus({ error: 'x' })).toBe(null);
+    expect(api.summarizeCaseStatus([{ milestone: 'weird', current: true, repair_statuses: [] }])).toBe(null);
+  });
+  it('getCaseStatus rejects a non-numeric id before any network call', async () => {
+    await expect(api.getCaseStatus('abc')).rejects.toThrow(/numeric/);
+  });
+});
+
+// PACCAR paccarpg landing (2026-10-28): paccarpg.decisiv.net/fleet forwards to
+// pssmfleet, but the case page itself stays on paccarpg (operator-verified), so
+// the API window lands on the case page when it has one.
+describe('decisiv_api: API window landing page', () => {
+  const P = 'https://paccarpg.decisiv.net';
+  it('lands on the case page when the case URL is on the same host', () => {
+    expect(api._landingUrl(P, 'https://paccarpg.decisiv.net/fleet/estimates/21467830')).toBe(P + '/fleet/estimates/21467830');
+    expect(api._landingUrl(P, 'https://paccarpg.decisiv.net/fleet/estimates/21467830?tab=notes#x')).toBe(P + '/fleet/estimates/21467830');
+  });
+  it('falls back to /fleet for no URL, another host, or a non-case page', () => {
+    expect(api._landingUrl(P, '')).toBe(P + '/fleet');
+    expect(api._landingUrl(P, 'https://pssmfleet.decisiv.net/fleet/estimates/1')).toBe(P + '/fleet');
+    expect(api._landingUrl(P, 'https://paccarpg.decisiv.net/service_requests/9')).toBe(P + '/fleet');
+  });
+  it('builds the case page from the id when the caller gave no usable URL', () => {
+    expect(api._caseUrl(P, '21467830', {})).toBe(P + '/fleet/estimates/21467830');
+    expect(api._caseUrl(P, '21467830', { srUrl: P + '/fleet/estimates/21467830' })).toBe(P + '/fleet/estimates/21467830');
+    expect(api._landingUrl(P, api._caseUrl(P, '21467830', {}))).toBe(P + '/fleet/estimates/21467830');
+  });
+});

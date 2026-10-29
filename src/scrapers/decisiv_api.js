@@ -147,10 +147,33 @@ function _onApiHost(u, origin) {
   catch (_) { return false; }
 }
 
+// Where the window should land to get logged in + capture the token.
+// FIX (2026-10-28): the PACCAR home page paccarpg.decisiv.net/fleet forwards to
+// pssmfleet/t/AMZN, so a window opened there could never settle on paccarpg
+// (262 "never settled on API host" timeouts on 10-28). Opening the CASE page
+// itself (paccarpg.../fleet/estimates/<id>) stays on paccarpg -- confirmed in
+// the operator's browser, where the status API answered there. So when the
+// caller has the case URL on this same host, land on it; otherwise /fleet.
+function _landingUrl(origin, landingUrl) {
+  try {
+    const u = new URL(String(landingUrl || ''));
+    if (u.host === new URL(origin).host && /^\/fleet\/estimates\/\d+/i.test(u.pathname)) return u.origin + u.pathname;
+  } catch (_) {}
+  return origin + '/fleet';
+}
+
+// The case page for estimate `id` on `origin` (what the operator opens).
+function _caseUrl(origin, id, opts) {
+  const given = opts && opts.srUrl;
+  if (given && _landingUrl(origin, given) !== origin + '/fleet') return given;
+  return origin + '/fleet/estimates/' + encodeURIComponent(String(id));
+}
+
 // Ensure a warm, authenticated window for `origin` with a captured CSRF token.
-async function _ensureWindow(origin) {
+async function _ensureWindow(origin, landingUrl) {
   const existing = _wins[origin];
   if (existing && !existing.isDestroyed() && _tokens[origin]) return existing;
+  const startUrl = _landingUrl(origin, landingUrl);
 
   const partition = partitionForUrl(origin + '/') || undefined;
   if (!partition) throw Object.assign(new Error('no vendor partition for ' + origin), { code: 'DECISIV_NO_PARTITION' });
@@ -176,8 +199,8 @@ async function _ensureWindow(origin) {
   // API host (volvopg.asist). We MUST end up on the API host so the in-page
   // fetch is same-origin (a cross-host fetch is CORS-blocked -> "Failed to
   // fetch"). If login parks us on the non-API host, we re-navigate to it.
-  try { attachAutoLogin(win, origin + '/fleet', { maxRetries: 2 }); } catch (_) {}
-  win.loadURL(origin + '/fleet');
+  try { attachAutoLogin(win, startUrl, { maxRetries: 2 }); } catch (_) {}
+  win.loadURL(startUrl);
 
   const deadline = Date.now() + AUTH_WAIT_MS;
   let lastReNav = 0;
@@ -196,8 +219,8 @@ async function _ensureWindow(origin) {
       // Re-navigate to the API host now that the session cookie is set. Gated
       // to once per 8s so a bouncing redirect can't spin.
       lastReNav = Date.now();
-      logger.info('[decisiv-api] authed on non-API host (' + url.split('?')[0] + '), re-navigating to API host');
-      try { win.loadURL(origin + '/fleet'); } catch (_) {}
+      logger.info('[decisiv-api] authed on non-API host (' + url.split('?')[0] + '), re-navigating to ' + startUrl.replace(origin, ''));
+      try { win.loadURL(startUrl); } catch (_) {}
     }
     await new Promise(r => setTimeout(r, 1000));
   }
@@ -230,9 +253,9 @@ function _fetchScript(url, token) {
 }
 
 // Core GET: run inside the warm authenticated window for `origin`.
-async function _apiGet(origin, path) {
+async function _apiGet(origin, path, landingUrl) {
   return _withLock(async () => {
-    const win = await _ensureWindow(origin);
+    const win = await _ensureWindow(origin, landingUrl);
     const token = _tokens[origin] || '';
     const url = path.startsWith('http') ? path : (origin + path);
     const r = await win.webContents.executeJavaScript(_fetchScript(url, token), true);
@@ -264,7 +287,7 @@ async function getActivityLogs(estimateId, opts = {}) {
   const page = opts.page || 1;
   const perPage = opts.perPage || 50;
   const path = `/mobilecomm/api/estimates/${encodeURIComponent(id)}/activity_logs?page=${page}&per_page=${perPage}`;
-  return _apiGet(origin, path);
+  return _apiGet(origin, path, _caseUrl(origin, id, opts));
 }
 
 /** Estimate contacts (dealer + Amazon) — supporting endpoint, read-only. */
@@ -273,7 +296,7 @@ async function getEstimateContacts(estimateId, opts = {}) {
   if (!id) throw Object.assign(new Error('getEstimateContacts: estimateId required'), { code: 'DECISIV_NO_ESTIMATE_ID' });
   const origin = originFor(opts.host || opts.vendor || opts.srUrl || DEFAULT_HOST);
   const path = `/mobilecomm/api/contacts/estimate_contacts.json?estimate_id=${encodeURIComponent(id)}&exclude_recipients=true&mobile=false`;
-  return _apiGet(origin, path);
+  return _apiGet(origin, path, _caseUrl(origin, id, opts));
 }
 
 // Strip Decisiv's HTML out of a note subject/body into readable plain text.
@@ -346,6 +369,69 @@ async function getEstimateComments(estimateId, opts = {}) {
   }
 }
 
+// ── Case status (Arrival > Diagnosis > Approval > Repair > Ready) ────────────
+// VERIFIED 2026-10-28 on Volvo ASIST (case 21350186) and PACCAR pssmfleet
+// (case 21467830): the case page's progress bar comes from
+//   GET /fleet/estimates/{id}/case_repair_status_changes.json
+// -> ordered segments [{ milestone, milestone_display, current,
+//      repair_statuses:[{ status, changed_at, current }] }]
+// A milestone can repeat (approval -> repair -> approval -> repair). The page's
+// own bar has no "current" marker in the DOM, which is why the old screen
+// reading (asist_enrich offsiteStage) missed ~70% of the time.
+
+const STAGES = ['arrival', 'diagnosis', 'approval', 'repair', 'ready'];
+
+/** Raw milestone segments for one case. Read-only GET. */
+async function getCaseStatus(estimateId, opts = {}) {
+  const id = String(estimateId || '').trim();
+  if (!/^\d+$/.test(id)) throw Object.assign(new Error('getCaseStatus: numeric estimateId required'), { code: 'DECISIV_NO_ESTIMATE_ID' });
+  const origin = originFor(opts.host || opts.vendor || opts.srUrl || DEFAULT_HOST);
+  return _apiGet(origin, '/fleet/estimates/' + encodeURIComponent(id) + '/case_repair_status_changes.json', _caseUrl(origin, id, opts));
+}
+
+/**
+ * summarizeCaseStatus(segments) -> { stage, stageDisplay, status, since,
+ *   history:[{ stage, status, at }] } or null when unusable.
+ * stage = the segment marked current (fallback: last segment with any status).
+ */
+function summarizeCaseStatus(segments) {
+  if (!Array.isArray(segments) || !segments.length) return null;
+  const history = [];
+  for (const seg of segments) {
+    const stage = String(seg && seg.milestone || '').toLowerCase();
+    for (const s of (seg && Array.isArray(seg.repair_statuses) ? seg.repair_statuses : [])) {
+      history.push({ stage, status: String(s && s.status || ''), at: String(s && s.changed_at || '') });
+    }
+  }
+  let cur = segments.find(s => s && s.current === true);
+  if (!cur) cur = [...segments].reverse().find(s => s && Array.isArray(s.repair_statuses) && s.repair_statuses.length);
+  if (!cur) return null;
+  const stage = String(cur.milestone || '').toLowerCase();
+  if (!STAGES.includes(stage)) return null;
+  const sts = Array.isArray(cur.repair_statuses) ? cur.repair_statuses : [];
+  const det = sts.find(s => s && s.current === true) || sts[sts.length - 1] || null;
+  return {
+    stage,
+    stageDisplay: String(cur.milestone_display || (stage.charAt(0).toUpperCase() + stage.slice(1))),
+    status: det ? String(det.status || '') : '',
+    since: det ? String(det.changed_at || '') : '',
+    history,
+  };
+}
+
+/** Never throws: { ok, ...summary } or { ok:false, error }. */
+async function getCaseStatusSummary(estimateId, opts = {}) {
+  try {
+    const sum = summarizeCaseStatus(await getCaseStatus(estimateId, opts));
+    if (!sum) return { ok: false, error: 'no current milestone in response' };
+    logger.info('[decisiv-api] case status est=' + estimateId + ' -> ' + sum.stage + (sum.status ? ' / ' + sum.status : '') + (sum.since ? ' since ' + sum.since : ''));
+    return { ok: true, ...sum };
+  } catch (e) {
+    logger.warn('[decisiv-api] case status failed est=' + estimateId + ': ' + e.message);
+    return { ok: false, error: e.message, code: e.code || 'DECISIV_API_ERROR' };
+  }
+}
+
 /**
  * apiGet(urlOrVendor, path) -> parsed JSON from a Decisiv JSON endpoint,
  * run inside the warm authenticated window (same auth as the calls above).
@@ -373,8 +459,9 @@ module.exports = {
   HOSTS, originFor,
   getActivityLogs, getEstimateContacts, getEstimateComments,
   apiGet, withWindow,
+  getCaseStatus, summarizeCaseStatus, getCaseStatusSummary, STAGES,
   formatActivityLogs,
   dispose,
   // exported for tests
-  _plain, _noteDate,
+  _plain, _noteDate, _landingUrl, _caseUrl,
 };

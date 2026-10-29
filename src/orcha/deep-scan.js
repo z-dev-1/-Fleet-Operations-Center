@@ -611,7 +611,21 @@ async function _processUnit(u, notesStore, askOrcha) {
         u.asistSource = enrichResult.source;
         u.asistLabel = enrichResult.bestLabel;
         u.asistSrUrl = enrichResult.bestUrl || offsiteUrl;
-        logger.info('[DS] Offsite enriched (live) for ' + u.equipmentId + ' | ' + enrichResult.source + ' | ' + offsiteText.length + 'ch');
+        // Case stage (Arrival..Ready) + detail, now read from Decisiv's API.
+        // Previously never copied here, so the live path lost it (DTNA did).
+        if (enrichResult.offsiteStage) {
+          u.offsiteStage = enrichResult.offsiteStage;
+          u.offsiteStageDetail = enrichResult.offsiteStageDetail || '';
+          u.offsiteStageSince = enrichResult.offsiteStageSince || '';
+          // Dealer case just reached READY (API-confirmed) -> notify the
+          // operator once (fresh, deduped, queued; never blocks the scan).
+          if (u.offsiteStage === 'ready' && u.offsiteStageSince) {
+            try { require('../scrapers/ready_pickup_notify').onStageUpdate(u); }
+            catch (e) { logger.warn('[DS] stage-ready notify hook failed (non-fatal): ' + e.message); }
+          }
+        }
+        logger.info('[DS] Offsite enriched (live) for ' + u.equipmentId + ' | ' + enrichResult.source + ' | ' + offsiteText.length + 'ch'
+          + (enrichResult.offsiteStage ? ' | stage ' + enrichResult.offsiteStage + (enrichResult.offsiteStageDetail ? ' / ' + enrichResult.offsiteStageDetail : '') : ''));
       }
     } catch (e) {
       logger.warn('[DS] Offsite enrich failed for ' + u.equipmentId + ': ' + e.message);
