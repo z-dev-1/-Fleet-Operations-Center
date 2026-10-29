@@ -284,6 +284,68 @@ function getLocationLatest(aaid) {
   return apiGet('/api/v1/locationHistories/latest/' + encodeURIComponent(aaid));
 }
 
+// ── GPS -> street address (2026-10-29) ───────────────────────────────────────
+// AAP's own WR wizard fills the Off Site address by reverse-geocoding the
+// unit's GPS through HERE, using the key from /api/v2/mapCredentials (confirmed
+// by recording the wizard: On Site -> Off Site populated "90 Shepard Rd,
+// Rochester, NY 14624-1148" for B62049). Same lookup here, so the API-created
+// WR gets the address of wherever the truck actually is. The key is never logged.
+let _mapApiKey = null;
+async function _getMapApiKey() {
+  if (_mapApiKey) return _mapApiKey;
+  let cred = await apiGet('/api/v2/mapCredentials');
+  if (typeof cred === 'string') { try { cred = JSON.parse(cred); } catch (_) { cred = null; } }
+  const key = cred && (cred.apiKey || cred.apikey);
+  if (!key) throw new Error('mapCredentials had no apiKey');
+  _mapApiKey = String(key);
+  return _mapApiKey;
+}
+
+// Map one HERE revgeocode item to the off-site location fields the WR body
+// reads. Returns null when the item has no usable street/city.
+function _offSiteFromGeocode(item) {
+  const a = (item && item.address) || {};
+  const street = [a.houseNumber, a.street].filter(Boolean).join(' ').trim();
+  if (!street && !a.city) return null;
+  return {
+    locStreet: street,
+    locCity: a.city || '',
+    locState: a.stateCode || a.state || '',
+    locZip: a.postalCode || '',
+    locTimeZone: (item.timeZone && item.timeZone.name) || '',
+    locLabel: a.label || item.title || '',
+  };
+}
+
+// The Amazon yard geofence the truck's live GPS is inside, or null. Exact
+// domicile name first (e.g. "ROC5"), then any yard-category geofence
+// (SortCenter / Facility / DeliveryStation). Routes, shuttles, regions and
+// unnamed/uncategorised fences are not a yard, so they never count.
+function _yardGeofenceAtGps(opts) {
+  const llRaw = opts && opts.locationLatest;
+  const ll = (llRaw && (llRaw.location || llRaw)) || {};
+  const list = Array.isArray(ll.geoFences) ? ll.geoFences.filter(Boolean) : [];
+  const nm = (g) => String((g && (g.name || g.geofenceName)) || '').trim();
+  const dom = String((opts && opts.domicile) || '').trim().toUpperCase();
+  const exact = dom && list.find((g) => nm(g).toUpperCase() === dom);
+  if (exact) return nm(exact);
+  const yard = list.find((g) => /sortcenter|facility|deliverystation|fulfillment|yard/i.test(String((g && g.category) || '')));
+  return yard ? nm(yard) : null;
+}
+
+async function reverseGeocodeGps(latitude, longitude) {
+  const lat = Number(latitude), lng = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0)) return null;
+  const key = await _getMapApiKey();
+  const { net } = require('electron');
+  const url = 'https://revgeocode.search.hereapi.com/v1/revgeocode?apikey=' + encodeURIComponent(key) +
+    '&at=' + lat + ',' + lng + '&show=tz';
+  const r = await net.fetch(url);
+  if (!r.ok) { if (r.status === 401 || r.status === 403) _mapApiKey = null; throw new Error('revgeocode HTTP ' + r.status); }
+  const j = await r.json();
+  return _offSiteFromGeocode(j && Array.isArray(j.items) ? j.items[0] : null);
+}
+
 // Endpoint 2: full service aggregate (comments, estimates, AVM codes).
 function getService(serviceId) {
   return apiGet('/api/v1/serviceaggregates/' + encodeURIComponent(serviceId));
@@ -1410,6 +1472,7 @@ function _buildLocation(assetFull, opts) {
     loc.city       = opts.locCity   || '';
     loc.subRegion  = opts.locState  || '';
     loc.postalCode = opts.locZip    || '';
+    if (opts.locTimeZone) loc.timeZone = opts.locTimeZone;
   }
   // Prefer the live location-latest payload (same source the wizard uses). It
   // carries geoPoint + a reverse-geocoded address + timeZone.
@@ -1710,6 +1773,26 @@ async function createWorkOrder(opts = {}) {
       opts = { ...opts, locationLatest: ll };
     }
     catch (e) { logger.warn('createWorkOrder: getLocationLatest failed: ' + e.message); }
+  }
+
+  // Unit location = OFF SITE (Address) from the truck's live GPS (2026-10-29),
+  // matching what AAP's wizard populates after On Site -> Off Site. Skipped when
+  // the caller already supplied an off-site address (tow pickup) or forced a
+  // call type. If the lookup fails, keep the previous yard behavior rather
+  // than send an Off Site WR with a blank address.
+  if (!opts.offSite && !opts.roadside && !opts.callType && !opts.calltype) {
+    try {
+      const llRaw = opts.locationLatest;
+      const gp = (llRaw && (llRaw.geoPoint || (llRaw.location && llRaw.location.geoPoint))) ||
+                 (assetFull && assetFull.latestLocation && assetFull.latestLocation.geoPoint) || null;
+      const addr = gp ? await reverseGeocodeGps(gp.latitude, gp.longitude) : null;
+      if (addr) {
+        opts = { ...opts, offSite: true, locFromGps: true, ...addr };
+        logger.info('createWorkOrder: unit location Off Site from GPS: ' + (addr.locLabel || addr.locStreet));
+      } else {
+        logger.warn('createWorkOrder: no GPS address for ' + aaid + ' -- keeping yard location');
+      }
+    } catch (e) { logger.warn('createWorkOrder: GPS address lookup failed (' + e.message + ') -- keeping yard location'); }
   }
 
   const wantCommit = !!opts.confirmVendor;
@@ -2061,7 +2144,16 @@ function _buildCreateRepairBody(opts, assetFull, vendorCode, recoResp) {
     currentLocation.yardLocation = addrParts || currentLocation.yardLocation || null;
     // OFFSITE reportedLocation.type is "OTHER" with a human name (confirmed from
     // the hand-made tow WR: code/geofenceName = the dealer name, type=OTHER).
-    currentLocation.code = opts.vendorLocationName || (opts.vendor ? String(opts.vendor).split(' (')[0] : null) || 'Off-site';
+    if (opts.locFromGps) {
+      // GPS-derived Off Site (2026-10-29): "Location:" must be WHERE THE TRUCK
+      // IS, never the vendor. Inside an Amazon yard geofence -> that yard
+      // (domicile name first, e.g. "ROC5"); otherwise the street address.
+      currentLocation.code = _yardGeofenceAtGps(opts) || currentLocation.street || addrParts || 'Off-site';
+    } else {
+      // Typed pickup address (tow): name it after the pickup street, never
+      // the vendor (2026-10-29 — user: the vendor should not be the location).
+      currentLocation.code = currentLocation.street || addrParts || 'Off-site';
+    }
     currentLocation.geofenceName = currentLocation.code;
     currentLocation.type = 'OTHER';
     currentLocation.deviceTelemetryData = { engineHours: null, odometer: null };
@@ -2087,7 +2179,10 @@ function _buildCreateRepairBody(opts, assetFull, vendorCode, recoResp) {
     const nm = (g) => String((g && (g.name || g.geofenceName)) || '');
     const dom = String(opts.domicile || '').trim().toUpperCase();
     const isSiteCode = (s) => /^[A-Z]{2,4}\d{0,3}$/.test(s) || /^[A-Z]{3,4}\d-MMRO$/i.test(s);
+    // EXACT domicile name first (2026-10-29): AAP lists "ROC5-MMRO" before
+    // "ROC5" for B62049, so a prefix-only match picked ROC5-MMRO.
     let gf =
+      (dom && gfList.find((g) => nm(g).toUpperCase() === dom)) ||
       (dom && gfList.find((g) => { const n = nm(g).toUpperCase(); return n === dom || n.startsWith(dom + '-') || n.startsWith(dom); })) ||
       gfList.find((g) => /-MMRO$/i.test(nm(g))) ||
       gfList.find((g) => /sortcenter/i.test(String(g && g.category || ''))) ||
@@ -2521,5 +2616,7 @@ module.exports = {
   getFleetGeofencesViaApi, // API-first live geofence + GPS (replaces geofence_scraper DOM scrape)
   getWorkOrderDetailViaApi, // API-first WO detail (replaces aap_wo_scraper DOM scrape)
   getLocationLatest,
+  reverseGeocodeGps,            // GPS -> street address (AAP's own HERE lookup)
+  _offSiteFromGeocode,          // exported for tests
   dispose,
 };
