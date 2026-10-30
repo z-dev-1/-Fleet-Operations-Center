@@ -82,6 +82,79 @@ function registerAapApiIPC(ctx) {
     } catch (e) { return { ok: false, error: e.message, code: e.code || null }; }
   });
 
+  // WR ESCALATION context: feature gate + live teams for the unit's fleet +
+  // the WR's live current escalations, in one round trip. payload:
+  // { fleetId?, aaid, workRequestId? } (a bare string = fleetId).
+  handle('aap-api:escalation-options', async (_e, payload) => {
+    try {
+      const p = (typeof payload === 'string') ? { fleetId: payload }
+        : ((payload && typeof payload === 'object') ? payload : {});
+      const aaid = p.fleetId ? '' : requireStringMax(p.aaid || '', 'aaid', 128);
+      const workRequestId = p.workRequestId ? requireStringMax(String(p.workRequestId), 'workRequestId', 128) : '';
+      const user = await api().getUserDetails();
+      if (!api()._hasEscalateFeature(user)) return { ok: true, enabled: false, options: [], current: [] };
+      const fleetId = p.fleetId ? String(p.fleetId)
+        : ((a) => (a && (a.asset || a)).fleetId)(await api().getAsset(aaid));
+      if (!fleetId) return { ok: false, error: 'Could not resolve fleetId', code: 'NO_FLEET_ID' };
+      const options = await api().getEscalationOptions(fleetId);
+      let current = [];
+      let currentError;
+      if (workRequestId) {
+        try { current = api()._currentEscalations(await api().getService(workRequestId)); }
+        catch (e) { current = []; currentError = e.message; }
+      }
+      const out = { ok: true, enabled: true, fleetId, options, current };
+      if (currentError) out.currentError = currentError;
+      return out;
+    } catch (e) { return { ok: false, error: e.message, code: e.code || null }; }
+  });
+
+  // Escalate / de-escalate a WR. createdBy is ALWAYS the signed-in AAP user's
+  // alias from getUserDetails — any renderer-supplied createdBy is ignored.
+  handle('aap-api:update-escalations', async (_e, payload) => {
+    try {
+      const p = (payload && typeof payload === 'object') ? payload : {};
+      const workRequestId = requireStringMax(p.workRequestId || '', 'workRequestId', 128);
+      const aaid = requireStringMax(p.aaid || '', 'aaid', 128);
+      const list = (v, name) => {
+        const arr = v == null ? [] : v;
+        if (!Array.isArray(arr) || arr.length > 20 || arr.some((x) => typeof x !== 'string')) {
+          return { error: name + ' must be an array of at most 20 strings' };
+        }
+        return { arr };
+      };
+      const a = list(p.add, 'add');
+      if (a.error) return { ok: false, error: a.error, code: 'ESCALATION_INVALID' };
+      const r = list(p.remove, 'remove');
+      if (r.error) return { ok: false, error: r.error, code: 'ESCALATION_INVALID' };
+      const comment = p.comment == null ? '' : String(p.comment);
+      const user = await api().getUserDetails();
+      if (!api()._hasEscalateFeature(user)) {
+        return { ok: false, error: 'Escalation is not enabled for this AAP user', code: 'ESCALATE_NOT_ENABLED' };
+      }
+      const createdBy = api()._userAlias(user);
+      if (!createdBy) return { ok: false, error: 'Could not resolve the AAP user alias', code: 'NO_USER_ALIAS' };
+      const res = await api().updateEscalations({ workRequestId, aaid, add: a.arr, remove: r.arr, comment, createdBy });
+      let current = null;
+      try { current = api()._currentEscalations(await api().getService(workRequestId)); } catch (_) {}
+      return { ok: true, current, response: res && res.response };
+    } catch (e) { return { ok: false, error: e.message, code: e.code || null }; }
+  });
+
+  // AI (with deterministic fallback) suggestion for which team to escalate to.
+  handle('aap-api:escalation-suggest', async (_e, payload) => {
+    try {
+      const p = (payload && typeof payload === 'object') ? payload : {};
+      const unitId = requireStringMax(String(p.unit || ''), 'unit', 64);
+      const options = (Array.isArray(p.options) ? p.options : []).slice(0, 100)
+        .filter((o) => o && typeof o === 'object')
+        .map((o) => ({ value: String(o.value == null ? '' : o.value), displayText: String(o.displayText == null ? '' : o.displayText) }));
+      const current = (Array.isArray(p.current) ? p.current : []).filter((x) => typeof x === 'string');
+      const suggestion = await require('../orcha/escalation-suggest').suggestEscalation({ unitId, options, current });
+      return { ok: true, suggestion };
+    } catch (e) { return { ok: false, error: e.message, code: e.code || null }; }
+  });
+
   // FULL PIPELINE — fetch all open work orders + index all assets, join by
   // aaid, return mapped tracker rows. opts: { searchRequest, maxPages }.
   handle('aap-api:build-tracker', async (_e, payload) => {

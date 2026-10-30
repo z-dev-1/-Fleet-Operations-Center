@@ -2493,6 +2493,138 @@ async function updateWorkRequestImages(workRequestId, dataUrls) {
   return { ok: true, resp, count: images.length };
 }
 
+// ── WR ESCALATIONS ──────────────────────────────────────────────────────────
+// Feature gate: /user/details activeFeatures includes ESCALATE_SERVICE.
+// Teams: live from /maintenanceConfiguration?fleetIds=<fleetId> (.escalations),
+// never hard-coded. Mutate: POST /workRequest/updateEscalations via apiPost
+// (which already sends anti-csrftoken-a2z). Optional deps={apiGet,apiPost} is
+// the test seam — internal apiGet/apiPost calls are local bindings.
+const ESCALATE_FEATURE = 'ESCALATE_SERVICE';
+const CARRIER_UPDATE_ESCALATION = 'MCS_CARRIER_UPDATE_REQUEST';
+const ESCALATION_COMMENT_MAX = 2000;
+const UPDATE_ESCALATIONS_PATH = '/api/v1/workRequest/updateEscalations';
+
+function _jsonish(v) {
+  if (typeof v === 'string') { try { return JSON.parse(v); } catch (_) { return v; } }
+  return v;
+}
+
+function _parseEscalationOptions(resp) {
+  let r = _jsonish(resp);
+  if (Array.isArray(r)) r = r[0];
+  const list = (r && typeof r === 'object' && Array.isArray(r.escalations)) ? r.escalations : [];
+  const out = [];
+  const seen = new Set();
+  for (const e of list) {
+    if (!e || typeof e !== 'object' || e.deprecated === true) continue;
+    const value = String(e.value == null ? '' : e.value).trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    const dt = String(e.displayText == null ? '' : e.displayText).trim();
+    out.push({ value, displayText: dt || value });
+  }
+  return out;
+}
+
+async function getEscalationOptions(fleetId, deps = {}) {
+  const id = String(fleetId || '').trim();
+  if (!id) { const e = new Error('getEscalationOptions: no fleetId'); e.code = 'NO_FLEET_ID'; throw e; }
+  const get = deps.apiGet || apiGet;
+  return _parseEscalationOptions(await get('/api/v1/maintenanceConfiguration?fleetIds=' + encodeURIComponent(id)));
+}
+
+function _hasEscalateFeature(userDetails) {
+  const u = _jsonish(userDetails);
+  if (!u || typeof u !== 'object') return false;
+  const feats = Array.isArray(u.activeFeatures) ? u.activeFeatures
+    : (u.user && Array.isArray(u.user.activeFeatures)) ? u.user.activeFeatures : [];
+  return feats.includes(ESCALATE_FEATURE);
+}
+
+function _userAlias(userDetails) {
+  const u = _jsonish(userDetails);
+  if (!u || typeof u !== 'object') return '';
+  const a = u.userName || u.alias || u.login;
+  return typeof a === 'string' ? a.trim() : '';
+}
+
+function _normList(v) {
+  let arr;
+  if (Array.isArray(v)) arr = v;
+  else if (typeof v === 'string') arr = v.split(/[;,]/);
+  else return [];
+  const out = [];
+  for (const x of arr) {
+    const s = String((x && typeof x === 'object') ? (x.value == null ? '' : x.value) : (x == null ? '' : x)).trim();
+    if (s && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
+function _currentEscalations(serviceAgg) {
+  const s = _jsonish(serviceAgg);
+  if (!s || typeof s !== 'object') return [];
+  return _normList(s.escalations || (s.workRequest && s.workRequest.escalations));
+}
+
+function _escalationInvalid(msg) {
+  const e = new Error(msg);
+  e.code = 'ESCALATION_INVALID';
+  return e;
+}
+
+function _validateEscalationChange({ add, remove, comment } = {}) {
+  const a = _normList(Array.isArray(add) ? add : []);
+  const r = _normList(Array.isArray(remove) ? remove : []);
+  const c = String(comment == null ? '' : comment).trim();
+  if (!a.length && !r.length) throw _escalationInvalid('No escalation changes requested');
+  const both = a.find((v) => r.includes(v));
+  if (both) throw _escalationInvalid('Escalation ' + both + ' cannot be both added and removed');
+  const carrier = r.includes(CARRIER_UPDATE_ESCALATION);
+  if (carrier && (r.length > 1 || a.length > 0)) {
+    throw _escalationInvalid(CARRIER_UPDATE_ESCALATION + ' must be de-escalated by itself');
+  }
+  if (!c && (a.length > 0 || carrier)) throw _escalationInvalid('A reason comment is required');
+  if (c.length > ESCALATION_COMMENT_MAX) {
+    throw _escalationInvalid('Comment exceeds ' + ESCALATION_COMMENT_MAX + ' characters');
+  }
+  return { add: a, remove: r, comment: c, carrier };
+}
+
+function _buildUpdateEscalationsBody({ workRequestId, aaid, add, remove, comment, createdBy, now } = {}) {
+  const v = _validateEscalationChange({ add, remove, comment });
+  const wr = String(workRequestId || '').trim();
+  const id = String(aaid || '').trim();
+  const by = String(createdBy || '').trim();
+  if (!wr) throw _escalationInvalid('workRequestId is required');
+  if (!id) throw _escalationInvalid('aaid is required');
+  if (!by) throw _escalationInvalid('createdBy is required');
+  const text = v.carrier ? require('../orcha/redact_sharing').redactForSharing(v.comment) : v.comment;
+  return {
+    workRequestId: wr,
+    aaid: id,
+    escalationsToAdd: v.add,
+    escalationsToRemove: v.remove,
+    reasonComment: {
+      timestamp: (now || new Date()).toISOString(),
+      text,
+      createdBy: by,
+      internalOnly: !v.carrier,
+      externalConsumers: v.carrier ? ['CARRIER'] : [],
+    },
+  };
+}
+
+async function updateEscalations(opts, deps = {}) {
+  const body = _buildUpdateEscalationsBody(opts || {});
+  const post = deps.apiPost || apiPost;
+  const resp = await post(UPDATE_ESCALATIONS_PATH, body);
+  // Never log the comment text — only WR id + values.
+  logger.info('[escalation] WR ' + body.workRequestId + ' add=[' + body.escalationsToAdd.join(',') +
+    '] remove=[' + body.escalationsToRemove.join(',') + ']');
+  return { ok: true, response: _jsonish(resp), add: body.escalationsToAdd, remove: body.escalationsToRemove };
+}
+
 // High-level: upload a list of attachments to a just-created WR. Each attachment
 // is { name, dataUrl } (dataUrl = "data:<mime>;base64,<...>" as produced by the
 // WR modal's FileReader). Best-effort: failures are collected, not thrown, so a
@@ -2618,5 +2750,15 @@ module.exports = {
   getLocationLatest,
   reverseGeocodeGps,            // GPS -> street address (AAP's own HERE lookup)
   _offSiteFromGeocode,          // exported for tests
+  getEscalationOptions,         // live escalation teams for a fleet
+  updateEscalations,            // POST /workRequest/updateEscalations
+  _parseEscalationOptions,      // exported for tests
+  _buildUpdateEscalationsBody,  // exported for tests
+  _validateEscalationChange,    // exported for tests
+  _currentEscalations,
+  _hasEscalateFeature,
+  _userAlias,
+  ESCALATION_COMMENT_MAX,
+  CARRIER_UPDATE_ESCALATION,
   dispose,
 };
