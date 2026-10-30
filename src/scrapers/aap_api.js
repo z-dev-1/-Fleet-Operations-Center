@@ -2599,7 +2599,11 @@ function _buildUpdateEscalationsBody({ workRequestId, aaid, add, remove, comment
   if (!wr) throw _escalationInvalid('workRequestId is required');
   if (!id) throw _escalationInvalid('aaid is required');
   if (!by) throw _escalationInvalid('createdBy is required');
-  const text = v.carrier ? require('../orcha/redact_sharing').redactForSharing(v.comment) : v.comment;
+  // Deliberate user decision (2026-10-30): EVERY escalation comment (escalate
+  // and de-escalate, including MCS_CARRIER_UPDATE_REQUEST removal) is
+  // INTERNAL ONLY and never carrier-visible. AAP's own default flips carrier
+  // removal to externalConsumers:['CARRIER']; we intentionally do not. Since
+  // nothing is shared with the carrier, no carrier redaction is applied.
   return {
     workRequestId: wr,
     aaid: id,
@@ -2607,10 +2611,10 @@ function _buildUpdateEscalationsBody({ workRequestId, aaid, add, remove, comment
     escalationsToRemove: v.remove,
     reasonComment: {
       timestamp: (now || new Date()).toISOString(),
-      text,
+      text: v.comment,
       createdBy: by,
-      internalOnly: !v.carrier,
-      externalConsumers: v.carrier ? ['CARRIER'] : [],
+      internalOnly: true,
+      externalConsumers: [],
     },
   };
 }

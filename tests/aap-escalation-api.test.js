@@ -75,16 +75,27 @@ describe('_buildUpdateEscalationsBody', () => {
     expect(body.reasonComment.internalOnly).toBe(true);
     expect(body.reasonComment.externalConsumers).toEqual([]);
   });
-  it('carrier-update removal alone is carrier-visible and redacted', () => {
-    const body = aap._buildUpdateEscalationsBody({
-      ...BASE, remove: [aap.CARRIER_UPDATE_ESCALATION],
-      comment: 'Jane Doe - Amazon Logistics (Fleet Support): estimate $1,234 approved, unit ready',
-    });
-    expect(body.reasonComment.internalOnly).toBe(false);
-    expect(body.reasonComment.externalConsumers).toEqual(['CARRIER']);
-    expect(body.reasonComment.text).not.toContain('$1,234');
-    expect(body.reasonComment.text).not.toContain('Jane Doe');
-    expect(body.reasonComment.text).toContain('Amazon Logistics');
+  it('carrier-update removal alone is INTERNAL ONLY (user decision 2026-10-30), text sent as typed', () => {
+    const comment = 'Jane Doe - Amazon Logistics (Fleet Support): estimate $1,234 approved, unit ready';
+    const body = aap._buildUpdateEscalationsBody({ ...BASE, remove: [aap.CARRIER_UPDATE_ESCALATION], comment });
+    expect(body.escalationsToRemove).toEqual([aap.CARRIER_UPDATE_ESCALATION]);
+    expect(body.reasonComment.internalOnly).toBe(true);
+    expect(body.reasonComment.externalConsumers).toEqual([]);
+    expect(body.reasonComment.text).toBe(comment);
+  });
+  it('every change shape is internal-only with no external consumers', () => {
+    const shapes = [
+      { add: ['MCS_LEAD'], remove: [], comment: 'Need lead' },
+      { add: [], remove: ['FAS'], comment: '' },
+      { add: [], remove: ['FAS'], comment: 'Resolved' },
+      { add: ['MCS_LEAD'], remove: ['FAS'], comment: 'Swap' },
+      { add: [], remove: [aap.CARRIER_UPDATE_ESCALATION], comment: 'Carrier updated' },
+    ];
+    for (const s of shapes) {
+      const body = aap._buildUpdateEscalationsBody({ ...BASE, ...s });
+      expect(body.reasonComment.internalOnly).toBe(true);
+      expect(body.reasonComment.externalConsumers).toEqual([]);
+    }
   });
   it('carrier-update removal requires a comment', () => {
     expect(() => aap._buildUpdateEscalationsBody({ ...BASE, remove: [aap.CARRIER_UPDATE_ESCALATION], comment: '  ' }))

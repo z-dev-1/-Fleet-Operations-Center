@@ -3375,15 +3375,41 @@ function _wireHistoryPane(unit) {
 // AAP context (feature gate + live teams + current) is cached per WR for 2 min
 // and the AI/rules suggestion per WR+current for the session. Nothing is sent
 // to AAP until the user clicks Escalate or confirms a chip removal.
-var _escCtxCache=new Map();     // wrId -> {at, res}
+var _escCtxCache=new Map();     // wrId -> {at, p} (p = in-flight/resolved escalationOptions promise)
 var _escSuggestCache=new Map(); // wrId|current -> suggestion
+var _escInFlight=new Set();     // wrIds with an updateEscalations call pending
 var _ESC_CTX_TTL=120000;
 
 function _escAttr(s){return esc(s).replace(/"/g,'&quot;');}
 
+function _escSetDisabled(root,on){
+  if(!root)return;
+  var b=root.querySelector('#dp-escalate-send');
+  if(b)b.disabled=on;
+  root.querySelectorAll('[data-esc-remove]').forEach(function(x){x.disabled=on;});
+}
+
 function _escClear(wrId){
   _escCtxCache.delete(wrId);
   Array.from(_escSuggestCache.keys()).forEach(function(k){if(k.indexOf(wrId+'|')===0)_escSuggestCache.delete(k);});
+}
+
+// Cache the PROMISE (not just the resolved value) so live re-renders that land
+// before the first response share one AAP round trip. Dropped on failure so
+// the next render refetches.
+function _escContext(wrId,aaid){
+  var hit=_escCtxCache.get(wrId);
+  if(hit&&Date.now()-hit.at<_ESC_CTX_TTL)return hit.p;
+  var entry={at:Date.now(),p:null};
+  var drop=function(){if(_escCtxCache.get(wrId)===entry)_escCtxCache.delete(wrId);};
+  entry.p=Promise.resolve().then(function(){
+    return window.aapApi.escalationOptions({aaid:aaid,workRequestId:wrId});
+  }).then(function(res){
+    if(!res||!res.ok)drop();
+    return res;
+  },function(e){drop();throw e;});
+  _escCtxCache.set(wrId,entry);
+  return entry.p;
 }
 
 function _wireEscalation(unit){
@@ -3395,13 +3421,7 @@ function _wireEscalation(unit){
   var live=function(){return !!(_unit&&_unit.equipmentId===unit.equipmentId&&document.body.contains(wrap));};
   (async function(){
     var res=null;
-    var hit=_escCtxCache.get(wrId);
-    if(hit&&Date.now()-hit.at<_ESC_CTX_TTL){
-      res=hit.res;
-    }else{
-      try{res=await window.aapApi.escalationOptions({aaid:aaid,workRequestId:wrId});}catch(_e){return;}
-      if(res&&res.ok)_escCtxCache.set(wrId,{at:Date.now(),res:res});
-    }
+    try{res=await _escContext(wrId,aaid);}catch(_e){return;}
     if(!live())return;
     if(!res||!res.ok||!res.enabled||!Array.isArray(res.options)||!res.options.length)return;
     _renderEscalation(unit,wrap,res,live);
@@ -3437,7 +3457,7 @@ function _renderEscalation(unit,wrap,res,live){
       '<button type="button" id="dp-escalate-send" class="dp-escalate__btn">Escalate</button>'+
     '</div>':'')+
     '<textarea id="dp-escalate-comment" class="dp-escalate__comment" maxlength="'+ESC_COMMENT_MAX+'" rows="3" aria-label="Escalation reason comment" placeholder="'+(selectable.length?'Reason comment (required)':'Reason comment')+'"></textarea>'+
-    '<span class="dp-escalate__count" id="dp-escalate-count" aria-live="polite">0/'+ESC_COMMENT_MAX+'</span>'+
+    '<span class="dp-escalate__count" id="dp-escalate-count">0/'+ESC_COMMENT_MAX+'</span>'+
   '</div>';
   wrap.innerHTML=html;
   wrap.hidden=false;
@@ -3460,20 +3480,32 @@ function _renderEscalation(unit,wrap,res,live){
 
   var setBusy=function(on){
     busy=on;
-    if(sendBtn)sendBtn.disabled=on;
-    card.querySelectorAll('[data-esc-remove]').forEach(function(b){b.disabled=on;});
+    _escSetDisabled(card,on);
   };
+  // A send for this WR is still pending from an earlier card (pane rebuilt
+  // mid-send): render this card's controls disabled so the same change can't
+  // be submitted twice. send() re-enables / re-wires whichever card is current.
+  if(_escInFlight.has(wrId))setBusy(true);
+  var isBusy=function(){return busy||_escInFlight.has(wrId);};
   var send=async function(payload,okMsg){
+    _escInFlight.add(wrId);
     var r;
     try{r=await window.aapApi.updateEscalations(payload);}catch(e){r={ok:false,error:e&&e.message};}
+    _escInFlight.delete(wrId);
+    // The card that started the send may have been replaced by a re-render;
+    // act on whichever escalation card is current for this unit.
+    var curWrap=document.getElementById('dp-escalate-wrap');
+    var curLive=!!(curWrap&&_unit&&_unit.equipmentId===unit.equipmentId&&String(_unit.workRequestId||'')===wrId);
     if(r&&r.ok){
       toast.show('success',okMsg,4000);
       _escClear(wrId);
-      if(live())_wireEscalation(unit);
+      if(curLive)_wireEscalation(_unit);
       return;
     }
     toast.show('error','Escalation failed: '+((r&&r.error)||'unknown'),6000);
+    busy=false;
     if(live())setBusy(false);
+    else if(curLive)_escSetDisabled(curWrap,false);
   };
 
   // ── suggestion (fills team + comment only if the user hasn't touched them) ─
@@ -3502,7 +3534,7 @@ function _renderEscalation(unit,wrap,res,live){
 
   // ── Escalate ─────────────────────────────────────────────────────────────
   if(sendBtn)sendBtn.addEventListener('click',function(){
-    if(busy)return;
+    if(isBusy())return;
     var team=teamEl?teamEl.value:'';
     var comment=cmtEl.value;
     var v=validateEscalationDraft({team:team,comment:comment,current:current});
@@ -3514,10 +3546,20 @@ function _renderEscalation(unit,wrap,res,live){
   // ── chip × (de-escalate after confirm) ───────────────────────────────────
   card.querySelectorAll('[data-esc-remove]').forEach(function(btn){
     btn.addEventListener('click',function(){
-      if(busy)return;
+      if(isBusy())return;
       var value=btn.getAttribute('data-esc-remove')||'';
-      var comment=cmtEl.value;
       var carrier=value===ESC_CARRIER_UPDATE;
+      // The box may hold the auto-filled ESCALATE draft (AI/rules). That is not
+      // a de-escalation reason, so only a user-edited comment is sent.
+      if(carrier&&!cmtDirty){
+        // AAP requires a reason to remove Carrier Update Request: ask the user
+        // to write one instead of reusing the suggestion draft. Marking the box
+        // dirty stops a late suggestion from refilling it.
+        cmtEl.value='';cmtDirty=true;updCount();cmtEl.focus();
+        toast.show('warn','Write a reason for removing Carrier Update Request, then click × again.',4500);
+        return;
+      }
+      var comment=cmtDirty?cmtEl.value:'';
       var v=validateDeEscalation({value:value,comment:comment,current:current});
       if(!v.ok){
         toast.show('warn',v.error,3500);
@@ -3525,7 +3567,8 @@ function _renderEscalation(unit,wrap,res,live){
         return;
       }
       var label=labelOf(value);
-      if(!window.confirm('Remove escalation "'+label+'"?'+(carrier?' This comment will be visible to the carrier (names and $ removed).':'')))return;
+      // All escalation comments are internal only (user decision 2026-10-30).
+      if(!window.confirm('Remove escalation "'+label+'"?'))return;
       setBusy(true);
       send(buildEscalationPayload(unit,{add:[],remove:[value],comment:comment}),'Removed escalation '+label);
     });

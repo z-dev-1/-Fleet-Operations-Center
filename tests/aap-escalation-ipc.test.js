@@ -117,12 +117,15 @@ describe('aap-api:update-escalations', () => {
     expect(upd).not.toHaveBeenCalled();
   });
 
-  it('invalid change surfaces ESCALATION_INVALID (real updateEscalations throws before any POST)', async () => {
+  it('invalid change surfaces ESCALATION_INVALID (real updateEscalations rejects in validation)', async () => {
     vi.spyOn(aap, 'getUserDetails').mockResolvedValue(USER_ON);
-    const post = vi.spyOn(aap, 'apiPost').mockRejectedValue(new Error('must not POST'));
+    // Call-through spy: the REAL updateEscalations runs and must reject with
+    // ESCALATION_INVALID during body validation (before any POST).
+    const upd = vi.spyOn(aap, 'updateEscalations');
     const r = await call('aap-api:update-escalations', { workRequestId: 'WR-1', aaid: 'aaid_1', add: ['MCS_LEAD'], comment: '' });
     expect(r).toMatchObject({ ok: false, code: 'ESCALATION_INVALID' });
-    expect(post).not.toHaveBeenCalled();
+    expect(upd).toHaveBeenCalledTimes(1);
+    await expect(upd.mock.results[0].value).rejects.toMatchObject({ code: 'ESCALATION_INVALID' });
   });
 });
 
