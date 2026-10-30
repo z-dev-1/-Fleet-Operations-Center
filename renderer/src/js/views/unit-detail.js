@@ -3485,7 +3485,9 @@ function _renderEscalation(unit,wrap,res,live){
   // A send for this WR is still pending from an earlier card (pane rebuilt
   // mid-send): render this card's controls disabled so the same change can't
   // be submitted twice. send() re-enables / re-wires whichever card is current.
-  if(_escInFlight.has(wrId))setBusy(true);
+  // Only the DOM is disabled here (not the local busy flag): isBusy() reads the
+  // module-level _escInFlight, so this card works again once that send settles.
+  if(_escInFlight.has(wrId))_escSetDisabled(card,true);
   var isBusy=function(){return busy||_escInFlight.has(wrId);};
   var send=async function(payload,okMsg){
     _escInFlight.add(wrId);
