@@ -305,6 +305,73 @@ export function openWrChoices(unit) {
   return out;
 }
 
+// ── WR escalation (Repair tab) ─────────────────────────────────────────────
+// Pure helpers for the Escalation card. Teams/current come live from AAP via
+// window.aapApi; createdBy is resolved in the main process, never sent here.
+export const ESC_COMMENT_MAX = 2000;
+export const ESC_CARRIER_UPDATE = 'MCS_CARRIER_UPDATE_REQUEST';
+
+export function escalationAaid(unit) {
+  const u = unit || {};
+  if (u.aaid) return String(u.aaid).trim();
+  const m = String(u.assetUrl || '').match(/\/v2\/asset\/([^/?#]+)/);
+  return m ? m[1] : '';
+}
+
+export function parseEscalationList(v) {
+  if (v == null) return [];
+  const arr = Array.isArray(v) ? v : String(v).split(/[;,]/);
+  const out = [];
+  arr.forEach((x) => {
+    const s = String((x && typeof x === 'object') ? (x.value || '') : (x == null ? '' : x)).trim();
+    if (s && !out.includes(s)) out.push(s);
+  });
+  return out;
+}
+
+export function escalationSelectable(options, current) {
+  const cur = new Set(parseEscalationList(current));
+  const seen = new Set();
+  const out = [];
+  (Array.isArray(options) ? options : []).forEach((o) => {
+    const v = String((o && o.value) || '').trim();
+    if (!v || cur.has(v) || seen.has(v)) return;
+    seen.add(v);
+    out.push(o);
+  });
+  return out;
+}
+
+export function validateEscalationDraft({ team, comment, current } = {}) {
+  const t = String(team || '').trim();
+  const c = String(comment || '').trim();
+  if (!t) return { ok: false, error: 'Pick a team to escalate to.' };
+  if (parseEscalationList(current).includes(t)) return { ok: false, error: 'That escalation is already applied.' };
+  if (!c) return { ok: false, error: 'A reason comment is required to escalate.' };
+  if (c.length > ESC_COMMENT_MAX) return { ok: false, error: 'Reason comment must be ' + ESC_COMMENT_MAX + ' characters or fewer.' };
+  return { ok: true, error: null };
+}
+
+export function validateDeEscalation({ value, comment, current } = {}) {
+  const v = String(value || '').trim();
+  const c = String(comment || '').trim();
+  if (!v || !parseEscalationList(current).includes(v)) return { ok: false, error: 'That escalation is not currently applied.' };
+  if (v === ESC_CARRIER_UPDATE && !c) return { ok: false, error: 'Add a reason comment to remove Carrier Update Request' };
+  if (c.length > ESC_COMMENT_MAX) return { ok: false, error: 'Reason comment must be ' + ESC_COMMENT_MAX + ' characters or fewer.' };
+  return { ok: true, error: null };
+}
+
+export function buildEscalationPayload(unit, { add, remove, comment } = {}) {
+  const u = unit || {};
+  return {
+    workRequestId: u.workRequestId,
+    aaid: escalationAaid(u),
+    add: Array.isArray(add) ? add : [],
+    remove: Array.isArray(remove) ? remove : [],
+    comment: String(comment || ''),
+  };
+}
+
 function _attachSectionHtml(unit) {
   const choices = openWrChoices(unit);
   if (!choices.length) {
@@ -2334,10 +2401,14 @@ function renderRepairPane(unit){
     });
   }, 100);
 
+  // Escalation card mount (filled by _wireEscalation; stays hidden unless AAP
+  // reports the feature enabled and returns teams for this unit's fleet).
+  var escalateHtml=(unit.workRequestId&&escalationAaid(unit))?'<div class="dp-escalate-wrap" id="dp-escalate-wrap" hidden></div>':'';
+
   return '<div class="dp-pane active" id="dp-pane-repair">'+
     // Dealer case stage sits at the top so it's visible without scrolling.
     (stageHtml?'<div class="dp-section-title">Dealer Case Stage</div>'+stageHtml:'')+
-    '<div class="dp-section-title">Work Request</div>'+woCard+plannedWRCard+secondaryWRCards+splitViewBtn+durBar+timelineHtml+offsiteHtml+
+    '<div class="dp-section-title">Work Request</div>'+woCard+escalateHtml+plannedWRCard+secondaryWRCards+splitViewBtn+durBar+timelineHtml+offsiteHtml+
   '</div>';
 }
 
@@ -2779,6 +2850,9 @@ function _renderUnit(unit) {
 
   // ── notes ──────────────────────────────────────────────────────────────────
   _wireNotes(unit);
+
+  // ── repair tab: WR escalation card ─────────────────────────────────────────
+  _wireEscalation(unit);
 
   // ── history tab: 12-month repair intelligence report + controls ───────────
   _wireRepairIntel(unit);
@@ -3293,6 +3367,168 @@ function _wireHistoryPane(unit) {
     list.innerHTML = bds.map(renderCard).join('');
   }).catch(function(e) {
     list.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to load breakdown history: ' + esc((e && e.message) || 'error') + '</div>';
+  });
+}
+
+// ── _wireEscalation ───────────────────────────────────────────────────────────
+// Repair tab Escalation card. _renderUnit re-runs on every live refresh, so the
+// AAP context (feature gate + live teams + current) is cached per WR for 2 min
+// and the AI/rules suggestion per WR+current for the session. Nothing is sent
+// to AAP until the user clicks Escalate or confirms a chip removal.
+var _escCtxCache=new Map();     // wrId -> {at, res}
+var _escSuggestCache=new Map(); // wrId|current -> suggestion
+var _ESC_CTX_TTL=120000;
+
+function _escAttr(s){return esc(s).replace(/"/g,'&quot;');}
+
+function _escClear(wrId){
+  _escCtxCache.delete(wrId);
+  Array.from(_escSuggestCache.keys()).forEach(function(k){if(k.indexOf(wrId+'|')===0)_escSuggestCache.delete(k);});
+}
+
+function _wireEscalation(unit){
+  var wrap=document.getElementById('dp-escalate-wrap');
+  if(!wrap||!window.aapApi||typeof window.aapApi.escalationOptions!=='function')return;
+  var wrId=String(unit.workRequestId||'');
+  var aaid=escalationAaid(unit);
+  if(!wrId||!aaid)return;
+  var live=function(){return !!(_unit&&_unit.equipmentId===unit.equipmentId&&document.body.contains(wrap));};
+  (async function(){
+    var res=null;
+    var hit=_escCtxCache.get(wrId);
+    if(hit&&Date.now()-hit.at<_ESC_CTX_TTL){
+      res=hit.res;
+    }else{
+      try{res=await window.aapApi.escalationOptions({aaid:aaid,workRequestId:wrId});}catch(_e){return;}
+      if(res&&res.ok)_escCtxCache.set(wrId,{at:Date.now(),res:res});
+    }
+    if(!live())return;
+    if(!res||!res.ok||!res.enabled||!Array.isArray(res.options)||!res.options.length)return;
+    _renderEscalation(unit,wrap,res,live);
+  })();
+}
+
+function _renderEscalation(unit,wrap,res,live){
+  var wrId=String(unit.workRequestId||'');
+  var options=res.options;
+  var current=parseEscalationList(res.current);
+  var selectable=escalationSelectable(options,current);
+  var labelOf=function(v){
+    for(var i=0;i<options.length;i++){if(options[i]&&options[i].value===v)return String(options[i].displayText||v);}
+    return v;
+  };
+
+  var chips=current.length?current.map(function(v){
+    var l=labelOf(v);
+    return '<span class="dp-escalate__chip">'+esc(l)+
+      '<button type="button" class="dp-escalate__chip-x" data-esc-remove="'+_escAttr(v)+'" aria-label="Remove escalation '+_escAttr(l)+'">×</button></span>';
+  }).join(''):'<span class="dp-escalate__none">No active escalations</span>';
+
+  // The comment box stays even when every team is applied: removing Carrier
+  // Update Request needs a reason comment.
+  var html='<div class="dp-section-title">Escalation</div><div class="dp-escalate">'+
+    '<div class="dp-escalate__chips">'+chips+'</div>'+
+    (selectable.length?'<div class="dp-escalate__ai" id="dp-escalate-ai">Suggesting…</div>':'')+
+    (selectable.length?'<div class="dp-escalate__row">'+
+      '<select id="dp-escalate-team" class="dp-escalate__select" aria-label="Escalation team">'+
+        '<option value="">Select team…</option>'+
+        selectable.map(function(o){return '<option value="'+_escAttr(o.value)+'">'+esc(o.displayText||o.value)+'</option>';}).join('')+
+      '</select>'+
+      '<button type="button" id="dp-escalate-send" class="dp-escalate__btn">Escalate</button>'+
+    '</div>':'')+
+    '<textarea id="dp-escalate-comment" class="dp-escalate__comment" maxlength="'+ESC_COMMENT_MAX+'" rows="3" aria-label="Escalation reason comment" placeholder="'+(selectable.length?'Reason comment (required)':'Reason comment')+'"></textarea>'+
+    '<span class="dp-escalate__count" id="dp-escalate-count" aria-live="polite">0/'+ESC_COMMENT_MAX+'</span>'+
+  '</div>';
+  wrap.innerHTML=html;
+  wrap.hidden=false;
+
+  var card=wrap.querySelector('.dp-escalate');
+  var teamEl=wrap.querySelector('#dp-escalate-team');
+  var cmtEl=wrap.querySelector('#dp-escalate-comment');
+  var countEl=wrap.querySelector('#dp-escalate-count');
+  var aiEl=wrap.querySelector('#dp-escalate-ai');
+  var sendBtn=wrap.querySelector('#dp-escalate-send');
+  var teamDirty=false, cmtDirty=false, busy=false;
+
+  var updCount=function(){
+    var n=cmtEl.value.length;
+    countEl.textContent=n+'/'+ESC_COMMENT_MAX;
+    countEl.classList.toggle('dp-escalate__count--over',n>ESC_COMMENT_MAX);
+  };
+  cmtEl.addEventListener('input',function(){cmtDirty=true;updCount();});
+  if(teamEl)teamEl.addEventListener('change',function(){teamDirty=true;});
+
+  var setBusy=function(on){
+    busy=on;
+    if(sendBtn)sendBtn.disabled=on;
+    card.querySelectorAll('[data-esc-remove]').forEach(function(b){b.disabled=on;});
+  };
+  var send=async function(payload,okMsg){
+    var r;
+    try{r=await window.aapApi.updateEscalations(payload);}catch(e){r={ok:false,error:e&&e.message};}
+    if(r&&r.ok){
+      toast.show('success',okMsg,4000);
+      _escClear(wrId);
+      if(live())_wireEscalation(unit);
+      return;
+    }
+    toast.show('error','Escalation failed: '+((r&&r.error)||'unknown'),6000);
+    if(live())setBusy(false);
+  };
+
+  // ── suggestion (fills team + comment only if the user hasn't touched them) ─
+  if(selectable.length){
+    var sk=wrId+'|'+current.join(',');
+    (async function(){
+      var s=_escSuggestCache.get(sk)||null;
+      if(!s&&typeof window.aapApi.escalationSuggest==='function'){
+        try{
+          var r=await window.aapApi.escalationSuggest({unit:unit.equipmentId,options:options,current:current});
+          s=(r&&r.ok&&r.suggestion)||null;
+        }catch(_e){s=null;}
+        if(s)_escSuggestCache.set(sk,s);
+      }
+      if(!live()||!document.body.contains(aiEl))return;
+      if(!s||!s.team||!selectable.some(function(o){return o.value===s.team;})){
+        aiEl.textContent='No suggestion — pick a team and write a reason.';
+        return;
+      }
+      if(!teamDirty&&teamEl)teamEl.value=s.team;
+      if(!cmtDirty&&s.comment){cmtEl.value=String(s.comment).slice(0,ESC_COMMENT_MAX);updCount();}
+      aiEl.innerHTML=esc(s.rationale||('Suggested: '+labelOf(s.team)))+
+        '<span class="dp-escalate__badge">'+(s.source==='ai'?'AI':'Rules')+'</span>';
+    })();
+  }
+
+  // ── Escalate ─────────────────────────────────────────────────────────────
+  if(sendBtn)sendBtn.addEventListener('click',function(){
+    if(busy)return;
+    var team=teamEl?teamEl.value:'';
+    var comment=cmtEl.value;
+    var v=validateEscalationDraft({team:team,comment:comment,current:current});
+    if(!v.ok){toast.show('warn',v.error,3500);return;}
+    setBusy(true);
+    send(buildEscalationPayload(unit,{add:[team],remove:[],comment:comment}),'Escalated to '+labelOf(team));
+  });
+
+  // ── chip × (de-escalate after confirm) ───────────────────────────────────
+  card.querySelectorAll('[data-esc-remove]').forEach(function(btn){
+    btn.addEventListener('click',function(){
+      if(busy)return;
+      var value=btn.getAttribute('data-esc-remove')||'';
+      var comment=cmtEl.value;
+      var carrier=value===ESC_CARRIER_UPDATE;
+      var v=validateDeEscalation({value:value,comment:comment,current:current});
+      if(!v.ok){
+        toast.show('warn',v.error,3500);
+        if(carrier)cmtEl.focus();
+        return;
+      }
+      var label=labelOf(value);
+      if(!window.confirm('Remove escalation "'+label+'"?'+(carrier?' This comment will be visible to the carrier (names and $ removed).':'')))return;
+      setBusy(true);
+      send(buildEscalationPayload(unit,{add:[],remove:[value],comment:comment}),'Removed escalation '+label);
+    });
   });
 }
 

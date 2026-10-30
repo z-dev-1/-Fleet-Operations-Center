@@ -4880,6 +4880,23 @@ td:has(.pm-pills-row) {
 .dp-stage--ready .dp-stage__step--current { color: #fff; background: #238636; border-color: #2ea043; }
 .dp-stage__sep { color: var(--mut); font-size: 10px; }
 .dp-stage__detail { font-size: 10px; color: var(--txt2); margin-top: 3px; }
+/* WR escalation card (Repair tab, under the Work Request card) */
+.dp-escalate-wrap { margin-top: 6px; }
+.dp-escalate { background: var(--card); border: 1px solid var(--bdr); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.dp-escalate__chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.dp-escalate__chip { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--adim); color: var(--txt); border: 1px solid var(--acc2); display: inline-flex; align-items: center; gap: 4px; }
+.dp-escalate__chip-x { background: none; border: 0; color: var(--mut); cursor: pointer; font-size: 11px; padding: 0; }
+.dp-escalate__chip-x:hover { color: var(--red); }
+.dp-escalate__chip-x:focus-visible { outline: 1px solid var(--acc2); }
+.dp-escalate__none, .dp-escalate__ai { font-size: 10px; color: var(--txt2); }
+.dp-escalate__badge { font-size: 9px; padding: 1px 6px; border-radius: 4px; background: var(--adim); color: var(--acc2); margin-left: 4px; }
+.dp-escalate__row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.dp-escalate__select, .dp-escalate__comment { font-size: 11px; background: var(--el); color: var(--txt); border: 1px solid var(--bdr); border-radius: 4px; padding: 3px 6px; }
+.dp-escalate__comment { width: 100%; min-height: 56px; resize: vertical; box-sizing: border-box; }
+.dp-escalate__count { font-size: 9px; font-family: var(--mono); color: var(--mut); }
+.dp-escalate__count--over { color: var(--red); }
+.dp-escalate__btn { font-size: 11px; padding: 3px 10px; border-radius: 4px; border: 1px solid var(--acc2); background: var(--acc2); color: #fff; cursor: pointer; }
+.dp-escalate__btn:disabled { opacity: .5; cursor: default; }
 .dp-offsite-card__ts    { font-size: 9px; color: var(--mut); margin-top: 2px; }
 .dp-offsite-card__src-badge { font-size: 9px; padding: 1px 6px; border-radius: 4px; background: var(--adim); color: var(--acc2); }
 
