@@ -95,7 +95,8 @@ function registerSlackIPC(ctx) {
         webPreferences: { nodeIntegration: false, contextIsolation: true, partition: 'persist:slack' },
       });
       slackWin.setMenuBarVisibility(false);
-      slackWin.loadURL('https://amazon.enterprise.slack.com/');
+      // (Slack page load moved below: it runs after the persist:slack
+      //  partition is seeded with the Midway session -- see FIX 2026-10-30.)
 
       let tokenGrabbed = false;
       const ses    = electronSession.fromPartition('persist:slack');
@@ -128,6 +129,21 @@ function registerSlackIPC(ctx) {
       slackWin.on('closed', () => {
         if (!tokenGrabbed) resolve({ ok: false, error: 'Login window closed before sign-in completed' });
       });
+
+      // FIX (2026-10-30): seed the isolated persist:slack partition with the
+      // same already-valid Midway session the main window uses (same pattern
+      // as credentials:test-login for vendor partitions). Runs after `ses` and
+      // the token listener above exist, so the token is still captured.
+      (async () => {
+        try {
+          const { injectCookies } = require('../scrapers/auth');
+          await injectCookies(ses);
+          logger.info('Slack login: Midway session injected into persist:slack');
+        } catch (e) {
+          logger.warn('Slack login: Midway cookie injection failed (continuing): ' + e.message);
+        }
+        if (!slackWin.isDestroyed()) slackWin.loadURL('https://amazon.enterprise.slack.com/');
+      })();
     });
   });
 

@@ -412,11 +412,25 @@ function registerMiscIPC(ctx) {
     // non-vendor URLs fall back to defaultSession (same Midway cookies as the
     // scraper window). Mirrors the window:split-view partition logic.
     let _openSession = session.defaultSession;
+    let _part = null;
     try {
       const { partitionForUrl } = require('../orcha/auto-login');
-      const _part = partitionForUrl(url);
+      _part = partitionForUrl(url);
       if (_part) _openSession = session.fromPartition(_part);
     } catch (_) { /* fall back to defaultSession */ }
+    // FIX (2026-10-30): seed the isolated persist:vendor-uptake partition with
+    // the same already-valid Midway session the main window uses (same
+    // pattern as the Slack login and credentials:test-login), so Uptake's
+    // Amazon-SSO step doesn't stop at a login wall. Uptake only.
+    if (_part === 'persist:vendor-uptake') {
+      try {
+        const { injectCookies } = require('../scrapers/auth');
+        await injectCookies(_openSession);
+        logger.info('Uptake open: Midway session injected into persist:vendor-uptake');
+      } catch (e) {
+        logger.warn('Uptake open: Midway cookie injection failed (continuing): ' + e.message);
+      }
+    }
     const win = new BrowserWindow({
       width: 1280, height: 860,
       title: 'Fleet — External',
