@@ -262,6 +262,24 @@ export function init() {
     });
   }
 
+  // Context-aware assistant: proactive notes pushed from the main-process
+  // notifier. The notif dropdown renders body via innerHTML, so note text
+  // (vendor names, dealer status, timeline comments) is escaped here and the
+  // raw text never goes on ui:notif-push.
+  function _esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  if (window.assistant) {
+    window.assistant.onNotes(p => {
+      bus.emit('assistant:notes', p);
+      const first = (p && p.notes && p.notes[0]) || {};
+      bus.emit('ui:notif-push', {
+        icon: '🤖',
+        title: 'Orcha: ' + ((p && p.notes && p.notes.length) || 0) + ' new note(s)',
+        body: _esc(String(first.text || '').slice(0, 200)),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), // display string, like notif-dropdown.js:245
+      });
+    });
+  }
+
 
 
   // S23-8: attach vendor push listeners
@@ -392,6 +410,16 @@ export const ai = {
   getExecutionLog:  ()           => window.ai.getExecutionLog(),
   exportExcel:      (data)       => window.ai.exportExcel(data),
   inferRCA:         (text, ctx)  => window.ai.inferRCA(text, ctx),
+};
+
+// ── Context-aware assistant ────────────────────────────────────────────────
+// Guarded: resolves a benign fallback when the preload bridge is missing
+// (e.g. the bubble window or tests), so callers can .then/.catch safely.
+export const assistant = {
+  setScreenContext: (c)  => window.assistant ? window.assistant.setScreenContext(c) : Promise.resolve({ ok: false }),
+  getNotes:         ()   => window.assistant ? window.assistant.getNotes()          : Promise.resolve({ ok: false, notes: [], unseen: 0 }),
+  markNotesSeen:    ()   => window.assistant ? window.assistant.markNotesSeen()     : Promise.resolve({ ok: false }),
+  dismissNote:      (id) => window.assistant ? window.assistant.dismissNote(id)     : Promise.resolve({ ok: false }),
 };
 
 

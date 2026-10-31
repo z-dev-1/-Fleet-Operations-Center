@@ -10,7 +10,7 @@
  */
 
 import bus from '../bus.js';
-import { ai, slack, aap } from '../bridge.js';
+import { ai, slack, aap, assistant } from '../bridge.js';
 import state from '../state.js';
 import toast from '../components/toast.js';
 
@@ -853,6 +853,95 @@ function _refreshAlerts() {
   });
 }
 
+// ── Context-aware assistant: proactive Notes tab ────────────────────────────
+// Notes come from the main-process notifier (assistant:get-notes and the
+// assistant:notes push re-emitted on the bus by bridge.js). They are
+// suggestions only; the buttons here navigate, pre-fill chat, or dismiss.
+// Nothing is sent anywhere from this tab.
+let _notes = [];
+
+function _updateNotesBadge(unseen) {
+  const n = Number(unseen) || 0;
+  const tabBadge = document.getElementById('oc-notes-badge');
+  const fabBadge = document.getElementById('orcha-fab-badge');
+  [tabBadge, fabBadge].forEach((el) => {
+    if (!el) return;
+    if (n > 0) {
+      el.textContent = n > 99 ? '99+' : String(n);
+      el.style.display = '';
+    } else {
+      el.style.display = 'none';
+    }
+  });
+}
+
+function _loadNotes() {
+  return assistant.getNotes().then((r) => {
+    if (!r || r.ok === false) return;
+    _notes = Array.isArray(r.notes) ? r.notes : [];
+    // While the Notes tab is open the user is looking at them; the
+    // markNotesSeen() call from _switchTab owns the badge then.
+    if (_activeTab !== 'notes') _updateNotesBadge(r.unseen || 0);
+    if (_activeTab === 'notes') _refreshNotes();
+  }).catch(() => {});
+}
+
+// Renders the cached _notes list (call _loadNotes() to re-fetch).
+function _refreshNotes() {
+  const listEl = document.getElementById('oc-notes-list');
+  if (!listEl) return;
+  if (!_notes.length) {
+    listEl.innerHTML = '<div class="oc-alerts-empty" id="oc-notes-empty">No notes right now.</div>';
+    return;
+  }
+
+  listEl.innerHTML = _notes.map((n) => {
+    const u = _escapeHtml(n.unit);
+    const high = n.severity === 'high';
+    const when = n.at ? new Date(n.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    return `<div class="oc-alert-item ${high ? 'oc-alert-item--high' : ''}" data-id="${_escapeHtml(n.id)}" data-unit="${u}">
+      <div class="oc-alert-head">
+        <span class="oc-alert-unit">${u || '&mdash;'}</span>
+        <span class="oc-alert-sev ${high ? 'oc-alert-sev--high' : 'oc-alert-sev--medium'}">${_escapeHtml(n.title)}</span>
+        <span class="oc-alert-site">${_escapeHtml(when)}</span>
+      </div>
+      <div class="oc-alert-detail">${_escapeHtml(n.text)}</div>
+      <div class="oc-alert-actions">
+        ${u ? '<button class="oc-alert-btn" data-action="view">View unit</button><button class="oc-alert-btn" data-action="ask">Ask Orcha</button>' : ''}
+        <button class="oc-alert-btn" data-action="dismiss">Dismiss</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  listEl.querySelectorAll('.oc-alert-item').forEach((el) => {
+    const id = el.getAttribute('data-id');
+    const unit = el.getAttribute('data-unit');
+    el.querySelectorAll('.oc-alert-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const action = btn.getAttribute('data-action');
+        if (action === 'view') {
+          bus.emit('navigate:unit', unit);
+        } else if (action === 'ask') {
+          // Pre-fill only -- the user decides whether to send.
+          _switchTab('chat');
+          const input = document.getElementById('orcha-input');
+          if (input) {
+            input.value = "What's going on with " + unit + '?';
+            input.focus();
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+          }
+        } else if (action === 'dismiss') {
+          assistant.dismissNote(id).then(() => {
+            _notes = _notes.filter((x) => x && x.id !== id);
+            _refreshNotes();
+          }).catch(() => {});
+        }
+      });
+    });
+  });
+}
+
 // ── FEATURE (2026-07-16): Slack tab — Chat/Slack tab switching ──────────────
 function _switchTab(tab) {
   if (tab === _activeTab) return;
@@ -862,21 +951,25 @@ function _switchTab(tab) {
   const reviewBtn = document.getElementById('oc-tab-btn-review');
   const alertsBtn = document.getElementById('oc-tab-btn-alerts');
   const calBtn   = document.getElementById('oc-tab-btn-calendar');
+  const notesBtn = document.getElementById('oc-tab-btn-notes');
   const chatPane = document.getElementById('oc-tab-chat');
   const slackPane = document.getElementById('oc-tab-slack');
   const reviewPane = document.getElementById('oc-tab-review');
   const alertsPane = document.getElementById('oc-tab-alerts');
   const calPane  = document.getElementById('oc-tab-calendar');
+  const notesPane = document.getElementById('oc-tab-notes');
   if (chatBtn)  chatBtn.classList.toggle('oc-tab--active', tab === 'chat');
   if (slackBtn) slackBtn.classList.toggle('oc-tab--active', tab === 'slack');
   if (reviewBtn) reviewBtn.classList.toggle('oc-tab--active', tab === 'review');
   if (alertsBtn) alertsBtn.classList.toggle('oc-tab--active', tab === 'alerts');
   if (calBtn)   calBtn.classList.toggle('oc-tab--active', tab === 'calendar');
+  if (notesBtn) notesBtn.classList.toggle('oc-tab--active', tab === 'notes');
   if (chatPane)  chatPane.style.display  = tab === 'chat'     ? '' : 'none';
   if (slackPane) slackPane.style.display = tab === 'slack'    ? '' : 'none';
   if (reviewPane) reviewPane.style.display = tab === 'review' ? '' : 'none';
   if (alertsPane) alertsPane.style.display = tab === 'alerts' ? '' : 'none';
   if (calPane)  calPane.style.display   = tab === 'calendar'  ? '' : 'none';
+  if (notesPane) notesPane.style.display = tab === 'notes'    ? '' : 'none';
 
   if (tab === 'slack') {
     _refreshSlackTabState();
@@ -890,6 +983,11 @@ function _switchTab(tab) {
   } else if (tab === 'calendar') {
     _stopSlackTabRefresh();
     _refreshCalendar();
+  } else if (tab === 'notes') {
+    _stopSlackTabRefresh();
+    _refreshNotes();
+    _loadNotes();
+    assistant.markNotesSeen().then(() => _updateNotesBadge(0)).catch(() => {});
   } else {
     _stopSlackTabRefresh();
   }
@@ -1097,6 +1195,8 @@ function _wireSlackTab() {
   if (reviewBtn) reviewBtn.addEventListener('click', () => _switchTab('review'));
   if (alertsBtn) alertsBtn.addEventListener('click', () => _switchTab('alerts'));
   if (calBtn2)  calBtn2.addEventListener('click', () => _switchTab('calendar'));
+  const notesBtn = document.getElementById('oc-tab-btn-notes');
+  if (notesBtn) notesBtn.addEventListener('click', () => _switchTab('notes'));
 
   const calRefreshBtn = document.getElementById('oc-cal-refresh');
   if (calRefreshBtn) calRefreshBtn.addEventListener('click', _refreshCalendar);
@@ -1759,7 +1859,7 @@ export function init() {
   fab.id        = 'orcha-fab';
   fab.className = 'orcha-fab';
   fab.title     = 'Orcha AI';
-  fab.innerHTML = '\u{2728}';
+  fab.innerHTML = '\u{2728}<span class="orcha-fab-badge" id="orcha-fab-badge" style="display:none">0</span>';
   fab.addEventListener('click', _togglePanel);
   document.body.appendChild(fab);
 
@@ -1780,6 +1880,7 @@ export function init() {
       <button class="oc-tab" id="oc-tab-btn-slack" data-tab="slack">Slack</button>
       <button class="oc-tab" id="oc-tab-btn-review" data-tab="review">Review<span class="oc-review-badge" id="oc-review-badge" style="display:none">0</span></button>
       <button class="oc-tab" id="oc-tab-btn-alerts" data-tab="alerts">Alerts<span class="oc-alerts-badge" id="oc-alerts-badge" style="display:none">0</span></button>
+      <button class="oc-tab" id="oc-tab-btn-notes" data-tab="notes">Notes<span class="oc-alerts-badge" id="oc-notes-badge" style="display:none">0</span></button>
     </div>
     <div class="oc-tab-content" id="oc-tab-chat">
       <div class="oc-msgs" id="orcha-msgs">
@@ -1821,6 +1922,11 @@ export function init() {
     <div class="oc-tab-content" id="oc-tab-alerts" style="display:none">
       <div class="oc-alerts-list" id="oc-alerts-list">
         <div class="oc-alerts-empty" id="oc-alerts-empty">No active alerts right now.</div>
+      </div>
+    </div>
+    <div class="oc-tab-content" id="oc-tab-notes" style="display:none">
+      <div class="oc-alerts-list" id="oc-notes-list">
+        <div class="oc-alerts-empty" id="oc-notes-empty">No notes right now.</div>
       </div>
     </div>
     <div class="oc-tab-content" id="oc-tab-calendar" style="display:none">
@@ -1930,6 +2036,16 @@ export function init() {
     if (_activeTab === 'alerts') _refreshAlerts();
   });
   _updateAlertsBadge();
+
+  // Context-aware assistant: proactive notes. Seed badge + list now, then
+  // re-fetch whenever the notifier pushes (bridge.js re-emits on the bus).
+  bus.on('assistant:notes', () => {
+    _loadNotes().then(() => {
+      // Tab already open: the new notes are visible, so mark them seen.
+      if (_activeTab === 'notes') assistant.markNotesSeen().then(() => _updateNotesBadge(0)).catch(() => {});
+    });
+  });
+  _loadNotes();
 
   // Start Slack DM polling on boot (background)
   setTimeout(() => _startSlackPoll(), 3000);

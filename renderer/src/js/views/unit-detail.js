@@ -2722,6 +2722,16 @@ async function _runDailyNotesForUnit(unit) {
 }
 
 
+// ── _emitTabContext ──────────────────────────────────────────────────────────
+// Tell the screen-context publisher which detail tab is active (assistant
+// awareness). Read-only: just reports the current .dp-tab.active.
+function _emitTabContext() {
+  if (!_panel) return;
+  var activeEl = _panel.querySelector('.dp-tab.active');
+  var tab = activeEl && activeEl.dataset ? (activeEl.dataset.tab || null) : null;
+  bus.emit('ui:unit-tab-change', { unitId: _unit && _unit.equipmentId, tab: tab });
+}
+
 // ── _renderUnit ──────────────────────────────────────────────────────────────
 function _renderUnit(unit) {
   _unit = unit;
@@ -2757,8 +2767,11 @@ function _renderUnit(unit) {
       btn.classList.add('active');
       var pane = document.getElementById('dp-pane-' + btn.dataset.tab);
       if (pane) pane.classList.add('active');
+      _emitTabContext();
     });
   });
+  // Publish the default tab (computed by renderTabs) for the assistant.
+  _emitTabContext();
 
   // Load ALL uptake screenshots into Intel tab (one per insight). Each image
   // lazy-loads its PNG as a data URL and opens full-size on click.
@@ -2876,6 +2889,7 @@ function _renderUnit(unit) {
       var ap = document.getElementById('dp-pane-actions');
       if (at) at.classList.add('active');
       if (ap) ap.classList.add('active');
+      _emitTabContext();
       setTimeout(function(){ var s=document.getElementById('dp-vendor-section'); if(s)s.scrollIntoView({behavior:'smooth',block:'start'}); }, 100);
 
       // Dealer WO automation only supports PACCAR (Kenworth/Peterbilt) and
@@ -3762,6 +3776,7 @@ export function init(container) {
                 btn.classList.add('active');
                 pane.classList.add('active');
               }
+              _emitTabContext();
             }
           }).catch(() => { /* best-effort */ });
         }
@@ -3812,6 +3827,7 @@ export function init(container) {
         btn.classList.add('active');
         pane.classList.add('active');
       }
+      _emitTabContext();
     }
   });
 }

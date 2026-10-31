@@ -281,6 +281,15 @@ expose('ai', {
   timelineIntel:    ()             => ipcRenderer.invoke('orcha:timeline-intel'),
 });
 
+// ── Context-aware assistant (screen context + proactive notes) ───────────────
+expose('assistant', {
+  setScreenContext: (c)  => ipcRenderer.invoke('assistant:set-screen-context', c),
+  getNotes:         ()   => ipcRenderer.invoke('assistant:get-notes'),
+  markNotesSeen:    ()   => ipcRenderer.invoke('assistant:mark-notes-seen'),
+  dismissNote:      (id) => ipcRenderer.invoke('assistant:dismiss-note', id),
+  onNotes:          (cb) => on('assistant:notes', cb),
+});
+
 
 
 // ── Slack ─────────────────────────────────────────────────────────────────────

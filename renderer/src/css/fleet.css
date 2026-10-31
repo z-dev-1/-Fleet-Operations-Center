@@ -3567,6 +3567,22 @@ td .pm-pill {
   background: linear-gradient(135deg, rgba(88,166,255,.3), rgba(210,168,255,.25));
   border-color: var(--pur);
 }
+/* Unseen proactive-notes count on the FAB (same colors as .oc-alerts-badge). */
+.orcha-fab-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  padding: 1px 5px;
+  border-radius: 9px;
+  background: #dc2626;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-align: center;
+  pointer-events: none;
+}
 
 .orcha-panel {
   position: fixed;

@@ -63,6 +63,10 @@ export const UI_TOAST             = 'ui:toast';
 export const UI_LOADING           = 'ui:loading';
 export const UI_QUICK_FILTER      = 'ui:quick-filter';
 export const UI_NOTIF_PUSH        = 'ui:notif-push';
+export const UI_UNIT_TAB_CHANGE   = 'ui:unit-tab-change';
+
+// ── Context-aware assistant ───────────────────────────────────────────────────
+export const ASSISTANT_NOTES      = 'assistant:notes';
 
 // ── State slice events (emitted by state.js on update) ────────────────────────
 export const STATE_FLEET          = 'state:fleet';

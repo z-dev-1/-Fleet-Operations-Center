@@ -376,6 +376,20 @@ function _html() {
           </div>
         </div>
 
+        <!-- Orcha Proactive Notes (context-aware assistant) -->
+        <div class="sd-section" id="sect-orcha-notes">
+          <div class="sd-section-title">Orcha Proactive Notes</div>
+          <div class="sd-hint" style="margin-bottom:10px">Short suggestions when units go Ready, get escalated, hit a high estimate, or stall. Nothing is ever sent to carriers or vendors.</div>
+          <div class="sd-toggle-row">
+            <label class="sd-toggle-label" for="set-proactive-inapp">Show notes in the Orcha panel</label>
+            <input type="checkbox" id="set-proactive-inapp" checked/>
+          </div>
+          <div class="sd-toggle-row">
+            <label class="sd-toggle-label" for="set-proactive-slack">Post notes to my Slack Just Me channel</label>
+            <input type="checkbox" id="set-proactive-slack" checked/>
+          </div>
+        </div>
+
         <!-- ═══ NEXUS THEME BUILDER (Year 3030) ═══ -->
         <div class="sd-section" id="sect-nexus-theme">
           <div class="sd-section-title" style="display:flex;align-items:center;gap:8px">
@@ -2697,6 +2711,20 @@ function _wireUITab() {
   const compact = document.getElementById('toggle-compact');
   if (compact) compact.addEventListener('change', _saveUI);
 
+  // ── Orcha proactive notes toggles (default ON; absent key => ON) ─────────
+  // settings:save resolves {ok:false, error} on failure rather than
+  // rejecting, so both shapes revert the checkbox.
+  [['set-proactive-inapp', 'proactiveNotesInApp'], ['set-proactive-slack', 'proactiveNotesSlack']].forEach(function (pair) {
+    var el = document.getElementById(pair[0]);
+    var key = pair[1];
+    if (!el) return;
+    el.addEventListener('change', function () {
+      settingsBridge.save(key, el.checked)
+        .then(function (r) { if (r && r.ok === false) throw new Error(r.error || 'save failed'); toast.show('success', 'Saved', 1500); })
+        .catch(function (e) { el.checked = !el.checked; toast.show('error', 'Could not save: ' + e.message, 4000); });
+    });
+  });
+
   // ── NEXUS THEME BUILDER WIRING ─────────────────────────────────────────────
   _wireNexusThemeBuilder();
 }
@@ -2989,6 +3017,12 @@ function _populate() {
 
     // UI prefs (theme, colors, sliders, font)
     if (all.ui_prefs) _applyUI(all.ui_prefs);
+
+    // Orcha proactive notes (default ON when the key is absent)
+    const pInApp = document.getElementById('set-proactive-inapp');
+    const pSlack = document.getElementById('set-proactive-slack');
+    if (pInApp) pInApp.checked = all.proactiveNotesInApp !== false;
+    if (pSlack) pSlack.checked = all.proactiveNotesSlack !== false;
 
     // Domiciles populate removed (2026-08-14): editor moved to the 👤 User
     // Profile popover, which loads from settings.getDomiciles() itself.

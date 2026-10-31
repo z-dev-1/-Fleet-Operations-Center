@@ -15,6 +15,7 @@ import { init as initVendorActivityBar }  from './components/vendor-activity-bar
 import { init as initPriorityDrawer }     from './components/priority-drawer.js';
 import { init as initNotifDropdown }      from './components/notif-dropdown.js';
 import { init as initOrchaFab }           from './components/orcha-fab.js';
+import { init as initScreenContext }      from './screen-context.js';
 import { init as initNexusSidebar }       from './components/nexus-sidebar.js';
 import { init as initMorningBriefing }   from './components/morning-briefing.js';
 import { init as initEmailTriage }        from './components/email-triage-overlay.js';
@@ -106,6 +107,7 @@ function boot() {
   // Body-level overlays (mount on document.body)
   initNotifDropdown();
   initOrchaFab();
+  initScreenContext();
 initDraftInbox();
 initNexusSidebar();
   initMorningBriefing();
