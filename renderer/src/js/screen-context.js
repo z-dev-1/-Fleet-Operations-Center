@@ -48,16 +48,22 @@ export function buildPayload(s) {
   Object.keys(src).forEach(function (k) {
     if (src[k] != null && src[k] !== '') filters[k] = String(src[k]);
   });
-  return {
-    view: _str(s.view, 32),
+  var out = {
     unitId: _str(s.unitId, 32),
     tab: s.tab || null,
     wrId: _str(s.wrId, 64),
     secondaryWrCount: s.secondaryWrCount || 0,
     filters: filters,
-    quickFilter: _str(s.quickFilter, 32),
-    search: _str(s.search, 80),
   };
+  // view / quickFilter / search are optional strings on the main side (null is
+  // rejected there, which would drop the whole payload), so omit them when unset.
+  var view = _str(s.view, 32);
+  var quickFilter = _str(s.quickFilter, 32);
+  var search = _str(s.search, 80);
+  if (view != null) out.view = view;
+  if (quickFilter != null) out.quickFilter = quickFilter;
+  if (search != null) out.search = search;
+  return out;
 }
 
 function _sendNow() {

@@ -1,8 +1,12 @@
 // tests/awareness-screen-context.test.js
 //
 // Screen-context holder and sender guard (src/orcha/awareness/screen-context.js), design §D3, §D16.6 (AC20).
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createRequire } from 'module';
+
+vi.mock('../renderer/src/js/bridge.js', () => ({ assistant: {} }));
+vi.mock('../renderer/src/js/bus.js', () => ({ default: { on() {}, emit() {}, off() {} } }));
+import { buildPayload } from '../renderer/src/js/screen-context.js';
 const require = createRequire(import.meta.url);
 const sc = require('../src/orcha/awareness/screen-context');
 const { ConfigError } = require('../src/utils/errors');
@@ -63,6 +67,24 @@ describe('set / get', () => {
 
   it('empty holder → null', () => {
     expect(sc.get({ maxAgeMs: 1000, nowMs: T0 })).toBeNull();
+  });
+});
+
+describe('renderer buildPayload → main sanitize (seam)', () => {
+  it('initial / unset state is accepted (no null view/quickFilter/search sent)', () => {
+    const p = buildPayload({ view: null, unitId: null, tab: null, wrId: null, secondaryWrCount: 0, filters: {}, quickFilter: null, search: null });
+    expect(p).not.toHaveProperty('view');
+    expect(p).not.toHaveProperty('quickFilter');
+    expect(p).not.toHaveProperty('search');
+    expect(() => sc.sanitize(p)).not.toThrow();
+    expect(() => sc.sanitize(buildPayload(undefined))).not.toThrow();
+  });
+
+  it('populated state round-trips, over-long strings clipped to main limits', () => {
+    const p = buildPayload({ view: 'fleet', unitId: '322504', tab: 'repair', wrId: 'WR-1', secondaryWrCount: 2,
+      filters: { vendor: 'Rush' }, quickFilter: 'down', search: 'x'.repeat(200) });
+    expect(sc.sanitize(p)).toEqual({ view: 'fleet', unitId: '322504', tab: 'repair', wrId: 'WR-1', secondaryWrCount: 2,
+      filters: { vendor: 'Rush' }, quickFilter: 'down', search: 'x'.repeat(80) });
   });
 });
 
