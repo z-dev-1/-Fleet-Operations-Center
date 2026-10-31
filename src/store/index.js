@@ -214,6 +214,12 @@ const REGISTRY = {
   emailLastSnapshot:       () => path.join(P.dataDir, 'email_last_snapshot.json'),
   proactiveAlertHistory:  () => path.join(P.dataDir, 'proactive_alert_history.json'),
   proactiveLastScores:   () => path.join(P.dataDir, 'proactive_last_scores.json'),
+  // Context-aware assistant (2026-11). See src/orcha/awareness/*.
+  assistantUnitSnapshots: () => path.join(P.dataDir, 'assistant_unit_snapshots.json'), // { version:1, units:{ id:{l,r,c,st,sd,ss,sr,v,w,e,x,n,nl,a,seen} } }
+  assistantChangeDigest:  () => path.join(P.dataDir, 'assistant_change_digest.json'),  // { digests:[{id,at,source,entries:[{u,k,f,t,text,wr}]}] } max 10 / 200 entries
+  assistantActionLog:     () => path.join(P.dataDir, 'assistant_action_log.json'),     // { actions:[{at,type,unit,wr,detail,actor}] } ring 50
+  assistantNoteLedger:    () => path.join(P.dataDir, 'assistant_note_ledger.json'),    // { initializedAt, sourceBaseline:{src:atMs}, keys:{key:atMs}, slackPosts:[atMs] } 30d prune
+  assistantNotesFeed:     () => path.join(P.dataDir, 'assistant_notes_feed.json'),     // { notes:[note], lastSeenAt } max 50
   // Production backend scheduler (2026-08) — durable job ledger for SharePoint
   // push + scheduled OWA email jobs. See src/scheduler/ledger.js. Owns job
   // state machine, idempotency keys, expiring leases, completed-slot keys,
