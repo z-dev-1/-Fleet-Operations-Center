@@ -137,6 +137,11 @@ function registerAapApiIPC(ctx) {
       const res = await api().updateEscalations({ workRequestId, aaid, add: a.arr, remove: r.arr, comment, createdBy });
       let current = null;
       try { current = api()._currentEscalations(await api().getService(workRequestId)); } catch (_) {}
+      // Assistant action memory: teams only, the comment is never passed or logged.
+      try {
+        const _al = require('../orcha/awareness/action-log');
+        for (const rec of _al.fromEscalationUpdate({ add: a.arr, remove: r.arr, workRequestId }, _al.resolveUnit({ workRequestId, aaid }))) _al.record(rec);
+      } catch (_) {}
       return { ok: true, current, response: res && res.response };
     } catch (e) { return { ok: false, error: e.message, code: e.code || null }; }
   });

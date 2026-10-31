@@ -126,3 +126,23 @@ describe('mappers (AC26)', () => {
     expect(al.fromTimeline('bogus', 'A1', '', 'user')).toBeNull();
   });
 });
+
+describe('hooks wired in the write handlers (AC26, static)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const root = path.resolve(path.dirname(require('url').fileURLToPath(import.meta.url)), '..');
+  const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
+
+  it('src/ipc/scrapers.js calls fromCreateWr( at least twice', () => {
+    const n = (read('src/ipc/scrapers.js').match(/fromCreateWr\(/g) || []).length;
+    expect(n).toBeGreaterThanOrEqual(2);
+  });
+
+  it('the ai:append-timeline handler block in src/ipc/ai.js calls fromTimeline(', () => {
+    const s = read('src/ipc/ai.js');
+    const i = s.indexOf("handle('ai:append-timeline'");
+    expect(i).toBeGreaterThanOrEqual(0);
+    const j = s.indexOf('handle(', i + 10);
+    expect(s.slice(i, j > i ? j : undefined)).toContain('fromTimeline(');
+  });
+});

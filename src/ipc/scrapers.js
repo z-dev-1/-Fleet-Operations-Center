@@ -173,6 +173,14 @@ function registerScrapersIPC(ctx) {
       } else if (result && result.phase === 'commit') {
         log('Work order created' + (result.workRequestId ? ': ' + result.workRequestId : ''));
       }
+      // Assistant action memory: record the user's committed WR (never blocks the return).
+      try {
+        if (result && result.phase === 'commit' && result.ok && result.workRequestId) {
+          const _al = require('../orcha/awareness/action-log');
+          const _rec = _al.fromCreateWr(result, { unitId: _al.resolveUnit({ aaid: payload.aaid, assetUrl: payload.assetUrl }), towDirection: payload.towDirection, vendor: payload.vendor });
+          if (_rec) _al.record(_rec);
+        }
+      } catch (_) {}
       return { ...result, logs };
     } finally {
       _wrApiLock = false;
@@ -368,7 +376,19 @@ function registerScrapersIPC(ctx) {
 
   // ── aap:set-lifecycle ───────────────────────────────────────────────────
   // Issue #17: rethrow as ScraperError so safeIPC logs it uniformly
-  handle('aap:set-lifecycle', async (_e, { equipmentId, assetUrl, state, reason }) => {
+  // The body lives in _setLifecycleImpl so both the API path and the browser
+  // fallback are recorded in the assistant action log on success:true without
+  // touching either path internally.
+  handle('aap:set-lifecycle', async (_e, args) => {
+    const result = await _setLifecycleImpl(args);
+    try {
+      const _al = require('../orcha/awareness/action-log');
+      const _rec = _al.fromLifecycleResult(result, { unitId: args && args.equipmentId, state: args && args.state, reason: args && args.reason });
+      if (_rec) _al.record(_rec);
+    } catch (_) {}
+    return result;
+  });
+  async function _setLifecycleImpl({ equipmentId, assetUrl, state, reason }) {
     requireString(equipmentId, 'equipmentId');
     requireString(assetUrl, 'assetUrl');
     requireString(state, 'state');
@@ -438,7 +458,7 @@ function registerScrapersIPC(ctx) {
     } catch (e) {
       throw new ScraperError(e.message, 'aap:set-lifecycle', { equipmentId, state });
     }
-  });
+  }
 
   // ── aap:create-wr ───────────────────────────────────────────────────────
   // Issue #9: re-entrancy lock prevents duplicate WR submissions
@@ -532,6 +552,12 @@ function registerScrapersIPC(ctx) {
       // Normalize to the shape the modal expects ({ ok, workRequestId, error }).
       if (result && result.phase === 'commit' && result.workRequestId) {
         log('Work order created: ' + result.workRequestId);
+        // Assistant action memory (never turns a committed WR into an error return).
+        try {
+          const _al = require('../orcha/awareness/action-log');
+          const _rec = _al.fromCreateWr(result, { unitId: (unit && unit.equipmentId) || _al.resolveUnit({ aaid: opts.aaid, assetUrl: opts.assetUrl }), towDirection: payload.towDirection, vendor: result.vendor });
+          if (_rec) _al.record(_rec);
+        } catch (_) {}
         return { ok: true, workRequestId: result.workRequestId, vendor: result.vendor, raw: result };
       }
       return { ok: false, error: (result && result.error) || 'WR not created', aapMessage: result && result.aapMessage, businessRule: result && result.businessRule, raw: result };

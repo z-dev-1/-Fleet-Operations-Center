@@ -206,6 +206,8 @@ app.whenReady().then(async () => {
       const rows = (d && d.rows) || [];
       if (rows.length) briefing.process(rows, _send);
     } catch(e) { /* advisory — don't block data push */ }
+    // Context-aware assistant: per-unit change digest + proactive candidates (src/orcha/awareness).
+    try { setImmediate(() => { try { require('./orcha/awareness/change-digest').onFleetPush(d); } catch (e) { log.warn('[awareness] digest failed: ' + e.message); } }); } catch (_) {}
 
     // WBR weekly snapshot capture — record this week's per-site + fleet-total
     // down metrics so the WBR gets a REAL Prior-Week / T6W comparison. Capture

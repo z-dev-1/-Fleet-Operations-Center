@@ -580,7 +580,7 @@ async function _jmHandleMessage(channelId, text, signal, jobId) {
   }
 
   logger.info(`[SlackWatch][${jobId || '?'}] processOrchaAction started`);
-  const result = await processOrchaAction(text, { signal, requestId: jobId });
+  const result = await processOrchaAction(text, { signal, requestId: jobId, source: 'slack-justme' });
   // If processOrchaAction returned a hard error (ok===false), throw so
   // _runJustMeJob's catch block replaces it with the friendly fallback message
   // instead of blindly posting "Error:Aborted" (or any other raw error) to Slack.
@@ -831,7 +831,7 @@ async function pollChannelsOnce(log) {
     // a tag inside a thread (how MCS alerts arrive) is actually seen. Runs
     // BEFORE the mode branches and does NOT continue — a normal channel still
     // does its regular replies too. Deduped via slackChannelReplies id.
-    const _earlyMode = ch.replyMode || config.replyMode || 'mentions';
+    const _earlyMode = require('./slack_justme_channel').channelMode(ch, config);
     // Skip PM-alert scanning on justme (personal) channels like the self-DM —
     // they have many old threads and hammering conversations.replies there just
     // gets rate-limited. PM alerts come from partner/support channels.

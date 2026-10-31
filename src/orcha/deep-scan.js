@@ -401,6 +401,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
       if (ns2._repairDoneNotifDate === _today) continue;
       _repairDoneUnits.push({
         id: unitId,
+        wr: row.workRequestId || '-',
         vendor: row.vendor || '?',
         site: row.domicileSite || '',
         signal: statusDone ? 'status: ' + (val.repairStatus || '') : lastLines.slice(-80),
@@ -419,6 +420,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
       if (ns3._outOfScopeNotifDate !== _today) {
         _outOfScopeUnits.push({
           id: unitId,
+          wr: row.workRequestId || '-',
           vendor: row.vendor || '?',
           site: row.domicileSite || '',
           signal: scopeLines.slice(-100),
@@ -435,64 +437,18 @@ async function runOrchaDeepScan(mergedRows, opts) {
   // Send notifications for units detected as repair-complete
   if (_repairDoneUnits.length) {
     logger.info('Repair-complete detected: ' + _repairDoneUnits.map(u => u.id).join(', '));
-    // Renderer notification
-    if (pushData && typeof pushData === 'function') {
-      try {
-        const mainWin = require('electron').BrowserWindow.getAllWindows()[0];
-        if (mainWin && !mainWin.isDestroyed()) {
-          _repairDoneUnits.forEach(u => {
-            mainWin.webContents.send('ui:notif-push', {
-              icon: '✅',
-              title: 'Repair Complete: ' + u.id,
-              body: u.vendor + (u.site ? ' @ ' + u.site : '') + ' — ' + u.signal,
-              time: Date.now(),
-            });
-          });
-        }
-      } catch (_) {}
-    }
-    // Slack self-DM (Just Me channel) — batch all into one message
+    // Unified assistant notifier: de-dupe ledger, batching, in-app + Just Me only.
     try {
-      const slackSend = require('../scrapers/slack_send');
-      const slackConfig = store.load('slackChannelWatchConfig', {});
-      const justMeCh = (slackConfig.channels || []).find(ch => ch.mode === 'justme');
-      if (justMeCh && justMeCh.id) {
-        const msg = '✅ *Repair Complete — Ready to Flip*\n' +
-          _repairDoneUnits.map(u => `• *${u.id}* (${u.vendor}${u.site ? ' @ ' + u.site : ''}) — ${u.signal}`).join('\n') +
-          '\n\n_These units appear done based on their latest timeline. Verify and flip to Available._';
-        await slackSend.sendToChannel({ channelId: justMeCh.id, message: msg }).catch(e => logger.warn('Repair-done Slack notify failed:', e.message));
-      }
-    } catch (_) {}
+      require('./awareness/notifier').getNotifier().enqueue(_repairDoneUnits.map(_repairDoneNote));
+    } catch (e) { logger.warn('Repair-done notifier enqueue failed: ' + e.message); }
   }
 
   // Send notifications for units detected as out-of-scope / needs dealer
   if (_outOfScopeUnits.length) {
     logger.info('Out-of-scope/needs-dealer detected: ' + _outOfScopeUnits.map(u => u.id).join(', '));
     try {
-      const mainWin = require('electron').BrowserWindow.getAllWindows()[0];
-      if (mainWin && !mainWin.isDestroyed()) {
-        _outOfScopeUnits.forEach(u => {
-          mainWin.webContents.send('ui:notif-push', {
-            icon: '⚠️',
-            title: 'Out of Scope: ' + u.id,
-            body: u.vendor + (u.site ? ' @ ' + u.site : '') + ' — needs re-routing to dealer/OEM',
-            time: Date.now(),
-          });
-        });
-      }
-    } catch (_) {}
-    // Slack self-DM
-    try {
-      const slackSend2 = require('../scrapers/slack_send');
-      const slackConfig2 = store.load('slackChannelWatchConfig', {});
-      const justMeCh2 = (slackConfig2.channels || []).find(ch => ch.mode === 'justme');
-      if (justMeCh2 && justMeCh2.id) {
-        const msg2 = '⚠️ *Out of Scope / Needs Dealer*\n' +
-          _outOfScopeUnits.map(u => `• *${u.id}* (${u.vendor}${u.site ? ' @ ' + u.site : ''}) — ${u.signal}`).join('\n') +
-          '\n\n_These units need re-routing. The current vendor cannot complete the repair — route to dealer/OEM._';
-        await slackSend2.sendToChannel({ channelId: justMeCh2.id, message: msg2 }).catch(e => logger.warn('Out-of-scope Slack notify failed:', e.message));
-      }
-    } catch (_) {}
+      require('./awareness/notifier').getNotifier().enqueue(_outOfScopeUnits.map(_outOfScopeNote));
+    } catch (e) { logger.warn('Out-of-scope notifier enqueue failed: ' + e.message); }
   }
 
   if (improved > 0) {
@@ -998,4 +954,16 @@ async function rebuildUnitTimeline(row, opts) {
   }
 }
 
-module.exports = { runOrchaDeepScan, rebuildUnitTimeline, isOffsiteCacheFresh, OFFSITE_CACHE_FRESH_MS, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature, _stripTrailingGapFillers, _aiInputSig };
+// Detected unit -> unified notifier note (design §D6). 'ready-maybe' is shared
+// with the change digest's P1b key so a weak text signal never claims the
+// API-confirmed 'ready-api' key.
+function _repairDoneNote(u) { return {
+  key: `${u.id}|ready-maybe|${u.wr}`, unit: u.id, wr: u.wr, family: 'ready-maybe', icon: '✅', title: 'Repair done?',
+  text: `${u.id} repair looks complete (${String(u.signal).slice(0, 80)}). Verify and flip to Available.`,
+  source: 'deep-scan', severity: 'high' }; }
+function _outOfScopeNote(u) { return {
+  key: `${u.id}|out-of-scope|${u.wr}`, unit: u.id, wr: u.wr, family: 'out-of-scope', icon: '⚠️', title: 'Needs re-routing',
+  text: `${u.id} needs re-routing (vendor says out of scope). Consider dealer/OEM.`,
+  source: 'deep-scan', severity: 'medium' }; }
+
+module.exports = { runOrchaDeepScan, rebuildUnitTimeline, isOffsiteCacheFresh, OFFSITE_CACHE_FRESH_MS, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature, _stripTrailingGapFillers, _aiInputSig, _repairDoneNote, _outOfScopeNote };

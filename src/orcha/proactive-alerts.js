@@ -7,11 +7,9 @@
  *   - Units where vendor hasn't changed state in 3+ days
  *   - Risk score jumps (Uptake score increased 20+ points between syncs)
  *
- * When found: sends a proactive message to the user's Just Me / self-DM
- * Slack channel with the alert + a suggested follow-up action.
- *
- * Integrates with the channel watch's justme pipeline — uses the same
- * sendToChannel() function the auto-reply engine uses.
+ * When found: hands the alerts to the unified assistant notifier
+ * (src/orcha/awareness/notifier.js), which de-dupes, batches, and posts to
+ * the Just Me channel.
  */
 
 const store  = require('../store');
@@ -23,16 +21,19 @@ const RISK_JUMP_THRESHOLD = 20;
 const ALERT_COOLDOWN_HOURS = 12; // Don't re-alert for same unit within 12h
 
 /**
- * runProactiveAlerts(rows, ctx)
+ * runProactiveAlerts(rows, ctx, deps)
  * Called after each sync cycle completes.
  * @param {Array} rows - Current fleet rows
  * @param {object} ctx - app context with ctx.send for IPC push
+ * @param {object} [deps] - { load, save, notifier } (default store + getNotifier())
  */
-async function runProactiveAlerts(rows, ctx) {
+async function runProactiveAlerts(rows, ctx, deps = {}) {
   if (!rows || !rows.length) return;
+  const load = deps.load || store.load;
+  const save = deps.save || store.save;
 
-  const notesStore = store.load('notesStore', {});
-  const prevAlerts = store.load('proactiveAlertHistory', {});
+  const notesStore = load('notesStore', {});
+  const prevAlerts = load('proactiveAlertHistory', {});
   const now = Date.now();
   const alerts = [];
 
@@ -58,6 +59,7 @@ async function runProactiveAlerts(rows, ctx) {
       alerts.push({
         type: 'stalled',
         unitId: id,
+        wr: r.workRequestId || '-',
         vendor: r.vendor || 'Unknown',
         days,
         hoursSinceUpdate: lastUpdateAge,
@@ -68,9 +70,12 @@ async function runProactiveAlerts(rows, ctx) {
   });
 
   // ── Detect risk score jumps ─────────────────────────────────────────────
-  const prevScores = store.load('proactiveLastScores', {});
+  // Baseline fix: a unit with no prior score never "jumps" (first sighting),
+  // and a partial push merges into the saved scores instead of wiping them.
+  const prevScores = load('proactiveLastScores', {}) || {};
   rows.forEach(r => {
     if (!r.equipmentId || !r.riskScore) return;
+    if (!Object.prototype.hasOwnProperty.call(prevScores, r.equipmentId)) return;
     const prev = prevScores[r.equipmentId] || 0;
     const jump = r.riskScore - prev;
     if (jump >= RISK_JUMP_THRESHOLD && r.riskScore >= 60) {
@@ -79,6 +84,7 @@ async function runProactiveAlerts(rows, ctx) {
       alerts.push({
         type: 'risk-jump',
         unitId: id,
+        wr: r.workRequestId || '-',
         vendor: r.vendor || '',
         riskScore: r.riskScore,
         previousScore: prev,
@@ -91,13 +97,13 @@ async function runProactiveAlerts(rows, ctx) {
   // Save current scores for next comparison
   const newScores = {};
   rows.forEach(r => { if (r.equipmentId && r.riskScore) newScores[r.equipmentId] = r.riskScore; });
-  store.save('proactiveLastScores', newScores);
+  save('proactiveLastScores', Object.assign({}, prevScores, newScores));
 
   if (!alerts.length) return;
 
   // Mark alerted units
   alerts.forEach(a => { prevAlerts[a.unitId] = now; });
-  store.save('proactiveAlertHistory', prevAlerts);
+  save('proactiveAlertHistory', prevAlerts);
 
   logger.info('[Proactive] ' + alerts.length + ' alerts generated');
 
@@ -106,24 +112,26 @@ async function runProactiveAlerts(rows, ctx) {
     ctx.send('orcha:proactive-alerts', { alerts, count: alerts.length });
   }
 
-  // Send to Just Me Slack channel (if configured)
+  // Hand off to the unified notifier (de-dupe ledger, batching, Just Me only).
   try {
-    const config = store.load('slackChannelWatchConfig', {});
-    if (!config.enabled || !config.channels) return;
-    const justmeChannel = (config.channels || []).find(ch => ch.enabled && ch.replyMode === 'justme');
-    if (!justmeChannel) return;
-
-    const { sendToChannel } = require('../scrapers/slack_send');
-    const summary = alerts.slice(0, 5).map(a => a.message).join('\n\n');
-    const text = '🤖 *Proactive Fleet Alert*\n\n' + summary +
-      (alerts.length > 5 ? '\n\n...and ' + (alerts.length - 5) + ' more.' : '') +
-      '\n\n_Reply here to take action on any of these._';
-
-    await sendToChannel(justmeChannel.id, text);
-    logger.info('[Proactive] Sent ' + alerts.length + ' alerts to Just Me channel: ' + justmeChannel.name);
+    const notifier = deps.notifier || require('./awareness/notifier').getNotifier();
+    notifier.enqueue(alerts.map(_toNote));
   } catch (e) {
-    logger.warn('[Proactive] Could not send to Slack:', e.message);
+    logger.warn('[Proactive] notifier enqueue failed: ' + e.message);
   }
+}
+
+// Alert -> notifier note (design §D6). Stalled re-notifies once per WR per
+// extra full week stuck; risk once per 10-point band.
+function _toNote(a) {
+  if (a.type === 'stalled') return {
+    key: `${a.unitId}|stalled|${a.wr}|w${Math.floor((a.days - 5) / 7)}`,
+    unit: a.unitId, wr: a.wr, family: 'stalled', icon: '⚠️', title: 'Stalled',
+    text: a.message, source: 'proactive-alerts', severity: 'medium' };
+  return { // 'risk-jump'
+    key: `${a.unitId}|risk|${Math.floor(a.riskScore / 10) * 10}`,
+    unit: a.unitId, wr: a.wr, family: 'risk', icon: '🔺', title: 'Risk jump',
+    text: a.message, source: 'proactive-alerts', severity: 'medium' };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -158,4 +166,4 @@ function _timelineAgeHours(timeline) {
   return null;
 }
 
-module.exports = { runProactiveAlerts };
+module.exports = { runProactiveAlerts, _toNote };
