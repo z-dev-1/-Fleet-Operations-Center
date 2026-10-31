@@ -83,7 +83,12 @@ function parseMidwayCookies() {
     const name       = parts[5];
     const value      = parts.slice(6).join('\t');
 
-    if (!/amazon\.(com|dev)|a2z\.com/.test(domain)) continue;
+    // Accept all Midway/Amazon auth domains. FIX (2026-10-10): the old filter
+    // was /amazon\.(com|dev)|a2z\.com/ which DROPPED the amazon_enterprise_access
+    // cookie on `.auth.midway.aws.dev` (matches none of those) — confirmed from
+    // the live cookie file. AAP checks AEA across all four of its domains, so a
+    // dropped one weakens the session. Added aws.dev + a generic midway match.
+    if (!/amazon\.(com|dev)|a2z\.com|aws\.dev|midway/i.test(domain)) continue;
 
     if (expiry && expiry < now) {
       expired.push({ name, domain, expiredAgoMin: Math.round((now - expiry) / 60) });
@@ -124,18 +129,29 @@ function checkMwinit() {
 
   const { cookies, expired } = parsed;
 
-  if (cookies.length === 0) {
-    // All cookies in the file have expired
+  // SESSION VALIDITY IS DEFINED BY THE REAL SESSION CREDENTIAL, NOT "any cookie".
+  // FIX: the old check treated the session as alive if ANY non-expired Midway
+  // cookie remained — but `user_name` lives ~1 year, so the app could report
+  // ok=true for ~a year after the actual session (__Host-session / session,
+  // ~20h) had expired. Validity must be keyed to __Host-session / session
+  // specifically. parseMidwayCookies() already drops expired cookies, so if the
+  // real session credential isn't in `cookies`, it has expired → NOT ok.
+  const now = Math.floor(Date.now() / 1000);
+  const SESSION_NAMES = new Set(['session', '__Host-session']);
+  const sessionCred = cookies.filter(c =>
+    SESSION_NAMES.has(c.name) &&
+    /midway-auth\.amazon\.com$/i.test(String(c.domain || '').replace(/^\./, '')) &&
+    c.expirationDate && c.expirationDate > now);
+
+  if (sessionCred.length === 0) {
+    // The real Midway session credential is gone/expired, even if long-lived
+    // cookies like user_name are still present. This is a genuine re-auth case.
     const names = expired.map(c => c.name).join(', ');
-    const reason = expired.length > 0
-      ? 'All Midway cookies have expired (' + names + ') — run mwinit'
-      : 'All Midway cookies have expired — run mwinit';
+    const reason = names
+      ? 'Midway session cookie (__Host-session/session) expired or missing (expired: ' + names + ') — run mwinit'
+      : 'Midway session cookie (__Host-session/session) expired or missing — run mwinit';
     return { ok: false, reason, expired };
   }
-
-  // Some cookies expired, some still valid — session is still usable.
-  // The soonest-expiry logic below will reflect how much time is left.
-  const now = Math.floor(Date.now() / 1000);
   // FIX (2026-07-28): was computing soonest expiry across ALL cookies, which
   // always picked up amazon_enterprise_access — a short-lived (~2h) JWT access
   // token that Midway issues alongside the real ~20h session cookies. That
@@ -152,17 +168,14 @@ function checkMwinit() {
   // handshake — it is NOT the ongoing session credential and must be excluded
   // from the expiry clock.
   //
-  // SESSION_COOKIES: names that represent the real ~20h session.
-  // SHORT_LIVED:     names to exclude from the expiry/renewal clock.
+  // RENEWAL CLOCK = the real session credential's expiry, nothing else.
+  // Using sessionCred (the live __Host-session/session cookies computed above)
+  // means short-lived tokens (amazon_enterprise_access) AND long-lived ones
+  // (user_name ~1yr, sshkeysigner amzn_sso_* ~min) can never skew the clock —
+  // the earlier bug where an unrelated near-expiry cookie made this read
+  // "0 min / 1 min left" while the session had ~20h.
   const SHORT_LIVED_NAMES = new Set(['amazon_enterprise_access']);
-  const sessionCookies = cookies.filter(c => !SHORT_LIVED_NAMES.has(c.name) && c.expirationDate);
-  const allCookies     = cookies.filter(c => c.expirationDate);
-
-  // Find the soonest expiry among SESSION cookies only (for renewal clock)
-  const soonest = sessionCookies.length
-    ? sessionCookies.reduce((min, c) => Math.min(min, c.expirationDate), Infinity)
-    : allCookies.reduce((min, c) => Math.min(min, c.expirationDate), Infinity);
-
+  const soonest = sessionCred.reduce((min, c) => Math.min(min, c.expirationDate), Infinity);
   const expiresInMin = soonest === Infinity ? null : Math.round((soonest - now) / 60);
 
   // AEA (amazon_enterprise_access) is the short-lived access token that AAP
@@ -192,12 +205,22 @@ function checkMwinit() {
 // "AEA extension not installed" gate -- a brand-new partition has never
 // been through mwinit/WebAuthn itself, so it hits that gate cold even
 // though this app already holds a fully valid Midway session elsewhere.
-async function injectCookies(targetSession) {
+// opts.skipAea (default false): when true, do NOT inject amazon_enterprise_access
+// from disk. The disk AEA is the SHORT-LIVED token captured at mwinit time and
+// is usually STALE; after a silent OIDC handshake the LIVE Electron cookie store
+// holds a FRESH AEA. Re-injecting the disk AEA on top of that would overwrite
+// the fresh live token with the stale one — the exact bug that made the silent
+// refresh "succeed" yet leave AEA expired. So the post-handshake re-inject uses
+// skipAea:true to preserve the freshly-minted live AEA while still refreshing the
+// long-lived session cookies.
+async function injectCookies(targetSession, opts) {
   const ses             = targetSession || electronSession.defaultSession;
+  const skipAea         = !!(opts && opts.skipAea);
   const { cookies }     = parseMidwayCookies();
-  let injected = 0, failed = 0;
+  let injected = 0, failed = 0, skippedAea = 0;
 
   for (const c of cookies) {
+    if (skipAea && c.name === 'amazon_enterprise_access') { skippedAea++; continue; }
     try {
       // FIX (2026-07-21): __Host-prefixed cookies (e.g. __Host-session) are
       // required by spec to be host-only -- Secure + Path=/ only, with NO
@@ -224,8 +247,105 @@ async function injectCookies(targetSession) {
   }
 
   await ses.cookies.flushStore(); // required so hidden BrowserWindows see cookies immediately
-  logger.info('[AuthManager] Injected:', injected, ' Skipped:', failed);
+  logger.info('[AuthManager] Injected:', injected, ' Skipped:', failed +
+    (skipAea ? ' (AEA preserved: ' + skippedAea + ' live-token not overwritten)' : ''));
   return injected;
+}
+
+// ── Direct AEA injection from the ACME posture token ─────────────────────────
+// ROOT CAUSE (confirmed 2026-10-19): the amazon_enterprise_access (AEA) cookie
+// is normally injected into the browser by the AEA BROWSER EXTENSION via native
+// messaging from the ACME agent. On this machine that path is BROKEN —
+// AEABrowserExtensionState.json shows StatusCode 7 for Chrome/Firefox/Edge and
+// the ACME daemon log throws RegistryException on the extension-install keys +
+// gRPC stream errors. So no browser (and no Electron window doing the OIDC
+// handshake) ever receives AEA, and AAP rejects every request. mwinit -o only
+// SOMETIMES writes AEA to the cookie file (backend 403s make it flaky).
+//
+// FIX: the AEA cookie's VALUE is just the device POSTURE TOKEN JWT, which the
+// ACME agent reliably mints to disk at:
+//   C:\ProgramData\Amazon\ACME\PostureToken\posture_token.jwt
+// (confirmed: valid RS256 JWT, device_id + com.amazon.acme.compliance claims,
+// ~4h TTL, refreshed every ~10min by PostureTokenCacheJob). So we read that
+// token straight from disk and SET it as the amazon_enterprise_access cookie
+// directly into the app's Electron session — bypassing the broken extension
+// entirely. This is what finally "attaches the AEA cookie to the app" without
+// depending on the browser extension or a flaky mwinit.
+//
+// Returns { ok, aeaMin, domains } on success, { ok:false, reason } otherwise.
+const ACME_POSTURE_TOKEN = 'C:\\ProgramData\\Amazon\\ACME\\PostureToken\\posture_token.jwt';
+// The 4 domains AAP's AEA gate checks (matches the historical 4-entry AEA set).
+const AEA_COOKIE_DOMAINS = [
+  { url: 'https://aap-na.corp.amazon.com', domain: '.corp.amazon.com' },
+  { url: 'https://amazon.com',             domain: '.amazon.com' },
+  { url: 'https://a2z.com',                domain: '.a2z.com' },
+  { url: 'https://aws.dev',                domain: '.aws.dev' },
+];
+function _decodeJwtExp(jwt) {
+  try {
+    let pl = jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (pl.length % 4) pl += '=';
+    const claims = JSON.parse(Buffer.from(pl, 'base64').toString('utf8'));
+    return typeof claims.exp === 'number' ? claims.exp : null;
+  } catch (_) { return null; }
+}
+// Read the ACME posture token's remaining life (minutes) WITHOUT injecting.
+// Returns a number of minutes, or null if the file is missing/malformed. The
+// keep-alive service uses this to decide when to re-inject (the AEA cookie
+// carries this exact expiry, so the app's AEA is only ever as fresh as the
+// token on disk).
+function postureTokenExpiryMin() {
+  try {
+    const token = fs.readFileSync(ACME_POSTURE_TOKEN, 'utf8').trim();
+    if (!token || token.split('.').length !== 3) return null;
+    const exp = _decodeJwtExp(token);
+    if (!exp) return null;
+    return Math.round((exp - Math.floor(Date.now() / 1000)) / 60);
+  } catch (_) { return null; }
+}
+
+async function injectAeaFromPostureToken(targetSession) {
+  const ses = targetSession || electronSession.defaultSession;
+  let token;
+  try {
+    token = fs.readFileSync(ACME_POSTURE_TOKEN, 'utf8').trim();
+  } catch (e) {
+    logger.warn('[AuthManager] posture token not readable (' + e.code + ') — cannot inject AEA directly');
+    return { ok: false, reason: 'posture-token-missing' };
+  }
+  if (!token || token.split('.').length !== 3) {
+    return { ok: false, reason: 'posture-token-malformed' };
+  }
+  const exp = _decodeJwtExp(token);
+  const now = Math.floor(Date.now() / 1000);
+  if (exp && exp <= now) {
+    logger.warn('[AuthManager] posture token already expired — ACME should re-mint; not injecting stale AEA');
+    return { ok: false, reason: 'posture-token-expired', aeaMin: Math.round((exp - now) / 60) };
+  }
+  const expirationDate = exp || (now + 2 * 3600);
+  let set = 0;
+  for (const d of AEA_COOKIE_DOMAINS) {
+    try {
+      await ses.cookies.set({
+        url: d.url,
+        name: 'amazon_enterprise_access',
+        value: token,
+        domain: d.domain,
+        path: '/',
+        secure: true,
+        httpOnly: true,
+        sameSite: 'no_restriction',
+        expirationDate,
+      });
+      set++;
+    } catch (e) {
+      logger.warn('[AuthManager] AEA set failed @ ' + d.domain + ': ' + e.message);
+    }
+  }
+  try { await ses.cookies.flushStore(); } catch (_) {}
+  const aeaMin = exp ? Math.round((exp - now) / 60) : null;
+  logger.info('[AuthManager] AEA injected from posture token on ' + set + '/' + AEA_COOKIE_DOMAINS.length + ' domains (aea ' + (aeaMin == null ? 'n/a' : aeaMin + 'min') + ') — bypassing broken browser extension');
+  return { ok: set > 0, aeaMin, tokenExp: exp, domains: set };
 }
 
 // -- Spawn a visible terminal and run mwinit ---------------------------------
@@ -365,6 +485,107 @@ function runMwinit(force) {
   // which caller is awaiting it.
   _mwinitInFlight.finally(() => { _mwinitInFlight = null; });
   return _mwinitInFlight;
+}
+
+// Read the soonest AEA (amazon_enterprise_access) expiry FROM THE COOKIE FILE,
+// in minutes, or null when no live AEA cookie is on disk. Used to detect the
+// "session valid but AEA missing/lapsed" state and to verify a refresh landed.
+function aeaFileExpiryMin() {
+  try {
+    const { cookies } = parseMidwayCookies();
+    const now = Math.floor(Date.now() / 1000);
+    const aea = cookies.filter(c => c.name === 'amazon_enterprise_access' && c.expirationDate);
+    if (!aea.length) return null;
+    const soonest = aea.reduce((min, c) => Math.min(min, c.expirationDate), Infinity);
+    return soonest === Infinity ? null : Math.round((soonest - now) / 60);
+  } catch (_) { return null; }
+}
+
+// ── Refresh ONLY the AEA posture cookie via `mwinit --refresh-aea` ──────────────
+// The missing middle rung of the recovery ladder. AEA (amazon_enterprise_access)
+// is a short-lived (~6h) posture cookie AAP enforces server-side; when it lapses
+// the long-lived Midway session is still valid, so a FULL interactive mwinit
+// (PIN + WebAuthn tap) is overkill. `mwinit --refresh-aea` re-mints just the AEA
+// cookie into ~/.midway/cookie, reusing the live session — usually with NO tap.
+// This is exactly the command that fixes the "AAP session expired, cookie file
+// has session but no AEA" state (confirmed live 2026-10-17). Returns
+// { ok, aeaMin } — ok=true means a live AEA cookie is now on disk.
+let _aeaRefreshInFlight = null;
+function refreshAeaViaMwinit() {
+  if (_aeaRefreshInFlight) return _aeaRefreshInFlight;
+  if (_isOfflineNow()) return Promise.resolve({ ok: false, skipped: 'offline' });
+  _aeaRefreshInFlight = new Promise((resolve) => {
+    logger.info('[AuthManager] Spawning mwinit --refresh-aea (AEA posture refresh, no full re-auth)...');
+    // Run mwinit DIRECTLY with piped stdio so we can READ its output. This is
+    // the critical fix: `mwinit --refresh-aea` is non-interactive, but when the
+    // underlying Midway SESSION is no longer valid it prints
+    //   "Not refreshing AEA cookie because Midway cookie file does not contain
+    //    a valid Midway session"
+    // and writes NO AEA cookie. The old detached-batch spawn used stdio:'ignore'
+    // and only polled the cookie file, so it never learned WHY nothing landed —
+    // it just timed out and the caller retried the (hopeless) silent handshake.
+    // Now we detect that message and return sessionInvalid:true so the recovery
+    // ladder stops the silent loop and surfaces a full-re-auth (YubiKey) prompt.
+    let child;
+    try {
+      child = spawn('mwinit', ['--refresh-aea'], { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+    } catch (e) {
+      _aeaRefreshInFlight = null;
+      resolve({ ok: false, error: 'spawn:' + e.message });
+      return;
+    }
+    let outBuf = '';
+    try {
+      child.stdout.on('data', (d) => { outBuf += d.toString(); });
+      child.stderr.on('data', (d) => { outBuf += d.toString(); });
+    } catch (_) { /* stdio may be unavailable in some envs */ }
+
+    const started = Date.now();
+    const AEA_REFRESH_TIMEOUT_MS = 90 * 1000;
+    let baselineMtimeMs = 0;
+    try { baselineMtimeMs = fs.statSync(COOKIE_FILE).mtimeMs; } catch (_) {}
+    let settled = false;
+    const finish = (v) => { if (settled) return; settled = true; try { clearInterval(poll); } catch (_) {} try { clearTimeout(killTimer); } catch (_) {} resolve(v); };
+
+    // Detect the "session invalid" message the instant mwinit prints it.
+    const SESSION_INVALID_RE = /does not contain a valid Midway session|no valid Midway session|not refreshing AEA/i;
+    child.on('exit', () => {
+      // On exit, decide from the cookie file + the captured message.
+      const aeaMin = aeaFileExpiryMin();
+      if (aeaMin != null && aeaMin > 0) {
+        logger.info('[AuthManager] mwinit --refresh-aea complete — AEA now ' + aeaMin + 'min');
+        finish({ ok: true, aeaMin });
+        return;
+      }
+      if (SESSION_INVALID_RE.test(outBuf)) {
+        logger.warn('[AuthManager] mwinit --refresh-aea reports the Midway SESSION is invalid — AEA cannot be minted. A full `mwinit` (YubiKey tap) is required.');
+        finish({ ok: false, sessionInvalid: true, aeaMin: null, mwinitMessage: outBuf.trim().slice(0, 300) });
+        return;
+      }
+      logger.warn('[AuthManager] mwinit --refresh-aea produced no AEA cookie: ' + (outBuf.trim().slice(0, 200) || '(no output)'));
+      finish({ ok: false, aeaMin: aeaFileExpiryMin(), mwinitMessage: outBuf.trim().slice(0, 300) });
+    });
+    child.on('error', (e) => finish({ ok: false, error: 'proc:' + e.message }));
+
+    // Safety: bound it (should exit well under this). If mwinit ever blocks on
+    // a prompt (it shouldn't for --refresh-aea), kill it so we never hang.
+    const killTimer = setTimeout(() => { try { child.kill(); } catch (_) {} }, AEA_REFRESH_TIMEOUT_MS);
+    if (killTimer.unref) killTimer.unref();
+
+    // Also poll the cookie file as a secondary success signal (in case exit is
+    // delayed on some platforms), but the exit handler is the primary path.
+    const poll = setInterval(() => {
+      try {
+        let rewritten = false;
+        try { rewritten = fs.statSync(COOKIE_FILE).mtimeMs > baselineMtimeMs; } catch (_) {}
+        const aeaMin = aeaFileExpiryMin();
+        if (rewritten && aeaMin != null && aeaMin > 0) { logger.info('[AuthManager] mwinit --refresh-aea complete — AEA now ' + aeaMin + 'min'); finish({ ok: true, aeaMin }); return; }
+        if (Date.now() - started > AEA_REFRESH_TIMEOUT_MS) { finish({ ok: false, aeaMin: aeaFileExpiryMin(), mwinitMessage: outBuf.trim().slice(0, 300) }); }
+      } catch (_) { /* transient FS error while file is written */ }
+    }, 1500);
+  });
+  _aeaRefreshInFlight.finally(() => { _aeaRefreshInFlight = null; });
+  return _aeaRefreshInFlight;
 }
 
 // ── Probe AAP session by URL (no DOM — too fragile) ──────────────────────────
@@ -672,26 +893,108 @@ async function ensureAuthenticated(mainWindow) {
 // Returns { ok, refreshed } — ok=true means the silent handshake landed on AAP
 // (session still valid, AEA refreshed). ok=false means the session itself is
 // gone and a real mwinit is required.
-async function refreshAeaSilently() {
+// Read the live AEA (amazon_enterprise_access) expiry FROM THE ELECTRON SESSION
+// cookie store (not the stale ~/.midway/cookie disk file). After a silent
+// handshake, AAP issues a fresh AEA into defaultSession — that is the real
+// source of truth for whether AEA is actually valid right now. Returns minutes
+// until the soonest live AEA expires, or null if none present.
+async function aeaSessionExpiryMin() {
   try {
-    // 1) Make sure the freshest cookies from disk are in the Electron session.
-    try { await injectCookies(); } catch (_) {}
-    // 2) Run the silent SSO handshake. If the session cookie is valid this
-    //    lands on AAP with a fresh AEA and NO prompt. If the session is truly
-    //    expired it settles on a login wall and returns false.
-    const landed = await probeSession();
-    if (!landed) {
-      logger.warn('[AuthManager] Silent AEA refresh: handshake did not land on AAP — session likely expired, real mwinit needed');
-      return { ok: false, refreshed: false };
+    const all = await electronSession.defaultSession.cookies.get({ name: 'amazon_enterprise_access' });
+    if (!all || !all.length) return null;
+    const now = Math.floor(Date.now() / 1000);
+    const soonest = all.reduce((min, c) => (c.expirationDate ? Math.min(min, c.expirationDate) : min), Infinity);
+    if (soonest === Infinity) return null;
+    return Math.round((soonest - now) / 60);
+  } catch (_) { return null; }
+}
+
+// How many times the silent handshake is attempted before we conclude the
+// session is genuinely rejected. A single failed probe is often a transient
+// SSO bounce / slow redirect, not a dead session — retrying (with a re-inject
+// + short backoff) rescues those WITHOUT ever prompting the user. Only a
+// consistent failure across all attempts escalates.
+const AEA_SILENT_RETRIES = 3;
+
+async function refreshAeaSilently() {
+  const before = await aeaSessionExpiryMin();
+
+  // RUNG 0 (NEW 2026-10-19) — inject AEA DIRECTLY from the ACME posture token.
+  // The browser-extension AEA path is broken on this machine (StatusCode 7), so
+  // the OIDC handshake below can NOT mint AEA. But the ACME agent still writes a
+  // valid posture token to disk, and the AEA cookie value IS that token. Inject
+  // it straight into the Electron session, then verify against the real target.
+  // This is the path that actually attaches AEA to the app with no tap and no
+  // dependency on the broken extension. If it works, we are done.
+  try {
+    const direct = await injectAeaFromPostureToken();
+    if (direct && direct.ok) {
+      const landed = await probeSession();
+      const after = await aeaSessionExpiryMin();
+      const aeaOk = after !== null && after > 0;
+      if (landed && aeaOk) {
+        logger.info('[AuthManager] AEA refresh OUTCOME: ok=true via=posture-token-direct aeaAfter=' + after + 'min (no prompt, no extension)');
+        return { ok: true, refreshed: true, aeaMin: after, via: 'posture-token-direct' };
+      }
+      logger.warn('[AuthManager] Direct posture-token AEA inject did not verify (landed=' + landed + ', aea=' + (after == null ? 'none' : after + 'min') + ') — falling back to handshake');
     }
-    // 3) Re-inject so any refreshed cookies (incl. a new AEA) are consistent.
-    try { await injectCookies(); } catch (_) {}
-    logger.info('[AuthManager] Silent AEA refresh OK — AAP handshake completed with no prompt');
-    return { ok: true, refreshed: true };
   } catch (e) {
-    logger.warn('[AuthManager] Silent AEA refresh error: ' + e.message);
-    return { ok: false, refreshed: false };
+    logger.warn('[AuthManager] Direct posture-token AEA inject error: ' + e.message + ' — falling back to handshake');
   }
+
+  let lastErr = '';
+  for (let attempt = 1; attempt <= AEA_SILENT_RETRIES; attempt++) {
+    try {
+      // 1) Push the freshest cookies from disk into the Electron session.
+      try { await injectCookies(); } catch (_) {}
+      // 2) Run the silent SSO handshake. If the session cookie is valid this
+      //    lands on AAP with a fresh AEA and NO prompt. If the session is truly
+      //    expired it settles on a login wall and returns false.
+      const landed = await probeSession();
+      if (landed) {
+        // 3) Re-inject the LONG-LIVED session cookies for consistency, but
+        //    skipAea:true so we DO NOT overwrite the fresh AEA the handshake
+        //    just minted into the live Electron store with the stale disk AEA.
+        //    (This was the bug: the old unconditional re-inject clobbered the
+        //    new live AEA, so the refresh logged ok=true while AEA stayed stale.)
+        try { await injectCookies(undefined, { skipAea: true }); } catch (_) {}
+        // 4) VERIFY against the LIVE session cookie store (truth), not the disk
+        //    file. The handshake writes the fresh AEA into defaultSession; the
+        //    disk file keeps the old expired AEA, so only this proves it worked.
+        const after = await aeaSessionExpiryMin();
+        // Treat it as a real success only if the live AEA is actually present
+        // and not already expired. A landed probe with no live AEA means the
+        // handshake didn't truly mint one (posture gate) — report that honestly
+        // instead of a false ok=true.
+        const aeaOk = after !== null && after > 0;
+        logger.info('[AuthManager] AEA refresh OUTCOME: ok=' + aeaOk + ' refreshed=' + aeaOk + ' attempt=' + attempt + '/' + AEA_SILENT_RETRIES +
+          ' aeaBefore=' + (before === null ? 'none' : before + 'min') +
+          ' aeaAfter=' + (after === null ? 'none' : after + 'min') + ' (no prompt)');
+        if (aeaOk) return { ok: true, refreshed: true, aeaMin: after, attempts: attempt };
+        lastErr = 'handshake landed but no fresh live AEA minted (posture?)';
+        logger.warn('[AuthManager] Silent AEA refresh attempt ' + attempt + '/' + AEA_SILENT_RETRIES + ' landed but AEA still ' + (after === null ? 'missing' : after + 'min') + (attempt < AEA_SILENT_RETRIES ? ' — retrying' : ''));
+      } else {
+        lastErr = 'handshake did not land on AAP';
+        logger.warn('[AuthManager] Silent AEA refresh attempt ' + attempt + '/' + AEA_SILENT_RETRIES + ' did not land on AAP' + (attempt < AEA_SILENT_RETRIES ? ' — retrying' : ''));
+      }
+    } catch (e) {
+      lastErr = e.message;
+      logger.warn('[AuthManager] Silent AEA refresh attempt ' + attempt + '/' + AEA_SILENT_RETRIES + ' error: ' + e.message);
+    }
+    // Don't hammer: short backoff before the next attempt. Bail early if the
+    // machine went offline mid-retry (a dead network can't be fixed by retrying
+    // and must not be mistaken for a rejected session).
+    if (attempt < AEA_SILENT_RETRIES) {
+      if (_isOfflineNow()) { lastErr = 'offline mid-retry'; break; }
+      await new Promise((r) => setTimeout(r, 2000 * attempt));
+    }
+  }
+  const after = await aeaSessionExpiryMin();
+  logger.warn('[AuthManager] AEA refresh OUTCOME: ok=false refreshed=false attempts=' + AEA_SILENT_RETRIES +
+    ' aeaBefore=' + (before === null ? 'none' : before + 'min') +
+    ' aeaAfter=' + (after === null ? 'none' : after + 'min') +
+    ' why="' + (lastErr || 'unknown') + '" — session likely expired, real mwinit may be needed');
+  return { ok: false, refreshed: false, aeaMin: after, why: lastErr };
 }
 
 // ── Reconnect watcher (re-probe the SAME session when internet returns) ───────
@@ -724,10 +1027,12 @@ function startOnlineReauthWatch() {
         logger.info('[AuthManager] Reconnect re-verify OK — session still valid, no re-auth needed');
         return;
       }
-      // Confirmed online + session did NOT re-verify → genuine rejection.
+      // Confirmed online + session did NOT re-verify → climb the full ladder
+      // (VPN rung, then silent again, then mwinit as last resort) instead of a
+      // bare prompt. recoverAuth is defined below in this module.
       if (_isOfflineNow()) return; // dropped again mid-check; don't prompt
-      logger.warn('[AuthManager] Reconnect re-verify failed while online — session genuinely rejected, prompting mwinit');
-      try { await runMwinit(); } catch (e) { logger.warn('[AuthManager] Reconnect mwinit failed: ' + e.message); }
+      logger.warn('[AuthManager] Reconnect re-verify failed while online — escalating via recovery ladder');
+      try { await recoverAuth('reconnect:reverify-failed'); } catch (e) { logger.warn('[AuthManager] Reconnect recovery failed: ' + e.message); }
     } catch (e) {
       logger.warn('[AuthManager] Reconnect re-verify error: ' + e.message);
     } finally {
@@ -738,14 +1043,353 @@ function startOnlineReauthWatch() {
   return _reauthUnsub;
 }
 
+// ── AEA cookie auto-capture watch ────────────────────────────────────────────
+// PROBLEM (confirmed 2026-10-19): on this machine the SILENT AEA paths
+// (browser OIDC handshake via refreshAeaSilently, and `mwinit --refresh-aea`)
+// mint NO AEA cookie because the AEA browser extension is broken (StatusCode 7).
+// The ONLY thing that mints AEA is a full `mwinit -o` (YubiKey OTP), which
+// writes amazon_enterprise_access into ~/.midway/cookie. When the user runs
+// that from ANY terminal (not just via the app), the app previously had to wait
+// up to 5 minutes for the heartbeat to notice and inject it.
+//
+// This watch makes the app CAPTURE a freshly-minted AEA the INSTANT it lands on
+// disk: it watches the cookie file and, whenever the file changes and a live
+// AEA cookie is present on disk that is NOT yet in the Electron session, it
+// injects it immediately and nudges the supervisor to re-verify. So the moment
+// `mwinit -o` completes (in the app's spawned terminal OR a terminal the user
+// opened themselves), the app picks up AEA within ~1s and converges to HEALTHY
+// with no further action. Idempotent; a second call replaces the watcher.
+let _aeaWatchHandle = null;
+let _aeaWatchDebounce = null;
+let _aeaWatchBusy = false;
+function startAeaCookieWatch() {
+  try { if (_aeaWatchHandle) { _aeaWatchHandle.close(); _aeaWatchHandle = null; } } catch (_) {}
+  const dir = require('path').dirname(COOKIE_FILE);
+  const base = require('path').basename(COOKIE_FILE);
+  const onChange = () => {
+    if (_aeaWatchDebounce) clearTimeout(_aeaWatchDebounce);
+    _aeaWatchDebounce = setTimeout(async () => {
+      if (_aeaWatchBusy) return;
+      _aeaWatchBusy = true;
+      try {
+        // Only act when the DISK has a live (unexpired) AEA cookie. aeaFileExpiryMin
+        // returns the soonest AEA expiry from the file, or null when absent/expired.
+        const diskAea = aeaFileExpiryMin();
+        if (diskAea == null || diskAea <= 0) return;   // nothing fresh to capture
+        // Is the Electron session already carrying a live AEA? If so, nothing to do.
+        let liveAea = null;
+        try { liveAea = await aeaSessionExpiryMin(); } catch (_) {}
+        if (liveAea != null && liveAea > 0) return;    // app already has it
+        // Fresh AEA on disk but NOT in the app session → capture it NOW.
+        logger.info('[AuthManager] AEA cookie appeared on disk (' + diskAea + 'min) — injecting into app session immediately (auto-capture)');
+        try { await injectCookies(); } catch (e) { logger.warn('[AuthManager] AEA auto-capture inject failed: ' + e.message); }
+        const after = await aeaSessionExpiryMin().catch(() => null);
+        logger.info('[AuthManager] AEA auto-capture result: app session AEA now ' + (after == null ? 'missing' : after + 'min'));
+        // Nudge the supervisor to re-verify against the real target so it flips
+        // to HEALTHY right away instead of waiting for its next backoff tick.
+        try {
+          const sup = require('../auth/midway-health-supervisor');
+          if (sup && typeof sup.ensureHealthyConverging === 'function') {
+            sup.ensureHealthyConverging({ reason: 'aea-captured', allowPrompt: false }).catch(() => {});
+          }
+        } catch (_) {}
+      } finally {
+        _aeaWatchBusy = false;
+      }
+    }, 800);   // debounce: cookie file is rewritten in a few bursts
+  };
+  try {
+    _aeaWatchHandle = fs.watch(dir, (evt, fname) => {
+      if (!fname || fname === base) onChange();
+    });
+    logger.info('[AuthManager] AEA cookie auto-capture watch started on ' + COOKIE_FILE);
+  } catch (e) {
+    logger.warn('[AuthManager] AEA cookie watch failed to start: ' + e.message);
+  }
+  return () => { try { if (_aeaWatchHandle) _aeaWatchHandle.close(); } catch (_) {} _aeaWatchHandle = null; };
+}
+
+// ── AEA posture-agent self-heal (Windows) ────────────────────────────────────
+// ROOT CAUSE (observed 2026-10-18): AAP kept rejecting the session even with a
+// valid Midway session, VPN up, and AAP reachable — because the Amazon
+// Enterprise Access posture agent (EnterpriseAccessConsoleApp.exe) had THREE
+// stuck instances all timing out when queried for the AEA JWT
+// ("AEA get_aea_jwt timed out after 2 seconds / AEA JSON is empty"). No amount
+// of silent-refresh / mwinit --refresh-aea helps, because every rung queries
+// the SAME hung agent. The manual fix was: kill the duplicate
+// EnterpriseAccessConsoleApp.exe processes + restart the itacsvc service, after
+// which the agent produced a valid JWT ({"Status":"Success"}).
+//
+// This automates that fix so the app self-heals without the user ever touching
+// Task Manager. Windows-only (the agent only exists there); a no-op elsewhere.
+// Returns true if it attempted a restart (caller then re-probes).
+let _aeaAgentRestartInFlight = false;
+let _lastAeaAgentRestartAt = 0;
+// Separate attempt / verified timestamps (spec #11) — a restart attempt that
+// did not verify must not be treated as a successful restart.
+let _lastAeaAgentRestartAttemptAt = 0;
+let _lastAeaAgentRestartVerifiedAt = 0;
+async function restartAeaAgent() {
+  if (process.platform !== 'win32') return false;         // agent is Windows-only
+  // KILL-SWITCH (2026-10-19): when FLEET_NO_AEA_AGENT_RESTART=1, NEVER kill /
+  // restart the Enterprise Access posture agent. Repeatedly killing
+  // EnterpriseAccessConsoleApp.exe + restarting itacsvc can tip the agent into
+  // a multiplying-duplicate state where it mints NO AEA at all. If the OS-side
+  // agent is healthy (e.g. right after a clean reboot), the app must leave it
+  // alone and just let silent AEA refresh use it. Set this when recovering from
+  // a broken posture-agent state so the app's self-heal can't re-break it.
+  if (process.env.FLEET_NO_AEA_AGENT_RESTART === '1') {
+    logger.info('[AuthManager] AEA agent restart DISABLED (FLEET_NO_AEA_AGENT_RESTART=1) — leaving posture agent untouched');
+    return false;
+  }
+  if (_aeaAgentRestartInFlight) return false;             // don't stack restarts
+  // Rate-limit: at most once per 2 min, so a flapping agent can't get into a
+  // kill/respawn loop that itself starves the posture query.
+  if (Date.now() - _lastAeaAgentRestartAt < 120000) {
+    logger.info('[AuthManager] AEA agent restart skipped — restarted <2min ago');
+    return false;
+  }
+  _aeaAgentRestartInFlight = true;
+  _lastAeaAgentRestartAt = Date.now();
+  logger.warn('[AuthManager] AEA posture agent appears stuck — restarting EnterpriseAccessConsoleApp + itacsvc (self-heal)');
+  try {
+    const { spawn } = require('child_process');
+    // Kill ALL EnterpriseAccessConsoleApp.exe instances (duplicates are the bug),
+    // then nudge the itacsvc service to respawn a single clean agent. Use
+    // taskkill/powershell via cmd so it works without extra deps. Best-effort:
+    // each step is independent and failures are logged, not fatal.
+    const run = (cmd) => new Promise((resolve) => {
+      try {
+        const c = spawn('cmd.exe', ['/c', cmd], { windowsHide: true, stdio: 'ignore' });
+        const t = setTimeout(() => { try { c.kill(); } catch (_) {} resolve(false); }, 15000);
+        c.on('exit', () => { clearTimeout(t); resolve(true); });
+        c.on('error', () => { clearTimeout(t); resolve(false); });
+      } catch (_) { resolve(false); }
+    });
+    await run('taskkill /F /IM EnterpriseAccessConsoleApp.exe /T');
+    // Restart the host service so a fresh single agent comes up. net stop/start
+    // may need elevation; if it can't, the killed agent is typically auto-
+    // respawned by the service anyway, so this is a best-effort nudge.
+    await run('net stop itacsvc & net start itacsvc');
+
+    // SPEC #11: do NOT trust "taskkill returned" as success. VERIFY the agent
+    // actually became healthy — i.e. the duplicate/hung condition is resolved
+    // (no more than one EnterpriseAccessConsoleApp.exe running) — by polling
+    // `tasklist` until it is responsive OR a bounded timeout. Track the attempt
+    // vs the VERIFIED outcome separately so a failed restart never masquerades
+    // as a successful one (and never starts a cooldown as if it worked).
+    _lastAeaAgentRestartAttemptAt = Date.now();
+    const procCount = () => new Promise((resolve) => {
+      try {
+        const c = spawn('cmd.exe', ['/c', 'tasklist /FI "IMAGENAME eq EnterpriseAccessConsoleApp.exe" /NH'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+        let out = '';
+        c.stdout.on('data', (d) => { out += d.toString(); });
+        const t = setTimeout(() => { try { c.kill(); } catch (_) {} resolve(null); }, 5000);
+        c.on('exit', () => { clearTimeout(t); const m = out.match(/EnterpriseAccessConsoleApp\.exe/gi); resolve(m ? m.length : 0); });
+        c.on('error', () => { clearTimeout(t); resolve(null); });
+      } catch (_) { resolve(null); }
+    });
+    // Poll for readiness: a single (or zero, about to respawn) clean instance,
+    // up to ~15s. "Responsive" = not the duplicate/hung multi-instance state.
+    let verified = false;
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const n = await procCount();
+      // null = couldn't query (tasklist unavailable) -> fall back to a single
+      // settle wait and treat as attempted-but-unverified.
+      if (n === null) { await new Promise((r) => setTimeout(r, 4000)); break; }
+      if (n <= 1) { verified = true; break; }   // duplicate condition resolved
+      logger.info('[AuthManager] AEA agent still shows ' + n + ' instances — waiting for the duplicate/hung condition to clear');
+    }
+    if (verified) {
+      _lastAeaAgentRestartVerifiedAt = Date.now();
+      logger.info('[AuthManager] AEA agent restart VERIFIED — single clean agent; posture JWT should mint now');
+    } else {
+      logger.warn('[AuthManager] AEA agent restart attempted but NOT verified responsive within budget');
+    }
+    // Return whether the restart was VERIFIED (not merely attempted). The caller
+    // (recoverAuth) retries the silent refresh regardless, but a true here means
+    // the agent is genuinely healthy; a false lets the ladder escalate without
+    // falsely cooling down on an unverified restart (spec #12).
+    return verified;
+  } catch (e) {
+    logger.warn('[AuthManager] AEA agent restart error: ' + e.message);
+    return false;
+  } finally {
+    _aeaAgentRestartInFlight = false;
+  }
+}
+
+// ── Centralized recovery ladder ───────────────────────────────────────────────
+// ONE place every "auth looks broken, what now?" decision routes through, so
+// the escalation policy isn't re-implemented (and divergent) across the 5+
+// callers (heartbeat, SSO-loop poller, reconnect watcher, rescan recovery, IPC
+// buttons). The ladder climbs from cheapest/least-intrusive to the only
+// user-interrupting rung, and STOPS at the first rung that recovers:
+//
+//   1. OFFLINE?        -> raw internet down (net.isOnline). Can't auth against a
+//                         dead network; a failure here is NOT a rejected session.
+//                         Return without prompting; the reconnect watcher retries.
+//   2. VPN DOWN?       -> corp resources need the tunnel. ensureVpn (non-blocking
+//                         reconnect) then re-probe. Still no prompt.
+//   3. SESSION VALID + probe failing -> the common case: the ~24h __Host-session
+//                         is fine but AEA lapsed, so AAP bounced us. refreshAeaSilently
+//                         (now retried internally) re-mints AEA with NO tap. Re-probe.
+//   4. LAST RESORT     -> session cookie genuinely expired on disk, OR the silent
+//                         refresh is exhausted while confirmed online. ONLY NOW
+//                         prompt mwinit (deduped via runMwinit's _mwinitInFlight).
+//
+// Returns { recovered, rung, prompted, reason } so callers can log/branch.
+// opts.allowPrompt (default true) lets a caller run the whole ladder but STOP
+// before the interactive rung (e.g. a background pass that must never prompt).
+async function recoverAuth(reason, opts) {
+  opts = opts || {};
+  const allowPrompt = opts.allowPrompt !== false;
+  const label = reason || 'unspecified';
+  // Tracks whether the ladder POSITIVELY established that the on-disk / live
+  // Midway SESSION is genuinely expired or missing (vs. a silent AEA rung that
+  // merely failed). Only a true here justifies WAITING_FOR_USER upstream — a
+  // silent-rung failure with allowPrompt=false must NOT be treated as "user
+  // required" (that is the stuck-recovery bug). Set when checkMwinit says the
+  // disk session is expired, or when `mwinit --refresh-aea` itself reports no
+  // valid Midway session.
+  let _sessionInvalid = false;
+  logger.info('[AuthManager] recoverAuth START (reason=' + label + ', allowPrompt=' + allowPrompt + ')');
+
+  // Rung 1 — offline. A dead network is not a rejected session.
+  if (_isOfflineNow()) {
+    logger.info('[AuthManager] recoverAuth rung=offline — no internet; deferring (no prompt). Reconnect watcher will retry.');
+    return { recovered: false, rung: 'offline', prompted: false, reason: label };
+  }
+
+  // Rung 2 — VPN down. Kick a non-blocking reconnect, then re-probe once.
+  try {
+    const { checkVpnState, ensureVpn } = require('../utils/vpn');
+    const vpn = await checkVpnState();
+    if (vpn && !vpn.connected && vpn.status !== 'not-installed') {
+      logger.info('[AuthManager] recoverAuth rung=vpn — tunnel ' + vpn.status + '; reconnecting then re-probing (no prompt)');
+      try { await ensureVpn(logger.info); } catch (_) {}
+      if (await probeSession()) {
+        logger.info('[AuthManager] recoverAuth recovered at rung=vpn — session OK once tunnel was up');
+        return { recovered: true, rung: 'vpn', prompted: false, reason: label };
+      }
+    }
+  } catch (_) { /* vpn module unavailable — skip this rung */ }
+
+  // Rung 3 — session cookie valid but probe failing => AEA lapsed. Silent re-mint.
+  const state = checkMwinit();
+  if (state.ok) {
+    logger.info('[AuthManager] recoverAuth rung=silent — session cookie valid (expires ' + (state.expiresInMin === null ? 'session' : state.expiresInMin + 'min') + '); attempting silent AEA refresh (no prompt)');
+    const r = await refreshAeaSilently();
+    if (r && r.ok) {
+      logger.info('[AuthManager] recoverAuth recovered at rung=silent — AEA re-minted with no prompt');
+      return { recovered: true, rung: 'silent', prompted: false, reason: label };
+    }
+    // Silent refresh exhausted. If we somehow dropped offline during it, defer.
+    if (_isOfflineNow()) {
+      logger.info('[AuthManager] recoverAuth — went offline during silent refresh; deferring (no prompt)');
+      return { recovered: false, rung: 'offline', prompted: false, reason: label };
+    }
+
+    // Rung 3.25 — AEA-ONLY re-mint via `mwinit --refresh-aea` (no WebAuthn tap).
+    // Cheaper than restarting the posture agent; the proven middle rung that
+    // re-mints JUST the AEA cookie when the session is valid but AEA lapsed.
+    // It now reports sessionInvalid when mwinit itself says the session is gone
+    // — in that case silent/agent repair cannot help, so jump to the prompt.
+    try {
+      const rA = await refreshAeaViaMwinit();
+      if (rA && rA.ok) {
+        try { await injectCookies(undefined, { skipAea: true }); } catch (_) {}
+        logger.info('[AuthManager] recoverAuth recovered at rung=aea-mwinit — AEA re-minted (no tap)');
+        return { recovered: true, rung: 'aea-mwinit', prompted: false, reason: label };
+      }
+      if (rA && rA.sessionInvalid) {
+        _sessionInvalid = true;   // authoritative: the Midway SESSION is gone
+        logger.warn('[AuthManager] recoverAuth — mwinit --refresh-aea reports session invalid; AEA repair cannot help, escalating to interactive mwinit');
+        // Skip the agent rung (it cannot fix a dead session) and fall straight
+        // through to the interactive mwinit rung below.
+      } else {
+        // Rung 3.5 — AEA AGENT SELF-HEAL. Session cookie is valid + online + VPN up,
+    // yet the silent AEA re-mint failed. The dominant cause (confirmed 2026-10)
+    // is a STUCK Enterprise Access posture agent (duplicate/hung
+    // EnterpriseAccessConsoleApp.exe instances timing out the posture query).
+    // Restart the agent automatically and retry the silent refresh ONCE — this
+    // is the app doing, on its own, what previously required manually killing
+    // the processes. Only if THIS still fails do we fall through to the
+    // interactive mwinit prompt. Windows-only; a no-op (returns false) elsewhere.
+    // restartAeaAgent now returns true only when the restart was VERIFIED
+    // (duplicate/hung condition resolved). But even an UNVERIFIED attempt may
+    // have helped, so retry the silent refresh whenever a restart was attempted
+    // (not skipped by the rate-limit) — the silent refresh + real-target verify
+    // is the actual proof of recovery, not the restart itself (spec #11/#12).
+    const verifiedRestart = await restartAeaAgent();
+    const attemptedRestart = verifiedRestart || (Date.now() - _lastAeaAgentRestartAttemptAt < 30000);
+    if (attemptedRestart) {
+      logger.info('[AuthManager] recoverAuth rung=aea-agent — agent restart ' + (verifiedRestart ? 'VERIFIED' : 'attempted (unverified)') + '; retrying silent AEA refresh');
+      const r2 = await refreshAeaSilently();
+      if (r2 && r2.ok) {
+        logger.info('[AuthManager] recoverAuth recovered at rung=aea-agent — posture agent self-healed, AEA re-minted, no prompt');
+        return { recovered: true, rung: 'aea-agent', prompted: false, reason: label };
+      }
+      logger.warn('[AuthManager] recoverAuth — silent refresh still failing after AEA agent restart; escalating');
+      }
+      } // end: AEA-mwinit did not short-circuit to prompt (agent rung ran)
+    } catch (_) { /* AEA-only rung unavailable — fall through to prompt */ }
+  } else {
+    _sessionInvalid = true;   // authoritative: on-disk Midway session expired
+    logger.warn('[AuthManager] recoverAuth — on-disk session cookie genuinely expired (' + (state.reason || 'expired') + ')');
+  }
+
+  // Rung 4 — last resort: prompt mwinit (deduped). Only reached when online, and
+  // either the disk session is truly expired OR the silent refresh is exhausted.
+  if (!allowPrompt) {
+    logger.info('[AuthManager] recoverAuth — recovery exhausted but allowPrompt=false; NOT prompting (caller will handle). sessionInvalid=' + _sessionInvalid);
+    // requiresInteractiveAuth is TRUE only when we positively established the
+    // session is gone. A silent-rung exhaustion with a still-valid session is
+    // NOT a user requirement — the supervisor should COOLDOWN + retry, not sit
+    // in WAITING_FOR_USER forever (the stuck-recovery bug).
+    return { recovered: false, rung: 'needs-prompt', prompted: false, reason: label, sessionInvalid: _sessionInvalid, requiresInteractiveAuth: _sessionInvalid };
+  }
+  logger.warn('[AuthManager] recoverAuth rung=mwinit — escalating to interactive mwinit (reason=' + label + ')');
+  try {
+    const mw = await runMwinit();
+    // runMwinit skips when offline (returns { skipped:'offline' }); that is not
+    // a completed re-auth — treat it as deferred, not recovered.
+    if (mw && mw.skipped === 'offline') {
+      return { recovered: false, rung: 'offline', prompted: false, reason: label };
+    }
+    try { await injectCookies(); } catch (_) {}
+    logger.info('[AuthManager] recoverAuth recovered at rung=mwinit — re-auth completed');
+    // requiresInteractiveAuth reflects whether the SESSION was genuinely gone
+    // (the only thing that justifies WAITING_FOR_USER). A mwinit run that
+    // completed should let the supervisor re-verify; it does NOT by itself
+    // force a user-gate on the next cycle.
+    return { recovered: true, rung: 'mwinit', prompted: true, reason: label, sessionInvalid: _sessionInvalid, requiresInteractiveAuth: _sessionInvalid };
+  } catch (e) {
+    logger.warn('[AuthManager] recoverAuth mwinit failed: ' + e.message);
+    return { recovered: false, rung: 'mwinit', prompted: true, reason: label, error: e.message, sessionInvalid: _sessionInvalid, requiresInteractiveAuth: _sessionInvalid };
+  }
+}
+
 module.exports = {
   checkMwinit,
+  parseMidwayCookies, // Stage 10: browser_provider seeds a headless Playwright context from the same parsed cookies
   runMwinit,
+  recoverAuth, // FIX (2026-10): single centralized recovery ladder every caller routes through
+  restartAeaAgent, // FIX (2026-10-18): self-heal a stuck Enterprise Access posture agent (duplicate/hung EnterpriseAccessConsoleApp.exe) so AAP recovers with no manual Task Manager step
   injectCookies, // FEATURE (2026-07-23): now accepts optional target session
   probeSession, // FIX (2026-07-21): exported so callers can replicate ensureAuthenticated's verification steps without its disabled auto-spawn branch
   refreshAeaSilently, // FIX (2026-09-30): silent AEA re-mint so one auth lasts the full ~24h session
+  refreshAeaViaMwinit, // FIX (2026-10-17): middle recovery rung — `mwinit --refresh-aea` re-mints just the AEA posture cookie (no full re-auth) when session is valid but AEA lapsed
+  aeaFileExpiryMin, // FIX (2026-10-17): soonest AEA expiry from the cookie FILE (to detect session-valid-but-AEA-missing)
+  aeaSessionExpiryMin, // FIX (2026-10-10): read live AEA expiry from the Electron session (truth), not the stale disk file
   ensureAuthenticated,
   pingRelayEndpoint,
   startOnlineReauthWatch, // FIX (2026-10): re-probe same session on reconnect; prompt only on confirmed-online rejection
+  startAeaCookieWatch, // FIX (2026-10-19): auto-capture a freshly-minted AEA cookie into the app session the instant it lands on disk
+  injectAeaFromPostureToken, // FIX (2026-10-19): inject AEA directly from the ACME posture token, bypassing the broken AEA browser extension (StatusCode 7)
+  postureTokenExpiryMin,     // FIX (2026-10-19): read the ACME posture token's remaining life (the AEA cookie's true TTL)
+  ACME_POSTURE_TOKEN,        // path to the ACME posture token file (for the keep-alive watcher)
   COOKIE_FILE,
 };

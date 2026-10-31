@@ -13,10 +13,18 @@
 import bus           from '../bus.js';
 import state         from '../state.js';
 import { notes, ai, aap, relay, vendor } from '../bridge.js';
-import { open as openWRModal }    from './wr-modal.js';
+import { open as openWRModal, readFileAsAttachment } from './wr-modal.js';
 import { open as openVendorReview } from './vendor-review-modal.js';
 import { open as openDealerWOModal } from './dealer-wo-modal.js';
+import { open as openRcaModal } from './rca-modal.js';
+
+// RCA button shows on COMPLETED Repair timeline cards completed within this window.
+const RCA_WINDOW_MS = 9 * 24 * 60 * 60 * 1000;
+// Set by ui:unit-select when the user came from an "RCA to do" link: the WO whose
+// RCA form should open as soon as its button renders. Expires after 30s.
+let _pendingRca = null;
 import toast         from '../components/toast.js';
+import { redactForSharing } from '../util/redact.js';
 
 let _panel    = null;
 let _unit     = null;
@@ -114,9 +122,29 @@ function _wireLifecycleForm(unit) {
   const actionsEl= document.getElementById('dp-quick-actions');
   if (!btn || !form || !cancelEl || !confirmEl || !actionsEl) return;
 
+  const stateEl  = document.getElementById('dp-lc-state');
+  const reasonEl = document.getElementById('dp-lc-reason');
+
+  // Auto-populate the reason based on the chosen state. Active -> Healthy;
+  // Unavailable -> Off-site Shop Repair (the common default). The operator can
+  // still pick any reason from the dropdown.
+  function _autoReason() {
+    if (!stateEl || !reasonEl) return;
+    const st = (stateEl.value || '').toLowerCase();
+    const want = st === 'active' ? 'HEALTHY' : (st.includes('unavail') ? 'OFFSITE_SHOP_REPAIR' : reasonEl.value);
+    if (want && [...reasonEl.options].some((o) => o.value === want)) reasonEl.value = want;
+  }
+  if (stateEl) stateEl.addEventListener('change', _autoReason);
+
   btn.addEventListener('click', () => {
     actionsEl.style.display = 'none';
     form.style.display = 'flex';
+    // Prefill the state with the unit's CURRENT state, then auto-set its reason.
+    if (stateEl) {
+      const cur = (unit.lifecycleState || '').toLowerCase();
+      stateEl.value = cur.includes('unavail') ? 'Unavailable' : (cur === 'ordered' ? 'Ordered' : 'Active');
+    }
+    _autoReason();
   });
 
   cancelEl.addEventListener('click', () => {
@@ -204,6 +232,248 @@ function _wireAISuggest(unit) {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const q = askInput.value.trim(); if (q) _runSuggest(q); }
     });
   }
+}
+
+// ── Live lifecycle (read straight from AAP) ─────────────────────────────────
+const _lcNorm = (s) => String(s || '').trim().toUpperCase().replace(/[\s/-]+/g, '_');
+// Does the LIVE AAP lifecycle match what was requested? State must match; the
+// reason must match too when one was requested.
+export function lifecycleMatches(live, wantState, wantReason) {
+  if (!live || !live.ok) return false;
+  if (_lcNorm(live.state) !== _lcNorm(wantState)) return false;
+  return !wantReason || _lcNorm(live.reason) === _lcNorm(wantReason);
+}
+export function liveLifecycleText(live) {
+  if (!live || !live.ok) return '';
+  const st = live.stateLabel || live.state || '?';
+  const rs = live.reasonLabel || live.reason || '';
+  return st + (rs ? ' · ' + rs : '');
+}
+
+// Fetch the live lifecycle and reflect it on the Lifecycle tile + form.
+// Updates the in-memory unit so the rest of the panel matches AAP.
+async function _refreshLiveLC(unit) {
+  const sub = document.getElementById('dp-act-lc-sub');
+  const line = document.getElementById('dp-lc-live');
+  if (!unit || !unit.assetUrl) {
+    if (line) line.textContent = 'Live AAP status unavailable (no asset link)';
+    return null;
+  }
+  if (!(window.aap && typeof window.aap.getLifecycle === 'function')) {
+    // App core hasn't been restarted since this feature was added.
+    if (line) line.textContent = 'Live AAP check needs an app restart (Ctrl+R) — showing last sync';
+    return null;
+  }
+  if (sub) sub.textContent = (unit.lifecycleState || '') + ' · checking AAP…';
+  let live = null;
+  try { live = await aap.getLifecycle(unit.equipmentId, unit.assetUrl); } catch (e) { live = { ok: false, error: e.message }; }
+  if (live && live.ok) {
+    const txt = liveLifecycleText(live);
+    const appHad = (unit.lifecycleState || '') + (unit.lifecycleReason ? ' · ' + unit.lifecycleReason : '');
+    if (sub) { sub.textContent = '● LIVE ' + (live.stateLabel || live.state); sub.title = 'AAP now: ' + txt + (appHad ? '\nApp had: ' + appHad : ''); }
+    if (line) line.textContent = 'AAP live: ' + txt + ' (checked ' + new Date(live.at || Date.now()).toLocaleTimeString() + ')';
+    unit.lifecycleState = live.stateLabel || live.state || unit.lifecycleState;
+    unit.lifecycleReason = live.reasonLabel || live.reason || unit.lifecycleReason;
+  } else {
+    if (sub) { sub.textContent = (unit.lifecycleState || '') + ' (not live)'; sub.title = 'Live check failed: ' + ((live && live.error) || 'unknown'); }
+    if (line) line.textContent = 'Live AAP check failed: ' + ((live && live.error) || 'unknown') + ' — showing last sync';
+  }
+  return live;
+}
+
+// ── Attach documents to an open WR ─────────────────────────────────────────
+// The unit's OPEN work requests (primary + secondary cards). Completed /
+// closed / cancelled ones are skipped — a just-closed WR can still be the
+// primary card, and documents shouldn't land on it by accident.
+const _UUID_IN = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i;
+export function openWrChoices(unit) {
+  const u = unit || {};
+  const out = [];
+  const seen = new Set();
+  const add = (w, kind) => {
+    if (!w) return;
+    const m = String(w.workRequestId || w._serviceUUID || w.serviceUrl || '').match(_UUID_IN);
+    if (!m || seen.has(m[0].toLowerCase())) return;
+    const st = String(w.serviceState || '');
+    if (w.completed || /complet|closed|cancel/i.test(st)) return;
+    seen.add(m[0].toLowerCase());
+    const desc = String(w.issueDetails || w.issueSummary || w.serviceCategory || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    out.push({ id: m[0], kind, label: m[0].slice(0, 8) + (st ? ' · ' + st : '') + (desc ? ' · ' + desc : '') });
+  };
+  add(u, 'primary');
+  (Array.isArray(u._secondaryWRs) ? u._secondaryWRs : []).forEach((w) => add(w, 'secondary'));
+  return out;
+}
+
+// ── WR escalation (Repair tab) ─────────────────────────────────────────────
+// Pure helpers for the Escalation card. Teams/current come live from AAP via
+// window.aapApi; createdBy is resolved in the main process, never sent here.
+export const ESC_COMMENT_MAX = 2000;
+export const ESC_CARRIER_UPDATE = 'MCS_CARRIER_UPDATE_REQUEST';
+
+export function escalationAaid(unit) {
+  const u = unit || {};
+  if (u.aaid) return String(u.aaid).trim();
+  const m = String(u.assetUrl || '').match(/\/v2\/asset\/([^/?#]+)/);
+  return m ? m[1] : '';
+}
+
+export function parseEscalationList(v) {
+  if (v == null) return [];
+  const arr = Array.isArray(v) ? v : String(v).split(/[;,]/);
+  const out = [];
+  arr.forEach((x) => {
+    const s = String((x && typeof x === 'object') ? (x.value || '') : (x == null ? '' : x)).trim();
+    if (s && !out.includes(s)) out.push(s);
+  });
+  return out;
+}
+
+export function escalationSelectable(options, current) {
+  const cur = new Set(parseEscalationList(current));
+  const seen = new Set();
+  const out = [];
+  (Array.isArray(options) ? options : []).forEach((o) => {
+    const v = String((o && o.value) || '').trim();
+    if (!v || cur.has(v) || seen.has(v)) return;
+    seen.add(v);
+    out.push(o);
+  });
+  return out;
+}
+
+export function validateEscalationDraft({ team, comment, current } = {}) {
+  const t = String(team || '').trim();
+  const c = String(comment || '').trim();
+  if (!t) return { ok: false, error: 'Pick a team to escalate to.' };
+  if (parseEscalationList(current).includes(t)) return { ok: false, error: 'That escalation is already applied.' };
+  if (!c) return { ok: false, error: 'A reason comment is required to escalate.' };
+  if (c.length > ESC_COMMENT_MAX) return { ok: false, error: 'Reason comment must be ' + ESC_COMMENT_MAX + ' characters or fewer.' };
+  return { ok: true, error: null };
+}
+
+export function validateDeEscalation({ value, comment, current } = {}) {
+  const v = String(value || '').trim();
+  const c = String(comment || '').trim();
+  if (!v || !parseEscalationList(current).includes(v)) return { ok: false, error: 'That escalation is not currently applied.' };
+  if (v === ESC_CARRIER_UPDATE && !c) return { ok: false, error: 'Add a reason comment to remove Carrier Update Request' };
+  if (c.length > ESC_COMMENT_MAX) return { ok: false, error: 'Reason comment must be ' + ESC_COMMENT_MAX + ' characters or fewer.' };
+  return { ok: true, error: null };
+}
+
+export function buildEscalationPayload(unit, { add, remove, comment } = {}) {
+  const u = unit || {};
+  return {
+    workRequestId: u.workRequestId,
+    aaid: escalationAaid(u),
+    add: Array.isArray(add) ? add : [],
+    remove: Array.isArray(remove) ? remove : [],
+    comment: String(comment || ''),
+  };
+}
+
+function _attachSectionHtml(unit) {
+  const choices = openWrChoices(unit);
+  if (!choices.length) {
+    return '<div class="dp-section-title" style="margin-top:10px">Attach to open WR</div>' +
+      '<p class="dp-empty" id="dp-wra-none">No open work request on this unit.</p>';
+  }
+  return '<div class="dp-section-title" style="margin-top:10px">Attach to open WR</div>' +
+    '<div class="dp-lc-form" id="dp-wra" style="display:flex;flex-direction:column;gap:6px">' +
+      '<label class="settings-label">Work request' +
+        '<select id="dp-wra-wr" class="detail-panel__select" aria-label="Work request to attach to">' +
+          choices.map((c) => '<option value="' + esc(c.id) + '">' + esc(c.label) + '</option>').join('') +
+        '</select></label>' +
+      '<div id="dp-wra-drop" class="wr-dropzone" tabindex="0" role="button" aria-label="Add files: drop here or press Enter to browse">' +
+        '<span>Drag files here, or <button id="dp-wra-browse" type="button" class="wr-dropzone__browse">browse…</button> (PNG, JPEG, PDF)</span>' +
+        '<input id="dp-wra-input" type="file" multiple accept="image/*,.pdf" style="display:none" />' +
+      '</div>' +
+      '<div id="dp-wra-list" class="wr-attach-list" aria-live="polite"></div>' +
+      '<div class="dp-lc-row"><button id="dp-wra-upload" class="detail-panel__btn" disabled>Upload</button>' +
+        '<button id="dp-wra-clear" class="detail-panel__btn detail-panel__btn--secondary" disabled>Clear</button></div>' +
+      '<div id="dp-wra-result" class="wr-screenshot-label" aria-live="polite"></div>' +
+    '</div>';
+}
+
+function _wireAttachToWR(unit) {
+  const drop = document.getElementById('dp-wra-drop');
+  if (!drop) return;
+  const input  = document.getElementById('dp-wra-input');
+  const browse = document.getElementById('dp-wra-browse');
+  const list   = document.getElementById('dp-wra-list');
+  const upBtn  = document.getElementById('dp-wra-upload');
+  const clrBtn = document.getElementById('dp-wra-clear');
+  const sel    = document.getElementById('dp-wra-wr');
+  const result = document.getElementById('dp-wra-result');
+  let files = []; // [{ name, dataUrl }]
+
+  const render = () => {
+    list.innerHTML = files.map((f, i) =>
+      '<div class="wr-attach-item"><span>' + esc(f.name) + '</span> ' +
+      '<button type="button" class="wr-dropzone__browse" data-wra-rm="' + i + '" aria-label="Remove ' + esc(f.name) + '">✕</button></div>').join('');
+    upBtn.disabled = !files.length;
+    clrBtn.disabled = !files.length;
+  };
+  const addFiles = async (fileList) => {
+    for (const file of Array.from(fileList || [])) {
+      const att = await readFileAsAttachment(file);
+      if (!att) { toast.show('warn', 'Could not read "' + file.name + '"', 3000); continue; }
+      if (att.warn) { toast.show('warn', '"' + file.name + '" ' + att.warn, 5000); continue; }
+      files.push({ name: att.name, dataUrl: att.dataUrl });
+    }
+    result.textContent = '';
+    render();
+  };
+
+  browse.addEventListener('click', (e) => { e.stopPropagation(); input.click(); });
+  drop.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } });
+  input.addEventListener('change', () => { addFiles(input.files); input.value = ''; });
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('wr-dropzone--over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('wr-dropzone--over'));
+  drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('wr-dropzone--over'); addFiles(e.dataTransfer && e.dataTransfer.files); });
+  list.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-wra-rm]');
+    if (!b) return;
+    files.splice(parseInt(b.getAttribute('data-wra-rm'), 10), 1);
+    render();
+  });
+  clrBtn.addEventListener('click', () => { files = []; result.textContent = ''; render(); });
+
+  upBtn.addEventListener('click', async () => {
+    const wrId = sel.value;
+    const label = (sel.options[sel.selectedIndex] || {}).text || wrId;
+    if (!wrId || !files.length) return;
+    if (!window.confirm('Upload ' + files.length + ' file' + (files.length > 1 ? 's' : '') + ' to WR ' + label + '?')) return;
+    upBtn.disabled = true; clrBtn.disabled = true; upBtn.textContent = 'Uploading…';
+    result.textContent = '';
+    try {
+      if (!(window.aap && typeof window.aap.attachToWR === 'function')) throw new Error('needs an app restart (Ctrl+R) first');
+      const r = await aap.attachToWR(wrId, files);
+      const res = (r && Array.isArray(r.results)) ? r.results : [];
+      const okN = res.filter((x) => x && x.ok).length;
+      if (r && r.ok) {
+        result.textContent = '✓ ' + okN + ' file' + (okN > 1 ? 's' : '') + ' uploaded to WR ' + wrId.slice(0, 8);
+        toast.show('success', okN + ' file' + (okN > 1 ? 's' : '') + ' attached to WR ' + wrId.slice(0, 8), 5000);
+        files = [];
+      } else if (r && r.partial) {
+        const failed = res.filter((x) => !(x && x.ok)).map((x) => (x && x.name) || 'file');
+        result.textContent = '⚠ ' + okN + '/' + res.length + ' uploaded. Failed: ' + failed.join(', ');
+        toast.show('warn', 'Some files failed to upload', 5000);
+        // keep only the failed ones so a retry doesn't re-upload the good ones
+        const failedSet = new Set(failed);
+        files = files.filter((f) => failedSet.has(f.name));
+      } else {
+        result.textContent = '✗ Upload failed: ' + ((r && r.error) || 'unknown');
+        toast.show('error', 'Upload failed: ' + ((r && r.error) || 'unknown'), 6000);
+      }
+    } catch (e) {
+      result.textContent = '✗ Upload failed: ' + e.message;
+      toast.show('error', 'Upload failed: ' + e.message, 6000);
+    } finally {
+      upBtn.textContent = 'Upload';
+      render();
+    }
+  });
 }
 
 // S11: Create WR -> openWRModal (full modal with vendor/urgency/areas/screenshot)
@@ -673,6 +943,15 @@ function _renderAsistContent(unit) {
     html += ' <a class="dp-asist-sr-link" href="'+ srHref +'" target="_blank" rel="noreferrer">'+'(SR)'+'</a>';
   }
   if (ts) html += '<div class="dp-asist-ts">Last enriched: '+_esc(ts.slice(0,10))+'</div>';
+  // Dealer comment thread scraped from the offsite estimate/SR page (asistNotes).
+  // This is where vendor status updates that never reach the Relay thread live
+  // (e.g. "part was damaged, waiting for a new one"). Show it raw so the latest
+  // dealer word is visible without opening Split View.
+  const notes = (unit.asistNotes || '').trim();
+  if (notes) {
+    html += '<details class="dp-asist-notes"><summary>📄 Dealer comments (offsite)</summary>'
+      + '<pre class="dp-asist-notes__body">' + _esc(notes.slice(0, 6000)) + '</pre></details>';
+  }
   html += '</div>';
   return html;
 }
@@ -736,9 +1015,9 @@ function _wireDealerWOBtn(unit) {
 // ── helpers ───────────────────────────────────────────────────────────────────
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function riskColor(n){return n>=70?'red':n>=40?'org':'grn';}
-function downDays(unit){const ts=unit.created;if(!ts)return null;return Math.floor((Date.now()-new Date(ts).getTime())/86400000);}
+function downDays(unit){const ts=unit.created;if(!ts)return null;const t=new Date(ts).getTime();if(isNaN(t))return null;return Math.floor((Date.now()-t)/86400000);}
 function relTime(ts){if(!ts)return'';const d=Date.now()-new Date(ts).getTime();if(d<3600000)return Math.floor(d/60000)+'m ago';if(d<86400000)return Math.floor(d/3600000)+'h ago';return Math.floor(d/86400000)+'d ago';}
-function fmtDate(ts){if(!ts)return'';try{return new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});}catch(e){return ts;}}
+function fmtDate(ts){if(!ts)return'';try{var d=new Date(ts);if(isNaN(d.getTime()))return'';return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});}catch(e){return'';}}
 function parseConvo(raw){
   if(!raw||typeof raw!=='string')return[];
   // Filter to non-empty lines only
@@ -951,6 +1230,10 @@ function renderHeader(unit){
     aapUrl?'<button class="dp-launcher" title="Open AAP" data-aap-url="'+aapUrl+'">\ud83d\udd17 AAP</button>':'',
     relayUrl?'<button class="dp-launcher" title="Open Relay WR" data-ext-url="'+relayUrl+'">\ud83d\udcc4 Relay</button>':'',
     offsiteUrl?'<button class="dp-launcher" title="Open Offsite Portal" data-ext-url="'+offsiteUrl+'">\ud83c\udfe6 Portal</button>':'',
+    // Daily Notes launcher: opens Relay + Offsite together in ONE inline split
+    // panel (single close button) via _openInlineSplit — no more two separate
+    // windows to close individually.
+    (relayUrl||offsiteUrl)?'<button id="dp-launch-daily" class="dp-launcher" title="Open Relay + Offsite side-by-side (Daily Notes)">\ud83d\udccb Daily</button>':'',
   ].filter(Boolean).join('');
 
   return '<div class="dp-header dp-header--'+hdrCls+'">'+
@@ -966,7 +1249,40 @@ function renderHeader(unit){
     (meta?'<div class="dp-header__meta">'+meta+'</div>':'')+
     (unit.lifecycleReason?'<div class="dp-header__reason">\u2192 '+esc(unit.lifecycleReason)+'</div>':'')+
     '<div class="dp-header__vitals">'+vitals+'</div>'+
+    _pmLocationRow(unit)+
   '</div>';
+}
+
+// PM due-date pills + current location, shown in the detail header. PM values
+// come from unit.pmB/pmX/dot/quarterlyLift (API: asset.maintenanceScheduleStatuses;
+// scrape: parsed dueDate). Shows ALL set PM types (not hidden at 60 days like the
+// grid), color-coded overdue/soon/ok. Location from unit.geofence || domicileSite.
+function _pmLocationRow(unit){
+  function pill(label,val){
+    if(!val||val==='--')return '';
+    var cls='dp-pm-pill--ok';
+    var v=String(val).toLowerCase();
+    if(v==='overdue'){ cls='dp-pm-pill--overdue'; }
+    else {
+      // val is "Mon D" (no year) — assume the NEXT occurrence: if that month/day
+      // already passed this year, it's next year. Avoids the grid's this-year
+      // misparse that flagged future dates as overdue.
+      var now=new Date(); now.setHours(0,0,0,0);
+      var d=new Date(val+' '+now.getFullYear());
+      if(!isNaN(d.getTime())){
+        if(d< now) d=new Date(val+' '+(now.getFullYear()+1));
+        var days=Math.round((d-now)/86400000);
+        cls=days<=0?'dp-pm-pill--overdue':days<=30?'dp-pm-pill--soon':'dp-pm-pill--ok';
+      }
+    }
+    return '<span class="dp-pm-pill '+cls+'"><span class="dp-pm-pill__lbl">'+esc(label)+'</span>'+
+           '<span class="dp-pm-pill__val">'+esc(val)+'</span></span>';
+  }
+  var pills=[pill('PM B',unit.pmB),pill('PM X',unit.pmX),pill('DOT',unit.dot),pill('Qtrly Lift',unit.quarterlyLift)].filter(Boolean).join('');
+  var loc=unit.geofence||unit.domicileSite||unit.domicile||'';
+  var locChip=loc?'<span class="dp-pm-loc"><span class="dp-pm-loc__icon">\ud83d\udccd</span>'+esc(loc)+'</span>':'';
+  if(!pills&&!locChip)return '';
+  return '<div class="dp-header__pmloc">'+locChip+(pills?'<span class="dp-pm-pills">'+pills+'</span>':'')+'</div>';
 }
 
 // ── tabs ──────────────────────────────────────────────────────────────────────
@@ -1078,6 +1394,44 @@ async function _injectAISplitDraft(webview, unit, side) {
       '},1000)'
     ).catch(function(){});
   }
+
+  // ── Live refresh gate (2026-10): the Split View button kicked a forced
+  // per-unit Relay + Offsite re-scrape (+ canonical re-reason) and stashed the
+  // promise on window.__splitRefresh. Await it (already time-capped by the
+  // caller) so the reconcile draft below is built from FRESH data, not the last
+  // full-sync snapshot. If it refreshed, note that so we can label the draft.
+  var _refreshed = false;
+  try {
+    if (window.__splitRefresh) {
+      var _rr = await window.__splitRefresh;
+      if (_rr && _rr.ok) _refreshed = true;
+    }
+  } catch (_re) { /* refresh failed — proceed with whatever data we have */ }
+
+  // ── Reconcile-first (2026-10): if the Relay↔Offsite reconcile engine is
+  // enabled, use its decision — the gap-fill (an Offsite update Relay is
+  // missing) for the Relay pane, or the escalated vendor follow-up / dealer-ask
+  // for the Offsite pane. This is the SAME reasoning that runs during sync, so
+  // Split View auto-fills exactly what would be posted. If the engine is off,
+  // low-confidence, or produces nothing, we fall through to the existing
+  // simple draft below (no regression).
+  try {
+    if (window.relayReconcile && window.relayReconcile.draftForSplit) {
+      var rec = await window.relayReconcile.draftForSplit(equipId, side);
+      if (rec && rec.ok && rec.text && rec.text.length > 10 && webview.isConnected) {
+        var _indLabel = _refreshed
+          ? '\\ud83d\\udd04 Live-refreshed reconcile draft'
+          : '\\u2705 Reconcile draft (Relay \\u2194 Offsite)';
+        webview.executeJavaScript(
+          '(function(){' + selector +
+          'if(ta){ta.focus();ta.value="";document.execCommand("insertText",false,' + JSON.stringify(rec.text) + ');ta.style.background="#e6f7ff";ta.blur();' +
+          'var ind=document.createElement("div");ind.id="ai-draft-indicator";ind.textContent="' + _indLabel + '";ind.style.cssText="font-size:11px;color:#3fb950;padding:4px 8px;margin-top:4px;";ta.parentElement.insertBefore(ind,ta.nextSibling);setTimeout(function(){if(ind)ind.remove();},4000);}' +
+          '})()'
+        ).catch(function(){});
+        return; // reconcile draft used — skip the generic AI draft below
+      }
+    }
+  } catch (e) { /* reconcile unavailable — fall through to the generic draft */ }
 
   // Show a small "AI drafting..." indicator near the textarea while waiting
   if (!webview.isConnected) return;
@@ -1784,7 +2138,12 @@ function renderRepairPane(unit){
   // parseConvo removed — AI timeline is the only source of truth
   _allConvoMsgs = [];
   // === ORCHA REPAIR TIMELINE (Source of Truth) ===
-  var aiTimeline = unit.repairTimeline || '';
+  // Carrier-facing backstop: the displayed timeline is the "official" status
+  // view, so scrub personal names + dollar amounts here too (the AI timeline
+  // already avoids them by construction; this catches any that slip through).
+  // Keeps vendor/company names, locations, case numbers, parts, dates. The raw
+  // "Dealer comments (offsite)" block (_renderAsistContent) is left untouched.
+  var aiTimeline = redactForSharing(unit.repairTimeline || '');
   var orchaNote = unit.savedNotes || '';
   var timelineHtml = '';
 
@@ -1831,6 +2190,31 @@ function renderRepairPane(unit){
   var src=unit.asistSource||'';
   var scrapedAt=unit.asistScrapedAt||'';
   var staleOffsite=scrapedAt&&(Date.now()-new Date(scrapedAt).getTime())>86400000;
+  // Volvo / PACCAR case stage from Decisiv's API (2026-10-28):
+  // Arrival > Diagnosis > Approval > Repair > Ready, plus detail + since-when.
+  var stageHtml='';
+  // Only a stage CONFIRMED by the Decisiv API (offsiteStageSince is set only by
+  // the API). A stage guessed from note wording (e.g. 322504 "ready" on 10-28
+  // while the case was in diagnosis) is never shown.
+  var _stg=unit.offsiteStageSince?String(unit.offsiteStage||'').toLowerCase():'';
+  var _STAGES=['arrival','diagnosis','approval','repair','ready'];
+  var _si=_STAGES.indexOf(_stg);
+  if(_si>=0){
+    var _steps=_STAGES.map(function(s,i){
+      var cls='dp-stage__step'+(i<_si?' dp-stage__step--done':'')+(i===_si?' dp-stage__step--current':'');
+      return '<span class="'+cls+'"'+(i===_si?' aria-current="step"':'')+'>'+esc(s.charAt(0).toUpperCase()+s.slice(1))+'</span>';
+    }).join('<span class="dp-stage__sep" aria-hidden="true">\u203a</span>');
+    var _since='';
+    try{ var _sd=new Date(unit.offsiteStageSince); if(unit.offsiteStageSince&&!isNaN(_sd.getTime())) _since=_sd.toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch(_e){}
+    stageHtml='<div class="dp-stage'+(_stg==='ready'?' dp-stage--ready':'')+'" role="group" aria-label="Dealer case stage">'+
+      '<div class="dp-stage__steps">'+_steps+'</div>'+
+      ((unit.offsiteStageDetail||_since)?'<div class="dp-stage__detail">'+
+        esc(unit.offsiteStageDetail||'')+(_since?(unit.offsiteStageDetail?' \u00b7 ':'')+'since '+esc(_since):'')+'</div>':'')+
+    '</div>';
+  } else if (!unit.offsiteStage && /no status set by the dealer/i.test(String(unit.offsiteStageDetail||''))) {
+    // Decisiv API answered: the dealer hasn't set any repair status yet.
+    stageHtml='<div class="dp-stage" role="note"><div class="dp-stage__detail">'+esc(unit.offsiteStageDetail)+'</div></div>';
+  }
   var offsiteHtml=offsiteUrl?
     '<div class="dp-section-title">Offsite Event</div>'+
     '<div class="dp-offsite-card">'+
@@ -1991,12 +2375,40 @@ function renderRepairPane(unit){
     if (btn) btn.addEventListener('click', function() {
       var rUrl = unit.serviceUrl || '';
       var oUrl = offsiteUrl || '';
-      window.__splitUnit = unit; _openInlineSplit(rUrl, oUrl, unit.equipmentId);
+      window.__splitUnit = unit;
+      // LIVE REFRESH ON OPEN: kick a forced single-unit Relay + Offsite re-scrape
+      // (+ canonical re-reason) so the drafts reflect the latest updates, not the
+      // last full-sync snapshot. Non-blocking: the panes open immediately with
+      // cached drafts; _injectAISplitDraft awaits this promise (window.__splitRefresh)
+      // before drafting, then shows a "live-refreshed" draft. Guarded + graceful:
+      // on failure/timeout the cached draft stands. Bounded so a hung scrape
+      // never blocks the pane forever.
+      try {
+        if (window.relay && window.relay.refreshUnit) {
+          var _rp = window.relay.refreshUnit(unit.equipmentId, { force: true, reconcile: true })
+            .then(function (r) { return (r && r.ok) ? r : null; })
+            .catch(function () { return null; });
+          // Cap the wait so panes don't hang on a slow/failed scrape.
+          window.__splitRefresh = Promise.race([
+            _rp,
+            new Promise(function (res) { setTimeout(function () { res(null); }, 35000); })
+          ]);
+        } else {
+          window.__splitRefresh = Promise.resolve(null);
+        }
+      } catch (_e) { window.__splitRefresh = Promise.resolve(null); }
+      _openInlineSplit(rUrl, oUrl, unit.equipmentId);
     });
   }, 100);
 
+  // Escalation card mount (filled by _wireEscalation; stays hidden unless AAP
+  // reports the feature enabled and returns teams for this unit's fleet).
+  var escalateHtml=(unit.workRequestId&&escalationAaid(unit))?'<div class="dp-escalate-wrap" id="dp-escalate-wrap" hidden></div>':'';
+
   return '<div class="dp-pane active" id="dp-pane-repair">'+
-    '<div class="dp-section-title">Work Request</div>'+woCard+plannedWRCard+secondaryWRCards+splitViewBtn+durBar+timelineHtml+offsiteHtml+
+    // Dealer case stage sits at the top so it's visible without scrolling.
+    (stageHtml?'<div class="dp-section-title">Dealer Case Stage</div>'+stageHtml:'')+
+    '<div class="dp-section-title">Work Request</div>'+woCard+escalateHtml+plannedWRCard+secondaryWRCards+splitViewBtn+durBar+timelineHtml+offsiteHtml+
   '</div>';
 }
 
@@ -2058,12 +2470,23 @@ function renderIntelPane(unit){
           (subsystem?'<span class="dp-insight-card__type">'+esc(subsystem)+'</span>':'')+
           (type?'<span class="dp-insight-card__sub">'+esc(type)+'</span>':'')+
           (status?'<span class="dp-insight-card__status dp-insight-card__status--'+esc(status.toLowerCase())+'">'+esc(status)+'</span>':'')+
-          (ins.url?'<a class="dp-offsite-card__link" href="#" data-ext-url="'+esc(ins.url)+'" style="margin-left:auto">\u2197</a>':'')+
+          (ins.url?'<a class="dp-offsite-card__link" href="#" data-inapp-url="'+esc(ins.url)+'" title="Open insight in app" style="margin-left:auto">\u2197</a>':'')+
         '</div>'+
         (ins.title?'<div class="dp-insight-card__title">'+esc(ins.title)+'</div>':'')+
         (ins.summary?'<div class="dp-insight-card__summary">'+esc(ins.summary)+'</div>':'')+
-        (ins.guidance?'<div class="dp-insight-card__action">\u27a1 '+esc(ins.guidance)+'</div>':'')+
-        (ins.recommended?'<div class="dp-insight-card__action">\ud83d\udd27 '+esc(ins.recommended)+'</div>':'')+
+        // guidance and recommended both derive from the same Uptake field
+        // (meta.recommendedAction), so render ONLY ONE to avoid the duplicated
+        // "Recommended Actions" block. Prefer `recommended`; fall back to
+        // `guidance`; and if they ever differ, show guidance separately only
+        // when it is NOT identical to recommended.
+        ((function(){
+          var rec = ins.recommended || ins.guidance || '';
+          var g   = ins.guidance || '';
+          var out = '';
+          if (rec) out += '<div class="dp-insight-card__action">\ud83d\udd27 '+esc(rec)+'</div>';
+          if (g && g !== rec && g !== ins.recommended) out += '<div class="dp-insight-card__action">\u27a1 '+esc(g)+'</div>';
+          return out;
+        })())+
         ((since||last||mf)?'<div class="dp-insight-card__meta">'+
           (since?'<span>First: '+esc(since)+'</span>':'')+
           (last?'<span>Last: '+esc(last)+'</span>':'')+
@@ -2073,14 +2496,89 @@ function renderIntelPane(unit){
     }).join(''):
     '<div class="dp-empty-state"><span class="dp-empty-state__icon">\u26a1</span>No Uptake insights</div>';
 
-  // screenshot
-  var shot=(unit.screenshots||[])[0]; var shotHtml='';
-  if(shot){
-    shotHtml='<div class="dp-section-title">Uptake Screenshot</div>' +
-      '<div id="dp-screenshot-card" style="position:relative;width:100%;margin:8px 0;min-height:100px;background:#1c2128;border-radius:6px;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">' +
-        '<img id="dp-screenshot-img" data-shot="'+esc(shot)+'" style="width:100%;height:auto;min-height:50px;display:block;border-radius:6px;" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Uptake screenshot loading..." />' +
-        '<div style="font-size:9px;color:rgba(255,255,255,0.35);margin-top:5px;text-align:right;padding:0 8px 4px;" id="dp-screenshot-meta">Loading...</div>' +
-      '</div>';
+  // Uptake screenshots — ONE PER INSIGHT. The scraper captures a screenshot per
+  // insight into unit.screenshots[] (same order as insightsList). The image is
+  // a PNG (its text is NOT selectable), so each screenshot is paired with that
+  // insight's COPYABLE text + a Copy button right here — so when you open a
+  // screenshot you can grab the exact text you need. Falls back gracefully if
+  // there are more/fewer screenshots than insights.
+  function _insightText(ins, ix) {
+    var L = [];
+    L.push('--- Insight ' + (ix + 1) + (ins && ins.title ? ': ' + ins.title : '') + ' ---');
+    if (ins) {
+      if (ins.subsystem) L.push('Subsystem: ' + ins.subsystem);
+      if (ins.type || ins.insightType) L.push('Type: ' + (ins.type || ins.insightType));
+      if (ins.status) L.push('Status: ' + ins.status);
+      if (ins.firstSeen || ins.firstDetected) L.push('First seen: ' + (ins.firstSeen || ins.firstDetected));
+      if (ins.lastSeen || ins.lastDetected) L.push('Last seen: ' + (ins.lastSeen || ins.lastDetected));
+      if (ins.maintenanceFactor) L.push('Maintenance factor: ' + ins.maintenanceFactor);
+      if (ins.summary) L.push('Summary: ' + ins.summary);
+      // guidance/recommended are the same source field — emit once (prefer
+      // recommended), and only add guidance if it genuinely differs.
+      var _rec = ins.recommended || ins.guidance || '';
+      if (_rec) L.push('Recommended: ' + _rec);
+      if (ins.guidance && ins.guidance !== _rec && ins.guidance !== ins.recommended) L.push('Guidance: ' + ins.guidance);
+      if (ins.url) L.push('Link: ' + ins.url);
+    }
+    return L.join('\n');
+  }
+  // Build the per-insight screenshot blocks. An insight may now carry MORE than
+  // one chart (fault chart + line/trend chart) in ins.screenshots[]. So iterate
+  // INSIGHTS and render each insight's own charts under its text — this keeps
+  // the chart↔insight pairing correct even when counts differ. Falls back to
+  // the old positional flat unit.screenshots[] for cached data that predates
+  // per-insight ins.screenshots[].
+  function _shotCardHtml(s) {
+    return '<div class="dp-screenshot-card">' +
+      '<img class="dp-screenshot-img" data-shot="' + esc(s) + '" style="width:100%;height:auto;min-height:50px;display:block;border-radius:6px;cursor:zoom-in;" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Uptake screenshot loading..." />' +
+      '<div class="dp-screenshot-meta">Loading...</div>' +
+    '</div>';
+  }
+  function _copyHtml(txt) {
+    if (!txt) return '';
+    return '<details class="dp-insight-copy"><summary>\ud83d\udccb Copy this insight\u2019s text</summary>' +
+      '<div class="dp-insight-copy__bar"><button class="detail-panel__btn detail-panel__btn--secondary dp-insight-copy__btn" type="button">Copy</button></div>' +
+      '<textarea class="dp-insight-copy__text" readonly rows="' + Math.min(20, Math.max(5, txt.split('\n').length)) + '">' + esc(txt) + '</textarea>' +
+    '</details>';
+  }
+  var perInsightShots = Array.isArray(insights) &&
+    insights.some(function (ins) { return ins && Array.isArray(ins.screenshots) && ins.screenshots.length; });
+
+  var shotHtml = '';
+  if (perInsightShots) {
+    var blocks = [];
+    var totalShots = 0;
+    insights.forEach(function (ins, ix) {
+      var insShots = (ins && Array.isArray(ins.screenshots) ? ins.screenshots : (ins && ins.screenshotPath ? [ins.screenshotPath] : [])).filter(Boolean);
+      if (!insShots.length) return;
+      totalShots += insShots.length;
+      var label = (ins && ins.title) ? ins.title : ('Insight ' + (ix + 1));
+      blocks.push(
+        '<div class="dp-shot-block">' +
+          '<div class="dp-shot-block__title">' + esc(label) + (insShots.length > 1 ? ' <span class="dp-section-count">' + insShots.length + ' charts</span>' : '') + '</div>' +
+          insShots.map(_shotCardHtml).join('') +
+          _copyHtml(_insightText(ins, ix)) +
+        '</div>'
+      );
+    });
+    if (blocks.length) {
+      shotHtml = '<div class="dp-section-title">Uptake Screenshots <span class="dp-section-count">' + totalShots + '</span></div>' + blocks.join('');
+    }
+  } else {
+    // Legacy / cached data: positional pairing with the flat unit.screenshots[].
+    var shots = Array.isArray(unit.screenshots) ? unit.screenshots.filter(Boolean) : [];
+    if (shots.length) {
+      shotHtml = '<div class="dp-section-title">Uptake Screenshots <span class="dp-section-count">' + shots.length + '</span></div>' +
+        shots.map(function(s, ix) {
+          var ins = insights[ix] || null;
+          var label = (ins && ins.title) ? ins.title : ('Insight ' + (ix + 1));
+          return '<div class="dp-shot-block">' +
+            '<div class="dp-shot-block__title">' + esc(label) + '</div>' +
+            _shotCardHtml(s) +
+            _copyHtml(_insightText(ins, ix)) +
+          '</div>';
+        }).join('');
+    }
   }
 
   // ask Orcha
@@ -2107,7 +2605,7 @@ function renderActionsPane(unit){
       '<button class="dp-action-btn dp-action-btn--primary" id="dp-act-create-wr"><span class="dp-action-btn__icon">\u2795</span>Create WR<span class="dp-action-btn__sub">AAP work request</span></button>'+
       '<button class="dp-action-btn" id="dp-act-dealer-wo"><span class="dp-action-btn__icon">\ud83c\udfe6</span>Dealer WO<span class="dp-action-btn__sub">PACCAR / Volvo / DTNA</span></button>'+
       '<button class="dp-action-btn" id="dp-act-aap"><span class="dp-action-btn__icon">\ud83d\udd17</span>Open AAP<span class="dp-action-btn__sub">Asset page</span></button>'+
-      '<button class="dp-action-btn" id="dp-act-lc"><span class="dp-action-btn__icon">\ud83d\udd04</span>Lifecycle<span class="dp-action-btn__sub">'+esc(unit.lifecycleState||'')+'</span></button>'+
+      '<button class="dp-action-btn" id="dp-act-lc"><span class="dp-action-btn__icon">\ud83d\udd04</span>Lifecycle<span class="dp-action-btn__sub" id="dp-act-lc-sub" aria-live="polite">'+esc(unit.lifecycleState||'')+'</span></button>'+
       '<button class="dp-action-btn dp-action-btn--notes" id="dp-act-daily-notes"><span class="dp-action-btn__icon">\ud83d\udccb</span>Daily Notes<span class="dp-action-btn__sub">AI note + split view</span></button>'+
       '<button class="dp-action-btn dp-action-btn--orcha" id="dp-act-orcha-deep"><span class="dp-action-btn__icon">\u26a1</span>Orcha Scan<span class="dp-action-btn__sub">AI deep analysis</span></button>'+
     '</div>'+
@@ -2122,54 +2620,60 @@ function renderActionsPane(unit){
 // _wireLifecycleForm -- that failure was being reported to the user as a
 // SUCCESS. Fixed to the 4 real AAP states.
 '<div id="dp-lc-form" class="dp-lc-form" style="display:none">'+
-      '<div class="dp-lc-row"><select id="dp-lc-state" class="detail-panel__select"><option value="Active">Active</option><option value="Unavailable">Unavailable</option><option value="Ordered">Ordered</option><option value="End of Life">End of Life</option></select>'+
-      '<input id="dp-lc-reason" class="detail-panel__input" type="text" placeholder="Reason..."/></div>'+
+      '<div id="dp-lc-live" class="dp-lc-row" aria-live="polite" style="font-size:12px;opacity:.85">AAP live: checking…</div>'+
+      '<div id="dp-lc-result" class="dp-lc-row" aria-live="polite" style="font-size:12px"></div>'+
+      '<div class="dp-lc-row"><select id="dp-lc-state" class="detail-panel__select"><option value="Active">Active</option><option value="Unavailable">Unavailable</option><option value="Ordered">Ordered</option></select>'+
+      '<select id="dp-lc-reason" class="detail-panel__select">'+
+        '<option value="HEALTHY">Healthy</option>'+
+        '<option value="OFFSITE_SHOP_REPAIR">Off-site Shop Repair</option>'+
+        '<option value="PM_FAILED">PM Failed</option>'+
+        '<option value="PREVENTATIVE_MAINTENANCE">Preventative Maintenance</option>'+
+        '<option value="PARTS_DELAY">Parts Delay</option>'+
+        '<option value="DAMAGED_MODERATE">Damaged - Moderate</option>'+
+        '<option value="SENSOR_DETECTED_DAMAGE">Sensor Detected Damage</option>'+
+        '<option value="SAFETY_INSPECTION_POST_ACCIDENT">Safety Inspection Post Accident</option>'+
+        '<option value="LICENSE_OR_PERMIT_ISSUE">License or Permit Issue</option>'+
+        '<option value="IMPOUNDED_TOW">Impounded / Tow</option>'+
+        '<option value="GPS_MALFUNCTIONING">GPS Malfunctioning</option>'+
+        '<option value="CAMPAIGN">Campaign</option>'+
+      '</select></div>'+
       '<div class="dp-lc-row"><button id="dp-lc-confirm" class="detail-panel__btn">Confirm</button><button id="dp-lc-cancel" class="detail-panel__btn detail-panel__btn--secondary">Cancel</button></div>'+
+    '</div>'+ /* close #dp-lc-form — was MISSING, so the final </div> closed this form instead of #dp-pane-actions, leaving the Actions pane open and swallowing the entire History pane inside it (History rendered with offsetHeight 0 = blank). */
+    _attachSectionHtml(unit)+
     '<div class="dp-section-title" style="margin-top:10px">Dealer Work Order</div>'+
     '<div id="dp-vnd-ai-suggest" class="dp-vnd-ai-suggest"></div>'+
     '<div id="dp-vendor-section" class="dp-vendor-section"><p class="dp-empty">Loading eligibility\u2026</p></div>'+
     '<div id="dp-vnd-history-strip" class="dp-vnd-history-strip"></div>'+
+    // Notes — moved here from the History tab so History stays a clean
+    // breakdown record. Same #dp-notes / #dp-save-notes IDs so _wireNotes works.
+    '<div class="dp-section-title" style="margin-top:10px">Notes</div>'+
+    '<textarea id="dp-notes" class="dp-notes-area" placeholder="Add notes...">'+esc(unit.savedNotes||'')+'</textarea>'+
+    '<div class="dp-notes-footer"><button id="dp-save-notes" class="detail-panel__btn">Save</button><span id="dp-notes-saved" class="dp-notes-saved">Saved \u2713</span></div>'+
   '</div>';
 }
 
 // ── history pane ──────────────────────────────────────────────────────────────
 function renderHistoryPane(unit){
-  var sources=[
-    {label:'AAP',      ts:unit.lastDataDate,   icon:'\ud83d\udd17'},
-    {label:'Relay',    ts:unit.relaySynced?new Date().toISOString():null, icon:'\ud83d\udcc4'},
-    {label:'Uptake',   ts:unit.uptakeSynced?unit.lastDataDate:null,       icon:'\u26a1'},
-    {label:'ASIST',    ts:unit.asistScrapedAt,  icon:'\ud83c\udfe6'},
-    {label:'Notes',    ts:unit.notesUpdatedAt,  icon:'\ud83d\udcdd'},
-  ];
-  var syncRows=sources.map(function(s){
-    var age=s.ts?Date.now()-new Date(s.ts).getTime():null;
-    var cls=age===null?'none':age>86400000?'old':'ok';
-    return '<div class="dp-sync-row">'+
-      '<div class="dp-sync-dot dp-sync-dot--'+cls+'"></div>'+
-      '<span class="dp-sync-icon">'+s.icon+'</span>'+
-      '<span class="dp-sync-source">'+s.label+'</span>'+
-      '<span class="dp-sync-time">'+(s.ts?relTime(s.ts):'Never')+'</span>'+
-    '</div>';
-  }).join('');
-
-  // unit timeline summary
-  var timeline=[
-    unit.created?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--open"></span><span class="dp-tl-label">WR Opened</span><span class="dp-tl-date">'+fmtDate(unit.created)+'</span></div>':'',
-    unit.workDuration?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--etc"></span><span class="dp-tl-label">Work Duration</span><span class="dp-tl-date">'+esc(unit.workDuration)+'</span></div>':'',
-    unit.needBy?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--needby"></span><span class="dp-tl-label">Need By</span><span class="dp-tl-date">'+esc(unit.needBy)+'</span></div>':'',
-    unit.completed?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--closed"></span><span class="dp-tl-label">Completed</span><span class="dp-tl-date">'+fmtDate(unit.completed)+'</span></div>':'',
-    unit.notesUpdatedAt?'<div class="dp-tl-row"><span class="dp-tl-dot dp-tl-dot--note"></span><span class="dp-tl-label">Notes Updated</span><span class="dp-tl-date">'+relTime(unit.notesUpdatedAt)+'</span></div>':'',
-  ].filter(Boolean).join('');
-
+  // Breakdown History — one card per down->up repair cycle, newest first, each
+  // with an AI analysis line + a quick AI summary of the unit's pattern at top.
+  // Populated async by _wireHistoryPane via window.fleet.breakdownHistory().
+  // (Data Sync / Timeline / Notes were removed from here — Notes moved to the
+  // Actions tab — so History is purely a clean record of breakdowns by date.)
   return '<div class="dp-pane" id="dp-pane-history">'+
-    '<div class="dp-section-title">Repair History <span class="dp-section-sub">(last 3 months)</span></div>'+
-    '<div id="dp-repair-history" class="dp-repair-history"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading repair history\u2026</div></div>'+
-    '<div class="dp-section-title">Data Sync</div>'+
-    '<div class="dp-sync-panel">'+syncRows+'</div>'+
-    (timeline?'<div class="dp-section-title">Timeline</div><div class="dp-timeline">'+timeline+'</div>':'')+
-    '<div class="dp-section-title">Notes</div>'+
-    '<textarea id="dp-notes" class="dp-notes-area" placeholder="Add notes...">'+esc(unit.savedNotes||'')+'</textarea>'+
-    '<div class="dp-notes-footer"><button id="dp-save-notes" class="detail-panel__btn">Save</button><span id="dp-notes-saved" class="dp-notes-saved">Saved \u2713</span></div>'+
+    // ── Repair Intelligence: 12-month deterministic report ──────────────────
+    '<div class="dp-ri-controls">'+
+      '<div class="dp-ri-btns">'+
+        '<button id="dp-ri-build" class="detail-panel__btn" title="Pull the full 365-day repair history from AAP">Build Full History</button>'+
+        '<button id="dp-ri-fetch" class="detail-panel__btn detail-panel__btn--ghost" title="Only pull work orders changed since the last sync">Fetch New Data Only</button>'+
+        '<button id="dp-ri-ai" class="detail-panel__btn detail-panel__btn--ghost" title="Re-run the AI narrative analysis">Refresh AI Analysis</button>'+
+      '</div>'+
+      '<div id="dp-ri-status" class="dp-ri-status"></div>'+
+    '</div>'+
+    '<div id="dp-ri-report" class="dp-ri-report"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading repair intelligence\u2026</div></div>'+
+    // ── Legacy 3-month breakdown cards (kept as a quick recent view) ─────────
+    '<div class="dp-section-title" style="margin-top:14px">Recent Breakdowns <span class="dp-section-sub">(last 3 months)</span></div>'+
+    '<div id="dp-breakdown-summary" class="dp-breakdown-summary"></div>'+
+    '<div id="dp-breakdown-list" class="dp-breakdown-list"><div class="dp-empty" style="color:var(--mut);font-style:italic">Loading breakdown history\u2026</div></div>'+
   '</div>';
 }
 
@@ -2183,8 +2687,11 @@ async function _runDailyNotesForUnit(unit) {
   const unitId = unit.equipmentId || unit.id || '';
   if (!unitId) { toast.show('warn', 'No unit selected', 2500); return; }
 
-  const altId = unit.alternativeId || unit.altId || '';
-  if (!altId) { toast.show('warn', unitId + ' has no Alt ID', 3000); return; }
+  // NOTE: this action opens the Relay + Offsite split windows — exactly like
+  // "Open Split View". It only needs the URLs, NOT an Alt ID. The old
+  // `if (!altId) return` gate was blocking it in API mode (the API path doesn't
+  // populate alternativeId), even though the URLs were available. Removed so it
+  // behaves the same as Split View and proceeds on the URLs alone.
 
   // Collect URLs
   const relayUrl    = unit.serviceUrl || unit.pageUrl || '';
@@ -2253,25 +2760,28 @@ function _renderUnit(unit) {
     });
   });
 
-  // Load uptake screenshot into Intel tab
-  var _ssImg = document.getElementById('dp-screenshot-img');
-  if (_ssImg && _ssImg.dataset.shot) {
-    window.files.readAsDataUrl(_ssImg.dataset.shot).then(function(d) {
-      if (d) {
-        _ssImg.src = d;
-        _ssImg.alt = 'Uptake Insight';
-        var m = document.getElementById('dp-screenshot-meta');
-        var ts = _ssImg.dataset.shot.match(/_(\d{13,})\.png$/);
-        if (ts && m) m.textContent = 'Captured: ' + new Date(parseInt(ts[1])).toLocaleString();
-        else if (m) m.textContent = '';
-        _ssImg.onclick = function() { window.files.openUptakeScreenshot(_ssImg.dataset.shot); };
-      } else {
-        _ssImg.alt = 'Screenshot file not found';
-        var m2 = document.getElementById('dp-screenshot-meta');
-        if (m2) m2.textContent = 'File not accessible';
-      }
-    }).catch(function(e) {
-      _ssImg.alt = 'Error: ' + (e.message || e);
+  // Load ALL uptake screenshots into Intel tab (one per insight). Each image
+  // lazy-loads its PNG as a data URL and opens full-size on click.
+  if (_panel && window.files && typeof window.files.readAsDataUrl === 'function') {
+    _panel.querySelectorAll('.dp-screenshot-img').forEach(function(img) {
+      var shotPath = img.dataset.shot;
+      if (!shotPath) return;
+      var metaEl = img.parentElement ? img.parentElement.querySelector('.dp-screenshot-meta') : null;
+      window.files.readAsDataUrl(shotPath).then(function(d) {
+        if (d) {
+          img.src = d;
+          img.alt = 'Uptake Insight';
+          var ts = shotPath.match(/_(\d{13,})\.png$/);
+          if (metaEl) metaEl.textContent = ts ? ('Captured: ' + new Date(parseInt(ts[1])).toLocaleString()) : '';
+          img.onclick = function() { if (window.files.openUptakeScreenshot) window.files.openUptakeScreenshot(shotPath); };
+        } else {
+          img.alt = 'Screenshot file not found';
+          if (metaEl) metaEl.textContent = 'File not accessible';
+        }
+      }).catch(function(e) {
+        img.alt = 'Error: ' + (e.message || e);
+        if (metaEl) metaEl.textContent = 'Load error';
+      });
     });
   }
 
@@ -2286,6 +2796,26 @@ function _renderUnit(unit) {
   });
   _panel.querySelectorAll('[data-ext-url]').forEach(function(b) {
     b.addEventListener('click', function(e){ e.preventDefault(); var u=b.dataset.extUrl||b.getAttribute('data-ext-url'); if(u&&window.files) window.files.openExternal(u).catch(function(){}); });
+  });
+
+  // In-app openers (e.g. Uptake insight ↗): open inside the app window
+  // (partition-aware via aap:open-url) instead of the external browser.
+  _panel.querySelectorAll('[data-inapp-url]').forEach(function(b) {
+    b.addEventListener('click', function(e){ e.preventDefault(); var u=b.dataset.inappUrl||b.getAttribute('data-inapp-url'); if(u&&window.aap&&window.aap.openUrl) window.aap.openUrl(u).catch(function(){}); });
+  });
+
+  // Copy-insight-text button (Intel pane): copy the full insight text block.
+  _panel.querySelectorAll('.dp-insight-copy__btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var det = btn.closest('.dp-insight-copy');
+      var ta = det && det.querySelector('.dp-insight-copy__text');
+      var val = ta ? ta.value : '';
+      if (!val) return;
+      (navigator.clipboard ? navigator.clipboard.writeText(val) : Promise.reject())
+        .catch(function(){ try { ta.focus(); ta.select(); document.execCommand('copy'); } catch(_){} });
+      var orig = btn.textContent; btn.textContent = '\u2713 Copied';
+      setTimeout(function(){ btn.textContent = orig; }, 1500);
+    });
   });
 
   // Split view for secondary ASIST/offsite WR cards
@@ -2321,7 +2851,12 @@ function _renderUnit(unit) {
   // ── notes ──────────────────────────────────────────────────────────────────
   _wireNotes(unit);
 
-  // ── history tab: 3-month repair history list ───────────────────────────────
+  // ── repair tab: WR escalation card ─────────────────────────────────────────
+  _wireEscalation(unit);
+
+  // ── history tab: 12-month repair intelligence report + controls ───────────
+  _wireRepairIntel(unit);
+  // ── history tab: 3-month repair history list (recent breakdowns) ──────────
   _wireHistoryPane(unit);
 
   // ── action buttons (new layout IDs) ───────────────────────────────────────
@@ -2365,7 +2900,13 @@ function _renderUnit(unit) {
 
   var actLC  = document.getElementById('dp-act-lc');
   var lcForm = document.getElementById('dp-lc-form');
-  if (actLC && lcForm) actLC.addEventListener('click', function(){ lcForm.style.display = lcForm.style.display==='none'?'flex':'none'; });
+  // Live status on panel open, and again whenever the form is opened.
+  _refreshLiveLC(unit);
+  if (actLC && lcForm) actLC.addEventListener('click', function(){
+    var opening = lcForm.style.display==='none';
+    lcForm.style.display = opening?'flex':'none';
+    if (opening) { var rl=document.getElementById('dp-lc-result'); if(rl) rl.textContent=''; _refreshLiveLC(unit); }
+  });
   var lcCancel = document.getElementById('dp-lc-cancel');
   if (lcCancel && lcForm) lcCancel.addEventListener('click', function(){ lcForm.style.display='none'; });
   var lcConfirm = document.getElementById('dp-lc-confirm');
@@ -2374,18 +2915,47 @@ function _renderUnit(unit) {
       if (!unit.assetUrl) { toast.show('warn','No AAP URL',3000); return; }
       var lcState  = (document.getElementById('dp-lc-state')||{}).value;
       var lcReason = ((document.getElementById('dp-lc-reason')||{}).value||'').trim();
+      var resEl = document.getElementById('dp-lc-result');
+      var reasonLabel = (function(){ var s=document.getElementById('dp-lc-reason'); return s && s.options[s.selectedIndex] ? s.options[s.selectedIndex].text : lcReason; })();
       lcConfirm.disabled=true; lcConfirm.textContent='Saving...';
-      try { await aap.setLifecycle(unit.equipmentId,unit.assetUrl,lcState,lcReason); toast.show('success','Lifecycle changed to '+lcState); if(lcForm)lcForm.style.display='none'; }
-      catch(e) { toast.show('error','Lifecycle change failed: '+e.message); }
-      finally { lcConfirm.disabled=false; lcConfirm.textContent='Confirm'; }
+      if (resEl) { resEl.style.color=''; resEl.textContent='Saving to AAP…'; }
+      var r = null;
+      try { r = await aap.setLifecycle(unit.equipmentId,unit.assetUrl,lcState,lcReason); }
+      catch(e) { r = { success:false, message:e.message }; }
+      // Don't trust the save call alone: read the unit back LIVE from AAP and
+      // confirm the state (and reason) actually changed.
+      lcConfirm.textContent='Confirming…';
+      if (resEl) resEl.textContent='Checking AAP to confirm…';
+      var live = await _refreshLiveLC(unit);
+      var confirmed = lifecycleMatches(live, lcState, lcReason);
+      var want = lcState + (lcReason ? ' · ' + reasonLabel : '');
+      if (confirmed) {
+        toast.show('success', unit.equipmentId + ' confirmed live in AAP: ' + want, 5000);
+        if (resEl) { resEl.style.color='var(--ok,#3fb950)'; resEl.textContent='✓ Confirmed live in AAP: ' + liveLifecycleText(live); }
+      } else if (live && live.ok) {
+        toast.show('error', unit.equipmentId + ': AAP still shows ' + liveLifecycleText(live) + ' — change did not take' + (r && r.message ? ' (' + r.message + ')' : ''), 8000);
+        if (resEl) { resEl.style.color='var(--err,#f85149)'; resEl.textContent='✗ Not changed. AAP shows ' + liveLifecycleText(live) + (r && r.message ? ' — ' + r.message : ''); }
+      } else {
+        toast.show('warn', unit.equipmentId + ': could not confirm in AAP' + (r && r.message ? ' (' + r.message + ')' : '') + ' — check the unit before relying on it', 8000);
+        if (resEl) { resEl.style.color='var(--warn,#d29922)'; resEl.textContent='⚠ Unconfirmed: ' + ((r && r.message) || 'live check failed'); }
+      }
+      lcConfirm.disabled=false; lcConfirm.textContent='Confirm';
     });
   }
+
+  // ── Attach documents to an open WR ───────────────────────────────────────
+  _wireAttachToWR(unit);
 
   // ── Daily Notes for this unit ────────────────────────────────────────────
   var actDailyNotes = document.getElementById('dp-act-daily-notes');
   if (actDailyNotes) {
     actDailyNotes.addEventListener('click', function () { _runDailyNotesForUnit(unit); });
   }
+
+  // Header "Daily" launcher — opens the Relay + Offsite windows (same as the
+  // Actions Daily Notes button), just reachable from the top header.
+  var launchDaily = document.getElementById('dp-launch-daily');
+  if (launchDaily) launchDaily.addEventListener('click', function () { _runDailyNotesForUnit(unit); });
 
   // S28: Orcha Deep Scan button — on-demand AI analysis for this unit
   var actOrchaDeep = document.getElementById('dp-act-orcha-deep');
@@ -2475,145 +3045,535 @@ function _renderUnit(unit) {
   }
 }
 
-// ── _wireHistoryPane ───────────────────────────────────────────────────────
-// Builds a clean 3-month repair-history list for the History tab:
-//   MM/DD/YYYY - short description
-// Merges three per-unit sources into dated entries, then dedupes so the SAME
-// work order + vendor collapses to one line that shows the LATEST known root
-// cause (cause/correction) instead of repeating the original complaint:
-//   1) structured repairHistory store (window.fleet.repairHistory) — dated events
-//   2) each work order on the row (primary WO + _plannedWRData + _secondaryWRs)
-//   3) repairTimeline lines (MM/DD - text) as a fallback for anything else
-// Everything is filtered to the last ~90 days and sorted newest-first.
-function _wireHistoryPane(unit) {
-  var host = document.getElementById('dp-repair-history');
-  if (!host) return;
-
-  var NINETY_DAYS = 90 * 24 * 60 * 60 * 1000;
-  var now = Date.now();
-  var thisYear = new Date().getFullYear();
-
-  // Parse a date-ish value into a JS timestamp (ms) or null.
-  function toTs(v) {
-    if (!v) return null;
-    if (typeof v === 'number') return v;
-    var s = String(v).trim();
-    if (!s) return null;
-    // MM/DD (no year) -> assume current year
-    var md = s.match(/^(\d{1,2})\/(\d{1,2})$/);
-    if (md) {
-      var t = new Date(thisYear, parseInt(md[1], 10) - 1, parseInt(md[2], 10)).getTime();
-      // if that lands in the future (e.g. Dec date early next year), roll back a year
-      return t > now + 86400000 ? new Date(thisYear - 1, parseInt(md[1], 10) - 1, parseInt(md[2], 10)).getTime() : t;
-    }
-    var d = new Date(s);
-    return isNaN(d.getTime()) ? null : d.getTime();
+// ── _wireRepairIntel ─────────────────────────────────────────────────────────
+// Drives the 12-month Fleet Repair Intelligence report in the History tab:
+// loads the cached deterministic report (window.repairIntel.get), renders the
+// executive summary + repeat-failure groups + timeline, and wires the three
+// controls (Build Full History / Fetch New Data Only / Refresh AI Analysis).
+// Nothing here is AI — the numbers are deterministic; AI only adds narrative.
+function _wireRepairIntel(unit) {
+  var reportEl = document.getElementById('dp-ri-report');
+  var statusEl = document.getElementById('dp-ri-status');
+  var btnBuild = document.getElementById('dp-ri-build');
+  var btnFetch = document.getElementById('dp-ri-fetch');
+  var btnAi    = document.getElementById('dp-ri-ai');
+  if (!reportEl) return;
+  var equipmentId = unit.equipmentId || unit.id || '';
+  if (!window.repairIntel) {
+    reportEl.innerHTML = '<div class="dp-empty" style="color:var(--mut)">Repair intelligence unavailable.</div>';
+    return;
   }
 
-  function fmtMDY(ts) {
-    var d = new Date(ts);
-    return (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
+  function fmtDate(ms) {
+    if (!ms) return 'Unknown';
+    try { var d = new Date(ms); return (d.getMonth()+1)+'/'+d.getDate()+'/'+String(d.getFullYear()).slice(2); }
+    catch (_) { return 'Unknown'; }
+  }
+  function fmtAgo(ms) {
+    if (!ms) return '';
+    var days = Math.round((Date.now() - ms) / 86400000);
+    if (days <= 0) return 'today';
+    if (days === 1) return '1 day ago';
+    return days + ' days ago';
   }
 
-  function shorten(txt) {
-    var s = String(txt || '').replace(/\s+/g, ' ').trim();
-    return s.length > 140 ? s.slice(0, 138) + '\u2026' : s;
-  }
-
-  // Collect raw candidate entries: { ts, desc, vendor, woKey, isRoot }
-  function collect(store) {
-    var out = [];
-
-    // (1) structured repair-history store
-    (store || []).forEach(function(e) {
-      var ts = toTs(e.date) || e.ts || null;
-      if (ts == null) return;
-      out.push({ ts: ts, desc: e.summary || '', vendor: e.vendor || '', woKey: '', isRoot: e.outcome === 'completed' });
-    });
-
-    // (2) work orders on the row
-    function pushWO(wo, tag) {
-      if (!wo) return;
-      var ts = toTs(wo.created) || toTs(wo.completed);
-      if (ts == null) return;
-      var woKey = (wo.workRequestId || wo.alternativeId || wo.vendorWorkOrderId || '') + '|' + (wo.vendor || '');
-      // root cause = cause/correction if present, else the reported issue
-      var root = (wo.cause || wo.correction || '').trim();
-      var desc = root || wo.issueDetails || wo.issueSummary || tag || 'Work order';
-      out.push({ ts: ts, desc: desc, vendor: wo.vendor || '', woKey: woKey.trim() === '|' ? '' : woKey, isRoot: !!root });
-    }
-    pushWO(unit, 'Primary WR');
-    pushWO(unit._plannedWRData, 'Planned WR');
-    (unit._secondaryWRs || []).forEach(function(w) { pushWO(w, 'Secondary WR'); });
-
-    // (3) repairTimeline lines (MM/DD - text)
-    var tl = (unit.repairTimeline || '').split('\n');
-    tl.forEach(function(line) {
-      var m = line.trim().match(/^(\d{1,2}\/\d{1,2})\s*[-\u2013]\s*(.+)$/);
-      if (!m) return;
-      var ts = toTs(m[1]);
-      if (ts == null) return;
-      out.push({ ts: ts, desc: m[2], vendor: '', woKey: '', isRoot: false });
-    });
-
-    return out;
-  }
-
-  function dedupe(entries) {
-    // Merge by work-order key: keep ONE row per WO+vendor, preferring the entry
-    // that carries a root cause and the most recent date.
-    var byWO = {};
-    var loose = [];
-    entries.forEach(function(en) {
-      if (!en.woKey) { loose.push(en); return; }
-      var cur = byWO[en.woKey];
-      if (!cur) { byWO[en.woKey] = en; return; }
-      // prefer root-cause entry; then prefer newer date
-      if ((en.isRoot && !cur.isRoot) || (en.isRoot === cur.isRoot && en.ts > cur.ts)) {
-        byWO[en.woKey] = en;
-      }
-    });
-    var merged = Object.keys(byWO).map(function(k) { return byWO[k]; }).concat(loose);
-    // drop near-duplicate loose lines (same day + same text)
-    var seen = {};
-    return merged.filter(function(en) {
-      var key = fmtMDY(en.ts) + '::' + shorten(en.desc).toLowerCase();
-      if (seen[key]) return false;
-      seen[key] = true;
-      return true;
-    });
-  }
-
-  function render(entries) {
-    var recent = entries
-      .filter(function(en) { return en.ts != null && (now - en.ts) < NINETY_DAYS && en.ts <= now + 86400000; })
-      .sort(function(a, b) { return b.ts - a.ts; });
-
-    if (!recent.length) {
-      host.innerHTML = '<div class="dp-empty" style="color:var(--mut);font-style:italic">No repair events in the last 3 months.</div>';
+  function renderStatus(res) {
+    if (!statusEl) return;
+    var cp = res && res.checkpoint;
+    if (!cp) {
+      statusEl.innerHTML = '<span class="dp-ri-status-cold">Not synced yet \u2014 click <b>Build Full History</b> to pull this unit\u2019s repair history from AAP.</span>';
       return;
     }
-    host.innerHTML = recent.map(function(en) {
-      var vend = en.vendor ? ' <span class="dp-rh-vendor">' + esc(en.vendor) + '</span>' : '';
-      return '<div class="dp-rh-item">' +
-        '<span class="dp-rh-date">' + esc(fmtMDY(en.ts)) + '</span>' +
-        '<span class="dp-rh-dash"> \u2014 </span>' +
-        '<span class="dp-rh-text">' + esc(shorten(en.desc)) + '</span>' + vend +
-      '</div>';
-    }).join('');
+    var last = cp.last_incr_sync_at || cp.last_full_sync_at;
+    var cov = '';
+    try { var c = cp.source_coverage ? JSON.parse(cp.source_coverage) : null; if (c && c.relay) cov = ' \u00b7 source: ' + esc(c.relay); } catch (_) {}
+    var span = (res.report && res.report.spanDays) ? ' \u00b7 history spans ' + res.report.spanDays + ' days' : '';
+    statusEl.innerHTML = '<span class="dp-ri-status-ok">Last synced ' + esc(fmtAgo(last)) + ' (' + esc(fmtDate(last)) + ')' +
+      (cp.records_total != null ? ' \u00b7 ' + cp.records_total + ' records' : '') + span + cov + '</span>' +
+      (cp.last_error ? '<span class="dp-ri-status-err"> \u00b7 ' + esc(String(cp.last_error).slice(0,120)) + '</span>' : '');
   }
 
-  // Fetch the structured store async, then merge with row-derived entries.
-  var fetchStore = (window.fleet && window.fleet.repairHistory)
-    ? window.fleet.repairHistory(unit.equipmentId).catch(function() { return []; })
-    : Promise.resolve([]);
+  function renderAi(ai) {
+    if (!ai || (!ai.summary && !(ai.recommendations && ai.recommendations.length))) return '';
+    var sum = ai.summary
+      ? '<div class="dp-ri-ai-summary">' + esc(ai.summary) + '</div>'
+      : '';
+    var recs = (ai.recommendations || []).map(function(r){
+      var pr = (r.priority || 'low');
+      return '<div class="dp-ri-rec dp-ri-rec--' + esc(pr) + '">' +
+        '<div class="dp-ri-rec-head"><span class="dp-ri-rec-kind">' + esc(r.kind || 'monitor') + '</span>' +
+          '<span class="dp-ri-rec-pri">' + esc(pr) + '</span></div>' +
+        '<div class="dp-ri-rec-finding">' + esc(r.finding || '') + '</div>' +
+        (r.recommendedAction ? '<div class="dp-ri-rec-action"><b>Action:</b> ' + esc(r.recommendedAction) + '</div>' : '') +
+        (r.reason ? '<div class="dp-ri-rec-reason">' + esc(r.reason) + '</div>' : '') +
+      '</div>';
+    }).join('');
+    var recBlock = recs
+      ? '<div class="dp-ri-sub">Advisory recommendations <span class="dp-ri-sub-note">(advisory only \u2014 never changes readiness)</span></div>' + recs
+      : '';
+    return '<div class="dp-ri-ai">' +
+      '<div class="dp-ri-sub">AI analysis <span class="dp-ri-sub-note">(narrative on top of the deterministic facts)</span></div>' +
+      sum + recBlock +
+    '</div>';
+  }
 
-  fetchStore.then(function(store) {
-    try {
-      render(dedupe(collect(store || [])));
-    } catch (e) {
-      host.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to build history: ' + esc(e.message || 'error') + '</div>';
+  function renderReport(rep, ai) {
+    if (!rep) { reportEl.innerHTML = '<div class="dp-empty" style="color:var(--mut)">No report.</div>'; return; }
+    var aiHtml = renderAi(ai);
+    var s = rep.executiveSummary || {};
+    var eff = s.effectiveness || {};
+    function stat(label, val, cls) {
+      return '<div class="dp-ri-stat ' + (cls||'') + '"><div class="dp-ri-stat-val">' + esc(String(val)) + '</div><div class="dp-ri-stat-lbl">' + esc(label) + '</div></div>';
     }
+    if (!s.totalRepairEvents) {
+      reportEl.innerHTML = aiHtml + '<div class="dp-empty" style="color:var(--mut);font-style:italic">No repair history stored yet. Click <b>Build Full History</b> to pull it from AAP.</div>';
+      return;
+    }
+    var stats = '<div class="dp-ri-stats">' +
+      stat('Repair events', s.totalRepairEvents) +
+      stat('Corrective', s.correctiveRepairs) +
+      stat('PM', s.pmEvents) +
+      stat('Repeat-failure groups', s.repeatFailureGroups, s.repeatFailureGroups ? 'dp-ri-stat--warn' : '') +
+      stat('Unresolved / repeated', s.unresolvedIssues, s.unresolvedIssues ? 'dp-ri-stat--warn' : '') +
+      stat('Known downtime (hrs)', s.totalKnownDowntimeHours != null ? s.totalKnownDowntimeHours : 'Unknown') +
+    '</div>';
+
+    var cov = (s.downtimeCoveragePct != null)
+      ? '<div class="dp-ri-note">Downtime computed for ' + s.downtimeCoveragePct + '% of events (rest lack timestamps \u2014 shown as Unknown, never estimated).</div>'
+      : '';
+
+    var topCats = (s.topCategories || []).map(function(c){ return '<span class="dp-ri-chip">' + esc(c.key) + ' \u00d7' + c.count + '</span>'; }).join('');
+    var catsBlock = topCats ? '<div class="dp-ri-sub">Top categories</div><div class="dp-ri-chips">' + topCats + '</div>' : '';
+
+    var effBlock = '<div class="dp-ri-sub">Repair effectiveness <span class="dp-ri-sub-note">(evidence-based; a closed WO is not assumed resolved)</span></div>' +
+      '<div class="dp-ri-chips">' +
+        '<span class="dp-ri-chip dp-ri-chip--ok">resolved ' + (eff.resolved||0) + '</span>' +
+        '<span class="dp-ri-chip dp-ri-chip--warn">resolved-repeated ' + (eff.resolvedRepeated||0) + '</span>' +
+        '<span class="dp-ri-chip">partial ' + (eff.partial||0) + '</span>' +
+        '<span class="dp-ri-chip dp-ri-chip--bad">unresolved ' + (eff.unresolved||0) + '</span>' +
+        '<span class="dp-ri-chip">referred ' + (eff.referred||0) + '</span>' +
+        '<span class="dp-ri-chip">cancelled ' + (eff.cancelled||0) + '</span>' +
+        '<span class="dp-ri-chip">unknown ' + (eff.unknown||0) + '</span>' +
+      '</div>';
+
+    var rf = (rep.repeatFailures || []).map(function(g){
+      var wos = (g.workOrders || []).slice(0, 6).map(function(w){
+        return '<li>' + esc(fmtDate(w.reportedAt)) + ' \u00b7 ' + esc(w.vendor || 'vendor n/a') + ' \u00b7 ' + esc(w.status || '') + '</li>';
+      }).join('');
+      return '<div class="dp-ri-rf">' +
+        '<div class="dp-ri-rf-head"><span class="dp-ri-rf-comp">' + esc(g.component) + '</span>' +
+          '<span class="dp-ri-rf-count">' + g.count + ' events</span></div>' +
+        '<ul class="dp-ri-rf-list">' + wos + '</ul>' +
+      '</div>';
+    }).join('');
+    var rfBlock = rf
+      ? '<div class="dp-ri-sub">Repeat failures <span class="dp-ri-sub-note">(same component recurring \u2014 pattern to investigate, not proof of defect)</span></div>' + rf
+      : '';
+
+    rcaEntries = {};
+    var tl = (rep.timeline || []).slice(0, 40).map(function(e){
+      var dur = e.durationHours != null ? (e.durationHours + 'h') : 'Unknown';
+      var cost = e.estimateCost != null ? (' \u00b7 est $' + e.estimateCost) : '';
+      // RCA button: completed work orders, completed within the last 9 days.
+      var rcaHtml = '';
+      if (_rcaEligible(e)) {
+        rcaEntries[e.workOrderId] = e;
+        rcaHtml = '<button class="dp-rca-btn" data-wo="' + esc(e.workOrderId) + '" title="Fill the AAP Root Cause Analysis form for this work order">RCA</button>';
+      }
+      return '<div class="dp-ri-tl">' +
+        '<div class="dp-ri-tl-head"><span class="dp-ri-tl-date">' + esc(fmtDate(e.reportedAt)) + '</span>' +
+          '<span class="dp-ri-tl-vend">' + esc(e.vendor || 'vendor n/a') + '</span>' +
+          '<span class="dp-ri-tl-status dp-ri-status-' + esc(e.status||'') + '">' + esc(e.status||'') + '</span>' + rcaHtml + '</div>' +
+        '<div class="dp-ri-tl-body">' +
+          '<span class="dp-ri-tl-cat">' + esc(e.category || '') + (e.component ? ' / ' + esc(e.component) : '') + '</span>' +
+          (e.complaint ? '<div class="dp-ri-tl-complaint">' + esc(e.complaint) + '</div>' : '') +
+          '<div class="dp-ri-tl-meta">' + esc(dur) + cost + (e.rootCause ? ' \u00b7 ' + esc(e.rootCause) : '') + '</div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+    var tlBlock = '<div class="dp-ri-sub">Repair timeline <span class="dp-ri-sub-note">(newest first, up to 40)</span></div>' + (tl || '<div class="dp-empty">None.</div>');
+
+    reportEl.innerHTML = aiHtml + stats + cov + catsBlock + effBlock + rfBlock + tlBlock;
+    _wireRcaButtons();
+  }
+
+  // ── RCA buttons on the Repair timeline cards ───────────────────────────────
+  var rcaEntries = {};
+  // Completed work orders only, completed within the last 9 days.
+  function _rcaEligible(e) {
+    if (!e || !e.workOrderId || !/^[0-9a-f-]{36}$/i.test(e.workOrderId)) return false;
+    if (String(e.status || '').toLowerCase() !== 'completed') return false;
+    var done = Number(e.completedAt) || 0;
+    return done > 0 && (Date.now() - done) <= RCA_WINDOW_MS;
+  }
+  function _markRcaDone(btn, at, source) {
+    if (!btn) return;
+    btn.classList.add('dp-rca-btn--done');
+    var when = at ? fmtDate(Date.parse(at)) : '';
+    btn.innerHTML = '\u2713 RCA done' + (when && when !== 'Unknown' ? ' <span class="dp-rca-when">' + esc(when) + '</span>' : '');
+    btn.title = 'RCA ' + (source === 'aap' ? 'found in AAP' : 'submitted from this app') + (when ? ' on ' + when : '') + ' \u2014 click to view or update';
+  }
+  function _wireRcaButtons() {
+    var btns = reportEl.querySelectorAll('.dp-rca-btn');
+    if (!btns.length) return;
+    btns.forEach(function(btn){
+      btn.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        var entry = rcaEntries[btn.dataset.wo];
+        if (!entry) return;
+        openRcaModal({ unit: unit, entry: entry, onDone: function(r){ _markRcaDone(btn, r && r.at, 'app'); } });
+      });
+    });
+    // Came here from an "RCA to do" link → jump straight to that WO's RCA.
+    if (_pendingRca && Date.now() < _pendingRca.until && _pendingRca.unit === String(unit.equipmentId)) {
+      var target = Array.prototype.find.call(btns, function(b){ return b.dataset.wo === _pendingRca.wo; });
+      if (target) {
+        _pendingRca = null;
+        try { target.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) {}
+        target.classList.add('dp-rca-btn--flash');
+        setTimeout(function(){ target.classList.remove('dp-rca-btn--flash'); }, 2400);
+        setTimeout(function(){ target.click(); }, 450);
+      }
+    }
+    if (!window.rca) return;
+    var ids = Object.keys(rcaEntries);
+    var apply = function(res){
+      var st = (res && res.statuses) || {};
+      btns.forEach(function(btn){
+        var s = st[btn.dataset.wo];
+        if (s && s.done) _markRcaDone(btn, s.at, s.source);
+      });
+    };
+    // Local record first (instant), then ask AAP for RCAs filled in elsewhere.
+    window.rca.status(ids, { live: false }).then(apply).catch(function(){});
+    window.rca.status(ids, { live: true }).then(apply).catch(function(){});
+  }
+
+  function setBusy(busy, msg) {
+    [btnBuild, btnFetch, btnAi].forEach(function(b){ if (b) b.disabled = !!busy; });
+    if (busy && statusEl) statusEl.innerHTML = '<span class="dp-ri-status-busy">' + esc(msg || 'Working\u2026') + '</span>';
+  }
+
+  function load(initial) {
+    window.repairIntel.get(equipmentId).then(function(res){
+      res = res || {};
+      renderStatus(res);
+      renderReport(res.report, res.ai);
+    }).catch(function(e){
+      reportEl.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to load report: ' + esc((e && e.message) || 'error') + '</div>';
+    });
+  }
+
+  function runSync(fn, label) {
+    setBusy(true, label);
+    fn(equipmentId).then(function(res){
+      res = res || {};
+      setBusy(false);
+      if (res.ok === false && res.error) toast.show('warn', equipmentId + ': ' + res.error, 5000);
+      else if (res.sync) {
+        var sy = res.sync;
+        if ((sy.errors && sy.errors.length)) {
+          toast.show('warn', equipmentId + ': ' + sy.errors[0], 5000);
+        } else if ((sy.retrieved || 0) === 0) {
+          toast.show('info', equipmentId + ': no work orders returned by AAP for this unit.', 5000);
+        } else {
+          toast.show('info', equipmentId + ' synced: ' + sy.retrieved + ' WOs \u2014 +' + (sy.added||0) + ' new, ' + (sy.updated||0) + ' updated' + (sy.excluded ? ', ' + sy.excluded + ' excluded' : ''), 4000);
+        }
+      } else {
+        toast.show('info', equipmentId + ': sync returned no data.', 4000);
+      }
+      renderStatus(res);
+      renderReport(res.report, res.ai);
+    }).catch(function(e){
+      setBusy(false);
+      toast.show('error', 'Sync failed: ' + ((e && e.message) || 'error'), 4000);
+    });
+  }
+
+  if (btnBuild) btnBuild.addEventListener('click', function(){ runSync(window.repairIntel.build, 'Building full 12-month history\u2026'); });
+  if (btnFetch) btnFetch.addEventListener('click', function(){ runSync(window.repairIntel.fetchNew, 'Fetching new data\u2026'); });
+  if (btnAi) btnAi.addEventListener('click', function(){
+    setBusy(true, 'Refreshing AI analysis\u2026');
+    window.repairIntel.refreshAi(equipmentId).then(function(res){
+      setBusy(false);
+      res = res || {};
+      if (res.pending) toast.show('info', 'AI lane is busy or offline right now \u2014 the deterministic report is still current. Try again shortly.', 4500);
+      else if (res.ok === false && res.error) toast.show('warn', res.error, 3500);
+      else if (res.ok) toast.show('info', 'AI analysis updated for ' + equipmentId, 3000);
+      if (res.report) renderReport(res.report, res.ai);
+      else load();
+    }).catch(function(e){ setBusy(false); toast.show('error', 'AI refresh failed: ' + ((e && e.message)||'error'), 4000); });
+  });
+
+  load(true);
+}
+
+// ── _wireHistoryPane ───────────────────────────────────────────────────────
+// Populates the History tab's Breakdown History: one card per down->up repair
+// cycle (date down -> date back . duration . root cause . vendor) plus an AI
+// analysis line each, with a quick AI summary of the unit's pattern at top.
+// All computed server-side by the breakdown-history:get IPC (buildBreakdowns +
+// cached AI); this just fetches and renders. Honest empty state when none.
+function _wireHistoryPane(unit) {
+  var list    = document.getElementById('dp-breakdown-list');
+  var summary = document.getElementById('dp-breakdown-summary');
+  if (!list) return;
+
+  function fmtDateShort(ymd) {
+    if (!ymd) return '';
+    var p = String(ymd).split('-');
+    if (p.length !== 3) return esc(ymd);
+    return parseInt(p[1], 10) + '/' + parseInt(p[2], 10) + '/' + p[0].slice(2);
+  }
+
+  function renderCard(b) {
+    var back = b.ongoing
+      ? '<span class="dp-bd-ongoing">ongoing</span>'
+      : '<span class="dp-bd-date">' + fmtDateShort(b.backDate) + '</span>';
+    var dur = b.days != null ? b.days + 'd' : (b.ongoing ? 'still down' : '?');
+    var vend = b.vendor ? '<span class="dp-bd-vendor">' + esc(b.vendor) + '</span>' : '';
+    var analysis = b.analysis
+      ? '<div class="dp-bd-analysis"><span class="dp-bd-analysis-label">Analysis:</span> ' + esc(b.analysis) + '</div>'
+      : '';
+    return '<div class="dp-bd-card' + (b.ongoing ? ' dp-bd-card--ongoing' : '') + '">' +
+      '<div class="dp-bd-head">' +
+        '<span class="dp-bd-dates"><span class="dp-bd-date">' + fmtDateShort(b.downDate) + '</span>' +
+          '<span class="dp-bd-arrow"> \u2192 </span>' + back + '</span>' +
+        '<span class="dp-bd-dur">' + esc(dur) + '</span>' +
+      '</div>' +
+      (b.reportedIssue ? '<div class="dp-bd-reported"><span class="dp-bd-field-label">Reported:</span> ' + esc(b.reportedIssue) + '</div>' : '') +
+      '<div class="dp-bd-cause"><span class="dp-bd-field-label">Root cause:</span> ' + esc(b.rootCause || 'Repair') + '</div>' +
+      (vend ? '<div class="dp-bd-meta">' + vend + '</div>' : '') +
+      analysis +
+    '</div>';
+  }
+
+  var fetch = (window.fleet && window.fleet.breakdownHistory)
+    ? window.fleet.breakdownHistory(unit.equipmentId, unit).catch(function(e) { return { breakdowns: [], summary: '', error: (e && e.message) || 'error' }; })
+    : Promise.resolve({ breakdowns: [], summary: '' });
+
+  fetch.then(function(res) {
+    res = res || {};
+    var bds = res.breakdowns || [];
+    if (summary) {
+      summary.innerHTML = res.summary
+        ? '<div class="dp-bd-summary-text">' + esc(res.summary) + '</div>'
+        : '';
+    }
+    if (!bds.length) {
+      list.innerHTML = '<div class="dp-empty" style="color:var(--mut);font-style:italic">No breakdowns in the last 3 months.</div>';
+      return;
+    }
+    list.innerHTML = bds.map(renderCard).join('');
+  }).catch(function(e) {
+    list.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to load breakdown history: ' + esc((e && e.message) || 'error') + '</div>';
+  });
+}
+
+// ── _wireEscalation ───────────────────────────────────────────────────────────
+// Repair tab Escalation card. _renderUnit re-runs on every live refresh, so the
+// AAP context (feature gate + live teams + current) is cached per WR for 2 min
+// and the AI/rules suggestion per WR+current for the session. Nothing is sent
+// to AAP until the user clicks Escalate or confirms a chip removal.
+var _escCtxCache=new Map();     // wrId -> {at, p} (p = in-flight/resolved escalationOptions promise)
+var _escSuggestCache=new Map(); // wrId|current -> suggestion
+var _escInFlight=new Set();     // wrIds with an updateEscalations call pending
+var _ESC_CTX_TTL=120000;
+
+function _escAttr(s){return esc(s).replace(/"/g,'&quot;');}
+
+function _escSetDisabled(root,on){
+  if(!root)return;
+  var b=root.querySelector('#dp-escalate-send');
+  if(b)b.disabled=on;
+  root.querySelectorAll('[data-esc-remove]').forEach(function(x){x.disabled=on;});
+}
+
+function _escClear(wrId){
+  _escCtxCache.delete(wrId);
+  Array.from(_escSuggestCache.keys()).forEach(function(k){if(k.indexOf(wrId+'|')===0)_escSuggestCache.delete(k);});
+}
+
+// Cache the PROMISE (not just the resolved value) so live re-renders that land
+// before the first response share one AAP round trip. Dropped on failure so
+// the next render refetches.
+function _escContext(wrId,aaid){
+  var hit=_escCtxCache.get(wrId);
+  if(hit&&Date.now()-hit.at<_ESC_CTX_TTL)return hit.p;
+  var entry={at:Date.now(),p:null};
+  var drop=function(){if(_escCtxCache.get(wrId)===entry)_escCtxCache.delete(wrId);};
+  entry.p=Promise.resolve().then(function(){
+    return window.aapApi.escalationOptions({aaid:aaid,workRequestId:wrId});
+  }).then(function(res){
+    if(!res||!res.ok)drop();
+    return res;
+  },function(e){drop();throw e;});
+  _escCtxCache.set(wrId,entry);
+  return entry.p;
+}
+
+function _wireEscalation(unit){
+  var wrap=document.getElementById('dp-escalate-wrap');
+  if(!wrap||!window.aapApi||typeof window.aapApi.escalationOptions!=='function')return;
+  var wrId=String(unit.workRequestId||'');
+  var aaid=escalationAaid(unit);
+  if(!wrId||!aaid)return;
+  var live=function(){return !!(_unit&&_unit.equipmentId===unit.equipmentId&&document.body.contains(wrap));};
+  (async function(){
+    var res=null;
+    try{res=await _escContext(wrId,aaid);}catch(_e){return;}
+    if(!live())return;
+    if(!res||!res.ok||!res.enabled||!Array.isArray(res.options)||!res.options.length)return;
+    _renderEscalation(unit,wrap,res,live);
+  })();
+}
+
+function _renderEscalation(unit,wrap,res,live){
+  var wrId=String(unit.workRequestId||'');
+  var options=res.options;
+  var current=parseEscalationList(res.current);
+  var selectable=escalationSelectable(options,current);
+  var labelOf=function(v){
+    for(var i=0;i<options.length;i++){if(options[i]&&options[i].value===v)return String(options[i].displayText||v);}
+    return v;
+  };
+
+  var chips=current.length?current.map(function(v){
+    var l=labelOf(v);
+    return '<span class="dp-escalate__chip">'+esc(l)+
+      '<button type="button" class="dp-escalate__chip-x" data-esc-remove="'+_escAttr(v)+'" aria-label="Remove escalation '+_escAttr(l)+'">×</button></span>';
+  }).join(''):'<span class="dp-escalate__none">No active escalations</span>';
+
+  // The comment box stays even when every team is applied: removing Carrier
+  // Update Request needs a reason comment.
+  var html='<div class="dp-section-title">Escalation</div><div class="dp-escalate">'+
+    '<div class="dp-escalate__chips">'+chips+'</div>'+
+    (selectable.length?'<div class="dp-escalate__ai" id="dp-escalate-ai">Suggesting…</div>':'')+
+    (selectable.length?'<div class="dp-escalate__row">'+
+      '<select id="dp-escalate-team" class="dp-escalate__select" aria-label="Escalation team">'+
+        '<option value="">Select team…</option>'+
+        selectable.map(function(o){return '<option value="'+_escAttr(o.value)+'">'+esc(o.displayText||o.value)+'</option>';}).join('')+
+      '</select>'+
+      '<button type="button" id="dp-escalate-send" class="dp-escalate__btn">Escalate</button>'+
+    '</div>':'')+
+    '<textarea id="dp-escalate-comment" class="dp-escalate__comment" maxlength="'+ESC_COMMENT_MAX+'" rows="3" aria-label="Escalation reason comment" placeholder="'+(selectable.length?'Reason comment (required)':'Reason comment')+'"></textarea>'+
+    '<span class="dp-escalate__count" id="dp-escalate-count">0/'+ESC_COMMENT_MAX+'</span>'+
+  '</div>';
+  wrap.innerHTML=html;
+  wrap.hidden=false;
+
+  var card=wrap.querySelector('.dp-escalate');
+  var teamEl=wrap.querySelector('#dp-escalate-team');
+  var cmtEl=wrap.querySelector('#dp-escalate-comment');
+  var countEl=wrap.querySelector('#dp-escalate-count');
+  var aiEl=wrap.querySelector('#dp-escalate-ai');
+  var sendBtn=wrap.querySelector('#dp-escalate-send');
+  var teamDirty=false, cmtDirty=false, busy=false;
+
+  var updCount=function(){
+    var n=cmtEl.value.length;
+    countEl.textContent=n+'/'+ESC_COMMENT_MAX;
+    countEl.classList.toggle('dp-escalate__count--over',n>ESC_COMMENT_MAX);
+  };
+  cmtEl.addEventListener('input',function(){cmtDirty=true;updCount();});
+  if(teamEl)teamEl.addEventListener('change',function(){teamDirty=true;});
+
+  var setBusy=function(on){
+    busy=on;
+    _escSetDisabled(card,on);
+  };
+  // A send for this WR is still pending from an earlier card (pane rebuilt
+  // mid-send): render this card's controls disabled so the same change can't
+  // be submitted twice. send() re-enables / re-wires whichever card is current.
+  // Only the DOM is disabled here (not the local busy flag): isBusy() reads the
+  // module-level _escInFlight, so this card works again once that send settles.
+  if(_escInFlight.has(wrId))_escSetDisabled(card,true);
+  var isBusy=function(){return busy||_escInFlight.has(wrId);};
+  var send=async function(payload,okMsg){
+    _escInFlight.add(wrId);
+    var r;
+    try{r=await window.aapApi.updateEscalations(payload);}catch(e){r={ok:false,error:e&&e.message};}
+    _escInFlight.delete(wrId);
+    // The card that started the send may have been replaced by a re-render;
+    // act on whichever escalation card is current for this unit.
+    var curWrap=document.getElementById('dp-escalate-wrap');
+    var curLive=!!(curWrap&&_unit&&_unit.equipmentId===unit.equipmentId&&String(_unit.workRequestId||'')===wrId);
+    if(r&&r.ok){
+      toast.show('success',okMsg,4000);
+      _escClear(wrId);
+      if(curLive)_wireEscalation(_unit);
+      return;
+    }
+    toast.show('error','Escalation failed: '+((r&&r.error)||'unknown'),6000);
+    busy=false;
+    if(live())setBusy(false);
+    else if(curLive)_escSetDisabled(curWrap,false);
+  };
+
+  // ── suggestion (fills team + comment only if the user hasn't touched them) ─
+  if(selectable.length){
+    var sk=wrId+'|'+current.join(',');
+    (async function(){
+      var s=_escSuggestCache.get(sk)||null;
+      if(!s&&typeof window.aapApi.escalationSuggest==='function'){
+        try{
+          var r=await window.aapApi.escalationSuggest({unit:unit.equipmentId,options:options,current:current});
+          s=(r&&r.ok&&r.suggestion)||null;
+        }catch(_e){s=null;}
+        if(s)_escSuggestCache.set(sk,s);
+      }
+      if(!live()||!document.body.contains(aiEl))return;
+      if(!s||!s.team||!selectable.some(function(o){return o.value===s.team;})){
+        aiEl.textContent='No suggestion — pick a team and write a reason.';
+        return;
+      }
+      if(!teamDirty&&teamEl)teamEl.value=s.team;
+      if(!cmtDirty&&s.comment){cmtEl.value=String(s.comment).slice(0,ESC_COMMENT_MAX);updCount();}
+      aiEl.innerHTML=esc(s.rationale||('Suggested: '+labelOf(s.team)))+
+        '<span class="dp-escalate__badge">'+(s.source==='ai'?'AI':'Rules')+'</span>';
+    })();
+  }
+
+  // ── Escalate ─────────────────────────────────────────────────────────────
+  if(sendBtn)sendBtn.addEventListener('click',function(){
+    if(isBusy())return;
+    var team=teamEl?teamEl.value:'';
+    var comment=cmtEl.value;
+    var v=validateEscalationDraft({team:team,comment:comment,current:current});
+    if(!v.ok){toast.show('warn',v.error,3500);return;}
+    setBusy(true);
+    send(buildEscalationPayload(unit,{add:[team],remove:[],comment:comment}),'Escalated to '+labelOf(team));
+  });
+
+  // ── chip × (de-escalate after confirm) ───────────────────────────────────
+  card.querySelectorAll('[data-esc-remove]').forEach(function(btn){
+    btn.addEventListener('click',function(){
+      if(isBusy())return;
+      var value=btn.getAttribute('data-esc-remove')||'';
+      var carrier=value===ESC_CARRIER_UPDATE;
+      // The box may hold the auto-filled ESCALATE draft (AI/rules). That is not
+      // a de-escalation reason, so only a user-edited comment is sent.
+      if(carrier&&!cmtDirty){
+        // AAP requires a reason to remove Carrier Update Request: ask the user
+        // to write one instead of reusing the suggestion draft. Marking the box
+        // dirty stops a late suggestion from refilling it.
+        cmtEl.value='';cmtDirty=true;updCount();cmtEl.focus();
+        toast.show('warn','Write a reason for removing Carrier Update Request, then click × again.',4500);
+        return;
+      }
+      var comment=cmtDirty?cmtEl.value:'';
+      var v=validateDeEscalation({value:value,comment:comment,current:current});
+      if(!v.ok){
+        toast.show('warn',v.error,3500);
+        if(carrier)cmtEl.focus();
+        return;
+      }
+      var label=labelOf(value);
+      // All escalation comments are internal only (user decision 2026-10-30).
+      if(!window.confirm('Remove escalation "'+label+'"?'))return;
+      setBusy(true);
+      send(buildEscalationPayload(unit,{add:[],remove:[value],comment:comment}),'Removed escalation '+label);
+    });
   });
 }
 
@@ -2702,9 +3662,111 @@ export function init(container) {
   _panel.className = 'detail-panel';
   document.body.appendChild(_panel);
 
-  bus.on('ui:unit-select', ({ unit }) => {
+  bus.on('ui:unit-select', ({ unit, tab, rcaWorkOrderId }) => {
+    // "RCA to do" badge / overview line: once that WO's RCA button renders on
+    // the History tab, scroll to it and open its RCA form (see _wireRcaButtons).
+    _pendingRca = rcaWorkOrderId ? { wo: String(rcaWorkOrderId), unit: String(unit && unit.equipmentId || ''), until: Date.now() + 30000 } : null;
     _renderUnit(unit);
     requestAnimationFrame(() => _panel.classList.add('detail-panel--open'));
+    // Optional: open on a specific tab (e.g. the overview's "RCA to do" list
+    // opens straight on History, where the RCA button is).
+    if (tab) {
+      requestAnimationFrame(() => {
+        const btn = _panel && _panel.querySelector('.dp-tab[data-tab="' + String(tab).replace(/"/g, '') + '"]');
+        if (btn) btn.click();
+      });
+    }
+
+    // LAZY per-unit API refresh (API mode): the bulk fleet load skips comments
+    // AND the multi-WO (planned/unplanned) detail for speed. When a unit opens,
+    // pull its fresh comment thread + ALL its work orders from the API and
+    // re-render. Best-effort; never blocks the panel (already rendered above).
+    try {
+      if (window.aapApi && window.aapApi.refreshUnit && unit && unit.equipmentId) {
+        // Only when the row looks API-sourced or is missing its timeline/WO set.
+        const needsDetail = unit._apiSourced || !unit.repairTimeline || !unit._secondaryWRs;
+        if (needsDetail) {
+          const _targetId = unit.equipmentId;
+          window.aapApi.refreshUnit(_targetId).then((res) => {
+            if (!res || res.ok === false || !res.row) return;
+            // Only patch if the user is still on this same unit.
+            if (!_unit || _unit.equipmentId !== _targetId) return;
+            if (!_panel || !_panel.classList.contains('detail-panel--open')) return;
+            const fresh = res.row;
+            // ASSET-IS-TRUTH: if the fresh row reports the unit as in-service
+            // (relaySynced:false — the API cleared the WO framing because the
+            // asset is Active), ADOPT those cleared values instead of falling
+            // back to the stale _unit WO data. Otherwise the "x || _unit.x"
+            // fallbacks below would re-show the old work order (124124 showing
+            // "Active / Offsite Shop Repair" with a 2-year-old WO).
+            const _freshAvailable = fresh.relaySynced === false;
+            const patched = _freshAvailable
+              ? Object.assign({}, _unit, {
+                  relaySynced: false,
+                  lifecycleState: fresh.lifecycleState || _unit.lifecycleState,
+                  lifecycleReason: '',
+                  vendor: '', serviceState: '', subState: '', serviceCategory: '',
+                  issueDetails: '', issueSummary: '', workRequestId: '', serviceUrl: '',
+                  _serviceId: '', created: '', completed: '', level1: '', level2: '',
+                  repairTimeline: '', fullConversation: '',
+                  vin: fresh.vin || _unit.vin,
+                  pmB: fresh.pmB || _unit.pmB, pmX: fresh.pmX || _unit.pmX,
+                  dot: fresh.dot || _unit.dot, quarterlyLift: fresh.quarterlyLift || _unit.quarterlyLift,
+                  _secondaryWRs: [],
+                })
+              : Object.assign({}, _unit, {
+                  relaySynced:    fresh.relaySynced != null ? fresh.relaySynced : _unit.relaySynced,
+                  lifecycleState: fresh.lifecycleState || _unit.lifecycleState,
+                  lifecycleReason: fresh.lifecycleReason != null ? fresh.lifecycleReason : _unit.lifecycleReason,
+                  vendor:         fresh.vendor || _unit.vendor,
+                  serviceState:   fresh.serviceState || _unit.serviceState,
+                  subState:       fresh.subState || _unit.subState,
+                  serviceCategory: fresh.serviceCategory || _unit.serviceCategory,
+                  issueDetails:   fresh.issueDetails || _unit.issueDetails,
+                  issueSummary:   fresh.issueSummary || _unit.issueSummary,
+                  workRequestId:  fresh.workRequestId || _unit.workRequestId,
+                  serviceUrl:     fresh.serviceUrl || _unit.serviceUrl,
+                  _serviceId:     fresh._serviceId || _unit._serviceId,
+                  created:        fresh.created || _unit.created,
+                  completed:      fresh.completed || _unit.completed,
+                  level1:         fresh.level1 || _unit.level1,
+                  level2:         fresh.level2 || _unit.level2,
+                  repairTimeline: fresh.repairTimeline || _unit.repairTimeline,
+                  vin:            fresh.vin || _unit.vin,
+                  geofence:       fresh.geofence || _unit.geofence,
+                  pmB: fresh.pmB || _unit.pmB, pmX: fresh.pmX || _unit.pmX,
+                  dot: fresh.dot || _unit.dot, quarterlyLift: fresh.quarterlyLift || _unit.quarterlyLift,
+                  // Offsite (Decisiv/ASIST) — gives Split View its right pane immediately.
+                  offsiteShopEventUrl: fresh.offsiteShopEventUrl || _unit.offsiteShopEventUrl,
+                  savedOffsiteUrl:     fresh.savedOffsiteUrl || _unit.savedOffsiteUrl,
+                  offsiteShopEvent:    fresh.offsiteShopEvent || _unit.offsiteShopEvent,
+                  asistSrUrl:          fresh.asistSrUrl || _unit.asistSrUrl,
+                  asistLabel:          fresh.asistLabel || _unit.asistLabel,
+                  asistSource:         fresh.asistSource || _unit.asistSource,
+                  // Case stage moves forward (Repair -> Ready): fresh wins.
+                  offsiteStage:        fresh.offsiteStage || _unit.offsiteStage,
+                  offsiteStageDetail:  fresh.offsiteStageDetail || _unit.offsiteStageDetail,
+                  offsiteStageSince:   fresh.offsiteStageSince || _unit.offsiteStageSince,
+                  _secondaryWRs:  fresh._secondaryWRs || _unit._secondaryWRs,
+                });
+            // Preserve the active tab across the re-render.
+            const activeEl = _panel.querySelector('.dp-tab.active');
+            const activeTab = activeEl && activeEl.dataset ? activeEl.dataset.tab : null;
+            _renderUnit(patched);
+            if (activeTab) {
+              const btn = _panel.querySelector('.dp-tab[data-tab="' + activeTab + '"]');
+              const pane = document.getElementById('dp-pane-' + activeTab);
+              if (btn && pane) {
+                _panel.querySelectorAll('.dp-tab').forEach((t) => t.classList.remove('active'));
+                _panel.querySelectorAll('.dp-pane').forEach((p) => p.classList.remove('active'));
+                btn.classList.add('active');
+                pane.classList.add('active');
+              }
+            }
+          }).catch(() => { /* best-effort */ });
+        }
+      }
+    } catch (_) { /* best-effort; panel already rendered */ }
   });
 
   bus.on('ui:unit-deselect', () => {

@@ -16,6 +16,21 @@ let _ctx = null;
 let _enabled = true;
 let _volume = 0.3; // 0-1
 
+// Per-category sound mapping. Each of the 5 notification CATEGORIES maps to a
+// tone name (a key of SOUNDS) or 'off' to silence that category. The category
+// is resolved from the notification icon by playForNotification(). Defaults
+// mirror the original icon→tone routing so behavior is unchanged until the
+// user customizes it.
+const SOUND_CATEGORIES = ['alert', 'message', 'success', 'error', 'info'];
+const DEFAULT_SOUND_MAP = {
+  alert:   'alert',    // 🚨 escalation / 🔴 critical
+  message: 'dm',       // 📩 Slack DM / message
+  success: 'success',  // ✅ completed action / sync OK
+  error:   'warning',  // ❌ error / ⚠️ warning
+  info:    'info',     // everything else
+};
+let _soundMap = { ...DEFAULT_SOUND_MAP };
+
 function _getCtx() {
   if (!_ctx) {
     try { _ctx = new (window.AudioContext || window.webkitAudioContext)(); }
@@ -79,9 +94,13 @@ const SOUNDS = {
 };
 
 export function playSound(name) {
+  if (!name || name === 'off') return;
   const fn = SOUNDS[name];
   if (fn) fn();
 }
+
+// Alias used by callers (notif-dropdown.js / settings.js test button).
+export function play(name) { playSound(name); }
 
 export function setSoundEnabled(enabled) {
   _enabled = !!enabled;
@@ -95,6 +114,49 @@ export function isSoundEnabled() {
   return _enabled;
 }
 
+/**
+ * configure(prefs) — update sound settings in one call.
+ * @param {{ enabled?: boolean, volume?: number, soundMap?: object }} prefs
+ *   volume accepts 0-1 (fraction) or 0-100 (percent, auto-normalized).
+ */
+export function configure(prefs) {
+  if (!prefs || typeof prefs !== 'object') return;
+  if (typeof prefs.enabled === 'boolean') _enabled = prefs.enabled;
+  if (typeof prefs.volume === 'number') {
+    const v = prefs.volume > 1 ? prefs.volume / 100 : prefs.volume;
+    _volume = Math.max(0, Math.min(1, v));
+  }
+  if (prefs.soundMap && typeof prefs.soundMap === 'object') {
+    _soundMap = { ...DEFAULT_SOUND_MAP, ...prefs.soundMap };
+  }
+}
+
+export function getConfig() {
+  return { enabled: _enabled, volume: _volume, soundMap: { ..._soundMap } };
+}
+
+export function getDefaultSoundMap() { return { ...DEFAULT_SOUND_MAP }; }
+export function getSoundCategories() { return [...SOUND_CATEGORIES]; }
+export function getToneNames() { return Object.keys(SOUNDS); }
+
+// Resolve a notification's CATEGORY from its icon (same routing as before).
+function _categoryForIcon(icon) {
+  if (!icon) return 'info';
+  if (icon.includes('\u{1F6A8}') || icon.includes('🚨')) return 'alert';   // 🚨 escalation
+  if (icon.includes('\u{1F534}') || icon.includes('🔴')) return 'alert';   // 🔴 critical
+  if (icon.includes('\u{1F4E9}') || icon.includes('📩')) return 'message'; // 📩 DM / message
+  if (icon.includes('\u2705') || icon.includes('✅'))    return 'success'; // ✅ success
+  if (icon.includes('\u274C') || icon.includes('❌'))    return 'error';   // ❌ error
+  if (icon.includes('\u26A0') || icon.includes('⚠'))    return 'error';   // ⚠️ warning
+  return 'info';
+}
+
+// Preview the tone currently mapped to a category (for the settings UI).
+export function previewCategory(category) {
+  const tone = _soundMap[category];
+  if (tone && tone !== 'off') playSound(tone);
+}
+
 
 /**
  * playForNotification(n) — Derives sound type from notification icon and plays it.
@@ -102,13 +164,7 @@ export function isSoundEnabled() {
  * @param {{ icon, title, body }} n — notification payload
  */
 export function playForNotification(n) {
-  if (!n || !n.icon) { playSound('info'); return; }
-  const icon = n.icon;
-  if (icon.includes('\u{1F6A8}') || icon.includes('🚨')) { playSound('alert'); return; }   // 🚨 escalation
-  if (icon.includes('\u{1F534}') || icon.includes('🔴')) { playSound('alert'); return; }   // 🔴 critical
-  if (icon.includes('\u{1F4E9}') || icon.includes('📩')) { playSound('dm'); return; }      // 📩 DM / message
-  if (icon.includes('\u2705') || icon.includes('✅'))    { playSound('success'); return; } // ✅ success
-  if (icon.includes('\u274C') || icon.includes('❌'))    { playSound('warning'); return; } // ❌ error
-  if (icon.includes('\u26A0') || icon.includes('⚠'))    { playSound('warning'); return; } // ⚠️ warning
-  playSound('info'); // default
+  const category = _categoryForIcon(n && n.icon);
+  const tone = _soundMap[category] || DEFAULT_SOUND_MAP[category];
+  playSound(tone); // playSound() no-ops on 'off'/unknown
 }

@@ -29,7 +29,14 @@ const { registerVendorHistoryIPC } = require('./vendor-history');
 const { registerSetupIPC }       = require('./setup');
 const { registerDailyTasksIPC }  = require('./daily-tasks');
 const { registerLongDwellIPC }     = require('./long-dwell');
+const { registerLongDwellCsvIPC }  = require('./long-dwell-csv');
+const { registerBaseballCardIPC }  = require('./baseball-card');
+const { registerFasRosterIPC }     = require('./fas-roster');
 const { registerSchedulerIPC }     = require('./scheduler');
+const { registerEmailTriageIPC }   = require('./email-triage');
+const { registerRelayReconcileIPC } = require('./relay-reconcile');
+const { registerAuthHealthIPC }    = require('./auth-health');
+const { registerRepairIntelIPC }   = require('./repair-intel');
 const logger = require('../utils/logger')('ipc');
 
 function registerAllIPC(ctx) {
@@ -51,9 +58,20 @@ function registerAllIPC(ctx) {
   // (morning + on-demand) so Split View is ready without a manual sign-in.
   try { require('../scrapers/vendor_session').startWarmScheduler(); } catch (e) { logger.warn('vendor warm scheduler start failed: ' + e.message); }
   registerLongDwellIPC();
+  registerLongDwellCsvIPC();
+  registerBaseballCardIPC();
+  registerFasRosterIPC();
+  const { registerAapApiIPC } = require('./aap-api');
+  registerAapApiIPC(ctx);
   registerSchedulerIPC(ctx);
+  registerEmailTriageIPC(ctx);
+  registerRelayReconcileIPC(ctx);
   const { registerContactsHandlers } = require('./contacts');
   registerContactsHandlers();
+  registerAuthHealthIPC(ctx);
+  registerRepairIntelIPC(ctx);
+  // AAP Root Cause Analysis form via the Relay template API (History-tab RCA button).
+  try { require('./rca').registerRcaIPC(); } catch (e) { logger.warn('RCA IPC registration failed: ' + e.message); }
   logger.info('All IPC handlers registered');
 }
 

@@ -49,6 +49,15 @@ function registerSchedulerIPC(ctx) {
     return { ok: !(r && r.blocked), result: _redactEmailRun(r) };
   });
 
+  // DBR DATA pull now (the "Pull All" button) — scrapes + AI-parses + reviews
+  // BOTH AFP and DSP. Each is today-PT freshness-gated; a not-ready source
+  // returns { blocked:'stale-data' } and the recovery sweep keeps retrying it.
+  handle('scheduler:run-dbr-now', async (_e, slotLabel) => {
+    logger.info('Run DBR pull now requested (slot=' + (slotLabel || 'auto') + ')');
+    const r = await scheduler.runDbrNow(slotLabel);
+    return { ok: true, result: _redactDbrRun(r) };
+  });
+
   // ── Job actions ────────────────────────────────────────────────────────────
   handle('scheduler:retry', async (_e, jobId) => {
     requireString(jobId, 'jobId');
@@ -173,6 +182,21 @@ function _redactEmailRun(r) {
     completed: outs.filter(o => o.state === 'completed').length,
     states: outs.map(o => ({ scope: o.scope, state: o.state, skipped: o.skipped })),
   };
+}
+// runDbrNow returns { afp:<runResult>, dsp:<runResult> }; surface each
+// source's outcome compactly (ok / blocked-not-ready / skipped / failed).
+function _redactDbrRun(r) {
+  if (!r) return null;
+  const one = (x) => {
+    if (!x) return null;
+    if (x.ok) return { state: 'ok', rowCount: x.rowCount != null ? x.rowCount : null };
+    if (x.blocked) return { state: 'not-ready', blocked: x.blocked, dataAsOf: x.dataAsOf || null };
+    if (x.skipped) return { state: 'skipped', skipped: x.skipped };
+    if (x.failed) return { state: 'failed', failed: x.failed };
+    if (x.error) return { state: 'error', error: x.error };
+    return { state: 'unknown' };
+  };
+  return { afp: one(r.afp), dsp: one(r.dsp) };
 }
 
 module.exports = { registerSchedulerIPC };

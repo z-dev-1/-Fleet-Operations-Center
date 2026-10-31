@@ -16,12 +16,10 @@
 
 import bus                                         from '../bus.js';
 import state                                        from '../state.js';
-import * as notifSounds                            from '../notif-sounds.js';
 import { settings as settingsBridge }              from '../bridge.js';
-import { auth     as authBridge }                  from '../bridge.js';
 import { credentials as credsBridge }              from '../bridge.js';
+import { auth     as authBridge }                  from '../bridge.js';
 import { slack    as slackBridge }                 from '../bridge.js';
-import { email    as emailBridge }                 from '../bridge.js';
 import { sp       as spBridge }                    from '../bridge.js';
 import { asana    as asanaBridge }                 from '../bridge.js';
 import toast                                       from '../components/toast.js';
@@ -31,6 +29,39 @@ import { initFasSettings } from './fas-settings.js';
 // ── Module state ────────────────────────────────────────────────────────────
 let _drawer   = null;   // the drawer DOM element
 let _overlay  = null;   // the backdrop overlay
+
+// Font size → UI zoom scale. The UI is px-based, so zoom (not root font-size)
+// is what scales the whole interface proportionally.
+//
+// IMPORTANT: the app shell is a fixed 100vh flex column with overflow:hidden
+// and a bottom status bar. Zooming the body alone makes its 100vh content
+// render taller than the real window, so overflow:hidden clips the BOTTOM
+// (the status bar disappears). Fix: zoom #app AND shrink its height by the same
+// factor (height = 100vh / scale) so that AFTER the zoom it renders at exactly
+// one real viewport — everything, including the status bar, stays on screen.
+const FONT_SIZE_SCALE = { small: 0.9, normal: 1, large: 1.12, xlarge: 1.25 };
+function _applyFontSize(size) {
+  const scale = FONT_SIZE_SCALE[size] || 1;
+  try {
+    const app = document.getElementById('app');
+    if (app) {
+      app.style.zoom = String(scale);
+      app.style.height = scale === 1 ? '' : `calc(100vh / ${scale})`;
+    } else {
+      // Fallback if #app isn't present yet.
+      document.body.style.zoom = String(scale);
+    }
+  } catch (_) {}
+  // CSS `zoom` does NOT fire a window 'resize', so views that size themselves to
+  // the viewport (e.g. the Long Dwell CSV table's scroll box) can't react to a
+  // font-size change on their own. Broadcast it so they can re-fit. Deferred a
+  // frame so layout reflects the new zoom before listeners measure.
+  try {
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new CustomEvent('fleet:font-size-changed', { detail: { size, scale } }));
+    });
+  } catch (_) {}
+}
 
 // ── HTML ─────────────────────────────────────────────────────────────────────
 function _html() {
@@ -52,7 +83,6 @@ function _html() {
     <div class="sd-tabs">
       <button class="sd-tab active" data-pane="ui">UI &amp; App</button>
       <button class="sd-tab"        data-pane="integrations">Integrations</button>
-      <button class="sd-tab"        data-pane="operators">Operators &amp; SP</button>
       <button class="sd-tab"        data-pane="accounts">Accounts</button>
     </div>
 
@@ -270,6 +300,17 @@ function _html() {
         </div>
 
         <div class="sd-section">
+          <div class="sd-section-title">Font Size</div>
+          <div class="sd-font-row">
+            <button class="sd-fontsize-btn" data-fontsize="small"  style="font-size:10px">Small</button>
+            <button class="sd-fontsize-btn active" data-fontsize="normal" style="font-size:12px">Normal</button>
+            <button class="sd-fontsize-btn" data-fontsize="large"  style="font-size:14px">Large</button>
+            <button class="sd-fontsize-btn" data-fontsize="xlarge" style="font-size:16px">X-Large</button>
+          </div>
+          <div class="sd-hint" style="margin-top:6px">Scales the entire app interface.</div>
+        </div>
+
+        <div class="sd-section">
           <div class="sd-section-title">Border Radius</div>
           <div class="sd-slider-row">
             <div class="sd-label">Card Radius</div>
@@ -417,357 +458,43 @@ function _html() {
       <!-- ══ TAB 2: Integrations ══════════════════════════════════════════ -->
       <div id="sd-pane-integrations" style="display:none">
 
-        <!-- Domiciles -->
-        <div class="sd-section" id="sect-domiciles">
-          <div class="sd-section-title">Domiciles</div>
-          <div class="sd-field">
-            <div class="sd-label">Managed domiciles (one per line, or comma-separated)</div>
-            <textarea id="settings-domiciles" class="settings__textarea sd-input" placeholder="ABE40&#10;AVP40&#10;AUVTE01"></textarea>
-          </div>
+        <!-- Domiciles section moved (2026-08-14) to the 👤 User Profile popover
+             (toolbar avatar) as a chip editor. Same settings:save/reset-domiciles
+             backend (triggers a rescan). -->
+
+        <!-- Midway Auth section removed (2026-08-14): run mwinit via Ctrl+M
+             (keyboard-shortcuts.js); session-expiry surfaces its own re-auth
+             modal (app.js fleet:auth-failure) + status-bar indicator. -->
+
+        <!-- Auth Health (Phase E) — the single Midway/AAP self-healing
+             supervisor. Health = verified authenticated access to the REAL AAP
+             target, not VPN state and not cookie existence. -->
+        <div class="sd-section" id="sect-auth-health">
+          <div class="sd-section-title">Midway / AAP Auth Health</div>
+          <div id="auth-health-state" class="sd-status warn" style="margin-bottom:8px">\u2139\uFE0F Not checked yet</div>
+          <div id="auth-health-grid" class="sd-hint" style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin-bottom:8px"></div>
+          <div class="sd-hint" style="margin-bottom:8px">VPN is <b>not required</b> for Midway/AAP auth. Health is verified by a real authenticated call to the AAP target.</div>
           <div class="sd-btn-row">
-            <button class="sd-btn primary" id="save-domiciles">Save</button>
-            <button class="sd-btn secondary" id="reset-domiciles">Reset defaults</button>
+            <button class="sd-btn secondary" id="auth-health-refresh">Refresh</button>
+            <button class="sd-btn primary"   id="auth-health-retry">Retry now</button>
+            <button class="sd-btn secondary" id="auth-health-mwinit">Run mwinit</button>
           </div>
-          <div id="domicile-status" class="settings__status" style="display:none"></div>
+          <div id="auth-health-history" class="sd-hint" style="margin-top:10px"></div>
         </div>
 
-        <!-- Midway Auth -->
-        <div class="sd-section" id="sect-auth">
-          <div class="sd-section-title">Midway Auth</div>
-          <div id="auth-status" class="sd-status warn">⏳ Checking...</div>
-          <div class="sd-btn-row" style="margin-top:8px">
-            <button class="sd-btn primary" id="auth-mwinit">Run mwinit</button>
-            <button class="sd-btn secondary" id="auth-recheck">Re-check</button>
-          </div>
-        </div>
+        <!-- AI Config moved (2026-08-14) to #ai-config-overlay opened from
+             the toolbar AI status pill (#tb-ai-status). -->
 
-        <!-- AI Config -->
-        <div class="sd-section" id="sect-ai-config">
-          <div class="sd-section-title" style="display:flex;align-items:center;gap:8px">
-            🤖 AI Config
-            <span id="ai-config-live-status" style="font-size:10px;padding:2px 10px;border-radius:10px;background:#21262d;color:#8b949e;font-weight:500">⏳ checking...</span>
-          </div>
+        <!-- Notifications section moved (2026-08-14) to the 🔔 notification
+             dropdown's ⚙ gear (renderer/src/js/components/notif-dropdown.js):
+             OS-notification toggles + sound on/off/volume + per-category sound
+             pickers. Persists to the same settings.notifications object. -->
 
-          <!-- Preference selector -->
-          <div class="sd-field" style="margin-bottom:14px">
-            <div class="sd-label" style="margin-bottom:8px">Active AI</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-auto">
-                <input type="radio" name="ai-pref" value="auto" style="accent-color:#58a6ff"> Auto (fallback chain)
-              </label>
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-orcha">
-                <input type="radio" name="ai-pref" value="orcha" style="accent-color:#22c55e"> Orcha only
-              </label>
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-claude">
-                <input type="radio" name="ai-pref" value="claude" style="accent-color:#818cf8"> Claude Code only
-              </label>
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-balanced">
-                <input type="radio" name="ai-pref" value="balanced" style="accent-color:#f0a800"> Balanced (Orcha + Claude)
-              </label>
-            </div>
-            <div id="ai-pref-hint" style="margin-top:5px;font-size:10px;color:#6e7681;font-style:italic">Auto: tries Orcha first, falls back to Claude Code if quota is exceeded.</div>
-          </div>
-
-          <!-- Orcha subsection -->
-          <div style="border:1px solid var(--bdr);border-radius:6px;padding:10px 12px;margin-bottom:10px">
-            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">⚡ Orcha</div>
-            <div class="sd-row">
-              <div class="sd-field">
-                <div class="sd-label">Mode</div>
-                <select class="sd-select" id="orcha-mode">
-                  <option value="local">Local</option>
-                  <option value="remote">Remote</option>
-                </select>
-              </div>
-              <div class="sd-field">
-                <div class="sd-label">Host</div>
-                <input class="sd-input" id="orcha-host" placeholder="localhost"/>
-              </div>
-              <div class="sd-field">
-                <div class="sd-label">Port</div>
-                <input class="sd-input" id="orcha-port" type="number" placeholder="4799"/>
-              </div>
-            </div>
-            <div class="sd-field" style="margin-top:8px">
-              <div class="sd-label">Orcha Agent (model)</div>
-              <select class="sd-select" id="orcha-agent" style="font-size:11px">
-                <option value="orcha_default">Orcha — Claude Opus 4.6</option>
-                <option value="moon">Moon — Claude Sonnet 4.6</option>
-                <option value="mirror">Mirror — Claude Sonnet 4.6</option>
-                <option value="otter">Otter — Claude Sonnet 4.6</option>
-                <option value="tides_workflow_runner">Tides Workflow Runner — Claude Sonnet 4.6</option>
-              </select>
-              <div style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">The Orcha agent that answers AI requests. The model is chosen server-side by the agent (Orcha = Opus 4.6, others = Sonnet 4.6).</div>
-            </div>
-            <div class="sd-field" style="margin-top:8px">
-              <div class="sd-label">Fallback Model ID (Bedrock)</div>
-              <input class="sd-input" id="ai-model-id" placeholder="us.amazon.nova-pro-v1:0" style="font-family:monospace;font-size:10px"/>
-              <div style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">Bedrock model used only when Orcha WS is down and the app calls Bedrock directly. Leave blank to use the app default.</div>
-            </div>
-            <div class="sd-btn-row" style="margin-top:8px">
-              <button class="sd-btn secondary" id="test-orcha" style="font-size:11px">Test Orcha</button>
-            </div>
-            <div id="orcha-test-status" style="margin-top:4px;font-size:11px;min-height:14px"></div>
-          </div>
-
-          <!-- Claude Code subsection -->
-          <div style="border:1px solid var(--bdr);border-radius:6px;padding:10px 12px;margin-bottom:12px">
-            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">🧠 Claude Code</div>
-            <div class="sd-field">
-              <div class="sd-label">Binary (auto-detected)</div>
-              <input class="sd-input" id="claude-bin-path" placeholder="(auto)" readonly style="color:#6e7681;font-size:10px;font-family:monospace"/>
-            </div>
-            <div class="sd-field" style="margin-top:6px">
-              <div class="sd-label">Timeout (seconds)</div>
-              <input class="sd-input" id="claude-timeout" type="number" placeholder="60" style="width:80px"/>
-            </div>
-            <div class="sd-btn-row">
-              <button class="sd-btn secondary" id="test-claude" style="font-size:11px">Test Claude</button>
-            </div>
-            <div id="claude-test-status" style="margin-top:4px;font-size:11px;min-height:14px"></div>
-          </div>
-
-          <div class="sd-btn-row">
-            <button class="sd-btn primary" id="save-ai-config">Save AI Config</button>
-          </div>
-        </div>
-
-        <!-- Notifications -->
-        <div class="sd-section" id="sect-notifications">
-          <div class="sd-section-title">Notifications</div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">OS notification on Midway auth failure</span>
-            <input type="checkbox" id="notif-auth-fail" checked/>
-          </div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">OS notification on sync complete</span>
-            <input type="checkbox" id="notif-sync-ok" checked/>
-          </div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">OS notification on sync error</span>
-            <input type="checkbox" id="notif-sync-err" checked/>
-          </div>
-          <!-- FEATURE (2026-07-22): sound notifications -- synthesized
-               tones (no audio asset files), a distinct pattern per
-               notification type, inferred automatically from each
-               notification's existing icon field. See
-               renderer/src/js/notif-sounds.js for the full design. -->
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">Sound notifications</span>
-            <input type="checkbox" id="notif-sounds-enabled" checked/>
-          </div>
-          <div class="sd-field">
-            <div class="sd-label">Volume</div>
-            <input type="range" id="notif-sounds-volume" min="0" max="100" value="50" style="width:100%"/>
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn secondary" id="notif-sounds-test" type="button">Test sounds</button>
-          </div>
-        </div>
-
-        <!-- Credentials (keychain) -->
-        <div class="sd-section" id="sect-creds">
-          <div class="sd-section-title">Credentials (keychain)</div>
-          <div class="sd-row">
-            <div class="sd-field">
-              <div class="sd-label">Key</div>
-              <input class="sd-input" id="cred-key" placeholder="e.g. aap-password"/>
-            </div>
-            <div class="sd-field">
-              <div class="sd-label">Value</div>
-              <input class="sd-input" id="cred-val" type="password" placeholder="secret"/>
-            </div>
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn primary"    id="cred-save">Save Credential</button>
-            <button class="sd-btn danger"     id="cred-delete">Delete Key</button>
-          </div>
-          <div id="cred-status" class="settings__status" style="display:none"></div>
-          <div id="cred-list-wrap" class="settings-list-wrap" style="margin-top:10px">
-            <div class="settings-list-label">Stored keys:</div>
-            <div id="cred-list" class="settings-key-list"></div>
-          </div>
-        </div>
-
-        <!-- Schedulers Config -->
-        <div class="sd-section" style="border-top:1px solid var(--bdr);padding-top:14px;margin-top:4px">
-          <div class="sd-section-title">Schedulers – Config</div>
-          <div class="sd-field">
-            <div class="sd-label">Sync interval (minutes)</div>
-            <input class="sd-input" id="sched-interval" type="number" min="1" max="360" placeholder="5"/>
-            <div id="sched-status" class="sd-inline-status" style="margin-top:4px;font-size:11px;"></div>
-          </div>
-          <div class="sd-field">
-            <div class="sd-label">Default scheduler endpoint</div>
-            <input class="sd-input" id="sched-endpoint" placeholder="https://..."/>
-            <div class="sd-hint" style="margin-top:4px">Reserved for a future remote-scheduler integration — not yet functional.</div>
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn primary" id="save-sched">Save</button>
-          </div>
-        </div>
-
-        <!-- Vendor Portal Credentials -->
-        <div class="sd-section" id="sect-vendor-creds">
-          <div class="sd-section-title">Vendor Portal Credentials</div>
-          <!-- PACCAR -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">PACCAR (paccarpg.decisiv.net)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="paccar-user" placeholder="portal username"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="paccar-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="paccar-save">Save</button><button class="sd-btn secondary" id="paccar-test">Test login</button><button class="sd-btn danger" id="paccar-clear">Clear</button></div>
-            <div id="paccar-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Volvo -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Volvo (volvopg.asist.decisiv.net)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="volvo-user" placeholder="portal username"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="volvo-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="volvo-save">Save</button><button class="sd-btn secondary" id="volvo-test">Test login</button><button class="sd-btn danger" id="volvo-clear">Clear</button></div>
-            <div id="volvo-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Record360 -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Record360 (dashboard.record360.com)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Email</div><input class="sd-input" id="record360-user" placeholder="you@amazon.com"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="record360-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="record360-save">Save</button><button class="sd-btn secondary" id="record360-test">Test login</button><button class="sd-btn danger" id="record360-clear">Clear</button></div>
-            <div id="record360-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Aperia / Halo -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Aperia / Halo Tire (amazon.aperiatech.com)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Email</div><input class="sd-input" id="aperia-user" placeholder="you@amazon.com"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="aperia-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="aperia-save">Save</button><button class="sd-btn secondary" id="aperia-test">Test login</button><button class="sd-btn danger" id="aperia-clear">Clear</button></div>
-            <div id="aperia-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Reach24 -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Reach24 (amazon.reach24.net)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Email</div><input class="sd-input" id="reach24-user" placeholder="you@amazon.com"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="reach24-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="reach24-save">Save</button><button class="sd-btn secondary" id="reach24-test">Test login</button><button class="sd-btn danger" id="reach24-clear">Clear</button></div>
-            <div id="reach24-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- DTNA -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">DTNA Service Tracker (dtna.my.site.com)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="dtna-user" placeholder="portal username"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="dtna-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="dtna-save">Save</button><button class="sd-btn secondary" id="dtna-test">Test login</button><button class="sd-btn danger" id="dtna-clear">Clear</button></div>
-            <div id="dtna-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Road Ready -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Road Ready (roadready.fadv.com)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="roadready-user" placeholder="portal username"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="roadready-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="roadready-save">Save</button><button class="sd-btn secondary" id="roadready-test">Test login</button><button class="sd-btn danger" id="roadready-clear">Clear</button></div>
-            <div id="roadready-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Velogic -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Velogic (velogic.my.site.com)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="velogic-user" placeholder="portal username"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="velogic-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="velogic-save">Save</button><button class="sd-btn secondary" id="velogic-test">Test login</button><button class="sd-btn danger" id="velogic-clear">Clear</button></div>
-            <div id="velogic-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Access Billing Services -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Access Billing Services (access-billing-services.com)</div>
-            <div class="sd-row">
-              <div class="sd-field"><div class="sd-label">Username</div><input class="sd-input" id="abs-user" placeholder="portal username"/></div>
-              <div class="sd-field"><div class="sd-label">Password</div><input class="sd-input" id="abs-pass" type="password" placeholder="(encrypted)"/></div>
-            </div>
-            <div class="sd-btn-row"><button class="sd-btn primary" id="abs-save">Save</button><button class="sd-btn secondary" id="abs-test">Test login</button><button class="sd-btn danger" id="abs-clear">Clear</button></div>
-            <div id="abs-status" class="settings__status" style="display:none"></div>
-          </div>
-          <!-- Uptake -- Amazon SSO, no password needed (FEATURE 2026-07-22) -->
-          <div style="margin-bottom:10px">
-            <div class="sd-label" style="margin-bottom:6px;color:var(--txt)">Uptake (fleet.uptake.com) -- Amazon SSO, no password needed</div>
-            <div class="sd-btn-row"><button class="sd-btn secondary" id="uptake-test">Sign in to Uptake</button></div>
-            <div id="uptake-status" class="settings__status" style="display:none"></div>
-          </div>
-        </div>
-
-
-        <!-- Email SMTP -->
-        <div class="sd-section" id="sect-email">
-          <div class="sd-section-title">Email</div>
-          <div class="sd-row">
-            <div class="sd-field">
-              <div class="sd-label">Host</div>
-              <input class="sd-input" id="email-host" placeholder="smtp.corp.amazon.com"/>
-            </div>
-            <div class="sd-field">
-              <div class="sd-label">Port</div>
-              <input class="sd-input" id="email-port" type="number" placeholder="587"/>
-            </div>
-          </div>
-          <div class="sd-row">
-            <div class="sd-field">
-              <div class="sd-label">From</div>
-              <input class="sd-input" id="email-from" type="email" placeholder="you@amazon.com"/>
-            </div>
-            <div class="sd-field">
-              <div class="sd-label">Username</div>
-              <input class="sd-input" id="email-user" placeholder="LDAP user"/>
-            </div>
-          </div>
-          <div class="sd-field">
-            <div class="sd-label">Password</div>
-            <input class="sd-input" id="email-pass" type="password" placeholder="(encrypted)"/>
-          </div>
-          <div class="sd-field" style="margin-top:8px">
-            <div class="sd-label">Send Method</div>
-            <select class="sd-input" id="email-method">
-              <option value="auto">Auto (Graph → SMTP → OWA)</option>
-              <option value="graph">Microsoft Graph (no VPN needed)</option>
-              <option value="smtp">SMTP (VPN required)</option>
-              <option value="owa">OWA (in-app compose window)</option>
-            </select>
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn primary"    id="email-save">Save</button>
-            <button class="sd-btn secondary"  id="email-test">Send test</button>
-          </div>
-          <div id="email-status" class="settings__status" style="display:none"></div>
-        </div>
-
-        <!-- Auto-Email Note -->
-        <div class="sd-section" id="sect-auto-note">
-          <div class="sd-section-title">Auto-Email Note</div>
-          <div class="sd-hint" style="margin-bottom:10px">Optional note included as a red banner at the top of every scheduled auto-send (08:00 / 15:15) until cleared.</div>
-          <textarea class="sd-input" id="auto-note-text" rows="2" placeholder="e.g. 'Units at EWR45 excluded due to site freeze'" style="width:100%;resize:vertical;"></textarea>
-          <div class="sd-toggle-row" style="margin-top:8px">
-            <span class="sd-toggle-label">Clear automatically after next auto-send</span>
-            <input type="checkbox" id="auto-note-oneshot"/>
-          </div>
-          <div class="sd-btn-row" style="margin-top:8px">
-            <button class="sd-btn primary" id="auto-note-save">Save note</button>
-            <button class="sd-btn secondary" id="auto-note-clear">Clear note</button>
-          </div>
-          <div id="auto-note-status" class="sd-status" style="display:none;margin-top:8px"></div>
-          <div id="auto-note-preview" style="display:none;margin-top:10px;padding:10px 16px;color:#dc2626;font-weight:bold;font-family:Arial,sans-serif;font-size:12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:4px;word-break:break-word;">NOTE: </div>
-        </div>
+        <!-- Email SMTP + Auto-Email Note sections removed (2026-08-14):
+             user sends via OWA only, so the SMTP config is unused and the
+             send pipeline (src/ipc/ai.js) already falls through to OWA when
+             no SMTP password is set. The Auto-Email Note now lives in a gear
+             overlay on the Scheduler view's Email card. -->
 
         <!-- Slack -->
         <div class="sd-section" id="sect-slack">
@@ -835,51 +562,6 @@ function _html() {
           <div id="opc-status" class="sd-status" style="display:none;margin-top:8px"></div>
         </div>
 
-        <div class="sd-section" id="sect-carrier-briefing">
-          <div class="sd-section-title">
-            <span style="font-size:11px">📅</span> Daily Carrier Briefing
-            <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">AI</span>
-          </div>
-          <div class="sd-hint" style="margin-bottom:10px">Once a day, posts an AI-written fleet snapshot and safety tip to each operator's carrier channel (from Operator Channels above), tagging the owner. The AI writes the whole message from the real fleet data and Contact Book domicile addresses — nothing invented. One message per operator per day.</div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">Enable daily briefing</span>
-            <input type="checkbox" id="cb-enabled"/>
-          </div>
-          <div class="sd-field" style="margin-top:8px">
-            <label class="sd-label">Send time</label>
-            <input class="sd-input" id="cb-send-time" type="time" />
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Timezone (IANA)</label>
-            <input class="sd-input" id="cb-timezone" placeholder="America/New_York" />
-            <div class="sd-hint">e.g. America/New_York, America/Chicago, America/Los_Angeles.</div>
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Include in snapshot</label>
-            <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:4px">
-              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-down"/> Units down</label>
-              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-flagged"/> Flagged this week</label>
-              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-active"/> Active count</label>
-              <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer"><input type="checkbox" id="cb-inc-domiciles"/> Domiciles</label>
-            </div>
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Flagged threshold (risk ≥)</label>
-            <input class="sd-input" id="cb-risk-threshold" type="number" min="0" max="100" step="1" />
-          </div>
-          <div class="sd-toggle-row">
-            <span class="sd-toggle-label">Include AI safety tip</span>
-            <input type="checkbox" id="cb-tip-enabled"/>
-          </div>
-          <div class="sd-hint" id="cb-run-info" style="margin-top:8px"></div>
-          <div class="sd-btn-row" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
-            <button class="sd-btn secondary" id="cb-test-btn" type="button">Send test to myself</button>
-            <button class="sd-btn secondary" id="cb-runnow-btn" type="button">Run now (live)</button>
-            <button class="sd-btn primary" id="cb-save">Save</button>
-          </div>
-          <div id="cb-status" class="sd-status" style="display:none;margin-top:8px"></div>
-        </div>
-
         <div class="sd-section" id="sect-dm-autoreply">
           <div class="sd-section-title">
             <span style="font-size:11px">💬</span> DM Auto-Reply
@@ -903,7 +585,7 @@ function _html() {
             <span style="font-size:11px">🤖</span> Digital Fleet Asset Specialist
             <span style="font-size:8px;color:var(--acc2);font-weight:700;background:var(--adim);padding:2px 6px;border-radius:8px;letter-spacing:1px">AGENT</span>
           </div>
-          <div class="sd-hint" style="margin-bottom:10px">A permission-aware agent that researches scoped fleet data, applies FAS judgment, and drafts replies. Starts in <strong>Shadow</strong> mode — it drafts and compares against your real replies but sends nothing.</div>
+          <div class="sd-hint" style="margin-bottom:10px">The single Slack reasoning agent: researches scoped fleet data, applies FAS judgment, decides whether/where to reply, and drafts or sends replies per mode. <strong>Approval</strong> is the default — FAS drafts and queues for your approval; <strong>Shadow</strong> drafts and compares only (sends nothing); <strong>Autonomous</strong> auto-sends verified low-risk answers.</div>
           <div class="sd-toggle-row">
             <span class="sd-toggle-label">Enable FAS agent</span>
             <input type="checkbox" id="fas-enabled"/>
@@ -911,11 +593,15 @@ function _html() {
           <div class="sd-field" style="margin-top:8px">
             <label class="sd-label">Mode</label>
             <select class="sd-select" id="fas-mode">
-              <option value="shadow">Shadow — draft &amp; compare, send nothing</option>
-              <option value="approval">Approval — propose, execute only after approval</option>
-              <option value="autonomous">Autonomous — auto-handle verified low-risk</option>
+              <option value="shadow">Shadow — draft &amp; compare, send nothing (legacy still replies)</option>
+              <option value="approval">Approval — FAS drafts, you approve each send (legacy retired)</option>
+              <option value="autonomous">Autonomous — auto-send verified low-risk (legacy retired)</option>
             </select>
-            <div class="sd-hint">New installs default to Shadow. Approval/Autonomous also require per-action permissions.</div>
+            <div class="sd-hint">Default: Approval. Shadow keeps the legacy auto-reply live for parity comparison; Approval/Autonomous make FAS the only reasoning engine.</div>
+          </div>
+          <div class="sd-toggle-row" style="margin-top:8px">
+            <span class="sd-toggle-label">Retire legacy reasoning<span class="sd-hint" style="display:block;opacity:.6;font-weight:400">When on (recommended), the old DM/partner persona reply engines never answer on their own — a FAS failure goes to manual review, not a legacy auto-reply. Turn off only as a temporary rollback.</span></span>
+            <input type="checkbox" id="fas-retire-legacy"/>
           </div>
           <div class="sd-field">
             <label class="sd-label">Max agent steps</label>
@@ -962,38 +648,87 @@ function _html() {
           <div class="sd-section-title" style="margin-top:14px;font-size:11px">Shadow comparisons (FAS draft vs. what was sent)</div>
           <div class="sd-hint" style="margin-bottom:6px">Highest-divergence first. Nothing here was sent — this is evaluation only.</div>
           <div id="fas-audit-list" style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto"></div>
+
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Channel roles (conversation vs data feed)</div>
+          <div class="sd-hint" style="margin-bottom:6px">Classify channels FAS watches. <strong>Feed</strong> channels (vendor/alert/system/info) are read silently — FAS ingests the data and only replies when directly @-mentioned. <strong>Conversational</strong> channels get normal replies. Auto-detected roles are suggestions until you confirm them here.</div>
+          <div class="sd-row" style="gap:6px;align-items:flex-end;flex-wrap:wrap">
+            <div class="sd-field" style="flex:1;min-width:120px"><div class="sd-label">Channel ID</div><input class="sd-input" id="fas-chan-id" placeholder="C0123ABCD"/></div>
+            <div class="sd-field" style="flex:1;min-width:120px"><div class="sd-label">Name</div><input class="sd-input" id="fas-chan-name" placeholder="vendor-repair-feed"/></div>
+            <div class="sd-field" style="flex:1;min-width:140px"><div class="sd-label">Mode</div>
+              <select class="sd-select" id="fas-chan-mode">
+                <option value="CONVERSATIONAL">Conversational</option>
+                <option value="OPERATIONAL">Operational</option>
+                <option value="INFORMATION_FEED">Information feed</option>
+                <option value="ALERT_FEED">Alert feed</option>
+                <option value="VENDOR_FEED">Vendor feed</option>
+                <option value="SYSTEM_FEED">System feed</option>
+                <option value="MIXED">Mixed</option>
+              </select>
+            </div>
+            <div class="sd-field" style="flex:1;min-width:150px"><div class="sd-label">Reply policy</div>
+              <select class="sd-select" id="fas-chan-reply">
+                <option value="normal">Normal</option>
+                <option value="only_if_directly_mentioned">Only if @-mentioned</option>
+                <option value="never">Never</option>
+              </select>
+            </div>
+            <div class="sd-btn-row"><button class="sd-btn secondary" id="fas-chan-detect">Auto-detect</button><button class="sd-btn primary" id="fas-chan-save">Save channel</button></div>
+          </div>
+          <div id="fas-chan-list" style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow:auto;margin-top:6px"></div>
+
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Identity domain mappings (auto-classification)</div>
+          <div class="sd-hint" style="margin-bottom:6px">Map an email domain to a carrier (with SCAC) or vendor so FAS classifies new senders from that domain automatically. @amazon.com is always internal. One mapping per line as <code>domain = SCAC</code> (carrier) or <code>domain = vendorName</code> (vendor).</div>
+          <div class="sd-field"><div class="sd-label">Carrier domains (domain = SCAC)</div><textarea class="sd-input" id="fas-map-carrier" rows="3" placeholder="examplecarrier.com = TUZR" style="resize:vertical"></textarea></div>
+          <div class="sd-field"><div class="sd-label">Vendor domains (domain = vendor name)</div><textarea class="sd-input" id="fas-map-vendor" rows="3" placeholder="amerit.com = Amerit Fleet" style="resize:vertical"></textarea></div>
+          <div class="sd-btn-row"><button class="sd-btn primary" id="fas-map-save">Save mappings</button></div>
+
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">Identity change log (auto-maintenance)</div>
+          <div class="sd-hint" style="margin-bottom:6px">Every automatic identity/permission change FAS made, with the evidence and confidence that drove it. Read-only audit trail.</div>
+          <div id="fas-identity-log" style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow:auto"></div>
+
+          <div class="sd-section-title" style="margin-top:14px;font-size:11px">FAS Roster</div>
+          <div class="sd-hint" style="margin-bottom:6px">The full FAS personnel roster (FAS Name, Site Code, Email, Phone, Uptime Manager, Program, SCAC), pulled directly from the FAS roster page — every entry, not just the first 100. Filter any column and copy to Excel/SharePoint.</div>
+          <div id="fas-roster-host"></div>
         </div>
 
-        <!-- Partner Forms -->
-        <div class="sd-section" id="sect-forms">
-          <div class="sd-section-title">Partner Work Request Forms</div>
-          <div class="sd-field">
-            <label class="sd-label">Google Sheets ID</label>
-            <input class="sd-input" id="forms-sheet-id" placeholder="Paste Sheet ID from URL..." />
-            <div class="sd-hint">From: docs.google.com/spreadsheets/d/<strong>[THIS ID]</strong>/edit</div>
-          </div>
-          <div class="sd-field">
-            <label class="sd-label">Poll Interval</label>
-            <select class="sd-select" id="forms-poll-interval">
-              <option value="30">Every 30 seconds</option>
-              <option value="60" selected>Every 60 seconds</option>
-              <option value="120">Every 2 minutes</option>
-              <option value="300">Every 5 minutes</option>
-            </select>
-          </div>
-          <div class="sd-btn-row">
-            <button class="sd-btn primary" id="forms-save">Save Forms Config</button>
-            <button class="sd-btn secondary" id="forms-poll-now">Poll Now</button>
-          </div>
-          <div id="forms-status" class="sd-status" style="margin-top:8px;display:none"></div>
-        </div>
+        <!-- Partner Work Request Forms section moved (2026-08-14) to the
+             Incoming Work Requests overlay (📋 toolbar) ⚙ gear. -->
 
         <!-- Asana -->
         <div class="sd-section" id="sect-asana">
           <div class="sd-section-title">Asana</div>
-          <div class="sd-field">
-            <div class="sd-label">Personal Access Token</div>
-            <input class="sd-input" id="asana-pat" type="password" placeholder="0/xxxxxxxx"/>
+
+          <!-- PRIMARY: Amazon Midway SSO. No PAT/OAuth needed — rides the same
+               Midway session as AAP/Uptake. Requires a healthy AEA session. -->
+          <div class="sd-hint" style="margin-bottom:8px">Asana connects through your Amazon Midway SSO session — the same login as AAP/Uptake. No token needed. First time: click Connect, enter your Asana email in the window that opens, and complete SSO once. After that it logs in automatically.</div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary"   id="asana-midway-connect">Connect to Asana</button>
+            <button class="sd-btn secondary" id="asana-midway-check">Check connection</button>
+          </div>
+          <div id="asana-midway-status" class="sd-status warn" style="margin-top:6px">\u2139\uFE0F Not checked yet</div>
+
+          <div class="sd-divider" style="margin:14px 0;border-top:1px solid var(--line,#2a3344)"></div>
+
+          <!-- FALLBACK: Multi-user PAT manager (only works if your org allows
+               Personal Access Tokens; many Amazon-managed workspaces don't). -->
+          <div class="sd-hint" style="margin-bottom:8px">Fallback (only if PATs are allowed): add a teammate by alias + PAT. Auto-discovers their IDs; token stored encrypted.</div>
+          <div class="sd-row">
+            <div class="sd-field">
+              <div class="sd-label">Alias</div>
+              <input class="sd-input" id="asana-user-alias" placeholder="gbates"/>
+            </div>
+            <div class="sd-field">
+              <div class="sd-label">Personal Access Token</div>
+              <input class="sd-input" id="asana-user-pat" type="password" placeholder="0/xxxxxxxx"/>
+            </div>
+          </div>
+          <div class="sd-btn-row">
+            <button class="sd-btn primary" id="asana-user-add">Add / Set up user</button>
+          </div>
+          <div id="asana-user-status" class="sd-status warn" style="margin-top:6px">\u26A0\uFE0F No Asana users configured</div>
+          <div class="sd-field" style="margin-top:10px">
+            <div class="sd-label">Configured users</div>
+            <div id="asana-user-list" style="font-size:13px"></div>
           </div>
           <div class="sd-row">
             <div class="sd-field">
@@ -1017,63 +752,15 @@ function _html() {
       </div>
       <!-- end sd-pane-integrations -->
 
-      <!-- ══ TAB 3: Operators & SP ═════════════════════════════════════════ -->
-      <div id="sd-pane-operators" style="display:none">
-        <!-- Standalone SP Workbook Config -->
-        <div class="sd-section" id="sect-sp-workbooks">
-          <div class="sd-section-title">SharePoint Workbooks</div>
-          <div class="sd-hint" style="margin-bottom:10px">Paste a SharePoint Excel URL → Load sheets → Pick sheet + operator → Save. The app will push fleet data to these workbooks.</div>
-          <div class="sd-field">
-            <div class="sd-label">SharePoint Excel URL</div>
-            <input class="sd-input" id="sp-wb-url" placeholder="Paste SharePoint Excel file URL here..." style="width:100%" />
-          </div>
-          <div class="sd-btn-row" style="margin-top:6px">
-            <button class="sd-btn primary" id="sp-wb-discover">Load sheets</button>
-          </div>
-          <div id="sp-wb-results" style="margin-top:10px;display:none">
-            <div class="sd-field">
-              <div class="sd-label">Sheets found:</div>
-              <div id="sp-wb-sheets-list"></div>
-            </div>
-          </div>
-          <div id="sp-wb-saved" style="margin-top:12px"></div>
-        </div>
+      <!-- Scheduler settings tab removed (2026-08-14): everything moved to the
+           Scheduler VIEW (renderer/src/js/views/schedulers.js).
+           - Sync interval + freshness -> the ⚙ gear overlay on that page.
+           - Daily Carrier Briefing -> the 📅 Briefing header button overlay.
+           The dead "Default scheduler endpoint" field was dropped entirely. -->
 
-
-
-        <!-- Pane header -->
-        <div class="ops-pane-header">
-          <div class="ops-pane-header-left">
-            <span class="ops-pane-title">Operators &amp; SharePoint</span>
-          </div>
-        </div>
-        <!-- FEATURE (2026-07-23): removed the dead "Sync Now" button and its
-             "Run a sync to load operators" label that used to live in the
-             pane header above. Neither one was ever wired up: the button
-             had no click listener anywhere, the label was never updated by
-             any code, and the one function that looked like it populated a
-             list here (_renderOperators, removed below) was never called
-             and referenced DOM ids (#ops-list, #ops-empty-state) that don't
-             exist in this template. The Operators tab's real data (the
-             per-operator SharePoint workbook cards above) is populated by a
-             separate, live mechanism, not by this button. -->
-        <!-- FEATURE (2026-07-22): removed the duplicate "Email — Global
-             SMTP" panel that lived here. It was 100% dead/broken: no event
-             listener ever wired the inputs or the "Send test email"
-             button, nothing populated the fields on load, and the one
-             function that referenced them (_opsEmailAutoSave) called an
-             undeclared variable (_opsEmailTimers) that would have thrown a
-             ReferenceError the instant it ran. Even setting that aside, it
-             saved into spConfig.email* fields that nothing else in the
-             codebase ever reads back -- a second, disconnected config that
-             could never actually be used to send mail.
-             The single real SMTP config is "Email (SMTP)" above (id
-             sect-email, wired by _wireEmail()) -- it writes to
-             email_config.json via emailBridge.saveConfig(), which is what
-             sendFleetEmail() (src/scrapers/email_sender.js) actually reads
-             from when sending a report over SMTP. -->
-      </div>
-      <!-- end sd-pane-operators -->
+      <!-- Operators & SP tab removed (2026-08-14): its only live content (the
+           SharePoint Workbooks config) moved to the Scheduler view's SP Push
+           gear overlay. Domiciles config lives in the Integrations tab. -->
 
       <!-- ══ TAB 4: Accounts ════════════════════════════════════════════════ -->
       <div id="sd-pane-accounts" style="display:none">
@@ -1082,17 +769,17 @@ function _html() {
         <div class="ops-pane-header">
           <div class="ops-pane-header-left">
             <span class="ops-pane-title">Accounts</span>
-            <span class="ops-pane-sub">Site credentials – click a site name to open it</span>
+            <span class="ops-pane-sub">Every login in one place — edit, reveal, test, or add new</span>
           </div>
           <button class="ops-sync-btn" id="acct-add">+ Add account</button>
         </div>
 
-        <!-- Account rows -->
+        <!-- One unified, editable list (vendor portals seeded + any site you add) -->
         <div class="acct-list" id="acct-list">
-          <div class="acct-empty" id="acct-empty">
+          <div class="acct-empty" id="acct-empty" style="display:none">
             <span style="font-size:28px;opacity:.5">🔑</span>
             <div class="ops-empty-title">No accounts yet</div>
-            <div class="ops-empty-sub">Click <strong>+ Add account</strong> to save a site credential.</div>
+            <div class="ops-empty-sub">Click <strong>+ Add account</strong> to save a login.</div>
           </div>
         </div>
 
@@ -1104,6 +791,134 @@ function _html() {
 
   </div>
   <!-- end settings-drawer -->
+
+  <!-- AI Config overlay (opened from the toolbar AI status pill) -->
+  <div id="ai-config-overlay" class="ai-config-overlay">
+    <div class="ai-config-panel">
+      <button class="ai-config-close" id="ai-config-close" title="Close">✕</button>
+        <!-- AI Config -->
+        <div class="sd-section" id="sect-ai-config">
+          <div class="sd-section-title" style="display:flex;align-items:center;gap:8px">
+            🤖 AI Config
+            <span id="ai-config-live-status" style="font-size:10px;padding:2px 10px;border-radius:10px;background:#21262d;color:#8b949e;font-weight:500">⏳ checking...</span>
+          </div>
+
+          <!-- Preference selector -->
+          <div class="sd-field" style="margin-bottom:14px">
+            <div class="sd-label" style="margin-bottom:8px">Active AI</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-auto">
+                <input type="radio" name="ai-pref" value="auto" style="accent-color:#58a6ff"> Auto (fallback chain)
+              </label>
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-orcha">
+                <input type="radio" name="ai-pref" value="orcha" style="accent-color:#22c55e"> Orcha only
+              </label>
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-claude">
+                <input type="radio" name="ai-pref" value="claude" style="accent-color:#818cf8"> Claude Code only
+              </label>
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-balanced">
+                <input type="radio" name="ai-pref" value="balanced" style="accent-color:#f0a800"> Balanced (Orcha + Claude)
+              </label>
+            </div>
+            <div id="ai-pref-hint" style="margin-top:5px;font-size:10px;color:#6e7681;font-style:italic">Auto: tries Orcha first, falls back to Claude Code if quota is exceeded.</div>
+          </div>
+
+          <!-- Orcha subsection -->
+          <div style="border:1px solid var(--bdr);border-radius:6px;padding:10px 12px;margin-bottom:10px">
+            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">⚡ Orcha</div>
+            <div class="sd-row">
+              <div class="sd-field">
+                <div class="sd-label">Mode</div>
+                <select class="sd-select" id="orcha-mode">
+                  <option value="local">Local</option>
+                  <option value="remote">Remote</option>
+                </select>
+              </div>
+              <div class="sd-field">
+                <div class="sd-label">Host</div>
+                <input class="sd-input" id="orcha-host" placeholder="localhost"/>
+              </div>
+              <div class="sd-field">
+                <div class="sd-label">Port</div>
+                <input class="sd-input" id="orcha-port" type="number" placeholder="4799"/>
+              </div>
+            </div>
+            <div class="sd-field" style="margin-top:8px">
+              <div class="sd-label" style="display:flex;align-items:center;justify-content:space-between">
+                <span>Orcha Agent (model)</span>
+                <button class="sd-btn secondary" id="refresh-orcha-agents" style="font-size:10px;padding:2px 8px">Refresh list</button>
+              </div>
+              <select class="sd-select" id="orcha-agent" style="font-size:11px">
+                <!-- Fallback defaults, shown until live discovery replaces them
+                     with the real per-agent model read from ~/.orcha/agents. -->
+                <option value="orcha_default">Orcha — Claude Opus 4.6</option>
+                <option value="migration">Migration — Claude Opus 4.6</option>
+                <option value="moon">Moon — Claude Sonnet 4.6</option>
+                <option value="mirror">Mirror — Claude Sonnet 4.6</option>
+                <option value="otter">Otter — Claude Sonnet 4.6</option>
+                <option value="tides_workflow_runner">Tides Workflow Runner — Claude Sonnet 4.6</option>
+              </select>
+              <div id="orcha-agent-hint" style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">The Orcha agent that answers AI requests (FAS, Fleet Chat, auto-reply). The model is chosen server-side by the agent. This list is discovered live from your Orcha toolbox.</div>
+            </div>
+            <div class="sd-field" style="margin-top:8px">
+              <div class="sd-label">Fallback Model ID (Bedrock)</div>
+              <input class="sd-input" id="ai-model-id" placeholder="us.amazon.nova-pro-v1:0" style="font-family:monospace;font-size:10px"/>
+              <div style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">Bedrock model used only when Orcha WS is down and the app calls Bedrock directly. Leave blank to use the app default.</div>
+            </div>
+            <div class="sd-btn-row" style="margin-top:8px">
+              <button class="sd-btn secondary" id="test-orcha" style="font-size:11px">Test Orcha</button>
+            </div>
+            <div id="orcha-test-status" style="margin-top:4px;font-size:11px;min-height:14px"></div>
+          </div>
+
+          <!-- Claude Code subsection -->
+          <div style="border:1px solid var(--bdr);border-radius:6px;padding:10px 12px;margin-bottom:12px">
+            <div style="font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">🧠 Claude Code</div>
+            <div class="sd-field">
+              <div class="sd-label">Binary (auto-detected)</div>
+              <input class="sd-input" id="claude-bin-path" placeholder="(auto)" readonly style="color:#6e7681;font-size:10px;font-family:monospace"/>
+            </div>
+            <div class="sd-field" style="margin-top:6px">
+              <div class="sd-label" style="display:flex;align-items:center;justify-content:space-between">
+                <span>Model</span>
+                <button class="sd-btn secondary" id="detect-claude-model" style="font-size:10px;padding:2px 8px">Detect current</button>
+              </div>
+              <select class="sd-select" id="claude-model" style="font-size:11px">
+                <option value="">Default (let Claude Code decide)</option>
+                <option value="claude-opus-5-5">Opus 5.5 — smartest, slow</option>
+                <option value="claude-sonnet-5-5">Sonnet 5.5 — balanced (recommended)</option>
+                <option value="claude-haiku-5-5">Haiku 5.5 — fastest</option>
+                <option value="claude-fable-5-1">Fable 5.1</option>
+              </select>
+              <div id="claude-model-hint" style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">Model for the Claude Code lane (fallback AI + attachment/screenshot reading). Blank = Claude Code's own default.</div>
+            </div>
+            <div class="sd-field" style="margin-top:6px">
+              <div class="sd-label">Timeout (seconds)</div>
+              <input class="sd-input" id="claude-timeout" type="number" placeholder="60" style="width:80px"/>
+            </div>
+            <div class="sd-field" style="margin-top:6px">
+              <div class="sd-label">Parallel workers</div>
+              <select class="sd-input" id="claude-pool" style="width:80px">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+              </select>
+              <div id="claude-pool-hint" style="margin-top:4px;font-size:10px;color:#6e7681;font-style:italic">How many Claude Code processes run at once. 1 (recommended) avoids a startup file-lock race that caused intermittent timeouts; higher = more concurrency if your machine handles it.</div>
+            </div>
+            <div class="sd-btn-row">
+              <button class="sd-btn secondary" id="test-claude" style="font-size:11px">Test Claude</button>
+            </div>
+            <div id="claude-test-status" style="margin-top:4px;font-size:11px;min-height:14px"></div>
+          </div>
+
+          <div class="sd-btn-row">
+            <button class="sd-btn primary" id="save-ai-config">Save AI Config</button>
+          </div>
+        </div>
+    </div>
+  </div>
   `;
 }
 
@@ -1114,7 +929,7 @@ function _wireTabSwitching() {
       _drawer.querySelectorAll('.sd-tab').forEach((t) => t.classList.remove('active'));
       btn.classList.add('active');
       const pane = btn.dataset.pane;
-      ['ui', 'integrations', 'operators', 'accounts'].forEach((p) => {
+      ['ui', 'integrations', 'accounts'].forEach((p) => {
         const el = document.getElementById(`sd-pane-${p}`);
         if (el) el.style.display = p === pane ? 'block' : 'none';
       });
@@ -1135,82 +950,26 @@ function _close() {
   _overlay.classList.remove('open');
 }
 
-// ── Section: Domiciles ───────────────────────────────────────────────────────
-function _wireDomiciles() {
-  document.getElementById('save-domiciles').addEventListener('click', async () => {
-    const raw = document.getElementById('settings-domiciles').value;
-    // BUG FIX (2026-07-22): only split on commas -- a newline-separated
-    // list (one code per line, which is how the textarea's own
-    // placeholder now shows it, and how most people naturally type a
-    // list of site codes) collapsed into ONE array entry containing
-    // literal embedded newlines, e.g. ["ABE40\nAVP40\nAUVTE01"] instead
-    // of ["ABE40","AVP40","AUVTE01"]. Confirmed live in this exact
-    // installation's real settings.json before this fix. Any code
-    // downstream that expects individual clean domicile codes (the AAP
-    // scan URL builder, the sync engine) would silently fail to match
-    // anything against a single garbled multi-line string -- producing
-    // exactly the "I entered domiciles and it did nothing" symptom.
-    // Backend settings:save-domiciles (src/ipc/settings.js) already
-    // splits on /[\n,]+/ -- this now matches it exactly.
-    const codes = raw.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
-    const st = document.getElementById('domicile-status');
-    if (!codes.length) {
-      st.textContent = '\u26A0\uFE0F Enter at least one domicile code first'; st.style.display = 'block';
-      return;
-    }
-    try {
-      await settingsBridge.saveDomiciles(codes);
-      st.textContent = '\u2705 Saved'; st.style.display = 'block';
-      setTimeout(() => { st.style.display = 'none'; }, 2000);
-    } catch (e) {
-      st.textContent = '\u274C ' + (e.message || 'Save failed'); st.style.display = 'block';
-    }
-  });
-  document.getElementById('reset-domiciles').addEventListener('click', async () => {
-    // BUG FIX (2026-07-22): this called saveDomiciles([]) -- but the
-    // backend handler THROWS on an empty list ("domicile list cannot be
-    // empty", src/ipc/settings.js) and this had no .catch() anywhere, so
-    // "Reset defaults" has never once actually worked; it silently threw
-    // an unhandled promise rejection with zero visible feedback. The
-    // backend already has a dedicated, correct handler for exactly this
-    // (settings:reset-domiciles, returns DEFAULTS.DEFAULT_DOMICILES) --
-    // switched to that instead of trying to save an empty list.
-    try {
-      const result = await settingsBridge.resetDomiciles();
-      const codes = (result && result.domiciles) || [];
-      document.getElementById('settings-domiciles').value = codes.join('\n');
-      const st = document.getElementById('domicile-status');
-      st.textContent = '\u2705 Reset to defaults'; st.style.display = 'block';
-      setTimeout(() => { st.style.display = 'none'; }, 2000);
-    } catch (e) {
-      const st = document.getElementById('domicile-status');
-      st.textContent = '\u274C ' + (e.message || 'Reset failed'); st.style.display = 'block';
-    }
-  });
+// AI Config overlay (toolbar AI pill). Separate from the settings drawer so it
+// can open standalone. Reuses the #sect-ai-config form + its existing wiring.
+function _openAIConfig() {
+  const ov = document.getElementById('ai-config-overlay');
+  if (!ov) return;
+  ov.classList.add('open');
+  // _loadAIConfig lives inside _wireAIConfig's scope; trigger a reload so the
+  // form reflects current config/live status when opened on its own.
+  bus.emit('ui:ai-config-reload');
+}
+function _closeAIConfigOverlay() {
+  const ov = document.getElementById('ai-config-overlay');
+  if (ov) ov.classList.remove('open');
 }
 
-// ── Section: Auth ────────────────────────────────────────────────────────────
-function _checkAuth() {
-  authBridge.checkMidway().then((ok) => {
-    const el = document.getElementById('auth-status');
-    if (!el) return;
-    if (ok) {
-      el.textContent = '✅ Authenticated';
-      el.className = 'sd-status ok';
-    } else {
-      el.textContent = '⚠️ Not authenticated';
-      el.className = 'sd-status warn';
-    }
-  }).catch(() => {});
-}
+// _wireDomiciles() removed (2026-08-14): Domiciles editor moved to the 👤 User
+// Profile popover (toolbar.js). Same settings:save/reset-domiciles backend.
 
-function _wireAuth() {
-  _checkAuth();
-  document.getElementById('auth-recheck').addEventListener('click', _checkAuth);
-  document.getElementById('auth-mwinit').addEventListener('click', () => {
-    authBridge.runMwinit().then(() => _checkAuth()).catch(() => {});
-  });
-}
+// _checkAuth()/_wireAuth() removed (2026-08-14): Midway Auth section moved out
+// of Settings — run mwinit via Ctrl+M; re-auth modal handles session expiry.
 
 // ── Section: Orcha ───────────────────────────────────────────────────────────
 function _wireOrcha() { _wireAIConfig(); }
@@ -1236,9 +995,14 @@ function _wireAIConfig() {
     if (modeEl) modeEl.value = cfg.mode || 'local';
     if (hostEl) hostEl.value = cfg.host || '';
     if (portEl) portEl.value = cfg.port || 4799;
-    // Orcha agent (selects the server-side model) — defaults to orcha_default (Opus 4.6)
+    // Orcha agent (selects the server-side model) — defaults to orcha_default.
+    // Populate the dropdown LIVE from `orcha --list-agents` so it always shows
+    // exactly the agents this machine can call (the hardcoded <option>s are
+    // just a fallback shown until/unless discovery succeeds).
     const agentEl = document.getElementById('orcha-agent');
-    if (agentEl) agentEl.value = cfg.orchaAgentId || 'orcha_default';
+    const wanted = cfg.orchaAgentId || 'orcha_default';
+    if (agentEl) agentEl.value = wanted;
+    _populateOrchaAgents(wanted);
     // Model ID (Bedrock fallback leg) — blank field means "use app default"
     const modelEl = document.getElementById('ai-model-id');
     if (modelEl) modelEl.value = cfg.modelId || '';
@@ -1247,6 +1011,57 @@ function _wireAIConfig() {
     const toEl   = document.getElementById('claude-timeout');
     if (binEl) binEl.value = cfg.claudeBin || '(auto)';
     if (toEl)  toEl.value  = Math.round((cfg.claudeTimeoutMs || 60000) / 1000);
+    const poolEl = document.getElementById('claude-pool');
+    if (poolEl) poolEl.value = String(Math.min(5, Math.max(1, cfg.claudePoolSize || 1)));
+    // Claude-lane model. If the saved id isn't one of the known options, add it
+    // so the selection is never silently lost.
+    const cmEl = document.getElementById('claude-model');
+    if (cmEl) {
+      const saved = cfg.claudeModelId || '';
+      if (saved && !Array.from(cmEl.options).some(o => o.value === saved)) {
+        const opt = document.createElement('option');
+        opt.value = saved; opt.textContent = saved; cmEl.appendChild(opt);
+      }
+      cmEl.value = saved;
+    }
+  }
+
+  // Replace the Orcha-agent dropdown's options with the LIVE discovered list,
+  // including the REAL model each agent maps to (read from the agent's config
+  // file, not a hardcoded guess). Keeps `selected` chosen even if it isn't in
+  // the discovered set (so a saved agent id is never silently lost), and falls
+  // back to the hardcoded options already in the DOM if discovery is unavailable.
+  async function _populateOrchaAgents(selected, opts) {
+    const agentEl = document.getElementById('orcha-agent');
+    const hintEl = document.getElementById('orcha-agent-hint');
+    if (!agentEl || !window.ai || !window.ai.listOrchaAgents) return;
+    let res = null;
+    try { res = await window.ai.listOrchaAgents(opts || {}); } catch (_) { res = null; }
+    if (!res || !res.ok || !Array.isArray(res.agents) || !res.agents.length) {
+      if (hintEl && res && res.error) {
+        hintEl.textContent = 'Could not discover agents live (' + res.error + ') — showing built-in defaults.';
+      }
+      return; // keep the hardcoded fallback options already in the DOM
+    }
+    const want = selected || agentEl.value || 'orcha_default';
+    const agents = res.agents.slice();
+    // Ensure the currently-selected agent is present even if discovery omitted it.
+    if (want && !agents.some(a => a.id === want)) agents.unshift({ id: want, name: want });
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    agentEl.innerHTML = agents.map(a => {
+      // Prefer the live-discovered model label; fall back to nothing if unknown.
+      const label = a.name + (a.modelLabel ? ' — ' + a.modelLabel : '');
+      const sel = a.id === want ? ' selected' : '';
+      return '<option value="' + esc(a.id) + '"' + sel + '>' + esc(label) + '</option>';
+    }).join('');
+    agentEl.value = want;
+    if (hintEl) {
+      const picked = agents.find(a => a.id === want);
+      const pickedModel = picked && picked.modelLabel ? (' Current: ' + picked.modelLabel + '.') : '';
+      hintEl.textContent = 'The Orcha agent that answers AI requests (FAS, Fleet Chat, auto-reply); the model shown is ' +
+        'what each agent maps to server-side. ' + agents.length + ' agent(s) discovered live' +
+        (res.cached ? ' (cached)' : '') + '.' + pickedModel;
+    }
   }
 
   function _updateLiveStatus(st) {
@@ -1297,6 +1112,7 @@ function _wireAIConfig() {
   if (saveBtn) saveBtn.addEventListener('click', async () => {
     const pref    = (document.querySelector('input[name="ai-pref"]:checked') || {}).value || 'auto';
     const toSecs  = parseInt((document.getElementById('claude-timeout') || {}).value, 10) || 60;
+    const poolN   = parseInt((document.getElementById('claude-pool') || {}).value, 10) || 1;
     await window.ai.saveAIConfig({
       aiPreference:    pref,
       mode:            (document.getElementById('orcha-mode') || {}).value || 'local',
@@ -1304,7 +1120,9 @@ function _wireAIConfig() {
       port:            parseInt((document.getElementById('orcha-port') || {}).value, 10) || 4799,
       orchaAgentId:    (document.getElementById('orcha-agent') || {}).value || 'orcha_default',
       modelId:         ((document.getElementById('ai-model-id') || {}).value || '').trim(),
+      claudeModelId:   ((document.getElementById('claude-model') || {}).value || '').trim(),
       claudeTimeoutMs: toSecs * 1000,
+      claudePoolSize:  Math.min(5, Math.max(1, poolN)),
     });
     toast.show('success', 'AI config saved — active: ' + pref, 2500);
     window.ai.status().then(_updateLiveStatus).catch(() => {});
@@ -1329,6 +1147,34 @@ function _wireAIConfig() {
     } finally { testOrchaBtn.disabled = false; testOrchaBtn.textContent = 'Test Orcha'; }
   });
 
+  // ── Refresh Orcha agent list (live discovery via `orcha --list-agents`) ──
+  const refreshAgentsBtn = document.getElementById('refresh-orcha-agents');
+  if (refreshAgentsBtn) refreshAgentsBtn.addEventListener('click', async () => {
+    const agentEl = document.getElementById('orcha-agent');
+    const keep = agentEl ? agentEl.value : null;
+    refreshAgentsBtn.disabled = true; refreshAgentsBtn.textContent = 'Refreshing...';
+    try { await _populateOrchaAgents(keep, { force: true }); }
+    finally { refreshAgentsBtn.disabled = false; refreshAgentsBtn.textContent = 'Refresh list'; }
+  });
+
+  // ── Detect the Claude Code lane's current model ─────────────────────────
+  const detectClaudeBtn = document.getElementById('detect-claude-model');
+  if (detectClaudeBtn) detectClaudeBtn.addEventListener('click', async () => {
+    const hintEl = document.getElementById('claude-model-hint');
+    detectClaudeBtn.disabled = true; detectClaudeBtn.textContent = 'Detecting...';
+    if (hintEl) hintEl.textContent = '⏳ Asking Claude Code what it is running on...';
+    try {
+      const r = await window.ai.detectClaudeModel();
+      if (r && r.ok && r.model) {
+        if (hintEl) hintEl.textContent = 'Currently running on: ' + r.model + '. (This is the model when "Default" is selected; pick a specific one above to pin it.)';
+      } else {
+        if (hintEl) hintEl.textContent = 'Could not detect the current model' + (r && r.error ? ' (' + r.error + ')' : '') + '.';
+      }
+    } catch (e) {
+      if (hintEl) hintEl.textContent = 'Detection failed: ' + e.message;
+    } finally { detectClaudeBtn.disabled = false; detectClaudeBtn.textContent = 'Detect current'; }
+  });
+
   // ── Test Claude ───────────────────────────────────────────────────────
   const testClaudeBtn = document.getElementById('test-claude');
   if (testClaudeBtn) testClaudeBtn.addEventListener('click', async () => {
@@ -1350,127 +1196,39 @@ function _wireAIConfig() {
   // Load config when drawer opens
   _loadAIConfig();
   bus.on('ui:view-change', ({ to }) => { if (to === 'settings') setTimeout(_loadAIConfig, 150); });
+  // Reload when the standalone AI Config overlay is opened from the toolbar.
+  bus.on('ui:ai-config-reload', () => setTimeout(_loadAIConfig, 50));
 }
 
-// ── Section: Credentials ─────────────────────────────────────────────────────
-function _loadCredsList() {
-  credsBridge.list().then((keys) => {
-    const el = document.getElementById('cred-list');
-    if (!el) return;
-    el.innerHTML = '';
-    (keys || []).forEach((k) => {
-      const pill = document.createElement('span');
-      pill.className = 'settings-key-pill';
-      pill.textContent = k;
-      el.appendChild(pill);
-    });
-    const wrap = document.getElementById('cred-list-wrap');
-    if (wrap) wrap.style.display = (keys && keys.length) ? 'block' : 'none';
-  }).catch(() => {});
-}
+// ── Known vendor portals (for the unified Accounts list) ─────────────────────
+// Each known vendor portal that the background scraper can auto-login to. These
+// are SEEDED as rows in the one Accounts list so they're always present. A row
+// is recognized as a vendor by matching its URL host against `host` here. The
+// `id` is the vendorId used by the keychain (vendor.<id>.username/password) and
+// by credentials:test-login — so saving a vendor row MIRRORS its user/pass into
+// the keychain to keep auto-login (getForHostname) working unchanged. 'sso'
+// vendors (Uptake) use Amazon Midway, no stored password — just a Test/Sign-in.
+const _VENDORS = [
+  { id: 'paccar',    name: 'PACCAR',                  host: 'paccarpg.decisiv.net' },
+  { id: 'volvo',     name: 'Volvo',                   host: 'volvopg.asist.decisiv.net' },
+  { id: 'record360', name: 'Record360',               host: 'dashboard.record360.com' },
+  { id: 'aperia',    name: 'Aperia / Halo Tire',      host: 'amazon.aperiatech.com' },
+  { id: 'reach24',   name: 'Reach24',                 host: 'amazon.reach24.net' },
+  { id: 'dtna',      name: 'DTNA Service Tracker',    host: 'dtna.my.site.com' },
+  { id: 'roadready', name: 'Road Ready',              host: 'roadready.fadv.com' },
+  { id: 'velogic',   name: 'Velogic',                 host: 'velogic.my.site.com' },
+  { id: 'abs',       name: 'Access Billing Services', host: 'access-billing-services.com' },
+  { id: 'uptake',    name: 'Uptake',                  host: 'fleet.uptake.com', sso: true },
+];
+const _VENDOR_BY_ID = Object.fromEntries(_VENDORS.map(v => [v.id, v]));
 
-function _wireCreds() {
-  _loadCredsList();
-  document.getElementById('cred-save').addEventListener('click', async () => {
-    const k = document.getElementById('cred-key').value.trim();
-    const v = document.getElementById('cred-val').value;
-    if (!k) return;
-    await credsBridge.set(k, v);
-    document.getElementById('cred-key').value = '';
-    document.getElementById('cred-val').value = '';
-    _loadCredsList();
-    const st = document.getElementById('cred-status');
-    st.textContent = '✓ Saved'; st.style.display = 'block';
-    setTimeout(() => { st.style.display = 'none'; }, 2000);
-  });
-  document.getElementById('cred-delete').addEventListener('click', async () => {
-    const k = document.getElementById('cred-key').value.trim();
-    if (!k) return;
-    await credsBridge.delete(k);
-    document.getElementById('cred-key').value = '';
-    _loadCredsList();
-  });
-}
-
-// ── Section: Vendor Auth ─────────────────────────────────────────────────────
-function _checkVendorCred(vendor, statusId) {
-  credsBridge.has(`vendor.${vendor}.username`).then((has) => {
-    const st = document.getElementById(statusId);
-    if (!st) return;
-    st.textContent = has ? `✅ Credentials saved` : '⚠️ Not configured';
-    st.style.display = 'block';
-    st.className = `settings__status settings__status--${has ? 'ok' : 'loading'}`;
-  }).catch(() => {});
-}
-
-function _wireVendorAuth() {
-  const ALL_VENDORS = ['paccar', 'volvo', 'record360', 'aperia', 'reach24', 'dtna', 'roadready', 'velogic', 'abs'];
-  ALL_VENDORS.forEach((v) => {
-    _checkVendorCred(v, `${v}-status`);
-
-    // Repopulate username field (password never retrieved — encrypted only)
-    settingsBridge.getAll().then((all) => {
-      const userEl = document.getElementById(`${v}-user`);
-      if (userEl && all && all[`${v}_user`]) userEl.value = all[`${v}_user`];
-    }).catch(() => {});
-
-    document.getElementById(`${v}-save`).addEventListener('click', async () => {
-      const user = document.getElementById(`${v}-user`).value.trim();
-      const pass = document.getElementById(`${v}-pass`).value;
-      if (!user || !pass) return;
-      await credsBridge.set(`vendor.${v}.username`, user);
-      await credsBridge.set(`vendor.${v}.password`, pass);
-      await settingsBridge.save(`${v}_user`, user);
-      document.getElementById(`${v}-pass`).value = '';
-      _checkVendorCred(v, `${v}-status`);
-    });
-
-    document.getElementById(`${v}-clear`).addEventListener('click', async () => {
-      await credsBridge.delete(`vendor.${v}.username`);
-      await credsBridge.delete(`vendor.${v}.password`);
-      await settingsBridge.save(`${v}_user`, '');
-      document.getElementById(`${v}-user`).value = '';
-      document.getElementById(`${v}-pass`).value = '';
-      _checkVendorCred(v, `${v}-status`);
-    });
-
-    // FEATURE (2026-07-22): opens the real vendor portal and attempts the
-    // exact same auto-login pass (src/orcha/auto-login.js) the background
-    // AAP/Relay scraper already uses in production for this host -- see
-    // src/ipc/credentials.js (credentials:test-login) for the full design.
-    const testBtn = document.getElementById(`${v}-test`);
-    if (testBtn) testBtn.addEventListener('click', async () => {
-      const st = document.getElementById(`${v}-status`);
-      if (st) { st.textContent = '\u23F3 Opening portal...'; st.style.display = 'block'; st.className = 'settings__status settings__status--loading'; }
-      try {
-        const r = await credsBridge.testLogin(v);
-        if (st) {
-          if (r && r.ok && r.attempted) { st.textContent = '\u2705 Login attempted -- check the window that opened'; st.className = 'settings__status settings__status--ok'; }
-          else if (r && r.closedByUser) { st.textContent = 'Window closed'; st.className = 'settings__status'; }
-          else { st.textContent = '\u26A0\uFE0F No saved credentials to try -- save above first'; st.className = 'settings__status settings__status--loading'; }
-        }
-      } catch (e) {
-        if (st) { st.textContent = '\u274C ' + e.message; st.className = 'settings__status settings__status--err'; st.style.display = 'block'; }
-      }
-    });
-  });
-
-  // Uptake -- Amazon SSO, no credentials to save/clear, just a sign-in test
-  const uptakeBtn = document.getElementById('uptake-test');
-  if (uptakeBtn) uptakeBtn.addEventListener('click', async () => {
-    const st = document.getElementById('uptake-status');
-    if (st) { st.textContent = '\u23F3 Opening Uptake...'; st.style.display = 'block'; st.className = 'settings__status settings__status--loading'; }
-    try {
-      const r = await credsBridge.testLogin('uptake');
-      if (st) {
-        if (r && r.ok && r.attempted) { st.textContent = '\u2705 SSO attempted -- check the window that opened'; st.className = 'settings__status settings__status--ok'; }
-        else if (r && r.closedByUser) { st.textContent = 'Window closed'; st.className = 'settings__status'; }
-        else { st.textContent = '\u26A0\uFE0F Could not sign in automatically -- requires Midway'; st.className = 'settings__status settings__status--loading'; }
-      }
-    } catch (e) {
-      if (st) { st.textContent = '\u274C ' + e.message; st.className = 'settings__status settings__status--err'; st.style.display = 'block'; }
-    }
-  });
+// Resolve a row's URL/host string to a known vendor (or null). Matches on
+// hostname substring so 'https://paccarpg.decisiv.net/x' maps to paccar.
+function _vendorForUrl(urlOrHost) {
+  const s = String(urlOrHost || '').toLowerCase();
+  if (!s) return null;
+  for (const v of _VENDORS) { if (s.indexOf(v.host) !== -1) return v; }
+  return null;
 }
 
 // ── Section: Slack ───────────────────────────────────────────────────────────
@@ -1492,145 +1250,22 @@ function _checkSlack() {
   }).catch(() => {});
 }
 
-function _wireEmail() {
-  var saveBtn   = document.getElementById('email-save');
-  var testBtn   = document.getElementById('email-test');
-  var statusEl  = document.getElementById('email-status');
-  function showEmailStatus(text, cls) {
-    if (!statusEl) return;
-    statusEl.textContent = text;
-    statusEl.className = 'settings__status ' + (cls || '');
-    statusEl.style.display = '';
-    setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
-  }
-  if (saveBtn) saveBtn.addEventListener('click', async () => {
-    const methodEl = document.getElementById('email-method');
-    await emailBridge.saveConfig({
-      host:        document.getElementById('email-host').value.trim(),
-      port:        parseInt(document.getElementById('email-port').value, 10) || 587,
-      from:        document.getElementById('email-from').value.trim(),
-      user:        document.getElementById('email-user').value.trim(),
-      pass:        document.getElementById('email-pass').value,
-      emailMethod: methodEl ? methodEl.value : 'auto',
-    });
-    document.getElementById('email-pass').value = '';
-    const methodLabel = { auto: 'Auto', graph: 'Microsoft Graph', smtp: 'SMTP', owa: 'OWA' };
-    const sel = methodEl ? (methodLabel[methodEl.value] || methodEl.value) : 'Auto';
-    showEmailStatus('Saved — send method: ' + sel, 'ok');
-  });
-  if (testBtn) testBtn.addEventListener('click', () => {});
-}
+// _wireEmail() removed (2026-08-14): Email (SMTP) settings section deleted —
+// user sends via OWA only. Send pipeline falls through to OWA automatically.
 
 // FEATURE (2026-07-16): persisted note for scheduled auto-sends (08:00 /
 // 15:15). Stored via the generic settings:save IPC under keys
 // `autoEmailNote` / `autoEmailNoteOneShot` — read fresh by the scheduler in
 // src/app.js on every fire, so edits here take effect on the very next slot.
-function _wireAutoNote() {
-  var textEl    = document.getElementById('auto-note-text');
-  var oneShotEl = document.getElementById('auto-note-oneshot');
-  var saveBtn   = document.getElementById('auto-note-save');
-  var clearBtn  = document.getElementById('auto-note-clear');
-  var statusEl  = document.getElementById('auto-note-status');
-  var previewEl = document.getElementById('auto-note-preview');
-  if (!textEl || !saveBtn) return;
+// _wireAutoNote() removed (2026-08-14): the Auto-Email Note moved to a gear
+// overlay on the Scheduler view's Email card (renderer/src/js/views/schedulers.js).
+// Same storage keys (autoEmailNote / autoEmailNoteOneShot) so behavior is
+// unchanged — the scheduler reads them fresh on every auto-send.
 
-  function _updateNotePreview() {
-    if (!previewEl) return;
-    var txt = (textEl.value || '').trim();
-    if (txt) { previewEl.textContent = 'NOTE: ' + txt; previewEl.style.display = ''; }
-    else { previewEl.style.display = 'none'; }
-  }
-  textEl.addEventListener('input', _updateNotePreview);
-
-  function showStatus(text, cls) {
-    if (!statusEl) return;
-    statusEl.textContent = text;
-    statusEl.className = 'sd-status ' + (cls || '');
-    statusEl.style.display = '';
-  }
-
-  // Populate current state on load
-  settingsBridge.getAll().then((all) => {
-    var s = all || {};
-    textEl.value = s.autoEmailNote || '';
-    if (oneShotEl) oneShotEl.checked = !!s.autoEmailNoteOneShot;
-    _updateNotePreview();
-    if (s.autoEmailNote) {
-      showStatus('✅ Active — will be included in the next scheduled auto-send' + (s.autoEmailNoteOneShot ? ' (one-time only)' : ''), 'ok');
-    }
-  }).catch(() => {});
-
-  saveBtn.addEventListener('click', async () => {
-    var note = (textEl.value || '').trim();
-    if (!note) { showStatus('⚠️ Enter a note first, or use "Clear note" to remove an existing one', 'warn'); return; }
-    await settingsBridge.save('autoEmailNote', note);
-    await settingsBridge.save('autoEmailNoteOneShot', !!(oneShotEl && oneShotEl.checked));
-    showStatus('✅ Saved — will be included in the next scheduled auto-send' + (oneShotEl && oneShotEl.checked ? ' (one-time only)' : ''), 'ok');
-    toast.show('success', 'Auto-email note saved', 2500);
-  });
-
-  clearBtn.addEventListener('click', async () => {
-    textEl.value = '';
-    if (oneShotEl) oneShotEl.checked = false;
-    await settingsBridge.save('autoEmailNote', '');
-    await settingsBridge.save('autoEmailNoteOneShot', false);
-    showStatus('Note cleared — future auto-sends will not include a note', '');
-    toast.show('info', 'Auto-email note cleared', 2500);
-  });
-}
-
-// FEATURE (2026-07-16): "Schedulers – Config → Sync interval (minutes)" had
-// zero wiring anywhere -- no click handler, no IPC handler, no read path.
-// The main data sync (AAP/Uptake/Relay) ran on a hardcoded 5-minute timer
-// (DEFAULTS.SYNC_INTERVAL_MS in src/config/defaults.js) with no way to
-// change it from the UI. Now backed by settings:get-sync-interval /
-// settings:save-sync-interval (src/ipc/settings.js), which persist to the
-// settings store and immediately restart the live timer in src/app.js via
-// ctx.reloadSyncInterval -- no app restart required.
-// Note: the "Default scheduler endpoint" field in this same section maps
-// to no existing concept in the codebase and remains intentionally
-// unwired -- flagged with an in-UI hint rather than silently left broken.
-function _wireSchedulerConfig() {
-  var intervalEl = document.getElementById('sched-interval');
-  var saveBtn    = document.getElementById('save-sched');
-  var statusEl   = document.getElementById('sched-status');
-  if (!intervalEl || !saveBtn) return;
-
-  function showStatus(text, cls) {
-    if (!statusEl) return;
-    statusEl.textContent = text;
-    statusEl.className = 'sd-inline-status' + (cls ? ' ' + cls : '');
-    statusEl.style.color = cls === 'err' ? '#ef4444' : cls === 'warn' ? '#eab308' : cls === 'ok' ? '#22c55e' : '#8b949e';
-  }
-
-  settingsBridge.getSyncInterval().then((res) => {
-    var effective = (res && res.effectiveMinutes) || 5;
-    if (res && res.minutes) {
-      intervalEl.value = res.minutes;
-      showStatus('Currently syncing every ' + res.minutes + ' min (custom)', 'ok');
-    } else {
-      showStatus('Currently syncing every ' + effective + ' min (default)', '');
-    }
-  }).catch(() => {});
-
-  saveBtn.addEventListener('click', async () => {
-    var raw = (intervalEl.value || '').trim();
-    var minutes = parseInt(raw, 10);
-    if (!raw || isNaN(minutes)) { showStatus('⚠️ Enter a number of minutes first', 'warn'); return; }
-    try {
-      var result = await settingsBridge.saveSyncInterval(minutes);
-      if (result && result.ok) {
-        showStatus('✅ Saved — now syncing every ' + result.minutes + ' min (applied immediately)', 'ok');
-        toast.show('success', 'Sync interval updated to ' + result.minutes + ' min', 3000);
-      } else {
-        showStatus('❌ ' + ((result && result.error) || 'Save failed'), 'err');
-      }
-    } catch (e) {
-      showStatus('❌ ' + (e.message || 'Save failed'), 'err');
-      toast.show('error', 'Save failed: ' + e.message, 4000);
-    }
-  });
-}
+// _wireSchedulerConfig() removed (2026-08-14): the Schedulers-Config section
+// (sync interval) moved to the Scheduler view's ⚙ gear overlay. The dead
+// "Default scheduler endpoint" field was dropped. Sync interval is still
+// backed by settings:get/save-sync-interval, now driven from that overlay.
 
 function _wireSlack() {
   _checkSlack();
@@ -2214,140 +1849,9 @@ function _wireOperatorChannels() {
   });
 }
 
-// ── Daily Carrier Briefing ────────────────────────────────────────────────────
-function _wireCarrierBriefing() {
-  const enabledEl   = document.getElementById('cb-enabled');
-  const timeEl      = document.getElementById('cb-send-time');
-  const tzEl        = document.getElementById('cb-timezone');
-  const incDownEl   = document.getElementById('cb-inc-down');
-  const incFlagEl   = document.getElementById('cb-inc-flagged');
-  const incActiveEl = document.getElementById('cb-inc-active');
-  const incDomEl    = document.getElementById('cb-inc-domiciles');
-  const riskEl      = document.getElementById('cb-risk-threshold');
-  const tipEl       = document.getElementById('cb-tip-enabled');
-  const runInfoEl   = document.getElementById('cb-run-info');
-  const testBtn     = document.getElementById('cb-test-btn');
-  const runNowBtn   = document.getElementById('cb-runnow-btn');
-  const saveBtn     = document.getElementById('cb-save');
-  const statusEl    = document.getElementById('cb-status');
-  if (!enabledEl || !saveBtn) return;
-
-  let _saveTimer = null;
-
-  function showStatus(text, cls) {
-    if (!statusEl) return;
-    statusEl.textContent = text;
-    statusEl.className = 'sd-status ' + (cls || '');
-    statusEl.style.display = '';
-  }
-
-  function _collect() {
-    return {
-      enabled: !!enabledEl.checked,
-      sendTime: (timeEl.value || '').trim(),
-      timezone: (tzEl.value || '').trim(),
-      includeDown: !!incDownEl.checked,
-      includeFlagged: !!incFlagEl.checked,
-      includeActive: !!incActiveEl.checked,
-      includeDomiciles: !!incDomEl.checked,
-      riskThreshold: parseInt(riskEl.value, 10),
-      tipEnabled: !!tipEl.checked,
-    };
-  }
-
-  async function _save() {
-    try {
-      const saved = await slackBridge.saveBriefingConfig(_collect());
-      _apply(saved); // reflect normalized values back
-    } catch (e) {
-      showStatus('Save failed: ' + e.message, 'err');
-    }
-  }
-
-  // Debounced auto-save on any change.
-  function _autoSave() {
-    clearTimeout(_saveTimer);
-    _saveTimer = setTimeout(_save, 400);
-  }
-
-  function _apply(cfg) {
-    cfg = cfg || {};
-    enabledEl.checked   = !!cfg.enabled;
-    timeEl.value        = cfg.sendTime || '07:00';
-    tzEl.value          = cfg.timezone || 'America/New_York';
-    incDownEl.checked   = cfg.includeDown !== false;
-    incFlagEl.checked   = cfg.includeFlagged !== false;
-    incActiveEl.checked = cfg.includeActive !== false;
-    incDomEl.checked    = cfg.includeDomiciles !== false;
-    riskEl.value        = (cfg.riskThreshold != null ? cfg.riskThreshold : 80);
-    tipEl.checked       = cfg.tipEnabled !== false;
-  }
-
-  [enabledEl, incDownEl, incFlagEl, incActiveEl, incDomEl, tipEl].forEach((el) => {
-    if (el) el.addEventListener('change', _autoSave);
-  });
-  [timeEl, tzEl, riskEl].forEach((el) => {
-    if (el) el.addEventListener('input', _autoSave);
-  });
-
-  if (saveBtn) {
-    saveBtn.addEventListener('click', async () => {
-      await _save();
-      showStatus('\u2705 Saved', 'ok');
-    });
-  }
-
-  if (testBtn) {
-    testBtn.addEventListener('click', async () => {
-      testBtn.disabled = true;
-      const orig = testBtn.textContent;
-      testBtn.textContent = 'Sending...';
-      try {
-        await _save(); // persist current settings first so the test reflects them
-        const res = await slackBridge.sendBriefingTest({});
-        if (res && res.sent) showStatus('\uD83E\uDDEA Test sent to your Slack DM (' + (res.aiWritten ? 'AI-written' : 'fallback') + ') for ' + (res.operator || '') + '.', 'ok');
-        else showStatus('Test not sent: ' + ((res && res.reason) || 'unknown') + '.', 'err');
-      } catch (e) {
-        showStatus('Test failed: ' + e.message, 'err');
-      } finally {
-        testBtn.disabled = false;
-        testBtn.textContent = orig;
-      }
-    });
-  }
-
-  if (runNowBtn) {
-    runNowBtn.addEventListener('click', async () => {
-      if (!confirm('Post the briefing to ALL mapped carrier channels now? This sends live messages to carriers.')) return;
-      runNowBtn.disabled = true;
-      const orig = runNowBtn.textContent;
-      runNowBtn.textContent = 'Running...';
-      try {
-        await _save();
-        const res = await slackBridge.runBriefingNow();
-        const sent = (res && res.results || []).filter((r) => r.sent).length;
-        const total = (res && res.results || []).length;
-        showStatus('Posted ' + sent + '/' + total + ' carrier briefing(s).', sent ? 'ok' : 'err');
-      } catch (e) {
-        showStatus('Run failed: ' + e.message, 'err');
-      } finally {
-        runNowBtn.disabled = false;
-        runNowBtn.textContent = orig;
-      }
-    });
-  }
-
-  slackBridge.getBriefingConfig().then((cfg) => {
-    _apply(cfg);
-    if (runInfoEl) {
-      const tz = (cfg && cfg.timezone) || 'America/New_York';
-      const t  = (cfg && cfg.sendTime) || '07:00';
-      runInfoEl.textContent = (cfg && cfg.enabled)
-        ? ('Enabled — sends daily at ' + t + ' ' + tz + ' to each mapped carrier channel.')
-        : 'Disabled — enable to send a daily briefing.';
-    }
-  }).catch(() => { _apply({}); });
-}
+// _wireCarrierBriefing() + _populateCbTestOperators() removed (2026-08-14):
+// Daily Carrier Briefing moved to the Scheduler view header button overlay
+// (renderer/src/js/views/schedulers.js), same slackBridge briefing config.
 
 // ── SP: render operator accordion cards ──────────────────────────────────────
 
@@ -2469,81 +1973,156 @@ async function _spSaveEmail(opName, domCode, to, cc) {
 function _wireSP() { /* SP wiring handled in operators tab */ }
 
 function _wireAsana() {
-  document.getElementById('asana-save').addEventListener('click', async () => {
+  // Midway SSO one-time interactive sign-in (opens a visible Asana login window).
+  const connectBtn = document.getElementById('asana-midway-connect');
+  if (connectBtn) connectBtn.addEventListener('click', () => {
+    const el = document.getElementById('asana-user-status');
+    connectBtn.disabled = true;
+    const original = connectBtn.textContent;
+    connectBtn.textContent = 'Opening sign-in\u2026';
+    if (el) { el.textContent = '\u23F3 Complete sign-in in the Asana window\u2026'; el.className = 'sd-status'; }
+    asanaBridge.signIn().then((res) => {
+      if (res && res.ok) {
+        toast.show('success', 'Connected to Asana' + (res.user ? ' as ' + res.user : ''), 3000);
+        if (el) { el.textContent = '\u2705 Connected via Amazon SSO' + (res.user ? ' as ' + res.user : ''); el.className = 'sd-status ok'; }
+      } else {
+        toast.show('warn', (res && res.error) || 'Sign-in was not completed', 4000);
+        if (el) { el.textContent = '\u26A0\uFE0F ' + ((res && res.error) || 'Sign-in not completed'); el.className = 'sd-status warn'; }
+      }
+    }).catch((e) => {
+      toast.show('error', 'Asana sign-in failed: ' + e.message, 4000);
+    }).finally(() => {
+      connectBtn.disabled = false;
+      connectBtn.textContent = original;
+    });
+  });
+
+  // Midway SSO connection check (primary path — no token).
+  const midwayBtn = document.getElementById('asana-midway-check');
+  if (midwayBtn) midwayBtn.addEventListener('click', () => {
+    const el = document.getElementById('asana-midway-status');
+    midwayBtn.disabled = true;
+    const original = midwayBtn.textContent;
+    midwayBtn.textContent = 'Checking\u2026';
+    if (el) { el.textContent = '\u23F3 Checking via Amazon SSO\u2026'; el.className = 'sd-status'; }
+    asanaBridge.checkAuth().then((res) => {
+      const ok = !!(res && res.ok);
+      if (el) {
+        el.textContent = ok
+          ? ('\u2705 Connected via Amazon SSO as ' + (res.user || res.email || 'you'))
+          : ('\u26A0\uFE0F Not connected: ' + ((res && res.error) || 'session unavailable') + ' — run mwinit / check AEA');
+        el.className = 'sd-status ' + (ok ? 'ok' : 'warn');
+      }
+      if (ok) toast.show('success', 'Asana connected via SSO', 2500);
+    }).catch((e) => {
+      if (el) { el.textContent = '\u26A0\uFE0F Check failed: ' + e.message; el.className = 'sd-status warn'; }
+    }).finally(() => {
+      midwayBtn.disabled = false;
+      midwayBtn.textContent = original;
+    });
+  });
+
+  // Default workspace/project (shared config, no secret here).
+  const saveBtn = document.getElementById('asana-save');
+  if (saveBtn) saveBtn.addEventListener('click', async () => {
     await asanaBridge.saveConfig({
-      pat:       document.getElementById('asana-pat').value,
       workspace: document.getElementById('asana-workspace').value.trim(),
       project:   document.getElementById('asana-project').value.trim(),
     });
-    document.getElementById('asana-pat').value = '';
     const st = document.getElementById('asana-status');
     st.textContent = '✓ Saved'; st.style.display = 'block';
     setTimeout(() => { st.style.display = 'none'; }, 2000);
   });
-  document.getElementById('asana-verify').addEventListener('click', () => {
-    // BUG FIX (2026-07-16): identical defect to the Slack status check
-    // above -- checkAuth() resolves to an object ({ ok: bool, ... }), not a
-    // boolean, so this always showed "Token valid" once the promise
-    // resolved regardless of actual state.
+  const verifyBtn = document.getElementById('asana-verify');
+  if (verifyBtn) verifyBtn.addEventListener('click', () => {
+    // checkAuth() resolves to an object ({ ok: bool, ... }); verify the ACTIVE
+    // user's PAT actually works, not just that a token exists.
     asanaBridge.checkAuth().then((res) => {
       const ok = !!(res && res.ok);
       const st = document.getElementById('asana-status');
-      st.textContent = ok ? '✅ Token valid' : '❌ Token invalid';
+      st.textContent = ok ? ('✅ Valid — ' + (res.user || 'connected')) : '❌ Token invalid';
       st.style.display = 'block';
     }).catch(() => {});
   });
+
+  // ── Multi-user PAT manager ──────────────────────────────────────────────────
+  _refreshAsanaUsers();
+
+  const addBtn = document.getElementById('asana-user-add');
+  if (addBtn) addBtn.addEventListener('click', () => {
+    const alias = document.getElementById('asana-user-alias').value.trim();
+    const pat   = document.getElementById('asana-user-pat').value.trim();
+    if (!alias || !pat) { toast.show('warn', 'Enter both an alias and a PAT', 3000); return; }
+    addBtn.disabled = true;
+    const original = addBtn.textContent;
+    addBtn.textContent = 'Setting up\u2026';
+    asanaBridge.setupUser(alias, pat).then((res) => {
+      if (res && res.ok) {
+        document.getElementById('asana-user-pat').value = '';   // never keep the PAT in the field
+        document.getElementById('asana-user-alias').value = '';
+        toast.show('success', 'Added ' + (res.name || alias) + ' to Asana', 3000);
+      } else {
+        toast.show('warn', (res && res.error) || 'Setup failed', 4000);
+      }
+      _refreshAsanaUsers();
+    }).catch((e) => {
+      toast.show('error', 'Setup failed: ' + e.message, 4000);
+    }).finally(() => {
+      addBtn.disabled = false;
+      addBtn.textContent = original;
+    });
+  });
+}
+
+// Render the configured-user list + active badge. Never receives a PAT value —
+// listUsers() returns only { alias, name, email, active }.
+function _refreshAsanaUsers() {
+  if (!window.asana || !window.asana.listUsers) return;
+  asanaBridge.listUsers().then((res) => {
+    const badge = document.getElementById('asana-user-status');
+    const list  = document.getElementById('asana-user-list');
+    const users = (res && res.users) || [];
+    if (badge) {
+      if (!users.length) {
+        badge.textContent = '\u26A0\uFE0F No Asana users configured';
+        badge.className = 'sd-status warn';
+      } else {
+        const active = users.find((u) => u.active);
+        badge.textContent = active
+          ? ('\u2705 Active: ' + (active.name || active.alias))
+          : ('\u2139\uFE0F ' + users.length + ' user(s) configured — none active');
+        badge.className = 'sd-status ' + (active ? 'ok' : 'warn');
+      }
+    }
+    if (list) {
+      if (!users.length) { list.innerHTML = '<span style="color:var(--mut,#8794a6)">None yet.</span>'; return; }
+      list.innerHTML = users.map((u) => {
+        const name = u.name || u.alias;
+        const act  = u.active ? ' <strong style="color:var(--ok,#1b7f3b)">(active)</strong>' : '';
+        const sw   = u.active ? '' : '<button class="sd-btn secondary" data-asana-switch="' + u.alias + '" style="padding:2px 8px;font-size:11px">Switch</button>';
+        const rm   = '<button class="sd-btn secondary" data-asana-remove="' + u.alias + '" style="padding:2px 8px;font-size:11px">Remove</button>';
+        return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">'
+          + '<span style="flex:1">' + name + act + ' <span style="color:var(--mut,#8794a6)">(' + u.alias + ')</span></span>'
+          + sw + rm + '</div>';
+      }).join('');
+      list.querySelectorAll('[data-asana-switch]').forEach((b) => b.addEventListener('click', () => {
+        asanaBridge.switchUser(b.getAttribute('data-asana-switch'))
+          .then(() => { toast.show('info', 'Switched active user', 2000); _refreshAsanaUsers(); })
+          .catch((e) => toast.show('error', 'Switch failed: ' + e.message, 3000));
+      }));
+      list.querySelectorAll('[data-asana-remove]').forEach((b) => b.addEventListener('click', () => {
+        asanaBridge.removeUser(b.getAttribute('data-asana-remove'))
+          .then(() => { toast.show('info', 'Removed user', 2000); _refreshAsanaUsers(); })
+          .catch((e) => toast.show('error', 'Remove failed: ' + e.message, 3000));
+      }));
+    }
+  }).catch(() => {});
 }
 
 // ── Section: Fleet Ops Companion — removed (feature discontinued) ────────────
 
-// ── Section: Notifications ───────────────────────────────────────────────────
-function _wireNotifications() {
-  // BUG-AWARE (2026-07-22): settings:save fully REPLACES whatever value
-  // is stored under a key (confirmed in src/ipc/settings.js -- `s[key] =
-  // value`, not a merge) -- so every save here must include ALL fields
-  // under 'notifications', not just the one that changed, or the other
-  // toggles would silently get wiped back to undefined.
-  function _saveAll() {
-    const soundsEnabledEl = document.getElementById('notif-sounds-enabled');
-    const volumeEl = document.getElementById('notif-sounds-volume');
-    const volume = volumeEl ? (parseInt(volumeEl.value, 10) || 0) / 100 : 0.5;
-    const soundsEnabled = soundsEnabledEl ? !!soundsEnabledEl.checked : true;
-    settingsBridge.save('notifications', {
-      authFail:     document.getElementById('notif-auth-fail').checked,
-      syncOk:       document.getElementById('notif-sync-ok').checked,
-      syncErr:      document.getElementById('notif-sync-err').checked,
-      soundsEnabled,
-      soundVolume:  volume,
-    }).catch(() => {});
-    // FEATURE (2026-07-22): live-update the already-running notif sound
-    // module immediately -- no restart needed to see/hear the change.
-    bus.emit('notif-sounds:config', { enabled: soundsEnabled, volume });
-  }
-
-  ['notif-auth-fail', 'notif-sync-ok', 'notif-sync-err', 'notif-sounds-enabled'].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener('change', _saveAll);
-  });
-
-  const volumeEl = document.getElementById('notif-sounds-volume');
-  if (volumeEl) volumeEl.addEventListener('input', _saveAll);
-
-  const testBtn = document.getElementById('notif-sounds-test');
-  if (testBtn) testBtn.addEventListener('click', () => {
-    // Briefly force-enable playback for the test regardless of the
-    // current checkbox state, using whatever volume is currently set,
-    // so "Test sounds" always audibly demonstrates all 4 types even if
-    // the user is mid-way through deciding whether to enable them.
-    const volumeEl2 = document.getElementById('notif-sounds-volume');
-    const volume = volumeEl2 ? (parseInt(volumeEl2.value, 10) || 0) / 100 : 0.5;
-    const prevConfig = notifSounds.getConfig();
-    notifSounds.configure({ enabled: true, volume });
-    ['success', 'error', 'alert', 'message'].forEach((type, i) => {
-      setTimeout(() => notifSounds.play(type), i * 700);
-    });
-    setTimeout(() => notifSounds.configure(prevConfig), 4 * 700 + 300);
-  });
-}
+// _wireNotifications() removed (2026-08-14): Notifications settings moved to
+// the 🔔 dropdown ⚙ gear (notif-dropdown.js). Same settings.notifications keys.
 
 
 // ── Section Accordion (Integrations tab) ─────────────────────────────────────
@@ -2577,16 +2156,43 @@ function _wireSectionAccordion(paneId) {
   });
 }
 
-// ── Section: Accounts (S11) ──────────────────────────────────────────────────
-function _wireAccounts() {
+// ── Section: Accounts — ONE unified editable list ────────────────────────────
+// Every login (seeded vendor portals + any site you add) is one editable card:
+// name, url, username, password (+eye reveal), 🔗 open, 🗑 remove, and — for a
+// row whose URL matches a known vendor portal — a "Test login" button + a 🔐
+// badge. The list persists to settings.accounts (plaintext, so the eye-reveal
+// works for everything). CRITICAL: a vendor row ALSO mirrors its user/pass into
+// the encrypted keychain (vendor.<id>.username/password) on save, so the
+// background auto-login (getForHostname) keeps working byte-for-byte unchanged.
+// Vendor ids the user has explicitly deleted from the Accounts list. Persisted
+// in settings (accountsRemovedVendors) so a deleted vendor stays gone instead
+// of being re-seeded every time Settings opens. Re-adding its URL via + Add
+// un-removes it. Loaded in _wireAccounts.
+let _removedVendors = [];
 
+function _wireAccounts() {
   settingsBridge.getAll().then((all) => {
-    const rows = (all && Array.isArray(all.accounts)) ? all.accounts : [];
-    if (rows.length > 0) {
-      const empty = document.getElementById('acct-empty');
-      if (empty) empty.style.display = 'none';
-      rows.forEach((r) => _acctAddRow(r));
-    }
+    const saved = (all && Array.isArray(all.accounts)) ? all.accounts : [];
+    _removedVendors = (all && Array.isArray(all.accountsRemovedVendors)) ? all.accountsRemovedVendors.slice() : [];
+
+    // Seed the known vendor portals so they're always in the one list. A saved
+    // row already covering a vendor host wins (keeps the user's edits); any
+    // vendor not yet present is added, prefilled with its known name/url + the
+    // keychain username mirror (<id>_user). Passwords are never prefilled (the
+    // keychain copy isn't retrievable) — the plaintext copy fills in once saved.
+    // A vendor the user has explicitly DELETED is NOT re-seeded.
+    const rows = saved.slice();
+    _VENDORS.forEach((v) => {
+      if (_removedVendors.indexOf(v.id) !== -1) return; // user deleted this one — stay gone
+      const already = rows.some((r) => _vendorForUrl(r.url || r.name) && _vendorForUrl(r.url || r.name).id === v.id);
+      if (!already) {
+        rows.push({ name: v.name, url: 'https://' + v.host + '/', user: (all && all[`${v.id}_user`]) || '', pass: '' });
+      }
+    });
+
+    const empty = document.getElementById('acct-empty');
+    if (rows.length) { if (empty) empty.style.display = 'none'; rows.forEach((r) => _acctAddRow(r)); }
+    else if (empty) empty.style.display = 'flex';
   }).catch(() => {});
 
   document.getElementById('acct-add').addEventListener('click', () => {
@@ -2597,7 +2203,6 @@ function _wireAccounts() {
       if (inp) inp.focus();
     }
   });
-
 }
 
 function _acctAddRow(prefill = {}) {
@@ -2605,51 +2210,67 @@ function _acctAddRow(prefill = {}) {
   if (empty) empty.style.display = 'none';
 
   const list = document.getElementById('acct-list');
-  const id   = 'acct-' + Date.now();
+  const id   = 'acct-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
   const row  = document.createElement('div');
-  row.className = 'acct-row';
+  row.className = 'acct-card acct-row';
   row.id = id;
 
   const url  = prefill.url  || '';
   const name = prefill.name || '';
   const user = prefill.user || '';
   const pass = prefill.pass || '';
+  const vendor = _vendorForUrl(url || name);
 
-  row.innerHTML = `
-    <div class="acct-cell acct-cell-site">
-      <input class="acct-input acct-url"  type="url"  placeholder="https://..."     value="${_esc(url)}"  title="Site URL"/>
-      <input class="acct-input acct-name" type="text" placeholder="Site name"       value="${_esc(name)}" title="Display name"/>
-      <a class="acct-link" href="${_esc(url) || '#'}" title="Open site" style="${url ? '' : 'display:none'}" target="_blank">🔗</a>
-    </div>
-    <div class="acct-cell acct-cell-user">
-      <input class="acct-input" type="text" placeholder="username / email" value="${_esc(user)}"/>
-    </div>
-    <div class="acct-cell acct-cell-pass">
-      <input class="acct-input acct-pass" type="password" placeholder="password" value="${_esc(pass)}"/>
-      <button class="acct-eye" type="button" title="Show/hide">👁️</button>
-    </div>
-    <div class="acct-cell acct-cell-actions">
-      <span class="acct-save-badge" id="badge-${id}"></span>
-      <button class="acct-del" type="button" title="Remove">🗑</button>
-    </div>`;
+  const testBtn = vendor
+    ? '<button class="sd-btn secondary acct-test" type="button">' + (vendor.sso ? 'Sign in' : 'Test login') + '</button>'
+    : '';
+  const vendorBadge = vendor ? '<span class="acct-vendor-tag" title="Auto-login portal — syncs to secure keychain">🔐 ' + _esc(vendor.name) + '</span>' : '';
 
+  row.innerHTML =
+    '<div class="acct-card-row1">' +
+      '<input class="acct-input acct-name" type="text" placeholder="Account name" value="' + _esc(name) + '" title="Display name"/>' +
+      vendorBadge +
+      '<a class="acct-link" href="' + (_esc(url) || '#') + '" title="Open site" style="' + (url ? '' : 'display:none') + '" target="_blank">🔗</a>' +
+      '<span class="acct-save-badge" id="badge-' + id + '"></span>' +
+      '<button class="acct-del" type="button" title="Remove">🗑</button>' +
+    '</div>' +
+    '<input class="acct-input acct-url" type="url" placeholder="https://..." value="' + _esc(url) + '" title="Site URL"/>' +
+    '<div class="acct-card-row2">' +
+      '<input class="acct-input acct-user" type="text" placeholder="username / email" value="' + _esc(user) + '"/>' +
+      '<span class="acct-pass-wrap' + (vendor && vendor.sso ? ' acct-hide' : '') + '">' +
+        '<input class="acct-input acct-pass" type="password" placeholder="password" value="' + _esc(pass) + '"/>' +
+        '<button class="acct-eye" type="button" title="Show/hide">👁️</button>' +
+      '</span>' +
+    '</div>' +
+    (testBtn ? '<div class="acct-card-actions">' + testBtn + '<span class="acct-test-status settings__status" style="display:none"></span></div>' : '');
+
+  // URL change: update the open-link + re-detect vendor (so pasting a vendor
+  // URL turns a plain row into a recognized portal row on next render).
   row.querySelector('.acct-url').addEventListener('input', function () {
     const link = row.querySelector('.acct-link');
     const v = this.value.trim();
-    link.href = v || '#';
-    link.style.display = v ? '' : 'none';
+    if (link) { link.href = v || '#'; link.style.display = v ? '' : 'none'; }
     _acctAutoSave(row);
   });
-  row.querySelectorAll('.acct-input.acct-name, .acct-cell-user .acct-input').forEach((inp) => {
-    inp.addEventListener('input', () => _acctAutoSave(row));
-  });
+  row.querySelector('.acct-name').addEventListener('input', () => _acctAutoSave(row));
+  row.querySelector('.acct-user').addEventListener('input', () => _acctAutoSave(row));
   row.querySelector('.acct-pass').addEventListener('input', () => _acctAutoSave(row));
   row.querySelector('.acct-eye').addEventListener('click', function () {
     const inp = row.querySelector('.acct-pass');
     inp.type = inp.type === 'password' ? 'text' : 'password';
     this.textContent = inp.type === 'password' ? '👁️' : '🙈';
   });
-  row.querySelector('.acct-del').addEventListener('click', () => {
+  row.querySelector('.acct-del').addEventListener('click', async () => {
+    const vend = _vendorForUrl((row.querySelector('.acct-url')?.value || '') || (row.querySelector('.acct-name')?.value || ''));
+    if (vend) {
+      // Remember this vendor as removed so it is NOT re-seeded next open, and
+      // (for non-sso) clear its keychain keys so auto-login drops the stale creds.
+      if (_removedVendors.indexOf(vend.id) === -1) _removedVendors.push(vend.id);
+      try { await settingsBridge.save('accountsRemovedVendors', _removedVendors); } catch (_) {}
+      if (!vend.sso) {
+        try { await credsBridge.delete('vendor.' + vend.id + '.username'); await credsBridge.delete('vendor.' + vend.id + '.password'); await settingsBridge.save(vend.id + '_user', ''); } catch (_) {}
+      }
+    }
     row.remove();
     if (!document.querySelectorAll('#acct-list .acct-row').length) {
       const e = document.getElementById('acct-empty');
@@ -2658,16 +2279,55 @@ function _acctAddRow(prefill = {}) {
     _acctPersist();
   });
 
+  // Test login (vendor rows only) — opens the real portal + runs the same
+  // auto-login pass the scraper uses. Saves first so it tests current creds.
+  const tb = row.querySelector('.acct-test');
+  if (tb && vendor) tb.addEventListener('click', async () => {
+    const st = row.querySelector('.acct-test-status');
+    if (st) { st.textContent = '⏳ Opening portal…'; st.style.display = 'inline'; st.className = 'acct-test-status settings__status settings__status--loading'; }
+    try {
+      await _acctMirrorVendor(row, vendor);               // ensure latest creds are in the keychain
+      const r = await credsBridge.testLogin(vendor.id);
+      if (st) {
+        if (r && r.ok && r.attempted) { st.textContent = '✅ Attempted — check the window'; st.className = 'acct-test-status settings__status settings__status--ok'; }
+        else if (r && r.closedByUser) { st.textContent = 'Window closed'; st.className = 'acct-test-status settings__status'; }
+        else { st.textContent = vendor.sso ? '⚠️ Requires Midway SSO' : '⚠️ Save a username + password first'; st.className = 'acct-test-status settings__status settings__status--loading'; }
+      }
+    } catch (e) {
+      if (st) { st.textContent = '❌ ' + e.message; st.className = 'acct-test-status settings__status settings__status--err'; }
+    }
+  });
+
   list.appendChild(row);
+}
+
+// Mirror a vendor row's user/pass into the encrypted keychain + username mirror,
+// so the background auto-login (getForHostname) uses the current credentials.
+async function _acctMirrorVendor(row, vendor) {
+  if (!vendor || vendor.sso) return;
+  const user = (row.querySelector('.acct-user')?.value || '').trim();
+  const pass = (row.querySelector('.acct-pass')?.value || '');
+  try {
+    if (user) { await credsBridge.set('vendor.' + vendor.id + '.username', user); await settingsBridge.save(vendor.id + '_user', user); }
+    if (pass) { await credsBridge.set('vendor.' + vendor.id + '.password', pass); }
+  } catch (_) {}
 }
 
 const _acctTimers = {};
 function _acctAutoSave(row) {
   const badge = row.querySelector('.acct-save-badge');
-  if (badge) { badge.textContent = 'saving...'; badge.className = 'acct-save-badge saving'; }
+  if (badge) { badge.textContent = 'saving…'; badge.className = 'acct-save-badge saving'; }
   clearTimeout(_acctTimers[row.id]);
-  _acctTimers[row.id] = setTimeout(() => {
+  _acctTimers[row.id] = setTimeout(async () => {
     _acctPersist();
+    // If this row is a known vendor, keep the keychain copy in sync too, and
+    // un-mark it as "removed" (the user re-added it by entering its URL).
+    const vend = _vendorForUrl((row.querySelector('.acct-url')?.value || '') || (row.querySelector('.acct-name')?.value || ''));
+    if (vend) {
+      const ri = _removedVendors.indexOf(vend.id);
+      if (ri !== -1) { _removedVendors.splice(ri, 1); try { await settingsBridge.save('accountsRemovedVendors', _removedVendors); } catch (_) {} }
+      if (!vend.sso) { await _acctMirrorVendor(row, vend); }
+    }
     if (badge) {
       badge.textContent = '✅'; badge.className = 'acct-save-badge saved';
       setTimeout(() => { badge.textContent = ''; badge.className = 'acct-save-badge'; }, 2000);
@@ -2679,12 +2339,8 @@ function _acctPersist() {
   const rows = [...document.querySelectorAll('#acct-list .acct-row')].map((r) => ({
     name: (r.querySelector('.acct-name')?.value || '').trim(),
     url:  (r.querySelector('.acct-url')?.value  || '').trim(),
-    user: (r.querySelector('.acct-cell-user .acct-input')?.value || '').trim(),
-    // BUG FIX (2026-07-23): password was never included here, so it was
-    // never persisted -- every reload silently wiped it, which is why the
-    // eye/show-password toggle appeared "broken" (there was nothing saved
-    // to reveal). Not trimmed: leading/trailing spaces can be intentional
-    // in a password.
+    user: (r.querySelector('.acct-user')?.value || '').trim(),
+    // Password NOT trimmed: leading/trailing spaces can be intentional.
     pass: (r.querySelector('.acct-pass')?.value || ''),
   })).filter((r) => r.name || r.url || r.user);
   settingsBridge.save('accounts', rows).catch(() => {});
@@ -2786,6 +2442,139 @@ function _syncSwatchesToTheme(theme) {
   });
 }
 
+// ── Section: Auth Health (Phase E) ───────────────────────────────────────────
+// Renders the single Midway/AAP self-healing supervisor's live state. Health is
+// defined by a VERIFIED authenticated call to the real AAP target — not VPN,
+// not cookie existence. The panel is read-only except for three actions:
+// Refresh (re-read snapshot), Retry now (silent convergence), Run mwinit
+// (interactive escalation).
+function _fmtMin(m) {
+  if (typeof m !== 'number' || !isFinite(m)) return '—';
+  if (m <= 0) return 'expired';
+  if (m < 60) return Math.round(m) + ' min';
+  const h = Math.floor(m / 60), r = Math.round(m % 60);
+  return r ? `${h}h ${r}m` : `${h}h`;
+}
+
+function _authHealthStateClass(state) {
+  switch (state) {
+    case 'HEALTHY':          return 'ok';
+    case 'DEGRADED':
+    case 'RECOVERING':
+    case 'COOLDOWN':
+    case 'UNKNOWN':          return 'warn';
+    case 'WAITING_FOR_USER':
+    case 'OFFLINE':
+    case 'FAILED':           return 'err';
+    default:                 return 'warn';
+  }
+}
+
+function _authHealthLabel(state) {
+  const map = {
+    HEALTHY:          '\u2705 Healthy — AAP target verified',
+    DEGRADED:         '\u26A0\uFE0F Degraded — auto-recovery armed',
+    RECOVERING:       '\u231B Recovering…',
+    COOLDOWN:         '\u23F3 Cooldown — waiting before next retry',
+    WAITING_FOR_USER: '\uD83D\uDD11 Waiting for you — run mwinit (PIN + YubiKey)',
+    OFFLINE:          '\uD83D\uDCF6 Offline — will re-verify on reconnect',
+    FAILED:           '\u274C Failed — manual mwinit required',
+    UNKNOWN:          '\u2139\uFE0F Not checked yet',
+  };
+  return map[state] || ('\u2139\uFE0F ' + (state || 'Unknown'));
+}
+
+function _renderAuthHealth(res) {
+  const stateEl = document.getElementById('auth-health-state');
+  const gridEl  = document.getElementById('auth-health-grid');
+  const histEl  = document.getElementById('auth-health-history');
+  if (!stateEl || !gridEl) return;
+
+  if (!res || !res.ok) {
+    stateEl.className = 'sd-status err';
+    stateEl.textContent = '\u274C Auth supervisor unavailable' + (res && res.error ? ' (' + res.error + ')' : '');
+    gridEl.innerHTML = '';
+    if (histEl) histEl.innerHTML = '';
+    return;
+  }
+
+  const state = res.state || (res.snapshot && res.snapshot.state) || 'UNKNOWN';
+  stateEl.className = 'sd-status ' + _authHealthStateClass(state);
+  stateEl.textContent = _authHealthLabel(state);
+
+  const s = res.snapshot || {};
+  const smoke = s.aapApiSmokeTest || null;
+  const verified = !!(smoke && smoke.ok);
+  const rows = [
+    ['AAP target verified', verified ? 'yes' : 'no' + (smoke && smoke.class ? ' (' + smoke.class + ')' : '')],
+    ['Internet', s.internet && s.internet.online ? 'online' : 'offline'],
+    ['VPN', (s.vpn && s.vpn.connected === true ? 'connected' : s.vpn && s.vpn.connected === false ? 'not connected' : 'unknown') + ' — not required'],
+    ['Midway session', s.diskSession ? _fmtMin(s.diskSession.expiresInMin) + ' left' : '—'],
+    ['AEA cookie', s.diskAea ? _fmtMin(s.diskAea.expiresInMin) + ' left' : '—'],
+    ['Next auto-retry', s.nextRetryAt ? new Date(s.nextRetryAt).toLocaleTimeString() : '—'],
+    ['Checked', s.at ? new Date(s.at).toLocaleTimeString() : '—'],
+  ];
+  gridEl.innerHTML = rows.map(([k, v]) =>
+    `<div style="opacity:.75">${k}</div><div><b>${v}</b></div>`
+  ).join('');
+
+  if (histEl) {
+    const hist = Array.isArray(res.history) ? res.history.slice(-5).reverse() : [];
+    if (!hist.length) { histEl.innerHTML = ''; }
+    else {
+      histEl.innerHTML = '<div style="opacity:.75;margin-bottom:4px">Recent recovery attempts</div>' +
+        hist.map((h) => {
+          const when = h.at ? new Date(h.at).toLocaleTimeString() : '';
+          const outcome = h.result || (h.recovered ? 'recovered' : 'failed');
+          const note = h.note || h.reason || '';
+          return `<div style="font-size:11px;opacity:.85">• ${when} — ${outcome}${note ? ' (' + note + ')' : ''}</div>`;
+        }).join('');
+    }
+  }
+}
+
+function _loadAuthHealth() {
+  if (!authBridge.healthGet) return;
+  const stateEl = document.getElementById('auth-health-state');
+  if (stateEl) { stateEl.className = 'sd-status warn'; stateEl.textContent = '\u231B Checking…'; }
+  authBridge.healthGet().then(_renderAuthHealth).catch((e) => {
+    _renderAuthHealth({ ok: false, error: e && e.message });
+  });
+}
+
+function _wireAuthHealth() {
+  const refreshBtn = document.getElementById('auth-health-refresh');
+  const retryBtn   = document.getElementById('auth-health-retry');
+  const mwinitBtn  = document.getElementById('auth-health-mwinit');
+  if (!refreshBtn) return; // section not present
+
+  refreshBtn.addEventListener('click', _loadAuthHealth);
+
+  if (retryBtn) retryBtn.addEventListener('click', () => {
+    if (!authBridge.healthRetry) return;
+    retryBtn.disabled = true;
+    const orig = retryBtn.textContent;
+    retryBtn.textContent = 'Retrying…';
+    authBridge.healthRetry().then((r) => _renderAuthHealth(r && r.snapshot ? { ok: true, state: r.state, snapshot: r.snapshot, history: [] } : null) || _loadAuthHealth())
+      .catch(() => {})
+      .finally(() => { retryBtn.disabled = false; retryBtn.textContent = orig; _loadAuthHealth(); });
+  });
+
+  if (mwinitBtn) mwinitBtn.addEventListener('click', () => {
+    if (!authBridge.healthRunMwinit) return;
+    mwinitBtn.disabled = true;
+    const orig = mwinitBtn.textContent;
+    mwinitBtn.textContent = 'Running mwinit…';
+    authBridge.healthRunMwinit().catch(() => {})
+      .finally(() => { mwinitBtn.disabled = false; mwinitBtn.textContent = orig; _loadAuthHealth(); });
+  });
+
+  // Live update when the supervisor pushes an mwinit status change.
+  try { bus.on('auth:mwinit-status', () => _loadAuthHealth()); } catch (_) {}
+
+  _loadAuthHealth();
+}
+
 function _wireUITab() {
   // ── Template cards ──────────────────────────────────────────────────────
   _drawer.querySelectorAll('.sd-template').forEach((card) => {
@@ -2869,6 +2658,19 @@ function _wireUITab() {
         inter:  '"Inter",sans-serif',
       };
       document.documentElement.style.setProperty('--font', fontMap[btn.dataset.font] || fontMap.system);
+      _saveUI();
+    });
+  });
+
+  // ── Font size chips ─────────────────────────────────────────────────────
+  // The app's UI is px-based (not rem), so a root font-size change wouldn't
+  // cascade. Scale the whole interface with body zoom instead — the same thing
+  // browser zoom does — which scales text AND layout proportionally.
+  _drawer.querySelectorAll('.sd-fontsize-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      _drawer.querySelectorAll('.sd-fontsize-btn').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      _applyFontSize(btn.dataset.fontsize);
       _saveUI();
     });
   });
@@ -3070,6 +2872,10 @@ function _saveUI() {
     const fontBtn = _drawer.querySelector('[data-font].active');
     const font = fontBtn ? fontBtn.dataset.font : 'system';
 
+    // Active font size
+    const fontSizeBtn = _drawer.querySelector('[data-fontsize].active');
+    const fontSize = fontSizeBtn ? fontSizeBtn.dataset.fontsize : 'normal';
+
     // Chat floater size
     const chatSizeBtn = _drawer.querySelector('[data-chat-size].active');
     const chatSize = chatSizeBtn ? chatSizeBtn.dataset.chatSize : 'normal';
@@ -3078,7 +2884,7 @@ function _saveUI() {
     const compact = document.getElementById('toggle-compact');
     const compactRows = compact ? compact.checked : false;
 
-    settingsBridge.save('ui_prefs', { theme, swatches, sliders, font, compactRows, chatSize })
+    settingsBridge.save('ui_prefs', { theme, swatches, sliders, font, fontSize, compactRows, chatSize })
       .catch(() => {});
   }, 400);
 }
@@ -3149,6 +2955,15 @@ function _applyUI(prefs) {
     document.documentElement.style.setProperty('--font', fontMap[prefs.font] || fontMap.system);
   }
 
+  // Font size
+  {
+    const size = prefs.fontSize || 'normal';
+    _drawer.querySelectorAll('.sd-fontsize-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.fontsize === size);
+    });
+    _applyFontSize(size);
+  }
+
   // Compact toggle
   if (prefs.compactRows != null) {
     const compact = document.getElementById('toggle-compact');
@@ -3175,10 +2990,8 @@ function _populate() {
     // UI prefs (theme, colors, sliders, font)
     if (all.ui_prefs) _applyUI(all.ui_prefs);
 
-    if (all.domiciles) {
-      const el = document.getElementById('settings-domiciles');
-      if (el) el.value = Array.isArray(all.domiciles) ? all.domiciles.join('\n') : all.domiciles;
-    }
+    // Domiciles populate removed (2026-08-14): editor moved to the 👤 User
+    // Profile popover, which loads from settings.getDomiciles() itself.
     if (all.orcha) {
       const o = all.orcha;
       const mode = document.getElementById('orcha-mode');
@@ -3188,36 +3001,14 @@ function _populate() {
       if (host && o.host) host.value = o.host;
       if (port && o.port) port.value = o.port;
     }
-    if (all.email) {
-      const e = all.email;
-      ['host','port','from','user'].forEach((f) => {
-        const el = document.getElementById(`email-${f}`);
-        if (el && e[f] != null) el.value = e[f];
-      });
-      // Restore saved send method
-      if (e.emailMethod) {
-        const mEl = document.getElementById('email-method');
-        if (mEl) mEl.value = e.emailMethod;
-      }
-    }
+    // Email SMTP populate removed (2026-08-14): OWA-only, section deleted.
     if (all.asana) {
       const a = all.asana;
       if (a.workspace) { const el = document.getElementById('asana-workspace'); if (el) el.value = a.workspace; }
       if (a.project)   { const el = document.getElementById('asana-project');   if (el) el.value = a.project;   }
     }
-    if (all.notifications) {
-      const n = all.notifications;
-      const af = document.getElementById('notif-auth-fail');
-      const so = document.getElementById('notif-sync-ok');
-      const se = document.getElementById('notif-sync-err');
-      const sndEn = document.getElementById('notif-sounds-enabled');
-      const sndVol = document.getElementById('notif-sounds-volume');
-      if (af && n.authFail != null) af.checked = n.authFail;
-      if (so && n.syncOk   != null) so.checked = n.syncOk;
-      if (se && n.syncErr  != null) se.checked = n.syncErr;
-      if (sndEn) sndEn.checked = n.soundsEnabled !== false; // default ON if never set
-      if (sndVol && typeof n.soundVolume === 'number') sndVol.value = Math.round(n.soundVolume * 100);
-    }
+    // Notifications populate removed (2026-08-14): the Notifications UI moved
+    // to the 🔔 dropdown ⚙ gear, which reads settings.notifications itself.
   }).catch(() => {});
 }
 
@@ -3272,6 +3063,18 @@ export function init() {
   document.getElementById('sd-close-btn').addEventListener('click', _close);
   _overlay.addEventListener('click', _close);
 
+  // AI Config overlay (opened from the toolbar AI status pill #tb-ai-status
+  // via the ui:ai-config-toggle bus event). Shares all #sect-ai-config IDs,
+  // so _wireAIConfig()/_loadAIConfig() operate on it unchanged.
+  const _aiOv = document.getElementById('ai-config-overlay');
+  const _aiClose = document.getElementById('ai-config-close');
+  if (_aiClose) _aiClose.addEventListener('click', _closeAIConfigOverlay);
+  if (_aiOv) _aiOv.addEventListener('click', (e) => { if (e.target === _aiOv) _closeAIConfigOverlay(); });
+  bus.on('ui:ai-config-toggle', () => {
+    if (_aiOv && _aiOv.classList.contains('open')) _closeAIConfigOverlay();
+    else _openAIConfig();
+  });
+
   // Wire tabs
   _wireTabSwitching();
 
@@ -3288,177 +3091,25 @@ export function init() {
 
   // Wire all integration sections
   
-  // ── Partner Forms (top-level, always registers) ─────────────────────────
-  (function _wireFormsTopLevel() {
-    const sheetInput = document.getElementById('forms-sheet-id');
-    const pollSelect = document.getElementById('forms-poll-interval');
-    const statusEl = document.getElementById('forms-status');
-    const savedCfg = JSON.parse(localStorage.getItem('fleet_forms_config') || '{}');
-    if (sheetInput && savedCfg.sheetId) sheetInput.value = savedCfg.sheetId;
-    if (pollSelect && savedCfg.pollInterval) pollSelect.value = savedCfg.pollInterval;
+  // Partner Work Request Forms config moved (2026-08-14) to the Incoming Work
+  // Requests overlay (📋 toolbar) ⚙ gear. localStorage fleet_forms_config +
+  // config:forms-changed are unchanged; draft-inbox.js owns the wiring now.
 
-    const saveBtn = document.getElementById('forms-save');
-    if (saveBtn) saveBtn.addEventListener('click', () => {
-      const cfg = { sheetId: (sheetInput.value || '').trim(), pollInterval: parseInt(pollSelect.value || '60', 10) };
-      localStorage.setItem('fleet_forms_config', JSON.stringify(cfg));
-      if (statusEl) { statusEl.textContent = '\u2705 Saved'; statusEl.style.display = ''; statusEl.className = 'sd-status ok'; }
-    });
+  // SP Workbook Discover/config wiring moved (2026-08-14) to the Scheduler
+  // view's SharePoint Push gear overlay (renderer/src/js/views/schedulers.js).
 
-    const pollBtn = document.getElementById('forms-poll-now');
-    if (pollBtn) pollBtn.addEventListener('click', async () => {
-      let rawId = (sheetInput.value || '').trim();
-      if (!rawId) { if (statusEl) { statusEl.textContent = '\u26a0 Enter a Sheet ID first'; statusEl.style.display = ''; statusEl.className = 'sd-status warn'; } return; }
-      if (statusEl) { statusEl.textContent = '\u{1F504} Polling...'; statusEl.style.display = ''; statusEl.className = 'sd-status'; }
-      let gid = '0';
-      const gidMatch = rawId.match(/gid=(\d+)/);
-      if (gidMatch) gid = gidMatch[1];
-      let sheetId = rawId.replace(/\/edit.*$/, '').replace(/[?#].*$/, '').replace(/\/+$/, '').trim();
-      if (sheetId.includes('spreadsheets/d/')) sheetId = sheetId.split('spreadsheets/d/')[1].split('/')[0];
-      if (sheetId.includes('/')) sheetId = sheetId.split('/')[0];
-      const csvUrl = 'https://docs.google.com/spreadsheets/d/' + sheetId + '/export?format=tsv';
-      try {
-        const resp = await fetch(csvUrl);
-        if (!resp.ok) { statusEl.textContent = '\u274c HTTP ' + resp.status; statusEl.className = 'sd-status err'; statusEl.style.display = ''; return; }
-        const csv = await resp.text();
-        const rows = csv.split('\n').filter(r => r.trim());
-        statusEl.textContent = '\u2705 Connected! ' + (rows.length - 1) + ' row(s) found';
-        statusEl.className = 'sd-status ok'; statusEl.style.display = '';
-        const result = await window.partner.pollForms({ csvText: csv });
-        if (result && result.newCount > 0) { statusEl.textContent = '\u2705 ' + result.newCount + ' new request(s) — AI classifying...'; }
-      } catch(e) { statusEl.textContent = '\u274c ' + e.message; statusEl.className = 'sd-status err'; statusEl.style.display = ''; }
-    });
-  })();
-
-  // ── SP Workbook Discover ────────────────────────────────────────────────
-  document.getElementById('sp-wb-discover').addEventListener('click', async () => {
-    console.log('[SP Discover] Button clicked');
-    const urlInput = document.getElementById('sp-wb-url');
-    const url = (urlInput.value || '').trim();
-    console.log('[SP Discover] URL:', url);
-    console.log('[SP Discover] spBridge:', typeof spBridge.discoverSheets);
-    if (!url) { toast.show('warn', 'Paste a SharePoint Excel URL first', 2500); return; }
-    
-    const btn = document.getElementById('sp-wb-discover');
-    const resultsDiv = document.getElementById('sp-wb-results');
-    const sheetsDiv = document.getElementById('sp-wb-sheets-list');
-    
-    btn.disabled = true; btn.textContent = 'Discovering...';
-    try {
-      console.log('[SP Discover] Calling discoverSheets...');
-      let result;
-      try {
-        result = await spBridge.discoverSheets(url);
-      } catch(err) {
-        console.error('[SP Discover] IPC Error:', err);
-        toast.show('error', 'IPC Error: ' + (err.message || err), 4000);
-        return;
-      }
-      console.log('[SP Discover] Result:', JSON.stringify(result));
-      if (!result || !result.ok) {
-        toast.show('error', (result && result.error) || 'Could not discover sheets', 4000);
-        return;
-      }
-      resultsDiv.style.display = '';
-      sheetsDiv.innerHTML = result.sheets.map((s, i) => `
-        <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#161b22;border:1px solid #21262d;border-radius:4px;margin-bottom:4px;">
-          <input type="checkbox" id="sp-sh-${i}" data-sheet="${s.xmlFile || s.name}" data-name="${s.name}" data-header="${s.headerRow}" />
-          <label for="sp-sh-${i}" style="font-size:11px;color:#c9d1d9;flex:1;cursor:pointer;">
-            <strong>${s.name}</strong> <span style="color:#6e7681;">(${s.xmlFile || '?'})</span> <span style="color:#8b949e;">header: ${s.headerRow}</span>
-          </label>
-          <input style="width:60px;background:#0d1117;border:1px solid #30363d;border-radius:3px;padding:3px 6px;font-size:10px;color:#c9d1d9;" placeholder="Operator" id="sp-op-${i}" />
-        </div>
-      `).join('');
-      
-      sheetsDiv.innerHTML += `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;"><input class="sd-input" id="sp-wb-domicile" placeholder="Domicile (ABE40, AVP40...)" style="width:140px;" /><button class="sd-btn primary" id="sp-wb-save">Save workbook config</button></div>`;
-      
-      // Save handler
-      document.getElementById('sp-wb-save').addEventListener('click', async () => {
-        const checks = sheetsDiv.querySelectorAll('input[type=checkbox]:checked');
-        if (!checks.length) { toast.show('warn', 'Select at least one sheet', 2000); return; }
-        
-        const carriers = [];
-        checks.forEach((cb, idx) => {
-          const sheet = cb.dataset.sheet;
-          const headerRow = parseInt(cb.dataset.header || '16');
-          const opInput = cb.closest('div').querySelector('input[placeholder="Operator"]');
-          const operator = opInput ? opInput.value.trim().toUpperCase() : '';
-          carriers.push({ code: (operator || cb.dataset.name || 'DEFAULT').toUpperCase(), sheet: sheet, sheetName: cb.dataset.name || sheet, headerRow });
-        });
-        
-        const domicileInput = document.getElementById('sp-wb-domicile');
-        const workbook = {
-          name: url.split('file=')[1] ? decodeURIComponent(url.split('file=')[1].split('&')[0]) : 'Workbook',
-          domicile: (domicileInput ? domicileInput.value.trim().toUpperCase() : '') || '',
-          path: result.filePath || url,
-          carriers,
-          headerRow: carriers[0].headerRow
-        };
-        
-        // Load existing config and add
-        const existing = await spBridge.getConfig();
-        const workbooks = (existing && existing.workbooks) || [];
-        workbooks.push(workbook);
-        await spBridge.saveConfig({ ...existing, workbooks });
-        toast.show('success', 'Workbook saved: ' + workbook.name, 3000);
-        _renderSavedWorkbooks();
-      });
-      
-      toast.show('success', result.sheets.length + ' sheet(s) found', 2500);
-    } catch(e) {
-      toast.show('error', 'Failed: ' + (e.message || e), 4000);
-    } finally {
-      btn.disabled = false; btn.textContent = 'Load sheets';
-    }
-  });
-
-  // Render saved workbooks
-  async function _renderSavedWorkbooks() {
-    const cfg = await spBridge.getConfig();
-    const workbooks = (cfg && cfg.workbooks) || [];
-    const div = document.getElementById('sp-wb-saved');
-    if (!div) return;
-    if (!workbooks.length) { div.innerHTML = '<div style="font-size:10px;color:#484f58;">No workbooks configured yet.</div>'; return; }
-    div.innerHTML = '<div style="font-size:10px;font-weight:700;color:#8b949e;margin-bottom:6px;">SAVED WORKBOOKS</div>' +
-      workbooks.map((wb, i) => `
-        <div style="background:#161b22;border:1px solid #21262d;border-radius:4px;padding:8px 10px;margin-bottom:4px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div style="font-size:11px;font-weight:600;color:#c9d1d9;">${wb.name}</div>
-            <button onclick="window._removeWB(${i})" style="background:none;border:none;color:#f85149;cursor:pointer;font-size:11px;">✕</button>
-          </div>
-          <div style="font-size:9px;color:#6e7681;margin-top:2px;">${(wb.carriers||[]).map(c => c.code + ' → ' + (c.sheetName || c.sheet)).join(' | ')}</div>
-        </div>
-      `).join('');
-  }
-  window._removeWB = async (idx) => {
-    const cfg = await spBridge.getConfig();
-    const workbooks = (cfg && cfg.workbooks) || [];
-    workbooks.splice(idx, 1);
-    await spBridge.saveConfig({ ...cfg, workbooks });
-    _renderSavedWorkbooks();
-  };
-  _renderSavedWorkbooks();
-
-
-  _wireDomiciles();
-  _wireAuth();
   _wireOrcha();
-  _wireCreds();
-  _wireVendorAuth();
   _wireSlack();
   _wirePartnerAutoReply();
   _wireOperatorChannels();
-  _wireCarrierBriefing();
   _wireDMAutoReply();
-  _wireEmail();
-  _wireAutoNote();
-  _wireSchedulerConfig();
   _wireSP();
   _wireAsana();
-  _wireNotifications();
+
   _wireAccounts();
+  _wireAuthHealth();
   _wireSectionAccordion('sd-pane-integrations');
   _wireSectionAccordion('sd-pane-ui');
-  _wireSectionAccordion('sd-pane-operators');
 
   // Listen for settings open request
   bus.on('ui:view-change', ({ to }) => {
@@ -3474,5 +3125,16 @@ export function init() {
         if (color) document.documentElement.style.setProperty(cssVar, color);
       });
     }
+    // Font family + size on boot (not just when the drawer opens).
+    const _fontMap = {
+      system: '-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+      serif:  'Georgia,serif',
+      mono:   '"SFMono-Regular",Consolas,"Liberation Mono",monospace',
+      inter:  '"Inter",sans-serif',
+    };
+    if (all.ui_prefs.font) {
+      document.documentElement.style.setProperty('--font', _fontMap[all.ui_prefs.font] || _fontMap.system);
+    }
+    if (all.ui_prefs.fontSize) _applyFontSize(all.ui_prefs.fontSize);
   }).catch(() => {});
 }

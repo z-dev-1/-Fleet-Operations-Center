@@ -7,6 +7,7 @@ dist/
 # Electron build
 out/
 release/
+release-*/
 
 # User data (never commit app data)
 *.enc
@@ -26,6 +27,8 @@ email_config.json
 slack-config.json
 orcha_config.json
 credentials.enc
+asana_config.json
+asana_auth_state.json
 
 # Logs
 logs/

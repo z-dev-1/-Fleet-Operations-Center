@@ -10,8 +10,18 @@
 const store = require('../../store');
 
 const DEFAULTS = {
-  enabled: false,               // master switch for the FAS agent path (off until opted in)
-  mode: 'shadow',               // shadow | approval | autonomous
+  // PHASE 8: Digital FAS is now the primary (and only) Slack reasoning agent.
+  // Enabled by default in 'approval' mode — FAS drafts + queues for the operator
+  // to approve; the legacy persona brains no longer answer on their own. Set
+  // mode to 'autonomous' to let confident, verified, low-risk answers auto-send.
+  enabled: true,                // master switch for the FAS agent path (Phase 8: on)
+  mode: 'approval',             // shadow | approval | autonomous  (Phase 8 default: approval)
+  // PHASE 8 retirement switch. When true (default), the legacy DM/partner
+  // persona reasoning is RETIRED: the engines no longer generate their own AI
+  // reply when FAS defers — a deliberate FAS silence stays silent, and a genuine
+  // FAS failure goes to manual review instead of a legacy auto-reply. Set to
+  // false ONLY as a temporary rollback to re-enable the legacy brain.
+  retireLegacyReasoning: true,
   maxSteps: 6,                  // max research iterations per message
   maxRuntimeMs: 45000,          // hard cap on total agent runtime per message
   maxToolResultChars: 6000,     // cap on a single tool result fed to the model
@@ -19,6 +29,7 @@ const DEFAULTS = {
   retry: { maxRetries: 4, baseBackoffMs: 30000, maxBackoffMs: 15 * 60 * 1000 }, // bounded AI retry w/ backoff
   contextBudgetChars: 24000,    // configurable context budget (provider-independent)
   approvedAutomaticActions: [], // action tool names allowed to run automatically in autonomous mode
+  useLifecycleApi: true,        // MOVE_UNIT + manual button via the AAP JSON API (version-locked PUT + DVIR auto-clear + source read-back). Falls back to browser automation on any failure.
   approvedLinkDomains: [        // Stage 3 allowlist (used later)
     'aap-na.corp.amazon.com',
     'fleet.uptake.com',

@@ -11,7 +11,7 @@
  */
 
 import bus                        from '../bus.js';
-import { fleet as fleetBridge }   from '../bridge.js';
+import { fleet as fleetBridge, settings as settingsBridge } from '../bridge.js';
 
 let _suppressFilterEvents = false;
 
@@ -20,7 +20,7 @@ const TAB_VIEW = {
   'fleet-table': 'fleet',
   dashboard:  'fleet',
   analytics:  'analytics',
-  vendors:    'vendors',
+  trends:     'trends',
   scheduler:  'schedulers',
   'email-composer': 'email-composer',
   'daily-call': 'daily-call',
@@ -59,8 +59,8 @@ export function init(container) {
         <button class="tb-tab" data-view="analytics">
           <span class="tb-tab-icon">⏳</span> Long Dwell
         </button>
-        <button class="tb-tab" data-view="vendors">
-          <span class="tb-tab-icon">🏢</span> Vendors
+        <button class="tb-tab" data-view="trends">
+          <span class="tb-tab-icon">📈</span> Trends
         </button>
         <button class="tb-tab" data-view="scheduler">
           <span class="tb-tab-icon">⏱</span> Scheduler
@@ -76,7 +76,7 @@ export function init(container) {
       
       <!-- Right side -->
       <div class="tb-right">
-        <span class="tb-ai-status" id="tb-ai-status" title="Orcha AI connection status">
+        <span class="tb-ai-status" id="tb-ai-status" title="AI settings — click to configure" style="cursor:pointer">
           <span class="tb-kpi-dot tb-kpi-dot--unknown" id="kpi-ai-dot"></span>
           <span id="kpi-ai-label">AI …</span>
         </span>
@@ -88,6 +88,8 @@ export function init(container) {
         <div class="tb-icon-btn" id="tb-intel" title="Intelligence Panel">🧠</div>
         <div class="tb-icon-btn" id="tb-contacts" title="Contact Book">📇</div>
         <div class="tb-icon-btn" id="tb-inbox" title="Incoming Work Requests">📋<span class="tb-notif-badge" id="tb-inbox-badge" style="display:none">0</span></div>
+        <div class="tb-icon-btn" id="tb-email-triage" title="Inbox Triage (AI)">📨</div>
+        <div class="tb-icon-btn" id="tb-relay-reconcile" title="Relay ↔ Offsite updates (AI)">🔁</div>
         <div class="tb-icon-btn" id="tb-notif" title="Notifications">
           🔔<span class="tb-notif-badge" id="tb-notif-badge" style="display:none">0</span>
         </div>
@@ -118,6 +120,7 @@ export function init(container) {
           <option value="">All States</option>
           <option value="available">Available</option>
           <option value="unavailable">Unavailable</option>
+          <option value="ordered">Ordered</option>
           <option value="decommissioned">Decommissioned</option>
           <option value="in_maintenance">In Maintenance</option>
         </select>
@@ -137,6 +140,7 @@ export function init(container) {
         <button class="tb-pill" data-filter="unavailable">Unavailable</button>
         <button class="tb-pill" data-filter="offsite">Offsite</button>
         <button class="tb-pill" data-filter="high-risk">High Risk</button>
+        <button class="tb-pill" data-filter="has-risk">Has Score</button>
         <button class="tb-pill" data-filter="stuck">Stuck 14d+</button>
         <button class="tb-pill" data-filter="fleetnet">FleetNet</button>
       </div>
@@ -237,11 +241,29 @@ export function init(container) {
     bus.emit('ui:inbox-toggle');
   });
 
+  // ── Inbox Triage (AI) overlay toggle ───────────────────────────────
+  const emailTriageBtn = document.getElementById('tb-email-triage');
+  if (emailTriageBtn) emailTriageBtn.addEventListener('click', () => {
+    bus.emit('ui:email-triage-toggle');
+  });
+
+  // ── Relay ↔ Offsite reconcile overlay toggle ───────────────────────
+  const relayReconcileBtn = document.getElementById('tb-relay-reconcile');
+  if (relayReconcileBtn) relayReconcileBtn.addEventListener('click', () => {
+    bus.emit('ui:relay-reconcile-toggle');
+  });
+
   
 
   // ── Settings ──────────────────────────────────────────────────────────────
   document.getElementById('tb-settings').addEventListener('click', () => {
     bus.emit('ui:view-change', { from: 'fleet', to: 'settings' });
+  });
+
+  // ── AI status pill → AI Config overlay ─────────────────────────────────────
+  const aiStatusEl = document.getElementById('tb-ai-status');
+  if (aiStatusEl) aiStatusEl.addEventListener('click', () => {
+    bus.emit('ui:ai-config-toggle');
   });
 
   // ── Sync ──────────────────────────────────────────────────────────────────
@@ -567,6 +589,9 @@ export function init(container) {
       } else if (f === 'high-risk') {
         if (lc) lc.value = '';
         bus.emit('ui:quick-filter', { filter: 'high-risk' });
+      } else if (f === 'has-risk') {
+        if (lc) lc.value = '';
+        bus.emit('ui:quick-filter', { filter: 'has-risk' });
       } else if (f === 'stuck') {
         if (lc) lc.value = '';
         bus.emit('ui:quick-filter', { filter: 'stuck' });
@@ -585,34 +610,132 @@ export function init(container) {
     if (pop) { pop.remove(); return; }
 
     const profile = JSON.parse(localStorage.getItem('fleet_user_profile') || '{}');
+    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
     pop = document.createElement('div');
     pop.id = 'tb-profile-pop';
-    pop.style.cssText = 'position:fixed;top:44px;right:12px;width:260px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;z-index:9999;box-shadow:0 8px 24px rgba(0,0,0,0.4);';
+    pop.className = 'tb-profile-pop';
     pop.innerHTML = `
-      <div style="font-size:12px;font-weight:700;color:#e6edf3;margin-bottom:10px;">👤 User Profile</div>
-      <div style="font-size:9px;color:#8b949e;margin-bottom:8px;">Used as default contact for Work Requests</div>
-      <input id="up-name" class="sd-input" style="width:100%;margin-bottom:6px;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:6px 8px;color:#c9d1d9;font-size:11px;" placeholder="Your name" value="${profile.name || ''}" />
-      <input id="up-phone" class="sd-input" style="width:100%;margin-bottom:6px;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:6px 8px;color:#c9d1d9;font-size:11px;" placeholder="Phone (1-555-000-0000)" value="${profile.phone || ''}" />
-      <input id="up-email" class="sd-input" style="width:100%;margin-bottom:10px;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:6px 8px;color:#c9d1d9;font-size:11px;" placeholder="Email (optional)" value="${profile.email || ''}" />
-      <button id="up-save" style="width:100%;background:rgba(63,185,80,0.1);border:1px solid rgba(63,185,80,0.3);border-radius:4px;color:#3fb950;font-size:10px;font-weight:600;padding:6px;cursor:pointer;">Save</button>
+      <div class="tbp-section">
+        <div class="tbp-title">👤 User Profile</div>
+        <div class="tbp-hint">Used as the default contact on Work Requests.</div>
+        <label class="tbp-label">Name</label>
+        <input id="up-name" class="tbp-input" placeholder="Your name" value="${esc(profile.name)}" />
+        <label class="tbp-label">Phone</label>
+        <input id="up-phone" class="tbp-input" placeholder="1-555-000-0000" value="${esc(profile.phone)}" />
+        <label class="tbp-label">Email</label>
+        <input id="up-email" class="tbp-input" placeholder="you@amazon.com (optional)" value="${esc(profile.email)}" />
+      </div>
+
+      <div class="tbp-section">
+        <div class="tbp-title">📍 Managed Domiciles</div>
+        <div class="tbp-hint">The AAP sites this app pulls fleet data for. Changing these re-scans the fleet.</div>
+        <div class="tbp-chips" id="up-dom-chips"></div>
+        <div class="tbp-dom-add">
+          <input id="up-dom-input" class="tbp-input" placeholder="Add a site code (e.g. ABE40) + Enter" />
+          <button id="up-dom-reset" class="tbp-btn tbp-btn--ghost" type="button" title="Reset to defaults">Reset</button>
+        </div>
+      </div>
+
+      <div class="tbp-section">
+        <div class="tbp-title">🪪 Baseball Card</div>
+        <div class="tbp-hint">Your AFP FAS performance card. AI fills what the app knows (name, sites, SCACs, fleet size, vendor); you fill the rest. Export the filled .docx anytime.</div>
+        <button id="up-bbcard" class="tbp-btn tbp-btn--ghost" type="button">Open Baseball Card</button>
+      </div>
+
+      <button id="up-save" class="tbp-btn tbp-btn--save">Save</button>
+      <div id="up-status" class="tbp-status" style="display:none"></div>
     `;
     document.body.appendChild(pop);
 
-    document.getElementById('up-save').addEventListener('click', () => {
+    // ── Baseball Card panel ───────────────────────────────────────────────
+    pop.querySelector('#up-bbcard').addEventListener('click', () => {
+      const prof = JSON.parse(localStorage.getItem('fleet_user_profile') || '{}');
+      _openBaseballCard(prof.name || '');
+    });
+
+    // ── Domicile chip editor ──────────────────────────────────────────────
+    let _domiciles = [];
+    const chipsEl = pop.querySelector('#up-dom-chips');
+    const domInput = pop.querySelector('#up-dom-input');
+
+    function _renderChips() {
+      if (!_domiciles.length) {
+        chipsEl.innerHTML = '<span class="tbp-chips-empty">No sites — the app will pull ALL fleets.</span>';
+        return;
+      }
+      chipsEl.innerHTML = _domiciles.map((d, i) =>
+        '<span class="tbp-chip">' + esc(d) + '<button class="tbp-chip-x" data-i="' + i + '" title="Remove">✕</button></span>'
+      ).join('');
+      chipsEl.querySelectorAll('.tbp-chip-x').forEach((b) => {
+        b.addEventListener('click', (e) => {
+          // stopPropagation: _renderChips() replaces this button's HTML during
+          // the click, detaching e.target from the DOM. Without this, the
+          // document-level outside-click closer then sees pop.contains(e.target)
+          // === false (target is detached) and closes the whole popover — so the
+          // removal looked like it "did nothing". Keep the click contained.
+          e.preventDefault();
+          e.stopPropagation();
+          _domiciles.splice(parseInt(b.dataset.i, 10), 1);
+          _renderChips();
+        });
+      });
+    }
+    function _addDomicile(raw) {
+      (raw || '').split(/[\n,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean).forEach((code) => {
+        if (!_domiciles.includes(code)) _domiciles.push(code);
+      });
+      _renderChips();
+    }
+    // Load current domiciles from the backend (source of truth, not localStorage).
+    settingsBridge.getDomiciles().then((list) => { _domiciles = Array.isArray(list) ? list.slice() : []; _renderChips(); }).catch(() => _renderChips());
+
+    domInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); _addDomicile(domInput.value); domInput.value = ''; }
+    });
+    domInput.addEventListener('blur', () => { if (domInput.value.trim()) { _addDomicile(domInput.value); domInput.value = ''; } });
+
+    pop.querySelector('#up-dom-reset').addEventListener('click', () => {
+      settingsBridge.resetDomiciles().then((r) => {
+        _domiciles = (r && r.domiciles) || [];
+        _renderChips();
+        _showStatus('✅ Domiciles reset to defaults — re-scanning', 'ok');
+      }).catch((e) => _showStatus('❌ ' + (e.message || 'Reset failed'), 'err'));
+    });
+
+    function _showStatus(text, cls) {
+      const st = pop.querySelector('#up-status');
+      if (!st) return;
+      st.textContent = text; st.className = 'tbp-status ' + (cls || ''); st.style.display = '';
+    }
+
+    // ── Save (profile → localStorage, domiciles → backend) ─────────────────
+    pop.querySelector('#up-save').addEventListener('click', async () => {
       const p = {
-        name: document.getElementById('up-name').value.trim(),
-        phone: document.getElementById('up-phone').value.trim(),
-        email: document.getElementById('up-email').value.trim()
+        name:  pop.querySelector('#up-name').value.trim(),
+        phone: pop.querySelector('#up-phone').value.trim(),
+        email: pop.querySelector('#up-email').value.trim(),
       };
       localStorage.setItem('fleet_user_profile', JSON.stringify(p));
-      // Update avatar initials
       const av = document.getElementById('tb-avatar');
       if (av && p.name) {
         const parts = p.name.split(' ');
         av.textContent = (parts[0][0] + (parts[1] ? parts[1][0] : '')).toUpperCase();
       }
-      pop.remove();
+      // Domiciles: only call the backend (which triggers a rescan) when the
+      // list actually has codes. An empty list is rejected by the backend, so
+      // guide the user to Reset instead of silently failing.
+      try {
+        if (_domiciles.length) {
+          await settingsBridge.saveDomiciles(_domiciles);
+          _showStatus('✅ Saved', 'ok');
+          setTimeout(() => pop.remove(), 700);
+        } else {
+          _showStatus('⚠️ Add at least one site, or click Reset for defaults', 'warn');
+        }
+      } catch (e) {
+        _showStatus('❌ ' + (e.message || 'Save failed'), 'err');
+      }
     });
 
     // Close on outside click
@@ -626,4 +749,309 @@ export function init(container) {
     }, 50);
   });
 
+}
+
+// ── Baseball Card modal ────────────────────────────────────────────────────────
+// Full overlay to view/edit/export the AFP FAS performance card. EVERY field
+// has its own ✨ button:
+//   data  = AI fills from app data / Phonetool (never invented)
+//   prose = AI rewrites the user's rough note into the required format
+//   user  = plain entry (✨ still offers a polish)
+// Reporting-chain order: Skip-Level (top) → Manager → You.
+const BBCARD_SECTIONS = [
+  { title: 'Identity', fields: [
+    { key: 'name', label: 'Name', ai: 'data' },
+    { key: 'alias', label: 'Alias (alias@)', ai: 'data', hint: 'from Phonetool' },
+    { key: 'managerId', label: 'Manager', ai: 'data', hint: 'from Phonetool' },
+    { key: 'hireDate', label: 'Amazon Hire Date (MM/YYYY)', ai: 'data', hint: 'from Phonetool' },
+    { key: 'geoFlex', label: 'Geographic Flexibility (Yes/No — preferred locations)', ai: 'prose' },
+    { key: 'mentors', label: 'Mentors (name(s) + relationship)', ai: 'prose' },
+  ]},
+  { title: 'Portfolio Overview', fields: [
+    { key: 'regionZone', label: 'Region / Zone (domicile city + state)', ai: 'data' },
+    { key: 'sites', label: 'Assigned Sites', ai: 'data' },
+    { key: 'fleetSize', label: 'Fleet Size', ai: 'data' },
+    { key: 'operators', label: 'Operators / SCACs', ai: 'data' },
+    { key: 'primaryVendor', label: 'Primary Vendor (COX / TA / Amerit)', ai: 'data' },
+  ]},
+  { title: 'Reporting Chain (Skip → Manager → You)', fields: [
+    { key: 'skipLevelId', label: 'Skip-Level (top)', ai: 'data', hint: 'from Phonetool' },
+    { key: 'managerId2', label: 'Manager', ai: 'data', hint: 'from Phonetool' },
+  ]},
+  { title: 'Summary', fields: [
+    { key: 'summaryName', label: 'Summary — Name', ai: 'data' },
+    { key: 'summaryYears', label: 'Summary — Years at Amazon', ai: 'data', hint: 'from Phonetool' },
+    { key: 'summaryMonths', label: 'Summary — Months', ai: 'data', hint: 'from Phonetool tenure' },
+    { key: 'summaryContext', label: 'Summary — current role context', ai: 'prose', area: true },
+  ]},
+  { title: 'Super Powers — Top 3 Leadership Principles', fields: [
+    { key: 'lp1Name', label: 'LP 1 (auto-picked)', ai: 'user' },
+    { key: 'lp1Desc', label: 'LP 1 — rough note → ✨ picks the LP + writes it', ai: 'lp', area: true },
+    { key: 'lp2Name', label: 'LP 2 (auto-picked)', ai: 'user' },
+    { key: 'lp2Desc', label: 'LP 2 — rough note → ✨ (different LP)', ai: 'lp', area: true },
+    { key: 'lp3Name', label: 'LP 3 (auto-picked)', ai: 'user' },
+    { key: 'lp3Desc', label: 'LP 3 — rough note → ✨ (different LP)', ai: 'lp', area: true },
+  ]},
+  { title: 'Growth Ideas — LP-backed', fields: [
+    { key: 'growth1Name', label: 'Growth LP 1 (auto-picked)', ai: 'user' },
+    { key: 'growth1Desc', label: 'Growth 1 — rough note → ✨ picks the LP + writes it', ai: 'lp', area: true },
+    { key: 'growth2Name', label: 'Growth LP 2 (auto-picked)', ai: 'user' },
+    { key: 'growth2Desc', label: 'Growth 2 — rough note → ✨ (different LP)', ai: 'lp', area: true },
+    { key: 'growth3Name', label: 'Growth LP 3 (optional)', ai: 'user' },
+    { key: 'growth3Desc', label: 'Growth 3 — rough note → ✨ (optional)', ai: 'lp', area: true },
+  ]},
+  { title: 'Biggest Accomplishments (STAR)', fields: [
+    { key: 'accomp1', label: 'Accomplishment 1', ai: 'prose', area: true },
+    { key: 'accomp2', label: 'Accomplishment 2', ai: 'prose', area: true },
+    { key: 'accomp3', label: 'Accomplishment 3', ai: 'prose', area: true },
+    { key: 'accomp4', label: 'Accomplishment 4', ai: 'prose', area: true },
+  ]},
+  { title: 'Accomplishments Outside Core Role', fields: [
+    { key: 'outside1', label: 'Contribution 1', ai: 'prose' },
+    { key: 'outside2', label: 'Contribution 2', ai: 'prose' },
+    { key: 'outside3', label: 'Contribution 3', ai: 'prose' },
+  ]},
+  { title: 'Current Initiatives / Actions', fields: [
+    { key: 'init1', label: 'Initiative 1', ai: 'prose' },
+    { key: 'init1Out', label: 'Initiative 1 — target outcome', ai: 'user' },
+    { key: 'init1Time', label: 'Initiative 1 — timeline', ai: 'user' },
+    { key: 'init2', label: 'Initiative 2', ai: 'prose' },
+    { key: 'init2Out', label: 'Initiative 2 — target outcome', ai: 'user' },
+    { key: 'init2Time', label: 'Initiative 2 — timeline', ai: 'user' },
+    { key: 'init3', label: 'Initiative 3', ai: 'prose' },
+    { key: 'init3Out', label: 'Initiative 3 — target outcome', ai: 'user' },
+    { key: 'init3Time', label: 'Initiative 3 — timeline', ai: 'user' },
+  ]},
+  { title: 'Tenure & Development', fields: [
+    { key: 'startDate', label: 'Start Date (MM/YYYY)', ai: 'data', hint: 'from Phonetool' },
+    { key: 'timeInRole', label: 'Time in Role (X years, X months)', ai: 'user' },
+    { key: 'previousRoles', label: 'Previous Roles (✨ dedupes + may ask about other roles)', ai: 'data', hint: 'from Phonetool' },
+    { key: 'developmentGoals', label: 'Development Goals', ai: 'prose', area: true },
+  ]},
+  { title: 'Personal / Fun Facts', fields: [
+    { key: 'funFacts', label: 'Hobbies / interests / fun fact', ai: 'prose', area: true },
+  ]},
+];
+
+function _openBaseballCard(profileName) {
+  if (document.getElementById('bbcard-overlay')) return;
+  const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const ov = document.createElement('div');
+  ov.id = 'bbcard-overlay';
+  ov.className = 'bbcard-overlay';
+
+  const sectionsHtml = BBCARD_SECTIONS.map((sec) => {
+    const rows = sec.fields.map((f) => {
+      const inputId = 'bbc-' + f.key;
+      const tagTitle = f.ai === 'data' ? 'AI fills this from app data / Phonetool (never invented)'
+        : f.ai === 'lp' ? 'Type a rough note, then ✨ — AI picks the best-fit Leadership Principle (distinct from your others) and writes the entry'
+        : f.ai === 'prose' ? 'Type a rough note, then ✨ — AI rewrites it professionally in the right format'
+        : 'Your entry — ✨ offers a professional polish';
+      const tagLabel = f.ai === 'data' ? 'AI' : (f.ai === 'prose' || f.ai === 'lp') ? '✨' : '✎';
+      const hint = f.hint ? '<span class="bbc-hint-src">' + esc(f.hint) + '</span>' : '';
+      const aiBtn = '<button class="bbc-ai-btn" type="button" data-aikey="' + f.key + '" data-aimode="' + (f.ai || 'user') + '" title="' + tagTitle + '">✨</button>';
+      const control = f.area
+        ? '<textarea id="' + inputId + '" class="bbc-input bbc-textarea" rows="2" data-key="' + f.key + '"></textarea>'
+        : '<input id="' + inputId + '" class="bbc-input" type="text" data-key="' + f.key + '" />';
+      return '<label class="bbc-field"><span class="bbc-label">' + esc(f.label) +
+        ' <span class="bbc-ai-tag" title="' + tagTitle + '">' + tagLabel + '</span>' + hint + '</span>' +
+        '<div class="bbc-field-row">' + control + aiBtn + '</div></label>';
+    }).join('');
+    return '<div class="bbc-section"><div class="bbc-section-title">' + esc(sec.title) + '</div>' + rows + '</div>';
+  }).join('');
+
+  ov.innerHTML =
+    '<div class="bbcard-panel">' +
+      '<div class="bbcard-head">' +
+        '<div class="bbcard-title">🪪 AFP FAS Baseball Card</div>' +
+        '<button id="bbc-close" class="bbcard-close" title="Close">✕</button>' +
+      '</div>' +
+      '<div class="bbcard-hint">Each field has its own <b>✨</b>. <b>AI</b> fields fill from the app/Phonetool (never invented). <b>✨</b> (prose) fields: type a rough note and ✨ rewrites it professionally in the right format (STAR, third-person LP, etc.). Use <b>Fetch Phonetool</b> for manager, skip-level, hire date, alias & previous roles, then <b>AI Fill All</b>, then Download the filled .docx.</div>' +
+      '<div class="bbcard-body">' + sectionsHtml + '</div>' +
+      '<div class="bbcard-actions">' +
+        '<button id="bbc-atoz" class="tbp-btn tbp-btn--ghost">🔐 Sign in to A to Z</button>' +
+        '<button id="bbc-phonetool" class="tbp-btn tbp-btn--ghost">🔎 Fetch Phonetool</button>' +
+        '<button id="bbc-ai" class="tbp-btn tbp-btn--ghost">✨ AI Fill All (data)</button>' +
+        '<button id="bbc-save" class="tbp-btn tbp-btn--save">Save</button>' +
+        '<button id="bbc-preview" class="tbp-btn tbp-btn--ghost">👁 Preview</button>' +
+        '<button id="bbc-export" class="tbp-btn tbp-btn--save">⬇ Download .docx</button>' +
+        '<span id="bbc-status" class="bbc-status"></span>' +
+      '</div>' +
+      '<div id="bbc-preview-pane" class="bbc-preview-pane" style="display:none"></div>' +
+    '</div>';
+  document.body.appendChild(ov);
+
+  const setVal = (key, v) => { const el = ov.querySelector('[data-key="' + key + '"]'); if (el) el.value = v == null ? '' : v; };
+  const getAll = () => {
+    const out = {};
+    ov.querySelectorAll('[data-key]').forEach((el) => { out[el.getAttribute('data-key')] = el.value; });
+    return out;
+  };
+  const status = (t, cls) => { const s = ov.querySelector('#bbc-status'); if (s) { s.textContent = t; s.className = 'bbc-status ' + (cls || ''); } };
+
+  // Interview UI: show the AI's clarifying questions under a field with an
+  // answer box plus an explicit "Submit answers" button (clearer than
+  // re-clicking ✨; Ctrl+Enter also submits).
+  function _showInterview(key, questions, btn) {
+    _clearInterview(key);
+    const field = btn && btn.closest ? btn.closest('.bbc-field') : null;
+    if (!field) return;
+    const box = document.createElement('div');
+    box.className = 'bbc-interview';
+    box.id = 'bbc-iv-' + key;
+    box.innerHTML = '<div class="bbc-iv-q">💬 ' + (questions || []).map(q => '• ' + esc(q)).join('<br>') + '</div>' +
+      '<textarea id="bbc-q-' + key + '" class="bbc-input bbc-textarea" rows="2" placeholder="Type your answer here…"></textarea>' +
+      '<div class="bbc-iv-actions">' +
+        '<button type="button" class="tbp-btn tbp-btn--save bbc-iv-submit" data-key="' + key + '">➤ Submit answer</button>' +
+        '<span class="bbc-iv-hint">or press Ctrl+Enter</span>' +
+      '</div>';
+    field.appendChild(box);
+    const ta = box.querySelector('#bbc-q-' + key);
+    if (ta) {
+      ta.focus();
+      ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); btn.click(); } });
+    }
+    const sub = box.querySelector('.bbc-iv-submit');
+    if (sub) sub.addEventListener('click', () => btn.click()); // re-run ✨ with the typed answer
+  }
+  function _clearInterview(key) { const b = ov.querySelector('#bbc-iv-' + key); if (b) b.remove(); }
+
+  // Load saved card into the fields.
+  (async () => {
+    try { const card = await window.baseballCard.get(); if (card) Object.keys(card).forEach((k) => setVal(k, card[k])); }
+    catch (_) {}
+  })();
+
+  ov.querySelector('#bbc-close').addEventListener('click', () => ov.remove());
+  ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+
+  // AI fill — fills ONLY known fields that are still blank; never overwrites.
+  ov.querySelector('#bbc-ai').addEventListener('click', async () => {
+    status('Filling…');
+    try {
+      // Save current edits first so autofill merges onto them.
+      await window.baseballCard.save(getAll());
+      const res = await window.baseballCard.autofill({ profileName: profileName || '' });
+      if (res && res.ok && res.card) {
+        Object.keys(res.card).forEach((k) => setVal(k, res.card[k]));
+        status('✅ Filled ' + ((res.filled && res.filled.length) || 0) + ' field(s) from app data', 'ok');
+      } else { status('Nothing to fill', 'warn'); }
+    } catch (e) { status('❌ ' + (e.message || 'AI fill failed'), 'err'); }
+  });
+
+  // Sign in to A to Z — opens the login window; persists the session so
+  // Fetch Phonetool works. A to Z is a separate login from Midway/AAP.
+  ov.querySelector('#bbc-atoz').addEventListener('click', async () => {
+    status('Opening A to Z sign-in…');
+    try {
+      const res = await window.baseballCard.signinAtoZ();
+      if (res && res.ok) status('✅ Signed in to A to Z — now click Fetch Phonetool', 'ok');
+      else status('⚠️ ' + ((res && res.detail) || 'Sign-in not completed'), 'warn');
+    } catch (e) { status('❌ ' + (e.message || 'Sign-in failed'), 'err'); }
+  });
+
+  // Shared Phonetool fetch (optionally auto-triggered after a sign-in).
+  async function _doFetchPhonetool() {
+    status('Fetching Phonetool…');
+    const res = await window.baseballCard.fetchPhonetool({ user: 'zilasant' });
+    if (res && res.ok) {
+      await window.baseballCard.save(getAll());
+      const af = await window.baseballCard.autofill({ profileName: profileName || '' });
+      if (af && af.card) Object.keys(af.card).forEach((k) => setVal(k, af.card[k]));
+      const got = Object.keys(res.data || {}).filter(k => res.data[k]);
+      status(got.length ? '✅ Phonetool: ' + got.join(', ') : '⚠️ Phonetool returned nothing readable — fill manually', got.length ? 'ok' : 'warn');
+      return true;
+    }
+    // Not signed in to A to Z → offer to sign in, then retry once.
+    if (res && res.error === 'atoz-login') {
+      status('🔐 A to Z sign-in required — opening login…', 'warn');
+      const si = await window.baseballCard.signinAtoZ();
+      if (si && si.ok) { return _doFetchPhonetool(); }
+      status('⚠️ Sign in to A to Z, then click Fetch Phonetool again', 'warn');
+      return false;
+    }
+    status('❌ ' + ((res && res.detail) || (res && res.error) || 'Phonetool fetch failed'), 'err');
+    return false;
+  }
+
+  ov.querySelector('#bbc-phonetool').addEventListener('click', async () => {
+    try { await _doFetchPhonetool(); } catch (e) { status('❌ ' + (e.message || 'Phonetool failed'), 'err'); }
+  });
+
+  // Per-field ✨: data fields pull from app data; prose fields rewrite the note.
+  ov.querySelectorAll('.bbc-ai-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const key = btn.getAttribute('data-aikey');
+      const el = ov.querySelector('[data-key="' + key + '"]');
+      const note = el ? el.value : '';
+      const orig = btn.textContent;
+      btn.disabled = true; btn.textContent = '…';
+      status('🤖 AI thinking… (can take up to a minute)', 'warn');
+      try {
+        // Include any answers the user typed into this field's interview box.
+        const qbox = ov.querySelector('#bbc-q-' + key);
+        const answers = qbox ? qbox.value.trim() : '';
+        const res = await window.baseballCard.aiField({ key, note, answers, profileName: profileName || '', card: getAll() });
+        if (res && res.ok && res.needsAnswers) {
+          // Interviewer asked clarifying questions — show them inline for answers.
+          _showInterview(key, res.questions || [], btn);
+          status('💬 The AI needs a bit more — answer below, then ✨ again', 'warn');
+        } else if (res && res.ok && res.value != null) {
+          setVal(key, res.value);
+          _clearInterview(key);
+          // Some fields fill companions too (e.g. Initiative → outcome + timeline).
+          const extraKeys = res.extra && typeof res.extra === 'object' ? Object.keys(res.extra).filter(k => res.extra[k]) : [];
+          extraKeys.forEach(k => setVal(k, res.extra[k]));
+          if (res.lpNameKey && res.lpName) { setVal(res.lpNameKey, res.lpName); status('✅ ' + res.lpName + ' — written', 'ok'); }
+          else if (extraKeys.length) status('✅ Filled ' + key + ' + target outcome + timeline', 'ok');
+          else status('✅ Filled ' + key, 'ok');
+        } else {
+          status('⚠️ ' + ((res && res.error) || 'nothing to fill for ' + key), 'warn');
+        }
+      } catch (e) { status('❌ ' + (e.message || 'AI failed'), 'err'); }
+      finally { btn.disabled = false; btn.textContent = orig; }
+    });
+  });
+
+  ov.querySelector('#bbc-save').addEventListener('click', async () => {
+    try { await window.baseballCard.save(getAll()); status('✅ Saved', 'ok'); }
+    catch (e) { status('❌ ' + (e.message || 'Save failed'), 'err'); }
+  });
+
+  // Preview — show exactly what will export (filled values + which fields stay
+  // as [placeholder]) before writing the .docx.
+  ov.querySelector('#bbc-preview').addEventListener('click', async () => {
+    status('Building preview…');
+    const pane = ov.querySelector('#bbc-preview-pane');
+    try {
+      const res = await window.baseballCard.preview(getAll());
+      if (!res || !res.ok) { status('❌ Preview failed', 'err'); return; }
+      const secMap = {};
+      BBCARD_SECTIONS.forEach(s => s.fields.forEach(f => { secMap[f.key] = s.title; }));
+      let html = '<div class="bbc-preview-title">👁 Export Preview — this is what the .docx will contain</div>';
+      let curSec = '';
+      res.items.forEach(it => {
+        const sec = secMap[it.key] || 'Other';
+        if (sec !== curSec) { html += '<div class="bbc-prev-sec">' + esc(sec) + '</div>'; curSec = sec; }
+        const val = it.filled ? esc(it.value) : '<span class="bbc-prev-empty">[will stay blank / placeholder]</span>';
+        html += '<div class="bbc-prev-row"><span class="bbc-prev-label">' + esc(it.label) + '</span><span class="bbc-prev-val">' + val + '</span></div>';
+      });
+      const filledN = res.items.filter(i => i.filled).length;
+      html = '<div class="bbc-prev-summary">' + filledN + ' of ' + res.items.length + ' fields filled</div>' + html;
+      pane.innerHTML = html;
+      pane.style.display = '';
+      pane.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      status('✅ Preview ready — review below, then Download', 'ok');
+    } catch (e) { status('❌ ' + (e.message || 'Preview failed'), 'err'); }
+  });
+
+  ov.querySelector('#bbc-export').addEventListener('click', async () => {
+    status('Exporting…');
+    try {
+      await window.baseballCard.save(getAll());
+      const res = await window.baseballCard.export({});
+      if (res && res.ok) status('✅ Downloaded: ' + res.path, 'ok');
+      else status('❌ ' + ((res && res.error) || 'Export failed'), 'err');
+    } catch (e) { status('❌ ' + (e.message || 'Export failed'), 'err'); }
+  });
 }

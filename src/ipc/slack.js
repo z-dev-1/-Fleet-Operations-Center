@@ -18,6 +18,23 @@ const store  = require('../store'); // BUG FIX (2026-07-16): was missing entirel
 const logger = require('../utils/logger')('ipc:slack');
 const { handle, requireString, requireStringMax } = require('./_safe');
 
+// ── Dual-instance leader gate for Slack polling ─────────────────────────────
+// The Slack poll loops (channel watch + DM auto-reply) READ messages and SEND
+// production replies. They may run ONLY on the instance holding the production
+// leadership lease, so the laptop and the Dev Space never double-reply. When
+// the cluster flag is OFF (legacy single-host) this is always allowed, so the
+// current behavior is unchanged. When ON and this instance is a standby, the
+// poll is skipped entirely (no read, no reply). Lazy-required to avoid a hard
+// load-order dependency on the cluster module.
+function _mayPollSlack() {
+  let cluster;
+  try { cluster = require('../cluster'); } catch (_) { return true; }
+  try {
+    if (typeof cluster.mayRunProduction !== 'function') return true;
+    return cluster.mayRunProduction();
+  } catch (_) { return true; }
+}
+
 // ── Issue #5: Slack field caps ───────────────────────────────────────────────
 const MAX_RECIPIENT_LEN = 128;    // Slack channel name / user handle
 // Slack's real chat.postMessage text-field limit is 40,000 characters --
@@ -78,7 +95,8 @@ function registerSlackIPC(ctx) {
         webPreferences: { nodeIntegration: false, contextIsolation: true, partition: 'persist:slack' },
       });
       slackWin.setMenuBarVisibility(false);
-      slackWin.loadURL('https://amazon.enterprise.slack.com/');
+      // (Slack page load moved below: it runs after the persist:slack
+      //  partition is seeded with the Midway session -- see FIX 2026-10-30.)
 
       let tokenGrabbed = false;
       const ses    = electronSession.fromPartition('persist:slack');
@@ -111,6 +129,21 @@ function registerSlackIPC(ctx) {
       slackWin.on('closed', () => {
         if (!tokenGrabbed) resolve({ ok: false, error: 'Login window closed before sign-in completed' });
       });
+
+      // FIX (2026-10-30): seed the isolated persist:slack partition with the
+      // same already-valid Midway session the main window uses (same pattern
+      // as credentials:test-login for vendor partitions). Runs after `ses` and
+      // the token listener above exist, so the token is still captured.
+      (async () => {
+        try {
+          const { injectCookies } = require('../scrapers/auth');
+          await injectCookies(ses);
+          logger.info('Slack login: Midway session injected into persist:slack');
+        } catch (e) {
+          logger.warn('Slack login: Midway cookie injection failed (continuing): ' + e.message);
+        }
+        if (!slackWin.isDestroyed()) slackWin.loadURL('https://amazon.enterprise.slack.com/');
+      })();
     });
   });
 
@@ -327,6 +360,7 @@ function registerSlackIPC(ctx) {
   });
 
   handle('slack:poll-channel-watch', async () => {
+    if (!_mayPollSlack()) return { skipped: 'standby — not the production leader' };
     const { pollChannelsOnce } = require('../../src/scrapers/slack_channel_watch');
     return pollChannelsOnce((msg) => logger.info(msg));
   });
@@ -372,6 +406,7 @@ function registerSlackIPC(ctx) {
   });
 
   handle('slack:poll-dm-autoreply', async () => {
+    if (!_mayPollSlack()) return { skipped: 'standby — not the production leader' };
     const { pollDMAutoReplyOnce } = require('../../src/scrapers/slack_dm_autoreply');
     const result = await pollDMAutoReplyOnce((msg) => logger.info(msg));
     // CHAT HEAD (2026-07-24): a DM that the AI couldn't confidently
@@ -420,7 +455,8 @@ function registerSlackIPC(ctx) {
     if (!patch || typeof patch !== 'object') throw new Error('config patch required');
     // Whitelist editable keys so the renderer can't inject arbitrary fields.
     const allowed = ['enabled', 'mode', 'maxSteps', 'maxRuntimeMs', 'maxToolResultChars',
-      'dataFreshnessMs', 'contextBudgetChars', 'approvedAutomaticActions', 'approvedLinkDomains'];
+      'dataFreshnessMs', 'contextBudgetChars', 'approvedAutomaticActions', 'approvedLinkDomains',
+      'retireLegacyReasoning'];
     const clean = {};
     for (const k of allowed) if (patch[k] !== undefined) clean[k] = patch[k];
     if (patch.retry && typeof patch.retry === 'object') clean.retry = patch.retry;
@@ -582,6 +618,47 @@ function registerSlackIPC(ctx) {
     if (!id) throw new Error('id required');
     const pb = require('../orcha/fas/playbook');
     return pb.rejectDraft(id);
+  });
+
+  // ── Phase 3: channel-role registry (feed vs conversational) ────────────────
+  handle('fas:get-channels', async () => {
+    try { return require('../slack/channel-registry').listChannels(); } catch (_) { return []; }
+  });
+  // Upsert a channel role record. Marked source:'operator' (authoritative) — an
+  // operator edit may set a trusted source level the name classifier wouldn't.
+  handle('fas:save-channel', async (_e, rec) => {
+    if (!rec || !rec.channelId) throw new Error('channelId required');
+    const cr = require('../slack/channel-registry');
+    return cr.upsertChannel(rec, { operator: true });
+  });
+  // Classify a channel name (suggestion only) — powers the "auto-detect" button.
+  handle('fas:classify-channel', async (_e, name) => {
+    try { return require('../slack/channel-registry').classifyByName(name || ''); } catch (e) { return { error: e.message }; }
+  });
+
+  // ── Phase 5: identity change log + email-domain mappings ───────────────────
+  handle('fas:get-identity-changelog', async (_e, limit) => {
+    try { return require('../slack/contact-sync').getChangeLog(Math.min(Number(limit) || 100, 500)); } catch (_) { return []; }
+  });
+  handle('fas:get-identity-mappings', async () => {
+    try { return require('../slack/identity-resolver')._mappings(); } catch (_) { return {}; }
+  });
+  // Save the operator-maintained email-domain -> carrier/vendor/SCAC maps used
+  // by auto-classification. Whole-object replace (the editor sends the full set).
+  handle('fas:save-identity-mappings', async (_e, maps) => {
+    if (!maps || typeof maps !== 'object') throw new Error('mappings object required');
+    const allowed = {};
+    for (const k of ['carrierDomains', 'vendorDomains', 'scacByDomain', 'domicilesByDomain']) {
+      if (maps[k] && typeof maps[k] === 'object') allowed[k] = maps[k];
+    }
+    store.save('slackIdentityMappings', allowed);
+    return { ok: true };
+  });
+  // Manually trigger enrichment+classification for one sender (force refresh).
+  handle('fas:sync-sender', async (_e, slackId) => {
+    if (!slackId) throw new Error('slackId required');
+    try { return await require('../slack/contact-sync').syncSender(slackId, { force: true }); }
+    catch (e) { return { ok: false, error: e.message }; }
   });
 
   // Reconcile any FAS actions left in-flight by a previous crash/restart

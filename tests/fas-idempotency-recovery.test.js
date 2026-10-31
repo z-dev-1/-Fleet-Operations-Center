@@ -68,6 +68,24 @@ describe('Part 4: in-flight protection + lease recovery + reconciliation', () =>
     expect(tl.length).toBe(1); // not duplicated
   });
 
+  it('atomic claim: a burst of claims for the same key yields EXACTLY ONE winner', () => {
+    const key = idemKey('ADD_TIMELINE', { unit: '320160', entry: 'x' });
+    // Each _claimForExecution runs its block-check + claim in ONE transaction,
+    // so two actions can never both pass the duplicate check and execute.
+    const results = Array.from({ length: 8 }, () => executor._claimForExecution(key));
+    expect(results.filter(r => r.ok).length).toBe(1);
+    expect(results.filter(r => !r.ok && r.blocked).length).toBe(7);
+  });
+
+  it('atomic claim is refused once a key is done (no second executor)', () => {
+    const key = idemKey('ADD_TIMELINE', { unit: '320160', entry: 'x' });
+    store.save('fasIdempotency', { [key]: { status: 'done', at: new Date().toISOString() } });
+    const r = executor._claimForExecution(key);
+    expect(r.ok).toBe(false);
+    expect(r.blocked).toBe(true);
+    expect(r.reason).toMatch(/completed/i);
+  });
+
   it('clearIdem allows manual retry of a FAILED action but not a done one', () => {
     const key = idemKey('ADD_TIMELINE', { unit: '320160', entry: 'x' });
     store.save('fasIdempotency', { [key]: { status: 'failed', at: new Date().toISOString() } });

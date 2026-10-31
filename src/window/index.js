@@ -33,6 +33,7 @@ const { isSetupComplete } = require('../../setup/state');
 const { buildWRUrls } = require('./wr_capture');
 
 const ROOT_DIR = path.join(__dirname, '..', '..');
+const { OFFSITE_FIELDS, offsiteUrlOf, clearOffsite } = require('../utils/offsite-owner');
 
 // ── Field map: AAP table column header → camelCase property ─────────────────
 const AAP_FIELD_MAP = {
@@ -260,16 +261,47 @@ function initWindows(ctx) {
   let _rescanInProgress = false;
   let _rescanHitSSO     = false; // set when a rescan window lands on Midway SSO (dead session)
   let _appReady         = false;
+  let _startupScrapeStarted = false; // hoisted so API mode can hard-block the scrape loop
+  let _uptakeRefreshing = false;     // hoisted: guards the background Uptake API refresh
+  let _deepScanRunning  = false;     // hoisted: guards the background Orcha AI timeline build
+  let _lastDeepScanAt   = 0;         // hoisted: throttles the AI timeline build to once / 20 min
+  let _autoSyncStarted  = false;     // hoisted: ensures the auto-sync timer starts exactly once
+  let _reauthInFlight   = false;     // hoisted: guards the AEA/mwinit recovery ladder (one at a time)
+  let _apiLoadInFlight  = false;     // hoisted: single-flight guard for _loadFleetViaApiStartup (no concurrent builds)
+  let _apiLoadPendingReason = null;  // hoisted: a load requested while one was in flight → one trailing refresh
+  let _pmFillRunning    = false;     // hoisted: guards the background PM/location fill
+  let _lastPmFillAt     = 0;         // hoisted: throttles the PM/location fill to once/hour
+  const RESCAN_INTERVAL_MS = 5 * 60 * 1000; // hoisted: _showApp reads it synchronously in API mode
 
   // Lazy-load scrapers to avoid circular require at module load
   function _getAap()  { return require('../scrapers/aap'); }
   function _getAuth() { return require('../scrapers/auth'); }
+// Phase D: the ONE auth health authority. All session-rejection recovery routes
+// through the supervisor (target-verified, single-lock, bounded auto-retry) so
+// no caller runs its own competing ladder.
+function _getAuthSupervisor() { try { return require('../auth/midway-health-supervisor'); } catch (_) { return null; } }
 
   function getDomiciles() {
     const settings = store.load('settings', {});
     return (settings.domiciles && settings.domiciles.length)
       ? settings.domiciles
       : require('../config/defaults').DEFAULT_DOMICILES;
+  }
+
+  // ── Data source mode ────────────────────────────────────────────────────
+  // The direct AAP/RG JSON API is the DEFAULT fleet data source. The legacy
+  // BrowserWindow scrape (which depends on AEA and can bounce into Midway SSO
+  // loops) is used ONLY when the user explicitly opts into 'scrape' mode via
+  // the status-bar sync pill toggle. When API mode is active we must NOT load
+  // the AAP scan URL in the main window, NOT run the startup/rescan scrape
+  // loops, and NOT let scrape writers overwrite the API-sourced fleetData.
+  // RETIRED SCRAPE (2026-10-28): the API is the only fleet source. The legacy
+  // settings.dataSource='scrape' value is ignored; the scrape branches below
+  // are kept as a disabled backup, reachable only via FLEET_LEGACY_SCRAPE=1.
+  // See src/config/data-source.js.
+  function _apiMode() {
+    try { return require('../config/data-source').isApiMode(); }
+    catch (_) { return true; }
   }
 
   // ── Bubble ────────────────────────────────────────────────────────────────
@@ -755,7 +787,14 @@ function initWindows(ctx) {
 
     mainWindow = new BrowserWindow({
       width: 900, height: 700,
-      minWidth: 600, minHeight: 500,
+      // BUG FIX (2026-10): minHeight:500 let the window shrink below what the
+      // UI actually needs (48px topbar + filterbar + KPI strip), which combined
+      // with dashboard-mode's old forced 60vh table height caused header
+      // content to be pushed out of view on shorter laptop screens. Raised the
+      // floor; the fleet.css dashboard-mode fix (removal of that 60vh floor) is
+      // the primary fix, this is just a safety margin so the window itself
+      // can't be squeezed smaller than the chrome needs.
+      minWidth: 600, minHeight: 600,
       title: 'Fleet Operations \u2014 Sign in\u2026',
       icon: getAppIconPath(), // FEATURE (2026-07-22): real app icon instead of default Electron icon in taskbar/titlebar
       backgroundColor: '#0d1117',
@@ -880,45 +919,98 @@ function initWindows(ctx) {
     // after _showApp() then backfills the remaining chunks into the full dataset.
     const startupDomiciles = scrapeDomiciles.slice(0, 6);
     const startUrl        = buildScanURL(startupDomiciles);
-    if (scrapeDomiciles.length > 6) {
+    if (scrapeDomiciles.length > 6 && !_apiMode()) {
+      // Legacy scrape backup only — in API mode nothing is scraped.
       logger.info('Startup: ' + scrapeDomiciles.length + ' domiciles configured; scraping first 6 now, rest via chunked rescan');
     }
+    // ── API MODE (default): skip the AAP BrowserWindow scrape entirely ──────
+    // The direct AAP/RG JSON API is the default source. Don't load the AAP scan
+    // URL (which triggers AEA/SSO churn) — show the Fleet UI immediately and
+    // kick off the API load. The scrape pipeline is used only in 'scrape' mode.
+    if (_apiMode()) {
+      logger.info('[data-source] API mode \u2014 skipping AAP scrape, loading Fleet UI + API data');
+      _startupScrapeStarted = true;   // hard-block the scrape loop in _onMainWindowNav
+      try { send('auth:mwinit-status', { ok: true }); } catch (_) {}
+      // Expose the API loader on ctx NOW (before the early return) so the
+      // scheduler-driven runFullSync() + the status-bar toggle can trigger an
+      // API refresh. _loadFleetViaApiStartup is a hoisted function declaration,
+      // so it's safe to reference here even though it's defined further down.
+      if (ctx) ctx._loadFleetViaApiStartup = _loadFleetViaApiStartup;
+      // Paint the app UI right away from cache (if any), then load live via API.
+      _showApp();
+      _loadFleetViaApiStartup();
+      // Start the scheduler-driven auto-sync timer. In API mode _showApp() loads
+      // the renderer BEFORE the did-finish-load listener (registered later in
+      // this function) is attached, so that event is missed and startAutoSync
+      // never fires on its own — kick it off directly here. Guarded to run once.
+      try {
+        if (!_autoSyncStarted) {
+          _autoSyncStarted = true;
+          if (ctx && ctx.startAutoSync) ctx.startAutoSync();
+        }
+      } catch (e) { logger.warn('[data-source] startAutoSync failed: ' + e.message); }
+      return;
+    }
+
     logger.info('Loading AAP in main window: ' + startUrl.substring(0, 80));
 
     // ── Midway pre-flight: check actual cookie expiry, run mwinit if needed ──
     // Reads ~/.midway/cookie expiry timestamps — no hardcoded hour thresholds.
     // Spawns a visible cmd.exe terminal automatically when any cookie is expired.
     (async function _midwayPreFlight() {
-      const { checkMwinit, runMwinit, injectCookies } = _getAuth();
+      const { checkMwinit } = _getAuth();
       const state = checkMwinit();
+      const supervisor = _getAuthSupervisor();
 
-      if (!state.ok) {
-        logger.warn('[startup] ' + state.reason + ' \u2014 launching mwinit terminal');
-        pushStatus('\uD83D\uDD11 Midway session expired \u2014 complete auth in the terminal window...');
+      if (supervisor && typeof supervisor.ensureHealthyConverging === 'function') {
+        // DELEGATE startup entirely to the ONE supervisor (spec #3/#4/#18).
+        //
+        // NO cookie-only short-circuit: disk cookies (even a fresh-looking AEA)
+        // are EVIDENCE, not proof. They do not establish that Electron has the
+        // cookies, that live AEA is valid, that the posture agent is healthy, or
+        // that AAP accepts the session. The authoritative question is: can the
+        // REAL authenticated AAP target succeed? So we always VERIFY against the
+        // target. The API smoke test is cheap (one read-only GET), so this does
+        // not meaningfully slow startup.
+        //
+        // ensureHealthyConverging (not ensureHealthy) so that if startup
+        // recovery fails, bounded auto-retry is ARMED automatically — startup is
+        // NOT a one-shot health check. forceVerify makes it a fresh real-target
+        // check even if we think we are healthy.
+        logger.info('[startup] verifying Midway via supervisor (disk session ' + (state.ok ? 'ok' : state.reason) + ', aea ' + (state.aeaExpiresInMin == null ? 'missing' : state.aeaExpiresInMin + 'min') + ') — cookies are evidence only');
+        pushStatus('\uD83D\uDD04 Verifying Midway session\u2026');
         try {
-          await runMwinit();
-          await injectCookies();
-          // Verify the session actually works after standard mwinit
-          const { probeSession } = _getAuth();
-          const startupPageOk = await probeSession();
-          if (!startupPageOk) {
-            logger.warn('[startup] probeSession failed after standard mwinit -- retrying with mwinit -f');
-            pushStatus('\uD83D\uDD04 Session still rejected -- retrying with mwinit -f (tap WebAuthn again)...');
-            await runMwinit(true);
-            await injectCookies();
+          const r = await supervisor.ensureHealthyConverging({ reason: 'startup', allowPrompt: true, forceVerify: true });
+          if (r && r.ok && r.verified) {
+            send('auth:mwinit-status', { ok: true });
+            pushStatus('\u2705 Midway session ready');
+          } else {
+            send('auth:mwinit-status', { ok: false, reason: (r && r.reason) || 'session not verified' });
+            if (r && r.state === supervisor.STATE.WAITING_FOR_USER) pushStatus('\uD83D\uDD11 Complete mwinit in the terminal to finish sign-in\u2026');
+            else pushStatus('\u26A0\uFE0F Midway session not verified\u2014' + ((r && r.reason) || 'will auto-retry'));
           }
-          logger.info('[startup] mwinit complete \u2014 loading AAP');
-          pushStatus('\u2705 Midway auth complete \u2014 loading AAP...');
         } catch (e) {
-          logger.error('[startup] mwinit failed:', e.message);
-          pushError('\u26A0\uFE0F mwinit failed: ' + e.message + ' \u2014 try running mwinit -f in a terminal');
+          logger.error('[startup] supervisor ensureHealthyConverging failed: ' + e.message);
+          pushError('\u26A0\uFE0F Auth check failed: ' + e.message + ' \u2014 try running mwinit -f in a terminal');
         }
       } else {
-        logger.info('[startup] Cookies valid (' + state.count + ' cookies, expires in ' +
-          (state.expiresInMin !== null ? state.expiresInMin + 'min' : 'session') + ')');
-        // Push session status to renderer immediately so the auth badge is green on startup
-        send('auth:mwinit-status', { ok: true, expiresInMin: state.expiresInMin });
+        // FALLBACK (supervisor unavailable): minimal legacy behavior.
+        const { runMwinit, injectCookies } = _getAuth();
+        if (!state.ok) {
+          pushStatus('\uD83D\uDD11 Midway session expired \u2014 complete auth in the terminal window...');
+          try { await runMwinit(); await injectCookies(); pushStatus('\u2705 Midway auth complete'); }
+          catch (e) { pushError('\u26A0\uFE0F mwinit failed: ' + e.message + ' \u2014 try running mwinit -f in a terminal'); }
+        } else {
+          send('auth:mwinit-status', { ok: true, expiresInMin: state.expiresInMin });
+        }
       }
+
+      // Start the ONE background health monitor (spec #20). It periodically
+      // verifies against the real AAP target and re-verifies on reconnect,
+      // arming bounded auto-recovery when genuinely degraded (no prompt).
+      // Idempotent, so safe even if preflight re-runs.
+      try { if (supervisor && typeof supervisor.startHealthMonitor === 'function') supervisor.startHealthMonitor(); }
+      catch (e) { logger.warn('[startup] health monitor start failed: ' + e.message); }
 
       // Keep window invisible during AAP scrape
       mainWindow.setPosition(-3000, -3000);
@@ -928,8 +1020,495 @@ function initWindows(ctx) {
       mainWindow.loadURL(startUrl);
     })();
 
+    // ── API-mode fleet load (default source) ───────────────────────────────
+    // Builds the fleet dataset from the direct AAP/RG JSON API, merges Uptake +
+    // saved notes (same enrichment the scrape path uses), persists to the SAME
+    // fleetData store and pushes on the SAME fleet:data channel — so the table,
+    // filters, KPIs, Split View and detail panel render identically. Comments
+    // are NOT fetched here (table is instant); a unit's thread loads lazily via
+    // refreshUnit when its detail panel opens. Called once at startup in API
+    // mode, and on the recurring API refresh timer.
+    async function _loadFleetViaApiStartup(reason) {
+      // SINGLE-FLIGHT GUARD (2026-10-19): only ONE fleet build may run at a
+      // time. Without this, a burst of callers — e.g. several AAP reads that
+      // all failed while auth was down and then each fire a 'post-reauth' retry
+      // when the supervisor recovers — launch concurrent buildFleetDataset()
+      // runs that race on the shared AAP warm window (and one sibling calling
+      // aap_api.dispose() mid-build), so none completes and the table never
+      // repaints. If a build is already in flight, remember that another was
+      // requested and run exactly ONE follow-up when the current one finishes
+      // (coalescing the whole burst into a single trailing refresh).
+      if (_apiLoadInFlight) {
+        _apiLoadPendingReason = reason || 'coalesced';
+        logger.info('[data-source] API load (' + (reason || 'startup') + ') skipped — a build is already in flight (coalescing)');
+        return;
+      }
+      _apiLoadInFlight = true;
+      try {
+        // Stage 11: cluster live-pull gate. This is the single chokepoint every
+        // recurring live AAP read converges on (the 5-min API timer, the rescan
+        // redirect, app.js auto-sync via sync/index.js, and the scheduler
+        // pipeline's runFullSync all funnel here). A host that may NOT pull live
+        // (a non-capable standby) skips the live pull and keeps whatever the
+        // cluster sync engine already applied as a snapshot. A capable host
+        // (the laptop, or a headless DevSpace standby advertising aapLivePull
+        // via browser_provider) proceeds exactly as before. When the cluster
+        // flag is OFF, mayLivePull() is true → byte-for-byte unchanged behavior.
+        // This is a READ gate, independent of leadership/production writes.
+        try {
+          const cluster = require('../cluster');
+          if (typeof cluster.mayLivePull === 'function' && !cluster.mayLivePull()) {
+            logger.info('[data-source] API load (' + (reason || 'startup') +
+              ') skipped — host is not live-pull capable (standby); using synced snapshot');
+            pushStatus('\uD83D\uDD04 Standby — showing synced fleet snapshot');
+            return;
+          }
+        } catch (_) { /* cluster not wired → behave as legacy single-host */ }
+
+        logger.info('[data-source] API load (' + (reason || 'startup') + '): building fleet dataset…');
+        pushStatus('\uD83D\uDD04 Loading fleet via API…');
+        const api = require('../scrapers/aap_api');
+        const { mergeUptakeIntoRows } = require('../scrapers/uptake');
+        const { mergeRelayIntoRows } = require('../scrapers/relay');
+        const ds  = await api.buildFleetDataset({ withComments: false });
+        let rows  = ds.rows || [];
+
+        // Enrich from the CACHED Uptake units immediately (never block the table
+        // on a live Uptake refresh). Uptake data is layered by equipmentId.
+        try {
+          const uu = (store.load('uptakeHash', {}).units) || [];
+          if (uu.length) rows = mergeUptakeIntoRows(rows, uu);
+        } catch (e) { logger.warn('[data-source] uptake merge skipped: ' + e.message); }
+        // Saved notes by equipmentId. EMPTY relayData so the API's vendor/WO/
+        // offsite/comment fields pass through unmodified.
+        try {
+          const ns = store.load('notesStore', {});
+          rows = mergeRelayIntoRows(rows, {}, ns);
+        } catch (e) { logger.warn('[data-source] notes merge skipped: ' + e.message); }
+
+        // CARRY-FORWARD per-unit enrichment that the bulk rebuild CANNOT
+        // reproduce (PM due dates + location from getAsset, offsite URL from WO
+        // comments, fetched lazily by hydration / PM-fill / refreshUnit). Without
+        // this, every recurring 5-min rebuild wiped PM/geo/offsite back to blank
+        // (observed: PM pills 201 -> 0 after the refresh). Overlay the previous
+        // fleetData's values for these fields by equipmentId; the fresh rebuild
+        // wins for everything else (lifecycle, WO, vendor, etc.).
+        try {
+          const prev = store.load('fleetData', null);
+          if (prev && Array.isArray(prev.rows) && prev.rows.length) {
+            // UNIT-level enrichment: true for the asset regardless of which WR is open.
+            const CARRY_UNIT = ['pmBDue','pmXDue','dotDue','quarterlyLiftDue','pmB','pmX','dot','quarterlyLift','geofence'];
+            // WR-level enrichment: the offsite (dealer estimate / SR / DTNA case)
+            // and its scraped dealer notes belong to ONE work request. Carry them
+            // ONLY when the open WR is unchanged — otherwise a completed WO's
+            // offsite stuck to the unit forever (B12260/B62049/B62064, 10/28).
+            const CARRY_WR = OFFSITE_FIELDS;
+            const blank = (v) => v == null || v === '' || v === '--';
+            const prevById = new Map(prev.rows.map((r) => [r.equipmentId, r]));
+            for (const row of rows) {
+              const p = prevById.get(row.equipmentId);
+              if (!p) continue;
+              for (const k of CARRY_UNIT) {
+                // carry prior value only when the fresh rebuild left it blank/'--'
+                if (blank(row[k]) && !blank(p[k])) row[k] = p[k];
+              }
+              // Conversation: the bulk rebuild is withComments:false, so without
+              // this every 5-min refresh blanked fullConversation until hydration
+              // re-fetched it. Same-WR only (a conversation is per WR too).
+              const sameWR = !!(row.workRequestId && p.workRequestId === row.workRequestId);
+              if (sameWR) {
+                if (blank(row.fullConversation) && !blank(p.fullConversation)) {
+                  row.fullConversation = p.fullConversation;
+                  if (p._convFetchedAt) row._convFetchedAt = p._convFetchedAt;
+                }
+                for (const k of CARRY_WR) {
+                  if (blank(row[k]) && !blank(p[k])) row[k] = p[k];
+                }
+                if (p._offsiteWrId && blank(row._offsiteWrId)) row._offsiteWrId = p._offsiteWrId;
+                // Extra open WOs (secondary / planned WR cards in the unit panel).
+                // The bulk rebuild doesn't fetch them, so every 5-min refresh
+                // emptied _secondaryWRs and the extra WO cards vanished until the
+                // next hydration (up to ~20 min). Hydration still replaces them
+                // with live data (including [] when a secondary WO closes).
+                if ((!Array.isArray(row._secondaryWRs) || !row._secondaryWRs.length) && Array.isArray(p._secondaryWRs) && p._secondaryWRs.length) {
+                  row._secondaryWRs = p._secondaryWRs;
+                }
+                if (!row._plannedWRData && p._plannedWRData) row._plannedWRData = p._plannedWRData;
+              }
+            }
+          }
+        } catch (e) { logger.warn('[data-source] carry-forward merge skipped: ' + e.message); }
+
+        const now = new Date().toISOString();
+        const payload = {
+          rows, count: rows.length, unavailableCount: ds.unavailableCount,
+          scrapedAt: now, syncedAt: now, stale: false, source: 'aap-api',
+        };
+        store.save('fleetData', payload);
+        if (ctx) ctx.lastData = payload;
+        pushData(payload);   // TABLE PAINTS NOW — instant, no Uptake wait.
+        logger.info('[data-source] API load: pushed ' + rows.length + ' units (' + ds.unavailableCount + ' unavailable)');
+        pushStatus('\u2705 ' + rows.length + ' units \u2014 ' + ds.unavailableCount + ' unavailable (API)');
+
+        // BACKGROUND: if the Uptake cache is stale (>1h), refresh it via Uptake's
+        // OWN REST API (src/scrapers/uptake.js), then re-merge + re-push. This is
+        // NOT awaited — the table is already live; Uptake risk scores fold in when
+        // ready. Guarded so only one Uptake refresh runs at a time.
+        _maybeRefreshUptakeAsync(ds, mergeUptakeIntoRows, mergeRelayIntoRows);
+
+        // BACKGROUND: AI repair-timeline build. The API provides raw WO comments
+        // in fullConversation (+ offsite asistNotes); the OFFICIAL timeline shown
+        // to partners is built by Orcha (deep-scan.js), NOT a raw comment dump.
+        // Same builder the scrape sync used. Non-blocking; writes repairTimeline
+        // + notesStore and re-pushes when done.
+        _maybeRunDeepScanAsync(payload);
+
+        // BACKGROUND: PM + location for the REST of the fleet (available units).
+        // The bulk asset search can't return maintenanceScheduleStatuses (HTTP
+        // 400), so fetch getAsset per unit — throttled, low priority, re-pushing
+        // in chunks — so every unit eventually shows PM due dates + location in
+        // the table. Guarded to run once per load cycle.
+        _maybeFillPmAllAsync(payload);
+        // Quick Volvo/PACCAR case-stage refresh (2026-10-28): reads only the
+        // Decisiv status API (not notes / AI), at most every 15 min, so the
+        // stage + Ready are current without waiting on deep-scan's 2h notes
+        // cache. Saves + runs the canonical pass. Non-blocking, non-fatal.
+        try {
+          require('../orcha/stage_refresh').refreshStages({ pushData, ctx })
+            .catch((e) => logger.warn('[stage-refresh] error (non-fatal): ' + e.message));
+        } catch (e) { logger.warn('[stage-refresh] hook error (non-fatal): ' + e.message); }
+      } catch (e) {
+        // A server-REJECTED AAP session (bounced to the SSO login wall) is the
+        // one failure the timestamp-based checkMwinit() can't see — the cookie
+        // file reads "valid" by expiry while AAP rejects it (almost always a
+        // lapsed/missing AEA posture cookie). Recovery LADDER (cheap → costly):
+        //   1. silent AEA re-mint (OIDC handshake, no prompt)
+        //   2. `mwinit --refresh-aea` — re-mint JUST the AEA cookie (rung A)
+        //   3. full interactive `mwinit` — only if the session itself is gone (B)
+        // then retry the load once. Guarded so only one ladder runs at a time.
+        const sessionRejected = (e && e.code === 'MIDWAY_SESSION_INVALID') ||
+          /session expired|session rejected|re-authenticate/i.test(e && e.message || '');
+        const _supervisor = _getAuthSupervisor();
+        if (sessionRejected && _supervisor && typeof _supervisor.ensureHealthyConverging === 'function') {
+          // Phase D: delegate to the ONE supervisor. It owns the global lock
+          // (so no second ladder runs — _reauthInFlight is subsumed), runs the
+          // proven rungs (silent AEA → mwinit --refresh-aea → AEA-agent self-heal
+          // → interactive mwinit), VERIFIES against the real AAP target (not
+          // just a probe / mwinit completion), and on failure ARMS a bounded
+          // auto-retry so it converges back to HEALTHY on its own instead of
+          // staying stuck. VPN is never a gate.
+          logger.warn('[data-source] API load failed — AAP session rejected; delegating to auth supervisor: ' + e.message);
+          try { send('auth:mwinit-status', { ok: false, reason: 'AAP session rejected — recovering' }); } catch (_) {}
+          pushError('AAP session expired — recovering enterprise-access (AEA)…');
+          (async () => {
+            try {
+              const r = await _supervisor.ensureHealthyConverging({ reason: 'data-source-api-load', allowPrompt: true });
+              try { require('../scrapers/aap_api').dispose(); } catch (_) {}  // drop stale warm window
+              if (r && r.ok && r.verified) {
+                try { send('auth:mwinit-status', { ok: true }); } catch (_) {}
+                logger.info('[data-source] supervisor recovered (rung=' + r.rung + ') — retrying fleet load');
+                _loadFleetViaApiStartup('post-reauth');
+              } else {
+                try { send('auth:mwinit-status', { ok: false, reason: (r && r.reason) || 'AAP still rejecting' }); } catch (_) {}
+                const when = (r && r.nextRetryAt) ? (' Auto-retry scheduled.') : '';
+                pushError('AAP still rejecting the session (' + ((r && r.state) || 'unhealthy') + ').' + when + ' Or run `mwinit --refresh-aea` (or `mwinit -f`) in a terminal, then click Sync.');
+                logger.error('[data-source] supervisor did not reach HEALTHY: ' + ((r && r.reason) || r && r.class || 'unknown') + ' (state=' + (r && r.state) + ')');
+              }
+            } catch (err) {
+              logger.error('[data-source] supervisor recovery error: ' + err.message);
+              pushError('Re-auth failed: ' + err.message + ' — run `mwinit --refresh-aea` in a terminal, then Sync.');
+            }
+          })();
+        } else if (sessionRejected && !_reauthInFlight) {
+          // FALLBACK (supervisor unavailable): the legacy hand-rolled ladder.
+          _reauthInFlight = true;
+          logger.warn('[data-source] API load failed — AAP session rejected; legacy recovery ladder: ' + e.message);
+          try { send('auth:mwinit-status', { ok: false, reason: 'AAP session rejected — recovering' }); } catch (_) {}
+          pushError('AAP session expired — refreshing enterprise-access (AEA)…');
+          (async () => {
+            try {
+              const sup = _getAuthSupervisor();
+              const r = sup ? await sup.ensureHealthyConverging({ reason: 'data-source-legacy', allowPrompt: true }) : null;
+              const ok = !!(r && r.ok && r.verified);
+              try { require('../scrapers/aap_api').dispose(); } catch (_) {}
+              if (ok) { try { send('auth:mwinit-status', { ok: true }); } catch (_) {} _loadFleetViaApiStartup('post-reauth'); }
+              else { pushError('AAP still rejecting the session. Run `mwinit --refresh-aea` (or `mwinit -f`) in a terminal, then click Sync.'); }
+            } catch (err) {
+              logger.error('[data-source] recovery error: ' + err.message);
+              pushError('Re-auth failed: ' + err.message + ' — run `mwinit --refresh-aea` in a terminal, then Sync.');
+            } finally {
+              _reauthInFlight = false;
+            }
+          })();
+        } else {
+          logger.warn('[data-source] API load failed: ' + e.message);
+          pushError('API load failed: ' + e.message);
+        }
+      } finally {
+        // Release the single-flight guard. If other callers asked for a load
+        // while this one was running, run exactly ONE trailing refresh now so
+        // the latest data lands — without stacking the whole burst.
+        _apiLoadInFlight = false;
+        if (_apiLoadPendingReason) {
+          const nextReason = _apiLoadPendingReason;
+          _apiLoadPendingReason = null;
+          logger.info('[data-source] running coalesced follow-up fleet load (' + nextReason + ')');
+          setTimeout(() => { _loadFleetViaApiStartup(nextReason); }, 250);
+        }
+      }
+    }
+
+    // Background AI timeline build (Orcha deep-scan) + re-push. Non-blocking.
+    // Guarded so only one runs at a time.
+    //
+    // The bulk fleet load uses withComments:false (fast), so down units have no
+    // fullConversation yet. The AI timeline needs it — so FIRST hydrate each
+    // down unit's conversation via the API (refreshUnit returns fullConversation
+    // + _secondaryWRs' conversations, internal comments already excluded), THEN
+    // hand the rows to runOrchaDeepScan which transforms them into the official
+    // partner-facing timeline (exactly the scrape path's behavior).
+    function _maybeRunDeepScanAsync(payload) {
+      if (_deepScanRunning) return;
+      // Don't re-run the full AI build more than once per 20 min — it's a heavy
+      // per-unit hydrate + AI call. The 5-min API refresh keeps the table fresh;
+      // the AI timeline doesn't need rebuilding that often.
+      if (_lastDeepScanAt && (Date.now() - _lastDeepScanAt) < 20 * 60 * 1000) return;
+      const rows = (payload && payload.rows) || [];
+      const downRows = rows.filter((r) => /unavail/i.test(String(r.lifecycleState || '')) || /offsite/i.test(String(r.lifecycleReason || '')));
+      if (!downRows.length) return;
+      _deepScanRunning = true;
+      _lastDeepScanAt = Date.now();
+      logger.info('[data-source] AI timeline build: hydrating ' + downRows.length + ' down units\u2019 conversations, then Orcha deep-scan…');
+      (async () => {
+        try {
+          const api = require('../scrapers/aap_api');
+          // Hydrate the down units via getAsset (PM due dates) + their WO
+          // conversations (bounded). PM is fetched even when the conversation is
+          // already cached, so the pills fill in. Mutates the rows in `payload`.
+          let hydrated = 0;
+          const _offsiteCleared = [];
+          let _relayCacheForOffsite = {};
+          try { _relayCacheForOffsite = store.load('relayCache', {}) || {}; } catch (_) {}
+          for (const r of downRows) {
+            try {
+              // api.refreshUnit() returns the mapped row directly. It calls
+              // getAsset(), which carries maintenanceScheduleStatuses — so this
+              // is where the PM due-date pills get populated for the table
+              // (the bulk asset search does NOT return that field).
+              const fr = await api.refreshUnit(r.equipmentId);
+              if (fr && fr.fullConversation) { r.fullConversation = fr.fullConversation; r._convFetchedAt = new Date().toISOString(); hydrated++; }
+              if (fr && fr._secondaryWRs) r._secondaryWRs = fr._secondaryWRs;
+              // PM due dates (raw + pills), offsite URL (Split View right pane),
+              // and location — all from getAsset + the WO comment thread.
+              if (fr) {
+                for (const k of ['pmBDue', 'pmXDue', 'dotDue', 'quarterlyLiftDue', 'pmB', 'pmX', 'dot', 'quarterlyLift', 'geofence']) {
+                  if (fr[k] != null && fr[k] !== '' && fr[k] !== '--') r[k] = fr[k];
+                }
+                if (fr.vin && !r.vin) r.vin = fr.vin;
+
+                // OFFSITE OWNERSHIP (2026-10-28): the offsite belongs to the WR
+                // whose comments contain it. fr is the unit's CURRENT WR with its
+                // live comment thread, so it is the authority — but only when it
+                // is the same WR the row is showing.
+                const sameWR = !!(fr.workRequestId && r.workRequestId && fr.workRequestId === r.workRequestId);
+                if (sameWR) {
+                  const frUrl = offsiteUrlOf(fr);
+                  const rowUrl = offsiteUrlOf(r);
+                  if (frUrl) {
+                    // Current WR names an offsite. If it's a DIFFERENT link than the
+                    // row had, drop the old link's dealer notes before taking the new one.
+                    if (rowUrl && rowUrl !== frUrl) clearOffsite(r);
+                    for (const k of ['offsiteShopEventUrl', 'savedOffsiteUrl', 'offsiteShopEvent', 'asistSrUrl', 'asistLabel', 'asistSource']) {
+                      if (fr[k] != null && fr[k] !== '' && fr[k] !== '--') r[k] = fr[k];
+                    }
+                    r._offsiteWrId = fr.workRequestId;
+                  } else if (rowUrl) {
+                    // Current WR's comments don't name the row's offsite. Keep it
+                    // only if something ties it to THIS WR; otherwise it's left over
+                    // from a previous (completed) WO — clear it + its dealer notes.
+                    const base = rowUrl.split('?')[0];
+                    const secs = Array.isArray(fr._secondaryWRs) ? fr._secondaryWRs : [];
+                    const inThisWr = String(fr.fullConversation || '').includes(base);
+                    const inOpenSecondary = secs.some((s) => offsiteUrlOf(s) === rowUrl || String((s && s.fullConversation) || '').includes(base));
+                    const rc = _relayCacheForOffsite[r.equipmentId] || {};
+                    const relayConfirms = !!(rc.workRequestId && rc.workRequestId === r.workRequestId && offsiteUrlOf(rc) === rowUrl);
+                    const stamped = r._offsiteWrId === r.workRequestId;
+                    if (inThisWr || inOpenSecondary || relayConfirms || stamped) {
+                      if (!r._offsiteWrId) r._offsiteWrId = r.workRequestId;
+                    } else {
+                      clearOffsite(r);
+                      _offsiteCleared.push(r.equipmentId + ' (' + base.replace(/^https?:\/\//, '') + ')');
+                    }
+                  }
+                }
+              }
+            } catch (_) { /* skip this unit */ }
+          }
+          // Persist + push the hydrated rows NOW (PM pills + conversations) so the
+          // saved fleetData + table reflect them even before the AI timeline
+          // finishes. (The deep-scan below only pushData()s; it doesn't save.)
+          try {
+            // FIX (2026-10-28): `payload` was loaded BEFORE the 15-min stage
+            // refresh may have saved newer Volvo/PACCAR stages (322504 "no
+            // status" was wiped back to a stale "ready" by this save). Pull any
+            // NEWER stage/notes reads from the stored copy first.
+            try {
+              const _cur = (store.load('fleetData', {}) || {}).rows || [];
+              require('../orcha/canonical_runner').overlayDeepScanFields(payload.rows || [], _cur);
+            } catch (_) {}
+            payload.syncedAt = new Date().toISOString();
+            store.save('fleetData', payload);
+            if (ctx) ctx.lastData = payload;
+            pushData(payload);
+          } catch (_) {}
+          if (_offsiteCleared.length) {
+            logger.info('[offsite] cleared ' + _offsiteCleared.length + ' offsite link(s) not tied to the unit\u2019s current WR: ' + _offsiteCleared.join(', '));
+          }
+          logger.info('[data-source] AI timeline build: hydrated ' + hydrated + ' conversations + PM — running Orcha deep-scan');
+          const { runOrchaDeepScan } = require('../orcha/deep-scan');
+          await runOrchaDeepScan(rows, {
+            pushData,
+            pushStatus,
+            payload,
+            uptakeCount: (store.load('uptakeHash', {}).units || []).length,
+            relayCount: 0,
+          });
+        } catch (e) {
+          logger.warn('[data-source] deep-scan error (non-fatal): ' + e.message);
+        } finally {
+          _deepScanRunning = false;
+          // CANONICAL PASS in API mode (2026-10-28): it only ran in the legacy
+          // scrape sync, so canonical state froze on 10-16. Runs after every
+          // API load + deep-scan (even if deep-scan failed) and saves the
+          // deep-scan's Decisiv case stage so Ready is known. Non-fatal.
+          try {
+            require('../orcha/canonical_runner').runCanonicalPass({ scannedRows: rows, pushData, ctx });
+          } catch (e) { logger.warn('[canonical] API-mode pass error (non-fatal): ' + e.message); }
+        }
+      })();
+    }
+
+    // Background PM + location fill for ALL units (throttled). getAsset per unit
+    // — only the ones still missing PM — in small chunks with a pause between,
+    // re-pushing so the table fills progressively. Runs once per load cycle,
+    // throttled to once/hour (PM/location change slowly). Non-blocking.
+    function _maybeFillPmAllAsync(payload) {
+      if (_pmFillRunning) return;
+      if (_lastPmFillAt && (Date.now() - _lastPmFillAt) < 60 * 60 * 1000) return;
+      const rows = (payload && payload.rows) || [];
+      // Units still lacking PM pills (down units were already filled by hydration).
+      const todo = rows.filter((r) => r.equipmentId && !(r.pmBDue || r.dotDue || r.pmXDue || r.quarterlyLiftDue));
+      if (!todo.length) return;
+      _pmFillRunning = true;
+      _lastPmFillAt = Date.now();
+      logger.info('[data-source] PM/location fill: ' + todo.length + ' units to enrich (throttled background)');
+      (async () => {
+        try {
+          const api = require('../scrapers/aap_api');
+          const mapper = require('../scrapers/aap_api_mapper');
+          const { parsePMDates } = require('../scrapers/relay');
+          // Accumulate computed PM/geo fields by equipmentId. We apply them onto
+          // the LIVE store (not a stale snapshot) at each save, so concurrent
+          // background enrichers (Uptake re-merge, deep-scan) don't clobber each
+          // other — each only overlays its own fields by equipmentId.
+          const pmByUnit = {};   // equipmentId -> { pmBDue, pmB, ..., geofence }
+          const _applyToStore = () => {
+            try {
+              const cur = store.load('fleetData', null);
+              if (!cur || !Array.isArray(cur.rows)) return;
+              for (const row of cur.rows) {
+                const fields = pmByUnit[row.equipmentId];
+                if (fields) Object.assign(row, fields);
+              }
+              cur.syncedAt = new Date().toISOString();
+              store.save('fleetData', cur);
+              if (ctx) ctx.lastData = cur;
+              pushData(cur);
+            } catch (_) {}
+          };
+          let done = 0;
+          for (const r of todo) {
+            try {
+              const aaid = r.assetId || r.aaid;
+              if (!aaid) continue;
+              const full = await api.getAsset(aaid);
+              if (full) {
+                const pmRaw = mapper.pmDueFields(full);
+                const _hasPm = pmRaw.pmBDue || pmRaw.pmXDue || pmRaw.dotDue || pmRaw.quarterlyLiftDue;
+                const fields = {};
+                if (_hasPm) {
+                  for (const k of Object.keys(pmRaw)) { if (pmRaw[k]) fields[k] = pmRaw[k]; }
+                  if (parsePMDates) { const pm = parsePMDates(pmRaw); fields.pmB = pm.pmB; fields.pmX = pm.pmX; fields.dot = pm.dot; fields.quarterlyLift = pm.quarterlyLift; }
+                }
+                const ll = (full.latestLocation) || (full.asset && full.asset.latestLocation) || {};
+                const gf = (g) => (Array.isArray(g) && g.length) ? (g[0] && (g[0].name || g[0].geofenceName || g[0])) : '';
+                const geo = gf(ll.geoFences) || ll.geofenceName || ll.yardBuildingID || '';
+                if (geo) fields.geofence = geo;
+                if (Object.keys(fields).length) { pmByUnit[r.equipmentId] = fields; done++; }
+              }
+            } catch (_) { /* skip */ }
+            // Throttle: overlay onto the live store + push in chunks.
+            if (done % 15 === 0 && done > 0) {
+              _applyToStore();
+              await new Promise((res) => setTimeout(res, 1500));
+            }
+          }
+          _applyToStore();
+          logger.info('[data-source] PM/location fill: enriched ' + done + ' units');
+        } catch (e) { logger.warn('[data-source] PM/location fill failed: ' + e.message); }
+        finally { _pmFillRunning = false; }
+      })();
+    }
+
+    // Background Uptake refresh (via Uptake REST API) + re-push. Non-blocking.
+    function _maybeRefreshUptakeAsync(ds) {
+      try {
+        const hash = store.load('uptakeHash', {});
+        const ageMs = hash.scrapedAt ? (Date.now() - new Date(hash.scrapedAt).getTime()) : Infinity;
+        const stale = !(Array.isArray(hash.units) && hash.units.length) || ageMs > 3600 * 1000;
+        if (!stale || _uptakeRefreshing) return;
+        _uptakeRefreshing = true;
+        logger.info('[data-source] Uptake cache stale (' + (isFinite(ageMs) ? Math.round(ageMs / 60000) + 'min' : 'empty') + ') — background refresh via Uptake API');
+        const { scrapeUptake, mergeUptakeIntoRows } = require('../scrapers/uptake');
+        const { mergeRelayIntoRows } = require('../scrapers/relay');
+        (async () => {
+          try {
+            const res = await scrapeUptake();
+            if (res && Array.isArray(res.units) && res.units.length) {
+              store.save('uptakeHash', {
+                units: res.units, count: res.units.length,
+                scrapedAt: res.scrapedAt || new Date().toISOString(),
+              });
+              logger.info('[data-source] Uptake API: ' + res.units.length + ' units refreshed + cached — re-merging');
+              // Re-merge onto the CURRENT fleet rows and re-push so risk scores appear.
+              const cur = store.load('fleetData', null);
+              if (cur && Array.isArray(cur.rows)) {
+                let rows2 = mergeUptakeIntoRows(cur.rows, res.units);
+                try { rows2 = mergeRelayIntoRows(rows2, {}, store.load('notesStore', {})); } catch (_) {}
+                const now2 = new Date().toISOString();
+                const p2 = { rows: rows2, count: rows2.length, unavailableCount: cur.unavailableCount, scrapedAt: now2, syncedAt: now2, stale: false, source: 'aap-api' };
+                store.save('fleetData', p2);
+                if (ctx) ctx.lastData = p2;
+                pushData(p2);
+                logger.info('[data-source] Uptake re-merge pushed (' + rows2.length + ' units)');
+              }
+            }
+          } catch (e) { logger.warn('[data-source] background Uptake refresh failed: ' + e.message); }
+          finally { _uptakeRefreshing = false; }
+        })();
+      } catch (e) { _uptakeRefreshing = false; logger.warn('[data-source] Uptake refresh scheduling failed: ' + e.message); }
+    }
+    // Expose on ctx so toggle/IPC can trigger a refresh the same way.
+    if (ctx) ctx._loadFleetViaApiStartup = _loadFleetViaApiStartup;
+
     function _showApp() {
       _appReady = true;
+      // In API mode the fleet comes from the direct JSON API, not the chunked
+      // scrape rescan — skip scheduling the scrape backfill/recurring rescan.
+      if (_apiMode()) {
+        logger.info('[data-source] API mode \u2014 scheduling recurring API refresh (no scrape rescan)');
+        setInterval(() => { _loadFleetViaApiStartup('refresh'); }, RESCAN_INTERVAL_MS);
+      } else {
       // Startup shows only the first 6 domiciles for a fast first paint; the
       // chunked rescan backfills the remaining domiciles. Run that FIRST backfill
       // almost immediately (~5s) instead of after 90s so all configured
@@ -940,6 +1519,7 @@ function initWindows(ctx) {
       setTimeout(() => {
         setInterval(() => triggerLiveRescan(false), RESCAN_INTERVAL_MS);
       }, RESCAN_INTERVAL_MS);
+      }
       logger.info('Switching to Fleet Operations app...');
       if (process.env.NODE_ENV === 'development') {
         mainWindow.loadURL('http://localhost:5173');
@@ -968,8 +1548,6 @@ function initWindows(ctx) {
       }catch(e){}
       _showApp();
     }
-    let _startupScrapeStarted = false;
-
     function _onMainWindowNav(url) {
       if (!url) url = mainWindow.webContents.getURL();
       logger.info('Main window loaded: ' + url.substring(0, 80));
@@ -1054,63 +1632,44 @@ function initWindows(ctx) {
         if (_ssoCount >= 10 && !_mwinitRunning) {
           _mwinitRunning = true;
           clearInterval(_authPoller);
-          logger.warn('[auth-poll] SSO redirect loop \u2014 launching mwinit terminal');
-          pushStatus('\uD83D\uDD11 Session expired \u2014 complete Midway auth in the terminal window...');
+          logger.warn('[auth-poll] SSO redirect loop detected');
+          logger.warn('[auth-poll] SSO redirect loop \u2014 delegating to the ONE auth supervisor');
+          pushStatus('\uD83D\uDD04 Resolving Midway session\u2026');
           try {
-            // FIX (2026-07-21): this recovery path was calling runMwinit() +
-            // injectCookies() directly, then doing a raw mainWindow.loadURL()
-            // with NO verification and NO retry -- a materially weaker flow
-            // than src/scrapers/auth.js's ensureAuthenticated(), which does
-            // inject -> verify via a real probe-window navigation -> verify
-            // via a relay-endpoint ping -> automatically retry injection once
-            // if the relay check fails. Confirmed via logs/auth.log:
-            // 2026-07-20 (working) sessions all logged the full "nav:" /
-            // "Probe landed:" / "Relay landed:" / "Session confirmed"
-            // sequence; 2026-07-21 (broken) attempts never did, because this
-            // path never called it. Injecting cookies successfully is
-            // necessary but not sufficient for AAP to actually accept the
-            // session -- only the probe/relay checks prove that.
-            //
-            // NOT delegating to ensureAuthenticated() wholesale: its own
-            // internal mwinit auto-spawn is deliberately disabled
-            // (`if (false /* DISABLED: mwinit auto-spawn causes boot loops */)`)
-            // per a prior fix, so calling it alone would silently skip
-            // spawning mwinit here. Keeping the explicit runMwinit() call
-            // below and adding the same probeSession()/pingRelayEndpoint()
-            // verification+retry ensureAuthenticated() does, without its
-            // disabled auto-spawn branch.
-            const { runMwinit, injectCookies, probeSession, pingRelayEndpoint } = _getAuth();
-
-            // ATTEMPT 1: standard mwinit
-            await runMwinit();
-            await injectCookies();
-
-            let pageOk = await probeSession();
-            if (!pageOk) {
-              // ATTEMPT 2: force mwinit (-f) clears stale server-side session.
-              // Fixes the "AAP rejected session" startup blocker that required
-              // manual mwinit -f + restart. Now happens automatically.
-              logger.warn('[auth-poll] probeSession failed after standard mwinit -- retrying with mwinit -f');
-              pushStatus('\uD83D\uDD04 Session still rejected -- retrying with mwinit -f (tap WebAuthn again)...');
-              await runMwinit(true);
-              await injectCookies();
-              pageOk = await probeSession();
+            // Delegate to the supervisor (spec #18): it runs the verified ladder
+            // (silent AEA → mwinit --refresh-aea → AEA-agent self-heal →
+            // interactive mwinit only if the session is truly dead), VERIFIES
+            // against the real AAP target, and arms a bounded auto-retry on
+            // failure. Replaces the hand-rolled silent-refresh + recoverAuth +
+            // explicit-mwinit sequence that used to live here. Falls back to the
+            // centralized recoverAuth ladder if the supervisor is unavailable.
+            const supervisor = _getAuthSupervisor();
+            let recovered = false, prompted = false, offline = false, stateReason = '';
+            if (supervisor && typeof supervisor.ensureHealthyConverging === 'function') {
+              const r = await supervisor.ensureHealthyConverging({ reason: 'auth-poll:sso-loop', allowPrompt: true, forceVerify: true });
+              recovered = !!(r && r.ok && r.verified);
+              prompted = !!(r && r.prompted);
+              offline = !!(r && r.state === supervisor.STATE.OFFLINE);
+              stateReason = (r && (r.reason || r.state)) || '';
+            } else {
+              const _auth = _getAuth();
+              const res = _auth.recoverAuth ? await _auth.recoverAuth('auth-poll:sso-loop') : { recovered: false };
+              recovered = !!(res && res.recovered); prompted = !!(res && res.prompted); offline = (res && res.rung === 'offline');
             }
-            if (!pageOk) throw new Error('AAP rejected session after mwinit -f -- check VPN/network and restart');
-
-            let relayOk = await pingRelayEndpoint();
-            if (!relayOk) {
-              logger.warn('[auth-poll] Relay check failed -- re-injecting and retrying');
-              await injectCookies();
-              relayOk = await pingRelayEndpoint();
+            try { require('../scrapers/aap_api').dispose(); } catch (_) {}
+            if (recovered) {
+              logger.info('[auth-poll] supervisor recovered the SSO loop \u2014 reloading AAP');
+              pushStatus(prompted ? '\u2705 Midway auth complete \u2014 reloading AAP...' : '\u2705 Session refreshed \u2014 reloading AAP...');
+              _ssoCount = 0;
+              mainWindow.loadURL(startUrl);
+            } else if (offline) {
+              pushStatus('\uD83D\uDCF6 Offline \u2014 will resume when the connection returns');
+            } else {
+              logger.warn('[auth-poll] supervisor did not recover (' + stateReason + ') \u2014 bounded auto-retry armed');
+              pushStatus('\u26A0\uFE0F Midway session not verified \u2014 auto-retrying\u2026');
             }
-            if (!relayOk) throw new Error('AAP relay rejected session -- try restarting the app');
-
-            logger.info('[auth-poll] session verified (page + relay probes passed) \u2014 reloading AAP');
-            pushStatus('\u2705 Midway auth complete \u2014 reloading AAP...');
-            mainWindow.loadURL(startUrl);
           } catch (e) {
-            logger.error('[auth-poll] mwinit/verification failed:', e.message);
+            logger.error('[auth-poll] recovery failed:', e.message);
             pushError('\u26A0\uFE0F ' + e.message);
           }
         }
@@ -1126,6 +1685,25 @@ function initWindows(ctx) {
     }, 1000);
 
     mainWindow.webContents.on('before-input-event', (_event, input) => {
+      // Ctrl+R (Cmd+R on mac) — RESTART THE WHOLE APP (main + renderer), the
+      // same as a manual stop/start. Handled here in the main process so it
+      // still works when the renderer is frozen. Force sync moved to
+      // Ctrl+Shift+R (handled in the renderer's keyboard-shortcuts.js).
+      // The close handler below always cancels close (hide-to-bubble), so
+      // app.quit() would be blocked — run the before-quit cleanup (scheduler
+      // stop, cluster lease release) explicitly, then relaunch + exit.
+      if (input.type === 'keyDown' && !input.isAutoRepeat && (input.control || input.meta) &&
+          !input.shift && !input.alt && String(input.key).toLowerCase() === 'r') {
+        _event.preventDefault();
+        logger.info('[shortcut] Ctrl+R \u2014 restarting app');
+        try { pushStatus('\uD83D\uDD04 Restarting app...'); } catch (_) {}
+        setTimeout(() => {
+          try { app.emit('before-quit'); } catch (e) { logger.warn('[shortcut] before-quit cleanup failed: ' + e.message); }
+          app.relaunch();
+          app.exit(0);
+        }, 300);
+        return;
+      }
       if (input.key === 'F12' && input.type === 'keyDown') {
         if (mainWindow.webContents.isDevToolsOpened()) {
           mainWindow.webContents.closeDevTools();
@@ -1179,7 +1757,12 @@ function initWindows(ctx) {
 
     mainWindow.webContents.on('did-finish-load', () => {
       const url = mainWindow.webContents.getURL();
-      if (url.includes('index.html') || url.startsWith('file://')) {
+      // Start the scheduler-driven auto-sync once the Fleet UI (renderer) is
+      // loaded. Match the dev server (localhost:5173) too, not just the packaged
+      // index.html/file:// — otherwise the sync-interval timer never starts in
+      // dev and the scheduler's Fleet Sync never fires on its own.
+      if ((url.includes('index.html') || url.startsWith('file://') || url.includes('localhost:5173') || url.includes('dist/renderer')) && !_autoSyncStarted) {
+        _autoSyncStarted = true;
         if (ctx.startAutoSync) ctx.startAutoSync(); else if (startAutoSync) startAutoSync();
       }
     });
@@ -1215,7 +1798,8 @@ function initWindows(ctx) {
     });
 
     // ── Live rescan: off-screen BrowserWindow every 5 min ────────────────────
-    const RESCAN_INTERVAL_MS = 5 * 60 * 1000;
+    // RESCAN_INTERVAL_MS is declared at initWindows scope (hoisted) so _showApp
+    // can read it synchronously at startup in API mode without a TDZ error.
 
     // The AAP dashboard hard-caps the domicile/search filter at 6 sites — pass
     // more and the page returns an EMPTY result set. To support fleets spread
@@ -1320,6 +1904,14 @@ function initWindows(ctx) {
     }
 
     async function triggerLiveRescan(force) {
+      // In API mode the scrape is disabled entirely — redirect any rescan
+      // request (timer, F5, aap:rescan IPC) to an API refresh instead so the
+      // AAP BrowserWindow never opens and can't bounce into AEA/SSO.
+      if (_apiMode()) {
+        logger.info('[data-source] API mode \u2014 rescan request redirected to API refresh');
+        if (ctx && ctx._loadFleetViaApiStartup) { try { await ctx._loadFleetViaApiStartup('rescan'); } catch (_) {} }
+        return;
+      }
       if (!_appReady)         { logger.info('Rescan skipped \u2014 app not ready'); return; }
       if (_rescanInProgress)  { logger.info('Rescan already in progress'); return; }
       // Skip the TIMER-driven rescan while a Long Dwell AI Fill is running -- a
@@ -1413,34 +2005,31 @@ function initWindows(ctx) {
       }
 
       // If any chunk landed on Midway SSO, the AAP session is dead server-side
-      // (AEA token lapsed) even if the 20h cookie is still valid. Proactively
-      // recover here so the NEXT rescan (5 min later) isn't another bounced,
-      // 0-row cycle: re-inject the freshest cookies first (fixes it silently
-      // when the cookie file still has a live AEA), and only escalate to a full
-      // mwinit -- the one path that needs the WebAuthn tap -- when the AEA on
-      // disk is itself dead. This is what makes the fix self-healing without
-      // waiting for the user to notice stale data.
+      // (AEA token lapsed) even if the 20h cookie is still valid. Recovery is
+      // NOT a rescan decision — it belongs to the ONE auth supervisor (spec
+      // #5/#13). Rescan does not re-inject cookies, inspect AEA freshness, or
+      // run mwinit itself; it just hands auth ownership to the supervisor, which
+      // runs the verified ladder, VERIFIES against the real AAP target, and arms
+      // bounded auto-retry so the next rescan isn't another bounced 0-row cycle.
       if (_rescanHitSSO) {
         _rescanHitSSO = false;
-        try {
-          const { injectCookies, checkMwinit, runMwinit } = _getAuth();
-          logger.warn('[rescan] session was invalid -- attempting proactive recovery (re-inject)');
-          await injectCookies();
-          const st = checkMwinit();
-          const aeaDead = !st.ok || (st.aeaExpiresInMin !== null && st.aeaExpiresInMin <= 0);
-          if (aeaDead) {
-            logger.warn('[rescan] AEA token dead (aeaExpiresInMin=' +
-              (st.aeaExpiresInMin) + ', ok=' + st.ok + ') -- launching mwinit to recover');
-            pushStatus('\uD83D\uDD11 Session expired \u2014 complete Midway auth in the terminal window...');
-            await runMwinit();
-            await injectCookies();
-            logger.info('[rescan] recovery mwinit complete -- session refreshed');
-          } else {
-            logger.info('[rescan] re-inject recovery done (AEA still valid on disk, aeaExpiresInMin=' +
-              st.aeaExpiresInMin + ') -- next rescan should succeed');
+        const supervisor = _getAuthSupervisor();
+        if (supervisor && typeof supervisor.ensureHealthyConverging === 'function') {
+          try {
+            logger.warn('[rescan] landed on SSO -- delegating recovery to auth supervisor (single owner)');
+            const r = await supervisor.ensureHealthyConverging({ reason: 'rescan:sso', allowPrompt: true, forceVerify: true });
+            if (r && r.ok && r.verified) {
+              logger.info('[rescan] supervisor recovered + verified against AAP -- next rescan should succeed');
+            } else if (r && r.state === supervisor.STATE.WAITING_FOR_USER) {
+              pushStatus('\uD83D\uDD11 Session expired \u2014 complete Midway auth in the terminal window...');
+            } else {
+              logger.warn('[rescan] supervisor did not verify (' + ((r && r.reason) || 'unknown') + ') -- bounded auto-retry armed');
+            }
+          } catch (e) {
+            logger.warn('[rescan] supervisor recovery error: ' + e.message);
           }
-        } catch (e) {
-          logger.warn('[rescan] proactive recovery failed: ' + e.message);
+        } else {
+          logger.warn('[rescan] auth supervisor unavailable -- skipping proactive recovery (next rescan will re-detect)');
         }
       }
     }
@@ -1563,7 +2152,18 @@ function initWindows(ctx) {
     if (ctx.runFullSync) ctx.runFullSync();
   });
 
-  ipcMain.on('win:minimize', () => { if (mainWindow) mainWindow.minimize(); });
+  ipcMain.on('win:minimize', () => {
+    if (!mainWindow) return;
+    mainWindow.minimize();
+    // FIX (minimize-FAB): on a frameless (frame:false) window, programmatic
+    // mainWindow.minimize() does NOT reliably emit the 'minimize' event on
+    // Windows — so the on('minimize') handler that shows the desktop bubble
+    // never ran, and the FAB didn't appear. Show the bubble directly from the
+    // IPC that we KNOW fired (the custom titlebar minimize button). Guarded so
+    // it's a no-op if the event path DID fire (showBubble early-returns when a
+    // live bubbleWin already exists).
+    setTimeout(() => { try { showBubble(); } catch (err) { logger.error('showBubble on win:minimize: ' + err.message); } }, 300);
+  });
   ipcMain.on('win:maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
   ipcMain.on('win:close', () => { if (mainWindow) mainWindow.close(); });
   ipcMain.on('win:show',  () => { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); } });

@@ -27,9 +27,11 @@ function seedFleet() {
 beforeEach(() => { store.save('contacts', []); store.save('contactsTombstones', []); seedFleet(); });
 afterEach(() => { try { fs.rmSync(tmpDir, { recursive: true }); } catch (_) {} fs.mkdirSync(tmpDir, { recursive: true }); });
 
-describe('Simplified 4-identity permission model', () => {
-  it('only four identities are valid; manager is dropped', () => {
-    expect(cb.VALID_IDENTITY).toEqual(['internal', 'carrier', 'vendor', 'unknown']);
+describe('Simplified identity permission model', () => {
+  it('valid identities are internal/mcs/carrier/vendor/unknown; manager is dropped', () => {
+    // 'mcs' (the FAS's internal assistant) was added as an internal-class
+    // identity with all-fleet scope. 'manager' remains invalid (coerced away).
+    expect(cb.VALID_IDENTITY).toEqual(['internal', 'mcs', 'carrier', 'vendor', 'unknown']);
     // A submitted 'manager' is coerced to unknown.
     const r = cb.upsert({ slackId: 'U1', identityType: 'manager' });
     expect(store.load('contacts', []).find(c => c.id === r.id).identityType).toBe('unknown');

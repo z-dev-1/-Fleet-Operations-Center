@@ -34,6 +34,18 @@ const { trace } = require('./slack_decision_trace');
 let _fasShadow; try { _fasShadow = require('../orcha/fas/shadow'); } catch (_) { _fasShadow = { runShadow: () => {} }; }
 // Digital FAS UNIFIED runner — per-mode reply ownership (see orcha/fas/runner.js).
 let _fasRunner; try { _fasRunner = require('../orcha/fas/runner'); } catch (_) { _fasRunner = null; }
+// Unified AI Core (Phase C): route inbound through aiCore.handleInbound, which
+// delegates ENTIRELY to the FAS runner (identical behavior) + adds a trace.
+// Falls back to the FAS runner directly if AiCore is unavailable so channel
+// watch never breaks.
+let _aiCore; try { _aiCore = require('../ai/core'); } catch (_) { _aiCore = null; }
+// Phase 7: the ONE Slack inbound gateway — unified inbound normalization.
+let _gateway; try { _gateway = require('../slack/gateway'); } catch (_) { _gateway = null; }
+function _aiInbound(input, deps) {
+  if (_aiCore && typeof _aiCore.handleInbound === 'function') return _aiCore.handleInbound(input, deps);
+  if (_fasRunner && typeof _fasRunner.handleInbound === 'function') return _fasRunner.handleInbound(input, deps);
+  return Promise.resolve({ mode: 'disabled', letLegacyReply: true, outcome: 'no-runner' });
+}
 // Shared inbound helpers: contact discovery, temporary send-block registry,
 // structured lifecycle observability (same module the DM engine uses).
 const inbound = require('./slack_inbound_support');
@@ -264,16 +276,28 @@ function _isInMentionThread(channelId, threadTs) {
 }
 
 // ── AI classify + draft ──────────────────────────────────────────────────
-async function _classifyAndDraft(messageText, askOrcha, allowedOperators) {
+// allowRoster: true ONLY for INTERNAL senders (resolved from the Contact Book
+// at the call site). FAS roster personnel data is internal and must never be
+// exposed to carrier/vendor/unknown senders on a watched channel.
+async function _classifyAndDraft(messageText, askOrcha, allowedOperators, allowRoster) {
   // Inject local time so the AI uses the correct time-of-day greeting
   const _now = new Date();
   const _timeStr = _now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
   const _dateStr = _now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   const timeContext = '\n\nCurrent local time: ' + _timeStr + ', ' + _dateStr + '.';
 
-  // Inject live fleet data context so AI can give real, data-driven answers
+  // Inject live fleet data context so AI can give real, data-driven answers.
+  // allowRoster (internal) → full FAS knowledge base + roster. For EXTERNAL
+  // senders we still pass the SHAREABLE knowledge tier (glossary + general
+  // process) so replies to carriers/vendors can accurately explain terms —
+  // internal-only sections (approval dollars, escalation, personnel) stay out.
   const { buildFleetContext } = require('../orcha/ai-context');
-  const fleetContext = buildFleetContext(messageText, { maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true, allowedOperators: allowedOperators || [] });
+  const fleetContext = buildFleetContext(messageText, {
+    maxUnits: 5, includeTimeline: true, includePM: true, includeRisk: true,
+    allowedOperators: allowedOperators || [],
+    allowRoster: !!allowRoster,
+    knowledgeAudience: allowRoster ? 'internal' : 'external',
+  });
 
   // CONTEXT RESET (2026-09-02): relay.ask() routes through fleet-brain, a
   // SINGLE persistent session whose rolling history is shared across every
@@ -821,6 +845,21 @@ async function pollChannelsOnce(log) {
       } catch (e) {
         doLog(`[SlackWatch] ${ch.name}: PM-alert scan error: ${e.message}`);
       }
+      // Ready-for-pickup REPLY handling (additive): if we posted a
+      // "unit ready — pickup or tow?" message to this channel and the carrier
+      // has replied in that thread, interpret pickup-vs-tow and acknowledge.
+      // Gated internally on the readyPickupNotices ledger (cheap no-op when
+      // there are no pending notices for this channel). Isolated + non-fatal.
+      try {
+        const readyNotify = require('./ready_pickup_notify');
+        await readyNotify.handleReadyReplies(
+          ch,
+          { readThreadReplies, sendToChannel, askOrcha, myUserId, resolveOperatorEntry: require('./pm_alert_reply').resolveOperatorEntry },
+          doLog
+        );
+      } catch (e) {
+        doLog(`[SlackWatch] ${ch.name}: ready-pickup reply scan error: ${e.message}`);
+      }
     }
 
     if (_earlyMode === 'justme') {
@@ -1043,10 +1082,19 @@ async function pollChannelsOnce(log) {
             // confirms a ts. On delivery failure the runner queues a recoverable
             // review item and commits nothing — we do NOT advance the channel
             // watermark so this message is retried next poll.
-            const _fr = await _fasRunner.handleInbound({
-              engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
-              channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text,
-            }, { sendToChannel });
+            // Phase 7: build the runner input through the ONE gateway. A channel
+            // is a GROUP surface (audience resolver), and `mentioned` lets the
+            // channel-registry decide ingest-vs-reply (spec #46/#64). We thread
+            // from the message ts (channel replies open a thread on the message).
+            const _chanRaw = { engine: 'channel', conv: { channelId: ch.id, name: ch.name, isGroup: true, isSlackConnect: !!ch.isSlackConnect },
+              message: { userId: msg.userId, ts: msg.ts, threadTs: msg.ts, text: msg.text, files: msg.files || [] }, mentioned: !!mentioned };
+            const _fr = await _aiInbound(_gateway
+              ? _gateway.buildRunnerInput(_chanRaw, {})
+              : {
+                engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
+                channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text,
+                files: msg.files || [], isGroup: true, mentioned: !!mentioned,
+              }, { sendToChannel });
             if (_fr && _fr.letLegacyReply) {
               // Runner asked us to let legacy reply (error-failsafe / ai-failed-
               // shadow). Fall through to the legacy classify+reply below; do NOT
@@ -1063,6 +1111,15 @@ async function pollChannelsOnce(log) {
               _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
                 replyTs: _fr.sent.ts, question: msg.text, reply: _txt, wasMentioned: mentioned,
                 inScope: true, category: null, title: 'FAS autonomous channel reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
+            } else if (_fr && _fr.outcome === 'no-reply') {
+              // FAS decided a human in its role would NOT speak up in this
+              // channel message (spec #4/#5/#22/#23) — deliberate silence.
+              // Terminal: watermark advances (below), nothing sent, legacy
+              // suppressed. This is the "don't behave like a noisy bot" path.
+              _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
+                replyTs: null, question: msg.text, reply: '(FAS chose silence: ' + ((_fr.decision && _fr.decision.reasonCode) || 'NO_RESPONSE_NEEDED') + ')',
+                wasMentioned: mentioned, inScope: true, category: null, title: 'FAS no-reply', createdAt: new Date().toISOString(), status: 'fas-no-reply' });
+              doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) chose silence for ${msg.ts} (${(_fr.decision && _fr.decision.reasonCode) || 'NO_RESPONSE_NEEDED'}) — legacy suppressed`);
             } else {
               // Queued for approval, manual-review (AI failure), or clarify.
               _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
@@ -1071,11 +1128,25 @@ async function pollChannelsOnce(log) {
               doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) owned ${msg.ts} (${(_fr && _fr.outcome) || 'handled'}) — legacy skipped`);
             }
           } catch (e) {
-            // FAS threw -> honor the runner's letLegacyReply-on-error design by
-            // falling through to the legacy reply below instead of only logging
-            // a silent review item.
-            _fasOwnedC = false;
-            doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) threw ${msg.ts}: ${e.message} — falling back to legacy reply`);
+            // FAS threw.
+            // PHASE 8: when legacy reasoning is RETIRED (default), the legacy
+            // partner persona brain must NOT answer even on a FAS failure — a
+            // broken AI goes to manual review, not a second competing brain.
+            // FAS keeps ownership (watermark advances). Only the rollback switch
+            // (retireLegacyReasoning:false) falls back to legacy.
+            let _retireC = true;
+            try { _retireC = require('../orcha/fas/config').get().retireLegacyReasoning !== false; } catch (_) {}
+            if (_retireC) {
+              try { const _r = require('../orcha/fas/runner'); if (_r._queueManualReview) _r._queueManualReview({ engine: 'channel', slackId: msg.userId, senderName: ch.name, channelId: ch.id, ts: msg.ts, text: msg.text }, { decision: 'clarify' }, 'FAS runtime error: ' + e.message); } catch (_) {}
+              _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
+                replyTs: null, question: msg.text, reply: '(FAS error — manual review; legacy retired)',
+                wasMentioned: mentioned, inScope: true, category: 'fas-error', title: 'FAS error — manual review', createdAt: new Date().toISOString(), status: 'fas-error-manual-review' });
+              doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) threw ${msg.ts}: ${e.message} — legacy RETIRED, queued manual review`);
+              // _fasOwnedC stays true -> watermark advances, legacy never runs.
+            } else {
+              _fasOwnedC = false;
+              doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) threw ${msg.ts}: ${e.message} — falling back to legacy reply`);
+            }
           }
           if (_fasOwnedC) {
             _saveChannelLastSeen(ch.id, msg.ts);
@@ -1084,7 +1155,17 @@ async function pollChannelsOnce(log) {
           // else: fall through to legacy reply path (letLegacyReply honored)
         }
 
-        const draft = await _classifyAndDraft(msg.text, askOrcha, (ch && ch.operators) || []);
+        // Expose FAS roster personnel data ONLY to INTERNAL senders (resolved
+        // from the Contact Book). Carrier/vendor/unknown senders never get it.
+        let _allowRoster = false;
+        try {
+          const prof = require('../orcha/fas/sender-profiles').resolveSender(msg.userId, msg.userName || '');
+          // mcs (the FAS's assistant) is internal — gets roster, full KB, and
+          // sensitive site fields (gate code / key location) like internal.
+          _allowRoster = !!(prof && (prof.type === 'internal' || prof.type === 'mcs'));
+        } catch (_) { _allowRoster = false; }
+
+        const draft = await _classifyAndDraft(msg.text, askOrcha, (ch && ch.operators) || [], _allowRoster);
 
         // FEATURE (2026-07-22): always tag the person being responded to,
         // prepended at send-time rather than asking the AI to include it
@@ -1102,10 +1183,16 @@ async function pollChannelsOnce(log) {
         // Shadow, record the comparison only — never suppress/replace.
         if (_fasRunner && _fasModeC === 'shadow') {
           try {
-            await _fasRunner.handleInbound({
-              engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
-              channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text, actualReply: draft.reply,
-            });
+            await _aiInbound(_gateway
+              ? _gateway.buildRunnerInput(
+                  { engine: 'channel', conv: { channelId: ch.id, name: ch.name, isGroup: true, isSlackConnect: !!ch.isSlackConnect },
+                    message: { userId: msg.userId, ts: msg.ts, threadTs: msg.ts, text: msg.text, files: msg.files || [] }, mentioned: !!mentioned },
+                  { actualReply: draft.reply })
+              : {
+                engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
+                channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text, actualReply: draft.reply,
+                files: msg.files || [],
+              });
           } catch (_e) { /* shadow comparison must never break the live path */ }
         }
 

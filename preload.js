@@ -78,6 +78,7 @@ expose('fleet', {
   queueOffline: (uid, text) => ipcRenderer.invoke('offline:queue', uid, text),
   getOfflineCount: () => ipcRenderer.invoke('offline:count'),
   repairHistory: (uid) => ipcRenderer.invoke('fleet:repair-history', uid),
+  breakdownHistory: (uid, row) => ipcRenderer.invoke('breakdown-history:get', uid, row),
   refreshBriefing: () => ipcRenderer.invoke('briefing:refresh'),
   addTimeline:    (unitId, entry) => ipcRenderer.invoke('notes:add-timeline', unitId, entry),
   hideTimeline:   (unitId, entry) => ipcRenderer.invoke('notes:hide-timeline-entry', unitId, entry),
@@ -112,6 +113,14 @@ expose('settings', {
   getOperators:  ()        => ipcRenderer.invoke('settings:get-operators'),
   saveOperators: (ops)     => ipcRenderer.invoke('settings:save-operators', ops),
   getOrchaConfig:    ()        => ipcRenderer.invoke('orcha:get-config'),
+  listOrchaAgents:   (opts)    => ipcRenderer.invoke('orcha:list-agents', opts),
+  detectClaudeModel: ()        => ipcRenderer.invoke('claude:detect-model'),
+  // Instance Management (dual-instance cluster) — Stage 7
+  clusterGetDashboard:  ()      => ipcRenderer.invoke('cluster:get-dashboard'),
+  clusterSetAutoFailover: (on)  => ipcRenderer.invoke('cluster:set-auto-failover', on),
+  clusterHandoff:       ()      => ipcRenderer.invoke('cluster:handoff'),
+  clusterSetMode:       (mode)  => ipcRenderer.invoke('cluster:set-mode', mode),
+  clusterReconcile:     ()      => ipcRenderer.invoke('cluster:reconcile'),
   getScheduleSlots:  ()        => ipcRenderer.invoke('settings:get-schedule-slots'),
   saveScheduleSlots: (slots)   => ipcRenderer.invoke('settings:save-schedule-slots', slots),
   getSyncInterval:   ()        => ipcRenderer.invoke('settings:get-sync-interval'),
@@ -126,6 +135,36 @@ expose('notes', {
   deleteUnit:(id)     => ipcRenderer.invoke('notes:delete-unit', id),
 });
 
+// ── OWA Inbox Triage (overlay) ──────────────────────────────────────────────
+expose('emailTriage', {
+  getConfig:    ()               => ipcRenderer.invoke('emailTriage:get-config'),
+  setConfig:    (patch)          => ipcRenderer.invoke('emailTriage:set-config', patch),
+  getResults:   ()               => ipcRenderer.invoke('emailTriage:get-results'),
+  run:          (opts)           => ipcRenderer.invoke('emailTriage:run', opts),
+  probe:        ()               => ipcRenderer.invoke('emailTriage:probe'),
+  draftReply:   (id, guidance)   => ipcRenderer.invoke('emailTriage:draft-reply', id, guidance),
+  sendReply:    (id, bodyText)   => ipcRenderer.invoke('emailTriage:send-reply', id, bodyText),
+  dismissReply: (id)             => ipcRenderer.invoke('emailTriage:dismiss-reply', id),
+  deleteEmail:  (id)             => ipcRenderer.invoke('emailTriage:delete', id),
+  keepEmail:    (id)             => ipcRenderer.invoke('emailTriage:keep', id),
+  deleteSuggested: ()            => ipcRenderer.invoke('emailTriage:delete-suggested'),
+  draftReadyDm: (id, unit)       => ipcRenderer.invoke('emailTriage:draft-ready-dm', id, unit),
+  sendReadyDm:  (id, unit, msg)  => ipcRenderer.invoke('emailTriage:send-ready-dm', id, unit, msg),
+  onUpdated:    (cb)             => on('emailTriage:updated', cb),
+});
+
+// ── Relay ↔ Offsite reconcile ───────────────────────────────────────────────
+expose('relayReconcile', {
+  getConfig:  ()            => ipcRenderer.invoke('relayReconcile:get-config'),
+  setConfig:  (patch)       => ipcRenderer.invoke('relayReconcile:set-config', patch),
+  getPending: ()            => ipcRenderer.invoke('relayReconcile:get-pending'),
+  confirm:    (id)          => ipcRenderer.invoke('relayReconcile:confirm', id),
+  dismiss:    (id)          => ipcRenderer.invoke('relayReconcile:dismiss', id),
+  runUnit:    (equipmentId) => ipcRenderer.invoke('relayReconcile:run-unit', equipmentId),
+  draftForSplit: (equipmentId, side) => ipcRenderer.invoke('relayReconcile:draft-for-split', equipmentId, side),
+  onUpdated:  (cb)          => on('relayReconcile:updated', cb),
+});
+
 // ── Long Dwell Units (Analytics tab) ──────────────────────────────────────
 expose('longDwell', {
   getAll:     ()            => ipcRenderer.invoke('long-dwell:get-all'),
@@ -137,10 +176,74 @@ expose('longDwell', {
   setAiFillActive: (active) => ipcRenderer.invoke('longdwell:ai-fill-active', !!active),
 });
 
+// ── Long Dwell imported CSV (team-shared tracker) ──────────────────────────
+expose('longDwellCsv', {
+  get:         ()        => ipcRenderer.invoke('long-dwell-csv:get'),
+  import:      (payload) => ipcRenderer.invoke('long-dwell-csv:import', payload),
+  fetchAap:    (opts)    => ipcRenderer.invoke('long-dwell-csv:fetch-aap', opts),
+  saveRow:     (payload) => ipcRenderer.invoke('long-dwell-csv:save-row', payload),
+  clear:       ()        => ipcRenderer.invoke('long-dwell-csv:clear'),
+  getSchedule: ()        => ipcRenderer.invoke('long-dwell-csv:get-schedule'),
+  saveSchedule:(payload) => ipcRenderer.invoke('long-dwell-csv:save-schedule', payload),
+  // Main fires this after a SCHEDULED fetch completes so the renderer can
+  // refresh the table and (if configured) run AI-fill-all on blank rows.
+  onScheduledFetched: (cb) => {
+    const h = (_e, data) => { try { cb(data); } catch (_) {} };
+    ipcRenderer.on('long-dwell-csv:scheduled-fetched', h);
+    return () => ipcRenderer.removeListener('long-dwell-csv:scheduled-fetched', h);
+  },
+});
+
+// ── Baseball Card (AFP FAS performance profile + docx export) ───────────────
+expose('baseballCard', {
+  get:           ()      => ipcRenderer.invoke('baseball-card:get'),
+  save:          (card)  => ipcRenderer.invoke('baseball-card:save', card),
+  autofill:      (opts)  => ipcRenderer.invoke('baseball-card:autofill', opts),
+  aiField:       (opts)  => ipcRenderer.invoke('baseball-card:ai-field', opts),
+  signinAtoZ:    ()      => ipcRenderer.invoke('baseball-card:signin-atoz'),
+  fetchPhonetool:(opts)  => ipcRenderer.invoke('baseball-card:fetch-phonetool', opts),
+  preview:       (card)  => ipcRenderer.invoke('baseball-card:preview', card),
+  export:        (opts)  => ipcRenderer.invoke('baseball-card:export', opts),
+});
+
+// ── AAP direct JSON API (Relay Garage / work orders over Midway) ────────────
+expose('aapApi', {
+  selftest:     ()     => ipcRenderer.invoke('aap-api:selftest'),
+  search:       (req)  => ipcRenderer.invoke('aap-api:search', req),
+  searchAssets: (req)  => ipcRenderer.invoke('aap-api:search-assets', req),
+  service:      (id)   => ipcRenderer.invoke('aap-api:service', { serviceId: id }),
+  asset:        (aaid) => ipcRenderer.invoke('aap-api:asset', { aaid }),
+  avmCodes:     ()     => ipcRenderer.invoke('aap-api:avm-codes'),
+  vendors:      (opts) => ipcRenderer.invoke('aap-api:vendors', { opts }),
+  avmTree:      (equipmentType, opts) => ipcRenderer.invoke('aap-api:avm-tree', { equipmentType, opts }),
+  vreMatrix:    (unit) => ipcRenderer.invoke('aap-api:vre-matrix', { unit }),
+  buildTracker: (opts) => ipcRenderer.invoke('aap-api:build-tracker', opts),
+  buildFleet:   (opts) => ipcRenderer.invoke('aap-api:build-fleet', opts),
+  refreshUnit:  (unit) => ipcRenderer.invoke('aap-api:refresh-unit', { unit }),
+  escalationOptions: (args) => ipcRenderer.invoke('aap-api:escalation-options', typeof args === 'string' ? { fleetId: args } : (args || {})),
+  escalationSuggest: (args) => ipcRenderer.invoke('aap-api:escalation-suggest', args || {}),
+  updateEscalations: (payload) => ipcRenderer.invoke('aap-api:update-escalations', payload || {}),
+  loadLiveFleet: (opts) => ipcRenderer.invoke('fleet:load-via-api', opts),
+  getDataSource: ()     => ipcRenderer.invoke('fleet:get-data-source'),
+  setDataSource: (source) => ipcRenderer.invoke('fleet:set-data-source', { source }),
+  verifyVsStored: (opts) => ipcRenderer.invoke('aap-api:verify-vs-stored', opts),
+});
+
+// ── FAS Roster (scraped FAS personnel roster) ───────────────────────────────
+expose('fasRoster', {
+  get:            () => ipcRenderer.invoke('fas-roster:get'),
+  fetch:          () => ipcRenderer.invoke('fas-roster:fetch'),
+  clear:          () => ipcRenderer.invoke('fas-roster:clear'),
+  importContacts: () => ipcRenderer.invoke('fas-roster:import-contacts'),
+  resolve:        (pairs) => ipcRenderer.invoke('fas-roster:resolve', pairs),
+});
+
 // ── AI / Orcha ────────────────────────────────────────────────────────────────
 expose('ai', {
   suggest:          (unit)        => ipcRenderer.invoke('ai:suggest', unit),
-  ask:              (prompt)      => ipcRenderer.invoke('ai:ask', prompt),
+  ask:              (prompt, opts) => ipcRenderer.invoke('ai:ask', prompt, opts || {}),
+  queueStatus:      ()            => ipcRenderer.invoke('ai:queue-status'),
+  getKnowledge:     ()            => ipcRenderer.invoke('fas-knowledge:get'),
   orchaAction:      (msg)         => ipcRenderer.invoke('ai:orcha-action', msg),
   sendEmail:   (data)   => ipcRenderer.invoke('ai:send-email', data),
   buildReport: (opts)   => ipcRenderer.invoke('ai:build-report', opts),
@@ -247,6 +350,14 @@ expose('slack', {
   fasGetKnowledgeDrafts:  (status) => ipcRenderer.invoke('fas:get-knowledge-drafts', status),
   fasApproveKnowledgeDraft:(data)  => ipcRenderer.invoke('fas:approve-knowledge-draft', data),
   fasRejectKnowledgeDraft:(id)     => ipcRenderer.invoke('fas:reject-knowledge-draft', id),
+  // Phase 3/5 settings surfaces.
+  fasGetChannels:         ()       => ipcRenderer.invoke('fas:get-channels'),
+  fasSaveChannel:         (rec)    => ipcRenderer.invoke('fas:save-channel', rec),
+  fasClassifyChannel:     (name)   => ipcRenderer.invoke('fas:classify-channel', name),
+  fasGetIdentityChangelog:(limit)  => ipcRenderer.invoke('fas:get-identity-changelog', limit),
+  fasGetIdentityMappings: ()       => ipcRenderer.invoke('fas:get-identity-mappings'),
+  fasSaveIdentityMappings:(maps)   => ipcRenderer.invoke('fas:save-identity-mappings', maps),
+  fasSyncSender:          (id)     => ipcRenderer.invoke('fas:sync-sender', id),
 });
 
 // Microsoft Graph mail was removed (2026-09-02) — it does not work in the
@@ -263,6 +374,10 @@ expose('sp', {
   saveConfig:     (data)    => ipcRenderer.invoke('sp:save-config', data),
   getLists:       (siteUrl) => ipcRenderer.invoke('sp:get-lists', siteUrl),
   discoverSheets: (url) => ipcRenderer.invoke('sp:discover-sheets', url),
+  // TEMPORARY debug bridge for DBR Copy-All layout inspection — see
+  // sp:dump-grid handler in src/ipc/misc.js. Safe to remove once the real
+  // DBR sheet layout is known and Copy-All is aligned to it.
+  dumpGrid:       (opts)    => ipcRenderer.invoke('sp:dump-grid', opts),
 });
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
@@ -270,6 +385,10 @@ expose('auth', {
   runMwinit:     ()   => ipcRenderer.invoke('auth:run-mwinit'),
   onMwinitStatus:(cb) => on('auth:mwinit-status', cb),
   checkMidway:   ()   => ipcRenderer.invoke('auth:check-midway'),
+  // Auth health supervisor (Phase E) — read-only snapshot + manual recovery.
+  healthGet:       ()   => ipcRenderer.invoke('auth-health:get'),
+  healthRetry:     ()   => ipcRenderer.invoke('auth-health:retry'),
+  healthRunMwinit: ()   => ipcRenderer.invoke('auth-health:run-mwinit'),
 });
 
 // ── AAP actions ───────────────────────────────────────────────────────────────
@@ -281,8 +400,29 @@ expose('aap', {
   adaptiveExtract:  (opts)                   => ipcRenderer.invoke('adaptive:extract', opts),
   adaptiveScanBatch:(units)                  => ipcRenderer.invoke('adaptive:scan-batch', units),
   createWR:         (payload, unit)          => ipcRenderer.invoke('aap:create-wr', payload, unit),
+  createWorkOrder:  (payload)                => ipcRenderer.invoke('aap:create-wr-api', payload),
+  attachToWR:       (workRequestId, attachments) => ipcRenderer.invoke('aap:attach-to-wr', { workRequestId, attachments }),
+  getLifecycle:     (id, url)                => ipcRenderer.invoke('aap:get-lifecycle', { equipmentId: id, assetUrl: url }),
   onWRProgress:     (cb)                     => on('wr:progress', cb),
   openUrl:          (url)                    => ipcRenderer.invoke('aap:open-url', url),
+});
+
+// ── QuickSight DBR DATA (Daily Call) ──────────────────────────────────────────
+// captureAfp/captureDsp return raw page text (QuickSight's pivot-table DOM
+// has no stable selector shape); the renderer feeds that text to AI to
+// parse into structured rows, then calls saveParsed to persist the result.
+expose('quicksight', {
+  captureAfp:  () => ipcRenderer.invoke('quicksight:capture-afp'),
+  captureDsp:  () => ipcRenderer.invoke('quicksight:capture-dsp'),
+  saveParsed:  (payload) => ipcRenderer.invoke('quicksight:save-parsed', payload),
+  getCache:    () => ipcRenderer.invoke('quicksight:get-cache'),
+  getCacheDsp: () => ipcRenderer.invoke('quicksight:get-cache-dsp'),
+});
+
+// ── WBR weekly snapshot + Prior-Week/T6W comparison (Daily Call) ──────────────
+expose('wbr', {
+  capture:    (rows) => ipcRenderer.invoke('wbr:capture', { rows }),
+  comparison: (rows) => ipcRenderer.invoke('wbr:comparison', { rows }),
 });
 
 // ── Geofence ──────────────────────────────────────────────────────────────────
@@ -318,6 +458,7 @@ expose('fleetScheduler', {
   runSpNow:        ()        => ipcRenderer.invoke('scheduler:run-sp-now'),
   runEmailTestNow: ()        => ipcRenderer.invoke('scheduler:run-email-test-now'),
   runEmailNow:     (slot)    => ipcRenderer.invoke('scheduler:run-email-now', slot),
+  runDbrNow:       (slot)    => ipcRenderer.invoke('scheduler:run-dbr-now', slot),
   retry:           (jobId)   => ipcRenderer.invoke('scheduler:retry', jobId),
   cancel:          (jobId)   => ipcRenderer.invoke('scheduler:cancel', jobId),
   reconcile:       (jobId)   => ipcRenderer.invoke('scheduler:reconcile', jobId),
@@ -341,13 +482,15 @@ expose('files', {
   readAsDataUrl:        (p) => ipcRenderer.invoke('file:read-dataurl', p),
   openExternal:         (u) => ipcRenderer.invoke('shell:open-external', u),
   openRelayUrl:         (u) => ipcRenderer.invoke('relay:open-url', u),
+  // HEIC -> PNG conversion (main process, pure-JS heic-convert).
+  heicToPng:            (dataUrl) => ipcRenderer.invoke('image:heic-to-png', dataUrl),
 });
 
 // ── Relay cache (S28: wiring fix — exposes relay data to renderer) ────────────
 expose('relay', {
   getCache:     ()   => ipcRenderer.invoke('relay:get-cache'),
   getUnitCache: (id) => ipcRenderer.invoke('relay:get-unit-cache', id),
-  refreshUnit:  (id) => ipcRenderer.invoke('relay:refresh-unit', id),
+  refreshUnit:  (id, opts) => ipcRenderer.invoke('relay:refresh-unit', id, opts),
 });
 
 // ── Credentials (UI-facing — never returns raw values) ──────────────────────
@@ -423,6 +566,25 @@ expose('asana', {
   addComment:    (taskGid, text)       => ipcRenderer.invoke('asana:add-comment', taskGid, text),
   moveTask:      (taskGid, sectGid)    => ipcRenderer.invoke('asana:move-task', taskGid, sectGid),
   linkUnit:      (unitId, taskId)      => ipcRenderer.invoke('asana:link-unit', unitId, taskId),
+  // Midway-SSO one-time interactive sign-in
+  signIn:        ()               => ipcRenderer.invoke('asana:sign-in'),
+  // Multi-user PAT manager (list/metadata only — never a PAT value)
+  listUsers:     ()               => ipcRenderer.invoke('asana:list-users'),
+  setupUser:     (alias, pat)     => ipcRenderer.invoke('asana:setup-user', alias, pat),
+  switchUser:    (alias)          => ipcRenderer.invoke('asana:switch-user', alias),
+  removeUser:    (alias)          => ipcRenderer.invoke('asana:remove-user', alias),
+  // Workflow helpers (active user)
+  getMyTasks:    (opts)           => ipcRenderer.invoke('asana:get-my-tasks', opts),
+  getTodaysTasks:()               => ipcRenderer.invoke('asana:get-todays-tasks'),
+  completeTask:  (gid)            => ipcRenderer.invoke('asana:complete-task', gid),
+  completeDaily: (name, comment)  => ipcRenderer.invoke('asana:complete-daily', name, comment),
+  batchComplete: (names)          => ipcRenderer.invoke('asana:batch-complete', names),
+  createEscalation:(opts)         => ipcRenderer.invoke('asana:create-escalation', opts),
+  dailySummary:  ()               => ipcRenderer.invoke('asana:daily-summary'),
+  // Attachments
+  getAttachments:(gid)            => ipcRenderer.invoke('asana:get-attachments', gid),
+  uploadFile:    (gid, filePath)  => ipcRenderer.invoke('asana:upload-file', gid, filePath),
+  linkExternal:  (gid, url, name) => ipcRenderer.invoke('asana:link-external', gid, url, name),
 });
 
 // -- Vendor / Dealer Work Order Engine (S23-8)
@@ -456,6 +618,9 @@ expose('dailyTasks', {
   update:    (data)  => ipcRenderer.invoke('tasks:update', data),
   remove:    (id)    => ipcRenderer.invoke('tasks:delete', id),
   generate:  ()      => ipcRenderer.invoke('tasks:generate'),
+  getActionConfig: ()        => ipcRenderer.invoke('tasks:get-action-config'),
+  setActionConfig: (patch)   => ipcRenderer.invoke('tasks:set-action-config', patch),
+  executeAction:   (taskId)  => ipcRenderer.invoke('tasks:execute-action', taskId),
 });
 
 // -- Bubble/mini-FAB window controls (2026-07-24) -- only meaningful when this
@@ -481,3 +646,37 @@ expose('bubble', {
 });
 
 // ── Fleet Ops Companion — removed in Phase 6 (feature no longer used) ────────
+
+// ── Fleet Repair Intelligence (12-month unit repair history + report) ────────
+// Deterministic per-unit report (counts, durations, repeat failures,
+// effectiveness, timeline) built from the ri_repair_event store. build/fetchNew
+// hit the AAP API; get reads the cached report only. refreshAi is the Phase 4
+// AI narrative pass (returns pending until that layer ships).
+expose('repairIntel', {
+  get:        (equipmentId) => ipcRenderer.invoke('repair-history:get', equipmentId),
+  build:      (equipmentId) => ipcRenderer.invoke('repair-history:build', equipmentId),
+  fetchNew:   (equipmentId) => ipcRenderer.invoke('repair-history:fetch-new', equipmentId),
+  refreshAi:  (equipmentId) => ipcRenderer.invoke('repair-history:refresh-ai', equipmentId),
+  // Fleet-wide Trends dashboard (deterministic aggregation; opts = filter spec).
+  trends:     (opts)        => ipcRenderer.invoke('repair-trends:get', opts || {}),
+  trendFilters: ()          => ipcRenderer.invoke('repair-trends:filters'),
+  // Drill into a clicked trend -> the units + events behind it (with the why).
+  drill:      (dimension, value, opts) => ipcRenderer.invoke('repair-trends:drill', dimension, value, opts || {}),
+  // Vendor scope / network intelligence (scorecards + repeat rates + signals).
+  network:    (opts)        => ipcRenderer.invoke('repair-network:get', opts || {}),
+  // Deep repetitive-fault slice + repeat offenders.
+  deepSlice:  (groupBy, opts) => ipcRenderer.invoke('repair-trends:deep-slice', groupBy, opts || {}),
+  repeatOffenders: (opts)     => ipcRenderer.invoke('repair-trends:repeat-offenders', opts || {}),
+  unitHealth: (opts)          => ipcRenderer.invoke('repair-trends:unit-health', opts || {}),
+});
+
+// ── AAP Root Cause Analysis (RCA) form via the Relay template API ────────────
+// status: which WRs already have an RCA (local record; live:true also asks
+// Relay). draft: pre-filled answers for review. submit: validate + save to AAP
+// (only from an explicit user click in the RCA modal).
+expose('rca', {
+  status: (workOrderIds, opts) => ipcRenderer.invoke('rca:status', workOrderIds || [], opts || {}),
+  todo:   (opts)               => ipcRenderer.invoke('rca:todo', opts || {}),
+  draft:  (args)               => ipcRenderer.invoke('rca:draft', args || {}),
+  submit: (args)               => ipcRenderer.invoke('rca:submit', args || {}),
+});

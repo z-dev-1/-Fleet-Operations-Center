@@ -33,6 +33,8 @@ const GEOFENCE_IPC_TIMEOUT = 200_000; // Stage 5 C-1: IPC belt -- scraper has ow
 // Module-level: survive across IPC calls within the same process lifetime.
 let _wrLock       = false;   // aap:create-wr
 let _adaptiveLock = false;   // aap:adaptive
+let _wrApiLock    = false;   // aap:create-wr-api (VRE recommendation WO create)
+let _wrAttachLock = false;   // aap:attach-to-wr (add documents to an open WR)
 let _activeAutofillWin = null; // aap:autofill -- lets aap:autofill-stop force-close it
 let _uptakeLock   = false;   // H-3: uptake:scrape
 let _relayLock    = false;   // H-3: relay:scrape
@@ -145,6 +147,38 @@ function registerScrapersIPC(ctx) {
     }
   });
 
+  // ── aap:create-wr-api ─────────────────────────────────────────────────────
+  // API-based WO creation via the VRE recommendation endpoint (replaces the
+  // "Submit WR" button's old adaptive-agent path). Two-phase:
+  //   confirmVendor !== true  → Phase 1: returns a vendor recommendation.
+  //   confirmVendor === true  → Phase 2: commits the WO with the chosen vendor.
+  // The "Open in AAP (autofill)" backup button (aap:autofill) is untouched.
+  handle('aap:create-wr-api', async (_e, payload) => {
+    if (_wrApiLock) {
+      throw new ScraperError('aap:create-wr-api operation already in progress', 'aap:create-wr-api');
+    }
+    requireObject(payload, 'payload');
+    _wrApiLock = true;
+    try {
+      const aapApi = require('../../src/scrapers/aap_api');
+      const logs = [];
+      const log  = (msg) => { logs.push(msg); logger.info(msg); if (send) send('wr:progress', msg); };
+      log(payload.confirmVendor
+        ? 'Creating work order in AAP (committing with vendor ' + (payload.vendor || '—') + ')…'
+        : 'Asking AAP for a vendor recommendation…');
+      const result = await aapApi.createWorkOrder(payload);
+      if (result && result.phase === 'recommend') {
+        log('AAP recommended vendor: ' + (result.recommendation.vendor || '(none)') +
+            (result.recommendation.ruleName ? ' [' + result.recommendation.ruleName + ']' : ''));
+      } else if (result && result.phase === 'commit') {
+        log('Work order created' + (result.workRequestId ? ': ' + result.workRequestId : ''));
+      }
+      return { ...result, logs };
+    } finally {
+      _wrApiLock = false;
+    }
+  });
+
   // ── aap:autofill ────────────────────────────────────────────────────────
   // Issue #2: enginePath pinned — renderer cannot supply an arbitrary file path
   // BUG FIX (2026-07-16): this handler previously resolved the
@@ -194,6 +228,53 @@ function registerScrapersIPC(ctx) {
       });
 
       _activeAutofillWin = aapWin;
+
+      // ── WR-CREATE NETWORK CAPTURE (observe-only; env-gated AAP_WR_CAPTURE=1)
+      // Attaches the Chrome DevTools Protocol network domain to THIS autofill
+      // window and records every POST/PUT/PATCH (url + request body + response),
+      // flagging the call whose response carries a workRequestId/serviceId —
+      // i.e. the real WR-create endpoint. Changes NOTHING about the autofill;
+      // it only watches the network so we can wire the API submit path.
+      // Captures are appended to logs/aap_wr_capture.json.
+      if (String(process.env.AAP_WR_CAPTURE || '').trim() === '1') {
+        try {
+          const dbg = aapWin.webContents.debugger;
+          dbg.attach('1.3');
+          const reqs = new Map(); // requestId -> { url, method, body }
+          const _isAap = (u) => /aap-na\.corp\.amazon\.com|towtruck|assetlifecycle|serviceaggregate|\bvre\b|work.?request|repair/i.test(String(u || ''));
+          dbg.on('message', async (_e, method, params) => {
+            try {
+              if (method === 'Network.requestWillBeSent') {
+                const r = params.request || {};
+                if (r.method && r.method !== 'GET' && _isAap(r.url)) {
+                  reqs.set(params.requestId, { url: r.url, method: r.method, body: (r.postData || '').slice(0, 20000) });
+                }
+              } else if (method === 'Network.responseReceived') {
+                const info = reqs.get(params.requestId);
+                if (info) info.status = params.response && params.response.status;
+              } else if (method === 'Network.loadingFinished') {
+                const info = reqs.get(params.requestId);
+                if (!info) return;
+                let bodyText = '';
+                try { const b = await dbg.sendCommand('Network.getResponseBody', { requestId: params.requestId }); bodyText = (b && b.body) ? String(b.body).slice(0, 20000) : ''; } catch (_) {}
+                const createdWR = /"(workRequestId|serviceId|workOrderId)"\s*:\s*"[^"]+"/i.test(bodyText);
+                const rec = { at: new Date().toISOString(), url: info.url, method: info.method, status: info.status, requestBody: info.body, responseBody: bodyText, createdWR };
+                try {
+                  const _logsDir = require('../config/paths').P.logsDir;
+                  const capFile = p.join(_logsDir, 'aap_wr_capture.json');
+                  let arr = []; try { arr = JSON.parse(fs.readFileSync(capFile, 'utf8')); if (!Array.isArray(arr)) arr = []; } catch (_) {}
+                  arr.push(rec); fs.writeFileSync(capFile, JSON.stringify(arr, null, 2));
+                } catch (_) {}
+                logger.info('[aap-wr-capture] ' + (createdWR ? '★ WR-CREATE ' : '') + rec.method + ' ' + rec.url + ' -> ' + rec.status);
+                reqs.delete(params.requestId);
+              }
+            } catch (_) { /* observer must never affect the autofill */ }
+          });
+          dbg.sendCommand('Network.enable').catch(() => {});
+          logger.info('[aap-wr-capture] attached to autofill window — create the WR and click Submit; captures -> logs/aap_wr_capture.json');
+        } catch (e) { logger.warn('[aap-wr-capture] attach failed (non-fatal): ' + e.message); }
+      }
+
       // FIX (2026-07-23): AAP's WR wizard form has an unsaved-changes guard.
       // Without this, clicking the native close button (or the new Stop
       // button below) while mid-form can trigger a native "Leave Site?"
@@ -223,14 +304,23 @@ function registerScrapersIPC(ctx) {
         logger.warn('Autofill timed out after 90s');
         done({ ok: false, message: 'Autofill timed out after 90 seconds -- AAP page may not have loaded, or the wizard reached an unexpected step.' });
       }, 90000);
+      // Guard so the engine is injected+run EXACTLY ONCE. The AAP wizard is a
+      // SPA; stepping through it (or an in-page section mount) can fire
+      // did-finish-load AGAIN while run() is still in progress. Without this
+      // guard that second event re-injected the engine and restarted it from
+      // STEP 1 -- an infinite loop that looked like "stuck", and left later
+      // area rows unfilled. 'settled' only flips after run() RETURNS, so it
+      // can't prevent a mid-run re-entry; this dedicated flag can.
+      let injected = false;
       aapWin.loadURL(url);
       aapWin.webContents.on('did-finish-load', async () => {
-        if (settled) return;
+        if (settled || injected) return;
         const curUrl = aapWin.isDestroyed() ? '' : aapWin.webContents.getURL();
         if (!/aap-na\.corp\.amazon\.com/i.test(curUrl)) {
           logger.info('[aap:autofill] Not on AAP yet (auth redirect?) -- waiting for next load...');
           return; // will fire again once the redirect chain settles
         }
+        injected = true; // from here on, ignore any further did-finish-load events
         try {
           const engineCode  = fs.readFileSync(ENGINE_FILE, 'utf8');
           const payloadJson = JSON.stringify(payload || {});
@@ -282,9 +372,69 @@ function registerScrapersIPC(ctx) {
     requireString(equipmentId, 'equipmentId');
     requireString(assetUrl, 'assetUrl');
     requireString(state, 'state');
+    // PREFERRED PATH (gated by fasConfig.useLifecycleApi, OFF by default): the
+    // AAP JSON API — version-locked PUT + source read-back, and auto-clears a
+    // blocking DVIR when going ACTIVE. Falls back to the proven browser
+    // automation on any failure or when the flag is off. The manual detail-page
+    // button and the AI MOVE_UNIT path now share the same API path.
+    let useApi = false;
+    try { useApi = require('../orcha/fas/config').get().useLifecycleApi === true; } catch (_) { useApi = false; }
+    if (useApi) {
+      try {
+        const api = require('../scrapers/aap_lifecycle_api');
+        const wantActive = String(state).trim().toUpperCase() === 'ACTIVE';
+        const r = wantActive
+          ? await api.setLifecycleActiveWithDvir({ unit: equipmentId, assetUrl, reason: reason || 'HEALTHY' })
+          : await api.setLifecycleApi({ unit: equipmentId, assetUrl, state, reason: reason || '' });
+        // Explicit, durable write-back line so the result is unambiguous in the
+        // log (and the UI toast via `message`): VERIFIED / UNCERTAIN / etc.
+        try {
+          const L = require('../utils/logger').createLogger('ipc:scrapers');
+          L.info('[LIFECYCLE-RESULT] ' + equipmentId + ' -> ' + String(state).toUpperCase() +
+            ' : ' + String((r && r.status) || 'unknown').toUpperCase() +
+            (r && r.verified ? ' (VERIFIED' + (r.version ? ' v' + r.version : '') + ', via api)' : '') +
+            (r && r.dvirCleared && r.dvirCleared.length ? ' [DVIR cleared: ' + r.dvirCleared.length + ']' : ''));
+        } catch (_) {}
+        // Map to the UI's { success, message } contract.
+        if (r && (r.status === 'done' || r.status === 'noop') && r.verified) {
+          return { success: true, via: 'api', verifiedState: r.to && r.to.state, newState: r.to && r.to.state, version: r.version,
+            message: r.status === 'noop' ? (equipmentId + ' is already ' + (r.to && r.to.state) + ' \u2014 verified, no change') : (equipmentId + ' set to ' + (r.to && r.to.state) + ' \u2014 VERIFIED' + (r.version ? ' (v' + r.version + ')' : '')),
+            dvirCleared: r.dvirCleared };
+        }
+        if (r && r.status === 'execution_uncertain') {
+          return { success: false, via: 'api', uncertain: true, message: 'EXECUTION_UNCERTAIN: the change may have applied but could not be verified — re-check before relying on it.' };
+        }
+        if (r && r.needsWorkOrder) {
+          return { success: false, via: 'api', needsWorkOrder: true, message: 'Open DVIR must be cleared but no open work request was found to reference — supply a WR number.' };
+        }
+        // API failed -> fall through to the browser-automation fallback.
+        try { require('../utils/logger').createLogger('ipc:scrapers').warn('[aap:set-lifecycle] API path failed (' + (r && (r.error || r.status)) + '); falling back to browser automation'); } catch (_) {}
+      } catch (e) {
+        try { require('../utils/logger').createLogger('ipc:scrapers').warn('[aap:set-lifecycle] API path threw (' + e.message + '); falling back'); } catch (_) {}
+      }
+    }
+    // FALLBACK: proven BrowserWindow automation. The UI now sends the AAP
+    // reason CODE (e.g. OFFSITE_SHOP_REPAIR) for the API path; the browser
+    // automation matches by the dropdown's VISIBLE text, so translate code ->
+    // friendly label here. Unknown/plain values pass through unchanged.
+    const _REASON_FRIENDLY = {
+      HEALTHY: 'Healthy',
+      OFFSITE_SHOP_REPAIR: 'Off-site storage',
+      PM_FAILED: 'PM Failed',
+      PREVENTATIVE_MAINTENANCE: 'Preventative Maintenance',
+      PARTS_DELAY: 'Parts Delay',
+      DAMAGED_MODERATE: 'Damaged-Moderate',
+      SENSOR_DETECTED_DAMAGE: 'Sensor Detected Damage',
+      SAFETY_INSPECTION_POST_ACCIDENT: 'Safety Inspection Post Accident',
+      LICENSE_OR_PERMIT_ISSUE: 'License or Permit Issue',
+      IMPOUNDED_TOW: 'Impounded/Tow',
+      GPS_MALFUNCTIONING: 'GPS Malfunctioning',
+      CAMPAIGN: 'Campaign',
+    };
+    const fallbackReason = _REASON_FRIENDLY[String(reason || '').trim().toUpperCase()] || reason || '';
     const { setLifecycleState } = require('../scrapers/setLifecycle');
     try {
-      return await setLifecycleState({ equipmentId, assetUrl, state, reason: reason || '' });
+      return await setLifecycleState({ equipmentId, assetUrl, state, reason: fallbackReason });
     } catch (e) {
       throw new ScraperError(e.message, 'aap:set-lifecycle', { equipmentId, state });
     }
@@ -308,22 +458,119 @@ function registerScrapersIPC(ctx) {
     requireObject(payload, "payload");
     _wrLock = true;
     try {
-      const { createWorkRequest } = require("../scrapers/aap_create_wr");
       const log = (msg) => {
-        logger.info(msg);
+        logger.info(typeof msg === 'string' ? msg : JSON.stringify(msg));
         try {
           const wins = require("electron").BrowserWindow.getAllWindows();
           const main = wins.find(w => !w.isDestroyed() && w.webContents.getURL().includes("localhost:5173"));
-          if (main) main.webContents.send("wr:progress", { message: msg });
+          if (main) main.webContents.send("wr:progress", { message: (typeof msg === 'string' ? msg : JSON.stringify(msg)) });
         } catch(e) {}
       };
-      const result = await createWorkRequest(payload, unit, log);
-      return result;
+
+      // ROUTE THROUGH THE HARDENED API PATH (2026-10-19). The old
+      // aap_create_wr.createWorkRequest uses a browser ses.fetch to /createRepair
+      // that returns HTTP 403 (auth) — confirmed live on the TOW submit. The
+      // aap_api.createWorkOrder path runs inside the authenticated AAP page with
+      // the captured a2z token (works), AND adds vendor resolution + self-healing
+      // + business-error messages. Unify every WR (repair AND tow) on it.
+      const aapApi = require("../../src/scrapers/aap_api");
+
+      // Map the modal/tow payload into createWorkOrder opts.
+      const opts = {
+        assetUrl: (unit && unit.assetUrl) || '',
+        aaid: (unit && unit.aaid) || undefined,
+        title: payload.title,
+        issue: payload.issue,
+        comments: payload.comments,
+        shareWith: payload.shareWith,
+        areaPairs: payload.areaPairs || [],
+        urgent: payload.urgent,
+        urgencyReason: payload.urgencyReason,
+        arcClaim: payload.arcClaim,
+        simNumber: payload.simNumber,
+        vendor: payload.vendor,
+        contactName: payload.contactName,
+        contactPhone: payload.contactPhone,
+        attachments: (payload.attachments || []).map((d, i) => (typeof d === 'string' ? { name: 'attachment-' + (i + 1), dataUrl: d } : d)),
+        domicile: (unit && (unit.site || unit.domicileSite)) || payload.domicile || '',
+        copiedFromWorkRequestId: payload.copiedFromWorkRequestId || null,
+        // TOW: pass the DESTINATION (where the unit is going) + direction so the
+        // create body can set AAP's separate `destination` field + transloading
+        // flag (AAP stores tow pickup in reportedLocation and the target in a
+        // distinct `destination` object — confirmed from a hand-made ref WR).
+        towDirection: payload.towDirection || '',
+        towToStreet: payload.towStreet || '', towToCity: payload.towCity || '',
+        towToState: payload.towState || '', towToZip: payload.towZip || '',
+        confirmVendor: true, // modal auto-submits → commit directly
+      };
+
+      // TOW LOCATION: for a return-to-yard / yard-to-yard tow the unit is NOT at
+      // its home yard — it's at the tow PICKUP (the dealer). Tell createWorkOrder
+      // via its off-site address fields so currentLocation reflects where the
+      // unit actually is. For a to-dealer tow the unit is still at the home yard,
+      // so leave the GPS/domicile location as-is.
+      const dir = String(payload.towDirection || '').toLowerCase();
+      // DIAGNOSTIC: log exactly what pickup/destination/offSite arrived, so a
+      // swapped pickup/destination is unambiguous in the log.
+      log('[create-wr] tow fields: dir=' + (dir || 'none') +
+        ' | pickup(towFrom)=' + [payload.towFromStreet, payload.towFromCity, payload.towFromState, payload.towFromZip].filter(Boolean).join(', ') +
+        ' | destination(tow)=' + [payload.towStreet, payload.towCity, payload.towState, payload.towZip].filter(Boolean).join(', ') +
+        ' | offSite=' + payload.offSite + ' loc=' + [payload.locStreet, payload.locCity, payload.locState, payload.locZip].filter(Boolean).join(', '));
+      if (dir === 'return-to-yard' || dir === 'yard-to-yard') {
+        const pickup = [payload.towFromStreet, payload.towFromCity, payload.towFromState, payload.towFromZip].map(s => String(s || '').trim());
+        if (pickup.some(Boolean)) {
+          opts.offSite = true;
+          opts.locStreet = payload.towFromStreet || '';
+          opts.locCity   = payload.towFromCity   || '';
+          opts.locState  = payload.towFromState  || '';
+          opts.locZip    = payload.towFromZip    || '';
+          log('[create-wr] tow direction "' + dir + '" — unit is at pickup, using off-site location: ' + pickup.filter(Boolean).join(', '));
+        }
+      }
+
+      const result = await aapApi.createWorkOrder(opts);
+      // Normalize to the shape the modal expects ({ ok, workRequestId, error }).
+      if (result && result.phase === 'commit' && result.workRequestId) {
+        log('Work order created: ' + result.workRequestId);
+        return { ok: true, workRequestId: result.workRequestId, vendor: result.vendor, raw: result };
+      }
+      return { ok: false, error: (result && result.error) || 'WR not created', aapMessage: result && result.aapMessage, businessRule: result && result.businessRule, raw: result };
     } finally {
       _wrLock = false;
     }
   });
 
+
+  // ── aap:get-lifecycle ───────────────────────────────────────────────────
+  // LIVE read of a unit's lifecycle state/reason straight from AAP (no cache).
+  // Read-only. Used to show the real status and to confirm a change landed.
+  handle('aap:get-lifecycle', async (_e, req) => {
+    requireObject(req, 'req');
+    const api = require('../scrapers/aap_lifecycle_api');
+    return api.getLiveLifecycle({ unit: String(req.equipmentId || ''), assetUrl: String(req.assetUrl || '') });
+  });
+
+  // ── aap:attach-to-wr ────────────────────────────────────────────────────
+  // Add documents (PNG/JPEG/PDF) to an EXISTING open work request. Same upload
+  // the create flow uses after a new WR. Re-entrancy locked so a double click
+  // can't upload the same files twice.
+  handle('aap:attach-to-wr', async (_e, req) => {
+    if (_wrAttachLock) {
+      throw new ScraperError('aap:attach-to-wr operation already in progress', 'aap:attach-to-wr');
+    }
+    requireObject(req, 'req');
+    _wrAttachLock = true;
+    try {
+      const { attachToOpenWr } = require('../scrapers/wr_attach');
+      const r = await attachToOpenWr(req);
+      logger.info('[attach-to-wr] WR ' + (r.workRequestId || '?') + ' (' + ((r.results || []).length) + ' file(s)): ' +
+        (r.ok ? 'all ' + r.results.length + ' uploaded' : (r.partial ? 'partial' : 'failed')) +
+        (r.error ? ' (' + r.error + ')' : ''));
+      return r;
+    } finally {
+      _wrAttachLock = false;
+    }
+  });
 
   // ── uptake:scrape ────────────────────────────────────────────────────────
   // H-3: IPC-level concurrency guard mirrors the scraper's own _uptakeLock.
@@ -348,6 +595,13 @@ function registerScrapersIPC(ctx) {
   // H-3: IPC-level concurrency guard mirrors the scraper's own _relayLock.
   // aapRows + relayCache pulled from store — callers do not need to supply them.
   handle('relay:scrape', async () => {
+    // RETIRED SCRAPE (2026-10-28): the bulk Relay scrape was part of the old
+    // scrape sync; fleet data now comes from the API. Kept as a disabled backup
+    // (FLEET_LEGACY_SCRAPE=1 only). Not exposed in preload, so no UI calls it.
+    if (require('../config/data-source').isApiMode()) {
+      logger.info('[data-source] relay:scrape refused — bulk scrape retired (API-only)');
+      return { ok: false, retired: true, error: 'Bulk Relay scrape is retired — fleet data comes from the API.' };
+    }
     if (_relayLock) {
       throw new ScraperError('relay:scrape operation already in progress', 'relay:scrape');
     }
@@ -388,9 +642,30 @@ function registerScrapersIPC(ctx) {
     requireString(payload.equipmentId, 'payload.equipmentId');
     _woLock = true;
     try {
-      const { scrapeWorkOrder } = require('../../src/scrapers/aap_wo_scraper');
       const logs = [];
       const log  = (msg) => { logs.push(msg); logger.info(msg); if (send) send('wo:progress', msg); };
+
+      // API-FIRST: the serviceaggregate JSON carries all core WO-detail fields
+      // (vendor, state, urgency, issue, L1/L2/L3, altId, vendor WO, offsite URL,
+      // full conversation). Instant + robust vs. the 3-phase DOM scrape. Fall
+      // back to the browser scraper only if the API path errors or finds no WO
+      // (e.g. vendor-PDF doc-scan vendors that need the Documents tab).
+      try {
+        const api = require('../../src/scrapers/aap_api');
+        if (typeof api.getWorkOrderDetailViaApi === 'function') {
+          const apiResult = await api.getWorkOrderDetailViaApi(payload.equipmentId);
+          if (apiResult && !apiResult.error && !apiResult.noWO) {
+            log('[wo:scrape] API-first: resolved WO detail via JSON (no browser) for ' + payload.equipmentId);
+            return { ok: true, result: apiResult, logs };
+          }
+          log('[wo:scrape] API path returned ' + (apiResult && apiResult.error ? ('error: ' + apiResult.error) : 'no open WO') + ' — falling back to DOM scrape');
+        }
+      } catch (e) {
+        log('[wo:scrape] API path threw, falling back to DOM scrape: ' + e.message);
+      }
+
+      // Fallback: legacy DOM scrape.
+      const { scrapeWorkOrder } = require('../../src/scrapers/aap_wo_scraper');
       const woOpts = {};
       if (payload.serviceUrl) woOpts.serviceUrl = payload.serviceUrl;
       const result = await scrapeWorkOrder(payload.equipmentId, woOpts);
@@ -428,9 +703,40 @@ function registerScrapersIPC(ctx) {
   // not needed here (single unit, own window), but we guard against concurrent
   // per-unit refreshes with a small lock.
   let _refreshUnitLock = false;
-  handle('relay:refresh-unit', async (_e, equipmentId) => {
+  // Signature of the timeline INPUTS each unit was last rebuilt from (this run).
+  const _timelineInputSig = new Map();
+  function _maybeRebuildTimeline(row) {
+    try {
+      const id = String(row.equipmentId || '').trim();
+      const down = /unavail/i.test(String(row.lifecycleState || '')) || /offsite/i.test(String(row.lifecycleReason || ''));
+      if (!id || !down) return;
+      const { timelineInputSignature } = require('../orcha/timeline-freshness');
+      const sig = timelineInputSignature(row);
+      if (!sig || _timelineInputSig.get(id) === sig) return;
+      _timelineInputSig.set(id, sig);
+      const { rebuildUnitTimeline } = require('../orcha/deep-scan');
+      logger.info('[timeline] inputs changed for ' + id + ' — rebuilding its timeline now');
+      rebuildUnitTimeline(row, {
+        pushData: ctx.pushData,
+        pushStatus: typeof ctx.pushStatus === 'function' ? ctx.pushStatus : null,
+      }).then((r) => {
+        if (r && r.ok) logger.info('[timeline] rebuilt ' + id + ' (' + String(r.timeline || '').length + 'ch)');
+        else if (r && r.skipped) logger.info('[timeline] rebuild for ' + id + ' skipped: ' + r.skipped);
+      }).catch((e) => {
+        _timelineInputSig.delete(id); // allow a retry on the next open
+        logger.warn('[timeline] rebuild failed for ' + id + ': ' + e.message);
+      });
+    } catch (e) { logger.warn('[timeline] rebuild trigger error: ' + e.message); }
+  }
+  handle('relay:refresh-unit', async (_e, equipmentId, opts) => {
     const store = require('../store');
     const id = String(equipmentId || '').trim();
+    opts = opts || {};
+    // force: bypass the relay TTL cache so this is a GUARANTEED live scrape
+    // (used by Split View "refresh on open"). reconcile: re-run canonical state
+    // for the unit after the fresh merge so the drafts reflect current data.
+    const force = !!opts.force;
+    const doReconcile = opts.reconcile !== false; // default on for this path
     if (!id) throw new ScraperError('equipmentId required', 'relay:refresh-unit');
     if (_refreshUnitLock) {
       // Don't hard-fail — return the current cache so the caller can proceed.
@@ -441,6 +747,11 @@ function registerScrapersIPC(ctx) {
     try {
       const { scrapeUnitPage, mergeRelayIntoRows } = require('../../src/scrapers/relay');
       const relayCache = store.load('relayCache', {});
+      // Force a live scrape by dropping this unit's cache entry first — there is
+      // no bypass flag on scrapeUnitPage, so deleting the entry is the clean way
+      // to guarantee a fresh Relay WR + ASIST pass (scrapeUnitPage runs the
+      // ASIST enrich internally, so this refreshes BOTH Relay and Offsite).
+      if (force) { delete relayCache[id]; }
       // partition '' == default session (Midway cookies already injected), same
       // as scrapeRelay uses for the batch path.
       const res = await scrapeUnitPage(id, '', relayCache);
@@ -481,12 +792,142 @@ function registerScrapersIPC(ctx) {
           try { ctx.pushData({ rows: [freshRow], partialMerge: true, _partial: 'relay-refresh-unit' }); } catch (_) {}
         }
       }
-      logger.info('relay:refresh-unit done for ' + id + (res && res._noWR ? ' (no WR)' : ''));
+      // Re-run canonical state for THIS unit off the fresh row so the Split View
+      // drafts (relayNote / dealerAsk) and canonical record reflect current data
+      // immediately, not the last full-sync snapshot. Reconcile is AI; keep it
+      // best-effort and non-fatal — a scrape refresh must never fail because the
+      // AI was slow/unavailable. Persists canonicalState + mirrors onto the row.
+      if (doReconcile && freshRow) {
+        try {
+          const reconcile = require('../scrapers/relay_reconcile');
+          const canonical = require('../orcha/canonical_state');
+          const cfg = reconcile.getConfig();
+          let decision = null;
+          if (cfg.enabled && reconcile.hasReconcilableData(freshRow)) {
+            try { decision = await reconcile.reconcileUnit(freshRow, { cfg }); } catch (_) {}
+          }
+          const prevCanon = store.load('canonicalState', {}) || {};
+          const prior = (prevCanon.units && prevCanon.units[id]) ? { [id]: prevCanon.units[id] } : {};
+          const built = canonical.buildAll([freshRow], { decisions: decision ? { [id]: decision } : {}, prior });
+          const rec = built.units[id];
+          if (rec) {
+            // Merge the one unit's record into the canonicalState store.
+            const units = Object.assign({}, prevCanon.units || {}, { [id]: rec });
+            store.save('canonicalState', { units, updatedAt: new Date().toISOString(), lastReconcileAt: decision ? new Date().toISOString() : (prevCanon.lastReconcileAt || null) });
+            // Mirror canonical fields onto the pushed row so the renderer sees them.
+            if (freshRow) Object.assign(freshRow, canonical.mirrorFields(rec));
+          }
+        } catch (ce) { logger.warn('relay:refresh-unit canonical re-run failed (non-fatal): ' + ce.message); }
+      }
+      logger.info('relay:refresh-unit done for ' + id + (force ? ' [forced]' : '') + (res && res._noWR ? ' (no WR)' : ''));
+      // Keep the AI timeline CURRENT: if the data the timeline is built from
+      // (offsite notes + WR conversation) changed since this unit's last
+      // rebuild, rebuild just this unit now in the background. Previously a
+      // refresh pulled fresh dealer notes but the timeline waited for the next
+      // full deep-scan (≥20 min, and that scan used stale cache).
+      if (freshRow && opts.rebuildTimeline !== false) _maybeRebuildTimeline(freshRow);
       return { ok: true, unit: freshRow, cache: relayCache[id] || null };
     } catch (e) {
       throw new ScraperError(e.message, 'relay:refresh-unit', { equipmentId: id });
     } finally {
       _refreshUnitLock = false;
+    }
+  });
+
+  // ── quicksight:capture-afp / capture-dsp ─────────────────────────────────
+  // DBR DATA (Daily Call): opens the AFP/DSP QuickSight dashboards and
+  // returns the RENDERED PAGE TEXT (not structured data — QuickSight's
+  // pivot-table DOM has no stable selector shape, confirmed via live
+  // iteration). The renderer (daily-call.js) hands this text to AI to parse
+  // into the DBR table rows. See src/scrapers/quicksight_dbr.js.
+  //
+  // Caching: quicksight:save-parsed / quicksight:get-cache let the renderer
+  // persist whatever STRUCTURED result it got back from AI, so re-opening
+  // the DBR panel doesn't need a fresh scrape+AI-call every time.
+  let _quicksightLock = false;
+  handle('quicksight:capture-afp', async () => {
+    if (_quicksightLock) {
+      throw new ScraperError('quicksight:capture-afp operation already in progress', 'quicksight:capture-afp');
+    }
+    _quicksightLock = true;
+    try {
+      const { captureAfpText } = require('../../src/scrapers/quicksight_dbr');
+      return await captureAfpText();
+    } catch (e) {
+      throw new ScraperError(e.message, 'quicksight:capture-afp');
+    } finally {
+      _quicksightLock = false;
+    }
+  });
+
+  let _quicksightDspLock = false;
+  handle('quicksight:capture-dsp', async () => {
+    if (_quicksightDspLock) {
+      throw new ScraperError('quicksight:capture-dsp operation already in progress', 'quicksight:capture-dsp');
+    }
+    _quicksightDspLock = true;
+    try {
+      const { captureDspText } = require('../../src/scrapers/quicksight_dbr');
+      return await captureDspText();
+    } catch (e) {
+      throw new ScraperError(e.message, 'quicksight:capture-dsp');
+    } finally {
+      _quicksightDspLock = false;
+    }
+  });
+
+  // Renderer calls this after AI successfully parses the captured text, so
+  // the structured result survives a panel close/reopen without re-scraping.
+  handle('quicksight:save-parsed', (_e, payload) => {
+    requireObject(payload, 'payload');
+    const store = require('../store');
+    if (payload.kind === 'dsp') store.save('quicksightDbrDsp', payload.data);
+    else store.save('quicksightDbr', payload.data);
+    return { ok: true };
+  });
+
+  handle('quicksight:get-cache', () => {
+    const store = require('../store');
+    return store.load('quicksightDbr', { ok: false, domicile: [], scac: [], scrapedAt: null });
+  });
+
+  handle('quicksight:get-cache-dsp', () => {
+    const store = require('../store');
+    return store.load('quicksightDbrDsp', { ok: false, scac: [], scrapedAt: null });
+  });
+
+  // ── WBR weekly snapshot + comparison ────────────────────────────────────────
+  // wbr:capture records this week's per-site + fleet-total down metrics (used by
+  // the Generate WBR button so a manual run always logs the current week — the
+  // sync path also auto-captures). wbr:comparison returns the real Prior-Week /
+  // T6W comparison + unit movement computed from captured history + canonical
+  // state, so the WBR prompt can use real numbers instead of "enter manually".
+  handle('wbr:capture', (_e, payload) => {
+    try {
+      const wbr = require('../orcha/wbr_snapshot');
+      const store = require('../store');
+      const rows = (payload && Array.isArray(payload.rows) && payload.rows.length)
+        ? payload.rows
+        : ((store.load('fleetData', {}) || {}).rows || []);
+      return wbr.captureSnapshot(rows);
+    } catch (e) {
+      return { ok: false, reason: e.message };
+    }
+  });
+
+  handle('wbr:comparison', (_e, payload) => {
+    try {
+      const wbr = require('../orcha/wbr_snapshot');
+      const store = require('../store');
+      const rows = (payload && Array.isArray(payload.rows) && payload.rows.length)
+        ? payload.rows
+        : ((store.load('fleetData', {}) || {}).rows || []);
+      const current = wbr.computeWeekMetrics(rows);
+      // Canonical records (for grounded newly-down "why").
+      const canonicalUnits = ((store.load('canonicalState', {}) || {}).units) || {};
+      return wbr.buildComparison(current, { canonicalUnits });
+    } catch (e) {
+      return { coldStart: true, error: e.message, total: { text: 'comparison unavailable' }, sites: {} };
     }
   });
 

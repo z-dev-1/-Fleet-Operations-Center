@@ -63,18 +63,28 @@ function logout() {
   return { ok: true };
 }
 
-/**
- * Call Slack Web API
- * Uses full cookie header (all cookies) + xoxc token in body
- */
-function slackWebApi(method, params = {}) {
+// ── Slack rate-limit handling ───────────────────────────────────────────────
+// Slack Web API is rate-limited per method (conversations.replies especially,
+// Tier 3 ~50/min, and it 429s HARD under bursts). Previously slackWebApi fired
+// every call immediately and ignored HTTP status, so a 429 surfaced as a hard
+// "ratelimited" error and thread fetches were dropped. We now:
+//   1. SERIALIZE all calls through a single-lane queue with a minimum spacing
+//      between requests (so bursts of conversations.replies can't stampede), and
+//   2. HONOR the Retry-After header on a 429 (wait, then retry, bounded).
+// This is the single chokepoint for every Slack call, so it fixes replies,
+// history, and postMessage alike with no call-site changes.
+const _SLACK_MIN_INTERVAL_MS = 350;  // ~170 calls/min ceiling, well under bursts
+const _SLACK_MAX_RETRIES = 4;
+let _slackChain = Promise.resolve();  // serializes requests
+let _slackLastAt = 0;
+
+function _slackRawRequest(method, params) {
   const config = getConfig();
   if (!config || !config.token || !config.allCookieHeader) {
-    throw new Error('Slack not configured — please sign in first');
+    return Promise.reject(new Error('Slack not configured — please sign in first'));
   }
-
-  params.token = config.token;
-  const postData = Object.entries(params)
+  const p = Object.assign({}, params, { token: config.token });
+  const postData = Object.entries(p)
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join('&');
 
@@ -92,20 +102,68 @@ function slackWebApi(method, params = {}) {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
+        // Surface a 429 with its Retry-After so the caller can back off. Slack
+        // sends 429 either as an HTTP status OR as {ok:false,error:'ratelimited'}.
+        const retryAfter = parseInt(res.headers['retry-after'], 10);
+        if (res.statusCode === 429) {
+          return resolve({ __rateLimited: true, retryAfter: isNaN(retryAfter) ? null : retryAfter });
+        }
         try {
-          resolve(JSON.parse(data));
+          const parsed = JSON.parse(data);
+          if (parsed && parsed.ok === false && parsed.error === 'ratelimited') {
+            return resolve({ __rateLimited: true, retryAfter: isNaN(retryAfter) ? null : retryAfter });
+          }
+          resolve(parsed);
         } catch (e) {
           reject(new Error(`Slack parse error: ${data.substring(0, 300)}`));
         }
       });
     });
     req.on('error', reject);
-    req.setTimeout(8000, () => {
+    req.setTimeout(15000, () => {
       req.destroy(new Error('Slack API timeout: ' + method));
     });
     req.write(postData);
     req.end();
   });
+}
+
+const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * Call Slack Web API — serialized + rate-limit aware.
+ * Uses full cookie header (all cookies) + xoxc token in body.
+ */
+function slackWebApi(method, params = {}) {
+  // Chain onto the shared lane so calls are spaced and a 429 backoff on one
+  // call also holds back the next (prevents a thundering herd of replies).
+  const run = _slackChain.then(async () => {
+    for (let attempt = 0; attempt <= _SLACK_MAX_RETRIES; attempt++) {
+      // enforce minimum spacing since the previous request started
+      const wait = _SLACK_MIN_INTERVAL_MS - (Date.now() - _slackLastAt);
+      if (wait > 0) await _sleep(wait);
+      _slackLastAt = Date.now();
+
+      const res = await _slackRawRequest(method, params);
+      if (!res || !res.__rateLimited) return res; // normal result
+
+      if (attempt === _SLACK_MAX_RETRIES) {
+        // Give up gracefully in Slack's own shape so callers handle it as before.
+        logger.warn('[slack] ' + method + ' rate-limited after ' + (_SLACK_MAX_RETRIES + 1) + ' attempts — giving up');
+        return { ok: false, error: 'ratelimited' };
+      }
+      // Honor Retry-After, else exponential backoff (1s, 2s, 4s, 8s) + jitter.
+      const backoff = res.retryAfter != null
+        ? (res.retryAfter * 1000 + 250)
+        : (Math.pow(2, attempt) * 1000 + Math.floor(Math.random() * 300));
+      logger.info('[slack] ' + method + ' 429 — backing off ' + Math.round(backoff) + 'ms (attempt ' + (attempt + 1) + ')');
+      await _sleep(backoff);
+    }
+  });
+  // Keep the lane alive even if this call rejects, so one failure doesn't stall
+  // every subsequent Slack request.
+  _slackChain = run.then(() => undefined, () => undefined);
+  return run;
 }
 
 /**
@@ -400,6 +458,56 @@ async function resolveUserName(userId) {
   }
 }
 
+// FEATURE (Phase 5): full Slack profile fetch for identity enrichment. Calls
+// users.info and returns the useful, ACTUALLY-AVAILABLE workspace profile
+// fields (spec #8). Captures source provenance; invents nothing. Returns null
+// on any failure (the caller falls back to the existing Contact Book record).
+// NOTE: deliberately a SEPARATE function from resolveUserName (which only needs
+// a display name + caches aggressively) so enrichment can run on its own TTL.
+async function fetchUserProfile(userId) {
+  if (!userId) return null;
+  let u;
+  try { u = await slackWebApi('users.info', { user: userId }); }
+  catch (_) { return null; }
+  if (!u || !u.ok || !u.user) return null;
+  const user = u.user;
+  const p = user.profile || {};
+  // Custom profile fields (users.profile.fields) come back keyed by field id;
+  // surface them by label when present, else by id. Never fabricated.
+  const customFields = {};
+  try {
+    const fields = p.fields && typeof p.fields === 'object' ? p.fields : {};
+    for (const k of Object.keys(fields)) {
+      const f = fields[k];
+      if (f && (f.value != null && String(f.value).trim())) customFields[f.label || k] = f.value;
+    }
+  } catch (_) { /* fields optional */ }
+  return {
+    slackId: user.id || userId,
+    realName: p.real_name || user.real_name || '',
+    displayName: p.display_name || user.name || '',
+    email: p.email || '',
+    emailDomain: (p.email && p.email.includes('@')) ? p.email.split('@')[1].toLowerCase() : '',
+    title: p.title || '',
+    phone: p.phone || '',
+    timezone: user.tz || '',
+    timezoneLabel: user.tz_label || '',
+    statusText: p.status_text || '',
+    imageUrl: p.image_192 || p.image_72 || '',
+    team: user.team_id || '',
+    isAdmin: !!user.is_admin,
+    isOwner: !!user.is_owner,
+    isBot: !!user.is_bot,
+    isAppUser: !!user.is_app_user,
+    isRestricted: !!user.is_restricted,          // single-channel/multi-channel guest
+    isUltraRestricted: !!user.is_ultra_restricted,
+    deleted: !!user.deleted,                      // deactivated account
+    customFields,
+    retrievedAt: new Date().toISOString(),
+    source: 'slack.users.info',
+  };
+}
+
 // Own userId (Z), fetched lazily via auth.test and cached for the process
 // lifetime -- needed to exclude Z from the joined member-name list when
 // resolving a GROUP DM's display name (see below), without every caller
@@ -525,10 +633,27 @@ async function listOpenDMs(limit, myUserId) {
   // Parallel name resolution — resolve all conversations.info calls at once
   // instead of sequentially. With 40 DMs, sequential calls at 8s timeout each
   // could take 40×8s=320s; parallel reduces that to max(one call) ≈ 8s.
-  const names = await Promise.all(
-    all.map(c => _resolveDmSenderName(c.id, myUserId).catch(() => null))
+  // Resolve each DM's display name AND detect the SELF-DM (the 1:1 IM with
+  // yourself — conversations.info.channel.user === my own user id). The caller
+  // treats the self-DM specially (lets you feed yourself links/attachments for
+  // the agent to research), so we surface an isSelf flag here.
+  const self = myUserId || await _getMyUserId();
+  const resolved = await Promise.all(
+    all.map(async (c) => {
+      let name = null, isSelf = false;
+      try {
+        if (!c.isGroup) {
+          const info = await slackWebApi('conversations.info', { channel: c.id });
+          const peer = info && info.ok && info.channel ? info.channel.user : null;
+          if (peer && self && peer === self) isSelf = true;
+        }
+      } catch (_) {}
+      try { name = await _resolveDmSenderName(c.id, myUserId); } catch (_) { name = null; }
+      if (isSelf && (!name || name === c.id)) name = 'You (self)';
+      return { name, isSelf };
+    })
   );
-  return all.map((c, i) => ({ channelId: c.id, name: names[i] || c.id, isGroup: c.isGroup, unread: c.unread }));
+  return all.map((c, i) => ({ channelId: c.id, name: resolved[i].name || c.id, isGroup: c.isGroup, unread: c.unread, isSelf: resolved[i].isSelf }));
 }
 
 async function readDMs(limit) {
@@ -646,9 +771,8 @@ async function processAutoReplies(messages, rules) {
  * Returns: { name, mimetype, content } or null.
  */
 async function downloadFileContent(file) {
-  if (!file || !file.url_private) return null;
+  if (!file) return null;
 
-  // Only attempt to read human-readable text formats
   const mime = (file.mimetype || '').toLowerCase();
   const name = (file.name    || '').toLowerCase();
   const isReadable =
@@ -661,7 +785,36 @@ async function downloadFileContent(file) {
     name.endsWith('.csv')    ||
     name.endsWith('.json')   ||
     name.endsWith('.log');
-  if (!isReadable) return null;
+
+  // FIX (2026-10): previously returned null for ANY non-text file (PDF, image,
+  // xlsx, docx), so the AI never saw vendor estimates / photos / spreadsheets —
+  // the "struggles with attachments" gap. Slack ITSELF indexes many documents
+  // and exposes extracted text on the file object WITHOUT a download:
+  //   - file.plain_text        (full extracted text, e.g. PDFs Slack has OCR'd)
+  //   - file.preview_plain_text / file.preview (first-page/preview text)
+  //   - file.preview_highlight (HTML preview — strip tags as a last resort)
+  // Use that for non-text files so the AI can read the content. We also call
+  // files.info when the shared payload lacks the preview (history/replies often
+  // omit it). Images still can't be OCR'd here, but we surface title/alt text.
+  if (!isReadable) {
+    let f = file;
+    const hasPreview = f.plain_text || f.preview_plain_text || f.preview;
+    if (!hasPreview && f.id) {
+      try {
+        const info = await slackWebApi('files.info', { file: f.id });
+        if (info && info.ok && info.file) f = info.file;
+      } catch (_) { /* best effort */ }
+    }
+    const extracted = f.plain_text || f.preview_plain_text || f.preview ||
+      (f.preview_highlight ? String(f.preview_highlight).replace(/<[^>]+>/g, '') : '') ||
+      // image: no text to read, but give the AI the alt/title so it's not blind
+      (mime.startsWith('image/') ? (f.alt_txt || f.title || '') : '');
+    if (extracted && String(extracted).trim()) {
+      return { name: file.name, mimetype: mime, content: String(extracted).slice(0, 32768) };
+    }
+    return null; // genuinely nothing readable (e.g. a photo with no caption)
+  }
+  if (!file.url_private) return null;
 
   const config = getConfig();
   if (!config || !config.token) return null;
@@ -809,4 +962,10 @@ async function uploadFileToChannel(channelId, opts) {
   return { ok: true, fileId: step1.file_id };
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, downloadFileContent, downloadFileBuffer, uploadFileToChannel };
+// Invisible sentinel the app prefixes onto any reply it posts into the SELF-DM,
+// so the next poll can recognize + skip its OWN replies there (otherwise a
+// self-DM reply — authored by your own user id — would be re-processed forever).
+// Zero-width characters: invisible in the Slack client, stable across fetches.
+const SELF_REPLY_MARKER = '\u200B\u2060'; // ZWSP + WORD JOINER
+
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, fetchUserProfile, downloadFileContent, downloadFileBuffer, uploadFileToChannel, SELF_REPLY_MARKER };
