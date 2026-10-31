@@ -237,7 +237,7 @@ function createNotifier(deps = {}) {
         ledger.initializedAt = t;
         for (const n of notes) if (STATE_SOURCES.has(n.source) && !ledger.sourceBaseline[n.source]) ledger.sourceBaseline[n.source] = t;
         try { save('assistantNoteLedger', ledger); }
-        catch (e) { log.warn('[notifier] ledger save failed: ' + e.message); return; }
+        catch (e) { log.warn('[notifier] ledger save failed: ' + e.message); _rearm = true; return; }
         pending = [];
         _evicted.clear();
         log.info('[notifier] baseline: ' + notes.length + ' notes marked silently');
@@ -256,7 +256,7 @@ function createNotifier(deps = {}) {
       // Mark + save BEFORE delivery: a crash loses a note rather than duplicating it.
       for (const k of allKeys) ledger.keys[k] = t;
       try { save('assistantNoteLedger', ledger); }
-      catch (e) { log.warn('[notifier] ledger save failed: ' + e.message); return; } // pending kept
+      catch (e) { log.warn('[notifier] ledger save failed: ' + e.message); _rearm = true; return; } // pending kept
       pending = [];
       _evicted.clear();
       for (const src of Object.keys(silentBySource)) log.info('[notifier] baseline (' + src + '): ' + silentBySource[src] + ' marked silently');

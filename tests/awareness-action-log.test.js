@@ -111,8 +111,13 @@ describe('mappers (AC26)', () => {
   it('fromConfirmSend for slack / email / lifecycle / approve-wr; not ok → null', () => {
     expect(al.fromConfirmSend({ channel: 'slack', recipientName: 'Bob', message: 'BODY' }, { ok: true })).toMatchObject({ type: 'message-sent', detail: 'Slack to Bob' });
     expect(al.fromConfirmSend({ channel: 'email', to: 'a@example.com', body: 'BODY' }, { ok: true })).toMatchObject({ type: 'email-sent', detail: 'email to a@example.com' });
-    expect(al.fromConfirmSend({ channel: 'lifecycle', unitId: 'A1', state: 'Available' }, { ok: true })).toMatchObject({ type: 'lifecycle-set', unit: 'A1' });
-    expect(al.fromConfirmSend({ channel: 'approve-wr', unitId: 'A1' }, { ok: true, workRequestId: 'WR7' })).toMatchObject({ type: 'wr-created', wr: 'WR7' });
+    // Real MOVE_UNIT confirm item shape (src/ipc/ai.js processOrchaAction)
+    expect(al.fromConfirmSend({ channel: 'lifecycle', equipmentId: 'A1', assetUrl: 'u', state: 'Available', reason: 'Healthy' }, { ok: true }))
+      .toMatchObject({ type: 'lifecycle-set', unit: 'A1', detail: 'Available / Healthy' });
+    // Real APPROVE_WR item + _confirmSendImpl success result shapes
+    expect(al.fromConfirmSend({ channel: 'approve-wr', recipientName: 'WR r1 (A1)', reviewId: 'r1' }, { ok: true, message: 'm', unit: 'A1', workRequestId: 'WR7' }))
+      .toMatchObject({ type: 'wr-created', unit: 'A1', wr: 'WR7' });
+    expect(al.fromConfirmSend({ channel: 'approve-wr', reviewId: 'r1' }, { ok: true, message: 'm' })).toMatchObject({ type: 'wr-created', unit: null, wr: null });
     expect(JSON.stringify(al.fromConfirmSend({ channel: 'slack', recipientName: 'Bob', message: 'BODY' }, { ok: true }))).not.toContain('BODY');
     expect(al.fromConfirmSend({ channel: 'slack' }, { ok: false })).toBeNull();
   });

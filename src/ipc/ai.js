@@ -1030,7 +1030,7 @@ async function _confirmSendImpl(item) {
             const idx = rev2.findIndex(x => x && String(x.id) === String(item.reviewId));
             if (idx !== -1) { rev2[idx].status = 'submitted'; rev2[idx].submittedAt = new Date().toISOString(); if (r.workRequestId) rev2[idx].workRequestId = r.workRequestId; store.save('partnerWRs_review', rev2); }
           } catch (_) {}
-          return { ok: true, message: 'WR ' + item.reviewId + ' submitted to AAP for ' + item2.unit + (r.workRequestId ? ' (WR ' + r.workRequestId + ')' : '') };
+          return { ok: true, message: 'WR ' + item.reviewId + ' submitted to AAP for ' + item2.unit + (r.workRequestId ? ' (WR ' + r.workRequestId + ')' : ''), unit: item2.unit, workRequestId: r.workRequestId };
         }
         return { ok: false, error: (r && (r.error || r.message)) || 'AAP did not confirm the WR submission' };
       } catch (e) {
@@ -1444,7 +1444,13 @@ function registerAIHandlers(ctx) {
     return { ok: true };
   });
   // -- Unified Orcha action handler (used by bubble + main) --
-  handle('ai:orcha-action', async (_e, userMsg) => processOrchaAction(userMsg, { source: 'fab' }));
+  // Only the app's own renderer gets the awareness block; preload is also
+  // injected into AAP corp pages, so other senders fail closed (no source).
+  handle('ai:orcha-action', async (_e, userMsg) => {
+    let _isApp = false;
+    try { _isApp = !!require('../orcha/awareness/screen-context')._isAppSender(_e); } catch (_) {}
+    return processOrchaAction(userMsg, _isApp ? { source: 'fab' } : {});
+  });
 
   // -- Confirmed send --
   // ai:orcha-action never sends directly — it returns a pendingConfirm item

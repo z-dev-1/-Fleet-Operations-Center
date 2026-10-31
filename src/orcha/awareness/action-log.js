@@ -119,7 +119,9 @@ function fromLifecycleResult(result, { unitId, state, reason } = {}) {
 
 function fromConfirmSend(item, result) {
   if (!item || !result || result.ok !== true) return null;
-  const unit = item.unitId || item.unit || null;
+  // MOVE_UNIT confirm items carry equipmentId; approve-wr results carry unit.
+  const unit = item.unitId || item.unit || item.equipmentId
+    || (item.channel === 'approve-wr' ? result.unit : null) || null;
   switch (item.channel) {
     case 'slack': return { type: 'message-sent', unit, wr: null, detail: 'Slack to ' + (item.recipientName || ''), actor: 'user' };
     case 'email': return { type: 'email-sent', unit, wr: null, detail: 'email to ' + (item.to || ''), actor: 'user' };
