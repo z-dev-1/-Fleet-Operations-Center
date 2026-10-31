@@ -220,6 +220,8 @@ const REGISTRY = {
   assistantActionLog:     () => path.join(P.dataDir, 'assistant_action_log.json'),     // { actions:[{at,type,unit,wr,detail,actor}] } ring 50
   assistantNoteLedger:    () => path.join(P.dataDir, 'assistant_note_ledger.json'),    // { initializedAt, sourceBaseline:{src:atMs}, keys:{key:atMs}, slackPosts:[atMs] } 30d prune
   assistantNotesFeed:     () => path.join(P.dataDir, 'assistant_notes_feed.json'),     // { notes:[note], lastSeenAt } max 50
+  // Telemetry (Phase 2a, 2026-11). See src/telemetry/index.js. Device-local.
+  telemetryRollup:        () => path.join(P.dataDir, 'telemetry_rollup.json'),        // { version:1, rollups:[…] } max 96 (15-min windows)
   // Production backend scheduler (2026-08) — durable job ledger for SharePoint
   // push + scheduled OWA email jobs. See src/scheduler/ledger.js. Owns job
   // state machine, idempotency keys, expiring leases, completed-slot keys,

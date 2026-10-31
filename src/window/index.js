@@ -25,6 +25,8 @@ const {
 const path   = require('path');
 const fs     = require('fs');
 const logger = require('../utils/logger')('window');
+const telemetry = require('../telemetry');
+const trayState = require('./tray-state');
 const { attachAutoLogin, partitionForUrl } = require('../orcha/auto-login');
 const { P }  = require('../config/paths');
 const { getAppIconPath } = require('../config/app-icon');
@@ -272,6 +274,7 @@ function initWindows(ctx) {
   let _pmFillRunning    = false;     // hoisted: guards the background PM/location fill
   let _lastPmFillAt     = 0;         // hoisted: throttles the PM/location fill to once/hour
   const RESCAN_INTERVAL_MS = 5 * 60 * 1000; // hoisted: _showApp reads it synchronously in API mode
+  let _apiRefreshTimer  = null;      // hoisted: handle of the recurring API refresh (guards _showApp double-scheduling)
 
   // Lazy-load scrapers to avoid circular require at module load
   function _getAap()  { return require('../scrapers/aap'); }
@@ -1028,7 +1031,14 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
     // are NOT fetched here (table is instant); a unit's thread loads lazily via
     // refreshUnit when its detail panel opens. Called once at startup in API
     // mode, and on the recurring API refresh timer.
-    async function _loadFleetViaApiStartup(reason) {
+    // Telemetry wrap (Phase 2a): times real builds as 'fleet.apiLoad'. The
+    // coalesce path (a build already in flight) bypasses tracking so a no-op
+    // skip doesn't pollute the durations. Pure pass-through either way.
+    function _loadFleetViaApiStartup(reason) {
+      if (_apiLoadInFlight) return _loadFleetViaApiStartupImpl(reason);
+      return telemetry.track('fleet.apiLoad', () => _loadFleetViaApiStartupImpl(reason));
+    }
+    async function _loadFleetViaApiStartupImpl(reason) {
       // SINGLE-FLIGHT GUARD (2026-10-19): only ONE fleet build may run at a
       // time. Without this, a burst of callers — e.g. several AAP reads that
       // all failed while auth was down and then each fire a 'post-reauth' retry
@@ -1174,7 +1184,9 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         // stage + Ready are current without waiting on deep-scan's 2h notes
         // cache. Saves + runs the canonical pass. Non-blocking, non-fatal.
         try {
-          require('../orcha/stage_refresh').refreshStages({ pushData, ctx })
+          telemetry.track('stageRefresh.run',
+            () => require('../orcha/stage_refresh').refreshStages({ pushData, ctx }),
+            { skip: (r) => !!(r && r.ran === false) })
             .catch((e) => logger.warn('[stage-refresh] error (non-fatal): ' + e.message));
         } catch (e) { logger.warn('[stage-refresh] hook error (non-fatal): ' + e.message); }
       } catch (e) {
@@ -1366,13 +1378,13 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
           }
           logger.info('[data-source] AI timeline build: hydrated ' + hydrated + ' conversations + PM — running Orcha deep-scan');
           const { runOrchaDeepScan } = require('../orcha/deep-scan');
-          await runOrchaDeepScan(rows, {
+          await telemetry.track('deepScan.run', () => runOrchaDeepScan(rows, {
             pushData,
             pushStatus,
             payload,
             uptakeCount: (store.load('uptakeHash', {}).units || []).length,
             relayCount: 0,
-          });
+          }));
         } catch (e) {
           logger.warn('[data-source] deep-scan error (non-fatal): ' + e.message);
         } finally {
@@ -1506,8 +1518,16 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
       // In API mode the fleet comes from the direct JSON API, not the chunked
       // scrape rescan — skip scheduling the scrape backfill/recurring rescan.
       if (_apiMode()) {
-        logger.info('[data-source] API mode \u2014 scheduling recurring API refresh (no scrape rescan)');
-        setInterval(() => { _loadFleetViaApiStartup('refresh'); }, RESCAN_INTERVAL_MS);
+        // Double-scheduling guard (Phase 2b, unflagged): the handle is stored
+        // and a repeat _showApp() won't stack a second 5-min refresh timer. A
+        // single call behaves exactly as before; only the double-call bug path
+        // changes, so no flag is needed.
+        if (_apiRefreshTimer) {
+          logger.info('[data-source] API refresh already scheduled \u2014 not double-scheduling');
+        } else {
+          logger.info('[data-source] API mode \u2014 scheduling recurring API refresh (no scrape rescan)');
+          _apiRefreshTimer = setInterval(() => { _loadFleetViaApiStartup('refresh'); }, RESCAN_INTERVAL_MS);
+        }
       } else {
       // Startup shows only the first 6 domiciles for a fast first paint; the
       // chunked rescan backfills the remaining domiciles. Run that FIRST backfill
@@ -2066,10 +2086,42 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
       frames.push(fs.existsSync(fp) ? nativeImage.createFromPath(fp) : icon);
     }
     let frameIdx = 0;
-    setInterval(() => {
-      frameIdx = (frameIdx + 1) % 12;
-      try { tray.setImage(frames[frameIdx]); } catch (_) {}
-    }, 120);
+    let _frameTimer = null;
+    function _startFrames() {
+      _frameTimer = setInterval(() => {
+        frameIdx = (frameIdx + 1) % 12;
+        try { tray.setImage(frames[frameIdx]); } catch (_) {}
+      }, trayState.TRAY_FRAME_MS);
+    }
+    function _stopFrames() {
+      if (_frameTimer) { clearInterval(_frameTimer); _frameTimer = null; }
+      frameIdx = 0;
+      try { tray.setImage(icon); } catch (_) {}
+    }
+    // perf.trayAnimateOnlyWhenBusy (Phase 2b, default OFF): when ON, animate
+    // only while a sync / API build / deep-scan / rescan is running and show
+    // the static icon otherwise. OFF = the original always-on 120 ms pulse.
+    let _animateOnlyWhenBusy = false;
+    try { _animateOnlyWhenBusy = require('../config/perf-flags').load().trayAnimateOnlyWhenBusy; } catch (_) {}
+    if (!_animateOnlyWhenBusy) {
+      _startFrames();
+    } else {
+      logger.info('[tray] animate-only-when-busy enabled');
+      setInterval(() => {
+        const a = trayState.trayAction({
+          animateOnlyWhenBusy: true,
+          busy: trayState.isBusy({
+            apiLoadInFlight: _apiLoadInFlight,
+            deepScanRunning: _deepScanRunning,
+            rescanInProgress: _rescanInProgress,
+            isSyncing: !!(ctx && ctx.isSyncing),
+          }),
+          animating: !!_frameTimer,
+        });
+        if (a === 'start') _startFrames();
+        else if (a === 'stop') _stopFrames();
+      }, trayState.TRAY_BUSY_POLL_MS);
+    }
   }
 
   // ── AAP Column Setup window ───────────────────────────────────────────────

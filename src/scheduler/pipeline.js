@@ -326,8 +326,15 @@ function _redactSync(s) {
     sourcesUpdated: s.sourcesUpdated, sourcesFailed: s.sourcesFailed, usedCache: s.usedCache };
 }
 
+// Telemetry (Phase 2a): lazy so the pure section above stays dependency-light.
+// track() is a pure pass-through (same value, same rejection).
+function _telemetry() { return require('../telemetry'); }
+
 // ── SharePoint job ─────────────────────────────────────────────────────────────
-async function runSharePointJob(ctx, spec) {
+function runSharePointJob(ctx, spec) {
+  return _telemetry().track('scheduler.sharepoint', () => _runSharePointJobImpl(ctx, spec));
+}
+async function _runSharePointJobImpl(ctx, spec) {
   const { job, created } = await ledger.getOrCreateJob({ ...spec, channel: ledger.CHANNELS.SHAREPOINT });
   if (!created) {
     if (job.state === ledger.STATES.COMPLETED) { logger.info('SP job already completed today — no-op'); return { skipped: 'already-completed', job }; }
@@ -453,8 +460,8 @@ async function _runDbrJob(ctx, kind, spec) {
   }
 }
 
-function runDbrAfpJob(ctx, spec) { return _runDbrJob(ctx, 'afp', spec); }
-function runDbrDspJob(ctx, spec) { return _runDbrJob(ctx, 'dsp', spec); }
+function runDbrAfpJob(ctx, spec) { return _telemetry().track('scheduler.dbr.afp', () => _runDbrJob(ctx, 'afp', spec)); }
+function runDbrDspJob(ctx, spec) { return _telemetry().track('scheduler.dbr.dsp', () => _runDbrJob(ctx, 'dsp', spec)); }
 
 // ── Email job (one job per operator/domicile/series scope) ──────────────────────
 // The scheduler creates ONE logical email trigger per slot; this function fans
@@ -477,7 +484,7 @@ async function runEmailSlot(ctx, slotSpec) {
     return { skipped: 'in-flight', outcomes: [] };
   }
   _emailSlotsInFlight.add(slotKey);
-  try { return await _runEmailSlotInner(ctx, slotSpec); }
+  try { return await _telemetry().track('scheduler.email', () => _runEmailSlotInner(ctx, slotSpec)); }
   finally { _emailSlotsInFlight.delete(slotKey); }
 }
 

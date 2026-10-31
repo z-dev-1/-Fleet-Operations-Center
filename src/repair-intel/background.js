@@ -123,9 +123,9 @@ async function _cycle() {
 function start() {
   if (_timer) return;
   _enabled = true;
-  _timer = setInterval(() => { _cycle().catch(() => {}); }, CYCLE_MS);
+  _timer = setInterval(() => { require('../telemetry').track('repairIntel.cycle', _cycle).catch(() => {}); }, CYCLE_MS);
   if (_timer.unref) _timer.unref(); // never keep the process alive just for this
-  setTimeout(() => { _cycle().catch(() => {}); }, FIRST_DELAY_MS);
+  setTimeout(() => { require('../telemetry').track('repairIntel.cycle', _cycle).catch(() => {}); }, FIRST_DELAY_MS);
   logger.info('repair-intel background worker started (cycle ' + Math.round(CYCLE_MS / 60000) + 'm)');
 }
 

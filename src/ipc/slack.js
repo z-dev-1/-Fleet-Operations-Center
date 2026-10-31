@@ -362,7 +362,9 @@ function registerSlackIPC(ctx) {
   handle('slack:poll-channel-watch', async () => {
     if (!_mayPollSlack()) return { skipped: 'standby — not the production leader' };
     const { pollChannelsOnce } = require('../../src/scrapers/slack_channel_watch');
-    return pollChannelsOnce((msg) => logger.info(msg));
+    return require('../telemetry').track('slack.pollChannelWatch',
+      () => pollChannelsOnce((msg) => logger.info(msg)),
+      { skip: (r) => !!(r && r._skipped) });
   });
 
   // BUG FIX (2026-07-22): one-time cleanup of any duplicate log entries
@@ -408,7 +410,9 @@ function registerSlackIPC(ctx) {
   handle('slack:poll-dm-autoreply', async () => {
     if (!_mayPollSlack()) return { skipped: 'standby — not the production leader' };
     const { pollDMAutoReplyOnce } = require('../../src/scrapers/slack_dm_autoreply');
-    const result = await pollDMAutoReplyOnce((msg) => logger.info(msg));
+    const result = await require('../telemetry').track('slack.pollDmAutoReply',
+      () => pollDMAutoReplyOnce((msg) => logger.info(msg)),
+      { skip: (r) => !!(r && r._skipped) });
     // CHAT HEAD (2026-07-24): a DM that the AI couldn't confidently
     // auto-answer (escalated -- needs Z's own judgment) pops the desktop
     // bubble up temporarily, Messenger-chat-head style, even if the main

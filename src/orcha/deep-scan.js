@@ -66,13 +66,24 @@ function _stripTrailingGapFillers(text) {
   return lines.join('\n');
 }
 
-// Deep-scan batch size. MUST match the claude-code worker pool (WORKER_POOL_SIZE=3
-// in relay.js). Processing 5 units in parallel while only 3 claude workers exist
-// meant 5 AI calls fought over 3 workers every batch — the extra 2 queued, and the
-// churn (kill-after-job + respawn) showed up as the 'stale process exited' spam and
-// stalled progress. Matching the pool size lets each unit get a worker immediately
-// with no contention. (2026-08-24)
+// Deep-scan base batch size (units processed in parallel per batch). History:
+// 5 → 3 on 2026-08-24 when the claude-code pool was 3 workers. The relay's
+// Claude pool is now relay.getClaudePoolSize() — default 1 (env
+// FLEET_CLAUDE_POOL / persisted orchaConfig.claudePoolSize, clamped 1–5) —
+// while the Orcha WS lane runs up to relay MAX_CONCURRENT (5) asks. So with
+// Orcha up, 3 is fine; with Orcha DOWN every ask falls to Claude and a batch of
+// 3 queues behind a single worker while each unit holds an offsite scrape
+// window open. perf.deepScanMatchPool (default OFF) caps the batch to the
+// Claude pool in that case — see deepScanBatchSize().
 const DS_BATCH_SIZE = 3;
+
+// Pure: effective batch size. Unchanged base unless the flag is on AND the
+// Orcha lane is down; then min(base, poolSize), never below 1.
+function deepScanBatchSize({ base = DS_BATCH_SIZE, matchPool, orchaUp, poolSize } = {}) {
+  if (!matchPool || orchaUp) return base;
+  const pool = Math.floor(Number(poolSize)) || 1;
+  return Math.max(1, Math.min(base, pool));
+}
 
 // Post-processing: strip dollar amounts AI may have included despite instructions
 function _stripCosts(text) {
@@ -136,6 +147,17 @@ async function runOrchaDeepScan(mergedRows, opts) {
       }
     };
 
+  // Effective batch size (perf.deepScanMatchPool, Phase 2b). Any probe error
+  // falls back to the unchanged base batch.
+  let _matchPool = false;
+  try { _matchPool = require('../config/perf-flags').load().deepScanMatchPool; } catch (_) {}
+  const _orchaUp = (() => { try { return !!relay.getStatus().backends.orcha; } catch (_) { return true; } })();
+  const _poolSize = (() => { try { return relay.getClaudePoolSize(); } catch (_) { return DS_BATCH_SIZE; } })();
+  const batchSize = deepScanBatchSize({ matchPool: _matchPool, orchaUp: _orchaUp, poolSize: _poolSize });
+  if (batchSize !== DS_BATCH_SIZE) {
+    logger.info('[DS] batch size ' + batchSize + ' (Orcha down, Claude pool ' + _poolSize + ')');
+  }
+
   const notesStore = store.load('notesStore', {});
   const _changedIds = new Set(); // units whose notesStore entry this run changed
 
@@ -193,8 +215,8 @@ async function runOrchaDeepScan(mergedRows, opts) {
   // earlier one in notesStore. Advancing by 5 (matching the slice window)
   // restores the non-overlapping batching the comment above intends.
   const allResults = []; // collect all settled results across batches for post-scan detection
-  for (let i = 0; i < unitsToProcess.length; i += DS_BATCH_SIZE) {
-    const batch   = unitsToProcess.slice(i, i + DS_BATCH_SIZE);
+  for (let i = 0; i < unitsToProcess.length; i += batchSize) {
+    const batch   = unitsToProcess.slice(i, i + batchSize);
     const results = await Promise.allSettled(
       batch.map(u => _processUnit(u, notesStore, askOrcha))
     );
@@ -355,7 +377,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
         // did). now() keeps the latest enrichment winning.
         pushData({ ...payload, rows: mergedRows, syncedAt: new Date().toISOString(), _partial: 'deep-scan' });
       }
-      logger.info('[DS] Incremental save after ' + Math.min(i + DS_BATCH_SIZE, unitsToProcess.length) + '/' + unitsToProcess.length + ' units');
+      logger.info('[DS] Incremental save after ' + Math.min(i + batchSize, unitsToProcess.length) + '/' + unitsToProcess.length + ' units');
     } catch (e) {
       logger.warn('[DS] Incremental save failed: ' + e.message);
     }
@@ -966,4 +988,4 @@ function _outOfScopeNote(u) { return {
   text: `${u.id} needs re-routing (vendor says out of scope). Consider dealer/OEM.`,
   source: 'deep-scan', severity: 'medium' }; }
 
-module.exports = { runOrchaDeepScan, rebuildUnitTimeline, isOffsiteCacheFresh, OFFSITE_CACHE_FRESH_MS, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature, _stripTrailingGapFillers, _aiInputSig, _repairDoneNote, _outOfScopeNote };
+module.exports = { runOrchaDeepScan, rebuildUnitTimeline, deepScanBatchSize, DS_BATCH_SIZE, isOffsiteCacheFresh, OFFSITE_CACHE_FRESH_MS, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature, _stripTrailingGapFillers, _aiInputSig, _repairDoneNote, _outOfScopeNote };

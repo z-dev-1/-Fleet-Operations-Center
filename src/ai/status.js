@@ -14,7 +14,7 @@
  *   - attachment-reading availability (claude-code / link-research presence);
  *   - trace-derived quality metrics (ai/eval): answer success, fallback rate,
  *     tool success, avg latency, model usage, correction rate;
- *   - queue length / active requests (best-effort from relay internals).
+ *   - queue length / active requests / max concurrency from relay.queueStats().
  *
  * Every probe is wrapped so building the snapshot NEVER throws. A signal that
  * cannot be read degrades to a neutral/unknown value rather than a false green.
@@ -169,12 +169,28 @@ function _throughput(metricsLimit) {
   const recs = _safe(() => require('./trace').recent(metricsLimit || 200), []);
   const lats = recs.map((r) => r.latencyMs).filter((n) => typeof n === 'number').sort((a, b) => a - b);
   const p95 = lats.length ? lats[Math.min(lats.length - 1, Math.floor(lats.length * 0.95))] : null;
-  // Active requests / queue depth from the relay concurrency surface if exposed.
-  let queue = null, active = null;
-  const rs = _safe(() => require('../orcha/relay').getStatus(), null);
-  if (rs && typeof rs.activeCount === 'number') active = rs.activeCount;
-  if (rs && typeof rs.queueLength === 'number') queue = rs.queueLength;
-  return { p95LatencyMs: p95, activeRequests: active, queueDepth: queue };
+  // Active requests / queue depth from the relay concurrency surface.
+  const q = _queueFromRelay(_safe(() => require('../orcha/relay'), null));
+  return { p95LatencyMs: p95, activeRequests: q.activeRequests, queueDepth: q.queueDepth, maxConcurrent: q.maxConcurrent };
+}
+
+// relay.queueStats() → { active, waiting, max } is the real concurrency
+// surface (relay.getStatus() carries no queue fields). Falls back to the legacy
+// getStatus().activeCount/queueLength shape, else nulls. Never throws.
+function _queueFromRelay(relay) {
+  const out = { activeRequests: null, queueDepth: null, maxConcurrent: null };
+  if (!relay) return out;
+  const qs = _safe(() => (typeof relay.queueStats === 'function' ? relay.queueStats() : null), null);
+  if (qs && (typeof qs.active === 'number' || typeof qs.waiting === 'number')) {
+    if (typeof qs.active === 'number') out.activeRequests = qs.active;
+    if (typeof qs.waiting === 'number') out.queueDepth = qs.waiting;
+    if (typeof qs.max === 'number') out.maxConcurrent = qs.max;
+    return out;
+  }
+  const rs = _safe(() => (typeof relay.getStatus === 'function' ? relay.getStatus() : null), null);
+  if (rs && typeof rs.activeCount === 'number') out.activeRequests = rs.activeCount;
+  if (rs && typeof rs.queueLength === 'number') out.queueDepth = rs.queueLength;
+  return out;
 }
 
 function snapshot(opts) {
@@ -246,4 +262,4 @@ function snapshot(opts) {
   };
 }
 
-module.exports = { snapshot };
+module.exports = { snapshot, _queueFromRelay };

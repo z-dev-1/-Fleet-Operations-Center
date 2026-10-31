@@ -618,6 +618,11 @@ function _startAutoSync() {
   // ── 5e. Register all IPC handlers ─────────────────────────────────────────
   const { registerAllIPC } = require('./ipc');
   registerAllIPC(_ctx);
+  // Phase 2a read-only telemetry sampler (settings.telemetry.enabled, default ON).
+  try {
+    const r = require('./telemetry').start();
+    log.info('[telemetry] ' + (r.started ? 'sampling started' : 'disabled'));
+  } catch (e) { log.warn('[telemetry] start failed (non-fatal): ' + e.message); }
 
   // AI-FILL GATE IPC: the renderer flips this on/off around a Long Dwell AI
   // Fill (single or Fill All) so scheduled auto-sync + live rescan pause and

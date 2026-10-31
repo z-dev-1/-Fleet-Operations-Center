@@ -82,6 +82,11 @@ function _defaultNotifyDeps() {
  * writer's fleetData save can interleave). The carrier notice is queued.
  */
 function runCanonicalPass(opts = {}) {
+  // Telemetry wrap (Phase 2a): sync pass-through, same return value / throws.
+  return require('../telemetry').track('canonical.pass', () => _runCanonicalPassImpl(opts));
+}
+
+function _runCanonicalPassImpl(opts = {}) {
   const deps = opts.deps || {};
   const store = deps.store || require('../store');
   const canonical = deps.canonical || require('./canonical_state');

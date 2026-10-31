@@ -289,6 +289,10 @@ expose('assistant', {
   dismissNote:      (id) => ipcRenderer.invoke('assistant:dismiss-note', id),
   onNotes:          (cb) => on('assistant:notes', cb),
 });
+// ── Telemetry (read-only diagnostics, Phase 2a) ──────────────────────────────
+expose('telemetry', {
+  snapshot: () => ipcRenderer.invoke('telemetry:snapshot'),
+});
 
 
 
