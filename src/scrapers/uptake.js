@@ -20,6 +20,7 @@ const { BrowserWindow } = require('electron');
 const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
+const crypto = require('crypto');
 const { P } = require('../config/paths');
 const logger = require('../utils/logger').createLogger('uptake');
 
@@ -677,8 +678,6 @@ const UPTAKE_API_PAGE_SIZE = 100;
 const UPTAKE_RECENT_DAYS = 7;
 // Bounded screenshot pass (screenshots are enrichment; the data is the win).
 const UPTAKE_API_SHOT_MIN_RISK = 80;      // only screenshot high-risk insights
-const UPTAKE_API_SHOT_CAP = 80;           // hard cap on total screenshots/run
-const UPTAKE_API_SHOT_BUDGET_MS = 5 * 60 * 1000;  // 5-min time budget for the pass
 
 // Run a fetch INSIDE the authed Uptake window so it carries the session cookies.
 // Returns { ok, status, json|text, error }. Never throws.
@@ -839,6 +838,48 @@ function mapApiAsset(assetObj) {
 // path that always worked), NOT canvas toDataURL on the raw buffer (which was
 // flaky at volume). Loads a local data: URL (no network), so it's fast.
 // Returns the saved file path, or null on failure.
+// ── "No change, no new picture" (2026-10-31) ─────────────────────────────────
+// Most insights repeat run after run unchanged, yet every run re-rendered a new
+// PNG for each. Key each picture by what it SHOWS: unit, insight id, title,
+// status, subsystem, first-seen day, summary, recommended actions, and a hash
+// of the chart image. Same key = same picture, so it is reused instead of
+// re-rendered. lastSeen is deliberately NOT in the key: it ticks forward while
+// the insight stays the same, which would recreate the picture every day.
+function insightShotKey(unitId, ins, chartB64) {
+  const i = ins || {};
+  const parts = [
+    unitId,
+    i._insightId || i.insightId || '',
+    i.title, i.status, i.subsystem,
+    i.firstSeen ? String(i.firstSeen).slice(0, 10) : '',
+    i.summary,
+    i.recommended || i.guidance || '',
+    chartB64 ? crypto.createHash('sha1').update(String(chartB64)).digest('hex') : 'nochart',
+  ].map((v) => String(v == null ? '' : v));
+  return crypto.createHash('sha1').update(parts.join('\u241f')).digest('hex').slice(0, 16);
+}
+
+function _safeUnitId(id) {
+  return String(id == null ? 'unit' : id).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 40) || 'unit';
+}
+
+// Stable path for a keyed picture.
+function insightShotPath(unitId, key, dir) {
+  return path.join(dir || SCREENSHOTS_DIR, `uptake_insight_${_safeUnitId(unitId)}_${key}.png`);
+}
+
+// Reuse an existing keyed picture. Refreshes its mtime so the 7-day age-based
+// retention (ipc/misc.js pruneScreenshots) keeps pictures that are still in use.
+function reuseInsightShot(file, _fs) {
+  const f = _fs || fs;
+  try {
+    if (!f.existsSync(file)) return false;
+    const now = new Date();
+    try { f.utimesSync(file, now, now); } catch (_) {}
+    return true;
+  } catch (_) { return false; }
+}
+
 async function renderHeaderedShot(win, chartB64, h, deps) {
   if (win.isDestroyed()) return null;
   const esc = (s) => String(s == null ? '' : s)
@@ -867,8 +908,17 @@ async function renderHeaderedShot(win, chartB64, h, deps) {
     '<hr>' +
     '<img src="data:image/png;base64,' + chartB64 + '" />' +
     '</div></body></html>';
+  // FIX (2026-10-31): render from ONE fixed temp file instead of a unique
+  // `data:` URL. Chromium's HostZoomMap persists zoom per "host"; a data: URL
+  // has no host, so every screenshot (window zoomFactor 0.9) added its whole
+  // ~60 KB URL as a permanent key in the profile's Preferences file (grew to
+  // 75 MB / 1,115 keys, rewritten in full on each add). A single reused file
+  // path means a single zoom key. Same HTML, same capture -> same PNG.
+  const _renderFile = (deps && deps.renderFile) || path.join(os.tmpdir(), 'fleet-uptake-insight-render.html');
+  const _fs = (deps && deps.fs) || fs;
   try {
-    await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    _fs.writeFileSync(_renderFile, html, 'utf8');
+    await win.loadFile(_renderFile);
     // Wait for the <img> to decode + layout before measuring/capturing.
     await (deps && deps.sleep ? deps.sleep(400) : new Promise(r => setTimeout(r, 400)));
     try {
@@ -896,11 +946,14 @@ async function renderHeaderedShot(win, chartB64, h, deps) {
     // Restore the default window height for the next render.
     try { const [w2] = win.getSize(); win.setSize(w2, 900); } catch (_) {}
     if (!buf || buf.length < 2000) return null;
-    const file = path.join(SCREENSHOTS_DIR, `uptake_insight_${h._label || Date.now()}.png`);
-    fs.writeFileSync(file, buf);
+    const file = path.join((deps && deps.screenshotsDir) || SCREENSHOTS_DIR, `uptake_insight_${h._label || Date.now()}.png`);
+    _fs.writeFileSync(file, buf);
     return file;
   } catch (_) {
     return null;
+  } finally {
+    // The temp page holds the chart image; remove it after each capture.
+    try { _fs.unlinkSync(_renderFile); } catch (_) {}
   }
 }
 
@@ -1177,7 +1230,7 @@ async function runApiScrape(deps) {
     };
 
     const allUnits = Object.values(unitMap);
-    let mediaOk = 0, capOk = 0, mediaWinIdx = -1;
+    let mediaOk = 0, mediaWinIdx = -1;
     const shotStart = Date.now();
 
     // Flatten (unit, insight) pairs with a stable per-insight label.
@@ -1207,9 +1260,20 @@ async function runApiScrape(deps) {
     // ── PHASE B: render each insight's details header ABOVE its chart (as an
     // HTML page) and capturePage it — baking the text INTO the saved PNG. This
     // navigates to data: URLs, so it runs AFTER all fetches are done.
+    let reusedOk = 0;
     for (const t of tasks) {
       if (win.isDestroyed() || deps.settled()) break;
       if (!t.chartB64) continue;
+      // No change, no new picture: reuse the existing PNG for this exact content.
+      const shotKey = insightShotKey(t.u.id, t.ins, t.chartB64);
+      const stable = insightShotPath(t.u.id, shotKey);
+      if (reuseInsightShot(stable)) {
+        t.ins.screenshotPath = stable;
+        t.ins.screenshots = [stable];
+        if (!t.u.screenshots.includes(stable)) t.u.screenshots.push(stable);
+        reusedOk++;
+        continue;
+      }
       const file = await renderHeaderedShot(win, t.chartB64, {
         title:       t.ins.title,
         status:      t.ins.status,
@@ -1218,7 +1282,7 @@ async function runApiScrape(deps) {
         subsystem:   t.ins.subsystem,
         summary:     t.ins.summary,
         recommended: t.ins.recommended || t.ins.guidance,
-        _label:      `${t.label}_${Date.now()}`,
+        _label:      `${_safeUnitId(t.u.id)}_${shotKey}`,   // -> stable path above
       }, deps);
       const saved = file || saveB64Png(t.chartB64, t.label);  // fallback: raw chart
       if (saved) {
@@ -1229,26 +1293,12 @@ async function runApiScrape(deps) {
       }
     }
 
-    // ── PHASE C: capturePage fallback for the few insights with NO media —
-    // BOUNDED (cap + time budget) so slow page captures can't dominate. Must
-    // re-navigate to the insight page (back on the uptake origin).
-    let capAttempts = 0;
-    for (const t of tasks) {
-      if (win.isDestroyed() || deps.settled()) break;
-      if (t.chartB64 || !t.ins.url) continue;
-      if (capAttempts >= UPTAKE_API_SHOT_CAP || (Date.now() - shotStart) > UPTAKE_API_SHOT_BUDGET_MS) break;
-      capAttempts++;
-      try {
-        await navTo(t.ins.url);
-        await pollUntil(win, CHECK_DETAIL_READY, 600, 20);
-        await sleep(1200);
-        const file = await deps.captureScreenshot(win, `insight_${t.label}`);
-        if (file) { t.ins.screenshotPath = file; t.ins.screenshots = [file]; t.u.screenshots.push(file); capOk++; }
-      } catch (e) {
-        fwarn(`[Uptake][API] capturePage fallback failed for ${t.u.id}/${t.ins.title}: ${e.message}`);
-      }
-    }
-    flog(`[Uptake][API] screenshots: ${mediaOk} via media+header + ${capOk} via capturePage fallback, ${tasks.length} insights in ${Math.round((Date.now() - shotStart) / 1000)}s`);
+    // (2026-10-31) The capturePage fallback for insights with NO chart media
+    // was removed at the user's request: on the API path every insight's chart
+    // comes from /api/media (logs: 53/53 via media, 0 page captures). An insight
+    // without media simply has no picture; its text is still saved and shown.
+    const noChart = tasks.filter((t) => !t.chartB64).length;
+    flog(`[Uptake][API] screenshots: ${reusedOk} reused (unchanged) + ${mediaOk} new via media+header, ${noChart} without chart (no picture), ${tasks.length} insights in ${Math.round((Date.now() - shotStart) / 1000)}s`);
 
     // strip internal fields before returning
     allUnits.forEach(u => u.insightsList.forEach(ins => { delete ins._assetUuid; delete ins._insightId; delete ins._mediaPng; delete ins._mediaPngs; }));
@@ -1742,4 +1792,8 @@ module.exports = {
   mapApiInsight,
   mapApiAsset,
   mediaUrlCandidates,
+  _renderHeaderedShot: renderHeaderedShot,   // test seam (fake win + deps)
+  insightShotKey,                             // test seam: "no change, no new picture" key
+  insightShotPath,
+  reuseInsightShot,
 };
