@@ -119,10 +119,37 @@ async function _cycle() {
   }
 }
 
+// ── Worker supervisor ownership (Phase 5, 2026-10-30) ──
+// When workers.supervisorEnabled + workers.supervised.repairIntel are on, the
+// supervisor owns the cadence (same 20 min interval, same 5 min first delay)
+// and the legacy setInterval/setTimeout are NOT armed. Otherwise (default) the
+// legacy timers run unchanged. Exactly one owner, decided here only.
+let _supervised = false;
+
 // Start the worker. Safe to call once at app bootstrap. No-op if already started.
 function start() {
-  if (_timer) return;
+  if (_timer || _supervised) return;
   _enabled = true;
+  // Under the supervisor, dependency skips (cluster.production / offline / auth)
+  // happen BEFORE the tick, so track('repairIntel.cycle') is not recorded on
+  // standby/offline/auth-down hosts; read status skipReasons.dependency instead.
+  // Backoff is inert for this worker (maxFailures 3 → ≤ 138 s < 20 min interval).
+  let owned = false;
+  try {
+    owned = require('../workers/supervisor').claim({
+      name: 'repairIntel', group: 'repair-intel',
+      tick: () => require('../telemetry').track('repairIntel.cycle', _cycle),
+      intervalMs: CYCLE_MS, initialDelayMs: FIRST_DELAY_MS, timeoutMs: 15 * 60 * 1000,
+      maxFailures: 3, cooldownMs: 30 * 60 * 1000,
+      dependsOn: ['cluster.production', 'offline', 'auth'], idempotent: true,
+      label: 'Repair-intel background refresh',
+    });
+  } catch (_) { owned = false; }
+  if (owned) {
+    _supervised = true;
+    logger.info('repair-intel background worker started (cycle ' + Math.round(CYCLE_MS / 60000) + 'm)');
+    return;
+  }
   _timer = setInterval(() => { require('../telemetry').track('repairIntel.cycle', _cycle).catch(() => {}); }, CYCLE_MS);
   if (_timer.unref) _timer.unref(); // never keep the process alive just for this
   setTimeout(() => { require('../telemetry').track('repairIntel.cycle', _cycle).catch(() => {}); }, FIRST_DELAY_MS);
@@ -130,6 +157,7 @@ function start() {
 }
 
 function stop() {
+  if (_supervised) { try { require('../workers/supervisor').stop('repairIntel'); } catch (_) {} _supervised = false; }
   if (_timer) { clearInterval(_timer); _timer = null; }
   _enabled = false;
 }
@@ -137,4 +165,7 @@ function stop() {
 // Exposed for tests / manual trigger.
 async function runOnce() { return _cycle(); }
 
-module.exports = { start, stop, runOnce, _stalest, _mayRun, _aiAvailable };
+module.exports = {
+  start, stop, runOnce, _stalest, _mayRun, _aiAvailable,
+  __test__: { legacyArmed: () => !!_timer, owned: () => _supervised },
+};
