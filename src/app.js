@@ -80,7 +80,13 @@ app.on('before-quit', () => {
   // Release the cluster leadership lease on a clean quit so a standby can take
   // over immediately (no TTL wait). No-op when the cluster is disabled.
   try { require('./cluster').stop(); } catch (_) {}
+  // Phase 5 worker supervisor: non-blocking shutdown + 15 s cancelled-quit
+  // resume watchdog (silent no-op when disabled). Neither hook ever calls
+  // preventDefault(): tray Quit / app:quit use app.exit(0), and the Ctrl+R
+  // restart emits before-quit then calls app.exit(0) right after.
+  try { const p = require.resolve('./workers/supervisor'); if (require.cache[p]) require.cache[p].exports.onBeforeQuit(); } catch (_) {}
 });
+app.on('will-quit', () => { try { const p = require.resolve('./workers/supervisor'); if (require.cache[p]) require.cache[p].exports.onWillQuit(); } catch (_) {} });
 
 // ── 5. Ready ──────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
@@ -617,6 +623,13 @@ function _startAutoSync() {
   _ctx.reloadSyncInterval = _startAutoSync;    // settings:save-sync-interval calls this to apply immediately
 
   // ── 5e. Register all IPC handlers ─────────────────────────────────────────
+  // Phase 5 worker supervisor (settings.workers.*, default OFF). Must run
+  // before any adopted loop's arm site (the first ones run inside
+  // registerAllIPC). Disabled → claim() is always false: legacy timers own.
+  try {
+    const r = require('./workers/supervisor').init({ notify: (n) => _ctx.pushBubbleNotification(n) });
+    if (r.enabled) log.info('[workers] supervisor enabled'); else log.debug('[workers] supervisor disabled (all loops on legacy timers)');
+  } catch (e) { log.warn('[workers] init failed (non-fatal, legacy timers keep ownership): ' + e.message); }
   const { registerAllIPC } = require('./ipc');
   registerAllIPC(_ctx);
   // Phase 2a read-only telemetry sampler (settings.telemetry.enabled, default ON).
