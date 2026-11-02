@@ -275,6 +275,7 @@ function initWindows(ctx) {
   let _lastPmFillAt     = 0;         // hoisted: throttles the PM/location fill to once/hour
   const RESCAN_INTERVAL_MS = 5 * 60 * 1000; // hoisted: _showApp reads it synchronously in API mode
   let _apiRefreshTimer  = null;      // hoisted: handle of the recurring API refresh (guards _showApp double-scheduling)
+  let _apiRefreshOwned  = false;     // hoisted: true when the Phase 5 supervisor owns the recurring API refresh
 
   // Lazy-load scrapers to avoid circular require at module load
   function _getAap()  { return require('../scrapers/aap'); }
@@ -1522,12 +1523,19 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         // and a repeat _showApp() won't stack a second 5-min refresh timer. A
         // single call behaves exactly as before; only the double-call bug path
         // changes, so no flag is needed.
-        if (_apiRefreshTimer) {
-          logger.info('[data-source] API refresh already scheduled \u2014 not double-scheduling');
-        } else {
-          logger.info('[data-source] API mode \u2014 scheduling recurring API refresh (no scrape rescan)');
-          _apiRefreshTimer = setInterval(() => { _loadFleetViaApiStartup('refresh'); }, RESCAN_INTERVAL_MS);
-        }
+        // Phase 5 (2026-10-30): the ownership decision lives in the pure helper
+        // src/workers/api-refresh-arm.js. Flag off = the same lines and the same
+        // setInterval as before; flag on = supervised, no legacy timer.
+        const r = require('../workers/api-refresh-arm').armApiRefresh({
+          alreadyArmed: !!(_apiRefreshTimer || _apiRefreshOwned),
+          claim: (spec) => require('../workers/supervisor').claim(spec),
+          setIntervalFn: setInterval,
+          load: () => _loadFleetViaApiStartup('refresh'),
+          intervalMs: RESCAN_INTERVAL_MS,
+          logger,
+        });
+        if (r.owned) _apiRefreshOwned = true;
+        if (r.timer) _apiRefreshTimer = r.timer;
       } else {
       // Startup shows only the first 6 domiciles for a fast first paint; the
       // chunked rescan backfills the remaining domiciles. Run that FIRST backfill
