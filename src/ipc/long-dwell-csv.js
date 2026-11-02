@@ -436,14 +436,37 @@ function _scheduleTick() {
     const minuteKey = now.toDateString() + ' ' + hhmm;
     if (_lastRunMinuteKey === minuteKey) return;   // already ran this minute
     _lastRunMinuteKey = minuteKey;
-    _runScheduledFetch(sched);
+    // Returned so a supervised tick awaits the fetch; the legacy setInterval
+    // ignores it, and _runScheduledFetch never rejects (catches every path).
+    return _runScheduledFetch(sched);
   } catch (e) {
     try { logger.warn('[ld-schedule] tick error (non-fatal): ' + e.message); } catch (_) {}
   }
 }
 
+// ── Worker supervisor ownership (Phase 5, 2026-10-30) ──
+// Flag on (workers.supervised.longDwell): the supervisor runs _scheduleTick
+// every 30 s and awaits the fetch; the legacy setInterval is NOT armed. Flag
+// off (default): the legacy setInterval runs unchanged. backoff:false keeps
+// the exact 30 s grid (backoff is inert for this worker); _lastRunMinuteKey
+// still prevents a second fire in the same minute.
+let _schedOwned = false;
+
 function _startScheduler() {
-  if (_schedTimer) return;
+  if (_schedTimer || _schedOwned) return;
+  let owned = false;
+  try {
+    owned = require('../workers/supervisor').claim({
+      name: 'longDwell', group: 'analytics', tick: _scheduleTick, intervalMs: 30 * 1000,
+      timeoutMs: 20 * 60 * 1000, maxFailures: 10, cooldownMs: 10 * 60 * 1000, backoff: false,
+      dependsOn: [], idempotent: true, label: 'Long-dwell CSV auto-fetch',
+    });
+  } catch (_) { owned = false; }
+  if (owned) {
+    _schedOwned = true;
+    logger.info('[ld-schedule] scheduler started (30s tick)');
+    return;
+  }
   // Align to the top of each minute-ish; a 30s tick guarantees we never miss
   // the matching minute even with timer drift.
   _schedTimer = setInterval(_scheduleTick, 30 * 1000);
@@ -535,4 +558,14 @@ module.exports = {
   _daysSince,
   MIN_DAYS_DOWN,
   TRACKER_COLUMNS,
+  __test__: {
+    scheduleTick: _scheduleTick,
+    startScheduler: _startScheduler,
+    legacyArmed: () => !!_schedTimer,
+    owned: () => _schedOwned,
+    resetForTests: () => {
+      if (_schedTimer) clearInterval(_schedTimer);
+      _schedTimer = null; _schedOwned = false; _lastRunMinuteKey = null;
+    },
+  },
 };
