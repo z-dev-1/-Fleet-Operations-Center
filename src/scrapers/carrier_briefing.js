@@ -607,8 +607,29 @@ async function _tick() {
   }
 }
 
+// ── Worker supervisor ownership (Phase 5, 2026-10-30) ──
+// Flag on (workers.supervised.carrierBriefing): the supervisor runs _tick
+// every 60 s and the legacy setInterval is NOT armed. Flag off (default): the
+// legacy setInterval runs unchanged. backoff:false keeps the exact-minute grid
+// (backoff is inert for this worker). The day-guard and per-operator dedup
+// stay inside _tick, so a restart in the matching minute never double-sends.
+let _owned = false;
+
 function startScheduler() {
   stopScheduler();
+  let owned = false;
+  try {
+    owned = require('../workers/supervisor').claim({
+      name: 'carrierBriefing', group: 'comms', tick: _tick, intervalMs: 60 * 1000,
+      timeoutMs: 30 * 60 * 1000, maxFailures: 10, cooldownMs: 10 * 60 * 1000, backoff: false,
+      dependsOn: [], idempotent: true, label: 'Daily carrier briefing',
+    });
+  } catch (_) { owned = false; }
+  if (owned) {
+    _owned = true;
+    logger.info('[CarrierBriefing] scheduler started (ticks every 60s)');
+    return stopScheduler;
+  }
   _timer = setInterval(() => { _tick().catch(() => {}); }, 60 * 1000);
   if (_timer.unref) _timer.unref();
   logger.info('[CarrierBriefing] scheduler started (ticks every 60s)');
@@ -616,6 +637,7 @@ function startScheduler() {
 }
 
 function stopScheduler() {
+  if (_owned) { try { require('../workers/supervisor').stop('carrierBriefing'); } catch (_) {} _owned = false; }
   if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
@@ -630,4 +652,5 @@ module.exports = {
   runDailyBriefing,
   startScheduler,
   stopScheduler,
+  __test__: { legacyArmed: () => !!_timer, owned: () => _owned },
 };
