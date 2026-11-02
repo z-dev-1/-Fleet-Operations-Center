@@ -141,7 +141,7 @@ async function _askTimed(ask, prompt, ms) {
   const timer = setTimeout(() => { try { ac.abort(); } catch (_) {} }, ms || 45000);
   try {
     return await Promise.race([
-      ask(prompt, { maxTokens: 700, priority: 'high', signal: ac.signal }),
+      ask(prompt, { maxTokens: 700, priority: 'high', signal: ac.signal, source: 'escalation_suggest' }),
       new Promise((_resolve, reject) => {
         ac.signal.addEventListener('abort', () => reject(new Error('AI suggestion timed out')), { once: true });
       }),

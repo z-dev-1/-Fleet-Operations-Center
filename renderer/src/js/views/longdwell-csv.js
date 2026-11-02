@@ -557,7 +557,7 @@ async function _aiFillRow(rowKey, btn, onStatus) {
     const promptRow = _promptRowFor(rowKey, fresh);
     const dd = _downDaysForRow(r.csv || {});
     const prompt = _buildAIFillPrompt(promptRow, dd);
-    const result = await aiBridge.ask(prompt);
+    const result = await aiBridge.ask(prompt, { priority: onStatus ? 'low' : 'normal' }); // batch fill-all = low (AI gateway)
     if (!result || result.ok === false) throw new Error((result && result.error) || 'AI call failed');
     const textOut = result.text || '';
     const jm = textOut.match(/\{[\s\S]*\}/);

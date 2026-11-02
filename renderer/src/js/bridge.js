@@ -393,7 +393,7 @@ export const longDwellCsv = {
 // ── AI / Orcha ─────────────────────────────────────────────────────────────
 export const ai = {
   suggest:          (unit)       => window.ai.suggest(unit),
-  ask:              (prompt)     => window.ai.ask(prompt),
+  ask:              (prompt, opts) => window.ai.ask(prompt, opts),
   getKnowledge:     ()           => window.ai.getKnowledge(),
   chat:             (prompt)     => window.ai.chat(prompt),
   deepProcess:      (unitIds)    => window.ai.deepProcess(unitIds),

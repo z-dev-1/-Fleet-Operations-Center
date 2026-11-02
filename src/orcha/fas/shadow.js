@@ -54,6 +54,7 @@ async function runShadow(input) {
       text: input.text,
       conversation: input.conversation || [],
       isGroup: !!input.isGroup,
+      aiSource: 'fas_shadow',   // background comparison work: low priority (gateway)
     });
 
     // Route any proposed actions through the executor. In Shadow this records

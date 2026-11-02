@@ -686,14 +686,14 @@ async function _aiFillRow(unitId, tr, onStatus) {
     // short pause — the second attempt usually lands on the warm Orcha lane.
     let result;
     try {
-      result = await aiBridge.ask(prompt);
+      result = await aiBridge.ask(prompt, { priority: onStatus ? 'low' : 'normal' }); // batch fill-all = low (AI gateway)
       if (!result || result.ok === false) throw new Error((result && result.error) || 'AI call failed');
     } catch (firstErr) {
       const msg = String((firstErr && firstErr.message) || firstErr || '');
       if (/abort|timed out|timeout/i.test(msg)) {
         if (btn && onStatus === undefined) btn.textContent = '\u2728 Retrying...';
         await new Promise(r => setTimeout(r, 1500));
-        result = await aiBridge.ask(prompt);
+        result = await aiBridge.ask(prompt, { priority: onStatus ? 'low' : 'normal' }); // batch fill-all = low (AI gateway)
         if (!result || result.ok === false) throw new Error((result && result.error) || 'AI call failed (after retry)');
       } else {
         throw firstErr;

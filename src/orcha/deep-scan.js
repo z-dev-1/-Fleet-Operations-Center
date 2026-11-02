@@ -140,7 +140,8 @@ async function runOrchaDeepScan(mergedRows, opts) {
     const relay = require('../orcha/relay');
     const askOrcha = async (prompt) => {
       try {
-        const text = await relay.ask(prompt);
+        // Gateway source tag: full-fleet scan = low; forced/on-demand unit = normal.
+        const text = await relay.ask(prompt, { source: opts.aiSource || (opts.force ? 'deep_scan_unit' : 'deep_scan') });
         return text ? { ok: true, text } : { ok: false, error: 'empty response' };
       } catch (e) {
         return { ok: false, error: e.message };

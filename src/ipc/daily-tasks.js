@@ -209,7 +209,7 @@ function _parseAiActions(raw) {
 // Reasons over the full fleet. Batches the snapshot if it exceeds the prompt
 // budget (every unit is still covered). 2 attempts x 30s per batch. Returns the
 // merged action-candidate array, or null if AI produced nothing usable.
-async function _generateViaAI() {
+async function _generateViaAI(opts = {}) {
   const lines = _fleetSnapshotLines();
   if (!lines.length) return null;
 
@@ -233,7 +233,7 @@ async function _generateViaAI() {
       // bounded timeout, never throws (ok:false on miss). On the rare chance
       // the model emits a bare array instead of {actions:[...]}, fall back to
       // the tolerant raw-text parse of r.raw so a good answer isn't lost.
-      const r = await reason({ prompt, expectArray: 'actions', timeoutMs: _AI_ATTEMPT_MS, label: 'tasks' });
+      const r = await reason({ prompt, expectArray: 'actions', timeoutMs: _AI_ATTEMPT_MS, label: 'tasks', priority: opts.priority });
       let actions = null;
       if (r.ok) actions = _sanitizeActions(r.data.actions);
       else if (r.raw) { const salv = _parseAiActions(r.raw); if (salv.length) actions = salv; }
@@ -339,10 +339,12 @@ function _ruleCandidates() {
 }
 
 // Main generation: AI-authored over the FULL fleet, with a rule-based fallback.
-async function _generate() {
+// opts.priority: 'normal' for the user-clicked Generate button (scheduled /
+// sync-triggered runs pass nothing -> source 'reason:tasks' = low in gateway mode).
+async function _generate(opts = {}) {
   let aiCandidates = null;
   try {
-    aiCandidates = await _generateViaAI();
+    aiCandidates = await _generateViaAI(opts);
   } catch (e) {
     logger.warn('[tasks] AI generation threw: ' + e.message);
     aiCandidates = null;
@@ -556,7 +558,7 @@ function registerDailyTasksIPC(ctx) {
 
   // Generate AI tasks now (manual "Generate" button). Never touches manual.
   handle('tasks:generate', async () => {
-    const s = await _generate();
+    const s = await _generate({ priority: 'normal' });
     // Mark today's generation done so the morning scheduler won't re-run —
     // but ONLY if the AI path actually produced the list; if we fell back to
     // rules, leave the day unmarked so the morning tick retries AI.
@@ -643,4 +645,4 @@ function _startScheduler() {
   logger.info('[tasks] morning scheduler started (generates ~' + MORNING_HOUR + ':00 ' + DEFAULT_TZ + ')');
 }
 
-module.exports = { registerDailyTasksIPC, generateNow };
+module.exports = { registerDailyTasksIPC, generateNow, __test__: { generate: _generate } };

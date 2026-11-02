@@ -364,7 +364,7 @@ const REVIEW_CONTRACT =
   'Respond with ONE valid JSON object only, no text before/after:\n' +
   '{"reply":"the best final message to send as Zila","confidence":0.0,"changed":true|false,"critique":"one short line on what you changed and why"}';
 
-async function _reviewAndRefine(decision, cfg, profile, evidence, extraResearch, controller) {
+async function _reviewAndRefine(decision, cfg, profile, evidence, extraResearch, controller, aiOpts) {
   // Only review terminal decisions that carry a real reply.
   if (!decision || typeof decision.reply !== 'string' || !decision.reply.trim()) return decision;
   if (decision._fallback || decision._aborted) return decision;
@@ -384,7 +384,7 @@ async function _reviewAndRefine(decision, cfg, profile, evidence, extraResearch,
       guard.wrapUntrusted('RESEARCH RESULTS', researchText) + '\n' +
       guard.wrapUntrusted('DRAFT REPLY TO REVIEW', decision.reply) + '\n\n' +
       REVIEW_CONTRACT;
-    const raw = await _ask(prompt, cfg, controller, 'fas-review');
+    const raw = await _ask(prompt, cfg, controller, 'fas-review', aiOpts);
     if (!raw) return decision;
     const m = raw.match(/\{[\s\S]*\}/);
     if (!m) return decision;
@@ -545,7 +545,8 @@ function _sleep(ms, controller) {
 // backoff, which governs OUTER message-level retry across VPN/outage windows.
 const IN_LOOP_BASE_BACKOFF_MS = 400;
 const IN_LOOP_MAX_BACKOFF_MS = 4000;
-async function _ask(prompt, cfg, controller, tag) {
+// aiOpts.source tags the relay call for gateway priority/telemetry (fas_agent = high, fas_shadow = low).
+async function _ask(prompt, cfg, controller, tag, aiOpts) {
   const retry = cfg.retry || {};
   const maxRetries = Number.isInteger(retry.inLoopRetries) ? retry.inLoopRetries : 2;
   const relay = require('../relay');
@@ -553,7 +554,7 @@ async function _ask(prompt, cfg, controller, tag) {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (controller.signal.aborted) return null;
     try {
-      return await relay.ask(prompt, { signal: controller.signal, requestId: tag + '-' + Date.now() });
+      return await relay.ask(prompt, { signal: controller.signal, requestId: tag + '-' + Date.now(), source: (aiOpts && aiOpts.source) || 'fas_agent' });
     } catch (e) {
       lastErr = e;
       if (controller.signal.aborted) return null;
@@ -621,6 +622,7 @@ async function _execResearch(requested, ctx, cfg, seen, controller) {
  * NEVER executed here — returned as proposals for mode-based routing.
  */
 async function runAgent(input) {
+  const aiOpts = { source: (input && input.aiSource === 'fas_shadow') ? 'fas_shadow' : 'fas_agent' };
   const cfg = config.get();
   const profile = profiles.resolveSender(input.slackId, input.senderName);
   const text = input.text || '';
@@ -694,7 +696,7 @@ async function runAgent(input) {
       const { prompt, assembled } = _assemblePrompt(cfg, profile, text, input, evidence, extraResearch, { step, maxSteps, remaining }, audience, channelRole);
       lastAssembled = assembled;
 
-      const raw = await _ask(prompt, cfg, controller, 'fas');
+      const raw = await _ask(prompt, cfg, controller, 'fas', aiOpts);
       decision = _parseDecision(raw, evidence);
 
       // Terminal decision, or no research requested, or out of budget -> stop.
@@ -732,7 +734,7 @@ async function runAgent(input) {
     // extra AI call on paths that never send.
     const _reviewOn = cfg.reviewReplies !== false && (mode === 'approval' || mode === 'autonomous');
     if (_reviewOn && !controller.signal.aborted) {
-      decision = await _reviewAndRefine(decision, cfg, profile, evidence, extraResearch, controller);
+      decision = await _reviewAndRefine(decision, cfg, profile, evidence, extraResearch, controller, aiOpts);
     }
 
     // COMMUNICATION DECISION (spec #5/#6): normalize shouldReply / replyPlacement
