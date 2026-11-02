@@ -109,4 +109,20 @@ describe('status + telemetry surfaces', () => {
     expect(ai.gateway).toHaveProperty('sampleSize');
     tel._resetForTests();
   });
+  it('telemetry snapshot().ai is null when relay is not loaded and no aiStats dep is given', () => {
+    const tel = require('../src/telemetry');
+    const relayPath = require.resolve('../src/orcha/relay');
+    const cached = require.cache[relayPath];
+    expect(cached).toBeTruthy();
+    try {
+      delete require.cache[relayPath];
+      tel._resetForTests();
+      tel.start({ enabled: false });
+      expect(tel.snapshot().ai).toBeNull();
+    } finally {
+      require.cache[relayPath] = cached;
+      tel._resetForTests();
+    }
+    expect(require('../src/orcha/relay')).toBe(relay);
+  });
 });

@@ -546,7 +546,7 @@ async function pullDsp() {
 module.exports = {
   pullAfp, pullDsp,
   // exported for tests / reuse
-  _computeGroup, _matchUnits, _loadMySitesAndCarriers, _rowIsMine,
+  _dbrAskAi, _computeGroup, _matchUnits, _loadMySitesAndCarriers, _rowIsMine,
   _dbrAfpPrompt, _dbrDspPrompt, _dbrBuildReviewPrompt, _clampToBottom10,
   _normalizeTrendsText, _normalizeHelpText,
 };

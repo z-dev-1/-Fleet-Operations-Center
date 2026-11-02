@@ -112,6 +112,126 @@ describe.each(MODES)('slack_channel_watch gates (%s)', (_name, flags) => {
   });
 });
 
+// Track settle state of a promise without awaiting it.
+function track(p) {
+  const s = { done: false, value: undefined, error: undefined };
+  p.then((v) => { s.done = true; s.value = v; }, (e) => { s.done = true; s.error = e; });
+  return s;
+}
+
+describe.each(MODES)('rca/autofill _aiFill (%s)', (_name, flags) => {
+  it("hanging relay.ask -> { values:{}, error:'AI timed out' } after 120 s", async () => {
+    T.setGatewayFlags(flags);
+    const autofill = require('../src/rca/autofill');
+    const ask = hanging();
+    vi.spyOn(relay, 'ask').mockImplementation(ask);
+    vi.useFakeTimers();
+    const s = track(autofill._aiFill({ fields: [] }, {}, '', null));
+    await vi.advanceTimersByTimeAsync(119999);
+    expect(s.done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.done).toBe(true);
+    expect(s.value).toEqual({ values: {}, error: 'AI timed out' });
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(ask.seen[0].source).toBe('rca_autofill');
+    if (flags.abortOnTimeout) expect(ask.seen[0].signal.aborted).toBe(true);
+    else expect(ask.seen[0].signal).toBeUndefined();
+  });
+});
+
+describe.each(MODES)('carrier_briefing.sendOperatorBriefing (%s)', (_name, flags) => {
+  it('hanging relay.ask -> 2 x 30 s attempts, then the deterministic fallback is posted', async () => {
+    T.setGatewayFlags(flags);
+    const store = require('../src/store');
+    store.save('operatorChannels', { operators: [{ operator: 'GWOP', channelId: 'C_GW', ownerId: 'U_GW' }] });
+    store.save('fleetData', { rows: [
+      { equipmentId: 'GW100', operator: 'GWOP', lifecycleState: 'Unavailable', lifecycleReason: 'Brakes', domicileSite: 'ABE40' },
+      { equipmentId: 'GW200', operator: 'GWOP', lifecycleState: 'Available', domicileSite: 'ABE40' },
+    ] });
+    const cb = require('../src/scrapers/carrier_briefing');
+    const ask = hanging();
+    vi.spyOn(relay, 'ask').mockImplementation(ask);
+    const sendToChannel = vi.fn(async () => ({ ts: '1.1' }));
+    vi.useFakeTimers();
+    const s = track(cb.sendOperatorBriefing('GWOP', { sendToChannel }, { force: true }, () => {}));
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(ask).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1 + 1500);
+    expect(ask).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(sendToChannel).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.done).toBe(true);
+    expect(s.value).toMatchObject({ sent: true, aiWritten: false, channelId: 'C_GW' });
+    expect(sendToChannel).toHaveBeenCalledTimes(1);
+    const [ch, msg] = sendToChannel.mock.calls[0];
+    expect(ch).toBe('C_GW');
+    expect(msg.startsWith('<@U_GW> :sunny: Good morning — GWOP fleet snapshot:')).toBe(true);
+    expect(msg).toContain(':truck: Have a safe day out there.');
+    expect(ask.seen.map((o) => o.source)).toEqual(['carrier_briefing', 'carrier_briefing']);
+    if (flags.abortOnTimeout) expect(ask.seen.every((o) => o.signal.aborted)).toBe(true);
+    else expect(ask.seen.every((o) => o.signal === undefined)).toBe(true);
+  });
+});
+
+describe.each(MODES)('ready_pickup_notify.notifyReadyUnits (%s)', (_name, flags) => {
+  it('hanging askOrcha -> deterministic ready notice after 2 x 30 s', async () => {
+    T.setGatewayFlags(flags);
+    const rpn = require('../src/scrapers/ready_pickup_notify');
+    const row = { equipmentId: 'GW322', operator: 'GWOP', domicileSite: 'AVP40', dealerName: 'Kenworth Northeast - Rochester',
+      asistNotes: 'ASIST case 21318589 set to Asset Ready.', offsiteShopEventUrl: 'https://pssmfleet.decisiv.net/fleet/estimates/21318589',
+      offsiteStage: 'ready', offsiteStageSince: '2026-10-14T12:00:00Z' };
+    let ledger = {};
+    const askOrcha = hanging();
+    const sendToChannel = vi.fn(async () => ({ ok: true, ts: '2.2' }));
+    const deps = {
+      sendToChannel, askOrcha,
+      resolveOperatorEntry: (op) => (op === 'GWOP' ? { operator: 'GWOP', channelId: 'C_GW', ownerId: 'U_GW' } : null),
+      fleetRow: () => row, loadLedger: () => ledger, saveLedger: (l) => { ledger = l; }, markCarrierNotified: vi.fn(),
+    };
+    const units = { GW322: { equipmentId: 'GW322', status: 'ready_for_pickup', previousStatus: 'in_repair', statusChangedAt: '2026-10-14T13:00:00Z' } };
+    vi.useFakeTimers();
+    const s = track(rpn.notifyReadyUnits(units, deps, () => {}));
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(askOrcha).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1 + 1500);
+    expect(askOrcha).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(sendToChannel).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.done).toBe(true);
+    expect(s.value).toMatchObject({ considered: 1, notified: 1 });
+    const [ch, msg] = sendToChannel.mock.calls[0];
+    expect(ch).toBe('C_GW');
+    expect(msg).toBe('<@U_GW> :white_check_mark: Unit GW322 has completed repairs and is ready for pickup (ASIST case 21318589).'
+      + ' It is currently at Kenworth Northeast - Rochester. :round_pushpin: https://pssmfleet.decisiv.net/fleet/estimates/21318589 '
+      + ':truck: Please let us know whether you will pick it up, or if you would like it towed back to your home yard.');
+    expect(askOrcha.seen.map((o) => o.source)).toEqual(['ready_pickup_notice', 'ready_pickup_notice']);
+    if (flags.abortOnTimeout) expect(askOrcha.seen.every((o) => o.signal.aborted)).toBe(true);
+    else expect(askOrcha.seen.every((o) => o.signal === undefined)).toBe(true);
+  });
+});
+
+describe.each(MODES)('dbr_pull _dbrAskAi (%s)', (_name, flags) => {
+  it('hanging relay.ask -> rejects with the exact timeout message after 95 s', async () => {
+    T.setGatewayFlags(flags);
+    const dbr = require('../src/scrapers/dbr_pull');
+    const ask = hanging();
+    vi.spyOn(relay, 'ask').mockImplementation(ask);
+    vi.useFakeTimers();
+    const s = track(dbr._dbrAskAi('page text'));
+    await vi.advanceTimersByTimeAsync(94999);
+    expect(s.done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.done).toBe(true);
+    expect(s.error).toBeInstanceOf(Error);
+    expect(s.error.message).toBe('AI parsing timed out — the AI service may be unavailable');
+    expect(ask.seen[0].source).toBe('dbr_parse');
+    if (flags.abortOnTimeout) expect(ask.seen[0].signal.aborted).toBe(true);
+    else expect(ask.seen[0].signal).toBeUndefined();
+  });
+});
+
 describe('relay.askWithTimeout sites through the real relay', () => {
   it.each(MODES)('volvo-style reject message / misc-style resolve value (%s)', async (_n, flags) => {
     T.setGatewayFlags(flags);

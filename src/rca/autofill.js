@@ -407,4 +407,4 @@ async function buildDraft(args) {
   return Object.assign(base, { values, sources, existing: null, warnings: norm.warnings, aiError: ai.error || null });
 }
 
-module.exports = { buildDraft, computePrefill, _ruleControllable, _ruleDriverDescription, _momentWeek, _lastPmRaw, _weekNumber, _assetType, _fuelType, _vendor, _program };
+module.exports = { buildDraft, computePrefill, _aiFill, _ruleControllable, _ruleDriverDescription, _momentWeek, _lastPmRaw, _weekNumber, _assetType, _fuelType, _vendor, _program };
