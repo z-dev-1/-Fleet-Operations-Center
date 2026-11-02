@@ -57,4 +57,54 @@ function load(deps = {}) {
   return resolveFlags(settings, env);
 }
 
-module.exports = { resolveFlags, load };
+// ── Phase 3: AI gateway flags (all default OFF) ─────────────────────────────
+//   settings.ai.gateway.priorities      / FLEET_AI_GW_PRIORITIES '0'|'1'
+//   settings.ai.gateway.abortOnTimeout  / FLEET_AI_GW_ABORT      '0'|'1'
+//   settings.ai.gateway.dedupe          / FLEET_AI_GW_DEDUPE     '0'|'1'
+//   settings.ai.gateway.routerDecides   / FLEET_AI_GW_ROUTER     '0'|'1'
+//   settings.ai.gateway.reserveSlots    / FLEET_AI_GW_RESERVE    integer 0..4 (default 2)
+// Only `=== true` enables; env '0'/'1' wins over settings. Read by relay.js
+// through a 15 s cache, never per call.
+const AI_GW_RESERVE_DEFAULT = 2;
+
+function _reserve(v) {
+  return (Number.isInteger(v) && v >= 0 && v <= 4) ? v : null;
+}
+
+function resolveAiGatewayFlags(settings, env) {
+  const s = _obj(settings);
+  const g = _obj(_obj(s.ai).gateway);
+  const flags = {
+    priorities: g.priorities === true,
+    abortOnTimeout: g.abortOnTimeout === true,
+    dedupe: g.dedupe === true,
+    routerDecides: g.routerDecides === true,
+    reserveSlots: _reserve(g.reserveSlots) != null ? g.reserveSlots : AI_GW_RESERVE_DEFAULT,
+  };
+  const ePr = _envBool(env, 'FLEET_AI_GW_PRIORITIES');
+  if (ePr !== null) flags.priorities = ePr;
+  const eAb = _envBool(env, 'FLEET_AI_GW_ABORT');
+  if (eAb !== null) flags.abortOnTimeout = eAb;
+  const eDd = _envBool(env, 'FLEET_AI_GW_DEDUPE');
+  if (eDd !== null) flags.dedupe = eDd;
+  const eRt = _envBool(env, 'FLEET_AI_GW_ROUTER');
+  if (eRt !== null) flags.routerDecides = eRt;
+  const rawRes = env && env.FLEET_AI_GW_RESERVE;
+  if (typeof rawRes === 'string' && /^\d+$/.test(rawRes.trim())) {
+    const n = _reserve(parseInt(rawRes.trim(), 10));
+    if (n != null) flags.reserveSlots = n;
+  }
+  return flags;
+}
+
+function loadAiGateway(deps = {}) {
+  const env = deps.env || process.env;
+  let settings = {};
+  try {
+    const loadFn = deps.load || require('../store').load;
+    settings = loadFn('settings', {}) || {};
+  } catch (_) { settings = {}; }
+  return resolveAiGatewayFlags(settings, env);
+}
+
+module.exports = { resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT };
