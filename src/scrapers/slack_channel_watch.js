@@ -1307,6 +1307,7 @@ module.exports = {
   getReplyLog,
   updateReviewItem,
   dedupeReplyLog,
+  isPollInFlight: () => _pollLock,
   __test__: {
     waitForAiQueueIdle: _waitForAiQueueIdle,
     setAiTimeoutMs: (ms) => { JM_AI_TIMEOUT_MS = ms; },

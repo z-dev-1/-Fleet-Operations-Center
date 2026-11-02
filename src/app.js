@@ -75,6 +75,8 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   log.info('Shutting down...');
   scheduler.stop();
+  // Phase 4: clear the main-process Slack poller timers (no-op when off).
+  try { require('./slack/poller').stop(); } catch (_) {}
   // Release the cluster leadership lease on a clean quit so a standby can take
   // over immediately (no TTL wait). No-op when the cluster is disabled.
   try { require('./cluster').stop(); } catch (_) {}
@@ -769,6 +771,17 @@ function _startAutoSync() {
       log.info('[cluster] dual-instance disabled (legacy single-host)');
     }
   } catch (e) { log.warn('[cluster] init/start failed (non-fatal, staying single-host):', e.message); }
+
+  // ── 5l. Main-process communications poller (Phase 4) ───────────────────────
+  // Flag-gated, OFF by default (settings.comms.mainProcessPolling /
+  // FLEET_COMMS_POLLING). Runs after 5k so the cluster leader gate is ready.
+  // In 'off' start() arms nothing and the renderer keeps polling as today. Any
+  // failure forces the poller back to 'off' so renderers resume polling.
+  try { require('./slack/poller').start(_ctx); }
+  catch (e) {
+    log.warn('[SlackPoller] start failed (non-fatal): ' + e.message);
+    try { require('./slack/poller').forceOff(e.message, _ctx); } catch (_) {}
+  }
 
   log.info('Bootstrap complete');
 

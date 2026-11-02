@@ -320,7 +320,7 @@ function snapshot(opts = {}) {
     };
   }
   const samples = _samples.last(20);
-  return {
+  const out = {
     enabled: _enabled,
     sampling: !!_timer,
     flags: _flags,
@@ -336,6 +336,24 @@ function snapshot(opts = {}) {
     dropped: _recent.dropped(),
     ai: _aiSection(),
   };
+  // Phase 4: comms poller status, attached ONLY when non-null so the 'off'
+  // snapshot is key-for-key identical to before.
+  const comms = _commsSection();
+  if (comms) out.comms = comms;
+  return out;
+}
+
+// Comms poller section (Phase 4). Same guard as _aiSection: never loads the
+// poller as a side effect (read only when already in the require cache);
+// null when not loaded, in mode 'off', or on any error. Never throws.
+function _commsSection() {
+  try {
+    const pollerPath = require.resolve('../slack/poller');
+    if (!require.cache[pollerPath]) return null;
+    const poller = require.cache[pollerPath].exports;
+    if (!poller || typeof poller.getMode !== 'function' || poller.getMode() === 'off') return null;
+    return typeof poller.getStatus === 'function' ? (poller.getStatus() || null) : null;
+  } catch (_) { return null; }
 }
 
 // AI gateway section (Phase 3): per-priority queue depth + gateway latency

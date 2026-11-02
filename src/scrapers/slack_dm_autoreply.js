@@ -1890,6 +1890,7 @@ module.exports = {
   getDMReviewQueue,
   getDMReplyLog,
   updateDMReviewItem,
+  isPollInFlight: () => _pollLock,
   // Test-only: expose the restored thread-reply baseline so restart-recovery
   // (loading slackDMThreadReplyCount at startup) can be asserted.
   _getThreadReplyCountForTest: () => _threadReplyCount,

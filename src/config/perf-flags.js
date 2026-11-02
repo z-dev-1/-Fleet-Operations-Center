@@ -17,6 +17,12 @@
  *   FLEET_PERF_TRAY_BUSY      '0' | '1'
  *   FLEET_PERF_DS_MATCH_POOL  '0' | '1'
  *
+ * Phase 4 communications poller (default OFF; see resolveCommsFlags below):
+ *
+ *   settings.comms.mainProcessPolling 'off'|'shadow'|'on' / FLEET_COMMS_POLLING
+ *   settings.comms.channelWatchClaims  default OFF (only `true` enables) /
+ *                                      FLEET_COMMS_CHANNEL_CLAIMS '0' | '1'
+ *
  * Read at point of use (startup / once per run), never per tick.
  */
 
@@ -107,4 +113,43 @@ function loadAiGateway(deps = {}) {
   return resolveAiGatewayFlags(settings, env);
 }
 
-module.exports = { resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT };
+// ── Phase 4: communications poller flags (default OFF) ──────────────────────
+//   settings.comms.mainProcessPolling   'off'|'shadow'|'on' / FLEET_COMMS_POLLING        'off'|'shadow'|'on'
+//   settings.comms.channelWatchClaims   boolean (=== true)  / FLEET_COMMS_CHANNEL_CLAIMS '0'|'1'
+// mainProcessPolling: string (trimmed, case-insensitive) in COMMS_POLLING_MODES,
+// anything else -> 'off' (fail safe to today's renderer polling). Read once per
+// process by src/slack/poller.js getMode(); channelWatchClaims once per run.
+const COMMS_POLLING_MODES = ['off', 'shadow', 'on'];
+
+function _mode(v) {
+  const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
+  return COMMS_POLLING_MODES.includes(s) ? s : null;
+}
+
+function resolveCommsFlags(settings, env) {
+  const c = _obj(_obj(settings).comms);
+  const flags = {
+    mainProcessPolling: _mode(c.mainProcessPolling) || 'off',
+    channelWatchClaims: c.channelWatchClaims === true,
+  };
+  const eMode = _mode(env && env.FLEET_COMMS_POLLING);
+  if (eMode) flags.mainProcessPolling = eMode;
+  const eCl = _envBool(env, 'FLEET_COMMS_CHANNEL_CLAIMS');
+  if (eCl !== null) flags.channelWatchClaims = eCl;
+  return flags;
+}
+
+function loadComms(deps = {}) {
+  const env = deps.env || process.env;
+  let settings = {};
+  try {
+    const loadFn = deps.load || require('../store').load;
+    settings = loadFn('settings', {}) || {};
+  } catch (_) { settings = {}; }
+  return resolveCommsFlags(settings, env);
+}
+
+module.exports = {
+  resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT,
+  resolveCommsFlags, loadComms, COMMS_POLLING_MODES,
+};

@@ -338,6 +338,11 @@ expose('slack', {
   getDMReviewQueue:       ()       => ipcRenderer.invoke('slack:get-dm-review-queue'),
   getDMReplyLog:          (limit)  => ipcRenderer.invoke('slack:get-dm-reply-log', limit),
   updateDMReviewItem:     (data)   => ipcRenderer.invoke('slack:update-dm-review-item', data),
+
+  // -- Phase 4 main-process comms poller -- see src/slack/poller.js
+  getPollerStatus:        ()       => ipcRenderer.invoke('slack:get-poller-status'),
+  onPollResult:           (cb)     => on('slack:poll-result', cb),
+  onPollMode:             (cb)     => on('slack:poll-mode', cb),
   // Digital FAS (Stage D UI)
   fasGetConfig:           ()       => ipcRenderer.invoke('fas:get-config'),
   fasSaveConfig:          (patch)  => ipcRenderer.invoke('fas:save-config', patch),

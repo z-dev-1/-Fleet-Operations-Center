@@ -35,6 +35,23 @@ function _mayPollSlack() {
   } catch (_) { return true; }
 }
 
+// ── Phase 4 (2026-11-01): main-process comms poller accessor ────────────────
+// The three poll handlers route through src/slack/poller.js runPoll(). If the
+// poller module cannot load, fall back to the legacy inline handler bodies
+// (today's exact behavior) and log that ONCE per process, so Slack polling can
+// never silently stop because of the new module.
+let _pollerLoadErrLogged = false;
+function _poller() {
+  try { return require('../slack/poller'); }
+  catch (e) {
+    if (!_pollerLoadErrLogged) {
+      _pollerLoadErrLogged = true;
+      logger.error('[SlackPoller] unavailable, using legacy handlers: ' + e.message);
+    }
+    return null;
+  }
+}
+
 // ── Issue #5: Slack field caps ───────────────────────────────────────────────
 const MAX_RECIPIENT_LEN = 128;    // Slack channel name / user handle
 // Slack's real chat.postMessage text-field limit is 40,000 characters --
@@ -242,8 +259,17 @@ function registerSlackIPC(ctx) {
 
   // S22: slack:read-dms -- fetch recent DM threads
   handle('slack:read-dms', async () => {
+    const p = _poller();
+    if (p) return p.runPoll('dmNotify', { origin: 'renderer', ctx });
+    // Legacy fallback (poller unavailable): today's exact body.
     const { readDMs } = require('../../src/scrapers/slack_send');
     return readDMs(20);
+  });
+
+  // Phase 4: comms poller status (mode for the renderer + counters).
+  handle('slack:get-poller-status', async () => {
+    const p = _poller();
+    return p ? p.getStatus() : { mode: 'off', unavailable: true };
   });
 
   // S22: slack:auto-reply-config -- get/set auto-reply rules
@@ -283,6 +309,8 @@ function registerSlackIPC(ctx) {
     const result = saveWatchConfig(config);
     // Signal renderer to restart the channel watch poller with new config
     ctx.send('slack:config-updated', { type: 'channel-watch' });
+    // Phase 4: re-phase the main-process channel timer ('on' only; no-op otherwise).
+    try { const p = _poller(); if (p) p.onConfigUpdated('channel-watch'); } catch (_) {}
     return result;
   });
 
@@ -360,6 +388,9 @@ function registerSlackIPC(ctx) {
   });
 
   handle('slack:poll-channel-watch', async () => {
+    const p = _poller();
+    if (p) return p.runPoll('channelWatch', { origin: 'renderer', ctx });
+    // Legacy fallback (poller unavailable): today's exact body.
     if (!_mayPollSlack()) return { skipped: 'standby — not the production leader' };
     const { pollChannelsOnce } = require('../../src/scrapers/slack_channel_watch');
     return require('../telemetry').track('slack.pollChannelWatch',
@@ -408,6 +439,9 @@ function registerSlackIPC(ctx) {
   });
 
   handle('slack:poll-dm-autoreply', async () => {
+    const p = _poller();
+    if (p) return p.runPoll('dmAutoReply', { origin: 'renderer', ctx });
+    // Legacy fallback (poller unavailable): today's exact body.
     if (!_mayPollSlack()) return { skipped: 'standby — not the production leader' };
     const { pollDMAutoReplyOnce } = require('../../src/scrapers/slack_dm_autoreply');
     const result = await require('../telemetry').track('slack.pollDmAutoReply',

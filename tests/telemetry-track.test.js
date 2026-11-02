@@ -79,6 +79,43 @@ describe('track()', () => {
     expect(keys).toContain('_other');
     expect(telemetry.snapshot().tracks._other.count).toBe(6);
   });
+  describe('snapshot().comms (Phase 4 poller section)', () => {
+    const pollerPath = require.resolve('../src/slack/poller');
+    let saved;
+    const injectPoller = (exportsObj) => {
+      require.cache[pollerPath] = { id: pollerPath, filename: pollerPath, loaded: true, exports: exportsObj };
+    };
+    afterEach(() => {
+      if (saved) require.cache[pollerPath] = saved; else delete require.cache[pollerPath];
+    });
+    it('no comms key when the poller is not loaded (and telemetry does not load it)', () => {
+      saved = require.cache[pollerPath];
+      delete require.cache[pollerPath];
+      const s = telemetry.snapshot();
+      expect('comms' in s).toBe(false);
+      expect(require.cache[pollerPath]).toBeUndefined();
+    });
+    it('no comms key when the poller is loaded in off', () => {
+      saved = require.cache[pollerPath];
+      const getStatus = vi.fn(() => ({ mode: 'off' }));
+      injectPoller({ getMode: () => 'off', getStatus });
+      expect('comms' in telemetry.snapshot()).toBe(false);
+      expect(getStatus).not.toHaveBeenCalled();
+    });
+    it('no comms key when getMode/getStatus throws', () => {
+      saved = require.cache[pollerPath];
+      injectPoller({ getMode: () => 'on', getStatus: () => { throw new Error('x'); } });
+      expect('comms' in telemetry.snapshot()).toBe(false);
+    });
+    for (const mode of ['shadow', 'on']) {
+      it(`comms equals getStatus() in ${mode}`, () => {
+        saved = require.cache[pollerPath];
+        const status = { mode, polls: { channelWatch: { runs: 3 } } };
+        injectPoller({ getMode: () => mode, getStatus: () => status });
+        expect(telemetry.snapshot().comms).toEqual(status);
+      });
+    }
+  });
   it('runCanonicalPass stays synchronous and is tracked as canonical.pass', () => {
     const data = { fleetData: { rows: [] }, canonicalState: { updatedAt: new Date().toISOString(), units: {} } };
     const store = { load: (k, d) => (k in data ? data[k] : d), save: (k, v) => { data[k] = v; } };
