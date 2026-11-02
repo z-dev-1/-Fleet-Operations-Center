@@ -493,6 +493,10 @@ export const slack = {
   getDMReviewQueue:       ()       => window.slack.getDMReviewQueue(),
   getDMReplyLog:          (limit)  => window.slack.getDMReplyLog(limit),
   updateDMReviewItem:     (data)   => window.slack.updateDMReviewItem(data),
+  // -- Main-process comms poller (2026-11-01, Phase 4) — see src/slack/poller.js
+  getPollerStatus:        ()       => window.slack.getPollerStatus(),
+  onPollResult:           (cb)     => window.slack.onPollResult(cb),
+  onPollMode:             (cb)     => window.slack.onPollMode(cb),
   // -- Digital FAS (Stage D)
   fasGetConfig:           ()       => window.slack.fasGetConfig(),
   fasSaveConfig:          (patch)  => window.slack.fasSaveConfig(patch),

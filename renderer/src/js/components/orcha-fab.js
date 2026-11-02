@@ -13,6 +13,9 @@ import bus from '../bus.js';
 import { ai, slack, aap, assistant } from '../bridge.js';
 import state from '../state.js';
 import toast from '../components/toast.js';
+import {
+  shouldArm, reducePollResult, applySteps, createPollModeLoader, planModeChange, createDmNotifyStarter,
+} from './orcha-fab-poll-logic.js';
 
 let _panelOpen = false;
 let _slackAuthed = false;
@@ -400,32 +403,66 @@ async function _onFirstOpen() {
 }
 
 // ── Slack polling ───────────────────────────────────────────────────────────
-async function _startSlackPoll() {
-  try {
-    // FEATURE (2026-07-16): use checkLiveAuth() for consistency with the
-    // rest of the reliability fix -- confirms the token still actually
-    // works rather than just checking a file exists on disk.
-    const auth = await slack.checkLiveAuth();
-    _slackAuthed = auth && auth.authenticated;
-  } catch(e) { _slackAuthed = false; }
-  if (!_slackAuthed) return;
+// FEATURE (2026-11-01, Phase 4): the poll mode (off|shadow|on) comes from the
+// main-process poller (src/slack/poller.js). In 'on' main owns every Slack
+// engine poll, so NO renderer poll timer arms in either window and results
+// arrive via the slack:poll-result push instead. off/shadow behave as today.
+// All mode / arm / reducer logic lives in orcha-fab-poll-logic.js (unit-tested).
+const _modeLoader = createPollModeLoader(() =>
+  (window.slack && typeof window.slack.getPollerStatus === 'function') ? slack.getPollerStatus() : null);
 
-  _pollTimer = setInterval(async () => {
+// One poll effect (throws propagate to the caller's silent try/catch).
+function _applyEffect(ef) {
+  switch (ef.type) {
+    case 'appendDM':
+      // FEATURE (2026-07-22): _appendSlackDM adds the inline Reply
+      // affordance -- msg.channelId comes straight from readDMs()
+      // (src/scrapers/slack_send.js), so the reply always targets the
+      // exact right DM thread.
+      _appendSlackDM(ef.msg);
+      break;
+    case 'notif':
+      bus.emit('ui:notif-push', { icon: ef.icon, title: ef.title, body: ef.body, time: Date.now() });
+      break;
+    case 'updateReviewBadge':
+      _updateReviewBadge();
+      break;
+    case 'refreshReviewIfOpen':
+      if (_activeTab === 'review') _refreshReviewQueue();
+      break;
+  }
+}
+
+// Apply any poll result (timer-returned or pushed from main) with today's
+// commit-then-effects-per-message ordering.
+function _applyResult(kind, result) {
+  applySteps(reducePollResult(kind, result, _lastDmTs).steps, ts => { _lastDmTs = ts; }, _applyEffect);
+}
+
+const _dmStarter = createDmNotifyStarter({
+  loadMode: () => _modeLoader.load(),
+  currentMode: () => _modeLoader.current(),
+  // FEATURE (2026-07-16): use checkLiveAuth() for consistency with the
+  // rest of the reliability fix -- confirms the token still actually
+  // works rather than just checking a file exists on disk.
+  checkLiveAuth: () => slack.checkLiveAuth(),
+  getAuthed: () => _slackAuthed,
+  setAuthed: v => { _slackAuthed = v; },
+  getTimer: () => _pollTimer,
+  setTimer: t => { _pollTimer = t; },
+  setInterval: (fn, ms) => setInterval(fn, ms),
+  tick: async () => {
     try {
       const dms = await slack.readDMs();
       if (!dms || !dms.length) return;
-      dms.forEach(msg => {
-        if (_lastDmTs && msg.ts <= _lastDmTs) return;
-        _lastDmTs = msg.ts;
-        // FEATURE (2026-07-22): _appendSlackDM adds the inline Reply
-        // affordance -- msg.channelId comes straight from readDMs()
-        // (src/scrapers/slack_send.js), so the reply always targets the
-        // exact right DM thread.
-        _appendSlackDM(msg);
-        bus.emit('ui:notif-push', { icon: '\u{1F4E9}', title: 'Slack DM', body: msg.text, time: Date.now() });
-      });
-    } catch(e) { /* silent */ }
-  }, 30000);
+      _applyResult('dmNotify', dms);
+    } catch (e) { /* silent */ }
+  },
+  intervalMs: 30000,
+});
+
+async function _startSlackPoll(opts) {
+  return _dmStarter.start(opts || {});
 }
 
 // ── Partner Auto-Reply engine (2026-07-21) — see src/scrapers/slack_channel_watch.js
@@ -441,7 +478,8 @@ const CATEGORY_META = {
 };
 
 async function _startChannelWatchPoll() {
-  if (_channelWatchTimer) return;
+  await _modeLoader.load();
+  if (!shouldArm('channelWatch', _modeLoader.current(), !!_channelWatchTimer)) return;
   // Lowered 30s -> 10s (2026-07-25) so a 'justme' personal channel gets
   // checked roughly every 10s as requested. Shared timer, so partner
   // channels get polled more often too -- harmless (faster replies there
@@ -449,17 +487,7 @@ async function _startChannelWatchPoll() {
   // protects against overlap either way.
   _channelWatchTimer = setInterval(async () => {
     try {
-      const result = await slack.pollChannelWatch();
-      if (result && result.escalatedCount > 0) {
-        bus.emit('ui:notif-push', {
-          icon: '\u{1F6A8}',
-          title: 'Partner AI: ' + result.escalatedCount + ' item(s) need review',
-          body: (result.items[0] && result.items[0].title) || '',
-          time: Date.now(),
-        });
-        _updateReviewBadge();
-        if (_activeTab === 'review') _refreshReviewQueue();
-      }
+      _applyResult('channelWatch', await slack.pollChannelWatch());
     } catch (e) { /* silent -- same pattern as DM poller above */ }
   }, 10000);
 }
@@ -468,20 +496,11 @@ async function _startChannelWatchPoll() {
 // above but for personal Slack DMs (see slack_dm_autoreply.js). Escalations
 // merge into the same Review tab list; see _refreshReviewQueue below.
 async function _startDMAutoReplyPoll() {
-  if (_dmAutoReplyTimer) return;
+  await _modeLoader.load();
+  if (!shouldArm('dmAutoReply', _modeLoader.current(), !!_dmAutoReplyTimer)) return;
   _dmAutoReplyTimer = setInterval(async () => {
     try {
-      const result = await slack.pollDMAutoReply();
-      if (result && result.escalatedCount > 0) {
-        bus.emit('ui:notif-push', {
-          icon: '\u{1F6A8}',
-          title: 'DM AI: ' + result.escalatedCount + ' item(s) need review',
-          body: (result.items[0] && result.items[0].title) || '',
-          time: Date.now(),
-        });
-        _updateReviewBadge();
-        if (_activeTab === 'review') _refreshReviewQueue();
-      }
+      _applyResult('dmAutoReply', await slack.pollDMAutoReply());
     } catch (e) { /* silent -- same pattern as channel-watch poller above */ }
   }, 30000);
 }
@@ -2072,6 +2091,37 @@ export function init() {
       if (_channelWatchTimer) { clearInterval(_channelWatchTimer); _channelWatchTimer = null; }
       _startChannelWatchPoll();
     });
+  }
+
+  // FEATURE (2026-11-01, Phase 4): main-process poller pushes. Guarded on the
+  // PRELOAD object (the bridge pass-throughs always exist). poll-result only
+  // arrives in 'on'; poll-mode {mode:'off'} is main's fallback, which re-arms
+  // exactly one renderer timer per kind.
+  if (window.slack && typeof window.slack.onPollResult === 'function') {
+    try {
+      slack.onPollResult(({ kind, result }) => {
+        try { _applyResult(kind, result); } catch (_) { /* silent, as the timer callbacks */ }
+      });
+    } catch (_) { /* non-fatal */ }
+  }
+  if (window.slack && typeof window.slack.onPollMode === 'function') {
+    try {
+      slack.onPollMode(({ mode }) => {
+        _dmStarter.notePush();
+        const m = _modeLoader.set(mode);
+        const pl = planModeChange(m, {
+          dmNotify: !!_pollTimer,
+          channelWatch: !!_channelWatchTimer,
+          dmAutoReply: !!_dmAutoReplyTimer,
+        });
+        if (pl.clear.includes('dmNotify')) { clearInterval(_pollTimer); _pollTimer = null; }
+        if (pl.clear.includes('channelWatch')) { clearInterval(_channelWatchTimer); _channelWatchTimer = null; }
+        if (pl.clear.includes('dmAutoReply')) { clearInterval(_dmAutoReplyTimer); _dmAutoReplyTimer = null; }
+        if (pl.arm.includes('dmNotify')) _startSlackPoll({ fromModePush: true });
+        if (pl.arm.includes('channelWatch')) _startChannelWatchPoll();
+        if (pl.arm.includes('dmAutoReply')) _startDMAutoReplyPoll();
+      });
+    } catch (_) { /* non-fatal */ }
   }
 
   // Morning briefing
