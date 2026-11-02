@@ -649,12 +649,139 @@ let _autoNotify = null; // optional callback(results) set by the IPC layer to pu
 
 function _setAutoNotify(fn) { _autoNotify = typeof fn === 'function' ? fn : null; }
 
+// ── Comms-poller independent OWA guard (FEATURE 2026-11-01, design §6) ───────
+// Behind comms.mainProcessPolling. The mode is read ONLY from the Slack
+// poller's memoized getMode() (lazy, fail-safe) so Slack and OWA can never
+// disagree mid-session; this file never calls perfFlags.loadComms().
+//   off    : _autoTick and the manual run are exactly today's code paths.
+//   shadow : today's control flow + observe-only wouldSkip counters.
+//   on     : single-flight across auto + manual runs, leader-gated auto tick,
+//            telemetry track 'owa.triageAutoScan', status.
+// The OWA guard is independent of the Slack _pollLock and the poller timers.
+function _commsMode() { try { return require('../slack/poller').getMode(); } catch (_) { return 'off'; } }
+
+// Leader gate for the auto tick (it auto-applies timeline updates). Same shape
+// as ipc/slack.js _mayPollSlack: lazy, fail-open to true.
+function _mayRunProduction() {
+  let cluster;
+  try { cluster = require('../cluster'); } catch (_) { return true; }
+  try {
+    if (typeof cluster.mayRunProduction !== 'function') return true;
+    return cluster.mayRunProduction();
+  } catch (_) { return true; }
+}
+
+function _track(name, fn, opts) {
+  let t = null;
+  try { t = require('../telemetry').track; } catch (_) { t = null; }
+  return typeof t === 'function' ? t(name, fn, opts) : fn();
+}
+
+const MANUAL_WAIT_MS = 5 * 60 * 1000;
+const _autoStatus = {
+  runs: 0,
+  lastOrigin: null,     // 'auto' | 'manual' | null (on only, both origins)
+  lastStartAt: null,
+  lastEndAt: null,
+  lastDurationMs: null,
+  lastOutcome: null,    // 'ok' | 'fail' | 'authBlocked' | 'skipped' | null (auto only)
+  lastError: null,
+  lastGate: null,       // true | false | null
+  skipped: { busy: 0, standby: 0, manualBusyTimeout: 0 },
+  wouldSkip: { busy: 0, standby: 0 },
+};
+let _triageInFlight = null; // settled-never-rejects guard promise (on only)
+let _observedManual = 0;    // manual runs in flight (shadow observe-only)
+let _armedAt = null;
+let _armedEveryMin = null;
+
+function _noteEnd() {
+  try {
+    _autoStatus.lastEndAt = Date.now();
+    _autoStatus.lastDurationMs = _autoStatus.lastStartAt ? _autoStatus.lastEndAt - _autoStatus.lastStartAt : null;
+  } catch (_) { /* bookkeeping only */ }
+}
+
+async function runTriageExclusive(opts, origin) {
+  if (origin === 'auto' && _triageInFlight) {
+    _autoStatus.skipped.busy++;
+    logger.info('[email-triage] auto-scan skipped — a triage run is already in progress');
+    return { skipped: 'busy' };
+  }
+  if (origin === 'manual') {
+    const deadline = Date.now() + MANUAL_WAIT_MS;
+    while (_triageInFlight) {                                               // re-check after EVERY wake-up
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        _autoStatus.skipped.manualBusyTimeout++;
+        logger.warn('[email-triage] manual run rejected — previous run still in flight since ' + new Date(_autoStatus.lastStartAt).toISOString());
+        throw new Error('Email triage is busy — a previous run has not finished (started ' + new Date(_autoStatus.lastStartAt).toISOString() + ')');
+      }
+      let t = null;
+      await Promise.race([_triageInFlight, new Promise((r) => { t = setTimeout(r, left); t.unref?.(); })]);   // guard never rejects
+      clearTimeout(t);                                                      // no dangling timer after a normal wake-up
+    }
+  }
+  const run = runTriage(opts);                                              // no await between check and set
+  const guard = run.then(() => {}, () => {}).then(() => { if (_triageInFlight === guard) _triageInFlight = null; });
+  _triageInFlight = guard;                                                  // set synchronously, same turn as the check
+  _autoStatus.lastStartAt = Date.now(); _autoStatus.lastOrigin = origin;    // recorded for manual AND auto runs
+  run.then(() => _noteEnd(), () => _noteEnd());                             // lastEndAt / lastDurationMs; never throws
+  return run;                                                               // caller gets the real result or rejection
+}
+
+// Manual emailTriage:run entry point (ipc/email-triage.js). Off: today's call.
+async function runTriageForIpc(opts) {
+  const mode = _commsMode();
+  if (mode === 'on') return runTriageExclusive(opts, 'manual');
+  if (mode === 'shadow') {
+    _observedManual++;
+    try { return await runTriage(opts); } finally { _observedManual--; }
+  }
+  return runTriage(opts);
+}
+
+// Shadow: observe-only — counts what 'on' would have skipped; changes nothing.
+function _shadowObserve() {
+  try {
+    if (_observedManual > 0) _autoStatus.wouldSkip.busy++;
+    if (!_mayRunProduction()) _autoStatus.wouldSkip.standby++;
+  } catch (_) { /* observe-only */ }
+}
+
+// Logs the leader gate only when it CHANGES; the first call records it without logging unless it is false.
+function _logStandbyTransition(gate) {
+  const prev = _autoStatus.lastGate;               // null | true | false
+  _autoStatus.lastGate = !!gate;
+  if (prev === !!gate) return;
+  if (!gate) logger.info('[email-triage] auto-scan standby — not the production leader');
+  else if (prev === false) logger.info('[email-triage] auto-scan resumed — production leader');
+}
+
 async function _autoTick() {
   const cfg = getConfig();
   if (!cfg.enabled || !cfg.autoScan) return;
   if (_autoRunning) return;
   _autoRunning = true;
+  const mode = _commsMode();                       // read once per tick
   try {
+    if (mode === 'on') {
+      const gate = _mayRunProduction();
+      _logStandbyTransition(gate);
+      if (!gate) { _autoStatus.skipped.standby++; return; }
+      return await _track('owa.triageAutoScan', async () => {
+        logger.info('[email-triage] auto-scan tick — folders: ' + (cfg.folders || []).join(', '));
+        const results = await runTriageExclusive({}, 'auto');
+        if (results && results.skipped) { _autoStatus.lastOutcome = 'skipped'; return results; }   // no apply, no notify
+        if (results && !results.authBlocked && cfg.autoApplyUnitUpdates) applyPendingUnitUpdates(results);
+        if (_autoNotify) { try { _autoNotify(loadResults()); } catch (_) {} }
+        _autoStatus.runs++;
+        _autoStatus.lastOutcome = results && results.authBlocked ? 'authBlocked' : 'ok';
+        _autoStatus.lastError = null;
+        return results;
+      }, { skip: (r) => !!(r && r.skipped) });
+    }
+    if (mode === 'shadow') _shadowObserve();
     logger.info('[email-triage] auto-scan tick — folders: ' + (cfg.folders || []).join(', '));
     const results = await runTriage({});
     if (results && !results.authBlocked && cfg.autoApplyUnitUpdates) {
@@ -662,10 +789,38 @@ async function _autoTick() {
     }
     if (_autoNotify) { try { _autoNotify(loadResults()); } catch (_) {} }
   } catch (e) {
+    if (mode === 'on') { _autoStatus.lastOutcome = 'fail'; _autoStatus.lastError = e.message; }
     logger.warn('[email-triage] auto-scan failed: ' + e.message);
   } finally {
     _autoRunning = false;
   }
+}
+
+// Read-only, in-memory status (consumed by poller.getStatus().owaTriage).
+function getAutoScanStatus() {
+  let nextRunAt = null;
+  if (_autoTimer && _armedAt && _armedEveryMin) {
+    const every = _armedEveryMin * 60 * 1000;
+    const k = Math.max(1, Math.ceil((Date.now() - _armedAt) / every));
+    nextRunAt = _armedAt + k * every;
+  }
+  return {
+    mode: _commsMode(),
+    armedMinutes: _autoTimer ? _armedEveryMin : null,
+    armedAt: _autoTimer ? _armedAt : null,
+    nextRunAt,
+    running: !!_triageInFlight,
+    lastOrigin: _autoStatus.lastOrigin,
+    lastStartAt: _autoStatus.lastStartAt,
+    lastEndAt: _autoStatus.lastEndAt,
+    lastDurationMs: _autoStatus.lastDurationMs,
+    lastOutcome: _autoStatus.lastOutcome,
+    lastError: _autoStatus.lastError,
+    lastGate: _autoStatus.lastGate,
+    runs: _autoStatus.runs,
+    skipped: { ..._autoStatus.skipped },
+    wouldSkip: { ..._autoStatus.wouldSkip },
+  };
 }
 
 function startAutoScan() {
@@ -674,6 +829,7 @@ function startAutoScan() {
   const minutes = Math.max(15, Math.min(1440, parseInt(cfg.autoScanMinutes, 10) || 60));
   _autoTimer = setInterval(() => { _autoTick().catch(() => {}); }, minutes * 60 * 1000);
   if (_autoTimer.unref) _autoTimer.unref();
+  _armedAt = Date.now(); _armedEveryMin = minutes;
   logger.info('[email-triage] auto-scan scheduler started (every ' + minutes + ' min; fires only when enabled + autoScan on)');
   return stopAutoScan;
 }
@@ -720,6 +876,9 @@ module.exports = {
   _batchEmails,
   _parseJson,
   _autoTick,
+  runTriageForIpc,
+  getAutoScanStatus,
+  MANUAL_WAIT_MS,
   _buildDecision,
   _canonFor,
 };

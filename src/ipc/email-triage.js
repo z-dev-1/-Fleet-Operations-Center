@@ -79,7 +79,8 @@ function registerEmailTriageIPC(_ctx) {
   handle('emailTriage:run', async (_e, opts) => {
     const cfg = triage.getConfig();
     const max = opts && Number.isFinite(opts.max) ? opts.max : cfg.maxEmails;
-    let results = await triage.runTriage({ max });
+    // runTriageForIpc == runTriage in comms mode off/shadow; single-flight in on (design §6).
+    let results = await triage.runTriageForIpc({ max });
 
     if (results && results.authBlocked) {
       _notifyOverlay(results);
