@@ -294,6 +294,9 @@ expose('telemetry', {
   snapshot: () => ipcRenderer.invoke('telemetry:snapshot'),
 });
 
+// ── Worker supervisor status (Phase 5, read-only; app-UI sender only) ───────
+expose('workers', { status: () => ipcRenderer.invoke('workers:status') });
+
 
 
 // ── Slack ─────────────────────────────────────────────────────────────────────

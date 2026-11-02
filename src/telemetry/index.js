@@ -340,7 +340,29 @@ function snapshot(opts = {}) {
   // snapshot is key-for-key identical to before.
   const comms = _commsSection();
   if (comms) out.comms = comms;
+  // Phase 5: worker supervisor summary, attached ONLY when non-null (same
+  // pattern as comms) so the disabled snapshot is key-for-key identical.
+  const workers = _workersSection();
+  if (workers) out.workers = workers;
   return out;
+}
+
+// Latest sampler sample (Phase 5, read-only; used by the worker supervisor
+// status). No new timer: reads the existing ring. null before any sample.
+function latestSample() {
+  return _samples.last(1)[0] || null;
+}
+
+// Worker supervisor section (Phase 5). Read only when the supervisor is
+// already in the require cache (never loads it as a side effect); null when
+// not loaded, not enabled, or on any error. Never throws.
+function _workersSection() {
+  try {
+    const supPath = require.resolve('../workers/supervisor');
+    if (!require.cache[supPath]) return null;
+    const sup = require.cache[supPath].exports;
+    return sup && typeof sup.getSummary === 'function' ? (sup.getSummary() || null) : null;
+  } catch (_) { return null; }
 }
 
 // Comms poller section (Phase 4). Same guard as _aiSection: never loads the
@@ -394,7 +416,7 @@ function _setEnabledForTests(v) { _enabled = !!v; }
 function _hasHistogramForTests() { return !!_eld; }
 
 module.exports = {
-  track, start, stop, snapshot,
+  track, start, stop, snapshot, latestSample,
   _sampleNow, _rollupNow, _dumpNow, _tick,
   _resetForTests, _setEnabledForTests, _hasHistogramForTests,
   createRingBuffer,
