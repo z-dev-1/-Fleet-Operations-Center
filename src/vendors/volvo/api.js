@@ -497,10 +497,10 @@ async function _imagesToPdf(images) {
 
 async function _askAi(prompt) {
   const relay = require('../../orcha/relay');
-  return Promise.race([
-    relay.ask(prompt, { priority: 'high', requestId: 'volvo-ck82-' + Date.now() }),
-    new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout')), AI_TIMEOUT_MS)),
-  ]);
+  return relay.askWithTimeout(prompt, {
+    priority: 'high', requestId: 'volvo-ck82-' + Date.now(), source: 'volvo_ck82',
+    timeoutMs: AI_TIMEOUT_MS, timeoutMessage: 'AI timeout',
+  });
 }
 
 async function _resolveVehicle(decisiv, cache, unitNumber, { skipCache } = {}) {

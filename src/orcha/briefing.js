@@ -136,10 +136,10 @@ async function _generateAndSendBriefing(rows, alerts, send, opts) {
   try {
     const relay = require('./relay');
     const prompt = _buildBriefingPrompt(rows, alerts, dueReminders);
-    const aiText = await Promise.race([
-      relay.ask(prompt, { requestId: 'briefing' }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('briefing AI timeout')), BRIEFING_AI_TIMEOUT_MS)),
-    ]);
+    const aiText = await relay.askWithTimeout(prompt, {
+      requestId: 'briefing', source: 'briefing',
+      timeoutMs: BRIEFING_AI_TIMEOUT_MS, timeoutMessage: 'briefing AI timeout',
+    });
     const clean = (aiText || '').trim();
     // Sanity: a real briefing is more than a few words. If the model returned
     // something empty/garbage, fall back to the template rather than show junk.

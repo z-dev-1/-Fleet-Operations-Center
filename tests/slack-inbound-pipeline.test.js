@@ -62,7 +62,8 @@ injectFake('../src/scrapers/slack_send', {
 
 // AI relay — default: a confident in-scope reply. Overridable per test.
 let _relayImpl = async () => JSON.stringify({ inScope: true, reply: 'Here is your answer.', category: null, title: 'answer' });
-injectFake('../src/orcha/relay', { ask: (...a) => _relayImpl(...a) });
+// Phase 3: migrated sites call relay.askWithTimeout / runWithTimeout (no timeout path is exercised here).
+injectFake('../src/orcha/relay', { ask: (...a) => _relayImpl(...a), askWithTimeout: (p, o) => _relayImpl(p, o), runWithTimeout: (run) => run(undefined) });
 
 // Fleet-context builder — keep it cheap/empty so _classifyAndDraft doesn't need
 // real fleet data.

@@ -37,14 +37,17 @@ function _evidenceHash(events) {
 // Call relay.ask with a hard timeout so a slow lane can't hang the job. An
 // injected relay (opts.relay) is used when provided — chiefly for tests; in
 // production we lazy-require the real relay.
-async function _askTimed(prompt, ms, relayOverride) {
+// Timeout via relay.runWithTimeout (Promise.race parity with the gateway flag
+// off; cancels the call and frees its slot with ai.gateway.abortOnTimeout). An
+// injected relay without runWithTimeout uses the real pure helper.
+async function _askTimed(prompt, ms, relayOverride, source) {
   let relay = relayOverride;
   if (!relay) { try { relay = require('../orcha/relay'); } catch (_) { return null; } }
   if (!relay || typeof relay.ask !== 'function') return null;
-  return Promise.race([
-    relay.ask(prompt).catch(e => { logger.warn('relay.ask failed: ' + e.message); return null; }),
-    new Promise(res => setTimeout(() => res(null), ms)),
-  ]);
+  let rwt = (relayOverride && typeof relayOverride.runWithTimeout === 'function') ? relayOverride.runWithTimeout : null;
+  if (!rwt) { try { rwt = require('../orcha/relay').runWithTimeout; } catch (_) { return null; } }
+  const run = (sig) => relay.ask(prompt, { signal: sig, source }).catch(e => { logger.warn('relay.ask failed: ' + e.message); return null; });
+  return rwt(run, { timeoutMs: ms, timeoutResult: null, source });
 }
 
 // Extract the first JSON object/array from a model response (tolerates code
@@ -127,7 +130,8 @@ async function analyzeUnit(equipmentId, opts = {}) {
   }
 
   const prompt = _buildPrompt(eq, rep, events);
-  const raw = await _askTimed(prompt, opts.timeoutMs || ASK_TIMEOUT_MS, opts.relay);
+  const raw = await _askTimed(prompt, opts.timeoutMs || ASK_TIMEOUT_MS, opts.relay,
+    opts.force ? 'repair_intel_unit' : 'repair_intel_analysis');
   if (!raw) return { ok: false, pending: true, error: 'AI lane unavailable or timed out', report: rep };
 
   const parsed = _parseJson(raw);

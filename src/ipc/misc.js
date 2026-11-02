@@ -1024,10 +1024,7 @@ function registerMiscIPC(ctx) {
           'If the root cause is not stated, say "root cause not documented". No preamble, no bullet points, just the sentence.\n\n' +
           'EVENTS:\n' + evText;
         try {
-          const txt = await Promise.race([
-            relay.ask(prompt),
-            new Promise(function (res) { setTimeout(function () { res(''); }, 20000); }),
-          ]);
+          const txt = await relay.askWithTimeout(prompt, { source: 'breakdown_analysis', timeoutMs: 20000, timeoutResult: '' });
           analysis = String(txt || '').replace(/\s+/g, ' ').trim().slice(0, 300);
         } catch (_) { analysis = ''; }
       }
@@ -1054,10 +1051,7 @@ function registerMiscIPC(ctx) {
           'Write ONE short summary sentence (max 35 words) of this unit\'s breakdown pattern — how many breakdowns, total days down, any recurring component/vendor theme, and whether it is currently down. ' +
           'Ground STRICTLY in the data above; do NOT invent. No preamble.';
         try {
-          const txt = await Promise.race([
-            relay.ask(prompt),
-            new Promise(function (res) { setTimeout(function () { res(''); }, 20000); }),
-          ]);
+          const txt = await relay.askWithTimeout(prompt, { source: 'breakdown_summary', timeoutMs: 20000, timeoutResult: '' });
           summary = String(txt || '').replace(/\s+/g, ' ').trim().slice(0, 300);
         } catch (_) { summary = ''; }
       }

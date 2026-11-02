@@ -40,7 +40,9 @@ injectFake('../src/scrapers/slack_send', {
   downloadFileContent: async () => null,
 });
 // Capture the prompt the AI receives; return a confident reply.
-injectFake('../src/orcha/relay', { ask: async (prompt) => { _lastPrompt = prompt; return JSON.stringify({ inScope: true, reply: 'ack', category: null, title: 't' }); } });
+const _fakeRelayAsk = async (prompt) => { _lastPrompt = prompt; return JSON.stringify({ inScope: true, reply: 'ack', category: null, title: 't' }); };
+// Phase 3: migrated sites call relay.askWithTimeout / runWithTimeout (no timeout path is exercised here).
+injectFake('../src/orcha/relay', { ask: _fakeRelayAsk, askWithTimeout: (p, o) => _fakeRelayAsk(p, o), runWithTimeout: (run) => run(undefined) });
 injectFake('../src/orcha/ai-context', { buildFleetContext: () => '' });
 // FAS disabled -> legacy path (history building is engine-agnostic; the legacy
 // _classifyAndDraft embeds the conversation context into the prompt).

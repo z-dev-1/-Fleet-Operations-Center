@@ -69,7 +69,10 @@ function getOrchaUrl() {
  */
 const relay = require('../orcha/relay');
 
-function sendOrchaPrompt(prompt) {
+// Optional `o` (signal / priority / source / requestId / task) is passed to
+// relay.ask; without it the call is relay.ask(prompt) exactly as before.
+function sendOrchaPrompt(prompt, o) {
+  if (o) return relay.ask(prompt, o);
   return relay.ask(prompt);
 }
 
@@ -561,12 +564,23 @@ Reply ONLY with valid JSON, no markdown:
  * askOrcha(prompt)
  * General-purpose Orcha call — returns plain text response.
  */
-async function askOrcha(prompt, retries = 2) {
+// askOrcha(prompt, retries = 2) | askOrcha(prompt, { retries = 2, signal, priority, source, requestId, task })
+// The object form forwards everything except `retries` to relay.ask and stops
+// retrying once its signal is aborted.
+async function askOrcha(prompt, retriesOrOpts = 2) {
+  let retries = retriesOrOpts;
+  let o = null;
+  if (retriesOrOpts && typeof retriesOrOpts === 'object') {
+    const { retries: r, ...rest } = retriesOrOpts;
+    retries = (Number.isInteger(r) && r > 0) ? r : 2;
+    o = rest;
+  }
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const text = await sendOrchaPrompt(prompt);
+      const text = await (o ? sendOrchaPrompt(prompt, o) : sendOrchaPrompt(prompt));
       return { ok: true, text };
     } catch (e) {
+      if (o && o.signal && o.signal.aborted) return { ok: false, error: 'Aborted' };
       const isTimeout = e.message && e.message.includes('timeout');
       logger.error(`[Orcha WS] askOrcha error (attempt ${attempt}/${retries}): ${e.message}`);
 

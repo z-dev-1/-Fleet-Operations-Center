@@ -177,10 +177,9 @@ async function _writeMessage(askOrcha, unit, ctx, ownerTag, doLog) {
   let message = '';
   for (let attempt = 1; attempt <= AI_ATTEMPTS && !message; attempt++) {
     try {
-      const ai = await Promise.race([
-        askOrcha(prompt),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), AI_ATTEMPT_MS)),
-      ]);
+      const ai = await require('../orcha/relay').runWithTimeout(
+        (sig) => askOrcha(prompt, { signal: sig, source: 'ready_pickup_notice' }),
+        { timeoutMs: AI_ATTEMPT_MS, timeoutMessage: 'ai-timeout', source: 'ready_pickup_notice' });
       message = (ai && ai.text) ? String(ai.text).trim() : (typeof ai === 'string' ? ai.trim() : '');
     } catch (e) {
       doLog('[ReadyPickup] AI attempt ' + attempt + '/' + AI_ATTEMPTS + ' failed (' + e.message + ')');
@@ -441,7 +440,7 @@ function _defaultStageDeps() {
   const { resolveOperatorEntry } = require('./pm_alert_reply');
   return {
     sendToChannel: slack.sendToChannel,
-    askOrcha: (p) => require('../orcha/relay').ask(p, {}),
+    askOrcha: (p, o) => require('../orcha/relay').ask(p, Object.assign({}, o)),
     resolveOperatorEntry,
   };
 }
@@ -518,10 +517,9 @@ async function _writeReply(askOrcha, entry, carrierReplyText, ownerTag, doLog) {
   let reply = '';
   for (let attempt = 1; attempt <= AI_ATTEMPTS && !reply; attempt++) {
     try {
-      const ai = await Promise.race([
-        askOrcha(prompt),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), AI_ATTEMPT_MS)),
-      ]);
+      const ai = await require('../orcha/relay').runWithTimeout(
+        (sig) => askOrcha(prompt, { signal: sig, source: 'ready_pickup_reply' }),
+        { timeoutMs: AI_ATTEMPT_MS, timeoutMessage: 'ai-timeout', source: 'ready_pickup_reply' });
       reply = (ai && ai.text) ? String(ai.text).trim() : (typeof ai === 'string' ? ai.trim() : '');
     } catch (e) {
       doLog('[ReadyPickup] reply AI attempt ' + attempt + '/' + AI_ATTEMPTS + ' failed (' + e.message + ')');

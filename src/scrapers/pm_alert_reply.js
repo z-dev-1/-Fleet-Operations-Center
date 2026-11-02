@@ -294,10 +294,9 @@ async function fanOutToCarrier(alert, unit, alertFiles, deps, log) {
   const AI_ATTEMPT_MS = 30000;
   for (let attempt = 1; attempt <= AI_ATTEMPTS && !message; attempt++) {
     try {
-      const ai = await Promise.race([
-        askOrcha(prompt),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), AI_ATTEMPT_MS)),
-      ]);
+      const ai = await require('../orcha/relay').runWithTimeout(
+        (sig) => askOrcha(prompt, { signal: sig, source: 'pm_alert_fanout' }),
+        { timeoutMs: AI_ATTEMPT_MS, timeoutMessage: 'ai-timeout', source: 'pm_alert_fanout' });
       message = (ai && ai.text) ? String(ai.text).trim() : (typeof ai === 'string' ? ai.trim() : '');
       if (message) {
         doLog('[PMAlert] fan-out: AI message generated (attempt ' + attempt + ')');
@@ -436,10 +435,9 @@ async function handleTaggedPmAlert(ch, msg, myUserId, deps, log) {
   const REPLY_ATTEMPT_MS = 30000;
   for (let attempt = 1; attempt <= REPLY_ATTEMPTS && !reply; attempt++) {
     try {
-      const ai = await Promise.race([
-        askOrcha(prompt),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), REPLY_ATTEMPT_MS)),
-      ]);
+      const ai = await require('../orcha/relay').runWithTimeout(
+        (sig) => askOrcha(prompt, { signal: sig, source: 'pm_alert_reply' }),
+        { timeoutMs: REPLY_ATTEMPT_MS, timeoutMessage: 'ai-timeout', source: 'pm_alert_reply' });
       reply = (ai && ai.text) ? String(ai.text).trim() : (typeof ai === 'string' ? ai.trim() : '');
       if (reply) {
         doLog('[PMAlert] ' + ch.name + ': AI reply generated (attempt ' + attempt + ')');

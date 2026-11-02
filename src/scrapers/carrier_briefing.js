@@ -361,10 +361,9 @@ async function _askAI(prompt, log) {
   const ATTEMPT_MS = 30000;
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
     try {
-      const raw = await Promise.race([
-        relay.ask(prompt),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), ATTEMPT_MS)),
-      ]);
+      const raw = await relay.askWithTimeout(prompt, {
+        source: 'carrier_briefing', timeoutMs: ATTEMPT_MS, timeoutMessage: 'ai-timeout',
+      });
       const text = (typeof raw === 'string') ? raw.trim() : (raw && raw.text ? String(raw.text).trim() : '');
       if (text) { log('[CarrierBriefing] AI message generated (attempt ' + attempt + ')'); return text; }
       log('[CarrierBriefing] AI returned empty (attempt ' + attempt + '/' + ATTEMPTS + ')');

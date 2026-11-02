@@ -90,10 +90,13 @@ async function reason(opts) {
 
   let raw = '';
   try {
-    raw = await Promise.race([
-      relay.ask(prompt, { signal: opts.signal, requestId: opts.requestId }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('reason-timeout')), timeoutMs)),
-    ]);
+    // relay.runWithTimeout: Promise.race parity with the gateway flag off;
+    // cancels the call (and frees its slot) with ai.gateway.abortOnTimeout.
+    // An injected relay without runWithTimeout uses the real pure helper.
+    const rwt = (typeof relay.runWithTimeout === 'function') ? relay.runWithTimeout : require('../orcha/relay').runWithTimeout;
+    const askOpts = { requestId: opts.requestId, priority: opts.priority, source: opts.source || ('reason:' + label) };
+    raw = await rwt((sig) => relay.ask(prompt, Object.assign({ signal: sig }, askOpts)),
+      { timeoutMs, signal: opts.signal, timeoutMessage: 'reason-timeout', source: askOpts.source });
   } catch (e) {
     logger.warn('[' + label + '] AI call failed: ' + (e && e.message));
     return { ok: false, data: null, raw: '', aiUsed: false, error: (e && e.message) || 'ai-failed' };

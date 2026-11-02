@@ -69,7 +69,7 @@ function _defaultNotifyDeps() {
   const { resolveOperatorEntry } = require('../scrapers/pm_alert_reply');
   return {
     sendToChannel: slack.sendToChannel,
-    askOrcha: (p) => require('./relay').ask(p, {}),
+    askOrcha: (p, o) => require('./relay').ask(p, Object.assign({}, o)),
     resolveOperatorEntry,
   };
 }

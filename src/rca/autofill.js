@@ -245,10 +245,7 @@ async function _aiFill(template, facts, commentsText, ev) {
     }) + '\n\n' +
     'WORK ORDER THREAD (oldest first):\n' + (commentsText ? commentsText.slice(-9000) : '(none)') + '\n';
   try {
-    const txt = await Promise.race([
-      relay.ask(prompt),
-      new Promise((res) => setTimeout(() => res(''), AI_TIMEOUT_MS)),
-    ]);
+    const txt = await relay.askWithTimeout(prompt, { source: 'rca_autofill', timeoutMs: AI_TIMEOUT_MS, timeoutResult: '' });
     const parsed = _parseJson(txt);
     if (!parsed) return { values: {}, error: txt ? 'AI reply was not JSON' : 'AI timed out' };
     return { values: parsed };

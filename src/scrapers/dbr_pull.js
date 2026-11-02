@@ -39,10 +39,10 @@ const AI_TIMEOUT_MS = 95000;
 // JSON blob and parse it — same contract the renderer's _dbrAskAi enforces.
 async function _dbrAskAi(prompt) {
   const relay = require('../orcha/relay');
-  const text = await Promise.race([
-    relay.ask(prompt, {}),
-    new Promise((_, rej) => setTimeout(() => rej(new Error('AI parsing timed out — the AI service may be unavailable')), AI_TIMEOUT_MS)),
-  ]);
+  const text = await relay.askWithTimeout(prompt, {
+    source: 'dbr_parse', timeoutMs: AI_TIMEOUT_MS,
+    timeoutMessage: 'AI parsing timed out — the AI service may be unavailable',
+  });
   const s = typeof text === 'string' ? text : (text && text.text) ? text.text : '';
   const match = s.match(/\{[\s\S]*\}/);
   if (!match) throw new Error('AI returned no parseable data — the dashboard text may be unusable, or the AI service may be down.');

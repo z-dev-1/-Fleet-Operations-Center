@@ -626,7 +626,7 @@ function createSyncEngine(ctx) {
               const { resolveOperatorEntry } = require('../scrapers/pm_alert_reply');
               const deps = {
                 sendToChannel: slack.sendToChannel,
-                askOrcha: (p) => require('../orcha/relay').ask(p, {}),
+                askOrcha: (p, o) => require('../orcha/relay').ask(p, Object.assign({}, o)),
                 resolveOperatorEntry,
               };
               // Shared queue with the Decisiv stage-Ready trigger (deep-scan)

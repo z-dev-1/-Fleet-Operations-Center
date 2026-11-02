@@ -817,8 +817,7 @@ async function _classifyAndDraft(messageText, historyMsgs, groupContext, coverin
     // timeout: raised 20s -> 90s. The old 20s cap was shorter than a real Orcha
     // response (50-90s), so every DM timed out and sent the canned fallback even
     // though Orcha would have answered. 90s matches the transport's own ceiling.
-    const _aiTimeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 90s')), 90000));
-    raw = await Promise.race([relay.ask(prompt), _aiTimeoutP]);
+    raw = await relay.askWithTimeout(prompt, { source: 'slack_dm_legacy', timeoutMs: 90000, timeoutMessage: 'AI timeout after 90s' });
   } catch (e) {
     logger.warn('[SlackDM] AI call threw:', e.message);
     raw = null;

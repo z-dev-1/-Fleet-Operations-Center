@@ -207,8 +207,10 @@ Message: `;
 
 async function _shouldChimeIn(messageText, askOrcha) {
   try {
-    const _t = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 20s')), 20000));
-    const aiResult = await Promise.race([askOrcha(CHIME_IN_GATE_PROMPT + messageText), _t]);
+    const { runWithTimeout } = require('../orcha/relay');
+    const aiResult = await runWithTimeout(
+      (sig) => askOrcha(CHIME_IN_GATE_PROMPT + messageText, { signal: sig, source: 'slack_chime_in_gate', task: { taskType: 'classification' } }),
+      { timeoutMs: 20000, timeoutMessage: 'AI timeout after 20s', source: 'slack_chime_in_gate' });
     const text = (aiResult && aiResult.text || '').trim().toUpperCase();
     return text.startsWith('YES');
   } catch (e) {
@@ -240,8 +242,10 @@ function _directedAtMePrompt(myName) {
 
 async function _isDirectedAtMe(messageText, myName, askOrcha) {
   try {
-    const _t = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 20s')), 20000));
-    const aiResult = await Promise.race([askOrcha(_directedAtMePrompt(myName) + messageText), _t]);
+    const { runWithTimeout } = require('../orcha/relay');
+    const aiResult = await runWithTimeout(
+      (sig) => askOrcha(_directedAtMePrompt(myName) + messageText, { signal: sig, source: 'slack_directed_gate', task: { taskType: 'classification' } }),
+      { timeoutMs: 20000, timeoutMessage: 'AI timeout after 20s', source: 'slack_directed_gate' });
     const text = (aiResult && aiResult.text || '').trim().toUpperCase();
     return text.startsWith('YES');
   } catch (e) {
@@ -325,8 +329,7 @@ async function _classifyAndDraft(messageText, askOrcha, allowedOperators, allowR
     // relay.ask returns a raw string, so normalize into the { text } shape the
     // JSON-parsing below expects. 90s matches the transport's own ceiling.
     const relay = require('../orcha/relay');
-    const _aiTimeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout after 90s')), 90000));
-    const _raw = await Promise.race([relay.ask(prompt), _aiTimeoutP]);
+    const _raw = await relay.askWithTimeout(prompt, { source: 'slack_channel_draft', timeoutMs: 90000, timeoutMessage: 'AI timeout after 90s' });
     aiResult = { ok: true, text: _raw };
   } catch (e) {
     logger.warn('[SlackWatch] AI call threw:', e.message);
@@ -1308,5 +1311,7 @@ module.exports = {
     waitForAiQueueIdle: _waitForAiQueueIdle,
     setAiTimeoutMs: (ms) => { JM_AI_TIMEOUT_MS = ms; },
     getAiTimeoutMs: () => JM_AI_TIMEOUT_MS,
+    shouldChimeIn: _shouldChimeIn,
+    isDirectedAtMe: _isDirectedAtMe,
   },
 };

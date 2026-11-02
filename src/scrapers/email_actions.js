@@ -88,10 +88,10 @@ async function _ask(prompt, opts) {
   opts = opts || {};
   const timeoutMs = opts.timeoutMs || 45000;
   try {
-    const raw = await Promise.race([
-      relay.ask(prompt, { signal: opts.signal, requestId: opts.requestId }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('ai-timeout')), timeoutMs)),
-    ]);
+    const raw = await relay.askWithTimeout(prompt, {
+      signal: opts.signal, requestId: opts.requestId, source: 'email_actions',
+      timeoutMs, timeoutMessage: 'ai-timeout',
+    });
     const text = (typeof raw === 'string') ? raw.trim() : (raw && raw.text ? String(raw.text).trim() : '');
     return text;
   } catch (e) {

@@ -238,10 +238,9 @@ app.whenReady().then(async () => {
       const relay = require('./orcha/relay');
       offline.processQueue(async (unit, raw) => {
         try {
-          const r = await Promise.race([
-            relay.ask('Rewrite this fleet timeline entry professionally in 1 sentence (keep date prefix): ' + raw),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('rewrite timeout')), 30000))
-          ]);
+          const r = await relay.askWithTimeout(
+            'Rewrite this fleet timeline entry professionally in 1 sentence (keep date prefix): ' + raw,
+            { source: 'offline_rewrite', timeoutMs: 30000, timeoutMessage: 'rewrite timeout' });
           return r || raw;
         }
         catch(e) { return raw; }
