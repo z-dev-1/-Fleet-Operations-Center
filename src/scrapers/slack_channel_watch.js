@@ -41,6 +41,11 @@ let _fasRunner; try { _fasRunner = require('../orcha/fas/runner'); } catch (_) {
 let _aiCore; try { _aiCore = require('../ai/core'); } catch (_) { _aiCore = null; }
 // Phase 7: the ONE Slack inbound gateway — unified inbound normalization.
 let _gateway; try { _gateway = require('../slack/gateway'); } catch (_) { _gateway = null; }
+// FEATURE (2026-11-01, Phase 4): durable inbound claim for the partner tier
+// loop, behind settings.comms.channelWatchClaims / FLEET_COMMS_CHANNEL_CLAIMS
+// (default OFF). Same ledger + key as the DM engine (fasInboundClaims). With the
+// flag off the ledger is never touched and the send path is the raw function.
+let _inboundClaim; try { _inboundClaim = require('../orcha/fas/inbound-claim'); } catch (_) { _inboundClaim = null; }
 function _aiInbound(input, deps) {
   if (_aiCore && typeof _aiCore.handleInbound === 'function') return _aiCore.handleInbound(input, deps);
   if (_fasRunner && typeof _fasRunner.handleInbound === 'function') return _fasRunner.handleInbound(input, deps);
@@ -817,6 +822,18 @@ async function pollChannelsOnce(log) {
   if (!auth || !auth.authenticated) { doLog('[SlackWatch] Slack not authenticated — skipping poll'); return { repliedCount: 0, escalatedCount: 0, items: [] }; }
   const myUserId = auth.userId || '';
 
+  // Phase 4: partner-channel durable claims, read once per run (default OFF).
+  let _claimsOn = false;
+  try { _claimsOn = !!_inboundClaim && require('../config/perf-flags').loadComms().channelWatchClaims === true; } catch (_) { _claimsOn = false; }
+  // Recover expired 'processing' leases (crash mid-flight), but only rewrite the
+  // ledger when one actually exists — no transaction per 10 s poll otherwise.
+  if (_claimsOn) {
+    try {
+      const m = store.load('fasInboundClaims', {}) || {};
+      if (Object.values(m).some(e => e && e.status === 'processing' && !(Date.parse(e.leaseUntil) > Date.now()))) _inboundClaim.reconcile();
+    } catch (_) {}
+  }
+
   let repliedCount = 0, escalatedCount = 0;
   const newEscalations = [];
 
@@ -892,6 +909,8 @@ async function pollChannelsOnce(log) {
       try {
         const trackedThreads = (store.load('slackMentionThreads', {})[ch.id] || []).slice(-10);
         if (trackedThreads.length) {
+          // NOTE: these readThreadReplies calls are chained on slack_send's
+          // _slackChain lane, so they are serialized anyway (no real parallelism).
           const replyBatches = await Promise.all(
             trackedThreads.map(t => readThreadReplies(ch.id, t, 20).catch(() => []))
           );
@@ -981,6 +1000,52 @@ async function pollChannelsOnce(log) {
 
       const partnerLog = store.load('slackChannelReplies', []); // hoisted — one disk read for all messages in this channel
       for (const msg of newMsgs) {
+        // ── Phase 4: per-message durable-claim state (inert when _claimsOn is false) ──
+        let _claimKey = null, _claimState = 'none', _claimDelivered = false, _claimDeliveredTs = null, _claimMarkOk = false, _resumeLegacy = false;
+        // Claim-bound send: one claim = at most one Slack post; marks delivered in
+        // the same turn Slack confirms a ts. Errors from sendToChannel propagate
+        // exactly as today; the real Slack result is always returned.
+        const _claimedSend = async (cid, text, thr) => {
+          if (_claimDelivered) {
+            doLog(`[SlackWatch] claim ${_claimKey} already delivered (${_claimDeliveredTs}) — suppressing second send`);
+            return { ts: _claimDeliveredTs, duplicateSuppressed: true };
+          }
+          const r = await sendToChannel(cid, text, thr);
+          if (_claimsOn && _claimKey && r && r.ts) {
+            _claimDelivered = true; _claimDeliveredTs = r.ts; // the post happened, whatever the mark does
+            try { _inboundClaim.markDelivered(_claimKey, r.ts); _claimMarkOk = true; _claimState = 'delivered'; }
+            catch (e) { logger.error(`[SlackWatch] claim markDelivered failed after confirmed send ${r.ts}: ${e.message}`); }
+          }
+          return r;
+        };
+        // Flag off: the raw imported function, identity-equal to today.
+        const _sendFn = _claimsOn ? _claimedSend : sendToChannel;
+        const _NEXT = { markOwnedQueued: 'owned', transferToLegacy: 'legacy', markFailed: 'failed', markDelivered: 'delivered' };
+        // Every post-acquire mark goes through here: never throws, never downgrades a confirmed delivery.
+        const _mark = (fn, ...args) => {
+          if (!_claimsOn || !_claimKey || _claimDelivered) return;
+          try { _inboundClaim[fn](_claimKey, ...args); _claimState = _NEXT[fn]; }
+          catch (e) { doLog(`[SlackWatch] claim ${fn} error ${msg.ts}: ${e.message} — continuing`); }
+        };
+        // Retry of the wrapper's delivered mark (bypasses _mark's _claimDelivered short-circuit).
+        const _retryDeliveredMark = () => {
+          if (!_claimsOn || !_claimKey || !_claimDeliveredTs || _claimMarkOk) return;
+          try { _inboundClaim.markDelivered(_claimKey, _claimDeliveredTs); _claimMarkOk = true; _claimState = 'delivered'; }
+          catch (e) { logger.error(`[SlackWatch] claim markDelivered retry failed for ${_claimDeliveredTs}: ${e.message}`); }
+        };
+        // The ONE terminal handler after a confirmed post that FAS did not report
+        // as auto-sent (e.g. ai-core converted a post-send throw to letLegacyReply).
+        const _finishDelivered = (why) => {
+          _retryDeliveredMark();
+          repliedCount++;
+          _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
+            replyTs: _claimDeliveredTs, question: msg.text, reply: '(FAS reply delivered; post-send error suppressed: ' + why + ')',
+            wasMentioned: mentioned, inScope: true, category: null, title: 'FAS autonomous channel reply',
+            createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
+          doLog(`[SlackWatch] ${ch.name}: FAS reply ${_claimDeliveredTs} already delivered for ${msg.ts} — ${why}; legacy and manual review suppressed`);
+          _saveChannelLastSeen(ch.id, msg.ts);
+        };
+
         // BUG FIX (2026-07-22): defense-in-depth dedup check, on top of
         // the _pollLock above. Skip if this exact message (channelId+ts)
         // was already logged -- guards against any overlap path the lock
@@ -1071,20 +1136,74 @@ async function pollChannelsOnce(log) {
           doLog(`[SlackWatch] ${ch.name}: strict-mode gate says clearly directed at me on ${msg.ts}`);
         }
 
+        // ── DURABLE INBOUND CLAIM (Phase 4, comms.channelWatchClaims) ─────
+        // Acquired only once the gates above decided to reply, so skipped
+        // messages never create claims. Owner 'digital-fas' mirrors the DM
+        // engine (also when FAS is disabled/shadow).
+        // Group DMs (mpims) can be both a watched channel and an auto-reply DM.
+        // Both engines compute the same claimKey(channelId, ts, threadTs) with
+        // owner 'digital-fas', so the first acquirer owns the message and the
+        // other skips (already: processing/delivered/owned) — the desired
+        // single-responder outcome.
+        if (_claimsOn) {
+          // Normalized slack_send shape (threadTs); NOT msgThreadTs (always null here).
+          const _ct = (msg.threadTs && msg.threadTs !== msg.ts) ? msg.threadTs : null;
+          let _acq;
+          try { _acq = _inboundClaim.acquire({ channelId: ch.id, ts: msg.ts, threadTs: _ct, owner: 'digital-fas' }); }
+          catch (e) {
+            logger.warn(`[SlackWatch] claim error ${msg.ts}: ${e.message} — holding`);
+            _markChannelRetry(msg.ts);
+            continue;
+          }
+          if (_acq && _acq.ok) {
+            _claimKey = _acq.key; _claimState = 'processing';
+          } else {
+            const _already = _acq && _acq.already;
+            if (_already === 'delivered' || _already === 'owned') {
+              doLog(`[SlackWatch] ${ch.name}: message ${msg.ts} already ${_already} (durable claim) — skipping`);
+              continue;
+            }
+            const _leaseLive = !!(_acq && _acq.claim && Date.parse(_acq.claim.leaseUntil) > Date.now());
+            if (_already === 'legacy' && !_leaseLive) {
+              // Crash after a FAS->legacy hand-off: resume as legacy, skip the FAS gate.
+              let _acq2;
+              try { _acq2 = _inboundClaim.acquire({ channelId: ch.id, ts: msg.ts, threadTs: _ct, owner: 'legacy' }); }
+              catch (e) {
+                logger.warn(`[SlackWatch] claim error ${msg.ts}: ${e.message} — holding`);
+                _markChannelRetry(msg.ts);
+                continue;
+              }
+              if (!(_acq2 && _acq2.ok)) { _markChannelRetry(msg.ts); continue; }
+              _claimKey = _acq2.key; _claimState = 'legacy'; _resumeLegacy = true;
+              doLog(`[SlackWatch] ${ch.name}: message ${msg.ts} resuming expired legacy claim — FAS gate skipped`);
+            } else {
+              // Live 'processing' (another process mid-flight) or live 'legacy': hold for retry (bounded by the 2 min lease).
+              doLog(`[SlackWatch] ${ch.name}: message ${msg.ts} already ${_already || 'claimed'} (durable claim, live lease) — holding for retry`);
+              _markChannelRetry(msg.ts);
+              continue;
+            }
+          }
+        }
+
+        // Post-acquire body. The try is unconditional so the body is not
+        // duplicated; with claims off the catch rethrows untouched (identical to
+        // no wrapper). Body intentionally not re-indented to keep the diff small.
+        try {
+
         // ── FAS EXECUTION-ORDER GATE (channel, Part 2) ────────────────────
         // Approval/Autonomous: FAS owns the reply BEFORE the legacy classify
         // AI call (also avoids a duplicate AI call). Disabled/Shadow fall
         // through to the legacy classify+reply below.
         let _fasModeC = 'disabled';
         try { const _c = require('../orcha/fas/config').get(); _fasModeC = (_c && _c.enabled) ? (_c.mode || 'shadow') : 'disabled'; } catch (_) {}
-        if (_fasRunner && (_fasModeC === 'approval' || _fasModeC === 'autonomous')) {
+        if (!_resumeLegacy && _fasRunner && (_fasModeC === 'approval' || _fasModeC === 'autonomous')) {
           let _fasOwnedC = true;
           try {
             // Part 8: inject the send path so the runner sends the autonomous
             // channel reply AND commits case memory atomically ONLY after Slack
             // confirms a ts. On delivery failure the runner queues a recoverable
-            // review item and commits nothing — we do NOT advance the channel
-            // watermark so this message is retried next poll.
+            // review item and commits nothing; the approval flow owns delivery
+            // from there (the end-of-channel watermark passes this message).
             // Phase 7: build the runner input through the ONE gateway. A channel
             // is a GROUP surface (audience resolver), and `mentioned` lets the
             // channel-registry decide ingest-vs-reply (spec #46/#64). We thread
@@ -1097,24 +1216,35 @@ async function pollChannelsOnce(log) {
                 engine: 'channel', slackId: msg.userId, senderName: ch.name, channelName: ch.name,
                 channelId: ch.id, threadTs: msg.ts, ts: msg.ts, text: msg.text,
                 files: msg.files || [], isGroup: true, mentioned: !!mentioned,
-              }, { sendToChannel });
+              }, { sendToChannel: _sendFn });
+            // Phase 4: once a post is confirmed for this claim the message is
+            // finished, whatever the FAS result says (no legacy second reply).
+            if (_claimsOn && _claimDeliveredTs && !(_fr && _fr.outcome === 'auto-sent' && _fr.sent && _fr.sent.ts)) {
+              _finishDelivered('outcome ' + ((_fr && _fr.outcome) || 'none'));
+              continue;
+            }
             if (_fr && _fr.letLegacyReply) {
+              _mark('transferToLegacy', 'fas:' + ((_fr && _fr.outcome) || 'letLegacyReply'));
               // Runner asked us to let legacy reply (error-failsafe / ai-failed-
               // shadow). Fall through to the legacy classify+reply below; do NOT
               // mark handled or advance the watermark here.
               _fasOwnedC = false;
               doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) deferred to legacy (${(_fr && _fr.outcome) || 'letLegacyReply'}) ${msg.ts}`);
             } else if (_fr && _fr.outcome === 'auto-send-failed') {
+              // The runner already queued a recoverable approval item: FAS owns delivery.
+              _mark('markOwnedQueued');
               // Delivery failed — nothing committed; retry this message later.
               doLog(`[SlackWatch] ${ch.name}: FAS autonomous delivery failed ${msg.ts} — deferring for retry (watermark not advanced)`);
-              continue; // NOT advancing lastSeenTs -> retried next poll
+              continue; // skips this message's own watermark save; the end-of-channel watermark still passes it (no retry hold)
             } else if (_fr && _fr.outcome === 'auto-sent' && _fr.sent && _fr.sent.ts) {
+              _retryDeliveredMark(); // no-op unless the wrapper's mark failed
               repliedCount++;
               const _txt = (msg.userId ? `<@${msg.userId}> ` : '') + ((_fr.decision && _fr.decision.reply) || '');
               _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
                 replyTs: _fr.sent.ts, question: msg.text, reply: _txt, wasMentioned: mentioned,
                 inScope: true, category: null, title: 'FAS autonomous channel reply', createdAt: new Date().toISOString(), status: 'fas-autonomous-sent' });
             } else if (_fr && _fr.outcome === 'no-reply') {
+              _mark('markDelivered', 'no-reply:' + ((_fr.decision && _fr.decision.reasonCode) || 'NO_RESPONSE_NEEDED'));
               // FAS decided a human in its role would NOT speak up in this
               // channel message (spec #4/#5/#22/#23) — deliberate silence.
               // Terminal: watermark advances (below), nothing sent, legacy
@@ -1124,6 +1254,7 @@ async function pollChannelsOnce(log) {
                 wasMentioned: mentioned, inScope: true, category: null, title: 'FAS no-reply', createdAt: new Date().toISOString(), status: 'fas-no-reply' });
               doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) chose silence for ${msg.ts} (${(_fr.decision && _fr.decision.reasonCode) || 'NO_RESPONSE_NEEDED'}) — legacy suppressed`);
             } else {
+              _mark('markOwnedQueued');
               // Queued for approval, manual-review (AI failure), or clarify.
               _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
                 replyTs: null, question: msg.text, reply: '(FAS ' + _fasModeC + ': ' + ((_fr && _fr.outcome) || 'handled') + ')',
@@ -1131,6 +1262,8 @@ async function pollChannelsOnce(log) {
               doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) owned ${msg.ts} (${(_fr && _fr.outcome) || 'handled'}) — legacy skipped`);
             }
           } catch (e) {
+            // Phase 4: a post already confirmed for this claim -> finished (no manual review, no legacy).
+            if (_claimsOn && _claimDeliveredTs) { _finishDelivered('exception ' + e.message); continue; }
             // FAS threw.
             // PHASE 8: when legacy reasoning is RETIRED (default), the legacy
             // partner persona brain must NOT answer even on a FAS failure — a
@@ -1140,6 +1273,7 @@ async function pollChannelsOnce(log) {
             let _retireC = true;
             try { _retireC = require('../orcha/fas/config').get().retireLegacyReasoning !== false; } catch (_) {}
             if (_retireC) {
+              _mark('markOwnedQueued');
               try { const _r = require('../orcha/fas/runner'); if (_r._queueManualReview) _r._queueManualReview({ engine: 'channel', slackId: msg.userId, senderName: ch.name, channelId: ch.id, ts: msg.ts, text: msg.text }, { decision: 'clarify' }, 'FAS runtime error: ' + e.message); } catch (_) {}
               _appendReplyLog({ id: ch.id + ':' + msg.ts, channelId: ch.id, channelName: ch.name, ts: msg.ts,
                 replyTs: null, question: msg.text, reply: '(FAS error — manual review; legacy retired)',
@@ -1147,6 +1281,7 @@ async function pollChannelsOnce(log) {
               doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) threw ${msg.ts}: ${e.message} — legacy RETIRED, queued manual review`);
               // _fasOwnedC stays true -> watermark advances, legacy never runs.
             } else {
+              _mark('transferToLegacy', 'fas-exception: ' + e.message);
               _fasOwnedC = false;
               doLog(`[SlackWatch] ${ch.name}: FAS(${_fasModeC}) threw ${msg.ts}: ${e.message} — falling back to legacy reply`);
             }
@@ -1201,6 +1336,7 @@ async function pollChannelsOnce(log) {
 
         // Temporary send-block: hold this message for recheck (don't advance).
         if (inbound.isSendBlocked(ch.id)) {
+          _mark('markFailed', 'send-blocked');
           doLog(`[SlackWatch] ${ch.name}: send-blocked (temporary) — holding ${msg.ts} for recheck`);
           inbound.lifecycle({ engine: 'channel', channelId: ch.id, ts: msg.ts, senderId: msg.userId, stage: 'blocked', reason: inbound.REASON.SEND_BLOCKED });
           _markChannelRetry(msg.ts);
@@ -1209,12 +1345,13 @@ async function pollChannelsOnce(log) {
         let replyTs = null;
         let _chSendFailed = false;
         try {
-          const sendResult = await sendToChannel(ch.id, taggedReply, msg.ts);
+          const sendResult = await _sendFn(ch.id, taggedReply, msg.ts);
           replyTs = sendResult.ts;
           repliedCount++;
           inbound.clearSendBlocked(ch.id);
         } catch (e) {
           const cls = inbound.classifySendError(e);
+          _mark('markFailed', 'legacy send failed: ' + cls.kind);
           doLog(`[SlackWatch] ${ch.name}: reply send FAILED (${cls.kind}): ${e.message}`);
           if (cls.kind === 'send-blocked') {
             // Temporary block (was: silently advanced past + never retried).
@@ -1256,6 +1393,17 @@ async function pollChannelsOnce(log) {
           doLog(`[SlackWatch] ${ch.name}: escalated (${draft.category}) — "${draft.title}"`);
         } else {
           doLog(`[SlackWatch] ${ch.name}: answered in-scope question`);
+        }
+
+        } catch (e) {
+          // Phase 4: claims off (or no claim held) -> rethrow untouched, exactly as today.
+          if (!(_claimsOn && _claimKey)) throw e;
+          if (_claimDelivered) {
+            _retryDeliveredMark();                              // a post happened: stay delivered, never retry the send
+          } else if (_claimState === 'processing' || _claimState === 'legacy') {
+            _mark('markFailed', 'exception: ' + e.message);     // recoverable: next poll re-acquires immediately, as today
+          }                                                     // 'owned' / 'failed': leave as is (never downgrade owned)
+          throw e;                                              // per-channel catch logs 'poll error', watermark not saved
         }
       }
 
