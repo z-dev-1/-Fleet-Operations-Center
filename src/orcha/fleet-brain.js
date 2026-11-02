@@ -111,10 +111,16 @@ function _buildLocalPrompt(userPrompt) {
   return sys + hist + '\n\n[CURRENT MESSAGE]\n' + userPrompt;
 }
 
-async function _localAsk(prompt) {
+// signal / priority are forwarded to the registered local fn (relay maps them
+// onto the Claude pool only when its gateway flags are on). With neither, the
+// fn is called with a single argument exactly as before.
+async function _localAsk(prompt, signal, priority) {
   if (!_localAskFn) throw new Error('fleet-brain: no local AI function — call setLocalAskFn() first');
   const fullPrompt = _buildLocalPrompt(prompt);
-  const response   = await _localAskFn(fullPrompt);
+  const o = {};
+  if (signal) o.signal = signal;
+  if (typeof priority === 'string') o.priority = priority;
+  const response   = await ((o.signal || o.priority) ? _localAskFn(fullPrompt, o) : _localAskFn(fullPrompt));
   // Accumulate history for next call
   _localHistory.push({ role: 'user',      content: prompt   });
   _localHistory.push({ role: 'assistant', content: response });
@@ -384,7 +390,7 @@ function _handleMessage(msg) {
         const text = req.text;
         _activeReq = null;
         _lastActivity = Date.now();
-        logger.info('[' + req.id + '] response completed (' + text.length + ' chars, ' + (Date.now() - req.createdAt) + 'ms total)');
+        logger.info('[' + req.id + '] response completed (' + text.length + ' chars, ' + (Date.now() - req.createdAt) + 'ms total)' + (req.detached ? ' (detached — discarded)' : ''));
         req.resolve(text);
         logger.info('[' + req.id + '] cleanup completed — queue advanced');
         _processNext();
@@ -406,6 +412,7 @@ function _wsUsable() {
 // Returns false when it should NOT be retried on Orcha.
 function _requeue(req, why) {
   if (req.done) return true;
+  if (req.detached) return false; // caller gave up: never resend abandoned work
   const age = Date.now() - req.createdAt;
   if (req.requeues >= MAX_REQUEUES || (TIMEOUT_MS - age) < REQUEUE_MIN_BUDGET_MS) return false;
   req.requeues++;
@@ -437,13 +444,16 @@ function _handoffLocal(req, reason) {
   if (req.handoffTimer) { clearTimeout(req.handoffTimer); req.handoffTimer = null; }
   if (req.timer) { clearTimeout(req.timer); req.timer = null; }
   logger.info('[' + req.id + '] handing off to local AI (' + reason + ')');
-  _localAsk(req.prompt)
+  _localAsk(req.prompt, req.signal, req.priority)
     .then((text) => { logger.info('[' + req.id + '] local AI resolved after handoff'); req.resolve(text); })
     .catch((err) => { logger.info('[' + req.id + '] local AI rejected after handoff: ' + err.message); req.reject(err); });
 }
 
 function _handoffOrReject(req, err) {
   if (req.done) return;
+  // A detached request (caller already gave up) is never moved onto the single
+  // local Claude worker.
+  if (req.detached) { req.reject(err); return; }
   if (_localAskFn) _handoffLocal(req, err.message);
   else req.reject(err);
 }
@@ -466,6 +476,19 @@ function _cleanupReq(req) {
 function _abortRequest(req, err, opts) {
   if (req.done) return;
   const wasActive = (_activeReq === req);
+  // Detach (relay passes detachActiveOnAbort only with ai.gateway.abortOnTimeout):
+  // the caller is unblocked now, but the shared Orcha session is kept. The
+  // request stays _activeReq so late deltas can never be misattributed; its
+  // reply is discarded on message_complete and its TIMEOUT_MS timer stays armed.
+  if (wasActive && opts && opts.detach) {
+    if (req.detached) return;
+    req.detached = true;
+    if (req.signal && req.onAbort) { try { req.signal.removeEventListener('abort', req.onAbort); } catch (_) {} }
+    if (req.handoffTimer) { clearTimeout(req.handoffTimer); req.handoffTimer = null; }
+    logger.info('[' + req.id + '] caller gave up on active WS request — detached (socket kept; late reply will be discarded)');
+    req.rejectCaller(err);
+    return;
+  }
   const qi = _queue.indexOf(req);
   if (qi !== -1) _queue.splice(qi, 1);
   if (wasActive) {
@@ -534,7 +557,7 @@ function ask(prompt, opts) {
       let settled = false;
       const onAbort = () => { if (settled) return; settled = true; reject(new Error('Aborted by caller')); };
       if (signal) signal.addEventListener('abort', onAbort, { once: true });
-      _localAsk(prompt)
+      _localAsk(prompt, signal, opts.priority)
         .then((text) => { if (settled) return; settled = true; if (signal) signal.removeEventListener('abort', onAbort); logger.info('[' + requestId + '] local AI resolved'); resolve(text); })
         .catch((err) => { if (settled) return; settled = true; if (signal) signal.removeEventListener('abort', onAbort); logger.info('[' + requestId + '] local AI rejected: ' + err.message); reject(err); });
       return;
@@ -551,11 +574,15 @@ function ask(prompt, opts) {
       done:      false,
       requeues:  0,
       handoffTimer: null,
+      priority:  opts.priority,                    // forwarded on local handoff
+      detachOnAbort: opts.detachActiveOnAbort === true,
+      detached:  false,
+      rejectCaller: reject,                        // raw outer reject (detach path)
       resolve:   (text) => { if (req.done) return; req.done = true; _cleanupReq(req); resolve(text); },
       reject:    (err)  => { if (req.done) return; req.done = true; _cleanupReq(req); reject(err);   },
     };
     if (signal) {
-      req.onAbort = () => _abortRequest(req, new Error('Aborted by caller'));
+      req.onAbort = () => _abortRequest(req, new Error('Aborted by caller'), req.detachOnAbort ? { detach: true } : undefined);
       signal.addEventListener('abort', req.onAbort, { once: true });
     }
     // priority 'high' (interactive, e.g. WR AI Fill) goes ahead of queued
@@ -619,4 +646,25 @@ function _ensureLocalOrcha() {
 
 function init() { _ensureLocalOrcha(); connect(); }
 
-module.exports = { init, ask, chat, getSessionId, getStatus, resetSession, setLocalAskFn };
+// Test seams only (fake socket, local-mode switch). Production never calls them.
+const __test__ = {
+  localAsk: (p, s, pr) => _localAsk(p, s, pr),
+  setWsGaveUp(b) { _wsGaveUp = !!b; },
+  handoffLocal: (req, reason) => _handoffLocal(req, reason),
+  setSocket(fakeWs) {
+    _ws = fakeWs;
+    _ready = !!(fakeWs && fakeWs.readyState === WebSocket.OPEN);
+    _connected = _ready;
+    _wsGaveUp = false;
+    _sessionId = 'ct_test_session';
+  },
+  handleMessage: (msg) => _handleMessage(msg),
+  state: () => ({ activeId: _activeReq ? _activeReq.id : null, queueLength: _queue.length, ready: _ready }),
+  reset() {
+    for (const r of _queue) { if (r.timer) clearTimeout(r.timer); if (r.handoffTimer) clearTimeout(r.handoffTimer); }
+    if (_activeReq && _activeReq.timer) clearTimeout(_activeReq.timer);
+    _queue = []; _activeReq = null; _ws = null; _ready = false; _connected = false; _wsGaveUp = false; _localHistory = [];
+  },
+};
+
+module.exports = { init, ask, chat, getSessionId, getStatus, resetSession, setLocalAskFn, __test__ };

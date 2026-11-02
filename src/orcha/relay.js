@@ -29,10 +29,55 @@ function _cdbg(msg) { if (CLAUDE_DEBUG) logger.info('[claude-dbg] ' + msg); }
 const fleetBrain = require('./fleet-brain');
 // Wire fleet-brain's local fallback AFTER _tryClaudeCode is defined below.
 // setImmediate defers to end-of-tick so the function reference is valid.
+// Phase 3: with ai.gateway.abortOnTimeout the caller's signal reaches the Claude
+// pool (abort frees the single worker); with ai.gateway.priorities the relay
+// priority orders the pool queue. Both flags off: _tryClaudeCode(prompt, {}),
+// identical to the old (prompt) => _tryClaudeCode(prompt).
+function _localAskFn(prompt, o) {
+  const gw = _gw();
+  return _tryClaudeCode(prompt, {
+    ...(gw.abortOnTimeout && o && o.signal ? { signal: o.signal } : {}),
+    ...(gw.priorities && o && o.priority ? { prio: o.priority } : {}),
+  });
+}
 setImmediate(() => {
-  fleetBrain.setLocalAskFn((prompt) => _tryClaudeCode(prompt));
+  fleetBrain.setLocalAskFn(_localAskFn);
   logger.info('fleet-brain local AI fallback wired to claude-code');
 });
+
+// ── AI GATEWAY FLAGS (Phase 3) ────────────────────────────────────────────────
+// All default OFF (config/perf-flags.js loadAiGateway: settings.ai.gateway.* +
+// FLEET_AI_GW_* env). Cached for GW_FLAG_TTL_MS so a settings change applies
+// without a restart and there is no sync settings read per ask. With every
+// flag off the legacy paths below behave exactly as before Phase 3.
+const perfFlags = require('../config/perf-flags');
+const GW_FLAG_TTL_MS = 15000;
+const _GW_DEFAULTS = Object.freeze({ priorities: false, abortOnTimeout: false, dedupe: false, routerDecides: false, reserveSlots: 2 });
+let _gwOverride = null;   // test seam: setGatewayFlags
+let _gwLoader = null;     // test seam: setGatewayLoader
+let _gwCache = null;
+let _gwCacheAt = 0;
+function _normGwFlags(f) {
+  const o = Object.assign({}, _GW_DEFAULTS, (f && typeof f === 'object') ? f : {});
+  const out = {
+    priorities: o.priorities === true,
+    abortOnTimeout: o.abortOnTimeout === true,
+    dedupe: o.dedupe === true,
+    routerDecides: o.routerDecides === true,
+    reserveSlots: (Number.isInteger(o.reserveSlots) && o.reserveSlots >= 0 && o.reserveSlots <= 4) ? o.reserveSlots : 2,
+  };
+  return Object.freeze(out);
+}
+function _gw() {
+  if (_gwOverride) return _gwOverride;
+  const now = Date.now();
+  if (_gwCache && (now - _gwCacheAt) < GW_FLAG_TTL_MS && now >= _gwCacheAt) return _gwCache;
+  let f = null;
+  try { f = (_gwLoader || perfFlags.loadAiGateway)(); } catch (_) { f = null; }
+  _gwCache = _normGwFlags(f);
+  _gwCacheAt = now;
+  return _gwCache;
+}
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 const DEFAULTS  = require('../config/defaults');
@@ -74,7 +119,7 @@ let _orchaAgentId = 'orcha_default';
 // with "not authorized" — it only added latency + log noise to every failure.
 // Kept behind a flag (env FLEET_ENABLE_BEDROCK=1) so it can be re-enabled if the
 // role is ever granted Bedrock access, without ripping out the code.
-const _bedrockEnabled = process.env.FLEET_ENABLE_BEDROCK === '1';
+let _bedrockEnabled = process.env.FLEET_ENABLE_BEDROCK === '1'; // let: test seam setBedrockEnabled
 
 // ── CONCURRENCY ───────────────────────────────────────────────────────────────
 const MAX_CONCURRENT = 5;
@@ -122,46 +167,404 @@ function _pickLane() {
   return _claudeBusy < _orchaBusy ? 'claude' : 'orcha';
 }
 
-// priority 'high' (interactive user actions) waits ahead of normal background
-// calls, behind other high ones. Entries are { go, high }.
-function _acquireSlot(priority) {
-  const high = priority === 'high';
-  return new Promise(resolve => {
-    if (_activeCount < MAX_CONCURRENT) { _activeCount++; resolve(); return; }
-    if (high) {
-      const at = _waitQueue.findIndex((w) => !w.high);
-      _waitQueue.splice(at === -1 ? _waitQueue.length : at, 0, { go: resolve, high });
-    } else _waitQueue.push({ go: resolve, high });
+// ── SLOT GATE: PRIORITIES, RESERVATION, AGING (Phase 3) ──────────────────────
+// Legacy mode (ai.gateway.priorities off): exactly the old gate — a free slot
+// is taken immediately, 'high' waits ahead of everything non-high (behind other
+// highs), everything else is FIFO; release grants the head of the queue.
+// Gateway mode: four levels critical | high | normal | low, picked by rank then
+// FIFO; low may not take the last `reserveSlots` slots (until it has waited
+// LOW_RESERVE_LIFT_MS); waiting entries age one level per AGE_STEP_MS (capped at
+// high-equivalent, never outranking critical). No preemption.
+// Both modes share one queue and grant ONLY through _grant(), so accounting
+// (_activeCount/_activeBy) stays consistent across a flag flip.
+const PRIORITIES = ['critical', 'high', 'normal', 'low'];
+const _BASE_RANK = { critical: 0, high: 1, normal: 2, low: 3 };
+const AGE_STEP_MS = 30000;
+const LOW_RESERVE_LIFT_MS = 120000;
+const _activeBy = { critical: 0, high: 0, normal: 0, low: 0 };
+let _slotSeq = 0;
+let _liftTimer = null;
+let _underflows = 0; // defensive accounting check (never expected; pinned by tests)
+function _noop() {}
+
+// Source → priority (gateway mode only; an explicit opts.priority wins). Call
+// sites tag `source` instead of passing new priority literals so that legacy
+// mode (which only honors the literal 'high') keeps today's ordering.
+const SOURCE_PRIORITY = Object.freeze({
+  // high: Slack DM / Just Me / channel replies, FAS inbound, PM alert replies
+  fas_agent: 'high',
+  'orcha_action:slack-justme': 'high',
+  slack_dm_legacy: 'high',
+  slack_channel_draft: 'high',
+  slack_directed_gate: 'high',
+  pm_alert_reply: 'high',
+  pm_alert_fanout: 'high',
+  ready_pickup_reply: 'high',
+  vision_fas_attachment: 'high',
+  // normal: chat, RCA, briefings, user-forced single-unit work
+  'orcha_action:fab': 'normal',
+  'orcha_action:chat': 'normal',
+  ui_ai_ask: 'normal',
+  rca_autofill: 'normal',
+  email_actions: 'normal',
+  breakdown_analysis: 'normal',
+  breakdown_summary: 'normal',
+  briefing: 'normal',
+  carrier_briefing: 'normal',
+  dbr_parse: 'normal',
+  volvo_ck82: 'normal',
+  ready_pickup_notice: 'normal',
+  slack_chime_in_gate: 'normal',
+  deep_scan_unit: 'normal',
+  repair_intel_unit: 'normal',
+  escalation_suggest: 'normal',
+  vision_image: 'normal',
+  vision_document: 'normal',
+  vision: 'normal',
+  // low: background analysis
+  deep_scan: 'low',
+  repair_intel_analysis: 'low',
+  'reason:tasks': 'low',
+  fas_shadow: 'low',
+  offline_rewrite: 'low',
+});
+
+function _normSource(s) {
+  if (typeof s !== 'string') return 'unknown';
+  const t = s.trim();
+  return /^[a-z0-9_:.\-]{1,64}$/i.test(t) ? t : 'unknown';
+}
+
+// opts: { priority, source (normalized) }
+function _effectivePriority(opts, gw) {
+  if (!gw.priorities) return opts.priority === 'high' ? 'high' : 'normal';
+  if (PRIORITIES.includes(opts.priority)) return opts.priority;
+  return SOURCE_PRIORITY[opts.source] || 'normal';
+}
+
+function _abortedQueuedErr() { return Object.assign(new Error('Aborted while queued'), { code: 'ABORTED' }); }
+function _abortedErr() { return Object.assign(new Error('Aborted'), { code: 'ABORTED' }); }
+function _timeoutErr(ms) { return Object.assign(new Error('AI timeout after ' + Math.round(ms / 1000) + 's'), { code: 'AI_TIMEOUT' }); }
+
+function _grant(e) {
+  _activeCount++;
+  _activeBy[e.prio] = (_activeBy[e.prio] || 0) + 1;
+  e.state = 'granted';
+  try { e.cleanup(); } catch (_) {}
+  e.go(e.prio);
+}
+
+// _acquireSlot(prio, signal, cancellable) -> Promise<label>. `cancellable`
+// (= abortOnTimeout && signal) lets an abort remove a still-waiting entry.
+function _acquireSlot(prio, signal, cancellable) {
+  if (!PRIORITIES.includes(prio)) prio = 'normal';
+  return new Promise((resolve, reject) => {
+    if (cancellable && signal.aborted) { reject(_abortedQueuedErr()); return; }
+    const e = { go: resolve, fail: reject, high: prio === 'critical' || prio === 'high', prio,
+      seq: ++_slotSeq, enqAt: Date.now(), state: 'waiting', cleanup: _noop };
+    const gw = _gw();
+    if (!gw.priorities) {
+      if (_activeCount < MAX_CONCURRENT) { _grant(e); return; }
+      if (e.high) {
+        const at = _waitQueue.findIndex((w) => !w.high);
+        _waitQueue.splice(at === -1 ? _waitQueue.length : at, 0, e);
+      } else _waitQueue.push(e);
+    } else {
+      _waitQueue.push(e);
+      _dispatch(gw);
+    }
+    if (cancellable && e.state === 'waiting') {
+      const onAbort = () => {
+        if (e.state !== 'waiting') return;
+        const i = _waitQueue.indexOf(e);
+        if (i !== -1) _waitQueue.splice(i, 1);
+        e.state = 'cancelled';
+        logger.info('[relay] dequeued after ' + (Date.now() - e.enqAt) + 'ms (aborted)');
+        reject(_abortedQueuedErr());
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      e.cleanup = () => { try { signal.removeEventListener('abort', onAbort); } catch (_) {} };
+    }
   });
 }
-function _releaseSlot() {
-  _activeCount--;
-  if (_waitQueue.length > 0 && _activeCount < MAX_CONCURRENT) { _activeCount++; _waitQueue.shift().go(); }
+
+function _releaseSlot(label) {
+  const l = PRIORITIES.includes(label) ? label : 'normal';
+  if (_activeCount <= 0) { _underflows++; logger.warn('[relay] slot accounting underflow (active)'); }
+  if (_activeBy[l] <= 0) { _underflows++; logger.warn('[relay] slot accounting underflow (' + l + ')'); }
+  _activeCount = Math.max(0, _activeCount - 1);
+  _activeBy[l] = Math.max(0, _activeBy[l] - 1);
+  _pump();
 }
-function queueStats() { return { active: _activeCount, waiting: _waitQueue.length, max: MAX_CONCURRENT }; }
+
+// Grant according to the CURRENT mode (shared by release and the lift timer).
+function _pump() {
+  const gw = _gw();
+  if (gw.priorities) { _dispatch(gw); return; }
+  while (_activeCount < MAX_CONCURRENT && _waitQueue.length) {
+    const n = _waitQueue.shift();
+    if (n.state === 'waiting') { _grant(n); break; }
+  }
+}
+
+function _rankOf(e, now) {
+  if (e.prio === 'critical') return 0;
+  return Math.max(1, _BASE_RANK[e.prio] - Math.floor((now - e.enqAt) / AGE_STEP_MS));
+}
+
+function _dispatch(gw) {
+  gw = gw || _gw();
+  while (_activeCount < MAX_CONCURRENT && _waitQueue.length) {
+    const now = Date.now();
+    let best = -1, bestRank = 0, bestSeq = 0;
+    for (let i = 0; i < _waitQueue.length; i++) {
+      const e = _waitQueue[i];
+      if (e.state !== 'waiting') continue;
+      if (e.prio === 'low' && _activeCount >= MAX_CONCURRENT - gw.reserveSlots && (now - e.enqAt) < LOW_RESERVE_LIFT_MS) continue; // reservation
+      const rank = _rankOf(e, now);
+      if (best === -1 || rank < bestRank || (rank === bestRank && e.seq < bestSeq)) { best = i; bestRank = rank; bestSeq = e.seq; }
+    }
+    if (best === -1) break;
+    const [e] = _waitQueue.splice(best, 1);
+    _grant(e);
+  }
+  _armLiftTimer();
+}
+
+// One unref'd timer at the earliest reservation lift among waiting lows, so a
+// low blocked only by reservation is granted at its lift time even when no
+// release happens. Only needed while a slot is actually free.
+function _armLiftTimer() {
+  if (_liftTimer) { clearTimeout(_liftTimer); _liftTimer = null; }
+  if (_activeCount >= MAX_CONCURRENT) return;
+  let earliest = Infinity;
+  for (const e of _waitQueue) {
+    if (e.state === 'waiting' && e.prio === 'low') earliest = Math.min(earliest, e.enqAt + LOW_RESERVE_LIFT_MS);
+  }
+  if (earliest === Infinity) return;
+  const delay = Math.max(10, earliest - Date.now());
+  _liftTimer = setTimeout(() => { _liftTimer = null; _pump(); }, delay);
+  if (_liftTimer && typeof _liftTimer.unref === 'function') _liftTimer.unref();
+}
+
+function queueStats() {
+  const gw = _gw();
+  const now = Date.now();
+  const byPriority = {};
+  for (const p of PRIORITIES) byPriority[p] = { active: _activeBy[p] || 0, waiting: 0 };
+  let oldest = null;
+  for (const e of _waitQueue) {
+    if (e.state !== 'waiting') continue;
+    byPriority[e.prio].waiting++;
+    const w = now - e.enqAt;
+    if (oldest == null || w > oldest) oldest = w;
+  }
+  return {
+    active: _activeCount, waiting: _waitQueue.length, max: MAX_CONCURRENT,
+    reserve: gw.reserveSlots,
+    byPriority,
+    oldestWaitMs: oldest,
+    inflightDedupe: _inflight.size,
+    flags: { priorities: gw.priorities, abortOnTimeout: gw.abortOnTimeout, dedupe: gw.dedupe, routerDecides: gw.routerDecides },
+    claudePool: _claudePoolStats(),
+  };
+}
 
 // ── ASK ───────────────────────────────────────────────────────────────────────
-async function ask(prompt, opts = {}) {
-  const signal = opts.signal;
-  const requestId = opts.requestId || ('rl' + (++_reqSeq));
-  if (signal && signal.aborted) throw new Error('Aborted before start');
+// ask(prompt, opts) is a thin wrapper: optional in-flight dedupe (only with an
+// explicit opts.dedupeKey AND ai.gateway.dedupe), else _askCore, which owns the
+// slot gate, cancellation and telemetry around the unchanged cascade
+// (_runCascade). Options (all optional):
+//   signal, requestId, priority ('critical'|'high'|'normal'|'low'), source,
+//   timeoutMs (honored only with ai.gateway.abortOnTimeout), dedupeKey, task,
+//   routeMessage (router input, ai.gateway.routerDecides), trace (AiCore handle).
+const _inflight = new Map(); // dedupeKey -> { prompt, promise, controller, refs, record }
 
-  await _acquireSlot(opts.priority);
-  _requestCount++;
+async function ask(prompt, opts = {}) {
+  opts = opts || {};
+  const gw = _gw();
+  return (gw.dedupe && _validDedupeKey(opts.dedupeKey))
+    ? _joinInflight(prompt, opts, gw)
+    : _askCore(prompt, opts, gw);
+}
+
+function _isSignal(s) { return !!(s && typeof s === 'object' && 'aborted' in s && typeof s.addEventListener === 'function'); }
+function _validTimeout(t) { return typeof t === 'number' && Number.isFinite(t) && t > 0; }
+
+// Internal AbortController linked to the caller's signal, aborted by the
+// caller or by an optional timer (sets linked.timedOut).
+function _linkSignal(callerSignal, timeoutMs, requestId) {
+  const ac = new AbortController();
+  const linked = { signal: ac.signal, timedOut: false, cleanup: _noop };
+  let onCaller = null;
+  let timer = null;
+  if (callerSignal) {
+    if (callerSignal.aborted) ac.abort();
+    else { onCaller = () => ac.abort(); callerSignal.addEventListener('abort', onCaller, { once: true }); }
+  }
+  if (timeoutMs && !ac.signal.aborted) {
+    timer = setTimeout(() => {
+      timer = null;
+      linked.timedOut = true;
+      logger.warn('[' + requestId + '] relay.ask timed out after ' + timeoutMs + 'ms — aborting');
+      ac.abort();
+    }, timeoutMs);
+  }
+  linked.cleanup = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (onCaller) { try { callerSignal.removeEventListener('abort', onCaller); } catch (_) {} onCaller = null; }
+  };
+  return linked;
+}
+
+let _traceMod = null;
+function _trace() {
+  if (_traceMod) return _traceMod;
+  try { _traceMod = require('../ai/trace'); } catch (_) { _traceMod = null; }
+  return _traceMod;
+}
+function _emitGatewayRecord(rec, traceHandle) {
+  let stored = null;
+  try { const t = _trace(); if (t && typeof t.recordGateway === 'function') stored = t.recordGateway(rec); } catch (_) {}
+  if (traceHandle && typeof traceHandle.setGateway === 'function') {
+    try { traceHandle.setGateway(stored || rec); } catch (_) {}
+  }
+  return stored || rec;
+}
+
+function _classify(ok, err, linked, meta, callerSignal) {
+  if (ok) return (meta && meta.timedOut) ? { outcome: 'timeout', late: true } : { outcome: 'ok' };
+  if ((linked && linked.timedOut) || (meta && meta.timedOut) || (err && err.code === 'AI_TIMEOUT')) return { outcome: 'timeout' };
+  if (callerSignal && callerSignal.aborted) return { outcome: 'aborted' };
+  if (err && err.code === 'ABORTED') return { outcome: 'aborted' };
+  return { outcome: 'error' };
+}
+
+async function _askCore(prompt, opts = {}, gwIn) {
+  opts = opts || {};
+  const gw = gwIn || _gw();
+  const callerSignal = opts.signal;
+  const requestId = opts.requestId || ('rl' + (++_reqSeq));
+  if (callerSignal && callerSignal.aborted) throw new Error('Aborted before start');
+  const source = _normSource(opts.source);
+  const prio = _effectivePriority({ priority: opts.priority, source }, gw);
+  const meta = (opts.__gwMeta && typeof opts.__gwMeta === 'object') ? opts.__gwMeta : null;
+  const t0 = Date.now();
+
+  // Linkage (ai.gateway.abortOnTimeout only): opts.timeoutMs and the caller's
+  // signal drive one internal controller; flag off = caller signal as-is and
+  // timeoutMs ignored (as before).
+  let linked = null;
+  let timeoutMs = null;
+  if (gw.abortOnTimeout) {
+    if (opts.timeoutMs !== undefined && opts.timeoutMs !== null) {
+      if (_validTimeout(opts.timeoutMs)) timeoutMs = opts.timeoutMs;
+      else logger.debug && logger.debug('[' + requestId + '] ignoring invalid timeoutMs');
+    }
+    if (timeoutMs || callerSignal) linked = _linkSignal(callerSignal, timeoutMs, requestId);
+  }
+  const signal = linked ? linked.signal : callerSignal;
+  const cancellable = !!(gw.abortOnTimeout && signal);
+  const rec = { requestId, source, priority: prio, legacy: !gw.priorities, via: null, routedLane: null, routeRationale: null,
+    timeoutMs: timeoutMs || (meta && meta.timeoutMs) || null };
+
+  let granted = false;
+  let label = null;
+  let tGranted = null;
+  let ok = false;
+  let err = null;
+  try {
+    try { label = await _acquireSlot(prio, signal, cancellable); }
+    catch (e) { if (linked && linked.timedOut) throw _timeoutErr(timeoutMs); throw e; }
+    granted = true;
+    tGranted = Date.now();
+    _requestCount++;
+    logger.info('[' + requestId + '] relay.ask started');
+
+    const ctx = {
+      signal, requestId, prio, source, opts, gw, rec,
+      fbPriority: gw.priorities ? ((prio === 'critical' || prio === 'high') ? 'high' : prio) : opts.priority,
+    };
+    const cascadeP = _runCascade(prompt, ctx);
+    let result;
+    if (linked) {
+      cascadeP.catch(() => {});
+      const abortP = new Promise((_, reject) => {
+        const fire = () => reject(linked.timedOut ? _timeoutErr(timeoutMs) : _abortedErr());
+        if (linked.signal.aborted) { fire(); return; }
+        linked.signal.addEventListener('abort', fire, { once: true });
+      });
+      abortP.catch(() => {});
+      try { result = await Promise.race([cascadeP, abortP]); }
+      catch (e) { if (linked.timedOut) throw _timeoutErr(timeoutMs); throw e; }
+    } else {
+      result = await cascadeP;
+    }
+    ok = true;
+    return result;
+  } catch (e) {
+    err = e;
+    throw e;
+  } finally {
+    // Single, unconditional cleanup point -- every return/throw path (success
+    // at any tier, every-tier-failed, aborted, timed out) funnels through here
+    // exactly once, so a granted slot can never be double-released or leaked.
+    if (granted) {
+      _releaseSlot(label);
+      logger.info('[' + requestId + '] relay.ask cleanup completed -- slot released');
+    }
+    if (linked) linked.cleanup();
+    try {
+      const now = Date.now();
+      const c = _classify(ok, err, linked, meta, callerSignal);
+      const full = Object.assign({}, rec, {
+        at: new Date(t0).toISOString(),
+        queueWaitMs: (tGranted || now) - t0,
+        runMs: tGranted ? now - tGranted : null,
+        latencyMs: now - t0,
+        outcome: c.outcome,
+      });
+      if (c.late) full.late = true;
+      if (!ok && err) full.error = String(err.message || err).slice(0, 200);
+      const stored = _emitGatewayRecord(full, opts.trace);
+      if (typeof opts.__gwOnRecord === 'function') { try { opts.__gwOnRecord(stored); } catch (_) {} }
+    } catch (_) {}
+  }
+}
+
+// Options for the cascade's Claude pool calls: unchanged unless priorities on.
+function _ccOpts(ctx) {
+  return { signal: ctx.signal, requestId: ctx.requestId, ...(ctx.gw.priorities ? { prio: ctx.prio } : {}) };
+}
+
+// The relay cascade (fleet-brain → direct WS → Claude Code → optional Bedrock,
+// plus the 'claude' and 'balanced' preference branches), moved verbatim from
+// the old ask() body. Flag-gated additions only: router pre-step, detach
+// option for fleet-brain, abortable retry sleep, pre-Bedrock abort guard.
+async function _runCascade(prompt, ctx) {
+  const { signal, requestId, gw, rec } = ctx;
+  const opts = ctx.opts;
   // Set true when balanced mode routes this call to the Orcha lane, so the
-  // outer finally can decrement _orchaBusy exactly once (per-call local — must
+  // finally can decrement _orchaBusy exactly once (per-call local — must
   // NOT be module scope or concurrent calls would corrupt the counter).
   let _balancedOrchaHeld = false;
-  logger.info('[' + requestId + '] relay.ask started');
 
   try {
+    // Optional router pre-step (ai.gateway.routerDecides, preference 'auto',
+    // caller-supplied task/routeMessage only). Never classifies the full prompt.
+    if (gw.routerDecides && _aiPreference === 'auto') {
+      const routed = await _routerPrestep(prompt, ctx);
+      if (routed) return routed;
+    }
+
     // Preference: 'claude' -- skip Orcha entirely, go straight to Claude Code
     if (_aiPreference === 'claude') {
       try {
-        const ccText = await _tryClaudeCode(prompt, { signal, requestId });
+        const ccText = await _tryClaudeCode(prompt, _ccOpts(ctx));
         if (ccText) {
           _lastHealthy = Date.now(); _status = 'connected-claude'; _saveStatus();
           logger.info('[' + requestId + '] OK via claude-code (preference=claude, ' + ccText.length + ' chars)');
+          rec.via = 'claude-code';
           return ccText;
         }
       } catch (ccErr) { logger.warn('[' + requestId + '] claude-code fast-path failed: ' + ccErr.message); }
@@ -180,11 +583,12 @@ async function ask(prompt, opts = {}) {
       if (lane === 'claude') {
         _claudeBusy++;
         try {
-          const t = await _tryClaudeCode(prompt, { signal, requestId });
+          const t = await _tryClaudeCode(prompt, _ccOpts(ctx));
           if (t) {
             _markLaneHealthy('claude');
             _lastHealthy = Date.now(); _lastError = null; _status = 'connected-claude'; _saveStatus();
             logger.info('[' + requestId + '] OK via balanced/claude (' + t.length + ' chars)');
+            rec.via = 'balanced/claude';
             return t;
           }
           throw new Error('claude-code empty');
@@ -198,7 +602,7 @@ async function ask(prompt, opts = {}) {
         }
       } else {
         // lane === 'orcha' — count it as Orcha-busy for the duration of the
-        // Orcha cascade below. Decrement in the outer finally via a flag.
+        // Orcha cascade below. Decrement in the finally via a flag.
         _orchaBusy++;
         _balancedOrchaHeld = true;
       }
@@ -213,13 +617,18 @@ async function ask(prompt, opts = {}) {
       const _fbStatus = fleetBrain.getStatus ? fleetBrain.getStatus() : {};
       if (!_fbStatus || !_fbStatus.ready) throw new Error('fleet-brain not ready');
       logger.info('[' + requestId + '] Fleet Brain attempt started');
-      const text = await fleetBrain.ask(prompt, { signal, requestId, priority: opts.priority });
+      // abortOnTimeout: a relay abort DETACHES the active WS request instead of
+      // terminating the one shared Orcha session (fleet-brain §6.5).
+      const fbOpts = { signal, requestId, priority: ctx.fbPriority };
+      if (gw.abortOnTimeout) fbOpts.detachActiveOnAbort = true;
+      const text = await fleetBrain.ask(prompt, fbOpts);
       if (text) {
         const via = _fbStatus.localMode ? 'fleet-brain/local' : 'fleet-brain/ws';
         _markLaneHealthy(_fbStatus.localMode ? 'claude' : 'orcha');
         _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
         logger.info('[' + requestId + '] OK via ' + via + ' (' + text.length + ' chars)');
         _saveStatus();
+        rec.via = via;
         return text;
       }
     } catch (brainErr) {
@@ -244,12 +653,13 @@ async function ask(prompt, opts = {}) {
       if (signal && signal.aborted) throw new Error('Aborted');
       try {
         logger.info('[' + requestId + '] WebSocket attempt ' + attempt);
-        const text = _fbDown ? null : await _tryWS(prompt, { signal }).catch(() => null);
+        const text = _fbDown ? null : await _tryWSImpl(prompt, { signal }).catch(() => null);
         if (text) {
           _markLaneHealthy('orcha');
           _lastHealthy = Date.now(); _lastError = null; _status = 'connected';
           logger.info('[' + requestId + '] OK via WS fallback (' + text.length + ' chars, attempt ' + attempt + ')');
           _saveStatus();
+          rec.via = 'ws';
           return text;
         }
         // Headless CLI fallback (`orcha --headless`) intentionally removed from
@@ -262,12 +672,13 @@ async function ask(prompt, opts = {}) {
           // CLAUDE CODE FALLBACK: claude -p via Cecelia shared account
           try {
             logger.info('[' + requestId + '] Claude Code attempt ' + attempt);
-            const ccText = await _tryClaudeCode(prompt, { signal, requestId });
+            const ccText = await _tryClaudeCode(prompt, _ccOpts(ctx));
             if (ccText) {
               _markLaneHealthy('claude');
               _lastHealthy = Date.now(); _status = 'connected-claude';
               _saveStatus();
               logger.info('[' + requestId + '] OK via claude-code fallback (' + ccText.length + ' chars)');
+              rec.via = 'claude-code';
               return ccText;
             }
           } catch (ccErr) { logger.warn('[' + requestId + '] claude-code fallback failed: ' + ccErr.message); }
@@ -279,6 +690,9 @@ async function ask(prompt, opts = {}) {
         // just slowed down every "all transports failed" path. Set
         // FLEET_ENABLE_BEDROCK=1 to re-enable if the role gains Bedrock access.
         if (_bedrockEnabled) {
+          // askBedrock cannot be aborted: never START it after an abort
+          // (abortOnTimeout only; legacy behavior unchanged).
+          if (gw.abortOnTimeout && signal && signal.aborted) throw new Error('Aborted');
           try {
             const { askBedrock } = require('../scrapers/bedrock');
             logger.info('[' + requestId + '] Bedrock attempt ' + attempt);
@@ -288,6 +702,7 @@ async function ask(prompt, opts = {}) {
               _lastHealthy = Date.now(); _status = 'connected-bedrock';
               _saveStatus();
               logger.info('[' + requestId + '] OK via Bedrock fallback (' + brText.length + ' chars)');
+              rec.via = 'bedrock';
               return brText;
             }
           } catch (brErr) { logger.warn('[' + requestId + '] Bedrock failed: ' + brErr.message); }
@@ -297,7 +712,7 @@ async function ask(prompt, opts = {}) {
         const msg = e.message || String(e);
         logger.warn('[' + requestId + '] Fallback ERROR attempt ' + attempt + '/' + MAX_RETRIES + ': ' + msg);
         if (signal && signal.aborted) throw new Error('Aborted');
-        if (attempt < MAX_RETRIES) { await _sleep(2000); continue; }
+        if (attempt < MAX_RETRIES) { await _sleep(2000, gw.abortOnTimeout ? signal : null); continue; }
         // Whole Orcha-first cascade exhausted — in balanced mode this means the
         // Orcha lane is unhealthy right now, so cool it down and let subsequent
         // balanced requests route to the Claude lane instead.
@@ -309,15 +724,251 @@ async function ask(prompt, opts = {}) {
     }
     throw new Error('Max retries exhausted');
   } finally {
-    // Single, unconditional cleanup point -- every return/throw path above
-    // (success at any tier, every-tier-failed, aborted) funnels through here
-    // exactly once, so the concurrency slot can never be double-released or
-    // leaked no matter how many exit paths get added later.
     if (_balancedOrchaHeld) _orchaBusy--; // release the balanced Orcha-lane hold
-    _releaseSlot();
-    logger.info('[' + requestId + '] relay.ask cleanup completed -- slot released');
   }
 }
+
+// Router pre-step (ai.gateway.routerDecides + preference 'auto'). Returns the
+// Claude-first text when the router picks 'claude' and it succeeds, else null
+// (normal auto cascade). Vision tasks throw NO_VISION_LANE: every relay lane is
+// text-only (vision goes through bedrock.readFileWithVision).
+async function _routerPrestep(prompt, ctx) {
+  const { opts, rec, requestId, signal } = ctx;
+  const task = (opts.task && typeof opts.task === 'object' && !Array.isArray(opts.task)) ? opts.task : null;
+  const routeMessage = typeof opts.routeMessage === 'string' ? opts.routeMessage.slice(0, 2000) : null;
+  if (!task && routeMessage == null) return null;
+  let decision = null;
+  try {
+    const b = getStatus().backends || {};
+    decision = require('../ai/router').decide({ source: ctx.source, message: routeMessage || '', task: task || undefined },
+      { preference: 'auto', laneHealth: { orcha: !!b.orcha, claude: !!b.claude } });
+  } catch (e) {
+    logger.warn('[' + requestId + '] router.decide failed: ' + e.message);
+    decision = null;
+  }
+  const needsVision = (task && task.requiresVision === true) || !!(decision && decision.task && decision.task.requiresVision);
+  if (needsVision) {
+    rec.routedLane = 'none';
+    rec.routeRationale = 'vision request: no relay lane';
+    logger.warn('[' + requestId + '] router: vision request cannot be served by any relay lane');
+    throw Object.assign(new Error('relay.ask cannot satisfy a vision request; use bedrock.readFileWithVision'), { code: 'NO_VISION_LANE' });
+  }
+  if (!decision) return null;
+  rec.routedLane = decision.effectiveLane || null;
+  rec.routeRationale = decision.rationale ? String(decision.rationale).slice(0, 120) : null;
+  if (decision.effectiveLane !== 'claude') return null;
+  try {
+    const t = await _tryClaudeCode(prompt, _ccOpts(ctx));
+    if (t) {
+      _markLaneHealthy('claude');
+      _lastHealthy = Date.now(); _lastError = null; _status = 'connected-claude'; _saveStatus();
+      logger.info('[' + requestId + '] OK via router/claude (' + t.length + ' chars)');
+      rec.via = 'router/claude';
+      return t;
+    }
+  } catch (e) {
+    if (signal && signal.aborted) throw e;
+    logger.warn('[' + requestId + '] router claude-first failed (' + e.message + ') — falling through to auto cascade');
+  }
+  return null;
+}
+
+// ── IN-FLIGHT DEDUPE (ai.gateway.dedupe) ─────────────────────────────────────
+// Only with an explicit, valid opts.dedupeKey. Never dedupes by prompt text.
+function _validDedupeKey(k) {
+  if (typeof k !== 'string') return false;
+  const n = k.trim().length;
+  return n >= 1 && n <= 200;
+}
+
+async function _joinInflight(prompt, opts = {}, gwIn) {
+  opts = opts || {};
+  const gw = gwIn || _gw();
+  if (opts.signal && opts.signal.aborted) throw new Error('Aborted before start');
+  const key = opts.dedupeKey.trim();
+  let entry = _inflight.get(key);
+  if (entry && entry.prompt !== prompt) {
+    logger.warn('[relay] dedupe key collision with different prompt; running independently (' + key.slice(0, 60) + ')');
+    return _askCore(prompt, opts, gw);
+  }
+  let isLeader = false;
+  if (!entry) {
+    isLeader = true;
+    const e = { prompt, promise: null, controller: new AbortController(), refs: 0, record: null };
+    _inflight.set(key, e);
+    // The leader's private __gwMeta / trace / timeoutMs are stripped: each
+    // participant records its own outcome below.
+    const under = Object.assign({}, opts, {
+      dedupeKey: undefined, timeoutMs: undefined, __gwMeta: undefined, trace: undefined,
+      signal: e.controller.signal, __gwOnRecord: (r) => { e.record = r; },
+    });
+    e.promise = _askCore(prompt, under, gw).finally(() => { if (_inflight.get(key) === e) _inflight.delete(key); });
+    e.promise.catch(() => {});
+    entry = e;
+  }
+  entry.refs++;
+  return _participant(entry, key, opts, gw, isLeader);
+}
+
+function _participant(entry, key, opts, gw, isLeader) {
+  const t0 = Date.now();
+  const source = _normSource(opts.source);
+  const prio = _effectivePriority({ priority: opts.priority, source }, gw);
+  const meta = (opts.__gwMeta && typeof opts.__gwMeta === 'object') ? opts.__gwMeta : null;
+  const sig = opts.signal;
+  const timeoutMs = (gw.abortOnTimeout && _validTimeout(opts.timeoutMs)) ? opts.timeoutMs : null;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    let onAbort = null;
+    const done = (outcome, value, err, detached) => {
+      if (settled) return;
+      settled = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (sig && onAbort) { try { sig.removeEventListener('abort', onAbort); } catch (_) {} }
+      if (detached) {
+        if (--entry.refs === 0) { if (_inflight.get(key) === entry) _inflight.delete(key); entry.controller.abort(); }
+      } else {
+        entry.refs = Math.max(0, entry.refs - 1);
+      }
+      try {
+        let r;
+        if (isLeader && !detached && entry.record) {
+          r = Object.assign({}, entry.record);
+          if (meta && meta.timedOut) { r.outcome = 'timeout'; r.late = true; }
+        } else {
+          r = _emitGatewayRecord({
+            requestId: opts.requestId || null, at: new Date(t0).toISOString(), source, priority: prio, legacy: !gw.priorities,
+            queueWaitMs: 0, runMs: null, latencyMs: Date.now() - t0, outcome, deduped: true,
+            late: !!(outcome === 'timeout' && meta && meta.timedOut && !err),
+            via: entry.record ? entry.record.via : null, timeoutMs: timeoutMs || (meta && meta.timeoutMs) || null,
+            error: err ? String(err.message || err).slice(0, 200) : undefined,
+          }, null);
+        }
+        if (opts.trace && typeof opts.trace.setGateway === 'function') { try { opts.trace.setGateway(r); } catch (_) {} }
+      } catch (_) {}
+      if (err) reject(err); else resolve(value);
+    };
+    if (sig) {
+      // askWithTimeout aborts its participant signal right after its timer
+      // fired: classify that detach as a timeout (meta.timedOut).
+      onAbort = () => done((meta && meta.timedOut) ? 'timeout' : 'aborted', null, _abortedErr(), true);
+      sig.addEventListener('abort', onAbort, { once: true });
+    }
+    if (timeoutMs) timer = setTimeout(() => done('timeout', null, _timeoutErr(timeoutMs), true), timeoutMs);
+    entry.promise.then(
+      (v) => done((meta && meta.timedOut) ? 'timeout' : 'ok', v, null, false),
+      (e) => done(_classify(false, e, null, meta, sig).outcome, null, e, false),
+    );
+  });
+}
+
+// ── TIMEOUT HELPERS ───────────────────────────────────────────────────────────
+// runWithTimeout(run, { timeoutMs, signal, timeoutMessage, timeoutResult, source, trace })
+//   run: (signal, meta) => Promise|value
+// Flag off (ai.gateway.abortOnTimeout): exact Promise.race([run(), timer])
+// parity — the inner call gets the caller's signal unchanged and is never
+// aborted. Flag on: the inner call gets a linked signal that is aborted right
+// after the timeout settles the race, so relay releases the slot and cancels
+// the transport. Timeout = resolve `timeoutResult` when the key is present,
+// else reject Error(timeoutMessage) (code 'AI_TIMEOUT').
+function runWithTimeout(run, o) {
+  o = o || {};
+  const timeoutMs = o.timeoutMs;
+  if (!_validTimeout(timeoutMs)) return Promise.reject(new TypeError('askWithTimeout: timeoutMs must be a positive number'));
+  const gw = _gw();
+  const callerSignal = _isSignal(o.signal) ? o.signal : undefined;
+  const message = typeof o.timeoutMessage === 'string' ? o.timeoutMessage : ('AI timeout after ' + Math.round(timeoutMs / 1000) + 's');
+  const hasResult = Object.prototype.hasOwnProperty.call(o, 'timeoutResult');
+  const source = _normSource(o.source);
+  const meta = { timedOut: false, timeoutMs };
+  let ac = null;
+  let onCaller = null;
+  let sig = callerSignal;
+  if (gw.abortOnTimeout) {
+    ac = new AbortController();
+    if (callerSignal) {
+      if (callerSignal.aborted) ac.abort();
+      else { onCaller = () => ac.abort(); callerSignal.addEventListener('abort', onCaller, { once: true }); }
+    }
+    sig = ac.signal;
+  }
+  const t0 = Date.now();
+  let timer = null;
+  const cleanup = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (onCaller) { try { callerSignal.removeEventListener('abort', onCaller); } catch (_) {} onCaller = null; }
+  };
+  let p;
+  try { p = Promise.resolve(run(sig, meta)); } catch (e) { p = Promise.reject(e); }
+  const timeoutP = new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      timer = null;
+      meta.timedOut = true;
+      if (o.trace && typeof o.trace.setGateway === 'function') {
+        try { o.trace.setGateway({ source, outcome: 'timeout', timeoutMs, latencyMs: Date.now() - t0 }); } catch (_) {}
+      }
+      if (hasResult) resolve(o.timeoutResult);
+      else reject(Object.assign(new Error(message), { code: 'AI_TIMEOUT' }));
+      if (ac) {
+        logger.warn('[askWithTimeout] ' + source + ' timed out after ' + timeoutMs + 'ms (aborted)');
+        ac.abort();
+      }
+      cleanup();
+    }, timeoutMs);
+  });
+  p.then(cleanup, cleanup);
+  return Promise.race([p, timeoutP]);
+}
+
+// askWithTimeout(prompt, { timeoutMs, timeoutMessage, timeoutResult, signal, ...askOpts })
+// The timeout options are NEVER forwarded to ask (askWithTimeout alone owns the
+// site timeout). module.exports.ask is late-bound so vi.spyOn(relay, 'ask')
+// keeps intercepting.
+function askWithTimeout(prompt, opts) {
+  const o = opts || {};
+  const { timeoutMs, timeoutMessage, timeoutResult, signal, ...askOpts } = o; // eslint-disable-line no-unused-vars
+  const rwtOpts = { timeoutMs, signal, timeoutMessage, source: askOpts.source, trace: askOpts.trace };
+  if (Object.prototype.hasOwnProperty.call(o, 'timeoutResult')) rwtOpts.timeoutResult = timeoutResult;
+  return runWithTimeout((sig, meta) => module.exports.ask(prompt, { ...askOpts, signal: sig, __gwMeta: meta }), rwtOpts);
+}
+
+// runInSlot(fn, { priority, source, signal }) — run non-relay AI work (vision)
+// inside the slot gate. ai.gateway.priorities off: fn() directly (today).
+async function runInSlot(fn, o = {}) {
+  o = o || {};
+  const gw = _gw();
+  if (!gw.priorities) return fn();
+  const source = _normSource(o.source);
+  const prio = _effectivePriority({ priority: o.priority, source }, gw);
+  const signal = _isSignal(o.signal) ? o.signal : undefined;
+  const t0 = Date.now();
+  let label;
+  try {
+    label = await _acquireSlot(prio, signal, !!(gw.abortOnTimeout && signal));
+  } catch (e) {
+    _emitGatewayRecord({ source, priority: prio, legacy: false, queueWaitMs: Date.now() - t0, runMs: null, latencyMs: Date.now() - t0,
+      outcome: 'aborted', via: 'vision', error: e.message }, null);
+    throw e;
+  }
+  const tG = Date.now();
+  let result;
+  let err = null;
+  try {
+    result = await fn();
+    return result;
+  } catch (e) {
+    err = e;
+    throw e;
+  } finally {
+    _releaseSlot(label);
+    const now = Date.now();
+    _emitGatewayRecord({ source, priority: prio, legacy: false, queueWaitMs: tG - t0, runMs: now - tG, latencyMs: now - t0,
+      outcome: (!err && result && result.ok) ? 'ok' : 'error', via: 'vision',
+      error: err ? err.message : (result && !result.ok ? result.error : undefined) }, null);
+  }
+}
+
 // ── WS TRANSPORT ─────────────────────────────────────────────────────────────
 function _tryWS(prompt, opts = {}) {
   const signal = opts.signal;
@@ -444,7 +1095,8 @@ function getClaudePoolSize() { return WORKER_POOL_SIZE; }
 // immediate handle; on Windows the Toolbox claude.exe spawns child workers
 // that survive, accumulating as zombies over time. taskkill /F /T kills the
 // entire tree. Falls back to proc.kill() on non-Windows.
-function _killClaudeTree(proc) {
+function _killClaudeTree(proc) { return _killTreeImpl(proc); }
+function _killClaudeTreeReal(proc) {
   if (!proc) return;
   try {
     if (process.platform === 'win32' && proc.pid) {
@@ -484,7 +1136,7 @@ function _failClaudeQueue(err) {
 
 function _ensureClaudeProcess(worker) {
   if (worker.proc && !worker.proc.killed) return;
-  if (!fs.existsSync(CLAUDE_BIN)) {
+  if (!_claudeBinExists()) {
     throw new Error('claude-code not installed — run: toolbox install claude-code');
   }
   logger.info('claude-code[' + worker.id + ']: spawning process' + (CLAUDE_MODEL_ID ? ' (model ' + CLAUDE_MODEL_ID + ')' : ''));
@@ -504,7 +1156,7 @@ function _ensureClaudeProcess(worker) {
      'no restating the request. If a message asks for JSON, your entire response must ' +
      'be valid JSON and nothing more.');
   const _spawnT0 = Date.now();
-  const proc = spawn(CLAUDE_BIN, _args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  const proc = _spawnImpl(CLAUDE_BIN, _args, { stdio: ['pipe', 'pipe', 'pipe'] });
   worker.stdoutBuf = '';
   worker.stderrBuf = '';              // full stderr for this process (debug dumps)
   worker._firstStdoutAt = 0;         // when the first stdout byte arrived
@@ -512,6 +1164,10 @@ function _ensureClaudeProcess(worker) {
     + (CLAUDE_MODEL_ID ? ' model=' + CLAUDE_MODEL_ID : ''));
 
   proc.stdout.on('data', (chunk) => {
+    // Stale-process guard (ai.gateway.abortOnTimeout): a killed proc whose tree
+    // is still dying (win32 taskkill is detached/no-wait) must never feed the
+    // next job on this worker -- not its result line, not partial chunks.
+    if (proc !== worker.proc && _gw().abortOnTimeout) return;
     if (!worker._firstStdoutAt) {
       worker._firstStdoutAt = Date.now();
       if (worker.currentJob && worker.currentJob._dispatchedAt) {
@@ -523,6 +1179,7 @@ function _ensureClaudeProcess(worker) {
     const lines = worker.stdoutBuf.split('\n');
     worker.stdoutBuf = lines.pop();
     for (const line of lines) {
+      if (proc !== worker.proc && _gw().abortOnTimeout) break; // this proc was replaced mid-chunk
       if (!line.trim()) continue;
       let obj;
       try { obj = JSON.parse(line); } catch (e) { continue; }
@@ -552,6 +1209,7 @@ function _ensureClaudeProcess(worker) {
   });
 
   proc.stderr.on('data', (d) => {
+    if (proc !== worker.proc && _gw().abortOnTimeout) return; // stale-process guard (see stdout)
     const s = d.toString();
     // Keep the full stderr for this process so a timeout dump shows the REAL
     // last words (the truncated warn below often cuts off the actual error).
@@ -672,16 +1330,47 @@ function _tryClaudeCode(prompt, opts = {}) {
     if (signal && signal.aborted) return reject(new Error('Aborted before start'));
     const CLAUDE_PROMPT_MAX_CHARS = 60000;
     const trimmed = prompt.length > CLAUDE_PROMPT_MAX_CHARS ? prompt.slice(0, CLAUDE_PROMPT_MAX_CHARS) + '...[trimmed]' : prompt;
-    const job = { prompt: trimmed, signal, onAbort: null, done: false };
+    const job = { prompt: trimmed, signal, onAbort: null, done: false,
+      rank: (opts.prio && _CQ_RANK[opts.prio] != null) ? _CQ_RANK[opts.prio] : null, enqAt: Date.now() };
     job.resolve = (text) => { if (job.done) return; job.done = true; if (signal && job.onAbort) { try { signal.removeEventListener('abort', job.onAbort); } catch (_) {} } resolve(text); };
     job.reject  = (err)  => { if (job.done) return; job.done = true; if (signal && job.onAbort) { try { signal.removeEventListener('abort', job.onAbort); } catch (_) {} } reject(err); };
     if (signal) {
       job.onAbort = () => _abortClaudeJob(job);
       signal.addEventListener('abort', job.onAbort, { once: true });
     }
-    _claudeQueue.push(job);
+    if (job.rank != null && _gw().priorities) {
+      // Priority insertion (ai.gateway.priorities): FIFO within a rank, better
+      // ranks ahead of worse ones, but never in front of a job that has already
+      // waited CQ_NO_JUMP_MS (floor = right after the LAST such job). Jobs
+      // without a rank count as normal.
+      const now = job.enqAt;
+      let floor = 0;
+      for (let i = 0; i < _claudeQueue.length; i++) {
+        if (now - _claudeQueue[i].enqAt >= CQ_NO_JUMP_MS) floor = i + 1;
+      }
+      let at = -1;
+      for (let i = floor; i < _claudeQueue.length; i++) {
+        const r = _claudeQueue[i].rank != null ? _claudeQueue[i].rank : 2;
+        if (r > job.rank) { at = i; break; }
+      }
+      _claudeQueue.splice(at === -1 ? _claudeQueue.length : at, 0, job);
+    } else {
+      _claudeQueue.push(job); // legacy / no prio: exactly as before
+    }
     _processClaudeQueue();
   });
+}
+
+const _CQ_RANK = { critical: 0, high: 1, normal: 2, low: 3 };
+const CQ_NO_JUMP_MS = 60000;
+
+function _claudePoolStats() {
+  const queuedByPriority = { critical: 0, high: 0, normal: 0, low: 0, none: 0 };
+  const names = ['critical', 'high', 'normal', 'low'];
+  for (const j of _claudeQueue) {
+    if (j.rank != null && names[j.rank]) queuedByPriority[names[j.rank]]++; else queuedByPriority.none++;
+  }
+  return { size: WORKER_POOL_SIZE, busy: _workers.filter((w) => w.busy).length, queued: _claudeQueue.length, queuedByPriority };
 }
 
 
@@ -712,7 +1401,7 @@ function getStatus() {
   const recentOrchaOk = _status === 'connected' && _lastHealthy && (Date.now() - _lastHealthy < 5 * 60 * 1000);
   const orchaUp  = _laneHealthy('orcha') && (orchaReachable || recentOrchaOk);
   let claudeInstalled = false;
-  try { claudeInstalled = fs.existsSync(CLAUDE_BIN); } catch (_) {}
+  try { claudeInstalled = _claudeBinExists(); } catch (_) {}
   const claudeUp = _laneHealthy('claude') && claudeInstalled;
 
   return {
@@ -767,7 +1456,18 @@ function refreshCredentials() {
 }
 
 // ── HELPERS ──────────────────────────────────────────────────────────────────
-function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// With a signal (ai.gateway.abortOnTimeout only) the sleep resolves early on
+// abort and never leaves a listener behind. Never rejects.
+function _sleep(ms, signal) {
+  if (!signal) return new Promise(r => setTimeout(r, ms));
+  return new Promise((r) => {
+    if (signal.aborted) { r(); return; }
+    let t = null;
+    const onAbort = () => { clearTimeout(t); r(); };
+    t = setTimeout(() => { try { signal.removeEventListener('abort', onAbort); } catch (_) {} r(); }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 function _saveStatus() {
   try {
@@ -967,4 +1667,57 @@ function listAgents(opts = {}) {
   });
 }
 
-module.exports = { ask, queueStats, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setAgent, getAgent, setClaudePoolSize, getClaudePoolSize, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents };
+// ── TEST SEAMS ───────────────────────────────────────────────────────────────
+// Transport/process call points route through these impl variables (default =
+// the real functions) so tests never touch a real socket or claude.exe.
+let _tryWSImpl = _tryWS;
+let _spawnImpl = spawn;
+let _killTreeImpl = _killClaudeTreeReal;
+let _claudeBinExists = () => fs.existsSync(CLAUDE_BIN);
+
+const __test__ = {
+  setGatewayFlags(obj) { _gwOverride = obj ? _normGwFlags(obj) : null; },
+  setGatewayLoader(fn) { _gwLoader = fn || null; _gwCache = null; _gwCacheAt = 0; },
+  setTryWS(fn) { _tryWSImpl = fn || _tryWS; },
+  setSpawn(fn) { _spawnImpl = fn || spawn; },
+  setKillTree(fn) { _killTreeImpl = fn || _killClaudeTreeReal; },
+  setClaudeBinExists(fn) { _claudeBinExists = fn || (() => fs.existsSync(CLAUDE_BIN)); },
+  setBedrockEnabled(b) { _bedrockEnabled = !!b; },
+  tryClaudeCode: (p, o) => _tryClaudeCode(p, o),
+  localAskFn: (p, o) => _localAskFn(p, o),
+  askCore: (p, o) => _askCore(p, o),
+  sleep: (ms, s) => _sleep(ms, s),
+  dispatch: () => _dispatch(),
+  claudePoolState() {
+    return {
+      queue: _claudeQueue.map((j) => ({ prompt: j.prompt, rank: j.rank, enqAt: j.enqAt })),
+      workers: _workers.map((w) => ({ id: w.id, busy: w.busy, hasProc: !!w.proc, currentPrompt: w.currentJob ? w.currentJob.prompt : null, stdoutBuf: w.stdoutBuf })),
+      stats: _claudePoolStats(),
+    };
+  },
+  inflight: () => _inflight,
+  waitQueue: () => _waitQueue.map((e) => ({ prio: e.prio, seq: e.seq, enqAt: e.enqAt, state: e.state })),
+  activeBy: () => Object.assign({}, _activeBy),
+  underflows: () => _underflows,
+  liftTimerArmed: () => !!_liftTimer,
+  constants: { MAX_CONCURRENT, AGE_STEP_MS, LOW_RESERVE_LIFT_MS, CQ_NO_JUMP_MS, GW_FLAG_TTL_MS, SOURCE_PRIORITY },
+  // Reset gateway state between tests. Callers must have released every slot.
+  reset() {
+    const leaked = _activeCount;
+    _waitQueue.length = 0;
+    _inflight.clear();
+    if (_liftTimer) { clearTimeout(_liftTimer); _liftTimer = null; }
+    _activeCount = 0;
+    for (const p of PRIORITIES) _activeBy[p] = 0;
+    _claudeQueue.length = 0;
+    for (const w of _workers) {
+      try { if (w.idleTimer) clearTimeout(w.idleTimer); } catch (_) {}
+      if (w.currentJob && w.currentJob._timer) clearTimeout(w.currentJob._timer);
+      w.proc = null; w.busy = false; w.currentJob = null; w.stdoutBuf = ''; w.idleTimer = null;
+    }
+    _orchaDownUntil = 0; _claudeDownUntil = 0; _orchaBusy = 0; _claudeBusy = 0;
+    return leaked;
+  },
+};
+
+module.exports = { ask, askWithTimeout, runWithTimeout, runInSlot, queueStats, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setAgent, getAgent, setClaudePoolSize, getClaudePoolSize, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents, __test__ };
