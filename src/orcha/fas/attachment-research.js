@@ -139,7 +139,7 @@ async function readAttachment(file) {
   if (!bd || typeof bd.readFileWithVision !== 'function') {
     return { ok: false, reason: 'cannot read ' + (dl.mimetype || name) + ' (vision/document reader unavailable)' };
   }
-  const vis = await bd.readFileWithVision({ name, mimetype: dl.mimetype, buffer: dl.buffer });
+  const vis = await bd.readFileWithVision({ name, mimetype: dl.mimetype, buffer: dl.buffer }, { source: 'vision_fas_attachment' });
   if (vis && vis.ok && vis.text) {
     // Surface the downloaded bytes + precise kind so researchAttachments can run
     // Phase-6 STRUCTURED analysis (document/image intelligence) WITHOUT a second

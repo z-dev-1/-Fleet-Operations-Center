@@ -255,8 +255,24 @@ async function readFileWithVision(file, opts) {
   const cls = _classifyAttachment(file);
   if (!cls) return { ok: false, error: 'unsupported attachment type for vision (' + ((file.mimetype || file.name) || '?') + ')' };
 
-  if (!fs.existsSync(CLAUDE_BIN)) return { ok: false, kind: cls.kind, error: 'claude-code not installed' };
+  if (!_binExists()) return { ok: false, kind: cls.kind, error: 'claude-code not installed' };
 
+  // Phase 3: run the spawn inside relay's AI slot gate (ai.gateway.priorities).
+  // Flag off: relay.runInSlot calls fn() directly (today's behavior). Cheap
+  // validations above never take a slot; the temp file and the 90 s timer only
+  // start after the grant. Only a queued-abort gate error is mapped to the
+  // normal { ok:false } shape; every other rejection propagates as today.
+  let relay = null;
+  try { relay = require('../orcha/relay'); } catch (_) { relay = null; }
+  if (!relay || typeof relay.runInSlot !== 'function') return _visionRead(file, cls, opts);
+  return relay.runInSlot(() => _visionRead(file, cls, opts), { source: opts.source || 'vision', priority: opts.priority, signal: opts.signal })
+    .catch((e) => {
+      if (e && e.code === 'ABORTED') return { ok: false, kind: cls.kind, error: 'vision gate: ' + e.message };
+      throw e;
+    });
+}
+
+async function _visionRead(file, cls, opts) {
   const instruction = opts.prompt ||
     'You are a headless transcription tool, NOT a chat assistant. Use the Read tool on the file ./' + '%%NAME%%' +
     ' and output ONLY its transcribed contents as plain text. Start directly with the content — no preamble, ' +
@@ -296,7 +312,7 @@ async function readFileWithVision(file, opts) {
       const _va = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
          '--no-session-persistence', '--bare', '--allowedTools', 'Read', '--dangerously-skip-permissions'];
       if (claudeModel) _va.push('--model', claudeModel);
-      proc = spawn(CLAUDE_BIN, _va, { cwd: tmpDir, stdio: ['pipe', 'pipe', 'pipe'] });
+      proc = _spawnImpl(CLAUDE_BIN, _va, { cwd: tmpDir, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (e) {
       cleanup();
       return resolve({ ok: false, kind: cls.kind, error: 'claude-code spawn failed: ' + e.message });
@@ -333,5 +349,14 @@ async function readFileWithVision(file, opts) {
   });
 }
 
+// Test seams (spawn + claude binary presence). Production never calls them.
+let _spawnImpl = spawn;
+let _binExists = () => fs.existsSync(CLAUDE_BIN);
+
 module.exports = {
-  askBedrock, suggestDropdowns, readFileWithVision, _classifyAttachment };
+  askBedrock, suggestDropdowns, readFileWithVision, _classifyAttachment,
+  __test__: {
+    setSpawn(fn) { _spawnImpl = fn || spawn; },
+    setBinExists(fn) { _binExists = fn || (() => fs.existsSync(CLAUDE_BIN)); },
+  },
+};

@@ -109,7 +109,7 @@ async function analyzeImage(file, opts) {
   const bd = _bedrock();
   if (!bd || typeof bd.readFileWithVision !== 'function') return { ok: false, error: 'image reader unavailable' };
   let res;
-  try { res = await bd.readFileWithVision({ name: file.name, mimetype: file.mimetype, buffer: file.buffer }, { prompt: CLASSIFY_PROMPT, model: opts.model, timeoutMs: opts.timeoutMs }); }
+  try { res = await bd.readFileWithVision({ name: file.name, mimetype: file.mimetype, buffer: file.buffer }, { prompt: CLASSIFY_PROMPT, model: opts.model, timeoutMs: opts.timeoutMs, source: 'vision_image' }); }
   catch (e) { return { ok: false, error: 'vision read failed: ' + e.message }; }
   if (!res || !res.ok || !res.text) return { ok: false, error: (res && res.error) || 'could not read image' };
   const parsed = parseAnalysis(res.text);
