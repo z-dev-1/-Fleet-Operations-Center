@@ -636,8 +636,29 @@ async function _tick() {
   }
 }
 
+// ── Worker supervisor ownership (Phase 5, 2026-10-30) ──
+// Flag on (workers.supervised.dailyTasks): the supervisor runs _tick every
+// 60 s with the same 8 s first run; neither the legacy setInterval nor the
+// 8 s setTimeout is armed. Flag off (default): the legacy timers run
+// unchanged. backoff:false (backoff is inert for this worker); _tickRunning,
+// lastGeneratedDay and the _aiMiss retry cooldown stay inside _tick.
+let _owned = false;
+
 function _startScheduler() {
   if (_timer) { clearInterval(_timer); _timer = null; }
+  let owned = false;
+  try {
+    owned = require('../workers/supervisor').claim({
+      name: 'dailyTasks', group: 'tasks', tick: _tick, intervalMs: 60 * 1000,
+      initialDelayMs: 8000, timeoutMs: 30 * 60 * 1000, maxFailures: 5, cooldownMs: 30 * 60 * 1000,
+      backoff: false, dependsOn: [], idempotent: true, label: 'Daily task generation',
+    });
+  } catch (_) { owned = false; }
+  if (owned) {
+    _owned = true;
+    logger.info('[tasks] morning scheduler started (generates ~' + MORNING_HOUR + ':00 ' + DEFAULT_TZ + ')');
+    return;
+  }
   _timer = setInterval(_tick, 60 * 1000);
   if (_timer.unref) _timer.unref();
   // Run one tick shortly after start so a late-morning launch still generates.
@@ -645,4 +666,19 @@ function _startScheduler() {
   logger.info('[tasks] morning scheduler started (generates ~' + MORNING_HOUR + ':00 ' + DEFAULT_TZ + ')');
 }
 
-module.exports = { registerDailyTasksIPC, generateNow, __test__: { generate: _generate } };
+module.exports = {
+  registerDailyTasksIPC, generateNow,
+  __test__: {
+    generate: _generate,
+    tick: _tick,
+    startScheduler: _startScheduler,
+    legacyArmed: () => !!_timer,
+    owned: () => _owned,
+    // The legacy 8 s setTimeout is unstored; tests also vi.clearAllTimers().
+    resetForTests: () => {
+      if (_timer) clearInterval(_timer);
+      _timer = null; _owned = false; _tickRunning = false;
+      _aiMiss = { day: null, count: 0, lastAt: 0 };
+    },
+  },
+};
