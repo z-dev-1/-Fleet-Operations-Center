@@ -66,7 +66,9 @@ function start(meta) {
     latencyMs: null,
     error: null,
     correction: null,                        // operator feedback attached later
+    gateway: null,                           // relay gateway record (source/priority/queue wait/latency/outcome)
   };
+  let finished = false;
 
   const handle = {
     requestId: rec.requestId,
@@ -92,7 +94,15 @@ function start(meta) {
       try { _foldDecision(handle, decision); } catch (_) {}
       return handle;
     },
+    // Attach the relay gateway record. No-op once finish() has persisted the
+    // record (a late relay completion must not mutate a saved trace).
+    setGateway(info) {
+      if (finished) return handle;
+      try { const g = _safeGateway(info); if (g) rec.gateway = g; } catch (_) {}
+      return handle;
+    },
     finish(extra) {
+      finished = true;
       try {
         rec.latencyMs = Date.now() - t0;
         if (extra && typeof extra === 'object') {
@@ -148,6 +158,92 @@ function _safeVerification(v) {
   return { verified: !!v.verified, deferred: !!v.deferred, evidence: v.evidence ? String(v.evidence).slice(0, 300) : undefined, error: v.error ? String(v.error).slice(0, 300) : undefined };
 }
 
+// ── Gateway records (Phase 3) ────────────────────────────────────────────────
+// One record per relay.ask / runInSlot call: source, priority, queue wait,
+// latency, outcome. Kept in an in-memory ring only (NOT persisted): one record
+// per AI call would mean a sync store write per call and would flood the
+// aiTraceLog ring that ai/eval reads.
+const GW_CAP = 500;
+const GW_OUTCOMES = ['ok', 'timeout', 'aborted', 'error'];
+const GW_PRIORITIES = ['critical', 'high', 'normal', 'low'];
+let _gwRing = []; // newest-first
+
+function _clip(v, n) { return v == null ? null : String(v).slice(0, n); }
+function _num(v) { return (typeof v === 'number' && Number.isFinite(v)) ? Math.max(0, Math.round(v)) : null; }
+
+function _safeGateway(info) {
+  if (!info || typeof info !== 'object') return null;
+  const out = {
+    requestId: _clip(info.requestId, 64),
+    at: info.at ? _clip(info.at, 40) : _now(),
+    source: _clip(info.source || 'unknown', 64),
+    priority: GW_PRIORITIES.includes(info.priority) ? info.priority : 'normal',
+    legacy: !!info.legacy,
+    queueWaitMs: _num(info.queueWaitMs),
+    runMs: _num(info.runMs),
+    latencyMs: _num(info.latencyMs),
+    outcome: GW_OUTCOMES.includes(info.outcome) ? info.outcome : 'error',
+    via: _clip(info.via, 40),
+    routedLane: _clip(info.routedLane, 20),
+    routeRationale: _clip(info.routeRationale, 120),
+    timeoutMs: _num(info.timeoutMs),
+  };
+  if (info.late) out.late = true;
+  if (info.deduped) out.deduped = true;
+  if (info.error) out.error = _clip(info.error && info.error.message ? info.error.message : info.error, 200);
+  return out;
+}
+
+/** recordGateway(rec) -> stored record | null. Never throws. */
+function recordGateway(info) {
+  try {
+    const g = _safeGateway(info);
+    if (!g) return null;
+    _gwRing.unshift(g);
+    if (_gwRing.length > GW_CAP) _gwRing.length = GW_CAP;
+    return g;
+  } catch (e) { logger.warn('[ai-trace] recordGateway failed: ' + e.message); return null; }
+}
+
+function gatewayRecent(limit) {
+  return _gwRing.slice(0, Math.max(0, limit == null ? 50 : limit));
+}
+
+function _pct(sorted, p) {
+  if (!sorted.length) return null;
+  const i = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return sorted[i];
+}
+function _sortedNums(arr) { return arr.filter((n) => typeof n === 'number').sort((a, b) => a - b); }
+
+/** gatewaySummary() -> per-priority / per-source counts and latency percentiles. */
+function gatewaySummary() {
+  const byP = {};
+  const bySrc = {};
+  for (const r of _gwRing) {
+    const p = byP[r.priority] || (byP[r.priority] = { count: 0, ok: 0, timeout: 0, aborted: 0, error: 0, deduped: 0, _lat: [], _wait: [] });
+    p.count++; p[r.outcome] = (p[r.outcome] || 0) + 1;
+    if (r.deduped) p.deduped++;
+    p._lat.push(r.latencyMs); p._wait.push(r.queueWaitMs);
+    const s = bySrc[r.source] || (bySrc[r.source] = { count: 0, timeout: 0, error: 0, _lat: [] });
+    s.count++; if (r.outcome === 'timeout') s.timeout++; if (r.outcome === 'error') s.error++;
+    s._lat.push(r.latencyMs);
+  }
+  const byPriority = {};
+  for (const [k, v] of Object.entries(byP)) {
+    const lat = _sortedNums(v._lat); const wait = _sortedNums(v._wait);
+    byPriority[k] = { count: v.count, ok: v.ok, timeout: v.timeout, aborted: v.aborted, error: v.error, deduped: v.deduped,
+      p50LatencyMs: _pct(lat, 50), p95LatencyMs: _pct(lat, 95), p95QueueWaitMs: _pct(wait, 95) };
+  }
+  const bySource = {};
+  Object.entries(bySrc).sort((a, b) => b[1].count - a[1].count).slice(0, 25).forEach(([k, v]) => {
+    bySource[k] = { count: v.count, timeout: v.timeout, error: v.error, p95LatencyMs: _pct(_sortedNums(v._lat), 95) };
+  });
+  return { sampleSize: _gwRing.length, byPriority, bySource };
+}
+
+function _resetGatewayForTests() { _gwRing = []; }
+
 /**
  * attachCorrection(requestId, correction) -> boolean
  * Attach a later operator correction/feedback to an existing trace (spec #9/#10
@@ -176,4 +272,7 @@ function recent(limit) {
   return arr.slice(0, Math.max(0, limit || 50));
 }
 
-module.exports = { start, attachCorrection, recent, STORE_KEY, CAP };
+module.exports = {
+  start, attachCorrection, recent, STORE_KEY, CAP,
+  recordGateway, gatewayRecent, gatewaySummary, _resetGatewayForTests, GW_CAP,
+};
