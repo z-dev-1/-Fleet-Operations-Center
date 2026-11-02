@@ -644,6 +644,7 @@ function applyPendingUnitUpdates(results) {
 // never keeps the process alive. _rearmAutoScan() is called by saveConfig so a
 // config change takes effect immediately.
 let _autoTimer = null;
+let _autoOwned = false; // Phase 5: true when the worker supervisor owns the cadence
 let _autoRunning = false;
 let _autoNotify = null; // optional callback(results) set by the IPC layer to push UI updates
 
@@ -798,16 +799,27 @@ async function _autoTick() {
 
 // Read-only, in-memory status (consumed by poller.getStatus().owaTriage).
 function getAutoScanStatus() {
+  const armed = !!(_autoTimer || _autoOwned);
   let nextRunAt = null;
-  if (_autoTimer && _armedAt && _armedEveryMin) {
+  let fromSupervisor = false;
+  if (_autoOwned) {
+    // Supervised: report the real next run (after backoff / isolation / disable
+    // it is the supervisor's slot, or null when nothing is scheduled).
+    try {
+      const w = require('../workers/supervisor').getStatus().workers.find((x) => x.name === 'emailTriage');
+      nextRunAt = w ? w.nextRunAt : null;
+      fromSupervisor = true;
+    } catch (_) { fromSupervisor = false; }
+  }
+  if (!fromSupervisor && armed && _armedAt && _armedEveryMin) {
     const every = _armedEveryMin * 60 * 1000;
     const k = Math.max(1, Math.ceil((Date.now() - _armedAt) / every));
     nextRunAt = _armedAt + k * every;
   }
   return {
     mode: _commsMode(),
-    armedMinutes: _autoTimer ? _armedEveryMin : null,
-    armedAt: _autoTimer ? _armedAt : null,
+    armedMinutes: armed ? _armedEveryMin : null,
+    armedAt: armed ? _armedAt : null,
     nextRunAt,
     running: !!_triageInFlight,
     lastOrigin: _autoStatus.lastOrigin,
@@ -827,6 +839,27 @@ function startAutoScan() {
   stopAutoScan();
   const cfg = getConfig();
   const minutes = Math.max(15, Math.min(1440, parseInt(cfg.autoScanMinutes, 10) || 60));
+  // ── Worker supervisor ownership (Phase 5, 2026-10-30) ──
+  // Flag on (workers.supervised.emailTriage): the supervisor runs _autoTick on
+  // the same cadence and the legacy setInterval is NOT armed. Flag off
+  // (default): the legacy setInterval below runs unchanged. _autoTick, the
+  // comms-mode guard and the 'owa.triageAutoScan' track are untouched.
+  // Backoff is inert for this worker (maxFailures 3 → ≤ 138 s < 15 min floor).
+  let owned = false;
+  try {
+    owned = require('../workers/supervisor').claim({
+      name: 'emailTriage', group: 'comms', tick: _autoTick,
+      intervalMs: minutes * 60 * 1000, timeoutMs: 30 * 60 * 1000, maxFailures: 3, cooldownMs: 60 * 60 * 1000,
+      dependsOn: ['offline'], idempotent: true, isSkip: (r) => !!(r && r.skipped),
+      label: 'Email triage auto-scan',
+    });
+  } catch (_) { owned = false; }
+  if (owned) {
+    _autoOwned = true;
+    _armedAt = Date.now(); _armedEveryMin = minutes;
+    logger.info('[email-triage] auto-scan scheduler started (every ' + minutes + ' min; fires only when enabled + autoScan on)');
+    return stopAutoScan;
+  }
   _autoTimer = setInterval(() => { _autoTick().catch(() => {}); }, minutes * 60 * 1000);
   if (_autoTimer.unref) _autoTimer.unref();
   _armedAt = Date.now(); _armedEveryMin = minutes;
@@ -835,6 +868,7 @@ function startAutoScan() {
 }
 
 function stopAutoScan() {
+  if (_autoOwned) { try { require('../workers/supervisor').stop('emailTriage'); } catch (_) {} _autoOwned = false; }
   if (_autoTimer) { clearInterval(_autoTimer); _autoTimer = null; }
 }
 
@@ -846,7 +880,7 @@ let _armedMinutes = null;
 function _rearmAutoScan() {
   const cfg = getConfig();
   const minutes = Math.max(15, Math.min(1440, parseInt(cfg.autoScanMinutes, 10) || 60));
-  if (_autoTimer && _armedMinutes === minutes) return; // already armed at this cadence
+  if ((_autoTimer || _autoOwned) && _armedMinutes === minutes) return; // already armed at this cadence
   _armedMinutes = minutes;
   startAutoScan();
 }
@@ -881,4 +915,5 @@ module.exports = {
   MANUAL_WAIT_MS,
   _buildDecision,
   _canonFor,
+  __test__: { legacyArmed: () => !!_autoTimer, owned: () => _autoOwned },
 };
