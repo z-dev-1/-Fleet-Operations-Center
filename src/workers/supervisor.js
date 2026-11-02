@@ -36,12 +36,10 @@
 const perfFlags = require('../config/perf-flags');
 
 // ── Constants ────────────────────────────────────────────────────────────────
-// Backoff is inert for every Phase 5 worker: each reachable backoffFor(n),
-// n < maxFailures, is ≤ its intervalMs (repairIntel/emailTriage/fasCoverage/
-// apiFleetRefresh use maxFailures 3 → ≤ 138 s; carrierBriefing/longDwell/
-// dailyTasks use backoff:false). It is exercised only by synthetic-worker
-// tests and becomes effective for future workers whose interval is shorter
-// than their backoff.
+// Backoff is inert for every Phase 5 worker: all seven Phase 5 specs set
+// backoff:false, so a failed tick always keeps the armed gridNext (even one
+// that fails late in its interval). Backoff is exercised only by
+// synthetic-worker tests and is available to future workers that opt in.
 // Copied (not imported) from src/auth/midway-health-supervisor.js _BACKOFF_MS /
 // _jitter / _backoffFor, with Math.random made injectable.
 const BACKOFF_MS = [30000, 60000, 120000, 300000, 600000, 900000];
@@ -231,6 +229,10 @@ function _newRecord(spec) {
     effMaxRestarts: _effMaxRestarts(spec),
     anchor: 0,
     slots: { next: null, guard: null },
+    // { at, trigger } of the run slot shutdown disarmed (or the first slot a
+    // register during shutdown could not arm); consumed by a cancelled-quit
+    // resume so the original grid / initialDelayMs is kept.
+    resumeSlot: null,
     ownerStopped: false,
     breakerState: 'ok',       // 'ok' | 'isolated' | 'budget-exhausted'
     isolations: 0,
@@ -277,6 +279,7 @@ function register(spec) {
     }
     rec.anchor = _now();
     _scheduleNext(rec, _firstAt(rec), 'schedule'); // no-op while shutting down (fix 1 R1)
+    if (_shuttingDown) rec.resumeSlot = { at: _firstAt(rec), trigger: 'schedule' };
     return true;
   }
 
@@ -295,6 +298,7 @@ function register(spec) {
   } else if (rec.breakerState === 'ok') {
     rec.anchor = _now();
     _scheduleNext(rec, _firstAt(rec), 'schedule');
+    if (_shuttingDown) rec.resumeSlot = { at: _firstAt(rec), trigger: 'schedule' };
   }
   // budget-exhausted: stays disabled until reEnable() or an app restart.
   return true;
@@ -596,6 +600,8 @@ function shutdown({ graceMs = DEFAULT_GRACE_MS } = {}) {
   _shuttingDown = true;
   const promises = [];
   for (const rec of _records.values()) {
+    const nx = rec.slots.next;
+    rec.resumeSlot = nx && nx.kind === 'run' ? { at: nx.at, trigger: nx.trigger || 'schedule' } : null;
     _disarm(rec, 'next');
     _disarm(rec, 'guard');
     if (rec.spec.stop) { try { rec.spec.stop(); } catch (_) {} }
@@ -677,10 +683,18 @@ function _resumeAfterCancelledQuit() {
       if (!inf.timedOut) _arm(rec, 'guard', inf.startedAt + rec.spec.timeoutMs, 'timeout');
       else _arm(rec, 'guard', inf.startedAt + 2 * rec.spec.timeoutMs, 'hung');
     }
+    const rs = rec.resumeSlot;
+    rec.resumeSlot = null;
     if (rec.ownerStopped) continue; // an owner stop during before-quit stays stopped, like legacy
     if (rec.breakerState === 'ok') {
-      rec.anchor = t;
-      _scheduleNext(rec, _gridNext(rec, t), 'schedule');
+      // Keep the ORIGINAL anchor (review issue 1): re-arm the slot shutdown
+      // disarmed (or the firstAt a register during shutdown could not arm, so
+      // initialDelayMs is kept). A slot that fell inside the shutdown window
+      // fires immediately, exactly once (_arm clamps a past `at` to 0 ms);
+      // _startTick then re-arms gridNext from the original anchor, so
+      // exact-minute loops do not lose their minute.
+      if (rs) _scheduleNext(rec, Math.max(rs.at, t), rs.trigger);
+      else _scheduleNext(rec, _gridNext(rec, t), 'schedule');
       n++;
     } else if (rec.breakerState === 'isolated') {
       if (rec.isolatedUntil != null && rec.isolatedUntil > t) _arm(rec, 'next', rec.isolatedUntil, 'cooldown');

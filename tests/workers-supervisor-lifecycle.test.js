@@ -72,11 +72,11 @@ describe('[FIX 1] lifecycle during shutdown / owner-stop', () => {
     expect(vi.getTimerCount()).toBe(base);
     expect(st().nextRunAt).toBeNull();
     await adv(15000);
-    const resumeAt = Date.now();
     expect(sup.getStatus().workers).toHaveLength(1);
-    expect(st()).toMatchObject({ state: 'healthy', disabledReason: null, nextRunAt: resumeAt + MIN });
+    // The re-claim at T0 anchors the grid; resume keeps it (first slot T0 + MIN).
+    expect(st()).toMatchObject({ state: 'healthy', disabledReason: null, nextRunAt: T0 + MIN });
     await adv(MIN);
-    expect(runs).toEqual([resumeAt + MIN]);
+    expect(runs).toEqual([T0 + MIN]);
   });
 
   it('R1: brand-new claim during shutdown arms nothing, resumes after the watchdog, and nothing resumes if onWillQuit() fires first', async () => {
@@ -87,7 +87,7 @@ describe('[FIX 1] lifecycle during shutdown / owner-stop', () => {
     expect(vi.getTimerCount()).toBe(1); // watchdog only
     expect(st('alpha')).toMatchObject({ state: 'disabled', disabledReason: 'shutdown', nextRunAt: null });
     await adv(15000);
-    expect(st('alpha').nextRunAt).toBe(Date.now() + MIN);
+    expect(st('alpha').nextRunAt).toBe(T0 + MIN); // firstAt from the claim instant
     await adv(MIN);
     expect(tick).toHaveBeenCalledTimes(1);
 
@@ -249,6 +249,72 @@ describe('[FIX 1] lifecycle during shutdown / owner-stop', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+describe('[REVIEW 1] cancelled-quit resume keeps the original grid', () => {
+  it('(a) 60 s worker resumed across a minute boundary fires immediately once, then returns to its grid', async () => {
+    initSup();
+    await adv(2000);                                   // anchor 12:00:02 → slots at :02
+    const runs = [];
+    sup.register(spec({ tick: () => { runs.push(Date.now() - T0); } }));
+    await adv(MIN);                                    // run at 12:01:02
+    await adv(48000);                                  // 12:01:50
+    sup.onBeforeQuit();
+    await adv(15000);                                  // resume at 12:02:05; the 12:02:02 slot was missed
+    await adv(1);                                      // a 0 ms timer armed inside a fake-timer callback fires 1 ms later
+    expect(runs).toEqual([62000, 125001]);             // immediate fire keeps minute 12:02
+    expect(st().nextRunAt).toBe(T0 + 2000 + 3 * MIN); // back on the :02 grid
+    await adv(T0 + 2000 + 3 * MIN - Date.now());
+    expect(runs).toEqual([62000, 125001, 182000]);
+  });
+
+  it('(b) resume with no slot missed keeps the original grid, not resume + interval', async () => {
+    initSup();
+    const tick = vi.fn();
+    sup.register(spec({ intervalMs: 10 * MIN, tick }));
+    await adv(MIN);
+    sup.onBeforeQuit();
+    await adv(15000);
+    expect(tick).not.toHaveBeenCalled();
+    expect(st().nextRunAt).toBe(T0 + 10 * MIN);
+    await adv(T0 + 10 * MIN - Date.now());
+    expect(tick).toHaveBeenCalledTimes(1);
+  });
+
+  it('(c) a record first registered during shutdown gets its initialDelayMs after resume', async () => {
+    initSup();
+    const tick = vi.fn();
+    sup.onBeforeQuit();
+    await adv(5000);
+    expect(sup.claim(spec({ name: 'alpha', intervalMs: 20 * MIN, initialDelayMs: 5 * MIN, tick }))).toBe(true);
+    expect(st('alpha').nextRunAt).toBeNull();
+    await adv(10000);                                  // resume at T0 + 15 s
+    expect(st('alpha').nextRunAt).toBe(T0 + 5000 + 5 * MIN);
+    await adv(T0 + 5000 + 5 * MIN - Date.now() - 1);
+    expect(tick).not.toHaveBeenCalled();
+    await adv(1);
+    expect(tick).toHaveBeenCalledTimes(1);
+    expect(st('alpha').nextRunAt).toBe(T0 + 5000 + 20 * MIN); // grid from the claim-time anchor
+  });
+
+  it('(d) exactly one immediate fire even when many slots were missed', async () => {
+    initSup();
+    const tick = vi.fn();
+    sup.register(spec({ intervalMs: 1000, tick }));
+    await adv(2500);                                   // runs at +1 s, +2 s
+    expect(tick).toHaveBeenCalledTimes(2);
+    sup.onBeforeQuit();
+    await adv(15000);                                  // resume at +17.5 s; 15 slots missed
+    await adv(1);                                      // 0 ms timer from a fake-timer callback fires 1 ms later
+    expect(tick).toHaveBeenCalledTimes(3);
+    expect(st().counts.runs).toBe(3);
+    expect(st().nextRunAt).toBe(T0 + 18000);
+    await adv(498);
+    expect(tick).toHaveBeenCalledTimes(3);
+    await adv(1);
+    expect(tick).toHaveBeenCalledTimes(4);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 describe('[FIX 2] notification policy', () => {
   it('two isolation episodes separated by a full recovery → two "Background worker paused" notices', async () => {
     initSup();
@@ -353,7 +419,7 @@ describe('[FIX 7] repeated before-quit', () => {
     expect(sup.getStatus().shuttingDown).toBe(true);
     await adv(1); // +25 s
     expect(sup.getStatus().shuttingDown).toBe(false);
-    expect(st().nextRunAt).toBe(T0 + 25000 + MIN);
+    expect(st().nextRunAt).toBe(T0 + MIN); // original grid kept
   });
 
   it('drain log attached once per shutdown promise', async () => {

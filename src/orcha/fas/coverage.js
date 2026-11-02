@@ -193,8 +193,8 @@ let _timer = null;
 // Flag on (workers.supervised.fasCoverage): the supervisor runs the 6 h
 // 'schedule' refresh; the legacy setInterval is NOT armed. Flag off (default):
 // the legacy setInterval runs unchanged. The startup refresh stays synchronous
-// and first in both modes. Backoff is inert for this worker (maxFailures 3 →
-// at most 138 s, far below the 6 h interval).
+// and first in both modes. backoff:false keeps the 6 h grid after a failure
+// (backoff is inert for this worker).
 let _owned = false;
 /** Start the periodic safety refresh + do an initial startup refresh. */
 function start() {
@@ -204,7 +204,7 @@ function start() {
     owned = require('../../workers/supervisor').claim({
       name: 'fasCoverage', group: 'fas', tick: () => refresh({ reason: 'schedule' }),
       intervalMs: REFRESH_INTERVAL_MS, timeoutMs: 60 * 1000, maxFailures: 3, cooldownMs: 60 * 60 * 1000,
-      dependsOn: [], idempotent: true, label: 'FAS coverage refresh',
+      backoff: false, dependsOn: [], idempotent: true, label: 'FAS coverage refresh',
     });
   } catch (_) { owned = false; }
   if (owned) { _owned = true; return; }

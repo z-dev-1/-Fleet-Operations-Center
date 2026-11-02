@@ -844,12 +844,17 @@ function startAutoScan() {
   // the same cadence and the legacy setInterval is NOT armed. Flag off
   // (default): the legacy setInterval below runs unchanged. _autoTick, the
   // comms-mode guard and the 'owa.triageAutoScan' track are untouched.
-  // Backoff is inert for this worker (maxFailures 3 → ≤ 138 s < 15 min floor).
+  // backoff:false keeps the cadence after a failure (backoff is inert).
+  // Under the supervisor, dependsOn ['offline'] skips _autoTick BEFORE it runs
+  // while offline (legacy still runs it and records the reader failure), so
+  // 'owa.triageAutoScan' track counts and _autoStatus diverge from flag-off on
+  // offline hosts; read status skipReasons.dependency.offline instead.
   let owned = false;
   try {
     owned = require('../workers/supervisor').claim({
       name: 'emailTriage', group: 'comms', tick: _autoTick,
       intervalMs: minutes * 60 * 1000, timeoutMs: 30 * 60 * 1000, maxFailures: 3, cooldownMs: 60 * 60 * 1000,
+      backoff: false,
       dependsOn: ['offline'], idempotent: true, isSkip: (r) => !!(r && r.skipped),
       label: 'Email triage auto-scan',
     });

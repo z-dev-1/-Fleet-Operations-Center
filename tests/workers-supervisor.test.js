@@ -635,7 +635,7 @@ describe('graceful shutdown', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('cancelled quit: healthy workers resume on a fresh grid, owner-stopped stays stopped, isolated keeps its remaining cool-down', async () => {
+  it('cancelled quit: healthy workers resume on their original grid, owner-stopped stays stopped, isolated keeps its remaining cool-down', async () => {
     initSup();
     sup.register(spec({ name: 'alpha' }));
     sup.register(spec({ name: 'beta' }));
@@ -645,8 +645,7 @@ describe('graceful shutdown', () => {
     sup.stop('beta');
     sup.onBeforeQuit();
     await adv(15000);
-    const resumeAt = Date.now();
-    expect(st('alpha')).toMatchObject({ state: 'healthy', nextRunAt: resumeAt + MIN });
+    expect(st('alpha')).toMatchObject({ state: 'healthy', nextRunAt: T0 + 2 * MIN });
     expect(st('beta')).toMatchObject({ state: 'disabled', disabledReason: 'stopped', nextRunAt: null });
     expect(st('gamma')).toMatchObject({ state: 'isolated', nextRunAt: gUntil, isolatedUntil: gUntil });
     expect(logger.calls.some((c) => /quit was cancelled — resumed 2 workers/.test(c.msg))).toBe(true);
@@ -698,10 +697,10 @@ describe('claim', () => {
 describe('backoff (FIX 5)', () => {
   // design §9 tuples: { intervalMs, maxFailures, backoff }
   const SPECS = [
-    ['repairIntel', 1200000, 3, true],
-    ['emailTriage', 900000, 3, true],
-    ['fasCoverage', 21600000, 3, true],
-    ['apiFleetRefresh', 300000, 3, true],
+    ['repairIntel', 1200000, 3, false],
+    ['emailTriage', 900000, 3, false],
+    ['fasCoverage', 21600000, 3, false],
+    ['apiFleetRefresh', 300000, 3, false],
     ['carrierBriefing', 60000, 10, false],
     ['longDwell', 30000, 10, false],
     ['dailyTasks', 60000, 5, false],
@@ -720,6 +719,22 @@ describe('backoff (FIX 5)', () => {
         expect(s.nextRunAt - Date.now(), `${name} n=${n}`).toBe(intervalMs); // == gridNext(t)
         await adv(intervalMs);
       }
+    }
+  });
+
+  it('backoff:false: a tick that fails LATE (10 s before its next slot) keeps the next run on-grid', async () => {
+    const lateFail = () => new Promise((_, rej) => setTimeout(() => rej(new Error('late')), 5 * MIN - 10000));
+    for (const backoff of [false, true]) {
+      sup._resetForTests();
+      vi.setSystemTime(T0);
+      initSup({ random: () => 0.999, supervised: { apiFleetRefresh: true } });
+      sup.register({ name: 'apiFleetRefresh', group: 'g', intervalMs: 5 * MIN, timeoutMs: 15 * MIN, maxFailures: 3, backoff, idempotent: true, tick: vi.fn(lateFail) });
+      await adv(5 * MIN);              // tick starts at T0+5 min
+      await adv(5 * MIN - 10000);      // fails at T0+9 min 50 s
+      const s = sup.getStatus().workers[0];
+      expect(s.consecutiveFailures).toBe(1);
+      if (backoff) expect(s.nextRunAt).toBeGreaterThan(T0 + 10 * MIN); // the off-grid push backoff:false avoids
+      else expect(s.nextRunAt).toBe(T0 + 10 * MIN);
     }
   });
 });

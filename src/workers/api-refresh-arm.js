@@ -7,9 +7,9 @@
 // (workers.supervised.apiFleetRefresh, default OFF): the same two log lines
 // and the same setInterval(() => { load(); }, intervalMs) as before (not
 // unref'd). Flag on: the supervisor runs load() on the same 5 min grid.
-// Backoff is inert for this worker (maxFailures 3 → at most 138 s, below the
-// 5 min interval); the coalesce guard, live-pull gate and auth handling stay
-// inside _loadFleetViaApiStartupImpl.
+// backoff:false keeps the 5 min grid even when load() fails late in its
+// interval (backoff is inert for this worker); the coalesce guard, live-pull
+// gate and auth handling stay inside _loadFleetViaApiStartupImpl.
 function armApiRefresh({ alreadyArmed, claim, setIntervalFn, load, intervalMs, logger }) {
   if (alreadyArmed) {
     logger.info('[data-source] API refresh already scheduled \u2014 not double-scheduling');
@@ -20,7 +20,7 @@ function armApiRefresh({ alreadyArmed, claim, setIntervalFn, load, intervalMs, l
     owned = claim({
       name: 'apiFleetRefresh', group: 'fleet', label: 'Fleet API refresh',
       tick: () => load(), intervalMs, timeoutMs: 15 * 60 * 1000,
-      maxFailures: 3, cooldownMs: 30 * 60 * 1000,
+      maxFailures: 3, cooldownMs: 30 * 60 * 1000, backoff: false,
       dependsOn: [],   // live-pull gate + auth handling stay inside _loadFleetViaApiStartupImpl
       idempotent: true,
     }) === true;

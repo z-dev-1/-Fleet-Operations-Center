@@ -133,14 +133,14 @@ function start() {
   // Under the supervisor, dependency skips (cluster.production / offline / auth)
   // happen BEFORE the tick, so track('repairIntel.cycle') is not recorded on
   // standby/offline/auth-down hosts; read status skipReasons.dependency instead.
-  // Backoff is inert for this worker (maxFailures 3 → ≤ 138 s < 20 min interval).
+  // backoff:false keeps the 20 min grid after a failure (backoff is inert).
   let owned = false;
   try {
     owned = require('../workers/supervisor').claim({
       name: 'repairIntel', group: 'repair-intel',
       tick: () => require('../telemetry').track('repairIntel.cycle', _cycle),
       intervalMs: CYCLE_MS, initialDelayMs: FIRST_DELAY_MS, timeoutMs: 15 * 60 * 1000,
-      maxFailures: 3, cooldownMs: 30 * 60 * 1000,
+      maxFailures: 3, cooldownMs: 30 * 60 * 1000, backoff: false,
       dependsOn: ['cluster.production', 'offline', 'auth'], idempotent: true,
       label: 'Repair-intel background refresh',
     });
