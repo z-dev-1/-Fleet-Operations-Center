@@ -170,8 +170,17 @@ function _throughput(metricsLimit) {
   const lats = recs.map((r) => r.latencyMs).filter((n) => typeof n === 'number').sort((a, b) => a - b);
   const p95 = lats.length ? lats[Math.min(lats.length - 1, Math.floor(lats.length * 0.95))] : null;
   // Active requests / queue depth from the relay concurrency surface.
-  const q = _queueFromRelay(_safe(() => require('../orcha/relay'), null));
-  return { p95LatencyMs: p95, activeRequests: q.activeRequests, queueDepth: q.queueDepth, maxConcurrent: q.maxConcurrent };
+  const relay = _safe(() => require('../orcha/relay'), null);
+  const q = _queueFromRelay(relay);
+  // Phase 3 gateway fields (additive; null when the relay surface lacks them).
+  const qs = _safe(() => (relay && typeof relay.queueStats === 'function' ? relay.queueStats() : null), null) || {};
+  return {
+    p95LatencyMs: p95, activeRequests: q.activeRequests, queueDepth: q.queueDepth, maxConcurrent: q.maxConcurrent,
+    byPriority: qs.byPriority || null,
+    reserve: typeof qs.reserve === 'number' ? qs.reserve : null,
+    oldestWaitMs: typeof qs.oldestWaitMs === 'number' ? qs.oldestWaitMs : null,
+    gatewayFlags: qs.flags || null,
+  };
 }
 
 // relay.queueStats() → { active, waiting, max } is the real concurrency
@@ -238,6 +247,7 @@ function snapshot(opts) {
     throughput,
     rates,
     metrics,
+    gateway: _safe(() => require('./trace').gatewaySummary(), null),
     // A flat, display-ready component table (spec §25).
     board: {
       'AI Core': components.aiCore,
@@ -252,6 +262,7 @@ function snapshot(opts) {
       'Cluster Role': cluster.role,
       'Production Ready': cluster.productionActionsAllowed ? 'Yes' : 'No',
       'Queue': throughput.queueDepth != null ? throughput.queueDepth : '-',
+      'Queue by priority': _fmtByPriority(throughput.byPriority),
       'P95 latency': throughput.p95LatencyMs != null ? (throughput.p95LatencyMs + 'ms') : '-',
       'Tool success': rates.toolSuccess != null ? Math.round(rates.toolSuccess * 100) + '%' : '-',
       'Schema success': rates.schemaSuccess != null ? Math.round(rates.schemaSuccess * 100) + '%' : '-',
@@ -260,6 +271,13 @@ function snapshot(opts) {
     },
     overall: { status: overallStatus, reasons },
   };
+}
+
+// 'C<n> H<n> N<n> L<n>' waiting counts per priority, or '-'.
+function _fmtByPriority(bp) {
+  if (!bp || typeof bp !== 'object') return '-';
+  const w = (k) => (bp[k] && typeof bp[k].waiting === 'number') ? bp[k].waiting : 0;
+  return 'C' + w('critical') + ' H' + w('high') + ' N' + w('normal') + ' L' + w('low');
 }
 
 module.exports = { snapshot, _queueFromRelay };

@@ -334,7 +334,25 @@ function snapshot(opts = {}) {
     recent: _recent.last(recentN),
     lastRollupAt: _lastRollupAt,
     dropped: _recent.dropped(),
+    ai: _aiSection(),
   };
+}
+
+// AI gateway section (Phase 3): per-priority queue depth + gateway latency
+// summary. Never loads relay (and so fleet-brain) as a side effect: only read
+// when relay is already in the require cache. Never throws.
+function _aiSection() {
+  try {
+    if (typeof _deps.aiStats === 'function') return _deps.aiStats();
+    const relayPath = require.resolve('../orcha/relay');
+    if (!require.cache[relayPath]) return null;
+    const relay = require.cache[relayPath].exports;
+    const trace = require('../ai/trace');
+    return {
+      queue: typeof relay.queueStats === 'function' ? relay.queueStats() : null,
+      gateway: typeof trace.gatewaySummary === 'function' ? trace.gatewaySummary() : null,
+    };
+  } catch (_) { return null; }
 }
 
 // ── Test hooks ─────────────────────────────────────────────────────────────
