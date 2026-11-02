@@ -130,6 +130,11 @@ function _slackRawRequest(method, params) {
 
 const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// Test seam (Phase 4b): the raw transport the lane calls. Production always uses
+// _slackRawRequest; only tests swap it (fake transport, no network).
+let _rawRequest = _slackRawRequest;
+function _setRawRequestForTests(fn) { _rawRequest = typeof fn === 'function' ? fn : _slackRawRequest; }
+
 /**
  * Call Slack Web API — serialized + rate-limit aware.
  * Uses full cookie header (all cookies) + xoxc token in body.
@@ -144,7 +149,7 @@ function slackWebApi(method, params = {}) {
       if (wait > 0) await _sleep(wait);
       _slackLastAt = Date.now();
 
-      const res = await _slackRawRequest(method, params);
+      const res = await _rawRequest(method, params);
       if (!res || !res.__rateLimited) return res; // normal result
 
       if (attempt === _SLACK_MAX_RETRIES) {
@@ -968,4 +973,12 @@ async function uploadFileToChannel(channelId, opts) {
 // Zero-width characters: invisible in the Slack client, stable across fetches.
 const SELF_REPLY_MARKER = '\u200B\u2060'; // ZWSP + WORD JOINER
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, fetchUserProfile, downloadFileContent, downloadFileBuffer, uploadFileToChannel, SELF_REPLY_MARKER };
+// Test-only: reset lane state (the name caches are deliberately NOT reset --
+// resetting them would change today's call list).
+function _resetForTests() {
+  _slackChain = Promise.resolve();
+  _slackLastAt = 0;
+  _myUserId = null;
+}
+
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, fetchUserProfile, downloadFileContent, downloadFileBuffer, uploadFileToChannel, SELF_REPLY_MARKER, _setRawRequestForTests, _resetForTests };
