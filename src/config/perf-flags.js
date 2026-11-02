@@ -23,6 +23,15 @@
  *   settings.comms.channelWatchClaims  default OFF (only `true` enables) /
  *                                      FLEET_COMMS_CHANNEL_CLAIMS '0' | '1'
  *
+ * Phase 5 worker supervisor (default OFF; see resolveWorkerFlags below):
+ *
+ *   settings.workers.supervisor.enabled   default OFF (only `true` enables) /
+ *                                         FLEET_WORKERS '0' | '1'
+ *   settings.workers.<name>.supervised    default OFF (only `true` enables) /
+ *                                         FLEET_WORKER_<UPPER_SNAKE> '0' | '1'
+ *   (<name> in WORKER_NAMES; a per-worker `true` with the supervisor off
+ *   means the legacy timer keeps ownership.)
+ *
  * Read at point of use (startup / once per run), never per tick.
  */
 
@@ -149,7 +158,55 @@ function loadComms(deps = {}) {
   return resolveCommsFlags(settings, env);
 }
 
+// ── Phase 5: worker supervisor flags (all default OFF) ──────────────────────
+//   settings.workers.supervisor.enabled  boolean (=== true) / FLEET_WORKERS              '0'|'1'
+//   settings.workers.<name>.supervised   boolean (=== true) / FLEET_WORKER_<UPPER_SNAKE> '0'|'1'
+// Read once by src/workers/supervisor.js init() and memoized (restart to
+// change). No new store key: 'settings' is already in the store REGISTRY.
+const WORKER_NAMES = [
+  'repairIntel', 'emailTriage', 'carrierBriefing', 'longDwell',
+  'dailyTasks', 'fasCoverage', 'apiFleetRefresh',
+];
+
+const WORKER_ENV = {
+  repairIntel: 'FLEET_WORKER_REPAIR_INTEL',
+  emailTriage: 'FLEET_WORKER_EMAIL_TRIAGE',
+  carrierBriefing: 'FLEET_WORKER_CARRIER_BRIEFING',
+  longDwell: 'FLEET_WORKER_LONG_DWELL',
+  dailyTasks: 'FLEET_WORKER_DAILY_TASKS',
+  fasCoverage: 'FLEET_WORKER_FAS_COVERAGE',
+  apiFleetRefresh: 'FLEET_WORKER_API_FLEET_REFRESH',
+};
+
+function resolveWorkerFlags(settings, env) {
+  const w = _obj(_obj(settings).workers);
+  const flags = {
+    supervisorEnabled: _obj(w.supervisor).enabled === true,
+    supervised: {},
+  };
+  const eSup = _envBool(env, 'FLEET_WORKERS');
+  if (eSup !== null) flags.supervisorEnabled = eSup;
+  for (const name of WORKER_NAMES) {
+    let on = _obj(w[name]).supervised === true;
+    const e = _envBool(env, WORKER_ENV[name]);
+    if (e !== null) on = e;
+    flags.supervised[name] = on;
+  }
+  return flags;
+}
+
+function loadWorkers(deps = {}) {
+  const env = deps.env || process.env;
+  let settings = {};
+  try {
+    const loadFn = deps.load || require('../store').load;
+    settings = loadFn('settings', {}) || {};
+  } catch (_) { settings = {}; }
+  return resolveWorkerFlags(settings, env);
+}
+
 module.exports = {
   resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT,
   resolveCommsFlags, loadComms, COMMS_POLLING_MODES,
+  resolveWorkerFlags, loadWorkers, WORKER_NAMES, WORKER_ENV,
 };
