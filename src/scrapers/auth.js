@@ -10,6 +10,7 @@ const { spawn } = require('child_process');
 const fs  = require('fs');
 const { P } = require('../config/paths');
 const logger = require('../utils/logger').createLogger('auth');
+const { createSingleFlight } = require('../auth/single-flight');
 
 const COOKIE_FILE       = P.midwayCookie;
 const AAP_PROBE_URL     = 'https://aap-na.corp.amazon.com/v2/page/bafc8b2a-3be6-4a52-a86f-7cb2de7b5400';
@@ -24,6 +25,45 @@ const MWINIT_TIMEOUT_MS = 3 * 60 * 1000;
 function _isOfflineNow() {
   try { return !!require('../orcha/offline').isOffline(); }
   catch (_) { return false; }
+}
+
+// ── Phase 9 auth coordination (flags default OFF; see config/perf-flags.js) ───
+// auth.singleFlight          → probeSession / refreshAeaSilently share one in-flight attempt
+// auth.singleOwner.reconnect → startOnlineReauthWatch routes through supervisor.onReconnect()
+// (auth.singleOwner.aea lives in the app.js heartbeat via src/auth/heartbeat-aea.js.)
+// With every flag off the wrappers call the unchanged implementations directly.
+const _coordDeps = {};            // test seam: { flags, supervisor, now, setTimer, clearTimer }
+let _coordFlagsMemo = null;
+function _coordFlags() {
+  if (_coordDeps.flags) return _coordDeps.flags;
+  if (!_coordFlagsMemo) {
+    try { _coordFlagsMemo = require('../config/perf-flags').loadAuthCoord(); }
+    catch (_) { _coordFlagsMemo = { singleFlight: false, singleOwnerAea: false, singleOwnerReconnect: false }; }
+  }
+  return _coordFlagsMemo;
+}
+// The ONE auth supervisor (never a second one). `supervisor: null` in
+// _coordDeps means "unavailable" (tests); otherwise lazy-require it.
+function _coordSupervisor() {
+  if (Object.prototype.hasOwnProperty.call(_coordDeps, 'supervisor')) return _coordDeps.supervisor;
+  try { return require('../auth/midway-health-supervisor'); } catch (_) { return null; }
+}
+// Late-binding clock/timers: read _coordDeps at every call so _setCoordDeps
+// reaches the single-flight instances created below at module load.
+const _sfClock = {
+  now: () => (_coordDeps.now || (() => performance.now()))(),
+  setTimer: (fn, ms) => (_coordDeps.setTimer || ((f, m) => setTimeout(f, m)))(fn, ms),
+  clearTimer: (h) => (_coordDeps.clearTimer || ((x) => clearTimeout(x)))(h),
+};
+const _probeSF = createSingleFlight({ name: 'probeSession', staleMs: 60_000, log: logger, ..._sfClock });
+const _refreshSF = createSingleFlight({ name: 'refreshAeaSilently', staleMs: 300_000, log: logger, ..._sfClock });
+// Cookie generation for defaultSession writes made via injectCookies /
+// injectAeaFromPostureToken (bumped by the thin wrappers, before and after the
+// unchanged implementation). A probe started before such a write is never
+// joined by a caller that arrives after it.
+let _cookieGen = 0;
+function _bumpIfDefault(ses) {
+  try { if ((ses || electronSession.defaultSession) === electronSession.defaultSession) _cookieGen++; } catch (_) {}
 }
 
 // Chromium network-layer error codes that mean "could not reach the network"
@@ -213,7 +253,7 @@ function checkMwinit() {
 // refresh "succeed" yet leave AEA expired. So the post-handshake re-inject uses
 // skipAea:true to preserve the freshly-minted live AEA while still refreshing the
 // long-lived session cookies.
-async function injectCookies(targetSession, opts) {
+async function _injectCookiesImpl(targetSession, opts) {
   const ses             = targetSession || electronSession.defaultSession;
   const skipAea         = !!(opts && opts.skipAea);
   const { cookies }     = parseMidwayCookies();
@@ -250,6 +290,14 @@ async function injectCookies(targetSession, opts) {
   logger.info('[AuthManager] Injected:', injected, ' Skipped:', failed +
     (skipAea ? ' (AEA preserved: ' + skippedAea + ' live-token not overwritten)' : ''));
   return injected;
+}
+// Phase 9 thin wrapper (rename-and-wrap): the body above is byte-for-byte the
+// pre-Phase-9 injectCookies (checked by tests/auth-coord-impl-bodies.test.js).
+// The wrapper only bumps the defaultSession cookie generation before and after.
+async function injectCookies(targetSession, opts) {
+  _bumpIfDefault(targetSession);
+  try { return await _injectCookiesImpl(targetSession, opts); }
+  finally { _bumpIfDefault(targetSession); }
 }
 
 // ── Direct AEA injection from the ACME posture token ─────────────────────────
@@ -304,7 +352,7 @@ function postureTokenExpiryMin() {
   } catch (_) { return null; }
 }
 
-async function injectAeaFromPostureToken(targetSession) {
+async function _injectAeaFromPostureTokenImpl(targetSession) {
   const ses = targetSession || electronSession.defaultSession;
   let token;
   try {
@@ -346,6 +394,13 @@ async function injectAeaFromPostureToken(targetSession) {
   const aeaMin = exp ? Math.round((exp - now) / 60) : null;
   logger.info('[AuthManager] AEA injected from posture token on ' + set + '/' + AEA_COOKIE_DOMAINS.length + ' domains (aea ' + (aeaMin == null ? 'n/a' : aeaMin + 'min') + ') — bypassing broken browser extension');
   return { ok: set > 0, aeaMin, tokenExp: exp, domains: set };
+}
+// Phase 9 thin wrapper (rename-and-wrap): body above is byte-for-byte the
+// pre-Phase-9 injectAeaFromPostureToken; only the generation bump is added.
+async function injectAeaFromPostureToken(targetSession) {
+  _bumpIfDefault(targetSession);
+  try { return await _injectAeaFromPostureTokenImpl(targetSession); }
+  finally { _bumpIfDefault(targetSession); }
 }
 
 // -- Spawn a visible terminal and run mwinit ---------------------------------
@@ -589,7 +644,7 @@ function refreshAeaViaMwinit() {
 }
 
 // ── Probe AAP session by URL (no DOM — too fragile) ──────────────────────────
-async function probeSession() {
+async function _probeSessionImpl() {
   return new Promise((resolve) => {
     const probe = new BrowserWindow({
       show: false,
@@ -700,6 +755,18 @@ async function probeSession() {
 
     probe.loadURL(AAP_PROBE_URL);
   });
+}
+// Phase 9 wrapper. Flag off → the unchanged implementation, no args (parity).
+// Flag on (auth.singleFlight) → at most one probe window in flight; callers
+// with the same cookie generation share its result; `fresh` or a newer
+// generation waits for the in-flight probe and then starts (or joins) a newer one.
+async function probeSession(opts) {
+  if (!_coordFlags().singleFlight) return _impl.probeSession();          // parity path
+  const fresh = !!(opts && opts.fresh === true);
+  const joining = _probeSF.inFlight();
+  const p = _probeSF.run(() => _impl.probeSession(), { fresh, gen: () => _cookieGen });
+  if (joining) logger.info('[AuthManager] probeSession: in-flight probe exists — ' + (fresh ? 'waiting for a fresh probe' : 'joining or waiting (no second window)'));
+  return p;
 }
 
 // ── Relay probe — hits /v2/service/ which bypasses CloudFront cache ───────────
@@ -916,7 +983,7 @@ async function aeaSessionExpiryMin() {
 // consistent failure across all attempts escalates.
 const AEA_SILENT_RETRIES = 3;
 
-async function refreshAeaSilently() {
+async function _refreshAeaSilentlyImpl() {
   const before = await aeaSessionExpiryMin();
 
   // RUNG 0 (NEW 2026-10-19) — inject AEA DIRECTLY from the ACME posture token.
@@ -996,6 +1063,18 @@ async function refreshAeaSilently() {
     ' why="' + (lastErr || 'unknown') + '" — session likely expired, real mwinit may be needed');
   return { ok: false, refreshed: false, aeaMin: after, why: lastErr };
 }
+// Phase 9 wrapper. Flag off → the unchanged implementation, no args (parity).
+// Flag on (auth.singleFlight) → one silent refresh at a time; joiners get a
+// copy of the owner's result marked coalesced:true. `fresh` (recoverAuth's
+// post-agent-restart retry) never reuses a result from before the call.
+async function refreshAeaSilently(opts) {
+  if (!_coordFlags().singleFlight) return _impl.refreshAeaSilently();    // parity path
+  const fresh = !!(opts && opts.fresh === true);
+  let owner = false;
+  const r = await _refreshSF.run(() => { owner = true; return _impl.refreshAeaSilently(); }, { fresh });
+  if (!owner) logger.info('[AuthManager] refreshAeaSilently: joined in-flight silent refresh (no duplicate probe/inject)');
+  return owner ? r : Object.assign({}, r, { coalesced: true });
+}
 
 // ── Reconnect watcher (re-probe the SAME session when internet returns) ───────
 // Subscribes to the offline module's online/offline transitions. When the
@@ -1013,6 +1092,8 @@ function startOnlineReauthWatch() {
   let offline;
   try { offline = require('../orcha/offline'); } catch (_) { return () => {}; }
   if (_reauthUnsub) { try { _reauthUnsub(); } catch (_) {} _reauthUnsub = null; }
+  // Phase 9 (auth.singleOwner.reconnect): read once at subscription (app start).
+  const viaSupervisor = !!_coordFlags().singleOwnerReconnect;
   _reauthUnsub = offline.onChange(async (status) => {
     if (status !== 'online') return;
     if (_reauthInFlight) return;
@@ -1021,6 +1102,25 @@ function startOnlineReauthWatch() {
       // Settle briefly so DNS/routing is actually ready before we probe.
       await new Promise((r) => setTimeout(r, 2500));
       if (_isOfflineNow()) return; // flapped back offline — bail, wait for next 'online'
+      if (viaSupervisor) {
+        // Single reconnect owner: the auth supervisor (no prompt; verifies the
+        // real target and arms its own bounded retry). Scrape mode note: the
+        // supervisor's health monitor also calls onReconnect() 2.5 s after the
+        // same edge. Overlapping calls coalesce on the supervisor lock. If they
+        // do NOT overlap, the second onReconnect() clears the armed retry
+        // (_failStreak = 0; _clearRetry()) and runs a new pass — one API smoke
+        // call when healthy, or a second full no-prompt ladder when the first
+        // pass ended unhealthy (scrape mode only; never a prompt either way).
+        const sup = _coordSupervisor();
+        if (sup && typeof sup.onReconnect === 'function') {
+          logger.info('[AuthManager] Back online — routing re-verify to auth supervisor (single owner, no prompt)');
+          const r = await sup.onReconnect();
+          logger.info('[AuthManager] Reconnect via supervisor: state=' + (r && r.state) + ' verified=' + !!(r && r.verified) +
+            (r && r.nextRetryAt ? ' nextRetry=' + r.nextRetryAt : '') + (r && r.coalesced ? ' (coalesced)' : ''));
+          return;
+        }
+        logger.warn('[AuthManager] auth.singleOwner.reconnect is on but the supervisor is unavailable — legacy reconnect path for this event');
+      }
       logger.info('[AuthManager] Back online — re-verifying existing Midway session (no prompt unless rejected)');
       const res = await refreshAeaSilently();
       if (res && res.ok) {
@@ -1032,14 +1132,14 @@ function startOnlineReauthWatch() {
       // bare prompt. recoverAuth is defined below in this module.
       if (_isOfflineNow()) return; // dropped again mid-check; don't prompt
       logger.warn('[AuthManager] Reconnect re-verify failed while online — escalating via recovery ladder');
-      try { await recoverAuth('reconnect:reverify-failed'); } catch (e) { logger.warn('[AuthManager] Reconnect recovery failed: ' + e.message); }
+      try { await _impl.recoverAuth('reconnect:reverify-failed'); } catch (e) { logger.warn('[AuthManager] Reconnect recovery failed: ' + e.message); }
     } catch (e) {
       logger.warn('[AuthManager] Reconnect re-verify error: ' + e.message);
     } finally {
       _reauthInFlight = false;
     }
   });
-  logger.info('[AuthManager] Online-reconnect re-auth watch started');
+  logger.info('[AuthManager] Online-reconnect re-auth watch started' + (viaSupervisor ? ' (routed via supervisor.onReconnect)' : ''));
   return _reauthUnsub;
 }
 
@@ -1270,7 +1370,7 @@ async function recoverAuth(reason, opts) {
     if (vpn && !vpn.connected && vpn.status !== 'not-installed') {
       logger.info('[AuthManager] recoverAuth rung=vpn — tunnel ' + vpn.status + '; reconnecting then re-probing (no prompt)');
       try { await ensureVpn(logger.info); } catch (_) {}
-      if (await probeSession()) {
+      if (await probeSession({ fresh: true })) {
         logger.info('[AuthManager] recoverAuth recovered at rung=vpn — session OK once tunnel was up');
         return { recovered: true, rung: 'vpn', prompted: false, reason: label };
       }
@@ -1327,7 +1427,7 @@ async function recoverAuth(reason, opts) {
     const attemptedRestart = verifiedRestart || (Date.now() - _lastAeaAgentRestartAttemptAt < 30000);
     if (attemptedRestart) {
       logger.info('[AuthManager] recoverAuth rung=aea-agent — agent restart ' + (verifiedRestart ? 'VERIFIED' : 'attempted (unverified)') + '; retrying silent AEA refresh');
-      const r2 = await refreshAeaSilently();
+      const r2 = await refreshAeaSilently({ fresh: true });
       if (r2 && r2.ok) {
         logger.info('[AuthManager] recoverAuth recovered at rung=aea-agent — posture agent self-healed, AEA re-minted, no prompt');
         return { recovered: true, rung: 'aea-agent', prompted: false, reason: label };
@@ -1372,6 +1472,24 @@ async function recoverAuth(reason, opts) {
   }
 }
 
+// ── Phase 9 test seams (leading underscore, like the supervisor's _setDeps) ───
+// _impl is what the wrappers / reconnect watcher call; tests may replace members.
+const _IMPL_DEFAULTS = { probeSession: _probeSessionImpl, refreshAeaSilently: _refreshAeaSilentlyImpl, recoverAuth };
+const _impl = Object.assign({}, _IMPL_DEFAULTS);
+function _setCoordDeps(d) { if (d && typeof d === 'object') Object.assign(_coordDeps, d); }
+function _setTestImpl(partial) { if (partial && typeof partial === 'object') Object.assign(_impl, partial); }
+function _resetCoord() {
+  for (const k of Object.keys(_coordDeps)) delete _coordDeps[k];
+  _coordFlagsMemo = null;
+  Object.assign(_impl, _IMPL_DEFAULTS);
+  _probeSF._reset();
+  _refreshSF._reset();
+  _cookieGen = 0;
+  if (_reauthUnsub) { try { _reauthUnsub(); } catch (_) {} _reauthUnsub = null; }
+  _reauthInFlight = false;
+}
+function _coordStats() { return { probe: _probeSF.stats(), refresh: _refreshSF.stats(), cookieGen: _cookieGen }; }
+
 module.exports = {
   checkMwinit,
   parseMidwayCookies, // Stage 10: browser_provider seeds a headless Playwright context from the same parsed cookies
@@ -1392,4 +1510,5 @@ module.exports = {
   postureTokenExpiryMin,     // FIX (2026-10-19): read the ACME posture token's remaining life (the AEA cookie's true TTL)
   ACME_POSTURE_TOKEN,        // path to the ACME posture token file (for the keep-alive watcher)
   COOKIE_FILE,
+  _setCoordDeps, _setTestImpl, _resetCoord, _coordStats, // Phase 9 test seams
 };

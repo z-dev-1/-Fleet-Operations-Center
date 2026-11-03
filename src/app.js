@@ -318,6 +318,13 @@ app.whenReady().then(async () => {
   // now?" decision is delegated so it is VERIFIED against the real AAP target
   // and arms bounded auto-retry instead of a one-shot recoverAuth.
   const _authSupervisor = (() => { try { return require('./auth/midway-health-supervisor'); } catch (_) { return null; } })();
+  // Phase 9 (auth.singleOwner.aea, default OFF): with the flag on and the AEA
+  // keep-alive service running, the keep-alive is the ONE AEA owner and this
+  // heartbeat only logs [AEA-DIAG] + hands recovery to the supervisor (no prompt).
+  // Flag off (or keep-alive not running) → the legacy AEA block below, unchanged.
+  const _hbAea = (() => { try { return require('./auth/heartbeat-aea'); } catch (_) { return null; } })();
+  const _keepaliveSvc = (() => { try { return require('./auth/aea-keepalive-service'); } catch (_) { return null; } })();
+  const _authCoordFlags = (() => { try { return require('./config/perf-flags').loadAuthCoord(); } catch (_) { return { singleFlight: false, singleOwnerAea: false, singleOwnerReconnect: false }; } })();
   let _midwayRefreshTimer = null;
   let _midwayRenewalInFlight = false; // FIX (2026-07-21): see note below
   function _midwayAutoRefresh() {
@@ -399,7 +406,11 @@ app.whenReady().then(async () => {
         // expiry (and thus re-injection can't save it) do we escalate to a full
         // mwinit ahead of the bounce, so the WebAuthn tap happens proactively
         // instead of mid-task after AAP has already kicked us out.
-        if (state.ok) {
+        const _aeaOwner = (state.ok && _hbAea) ? _hbAea.ownerFor({ singleOwnerAea: _authCoordFlags.singleOwnerAea, keepalive: _keepaliveSvc, log }).owner : 'legacy';
+        if (state.ok && _aeaOwner === 'keepalive') {
+          try { await _hbAea.runKeepaliveOwned({ state, auth: _authModule, keepalive: _keepaliveSvc, supervisor: _authSupervisor, log }); }
+          catch (e) { log.warn('[midway] heartbeat keep-alive-owned AEA step failed: ' + e.message); }
+        } else if (state.ok) {
           // FIX (hourly re-auth prompt): the block here used to spawn mwinit
           // ~10min before the short-lived (~1h) AEA token expired. But mwinit is
           // NOT silent — it opens a terminal and requires a WebAuthn/security-key

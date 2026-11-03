@@ -38,6 +38,12 @@
  *     laneConcurrency, laneTierPacing} / FLEET_SLACK_*
  *   (S3 threadReplyReuse is deferred to its own round and is not a flag here.)
  *
+ * Phase 9 auth coordination (all default OFF; see resolveAuthCoordFlags):
+ *
+ *   settings.auth.singleFlight          / FLEET_AUTH_SINGLE_FLIGHT          '0' | '1'
+ *   settings.auth.singleOwner.aea       / FLEET_AUTH_SINGLE_OWNER_AEA       '0' | '1'
+ *   settings.auth.singleOwner.reconnect / FLEET_AUTH_SINGLE_OWNER_RECONNECT '0' | '1'
+ *
  * Read at point of use (startup / once per run), never per tick.
  */
 
@@ -274,9 +280,52 @@ function loadSlackSpeedup(deps = {}) {
   }
 }
 
+// ── Phase 9: auth coordination flags (all default OFF) ──────────────────────
+//   settings.auth.singleFlight          boolean (=== true) / FLEET_AUTH_SINGLE_FLIGHT          '0'|'1'
+//   settings.auth.singleOwner.aea       boolean (=== true) / FLEET_AUTH_SINGLE_OWNER_AEA       '0'|'1'
+//   settings.auth.singleOwner.reconnect boolean (=== true) / FLEET_AUTH_SINGLE_OWNER_RECONNECT '0'|'1'
+// Read once per process: auth.js memoizes on first use, app.js at heartbeat setup,
+// startOnlineReauthWatch at subscribe time. Restart to change. No new store key:
+// 'settings' is already in the store REGISTRY; settings.auth is unused today.
+const AUTH_COORD_ENV = {
+  singleFlight: 'FLEET_AUTH_SINGLE_FLIGHT',
+  singleOwnerAea: 'FLEET_AUTH_SINGLE_OWNER_AEA',
+  singleOwnerReconnect: 'FLEET_AUTH_SINGLE_OWNER_RECONNECT',
+};
+
+function resolveAuthCoordFlags(settings, env) {
+  const a = _obj(_obj(settings).auth);
+  const so = _obj(a.singleOwner);
+  const flags = {
+    singleFlight: a.singleFlight === true,
+    singleOwnerAea: so.aea === true,
+    singleOwnerReconnect: so.reconnect === true,
+  };
+  for (const k of Object.keys(AUTH_COORD_ENV)) {
+    const e = _envBool(env, AUTH_COORD_ENV[k]);
+    if (e !== null) flags[k] = e;
+  }
+  return flags;
+}
+
+function loadAuthCoord(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveAuthCoordFlags(settings, env);
+  } catch (_) {
+    return resolveAuthCoordFlags({}, {});
+  }
+}
+
 module.exports = {
   resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT,
   resolveCommsFlags, loadComms, COMMS_POLLING_MODES,
   resolveWorkerFlags, loadWorkers, WORKER_NAMES, WORKER_ENV,
   resolveSlackSpeedupFlags, loadSlackSpeedup, SPEEDUP_MODES, LANE_CONCURRENCY_MAX,
+  resolveAuthCoordFlags, loadAuthCoord, AUTH_COORD_ENV,
 };
