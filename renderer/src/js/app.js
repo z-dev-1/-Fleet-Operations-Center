@@ -21,6 +21,7 @@ import { init as initMorningBriefing }   from './components/morning-briefing.js'
 import { init as initEmailTriage }        from './components/email-triage-overlay.js';
 import { init as initRelayReconcile }     from './components/relay-reconcile-overlay.js';
 import { init as initContactBook }       from './components/contact-book.js';
+import { init as initOpsCenter }         from './views/instance-management.js';
 import { init as initDraftInbox }         from './components/draft-inbox.js';
 import { init as initTimeline }           from './components/workflow-timeline.js';
 import { init as initStatusBar }          from './components/status-bar.js';
@@ -114,6 +115,7 @@ initNexusSidebar();
   initEmailTriage();
   initRelayReconcile();
   initContactBook();
+  initOpsCenter();
   initTimeline();
 initStatusBar(document.getElementById('status-bar-mount'));
   initTheme();

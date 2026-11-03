@@ -1,4 +1,4 @@
-// tests/workers-ipc.test.js — workers:status (src/ipc/workers.js) plus the
+// tests/workers-ipc.test.js — workers:status + workers:re-enable (Phase 6) (src/ipc/workers.js) plus the
 // telemetry latestSample() export and snapshot `workers` section (Phase 5).
 // Same harness as tests/telemetry-ipc.test.js: fake electron.ipcMain in
 // require.cache and an isolated data dir. Fake timers for the supervisor.
@@ -60,8 +60,8 @@ afterEach(() => {
 });
 
 describe('workers IPC', () => {
-  it('registers exactly workers:status', () => {
-    expect(Object.keys(handlers)).toEqual(['workers:status']);
+  it('registers exactly workers:status and workers:re-enable', () => {
+    expect(Object.keys(handlers)).toEqual(['workers:status', 'workers:re-enable']);
   });
 
   it('non-app sender → NOT_APP_UI', async () => {
@@ -145,6 +145,49 @@ describe('workers IPC', () => {
       byState: { healthy: 2, busy: 0, waiting: 0, degraded: 0, isolated: 0, disabled: 0 },
       isolated: [], waiting: [], fails: 0, lastErrorAt: null,
     });
+  });
+
+  it('re-enable from a non-app sender → NOT_APP_UI, supervisor not called', async () => {
+    const spy = vi.spyOn(sup, 'reEnable');
+    try {
+      expect(await handlers['workers:re-enable'](AAP, 'alpha')).toEqual({ ok: false, code: 'NOT_APP_UI' });
+      expect(spy).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
+  });
+
+  it('re-enable with an invalid name → INVALID_NAME, supervisor not called', async () => {
+    const spy = vi.spyOn(sup, 'reEnable');
+    try {
+      for (const bad of ['', 123, null, undefined, {}, '../x', 'A1', 'a', 'a' + 'b'.repeat(40), 'al pha', 'alpha;']) {
+        expect(await handlers['workers:re-enable'](APP, bad)).toEqual({ ok: false, code: 'INVALID_NAME' });
+      }
+      expect(spy).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
+  });
+
+  it('re-enable an isolated worker → reEnabled:true via supervisor.reEnable(name,{runNow:false}) only', async () => {
+    initEnabled();
+    sup.register({ name: 'alpha', group: 'test', intervalMs: 60000, timeoutMs: 10000, idempotent: true, maxFailures: 1, backoff: false, tick: () => { throw new Error('fail'); } });
+    await vi.advanceTimersByTimeAsync(60000);
+    const before = (await handlers['workers:status'](APP)).status.workers[0];
+    expect(before.state).toBe('isolated');
+    const spy = vi.spyOn(sup, 'reEnable');
+    try {
+      expect(await handlers['workers:re-enable'](APP, 'alpha', { runNow: true })).toEqual({ ok: true, reEnabled: true });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith('alpha', { runNow: false });
+    } finally { spy.mockRestore(); }
+    const after = (await handlers['workers:status'](APP)).status.workers[0];
+    expect(after.state).not.toBe('isolated');
+    expect(after.breakerState).toBe('ok');
+  });
+
+  it('re-enable a healthy worker → reEnabled:false, reason not-eligible', async () => {
+    initEnabled();
+    registerTwo();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(await handlers['workers:re-enable'](APP, 'alpha')).toEqual({ ok: true, reEnabled: false, reason: 'not-eligible' });
+    expect(await handlers['workers:re-enable'](APP, 'nosuchWorker')).toEqual({ ok: true, reEnabled: false, reason: 'not-eligible' });
   });
 
   it('latestSample() null before any sample', () => {

@@ -294,8 +294,14 @@ expose('telemetry', {
   snapshot: () => ipcRenderer.invoke('telemetry:snapshot'),
 });
 
-// ── Worker supervisor status (Phase 5, read-only; app-UI sender only) ───────
-expose('workers', { status: () => ipcRenderer.invoke('workers:status') });
+// ── Worker supervisor status (Phase 5) + re-enable (Phase 6); app-UI sender only ─
+expose('workers', {
+  status:   ()     => ipcRenderer.invoke('workers:status'),
+  reEnable: (name) => ipcRenderer.invoke('workers:re-enable', String(name || '')),
+});
+
+// ── Worker Health aggregate (Phase 6, read-only; app-UI sender only) ────────
+expose('health', { snapshot: () => ipcRenderer.invoke('health:snapshot') });
 
 
 

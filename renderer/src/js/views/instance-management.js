@@ -14,7 +14,13 @@
  *
  * When the cluster feature is OFF (legacy single-host), this panel shows a
  * simple "single-instance mode" notice and no controls — nothing to manage.
+ *
+ * Phase 6: init() builds the Fleet Operations Center overlay (toolbar 🩺),
+ * which hosts the Worker Health section (worker-health.js). See the bottom of
+ * this file.
  */
+import bus from '../bus.js';
+import workerHealth from './worker-health.js';
 
 let _el = null;
 let _timer = null;
@@ -206,3 +212,79 @@ export function unmount() {
 }
 
 export default { mount, unmount, refresh };
+
+// ── Fleet Operations Center overlay (Phase 6) ────────────────────────────────
+// Opened from the toolbar 🩺 button (bus 'ui:ops-center-toggle'). Hosts ONLY
+// the Worker Health section in Phase 6; the Instance Management block above
+// (mount/unmount) is intentionally not mounted here (follow-up).
+let _ops = null;
+let _opsOpen = false;
+let _opsReturnFocus = null;
+const _FOCUSABLE = 'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+
+function _opsFocusables(panel) {
+  return Array.prototype.filter.call(panel.querySelectorAll(_FOCUSABLE), (el) => el.offsetParent !== null);
+}
+
+function _opsKeydown(e) {
+  if (!_ops) return;
+  const panel = _ops.querySelector('.ops-panel');
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); _opsClose(); return; }
+  if (e.key !== 'Tab' || !panel) return;
+  const title = panel.querySelector('#ops-title');
+  const items = _opsFocusables(panel);
+  if (!panel.contains(document.activeElement)) { e.preventDefault(); if (title) title.focus(); return; }
+  if (!items.length) { e.preventDefault(); if (title) title.focus(); return; }
+  const first = items[0];
+  const last = items[items.length - 1];
+  const cur = document.activeElement;
+  if (e.shiftKey && (cur === first || cur === title)) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && cur === last) { e.preventDefault(); first.focus(); }
+}
+
+function _opsOpen_() {
+  if (!_ops || _opsOpen) return;
+  _opsOpen = true;
+  _opsReturnFocus = document.getElementById('tb-ops-center') || document.activeElement;
+  _ops.classList.add('open');
+  _ops.removeAttribute('hidden');
+  document.addEventListener('keydown', _opsKeydown, true);
+  workerHealth.mount(_ops.querySelector('#wh-body'));
+  const title = _ops.querySelector('#ops-title');
+  if (title) title.focus();
+}
+
+function _opsClose() {
+  if (!_ops || !_opsOpen) return;
+  _opsOpen = false;
+  workerHealth.unmount();
+  document.removeEventListener('keydown', _opsKeydown, true);
+  _ops.classList.remove('open');
+  _ops.setAttribute('hidden', '');
+  const wb = _ops.querySelector('#wh-body');
+  if (wb) wb.innerHTML = '';
+  const rf = _opsReturnFocus;
+  _opsReturnFocus = null;
+  if (rf && typeof rf.focus === 'function') rf.focus();
+}
+
+export function init() {
+  if (_ops) return;
+  _ops = document.createElement('div');
+  _ops.id = 'ops-center-overlay';
+  _ops.className = 'ops-overlay';
+  _ops.setAttribute('hidden', '');
+  _ops.innerHTML =
+    '<div class="ops-panel" role="dialog" aria-modal="true" aria-labelledby="ops-title">' +
+      '<button type="button" class="ai-config-close" id="ops-close" aria-label="Close Fleet Operations Center">\u2715</button>' +
+      '<h2 id="ops-title" class="ops-title" tabindex="-1">Fleet Operations Center</h2>' +
+      '<section class="sd-section" id="ops-wh" aria-labelledby="ops-wh-title">' +
+        '<div class="sd-section-title" id="ops-wh-title">Worker Health</div>' +
+        '<div id="wh-body"></div>' +
+      '</section>' +
+    '</div>';
+  document.body.appendChild(_ops);
+  _ops.addEventListener('click', (e) => { if (e.target === _ops) _opsClose(); });
+  _ops.querySelector('#ops-close').addEventListener('click', _opsClose);
+  bus.on('ui:ops-center-toggle', () => { if (_opsOpen) _opsClose(); else _opsOpen_(); });
+}

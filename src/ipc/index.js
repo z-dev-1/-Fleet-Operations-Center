@@ -40,6 +40,7 @@ const { registerRepairIntelIPC }   = require('./repair-intel');
 const { registerAssistantIPC }     = require('./assistant');
 const { registerTelemetryIPC }     = require('./telemetry');
 const { registerWorkersIPC }       = require('./workers');
+const { registerHealthIPC }        = require('./health');
 const logger = require('../utils/logger')('ipc');
 
 function registerAllIPC(ctx) {
@@ -76,6 +77,7 @@ function registerAllIPC(ctx) {
   registerAssistantIPC(ctx);
   registerTelemetryIPC(ctx);
   registerWorkersIPC(ctx);
+  registerHealthIPC(ctx);
   // AAP Root Cause Analysis form via the Relay template API (History-tab RCA button).
   try { require('./rca').registerRcaIPC(); } catch (e) { logger.warn('RCA IPC registration failed: ' + e.message); }
   logger.info('All IPC handlers registered');

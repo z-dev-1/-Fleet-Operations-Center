@@ -90,6 +90,7 @@ export function init(container) {
         <div class="tb-icon-btn" id="tb-inbox" title="Incoming Work Requests">📋<span class="tb-notif-badge" id="tb-inbox-badge" style="display:none">0</span></div>
         <div class="tb-icon-btn" id="tb-email-triage" title="Inbox Triage (AI)">📨</div>
         <div class="tb-icon-btn" id="tb-relay-reconcile" title="Relay ↔ Offsite updates (AI)">🔁</div>
+        <button type="button" class="tb-icon-btn" id="tb-ops-center" title="Fleet Operations Center" aria-label="Open Fleet Operations Center (worker health)">🩺</button>
         <div class="tb-icon-btn" id="tb-notif" title="Notifications">
           🔔<span class="tb-notif-badge" id="tb-notif-badge" style="display:none">0</span>
         </div>
@@ -251,6 +252,12 @@ export function init(container) {
   const relayReconcileBtn = document.getElementById('tb-relay-reconcile');
   if (relayReconcileBtn) relayReconcileBtn.addEventListener('click', () => {
     bus.emit('ui:relay-reconcile-toggle');
+  });
+
+  // ── Fleet Operations Center (Worker Health) overlay toggle ─────────────
+  const opsCenterBtn = document.getElementById('tb-ops-center');
+  if (opsCenterBtn) opsCenterBtn.addEventListener('click', () => {
+    bus.emit('ui:ops-center-toggle');
   });
 
   

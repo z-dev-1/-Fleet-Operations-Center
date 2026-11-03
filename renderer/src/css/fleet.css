@@ -8487,6 +8487,69 @@ body {
 }
 .ai-config-close:hover { color: var(--txt); }
 
+/* ── Fleet Operations Center overlay + Worker Health (Phase 6) ────────────── */
+.ops-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9100;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0,0,0,.55);
+}
+.ops-overlay.open { display: flex; }
+.ops-panel {
+  position: relative;
+  width: min(1180px, 96vw);
+  max-height: 90vh;
+  overflow: auto;
+  background: linear-gradient(180deg, rgba(16,20,26,.98) 0%, rgba(13,17,23,.99) 100%);
+  border: 1px solid var(--bdr);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.6);
+  padding: 18px 18px 20px;
+}
+.ops-panel .sd-section { padding: 0; }
+.ops-panel .sd-section-title { color: var(--txt2); }
+.ops-title { margin: 0 0 10px; font-size: 15px; color: var(--txt); outline: none; }
+.wh-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; font-size: 11px; color: var(--txt2); }
+.wh-btn { font-size: 11px; padding: 3px 8px; }
+.wh-msg { color: var(--txt); }
+.wh-note { font-size: 12px; color: var(--txt2); padding: 6px 0; }
+.wh-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.wh-table th, .wh-table td { padding: 4px 6px; border-bottom: 1px solid var(--bdr); text-align: left; vertical-align: top; color: var(--txt); }
+.wh-table thead th { font-size: 9px; text-transform: uppercase; color: var(--txt2); font-family: var(--mono); }
+.wh-table th, .wh-table tr { cursor: default; }
+.wh-table th:hover { color: var(--txt2); }
+.wh-table tr:hover td { background: transparent; }
+.wh-table th.sorted::after { content: none; }
+.wh-cap { text-align: left; font-size: 11px; color: var(--txt2); padding: 2px 0 4px; }
+.wh-actions { white-space: nowrap; }
+.wh-actions .wh-btn + .wh-btn { margin-left: 4px; }
+.wh-mono { font-family: var(--mono); }
+.wh-reason { display: block; font-size: 10px; color: var(--txt2); }
+.wh-err { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.wh-json { max-height: 240px; overflow: auto; font-size: 10px; background: var(--el); padding: 6px; border-radius: 6px; margin: 0; white-space: pre-wrap; word-break: break-word; }
+.wh-st { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 20px; border: 1px solid transparent; white-space: nowrap; }
+.wh-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.wh-st--healthy    { color: var(--grn); background: var(--grnd); }
+.wh-st--busy       { color: var(--acc2); background: var(--adim); }
+.wh-st--waiting    { color: var(--ylw, var(--org)); background: var(--orgd); }
+.wh-st--auth       { color: var(--pur); background: rgba(130,80,223,.1); }
+.wh-st--recovering { color: var(--acc2); background: var(--adim); border-style: dashed; border-color: currentColor; }
+.wh-st--degraded   { color: var(--org); background: var(--orgd); }
+.wh-st--failed     { color: var(--red); background: var(--redd); }
+.wh-st--disabled, .wh-st--unknown { color: var(--txt2); background: var(--el); }
+.wh-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; margin-top: 10px; }
+.wh-card { border: 1px solid var(--bdr); border-radius: 8px; padding: 8px 10px; }
+.wh-card-title { font-family: var(--mono, 'SF Mono', monospace); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--txt2); margin: 0 0 6px; }
+.wh-kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; font-size: 11px; margin: 0; color: var(--txt); }
+.wh-kv dt { color: var(--txt2); }
+.wh-kv dd { margin: 0; min-width: 0; }
+button.tb-icon-btn { background: none; border: 0; font: inherit; font-size: 15px; padding: 0; }
+.wh-btn:focus-visible, .tb-icon-btn:focus-visible, .wh-err:focus-visible, .ops-panel .ai-config-close:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
+
 /* Hide intel panel when empty */
 .ip-panel--hidden { display: none !important; }
 
