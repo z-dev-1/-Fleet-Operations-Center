@@ -2009,6 +2009,8 @@ module.exports = {
   isPollInFlight: () => _pollLock,
   getSpeedupStats,
   _resetSpeedupForTests,
+  // Test-only (Phase 4b): clears the S2 speed-up state (_dmLastFetchedAt) and stats.
+  __test__: { resetSpeedup: _resetSpeedupForTests },
   // Test-only: expose the restored thread-reply baseline so restart-recovery
   // (loading slackDMThreadReplyCount at startup) can be asserted.
   _getThreadReplyCountForTest: () => _threadReplyCount,

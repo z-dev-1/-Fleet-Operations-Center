@@ -39,6 +39,14 @@ describe('skipAgeMs', () => {
       expect(v).toBeLessThan(600000);
     }
   });
+  it('forced refresh ≈ 1 in 15 runs at the 30 s DM cadence (design §1.6 N/15), spread across DMs', () => {
+    const ages = Array.from({ length: 2000 }, (_, i) => cd.skipAgeMs('D' + i.toString(36).toUpperCase()));
+    const meanRuns = ages.reduce((a, v) => a + v / 30000, 0) / ages.length;  // runs between forced refreshes
+    expect(meanRuns).toBeGreaterThan(14);
+    expect(meanRuns).toBeLessThan(16);
+    for (const v of ages) expect(Math.ceil(v / 30000)).toBeLessThanOrEqual(20); // never longer than 10 min
+    expect(new Set(ages.map(v => Math.ceil(v / 30000))).size).toBeGreaterThan(5); // not all on one run
+  });
 });
 
 describe('dmSkipDecision (S2)', () => {

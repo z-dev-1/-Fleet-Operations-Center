@@ -12,7 +12,7 @@
 // One engine per file: this file only loads the DM engine (see design §9.0).
 // No network, no Slack, no Electron.
 
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -45,7 +45,7 @@ const ME = 'UME';
 
 const fake = createFakeSlack({ me: ME });
 let ss, engine;
-const ENV_KEYS = ['FLEET_SLACK_DM_PEER_CACHE', 'FLEET_SLACK_DM_SKIP_UNCHANGED', 'FLEET_SLACK_THREAD_REUSE',
+const ENV_KEYS = ['FLEET_SLACK_DM_PEER_CACHE', 'FLEET_SLACK_DM_SKIP_UNCHANGED',
   'FLEET_SLACK_PM_SHARED_HISTORY', 'FLEET_SLACK_LANE_CONCURRENCY', 'FLEET_SLACK_LANE_TIER_PACING'];
 
 function seedPartA() {
@@ -92,6 +92,9 @@ beforeAll(() => {
   delete require.cache[require.resolve('../src/scrapers/slack_dm_autoreply.js')];
   engine = require('../src/scrapers/slack_dm_autoreply.js');
 });
+// Phase 4b fix (a): engine speed-up state/stats cleared before every test. With
+// every flag off this touches nothing part (a) observes.
+beforeEach(() => { engine.__test__.resetSpeedup(); });
 afterAll(() => {
   vi.useRealTimers();
   try { ss._setRawRequestForTests(null); } catch (_) {}
@@ -176,4 +179,110 @@ describe.sequential('DM engine flags-off golden parity (part a)', () => {
     expect(watermarks()).toEqual(GOLDEN_RUN2_WATERMARKS);
     expect(result).toEqual(GOLDEN_RUN2_RESULT);
   });
+});
+
+// ── T7(a) shape: the golden above is a HEAD capture (b4776c2 = 966eaae + the raw
+// transport seam only). On a cold module, per 1:1 DM, listOpenDMs makes the
+// isSelf conversations.info for all N DMs first, then the N name-resolution
+// conversations.info, then the N users.info (same DM order each time). Pinned
+// here as a structural check on the literal array; part (a) is not edited.
+describe.sequential('DM golden shape (T7a)', () => {
+  it('cold run: N isSelf infos, then N name infos, then N users.info, in one DM order', () => {
+    const N = 5;
+    const ids = GOLDEN_RUN1_CALLS.slice(2, 2 + N).map(c => c[1].channel);
+    const peers = { DS: ME, D1: 'U1', D2: 'U2', D3: 'U3', D4: 'U4' };
+    expect(GOLDEN_RUN1_CALLS.slice(0, 2).map(c => c[0])).toEqual(['auth.test', 'client.counts']);
+    expect(GOLDEN_RUN1_CALLS.slice(2, 2 + N)).toEqual(ids.map(id => ['conversations.info', { channel: id }]));
+    expect(GOLDEN_RUN1_CALLS.slice(2 + N, 2 + 2 * N)).toEqual(ids.map(id => ['conversations.info', { channel: id }]));
+    expect(GOLDEN_RUN1_CALLS.slice(2 + 2 * N, 2 + 3 * N)).toEqual(ids.map(id => ['users.info', { user: peers[id] }]));
+    expect(new Set(ids)).toEqual(new Set(Object.keys(peers)));
+  });
+});
+
+// ── T7(b) (step 10): simulated flags-off vs flags-on run, own fixture ─────────
+// Sequence, in ONE test so nothing resets in between: reset → uncounted warm-up
+// with the built DM flags on (S1 dmPeerCache + S2 dmSkipUnchanged 'on'; S3 is
+// not built) → counted flags-off run → counted flags-on run, all within 5 min
+// of fake time (so no skipped DM reaches its 5–10 min age refetch).
+// N = 50 1:1 DMs: 1 self, 1 unread (latest ≤ W), 15 D_mine (only my own reply
+// is newer than W), 33 unchanged. Every message has reply_count 0. The fake
+// transport resolves after 450 ms of fake time.
+describe.sequential('DM simulated run, flags off vs on (part b)', () => {
+  const N = 50, D_MINE = 15, U = 1, LAT = 450;
+  function seedPartB() {
+    fake.latencyMs = LAT;
+    fake.ims = []; fake.mpims = []; fake.conv = {};
+    const threads = {};
+    const W = T(-7200);
+    const add = (id, peer, messages, latest, unread = false) => {
+      fake.ims.push({ id, has_unreads: unread, latest });
+      fake.conv[id] = { peer, messages };
+      threads[id] = { lastSeenTs: W, name: 'Name ' + peer };
+    };
+    add('BS', ME, [{ ts: T(-7300), user: ME, text: 'note', reply_count: 0 }], T(-7300));
+    add('BU', 'UBU', [{ ts: T(-7300), user: 'UBU', text: 'old', reply_count: 0 }], T(-7300), true);
+    for (let i = 0; i < D_MINE; i++) {
+      add('BM' + i, 'UBM' + i, [{ ts: T(-7300), user: 'UBM' + i, text: 'q', reply_count: 0 },
+        { ts: T(-100 - i), user: ME, text: 'my answer', reply_count: 0 }], T(-100 - i));
+    }
+    for (let i = 0; i < N - 2 - D_MINE; i++) {
+      add('BX' + i, 'UBX' + i, [{ ts: T(-7300 - i), user: 'UBX' + i, text: 'old', reply_count: 0 }], T(-7300 - i));
+    }
+    store.save('settings', {});
+    store.save('slackDMReplies', []);
+    store.save('slackDMThreadReplyCount', {});
+    store.save('fasInboundClaims', {});
+    store.save('contacts', []);
+    store.save('slackDMAutoReplyConfig', { enabled: true, threads });
+  }
+  const setSp = (on) => store.save('settings', on ? { comms: { speedup: { dmPeerCache: true, dmSkipUnchanged: 'on' } } } : {});
+  async function timedRun() {
+    fake.reset();
+    const t0 = Date.now();
+    await drive(engine.pollDMAutoReplyOnce(() => {}), vi);
+    return Date.now() - t0;
+  }
+
+  it('reset → warm-up (flags on) → counted off (2 + 2N) → counted on (2 + 1 + u + D_mine), within 5 min', async () => {
+    ss._resetForTests();
+    engine.__test__.resetSpeedup();
+    seedPartB();
+    const wmBefore = watermarks();
+    const t0 = Date.now();
+
+    setSp(true);
+    await timedRun();                                   // warm-up: names, S1 peers, S2 lastFetchedAt
+    expect(fake.unscripted).toEqual([]);
+    expect(fake.posts).toEqual([]);
+
+    setSp(false);
+    const offMs = await timedRun();
+    expect(fake.unscripted).toEqual([]);
+    expect(fake.count('auth.test')).toBe(1);
+    expect(fake.count('client.counts')).toBe(1);
+    expect(fake.count('conversations.info')).toBe(N);
+    expect(fake.count('conversations.history')).toBe(N);
+    expect(fake.count()).toBe(2 + 2 * N);              // 102
+    expect(offMs).toBeGreaterThanOrEqual((2 + 2 * N) * LAT);
+    expect(fake.posts).toEqual([]);
+
+    setSp(true);
+    const onMs = await timedRun();
+    expect(fake.unscripted).toEqual([]);
+    expect(fake.count('auth.test')).toBe(1);
+    expect(fake.count('client.counts')).toBe(1);
+    expect(fake.count('conversations.info')).toBe(0);
+    const hist = fake.calls.filter(c => c[0] === 'conversations.history').map(c => c[1].channel).sort();
+    expect(hist).toEqual(['BS', 'BU', ...Array.from({ length: D_MINE }, (_, i) => 'BM' + i)].sort());
+    expect(fake.count()).toBe(2 + 1 + U + D_MINE);     // 19 (ageRefetch = 0 within 5 min)
+    expect(onMs).toBeLessThanOrEqual((2 + 1 + U + D_MINE) * LAT + 1000);
+    expect(fake.posts).toEqual([]);
+    const st = engine.getSpeedupStats();
+    expect(st.lastRun).toMatchObject({ dms: N, historyFetched: 2 + D_MINE, historySkipped: N - 2 - D_MINE, peerHits: N, peerMisses: 0 });
+    expect(st.lastRun.reasons).toMatchObject({ self: 1, unread: 1, newer: D_MINE, unchanged: N - 2 - D_MINE });
+
+    expect(Date.now() - t0).toBeLessThan(5 * 60000);
+    expect(watermarks()).toEqual(wmBefore);             // no counted run moved a watermark
+    fake.latencyMs = 0;
+  }, 60000); // wall-clock bound for full-suite load (fake time drives the runs)
 });

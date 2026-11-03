@@ -70,7 +70,7 @@ beforeEach(() => {
   store.save('fasInboundClaims', {});
   store.save('contacts', []);
   setFlags(null);
-  engine._resetSpeedupForTests();
+  engine.__test__.resetSpeedup();
 });
 afterAll(() => {
   vi.useRealTimers();
@@ -214,6 +214,31 @@ describe.sequential('S2 dmSkipUnchanged (real pollDMAutoReplyOnce)', () => {
     expect(engine.getSpeedupStats().lastRun.reasons.stale).toBe(2);
     expect(fake.unscripted).toEqual([]);
   });
+
+  it('on: forced refresh — a skipped DM is refetched once its 5–10 min age passes, on every cycle (≈ 1 in 15 runs at 30 s)', async () => {
+    seedS2();
+    setFlags({ dmSkipUnchanged: 'on', dmPeerCache: true });
+    const cd = require('../src/slack/change-detect');
+    const fetchedAt = [];
+    for (let i = 0; i < 45; i++) {                         // 22 min of 30 s runs
+      vi.setSystemTime(NOW_MS + i * 30000);
+      fake.reset();
+      await run();
+      if (histFor('E_SAME')) fetchedAt.push(i);
+      // the DMs that can have a newer message are fetched on every run
+      for (const id of ['E_SELF', 'E_UNREAD', 'E_MINE']) expect(histFor(id), id + ' run ' + i).toBe(1);
+    }
+    const ageRuns = cd.skipAgeMs('E_SAME') / 30000;
+    expect(fetchedAt[0]).toBe(0);                          // cold start
+    expect(fetchedAt.length).toBeGreaterThanOrEqual(3);    // refreshed again and again, never skipped forever
+    for (let j = 1; j < fetchedAt.length; j++) {
+      const gap = fetchedAt[j] - fetchedAt[j - 1];
+      expect(gap).toBeGreaterThanOrEqual(Math.floor(ageRuns));
+      expect(gap).toBeLessThanOrEqual(Math.ceil(ageRuns) + 1);
+      expect(gap).toBeLessThanOrEqual(21);                 // ≤ 10 min (+1 run of slack for in-run time)
+    }
+    expect(fake.unscripted).toEqual([]);
+  }, 60000); // 45 engine runs: generous wall-clock bound for full-suite load
 
   it('on: the self-DM is fetched every run and a Just-Me link message there gets today\'s reply', async () => {
     seedS2();

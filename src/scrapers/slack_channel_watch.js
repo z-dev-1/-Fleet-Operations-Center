@@ -77,6 +77,58 @@ const MAX_LOG_ENTRIES       = 500; // persisted reply log cap
 // silently updated the wrong entry instead of the one actually clicked.
 let _pollLock = false;
 
+// ── Phase 4b S4: pmAlertSharedHistory (settings.comms.speedup, default OFF) ──
+// When on, a mention channel with pmAlertAutoReply reuses the PM scan's root
+// read for its main-loop pass (one conversations.history fewer per run). The
+// mixed-snapshot guard in _s4MergeSharedRoots (design §4.3, Claim 3) re-reads
+// the roots and re-fetches every tracked thread (today's path) whenever a
+// fresh thread reply is newer than anything that provably existed at the scan
+// read. In memory only. With the flag off none of this is touched: the merge
+// below is today's inline code and _observedMax stays empty.
+// S3 (thread-reply reuse) is deferred to its own round; nothing here caches
+// thread replies.
+const cd = require('../slack/change-detect');
+const _OBSERVED_MAX_CAP = 1000;
+const _observedMax = new Map(); // channelId -> max ts merged in a COMPLETED earlier S4 pass
+const _CH_SP_SUMMARY_MS = 5 * 60 * 1000;
+let _chSpLastSummaryAt = 0;
+function _newChSpeedupRun() {
+  return { threadFetched: 0, rootReadsShared: 0, reasons: { mixedSnapshot: 0, fallbackReadFailed: 0 } };
+}
+function _newChSpeedupStats() {
+  return { flags: null, lastRun: null, totals: Object.assign({ runs: 0 }, _newChSpeedupRun()) };
+}
+let _chSpStats = _newChSpeedupStats();
+function _observedMaxSet(id, ts) {
+  if (!ts) return;
+  _observedMax.delete(id);
+  _observedMax.set(id, ts);
+  while (_observedMax.size > _OBSERVED_MAX_CAP) _observedMax.delete(_observedMax.keys().next().value);
+}
+function getSpeedupStats() {
+  try { return JSON.parse(JSON.stringify(_chSpStats)); } catch (_) { return null; }
+}
+// End-of-run bookkeeping (S4 on only). Never throws.
+function _chSpFinishRun(run, doLog) {
+  try {
+    const t = _chSpStats.totals;
+    t.runs++;
+    t.threadFetched += run.threadFetched;
+    t.rootReadsShared += run.rootReadsShared;
+    for (const k of Object.keys(run.reasons)) t.reasons[k] = (t.reasons[k] || 0) + run.reasons[k];
+    const now = Date.now();
+    if (now - _chSpLastSummaryAt >= _CH_SP_SUMMARY_MS) {
+      _chSpLastSummaryAt = now;
+      doLog(`[SlackWatch] speedup: threads fetched ${run.threadFetched}, roots shared ${run.rootReadsShared}, mixed ${run.reasons.mixedSnapshot}, fallback read failed ${run.reasons.fallbackReadFailed}`);
+    }
+  } catch (_) {}
+}
+function _resetSpeedup() {
+  _observedMax.clear();
+  _chSpStats = _newChSpeedupStats();
+  _chSpLastSummaryAt = 0;
+}
+
 // Default watch list — the 4 channels confirmed live and specified by the
 // user. Stored so they can be toggled off individually without code
 // changes; new channels can be added the same way via the config store.
@@ -616,12 +668,15 @@ async function _jmHandleMessage(channelId, text, signal, jobId) {
 // deduped via the same slackChannelReplies id (channelId:ts) so it never
 // double-replies, and it does NOT gate on lastSeenTs (a threaded tag can land
 // under an old root the watermark already passed).
-async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
+// Phase 4b S4: optional `opts` ({ rmOpts }) is passed only when
+// pmAlertSharedHistory is on; the scan's roots are returned (last statement)
+// so the main loop can share them. Every early return stays undefined.
+async function _pollPmAlertChannel(ch, myUserId, deps, doLog, opts) {
   const { readMessages, readThreadReplies, sendToChannel, askOrcha, uploadFileToChannel, downloadFileBuffer } = deps;
   const pmAlert = require('./pm_alert_reply');
 
   let roots;
-  try { roots = await readMessages(ch.id, 20); } catch (e) { doLog(`[PMAlert] ${ch.name}: readMessages failed: ${e.message}`); return; }
+  try { roots = await (opts && opts.rmOpts ? readMessages(ch.id, 20, undefined, opts.rmOpts) : readMessages(ch.id, 20)); } catch (e) { doLog(`[PMAlert] ${ch.name}: readMessages failed: ${e.message}`); return; }
   if (!roots || !roots.length) return;
 
   const token = myUserId ? '<@' + myUserId + '>' : '';
@@ -703,6 +758,57 @@ async function _pollPmAlertChannel(ch, myUserId, deps, doLog) {
       doLog(`[PMAlert] ${ch.name}: handler error on ${msg.ts}: ${e.message}`);
     }
   }
+  return roots; // Phase 4b S4: today's caller ignores this
+}
+
+// Today's mention-merge loop, verbatim (the flags-off path keeps its own inline
+// copy below). Used only by the S4 shared-roots path.
+function _mergeBatches(rootMessages, replyBatches) {
+  let messages = rootMessages;
+  const seenTs = new Set(rootMessages.map(m => m.ts));
+  const extra = [];
+  for (const batch of replyBatches) {
+    for (const m of batch) {
+      if (!seenTs.has(m.ts)) { seenTs.add(m.ts); extra.push(m); }
+    }
+  }
+  if (extra.length) {
+    messages = rootMessages.concat(extra).sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
+  }
+  return messages;
+}
+
+// Phase 4b S4 merge with the mixed-snapshot guard (design §4.3; Claim 3 of the
+// S3 section, which needs only A0 for shared roots without reuse). `roots` is
+// the PM scan's snapshot taken at time T; the tracked threads are fetched fresh
+// now (T' > T), exactly as today. cutoff = the newest ts that provably existed
+// at T (snapshot ts / latestReply, plus what earlier completed passes merged).
+// If any fresh reply is above the cutoff (or anything is unparseable / throws),
+// the data may mix two points in time, so the roots are re-read fresh and every
+// tracked thread is re-fetched: today's order of operations. A throwing re-read
+// propagates to the caller's merge catch (snapshot roots only, today's
+// merge-failure behavior). Thread fetch failures give [] as today.
+async function _s4MergeSharedRoots(ch, roots, threadKeys, run, api) {
+  const fetchAll = () => Promise.all(threadKeys.map(t => api.readThreadReplies(ch.id, t, 20).catch(() => [])));
+  let batches = [];
+  if (threadKeys.length) { batches = await fetchAll(); run.threadFetched += threadKeys.length; }
+  let mixed = true; // fail open
+  try {
+    const cutoff = cd.snapshotCutoff(roots, _observedMax.get(ch.id));
+    const above = (m) => { const c = cd.compareTs(m && m.ts, cutoff); return c === 1 || c === null; };
+    mixed = !cutoff || batches.some(b => b.some(above));
+  } catch (_) { mixed = true; }
+  if (mixed) {
+    run.reasons.mixedSnapshot++;
+    try { roots = await api.readMessages(ch.id, 20, undefined, { threadMeta: true }); }
+    catch (e) { run.reasons.fallbackReadFailed++; throw e; }
+    if (!roots.length) return [];          // as today: no roots → the channel is skipped
+    batches = [];
+    if (threadKeys.length) { batches = await fetchAll(); run.threadFetched += threadKeys.length; }
+  }
+  const messages = _mergeBatches(roots, batches);
+  try { _observedMaxSet(ch.id, cd.maxTs(_observedMax.get(ch.id), ...messages.map(m => m.ts))); } catch (_) {}
+  return messages;
 }
 
 async function _pollJustMeChannel(ch, myUserId, doLog) {
@@ -721,6 +827,8 @@ async function _pollJustMeChannel(ch, myUserId, doLog) {
   // justme reply threads under msg.ts) and merge them in, deduped by ts,
   // before any of the filtering below runs -- that logic is otherwise
   // untouched.
+  // Phase 4b: S3 (threadReplyReuse) is deferred; this Just-Me reply-thread
+  // merge keeps today's always-fetch behavior.
   let messages = rootMessages;
   try {
     const recentThreads = store.load('slackChannelReplies', [])
@@ -834,6 +942,14 @@ async function pollChannelsOnce(log) {
     } catch (_) {}
   }
 
+  // Phase 4b: speed-up flags, read once per run (any error → all off). Only S4
+  // (pmAlertSharedHistory) applies to this engine.
+  let _spFlags = null;
+  try { _spFlags = require('../config/perf-flags').loadSlackSpeedup(); } catch (_) { _spFlags = null; }
+  const _spShared = !!(_spFlags && _spFlags.pmAlertSharedHistory === true);
+  const _spRun = _spShared ? _newChSpeedupRun() : null;
+  if (_spShared) { try { _chSpStats.flags = _spFlags; _chSpStats.lastRun = _spRun; } catch (_) {} }
+
   let repliedCount = 0, escalatedCount = 0;
   const newEscalations = [];
 
@@ -852,16 +968,28 @@ async function pollChannelsOnce(log) {
     // BEFORE the mode branches and does NOT continue — a normal channel still
     // does its regular replies too. Deduped via slackChannelReplies id.
     const _earlyMode = require('./slack_justme_channel').channelMode(ch, config);
+    // Phase 4b S4: the PM scan's roots, shared with this channel's main-loop
+    // pass when pmAlertSharedHistory is on (undefined = read roots as today).
+    let _sharedRoots;
     // Skip PM-alert scanning on justme (personal) channels like the self-DM —
     // they have many old threads and hammering conversations.replies there just
     // gets rate-limited. PM alerts come from partner/support channels.
     if (ch.pmAlertAutoReply === true && _earlyMode !== 'justme') {
       try {
-        await _pollPmAlertChannel(
-          ch, myUserId,
-          { readMessages, readThreadReplies, sendToChannel, askOrcha, uploadFileToChannel, downloadFileBuffer },
-          doLog
-        );
+        if (_spShared) {
+          const _pmRoots = await _pollPmAlertChannel(
+            ch, myUserId,
+            { readMessages, readThreadReplies, sendToChannel, askOrcha, uploadFileToChannel, downloadFileBuffer },
+            doLog, { rmOpts: { threadMeta: true } }
+          );
+          if (Array.isArray(_pmRoots) && _pmRoots.length) _sharedRoots = _pmRoots;
+        } else {
+          await _pollPmAlertChannel(
+            ch, myUserId,
+            { readMessages, readThreadReplies, sendToChannel, askOrcha, uploadFileToChannel, downloadFileBuffer },
+            doLog
+          );
+        }
       } catch (e) {
         doLog(`[SlackWatch] ${ch.name}: PM-alert scan error: ${e.message}`);
       }
@@ -892,7 +1020,9 @@ async function pollChannelsOnce(log) {
     }
 
     try {
-      const rootMessages = await readMessages(ch.id, 20); // newest-first
+      // Phase 4b S4: reuse the PM scan's root read when it was shared.
+      const rootMessages = _sharedRoots ? _sharedRoots : await readMessages(ch.id, 20); // newest-first
+      if (_sharedRoots) _spRun.rootReadsShared++;
       if (!rootMessages.length) continue;
 
       // BUG FIX (2026-07-26): conversations.history (readMessages) never
@@ -908,7 +1038,12 @@ async function pollChannelsOnce(log) {
       let messages = rootMessages;
       try {
         const trackedThreads = (store.load('slackMentionThreads', {})[ch.id] || []).slice(-10);
-        if (trackedThreads.length) {
+        // Phase 4b: S3 (threadReplyReuse) is deferred; tracked mention threads
+        // are always fetched fresh, as today. S4 shared roots only add the
+        // mixed-snapshot guard around the same fetches.
+        if (_sharedRoots) {
+          messages = await _s4MergeSharedRoots(ch, rootMessages, trackedThreads, _spRun, { readMessages, readThreadReplies });
+        } else if (trackedThreads.length) {
           // NOTE: these readThreadReplies calls are chained on slack_send's
           // _slackChain lane, so they are serialized anyway (no real parallelism).
           const replyBatches = await Promise.all(
@@ -1422,6 +1557,7 @@ async function pollChannelsOnce(log) {
     }
   }
 
+  if (_spShared) _chSpFinishRun(_spRun, doLog);
   return { repliedCount, escalatedCount, items: newEscalations };
   } finally {
     _pollLock = false;
@@ -1456,7 +1592,10 @@ module.exports = {
   updateReviewItem,
   dedupeReplyLog,
   isPollInFlight: () => _pollLock,
+  getSpeedupStats,
   __test__: {
+    // Phase 4b: clears the S4 speed-up state (_observedMax) and stats.
+    resetSpeedup: _resetSpeedup,
     waitForAiQueueIdle: _waitForAiQueueIdle,
     setAiTimeoutMs: (ms) => { JM_AI_TIMEOUT_MS = ms; },
     getAiTimeoutMs: () => JM_AI_TIMEOUT_MS,

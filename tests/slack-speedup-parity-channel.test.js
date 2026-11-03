@@ -13,7 +13,7 @@
 //
 // One engine per file (design §9.0). No network, no Slack, no Electron.
 
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -85,7 +85,7 @@ const T = (off) => (NOW_S + off).toFixed(6);
 
 const fake = createFakeSlack({ me: ME });
 let ss, engine;
-const ENV_KEYS = ['FLEET_SLACK_DM_PEER_CACHE', 'FLEET_SLACK_DM_SKIP_UNCHANGED', 'FLEET_SLACK_THREAD_REUSE',
+const ENV_KEYS = ['FLEET_SLACK_DM_PEER_CACHE', 'FLEET_SLACK_DM_SKIP_UNCHANGED',
   'FLEET_SLACK_PM_SHARED_HISTORY', 'FLEET_SLACK_LANE_CONCURRENCY', 'FLEET_SLACK_LANE_TIER_PACING', 'FLEET_COMMS_CHANNEL_CLAIMS'];
 
 function seedPartA() {
@@ -159,6 +159,9 @@ beforeAll(() => {
   delete require.cache[require.resolve('../src/scrapers/slack_channel_watch.js')];
   engine = require('../src/scrapers/slack_channel_watch.js');
 });
+// Phase 4b fix (a): engine speed-up state/stats cleared before every test. With
+// every flag off this touches nothing part (a) observes.
+beforeEach(() => { engine.__test__.resetSpeedup(); });
 afterAll(() => {
   vi.useRealTimers();
   try { ss._setRawRequestForTests(null); } catch (_) {}
@@ -231,4 +234,123 @@ describe.sequential('Channel-watch engine flags-off golden parity (part a)', () 
     expect(replyLog()).toEqual(GOLDEN_RUN2_LOG);
     expect(result).toEqual(GOLDEN_RUN2_RESULT);
   });
+});
+
+// ── T7(b) (step 10): simulated flags-off vs flags-on run, own fixture ─────────
+// Sequence, in ONE test so nothing resets in between: reset → uncounted warm-up
+// with the built channel flag on (S4 pmAlertSharedHistory; S3 is not built) →
+// counted flags-off run → counted flags-on run, all within 5 min of fake time.
+// Fixture mirrors §1.5: 9 channels; 10 + 4 + 3 + 1 + 1 = 19 tracked mention
+// threads (the last 1 in the PM channel); two justme channels with 10
+// reply-log threads each; one PM channel with exactly P = 2 PM ALERT roots
+// whose replies do not tag me. Nothing is newer than any watermark, so no run
+// posts. The fake transport resolves after 450 ms of fake time.
+describe.sequential('Channel simulated run, flags off vs on (part b)', () => {
+  const LAT = 450, P = 2;
+  const TRACKED = { M1: 10, M2: 4, M3: 3, M4: 1, PM: 1 };
+  const JM = ['J1B', 'J2B'];
+  function seedPartB() {
+    fake.latencyMs = LAT;
+    fake.conv = {};
+    const channels = [];
+    const mention = {};
+    const log = [];
+    let k = 0;
+    const thread = (conv, rootTs, user, replyUser, replyText) => {
+      const replyTs = (parseFloat(rootTs) + 1).toFixed(6);
+      const root = { ts: rootTs, user, text: 'thread ' + rootTs, reply_count: 1, latest_reply: replyTs, thread_ts: rootTs };
+      conv.messages.push(root);
+      conv.replies[rootTs] = [{ ...root }, { ts: replyTs, user: replyUser, text: replyText, thread_ts: rootTs }];
+    };
+    for (const [id, n] of Object.entries(TRACKED)) {
+      const conv = fake.conv[id] = { messages: [{ ts: T(-3000 - k), user: 'UPART', text: 'plain old' }], replies: {} };
+      mention[id] = [];
+      for (let i = 0; i < n; i++) { const ts = T(-10000 - 10 * (k++)); thread(conv, ts, 'UPART', 'UPART', 'old reply'); mention[id].push(ts); }
+      channels.push({ id, name: 'ch-' + id, enabled: true, replyMode: 'mentions', pmAlertAutoReply: id === 'PM', lastSeenTs: T(-600) });
+    }
+    for (let i = 0; i < P; i++) {
+      const ts = T(-20000 - 10 * i);
+      const replyTs = (parseFloat(ts) + 1).toFixed(6);
+      const root = { ts, user: 'UBOT', text: 'PM ALERT unit ' + i, reply_count: 1, latest_reply: replyTs, thread_ts: ts };
+      fake.conv.PM.messages.push(root);
+      fake.conv.PM.replies[ts] = [{ ...root }, { ts: replyTs, user: 'UBOT', text: 'details', thread_ts: ts }];
+    }
+    for (const id of JM) {
+      const conv = fake.conv[id] = { messages: [], replies: {} };
+      for (let i = 0; i < 10; i++) {
+        const ts = T(-30000 - 10 * (k++));
+        thread(conv, ts, ME, ME, `<@${ME}> old answer`);
+        log.push({ id: id + ':' + ts, channelId: id, channelName: 'jm-' + id, ts, replyTs: 'R', title: 'Just Me', createdAt: '2026-11-01T00:00:00.000Z', status: 'auto-answered' });
+      }
+      channels.push({ id, name: 'jm-' + id, enabled: true, replyMode: 'justme', pmAlertAutoReply: false, lastSeenTs: T(-600) });
+    }
+    for (const id of ['Q1', 'Q2']) {
+      fake.conv[id] = { messages: [{ ts: T(-4000), user: 'UPART', text: 'quiet' }], replies: {} };
+      channels.push({ id, name: 'ch-' + id, enabled: true, replyMode: 'mentions', pmAlertAutoReply: false, lastSeenTs: T(-600) });
+    }
+    store.save('settings', {});
+    store.save('fasInboundClaims', {});
+    store.save('slackMentionThreads', mention);
+    store.save('slackChannelReplies', log);
+    store.save('slackChannelWatchConfig', { enabled: true, replyMode: 'mentions', channels });
+    return channels.length;
+  }
+  const setSp = (on) => store.save('settings', on ? { comms: { speedup: { pmAlertSharedHistory: true } } } : {});
+  async function timedRun() {
+    fake.reset();
+    const t0 = Date.now();
+    await drive(engine.pollChannelsOnce(() => {}), vi);
+    const ms = Date.now() - t0;
+    await drive(engine.__test__.waitForAiQueueIdle(60000), vi);
+    return ms;
+  }
+
+  it('reset → warm-up (flags on) → counted off (52) → counted on (51: the PM root read is shared), within 5 min', async () => {
+    ss._resetForTests();
+    engine.__test__.resetSpeedup();
+    const C = seedPartB();
+    expect(C).toBe(9);
+    const tracked = Object.values(TRACKED).reduce((a, b) => a + b, 0);
+    expect(tracked).toBe(19);
+    const OFF = 1 + C + 1 + tracked + 10 * JM.length + P;
+    expect(OFF).toBe(52);
+    const wmBefore = watermarks();
+    const t0 = Date.now();
+
+    setSp(true);
+    await timedRun();                                   // warm-up (uncounted)
+    expect(fake.unscripted).toEqual([]);
+    expect(fake.posts).toEqual([]);
+
+    setSp(false);
+    const offMs = await timedRun();
+    expect(fake.unscripted).toEqual([]);
+    expect(fake.count('auth.test')).toBe(1);
+    expect(fake.count('conversations.history')).toBe(C + 1);
+    expect(fake.count('conversations.replies')).toBe(tracked + 10 * JM.length + P);
+    expect(fake.count()).toBe(OFF);
+    expect(offMs).toBeGreaterThanOrEqual(OFF * LAT);
+    expect(fake.posts).toEqual([]);
+    const offCalls = fake.calls.map(c => JSON.stringify(c)).sort();
+
+    setSp(true);
+    const onMs = await timedRun();
+    expect(fake.unscripted).toEqual([]);
+    expect(fake.count('auth.test')).toBe(1);
+    expect(fake.count('conversations.history')).toBe(C);
+    expect(fake.count('conversations.replies')).toBe(tracked + 10 * JM.length + P); // no thread reuse (S3 deferred)
+    expect(fake.count()).toBe(OFF - 1);
+    expect(onMs).toBeLessThanOrEqual((OFF - 1) * LAT + 1000);
+    expect(fake.posts).toEqual([]);
+    // the on-run calls are the off-run calls minus exactly one PM-channel history read
+    const onCalls = fake.calls.map(c => JSON.stringify(c)).sort();
+    const pmHist = JSON.stringify(['conversations.history', { channel: 'PM', limit: '20', inclusive: 'true' }]);
+    const minusOne = offCalls.slice(); minusOne.splice(minusOne.indexOf(pmHist), 1);
+    expect(onCalls).toEqual(minusOne);
+    expect(engine.getSpeedupStats().lastRun).toEqual({ threadFetched: 1, rootReadsShared: 1, reasons: { mixedSnapshot: 0, fallbackReadFailed: 0 } });
+
+    expect(Date.now() - t0).toBeLessThan(5 * 60000);
+    expect(watermarks()).toEqual(wmBefore);
+    fake.latencyMs = 0;
+  }, 60000); // wall-clock bound for full-suite load (fake time drives the runs)
 });

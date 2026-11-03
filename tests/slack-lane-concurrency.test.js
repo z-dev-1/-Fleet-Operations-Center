@@ -205,4 +205,32 @@ describe('per-method tier budgets', () => {
     expect(r49[1].start).toBe(log.find(r => r.id === 'r0').start + 60000); // retry waits for the budget release
     expectWithinBudget('conversations.replies', 50);                     // retries included
   });
+  it('retry FIFO goes first only among eligible requests: a budget-blocked retry is passed by an eligible retry and the queue', async () => {
+    // retryQ = [x (conversations.replies, out of budget), y (conversations.history, eligible)], queue = [h1, h2].
+    const seen = new Set();
+    script = (m, p) => {
+      if (seen.has(p.id)) return { ms: 10 };
+      seen.add(p.id);
+      if (p.id === 'y') return { res: { __rateLimited: true, retryAfter: 1 }, ms: 400 };  // settles after x
+      if (p.id === 'x') return { res: { __rateLimited: true, retryAfter: 1 }, ms: 10 };
+      return { ms: 10 };
+    };
+    const lane = mkLane({ K: 2, latency: 10 });
+    const ps = Array.from({ length: 49 }, (_, i) => lane.enqueue('conversations.replies', { id: 'r' + i }));
+    ps.push(lane.enqueue('conversations.history', { id: 'y' }), lane.enqueue('conversations.replies', { id: 'x' }),
+      lane.enqueue('conversations.history', { id: 'h1' }), lane.enqueue('conversations.history', { id: 'h2' }));
+    await settle(ps);
+    const att = (id) => log.filter(r => r.id === id);
+    const [y1, y2] = att('y'), [x1, x2] = att('x'), h1 = att('h1')[0], h2 = att('h2')[0];
+    expect(x1.end).toBeLessThan(y1.end);                                  // x entered the retry FIFO first
+    const pausedUntil = Math.max(x1.end, y1.end) + 1250;
+    // nothing starts during the pause; x's 429'd attempt filled its 50-start window
+    expect(Math.min(y2.start, x2.start, h1.start, h2.start)).toBeGreaterThanOrEqual(pausedUntil);
+    expect(y2.start).toBe(pausedUntil);                                   // eligible retry first, ahead of the queue
+    expect(h1.start).toBeGreaterThan(y2.start);
+    expect(h2.start).toBeGreaterThan(h1.start);
+    expect(h2.start).toBeLessThan(x2.start);                              // blocked retry does not hold the queue
+    expect(x2.start).toBe(log.find(r => r.id === 'r0').start + 60000);    // waits for both pause and budget
+    expectWithinBudget('conversations.replies', 50);
+  });
 });
