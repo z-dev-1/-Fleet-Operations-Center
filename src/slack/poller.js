@@ -99,6 +99,22 @@ function _defaultOwaStatus() {
   } catch (_) { return null; }
 }
 
+// Phase 4b: speed-up stats for getStatus(). Never loads a module; each part is
+// null when that module is absent or its getter throws.
+function _cachedExport(rel, fn) {
+  try {
+    const m = require.cache[require.resolve(rel)];
+    return (m && m.exports && typeof m.exports[fn] === 'function') ? m.exports[fn]() : null;
+  } catch (_) { return null; }
+}
+function _defaultSpeedupStats() {
+  return {
+    lane:    _cachedExport('../scrapers/slack_send', 'getLaneStats'),
+    dm:      _cachedExport('../scrapers/slack_dm_autoreply', 'getSpeedupStats'),
+    channel: _cachedExport('../scrapers/slack_channel_watch', 'getSpeedupStats'),
+  };
+}
+
 function _newPollState(kind) {
   return {
     intervalMs: POLL_SPECS[kind].intervalMs,
@@ -141,6 +157,7 @@ function createPoller(deps = {}) {
   // line keeps today's 'ipc:slack' tag.
   const engineLog      = deps.engineLog    || (() => { const l = require('../utils/logger')('ipc:slack'); return (m) => l.info(m); })();
   const owaStatus      = deps.owaStatus    || _defaultOwaStatus;
+  const speedupStats   = deps.speedupStats || _defaultSpeedupStats;
 
   let _effectiveMode = null;   // memoized; 'off' after a start fallback
   let _configuredMode = null;
@@ -503,6 +520,7 @@ function createPoller(deps = {}) {
       },
       polls,
       owaTriage: owa == null ? null : owa,
+      speedup: (() => { try { return speedupStats(); } catch (_) { return null; } })(),
     };
   }
 

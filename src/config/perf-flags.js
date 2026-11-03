@@ -32,6 +32,12 @@
  *   (<name> in WORKER_NAMES; a per-worker `true` with the supervisor off
  *   means the legacy timer keeps ownership.)
  *
+ * Phase 4b Slack poll speed-ups (all default OFF; see resolveSlackSpeedupFlags):
+ *
+ *   settings.comms.speedup.{dmPeerCache, dmSkipUnchanged, pmAlertSharedHistory,
+ *     laneConcurrency, laneTierPacing} / FLEET_SLACK_*
+ *   (S3 threadReplyReuse is deferred to its own round and is not a flag here.)
+ *
  * Read at point of use (startup / once per run), never per tick.
  */
 
@@ -205,8 +211,72 @@ function loadWorkers(deps = {}) {
   return resolveWorkerFlags(settings, env);
 }
 
+// ── Phase 4b: Slack poll speed-ups (all default OFF) ─────────────────────────
+//   settings.comms.speedup.dmPeerCache          bool (=== true)     / FLEET_SLACK_DM_PEER_CACHE      '0'|'1'
+//   settings.comms.speedup.dmSkipUnchanged      'off'|'shadow'|'on' / FLEET_SLACK_DM_SKIP_UNCHANGED  'off'|'shadow'|'on'
+//   settings.comms.speedup.pmAlertSharedHistory bool (=== true)     / FLEET_SLACK_PM_SHARED_HISTORY  '0'|'1'
+//   settings.comms.speedup.laneConcurrency      integer 1..4 (1)    / FLEET_SLACK_LANE_CONCURRENCY   '1'..'4'
+//   settings.comms.speedup.laneTierPacing       bool (=== true)     / FLEET_SLACK_LANE_TIER_PACING   '0'|'1'
+// Modes (settings and env) are trimmed + case-insensitive; anything outside
+// off|shadow|on is 'off' in settings and ignored in env. laneConcurrency must be
+// a JS integer 1..4 in settings (anything else -> 1); env accepts digit strings
+// resolving to 1..4 only. Separate resolver so resolveCommsFlags is unchanged.
+// S3 (threadReplyReuse) is deferred and deliberately absent.
+// S1/S2/S4 are read once per engine run; S5/S6 once per process by slack_send.
+const SPEEDUP_MODES = ['off', 'shadow', 'on'];
+const LANE_CONCURRENCY_MAX = 4;
+
+function _spMode(v) {
+  const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
+  return SPEEDUP_MODES.includes(s) ? s : null;
+}
+
+function _laneK(v) {
+  return (Number.isInteger(v) && v >= 1 && v <= LANE_CONCURRENCY_MAX) ? v : null;
+}
+
+function resolveSlackSpeedupFlags(settings, env) {
+  const sp = _obj(_obj(_obj(settings).comms).speedup);
+  const flags = {
+    dmPeerCache: sp.dmPeerCache === true,
+    dmSkipUnchanged: _spMode(sp.dmSkipUnchanged) || 'off',
+    pmAlertSharedHistory: sp.pmAlertSharedHistory === true,
+    laneConcurrency: _laneK(sp.laneConcurrency) || 1,
+    laneTierPacing: sp.laneTierPacing === true,
+  };
+  const eP = _envBool(env, 'FLEET_SLACK_DM_PEER_CACHE');
+  if (eP !== null) flags.dmPeerCache = eP;
+  const eS = _spMode(env && env.FLEET_SLACK_DM_SKIP_UNCHANGED);
+  if (eS) flags.dmSkipUnchanged = eS;
+  const eH = _envBool(env, 'FLEET_SLACK_PM_SHARED_HISTORY');
+  if (eH !== null) flags.pmAlertSharedHistory = eH;
+  const rawK = env && env.FLEET_SLACK_LANE_CONCURRENCY;
+  if (typeof rawK === 'string' && /^\d+$/.test(rawK.trim())) {
+    const k = _laneK(parseInt(rawK.trim(), 10));
+    if (k) flags.laneConcurrency = k;
+  }
+  const eT = _envBool(env, 'FLEET_SLACK_LANE_TIER_PACING');
+  if (eT !== null) flags.laneTierPacing = eT;
+  return flags;
+}
+
+function loadSlackSpeedup(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveSlackSpeedupFlags(settings, env);
+  } catch (_) {
+    return resolveSlackSpeedupFlags({}, {});
+  }
+}
+
 module.exports = {
   resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT,
   resolveCommsFlags, loadComms, COMMS_POLLING_MODES,
   resolveWorkerFlags, loadWorkers, WORKER_NAMES, WORKER_ENV,
+  resolveSlackSpeedupFlags, loadSlackSpeedup, SPEEDUP_MODES, LANE_CONCURRENCY_MAX,
 };

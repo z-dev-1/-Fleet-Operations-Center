@@ -643,7 +643,7 @@ describe('12. getStatus', () => {
     const h = makeHarness('on', { deps: { owaStatus: () => ({ mode: 'on', skipped: { busy: 0 } }) } });
     h.poller.start(h.ctx);
     const st = h.poller.getStatus();
-    expect(Object.keys(st).sort()).toEqual(['configuredMode', 'flags', 'mode', 'owaTriage', 'polls', 'startError', 'startedAt'].sort());
+    expect(Object.keys(st).sort()).toEqual(['configuredMode', 'flags', 'mode', 'owaTriage', 'polls', 'speedup', 'startError', 'startedAt'].sort());
     expect(st).toMatchObject({ mode: 'on', configuredMode: 'on', startedAt: 0, startError: null, flags: { mainProcessPolling: 'on', channelWatchClaims: false } });
     expect(st.owaTriage).toEqual({ mode: 'on', skipped: { busy: 0 } });
     for (const k of ['channelWatch', 'dmAutoReply', 'dmNotify']) {

@@ -139,7 +139,79 @@ function _setRawRequestForTests(fn) { _rawRequest = typeof fn === 'function' ? f
  * Call Slack Web API — serialized + rate-limit aware.
  * Uses full cookie header (all cookies) + xoxc token in body.
  */
+// ── Phase 4b S0: lane stats (always on, observation only, never throws) ─────
+function _newLaneStats() {
+  return { calls: 0, byMethod: {}, queueWaitMsTotal: 0, requestMsTotal: 0, maxQueueDepth: 0, inFlightMax: 0,
+    rateLimited: 0, retries: 0, gaveUp: 0, budgetDelays: 0, concurrency: 1, pacing: false,
+    _starts: [], _depth: 0 };
+}
+let _laneStats = _newLaneStats();
+const _STATS_RING = 1000;
+function _stat(fn) { try { fn(_laneStats); } catch (_) { /* stats never break a call */ } }
+function _statStart(method, waitMs, inFlight) {
+  _stat((s) => {
+    s.calls++;
+    s.byMethod[method] = (s.byMethod[method] || 0) + 1;
+    s.queueWaitMsTotal += Math.max(0, waitMs || 0);
+    if (inFlight > s.inFlightMax) s.inFlightMax = inFlight;
+    s._starts.push({ t: Date.now(), m: method });
+    if (s._starts.length > _STATS_RING) s._starts.shift();
+  });
+}
+function getLaneStats() {
+  try {
+    const s = _laneStats;
+    const cutoff = Date.now() - 60000;
+    const perMinute = {};
+    for (const e of s._starts) if (e.t > cutoff) perMinute[e.m] = (perMinute[e.m] || 0) + 1;
+    return { calls: s.calls, byMethod: Object.assign({}, s.byMethod), perMinute,
+      queueWaitMsTotal: s.queueWaitMsTotal, requestMsTotal: s.requestMsTotal,
+      maxQueueDepth: s.maxQueueDepth, inFlightMax: s.inFlightMax,
+      rateLimited: s.rateLimited, retries: s.retries, gaveUp: s.gaveUp, budgetDelays: s.budgetDelays,
+      concurrency: s.concurrency, pacing: s.pacing };
+  } catch (_) { return null; }
+}
+
+// ── Phase 4b S5/S6: lane selection, memoized ONCE per process on the first
+// call (the lane must never change shape with requests in flight). Default
+// (K = 1, pacing off) keeps today's chain below. Any load error → today's lane.
+let _laneSel = null;   // { lane: null | createLane(...) }
+function _selectLane() {
+  if (_laneSel) return _laneSel;
+  let K = 1, pacing = false;
+  try {
+    const f = require('../config/perf-flags').loadSlackSpeedup();
+    K = f.laneConcurrency; pacing = f.laneTierPacing === true || K > 1;
+  } catch (_) { K = 1; pacing = false; }
+  _laneSel = { lane: null };
+  if (K > 1 || pacing) {
+    try {
+      const { createLane } = require('../slack/web-api-lane');
+      _laneSel.lane = createLane({
+        concurrency: K, pacing, minIntervalMs: _SLACK_MIN_INTERVAL_MS, maxRetries: _SLACK_MAX_RETRIES,
+        request: (m, p) => _rawRequest(m, p), logger,
+        hooks: {
+          onEnqueue: (depth) => _stat((s) => { if (depth > s.maxQueueDepth) s.maxQueueDepth = depth; }),
+          onStart: (m, waitMs, inFlight) => _statStart(m, waitMs, inFlight),
+          onSettle: (m, ms) => _stat((s) => { s.requestMsTotal += ms; }),
+          onRateLimited: () => _stat((s) => { s.rateLimited++; }),
+          onRetry: () => _stat((s) => { s.retries++; }),
+          onGiveUp: () => _stat((s) => { s.gaveUp++; }),
+          onBudgetDelay: () => _stat((s) => { s.budgetDelays++; }),
+        },
+      });
+      logger.info('[slack] lane concurrency=' + _laneSel.lane.concurrency + ' pacing=' + (_laneSel.lane.pacing ? 'on' : 'off'));
+    } catch (_) { _laneSel.lane = null; }
+  }
+  _stat((s) => { s.concurrency = _laneSel.lane ? _laneSel.lane.concurrency : 1; s.pacing = !!(_laneSel.lane && _laneSel.lane.pacing); });
+  return _laneSel;
+}
+
 function slackWebApi(method, params = {}) {
+  const sel = _selectLane();
+  if (sel.lane) return sel.lane.enqueue(method, params);
+  const _enqAt = Date.now();
+  _stat((s) => { s._depth++; if (s._depth > s.maxQueueDepth) s.maxQueueDepth = s._depth; });
   // Chain onto the shared lane so calls are spaced and a 429 backoff on one
   // call also holds back the next (prevents a thundering herd of replies).
   const run = _slackChain.then(async () => {
@@ -149,11 +221,17 @@ function slackWebApi(method, params = {}) {
       if (wait > 0) await _sleep(wait);
       _slackLastAt = Date.now();
 
-      const res = await _rawRequest(method, params);
+      if (attempt === 0) _stat((s) => { s._depth--; });
+      _statStart(method, attempt === 0 ? _slackLastAt - _enqAt : 0, 1);
+      let res;
+      try { res = await _rawRequest(method, params); }
+      finally { const _ms = Date.now() - _slackLastAt; _stat((s) => { s.requestMsTotal += _ms; }); }
       if (!res || !res.__rateLimited) return res; // normal result
+      _stat((s) => { s.rateLimited++; });
 
       if (attempt === _SLACK_MAX_RETRIES) {
         // Give up gracefully in Slack's own shape so callers handle it as before.
+        _stat((s) => { s.gaveUp++; });
         logger.warn('[slack] ' + method + ' rate-limited after ' + (_SLACK_MAX_RETRIES + 1) + ' attempts — giving up');
         return { ok: false, error: 'ratelimited' };
       }
@@ -162,6 +240,7 @@ function slackWebApi(method, params = {}) {
         ? (res.retryAfter * 1000 + 250)
         : (Math.pow(2, attempt) * 1000 + Math.floor(Math.random() * 300));
       logger.info('[slack] ' + method + ' 429 — backing off ' + Math.round(backoff) + 'ms (attempt ' + (attempt + 1) + ')');
+      _stat((s) => { s.retries++; });
       await _sleep(backoff);
     }
   });
@@ -352,8 +431,8 @@ async function getChannels(limit) {
 /**
  * readMessages(channelId, limit) -- fetch history for any channel or DM
  */
-function _mapMsg(m, channelId) {
-  return {
+function _mapMsg(m, channelId, opts) {
+  const out = {
     ts:         m.ts,
     userId:     m.user || m.username || '',
     text:       m.text || '',
@@ -364,6 +443,10 @@ function _mapMsg(m, channelId) {
     attachments: m.attachments || [],
     channelId
   };
+  // Phase 4b S4 (opt-in only): mixed-snapshot guard input. Without opts the
+  // output is exactly today's shape (no latestReply key at all).
+  if (opts && opts.threadMeta === true) out.latestReply = typeof m.latest_reply === 'string' ? m.latest_reply : null;
+  return out;
 }
 
 /**
@@ -377,14 +460,16 @@ function _mapMsg(m, channelId) {
  * maxPages so a runaway channel can't stall a poll; result is newest-first
  * (same shape as before).
  */
-async function readMessages(channelId, limit, sinceTs) {
+// Phase 4b S4: optional 4th arg `opts` ({ threadMeta: true } adds latestReply to
+// each mapped message). The request params are identical with or without it.
+async function readMessages(channelId, limit, sinceTs, opts) {
   if (!channelId) throw new Error('channelId required');
   const lim = String(limit || 30);
 
   if (!sinceTs) {
     const res = await slackWebApi('conversations.history', { channel: channelId, limit: lim, inclusive: 'true' });
     if (!res.ok) throw new Error('conversations.history failed: ' + res.error);
-    return (res.messages || []).map(m => _mapMsg(m, channelId));
+    return (res.messages || []).map(m => _mapMsg(m, channelId, opts));
   }
 
   // Cursor-paginated fetch of everything strictly after sinceTs.
@@ -396,7 +481,7 @@ async function readMessages(channelId, limit, sinceTs) {
     if (cursor) params.cursor = cursor;
     const res = await slackWebApi('conversations.history', params);
     if (!res.ok) throw new Error('conversations.history failed: ' + res.error);
-    (res.messages || []).forEach(m => all.push(_mapMsg(m, channelId)));
+    (res.messages || []).forEach(m => all.push(_mapMsg(m, channelId, opts)));
     cursor = res.response_metadata && res.response_metadata.next_cursor;
     if (!cursor || !res.has_more) break;
   }
@@ -617,7 +702,25 @@ const _dmNotifiedTs = new Set();
 // carries isGroup so callers can tell the two apart (e.g. for reply-context
 // / persona prompting -- a group thread needs different handling than a
 // 1:1, since replies are visible to everyone in the group).
-async function listOpenDMs(limit, myUserId) {
+// Phase 4b S1 (dmPeerCache): IM id -> counterpart user id. An IM's two members
+// never change, so a cached peer gives the same isSelf as a fresh
+// conversations.info. In memory only, capped, oldest insertion evicted first.
+const _IM_PEER_CACHE_MAX = 5000;
+const _imPeerCache = new Map();
+function _imPeerSet(id, peer) {
+  _imPeerCache.delete(id);
+  _imPeerCache.set(id, peer);
+  while (_imPeerCache.size > _IM_PEER_CACHE_MAX) _imPeerCache.delete(_imPeerCache.keys().next().value);
+}
+
+// Phase 4b: optional 3rd arg `opts` (absent = today's behavior exactly):
+//   opts.peerCache === true  -> reuse the cached IM counterpart for isSelf (S1)
+//   opts.withLatest === true -> each result also carries latestTs (client.counts
+//                               `latest` when it is a string, else null) (S2)
+//   opts.stats               -> { peerHits, peerMisses } counters to increment
+async function listOpenDMs(limit, myUserId, opts) {
+  const _peerCache = !!(opts && opts.peerCache === true);
+  const _pstats = opts && opts.stats && typeof opts.stats === 'object' ? opts.stats : null;
   // Ceiling raised 100 -> 500 (2026-09) so "scan every open DM" is possible:
   // client.counts returns the full DM/mpim list in one shot (no cursor), so we
   // only need to not truncate. The caller still bounds work per cycle.
@@ -630,8 +733,8 @@ async function listOpenDMs(limit, myUserId) {
   // silently fall off and never get a reply. Sort unread-first, then by most
   // recent activity, so the DMs most likely to need a reply are always kept.
   const _ts = (c) => parseFloat(c.latest || c.updated || 0) || 0;
-  const ims   = (counts.ims   || []).map(c => ({ id: c.id, isGroup: false, unread: !!c.has_unreads, ts: _ts(c) }));
-  const mpims = (counts.mpims || []).map(c => ({ id: c.id, isGroup: true,  unread: !!c.has_unreads, ts: _ts(c) }));
+  const ims   = (counts.ims   || []).map(c => ({ id: c.id, isGroup: false, unread: !!c.has_unreads, ts: _ts(c), latest: c.latest }));
+  const mpims = (counts.mpims || []).map(c => ({ id: c.id, isGroup: true,  unread: !!c.has_unreads, ts: _ts(c), latest: c.latest }));
   const all = ims.concat(mpims)
     .sort((a, b) => (Number(b.unread) - Number(a.unread)) || (b.ts - a.ts))
     .slice(0, lim);
@@ -648,8 +751,16 @@ async function listOpenDMs(limit, myUserId) {
       let name = null, isSelf = false;
       try {
         if (!c.isGroup) {
-          const info = await slackWebApi('conversations.info', { channel: c.id });
-          const peer = info && info.ok && info.channel ? info.channel.user : null;
+          let peer;
+          if (_peerCache && _imPeerCache.has(c.id)) {
+            peer = _imPeerCache.get(c.id);
+            if (_pstats) _pstats.peerHits = (_pstats.peerHits || 0) + 1;
+          } else {
+            if (_peerCache && _pstats) _pstats.peerMisses = (_pstats.peerMisses || 0) + 1;
+            const info = await slackWebApi('conversations.info', { channel: c.id });
+            peer = info && info.ok && info.channel ? info.channel.user : null;
+            if (_peerCache && info && info.ok && info.channel && typeof info.channel.user === 'string') _imPeerSet(c.id, info.channel.user);
+          }
           if (peer && self && peer === self) isSelf = true;
         }
       } catch (_) {}
@@ -658,7 +769,12 @@ async function listOpenDMs(limit, myUserId) {
       return { name, isSelf };
     })
   );
-  return all.map((c, i) => ({ channelId: c.id, name: resolved[i].name || c.id, isGroup: c.isGroup, unread: c.unread, isSelf: resolved[i].isSelf }));
+  const _withLatest = !!(opts && opts.withLatest === true);
+  return all.map((c, i) => {
+    const r = { channelId: c.id, name: resolved[i].name || c.id, isGroup: c.isGroup, unread: c.unread, isSelf: resolved[i].isSelf };
+    if (_withLatest) r.latestTs = typeof c.latest === 'string' ? c.latest : null;
+    return r;
+  });
 }
 
 async function readDMs(limit) {
@@ -979,6 +1095,9 @@ function _resetForTests() {
   _slackChain = Promise.resolve();
   _slackLastAt = 0;
   _myUserId = null;
+  _laneStats = _newLaneStats();
+  _laneSel = null;
+  _imPeerCache.clear();
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, fetchUserProfile, downloadFileContent, downloadFileBuffer, uploadFileToChannel, SELF_REPLY_MARKER, _setRawRequestForTests, _resetForTests };
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, fetchUserProfile, downloadFileContent, downloadFileBuffer, uploadFileToChannel, SELF_REPLY_MARKER, getLaneStats, _setRawRequestForTests, _resetForTests };

@@ -33,6 +33,8 @@ function createFakeSlack(opts = {}) {
     repliesFail: new Set(),     // 'ch:ts' keys whose conversations.replies answers ok:false
     rateLimit: [],              // queue of { method, retryAfter } -> next matching call answers __rateLimited
     postSeq: 0,
+    postFail: 0,                // next N chat.postMessage calls answer ok:false
+    appendPosts: !!opts.appendPosts, // realistic: posts become messages by me (off for the goldens)
     hooks: {},                  // method -> fn(params) called before answering (scripted races)
   };
 
@@ -77,9 +79,24 @@ function createFakeSlack(opts = {}) {
         return { ok: true, messages: (thread || []).slice(0, lim).map(m => ({ ...m })), has_more: false };
       }
       case 'chat.postMessage': {
+        if (fake.postFail > 0) { fake.postFail--; return { ok: false, error: 'internal_error' }; }
         fake.postSeq++;
         fake.posts.push({ channel: params.channel, text: params.text, thread_ts: params.thread_ts });
-        return { ok: true, ts: 'R' + fake.postSeq };
+        if (!fake.appendPosts) return { ok: true, ts: 'R' + fake.postSeq };
+        // Realistic mode: the post becomes a message by me (top-level, or a thread reply).
+        const ts = (Date.now() / 1000 + fake.postSeq / 1e6).toFixed(6);
+        const c = fake.conv[params.channel] || (fake.conv[params.channel] = { messages: [] });
+        if (params.thread_ts) {
+          c.replies = c.replies || {};
+          const root = (c.messages || []).find(m => m.ts === params.thread_ts);
+          const thr = c.replies[params.thread_ts] || (c.replies[params.thread_ts] = [root ? { ...root, thread_ts: params.thread_ts } : { ts: params.thread_ts, thread_ts: params.thread_ts, user: fake.me }]);
+          thr.push({ ts, user: fake.me, text: params.text, thread_ts: params.thread_ts });
+          if (root) { root.reply_count = (root.reply_count || 0) + 1; root.latest_reply = ts; root.thread_ts = params.thread_ts; thr[0] = { ...root }; }
+        } else {
+          c.messages.push({ ts, user: fake.me, text: params.text });
+          for (const l of [fake.ims, fake.mpims]) { const e = l.find(x => x.id === params.channel); if (e) e.latest = ts; }
+        }
+        return { ok: true, ts };
       }
       default:
         fake.unscripted.push(method);

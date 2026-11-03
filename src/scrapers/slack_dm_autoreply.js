@@ -93,6 +93,61 @@ const MAX_LOG_ENTRIES       = 500; // persisted reply log cap
 // list; this caps how many we fetch histories for per cycle).
 const MAX_DMS_PER_POLL      = 200;
 
+// ── Phase 4b: Slack poll speed-ups (settings.comms.speedup.*, default OFF) ──
+// S1 dmPeerCache (in slack_send.listOpenDMs) and S2 dmSkipUnchanged (Phase 1
+// below). Pure predicates live in src/slack/change-detect.js. Everything here
+// is in memory only; with every flag off Phase 1 is today's code verbatim and
+// the only bookkeeping is lastRun.dms.
+const cd = require('../slack/change-detect');
+const _DM_FETCHED_MAX = 5000;
+const _dmLastFetchedAt = new Map(); // channelId -> epoch ms of the last SUCCESSFUL readMessages
+const _SP_SUMMARY_MS = 5 * 60 * 1000;
+let _spLastSummaryAt = 0;
+function _newDmSpeedupStats() {
+  return {
+    flags: null, lastRun: null,
+    totals: { runs: 0, historyFetched: 0, historySkipped: 0, peerHits: 0, peerMisses: 0, reasons: {}, threadBacklogMax: 0 },
+    shadow: { agreeSkip: 0, agreeFetch: 0, mismatch: 0, lastMismatch: null, threadBacklog: null },
+  };
+}
+let _spStats = _newDmSpeedupStats();
+function _dmFetchedSet(id, at) {
+  _dmLastFetchedAt.delete(id);
+  _dmLastFetchedAt.set(id, at);
+  while (_dmLastFetchedAt.size > _DM_FETCHED_MAX) _dmLastFetchedAt.delete(_dmLastFetchedAt.keys().next().value);
+}
+function getSpeedupStats() {
+  try { return JSON.parse(JSON.stringify(_spStats)); } catch (_) { return null; }
+}
+// End-of-run bookkeeping (only when a DM speed-up flag is not off). Never throws.
+function _spFinishRun(run, mode, backlog, doLog) {
+  try {
+    if (mode !== 'off') {
+      run.threadBacklog = { count: backlog.count, items: backlog.items.slice() };
+      _spStats.shadow.threadBacklog = run.threadBacklog;
+      if (backlog.count > _spStats.totals.threadBacklogMax) _spStats.totals.threadBacklogMax = backlog.count;
+    }
+    const t = _spStats.totals;
+    t.runs++;
+    t.historyFetched += run.historyFetched || 0;
+    t.historySkipped += run.historySkipped || 0;
+    t.peerHits += run.peerHits || 0;
+    t.peerMisses += run.peerMisses || 0;
+    for (const k of Object.keys(run.reasons || {})) t.reasons[k] = (t.reasons[k] || 0) + run.reasons[k];
+    const now = Date.now();
+    if (now - _spLastSummaryAt >= _SP_SUMMARY_MS) {
+      _spLastSummaryAt = now;
+      const r = run.reasons || {};
+      (doLog || ((m) => logger.info(m)))(`[SlackDM] speedup: fetched ${run.historyFetched || 0}/${run.dms} histories (skipped ${run.historySkipped || 0}, newer ${r.newer || 0}), peer cache ${run.peerHits || 0}/${run.peerMisses || 0}, thread backlog ${run.threadBacklog ? run.threadBacklog.count : 0}`);
+    }
+  } catch (_) {}
+}
+function _resetSpeedupForTests() {
+  _dmLastFetchedAt.clear();
+  _spStats = _newDmSpeedupStats();
+  _spLastSummaryAt = 0;
+}
+
 let _pollLock = false; // mirrors slack_channel_watch.js's _pollLock exactly
 let _rlUntil  = 0;    // epoch ms — skip all conversations.replies calls until this time
 // cache: channelId:parentTs -> replyCount seen on last fetch.
@@ -972,7 +1027,21 @@ async function pollDMAutoReplyOnce(log) {
   // the full DM/mpim list in one shot (no cursor), so we just raise the cap.
   // MAX_DMS_PER_POLL bounds work per cycle to keep Slack calls + the Electron
   // main process from freezing; the parallel fetch below pays latency once.
-  const dms = await listOpenDMs(MAX_DMS_PER_POLL, myUserId); // myUserId excludes Z from group-DM display names
+  // Phase 4b: speed-up flags, read once per run (any error → all off).
+  let _spFlags = null;
+  try { _spFlags = require('../config/perf-flags').loadSlackSpeedup(); } catch (_) { _spFlags = null; }
+  const _spPeer = !!(_spFlags && _spFlags.dmPeerCache === true);
+  const _spMode = (_spFlags && (_spFlags.dmSkipUnchanged === 'shadow' || _spFlags.dmSkipUnchanged === 'on')) ? _spFlags.dmSkipUnchanged : 'off';
+  const _spActive = _spPeer || _spMode !== 'off';
+  const _spRun = { dms: 0 };
+  if (_spActive) Object.assign(_spRun, { historyFetched: 0, historySkipped: 0, peerHits: 0, peerMisses: 0, reasons: {}, threadBacklog: null });
+  const _spBacklog = { count: 0, items: [], _seen: new Set() };
+
+  const dms = _spActive
+    ? await listOpenDMs(MAX_DMS_PER_POLL, myUserId, { peerCache: _spPeer, withLatest: _spMode !== 'off', stats: _spRun })
+    : await listOpenDMs(MAX_DMS_PER_POLL, myUserId); // myUserId excludes Z from group-DM display names
+  _spRun.dms = dms.length; // always (lets Stage 0 read N with every flag off)
+  try { _spStats.flags = _spFlags; _spStats.lastRun = _spRun; } catch (_) {}
   if (!dms.length) return { repliedCount: 0, escalatedCount: 0, items: [] };
 
   // ── PHASE 1: parallel fetch ──────────────────────────────────────────────
@@ -990,7 +1059,37 @@ async function pollDMAutoReplyOnce(log) {
       // >20 messages since the last poll can't silently drop the oldest new ones.
       // First-ever poll (no watermark) uses the plain newest-20 fetch (baseline).
       const seenTs = _threads[dm.channelId] && _threads[dm.channelId].lastSeenTs;
-      return readMessages(dm.channelId, 20, seenTs || undefined).catch(e => {
+      if (_spMode === 'off') {
+        return readMessages(dm.channelId, 20, seenTs || undefined).catch(e => {
+          doLog(`[SlackDM] ${dm.name}: readMessages error — ${e.message}`);
+          return [];
+        });
+      }
+      // Phase 4b S2: skip ONLY a provably unchanged DM (design §3 S2 / §4.1).
+      let _dec;
+      try { _dec = cd.dmSkipDecision({ dm, lastSeenTs: seenTs, lastFetchedAt: _dmLastFetchedAt.get(dm.channelId), now: Date.now() }); }
+      catch (_) { _dec = { skip: false, reason: 'error' }; }
+      try { _spRun.reasons[_dec.reason] = (_spRun.reasons[_dec.reason] || 0) + 1; } catch (_) {}
+      if (_spMode === 'on' && _dec.skip) {
+        _spRun.historySkipped++;
+        return Promise.resolve([]); // Phase 2 takes the existing empty-messages `continue`
+      }
+      _spRun.historyFetched++;
+      return readMessages(dm.channelId, 20, seenTs || undefined).then(r => {
+        // Bookkeeping only; attached BEFORE the existing catch so it can never replace the result.
+        try {
+          _dmFetchedSet(dm.channelId, Date.now());
+          if (_spMode === 'shadow') {
+            if (_dec.skip && Array.isArray(r) && r.length) {
+              _spStats.shadow.mismatch++;
+              _spStats.shadow.lastMismatch = { channelId: dm.channelId, name: dm.name, latest: dm.latestTs, lastSeen: seenTs, fetched: r.length, newest: r[0] && r[0].ts, at: Date.now() };
+              logger.warn(`[SlackDM] speedup shadow MISMATCH ${dm.name}: latest=${dm.latestTs} lastSeen=${seenTs} fetched=${r.length} newest=${r[0] && r[0].ts}`);
+            } else if (_dec.skip) _spStats.shadow.agreeSkip++;
+            else _spStats.shadow.agreeFetch++;
+          }
+        } catch (_) {}
+        return r;
+      }).catch(e => {
         doLog(`[SlackDM] ${dm.name}: readMessages error — ${e.message}`);
         return [];
       });
@@ -1589,6 +1688,22 @@ async function pollDMAutoReplyOnce(log) {
       // wastes API quota and causes rate-limit errors.
       const _sevenDaysAgo = (Date.now() / 1000) - 7 * 86400;
       const threadsToCheck = messages.filter(m => m.replyCount > 0 && parseFloat(m.ts) > _sevenDaysAgo).slice(0, 5); // cap at 5 per DM
+      // Phase 4b: thread-backlog OBSERVATION (S2 not 'off'): the threads the loop
+      // below would fetch if it had time. Zero calls; the loop is untouched.
+      if (_spMode !== 'off') {
+        try {
+          for (const p of threadsToCheck) {
+            const k = dm.channelId + ':' + p.ts;
+            if (_threadReplyCount[k] === p.replyCount || _spBacklog._seen.has(k)) continue;
+            _spBacklog._seen.add(k);
+            _spBacklog.count++;
+            if (_spBacklog.items.length < 50) {
+              _spBacklog.items.push({ channelId: dm.channelId, dmName: dm.name, parentTs: p.ts,
+                ageH: Math.round(((Date.now() / 1000) - parseFloat(p.ts)) / 360) / 10 });
+            }
+          }
+        } catch (_) {}
+      }
       let latestThreadReplyTs = null;
 
       // Rate-limit guard: _rlUntil is module-level so it persists across DMs
@@ -1860,6 +1975,7 @@ async function pollDMAutoReplyOnce(log) {
     }
   }
 
+  if (_spActive) _spFinishRun(_spRun, _spMode, _spBacklog, doLog);
   return { repliedCount, escalatedCount, items: newEscalations };
   } finally {
     // Persist thread-reply count cache so the next app restart doesn't cold-start
@@ -1891,6 +2007,8 @@ module.exports = {
   getDMReplyLog,
   updateDMReviewItem,
   isPollInFlight: () => _pollLock,
+  getSpeedupStats,
+  _resetSpeedupForTests,
   // Test-only: expose the restored thread-reply baseline so restart-recovery
   // (loading slackDMThreadReplyCount at startup) can be asserted.
   _getThreadReplyCountForTest: () => _threadReplyCount,

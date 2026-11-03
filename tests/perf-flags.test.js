@@ -13,7 +13,8 @@ fs.mkdirSync(tmpDir, { recursive: true });
 const { setDataDir } = require('../src/config/paths');
 setDataDir(tmpDir);
 
-const { resolveFlags, load, resolveCommsFlags, loadComms, COMMS_POLLING_MODES } = require('../src/config/perf-flags');
+const { resolveFlags, load, resolveCommsFlags, loadComms, COMMS_POLLING_MODES,
+  resolveSlackSpeedupFlags, loadSlackSpeedup, SPEEDUP_MODES, LANE_CONCURRENCY_MAX } = require('../src/config/perf-flags');
 const store = require('../src/store');
 
 describe('perf flags', () => {
@@ -81,6 +82,57 @@ describe('perf flags', () => {
   it('loadComms() uses the injected loader and survives a throwing one', () => {
     expect(loadComms({ load: () => ({ comms: { mainProcessPolling: 'on' } }), env: {} }).mainProcessPolling).toBe('on');
     expect(loadComms({ load: () => { throw new Error('boom'); }, env: {} })).toEqual({ mainProcessPolling: 'off', channelWatchClaims: false });
+  });
+  // ── Phase 4b: Slack speed-up flags ──
+  const SP_DEFAULTS = { dmPeerCache: false, dmSkipUnchanged: 'off', pmAlertSharedHistory: false, laneConcurrency: 1, laneTierPacing: false };
+  const sp = (o) => ({ comms: { speedup: o } });
+  it('speedup defaults: everything off, K = 1, pacing false', () => {
+    expect(resolveSlackSpeedupFlags({}, {})).toEqual(SP_DEFAULTS);
+    expect(resolveSlackSpeedupFlags(null, null)).toEqual(SP_DEFAULTS);
+    expect(resolveSlackSpeedupFlags({ comms: { speedup: 'x' } }, {})).toEqual(SP_DEFAULTS);
+    expect(resolveSlackSpeedupFlags({ comms: { mainProcessPolling: 'on', channelWatchClaims: true } }, {})).toEqual(SP_DEFAULTS);
+    expect(SPEEDUP_MODES).toEqual(['off', 'shadow', 'on']);
+    expect(LANE_CONCURRENCY_MAX).toBe(4);
+  });
+  it('speedup settings values are honored', () => {
+    expect(resolveSlackSpeedupFlags(sp({ dmPeerCache: true, dmSkipUnchanged: 'shadow', pmAlertSharedHistory: true, laneConcurrency: 3, laneTierPacing: true }), {}))
+      .toEqual({ dmPeerCache: true, dmSkipUnchanged: 'shadow', pmAlertSharedHistory: true, laneConcurrency: 3, laneTierPacing: true });
+    expect(resolveSlackSpeedupFlags(sp({ dmSkipUnchanged: 'ON ' }), {})).toMatchObject({ dmSkipUnchanged: 'on' });
+    expect(resolveSlackSpeedupFlags(sp({ dmSkipUnchanged: ' Shadow' }), {})).toMatchObject({ dmSkipUnchanged: 'shadow' });
+    // S3 is deferred: a threadReplyReuse setting is not a flag and never appears in the output.
+    expect(resolveSlackSpeedupFlags(sp({ threadReplyReuse: 'on' }), { FLEET_SLACK_THREAD_REUSE: 'on' })).toEqual(SP_DEFAULTS);
+  });
+  it('speedup invalid settings fall back to defaults', () => {
+    for (const bad of ['yes', true, 1, null, {}, 'onn']) {
+      expect(resolveSlackSpeedupFlags(sp({ dmSkipUnchanged: bad }), {})).toMatchObject({ dmSkipUnchanged: 'off' });
+    }
+    for (const bad of ['true', 1, 'yes']) {
+      expect(resolveSlackSpeedupFlags(sp({ dmPeerCache: bad, pmAlertSharedHistory: bad, laneTierPacing: bad }), {})).toEqual(SP_DEFAULTS);
+    }
+    for (const bad of [0, 5, '2', 2.5, -1, null, true]) {
+      expect(resolveSlackSpeedupFlags(sp({ laneConcurrency: bad }), {}).laneConcurrency).toBe(1);
+    }
+  });
+  it('speedup env overrides win over settings; invalid env is ignored', () => {
+    const all = sp({ dmPeerCache: true, dmSkipUnchanged: 'on', pmAlertSharedHistory: true, laneConcurrency: 2, laneTierPacing: true });
+    expect(resolveSlackSpeedupFlags(all, {
+      FLEET_SLACK_DM_PEER_CACHE: '0', FLEET_SLACK_DM_SKIP_UNCHANGED: 'off',
+      FLEET_SLACK_PM_SHARED_HISTORY: '0', FLEET_SLACK_LANE_CONCURRENCY: '4', FLEET_SLACK_LANE_TIER_PACING: '0',
+    })).toEqual({ dmPeerCache: false, dmSkipUnchanged: 'off', pmAlertSharedHistory: false, laneConcurrency: 4, laneTierPacing: false });
+    expect(resolveSlackSpeedupFlags({}, { FLEET_SLACK_DM_PEER_CACHE: '1', FLEET_SLACK_PM_SHARED_HISTORY: '1', FLEET_SLACK_LANE_TIER_PACING: '1', FLEET_SLACK_DM_SKIP_UNCHANGED: ' On ' }))
+      .toMatchObject({ dmPeerCache: true, pmAlertSharedHistory: true, laneTierPacing: true, dmSkipUnchanged: 'on' });
+    const bogus = { FLEET_SLACK_DM_PEER_CACHE: 'yes', FLEET_SLACK_DM_SKIP_UNCHANGED: 'maybe',
+      FLEET_SLACK_PM_SHARED_HISTORY: 'true', FLEET_SLACK_LANE_CONCURRENCY: '5', FLEET_SLACK_LANE_TIER_PACING: 'on' };
+    expect(resolveSlackSpeedupFlags(all, bogus)).toEqual(resolveSlackSpeedupFlags(all, {}));
+    for (const k of ['0', '2.5', 'two', '-1', '']) expect(resolveSlackSpeedupFlags(all, { FLEET_SLACK_LANE_CONCURRENCY: k }).laneConcurrency).toBe(2);
+    expect(resolveSlackSpeedupFlags({}, { FLEET_SLACK_LANE_CONCURRENCY: ' 3 ' }).laneConcurrency).toBe(3);
+  });
+  it('loadSlackSpeedup() uses the injected loader and survives a throwing one', () => {
+    expect(loadSlackSpeedup({ load: () => sp({ dmPeerCache: true }), env: {} }).dmPeerCache).toBe(true);
+    expect(loadSlackSpeedup({ load: () => { throw new Error('boom'); }, env: {} })).toEqual(SP_DEFAULTS);
+  });
+  it('resolveCommsFlags output is unchanged by the speedup block', () => {
+    expect(resolveCommsFlags(sp({ dmPeerCache: true, laneConcurrency: 3 }), {})).toEqual({ mainProcessPolling: 'off', channelWatchClaims: false });
   });
   it('telemetryRollup is a registered store key (save does not throw, round-trips)', () => {
     const doc = { version: 1, rollups: [{ at: 1 }] };
