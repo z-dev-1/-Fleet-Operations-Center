@@ -33,7 +33,7 @@ const NOT_LOADED = { status: 'unavailable', reason: 'not-loaded' };
 const REDACT_KV = /(token|cookie|authorization|bearer|password|secret|session)\s*[=:]\s*\S+/gi;
 const REDACT_RUN = /[A-Za-z0-9+/=_-]{32,}/g;
 
-let _memo = { scheduler: null, ai: null };
+let _memo = { scheduler: null, ai: null, jobs: null };
 let _failures = new Map();   // section -> last failure message
 
 // ── Bounding helpers ─────────────────────────────────────────────────────────
@@ -306,6 +306,51 @@ function _schedulerSection(deps, now) {
   };
 }
 
+// Phase 7 durable jobs: read-only summary (no SQL when off/degraded).
+const JOB_STATES = ['queued', 'claimed', 'running', 'waiting_on_dependency', 'waiting_on_auth', 'waiting_on_approval',
+  'verifying', 'completed', 'failed', 'cancelled', 'recovery_required'];
+function _jobsSection(deps, now) {
+  const jobs = _mod(deps, 'jobs', '../jobs');
+  if (!jobs) return NOT_LOADED;
+  const memo = _memoized('jobs', now, () => jobs.getSummary(now));
+  const s = memo.value || {};
+  const types = {};
+  const st = s.types || {};
+  for (const k of Object.keys(st).slice(0, 10)) {
+    const t = st[k] || {};
+    types[_clip(k, 40)] = { flag: !!t.flag, effective: !!t.effective, adopted: !!t.adopted, mode: _str(t.mode, 20) };
+  }
+  const counts = {};
+  const sc = s.counts || {};
+  for (const k of Object.keys(sc).slice(0, 10)) {
+    const c = sc[k] || {};
+    const o = {};
+    for (const state of JOB_STATES) { const n = _num(c[state]); if (n) o[state] = n; }
+    counts[_clip(k, 40)] = o;
+  }
+  const tot = s.totals || {};
+  const or = s.oldestRunning;
+  const lr = s.lastRecovery;
+  const le = s.lastError;
+  return {
+    at: memo.at,
+    mode: _str(s.mode, 20) || 'off',
+    reason: _str(s.reason, 120),
+    types,
+    counts,
+    totals: { open: _num(tot.open) || 0, recoveryRequired: _num(tot.recoveryRequired) || 0, failed24h: _num(tot.failed24h) || 0, foreign: _num(tot.foreign) || 0 },
+    oldestRunning: or ? { id: _str(or.id, 60), type: _str(or.type, 40), scopeKey: _str(or.scopeKey, 80), startedAt: _ts(or.startedAt),
+      leaseUntil: _ts(or.leaseUntil), attempt: _num(or.attempt), leaseExpired: !!or.leaseExpired } : null,
+    recoveryRequiredCount: _num(s.recoveryRequiredCount) || 0,
+    recoveryRequired: (Array.isArray(s.recoveryRequired) ? s.recoveryRequired : []).slice(0, MAX_JOBS).map((r) => ({
+      id: _str(r && r.id, 60), type: _str(r && r.type, 40), scopeKey: _str(r && r.scopeKey, 80),
+      updatedAt: _ts(r && r.updatedAt), lastError: _str(r && r.lastError, 200),
+    })),
+    lastRecovery: lr ? { at: _ts(lr.at), requeued: _num(lr.requeued), recoveryRequired: _num(lr.recoveryRequired), failed: _num(lr.failed), cancelled: _num(lr.cancelled) } : null,
+    lastError: le ? { message: _clip(le.message, 200), at: _ts(le.at) } : null,
+  };
+}
+
 function _resourcesSection(deps) {
   const tel = deps.telemetry || require('../telemetry');
   const smp = typeof tel.latestSample === 'function' ? tel.latestSample() : null;
@@ -355,12 +400,13 @@ function buildSnapshot(deps) {
     auth: _section('auth', () => _authSection(deps), log),
     slack: _section('slack', () => _slackSection(deps), log),
     scheduler: _section('scheduler', () => _schedulerSection(deps, now), log),
+    jobs: _section('jobs', () => _jobsSection(deps, now), log),
     resources: _section('resources', () => _resourcesSection(deps), log),
   };
 }
 
 function _resetForTests() {
-  _memo = { scheduler: null, ai: null };
+  _memo = { scheduler: null, ai: null, jobs: null };
   _failures = new Map();
 }
 

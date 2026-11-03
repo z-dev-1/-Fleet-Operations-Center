@@ -1385,6 +1385,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
             payload,
             uptakeCount: (store.load('uptakeHash', {}).units || []).length,
             relayCount: 0,
+            durableScope: 'fleet',
           }));
         } catch (e) {
           logger.warn('[data-source] deep-scan error (non-fatal): ' + e.message);

@@ -140,7 +140,7 @@ describe('health snapshot — shape', () => {
   it('all sections ok, exact top-level keys', () => {
     const { deps } = mkDeps();
     const s = health.buildSnapshot(deps);
-    expect(Object.keys(s).sort()).toEqual(['ai', 'at', 'auth', 'ok', 'resources', 'scheduler', 'slack', 'workers'].sort());
+    expect(Object.keys(s).sort()).toEqual(['ai', 'at', 'auth', 'jobs', 'ok', 'resources', 'scheduler', 'slack', 'workers'].sort());
     expect(s.ok).toBe(true);
     expect(s.at).toBe(T);
     for (const k of SECTIONS) expect(s[k].status).toBe('ok');

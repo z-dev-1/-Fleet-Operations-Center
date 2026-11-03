@@ -13,7 +13,7 @@
  */
 import {
   esc, truncate, relTime, dur, workerStatus, authStatus, laneStatus, aiOverall,
-  unavailableStatus, canReEnable, createVisiblePoller,
+  unavailableStatus, canReEnable, createVisiblePoller, jobsStatus,
 } from './worker-health-logic.js';
 
 let _el = null;
@@ -193,6 +193,36 @@ function _schedulerCard(s) {
   return _kv(rows);
 }
 
+// Phase 7 durable jobs (read-only).
+export function _jobsCard(j) {
+  const now = Date.now();
+  const rows = [['Status', _pill(jobsStatus(j))], ['Mode', _v(j.mode) + (j.reason ? ' <span class="wh-reason">' + esc(truncate(j.reason, 80)) + '</span>' : '')]];
+  const ts = j.types || {};
+  for (const t of Object.keys(ts)) rows.push([t, _v(ts[t] && ts[t].mode)]);
+  const cs = j.counts || {};
+  for (const t of Object.keys(cs)) {
+    const c = cs[t] || {};
+    const parts = Object.keys(c).map((s) => esc(s) + ' ' + esc(c[s])).join(' · ');
+    rows.push([t + ' jobs', '<span class="wh-mono">' + (parts || '—') + '</span>']);
+  }
+  const tot = j.totals || {};
+  rows.push(['Open / failed 24h', _v(tot.open) + ' / ' + _v(tot.failed24h) + (tot.foreign ? ' <span class="wh-reason">' + esc(tot.foreign) + ' from a newer build</span>' : '')]);
+  const or = j.oldestRunning;
+  rows.push(['Oldest running', or ? esc(or.type) + ' ' + esc(or.scopeKey) + ' · started ' + esc(relTime(or.startedAt, now)) +
+    ' · attempt ' + _v(or.attempt) + (or.leaseExpired ? ' <strong>lease expired</strong>' : '') : '—']);
+  const rr = Array.isArray(j.recoveryRequired) ? j.recoveryRequired : [];
+  if (rr.length) {
+    rows.push(['Needs reconciliation', rr.map((r) => '<span class="wh-reason">' + esc(r.type) + ' ' + esc(r.scopeKey) +
+      (r.lastError ? ' — ' + esc(truncate(r.lastError, 60)) : '') + '</span>').join('')]);
+  }
+  if (j.lastRecovery) {
+    const lr = j.lastRecovery;
+    rows.push(['Last recovery', esc(relTime(lr.at, now)) + ' <span class="wh-reason">requeued ' + _v(lr.requeued) + ' · needs reconciliation ' +
+      _v(lr.recoveryRequired) + ' · failed ' + _v(lr.failed) + ' · cancelled ' + _v(lr.cancelled) + '</span>']);
+  }
+  return _kv(rows);
+}
+
 function _resourcesCard(r) {
   const el = r.eventLoop || {};
   const m = r.main || {};
@@ -235,6 +265,7 @@ function _render() {
     _card('auth', 'Auth health', d.auth, _authCard) +
     _card('slack', 'Slack poller', d.slack, _slackCard) +
     _card('sched', 'Scheduler', d.scheduler, _schedulerCard) +
+    _card('jobs', 'Durable jobs', d.jobs, _jobsCard) +
     _card('res', 'Resources', d.resources, _resourcesCard) +
     '</div>';
   _renderUpdated();

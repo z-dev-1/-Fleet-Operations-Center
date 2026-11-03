@@ -73,6 +73,8 @@ function _stalest(ids, store, cap) {
 async function _cycle() {
   if (_running || !_enabled) return;
   _running = true;
+  // Phase 7 durable job (NOOP unless jobs.repairIntel.durable is on).
+  let job = require('../jobs').NOOP_HANDLE;
   try {
     if (!_mayRun()) { return; } // standby host — do nothing
     const schema = require('./schema');
@@ -86,25 +88,42 @@ async function _cycle() {
     const batch = _stalest(ids, store, SYNC_BATCH);
     if (!batch.length) return; // everything is fresh
 
+    job = require('../jobs').begin({ type: 'repairIntel', scopeKey: 'cycle' });
     let synced = 0, failed = 0, aiRan = 0;
     let aiCandidate = null;
-    for (const id of batch) {
+    let pendingAi = null;
+    if (job.resumed) {
+      const prev = job.checkpoint;
+      if (prev.aiCandidate && !prev.aiDone) pendingAi = prev.aiCandidate;
+    }
+    const runBatch = job.resumed ? batch.filter(id => !job.isUnitPoisoned(id)) : batch;
+    job.start();
+    for (const id of runBatch) {
+      job.unitsStarted([id]);
       try {
         const res = await fetch.syncUnit(id, { incremental: true });
+        const changed = !!(res && ((res.added || 0) + (res.updated || 0)) > 0);
         if (res && res.ok) {
           synced++;
           // Remember a unit that actually changed as the AI candidate.
-          if (!aiCandidate && ((res.added || 0) + (res.updated || 0)) > 0) aiCandidate = id;
+          if (!aiCandidate && changed) aiCandidate = id;
         } else { failed++; }
-      } catch (e) { failed++; logger.warn('[bg] sync ' + id + ' failed: ' + e.message); }
+        job.unitsSettled([{ key: id, status: res && res.ok ? 'done' : 'failed', detail: { changed } }]);
+      } catch (e) {
+        failed++; logger.warn('[bg] sync ' + id + ' failed: ' + e.message);
+        job.unitsSettled([{ key: id, status: 'failed', detail: { error: true } }]);
+      }
     }
+    if (!aiCandidate && pendingAi) aiCandidate = pendingAi;
 
     // Optional single AI analysis — only when a lane is up and a unit changed.
     // The evidence-hash cache skips unchanged units internally anyway.
     if (aiCandidate && _aiAvailable()) {
       try {
         const analysis = require('./analysis');
+        job.setCheckpoint({ aiCandidate, aiDone: false });
         const r = await analysis.analyzeUnit(aiCandidate, {});
+        job.setCheckpoint({ aiCandidate, aiDone: true });
         if (r && r.ok) aiRan = 1;
       } catch (e) { logger.warn('[bg] analysis ' + aiCandidate + ' failed: ' + e.message); }
     }
@@ -112,8 +131,10 @@ async function _cycle() {
     if (synced || failed || aiRan) {
       logger.info('[bg] cycle: synced=' + synced + ' failed=' + failed + ' aiRan=' + aiRan + ' (batch=' + batch.length + '/' + ids.length + ' units)');
     }
+    job.complete({ synced, failed, aiRan });
   } catch (e) {
     logger.warn('[bg] cycle error: ' + e.message);
+    job.fail(e);
   } finally {
     _running = false;
   }

@@ -123,6 +123,27 @@ export function unavailableStatus(section) {
   return _st('unknown', section && section.reason ? section.reason : '', 'Unavailable');
 }
 
+/**
+ * Durable jobs (Phase 7) section pill. First matching rule wins:
+ * unavailable → off → recovery_required → degraded → foreign rows →
+ * expired lease → failed in 24h → healthy.
+ */
+export function jobsStatus(sec) {
+  if (!sec || sec.status !== 'ok') return unavailableStatus(sec);
+  if (sec.mode === 'off') return _st('disabled', 'durable jobs off');
+  const n = Number(sec.recoveryRequiredCount) || 0;
+  if (n > 0) return _st('failed', n + ' need reconciliation', 'Needs reconciliation');
+  if (sec.mode === 'degraded') return _st('degraded', sec.reason || '');
+  const tot = sec.totals || {};
+  const foreign = Number(tot.foreign) || 0;
+  if (foreign > 0) return _st('degraded', foreign + ' row(s) from a newer build');
+  const or = sec.oldestRunning;
+  if (or && or.leaseExpired) return _st('degraded', 'lease expired: ' + (or.type || ''));
+  const f24 = Number(tot.failed24h) || 0;
+  if (f24 > 0) return _st('degraded', f24 + ' failed in 24h');
+  return _st('healthy');
+}
+
 export function canReEnable(w) {
   return !!w && (w.state === 'isolated' || (w.state === 'disabled' && w.disabledReason === 'restart-budget-exhausted'));
 }

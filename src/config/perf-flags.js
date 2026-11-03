@@ -44,6 +44,11 @@
  *   settings.auth.singleOwner.aea       / FLEET_AUTH_SINGLE_OWNER_AEA       '0' | '1'
  *   settings.auth.singleOwner.reconnect / FLEET_AUTH_SINGLE_OWNER_RECONNECT '0' | '1'
  *
+ * Phase 7 durable jobs (all default OFF; see resolveJobsFlags below):
+ *
+ *   settings.jobs.durable.enabled / FLEET_JOBS_DURABLE '0' | '1'
+ *   settings.jobs.<type>.durable  / FLEET_JOBS_<UPPER_SNAKE> '0' | '1'
+ *
  * Read at point of use (startup / once per run), never per tick.
  */
 
@@ -322,10 +327,53 @@ function loadAuthCoord(deps = {}) {
   }
 }
 
+// ── Phase 7: durable job lifecycle (all default OFF) ─────────────────────────
+//   settings.jobs.durable.enabled   boolean (=== true) / FLEET_JOBS_DURABLE            '0'|'1'
+//   settings.jobs.<type>.durable    boolean (=== true) / FLEET_JOBS_<UPPER_SNAKE>      '0'|'1'
+// Effective for a type = enabled && type flag && type adopted (longDwellAiFill is
+// deferred in Phase 7: resolvable but never effective). Read once by
+// src/jobs/index.js init() and memoized (restart to change).
+const JOB_TYPES = ['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill'];
+const JOB_ENV = {
+  deepScan: 'FLEET_JOBS_DEEP_SCAN',
+  repairIntel: 'FLEET_JOBS_REPAIR_INTEL',
+  longDwellAiFill: 'FLEET_JOBS_LONG_DWELL_AI_FILL',
+  rcaAutofill: 'FLEET_JOBS_RCA_AUTOFILL',
+};
+
+function resolveJobsFlags(settings, env) {
+  const j = _obj(_obj(settings).jobs);
+  const flags = { enabled: _obj(j.durable).enabled === true, types: {} };
+  const eEn = _envBool(env, 'FLEET_JOBS_DURABLE');
+  if (eEn !== null) flags.enabled = eEn;
+  for (const t of JOB_TYPES) {
+    let on = _obj(j[t]).durable === true;
+    const e = _envBool(env, JOB_ENV[t]);
+    if (e !== null) on = e;
+    flags.types[t] = on;
+  }
+  return flags;
+}
+
+function loadJobs(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveJobsFlags(settings, env);
+  } catch (_) {
+    return resolveJobsFlags({}, {});
+  }
+}
+
 module.exports = {
   resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT,
   resolveCommsFlags, loadComms, COMMS_POLLING_MODES,
   resolveWorkerFlags, loadWorkers, WORKER_NAMES, WORKER_ENV,
   resolveSlackSpeedupFlags, loadSlackSpeedup, SPEEDUP_MODES, LANE_CONCURRENCY_MAX,
   resolveAuthCoordFlags, loadAuthCoord, AUTH_COORD_ENV,
+  resolveJobsFlags, loadJobs, JOB_TYPES, JOB_ENV,
 };

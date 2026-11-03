@@ -139,8 +139,16 @@ function registerRcaIPC() {
   handle('rca:draft', async (args) => {
     const a = args || {};
     if (!_isId(a.workOrderId)) return { ok: false, error: 'Invalid work order id' };
-    return autofill.buildDraft({ equipmentId: a.equipmentId, workOrderId: a.workOrderId,
-      vendorWorkOrderId: a.vendorWorkOrderId || null, unit: a.unit || {} });
+    // Phase 7: tracking-only durable job (NOOP unless jobs.rcaAutofill.durable is on).
+    const job = require('../jobs').begin({ type: 'rcaAutofill', scopeKey: a.workOrderId });
+    job.start();
+    try {
+      const d = await autofill.buildDraft({ equipmentId: a.equipmentId, workOrderId: a.workOrderId,
+        vendorWorkOrderId: a.vendorWorkOrderId || null, unit: a.unit || {} });
+      if (d && d.ok) job.complete({ existing: !!d.existing, aiError: !!d.aiError });
+      else job.fail((d && d.error) || 'draft failed');
+      return d;
+    } catch (e) { job.fail(e); throw e; }
   });
 
   handle('rca:submit', async (args) => {

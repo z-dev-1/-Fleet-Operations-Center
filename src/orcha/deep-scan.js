@@ -130,7 +130,23 @@ function _saveChangedNotes(notesStore, changedIds) {
   store.save('notesStore', disk);
 }
 
+// Phase 7 durable jobs: fleet passes (opts.durableScope === 'fleet') get a
+// durable handle when jobs.deepScan.durable is on; everything else (and every
+// path with the flags off) gets the NOOP handle and runs exactly as before.
 async function runOrchaDeepScan(mergedRows, opts) {
+  const { NOOP_HANDLE } = require('../jobs');   // side-effect-free require
+  const jobRef = { job: NOOP_HANDLE, resumeSkipped: 0 };
+  try {
+    const out = await _runOrchaDeepScanBody(mergedRows, opts, jobRef);
+    jobRef.job.complete({ processed: out && out.processed, improved: out && out.improved, resumeSkipped: jobRef.resumeSkipped });
+    return out;                                  // the body's own object, untouched
+  } catch (e) {
+    jobRef.job.fail(e);
+    throw e;                                     // same error object as today
+  }
+}
+
+async function _runOrchaDeepScanBody(mergedRows, opts, jobRef) {
   const { pushData, pushStatus, payload } = opts;
   const uptakeCount = opts.uptakeCount || 0;
   const relayCount  = opts.relayCount  || 0;
@@ -201,6 +217,23 @@ async function runOrchaDeepScan(mergedRows, opts) {
     if (_skipped.length) logger.info('[DS] skipping ' + _skipped.length + ' unit(s) with unchanged inputs since their last build');
   }
 
+  // Phase 7: durable fleet pass (NOOP unless jobs.deepScan.durable is on).
+  if (unitsToProcess.length > 0 && opts.durableScope === 'fleet') {
+    jobRef.job = require('../jobs').begin({ type: 'deepScan', scopeKey: 'fleet' });
+  }
+  const job = jobRef.job;
+  let k = 0;                                   // declared before the if: fresh jobs use 0
+  if (job.resumed) {
+    for (let j = unitsToProcess.length - 1; j >= 0; j--) {
+      const u = unitsToProcess[j];
+      const id = u.equipmentId;
+      if (job.isUnitPoisoned(id) || job.isUnitDone(id, _aiInputSig(u, notesStore[id] || {}))) { unitsToProcess.splice(j, 1); k++; }
+    }
+    jobRef.resumeSkipped = k;
+    if (k) logger.info('[DS] resume job ' + job.jobId + ' attempt ' + job.attempt + ': skipping ' + k + ' unit(s) completed before restart');
+  }
+  job.setCheckpoint({ total: unitsToProcess.length + k, resumeSkipped: k });   // no-op on NOOP
+
   logger.info('Orcha Deep Scan: processing ' + unitsToProcess.length + ' units...');
   pushStatus('\uD83E\uDDE0 Orcha analyzing ' + unitsToProcess.length + ' units...');
   let improved = 0;
@@ -216,8 +249,14 @@ async function runOrchaDeepScan(mergedRows, opts) {
   // earlier one in notesStore. Advancing by 5 (matching the slice window)
   // restores the non-overlapping batching the comment above intends.
   const allResults = []; // collect all settled results across batches for post-scan detection
+  job.start();
   for (let i = 0; i < unitsToProcess.length; i += batchSize) {
     const batch   = unitsToProcess.slice(i, i + batchSize);
+    // Phase 7: PRE-processing input signatures (only when durable).
+    const inSig = job.durable
+      ? new Map(batch.map(u => [u.equipmentId, _aiInputSig(u, notesStore[u.equipmentId] || {})]))
+      : null;
+    job.unitsStarted(batch.map(u => u.equipmentId));
     const results = await Promise.allSettled(
       batch.map(u => _processUnit(u, notesStore, askOrcha))
     );
@@ -367,6 +406,13 @@ async function runOrchaDeepScan(mergedRows, opts) {
     // reach disk (and the UI on next push) as soon as they're generated.
     try {
       _saveChangedNotes(notesStore, _changedIds);
+      // Phase 7: "done" only once notes are persisted. Guarded so the flags-off
+      // path never builds or dereferences anything (inSig is null there).
+      if (job.durable && inSig) job.unitsSettled(batch.map((u, idx) => {
+        const r = results[idx]; const id = u.equipmentId;
+        if (r && r.status === 'fulfilled' && r.value) return { key: id, status: 'done', sig: r.value.timeline ? (inSig.get(id) || null) : null };
+        return { key: id, status: 'failed' };
+      }));
       // Never push an EMPTY rows array -- the renderer would REPLACE the whole
       // fleet with [] and zero the grid. Only push when we actually have rows.
       if (pushData && typeof pushData === 'function' && Array.isArray(mergedRows) && mergedRows.length) {

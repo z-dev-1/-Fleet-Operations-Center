@@ -563,6 +563,7 @@ function createSyncEngine(ctx) {
         payload,
         uptakeCount,
         relayCount,
+        durableScope: 'fleet',
       })
         .catch(e => logger.error('Orcha Deep Scan error (non-fatal):', e.message))
         .finally(() => { _deepScanInProgress = false; }); }, 15000); // Wait 15s for relay extraction to finish
