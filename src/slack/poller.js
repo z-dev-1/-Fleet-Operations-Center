@@ -47,6 +47,10 @@
  * Never eagerly requires electron or the engines (lazy, per call).
  */
 
+// Origin tag for the Slack fair lane (attribution only; transparent and
+// synchronous, so it changes no call, argument, order or timing).
+const { runWithOrigin } = require('./lane-origin');
+
 const KINDS = ['dmNotify', 'channelWatch', 'dmAutoReply'];
 
 const POLL_SPECS = Object.freeze({
@@ -243,16 +247,16 @@ function createPoller(deps = {}) {
       case 'dmNotify':
         if (origin === 'main') {
           if (!isSlackConfigured()) return NOT_AUTHED;
-          return track(POLL_SPECS.dmNotify.trackName, () => engines.dmNotify());
+          return track(POLL_SPECS.dmNotify.trackName, () => runWithOrigin('dmNotify', () => engines.dmNotify()));
         }
-        return engines.dmNotify();
+        return runWithOrigin('dmNotify', () => engines.dmNotify());
       case 'channelWatch':
         if (!mayPollSlack()) return { skipped: STANDBY_RESULT_TEXT };
-        return track(POLL_SPECS.channelWatch.trackName, () => engines.channelWatch(engineLog), _skipOpt);
+        return track(POLL_SPECS.channelWatch.trackName, () => runWithOrigin('channelWatch', () => engines.channelWatch(engineLog)), _skipOpt);
       case 'dmAutoReply':
       default: {
         if (!mayPollSlack()) return { skipped: STANDBY_RESULT_TEXT };
-        const p = track(POLL_SPECS.dmAutoReply.trackName, () => engines.dmAutoReply(engineLog), _skipOpt);
+        const p = track(POLL_SPECS.dmAutoReply.trackName, () => runWithOrigin('dmAutoReply', () => engines.dmAutoReply(engineLog)), _skipOpt);
         return _dmAutoReplyWithBubble(p, ctx);
       }
     }

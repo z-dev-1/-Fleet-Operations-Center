@@ -143,7 +143,7 @@ function _setRawRequestForTests(fn) { _rawRequest = typeof fn === 'function' ? f
 function _newLaneStats() {
   return { calls: 0, byMethod: {}, queueWaitMsTotal: 0, requestMsTotal: 0, maxQueueDepth: 0, inFlightMax: 0,
     rateLimited: 0, retries: 0, gaveUp: 0, budgetDelays: 0, concurrency: 1, pacing: false,
-    _starts: [], _depth: 0 };
+    _starts: [], _depth: 0, fairness: false, _byOrigin: null, prioritizedWrites: null };
 }
 let _laneStats = _newLaneStats();
 const _STATS_RING = 1000;
@@ -168,22 +168,26 @@ function getLaneStats() {
       queueWaitMsTotal: s.queueWaitMsTotal, requestMsTotal: s.requestMsTotal,
       maxQueueDepth: s.maxQueueDepth, inFlightMax: s.inFlightMax,
       rateLimited: s.rateLimited, retries: s.retries, gaveUp: s.gaveUp, budgetDelays: s.budgetDelays,
-      concurrency: s.concurrency, pacing: s.pacing };
+      concurrency: s.concurrency, pacing: s.pacing,
+      fairness: s.fairness === true,
+      byOrigin: s._byOrigin ? JSON.parse(JSON.stringify(s._byOrigin)) : null,
+      prioritizedWrites: s.prioritizedWrites };
   } catch (_) { return null; }
 }
 
 // ── Phase 4b S5/S6: lane selection, memoized ONCE per process on the first
 // call (the lane must never change shape with requests in flight). Default
 // (K = 1, pacing off) keeps today's chain below. Any load error → today's lane.
-let _laneSel = null;   // { lane: null | createLane(...) }
+let _laneSel = null;   // { lane: null | createLane(...), fair: null | createFairLane(...) }
 function _selectLane() {
   if (_laneSel) return _laneSel;
-  let K = 1, pacing = false;
+  let K = 1, pacing = false, fairness = false;
   try {
     const f = require('../config/perf-flags').loadSlackSpeedup();
     K = f.laneConcurrency; pacing = f.laneTierPacing === true || K > 1;
-  } catch (_) { K = 1; pacing = false; }
-  _laneSel = { lane: null };
+    fairness = f.laneFairness === true;
+  } catch (_) { K = 1; pacing = false; fairness = false; }
+  _laneSel = { lane: null, fair: null };
   if (K > 1 || pacing) {
     try {
       const { createLane } = require('../slack/web-api-lane');
@@ -202,14 +206,95 @@ function _selectLane() {
       });
       logger.info('[slack] lane concurrency=' + _laneSel.lane.concurrency + ' pacing=' + (_laneSel.lane.pacing ? 'on' : 'off'));
     } catch (_) { _laneSel.lane = null; }
+    if (fairness) {
+      logger.info('[slack] laneFairness ignored: requires laneConcurrency=1 and laneTierPacing off (have concurrency=' + K + ' pacing=' + (pacing ? 'on' : 'off') + ')');
+    }
+  } else if (fairness) {
+    // Fair lane (comms.speedup.laneFairness): reorders queued calls only; each
+    // job runs _fairServe, a verbatim copy of the attempt loop below.
+    try {
+      const { createFairLane } = require('../slack/fair-lane');
+      const { currentOrigin, ORIGINS } = require('../slack/lane-origin');
+      const { READ_METHODS } = require('../slack/web-api-lane');
+      _laneSel.fair = createFairLane({
+        serve: _fairServe, isWrite: (m) => !READ_METHODS.has(m), now: () => Date.now(), logger,
+        hooks: {
+          onEnqueue: (origin, isWrite, totalDepth) => _stat((s) => {
+            const o = s._byOrigin && s._byOrigin[origin];
+            if (o) { o.enqueued++; o.queued++; if (o.queued > o.maxQueued) o.maxQueued = o.queued; if (isWrite) o.writes++; }
+            if (totalDepth > s.maxQueueDepth) s.maxQueueDepth = totalDepth;
+          }),
+          onDequeue: (origin, isWrite, overtookReads) => _stat((s) => {
+            const o = s._byOrigin && s._byOrigin[origin];
+            if (o) { o.served++; o.queued--; }
+            if (isWrite && overtookReads) s.prioritizedWrites++;
+          }),
+        },
+      });
+      _laneSel.originOf = currentOrigin;
+      _stat((s) => {
+        s.fairness = true; s.prioritizedWrites = 0; s._byOrigin = {};
+        for (const o of ORIGINS) s._byOrigin[o] = { enqueued: 0, served: 0, queued: 0, maxQueued: 0, waitMsTotal: 0, waitMsMax: 0, writes: 0 };
+      });
+      logger.info('[slack] lane fairness=on (round-robin: ' + ORIGINS.join(',') + '; writes first)');
+    } catch (e) {
+      _laneSel.fair = null;
+      logger.warn('[slack] fair lane unavailable — using default lane: ' + (e && e.message ? e.message : String(e)));
+    }
   }
   _stat((s) => { s.concurrency = _laneSel.lane ? _laneSel.lane.concurrency : 1; s.pacing = !!(_laneSel.lane && _laneSel.lane.pacing); });
   return _laneSel;
 }
 
+// Fair-lane job server: a VERBATIM copy of slackWebApi's attempt loop below
+// (spacing, retries, 429 backoff slept inside the job, stats, log text). The
+// only differences: the queue wait uses job.enqAt; the per-origin wait is
+// recorded at attempt 0 (the real start); job.started marks the start for the
+// lane's depth count. It never touches s._depth, and only _statStart grows
+// queueWaitMsTotal. Pinned by tests/slack-lane-fairness.test.js T1.2.
+async function _fairServe(job) {
+  const method = job.method, params = job.params;
+  for (let attempt = 0; attempt <= _SLACK_MAX_RETRIES; attempt++) {
+    // enforce minimum spacing since the previous request started
+    const wait = _SLACK_MIN_INTERVAL_MS - (Date.now() - _slackLastAt);
+    if (wait > 0) await _sleep(wait);
+    _slackLastAt = Date.now();
+
+    if (attempt === 0) {
+      job.started = true;
+      _stat((s) => {
+        const o = s._byOrigin && s._byOrigin[job.origin];
+        if (o) { const w = Math.max(0, _slackLastAt - job.enqAt); o.waitMsTotal += w; if (w > o.waitMsMax) o.waitMsMax = w; }
+      });
+    }
+    _statStart(method, attempt === 0 ? _slackLastAt - job.enqAt : 0, 1);
+    let res;
+    try { res = await _rawRequest(method, params); }
+    finally { const _ms = Date.now() - _slackLastAt; _stat((s) => { s.requestMsTotal += _ms; }); }
+    if (!res || !res.__rateLimited) return res; // normal result
+    _stat((s) => { s.rateLimited++; });
+
+    if (attempt === _SLACK_MAX_RETRIES) {
+      // Give up gracefully in Slack's own shape so callers handle it as before.
+      _stat((s) => { s.gaveUp++; });
+      logger.warn('[slack] ' + method + ' rate-limited after ' + (_SLACK_MAX_RETRIES + 1) + ' attempts — giving up');
+      return { ok: false, error: 'ratelimited' };
+    }
+    // Honor Retry-After, else exponential backoff (1s, 2s, 4s, 8s) + jitter.
+    const backoff = res.retryAfter != null
+      ? (res.retryAfter * 1000 + 250)
+      : (Math.pow(2, attempt) * 1000 + Math.floor(Math.random() * 300));
+    logger.info('[slack] ' + method + ' 429 — backing off ' + Math.round(backoff) + 'ms (attempt ' + (attempt + 1) + ')');
+    _stat((s) => { s.retries++; });
+    await _sleep(backoff);
+  }
+}
+// ── end _fairServe
+
 function slackWebApi(method, params = {}) {
   const sel = _selectLane();
   if (sel.lane) return sel.lane.enqueue(method, params);
+  if (sel.fair) return sel.fair.enqueue(method, params, sel.originOf());
   const _enqAt = Date.now();
   _stat((s) => { s._depth++; if (s._depth > s.maxQueueDepth) s.maxQueueDepth = s._depth; });
   // Chain onto the shared lane so calls are spaced and a 429 backoff on one
@@ -1089,6 +1174,14 @@ async function uploadFileToChannel(channelId, opts) {
 // Zero-width characters: invisible in the Slack client, stable across fetches.
 const SELF_REPLY_MARKER = '\u200B\u2060'; // ZWSP + WORD JOINER
 
+// Test-only: reset only the lane (selection, stats, chain, spacing clock); the
+// name/peer caches are left alone, like the engines' __test__.resetSpeedup.
+function _resetSpeedupForTests() {
+  _laneSel = null;
+  _laneStats = _newLaneStats();
+  _slackChain = Promise.resolve();
+  _slackLastAt = 0;
+}
 // Test-only: reset lane state (the name caches are deliberately NOT reset --
 // resetting them would change today's call list).
 function _resetForTests() {
@@ -1101,3 +1194,5 @@ function _resetForTests() {
 }
 
 module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, fetchUserProfile, downloadFileContent, downloadFileBuffer, uploadFileToChannel, SELF_REPLY_MARKER, getLaneStats, _setRawRequestForTests, _resetForTests };
+// Test-only handles (never used by src/): slackWebApi is otherwise module-private.
+module.exports.__test__ = { resetSpeedup: _resetSpeedupForTests, slackWebApi };

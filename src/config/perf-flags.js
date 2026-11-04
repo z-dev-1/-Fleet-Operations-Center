@@ -35,7 +35,7 @@
  * Phase 4b Slack poll speed-ups (all default OFF; see resolveSlackSpeedupFlags):
  *
  *   settings.comms.speedup.{dmPeerCache, dmSkipUnchanged, pmAlertSharedHistory,
- *     laneConcurrency, laneTierPacing} / FLEET_SLACK_*
+ *     laneConcurrency, laneTierPacing, laneFairness} / FLEET_SLACK_*
  *   (S3 threadReplyReuse is deferred to its own round and is not a flag here.)
  *
  * Phase 9 auth coordination (all default OFF; see resolveAuthCoordFlags):
@@ -228,6 +228,9 @@ function loadWorkers(deps = {}) {
 //   settings.comms.speedup.pmAlertSharedHistory bool (=== true)     / FLEET_SLACK_PM_SHARED_HISTORY  '0'|'1'
 //   settings.comms.speedup.laneConcurrency      integer 1..4 (1)    / FLEET_SLACK_LANE_CONCURRENCY   '1'..'4'
 //   settings.comms.speedup.laneTierPacing       bool (=== true)     / FLEET_SLACK_LANE_TIER_PACING   '0'|'1'
+//   settings.comms.speedup.laneFairness         bool (=== true)     / FLEET_SLACK_LANE_FAIRNESS      '0'|'1'
+//     (fair lane: write priority + round-robin reads by origin; only with
+//      laneConcurrency 1 and laneTierPacing off, otherwise ignored)
 // Modes (settings and env) are trimmed + case-insensitive; anything outside
 // off|shadow|on is 'off' in settings and ignored in env. laneConcurrency must be
 // a JS integer 1..4 in settings (anything else -> 1); env accepts digit strings
@@ -254,6 +257,7 @@ function resolveSlackSpeedupFlags(settings, env) {
     pmAlertSharedHistory: sp.pmAlertSharedHistory === true,
     laneConcurrency: _laneK(sp.laneConcurrency) || 1,
     laneTierPacing: sp.laneTierPacing === true,
+    laneFairness: sp.laneFairness === true,
   };
   const eP = _envBool(env, 'FLEET_SLACK_DM_PEER_CACHE');
   if (eP !== null) flags.dmPeerCache = eP;
@@ -268,6 +272,8 @@ function resolveSlackSpeedupFlags(settings, env) {
   }
   const eT = _envBool(env, 'FLEET_SLACK_LANE_TIER_PACING');
   if (eT !== null) flags.laneTierPacing = eT;
+  const eF = _envBool(env, 'FLEET_SLACK_LANE_FAIRNESS');
+  if (eF !== null) flags.laneFairness = eF;
   return flags;
 }
 

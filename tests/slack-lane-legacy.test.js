@@ -37,6 +37,7 @@ function transport(method, params) {
 let ss;
 beforeAll(() => { vi.useFakeTimers(); store.save('settings', {}); });
 beforeEach(() => {
+  delete process.env.FLEET_SLACK_LANE_FAIRNESS;
   starts = []; inFlight = 0; maxInFlight = 0; script = []; LOGS.length = 0;
   ss = loadRealSlackSend(require, tmpDir, { transport });
 });

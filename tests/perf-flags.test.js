@@ -84,7 +84,7 @@ describe('perf flags', () => {
     expect(loadComms({ load: () => { throw new Error('boom'); }, env: {} })).toEqual({ mainProcessPolling: 'off', channelWatchClaims: false });
   });
   // ── Phase 4b: Slack speed-up flags ──
-  const SP_DEFAULTS = { dmPeerCache: false, dmSkipUnchanged: 'off', pmAlertSharedHistory: false, laneConcurrency: 1, laneTierPacing: false };
+  const SP_DEFAULTS = { dmPeerCache: false, dmSkipUnchanged: 'off', pmAlertSharedHistory: false, laneConcurrency: 1, laneTierPacing: false, laneFairness: false };
   const sp = (o) => ({ comms: { speedup: o } });
   it('speedup defaults: everything off, K = 1, pacing false', () => {
     expect(resolveSlackSpeedupFlags({}, {})).toEqual(SP_DEFAULTS);
@@ -96,7 +96,7 @@ describe('perf flags', () => {
   });
   it('speedup settings values are honored', () => {
     expect(resolveSlackSpeedupFlags(sp({ dmPeerCache: true, dmSkipUnchanged: 'shadow', pmAlertSharedHistory: true, laneConcurrency: 3, laneTierPacing: true }), {}))
-      .toEqual({ dmPeerCache: true, dmSkipUnchanged: 'shadow', pmAlertSharedHistory: true, laneConcurrency: 3, laneTierPacing: true });
+      .toEqual({ dmPeerCache: true, dmSkipUnchanged: 'shadow', pmAlertSharedHistory: true, laneConcurrency: 3, laneTierPacing: true, laneFairness: false });
     expect(resolveSlackSpeedupFlags(sp({ dmSkipUnchanged: 'ON ' }), {})).toMatchObject({ dmSkipUnchanged: 'on' });
     expect(resolveSlackSpeedupFlags(sp({ dmSkipUnchanged: ' Shadow' }), {})).toMatchObject({ dmSkipUnchanged: 'shadow' });
     // S3 is deferred: a threadReplyReuse setting is not a flag and never appears in the output.
@@ -118,7 +118,7 @@ describe('perf flags', () => {
     expect(resolveSlackSpeedupFlags(all, {
       FLEET_SLACK_DM_PEER_CACHE: '0', FLEET_SLACK_DM_SKIP_UNCHANGED: 'off',
       FLEET_SLACK_PM_SHARED_HISTORY: '0', FLEET_SLACK_LANE_CONCURRENCY: '4', FLEET_SLACK_LANE_TIER_PACING: '0',
-    })).toEqual({ dmPeerCache: false, dmSkipUnchanged: 'off', pmAlertSharedHistory: false, laneConcurrency: 4, laneTierPacing: false });
+    })).toEqual({ dmPeerCache: false, dmSkipUnchanged: 'off', pmAlertSharedHistory: false, laneConcurrency: 4, laneTierPacing: false, laneFairness: false });
     expect(resolveSlackSpeedupFlags({}, { FLEET_SLACK_DM_PEER_CACHE: '1', FLEET_SLACK_PM_SHARED_HISTORY: '1', FLEET_SLACK_LANE_TIER_PACING: '1', FLEET_SLACK_DM_SKIP_UNCHANGED: ' On ' }))
       .toMatchObject({ dmPeerCache: true, pmAlertSharedHistory: true, laneTierPacing: true, dmSkipUnchanged: 'on' });
     const bogus = { FLEET_SLACK_DM_PEER_CACHE: 'yes', FLEET_SLACK_DM_SKIP_UNCHANGED: 'maybe',
@@ -126,6 +126,18 @@ describe('perf flags', () => {
     expect(resolveSlackSpeedupFlags(all, bogus)).toEqual(resolveSlackSpeedupFlags(all, {}));
     for (const k of ['0', '2.5', 'two', '-1', '']) expect(resolveSlackSpeedupFlags(all, { FLEET_SLACK_LANE_CONCURRENCY: k }).laneConcurrency).toBe(2);
     expect(resolveSlackSpeedupFlags({}, { FLEET_SLACK_LANE_CONCURRENCY: ' 3 ' }).laneConcurrency).toBe(3);
+  });
+  it('laneFairness: default off; only settings === true; env \'1\'/\'0\' wins; other env ignored', () => {
+    expect(resolveSlackSpeedupFlags({}, {}).laneFairness).toBe(false);
+    expect(resolveSlackSpeedupFlags(sp({ laneFairness: true }), {}).laneFairness).toBe(true);
+    for (const bad of ['true', 1, 'yes', null, {}]) expect(resolveSlackSpeedupFlags(sp({ laneFairness: bad }), {}).laneFairness).toBe(false);
+    expect(resolveSlackSpeedupFlags({}, { FLEET_SLACK_LANE_FAIRNESS: '1' }).laneFairness).toBe(true);
+    expect(resolveSlackSpeedupFlags(sp({ laneFairness: true }), { FLEET_SLACK_LANE_FAIRNESS: '0' }).laneFairness).toBe(false);
+    for (const bad of ['yes', 'true', 'on', '2', '']) {
+      expect(resolveSlackSpeedupFlags({}, { FLEET_SLACK_LANE_FAIRNESS: bad }).laneFairness).toBe(false);
+      expect(resolveSlackSpeedupFlags(sp({ laneFairness: true }), { FLEET_SLACK_LANE_FAIRNESS: bad }).laneFairness).toBe(true);
+    }
+    expect(loadSlackSpeedup({ load: () => sp({ laneFairness: true }), env: {} }).laneFairness).toBe(true);
   });
   it('loadSlackSpeedup() uses the injected loader and survives a throwing one', () => {
     expect(loadSlackSpeedup({ load: () => sp({ dmPeerCache: true }), env: {} }).dmPeerCache).toBe(true);
