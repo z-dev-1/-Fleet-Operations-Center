@@ -1,0 +1,114 @@
+{
+  "changed": {
+    "sync": [
+      "U1",
+      "U2",
+      "U3"
+    ],
+    "syncOpts": [
+      {
+        "incremental": true
+      },
+      {
+        "incremental": true
+      },
+      {
+        "incremental": true
+      }
+    ],
+    "analyze": [
+      [
+        "U1",
+        {}
+      ]
+    ],
+    "warn": [],
+    "info": [
+      "[bg] cycle: synced=3 failed=0 aiRan=1 (batch=3/3 units)"
+    ],
+    "ret": "<undefined>"
+  },
+  "nullResult": {
+    "sync": [
+      "U1",
+      "U2",
+      "U3"
+    ],
+    "syncOpts": [
+      {
+        "incremental": true
+      },
+      {
+        "incremental": true
+      },
+      {
+        "incremental": true
+      }
+    ],
+    "analyze": [],
+    "warn": [],
+    "info": [
+      "[bg] cycle: synced=2 failed=1 aiRan=0 (batch=3/3 units)"
+    ],
+    "ret": "<undefined>"
+  },
+  "throwing": {
+    "sync": [
+      "U1",
+      "U2",
+      "U3"
+    ],
+    "syncOpts": [
+      {
+        "incremental": true
+      },
+      {
+        "incremental": true
+      },
+      {
+        "incremental": true
+      }
+    ],
+    "analyze": [
+      [
+        "U3",
+        {}
+      ]
+    ],
+    "warn": [
+      "[bg] sync U2 failed: AAP 503"
+    ],
+    "info": [
+      "[bg] cycle: synced=2 failed=1 aiRan=1 (batch=3/3 units)"
+    ],
+    "ret": "<undefined>"
+  },
+  "unchanged": {
+    "sync": [
+      "U1",
+      "U2"
+    ],
+    "syncOpts": [
+      {
+        "incremental": true
+      },
+      {
+        "incremental": true
+      }
+    ],
+    "analyze": [],
+    "warn": [],
+    "info": [
+      "[bg] cycle: synced=2 failed=0 aiRan=0 (batch=2/2 units)"
+    ],
+    "ret": "<undefined>"
+  },
+  "allFresh": {
+    "sync": [],
+    "syncOpts": [],
+    "analyze": [],
+    "warn": [],
+    "info": [],
+    "ret": "<undefined>"
+  }
+}

@@ -27,10 +27,12 @@ async function _loadConfig() {
     const mode = document.getElementById('fas-mode');
     const steps = document.getElementById('fas-max-steps');
     const rt = document.getElementById('fas-max-runtime');
+    const retire = document.getElementById('fas-retire-legacy');
     if (en) en.checked = !!c.enabled;
-    if (mode) mode.value = c.mode || 'shadow';
+    if (mode) mode.value = c.mode || 'approval';
     if (steps) steps.value = c.maxSteps || 6;
     if (rt) rt.value = Math.round((c.maxRuntimeMs || 45000) / 1000);
+    if (retire) retire.checked = c.retireLegacyReasoning !== false;
   } catch (e) { /* config not available yet */ }
 }
 
@@ -40,7 +42,9 @@ async function _saveConfig() {
     const mode = document.getElementById('fas-mode').value;
     const maxSteps = parseInt(document.getElementById('fas-max-steps').value, 10) || 6;
     const maxRuntimeMs = (parseInt(document.getElementById('fas-max-runtime').value, 10) || 45) * 1000;
-    await slackBridge.fasSaveConfig({ enabled, mode, maxSteps, maxRuntimeMs });
+    const _retireEl = document.getElementById('fas-retire-legacy');
+    const retireLegacyReasoning = _retireEl ? !!_retireEl.checked : true;
+    await slackBridge.fasSaveConfig({ enabled, mode, maxSteps, maxRuntimeMs, retireLegacyReasoning });
     _status('FAS config saved (' + mode + (enabled ? ', enabled' : ', disabled') + ')', 'ok');
     toast.show('success', 'FAS config saved', 2000);
     try { _refreshEngineStatus(); } catch (_) {}
@@ -433,6 +437,105 @@ async function _refreshPlaybook() {
   } catch (e) { list.innerHTML = '<div class="sd-hint">Failed: ' + _esc(e.message) + '</div>'; }
 }
 
+// ── Phase 3: channel-role registry editor ───────────────────────────────────
+async function _refreshChannels() {
+  const list = document.getElementById('fas-chan-list');
+  if (!list) return;
+  try {
+    const rows = (slackBridge.fasGetChannels) ? await slackBridge.fasGetChannels() : [];
+    if (!rows || !rows.length) { list.innerHTML = '<div class="sd-hint">No channel roles saved yet. Watched channels default to auto-detected roles; confirm them here to make them authoritative.</div>'; return; }
+    list.innerHTML = rows.map((r) => {
+      const feed = /FEED/.test(r.mode);
+      const color = feed ? 'var(--warn,#c98a00)' : 'var(--acc2,#2d7)';
+      return '<div class="sd-hint" style="display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid var(--bd,#333);padding:3px 0">' +
+        '<span><strong>' + _esc(r.name || r.channelId) + '</strong> <span style="color:' + color + ';font-weight:700">' + _esc(r.mode) + '</span> · ' + _esc(r.replyPolicy) + '</span>' +
+        '<span style="opacity:.55;font-size:9px">' + _esc(r.trustedSourceLevel || '') + ' · ' + _esc(r.source || '') + '</span>' +
+        '</div>';
+    }).join('');
+  } catch (e) { list.innerHTML = '<div class="sd-hint">Failed: ' + _esc(e.message) + '</div>'; }
+}
+
+async function _saveChannel() {
+  const channelId = (document.getElementById('fas-chan-id').value || '').trim();
+  const name = (document.getElementById('fas-chan-name').value || '').trim();
+  const mode = document.getElementById('fas-chan-mode').value;
+  const replyPolicy = document.getElementById('fas-chan-reply').value;
+  if (!channelId) { toast.show('error', 'Channel ID required', 2500); return; }
+  try {
+    await slackBridge.fasSaveChannel({ channelId, name, mode, replyPolicy, ingestionPolicy: /FEED|OPERATIONAL/.test(mode) });
+    toast.show('success', 'Channel role saved', 2000);
+    _refreshChannels();
+  } catch (e) { toast.show('error', e.message, 3000); }
+}
+
+async function _detectChannel() {
+  const name = (document.getElementById('fas-chan-name').value || '').trim();
+  if (!name) { toast.show('error', 'Enter a channel name to auto-detect', 2500); return; }
+  try {
+    const g = await slackBridge.fasClassifyChannel(name);
+    if (g && g.mode) {
+      document.getElementById('fas-chan-mode').value = g.mode;
+      document.getElementById('fas-chan-reply').value = g.replyPolicy || 'normal';
+      toast.show('info', 'Suggested: ' + g.mode + ' (' + Math.round((g.confidence || 0) * 100) + '% — confirm by saving)', 3000);
+    }
+  } catch (e) { toast.show('error', e.message, 3000); }
+}
+
+// ── Phase 5: identity domain mappings + change log ──────────────────────────
+function _parseMapLines(text) {
+  const out = {};
+  String(text || '').split(/\n+/).forEach((line) => {
+    const m = line.split('=');
+    if (m.length >= 2) {
+      const domain = m[0].trim().toLowerCase();
+      const val = m.slice(1).join('=').trim();
+      if (domain && val) out[domain] = val;
+    }
+  });
+  return out;
+}
+function _toMapLines(obj) {
+  return Object.entries(obj || {}).map(([k, v]) => k + ' = ' + v).join('\n');
+}
+
+async function _refreshMappings() {
+  try {
+    const m = (slackBridge.fasGetIdentityMappings) ? await slackBridge.fasGetIdentityMappings() : {};
+    const cEl = document.getElementById('fas-map-carrier');
+    const vEl = document.getElementById('fas-map-vendor');
+    if (cEl) cEl.value = _toMapLines(m.carrierDomains || {});
+    if (vEl) vEl.value = _toMapLines(m.vendorDomains || {});
+  } catch (_) { /* optional */ }
+}
+
+async function _saveMappings() {
+  const carrierDomains = _parseMapLines(document.getElementById('fas-map-carrier').value);
+  const vendorDomains = _parseMapLines(document.getElementById('fas-map-vendor').value);
+  // scacByDomain mirrors the carrier mapping (domain -> [SCAC]) for the resolver.
+  const scacByDomain = {};
+  for (const [d, scac] of Object.entries(carrierDomains)) scacByDomain[d] = [scac];
+  try {
+    await slackBridge.fasSaveIdentityMappings({ carrierDomains, vendorDomains, scacByDomain });
+    toast.show('success', 'Identity mappings saved', 2000);
+  } catch (e) { toast.show('error', e.message, 3000); }
+}
+
+async function _refreshIdentityLog() {
+  const list = document.getElementById('fas-identity-log');
+  if (!list) return;
+  try {
+    const rows = (slackBridge.fasGetIdentityChangelog) ? await slackBridge.fasGetIdentityChangelog(60) : [];
+    if (!rows || !rows.length) { list.innerHTML = '<div class="sd-hint">No automatic identity changes yet.</div>'; return; }
+    list.innerHTML = rows.map((r) => {
+      const when = (() => { try { return new Date(r.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (_) { return ''; } })();
+      const label = r.change === 'identity' ? (_esc(r.from) + ' → ' + _esc(r.to)) : ('suggested ' + _esc(r.suggested || ''));
+      return '<div class="sd-hint" style="border-bottom:1px solid var(--bd,#333);padding:3px 0">' +
+        '<strong>' + _esc(r.slackId || '') + '</strong>: ' + label + ' · conf ' + Math.round((r.confidence || 0) * 100) + '% · ' + _esc(r.tier || '') +
+        '<div style="opacity:.55;font-size:9px">' + _esc((r.evidence || []).slice(0, 2).join('; ')) + ' · ' + _esc(when) + '</div></div>';
+    }).join('');
+  } catch (e) { list.innerHTML = '<div class="sd-hint">Failed: ' + _esc(e.message) + '</div>'; }
+}
+
 // Called once from settings.init(). Idempotent (guards against double-wiring).
 let _wired = false;
 export function initFasSettings() {
@@ -442,7 +545,7 @@ export function initFasSettings() {
   const saveBtn = document.getElementById('fas-save');
   const refreshBtn = document.getElementById('fas-refresh-audit');
   if (saveBtn) saveBtn.addEventListener('click', _saveConfig);
-  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshEngineStatus(); _refreshAudit(); _refreshReplyApprovals(); _refreshFollowUps(); _refreshApprovals(); _refreshAutoActions(); _refreshDrafts(); _refreshProfiles(); });
+  if (refreshBtn) refreshBtn.addEventListener('click', () => { _refreshEngineStatus(); _refreshAudit(); _refreshReplyApprovals(); _refreshFollowUps(); _refreshApprovals(); _refreshAutoActions(); _refreshDrafts(); _refreshProfiles(); _refreshChannels(); _refreshMappings(); _refreshIdentityLog(); });
   const migrateBtn = document.getElementById('fas-migrate-profiles');
   if (migrateBtn) migrateBtn.addEventListener('click', async () => {
     migrateBtn.disabled = true; migrateBtn.textContent = 'Migrating…';
@@ -460,6 +563,13 @@ export function initFasSettings() {
     catch (e) { toast.show('error', e.message, 3000); }
     _refreshAutoActions();
   });
+  // Phase 3/5 settings controls.
+  const chanSave = document.getElementById('fas-chan-save');
+  if (chanSave) chanSave.addEventListener('click', _saveChannel);
+  const chanDetect = document.getElementById('fas-chan-detect');
+  if (chanDetect) chanDetect.addEventListener('click', _detectChannel);
+  const mapSave = document.getElementById('fas-map-save');
+  if (mapSave) mapSave.addEventListener('click', _saveMappings);
   _loadConfig();
   _refreshEngineStatus();
   _refreshAudit();
@@ -470,6 +580,18 @@ export function initFasSettings() {
   _refreshProfiles();
   _refreshDrafts();
   _refreshPlaybook();
+  _refreshChannels();
+  _refreshMappings();
+  _refreshIdentityLog();
+
+  // FAS Roster table (self-contained module). Lazy-import so a load error in
+  // the roster view never blocks the rest of the FAS settings from wiring.
+  const rosterHost = document.getElementById('fas-roster-host');
+  if (rosterHost) {
+    import('./fas-roster.js')
+      .then((mod) => { try { mod.mount(rosterHost); } catch (_) {} })
+      .catch(() => {});
+  }
 }
 
 export { _refreshAudit as refreshFasAudit };

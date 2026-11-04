@@ -63,18 +63,28 @@ function logout() {
   return { ok: true };
 }
 
-/**
- * Call Slack Web API
- * Uses full cookie header (all cookies) + xoxc token in body
- */
-function slackWebApi(method, params = {}) {
+// ── Slack rate-limit handling ───────────────────────────────────────────────
+// Slack Web API is rate-limited per method (conversations.replies especially,
+// Tier 3 ~50/min, and it 429s HARD under bursts). Previously slackWebApi fired
+// every call immediately and ignored HTTP status, so a 429 surfaced as a hard
+// "ratelimited" error and thread fetches were dropped. We now:
+//   1. SERIALIZE all calls through a single-lane queue with a minimum spacing
+//      between requests (so bursts of conversations.replies can't stampede), and
+//   2. HONOR the Retry-After header on a 429 (wait, then retry, bounded).
+// This is the single chokepoint for every Slack call, so it fixes replies,
+// history, and postMessage alike with no call-site changes.
+const _SLACK_MIN_INTERVAL_MS = 350;  // ~170 calls/min ceiling, well under bursts
+const _SLACK_MAX_RETRIES = 4;
+let _slackChain = Promise.resolve();  // serializes requests
+let _slackLastAt = 0;
+
+function _slackRawRequest(method, params) {
   const config = getConfig();
   if (!config || !config.token || !config.allCookieHeader) {
-    throw new Error('Slack not configured — please sign in first');
+    return Promise.reject(new Error('Slack not configured — please sign in first'));
   }
-
-  params.token = config.token;
-  const postData = Object.entries(params)
+  const p = Object.assign({}, params, { token: config.token });
+  const postData = Object.entries(p)
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join('&');
 
@@ -92,20 +102,237 @@ function slackWebApi(method, params = {}) {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
+        // Surface a 429 with its Retry-After so the caller can back off. Slack
+        // sends 429 either as an HTTP status OR as {ok:false,error:'ratelimited'}.
+        const retryAfter = parseInt(res.headers['retry-after'], 10);
+        if (res.statusCode === 429) {
+          return resolve({ __rateLimited: true, retryAfter: isNaN(retryAfter) ? null : retryAfter });
+        }
         try {
-          resolve(JSON.parse(data));
+          const parsed = JSON.parse(data);
+          if (parsed && parsed.ok === false && parsed.error === 'ratelimited') {
+            return resolve({ __rateLimited: true, retryAfter: isNaN(retryAfter) ? null : retryAfter });
+          }
+          resolve(parsed);
         } catch (e) {
           reject(new Error(`Slack parse error: ${data.substring(0, 300)}`));
         }
       });
     });
     req.on('error', reject);
-    req.setTimeout(8000, () => {
+    req.setTimeout(15000, () => {
       req.destroy(new Error('Slack API timeout: ' + method));
     });
     req.write(postData);
     req.end();
   });
+}
+
+const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Test seam (Phase 4b): the raw transport the lane calls. Production always uses
+// _slackRawRequest; only tests swap it (fake transport, no network).
+let _rawRequest = _slackRawRequest;
+function _setRawRequestForTests(fn) { _rawRequest = typeof fn === 'function' ? fn : _slackRawRequest; }
+
+/**
+ * Call Slack Web API — serialized + rate-limit aware.
+ * Uses full cookie header (all cookies) + xoxc token in body.
+ */
+// ── Phase 4b S0: lane stats (always on, observation only, never throws) ─────
+function _newLaneStats() {
+  return { calls: 0, byMethod: {}, queueWaitMsTotal: 0, requestMsTotal: 0, maxQueueDepth: 0, inFlightMax: 0,
+    rateLimited: 0, retries: 0, gaveUp: 0, budgetDelays: 0, concurrency: 1, pacing: false,
+    _starts: [], _depth: 0, fairness: false, _byOrigin: null, prioritizedWrites: null };
+}
+let _laneStats = _newLaneStats();
+const _STATS_RING = 1000;
+function _stat(fn) { try { fn(_laneStats); } catch (_) { /* stats never break a call */ } }
+function _statStart(method, waitMs, inFlight) {
+  _stat((s) => {
+    s.calls++;
+    s.byMethod[method] = (s.byMethod[method] || 0) + 1;
+    s.queueWaitMsTotal += Math.max(0, waitMs || 0);
+    if (inFlight > s.inFlightMax) s.inFlightMax = inFlight;
+    s._starts.push({ t: Date.now(), m: method });
+    if (s._starts.length > _STATS_RING) s._starts.shift();
+  });
+}
+function getLaneStats() {
+  try {
+    const s = _laneStats;
+    const cutoff = Date.now() - 60000;
+    const perMinute = {};
+    for (const e of s._starts) if (e.t > cutoff) perMinute[e.m] = (perMinute[e.m] || 0) + 1;
+    return { calls: s.calls, byMethod: Object.assign({}, s.byMethod), perMinute,
+      queueWaitMsTotal: s.queueWaitMsTotal, requestMsTotal: s.requestMsTotal,
+      maxQueueDepth: s.maxQueueDepth, inFlightMax: s.inFlightMax,
+      rateLimited: s.rateLimited, retries: s.retries, gaveUp: s.gaveUp, budgetDelays: s.budgetDelays,
+      concurrency: s.concurrency, pacing: s.pacing,
+      fairness: s.fairness === true,
+      byOrigin: s._byOrigin ? JSON.parse(JSON.stringify(s._byOrigin)) : null,
+      prioritizedWrites: s.prioritizedWrites };
+  } catch (_) { return null; }
+}
+
+// ── Phase 4b S5/S6: lane selection, memoized ONCE per process on the first
+// call (the lane must never change shape with requests in flight). Default
+// (K = 1, pacing off) keeps today's chain below. Any load error → today's lane.
+let _laneSel = null;   // { lane: null | createLane(...), fair: null | createFairLane(...) }
+function _selectLane() {
+  if (_laneSel) return _laneSel;
+  let K = 1, pacing = false, fairness = false;
+  try {
+    const f = require('../config/perf-flags').loadSlackSpeedup();
+    K = f.laneConcurrency; pacing = f.laneTierPacing === true || K > 1;
+    fairness = f.laneFairness === true;
+  } catch (_) { K = 1; pacing = false; fairness = false; }
+  _laneSel = { lane: null, fair: null };
+  if (K > 1 || pacing) {
+    try {
+      const { createLane } = require('../slack/web-api-lane');
+      _laneSel.lane = createLane({
+        concurrency: K, pacing, minIntervalMs: _SLACK_MIN_INTERVAL_MS, maxRetries: _SLACK_MAX_RETRIES,
+        request: (m, p) => _rawRequest(m, p), logger,
+        hooks: {
+          onEnqueue: (depth) => _stat((s) => { if (depth > s.maxQueueDepth) s.maxQueueDepth = depth; }),
+          onStart: (m, waitMs, inFlight) => _statStart(m, waitMs, inFlight),
+          onSettle: (m, ms) => _stat((s) => { s.requestMsTotal += ms; }),
+          onRateLimited: () => _stat((s) => { s.rateLimited++; }),
+          onRetry: () => _stat((s) => { s.retries++; }),
+          onGiveUp: () => _stat((s) => { s.gaveUp++; }),
+          onBudgetDelay: () => _stat((s) => { s.budgetDelays++; }),
+        },
+      });
+      logger.info('[slack] lane concurrency=' + _laneSel.lane.concurrency + ' pacing=' + (_laneSel.lane.pacing ? 'on' : 'off'));
+    } catch (_) { _laneSel.lane = null; }
+    if (fairness) {
+      logger.info('[slack] laneFairness ignored: requires laneConcurrency=1 and laneTierPacing off (have concurrency=' + K + ' pacing=' + (pacing ? 'on' : 'off') + ')');
+    }
+  } else if (fairness) {
+    // Fair lane (comms.speedup.laneFairness): reorders queued calls only; each
+    // job runs _fairServe, a verbatim copy of the attempt loop below.
+    try {
+      const { createFairLane } = require('../slack/fair-lane');
+      const { currentOrigin, ORIGINS } = require('../slack/lane-origin');
+      const { READ_METHODS } = require('../slack/web-api-lane');
+      _laneSel.fair = createFairLane({
+        serve: _fairServe, isWrite: (m) => !READ_METHODS.has(m), now: () => Date.now(), logger,
+        hooks: {
+          onEnqueue: (origin, isWrite, totalDepth) => _stat((s) => {
+            const o = s._byOrigin && s._byOrigin[origin];
+            if (o) { o.enqueued++; o.queued++; if (o.queued > o.maxQueued) o.maxQueued = o.queued; if (isWrite) o.writes++; }
+            if (totalDepth > s.maxQueueDepth) s.maxQueueDepth = totalDepth;
+          }),
+          onDequeue: (origin, isWrite, overtookReads) => _stat((s) => {
+            const o = s._byOrigin && s._byOrigin[origin];
+            if (o) { o.served++; o.queued--; }
+            if (isWrite && overtookReads) s.prioritizedWrites++;
+          }),
+        },
+      });
+      _laneSel.originOf = currentOrigin;
+      _stat((s) => {
+        s.fairness = true; s.prioritizedWrites = 0; s._byOrigin = {};
+        for (const o of ORIGINS) s._byOrigin[o] = { enqueued: 0, served: 0, queued: 0, maxQueued: 0, waitMsTotal: 0, waitMsMax: 0, writes: 0 };
+      });
+      logger.info('[slack] lane fairness=on (round-robin: ' + ORIGINS.join(',') + '; writes first)');
+    } catch (e) {
+      _laneSel.fair = null;
+      logger.warn('[slack] fair lane unavailable — using default lane: ' + (e && e.message ? e.message : String(e)));
+    }
+  }
+  _stat((s) => { s.concurrency = _laneSel.lane ? _laneSel.lane.concurrency : 1; s.pacing = !!(_laneSel.lane && _laneSel.lane.pacing); });
+  return _laneSel;
+}
+
+// Fair-lane job server: a VERBATIM copy of slackWebApi's attempt loop below
+// (spacing, retries, 429 backoff slept inside the job, stats, log text). The
+// only differences: the queue wait uses job.enqAt; the per-origin wait is
+// recorded at attempt 0 (the real start); job.started marks the start for the
+// lane's depth count. It never touches s._depth, and only _statStart grows
+// queueWaitMsTotal. Pinned by tests/slack-lane-fairness.test.js T1.2.
+async function _fairServe(job) {
+  const method = job.method, params = job.params;
+  for (let attempt = 0; attempt <= _SLACK_MAX_RETRIES; attempt++) {
+    // enforce minimum spacing since the previous request started
+    const wait = _SLACK_MIN_INTERVAL_MS - (Date.now() - _slackLastAt);
+    if (wait > 0) await _sleep(wait);
+    _slackLastAt = Date.now();
+
+    if (attempt === 0) {
+      job.started = true;
+      _stat((s) => {
+        const o = s._byOrigin && s._byOrigin[job.origin];
+        if (o) { const w = Math.max(0, _slackLastAt - job.enqAt); o.waitMsTotal += w; if (w > o.waitMsMax) o.waitMsMax = w; }
+      });
+    }
+    _statStart(method, attempt === 0 ? _slackLastAt - job.enqAt : 0, 1);
+    let res;
+    try { res = await _rawRequest(method, params); }
+    finally { const _ms = Date.now() - _slackLastAt; _stat((s) => { s.requestMsTotal += _ms; }); }
+    if (!res || !res.__rateLimited) return res; // normal result
+    _stat((s) => { s.rateLimited++; });
+
+    if (attempt === _SLACK_MAX_RETRIES) {
+      // Give up gracefully in Slack's own shape so callers handle it as before.
+      _stat((s) => { s.gaveUp++; });
+      logger.warn('[slack] ' + method + ' rate-limited after ' + (_SLACK_MAX_RETRIES + 1) + ' attempts — giving up');
+      return { ok: false, error: 'ratelimited' };
+    }
+    // Honor Retry-After, else exponential backoff (1s, 2s, 4s, 8s) + jitter.
+    const backoff = res.retryAfter != null
+      ? (res.retryAfter * 1000 + 250)
+      : (Math.pow(2, attempt) * 1000 + Math.floor(Math.random() * 300));
+    logger.info('[slack] ' + method + ' 429 — backing off ' + Math.round(backoff) + 'ms (attempt ' + (attempt + 1) + ')');
+    _stat((s) => { s.retries++; });
+    await _sleep(backoff);
+  }
+}
+// ── end _fairServe
+
+function slackWebApi(method, params = {}) {
+  const sel = _selectLane();
+  if (sel.lane) return sel.lane.enqueue(method, params);
+  if (sel.fair) return sel.fair.enqueue(method, params, sel.originOf());
+  const _enqAt = Date.now();
+  _stat((s) => { s._depth++; if (s._depth > s.maxQueueDepth) s.maxQueueDepth = s._depth; });
+  // Chain onto the shared lane so calls are spaced and a 429 backoff on one
+  // call also holds back the next (prevents a thundering herd of replies).
+  const run = _slackChain.then(async () => {
+    for (let attempt = 0; attempt <= _SLACK_MAX_RETRIES; attempt++) {
+      // enforce minimum spacing since the previous request started
+      const wait = _SLACK_MIN_INTERVAL_MS - (Date.now() - _slackLastAt);
+      if (wait > 0) await _sleep(wait);
+      _slackLastAt = Date.now();
+
+      if (attempt === 0) _stat((s) => { s._depth--; });
+      _statStart(method, attempt === 0 ? _slackLastAt - _enqAt : 0, 1);
+      let res;
+      try { res = await _rawRequest(method, params); }
+      finally { const _ms = Date.now() - _slackLastAt; _stat((s) => { s.requestMsTotal += _ms; }); }
+      if (!res || !res.__rateLimited) return res; // normal result
+      _stat((s) => { s.rateLimited++; });
+
+      if (attempt === _SLACK_MAX_RETRIES) {
+        // Give up gracefully in Slack's own shape so callers handle it as before.
+        _stat((s) => { s.gaveUp++; });
+        logger.warn('[slack] ' + method + ' rate-limited after ' + (_SLACK_MAX_RETRIES + 1) + ' attempts — giving up');
+        return { ok: false, error: 'ratelimited' };
+      }
+      // Honor Retry-After, else exponential backoff (1s, 2s, 4s, 8s) + jitter.
+      const backoff = res.retryAfter != null
+        ? (res.retryAfter * 1000 + 250)
+        : (Math.pow(2, attempt) * 1000 + Math.floor(Math.random() * 300));
+      logger.info('[slack] ' + method + ' 429 — backing off ' + Math.round(backoff) + 'ms (attempt ' + (attempt + 1) + ')');
+      _stat((s) => { s.retries++; });
+      await _sleep(backoff);
+    }
+  });
+  // Keep the lane alive even if this call rejects, so one failure doesn't stall
+  // every subsequent Slack request.
+  _slackChain = run.then(() => undefined, () => undefined);
+  return run;
 }
 
 /**
@@ -289,8 +516,8 @@ async function getChannels(limit) {
 /**
  * readMessages(channelId, limit) -- fetch history for any channel or DM
  */
-function _mapMsg(m, channelId) {
-  return {
+function _mapMsg(m, channelId, opts) {
+  const out = {
     ts:         m.ts,
     userId:     m.user || m.username || '',
     text:       m.text || '',
@@ -301,6 +528,10 @@ function _mapMsg(m, channelId) {
     attachments: m.attachments || [],
     channelId
   };
+  // Phase 4b S4 (opt-in only): mixed-snapshot guard input. Without opts the
+  // output is exactly today's shape (no latestReply key at all).
+  if (opts && opts.threadMeta === true) out.latestReply = typeof m.latest_reply === 'string' ? m.latest_reply : null;
+  return out;
 }
 
 /**
@@ -314,14 +545,16 @@ function _mapMsg(m, channelId) {
  * maxPages so a runaway channel can't stall a poll; result is newest-first
  * (same shape as before).
  */
-async function readMessages(channelId, limit, sinceTs) {
+// Phase 4b S4: optional 4th arg `opts` ({ threadMeta: true } adds latestReply to
+// each mapped message). The request params are identical with or without it.
+async function readMessages(channelId, limit, sinceTs, opts) {
   if (!channelId) throw new Error('channelId required');
   const lim = String(limit || 30);
 
   if (!sinceTs) {
     const res = await slackWebApi('conversations.history', { channel: channelId, limit: lim, inclusive: 'true' });
     if (!res.ok) throw new Error('conversations.history failed: ' + res.error);
-    return (res.messages || []).map(m => _mapMsg(m, channelId));
+    return (res.messages || []).map(m => _mapMsg(m, channelId, opts));
   }
 
   // Cursor-paginated fetch of everything strictly after sinceTs.
@@ -333,7 +566,7 @@ async function readMessages(channelId, limit, sinceTs) {
     if (cursor) params.cursor = cursor;
     const res = await slackWebApi('conversations.history', params);
     if (!res.ok) throw new Error('conversations.history failed: ' + res.error);
-    (res.messages || []).forEach(m => all.push(_mapMsg(m, channelId)));
+    (res.messages || []).forEach(m => all.push(_mapMsg(m, channelId, opts)));
     cursor = res.response_metadata && res.response_metadata.next_cursor;
     if (!cursor || !res.has_more) break;
   }
@@ -398,6 +631,56 @@ async function resolveUserName(userId) {
   } catch (_) {
     return userId;
   }
+}
+
+// FEATURE (Phase 5): full Slack profile fetch for identity enrichment. Calls
+// users.info and returns the useful, ACTUALLY-AVAILABLE workspace profile
+// fields (spec #8). Captures source provenance; invents nothing. Returns null
+// on any failure (the caller falls back to the existing Contact Book record).
+// NOTE: deliberately a SEPARATE function from resolveUserName (which only needs
+// a display name + caches aggressively) so enrichment can run on its own TTL.
+async function fetchUserProfile(userId) {
+  if (!userId) return null;
+  let u;
+  try { u = await slackWebApi('users.info', { user: userId }); }
+  catch (_) { return null; }
+  if (!u || !u.ok || !u.user) return null;
+  const user = u.user;
+  const p = user.profile || {};
+  // Custom profile fields (users.profile.fields) come back keyed by field id;
+  // surface them by label when present, else by id. Never fabricated.
+  const customFields = {};
+  try {
+    const fields = p.fields && typeof p.fields === 'object' ? p.fields : {};
+    for (const k of Object.keys(fields)) {
+      const f = fields[k];
+      if (f && (f.value != null && String(f.value).trim())) customFields[f.label || k] = f.value;
+    }
+  } catch (_) { /* fields optional */ }
+  return {
+    slackId: user.id || userId,
+    realName: p.real_name || user.real_name || '',
+    displayName: p.display_name || user.name || '',
+    email: p.email || '',
+    emailDomain: (p.email && p.email.includes('@')) ? p.email.split('@')[1].toLowerCase() : '',
+    title: p.title || '',
+    phone: p.phone || '',
+    timezone: user.tz || '',
+    timezoneLabel: user.tz_label || '',
+    statusText: p.status_text || '',
+    imageUrl: p.image_192 || p.image_72 || '',
+    team: user.team_id || '',
+    isAdmin: !!user.is_admin,
+    isOwner: !!user.is_owner,
+    isBot: !!user.is_bot,
+    isAppUser: !!user.is_app_user,
+    isRestricted: !!user.is_restricted,          // single-channel/multi-channel guest
+    isUltraRestricted: !!user.is_ultra_restricted,
+    deleted: !!user.deleted,                      // deactivated account
+    customFields,
+    retrievedAt: new Date().toISOString(),
+    source: 'slack.users.info',
+  };
 }
 
 // Own userId (Z), fetched lazily via auth.test and cached for the process
@@ -504,7 +787,25 @@ const _dmNotifiedTs = new Set();
 // carries isGroup so callers can tell the two apart (e.g. for reply-context
 // / persona prompting -- a group thread needs different handling than a
 // 1:1, since replies are visible to everyone in the group).
-async function listOpenDMs(limit, myUserId) {
+// Phase 4b S1 (dmPeerCache): IM id -> counterpart user id. An IM's two members
+// never change, so a cached peer gives the same isSelf as a fresh
+// conversations.info. In memory only, capped, oldest insertion evicted first.
+const _IM_PEER_CACHE_MAX = 5000;
+const _imPeerCache = new Map();
+function _imPeerSet(id, peer) {
+  _imPeerCache.delete(id);
+  _imPeerCache.set(id, peer);
+  while (_imPeerCache.size > _IM_PEER_CACHE_MAX) _imPeerCache.delete(_imPeerCache.keys().next().value);
+}
+
+// Phase 4b: optional 3rd arg `opts` (absent = today's behavior exactly):
+//   opts.peerCache === true  -> reuse the cached IM counterpart for isSelf (S1)
+//   opts.withLatest === true -> each result also carries latestTs (client.counts
+//                               `latest` when it is a string, else null) (S2)
+//   opts.stats               -> { peerHits, peerMisses } counters to increment
+async function listOpenDMs(limit, myUserId, opts) {
+  const _peerCache = !!(opts && opts.peerCache === true);
+  const _pstats = opts && opts.stats && typeof opts.stats === 'object' ? opts.stats : null;
   // Ceiling raised 100 -> 500 (2026-09) so "scan every open DM" is possible:
   // client.counts returns the full DM/mpim list in one shot (no cursor), so we
   // only need to not truncate. The caller still bounds work per cycle.
@@ -517,18 +818,48 @@ async function listOpenDMs(limit, myUserId) {
   // silently fall off and never get a reply. Sort unread-first, then by most
   // recent activity, so the DMs most likely to need a reply are always kept.
   const _ts = (c) => parseFloat(c.latest || c.updated || 0) || 0;
-  const ims   = (counts.ims   || []).map(c => ({ id: c.id, isGroup: false, unread: !!c.has_unreads, ts: _ts(c) }));
-  const mpims = (counts.mpims || []).map(c => ({ id: c.id, isGroup: true,  unread: !!c.has_unreads, ts: _ts(c) }));
+  const ims   = (counts.ims   || []).map(c => ({ id: c.id, isGroup: false, unread: !!c.has_unreads, ts: _ts(c), latest: c.latest }));
+  const mpims = (counts.mpims || []).map(c => ({ id: c.id, isGroup: true,  unread: !!c.has_unreads, ts: _ts(c), latest: c.latest }));
   const all = ims.concat(mpims)
     .sort((a, b) => (Number(b.unread) - Number(a.unread)) || (b.ts - a.ts))
     .slice(0, lim);
   // Parallel name resolution — resolve all conversations.info calls at once
   // instead of sequentially. With 40 DMs, sequential calls at 8s timeout each
   // could take 40×8s=320s; parallel reduces that to max(one call) ≈ 8s.
-  const names = await Promise.all(
-    all.map(c => _resolveDmSenderName(c.id, myUserId).catch(() => null))
+  // Resolve each DM's display name AND detect the SELF-DM (the 1:1 IM with
+  // yourself — conversations.info.channel.user === my own user id). The caller
+  // treats the self-DM specially (lets you feed yourself links/attachments for
+  // the agent to research), so we surface an isSelf flag here.
+  const self = myUserId || await _getMyUserId();
+  const resolved = await Promise.all(
+    all.map(async (c) => {
+      let name = null, isSelf = false;
+      try {
+        if (!c.isGroup) {
+          let peer;
+          if (_peerCache && _imPeerCache.has(c.id)) {
+            peer = _imPeerCache.get(c.id);
+            if (_pstats) _pstats.peerHits = (_pstats.peerHits || 0) + 1;
+          } else {
+            if (_peerCache && _pstats) _pstats.peerMisses = (_pstats.peerMisses || 0) + 1;
+            const info = await slackWebApi('conversations.info', { channel: c.id });
+            peer = info && info.ok && info.channel ? info.channel.user : null;
+            if (_peerCache && info && info.ok && info.channel && typeof info.channel.user === 'string') _imPeerSet(c.id, info.channel.user);
+          }
+          if (peer && self && peer === self) isSelf = true;
+        }
+      } catch (_) {}
+      try { name = await _resolveDmSenderName(c.id, myUserId); } catch (_) { name = null; }
+      if (isSelf && (!name || name === c.id)) name = 'You (self)';
+      return { name, isSelf };
+    })
   );
-  return all.map((c, i) => ({ channelId: c.id, name: names[i] || c.id, isGroup: c.isGroup, unread: c.unread }));
+  const _withLatest = !!(opts && opts.withLatest === true);
+  return all.map((c, i) => {
+    const r = { channelId: c.id, name: resolved[i].name || c.id, isGroup: c.isGroup, unread: c.unread, isSelf: resolved[i].isSelf };
+    if (_withLatest) r.latestTs = typeof c.latest === 'string' ? c.latest : null;
+    return r;
+  });
 }
 
 async function readDMs(limit) {
@@ -646,9 +977,8 @@ async function processAutoReplies(messages, rules) {
  * Returns: { name, mimetype, content } or null.
  */
 async function downloadFileContent(file) {
-  if (!file || !file.url_private) return null;
+  if (!file) return null;
 
-  // Only attempt to read human-readable text formats
   const mime = (file.mimetype || '').toLowerCase();
   const name = (file.name    || '').toLowerCase();
   const isReadable =
@@ -661,7 +991,36 @@ async function downloadFileContent(file) {
     name.endsWith('.csv')    ||
     name.endsWith('.json')   ||
     name.endsWith('.log');
-  if (!isReadable) return null;
+
+  // FIX (2026-10): previously returned null for ANY non-text file (PDF, image,
+  // xlsx, docx), so the AI never saw vendor estimates / photos / spreadsheets —
+  // the "struggles with attachments" gap. Slack ITSELF indexes many documents
+  // and exposes extracted text on the file object WITHOUT a download:
+  //   - file.plain_text        (full extracted text, e.g. PDFs Slack has OCR'd)
+  //   - file.preview_plain_text / file.preview (first-page/preview text)
+  //   - file.preview_highlight (HTML preview — strip tags as a last resort)
+  // Use that for non-text files so the AI can read the content. We also call
+  // files.info when the shared payload lacks the preview (history/replies often
+  // omit it). Images still can't be OCR'd here, but we surface title/alt text.
+  if (!isReadable) {
+    let f = file;
+    const hasPreview = f.plain_text || f.preview_plain_text || f.preview;
+    if (!hasPreview && f.id) {
+      try {
+        const info = await slackWebApi('files.info', { file: f.id });
+        if (info && info.ok && info.file) f = info.file;
+      } catch (_) { /* best effort */ }
+    }
+    const extracted = f.plain_text || f.preview_plain_text || f.preview ||
+      (f.preview_highlight ? String(f.preview_highlight).replace(/<[^>]+>/g, '') : '') ||
+      // image: no text to read, but give the AI the alt/title so it's not blind
+      (mime.startsWith('image/') ? (f.alt_txt || f.title || '') : '');
+    if (extracted && String(extracted).trim()) {
+      return { name: file.name, mimetype: mime, content: String(extracted).slice(0, 32768) };
+    }
+    return null; // genuinely nothing readable (e.g. a photo with no caption)
+  }
+  if (!file.url_private) return null;
 
   const config = getConfig();
   if (!config || !config.token) return null;
@@ -809,4 +1168,31 @@ async function uploadFileToChannel(channelId, opts) {
   return { ok: true, fileId: step1.file_id };
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, downloadFileContent, downloadFileBuffer, uploadFileToChannel };
+// Invisible sentinel the app prefixes onto any reply it posts into the SELF-DM,
+// so the next poll can recognize + skip its OWN replies there (otherwise a
+// self-DM reply — authored by your own user id — would be re-processed forever).
+// Zero-width characters: invisible in the Slack client, stable across fetches.
+const SELF_REPLY_MARKER = '\u200B\u2060'; // ZWSP + WORD JOINER
+
+// Test-only: reset only the lane (selection, stats, chain, spacing clock); the
+// name/peer caches are left alone, like the engines' __test__.resetSpeedup.
+function _resetSpeedupForTests() {
+  _laneSel = null;
+  _laneStats = _newLaneStats();
+  _slackChain = Promise.resolve();
+  _slackLastAt = 0;
+}
+// Test-only: reset lane state (the name caches are deliberately NOT reset --
+// resetting them would change today's call list).
+function _resetForTests() {
+  _slackChain = Promise.resolve();
+  _slackLastAt = 0;
+  _myUserId = null;
+  _laneStats = _newLaneStats();
+  _laneSel = null;
+  _imPeerCache.clear();
+}
+
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, fetchUserProfile, downloadFileContent, downloadFileBuffer, uploadFileToChannel, SELF_REPLY_MARKER, getLaneStats, _setRawRequestForTests, _resetForTests };
+// Test-only handles (never used by src/): slackWebApi is otherwise module-private.
+module.exports.__test__ = { resetSpeedup: _resetSpeedupForTests, slackWebApi };

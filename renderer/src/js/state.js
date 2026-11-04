@@ -85,6 +85,11 @@ const _state = {
   },
   // S28-Sprint3: System health
   health: {},
+  // Morning briefing — mirrored here so any consumer can read the latest
+  // briefing via state (the sidebar also receives it live on the bus event
+  // 'orcha:morning-briefing'). Registering the slice silences the prior
+  // "[state] unknown slice: briefing" warning from bridge.js's forwarder.
+  briefing: {},
 };
 
 

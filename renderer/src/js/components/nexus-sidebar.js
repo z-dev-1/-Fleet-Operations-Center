@@ -19,8 +19,8 @@ let _draftsLoaded = false;
 let _draftsList = [];
 
 const TABS = [
-  { id: 'alerts',   label: '🚨 Alerts',   badge: () => { const r = state.get('alerts'); return (Array.isArray(r) ? r.length : r?.alerts?.length) || 0; } },
-  { id: 'actions',  label: '💡 Actions',  badge: () => { const r = state.get('recommendations'); return (Array.isArray(r) ? r.length : r?.recommendations?.length) || 0; } },
+  { id: 'alerts',   label: '🚨 Alerts',   badge: () => { const r = state.slice('alerts'); const n = (Array.isArray(r) ? r.length : r?.alerts?.length) || 0; return n > 99 ? '99+' : n; } },
+  { id: 'actions',  label: '💡 Actions',  badge: () => { const r = state.slice('recommendations'); const n = (Array.isArray(r) ? r.length : r?.recommendations?.length) || 0; return n > 99 ? '99+' : n; } },
   { id: 'drafts',   label: '📦 Drafts',   badge: () => _drafts.filter(d => d.status === 'pending').length },
   { id: 'timeline', label: '📍 Workflow', badge: () => '' },
   { id: 'health',   label: '🏥 Health',   badge: () => '' },
@@ -34,9 +34,12 @@ function _esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '
 
 function _render() {
   if (!_el) return;
+  // _el (#nexus-sidebar-mount) acts as the centered-overlay backdrop; the
+  // .nx-sidebar inside is the modal panel.
+  _el.classList.toggle('nx-overlay--open', _open);
   _el.innerHTML = `
     <div class="nx-sidebar${_open ? ' nx-sidebar--open' : ''}">
-      <button class="nx-sidebar__close" id="nx-sb-close">◂</button>
+      <button class="nx-sidebar__close" id="nx-sb-close">✕</button>
       <div class="nx-sidebar__tabs">
         ${TABS.map(t => {
           const b = t.badge();
@@ -50,6 +53,8 @@ function _render() {
       </div>
     </div>
   `;
+  // Backdrop click (on the mount itself, not the panel) closes.
+  _el.addEventListener('click', (e) => { if (e.target === _el) { _open = false; _render(); } }, { once: true });
   _wireEvents();
 }
 
@@ -65,7 +70,7 @@ function _renderTab() {
 }
 
 function _renderAlerts() {
-  const raw = state.get('alerts');
+  const raw = state.slice('alerts');
   const alerts = Array.isArray(raw) ? raw : (raw?.alerts || []);
   const _brief = _lastBriefing;
   const briefingHtml =
@@ -94,7 +99,7 @@ function _renderAlerts() {
 }
 
 function _renderActions() {
-  const raw = state.get('recommendations');
+  const raw = state.slice('recommendations');
   const recs = Array.isArray(raw) ? raw : (raw?.recommendations || []);
   if (!Array.isArray(recs) || recs.length === 0) return '<div class="nx-empty">No actions needed</div>';
   return recs.slice(0, 15).map(r => `
@@ -140,7 +145,7 @@ function _renderDrafts() {
 }
 
 function _renderTimeline() {
-  const tracker = state.get('tracker');
+  const tracker = state.slice('tracker');
   if (!tracker || !tracker.summary) return '<div class="nx-empty">Waiting for tracker data...</div>';
 
   const STAGES = ['detected','assigned','diagnosed','quoted','approved','parts','repair','qc','pickup','active'];
@@ -171,10 +176,17 @@ function _renderTimeline() {
 }
 
 function _renderHealth() {
-  const health = state.get('health');
-  if (!health) return '<div class="nx-empty">Waiting for health check...</div>';
+  // BUG FIX: state.get() takes NO argument and returns the WHOLE state tree, so
+  // state.get('health').overallScore read the top-level state's overallScore
+  // (undefined) and the panel was stuck at "0%" even though the real health
+  // payload (score 100) was correctly stored in the 'health' slice. The correct
+  // per-slice accessor is state.slice('health').
+  const health = state.slice('health');
+  if (!health || !health.overallScore && !health.integrations) {
+    return '<div class="nx-empty">Waiting for health check...</div>';
+  }
 
-  const statusIcon = { green: '🟢', yellow: '🟡', red: '🔴' };
+  const statusIcon = { green: '🟢', yellow: '🟡', red: '🔴', grey: '⚪' };
   return `
     <div class="nx-stat" style="margin-bottom:16px">
       <span class="nx-stat__value">${health.overallScore || 0}%</span>
@@ -264,6 +276,11 @@ export function init() {
   bus.on('orcha:alerts', () => _render());
   bus.on('orcha:recommendations', () => _render());
   bus.on('orcha:tracker', () => _render());
+  // System Health — the health payload (overallScore + per-integration states)
+  // arrives on this event via the bridge. Without this listener the Health tab
+  // only ever showed its initial empty state ("0%" / "Waiting for health
+  // check...") because nothing re-rendered it when real data landed.
+  bus.on('orcha:health', () => _render());
   bus.on('orcha:drafts', (data) => {
     if (data && data.drafts) {
       for (const d of data.drafts) {

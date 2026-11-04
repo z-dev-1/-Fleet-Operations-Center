@@ -43,6 +43,15 @@ function _truncateField(val, field) {
   return s;
 }
 
+// Assistant action memory (src/orcha/awareness/action-log.js). Never throws.
+function _recordAction(kind, unitId, entry) {
+  try {
+    const al = require('../orcha/awareness/action-log');
+    const rec = al.fromTimeline(kind, unitId, entry, 'user');
+    if (rec) al.record(rec);
+  } catch (_) {}
+}
+
 function registerNotesIPC() {
   handle('notes:get-unit', (_e, equipmentId) => {
     const s = store.load('notesStore', {});
@@ -64,6 +73,7 @@ function registerNotesIPC() {
     u.manualEntries.push(entry);
     ns[unitId] = u;
     store.save('notesStore', ns);
+    _recordAction('add', unitId, entry);
     // Mirror into fleetData row — this is the field the detail panel actually
     // reads (unit.repairTimeline). Without this, a manual add only lived in
     // notesStore and vanished the next time fleet data reloaded or a sync ran.
@@ -129,6 +139,7 @@ function registerNotesIPC() {
     }
     ns[unitId] = u;
     store.save('notesStore', ns);
+    _recordAction('hide', unitId, entryText);
     _mirrorTimelineToFleetData(unitId, u.timeline);
     _notifyTimelineUpdated(unitId, u.timeline);
     return { ok: true, timeline: u.timeline };
@@ -173,6 +184,7 @@ function registerNotesIPC() {
 
     ns[unitId] = u;
     store.save('notesStore', ns);
+    _recordAction('edit', unitId, newLine);
     _mirrorTimelineToFleetData(unitId, u.timeline);
     _notifyTimelineUpdated(unitId, u.timeline);
     return { ok: true, timeline: u.timeline };
@@ -211,6 +223,7 @@ function registerNotesIPC() {
 
     const note = (store.load('notesStore', {}))[id];
     logger.info('Notes saved for unit:', id);
+    _recordAction('notes', id, 'unit notes saved'); // never the notes body
     return { ok: true, note };
   });
 

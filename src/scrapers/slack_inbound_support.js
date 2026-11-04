@@ -95,6 +95,16 @@ async function discoverOneSender({ slackId, channelId, name, isGroup }, deps) {
       if (res && res.ok) {
         _clearSaveFailure(slackId, channelId);
         if (!res.existed) logger.info(`[slack-inbound] contact discovered slackId=${slackId} conv=${channelId} name="${resolvedName}"`);
+        // Phase 5: enrich + classify this sender (TTL-gated, best-effort, async).
+        // Runs enrichment -> identity classification -> deterministic policy ->
+        // Contact Book auto-maintenance as an AUTOMATED (non-operator) write, so
+        // the Phase 4 gate blocks any trusted grant. Fire-and-forget: a slow or
+        // failed users.info never blocks discovery or the reply path. The TTL
+        // inside syncSender means this only hits Slack on first contact / stale.
+        try {
+          const sync = require('../slack/contact-sync');
+          Promise.resolve(sync.syncSender(slackId, { name: resolvedName })).catch(() => {});
+        } catch (_) { /* contact-sync optional; never block discovery */ }
         return { ok: true, existed: !!res.existed, created: !res.existed, contact: res.contact };
       }
       lastErr = (res && res.error) || 'discoverFromDM returned not-ok';

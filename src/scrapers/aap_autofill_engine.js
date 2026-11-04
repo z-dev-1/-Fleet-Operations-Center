@@ -691,21 +691,48 @@ const CreateWRAutofill = {
              if (p.areaPairs && p.areaPairs.length) {
                  const totalRows = p.areaPairs.filter(pair => pair.area).length;
 
-                 // Phase 1: click + (totalRows-1) times, wait for each new row
+                 // Phase 1: add (totalRows-1) more area rows, one click each.
+                 //
+                 // ROOT CAUSE of the "collapses back to 2 rows" bug (found via live
+                 // DOM diagnostics): once there are 2+ rows, EACH row has its own
+                 // "css-1sm4msn" svg icon-button. The old code used
+                 // document.querySelector('BUTTON.css-1sm4msn') which returns the
+                 // FIRST one in the DOM -- that is row 1's REMOVE button, not the
+                 // "add another row" control. So the 2nd click removed a row
+                 // (count 2 -> 1) instead of adding one. Confirmed by position:
+                 // the real "add another" button is the LAST css-1sm4msn (lowest on
+                 // screen, below the last area row). Fix: always click the LAST
+                 // such button so each click ADDS a row (1 -> 2 -> 3 -> 4 ...).
+                 const _rowCount = () => Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
+                 const _addRowBtn = () => {
+                     // All visible svg-only icon-buttons that could be the add/remove
+                     // control, sorted top-to-bottom; the ADD-another button is the
+                     // lowest one (it sits below the last row). Prefer css-1sm4msn.
+                     const btns = Array.from(document.querySelectorAll('BUTTON.css-1sm4msn'))
+                         .filter(el => el.offsetParent);
+                     if (btns.length) return btns[btns.length - 1]; // lowest in DOM = add-another
+                     // Fallback: lowest svg-only button on the page.
+                     const svgBtns = Array.from(document.querySelectorAll('BUTTON'))
+                         .filter(el => el.offsetParent && el.querySelector('svg') && !(el.innerText || '').trim())
+                         .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+                     return svgBtns.length ? svgBtns[svgBtns.length - 1] : null;
+                 };
                  if (totalRows > 1) {
                      for (let r = 0; r < totalRows - 1; r++) {
-                         const currentCount = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
-                         const addBtn = document.querySelector('BUTTON.css-1sm4msn') ||
-                             Array.from(document.querySelectorAll('BUTTON')).find(b => b.offsetParent && b.querySelector('svg') && !(b.innerText || '').trim());
-                         if (addBtn) {
+                         const before = _rowCount();
+                         let grew = false;
+                         // Retry a couple times in case a click is dropped, but always
+                         // target the LAST (add-another) button so we never hit remove.
+                         for (let attempt = 0; attempt < 3 && !grew; attempt++) {
+                             const addBtn = _addRowBtn();
+                             if (!addBtn) { this.log('Area rows: add-another button not found (have ' + before + '/' + totalRows + ')'); await this.sleep(300); continue; }
                              addBtn.click();
-                             await this.waitFor(() => {
-                                 const now = Array.from(document.querySelectorAll('INPUT.css-cmvgon[role="combobox"]')).filter(el => el.offsetParent).length;
-                                 return now > currentCount ? true : null;
-                             }, 3000, 80);
-                             await this.sleep(100);
+                             grew = !!(await this.waitFor(() => (_rowCount() > before ? true : null), 3000, 80));
+                             await this.sleep(400);
+                             if (!grew) this.log('Area rows: row ' + (r + 2) + ' did not appear (attempt ' + (attempt + 1) + ', have ' + _rowCount() + '/' + totalRows + ')');
                          }
                      }
+                     this.log('Area rows: ready with ' + _rowCount() + '/' + totalRows + ' row(s) before fill');
                  }
 
                   // Phase 2: fill all rows

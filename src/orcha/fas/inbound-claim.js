@@ -51,9 +51,12 @@ const CAP = 5000;                  // keep the ledger bounded
 const RETAIN_MS = 7 * 24 * 3600 * 1000; // prune delivered/legacy older than 7d
 
 function _now() { return new Date().toISOString(); }
-function _load() { const m = store.load(KEY, {}); return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {}; }
-function _save(m) {
-  // Prune old terminal entries so the ledger stays bounded.
+function _normMap(m) { return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {}; }
+function _load() { return _normMap(store.load(KEY, {})); }
+
+// Prune old terminal entries IN PLACE so the ledger stays bounded. Shared by the
+// read-path save and the in-transaction mutation path.
+function _prune(m) {
   const keys = Object.keys(m);
   if (keys.length > CAP) {
     const now = Date.now();
@@ -63,14 +66,34 @@ function _save(m) {
       const age = now - (Date.parse(e && e.updatedAt || 0) || 0);
       if (terminal && age > RETAIN_MS) delete m[k];
     }
-    // Still over cap? drop oldest terminal entries.
     const rest = Object.keys(m);
     if (rest.length > CAP) {
       rest.sort((a, b) => Date.parse(m[a].updatedAt || 0) - Date.parse(m[b].updatedAt || 0));
       for (let i = 0; i < rest.length - CAP; i++) delete m[rest[i]];
     }
   }
-  store.save(KEY, m);
+  return m;
+}
+function _save(m) { store.save(KEY, _prune(m)); }
+
+/**
+ * _mutate(fn) — run `fn(map)` as a single ATOMIC transaction over the whole
+ * claim ledger. `fn` receives the live map, mutates it, and returns a value
+ * that _mutate forwards to the caller. store.update() wraps the read + fn +
+ * write in ONE BEGIN IMMEDIATE transaction (on the SQLite-backed key), so a
+ * check-then-claim done entirely inside `fn` is atomic: no other caller can
+ * read the same pre-state and also claim. This is the exactly-once guarantee
+ * the old raw load→check→save path could not give.
+ */
+function _mutate(fn) {
+  let ret;
+  store.update(KEY, (raw) => {
+    const m = _normMap(raw);
+    ret = fn(m);
+    _prune(m);
+    return m;
+  }, {});
+  return ret;
 }
 
 /** Stable claim key. threadTs is part of the identity so a thread reply and a
@@ -102,50 +125,59 @@ function acquire(opts) {
   opts = opts || {};
   const owner = opts.owner || 'digital-fas';
   const key = claimKey(opts.channelId, opts.ts, opts.threadTs);
-  const m = _load();
-  const e = m[key];
 
-  if (e) {
-    if (e.status === 'delivered') return { ok: false, already: 'delivered', key, claim: e };
-    if (e.status === 'legacy') {
-      // Legacy owns it. Only the legacy engine may re-acquire (idempotent).
-      if (owner === 'legacy') { e.leaseUntil = new Date(Date.now() + LEASE_MS).toISOString(); e.updatedAt = _now(); _save(m); return { ok: true, key, claim: e, resumed: true }; }
-      return { ok: false, already: 'legacy', key, claim: e };
-    }
-    if (e.status === 'owned') {
-      // Held by Digital FAS (queued response). FAS may re-acquire to resume;
-      // legacy may NOT take it.
-      if (owner === 'digital-fas') return { ok: false, already: 'owned', key, claim: e };
-      return { ok: false, already: 'owned', key, claim: e };
-    }
-    if (e.status === 'processing') {
-      if (_isLeaseLive(e)) return { ok: false, already: 'processing', key, claim: e };
-      // Stale lease (crash) -> recover: take over.
-      logger.warn && logger.warn('[inbound-claim] recovering stale processing lease for ' + key);
-    }
-    // 'failed' or stale 'processing' -> recoverable: fall through to re-claim.
-  }
+  // The ENTIRE read → status check → claim-write runs inside ONE transaction
+  // (store.update => BEGIN IMMEDIATE on the SQLite ledger). Two engines racing
+  // on the same Slack message can no longer both read "free" and both claim —
+  // SQLite serializes the transactions, so the first commits its claim and the
+  // second sees that claim and backs off (already: processing/owned/...).
+  return _mutate((m) => {
+    const e = m[key];
 
-  const claim = {
-    key, channelId: opts.channelId || '', ts: opts.ts || '', threadTs: opts.threadTs || null,
-    status: 'processing', owner,
-    leaseUntil: new Date(Date.now() + LEASE_MS).toISOString(),
-    deliveredTs: null,
-    attempts: ((e && e.attempts) || 0) + 1,
-    createdAt: (e && e.createdAt) || _now(), updatedAt: _now(),
-  };
-  m[key] = claim;
-  _save(m);
-  return { ok: true, key, claim };
+    if (e) {
+      if (e.status === 'delivered') return { ok: false, already: 'delivered', key, claim: e };
+      if (e.status === 'legacy') {
+        // Legacy owns it. Only the legacy engine may re-acquire (idempotent).
+        if (owner === 'legacy') {
+          e.leaseUntil = new Date(Date.now() + LEASE_MS).toISOString();
+          e.updatedAt = _now();
+          return { ok: true, key, claim: e, resumed: true };
+        }
+        return { ok: false, already: 'legacy', key, claim: e };
+      }
+      if (e.status === 'owned') {
+        // Held by Digital FAS (queued response). FAS may re-acquire to resume;
+        // legacy may NOT take it.
+        return { ok: false, already: 'owned', key, claim: e };
+      }
+      if (e.status === 'processing') {
+        if (_isLeaseLive(e)) return { ok: false, already: 'processing', key, claim: e };
+        // Stale lease (crash) -> recover: take over.
+        logger.warn && logger.warn('[inbound-claim] recovering stale processing lease for ' + key);
+      }
+      // 'failed' or stale 'processing' -> recoverable: fall through to re-claim.
+    }
+
+    const claim = {
+      key, channelId: opts.channelId || '', ts: opts.ts || '', threadTs: opts.threadTs || null,
+      status: 'processing', owner,
+      leaseUntil: new Date(Date.now() + LEASE_MS).toISOString(),
+      deliveredTs: null,
+      attempts: ((e && e.attempts) || 0) + 1,
+      createdAt: (e && e.createdAt) || _now(), updatedAt: _now(),
+    };
+    m[key] = claim;
+    return { ok: true, key, claim };
+  });
 }
 
 function _patch(key, patch) {
-  const m = _load();
-  const e = m[key];
-  if (!e) return null;
-  Object.assign(e, patch, { updatedAt: _now() });
-  _save(m);
-  return e;
+  return _mutate((m) => {
+    const e = m[key];
+    if (!e) return null;
+    Object.assign(e, patch, { updatedAt: _now() });
+    return e;
+  });
 }
 
 /** Mark a claim as OWNED by Digital FAS with a queued (not-yet-sent) response.
@@ -164,23 +196,25 @@ function markFailed(key, reason) { return _patch(key, { status: 'failed', reason
 
 /** Transfer ownership to the legacy engine (Digital FAS technical fallback). */
 function transferToLegacy(key, reason) {
-  const m = _load();
-  const e = m[key];
-  if (!e) {
-    // No prior claim (fallback before any claim) — create one owned by legacy.
-    m[key] = { key, status: 'legacy', owner: 'legacy', reason: reason || 'fas-technical-failure',
-      leaseUntil: new Date(Date.now() + LEASE_MS).toISOString(), deliveredTs: null, attempts: 1, createdAt: _now(), updatedAt: _now() };
-    _save(m);
-    return m[key];
-  }
-  Object.assign(e, { status: 'legacy', owner: 'legacy', reason: reason || 'fas-technical-failure',
-    leaseUntil: new Date(Date.now() + LEASE_MS).toISOString(), updatedAt: _now() });
-  _save(m);
-  return e;
+  return _mutate((m) => {
+    const e = m[key];
+    if (!e) {
+      // No prior claim (fallback before any claim) — create one owned by legacy.
+      m[key] = { key, status: 'legacy', owner: 'legacy', reason: reason || 'fas-technical-failure',
+        leaseUntil: new Date(Date.now() + LEASE_MS).toISOString(), deliveredTs: null, attempts: 1, createdAt: _now(), updatedAt: _now() };
+      return m[key];
+    }
+    Object.assign(e, { status: 'legacy', owner: 'legacy', reason: reason || 'fas-technical-failure',
+      leaseUntil: new Date(Date.now() + LEASE_MS).toISOString(), updatedAt: _now() });
+    return e;
+  });
 }
 
 /** Release a claim (e.g. nothing to do) so it isn't left dangling in processing. */
-function release(key) { const m = _load(); if (m[key] && m[key].status === 'processing') { delete m[key]; _save(m); } return { ok: true }; }
+function release(key) {
+  _mutate((m) => { if (m[key] && m[key].status === 'processing') delete m[key]; });
+  return { ok: true };
+}
 
 function get(key) { return _load()[key] || null; }
 function isDelivered(key) { const e = _load()[key]; return !!(e && e.status === 'delivered'); }
@@ -189,17 +223,17 @@ function isDelivered(key) { const e = _load()[key]; return !!(e && e.status === 
  *  recoverable ('failed') so they can be re-acquired. Delivered/owned/legacy
  *  are untouched. Returns { recovered }. */
 function reconcile() {
-  const m = _load();
-  let recovered = 0, changed = false;
-  for (const k of Object.keys(m)) {
-    const e = m[k];
-    if (e && e.status === 'processing' && !_isLeaseLive(e)) {
-      e.status = 'failed'; e.reason = 'stale processing lease recovered on restart'; e.leaseUntil = null; e.updatedAt = _now();
-      recovered++; changed = true;
+  return _mutate((m) => {
+    let recovered = 0;
+    for (const k of Object.keys(m)) {
+      const e = m[k];
+      if (e && e.status === 'processing' && !_isLeaseLive(e)) {
+        e.status = 'failed'; e.reason = 'stale processing lease recovered on restart'; e.leaseUntil = null; e.updatedAt = _now();
+        recovered++;
+      }
     }
-  }
-  if (changed) _save(m);
-  return { recovered };
+    return { recovered };
+  });
 }
 
 module.exports = {

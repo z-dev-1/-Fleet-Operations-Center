@@ -149,7 +149,7 @@ const SCHEMAS = {
   ADD_TIMELINE: { unit: F.unitReq, entry: { v: (x) => _str(x, MAX_ENTRY), req: true } },
   CREATE_REMINDER: { unit: F.unit(false), note: { v: (x) => _str(x, MAX_ENTRY), req: true }, when: F.when },
   CREATE_FOLLOWUP_CASE: { unit: F.unit(false), summary: F.summary, promise: F.promise, dueAt: F.dueAt },
-  MOVE_UNIT: { unit: F.unitReq, state: { v: (x) => _str(x, 40), req: true }, reason: F.reason, assetUrl: F.assetUrl },
+  MOVE_UNIT: { unit: F.unitReq, state: { v: (x) => _str(x, 40), req: true }, reason: F.reason, assetUrl: F.assetUrl, aaid: { v: (x) => _str(x, 64) } },
   SUBMIT_WORK_REQUEST: { unit: F.unitReq, payload: F.payload },
   SEND_SLACK_MESSAGE: { channelId: { v: _channel, req: true }, message: { v: (x) => _str(x, 4000), req: true }, threadTs: F.threadTs },
 };

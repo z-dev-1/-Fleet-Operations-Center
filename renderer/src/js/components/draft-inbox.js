@@ -162,6 +162,57 @@ function _toggle() {
   if (_open) _loadReview();
 }
 
+// Partner Work Request Forms config — moved here from Settings (2026-08-14).
+// Persists to localStorage fleet_forms_config and emits config:forms-changed
+// so this component's own auto-poll restarts with the new settings.
+function _wireFormsConfig() {
+  const sheetInput = _el.querySelector('#forms-sheet-id');
+  const pollSelect = _el.querySelector('#forms-poll-interval');
+  const statusEl   = _el.querySelector('#forms-status');
+  if (!sheetInput || !pollSelect) return;
+
+  const savedCfg = JSON.parse(localStorage.getItem('fleet_forms_config') || '{}');
+  if (savedCfg.sheetId) sheetInput.value = savedCfg.sheetId;
+  if (savedCfg.pollInterval) pollSelect.value = savedCfg.pollInterval;
+
+  const show = (text, cls) => {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.className = 'wr-inbox-config-status' + (cls ? ' ' + cls : '');
+    statusEl.style.display = '';
+  };
+
+  const saveBtn = _el.querySelector('#forms-save');
+  if (saveBtn) saveBtn.addEventListener('click', () => {
+    const cfg = { sheetId: (sheetInput.value || '').trim(), pollInterval: parseInt(pollSelect.value || '60', 10) };
+    localStorage.setItem('fleet_forms_config', JSON.stringify(cfg));
+    show('\u2705 Saved', 'ok');
+    bus.emit('config:forms-changed');
+  });
+
+  const pollBtn = _el.querySelector('#forms-poll-now');
+  if (pollBtn) pollBtn.addEventListener('click', async () => {
+    const rawId = (sheetInput.value || '').trim();
+    if (!rawId) { show('\u26a0 Enter a Sheet ID first', 'warn'); return; }
+    show('\u{1F504} Polling...', '');
+    let sheetId = rawId.replace(/\/edit.*$/, '').replace(/[?#].*$/, '').replace(/\/+$/, '').trim();
+    if (sheetId.includes('spreadsheets/d/')) sheetId = sheetId.split('spreadsheets/d/')[1].split('/')[0];
+    if (sheetId.includes('/')) sheetId = sheetId.split('/')[0];
+    const csvUrl = 'https://docs.google.com/spreadsheets/d/' + sheetId + '/export?format=tsv';
+    try {
+      const resp = await fetch(csvUrl);
+      if (!resp.ok) { show('\u274c HTTP ' + resp.status, 'err'); return; }
+      const csv = await resp.text();
+      const rows = csv.split('\n').filter(r => r.trim());
+      show('\u2705 Connected! ' + (rows.length - 1) + ' row(s) found', 'ok');
+      if (window.partner && window.partner.pollForms) {
+        const result = await window.partner.pollForms({ csvText: csv });
+        if (result && result.newCount > 0) { show('\u2705 ' + result.newCount + ' new request(s) — AI classifying...', 'ok'); }
+      }
+    } catch (e) { show('\u274c ' + e.message, 'err'); }
+  });
+}
+
 let _formsPollTimer = null;
 
 function _startAutoFormsPoll() {
@@ -207,17 +258,49 @@ async function _pollForms(rawId) {
 
 export function init() {
   _el = document.createElement('div');
-  _el.className = 'wr-inbox';
+  _el.className = 'wr-inbox';   // now a centered-overlay backdrop
   _el.innerHTML = `
-    <div class="wr-inbox-header">
-      <span class="wr-inbox-header-title">📋 Incoming Work Requests</span>
-      <button class="wr-inbox-close" id="wr-inbox-close">▼</button>
+    <div class="wr-inbox-panel">
+      <div class="wr-inbox-header">
+        <span class="wr-inbox-header-title">📋 Incoming Work Requests</span>
+        <div class="wr-inbox-header-actions">
+          <button class="wr-inbox-gear" id="wr-inbox-gear" title="Partner Work Request Forms config">⚙</button>
+          <button class="wr-inbox-close" id="wr-inbox-close" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="wr-inbox-config" id="wr-inbox-config" style="display:none">
+        <div class="wr-inbox-config-title">Partner Work Request Forms</div>
+        <label class="wr-inbox-config-label">Google Sheets ID</label>
+        <input class="wr-inbox-config-input" id="forms-sheet-id" placeholder="Paste Sheet ID from URL..." />
+        <div class="wr-inbox-config-hint">From: docs.google.com/spreadsheets/d/<strong>[THIS ID]</strong>/edit</div>
+        <label class="wr-inbox-config-label">Poll Interval</label>
+        <select class="wr-inbox-config-input" id="forms-poll-interval">
+          <option value="30">Every 30 seconds</option>
+          <option value="60" selected>Every 60 seconds</option>
+          <option value="120">Every 2 minutes</option>
+          <option value="300">Every 5 minutes</option>
+        </select>
+        <div class="wr-inbox-config-actions">
+          <button class="wr-inbox-cfg-btn wr-inbox-cfg-btn--save" id="forms-save">Save Forms Config</button>
+          <button class="wr-inbox-cfg-btn" id="forms-poll-now">Poll Now</button>
+        </div>
+        <div id="forms-status" class="wr-inbox-config-status" style="display:none"></div>
+      </div>
+      <div class="wr-inbox-list"></div>
     </div>
-    <div class="wr-inbox-list"></div>
   `;
   document.body.appendChild(_el);
 
   _el.querySelector('#wr-inbox-close').addEventListener('click', _toggle);
+  // Backdrop click (outside the panel) closes.
+  _el.addEventListener('click', (e) => { if (e.target === _el) _toggle(); });
+  // Gear toggles the inline Partner Forms config panel.
+  const gearBtn = _el.querySelector('#wr-inbox-gear');
+  const cfgPanel = _el.querySelector('#wr-inbox-config');
+  if (gearBtn && cfgPanel) gearBtn.addEventListener('click', () => {
+    cfgPanel.style.display = cfgPanel.style.display === 'none' ? '' : 'none';
+  });
+  _wireFormsConfig();
 
   // Delegated click handler
   _el.addEventListener('click', (e) => {

@@ -33,13 +33,57 @@ function _woFingerprint(row) {
   return crypto.createHash('sha1').update(parts.map(p => String(p || '')).join('\u0001')).digest('hex').slice(0, 16);
 }
 
-// Deep-scan batch size. MUST match the claude-code worker pool (WORKER_POOL_SIZE=3
-// in relay.js). Processing 5 units in parallel while only 3 claude workers exist
-// meant 5 AI calls fought over 3 workers every batch — the extra 2 queued, and the
-// churn (kill-after-job + respawn) showed up as the 'stale process exited' spam and
-// stalled progress. Matching the pool size lets each unit get a worker immediately
-// with no contention. (2026-08-24)
+// Fingerprint of EVERYTHING the AI timeline is built from (2026-10-28). If a
+// unit's inputs are unchanged since its last successful build, the full scan
+// skips it — the 20-min pass used to re-send every down unit to the AI and
+// rewrite notesStore ~every 40s with no new information. Includes today's date
+// so each unit is still rebuilt at least once a day.
+function _aiInputSig(u, ns) {
+  const secs = Array.isArray(u._secondaryWRs) ? u._secondaryWRs : [];
+  const parts = [
+    new Date().toISOString().slice(0, 10),
+    u.workRequestId, u.lifecycleState, u.lifecycleReason, u.vendor, u.serviceState,
+    u.fullConversation || u.lastConversation || u.conversation || '',
+    (u._plannedWRData && u._plannedWRData.fullConversation) || '',
+    secs.map((w) => (w.workRequestId || '') + '|' + (w.fullConversation || '')).join('\u0002'),
+    u.offsiteShopEventUrl || u.asistSrUrl || '', u.asistNotes || '',
+    JSON.stringify((ns && ns.manualEntries) || null), JSON.stringify((ns && ns.hiddenEntries) || null),
+  ];
+  return crypto.createHash('sha1').update(parts.map((p) => String(p || '')).join('\u0001')).digest('hex').slice(0, 16);
+}
+
+// Deterministic tail (2026-10-28): the prompt says gap ranges go only BETWEEN
+// actual events, but the AI sometimes appends a trailing "MM/DD-MM/DD -
+// [no update logged]" after the last real update and sometimes doesn't, so the
+// end of the timeline flipped on every rebuild. Enforce the rule in code.
+function _stripTrailingGapFillers(text) {
+  if (!text) return text;
+  const lines = String(text).split('\n');
+  while (lines.length && (/^\s*$/.test(lines[lines.length - 1]) || /\[no (update|activity) logged\]\s*$/i.test(lines[lines.length - 1]))) {
+    if (lines.length === 1) break; // never strip the only line
+    lines.pop();
+  }
+  return lines.join('\n');
+}
+
+// Deep-scan base batch size (units processed in parallel per batch). History:
+// 5 → 3 on 2026-08-24 when the claude-code pool was 3 workers. The relay's
+// Claude pool is now relay.getClaudePoolSize() — default 1 (env
+// FLEET_CLAUDE_POOL / persisted orchaConfig.claudePoolSize, clamped 1–5) —
+// while the Orcha WS lane runs up to relay MAX_CONCURRENT (5) asks. So with
+// Orcha up, 3 is fine; with Orcha DOWN every ask falls to Claude and a batch of
+// 3 queues behind a single worker while each unit holds an offsite scrape
+// window open. perf.deepScanMatchPool (default OFF) caps the batch to the
+// Claude pool in that case — see deepScanBatchSize().
 const DS_BATCH_SIZE = 3;
+
+// Pure: effective batch size. Unchanged base unless the flag is on AND the
+// Orcha lane is down; then min(base, poolSize), never below 1.
+function deepScanBatchSize({ base = DS_BATCH_SIZE, matchPool, orchaUp, poolSize } = {}) {
+  if (!matchPool || orchaUp) return base;
+  const pool = Math.floor(Number(poolSize)) || 1;
+  return Math.max(1, Math.min(base, pool));
+}
 
 // Post-processing: strip dollar amounts AI may have included despite instructions
 function _stripCosts(text) {
@@ -65,7 +109,44 @@ function _withTimeout(promise, ms, label) {
  * @param {Array}  mergedRows - All merged unit rows (mutated in place)
  * @param {object} opts       - { pushData, pushStatus, payload, uptakeCount, relayCount }
  */
+// Cached offsite (ASIST/DTNA) notes are trusted for this long; older or
+// undated → the timeline build re-scrapes live. Opening a unit always fetches
+// fresh notes and rebuilds that unit right away (relay:refresh-unit).
+const OFFSITE_CACHE_FRESH_MS = 2 * 60 * 60 * 1000;
+function isOffsiteCacheFresh(u, now) {
+  const t = u && u.asistScrapedAt ? new Date(u.asistScrapedAt).getTime() : NaN;
+  if (!Number.isFinite(t)) return false;
+  return ((now || Date.now()) - t) < OFFSITE_CACHE_FRESH_MS;
+}
+
+// Write back ONLY the entries this run changed, on top of what's on disk now.
+// A deep-scan holds its own in-memory copy of notesStore for minutes; saving
+// that whole copy would silently undo a concurrent single-unit rebuild (or a
+// user edit) made in the meantime.
+function _saveChangedNotes(notesStore, changedIds) {
+  if (!changedIds || !changedIds.size) return;
+  const disk = store.load('notesStore', {}) || {};
+  for (const id of changedIds) disk[id] = notesStore[id];
+  store.save('notesStore', disk);
+}
+
+// Phase 7 durable jobs: fleet passes (opts.durableScope === 'fleet') get a
+// durable handle when jobs.deepScan.durable is on; everything else (and every
+// path with the flags off) gets the NOOP handle and runs exactly as before.
 async function runOrchaDeepScan(mergedRows, opts) {
+  const { NOOP_HANDLE } = require('../jobs');   // side-effect-free require
+  const jobRef = { job: NOOP_HANDLE, resumeSkipped: 0 };
+  try {
+    const out = await _runOrchaDeepScanBody(mergedRows, opts, jobRef);
+    jobRef.job.complete({ processed: out && out.processed, improved: out && out.improved, resumeSkipped: jobRef.resumeSkipped });
+    return out;                                  // the body's own object, untouched
+  } catch (e) {
+    jobRef.job.fail(e);
+    throw e;                                     // same error object as today
+  }
+}
+
+async function _runOrchaDeepScanBody(mergedRows, opts, jobRef) {
   const { pushData, pushStatus, payload } = opts;
   const uptakeCount = opts.uptakeCount || 0;
   const relayCount  = opts.relayCount  || 0;
@@ -75,14 +156,27 @@ async function runOrchaDeepScan(mergedRows, opts) {
     const relay = require('../orcha/relay');
     const askOrcha = async (prompt) => {
       try {
-        const text = await relay.ask(prompt);
+        // Gateway source tag: full-fleet scan = low; forced/on-demand unit = normal.
+        const text = await relay.ask(prompt, { source: opts.aiSource || (opts.force ? 'deep_scan_unit' : 'deep_scan') });
         return text ? { ok: true, text } : { ok: false, error: 'empty response' };
       } catch (e) {
         return { ok: false, error: e.message };
       }
     };
 
+  // Effective batch size (perf.deepScanMatchPool, Phase 2b). Any probe error
+  // falls back to the unchanged base batch.
+  let _matchPool = false;
+  try { _matchPool = require('../config/perf-flags').load().deepScanMatchPool; } catch (_) {}
+  const _orchaUp = (() => { try { return !!relay.getStatus().backends.orcha; } catch (_) { return true; } })();
+  const _poolSize = (() => { try { return relay.getClaudePoolSize(); } catch (_) { return DS_BATCH_SIZE; } })();
+  const batchSize = deepScanBatchSize({ matchPool: _matchPool, orchaUp: _orchaUp, poolSize: _poolSize });
+  if (batchSize !== DS_BATCH_SIZE) {
+    logger.info('[DS] batch size ' + batchSize + ' (Orcha down, Claude pool ' + _poolSize + ')');
+  }
+
   const notesStore = store.load('notesStore', {});
+  const _changedIds = new Set(); // units whose notesStore entry this run changed
 
   // Filter: units that need attention
   // Uses lifecycleState + lifecycleReason — atsState does not exist on merged rows
@@ -105,6 +199,41 @@ async function runOrchaDeepScan(mergedRows, opts) {
     return false;
   });
 
+  // SKIP UNCHANGED (2026-10-28): drop units whose AI inputs are identical to
+  // their last successful build. Never skipped: forced single-unit rebuilds
+  // (opening a unit), units with no stored timeline yet, and units whose offsite
+  // notes are stale but live-scrapable (the live re-scrape may bring news).
+  const _skipped = [];
+  if (!opts.force) {
+    for (let k = unitsToProcess.length - 1; k >= 0; k--) {
+      const u = unitsToProcess[k];
+      const ns = notesStore[u.equipmentId] || {};
+      if (!ns.timeline || !ns._dsInputSig) continue;
+      const offUrl = u.offsiteShopEventUrl || u.asistSrUrl || '';
+      const liveScrapable = /decisiv\.net/i.test(offUrl) || /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(offUrl);
+      if (liveScrapable && !isOffsiteCacheFresh(u)) continue;
+      if (ns._dsInputSig === _aiInputSig(u, ns)) { _skipped.push(u.equipmentId); unitsToProcess.splice(k, 1); }
+    }
+    if (_skipped.length) logger.info('[DS] skipping ' + _skipped.length + ' unit(s) with unchanged inputs since their last build');
+  }
+
+  // Phase 7: durable fleet pass (NOOP unless jobs.deepScan.durable is on).
+  if (unitsToProcess.length > 0 && opts.durableScope === 'fleet') {
+    jobRef.job = require('../jobs').begin({ type: 'deepScan', scopeKey: 'fleet' });
+  }
+  const job = jobRef.job;
+  let k = 0;                                   // declared before the if: fresh jobs use 0
+  if (job.resumed) {
+    for (let j = unitsToProcess.length - 1; j >= 0; j--) {
+      const u = unitsToProcess[j];
+      const id = u.equipmentId;
+      if (job.isUnitPoisoned(id) || job.isUnitDone(id, _aiInputSig(u, notesStore[id] || {}))) { unitsToProcess.splice(j, 1); k++; }
+    }
+    jobRef.resumeSkipped = k;
+    if (k) logger.info('[DS] resume job ' + job.jobId + ' attempt ' + job.attempt + ': skipping ' + k + ' unit(s) completed before restart');
+  }
+  job.setCheckpoint({ total: unitsToProcess.length + k, resumeSkipped: k });   // no-op on NOOP
+
   logger.info('Orcha Deep Scan: processing ' + unitsToProcess.length + ' units...');
   pushStatus('\uD83E\uDDE0 Orcha analyzing ' + unitsToProcess.length + ' units...');
   let improved = 0;
@@ -120,8 +249,14 @@ async function runOrchaDeepScan(mergedRows, opts) {
   // earlier one in notesStore. Advancing by 5 (matching the slice window)
   // restores the non-overlapping batching the comment above intends.
   const allResults = []; // collect all settled results across batches for post-scan detection
-  for (let i = 0; i < unitsToProcess.length; i += DS_BATCH_SIZE) {
-    const batch   = unitsToProcess.slice(i, i + DS_BATCH_SIZE);
+  job.start();
+  for (let i = 0; i < unitsToProcess.length; i += batchSize) {
+    const batch   = unitsToProcess.slice(i, i + batchSize);
+    // Phase 7: PRE-processing input signatures (only when durable).
+    const inSig = job.durable
+      ? new Map(batch.map(u => [u.equipmentId, _aiInputSig(u, notesStore[u.equipmentId] || {})]))
+      : null;
+    job.unitsStarted(batch.map(u => u.equipmentId));
     const results = await Promise.allSettled(
       batch.map(u => _processUnit(u, notesStore, askOrcha))
     );
@@ -153,7 +288,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
           // AI regenerates the timeline purely from raw vendor/WO comments -- it has no
           // awareness of previously manually-added lines. Merge them back in so a rescan
           // never silently discards user-entered timeline entries (immutable truth).
-          const _rowTl = _sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(_stripCosts(val.timeline), ns.manualEntries), ns.hiddenEntries));
+          const _rowTl = _stripTrailingGapFillers(_sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(_stripCosts(val.timeline), ns.manualEntries), ns.hiddenEntries)));
           if (!_isPlaceholderRow(_rowTl) || _isPlaceholderRow(row.repairTimeline)) {
             row.repairTimeline = _rowTl;
           }
@@ -194,7 +329,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
       };
       const _prevTl = ns.timeline || '';
       if (val.timeline) {
-        const _merged = _sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(val.timeline, ns.manualEntries), ns.hiddenEntries));
+        const _merged = _stripTrailingGapFillers(_sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(val.timeline, ns.manualEntries), ns.hiddenEntries)));
         // Only accept the new timeline if it is NOT a placeholder, OR the stored
         // one is already empty/placeholder too (nothing better to protect).
         if (!_isPlaceholder(_merged) || _isPlaceholder(_prevTl)) {
@@ -252,7 +387,14 @@ async function runOrchaDeepScan(mergedRows, opts) {
         }
       }
 
-      if (isChanged) notesStore[val.equipmentId] = ns;
+      // Record the inputs this successful build used (computed AFTER processing,
+      // since a live offsite re-scrape may have refreshed asistNotes on the row).
+      if (row && val.timeline) {
+        const _sig = _aiInputSig(row, ns);
+        if (ns._dsInputSig !== _sig) { ns._dsInputSig = _sig; isChanged = true; }
+      }
+
+      if (isChanged) { notesStore[val.equipmentId] = ns; _changedIds.add(val.equipmentId); }
     }
 
     // Persist INCREMENTALLY after each group of 5 (not only at end of batch).
@@ -263,21 +405,33 @@ async function runOrchaDeepScan(mergedRows, opts) {
     // already-computed timeline in that stall. Saving per-group means results
     // reach disk (and the UI on next push) as soon as they're generated.
     try {
-      store.save('notesStore', notesStore);
+      _saveChangedNotes(notesStore, _changedIds);
+      // Phase 7: "done" only once notes are persisted. Guarded so the flags-off
+      // path never builds or dereferences anything (inSig is null there).
+      if (job.durable && inSig) job.unitsSettled(batch.map((u, idx) => {
+        const r = results[idx]; const id = u.equipmentId;
+        if (r && r.status === 'fulfilled' && r.value) return { key: id, status: 'done', sig: r.value.timeline ? (inSig.get(id) || null) : null };
+        return { key: id, status: 'failed' };
+      }));
       // Never push an EMPTY rows array -- the renderer would REPLACE the whole
       // fleet with [] and zero the grid. Only push when we actually have rows.
       if (pushData && typeof pushData === 'function' && Array.isArray(mergedRows) && mergedRows.length) {
-        pushData({ ...payload, rows: mergedRows, _partial: 'deep-scan' });
+        // Stamp a FRESH syncedAt so the main-process _pushData stale-guard
+        // (drops pushes older than the last) never rejects this enriched push.
+        // Reusing the load-time payload.syncedAt made the deep-scan + Uptake
+        // re-merge pushes get dropped behind each other, so the grid never got
+        // the merged risk scores / PM (the priority drawer, on a different path,
+        // did). now() keeps the latest enrichment winning.
+        pushData({ ...payload, rows: mergedRows, syncedAt: new Date().toISOString(), _partial: 'deep-scan' });
       }
-      logger.info('[DS] Incremental save after ' + Math.min(i + DS_BATCH_SIZE, unitsToProcess.length) + '/' + unitsToProcess.length + ' units');
+      logger.info('[DS] Incremental save after ' + Math.min(i + batchSize, unitsToProcess.length) + '/' + unitsToProcess.length + ' units');
     } catch (e) {
       logger.warn('[DS] Incremental save failed: ' + e.message);
     }
   }
 
-  // Final save (idempotent — captures any last-group changes and downstream
-  // notification-flag writes below).
-  store.save('notesStore', notesStore);
+  // Final save (idempotent — captures any last-group changes).
+  _saveChangedNotes(notesStore, _changedIds);
 
   // ── Repair-complete detection ─────────────────────────────────────────────
   // After processing timelines, check each unit's latest entries for
@@ -316,6 +470,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
       if (ns2._repairDoneNotifDate === _today) continue;
       _repairDoneUnits.push({
         id: unitId,
+        wr: row.workRequestId || '-',
         vendor: row.vendor || '?',
         site: row.domicileSite || '',
         signal: statusDone ? 'status: ' + (val.repairStatus || '') : lastLines.slice(-80),
@@ -323,6 +478,7 @@ async function runOrchaDeepScan(mergedRows, opts) {
       // Mark notified today
       if (!notesStore[unitId]) notesStore[unitId] = {};
       notesStore[unitId]._repairDoneNotifDate = _today;
+      _changedIds.add(unitId);
     }
 
     // Out-of-scope / needs dealer — check last 3 timeline lines
@@ -333,77 +489,35 @@ async function runOrchaDeepScan(mergedRows, opts) {
       if (ns3._outOfScopeNotifDate !== _today) {
         _outOfScopeUnits.push({
           id: unitId,
+          wr: row.workRequestId || '-',
           vendor: row.vendor || '?',
           site: row.domicileSite || '',
           signal: scopeLines.slice(-100),
         });
         if (!notesStore[unitId]) notesStore[unitId] = {};
         notesStore[unitId]._outOfScopeNotifDate = _today;
+        _changedIds.add(unitId);
       }
     }
   }
+  // Persist the once-per-day notification flags set just above.
+  try { _saveChangedNotes(notesStore, _changedIds); } catch (_) {}
 
   // Send notifications for units detected as repair-complete
   if (_repairDoneUnits.length) {
     logger.info('Repair-complete detected: ' + _repairDoneUnits.map(u => u.id).join(', '));
-    // Renderer notification
-    if (pushData && typeof pushData === 'function') {
-      try {
-        const mainWin = require('electron').BrowserWindow.getAllWindows()[0];
-        if (mainWin && !mainWin.isDestroyed()) {
-          _repairDoneUnits.forEach(u => {
-            mainWin.webContents.send('ui:notif-push', {
-              icon: '✅',
-              title: 'Repair Complete: ' + u.id,
-              body: u.vendor + (u.site ? ' @ ' + u.site : '') + ' — ' + u.signal,
-              time: Date.now(),
-            });
-          });
-        }
-      } catch (_) {}
-    }
-    // Slack self-DM (Just Me channel) — batch all into one message
+    // Unified assistant notifier: de-dupe ledger, batching, in-app + Just Me only.
     try {
-      const slackSend = require('../scrapers/slack_send');
-      const slackConfig = store.load('slackChannelWatchConfig', {});
-      const justMeCh = (slackConfig.channels || []).find(ch => ch.mode === 'justme');
-      if (justMeCh && justMeCh.id) {
-        const msg = '✅ *Repair Complete — Ready to Flip*\n' +
-          _repairDoneUnits.map(u => `• *${u.id}* (${u.vendor}${u.site ? ' @ ' + u.site : ''}) — ${u.signal}`).join('\n') +
-          '\n\n_These units appear done based on their latest timeline. Verify and flip to Available._';
-        await slackSend.sendToChannel({ channelId: justMeCh.id, message: msg }).catch(e => logger.warn('Repair-done Slack notify failed:', e.message));
-      }
-    } catch (_) {}
+      require('./awareness/notifier').getNotifier().enqueue(_repairDoneUnits.map(_repairDoneNote));
+    } catch (e) { logger.warn('Repair-done notifier enqueue failed: ' + e.message); }
   }
 
   // Send notifications for units detected as out-of-scope / needs dealer
   if (_outOfScopeUnits.length) {
     logger.info('Out-of-scope/needs-dealer detected: ' + _outOfScopeUnits.map(u => u.id).join(', '));
     try {
-      const mainWin = require('electron').BrowserWindow.getAllWindows()[0];
-      if (mainWin && !mainWin.isDestroyed()) {
-        _outOfScopeUnits.forEach(u => {
-          mainWin.webContents.send('ui:notif-push', {
-            icon: '⚠️',
-            title: 'Out of Scope: ' + u.id,
-            body: u.vendor + (u.site ? ' @ ' + u.site : '') + ' — needs re-routing to dealer/OEM',
-            time: Date.now(),
-          });
-        });
-      }
-    } catch (_) {}
-    // Slack self-DM
-    try {
-      const slackSend2 = require('../scrapers/slack_send');
-      const slackConfig2 = store.load('slackChannelWatchConfig', {});
-      const justMeCh2 = (slackConfig2.channels || []).find(ch => ch.mode === 'justme');
-      if (justMeCh2 && justMeCh2.id) {
-        const msg2 = '⚠️ *Out of Scope / Needs Dealer*\n' +
-          _outOfScopeUnits.map(u => `• *${u.id}* (${u.vendor}${u.site ? ' @ ' + u.site : ''}) — ${u.signal}`).join('\n') +
-          '\n\n_These units need re-routing. The current vendor cannot complete the repair — route to dealer/OEM._';
-        await slackSend2.sendToChannel({ channelId: justMeCh2.id, message: msg2 }).catch(e => logger.warn('Out-of-scope Slack notify failed:', e.message));
-      }
-    } catch (_) {}
+      require('./awareness/notifier').getNotifier().enqueue(_outOfScopeUnits.map(_outOfScopeNote));
+    } catch (e) { logger.warn('Out-of-scope notifier enqueue failed: ' + e.message); }
   }
 
   if (improved > 0) {
@@ -411,6 +525,9 @@ async function runOrchaDeepScan(mergedRows, opts) {
   }
 
   payload.rows = mergedRows;
+  // Fresh syncedAt so this final enriched push isn't dropped by the stale-guard
+  // behind an interleaved background push (Uptake re-merge / PM fill).
+  payload.syncedAt = new Date().toISOString();
   // Never push an EMPTY rows array (would REPLACE the fleet with [] and zero the
   // grid). A 0-unit scan has nothing to push.
   if (Array.isArray(mergedRows) && mergedRows.length) {
@@ -493,33 +610,114 @@ async function _processUnit(u, notesStore, askOrcha) {
   // timeline instead of '[no activity logged]'.
   // Lowered gate (2026-10): a terse but critical status note like "Asset Ready.
   // REPAIRS ARE COMPLETED." must not be skipped. >10 chars is enough signal.
-  if (u.asistNotes && u.asistNotes.trim().length > 10) {
-    offsiteText = u.asistNotes.substring(0, 3000);
-    logger.info('[DS] Offsite text from cached asistNotes for ' + u.equipmentId + ' | ' + offsiteText.length + 'ch');
+  // FRESHNESS (2026-10-27): cached notes are only trusted while they're recent.
+  // Unit 320160's timeline said "no dealer update since 10/22" while ASIST had
+  // 10/22, 10/26 and 10/27 updates — the cache was days old and was used
+  // forever because it existed. Stale or undated cache → re-scrape live below
+  // (falls back to the cache if the live scrape fails).
+  const _cacheFresh = isOffsiteCacheFresh(u);
+  const _canLive = !!(offsiteUrl && (/decisiv\.net/i.test(offsiteUrl) || /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(offsiteUrl)));
+  const _cachedText = (u.asistNotes && u.asistNotes.trim().length > 10) ? u.asistNotes : '';
+  if (_cachedText && (_cacheFresh || !_canLive)) {
+    offsiteText = _cachedText.substring(0, 3000);
+    logger.info('[DS] Offsite text from cached asistNotes for ' + u.equipmentId + ' | ' + offsiteText.length + 'ch' + (_cacheFresh ? '' : ' (stale, no live source)'));
+  } else if (_cachedText) {
+    logger.info('[DS] Cached asistNotes for ' + u.equipmentId + ' are stale (scraped ' + (u.asistScrapedAt || 'never') + ') — re-scraping live');
   }
-  // FALLBACK: only re-scrape live if we have a Decisiv URL but no cached text yet.
+  // LIVE: re-scrape when there's no usable (fresh) cached text.
   if (!offsiteText && offsiteUrl && /decisiv\.net/i.test(offsiteUrl)) {
     try {
       const { enrichVolvoAsist } = require('../scrapers/asist_enrich');
       const enrichResult = await enrichVolvoAsist(offsiteUrl);
       if (enrichResult && enrichResult.ok && enrichResult.offsiteText) {
         offsiteText = enrichResult.offsiteText.substring(0, 3000);
-        u.asistScrapedAt = enrichResult.scrapedAt;
+        u.asistNotes = enrichResult.offsiteText.slice(0, 8000); // keep the row's cache current
+        u.asistScrapedAt = enrichResult.scrapedAt || new Date().toISOString();
         u.asistSource = enrichResult.source;
         u.asistLabel = enrichResult.bestLabel;
         u.asistSrUrl = enrichResult.bestUrl || offsiteUrl;
-        logger.info('[DS] Offsite enriched (live) for ' + u.equipmentId + ' | ' + enrichResult.source + ' | ' + offsiteText.length + 'ch');
+        // Case stage (Arrival..Ready) + detail, now read from Decisiv's API.
+        // Previously never copied here, so the live path lost it (DTNA did).
+        // ...or the API said the dealer set NO status yet (clears an old guess).
+        if (enrichResult.offsiteStage || enrichResult.offsiteStageConfidence === 'api') {
+          u.offsiteStage = enrichResult.offsiteStage || '';
+          u.offsiteStageDetail = enrichResult.offsiteStageDetail || '';
+          u.offsiteStageSince = enrichResult.offsiteStageSince || '';
+          u._stageReadAt = new Date().toISOString(); // newer read wins on save
+          // Dealer case just reached READY (API-confirmed) -> notify the
+          // operator once (fresh, deduped, queued; never blocks the scan).
+          if (u.offsiteStage === 'ready' && u.offsiteStageSince) {
+            try { require('../scrapers/ready_pickup_notify').onStageUpdate(u); }
+            catch (e) { logger.warn('[DS] stage-ready notify hook failed (non-fatal): ' + e.message); }
+          }
+        }
+        logger.info('[DS] Offsite enriched (live) for ' + u.equipmentId + ' | ' + enrichResult.source + ' | ' + offsiteText.length + 'ch'
+          + (enrichResult.offsiteStage ? ' | stage ' + enrichResult.offsiteStage + (enrichResult.offsiteStageDetail ? ' / ' + enrichResult.offsiteStageDetail : '') : ''));
       }
     } catch (e) {
       logger.warn('[DS] Offsite enrich failed for ' + u.equipmentId + ': ' + e.message);
     }
   }
+  // DTNA (Daimler/Freightliner) Servicetracker: its case comment feed is a
+  // Salesforce Lightning community — scrape the rendered feed (see dtna_enrich).
+  // Same offsiteText/timeline path as Decisiv; feeds the AI timeline identically.
+  if (!offsiteText && offsiteUrl && /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(offsiteUrl)) {
+    try {
+      const { enrichDtna } = require('../scrapers/dtna_enrich');
+      const dr = await enrichDtna(offsiteUrl);
+      if (dr && dr.ok && dr.offsiteText) {
+        offsiteText = dr.offsiteText.substring(0, 3000);
+        u.asistNotes = dr.offsiteText.slice(0, 8000); // keep the row's cache current
+        u.asistScrapedAt = dr.scrapedAt || new Date().toISOString();
+        u.asistSource = 'dtna';
+        u.asistLabel = dr.bestLabel || 'DTNA Case';
+        u.asistSrUrl = offsiteUrl;
+        if (dr.offsiteStage) u.offsiteStage = dr.offsiteStage;
+        logger.info('[DS] DTNA case enriched (live) for ' + u.equipmentId + ' | ' + offsiteText.length + 'ch');
+      }
+    } catch (e) {
+      logger.warn('[DS] DTNA enrich failed for ' + u.equipmentId + ': ' + e.message);
+    }
+  }
+  // Live re-scrape failed/unavailable → fall back to the (stale) cached notes
+  // rather than building the timeline with no dealer notes at all.
+  if (!offsiteText && _cachedText) {
+    offsiteText = _cachedText.substring(0, 3000);
+    logger.info('[DS] Live offsite refresh failed for ' + u.equipmentId + ' — using stale cached asistNotes (' + offsiteText.length + 'ch)');
+  }
   const today = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' });
+
+  // ── Reconciliation hint (spec §31) ──────────────────────────────────────────
+  // The Relay↔Offsite reconcile engine already established a TRUSTED canonical
+  // state for this unit (repairPhase, waitingOn, threadOfRecord, the open
+  // question, and whether a human decision is pending). Feed that to the timeline
+  // builder as GROUND TRUTH so it doesn't independently re-decide the phase from
+  // scratch — it should write a timeline CONSISTENT with the reconciled state.
+  // Best-effort + read-only: if there's no canonical record yet, the block is
+  // empty and the builder works exactly as before.
+  let reconcileHint = '';
+  try {
+    const canon = ((store.load('canonicalState', {}) || {}).units) || {};
+    const rec = canon[u.equipmentId];
+    if (rec && rec.aiReconciled) {
+      const bits = [];
+      if (rec.repairPhase && rec.repairPhase !== 'unknown') bits.push('repair phase = ' + rec.repairPhase);
+      if (rec.waitingOnFine && rec.waitingOnFine !== 'unknown') bits.push('waiting on ' + rec.waitingOnFine);
+      if (rec.threadOfRecordFine) bits.push('live conversation is in ' + rec.threadOfRecordFine);
+      if (rec.awaitingReply) bits.push('OPEN QUESTION from vendor still owed an answer: "' + String(rec.awaitingReply).slice(0, 160) + '"');
+      if (rec.decisionRequired) bits.push('a HUMAN DECISION is pending' + (rec.decisionQuestion ? ' (' + String(rec.decisionQuestion).slice(0, 160) + ')' : ''));
+      if (bits.length) {
+        reconcileHint =
+          '\nRECONCILED CANONICAL STATE (trusted — the reconcile engine already determined this; make the timeline CONSISTENT with it, do NOT contradict it):\n' +
+          '  ' + bits.join('; ') + '.\n';
+      }
+    }
+  } catch (_) { /* no canonical record — proceed without the hint */ }
 
   const prompt =
     'You are Orcha, the AI brain for Fleet Operations. Generate the OFFICIAL repair timeline for unit ' + u.equipmentId + '.\n\n' +
     'PURPOSE:\n' +
-    'This timeline is the official repair status report sent directly to business partners and management. Every line must be a professional coordinator update — NOT a message transcript.\n\n' +
+    'This timeline is the official repair status report sent directly to business partners and management. Every line must be a professional coordinator update — NOT a message transcript. Write every entry in INTERNAL third-person status-log voice (e.g. "Requested updated parts ETA from dealer; response pending." / "Dealer submitted repair estimate; internal approval pending."). NEVER write vendor-facing language ("can you confirm...", "please advise") into the timeline.\n\n' +
     'VOICE:\n' +
     'Write as a fleet maintenance coordinator providing status updates to partners. Professional, concise, actionable. Each entry answers: what is the current repair state and what happens next.\n\n' +
     'CRITICAL RULES:\n' +
@@ -601,6 +799,7 @@ async function _processUnit(u, notesStore, askOrcha) {
     'WO Created: ' + (u.created || '--') + '\n' +
     (u.serviceState ? 'WO State: ' + u.serviceState + '\n' : '') +
     (u.issueDetails ? 'Issue: ' + u.issueDetails.substring(0, 300) + '\n' : '') +
+    reconcileHint +
     '\nRELAY GARAGE CONVERSATION (Unplanned WR):\n' +
     (fullConv || '(no conversation)') + '\n\n' +
     (plannedConv ? 'RELAY GARAGE CONVERSATION (Planned WR -- ' + (u._plannedWRData.vendor || 'vendor unknown') + '):\n' + plannedConv + '\n\n' : '') +
@@ -802,4 +1001,38 @@ function _filterHiddenEntries(timelineText, hiddenEntries) {
   return lines.join('\n');
 }
 
-module.exports = { runOrchaDeepScan, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature };
+// ── Single-unit rebuild ───────────────────────────────────────────────────────
+// Rebuild ONE unit's timeline now (e.g. right after its offsite/WR data was
+// refreshed on open). Pushes the row as a partialMerge so the grid is never
+// replaced by a 1-row list. One rebuild per unit at a time.
+const _unitRebuilds = new Set();
+async function rebuildUnitTimeline(row, opts) {
+  opts = opts || {};
+  const id = row && String(row.equipmentId || '').trim();
+  if (!id || _unitRebuilds.has(id)) return { ok: false, skipped: id ? 'in-progress' : 'no-unit' };
+  _unitRebuilds.add(id);
+  try {
+    const push = typeof opts.pushData === 'function'
+      ? (p) => opts.pushData({ rows: (p && p.rows) || [row], partialMerge: true, _partial: 'timeline-rebuild' })
+      : null;
+    // force: an explicit single-unit rebuild (unit opened / inputs changed) must never be skipped.
+    await runOrchaDeepScan([row], { pushData: push, pushStatus: opts.pushStatus || (() => {}), payload: {}, force: true });
+    return { ok: true, timeline: row.repairTimeline || '' };
+  } finally {
+    _unitRebuilds.delete(id);
+  }
+}
+
+// Detected unit -> unified notifier note (design §D6). 'ready-maybe' is shared
+// with the change digest's P1b key so a weak text signal never claims the
+// API-confirmed 'ready-api' key.
+function _repairDoneNote(u) { return {
+  key: `${u.id}|ready-maybe|${u.wr}`, unit: u.id, wr: u.wr, family: 'ready-maybe', icon: '✅', title: 'Repair done?',
+  text: `${u.id} repair looks complete (${String(u.signal).slice(0, 80)}). Verify and flip to Available.`,
+  source: 'deep-scan', severity: 'high' }; }
+function _outOfScopeNote(u) { return {
+  key: `${u.id}|out-of-scope|${u.wr}`, unit: u.id, wr: u.wr, family: 'out-of-scope', icon: '⚠️', title: 'Needs re-routing',
+  text: `${u.id} needs re-routing (vendor says out of scope). Consider dealer/OEM.`,
+  source: 'deep-scan', severity: 'medium' }; }
+
+module.exports = { runOrchaDeepScan, rebuildUnitTimeline, deepScanBatchSize, DS_BATCH_SIZE, isOffsiteCacheFresh, OFFSITE_CACHE_FRESH_MS, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature, _stripTrailingGapFillers, _aiInputSig, _repairDoneNote, _outOfScopeNote };

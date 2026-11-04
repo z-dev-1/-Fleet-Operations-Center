@@ -363,14 +363,67 @@ async function _scrapeGeofencesOnce(log) {
   return Promise.race([scrapeWork, timeoutRace]);
 }
 
+// Merge resolved units ({equipmentId, geofence, latLong}) into the cache.
+// Shared by the API path and the DOM-scrape path so both write identically.
+function _mergeUnitsIntoCache(units, log) {
+  const cache = loadGeofenceCache();
+  let updated = 0;
+  (units || []).forEach((u) => {
+    const id = u.equipmentId;
+    if (!id) return;
+    const existing = cache[id] || {};
+    const changed = existing.geofence !== u.geofence || existing.latLong !== u.latLong;
+    if (changed || !existing.geofence) {
+      cache[id] = {
+        geofence:    u.geofence || existing.geofence || '',
+        latLong:     u.latLong  || existing.latLong  || '',
+        lastUpdated: new Date().toISOString(),
+      };
+      updated++;
+    }
+  });
+  saveGeofenceCache(cache);
+  if (log) log(`[Geofence] Cache updated: ${updated} changed. Cache has ${Object.keys(cache).length} entries.`);
+  return { updated, cache };
+}
+
+// API-FIRST path: get live geofence + GPS for the whole fleet via the AAP JSON
+// API (one bulk search, no browser). Returns null on any failure so the caller
+// falls back to the DOM scraper.
+async function _geofencesViaApi(log) {
+  try {
+    const api = require('./aap_api');
+    if (typeof api.getFleetGeofencesViaApi !== 'function') return null;
+    const r = await api.getFleetGeofencesViaApi();
+    if (!r || !r.ok || !Array.isArray(r.units) || r.units.length === 0) return null;
+    const { updated, cache } = _mergeUnitsIntoCache(r.units, log);
+    if (log) log(`[Geofence] API-first: ${r.count} units (geofence + GPS) via JSON — no browser.`);
+    return { ok: true, count: r.count, updated, cache, source: 'aap-api' };
+  } catch (e) {
+    if (log) log('[Geofence] API-first path failed, will fall back to scrape: ' + e.message);
+    logger.warn('[Geofence] API-first path failed: ' + e.message);
+    return null;
+  }
+}
+
 /**
- * scrapeGeofences(log) -- P1-B: withRetry wrapper
- * Wraps _scrapeGeofencesOnce: 3 attempts, 8s backoff (16s, 32s).
- * Promotes { ok:false } soft-failures (except AUTH_REQUIRED) to throws.
- * AUTH_REQUIRED is not retried -- requires user action.
+ * scrapeGeofences(log) — API-FIRST with DOM-scrape fallback.
+ *
+ * 1. Try the AAP JSON API (getFleetGeofencesViaApi): one bulk call, instant,
+ *    robust — the preferred path now that the fleet-monitoring data is API-first.
+ * 2. If the API path returns nothing (unexpected API change / empty), fall back
+ *    to the legacy DOM scraper (_scrapeGeofencesOnce) with its 3× retry so we
+ *    never regress functionality.
  */
 async function scrapeGeofences(log) {
   if (!log) log = console.log;
+
+  // 1) API-first.
+  const viaApi = await _geofencesViaApi(log);
+  if (viaApi && viaApi.ok) return viaApi;
+
+  // 2) Fallback: legacy DOM scrape.
+  log('[Geofence] Falling back to DOM scrape (API path unavailable)…');
   return withRetry(async () => {
     const result = await _scrapeGeofencesOnce(log);
     if (result.ok) return result;

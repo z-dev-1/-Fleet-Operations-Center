@@ -85,6 +85,7 @@ function registerOrchaIPC(ctx) {
       return { processed: 0, units: [] };
     }
     const scanPromise = runOrchaDeepScan(targets, {
+      aiSource:    'deep_scan_unit', // on-demand path (single-row AI Fill): normal AI priority
       pushData:    ctx.pushData,
       pushStatus:  ctx.pushStatus,
       // partialMerge: this is the ON-DEMAND path (e.g. Long Dwell AI Fill scans

@@ -127,6 +127,34 @@ describe('stale lease recovery (restart)', () => {
   });
 });
 
+describe('atomic check-then-claim (single transaction)', () => {
+  it('a burst of acquires for the same message yields EXACTLY ONE winner', () => {
+    // Every acquire runs its check-then-claim inside one transaction, so only
+    // the first can move the message into 'processing'; the rest see it.
+    const results = Array.from({ length: 10 }, () => claim.acquire({ ...MSG, owner: 'digital-fas' }));
+    const winners = results.filter(r => r.ok);
+    expect(winners.length).toBe(1);
+    expect(results.filter(r => !r.ok && r.already === 'processing').length).toBe(9);
+  });
+
+  it('two engines racing the same message cannot both win', () => {
+    const fas = claim.acquire({ ...MSG, owner: 'digital-fas' });
+    const legacy = claim.acquire({ ...MSG, owner: 'legacy' });
+    // Exactly one ok:true across both engines.
+    expect([fas.ok, legacy.ok].filter(Boolean).length).toBe(1);
+    expect(fas.ok).toBe(true);        // first caller wins
+    expect(legacy.ok).toBe(false);
+  });
+
+  it('the claim ledger is SQLite-backed (goes through the transactional store)', () => {
+    const engine = require('../src/store/sqlite_engine');
+    expect(engine.isAvailable()).toBe(true);
+    claim.acquire({ ...MSG, owner: 'digital-fas' });
+    // The document now lives as an atomic row in SQLite, not just a JSON file.
+    expect(engine.hasDoc(claim.KEY)).toBe(true);
+  });
+});
+
 describe('durability across a simulated restart', () => {
   it('a delivered claim persists and blocks resend after reloading the store module', () => {
     const a = claim.acquire({ ...MSG, owner: 'digital-fas' });

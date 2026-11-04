@@ -17,6 +17,7 @@ const caseStore = require('./case-store');
 const store = require('../../store');
 const guard = require('./injection-guard');
 let linkResearch; try { linkResearch = require('./link-research'); } catch (_) { linkResearch = null; }
+let attachmentResearch; try { attachmentResearch = require('./attachment-research'); } catch (_) { attachmentResearch = null; }
 
 let _resolveEntities;
 try { _resolveEntities = require('../ai-context').resolveEntities; } catch (_) { _resolveEntities = null; }
@@ -55,7 +56,7 @@ function resolveMessageEntities(text) {
  * factsNeeded (optional) is a hint list of tool names to run; if omitted we
  * infer sensible defaults from the resolved entities.
  */
-async function buildEvidence({ profile, text, question, factsNeeded, mode }) {
+async function buildEvidence({ profile, text, question, factsNeeded, mode, files }) {
   const entities = resolveMessageEntities(text || question || '');
   const fd = store.load('fleetData', {});
   const syncedAt = (fd && (fd.syncedAt || fd.updatedAt)) || null;
@@ -77,8 +78,43 @@ async function buildEvidence({ profile, text, question, factsNeeded, mode }) {
   const missingFacts = [];
   const sources = new Set();
   const denied = [];
+  const linkRefusals = [];
 
   const ctx = { profile, mode: mode || 'disabled' };
+
+  // ── Resolve shared links AND file attachments FIRST, so an AAP work-order/
+  // asset link, a shared screenshot (PNG), or a PDF can REVEAL a unit id that
+  // then gets the same full unit research below. This is what lets "here's an
+  // AAP link" / "here's a screenshot" messages (no unit typed) still produce
+  // verified unit facts — the link is resolved via the AAP JSON API (incl. the
+  // conversation) and attachments are read (text decode, or Bedrock vision for
+  // images/PDFs), their unit ids extracted, and those units merged into the set.
+  let linkUnits = [];
+  if (linkResearch) {
+    try {
+      const lr = await linkResearch.researchLinks(text || question || '');
+      (lr.evidence || []).forEach(f => { verifiedFacts.push(f); if (f.source) sources.add(f.source); });
+      (lr.refused || []).forEach(r => linkRefusals.push(r));
+      linkUnits = Array.isArray(lr.units) ? lr.units : [];
+    } catch (e) { /* link research is best-effort */ }
+  }
+  // Read shared file attachments (PNG/PDF/HTML/CSV/...) the same way.
+  if (attachmentResearch && Array.isArray(files) && files.length) {
+    try {
+      const ar = await attachmentResearch.researchAttachments(files);
+      (ar.evidence || []).forEach(f => { verifiedFacts.push(f); if (f.source) sources.add(f.source); });
+      (ar.refused || []).forEach(r => linkRefusals.push({ url: 'attachment:' + (r.file || '?'), reason: r.reason }));
+      (ar.units || []).forEach(u => { if (u) linkUnits.push(u); });
+    } catch (e) { /* attachment research is best-effort */ }
+  }
+  // Merge link/attachment-discovered units into the research set (dedup,
+  // authorization is still enforced per-unit by GET_UNIT below — a shared link
+  // or file can't widen scope).
+  if (linkUnits.length) {
+    const have = new Set(entities.units.map(x => String(x).toUpperCase()));
+    for (const lu of [...new Set(linkUnits)]) { if (lu && !have.has(String(lu).toUpperCase())) { entities.units.push(lu); have.add(String(lu).toUpperCase()); } }
+  }
+
   const primaryUnit = entities.units[0] || null;
 
   // Per-unit evidence (only for the units actually referenced).
@@ -150,16 +186,6 @@ async function buildEvidence({ profile, text, question, factsNeeded, mode }) {
   // Prompt-injection scan on the incoming message (untrusted).
   const injection = guard.detectInjection(text || question || '');
 
-  // Approved-link research: fetch ONLY allowlisted domains, treat as untrusted.
-  const linkRefusals = [];
-  if (linkResearch) {
-    try {
-      const lr = await linkResearch.researchLinks(text || question || '');
-      (lr.evidence || []).forEach(f => { verifiedFacts.push(f); sources.add(f.source); });
-      (lr.refused || []).forEach(r => linkRefusals.push(r));
-    } catch (e) { /* link research is best-effort */ }
-  }
-
   // ── CONFLICT DETECTION across the collected sources ──────────────────────
   // Surface contradictions so the AI reasons about them instead of picking one
   // silently. Real checks against the facts we actually gathered:
@@ -190,7 +216,7 @@ async function buildEvidence({ profile, text, question, factsNeeded, mode }) {
   const _rowFor = (unit) => _fleetRows.find(r => String(r.equipmentId || '').trim().toUpperCase() === String(unit || '').trim().toUpperCase()) || null;
   const _senderCaseId = caseStore.caseIdForSender(profile.slackId);
   function _caseInScope(c) {
-    if (profile.type === 'internal' || profile.type === 'manager') return true;
+    if (profile.type === 'internal' || profile.type === 'manager' || profile.type === 'mcs') return true;
     if (c.caseId && c.caseId === _senderCaseId) return true; // the sender's own case
     if (!c.unit) return false; // sender-less/unit-less case -> external can't see
     const row = _rowFor(c.unit);

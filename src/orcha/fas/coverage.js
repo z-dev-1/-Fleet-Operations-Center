@@ -189,14 +189,33 @@ function refresh(opts) {
 
 // ── Scheduling ────────────────────────────────────────────────────────────────
 let _timer = null;
+// ── Worker supervisor ownership (Phase 5, 2026-10-30) ──
+// Flag on (workers.supervised.fasCoverage): the supervisor runs the 6 h
+// 'schedule' refresh; the legacy setInterval is NOT armed. Flag off (default):
+// the legacy setInterval runs unchanged. The startup refresh stays synchronous
+// and first in both modes. backoff:false keeps the 6 h grid after a failure
+// (backoff is inert for this worker).
+let _owned = false;
 /** Start the periodic safety refresh + do an initial startup refresh. */
 function start() {
   refresh({ reason: 'startup' });
+  let owned = false;
+  try {
+    owned = require('../../workers/supervisor').claim({
+      name: 'fasCoverage', group: 'fas', tick: () => refresh({ reason: 'schedule' }),
+      intervalMs: REFRESH_INTERVAL_MS, timeoutMs: 60 * 1000, maxFailures: 3, cooldownMs: 60 * 60 * 1000,
+      backoff: false, dependsOn: [], idempotent: true, label: 'FAS coverage refresh',
+    });
+  } catch (_) { owned = false; }
+  if (owned) { _owned = true; return; }
   if (_timer) clearInterval(_timer);
   _timer = setInterval(() => { try { refresh({ reason: 'schedule' }); } catch (_) {} }, REFRESH_INTERVAL_MS);
   if (_timer.unref) _timer.unref();
 }
-function stop() { if (_timer) { clearInterval(_timer); _timer = null; } }
+function stop() {
+  if (_owned) { try { require('../../workers/supervisor').stop('fasCoverage'); } catch (_) {} _owned = false; }
+  if (_timer) { clearInterval(_timer); _timer = null; }
+}
 /** Call from the sync-complete hook. */
 function onSyncComplete() { return refresh({ reason: 'sync' }); }
 
@@ -239,4 +258,5 @@ module.exports = {
   start, stop, onSyncComplete,
   isOperatorCovered, isDomicileCovered, listOperators, listDomiciles,
   _emptyProfile,
+  __test__: { legacyArmed: () => !!_timer, owned: () => _owned },
 };

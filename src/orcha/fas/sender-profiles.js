@@ -64,7 +64,9 @@ function presetFor(type) {
 // editable to specific SCAC/domicile. `carrier`/`vendor` (external) default to
 // EMPTY = no data until explicitly scoped ("empty external scope = NO access").
 function _defaultScopeFor(type) {
-  return (type === 'unknown' || type === 'internal') ? [ALL_SCOPE] : [];
+  // mcs = the FAS's assistant → all-scope ('*'), same as internal: they help
+  // across every operator/domicile, so they see the whole fleet by default.
+  return (type === 'unknown' || type === 'internal' || type === 'mcs') ? [ALL_SCOPE] : [];
 }
 
 // Infer identityType from a raw contact when not explicitly set. IMPORTANT: an
@@ -76,6 +78,12 @@ function _defaultScopeFor(type) {
 function _inferType(c) {
   if (VALID_TYPES.includes(c.identityType)) return c.identityType;
   if (VALID_TYPES.includes(c.type) && c.type !== 'slack') return c.type;
+  // MCS Buddy: explicit role/org marker wins. "MCS" or "Maintenance Centralized
+  // Services" in the role/org/title classifies the contact as the FAS's MCS
+  // assistant (internal-class, all-scope). Checked BEFORE the generic amazon
+  // internal test so an MCS buddy is tagged 'mcs' rather than plain 'internal'.
+  const _mcsBlob = [c.role, c.org, c.title, c.team].map((v) => String(v || '')).join(' ');
+  if (/\bmcs\b|maintenance centralized/i.test(_mcsBlob)) return 'mcs';
   if ((c.org && /amazon/i.test(c.org)) || /amazon\.com$/i.test(c.email || '')) return 'internal';
   if (c.type === 'vendor') return 'vendor';
   // A contact that has been explicitly SCOPED to specific operators/domiciles is
@@ -153,7 +161,12 @@ function _loadProfiles() {
   return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
 }
 
-const VALID_TYPES = ['internal', 'carrier', 'vendor', 'unknown'];
+// 'mcs' = MCS Buddy: the FAS's internal Maintenance Centralized Services
+// assistant. Treated like 'internal' (all-scope, full data) because they execute
+// the FAS's admin/logistics work (WR/WO creation, vendor + dealer coordination,
+// lifecycle updates) across the WHOLE fleet — they need the complete picture
+// (unit, issue, keys, gate code, location, dealer, lifecycle, DVIRs, estimate).
+const VALID_TYPES = ['internal', 'mcs', 'carrier', 'vendor', 'unknown'];
 
 /**
  * validateProfile(profile) -> { ok, profile?, error? }
@@ -278,7 +291,7 @@ function authorizationSummary(profile) {
     canRequestFollowUp: canRequest(profile, 'follow_up'),
     canRequestLifecycleChange: canRequest(profile, 'lifecycle_change'),
     canRequestWR: canRequest(profile, 'create_wr'),
-    isInternal: !!(profile && profile.type === 'internal'),
+    isInternal: !!(profile && (profile.type === 'internal' || profile.type === 'mcs')),
   };
 }
 

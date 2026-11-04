@@ -58,6 +58,17 @@ const MAX_QUEUE         = 50;
 const WS_GIVE_UP_AFTER  = 6;
 const RETRY_WS_AFTER_MS = 15 * 60 * 1000; // 15 min
 
+// ─── RE-QUEUE ON ORCHA FAILURE ───────────────────────────────────────────────
+// When the Orcha socket drops mid-request, the request is put back at the
+// FRONT of the queue and resent once Orcha reconnects (fresh socket, so a
+// late reply to the dead socket can never be attributed to another request).
+// If Orcha isn't ready again within HANDOFF_MS, or the request has been
+// re-queued MAX_REQUEUES times, or too little of its time budget is left,
+// it is handed off explicitly to the local AI (Claude) — never dropped.
+const MAX_REQUEUES          = 2;
+const HANDOFF_MS            = 20000;
+const REQUEUE_MIN_BUDGET_MS = 60000;
+
 // ─── LOCAL AI FALLBACK ───────────────────────────────────────────────────────
 // relay.js calls setLocalAskFn(fn) at startup so fleet-brain can route through
 // claude-code (or Bedrock) when Orcha WS isn't available. The fn receives a
@@ -100,10 +111,16 @@ function _buildLocalPrompt(userPrompt) {
   return sys + hist + '\n\n[CURRENT MESSAGE]\n' + userPrompt;
 }
 
-async function _localAsk(prompt) {
+// signal / priority are forwarded to the registered local fn (relay maps them
+// onto the Claude pool only when its gateway flags are on). With neither, the
+// fn is called with a single argument exactly as before.
+async function _localAsk(prompt, signal, priority) {
   if (!_localAskFn) throw new Error('fleet-brain: no local AI function — call setLocalAskFn() first');
   const fullPrompt = _buildLocalPrompt(prompt);
-  const response   = await _localAskFn(fullPrompt);
+  const o = {};
+  if (signal) o.signal = signal;
+  if (typeof priority === 'string') o.priority = priority;
+  const response   = await ((o.signal || o.priority) ? _localAskFn(fullPrompt, o) : _localAskFn(fullPrompt));
   // Accumulate history for next call
   _localHistory.push({ role: 'user',      content: prompt   });
   _localHistory.push({ role: 'assistant', content: response });
@@ -169,8 +186,19 @@ function _buildSystemContext() {
     '- Primary Component, Technician Failure Code, Primary Cause Code, Work Accomplished Code\n' +
     '- Maintenance Code: PM (preventive), UM (unscheduled), MOD (modification)\n' +
     '- Controllable: Y/N\n' +
-    fleetSummary + '\n\n' +
+    fleetSummary +
+    _repairIntelContext() + '\n\n' +
     'RESPOND CONCISELY. You are an operational tool, not a chatbot. Facts over filler.';
+}
+
+// Compact, deterministic repair-intelligence snapshot (12-month engine). Lazy-
+// required and fully guarded so it can NEVER break the Brain's context build;
+// returns '' when the engine is empty or unavailable.
+function _repairIntelContext() {
+  try {
+    const { brainContext } = require('../repair-intel/brain-context');
+    return brainContext() || '';
+  } catch (_) { return ''; }
 }
 
 // ─── PORT RESOLUTION ────────────────────────────────────────────────────────
@@ -255,6 +283,7 @@ function connect() {
   _ws.on('error', (err) => {
     clearTimeout(connectTimer);
     _failCount++;
+    _ensureLocalOrcha();
     const logFn = _failCount <= 5 ? 'warn' : 'info';
     logger[logFn]('WS error (attempt ' + _failCount + '): ' + (err.message || 'unknown'));
     _connected = false;
@@ -267,7 +296,7 @@ function connect() {
       if (_localAskFn && _queue.length) {
         logger.info('[fleet-brain] Flushing ' + _queue.length + ' queued request(s) through local AI');
         const queued = _queue.splice(0);
-        queued.forEach(req => _localAsk(req.prompt).then(req.resolve).catch(req.reject));
+        queued.forEach(req => _handoffLocal(req, 'Orcha unreachable — gave up on WS'));
       }
       // Schedule a retry of Orcha WS after RETRY_WS_AFTER_MS
       setTimeout(() => {
@@ -285,7 +314,14 @@ function connect() {
     _connected = false;
     _ready     = false;
     _ws        = null;
-    if (_activeReq) { _activeReq.reject(new Error('WS closed')); _activeReq = null; }
+    if (_activeReq) {
+      const r = _activeReq;
+      _activeReq = null;
+      // Socket is gone, so any late reply for r is unreachable — safe to resend.
+      if (!_requeue(r, 'WS closed mid-request')) _handoffOrReject(r, new Error('WS closed'));
+    }
+    // Anything still waiting gets a bounded wait for Orcha to come back.
+    _queue.forEach(_armHandoff);
     _scheduleReconnect();
   });
 
@@ -336,8 +372,12 @@ function _handleMessage(msg) {
         _sessionId = null;
         _ws.send(JSON.stringify({ type: 'create_session', title: 'Fleet Operations Brain', agent_id: _resolveAgentId() }));
       } else if (_activeReq) {
-        _activeReq.reject(new Error(msg.error || 'Orcha error'));
+        // Orcha answered with an error. Don't resend on this same socket (a
+        // stray late delta could mix into the retry) — hand it to local AI.
+        const r = _activeReq;
         _activeReq = null;
+        logger.warn('[' + r.id + '] Orcha error: ' + (msg.error || 'unknown'));
+        _handoffOrReject(r, new Error(msg.error || 'Orcha error'));
         _processNext();
       }
       break;
@@ -350,7 +390,7 @@ function _handleMessage(msg) {
         const text = req.text;
         _activeReq = null;
         _lastActivity = Date.now();
-        logger.info('[' + req.id + '] response completed (' + text.length + ' chars, ' + (Date.now() - req.createdAt) + 'ms total)');
+        logger.info('[' + req.id + '] response completed (' + text.length + ' chars, ' + (Date.now() - req.createdAt) + 'ms total)' + (req.detached ? ' (detached — discarded)' : ''));
         req.resolve(text);
         logger.info('[' + req.id + '] cleanup completed — queue advanced');
         _processNext();
@@ -364,8 +404,63 @@ function _drainQueue() {
   if (_queue.length > 0 && !_activeReq) _processNext();
 }
 
+function _wsUsable() {
+  return _ready && !!_ws && _ws.readyState === WebSocket.OPEN;
+}
+
+// Put a failed in-flight request back at the front of the queue.
+// Returns false when it should NOT be retried on Orcha.
+function _requeue(req, why) {
+  if (req.done) return true;
+  if (req.detached) return false; // caller gave up: never resend abandoned work
+  const age = Date.now() - req.createdAt;
+  if (req.requeues >= MAX_REQUEUES || (TIMEOUT_MS - age) < REQUEUE_MIN_BUDGET_MS) return false;
+  req.requeues++;
+  if (req.timer) { clearTimeout(req.timer); req.timer = null; }
+  req.text = '';
+  _queue.unshift(req);
+  logger.warn('[' + req.id + '] ' + why + ' — re-queued for Orcha (re-queue ' + req.requeues + '/' + MAX_REQUEUES + ', age=' + age + 'ms)');
+  _armHandoff(req);
+  return true;
+}
+
+// Bounded wait: if Orcha isn't usable within HANDOFF_MS, move the request to
+// local AI. If Orcha is up but simply busy, leave it queued.
+function _armHandoff(req) {
+  if (!_localAskFn || req.done || req.handoffTimer) return;
+  req.handoffTimer = setTimeout(() => {
+    req.handoffTimer = null;
+    if (req.done || _activeReq === req) return;
+    const qi = _queue.indexOf(req);
+    if (qi === -1) return;
+    if (_wsUsable()) return; // Orcha is back, just busy — keep FIFO order
+    _queue.splice(qi, 1);
+    _handoffLocal(req, 'Orcha not ready after ' + HANDOFF_MS + 'ms');
+  }, HANDOFF_MS);
+}
+
+function _handoffLocal(req, reason) {
+  if (req.done) return;
+  if (req.handoffTimer) { clearTimeout(req.handoffTimer); req.handoffTimer = null; }
+  if (req.timer) { clearTimeout(req.timer); req.timer = null; }
+  logger.info('[' + req.id + '] handing off to local AI (' + reason + ')');
+  _localAsk(req.prompt, req.signal, req.priority)
+    .then((text) => { logger.info('[' + req.id + '] local AI resolved after handoff'); req.resolve(text); })
+    .catch((err) => { logger.info('[' + req.id + '] local AI rejected after handoff: ' + err.message); req.reject(err); });
+}
+
+function _handoffOrReject(req, err) {
+  if (req.done) return;
+  // A detached request (caller already gave up) is never moved onto the single
+  // local Claude worker.
+  if (req.detached) { req.reject(err); return; }
+  if (_localAskFn) _handoffLocal(req, err.message);
+  else req.reject(err);
+}
+
 function _cleanupReq(req) {
   if (req.timer) { clearTimeout(req.timer); req.timer = null; }
+  if (req.handoffTimer) { clearTimeout(req.handoffTimer); req.handoffTimer = null; }
   if (req.signal && req.onAbort) {
     try { req.signal.removeEventListener('abort', req.onAbort); } catch (_) {}
   }
@@ -381,6 +476,19 @@ function _cleanupReq(req) {
 function _abortRequest(req, err, opts) {
   if (req.done) return;
   const wasActive = (_activeReq === req);
+  // Detach (relay passes detachActiveOnAbort only with ai.gateway.abortOnTimeout):
+  // the caller is unblocked now, but the shared Orcha session is kept. The
+  // request stays _activeReq so late deltas can never be misattributed; its
+  // reply is discarded on message_complete and its TIMEOUT_MS timer stays armed.
+  if (wasActive && opts && opts.detach) {
+    if (req.detached) return;
+    req.detached = true;
+    if (req.signal && req.onAbort) { try { req.signal.removeEventListener('abort', req.onAbort); } catch (_) {} }
+    if (req.handoffTimer) { clearTimeout(req.handoffTimer); req.handoffTimer = null; }
+    logger.info('[' + req.id + '] caller gave up on active WS request — detached (socket kept; late reply will be discarded)');
+    req.rejectCaller(err);
+    return;
+  }
   const qi = _queue.indexOf(req);
   if (qi !== -1) _queue.splice(qi, 1);
   if (wasActive) {
@@ -404,17 +512,21 @@ function _processNext() {
   if (_queue.length === 0 || _activeReq) return;
   if (!_ready || !_ws || _ws.readyState !== WebSocket.OPEN) return;
   const req = _queue.shift();
-  _activeReq = req;
-  if (Date.now() - req.createdAt > TIMEOUT_MS) {
+  if (req.done) { _processNext(); return; }
+  if (req.handoffTimer) { clearTimeout(req.handoffTimer); req.handoffTimer = null; }
+  const age = Date.now() - req.createdAt;
+  if (age > TIMEOUT_MS) {
     logger.info('[' + req.id + '] timed out while queued — discarding');
-    _activeReq = null;
     req.reject(new Error('Request timed out in queue'));
     _processNext();
     return;
   }
-  logger.info('[' + req.id + '] WS attempt — sending (queueWait=' + (Date.now() - req.createdAt) + 'ms)');
+  _activeReq = req;
+  logger.info('[' + req.id + '] WS attempt — sending (queueWait=' + age + 'ms' + (req.requeues ? ', resend #' + req.requeues : '') + ')');
   _ws.send(JSON.stringify({ type: 'send_message', session_id: _sessionId, message: req.prompt, images: [] }));
-  req.timer = setTimeout(() => _onRequestTimeout(req), TIMEOUT_MS);
+  // A resent request only gets what's left of its original budget.
+  const budget = req.requeues ? Math.max(30000, TIMEOUT_MS - age) : TIMEOUT_MS;
+  req.timer = setTimeout(() => _onRequestTimeout(req), budget);
 }
 
 // ─── PUBLIC API ─────────────────────────────────────────────────────────────
@@ -438,13 +550,14 @@ function ask(prompt, opts) {
     if (signal && signal.aborted) return reject(new Error('Aborted before start'));
     if (_queue.length >= MAX_QUEUE) return reject(new Error('Fleet brain queue full'));
 
-    // Local mode: WS gave up OR WS not connected but local fallback is available
-    if ((_wsGaveUp || !_connected) && _localAskFn) {
-      logger.info('[' + requestId + '] routing via local AI fallback (WS unavailable)');
+    // Local mode: WS gave up (Orcha unreachable). If Orcha is just reconnecting,
+    // the request is queued below with a bounded HANDOFF_MS wait instead.
+    if (_wsGaveUp && _localAskFn) {
+      logger.info('[' + requestId + '] routing via local AI fallback (Orcha WS gave up)');
       let settled = false;
       const onAbort = () => { if (settled) return; settled = true; reject(new Error('Aborted by caller')); };
       if (signal) signal.addEventListener('abort', onAbort, { once: true });
-      _localAsk(prompt)
+      _localAsk(prompt, signal, opts.priority)
         .then((text) => { if (settled) return; settled = true; if (signal) signal.removeEventListener('abort', onAbort); logger.info('[' + requestId + '] local AI resolved'); resolve(text); })
         .catch((err) => { if (settled) return; settled = true; if (signal) signal.removeEventListener('abort', onAbort); logger.info('[' + requestId + '] local AI rejected: ' + err.message); reject(err); });
       return;
@@ -459,15 +572,30 @@ function ask(prompt, opts) {
       signal,
       onAbort:   null,
       done:      false,
+      requeues:  0,
+      handoffTimer: null,
+      priority:  opts.priority,                    // forwarded on local handoff
+      detachOnAbort: opts.detachActiveOnAbort === true,
+      detached:  false,
+      rejectCaller: reject,                        // raw outer reject (detach path)
       resolve:   (text) => { if (req.done) return; req.done = true; _cleanupReq(req); resolve(text); },
       reject:    (err)  => { if (req.done) return; req.done = true; _cleanupReq(req); reject(err);   },
     };
     if (signal) {
-      req.onAbort = () => _abortRequest(req, new Error('Aborted by caller'));
+      req.onAbort = () => _abortRequest(req, new Error('Aborted by caller'), req.detachOnAbort ? { detach: true } : undefined);
       signal.addEventListener('abort', req.onAbort, { once: true });
     }
-    _queue.push(req);
-    logger.info('[' + requestId + '] queued (queueLength=' + _queue.length + ')');
+    // priority 'high' (interactive, e.g. WR AI Fill) goes ahead of queued
+    // background requests, behind other high ones. Never preempts the active one.
+    req.high = opts.priority === 'high';
+    if (req.high) {
+      const at = _queue.findIndex((q) => !q.high);
+      _queue.splice(at === -1 ? _queue.length : at, 0, req);
+    } else {
+      _queue.push(req);
+    }
+    logger.info('[' + requestId + '] queued' + (req.high ? ' (priority)' : '') + ' (queueLength=' + _queue.length + ')');
+    if (!_wsUsable()) _armHandoff(req);
     if (!_ws || _ws.readyState !== WebSocket.OPEN) {
       connect();
     } else if (_ready) {
@@ -503,6 +631,40 @@ function getStatus() {
   };
 }
 
-function init() { connect(); }
+// Keep ONE background Orcha alive on this machine (only for a localhost URL;
+// remote mode is someone else's server). Throttled + never spawns while any
+// Orcha process exists, so it can't create the duplicate-daemon fight.
+function _ensureLocalOrcha() {
+  try {
+    const m = _getWsUrl().match(/^ws:\/\/(localhost|127\.0\.0\.1):(\d+)/);
+    if (!m) return;
+    require('./orcha-supervisor').ensureRunning(parseInt(m[2], 10))
+      .then((st) => { if (st === 'spawned') logger.info('Orcha supervisor started a background agent — will connect when it is up'); })
+      .catch(() => {});
+  } catch (_) {}
+}
 
-module.exports = { init, ask, chat, getSessionId, getStatus, resetSession, setLocalAskFn };
+function init() { _ensureLocalOrcha(); connect(); }
+
+// Test seams only (fake socket, local-mode switch). Production never calls them.
+const __test__ = {
+  localAsk: (p, s, pr) => _localAsk(p, s, pr),
+  setWsGaveUp(b) { _wsGaveUp = !!b; },
+  handoffLocal: (req, reason) => _handoffLocal(req, reason),
+  setSocket(fakeWs) {
+    _ws = fakeWs;
+    _ready = !!(fakeWs && fakeWs.readyState === WebSocket.OPEN);
+    _connected = _ready;
+    _wsGaveUp = false;
+    _sessionId = 'ct_test_session';
+  },
+  handleMessage: (msg) => _handleMessage(msg),
+  state: () => ({ activeId: _activeReq ? _activeReq.id : null, queueLength: _queue.length, ready: _ready }),
+  reset() {
+    for (const r of _queue) { if (r.timer) clearTimeout(r.timer); if (r.handoffTimer) clearTimeout(r.handoffTimer); }
+    if (_activeReq && _activeReq.timer) clearTimeout(_activeReq.timer);
+    _queue = []; _activeReq = null; _ws = null; _ready = false; _connected = false; _wsGaveUp = false; _localHistory = [];
+  },
+};
+
+module.exports = { init, ask, chat, getSessionId, getStatus, resetSession, setLocalAskFn, __test__ };

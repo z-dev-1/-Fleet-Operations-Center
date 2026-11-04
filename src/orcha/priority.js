@@ -116,6 +116,22 @@ function calculatePriority(unit) {
     score += 8; reasons.push('Pending diagnostics');
   }
 
+  // ── CANONICAL STATE boost (single source of truth) ────────────────────────
+  // The reconciled canonical record is mirrored onto the row (canonical* fields)
+  // every sync, so this needs no extra I/O. It sharpens — never overrides — the
+  // rule score above: a stale unit, a unit waiting on US (ready for pickup), or
+  // one awaiting our estimate approval are the cases a coordinator must act on.
+  // Does nothing for rows without a canonical record (older/not-yet-reconciled),
+  // so this is purely additive with a clean fallback.
+  const canonStatus = String(unit.canonicalStatus || '').trim();
+  if (canonStatus) {
+    if (unit.canonicalStale) { score += 15; reasons.push('Canonical: stale (no recent update)'); }
+    if (canonStatus === 'ready_for_pickup') { score += 20; reasons.push('Canonical: ready for pickup — needs our action'); }
+    else if (canonStatus === 'awaiting_estimate_approval') { score += 25; reasons.push('Canonical: estimate awaiting approval'); }
+    else if (unit.canonicalWaitingOn === 'us') { score += 15; reasons.push('Canonical: waiting on us'); }
+    else if (canonStatus === 'awaiting_vendor' || unit.canonicalWaitingOn === 'vendor') { reasons.push('Canonical: waiting on vendor'); }
+  }
+
   // ── TIER ASSIGNMENT ──────────────────────────────────────────────────────
   const tier = score >= 30 ? 'action' : score >= 12 ? 'watch' : 'track';
 
@@ -125,6 +141,7 @@ function calculatePriority(unit) {
     reasons,
     label:  tier === 'action' ? '🔴 ACTION' : tier === 'watch' ? '🟡 WATCH' : '🟢 ON TRACK',
     color:  tier === 'action' ? '#f85149' : tier === 'watch' ? '#f0a800' : '#3fb950',
+    canonicalStatus: canonStatus || null,
   };
 }
 

@@ -14,6 +14,7 @@
 
 import bus   from '../bus.js';
 import state from '../state.js';
+import rcaTodo from '../rca-todo.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const _safe = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -199,6 +200,10 @@ function _renderSummary(c) {
         <span class="an-kpi__val">${_drill(c.highRisk, 'highrisk')} <span class="an-kpi__pct">${_pct(c.highRisk, c.total)}%</span></span>
         <span class="an-kpi__lbl">High risk (≥75)</span>
       </div>
+      <div class="an-kpi an-kpi--rca" title="Completed work orders in the last 9 days with no Root Cause Analysis yet">
+        <span class="an-kpi__val">${_drill(rcaTodo.items().length, 'rca')}${rcaTodo.items().some((i) => i.daysLeft <= 2) ? ' <span class="an-kpi__pct an-kpi__pct--warn">' + rcaTodo.items().filter((i) => i.daysLeft <= 2).length + ' due ≤2d</span>' : ''}</span>
+        <span class="an-kpi__lbl">RCA to do</span>
+      </div>
       <div class="an-kpi an-kpi--synced">
         <span class="an-kpi__val an-kpi__val--sm">${syncedStr}</span>
         <span class="an-kpi__lbl">Last synced</span>
@@ -309,8 +314,59 @@ function _renderBodyTypes(c) {
   return `<div class="an-bt-chart">${rows}</div>`;
 }
 
+// ── RCA to do drill-down: one line per WORK ORDER (a unit can have several) ──
+// Most urgent first (fewest days left in the 9-day window). Clicking a line
+// opens that unit on its History tab, where the RCA button lives.
+function _openRcaDrill() {
+  const items = rcaTodo.items().slice().sort((a, b) => a.daysLeft - b.daysLeft || a.completedAt - b.completedAt);
+  const rows = (state.slice('fleet').rows || []);
+  const byId = new Map(rows.map((r) => [String(r.equipmentId), r]));
+  const existing = document.getElementById('fo-drill-modal');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'fo-drill-modal';
+  modal.className = 'fo-drill-modal';
+  const fmt = (ms) => ms ? new Date(ms).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }) : '';
+  const list = items.length
+    ? items.map((it) => {
+        const u = byId.get(String(it.equipmentId)) || {};
+        const sub = [u.operator || it.operator, u.domicileSite || it.site, it.vendor, it.component].filter(Boolean).join(' · ');
+        const urgency = it.daysLeft <= 2 ? 'down' : 'ok';
+        return `<div class="fo-drill-item" data-unit="${_safe(it.equipmentId)}" data-wo="${_safe(it.workOrderId)}" title="${_safe(it.complaint)}">
+          <span class="fo-drill-item__dot fo-drill-item__dot--${urgency}"></span>
+          <span class="fo-drill-item__id">${_safe(it.equipmentId)}</span>
+          <span class="fo-drill-item__sub">${_safe(sub)} · completed ${_safe(fmt(it.completedAt))}</span>
+          <span class="fo-drill-item__risk">${it.daysLeft}d left</span>
+        </div>`;
+      }).join('')
+    : '<div class="fo-drill-empty">No RCAs to do — every work order completed in the last 9 days has one.</div>';
+  modal.innerHTML = `
+    <div class="fo-drill-backdrop" id="fo-drill-backdrop"></div>
+    <div class="fo-drill-panel">
+      <div class="fo-drill-head">
+        <span class="fo-drill-title">RCA to do <span class="fo-drill-count">${items.length}</span></span>
+        <button class="fo-drill-close" id="fo-drill-close">✕</button>
+      </div>
+      <div class="fo-drill-list">${list}</div>
+    </div>`;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.querySelector('#fo-drill-close').addEventListener('click', close);
+  modal.querySelector('#fo-drill-backdrop').addEventListener('click', close);
+  document.addEventListener('keydown', function esc(e) {
+    if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+  });
+  modal.querySelector('.fo-drill-list').addEventListener('click', (e) => {
+    const item = e.target.closest('.fo-drill-item');
+    if (!item) return;
+    const row = (state.slice('fleet').rows || []).find((r) => String(r.equipmentId) === item.dataset.unit);
+    if (row) { bus.emit('ui:unit-select', { unit: row, tab: 'history', rcaWorkOrderId: item.dataset.wo || null }); close(); }
+  });
+}
+
 // ── Drill-down modal ───────────────────────────────────────────────────────
 function _openDrill(key) {
+  if (key === 'rca') { _openRcaDrill(); return; }
   const rows = (state.slice('fleet').rows || []);
   const pred = _predicateFor(key);
   if (!pred) return;
@@ -396,7 +452,7 @@ export function mount(container) {
         <div class="an-card"><div class="an-card__title">Asset Type Mix</div><div id="fo-bt"></div></div>
       </div>
       <div class="an-card"><div class="an-card__title">By Operator</div><div id="fo-operators"></div></div>
-      <div class="an-card"><div class="an-card__title">Top Vendors</div><div id="fo-vendors"></div></div>
+      <div class="an-card"><div class="an-card__title">Top Vendors <button id="fo-vendors-all" class="fo-view-all" type="button" title="Open full Vendors view">View all →</button></div><div id="fo-vendors"></div></div>
     </div>`;
   container.insertBefore(wrap, container.firstChild);
 
@@ -404,6 +460,14 @@ export function mount(container) {
   wrap.querySelector('#fo-header').addEventListener('click', () => {
     const isCollapsed = wrap.classList.toggle('fleet-overview--collapsed');
     localStorage.setItem('fleet_overview_collapsed', isCollapsed ? '1' : '0');
+  });
+
+  // "View all →" in the Top Vendors tile opens the full Vendors overlay.
+  wrap.addEventListener('click', (e) => {
+    if (e.target.closest('#fo-vendors-all')) {
+      e.stopPropagation();
+      bus.emit('ui:vendors-open');
+    }
   });
 
   // Delegated drill-down: any element carrying data-drill opens the modal.
@@ -434,6 +498,8 @@ export function mount(container) {
   };
 
   bus.on('state:fleet', render);
+  bus.on('rca:todo', render);
+  rcaTodo.start();
   render();
 
   // Show the overview strip only on the Dashboard tab; hide it on the plain

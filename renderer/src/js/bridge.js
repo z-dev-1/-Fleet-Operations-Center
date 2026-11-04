@@ -262,6 +262,24 @@ export function init() {
     });
   }
 
+  // Context-aware assistant: proactive notes pushed from the main-process
+  // notifier. The notif dropdown renders body via innerHTML, so note text
+  // (vendor names, dealer status, timeline comments) is escaped here and the
+  // raw text never goes on ui:notif-push.
+  function _esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  if (window.assistant) {
+    window.assistant.onNotes(p => {
+      bus.emit('assistant:notes', p);
+      const first = (p && p.notes && p.notes[0]) || {};
+      bus.emit('ui:notif-push', {
+        icon: '🤖',
+        title: 'Orcha: ' + ((p && p.notes && p.notes.length) || 0) + ' new note(s)',
+        body: _esc(String(first.text || '').slice(0, 200)),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), // display string, like notif-dropdown.js:245
+      });
+    });
+  }
+
 
 
   // S23-8: attach vendor push listeners
@@ -352,10 +370,31 @@ export const longDwell = {
   setAiFillActive: (active) => window.longDwell.setAiFillActive(active),
 };
 
+// ── Long Dwell imported CSV (team-shared tracker) ──────────────────────────
+export const fasRoster = {
+  get:            () => window.fasRoster.get(),
+  fetch:          () => window.fasRoster.fetch(),
+  clear:          () => window.fasRoster.clear(),
+  importContacts: () => window.fasRoster.importContacts(),
+  resolve:        (pairs) => window.fasRoster.resolve(pairs),
+};
+
+export const longDwellCsv = {
+  get:          ()        => window.longDwellCsv.get(),
+  import:       (payload) => window.longDwellCsv.import(payload),
+  fetchAap:     (opts)    => window.longDwellCsv.fetchAap(opts),
+  saveRow:      (payload) => window.longDwellCsv.saveRow(payload),
+  clear:        ()        => window.longDwellCsv.clear(),
+  getSchedule:  ()        => window.longDwellCsv.getSchedule(),
+  saveSchedule: (payload) => window.longDwellCsv.saveSchedule(payload),
+  onScheduledFetched: (cb) => window.longDwellCsv.onScheduledFetched(cb),
+};
+
 // ── AI / Orcha ─────────────────────────────────────────────────────────────
 export const ai = {
   suggest:          (unit)       => window.ai.suggest(unit),
-  ask:              (prompt)     => window.ai.ask(prompt),
+  ask:              (prompt, opts) => window.ai.ask(prompt, opts),
+  getKnowledge:     ()           => window.ai.getKnowledge(),
   chat:             (prompt)     => window.ai.chat(prompt),
   deepProcess:      (unitIds)    => window.ai.deepProcess(unitIds),
   recordCorrection: (data)       => window.ai.recordCorrection(data),
@@ -373,6 +412,16 @@ export const ai = {
   inferRCA:         (text, ctx)  => window.ai.inferRCA(text, ctx),
 };
 
+// ── Context-aware assistant ────────────────────────────────────────────────
+// Guarded: resolves a benign fallback when the preload bridge is missing
+// (e.g. the bubble window or tests), so callers can .then/.catch safely.
+export const assistant = {
+  setScreenContext: (c)  => window.assistant ? window.assistant.setScreenContext(c) : Promise.resolve({ ok: false }),
+  getNotes:         ()   => window.assistant ? window.assistant.getNotes()          : Promise.resolve({ ok: false, notes: [], unseen: 0 }),
+  markNotesSeen:    ()   => window.assistant ? window.assistant.markNotesSeen()     : Promise.resolve({ ok: false }),
+  dismissNote:      (id) => window.assistant ? window.assistant.dismissNote(id)     : Promise.resolve({ ok: false }),
+};
+
 
 
 // ── AAP ────────────────────────────────────────────────────────────────────
@@ -384,8 +433,26 @@ export const aap = {
   adaptiveExtract:   (opts)                => window.aap.adaptiveExtract(opts),
   adaptiveScanBatch: (units)               => window.aap.adaptiveScanBatch(units),
   createWR:          (payload, unit)       => window.aap.createWR(payload, unit),
+  createWorkOrder:   (payload)             => window.aap.createWorkOrder(payload),
+  attachToWR:        (wrId, attachments)   => window.aap.attachToWR(wrId, attachments),
+  getLifecycle:      (id, url)             => window.aap.getLifecycle(id, url),
   onWRProgress:      (cb)                  => window.aap.onWRProgress(cb),
   openUrl:           (url)                 => window.aap.openUrl(url),
+};
+
+// ── QuickSight DBR DATA (Daily Call) ────────────────────────────────────────
+export const quicksight = {
+  captureAfp:  () => window.quicksight.captureAfp(),
+  captureDsp:  () => window.quicksight.captureDsp(),
+  saveParsed:  (payload) => window.quicksight.saveParsed(payload),
+  getCache:    () => window.quicksight.getCache(),
+  getCacheDsp: () => window.quicksight.getCacheDsp(),
+};
+
+// ── WBR weekly snapshot + Prior-Week/T6W comparison (Daily Call) ────────────
+export const wbr = {
+  capture:    (rows) => window.wbr.capture(rows),
+  comparison: (rows) => window.wbr.comparison(rows),
 };
 
 // ── Slack ──────────────────────────────────────────────────────────────────
@@ -426,6 +493,10 @@ export const slack = {
   getDMReviewQueue:       ()       => window.slack.getDMReviewQueue(),
   getDMReplyLog:          (limit)  => window.slack.getDMReplyLog(limit),
   updateDMReviewItem:     (data)   => window.slack.updateDMReviewItem(data),
+  // -- Main-process comms poller (2026-11-01, Phase 4) — see src/slack/poller.js
+  getPollerStatus:        ()       => window.slack.getPollerStatus(),
+  onPollResult:           (cb)     => window.slack.onPollResult(cb),
+  onPollMode:             (cb)     => window.slack.onPollMode(cb),
   // -- Digital FAS (Stage D)
   fasGetConfig:           ()       => window.slack.fasGetConfig(),
   fasSaveConfig:          (patch)  => window.slack.fasSaveConfig(patch),
@@ -448,6 +519,14 @@ export const slack = {
   fasGetKnowledgeDrafts:  (status) => window.slack.fasGetKnowledgeDrafts(status),
   fasApproveKnowledgeDraft:(data)  => window.slack.fasApproveKnowledgeDraft(data),
   fasRejectKnowledgeDraft:(id)     => window.slack.fasRejectKnowledgeDraft(id),
+  // Phase 3/5 settings surfaces.
+  fasGetChannels:         ()       => window.slack.fasGetChannels(),
+  fasSaveChannel:         (rec)    => window.slack.fasSaveChannel(rec),
+  fasClassifyChannel:     (name)   => window.slack.fasClassifyChannel(name),
+  fasGetIdentityChangelog:(limit)  => window.slack.fasGetIdentityChangelog(limit),
+  fasGetIdentityMappings: ()       => window.slack.fasGetIdentityMappings(),
+  fasSaveIdentityMappings:(maps)   => window.slack.fasSaveIdentityMappings(maps),
+  fasSyncSender:          (id)     => window.slack.fasSyncSender(id),
 };
 
 // ── SharePoint ─────────────────────────────────────────────────────────────
@@ -465,6 +544,10 @@ export const sp = {
 export const auth = {
   runMwinit:   () => window.auth.runMwinit(),
   checkMidway: () => window.auth.checkMidway(),
+  // Auth health supervisor (Phase E).
+  healthGet:       () => window.auth.healthGet(),
+  healthRetry:     () => window.auth.healthRetry(),
+  healthRunMwinit: () => window.auth.healthRunMwinit(),
 };
 
 // ── Email ──────────────────────────────────────────────────────────────────
@@ -531,6 +614,25 @@ export const asana = {
   addComment:     (taskGid, text)    => window.asana.addComment(taskGid, text),
   moveTask:       (taskGid, sectGid) => window.asana.moveTask(taskGid, sectGid),
   linkUnit:       (unitId, taskId)   => window.asana.linkUnit(unitId, taskId),
+  // Midway-SSO one-time interactive sign-in
+  signIn:         ()              => window.asana.signIn(),
+  // Multi-user PAT manager
+  listUsers:      ()              => window.asana.listUsers(),
+  setupUser:      (alias, pat)    => window.asana.setupUser(alias, pat),
+  switchUser:     (alias)         => window.asana.switchUser(alias),
+  removeUser:     (alias)         => window.asana.removeUser(alias),
+  // Workflow helpers
+  getMyTasks:     (opts)          => window.asana.getMyTasks(opts),
+  getTodaysTasks: ()              => window.asana.getTodaysTasks(),
+  completeTask:   (gid)           => window.asana.completeTask(gid),
+  completeDaily:  (name, comment) => window.asana.completeDaily(name, comment),
+  batchComplete:  (names)         => window.asana.batchComplete(names),
+  createEscalation:(opts)         => window.asana.createEscalation(opts),
+  dailySummary:   ()              => window.asana.dailySummary(),
+  // Attachments
+  getAttachments: (gid)           => window.asana.getAttachments(gid),
+  uploadFile:     (gid, p)        => window.asana.uploadFile(gid, p),
+  linkExternal:   (gid, url, name)=> window.asana.linkExternal(gid, url, name),
 };
 
 // Microsoft Graph mail was removed (2026-09-02). Email uses SMTP/OWA only.
@@ -579,4 +681,7 @@ export const dailyTasks = {
   update:    (data)  => window.dailyTasks.update(data),
   remove:    (id)    => window.dailyTasks.remove(id),
   generate:  ()      => window.dailyTasks.generate(),
+  getActionConfig: ()       => window.dailyTasks.getActionConfig(),
+  setActionConfig: (patch)  => window.dailyTasks.setActionConfig(patch),
+  executeAction:   (taskId) => window.dailyTasks.executeAction(taskId),
 };

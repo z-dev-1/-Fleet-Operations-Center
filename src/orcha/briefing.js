@@ -14,6 +14,7 @@ const logger = require('../utils/logger')('briefing');
 const store  = require('../store');
 const crypto = require('crypto');
 const { runAnomalyDetection } = require('./anomaly');
+const { runTracker } = require('./tracker');
 const repairHistory = require('./repair-history');
 
 const BRIEFING_AI_TIMEOUT_MS = 45000;
@@ -135,10 +136,10 @@ async function _generateAndSendBriefing(rows, alerts, send, opts) {
   try {
     const relay = require('./relay');
     const prompt = _buildBriefingPrompt(rows, alerts, dueReminders);
-    const aiText = await Promise.race([
-      relay.ask(prompt, { requestId: 'briefing' }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('briefing AI timeout')), BRIEFING_AI_TIMEOUT_MS)),
-    ]);
+    const aiText = await relay.askWithTimeout(prompt, {
+      requestId: 'briefing', source: 'briefing',
+      timeoutMs: BRIEFING_AI_TIMEOUT_MS, timeoutMessage: 'briefing AI timeout',
+    });
     const clean = (aiText || '').trim();
     // Sanity: a real briefing is more than a few words. If the model returned
     // something empty/garbage, fall back to the template rather than show junk.
@@ -216,23 +217,37 @@ function process(rows, send, opts) {
   }));
   if (recs.length) send('orcha:recommendations', { recommendations: recs });
 
+  // Workflow tracker (📍 Workflow tab). runTracker() was previously never
+  // called, so the renderer's tracker slice stayed at defaults and the tab
+  // showed only zeros. Compute + push it on every fleet data push, same as
+  // alerts/recommendations above.
+  try {
+    const trackerData = runTracker(rows);
+    if (trackerData) send('orcha:tracker', trackerData);
+  } catch (e) { logger.warn('[tracker] run failed: ' + e.message); }
+
   // Detect repair completions (unavail -> available transitions)
   try { repairHistory.detectTransitions(rows, global._prevRows || []); } catch (e) {}
+  // Stateless sweep: archive + clear the stored timeline of any unit that is now
+  // in service with no open WO but still carries one (covers units that returned
+  // BEFORE transition-detection existed, or across a restart where _prevRows is
+  // lost). The archived narrative shows up in the unit's History tab.
+  try { repairHistory.sweepReturnedUnits(rows); } catch (e) {}
   global._prevRows = rows;
 
-  // System health score
-  send('orcha:health', {
-    overallScore: Math.max(0, 100 - (recs.filter(a => a.severity === 'critical').length * 5)),
-    lastSync: new Date().toISOString(),
-    totalUnits: rows.length,
-    unavailCount: recs.length,
-    integrations: {
-      relay: { status: 'green', label: 'Relay' },
-      ai:    { status: 'green', label: 'AI' },
-      sp:    { status: 'green', label: 'SharePoint' },
-      slack: { status: 'green', label: 'Slack' },
-    },
-  });
+  // System health — REAL snapshot of live integration state (relay/AI, Midway
+  // auth expiry, data freshness, canonical reconcile freshness, network, and
+  // the SharePoint/Slack push channels). Replaces the former hardcoded all-green
+  // block. Fully defensive: a signal that can't be read degrades to yellow
+  // rather than throwing or faking green.
+  try {
+    const { buildHealthSnapshot } = require('./health');
+    const snap = buildHealthSnapshot(rows);
+    snap.unavailCount = recs.length; // keep the existing field for consumers
+    send('orcha:health', snap);
+  } catch (e) {
+    logger.warn('[briefing] health snapshot failed: ' + e.message);
+  }
 
   // Proactive AI alerts — check for stalled units and risk jumps
   try {

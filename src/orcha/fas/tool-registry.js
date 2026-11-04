@@ -258,7 +258,7 @@ function GET_RELAY_WORK_ORDER_DETAILS(args, ctx) {
   ];
   // FINANCIAL DATA (Part 13): total work-order cost is INTERNAL-ONLY by default
   // — never exposed to carriers/vendors.
-  const isInternal = !!(ctx && ctx.profile && (ctx.profile.type === 'internal' || ctx.profile.type === 'manager'));
+  const isInternal = !!(ctx && ctx.profile && (ctx.profile.type === 'internal' || ctx.profile.type === 'manager' || ctx.profile.type === 'mcs'));
   if (isInternal) facts.push(_srcFact('totalCost', entry.totalCost || '', 'RelayGarage/WO', at));
   return { ok: true, verifiedFacts: facts };
 }

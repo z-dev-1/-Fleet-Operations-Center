@@ -116,6 +116,39 @@ const MOVE_UNIT = {
   // not double-apply. Keyed by unit + target state + reason.
   idempotencyKey(args) { return _idem('MOVE_UNIT', { unit: String(args.unit || '').trim().toUpperCase(), state: String(args.state || '').trim().toUpperCase(), reason: String(args.reason || '').trim() }); },
   async run(args) {
+    // PREFERRED PATH: the AAP JSON API (aap_lifecycle_api) — version-locked PUT
+    // with a source read-back, and auto-clears a blocking DVIR when flipping to
+    // ACTIVE. Gated behind fasConfig.useLifecycleApi (OFF by default) until the
+    // operator has tested it; falls back to the proven browser automation
+    // (setLifecycle.js) on any failure or when the flag is off. The API result
+    // carries verifiedState so the executor's verify() confirms from source.
+    let useApi = false;
+    try { useApi = require('./config').get().useLifecycleApi === true; } catch (_) { useApi = false; }
+    if (useApi) {
+      try {
+        const api = require('../../scrapers/aap_lifecycle_api');
+        const wantActive = String(args.state || '').trim().toUpperCase() === 'ACTIVE';
+        // Flipping to ACTIVE auto-clears a blocking DVIR first (the "DVIR error"
+        // fix); other states use the plain flip.
+        const r = wantActive
+          ? await api.setLifecycleActiveWithDvir({ unit: args.unit, aaid: args.aaid, assetUrl: args.assetUrl, reason: args.reason || 'HEALTHY' })
+          : await api.setLifecycleApi({ unit: args.unit, aaid: args.aaid, assetUrl: args.assetUrl, state: args.state, reason: args.reason || '' });
+        if (r && (r.status === 'done' || r.status === 'noop') && r.verified) {
+          // Pass the source read-back so verify() confirms from source.
+          return { ok: true, result: { via: 'api', success: true, verifiedState: (r.to && r.to.state) || r.sourceReadback && r.sourceReadback.state, newState: r.to && r.to.state, dvirCleared: r.dvirCleared }, };
+        }
+        if (r && r.status === 'execution_uncertain') {
+          // The write may have landed but could not be verified -> let verify()
+          // DEFER (verifying) rather than claim success. Provide no verifiedState.
+          return { ok: true, result: { via: 'api', success: true, uncertain: true, newState: null } };
+        }
+        // API failed/blocked -> fall through to the browser-automation fallback.
+        try { require('../../utils/logger').createLogger('fas-action').warn('[MOVE_UNIT] API path failed (' + (r && (r.error || r.status)) + '); falling back to browser automation'); } catch (_) {}
+      } catch (e) {
+        try { require('../../utils/logger').createLogger('fas-action').warn('[MOVE_UNIT] API path threw (' + e.message + '); falling back'); } catch (_) {}
+      }
+    }
+    // FALLBACK: proven BrowserWindow automation.
     const { setLifecycleState } = require('../../scrapers/setLifecycle');
     const res = await setLifecycleState({ equipmentId: args.unit, assetUrl: args.assetUrl, state: args.state, reason: args.reason || '' });
     return { ok: !!(res && res.success), result: res, error: res && !res.success ? res.message : undefined };

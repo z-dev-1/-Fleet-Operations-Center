@@ -21,11 +21,24 @@ export function esc(s) {
     .replace(/"/g, '&quot;');
 }
 
+/** Coerce a timestamp (epoch number OR ISO/date string) to epoch ms, or null. */
+export function toEpochMs(ts) {
+  if (ts == null) return null;
+  if (typeof ts === 'number') return isFinite(ts) ? ts : null;
+  const ms = new Date(ts).getTime();
+  return isFinite(ms) ? ms : null;
+}
+
 /** Human "N ago" for a timestamp, relative to `now` (injectable for tests). */
 export function timeSince(ts, now) {
-  if (!ts) return 'never';
+  // FIX: the backend's syncedAt / lastSuccessfulSyncAt arrive as ISO STRINGS,
+  // but the age math below is numeric — `now - "2026-10-11T..."` is NaN, which
+  // surfaced as the literal "NaN ago" in the status bar. Coerce to epoch ms
+  // (accepts both numbers and ISO strings) before any arithmetic.
+  const tsMs = toEpochMs(ts);
+  if (tsMs == null) return 'never';
   const n = (typeof now === 'number') ? now : Date.now();
-  let sec = Math.round((n - ts) / 1000);
+  let sec = Math.round((n - tsMs) / 1000);
   if (sec < 0) sec = 0;
   if (sec < 60) return sec + 's ago';
   const min = Math.floor(sec / 60);
@@ -102,7 +115,8 @@ export function deriveStatus(f, opts) {
   f = f || {};
   const now = (opts && typeof opts.now === 'number') ? opts.now : Date.now();
   const lastOk = f.lastSuccessfulSyncAt || null;
-  const ageMs = lastOk ? (now - lastOk) : null;
+  const lastOkMs = toEpochMs(lastOk); // syncedAt is an ISO string — coerce for math
+  const ageMs = lastOkMs != null ? (now - lastOkMs) : null;
 
   let ageText;
   if (f.failed && lastOk) {

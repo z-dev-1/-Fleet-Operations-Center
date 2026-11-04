@@ -140,6 +140,15 @@ function _buildHTML(p, portalFallbackUrl) {
     '<p class="vr-instructions">' +
     _safe(p.instructions || 'Review the pre-filled vendor portal. When satisfied, click Approve & Submit.') +
     '</p></div>' +
+    // API-path vendors (Volvo ASIST, 2026-10-28) send previewLines = the exact
+    // values Approve will submit. Portal-driven vendors don't, so it's omitted.
+    (Array.isArray(p.previewLines) && p.previewLines.length ? (
+      '<div class="vr-section">' +
+      '<div class="vr-section__title">What will be sent</div>' +
+      '<ul class="vr-instructions" style="margin:0;padding-left:18px;white-space:pre-wrap">' +
+      p.previewLines.map(l => '<li>' + _safe(l) + '</li>').join('') +
+      '</ul></div>'
+    ) : '') +
     portalSection +
     '<div class="vr-section">' +
     '<div class="vr-section__title">Alt ID ' +

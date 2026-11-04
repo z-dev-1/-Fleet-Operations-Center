@@ -28,19 +28,34 @@ module.exports = {
   ORCHA_MAX_CONCURRENT:  5,
   ORCHA_TIMEOUT_MS:      90000,
   ORCHA_FALLBACK_PORT:   4799,
-  // Phase 4: consolidated AI model config — single source of truth.
-  // relay.js and bedrock.js read from here instead of hardcoding separately.
-  // REVERT (2026-08-17): restored the original Nova Pro model + us-east-1
-  // region. The Phase-4 consolidation had silently swapped these to Claude
-  // Sonnet 4 / us-west-2, which raised typical response time from a few
-  // seconds to ~90s+ — past the per-feature AI timeouts (Slack auto-reply 20s,
-  // Daily Call AI Review 25s, Fleet Chat 60s), so every one of those features
-  // was timing out and falling back to a canned/"AI review failed" path.
-  // Keeping the AI_* names (bedrock.js reads them) but the original values.
+  // AI MODEL SELECTION — IMPORTANT, read before changing AI_MODEL_ID:
+  //   The LIVE model is NOT chosen here. All real AI goes through the Orcha
+  //   agent (fleet-brain/relay) whose server-side model is selected by
+  //   `orchaAgentId` in orcha_config.json (Settings → AI → Orcha Agent / the
+  //   Claude Code model picker). To upgrade the model (e.g. Claude Sonnet 4.6
+  //   for stronger WO/screenshot reading), change it THERE — not here.
+  //   Recommendation: a "Medium"-speed Sonnet, NOT an Opus. Every Opus tier is
+  //   "Slow"; that is exactly what caused the 2026-08-17 regression where
+  //   responses hit ~90s+ and blew past the per-feature timeouts (Slack
+  //   auto-reply 20s, Daily Call 25s, Fleet Chat 60s).
+  //
+  //   AI_MODEL_ID below ONLY feeds the DIRECT Bedrock SDK fallback in
+  //   bedrock.js. That path is effectively DEAD: the Cecelia shared IAM role is
+  //   not authorized to call bedrock:InvokeModel on any model (verified 2026-10
+  //   — AccessDenied on every id). It is kept as a last-resort name only; it
+  //   does NOT determine the model any working feature uses.
   AI_MODEL_ID:           'us.amazon.nova-pro-v1:0',
   AI_REGION:             'us-east-1',
   AI_BEDROCK_REGION:     'us-east-1',
   AI_MAX_TOKENS:         4096,
+  // NOTE on vision/attachment reading (FAS): there is deliberately NO separate
+  // "better model" id here. The Cecelia shared Bedrock role canNOT call
+  // bedrock:InvokeModel directly (verified 2026-10 — every model returns
+  // AccessDenied), so a direct Converse multimodal call is impossible with
+  // these creds. Attachment reading (bedrock.readFileWithVision) instead goes
+  // through the Claude Code toolbox binary's Read tool, which handles images +
+  // PDFs on the auth path the SDK role lacks. The model is whatever that
+  // toolbox is configured to use — not selectable from here.
 
   // ── Priority engine ───────────────────────────────────────────────────────
   PRIORITY_STALE_DAYS:    3,
