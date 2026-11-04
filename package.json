@@ -13,7 +13,8 @@
     "lint": "eslint src/ renderer/src/ --ext .js,.ts",
     "launch": "start /min cmd /c npm run dev",
     "launch:hidden": "powershell -WindowStyle Hidden -Command \"npm run dev\"",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:smoke:electron": "electron tests/smoke/justme-libs-main.cjs"
   },
   "devDependencies": {
     "@types/node": "^22.5.0",
@@ -31,12 +32,20 @@
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1073.0",
     "@aws-sdk/credential-providers": "^3.1073.0",
+    "@kenjiuno/msgreader": "1.29.0",
     "heic-convert": "2.1.0",
     "jszip": "^3.10.1",
     "juice": "^12.1.1",
+    "mailparser": "3.14.1",
+    "mammoth": "1.13.0",
     "nodemailer": "^9.0.1",
+    "pdfjs-dist": "6.4.299",
     "playwright": "^1.61.1",
-    "ws": "^8.21.0"
+    "ws": "^8.21.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "overrides": {
+    "@napi-rs/canvas": "1.1.0"
   },
   "build": {
     "appId": "com.amazon.fleet-ops",
@@ -62,6 +71,9 @@
       "!**/*.bak*",
       "!src/asana/_test_ops.js",
       "!src/scrapers/aap_custom_form_probe.js"
+    ],
+    "asarUnpack": [
+      "node_modules/@napi-rs/**"
     ],
     "extraResources": [
       {
