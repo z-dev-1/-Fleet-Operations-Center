@@ -30,7 +30,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
  * askInternal(question) -> { ok, answer, error }
  * Sends `question` to AITeammate and returns its reply text.
  */
-async function askInternal(question) {
+async function askInternal(question, opts = {}) {
+  // opts (optional, Just Me context turns): redactLog -> log the length instead
+  // of the question text; unfurl:false -> post with link/media unfurling off.
+  opts = opts || {};
   const q = (question || '').trim();
   if (!q) return { ok: false, error: 'empty question' };
 
@@ -54,9 +57,11 @@ async function askInternal(question) {
   // 1. Post the question.
   let sentTs;
   try {
-    const res = await sendToChannel(AITEAMMATE_CHANNEL, q);
+    const res = opts.unfurl === false
+      ? await sendToChannel(AITEAMMATE_CHANNEL, q, undefined, { unfurl: false })
+      : await sendToChannel(AITEAMMATE_CHANNEL, q);
     sentTs = res && res.ts ? parseFloat(res.ts) : (Date.now() / 1000);
-    logger.info('[ask-internal] question sent to AITeammate (ts=' + sentTs + '): ' + q.slice(0, 120));
+    logger.info('[ask-internal] question sent to AITeammate (ts=' + sentTs + '): ' + (opts.redactLog ? '(' + q.length + ' chars)' : q.slice(0, 120)));
   } catch (e) {
     return { ok: false, error: 'could not send to AITeammate: ' + e.message };
   }

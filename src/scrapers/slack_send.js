@@ -460,8 +460,12 @@ async function sendSlackMessage(recipient, message) {
 // getChannels()/readDMs()), re-doing a name search is both wasteful and
 // less reliable than just posting directly to the known ID. Used by the
 // new Slack tab's reply box.
-async function sendToChannel(channelId, message, threadTs) {
+async function sendToChannel(channelId, message, threadTs, opts) {
   if (!channelId) throw new Error('channelId required');
+  // opts (optional 4th arg, Just Me context turns): { unfurl: false } posts with
+  // link/media unfurling off so a URL in the text is never fetched by Slack.
+  // Absent = today's payload, unfurl on.
+  const _unfurl = (opts && opts.unfurl === false) ? 'false' : 'true';
   // FEATURE (2026-07-21): optional threadTs param, backward compatible --
   // existing callers passing only (channelId, message) are unaffected.
   // Added for the Slack Partner Auto-Reply engine (slack_channel_watch.js),
@@ -471,8 +475,8 @@ async function sendToChannel(channelId, message, threadTs) {
     channel:       channelId,
     text:          message,
     // Unfurl links/media so URLs in AI replies auto-expand in Slack
-    unfurl_links:  'true',
-    unfurl_media:  'true',
+    unfurl_links:  _unfurl,
+    unfurl_media:  _unfurl,
   };
   if (threadTs) payload.thread_ts = threadTs;
   const result = await slackWebApi('chat.postMessage', payload);
@@ -1106,6 +1110,153 @@ async function downloadFileBuffer(file) {
   });
 }
 
+// ── Just Me context reader: file metadata + bounded download ──────────────────
+// getFileInfo(fileId) -> { ok:true, file } | { ok:false, error:<slack error code> }.
+// Shared message payloads often omit url_private / previews; files.info fills them in.
+async function getFileInfo(fileId) {
+  try {
+    const r = await slackWebApi('files.info', { file: fileId });
+    if (r && r.ok && r.file) return { ok: true, file: r.file };
+    return { ok: false, error: String((r && r.error) || 'unknown').slice(0, 64) };
+  } catch (_) {
+    return { ok: false, error: 'request failed' };
+  }
+}
+
+// Hosts that may receive Slack credentials (dot-boundary match) and hosts a
+// redirect may be followed to WITHOUT any credentials. slack-imgs.com (an open
+// image proxy) is never followed and never authorized.
+const SLACK_AUTH_HOSTS = ['slack.com'];
+const SLACK_FOLLOW_HOSTS = [...SLACK_AUTH_HOSTS, 'slack-edge.com', 'slack-files.com'];
+function _slackHostIn(host, list) {
+  const h = String(host || '').toLowerCase().replace(/\.$/, '');
+  return list.some((s) => h === s || h.endsWith('.' + s));
+}
+const _BOUNDED_MAX_REDIRECTS = 3;
+const _BOUNDED_DEFAULT_MAX = 25 * 1024 * 1024;
+const _BOUNDED_DEFAULT_TIMEOUT = 20000;
+const _FILE_ID_RE = /^F[A-Z0-9]+$/;
+
+// downloadFileBounded(file, { maxBytes, timeoutMs, signal, https })
+//   -> { ok:true, buffer, mimetype, name } | { ok:false, reason }. Never throws.
+// Attempt 1 sends Authorization: Bearer <token> only; on 401/403 or an HTML
+// sign-in page for a non-HTML file, attempt 2 adds the Cookie header (the same
+// one the Web API lane sends). Credentials go only to SLACK_AUTH_HOSTS, never
+// to other followed hosts. Never truncates; over-size is a failure. Logs the
+// file id, size, status and attempt number only (never URL, token or cookie).
+async function downloadFileBounded(file, opts) {
+  opts = opts || {};
+  const httpsImpl = opts.https || https;
+  const maxBytes = (typeof opts.maxBytes === 'number' && opts.maxBytes > 0) ? opts.maxBytes : _BOUNDED_DEFAULT_MAX;
+  const timeoutMs = (typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0) ? opts.timeoutMs : _BOUNDED_DEFAULT_TIMEOUT;
+  const signal = opts.signal || null;
+  const fid = (file && typeof file.id === 'string' && _FILE_ID_RE.test(file.id)) ? file.id : '?';
+  const logRes = (status, size, attempt) => {
+    try { logger.info('[Slack] bounded download id=' + fid + ' status=' + status + ' size=' + size + ' attempt=' + attempt); } catch (_) {}
+  };
+  try {
+    if (!file) return { ok: false, reason: 'no file' };
+    const raw = file.url_private_download || file.url_private;
+    let startUrl;
+    try { startUrl = new URL(String(raw || '')); } catch (_) { return { ok: false, reason: 'not a Slack file URL' }; }
+    if (startUrl.protocol !== 'https:' || !_slackHostIn(startUrl.hostname, SLACK_AUTH_HOSTS)) {
+      return { ok: false, reason: 'not a Slack file URL' };
+    }
+    const config = getConfig();
+    if (!config || !config.token) return { ok: false, reason: 'Slack not configured' };
+    if (signal && signal.aborted) return { ok: false, reason: 'aborted' };
+
+    const fileMime = String(file.mimetype || '').toLowerCase();
+    const fileIsHtml = fileMime.includes('html');
+
+    // One attempt: follow up to 3 re-checked redirects, stream with a hard cap.
+    const attemptOnce = (withCookie) => new Promise((resolve) => {
+      let settled = false;
+      let active = null;
+      let timer = null;
+      let onAbort = null;
+      const done = (r) => {
+        if (settled) return; settled = true;
+        if (timer) clearTimeout(timer);
+        if (signal && onAbort) { try { signal.removeEventListener('abort', onAbort); } catch (_) {} }
+        resolve(r);
+      };
+      const killActive = () => { try { if (active) active.destroy(); } catch (_) {} };
+      timer = setTimeout(() => { killActive(); done({ fail: 'timeout' }); }, timeoutMs);
+      if (signal) {
+        onAbort = () => { killActive(); done({ fail: 'aborted' }); };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      const hop = (urlStr, left) => {
+        if (settled) return;
+        let u;
+        try { u = new URL(urlStr); } catch (_) { return done({ fail: 'bad redirect' }); }
+        const authHost = _slackHostIn(u.hostname, SLACK_AUTH_HOSTS);
+        if (u.protocol !== 'https:' || (!authHost && !_slackHostIn(u.hostname, SLACK_FOLLOW_HOSTS))) {
+          return done({ fail: 'redirected off Slack' });
+        }
+        const headers = {};
+        if (authHost) {
+          headers.Authorization = 'Bearer ' + config.token;
+          if (withCookie && config.allCookieHeader) headers.Cookie = config.allCookieHeader;
+        }
+        let req;
+        try {
+          req = httpsImpl.request({ hostname: u.hostname, path: u.pathname + u.search, method: 'GET', headers }, (res) => {
+            const status = res.statusCode;
+            const loc = res.headers && res.headers.location;
+            if ([301, 302, 303, 307, 308].includes(status) && loc) {
+              try { res.resume(); } catch (_) {}
+              if (left <= 0) return done({ fail: 'too many redirects' });
+              let next;
+              try { next = new URL(loc, u).toString(); } catch (_) { return done({ fail: 'bad redirect' }); }
+              return hop(next, left - 1);
+            }
+            const ctype = String((res.headers && res.headers['content-type']) || '').toLowerCase();
+            const clen = parseInt(res.headers && res.headers['content-length'], 10);
+            if (status !== 200) { try { res.resume(); } catch (_) {} return done({ status }); }
+            if (!fileIsHtml && ctype.includes('text/html')) { killActive(); return done({ status, signin: true }); }
+            if (Number.isFinite(clen) && clen > maxBytes) { killActive(); return done({ status, tooLarge: true }); }
+            const chunks = [];
+            let total = 0;
+            res.on('data', (c) => {
+              if (settled) return;
+              total += c.length;
+              if (total > maxBytes) { killActive(); return done({ status, tooLarge: true }); }
+              chunks.push(c);
+            });
+            res.on('end', () => done({ status, buffer: Buffer.concat(chunks) }));
+            res.on('error', () => done({ fail: 'stream error' }));
+          });
+        } catch (_) { return done({ fail: 'request failed' }); }
+        active = req;
+        req.on('error', () => done({ fail: 'network error' }));
+        try { req.setTimeout(timeoutMs, () => { killActive(); done({ fail: 'timeout' }); }); } catch (_) {}
+        req.end();
+      };
+      hop(startUrl.toString(), _BOUNDED_MAX_REDIRECTS);
+    });
+
+    const hasCookie = !!config.allCookieHeader;
+    let last = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const r = await attemptOnce(attempt === 2);
+      last = r;
+      logRes(r.status != null ? r.status : (r.fail || '?'), r.buffer ? r.buffer.length : 0, attempt);
+      if (r.fail) return { ok: false, reason: r.fail };
+      if (r.tooLarge) return { ok: false, reason: 'too-large' };
+      if (r.buffer) return { ok: true, buffer: r.buffer, mimetype: file.mimetype || 'application/octet-stream', name: file.name || 'attachment' };
+      const needsAuth = r.signin || r.status === 401 || r.status === 403;
+      if (needsAuth && attempt === 1 && hasCookie) continue;
+      if (needsAuth) return { ok: false, reason: 'Slack file download needs re-auth' };
+      return { ok: false, reason: 'HTTP ' + r.status };
+    }
+    return { ok: false, reason: last && last.status != null ? 'HTTP ' + last.status : 'download failed' };
+  } catch (_) {
+    return { ok: false, reason: 'download failed' };
+  }
+}
+
 // ── Upload a file to a channel (Slack external upload flow) ───────────────────
 // FEATURE (2026-10): posts a FILE (with an optional message) to a channel, used
 // by the PM-alert carrier fan-out to attach the alert document. Slack's modern
@@ -1193,6 +1344,6 @@ function _resetForTests() {
   _imPeerCache.clear();
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, fetchUserProfile, downloadFileContent, downloadFileBuffer, uploadFileToChannel, SELF_REPLY_MARKER, getLaneStats, _setRawRequestForTests, _resetForTests };
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, fetchUserProfile, downloadFileContent, downloadFileBuffer, getFileInfo, downloadFileBounded, uploadFileToChannel, SELF_REPLY_MARKER, getLaneStats, _setRawRequestForTests, _resetForTests };
 // Test-only handles (never used by src/): slackWebApi is otherwise module-private.
 module.exports.__test__ = { resetSpeedup: _resetSpeedupForTests, slackWebApi };

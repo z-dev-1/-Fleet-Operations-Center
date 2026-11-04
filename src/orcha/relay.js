@@ -383,6 +383,9 @@ const _inflight = new Map(); // dedupeKey -> { prompt, promise, controller, refs
 async function ask(prompt, opts = {}) {
   opts = opts || {};
   const gw = _gw();
+  // Isolated lane (Just Me context turns): never joins a dedupe entry, so the
+  // content-bearing prompt is never shared with, or visible to, another caller.
+  if (opts.isolated === true) return _askCore(prompt, opts, gw);
   return (gw.dedupe && _validDedupeKey(opts.dedupeKey))
     ? _joinInflight(prompt, opts, gw)
     : _askCore(prompt, opts, gw);
@@ -550,6 +553,15 @@ async function _runCascade(prompt, ctx) {
   let _balancedOrchaHeld = false;
 
   try {
+    // Isolated lane (opts.isolated === true, Just Me context turns): ONLY the
+    // tool-less Claude pool worker. No fleet-brain (its session / _localHistory
+    // would retain the content), no WS, no Bedrock, no lane-health changes.
+    if (opts.isolated === true) {
+      const t = await _tryClaudeCode(prompt, { ..._ccOpts(ctx), isolated: true });
+      rec.via = 'claude-code/isolated';
+      return t;
+    }
+
     // Optional router pre-step (ai.gateway.routerDecides, preference 'auto',
     // caller-supplied task/routeMessage only). Never classifies the full prompt.
     if (gw.routerDecides && _aiPreference === 'auto') {
@@ -1040,6 +1052,44 @@ let CLAUDE_TIMEOUT_MS = 60000; // mutable — updated by setClaudeTimeout() when
 // user can pin a specific Claude model for the fallback lane + attachment reads.
 let CLAUDE_MODEL_ID = '';
 
+// ISOLATED (tool-less) Claude lane, used only for opts.isolated === true asks
+// (Just Me context turns whose prompt carries untrusted file/link content).
+// Variant A, verified against the real CLI by tests/smoke/claude-lane-probe.cjs
+// (claude 2.1.318.1638, run recorded in .agents/.../lane-probe.json): with these
+// args the system/init event reports tools: [] and mcp_servers: [], and a prompt
+// that asks for a file read and a shell command produces no tool_use block and
+// leaks neither the file contents nor the command output.
+//   --bare               no hooks, plugins, CLAUDE.md, keychain reads
+//   --strict-mcp-config  only MCP servers passed explicitly (none)
+//   --tools ''           disable every built-in tool
+//   --disallowedTools    belt and braces: the tools that matter by name
+const ISOLATED_DISALLOWED_TOOLS = 'Bash,PowerShell,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Read,Glob,Grep';
+// Same text as the pool's inline --system-prompt in _ensureClaudeProcess
+// (tests/justme-context-lane.test.js asserts the two stay identical).
+const ISOLATED_SYSTEM_PROMPT =
+  'You are a headless automation API, not an interactive coding assistant. ' +
+  'Every message you receive contains its own complete formatting instructions ' +
+  '(e.g. "respond with only a JSON array"). Follow those instructions exactly and ' +
+  'output nothing else -- no explanations, no markdown code fences, no tool calls, ' +
+  'no restating the request. If a message asks for JSON, your entire response must ' +
+  'be valid JSON and nothing more.';
+function ISOLATED_CLAUDE_ARGS(model) {
+  const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+    '--no-session-persistence', '--bare', '--strict-mcp-config', '--tools', '',
+    '--disallowedTools', ISOLATED_DISALLOWED_TOOLS];
+  if (model) args.push('--model', model);
+  args.push('--system-prompt', ISOLATED_SYSTEM_PROMPT);
+  return args;
+}
+// Fixed empty working dir for the isolated worker, so it never sees the app
+// repo or any user files by relative path. mkdir is idempotent, so a swept
+// temp dir is recreated.
+function _isolatedLaneCwd() {
+  const dir = path.join(os.tmpdir(), 'fleet-isolated-lane');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+  return dir;
+}
+
 // 3-worker pool — lets up to 3 concurrent AI calls run in parallel.
 // When DM poll, WR autofill, and long-dwell fill all fire at once, each gets
 // its own Claude Code process instead of queuing behind the others.
@@ -1134,12 +1184,19 @@ function _failClaudeQueue(err) {
   }
 }
 
-function _ensureClaudeProcess(worker) {
+function _ensureClaudeProcess(worker, job) {
+  const _iso = !!(job && job.isolated);
+  // Warm-process guard: a process spawned for the other lane (isolated vs
+  // normal) is never reused for this job.
+  if (worker.proc && !worker.proc.killed && !!worker.procIsolated !== _iso) {
+    _killClaudeTree(worker.proc);
+    worker.proc = null;
+  }
   if (worker.proc && !worker.proc.killed) return;
   if (!_claudeBinExists()) {
     throw new Error('claude-code not installed — run: toolbox install claude-code');
   }
-  logger.info('claude-code[' + worker.id + ']: spawning process' + (CLAUDE_MODEL_ID ? ' (model ' + CLAUDE_MODEL_ID + ')' : ''));
+  logger.info('claude-code[' + worker.id + ']: spawning process' + (CLAUDE_MODEL_ID ? ' (model ' + CLAUDE_MODEL_ID + ')' : '') + (_iso ? ' [isolated]' : ''));
   // --system-prompt: override default coding-assistant persona with a strict
   // headless-API framing so all callers get reliable JSON/plain-text output
   // without explanations or markdown fences (see original rationale above).
@@ -1156,7 +1213,10 @@ function _ensureClaudeProcess(worker) {
      'no restating the request. If a message asks for JSON, your entire response must ' +
      'be valid JSON and nothing more.');
   const _spawnT0 = Date.now();
-  const proc = _spawnImpl(CLAUDE_BIN, _args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  const proc = _iso
+    ? _spawnImpl(CLAUDE_BIN, ISOLATED_CLAUDE_ARGS(CLAUDE_MODEL_ID), { cwd: _isolatedLaneCwd(), stdio: ['pipe', 'pipe', 'pipe'] })
+    : _spawnImpl(CLAUDE_BIN, _args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  worker.procIsolated = _iso;
   worker.stdoutBuf = '';
   worker.stderrBuf = '';              // full stderr for this process (debug dumps)
   worker._firstStdoutAt = 0;         // when the first stdout byte arrived
@@ -1192,7 +1252,8 @@ function _ensureClaudeProcess(worker) {
         worker.currentJob = null;
         worker.busy = false;
         if (obj.is_error) {
-          job.reject(new Error('claude-code error: ' + (obj.result || 'unknown')));
+          // Isolated jobs never echo model text (it may quote untrusted content).
+          job.reject(new Error(job.isolated ? 'claude-code error (isolated)' : ('claude-code error: ' + (obj.result || 'unknown'))));
         } else {
           const text = (obj.result || '').trim();
           if (!text) job.reject(new Error('claude-code returned empty'));
@@ -1211,6 +1272,8 @@ function _ensureClaudeProcess(worker) {
   proc.stderr.on('data', (d) => {
     if (proc !== worker.proc && _gw().abortOnTimeout) return; // stale-process guard (see stdout)
     const s = d.toString();
+    // Isolated lane: stderr can echo prompt content; log the size only and keep nothing.
+    if (_iso) { logger.warn('claude-code[' + worker.id + '] stderr: (' + s.length + ' chars)'); return; }
     // Keep the full stderr for this process so a timeout dump shows the REAL
     // last words (the truncated warn below often cuts off the actual error).
     if (CLAUDE_DEBUG) { worker.stderrBuf = (worker.stderrBuf + s).slice(-4000); }
@@ -1269,7 +1332,7 @@ function _processClaudeQueue() {
       // DIAGNOSTIC DUMP: classify WHERE it stalled so "works then crashes" has
       // evidence instead of a guess. Did the process ever emit stdout? What was
       // its full stderr? How long did it actually run vs. the timeout?
-      if (CLAUDE_DEBUG) {
+      if (CLAUDE_DEBUG && !job.isolated) {
         const ran = Date.now() - (job._dispatchedAt || Date.now());
         const gotStdout = worker._firstStdoutAt ? ('yes, after ' + (worker._firstStdoutAt - job._dispatchedAt) + 'ms') : 'NO stdout at all';
         const phase = worker._firstStdoutAt ? 'STALLED MID-RESPONSE (started replying then hung)' : 'STALLED BEFORE ANY OUTPUT (spawn/auth/startup hang)';
@@ -1288,7 +1351,7 @@ function _processClaudeQueue() {
     try {
       // Spawn a fresh process for this worker if needed (re-ensure after any
       // prior kill — timeout, abort, or completed-job kill).
-      _ensureClaudeProcess(worker);
+      _ensureClaudeProcess(worker, job);
       const msg = { type: 'user', message: { role: 'user', content: job.prompt } };
       worker.proc.stdin.write(JSON.stringify(msg) + '\n');
     } catch (e) {
@@ -1330,7 +1393,7 @@ function _tryClaudeCode(prompt, opts = {}) {
     if (signal && signal.aborted) return reject(new Error('Aborted before start'));
     const CLAUDE_PROMPT_MAX_CHARS = 60000;
     const trimmed = prompt.length > CLAUDE_PROMPT_MAX_CHARS ? prompt.slice(0, CLAUDE_PROMPT_MAX_CHARS) + '...[trimmed]' : prompt;
-    const job = { prompt: trimmed, signal, onAbort: null, done: false,
+    const job = { prompt: trimmed, signal, onAbort: null, done: false, isolated: opts.isolated === true,
       rank: (opts.prio && _CQ_RANK[opts.prio] != null) ? _CQ_RANK[opts.prio] : null, enqAt: Date.now() };
     job.resolve = (text) => { if (job.done) return; job.done = true; if (signal && job.onAbort) { try { signal.removeEventListener('abort', job.onAbort); } catch (_) {} } resolve(text); };
     job.reject  = (err)  => { if (job.done) return; job.done = true; if (signal && job.onAbort) { try { signal.removeEventListener('abort', job.onAbort); } catch (_) {} } reject(err); };
@@ -1684,6 +1747,8 @@ const __test__ = {
   setClaudeBinExists(fn) { _claudeBinExists = fn || (() => fs.existsSync(CLAUDE_BIN)); },
   setBedrockEnabled(b) { _bedrockEnabled = !!b; },
   tryClaudeCode: (p, o) => _tryClaudeCode(p, o),
+  isolatedArgs: (model) => ISOLATED_CLAUDE_ARGS(model),
+  isolatedCwd: () => _isolatedLaneCwd(),
   localAskFn: (p, o) => _localAskFn(p, o),
   askCore: (p, o) => _askCore(p, o),
   sleep: (ms, s) => _sleep(ms, s),
@@ -1713,11 +1778,15 @@ const __test__ = {
     for (const w of _workers) {
       try { if (w.idleTimer) clearTimeout(w.idleTimer); } catch (_) {}
       if (w.currentJob && w.currentJob._timer) clearTimeout(w.currentJob._timer);
-      w.proc = null; w.busy = false; w.currentJob = null; w.stdoutBuf = ''; w.idleTimer = null;
+      w.proc = null; w.procIsolated = false; w.busy = false; w.currentJob = null; w.stdoutBuf = ''; w.idleTimer = null;
     }
     _orchaDownUntil = 0; _claudeDownUntil = 0; _orchaBusy = 0; _claudeBusy = 0;
     return leaked;
   },
 };
 
-module.exports = { ask, askWithTimeout, runWithTimeout, runInSlot, queueStats, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setAgent, getAgent, setClaudePoolSize, getClaudePoolSize, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents, __test__ };
+// True when the isolated (tool-less) Claude lane can run, i.e. the claude binary
+// exists. Just Me context turns check this before building a content prompt.
+function isolatedLaneAvailable() { return !!_claudeBinExists(); }
+
+module.exports = { ask, askWithTimeout, isolatedLaneAvailable, runWithTimeout, runInSlot, queueStats, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setAgent, getAgent, setClaudePoolSize, getClaudePoolSize, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents, __test__ };

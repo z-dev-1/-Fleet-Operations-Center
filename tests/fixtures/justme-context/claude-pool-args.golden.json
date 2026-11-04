@@ -1,0 +1,46 @@
+{
+  "noModel": {
+    "binIsClaude": true,
+    "args": [
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--no-session-persistence",
+      "--system-prompt",
+      "You are a headless automation API, not an interactive coding assistant. Every message you receive contains its own complete formatting instructions (e.g. \"respond with only a JSON array\"). Follow those instructions exactly and output nothing else -- no explanations, no markdown code fences, no tool calls, no restating the request. If a message asks for JSON, your entire response must be valid JSON and nothing more."
+    ],
+    "options": {
+      "stdio": [
+        "pipe",
+        "pipe",
+        "pipe"
+      ]
+    }
+  },
+  "model_m1": {
+    "binIsClaude": true,
+    "args": [
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--no-session-persistence",
+      "--model",
+      "m1",
+      "--system-prompt",
+      "You are a headless automation API, not an interactive coding assistant. Every message you receive contains its own complete formatting instructions (e.g. \"respond with only a JSON array\"). Follow those instructions exactly and output nothing else -- no explanations, no markdown code fences, no tool calls, no restating the request. If a message asks for JSON, your entire response must be valid JSON and nothing more."
+    ],
+    "options": {
+      "stdio": [
+        "pipe",
+        "pipe",
+        "pipe"
+      ]
+    }
+  }
+}

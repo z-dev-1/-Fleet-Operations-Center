@@ -273,6 +273,13 @@ async function readFileWithVision(file, opts) {
 }
 
 async function _visionRead(file, cls, opts) {
+  // opts.deadline (epoch ms, opt-in, Just Me context reader): a read that is only
+  // granted its slot near/after the deadline returns before writing a temp file
+  // or spawning anything. Callers that don't pass it are unchanged.
+  if (Number.isFinite(opts.deadline)) {
+    const left = opts.deadline - Date.now();
+    if (left < 1000) return { ok: false, kind: cls.kind, error: 'vision deadline passed' };
+  }
   const instruction = opts.prompt ||
     'You are a headless transcription tool, NOT a chat assistant. Use the Read tool on the file ./' + '%%NAME%%' +
     ' and output ONLY its transcribed contents as plain text. Start directly with the content — no preamble, ' +
@@ -317,10 +324,14 @@ async function _visionRead(file, cls, opts) {
       cleanup();
       return resolve({ ok: false, kind: cls.kind, error: 'claude-code spawn failed: ' + e.message });
     }
+    // With opts.deadline the timer is clamped so the read ends by the deadline.
+    const _tmo = Number.isFinite(opts.deadline)
+      ? Math.max(1, Math.min(opts.timeoutMs || 90000, opts.deadline - Date.now()))
+      : (opts.timeoutMs || 90000);
     const timer = setTimeout(() => {
       logger.warn('[Bedrock] readFileWithVision timed out');
       finish({ ok: false, kind: cls.kind, error: 'claude-code read timed out' });
-    }, opts.timeoutMs || 90000);
+    }, _tmo);
 
     let buf = '';
     proc.stdout.on('data', (chunk) => {
@@ -340,7 +351,8 @@ async function _visionRead(file, cls, opts) {
         }
       }
     });
-    proc.stderr.on('data', (d) => logger.warn('[Bedrock] vision stderr: ' + d.toString().slice(0, 200)));
+    // opts.redactLog (opt-in): stderr may echo file content, so log the size only.
+    proc.stderr.on('data', (d) => logger.warn(opts.redactLog ? '[Bedrock] vision stderr: (' + d.length + ' chars)' : '[Bedrock] vision stderr: ' + d.toString().slice(0, 200)));
     proc.on('error', (e) => { clearTimeout(timer); finish({ ok: false, kind: cls.kind, error: 'claude-code spawn error: ' + e.message }); });
     proc.on('exit', (code) => { clearTimeout(timer); if (!settled) finish({ ok: false, kind: cls.kind, error: 'claude-code exited (' + code + ') with no result' }); });
 

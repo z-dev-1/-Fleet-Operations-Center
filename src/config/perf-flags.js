@@ -49,6 +49,10 @@
  *   settings.jobs.durable.enabled / FLEET_JOBS_DURABLE '0' | '1'
  *   settings.jobs.<type>.durable  / FLEET_JOBS_<UPPER_SNAKE> '0' | '1'
  *
+ * Just Me context reader (default OFF; see resolveJustMeContextFlags below):
+ *
+ *   settings.comms.justMeReadContext / FLEET_JUSTME_READ_CONTEXT '0' | '1'
+ *
  * Read at point of use (startup / once per run), never per tick.
  */
 
@@ -375,6 +379,32 @@ function loadJobs(deps = {}) {
   }
 }
 
+// ── Just Me context reader (default OFF) ─────────────────────────────────────
+//   settings.comms.justMeReadContext  boolean (=== true) / FLEET_JUSTME_READ_CONTEXT '0'|'1'
+// Read once per Just Me job (slack_channel_watch._runJustMeJob) and once per
+// DM auto-reply poll (self-DM yield). No new store key: 'settings' is registered.
+function resolveJustMeContextFlags(settings, env) {
+  const c = _obj(_obj(settings).comms);
+  const flags = { readContext: c.justMeReadContext === true };
+  const e = _envBool(env, 'FLEET_JUSTME_READ_CONTEXT');
+  if (e !== null) flags.readContext = e;
+  return flags;
+}
+
+function loadJustMeContext(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveJustMeContextFlags(settings, env);
+  } catch (_) {
+    return resolveJustMeContextFlags({}, {});
+  }
+}
+
 module.exports = {
   resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT,
   resolveCommsFlags, loadComms, COMMS_POLLING_MODES,
@@ -382,4 +412,5 @@ module.exports = {
   resolveSlackSpeedupFlags, loadSlackSpeedup, SPEEDUP_MODES, LANE_CONCURRENCY_MAX,
   resolveAuthCoordFlags, loadAuthCoord, AUTH_COORD_ENV,
   resolveJobsFlags, loadJobs, JOB_TYPES, JOB_ENV,
+  resolveJustMeContextFlags, loadJustMeContext,
 };

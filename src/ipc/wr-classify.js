@@ -14,9 +14,10 @@ const logger = require('../utils/logger')('wr-classify');
  * classifyRequest(req, relay) — Uses AI to classify a work request
  * @param {object} req - { unit, issue, site }
  * @param {object} relay - relay module with .ask() method
+ * @param {object} [relayOpts] - optional options forwarded to relay.ask
  * @returns {object} req with .payload, .aiClassified, .aiArea, etc.
  */
-async function classifyRequest(req, relay) {
+async function classifyRequest(req, relay, relayOpts) {
   const fd = store.load('fleetData', {});
   const AREA_SUBS = require('../data/area-subs.json');
   const unit = (fd.rows || []).find(r => r.equipmentId === req.unit);
@@ -67,7 +68,9 @@ Respond ONLY with valid JSON (no markdown, no explanation):
   "towFrom": "pickup address if TOW, else empty string"
 }`;
 
-  const result = await relay.ask(prompt);
+  // relayOpts (optional): forwarded to relay.ask, e.g. { isolated: true, source }
+  // for Just Me context turns. Absent = the original single-argument call.
+  const result = relayOpts ? await relay.ask(prompt, relayOpts) : await relay.ask(prompt);
   if (!result) throw new Error('AI returned empty');
 
   const jsonMatch = result.match(/\{[\s\S]*\}/);

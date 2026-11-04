@@ -14,3 +14,6 @@ for (const k of ['FLEET_SLACK_DM_PEER_CACHE', 'FLEET_SLACK_DM_SKIP_UNCHANGED',
 // Phase 9: auth coordination flags forced OFF so legacy suites always run the parity path,
 // even if the developer's shell sets FLEET_AUTH_* for the rollout (env wins over settings.json).
 for (const k of ['FLEET_AUTH_SINGLE_FLIGHT', 'FLEET_AUTH_SINGLE_OWNER_AEA', 'FLEET_AUTH_SINGLE_OWNER_RECONNECT']) process.env[k] = '0';
+// Just Me context reader forced OFF so legacy suites run the flag-off parity path.
+// Flag-on tests set '1' inside the test and restore '0' in afterEach.
+process.env.FLEET_JUSTME_READ_CONTEXT = '0';
