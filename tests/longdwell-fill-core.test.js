@@ -81,21 +81,21 @@ describe('plan decision matrix (computed)', () => {
     expect(r.toFill).toEqual([
       { key: 'B::primary', reason: 'blank' },
       { key: 'FP::primary', reason: 'inputs-changed' },
-      { key: 'PD::primary', reason: 'refresh-day' },
       { key: 'NEW::primary', reason: 'blank' },
     ]);
     expect(r.skipped).toEqual([
       { key: 'FT::primary', reason: 'filled-today' },
+      { key: 'PD::primary', reason: 'prior-day' },        // user decision: earlier-day AI notes are kept
       { key: 'ED::primary', reason: 'edited' },
       { key: 'HC::primary', reason: 'has-content' },
       { key: 'HCL::primary', reason: 'has-content' },
       { key: 'CL::primary', reason: 'crash-loop' },
       { key: 'B::primary', reason: 'duplicate' },
     ]);
-    expect(r.counts).toEqual({ units: 10, planned: 4, filledToday: 1, edited: 1, hasContent: 2, crashLoop: 1, duplicate: 1, notFound: 0,
+    expect(r.counts).toEqual({ units: 10, planned: 3, filledToday: 1, priorDay: 1, edited: 1, hasContent: 2, crashLoop: 1, duplicate: 1, notFound: 0,
       filled: 0, failed: 0, editedDuringRun: 0, notRun: 0 });
     const ck = jobs.calls.find((c) => c[0] === 'ckpt')[1];
-    expect(ck).toEqual({ table: 'computed', keys: ['B::primary', 'FP::primary', 'PD::primary', 'NEW::primary'], total: 4 });
+    expect(ck).toEqual({ table: 'computed', keys: ['B::primary', 'FP::primary', 'NEW::primary'], total: 3 });
     expect(jobs.calls.slice(0, 2)).toEqual([['begin'], ['start']]);
   });
 

@@ -153,8 +153,8 @@ describe('manual edits are never overwritten', () => {
     store.update('longDwellStore', (s) => { s['U1::primary'].summary = 'my own words'; return s; }, {});
     clock += 24 * 3600 * 1000;                                  // even the next day
     const p = core.plan({ table: 'computed', units: units(2) });
-    expect(p.skipped).toEqual([{ key: 'U1::primary', reason: 'edited' }]);
-    expect(p.toFill).toEqual([{ key: 'U2::primary', reason: 'refresh-day' }]);
+    expect(p.skipped).toEqual([{ key: 'U1::primary', reason: 'edited' }, { key: 'U2::primary', reason: 'prior-day' }]);
+    expect(p.toFill).toEqual([]);
     core.finish({ runId: p.runId });
     clock -= 24 * 3600 * 1000;
     expect(Object.keys(core.today({ table: 'computed' }).entries)).toEqual(['U2::primary']);
@@ -182,13 +182,17 @@ describe('refills', () => {
     expect(store.load('longDwellAiFills', null).entries['computed|U2::primary'].fp).toBe('fpB');
   });
 
-  it('next local day refills unedited AI notes under a new day scope', () => {
+  it('next local day KEEPS unedited AI notes (user decision) under a new day scope', () => {
     const { core } = restart();
     drive(core, 'computed', units(2));
+    const before = JSON.stringify(store.load('longDwellStore', {}));
     clock += 24 * 3600 * 1000;
     const r = drive(core, 'computed', units(2));
-    expect(r.p.toFill.map((x) => x.reason)).toEqual(['refresh-day', 'refresh-day']);
-    expect(store.load('longDwellAiFills', null).entries['computed|U1::primary'].day).toBe('2026-11-05');
+    expect(r.p.toFill).toEqual([]);
+    expect(r.p.skipped.map((x) => x.reason)).toEqual(['prior-day', 'prior-day']);
+    expect(r.p.counts).toMatchObject({ priorDay: 2, planned: 0 });
+    expect(JSON.stringify(store.load('longDwellStore', {}))).toBe(before);           // notes untouched
+    expect(store.load('longDwellAiFills', null).entries['computed|U1::primary'].day).toBe('2026-11-04');
     expect(engine.getDb().prepare("SELECT scope_key FROM jobs WHERE type = 'longDwellAiFill' ORDER BY created_at").all().map((x) => x.scope_key))
       .toEqual(['computed:2026-11-04', 'computed:2026-11-05']);
   });

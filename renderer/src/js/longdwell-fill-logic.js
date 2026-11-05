@@ -44,10 +44,11 @@ export function fillFingerprint(promptRow) {
 function _n(v) { const x = Number(v); return Number.isFinite(x) && x > 0 ? x : 0; }
 
 // "12 skipped (already filled today), 5 filled" (+ non-zero extras in order:
-// edited by you, already has content, failed).
+// kept from an earlier day, edited by you, already has content, failed).
 export function fillSummaryText(counts) {
   const c = counts || {};
   const parts = [_n(c.filledToday) + ' skipped (already filled today)', _n(c.filled) + ' filled'];
+  if (_n(c.priorDay)) parts.push(_n(c.priorDay) + ' kept (filled on an earlier day)');
   const edited = _n(c.edited) + _n(c.editedDuringRun);
   if (edited) parts.push(edited + ' skipped (edited by you)');
   if (_n(c.hasContent)) parts.push(_n(c.hasContent) + ' skipped (already has content)');

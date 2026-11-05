@@ -137,10 +137,10 @@ function _cleanResult(table, res) {
 }
 
 function _emptyCounts(units) {
-  return { units, planned: 0, filledToday: 0, edited: 0, hasContent: 0, crashLoop: 0, duplicate: 0, notFound: 0,
+  return { units, planned: 0, filledToday: 0, priorDay: 0, edited: 0, hasContent: 0, crashLoop: 0, duplicate: 0, notFound: 0,
     filled: 0, failed: 0, editedDuringRun: 0, notRun: 0 };
 }
-const SKIP_COUNT = { 'filled-today': 'filledToday', edited: 'edited', 'has-content': 'hasContent', 'crash-loop': 'crashLoop', duplicate: 'duplicate', 'not-found': 'notFound' };
+const SKIP_COUNT = { 'filled-today': 'filledToday', 'prior-day': 'priorDay', edited: 'edited', 'has-content': 'hasContent', 'crash-loop': 'crashLoop', duplicate: 'duplicate', 'not-found': 'notFound' };
 
 function createCore(deps) {
   const d = deps || {};
@@ -163,7 +163,9 @@ function createCore(deps) {
     const rec = _recordFor(table, fills, unit, cur);
     if (!rec) return { skip: 'has-content', cur };
     if (valuesHash(cur.vals) !== rec.outHash) return { skip: 'edited', cur };
-    if (rec.day !== day) return { fill: 'refresh-day', cur };
+    // User decision (2026-11-04): AI notes from a previous day are kept as-is, never bulk-refilled.
+    // The per-row AI Fill / ✨ button remains the way to refresh one unit.
+    if (rec.day !== day) return { skip: 'prior-day', cur };
     if (rec.fp !== unit.fp) return { fill: 'inputs-changed', cur };
     return { skip: 'filled-today', cur };
   }

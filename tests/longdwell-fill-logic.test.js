@@ -40,6 +40,8 @@ describe('fillSummaryText', () => {
     expect(fillSummaryText({ filledToday: 12, filled: 5, edited: 1, editedDuringRun: 1, hasContent: 1, failed: 1 }))
       .toBe('12 skipped (already filled today), 5 filled, 2 skipped (edited by you), 1 skipped (already has content), 1 failed');
     expect(fillSummaryText({ filledToday: 0, filled: 3, failed: 1 })).toBe('0 skipped (already filled today), 3 filled, 1 failed');
+    expect(fillSummaryText({ filledToday: 2, filled: 1, priorDay: 4, edited: 1 }))
+      .toBe('2 skipped (already filled today), 1 filled, 4 kept (filled on an earlier day), 1 skipped (edited by you)');
     expect(fillSummaryText(null)).toBe('0 skipped (already filled today), 0 filled');
   });
 });
