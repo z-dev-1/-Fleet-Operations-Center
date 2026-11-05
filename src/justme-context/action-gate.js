@@ -107,6 +107,12 @@ const ACTION_RULES = {
   REVIEW_QUEUE: read('\\breview\\b'),
   READ_SLACK: read('\\b(?:read|check)\\b[^.?!;\\n]{0,40}\\b(?:slack|messages|dms?)\\b'),
   DRAFT_FOLLOWUPS: read('\\bfollow[\\s-]?ups?\\b'),
+  // Read-only DBR lookup (no sends, no pendingConfirm): the keyword and the target must be typed by Z.
+  DBR_LOOKUP: withTarget(read('\\bdbr\\b|\\buptime\\b'), (a, t) => {
+    if (a.kind === 'mine' || !String(a.target || '').trim()) return /\b(my|mine)\b/.test(t);
+    const v = String(a.target).trim().toLowerCase();
+    return v.length >= 2 && v.length <= 24 && tok(v, t);
+  }),
 };
 
 // ── §11.4 free-text screening ───────────────────────────────────────────────
