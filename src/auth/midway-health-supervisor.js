@@ -58,6 +58,7 @@ const FAIL = {
   AAP_API_UNAUTHORIZED: 'AAP_API_UNAUTHORIZED',
   AAP_SERVER_ERROR: 'AAP_SERVER_ERROR',
   UNKNOWN_AUTH_FAILURE: 'UNKNOWN_AUTH_FAILURE',
+  STEP_UP_REQUIRED: 'STEP_UP_REQUIRED',   // auth.propagation: status-only class, never returned by classifyFailure
 };
 
 /**
@@ -212,6 +213,40 @@ let _lastSnapshot = null;
 const _HISTORY_CAP = 30;
 const _history = [];                // bounded recovery history (spec #25)
 
+// ── auth.propagation state (flag-gated; all reset in _reset()) ───────────────
+// Only written when _propOn() is true, so flag OFF behavior is unchanged.
+let _cause = null;                  // { source } — why the latest transition/outcome happened
+let _lastFailClass = null;          // last FAIL.* seen; null on every HEALTHY transition
+let _lastApiOkAt = null;            // ms epoch of the last observed AAP 2xx
+let _lastApiFailAt = null;          // ms epoch of the last observed AAP 401/403
+let _verifiedAt = null;             // ms epoch of the last verification that reached HEALTHY
+let _verifiedBy = null;             // 'verify:<cause>' | 'ladder:<rung>' | 'api:<source>' | 'monitor'
+let _stepUpPasses = 0;              // consecutive class-B (step-up signature) passes
+let _stepUpSignalAt = 0;            // ms epoch of the last explicit step-up signal (RCA fallback)
+let _stepUpSignalTimer = null;      // lapse timer for the explicit signal
+let _stepUpMwinitAt = null;         // ms epoch when ensureHealthyFullSignIn's runMwinit resolved (F9)
+let _fullSignInActive = null;       // promise while ensureHealthyFullSignIn runs (F1)
+let _seq = 0;
+let _evidence = _emptyEvidence();
+const _listeners = new Set();
+let _emitQueue = [];
+let _flushScheduled = false;
+const _warnedListeners = new WeakSet();
+let _statusWarned = false;
+let _throttleLoggedFor = null;
+
+const _STEP_UP_SIGNAL_MS = 30 * 60 * 1000;
+const _STEP_UP_STATES = ['DEGRADED', 'RECOVERING', 'COOLDOWN'];
+
+function _emptyEvidence() { return { sessionMin: null, diskAeaMin: null, liveAeaMin: null, aeaCountToMidway: null, online: null, at: null }; }
+
+/** F4: flag read at call time (never at module load). */
+function _propOn() {
+  if (typeof _deps.propagation === 'boolean') return _deps.propagation;
+  try { return require('./auth-report').isEnabled() === true; } catch (_) { return false; }
+}
+function _now() { return (typeof _deps.now === 'function') ? _deps.now() : Date.now(); }
+
 function getState() { return _state; }
 function getSnapshot() { return _lastSnapshot; }
 function getHistory() { return _history.slice(); }
@@ -219,7 +254,204 @@ function getHistory() { return _history.slice(); }
 function _setState(next, reason) {
   if (next === _state) return;
   logger.info('[auth-supervisor] state ' + _state + ' -> ' + next + (reason ? ' (' + reason + ')' : ''));
+  const from = _state;
   _state = next;
+  if (_propOn()) {
+    if (next === STATE.HEALTHY) { _clearStepUp(); _lastFailClass = null; }
+    _emit({ type: 'state', from, to: next });
+  }
+}
+
+/** Reset all step-up evidence (any HEALTHY transition, observed success, _reset). */
+function _clearStepUp() {
+  _stepUpPasses = 0;
+  _stepUpSignalAt = 0;
+  _stepUpMwinitAt = null;
+  if (_stepUpSignalTimer != null) { try { _timers.clear(_stepUpSignalTimer); } catch (_) {} _stepUpSignalTimer = null; }
+}
+
+function _markVerified(by) { _verifiedAt = _now(); _verifiedBy = String(by || 'verify').slice(0, 80); }
+
+function _isStepUp() {
+  if (!_propOn()) return false;
+  if (!_STEP_UP_STATES.includes(_state)) return false;
+  if (_stepUpPasses >= 2) return true;
+  return _stepUpSignalAt > 0 && (_now() - _stepUpSignalAt) < _STEP_UP_SIGNAL_MS;
+}
+
+/**
+ * getStatus() -> normalized, secret-free AuthStatus (src/auth/auth-status.js).
+ * Never throws: an internal error yields an UNKNOWN status.
+ */
+function getStatus() {
+  try {
+    return require('./auth-status').deriveStatus({
+      state: _state,
+      stepUp: _isStepUp(),
+      stepUpMwinitAt: _stepUpMwinitAt,
+      now: _now(),
+      seq: _seq,
+      failClass: _lastFailClass,
+      verifiedAt: _verifiedAt,
+      verifiedBy: _verifiedBy,
+      lastApiOkAt: _lastApiOkAt,
+      lastApiFailAt: _lastApiFailAt,
+      nextRetryAt: _nextRetryAt,
+      retryStreak: _failStreak,
+      evidence: _evidence,
+    });
+  } catch (e) {
+    if (!_statusWarned) { _statusWarned = true; logger.warn('[auth-supervisor] getStatus failed: ' + (e && e.message)); }
+    return { v: 1, seq: _seq, at: new Date().toISOString(), state: 'UNKNOWN', level: 'unknown', ok: null, action: 'wait',
+      stepUp: false, failClass: null, message: 'Auth status unavailable', verifiedAt: null, verifiedBy: null,
+      lastApiOkAt: null, lastApiFailAt: null, nextRetryAt: null, retryStreak: 0, evidence: _emptyEvidence() };
+  }
+}
+
+/** subscribe(fn) -> unsubscribe. Listeners get { type, from, to, cause, status }, always asynchronously. */
+function subscribe(fn) {
+  if (typeof fn !== 'function') return () => {};
+  _listeners.add(fn);
+  return () => { _listeners.delete(fn); };
+}
+
+/**
+ * Queue an event and schedule ONE asynchronous flush (_timers.immediate). No
+ * listener ever runs inside _setState / noteApiOutcome / aap_api._withLock.
+ * Flag off: returns immediately (no queue, no setImmediate).
+ */
+function _emit(evt) {
+  if (!_propOn()) return;
+  _seq += 1;
+  _emitQueue.push({ type: evt.type, from: evt.from || null, to: evt.to || _state, cause: _cause ? _cause.source : null, stepUp: _isStepUp() });
+  if (_flushScheduled) return;
+  _flushScheduled = true;
+  try { _timers.immediate(_flush); } catch (_) { _flushScheduled = false; }
+}
+
+function _flush() {
+  _flushScheduled = false;
+  const q = _emitQueue; _emitQueue = [];
+  if (!q.length || !_listeners.size) return;
+  // Collapse consecutive events with identical (to, stepUp); a 'state' event wins over others.
+  const out = [];
+  for (const e of q) {
+    const prev = out[out.length - 1];
+    if (prev && prev.to === e.to && prev.stepUp === e.stepUp) {
+      if (e.type === 'state' || prev.type !== 'state') out[out.length - 1] = e;
+      continue;
+    }
+    out.push(e);
+  }
+  const status = getStatus();
+  for (const e of out) {
+    const payload = { type: e.type, from: e.from, to: e.to, cause: e.cause, status };
+    for (const fn of Array.from(_listeners)) {
+      try { fn(payload); }
+      catch (err) {
+        if (!_warnedListeners.has(fn)) { _warnedListeners.add(fn); logger.warn('[auth-supervisor] status listener threw: ' + (err && err.message)); }
+      }
+    }
+  }
+}
+
+/**
+ * noteApiOutcome({ ok, err?, source? }) — real AAP traffic (via auth-report.report).
+ * Never throws, never awaits recovery (aap_api._request calls it under _withLock).
+ */
+function noteApiOutcome(o) {
+  try {
+    if (!_propOn()) return { handled: false };
+    o = o || {};
+    if (typeof o.ok !== 'boolean') return { handled: false, reason: 'bad-input' };
+    if (_shuttingDown) return { handled: false, reason: 'shutting-down' };
+    const src = String(o.source || 'unknown').slice(0, 40);
+    const now = _now();
+    if (o.ok === true) {
+      if (_authRecoveryInFlight) { _lastApiOkAt = now; return { handled: false, reason: 'in-flight' }; }
+      if (_deps.isOffline()) return { handled: false, reason: 'offline' };
+      _lastApiOkAt = now;
+      if (_state === STATE.HEALTHY) return { handled: true, transitioned: false };
+      const from = _state;
+      _failStreak = 0; _clearRetry();
+      _clearStepUp();
+      _cause = { source: 'api:' + src };
+      _lastFailClass = null;
+      _markVerified('api:' + src);
+      _setState(STATE.HEALTHY, 'observed AAP API success');
+      const base = _lastSnapshot || {
+        internet: { online: true }, vpn: { connected: null, required: false },
+        diskSession: { present: false, expiresInMin: null }, diskAea: { present: false, expiresInMin: null },
+        aapProbe: null, lastRecovery: null,
+      };
+      _lastSnapshot = Object.assign({}, base, {
+        state: _state, at: new Date(now).toISOString(),
+        aapApiSmokeTest: { ok: true, status: 200, via: 'observed-traffic' }, nextRetryAt: null,
+      });
+      _recordHistory({ reason: 'api:' + src, initialState: from, attempts: [], result: STATE.HEALTHY, verifiedBy: ['observed-traffic'], ladderReported: false, durationMs: 0 });
+      return { handled: true, transitioned: true };
+    }
+    const err = o.err || {};
+    const isAuth = err.code === 'MIDWAY_SESSION_INVALID' || err.status === 401 || err.status === 403;
+    if (!isAuth) return { handled: false, reason: 'not-auth' };   // 5xx / network / step-up code: ignored
+    if (_deps.isOffline()) return { handled: false, reason: 'offline' };
+    _lastApiFailAt = now;
+    _lastFailClass = FAIL.AAP_API_UNAUTHORIZED;
+    if ((_state === STATE.HEALTHY || _state === STATE.UNKNOWN) && !_authRecoveryInFlight) {
+      _cause = { source: 'api:' + src };
+      _setState(STATE.DEGRADED, 'api: session rejected');
+      _scheduleRetry('api-outcome');                     // timer only; never a synchronous ladder
+      return { handled: true, transitioned: true };
+    }
+    _emit({ type: 'outcome' });
+    return { handled: true, transitioned: false };
+  } catch (e) {
+    logger.warn('[auth-supervisor] noteApiOutcome error: ' + (e && e.message));
+    return { handled: false, reason: 'error' };
+  }
+}
+
+/**
+ * noteStepUpSignal({ source }) — explicit server-worded step-up evidence (RCA
+ * cookie-file fallback only). Never changes _state. F5: emits 'stepup' now when
+ * not HEALTHY, and again when the 30-min lapse timer fires.
+ */
+function noteStepUpSignal(o) {
+  try {
+    if (!_propOn()) return { handled: false };
+    if (_shuttingDown) return { handled: false, reason: 'shutting-down' };
+    _stepUpSignalAt = _now();
+    if (_stepUpSignalTimer != null) { try { _timers.clear(_stepUpSignalTimer); } catch (_) {} _stepUpSignalTimer = null; }
+    _stepUpSignalTimer = _timers.set(() => {
+      _stepUpSignalTimer = null;
+      _stepUpSignalAt = 0;
+      _emit({ type: 'stepup' });
+    }, _STEP_UP_SIGNAL_MS);
+    if (_stepUpSignalTimer && _stepUpSignalTimer.unref) _stepUpSignalTimer.unref();
+    if (_state !== STATE.HEALTHY) _emit({ type: 'stepup' });
+    return { handled: true, source: String((o && o.source) || 'unknown').slice(0, 40) };
+  } catch (e) {
+    logger.warn('[auth-supervisor] noteStepUpSignal error: ' + (e && e.message));
+    return { handled: false, reason: 'error' };
+  }
+}
+
+/** noteEvidence({ sessionMin, diskAeaMin, liveAeaMin, aeaCountToMidway, online }) — numbers only. */
+function noteEvidence(o) {
+  try {
+    if (!_propOn()) return { handled: false };
+    o = o || {};
+    const n = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= -1e6 && v <= 1e6) ? v : null;
+    const next = Object.assign({}, _evidence);
+    for (const k of ['sessionMin', 'diskAeaMin', 'liveAeaMin', 'aeaCountToMidway']) if (k in o) next[k] = n(o[k]);
+    if ('online' in o) next.online = typeof o.online === 'boolean' ? o.online : null;
+    next.at = _now();
+    _evidence = next;
+    _emit({ type: 'evidence' });
+    return { handled: true };
+  } catch (e) {
+    return { handled: false, reason: 'error' };
+  }
 }
 
 function _recordHistory(entry) {
@@ -254,6 +486,14 @@ async function ensureHealthy(opts) {
 }
 
 async function _runEnsureHealthy(opts) {
+  const propOn = _propOn();
+  if (propOn) _cause = { source: String(opts.reason || 'unspecified').slice(0, 60) };
+  const r = await _runEnsureHealthyPass(opts, propOn);
+  if (propOn) r.stepUp = _isStepUp();
+  return r;
+}
+
+async function _runEnsureHealthyPass(opts, propOn) {
   const t0 = Date.now();
   const reason = opts.reason || 'unspecified';
   const allowPrompt = opts.allowPrompt !== false;
@@ -269,6 +509,7 @@ async function _runEnsureHealthy(opts) {
   // of VPN. forceVerify forces a fresh check even if we think we're healthy.
   const v0 = await verifyHealthy({ forceProbe: !!opts.forceVerify });
   if (v0.healthy) {
+    if (propOn) _markVerified('verify:' + (_cause ? _cause.source : reason));
     _setState(STATE.HEALTHY, 'verified at rung 0');
     _lastSnapshot = await buildSnapshot({ state: _state, api: v0.api, verify: v0 });
     return _result(true, { state: _state, recovered: false, rung: 'verify', prompted: false, verified: true, via: v0.via, latencyMs: Date.now() - t0 });
@@ -277,6 +518,7 @@ async function _runEnsureHealthy(opts) {
   // Not healthy -> DEGRADED, then run the proven recovery ladder.
   _setState(STATE.DEGRADED, 'verify failed: ' + (v0.class || 'unknown'));
   const failClass = v0.class || FAIL.AAP_AUTH_REJECTED;
+  if (propOn) _lastFailClass = failClass;
 
   // An AAP SERVER error (500) is NOT an auth problem — do not run the ladder
   // or prompt (spec #17). Surface as degraded-but-not-auth and let the caller
@@ -310,6 +552,7 @@ async function _runEnsureHealthy(opts) {
   });
 
   if (verified) {
+    if (propOn) _markVerified('ladder:' + ladder.rung);
     _setState(STATE.HEALTHY, 'verified after ladder rung=' + ladder.rung);
     _lastSnapshot = await buildSnapshot({ state: _state, api: v1.api, verify: v1 });
     return _result(true, { state: _state, recovered: true, rung: ladder.rung, prompted: !!ladder.prompted, verified: true, via: v1.via, latencyMs: Date.now() - t0 });
@@ -332,6 +575,23 @@ async function _runEnsureHealthy(opts) {
     ladder.requiresInteractiveAuth === true ||
     ladder.sessionInvalid === true ||
     failClass === FAIL.MIDWAY_SESSION_EXPIRED;
+
+  // auth.propagation step-up counter (flag on only, so flag off makes no extra
+  // call and no extra await). A pass counts only for the class-B signature:
+  // valid disk session, silent rungs ran, live AEA with time left, AAP walled.
+  if (propOn) {
+    let liveAea = null;
+    if (auth && typeof auth.aeaSessionExpiryMin === 'function') {
+      try { liveAea = await auth.aeaSessionExpiryMin(); } catch (_) { liveAea = null; }
+    }
+    const countable = !actuallyNeedsUser && ladder.sessionInvalid !== true &&
+      !['error', 'unavailable', 'offline'].includes(ladder.rung) &&
+      [FAIL.AAP_API_UNAUTHORIZED, FAIL.SSO_LOGIN_WALL, FAIL.AAP_AUTH_REJECTED].includes(failClass) &&
+      typeof liveAea === 'number' && Number.isFinite(liveAea) && liveAea > 0;
+    _stepUpPasses = countable ? _stepUpPasses + 1 : 0;
+    _lastFailClass = v1.class || failClass;
+    if (typeof liveAea === 'number' && Number.isFinite(liveAea)) _evidence = Object.assign({}, _evidence, { liveAeaMin: liveAea, at: _now() });
+  }
 
   const nextState = actuallyNeedsUser ? STATE.WAITING_FOR_USER : STATE.COOLDOWN;
   _setState(nextState, actuallyNeedsUser ? 'interactive mwinit genuinely required' : 'still rejected after silent ladder (will retry)');
@@ -373,8 +633,13 @@ let _shuttingDown = false;
 const _timers = {
   set: (fn, ms) => setTimeout(fn, ms),
   clear: (h) => clearTimeout(h),
+  immediate: (fn) => setImmediate(fn),   // auth.propagation event delivery (flag on only)
 };
-function _setTimers(t) { if (t && t.set) _timers.set = t.set; if (t && t.clear) _timers.clear = t.clear; }
+function _setTimers(t) {
+  if (t && t.set) _timers.set = t.set;
+  if (t && t.clear) _timers.clear = t.clear;
+  if (t && t.immediate) _timers.immediate = t.immediate;
+}
 
 function _jitter(ms) { return Math.round(ms * (0.85 + Math.random() * 0.3)); } // ±15%
 
@@ -395,6 +660,7 @@ function _clearRetry() {
  */
 function _scheduleRetry(reason) {
   if (_shuttingDown) return;
+  if (_fullSignInActive) return;                   // F1: the full sign-in re-arms once when it finishes (flag on only)
   if (_state === STATE.WAITING_FOR_USER) return;   // don't hammer while user acts
   if (_state === STATE.HEALTHY) { _failStreak = 0; _clearRetry(); return; }
   if (_deps.isOffline()) { _clearRetry(); return; } // reconnect watcher handles online-return
@@ -427,6 +693,23 @@ function _scheduleRetry(reason) {
  * This is what long-lived callers / the background monitor use.
  */
 async function ensureHealthyConverging(opts) {
+  // auth.propagation throttle (D6, flag on only): the 5-minute API refresh
+  // (data-source-*) does not start a new pass while COOLDOWN backoff is armed.
+  // ui:*, aea-captured, reconnect, heartbeat:*, startup, post-reauth, monitor:*
+  // are never throttled; auto-retry calls ensureHealthy directly.
+  const reasonStr = (opts && opts.reason) || '';
+  if (/^data-source-/.test(reasonStr) && _state === STATE.COOLDOWN &&
+      _nextRetryAt && Date.parse(_nextRetryAt) > Date.now() && _propOn()) {
+    if (_throttleLoggedFor !== _nextRetryAt) {
+      _throttleLoggedFor = _nextRetryAt;
+      logger.info('[auth-supervisor] ' + reasonStr + ' deferred: auth recovery backoff in effect until ' + _nextRetryAt);
+    }
+    return {
+      ok: false, state: _state, recovered: false, rung: 'deferred', prompted: false, verified: false,
+      deferred: true, requiresUser: false, class: _lastFailClass, stepUp: _isStepUp(),
+      nextRetryAt: _nextRetryAt, reason: 'auth recovery backoff in effect', latencyMs: 0,
+    };
+  }
   const r = await ensureHealthy(opts || {});
   if (r.ok && r.verified) {
     _failStreak = 0; _clearRetry();
@@ -451,6 +734,92 @@ async function ensureHealthyConverging(opts) {
  */
 function _isTerminalForRetry() {
   return _shuttingDown || _state === STATE.OFFLINE || _state === STATE.WAITING_FOR_USER;
+}
+
+/**
+ * ensureHealthyFullSignIn(opts) — F1: the "Run mwinit" action while step-up is
+ * active. Flag off: exactly the legacy ensureHealthyConverging({ reason:
+ * 'ui:run-mwinit', allowPrompt:true }). Flag on, under the supervisor lock:
+ *   1. wait for any in-flight pass, clear the retry timer;
+ *   2. take _authRecoveryInFlight with a pass that runs the interactive
+ *      auth.runMwinit() (never recoverAuth / refreshAeaViaMwinit), then
+ *      injectCookies(), then verifyHealthy({ forceProbe:true });
+ *   3. HEALTHY (verifiedBy 'ladder:mwinit') or COOLDOWN; on failure re-arm
+ *      exactly one retry timer.
+ * Callers that arrive meanwhile coalesce onto the lock. The returned result
+ * comes from this call's own verify and is never coalesced:true.
+ */
+async function ensureHealthyFullSignIn(opts) {
+  if (!_propOn()) return ensureHealthyConverging({ reason: 'ui:run-mwinit', allowPrompt: true });
+  if (_fullSignInActive) return Object.assign({}, await _fullSignInActive);
+  let release;
+  _fullSignInActive = new Promise((res) => { release = res; });
+  let r;
+  try {
+    while (_authRecoveryInFlight) { try { await _authRecoveryInFlight; } catch (_) {} }
+    _clearRetry();
+    const pass = _runFullSignIn(opts || {});
+    _authRecoveryInFlight = pass;
+    try { r = await pass; }
+    finally { if (_authRecoveryInFlight === pass) _authRecoveryInFlight = null; }
+  } catch (e) {
+    logger.warn('[auth-supervisor] full sign-in error: ' + (e && e.message));
+    r = _result(false, { state: _state, recovered: false, rung: 'mwinit', prompted: true, verified: false, reason: 'full-sign-in-error', latencyMs: 0 });
+  } finally {
+    _fullSignInActive = null;
+  }
+  if (_state === STATE.HEALTHY) { _failStreak = 0; _clearRetry(); }
+  else _scheduleRetry('post-stepup-mwinit');
+  const out = Object.assign({}, r, { stepUp: _isStepUp(), nextRetryAt: _nextRetryAt });
+  delete out.coalesced;
+  release(out);
+  return out;
+}
+
+async function _runFullSignIn() {
+  const t0 = Date.now();
+  const initialState = _state;
+  _cause = { source: 'ui:run-mwinit-stepup' };
+  const auth = _deps.auth || _auth();
+  if (!auth || typeof auth.runMwinit !== 'function') {
+    return _result(false, { state: _state, recovered: false, rung: 'mwinit', prompted: false, verified: false, reason: 'mwinit-unavailable', latencyMs: Date.now() - t0 });
+  }
+  logger.info('[auth-supervisor] step-up: running interactive mwinit (full sign-in)');
+  let mw;
+  try { mw = await auth.runMwinit(); }
+  catch (e) {
+    logger.warn('[auth-supervisor] interactive mwinit failed: ' + (e && e.message));
+    return _result(false, { state: _state, recovered: false, rung: 'mwinit', prompted: true, verified: false, reason: 'mwinit-failed', latencyMs: Date.now() - t0 });
+  }
+  if (mw && mw.skipped === 'offline') {
+    return _result(false, { state: _state, recovered: false, rung: 'mwinit', prompted: false, verified: false, reason: 'offline', latencyMs: Date.now() - t0 });
+  }
+  _stepUpMwinitAt = _now();                       // F9: the full sign-in completed
+  try { if (typeof auth.injectCookies === 'function') await auth.injectCookies(); } catch (_) {}
+  const v = await verifyHealthy({ forceProbe: true });
+  const verified = !!v.healthy;
+  _recordHistory({
+    reason: 'ui:run-mwinit-stepup', initialState,
+    attempts: ['mwinit'],
+    result: verified ? STATE.HEALTHY : STATE.COOLDOWN,
+    verifiedBy: verified ? v.via : [],
+    ladderReported: true,
+    durationMs: Date.now() - t0,
+  });
+  if (verified) {
+    _markVerified('ladder:mwinit');
+    _setState(STATE.HEALTHY, 'verified after step-up mwinit');
+    _clearStepUp(); _lastFailClass = null;        // also when already HEALTHY (no transition)
+    _lastSnapshot = await buildSnapshot({ state: _state, api: v.api, verify: v });
+    return _result(true, { state: _state, recovered: true, rung: 'mwinit', prompted: true, verified: true, via: v.via, latencyMs: Date.now() - t0 });
+  }
+  _lastFailClass = v.class || FAIL.AAP_AUTH_REJECTED;
+  _setState(STATE.COOLDOWN, 'still rejected after step-up mwinit (will retry)');
+  _lastSnapshot = await buildSnapshot({ state: _state, api: v.api, verify: v });
+  return _result(false, {
+    state: _state, recovered: false, rung: 'mwinit', prompted: true, verified: false,
+    class: _lastFailClass, reason: 'AAP still ' + _lastFailClass, latencyMs: Date.now() - t0,
+  });
 }
 
 /**
@@ -528,7 +897,10 @@ function startHealthMonitor(opts) {
     try {
       const v = await verifyHealthy({});
       if (v && v.healthy) {
-        if (_state !== STATE.HEALTHY) { _setState(STATE.HEALTHY, 'monitor: verified'); _failStreak = 0; _clearRetry(); }
+        if (_state !== STATE.HEALTHY) {
+          if (_propOn()) { _cause = { source: 'monitor' }; _markVerified('monitor'); }
+          _setState(STATE.HEALTHY, 'monitor: verified'); _failStreak = 0; _clearRetry();
+        }
         _lastSnapshot = await buildSnapshot({ state: _state, api: v.api, verify: v });
         return;
       }
@@ -556,8 +928,23 @@ function stopHealthMonitor() {
 }
 
 /** shutdown() — cancel pending retries cleanly (spec #27). */
-function shutdown() { _shuttingDown = true; _clearRetry(); stopHealthMonitor(); }
-function _resetConvergence() { _shuttingDown = false; _failStreak = 0; _clearRetry(); _timers.set = (fn, ms) => setTimeout(fn, ms); _timers.clear = (h) => clearTimeout(h); }
+function shutdown() {
+  _shuttingDown = true; _clearRetry(); stopHealthMonitor();
+  if (_stepUpSignalTimer != null) { try { _timers.clear(_stepUpSignalTimer); } catch (_) {} _stepUpSignalTimer = null; }
+  _emitQueue = [];
+}
+function _resetConvergence() { _shuttingDown = false; _failStreak = 0; _clearRetry(); _timers.set = (fn, ms) => setTimeout(fn, ms); _timers.clear = (h) => clearTimeout(h); _timers.immediate = (fn) => setImmediate(fn); }
+
+/** Clear every auth.propagation variable (listeners included). Uses the current timers. */
+function _resetPropagation() {
+  if (_stepUpSignalTimer != null) { try { _timers.clear(_stepUpSignalTimer); } catch (_) {} _stepUpSignalTimer = null; }
+  _cause = null; _lastFailClass = null; _lastApiOkAt = null; _lastApiFailAt = null;
+  _verifiedAt = null; _verifiedBy = null;
+  _stepUpPasses = 0; _stepUpSignalAt = 0; _stepUpMwinitAt = null; _fullSignInActive = null;
+  _seq = 0; _evidence = _emptyEvidence();
+  _listeners.clear(); _emitQueue = []; _flushScheduled = false;
+  _statusWarned = false; _throttleLoggedFor = null;
+}
 
 // ── Injectable deps (spec #26) so the ladder/verification are deterministically
 // testable without a live box. Defaults point at the live implementations. ─────
@@ -566,11 +953,15 @@ const _deps = {
   aapApi: null,   // null -> lazy require('../scrapers/aap_api')
   auth: null,     // null -> lazy require('../scrapers/auth')
   checkVpnState: null, // null -> lazy require('../utils/vpn').checkVpnState (context only)
+  propagation: null,   // null -> auth-report.isEnabled() at call time (F4); boolean overrides (tests)
+  now: null,           // null -> Date.now (auth.propagation clock; tests inject)
 };
 function _setDeps(d) { if (d && typeof d === 'object') Object.assign(_deps, d); }
 function _reset() {
   _deps.isOffline = () => _isOfflineNow(); _deps.aapApi = null; _deps.auth = null; _deps.checkVpnState = null;
+  _deps.propagation = null; _deps.now = null;
   _state = STATE.UNKNOWN; _authRecoveryInFlight = null; _lastSnapshot = null; _history.length = 0;
+  _resetPropagation();
   _resetConvergence();
 }
 
@@ -587,6 +978,10 @@ module.exports = {
   startHealthMonitor, stopHealthMonitor,
   shutdown,
   getState, getSnapshot, getHistory,
+  // auth.propagation (flag-gated; inert when the flag is off)
+  getStatus, subscribe,
+  noteApiOutcome, noteStepUpSignal, noteEvidence,
+  ensureHealthyFullSignIn,
   _setDeps, _setTimers, _reset,
   _scheduleRetry, _backoffFor,  // exported for convergence tests
 };

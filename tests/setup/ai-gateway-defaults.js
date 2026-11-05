@@ -19,3 +19,6 @@ for (const k of ['FLEET_AUTH_SINGLE_FLIGHT', 'FLEET_AUTH_SINGLE_OWNER_AEA', 'FLE
 process.env.FLEET_JUSTME_READ_CONTEXT = '0';
 // On-demand DBR lookup forced OFF so legacy suites run the flag-off parity path.
 process.env.FLEET_AI_DBR_LOOKUP = '0';
+// Auth propagation forced OFF so legacy suites run the flag-off parity path.
+// Flag-on tests use auth-report._setEnabledForTest / supervisor _setDeps({ propagation }).
+process.env.FLEET_AUTH_PROPAGATION = '0';

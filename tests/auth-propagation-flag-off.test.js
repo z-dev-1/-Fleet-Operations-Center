@@ -138,4 +138,46 @@ describe('auth.propagation flag OFF: supervisor golden trace', () => {
     expect(w.handles[0].ms).toBeGreaterThanOrEqual(25500);
     expect(w.handles[0].ms).toBeLessThanOrEqual(34500);
   });
+
+  // Added with the supervisor extensions (plan item 6). The GOLDEN above is unchanged.
+  it('new entry points called with the flag OFF leave the golden trace unchanged', async () => {
+    const ar = require('../src/auth/auth-report');
+    expect(ar.isEnabled()).toBe(false);          // real flag path: env FLEET_AUTH_PROPAGATION=0 (tests/setup)
+    const w = makeWorld();
+    const seen = [];
+    const unsub = sup.subscribe((e) => seen.push(e));
+    const poke = () => {
+      expect(sup.noteApiOutcome({ ok: true, source: 'aap-api' })).toEqual({ handled: false });
+      expect(sup.noteApiOutcome({ ok: false, err: { code: 'MIDWAY_SESSION_INVALID' }, source: 'aap-api' })).toEqual({ handled: false });
+      expect(sup.noteStepUpSignal({ source: 'rca' })).toEqual({ handled: false });
+      expect(sup.noteEvidence({ sessionMin: 10, liveAeaMin: 5, online: true })).toEqual({ handled: false });
+      ar.report({ ok: true, source: 'aap-api' });
+      ar.reportStepUp({ source: 'rca' });
+      expect(ar.currentStatus()).toBeNull();
+    };
+    const out = await runScenario(w, { afterA: poke, afterB: poke, afterC: poke });
+    await new Promise((r) => setImmediate(r));
+    unsub();
+    expect(w.calls).toEqual(GOLDEN.calls);
+    expect(out.states).toEqual(GOLDEN.states);
+    expect(out.results).toEqual(GOLDEN.results);
+    for (const r of out.results) expect('stepUp' in r).toBe(false);   // no additive field flag off
+    expect(out.history).toEqual(GOLDEN.history);
+    expect(out.snapshot).toEqual(GOLDEN.snapshot);
+    expect(w.handles).toHaveLength(1);               // no step-up lapse timer
+    expect(seen).toEqual([]);                        // no events delivered
+    expect(w.immediates).toEqual([]);                // setImmediate delivery never used
+    expect(w.calls.some((c) => c[0] === 'aeaSessionExpiryMin')).toBe(false);
+  });
+
+  it('flag OFF: ensureHealthyFullSignIn is the legacy ui:run-mwinit allowPrompt:true pass', async () => {
+    const w = makeWorld();
+    w.smoke.push('401', '401');
+    const r = await sup.ensureHealthyFullSignIn();
+    expect(w.calls.find((c) => c[0] === 'recoverAuth')).toEqual(['recoverAuth', 'RECOVERING', 'ui:run-mwinit', { allowPrompt: true }]);
+    expect(w.calls.some((c) => c[0] === 'runMwinit' || c[0] === 'aeaSessionExpiryMin')).toBe(false);
+    expect(r.state).toBe('COOLDOWN');
+    expect('stepUp' in r).toBe(false);
+    expect(w.immediates).toEqual([]);
+  });
 });

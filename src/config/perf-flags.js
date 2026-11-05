@@ -44,6 +44,10 @@
  *   settings.auth.singleOwner.aea       / FLEET_AUTH_SINGLE_OWNER_AEA       '0' | '1'
  *   settings.auth.singleOwner.reconnect / FLEET_AUTH_SINGLE_OWNER_RECONNECT '0' | '1'
  *
+ * Auth propagation (default OFF; see resolveAuthPropagationFlags):
+ *
+ *   settings.auth.propagation.enabled   / FLEET_AUTH_PROPAGATION            '0' | '1'
+ *
  * Phase 7 durable jobs (all default OFF; see resolveJobsFlags below):
  *
  *   settings.jobs.durable.enabled / FLEET_JOBS_DURABLE '0' | '1'
@@ -341,6 +345,35 @@ function loadAuthCoord(deps = {}) {
   }
 }
 
+// ── Auth propagation (default OFF) ──────────────────────────────────────────
+//   settings.auth.propagation.enabled  boolean (=== true) / FLEET_AUTH_PROPAGATION '0'|'1'
+// Separate resolver so resolveAuthCoordFlags (Phase 9) is unchanged. Read once
+// per process and memoized by src/auth/auth-report.js isEnabled() (restart to
+// change). No new store key: 'settings' is already in the store REGISTRY.
+const AUTH_PROPAGATION_ENV = { enabled: 'FLEET_AUTH_PROPAGATION' };
+
+function resolveAuthPropagationFlags(settings, env) {
+  const p = _obj(_obj(_obj(settings).auth).propagation);
+  const flags = { enabled: p.enabled === true };
+  const e = _envBool(env, AUTH_PROPAGATION_ENV.enabled);
+  if (e !== null) flags.enabled = e;
+  return flags;
+}
+
+function loadAuthPropagation(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveAuthPropagationFlags(settings, env);
+  } catch (_) {
+    return { enabled: false };
+  }
+}
+
 // ── Phase 7: durable job lifecycle (all default OFF) ─────────────────────────
 //   settings.jobs.durable.enabled   boolean (=== true) / FLEET_JOBS_DURABLE            '0'|'1'
 //   settings.jobs.<type>.durable    boolean (=== true) / FLEET_JOBS_<UPPER_SNAKE>      '0'|'1'
@@ -439,6 +472,7 @@ module.exports = {
   resolveWorkerFlags, loadWorkers, WORKER_NAMES, WORKER_ENV,
   resolveSlackSpeedupFlags, loadSlackSpeedup, SPEEDUP_MODES, LANE_CONCURRENCY_MAX,
   resolveAuthCoordFlags, loadAuthCoord, AUTH_COORD_ENV,
+  resolveAuthPropagationFlags, loadAuthPropagation, AUTH_PROPAGATION_ENV,
   resolveJobsFlags, loadJobs, JOB_TYPES, JOB_ENV,
   resolveJustMeContextFlags, loadJustMeContext,
   resolveDbrLookupFlags, loadDbrLookup,
