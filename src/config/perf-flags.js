@@ -53,6 +53,10 @@
  *
  *   settings.comms.justMeReadContext / FLEET_JUSTME_READ_CONTEXT '0' | '1'
  *
+ * On-demand DBR lookup (default OFF; see resolveDbrLookupFlags below):
+ *
+ *   settings.ai.dbrLookup / FLEET_AI_DBR_LOOKUP '0' | '1'
+ *
  * Read at point of use (startup / once per run), never per tick.
  */
 
@@ -405,6 +409,30 @@ function loadJustMeContext(deps = {}) {
   }
 }
 
+// ── On-demand DBR lookup (default OFF) ───────────────────────────────────────
+//   settings.ai.dbrLookup  boolean (=== true) / FLEET_AI_DBR_LOOKUP '0'|'1'
+// Read once per processOrchaAction call. No new store key: 'settings' is registered.
+function resolveDbrLookupFlags(settings, env) {
+  const flags = { enabled: _obj(_obj(settings).ai).dbrLookup === true };
+  const e = _envBool(env, 'FLEET_AI_DBR_LOOKUP');
+  if (e !== null) flags.enabled = e;
+  return flags;
+}
+
+function loadDbrLookup(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveDbrLookupFlags(settings, env);
+  } catch (_) {
+    return resolveDbrLookupFlags({}, {});
+  }
+}
+
 module.exports = {
   resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT,
   resolveCommsFlags, loadComms, COMMS_POLLING_MODES,
@@ -413,4 +441,5 @@ module.exports = {
   resolveAuthCoordFlags, loadAuthCoord, AUTH_COORD_ENV,
   resolveJobsFlags, loadJobs, JOB_TYPES, JOB_ENV,
   resolveJustMeContextFlags, loadJustMeContext,
+  resolveDbrLookupFlags, loadDbrLookup,
 };

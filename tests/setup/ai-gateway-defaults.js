@@ -17,3 +17,5 @@ for (const k of ['FLEET_AUTH_SINGLE_FLIGHT', 'FLEET_AUTH_SINGLE_OWNER_AEA', 'FLE
 // Just Me context reader forced OFF so legacy suites run the flag-off parity path.
 // Flag-on tests set '1' inside the test and restore '0' in afterEach.
 process.env.FLEET_JUSTME_READ_CONTEXT = '0';
+// On-demand DBR lookup forced OFF so legacy suites run the flag-off parity path.
+process.env.FLEET_AI_DBR_LOOKUP = '0';

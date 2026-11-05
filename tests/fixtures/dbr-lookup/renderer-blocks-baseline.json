@@ -1,0 +1,19 @@
+{
+  "TREND_TERMS": "495acbf3976949592e5cad7dd89756af7bcab367",
+  "TREND_MIN_UNITS": "3699c88aed4621b740c40047854d32a4085d331f",
+  "BARRIER_TERMS": "c3cac773e325d1aad3f08acdeaeeadeda94f4eaa",
+  "FLIP_SIGNAL": "8d18d0d73b04f0de617139934e7793ae3696bfc0",
+  "STATUS_BARRIER_MAP": "61b8993230a7d689842a70189ae772d23a9b4492",
+  "_unitText": "82b3b1a6c9a37fca4686067ae13e27a3e49f1134",
+  "_parseDaysOpen": "efd76775eb07d88e4fe8469dd2bbac926ce5b035",
+  "_isUnavail": "bd4dc383b646d1ad57e04c62217c3c9ded34a47d",
+  "_computeGroup": "44ae88e9ef547cd033fca64410304268eee9912e",
+  "_dbrMatchUnits": "0a7495839d28a8a48cc8d76b839f86ca760b08a0",
+  "_dbrBuildReviewPrompt": "1cfd19c1806daacf45dc0cc6366273acb700d9d0",
+  "_dbrNormalizeTrendsText": "18f50504722b102277b8f4182533551ab8fe34ff",
+  "_dbrNormalizeHelpText": "0801e8b5f866dde647057acc12182b7e53d35ae9",
+  "_dbrAskAi": "c7c9a229a514883d34541939e50bea78903379d3",
+  "_dbrReviewKey": "f39c4ef374482a5a26f9b3f269a4bdeb11341207",
+  "_DBR_AI_TIMEOUT_MS": "03d36e961e4a472aec6e298093d5d6419ee39212",
+  "_dbrReviewRow": "428e6dc777d1abdc2a323662789dd7ee08889ab6"
+}

@@ -1,0 +1,101 @@
+You are filling in a fleet operations DBR (Daily Business Review) call sheet row for domicile AUVTE. You are a SUPPORTING / VERIFICATION source only — never invent information not present in the unit data below.
+
+6 unavailable (OOS) unit(s) at this domicile AUVTE. Per-unit data below (SCAC, Make, Fuel, lifecycle Reason, Vendor, Days down, Repair status, and raw issue/notes text).
+
+UNIT DATA:
+[521073] SCAC: ABEOW | Make: Freightliner | Fuel: CNG | Reason: Parts Delay | Vendor: Amerit | Days down: 27 | Repair status: Parts backordered
+Engine misfire cyl 3; wiring harness PN 4471 on backorder, ETA 8/13 Misfire parts delay per vendor Parts backordered
+
+[521054] SCAC: ABEOW | Make: Freightliner | Fuel: CNG | Reason: Offsite Shop Repair | Vendor: Amerit | Days down: 12 | Repair status: Waiting for vendor
+Misfire reported by driver, injector replaced   Waiting for vendor
+
+[221019] SCAC: ABEOW | Make: Kenworth | Fuel: CNG | Reason: Onsite Repair | Vendor: Amerit | Days down: 3 | Repair status: Repair in progress
+misfire at idle   Repair in progress Day 2: road test scheduled, repair complete today
+
+[330001] SCAC: TUZR | Make: Kenworth | Fuel: CNG | Reason: Onsite Repair | Vendor: unassigned | Days down: 5
+Brakes squeal on stop
+
+[330002] SCAC: TUZR | Make: Freightliner | Fuel: Diesel | Reason: Offsite Shop Repair | Vendor: Kooner | Days down: 9 | Repair status: Awaiting estimate
+Coolant leak at water pump, pending estimate approval   Awaiting estimate
+
+[330003] SCAC: TUZR | Make: Freightliner | Fuel: CNG | Reason: Onsite Repair | Vendor: Amerit | Days down: 30 | Repair status: Under diagnosis
+Check engine light, sensor fault code   Under diagnosis
+
+Fill FIVE fields using the EXACT logic below. Follow each step in order — this is not a style guide, it's the actual procedure to run.
+
+══════════════════════════════════════
+TRENDS — "What patterns do I see?"
+══════════════════════════════════════
+Work through this ANALYSIS SILENTLY (do not print your reasoning, counts-that-didn't-qualify, or "no single system reaches 3+" explanations into the output — the output is ONLY the final verdict, nothing else):
+1. Count the OOS units (shown above) and split them by Fuel (e.g. CNG, Diesel, Electric). Units with no Fuel shown are left out of the split.
+2. Group units by SYSTEM (the broad component area the issue text points to). Use these UPPERCASE names: ENGINE/MOTOR SYSTEMS, CHASSIS, ELECTRICAL, TRANSMISSION/DRIVETRAIN, BRAKES, HVAC, BODY/CAB, TIRES/WHEELS, SUSPENSION/STEERING, DEF/EMISSIONS, FUEL SYSTEM, PM/INSPECTION.
+3. Group units by VENDOR. Within a vendor, count each blocker type (Parts, Estimate, Diag, Tech/Bay) and the units whose vendor ETC is TODAY.
+4. Group units by lifecycle Reason. Abbreviate: Offsite Shop Repair = OSR, Onsite Repair = Onsite, Parts Delay = Parts, Expired Inspection = Insp, PM Failed = PM Fail; other reasons keep their name.
+5. THE 3+ RULE: a group is a trend ONLY if 3 OR MORE units share it (same system, same vendor, same reason+system, or same specific issue like "misfire"). 2 units is NOT a trend.
+6. If NO group reaches 3+ units, the ENTIRE output must be exactly the two words "No trends" — nothing else. Do not explain why, do not list what you checked, do not print the OOS/fuel line.
+
+OUTPUT FORMAT (only when at least one 3+ trend exists). Plain text, one item per line, in this order. Include a line ONLY if it qualifies; never print a line for a group under 3 units:
+Line 1 — header (always first when there is any trend): "<N> OOS; <count> <fuel>, <count> <fuel>"   e.g. "10 OOS; 9 CNG, 1 Diesel"
+Vendor lines — for each VENDOR with 3+ OOS units: "<Vendor>; <count> <blocker type>; <count> ETC today; <unit IDs with ETC today>"   e.g. "Amerit; 4 Parts; 2 ETC today; 221019, 521054". Only list the blocker types/ETC parts that apply; drop a part if its count is 0.
+Reason lines — for each lifecycle Reason where 3+ units share the same system: "<Reason abbr>; <count> <System> Related"   e.g. "OSR; 3 Engine Related"
+System lines — for each SYSTEM with 3+ units: "<SYSTEM>: <count> units", then ONE line per unit in that system, indented with "  - ", giving the unit ID and a quick 3-8 word reason taken from that unit's issue text:
+  ENGINE/MOTOR SYSTEMS: 5 units
+    - 521054: misfire cyl 3, injector replaced
+    - 221019: coolant leak at water pump
+List systems largest first. Every unit ID must be a real ID from UNIT DATA, and every reason must come from that unit's own text (never invented).
+
+- NEVER include your work, your rejected candidates, or a sentence explaining the absence of a trend. The field is either "No trends" or the lines above — nothing in between.
+
+══════════════════════════════════════
+BARRIERS — "What's blocking each unit?"
+══════════════════════════════════════
+1. Sort units by days down, LONGEST first.
+2. For each unit, classify its #1 blocker into exactly ONE of these 5 categories (pick the closest match from the actual text — do not invent a 6th category):
+   - PARTS DELAY (a part number and/or ETA is mentioned, part on backorder/sourcing)
+   - ESTIMATE DELAY (estimate pending/awaiting approval)
+   - VENDOR DELAY (awaiting technician assignment or bay availability, vendor backlog)
+   - ACCIDENT/CEI (legal hold, insurance claim, accident investigation)
+   - DIAGNOSTIC (awaiting diagnostic results, root cause not yet determined)
+   If a unit genuinely has no blocker evident in the text (e.g. actively being worked, or data too thin to classify), do not force one of the 5 categories — just omit that unit from the barriers list.
+3. Write ONE line per unit, longest-dwell first, in this exact form: "Unit ID (Xd): Blocker + ETA" — e.g. "521073 (27d): Parts delay — harness PN, ETA 8/13". If NO unit has a classifiable blocker, write "no barriers".
+
+══════════════════════════════════════
+ACTIONS — "What am I doing today?"
+══════════════════════════════════════
+For EACH unit that has a barrier from above, write ONE action line using this exact mapping from its repair status / situation to a template (fill in the brackets with real values, do not leave them literal):
+   - Parts backordered/ordered           → "Follow up with [vendor] on parts ETA for [unit]"
+   - Appointment scheduled                → "Confirm vendor arrival for [unit], await inspection results"
+   - Pending estimate                     → "Push/escalate estimate for [unit] in RG"
+   - Estimate approved                    → "Confirm repair start and ETC for [unit]"
+   - In bay / in progress                 → "Follow up with [vendor] on completion ETC for [unit]"
+   - Pending tow                          → "Coordinate tow for [unit] to [destination]"
+   - If days down > 14, ADD an extra line: "Escalate long-dwell [unit] (Xd)"
+Pick the template row that best matches what the unit's repair status / issue text actually says. Every barrier identified above should have a matching action line. If no units need action, return empty string.
+
+══════════════════════════════════════
+EXPECTED FLIPS — "Can anything flip today?"
+══════════════════════════════════════
+Count units where ANY of these is true in the text: parts ETA is TODAY and it's a quick install, OR repair status is "pending road test"/"pending QC", OR vendor has confirmed an ETC of TODAY. If none qualify, the value is "0". Otherwise give the count + unit IDs, e.g. "2 (520079, 39110)".
+
+══════════════════════════════════════
+HELP NEEDED — decision logic
+══════════════════════════════════════
+The DEFAULT answer is "No help needed" — you (the FAS) only escalate when a blocker is genuinely OUTSIDE your authority to resolve yourself. Core rule: if YOU can still take an action today (call vendor, escalate estimate, coordinate tow, push for ETC) → "No help needed". Only if the blocker requires someone ABOVE you (MMPM/BC) to intervene with authority you don't have, state what you need.
+
+Check each unit against these, IN ORDER, and stop at the first one that matches:
+1. STUCK ESTIMATE — estimate has been escalated to HVE TWICE and is still not approved (especially high-dollar, e.g. >$50K) → "Help with getting estimate pushed through for [unit]"
+2. CEI / LEGAL HOLD — accident unit pending Element, legal review, or salvage/liquidation decision (FAS has no authority to move it) → "Help with CEI/Element action on [unit]"
+3. VENDOR MANAGEMENT ISSUE — chronic vendor non-responsiveness, tech shortages, or systemic delays persisting after daily follow-ups → "Help escalating vendor performance with [vendor] at [site]"
+4. PARTS SOURCING BEYOND FAS — part is backordered network-wide, no alternate source, needs VP/procurement intervention → "Help sourcing Part #[X] for [unit]"
+5. BAY/RESOURCE CONSTRAINT — OEM or vendor has no capacity and alternate routing has already been exhausted → "Help with bay availability at [dealer]"
+6. NONE OF THE ABOVE (the normal case, ~95% of the time) — output EXACTLY "No help needed" and nothing more.
+
+Only match checks 1-5 if the unit data text ACTUALLY supports it (e.g. only call it a "stuck estimate" if the text shows it was escalated twice, not just "pending"). Do not invent a need that isn't evidenced in the text — when in doubt, the answer is "No help needed".
+
+STRICT RULES:
+- Every claim must cite real unit IDs from the UNIT DATA above. No unit IDs = do not include the claim.
+- Do not invent, guess, or extrapolate beyond what the unit data actually states.
+- Follow the step-by-step logic exactly — do not skip steps or substitute your own judgment for the stated thresholds (3+ units for any trend claim, 14 days for escalation, HVE escalated twice for stuck estimates, etc).
+
+RESPOND WITH JSON ONLY, no markdown, no explanation outside the JSON. Multi-line values (like the trends block) must use \n for line breaks inside the JSON string:
+{"trends":"","barriers":"","expectedFlips":"","actions":"","helpNeeded":""}
