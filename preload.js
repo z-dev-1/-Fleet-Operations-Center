@@ -204,6 +204,16 @@ expose('longDwellAi', {
   finish:    (payload) => ipcRenderer.invoke('long-dwell-ai:finish', payload),
   today:     (payload) => ipcRenderer.invoke('long-dwell-ai:today', payload),
 });
+// ── Long Dwell weekly SharePoint sheet (preview, then write) ──────────────
+// Every call except status returns { ok:false, code:'off' } unless longDwell.sharepointWrite.
+expose('longDwellSp', {
+  status:    ()        => ipcRenderer.invoke('long-dwell-sp:status'),
+  setLink:   (payload) => ipcRenderer.invoke('long-dwell-sp:set-link', payload),
+  clearLink: ()        => ipcRenderer.invoke('long-dwell-sp:clear-link'),
+  preview:   (payload) => ipcRenderer.invoke('long-dwell-sp:preview', payload),
+  write:     (payload) => ipcRenderer.invoke('long-dwell-sp:write', payload),
+  discard:   (payload) => ipcRenderer.invoke('long-dwell-sp:discard', payload),
+});
 
 // ── Baseball Card (AFP FAS performance profile + docx export) ───────────────
 expose('baseballCard', {

@@ -31,6 +31,7 @@ const { registerDailyTasksIPC }  = require('./daily-tasks');
 const { registerLongDwellIPC }     = require('./long-dwell');
 const { registerLongDwellCsvIPC }  = require('./long-dwell-csv');
 const { registerLongDwellAiIPC }   = require('./long-dwell-ai');
+const { registerLongDwellSpIPC }   = require('./long-dwell-sp');
 const { registerBaseballCardIPC }  = require('./baseball-card');
 const { registerFasRosterIPC }     = require('./fas-roster');
 const { registerSchedulerIPC }     = require('./scheduler');
@@ -65,6 +66,7 @@ function registerAllIPC(ctx) {
   registerLongDwellIPC();
   registerLongDwellCsvIPC();
   registerLongDwellAiIPC();   // durable AI Fill arbiter; inert unless jobs.longDwellAiFill.durable
+  registerLongDwellSpIPC();   // weekly sheet preview/write; inert unless longDwell.sharepointWrite
   registerBaseballCardIPC();
   registerFasRosterIPC();
   const { registerAapApiIPC } = require('./aap-api');

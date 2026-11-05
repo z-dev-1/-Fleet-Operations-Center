@@ -425,6 +425,20 @@ export const longDwellAi = {
   finish:    _ldAi('finish'),
   today:     _ldAi('today'),
 };
+// ── Long Dwell weekly SharePoint sheet (preview, then write) ───────────────
+// Missing preload API or method -> { ok:false, code:'off' } (feature hidden).
+const _ldSp = (name) => (payload) => {
+  const api = typeof window !== 'undefined' ? window.longDwellSp : null;
+  return api && typeof api[name] === 'function' ? api[name](payload) : Promise.resolve({ ok: false, code: 'off' });
+};
+export const longDwellSp = {
+  status:    _ldSp('status'),
+  setLink:   _ldSp('setLink'),
+  clearLink: _ldSp('clearLink'),
+  preview:   _ldSp('preview'),
+  write:     _ldSp('write'),
+  discard:   _ldSp('discard'),
+};
 
 // ── AI / Orcha ─────────────────────────────────────────────────────────────
 export const ai = {

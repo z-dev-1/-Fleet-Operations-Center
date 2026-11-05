@@ -480,4 +480,4 @@ async function _pushToSharePointInner(units, onProgress) {
   return _finish();
 }
 
-module.exports = { pushToSharePoint, WORKBOOKS, buildRowValues, loadWorkbooks, saveWorkbooks, SP_CONFIG_FILE, _newSpResult, _deriveSpStatus, _verifyMissingCount };
+module.exports = { pushToSharePoint, WORKBOOKS, buildRowValues, loadWorkbooks, saveWorkbooks, SP_CONFIG_FILE, _newSpResult, _deriveSpStatus, _verifyMissingCount, _withWriteLock };
