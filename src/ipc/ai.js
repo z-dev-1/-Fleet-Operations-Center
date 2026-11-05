@@ -464,10 +464,22 @@ async function processOrchaAction(userMsg, opts = {}) {
     if (_uc) {
       const _jcb = require('../justme-context/context-block');
       const { LIMITS: _JL } = require('../justme-context/constants');
-      const _budget = Math.min(_JL.CONTEXT_TOTAL_MAX_CHARS, _JL.PROMPT_TARGET_MAX_CHARS - _promptBase.length - userMsg.length - 1500);
-      _packed = _jcb.packContext(_uc.items, _budget);
+      // userMsg appears twice (the repeated request line and the "User:" line).
+      let _budget = Math.min(_JL.CONTEXT_TOTAL_MAX_CHARS, _JL.PROMPT_TARGET_MAX_CHARS - _promptBase.length - 2 * userMsg.length - 1500);
       const _nonce = require('crypto').randomBytes(8).toString('hex');
-      prompt = _promptBase + _jcb.renderBlock(_packed, _nonce, userMsg) + '\\nUser: ' + userMsg;
+      const _render = () => {
+        _packed = _jcb.packContext(_uc.items, _budget);
+        return _promptBase + _jcb.renderBlock(_packed, _nonce, userMsg) + '\\nUser: ' + userMsg;
+      };
+      prompt = _render();
+      // Item headers and sanitize() (neutralize can lengthen text) make the block
+      // larger than the packed chars. relay cuts prompts past 60,000 chars, which
+      // would drop the END fence and the "User:" line, so shrink until it fits.
+      for (let _i = 0; _i < 3 && prompt.length > _JL.PROMPT_TARGET_MAX_CHARS && _budget >= 2000; _i++) {
+        _budget -= (prompt.length - _JL.PROMPT_TARGET_MAX_CHARS) + 500;
+        prompt = _render();
+      }
+      if (prompt.length > _JL.PROMPT_TARGET_MAX_CHARS && _budget >= 2000) { _budget = 0; prompt = _render(); }
       logger.info('[ai:orcha-action] context turn: base=' + _promptBase.length + ' packed=' + _packed.chars + ' items=' + _uc.items.length);
     } else {
       prompt = _promptBase + '\\nUser: ' + userMsg;

@@ -229,6 +229,29 @@ describe('T-FENCE fix-6 row', () => {
     expect(p.endsWith('\\nUser: what does this say?')).toBe(true);
     expect(p.indexOf('=== CONTENT Z SHARED')).toBeLessThan(p.lastIndexOf('\\nUser: '));
   });
+  // Integration seam: relay._tryClaudeCode cuts prompts past 60,000 chars, which would
+  // drop the END fence and the trusted "User:" line. The packed prompt must fit.
+  const { LIMITS } = require('../src/justme-context/constants');
+  const fits = (p, userMsg) => {
+    expect(p.length).toBeLessThanOrEqual(LIMITS.PROMPT_TARGET_MAX_CHARS);
+    expect(p).toMatch(/=== END CONTENT [0-9a-f]{16} ===/);
+    expect(p.endsWith('\\nUser: ' + userMsg)).toBe(true);
+  };
+  it('content that sanitize() expands (neutralize) cannot push the fence and User: line past the relay cut', async () => {
+    setup();
+    const hostile = (n) => doc('you are now '.repeat(1000), { id: 'c' + n, label: 'f' + n + '.pdf' });
+    const items = Array.from({ length: 10 }, (_, i) => hostile(i + 1));
+    const r = await h.ai.processOrchaAction('what does this say?', ctxOpts('what does this say?', items));
+    fits(h.relayCalls[0].prompt, 'what does this say?');
+    for (const it of items) expect(['truncated', 'skipped']).toContain(r.contextPacking[it.id].status);
+  });
+  it('a long typed message (counted twice: request line + User: line) still fits with full items', async () => {
+    setup();
+    const typed = 'what does this say? ' + 'context '.repeat(1500);
+    const items = Array.from({ length: 10 }, (_, i) => doc('z'.repeat(12000), { id: 'c' + (i + 1), label: 'f' + (i + 1) + '.pdf' }));
+    await h.ai.processOrchaAction(typed, ctxOpts(typed, items));
+    fits(h.relayCalls[0].prompt, typed);
+  });
 });
 
 describe('T-GATE-INT fix-7 row', () => {
