@@ -1312,6 +1312,21 @@ async function runApiScrape(deps) {
 }
 
 
+// auth.propagation (default OFF, F3): the shared auth message for an empty,
+// never-authenticated Uptake run when Midway is known to be walled/expired.
+// Returns null unless the flag is on, the run is empty, auth never completed
+// and the status level is warn/down. Read-only: Uptake never reports.
+function _authMessageFor(arr, authDone, ar) {
+  try {
+    const r = ar || require('../auth/auth-report');
+    if (!r.isEnabled()) return null;
+    if (!Array.isArray(arr) || arr.length !== 0 || authDone) return null;
+    const st = r.currentStatus();
+    if (st && (st.level === 'warn' || st.level === 'down') && st.message) return String(st.message);
+    return null;
+  } catch (_) { return null; }
+}
+
 // ─── Main scrape function ─────────────────────────────────────────────────────
 async function scrapeUptake() {
   // H-3: block duplicate concurrent scrapes
@@ -1374,13 +1389,21 @@ async function scrapeUptake() {
       if (arr.length > 0) {
         try { pruneScreenshots(arr, screenshotPath); } catch (e) { fwarn('[Uptake] prune skipped:', e.message); }
       }
-      resolve({
+      const out = {
         source:         'uptake',
         units:          arr,
         count:          arr.length,
         screenshotPath: screenshotPath || null,
         scrapedAt:      new Date().toISOString(),
-      });
+      };
+      // auth.propagation (default OFF): explain an empty, never-authenticated
+      // run with the shared auth status. Additive field; null flag off.
+      const authMessage = _authMessageFor(arr, authDone);
+      if (authMessage) {
+        out.authMessage = authMessage;
+        fwarn('[Uptake] empty result, auth status: ' + authMessage);
+      }
+      resolve(out);
     };
 
     const navTo = async (url) => {
@@ -1797,3 +1820,4 @@ module.exports = {
   insightShotPath,
   reuseInsightShot,
 };
+module.exports.__test__ = { _authMessageFor };

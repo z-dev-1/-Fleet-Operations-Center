@@ -37,6 +37,13 @@ const { buildWRUrls } = require('./wr_capture');
 const ROOT_DIR = path.join(__dirname, '..', '..');
 const { OFFSITE_FIELDS, offsiteUrlOf, clearOffsite } = require('../utils/offsite-owner');
 
+// auth.propagation (default OFF, F2): the six auth toasts below advise
+// "mwinit --refresh-aea" / "mwinit -f", which is the wrong remedy during a
+// step-up wall. When the shared status is warn/down its message replaces the
+// original; `detail` (an error text) is kept as a diagnostic suffix. Flag off,
+// currentStatus() is null and every call returns `orig` unchanged.
+const _authMsg = (orig, detail) => { try { const st = require('../auth/auth-report').currentStatus(); if (!st || (st.level !== 'warn' && st.level !== 'down') || !st.message) return orig; return detail != null ? st.message + ' (' + String(detail).slice(0, 200) + ')' : st.message; } catch (_) { return orig; } };
+
 // ── Field map: AAP table column header → camelCase property ─────────────────
 const AAP_FIELD_MAP = {
   'Equipment ID':                 'equipmentId',
@@ -995,7 +1002,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
           }
         } catch (e) {
           logger.error('[startup] supervisor ensureHealthyConverging failed: ' + e.message);
-          pushError('\u26A0\uFE0F Auth check failed: ' + e.message + ' \u2014 try running mwinit -f in a terminal');
+          pushError(_authMsg('\u26A0\uFE0F Auth check failed: ' + e.message + ' \u2014 try running mwinit -f in a terminal', e.message));
         }
       } else {
         // FALLBACK (supervisor unavailable): minimal legacy behavior.
@@ -1003,7 +1010,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         if (!state.ok) {
           pushStatus('\uD83D\uDD11 Midway session expired \u2014 complete auth in the terminal window...');
           try { await runMwinit(); await injectCookies(); pushStatus('\u2705 Midway auth complete'); }
-          catch (e) { pushError('\u26A0\uFE0F mwinit failed: ' + e.message + ' \u2014 try running mwinit -f in a terminal'); }
+          catch (e) { pushError(_authMsg('\u26A0\uFE0F mwinit failed: ' + e.message + ' \u2014 try running mwinit -f in a terminal')); }
         } else {
           send('auth:mwinit-status', { ok: true, expiresInMin: state.expiresInMin });
         }
@@ -1224,12 +1231,12 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
               } else {
                 try { send('auth:mwinit-status', { ok: false, reason: (r && r.reason) || 'AAP still rejecting' }); } catch (_) {}
                 const when = (r && r.nextRetryAt) ? (' Auto-retry scheduled.') : '';
-                pushError('AAP still rejecting the session (' + ((r && r.state) || 'unhealthy') + ').' + when + ' Or run `mwinit --refresh-aea` (or `mwinit -f`) in a terminal, then click Sync.');
+                pushError(_authMsg('AAP still rejecting the session (' + ((r && r.state) || 'unhealthy') + ').' + when + ' Or run `mwinit --refresh-aea` (or `mwinit -f`) in a terminal, then click Sync.'));
                 logger.error('[data-source] supervisor did not reach HEALTHY: ' + ((r && r.reason) || r && r.class || 'unknown') + ' (state=' + (r && r.state) + ')');
               }
             } catch (err) {
               logger.error('[data-source] supervisor recovery error: ' + err.message);
-              pushError('Re-auth failed: ' + err.message + ' — run `mwinit --refresh-aea` in a terminal, then Sync.');
+              pushError(_authMsg('Re-auth failed: ' + err.message + ' — run `mwinit --refresh-aea` in a terminal, then Sync.', err.message));
             }
           })();
         } else if (sessionRejected && !_reauthInFlight) {
@@ -1245,10 +1252,10 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
               const ok = !!(r && r.ok && r.verified);
               try { require('../scrapers/aap_api').dispose(); } catch (_) {}
               if (ok) { try { send('auth:mwinit-status', { ok: true }); } catch (_) {} _loadFleetViaApiStartup('post-reauth'); }
-              else { pushError('AAP still rejecting the session. Run `mwinit --refresh-aea` (or `mwinit -f`) in a terminal, then click Sync.'); }
+              else { pushError(_authMsg('AAP still rejecting the session. Run `mwinit --refresh-aea` (or `mwinit -f`) in a terminal, then click Sync.')); }
             } catch (err) {
               logger.error('[data-source] recovery error: ' + err.message);
-              pushError('Re-auth failed: ' + err.message + ' — run `mwinit --refresh-aea` in a terminal, then Sync.');
+              pushError(_authMsg('Re-auth failed: ' + err.message + ' — run `mwinit --refresh-aea` in a terminal, then Sync.', err.message));
             } finally {
               _reauthInFlight = false;
             }
@@ -2381,3 +2388,4 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
 }
 
 module.exports = { initWindows };
+module.exports.__test__ = { _authMsg };

@@ -226,7 +226,7 @@ function _authSection(deps) {
       lastReason: last ? _str(last.reason, 120) : null,
     };
   }
-  return {
+  const out = {
     state,
     at: snap ? _ts(snap.at) : null,
     online: snap && snap.internet ? (typeof snap.internet.online === 'boolean' ? snap.internet.online : null) : null,
@@ -234,6 +234,25 @@ function _authSection(deps) {
     aeaExpiresInMin: snap && snap.diskAea ? _num(snap.diskAea.expiresInMin) : null,
     keepAlive,
   };
+  // auth.propagation (default OFF, F11): add the live status fields. Flag off
+  // the section is byte-equal to the legacy output.
+  let propOn = false;
+  // Read-only like the other sections: never loads auth-report (the supervisor
+  // loads it on its first flag read).
+  try { const ar = _mod(deps, 'authReport', '../auth/auth-report'); propOn = !!ar && ar.isEnabled() === true; } catch (_) { propOn = false; }
+  if (propOn && typeof mw.getStatus === 'function') {
+    const s = mw.getStatus() || {};
+    const ev = s.evidence || {};
+    out.level = _str(s.level, 20);
+    out.action = _str(s.action, 20);
+    out.stepUp = !!s.stepUp;
+    out.message = _str(s.message, 300);
+    out.verifiedAt = _ts(s.verifiedAt);
+    out.verifiedBy = _str(s.verifiedBy, 80);
+    out.nextRetryAt = _ts(s.nextRetryAt);
+    out.liveAea = _num(ev.liveAeaMin);
+  }
+  return out;
 }
 
 function _slackSection(deps) {

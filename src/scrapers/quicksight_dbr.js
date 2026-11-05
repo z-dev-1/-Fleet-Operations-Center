@@ -234,12 +234,36 @@ function isDataAsOfToday(dataAsOf) {
   return dataAsOf === _todayPacific();
 }
 
+// auth.propagation (default OFF): flag read through auth-report; false on any error.
+function _propOn(ar) {
+  try { return (ar || require('../auth/auth-report')).isEnabled() === true; } catch (_) { return false; }
+}
+
+// F3: the stuck-on-SSO result. With the flag on and Midway known to be walled
+// or expired (level warn/down) the shared status message replaces the
+// "open the dashboard in a browser" remedy; otherwise the original text.
+function _ssoFailureResult(ar) {
+  try {
+    const r = ar || require('../auth/auth-report');
+    if (r.isEnabled()) {
+      const st = r.currentStatus();
+      if (st && (st.level === 'warn' || st.level === 'down') && st.message) return { ok: false, error: String(st.message) };
+    }
+  } catch (_) {}
+  return { ok: false, error: 'Not logged in to QuickSight/Midway — open the dashboard once in a browser to establish SSO, then retry.' };
+}
+
 /**
  * _capturePageText(url, readyCheckExpr, label) — shared navigate+wait+grab-text
  * flow for both dashboards. Returns { ok, text, error? }.
  */
 async function _capturePageText(url, readyCheckExpr, label) {
-  try { require('./auth').injectCookies(); } catch (e) { logger.warn('injectCookies skipped:', e.message); }
+  if (_propOn()) {
+    // auth.propagation: wait for the inject so the window never loads first.
+    try { await require('./auth').injectCookies(); } catch (e) { logger.warn('injectCookies skipped:', e.message); }
+  } else {
+    try { require('./auth').injectCookies(); } catch (e) { logger.warn('injectCookies skipped:', e.message); }
+  }
 
   let win = null;
   try {
@@ -276,7 +300,7 @@ async function _capturePageText(url, readyCheckExpr, label) {
       }
       if (SSO_HOST_RE.test(curUrl) && !QUICKSIGHT_HOST_RE.test(curUrl)) {
         logger.warn('Stuck on SSO/login page, not QuickSight:', curUrl);
-        return { ok: false, error: 'Not logged in to QuickSight/Midway — open the dashboard once in a browser to establish SSO, then retry.' };
+        return _ssoFailureResult();
       }
     }
 
@@ -351,3 +375,4 @@ module.exports = {
   AFP_DASHBOARD_URL, DSP_DASHBOARD_URL,
   extractDataAsOf, isDataAsOfToday,
 };
+module.exports.__test__ = { _ssoFailureResult, _propOn };

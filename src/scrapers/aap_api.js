@@ -32,8 +32,23 @@
 // Electron (laptop, has a display) or headless Playwright (DevSpace standby,
 // seeds ~/.midway/cookie). The token-capture + XHR-in-page logic below is
 // engine-agnostic — it only needs a page with evaluate()/url()/close().
-const provider = require('./browser_provider');
+let provider = require('./browser_provider');   // `let` only for _setProviderForTest
 const logger = require('../utils/logger')('aap-api');
+
+// auth.propagation (default OFF): real AAP traffic is the auth evidence. The
+// reporter is resolved lazily, is a no-op with the flag off, and swallows all
+// errors. It only records state (never awaits recovery), so calling it inside
+// _withLock cannot deadlock the lock.
+let _authReporter = null;   // test seam (_setAuthReporterForTest)
+function _reportAuth(o) {
+  try {
+    const ar = _authReporter || require('../auth/auth-report');
+    if (!ar || !ar.isEnabled()) return;
+    ar.report(o);
+  } catch (_) {}
+}
+function _setProviderForTest(p) { provider = p || require('./browser_provider'); }
+function _setAuthReporterForTest(ar) { _authReporter = ar || null; }
 
 const AAP_ORIGIN = 'https://aap-na.corp.amazon.com';
 // A lightweight AAP page that authenticates + fires token-bearing XHRs on load.
@@ -133,6 +148,8 @@ async function _ensureWindow() {
     dispose();
     // Normalize provider errors to the codes callers already handle.
     if (e && e.code === 'MIDWAY_SESSION_INVALID') {
+      // Failure only: landing on AAP is not proof the API accepts the session.
+      _reportAuth({ ok: false, err: { code: 'MIDWAY_SESSION_INVALID' }, source: 'aap-api' });
       throw Object.assign(new Error(
         'AAP session expired (Midway/AEA). ' +
         (provider.kind() === 'playwright' ? 'Run mwinit -o on this host, then retry.'
@@ -219,10 +236,12 @@ async function _request(method, path, body) {
       if (!detail) detail = 'HTTP ' + (r && r.status);
       // A 401/403 or an SSO redirect body means the session lapsed mid-call.
       if (r && (r.status === 401 || r.status === 403)) {
+        _reportAuth({ ok: false, err: { code: 'MIDWAY_SESSION_INVALID' }, source: 'aap-api' });
         throw Object.assign(new Error('AAP API ' + r.status + ' (session rejected)'), { code: 'MIDWAY_SESSION_INVALID' });
       }
       throw Object.assign(new Error('AAP API ' + (r && r.status) + ': ' + detail), { code: 'AAP_API_ERROR', status: r && r.status });
     }
+    _reportAuth({ ok: true, source: 'aap-api' });
     return r.json;
   });
 }
@@ -2765,4 +2784,6 @@ module.exports = {
   ESCALATION_COMMENT_MAX,
   CARRIER_UPDATE_ESCALATION,
   dispose,
+  _setProviderForTest,          // test seam: inject a fake browser_provider (inert unless called)
+  _setAuthReporterForTest,      // test seam: inject a fake auth-report (inert unless called)
 };

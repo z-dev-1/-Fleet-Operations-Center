@@ -303,6 +303,16 @@ function _buildInPageScript({ downloadApi, bodyObjLiteral, probeApi, probeBodyLi
  * @param {object} searchRequest  the filter body (unwrapped; source.buildBody wraps it)
  * @param {number} timeoutMs
  */
+// auth.propagation (default OFF): the AAP WR page bouncing to Midway SSO is
+// real auth evidence. No-op with the flag off; never throws.
+function _reportSsoBounce(ar) {
+  try {
+    const r = ar || require('../auth/auth-report');
+    if (!r.isEnabled()) return;
+    r.report({ ok: false, err: { code: 'MIDWAY_SESSION_INVALID' }, source: 'aap-longdwell' });
+  } catch (_) {}
+}
+
 function _fetchSource(source, searchRequest, timeoutMs) {
   const payload = source.buildBody(searchRequest);
   const bodyObjLiteral = JSON.stringify(payload);
@@ -343,6 +353,7 @@ function _fetchSource(source, searchRequest, timeoutMs) {
       if (_isSSO(url)) {
         clearTimeout(timeout);
         logger.warn('[' + source.label + '] landed on Midway SSO — session invalid');
+        _reportSsoBounce();
         finish({ ok: false, error: 'auth', detail: 'AAP session expired. Open the app’s main window to re-authenticate, then try again.' });
         return;
       }
@@ -429,3 +440,4 @@ module.exports = {
   WR_PAGE_URL,
   ASSET_PAGE_URL,
 };
+module.exports.__test__ = { _reportSsoBounce };

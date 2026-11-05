@@ -1,7 +1,7 @@
 // tests/health-snapshot.test.js — src/health/snapshot.js buildSnapshot()
 // (Phase 6 Worker Health). Every source is an injected fake; `now` is
 // injected; _resetForTests() clears the memos + failure map.
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const health = require('../src/health/snapshot');
@@ -197,6 +197,41 @@ describe('health snapshot — shape', () => {
     expect(health.buildSnapshot(deps).auth).toEqual({
       status: 'ok', state: 'COOLDOWN', at: null, online: null, sessionExpiresInMin: null, aeaExpiresInMin: null, keepAlive: null,
     });
+  });
+
+  // auth.propagation (F11): live status fields only when the flag is on.
+  const LIVE = {
+    level: 'warn', action: 'mwinit', stepUp: true, message: 'Midway is asking for a full sign-in.',
+    verifiedAt: '2026-03-02T11:00:00.000Z', verifiedBy: 'api:aap-api', nextRetryAt: '2026-03-02T12:05:00.000Z',
+    evidence: { liveAeaMin: 14, diskAeaMin: 120 }, secretish: 'never-copied',
+  };
+  const LEGACY_AUTH = {
+    status: 'ok', state: 'HEALTHY', at: '2026-03-02T11:59:00Z', online: true, sessionExpiresInMin: 300, aeaExpiresInMin: 120,
+    keepAlive: { running: true, state: 'HEALTHY', consecutiveFailures: 0, lastOk: true, lastAt: T - 1000, lastReason: 'refreshed' },
+  };
+  function withStatus(enabled) {
+    const { deps } = mkDeps();
+    const getStatus = vi.fn(() => LIVE);
+    deps.midway = Object.assign({}, deps.midway, { getStatus });
+    deps.authReport = { isEnabled: () => enabled };
+    return { deps, getStatus };
+  }
+
+  it('F11: _authSection flag-off output unchanged (getStatus never read)', () => {
+    const { deps, getStatus } = withStatus(false);
+    const a = health.buildSnapshot(deps).auth;
+    expect(JSON.stringify(a)).toBe(JSON.stringify(LEGACY_AUTH));
+    expect(getStatus).not.toHaveBeenCalled();
+  });
+
+  it('F11: _authSection flag-on adds status fields', () => {
+    const { deps } = withStatus(true);
+    const a = health.buildSnapshot(deps).auth;
+    expect(a).toEqual(Object.assign({}, LEGACY_AUTH, {
+      level: 'warn', action: 'mwinit', stepUp: true, message: 'Midway is asking for a full sign-in.',
+      verifiedAt: '2026-03-02T11:00:00.000Z', verifiedBy: 'api:aap-api', nextRetryAt: '2026-03-02T12:05:00.000Z', liveAea: 14,
+    }));
+    expect('secretish' in a).toBe(false);
   });
 
   it('slack: polls without lastResult; speedup numbers only; no owaTriage', () => {

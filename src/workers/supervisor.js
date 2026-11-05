@@ -810,6 +810,23 @@ function getSummary() {
   } catch (_) { return null; }
 }
 
+// ── Dependency wake (auth.propagation, additive; inert unless called) ────────
+// Reschedules workers that skipped a run because `key` was down so they run
+// `delayMs` from now instead of waiting for their own grid. Only workers that
+// actually skipped for this key (waitingOn), are idle, have breaker 'ok' and
+// are not owner-stopped. _startTick re-arms the normal grid afterwards.
+function wakeDependents(key, { delayMs = 2000 } = {}) {
+  if (!_initialized || _shuttingDown) return 0;
+  let n = 0;
+  for (const rec of _records.values()) {
+    if (rec.inFlight || rec.ownerStopped || rec.breakerState !== 'ok') continue;
+    if (!Array.isArray(rec.spec.dependsOn) || !rec.spec.dependsOn.includes(key)) continue;
+    if (!rec.waitingOn || !rec.waitingOn.includes(key)) continue; // only workers that actually skipped for this dependency
+    if (_scheduleNext(rec, _now() + delayMs, 'manual')) n++;
+  }
+  return n;
+}
+
 // ── Test hook ────────────────────────────────────────────────────────────────
 function _resetForTests() {
   if (_deps) {
@@ -835,4 +852,5 @@ function _resetForTests() {
 module.exports = {
   init, isEnabled, claim, register, stop, reEnable, getStatus, getSummary,
   shutdown, onBeforeQuit, onWillQuit, _resetForTests,
+  wakeDependents,
 };

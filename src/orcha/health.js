@@ -247,9 +247,18 @@ function _snapAI() {
 }
 
 // Midway auth — real cookie-expiry clock (checkMwinit), honest about expiry.
-function _snapAuth() {
+// auth.propagation (default OFF, F11): the shared AAP-verified status is
+// consulted first (null flag off) so a walled session is not shown green.
+// `deps` ({ authReport, checkMwinit }) is a test seam; production passes none.
+function _snapAuth(deps) {
+  const d = deps || {};
+  let st = null;
+  try { st = (d.authReport || require('../auth/auth-report')).currentStatus(); } catch (_) { st = null; }
+  if (st && st.level === 'warn') return { status: STATUS.YELLOW, label: 'Midway Auth', detail: st.message || 'Midway needs attention' };
+  if (st && st.level === 'down') return { status: STATUS.RED,    label: 'Midway Auth', detail: st.message || 'Midway sign-in required' };
+  if (st && st.level === 'ok')   return { status: STATUS.GREEN,  label: 'Midway Auth', detail: 'AAP verified' };
   let r = null;
-  try { r = require('../scrapers/auth').checkMwinit(); } catch (_) {}
+  try { r = d.checkMwinit ? d.checkMwinit() : require('../scrapers/auth').checkMwinit(); } catch (_) {}
   if (!r) return { status: STATUS.YELLOW, label: 'Midway Auth', detail: 'Status unavailable' };
   if (!r.ok) {
     return { status: STATUS.RED, label: 'Midway Auth', detail: r.reason || 'Session invalid — run mwinit' };
@@ -386,3 +395,4 @@ function buildHealthSnapshot(rows) {
 }
 
 module.exports = { runHealthCheck, buildHealthSnapshot, STATUS };
+module.exports.__test__ = { _snapAuth };

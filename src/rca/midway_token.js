@@ -142,7 +142,17 @@ async function getIdToken(clientId, opts = {}, deps = {}) {
   } catch (appErr) {
     // Fallback: cookie file + fresh AEA from the ACME posture token.
     logger.warn('[rca] in-app token mint failed (' + appErr.message + ') -- falling back to cookie file');
-    token = await (deps.fetchFromFile || _fetchToken)(clientId);
+    try {
+      token = await (deps.fetchFromFile || _fetchToken)(clientId);
+    } catch (e) {
+      // auth.propagation (F8): a cookie-file step-up rejection is a real
+      // signal that Midway wants a full sign-in. Report it (no-op flag off),
+      // then rethrow the original error unchanged.
+      if (e && e.code === 'MIDWAY_STEPUP_REQUIRED') {
+        try { (deps.reportStepUp || require('../auth/auth-report').reportStepUp)({ source: 'rca' }); } catch (_) {}
+      }
+      throw e;
+    }
     via = 'cookie file';
   }
   const cl = _claims(token);
