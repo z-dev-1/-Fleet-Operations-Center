@@ -194,6 +194,17 @@ expose('longDwellCsv', {
   },
 });
 
+// ── Long Dwell durable AI Fill (main arbitrates skip/fill + commits) ──────
+// Every call returns { ok:false, code:'off' } unless jobs.longDwellAiFill.durable.
+expose('longDwellAi', {
+  status:    ()        => ipcRenderer.invoke('long-dwell-ai:status'),
+  plan:      (payload) => ipcRenderer.invoke('long-dwell-ai:plan', payload),
+  unitStart: (payload) => ipcRenderer.invoke('long-dwell-ai:unit-start', payload),
+  commit:    (payload) => ipcRenderer.invoke('long-dwell-ai:commit', payload),
+  finish:    (payload) => ipcRenderer.invoke('long-dwell-ai:finish', payload),
+  today:     (payload) => ipcRenderer.invoke('long-dwell-ai:today', payload),
+});
+
 // ── Baseball Card (AFP FAS performance profile + docx export) ───────────────
 expose('baseballCard', {
   get:           ()      => ipcRenderer.invoke('baseball-card:get'),

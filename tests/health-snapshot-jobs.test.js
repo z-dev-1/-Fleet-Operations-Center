@@ -17,7 +17,7 @@ const jobsPath = path.join(path.dirname(require.resolve('../src/health/snapshot'
 function summary(over) {
   return Object.assign({
     mode: 'active', reason: null,
-    types: { deepScan: { flag: true, effective: true, adopted: true, mode: 'durable' }, longDwellAiFill: { flag: false, effective: false, adopted: false, mode: 'deferred' } },
+    types: { deepScan: { flag: true, effective: true, adopted: true, mode: 'durable' }, longDwellAiFill: { flag: false, effective: false, adopted: true, mode: 'off' } },
     counts: { deepScan: { running: 1, completed: 40, bogus: 3 } },
     totals: { open: 1, recoveryRequired: 0, failed24h: 0, foreign: 0 },
     oldestRunning: { id: 'job_1', type: 'deepScan', scopeKey: 'fleet', startedAt: T - 1000, leaseUntil: T + 1000, attempt: 1, leaseExpired: false },
@@ -47,7 +47,7 @@ describe('T13 jobs section', () => {
     expect(j.recoveryRequired[0].lastError).toContain('token=[redacted]');
     expect(j.recoveryRequiredCount).toBe(8);
     expect(j.counts).toEqual({ deepScan: { running: 1, completed: 40 } });
-    expect(j.types.longDwellAiFill.mode).toBe('deferred');
+    expect(j.types.longDwellAiFill.mode).toBe('off');
     expect(j.oldestRunning).toMatchObject({ id: 'job_1', type: 'deepScan', leaseExpired: false });
     expect(j.totals).toEqual({ open: 1, recoveryRequired: 0, failed24h: 0, foreign: 0 });
     expect(j.lastRecovery).toEqual({ at: T - 5000, requeued: 1, recoveryRequired: 0, failed: 0, cancelled: 0 });
@@ -111,6 +111,16 @@ describe('T13 jobs section', () => {
       expect(s.jobs.recoveryRequired).toEqual([]);
       expect(s.jobs.counts).toEqual({ deepScan: { running: 1 } });
       expect(s.jobs.oldestRunning).toMatchObject({ type: 'deepScan', scopeKey: 'fleet', attempt: 1, leaseExpired: false });
+      h.complete({});
+    });
+
+    it('longDwellAiFill flagged: types mode durable and counts.longDwellAiFill flow through', () => {
+      jobs._resetForTests({ flags: { enabled: true, types: { longDwellAiFill: true } }, logger: quiet, now: () => T });
+      expect(jobs.init()).toEqual({ mode: 'active' });
+      const h = jobs.begin({ type: 'longDwellAiFill', scopeKey: 'computed:2026-11-04' }); h.start();
+      const s = health.buildSnapshot({ now: () => T, logger: quiet });
+      expect(s.jobs.types.longDwellAiFill).toEqual({ flag: true, effective: true, adopted: true, mode: 'durable' });
+      expect(s.jobs.counts).toEqual({ longDwellAiFill: { running: 1 } });
       h.complete({});
     });
   });

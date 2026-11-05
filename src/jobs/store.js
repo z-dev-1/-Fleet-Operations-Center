@@ -398,6 +398,16 @@ function createJobStore(opts) {
     } catch (e) { return _fail('setCheckpoint', e); }
   }
 
+  // Read-only autocommit look at the open row for (type, scope).
+  function peekOpen(type, scope) {
+    try {
+      const row = _openRow(type, scope);
+      if (!row) return { ok: true, row: null };
+      const n = _stmt("SELECT COUNT(*) AS n FROM job_checkpoint WHERE job_id = ? AND status = 'done'").get(row.id).n;
+      return { ok: true, row: { id: row.id, state: row.state, attempt: row.attempt, checkpoint: _parse(row.checkpoint_json, {}), settled: Number(n) || 0 } };
+    } catch (e) { return _fail('peekOpen', e); }
+  }
+
   function loadCheckpoints(id) {
     try { return { ok: true, rows: _loadCheckpointsInTx(id) }; }
     catch (e) { return _fail('loadCheckpoints', e); }
@@ -452,7 +462,7 @@ function createJobStore(opts) {
   return Object.assign(inst, {
     _tx, _stmt, _classify, _isTx, _recoverRowInTx, _isOrphan,
     transition, reconcile, recover, prune, beginTx, begin,
-    renew, unitsStarted, unitsSettled, setCheckpoint, loadCheckpoints, summary,
+    renew, unitsStarted, unitsSettled, setCheckpoint, loadCheckpoints, peekOpen, summary,
     _stopAllTimersForTests,
   });
 }

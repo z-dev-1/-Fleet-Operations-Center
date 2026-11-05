@@ -42,7 +42,7 @@ describe('T7 degraded mode (node:sqlite unavailable)', () => {
     expect(sum.reason).toBe('node:sqlite unavailable');
     expect(sum.types.deepScan.mode).toBe('legacy');
     expect(sum.types.rcaAutofill.mode).toBe('off');
-    expect(sum.types.longDwellAiFill.mode).toBe('deferred');
+    expect(sum.types.longDwellAiFill.mode).toBe('off');    // adopted but not flagged
     expect(sExec).not.toHaveBeenCalled(); expect(sPrep).not.toHaveBeenCalled(); expect(sDb).not.toHaveBeenCalled();
     expect(warns.length).toBe(1);
     expect(warns[0]).toMatch(/durable jobs requested for deepScan, repairIntel but node:sqlite unavailable — running non-durable \(legacy\) behavior; status: degraded/);

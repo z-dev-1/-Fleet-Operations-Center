@@ -340,8 +340,8 @@ function loadAuthCoord(deps = {}) {
 // ── Phase 7: durable job lifecycle (all default OFF) ─────────────────────────
 //   settings.jobs.durable.enabled   boolean (=== true) / FLEET_JOBS_DURABLE            '0'|'1'
 //   settings.jobs.<type>.durable    boolean (=== true) / FLEET_JOBS_<UPPER_SNAKE>      '0'|'1'
-// Effective for a type = enabled && type flag && type adopted (longDwellAiFill is
-// deferred in Phase 7: resolvable but never effective). Read once by
+// Effective for a type = enabled && type flag && type adopted (every type is
+// adopted; longDwellAiFill was adopted in the Phase 7 follow-up). Read once by
 // src/jobs/index.js init() and memoized (restart to change).
 const JOB_TYPES = ['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill'];
 const JOB_ENV = {

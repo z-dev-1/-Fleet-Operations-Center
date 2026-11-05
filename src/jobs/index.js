@@ -11,6 +11,7 @@
  *                                engine availability -> ensureSchema -> recover -> prune
  *   begin({ type, scopeKey })    durable handle or a NOOP handle
  *   getStatus() / getSummary(now) / reconcile(id, outcome)
+ *   isEffective(type) / peek({ type, scopeKey })   read-only, null/false when off
  *
  * Degraded (flags on, node:sqlite unavailable or schema failed): NOOP handles,
  * adopted bodies run today's legacy path, one warn per process.
@@ -47,7 +48,6 @@ let _store = null;
 let _mode = 'off';
 let _status = null;
 let _degradedLogged = false;
-let _deferredLogged = false;
 let _flags = null;
 let _testOverrides = {};
 let _testEffective = new Set();
@@ -92,10 +92,6 @@ function init() {
     const effective = {};
     for (const t of JOB_TYPES) effective[t] = flags.enabled && flags.types[t] === true && types.ADOPTED[t] === true;
     _flags = { enabled: flags.enabled, types: flags.types, effective };
-    if (flags.enabled && flags.types.longDwellAiFill && !_deferredLogged) {
-      _deferredLogged = true;
-      try { _log().info('[jobs] longDwellAiFill durable mode is deferred in Phase 7; flag ignored'); } catch (_) {}
-    }
     if (!JOB_TYPES.some((t) => effective[t])) {
       _mode = 'off';
       _status = { mode: 'off' };
@@ -229,9 +225,27 @@ function reconcile(id, outcome) {
   return _store.reconcile(id, outcome);
 }
 
+// True when begin() for this type can return a durable handle (mode active,
+// type flagged + adopted). No SQL.
+function isEffective(type) {
+  if (_mode !== 'active' || !_store || !types.get(type)) return false;
+  return !!(_flags && _flags.effective[type] === true) || _testEffective.has(type);
+}
+
+// Read-only look at the open (non-terminal) row for (type, scope):
+// { id, state, attempt, checkpoint, settled } or null. null (and no SQL)
+// unless mode is active and the type is effective.
+function peek(args) {
+  const a = args || {};
+  if (!isEffective(a.type)) return null;
+  if (typeof a.scopeKey !== 'string' || !SCOPE_RE.test(a.scopeKey)) return null;
+  const r = _store.peekOpen(a.type, a.scopeKey);
+  return r && r.ok ? r.row : null;
+}
+
 function _resetForTests(opts = {}) {
   if (_store) _store._stopAllTimersForTests();
-  _store = null; _mode = 'off'; _status = null; _degradedLogged = false; _flags = null; _deferredLogged = false;
+  _store = null; _mode = 'off'; _status = null; _degradedLogged = false; _flags = null;
   _testOverrides = { owner: opts.owner, now: opts.now, flags: opts.flags, adapter: opts.adapter, logger: opts.logger };
   _testEffective = new Set();
   _warnedTypes = new Set();
@@ -247,7 +261,7 @@ function _registerTypeForTests(name, def) {
 function _storeForTests() { return _store; }
 
 module.exports = {
-  init, begin, getStatus, getSummary, reconcile, NOOP_HANDLE,
+  init, begin, getStatus, getSummary, reconcile, isEffective, peek, NOOP_HANDLE,
   BOOT_ID, OWNER, engineAdapter,
   _resetForTests, _registerTypeForTests, _storeForTests,
 };

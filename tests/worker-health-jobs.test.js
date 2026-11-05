@@ -43,7 +43,7 @@ describe('T14 Durable jobs card', () => {
   it('renders mode, types, counts, oldest running and recovery list with every string escaped', () => {
     const html = _jobsCard(base({
       mode: 'active', reason: '<img src=x onerror=alert(1)>',
-      types: { deepScan: { mode: 'durable' }, longDwellAiFill: { mode: 'deferred' } },
+      types: { deepScan: { mode: 'durable' }, longDwellAiFill: { mode: 'off' } },
       counts: { deepScan: { running: 1, '<b>': 2 } },
       totals: { open: 1, failed24h: 0, foreign: 0 },
       oldestRunning: { type: 'deepScan', scopeKey: '<script>x</script>', startedAt: Date.now() - 5000, attempt: 2, leaseExpired: true },
@@ -55,8 +55,18 @@ describe('T14 Durable jobs card', () => {
     expect(html).not.toMatch(/<script>|<img |<svg |<b>/);
     expect(html).toContain('&lt;script&gt;');
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
-    expect(html).toContain('deferred');
+    expect(html).not.toContain('deferred');
     expect(html).toContain('lease expired');
     expect(html).toContain('Needs reconciliation');
+  });
+
+  it('lists longDwellAiFill with mode durable and its job counts when flagged', () => {
+    const html = _jobsCard(base({
+      types: { deepScan: { mode: 'off' }, longDwellAiFill: { mode: 'durable' } },
+      counts: { longDwellAiFill: { running: 1, completed: 3 } },
+    }));
+    expect(html).toContain('<dt>longDwellAiFill</dt><dd>durable</dd>');
+    expect(html).toContain('longDwellAiFill jobs');
+    expect(html).toContain('running 1 · completed 3');
   });
 });

@@ -390,6 +390,23 @@ export const longDwellCsv = {
   onScheduledFetched: (cb) => window.longDwellCsv.onScheduledFetched(cb),
 };
 
+// ── Long Dwell durable AI Fill ─────────────────────────────────────────────
+// Missing preload API (older build / dev mock) -> { ok:false, code:'off' },
+// which callers treat as "run the legacy loop".
+const _ldAiOff = () => Promise.resolve({ ok: false, code: 'off' });
+const _ldAi = (name) => (payload) => {
+  const api = typeof window !== 'undefined' ? window.longDwellAi : null;
+  return api && typeof api[name] === 'function' ? api[name](payload) : _ldAiOff();
+};
+export const longDwellAi = {
+  status:    _ldAi('status'),
+  plan:      _ldAi('plan'),
+  unitStart: _ldAi('unitStart'),
+  commit:    _ldAi('commit'),
+  finish:    _ldAi('finish'),
+  today:     _ldAi('today'),
+};
+
 // ── AI / Orcha ─────────────────────────────────────────────────────────────
 export const ai = {
   suggest:          (unit)       => window.ai.suggest(unit),

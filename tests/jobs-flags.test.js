@@ -46,12 +46,12 @@ describe('T8 resolveJobsFlags', () => {
 describe('T8b per-type isolation through the facade [round-3 fix 3]', () => {
   let tmp, warns, infos;
   const WO = '11111111-2222-3333-4444-555555555555';
-  const SCOPES = { deepScan: 'fleet', repairIntel: 'cycle', rcaAutofill: WO };
+  const SCOPES = { deepScan: 'fleet', repairIntel: 'cycle', rcaAutofill: WO, longDwellAiFill: 'computed:2026-11-04' };
   const log = () => ({ debug() {}, info: (m) => infos.push(m), warn: (m) => warns.push(m), error: (m) => warns.push(m) });
   beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jobs-flags-')); engine.close(); setDataDir(tmp); warns = []; infos = []; });
   afterEach(() => { jobs._resetForTests(); engine.close(); });
 
-  for (const only of ['deepScan', 'repairIntel', 'rcaAutofill']) {
+  for (const only of ['deepScan', 'repairIntel', 'rcaAutofill', 'longDwellAiFill']) {
     it('only ' + only + ' enabled -> the other types stay NOOP with zero rows and no warn', () => {
       jobs._resetForTests({ flags: { enabled: true, types: { [only]: true } }, logger: log() });
       expect(jobs.init()).toEqual({ mode: 'active' });
@@ -75,21 +75,25 @@ describe('T8b per-type isolation through the facade [round-3 fix 3]', () => {
     });
   }
 
-  it('longDwellAiFill flagged on -> never durable, info logged once, health shows deferred', () => {
+  it('longDwellAiFill flagged on -> effective + durable, no "deferred" info line; off -> NOOP', () => {
     jobs._resetForTests({ flags: { enabled: true, types: { longDwellAiFill: true } }, logger: log() });
-    expect(jobs.init()).toEqual({ mode: 'off' });
-    expect(jobs.begin({ type: 'longDwellAiFill', scopeKey: 'x' })).toBe(jobs.NOOP_HANDLE);
-    expect(jobs.init()).toEqual({ mode: 'off' });
-    expect(infos.filter((m) => /longDwellAiFill durable mode is deferred in Phase 7; flag ignored/.test(m)).length).toBe(1);
-    expect(jobs.getSummary(Date.now()).types.longDwellAiFill).toMatchObject({ adopted: false, effective: false, mode: 'deferred' });
-    jobs._resetForTests({ flags: { enabled: true, types: { longDwellAiFill: true, deepScan: true } }, logger: log() });
     expect(jobs.init()).toEqual({ mode: 'active' });
-    expect(jobs.begin({ type: 'longDwellAiFill', scopeKey: 'x' })).toBe(jobs.NOOP_HANDLE);
-    expect(engine.getDb().prepare("SELECT COUNT(*) AS n FROM jobs WHERE type = 'longDwellAiFill'").get().n).toBe(0);
+    expect(jobs.getSummary(Date.now()).types.longDwellAiFill).toMatchObject({ adopted: true, effective: true, mode: 'durable' });
+    expect(jobs.isEffective('longDwellAiFill')).toBe(true);
+    expect(jobs.isEffective('deepScan')).toBe(false);
+    const h = jobs.begin({ type: 'longDwellAiFill', scopeKey: 'csv:2026-11-04' });
+    expect(h.durable).toBe(true);
+    h.start(); h.complete({});
+    expect(infos.filter((m) => /deferred/.test(m))).toEqual([]);
+    jobs._resetForTests({ flags: { enabled: true, types: { deepScan: true } }, logger: log() });
+    expect(jobs.init()).toEqual({ mode: 'active' });
+    expect(jobs.begin({ type: 'longDwellAiFill', scopeKey: 'csv:2026-11-04' })).toBe(jobs.NOOP_HANDLE);
+    expect(jobs.getSummary(Date.now()).types.longDwellAiFill).toMatchObject({ adopted: true, effective: false, mode: 'off' });
+    expect(jobs.isEffective('longDwellAiFill')).toBe(false);
   });
 
   it('master switch off -> every type NOOP even when per-type flags are on', () => {
-    jobs._resetForTests({ flags: { enabled: false, types: { deepScan: true, repairIntel: true, rcaAutofill: true } }, logger: log() });
+    jobs._resetForTests({ flags: { enabled: false, types: { deepScan: true, repairIntel: true, rcaAutofill: true, longDwellAiFill: true } }, logger: log() });
     expect(jobs.init()).toEqual({ mode: 'off' });
     for (const t of Object.keys(SCOPES)) expect(jobs.begin({ type: t, scopeKey: SCOPES[t] })).toBe(jobs.NOOP_HANDLE);
   });

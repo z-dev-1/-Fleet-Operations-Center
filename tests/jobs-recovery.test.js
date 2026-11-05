@@ -155,7 +155,8 @@ describe('T4 facade: recovery is inert (Rule R)', () => {
     expect(handles[0].resumed).toBe(true);
     expect(handles[3].durable).toBe(false);
     expect(handles[3].blockedBy).toBe('recovery_required');
-    expect(handles[4].durable).toBe(false);
+    expect(handles[4].durable).toBe(true);    // longDwellAiFill adopted: fresh durable handle
+    expect(handles[4].resumed).toBe(false);
     for (const h of handles) h.complete({});
     expect(calls).toEqual([]);
     const st2 = jobs.getStatus();
