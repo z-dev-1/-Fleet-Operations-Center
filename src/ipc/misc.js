@@ -422,11 +422,14 @@ function registerMiscIPC(ctx) {
     // the same already-valid Midway session the main window uses (same
     // pattern as the Slack login and credentials:test-login), so Uptake's
     // Amazon-SSO step doesn't stop at a login wall. Uptake only.
-    if (_part === 'persist:vendor-uptake') {
+    // auth.propagation (flag on): any MIDWAY_PARTITIONS partition is seeded through
+    // the guarded seeder; defaultSession is never seeded here (unchanged).
+    const _seeder = require('../auth/session-seeder');
+    if (_part === 'persist:vendor-uptake' || (_part && _seeder.isEnabled() && _seeder.MIDWAY_PARTITIONS.has(_part))) {
       try {
         const { injectCookies } = require('../scrapers/auth');
-        await injectCookies(_openSession);
-        logger.info('Uptake open: Midway session injected into persist:vendor-uptake');
+        await _seeder.seedOrLegacy(_openSession, { reason: 'aap:open-url', partition: _part }, () => injectCookies(_openSession));
+        logger.info(_part === 'persist:vendor-uptake' ? 'Uptake open: Midway session injected into persist:vendor-uptake' : 'Vendor open: Midway session seeded into ' + _part);
       } catch (e) {
         logger.warn('Uptake open: Midway cookie injection failed (continuing): ' + e.message);
       }

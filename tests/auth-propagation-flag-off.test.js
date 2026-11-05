@@ -170,6 +170,50 @@ describe('auth.propagation flag OFF: supervisor golden trace', () => {
     expect(w.calls.some((c) => c[0] === 'aeaSessionExpiryMin')).toBe(false);
   });
 
+  // Added with FEAT-003 (seeder, propagation, app.js wiring). The GOLDEN above is unchanged.
+  it('flag OFF: seedOrLegacy only runs the legacy lambda and makes no cookies.set', async () => {
+    const seeder = require('../src/auth/session-seeder');
+    expect(seeder.isEnabled()).toBe(false);
+    const sets = [];
+    const ses = { cookies: { set: async (c) => { sets.push(c); }, flushStore: async () => {}, get: async () => [] } };
+    const auth = { injectCookies: async () => { throw new Error('seeder must not inject flag off'); }, postureTokenExpiryMin: () => 15, injectAeaFromPostureToken: async () => { throw new Error('no'); } };
+    let calls = 0;
+    const out = await seeder.seedOrLegacy(ses, { reason: 'slack:login', partition: 'persist:slack' }, () => { calls++; return 6; }, { auth });
+    expect(out).toBe(6);                                  // the legacy statement's own result
+    expect(calls).toBe(1);
+    expect(sets).toEqual([]);
+    expect(seeder._seededThisProcess.size).toBe(0);
+    await expect(seeder.seedOrLegacy(ses, {}, async () => { throw new Error('legacy boom'); }, { auth })).rejects.toThrow('legacy boom');
+  });
+
+  it('flag OFF: propagation.init returns null, subscribes nothing and never wakes workers; interceptLegacy returns false', () => {
+    const prop = require('../src/auth/propagation');
+    const subscribe = (fn) => { throw new Error('must not subscribe flag off: ' + typeof fn); };
+    const wakeDependents = () => { throw new Error('must not wake flag off'); };
+    const fakeSup = { subscribe, getStatus: () => { throw new Error('must not read status flag off'); } };
+    expect(prop.init({ sendRaw: () => { throw new Error('no sends'); }, getCtx: () => null })).toBeNull();
+    expect(prop.init({ sendRaw: () => {}, getCtx: () => null, deps: { supervisor: fakeSup, workers: { wakeDependents } } })).toBeNull();
+    expect(prop.interceptLegacy({ ok: true })).toBe(false);
+    expect(prop.interceptLegacy({ ok: true, expiresInMin: 600, aeaExpiresInMin: 30 })).toBe(false);
+    expect(prop.interceptLegacy('running')).toBe(false);
+  });
+
+  it('flag OFF: the app.js _send intercept short-circuits on a null _authPropagation', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../src/app.js'), 'utf8').replace(/\r\n/g, '\n');
+    const m = /function _send\(channel, payload\) \{\n\s*(if \(.*\) return;)\n\s*_sendRaw\(channel, payload\);\n\s*\}/.exec(src);
+    expect(m).not.toBeNull();
+    expect(m[1].startsWith("if (channel === 'auth:mwinit-status' && _authPropagation &&")).toBe(true);
+    expect(m[1]).toBe("if (channel === 'auth:mwinit-status' && _authPropagation && _authPropagation.interceptLegacy(payload)) return;");
+    // Evaluate the exact two lines with _authPropagation = null: everything reaches _sendRaw unchanged.
+    const raw = [];
+    // eslint-disable-next-line no-new-func
+    const send = new Function('_sendRaw', '_authPropagation', 'return function _send(channel, payload) { ' + m[1] + ' _sendRaw(channel, payload); };')((c, p) => raw.push([c, p]), null);
+    const payloads = [['auth:mwinit-status', { ok: true }], ['auth:mwinit-status', 'running'], ['auth:mwinit-status', { ok: true, expiresInMin: 5 }], ['fleet:data', { rows: [] }]];
+    for (const [c, p] of payloads) send(c, p);
+    expect(raw).toEqual(payloads);
+  });
+
   it('flag OFF: ensureHealthyFullSignIn is the legacy ui:run-mwinit allowPrompt:true pass', async () => {
     const w = makeWorld();
     w.smoke.push('401', '401');

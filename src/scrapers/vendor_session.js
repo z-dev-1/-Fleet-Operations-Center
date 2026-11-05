@@ -69,7 +69,7 @@ async function _warm(vendorId, opts) {
   if (LOGIN_STRATEGIES[hostname] === 'sso-click') {
     try {
       const { injectCookies } = require('./auth');
-      await injectCookies(win.webContents.session);
+      await require('../auth/session-seeder').seedOrLegacy(win.webContents.session, { reason: 'vendor-warm', partition: VENDOR_PARTITIONS[hostname] || null }, () => injectCookies(win.webContents.session));
     } catch (e) { logger.warn('[warm] could not seed Midway cookies for ' + vendorId + ': ' + e.message); }
   }
 

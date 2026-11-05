@@ -172,7 +172,14 @@ app.whenReady().then(async () => {
   let _aiFillActiveTimer = null;
 
   // Safe IPC push helpers — no-op if window is gone
+  // auth.propagation (default OFF): when initialised, legacy 'auth:mwinit-status'
+  // pushes are demoted to evidence here; null keeps _send identical to _sendRaw.
+  let _authPropagation = null;
   function _send(channel, payload) {
+    if (channel === 'auth:mwinit-status' && _authPropagation && _authPropagation.interceptLegacy(payload)) return;
+    _sendRaw(channel, payload);
+  }
+  function _sendRaw(channel, payload) {
     try {
       const win = _windowApi && _windowApi.getMainWindow();
       if (win && !win.isDestroyed())
@@ -325,6 +332,11 @@ app.whenReady().then(async () => {
   const _hbAea = (() => { try { return require('./auth/heartbeat-aea'); } catch (_) { return null; } })();
   const _keepaliveSvc = (() => { try { return require('./auth/aea-keepalive-service'); } catch (_) { return null; } })();
   const _authCoordFlags = (() => { try { return require('./config/perf-flags').loadAuthCoord(); } catch (_) { return { singleFlight: false, singleOwnerAea: false, singleOwnerReconnect: false }; } })();
+  if (require('./auth/auth-report').isEnabled()) {
+    // `const _ctx` is declared further down; a transition before that line would hit the TDZ.
+    try { _authPropagation = require('./auth/propagation').init({ sendRaw: _sendRaw, getCtx: () => { try { return _ctx; } catch (_) { return null; } } }); }
+    catch (e) { log.warn('[auth-propagation] init failed, legacy status path stays active: ' + e.message); _authPropagation = null; }
+  }
   let _midwayRefreshTimer = null;
   let _midwayRenewalInFlight = false; // FIX (2026-07-21): see note below
   function _midwayAutoRefresh() {

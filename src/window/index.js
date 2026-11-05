@@ -2332,6 +2332,11 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
   });
 
   ipcMain.handle('relay:open-url', async (_e, url) => {
+    const _seeder = require('../auth/session-seeder');
+    if (_seeder.isEnabled()) {
+      // auth.propagation: seed the session actually opened ('' -> raw default-jar inject; Midway partitions -> seeder; others -> none)
+      try { await _seeder.seedForRelayOpen(partitionForUrl(url) || '', { auth: _getAuth(), fromPartition: (p) => session.fromPartition(p) }); } catch(e) { logger.warn('[relay:open-url] Cookie inject skipped:', e.message); }
+    } else
     // Re-inject Midway cookies so AEA passes on first load
     try { await _getAuth().injectCookies(); } catch(e) { logger.warn('[relay:open-url] Cookie inject skipped:', e.message); }
     if (!url || !/^https?:\/\//i.test(url)) return;

@@ -154,7 +154,7 @@ function registerSlackIPC(ctx) {
       (async () => {
         try {
           const { injectCookies } = require('../scrapers/auth');
-          await injectCookies(ses);
+          await require('../auth/session-seeder').seedOrLegacy(ses, { reason: 'slack:login', partition: 'persist:slack' }, () => injectCookies(ses));
           logger.info('Slack login: Midway session injected into persist:slack');
         } catch (e) {
           logger.warn('Slack login: Midway cookie injection failed (continuing): ' + e.message);

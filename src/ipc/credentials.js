@@ -191,7 +191,7 @@ function registerCredentialIPC() {
     if (LOGIN_STRATEGIES[hostname] === 'sso-click') {
       try {
         const { injectCookies } = require('../scrapers/auth');
-        await injectCookies(win.webContents.session);
+        await require('../auth/session-seeder').seedOrLegacy(win.webContents.session, { reason: 'credentials:test-login', partition: VENDOR_PARTITIONS[hostname] || null }, () => injectCookies(win.webContents.session));
       } catch (e) {
         logger.warn('test-login: could not seed Midway cookies for', vendorId, ':', e.message);
       }
