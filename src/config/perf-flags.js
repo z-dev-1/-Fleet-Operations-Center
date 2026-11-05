@@ -61,6 +61,13 @@
  *
  *   settings.ai.dbrLookup / FLEET_AI_DBR_LOOKUP '0' | '1'
  *
+ * Long Dwell "Preview, then write" SharePoint sheet (default OFF; see
+ * resolveLongDwellSpFlags below; read on every IPC call, not memoized):
+ *
+ *   settings.longDwell.sharepointWrite       / FLEET_LONGDWELL_SP_WRITE  '0' | '1'  (master)
+ *   settings.longDwell.sharepointWriteCommit / FLEET_LONGDWELL_SP_COMMIT '0' | '1'  (forced off without master)
+ *   settings.longDwell.sharepointGuard       'modified-recheck' (default) | 'if-match'
+ *
  * Read at point of use (startup / once per run), never per tick.
  */
 
@@ -466,6 +473,38 @@ function loadDbrLookup(deps = {}) {
   }
 }
 
+// ── Long Dwell SharePoint sheet preview/write (default OFF) ──────────────────
+// settings.longDwell is distinct from settings.workers.longDwell. The commit
+// flag never works without the master flag. Not memoized: read per IPC call.
+const LONGDWELL_SP_ENV = { sharepointWrite: 'FLEET_LONGDWELL_SP_WRITE', sharepointWriteCommit: 'FLEET_LONGDWELL_SP_COMMIT' };
+function resolveLongDwellSpFlags(settings, env) {
+  const l = _obj(_obj(settings).longDwell);
+  const flags = {
+    sharepointWrite: l.sharepointWrite === true,
+    sharepointWriteCommit: l.sharepointWriteCommit === true,
+    sharepointGuard: l.sharepointGuard === 'if-match' ? 'if-match' : 'modified-recheck',
+  };
+  const m = _envBool(env, LONGDWELL_SP_ENV.sharepointWrite);
+  if (m !== null) flags.sharepointWrite = m;
+  const c = _envBool(env, LONGDWELL_SP_ENV.sharepointWriteCommit);
+  if (c !== null) flags.sharepointWriteCommit = c;
+  if (!flags.sharepointWrite) flags.sharepointWriteCommit = false;
+  return flags;
+}
+function loadLongDwellSp(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveLongDwellSpFlags(settings, env);
+  } catch (_) {
+    return resolveLongDwellSpFlags({}, {});
+  }
+}
+
 module.exports = {
   resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT,
   resolveCommsFlags, loadComms, COMMS_POLLING_MODES,
@@ -476,4 +515,5 @@ module.exports = {
   resolveJobsFlags, loadJobs, JOB_TYPES, JOB_ENV,
   resolveJustMeContextFlags, loadJustMeContext,
   resolveDbrLookupFlags, loadDbrLookup,
+  resolveLongDwellSpFlags, loadLongDwellSp, LONGDWELL_SP_ENV,
 };

@@ -34,10 +34,16 @@ const _roster = require('../orcha/fas/roster-lookup'); // FAS/UM auto-fill by (S
 
 // Column labels that are team-filled in-app (N–R). When fetching/importing the
 // AAP CSV we DROP these columns' values so the team's in-app edits always win.
-const MANUAL_LABELS = [
-  'Delay Reason', 'Escalation Level Action', 'Support Team POC',
-  'Asana Link (If at SEV2)', 'Required Notes for ALL Units',
-].map((s) => s.toLowerCase());
+// Single server-side source of the manual columns (key + tracker header label);
+// MANUAL_LABELS and MANUAL_FIELDS below are derived from it.
+const MANUAL_COLUMNS = [
+  { key: 'delayReason',      label: 'Delay Reason' },
+  { key: 'escalationAction', label: 'Escalation Level Action' },
+  { key: 'supportPOC',       label: 'Support Team POC' },
+  { key: 'asanaLink',        label: 'Asana Link (If at SEV2)' },
+  { key: 'notes',            label: 'Required Notes for ALL Units' },
+];
+const MANUAL_LABELS = MANUAL_COLUMNS.map((c) => c.label.toLowerCase());
 
 // RFC-4180-ish CSV parser (mirrors the renderer's parseCsv): handles quoted
 // fields, escaped quotes (""), and newlines inside quoted cells. Returns a
@@ -292,7 +298,7 @@ const MAX = {
 
 // The manual (team-filled) columns. Everything else comes from the CSV import
 // verbatim and is read-only in the UI.
-const MANUAL_FIELDS = ['delayReason', 'escalationAction', 'supportPOC', 'asanaLink', 'notes'];
+const MANUAL_FIELDS = MANUAL_COLUMNS.map((c) => c.key);
 
 function _clip(v, max) {
   if (v === undefined || v === null) return '';
@@ -548,6 +554,7 @@ function registerLongDwellCsvIPC() {
 module.exports = {
   registerLongDwellCsvIPC,
   MANUAL_FIELDS,
+  MANUAL_COLUMNS,
   // ── test seams (pure functions; no electron/store side effects) ──────────
   // Exported so the merge/join/exclusion logic the API + CSV paths share can be
   // unit-tested directly. Not part of the IPC surface.

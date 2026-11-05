@@ -97,6 +97,7 @@ const REGISTRY = {
   longDwellCsv:     () => path.join(P.dataDir, 'long_dwell_csv.json'), // FEATURE: imported AAP tracker CSV + team-filled N-R columns
   longDwellSchedule: () => path.join(P.dataDir, 'long_dwell_schedule.json'), // FEATURE: Long Dwell auto-fetch schedule (days/time + AI-fill)
   longDwellAiFills: () => path.join(P.dataDir, 'long_dwell_ai_fills.json'), // durable longDwellAiFill: per-unit AI-fill provenance (host-local, not cluster-synced)
+  longDwellSheetLinks: () => path.join(P.dataDir, 'long_dwell_sheet_links.json'), // Long Dwell SharePoint preview/write: weekly sheet link per ISO week (host-local, not cluster-synced; holds sharing URLs)
   baseballCard:     () => path.join(P.dataDir, 'baseball_card.json'), // FEATURE: AFP FAS performance "baseball card" (profile + AI-fill + docx export)
   fasRoster:        () => path.join(P.dataDir, 'fas_roster.json'),    // FEATURE: scraped FAS roster snapshot (FAS personnel)
   slackMentionThreads: () => path.join(P.dataDir, 'slack_mention_threads.json'), // thread-continuation tracking for channel watch
