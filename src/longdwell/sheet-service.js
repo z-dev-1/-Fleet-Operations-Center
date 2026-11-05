@@ -67,7 +67,7 @@ function createSheetService(deps = {}) {
   let previewBusy = false;
   let lastPreviewAt = -Infinity;
 
-  const flags = () => { try { return flagsOf() || {}; } catch (_) { return {}; } };
+  const flags = () => { try { return flagsOf() || {}; } catch { return {}; } };
   const internal = (where, e) => { log.error('[ldsp] internal', { where, name: (e && e.name) || 'Error' }); return { ok: false, code: 'internal' }; };
 
   function _prune() {
@@ -84,7 +84,7 @@ function createSheetService(deps = {}) {
   // store, never from the renderer: compound key, legacy bare key for primary.
   function _annotate(units) {
     let s = {};
-    try { s = store.load('longDwellStore', {}) || {}; } catch (_) { s = {}; }
+    try { s = store.load('longDwellStore', {}) || {}; } catch { s = {}; }
     return units.map((u) => {
       const id = String(u.equipmentId || '').trim();
       const woKey = String(u.woKey || 'primary').trim();
@@ -122,7 +122,7 @@ function createSheetService(deps = {}) {
     if (!/\.xlsx$/i.test(String(r.name || ''))) return { ok: false, code: 'unsupported-format' };
     const fresh = { host: r.host, site: r.site || '', serverRelativeUrl: r.serverRelativeUrl, uniqueId: r.uniqueId || null, name: r.name };
     let saved = null;
-    try { saved = links.setResolved(weekKey, fresh, linkDeps); } catch (_) { log.warn('[ldsp] resolve cache not saved', { code: 'store' }); }
+    try { saved = links.setResolved(weekKey, fresh, linkDeps); } catch { log.warn('[ldsp] resolve cache not saved', { code: 'store' }); }
     return { ok: true, resolved: saved || { ...fresh, forUrlSha256: links.sha256(link.url) }, fromCache: false };
   }
 
@@ -197,7 +197,7 @@ function createSheetService(deps = {}) {
     });
     if (picked.tab !== resolved.tab) {
       try { links.setResolved(weekKey, { host: resolved.host, site: resolved.site, serverRelativeUrl: resolved.serverRelativeUrl, uniqueId: resolved.uniqueId, name: resolved.name, tab: picked.tab }, linkDeps); }
-      catch (_) { log.warn('[ldsp] tab not saved', { code: 'store' }); }
+      catch { log.warn('[ldsp] tab not saved', { code: 'store' }); }
     }
     const m = dl.meta || {};
     const diagnostics = {
@@ -387,7 +387,7 @@ function createSheetService(deps = {}) {
     const report = _report(entry, listed, noChange, errors);
     if (report.counts.written || report.counts.failed) {
       try { links.markWrite(entry.weekKey, { written: report.counts.written, failed: report.counts.failed }, linkDeps); }
-      catch (_) { log.warn('[ldsp] lastWrite not recorded', { code: 'store' }); }
+      catch { log.warn('[ldsp] lastWrite not recorded', { code: 'store' }); }
     }
     log.info('[ldsp] write', { status: report.status, counts: report.counts });
     return report;

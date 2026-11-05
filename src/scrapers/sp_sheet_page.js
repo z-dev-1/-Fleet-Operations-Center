@@ -75,7 +75,7 @@ function spsLoginRedirect(res) {
     var u = new URL(res.url);
     if (!/\.sharepoint\.com$/i.test(u.hostname)) return true;
     return /\/_forms\/default\.aspx|\/_layouts\/15\/authenticate\.aspx/i.test(u.pathname);
-  } catch (_) { return true; }
+  } catch { return true; }
 }
 
 // HTTP -> code table shared by every page function.
@@ -94,7 +94,7 @@ function spsFetch(url, opts, timeoutMs) {
   var ctl = typeof AbortController === 'function' ? new AbortController() : null;
   var o = Object.assign({ credentials: 'include' }, opts || {});
   if (ctl) o.signal = ctl.signal;
-  var timer = ctl && timeoutMs > 0 ? setTimeout(function () { try { ctl.abort(); } catch (_) {} }, timeoutMs) : null;
+  var timer = ctl && timeoutMs > 0 ? setTimeout(function () { try { ctl.abort(); } catch { /* ignore */ } }, timeoutMs) : null;
   return fetch(url, o).then(function (res) {
     if (timer) clearTimeout(timer);
     return { res: res };
@@ -141,7 +141,7 @@ function spsParseLanding(url) {
     var id = u.searchParams.get('id');
     var path = id && id.charAt(0) === '/' ? id : (/\.xlsx$/i.test(decodeURIComponent(u.pathname)) ? decodeURIComponent(u.pathname) : null);
     return { origin: u.origin, guid: g, path: path };
-  } catch (_) { return { origin: null, guid: null, path: null }; }
+  } catch { return { origin: null, guid: null, path: null }; }
 }
 
 // cfg: { origin, site, serverRelativeUrl?, fileGuid?, linkUrl?, stepMs?, totalMs? }
@@ -292,7 +292,7 @@ function spSheetPut(cfg) {
       var d = j && (j.FormDigestValue || (j.d && j.d.GetContextWebInformation && j.d.GetContextWebInformation.FormDigestValue));
       if (!d) return { ok: false, code: 'auth-required', sent: false };
       var body;
-      try { body = spsFromB64(c.b64); } catch (_) { return { ok: false, code: 'internal', sent: false }; }
+      try { body = spsFromB64(c.b64); } catch { return { ok: false, code: 'internal', sent: false }; }
       var headers = { Accept: SPS_JSON, 'X-RequestDigest': d, 'Content-Type': 'application/octet-stream', 'X-HTTP-Method': 'PUT' };
       if (typeof c.ifMatch === 'string' && c.ifMatch) headers['If-Match'] = c.ifMatch;
       return spsFetch(url, { method: 'PUT', headers: headers, body: body }, 120000).then(function (p) {

@@ -101,7 +101,7 @@ function decodeXml(s) {
     if (e === 'quot') return '"';
     if (e === 'apos') return "'";
     const cp = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-    try { return String.fromCodePoint(cp); } catch (_) { return ''; }
+    try { return String.fromCodePoint(cp); } catch { return ''; }
   });
 }
 function decodeOoxmlEscapes(s) {
@@ -145,8 +145,8 @@ function readEntryCapped(zip, name, maxBytes) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let total = 0, done = false, h;
-    const fail = (code) => { if (done) return; done = true; try { h && h.pause(); } catch (_) { /* ignore */ } reject(new GridError(code)); };
-    try { h = f.internalStream('uint8array'); } catch (_) { fail('unsupported-workbook'); return; }
+    const fail = (code) => { if (done) return; done = true; try { h && h.pause(); } catch { /* ignore */ } reject(new GridError(code)); };
+    try { h = f.internalStream('uint8array'); } catch { fail('unsupported-workbook'); return; }
     h.on('data', (chunk) => {
       if (done) return;
       total += chunk.length;
@@ -186,7 +186,7 @@ function _isPk(bytes) { return bytes && bytes.length >= 4 && bytes[0] === 0x50 &
 async function _loadZip(bytes, caps) {
   if (!_isPk(bytes)) throw new GridError('unsupported-workbook');
   let zip;
-  try { zip = await JSZip.loadAsync(bytes); } catch (_) { throw new GridError('unsupported-workbook'); }
+  try { zip = await JSZip.loadAsync(bytes); } catch { throw new GridError('unsupported-workbook'); }
   const names = Object.keys(zip.files);
   if (names.length > caps.maxEntries) throw new GridError('unsupported-workbook');
   _centralDirSanity(zip, caps);

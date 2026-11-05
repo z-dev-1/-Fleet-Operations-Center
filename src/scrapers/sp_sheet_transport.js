@@ -36,7 +36,7 @@ const SITE_RE = /^(\/(sites|teams|personal)\/[^/?#]+)?$/i;
 // ── pure: where did the hidden window land? ─────────────────────────────────
 function classifyLandingUrl(url, host, site) {
   let u;
-  try { u = new URL(String(url || '')); } catch (_) { return 'other'; }
+  try { u = new URL(String(url || '')); } catch { return 'other'; }
   const h = u.hostname.toLowerCase();
   const p = u.pathname.toLowerCase();
   if (h === 'login.microsoftonline.com' || h.endsWith('.microsoftonline.com') || h === 'login.live.com'
@@ -70,7 +70,7 @@ function openSession(host, site) {
   const close = () => {
     if (closed) return;
     closed = true;
-    try { if (typeof win.isDestroyed !== 'function' || !win.isDestroyed()) win.destroy(); } catch (_) {}
+    try { if (typeof win.isDestroyed !== 'function' || !win.isDestroyed()) win.destroy(); } catch { /* ignore */ }
   };
   const ready = new Promise((resolve) => {
     let started = false, done = false, settle = null;
@@ -78,14 +78,14 @@ function openSession(host, site) {
       if (done) return;
       done = true;
       if (settle) { clearTimeout(settle); settle = null; }
-      try { wc.removeListener('did-finish-load', onLoad); } catch (_) {}
-      try { wc.removeListener('did-fail-load', onFail); } catch (_) {}
+      try { wc.removeListener('did-finish-load', onLoad); } catch { /* ignore */ }
+      try { wc.removeListener('did-fail-load', onFail); } catch { /* ignore */ }
       resolve(r);
     };
     function onLoad() {
       if (started) return;
       let url = '';
-      try { url = wc.getURL(); } catch (_) {}
+      try { url = wc.getURL(); } catch { /* ignore */ }
       const kind = classifyLandingUrl(url, host, site);
       if (kind === 'login') {
         if (!settle) settle = setTimeout(() => finish({ ok: false, code: 'auth-required' }), SETTLE_MS);
@@ -105,7 +105,7 @@ function openSession(host, site) {
   try {
     const p = win.loadURL('https://' + host + (site || '') + '/_layouts/15/blank.htm');
     if (p && typeof p.catch === 'function') p.catch(() => {});
-  } catch (_) {}
+  } catch { /* ignore */ }
   const run = async (fnName, cfg) => {
     if (!PAGE_FUNCTIONS.includes(fnName)) return { ok: false, code: 'internal' };
     const r = await wc.executeJavaScript(PAGE_SCRIPT + '\n;' + fnName + '(' + JSON.stringify(cfg || {}) + ')');
@@ -146,7 +146,7 @@ function _ops(sess, target) {
   const put = async (bytes, opts = {}) => {
     const cfg = { ...base, b64: Buffer.from(bytes).toString('base64') };
     if (typeof opts.ifMatch === 'string' && opts.ifMatch) cfg.ifMatch = opts.ifMatch;
-    try { return await sess.run('spSheetPut', cfg); } catch (_) { return { ok: false, code: 'network', sent: true }; }
+    try { return await sess.run('spSheetPut', cfg); } catch { return { ok: false, code: 'network', sent: true }; }
   };
   const resolve = (cfg) => sess.run('spSheetResolve', { ...cfg, origin: base.origin, site: base.site });
   return { meta, get, download, put, resolve };

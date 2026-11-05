@@ -29,7 +29,7 @@ const _installed = new WeakSet();
 
 function _url(u) {
   if (typeof u !== 'string' || !u) return null;
-  try { return new URL(u); } catch (_) { return null; }
+  try { return new URL(u); } catch { return null; }
 }
 
 function isSharepointHost(h) {
@@ -85,7 +85,7 @@ function isMarkedGuest(guest) {
   try {
     const wp = guest && typeof guest.getLastWebPreferences === 'function' ? guest.getLastWebPreferences() : null;
     return !!(wp && Array.isArray(wp.additionalArguments) && wp.additionalArguments.includes(MARKER));
-  } catch (_) { return false; }
+  } catch { return false; }
 }
 
 function _deps(d) {
@@ -108,7 +108,7 @@ function hookGuest(guest, deps) {
     const now = d.now();
     if (now - lastOpen < OPEN_EXTERNAL_GAP_MS) return false;
     lastOpen = now;
-    try { const p = _shell(d).openExternal(url); if (p && typeof p.catch === 'function') p.catch(() => {}); } catch (_) {}
+    try { const p = _shell(d).openExternal(url); if (p && typeof p.catch === 'function') p.catch(() => {}); } catch { /* ignore */ }
     return true;
   };
   if (typeof guest.setWindowOpenHandler === 'function') {
@@ -123,7 +123,7 @@ function hookGuest(guest, deps) {
     if (isMainFrame === false) return; // subframes (Excel editor iframes) are not top-level navigations
     const url = typeof urlArg === 'string' ? urlArg : (e && e.url);
     if (isAllowedPaneUrl(url)) return;
-    try { if (e && typeof e.preventDefault === 'function') e.preventDefault(); } catch (_) {}
+    try { if (e && typeof e.preventDefault === 'function') e.preventDefault(); } catch { /* ignore */ }
     d.log.info('[ldsp-pane] navigation blocked', { host: _hostOf(url) });
     openExternal(url);
   };
@@ -140,10 +140,10 @@ function installPaneGuard(host, deps) {
   host.on('will-attach-webview', (_e, webPreferences, params) => {
     try {
       if (hardenAttach(webPreferences, params)) _deps(deps).log.info('[ldsp-pane] webview hardened', { host: _hostOf(params.src) });
-    } catch (_) { /* never break other webviews */ }
+    } catch { /* never break other webviews */ }
   });
   host.on('did-attach-webview', (_e, guest) => {
-    try { if (isMarkedGuest(guest)) hookGuest(guest, deps); } catch (_) { /* not hooked */ }
+    try { if (isMarkedGuest(guest)) hookGuest(guest, deps); } catch { /* not hooked */ }
   });
   return true;
 }

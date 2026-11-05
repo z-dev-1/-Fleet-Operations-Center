@@ -52,7 +52,7 @@ function parseSheetLink(input) {
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(raw)) return _fail('bad-link');
   let u;
-  try { u = new URL(raw); } catch (_) { return _fail('bad-link'); }
+  try { u = new URL(raw); } catch { return _fail('bad-link'); }
   if (u.protocol !== 'https:') return _fail('bad-link');
   if (u.username || u.password) return _fail('bad-link');
   const host = u.hostname.toLowerCase();
@@ -61,7 +61,7 @@ function parseSheetLink(input) {
   const canonicalUrl = u.toString();
 
   let segs;
-  try { segs = u.pathname.split('/').filter(Boolean).map((s) => decodeURIComponent(s)); } catch (_) { return _fail('bad-link'); }
+  try { segs = u.pathname.split('/').filter(Boolean).map((s) => decodeURIComponent(s)); } catch { return _fail('bad-link'); }
   const base = { ok: true, host, site: '', kind: null, serverRelativeUrl: null, fileGuid: null, fileName: null, canonicalUrl };
 
   // /:x:/... sharing links

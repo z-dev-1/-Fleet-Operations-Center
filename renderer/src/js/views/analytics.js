@@ -25,6 +25,7 @@ import { longDwell as longDwellBridge, ai as aiBridge, relay as relayBridge, fil
 import { fillFingerprint, fillSummaryText, filledBadgeHtml, fillStatusText, runDurableFill } from '../longdwell-fill-logic.js';
 import toast from '../components/toast.js';
 import * as longDwellCsv from './longdwell-csv.js';
+import * as longDwellSp from './longdwell-sp.js';
 // SINGLE SOURCE OF TRUTH for the AI-fill prompt + SEV rules. The computed Long
 // Dwell table uses the SAME prompt builder (and FAS knowledge base) as the
 // imported-CSV table and the Slack assistant — no duplicated/drifting rubric.
@@ -33,6 +34,7 @@ import { _buildAIFillPrompt, _stripCosts, _sourceContextForRow, loadKnowledge as
 let _el = null;
 let _ldSubView = 'computed';   // 'computed' | 'imported' — Long Dwell sub-view toggle
 let _ldCsvMounted = false;
+let _ldSp = null;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const _safe = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -944,6 +946,17 @@ function _expandRowToWOs(row) {
   return views;
 }
 
+// Identities of the computed rows currently shown (after every view filter),
+// one entry per work order, for the weekly sheet preview. Identity fields only.
+function _ldSpUnits() {
+  return _computeLongDwell(state.slice('fleet').rows || []).flatMap(({ row }) =>
+    _expandRowToWOs(row).map((wo) => ({
+      equipmentId: row.equipmentId, woKey: wo.woKey, isPrimary: wo.isPrimary,
+      woNumber: wo.woNumber, woAmz: wo.woAmz,
+      domicile: row.domicileSite || row.domicile || '', vendor: wo.woVendor || row.vendor || '',
+    })));
+}
+
 // A really short, human reason for a work order, for the Long Dwell WO cell.
 // Prefers the vendor cause, then the AI issue summary, then raw issue details.
 // Kept tight (~60 chars) so the cell stays scannable.
@@ -1479,6 +1492,7 @@ export function init(container) {
       _renderLongDwellTab(state.slice('fleet').rows || []);
     }
     btn.disabled = false; btn.textContent = '\u21ba Refresh';
+    longDwellSp.safeRefresh(_ldSp);
   });
 
   // (Overview tab removed — its KPI dashboard now lives on the Dashboard/fleet
@@ -1490,6 +1504,7 @@ export function init(container) {
   // mounts lazily the first time its tab is opened.
   const _ldComputedWrap = _el.querySelector('#an-ld-computed-wrap');
   const _ldCsvHost      = _el.querySelector('#an-ld-csv-host');
+  _ldSp = longDwellSp.mount(_ldComputedWrap, { getUnits: _ldSpUnits });
   _el.querySelectorAll('[data-an-ld-sub]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const sub = btn.dataset.anLdSub;

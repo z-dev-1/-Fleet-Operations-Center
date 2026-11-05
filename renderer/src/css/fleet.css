@@ -10147,3 +10147,43 @@ textarea.rca-input { resize: vertical; line-height: 1.4; }
 /* ── Long Dwell durable AI Fill: status line + filled-today badge ── */
 .ld-fill-status { font-size: 12px; color: var(--mut); margin-right: 8px; white-space: nowrap; }
 .ld-fill-badge { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 8px; font-size: 11px; white-space: nowrap; color: var(--acc); border: 1px solid var(--acc); }
+/* ── Long Dwell weekly SharePoint sheet (preview, then write) ── */
+.ldsp { margin: 6px 0 10px; font-size: 12px; }
+.ldsp-control { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ldsp-control__title { font-weight: 600; }
+.ldsp-control__week, .ldsp-control__hint, .ldsp-control__file { color: var(--mut); }
+.ldsp-control__input { min-width: 320px; }
+.ldsp-error { color: var(--red); }
+.ldsp-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+#an-ld-computed-wrap.ldsp-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 45%); column-gap: 10px; }
+#an-ld-computed-wrap.ldsp-split > .ldsp, #an-ld-computed-wrap.ldsp-split > #an-ld-toolbar-wrap { grid-column: 1 / -1; }
+#an-ld-computed-wrap.ldsp-split > #an-ld-table-wrap { grid-column: 1; min-width: 0; }
+.ldsp-pane { grid-column: 2; grid-row: 3 / span 10; display: flex; flex-direction: column; border: 1px solid var(--bdr); min-height: 480px; }
+.ldsp-pane[hidden] { display: none; }
+.ldsp-pane__head { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--bdr); }
+.ldsp-pane__title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ldsp-pane__body { flex: 1; display: flex; }
+.ldsp-webview { flex: 1; width: 100%; min-height: 460px; border: 0; }
+.ldsp-notice { margin: 6px 0; color: var(--mut); }
+.ldsp-notice--dry { color: var(--org); }
+.ldsp-preview, .ldsp-report { margin-top: 8px; }
+.ldsp-preview__head { margin-bottom: 6px; }
+.ldsp-mapping { width: auto; margin-bottom: 4px; }
+.ldsp-untouched { color: var(--mut); margin: 2px 0 6px; }
+.ldsp-chips, .ldsp-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+.ldsp-chip { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 11px; white-space: nowrap; border: 1px solid var(--bdr); }
+.ldsp-chip--warn { color: var(--org); border-color: var(--org); }
+.ldsp-chip--edited { color: var(--acc); border-color: var(--acc); }
+.ldsp-row--will-write, .ldsp-row--written { background: var(--grnd); }
+.ldsp-row--conflict { background: var(--orgd); }
+.ldsp-row--no-change { opacity: .6; }
+.ldsp-row--blocked, .ldsp-row--skipped { color: var(--mut); }
+.ldsp-row--failed { background: var(--redd); }
+.ldsp-state { font-weight: 600; }
+.ldsp-textarea { width: 100%; min-width: 200px; font: inherit; }
+.ldsp-diff summary { cursor: pointer; }
+.ldsp-diff pre { white-space: pre-wrap; margin: 4px 0 0; }
+.ldsp-prompt { margin: 6px 0; padding: 6px; border: 1px solid var(--org); }
+.ldsp-write__reason { color: var(--mut); }
+.ldsp-footnote { color: var(--mut); font-size: 11px; margin: 4px 0 0; }
+.ldsp-tabs { border: 1px solid var(--bdr); padding: 6px; margin-top: 6px; }

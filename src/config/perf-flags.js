@@ -498,9 +498,9 @@ function loadLongDwellSp(deps = {}) {
     try {
       const loadFn = deps.load || require('../store').load;
       settings = loadFn('settings', {}) || {};
-    } catch (_) { settings = {}; }
+    } catch { settings = {}; }
     return resolveLongDwellSpFlags(settings, env);
-  } catch (_) {
+  } catch {
     return resolveLongDwellSpFlags({}, {});
   }
 }

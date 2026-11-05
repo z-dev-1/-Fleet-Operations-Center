@@ -154,7 +154,7 @@ async function findLink(weekKey, deps) {
   const wk = _week(d, weekKey);
   for (const s of sources) {
     let r = null;
-    try { r = await s.find(wk, deps); } catch (_) { r = null; }
+    try { r = await s.find(wk, deps); } catch { r = null; }
     if (r && typeof r.url === 'string' && r.url) return r;
   }
   return null;
