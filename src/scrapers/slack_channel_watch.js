@@ -532,11 +532,51 @@ const _aiJobQueue = [];
 let _aiJobRunning = false;
 let _aiJobSeq = 0;
 
-function _jmEnqueueJob(ch, msg, doLog) {
+// myUserId (optional) is only used by the Just Me context reader's owner check.
+function _jmEnqueueJob(ch, msg, doLog, myUserId) {
   const jobId = 'jm' + (++_aiJobSeq);
   logger.info(`[SlackWatch][${jobId}] Slack message received (${ch.name} ts=${msg.ts}) -- queued`);
-  _aiJobQueue.push({ jobId, ch, msg, doLog });
+  _aiJobQueue.push({ jobId, ch, msg, doLog, myUserId });
   _pumpAiJobQueue();
+}
+
+// ─── Just Me context reader (settings.comms.justMeReadContext, default OFF) ──
+// Reads the files and links Z shares in Just Me before the AI call (design §12).
+// Flag off, a message not written by Z, or one with no files/links: jmCtx stays
+// undefined and every line below takes today's path.
+let _extractBudgetMs = null;   // null = LIMITS.EXTRACT_BUDGET_MS; __test__.setExtractBudgetMs
+let _gatherImpl = null;        // null = justme-context.gatherContext; __test__.setGatherImpl
+const REPLY_LOG_PLACEHOLDER = '(reply used attached/linked content — text not retained here; see the Slack thread)';
+const JM_WITHHELD = 'I withheld this reply because it contained what looked like credentials.';
+
+async function _jmGatherContext(job) {
+  const { jobId, msg, myUserId } = job;
+  let _rc = false;
+  try { _rc = require('../config/perf-flags').loadJustMeContext().readContext === true; } catch (_) { _rc = false; }
+  if (!_rc) return undefined;
+  // Owner check. _mapMsg stamps Z's user id on anything posted with Z's token, so
+  // this relies on _pollJustMeChannel dropping every message that contains
+  // <@myUserId> (the app's own Just Me replies and notifier posts) before enqueue.
+  if (!(myUserId && msg && msg.userId === myUserId)) return undefined;
+  let marker = '\u200B\u2060';
+  try { marker = require('./slack_send').SELF_REPLY_MARKER || marker; } catch (_) { /* default */ }
+  if (typeof msg.text === 'string' && msg.text.indexOf(marker) !== -1) return undefined;   // DM auto-reply's own post
+  let jc;
+  try { jc = require('../justme-context'); } catch (_) { logger.warn(`[SlackWatch][${jobId}] context reader unavailable`); return undefined; }
+  if (!jc.hasContext(msg)) return undefined;
+  const budget = _extractBudgetMs || jc.LIMITS.EXTRACT_BUDGET_MS;
+  const xc = new AbortController();
+  const xt = setTimeout(() => xc.abort(), budget);
+  try {
+    const r = await (_gatherImpl || jc.gatherContext)(msg, { signal: xc.signal, deadline: Date.now() + budget, jobId });
+    if (!r || !Array.isArray(r.items)) throw new TypeError('bad gather result');
+    return r;
+  } catch (e) {
+    logger.warn(`[SlackWatch][${jobId}] context gather failed: ${require('../justme-context/log-safe').errTag(e)}`);
+    return { items: [], fatal: true, hasFiles: Array.isArray(msg.files) && msg.files.length > 0, hasLinks: true };
+  } finally {
+    clearTimeout(xt);
+  }
 }
 
 function _pumpAiJobQueue() {
@@ -557,6 +597,11 @@ async function _runJustMeJob(job) {
   const { jobId, ch, msg, doLog } = job;
   const startedAt = Date.now();
 
+  // Context gather (flag on + Z's own message with files/links only). Bounded by
+  // its own budget, never throws, never posts: the single reply below still runs.
+  let jmCtx;
+  try { jmCtx = await _jmGatherContext(job); } catch (_) { jmCtx = undefined; }
+
   // JM_AI_TIMEOUT_MS remains ONLY a final safety boundary -- normal answers
   // (fleet-brain fast path, or the fast-path bypass in ipc/ai.js for simple
   // count/status questions) complete well inside it. If it does fire, we
@@ -571,11 +616,16 @@ async function _runJustMeJob(job) {
   }, JM_AI_TIMEOUT_MS);
 
   let replyText;
+  let packing = null;
   try {
-    replyText = await _jmHandleMessage(ch.id, msg.text, controller.signal, jobId);
+    const r = await _jmHandleMessage(ch.id, msg.text, controller.signal, jobId, jmCtx);
+    if (jmCtx && r && typeof r === 'object') { replyText = r.text; packing = r.packing || null; } else replyText = r;
     logger.info(`[SlackWatch][${jobId}] response completed (${Date.now() - startedAt}ms)`);
   } catch (e) {
-    logger.warn(`[SlackWatch][${jobId}] processOrchaAction failed after ${Date.now() - startedAt}ms: ${e.message}`);
+    // Round-3 fix 9: on a context turn the error text can quote document content,
+    // so only its length is logged. Without context: today's line.
+    if (jmCtx) logger.warn(`[SlackWatch][${jobId}] processOrchaAction failed after ${Date.now() - startedAt}ms (${String((e && e.message) || '').length} chars)`);
+    else logger.warn(`[SlackWatch][${jobId}] processOrchaAction failed after ${Date.now() - startedAt}ms: ${e.message}`);
     // Never surface raw internal errors (e.g. "processOrchaAction timed out
     // after 240000ms") in Slack -- replace with a friendly, actionable message.
     replyText = "I couldn't complete that request because Fleet Brain stopped responding. The AI connection has been reset, so you can try again now.";
@@ -583,17 +633,25 @@ async function _runJustMeJob(job) {
     clearTimeout(hardTimer);
   }
 
+  // "What I read" report: built from fixed strings and sanitized labels only.
+  if (jmCtx) { try { replyText += require('../justme-context').buildReport(jmCtx, packing); } catch (_) { /* reply still goes out */ } }
+
   const { sendToChannel } = require('./slack_send');
   const taggedReply = (msg.userId ? `<@${msg.userId}> ` : '') + replyText;
   let replyTs = null;
   try {
-    const sendResult = await sendToChannel(ch.id, taggedReply, msg.ts);
+    // Context turn: no unfurling (blocks exfiltration-by-unfurl, AC-27).
+    const sendResult = jmCtx
+      ? await sendToChannel(ch.id, taggedReply, msg.ts, { unfurl: false })
+      : await sendToChannel(ch.id, taggedReply, msg.ts);
     replyTs = sendResult.ts;
   } catch (e) {
     doLog(`[SlackWatch] ${ch.name} (justme): reply send FAILED: ${e.message}`);
   }
 
-  _appendReplyLog({
+  // Context turn: the shared reply log (indexed by FAS slack-search, synced by the
+  // cluster) keeps a placeholder instead of the content-derived reply.
+  const _logEntry = {
     id: ch.id + ':' + msg.ts,
     channelId: ch.id,
     channelName: ch.name,
@@ -608,12 +666,18 @@ async function _runJustMeJob(job) {
     title: 'Just Me',
     createdAt: new Date().toISOString(),
     status: 'auto-answered',
-  });
+  };
+  if (jmCtx) {
+    _logEntry.reply = (msg.userId ? `<@${msg.userId}> ` : '') + REPLY_LOG_PLACEHOLDER;
+    _logEntry.contextItems = jmCtx.items.map(i => ({ source: i.source, kind: i.kind, label: i.label, status: i.status }));
+  }
+  _appendReplyLog(_logEntry);
   logger.info(`[SlackWatch][${jobId}] cleanup completed`);
 }
 
-async function _jmHandleMessage(channelId, text, signal, jobId) {
+async function _jmHandleMessage(channelId, text, signal, jobId, jmCtx) {
   const { processOrchaAction, confirmSend } = require('../ipc/ai');
+  if (jmCtx) return _jmHandleContextMessage(channelId, text, signal, jobId, jmCtx, processOrchaAction);
 
   const pending = _jmGetPending(channelId);
   if (pending) {
@@ -653,6 +717,48 @@ async function _jmHandleMessage(channelId, text, signal, jobId) {
     replyText += '\n\nReply YES to send, or NO to cancel.';
   }
   return replyText;
+}
+
+// Context turn (design §12.1). Returns { text, packing }. The YES/NO branch is not
+// consulted (AC-33): any pending confirm is dropped and the message is new.
+async function _jmHandleContextMessage(channelId, text, signal, jobId, jmCtx, processOrchaAction) {
+  _jmClearPending(channelId);
+  const jc = require('../justme-context');
+  const { stripForIntent } = require('../justme-context/url-policy');
+  const { findSecret } = require('../justme-context/secret-scrub');
+  const { defangMentions, confirmPreview } = require('../justme-context/reply-hygiene');
+  const t = typeof text === 'string' ? text : '';
+  const typed = stripForIntent(t).trim();
+  const readable = (Array.isArray(jmCtx.items) ? jmCtx.items : []).filter(i => i && typeof i.text === 'string' && i.text);
+  if (!typed && !readable.length) return { text: "I couldn't read anything you sent.", packing: null };
+  const userMsg = typed ? t : (jmCtx.hasFiles ? jc.DEFAULT_INTENT_FILES : jc.DEFAULT_INTENT_LINKS);
+
+  logger.info(`[SlackWatch][${jobId || '?'}] processOrchaAction started (context items=${readable.length})`);
+  const result = await processOrchaAction(userMsg, {
+    signal, requestId: jobId, source: 'slack-justme',
+    untrustedContext: { typedText: t, items: readable },
+  });
+  if (!result || result.ok === false) {
+    throw new Error(result ? result.text : 'processOrchaAction returned no result');
+  }
+  const packing = result.contextPacking || null;
+  const aiText = result.text || "Sorry, I couldn't process that.";
+  const staged = Array.isArray(result.pendingConfirm) ? result.pendingConfirm : [];
+  // Round-3 fix 2: a reply or staged send that looks like it carries credentials
+  // (e.g. a local secret a hostile image got the vision reader to transcribe) is
+  // withheld, and the staged send is never stored.
+  const secret = findSecret(aiText) ||
+    staged.map(it => (it && (findSecret(it.body) || findSecret(it.subject))) || null).find(Boolean) || null;
+  if (secret) {
+    logger.warn(`[SlackWatch][${jobId || '?'}] context reply withheld: ${secret}`);
+    return { text: JM_WITHHELD, packing };
+  }
+  let replyText = defangMentions(aiText);   // incl. labelled links (fix 8)
+  if (staged.length) {
+    _jmSetPending(channelId, staged);
+    replyText += confirmPreview(staged) + '\n\nReply YES to send, or NO to cancel.';
+  }
+  return { text: replyText, packing };
 }
 
 // ── PM-ALERT channel scan (additive, runs for pmAlertAutoReply channels) ──────
@@ -893,7 +999,7 @@ async function _pollJustMeChannel(ch, myUserId, doLog) {
     }
 
     _saveChannelLastSeen(ch.id, msg.ts); // advance watermark BEFORE the AI wait
-    _jmEnqueueJob(ch, msg, doLog);       // fire-and-forget -- runs outside _pollLock
+    _jmEnqueueJob(ch, msg, doLog, myUserId); // fire-and-forget -- runs outside _pollLock
   }
 }
 
@@ -1598,6 +1704,11 @@ module.exports = {
     resetSpeedup: _resetSpeedup,
     waitForAiQueueIdle: _waitForAiQueueIdle,
     setAiTimeoutMs: (ms) => { JM_AI_TIMEOUT_MS = ms; },
+    // Just Me context reader seams (null restores the production default).
+    setExtractBudgetMs: (ms) => { _extractBudgetMs = ms || null; },
+    setGatherImpl: (fn) => { _gatherImpl = typeof fn === 'function' ? fn : null; },
+    enqueueJob: _jmEnqueueJob,
+    REPLY_LOG_PLACEHOLDER,
     getAiTimeoutMs: () => JM_AI_TIMEOUT_MS,
     shouldChimeIn: _shouldChimeIn,
     isDirectedAtMe: _isDirectedAtMe,

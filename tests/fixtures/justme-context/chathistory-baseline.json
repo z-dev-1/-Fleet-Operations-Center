@@ -1,0 +1,74 @@
+{
+  "1": [
+    [
+      {
+        "role": "user",
+        "text": "morning",
+        "ts": 1793797200000
+      },
+      {
+        "role": "ai",
+        "text": "Good morning Z.",
+        "ts": 1793797201000
+      },
+      {
+        "role": "user",
+        "text": "what's the status of 208336?",
+        "ts": 1793800800000
+      },
+      {
+        "role": "ai",
+        "text": "answer-1",
+        "ts": 1793800800000
+      }
+    ]
+  ],
+  "2": [
+    [
+      {
+        "role": "user",
+        "text": "morning",
+        "ts": 1793797200000
+      },
+      {
+        "role": "ai",
+        "text": "Good morning Z.",
+        "ts": 1793797201000
+      },
+      {
+        "role": "user",
+        "text": "tell me a fun fact about octopuses",
+        "ts": 1793800800000
+      },
+      {
+        "role": "ai",
+        "text": "answer-2",
+        "ts": 1793800800000
+      }
+    ]
+  ],
+  "3": [
+    [
+      {
+        "role": "user",
+        "text": "morning",
+        "ts": 1793797200000
+      },
+      {
+        "role": "ai",
+        "text": "Good morning Z.",
+        "ts": 1793797201000
+      },
+      {
+        "role": "user",
+        "text": "summarize this",
+        "ts": 1793800800000
+      },
+      {
+        "role": "ai",
+        "text": "answer-3",
+        "ts": 1793800800000
+      }
+    ]
+  ]
+}

@@ -1100,6 +1100,23 @@ async function pollDMAutoReplyOnce(log) {
   // posted there (loop prevention for the self-DM link/attachment feature).
   dms.forEach(d => { if (d && d.isSelf && d.channelId) _selfDmIds.add(d.channelId); });
 
+  // Just Me context reader (justMeReadContext, default OFF; design §12.4): when Z's
+  // self-DM IS the Just Me channel, Just Me owns its files/links, so DM auto-reply
+  // yields instead of answering the same message twice. Flag off → empty set.
+  let _jmOwnedSelf = new Set();
+  try {
+    if (require('../config/perf-flags').loadJustMeContext().readContext === true) {
+      const wcfg = store.load('slackChannelWatchConfig', {}) || {};
+      const { isJustMeChannel } = require('./slack_justme_channel');
+      dms.forEach(d => {
+        if (d && d.isSelf && wcfg.enabled && Array.isArray(wcfg.channels)) {
+          const ch = wcfg.channels.find(c => c && c.id === d.channelId);
+          if (ch && isJustMeChannel(ch, wcfg)) _jmOwnedSelf.add(d.channelId);
+        }
+      });
+    }
+  } catch (_) { _jmOwnedSelf = new Set(); }
+
   // ── PHASE 2: sequential process ──────────────────────────────────────────
   for (let _di = 0; _di < dms.length; _di++) {
     const dm = dms[_di];
@@ -1111,6 +1128,12 @@ async function pollDMAutoReplyOnce(log) {
     }
     if (dm.channelId === _AITEAMMATE_CHANNEL) {
       doLog(`[SlackDM] ${dm.name}: skipping (AITeammate internal agent — never auto-reply, prevents loop)`);
+      continue;
+    }
+    if (_jmOwnedSelf.has(dm.channelId)) {
+      // Watermark advanced, so turning the flag off later never answers a backlog Just Me handled.
+      if (messages && messages.length) _saveThreadLastSeen(dm.channelId, dm.name, messages[0].ts, dm.isGroup);
+      doLog(`[SlackDM] ${dm.name}: self-DM owned by Just Me (context reader on) — skipped`);
       continue;
     }
     // NOTE: a send-blocked channel is NO LONGER skipped here. We still discover
