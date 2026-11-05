@@ -12,7 +12,8 @@
 // fleet-row-based Long Dwell table.
 // ============================================================================
 
-import { longDwellCsv as csvBridge, ai as aiBridge, relay as relayBridge, longDwell as longDwellBridge } from '../bridge.js';
+import { longDwellCsv as csvBridge, ai as aiBridge, relay as relayBridge, longDwell as longDwellBridge, longDwellAi as longDwellAiBridge } from '../bridge.js';
+import { fillFingerprint, fillSummaryText, filledBadgeHtml, fillStatusText, runDurableFill } from '../longdwell-fill-logic.js';
 import state from '../state.js';
 import toast from '../components/toast.js';
 import { _buildAIFillPrompt, _stripCosts, loadKnowledge, DELAY_REASONS as AI_DELAY_REASONS, ESCALATION_LEVELS as AI_ESCALATION_LEVELS } from '../longdwell-ai.js';
@@ -361,6 +362,7 @@ function _render() {
   if (!_host) return;
   _host.innerHTML = _renderToolbar() + '<div id="ldc-table-wrap">' + _renderTable() + '</div>';
   _wire();
+  _applyCsvFillUi();
   _bindFrozenResize();
   // Apply frozen columns immediately (first paint), then again AFTER layout has
   // settled. The big table's final width (and therefore the horizontal scroll
@@ -541,7 +543,8 @@ async function _ensureUnitFresh(assetId, onStatus) {
   return findRow() || row;
 }
 
-async function _aiFillRow(rowKey, btn, onStatus) {
+async function _aiFillRow(rowKey, btn, onStatus,
+  opts /* durable-gate */) {
   const r = _data.rows[rowKey];
   if (!r) return false;
   const origHtml = btn ? btn.innerHTML : '';
@@ -579,6 +582,7 @@ async function _aiFillRow(rowKey, btn, onStatus) {
     let notes       = _stripCosts(String(parsed.summary || '').trim()).slice(0, 8000);
     if (!AI_DELAY_REASONS.includes(delayReason)) delayReason = '';
     if (!AI_ESCALATION_LEVELS.includes(escalation)) escalation = '';
+    if (opts && opts.generateOnly) return { delayReason, escalation, notes, fp: fillFingerprint(promptRow) }; // durable-gate
 
     // Persist each filled field via the same save-row path manual edits use.
     const saves = [];
@@ -606,6 +610,7 @@ async function _aiFillRow(rowKey, btn, onStatus) {
 }
 
 async function _aiFillAll(btn) {
+  if (await _durableFill(btn)) return; // durable-gate
   // Fill only rows whose manual delay/escalation/notes are all still blank.
   const keys = _rowKeys().filter((k) => {
     const m = (_data.rows[k] || {}).manual || {};
@@ -633,6 +638,178 @@ async function _aiFillAll(btn) {
   if (btn) { btn.disabled = false; btn.innerHTML = orig; }
   toast.show('success', `AI filled ${done} row(s)`, 3000);
   _renderBodyOnly();
+}
+
+// ── Durable AI Fill (jobs.longDwellAiFill.durable) ───────────────────────────
+// Main decides which rows to fill/skip and commits each result with
+// provenance; this view only runs the AI call per row. Everything below is a
+// no-op while long-dwell-ai:status reports durable:false (or the bridge/IPC is
+// missing), so the legacy _aiFillAll / _aiFillRow run unchanged.
+let _csvAiDurable = false;       // last status() answer
+let _csvFilledToday = {};        // rowKey -> { filledAt }
+let _csvLastSummary = '';        // last run's fillSummaryText
+let _csvResumeChecked = false;   // first-show resume check done this session
+let _csvDurableRunning = false;
+
+async function _csvAiStatus() {
+  try {
+    const st = await longDwellAiBridge.status();
+    _csvAiDurable = !!(st && st.ok !== false && st.durable === true);
+    return _csvAiDurable ? st : null;
+  } catch (_) {
+    _csvAiDurable = false;
+    return null;
+  }
+}
+
+async function _csvLoadToday() {
+  try {
+    const t = await longDwellAiBridge.today({ table: 'csv' });
+    if (t && t.ok && t.entries) _csvFilledToday = t.entries;
+  } catch (_) { /* keep the cached entries */ }
+}
+
+// Patch the filled-today badges, the Fill All label and the status line into
+// the rendered toolbar/table. Leaves the legacy DOM untouched when not durable.
+function _applyCsvFillUi() {
+  if (!_host || !_csvAiDurable) return;
+  const aiAllBtn = _host.querySelector('#ldc-ai-all');
+  if (aiAllBtn && !_csvDurableRunning) {
+    aiAllBtn.innerHTML = '\u2728 AI Fill All';
+    aiAllBtn.title = 'AI-fill Delay Reason, Escalation, and Notes for every row. Skips rows already AI-filled today (unless their repair data changed) and rows you edited by hand.';
+  }
+  const actions = _host.querySelector('.ldc-toolbar .an-ld-toolbar-actions');
+  let statusEl = _host.querySelector('#ldc-fill-status');
+  if (!statusEl && actions && _allRowKeys().length) {
+    statusEl = document.createElement('span');
+    statusEl.id = 'ldc-fill-status';
+    statusEl.className = 'ld-fill-status';
+    statusEl.setAttribute('role', 'status');
+    statusEl.setAttribute('aria-live', 'polite');
+    actions.insertBefore(statusEl, actions.firstChild);
+  }
+  if (statusEl) statusEl.textContent = fillStatusText(_csvLastSummary, Object.keys(_csvFilledToday).length);
+  _host.querySelectorAll('.ldc-table tbody tr[data-rowkey]').forEach((tr) => {
+    const btns = tr.querySelector('.ldc-dr-btns');
+    if (!btns) return;
+    const old = btns.querySelector('.ld-fill-badge');
+    if (old) old.remove();
+    const rec = _csvFilledToday[tr.getAttribute('data-rowkey')];
+    if (rec) btns.insertAdjacentHTML('beforeend', filledBadgeHtml(rec));
+  });
+}
+
+async function _hydrateCsvFill() {
+  const st = await _csvAiStatus();
+  if (!st) return;
+  await _csvLoadToday();
+  _applyCsvFillUi();
+  // First show per session with rows loaded: resume a run that a crash or
+  // restart interrupted today (main recovered it as 'queued').
+  if (_csvResumeChecked || !_allRowKeys().length) return;
+  _csvResumeChecked = true;
+  const p = (st.pending || []).find((x) => x && x.table === 'csv');
+  if (!p || _csvDurableRunning) return;
+  const remaining = Array.isArray(p.keys) ? Math.max(0, p.keys.length - (p.settled || 0)) : null;
+  toast.show('info', 'Resuming AI Fill' + (remaining != null ? ': ' + remaining + ' remaining' : ''), 3000);
+  await _durableFill(_host && _host.querySelector('#ldc-ai-all'), { resume: true });
+}
+
+function _csvCandidate(rowKey) {
+  const r = _data.rows[rowKey] || {};
+  return {
+    key: rowKey,
+    fp: fillFingerprint(_promptRowFor(rowKey)),
+    assetId: String(r.assetId || (r.csv || {})['Asset ID'] || '').trim(),
+    site: String(r.site || '').trim(),
+  };
+}
+
+function _csvOnCommitted(c, res) {
+  if (!res || !res.ok || res.outcome !== 'filled') return;
+  if (res.row) {
+    if (!_data.rows[c.key]) _data.rows[c.key] = {};
+    _data.rows[c.key].manual = res.row.manual;
+  }
+  _csvFilledToday[c.key] = { filledAt: res.filledAt };
+  _renderBodyOnly();   // show each fill as it lands (also re-applies badges)
+}
+
+// Bulk durable fill over the current (filtered) rows — the Fill All button and
+// the scheduled auto-fill. Returns false when durable mode is off so the
+// caller runs the legacy loop; true otherwise.
+async function _durableFill(btn, opts) {
+  const st = await _csvAiStatus();
+  if (!st) return false;
+  if (_csvDurableRunning) { toast.show('info', 'AI Fill is already running', 2500); return true; }
+  const keys = _rowKeys();
+  if (!keys.length) { toast.show('info', 'No rows to AI-fill', 2500); return true; }
+  const candidates = keys.map(_csvCandidate);
+  _csvDurableRunning = true;
+  if (btn) { btn.disabled = true; btn.innerHTML = '\u2728 Planning\u2026'; }
+  await _aiFillGate(true);
+  let res;
+  try {
+    res = await runDurableFill({
+      table: 'csv',
+      candidates,
+      bridge: longDwellAiBridge,
+      resume: !!(opts && opts.resume),
+      onProgress: ({ done, total }) => { if (btn) btn.innerHTML = `\u2728 Filling ${Math.min(done + 1, total)}/${total}\u2026`; },
+      fillOne: async (c, { index, total }) => {
+        const onStatus = (msg) => { if (btn) btn.innerHTML = `\u2728 ${index + 1}/${total}: ${_esc(msg)}`; };
+        const out = await _aiFillRow(c.key, null, onStatus, { generateOnly: true });
+        if (!out || typeof out !== 'object') return null;
+        return { delayReason: out.delayReason, escalation: out.escalation, summary: out.notes, fp: out.fp };
+      },
+      onUnitDone: _csvOnCommitted,
+    });
+  } finally {
+    await _aiFillGate(false);
+    _csvDurableRunning = false;
+    if (btn) { btn.disabled = false; btn.innerHTML = '\u2728 AI Fill All'; }
+  }
+  if (res && res.legacy) return false;
+  if (res && res.busy) { toast.show('info', res.message, 2500); return true; }
+  if (!res || res.ok === false) {
+    if (res && res.counts) _csvLastSummary = fillSummaryText(res.counts);
+    toast.show('error', 'AI Fill stopped: ' + ((res && res.error) || 'unknown error'), 4000);
+  } else {
+    _csvLastSummary = res.summary;
+    toast.show('success', 'AI Fill: ' + res.summary, 3500);
+  }
+  await _csvLoadToday();
+  _renderBodyOnly();
+  _applyCsvFillUi();
+  return true;
+}
+
+// Per-row ✨. Durable: force-refill this one row through main (commit
+// force:true), which still never clobbers an edit made during the call.
+async function _aiFillRowClick(rowKey, btn) {
+  const st = await _csvAiStatus();
+  if (!st) return _aiFillRow(rowKey, btn);
+  const m = (_data.rows[rowKey] || {}).manual || {};
+  const base = { delayReason: m.delayReason || '', escalation: m.escalationAction || '', summary: m.notes || '' };
+  const c = _csvCandidate(rowKey);
+  const out = await _aiFillRow(rowKey, btn, undefined, { generateOnly: true });
+  if (!out || typeof out !== 'object') return false;
+  let res;
+  try {
+    res = await longDwellAiBridge.commit({
+      runId: null, force: true, table: 'csv', key: rowKey, fp: out.fp || c.fp, base,
+      result: { delayReason: out.delayReason, escalation: out.escalation, summary: out.notes },
+    });
+  } catch (e) {
+    res = { ok: false, error: e && e.message };
+  }
+  if (res && res.ok && res.outcome === 'filled') { _csvOnCommitted(c, res); return true; }
+  if (res && res.ok && res.reason === 'edited-during-run') {
+    toast.show('warning', 'Kept your edit (the row changed while the AI was working)', 4000);
+  } else {
+    toast.show('error', 'AI fill failed: ' + ((res && (res.error || res.reason || res.code)) || 'not saved'), 4000);
+  }
+  return false;
 }
 
 // ── Wiring ───────────────────────────────────────────────────────────────────
@@ -799,7 +976,7 @@ function _wire() {
       ev.preventDefault();
       ev.stopPropagation();
       const rowKey = aiBtn.getAttribute('data-rowkey');
-      if (rowKey) _aiFillRow(rowKey, aiBtn);
+      if (rowKey) _aiFillRowClick(rowKey, aiBtn);
     });
 
     // Per-row "copy last 3 columns" (📋3) — copies Support Team POC, Asana Link
@@ -890,6 +1067,7 @@ function _renderBodyOnly() {
     ? `<tr><td class="ldc-no-match" colspan="${cols.length + MANUAL_COLS.length + 1}">No rows match the current filters.</td></tr>`
     : '';
   tbody.innerHTML = body + emptyMsg;
+  _applyCsvFillUi();
   _applyFrozenColumns();
 }
 
@@ -986,6 +1164,9 @@ export async function refresh() {
   try { _data = (await csvBridge.get()) || { importedAt: null, columns: [], rows: {} }; }
   catch (e) { _data = { importedAt: null, columns: [], rows: {} }; }
   _render();
+  // Durable AI Fill: filled-today badges + first-show resume (no-op when off).
+  // Not awaited, so a resumed run never blocks refresh() callers.
+  _hydrateCsvFill();
 }
 
 // Mount into a host element and load current data.

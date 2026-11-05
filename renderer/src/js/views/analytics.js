@@ -21,7 +21,8 @@
 
 import bus   from '../bus.js';
 import state from '../state.js';
-import { longDwell as longDwellBridge, ai as aiBridge, relay as relayBridge, files as filesBridge } from '../bridge.js';
+import { longDwell as longDwellBridge, ai as aiBridge, relay as relayBridge, files as filesBridge, longDwellAi as longDwellAiBridge } from '../bridge.js';
+import { fillFingerprint, fillSummaryText, filledBadgeHtml, fillStatusText, runDurableFill } from '../longdwell-fill-logic.js';
 import toast from '../components/toast.js';
 import * as longDwellCsv from './longdwell-csv.js';
 // SINGLE SOURCE OF TRUTH for the AI-fill prompt + SEV rules. The computed Long
@@ -660,7 +661,8 @@ async function _ensureUnitFresh(unitId, onStatus) {
 // FRESHNESS (2026): before summarizing, ensure the unit's relay data is <=30
 // min old; if not, refresh + deep-scan just this unit so the summary reflects
 // current vendor/repair data. `onStatus` is optional progress reporting.
-async function _aiFillRow(unitId, tr, onStatus) {
+async function _aiFillRow(unitId, tr, onStatus,
+  opts /* durable-gate */) {
   if (!tr) return false;
   let row = (state.slice('fleet').rows || []).find(r => r.equipmentId === unitId);
   if (!row) { toast.show('warn', 'Unit not found in current fleet data', 3000); return false; }
@@ -714,6 +716,7 @@ async function _aiFillRow(unitId, tr, onStatus) {
 
     if (!DELAY_REASONS.includes(delayReason))     delayReason     = '';
     if (!ESCALATION_LEVELS.includes(escalationLevel)) escalationLevel = '';
+    if (opts && opts.generateOnly) return { delayReason, escalationLevel, summary, fp: fillFingerprint(row) }; // durable-gate
 
     const dSel = tr.querySelector('[data-field="delayReason"]');
     const eSel = tr.querySelector('[data-field="escalationLevel"]');
@@ -1095,6 +1098,7 @@ function _renderLongDwellTab(rows) {
       const wrap = _el.querySelector('#an-ld-table-wrap');
       const trs = wrap ? Array.from(wrap.querySelectorAll('tr[data-unit-id]')) : [];
       const fillBtn = _el.querySelector('#an-ld-paste-fill');
+      if (await _durableFill(trs, fillBtn, '\u2728 Show + AI Fill')) return; // durable-gate
       await _runFillForRows(trs, fillBtn, '\u2728 Show + AI Fill');
     }
   };
@@ -1161,6 +1165,7 @@ function _renderLongDwellTab(rows) {
   const fillAllBtn = _el.querySelector('#an-ld-fill-all');
   if (fillAllBtn) {
     fillAllBtn.addEventListener('click', async () => {
+      if (await _durableFill(Array.from(tableEl.querySelectorAll('tr[data-unit-id]')), fillAllBtn, '\u2728 AI Fill All')) return; // durable-gate
       const trs = Array.from(tableEl.querySelectorAll('tr[data-unit-id]'));
       // Only rows with NOTHING entered yet -- a bulk action must never
       // silently overwrite a manually-typed delay reason / escalation /
@@ -1179,6 +1184,211 @@ function _renderLongDwellTab(rows) {
       await _runFillForRows(blankTrs, fillAllBtn, '\u2728 AI Fill All (blank rows)');
     });
   }
+
+  // Durable AI Fill: re-apply the cached filled-today badges / status line, then
+  // refresh them from main (no-op while the flag is off).
+  _applyLdFillUi();
+  _hydrateLdFill(rows);
+}
+
+// ── Durable AI Fill (jobs.longDwellAiFill.durable) ──────────────────────────
+// Main decides which rows to fill/skip and commits each result with
+// provenance; this view only runs the AI call per unit. Everything below is a
+// no-op while long-dwell-ai:status reports durable:false (or the bridge/IPC is
+// missing), so the legacy loop above runs unchanged.
+let _ldAiDurable = false;        // last status() answer
+let _ldFilledToday = {};         // '<unit>::<wo>' -> { filledAt }
+let _ldLastSummary = '';         // last run's fillSummaryText
+let _ldResumeChecked = false;    // first-show resume check done this session
+let _ldDurableRunning = false;
+
+async function _ldAiStatus() {
+  try {
+    const st = await longDwellAiBridge.status();
+    _ldAiDurable = !!(st && st.ok !== false && st.durable === true);
+    return _ldAiDurable ? st : null;
+  } catch (_) {
+    _ldAiDurable = false;
+    return null;
+  }
+}
+
+async function _ldLoadToday() {
+  try {
+    const t = await longDwellAiBridge.today({ table: 'computed' });
+    if (t && t.ok && t.entries) _ldFilledToday = t.entries;
+  } catch (_) { /* keep the cached entries */ }
+}
+
+// Patch the filled-today badges, the Fill All label and the status line into
+// the rendered toolbar/table. Leaves the legacy DOM untouched when not durable.
+function _applyLdFillUi() {
+  if (!_el || !_ldAiDurable) return;
+  const fillAllBtn = _el.querySelector('#an-ld-fill-all');
+  if (fillAllBtn && !_ldDurableRunning) {
+    fillAllBtn.textContent = '\u2728 AI Fill All';
+    fillAllBtn.title = 'AI-fill every row. Skips rows already AI-filled today (unless their repair data changed) and rows you edited by hand.';
+  }
+  const actions = _el.querySelector('#an-ld-toolbar-wrap .an-ld-toolbar-actions');
+  let statusEl = _el.querySelector('#an-ld-fill-status');
+  if (!statusEl && actions) {
+    statusEl = document.createElement('span');
+    statusEl.id = 'an-ld-fill-status';
+    statusEl.className = 'ld-fill-status';
+    statusEl.setAttribute('role', 'status');
+    statusEl.setAttribute('aria-live', 'polite');
+    actions.insertBefore(statusEl, actions.firstChild);
+  }
+  if (statusEl) statusEl.textContent = fillStatusText(_ldLastSummary, Object.keys(_ldFilledToday).length);
+  const wrap = _el.querySelector('#an-ld-table-wrap');
+  if (!wrap) return;
+  wrap.querySelectorAll('tr[data-unit-id]').forEach((tr) => _applyLdBadge(tr));
+}
+
+function _applyLdBadge(tr) {
+  const key = _ldKey(tr.dataset.unitId, tr.dataset.woId || 'primary');
+  const rec = _ldFilledToday[key];
+  const btn = tr.querySelector('[data-action="ai-fill"]');
+  const cell = btn ? btn.parentElement : null;
+  if (!cell) return;
+  const old = cell.querySelector('.ld-fill-badge');
+  if (old) old.remove();
+  if (rec) cell.insertAdjacentHTML('beforeend', filledBadgeHtml(rec));
+}
+
+async function _hydrateLdFill(rows) {
+  const st = await _ldAiStatus();
+  if (!st) return;
+  await _ldLoadToday();
+  _applyLdFillUi();
+  // First show per session with fleet rows loaded: resume a run that a crash
+  // or restart interrupted today (main recovered it as 'queued').
+  if (_ldResumeChecked || !(rows && rows.length)) return;
+  _ldResumeChecked = true;
+  const p = (st.pending || []).find((x) => x && x.table === 'computed');
+  if (!p || _ldDurableRunning) return;
+  const remaining = Array.isArray(p.keys) ? Math.max(0, p.keys.length - (p.settled || 0)) : null;
+  toast.show('info', 'Resuming AI Fill' + (remaining != null ? ': ' + remaining + ' remaining' : ''), 3000);
+  const wrap = _el && _el.querySelector('#an-ld-table-wrap');
+  const trs = wrap ? Array.from(wrap.querySelectorAll('tr[data-unit-id]')) : [];
+  await _durableFill(trs, _el.querySelector('#an-ld-fill-all'), '\u2728 AI Fill All', { resume: true });
+}
+
+function _ldLiveTr(tr, key) {
+  if (tr && tr.isConnected !== false) return tr;
+  const wrap = _el && _el.querySelector('#an-ld-table-wrap');
+  if (!wrap) return null;
+  return Array.from(wrap.querySelectorAll('tr[data-unit-id]'))
+    .find((t) => _ldKey(t.dataset.unitId, t.dataset.woId || 'primary') === key) || null;
+}
+
+// Show a committed unit's values in its row (the renderer never wrote them).
+function _ldShowCommitted(tr, unit) {
+  if (!tr || !unit) return;
+  const dSel = tr.querySelector('[data-field="delayReason"]');
+  const eSel = tr.querySelector('[data-field="escalationLevel"]');
+  const sTa  = tr.querySelector('[data-field="summary"]');
+  if (dSel) dSel.value = unit.delayReason || '';
+  if (eSel) { eSel.value = unit.escalationLevel || ''; eSel.className = 'settings__select an-ld-select an-ld-esc-select an-ld-esc--' + _escSeverityCls(unit.escalationLevel || ''); }
+  if (sTa)  sTa.value = unit.summary || '';
+  _flashSavedRow(tr);
+}
+
+function _ldCandidate(tr) {
+  const id = tr.dataset.unitId;
+  const woKey = tr.dataset.woId || 'primary';
+  const row = (state.slice('fleet').rows || []).find(r => r.equipmentId === id);
+  return { key: _ldKey(id, woKey), equipmentId: id, woKey, isPrimary: tr.dataset.woPrimary === '1', fp: fillFingerprint(row || { equipmentId: id }), tr };
+}
+
+function _ldOnCommitted(c, res) {
+  if (!res || !res.ok || res.outcome !== 'filled') return;
+  if (res.unit) _longDwellData[c.key] = res.unit;
+  _ldFilledToday[c.key] = { filledAt: res.filledAt };
+  const tr = _ldLiveTr(c.tr, c.key);
+  _ldShowCommitted(tr, res.unit);
+  _applyLdFillUi();
+}
+
+// Bulk durable fill over `trs` (Fill All, paste fill, resume). Returns false
+// when durable mode is off so the caller runs the legacy loop; true otherwise.
+async function _durableFill(trs, btn, label, opts) {
+  const st = await _ldAiStatus();
+  if (!st) return false;
+  if (_ldDurableRunning) { toast.show('info', 'AI Fill is already running', 2500); return true; }
+  if (!trs || !trs.length) { toast.show('info', 'No rows to AI-fill', 2500); return true; }
+  const candidates = trs.map(_ldCandidate);
+  _ldDurableRunning = true;
+  if (btn) { btn.disabled = true; btn.textContent = '\u2728 Planning\u2026'; }
+  await _aiFillGate(true);
+  let res;
+  try {
+    res = await runDurableFill({
+      table: 'computed',
+      candidates,
+      bridge: longDwellAiBridge,
+      resume: !!(opts && opts.resume),
+      onProgress: ({ done, total }) => { if (btn) btn.textContent = `\u2728 Filling ${done}/${total}...`; },
+      fillOne: async (c, { index, total }) => {
+        const tr = _ldLiveTr(c.tr, c.key);
+        if (!tr) return null;
+        const onStatus = (msg) => { if (btn) btn.textContent = `\u2728 ${index + 1}/${total}: ${msg}`; };
+        const out = await _aiFillRow(c.equipmentId, tr, onStatus, { generateOnly: true });
+        if (!out || typeof out !== 'object') return null;
+        return { delayReason: out.delayReason, escalation: out.escalationLevel, summary: out.summary, fp: out.fp };
+      },
+      onUnitDone: _ldOnCommitted,
+    });
+  } finally {
+    await _aiFillGate(false);
+    _ldDurableRunning = false;
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+  }
+  if (res && res.legacy) return false;
+  if (res && res.busy) { toast.show('info', res.message, 2500); return true; }
+  if (!res || res.ok === false) {
+    if (res && res.counts) _ldLastSummary = fillSummaryText(res.counts);
+    toast.show('error', 'AI Fill stopped: ' + ((res && res.error) || 'unknown error'), 4000);
+  } else {
+    _ldLastSummary = res.summary;
+    toast.show('success', 'AI Fill: ' + res.summary, 3500);
+  }
+  await _ldLoadToday();
+  _applyLdFillUi();
+  return true;
+}
+
+// Per-row "AI Fill" button. Durable: force-refill this one row through main
+// (commit force:true), which still never clobbers an edit made during the call.
+async function _aiFillRowClick(unitId, tr) {
+  const st = await _ldAiStatus();
+  if (!st) return _aiFillRow(unitId, tr);
+  const c = _ldCandidate(tr);
+  const saved = _savedForWO(unitId, c.woKey, c.isPrimary);
+  const base = { delayReason: saved.delayReason || '', escalation: saved.escalationLevel || '', summary: saved.summary || '' };
+  const out = await _aiFillRow(unitId, tr, undefined, { generateOnly: true });
+  if (!out || typeof out !== 'object') return false;
+  let res;
+  try {
+    res = await longDwellAiBridge.commit({
+      runId: null, force: true, table: 'computed', key: c.key, fp: out.fp || c.fp,
+      equipmentId: c.equipmentId, woKey: c.woKey, isPrimary: c.isPrimary, base,
+      result: { delayReason: out.delayReason, escalation: out.escalationLevel, summary: out.summary },
+    });
+  } catch (e) {
+    res = { ok: false, error: e && e.message };
+  }
+  if (res && res.ok && res.outcome === 'filled') {
+    _ldOnCommitted(Object.assign(c, { tr }), res);
+    toast.show('success', 'AI filled ' + unitId, 2000);
+    return true;
+  }
+  if (res && res.ok && res.reason === 'edited-during-run') {
+    toast.show('warning', 'Kept your edit for ' + unitId + ' (it changed while the AI was working)', 4000);
+  } else {
+    toast.show('error', 'AI fill failed for ' + unitId + ': ' + ((res && (res.error || res.reason || res.code)) || 'not saved'), 4000);
+  }
+  return false;
 }
 
 function _flashSavedRow(tr) {
@@ -1380,7 +1590,7 @@ export function init(container) {
     const aiBtn = e.target.closest('[data-action="ai-fill"]');
     if (aiBtn) {
       const tr = aiBtn.closest('tr[data-unit-id]');
-      if (tr) _aiFillRow(tr.dataset.unitId, tr);
+      if (tr) _aiFillRowClick(tr.dataset.unitId, tr);
       return;
     }
     // Work Order link -- open that specific WR in Relay (external browser).

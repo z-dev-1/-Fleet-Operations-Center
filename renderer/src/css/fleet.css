@@ -10143,3 +10143,7 @@ textarea.rca-input { resize: vertical; line-height: 1.4; }
 #dp-pane-repair .dp-wo-card__dates { margin-top: 4px; }
 #dp-pane-repair .dp-split-view-row { padding: 0 !important; }
 #dp-pane-repair .dp-split-view-btn { padding: 5px 10px; font-size: 11px; }
+
+/* ── Long Dwell durable AI Fill: status line + filled-today badge ── */
+.ld-fill-status { font-size: 12px; color: var(--mut); margin-right: 8px; white-space: nowrap; }
+.ld-fill-badge { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 8px; font-size: 11px; white-space: nowrap; color: var(--acc); border: 1px solid var(--acc); }
