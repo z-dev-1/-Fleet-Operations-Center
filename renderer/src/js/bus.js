@@ -14,6 +14,7 @@
  *   bubble:notification  { unit, message }
  *   navigate:unit        String unitId
  *   auth:mwinit-status   { ok, reason }
+ *   auth:status          { v, state, level, ok, action, stepUp, message, verifiedAt, verifiedBy, ... } (auth.propagation)
  *   setup:progress       { step, done, total }
  *   vendor:progress      { vendor, step, ts, workflowId?, unit?, ...extras }
  *   vendor:review-ready  { workflowId, vendor, unit, altId, serviceUrl, ... }

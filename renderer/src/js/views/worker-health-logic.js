@@ -92,6 +92,10 @@ export function workerStatus(w, now = Date.now()) {
 
 export function authStatus(auth) {
   if (!auth || auth.status !== 'ok') return _st('unknown', auth && auth.reason ? 'unavailable — ' + auth.reason : 'unavailable');
+  // auth.propagation (fields present only with the flag on): Midway step-up
+  // that needs a full sign-in. After a completed full sign-in the status
+  // action is 'wait' (F9) and this falls through to the state mapping.
+  if (auth.stepUp === true && auth.action === 'mwinit') return _st('auth', 'sign in needed');
   switch (auth.state) {
     case 'HEALTHY': return _st('healthy');
     case 'WAITING_FOR_USER': return _st('auth', 'sign in needed');

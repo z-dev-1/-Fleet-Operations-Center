@@ -15,9 +15,11 @@ import {
   esc, truncate, relTime, dur, workerStatus, authStatus, laneStatus, aiOverall,
   unavailableStatus, canReEnable, createVisiblePoller, jobsStatus,
 } from './worker-health-logic.js';
+import bus from '../bus.js';
 
 let _el = null;
 let _poller = null;
+let _offAuthStatus = null;
 let _last = null;
 let _lastAt = null;
 const _openDetails = new Set();
@@ -127,9 +129,16 @@ function _aiCard(a) {
 
 function _authCard(a) {
   const k = a.keepAlive;
+  // auth.propagation rows (fields present only with the flag on).
+  const extra = [];
+  if (a.message != null) extra.push(['Status', _v(a.message)]);
+  if (a.verifiedAt != null) extra.push(['Verified', esc(relTime(a.verifiedAt, Date.now())) + (a.verifiedBy ? ' <span class="wh-reason">' + esc(a.verifiedBy) + '</span>' : '')]);
+  if (a.nextRetryAt != null) extra.push(['Next retry', esc(relTime(a.nextRetryAt, Date.now()))]);
+  if (a.liveAea != null) extra.push(['AEA (live)', _v(a.liveAea, ' min')]);
   return _kv([
     ['Midway', _pill(authStatus(a))],
     ['State', _v(a.state)],
+  ].concat(extra).concat([
     ['Online', a.online == null ? '—' : (a.online ? 'yes' : 'no')],
     ['Session left', _v(a.sessionExpiresInMin, ' min')],
     ['AEA left', _v(a.aeaExpiresInMin, ' min')],
@@ -138,7 +147,7 @@ function _authCard(a) {
     ['Keep-alive fails', k ? _v(k.consecutiveFailures) : '—'],
     ['Last keep-alive', k ? (esc(relTime(k.lastAt, Date.now())) + (k.lastOk == null ? '' : (k.lastOk ? ' · ok' : ' · failed')) +
       (k.lastReason ? ' <span class="wh-reason">' + esc(truncate(k.lastReason, 80)) + '</span>' : '')) : '—'],
-  ]);
+  ]));
 }
 
 function _slackCard(s) {
@@ -349,10 +358,14 @@ export function mount(container) {
     isVisible: () => document.visibilityState !== 'hidden',
   });
   _poller.setOpen(true);
+  // auth.propagation: re-read the snapshot when the single auth status
+  // changes while mounted (never emitted with the flag off).
+  _offAuthStatus = bus.on('auth:status', () => { if (_poller) _poller.refreshNow(); });
   return _el;
 }
 
 export function unmount() {
+  if (_offAuthStatus) { _offAuthStatus(); _offAuthStatus = null; }
   if (_poller) { _poller.stop(); _poller = null; }
   document.removeEventListener('visibilitychange', _onVisibility);
   if (_el) _el.removeEventListener('click', _onClick);

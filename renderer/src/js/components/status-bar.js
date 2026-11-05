@@ -105,6 +105,28 @@ export function init(container) {
     _showMessage(msg, true);
   });
 
+  // auth.propagation single auth status (never pushed with the flag off).
+  // action 'mwinit' -> "Authentication required" (message shown once per
+  // transition); level 'ok' clears the flag this listener set. No modal:
+  // step-up can persist for hours and often self-clears.
+  let _authStatusRequired = false;
+  bus.on('auth:status', (s) => {
+    if (!s || typeof s !== 'object') return;
+    if (s.action === 'mwinit') {
+      if (!_authStatusRequired) {
+        _authStatusRequired = true;
+        _fleet = { ..._fleet, authRequired: true };
+        _showMessage(String(s.message || 'Authentication required'), true);   // includes _render
+      }
+    } else if (s.level === 'ok') {
+      if (_authStatusRequired) {
+        _authStatusRequired = false;
+        _fleet = { ..._fleet, authRequired: false };
+        _render();
+      }
+    }
+  });
+
   // AI connection indicator — reflect which backends are actually up (Orcha,
   // Claude, or both) using the per-backend `backends` field from
   // relay.getStatus(). The old code read status.connected (a boolean that

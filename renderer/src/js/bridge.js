@@ -150,6 +150,25 @@ export function init() {
     bus.emit('auth:mwinit-status', s);
   });
 
+  // auth.propagation: single auth status from the Midway health supervisor.
+  // Guarded because dev-mock.js does not define onStatus/statusGet. With the
+  // flag off main never pushes auth:status and statusGet returns status:null.
+  if (window.auth && window.auth.onStatus) {
+    const _applyAuthStatus = (s) => {
+      if (!s || typeof s !== 'object') return;
+      state.update('auth', { midwayOk: s.ok, midwayReason: s.message || '', status: s });
+      bus.emit('auth:status', s);
+    };
+    window.auth.onStatus(_applyAuthStatus);
+    // Pull once (bubble window and late renderer loads miss earlier pushes).
+    if (window.auth.statusGet) {
+      Promise.resolve()
+        .then(() => window.auth.statusGet())
+        .then((res) => { if (res && res.enabled && res.status) _applyAuthStatus(res.status); })
+        .catch(() => {});
+    }
+  }
+
   // Deep-link navigation from tray / bubble
   window.app.onNavigateUnit((unitId) => {
     bus.emit('navigate:unit', unitId);
@@ -565,6 +584,8 @@ export const auth = {
   healthGet:       () => window.auth.healthGet(),
   healthRetry:     () => window.auth.healthRetry(),
   healthRunMwinit: () => window.auth.healthRunMwinit(),
+  // auth.propagation single status pull ({ ok, enabled, status }).
+  statusGet:       () => (window.auth.statusGet ? window.auth.statusGet() : Promise.resolve({ ok: true, enabled: false, status: null })),
 };
 
 // ── Email ──────────────────────────────────────────────────────────────────

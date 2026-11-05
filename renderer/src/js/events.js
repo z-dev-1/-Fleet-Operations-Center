@@ -35,6 +35,7 @@ export const SP_PROGRESS          = 'sp:progress';
 
 export const NAVIGATE_UNIT        = 'navigate:unit';
 export const AUTH_MWINIT_STATUS   = 'auth:mwinit-status';
+export const AUTH_STATUS          = 'auth:status';
 export const SETUP_PROGRESS       = 'setup:progress';
 
 export const NOTES_UPDATED        = 'notes:updated';

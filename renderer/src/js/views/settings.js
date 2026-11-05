@@ -2528,6 +2528,32 @@ function _renderAuthHealth(res) {
     ['Next auto-retry', s.nextRetryAt ? new Date(s.nextRetryAt).toLocaleTimeString() : '—'],
     ['Checked', s.at ? new Date(s.at).toLocaleTimeString() : '—'],
   ];
+  // auth.propagation: res.status is present only with the flag on.
+  const st = (res.status && typeof res.status === 'object') ? res.status : null;
+  if (st) {
+    const ev = st.evidence || {};
+    const _t = (iso) => (iso ? new Date(iso).toLocaleTimeString() : '—');
+    const _left = (m) => (typeof m === 'number' && isFinite(m) ? _fmtMin(m) + ' left' : '—');
+    const aeaIdx = rows.findIndex((r) => r[0] === 'AEA cookie');
+    rows.splice(aeaIdx, 1,
+      ['AEA (live)', _left(ev.liveAeaMin)],
+      ['AEA (disk)', _left(typeof ev.diskAeaMin === 'number' ? ev.diskAeaMin : (s.diskAea && s.diskAea.expiresInMin))]);
+    rows.unshift(
+      ['Status', _esc(st.message || st.state || '—')],
+      ['Verified', st.verifiedAt ? _esc(_t(st.verifiedAt) + (st.verifiedBy ? ' (' + st.verifiedBy + ')' : '')) : '—']);
+    rows.push(['Last AAP call', 'ok ' + _esc(_t(st.lastApiOkAt)) + ' · fail ' + _esc(_t(st.lastApiFailAt))]);
+    // F9: after a completed full sign-in (action 'wait' + stepUp) show the
+    // message only and do not emphasise Run mwinit; emphasise it only when
+    // the status actually asks for mwinit.
+    const stepUpWait = st.action === 'wait' && st.stepUp === true;
+    if (stepUpWait) stateEl.textContent = '\u23F3 ' + String(st.message || '');
+    const mwBtn = document.getElementById('auth-health-mwinit');
+    if (mwBtn) {
+      const emph = st.action === 'mwinit';
+      mwBtn.classList.toggle('primary', emph);
+      mwBtn.classList.toggle('secondary', !emph);
+    }
+  }
   gridEl.innerHTML = rows.map(([k, v]) =>
     `<div style="opacity:.75">${k}</div><div><b>${v}</b></div>`
   ).join('');

@@ -427,6 +427,10 @@ expose('auth', {
   healthGet:       ()   => ipcRenderer.invoke('auth-health:get'),
   healthRetry:     ()   => ipcRenderer.invoke('auth-health:retry'),
   healthRunMwinit: ()   => ipcRenderer.invoke('auth-health:run-mwinit'),
+  // auth.propagation: single auth status (push + pull). Inert with the flag
+  // off (main never sends auth:status; auth-status:get -> { enabled:false }).
+  onStatus:        (cb) => on('auth:status', cb),
+  statusGet:       ()   => ipcRenderer.invoke('auth-status:get'),
 });
 
 // ── AAP actions ───────────────────────────────────────────────────────────────

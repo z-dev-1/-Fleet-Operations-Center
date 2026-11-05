@@ -90,6 +90,26 @@ describe('authStatus / laneStatus / aiOverall / unavailableStatus', () => {
     expect(authStatus({ status: 'unavailable', reason: 'not-loaded' })).toMatchObject({ key: 'unknown', reason: 'unavailable — not-loaded' });
     expect(authStatus(null).key).toBe('unknown');
   });
+  it('auth.propagation: stepUp with action mwinit in COOLDOWN → sign in needed', () => {
+    expect(authStatus({ status: 'ok', state: 'COOLDOWN', stepUp: true, action: 'mwinit' }))
+      .toEqual({ key: 'auth', label: STATUS_LABELS.auth, reason: 'sign in needed', cls: 'wh-st wh-st--auth' });
+    expect(authStatus({ status: 'ok', state: 'DEGRADED', stepUp: true, action: 'mwinit' }).reason).toBe('sign in needed');
+  });
+  it('F9: authStatus with the completed-full-sign-in row does not report sign in needed', () => {
+    const a = {
+      status: 'ok', state: 'COOLDOWN', stepUp: true, action: 'wait', level: 'warn',
+      message: 'Full sign-in completed; Midway is still rejecting. Retrying automatically.',
+    };
+    const s = authStatus(a);
+    expect(s.reason).not.toBe('sign in needed');
+    expect(s).toEqual(authStatus({ status: 'ok', state: 'COOLDOWN' }));
+  });
+  it('auth.propagation: legacy inputs (no stepUp/action fields) are unchanged', () => {
+    expect(authStatus({ status: 'ok', state: 'COOLDOWN' })).toMatchObject({ key: 'recovering', reason: 'cooling down' });
+    expect(authStatus({ status: 'ok', state: 'WAITING_FOR_USER' })).toMatchObject({ key: 'auth', reason: 'sign in needed' });
+    expect(authStatus({ status: 'ok', state: 'HEALTHY', stepUp: false, action: 'none' })).toMatchObject({ key: 'healthy' });
+    expect(authStatus({ status: 'ok', state: 'COOLDOWN', stepUp: false, action: 'mwinit' })).toMatchObject({ key: 'recovering' });
+  });
   it('laneStatus', () => {
     expect(laneStatus('up')).toMatchObject({ key: 'healthy', label: 'Healthy' });
     expect(laneStatus('down')).toMatchObject({ key: 'failed', label: 'Failed' });
