@@ -1,0 +1,2 @@
+# Review-prompt goldens are byte-exact (compared with toBe): no line-ending conversion.
+*.txt -text
