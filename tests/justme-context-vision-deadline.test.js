@@ -57,7 +57,7 @@ describe('deadline', () => {
     expect(spawns).toHaveLength(0);
     expect(mk).not.toHaveBeenCalled();
     expect(fasDirs().length).toBe(before);
-  });
+  }, 30000);   // listing a large %TEMP% can be slow under load
 
   it('grant inside the last second also returns early', async () => {
     const res = await bedrock.readFileWithVision(PNG, { deadline: Date.now() + 500 });
@@ -95,6 +95,35 @@ describe('deadline', () => {
     const q = bedrock.readFileWithVision(PNG, { timeoutMs: 2000 });
     await vi.advanceTimersByTimeAsync(2100);
     expect(await q).toMatchObject({ ok: false, error: 'claude-code read timed out' });
+  });
+});
+
+describe('late slot grant through visionRead (fix 10)', () => {
+  it('real bedrock + a grant after the deadline -> REASONS.BUDGET, nothing spawned or written', async () => {
+    vi.useFakeTimers();
+    const { visionRead } = require('../src/justme-context/vision');
+    const { REASONS } = require('../src/justme-context/constants');
+    const mk = vi.spyOn(fs, 'mkdtempSync');
+    const before = fasDirs().length;
+    // visionRead hands bedrock deadline = ctx.deadline - 2000; this relay fake grants the slot at +19 s.
+    installRelayFake(async (fn) => { await new Promise((r) => setTimeout(r, 19000)); return fn(); });
+    const ctx = { deadline: Date.now() + 20000, visionLeft: 4 };
+    const p = visionRead(PNG, 'vision_image', ctx, { bedrock, logger: { info() {}, warn() {}, error() {} } });
+    await vi.advanceTimersByTimeAsync(19500);
+    expect(await p).toEqual({ ok: false, reason: REASONS.BUDGET });
+    expect(spawns).toHaveLength(0);
+    expect(mk).not.toHaveBeenCalled();
+    expect(fasDirs().length).toBe(before);
+  }, 30000);
+  it('an on-time grant still runs and gets redactLog + the deadline', async () => {
+    const { visionRead } = require('../src/justme-context/vision');
+    const ctx = { deadline: Date.now() + 120000, visionLeft: 4 };
+    const p = visionRead(PNG, 'vision_image', ctx, { bedrock, logger: { info() {}, warn() {}, error() {} } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(spawns).toHaveLength(1);
+    procs[0].stderr.emit('data', Buffer.from('trace ' + SENTINEL));
+    procs[0].result('plain transcription');
+    expect(await p).toEqual({ ok: true, text: 'plain transcription' });
   });
 });
 

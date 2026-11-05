@@ -1,0 +1,107 @@
+'use strict';
+// src/justme-context/constants.js — LIMITS (design §14) and REASONS (fixed
+// user-facing strings). Lives apart from index.js (plan D5) so the extraction
+// worker and the extractors can use REASONS without loading main-process code.
+// Every reason shown to the user comes from REASONS, never from an error message.
+
+const MB = 1024 * 1024;
+
+const LIMITS = Object.freeze({
+  MAX_FILES: 10,
+  MAX_LINKS: 10,
+  MAX_VISION: 4,
+  EXTRACT_BUDGET_MS: 120000,
+  VISION_TIMEOUT_MS: 60000,
+  VISION_MIN_REMAINING_MS: 15000,
+  SLACK_DL_TIMEOUT_MS: 30000,
+  SLACK_DL_MAX_REDIRECTS: 3,
+  EXT_HEADERS_TIMEOUT_MS: 10000,
+  EXT_TOTAL_TIMEOUT_MS: 20000,
+  EXT_MAX_REDIRECTS: 5,
+  INT_NET_TIMEOUT_MS: 20000,
+  INT_MAX_REDIRECTS: 10,
+  INT_RENDER_TIMEOUT_MS: 25000,
+  PARSE_TIMEOUT_MS: 20000,
+  WORKER_MAX_HEAP_MB: 512,
+  WORKER_MAX_RSS_BYTES: 1024 * MB,
+  WORKER_RSS_POLL_MS: 250,
+  MAX_BYTES: Object.freeze({
+    pdf: 25 * MB,
+    docx: 20 * MB,
+    pptx: 20 * MB,
+    xlsx: 10 * MB,
+    xls: 10 * MB,
+    ods: 10 * MB,
+    eml: 10 * MB,
+    msg: 10 * MB,
+    text: 5 * MB,
+    csv: 5 * MB,
+    html: 5 * MB,
+    image: 10 * MB,
+    heic: 15 * MB,
+    external: 10 * MB,
+    internal: 25 * MB,
+  }),
+  HEIC_MAX_PIXELS: 25000000,
+  ZIP_MAX_TOTAL: 100 * MB,
+  ZIP_MAX_XML_ENTRY: 20 * MB,
+  ZIP_MAX_ENTRY: 50 * MB,
+  ZIP_MAX_ENTRIES: 5000,
+  PDF_MAX_PAGES: 50,
+  PPTX_MAX_SLIDES: 100,
+  SHEET_MAX: 10,
+  SHEET_ROWS: 200,
+  RAW_TEXT_MAX_CHARS: 60000,
+  ITEM_MAX_CHARS: 12000,
+  CONTEXT_TOTAL_MAX_CHARS: 30000,
+  PROMPT_TARGET_MAX_CHARS: 56000,
+  ACTION_FREE_TEXT_MAX: 2000,
+  CONFIRM_PREVIEW_MAX: 300,
+  REPORT_MAX_LINES: 20,
+  REPORT_MAX_CHARS: 3000,
+  // Scanned-PDF threshold: fewer extracted characters than this goes to vision.
+  PDF_SCANNED_MIN_CHARS: 100,
+  // Largest image the worker may send back to main for the vision step.
+  IMAGE_REPLY_MAX_BYTES: 10 * MB,
+});
+
+// Keys are what the worker sends over the wire; values are what the user sees.
+const REASONS = Object.freeze({
+  BUDGET: 'skipped — time budget reached',
+  VISION_FAILED: 'vision read failed',
+  VISION_UNAVAILABLE: 'image reading unavailable on this machine',
+  VISION_CAP: 'skipped — more than 4 images or scanned documents',
+  PDFJS_UNAVAILABLE: 'PDF text reader unavailable — used image reading',
+  TOO_COMPLEX: 'file too complex to read safely',
+  PARSE_FAILED: "couldn't read file",
+  INVALID_JOB: 'invalid extraction job',
+  READER_UNAVAILABLE: 'file reader unavailable',
+  SECRET_LIKE: 'image text looked like credentials — not used',
+  LOCAL_ADDRESS: 'local network address',
+  THIN_PAGE: 'page needed resources from other hosts — static text only',
+  LINKS_ADDED: 'content added links — type the message yourself',
+  INVALID_FILE: 'invalid Slack file record',
+  // Format-specific (design §8 table).
+  PDF_PASSWORD: 'password-protected PDF',
+  PDF_FAILED: "couldn't parse PDF",
+  SCANNED_PDF_UNAVAILABLE: 'scanned PDF — no text layer; image reading unavailable',
+  SCANNED_PDF_FAILED: 'scanned PDF — no text layer; vision read failed',
+  DOCX_FAILED: "couldn't parse Word file",
+  PPTX_FAILED: "couldn't parse PowerPoint file",
+  SHEET_FAILED: "couldn't parse spreadsheet",
+  SHEET_ROWS_CUT: 'first 200 rows per sheet',
+  TEXT_DECODE: "couldn't decode text",
+  TEXT_BINARY: 'looks binary — not a text file',
+  HTML_EMPTY: 'empty page',
+  EML_FAILED: "couldn't parse email",
+  MSG_FAILED: "couldn't parse Outlook message",
+  ZIP_UNSAFE: 'damaged or unsafe Office file',
+  HEIC_TOO_LARGE: 'photo too large to convert',
+  HEIC_FAILED: "couldn't convert HEIC photo",
+  AVIF_UNSUPPORTED: "I can't read .avif files",
+  UNSUPPORTED: "I can't read this kind of file",
+  TOO_LARGE: 'file too large to read',
+  EMPTY: 'no readable text found',
+});
+
+module.exports = { LIMITS, REASONS };

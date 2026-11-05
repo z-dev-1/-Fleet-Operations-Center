@@ -1,0 +1,8 @@
+# Fixture data is byte-exact (sha256 in README.md): no line-ending conversion.
+# Scripts, goldens and docs keep the repo default.
+* -text
+*.cjs text=auto
+*.json text=auto
+*.md text=auto
+sample.json -text
+sample.md -text
