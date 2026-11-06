@@ -33,7 +33,7 @@ const statusMod = require('./reliability/status');
 const fp = require('./capture/folder-plan');
 const ledger = require('./ingest/ledger');
 const adapter = require('./ingest/legacy-adapter');
-const { safeErr, errName } = require('./redact');
+const { errName } = require('./redact');                   // name:code only: reader / AI / triage errors may echo mail text
 let logger;
 try { logger = require('../utils/logger')('email-intel'); } catch (_) { logger = { info() {}, warn() {}, error() {} }; }
 
@@ -170,7 +170,7 @@ async function _scanBody(opts, trigger, job, triage, prevResults) {
     if (att) Object.assign(readOpts, _attachReadOpts(att, excerpts));
     reader = await readFn(readOpts);
   } catch (e) {
-    logger.warn('[email-intel] reader threw ' + safeErr(e));
+    logger.warn('[email-intel] reader threw ' + errName(e));
     reader = null;
   }
 
@@ -361,7 +361,7 @@ async function _understand(o) {
     if (o.att) Object.assign(actx, { attachmentsOn: true, attachmentExcerpts: excerpts });
     stats = await analyze.runScanAnalysis(msgDoc, actx, commit);
   } catch (e) {
-    logger.warn('[email-intel] analysis failed ' + safeErr(e));
+    logger.warn('[email-intel] analysis failed ' + errName(e));
   }
   if (o.att) _afterAnalysis(excerpts);
   if (stats) logger.info('[email-intel] analysis id=' + scanId + ' eligible=' + stats.eligible + ' ok=' + stats.ok + ' cheap=' + stats.skippedCheap + ' old=' + stats.skippedOld + ' unavailable=' + stats.aiUnavailable + ' invalid=' + stats.invalid + ' pending=' + stats.pending + ' calls=' + stats.aiCalls + ' lane=' + stats.laneState);
@@ -474,7 +474,7 @@ async function _buildLegacy(o) {
       const tr = await fn(batch.map(adapter.toLegacyEmail), { signal: opts.signal, requestId: opts.requestId });
       for (const rec of (tr && tr.records) || []) triaged[rec.id] = rec;
     } catch (e) {
-      logger.warn('[email-intel] legacy triage failed ' + safeErr(e));
+      logger.warn('[email-intel] legacy triage failed ' + errName(e));
     }
   }
   const results = adapter.buildResults({
@@ -506,7 +506,7 @@ async function runIntelScan(opts, trigger) {
   try {
     ran = await lock.run(t, () => _scan(opts, t));
   } catch (e) {
-    logger.error('[email-intel] scan failed ' + safeErr(e));
+    logger.error('[email-intel] scan failed ' + errName(e));
     try { _recordScanEnd({ scanId: null, endedAt: new Date().toISOString(), outcome: 'failed', partial: false, trigger: t, errorCode: 'exception', folders: [] }); } catch (_) { /* status only */ }
     return adapter.failedResults(_triage().loadResults(), 'read failed', 'exception');
   }
@@ -558,7 +558,7 @@ async function scheduledTick(ctx, cfg, deps) {
   const res = await runIntelScan(scanOpts, 'scheduled');
   if (res && res.skipped) { if (autoStatus) autoStatus.lastOutcome = 'skipped'; return res; }
   if (res && !res.authBlocked && cfg && cfg.autoApplyUnitUpdates) {
-    try { _triage().applyPendingUnitUpdates(res); } catch (e) { logger.warn('[email-intel] legacy apply failed ' + safeErr(e)); }
+    try { _triage().applyPendingUnitUpdates(res); } catch (e) { logger.warn('[email-intel] legacy apply failed ' + errName(e)); }
   }
   if (typeof deps.notify === 'function') {
     try { deps.notify(typeof deps.loadResults === 'function' ? deps.loadResults() : res); } catch (_) { /* overlay push only */ }

@@ -337,6 +337,72 @@ describe('AC-9 Phase D action paths log no dynamic content (FEAT-005)', () => {
     } finally { w.cleanup(); confirm._resetForTests(); }
   }, 30_000);
 });
+describe('AC-9 Phase G reliability paths log no dynamic content (FEAT-008)', () => {
+  it('scheduled ticks (complete, auth-blocked, failed, aborted, busy-other-run), the durable job, boot reconcile and the full status log only counts, ids and enums; thrown errors carry no content', async () => {
+    const { phaseCWorld, fact, fakeReader, T0 } = await import('./fixtures/email-intel/phase-c.js');
+    const engine = require('../src/store/sqlite_engine');
+    const jobs = require('../src/jobs');
+    const w = phaseCWorld({ enabled: true, capture: true, multiRecipient: true, actionsView: true, timelineWrites: true, threadReplies: true, attachments: true });
+    engine.close();
+    jobs._resetForTests({ flags: { enabled: true, types: { emailTriage: true } } });
+    jobs.init();
+    const ar = require('../src/auth/auth-report');
+    ar._setEnabledForTest(true);
+    ar._setStatusForTest({ state: 'HEALTHY' });
+    try {
+      const from = { name: S.name, address: S.addr };
+      const me = { name: 'Zila Santiago', address: 'zila.santiago@example.test' };
+      w.rules.push({ unit: '40123', fact: fact({ value: 'Turbo ETA 11/12', evidence: 'Turbo ETA 11/12 for 40123' }) });
+      const caps = [
+        w.cap({ from, to: [me, from], cc: [from], subject: S.subject, conversationId: 'conv-lg-1', messageId: 'lg-1', body: 'Turbo ETA 11/12 for 40123. ' + S.body, attachments: [{ name: S.attach }] }),
+        w.cap({ from, to: [me], subject: S.subject + ' 2', conversationId: 'conv-lg-2', messageId: 'lg-2', body: S.body + ' 40456' }),
+      ];
+      const idx = require('../src/email-intel/index');
+      const errors = [];
+      const tick = async (scanOpts, signal) => {
+        try { return await idx.scheduledTick({ signal: signal || new AbortController().signal }, { enabled: true, autoScan: true, autoApplyUnitUpdates: true }, { autoStatus: { runs: 0, skipped: { busy: 0, standby: 0 } }, notify: () => {}, loadResults: () => ({}), _scanOpts: Object.assign({ _now: T0, folders: ['Inbox', 'Missing ' + S.subject] }, scanOpts) }); } catch (e) { errors.push(e); return null; }
+      };
+      await tick({ _readMailbox: fakeReader(caps) });                                                         // complete (durable job)
+      await tick({ _readMailbox: async (o) => { const r = await fakeReader(caps)(o); return Object.assign(r, { ok: false, authBlocked: true }); } });   // auth-blocked
+      await tick({ _readMailbox: async () => { throw new Error('reader failed for ' + S.addr + ' ' + S.subject); } });   // failed
+      const ac = new AbortController();
+      await tick({ _readMailbox: async (o) => { const r = await fakeReader(caps)(o); ac.abort(); return r; } }, ac.signal);   // aborted
+      const other = jobs.begin({ type: 'emailTriage', scopeKey: 'mailbox' });
+      other.start();
+      await tick({ _readMailbox: fakeReader(caps) });                                                         // busy-other-run
+      other.complete({});
+      expect(errors.map((e) => e.code)).toEqual(['OWA_AUTH_BLOCKED', 'EMAIL_SCAN_FAILED', 'EMAIL_SCAN_ABORTED']);
+      for (const e of errors) for (const s of SENTINELS) { expect(e.message).not.toContain(s); expect(String(e.stack || '')).not.toContain(s); }
+      const jobRows = engine.getDb().prepare("SELECT checkpoint_json, last_error FROM jobs WHERE type = 'emailTriage'").all();
+      expect(jobRows.length).toBeGreaterThanOrEqual(4);
+      for (const r of jobRows) for (const s of SENTINELS) { expect(String(r.checkpoint_json || '')).not.toContain(s); expect(String(r.last_error || '')).not.toContain(s); }
+      // boot reconcile with every step active: interrupted scan, a send mid-click, a stale preparing one, a pending ledger entry, staged expiry
+      const guard = require('../src/email-intel/reply/send-guard');
+      const ck = Object.keys(w.stores.load('messages').byConv)[0];
+      const a = guard.createAttempt({ conversationKey: ck, mode: 'reply-all', mechanism: 'owa-thread', to: [from], cc: [from], subjectNorm: S.subject }).attempt;
+      guard.markSending(a.attemptId);
+      guard.createAttempt({ conversationKey: 'ck-other', mode: 'reply', mechanism: 'owa-thread', to: [from] }, { now: Date.now() - 11 * 60_000 });
+      w.stores.update('ledger', (doc) => { for (const e of Object.values(doc.entries)) { e.state = 'pending'; e.createdAt = new Date(Date.now() - 5 * 60_000).toISOString(); } return doc; });
+      w.stores.update('checkpoints', (c) => { c.scan.current = { scanId: 'sc_dead', startedAt: new Date().toISOString(), trigger: 'manual' }; return c; });
+      const out = await require('../src/email-intel/reliability/boot').reconcileOnBoot();
+      expect(out.sends).toEqual({ uncertain: 1, failed: 1 });
+      const st = idx.getStatus();
+      expect(st.midway).toEqual({ state: 'HEALTHY' });
+      expect(st.jobs).toMatchObject({ mode: 'active', effective: true });
+      const call = (ch, ...args) => handlers[ch]({}, ...args);
+      await call('emailIntel:status');
+      for (const s of SENTINELS) expect(JSON.stringify(st), s).not.toContain(s);
+      expect(logText()).toMatch(/boot reconcile interrupted=1 sendsUncertain=1 sendsFailed=1/);
+      expect(logText()).toMatch(/scan skipped: another run owns the mailbox job/);
+      const own = logLines().filter((l) => l.ns !== 'repair-history').map((l) => l.text).join('\n');
+      for (const s of SENTINELS.concat(['Missing ' + S.subject.slice(0, 10)])) expect(own, s).not.toContain(s);
+    } finally {
+      ar._reset();
+      jobs._resetForTests(); engine.close();
+      w.cleanup(); confirm._resetForTests();
+    }
+  }, 60_000);
+});
 describe('AC-9 Phase E reply paths log no dynamic content (FEAT-006)', () => {
   it('draft (refused, forced, unsafe), send-reply tokens (mismatch, uncertain, new-message), resolution, reconcile and the thread reply mechanism log only counts, ids and enums', async () => {
     const { phaseCWorld } = await import('./fixtures/email-intel/phase-c.js');

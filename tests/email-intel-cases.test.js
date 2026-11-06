@@ -572,3 +572,52 @@ describe('acceptance case M with attachments (FEAT-007)', () => {
     expect(res.emails[0].attachments[0]).toEqual({ name: 'Estimate_40123.pdf', ext: 'pdf', type: 'document' });     // legacy shape unchanged
   });
 });
+describe('acceptance case K at the scheduled-tick level (FEAT-008, final)', () => {
+  let w = null;
+  afterEach(() => { if (w) w.cleanup(); w = null; });
+  it('case K: auth expires mid-scan in a scheduled tick: committed batch and checkpoints kept, failure reported accurately (AuthBlockedError, status, banner data), next scan resumes', async () => {
+    const { fakeReader, T0 } = await import('./fixtures/email-intel/phase-c.js');
+    w = phaseCWorld();
+    w.rules.push({ unit: '40123', fact: fact() });
+    const caps = [
+      w.cap({ from: DEALER, to: [ZILA, COWORKER], subject: 'Turbo 40123', conversationId: 'conv-k1', messageId: 'k-1', body: 'Turbo ETA 11/12 for 40123' }),
+      w.cap({ from: DEALER, to: [ZILA], subject: 'Brakes 40456', conversationId: 'conv-k2', messageId: 'k-2', body: 'Brake pads arrived for 40456' }),
+    ];
+    // The first folder's batch is committed, then Outlook shows the sign-in wall: DOMO partial, Relay Garage not reached.
+    const wall = async (o) => {
+      await o.onBatch('Inbox', [{ rowKey: 'row-k1', rowSig: 'sig-k1', captures: [caps[0]] }]);
+      return { ok: false, authBlocked: true, aborted: false, timedOut: false, opened: 2, rowsExamined: 3,
+        folders: [
+          { folder: 'Inbox', status: 'ok', requested: 1, examined: 1, opened: 1, ingested: 1, skippedKnown: 0, caughtUp: true, backlog: false, backlogRemaining: 0, retried: 0 },
+          { folder: 'DOMO', status: 'partial', requested: 5, examined: 2, opened: 1, ingested: 0, skippedKnown: 0, caughtUp: false, backlog: true, backlogRemaining: 4, retried: 0 },
+          { folder: 'Relay Garage', status: 'not-reached', requested: 5, examined: 0, opened: 0, ingested: 0, skippedKnown: 0, caughtUp: false, backlog: false, backlogRemaining: 0, retried: 0 },
+        ] };
+    };
+    const auto = { runs: 0, lastOutcome: null, lastError: null, skipped: { busy: 0, standby: 0 } };
+    const deps = (reader) => ({ autoStatus: auto, notify: () => {}, loadResults: () => ({}), _scanOpts: { _now: T0, folders: ['Inbox', 'DOMO', 'Relay Garage'], _readMailbox: reader } });
+    let thrown = null;
+    try { await w.idx.scheduledTick({ signal: new AbortController().signal }, { autoApplyUnitUpdates: true }, deps(wall)); } catch (e) { thrown = e; }
+    expect(thrown && thrown.code).toBe('OWA_AUTH_BLOCKED');
+    expect(auto.lastOutcome).toBe('authBlocked');
+    const ck = w.stores.load('checkpoints');
+    expect(ck.scan.last).toMatchObject({ outcome: 'auth-blocked', partial: true, trigger: 'scheduled' });
+    expect(ck.scan.last.folders.map((f) => [f.folder, f.status])).toEqual([['Inbox', 'ok'], ['DOMO', 'partial'], ['Relay Garage', 'not-reached']]);
+    expect(ck.scan.current).toBeNull();
+    expect(Object.keys(ck.folders.Inbox.seenRows)).toEqual(['row-k1']);
+    expect(ck.owaAuth).toMatchObject({ state: 'blocked', blockedCount: 1 });
+    expect(Object.keys(w.messages())).toHaveLength(1);
+    expect(w.lines('40123')).toHaveLength(1);                                  // the committed message was still analyzed and recorded
+    const st = w.idx.getStatus();
+    expect(st.warnings).toContain('auth-blocked');
+    expect(st.owaAuth.state).toBe('blocked');
+    const P = await import('../renderer/src/js/components/email-intel-panels.js');
+    expect(P.renderBannersHtml(st)).toContain('Outlook needs sign-in. Read 1 message from 1 folder; 2 folders not read. Progress is saved.');
+    // signed in again: the next tick resumes (Inbox row known), completes and clears the block; no duplicate timeline line
+    const res = await w.idx.scheduledTick({ signal: new AbortController().signal }, { autoApplyUnitUpdates: true }, deps(fakeReader(caps)));
+    expect(res.intel.outcome).toBe('complete');
+    expect(w.stores.load('checkpoints').owaAuth.state).toBe('ok');
+    expect(Object.keys(w.messages())).toHaveLength(2);
+    expect(w.lines('40123')).toHaveLength(1);
+    expect(auto.lastOutcome).toBe('ok');
+  }, 30_000);
+});

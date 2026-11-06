@@ -32,7 +32,7 @@ const executors = require('../email-intel/executors');
 const stores = require('../email-intel/stores');
 const cfgMod = require('../email-intel/config');
 const C = require('../email-intel/constants');
-const { safeErr } = require('../email-intel/redact');
+const { safeErr, errName } = require('../email-intel/redact');
 
 const TOKEN_RE = /^[0-9a-f]{32}$/;
 const PROBE_RE = /^pr_[0-9a-f]{16}$/;
@@ -368,8 +368,8 @@ function registerEmailIntelIPC(_ctx) {
   // The synchronous steps (incl. the send recovery) have run when this returns; the ledger pass finishes later.
   if (flags.engaged()) {
     try {
-      require('../email-intel/reliability/boot').reconcileOnBoot().catch((e) => logger.warn('boot reconcile failed ' + safeErr(e)));
-    } catch (e) { logger.warn('boot reconcile failed ' + safeErr(e)); }
+      require('../email-intel/reliability/boot').reconcileOnBoot().catch((e) => logger.warn('boot reconcile failed ' + errName(e)));
+    } catch (e) { logger.warn('boot reconcile failed ' + errName(e)); }
   }
 
   handle('emailIntel:prepare-action', (_e, kind, payload) => {
