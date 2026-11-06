@@ -236,6 +236,15 @@ describe('R8.4 caps, not-found folders, abort and the F-03 preview retry', () =>
     expect(h.world.openLog).toHaveLength(before);
   });
 
+  it('R8.4 per-folder soft time: a folder that takes longer than its soft time stops and keeps the rest as a backlog', async () => {
+    h = makeHarness({ Inbox: inboxRows('Inbox', 10) }, { onExec: async (kind, n, api, world) => { if (kind === 'pane' && world.openLog.length === 2) await new Promise((r) => setTimeout(r, 60)); } });
+    const folders = ['Inbox'];
+    const r = await cap.readMailbox({ folders, plan: fp.planFolderBudgets({ folders, max: 25 }), checkpoints: {}, folderSoftMs: 40, onBatch: async () => {}, _electron: h.electron, _warm: warmOk, _sleep: noSleep, authGraceMs: 20 });
+    expect(r.opened).toBe(2);
+    expect(r.folders[0]).toMatchObject({ status: 'skipped-budget', backlog: true, backlogRemaining: 8 });
+    expect(C.FOLDER_SOFT_MS).toBe(90_000);
+  });
+
   it('F-20 the scan deadline stops opening rows and ends partial with a deadline reason', async () => {
     h = makeHarness({ Inbox: inboxRows('Inbox', 10) });
     const folders = ['Inbox'];

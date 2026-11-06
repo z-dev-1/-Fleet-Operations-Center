@@ -193,6 +193,7 @@ async function readMailbox(opts) {
   const caps = Object.assign({ maxOpen: C.MAX_OPEN_DEFAULT, rawCap: C.SCAN_RAW_CAP }, opts.caps || {});
   const lookbackMs = (Number.isFinite(opts.lookbackDays) ? opts.lookbackDays : C.LOOKBACK_DAYS_DEFAULT) * DAY;
   const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const softMs = Number.isFinite(opts.folderSoftMs) ? Math.min(opts.folderSoftMs, C.FOLDER_SOFT_MS) : C.FOLDER_SOFT_MS;   // tests may only lower it
   const outcomes = {};
   for (const f of plan.order) outcomes[f] = _freshOutcome(f, plan.quota[f], cps[f]);
   const totals = { opened: 0, rowsExamined: 0, rawChars: 0, ingested: 0 };
@@ -240,7 +241,7 @@ async function readMailbox(opts) {
       }
       const c = cache[folder];
       let consecutiveKnown = 0; let ingestedHere = 0;
-      let stoppedOnKnown = false; let reachedHorizon = false; let budgetExhausted = false; let rawCapHit = false; let openCapHit = false; let deadlineHit = false;
+      let stoppedOnKnown = false; let reachedHorizon = false; let budgetExhausted = false; let rawCapHit = false; let openCapHit = false; let deadlineHit = false; let softHit = false;
       let batch = []; let batchMessages = 0;
       const flush = async () => {
         if (!batch.length) return;
@@ -250,6 +251,7 @@ async function readMailbox(opts) {
         fo.ingested += items.length; totals.ingested += items.length;
       };
       const firstEver = !ck.lastOkAt && !ck.newestReceivedAt && !Object.keys(ck.seenRows || {}).length;
+      const folderStart = Date.now();
 
       while (c.cursor < c.rows.length) {
         if (!alive()) break;
@@ -265,6 +267,7 @@ async function readMailbox(opts) {
         if (totals.opened >= caps.maxOpen) { openCapHit = true; budgetExhausted = true; break; }
         if (totals.rawChars >= caps.rawCap) { rawCapHit = true; budgetExhausted = true; break; }
         if (deadlineNear()) { deadlineHit = true; budgetExhausted = true; break; }
+        if ((fo.elapsedMs || 0) + (Date.now() - folderStart) > softMs) { softHit = true; budgetExhausted = true; break; }   // per-folder soft time (both passes): the rest is a backlog
 
         let snap = null;
         try {
@@ -300,6 +303,7 @@ async function readMailbox(opts) {
         if (batchMessages >= C.BATCH_MESSAGES) await flush();
       }
       await flush();
+      fo.elapsedMs = (fo.elapsedMs || 0) + (Date.now() - folderStart);
       if (!alive()) return;                                          // interrupted: the folder is reported partial
 
       let leftUnseen = 0;
@@ -309,7 +313,7 @@ async function readMailbox(opts) {
       fo.backlog = fp.computeBacklog({ prevBacklog: ck.backlog, budgetExhausted, leftUnseen: reachedHorizon ? 0 : leftUnseen, reachedEnd, reachedHorizon, examinedCap, stoppedOnKnown });
       fo.backlogRemaining = reachedHorizon ? 0 : leftUnseen;
       fo.caughtUp = !fo.backlog;
-      fo.hasMore = leftUnseen > 0 && !reachedHorizon;
+      fo.hasMore = leftUnseen > 0 && !reachedHorizon && !softHit;
       fo.status = (fo.backlog && fo.backlogRemaining > 0) || rawCapHit || openCapHit || deadlineHit ? 'skipped-budget' : 'ok';
       if (deadlineHit) fo.deadline = true;
       if (typeof opts.onFolderDone === 'function') { try { await opts.onFolderDone(folder, Object.assign({}, fo)); } catch (_) { /* progress hook only */ } }
@@ -341,7 +345,7 @@ async function readMailbox(opts) {
       o.status = st.timedOut ? 'timeout' : 'partial';
       o.backlog = true; o.caughtUp = false;
     }
-    delete o.hasMore;
+    delete o.hasMore; delete o.elapsedMs;
     return o;
   });
   const okFolders = list.filter((f) => f.status === 'ok' || f.status === 'skipped-budget' || f.status === 'partial' || f.status === 'timeout');
