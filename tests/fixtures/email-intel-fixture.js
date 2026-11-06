@@ -100,7 +100,7 @@ let realDeleteMessage;
 let owaMailer;
 let realSendViaOwa;
 let realWarm;
-function freshLegacy() {
+export function freshLegacy() {
   for (const m of LEGACY) forget(m);
   const triage = require(path.join(ROOT, 'src/scrapers/email_triage'));
   const actions = require(path.join(ROOT, 'src/scrapers/email_actions'));
@@ -113,13 +113,13 @@ function freshLegacy() {
   }
   return { triage, actions, intel };
 }
-function freshIpc() {
+export function freshIpc() {
   rec.handlers = {};
   const m = require(path.join(ROOT, 'src/ipc/email-triage'));
   m.registerEmailTriageIPC({});
   return m;
 }
-const call = (ch, ...args) => rec.handlers[ch]({}, ...args);
+export const call = (ch, ...args) => rec.handlers[ch]({}, ...args);
 
 export function resetWorld(seed) {
   docs.clear();
@@ -127,7 +127,7 @@ export function resetWorld(seed) {
   for (const [k, v] of Object.entries(seed || {})) docs.set(k, JSON.stringify(v));
   rec.saves = [];
 }
-const doc = (k) => (docs.has(k) ? JSON.parse(docs.get(k)) : '<absent>');
+export const doc = (k) => (docs.has(k) ? JSON.parse(docs.get(k)) : '<absent>');
 
 // ── Synthetic data ─────────────────────────────────────────────────────────────
 const ROWS = [
@@ -486,7 +486,7 @@ async function captureN5() {
 }
 
 // ── N6 sendReply and the send-reply handler patch ─────────────────────────────
-async function captureN6() {
+export async function captureN6() {
   const out = { actions: {}, handler: {} };
   const base = { id: 'em_a1', convId: 'conv/a1=', from: 'dealer@example.test', fromName: 'Dealer Co', subject: 'Unit 40123 parts update', replyDraft: 'Thanks <b>&</b>' };
   const statuses = { sent: { status: 'sent' }, blockedAuth: { status: 'blocked-auth' }, uncertain: { status: 'delivery-uncertain' }, failed: { status: 'failed-before-send' }, unknown: {}, nullResult: null };
@@ -544,7 +544,7 @@ function preloadKeys(name) {
   const block = text.slice(start, end);
   return Array.from(block.matchAll(/^\s{2}(\w+):/gm)).map((m) => m[1]);
 }
-export { preloadKeys };
+export { preloadKeys, overlay as overlayFns, ROWS as FLEET_ROWS, EMAILS as FIXTURE_EMAILS };
 
 function captureN7N11() {
   resetWorld({});
