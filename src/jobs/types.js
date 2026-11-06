@@ -23,9 +23,12 @@ const _registry = {
   repairIntel: Object.freeze({ leaseMs: 10 * MIN, maxRunMs: 30 * MIN, maxAttempts: 3, resumeMaxAgeMs: 6 * H, sideEffects: 'none-external', recovery: 'retry', adopted: true }),
   rcaAutofill: Object.freeze({ leaseMs: 5 * MIN, maxRunMs: 10 * MIN, maxAttempts: 1, resumeMaxAgeMs: 0, sideEffects: 'none-external', recovery: 'retry-on-demand', adopted: true }),
   longDwellAiFill: Object.freeze({ leaseMs: 10 * MIN, maxRunMs: 4 * H, maxAttempts: 3, resumeMaxAgeMs: 12 * H, sideEffects: 'none-external', recovery: 'retry', adopted: true }),
+  // emailTriage (email-intel): one mailbox scan (scope 'mailbox'). Reads the mailbox and writes local
+  // stores only; timeline writes are idempotent (ledger + marker); sends are never jobs.
+  emailTriage: Object.freeze({ leaseMs: 10 * MIN, maxRunMs: 30 * MIN, maxAttempts: 3, resumeMaxAgeMs: 2 * H, sideEffects: 'none-external', recovery: 'retry', adopted: true }),
 };
 
-const ADOPTED = Object.freeze({ deepScan: true, repairIntel: true, rcaAutofill: true, longDwellAiFill: true });
+const ADOPTED = Object.freeze({ deepScan: true, repairIntel: true, rcaAutofill: true, longDwellAiFill: true, emailTriage: true });
 
 function get(type) {
   return typeof type === 'string' && Object.prototype.hasOwnProperty.call(_registry, type) ? _registry[type] : null;

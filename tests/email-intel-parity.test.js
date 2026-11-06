@@ -177,6 +177,17 @@ describe('N13 rollback: records written by a flagged build are handled with all 
 
 describe('N14 jobs status with all flags OFF', () => {
   it('matches the baseline (FEAT-008 adds only the single inert types.emailTriage entry)', () => {
-    expect(cur.N14).toEqual(baseline.N14);
+    // NFR-12: the only difference is the new job type itself (its inert summary entry, its slot in the
+    // type list, its env name and its default-false flag). Everything else is the base document.
+    const expected = JSON.parse(JSON.stringify(baseline.N14));
+    expected.summary.types.emailTriage = { flag: false, effective: false, adopted: true, mode: 'off' };
+    expected.jobTypes = expected.jobTypes.concat(['emailTriage']);
+    expected.jobEnv.emailTriage = 'FLEET_JOBS_EMAIL_TRIAGE';
+    expected.resolveJobsDefault.types.emailTriage = false;
+    expect(cur.N14).toEqual(expected);
+    const added = Object.keys(cur.N14.summary.types).filter((k) => !(k in baseline.N14.summary.types));
+    expect(added).toEqual(['emailTriage']);
+    expect(cur.N14.init).toEqual(baseline.N14.init);
+    expect(cur.N14.status).toEqual(baseline.N14.status);
   });
 });

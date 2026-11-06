@@ -102,10 +102,29 @@ describe('R8.7 / NFR-1 resolveEmailIntelFlags', () => {
     expect(pf.loadEmailIntel({ load: () => ON(FULL), env: {} }).effective.threadReplies).toBe(true);
   });
 
-  it('existing resolvers and JOB_TYPES are unchanged by this phase', () => {
-    expect(pf.JOB_TYPES).toEqual(['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill']);
-    expect(pf.resolveJobsFlags({}, {}).types).toEqual({ deepScan: false, repairIntel: false, longDwellAiFill: false, rcaAutofill: false });
+  it('existing resolvers are unchanged; JOB_TYPES only gains emailTriage (FEAT-008)', () => {
+    expect(pf.JOB_TYPES).toEqual(['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill', 'emailTriage']);
+    expect(pf.resolveJobsFlags({}, {}).types).toEqual({ deepScan: false, repairIntel: false, longDwellAiFill: false, rcaAutofill: false, emailTriage: false });
     expect(pf.resolveWorkerFlags({}, {}).supervisorEnabled).toBe(false);
+  });
+
+  it('F-29 flag-OFF jobs status gains only an inert emailTriage entry', () => {
+    const jobs = require('../src/jobs');
+    const types = require('../src/jobs/types');
+    try {
+      jobs._resetForTests({ flags: { enabled: false, types: {} } });
+      expect(jobs.init()).toEqual({ mode: 'off' });
+      const sum = jobs.getSummary(Date.now());
+      expect(Object.keys(sum.types)).toEqual(['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill', 'emailTriage']);
+      expect(sum.types.emailTriage).toEqual({ flag: false, effective: false, adopted: true, mode: 'off' });
+      expect(jobs.begin({ type: 'emailTriage', scopeKey: 'mailbox' })).toBe(jobs.NOOP_HANDLE);
+      expect(jobs.isEffective('emailTriage')).toBe(false);
+      expect(types.get('emailTriage')).toEqual({ leaseMs: 600000, maxRunMs: 1800000, maxAttempts: 3, resumeMaxAgeMs: 7200000, sideEffects: 'none-external', recovery: 'retry', adopted: true });
+      expect(types.ADOPTED.emailTriage).toBe(true);
+      // the job flag alone (no master) and the env default never enable it
+      expect(pf.resolveJobsFlags({ jobs: { emailTriage: { durable: true } } }, {})).toMatchObject({ enabled: false, types: { emailTriage: true } });
+      expect(pf.resolveJobsFlags({ jobs: { durable: { enabled: true }, emailTriage: { durable: true } } }, { FLEET_JOBS_EMAIL_TRIAGE: '0' }).types.emailTriage).toBe(false);
+    } finally { jobs._resetForTests(); }
   });
 
   it('the test setup forces every email-intel env var to 0', () => {

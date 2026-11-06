@@ -29,7 +29,7 @@ try { _defaultLog = require('../utils/logger')('jobs'); } catch (_) { _defaultLo
 
 const BOOT_ID = crypto.randomBytes(6).toString('hex');
 const OWNER = os.hostname() + '|' + process.pid + '|' + BOOT_ID;
-const JOB_TYPES = ['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill'];
+const JOB_TYPES = ['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill', 'emailTriage'];
 const PRUNE_EVERY_MS = 6 * 60 * 60 * 1000;
 const SCOPE_RE = /^[A-Za-z0-9_.:|-]{1,200}$/;
 
