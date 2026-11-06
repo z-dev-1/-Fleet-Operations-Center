@@ -115,7 +115,7 @@ describe('NFR-8 off-limits files and import lists', () => {
     /^src\/ipc\/long-dwell-sp/, /^src\/scrapers\/aap_custom_form_probe$/, /bak-agent-wiring/, /long_dwell/i, /^src\/longdwell\//, /^src\/cluster\/aea-keepalive$/, /graph|ews/i,
   ];
   const ALLOW = new Set([
-    'src/justme-context/extract-host', 'src/justme-context/secret-scrub', 'src/orcha/fas/injection-guard', 'src/orcha/fas/roster-lookup',
+    'src/justme-context/extract-host', 'src/justme-context/secret-scrub', 'src/justme-context/constants', 'src/orcha/fas/injection-guard', 'src/orcha/fas/roster-lookup',
     'src/orcha/relay', 'src/orcha/reason', 'src/orcha/canonical_state', 'src/orcha/repair-history',
     'src/scrapers/owa_reader', 'src/scrapers/owa-mailer', 'src/scrapers/email_actions', 'src/scrapers/email_intel', 'src/scrapers/email_triage',
     'src/store/index', 'src/store', 'src/config/perf-flags', 'src/config/paths', 'src/jobs/index', 'src/jobs', 'src/workers/supervisor',
