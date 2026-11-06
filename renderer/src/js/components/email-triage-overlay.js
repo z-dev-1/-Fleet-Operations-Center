@@ -526,3 +526,4 @@ function _injectStyle() {
   `;
   document.head.appendChild(style);
 }
+export const __test__ = { _cardHtml, _replyButtonHtml, _replyPanelHtml };
