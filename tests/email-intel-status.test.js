@@ -1,6 +1,6 @@
 // tests/email-intel-status.test.js — R1.7 outcome and per-folder statuses, R8.5 auth surfacing (read-only,
 // no auth-report writes), F2-10 warning severities.
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import { createRequire } from 'module';
 import { inboxRows, rowsScenarios } from './fixtures/email-intel/emails.js';
@@ -61,12 +61,90 @@ describe('R8.5 auth surfacing', () => {
     expect(s.warnings).toContain('auth-blocked');
     expect(s.warningDetails.find((w) => w.code === 'auth-blocked').severity).toBe('error');
     expect(s.midway).toBeNull();
-    // The module never imports or writes the auth modules (owaAuth is local state only).
+    // The module never writes the auth modules (owaAuth is local state only). status.js is the single
+    // read-only reader of auth-report (currentStatus(), design 8.6); nothing calls .report(.
     for (const f of ['src/email-intel/reliability/status.js', 'src/email-intel/index.js', 'src/email-intel/capture/owa_capture.js']) {
       const src = fs.readFileSync(require.resolve('../' + f), 'utf8');
-      expect(src, f).not.toMatch(/require\([^)]*auth/);
+      const requires = Array.from(src.matchAll(/require\(\s*'([^']*auth[^']*)'\s*\)/g)).map((m) => m[1]);
+      expect(requires, f).toEqual(f.endsWith('status.js') ? ['../../auth/auth-report'] : []);
       expect(src, f).not.toMatch(/\.report\(/);
     }
+  });
+
+  it('R8.5 midway is the read-only auth-report currentStatus(); owaAuth never reaches any auth module', async () => {
+    const ar = require('../src/auth/auth-report');
+    const report = vi.spyOn(ar, 'report');
+    const stepUp = vi.spyOn(ar, 'reportStepUp');
+    ar._setEnabledForTest(true);
+    ar._setStatusForTest({ state: 'HEALTHY', level: 'ok' });
+    try {
+      h = makeHarness({ Inbox: inboxRows('Inbox', 2) });
+      await h.run({ _warm: async () => ({ authWall: true, url: AUTH_URL }) });
+      const s = h.idx.getStatus();
+      expect(s.owaAuth.state).toBe('blocked');
+      expect(s.midway).toEqual({ state: 'HEALTHY', level: 'ok' });
+      expect(report).not.toHaveBeenCalled();
+      expect(stepUp).not.toHaveBeenCalled();
+    } finally { ar._reset(); report.mockRestore(); stepUp.mockRestore(); }
+  });
+});
+
+describe('F2-05 supervisor, jobs and paused-until surfacing', () => {
+  let h = null;
+  afterEach(() => { if (h) h.cleanup(); h = null; vi.restoreAllMocks(); });
+  const WORKER = (over) => Object.assign({
+    name: 'emailTriage', group: 'comms', label: 'Email triage auto-scan', state: 'healthy', breakerState: 'ok', isolations: 0, isolatedUntil: null,
+    nextRunAt: 1_800_000_600_000, consecutiveFailures: 0, disabledReason: null, lastEndAt: 1_800_000_000_000, counts: { runs: 4 },
+  }, over || {});
+
+  it('F2-05 status.supervisor carries state, breakerState, isolatedUntil and nextRunAt for the emailTriage worker', async () => {
+    const sup = require('../src/workers/supervisor');
+    vi.spyOn(sup, 'getStatus').mockReturnValue({ enabled: true, workers: [WORKER({ name: 'repairIntel' }), WORKER()] });
+    h = makeHarness({ Inbox: inboxRows('Inbox', 1) });
+    const s = h.idx.getStatus();
+    expect(s.supervisor).toEqual({ state: 'healthy', breakerState: 'ok', isolatedUntil: null, nextRunAt: 1_800_000_600_000, isolations: 0, consecutiveFailures: 0, disabledReason: null, lastEndAt: 1_800_000_000_000 });
+    expect(s.scheduledPausedUntil).toBeNull();
+    expect(s.jobs).toMatchObject({ type: 'emailTriage', mode: 'off', effective: false, open: null });
+    // no supervisor entry (legacy timer, supervisor off) -> null
+    sup.getStatus.mockReturnValue({ enabled: false, workers: [] });
+    expect(h.idx.getStatus().supervisor).toBeNull();
+    // the supervisor module is only read
+    expect(fs.readFileSync(require.resolve('../src/email-intel/reliability/status.js'), 'utf8')).not.toMatch(/supervisor'\)\.(claim|stop|reEnable|wake)/);
+  });
+
+  it('F2-05 scheduledPausedUntil is set only when the supervisor entry is isolated', async () => {
+    const until = 1_800_003_600_000;
+    expect(st.pausedUntil(WORKER({ state: 'isolated', breakerState: 'isolated', isolatedUntil: until }))).toBe(until);
+    expect(st.pausedUntil(WORKER({ state: 'degraded', breakerState: 'ok', isolatedUntil: until }))).toBeNull();
+    expect(st.pausedUntil(WORKER({ state: 'disabled', breakerState: 'budget-exhausted', isolatedUntil: until }))).toBeNull();
+    expect(st.pausedUntil(WORKER({ state: 'isolated', isolatedUntil: null }))).toBeNull();
+    expect(st.pausedUntil(null)).toBeNull();
+    const sup = require('../src/workers/supervisor');
+    vi.spyOn(sup, 'getStatus').mockReturnValue({ enabled: true, workers: [WORKER({ state: 'isolated', breakerState: 'isolated', isolations: 1, isolatedUntil: until, nextRunAt: until })] });
+    h = makeHarness({ Inbox: inboxRows('Inbox', 1) });
+    const s = h.idx.getStatus();
+    expect(s.scheduledPausedUntil).toBe(until);
+    expect(s.supervisor).toMatchObject({ state: 'isolated', breakerState: 'isolated', isolatedUntil: until, isolations: 1 });
+    expect(s.warnings).toContain('scheduled-paused');
+    // a manual scan still runs while scheduled scans are paused
+    const res = await h.run({ max: 25 });
+    expect(res.intel.outcome).toBe('complete');
+    // the IPC status channel returns the same field
+    expect(h.idx.getStatus().scheduledPausedUntil).toBe(until);
+  });
+
+  it('F-17 gateway flags are relay queueStats().flags, read-only, only while multiRecipient is effective', () => {
+    h = makeHarness({ Inbox: inboxRows('Inbox', 1) });
+    const lane = require('../src/email-intel/understand/lane');
+    const relay = { isolatedLaneAvailable: () => true, queueStats: () => ({ queued: 3, flags: { priorities: true, abortOnTimeout: false, dedupe: true, routerDecides: false, reserveSlots: 2 } }) };
+    lane._setRelayForTests(relay);
+    try {
+      expect(h.idx.getStatus().aiGateway).toBeNull();                          // capture only: relay is not consulted
+      h.flags._setForTests({ enabled: true, capture: true, multiRecipient: true });
+      expect(h.idx.getStatus().aiGateway).toEqual({ priorities: true, abortOnTimeout: false, dedupe: true, routerDecides: false });
+      relay.queueStats = () => { throw new Error('relay down'); };
+      expect(h.idx.getStatus().aiGateway).toBeNull();
+    } finally { lane._resetForTests(); }
   });
 });
 

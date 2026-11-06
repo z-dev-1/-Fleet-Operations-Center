@@ -69,23 +69,53 @@ function _recordScanEnd(scan, extra) {
   });
 }
 
-/** One scan under the lock. Always resolves to LegacyResults; throws only for programming errors (caught by the caller). */
+/**
+ * One scan under the lock (design 8.2 steps 1-12). Always resolves to LegacyResults; throws only for
+ * programming errors (caught by runIntelScan, which records outcome 'failed' and clears scan.current).
+ *   1  flags + config (once per scan); a store from a newer build refuses the scan (read-only, NFR-3)
+ *   3  durable job begin (NOOP unless jobs.emailTriage.durable is effective); busy -> skipped busy-other-run
+ *   4  boot-style reconcile: a scan.current left by a crashed run -> interrupted (pending timeline writes and
+ *      staged caps run in the fact pre-pass, step 5, with the legacy bootstrap)
+ *   6-8  read (streaming, checkpoint per committed batch) and analysis (budget, deadline, signal)
+ *   9-10 facts, actions, legacy results; 11 finalize (scan.last, owaAuth, job complete / fail)
+ */
 async function _scan(opts, trigger) {
-  const startedAt = Number.isFinite(opts._now) ? opts._now : Date.now();
-  const nowIso = new Date(startedAt).toISOString();
-  const scanId = 'sc_' + crypto.randomBytes(4).toString('hex');
-  const wallStart = Date.now();
-  const deadlineAt = wallStart + C.SCAN_DEADLINE_MS;                          // F-20 (wall clock: the reader and AI queue compare to Date.now())
   const triage = _triage();
-  const legacyCfg = triage.getConfig();                                        // read ONCE per scan (F2-01)
-  const cfg = cfgMod.normalize(stores.load('config'));
-  const store = require('../store');
   const prevResults = triage.loadResults();
-
   if (stores.isReadOnly('checkpoints') || stores.isReadOnly('messages')) {
     logger.warn('[email-intel] scan refused: a store is from a newer build (read-only)');
     return adapter.failedResults(prevResults, 'read failed', 'store-newer-version');
   }
+  const job = require('./reliability/job').begin();
+  if (job.skipped) return adapter.skippedResults(prevResults, job.skipped);
+  let res;
+  try {
+    res = await _scanBody(opts, trigger, job, triage, prevResults);
+  } catch (e) {
+    job.fail('exception');
+    throw e;
+  }
+  const intel = (res && res.intel) || {};
+  job.finish(intel.outcome, { scanId: intel.scanId || null, partial: !!intel.partial });
+  return res;
+}
+
+async function _scanBody(opts, trigger, job, triage, prevResults) {
+  const startedAt = Number.isFinite(opts._now) ? opts._now : Date.now();
+  const nowIso = new Date(startedAt).toISOString();
+  const scanId = 'sc_' + crypto.randomBytes(4).toString('hex');
+  const wallStart = Date.now();
+  // F-20 (wall clock: the reader and AI queue compare to Date.now()); 20 min, below the supervisor's 30 min
+  // timeout. The test hook can only shorten it.
+  const deadlineMs = Number.isFinite(opts._deadlineMs) && opts._deadlineMs > 0 ? Math.min(opts._deadlineMs, C.SCAN_DEADLINE_MS) : C.SCAN_DEADLINE_MS;
+  const deadlineAt = wallStart + deadlineMs;
+  const legacyCfg = triage.getConfig();                                        // read ONCE per scan (F2-01)
+  const cfg = cfgMod.normalize(stores.load('config'));
+  const store = require('../store');
+  const aborted = () => !!(opts.signal && opts.signal.aborted);
+
+  // Step 4: this scan holds the lock, so a scan.current still on disk belongs to a run that never finished.
+  try { require('./reliability/boot').interruptStale(Date.now(), true); } catch (e) { logger.warn('[email-intel] stale scan check failed ' + errName(e)); }
 
   const folders = _folderList(opts, cfg, legacyCfg);
   const maxReq = Number.isFinite(opts.max) ? opts.max : (Number.isFinite(legacyCfg.maxEmails) ? legacyCfg.maxEmails : cfg.caps.maxEmails);
@@ -126,6 +156,7 @@ async function _scan(opts, trigger) {
       return ck;
     });
     if (!r2.ok) { storeError = r2.code || 'store'; throw new Error('store-write'); }
+    job.checkpoint({ scanId, folderIdx: Math.max(0, folders.indexOf(folder)), rows: stats.committedRows, newMessages: stats.newMessages });
   };
 
   const readFn = opts._readMailbox || require('./capture/owa_capture').readMailbox;
@@ -177,14 +208,14 @@ async function _scan(opts, trigger) {
   let d;
   let results;
   if (storeError) {
-    d = statusMod.deriveOutcome({ reader, committed: stats.newMessages + stats.upgraded, storeError, deadlineHit });
+    d = statusMod.deriveOutcome({ reader, committed: stats.newMessages + stats.upgraded, storeError, deadlineHit, aborted: aborted() });
     results = adapter.failedResults(prevResults, 'read failed', 'store');
     if (att) { try { _afterAnalysis(excerpts); } catch (_) { /* best effort */ } }
   } else if (_multiRecipient()) {
     const u = await _understand({ opts, trigger, cfg, legacyCfg, store, prevResults, touched, startedAt, deadlineAt, scanId, reader, committed: stats.newMessages + stats.upgraded, deadlineHit, att, excerpts });
     d = u.d; results = u.results;
   } else {
-    d = statusMod.deriveOutcome({ reader, committed: stats.newMessages + stats.upgraded, storeError, deadlineHit });
+    d = statusMod.deriveOutcome({ reader, committed: stats.newMessages + stats.upgraded, storeError, deadlineHit, aborted: aborted() });
     results = await _buildLegacy({ opts, triage, store, prevResults, touched, legacyCfg, plan, d, scanId, endMs, readerOk: !!reader });
   }
   results.intel = Object.assign({}, results.intel, { scanId, outcome: d.outcome, partial: d.partial, coalesced: false });
@@ -395,7 +426,7 @@ async function _understand(o) {
     const behind = !p || !p.intel || p.intel.latestMessageKey !== latest.messageKey || p.intel.analysisStatus !== String((latest.analysis || {}).status || 'pending');
     if (changed.has(ck) || behind) views.push({ conversationKey: ck, records });
   }
-  const d = statusMod.deriveOutcome({ reader, committed: o.committed, storeError: commitFailed, deadlineHit: o.deadlineHit, pendingAnalysis });
+  const d = statusMod.deriveOutcome({ reader, committed: o.committed, storeError: commitFailed, deadlineHit: o.deadlineHit, pendingAnalysis, aborted: !!(opts.signal && opts.signal.aborted) });
   const doneMs = Date.now();
   const results = adapter.buildPhaseBResults({
     prev: prevResults, views, now: doneMs, cfg: { readyDmSuggested: legacyCfg.readyDmSuggested },
@@ -487,10 +518,34 @@ async function runIntelScan(opts, trigger) {
   return ran.value;
 }
 
+// ── Supervisor outcome errors (design 8.5). Messages are fixed enum text, never message content. ──
+class AuthBlockedError extends Error {
+  constructor() { super('Outlook sign-in required; email scan blocked'); this.name = 'AuthBlockedError'; this.code = 'OWA_AUTH_BLOCKED'; }
+}
+class ScanFailedError extends Error {
+  constructor(errorCode) {
+    const c = /^[a-z0-9-]{1,40}$/i.test(String(errorCode || '')) ? String(errorCode) : 'read-failed';
+    super('Email scan failed (' + c + ')'); this.name = 'ScanFailedError'; this.code = 'EMAIL_SCAN_FAILED'; this.errorCode = c;
+  }
+}
+class ScanAbortedError extends Error {
+  constructor() { super('Email scan aborted; progress saved'); this.name = 'ScanAbortedError'; this.code = 'EMAIL_SCAN_ABORTED'; }
+}
+
+function _lastErrorCode() {
+  try { const l = stores.load('checkpoints').scan.last; return (l && l.errorCode) || null; } catch (_) { return null; }
+}
+
 /**
- * scheduledTick: the supervisor / legacy timer entry (design 8.5). Phase A keeps the legacy semantics:
- * a leader gate, the scan, the legacy fact apply (multiRecipient will own facts later), the overlay push
- * and the auto-scan counters. Failure-to-throw mapping for the supervisor arrives with Phase G.
+ * scheduledTick(ctx, cfg, deps): the supervisor / legacy timer entry (design 8.5).
+ *  1 leader gate (cluster.mayRunProduction, fail-open) -> { skipped:'standby' }
+ *  2 runIntelScan({ signal: ctx.signal, _trigger:'scheduled' }, 'scheduled') (F2-04: low AI priority)
+ *  3 a skip (busy, busy-other-run) is returned untouched (the supervisor's isSkip), no notify
+ *  4 legacy fact apply (inert once multiRecipient owns facts), overlay push, autoStatus counters
+ *  5 outcome mapping so the supervisor's counts and breaker see reality: auth-blocked -> AuthBlockedError
+ *    (code OWA_AUTH_BLOCKED), failed -> ScanFailedError, aborted -> ScanAbortedError; complete and partial
+ *    (including a deadline-limited scan) return the result. The legacy setInterval path swallows the throw
+ *    (`_autoTick().catch(() => {})`); the intel status records the outcome either way.
  */
 async function scheduledTick(ctx, cfg, deps) {
   deps = deps || {};
@@ -498,7 +553,9 @@ async function scheduledTick(ctx, cfg, deps) {
   let gate = true;
   try { const cl = require('../cluster'); gate = typeof cl.mayRunProduction === 'function' ? cl.mayRunProduction() !== false : true; } catch (_) { gate = true; }
   if (!gate) { if (autoStatus && autoStatus.skipped) autoStatus.skipped.standby++; return { skipped: 'standby' }; }
-  const res = await runIntelScan({ signal: ctx && ctx.signal, _trigger: 'scheduled' }, 'scheduled');
+  // deps._scanOpts: test-only injection (fake reader / window); the scheduler never passes it.
+  const scanOpts = Object.assign({}, deps._scanOpts && typeof deps._scanOpts === 'object' ? deps._scanOpts : {}, { signal: ctx && ctx.signal, _trigger: 'scheduled' });
+  const res = await runIntelScan(scanOpts, 'scheduled');
   if (res && res.skipped) { if (autoStatus) autoStatus.lastOutcome = 'skipped'; return res; }
   if (res && !res.authBlocked && cfg && cfg.autoApplyUnitUpdates) {
     try { _triage().applyPendingUnitUpdates(res); } catch (e) { logger.warn('[email-intel] legacy apply failed ' + safeErr(e)); }
@@ -506,11 +563,18 @@ async function scheduledTick(ctx, cfg, deps) {
   if (typeof deps.notify === 'function') {
     try { deps.notify(typeof deps.loadResults === 'function' ? deps.loadResults() : res); } catch (_) { /* overlay push only */ }
   }
+  const outcome = res && res.intel ? res.intel.outcome : null;
+  const authBlocked = outcome === 'auth-blocked' || !!(res && res.authBlocked);
+  const failed = outcome === 'failed' || outcome === 'aborted';
+  const errorCode = failed ? (outcome === 'aborted' ? 'aborted' : ((res && res.intel && res.intel.errorCode) || _lastErrorCode() || 'read-failed')) : null;
   if (autoStatus) {
     autoStatus.runs++;
-    autoStatus.lastOutcome = res && res.authBlocked ? 'authBlocked' : (res && res.intel && res.intel.outcome === 'failed' ? 'fail' : 'ok');
-    autoStatus.lastError = null;
+    autoStatus.lastOutcome = authBlocked ? 'authBlocked' : (failed ? 'fail' : 'ok');
+    autoStatus.lastError = failed ? errorCode : null;                       // enum only
   }
+  if (authBlocked) throw new AuthBlockedError();
+  if (outcome === 'aborted') throw new ScanAbortedError();
+  if (outcome === 'failed') throw new ScanFailedError(errorCode);
   return res;
 }
 
@@ -541,11 +605,15 @@ function getStatus() {
     try { unreconciledSends = require('./reply/send-guard').unreconciledCount(); } catch (_) { /* status only */ }
   }
   const config = cfgMod.normalize(stores.load('config'));
+  // Phase G (F2-05, F-17, R8.5): read-only views of the supervisor entry, the durable job, Midway and the AI gateway.
+  let ext = {};
+  try { ext = statusMod.collectExternal({ multiRecipient: !!(f && f.multiRecipient) }); } catch (_) { ext = {}; }
   const st = statusMod.buildStatus({
     enabled: engaged(), flags: f, flagWarnings: warnings, lane: laneSt, extraWarnings: extra, openStaged, openActions, unreconciledSends,
     config, checkpoints: stores.load('checkpoints'), messages: stores.load('messages'),
     running: lock.isBusy(), current: lock.current(),
-    readOnlyStores: ['config', 'checkpoints', 'messages'].map((n) => stores.isReadOnly(n)),
+    readOnlyStores: Object.keys(stores.KEYS).map((n) => stores.isReadOnly(n)),
+    supervisor: ext.supervisor, jobs: ext.jobs, midway: ext.midway, aiGateway: ext.aiGateway,
   });
   // Phase F: the one-time vision notice state (F-28); present only while `attachments` is effective.
   if (f && f.attachments && st && typeof st === 'object') {
@@ -557,4 +625,4 @@ function getStatus() {
   return st;
 }
 
-module.exports = { engaged, runIntelScan, scheduledTick, getStatus };
+module.exports = { engaged, runIntelScan, scheduledTick, getStatus, AuthBlockedError, ScanFailedError, ScanAbortedError };

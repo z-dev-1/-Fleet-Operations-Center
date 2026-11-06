@@ -100,4 +100,14 @@ async function probeLane(opts) {
 function _setRelayForTests(r) { _relay = r || null; }
 function _resetForTests() { _relay = null; _lane = { state: 'unknown', checkedAt: null, consecutiveFails: 0 }; }
 
-module.exports = { askIsolated, priorityFor, beginScan, recordSuccess, recordLaneFailure, probeLane, state, _setRelayForTests, _resetForTests };
+/** F-17 status: relay.queueStats().flags (priorities, abortOnTimeout, dedupe, routerDecides), read-only, or null. */
+function gatewayFlags() {
+  try {
+    const r = relay();
+    const q = typeof r.queueStats === 'function' ? r.queueStats() : null;
+    const g = q && q.flags && typeof q.flags === 'object' ? q.flags : null;
+    if (!g) return null;
+    return { priorities: !!g.priorities, abortOnTimeout: !!g.abortOnTimeout, dedupe: !!g.dedupe, routerDecides: !!g.routerDecides };
+  } catch (_) { return null; }
+}
+module.exports = { askIsolated, priorityFor, beginScan, recordSuccess, recordLaneFailure, probeLane, state, gatewayFlags, _setRelayForTests, _resetForTests };

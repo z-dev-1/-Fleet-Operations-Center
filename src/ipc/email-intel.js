@@ -363,9 +363,13 @@ function registerEmailIntelIPC(_ctx) {
     return r;
   });
 
-  // Boot recovery (design 6.5): a send that was mid-click when the app stopped becomes delivery-uncertain.
-  if (gateOpen('threadReplies')) {
-    try { require('../email-intel/reply/send-guard').bootRecover(); } catch (e) { logger.warn('send boot recovery failed ' + safeErr(e)); }
+  // Boot reconcile (design 8.8, 6.5): interrupted scan, sends mid-click -> delivery-uncertain, stale preparing ->
+  // failed-before-send, pending timeline writes, staged expiry, snoozed reopen. No network, no AI, no scan.
+  // The synchronous steps (incl. the send recovery) have run when this returns; the ledger pass finishes later.
+  if (flags.engaged()) {
+    try {
+      require('../email-intel/reliability/boot').reconcileOnBoot().catch((e) => logger.warn('boot reconcile failed ' + safeErr(e)));
+    } catch (e) { logger.warn('boot reconcile failed ' + safeErr(e)); }
   }
 
   handle('emailIntel:prepare-action', (_e, kind, payload) => {

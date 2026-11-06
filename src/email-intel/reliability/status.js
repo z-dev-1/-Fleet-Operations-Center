@@ -1,14 +1,17 @@
 'use strict';
 /**
  * email-intel/reliability/status.js — scan outcome derivation and the status document
- * (design 2.7, 8.6; R1.7, R8.5, F2-10). Pure: all inputs are passed in.
+ * (design 2.7, 8.6; R1.7, R8.5, F2-05, F2-10). The builders are pure (all inputs are passed in);
+ * collectExternal() is the only reader of other subsystems (supervisor, jobs, Midway status, AI gateway),
+ * all read-only.
  *
  *   deriveOutcome(input)        -> { outcome, partial, readError, errorCode }
  *   buildWarnings(input)        -> [{ code, severity }]
  *   WARNING_SEVERITY / severityOf(code)
  *   buildStatus(input)          -> the emailIntel:status document
+ *   pausedUntil(supervisorEntry) / supervisorEntry() / collectExternal({ multiRecipient })
  *
- * Outcomes: complete | partial | auth-blocked | failed | aborted | skipped.
+ * Outcomes: complete | partial | auth-blocked | failed | aborted | skipped (| interrupted, set at boot).
  * Every text produced here is built from enums and counts, never from message content.
  */
 const cfgMod = require('../config');
@@ -28,6 +31,8 @@ const WARNING_SEVERITY = Object.freeze({
   'too-many-folders-for-max': 'info',
   'unknown-folder': 'info',
   'minConfidence-reset': 'info',
+  'scan-interrupted': 'warning',
+  'scheduled-paused': 'warning',
 });
 const severityOf = (code) => WARNING_SEVERITY[code] || (/^(clamped|ignored|truncated)-/.test(String(code)) ? 'info' : 'info');
 
@@ -47,7 +52,9 @@ function deriveOutcome(o) {
   if (o.storeError) return { outcome: 'failed', partial: committed > 0, readError: 'read failed', errorCode: 'store' };
   if (!r) return { outcome: 'failed', partial: false, readError: 'read failed', errorCode: 'read-failed' };
   if (r.authBlocked) return { outcome: 'auth-blocked', partial: committed > 0, readError: 'auth blocked', errorCode: 'auth' };
-  if (r.aborted) return { outcome: 'aborted', partial: committed > 0, readError: 'read failed', errorCode: 'aborted' };
+  // A scan whose abort signal fired (supervisor timeout, shutdown) is 'aborted' even when the read itself had
+  // finished: the analysis / fact stages after the abort did not run to completion.
+  if (r.aborted || o.aborted) return { outcome: 'aborted', partial: committed > 0, readError: 'read failed', errorCode: 'aborted' };
   const folders = Array.isArray(r.folders) ? r.folders : [];
   const readAny = folders.some((f) => f.status === 'ok' || f.status === 'skipped-budget' || f.status === 'partial' || f.status === 'timeout');
   if (!readAny && !committed) return { outcome: 'failed', partial: false, readError: 'read failed', errorCode: r.error ? String(r.error).replace(/[^a-z-]/gi, '').slice(0, 40) : 'read-failed' };
@@ -76,8 +83,10 @@ function buildWarnings(o) {
   }
   for (const w of o.flagWarnings || []) add(w);
   for (const w of o.extra || []) add(w);
+  if (o.scheduledPaused) add('scheduled-paused');
   const last = o.lastScan || null;
   if (last) {
+    if (last.outcome === 'interrupted') add('scan-interrupted');
     if (last.outcome === 'auth-blocked') add('auth-blocked');
     if (last.outcome === 'failed' && last.errorCode === 'store') add('storeError');
     if (last.partial && last.outcome === 'partial') add('partial-scan');
@@ -104,7 +113,7 @@ function buildStatus(i) {
   let pendingAnalysis = 0;
   const msgs = (i.messages && i.messages.messages) || {};
   for (const k of Object.keys(msgs)) if (/^pending/.test(String((msgs[k].analysis || {}).status || ''))) pendingAnalysis++;
-  const warnings = buildWarnings({ config: i.config, flagWarnings: i.flagWarnings, extra: i.extraWarnings, lastScan: scan.last, readOnlyStores: i.readOnlyStores });
+  const warnings = buildWarnings({ config: i.config, flagWarnings: i.flagWarnings, extra: i.extraWarnings, lastScan: scan.last, readOnlyStores: i.readOnlyStores, scheduledPaused: pausedUntil(i.supervisor) !== null });
   return {
     ok: true, enabled: !!i.enabled, flags: i.flags || {},
     scan: { running: !!i.running, current: i.running ? (i.current || scan.current || null) : null, last: scan.last || null },
@@ -112,12 +121,66 @@ function buildStatus(i) {
     backlog: { pendingAnalysis, openActions: Number(i.openActions) || 0, openStaged: Number(i.openStaged) || 0, unreconciledSends: Number(i.unreconciledSends) || 0 },
     owaAuth: { state: auth.state || 'unknown', lastOkAt: auth.lastOkAt || null, lastBlockedAt: auth.lastBlockedAt || null, blockedCount: auth.blockedCount || 0 },
     lane: i.lane && i.lane.state ? { state: i.lane.state, checkedAt: i.lane.checkedAt || null } : { state: 'unknown', checkedAt: null },
-    aiGateway: null,
+    aiGateway: i.aiGateway && typeof i.aiGateway === 'object' ? i.aiGateway : null,
     identity: { set: i.config ? cfgMod.isIdentitySet(i.config) : false },
-    midway: null, supervisor: null, jobs: null,
+    midway: i.midway === undefined ? null : i.midway,
+    supervisor: i.supervisor || null,
+    jobs: i.jobs || null,
+    scheduledPausedUntil: pausedUntil(i.supervisor),
     warnings: warnings.map((w) => w.code),
     warningDetails: warnings,
   };
 }
 
-module.exports = { WARNING_SEVERITY, severityOf, deriveOutcome, buildWarnings, buildStatus };
+/**
+ * F2-05: scheduled scans are paused while the supervisor's emailTriage entry is isolated (breaker open after
+ * repeated failures). The time is the supervisor's own isolatedUntil; no supervisor edit. A manual scan still runs.
+ */
+function pausedUntil(sup) {
+  if (!sup || sup.state !== 'isolated') return null;
+  return Number.isFinite(sup.isolatedUntil) ? sup.isolatedUntil : null;
+}
+
+/** The emailTriage worker entry of workers/supervisor getStatus(), reduced to the fields the UI needs. */
+function supervisorEntry(getStatus) {
+  try {
+    const st = getStatus ? getStatus() : require('../../workers/supervisor').getStatus();
+    const w = st && Array.isArray(st.workers) ? st.workers.find((x) => x && x.name === 'emailTriage') : null;
+    if (!w) return null;
+    return {
+      state: w.state || null, breakerState: w.breakerState || null,
+      isolatedUntil: Number.isFinite(w.isolatedUntil) ? w.isolatedUntil : null,
+      nextRunAt: Number.isFinite(w.nextRunAt) ? w.nextRunAt : null,
+      isolations: Number(w.isolations) || 0, consecutiveFailures: Number(w.consecutiveFailures) || 0,
+      disabledReason: w.disabledReason || null, lastEndAt: w.lastEndAt || null,
+    };
+  } catch (_) { return null; }
+}
+
+/** Midway status, read-only (auth-report currentStatus(); this module never reports to any auth module). */
+function midwayStatus() {
+  try { return require('../../auth/auth-report').currentStatus() || null; } catch (_) { return null; }
+}
+
+/** F-17: the AI gateway flags as relay's queue stats report them (read-only), or null. */
+function gatewayFlags() {
+  try { return require('../understand/lane').gatewayFlags(); } catch (_) { return null; }
+}
+
+/**
+ * collectExternal({ multiRecipient }) -> { supervisor, jobs, midway, aiGateway } — the read-only views of other
+ * subsystems for the status document (design 8.6). Every part is null when unavailable; nothing here writes.
+ */
+function collectExternal(o) {
+  const opts = o || {};
+  let jobs = null;
+  try { jobs = require('./job').statusEntry(); } catch (_) { jobs = null; }
+  return {
+    supervisor: supervisorEntry(),
+    jobs,
+    midway: midwayStatus(),
+    aiGateway: opts.multiRecipient ? gatewayFlags() : null,
+  };
+}
+
+module.exports = { WARNING_SEVERITY, severityOf, deriveOutcome, buildWarnings, buildStatus, pausedUntil, supervisorEntry, collectExternal };
