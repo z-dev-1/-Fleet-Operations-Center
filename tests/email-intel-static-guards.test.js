@@ -12,7 +12,9 @@ import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const BASE = '50419ba';
+// Branch point of feature/email-intel after the rebase onto feature/owa-triage-midway-fixes
+// (originally 50419ba; upstream Long Dwell commits since then are not this branch's diff).
+const BASE = '5d75897';
 const rel = (p) => path.relative(ROOT, p).replace(/\\/g, '/');
 
 function walk(dir) {
