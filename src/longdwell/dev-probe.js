@@ -18,20 +18,28 @@ const logger = require('../utils/logger').createLogger('ldsp-probe');
 
 const ENV_DIR = 'FLEET_LDSP_PROBE_DIR';
 
-function attachDevProbe(guest, env) {
+function _isSpGuest(guest) {
+  try {
+    const h = new URL(guest.getURL()).hostname.toLowerCase();
+    return h.endsWith('.sharepoint.com');
+  } catch { return false; }
+}
+
+function attachDevProbe(guest, env, info) {
   const dir = (env || process.env)[ENV_DIR];
   if (!dir || !guest || typeof guest.on !== 'function') return false;
   let running = false;
   let n = 0;
   guest.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown' || input.isAutoRepeat || input.key !== 'F8' || !input.control || !input.shift || input.alt) return;
+    if (!_isSpGuest(guest)) return; // only the SharePoint sheet pane
     event.preventDefault();
     if (running) { logger.info('[ldsp-probe] already running'); return; }
     running = true;
     _run(guest, dir, ++n).catch((e) => logger.warn('[ldsp-probe] failed: ' + (e && e.message)))
       .finally(() => { running = false; });
   });
-  logger.info('[ldsp-probe] armed: Ctrl+Shift+F8 over the sheet pane');
+  logger.info('[ldsp-probe] armed: Ctrl+Shift+F8 over the sheet pane', { markerSeen: !!(info && info.marked) });
   return true;
 }
 
@@ -49,7 +57,9 @@ async function _run(guest, dir, n) {
     }
   }));
   const file = path.join(dir, 'probe-out-' + n + '.json');
-  fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString(), frames: results }, null, 1));
+  let marker = null;
+  try { const wp = guest.getLastWebPreferences(); marker = !!(wp && Array.isArray(wp.additionalArguments) && wp.additionalArguments.includes('--fleet-ldsp-pane')); } catch { /* unknown */ }
+  fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString(), paneMarkerSeen: marker, frames: results }, null, 1));
   logger.info('[ldsp-probe] wrote ' + file + ' (' + results.length + ' frames)');
 }
 

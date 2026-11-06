@@ -129,8 +129,6 @@ function hookGuest(guest, deps) {
   };
   guest.on('will-navigate', guardNav);
   guest.on('will-redirect', guardNav);
-  // Dev-only spike probe: inert unless FLEET_LDSP_PROBE_DIR is set.
-  if (process.env.FLEET_LDSP_PROBE_DIR) { try { require('./dev-probe').attachDevProbe(guest); } catch { /* dev aid only */ } }
   return true;
 }
 
@@ -146,6 +144,11 @@ function installPaneGuard(host, deps) {
   });
   host.on('did-attach-webview', (_e, guest) => {
     try { if (isMarkedGuest(guest)) hookGuest(guest, deps); } catch { /* not hooked */ }
+    // Dev-only spike probe: inert unless FLEET_LDSP_PROBE_DIR is set. Attached
+    // without relying on the marker; the probe checks the SharePoint host itself.
+    if (process.env.FLEET_LDSP_PROBE_DIR) {
+      try { require('./dev-probe').attachDevProbe(guest, process.env, { marked: isMarkedGuest(guest) }); } catch { /* dev aid only */ }
+    }
   });
   return true;
 }
