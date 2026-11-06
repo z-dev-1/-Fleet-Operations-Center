@@ -37,9 +37,10 @@ function maskAddress(addr) {
   return s[0] + '***' + s.slice(at);
 }
 
-/** Confirmation tokens are logged by their first 4 hex chars only. */
+/** Confirmation tokens are logged by their first 4 hex chars only; anything else (renderer-supplied junk) logs as '----'. */
 function tokenTag(token) {
-  return String(token == null ? '' : token).slice(0, 4);
+  const m = /^[0-9a-f]{4}/.exec(String(token == null ? '' : token));
+  return m ? m[0] : '----';
 }
 
 module.exports = { rid, safeErr, maskAddress, tokenTag };
