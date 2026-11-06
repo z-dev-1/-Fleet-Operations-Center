@@ -73,6 +73,22 @@ export function scriptedRelay(answer, o = {}) {
   return relay;
 }
 
+/** docOf(records) -> a messages document holding the records (conversation order kept by the ledger). */
+export function docOf(records) {
+  const d = ledger.emptyDoc();
+  for (const r of records) ledger.upsert(d, r);
+  return d;
+}
+
+/** analyzeDoc(doc, relay, over) -> runScanAnalysis stats, with the scripted relay installed in lane.js. */
+export async function analyzeDoc(doc, relay, over = {}) {
+  const lane = require('../../../src/email-intel/understand/lane');
+  lane._setRelayForTests(relay);
+  const an = require('../../../src/email-intel/understand/analyze');
+  const cfgMod = require('../../../src/email-intel/config');
+  return an.runScanAnalysis(doc, Object.assign({ index: scopeIndex('fresh'), me: ME, cfg: cfgMod.normalize({}), trigger: 'manual', now: NOW, lookbackDays: 14 }, over));
+}
+
 /** Replace "$REF" in an object with the messageRef of the prompt (for direct validator tests). */
 export function withRef(obj, ref) {
   return JSON.parse(JSON.stringify(obj).split('"$REF"').join(JSON.stringify(ref)));

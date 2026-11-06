@@ -1,0 +1,8 @@
+{
+ "recordedBy": "hand-authored",
+ "model": null,
+ "promptVersion": "ei-2",
+ "recordedAt": "2026-11-05T12:00:00.000Z",
+ "caseId": "planned-repair",
+ "rawText": "{\"messageRef\":\"r4ae2d37fw1\",\"schemaVersion\":2,\"relevance\":{\"level\":\"high\",\"reason\":\"unit update\",\"confidence\":0.9},\"units\":[{\"unit\":\"40123\",\"facts\":[{\"kind\":\"repair_stage\",\"item\":null,\"value\":\"repair stage repair in progress\",\"state\":\"repair_in_progress\",\"date\":null,\"amount\":null,\"assertion\":\"planned\",\"evidence\":\"We plan to start the repair on 40123 next week\",\"noteConflictHint\":false,\"confidence\":0.85}]}],\"questions\":[],\"requests\":[],\"answers\":[],\"commitments\":[],\"classification\":{\"category\":\"fleet_status_update\",\"intent\":\"provide_update\",\"informationalOnly\":false,\"confidence\":0.85},\"suggestDelete\":{\"suggested\":false,\"reason\":\"\",\"confidence\":0.9},\"overallConfidence\":0.9}"
+}

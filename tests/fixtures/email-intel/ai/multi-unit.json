@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 2,
+  "messageRef": "$REF",
+  "relevance": { "level": "high", "reason": "status of several units", "confidence": 0.9 },
+  "units": [
+    { "unit": "40123", "gist": "awaiting parts", "facts": [
+      { "kind": "parts_eta", "item": "parts", "value": "Awaiting parts, ETA 11/12", "state": "eta_given", "date": "2026-11-12", "amount": null, "assertion": "stated", "evidence": "40123 - awaiting parts, ETA 11/12", "noteConflictHint": false, "confidence": 0.9 }
+    ] },
+    { "unit": "40456", "gist": "ready", "facts": [
+      { "kind": "pickup_readiness", "item": null, "value": "Ready for pickup", "state": "ready", "date": null, "amount": null, "assertion": "stated", "evidence": "40456 - ready for pickup", "noteConflictHint": false, "confidence": 0.9 }
+    ] },
+    { "unit": "51888", "gist": "in repair", "facts": [
+      { "kind": "repair_stage", "item": null, "value": "In repair", "state": "repair_in_progress", "date": null, "amount": null, "assertion": "stated", "evidence": "51888 - in repair", "noteConflictHint": false, "confidence": 0.9 }
+    ] },
+    { "unit": "62100", "gist": "waiting on approval", "facts": [
+      { "kind": "blocker", "item": null, "value": "Waiting on approval", "state": "approval", "date": null, "amount": null, "assertion": "stated", "evidence": "62100 - waiting on approval", "noteConflictHint": false, "confidence": 0.9 }
+    ] }
+  ],
+  "questions": [], "requests": [], "answers": [], "commitments": [],
+  "classification": { "category": "fleet_status_update", "intent": "provide_update", "informationalOnly": true, "confidence": 0.9 },
+  "suggestDelete": { "suggested": false, "reason": "", "confidence": 0.9 },
+  "overallConfidence": 0.9
+}

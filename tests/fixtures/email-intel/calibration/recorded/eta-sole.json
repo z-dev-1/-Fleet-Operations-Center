@@ -1,0 +1,8 @@
+{
+ "recordedBy": "hand-authored",
+ "model": null,
+ "promptVersion": "ei-2",
+ "recordedAt": "2026-11-05T12:00:00.000Z",
+ "caseId": "eta-sole",
+ "rawText": "{\"messageRef\":\"r74e1f371w1\",\"schemaVersion\":2,\"relevance\":{\"level\":\"high\",\"reason\":\"unit update\",\"confidence\":0.9},\"units\":[{\"unit\":\"40123\",\"facts\":[{\"kind\":\"parts_eta\",\"item\":\"turbo\",\"value\":\"parts eta eta given\",\"state\":\"eta_given\",\"date\":\"2026-11-12\",\"amount\":null,\"assertion\":\"stated\",\"evidence\":\"the turbo for 40123 will arrive on 2026-11-12\",\"noteConflictHint\":false,\"confidence\":0.93}]}],\"questions\":[],\"requests\":[],\"answers\":[],\"commitments\":[],\"classification\":{\"category\":\"fleet_status_update\",\"intent\":\"provide_update\",\"informationalOnly\":false,\"confidence\":0.85},\"suggestDelete\":{\"suggested\":false,\"reason\":\"\",\"confidence\":0.9},\"overallConfidence\":0.9}"
+}

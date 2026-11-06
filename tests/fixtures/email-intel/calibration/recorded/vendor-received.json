@@ -1,0 +1,8 @@
+{
+ "recordedBy": "hand-authored",
+ "model": null,
+ "promptVersion": "ei-2",
+ "recordedAt": "2026-11-05T12:00:00.000Z",
+ "caseId": "vendor-received",
+ "rawText": "{\"messageRef\":\"ra9907d67w1\",\"schemaVersion\":2,\"relevance\":{\"level\":\"high\",\"reason\":\"unit update\",\"confidence\":0.9},\"units\":[{\"unit\":\"40789\",\"facts\":[{\"kind\":\"vendor_status\",\"item\":null,\"value\":\"vendor status received unit\",\"state\":\"received_unit\",\"date\":null,\"amount\":null,\"assertion\":\"stated\",\"evidence\":\"We received unit 40789 this morning\",\"noteConflictHint\":false,\"confidence\":0.9},{\"kind\":\"repair_stage\",\"item\":null,\"value\":\"repair stage diagnosis\",\"state\":\"diagnosis\",\"date\":null,\"amount\":null,\"assertion\":\"stated\",\"evidence\":\"started the diagnosis\",\"noteConflictHint\":false,\"confidence\":0.82}]}],\"questions\":[],\"requests\":[],\"answers\":[],\"commitments\":[],\"classification\":{\"category\":\"fleet_status_update\",\"intent\":\"provide_update\",\"informationalOnly\":false,\"confidence\":0.85},\"suggestDelete\":{\"suggested\":false,\"reason\":\"\",\"confidence\":0.9},\"overallConfidence\":null}"
+}

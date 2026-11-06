@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "messageRef": "$REF",
+  "emails": [{ "id": "em_x", "summary": "old schema output", "importance": "high", "confidence": 0.9 }]
+}

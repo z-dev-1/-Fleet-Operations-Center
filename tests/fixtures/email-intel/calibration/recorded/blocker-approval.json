@@ -1,0 +1,8 @@
+{
+ "recordedBy": "hand-authored",
+ "model": null,
+ "promptVersion": "ei-2",
+ "recordedAt": "2026-11-05T12:00:00.000Z",
+ "caseId": "blocker-approval",
+ "rawText": "{\"messageRef\":\"r12e8f4e1w1\",\"schemaVersion\":2,\"relevance\":{\"level\":\"high\",\"reason\":\"unit update\",\"confidence\":0.9},\"units\":[{\"unit\":\"40456\",\"facts\":[{\"kind\":\"blocker\",\"item\":null,\"value\":\"blocker approval\",\"state\":\"approval\",\"date\":null,\"amount\":null,\"assertion\":\"stated\",\"evidence\":\"Repair on 40999 is blocked\",\"noteConflictHint\":false,\"confidence\":0.95}]},{\"unit\":\"40999\",\"facts\":[{\"kind\":\"blocker\",\"item\":null,\"value\":\"blocker parts\",\"state\":\"parts\",\"date\":null,\"amount\":null,\"assertion\":\"stated\",\"evidence\":\"blocked because parts are missing\",\"noteConflictHint\":false,\"confidence\":0.95}]}],\"questions\":[],\"requests\":[],\"answers\":[],\"commitments\":[],\"classification\":{\"category\":\"fleet_status_update\",\"intent\":\"provide_update\",\"informationalOnly\":false,\"confidence\":0.85},\"suggestDelete\":{\"suggested\":false,\"reason\":\"\",\"confidence\":0.9},\"overallConfidence\":0.9}"
+}

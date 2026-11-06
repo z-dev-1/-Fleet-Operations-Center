@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "messageRef": "$REF",
+  "relevance": { "level": "medium", "reason": "question about 40123", "confidence": 0.85 },
+  "units": [{ "unit": "40123", "gist": "DPF check, dealer ETA", "facts": [
+    { "kind": "parts_eta", "item": null, "value": "Dealer ETA 11/14", "state": "eta_given", "date": "2026-11-14", "amount": null, "assertion": "reported-secondhand", "evidence": "Dealer says ETA 11/14", "noteConflictHint": false, "confidence": 0.82 }
+  ] }],
+  "questions": [{ "ref": "q1", "text": "Can you check the DPF on 40123?", "about": ["40123"], "addressee": { "kind": "named-other", "name": "Mike", "evidence": "Mike, can you check the DPF on 40123?" }, "isApprovalOrDecision": false, "decisionKind": null, "confidence": 0.9 }],
+  "requests": [], "answers": [], "commitments": [],
+  "classification": { "category": "question", "intent": "request_information", "informationalOnly": false, "confidence": 0.85 },
+  "suggestDelete": { "suggested": false, "reason": "", "confidence": 0.9 },
+  "overallConfidence": 0.86
+}

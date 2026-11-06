@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 2,
+  "messageRef": "$REF",
+  "relevance": { "level": "high", "reason": "completion date for 40789", "confidence": 0.85 },
+  "units": [{ "unit": "40789", "gist": "ready 11/15", "facts": [
+    { "kind": "estimated_completion", "item": null, "value": "Ready 11/15", "state": "eta_given", "date": "2026-11-15", "amount": null, "assertion": "stated", "evidence": "unit 40789 will be ready 11/15", "noteConflictHint": false, "confidence": 0.86 }
+  ] }],
+  "questions": [], "requests": [], "answers": [], "commitments": [],
+  "classification": { "category": "fleet_status_update", "intent": "provide_update", "informationalOnly": true, "confidence": 0.8 },
+  "suggestDelete": { "suggested": false, "reason": "", "confidence": 0.9 },
+  "overallConfidence": 0.85
+}

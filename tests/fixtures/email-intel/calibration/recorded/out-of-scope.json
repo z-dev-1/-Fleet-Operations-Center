@@ -1,0 +1,8 @@
+{
+ "recordedBy": "hand-authored",
+ "model": null,
+ "promptVersion": "ei-2",
+ "recordedAt": "2026-11-05T12:00:00.000Z",
+ "caseId": "out-of-scope",
+ "rawText": "{\"messageRef\":\"rad428d81w1\",\"schemaVersion\":2,\"relevance\":{\"level\":\"none\",\"reason\":\"other units\",\"confidence\":0.9},\"units\":[{\"unit\":\"51888\",\"facts\":[{\"kind\":\"parts_availability\",\"item\":null,\"value\":\"parts availability arrived\",\"state\":\"arrived\",\"date\":null,\"amount\":null,\"assertion\":\"stated\",\"evidence\":\"Parts arrived for 51888\",\"noteConflictHint\":false,\"confidence\":0.95}]}],\"questions\":[],\"requests\":[],\"answers\":[],\"commitments\":[],\"classification\":{\"category\":\"fleet_status_update\",\"intent\":\"provide_update\",\"informationalOnly\":false,\"confidence\":0.85},\"suggestDelete\":{\"suggested\":false,\"reason\":\"\",\"confidence\":0.9},\"overallConfidence\":0.9}"
+}

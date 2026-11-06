@@ -1,0 +1,8 @@
+{
+ "recordedBy": "hand-authored",
+ "model": null,
+ "promptVersion": "ei-2",
+ "recordedAt": "2026-11-05T12:00:00.000Z",
+ "caseId": "multi-unit",
+ "rawText": "{\"messageRef\":\"r5e179669w1\",\"schemaVersion\":2,\"relevance\":{\"level\":\"high\",\"reason\":\"unit update\",\"confidence\":0.9},\"units\":[{\"unit\":\"40123\",\"facts\":[{\"kind\":\"parts_eta\",\"item\":null,\"value\":\"parts eta eta given\",\"state\":\"eta_given\",\"date\":\"2026-11-12\",\"amount\":null,\"assertion\":\"stated\",\"evidence\":\"40123 - awaiting parts, ETA 2026-11-12\",\"noteConflictHint\":false,\"confidence\":0.9}]},{\"unit\":\"40456\",\"facts\":[{\"kind\":\"pickup_readiness\",\"item\":null,\"value\":\"pickup readiness ready\",\"state\":\"ready\",\"date\":null,\"amount\":null,\"assertion\":\"stated\",\"evidence\":\"40456 - ready for pickup\",\"noteConflictHint\":false,\"confidence\":0.91}]},{\"unit\":\"51888\",\"facts\":[{\"kind\":\"repair_stage\",\"item\":null,\"value\":\"repair stage repair in progress\",\"state\":\"repair_in_progress\",\"date\":null,\"amount\":null,\"assertion\":\"stated\",\"evidence\":\"51888 - in repair\",\"noteConflictHint\":false,\"confidence\":0.9}]}],\"questions\":[],\"requests\":[],\"answers\":[],\"commitments\":[],\"classification\":{\"category\":\"fleet_status_update\",\"intent\":\"provide_update\",\"informationalOnly\":false,\"confidence\":0.85},\"suggestDelete\":{\"suggested\":false,\"reason\":\"\",\"confidence\":0.9},\"overallConfidence\":0.9}"
+}

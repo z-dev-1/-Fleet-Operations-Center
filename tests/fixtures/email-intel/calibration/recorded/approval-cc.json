@@ -1,0 +1,8 @@
+{
+ "recordedBy": "hand-authored",
+ "model": null,
+ "promptVersion": "ei-2",
+ "recordedAt": "2026-11-05T12:00:00.000Z",
+ "caseId": "approval-cc",
+ "rawText": "{\"messageRef\":\"rdbc05b8aw1\",\"schemaVersion\":2,\"relevance\":{\"level\":\"high\",\"reason\":\"unit update\",\"confidence\":0.9},\"units\":[{\"unit\":\"40123\",\"facts\":[{\"kind\":\"approval_status\",\"item\":null,\"value\":\"approval status requested\",\"state\":\"requested\",\"date\":null,\"amount\":{\"value\":1840,\"currency\":\"USD\"},\"assertion\":\"stated\",\"evidence\":\"please approve the $1,840 estimate for 40123\",\"noteConflictHint\":false,\"confidence\":0.9}]}],\"questions\":[{\"ref\":\"r1\",\"text\":\"Approve the $1,840 estimate for 40123\",\"about\":[\"40123\"],\"addressee\":{\"kind\":\"me\",\"name\":\"Zila\",\"evidence\":\"Zila, please approve\"},\"isApprovalOrDecision\":true,\"decisionKind\":\"estimate\",\"confidence\":0.9}],\"requests\":[],\"answers\":[],\"commitments\":[],\"classification\":{\"category\":\"fleet_status_update\",\"intent\":\"provide_update\",\"informationalOnly\":false,\"confidence\":0.85},\"suggestDelete\":{\"suggested\":false,\"reason\":\"\",\"confidence\":0.9},\"overallConfidence\":0.9}"
+}

@@ -1,0 +1,8 @@
+{
+ "recordedBy": "hand-authored",
+ "model": null,
+ "promptVersion": "ei-2",
+ "recordedAt": "2026-11-05T12:00:00.000Z",
+ "caseId": "coworker-q",
+ "rawText": "{\"messageRef\":\"r58938eafw1\",\"schemaVersion\":2,\"relevance\":{\"level\":\"high\",\"reason\":\"unit update\",\"confidence\":0.9},\"units\":[{\"unit\":\"40123\",\"facts\":[{\"kind\":\"parts_eta\",\"item\":null,\"value\":\"parts eta eta given\",\"state\":\"eta_given\",\"date\":\"2026-11-14\",\"amount\":null,\"assertion\":\"reported-secondhand\",\"evidence\":\"Dealer says ETA 11/14\",\"noteConflictHint\":false,\"confidence\":0.8}]}],\"questions\":[{\"ref\":\"q1\",\"text\":\"Can you check the DPF on 40123?\",\"about\":[\"40123\"],\"addressee\":{\"kind\":\"named-other\",\"name\":\"Pat\",\"evidence\":\"Pat, can you check the DPF\"},\"confidence\":0.85}],\"requests\":[],\"answers\":[],\"commitments\":[],\"classification\":{\"category\":\"fleet_status_update\",\"intent\":\"provide_update\",\"informationalOnly\":false,\"confidence\":0.85},\"suggestDelete\":{\"suggested\":false,\"reason\":\"\",\"confidence\":0.9},\"overallConfidence\":0.9}"
+}

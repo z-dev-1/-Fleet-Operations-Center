@@ -1,0 +1,1473 @@
+{
+ "description": "Synthetic calibration set (R7.2, F-15). PII-free (@example.test); modeled on real fleet mail patterns. labels.facts are the TRUE facts: apply=false marks facts that must never auto-apply; clean=true marks explicit facts used for the 70% live-lane floor.",
+ "now": "2026-11-04T16:00:00.000Z",
+ "me": {
+  "names": [
+   "Zila Santiago",
+   "Zila"
+  ],
+  "addresses": [
+   "zila.santiago@example.test"
+  ],
+  "distributionLists": [
+   "fleet-ops@example.test"
+  ]
+ },
+ "fleet": {
+  "syncedAt": "2026-11-04T15:00:00.000Z",
+  "rows": [
+   {
+    "equipmentId": "40123",
+    "operator": "ACME DSP",
+    "domicileSite": "ABE1"
+   },
+   {
+    "equipmentId": "40456",
+    "operator": "BETA LOGISTICS",
+    "domicileSite": "AVP4"
+   },
+   {
+    "equipmentId": "40789",
+    "operator": "ACME DSP",
+    "domicileSite": "ABE1"
+   },
+   {
+    "equipmentId": "40999",
+    "operator": "GAMMA FREIGHT",
+    "domicileSite": "TUZR"
+   }
+  ]
+ },
+ "cases": [
+  {
+   "id": "eta-sole",
+   "pattern": "vendor ETA update",
+   "from": {
+    "name": "Dealer Parts Desk",
+    "address": "parts@dealer.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Turbo 40123",
+   "body": "Hi Zila, the turbo for 40123 will arrive on 2026-11-12. Thanks.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40123",
+      "kind": "parts_eta",
+      "state": "eta_given",
+      "clean": true,
+      "apply": true,
+      "date": "2026-11-12"
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "eta-cc",
+   "pattern": "CC dealer ETA",
+   "from": {
+    "name": "Dealer Parts Desk",
+    "address": "parts@dealer.example.test"
+   },
+   "to": [
+    {
+     "name": "Mike Rivera",
+     "address": "mike.rivera@example.test"
+    }
+   ],
+   "cc": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "subject": "Parts 40456",
+   "body": "Mike, parts ETA for 40456 is 2026-11-10.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40456",
+      "kind": "parts_eta",
+      "state": "eta_given",
+      "clean": true,
+      "apply": true,
+      "date": "2026-11-10"
+     }
+    ],
+    "owner": "other-person",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "eta-20to",
+   "pattern": "one email to 20 people",
+   "from": {
+    "name": "Dealer Parts Desk",
+    "address": "parts@dealer.example.test"
+   },
+   "to": [
+    {
+     "name": "Person 01",
+     "address": "person01@example.test"
+    },
+    {
+     "name": "Person 02",
+     "address": "person02@example.test"
+    },
+    {
+     "name": "Person 03",
+     "address": "person03@example.test"
+    },
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    },
+    {
+     "name": "Person 05",
+     "address": "person05@example.test"
+    },
+    {
+     "name": "Person 06",
+     "address": "person06@example.test"
+    },
+    {
+     "name": "Person 07",
+     "address": "person07@example.test"
+    },
+    {
+     "name": "Person 08",
+     "address": "person08@example.test"
+    },
+    {
+     "name": "Person 09",
+     "address": "person09@example.test"
+    },
+    {
+     "name": "Person 10",
+     "address": "person10@example.test"
+    },
+    {
+     "name": "Person 11",
+     "address": "person11@example.test"
+    },
+    {
+     "name": "Person 12",
+     "address": "person12@example.test"
+    },
+    {
+     "name": "Person 13",
+     "address": "person13@example.test"
+    },
+    {
+     "name": "Person 14",
+     "address": "person14@example.test"
+    },
+    {
+     "name": "Person 15",
+     "address": "person15@example.test"
+    },
+    {
+     "name": "Person 16",
+     "address": "person16@example.test"
+    },
+    {
+     "name": "Person 17",
+     "address": "person17@example.test"
+    },
+    {
+     "name": "Person 18",
+     "address": "person18@example.test"
+    },
+    {
+     "name": "Person 19",
+     "address": "person19@example.test"
+    },
+    {
+     "name": "Person 20",
+     "address": "person20@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Parts update 40123",
+   "body": "All, parts arrived for unit 40123, repair starts Monday.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40123",
+      "kind": "parts_availability",
+      "state": "arrived",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "approval-cc",
+   "pattern": "CC approval to me",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Mike Rivera",
+     "address": "mike.rivera@example.test"
+    }
+   ],
+   "cc": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "subject": "Estimate 40123",
+   "body": "Zila, please approve the $1,840 estimate for 40123 so we can order the turbo.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40123",
+      "kind": "approval_status",
+      "state": "requested",
+      "clean": false,
+      "apply": true,
+      "stage": "spend"
+     }
+    ],
+    "owner": "me",
+    "reply": "required"
+   }
+  },
+  {
+   "id": "coworker-q",
+   "pattern": "coworker question about my unit",
+   "from": {
+    "name": "Mike Rivera",
+    "address": "mike.rivera@example.test"
+   },
+   "to": [
+    {
+     "name": "Person 03",
+     "address": "person03@example.test"
+    }
+   ],
+   "cc": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "subject": "DPF on 40123",
+   "body": "Pat, can you check the DPF on 40123? Dealer says ETA 11/14.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40123",
+      "kind": "parts_eta",
+      "state": "eta_given",
+      "clean": false,
+      "apply": true,
+      "date": "2026-11-14"
+     }
+    ],
+    "owner": "other-person",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "multi-unit",
+   "pattern": "multi-unit status list",
+   "from": {
+    "name": "Fleet Ops",
+    "address": "fleet-ops@example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    },
+    {
+     "name": "Mike Rivera",
+     "address": "mike.rivera@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Status roundup",
+   "body": "40123 - awaiting parts, ETA 2026-11-12\n40456 - ready for pickup\n51888 - in repair\n62100 - waiting on approval",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40123",
+      "kind": "parts_eta",
+      "state": "eta_given",
+      "clean": true,
+      "apply": true,
+      "date": "2026-11-12"
+     },
+     {
+      "unit": "40456",
+      "kind": "pickup_readiness",
+      "state": "ready",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "forwarded-ready",
+   "pattern": "forwarded dealer note",
+   "from": {
+    "name": "Mike Rivera",
+    "address": "mike.rivera@example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Fwd: Unit 40456 ready",
+   "body": "FYI see below.\n\n---------- Forwarded message ---------\nFrom: Dealer Parts Desk\nDate: Tue, Nov 4, 2026\nSubject: Unit 40456 ready\nTo: Mike\n\nUnit 40456 is repaired and ready for pickup.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40456",
+      "kind": "pickup_readiness",
+      "state": "ready",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "vendor-received",
+   "pattern": "vendor received unit",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Unit 40789 in shop",
+   "body": "We received unit 40789 this morning and started the diagnosis.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40789",
+      "kind": "vendor_status",
+      "state": "received_unit",
+      "clean": true,
+      "apply": true
+     },
+     {
+      "unit": "40789",
+      "kind": "repair_stage",
+      "state": "diagnosis",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "blocker-approval",
+   "pattern": "blocker",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    },
+    {
+     "name": "Mike Rivera",
+     "address": "mike.rivera@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "40999 blocked",
+   "body": "Repair on 40999 is blocked, waiting on approval from the operator.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40999",
+      "kind": "blocker",
+      "state": "approval",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "planned-repair",
+   "pattern": "plan, not a fact",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "40123 next week",
+   "body": "We plan to start the repair on 40123 next week if parts show up.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40123",
+      "kind": "repair_stage",
+      "state": "repair_in_progress",
+      "clean": false,
+      "apply": false
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "question-only",
+   "pattern": "question only",
+   "from": {
+    "name": "Mike Rivera",
+    "address": "mike.rivera@example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "40456?",
+   "body": "Is 40456 ready yet? Can you confirm with the dealer?",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [],
+    "owner": "me",
+    "reply": "required"
+   }
+  },
+  {
+   "id": "newsletter",
+   "pattern": "informational",
+   "from": {
+    "name": "Fleet News",
+    "address": "news@example.test"
+   },
+   "to": [
+    {
+     "name": "Fleet Ops",
+     "address": "fleet-ops@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Weekly newsletter",
+   "body": "Safety tip of the week: check tire pressure before every trip.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "out-of-scope",
+   "pattern": "other FAS units only",
+   "from": {
+    "name": "Dealer Parts Desk",
+    "address": "parts@dealer.example.test"
+   },
+   "to": [
+    {
+     "name": "Mike Rivera",
+     "address": "mike.rivera@example.test"
+    }
+   ],
+   "cc": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "subject": "Parts 51888",
+   "body": "Parts arrived for 51888 and 62100 today.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "tow-scheduled",
+   "pattern": "transportation",
+   "from": {
+    "name": "Tow Dispatch",
+    "address": "dispatch@tow.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Tow 40789",
+   "body": "The tow for 40789 is scheduled for 2026-11-06 at 8 AM.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40789",
+      "kind": "transportation",
+      "state": "scheduled",
+      "clean": true,
+      "apply": true,
+      "date": "2026-11-06"
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "completion-eta",
+   "pattern": "estimated completion",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Completion 40999",
+   "body": "Estimated completion for 40999 is 2026-11-15.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40999",
+      "kind": "estimated_completion",
+      "state": "eta_given",
+      "clean": true,
+      "apply": true,
+      "date": "2026-11-15"
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "eta-delayed",
+   "pattern": "updated ETA same thread",
+   "from": {
+    "name": "Dealer Parts Desk",
+    "address": "parts@dealer.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [
+    {
+     "name": "Mike Rivera",
+     "address": "mike.rivera@example.test"
+    }
+   ],
+   "subject": "RE: Turbo 40123",
+   "body": "Update: the turbo for 40123 is delayed to 2026-11-20.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40123",
+      "kind": "parts_eta",
+      "state": "delayed",
+      "clean": true,
+      "apply": true,
+      "date": "2026-11-20"
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "backordered",
+   "pattern": "parts backordered",
+   "from": {
+    "name": "Dealer Parts Desk",
+    "address": "parts@dealer.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Brakes 40456",
+   "body": "Brake parts for 40456 are backordered.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40456",
+      "kind": "parts_availability",
+      "state": "backordered",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "approved",
+   "pattern": "approval granted",
+   "from": {
+    "name": "Mike Rivera",
+    "address": "mike.rivera@example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    },
+    {
+     "name": "Northside Repair Shop",
+     "address": "service@shop.example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "RE: Estimate 40789",
+   "body": "The estimate for 40789 was approved by the operator, please proceed.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40789",
+      "kind": "approval_status",
+      "state": "approved",
+      "clean": false,
+      "apply": true,
+      "stage": "spend"
+     }
+    ],
+    "owner": "vendor",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "repeat-eta",
+   "pattern": "repeated ETA",
+   "from": {
+    "name": "Dealer Parts Desk",
+    "address": "parts@dealer.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "RE: Turbo 40123",
+   "body": "As mentioned, the turbo for 40123 arrives 2026-11-12.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40123",
+      "kind": "parts_eta",
+      "state": "eta_given",
+      "clean": true,
+      "apply": true,
+      "date": "2026-11-12"
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "answered-later",
+   "pattern": "later answer",
+   "from": {
+    "name": "Mike Rivera",
+    "address": "mike.rivera@example.test"
+   },
+   "to": [
+    {
+     "name": "Dealer Parts Desk",
+     "address": "parts@dealer.example.test"
+    }
+   ],
+   "cc": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "subject": "RE: Pickup 40456",
+   "body": "Confirmed, pickup for 40456 is Friday 2026-11-07.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40456",
+      "kind": "pickup_readiness",
+      "state": "scheduled",
+      "clean": true,
+      "apply": true,
+      "date": "2026-11-07"
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "long-body",
+   "pattern": "unit after char 1500",
+   "from": {
+    "name": "Fleet Ops",
+    "address": "fleet-ops@example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    },
+    {
+     "name": "Mike Rivera",
+     "address": "mike.rivera@example.test"
+    },
+    {
+     "name": "Person 05",
+     "address": "person05@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Weekly status",
+   "body": "Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Routine weekly status text. Unit 40789 will be ready 2026-11-15.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40789",
+      "kind": "estimated_completion",
+      "state": "eta_given",
+      "clean": false,
+      "apply": true,
+      "date": "2026-11-15"
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "dl-request",
+   "pattern": "DL is not assignment",
+   "from": {
+    "name": "Fleet Ops",
+    "address": "fleet-ops@example.test"
+   },
+   "to": [
+    {
+     "name": "Fleet Ops",
+     "address": "fleet-ops@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "All: confirm",
+   "body": "Can everyone confirm their unit counts by Friday?",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "in-transit",
+   "pattern": "unit in transit",
+   "from": {
+    "name": "Tow Dispatch",
+    "address": "dispatch@tow.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "40999 on the way",
+   "body": "Unit 40999 is in transit to the dealer now.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40999",
+      "kind": "transportation",
+      "state": "in_transit",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "delivered",
+   "pattern": "unit delivered",
+   "from": {
+    "name": "Tow Dispatch",
+    "address": "dispatch@tow.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "40999 delivered",
+   "body": "Unit 40999 was delivered to the dealer at 10 AM.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40999",
+      "kind": "transportation",
+      "state": "delivered",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "parts-shipped",
+   "pattern": "parts shipped",
+   "from": {
+    "name": "Dealer Parts Desk",
+    "address": "parts@dealer.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Shipped 40123",
+   "body": "The parts for 40123 shipped today via ground.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40123",
+      "kind": "parts_availability",
+      "state": "shipped",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "estimate-received",
+   "pattern": "estimate received",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Estimate 40456",
+   "body": "Attached is our estimate for 40456 for $2,450.00.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40456",
+      "kind": "approval_status",
+      "state": "estimate_received",
+      "clean": false,
+      "apply": true,
+      "stage": "spend"
+     }
+    ],
+    "owner": "me",
+    "reply": "suggested"
+   }
+  },
+  {
+   "id": "denied",
+   "pattern": "approval denied",
+   "from": {
+    "name": "Mike Rivera",
+    "address": "mike.rivera@example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [
+    {
+     "name": "Northside Repair Shop",
+     "address": "service@shop.example.test"
+    }
+   ],
+   "subject": "RE: Estimate 40999",
+   "body": "Operator denied the estimate for 40999.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40999",
+      "kind": "approval_status",
+      "state": "denied",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "road-test",
+   "pattern": "road test",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "40789 road test",
+   "body": "Repairs on 40789 are done and the unit is on road test now.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40789",
+      "kind": "repair_stage",
+      "state": "road_test",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "not-ready",
+   "pattern": "not ready",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "RE: 40456 pickup",
+   "body": "Unit 40456 is not ready for pickup yet, waiting on a seal.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40456",
+      "kind": "pickup_readiness",
+      "state": "not_ready",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "speculative",
+   "pattern": "guess, not a fact",
+   "from": {
+    "name": "Mike Rivera",
+    "address": "mike.rivera@example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "40123 maybe",
+   "body": "I think 40123 might be ready Thursday, not sure.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40123",
+      "kind": "pickup_readiness",
+      "state": "ready",
+      "clean": false,
+      "apply": false
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "retracted",
+   "pattern": "retraction",
+   "from": {
+    "name": "Dealer Parts Desk",
+    "address": "parts@dealer.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Correction 40456",
+   "body": "Correction: 40456 is NOT ready, ignore my last email.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40456",
+      "kind": "pickup_readiness",
+      "state": "not_ready",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "vendor-waiting",
+   "pattern": "vendor waiting",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "40789 waiting",
+   "body": "We are waiting on the operator to drop off keys for 40789.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40789",
+      "kind": "blocker",
+      "state": "access",
+      "clean": false,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "blocker-cleared",
+   "pattern": "blocker cleared",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "40999 cleared",
+   "body": "Approval received for 40999, the blocker is cleared and work resumes.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40999",
+      "kind": "blocker",
+      "state": "cleared",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "in-stock",
+   "pattern": "in stock",
+   "from": {
+    "name": "Dealer Parts Desk",
+    "address": "parts@dealer.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Stock 40123",
+   "body": "Good news, the filter for 40123 is in stock.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40123",
+      "kind": "parts_availability",
+      "state": "in_stock",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "vendor-scheduled",
+   "pattern": "appointment",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Appointment 40456",
+   "body": "Unit 40456 is scheduled for service on 2026-11-09.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40456",
+      "kind": "vendor_status",
+      "state": "scheduled",
+      "clean": true,
+      "apply": true,
+      "date": "2026-11-09"
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "mixed-scope",
+   "pattern": "mine and other FAS",
+   "from": {
+    "name": "Dealer Parts Desk",
+    "address": "parts@dealer.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    },
+    {
+     "name": "Person 08",
+     "address": "person08@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Units",
+   "body": "40999 parts arrived. 73001 parts arrived.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40999",
+      "kind": "parts_availability",
+      "state": "arrived",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "meeting",
+   "pattern": "meeting invite",
+   "from": {
+    "name": "Mike Rivera",
+    "address": "mike.rivera@example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    },
+    {
+     "name": "Person 02",
+     "address": "person02@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Weekly sync",
+   "body": "Teams meeting Thursday 10 AM to review the fleet board.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "request-to-me",
+   "pattern": "assigned task",
+   "from": {
+    "name": "Mike Rivera",
+    "address": "mike.rivera@example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Tow 40789",
+   "body": "Zila, please schedule the tow for 40789 tomorrow.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40789",
+      "kind": "transportation",
+      "state": "needed",
+      "clean": false,
+      "apply": true
+     }
+    ],
+    "owner": "me",
+    "reply": "required"
+   }
+  },
+  {
+   "id": "shared-q",
+   "pattern": "shared question",
+   "from": {
+    "name": "Mike Rivera",
+    "address": "mike.rivera@example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    },
+    {
+     "name": "Person 04",
+     "address": "person04@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Status 40123",
+   "body": "Team, does anyone have an update on 40123?",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [],
+    "owner": "shared",
+    "reply": "suggested"
+   }
+  },
+  {
+   "id": "diagnosing",
+   "pattern": "diagnosing",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "Diag 40999",
+   "body": "Technicians are diagnosing the electrical fault on 40999.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40999",
+      "kind": "vendor_status",
+      "state": "diagnosing",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "parts-unavailable",
+   "pattern": "unavailable",
+   "from": {
+    "name": "Dealer Parts Desk",
+    "address": "parts@dealer.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [
+    {
+     "name": "Mike Rivera",
+     "address": "mike.rivera@example.test"
+    }
+   ],
+   "subject": "Part 40123",
+   "body": "The OEM part for 40123 is unavailable nationwide.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40123",
+      "kind": "parts_availability",
+      "state": "unavailable",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  },
+  {
+   "id": "complete",
+   "pattern": "repair complete",
+   "from": {
+    "name": "Northside Repair Shop",
+    "address": "service@shop.example.test"
+   },
+   "to": [
+    {
+     "name": "Zila Santiago",
+     "address": "zila.santiago@example.test"
+    }
+   ],
+   "cc": [],
+   "subject": "40789 complete",
+   "body": "Repair on 40789 is complete.",
+   "receivedAt": "2026-11-04T14:30:00.000Z",
+   "labels": {
+    "facts": [
+     {
+      "unit": "40789",
+      "kind": "repair_stage",
+      "state": "repair_complete",
+      "clean": true,
+      "apply": true
+     }
+    ],
+    "owner": "none",
+    "reply": "none"
+   }
+  }
+ ]
+}
