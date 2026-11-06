@@ -8,6 +8,8 @@ import os from 'os';
 import path from 'path';
 import { createRequire } from 'module';
 import { installLogSpy, restoreLogSpy, clearLog, logLines, logText, leaks } from './fixtures/email-intel/log-spy.js';
+import { createWorld, warmOk, noSleep, AUTH_URL } from './fixtures/email-intel/fake-owa.js';
+import { snapshot, block, att } from './fixtures/email-intel/emails.js';
 const require = createRequire(import.meta.url);
 
 const S = {
@@ -142,4 +144,42 @@ describe('logger spy harness', () => {
     expect(leaks(SENTINELS)).toContain(S.addr);
     expect(logText()).toContain('probe');
   });
+});
+
+describe('AC-9 Phase A capture paths log no dynamic content (FEAT-002)', () => {
+  const sentRow = (i) => ({ index: i, convId: 'conv/s' + i + '=', aria: 'Unread ' + S.name + ' ' + S.subject + ' ' + i + ' 18:09 ' + S.body, hasAttach: true, unread: true, itemIdCandidates: { dataAttrs: {}, ids: [] }, timeTokenRaw: '18:09' });
+  const sentSnap = (row) => snapshot({ subject: S.subject, blocks: [block({
+    from: { name: S.name, address: S.addr }, to: [{ name: S.name, address: S.addr }], cc: [{ name: S.name, address: S.addr }],
+    text: S.body + ' unit 40123 ' + row.convId, convId: row.convId, attachments: [att(S.attach)], controls: ['Show more'],
+  })] });
+  const runScan = async (idx, electron, extra) => idx.runIntelScan(Object.assign({
+    folders: ['Inbox', 'Missing ' + S.subject], max: 25, _electron: electron, _warm: warmOk, _sleep: noSleep, authGraceMs: 20,
+    _triageEmails: async (emails) => ({ records: emails.map((e) => ({ id: e.id, subject: e.subject, from: e.from, fromName: e.fromName, summary: S.body, unitRefs: [], triagedAt: new Date().toISOString() })) }),
+  }, extra || {}), 'manual');
+
+  it('scan (complete, partial, auth wall, preview retry, failure), status, config and dom-probe', async () => {
+    flags._setForTests({ enabled: true, capture: true });
+    const idx = require('../src/email-intel/index');
+    const rows = [0, 1, 2, 3, 4, 5, 6].map(sentRow);
+    const { world, electron } = createWorld({ Inbox: { rows, snapshots: { [rows[6].convId]: 'throw' } } }, { snapshotFor: sentSnap });
+    await runScan(idx, electron);
+    world.folders.Inbox.rows = rows.concat([7, 8, 9].map(sentRow));
+    world.onExec = async (kind, n, api, w) => { if (kind === 'open' && w.openLog.length === 9) api.navigate(AUTH_URL); };
+    await runScan(idx, electron);
+    world.onExec = null; world.url = 'https://outlook.office365.com/mail/inbox';
+    await runScan(idx, electron, { _readMailbox: async () => { throw new Error('reader failed'); } });
+    await runScan(idx, electron, { _triageEmails: async () => { throw new Error('triage failed'); } });
+    idx.getStatus();
+    const call = (ch, ...a) => handlers[ch]({}, ...a);
+    await call('emailIntel:status');
+    await call('emailIntel:get-config');
+    await call('emailIntel:set-config', { me: { names: [S.name.slice(0, 40)], addresses: [S.addr], distributionLists: [S.subject.slice(0, 40)], fasName: S.name.slice(0, 40) } });
+    await call('emailIntel:set-config', { me: { addresses: [S.subject] } });
+    await call('emailIntel:scan', { folders: [S.subject], max: 99 });
+    await call('emailIntel:prepare-action', 'send-ready-dm', { id: 'em_x', unit: S.subject.slice(0, 20), message: S.body });
+    const probe = require('../src/email-intel/capture/dom-probe');
+    await probe.domProbe({ n: 2, _electron: electron, _warm: warmOk, _sleep: noSleep, authGraceMs: 20 });
+    expect(logLines().length).toBeGreaterThan(4);
+    assertClean();
+  }, 30_000);
 });

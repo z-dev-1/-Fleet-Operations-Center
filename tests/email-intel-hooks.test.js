@@ -180,9 +180,9 @@ describe('IPC and preload skeleton', () => {
 
     it('capture effective: status answers, gated-by-phase channels report NOT_IMPLEMENTED, others stay inert', async () => {
       flags._setForTests({ enabled: true, capture: true });
-      expect(await call('emailIntel:status')).toEqual({ ok: true, enabled: true, phase: 0, flags: flags.get().effective });
-      expect((await call('emailIntel:scan')).code).toBe('NOT_IMPLEMENTED');
-      expect((await call('emailIntel:get-config')).code).toBe('NOT_IMPLEMENTED');
+      expect(await call('emailIntel:status')).toMatchObject({ ok: true, enabled: true, flags: flags.get().effective });   // Phase A: the real status document
+      expect((await call('emailIntel:probe-lane')).code).toBe('NOT_IMPLEMENTED');                                     // owned by Phase B
+      expect((await call('emailIntel:get-config')).ok).toBe(true);                                                     // Phase A
       expect(await call('emailIntel:get-actions')).toEqual({ ok: true, enabled: false });       // actionsView not effective
       expect(await call('emailIntel:draft-thread-reply')).toEqual({ ok: true, enabled: false }); // threadReplies not effective
       expect(await call('emailIntel:ack-vision-notice')).toEqual({ ok: true, enabled: false });
@@ -192,7 +192,7 @@ describe('IPC and preload skeleton', () => {
       flags._setForTests({ enabled: true, capture: true });
       expect(await call('emailIntel:prepare-action', 'format-disk', {})).toEqual({ ok: false, code: 'BAD_ARG', field: 'kind' });
       expect(await call('emailIntel:prepare-action', 'send-reply', {})).toEqual({ ok: true, enabled: false });   // needs threadReplies
-      expect(await call('emailIntel:prepare-action', 'send-ready-dm', {})).toEqual({ ok: false, code: 'KIND_UNAVAILABLE' });  // no executor in Phase 0
+      expect(await call('emailIntel:prepare-action', 'send-ready-dm', {})).toEqual({ ok: false, code: 'BAD_ARG', field: 'id' });  // Phase A: payload validated before any token
       expect(await call('emailIntel:confirm-action', 'not-a-token')).toEqual({ ok: false, code: 'BAD_ARG', field: 'token' });
       expect(await call('emailIntel:confirm-action', '0'.repeat(32))).toEqual({ ok: false, code: 'TOKEN_UNKNOWN' });
     });

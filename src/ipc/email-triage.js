@@ -47,6 +47,12 @@ function _notifyOverlay(results) {
   } catch (_) {}
 }
 
+// True only when the Email Triage Intelligence capture flag is effective. Any failure reading the
+// flags means "not effective" (legacy behavior).
+function _captureEffective() {
+  try { return require('../email-intel/flags').get().effective.capture === true; } catch (_) { return false; }
+}
+
 function _findEmail(id) {
   const results = triage.loadResults();
   return results.emails.find((e) => e.id === id) || null;
@@ -195,6 +201,10 @@ function registerEmailTriageIPC(_ctx) {
   });
 
   handle('emailTriage:send-ready-dm', async (_e, id, unit, message) => {
+    // Email Triage Intelligence (F2-03): while capture is effective this legacy channel cannot carry a
+    // confirmation token, so it fails closed. The overlay uses emailIntel:prepare-action / confirm-action
+    // (single-use token + native dialog) instead. Flags OFF: unchanged.
+    if (_captureEffective()) return { ok: false, code: 'CONFIRMATION_REQUIRED', error: 'Confirmation required: use the confirmed send flow.' };
     requireString(id, 'id');
     requireString(unit, 'unit');
     const email = _findEmail(id);

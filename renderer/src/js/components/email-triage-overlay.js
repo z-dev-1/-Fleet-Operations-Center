@@ -10,12 +10,18 @@
  */
 
 import bus from '../bus.js';
+import { renderBannersHtml, renderIdentityHtml, wireBanners, wireIdentityPanel, errorsFromResult, PANEL_CSS } from './email-intel-panels.js';
 
 let _open = false;
 let _results = { emails: [] };
 let _running = false;
 let _config = {};
 let _cfgOpen = false;
+// Email Triage Intelligence (default OFF): set only when window.emailIntel.status() reports enabled.
+// Every intel addition below is behind `_intel`, so with the flags OFF the overlay is unchanged.
+let _intel = null;
+let _idOpen = false;
+let _idState = null;
 
 export function init() {
   bus.on('ui:email-triage-toggle', () => { if (_open) _close(); else _open_(); });
@@ -25,6 +31,7 @@ export function init() {
     window.emailTriage.onUpdated((results) => {
       if (results) _results = results;
       if (_open) _render();
+      if (_open && _intel) _refreshIntel();
     });
   }
 }
@@ -65,6 +72,7 @@ async function _open_() {
     }
   } catch (_) {}
   _renderConfig();
+  await _loadIntel();
 
   // Load whatever we have cached, then render.
   try {
@@ -77,6 +85,7 @@ async function _open_() {
 
 function _close() {
   _open = false;
+  _idOpen = false;
   const el = document.getElementById('email-triage');
   if (el) el.remove();
 }
@@ -96,6 +105,85 @@ async function _run() {
   _running = false;
   if (btn) { btn.disabled = false; btn.textContent = 'Scan inbox'; }
   _render();
+  if (_intel) _refreshIntel();
+}
+
+// ── Email Triage Intelligence (flag-gated; nothing below runs unless status() says enabled) ──
+async function _loadIntel() {
+  _intel = null;
+  try {
+    if (window.emailIntel && window.emailIntel.status) {
+      const s = await window.emailIntel.status();
+      if (s && s.ok && s.enabled) _intel = s;
+    }
+  } catch (_) { _intel = null; }
+  if (_intel) _mountIntel();
+}
+
+function _mountIntel() {
+  if (!document.getElementById('email-intel-style')) {
+    const style = document.createElement('style');
+    style.id = 'email-intel-style';
+    style.textContent = PANEL_CSS;
+    document.head.appendChild(style);
+  }
+  const actions = document.querySelector('#email-triage .et-actions');
+  if (actions && !document.getElementById('ei-gear')) {
+    const gear = document.createElement('button');
+    gear.id = 'ei-gear';
+    gear.className = 'et-btn ei-gear';
+    gear.type = 'button';
+    gear.textContent = '⚙ My identity';
+    gear.setAttribute('aria-expanded', 'false');
+    gear.addEventListener('click', () => _toggleIdentity());
+    actions.insertBefore(gear, document.getElementById('et-close'));
+  }
+  const body = document.getElementById('et-body');
+  if (body && !document.getElementById('ei-intel')) {
+    const box = document.createElement('div');
+    box.id = 'ei-intel';
+    body.parentNode.insertBefore(box, body);
+  }
+  _renderIntel();
+}
+
+async function _refreshIntel() {
+  try {
+    const s = await window.emailIntel.status();
+    _intel = (s && s.ok && s.enabled) ? s : null;
+  } catch (_) { /* keep the last status */ }
+  if (_intel) _renderIntel();
+}
+
+async function _toggleIdentity() {
+  _idOpen = !_idOpen;
+  const gear = document.getElementById('ei-gear');
+  if (gear) gear.setAttribute('aria-expanded', _idOpen ? 'true' : 'false');
+  if (_idOpen) {
+    try {
+      const c = await window.emailIntel.getConfig();
+      _idState = { me: (c && c.config && c.config.me) || {}, suggestions: (c && c.suggestions) || {}, errors: {} };
+    } catch (_) { _idState = { me: {}, suggestions: {}, errors: {} }; }
+  }
+  _renderIntel();
+}
+
+function _renderIntel() {
+  const box = document.getElementById('ei-intel');
+  if (!box || !_intel) return;
+  box.innerHTML = renderBannersHtml(_intel) + (_idOpen && _idState ? renderIdentityHtml(_idState) : '');
+  wireBanners(document, {
+    onScanAgain: () => _run(),
+    onSetup: () => { if (!_idOpen) _toggleIdentity(); },
+  });
+  if (_idOpen && _idState) {
+    wireIdentityPanel(document, {
+      setConfig: (patch) => window.emailIntel.setConfig(patch),
+      onSaved: (r) => { _idState = { me: r.config.me, suggestions: _idState.suggestions, errors: {} }; _toast('Identity saved.'); _refreshIntel(); },
+      onError: (r) => { _idState = Object.assign({}, _idState, { errors: errorsFromResult(r) }); _renderIntel(); },
+      onClose: () => _toggleIdentity(),
+    });
+  }
 }
 
 function _setMeta(text) {
@@ -433,6 +521,19 @@ async function _notifyReady(id, unit) {
   const edited = prompt('Send this message to the operator for unit ' + unit + '?\n(edit if needed, Cancel to abort)', draft);
   if (edited === null) return;
   if (!edited.trim()) { _toast('Message empty — not sent.'); return; }
+  if (_intel && window.emailIntel && window.emailIntel.prepareAction) {
+    // Intel on: a single-use token from the main process, then a native confirmation dialog there.
+    try {
+      const prep = await window.emailIntel.prepareAction('send-ready-dm', { id, unit, message: edited });
+      if (!prep || !prep.ok) { _toast('Not sent: ' + ((prep && (prep.error || prep.code)) || 'unknown')); return; }
+      _toast('Confirm in the dialog to send…');
+      const r = await window.emailIntel.confirmAction(prep.token);
+      if (r && r.ok) { _toast(r.message || 'Operator notified.'); }
+      else if (r && r.code === 'USER_CANCELLED') { _toast('Not sent.'); }
+      else { _toast('Send failed: ' + ((r && (r.error || r.code)) || 'unknown')); }
+    } catch (e) { _toast('Send failed: ' + (e.message || e)); }
+    return;
+  }
   _toast('Sending…');
   try {
     const r = await window.emailTriage.sendReadyDm(id, unit, edited);
