@@ -83,6 +83,17 @@ export function renderIdentityHtml(state) {
 }
 
 function _plural(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
+/** Local clock time for the paused-until banner (date added when it is not today). */
+export function formatPausedUntil(ms, now) {
+  const d = new Date(ms);
+  const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const n = new Date(Number.isFinite(now) ? now : Date.now());
+  return d.toDateString() === n.toDateString() ? t : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + t;
+}
+/** F2-05 banner text: 'Scheduled scans paused until <time>; press Scan again to resume now'. */
+export function pausedBannerText(ms, now) {
+  return 'Scheduled scans paused until ' + formatPausedUntil(ms, now) + '; press Scan again to resume now';
+}
 
 /**
  * renderBannersHtml(status) -> '' or banners for: Outlook sign-in needed (auth-blocked), a partial scan
@@ -108,6 +119,11 @@ export function renderBannersHtml(status) {
     const parts = backlog.concat(missing);
     out.push('<div class="ei-banner ei-banner--partial" role="status" aria-live="polite">Partial scan. ' +
       (parts.length ? parts.join('; ') + '. ' : '') + 'The next scan continues from here.</div>');
+  }
+  // F2-05: the supervisor isolated the scheduled scan after repeated failures; a manual scan still works.
+  if (Number.isFinite(s.scheduledPausedUntil)) {
+    out.push('<div class="ei-banner ei-banner--paused" role="status" aria-live="polite">' + esc(pausedBannerText(s.scheduledPausedUntil)) +
+      ' <button type="button" class="et-mini" id="ei-scan-again-paused">Scan again</button></div>');
   }
   const warnings = Array.isArray(s.warnings) ? s.warnings : [];
   const laneState = s.lane && s.lane.state;
@@ -176,8 +192,10 @@ export function wireIdentityPanel(doc, deps) {
 /** wireBanners(doc, { onScanAgain(), onSetup(), onProbeLane(), onVisionNotice(allowVision) }) */
 export function wireBanners(doc, deps) {
   const d = deps || {};
-  const again = doc.getElementById('ei-scan-again');
-  if (again && d.onScanAgain) again.addEventListener('click', () => d.onScanAgain());
+  for (const id of ['ei-scan-again', 'ei-scan-again-paused']) {
+    const again = doc.getElementById(id);
+    if (again && d.onScanAgain) again.addEventListener('click', () => d.onScanAgain());
+  }
   const probe = doc.getElementById('ei-probe-lane');
   if (probe && d.onProbeLane) {
     probe.addEventListener('click', async () => {

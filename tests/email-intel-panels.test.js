@@ -105,6 +105,32 @@ describe('Phase A banners', () => {
   });
 });
 
+describe('Phase G paused-until banner (F2-05)', () => {
+  const st = (o) => Object.assign({ ok: true, enabled: true, identity: { set: true }, warnings: [], scan: { last: null }, owaAuth: { state: 'ok' }, scheduledPausedUntil: null }, o);
+  it("F2-05 banner reads 'Scheduled scans paused until <time>; press Scan again to resume now'", () => {
+    const until = new Date(2026, 10, 6, 15, 45).getTime();
+    const time = P.formatPausedUntil(until, until - 30 * 60_000);
+    expect(time).toBe(new Date(until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }));
+    expect(P.pausedBannerText(until, until - 30 * 60_000)).toBe('Scheduled scans paused until ' + time + '; press Scan again to resume now');
+    const html = P.renderBannersHtml(st({ scheduledPausedUntil: until }));
+    expect(html).toMatch(/^<div class="ei-banner ei-banner--paused" role="status" aria-live="polite">Scheduled scans paused until [^<]+; press Scan again to resume now <button type="button" class="et-mini" id="ei-scan-again-paused">Scan again<\/button><\/div>$/);
+    expect(html).toContain(P.pausedBannerText(until));
+    // not paused -> no banner; flags OFF -> nothing at all
+    expect(P.renderBannersHtml(st({}))).toBe('');
+    expect(P.renderBannersHtml(st({ scheduledPausedUntil: until, enabled: false }))).toBe('');
+    // a pause on another day names the day too
+    expect(P.formatPausedUntil(until, until - 2 * 86_400_000)).toContain(time);
+    expect(P.formatPausedUntil(until, until - 2 * 86_400_000).length).toBeGreaterThan(time.length);
+  });
+  it('F2-05 Scan again in the paused banner runs a manual scan (the same handler as the auth banner)', () => {
+    const { doc, el } = domFor(['ei-scan-again-paused']);
+    let scans = 0;
+    P.wireBanners(doc, { onScanAgain: () => scans++ });
+    el['ei-scan-again-paused'].click();
+    expect(scans).toBe(1);
+  });
+});
+
 describe('Phase B lane banner (isolated-lane-unavailable, F-16)', () => {
   const st = (o) => Object.assign({ ok: true, enabled: true, identity: { set: true }, warnings: [], scan: { last: null }, owaAuth: { state: 'ok' }, lane: { state: 'ok', checkedAt: null } }, o);
   it('shows for the warning and for unavailable / degraded lane states, never otherwise', () => {
