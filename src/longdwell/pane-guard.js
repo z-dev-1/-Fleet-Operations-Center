@@ -129,6 +129,8 @@ function hookGuest(guest, deps) {
   };
   guest.on('will-navigate', guardNav);
   guest.on('will-redirect', guardNav);
+  // Dev-only spike probe: inert unless FLEET_LDSP_PROBE_DIR is set.
+  if (process.env.FLEET_LDSP_PROBE_DIR) { try { require('./dev-probe').attachDevProbe(guest); } catch { /* dev aid only */ } }
   return true;
 }
 
