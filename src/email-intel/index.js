@@ -447,8 +447,12 @@ function getStatus() {
   if (f && f.actionsView) {
     try { const as = require('./actions/store'); openActions = as.openCount(as.load()); } catch (_) { /* status only */ }
   }
+  let unreconciledSends = 0;
+  if (f && f.threadReplies) {
+    try { unreconciledSends = require('./reply/send-guard').unreconciledCount(); } catch (_) { /* status only */ }
+  }
   return statusMod.buildStatus({
-    enabled: engaged(), flags: f, flagWarnings: warnings, lane: laneSt, extraWarnings: extra, openStaged, openActions,
+    enabled: engaged(), flags: f, flagWarnings: warnings, lane: laneSt, extraWarnings: extra, openStaged, openActions, unreconciledSends,
     config: cfgMod.normalize(stores.load('config')), checkpoints: stores.load('checkpoints'), messages: stores.load('messages'),
     running: lock.isBusy(), current: lock.current(),
     readOnlyStores: ['config', 'checkpoints', 'messages'].map((n) => stores.isReadOnly(n)),

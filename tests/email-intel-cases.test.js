@@ -406,3 +406,88 @@ describe('acceptance cases C, D, I with My Email Actions (FEAT-005)', () => {
     expect(notify).not.toHaveBeenCalled();
   });
 });
+// ── FEAT-006: thread-aware replies. Case I's draft side and case L at the executor / store level (temp data dir,
+// scripted lane, the Outlook reply mechanism stubbed: no Outlook, no send).
+describe('acceptance cases I and L with thread replies (FEAT-006)', () => {
+  let w = null;
+  afterEach(() => { if (w) w.cleanup(); w = null; });
+  const REPLIES = { enabled: true, capture: true, multiRecipient: true, actionsView: true, timelineWrites: true, threadReplies: true };
+  const identity = require('../src/email-intel/ingest/identity');
+  const iThread = (world) => {
+    world.questions.push({ when: 'can you confirm pickup Friday', q: { ref: 'q1', text: 'Can you confirm pickup Friday for 40123?', about: ['40123'], addressee: { kind: 'me', name: 'Zila', evidence: 'Zila, can you confirm pickup Friday' }, isApprovalOrDecision: false, confidence: 0.9 } });
+    world.answers.push({ when: 'Confirmed for Friday', evidence: 'Confirmed for Friday', confidence: 0.9 });
+    return [
+      world.cap({ from: DEALER, to: [ZILA], subject: 'Pickup 40123', conversationId: 'conv-i6', messageId: 'i6-1', receivedAt: '2026-11-04T14:00:00.000Z', body: 'Zila, can you confirm pickup Friday for 40123?' }),
+      world.cap({ from: COWORKER, to: [DEALER], cc: [ZILA], subject: 'RE: Pickup 40123', conversationId: 'conv-i6', messageId: 'i6-2', receivedAt: '2026-11-04T15:00:00.000Z', body: 'Confirmed for Friday, the truck is booked for 40123.' }),
+    ];
+  };
+
+  it('case I: later answer closes the question, no item, no notification, draft refused', async () => {
+    w = phaseCWorld(REPLIES);
+    const notify = vi.fn(() => true);
+    await w.scan(iThread(w), { _notify: notify });
+    expect(w.open('reply')).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+    const draft = require('../src/email-intel/reply/draft');
+    const ask = vi.fn(async () => ({ ok: true, text: 'Confirming Friday.' }));
+    const ck = identity.conversationKey('conv-i6');
+    for (const mode of ['reply', 'reply-all']) {
+      const r = await draft.draftThreadReply({ conversationKey: ck, mode }, { _ask: ask });
+      expect(r).toMatchObject({ ok: false, code: 'ALREADY_RESOLVED', resolvedBy: { senderName: 'Mike Rivera', basis: 'later-answer' } });
+    }
+    expect(ask).not.toHaveBeenCalled();                                            // no AI call, nothing to send
+    const legacy = w.store.load('emailTriageResults').emails.find((e) => e.intel && e.intel.conversationKey === ck);
+    expect(legacy.replyState).not.toBe('drafted');
+  });
+
+  it('case L: uncertain send blocks resend until reconciled', async () => {
+    w = phaseCWorld(REPLIES);
+    const caps = iThread(w).slice(0, 1);                                             // an open question to me
+    await w.scan(caps);
+    const ck = identity.conversationKey('conv-i6');
+    const confirm = require('../src/email-intel/confirm');
+    const executors = require('../src/email-intel/executors');
+    const guard = require('../src/email-intel/reply/send-guard');
+    const owaReply = require('../src/email-intel/reply/owa_reply');
+    const actions = require('../src/scrapers/email_actions');
+    confirm._resetForTests(); guard._resetForTests();
+    executors.registerAll();
+    const real = owaReply.sendThreadReply;
+    const legacySpy = vi.spyOn(actions, 'sendReply');
+    const accept = { showMessageBox: vi.fn(async () => ({ response: 1 })) };
+    let clicks = 0;
+    owaReply.sendThreadReply = vi.fn(async (o) => { if (!o.attemptHooks.beforeSendClick()) return { status: 'failed-before-send', detail: {} }; clicks++; return { status: 'delivery-uncertain', mechanism: 'owa-thread', detail: { code: 'NOT_IN_SENT_ITEMS' } }; });
+    try {
+      const p = confirm.prepare('send-reply', { conversationKey: ck, mode: 'reply', bodyText: 'Friday works for 40123.' });
+      expect(p.ok).toBe(true);
+      const r = await confirm.confirm(p.token, { _dialog: accept });
+      expect(r).toMatchObject({ ok: false, status: 'delivery-uncertain' });
+      expect(r.message).toContain('reconcile before retrying');
+      // a second click, a retry from another view, or a re-prepare: all refused, nothing sent again
+      expect(await confirm.confirm(p.token, { _dialog: accept })).toEqual({ ok: false, code: 'TOKEN_USED' });
+      expect(executors.validateSendReply({ conversationKey: ck, mode: 'reply', bodyText: 'again' })).toMatchObject({ ok: false, code: 'UNRECONCILED_ATTEMPT', attemptId: r.attemptId });
+      expect(executors.validateSendReply({ conversationKey: ck, mode: 'new-message', bodyText: 'again' }).code).toBe('UNRECONCILED_ATTEMPT');
+      expect(confirm.prepare('send-reply', { conversationKey: ck, mode: 'reply-all', bodyText: 'again' })).toMatchObject({ ok: false, code: 'BAD_ARG' });
+      expect(clicks).toBe(1);
+      expect(legacySpy).not.toHaveBeenCalled();
+      const legacy = () => w.store.load('emailTriageResults').emails.find((e) => e.intel && e.intel.conversationKey === ck);
+      expect(legacy().replyState).toBe('uncertain');                                 // the overlay renders it non-actionable (F-09)
+      expect(w.idx.getStatus().backlog.unreconciledSends).toBe(1);
+      // boot recovery leaves it uncertain; a rescan keeps the uncertain state on the legacy record
+      guard.bootRecover();
+      await w.scan(caps);
+      expect(legacy().replyState).toBe('uncertain');
+      expect(guard.canSend(ck).ok).toBe(false);
+      // read-only reconcile: not found keeps it blocked; found unblocks and marks the reply sent
+      const { reconcileSend } = require('../src/email-intel/reply/reconcile-send');
+      const session = async (_o, driver) => { const ctx = { state: {}, win: {} }; await driver(ctx); return { state: ctx.state, settled: {} }; };
+      expect(await reconcileSend(r.attemptId, { _session: session, _verify: async () => ({ found: false }) })).toMatchObject({ state: 'unconfirmed-not-found' });
+      expect(guard.canSend(ck).ok).toBe(false);
+      expect(await reconcileSend(r.attemptId, { _session: session, _verify: async () => ({ found: true }) })).toMatchObject({ state: 'sent' });
+      expect(guard.canSend(ck)).toEqual({ ok: true });
+      expect(legacy().replyState).toBe('sent');
+      expect(w.open('reply')).toEqual([]);                                           // the Reply Needed item is done
+      expect(clicks).toBe(1);                                                        // reconcile never sends
+    } finally { owaReply.sendThreadReply = real; legacySpy.mockRestore(); confirm._resetForTests(); }
+  });
+});

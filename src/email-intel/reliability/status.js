@@ -90,7 +90,7 @@ function buildWarnings(o) {
 /**
  * buildStatus(input) -> status document (design 8.6). Never contains identity values, subjects,
  * bodies or addresses; folder names are the user's configured labels and are returned to the UI only.
- * input: { enabled, flags, config, checkpoints, messages, running, current, flagWarnings, readOnlyStores, extraWarnings, openStaged, openActions }
+ * input: { enabled, flags, config, checkpoints, messages, running, current, flagWarnings, readOnlyStores, extraWarnings, openStaged, openActions, unreconciledSends }
  */
 function buildStatus(i) {
   i = i || {};
@@ -109,7 +109,7 @@ function buildStatus(i) {
     ok: true, enabled: !!i.enabled, flags: i.flags || {},
     scan: { running: !!i.running, current: i.running ? (i.current || scan.current || null) : null, last: scan.last || null },
     checkpoints: { folders },
-    backlog: { pendingAnalysis, openActions: Number(i.openActions) || 0, openStaged: Number(i.openStaged) || 0, unreconciledSends: 0 },
+    backlog: { pendingAnalysis, openActions: Number(i.openActions) || 0, openStaged: Number(i.openStaged) || 0, unreconciledSends: Number(i.unreconciledSends) || 0 },
     owaAuth: { state: auth.state || 'unknown', lastOkAt: auth.lastOkAt || null, lastBlockedAt: auth.lastBlockedAt || null, blockedCount: auth.blockedCount || 0 },
     lane: i.lane && i.lane.state ? { state: i.lane.state, checkedAt: i.lane.checkedAt || null } : { state: 'unknown', checkedAt: null },
     aiGateway: null,

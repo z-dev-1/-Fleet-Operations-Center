@@ -198,6 +198,84 @@ export function errorsFromResult(r) {
   return { [field]: msg };
 }
 
+// ── Thread-aware replies (threadReplies; design 6.2-6.7). Pure HTML builders; the overlay wires them. ──
+export const NOT_THREADED_LABEL = 'New message (not threaded)';
+export const THREADED_LABEL = 'Threaded reply in the Outlook conversation';
+export const UNCERTAIN_RECONCILE_TEXT = 'Reply status uncertain - reconcile before retrying';
+export const STALE_DRAFT_TEXT = 'A newer message arrived after this draft was written. Re-draft before sending.';
+
+/** Reply and Reply All as two separate, intentional buttons (Reply All disabled with a reason when recipients are unknown). */
+export function renderReplyButtonsHtml(em) {
+  const id = esc(em && em.id);
+  const known = !!(em && em.intel && em.intel.recipientsKnown);
+  return '<button type="button" class="et-mini ei-reply-btn" data-ei-reply="reply" data-ei-id="' + id + '" aria-label="Reply to the sender">↩︎ Reply</button>' +
+    '<button type="button" class="et-mini ei-reply-btn" data-ei-reply="reply-all" data-ei-id="' + id + '"' +
+    (known ? ' aria-label="Reply to everyone on the thread"' : ' disabled aria-disabled="true" title="Reply All is unavailable: the recipients of this email are not known" aria-label="Reply All unavailable: recipients unknown"') +
+    '>↩︎ Reply All</button>';
+}
+
+/** The non-actionable uncertain state gets only a Reconcile action (never a Reply button). */
+export function renderReconcileHtml(em) {
+  return '<button type="button" class="et-mini ei-reconcile" data-ei-reconcile="' + esc(em && em.id) + '" aria-label="' + esc(UNCERTAIN_RECONCILE_TEXT) + '">Reconcile with Sent Items</button>';
+}
+
+const _person = (e) => esc((e && (e.name || e.address)) || 'unknown') + (e && e.address && e.name ? ' &lt;' + esc(e.address) + '&gt;' : '');
+
+/** To and CC lists; CC is visually highlighted AND labeled in text (not color alone). */
+export function renderRecipientsHtml(r) {
+  const x = r || {};
+  const to = Array.isArray(x.to) ? x.to : []; const cc = Array.isArray(x.cc) ? x.cc : [];
+  return '<div class="ei-rcpt">' +
+    '<div class="ei-rcpt-to"><b>To (' + to.length + '):</b> ' + (to.map(_person).join('; ') || 'none') + '</div>' +
+    (cc.length ? '<div class="ei-cc" role="note"><b>CC (' + cc.length + ') - check these people:</b> ' + cc.map(_person).join('; ') + '</div>' : '') +
+    (x.external ? '<div class="ei-ext">External recipients: ' + Number(x.external) + '</div>' : '') +
+    '</div>';
+}
+
+/**
+ * The intel reply panel for a drafted record. ui: { mode, recipients, warnings, stale, fallback, replyAllAvailable, confirm }
+ * (ui may be missing for a draft from an earlier session: both send buttons are offered and the recipients are shown
+ * in the confirmation).
+ */
+export function renderReplyPanelHtml(em, ui) {
+  const u = ui || {};
+  const id = esc(em && em.id);
+  const mode = u.mode === 'reply-all' ? 'Reply All' : u.mode === 'reply' ? 'Reply' : 'reply';
+  const known = !!(em && em.intel && em.intel.recipientsKnown) && u.replyAllAvailable !== false;
+  const warn = (u.warnings || []).map((w) => '<li>The reply ' + esc(w.label) + '</li>').join('');
+  return '<div class="et-reply-panel ei-reply-panel" data-ei-panel="' + id + '">' +
+    '<div class="et-reply-label">✍️ Your ' + esc(mode) + ' draft — edit, then send:</div>' +
+    '<div class="ei-mech">' + esc(u.fallback ? NOT_THREADED_LABEL + ' is available because a threaded reply was not possible' : THREADED_LABEL) + '</div>' +
+    (u.recipients ? renderRecipientsHtml(u.recipients) : '') +
+    (u.stale ? '<div class="ei-warn" role="note">' + esc(STALE_DRAFT_TEXT) + '</div>' : '') +
+    (warn ? '<ul class="ei-warn-list" aria-label="Check before sending">' + warn + '</ul>' : '') +
+    '<textarea class="et-draft" data-draft="' + id + '" aria-label="Reply draft">' + esc((em && em.replyDraft) || '') + '</textarea>' +
+    (u.confirm ? renderSendConfirmHtml(u.confirm.summary) : '') +
+    '<div class="et-draft-btns">' +
+      '<button type="button" class="et-mini et-send" data-ei-send="reply" data-ei-id="' + id + '">📤 Send Reply</button>' +
+      '<button type="button" class="et-mini et-send" data-ei-send="reply-all" data-ei-id="' + id + '"' + (known ? '' : ' disabled aria-disabled="true" title="Reply All is unavailable: recipients unknown"') + '>📤 Send Reply All</button>' +
+      (u.fallback ? '<button type="button" class="et-mini" data-ei-send="new-message" data-ei-id="' + id + '">✉ Send as ' + esc(NOT_THREADED_LABEL) + '</button>' : '') +
+      '<button type="button" class="et-mini et-redraft" data-ei-redraft="' + id + '">↻ Re-draft</button>' +
+      '<button type="button" class="et-mini et-dismiss" data-dismiss="' + id + '">Dismiss</button>' +
+    '</div></div>';
+}
+
+/** In-app confirmation (the native main-process dialog follows): To and CC lists with CC highlighted. */
+export function renderSendConfirmHtml(summary) {
+  const s = summary || {};
+  const warn = (s.warnings || []).map((w) => '<li>The reply ' + esc(w.label) + '</li>').join('');
+  return '<div class="ei-confirm" role="group" aria-label="Confirm send">' +
+    '<div class="ei-confirm-head">' + esc(s.headline || 'Send this reply?') + '</div>' +
+    (s.notThreaded ? '<div class="ei-warn" role="note">' + esc(NOT_THREADED_LABEL) + ': this is a new message with "Re:", not a reply inside the Outlook conversation.</div>' : '<div class="ei-mech">' + esc(THREADED_LABEL) + '</div>') +
+    renderRecipientsHtml({ to: s.to, cc: s.cc, external: s.external }) +
+    (s.stale ? '<div class="ei-warn" role="note">' + esc(STALE_DRAFT_TEXT) + '</div>' : '') +
+    (warn ? '<ul class="ei-warn-list" aria-label="Check before sending">' + warn + '</ul>' : '') +
+    '<div class="et-draft-btns"><button type="button" class="et-mini et-send" data-ei-confirm="1">Confirm and send</button>' +
+    '<button type="button" class="et-mini" data-ei-cancel="1">Cancel</button></div>' +
+    '<div class="ei-hint">A system dialog asks you once more before anything is sent.</div>' +
+    '</div>';
+}
+
 export const PANEL_CSS = `
   #email-triage .ei-identity { padding:10px 18px; border-bottom:1px solid #161b22; font-size:12px; color:#c9d1d9; }
   #email-triage .ei-id-title { font-size:13px; margin:0 0 4px; color:#e6edf3; }
@@ -214,4 +292,11 @@ export const PANEL_CSS = `
   #email-triage .ei-banner--identity { color:#79c0ff; background:rgba(56,139,253,.08); border:1px solid rgba(56,139,253,.3); }
   #email-triage .ei-banner--lane { color:#e3b341; background:rgba(210,153,34,.08); border:1px solid rgba(210,153,34,.3); }
   #email-triage .ei-gear { background:#30363d; padding:7px 10px; }
+  #email-triage .ei-mech { font-size:11px; color:#8b949e; margin-bottom:6px; }
+  #email-triage .ei-rcpt { font-size:11px; color:#c9d1d9; margin:4px 0 8px; display:flex; flex-direction:column; gap:3px; }
+  #email-triage .ei-cc { background:rgba(210,153,34,.14); border:1px solid rgba(210,153,34,.45); border-radius:5px; padding:3px 6px; color:#e3b341; }
+  #email-triage .ei-ext, #email-triage .ei-warn { font-size:11px; color:#e3b341; }
+  #email-triage .ei-warn-list { font-size:11px; color:#e3b341; margin:4px 0; padding-left:18px; }
+  #email-triage .ei-confirm { margin-top:8px; padding:8px 10px; border:1px solid rgba(88,166,255,.45); border-radius:6px; background:#0d1117; }
+  #email-triage .ei-confirm-head { font-size:12px; font-weight:700; color:#e6edf3; margin-bottom:4px; }
 `;

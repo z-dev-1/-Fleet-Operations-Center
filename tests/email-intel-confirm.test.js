@@ -1,7 +1,7 @@
 // tests/email-intel-confirm.test.js — confirmation tokens and native human proof (design 1.7, F-18).
 // R5.6 summary lists CC; R5.7 single-use token, ttl, payload binding; R7.5 no executor runs
 // without a token AND native dialog acceptance; F-18 cancelled dialog consumes the token.
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const confirm = require('../src/email-intel/confirm');
@@ -195,5 +195,46 @@ describe('F-18 native human proof for consequential kinds', () => {
       if (typeof electron === 'object') { expect(seen[0][0]).toBe(parent); expect(seen[0]).toHaveLength(2); }
       else { expect(seen[0]).toHaveLength(1); }   // plain node: electron is a path string, no parent
     } finally { if (typeof electron === 'object') electron.BrowserWindow = orig; }
+  });
+});
+
+// FEAT-006: the REAL send-reply executor's summary (built in the main process from the stored conversation).
+describe('R5.6 send-reply summary from the real executor (FEAT-006)', () => {
+  let fx; let flags; let executors;
+  const CK = 'cv_00000000000000d9';
+  beforeEach(async () => {
+    fx = await import('./fixtures/email-intel-fixture.js');
+    fx.installStubs();
+    flags = require('../src/email-intel/flags');
+    executors = require('../src/email-intel/executors');
+    executors.registerAll();
+    fx.resetWorld({
+      emailIntelMessages: { version: 1, byConv: { [CK]: ['mi_d9'] }, aliasIndex: {}, bytesEstimate: 0, messages: { mi_d9: {
+        messageKey: 'mi_d9', conversationKey: CK, legacyId: 'em_d9', convIdRaw: 'conv/d9=', convIdSource: 'owa', folder: 'Inbox', recipientsKnown: true, subject: 'Estimate 40123',
+        from: { name: 'Dealer Parts Desk', address: 'parts@dealer.example.test' }, to: [{ name: 'Zila Santiago', address: 'zila.santiago@example.test' }, { name: 'Ops Lead', address: 'ops.lead@example.test' }],
+        cc: [{ name: 'Mike Rivera', address: 'mike.rivera@example.test' }, { name: 'Vendor Desk', address: 'desk@vendor.other.test' }], body: { status: 'complete', newContent: 'x' } } } },
+      emailIntelConfig: { version: 1, me: { names: ['Zila Santiago'], addresses: ['zila.santiago@example.test'], distributionLists: [] } },
+    });
+    flags._setForTests({ enabled: true, capture: true, multiRecipient: true, threadReplies: true });
+  });
+  afterEach(() => { flags._setForTests(null); });
+
+  it('R5.6 summary lists CC: Reply All headline counts CC, the detail lists every CC participant, the native dialog shows it', async () => {
+    const r = confirm.prepare('send-reply', { conversationKey: CK, mode: 'reply-all', bodyText: 'We will have it ready by Friday.' });
+    expect(r.ok).toBe(true);
+    expect(r.summary.headline).toBe('Send Reply All to 4 people (2 in CC)?');
+    expect(r.summary.detailText).toContain('To (2): Dealer Parts Desk <parts@dealer.example.test>; Ops Lead <ops.lead@example.test>');
+    expect(r.summary.detailText).toContain('CC (2) - check these people: Mike Rivera <mike.rivera@example.test>; Vendor Desk <desk@vendor.other.test>');
+    expect(r.summary.detailText).toContain('External recipients: 2');
+    expect(r.summary.detailText).toContain('Warning: the reply promises a date or time.');
+    expect(r.summary.detailText).not.toContain('zila.santiago@example.test');                     // never to myself
+    expect(r.summary).toMatchObject({ toCount: 2, ccCount: 2, external: 2, mechanism: 'owa-thread', notThreaded: false });
+    // cancel at the native dialog: the dialog showed the same lists, the token is consumed and nothing ran
+    const r2 = await confirm.confirm(r.token, { _dialog: cancel });
+    expect(r2).toEqual({ ok: false, code: 'USER_CANCELLED' });
+    expect(dialogs[0]).toMatchObject({ title: 'Send reply', message: 'Send Reply All to 4 people (2 in CC)?', buttons: ['Cancel', 'Send'] });
+    expect(dialogs[0].detail).toContain('CC (2) - check these people');
+    expect(fx.doc('emailIntelSends')).toBe('<absent>');
+    expect(await confirm.confirm(r.token, { _dialog: accept })).toEqual({ ok: false, code: 'TOKEN_USED' });
   });
 });

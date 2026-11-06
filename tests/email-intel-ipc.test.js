@@ -435,3 +435,248 @@ describe('dom-probe (read-only, masked)', () => {
     expect(domProbeMod.consumeTzProbe(out.probeId)).toEqual({ ok: true });
   });
 });
+
+// ── Phase E (FEAT-006): thread-aware replies. The legacy send-reply fails closed under threadReplies (F2-03); the
+// send-reply token executor owns the attempt; mark-send-resolution needs exactly acknowledgeCheckedOutlook:true.
+describe('Phase E: send-reply and mark-send-resolution tokens, legacy send-reply fail-closed (F2-03)', () => {
+  const REPLIES = { enabled: true, capture: true, multiRecipient: true, threadReplies: true };
+  const CKR = 'cv_00000000000000e1';
+  const ZIL = { name: 'Zila Santiago', address: 'zila.santiago@example.test' };
+  const MIKE = { name: 'Mike Rivera', address: 'mike.rivera@example.test' };
+  const LEGACY = { id: 'em_e1', convId: 'conv/e1=', from: 'parts@dealer.example.test', fromName: 'Dealer Parts Desk', subject: 'Pickup 40123', replyState: 'drafted', replyDraft: 'old draft', unitRefs: [], intel: { conversationKey: CKR, recipientsKnown: true, latestMessageKey: 'mi_e1' } };
+  const REC = {
+    messageKey: 'mi_e1', conversationKey: CKR, legacyId: 'em_e1', convIdRaw: 'conv/e1=', convIdSource: 'owa', messageIdSource: 'owa-item', folder: 'Inbox',
+    from: { name: 'Dealer Parts Desk', address: 'parts@dealer.example.test' }, to: [ZIL], cc: [MIKE], recipientsKnown: true, subject: 'Pickup 40123',
+    receivedAt: '2026-11-04T14:00:00.000Z', body: { status: 'complete', newContent: 'Can you confirm pickup Friday?' }, analysis: { status: 'ok', deterministic: { units: [] } },
+  };
+  let owaReply; let realThread; let ow; let owaMailer; let realViaOwa;
+  const seed = (extra = {}) => fx.resetWorld(Object.assign({
+    emailTriageResults: { emails: [JSON.parse(JSON.stringify(LEGACY))], ranAt: 'x', authBlocked: false },
+    emailIntelMessages: { version: 1, messages: { mi_e1: REC }, byConv: { [CKR]: ['mi_e1'] }, aliasIndex: {}, bytesEstimate: 0 },
+    emailIntelConfig: { version: 1, me: { names: ['Zila Santiago'], addresses: ['zila.santiago@example.test'], distributionLists: [] } },
+  }, extra));
+  const attempts = () => { const d = fx.doc('emailIntelSends'); return d === '<absent>' ? [] : Object.values(d.attempts); };
+  const legacy = () => fx.doc('emailTriageResults').emails[0];
+  beforeEach(() => {
+    owaReply = require(path.join(fx.ROOT, 'src/email-intel/reply/owa_reply'));
+    realThread = owaReply.sendThreadReply;
+    owaReply.sendThreadReply = vi.fn(async () => { throw new Error('not stubbed for this test'); });
+    ow = require(path.join(fx.ROOT, 'src/scrapers/owa_reader'));
+    owaMailer = require(path.join(fx.ROOT, 'src/scrapers/owa-mailer'));
+    realViaOwa = owaMailer.sendViaOwa;
+    owaMailer.sendViaOwa = vi.fn(async () => { throw new Error('sendViaOwa must not be reached'); });
+    actions.sendReply = vi.fn(async () => ({ ok: true, status: 'sent', message: 'Reply sent to parts@dealer.example.test' }));
+    require(path.join(fx.ROOT, 'src/email-intel/reply/send-guard'))._resetForTests();
+  });
+  afterEach(() => { owaReply.sendThreadReply = realThread; owaMailer.sendViaOwa = realViaOwa; });
+
+  it('F2-03 legacy send-reply returns CONFIRMATION_REQUIRED and calls no sender under threadReplies', async () => {
+    seed();
+    flags._setForTests(REPLIES);
+    const before = fx.doc('emailTriageResults');
+    for (const args of [['em_e1', 'Edited reply body'], ['em_e1', ''], ['nope', 'x'], [5, 'x']]) {
+      expect(await call('emailTriage:send-reply', ...args)).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED' });
+    }
+    expect(actions.sendReply).not.toHaveBeenCalled();
+    expect(owaMailer.sendViaOwa).not.toHaveBeenCalled();
+    expect(owaReply.sendThreadReply).not.toHaveBeenCalled();
+    expect(fx.doc('emailTriageResults')).toEqual(before);
+    expect(fx.doc('emailIntelSends')).toBe('<absent>');
+    expect(confirm._liveCount()).toBe(0);
+    // threadReplies not effective (capture only, or threadReplies without its dependencies): the baseline handler
+    for (const f of [null, { enabled: true, capture: true }, { enabled: true, capture: true, threadReplies: true }]) {
+      flags._setForTests(f);
+      seed();
+      actions.sendReply.mockClear();
+      expect(await call('emailTriage:send-reply', 'em_e1', 'Edited reply body')).toMatchObject({ ok: true, status: 'sent' });
+      expect(actions.sendReply).toHaveBeenCalledTimes(1);
+      expect(legacy()).toMatchObject({ replyState: 'sent', replyDraft: 'Edited reply body' });
+    }
+  });
+
+  it('R5.7 legacy send requires token under flag (always CONFIRMATION_REQUIRED, the confirmed executor sends)', async () => {
+    seed();
+    flags._setForTests(REPLIES);
+    expect(await call('emailTriage:send-reply', 'em_e1', 'Body')).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED' });
+    const prep = await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'new-message', bodyText: 'Body' });
+    expect(prep).toMatchObject({ ok: true, token: expect.stringMatching(/^[0-9a-f]{32}$/) });
+    const dlg = acceptDialog();
+    expect(await call('emailIntel:confirm-action', prep.token)).toMatchObject({ ok: true, status: 'sent' });
+    expect(dlg.showMessageBox.mock.calls[0][0]).toMatchObject({ title: 'Send reply', buttons: ['Cancel', 'Send'], cancelId: 0, defaultId: 0 });
+    expect(actions.sendReply).toHaveBeenCalledTimes(1);
+  });
+
+  it('F2-03 new-message executor owns the attempt, calls sendReply once with baseline arguments, maps status to attempt and replyState', async () => {
+    const rows = [
+      ['sent', { ok: true, status: 'sent' }, 'sent', 'sent'],
+      ['uncertain', { ok: false, status: 'delivery-uncertain' }, 'delivery-uncertain', 'uncertain'],
+      ['blocked-auth', { ok: false, status: 'blocked-auth' }, 'blocked-auth', 'drafted'],
+      ['failed', { ok: false, status: 'failed' }, 'failed-before-send', 'drafted'],
+      ['no status', { ok: false, error: 'reply body required' }, 'failed-before-send', 'drafted'],
+    ];
+    for (const [name, res, state, replyState] of rows) {
+      seed();
+      flags._setForTests(REPLIES);
+      actions.sendReply = vi.fn(async () => res);
+      const prep = await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'new-message', bodyText: '  Edited reply body  ' });
+      expect(prep.ok, name).toBe(true);
+      expect(prep.summary).toMatchObject({ headline: 'Send New message (not threaded) to 1 person?', notThreaded: true, mechanism: 'compose-new', mechanismLabel: 'New message (not threaded)', toCount: 1, ccCount: 0 });
+      expect(prep.summary.detailText).toContain('NOT THREADED');
+      acceptDialog();
+      const r = await call('emailIntel:confirm-action', prep.token);
+      expect(r, name).toMatchObject({ ok: state === 'sent', status: state, mechanism: 'compose-new', attemptId: expect.stringMatching(/^sa_[0-9a-f]{16}$/) });
+      expect(actions.sendReply, name).toHaveBeenCalledTimes(1);
+      const args = actions.sendReply.mock.calls[0];
+      expect(args).toHaveLength(2);                                                   // (email, body): the baseline N6 call shape
+      expect(args[0]).toEqual(LEGACY);
+      expect(args[1]).toBe('Edited reply body');
+      const a = attempts();
+      expect(a, name).toHaveLength(1);
+      expect(a[0]).toMatchObject({ attemptId: r.attemptId, state, mode: 'new-message', mechanism: 'compose-new', conversationKey: CKR, toCount: 1, ccCount: 0, bodyChars: 17 });
+      expect(a[0].sendClickedAt).toEqual(expect.any(String));
+      expect(legacy().replyState, name).toBe(replyState);
+      if (state === 'sent') expect(legacy().replyDraft).toBe('Edited reply body');
+    }
+    // the uncertain one blocks any further send for the conversation (case L)
+    seed();
+    flags._setForTests(REPLIES);
+    actions.sendReply = vi.fn(async () => ({ ok: false, status: 'delivery-uncertain' }));
+    const p1 = await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'new-message', bodyText: 'x' });
+    acceptDialog();
+    const r1 = await call('emailIntel:confirm-action', p1.token);
+    expect(r1.status).toBe('delivery-uncertain');
+    expect(await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'reply', bodyText: 'x' })).toEqual({ ok: false, code: 'UNRECONCILED_ATTEMPT', attemptId: r1.attemptId, state: 'delivery-uncertain' });
+    expect(confirm._liveCount()).toBe(0);
+    expect(actions.sendReply).toHaveBeenCalledTimes(1);
+  });
+
+  it('threaded Reply All: expected recipients exclude me, CC listed separately; uncertain blocks, user resolution unblocks (F-19 mark-send-resolution)', async () => {
+    seed();
+    flags._setForTests(REPLIES);
+    owaReply.sendThreadReply = vi.fn(async (o) => { expect(o.attemptHooks.beforeSendClick()).toBe(true); return { status: 'delivery-uncertain', mechanism: 'owa-thread', detail: { code: 'NOT_IN_SENT_ITEMS' } }; });
+    const prep = await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'reply-all', bodyText: 'I approve it, go ahead.' });
+    expect(prep.summary).toMatchObject({ headline: 'Send Reply All to 2 people (1 in CC)?', notThreaded: false, mechanism: 'owa-thread', toCount: 1, ccCount: 1 });
+    expect(prep.summary.cc).toEqual([MIKE]);
+    expect(prep.summary.detailText).toContain('CC (1) - check these people: Mike Rivera <mike.rivera@example.test>');
+    expect(prep.summary.warnings.map((w) => w.code)).toEqual(['approval', 'go-ahead']);
+    acceptDialog();
+    const r = await call('emailIntel:confirm-action', prep.token);
+    expect(r).toMatchObject({ ok: false, status: 'delivery-uncertain', mechanism: 'owa-thread', code: 'NOT_IN_SENT_ITEMS' });
+    const o = owaReply.sendThreadReply.mock.calls[0][0];
+    expect(o).toMatchObject({ convId: 'conv/e1=', folder: 'Inbox', mode: 'reply-all', subjectNorm: 're: pickup 40123', bodyText: 'I approve it, go ahead.' });
+    expect(o.expected.to.map((e) => e.address)).toEqual(['parts@dealer.example.test']);
+    expect(o.expected.cc.map((e) => e.address)).toEqual(['mike.rivera@example.test']);
+    expect(o.html).toContain(o.marker);
+    expect(actions.sendReply).not.toHaveBeenCalled();
+    expect(legacy().replyState).toBe('uncertain');
+    expect(attempts()[0]).toMatchObject({ state: 'delivery-uncertain', errorCode: 'NOT_IN_SENT_ITEMS' });
+    expect((await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'reply', bodyText: 'again' })).code).toBe('UNRECONCILED_ATTEMPT');
+    const ga = await call('emailIntel:get-send-attempts', CKR);
+    expect(ga).toMatchObject({ ok: true, unreconciled: 1 });
+    expect(ga.attempts[0].attemptId).toBe(r.attemptId);
+    // user resolution: not-sent needs a reconcile check >= 2 minutes after the click, or the explicit override
+    const base = { attemptId: r.attemptId, resolution: 'not-sent', acknowledgeCheckedOutlook: true };
+    expect(await call('emailIntel:prepare-action', 'mark-send-resolution', base)).toEqual({ ok: false, code: 'BAD_ARG', field: 'resolution', reason: 'reconcile-first' });
+    const pm = await call('emailIntel:prepare-action', 'mark-send-resolution', Object.assign({}, base, { override: true }));
+    expect(pm).toMatchObject({ ok: true, summary: { headline: 'Mark this reply as NOT sent?' } });
+    expect(pm.summary.detailText).toContain('Warning: no Sent Items check');
+    electronStub.dialog = { showMessageBox: vi.fn(async () => ({ response: 0 })) };
+    expect(await call('emailIntel:confirm-action', pm.token)).toEqual({ ok: false, code: 'USER_CANCELLED' });
+    expect(attempts()[0].state).toBe('delivery-uncertain');
+    const pm2 = await call('emailIntel:prepare-action', 'mark-send-resolution', Object.assign({}, base, { override: true }));
+    acceptDialog();
+    expect(await call('emailIntel:confirm-action', pm2.token)).toEqual({ ok: true, state: 'abandoned', resolution: 'user-marked-not-sent' });
+    expect(legacy().replyState).toBe('drafted');
+    expect((await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'reply', bodyText: 'again' })).ok).toBe(true);
+  });
+
+  it('threaded failures: recipient mismatch returns the diff, mechanism-unavailable offers the labeled fallback; nothing is marked sent', async () => {
+    seed();
+    flags._setForTests(REPLIES);
+    owaReply.sendThreadReply = vi.fn(async () => ({ status: 'recipient-mismatch', mechanism: 'owa-thread', detail: { code: 'RECIPIENT_MISMATCH', diff: { missing: [], extra: [{ name: 'X', address: 'x@example.test', role: 'cc' }] } } }));
+    let p = await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'reply', bodyText: 'ok' });
+    expect(p.summary.headline).toBe('Send Reply to 1 person (0 in CC)?');
+    acceptDialog();
+    let r = await call('emailIntel:confirm-action', p.token);
+    expect(r).toMatchObject({ ok: false, status: 'recipient-mismatch', code: 'RECIPIENT_MISMATCH', diff: { extra: [{ address: 'x@example.test' }] } });
+    expect(attempts()[0]).toMatchObject({ state: 'failed-before-send', errorCode: 'RECIPIENT_MISMATCH' });
+    expect(legacy().replyState).toBe('drafted');
+    owaReply.sendThreadReply = vi.fn(async () => ({ status: 'mechanism-unavailable', mechanism: 'owa-thread', detail: { code: 'NO_REPLY_CONTROL' } }));
+    p = await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'reply', bodyText: 'ok' });
+    r = await call('emailIntel:confirm-action', p.token);
+    expect(r).toMatchObject({ status: 'mechanism-unavailable', fallback: 'new-message' });
+    expect(r.message).toContain('New message (not threaded)');
+    expect(actions.sendReply).not.toHaveBeenCalled();
+    // a derived conversation id cannot be replied to in-thread; the new-message fallback still can
+    seed({ emailIntelMessages: { version: 1, messages: { mi_e1: Object.assign({}, REC, { convIdSource: 'derived' }) }, byConv: { [CKR]: ['mi_e1'] }, aliasIndex: {}, bytesEstimate: 0 } });
+    expect(await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'reply', bodyText: 'ok' })).toEqual({ ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'no-conversation-id' });
+    expect((await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'new-message', bodyText: 'ok' })).ok).toBe(true);
+  });
+
+  it('F-18 send-reply: no native dialog executes nothing; a cancelled dialog consumes the token', async () => {
+    seed();
+    flags._setForTests(REPLIES);
+    const p0 = await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'new-message', bodyText: 'Body' });
+    expect(await call('emailIntel:confirm-action', p0.token)).toEqual({ ok: false, code: 'DIALOG_UNAVAILABLE' });
+    electronStub.dialog = { showMessageBox: vi.fn(async () => ({ response: 0 })) };
+    const p1 = await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'new-message', bodyText: 'Body' });
+    expect(await call('emailIntel:confirm-action', p1.token)).toEqual({ ok: false, code: 'USER_CANCELLED' });
+    expect(await call('emailIntel:confirm-action', p1.token)).toEqual({ ok: false, code: 'TOKEN_USED' });
+    expect(actions.sendReply).not.toHaveBeenCalled();
+    expect(fx.doc('emailIntelSends')).toBe('<absent>');                                // no attempt before the human accepted
+  });
+
+  it('F-19 prepare-action payload schema matrix: send-reply and mark-send-resolution', async () => {
+    seed();
+    flags._setForTests({ enabled: true, capture: true, multiRecipient: true });
+    expect(await call('emailIntel:prepare-action', 'send-reply', { conversationKey: CKR, mode: 'reply', bodyText: 'x' })).toEqual({ ok: true, enabled: false });
+    expect(await call('emailIntel:prepare-action', 'mark-send-resolution', { attemptId: 'sa_0000000000000000' })).toEqual({ ok: true, enabled: false });
+    flags._setForTests(REPLIES);
+    const S = (o) => Object.assign({ conversationKey: CKR, mode: 'reply', bodyText: 'Body' }, o);
+    const rows = [
+      ['send-reply', 'x', 'payload'], ['send-reply', {}, 'conversationKey'], ['send-reply', S({ conversationKey: 'cv_short' }), 'conversationKey'], ['send-reply', S({ conversationKey: CKR.toUpperCase() }), 'conversationKey'],
+      ['send-reply', S({ mode: 'forward' }), 'mode'], ['send-reply', S({ mode: undefined }), 'mode'], ['send-reply', S({ bodyText: undefined }), 'bodyText'], ['send-reply', S({ bodyText: '   ' }), 'bodyText'],
+      ['send-reply', S({ bodyText: 'x'.repeat(8001) }), 'bodyText'], ['send-reply', S({ bodyText: 5 }), 'bodyText'],
+      ['mark-send-resolution', 'x', 'payload'], ['mark-send-resolution', {}, 'attemptId'], ['mark-send-resolution', { attemptId: 'sa_nothex' }, 'attemptId'],
+      ['mark-send-resolution', { attemptId: 'sa_0000000000000000', resolution: 'maybe' }, 'resolution'],
+      ['mark-send-resolution', { attemptId: 'sa_0000000000000000', resolution: 'sent' }, 'acknowledgeCheckedOutlook'],
+      ['mark-send-resolution', { attemptId: 'sa_0000000000000000', resolution: 'sent', acknowledgeCheckedOutlook: 'true' }, 'acknowledgeCheckedOutlook'],
+      ['mark-send-resolution', { attemptId: 'sa_0000000000000000', resolution: 'sent', acknowledgeCheckedOutlook: 1 }, 'acknowledgeCheckedOutlook'],
+      ['mark-send-resolution', { attemptId: 'sa_0000000000000000', resolution: 'sent', acknowledgeCheckedOutlook: true, override: 'yes' }, 'override'],
+    ];
+    for (const [kind, p, field] of rows) {
+      expect(await call('emailIntel:prepare-action', kind, p), kind + ' ' + JSON.stringify(p)).toMatchObject({ ok: false, code: 'BAD_ARG', field });
+    }
+    expect(await call('emailIntel:prepare-action', 'send-reply', S({ bodyText: 'key AKIAIOSFODNN7EXAMPLE' }))).toEqual({ ok: false, code: 'BAD_ARG', field: 'bodyText', reason: 'secret-like' });
+    expect(await call('emailIntel:prepare-action', 'send-reply', S({ conversationKey: 'cv_ffffffffffffffff' }))).toEqual({ ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'unknown-conversation' });
+    expect(await call('emailIntel:prepare-action', 'mark-send-resolution', { attemptId: 'sa_0000000000000000', resolution: 'sent', acknowledgeCheckedOutlook: true })).toEqual({ ok: false, code: 'BAD_ARG', field: 'attemptId', reason: 'not-unresolved' });
+    // Reply All with unknown recipients is refused before a token exists; Reply still works
+    seed({ emailIntelMessages: { version: 1, messages: { mi_e1: Object.assign({}, REC, { recipientsKnown: false }) }, byConv: { [CKR]: ['mi_e1'] }, aliasIndex: {}, bytesEstimate: 0 } });
+    expect(await call('emailIntel:prepare-action', 'send-reply', S({ mode: 'reply-all' }))).toEqual({ ok: false, code: 'RECIPIENTS_UNKNOWN' });
+    expect(confirm._liveCount()).toBe(0);
+    expect((await call('emailIntel:prepare-action', 'send-reply', S())).ok).toBe(true);
+  });
+
+  it('draft-thread-reply, get-send-attempts and reconcile-send: inert when off, validated when on', async () => {
+    seed();
+    expect(await call('emailIntel:draft-thread-reply', { conversationKey: CKR, mode: 'reply' })).toEqual({ ok: true, enabled: false });
+    expect(await call('emailIntel:get-send-attempts')).toEqual({ ok: true, enabled: false });
+    expect(await call('emailIntel:reconcile-send', { attemptId: 'sa_0000000000000000' })).toEqual({ ok: true, enabled: false });
+    flags._setForTests(REPLIES);
+    for (const [p, field] of [['x', 'payload'], [{ mode: 'reply' }, 'conversationKey'], [{ conversationKey: CKR, mode: 'new-message' }, 'mode'], [{ conversationKey: CKR, mode: 'reply', guidance: 'g'.repeat(1001) }, 'guidance'], [{ conversationKey: CKR, mode: 'reply', force: 'yes' }, 'force']]) {
+      expect(await call('emailIntel:draft-thread-reply', p)).toEqual({ ok: false, code: 'BAD_ARG', field });
+    }
+    // the fixture relay has no isolated lane: an editable starter draft, mirrored onto the legacy record
+    const d = await call('emailIntel:draft-thread-reply', { conversationKey: CKR, mode: 'reply-all', guidance: 'Friday works.' });
+    expect(d).toMatchObject({ ok: true, mode: 'reply-all', aiUnavailable: true, draft: 'Hi Dealer,\n\nFriday works.\n\nBest regards', replyAllAvailable: true });
+    expect(d.recipients.cc).toEqual([Object.assign({ role: 'cc' }, MIKE)]);
+    expect(legacy()).toMatchObject({ replyState: 'drafted', replyDraft: d.draft });
+    expect(await call('emailIntel:get-send-attempts', { conversationKey: 'nope' })).toEqual({ ok: false, code: 'BAD_ARG', field: 'conversationKey' });
+    expect(await call('emailIntel:get-send-attempts', CKR)).toEqual({ ok: true, attempts: [], unreconciled: 0 });
+    expect(await call('emailIntel:reconcile-send', { attemptId: 'nope' })).toEqual({ ok: false, code: 'BAD_ARG', field: 'attemptId' });
+    expect(await call('emailIntel:reconcile-send', 'sa_0000000000000000')).toEqual({ ok: false, code: 'NOT_FOUND' });
+    // the legacy draft-reply channel under threadReplies drafts through the same thread-aware path
+    expect(await call('emailTriage:draft-reply', 'em_e1', 'Friday works.')).toEqual({ ok: true, draft: 'Hi Dealer,\n\nFriday works.\n\nBest regards', aiUnavailable: true });
+    expect((await call('emailIntel:status')).backlog.unreconciledSends).toBe(0);
+  });
+});

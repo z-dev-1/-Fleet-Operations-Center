@@ -22,7 +22,14 @@
  *   The rule (deleteTarget, R7.6): real conversation id (derived keys excluded), no open action, no question or
  *   decision for me, at most one message without a message-level id.
  *
- * Later phases extend registerAll() (send-reply, ...).
+ * Phase E registers:
+ *   send-reply     payload { conversationKey, mode:'reply'|'reply-all'|'new-message', bodyText } -> owns the send
+ *                  attempt; threaded modes use reply/owa_reply.sendThreadReply, 'new-message' the UNCHANGED
+ *                  email_actions.sendReply (labeled "New message (not threaded)"). The legacy emailTriage:send-reply
+ *                  channel always returns CONFIRMATION_REQUIRED while threadReplies is effective (plan 2.3, F2-03).
+ *   mark-send-resolution payload { attemptId, resolution:'sent'|'not-sent', acknowledgeCheckedOutlook:true, override? }
+ *
+ * Later phases extend registerAll().
  */
 const confirm = require('./confirm');
 const { cleanLabel } = confirm;
@@ -366,6 +373,233 @@ const deleteBatch = {
   },
 };
 
+// ── Phase E: send-reply / mark-send-resolution (design 6.5-6.7; plan 2.3 F2-03) ──
+// The send-reply executor OWNS the attempt record (emailIntelSends). Modes 'reply' / 'reply-all' reply inside the
+// real Outlook conversation (reply/owa_reply.sendThreadReply); mode 'new-message' calls the UNCHANGED
+// email_actions.sendReply(email, body) with the same arguments as the legacy handler and is labeled
+// "New message (not threaded)". res.status maps onto the attempt (sent | delivery-uncertain | failed-before-send |
+// blocked-auth) and onto the legacy replyState (sent | uncertain | unchanged). Nothing here retries a send.
+const SEND_MODES = Object.freeze(['reply', 'reply-all', 'new-message']);
+const ATTEMPT_RE = /^sa_[0-9a-f]{16}$/;
+const SEND_BODY_MAX = 8_000;
+const RESOLUTION_CHECK_MIN_MS = 2 * 60_000;
+const NOT_THREADED_LABEL = 'New message (not threaded)';
+const SEND_MESSAGES = Object.freeze({
+  sent: 'Reply sent.',
+  'delivery-uncertain': 'Reply status uncertain - check Outlook and reconcile before retrying. It will not be sent again automatically.',
+  'blocked-auth': 'Outlook needs a sign-in. Nothing was sent. Open Outlook on the web once, then try again.',
+  'failed-before-send': 'Nothing was sent.',
+  'recipient-mismatch': 'Outlook\'s recipients differ from the ones you confirmed. Nothing was sent.',
+  'mechanism-unavailable': 'Could not reply inside the Outlook conversation. Nothing was sent. You can send it as a ' + NOT_THREADED_LABEL + '.',
+});
+
+const _conv = (ck) => {
+  const ledger = require('./ingest/ledger');
+  return ledger.conversation(ledger.ensureDoc(require('./stores').load('messages')), ck);
+};
+function _legacyRecord(conversationKey, legacyId) {
+  let results = null;
+  try { results = _results(); } catch (_) { results = null; }
+  const emails = (results && Array.isArray(results.emails)) ? results.emails : [];
+  return emails.find((e) => e && e.intel && e.intel.conversationKey === conversationKey) || emails.find((e) => e && e.id === legacyId) || null;
+}
+function _storedDraftStale(conversationKey, latestKey) {
+  try {
+    const as = require('./actions/store');
+    return Object.values(as.load().items).some((x) => x.conversationKey === conversationKey && as.LIVE.has(x.state) && x.draft && x.draft.basedOnMessageKey && x.draft.basedOnMessageKey !== latestKey);
+  } catch (_) { return false; }
+}
+
+/**
+ * validateSendReply(payload) -> { ok:true, ... } | { ok:false, code, field?, reason?, attemptId? }
+ * payload { conversationKey ^cv_[0-9a-f]{16}$, mode reply|reply-all|new-message, bodyText 1..8000 after trim };
+ * findSecret(bodyText) must be null; the conversation must exist and canSend; reply-all needs known recipients;
+ * threaded modes need a real Outlook conversation id; new-message needs the legacy record with a sender address.
+ */
+function validateSendReply(payload) {
+  if (!_isPlain(payload)) return { ok: false, code: 'BAD_ARG', field: 'payload' };
+  const { conversationKey, mode } = payload;
+  if (typeof conversationKey !== 'string' || !CONV_RE.test(conversationKey)) return { ok: false, code: 'BAD_ARG', field: 'conversationKey' };
+  if (!SEND_MODES.includes(mode)) return { ok: false, code: 'BAD_ARG', field: 'mode' };
+  const body = typeof payload.bodyText === 'string' ? payload.bodyText.trim() : null;
+  if (!body || body.length > SEND_BODY_MAX) return { ok: false, code: 'BAD_ARG', field: 'bodyText' };
+  if (require('../justme-context/secret-scrub').findSecret(body)) return { ok: false, code: 'BAD_ARG', field: 'bodyText', reason: 'secret-like' };
+  const records = _conv(conversationKey);
+  if (!records.length) return { ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'unknown-conversation' };
+  const latest = records[records.length - 1];
+  const guard = require('./reply/send-guard');
+  const can = guard.canSend(conversationKey);
+  if (!can.ok) return { ok: false, code: 'UNRECONCILED_ATTEMPT', attemptId: can.attemptId, state: can.state };
+  const me = (require('./config').normalize(require('./stores').load('config')).me) || {};
+  const rec = require('./reply/recipients').computeRecipients(latest, mode, me);
+  if (mode === 'reply-all' && rec.blocked === 'RECIPIENTS_UNKNOWN') return { ok: false, code: 'RECIPIENTS_UNKNOWN' };
+  const legacy = _legacyRecord(conversationKey, latest.legacyId);
+  let to = rec.to; let cc = rec.cc;
+  if (mode === 'new-message') {
+    if (!legacy) return { ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'no-legacy-record' };
+    if (!legacy.from || !/@/.test(String(legacy.from))) return { ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'no-sender-address' };
+    to = [{ name: String(legacy.fromName || '').slice(0, 120), address: String(legacy.from).trim().toLowerCase(), role: 'sender' }]; cc = [];
+  } else {
+    if (rec.blocked) return { ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'no-recipients' };
+    if (latest.convIdSource === 'derived' || !latest.convIdRaw) return { ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'no-conversation-id' };
+  }
+  const doms = new Set((me.addresses || []).map((a) => String(a).slice(String(a).lastIndexOf('@') + 1).toLowerCase()).filter(Boolean));
+  const external = doms.size ? to.concat(cc).filter((e) => e.address && !doms.has(e.address.slice(e.address.lastIndexOf('@') + 1))).length : null;
+  return {
+    ok: true, conversationKey, mode, body, records, latest, legacy, to, cc, external,
+    mechanism: mode === 'new-message' ? 'compose-new' : 'owa-thread',
+    stale: _storedDraftStale(conversationKey, latest.messageKey),
+    warnings: require('./reply/risk').scanRisk(body),
+  };
+}
+
+const _who = (e) => cleanLabel(e.name || e.address || 'unknown') + (e.address && e.name ? ' <' + cleanLabel(e.address, 80) + '>' : '');
+const _plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
+
+function _sendSummary(v) {
+  const n = v.to.length + v.cc.length;
+  const verb = v.mode === 'reply-all' ? 'Reply All' : v.mode === 'reply' ? 'Reply' : NOT_THREADED_LABEL;
+  const headline = v.mode === 'new-message'
+    ? 'Send ' + NOT_THREADED_LABEL + ' to ' + _plural(n, 'person').replace('persons', 'people') + '?'
+    : 'Send ' + verb + ' to ' + (n === 1 ? '1 person' : n + ' people') + ' (' + v.cc.length + ' in CC)?';
+  const lines = [];
+  lines.push(v.mode === 'new-message'
+    ? 'NOT THREADED: this sends a new message with "Re:" to the sender. It is not a reply inside the Outlook conversation.'
+    : 'Threaded: replies inside the Outlook conversation with Outlook\'s own ' + verb + ' control.');
+  lines.push('To (' + v.to.length + '): ' + (v.to.map(_who).join('; ') || 'none'));
+  if (v.cc.length) lines.push('CC (' + v.cc.length + ') - check these people: ' + v.cc.map(_who).join('; '));
+  if (v.external) lines.push('External recipients: ' + v.external);
+  for (const w of v.warnings) lines.push('Warning: the reply ' + w.label + '.');
+  if (v.stale) lines.push('Warning: a newer message arrived in this conversation after the draft was written.');
+  lines.push('Message:\n' + v.body.slice(0, 600) + (v.body.length > 600 ? '\u2026' : ''));
+  return {
+    headline, detailText: lines.join('\n'), mode: v.mode, mechanism: v.mechanism, notThreaded: v.mode === 'new-message',
+    mechanismLabel: v.mode === 'new-message' ? NOT_THREADED_LABEL : 'Threaded reply in the Outlook conversation',
+    to: v.to.map((e) => ({ name: e.name || '', address: e.address || null })), cc: v.cc.map((e) => ({ name: e.name || '', address: e.address || null })),
+    toCount: v.to.length, ccCount: v.cc.length, external: v.external, warnings: v.warnings, stale: v.stale,
+  };
+}
+
+function _mapLegacyStatus(res) {
+  const s = res && res.status;
+  if (s === 'sent') return 'sent';
+  if (s === 'delivery-uncertain') return 'delivery-uncertain';
+  if (s === 'blocked-auth') return 'blocked-auth';
+  return 'failed-before-send';                        // 'failed' (never clicked), guards without a status, unknown
+}
+
+function _replyHtml(body) {
+  return '<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;white-space:pre-wrap">' +
+    body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>';
+}
+
+const sendReplyExec = {
+  summarize(payload) {
+    const v = validateSendReply(payload);
+    if (!v.ok) throw new Error('invalid send-reply payload');
+    return _sendSummary(v);
+  },
+  async run(payload) {
+    const v = validateSendReply(payload);
+    if (!v.ok) return v;
+    const guard = require('./reply/send-guard');
+    const crypto = require('crypto');
+    const mailer = require('../scrapers/owa-mailer');
+    return guard.withSendLock(async () => {
+      const subject = String(v.latest.subject || (v.legacy && v.legacy.subject) || '');
+      const reSubject = /^re:/i.test(subject) ? subject : (v.mode === 'new-message' ? 'Re: ' : 'RE: ') + (subject || '(no subject)');
+      const marker = mailer.genCorrelationMarker();
+      const c = guard.createAttempt({
+        conversationKey: v.conversationKey, targetMessageKey: v.latest.messageKey, mode: v.mode, mechanism: v.mechanism, to: v.to, cc: v.cc,
+        subjectNorm: mailer.normalizeSubject(reSubject), bodyHash: crypto.createHash('sha256').update(v.body).digest('hex').slice(0, 16), bodyChars: v.body.length, marker,
+      });
+      if (!c.ok) return { ok: false, code: c.code, attemptId: c.attemptId, state: c.state };
+      const id = c.attempt.attemptId;
+      let status; let detail = {};
+      if (v.mode === 'new-message') {
+        guard.markSending(id);                                         // conservative: the unchanged sender hides its click
+        let res;
+        try { res = await require('../scrapers/email_actions').sendReply(v.legacy, v.body); status = _mapLegacyStatus(res); } catch (e) {
+          logger.warn('[email-intel] new-message send threw ' + safeErr(e)); status = 'delivery-uncertain'; detail.code = 'EXCEPTION';
+        }
+        if (res && !res.ok && status === 'failed-before-send') detail.code = res.status ? String(res.status) : 'NOT_SENT';
+      } else {
+        let res;
+        try {
+          res = await require('./reply/owa_reply').sendThreadReply({
+            convId: v.latest.convIdRaw, folder: v.latest.folder || 'Inbox', mode: v.mode, expected: { to: v.to, cc: v.cc },
+            html: mailer.embedMarker(_replyHtml(v.body), marker), bodyText: v.body, marker, subjectNorm: mailer.normalizeSubject(reSubject),
+            attemptHooks: { beforeSendClick: () => { const m = guard.markSending(id); return !!(m.ok && m.attempt.state === 'sending'); } },
+          });
+        } catch (e) {
+          logger.warn('[email-intel] thread reply threw ' + safeErr(e));
+          const a = guard.get(id);
+          res = { status: a && a.state === 'sending' ? 'delivery-uncertain' : 'failed-before-send', detail: { code: 'EXCEPTION' } };
+        }
+        status = res.status;
+        detail = res.detail || {};
+      }
+      const state = status === 'sent' || status === 'delivery-uncertain' || status === 'blocked-auth' ? status : 'failed-before-send';
+      const f = guard.finish(id, state, { errorCode: state === 'failed-before-send' ? (detail.code || status) : (state === 'delivery-uncertain' ? detail.code : undefined) });
+      const results = f.ok ? guard.applyOutcome(f.attempt, { bodyText: v.body, legacyId: v.latest.legacyId }) : null;
+      if (results) notifyOverlay(results);
+      const out = { ok: state === 'sent', status, attemptId: id, mechanism: v.mechanism, message: SEND_MESSAGES[status] || SEND_MESSAGES['failed-before-send'] };
+      if (detail.code) out.code = detail.code;
+      if (detail.diff) out.diff = detail.diff;                       // returned to the UI only, never logged
+      if (status === 'mechanism-unavailable' || (status === 'failed-before-send' && ['INSERT_UNVERIFIED', 'COMPOSE_NOT_INLINE', 'NO_REPLY_CONTROL'].includes(detail.code))) out.fallback = 'new-message';
+      return out;
+    });
+  },
+};
+
+/**
+ * validateResolution(payload, now) -> { ok:true, attempt, override } | { ok:false, code:'BAD_ARG', field, reason? }
+ * { attemptId, resolution:'sent'|'not-sent', acknowledgeCheckedOutlook: true (exactly), override?: boolean }.
+ * not-sent also needs a reconcile check at least 2 minutes after the click that found nothing, or override:true.
+ */
+function validateResolution(payload, now) {
+  if (!_isPlain(payload)) return { ok: false, code: 'BAD_ARG', field: 'payload' };
+  if (typeof payload.attemptId !== 'string' || !ATTEMPT_RE.test(payload.attemptId)) return { ok: false, code: 'BAD_ARG', field: 'attemptId' };
+  if (payload.resolution !== 'sent' && payload.resolution !== 'not-sent') return { ok: false, code: 'BAD_ARG', field: 'resolution' };
+  if (payload.acknowledgeCheckedOutlook !== true) return { ok: false, code: 'BAD_ARG', field: 'acknowledgeCheckedOutlook' };
+  if (payload.override !== undefined && typeof payload.override !== 'boolean') return { ok: false, code: 'BAD_ARG', field: 'override' };
+  const a = require('./reply/send-guard').get(payload.attemptId);
+  if (!a || !['delivery-uncertain', 'unconfirmed-not-found'].includes(a.state)) return { ok: false, code: 'BAD_ARG', field: 'attemptId', reason: 'not-unresolved' };
+  if (payload.resolution === 'not-sent' && payload.override !== true) {
+    const t0 = Date.parse(a.sendClickedAt || a.createdAt) || 0;
+    const checked = (a.reconcile.checks || []).some((c) => c.found === false && (Date.parse(c.at) || 0) - t0 >= RESOLUTION_CHECK_MIN_MS);
+    if (!checked) return { ok: false, code: 'BAD_ARG', field: 'resolution', reason: 'reconcile-first' };
+  }
+  const t = Number.isFinite(now) ? now : Date.now();
+  return { ok: true, attempt: a, override: payload.override === true, now: t };
+}
+
+const markResolution = {
+  summarize(payload) {
+    const v = validateResolution(payload);
+    if (!v.ok) throw new Error('invalid mark-send-resolution payload');
+    const a = v.attempt;
+    const lines = [
+      'Recipients: ' + a.toCount + ' in To, ' + a.ccCount + ' in CC (' + (a.mode === 'new-message' ? NOT_THREADED_LABEL : a.mode === 'reply-all' ? 'Reply All' : 'Reply') + ').',
+      'You confirmed that you checked Outlook Sent Items yourself.',
+    ];
+    if (payload.resolution === 'not-sent') lines.push('Marking it not sent lets you send this reply again. If it was actually delivered, a second send is a duplicate.');
+    if (v.override) lines.push('Warning: no Sent Items check at least 2 minutes after the click has confirmed it is missing.');
+    return { headline: payload.resolution === 'sent' ? 'Mark this reply as sent?' : 'Mark this reply as NOT sent?', detailText: lines.join('\n'), resolution: payload.resolution, override: v.override };
+  },
+  async run(payload) {
+    const v = validateResolution(payload);
+    if (!v.ok) return v;
+    const guard = require('./reply/send-guard');
+    const r = guard.resolve(v.attempt.attemptId, payload.resolution, Date.now());
+    if (!r.ok) return { ok: false, code: r.code || 'STORE_ERROR' };
+    const results = guard.applyOutcome(r.attempt, {});
+    if (results) notifyOverlay(results);
+    logger.info('[email-intel] send resolution sa=' + require('./redact').rid(v.attempt.attemptId) + ' resolution=' + payload.resolution + (v.override ? ' override' : ''));
+    return { ok: true, state: r.attempt.state, resolution: r.attempt.reconcile.resolution };
+  },
+};
+
 let _registered = false;
 /** registerAll(): idempotent (confirm.registerExecutor replaces a previous registration for the same kind). */
 function registerAll() {
@@ -374,8 +608,13 @@ function registerAll() {
   confirm.registerExecutor('reject-staged', rejectStaged);
   confirm.registerExecutor('delete', deleteOne);
   confirm.registerExecutor('delete-batch', deleteBatch);
+  confirm.registerExecutor('send-reply', sendReplyExec);
+  confirm.registerExecutor('mark-send-resolution', markResolution);
   _registered = true;
 }
 function isRegistered() { return _registered && confirm.hasExecutor('send-ready-dm'); }
 
-module.exports = { validateReadyDm, validateStaged, validateDelete, deleteTarget, DELETE_REASON_TEXT, notifyOverlay, registerAll, isRegistered };
+module.exports = {
+  validateReadyDm, validateStaged, validateDelete, validateSendReply, validateResolution, deleteTarget, DELETE_REASON_TEXT, NOT_THREADED_LABEL,
+  SEND_MESSAGES, notifyOverlay, registerAll, isRegistered,
+};

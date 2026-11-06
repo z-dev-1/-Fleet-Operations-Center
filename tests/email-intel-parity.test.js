@@ -91,7 +91,7 @@ describe('N1-N11 flag-OFF parity against the base-commit golden', () => {
   it('N11 supervisor.claim spec and getAutoScanStatus key set are unchanged', () => { expect(cur.N11).toEqual(baseline.N11); });
 });
 
-describe('F2-03 N6b legacy send-reply is byte-identical when threadReplies is not effective', () => {
+describe('F2-03 N6b legacy send-reply byte-identical when threadReplies is not effective (all flags OFF; capture only; threadReplies set without capture)', () => {
   const variants = {
     'all flags OFF': null,
     'capture only': { enabled: true, capture: true },

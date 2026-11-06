@@ -60,6 +60,13 @@ function _actionsViewEffective() {
 }
 const _CONFIRM_DELETE = () => ({ ok: false, code: 'CONFIRMATION_REQUIRED', error: 'Confirmation required: use the confirmed delete flow.' });
 
+// True only when thread-aware replies (threadReplies) are effective. The legacy send-reply channel then ALWAYS
+// fails closed (plan 2.3, F2-03): it cannot carry a confirmation token, so it sends nothing; sends go through
+// emailIntel:prepare-action / confirm-action, whose executor owns the attempt record.
+function _repliesEffective() {
+  try { return require('../email-intel/flags').get().effective.threadReplies === true; } catch (_) { return false; }
+}
+
 function _findEmail(id) {
   const results = triage.loadResults();
   return results.emails.find((e) => e.id === id) || null;
@@ -116,6 +123,13 @@ function registerEmailTriageIPC(_ctx) {
     requireString(id, 'id');
     const email = _findEmail(id);
     if (!email) throw new ConfigError('email not found: ' + id, 'id');
+    // threadReplies: draft through the thread-aware path (resolved-question gate, isolated lane, fenced context).
+    if (_repliesEffective() && email.intel && email.intel.conversationKey) {
+      const t = await require('../email-intel/reply/draft').draftThreadReply({ conversationKey: email.intel.conversationKey, mode: 'reply', guidance: guidance ? String(guidance).slice(0, 1000) : '' });
+      if (!t.ok) return Object.assign({}, t, { error: t.code === 'ALREADY_RESOLVED' ? 'Already answered in the thread; no reply is needed.' : 'Draft not created (' + t.code + ').' });
+      _notifyOverlay();
+      return { ok: true, draft: t.draft, aiUnavailable: !!t.aiUnavailable };
+    }
     const r = await actions.draftReply(email, guidance ? String(guidance).slice(0, 1000) : '', {});
     if (!r.ok) return r;
     _patchEmail(id, { replyDraft: r.draft, replyState: 'drafted' });
@@ -124,6 +138,7 @@ function registerEmailTriageIPC(_ctx) {
 
   // ── Reply sending (confirm-gated by the overlay's Send button) ────────────
   handle('emailTriage:send-reply', async (_e, id, bodyText) => {
+    if (_repliesEffective()) return { ok: false, code: 'CONFIRMATION_REQUIRED', error: 'Confirmation required: use the confirmed reply flow.' };
     requireString(id, 'id');
     const email = _findEmail(id);
     if (!email) throw new ConfigError('email not found: ' + id, 'id');

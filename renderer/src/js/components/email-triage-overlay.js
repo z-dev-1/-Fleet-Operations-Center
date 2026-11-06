@@ -10,7 +10,10 @@
  */
 
 import bus from '../bus.js';
-import { renderBannersHtml, renderIdentityHtml, wireBanners, wireIdentityPanel, errorsFromResult, PANEL_CSS } from './email-intel-panels.js';
+import {
+  renderBannersHtml, renderIdentityHtml, wireBanners, wireIdentityPanel, errorsFromResult, PANEL_CSS,
+  renderReplyButtonsHtml, renderReconcileHtml, renderReplyPanelHtml, UNCERTAIN_RECONCILE_TEXT, NOT_THREADED_LABEL,
+} from './email-intel-panels.js';
 
 let _open = false;
 let _results = { emails: [] };
@@ -154,6 +157,13 @@ function _actionsOn() {
   return !!(_intel && _intel.flags && _intel.flags.actionsView === true);
 }
 
+// Thread-aware replies (only when status reports threadReplies, and only for records the intel path built).
+function _repliesOn() {
+  return !!(_intel && _intel.flags && _intel.flags.threadReplies === true);
+}
+function _ck(em) { return em && em.intel && em.intel.conversationKey ? em.intel.conversationKey : null; }
+const _replyUi = {};
+
 let _actionsView = null;
 function _mountTabs() {
   const body = document.getElementById('et-body');
@@ -207,13 +217,13 @@ async function _showTab(name) {
     }
     _actionsView = view.mount(panel, {
       api: window.emailIntel, toast: _toast, confirmFn: (text) => confirm(text),
-      onReply: (data) => _openCardForAction(data && data.id),
+      onReply: (data, mode) => _openCardForAction(data && data.id, mode),
     });
   } catch (e) { _toast('Could not open My Email Actions: ' + (e.message || e)); }
 }
 
-// Reply from an action item: show the matching Inbox card (the reply flow lives there until Phase E).
-async function _openCardForAction(actionId) {
+// Reply from an action item: show the matching Inbox card; with thread replies on, draft in the chosen mode there.
+async function _openCardForAction(actionId, mode) {
   let item = null;
   try {
     const r = await window.emailIntel.getActions({ limit: 200 });
@@ -223,6 +233,10 @@ async function _openCardForAction(actionId) {
   const card = item && item.legacyId ? document.querySelector('.et-card[data-id="' + CSS.escape(item.legacyId) + '"]') : null;
   if (card) { try { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) { /* scroll only */ } }
   else _toast('Open the email in the Inbox list to reply.');
+  if (card && _repliesOn()) {
+    const em = _results.emails.find((e) => e.id === item.legacyId);
+    if (em && _ck(em) && !['uncertain', 'sent'].includes(em.replyState)) _intelDraft(em.id, mode === 'reply-all' ? 'reply-all' : 'reply', false);
+  }
 }
 
 // Delete under actionsView: a single-use token from the main process, the in-app summary, then the native dialog.
@@ -450,9 +464,10 @@ function _deleteButtonsHtml(em) {
 // The compact Reply button that lives in the footer (right side).
 function _replyButtonHtml(em) {
   const state = em.replyState || 'none';
-  if (state === 'uncertain') return '<span class="et-uncertain" role="status">Reply status uncertain - check Outlook</span>';
+  if (state === 'uncertain') return '<span class="et-uncertain" role="status">Reply status uncertain - check Outlook</span>' + (_repliesOn() && _ck(em) ? renderReconcileHtml(em) : '');
   if (state === 'sent') return '<span class="et-sent">✉️ Reply sent</span>';
   if (state === 'drafted') return '<span class="et-draft-flag">✍️ Draft ready below ↓</span>';
+  if (_repliesOn() && _ck(em)) return renderReplyButtonsHtml(em);
   if (state === 'dismissed') return '<button class="et-mini et-reply-start" data-reply="' + _esc(em.id) + '">↩︎ Reply anyway</button>';
   const hint = em.replySuggested ? '↩︎ Draft reply' : '↩︎ Reply';
   return '<button class="et-mini et-reply-start" data-reply="' + _esc(em.id) + '">' + hint + '</button>';
@@ -462,6 +477,7 @@ function _replyButtonHtml(em) {
 // exists), so it is unmistakable and roomy — not jammed into the footer corner.
 function _replyPanelHtml(em) {
   if ((em.replyState || 'none') !== 'drafted') return '';
+  if (_repliesOn() && _ck(em)) return renderReplyPanelHtml(em, _replyUi[em.id]);
   return '<div class="et-reply-panel">' +
     '<div class="et-reply-label">✍️ Your reply draft — edit, then Send:</div>' +
     '<textarea class="et-draft" data-draft="' + _esc(em.id) + '">' + _esc(em.replyDraft || '') + '</textarea>' +
@@ -475,6 +491,20 @@ function _replyPanelHtml(em) {
 function _wireCard(id) {
   const card = document.querySelector('.et-card[data-id="' + CSS.escape(id) + '"]');
   if (!card) return;
+
+  if (_repliesOn()) {
+    // Thread-aware reply controls (rendered only for intel records; legacy cards keep the legacy wiring below).
+    card.querySelectorAll('[data-ei-reply]').forEach((b) => b.addEventListener('click', () => _intelDraft(id, b.getAttribute('data-ei-reply'), false)));
+    const re = card.querySelector('[data-ei-redraft]');
+    if (re) re.addEventListener('click', () => _intelDraft(id, (_replyUi[id] && _replyUi[id].mode) || 'reply', false));
+    card.querySelectorAll('[data-ei-send]').forEach((b) => b.addEventListener('click', () => _intelPrepareSend(id, b.getAttribute('data-ei-send'))));
+    const ok = card.querySelector('[data-ei-confirm]');
+    if (ok) ok.addEventListener('click', () => _intelConfirmSend(id));
+    const cancel = card.querySelector('[data-ei-cancel]');
+    if (cancel) cancel.addEventListener('click', () => { if (_replyUi[id]) delete _replyUi[id].confirm; _toast('Not sent.'); _render(); });
+    const rec = card.querySelector('[data-ei-reconcile]');
+    if (rec) rec.addEventListener('click', () => _intelReconcile(id));
+  }
 
   const startBtn = card.querySelector('[data-reply]');
   if (startBtn) startBtn.addEventListener('click', () => _draftReply(id));
@@ -624,6 +654,112 @@ async function _sendReply(id) {
   } catch (e) { _toast('Send failed: ' + (e.message || e)); }
 }
 
+// ── Thread-aware replies (threadReplies on): draft, confirm through prepare/confirm-action, reconcile ──
+const _FALLBACK_CODES = ['INSERT_UNVERIFIED', 'COMPOSE_NOT_INLINE', 'NO_REPLY_CONTROL'];
+
+async function _intelDraft(id, mode, force) {
+  const em = _results.emails.find((e) => e.id === id);
+  const ck = _ck(em);
+  if (!ck) { _toast('Open the email in Outlook to reply.'); return; }
+  _toast('Drafting ' + (mode === 'reply-all' ? 'Reply All' : 'Reply') + '… (the AI can take a few seconds)');
+  let r;
+  try { r = await window.emailIntel.draftThreadReply({ conversationKey: ck, mode, force: !!force }); } catch (e) { _toast('Draft failed: ' + (e.message || e)); return; }
+  if (r && r.code === 'ALREADY_RESOLVED') {
+    const who = r.resolvedBy && r.resolvedBy.senderName ? r.resolvedBy.senderName : 'someone else in the thread';
+    if (!confirm('This question was already answered by ' + who + '. No reply is needed from you.\n\nDraft a reply anyway?')) { _toast('No reply needed.'); return; }
+    await _intelDraft(id, mode, true);
+    return;
+  }
+  if (r && r.code === 'RECIPIENTS_UNKNOWN') { _toast('Reply All is unavailable: the recipients of this email are not known.'); return; }
+  if (!r || !r.ok) { _toast('Draft failed: ' + ((r && (r.error || r.code)) || 'unknown')); return; }
+  em.replyDraft = r.draft; em.replyState = 'drafted';
+  _replyUi[id] = { mode: r.mode, recipients: r.recipients, warnings: r.warnings || [], stale: false, replyAllAvailable: r.replyAllAvailable, basedOnMessageKey: r.basedOnMessageKey };
+  _render();
+  try { const ta = document.querySelector('textarea[data-draft="' + CSS.escape(id) + '"]'); if (ta) { ta.scrollIntoView({ behavior: 'smooth', block: 'center' }); ta.focus(); } } catch (_) { /* focus only */ }
+  _toast(r.aiUnavailable ? 'AI was unavailable — opened an editable starter draft below.' : 'Draft ready — see the box below the email.');
+}
+
+async function _intelPrepareSend(id, mode) {
+  const em = _results.emails.find((e) => e.id === id);
+  const ck = _ck(em);
+  const ta = document.querySelector('textarea[data-draft="' + CSS.escape(id) + '"]');
+  const body = ta ? ta.value : '';
+  if (!ck) return;
+  if (!body.trim()) { _toast('Reply is empty.'); return; }
+  em.replyDraft = body;
+  let prep;
+  try { prep = await window.emailIntel.prepareAction('send-reply', { conversationKey: ck, mode, bodyText: body }); } catch (e) { _toast('Not sent: ' + (e.message || e)); return; }
+  if (!prep || !prep.ok) {
+    const ui = _replyUi[id] || (_replyUi[id] = {});
+    if (prep && prep.code === 'UNRECONCILED_ATTEMPT') _toast(UNCERTAIN_RECONCILE_TEXT + '. Nothing was sent.');
+    else if (prep && prep.code === 'RECIPIENTS_UNKNOWN') _toast('Reply All is unavailable: the recipients of this email are not known.');
+    else if (prep && prep.reason === 'no-conversation-id') { ui.fallback = true; _render(); _toast('This email cannot be replied to inside its Outlook conversation. You can send a ' + NOT_THREADED_LABEL + '.'); }
+    else _toast('Not sent: ' + ((prep && (prep.reason || prep.code || prep.error)) || 'unknown'));
+    return;
+  }
+  const ui = _replyUi[id] || (_replyUi[id] = {});
+  ui.confirm = { token: prep.token, summary: prep.summary, mode };
+  if (prep.summary && prep.summary.stale) ui.stale = true;
+  _render();
+}
+
+async function _intelConfirmSend(id) {
+  const em = _results.emails.find((e) => e.id === id);
+  const ui = _replyUi[id];
+  if (!em || !ui || !ui.confirm) return;
+  const token = ui.confirm.token;
+  delete ui.confirm;
+  _render();
+  _toast('Confirm in the system dialog to send…');
+  let r;
+  try { r = await window.emailIntel.confirmAction(token); } catch (e) { _toast('Send failed: ' + (e.message || e)); return; }
+  if (r && r.code === 'USER_CANCELLED') { _toast('Not sent.'); return; }
+  const status = r && r.status;
+  if (status === 'sent') { em.replyState = 'sent'; delete _replyUi[id]; }
+  else if (status === 'delivery-uncertain') { em.replyState = 'uncertain'; delete _replyUi[id]; }
+  else if (r && r.fallback === 'new-message') ui.fallback = true;
+  if (status === 'recipient-mismatch' && r.diff) _toast('Outlook\'s recipients differ from the ones you confirmed (' + r.diff.missing.length + ' missing, ' + r.diff.extra.length + ' extra). Nothing was sent.');
+  else _toast((r && (r.message || r.error || r.code)) || 'Send failed.');
+  _render();
+}
+
+async function _intelReconcile(id) {
+  const em = _results.emails.find((e) => e.id === id);
+  const ck = _ck(em);
+  if (!ck) return;
+  let attempt = null;
+  try {
+    const a = await window.emailIntel.getSendAttempts(ck);
+    attempt = a && a.ok ? (a.attempts || []).find((x) => x.state === 'delivery-uncertain' || x.state === 'unconfirmed-not-found') : null;
+  } catch (_) { attempt = null; }
+  if (!attempt) { _toast('No uncertain send to reconcile for this email.'); return; }
+  _toast('Checking Outlook Sent Items…');
+  let r;
+  try { r = await window.emailIntel.reconcileSend(attempt.attemptId); } catch (e) { _toast('Reconcile failed: ' + (e.message || e)); return; }
+  if (r && r.state === 'sent') { em.replyState = 'sent'; _render(); _toast('Found in Sent Items: the reply was sent.'); return; }
+  if (r && r.code === 'blocked-auth') { _toast('Outlook needs a sign-in. Open Outlook on the web once, then reconcile again.'); return; }
+  if (!r || !r.ok) { _toast('Reconcile failed: ' + ((r && r.code) || 'unknown')); return; }
+  // Not found yet: the user may resolve it after checking Outlook themselves (token + system dialog).
+  const sent = confirm('The reply was not found in Sent Items yet.\n\nCheck Outlook yourself. Did you find this reply in your Sent Items?\nOK = yes, mark it sent. Cancel = no.');
+  let resolution = sent ? 'sent' : null;
+  if (!sent && confirm('Mark this reply as NOT sent so you can send it again?\nOnly do this after checking Outlook Sent Items; a second send may be a duplicate.')) resolution = 'not-sent';
+  if (!resolution) { _toast(UNCERTAIN_RECONCILE_TEXT + '.'); return; }
+  const payload = { attemptId: attempt.attemptId, resolution, acknowledgeCheckedOutlook: true };
+  let prep = await window.emailIntel.prepareAction('mark-send-resolution', payload);
+  if (prep && !prep.ok && prep.reason === 'reconcile-first') {
+    if (!confirm('No Sent Items check at least 2 minutes after the click has confirmed it is missing.\nMark it not sent anyway?')) { _toast(UNCERTAIN_RECONCILE_TEXT + '.'); return; }
+    prep = await window.emailIntel.prepareAction('mark-send-resolution', Object.assign({}, payload, { override: true }));
+  }
+  if (!prep || !prep.ok) { _toast('Not changed: ' + ((prep && (prep.reason || prep.code)) || 'unknown')); return; }
+  _toast('Confirm in the system dialog…');
+  const res = await window.emailIntel.confirmAction(prep.token);
+  if (res && res.ok) {
+    em.replyState = res.state === 'sent' ? 'sent' : (em.replyDraft ? 'drafted' : 'none');
+    _render();
+    _toast(res.state === 'sent' ? 'Marked as sent.' : 'Marked as not sent. You can send it again.');
+  } else _toast(res && res.code === 'USER_CANCELLED' ? 'Not changed.' : 'Not changed: ' + ((res && res.code) || 'unknown'));
+}
+
 async function _dismissReply(id) {
   try {
     await window.emailTriage.dismissReply(id);
@@ -753,4 +889,4 @@ function _injectStyle() {
   `;
   document.head.appendChild(style);
 }
-export const __test__ = { _cardHtml, _replyButtonHtml, _replyPanelHtml };
+export const __test__ = { _cardHtml, _replyButtonHtml, _replyPanelHtml, _setIntelForTests: (s) => { _intel = s || null; }, _setReplyUiForTests: (id, ui) => { if (ui) _replyUi[id] = ui; else delete _replyUi[id]; } };

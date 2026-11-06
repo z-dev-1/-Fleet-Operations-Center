@@ -337,3 +337,54 @@ describe('AC-9 Phase D action paths log no dynamic content (FEAT-005)', () => {
     } finally { w.cleanup(); confirm._resetForTests(); }
   }, 30_000);
 });
+describe('AC-9 Phase E reply paths log no dynamic content (FEAT-006)', () => {
+  it('draft (refused, forced, unsafe), send-reply tokens (mismatch, uncertain, new-message), resolution, reconcile and the thread reply mechanism log only counts, ids and enums', async () => {
+    const { phaseCWorld } = await import('./fixtures/email-intel/phase-c.js');
+    const w = phaseCWorld({ enabled: true, capture: true, multiRecipient: true, actionsView: true, timelineWrites: true, threadReplies: true });
+    try {
+      const from = { name: S.name, address: S.addr };
+      const me = { name: 'Zila Santiago', address: 'zila.santiago@example.test' };
+      w.questions.push({ when: 'can you confirm', q: { ref: 'q1', text: S.subject + '?', about: ['40123'], addressee: { kind: 'me', name: 'Zila', evidence: 'Zila, can you confirm' }, isApprovalOrDecision: false, confidence: 0.9 } });
+      const caps = [w.cap({ from, to: [me], cc: [{ name: S.name + ' cc', address: 'cc.' + S.addr }], subject: S.subject, conversationId: 'conv-le-1', messageId: 'le-1', body: 'Zila, can you confirm pickup for 40123? ' + S.body })];
+      await w.scan(caps);
+      const ck = Object.keys(w.stores.load('messages').byConv)[0];
+      const call = (ch, ...a) => handlers[ch]({}, ...a);
+      const draft = require('../src/email-intel/reply/draft');
+      await draft.draftThreadReply({ conversationKey: ck, mode: 'reply-all', guidance: S.body }, { _ask: async () => ({ ok: true, text: 'Reply ' + S.body + ' ' + S.addr }) });
+      await draft.draftThreadReply({ conversationKey: ck, mode: 'reply' }, { _ask: async () => ({ ok: true, text: S.subject + ' AKIAIOSFODNN7EXAMPLE' }) });
+      await draft.draftThreadReply({ conversationKey: ck, mode: 'reply' }, { _ask: async () => ({ ok: false, error: 'lane-unavailable' }) });
+      await call('emailIntel:draft-thread-reply', { conversationKey: ck, mode: 'reply', guidance: S.body });
+      require('../src/email-intel/executors').registerAll();
+      const owaReply = require('../src/email-intel/reply/owa_reply');
+      const actions = require('../src/scrapers/email_actions');
+      const realThread = owaReply.sendThreadReply; const realSend = actions.sendReply;
+      const outcomes = [
+        { status: 'recipient-mismatch', detail: { code: 'RECIPIENT_MISMATCH', diff: { missing: [{ name: S.name, address: S.addr, role: 'to' }], extra: [] } } },
+        { status: 'failed-before-send', detail: { code: 'INSERT_UNVERIFIED', why: 'quote-changed' } },
+      ];
+      owaReply.sendThreadReply = async (o) => outcomes.shift() || (o.attemptHooks.beforeSendClick(), { status: 'delivery-uncertain', detail: { code: 'NOT_IN_SENT_ITEMS' } });
+      actions.sendReply = async () => ({ ok: false, status: 'failed', error: 'failed for ' + S.addr });
+      try {
+        for (const mode of ['reply', 'reply-all', 'new-message', 'reply']) {
+          const p = await call('emailIntel:prepare-action', 'send-reply', { conversationKey: ck, mode, bodyText: S.body + ' ' + S.subject });
+          if (p.ok) await confirm.confirm(p.token, { _dialog: accept });
+        }
+        const atts = await call('emailIntel:get-send-attempts', ck);
+        const id = atts.attempts.find((a) => a.state === 'delivery-uncertain').attemptId;
+        const { reconcileSend } = require('../src/email-intel/reply/reconcile-send');
+        const session = async (_o, driver) => { const ctx = { state: {}, win: {} }; await driver(ctx); return { state: ctx.state, settled: {} }; };
+        await reconcileSend(id, { _session: session, _verify: async () => ({ found: false, matchedBy: S.subject }) });
+        await reconcileSend(id, { _session: async () => ({ state: {}, settled: { authBlocked: true } }) });
+        const pm = await call('emailIntel:prepare-action', 'mark-send-resolution', { attemptId: id, resolution: 'not-sent', acknowledgeCheckedOutlook: true, override: true, note: S.body });
+        if (pm.ok) await confirm.confirm(pm.token, { _dialog: accept });
+        await call('emailIntel:prepare-action', 'send-reply', { conversationKey: S.subject, mode: 'reply', bodyText: S.body });
+      } finally { owaReply.sendThreadReply = realThread; actions.sendReply = realSend; }
+      // the real mechanism against a fake window: recipient mismatch with sentinel names in the compose wells
+      owaReply.parseComposeRecipients({ to: [{ title: S.name + ' <' + S.addr + '>' }], cc: [], found: { to: true } });
+      await call('emailIntel:status');
+      expect(logText()).toMatch(/send attempt created sa=[0-9a-f]{8} mode=/);
+      const own = logLines().filter((l) => l.ns !== 'repair-history').map((l) => l.text).join('\n');
+      for (const s of SENTINELS.concat(['cc.' + S.addr, 'AKIAIOSFODNN7EXAMPLE'])) expect(own, s).not.toContain(s);
+    } finally { w.cleanup(); confirm._resetForTests(); }
+  }, 30_000);
+});

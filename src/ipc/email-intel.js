@@ -11,6 +11,9 @@
  * timelineWrites: TIMELINE_DISABLED while only actionsView is on; conflict-ready needs acknowledgeConflictReady).
  * Phase D adds get-actions, action-update (dismiss/snooze/done/reopen/retry-analysis, local state only) and the
  * delete / delete-batch prepare validation (R7.6 rule in executors.deleteTarget; derived conversation keys excluded).
+ * Phase E adds draft-thread-reply (resolved-question gate, isolated lane), get-send-attempts, reconcile-send (read-only
+ * Sent Items re-check) and the send-reply / mark-send-resolution prepare validation; boot recovery of send attempts
+ * runs at registration when threadReplies is effective.
  * Channels owned by later phases return { ok:false, code:'NOT_IMPLEMENTED' } when their gate is open.
  * The legacy emailTriage:* channels are untouched here.
  *
@@ -69,7 +72,20 @@ const IMPLEMENTED = new Set([
   'emailIntel:status', 'emailIntel:scan', 'emailIntel:get-config', 'emailIntel:set-config', 'emailIntel:dom-probe',
   'emailIntel:set-tz-verified', 'emailIntel:prepare-action', 'emailIntel:confirm-action', 'emailIntel:probe-lane',
   'emailIntel:get-staged', 'emailIntel:get-actions', 'emailIntel:action-update',
+  'emailIntel:draft-thread-reply', 'emailIntel:get-send-attempts', 'emailIntel:reconcile-send',
 ]);
+const CONV_RE = /^cv_[0-9a-f]{16}$/;
+const ATTEMPT_RE = /^sa_[0-9a-f]{16}$/;
+
+/** draft-thread-reply (design 9): { conversationKey, mode:'reply'|'reply-all', guidance? <= 1000, force? boolean }. */
+function validateDraftThreadReply(payload) {
+  if (!_isPlain(payload)) return BAD('payload');
+  if (typeof payload.conversationKey !== 'string' || !CONV_RE.test(payload.conversationKey)) return BAD('conversationKey');
+  if (payload.mode !== 'reply' && payload.mode !== 'reply-all') return BAD('mode');
+  if (payload.guidance !== undefined && (typeof payload.guidance !== 'string' || payload.guidance.length > 1000)) return BAD('guidance');
+  if (payload.force !== undefined && typeof payload.force !== 'boolean') return BAD('force');
+  return { conversationKey: payload.conversationKey, mode: payload.mode, guidance: payload.guidance || '', force: payload.force === true };
+}
 const STAGED_STATES = ['open', 'approved', 'rejected', 'superseded', 'expired', 'all'];
 const ACTION_RE = /^ac_[0-9a-f]{16}$/;
 const ACTION_CATEGORIES = ['reply', 'decision', 'followup', 'review', 'recorded', 'info', 'outofscope'];
@@ -297,6 +313,41 @@ function registerEmailIntelIPC(_ctx) {
     return { ok: true, actionId: v.actionId, state: res.item.state, snoozeUntil: res.item.snoozeUntil };
   });
 
+  // ── Phase E: thread-aware replies (threadReplies). Sending itself only happens through prepare/confirm-action.
+  handle('emailIntel:draft-thread-reply', async (_e, payload) => {
+    if (!gateOpen('threadReplies')) return OFF();
+    const v = validateDraftThreadReply(payload);
+    if (v.ok === false) return v;
+    const r = await require('../email-intel/reply/draft').draftThreadReply(v);
+    if (r && r.ok) { try { executors.notifyOverlay(require('../scrapers/email_triage').loadResults()); } catch (_) { /* push only */ } _notifyUpdated({ kind: 'actions' }); }
+    return r;
+  });
+
+  handle('emailIntel:get-send-attempts', (_e, payload) => {
+    if (!gateOpen('threadReplies')) return OFF();
+    // The preload bridge passes the conversation key itself; an object { conversationKey } is accepted too.
+    const p = payload == null ? {} : (typeof payload === 'string' ? { conversationKey: payload } : payload);
+    if (!_isPlain(p)) return BAD('payload');
+    if (p.conversationKey !== undefined && (typeof p.conversationKey !== 'string' || !CONV_RE.test(p.conversationKey))) return BAD('conversationKey');
+    const guard = require('../email-intel/reply/send-guard');
+    return { ok: true, attempts: guard.list({ conversationKey: p.conversationKey, limit: 50 }), unreconciled: guard.unreconciledCount() };
+  });
+
+  handle('emailIntel:reconcile-send', async (_e, payload) => {
+    if (!gateOpen('threadReplies')) return OFF();
+    const p = typeof payload === 'string' ? { attemptId: payload } : payload;           // the preload bridge passes the id itself
+    if (!_isPlain(p) || typeof p.attemptId !== 'string' || !ATTEMPT_RE.test(p.attemptId)) return BAD('attemptId');
+    const r = await require('../email-intel/reply/reconcile-send').reconcileSend(p.attemptId);
+    try { executors.notifyOverlay(require('../scrapers/email_triage').loadResults()); } catch (_) { /* push only */ }
+    _notifyUpdated({ kind: 'sends' });
+    return r;
+  });
+
+  // Boot recovery (design 6.5): a send that was mid-click when the app stopped becomes delivery-uncertain.
+  if (gateOpen('threadReplies')) {
+    try { require('../email-intel/reply/send-guard').bootRecover(); } catch (e) { logger.warn('send boot recovery failed ' + safeErr(e)); }
+  }
+
   handle('emailIntel:prepare-action', (_e, kind, payload) => {
     if (typeof kind !== 'string' || !confirm.KINDS.includes(kind)) {
       return gateOpen('capture') ? BAD('kind') : OFF();
@@ -310,6 +361,14 @@ function registerEmailIntelIPC(_ctx) {
     }
     if (kind === 'delete' || kind === 'delete-batch') {
       const check = executors.validateDelete(kind, payload);
+      if (!check.ok) return Object.assign({ ok: false, code: check.code, field: check.field }, check.reason ? { reason: check.reason } : {});
+    }
+    if (kind === 'send-reply') {
+      const check = executors.validateSendReply(payload);
+      if (!check.ok) return Object.assign({ ok: false, code: check.code }, check.field ? { field: check.field } : {}, check.reason ? { reason: check.reason } : {}, check.attemptId ? { attemptId: check.attemptId, state: check.state } : {});
+    }
+    if (kind === 'mark-send-resolution') {
+      const check = executors.validateResolution(payload);
       if (!check.ok) return Object.assign({ ok: false, code: check.code, field: check.field }, check.reason ? { reason: check.reason } : {});
     }
     if (kind === 'send-ready-dm') {
@@ -332,4 +391,4 @@ function registerEmailIntelIPC(_ctx) {
   logger.info('Email Intelligence IPC handlers registered (' + Object.keys(GATES).length + ' channels; inert unless flags are effective)');
 }
 
-module.exports = { registerEmailIntelIPC, GATES, KIND_GATES, validateScan, validateGetActions, validateActionUpdate };
+module.exports = { registerEmailIntelIPC, GATES, KIND_GATES, validateScan, validateGetActions, validateActionUpdate, validateDraftThreadReply };
