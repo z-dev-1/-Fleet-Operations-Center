@@ -36,6 +36,7 @@ const { registerBaseballCardIPC }  = require('./baseball-card');
 const { registerFasRosterIPC }     = require('./fas-roster');
 const { registerSchedulerIPC }     = require('./scheduler');
 const { registerEmailTriageIPC }   = require('./email-triage');
+const { registerEmailIntelIPC }    = require('./email-intel');
 const { registerRelayReconcileIPC } = require('./relay-reconcile');
 const { registerAuthHealthIPC }    = require('./auth-health');
 const { registerRepairIntelIPC }   = require('./repair-intel');
@@ -73,6 +74,7 @@ function registerAllIPC(ctx) {
   registerAapApiIPC(ctx);
   registerSchedulerIPC(ctx);
   registerEmailTriageIPC(ctx);
+  registerEmailIntelIPC(ctx);
   registerRelayReconcileIPC(ctx);
   const { registerContactsHandlers } = require('./contacts');
   registerContactsHandlers();

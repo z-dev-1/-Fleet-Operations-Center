@@ -443,6 +443,21 @@ function _fallbackVerdict(email, rows) {
   };
 }
 
+// ── Email Triage Intelligence hooks (default OFF) ─────────────────────────────
+// Each hook is a single early branch whose guard is false when the flags are OFF.
+// Any failure to read the flags means legacy behavior (the guards return false).
+function _intelEngaged() {
+  try { return require('../email-intel/flags').engaged() === true; } catch (_) { return false; }
+}
+// True only when the intel path owns unit-fact extraction (effective multiRecipient).
+function _intelOwnsFacts() {
+  try { return require('../email-intel/flags').get().effective.multiRecipient === true; } catch (_) { return false; }
+}
+// 'scheduled' only for scheduler-originated runs; manual, IPC and chat runs are all 'manual'.
+function _trigger(opts) {
+  return opts && opts._trigger === 'scheduled' ? 'scheduled' : 'manual';
+}
+
 // ── Persisted results (merge preserving per-email reply state) ─────────────────
 function loadResults() {
   const r = store.load('emailTriageResults', null);
@@ -554,6 +569,7 @@ async function triageEmails(emails, opts) {
  * Returns the persisted results object (shape of loadResults()).
  */
 async function runTriage(opts) {
+  if (_intelEngaged()) return require('../email-intel').runIntelScan(opts, _trigger(opts));
   opts = opts || {};
   const cfg = getConfig();
   const max = Number.isFinite(opts.max) ? opts.max : cfg.maxEmails;
@@ -594,6 +610,7 @@ async function runTriage(opts) {
 // which mirrors into fleetData), marks the email so it is applied only once,
 // and persists. The operator READY DM is NEVER auto-sent — always confirm-gated.
 function applyPendingUnitUpdates(results) {
+  if (_intelOwnsFacts()) return 0;
   if (!results || !Array.isArray(results.emails)) return 0;
   let actions = null;
   try { actions = require('./email_actions'); } catch (_) { return 0; }
@@ -759,9 +776,10 @@ function _logStandbyTransition(gate) {
   else if (prev === false) logger.info('[email-triage] auto-scan resumed — production leader');
 }
 
-async function _autoTick() {
+async function _autoTick(ctx) {
   const cfg = getConfig();
   if (!cfg.enabled || !cfg.autoScan) return;
+  if (_intelEngaged()) return require('../email-intel').scheduledTick(ctx, cfg, { notify: _autoNotify, autoStatus: _autoStatus, loadResults });
   if (_autoRunning) return;
   _autoRunning = true;
   const mode = _commsMode();                       // read once per tick
@@ -816,7 +834,7 @@ function getAutoScanStatus() {
     const k = Math.max(1, Math.ceil((Date.now() - _armedAt) / every));
     nextRunAt = _armedAt + k * every;
   }
-  return {
+  const status = {
     mode: _commsMode(),
     armedMinutes: armed ? _armedEveryMin : null,
     armedAt: armed ? _armedAt : null,
@@ -833,6 +851,8 @@ function getAutoScanStatus() {
     skipped: { ..._autoStatus.skipped },
     wouldSkip: { ..._autoStatus.wouldSkip },
   };
+  if (_intelEngaged()) { try { status.intel = require('../email-intel').getStatus(); } catch (_) { /* status only */ } }
+  return status;
 }
 
 function startAutoScan() {
@@ -920,5 +940,6 @@ module.exports = {
   MANUAL_WAIT_MS,
   _buildDecision,
   _canonFor,
+  _trigger,
   __test__: { legacyArmed: () => !!_autoTimer, owned: () => _autoOwned },
 };

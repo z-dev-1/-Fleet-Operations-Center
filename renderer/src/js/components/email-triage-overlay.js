@@ -265,6 +265,7 @@ function _deleteButtonsHtml(em) {
 // The compact Reply button that lives in the footer (right side).
 function _replyButtonHtml(em) {
   const state = em.replyState || 'none';
+  if (state === 'uncertain') return '<span class="et-uncertain" role="status">Reply status uncertain - check Outlook</span>';
   if (state === 'sent') return '<span class="et-sent">✉️ Reply sent</span>';
   if (state === 'drafted') return '<span class="et-draft-flag">✍️ Draft ready below ↓</span>';
   if (state === 'dismissed') return '<button class="et-mini et-reply-start" data-reply="' + _esc(em.id) + '">↩︎ Reply anyway</button>';
@@ -504,6 +505,7 @@ function _injectStyle() {
     #email-triage .et-send { background:rgba(63,185,80,.12); border-color:rgba(63,185,80,.35); color:#3fb950; }
     #email-triage .et-ready { background:rgba(240,168,0,.12); border-color:rgba(240,168,0,.35); color:#f0a800; margin-top:4px; }
     #email-triage .et-sent { font-size:11px; color:#3fb950; }
+    #email-triage .et-uncertain { font-size:11px; color:#d29922; }
     #email-triage .et-draft-flag { font-size:11px; font-weight:600; color:#d2a8ff; }
     #email-triage .et-reply-panel { margin-top:10px; padding:10px; background:#0b1b2b; border:1px solid rgba(88,166,255,0.3); border-radius:8px; }
     #email-triage .et-reply-label { font-size:11px; font-weight:700; color:#79c0ff; margin-bottom:6px; }

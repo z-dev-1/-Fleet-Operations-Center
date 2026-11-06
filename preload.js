@@ -153,6 +153,27 @@ expose('emailTriage', {
   onUpdated:    (cb)             => on('emailTriage:updated', cb),
 });
 
+// ── Email Triage Intelligence (default OFF; every channel is inert unless its flag is effective) ──
+expose('emailIntel', {
+  status:           ()                  => ipcRenderer.invoke('emailIntel:status'),
+  scan:             (opts)              => ipcRenderer.invoke('emailIntel:scan', opts),
+  getConfig:        ()                  => ipcRenderer.invoke('emailIntel:get-config'),
+  setConfig:        (patch)             => ipcRenderer.invoke('emailIntel:set-config', patch),
+  getActions:       (opts)              => ipcRenderer.invoke('emailIntel:get-actions', opts),
+  actionUpdate:     (payload)           => ipcRenderer.invoke('emailIntel:action-update', payload),
+  getStaged:        (opts)              => ipcRenderer.invoke('emailIntel:get-staged', opts),
+  prepareAction:    (kind, payload)     => ipcRenderer.invoke('emailIntel:prepare-action', kind, payload),
+  confirmAction:    (token)             => ipcRenderer.invoke('emailIntel:confirm-action', token),
+  draftThreadReply: (payload)           => ipcRenderer.invoke('emailIntel:draft-thread-reply', payload),
+  getSendAttempts:  (conversationKey)   => ipcRenderer.invoke('emailIntel:get-send-attempts', conversationKey),
+  reconcileSend:    (attemptId)         => ipcRenderer.invoke('emailIntel:reconcile-send', attemptId),
+  domProbe:         (opts)              => ipcRenderer.invoke('emailIntel:dom-probe', opts),
+  probeLane:        ()                  => ipcRenderer.invoke('emailIntel:probe-lane'),
+  setTzVerified:    (payload)           => ipcRenderer.invoke('emailIntel:set-tz-verified', payload),
+  ackVisionNotice:  (payload)           => ipcRenderer.invoke('emailIntel:ack-vision-notice', payload),
+  onUpdated:        (cb)                => on('emailIntel:updated', cb),
+});
+
 // ── Relay ↔ Offsite reconcile ───────────────────────────────────────────────
 expose('relayReconcile', {
   getConfig:  ()            => ipcRenderer.invoke('relayReconcile:get-config'),
