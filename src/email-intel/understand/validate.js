@@ -128,7 +128,15 @@ function validateAnalysis(raw, ctx) {
   const base = Number.isFinite(recMs) ? recMs : nowMs;
   const scopeOf = typeof ctx.scopeOf === 'function' ? ctx.scopeOf : () => 'unknown';
   const cand = new Map((ctx.candidateUnits || []).map((u) => [norm(u), String(u)]));
+  // Phase F (R6.4, design 7.7): extracted text of analyzed attachments is a second evidence source. Only
+  // content / content-partial excerpts count; a filename is never text. Amounts must appear in the body or there.
+  const attN = new Map();
+  for (const a of Array.isArray(ctx.attachments) ? ctx.attachments : []) {
+    if (a && Number.isInteger(a.index) && typeof a.text === 'string' && a.text && (a.status === 'content' || a.status === 'content-partial')) attN.set(a.index, norm(a.text));
+  }
+  if (attN.size) counts.attachmentConflicts = 0;
   const numbers = numbersIn(text);
+  for (const a of Array.isArray(ctx.attachments) ? ctx.attachments : []) if (a && attN.has(a.index)) for (const n of numbersIn(a.text)) numbers.push(n);
 
   // ── units and facts ──
   const units = [];
@@ -159,7 +167,15 @@ function validateAnalysis(raw, ctx) {
       const value = str(f.value, 1, L.VALUE_MAX, counts);
       if (!value) { counts.dropped.invalidFact++; entry.dropped++; continue; }
       const evidence = typeof f.evidence === 'string' ? clean(f.evidence) : '';
-      if (evidence.length < L.EVIDENCE_MIN || evidence.length > L.EVIDENCE_MAX || !ntext.includes(norm(evidence))) { counts.dropped.unverifiedEvidence++; entry.dropped++; continue; }
+      // Evidence source: the body, or (Phase F) the attachment the model names / the one that holds the quote.
+      let srcN = ntext; let source = 'body';
+      if (attN.size && evidence) {
+        const nev0 = norm(evidence);
+        const m = typeof f.evidenceSource === 'string' ? /^attachment:(\d{1,2})$/.exec(f.evidenceSource) : null;
+        if (m && attN.has(Number(m[1])) && attN.get(Number(m[1])).includes(nev0)) { srcN = attN.get(Number(m[1])); source = 'attachment:' + m[1]; }
+        else if (!ntext.includes(nev0)) { for (const [i, t] of attN) { if (t.includes(nev0)) { srcN = t; source = 'attachment:' + i; break; } } }
+      }
+      if (evidence.length < L.EVIDENCE_MIN || evidence.length > L.EVIDENCE_MAX || !srcN.includes(norm(evidence))) { counts.dropped.unverifiedEvidence++; entry.dropped++; continue; }
       if (findSecret(evidence)) { counts.dropped.secret++; entry.dropped++; continue; }
       const item = optStr(f.item, L.ITEM_MAX, counts);
       if (item === false) { entry.dropped++; continue; }
@@ -174,13 +190,17 @@ function validateAnalysis(raw, ctx) {
         const okNum = typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= L.AMOUNT_MAX && (cur === 'USD' || cur == null);
         if (okNum && numbers.some((n) => Math.abs(n - v) < 0.005)) fact.amount = { value: v, currency: cur || null };
         else { fact.amountUnverified = true; counts.dropped.amount++; }
+        // R6.4 / case M: an unverified amount must not survive inside the value text either.
+        if (fact.amountUnverified && numbersIn(value).some((n) => !numbers.some((x) => Math.abs(x - n) < 0.005))) { entry.dropped++; continue; }
       }
       // Unit attribution: id inside the evidence quote, or an occurrence near the evidence position.
       const nev = norm(evidence);
-      const at = ntext.indexOf(nev);
+      const at = srcN.indexOf(nev);
       fact.evidenceAt = at;
+      if (attN.size) fact.evidenceSource = source;
+      const srcOcc = source === 'body' ? occ : _unitOffsets(srcN, norm(id));
       const inside = _unitOffsets(nev, norm(id)).length > 0;
-      const near = occ.some((o) => o >= at - C.EVIDENCE_PROXIMITY_CHARS && o <= at + nev.length + C.EVIDENCE_PROXIMITY_CHARS);
+      const near = srcOcc.some((o) => o >= at - C.EVIDENCE_PROXIMITY_CHARS && o <= at + nev.length + C.EVIDENCE_PROXIMITY_CHARS);
       fact.unitAttribution = inside || near ? 'strong' : 'weak';
       if (fact.unitAttribution === 'weak') counts.weakAttribution++;
       Object.assign(fact, conf(f.confidence));
@@ -191,6 +211,17 @@ function validateAnalysis(raw, ctx) {
     }
   }
   counts.units = units.length;
+  // Phase F: an attachment amount that disagrees with the email's amount for the same unit / kind / item is
+  // flagged; reconcile stages it as attachment-conflict (never applied).
+  if (attN.size) {
+    for (const u of units) {
+      for (const f of u.facts) {
+        if (!f.amount || !String(f.evidenceSource || '').startsWith('attachment:')) continue;
+        const clash = u.facts.some((b) => b !== f && b.evidenceSource === 'body' && b.amount && b.kind === f.kind && norm(b.item || '') === norm(f.item || '') && Math.abs(b.amount.value - f.amount.value) >= 0.005);
+        if (clash) { f.attachmentConflict = true; counts.attachmentConflicts++; }
+      }
+    }
+  }
 
   // ── questions and requests ──
   const items = (list, max, kindName, dropKey) => {

@@ -11,7 +11,7 @@
 
 import bus from '../bus.js';
 import {
-  renderBannersHtml, renderIdentityHtml, wireBanners, wireIdentityPanel, errorsFromResult, PANEL_CSS,
+  renderBannersHtml, renderIdentityHtml, wireBanners, wireIdentityPanel, errorsFromResult, PANEL_CSS, renderAttachmentStatusHtml,
   renderReplyButtonsHtml, renderReconcileHtml, renderReplyPanelHtml, UNCERTAIN_RECONCILE_TEXT, NOT_THREADED_LABEL,
 } from './email-intel-panels.js';
 
@@ -286,6 +286,13 @@ function _renderIntel() {
       try { const r = await window.emailIntel.probeLane(); _toast(r && r.ok ? 'AI connection is working.' : 'AI connection is still unavailable.'); } catch (_) { /* status refresh below */ }
       _refreshIntel();
     },
+    onVisionNotice: async (allowVision) => {
+      try {
+        const r = await window.emailIntel.ackVisionNotice({ allowVision });
+        _toast(r && r.ok ? (allowVision ? 'Image reading is on.' : 'Image reading is off.') : 'Could not save the choice.');
+      } catch (_) { /* status refresh below */ }
+      _refreshIntel();
+    },
   });
   if (_idOpen && _idState) {
     wireIdentityPanel(document, {
@@ -417,7 +424,7 @@ function _render() {
 function _cardHtml(em) {
   const imp = em.importance || 'normal';
   const atts = (em.attachments || []).map((a) =>
-    '<span class="et-chip et-chip--' + (a.type || 'file') + '">' + (a.type === 'image' ? '🖼' : a.type === 'document' ? '📄' : '📎') + ' ' + _esc(a.name) + '</span>'
+    '<span class="et-chip et-chip--' + (a.type || 'file') + '">' + (a.type === 'image' ? '🖼' : a.type === 'document' ? '📄' : '📎') + ' ' + _esc(a.name) + (a.analysisStatus ? renderAttachmentStatusHtml(a) : '') + '</span>'
   ).join('');
   const units = (em.unitRefs || []).map((u) => {
     const readyBtn = u.ready

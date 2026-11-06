@@ -37,6 +37,74 @@ describe('R6.2 policy gates', () => {
   });
 });
 
+describe('R6.2 fetch rules (attach/fetch.js)', () => {
+  const fetchMod = require('../src/email-intel/attach/fetch');
+
+  /** Runs the page script against a fake DOM (one chip) and a scripted fetch. */
+  async function runPage(chip, respond, o = {}) {
+    const seen = [];
+    const doc = { querySelectorAll: () => [chip] };
+    const fakeFetch = async (url, init) => { seen.push({ url, init }); return respond(url, init); };
+    const script = fetchMod.buildFetchScript(Object.assign({ name: 'Estimate_40123.pdf', attId: '', maxBytes: 1000, timeoutMs: 30_000 }, o));
+    // eslint-disable-next-line no-new-func
+    const out = await new Function('document', 'location', 'fetch', 'btoa', 'return ' + script)(doc, { href: 'https://outlook.office.com/mail/inbox' }, fakeFetch, (s) => Buffer.from(s, 'latin1').toString('base64'));
+    return { out: JSON.parse(out), seen };
+  }
+  const chipWith = (href, label = 'Estimate_40123.pdf 120 KB') => {
+    const a = { getAttribute: (k) => (k === 'href' ? href : null) };
+    return { tagName: 'DIV', innerText: label, getAttribute: (k) => (k === 'title' ? 'Estimate_40123.pdf' : null), querySelectorAll: () => (href ? [a] : []) };
+  };
+  const body = (bytes) => ({ getReader() { let done = false; return { read: async () => { if (done) return { done: true }; done = true; return { done: false, value: new Uint8Array(bytes) }; } }; } });
+  const resp = (o) => Object.assign({ type: 'basic', status: 200, ok: true, url: '', headers: { get: () => null }, body: body([37, 80, 68, 70]) }, o);
+
+  it('R6.2 host, https, no redirect: only the chip link on an Outlook host is fetched, never a constructed or service URL', async () => {
+    const good = 'https://attachments.office.net/x';
+    expect(fetchMod.hrefAllowed('https://outlook.office.com/mail/attach/AAMk1').ok).toBe(true);
+    expect(fetchMod.hrefAllowed('https://outlook.office365.com/owa/attachment.ashx?id=1').ok).toBe(true);
+    for (const bad of ['http://outlook.office.com/a', good, 'https://evil.example/?h=outlook.office.com', 'https://outlook.office.com.evil.example/a', 'https://user:pw@outlook.office.com/a', 'https://outlook.office.com:8443/a', 'javascript:alert(1)', '']) {
+      expect(fetchMod.hrefAllowed(bad), bad).toEqual({ ok: false, reason: 'bad-host' });
+    }
+    for (const svc of ['https://outlook.office.com/owa/x.svc/s/GetFileAttachment', 'https://outlook.office.com/api/v1/me', 'https://outlook.office.com/EWS/Exchange.asmx']) {
+      expect(fetchMod.hrefAllowed(svc).reason, svc).toBe('service-endpoint');
+    }
+    // the page script: chip link only, credentials of the existing session, redirect manual
+    const ok = await runPage(chipWith('https://outlook.office.com/mail/attach/1'), () => resp({ url: 'https://outlook.office.com/mail/attach/1' }));
+    expect(ok.out).toMatchObject({ status: 'ok', bytes: 4, mimetype: '' });
+    expect(Buffer.from(ok.out.base64, 'base64').toString('latin1')).toBe('%PDF');
+    expect(ok.seen).toHaveLength(1);
+    expect(ok.seen[0].init).toMatchObject({ credentials: 'include', redirect: 'manual' });
+    // no link on the chip -> no-handle, nothing fetched; a wrong host -> bad-host, nothing fetched
+    const none = await runPage(chipWith(null), () => resp({}));
+    expect([none.out.status, none.seen.length]).toEqual(['no-handle', 0]);
+    const off = await runPage(chipWith('https://files.example.test/e.pdf'), () => resp({}));
+    expect([off.out.status, off.seen.length]).toEqual(['bad-host', 0]);
+    const svc = await runPage(chipWith('https://outlook.office.com/owa/a.svc/x'), () => resp({}));
+    expect([svc.out.status, svc.seen.length]).toEqual(['service-endpoint', 0]);
+    // a redirect is never followed
+    expect((await runPage(chipWith('https://outlook.office.com/a'), () => resp({ type: 'opaqueredirect', status: 0, ok: false }))).out.status).toBe('redirect');
+    expect((await runPage(chipWith('https://outlook.office.com/a'), () => resp({ status: 302, ok: false }))).out.status).toBe('redirect');
+    // byte counting aborts above maxBytes (also when content-length lies)
+    expect((await runPage(chipWith('https://outlook.office.com/a'), () => resp({ body: body(new Array(1001).fill(1)) }))).out.status).toBe('too-large');
+    expect((await runPage(chipWith('https://outlook.office.com/a'), () => resp({ headers: { get: (k) => (k === 'content-length' ? '5000' : null) } }))).out.status).toBe('too-large');
+    // a chip for another file is not used
+    expect((await runPage(chipWith('https://outlook.office.com/a', 'Other.pdf'), () => resp({}), { name: 'Missing.pdf' })).out.status).toBe('no-chip');
+  });
+
+  it('R6.2 main-side fetch result checks (size, base64, auth wall, page errors)', async () => {
+    const ctx = (r) => ({ alive: () => true, state: {}, execJson: async () => r });
+    const b64 = Buffer.from('%PDF-1.4 x').toString('base64');
+    expect(await fetchMod.fetchAttachment(ctx({ status: 'ok', base64: b64, mimetype: 'application/pdf' }), { name: 'a.pdf' }, { maxBytes: 100 })).toMatchObject({ ok: true, mimetype: 'application/pdf', bytes: 10 });
+    expect(await fetchMod.fetchAttachment(ctx({ status: 'ok', base64: b64 }), { name: 'a.pdf' }, { maxBytes: 5 })).toEqual({ ok: false, reason: 'too-large' });
+    expect(await fetchMod.fetchAttachment(ctx({ status: 'ok', base64: '<script>' }), { name: 'a.pdf' }, { maxBytes: 100 })).toEqual({ ok: false, reason: 'fetch-failed' });
+    expect(await fetchMod.fetchAttachment(ctx({ status: 'redirect' }), { name: 'a.pdf' }, { maxBytes: 100 })).toEqual({ ok: false, reason: 'redirect' });
+    expect(await fetchMod.fetchAttachment(ctx({ status: 'weird page text' }), { name: 'a.pdf' }, { maxBytes: 100 })).toEqual({ ok: false, reason: 'fetch-failed' });
+    expect(await fetchMod.fetchAttachment(ctx(null), { name: 'a.pdf' }, { maxBytes: 100 })).toEqual({ ok: false, reason: 'fetch-failed' });
+    expect(await fetchMod.fetchAttachment({ alive: () => true, state: { authBlocked: true }, execJson: async () => ({ status: 'ok', base64: b64 }) }, { name: 'a.pdf' }, { maxBytes: 100 })).toEqual({ ok: false, reason: 'auth-wall' });
+    expect(await fetchMod.fetchAttachment({ alive: () => false, execJson: async () => ({}) }, { name: 'a.pdf' }, {})).toEqual({ ok: false, reason: 'fetch-failed' });
+    expect(await fetchMod.fetchAttachment(ctx({}), { name: null }, {})).toEqual({ ok: false, reason: 'no-chip' });
+  });
+});
+
 describe('R6.5 bounds', () => {
   it('R6.5 size/time/count caps', () => {
     const p = policy.policyOf({});

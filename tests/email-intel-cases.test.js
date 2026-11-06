@@ -491,3 +491,84 @@ describe('acceptance cases I and L with thread replies (FEAT-006)', () => {
     } finally { owaReply.sendThreadReply = real; legacySpy.mockRestore(); confirm._resetForTests(); }
   });
 });
+
+// FEAT-007 (Phase F): case M at runIntelScan level. The reader stand-in does what owa_capture does with the
+// `attachments` flag effective (policy -> fetch -> extract on the newest message); the extractor is stubbed to
+// report a scanned PDF it cannot read, and the scripted lane tries to invent a $4,200 estimate.
+describe('acceptance case M with attachments (FEAT-007)', () => {
+  let w = null;
+  afterEach(() => { if (w) w.cleanup(); w = null; });
+
+  it('case M: estimate-named attachment, unreadable content, no invented amount, labeled filename only', async () => {
+    const { PHASE_F, att, attReader, stubExtract, REASONS } = await import('./fixtures/email-intel/attach.js');
+    const panels = await import('../renderer/src/js/components/email-intel-panels.js');
+    w = phaseCWorld(PHASE_F);
+    const confirm = require('../src/email-intel/confirm');
+    confirm._resetForTests();
+    const extract = stubExtract({ 'Estimate_40123.pdf': { kind: 'pdf', status: 'failed', reason: REASONS.SCANNED_PDF_UNAVAILABLE, text: '' } });
+    const m = { from: DEALER, to: [ZILA], subject: 'Unit 40123', conversationId: 'conv-m', body: 'Hi Zila, attached for unit 40123. Thanks.', attachments: [att('Estimate_40123.pdf')] };
+    // the scripted model invents an estimate amount from the file name, once quoting the body and once the name
+    w.answer = (prompt) => ({
+      schemaVersion: 2, messageRef: '$REF', relevance: { level: 'high', reason: 'estimate', confidence: 0.95 },
+      units: [{ unit: '40123', gist: 'estimate', facts: [
+        { kind: 'approval_status', item: 'estimate', value: 'Estimate received for $4,200', state: 'estimate_received', date: null, amount: { value: 4200, currency: 'USD' }, assertion: 'stated', evidence: 'attached for unit 40123', noteConflictHint: false, confidence: 0.95 },
+        { kind: 'approval_status', item: 'estimate', value: 'Estimate received', state: 'estimate_received', date: null, amount: { value: 4200, currency: 'USD' }, assertion: 'stated', evidence: 'Estimate_40123.pdf', evidenceSource: 'attachment:0', noteConflictHint: false, confidence: 0.95 },
+      ] }],
+      questions: [], requests: [], answers: [], commitments: [],
+      classification: { category: 'fleet_status_update', intent: 'provide_update', informationalOnly: true, confidence: 0.9 },
+      suggestDelete: { suggested: false, reason: '', confidence: 0.9 }, overallConfidence: 0.9,
+    });
+    const writer = require('../src/email-intel/facts/timeline-writer');
+    const cap = w.cap(m);
+    const reader = attReader([cap], { extract });
+    const res = await w.scan([cap], { _readMailbox: reader });
+    expect(reader.calls.fetch).toBe(1);                                              // fetched once, through the policy
+    const rec = Object.values(w.messages())[0];
+    // status: unreadable (scanned PDF, vision unavailable); the stored record has no file content
+    expect(rec.attachments[0].analysis).toMatchObject({ status: 'unreadable', reason: 'scanned-pdf-unavailable', reasonText: REASONS.SCANNED_PDF_UNAVAILABLE });
+    // the prompt carried the name only, never as content
+    const prompt = w.relay.calls[0].prompt;
+    expect(prompt).toContain('name: "Estimate_40123.pdf" - NAME ONLY, carries no facts');
+    expect(prompt).not.toContain('<<<UNTRUSTED_ATTACHMENT id=');
+    // no amount and no approval fact survives: the invented amount is dropped, the filename quote is not evidence
+    expect(rec.analysis.status).toBe('ok');
+    const facts = (rec.analysis.result.units || []).flatMap((u) => u.facts);
+    expect(facts).toEqual([]);
+    expect(rec.analysis.validation.dropped.amount).toBeGreaterThanOrEqual(1);
+    expect(rec.analysis.validation.dropped.unverifiedEvidence).toBeGreaterThanOrEqual(1);
+    expect(JSON.stringify(rec.analysis.result)).not.toMatch(/4,?200/);
+    expect(w.staged().filter((s) => s.fact && (s.fact.amount || s.fact.kind === 'approval_status'))).toEqual([]);
+    expect(w.ledger()).toEqual([]);
+    expect(w.lines('40123')).toEqual([]);
+    expect(writer.appliedMessageKeys().size).toBe(0);
+    // the overlay record and its label: "Filename only", never "Analyzed"
+    const legacyAtt = res.emails[0].attachments[0];
+    expect(legacyAtt).toMatchObject({ name: 'Estimate_40123.pdf', analysisStatus: 'unreadable' });
+    const label = panels.renderAttachmentStatusHtml(legacyAtt);
+    expect(label).toContain('Filename only');
+    expect(label).not.toContain('Analyzed');
+    // no approve / spend path ran
+    expect(confirm._liveCount()).toBe(0);
+  });
+
+  it('case M with the attachments flag OFF: no fetch, filename-only everywhere, the same invented amount is dropped', async () => {
+    const { att, attReader, stubExtract } = await import('./fixtures/email-intel/attach.js');
+    w = phaseCWorld();                                                               // PHASE_C: attachments not effective
+    const extract = stubExtract({});
+    w.answer = () => ({
+      schemaVersion: 2, messageRef: '$REF', relevance: { level: 'high', reason: 'estimate', confidence: 0.95 },
+      units: [{ unit: '40123', gist: 'estimate', facts: [{ kind: 'approval_status', item: 'estimate', value: 'Estimate received for $4,200', state: 'estimate_received', date: null, amount: { value: 4200, currency: 'USD' }, assertion: 'stated', evidence: 'attached for unit 40123', noteConflictHint: false, confidence: 0.95 }] }],
+      questions: [], requests: [], answers: [], commitments: [], classification: { category: 'fleet_status_update', intent: 'provide_update', informationalOnly: true, confidence: 0.9 },
+      suggestDelete: { suggested: false, reason: '', confidence: 0.9 }, overallConfidence: 0.9,
+    });
+    const cap = w.cap({ from: DEALER, to: [ZILA], subject: 'Unit 40123', conversationId: 'conv-m-off', body: 'Hi Zila, attached for unit 40123. Thanks.', attachments: [att('Estimate_40123.pdf')] });
+    const reader = attReader([cap], { extract });
+    const res = await w.scan([cap], { _readMailbox: reader });
+    expect(reader.calls.fetch).toBe(0);
+    expect(extract.calls.n).toBe(0);
+    const rec = Object.values(w.messages())[0];
+    expect(rec.attachments[0].analysis).toEqual({ status: 'filename-only' });
+    expect((rec.analysis.result.units || []).flatMap((u) => u.facts)).toEqual([]);
+    expect(res.emails[0].attachments[0]).toEqual({ name: 'Estimate_40123.pdf', ext: 'pdf', type: 'document' });     // legacy shape unchanged
+  });
+});

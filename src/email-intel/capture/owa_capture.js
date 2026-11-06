@@ -3,7 +3,8 @@
  * email-intel/capture/owa_capture.js — message-level OWA reader (design 2.2).
  *
  *   readMailbox({ folders, plan, checkpoints, onBatch, onFolderDone, signal, deadlineAt, timeoutMs,
- *                 caps, lookbackDays, now, tzMinutes, authGraceMs, _electron, _warm, _sleep })
+ *                 caps, lookbackDays, now, tzMinutes, authGraceMs, _electron, _warm, _sleep,
+ *                 attachments?:{ flagOn, budget, unitIds, deps }, reextract?:[target], onReextract?(target, result) })
  *     -> { ok, authBlocked, aborted, timedOut, folders:[FolderOutcome], opened, rowsExamined, rawChars, error? }
  *
  * One hidden window per scan, built like the legacy readInbox (show:false, offscreen, popups denied,
@@ -11,6 +12,11 @@
  * does NOT discard collected data: every batch was already streamed through `onBatch`, which the
  * orchestrator commits (ledger + checkpoint) before the reader continues, so an auth wall, abort or
  * crash loses at most the batch in flight.
+ *
+ * Phase F (`attachments` effective only): after a row's pane is read, fetchForMessage downloads the allowed
+ * attachments through the chip's own link (attach/fetch.js) and extracts them (attach/extract.js); the
+ * per-attachment status goes on the capture, the excerpt rides on cap.attachmentExcerpts (memory only).
+ * Pending re-extracts (F-14) are re-opened by conversation id after the folder passes.
  *
  * The reader never clicks Reply, Forward, Delete, Move, Flag or a compose control. Opening a row can
  * mark it read in OWA (existing, documented side effect). Error values are enum codes, never text
@@ -194,6 +200,8 @@ async function readMailbox(opts) {
   const lookbackMs = (Number.isFinite(opts.lookbackDays) ? opts.lookbackDays : C.LOOKBACK_DAYS_DEFAULT) * DAY;
   const now = Number.isFinite(opts.now) ? opts.now : Date.now();
   const softMs = Number.isFinite(opts.folderSoftMs) ? Math.min(opts.folderSoftMs, C.FOLDER_SOFT_MS) : C.FOLDER_SOFT_MS;   // tests may only lower it
+  // Phase F: { flagOn, budget, unitIds, deps } only when the `attachments` flag is effective; otherwise no fetch at all.
+  const att = opts.attachments && opts.attachments.flagOn === true && opts.attachments.budget ? opts.attachments : null;
   const outcomes = {};
   for (const f of plan.order) outcomes[f] = _freshOutcome(f, plan.quota[f], cps[f]);
   const totals = { opened: 0, rowsExamined: 0, rawChars: 0, ingested: 0 };
@@ -290,6 +298,8 @@ async function readMailbox(opts) {
           continue;
         }
         const real = captures.filter((x) => !x.stub);
+        if (att) await fetchForMessage(ctx, real, att);       // Phase F: only when `attachments` is effective
+        if (!alive()) break;
         for (const cap of real) {
           cap.rowTimeIso = row.timeIso || null;
           cap.threadContextIncomplete = stubs > 0;
@@ -334,7 +344,60 @@ async function readMailbox(opts) {
       if (!alive()) return;
       await readFolder(e.folder, e.extra);
     }
+    // Phase F re-extract pass (F-14): messages whose analysis did not finish on an earlier scan are re-opened
+    // by conversation id and their analyzed attachments fetched again (MAX_OPEN and the attachment budget apply).
+    if (att && Array.isArray(opts.reextract) && opts.reextract.length) await reextractPass(ctx);
   };
+
+  async function reextractPass(ctx) {
+    const alive = () => ctx.alive() && !ctx.stopped();
+    const deadlineNear = () => Number.isFinite(opts.deadlineAt) && opts.deadlineAt - Date.now() < C.DEADLINE_MARGIN_MS;
+    const report = async (t, r) => { if (typeof opts.onReextract === 'function') { try { await opts.onReextract(t, r); } catch (_) { /* commit hook only */ } } };
+    let current = null;
+    for (const t of opts.reextract) {
+      if (!alive() || deadlineNear() || totals.opened >= caps.maxOpen || att.budget.used >= att.budget.policy.maxPerScan) break;
+      if (current !== t.folder) {
+        const sel = await ctx.selectFolder(t.folder);
+        if (sel === 'not-found') { await report(t, { status: 'not-found' }); continue; }
+        await ctx.waitFor(ps.ROW_SELECTOR, 30, 1000);
+        await ctx.sleep(800);
+        current = t.folder;
+      }
+      let o = null;
+      try { o = await ctx.execJson(ps.buildOpenRowScript({ convId: t.convIdRaw })); } catch (_) { o = null; }
+      if (!alive()) break;
+      if (!o || o.status !== 'opened') { await report(t, { status: o ? 'not-found' : 'open-failed' }); continue; }
+      totals.opened++;
+      await ctx.sleep(C.OPEN_WAIT_MS);
+      if (!alive()) break;
+      const r = await require('../attach/extract').analyzeAttachments({
+        attachments: t.attachments, only: new Set(t.indexes), reextract: true, budget: att.budget, flagOn: true, unitIds: att.unitIds,
+        signal: opts.signal, deps: att.deps, fetchOne: (a, i, lim) => _fetchOne(ctx, a, i, lim),
+      });
+      await report(t, { status: 'ok', attachments: r.attachments, excerpts: r.excerpts, stats: r.stats });
+    }
+  }
+
+  function _fetchOne(ctx, a, i, lim) {
+    if (att && typeof att.fetchOne === 'function') return att.fetchOne(ctx, a, i, lim);       // tests only
+    return require('../attach/fetch').fetchAttachment(ctx, a, lim);
+  }
+
+  /** Fetch + extract the allowed attachments of the captured messages (newest first); excerpts stay in memory. */
+  async function fetchForMessage(ctx, real, a) {
+    for (let k = real.length - 1; k >= 0; k--) {
+      const cap = real[k];
+      if (!cap.isLatest) continue;                                         // the newest message of the row (older blocks stay filename-only)
+      if (!(cap.attachments || []).some((x) => x && !x.placeholder && x.name)) continue;
+      if (!ctx.alive() || ctx.stopped()) return;
+      const r = await require('../attach/extract').analyzeAttachments({
+        attachments: cap.attachments, budget: a.budget, flagOn: true, unitIds: a.unitIds, signal: opts.signal, deps: a.deps,
+        fetchOne: (x, i, lim) => _fetchOne(ctx, x, i, lim),
+      });
+      cap.attachments = r.attachments;
+      if (r.excerpts.length) cap.attachmentExcerpts = r.excerpts;          // never persisted (ledger.buildRecord copies explicit fields only)
+    }
+  }
 
   const session = await openSession(opts, driver);
   const st = session.settled;

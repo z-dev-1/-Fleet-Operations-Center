@@ -35,10 +35,24 @@ function _canonStatus(unit, canonicalFor) {
 
 /** Attachment list in the legacy shape; placeholders are shown as "attachment" (never an invented name). */
 function legacyAttachments(list) {
-  return (Array.isArray(list) ? list : []).map((a) => ({
-    name: a.name || 'attachment', ext: a.ext || '',
-    type: a.kind === 'image' ? 'image' : a.kind === 'document' ? 'document' : 'file',
-  }));
+  const labels = _attachmentsOn();
+  return (Array.isArray(list) ? list : []).map((a) => {
+    const out = {
+      name: a.name || 'attachment', ext: a.ext || '',
+      type: a.kind === 'image' ? 'image' : a.kind === 'document' ? 'document' : 'file',
+    };
+    // Phase F (R6.3): the overlay labels "Analyzed" vs "Filename only". Added only while `attachments` is effective.
+    if (labels) {
+      const an = (a && a.analysis) || {};
+      out.analysisStatus = typeof an.status === 'string' ? an.status : 'filename-only';
+      if (an.reasonText) out.analysisReason = String(an.reasonText).slice(0, 80);
+    }
+    return out;
+  });
+}
+
+function _attachmentsOn() {
+  try { return require('../flags').get().effective.attachments === true; } catch (_) { return false; }
 }
 
 /** view: { conversationKey, records:[MessageRecord oldest first] } -> the email handed to legacy triageEmails. */

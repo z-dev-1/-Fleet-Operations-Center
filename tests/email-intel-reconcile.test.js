@@ -173,6 +173,16 @@ describe('evaluateFact', () => {
     expect(ev({}, { msg: withFile }).verdict).toBe('apply');
   });
 
+  it('Phase F (D9, design 7.7): amounts and approvals read from an attachment stage; an attachment conflict stages', () => {
+    const analyzed = msg({ attachments: [{ name: 'Estimate_40123.pdf', analysis: { status: 'content' } }] });
+    expect(ev({ kind: 'approval_status', item: 'estimate', value: 'Estimate pending', state: 'pending', date: null, evidenceSource: 'attachment:0' }, { msg: analyzed })).toMatchObject({ verdict: 'stage', reason: 'spend-related' });
+    expect(ev({ kind: 'parts_availability', item: 'turbo', value: 'Turbo in stock', state: 'in_stock', date: null, amount: { value: 2960, currency: 'USD' }, evidenceSource: 'attachment:0' }, { msg: analyzed }).reason).toBe('spend-related');
+    // a non-money fact from an analyzed attachment follows the normal rules
+    expect(ev({ evidenceSource: 'attachment:0' }, { msg: analyzed }).verdict).toBe('apply');
+    expect(ev({ evidenceSource: 'body' }, { msg: analyzed }).verdict).toBe('apply');
+    expect(ev({ attachmentConflict: true, evidenceSource: 'attachment:0' }, { msg: analyzed })).toMatchObject({ verdict: 'stage', reason: 'attachment-conflict' });
+  });
+
   it('roster mismatch, low confidence and invalid confidence stage; the threshold is >= 0.75 and config only raises it', () => {
     expect(ev({}, { rosterMismatch: true }).reason).toBe('roster-mismatch');
     expect(ev({ effectiveConfidence: 0.7499 }).reason).toBe('low-confidence');

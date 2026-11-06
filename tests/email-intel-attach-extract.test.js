@@ -120,7 +120,113 @@ describe('R6.5 safety and bounds', () => {
   });
 });
 
+describe('reader wiring (capture/owa_capture.js)', () => {
+  it('attachments are fetched only when the flag is effective, for the newest message of the row; the excerpt rides on the capture only', async () => {
+    const { createWorld, warmOk, noSleep } = await import('./fixtures/email-intel/fake-owa.js');
+    const E = await import('./fixtures/email-intel/emails.js');
+    const cap = require('../src/email-intel/capture/owa_capture');
+    const href = ['https://outlook.office.com/mail/attach/AAMk1'];
+    const snap = E.snapshot({ subject: 'Estimate 40123', blocks: [
+      E.block({ text: 'Older message for 40123.', convId: 'conv/inbox/0=', attachments: [E.att('Old.pdf', { hrefs: href })] }),
+      E.block({ text: 'Estimate attached for 40123.', convId: 'conv/inbox/0=', attachments: [E.att('Estimate_40123.pdf', { hrefs: href })] }),
+    ] });
+    const run = async (attachments) => {
+      const { electron } = createWorld({ Inbox: { rows: [E.rowDesc({ i: 0, hasAttach: true })], snapshots: { 'conv/inbox/0=': snap } } });
+      const batches = [];
+      const fetched = [];
+      const res = await cap.readMailbox({
+        folders: ['Inbox'], onBatch: async (_f, items) => { batches.push(...items); }, _electron: electron, _warm: warmOk, _sleep: noSleep, authGraceMs: 20, now: Date.parse('2026-11-04T20:00:00Z'),
+        attachments: attachments ? Object.assign({ flagOn: true, budget: budget(), unitIds: ['40123'], fetchOne: async (_ctx, a) => { fetched.push(a.name); return { ok: true, buffer: Buffer.from('%PDF-1.4'), mimetype: 'application/pdf' }; } }, attachments) : undefined,
+      });
+      return { res, batches, fetched };
+    };
+    const extract = stubExtract({ 'Estimate_40123.pdf': read('pdf', 'Estimate total $1,840 for unit 40123'), 'Old.pdf': read('pdf', 'old') });
+    // flag OFF (no attachments option): no fetch at all, every attachment filename-only
+    const off = await run(null);
+    expect(off.fetched).toEqual([]);
+    const offCaps = off.batches.flatMap((b) => b.captures);
+    expect(offCaps.flatMap((c) => c.attachments.map((a) => a.analysis.status))).toEqual(['filename-only', 'filename-only']);
+    expect(offCaps.some((c) => c.attachmentExcerpts)).toBe(false);
+    // flag ON: only the newest block's attachment is fetched and extracted
+    const on = await run({ deps: { extractItem: extract } });
+    expect(on.res.ok).toBe(true);
+    expect(on.fetched).toEqual(['Estimate_40123.pdf']);
+    const caps = on.batches.flatMap((b) => b.captures);
+    const latest = caps.find((c) => c.isLatest);
+    expect(latest.attachments[0].analysis).toMatchObject({ status: 'content', via: 'pdf-text' });
+    expect(latest.attachmentExcerpts).toEqual([{ index: 0, status: 'content', text: 'Estimate total $1,840 for unit 40123', cut: false }]);
+    expect(caps.find((c) => !c.isLatest).attachments[0].analysis.status).toBe('filename-only');
+    // the ledger record built from the capture keeps only the status (memory-only excerpt, F-14)
+    const ledger = require('../src/email-intel/ingest/ledger');
+    const doc = ledger.emptyDoc();
+    const rec = ledger.buildRecord(latest, doc, { me: { names: [], addresses: [] }, now: Date.now() }).record;
+    expect(JSON.stringify(rec)).not.toContain('$1,840');
+    expect(rec.attachments[0].analysis.status).toBe('content');
+  });
+});
+
 describe('F-14 memory-only excerpts and pending re-extract', () => {
+  it('F-14 at runIntelScan level: excerpt never persisted, unfinished analysis marks pending-reextract, the next scan re-fetches and analyzes with it', async () => {
+    const fsMod = await import('fs');
+    const pathMod = await import('path');
+    const { phaseCWorld } = await import('./fixtures/email-intel/phase-c.js');
+    const { PHASE_F, attReader } = await import('./fixtures/email-intel/attach.js');
+    const w = phaseCWorld(PHASE_F);
+    try {
+      const SENT = 'XCERPT-SENTINEL-7781';
+      const extract = stubExtract({ 'Estimate_40123.pdf': read('pdf', 'Repair estimate for unit 40123. ' + SENT + ' Parts ETA 11/12. Total $1,840.') });
+      const c = w.cap({ subject: 'Estimate 40123', conversationId: 'conv-f14', body: 'Hi Zila, the estimate for 40123 is attached.', attachments: [att('Estimate_40123.pdf')] });
+      w.relay.available = false;                                   // the lane is down: analysis cannot finish this scan
+      const r1 = attReader([c], { extract });
+      await w.scan([c], { _readMailbox: r1 });
+      expect(r1.calls.fetch).toBe(1);
+      expect(w.relay.calls).toHaveLength(0);
+      const m1 = Object.values(w.messages())[0];
+      expect(m1.analysis.status).toBe('pending');
+      expect(m1.attachments[0].analysis.status).toBe('pending-reextract');
+      const files = () => fsMod.readdirSync(w.tmp).filter((f) => f.endsWith('.json')).map((f) => fsMod.readFileSync(pathMod.join(w.tmp, f), 'utf8')).join('\n');
+      expect(files()).not.toContain(SENT);
+      // next scan: lane back; the pending attachment is re-fetched (re-extract pass), the excerpt reaches the prompt, analysis finishes
+      w.relay.available = true;
+      const r3 = attReader([], { extract });
+      await w.scan([], { _readMailbox: r3 });
+      expect(r3.calls.reextractTargets).toBe(1);
+      expect(r3.calls.fetch).toBe(1);
+      const prompts = w.relay.calls.map((x) => x.prompt);
+      expect(prompts.some((p) => p.includes('<<<UNTRUSTED_ATTACHMENT id=') && p.includes(SENT))).toBe(true);
+      const m2 = Object.values(w.messages())[0];
+      expect(m2.analysis.status).toBe('ok');
+      expect(m2.attachments[0].analysis.status).toBe('content');
+      expect(files()).not.toContain(SENT);
+      // a later scan does not fetch again (analysis finished)
+      const r4 = attReader([], { extract });
+      await w.scan([], { _readMailbox: r4 });
+      expect([r4.calls.reextractTargets, r4.calls.fetch]).toEqual([0, 0]);
+    } finally { w.cleanup(); }
+  }, 30_000);
+
+  it('F-14 a message that cannot be found again ends unreadable: not-found and is analyzed on its body', async () => {
+    const { phaseCWorld } = await import('./fixtures/email-intel/phase-c.js');
+    const { PHASE_F, attReader } = await import('./fixtures/email-intel/attach.js');
+    const w = phaseCWorld(PHASE_F);
+    try {
+      const extract = stubExtract({ 'Estimate_40123.pdf': read('pdf', 'Repair estimate for unit 40123. Total $1,840.') });
+      const c = w.cap({ subject: 'Estimate 40123', conversationId: 'conv-f14b', body: 'Hi Zila, the estimate for 40123 is attached.', attachments: [att('Estimate_40123.pdf')] });
+      w.relay.available = false;
+      await w.scan([c], { _readMailbox: attReader([c], { extract }) });
+      expect(Object.values(w.messages())[0].attachments[0].analysis.status).toBe('pending-reextract');
+      w.relay.available = true;
+      const r = attReader([], { extract, notFound: true });
+      await w.scan([], { _readMailbox: r });
+      const m = Object.values(w.messages())[0];
+      expect(m.attachments[0].analysis).toMatchObject({ status: 'unreadable', reason: 'not-found' });
+      expect(m.analysis.status).toBe('ok');
+      expect(w.relay.calls.some((x) => x.prompt.includes('<<<UNTRUSTED_ATTACHMENT id='))).toBe(false);
+    } finally { w.cleanup(); }
+  }, 30_000);
+});
+
+describe('F-14 memory-only excerpts and pending re-extract (unit)', () => {
   it('F-14 excerpt never persisted; pending-reextract re-fetches on retry', async () => {
     const SENT = 'EXCERPT-SENTINEL-5150 estimate total $1,840';
     const extract = stubExtract({ 'Estimate.pdf': read('pdf', SENT) });

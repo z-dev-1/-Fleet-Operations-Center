@@ -171,20 +171,35 @@ async function analyzeMessage(rec, ctx) {
     return fin('skipped-old', { determinations: _determine(null, rec, scan, cctx) });
   }
 
+  // Phase F: this scan's attachment excerpts (memory only, F-14). A message whose analyzed attachment still has
+  // to be re-fetched waits for it (bounded: 3 re-extract attempts, then the attachment is unreadable).
+  const attEx = c.attachmentsOn && c.attachmentExcerpts && typeof c.attachmentExcerpts.get === 'function' ? (c.attachmentExcerpts.get(rec.messageKey) || []) : [];
+  if (c.attachmentsOn && (rec.attachments || []).some((a) => a && a.analysis && a.analysis.status === 'pending-reextract')) {
+    return Object.assign(_base(rec, prev), { status: ELIGIBLE.has(prev.status) ? prev.status : 'pending', deterministic: det, error: 'awaiting-reextract' });
+  }
+  const attUnits = [];
+  for (const x of attEx) {
+    for (const u of scopeMod.extractUnits(x.text, c.index)) {
+      if (!scan.all.some((m) => m.id === u.id) && !attUnits.some((m) => m.id === u.id)) attUnits.push({ id: u.id, scope: u.scope, offsets: [], inAttachment: true });
+    }
+  }
+
   const idx = conv.indexOf(rec);
   const earlier = idx > 0 ? conv.slice(0, idx) : conv.filter((r) => r !== rec && (Date.parse(r.receivedAt || '') || 0) <= (t || 0));
   const convOpen = earlier.some((r) => {
     const d = r.analysis && r.analysis.determinations;
     return !!d && d.actionOwnership.items.some((x) => x.state === 'open' && (x.owner === 'me' || x.owner === 'shared') && x.inScope);
   });
-  const pre = prescreen(rec, scan, { openOnMyUnits: convOpen }, { me: c.me });
+  const pre0 = prescreen(rec, scan, { openOnMyUnits: convOpen }, { me: c.me });
+  // Extracted attachment text is new content the cheap prescreen cannot see: it always goes to the AI.
+  const pre = attEx.length && !pre0.aiNeeded ? Object.assign({}, pre0, { aiNeeded: true, reason: 'attachment-content' }) : pre0;
   const preInfo = { reason: pre.reason, priority: pre.priority, triggers: pre.triggers };
   if (!pre.aiNeeded) {
     return fin('skipped-cheap', { prescreen: preInfo, deterministic: Object.assign({}, det, { relevance: pre.deterministic.relevance, outOfScope: pre.deterministic.outOfScope, classification: Object.assign({}, det.classification, { category: pre.deterministic.category === 'noise' ? 'noise' : det.classification.category }) }), determinations: _determine(null, rec, scan, cctx) });
   }
 
   // Reuse: identical content already analyzed in this conversation (recipient-dependent fields recomputed).
-  const twin = conv.find((r) => r !== rec && r.contentHash && r.contentHash === rec.contentHash && r.analysis && r.analysis.status === 'ok' && r.analysis.promptVersion === C.PROMPT_VERSION && r.analysis.result);
+  const twin = attEx.length ? null : conv.find((r) => r !== rec && r.contentHash && r.contentHash === rec.contentHash && r.analysis && r.analysis.status === 'ok' && r.analysis.promptVersion === C.PROMPT_VERSION && r.analysis.result);
   if (twin) {
     const result = _decorate(JSON.parse(JSON.stringify(twin.analysis.result)), rec);
     return fin('ok', { prescreen: preInfo, result, validation: twin.analysis.validation, coverage: twin.analysis.coverage, unprocessedUnits: twin.analysis.unprocessedUnits || [], reusedFrom: twin.messageKey, determinations: _determine(result, rec, scan, cctx) });
@@ -206,14 +221,19 @@ async function analyzeMessage(rec, ctx) {
   const oneToOne = own.isOneToOne(rec, c.me);
   const ok = []; let outputFails = 0; let laneFails = 0; let dropped = 0;
   const failedWindows = new Set();
+  const candidates = attUnits.length ? scan.all.concat(attUnits) : scan.all;
   for (const wi of wins.sent) {
     const w = wins.windows[wi];
     const ref = promptMod.messageRef(rec.messageKey, wi);
     const nonce = untrusted.newNonce();
-    const prompt = promptMod.buildPrompt(rec, { index: wi, total: wins.windows.length, text: w.text, coverage: wins.coverage }, {
-      messageRef: ref, recipientRole: role, me: c.me, candidates: scan.all, canonicalFor: c.canonicalFor, priorQuestions: prior,
+    // Attachment excerpts go with the first window only (AI input bound: at most 10,000 chars per message).
+    const winAtt = attEx.length && wi === wins.sent[0] ? attEx : null;
+    const pctx = {
+      messageRef: ref, recipientRole: role, me: c.me, candidates, canonicalFor: c.canonicalFor, priorQuestions: prior,
       quotedHistory: lastEarlier && lastEarlier.body ? lastEarlier.body.newContent : '', now,
-    }, nonce);
+    };
+    if (winAtt) pctx.attachmentExcerpts = winAtt;
+    const prompt = promptMod.buildPrompt(rec, { index: wi, total: wins.windows.length, text: w.text, coverage: wins.coverage }, pctx, nonce);
     const q = await c.queue.run(() => lane.askIsolated(prompt, { trigger: c.trigger, signal: c.signal }), { priority: pre.priority });
     if (!q.ok) { dropped++; failedWindows.add(wi); continue; }
     const r = q.value || { ok: false, kind: 'lane', error: 'threw' };
@@ -225,10 +245,12 @@ async function analyzeMessage(rec, ctx) {
     }
     let parsed = null;
     try { parsed = require('../../orcha/reason').parseJson(r.text); } catch (_) { parsed = null; }
-    const v = parsed ? validateAnalysis(parsed, {
-      expectedRef: ref, candidateUnits: scan.all.map((u) => u.id), scopeOf: c.index.scopeOf, priorQuestionIds: prior.map((p) => p.pqid),
+    const vctx = {
+      expectedRef: ref, candidateUnits: candidates.map((u) => u.id), scopeOf: c.index.scopeOf, priorQuestionIds: prior.map((p) => p.pqid),
       text: 'Subject: ' + String(rec.subject || '') + '\n\n' + w.text, receivedAt: rec.receivedAt, now, me: c.me, oneToOne,
-    }) : null;
+    };
+    if (winAtt) vctx.attachments = winAtt.map((x) => ({ index: x.index, status: x.status, text: x.text }));
+    const v = parsed ? validateAnalysis(parsed, vctx) : null;
     lane.recordSuccess(now);
     if (c.scanState) c.scanState.successes = (c.scanState.successes || 0) + 1;
     if (!v || !v.ok) { outputFails++; failedWindows.add(wi); continue; }

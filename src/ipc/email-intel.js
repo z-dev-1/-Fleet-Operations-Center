@@ -14,6 +14,7 @@
  * Phase E adds draft-thread-reply (resolved-question gate, isolated lane), get-send-attempts, reconcile-send (read-only
  * Sent Items re-check) and the send-reply / mark-send-resolution prepare validation; boot recovery of send attempts
  * runs at registration when threadReplies is effective.
+ * Phase F adds ack-vision-notice (F-28: the one-time vision notice; sets visionNoticeAcknowledged and maxVision).
  * Channels owned by later phases return { ok:false, code:'NOT_IMPLEMENTED' } when their gate is open.
  * The legacy emailTriage:* channels are untouched here.
  *
@@ -72,7 +73,7 @@ const IMPLEMENTED = new Set([
   'emailIntel:status', 'emailIntel:scan', 'emailIntel:get-config', 'emailIntel:set-config', 'emailIntel:dom-probe',
   'emailIntel:set-tz-verified', 'emailIntel:prepare-action', 'emailIntel:confirm-action', 'emailIntel:probe-lane',
   'emailIntel:get-staged', 'emailIntel:get-actions', 'emailIntel:action-update',
-  'emailIntel:draft-thread-reply', 'emailIntel:get-send-attempts', 'emailIntel:reconcile-send',
+  'emailIntel:draft-thread-reply', 'emailIntel:get-send-attempts', 'emailIntel:reconcile-send', 'emailIntel:ack-vision-notice',
 ]);
 const CONV_RE = /^cv_[0-9a-f]{16}$/;
 const ATTEMPT_RE = /^sa_[0-9a-f]{16}$/;
@@ -240,6 +241,25 @@ function registerEmailIntelIPC(_ctx) {
     if (!u.ok) return { ok: false, code: u.code || 'STORE_ERROR' };
     _notifyUpdated({ kind: 'config' });
     return { ok: true, mailboxTzVerified: true };
+  });
+
+  // F-28 one-time vision notice: { allowVision: boolean } -> visionNoticeAcknowledged true and maxVision (0 when false).
+  // Until this is called no image / scanned-PDF bytes go to the vision reader (policy.visionAllowance is 0).
+  handle('emailIntel:ack-vision-notice', (_e, payload) => {
+    if (!gateOpen('attachments')) return OFF();
+    if (!_isPlain(payload) || typeof payload.allowVision !== 'boolean') return BAD('allowVision');
+    let saved = null;
+    const u = stores.update('config', (doc) => {
+      const next = cfgMod.normalize(doc);
+      const cur = next.attachments.maxVision;
+      next.attachments.visionNoticeAcknowledged = true;
+      next.attachments.maxVision = payload.allowVision ? (cur > 0 ? cur : 2) : 0;
+      saved = next.attachments;
+      return next;
+    });
+    if (!u.ok) return { ok: false, code: u.code || 'STORE_ERROR' };
+    _notifyUpdated({ kind: 'config' });
+    return { ok: true, visionNoticeAcknowledged: true, maxVision: saved ? saved.maxVision : 0 };
   });
 
   // P-LANE (F-16): one tiny isolated-lane call with no email content, manual only; updates the lane state.

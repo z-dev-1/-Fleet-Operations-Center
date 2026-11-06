@@ -388,3 +388,51 @@ describe('AC-9 Phase E reply paths log no dynamic content (FEAT-006)', () => {
     } finally { w.cleanup(); confirm._resetForTests(); }
   }, 30_000);
 });
+
+
+describe('AC-9 Phase F attachment paths log no dynamic content (FEAT-007)', () => {
+  it('fetch, extract (content, unreadable, secret-like, throwing), pending re-extract, prompt fences, case-M amounts and ack-vision-notice log only counts and enums', async () => {
+    const { phaseCWorld } = await import('./fixtures/email-intel/phase-c.js');
+    const { PHASE_F, att, attReader, stubExtract, REASONS } = await import('./fixtures/email-intel/attach.js');
+    const w = phaseCWorld(PHASE_F);
+    try {
+      const XS = 'XTEXT-SENTINEL-3307';
+      const from = { name: S.name, address: S.addr };
+      const extract = stubExtract({
+        [S.attach]: { kind: 'pdf', status: 'read', text: 'Repair estimate for unit 40123 ' + XS + ' total $1,840.', reason: '', meta: {} },
+        ['scan-' + S.attach]: { kind: 'pdf', status: 'failed', reason: REASONS.SCANNED_PDF_UNAVAILABLE },
+        ['creds-' + S.attach]: { kind: 'docx', status: 'read', text: 'aws_secret_access_key ' + XS, reason: '', meta: {} },
+        ['boom-' + S.attach]: () => { throw new Error('parser blew up on ' + S.attach + ' ' + XS + ' ' + S.addr); },
+      });
+      const fetchErr = (a) => (a.name.startsWith('slow-') ? { ok: false, reason: 'timeout' } : { ok: true, buffer: Buffer.from('%PDF-1.4'), mimetype: 'application/pdf' });
+      const names = [S.attach, 'scan-' + S.attach, 'creds-' + S.attach];
+      const caps = [
+        w.cap({ from, to: [{ name: S.name, address: S.addr }], subject: S.subject, conversationId: 'conv-att-1', body: S.body + ' unit 40123 estimate attached', attachments: names.map((n) => att(n)) }),
+        w.cap({ from, subject: S.subject + ' 2', conversationId: 'conv-att-2', body: S.body + ' unit 40456', attachments: [att('boom-' + S.attach), att('slow-' + S.attach), att('photo-' + S.attach.replace('.pdf', '.png'))] }),
+      ];
+      w.answer = () => ({
+        schemaVersion: 2, messageRef: '$REF', relevance: { level: 'high', reason: S.body, confidence: 0.9 },
+        units: [{ unit: '40123', gist: XS, facts: [{ kind: 'approval_status', item: 'estimate', value: 'Estimate ' + XS + ' $4,200', state: 'estimate_received', date: null, amount: { value: 4200, currency: 'USD' }, assertion: 'stated', evidence: S.attach, noteConflictHint: false, confidence: 0.9 }] }],
+        questions: [], requests: [], answers: [], commitments: [], classification: { category: 'fleet_status_update', intent: 'provide_update', informationalOnly: true, confidence: 0.9 },
+        suggestDelete: { suggested: false, reason: '', confidence: 0.9 }, overallConfidence: 0.9,
+      });
+      // scan 1: lane down -> pending-reextract; scan 2: re-extract pass and analysis with the excerpt fence
+      w.relay.available = false;
+      await w.scan(caps, { _readMailbox: attReader(caps, { extract, fetch: fetchErr }) });
+      w.relay.available = true;
+      await w.scan([], { _readMailbox: attReader([], { extract, fetch: fetchErr }) });
+      // the real fetch helper against a page that returns junk, and the IPC notice channel
+      const fetchMod = require('../src/email-intel/attach/fetch');
+      await fetchMod.fetchAttachment({ alive: () => true, state: {}, execJson: async () => ({ status: S.body }) }, { name: S.attach }, { maxBytes: 10 });
+      const call = (ch, ...a) => handlers[ch]({}, ...a);
+      flags._setForTests(PHASE_F);
+      await call('emailIntel:ack-vision-notice', { allowVision: S.body });
+      await call('emailIntel:ack-vision-notice', { allowVision: false });
+      await call('emailIntel:status');
+      expect(w.relay.calls.some((c) => c.prompt.includes('<<<UNTRUSTED_ATTACHMENT id='))).toBe(true);
+      expect(logText()).toMatch(/attachments pending-reextract=\d+/);
+      const own = logLines().filter((l) => l.ns !== 'repair-history').map((l) => l.text).join('\n');
+      for (const s of SENTINELS.concat([XS, 'scan-ATTACH', 'creds-ATTACH', 'boom-ATTACH', 'slow-ATTACH', 'photo-ATTACH', 'aws_secret'])) expect(own, s).not.toContain(s);
+    } finally { w.cleanup(); flags._setForTests(null); }
+  }, 30_000);
+});

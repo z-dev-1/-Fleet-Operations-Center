@@ -99,6 +99,9 @@ async function _scan(opts, trigger) {
   const stats = { newMessages: 0, upgraded: 0, committedRows: 0 };
   const touched = new Set();
   let storeError = null;
+  // Phase F (attachments): per-scan budget and the memory-only excerpts (messageKey -> [{index,status,text}], F-14).
+  const att = _attachmentsOn() ? _attachSetup(cfg, startedAt, opts) : null;
+  const excerpts = new Map();
 
   const onBatch = async (folder, items) => {
     const r1 = stores.update('messages', (doc) => {
@@ -109,6 +112,7 @@ async function _scan(opts, trigger) {
           if (!res) continue;
           if (res.created) { ledger.upsert(doc, res.record); stats.newMessages++; } else if (res.upgraded) stats.upgraded++;
           touched.add(res.record.conversationKey);
+          if (att) _keepExcerpts(doc, res, cap, excerpts);
         }
       }
       return doc;
@@ -127,11 +131,13 @@ async function _scan(opts, trigger) {
   const readFn = opts._readMailbox || require('./capture/owa_capture').readMailbox;
   let reader = null;
   try {
-    reader = await readFn({
+    const readOpts = {
       folders, plan, checkpoints: ckSnapshot, onBatch, signal: opts.signal, deadlineAt,
       caps: { maxOpen: Math.min(cfg.caps.maxOpen, C.MAX_OPEN_HARD) }, lookbackDays: cfg.caps.lookbackDays, now: startedAt,
       timeoutMs: opts.readTimeoutMs, authGraceMs: opts.authGraceMs, _electron: opts._electron, _warm: opts._warm, _sleep: opts._sleep,
-    });
+    };
+    if (att) Object.assign(readOpts, _attachReadOpts(att, excerpts));
+    reader = await readFn(readOpts);
   } catch (e) {
     logger.warn('[email-intel] reader threw ' + safeErr(e));
     reader = null;
@@ -173,8 +179,9 @@ async function _scan(opts, trigger) {
   if (storeError) {
     d = statusMod.deriveOutcome({ reader, committed: stats.newMessages + stats.upgraded, storeError, deadlineHit });
     results = adapter.failedResults(prevResults, 'read failed', 'store');
+    if (att) { try { _afterAnalysis(excerpts); } catch (_) { /* best effort */ } }
   } else if (_multiRecipient()) {
-    const u = await _understand({ opts, trigger, cfg, legacyCfg, store, prevResults, touched, startedAt, deadlineAt, scanId, reader, committed: stats.newMessages + stats.upgraded, deadlineHit });
+    const u = await _understand({ opts, trigger, cfg, legacyCfg, store, prevResults, touched, startedAt, deadlineAt, scanId, reader, committed: stats.newMessages + stats.upgraded, deadlineHit, att, excerpts });
     d = u.d; results = u.results;
   } else {
     d = statusMod.deriveOutcome({ reader, committed: stats.newMessages + stats.upgraded, storeError, deadlineHit });
@@ -193,6 +200,83 @@ async function _scan(opts, trigger) {
 
 function _multiRecipient() {
   try { return flags.get().effective.multiRecipient === true; } catch (_) { return false; }
+}
+
+// ── Phase F (attachments) helpers. Excerpts never leave memory; only per-attachment status is stored. ──
+const ANALYSIS_DONE = new Set(['ok', 'skipped-cheap', 'skipped-old', 'failed-permanent']);
+
+function _attachmentsOn() {
+  try { return require('./attach/policy').enabled(flags.get().effective); } catch (_) { return false; }
+}
+
+function _attachSetup(cfg, startedAt, opts) {
+  const policyMod = require('./attach/policy');
+  const policy = policyMod.policyOf(cfg);
+  let unitIds = [];
+  try {
+    const idx = require('./understand/scope').buildScopeIndex({ now: startedAt, fasName: cfg.me && cfg.me.fasName });
+    unitIds = Array.from(idx.byId.values()).map((d) => d.unit).filter(Boolean).slice(0, 500);
+  } catch (_) { unitIds = []; }
+  return { flagOn: true, policy, budget: policyMod.createBudget(policy, { now: Date.now() }), unitIds, deps: opts._attachDeps, fetchOne: opts._attachFetch };
+}
+
+/** onBatch: remember this scan's excerpts; a re-read of a message that is still waiting for analysis refreshes its statuses. */
+function _keepExcerpts(doc, res, cap, excerpts) {
+  const rec = doc.messages[res.record.messageKey] || res.record;
+  if (!res.created) {
+    const st = String((rec.analysis || {}).status || 'pending');
+    if (ANALYSIS_DONE.has(st) || !Array.isArray(cap.attachments) || cap.attachments.length !== (rec.attachments || []).length) return;
+    rec.attachments = cap.attachments;
+  }
+  if (Array.isArray(cap.attachmentExcerpts) && cap.attachmentExcerpts.length) excerpts.set(rec.messageKey, cap.attachmentExcerpts);
+}
+
+/** Reader options for Phase F: the budget, the pending re-extract targets (F-14) and their commit hook. */
+function _attachReadOpts(att, excerpts) {
+  const ex = require('./attach/extract');
+  let targets = [];
+  const r0 = stores.update('messages', (doc) => {
+    ledger.ensureDoc(doc);
+    const t = ex.reextractTargets(doc, { max: att.policy.maxPerScan });
+    for (const k of t.unreachable) { const rec = doc.messages[k]; if (rec) ex.markNotFound(rec.attachments); }
+    targets = t.targets.map((x) => Object.assign({}, x, { attachments: JSON.parse(JSON.stringify(doc.messages[x.messageKey].attachments || [])) }));
+    return doc;
+  });
+  if (!r0.ok) targets = [];
+  const onReextract = async (t, r) => {
+    stores.update('messages', (doc) => {
+      const rec = doc.messages && doc.messages[t.messageKey];
+      if (!rec) return doc;
+      const only = new Set(t.indexes);
+      if (r.status === 'ok' && Array.isArray(r.attachments) && r.attachments.length === (rec.attachments || []).length) rec.attachments = r.attachments;
+      else if (r.status === 'not-found') ex.markNotFound(rec.attachments, only);
+      else ex.recordReextractFailure(rec.attachments, only, 'open-failed');
+      return doc;
+    });
+    if (r.status === 'ok' && Array.isArray(r.excerpts) && r.excerpts.length) excerpts.set(t.messageKey, r.excerpts);
+  };
+  return {
+    attachments: { flagOn: true, budget: att.budget, unitIds: att.unitIds, deps: att.deps, fetchOne: att.fetchOne },
+    reextract: targets, onReextract,
+  };
+}
+
+/** Scan end: analyzed attachments of messages whose analysis did not finish are re-fetched next scan; excerpts dropped. */
+function _afterAnalysis(excerpts) {
+  if (!excerpts || !excerpts.size) return;
+  const ex = require('./attach/extract');
+  const keys = Array.from(excerpts.keys());
+  excerpts.clear();
+  let marked = 0;
+  stores.update('messages', (doc) => {
+    for (const k of keys) {
+      const rec = doc.messages && doc.messages[k];
+      if (!rec || ANALYSIS_DONE.has(String((rec.analysis || {}).status || 'pending'))) continue;
+      marked += ex.markPendingReextract(rec.attachments);
+    }
+    return doc;
+  });
+  if (marked) logger.info('[email-intel] attachments pending-reextract=' + marked);
 }
 
 /** Messages referenced by open staged items are never evicted (design 1.2). Phase B/C only. */
@@ -225,11 +309,13 @@ async function _understand(o) {
   if (!index.ready || index.stale) logger.warn('[email-intel] fleet scope unknown reason=' + index.reason);
   const changed = new Set(touched);
   let commitFailed = null;
+  const excerpts = o.excerpts || null;
   const commit = (key, a) => {
     const rec = msgDoc.messages[key];
     if (rec) changed.add(rec.conversationKey);
     const r = stores.update('messages', (doc) => { const x = doc.messages && doc.messages[key]; if (x) x.analysis = a; return doc; });
     if (!r.ok && !commitFailed) commitFailed = r.code || 'store';
+    if (excerpts && a && ANALYSIS_DONE.has(a.status)) excerpts.delete(key);          // F-14: dropped once the analysis finished
   };
   const pipeline = require('./facts/pipeline');
   let effective = {};
@@ -238,12 +324,15 @@ async function _understand(o) {
   try { await pipeline.beforeAnalysis({ effective, prevResults, lookbackDays: cfg.caps.lookbackDays }); } catch (e) { logger.warn('[email-intel] fact pre-pass failed ' + errName(e)); }
   let stats = null;
   try {
-    stats = await analyze.runScanAnalysis(msgDoc, {
+    const actx = {
       index, me: cfg.me, cfg, trigger, signal: opts.signal, deadlineAt, now: startedAt, canonicalFor: _canonicalFor, lookbackDays: cfg.caps.lookbackDays,
-    }, commit);
+    };
+    if (o.att) Object.assign(actx, { attachmentsOn: true, attachmentExcerpts: excerpts });
+    stats = await analyze.runScanAnalysis(msgDoc, actx, commit);
   } catch (e) {
     logger.warn('[email-intel] analysis failed ' + safeErr(e));
   }
+  if (o.att) _afterAnalysis(excerpts);
   if (stats) logger.info('[email-intel] analysis id=' + scanId + ' eligible=' + stats.eligible + ' ok=' + stats.ok + ' cheap=' + stats.skippedCheap + ' old=' + stats.skippedOld + ' unavailable=' + stats.aiUnavailable + ' invalid=' + stats.invalid + ' pending=' + stats.pending + ' calls=' + stats.aiCalls + ' lane=' + stats.laneState);
 
   // Stage 7 (Phase C): evaluate new facts; apply (timelineWrites), stage, corroborate or record evidence.
@@ -451,12 +540,21 @@ function getStatus() {
   if (f && f.threadReplies) {
     try { unreconciledSends = require('./reply/send-guard').unreconciledCount(); } catch (_) { /* status only */ }
   }
-  return statusMod.buildStatus({
+  const config = cfgMod.normalize(stores.load('config'));
+  const st = statusMod.buildStatus({
     enabled: engaged(), flags: f, flagWarnings: warnings, lane: laneSt, extraWarnings: extra, openStaged, openActions, unreconciledSends,
-    config: cfgMod.normalize(stores.load('config')), checkpoints: stores.load('checkpoints'), messages: stores.load('messages'),
+    config, checkpoints: stores.load('checkpoints'), messages: stores.load('messages'),
     running: lock.isBusy(), current: lock.current(),
     readOnlyStores: ['config', 'checkpoints', 'messages'].map((n) => stores.isReadOnly(n)),
   });
+  // Phase F: the one-time vision notice state (F-28); present only while `attachments` is effective.
+  if (f && f.attachments && st && typeof st === 'object') {
+    try {
+      const p = require('./attach/policy').policyOf(config);
+      st.attachments = { visionNoticePending: p.visionNoticeAcknowledged !== true, maxVision: p.maxVision, maxPerScan: p.maxPerScan, maxBytes: p.maxBytes };
+    } catch (_) { /* status only */ }
+  }
+  return st;
 }
 
 module.exports = { engaged, runIntelScan, scheduledTick, getStatus };

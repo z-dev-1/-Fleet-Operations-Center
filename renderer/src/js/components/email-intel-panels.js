@@ -119,6 +119,8 @@ export function renderBannersHtml(status) {
     out.push('<div class="ei-banner ei-banner--identity" role="status" aria-live="polite">' + esc(IDENTITY_BANNER) +
       ' <button type="button" class="et-mini" id="ei-id-setup">Set up</button></div>');
   }
+  const vision = renderVisionNoticeHtml(s);
+  if (vision) out.push(vision);
   return out.join('');
 }
 
@@ -171,7 +173,7 @@ export function wireIdentityPanel(doc, deps) {
   if (close && d.onClose) close.addEventListener('click', () => d.onClose());
 }
 
-/** wireBanners(doc, { onScanAgain(), onSetup(), onProbeLane() }) */
+/** wireBanners(doc, { onScanAgain(), onSetup(), onProbeLane(), onVisionNotice(allowVision) }) */
 export function wireBanners(doc, deps) {
   const d = deps || {};
   const again = doc.getElementById('ei-scan-again');
@@ -185,6 +187,16 @@ export function wireBanners(doc, deps) {
   }
   const setup = doc.getElementById('ei-id-setup');
   if (setup && d.onSetup) setup.addEventListener('click', () => d.onSetup());
+  // F-28 vision notice: OK keeps image reading, "Turn off image reading" sets maxVision 0. One click, then disabled.
+  for (const [id, allow] of [['ei-vision-ok', true], ['ei-vision-off', false]]) {
+    const b = doc.getElementById(id);
+    if (!b || !d.onVisionNotice) continue;
+    b.addEventListener('click', async () => {
+      const ok = doc.getElementById('ei-vision-ok'); const off = doc.getElementById('ei-vision-off');
+      if (ok) ok.disabled = true; if (off) off.disabled = true;
+      try { await d.onVisionNotice(allow); } finally { if (ok) ok.disabled = false; if (off) off.disabled = false; }
+    });
+  }
 }
 
 /** Field-level error map from a set-config BAD_ARG result. */
@@ -196,6 +208,35 @@ export function errorsFromResult(r) {
     : field === 'me.fasName' ? 'Enter the FAS name as text.'
     : 'These settings could not be saved.';
   return { [field]: msg };
+}
+
+// ── Attachments (Phase F; design 7.2, 7.5; R6.3, F-28). Pure HTML builders; the overlay wires them. ──
+export const VISION_NOTICE = 'Image and scanned-PDF attachments are read with the app\'s vision reader (an external AI service). Text attachments are read locally.';
+const ATT_LABELS = Object.freeze({
+  content: 'Analyzed', 'content-partial': 'Analyzed (truncated)', 'filename-only': 'Filename only, content not read',
+  'pending-reextract': 'Filename only for now, content will be read again', unreadable: 'Filename only, content not read', skipped: 'Filename only, content not read (skipped)',
+});
+
+/** attachmentLabel(status) -> fixed label text: "Analyzed" only for extracted content; everything else says "Filename only". */
+export function attachmentLabel(status) {
+  return ATT_LABELS[status] || ATT_LABELS['filename-only'];
+}
+
+/** Label chip next to an attachment name in the overlay (legacy record fields analysisStatus / analysisReason). */
+export function renderAttachmentStatusHtml(a) {
+  const st = a && a.analysisStatus;
+  const analyzed = st === 'content' || st === 'content-partial';
+  const why = !analyzed && a && a.analysisReason ? ': ' + esc(a.analysisReason) : '';
+  return ' <span class="ei-att-status' + (analyzed ? ' ei-att-status--ok' : '') + '">' + esc(attachmentLabel(st)) + why + '</span>';
+}
+
+/** One-time vision notice (F-28): shown while attachments are on and the notice is not acknowledged. */
+export function renderVisionNoticeHtml(status) {
+  const a = status && status.attachments;
+  if (!a || a.visionNoticePending !== true) return '';
+  return '<div class="ei-banner ei-banner--vision" role="region" aria-label="Attachment reading notice"><span>' + esc(VISION_NOTICE) + '</span> ' +
+    '<button type="button" class="et-mini" id="ei-vision-ok">OK</button> ' +
+    '<button type="button" class="et-mini" id="ei-vision-off">Turn off image reading</button></div>';
 }
 
 // ── Thread-aware replies (threadReplies; design 6.2-6.7). Pure HTML builders; the overlay wires them. ──
@@ -291,6 +332,9 @@ export const PANEL_CSS = `
   #email-triage .ei-banner--partial { color:#e3b341; background:rgba(210,153,34,.08); border:1px solid rgba(210,153,34,.3); }
   #email-triage .ei-banner--identity { color:#79c0ff; background:rgba(56,139,253,.08); border:1px solid rgba(56,139,253,.3); }
   #email-triage .ei-banner--lane { color:#e3b341; background:rgba(210,153,34,.08); border:1px solid rgba(210,153,34,.3); }
+  #email-triage .ei-banner--vision { color:#79c0ff; background:rgba(56,139,253,.08); border:1px solid rgba(56,139,253,.3); }
+  #email-triage .ei-att-status { font-size:10px; color:#8b949e; margin-left:4px; }
+  #email-triage .ei-att-status--ok { color:#3fb950; }
   #email-triage .ei-gear { background:#30363d; padding:7px 10px; }
   #email-triage .ei-mech { font-size:11px; color:#8b949e; margin-bottom:6px; }
   #email-triage .ei-rcpt { font-size:11px; color:#c9d1d9; margin:4px 0 8px; display:flex; flex-direction:column; gap:3px; }

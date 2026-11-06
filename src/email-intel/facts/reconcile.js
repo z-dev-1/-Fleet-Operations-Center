@@ -13,7 +13,8 @@
  *   1 out-of-scope   2 scope-unknown   3 partial-content / unprocessed-window   4 uncertain-assertion
  *   5 duplicate (ambiguous-item / ambiguous-order stage here)   6 stale-vs-ledger (evidence only)
  *   7 conflict-canonical / conflict-ready / freshness-unprovable / duplicate-of-canonical
- *   8 spend-related (F-06)   9 roster-mismatch   10 low-confidence / invalid-confidence
+ *   4b attachment-conflict (Phase F)
+ *   8 spend-related (F-06; Phase F: any amount / approval fact whose evidence is an attachment)   9 roster-mismatch   10 low-confidence / invalid-confidence
  *   11 timeline-disabled: !flags.timelineWrites OR cfg.autoApplyUnitUpdates === false (F2-01)   12 apply
  *
  * Nothing here writes; the caller stages, records evidence or commits through timeline-writer.js.
@@ -114,6 +115,8 @@ function evaluateFact(fact, ctx) {
     const why = f.assertion !== 'stated' ? 'the email does not state it as fact (' + f.assertion + ')' : (f.dateInvalid ? 'the date could not be verified' : 'the amount was not found in the text');
     return stage('uncertain-assertion', why, contradicts ? { contradicts } : null);
   }
+  // 4b attachment conflict (design 7.7): the attachment's amount disagrees with the email's.
+  if (f.attachmentConflict === true) return stage('attachment-conflict', 'the attachment disagrees with the email');
 
   // 5 duplicate / ambiguous item / ambiguous order (R3.6, F-07)
   const cls = fk.classify(f, c.unit, entries);
@@ -161,6 +164,10 @@ function evaluateFact(fact, ctx) {
   }
 
   // 8 spend-related (F-06): approvals, authorizations and estimates are never auto-applied.
+  // Phase F (D9): amounts and approval facts read from an attachment are staged for confirmation too.
+  if (/^attachment:/.test(String(f.evidenceSource || '')) && (f.amount || f.kind === 'approval_status')) {
+    return stage('spend-related', 'amounts and approvals read from an attachment need your review', { verifiedBy });
+  }
   if ((f.kind === 'approval_status' && (f.state === 'approved' || f.state === 'authorized')) || f.state === 'estimate_received') {
     return stage('spend-related', 'approvals and estimates need your review', { verifiedBy });
   }

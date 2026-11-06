@@ -105,6 +105,42 @@ describe('design 3.6 rows', () => {
       expect(f).toMatchObject({ amount: null, amountUnverified: true });
     }
   });
+  it('R6.4 amount must appear in the body or an analyzed attachment excerpt; an invented amount never survives in the value', () => {
+    const EST = 'Repair estimate unit 40123: labor 4h, turbo $2,960.00, total $4,200.00. Approved by the shop manager.';
+    const est = (f, atts) => validateAnalysis(base({ units: [{ unit: '40123', facts: [fact(f)] }] }), ctx({ attachments: atts }));
+    const evA = 'turbo $2,960.00, total $4,200.00';
+    // without extracted text the attachment amount is unverified (dropped) and a value carrying it is dropped
+    const none = est({ kind: 'approval_status', state: 'estimate_received', value: 'Estimate $4,200 for 40123', amount: { value: 4200, currency: 'USD' }, evidence: 'parts arrived for unit 40123' });
+    expect(facts(none)).toEqual([]);
+    expect(none.counts.dropped.amount).toBe(1);
+    const keep = facts(est({ kind: 'approval_status', state: 'estimate_received', value: 'Estimate received', amount: { value: 4200, currency: 'USD' }, evidence: 'parts arrived for unit 40123' }));
+    expect(keep[0]).toMatchObject({ amount: null, amountUnverified: true });
+    // an analyzed excerpt (content) makes the amount verifiable and the quote's source is recorded
+    const ok = facts(est({ kind: 'approval_status', state: 'estimate_received', value: 'Estimate $4,200', amount: { value: 4200, currency: 'USD' }, evidence: evA, evidenceSource: 'attachment:0' }, [{ index: 0, status: 'content', text: EST }]));
+    expect(ok[0]).toMatchObject({ amount: { value: 4200, currency: 'USD' }, amountUnverified: false, evidenceSource: 'attachment:0', unitAttribution: 'strong' });
+    // the source is found even when the model does not name it; a quote in no text is dropped
+    expect(facts(est({ value: 'Turbo priced', evidence: evA }, [{ index: 2, status: 'content-partial', text: EST }]))[0].evidenceSource).toBe('attachment:2');
+    expect(facts(est({ value: 'Parts arrived' }, [{ index: 0, status: 'content', text: EST }]))[0].evidenceSource).toBe('body');
+    expect(facts(est({ value: 'x quote', evidence: 'nowhere in any text at all' }, [{ index: 0, status: 'content', text: EST }]))).toEqual([]);
+    // unreadable / filename-only attachments are not text: same as no attachment
+    expect(facts(est({ value: 'Turbo priced', evidence: evA, evidenceSource: 'attachment:0' }, [{ index: 0, status: 'unreadable', text: EST }]))).toEqual([]);
+    // a filename is never evidence
+    expect(facts(est({ value: 'Estimate', evidence: 'Estimate_40123.pdf', evidenceSource: 'attachment:0' }, [{ index: 0, status: 'content', text: EST }]))).toEqual([]);
+  });
+
+  it('attachment amount that disagrees with the email amount is flagged attachmentConflict', () => {
+    const EST = 'Estimate for unit 40123 total $2,100.00 parts and labor';
+    const r = validateAnalysis(base({ units: [{ unit: '40123', facts: [
+      fact({ kind: 'approval_status', item: 'estimate', state: 'estimate_received', value: 'Estimate 1840', amount: { value: 1840, currency: 'USD' }, evidence: 'The estimate is $1,840.00 for 40123', evidenceSource: 'body' }),
+      fact({ kind: 'approval_status', item: 'estimate', state: 'estimate_received', value: 'Estimate 2100', amount: { value: 2100, currency: 'USD' }, evidence: 'total $2,100.00 parts and labor', evidenceSource: 'attachment:0' }),
+    ] }] }), ctx({ attachments: [{ index: 0, status: 'content', text: EST }] }));
+    const fs2 = facts(r);
+    expect(fs2.map((f) => [f.evidenceSource, !!f.attachmentConflict])).toEqual([['body', false], ['attachment:0', true]]);
+    expect(r.counts.attachmentConflicts).toBe(1);
+    // without attachments the counts shape is unchanged
+    expect(oneFact({}).counts.attachmentConflicts).toBeUndefined();
+  });
+
   it('evidence 8..200 chars and a normalized substring of the text, else the fact is dropped', () => {
     expect(facts(oneFact({ evidence: 'PARTS   arrived for UNIT 40123' }))).toHaveLength(1);
     for (const ev of ['short', 'parts arrived for unit 40999 yesterday', 'x'.repeat(201), null]) {

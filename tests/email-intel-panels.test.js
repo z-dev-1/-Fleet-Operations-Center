@@ -129,6 +129,92 @@ describe('Phase B lane banner (isolated-lane-unavailable, F-16)', () => {
     P.wireBanners(domFor([]).doc, {});                       // no button, no deps: nothing throws
   });
 });
+describe('Phase F attachment labels and vision notice (FEAT-007)', () => {
+  const st = (o) => Object.assign({ ok: true, enabled: true, identity: { set: true }, warnings: [], scan: { last: null }, owaAuth: { state: 'ok' }, lane: { state: 'ok' } }, o);
+
+  it('R6.3 label rendering: "Analyzed" only for extracted content, everything else says "Filename only"', () => {
+    expect(P.renderAttachmentStatusHtml({ name: 'a.pdf', analysisStatus: 'content' })).toBe(' <span class="ei-att-status ei-att-status--ok">Analyzed</span>');
+    expect(P.renderAttachmentStatusHtml({ analysisStatus: 'content-partial' })).toContain('Analyzed (truncated)');
+    for (const s of ['filename-only', 'unreadable', 'skipped', 'pending-reextract', undefined, 'junk']) {
+      const h = P.renderAttachmentStatusHtml({ analysisStatus: s, analysisReason: 'scanned PDF — no text layer; image reading unavailable' });
+      expect(h, String(s)).toContain('Filename only');
+      expect(h, String(s)).not.toContain('Analyzed');
+    }
+    // the reason is fixed text but still escaped
+    expect(P.renderAttachmentStatusHtml({ analysisStatus: 'unreadable', analysisReason: '<b>x</b>' })).toContain('&lt;b&gt;x&lt;/b&gt;');
+    expect(P.attachmentLabel('content')).toBe('Analyzed');
+    expect(P.attachmentLabel('unreadable')).toBe('Filename only, content not read');
+  });
+
+  it('R6.3 overlay card shows the label only for records the attachments path built (flag OFF markup unchanged)', async () => {
+    const O = await import('../renderer/src/js/components/email-triage-overlay.js');
+    const base = { id: 'em_1', from: 'a', fromName: 'A', subject: 'S', importance: 'normal', unitRefs: [], replyState: 'none' };
+    const legacy = O.__test__._cardHtml(Object.assign({}, base, { attachments: [{ name: 'Estimate_40123.pdf', ext: 'pdf', type: 'document' }] }));
+    expect(legacy).not.toContain('ei-att-status');
+    expect(legacy).toContain('📄 Estimate_40123.pdf</span>');
+    const intel = O.__test__._cardHtml(Object.assign({}, base, { attachments: [{ name: 'Estimate_40123.pdf', ext: 'pdf', type: 'document', analysisStatus: 'unreadable', analysisReason: 'scanned PDF' }, { name: 'Parts.xlsx', ext: 'xlsx', type: 'document', analysisStatus: 'content' }] }));
+    expect(intel).toContain('Estimate_40123.pdf <span class="ei-att-status">Filename only, content not read: scanned PDF</span>');
+    expect(intel).toContain('Parts.xlsx <span class="ei-att-status ei-att-status--ok">Analyzed</span>');
+  });
+
+  it('F-28 vision notice renders with turn-off option', async () => {
+    expect(P.renderBannersHtml(st({}))).not.toContain('ei-banner--vision');
+    expect(P.renderBannersHtml(st({ attachments: { visionNoticePending: false } }))).not.toContain('ei-banner--vision');
+    const html = P.renderBannersHtml(st({ attachments: { visionNoticePending: true } }));
+    expect(html).toContain(P.esc(P.VISION_NOTICE));
+    expect(P.VISION_NOTICE).toBe("Image and scanned-PDF attachments are read with the app's vision reader (an external AI service). Text attachments are read locally.");
+    expect(html).toContain('<button type="button" class="et-mini" id="ei-vision-ok">OK</button>');
+    expect(html).toContain('<button type="button" class="et-mini" id="ei-vision-off">Turn off image reading</button>');
+    expect(P.renderBannersHtml(st({ enabled: false, attachments: { visionNoticePending: true } }))).toBe('');
+    // wiring: each button sends its choice once; both are disabled while the call runs
+    const { doc, el } = domFor(['ei-vision-ok', 'ei-vision-off']);
+    const seen = [];
+    P.wireBanners(doc, { onVisionNotice: async (allow) => { seen.push(allow); expect(el['ei-vision-ok'].disabled && el['ei-vision-off'].disabled).toBe(true); } });
+    el['ei-vision-off'].click();
+    await tick();
+    el['ei-vision-ok'].click();
+    await tick();
+    expect(seen).toEqual([false, true]);
+    expect(el['ei-vision-ok'].disabled).toBe(false);
+  });
+
+  it('F-28 ack-vision-notice IPC: gate, payload check, sets acknowledged and maxVision (0 for turn off)', async () => {
+    const fs = require('fs'); const os = require('os'); const path = require('path');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ei-vis-'));
+    require('../src/config/paths').setDataDir(tmp);
+    const flags = require('../src/email-intel/flags');
+    const stores = require('../src/email-intel/stores');
+    const electronPath = require.resolve('electron');
+    const saved = require.cache[electronPath];
+    const handlers = {};
+    require.cache[electronPath] = { id: electronPath, filename: electronPath, loaded: true, exports: { ipcMain: { handle: (ch, fn) => { handlers[ch] = fn; } }, BrowserWindow: { getAllWindows: () => [] } } };
+    const ipcPath = require.resolve('../src/ipc/email-intel');
+    delete require.cache[ipcPath];
+    try {
+      require('../src/ipc/email-intel').registerEmailIntelIPC({});
+      const call = (p) => handlers['emailIntel:ack-vision-notice']({}, p);
+      flags._setForTests({ enabled: true, capture: true, multiRecipient: true });
+      expect(await call({ allowVision: true })).toEqual({ ok: true, enabled: false });          // attachments not effective
+      flags._setForTests({ enabled: true, capture: true, multiRecipient: true, attachments: true });
+      const idx = require('../src/email-intel/index');
+      expect(idx.getStatus().attachments).toMatchObject({ visionNoticePending: true, maxVision: 2 });
+      for (const bad of [undefined, null, {}, { allowVision: 'yes' }, [true]]) expect(await call(bad)).toMatchObject({ ok: false, code: 'BAD_ARG', field: 'allowVision' });
+      expect(await call({ allowVision: false })).toEqual({ ok: true, visionNoticeAcknowledged: true, maxVision: 0 });
+      expect(stores.load('config').attachments).toMatchObject({ visionNoticeAcknowledged: true, maxVision: 0 });
+      expect(idx.getStatus().attachments.visionNoticePending).toBe(false);
+      expect(await call({ allowVision: true })).toEqual({ ok: true, visionNoticeAcknowledged: true, maxVision: 2 });
+      // set-config can never acknowledge the notice
+      const cfgMod = require('../src/email-intel/config');
+      expect(cfgMod.validate({ attachments: { visionNoticeAcknowledged: true } }, cfgMod.defaults()).config.attachments.visionNoticeAcknowledged).toBe(false);
+    } finally {
+      flags._setForTests(null);
+      if (saved) require.cache[electronPath] = saved; else delete require.cache[electronPath];
+      delete require.cache[ipcPath];
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) { /* tmp */ }
+    }
+  });
+});
+
 describe('NFR-11 accessibility basics', () => {
   it('NFR-11 buttons, aria-live, text labels', () => {
     const html = P.renderIdentityHtml({ me: {}, suggestions: { alias: 'x' } }) + P.renderBannersHtml({ enabled: true, identity: { set: false }, warnings: ['identity-not-set'], owaAuth: { state: 'blocked' }, scan: { last: { outcome: 'auth-blocked', folders: [] } } });

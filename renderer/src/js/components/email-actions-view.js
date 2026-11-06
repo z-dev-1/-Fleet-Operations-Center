@@ -36,7 +36,8 @@ export function renderAttachmentLabel(att) {
   const st = a.analysis && a.analysis.status;
   const analyzed = st === 'content' || st === 'content-partial';
   const label = analyzed ? (st === 'content-partial' ? 'Attachment partly analyzed' : 'Attachment analyzed') : 'Filename only';
-  return '<span class="ei-att"><span class="ei-att-name">' + esc(a.name || 'attachment') + '</span> <span class="ei-flag">' + label + '</span></span>';
+  const why = !analyzed && a.analysis && a.analysis.reasonText ? ' <span class="ei-att-why">(' + esc(a.analysis.reasonText) + ')</span>' : '';
+  return '<span class="ei-att"><span class="ei-att-name">' + esc(a.name || 'attachment') + '</span> <span class="ei-flag">' + label + '</span>' + why + '</span>';
 }
 
 function _sortItems(list) {

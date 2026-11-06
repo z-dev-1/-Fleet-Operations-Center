@@ -48,7 +48,21 @@ function _base(category, view, rec, ref, extra) {
     reasonCode: category, reasonText: '', actionText: '', evidenceQuote: undefined, due: undefined,
     chips: { partial: false, injection: false, staged: false, notThreaded: false, probablyAnswered: false, analysisFailed: false },
     recipientsKnown: !!(latest && latest.recipientsKnown),
-  }, extra || {});
+  }, _attachments(rec || latest), extra || {});
+}
+
+/** Phase F (R6.3): per-attachment label data for the view (name + status + fixed reason text; never content). */
+function _attachments(rec) {
+  const list = ((rec && rec.attachments) || []).filter((a) => a && !a.placeholder && a.name).slice(0, 10);
+  if (!list.length) return {};
+  return {
+    attachments: list.map((a) => {
+      const an = a.analysis || {};
+      const x = { name: String(a.name).slice(0, 120), analysis: { status: typeof an.status === 'string' ? an.status : 'filename-only' } };
+      if (an.reasonText) x.analysis.reasonText = String(an.reasonText).slice(0, 80);
+      return x;
+    }),
+  };
 }
 
 function _chips(item, rec) {
