@@ -10155,17 +10155,12 @@ textarea.rca-input { resize: vertical; line-height: 1.4; }
 .ldsp-control__input { min-width: 320px; }
 .ldsp-error { color: var(--red); }
 .ldsp-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-#an-ld-computed-wrap.ldsp-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 45%); column-gap: 10px; }
-#an-ld-computed-wrap.ldsp-split > .ldsp, #an-ld-computed-wrap.ldsp-split > #an-ld-toolbar-wrap { grid-column: 1 / -1; }
-/* overflow-x: the wide table scrolls inside its column instead of painting over the sheet pane */
-#an-ld-computed-wrap.ldsp-split > #an-ld-table-wrap { grid-column: 1; min-width: 0; overflow-x: auto; }
-.ldsp-pane { grid-column: 2; grid-row: 3 / span 10; display: flex; flex-direction: column; border: 1px solid var(--bdr); min-height: 480px; }
+/* Sheet open: the pane always sits BELOW the table. The table gets its own
+   scroll area (second scrollbar) so the sheet is never far down the page. */
+#an-ld-computed-wrap.ldsp-split { display: grid; grid-template-columns: minmax(0, 1fr); }
+#an-ld-computed-wrap.ldsp-split > #an-ld-table-wrap { min-width: 0; overflow: auto; max-height: 55vh; }
+.ldsp-pane { display: flex; flex-direction: column; border: 1px solid var(--bdr); min-height: 480px; margin-top: 10px; scroll-margin-top: 10px; }
 .ldsp-pane[hidden] { display: none; }
-/* Narrow (non-maximized) window: stack the sheet pane below the table instead of beside it */
-@media (max-width: 1380px) {
-  #an-ld-computed-wrap.ldsp-split { grid-template-columns: minmax(0, 1fr); }
-  #an-ld-computed-wrap.ldsp-split > .ldsp-pane { grid-column: 1; grid-row: auto; margin-top: 10px; }
-}
 .ldsp-pane__head { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--bdr); }
 .ldsp-pane__title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ldsp-pane__body { flex: 1; display: flex; }

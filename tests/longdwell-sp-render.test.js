@@ -342,6 +342,15 @@ describe('control HTML', () => {
     for (const a of ['open-pane', 'pop-out', 'preview', 'change-link']) expect(h).toContain('data-ldsp-action="' + a + '"');
     expect(h).not.toContain('type="url"');
   });
+  it('pane open: Open sheet becomes Go to sheet, and back when closed', () => {
+    const open = L.reduce(L.initialState(STATUS), { type: 'pane', open: true });
+    const h = L.renderControlHtml(open);
+    expect(h).toContain('data-ldsp-action="goto-pane"');
+    expect(h).not.toContain('data-ldsp-action="open-pane"');
+    const closed = L.renderControlHtml(L.reduce(open, { type: 'pane', open: false }));
+    expect(closed).toContain('data-ldsp-action="open-pane"');
+    expect(closed).not.toContain('data-ldsp-action="goto-pane"');
+  });
   it('week rollover (status without link) shows the paste prompt again', () => {
     const s = L.reduce(L.initialState(STATUS), { type: 'status', status: { ...STATUS, weekKey: '2026-W46', weekLabel: 'Week 46, 2026', link: null } });
     const h = L.renderControlHtml(s);

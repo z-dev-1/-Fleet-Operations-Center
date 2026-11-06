@@ -191,6 +191,7 @@ export function reduce(state, action) {
     case 'prompt-show': return { ...s, prompting: true, promptShown: true };
     case 'prompt-hide': return { ...s, prompting: false };
     case 'link-edit': return { ...s, linkEditing: a.on === true, error: null };
+    case 'pane': return { ...s, paneOpen: a.open === true };
     case 'discard': return { ...s, preview: null, ticks: {}, edits: {}, report: null, confirmArmed: false };
     default: return state;
   }
@@ -251,7 +252,7 @@ export function renderControlHtml(state) {
   } else {
     const name = link.fileName || _hostOf(link.url) || 'sheet';
     h += '<span class="ldsp-control__file">' + esc(name) + '</span> ';
-    h += _btn('open-pane', 'Open sheet') + ' ' + _btn('pop-out', 'Pop out') + ' ' + _btn('preview', 'Preview', state.busy ? ' disabled' : '') + ' ' + _btn('change-link', 'Change link');
+    h += (state.paneOpen ? _btn('goto-pane', '\u2193 Go to sheet') : _btn('open-pane', 'Open sheet')) + ' ' + _btn('pop-out', 'Pop out') + ' ' + _btn('preview', 'Preview', state.busy ? ' disabled' : '') + ' ' + _btn('change-link', 'Change link');
   }
   if (state.error) h += ' <span class="ldsp-error" role="alert">' + esc(friendlyText(state.error)) + '</span>';
   h += '<div class="ldsp-live" aria-live="polite">' + esc(state.live || '') + '</div>';

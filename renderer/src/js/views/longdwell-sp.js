@@ -70,6 +70,12 @@ function _activate(api, wrap, opts, status) {
     pane.innerHTML = '';
     pane.hidden = true;
     if (wrap.classList) wrap.classList.remove('ldsp-split');
+    if (ctx.st.paneOpen) { set({ type: 'pane', open: false }); render(); }
+  }
+
+  // The pane sits below the table; bring it into view.
+  function gotoPane() {
+    try { if (typeof pane.scrollIntoView === 'function') pane.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { /* ignore */ }
   }
 
   function fallback(url) {
@@ -107,6 +113,8 @@ function _activate(api, wrap, opts, status) {
     (body || pane).appendChild(wv);
     ctx.webview = wv;
     ctx.paneTimer = setTimeout(() => fallback(url), L.PANE_TIMEOUT_MS);
+    set({ type: 'pane', open: true }); render();
+    gotoPane();
   }
 
   // ── Link ───────────────────────────────────────────────────────────────
@@ -189,6 +197,7 @@ function _activate(api, wrap, opts, status) {
       case 'change-link': set({ type: 'link-edit', on: true }); render(); break;
       case 'cancel-link': set({ type: 'link-edit', on: false }); render(); break;
       case 'open-pane': openPane(); break;
+      case 'goto-pane': gotoPane(); break;
       case 'pop-out': { const l = link(); if (l) _openExternal(l.url); break; }
       case 'preview': runPreview(); break;
       case 'use-tab': {
