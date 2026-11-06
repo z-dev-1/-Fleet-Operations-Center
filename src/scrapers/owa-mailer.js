@@ -948,4 +948,6 @@ module.exports = {
   genCorrelationMarker, embedMarker, classifyOutcome,
   COMPOSE_URL, OWA_ORIGIN, AUTH_HOST_RE, MAILBOX_RE, OUTLOOK_HOST_RE, EDITOR_SELECTOR, SEND_SELECTOR,
   _newResult, _buildInsertScript, _buildSendClickScript, _buildSentItemsCheckScript,
+  // Email Triage Intelligence thread replies (additive exports of existing internals, no behavior change).
+  _verifySentItems, _waitFor, _buildSendButtonProbeScript,
 };

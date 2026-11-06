@@ -153,8 +153,9 @@ describe('F-10 owa_reader.js is never edited', () => {
 
 describe('R7.5 no send / delete / approve outside confirm executors', () => {
   // Calls that mutate the mailbox, post a message, or write the timeline on a user's behalf.
-  const CONSEQUENTIAL_CALLS = /\b(sendReply|sendViaOwa|deleteMessage|sendReadyDm|sendSlackMessage|postMessage)\s*\(/;
-  const EXECUTOR_FILE = /^src\/email-intel\/(.*\/)?(executors?\.js|[^/]*-executor\.js|reply\/(send|owa-reply)[^/]*\.js)$/;
+  const CONSEQUENTIAL_CALLS = /\b(sendReply|sendViaOwa|sendThreadReply|deleteMessage|sendReadyDm|sendSlackMessage|postMessage)\s*\(/;
+  // owa_reply.js defines sendThreadReply (the Send click); executors.js is its only caller (after token + native dialog).
+  const EXECUTOR_FILE = /^src\/email-intel\/(.*\/)?(executors?\.js|[^/]*-executor\.js|reply\/owa[-_]reply\.js)$/;
   it('only executor files (registered through confirm.registerExecutor) may call them', () => {
     for (const f of OWN_FILES) {
       if (EXECUTOR_FILE.test(rel(f))) continue;
@@ -172,11 +173,19 @@ describe('F-11 reply compose guard', () => {
   it('the select-all insert path (_insertBody / _buildInsertScript) is never used by the module', () => {
     for (const f of OWN_FILES) expect(stripComments(read(f)), rel(f)).not.toMatch(/_insertBody|_buildInsertScript/);
   });
-  it('placeholder: reply/** has no file yet (FEAT-006 replaces this with the prepend-script guard)', () => {
-    const replyDir = path.join(ROOT, 'src/email-intel/reply');
-    const files = walk(replyDir);
-    for (const f of files) expect(read(f)).not.toMatch(/selectAll|execCommand\(\s*['"]selectAll/);
-    expect(Array.isArray(files)).toBe(true);
+  it('F-11 select-all insert path is never used on reply', () => {
+    const files = walk(path.join(ROOT, 'src/email-intel/reply'));
+    expect(files.map((f) => path.basename(f)).sort()).toEqual(['context.js', 'draft.js', 'owa_reply.js', 'page-scripts.js', 'recipients.js', 'reconcile-send.js', 'risk.js', 'send-guard.js']);
+    for (const f of files) {
+      const src = read(f);                                                     // raw text: not even a comment may name them
+      expect(src, rel(f)).not.toMatch(/_insertBody|_buildInsertScript/);
+      expect(src, rel(f)).not.toMatch(/selectNodeContents|selectAll|clipboard|\.paste\(|innerHTML\s*=(?!=)/);
+      expect(src, rel(f)).not.toMatch(/sendViaOwa\(/);                         // the threaded path never opens a new compose
+    }
+    // the reply page scripts are built from the prepend script only, and the mailer exports used are the additive ones
+    const mailer = require('../src/scrapers/owa-mailer');
+    for (const k of ['_verifySentItems', '_waitFor', '_buildSendButtonProbeScript']) expect(typeof mailer[k]).toBe('function');
+    expect(mailer._insertBody).toBeUndefined();
   });
 });
 
