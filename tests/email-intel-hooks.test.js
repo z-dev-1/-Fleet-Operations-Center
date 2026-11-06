@@ -181,7 +181,7 @@ describe('IPC and preload skeleton', () => {
     it('capture effective: status answers, gated-by-phase channels report NOT_IMPLEMENTED, others stay inert', async () => {
       flags._setForTests({ enabled: true, capture: true });
       expect(await call('emailIntel:status')).toMatchObject({ ok: true, enabled: true, flags: flags.get().effective });   // Phase A: the real status document
-      expect((await call('emailIntel:probe-lane')).code).toBe('NOT_IMPLEMENTED');                                     // owned by Phase B
+      expect(await call('emailIntel:probe-lane')).toMatchObject({ ok: false, lane: { state: 'unavailable' } });         // Phase B: real, stub relay has no isolated lane
       expect((await call('emailIntel:get-config')).ok).toBe(true);                                                     // Phase A
       expect(await call('emailIntel:get-actions')).toEqual({ ok: true, enabled: false });       // actionsView not effective
       expect(await call('emailIntel:draft-thread-reply')).toEqual({ ok: true, enabled: false }); // threadReplies not effective

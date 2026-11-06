@@ -5,7 +5,8 @@
  *
  * EVERY channel is registered, and each one returns { ok:true, enabled:false } and does nothing
  * while its gate is off (the auth-status:get precedent). Phase A (`capture`) fills in: status, scan,
- * get-config, set-config, dom-probe, set-tz-verified and the send-ready-dm prepare/confirm executor.
+ * get-config, set-config, dom-probe, set-tz-verified and the send-ready-dm prepare/confirm executor;
+ * Phase B adds probe-lane (manual P-LANE probe of the isolated lane, no email content).
  * Channels owned by later phases return { ok:false, code:'NOT_IMPLEMENTED' } when their gate is open.
  * The legacy emailTriage:* channels are untouched here.
  *
@@ -62,7 +63,7 @@ const KIND_GATES = Object.freeze({
 // Channels implemented by this build; everything else with an open gate is NOT_IMPLEMENTED.
 const IMPLEMENTED = new Set([
   'emailIntel:status', 'emailIntel:scan', 'emailIntel:get-config', 'emailIntel:set-config', 'emailIntel:dom-probe',
-  'emailIntel:set-tz-verified', 'emailIntel:prepare-action', 'emailIntel:confirm-action',
+  'emailIntel:set-tz-verified', 'emailIntel:prepare-action', 'emailIntel:confirm-action', 'emailIntel:probe-lane',
 ]);
 
 const OFF = () => ({ ok: true, enabled: false });
@@ -184,6 +185,17 @@ function registerEmailIntelIPC(_ctx) {
     if (!u.ok) return { ok: false, code: u.code || 'STORE_ERROR' };
     _notifyUpdated({ kind: 'config' });
     return { ok: true, mailboxTzVerified: true };
+  });
+
+  // P-LANE (F-16): one tiny isolated-lane call with no email content, manual only; updates the lane state.
+  handle('emailIntel:probe-lane', async () => {
+    if (!gateOpen('capture')) return OFF();
+    const lane = require('../email-intel/understand/lane');
+    let r;
+    try { r = await lane.probeLane(); } catch (e) { logger.warn('probe-lane failed ' + safeErr(e)); r = { ok: false, error: 'probe-failed' }; }
+    const s = lane.state();
+    _notifyUpdated({ kind: 'status' });
+    return { ok: !!r.ok, lane: { state: s.state, checkedAt: s.checkedAt }, error: r.ok ? undefined : (r.error || 'unavailable') };
   });
 
   handle('emailIntel:prepare-action', (_e, kind, payload) => {

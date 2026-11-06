@@ -155,7 +155,14 @@ async function analyzeMessage(rec, ctx) {
   const det = deterministicAnalysis(rec, scan);
   const cctx = Object.assign({}, c, { now });
   const conv = Array.isArray(c.conv) ? c.conv : [rec];
-  const fin = (status, extra) => _base(rec, prev, Object.assign({ status, analyzedAt: new Date(now).toISOString(), deterministic: det }, extra || {}));
+  // Units that occur only past the stored body cap (the text was not kept): always reported, never lost.
+  const beyond = [];
+  for (const k of (rec.body && rec.body.unitsBeyondCap) || []) {
+    const dd = c.index.detail(k);
+    if (dd.scope === 'in' || dd.scope === 'unknown') beyond.push({ unit: dd.unit, scope: dd.scope, reason: 'unprocessed-window' });
+  }
+  if (beyond.length) det.beyondCap = beyond.map((u) => ({ unit: u.unit, scope: u.scope }));
+  const fin = (status, extra) => _base(rec, prev, Object.assign({ status, analyzedAt: new Date(now).toISOString(), deterministic: det, unprocessedUnits: beyond.slice() }, extra || {}));
 
   // F-26: blocks older than the lookback horizon are thread context only; unknown time only for the latest block.
   const t = Date.parse(rec.receivedAt || '');
@@ -234,7 +241,9 @@ async function analyzeMessage(rec, ctx) {
   const unprocessedUnits = scan.body.filter((u) => (u.scope === 'in' || u.scope === 'unknown') && u.offsets.length
     && u.offsets.every((o) => !wins.windows.some((w) => okSet.has(w.index) && o >= w.start && o < w.end)))
     .map((u) => ({ unit: u.id, scope: u.scope, reason: 'unprocessed-window' }));
-  const coverage = Object.assign({}, wins.coverage, { windowsAnalyzed: ok.length, windowsFailed: failedWindows.size });
+  for (const b of beyond) if (!unprocessedUnits.some((u) => u.unit === b.unit)) unprocessedUnits.push(b);
+  const fullChars = Math.max(wins.coverage.charsTotal, Number(rec.body && rec.body.newChars) || 0);
+  const coverage = Object.assign({}, wins.coverage, { charsTotal: fullChars, storedTruncated: fullChars > wins.coverage.charsTotal, windowsAnalyzed: ok.length, windowsFailed: failedWindows.size });
 
   if (!processed) {
     // Every call was dropped by the queue (budget, deadline, abort, degraded lane): stays pending.

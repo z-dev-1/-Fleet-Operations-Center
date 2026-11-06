@@ -15,6 +15,11 @@
  * which carries until the send attempt is reconciled. One Phase A safety post-filter applies: a
  * unitRef is never `ready` while the canonical status says the unit is in repair, awaiting parts /
  * approval / vendor, or down (R3.5). readyDmSuggested === false forces unitRefs[].ready false (F2-01).
+ *
+ * Phase B (`multiRecipient`): buildPhaseBResults / phaseBRecord derive every legacy field by code from
+ * the v2 analysis of the latest message (design 2.9 table). `ready` is true only when a ready claim is
+ * verified by canonical state (status ready_for_pickup) and readyDmSuggested is not false (F2-01).
+ * Legacy importance vocabulary is kept ('high' | 'normal' | 'low'; the design's "medium" is 'normal').
  */
 const C = require('../constants');
 
@@ -138,6 +143,142 @@ function buildResults(input) {
   return out;
 }
 
+// ── Phase B derivation (multiRecipient effective): every legacy field from the v2 analysis, by code ──
+// Templates only; the only model-derived strings are validated fact values (evidence-checked, length-capped,
+// secret-screened). Legacy triageEmails / _buildDecision are never called on this path, so the legacy
+// 0.7 / 0.4 confidence fallback is unreachable (confidence is overallConfidence when valid, else 0).
+
+const OWNER_MAP = { me: 'me', vendor: 'vendor', 'other-person': 'internal_team', 'other-team': 'internal_team', shared: 'internal_team' };
+const PENDING_TEXT = { pending: "Couldn't analyze yet", 'pending-reextract': "Couldn't analyze yet", 'ai-unavailable': "Couldn't analyze yet (AI unavailable)", invalid: "Couldn't analyze yet", 'failed-permanent': "Couldn't analyze" };
+
+function _label(kind) {
+  try { return require('../understand/schema').FACT_LABELS[kind] || 'Update'; } catch (_) { return 'Update'; }
+}
+
+/** In-scope facts of the latest message, best first (effective confidence, then validated confidence). */
+function _topFacts(res) {
+  const out = [];
+  for (const u of (res && res.units) || []) {
+    if (u.scope !== 'in') continue;
+    for (const f of u.facts || []) out.push({ unit: u.unit, f });
+  }
+  return out.sort((a, b) => ((b.f.effectiveConfidence || 0) - (a.f.effectiveConfidence || 0)) || ((b.f.confidence || 0) - (a.f.confidence || 0)));
+}
+
+function _readyClaim(facts, unit) {
+  let phases = ['ready_for_pickup'];
+  try { phases = require('../facts/phase-order').READY_PHASES; } catch (_) { /* default */ }
+  return facts.some((x) => x.unit === unit && ((x.f.kind === 'pickup_readiness' && x.f.state === 'ready') || (x.f.kind === 'repair_stage' && phases.includes(x.f.state))));
+}
+
+/**
+ * phaseBRecord(view, prev, ctx) -> legacy record derived from the latest message's analysis.
+ * ctx: { cfg:{readyDmSuggested}, canonicalFor(unit), fleetRow(unit), appliedFor(messageKey), deleteFor(records), nowIso }
+ */
+function phaseBRecord(view, prev, ctx) {
+  const recs = view.records;
+  const latest = recs[recs.length - 1];
+  const a = latest.analysis || {};
+  const res = a.status === 'ok' ? a.result : null;
+  const d = a.determinations || null;
+  const det = a.deterministic || {};
+  const carry = _carry(prev, latest.messageKey);
+  const facts = _topFacts(res);
+  const relevance = d ? d.informationRelevance : null;
+  const reply = d ? d.replyRequirement.value : 'unknown';
+  const decisionVal = d ? d.decisionRequirement.value : 'none';
+
+  // Units: in-scope units from the deterministic pass and the validated result.
+  const unitIds = [];
+  const add = (id) => { if (id && !unitIds.includes(id)) unitIds.push(id); };
+  for (const u of det.units || []) if (u.scope === 'in') add(u.unit);
+  for (const u of (res && res.units) || []) if (u.scope === 'in') add(u.unit);
+  const anyIn = unitIds.length > 0;
+  const anyOut = (det.units || []).some((u) => u.scope === 'out');
+  const prevRefs = {};
+  for (const r of (prev && prev.unitRefs) || []) prevRefs[r.unit] = r;
+  let verifiedReady = false;
+  const unitRefs = unitIds.slice(0, 20).map((unit) => {
+    const row = (ctx.fleetRow && ctx.fleetRow(unit)) || {};
+    const top = facts.find((x) => x.unit === unit);
+    const claim = _readyClaim(facts, unit);
+    const verified = claim && _canonStatus(unit, ctx.canonicalFor) === 'ready_for_pickup';      // verifiedBy canonical only
+    if (verified) verifiedReady = true;
+    const sameMsg = prev && prev.intel && prev.intel.latestMessageKey === latest.messageKey;
+    const ref = {
+      unit, operator: String(row.operator || ''), domicile: String(row.domicileSite || ''),
+      update: top ? (_label(top.f.kind) + ': ' + top.f.value).slice(0, 160) : '',
+      ready: verified && !(ctx.cfg && ctx.cfg.readyDmSuggested === false),
+      readyDmSent: !!(sameMsg && prevRefs[unit] && prevRefs[unit].readyDmSent),
+    };
+    if (claim && !verified) ref.readyUnverified = true;
+    return ref;
+  });
+
+  const status = String(a.status || 'pending');
+  let summary;
+  if (facts.length) summary = facts.slice(0, 3).map((x) => _label(x.f.kind) + ': ' + x.f.value + ' (' + x.unit + ')').join('; ');
+  else if (PENDING_TEXT[status]) summary = PENDING_TEXT[status];
+  else summary = relevance ? relevance.reason : 'Informational';
+
+  const importance = (decisionVal === 'me' || reply === 'required' || verifiedReady) ? 'high'
+    : (relevance && (relevance.level === 'high' || relevance.level === 'medium')) ? 'normal' : 'low';
+  const why = d && reply === 'required' ? d.replyRequirement.reason
+    : d && decisionVal === 'me' ? d.decisionRequirement.reason
+    : (relevance ? relevance.reason : (PENDING_TEXT[status] || ''));
+  const scope = anyIn ? 'mine' : (anyOut ? 'other_fas' : 'unknown');
+  const cls = (res && res.classification) || det.classification || { category: 'unknown', intent: 'none' };
+  const firstOpen = d ? d.actionOwnership.items.find((x) => x.state === 'open' && x.type !== 'commitment') : null;
+  const del = typeof ctx.deleteFor === 'function' ? ctx.deleteFor(recs) : { suggested: false };
+  return Object.assign({}, carry, {
+    id: latest.legacyId, convId: latest.convIdRaw || '', from: (latest.from && latest.from.address) || '', fromName: (latest.from && latest.from.name) || '',
+    subject: latest.subject || '(no subject)', receivedText: latest.receivedAtRaw || '', folder: latest.folder || 'Inbox',
+    bodyText: String((latest.body && latest.body.newContent) || '').slice(0, C.BODY_FOR_LEGACY_CAP),
+    attachments: legacyAttachments(latest.attachments),
+    summary: String(summary).slice(0, 600), importance, importanceWhy: String(why || '').slice(0, 200),
+    scope, category: cls.category || 'unknown', intent: cls.intent || 'none',
+    replySuggested: reply === 'required' || reply === 'suggested', deleteSuggested: !!(del && del.suggested),
+    unitRefs,
+    decision: {
+      replyNeeded: reply === 'required', actionOwner: firstOpen ? (OWNER_MAP[firstOpen.owner] || 'none') : 'none', scope,
+      decisionRequired: decisionVal === 'me', decisionKind: d ? d.decisionRequirement.kind : null,
+      informationRelevance: relevance ? relevance.level : null, replyRequirement: reply, decisionRequirement: decisionVal,
+    },
+    unitUpdateApplied: !!(typeof ctx.appliedFor === 'function' && ctx.appliedFor(latest.messageKey)),
+    confidence: res && res.overallValid && Number.isFinite(res.overallConfidence) ? res.overallConfidence : 0,
+    triagedAt: a.analyzedAt || ctx.nowIso, firstSeenAt: (prev && prev.firstSeenAt) || a.analyzedAt || ctx.nowIso,
+    intel: Object.assign(_intelMeta(view, prev), { analysisStatus: status }),
+  });
+}
+
+/**
+ * buildPhaseBResults({ prev, views, meta, cfg, canonicalFor, fleetRow, appliedFor, deleteFor, now }) -> LegacyResults
+ * Same contract and ordering as buildResults; records of conversations outside `views` are carried.
+ */
+function buildPhaseBResults(input) {
+  const prev = input.prev && Array.isArray(input.prev.emails) ? input.prev : { emails: [] };
+  const meta = input.meta || {};
+  const nowIso = new Date(Number.isFinite(input.now) ? input.now : Date.now()).toISOString();
+  const prevById = {};
+  for (const e of prev.emails) prevById[e.id] = e;
+  const fresh = []; const freshIds = {};
+  const ctx = { cfg: input.cfg, canonicalFor: input.canonicalFor, fleetRow: input.fleetRow, appliedFor: input.appliedFor, deleteFor: input.deleteFor, nowIso };
+  for (const view of input.views || []) {
+    if (!view.records || !view.records.length) continue;
+    const id = view.records[view.records.length - 1].legacyId;
+    if (freshIds[id]) continue;
+    freshIds[id] = 1;
+    fresh.push(phaseBRecord(view, prevById[id], ctx));
+  }
+  const merged = fresh.slice();
+  for (const e of prev.emails) if (!freshIds[e.id]) merged.push(e);
+  merged.sort((a, b) => String(b.triagedAt || b.firstSeenAt || '').localeCompare(String(a.triagedAt || a.firstSeenAt || '')));
+  return {
+    emails: merged.slice(0, LEGACY_CAP), ranAt: nowIso, authBlocked: !!meta.authBlocked, readError: meta.readError || null,
+    intel: Object.assign({ scanId: null, outcome: 'complete', partial: false, coalesced: false }, meta.intel || {}),
+  };
+}
+
 /** A scheduled scan skipped by the lock: the stored results plus `skipped` so the supervisor's isSkip works. */
 function skippedResults(prev, skipped) {
   const base = prev && Array.isArray(prev.emails) ? prev : { emails: [], ranAt: null, authBlocked: false };
@@ -150,4 +291,4 @@ function failedResults(prev, readError, errorCode) {
   return Object.assign({}, base, { authBlocked: false, readError: readError || 'read failed', intel: { scanId: null, outcome: 'failed', partial: false, coalesced: false, errorCode: errorCode || 'read-failed' } });
 }
 
-module.exports = { CONFLICTING_CANONICAL, LEGACY_CAP, legacyAttachments, toLegacyEmail, buildResults, skippedResults, failedResults };
+module.exports = { CONFLICTING_CANONICAL, LEGACY_CAP, legacyAttachments, toLegacyEmail, buildResults, phaseBRecord, buildPhaseBResults, skippedResults, failedResults };

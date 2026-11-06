@@ -182,4 +182,45 @@ describe('AC-9 Phase A capture paths log no dynamic content (FEAT-002)', () => {
     expect(logLines().length).toBeGreaterThan(4);
     assertClean();
   }, 30_000);
+
+  it('Phase B (FEAT-003): analysis ok / invalid output / lane failure / timeout, lane probe and status log no content', async () => {
+    flags._setForTests({ enabled: true, capture: true, multiRecipient: true });
+    const idx = require('../src/email-intel/index');
+    const lane = require('../src/email-intel/understand/lane');
+    require('../src/store').save('fleetData', { rows: [{ equipmentId: '40123', operator: 'ACME', domicileSite: 'ABE1' }], syncedAt: '2026-11-04T19:00:00.000Z' });
+    const at = { _now: Date.parse('2026-11-04T20:00:00.000Z') };
+    const rows = [10, 11, 12, 13].map(sentRow);
+    const { electron } = createWorld({ Inbox: { rows } }, { snapshotFor: sentSnap });
+    let n = 0;
+    const echo = (prompt) => {
+      const ref = (/"messageRef":"([^"]+)"/.exec(prompt) || [])[1];
+      return JSON.stringify({ schemaVersion: 2, messageRef: ref, relevance: { level: 'high', reason: S.subject.slice(0, 40), confidence: 0.9 },
+        units: [{ unit: '40123', gist: S.name, facts: [{ kind: 'vendor_status', value: S.body.slice(0, 60), state: 'working', assertion: 'stated', evidence: S.body.slice(0, 40), confidence: 0.9 }] }],
+        questions: [{ ref: 'q1', text: S.subject.slice(0, 60), addressee: { kind: 'named-other', name: S.name.slice(0, 30), evidence: S.name.slice(0, 20) }, confidence: 0.9 }],
+        answers: [], classification: { category: 'question', intent: 'request_information', confidence: 0.9 }, overallConfidence: 0.9 });
+    };
+    lane._setRelayForTests({
+      isolatedLaneAvailable: () => true,
+      askWithTimeout: async (prompt) => {
+        n++;
+        if (n === 2) return 'not json ' + S.body + ' ' + S.addr;                                     // output failure echoing content
+        if (n === 3) throw new Error('lane exploded near ' + S.addr + ' ' + S.subject);              // lane failure with content in the message
+        if (n === 4) throw Object.assign(new Error('timed out ' + S.body), { code: 'AI_TIMEOUT' });
+        return echo(prompt);
+      },
+    });
+    await runScan(idx, electron, at);
+    lane._setRelayForTests({ isolatedLaneAvailable: () => false, askWithTimeout: async () => { throw new Error(S.body); } });
+    await runScan(idx, electron, at);
+    lane._setRelayForTests({ isolatedLaneAvailable: () => true, askWithTimeout: async () => 'garbage ' + S.subject });
+    await lane.probeLane();
+    const call = (ch, ...a) => handlers[ch]({}, ...a);
+    await call('emailIntel:probe-lane');
+    await call('emailIntel:status');
+    idx.getStatus();
+    expect(logText()).toMatch(/analysis id=sc_[0-9a-f]+ eligible=\d+/);
+    expect(n).toBeGreaterThanOrEqual(4);
+    assertClean();
+    lane._resetForTests();
+  }, 30_000);
 });

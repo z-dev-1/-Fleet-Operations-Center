@@ -3,7 +3,7 @@
  * main process reports `capture` effective through window.emailIntel.status()).
  *
  *   renderIdentityHtml(state)   "My identity" form (F-12, F2-10 hint line). Pure.
- *   renderBannersHtml(status)   auth-blocked / partial-scan / identity-not-set banners (8.6, F-12). Pure.
+ *   renderBannersHtml(status)   auth-blocked / partial-scan / isolated-lane-unavailable / identity-not-set banners (8.6, F-12, F-16). Pure.
  *   readIdentityForm(doc)       -> patch for emailIntel:set-config (pure over element values)
  *   wireIdentityPanel(doc, deps) / wireBanners(doc, deps)   thin DOM wiring (getElementById only)
  *
@@ -15,6 +15,7 @@
 
 export const FAS_HINT = 'Set your FAS name so units assigned to other FAS people at the same site are staged, not written.';
 export const IDENTITY_BANNER = 'Set your name and address so the app can tell what is addressed to you.';
+export const LANE_BANNER = 'Email analysis AI is unavailable. Messages are kept and will be analyzed when it is back; nothing is applied automatically meanwhile.';
 
 export function esc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -109,6 +110,11 @@ export function renderBannersHtml(status) {
       (parts.length ? parts.join('; ') + '. ' : '') + 'The next scan continues from here.</div>');
   }
   const warnings = Array.isArray(s.warnings) ? s.warnings : [];
+  const laneState = s.lane && s.lane.state;
+  if (warnings.includes('isolated-lane-unavailable') || laneState === 'unavailable' || laneState === 'degraded') {
+    out.push('<div class="ei-banner ei-banner--lane" role="status" aria-live="polite">' + esc(LANE_BANNER) +
+      ' <button type="button" class="et-mini" id="ei-probe-lane">Check AI connection</button></div>');
+  }
   if (warnings.includes('identity-not-set') || (s.identity && s.identity.set === false)) {
     out.push('<div class="ei-banner ei-banner--identity" role="status" aria-live="polite">' + esc(IDENTITY_BANNER) +
       ' <button type="button" class="et-mini" id="ei-id-setup">Set up</button></div>');
@@ -165,11 +171,18 @@ export function wireIdentityPanel(doc, deps) {
   if (close && d.onClose) close.addEventListener('click', () => d.onClose());
 }
 
-/** wireBanners(doc, { onScanAgain(), onSetup() }) */
+/** wireBanners(doc, { onScanAgain(), onSetup(), onProbeLane() }) */
 export function wireBanners(doc, deps) {
   const d = deps || {};
   const again = doc.getElementById('ei-scan-again');
   if (again && d.onScanAgain) again.addEventListener('click', () => d.onScanAgain());
+  const probe = doc.getElementById('ei-probe-lane');
+  if (probe && d.onProbeLane) {
+    probe.addEventListener('click', async () => {
+      probe.disabled = true;
+      try { await d.onProbeLane(); } finally { probe.disabled = false; }
+    });
+  }
   const setup = doc.getElementById('ei-id-setup');
   if (setup && d.onSetup) setup.addEventListener('click', () => d.onSetup());
 }
@@ -199,5 +212,6 @@ export const PANEL_CSS = `
   #email-triage .ei-banner--auth { color:#ffa198; background:rgba(248,81,73,.08); border:1px solid rgba(248,81,73,.3); }
   #email-triage .ei-banner--partial { color:#e3b341; background:rgba(210,153,34,.08); border:1px solid rgba(210,153,34,.3); }
   #email-triage .ei-banner--identity { color:#79c0ff; background:rgba(56,139,253,.08); border:1px solid rgba(56,139,253,.3); }
+  #email-triage .ei-banner--lane { color:#e3b341; background:rgba(210,153,34,.08); border:1px solid rgba(210,153,34,.3); }
   #email-triage .ei-gear { background:#30363d; padding:7px 10px; }
 `;

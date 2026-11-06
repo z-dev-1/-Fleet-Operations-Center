@@ -2,9 +2,11 @@
 // post-filter and F2-01 readyDmSuggested, plus the PG-4 legacy record shape.
 import { describe, it, expect, afterEach } from 'vitest';
 import { createRequire } from 'module';
-import { inboxRows, rowsScenarios } from './fixtures/email-intel/emails.js';
+import { inboxRows, rowsScenarios, snapshot, block } from './fixtures/email-intel/emails.js';
 import { AUTH_URL } from './fixtures/email-intel/fake-owa.js';
 import { makeHarness, stubTriage } from './fixtures/email-intel/scan-harness.js';
+import { fleetData } from './fixtures/email-intel/fleet.js';
+import { scriptedRelay, refOf } from './fixtures/email-intel/records.js';
 const require = createRequire(import.meta.url);
 const adapter = require('../src/email-intel/ingest/legacy-adapter');
 const store = require('../src/store');
@@ -123,6 +125,134 @@ describe('F-01 runTriage with capture on returns the legacy results shape', () =
     expect(isSkip(tick)).toBe(true);
     expect(auto.lastOutcome).toBe('skipped');
     await r2;
+  });
+});
+
+// ── Phase B derivation (multiRecipient): legacy fields by code from the v2 analysis ──────────────
+describe('F-01 Phase B derivation (multiRecipient effective)', () => {
+  const T0 = Date.parse('2026-11-04T20:00:00.000Z');
+  const lane = require('../src/email-intel/understand/lane');
+  // Lane answer built from the prompt: a fact for every in-scope candidate whose quote is in the text.
+  function answerFor(over = {}) {
+    return (prompt) => {
+      const units = JSON.parse(/CANDIDATE UNITS[^\n]*\n(\[.*\])/.exec(prompt)[1]).filter((u) => u.scope === 'in');
+      const ready = /ready for pickup/.test(prompt);
+      return Object.assign({
+        schemaVersion: 2, messageRef: refOf(prompt), relevance: { level: 'high', reason: 'unit update', confidence: 0.9 },
+        units: units.map((u) => ({ unit: u.id, gist: 'update', facts: [ready
+          ? { kind: 'pickup_readiness', value: 'Ready for pickup', state: 'ready', assertion: 'stated', evidence: 'unit ' + u.id + ' is ready for pickup', confidence: 0.9 }
+          : { kind: 'vendor_status', value: 'Vendor update received', state: 'working', assertion: 'stated', evidence: 'about unit ' + u.id, confidence: 0.9 }] })),
+        questions: [], requests: [], answers: [], commitments: [],
+        classification: { category: 'fleet_status_update', intent: 'provide_update', informationalOnly: true, confidence: 0.9 },
+        suggestDelete: { suggested: false, reason: '', confidence: 0.9 }, overallConfidence: 0.88,
+      }, over);
+    };
+  }
+  function phaseB(foldersIn, worldOpts, answer) {
+    h = makeHarness(foldersIn, worldOpts);
+    h.flags._setForTests({ enabled: true, capture: true, multiRecipient: true });
+    store.save('fleetData', fleetData('fresh', T0));
+    lane._resetForTests();
+    const relay = scriptedRelay(answer || answerFor());
+    lane._setRelayForTests(relay);
+    const legacy = stubTriage();
+    return { relay, legacy, run: (opts, trigger) => h.run(Object.assign({ _now: T0, _triageEmails: legacy }, opts || {}), trigger) };
+  }
+  const readySnap = (row) => snapshot({ subject: 'Unit 40456', blocks: [block({ text: 'Good news, unit 40456 is ready for pickup at the dealer.', convId: row.convId, time: '2026-11-04T14:30:00-05:00' })] });
+  afterEach(() => lane._resetForTests());
+
+  it('F-01 runTriage returns legacy shape for complete/partial/auth-blocked/failed/coalesced (Phase B)', async () => {
+    const t = phaseB({ Inbox: inboxRows('Inbox', 3) });
+    const complete = await runTriage({ _now: T0, _triageEmails: t.legacy });
+    expectLegacyShape(complete);
+    expect(complete.intel.outcome).toBe('complete');
+    expect(t.legacy.calls).toHaveLength(0);                                   // legacy triageEmails is never called
+    expect(t.relay.calls.length).toBe(3);
+    for (const e of complete.emails) {
+      for (const k of LEGACY_FIELDS) expect(e, k).toHaveProperty(k);
+      expect(e.intel.analysisStatus).toBe('ok');
+      expect(e.summary).toBe('Vendor: Vendor update received (40123)');
+      expect(e.scope).toBe('mine');
+    }
+    expect(store.load('emailTriageResults', null)).toEqual(complete);
+    expect(require('../src/scrapers/email_triage').applyPendingUnitUpdates(complete)).toBe(0);   // hook 2: legacy apply is off
+    h.world.folders.Inbox.rows = inboxRows('Inbox', 40);
+    const partial = await runTriage({ _now: T0, _triageEmails: t.legacy, max: 5 });
+    expectLegacyShape(partial);
+    expect(partial.intel).toMatchObject({ outcome: 'partial', partial: true });
+    h.world.onExec = async (kind, n, api) => { if (kind === 'open') api.navigate(AUTH_URL); };
+    const blocked = await runTriage({ _now: T0, _triageEmails: t.legacy, max: 5 });
+    expectLegacyShape(blocked);
+    expect(blocked).toMatchObject({ authBlocked: true, readError: 'auth blocked' });
+    h.world.onExec = null; h.world.url = 'https://outlook.office365.com/mail/inbox';
+    const failed = await runTriage({ _now: T0, _readMailbox: async () => { throw new Error('x'); } });
+    expectLegacyShape(failed);
+    expect(failed.intel.outcome).toBe('failed');
+    const realCapture = require('../src/email-intel/capture/owa_capture');
+    const slow = async (o) => { await new Promise((r) => setTimeout(r, 20)); return realCapture.readMailbox(o); };
+    const a = runTriage({ _now: T0, _readMailbox: slow });
+    const b = runTriage({ _now: T0, _readMailbox: slow });
+    const ra = await a; const rb = await b;
+    expectLegacyShape(ra);
+    expect(rb.intel.coalesced).toBe(true);
+    expect(rb.emails).toBe(ra.emails);
+  }, 30_000);
+
+  it('F-01 ai.js digest fields present and typed (Phase B)', async () => {
+    const t = phaseB({ Inbox: inboxRows('Inbox', 2) });
+    const res = await t.run();
+    for (const e of res.emails) {
+      expect(['high', 'normal', 'low']).toContain(e.importance);
+      for (const k of ['replySuggested', 'deleteSuggested', 'unitUpdateApplied']) expect(typeof e[k]).toBe('boolean');
+      for (const k of ['summary', 'importanceWhy', 'replyState', 'fromName', 'from', 'subject', 'category', 'intent']) expect(typeof e[k], k).toBe('string');
+      expect(e.unitUpdateApplied).toBe(false);                              // nothing is written in Phase B
+      expect(e.decision).toMatchObject({ replyNeeded: false, scope: 'mine', decisionRequired: false });
+      expect(e.confidence).toBe(0.88);                                       // overallConfidence, never a 0.7 / 0.4 fallback
+      for (const u of e.unitRefs) { expect(typeof u.update).toBe('string'); expect(typeof u.ready).toBe('boolean'); expect(u.operator).toBe('ACME DSP'); }
+    }
+  });
+
+  it('F-01 ready flag false unless verifiedBy canonical', async () => {
+    const t = phaseB({ Inbox: inboxRows('Inbox', 1) }, { snapshotFor: readySnap });
+    store.save('canonicalState', { units: { '40456': { status: 'in_repair' } } });
+    const res = await t.run();
+    expect(res.emails[0].unitRefs[0]).toMatchObject({ unit: '40456', ready: false, readyUnverified: true, update: 'Pickup: Ready for pickup' });
+    expect(res.emails[0].importance).toBe('normal');
+    // canonical confirms -> ready offered (still token + native dialog gated when sent)
+    store.save('canonicalState', { units: { '40456': { status: 'ready_for_pickup' } } });
+    h.world.folders.Inbox.rows = inboxRows('Inbox', 2);
+    const res2 = await t.run();
+    const e2 = res2.emails.find((e) => e.unitRefs.some((u) => u.ready));
+    expect(e2).toBeTruthy();
+    expect(e2.importance).toBe('high');
+    // a wrong-confidence answer never yields a ready offer: invalid overall confidence keeps the fact but ready needs canonical anyway
+  });
+
+  it("F2-01 readyDmSuggested false hides ready (Phase B derivation)", async () => {
+    const t = phaseB({ Inbox: inboxRows('Inbox', 1) }, { snapshotFor: readySnap });
+    store.save('canonicalState', { units: { '40456': { status: 'ready_for_pickup' } } });
+    store.save('emailTriageConfig', Object.assign({}, require('../src/scrapers/email_triage').DEFAULT_CONFIG, { readyDmSuggested: false }));
+    const res = await t.run();
+    expect(res.emails[0].unitRefs[0]).toMatchObject({ unit: '40456', ready: false, update: 'Pickup: Ready for pickup' });   // the fact stays, the DM offer goes
+    expect(t.legacy.calls).toHaveLength(0);
+  });
+
+  it('pending analysis (lane unavailable) is shown honestly, scan partial: pending-analysis, lane warning in status (AC-12)', async () => {
+    const t = phaseB({ Inbox: inboxRows('Inbox', 2) });
+    t.relay.available = false;
+    const res = await t.run();
+    expect(t.relay.calls).toHaveLength(0);
+    expect(res.readError).toBe('partial: pending-analysis');
+    for (const e of res.emails) { expect(e.summary).toBe("Couldn't analyze yet"); expect(e.intel.analysisStatus).toBe('pending'); expect(e.confidence).toBe(0); }
+    const st = h.idx.getStatus();
+    expect(st.lane.state).toBe('unavailable');
+    expect(st.warnings).toContain('isolated-lane-unavailable');
+    expect(st.backlog.pendingAnalysis).toBe(2);
+    t.relay.available = true;
+    const res2 = await t.run();
+    expect(res2.readError).toBeNull();
+    expect(res2.emails.every((e) => e.intel.analysisStatus === 'ok')).toBe(true);
+    expect(h.idx.getStatus().warnings).not.toContain('isolated-lane-unavailable');
   });
 });
 

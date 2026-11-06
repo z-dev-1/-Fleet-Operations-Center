@@ -111,7 +111,7 @@ function buildStatus(i) {
     checkpoints: { folders },
     backlog: { pendingAnalysis, openActions: 0, openStaged: 0, unreconciledSends: 0 },
     owaAuth: { state: auth.state || 'unknown', lastOkAt: auth.lastOkAt || null, lastBlockedAt: auth.lastBlockedAt || null, blockedCount: auth.blockedCount || 0 },
-    lane: { state: 'unknown', checkedAt: null },
+    lane: i.lane && i.lane.state ? { state: i.lane.state, checkedAt: i.lane.checkedAt || null } : { state: 'unknown', checkedAt: null },
     aiGateway: null,
     identity: { set: i.config ? cfgMod.isIdentitySet(i.config) : false },
     midway: null, supervisor: null, jobs: null,

@@ -105,6 +105,30 @@ describe('Phase A banners', () => {
   });
 });
 
+describe('Phase B lane banner (isolated-lane-unavailable, F-16)', () => {
+  const st = (o) => Object.assign({ ok: true, enabled: true, identity: { set: true }, warnings: [], scan: { last: null }, owaAuth: { state: 'ok' }, lane: { state: 'ok', checkedAt: null } }, o);
+  it('shows for the warning and for unavailable / degraded lane states, never otherwise', () => {
+    for (const s of [st({ warnings: ['isolated-lane-unavailable'] }), st({ lane: { state: 'unavailable' } }), st({ lane: { state: 'degraded' } })]) {
+      const html = P.renderBannersHtml(s);
+      expect(html).toContain('ei-banner--lane');
+      expect(html).toContain(P.LANE_BANNER);
+      expect(html).toContain('role="status" aria-live="polite"');
+      expect(html).toContain('<button type="button" class="et-mini" id="ei-probe-lane">Check AI connection</button>');
+    }
+    for (const s of [st({}), st({ lane: { state: 'unknown' } }), st({ enabled: false, lane: { state: 'unavailable' } })]) expect(P.renderBannersHtml(s)).not.toContain('ei-banner--lane');
+    expect(P.LANE_BANNER).toMatch(/nothing is applied automatically/);
+  });
+  it('the Check AI connection button runs the manual probe once per click and re-enables', async () => {
+    const { doc, el } = domFor(['ei-probe-lane']);
+    let n = 0;
+    P.wireBanners(doc, { onProbeLane: async () => { n++; expect(el['ei-probe-lane'].disabled).toBe(true); } });
+    el['ei-probe-lane'].click();
+    await tick();
+    expect(n).toBe(1);
+    expect(el['ei-probe-lane'].disabled).toBe(false);
+    P.wireBanners(domFor([]).doc, {});                       // no button, no deps: nothing throws
+  });
+});
 describe('NFR-11 accessibility basics', () => {
   it('NFR-11 buttons, aria-live, text labels', () => {
     const html = P.renderIdentityHtml({ me: {}, suggestions: { alias: 'x' } }) + P.renderBannersHtml({ enabled: true, identity: { set: false }, warnings: ['identity-not-set'], owaAuth: { state: 'blocked' }, scan: { last: { outcome: 'auth-blocked', folders: [] } } });

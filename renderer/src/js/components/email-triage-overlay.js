@@ -175,6 +175,10 @@ function _renderIntel() {
   wireBanners(document, {
     onScanAgain: () => _run(),
     onSetup: () => { if (!_idOpen) _toggleIdentity(); },
+    onProbeLane: async () => {
+      try { const r = await window.emailIntel.probeLane(); _toast(r && r.ok ? 'AI connection is working.' : 'AI connection is still unavailable.'); } catch (_) { /* status refresh below */ }
+      _refreshIntel();
+    },
   });
   if (_idOpen && _idState) {
     wireIdentityPanel(document, {

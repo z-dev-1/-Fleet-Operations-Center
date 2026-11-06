@@ -12,6 +12,10 @@
  * triageEmails (Phase B replaces it); the ledger is mapped back onto the legacy results shape so every
  * existing caller keeps working (F-01). runIntelScan covers design 8.2 steps 0-2, 7 and 10-12.
  *
+ * Phase B (`multiRecipient`): stage 5 replaces the legacy triage with the v2 analysis
+ * (understand/analyze.js through the isolated lane only) and derives the legacy fields by code
+ * (legacy-adapter buildPhaseBResults). Nothing is written to unit timelines in Phase B.
+ *
  * Every error ends in a LegacyResults object (never a throw to the caller); logs carry counts and
  * enums only (redact.js), never message content.
  */
@@ -66,7 +70,8 @@ async function _scan(opts, trigger) {
   const startedAt = Number.isFinite(opts._now) ? opts._now : Date.now();
   const nowIso = new Date(startedAt).toISOString();
   const scanId = 'sc_' + crypto.randomBytes(4).toString('hex');
-  const deadlineAt = startedAt + C.SCAN_DEADLINE_MS;                          // F-20
+  const wallStart = Date.now();
+  const deadlineAt = wallStart + C.SCAN_DEADLINE_MS;                          // F-20 (wall clock: the reader and AI queue compare to Date.now())
   const triage = _triage();
   const legacyCfg = triage.getConfig();                                        // read ONCE per scan (F2-01)
   const cfg = cfgMod.normalize(stores.load('config'));
@@ -153,12 +158,19 @@ async function _scan(opts, trigger) {
   }
   if (!storeError) stores.update('messages', (doc) => { ledger.applyRetention(doc, { now: endMs }); return doc; });
 
-  // Legacy decisions + results (Phase A: the legacy triageEmails on the latest message of each conversation).
-  const d = statusMod.deriveOutcome({ reader, committed: stats.newMessages + stats.upgraded, storeError, deadlineHit: !!(reader && (reader.folders || []).some((f) => f.deadline)) });
+  // Decisions + results. Phase A: the legacy triageEmails on the latest message of each conversation.
+  // Phase B (multiRecipient): stage 5, the v2 analysis through the isolated lane; legacy fields by code.
+  const deadlineHit = !!(reader && (reader.folders || []).some((f) => f.deadline));
+  let d;
   let results;
   if (storeError) {
+    d = statusMod.deriveOutcome({ reader, committed: stats.newMessages + stats.upgraded, storeError, deadlineHit });
     results = adapter.failedResults(prevResults, 'read failed', 'store');
+  } else if (_multiRecipient()) {
+    const u = await _understand({ opts, trigger, cfg, legacyCfg, store, prevResults, touched, startedAt, deadlineAt, scanId, reader, committed: stats.newMessages + stats.upgraded, deadlineHit });
+    d = u.d; results = u.results;
   } else {
+    d = statusMod.deriveOutcome({ reader, committed: stats.newMessages + stats.upgraded, storeError, deadlineHit });
     results = await _buildLegacy({ opts, triage, store, prevResults, touched, legacyCfg, plan, d, scanId, endMs, readerOk: !!reader });
   }
   results.intel = Object.assign({}, results.intel, { scanId, outcome: d.outcome, partial: d.partial, coalesced: false });
@@ -168,8 +180,71 @@ async function _scan(opts, trigger) {
     folders: reader ? reader.folders.map((f) => ({ folder: f.folder, status: f.status, requested: f.requested, examined: f.examined, opened: f.opened, ingested: f.ingested, skippedKnown: f.skippedKnown, caughtUp: f.caughtUp, backlog: f.backlog, backlogRemaining: f.backlogRemaining, retried: f.retried || 0 })) : [],
     counts: { newMessages: stats.newMessages, rows: stats.committedRows, opened: reader ? reader.opened : 0, rowsExamined: reader ? reader.rowsExamined : 0 },
   });
-  logger.info('[email-intel] scan end id=' + scanId + ' outcome=' + d.outcome + ' new=' + stats.newMessages + ' opened=' + (reader ? reader.opened : 0) + ' ms=' + (endMs - startedAt));
+  logger.info('[email-intel] scan end id=' + scanId + ' outcome=' + d.outcome + ' new=' + stats.newMessages + ' opened=' + (reader ? reader.opened : 0) + ' ms=' + (Date.now() - wallStart));
   return results;
+}
+
+function _multiRecipient() {
+  try { return flags.get().effective.multiRecipient === true; } catch (_) { return false; }
+}
+
+/**
+ * Stage 5 (Phase B): analyze every eligible message through the isolated lane (one call at a time,
+ * budgeted, deadline-aware), commit each analysis as it finishes, then derive the legacy results by
+ * code. Legacy triageEmails is not called; legacy applyPendingUnitUpdates returns 0 (email_triage hook).
+ */
+async function _understand(o) {
+  const { opts, trigger, cfg, legacyCfg, store, prevResults, touched, startedAt, deadlineAt, scanId, reader } = o;
+  const analyze = require('./understand/analyze');
+  const scopeMod = require('./understand/scope');
+  const msgDoc = ledger.ensureDoc(stores.load('messages'));
+  const index = scopeMod.buildScopeIndex({ now: startedAt, fasName: cfg.me && cfg.me.fasName });
+  if (!index.ready || index.stale) logger.warn('[email-intel] fleet scope unknown reason=' + index.reason);
+  const changed = new Set(touched);
+  let commitFailed = null;
+  const commit = (key, a) => {
+    const rec = msgDoc.messages[key];
+    if (rec) changed.add(rec.conversationKey);
+    const r = stores.update('messages', (doc) => { const x = doc.messages && doc.messages[key]; if (x) x.analysis = a; return doc; });
+    if (!r.ok && !commitFailed) commitFailed = r.code || 'store';
+  };
+  let stats = null;
+  try {
+    stats = await analyze.runScanAnalysis(msgDoc, {
+      index, me: cfg.me, cfg, trigger, signal: opts.signal, deadlineAt, now: startedAt, canonicalFor: _canonicalFor, lookbackDays: cfg.caps.lookbackDays,
+    }, commit);
+  } catch (e) {
+    logger.warn('[email-intel] analysis failed ' + safeErr(e));
+  }
+  if (stats) logger.info('[email-intel] analysis id=' + scanId + ' eligible=' + stats.eligible + ' ok=' + stats.ok + ' cheap=' + stats.skippedCheap + ' old=' + stats.skippedOld + ' unavailable=' + stats.aiUnavailable + ' invalid=' + stats.invalid + ' pending=' + stats.pending + ' calls=' + stats.aiCalls + ' lane=' + stats.laneState);
+
+  // Rebuild the legacy record of every conversation touched or analyzed this scan, and of any whose stored
+  // record is behind the ledger (self-heal after a crash between analysis and the results save).
+  const prevById = {};
+  for (const e of (prevResults && prevResults.emails) || []) prevById[e.id] = e;
+  const views = [];
+  let pendingAnalysis = 0;
+  for (const ck of Object.keys(msgDoc.byConv || {})) {
+    const records = ledger.conversation(msgDoc, ck);
+    if (!records.length) continue;
+    for (const r of records) if (ledger.isPending(r)) pendingAnalysis++;
+    const latest = records[records.length - 1];
+    const p = prevById[latest.legacyId];
+    const behind = !p || !p.intel || p.intel.latestMessageKey !== latest.messageKey || p.intel.analysisStatus !== String((latest.analysis || {}).status || 'pending');
+    if (changed.has(ck) || behind) views.push({ conversationKey: ck, records });
+  }
+  const d = statusMod.deriveOutcome({ reader, committed: o.committed, storeError: commitFailed, deadlineHit: o.deadlineHit, pendingAnalysis });
+  const doneMs = Date.now();
+  const results = adapter.buildPhaseBResults({
+    prev: prevResults, views, now: doneMs, cfg: { readyDmSuggested: legacyCfg.readyDmSuggested },
+    canonicalFor: _canonicalFor,
+    fleetRow: (unit) => index.byId.get(String(unit).toLowerCase()) || null,
+    appliedFor: () => false,                                   // Phase C owns the timeline ledger; nothing is applied in Phase B
+    deleteFor: (records) => analyze.conservativeDelete(records, { openActions: 0, cfg }),
+    meta: { authBlocked: d.outcome === 'auth-blocked', readError: d.readError, intel: { scanId, outcome: d.outcome, partial: d.partial, coalesced: false } },
+  });
+  store.save('emailTriageResults', results);
+  return { d, results, stats };
 }
 
 /** Triage the new / changed conversations with the legacy triageEmails and persist the legacy results. */
@@ -277,8 +352,14 @@ async function scheduledTick(ctx, cfg, deps) {
 function getStatus() {
   let f = {}; let warnings = [];
   try { const g = flags.get(); f = g.effective; warnings = g.warnings || []; } catch (_) { /* flags only */ }
+  let laneSt = { state: 'unknown', checkedAt: null };
+  const extra = [];
+  if (f && f.multiRecipient) {
+    try { const s = require('./understand/lane').state(); laneSt = { state: s.state, checkedAt: s.checkedAt }; } catch (_) { /* status only */ }
+    if (laneSt.state === 'unavailable' || laneSt.state === 'degraded') extra.push('isolated-lane-unavailable');
+  }
   return statusMod.buildStatus({
-    enabled: engaged(), flags: f, flagWarnings: warnings,
+    enabled: engaged(), flags: f, flagWarnings: warnings, lane: laneSt, extraWarnings: extra,
     config: cfgMod.normalize(stores.load('config')), checkpoints: stores.load('checkpoints'), messages: stores.load('messages'),
     running: lock.isBusy(), current: lock.current(),
     readOnlyStores: ['config', 'checkpoints', 'messages'].map((n) => stores.isReadOnly(n)),

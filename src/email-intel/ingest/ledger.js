@@ -19,7 +19,7 @@
 const crypto = require('crypto');
 const C = require('../constants');
 const identity = require('./identity');
-const { segment } = require('./segmenter');
+const { segment, unitsIn } = require('./segmenter');
 const untrusted = require('../untrusted');
 
 function emptyDoc() { return { version: C.STORE_VERSION, messages: {}, byConv: {}, aliasIndex: {}, bytesEstimate: 0 }; }
@@ -105,6 +105,14 @@ function buildRecord(cap, doc, ctx) {
   }
   const now = Number.isFinite(ctx.now) ? ctx.now : Date.now();
   const stored = seg.newContent.slice(0, C.STORED_BODY_CAP);
+  // Unit ids that occur only past the stored cap: the text is not kept, so analysis reports them as
+  // unprocessed (design 3.4 / AC-F: a unit mention is never silently lost).
+  let beyondCap = [];
+  if (seg.newContent.length > C.STORED_BODY_CAP) {
+    const kept = unitsIn(stored);
+    const cut = seg.newContent.lastIndexOf(' ', C.STORED_BODY_CAP);
+    beyondCap = Array.from(unitsIn(seg.newContent.slice(cut > 0 ? cut : C.STORED_BODY_CAP))).filter((u) => !kept.has(u)).slice(0, 20);
+  }
   const dl = untrusted.detect(seg.newContent);
   const record = {
     messageKey: resolved.messageKey, messageIdSource: resolved.messageIdSource,
@@ -121,6 +129,7 @@ function buildRecord(cap, doc, ctx) {
       segments: seg.segments.map((s) => ({ kind: s.kind, chars: s.chars })),
       inlineReply: !!seg.flags.inlineReply, stripSkippedEmpty: !!seg.flags.stripSkippedEmpty,
       quotedHash: _quotedHash(seg.segments), unitsOnlyInQuoted: seg.unitsOnlyInQuoted.slice(0, 20),
+      unitsBeyondCap: beyondCap.length ? beyondCap : undefined,
     },
     contentHash,
     attachments: cap.attachments || [],

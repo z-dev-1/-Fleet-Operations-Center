@@ -175,7 +175,7 @@ describe('F-19 scan and config validation', () => {
     expect(s).toMatchObject({ ok: true, enabled: true, identity: { set: false }, owaAuth: { state: 'unknown' } });
     expect(s.warnings).toEqual(expect.arrayContaining(['identity-not-set', 'fas-name-not-set']));
     expect(await call('emailIntel:dom-probe', { n: 9 })).toEqual({ ok: false, code: 'BAD_ARG', field: 'n' });
-    expect((await call('emailIntel:probe-lane')).code).toBe('NOT_IMPLEMENTED');
+    expect(await call('emailIntel:probe-lane')).toMatchObject({ ok: false, lane: { state: 'unavailable' } });   // implemented in Phase B
   });
 });
 
