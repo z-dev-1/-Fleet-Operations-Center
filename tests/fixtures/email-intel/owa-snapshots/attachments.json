@@ -1,0 +1,90 @@
+{
+  "_note": "synthetic, hand-authored; addresses are @example.test",
+  "row": {
+    "index": 0,
+    "convId": "conv/attachments=",
+    "aria": "Dealer Parts Unit status 40000 18:09 Preview text for message number 0",
+    "hasAttach": false,
+    "unread": false,
+    "itemIdCandidates": {
+      "dataAttrs": {},
+      "ids": []
+    },
+    "timeTokenRaw": "18:09"
+  },
+  "snapshot": {
+    "url": "/mail/inbox/id/AAA",
+    "subject": "",
+    "blocks": [
+      {
+        "aria": "Message",
+        "id": "",
+        "idAttrs": {},
+        "text": "Estimate attached for 40123.",
+        "textLen": 28,
+        "collapsed": false,
+        "headerText": "From: Dealer Parts Desk\nTo: Zila Santiago",
+        "fromCandidates": [
+          {
+            "title": "Dealer Parts Desk <parts@dealer.example.test>",
+            "aria": "",
+            "text": "Dealer Parts Desk",
+            "href": "mailto:parts@dealer.example.test"
+          }
+        ],
+        "toCandidates": [
+          {
+            "title": "Zila Santiago <zila.santiago@example.test>",
+            "aria": "",
+            "text": "Zila Santiago",
+            "href": "mailto:zila.santiago@example.test"
+          }
+        ],
+        "ccCandidates": [],
+        "timeCandidates": [
+          {
+            "tag": "time",
+            "datetime": "2026-11-04T14:30:00-05:00",
+            "title": "",
+            "aria": "",
+            "text": "2:30 PM"
+          }
+        ],
+        "attachments": [
+          {
+            "aria": "Attachment Estimate_40123.pdf",
+            "title": "Estimate_40123.pdf",
+            "text": "Estimate_40123.pdf 120 KB",
+            "attrs": {},
+            "hrefs": []
+          },
+          {
+            "aria": "Attachment photo1.jpg",
+            "title": "photo1.jpg",
+            "text": "photo1.jpg 2.5 MB",
+            "attrs": {},
+            "hrefs": [
+              "https://outlook.office365.com/owa/attachment.ashx?id=1"
+            ]
+          },
+          {
+            "aria": "attachment",
+            "title": "",
+            "text": "",
+            "attrs": {
+              "data-attachmentid": "AT1"
+            },
+            "hrefs": []
+          }
+        ],
+        "controls": []
+      }
+    ],
+    "paneFallback": false,
+    "buttons": [
+      "Reply",
+      "Reply all",
+      "Forward"
+    ]
+  }
+}

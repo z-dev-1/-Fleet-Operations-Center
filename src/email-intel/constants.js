@@ -42,6 +42,22 @@ const CONSTANTS = Object.freeze({
   STORED_BODY_CAP_OLD: 2_000,
   OLD_MESSAGE_AGE_MS: 7 * 86_400_000,
 
+  // Phase A capture details (design 2.2, 2.7, 2.8).
+  KNOWN_ROWS_STOP: 8,                                     // consecutive known rows that end a caught-up folder scan (F-04)
+  SEEN_ROWS_LRU: 300,                                     // seenRows entries kept per folder checkpoint
+  BATCH_MESSAGES: 5,                                      // messages per committed batch
+  OPEN_WAIT_MS: 800,                                      // wait after opening a row before reading the pane
+  FOLDER_SWITCH_WAIT_MS: 2_000,
+  AUTH_GRACE_MS: 12_000,                                  // auth-wall grace before the scan is declared blocked
+  DEADLINE_MARGIN_MS: 60_000,                             // reader stops opening rows with less than this left (F-20)
+  MAX_PANE_BLOCKS: 12,                                    // blocks read from a first-seen conversation view
+  RECIPIENTS_CAP: 200,
+  MAX_MESSAGES: 1_500,                                    // retention: messages kept in the ledger
+  MESSAGE_RETENTION_MS: 30 * 86_400_000,
+  CONFIG_MAX_BYTES: 32 * 1024,                            // set-config payload cap (F-19)
+  MAILBOX_FOLDERS_MAX: 12,
+  BODY_FOR_LEGACY_CAP: 8_000,                             // bodyText handed to the legacy adapter record
+
   // Confirmation tokens (design 1.7).
   CONFIRM_TTL_MS: 5 * 60_000,
   CONFIRM_MAX_LIVE_TOKENS: 50,

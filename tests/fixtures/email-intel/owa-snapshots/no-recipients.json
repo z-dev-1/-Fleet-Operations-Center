@@ -1,0 +1,57 @@
+{
+  "_note": "synthetic, hand-authored; addresses are @example.test",
+  "row": {
+    "index": 0,
+    "convId": "conv/no-recipients=",
+    "aria": "Dealer Parts Unit status 40000 18:09 Preview text for message number 0",
+    "hasAttach": false,
+    "unread": false,
+    "itemIdCandidates": {
+      "dataAttrs": {},
+      "ids": []
+    },
+    "timeTokenRaw": "18:09"
+  },
+  "snapshot": {
+    "url": "/mail/inbox/id/AAA",
+    "subject": "",
+    "blocks": [
+      {
+        "aria": "Message",
+        "id": "",
+        "idAttrs": {},
+        "text": "Hello from the dealer about 40123",
+        "textLen": 33,
+        "collapsed": false,
+        "headerText": "From: Dealer",
+        "fromCandidates": [
+          {
+            "title": "Dealer Parts Desk <parts@dealer.example.test>",
+            "aria": "",
+            "text": "Dealer Parts Desk",
+            "href": "mailto:parts@dealer.example.test"
+          }
+        ],
+        "toCandidates": [],
+        "ccCandidates": [],
+        "timeCandidates": [
+          {
+            "tag": "time",
+            "datetime": "2026-11-04T14:30:00-05:00",
+            "title": "",
+            "aria": "",
+            "text": "2:30 PM"
+          }
+        ],
+        "attachments": [],
+        "controls": []
+      }
+    ],
+    "paneFallback": false,
+    "buttons": [
+      "Reply",
+      "Reply all",
+      "Forward"
+    ]
+  }
+}

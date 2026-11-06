@@ -1,0 +1,70 @@
+{
+  "_note": "synthetic, hand-authored; addresses are @example.test",
+  "row": {
+    "index": 0,
+    "convId": "conv/dl-recipient=",
+    "aria": "Dealer Parts Unit status 40000 18:09 Preview text for message number 0",
+    "hasAttach": false,
+    "unread": false,
+    "itemIdCandidates": {
+      "dataAttrs": {},
+      "ids": []
+    },
+    "timeTokenRaw": "18:09"
+  },
+  "snapshot": {
+    "url": "/mail/inbox/id/AAA",
+    "subject": "",
+    "blocks": [
+      {
+        "aria": "Message",
+        "id": "",
+        "idAttrs": {},
+        "text": "Weekly note for all.",
+        "textLen": 20,
+        "collapsed": false,
+        "headerText": "From: Dealer Parts Desk\nTo: Fleet Ops DL; Zila Santiago",
+        "fromCandidates": [
+          {
+            "title": "Dealer Parts Desk <parts@dealer.example.test>",
+            "aria": "",
+            "text": "Dealer Parts Desk",
+            "href": "mailto:parts@dealer.example.test"
+          }
+        ],
+        "toCandidates": [
+          {
+            "title": "Fleet Ops DL <fleet-ops-dl@example.test>",
+            "aria": "",
+            "text": "Fleet Ops DL",
+            "href": "mailto:fleet-ops-dl@example.test"
+          },
+          {
+            "title": "Zila Santiago <zila.santiago@example.test>",
+            "aria": "",
+            "text": "Zila Santiago",
+            "href": "mailto:zila.santiago@example.test"
+          }
+        ],
+        "ccCandidates": [],
+        "timeCandidates": [
+          {
+            "tag": "time",
+            "datetime": "2026-11-04T14:30:00-05:00",
+            "title": "",
+            "aria": "",
+            "text": "2:30 PM"
+          }
+        ],
+        "attachments": [],
+        "controls": []
+      }
+    ],
+    "paneFallback": false,
+    "buttons": [
+      "Reply",
+      "Reply all",
+      "Forward"
+    ]
+  }
+}

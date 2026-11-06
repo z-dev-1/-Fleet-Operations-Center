@@ -1,0 +1,64 @@
+{
+  "_note": "synthetic, hand-authored; addresses are @example.test",
+  "row": {
+    "index": 0,
+    "convId": "conv/pane-fallback=",
+    "aria": "Dealer Parts Unit status 40000 18:09 Preview text for message number 0",
+    "hasAttach": false,
+    "unread": false,
+    "itemIdCandidates": {
+      "dataAttrs": {},
+      "ids": []
+    },
+    "timeTokenRaw": "18:09"
+  },
+  "snapshot": {
+    "url": "/mail/inbox/id/AAA",
+    "subject": "",
+    "blocks": [
+      {
+        "aria": "Message",
+        "id": "",
+        "idAttrs": {},
+        "text": "Whole pane text including navigation chrome and unit 40123",
+        "textLen": 58,
+        "collapsed": false,
+        "headerText": "From: Dealer Parts Desk\nTo: Zila Santiago",
+        "fromCandidates": [
+          {
+            "title": "Dealer Parts Desk <parts@dealer.example.test>",
+            "aria": "",
+            "text": "Dealer Parts Desk",
+            "href": "mailto:parts@dealer.example.test"
+          }
+        ],
+        "toCandidates": [
+          {
+            "title": "Zila Santiago <zila.santiago@example.test>",
+            "aria": "",
+            "text": "Zila Santiago",
+            "href": "mailto:zila.santiago@example.test"
+          }
+        ],
+        "ccCandidates": [],
+        "timeCandidates": [
+          {
+            "tag": "time",
+            "datetime": "2026-11-04T14:30:00-05:00",
+            "title": "",
+            "aria": "",
+            "text": "2:30 PM"
+          }
+        ],
+        "attachments": [],
+        "controls": []
+      }
+    ],
+    "paneFallback": true,
+    "buttons": [
+      "Reply",
+      "Reply all",
+      "Forward"
+    ]
+  }
+}

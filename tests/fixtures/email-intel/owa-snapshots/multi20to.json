@@ -1,0 +1,178 @@
+{
+  "_note": "synthetic, hand-authored; addresses are @example.test",
+  "row": {
+    "index": 0,
+    "convId": "conv/multi20to=",
+    "aria": "Dealer Parts Unit status 40000 18:09 Preview text for message number 0",
+    "hasAttach": false,
+    "unread": false,
+    "itemIdCandidates": {
+      "dataAttrs": {},
+      "ids": []
+    },
+    "timeTokenRaw": "18:09"
+  },
+  "snapshot": {
+    "url": "/mail/inbox/id/AAA",
+    "subject": "",
+    "blocks": [
+      {
+        "aria": "Message",
+        "id": "",
+        "idAttrs": {},
+        "text": "Parts arrived for unit 40123, repair starts Monday.",
+        "textLen": 51,
+        "collapsed": false,
+        "headerText": "From: Dealer Parts Desk\nTo: Person 01; Person 02; Person 03; Person 04; Person 05; Person 06; Person 07; Zila Santiago; Person 09; Person 10; Person 11; Person 12; Person 13; Person 14; Person 15; Person 16; Person 17; Person 18; Person 19; Person 20",
+        "fromCandidates": [
+          {
+            "title": "Dealer Parts Desk <parts@dealer.example.test>",
+            "aria": "",
+            "text": "Dealer Parts Desk",
+            "href": "mailto:parts@dealer.example.test"
+          }
+        ],
+        "toCandidates": [
+          {
+            "title": "Person 01 <person01@example.test>",
+            "aria": "",
+            "text": "Person 01",
+            "href": "mailto:person01@example.test"
+          },
+          {
+            "title": "Person 02 <person02@example.test>",
+            "aria": "",
+            "text": "Person 02",
+            "href": "mailto:person02@example.test"
+          },
+          {
+            "title": "Person 03 <person03@example.test>",
+            "aria": "",
+            "text": "Person 03",
+            "href": "mailto:person03@example.test"
+          },
+          {
+            "title": "Person 04 <person04@example.test>",
+            "aria": "",
+            "text": "Person 04",
+            "href": "mailto:person04@example.test"
+          },
+          {
+            "title": "Person 05 <person05@example.test>",
+            "aria": "",
+            "text": "Person 05",
+            "href": "mailto:person05@example.test"
+          },
+          {
+            "title": "Person 06 <person06@example.test>",
+            "aria": "",
+            "text": "Person 06",
+            "href": "mailto:person06@example.test"
+          },
+          {
+            "title": "Person 07 <person07@example.test>",
+            "aria": "",
+            "text": "Person 07",
+            "href": "mailto:person07@example.test"
+          },
+          {
+            "title": "Zila Santiago <zila.santiago@example.test>",
+            "aria": "",
+            "text": "Zila Santiago",
+            "href": "mailto:zila.santiago@example.test"
+          },
+          {
+            "title": "Person 09 <person09@example.test>",
+            "aria": "",
+            "text": "Person 09",
+            "href": "mailto:person09@example.test"
+          },
+          {
+            "title": "Person 10 <person10@example.test>",
+            "aria": "",
+            "text": "Person 10",
+            "href": "mailto:person10@example.test"
+          },
+          {
+            "title": "Person 11 <person11@example.test>",
+            "aria": "",
+            "text": "Person 11",
+            "href": "mailto:person11@example.test"
+          },
+          {
+            "title": "Person 12 <person12@example.test>",
+            "aria": "",
+            "text": "Person 12",
+            "href": "mailto:person12@example.test"
+          },
+          {
+            "title": "Person 13 <person13@example.test>",
+            "aria": "",
+            "text": "Person 13",
+            "href": "mailto:person13@example.test"
+          },
+          {
+            "title": "Person 14 <person14@example.test>",
+            "aria": "",
+            "text": "Person 14",
+            "href": "mailto:person14@example.test"
+          },
+          {
+            "title": "Person 15 <person15@example.test>",
+            "aria": "",
+            "text": "Person 15",
+            "href": "mailto:person15@example.test"
+          },
+          {
+            "title": "Person 16 <person16@example.test>",
+            "aria": "",
+            "text": "Person 16",
+            "href": "mailto:person16@example.test"
+          },
+          {
+            "title": "Person 17 <person17@example.test>",
+            "aria": "",
+            "text": "Person 17",
+            "href": "mailto:person17@example.test"
+          },
+          {
+            "title": "Person 18 <person18@example.test>",
+            "aria": "",
+            "text": "Person 18",
+            "href": "mailto:person18@example.test"
+          },
+          {
+            "title": "Person 19 <person19@example.test>",
+            "aria": "",
+            "text": "Person 19",
+            "href": "mailto:person19@example.test"
+          },
+          {
+            "title": "Person 20 <person20@example.test>",
+            "aria": "",
+            "text": "Person 20",
+            "href": "mailto:person20@example.test"
+          }
+        ],
+        "ccCandidates": [],
+        "timeCandidates": [
+          {
+            "tag": "time",
+            "datetime": "2026-11-04T14:30:00-05:00",
+            "title": "",
+            "aria": "",
+            "text": "2:30 PM"
+          }
+        ],
+        "attachments": [],
+        "controls": []
+      }
+    ],
+    "paneFallback": false,
+    "buttons": [
+      "Reply",
+      "Reply all",
+      "Forward"
+    ]
+  }
+}

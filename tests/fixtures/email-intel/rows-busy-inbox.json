@@ -1,0 +1,803 @@
+{
+  "_note": "synthetic inbox rows, hand-authored; senders are fictional",
+  "folders": {
+    "Inbox": [
+      {
+        "index": 0,
+        "convId": "conv/inbox/0=",
+        "aria": "Unread Inbox Sender Status Inbox 0 18:09 Preview text for message number 0",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 1,
+        "convId": "conv/inbox/1=",
+        "aria": "Unread Inbox Sender Status Inbox 1 18:09 Preview text for message number 1",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 2,
+        "convId": "conv/inbox/2=",
+        "aria": "Unread Inbox Sender Status Inbox 2 18:09 Preview text for message number 2",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 3,
+        "convId": "conv/inbox/3=",
+        "aria": "Unread Inbox Sender Status Inbox 3 18:09 Preview text for message number 3",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 4,
+        "convId": "conv/inbox/4=",
+        "aria": "Unread Inbox Sender Status Inbox 4 18:09 Preview text for message number 4",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 5,
+        "convId": "conv/inbox/5=",
+        "aria": "Unread Inbox Sender Status Inbox 5 18:09 Preview text for message number 5",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 6,
+        "convId": "conv/inbox/6=",
+        "aria": "Unread Inbox Sender Status Inbox 6 18:09 Preview text for message number 6",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 7,
+        "convId": "conv/inbox/7=",
+        "aria": "Unread Inbox Sender Status Inbox 7 18:09 Preview text for message number 7",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 8,
+        "convId": "conv/inbox/8=",
+        "aria": "Unread Inbox Sender Status Inbox 8 18:09 Preview text for message number 8",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 9,
+        "convId": "conv/inbox/9=",
+        "aria": "Unread Inbox Sender Status Inbox 9 18:09 Preview text for message number 9",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 10,
+        "convId": "conv/inbox/10=",
+        "aria": "Unread Inbox Sender Status Inbox 10 18:09 Preview text for message number 10",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 11,
+        "convId": "conv/inbox/11=",
+        "aria": "Unread Inbox Sender Status Inbox 11 18:09 Preview text for message number 11",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 12,
+        "convId": "conv/inbox/12=",
+        "aria": "Unread Inbox Sender Status Inbox 12 18:09 Preview text for message number 12",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 13,
+        "convId": "conv/inbox/13=",
+        "aria": "Unread Inbox Sender Status Inbox 13 18:09 Preview text for message number 13",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 14,
+        "convId": "conv/inbox/14=",
+        "aria": "Unread Inbox Sender Status Inbox 14 18:09 Preview text for message number 14",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 15,
+        "convId": "conv/inbox/15=",
+        "aria": "Unread Inbox Sender Status Inbox 15 18:09 Preview text for message number 15",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 16,
+        "convId": "conv/inbox/16=",
+        "aria": "Unread Inbox Sender Status Inbox 16 18:09 Preview text for message number 16",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 17,
+        "convId": "conv/inbox/17=",
+        "aria": "Unread Inbox Sender Status Inbox 17 18:09 Preview text for message number 17",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 18,
+        "convId": "conv/inbox/18=",
+        "aria": "Unread Inbox Sender Status Inbox 18 18:09 Preview text for message number 18",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 19,
+        "convId": "conv/inbox/19=",
+        "aria": "Unread Inbox Sender Status Inbox 19 18:09 Preview text for message number 19",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 20,
+        "convId": "conv/inbox/20=",
+        "aria": "Unread Inbox Sender Status Inbox 20 18:09 Preview text for message number 20",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 21,
+        "convId": "conv/inbox/21=",
+        "aria": "Unread Inbox Sender Status Inbox 21 18:09 Preview text for message number 21",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 22,
+        "convId": "conv/inbox/22=",
+        "aria": "Unread Inbox Sender Status Inbox 22 18:09 Preview text for message number 22",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 23,
+        "convId": "conv/inbox/23=",
+        "aria": "Unread Inbox Sender Status Inbox 23 18:09 Preview text for message number 23",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 24,
+        "convId": "conv/inbox/24=",
+        "aria": "Unread Inbox Sender Status Inbox 24 18:09 Preview text for message number 24",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 25,
+        "convId": "conv/inbox/25=",
+        "aria": "Unread Inbox Sender Status Inbox 25 18:09 Preview text for message number 25",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 26,
+        "convId": "conv/inbox/26=",
+        "aria": "Unread Inbox Sender Status Inbox 26 18:09 Preview text for message number 26",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 27,
+        "convId": "conv/inbox/27=",
+        "aria": "Unread Inbox Sender Status Inbox 27 18:09 Preview text for message number 27",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 28,
+        "convId": "conv/inbox/28=",
+        "aria": "Unread Inbox Sender Status Inbox 28 18:09 Preview text for message number 28",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 29,
+        "convId": "conv/inbox/29=",
+        "aria": "Unread Inbox Sender Status Inbox 29 18:09 Preview text for message number 29",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 30,
+        "convId": "conv/inbox/30=",
+        "aria": "Unread Inbox Sender Status Inbox 30 18:09 Preview text for message number 30",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 31,
+        "convId": "conv/inbox/31=",
+        "aria": "Unread Inbox Sender Status Inbox 31 18:09 Preview text for message number 31",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 32,
+        "convId": "conv/inbox/32=",
+        "aria": "Unread Inbox Sender Status Inbox 32 18:09 Preview text for message number 32",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 33,
+        "convId": "conv/inbox/33=",
+        "aria": "Unread Inbox Sender Status Inbox 33 18:09 Preview text for message number 33",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 34,
+        "convId": "conv/inbox/34=",
+        "aria": "Unread Inbox Sender Status Inbox 34 18:09 Preview text for message number 34",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 35,
+        "convId": "conv/inbox/35=",
+        "aria": "Unread Inbox Sender Status Inbox 35 18:09 Preview text for message number 35",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 36,
+        "convId": "conv/inbox/36=",
+        "aria": "Unread Inbox Sender Status Inbox 36 18:09 Preview text for message number 36",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 37,
+        "convId": "conv/inbox/37=",
+        "aria": "Unread Inbox Sender Status Inbox 37 18:09 Preview text for message number 37",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 38,
+        "convId": "conv/inbox/38=",
+        "aria": "Unread Inbox Sender Status Inbox 38 18:09 Preview text for message number 38",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 39,
+        "convId": "conv/inbox/39=",
+        "aria": "Unread Inbox Sender Status Inbox 39 18:09 Preview text for message number 39",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 40,
+        "convId": "conv/inbox/40=",
+        "aria": "Unread Inbox Sender Status Inbox 40 18:09 Preview text for message number 40",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 41,
+        "convId": "conv/inbox/41=",
+        "aria": "Unread Inbox Sender Status Inbox 41 18:09 Preview text for message number 41",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 42,
+        "convId": "conv/inbox/42=",
+        "aria": "Unread Inbox Sender Status Inbox 42 18:09 Preview text for message number 42",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 43,
+        "convId": "conv/inbox/43=",
+        "aria": "Unread Inbox Sender Status Inbox 43 18:09 Preview text for message number 43",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 44,
+        "convId": "conv/inbox/44=",
+        "aria": "Unread Inbox Sender Status Inbox 44 18:09 Preview text for message number 44",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 45,
+        "convId": "conv/inbox/45=",
+        "aria": "Unread Inbox Sender Status Inbox 45 18:09 Preview text for message number 45",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 46,
+        "convId": "conv/inbox/46=",
+        "aria": "Unread Inbox Sender Status Inbox 46 18:09 Preview text for message number 46",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 47,
+        "convId": "conv/inbox/47=",
+        "aria": "Unread Inbox Sender Status Inbox 47 18:09 Preview text for message number 47",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 48,
+        "convId": "conv/inbox/48=",
+        "aria": "Unread Inbox Sender Status Inbox 48 18:09 Preview text for message number 48",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 49,
+        "convId": "conv/inbox/49=",
+        "aria": "Unread Inbox Sender Status Inbox 49 18:09 Preview text for message number 49",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 50,
+        "convId": "conv/inbox/50=",
+        "aria": "Unread Inbox Sender Status Inbox 50 18:09 Preview text for message number 50",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 51,
+        "convId": "conv/inbox/51=",
+        "aria": "Unread Inbox Sender Status Inbox 51 18:09 Preview text for message number 51",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 52,
+        "convId": "conv/inbox/52=",
+        "aria": "Unread Inbox Sender Status Inbox 52 18:09 Preview text for message number 52",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 53,
+        "convId": "conv/inbox/53=",
+        "aria": "Unread Inbox Sender Status Inbox 53 18:09 Preview text for message number 53",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 54,
+        "convId": "conv/inbox/54=",
+        "aria": "Unread Inbox Sender Status Inbox 54 18:09 Preview text for message number 54",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 55,
+        "convId": "conv/inbox/55=",
+        "aria": "Unread Inbox Sender Status Inbox 55 18:09 Preview text for message number 55",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 56,
+        "convId": "conv/inbox/56=",
+        "aria": "Unread Inbox Sender Status Inbox 56 18:09 Preview text for message number 56",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 57,
+        "convId": "conv/inbox/57=",
+        "aria": "Unread Inbox Sender Status Inbox 57 18:09 Preview text for message number 57",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 58,
+        "convId": "conv/inbox/58=",
+        "aria": "Unread Inbox Sender Status Inbox 58 18:09 Preview text for message number 58",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 59,
+        "convId": "conv/inbox/59=",
+        "aria": "Unread Inbox Sender Status Inbox 59 18:09 Preview text for message number 59",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      }
+    ],
+    "DOMO": [
+      {
+        "index": 0,
+        "convId": "conv/domo/0=",
+        "aria": "Unread DOMO Sender Status DOMO 0 18:09 Preview text for message number 0",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 1,
+        "convId": "conv/domo/1=",
+        "aria": "Unread DOMO Sender Status DOMO 1 18:09 Preview text for message number 1",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      }
+    ],
+    "Relay Garage": [
+      {
+        "index": 0,
+        "convId": "conv/relaygarage/0=",
+        "aria": "Unread Relay Garage Sender Status Relay Garage 0 18:09 Preview text for message number 0",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 1,
+        "convId": "conv/relaygarage/1=",
+        "aria": "Unread Relay Garage Sender Status Relay Garage 1 18:09 Preview text for message number 1",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 2,
+        "convId": "conv/relaygarage/2=",
+        "aria": "Unread Relay Garage Sender Status Relay Garage 2 18:09 Preview text for message number 2",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      },
+      {
+        "index": 3,
+        "convId": "conv/relaygarage/3=",
+        "aria": "Unread Relay Garage Sender Status Relay Garage 3 18:09 Preview text for message number 3",
+        "hasAttach": false,
+        "unread": true,
+        "itemIdCandidates": {
+          "dataAttrs": {},
+          "ids": []
+        },
+        "timeTokenRaw": "18:09"
+      }
+    ]
+  }
+}
