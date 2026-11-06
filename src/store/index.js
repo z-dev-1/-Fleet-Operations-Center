@@ -269,6 +269,34 @@ const REGISTRY = {
   //   observedAt, messageId, conversationId, sender, informationType,
   //   usedInConclusion, isConflict } ] }.
   emailEvidence:           () => path.join(P.dataDir, 'email_evidence.json'),
+  // Email Triage Intelligence (default-OFF flags, src/email-intel/*, see
+  // src/email-intel/stores.js). These files are created ONLY on the first scan
+  // with the flags ON; with flags OFF nothing reads or writes them. Every
+  // document carries `version: 1`; a reader seeing a newer version is read-only.
+  // Config: user-editable identity, folders, caps, policy (thresholds raise-only).
+  //   { version:1, me:{names,addresses,distributionLists,fasName?}, folders:null|[..],
+  //     caps:{maxEmails,maxOpen,aiCalls,lookbackDays}, minConfidence, banners:[..],
+  //     attachments:{...}, aiConcurrency, mailboxTzVerified, sentFolder }.
+  emailIntelConfig:        () => path.join(P.dataDir, 'email_intel_config.json'),
+  // Per-folder cursors, rotation, scan state and OWA auth outcome.
+  //   { version:1, folders:{ '<folder>':{ seenRows:[..LRU 300], caughtUp, backlog, lastReadAt, ... } },
+  //     rotation:0, scan:{ current:null|{..}, last:null|{..} }, owaAuth:null|{..} }.
+  emailIntelCheckpoints:   () => path.join(P.dataDir, 'email_intel_checkpoints.json'),
+  // Message event ledger + thread index (stripped content, analysis). 1,500 msgs / 30 d, 8 MB cap.
+  //   { version:1, messages:{ '<messageKey>':MessageRecord }, byConv:{ '<conversationKey>':[messageKey..] } }.
+  emailIntelMessages:      () => path.join(P.dataDir, 'email_intel_messages.json'),
+  // Durable "My Email Actions" items and question states.
+  //   { version:1, items:{ '<actionId>':ActionItem }, questions:{ '<questionId>':QuestionState } }.
+  emailIntelActions:       () => path.join(P.dataDir, 'email_intel_actions.json'),
+  // Fact dedupe + provenance for unit-timeline writes (4,000 entries).
+  //   { version:1, entries:{ '<factKey>':{ state:'pending'|'applied'|.., provenance.. } } }.
+  emailIntelTimelineLedger: () => path.join(P.dataDir, 'email_intel_timeline_ledger.json'),
+  // Staged facts awaiting review (uncertain, stale, conflicting, low confidence).
+  //   { version:1, items:{ '<stagedId>':StagedItem } }.
+  emailIntelStaged:        () => path.join(P.dataDir, 'email_intel_staged.json'),
+  // Send attempts and reconcile history (never blindly resend).
+  //   { version:1, attempts:{ '<attemptId>':SendAttempt } }.
+  emailIntelSends:         () => path.join(P.dataDir, 'email_intel_sends.json'),
   // Relay ↔ Offsite reconcile (2026-10) — see src/scrapers/relay_reconcile.js.
   // Config: { enabled, autoPostToRelay (MODE A vs MODE B), staleDays,
   //   maxUnitsPerSync, minConfidence }.

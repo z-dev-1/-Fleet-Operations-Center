@@ -68,6 +68,19 @@
  *   settings.longDwell.sharepointWriteCommit / FLEET_LONGDWELL_SP_COMMIT '0' | '1'  (forced off without master)
  *   settings.longDwell.sharepointGuard       'modified-recheck' (default) | 'if-match'
  *
+ * Email Triage Intelligence (all default OFF; see resolveEmailIntelFlags below):
+ *
+ *   settings.email.intel.enabled        / FLEET_EMAIL_INTEL           '0' | '1'  (master)
+ *   settings.email.intel.capture        / FLEET_EMAIL_INTEL_CAPTURE   '0' | '1'
+ *   settings.email.intel.multiRecipient / FLEET_EMAIL_INTEL_MULTI     '0' | '1'
+ *   settings.email.intel.timelineWrites / FLEET_EMAIL_INTEL_TIMELINE  '0' | '1'
+ *   settings.email.intel.actionsView    / FLEET_EMAIL_INTEL_ACTIONS   '0' | '1'
+ *   settings.email.intel.threadReplies  / FLEET_EMAIL_INTEL_REPLIES   '0' | '1'
+ *   settings.email.intel.attachments    / FLEET_EMAIL_INTEL_ATTACH    '0' | '1'
+ *   (a sub-flag only takes effect when its dependencies are effective; the
+ *   chain is documented at resolveEmailIntelFlags. Read once per process by
+ *   src/email-intel/flags.js and memoized, restart to change.)
+ *
  * Read at point of use (startup / once per run), never per tick.
  */
 
@@ -505,6 +518,64 @@ function loadLongDwellSp(deps = {}) {
   }
 }
 
+// ── Email Triage Intelligence (default OFF) ─────────────────────────────────
+//   settings.email.intel.<key>  boolean (=== true) / FLEET_EMAIL_INTEL[_<SUFFIX>] '0'|'1'
+// Raw value per key = settings value === true, overridden by env '0'/'1' (junk
+// ignored). Effective flags apply the dependency chain:
+//   capture        = enabled && capture
+//   multiRecipient = capture(eff) && multiRecipient
+//   actionsView    = multiRecipient(eff) && actionsView
+//   timelineWrites = multiRecipient(eff) && timelineWrites && actionsView(eff)
+//   threadReplies  = capture(eff) && multiRecipient(eff) && threadReplies
+//   attachments    = capture(eff) && multiRecipient(eff) && attachments
+// timelineWrites set while actionsView is not effective leaves the system in
+// shadow mode and yields the warning 'timelineWrites-needs-actionsView'.
+// No new store key for flags: 'settings' is already in the store REGISTRY.
+const EMAIL_INTEL_ENV = {
+  enabled: 'FLEET_EMAIL_INTEL',
+  capture: 'FLEET_EMAIL_INTEL_CAPTURE',
+  multiRecipient: 'FLEET_EMAIL_INTEL_MULTI',
+  timelineWrites: 'FLEET_EMAIL_INTEL_TIMELINE',
+  actionsView: 'FLEET_EMAIL_INTEL_ACTIONS',
+  threadReplies: 'FLEET_EMAIL_INTEL_REPLIES',
+  attachments: 'FLEET_EMAIL_INTEL_ATTACH',
+};
+
+function resolveEmailIntelFlags(settings, env) {
+  const i = _obj(_obj(_obj(settings).email).intel);
+  const raw = {};
+  for (const k of Object.keys(EMAIL_INTEL_ENV)) {
+    let on = i[k] === true;
+    const e = _envBool(env, EMAIL_INTEL_ENV[k]);
+    if (e !== null) on = e;
+    raw[k] = on;
+  }
+  const effective = {};
+  effective.capture = raw.enabled && raw.capture;
+  effective.multiRecipient = effective.capture && raw.multiRecipient;
+  effective.actionsView = effective.multiRecipient && raw.actionsView;
+  effective.timelineWrites = effective.multiRecipient && raw.timelineWrites && effective.actionsView;
+  effective.threadReplies = effective.capture && effective.multiRecipient && raw.threadReplies;
+  effective.attachments = effective.capture && effective.multiRecipient && raw.attachments;
+  const warnings = [];
+  if (raw.timelineWrites && !effective.actionsView) warnings.push('timelineWrites-needs-actionsView');
+  return Object.assign({}, raw, { effective, warnings });
+}
+
+function loadEmailIntel(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveEmailIntelFlags(settings, env);
+  } catch (_) {
+    return resolveEmailIntelFlags({}, {});
+  }
+}
+
 module.exports = {
   resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT,
   resolveCommsFlags, loadComms, COMMS_POLLING_MODES,
@@ -516,4 +587,5 @@ module.exports = {
   resolveJustMeContextFlags, loadJustMeContext,
   resolveDbrLookupFlags, loadDbrLookup,
   resolveLongDwellSpFlags, loadLongDwellSp, LONGDWELL_SP_ENV,
+  resolveEmailIntelFlags, loadEmailIntel, EMAIL_INTEL_ENV,
 };
