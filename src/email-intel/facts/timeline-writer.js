@@ -27,7 +27,7 @@ const fk = require('./fact-key');
 const staged = require('./staged');
 const evidence = require('./evidence');
 const { FACT_LABELS } = require('../understand/schema');
-const { safeErr } = require('../redact');
+const { errName } = require('../redact');
 let logger;
 try { logger = require('../../utils/logger')('email-intel'); } catch (_) { logger = { info() {}, warn() {}, error() {} }; }
 
@@ -225,7 +225,8 @@ async function _commit(input) {
 async function _write(i, ledgerKey, line, keys, deps, now, supersededEntry) {
   const unit = String(i.unit).trim();
   let res = null;
-  try { res = deps.apply(unit, line); } catch (e) { logger.warn('[email-intel] timeline write threw unit=' + unit + ' ' + safeErr(e)); res = { ok: false, error: 'threw' }; }
+  // error name / code only: a write error message could echo the line (email-derived text)
+  try { res = deps.apply(unit, line); } catch (e) { logger.warn('[email-intel] timeline write threw unit=' + unit + ' ' + errName(e)); res = { ok: false, error: 'threw' }; }
   if (!res || !res.ok) {
     let attempts = 0;
     _setEntry(ledgerKey, (e) => { attempts = (e.attempts || 0) + 1; return { attempts, lastError: 'write-failed' }; });

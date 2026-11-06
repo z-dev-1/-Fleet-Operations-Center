@@ -29,7 +29,7 @@ const statusMod = require('./reliability/status');
 const fp = require('./capture/folder-plan');
 const ledger = require('./ingest/ledger');
 const adapter = require('./ingest/legacy-adapter');
-const { safeErr } = require('./redact');
+const { safeErr, errName } = require('./redact');
 let logger;
 try { logger = require('../utils/logger')('email-intel'); } catch (_) { logger = { info() {}, warn() {}, error() {} }; }
 
@@ -156,7 +156,10 @@ async function _scan(opts, trigger) {
     });
     if (!r.ok) storeError = r.code || 'store';
   }
-  if (!storeError) stores.update('messages', (doc) => { ledger.applyRetention(doc, { now: endMs }); return doc; });
+  if (!storeError) {
+    const pinned = _pinnedByStaged();
+    stores.update('messages', (doc) => { ledger.applyRetention(doc, pinned ? { now: endMs, pinned } : { now: endMs }); return doc; });
+  }
 
   // Decisions + results. Phase A: the legacy triageEmails on the latest message of each conversation.
   // Phase B (multiRecipient): stage 5, the v2 analysis through the isolated lane; legacy fields by code.
@@ -188,6 +191,12 @@ function _multiRecipient() {
   try { return flags.get().effective.multiRecipient === true; } catch (_) { return false; }
 }
 
+/** Messages referenced by open staged items are never evicted (design 1.2). Phase B/C only. */
+function _pinnedByStaged() {
+  if (!_multiRecipient()) return null;
+  try { return require('./facts/staged').openMessageKeys(stores.load('staged')); } catch (_) { return null; }
+}
+
 /**
  * Stage 5 (Phase B): analyze every eligible message through the isolated lane (one call at a time,
  * budgeted, deadline-aware), commit each analysis as it finishes, then derive the legacy results by
@@ -208,6 +217,11 @@ async function _understand(o) {
     const r = stores.update('messages', (doc) => { const x = doc.messages && doc.messages[key]; if (x) x.analysis = a; return doc; });
     if (!r.ok && !commitFailed) commitFailed = r.code || 'store';
   };
+  const pipeline = require('./facts/pipeline');
+  let effective = {};
+  try { effective = flags.get().effective || {}; } catch (_) { effective = {}; }
+  // Steps 4-5 (Phase C): pending-write reconcile, staged caps, per-phase legacy bootstrap (before any rebuild).
+  try { await pipeline.beforeAnalysis({ effective, prevResults, lookbackDays: cfg.caps.lookbackDays }); } catch (e) { logger.warn('[email-intel] fact pre-pass failed ' + errName(e)); }
   let stats = null;
   try {
     stats = await analyze.runScanAnalysis(msgDoc, {
@@ -217,6 +231,23 @@ async function _understand(o) {
     logger.warn('[email-intel] analysis failed ' + safeErr(e));
   }
   if (stats) logger.info('[email-intel] analysis id=' + scanId + ' eligible=' + stats.eligible + ' ok=' + stats.ok + ' cheap=' + stats.skippedCheap + ' old=' + stats.skippedOld + ' unavailable=' + stats.aiUnavailable + ' invalid=' + stats.invalid + ' pending=' + stats.pending + ' calls=' + stats.aiCalls + ' lane=' + stats.laneState);
+
+  // Stage 7 (Phase C): evaluate new facts; apply (timelineWrites), stage, corroborate or record evidence.
+  // The legacy Email Triage opt-outs come from the config read once at scan start (F2-01).
+  let facts = null;
+  if (!commitFailed) {
+    try {
+      facts = await pipeline.runFactStage({
+        effective, index, intelCfg: cfg, prevResults, canonicalFor: _canonicalFor, scanId,
+        optCfg: { autoApplyUnitUpdates: legacyCfg.autoApplyUnitUpdates, readyDmSuggested: legacyCfg.readyDmSuggested },
+      });
+    } catch (e) {
+      logger.warn('[email-intel] fact stage failed ' + errName(e));
+    }
+    if (facts && facts.ledgerError) commitFailed = 'ledger';
+  }
+  let applied = new Set();
+  try { applied = require('./facts/timeline-writer').appliedMessageKeys(); } catch (_) { applied = new Set(); }
 
   // Rebuild the legacy record of every conversation touched or analyzed this scan, and of any whose stored
   // record is behind the ledger (self-heal after a crash between analysis and the results save).
@@ -239,12 +270,16 @@ async function _understand(o) {
     prev: prevResults, views, now: doneMs, cfg: { readyDmSuggested: legacyCfg.readyDmSuggested },
     canonicalFor: _canonicalFor,
     fleetRow: (unit) => index.byId.get(String(unit).toLowerCase()) || null,
-    appliedFor: () => false,                                   // Phase C owns the timeline ledger; nothing is applied in Phase B
+    appliedFor: (messageKey) => applied.has(messageKey),      // display flag from the timeline ledger (Phase C)
     deleteFor: (records) => analyze.conservativeDelete(records, { openActions: 0, cfg }),
-    meta: { authBlocked: d.outcome === 'auth-blocked', readError: d.readError, intel: { scanId, outcome: d.outcome, partial: d.partial, coalesced: false } },
+    meta: {
+      authBlocked: d.outcome === 'auth-blocked', readError: d.readError,
+      intel: Object.assign({ scanId, outcome: d.outcome, partial: d.partial, coalesced: false },
+        facts ? { facts: { evaluated: facts.evaluated, applied: facts.applied, staged: facts.staged, duplicate: facts.duplicate, stale: facts.stale, outOfScope: facts.outOfScope, filtered: facts.filtered } } : {}),
+    },
   });
   store.save('emailTriageResults', results);
-  return { d, results, stats };
+  return { d, results, stats, facts };
 }
 
 /** Triage the new / changed conversations with the legacy triageEmails and persist the legacy results. */
@@ -358,8 +393,16 @@ function getStatus() {
     try { const s = require('./understand/lane').state(); laneSt = { state: s.state, checkedAt: s.checkedAt }; } catch (_) { /* status only */ }
     if (laneSt.state === 'unavailable' || laneSt.state === 'degraded') extra.push('isolated-lane-unavailable');
   }
+  let openStaged = 0;
+  if (f && f.multiRecipient) {
+    try {
+      const sd = stores.load('staged');
+      openStaged = require('./facts/staged').openCount(sd);
+      if (sd.overCap) extra.push('stagedOverCap');
+    } catch (_) { /* status only */ }
+  }
   return statusMod.buildStatus({
-    enabled: engaged(), flags: f, flagWarnings: warnings, lane: laneSt, extraWarnings: extra,
+    enabled: engaged(), flags: f, flagWarnings: warnings, lane: laneSt, extraWarnings: extra, openStaged,
     config: cfgMod.normalize(stores.load('config')), checkpoints: stores.load('checkpoints'), messages: stores.load('messages'),
     running: lock.isBusy(), current: lock.current(),
     readOnlyStores: ['config', 'checkpoints', 'messages'].map((n) => stores.isReadOnly(n)),

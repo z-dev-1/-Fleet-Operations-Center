@@ -7,6 +7,8 @@
  * while its gate is off (the auth-status:get precedent). Phase A (`capture`) fills in: status, scan,
  * get-config, set-config, dom-probe, set-tz-verified and the send-ready-dm prepare/confirm executor;
  * Phase B adds probe-lane (manual P-LANE probe of the isolated lane, no email content).
+ * Phase C adds get-staged and the approve-staged / reject-staged prepare validation (approve needs
+ * timelineWrites: TIMELINE_DISABLED while only actionsView is on; conflict-ready needs acknowledgeConflictReady).
  * Channels owned by later phases return { ok:false, code:'NOT_IMPLEMENTED' } when their gate is open.
  * The legacy emailTriage:* channels are untouched here.
  *
@@ -64,7 +66,9 @@ const KIND_GATES = Object.freeze({
 const IMPLEMENTED = new Set([
   'emailIntel:status', 'emailIntel:scan', 'emailIntel:get-config', 'emailIntel:set-config', 'emailIntel:dom-probe',
   'emailIntel:set-tz-verified', 'emailIntel:prepare-action', 'emailIntel:confirm-action', 'emailIntel:probe-lane',
+  'emailIntel:get-staged',
 ]);
+const STAGED_STATES = ['open', 'approved', 'rejected', 'superseded', 'expired', 'all'];
 
 const OFF = () => ({ ok: true, enabled: false });
 const NOT_YET = () => ({ ok: false, code: 'NOT_IMPLEMENTED', error: 'not available in this build phase' });
@@ -198,11 +202,31 @@ function registerEmailIntelIPC(_ctx) {
     return { ok: !!r.ok, lane: { state: s.state, checkedAt: s.checkedAt }, error: r.ok ? undefined : (r.error || 'unavailable') };
   });
 
+  // Staged facts awaiting review (Phase C). Paging ints; items carry code-built text plus the validated fact and quote.
+  handle('emailIntel:get-staged', (_e, payload) => {
+    if (!gateOpen(GATES['emailIntel:get-staged'])) return OFF();
+    const p = payload == null ? {} : payload;
+    if (!_isPlain(p)) return BAD('payload');
+    if (p.offset !== undefined && (!Number.isInteger(p.offset) || p.offset < 0 || p.offset > 10000)) return BAD('offset');
+    if (p.limit !== undefined && (!Number.isInteger(p.limit) || p.limit < 1 || p.limit > 200)) return BAD('limit');
+    if (p.state !== undefined && !STAGED_STATES.includes(p.state)) return BAD('state');
+    const staged = require('../email-intel/facts/staged');
+    const doc = staged.load();
+    const l = staged.list(doc, { state: p.state || 'open', offset: p.offset || 0, limit: p.limit || 50 });
+    return { ok: true, items: l.items, total: l.total, openCount: staged.openCount(doc), expiredCount: doc.expiredCount || 0, overCap: !!doc.overCap, timelineWrites: gateOpen('timelineWrites') };
+  });
+
   handle('emailIntel:prepare-action', (_e, kind, payload) => {
     if (typeof kind !== 'string' || !confirm.KINDS.includes(kind)) {
       return gateOpen('capture') ? BAD('kind') : OFF();
     }
+    // Approving needs timelineWrites; with only the review view on, the item is visible but not approvable.
+    if (kind === 'approve-staged' && !gateOpen('timelineWrites')) return gateOpen('actionsView') ? { ok: false, code: 'TIMELINE_DISABLED' } : OFF();
     if (!gateOpen(KIND_GATES[kind])) return OFF();
+    if (kind === 'approve-staged' || kind === 'reject-staged') {
+      const check = executors.validateStaged(kind, payload);
+      if (!check.ok) return { ok: false, code: check.code, field: check.field };
+    }
     if (kind === 'send-ready-dm') {
       let results = null;
       try { results = require('../scrapers/email_triage').loadResults(); } catch (_) { results = null; }

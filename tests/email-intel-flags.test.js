@@ -69,6 +69,21 @@ describe('R8.7 / NFR-1 resolveEmailIntelFlags', () => {
     expect(ok.warnings).toEqual([]);
   });
 
+  it('F-13 timelineWrites set without actionsView: a scan stays in shadow mode (facts stage timeline-disabled, nothing written, status warns)', async () => {
+    const { phaseCWorld, fact } = await import('./fixtures/email-intel/phase-c.js');
+    const w = phaseCWorld({ enabled: true, capture: true, multiRecipient: true, timelineWrites: true });
+    try {
+      expect(flags.get().effective.timelineWrites).toBe(false);
+      w.rules.push({ unit: '40123', fact: fact() });
+      const res = await w.scan([w.cap({ subject: 'Turbo 40123', conversationId: 'conv-f13', body: 'Turbo ETA 11/12 for 40123.' })]);
+      expect(w.timeline('40123')).toBe('');
+      expect(w.ledger()).toEqual([]);
+      expect(w.staged()).toEqual([expect.objectContaining({ unit: '40123', reason: 'timeline-disabled', detail: 'timeline writes are not enabled', state: 'open' })]);
+      expect(res.emails[0].unitUpdateApplied).toBe(false);
+      expect(w.idx.getStatus().warnings).toContain('timelineWrites-needs-actionsView');
+    } finally { w.cleanup(); }
+  });
+
   it("env '0'/'1' override settings both ways; junk env is ignored", () => {
     expect(pf.resolveEmailIntelFlags(ON(FULL), { FLEET_EMAIL_INTEL: '0' }).effective).toEqual(ALL_OFF);
     expect(pf.resolveEmailIntelFlags(ON(FULL), { FLEET_EMAIL_INTEL_ACTIONS: '0' }).effective).toMatchObject({ actionsView: false, timelineWrites: false });

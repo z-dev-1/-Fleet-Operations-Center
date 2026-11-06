@@ -29,6 +29,13 @@ function safeErr(e) {
   return name + ':' + code + (msg ? ' ' + msg : '');
 }
 
+/** errName(e): `Name:code` only, no message (for errors that may echo email-derived text, e.g. timeline writes). */
+function errName(e) {
+  const name = (e && typeof e === 'object' && e.name) ? String(e.name) : 'Error';
+  const code = (e && typeof e === 'object' && e.code != null) ? String(e.code) : '';
+  return (name + ':' + code).replace(/[^A-Za-z0-9_:.-]/g, '').slice(0, 60);
+}
+
 /** maskAddress('jane@corp.test') -> 'j***@corp.test' (probe output only, never logs). */
 function maskAddress(addr) {
   const s = String(addr == null ? '' : addr).trim();
@@ -43,4 +50,4 @@ function tokenTag(token) {
   return m ? m[0] : '----';
 }
 
-module.exports = { rid, safeErr, maskAddress, tokenTag };
+module.exports = { rid, safeErr, errName, maskAddress, tokenTag };

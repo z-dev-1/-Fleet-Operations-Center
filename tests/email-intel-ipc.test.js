@@ -108,6 +108,93 @@ describe('ready DM (F-18, F2-03)', () => {
   });
 });
 
+describe('staged review: get-staged, approve-staged and reject-staged tokens (Phase C)', () => {
+  const PHASE_C = { enabled: true, capture: true, multiRecipient: true, actionsView: true, timelineWrites: true };
+  let stagedMod;
+  function seedStaged() {
+    stagedMod = require(path.join(fx.ROOT, 'src/email-intel/facts/staged'));
+    const msg = { messageKey: 'mi_0123456789abcdef', conversationKey: 'cv_0123456789abcdef', legacyId: 'em_r2', receivedAt: '2026-11-04T14:30:00.000Z', receivedAtQuality: 'exact', from: { name: 'Dealer Parts Desk', address: 'parts@dealer.example.test' }, body: { status: 'complete' } };
+    const doc = stagedMod.ensureDoc({ version: 1 });
+    const f = { kind: 'parts_eta', item: 'turbo', value: 'Turbo ETA 11/12', state: 'eta_given', date: '2026-11-12', assertion: 'stated', evidence: 'Turbo ETA 11/12 for 40123', effectiveConfidence: 0.7, caps: [] };
+    const low = stagedMod.stage(doc, { fact: f, unit: '40123', msg, reason: 'low-confidence', detail: 'confidence 0.70 is below the threshold', proposedLine: '11/04 Parts ETA: Turbo ETA 11/12 (per Dealer Parts Desk email 11/04) (user-approved) [em:00000000]' }).item;
+    const ready = stagedMod.stage(doc, { fact: { kind: 'pickup_readiness', item: null, value: 'Ready for pickup', state: 'ready', date: null, assertion: 'stated', evidence: 'unit 40456 is ready', effectiveConfidence: 0.9 }, unit: '40456', msg, reason: 'conflict-ready', detail: 'canonical status is in_repair', proposedLine: 'x [em:11111111]', canonicalSnapshot: { status: 'in_repair', repairPhase: 'in_repair' } }).item;
+    const mention = stagedMod.stage(doc, { fact: null, unit: '40789', msg, reason: 'unprocessed-window', detail: 'part of the email was not analyzed' }).item;
+    fx.resetWorld({
+      emailTriageResults: RESULTS, emailTriageConfig: { enabled: true, folders: ['Inbox'], autoApplyUnitUpdates: false, readyDmSuggested: true },
+      emailIntelStaged: doc, fleetData: { rows: [{ equipmentId: '40123', operator: 'ACME' }, { equipmentId: '40456', operator: 'BETA' }, { equipmentId: '40789', operator: 'ACME' }], syncedAt: new Date(Date.now() - 3_600_000).toISOString() },
+      canonicalState: { units: { '40456': { status: 'in_repair' } } },
+    });
+    return { low, ready, mention };
+  }
+
+  it('get-staged pages the open items; inert without timelineWrites or actionsView', async () => {
+    seedStaged();
+    expect(await call('emailIntel:get-staged', {})).toEqual({ ok: true, enabled: false });
+    flags._setForTests({ enabled: true, capture: true, multiRecipient: true });
+    expect(await call('emailIntel:get-staged', {})).toEqual({ ok: true, enabled: false });
+    flags._setForTests({ enabled: true, capture: true, multiRecipient: true, actionsView: true });       // review visible, writes off
+    const r = await call('emailIntel:get-staged', { limit: 2 });
+    expect(r).toMatchObject({ ok: true, total: 3, openCount: 3, expiredCount: 0, overCap: false, timelineWrites: false });
+    expect(r.items).toHaveLength(2);
+    expect(JSON.stringify(r)).not.toContain('parts@dealer');
+    for (const bad of [{ limit: 0 }, { limit: 201 }, { offset: -1 }, { state: 'nope' }]) expect((await call('emailIntel:get-staged', bad)).code).toBe('BAD_ARG');
+    expect(await call('emailIntel:get-staged', 'x')).toEqual({ ok: false, code: 'BAD_ARG', field: 'payload' });
+  });
+
+  it('approve-staged requires a token and an accepted native dialog; TIMELINE_DISABLED without timelineWrites; conflict-ready needs the acknowledgement', async () => {
+    const { low, ready, mention } = seedStaged();
+    // review on, writes off: approval is refused before any token exists; reject still works
+    flags._setForTests({ enabled: true, capture: true, multiRecipient: true, actionsView: true });
+    expect(await call('emailIntel:prepare-action', 'approve-staged', { stagedId: low.stagedId })).toEqual({ ok: false, code: 'TIMELINE_DISABLED' });
+    expect(confirm._liveCount()).toBe(0);
+    flags._setForTests(PHASE_C);
+    // payload schema (F-19): nothing is minted on a violation
+    for (const [p, field] of [[{}, 'stagedId'], [{ stagedId: 'st_nothex' }, 'stagedId'], [{ stagedId: 'st_' + 'f'.repeat(16) }, 'stagedId'], [{ stagedId: low.stagedId, acknowledgeConflictReady: 'yes' }, 'acknowledgeConflictReady'],
+      [{ stagedId: ready.stagedId }, 'acknowledgeConflictReady'], [{ stagedId: mention.stagedId }, 'stagedId']]) {
+      expect(await call('emailIntel:prepare-action', 'approve-staged', p)).toEqual({ ok: false, code: 'BAD_ARG', field });
+    }
+    expect(await call('emailIntel:prepare-action', 'approve-staged', 'x')).toEqual({ ok: false, code: 'BAD_ARG', field: 'payload' });
+    expect(confirm._liveCount()).toBe(0);
+    // no native dialog in this process: fail closed, nothing written
+    const p0 = await call('emailIntel:prepare-action', 'approve-staged', { stagedId: low.stagedId });
+    expect(p0).toMatchObject({ ok: true, token: expect.stringMatching(/^[0-9a-f]{32}$/) });
+    expect(p0.summary.headline).toBe('Apply staged update for unit 40123?');
+    expect(p0.summary.detailText).toContain('Staged because: low-confidence');
+    expect(await call('emailIntel:confirm-action', p0.token)).toEqual({ ok: false, code: 'DIALOG_UNAVAILABLE' });
+    expect(fx.doc('notesStore')).toBe('<absent>');
+    // accepted dialog: one write through the ledgered writer with the user-approved suffix (autoApply is off in config)
+    const dlg = acceptDialog();
+    const p1 = await call('emailIntel:prepare-action', 'approve-staged', { stagedId: low.stagedId });
+    const r = await call('emailIntel:confirm-action', p1.token);
+    expect(r).toMatchObject({ ok: true, state: 'applied' });
+    expect(dlg.showMessageBox.mock.calls[0][0]).toMatchObject({ title: 'Apply staged update', buttons: ['Cancel', 'Apply'] });
+    expect(fx.doc('notesStore')['40123'].timeline).toMatch(/Turbo ETA 11\/12 \(per Dealer Parts Desk email \d\d\/\d\d\) \(user-approved\) \[em:[0-9a-f]{8}\]$/);
+    expect(fx.doc('emailIntelStaged').items[low.stagedId]).toMatchObject({ state: 'approved', decidedBy: 'user' });
+    expect(await call('emailIntel:confirm-action', p1.token)).toEqual({ ok: false, code: 'TOKEN_USED' });
+    expect(await call('emailIntel:prepare-action', 'approve-staged', { stagedId: low.stagedId })).toEqual({ ok: false, code: 'BAD_ARG', field: 'stagedId' });   // no longer open
+    // conflict-ready with the explicit acknowledgement writes the unverified wording
+    const p2 = await call('emailIntel:prepare-action', 'approve-staged', { stagedId: ready.stagedId, acknowledgeConflictReady: true });
+    expect(p2.summary.detailText).toContain('Warning: canonical state says this unit is not ready');
+    expect(await call('emailIntel:confirm-action', p2.token)).toMatchObject({ ok: true, state: 'applied' });
+    expect(fx.doc('notesStore')['40456'].timeline).toContain(' - not confirmed in AAP/Relay (user-approved) [em:');
+    expect(fx.doc('canonicalState')).toEqual({ units: { '40456': { status: 'in_repair' } } });
+  });
+
+  it('reject-staged is a local decision (token, no native dialog) and is allowed with writes off', async () => {
+    const { low, mention } = seedStaged();
+    flags._setForTests({ enabled: true, capture: true, multiRecipient: true, actionsView: true });
+    const p = await call('emailIntel:prepare-action', 'reject-staged', { stagedId: mention.stagedId });
+    expect(p.ok).toBe(true);
+    expect(await call('emailIntel:confirm-action', p.token)).toEqual({ ok: true, state: 'rejected' });
+    expect(fx.doc('emailIntelStaged').items[mention.stagedId]).toMatchObject({ state: 'rejected', decidedBy: 'user' });
+    expect(fx.doc('emailIntelStaged').items[low.stagedId].state).toBe('open');
+    expect(fx.doc('notesStore')).toBe('<absent>');
+    expect(await call('emailIntel:prepare-action', 'reject-staged', { stagedId: mention.stagedId })).toEqual({ ok: false, code: 'BAD_ARG', field: 'stagedId' });
+    flags._setForTests(null);
+    expect(await call('emailIntel:prepare-action', 'reject-staged', { stagedId: low.stagedId })).toEqual({ ok: true, enabled: false });
+  });
+});
+
 describe('F-19 scan and config validation', () => {
   it('F-19 scan folders must match configured list', async () => {
     const V = intelIpc.validateScan;

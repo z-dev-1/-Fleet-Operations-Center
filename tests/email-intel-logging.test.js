@@ -224,3 +224,52 @@ describe('AC-9 Phase A capture paths log no dynamic content (FEAT-002)', () => {
     lane._resetForTests();
   }, 30_000);
 });
+describe('AC-9 Phase C fact paths log no dynamic content (FEAT-004)', () => {
+  it('apply, stage, duplicate, filtered, possible-duplicate, conflict, write failure, approve / reject and get-staged log only counts, ids and enums', async () => {
+    const { phaseCWorld, fact } = await import('./fixtures/email-intel/phase-c.js');
+    const w = phaseCWorld(undefined, { triageConfig: { autoApplyUnitUpdates: true, readyDmSuggested: true } });
+    try {
+      const FS = 'FACT-SENTINEL-4471';
+      const from = { name: S.name, address: S.addr };
+      w.store.save('canonicalState', { units: { '40456': { status: 'in_repair', repairPhase: 'in_repair', lastMeaningfulUpdate: { source: 'relay', text: S.body, at: 'yesterday' } } } });
+      const body = (u, extra) => S.body + ' ' + FS + ' turbo ETA 11/12 for ' + u + '. ' + (extra || '');
+      w.rules.push(
+        { unit: '40123', fact: fact({ value: FS + ' turbo ETA', evidence: FS + ' turbo ETA 11/12 for 40123' }) },
+        { unit: '40789', fact: fact({ value: FS + ' low', evidence: FS + ' turbo ETA 11/12 for 40789', confidence: 0.5 }) },
+        { unit: '40999', fact: fact({ kind: 'blocker', item: 'approval', state: 'approval', date: null, value: 'Vendor prerequested a preupdate ' + FS, evidence: FS + ' turbo ETA 11/12 for 40999' }) },
+        { unit: '40456', fact: fact({ kind: 'pickup_readiness', item: null, value: 'Ready ' + FS, state: 'ready', date: null, evidence: FS + ' turbo ETA 11/12 for 40456' }) },
+      );
+      w.store.save('notesStore', { '40999': { timeline: '11/01 Unit arrived at the shop for diagnosis' } });
+      const caps = ['40123', '40789', '40999', '40456'].map((u, i) => w.cap({ from, to: [{ name: S.name, address: S.addr }], subject: S.subject + ' ' + i, conversationId: 'conv-log-' + i, body: body(u), attachments: [{ name: S.attach }] }));
+      await w.scan(caps);
+      await w.scan(caps.concat([w.cap({ from, subject: 'FW: ' + S.subject, conversationId: 'conv-log-fw', body: body('40123', 'Date: Nov 4, 2026 9:12 AM') })]));
+      // write failure + pending reconcile
+      const writer = require('../src/email-intel/facts/timeline-writer');
+      const t0 = Date.now();
+      await writer.commitFact({ fact: fact({ value: FS + ' fail', date: '2026-11-20', evidence: FS }), unit: '40123', msg: Object.values(w.messages())[0], evalResult: {}, deps: { apply: () => { throw new Error('disk full near ' + S.addr + ' ' + FS); } }, now: t0 });
+      await writer.reconcilePending({ now: t0 + 3 * 60_000, deps: { apply: () => ({ ok: false }) } });
+      // approve and reject through the executors, and the read channel
+      require('../src/email-intel/executors').registerAll();
+      const open = w.staged().filter((s) => s.state === 'open' && s.fact);
+      for (const [i, s] of open.entries()) {
+        const kind = i % 2 ? 'reject-staged' : 'approve-staged';
+        const prep = confirm.prepare(kind, { stagedId: s.stagedId, acknowledgeConflictReady: kind === 'approve-staged' ? true : undefined });
+        if (prep.ok) await confirm.confirm(prep.token, { _dialog: accept });
+      }
+      const call = (ch, ...a) => handlers[ch]({}, ...a);
+      await call('emailIntel:get-staged', { state: 'all' });
+      await call('emailIntel:prepare-action', 'approve-staged', { stagedId: S.subject });
+      w.idx.getStatus();
+      expect(logText()).toMatch(/facts id=sc_[0-9a-f]+ evaluated=\d+ applied=\d+ staged=\d+/);
+      expect(w.lines('40123').length).toBeGreaterThanOrEqual(1);
+      // the intel modules log no content at all
+      const own = logLines().filter((l) => l.ns !== 'repair-history').map((l) => l.text).join('\n');
+      for (const s of SENTINELS.concat([FS, 'prerequested', 'preupdate'])) expect(own, s).not.toContain(s);
+      // the UNCHANGED shared writer path (email_actions -> repair-history.addEvent) logs the first 50 chars of each
+      // timeline line, exactly as it does for legacy applies; the line never carries an address, subject, body or attachment name
+      const rh = logLines().filter((l) => l.ns === 'repair-history').map((l) => l.text).join('\n');
+      expect(rh).toContain('Added history: 40123');
+      for (const s of [S.addr, S.subject, S.body, S.attach, 'SUBJ-SENTINEL', 'BODY-SENTINEL', 'ATTACH-SENTINEL', 'secret.person', '@']) expect(rh, s).not.toContain(s);
+    } finally { w.cleanup(); confirm._resetForTests(); }
+  }, 30_000);
+});

@@ -42,6 +42,8 @@ const sha1 = (s) => crypto.createHash('sha1').update(String(s)).digest('hex');
 const nowIso = (now) => new Date(Number.isFinite(now) ? now : Date.now()).toISOString();
 
 function stagedIdOf(factKey, messageKey) { return 'st_' + sha1(String(factKey) + '|' + String(messageKey)).slice(0, 16); }
+/** Key of a unit mention without a fact (unprocessed window, AI unavailable). */
+function mentionFactKey(unit, reason) { return sha1('mention|' + String(unit).toLowerCase() + '|' + reason).slice(0, 20); }
 
 function ensureDoc(doc) {
   const d = doc && typeof doc === 'object' ? doc : {};
@@ -66,7 +68,7 @@ function stage(doc, input) {
   const msg = i.msg || {};
   const now = Number.isFinite(i.now) ? i.now : Date.now();
   const f = i.fact || null;
-  const keys = i.keys || (f ? fk.keysOf(f, i.unit) : { factKey: sha1('mention|' + String(i.unit).toLowerCase() + '|' + i.reason).slice(0, 20), groupKey: String(i.unit).toLowerCase() + '|mention', valueKey: null });
+  const keys = i.keys || (f ? fk.keysOf(f, i.unit) : { factKey: mentionFactKey(i.unit, i.reason), groupKey: String(i.unit).toLowerCase() + '|mention', valueKey: null });
   const stagedId = stagedIdOf(keys.factKey, msg.messageKey || '');
   const reason = REASONS.includes(i.reason) ? i.reason : 'uncertain-assertion';
   const existing = d.items[stagedId];
@@ -211,6 +213,6 @@ function closeItem(stagedId, state, resolution, now) {
 }
 
 module.exports = {
-  REASONS, PROTECTED, EXPIRABLE, OPEN_CAP, stagedIdOf, ensureDoc, stage, supersedeOlder, corroborate, close, applyCaps,
+  REASONS, PROTECTED, EXPIRABLE, OPEN_CAP, stagedIdOf, mentionFactKey, ensureDoc, stage, supersedeOlder, corroborate, close, applyCaps,
   openCount, openMessageKeys, list, load, stageFact, closeItem, itemsMatch: im.itemsMatch,
 };
