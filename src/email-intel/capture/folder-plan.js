@@ -21,8 +21,13 @@ const C = require('../constants');
 const sha1 = (s) => crypto.createHash('sha1').update(String(s)).digest('hex');
 
 /** First 120 chars of the preview, lowercased with whitespace collapsed. */
+const LEADING_TIME_RE = /^(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+)?(?:\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|\d{1,2}:\d{2}(?:\s?[ap]m)?)(?:\s+|$)/i;
 function normPreview120(preview) {
-  return String(preview == null ? '' : preview).toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 120);
+  let s = String(preview == null ? '' : preview).replace(/\s+/g, ' ').trim();
+  // The legacy aria split can leave the tail of a date token ("11/2") at the start of the preview, and that
+  // token changes at day rollover; drop up to two leading date/time tokens so the signature stays stable.
+  for (let i = 0; i < 2; i++) { const t = s.replace(LEADING_TIME_RE, ''); if (t === s) break; s = t; }
+  return s.toLowerCase().trim().slice(0, 120);
 }
 
 /** "N messages" / "N items" count token from a row aria label, or ''. */
