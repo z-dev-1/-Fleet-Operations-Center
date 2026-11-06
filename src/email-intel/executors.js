@@ -14,7 +14,15 @@
  *                  autoApplyUnitUpdates opt-out is off, because an explicit approval is not "auto" apply, F2-01)
  *   reject-staged  payload { stagedId } -> marks the item rejected (local decision, no native dialog)
  *
- * Later phases extend registerAll() (send-reply, delete, ...).
+ * Phase D registers:
+ *   delete         payload { conversationKey }      -> owa_reader.deleteMessage (moves to Deleted Items), legacy
+ *                  recordDeletion + deleted flag, the conversation's live action items close
+ *   delete-batch   payload { conversationKeys[1..25] } -> the same, one target at a time; targets that fail the
+ *                  rule are excluded and listed in the confirmation summary
+ *   The rule (deleteTarget, R7.6): real conversation id (derived keys excluded), no open action, no question or
+ *   decision for me, at most one message without a message-level id.
+ *
+ * Later phases extend registerAll() (send-reply, ...).
  */
 const confirm = require('./confirm');
 const { cleanLabel } = confirm;
@@ -212,14 +220,162 @@ const rejectStaged = {
   },
 };
 
+// ── Phase D: delete / delete-batch (design 9, F-19; R7.5, R7.6) ───────────────
+const CONV_RE = /^cv_[0-9a-f]{16}$/;
+const BATCH_MAX = 25;
+const DELETE_REASON_TEXT = Object.freeze({
+  'unknown-conversation': 'this conversation is not in the app\'s mail ledger',
+  'no-conversation-id': 'Outlook gave no real conversation id',
+  'open-action': 'it still has an open action for you',
+  'question-to-me': 'it has a question or decision for you',
+  'multi-message-without-ids': 'several messages have no message-level id',
+  'already-deleted': 'it is already deleted',
+});
+
+/**
+ * deleteTarget(conversationKey) -> { ok:true, target } | { ok:false, reason }
+ * The R7.6 rule for a user-chosen delete: a real (not derived) Outlook conversation id, no open action item and
+ * no question or decision for me, and at most one message without a message-level id. Fleet-relevant mail may be
+ * deleted by the user (the recorded facts and evidence stay in the app) and the summary says so.
+ */
+function deleteTarget(conversationKey) {
+  const stores = require('./stores');
+  const ledger = require('./ingest/ledger');
+  const recs = ledger.conversation(ledger.ensureDoc(stores.load('messages')), conversationKey);
+  if (!recs.length) return { ok: false, reason: 'unknown-conversation' };
+  const latest = recs[recs.length - 1];
+  if (latest.convIdSource === 'derived' || !latest.convIdRaw) return { ok: false, reason: 'no-conversation-id' };
+  try {
+    const as = require('./actions/store');
+    if (as.openActionsFor(as.load(), conversationKey) > 0) return { ok: false, reason: 'open-action' };
+  } catch (_) { /* no action store: the determinations below still apply */ }
+  const units = new Set();
+  for (const r of recs) {
+    const a = r.analysis || {};
+    const d = a.determinations;
+    if (d && (d.replyRequirement.value === 'required' || d.decisionRequirement.value !== 'none')) return { ok: false, reason: 'question-to-me' };
+    for (const u of ((a.deterministic && a.deterministic.units) || [])) if (u.scope === 'in' || u.scope === 'unknown') units.add(u.unit);
+  }
+  if (recs.filter((r) => r.messageIdSource !== 'owa-item').length > 1) return { ok: false, reason: 'multi-message-without-ids' };
+  let legacy = null;
+  try { legacy = (_results().emails || []).find((e) => e.id === latest.legacyId) || null; } catch (_) { legacy = null; }
+  if (legacy && legacy.deleted) return { ok: false, reason: 'already-deleted' };
+  return {
+    ok: true,
+    target: {
+      conversationKey, convId: latest.convIdRaw, folder: latest.folder || 'Inbox', legacyId: latest.legacyId || null, legacy,
+      senderName: (latest.from && latest.from.name) || '', subject: latest.subject || '', messages: recs.length, units: Array.from(units).slice(0, 10),
+    },
+  };
+}
+
+/**
+ * validateDelete(kind, payload) -> { ok:true, targets, excluded } | { ok:false, code:'BAD_ARG', field, reason? }
+ *   delete:       { conversationKey: /^cv_[0-9a-f]{16}$/ }
+ *   delete-batch: { conversationKeys: 1..25 unique conversationKeys } (failing targets are excluded and listed)
+ */
+function validateDelete(kind, payload) {
+  if (!_isPlain(payload)) return { ok: false, code: 'BAD_ARG', field: 'payload' };
+  if (kind === 'delete') {
+    if (typeof payload.conversationKey !== 'string' || !CONV_RE.test(payload.conversationKey)) return { ok: false, code: 'BAD_ARG', field: 'conversationKey' };
+    const t = deleteTarget(payload.conversationKey);
+    if (!t.ok) return { ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: t.reason };
+    return { ok: true, targets: [t.target], excluded: [] };
+  }
+  const keys = payload.conversationKeys;
+  if (!Array.isArray(keys) || keys.length < 1 || keys.length > BATCH_MAX || keys.some((k) => typeof k !== 'string' || !CONV_RE.test(k)) || new Set(keys).size !== keys.length) {
+    return { ok: false, code: 'BAD_ARG', field: 'conversationKeys' };
+  }
+  const targets = []; const excluded = [];
+  for (const k of keys) { const t = deleteTarget(k); if (t.ok) targets.push(t.target); else excluded.push({ conversationKey: k, reason: t.reason }); }
+  if (!targets.length) return { ok: false, code: 'BAD_ARG', field: 'conversationKeys', reason: 'none-deletable' };
+  return { ok: true, targets, excluded };
+}
+
+function _deleteLine(t) {
+  return 'From: ' + cleanLabel(t.senderName || 'unknown') + ' | Subject: ' + cleanLabel(t.subject || '(no subject)') + (t.messages > 1 ? ' | ' + t.messages + ' messages' : '');
+}
+
+/** One OWA delete (moves the conversation to Deleted Items) plus the legacy bookkeeping. */
+async function _deleteOne(t) {
+  const del = require('../scrapers/owa_reader').deleteMessage;
+  const r = await del({ convId: t.convId, folder: t.folder });
+  if (!(r && r.ok)) return { ok: false, error: (r && r.error) || 'delete failed', status: r && r.status };
+  try {
+    const triage = require('../scrapers/email_triage');
+    const store = require('../store');
+    const fresh = _results();
+    const idx = (fresh.emails || []).findIndex((e) => e.id === t.legacyId);
+    if (idx !== -1) {
+      try { triage.recordDeletion(fresh.emails[idx]); } catch (_) { /* learning only */ }
+      fresh.emails[idx] = { ...fresh.emails[idx], deleted: true, deletedAt: new Date().toISOString() };
+      store.save('emailTriageResults', fresh);
+      notifyOverlay(fresh);
+    }
+  } catch (e) { logger.warn('[email-intel] delete bookkeeping failed ' + safeErr(e)); }
+  try {
+    const as = require('./actions/store');
+    as.update((doc) => as.closeConversation(doc, t.conversationKey, 'superseded', Date.now()));
+  } catch (_) { /* actions bookkeeping only */ }
+  return { ok: true };
+}
+
+const deleteOne = {
+  summarize(payload) {
+    const v = validateDelete('delete', payload);
+    if (!v.ok) throw new Error('invalid delete payload');
+    const t = v.targets[0];
+    return {
+      headline: 'Delete this email from ' + cleanLabel(t.senderName || 'unknown sender') + '?',
+      detailText: [_deleteLine(t), 'Folder: ' + cleanLabel(t.folder, 40), 'It moves to Deleted Items in Outlook (recoverable).',
+        t.units.length ? 'It mentions your unit(s) ' + t.units.map((u) => cleanLabel(u, 20)).join(', ') + '; facts already recorded stay in the app.' : ''].filter(Boolean).join('\n'),
+      count: 1,
+    };
+  },
+  async run(payload) {
+    const v = validateDelete('delete', payload);
+    if (!v.ok) return { ok: false, code: v.code, field: v.field, reason: v.reason };
+    const r = await _deleteOne(v.targets[0]);
+    if (r.ok) logger.info('[email-intel] delete done conv=' + require('./redact').rid(v.targets[0].conversationKey));
+    return r.ok ? { ok: true, message: 'Deleted - moved to Deleted Items in Outlook.' } : r;
+  },
+};
+
+const deleteBatch = {
+  summarize(payload) {
+    const v = validateDelete('delete-batch', payload);
+    if (!v.ok) throw new Error('invalid delete-batch payload');
+    const lines = v.targets.slice(0, 10).map(_deleteLine);
+    if (v.targets.length > 10) lines.push('... and ' + (v.targets.length - 10) + ' more');
+    if (v.excluded.length) lines.push('Not included (' + v.excluded.length + '): ' + v.excluded.map((x) => DELETE_REASON_TEXT[x.reason] || x.reason).filter((x, i, a) => a.indexOf(x) === i).join('; '));
+    lines.push('They move to Deleted Items in Outlook (recoverable).');
+    return { headline: 'Delete ' + v.targets.length + ' email' + (v.targets.length === 1 ? '' : 's') + '?', detailText: lines.join('\n'), count: v.targets.length, excluded: v.excluded.length };
+  },
+  async run(payload) {
+    const v = validateDelete('delete-batch', payload);
+    if (!v.ok) return { ok: false, code: v.code, field: v.field, reason: v.reason };
+    const outcomes = [];
+    for (const t of v.targets) {                                   // one at a time, never in parallel
+      let r;
+      try { r = await _deleteOne(t); } catch (e) { r = { ok: false, error: 'delete failed' }; logger.warn('[email-intel] delete failed ' + safeErr(e)); }
+      outcomes.push({ conversationKey: t.conversationKey, id: t.legacyId, ok: !!r.ok, error: r.ok ? undefined : r.error });
+    }
+    const deleted = outcomes.filter((o) => o.ok).length;
+    logger.info('[email-intel] delete-batch done deleted=' + deleted + ' total=' + v.targets.length + ' excluded=' + v.excluded.length);
+    return { ok: true, deleted, total: v.targets.length, outcomes, excluded: v.excluded };
+  },
+};
+
 let _registered = false;
 /** registerAll(): idempotent (confirm.registerExecutor replaces a previous registration for the same kind). */
 function registerAll() {
   confirm.registerExecutor('send-ready-dm', readyDm);
   confirm.registerExecutor('approve-staged', approveStaged);
   confirm.registerExecutor('reject-staged', rejectStaged);
+  confirm.registerExecutor('delete', deleteOne);
+  confirm.registerExecutor('delete-batch', deleteBatch);
   _registered = true;
 }
 function isRegistered() { return _registered && confirm.hasExecutor('send-ready-dm'); }
 
-module.exports = { validateReadyDm, validateStaged, notifyOverlay, registerAll, isRegistered };
+module.exports = { validateReadyDm, validateStaged, validateDelete, deleteTarget, DELETE_REASON_TEXT, notifyOverlay, registerAll, isRegistered };

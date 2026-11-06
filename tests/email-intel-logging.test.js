@@ -125,6 +125,10 @@ describe('AC-9 confirm, stores, untrusted and flags paths log no dynamic content
     flags._setForTests({ enabled: true, capture: true, multiRecipient: true, actionsView: true });
     confirm.registerExecutor('delete', { summarize: (p) => ({ headline: 'Delete', detailText: p.subject }), run: async () => ({ ok: true }) });
     const call = (ch, ...a) => handlers[ch]({}, ...a);
+    // Phase D: the delete target must be a known conversation with a real Outlook id (sentinel subject / sender inside)
+    // (analysis already settled so the scan below has nothing to analyze; the lane is stubbed unavailable anyway)
+    require('../src/email-intel/understand/lane')._setRelayForTests({ isolatedLaneAvailable: () => false, askWithTimeout: async () => { throw new Error('no live AI in tests'); } });
+    stores.save('messages', { version: 1, aliasIndex: {}, bytesEstimate: 0, byConv: { cv_0123456789abcdef: ['mi_l1'] }, messages: { mi_l1: { messageKey: 'mi_l1', conversationKey: 'cv_0123456789abcdef', convIdRaw: 'conv/l1=', convIdSource: 'owa', messageIdSource: 'owa-item', legacyId: 'em_l1', subject: S.subject, from: { name: S.name, address: S.addr }, body: { status: 'complete', newContent: 'x' }, analysis: { status: 'skipped-cheap' } } } });
     const prep = await call('emailIntel:prepare-action', 'delete', { conversationKey: 'cv_0123456789abcdef', subject: S.subject, body: S.body, addr: S.addr });
     expect(prep.ok).toBe(true);
     await call('emailIntel:confirm-action', prep.token);
@@ -134,6 +138,9 @@ describe('AC-9 confirm, stores, untrusted and flags paths log no dynamic content
     await call('emailIntel:scan', { folders: [S.name] });
     await call('emailIntel:status');
     assertClean();
+    stores.save('messages', stores.defaults('messages'));          // leave the shared tmp ledger empty for later scenarios
+    stores.save('actions', stores.defaults('actions'));
+    require('../src/email-intel/understand/lane')._resetForTests();
   });
 });
 
@@ -270,6 +277,63 @@ describe('AC-9 Phase C fact paths log no dynamic content (FEAT-004)', () => {
       const rh = logLines().filter((l) => l.ns === 'repair-history').map((l) => l.text).join('\n');
       expect(rh).toContain('Added history: 40123');
       for (const s of [S.addr, S.subject, S.body, S.attach, 'SUBJ-SENTINEL', 'BODY-SENTINEL', 'ATTACH-SENTINEL', 'secret.person', '@']) expect(rh, s).not.toContain(s);
+    } finally { w.cleanup(); confirm._resetForTests(); }
+  }, 30_000);
+});
+
+describe('AC-9 Phase D action paths log no dynamic content (FEAT-005)', () => {
+  it('questions, action items, resolution pass, notifications, get-actions / action-update and delete tokens log only counts, ids and enums', async () => {
+    const { phaseCWorld, fact } = await import('./fixtures/email-intel/phase-c.js');
+    const w = phaseCWorld();
+    try {
+      const from = { name: S.name, address: S.addr };
+      const me = { name: 'Zila Santiago', address: 'zila.santiago@example.test' };
+      w.rules.push({ unit: '40123', fact: fact({ kind: 'approval_status', item: 'estimate', value: S.body.slice(0, 40), state: 'estimate_received', date: null, evidence: 'please approve the estimate for 40123' }) });
+      w.questions.push({ when: 'please approve', q: { ref: 'q1', text: S.subject + ' approve?', about: ['40123'], addressee: { kind: 'me', name: 'Zila', evidence: 'Zila, please approve' }, isApprovalOrDecision: true, decisionKind: 'estimate', confidence: 0.9 } });
+      w.questions.push({ when: 'can you confirm', q: { ref: 'q1', text: S.body.slice(0, 60) + '?', about: ['40456'], addressee: { kind: 'me', name: 'Zila', evidence: 'Zila, can you confirm' }, isApprovalOrDecision: false, confidence: 0.9 } });
+      w.answers.push({ when: 'Confirmed ' + S.name.slice(0, 10), evidence: 'Confirmed ' + S.name.slice(0, 10), confidence: 0.45 });
+      const caps = [
+        w.cap({ from, to: [me], subject: S.subject + ' a', conversationId: 'conv-ld-1', messageId: 'ld-1', body: 'Zila, please approve the estimate for 40123. ' + S.body, attachments: [{ name: S.attach }] }),
+        w.cap({ from, to: [me], subject: S.subject + ' b', conversationId: 'conv-ld-2', messageId: 'ld-2', receivedAt: '2026-11-04T13:00:00.000Z', body: 'Zila, can you confirm pickup for 40456? ' + S.body }),
+        w.cap({ from, to: [me], subject: 'RE: ' + S.subject + ' b', conversationId: 'conv-ld-2', messageId: 'ld-3', receivedAt: '2026-11-04T14:00:00.000Z', body: 'Confirmed ' + S.name.slice(0, 10) + ' ' + S.body }),
+        w.cap({ from, to: [me, { name: S.name, address: S.addr }], subject: S.subject + ' c', conversationId: 'conv-ld-4', messageId: 'ld-4', body: S.body + ' unit 51888 only' }),
+      ];
+      const shown = [];
+      await w.scan(caps, { _notify: (m) => { shown.push(m); return true; } });
+      // a resolution pass with hostile model output, a lane failure and a store failure path
+      const Q = require('../src/email-intel/actions/questions');
+      const recs = Object.values(w.messages());
+      await Q.resolutionPass(recs, Q.buildQuestions(recs, {}, {}), { ask: async () => ({ ok: true, text: 'not json ' + S.body + ' ' + S.addr }) });
+      await Q.resolutionPass(recs, Q.buildQuestions(recs, {}, {}), { ask: async () => { throw new Error('lane ' + S.subject); } });
+      const call = (ch, ...a) => handlers[ch]({}, ...a);
+      const g = await call('emailIntel:get-actions', { includeClosed: true, limit: 200 });
+      expect(g.ok).toBe(true);
+      expect(g.items.length).toBeGreaterThan(2);
+      for (const it of g.items) await call('emailIntel:action-update', { actionId: it.actionId, op: 'dismiss', note: S.body });
+      await call('emailIntel:action-update', { actionId: 'ac_ffffffffffffffff', op: 'done' });
+      await call('emailIntel:action-update', { actionId: S.subject, op: 'done' });
+      await call('emailIntel:get-actions', { category: S.subject });
+      // delete tokens: rule failures, a confirmed delete whose deleter fails with content in the error, and a batch
+      require('../src/email-intel/executors').registerAll();
+      const ow = require('../src/scrapers/owa_reader');
+      const real = ow.deleteMessage;
+      ow.deleteMessage = async () => ({ ok: false, error: 'failed for ' + S.addr + ' ' + S.subject });
+      try {
+        for (const ck of Object.keys(w.stores.load('messages').byConv)) {
+          const p = await call('emailIntel:prepare-action', 'delete', { conversationKey: ck, subject: S.subject });
+          if (p.ok) await confirm.confirm(p.token, { _dialog: accept });
+        }
+        const keys = Object.keys(w.stores.load('messages').byConv);
+        const b = await call('emailIntel:prepare-action', 'delete-batch', { conversationKeys: keys });
+        if (b.ok) await confirm.confirm(b.token, { _dialog: accept });
+        await call('emailIntel:prepare-action', 'delete', { conversationKey: S.subject });
+      } finally { ow.deleteMessage = real; }
+      await call('emailIntel:status');
+      expect(logText()).toMatch(/actions id=sc_[0-9a-f]+ conversations=\d+ created=\d+/);
+      expect(shown.length).toBe(1);
+      for (const m of shown) for (const s of SENTINELS) expect(m.body).not.toContain(s);
+      const own = logLines().filter((l) => l.ns !== 'repair-history').map((l) => l.text).join('\n');
+      for (const s of SENTINELS.concat(['Confirmed ' + S.name.slice(0, 10)])) expect(own, s).not.toContain(s);
     } finally { w.cleanup(); confirm._resetForTests(); }
   }, 30_000);
 });

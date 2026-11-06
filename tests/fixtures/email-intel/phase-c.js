@@ -53,7 +53,7 @@ export function phaseCWorld(flagsIn = PHASE_C, o = {}) {
   stores.save('config', Object.assign(stores.defaults('config'), { me: Object.assign({ fasName: '' }, JSON.parse(JSON.stringify(o.me || ME))) }));
   if (o.triageConfig) store.save('emailTriageConfig', Object.assign({}, require('../../../src/scrapers/email_triage').DEFAULT_CONFIG, o.triageConfig));
   const w = {
-    tmp, flags, store, stores, idx, lane, rules: [], questions: [],
+    tmp, flags, store, stores, idx, lane, rules: [], questions: [], answers: [],
     /** the lane answers with every rule fact whose evidence is quoted in the EMAIL fence of the prompt */
     answer(prompt) {
       const text = emailText(prompt);
@@ -64,10 +64,14 @@ export function phaseCWorld(flagsIn = PHASE_C, o = {}) {
         units.get(r.unit).push(r.fact);
       }
       const questions = w.questions.filter((q) => text.includes(q.when)).map((q) => q.q);
+      // FEAT-005: answers to the PRIOR OPEN QUESTIONS the app put in the prompt (rule: { when, evidence, confidence })
+      const prior = (() => { const m = /PRIOR OPEN QUESTIONS[^\n]*\n(\[.*\])/.exec(prompt); try { return m ? JSON.parse(m[1]) : []; } catch (_) { return []; } })();
+      const answers = [];
+      for (const a of w.answers) if (text.includes(a.when)) for (const p of prior) answers.push({ pqid: p.pqid, evidence: a.evidence, confidence: a.confidence == null ? 0.9 : a.confidence });
       return {
         schemaVersion: 2, messageRef: '$REF', relevance: { level: units.size ? 'high' : 'low', reason: 'unit update', confidence: 0.9 },
         units: Array.from(units.entries()).map(([unit, facts]) => ({ unit, gist: 'update', facts })),
-        questions, requests: [], answers: [], commitments: [],
+        questions, requests: [], answers, commitments: [],
         classification: { category: 'fleet_status_update', intent: questions.length ? 'request_information' : 'provide_update', informationalOnly: !questions.length, confidence: 0.9 },
         suggestDelete: { suggested: false, reason: '', confidence: 0.9 }, overallConfidence: 0.9,
       };
@@ -80,6 +84,8 @@ export function phaseCWorld(flagsIn = PHASE_C, o = {}) {
     ledger: () => Object.values(stores.load('ledger').entries || {}),
     staged: () => Object.values(stores.load('staged').items || {}),
     messages: () => stores.load('messages').messages,
+    actions: () => Object.values(stores.load('actions').items || {}),
+    open: (category) => Object.values(stores.load('actions').items || {}).filter((x) => x.state === 'open' && (!category || x.category === category)),
     cleanup() { flags._setForTests(null); lane._resetForTests(); require('../../../src/email-intel/reliability/lock')._reset(); try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) { /* tmp */ } },
   };
   w.relay = scriptedRelay((prompt) => w.answer(prompt));

@@ -53,6 +53,13 @@ function _captureEffective() {
   try { return require('../email-intel/flags').get().effective.capture === true; } catch (_) { return false; }
 }
 
+// True only when the My Email Actions view (actionsView) is effective: the legacy delete / delete-suggested / keep
+// channels then fail closed (F2-03); deletes go through emailIntel:prepare-action / confirm-action.
+function _actionsViewEffective() {
+  try { return require('../email-intel/flags').get().effective.actionsView === true; } catch (_) { return false; }
+}
+const _CONFIRM_DELETE = () => ({ ok: false, code: 'CONFIRMATION_REQUIRED', error: 'Confirmation required: use the confirmed delete flow.' });
+
 function _findEmail(id) {
   const results = triage.loadResults();
   return results.emails.find((e) => e.id === id) || null;
@@ -137,6 +144,7 @@ function registerEmailTriageIPC(_ctx) {
   // Confirm-gated by the overlay. Deletes the message in OWA, records the
   // deletion so the AI learns the user's junk habits, and marks the record.
   handle('emailTriage:delete', async (_e, id) => {
+    if (_actionsViewEffective()) return _CONFIRM_DELETE();
     requireString(id, 'id');
     const email = _findEmail(id);
     if (!email) throw new ConfigError('email not found: ' + id, 'id');
@@ -153,6 +161,7 @@ function registerEmailTriageIPC(_ctx) {
 
   // Keep: user says this is NOT junk — clear the suggestion + teach the AI.
   handle('emailTriage:keep', (_e, id) => {
+    if (_actionsViewEffective()) return _CONFIRM_DELETE();
     requireString(id, 'id');
     const email = _findEmail(id);
     if (!email) throw new ConfigError('email not found: ' + id, 'id');
@@ -164,6 +173,7 @@ function registerEmailTriageIPC(_ctx) {
   // Delete ALL currently-suggested (and not-kept, not-already-deleted) emails,
   // one confirmed batch. Returns per-email outcomes.
   handle('emailTriage:delete-suggested', async () => {
+    if (_actionsViewEffective()) return _CONFIRM_DELETE();
     const results = triage.loadResults();
     const targets = (results.emails || []).filter((e) => e.deleteSuggested && !e.kept && !e.deleted && e.convId);
     const del = require('../scrapers/owa_reader').deleteMessage;

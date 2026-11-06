@@ -16,6 +16,10 @@
  * (understand/analyze.js through the isolated lane only) and derives the legacy fields by code
  * (legacy-adapter buildPhaseBResults). Nothing is written to unit timelines in Phase B.
  *
+ * Phase D (`actionsView`): stage 9 (actions/stage.js) keeps durable question states and the My Email
+ * Actions items, notifies once per item, pins the referenced messages, and feeds open-action counts to the
+ * conservative delete rule (R7.6).
+ *
  * Every error ends in a LegacyResults object (never a throw to the caller); logs carry counts and
  * enums only (redact.js), never message content.
  */
@@ -194,7 +198,17 @@ function _multiRecipient() {
 /** Messages referenced by open staged items are never evicted (design 1.2). Phase B/C only. */
 function _pinnedByStaged() {
   if (!_multiRecipient()) return null;
-  try { return require('./facts/staged').openMessageKeys(stores.load('staged')); } catch (_) { return null; }
+  let pinned;
+  try { pinned = require('./facts/staged').openMessageKeys(stores.load('staged')); } catch (_) { return null; }
+  // Phase D: messages referenced by open action items are pinned too (design 1.2).
+  if (_actionsView()) {
+    try { for (const k of require('./actions/store').pinnedMessageKeys(require('./actions/store').load())) pinned.add(k); } catch (_) { /* staged pins only */ }
+  }
+  return pinned;
+}
+
+function _actionsView() {
+  try { return flags.get().effective.actionsView === true; } catch (_) { return false; }
 }
 
 /**
@@ -249,6 +263,34 @@ async function _understand(o) {
   let applied = new Set();
   try { applied = require('./facts/timeline-writer').appliedMessageKeys(); } catch (_) { applied = new Set(); }
 
+  // Stage 9 (Phase D, actionsView): question states, action items (stable ids), notify once. A failed actions
+  // store write fails the scan (previous items stay intact). The resolution pass shares the scan AI budget.
+  let actionsOn = false;
+  if (!commitFailed && effective.actionsView === true) {
+    actionsOn = true;
+    try {
+      const lane = require('./understand/lane');
+      const used = stats ? stats.aiCalls : 0;
+      const laneSt = lane.state().state;
+      const acts = await require('./actions/stage').runActionStage({
+        msgDoc, conversations: changed, scanId, now: Date.now(), signal: opts.signal, deadlineAt,
+        aiBudget: Math.max(0, ((cfg.caps && cfg.caps.aiCalls) || C.AI_CALLS_DEFAULT) - used),
+        laneOk: !!(stats && stats.laneAvailable === true) && laneSt !== 'degraded' && laneSt !== 'unavailable',
+        ask: (prompt) => lane.askIsolated(prompt, { trigger, signal: opts.signal }),
+        osNotify: typeof opts._notify === 'function' ? opts._notify : undefined,
+      });
+      if (acts && acts.storeError) commitFailed = 'actions';
+    } catch (e) {
+      logger.warn('[email-intel] action stage failed ' + errName(e));
+    }
+  }
+  let actDoc = null;
+  if (actionsOn) { try { actDoc = require('./actions/store').load(); } catch (_) { actDoc = null; } }
+  const openActionsFor = (records) => {
+    if (!actDoc || !records || !records.length) return 0;
+    try { return require('./actions/store').openActionsFor(actDoc, records[0].conversationKey); } catch (_) { return 0; }
+  };
+
   // Rebuild the legacy record of every conversation touched or analyzed this scan, and of any whose stored
   // record is behind the ledger (self-heal after a crash between analysis and the results save).
   const prevById = {};
@@ -271,7 +313,7 @@ async function _understand(o) {
     canonicalFor: _canonicalFor,
     fleetRow: (unit) => index.byId.get(String(unit).toLowerCase()) || null,
     appliedFor: (messageKey) => applied.has(messageKey),      // display flag from the timeline ledger (Phase C)
-    deleteFor: (records) => analyze.conservativeDelete(records, { openActions: 0, cfg }),
+    deleteFor: (records) => analyze.conservativeDelete(records, { openActions: openActionsFor(records), cfg }),
     meta: {
       authBlocked: d.outcome === 'auth-blocked', readError: d.readError,
       intel: Object.assign({ scanId, outcome: d.outcome, partial: d.partial, coalesced: false },
@@ -401,8 +443,12 @@ function getStatus() {
       if (sd.overCap) extra.push('stagedOverCap');
     } catch (_) { /* status only */ }
   }
+  let openActions = 0;
+  if (f && f.actionsView) {
+    try { const as = require('./actions/store'); openActions = as.openCount(as.load()); } catch (_) { /* status only */ }
+  }
   return statusMod.buildStatus({
-    enabled: engaged(), flags: f, flagWarnings: warnings, lane: laneSt, extraWarnings: extra, openStaged,
+    enabled: engaged(), flags: f, flagWarnings: warnings, lane: laneSt, extraWarnings: extra, openStaged, openActions,
     config: cfgMod.normalize(stores.load('config')), checkpoints: stores.load('checkpoints'), messages: stores.load('messages'),
     running: lock.isBusy(), current: lock.current(),
     readOnlyStores: ['config', 'checkpoints', 'messages'].map((n) => stores.isReadOnly(n)),

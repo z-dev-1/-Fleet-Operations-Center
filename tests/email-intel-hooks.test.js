@@ -203,6 +203,9 @@ describe('IPC and preload skeleton', () => {
       const ran = [];
       confirm._resetForTests();
       confirm.registerExecutor('delete', { summarize: () => ({ headline: 'Delete 1 email' }), run: async (p) => { ran.push(p); return { ok: true }; } });
+      // Phase D validates the delete target before minting a token: a known conversation with a real Outlook id.
+      const ck = 'cv_0123456789abcdef';
+      fx.resetWorld({ emailIntelMessages: { version: 1, byConv: { [ck]: ['mi_h1'] }, aliasIndex: {}, bytesEstimate: 0, messages: { mi_h1: { messageKey: 'mi_h1', conversationKey: ck, convIdRaw: 'conv/h1=', convIdSource: 'owa', messageIdSource: 'owa-item', legacyId: 'em_h1', analysis: { status: 'pending' } } } } });
       try {
         const prep = await call('emailIntel:prepare-action', 'delete', { conversationKey: 'cv_0123456789abcdef' });
         expect(prep.ok).toBe(true);

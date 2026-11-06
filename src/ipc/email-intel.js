@@ -9,6 +9,8 @@
  * Phase B adds probe-lane (manual P-LANE probe of the isolated lane, no email content).
  * Phase C adds get-staged and the approve-staged / reject-staged prepare validation (approve needs
  * timelineWrites: TIMELINE_DISABLED while only actionsView is on; conflict-ready needs acknowledgeConflictReady).
+ * Phase D adds get-actions, action-update (dismiss/snooze/done/reopen/retry-analysis, local state only) and the
+ * delete / delete-batch prepare validation (R7.6 rule in executors.deleteTarget; derived conversation keys excluded).
  * Channels owned by later phases return { ok:false, code:'NOT_IMPLEMENTED' } when their gate is open.
  * The legacy emailTriage:* channels are untouched here.
  *
@@ -66,9 +68,42 @@ const KIND_GATES = Object.freeze({
 const IMPLEMENTED = new Set([
   'emailIntel:status', 'emailIntel:scan', 'emailIntel:get-config', 'emailIntel:set-config', 'emailIntel:dom-probe',
   'emailIntel:set-tz-verified', 'emailIntel:prepare-action', 'emailIntel:confirm-action', 'emailIntel:probe-lane',
-  'emailIntel:get-staged',
+  'emailIntel:get-staged', 'emailIntel:get-actions', 'emailIntel:action-update',
 ]);
 const STAGED_STATES = ['open', 'approved', 'rejected', 'superseded', 'expired', 'all'];
+const ACTION_RE = /^ac_[0-9a-f]{16}$/;
+const ACTION_CATEGORIES = ['reply', 'decision', 'followup', 'review', 'recorded', 'info', 'outofscope'];
+const ACTION_OPS = ['dismiss', 'snooze', 'done', 'reopen', 'retry-analysis'];
+const SNOOZE_MAX_MS = 30 * 86_400_000;
+
+/** get-actions (design 5.5): { category?, includeClosed?, limit (clamped 1..200), offset 0..10000 }; unknown keys ignored. */
+function validateGetActions(payload) {
+  const p = payload == null ? {} : payload;
+  if (!_isPlain(p)) return BAD('payload');
+  const out = { limit: 50, offset: 0 };
+  if (p.category !== undefined) { if (!ACTION_CATEGORIES.includes(p.category)) return BAD('category'); out.category = p.category; }
+  if (p.includeClosed !== undefined) { if (typeof p.includeClosed !== 'boolean') return BAD('includeClosed'); out.includeClosed = p.includeClosed; }
+  if (p.limit !== undefined) {
+    if (typeof p.limit !== 'number' || !Number.isFinite(p.limit)) return BAD('limit');
+    out.limit = Math.min(200, Math.max(1, Math.trunc(p.limit)));
+  }
+  if (p.offset !== undefined) { if (!Number.isInteger(p.offset) || p.offset < 0 || p.offset > 10000) return BAD('offset'); out.offset = p.offset; }
+  return out;
+}
+
+/** action-update (design 5.5): { actionId ^ac_[0-9a-f]{16}$, op enum, snoozeUntil ISO in (now, now+30d] for snooze }. */
+function validateActionUpdate(payload, now) {
+  if (!_isPlain(payload)) return BAD('payload');
+  if (typeof payload.actionId !== 'string' || !ACTION_RE.test(payload.actionId)) return BAD('actionId');
+  if (!ACTION_OPS.includes(payload.op)) return BAD('op');
+  const out = { actionId: payload.actionId, op: payload.op };
+  if (payload.op === 'snooze') {
+    const t = typeof payload.snoozeUntil === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(payload.snoozeUntil) ? Date.parse(payload.snoozeUntil) : NaN;
+    if (!Number.isFinite(t) || t <= now || t > now + SNOOZE_MAX_MS) return BAD('snoozeUntil');
+    out.snoozeUntil = new Date(t).toISOString();
+  }
+  return out;
+}
 
 const OFF = () => ({ ok: true, enabled: false });
 const NOT_YET = () => ({ ok: false, code: 'NOT_IMPLEMENTED', error: 'not available in this build phase' });
@@ -216,6 +251,52 @@ function registerEmailIntelIPC(_ctx) {
     return { ok: true, items: l.items, total: l.total, openCount: staged.openCount(doc), expiredCount: doc.expiredCount || 0, overCap: !!doc.overCap, timelineWrites: gateOpen('timelineWrites') };
   });
 
+  // My Email Actions (Phase D). Reading refreshes snoozes, decided staged items and overdue follow-ups (no AI).
+  handle('emailIntel:get-actions', (_e, payload) => {
+    if (!gateOpen('actionsView')) return OFF();
+    const v = validateGetActions(payload);
+    if (v.ok === false) return v;
+    try { require('../email-intel/actions/stage').refresh({ now: Date.now() }); } catch (e) { logger.warn('actions refresh failed ' + safeErr(e)); }
+    const as = require('../email-intel/actions/store');
+    const tpl = require('../email-intel/actions/templates');
+    const doc = as.load();
+    const l = as.list(doc, v);
+    return {
+      ok: true, counts: l.counts, total: l.total, items: l.items, categories: tpl.CATEGORIES.map((c) => ({ id: c, label: tpl.LABELS[c] })),
+      overCap: !!doc.overCap, timelineWrites: gateOpen('timelineWrites'),
+    };
+  });
+
+  // Local item state only (no confirmation): dismiss | snooze | done | reopen | retry-analysis (failed-permanent only, F-16).
+  handle('emailIntel:action-update', (_e, payload) => {
+    if (!gateOpen('actionsView')) return OFF();
+    const now = Date.now();
+    const v = validateActionUpdate(payload, now);
+    if (v.ok === false) return v;
+    const as = require('../email-intel/actions/store');
+    const item = as.load().items[v.actionId];
+    if (!item) { logger.info('action-update: unknown action'); return { ok: false, code: 'NOT_FOUND' }; }
+    if (v.op === 'retry-analysis') {
+      const analyze = require('../email-intel/understand/analyze');
+      let retried = false;
+      const r = stores.update('messages', (doc) => {
+        const rec = doc.messages && (doc.messages[item.latestMessageKey] || doc.messages[item.messageKey]);
+        if (rec && rec.analysis && rec.analysis.status === 'failed-permanent') { rec.analysis = analyze.retryAnalysis(rec.analysis); retried = true; }
+        return doc;
+      });
+      if (!r.ok) return { ok: false, code: r.code || 'STORE_ERROR' };
+      if (!retried) return BAD('op');
+      _notifyUpdated({ kind: 'actions' });
+      return { ok: true, actionId: v.actionId, state: item.state, retry: 'queued' };
+    }
+    let res = null;
+    const u = as.update((doc) => { res = as.applyOp(doc, v.actionId, v.op, { snoozeUntil: v.snoozeUntil, now }); });
+    if (!u.ok) return { ok: false, code: u.code || 'STORE_ERROR' };
+    if (!res || !res.ok) return res || { ok: false, code: 'NOT_FOUND' };
+    _notifyUpdated({ kind: 'actions' });
+    return { ok: true, actionId: v.actionId, state: res.item.state, snoozeUntil: res.item.snoozeUntil };
+  });
+
   handle('emailIntel:prepare-action', (_e, kind, payload) => {
     if (typeof kind !== 'string' || !confirm.KINDS.includes(kind)) {
       return gateOpen('capture') ? BAD('kind') : OFF();
@@ -226,6 +307,10 @@ function registerEmailIntelIPC(_ctx) {
     if (kind === 'approve-staged' || kind === 'reject-staged') {
       const check = executors.validateStaged(kind, payload);
       if (!check.ok) return { ok: false, code: check.code, field: check.field };
+    }
+    if (kind === 'delete' || kind === 'delete-batch') {
+      const check = executors.validateDelete(kind, payload);
+      if (!check.ok) return Object.assign({ ok: false, code: check.code, field: check.field }, check.reason ? { reason: check.reason } : {});
     }
     if (kind === 'send-ready-dm') {
       let results = null;
@@ -247,4 +332,4 @@ function registerEmailIntelIPC(_ctx) {
   logger.info('Email Intelligence IPC handlers registered (' + Object.keys(GATES).length + ' channels; inert unless flags are effective)');
 }
 
-module.exports = { registerEmailIntelIPC, GATES, KIND_GATES, validateScan };
+module.exports = { registerEmailIntelIPC, GATES, KIND_GATES, validateScan, validateGetActions, validateActionUpdate };

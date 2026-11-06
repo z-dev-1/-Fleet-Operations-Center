@@ -86,6 +86,7 @@ async function _open_() {
 function _close() {
   _open = false;
   _idOpen = false;
+  _actionsView = null;
   const el = document.getElementById('email-triage');
   if (el) el.remove();
 }
@@ -144,7 +145,99 @@ function _mountIntel() {
     box.id = 'ei-intel';
     body.parentNode.insertBefore(box, body);
   }
+  if (_actionsOn()) _mountTabs();
   _renderIntel();
+}
+
+// ── My Email Actions tab (only when status reports actionsView; flag OFF: no tab bar, overlay DOM unchanged) ──
+function _actionsOn() {
+  return !!(_intel && _intel.flags && _intel.flags.actionsView === true);
+}
+
+let _actionsView = null;
+function _mountTabs() {
+  const body = document.getElementById('et-body');
+  if (!body || document.getElementById('ei-tabs')) return;
+  const bar = document.createElement('div');
+  bar.id = 'ei-tabs';
+  bar.className = 'ei-tabs';
+  bar.setAttribute('role', 'tablist');
+  bar.setAttribute('aria-label', 'Inbox Triage views');
+  const mk = (id, label, panel, selected) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.id = id; b.className = 'ei-tab'; b.textContent = label;
+    b.setAttribute('role', 'tab'); b.setAttribute('aria-controls', panel); b.setAttribute('aria-selected', selected ? 'true' : 'false');
+    return b;
+  };
+  const inboxTab = mk('ei-tab-inbox', 'Inbox', 'et-body', true);
+  const actTab = mk('ei-tab-actions', 'My Email Actions', 'ei-actions', false);
+  bar.appendChild(inboxTab); bar.appendChild(actTab);
+  const panel = document.createElement('div');
+  panel.id = 'ei-actions';
+  panel.setAttribute('role', 'tabpanel');
+  panel.setAttribute('aria-labelledby', 'ei-tab-actions');
+  panel.hidden = true;
+  body.setAttribute('role', 'tabpanel');
+  body.setAttribute('aria-labelledby', 'ei-tab-inbox');
+  body.parentNode.insertBefore(bar, body);
+  body.parentNode.insertBefore(panel, body.nextSibling);
+  inboxTab.addEventListener('click', () => _showTab('inbox'));
+  actTab.addEventListener('click', () => _showTab('actions'));
+}
+
+async function _showTab(name) {
+  const body = document.getElementById('et-body');
+  const panel = document.getElementById('ei-actions');
+  const inboxTab = document.getElementById('ei-tab-inbox');
+  const actTab = document.getElementById('ei-tab-actions');
+  if (!body || !panel) return;
+  const actions = name === 'actions';
+  body.hidden = actions; panel.hidden = !actions;
+  if (inboxTab) inboxTab.setAttribute('aria-selected', actions ? 'false' : 'true');
+  if (actTab) actTab.setAttribute('aria-selected', actions ? 'true' : 'false');
+  if (!actions) return;
+  if (_actionsView) { _actionsView.reload(); return; }
+  try {
+    const view = await import('./email-actions-view.js');
+    if (!document.getElementById('email-actions-style')) {
+      const style = document.createElement('style');
+      style.id = 'email-actions-style';
+      style.textContent = view.ACTIONS_CSS;
+      document.head.appendChild(style);
+    }
+    _actionsView = view.mount(panel, {
+      api: window.emailIntel, toast: _toast, confirmFn: (text) => confirm(text),
+      onReply: (data) => _openCardForAction(data && data.id),
+    });
+  } catch (e) { _toast('Could not open My Email Actions: ' + (e.message || e)); }
+}
+
+// Reply from an action item: show the matching Inbox card (the reply flow lives there until Phase E).
+async function _openCardForAction(actionId) {
+  let item = null;
+  try {
+    const r = await window.emailIntel.getActions({ limit: 200 });
+    item = r && r.ok ? (r.items || []).find((x) => x.actionId === actionId) : null;
+  } catch (_) { item = null; }
+  _showTab('inbox');
+  const card = item && item.legacyId ? document.querySelector('.et-card[data-id="' + CSS.escape(item.legacyId) + '"]') : null;
+  if (card) { try { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) { /* scroll only */ } }
+  else _toast('Open the email in the Inbox list to reply.');
+}
+
+// Delete under actionsView: a single-use token from the main process, the in-app summary, then the native dialog.
+async function _confirmedDelete(kind, payload) {
+  const prep = await window.emailIntel.prepareAction(kind, payload);
+  if (!prep || !prep.ok) {
+    const why = prep && prep.reason ? prep.reason.replace(/-/g, ' ') : ((prep && (prep.code || prep.error)) || 'unknown');
+    _toast('Not deleted: ' + why + '. You can delete it in Outlook.');
+    return null;
+  }
+  if (!confirm(prep.summary.headline + '\n\n' + (prep.summary.detailText || ''))) return null;
+  _toast('Confirm in the dialog to delete…');
+  const r = await window.emailIntel.confirmAction(prep.token);
+  if (r && r.code === 'USER_CANCELLED') { _toast('Not deleted.'); return null; }
+  return r;
 }
 
 async function _refreshIntel() {
@@ -403,11 +496,24 @@ function _wireCard(id) {
   if (delBtn) delBtn.addEventListener('click', () => _deleteEmail(id));
 
   const keepBtn = card.querySelector('[data-keep]');
-  if (keepBtn) keepBtn.addEventListener('click', () => _keepEmail(id));
+  // actionsView: the legacy Keep channel is closed (F2-03) and delete suggestions are recomputed by the
+  // conservative rule on every scan, so the Keep control is not offered.
+  if (keepBtn && _actionsOn()) keepBtn.remove();
+  else if (keepBtn) keepBtn.addEventListener('click', () => _keepEmail(id));
 }
 
 async function _deleteEmail(id) {
   const em = _results.emails.find((e) => e.id === id);
+  if (_actionsOn()) {
+    const ck = em && em.intel && em.intel.conversationKey;
+    if (!ck) { _toast('This email can\'t be deleted from here. Delete it in Outlook.'); return; }
+    try {
+      const r = await _confirmedDelete('delete', { conversationKey: ck });
+      if (!r) return;
+      if (r.ok) { em.deleted = true; _render(); _toast('Deleted — moved to Deleted Items.'); } else _toast('Delete failed: ' + ((r.error || r.code) || 'unknown'));
+    } catch (e) { _toast('Delete failed: ' + (e.message || e)); }
+    return;
+  }
   const label = em ? (em.fromName || em.from || em.subject || 'this email') : 'this email';
   if (!confirm('Delete "' + (em ? em.subject : label) + '"?\nIt moves to Deleted Items in Outlook (recoverable).')) return;
   const card = document.querySelector('.et-card[data-id="' + CSS.escape(id) + '"]');
@@ -443,6 +549,20 @@ async function _keepEmail(id) {
 async function _deleteAllSuggested() {
   const targets = (_results.emails || []).filter((e) => e.deleteSuggested && !e.kept && !e.deleted);
   if (!targets.length) { _toast('No suggested deletes to clear.'); return; }
+  if (_actionsOn()) {
+    const keys = targets.map((e) => e.intel && e.intel.conversationKey).filter(Boolean).filter((k, i, a) => a.indexOf(k) === i).slice(0, 25);
+    if (!keys.length) { _toast('These emails can\'t be deleted from here. Delete them in Outlook.'); return; }
+    try {
+      const r = await _confirmedDelete('delete-batch', { conversationKeys: keys });
+      if (!r) return;
+      if (r.ok) {
+        (r.outcomes || []).forEach((o) => { if (o.ok) { const em = _results.emails.find((e) => e.id === o.id); if (em) em.deleted = true; } });
+        _render();
+        _toast('Deleted ' + r.deleted + ' of ' + r.total + '.');
+      } else _toast('Bulk delete failed: ' + ((r.error || r.code) || 'unknown'));
+    } catch (e) { _toast('Bulk delete failed: ' + (e.message || e)); }
+    return;
+  }
   if (!confirm('Delete all ' + targets.length + ' suggested email(s)?\nThey move to Deleted Items in Outlook (recoverable).')) return;
   _toast('Deleting ' + targets.length + ' email(s)…');
   try {

@@ -1,7 +1,8 @@
 // tests/email-intel-cases.test.js — acceptance cases (design 11, 12.2). FEAT-003 covers D, E and F at
 // ANALYSIS level (facts and determinations only; nothing is written). FEAT-004 adds the runIntelScan-level
-// versions with the timeline writer, and the remaining cases arrive with their phases.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+// versions with the timeline writer; FEAT-005 adds the My Email Actions side of C, D and I; the remaining
+// cases arrive with their phases.
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRequire } from 'module';
 import { mk, scenarios, ZILA, DEALER, COWORKER, person } from './fixtures/email-intel/emails.js';
 import { recordOf, docOf, analyzeDoc, scriptedRelay, aiFixture, refOf } from './fixtures/email-intel/records.js';
@@ -270,5 +271,138 @@ describe('acceptance cases at runIntelScan level (FEAT-004)', () => {
     expect(ev[0]).toMatchObject({ isConflict: true, usedInConclusion: false, stagedReason: 'conflict-canonical' });
     expect(res.emails[0].unitUpdateApplied).toBe(false);
     expect(w.idx.getStatus().backlog.openStaged).toBe(1);
+  });
+});
+
+// ── FEAT-005: the My Email Actions side of cases C, D and I at runIntelScan level (stage 9: question states,
+// action items, notify once). Flags: master + capture + multiRecipient + actionsView + timelineWrites.
+describe('acceptance cases C, D, I with My Email Actions (FEAT-005)', () => {
+  let w = null;
+  afterEach(() => { if (w) w.cleanup(); w = null; });
+  const TPL = require('../src/email-intel/actions/templates');
+  const approvalCase = (world) => {
+    world.rules.push({ unit: '40123', fact: fact({ kind: 'approval_status', item: 'estimate', value: 'Estimate received for $1,840', state: 'estimate_received', date: null, amount: { value: 1840, currency: 'USD' }, evidence: 'please approve the $1,840 estimate for 40123' }) });
+    world.questions.push({ when: 'please approve', q: { ref: 'q1', text: 'Please approve the $1,840 estimate for 40123', about: ['40123'], addressee: { kind: 'me', name: 'Zila', evidence: 'Zila, please approve' }, isApprovalOrDecision: true, decisionKind: 'estimate', confidence: 0.9 } });
+    return world.cap({ from: DEALER, to: [COWORKER], cc: [ZILA], subject: 'Estimate 40123', conversationId: 'conv-c', messageId: 'c-1', body: 'Zila, please approve the $1,840 estimate for 40123.' });
+  };
+  const noConsequential = () => {
+    const actions = require('../src/scrapers/email_actions');
+    const ow = require('../src/scrapers/owa_reader');
+    const spies = { sendReply: vi.spyOn(actions, 'sendReply'), sendReadyDm: vi.spyOn(actions, 'sendReadyDm'), deleteMessage: vi.spyOn(ow, 'deleteMessage') };
+    return { spies, assert: () => { for (const s of Object.values(spies)) { expect(s).not.toHaveBeenCalled(); s.mockRestore(); } } };
+  };
+
+  it("case C: CC'd approval request yields one decision item with the exact action text, notified once, no approve / send / spend call", async () => {
+    w = phaseCWorld();
+    const confirm = require('../src/email-intel/confirm');
+    confirm._resetForTests();
+    const guard = noConsequential();
+    const notify = vi.fn(() => true);
+    const c = approvalCase(w);
+    await w.scan([c], { _notify: notify });
+    const dec = w.open('decision');
+    expect(dec).toHaveLength(1);
+    expect(dec[0]).toMatchObject({
+      category: 'decision', tier: 'required', reasonCode: 'decision-me', units: ['40123'],
+      reasonText: 'Dealer Parts Desk asked you to approve the estimate for unit 40123 ($1,840)',
+      actionText: 'Review in the approval system, then reply. The app will not approve for you.',
+    });
+    expect(dec[0].actionText).toBe(TPL.DECISION_ACTION);
+    expect(w.open('reply')).toEqual([]);                                         // the approval is a decision item, not also a reply item
+    expect(w.open('review')).toHaveLength(1);                                    // the staged spend fact is reviewable (not notified)
+    expect(w.open('review')[0]).toMatchObject({ reasonCode: 'spend-related', tier: 'suggested' });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toEqual({ title: 'My Email Actions', body: '1 item needs your decision (40123)' });
+    // rescans: same item id, no second notification, still nothing approved
+    await w.scan([c], { _notify: notify });
+    await w.scan([c], { _notify: notify });
+    expect(w.open('decision').map((x) => x.actionId)).toEqual([dec[0].actionId]);
+    expect(w.actions().filter((x) => x.category === 'decision')).toHaveLength(1);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(w.timeline('40123')).toBe('');
+    expect(w.staged()[0]).toMatchObject({ reason: 'spend-related', state: 'open' });
+    expect(confirm._liveCount()).toBe(0);
+    guard.assert();
+    expect(w.idx.getStatus().backlog.openActions).toBe(2);
+  });
+
+  it('case C with identity unset: the item is a suggested decision and still nothing is approved', async () => {
+    w = phaseCWorld(undefined, { me: { names: [], addresses: [], distributionLists: [] } });
+    const guard = noConsequential();
+    const notify = vi.fn(() => true);
+    await w.scan([approvalCase(w)], { _notify: notify });
+    const dec = w.open('decision');
+    expect(dec).toHaveLength(1);
+    expect(dec[0]).toMatchObject({ tier: 'suggested', reasonCode: 'decision-possible', actionText: TPL.DECISION_ACTION });
+    expect(dec[0].reasonText).toMatch(/^An estimate decision about unit 40123 may need you \(addressee unclear\)/);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(w.timeline('40123')).toBe('');
+    guard.assert();
+  });
+
+  it('case D: coworker question about my unit gives owner other-person and no Reply Needed item for me', async () => {
+    w = phaseCWorld();
+    const notify = vi.fn(() => true);
+    w.rules.push({ unit: '40123', fact: fact({ item: 'DPF', value: 'DPF ETA 11/14', date: '2026-11-14', evidence: 'The DPF ETA is 11/14' }) });
+    w.questions.push({ when: 'Mike, can you check', q: { ref: 'q1', text: 'Can you check the DPF on 40123?', about: ['40123'], addressee: { kind: 'named-other', name: 'Mike', evidence: 'Mike, can you check the DPF on 40123?' }, isApprovalOrDecision: false, confidence: 0.9 } });
+    await w.scan([w.cap({ from: DEALER, to: [COWORKER, person(3)], subject: 'DPF on 40123', conversationId: 'conv-d', body: 'Mike, can you check the DPF on 40123? The DPF ETA is 11/14.' })], { _notify: notify });
+    const qs = Object.values(w.stores.load('actions').questions);
+    expect(qs).toHaveLength(1);
+    expect(qs[0]).toMatchObject({ owner: 'other-person', status: 'open', addressee: { kind: 'named-other' } });
+    expect(w.open('reply')).toEqual([]);
+    expect(w.open('decision')).toEqual([]);
+    expect(w.open('recorded')).toHaveLength(1);                                  // the unit fact is captured and shown as recorded
+    expect(w.open('recorded')[0].reasonText).toBe('Recorded 1 update for unit 40123: Parts ETA');
+    expect(w.lines('40123')).toHaveLength(1);
+    expect(notify).not.toHaveBeenCalled();                                       // recorded items never notify
+  });
+
+  const iCase = (world, o = {}) => {
+    world.questions.push({ when: 'can you confirm pickup Friday', q: { ref: 'q1', text: 'Can you confirm pickup Friday for 40123?', about: ['40123'], addressee: { kind: 'me', name: 'Zila', evidence: 'Zila, can you confirm pickup Friday' }, isApprovalOrDecision: false, confidence: 0.9 } });
+    world.answers.push({ when: 'Confirmed for Friday', evidence: 'Confirmed for Friday', confidence: 0.9 });
+    const m1 = world.cap({ from: DEALER, to: [ZILA], subject: 'Pickup 40123', conversationId: 'conv-i', messageId: 'i-1', receivedAt: '2026-11-04T14:00:00.000Z', body: 'Zila, can you confirm pickup Friday for 40123?' });
+    const m2 = world.cap({ from: o.from || COWORKER, to: [DEALER], cc: [ZILA], subject: 'RE: Pickup 40123', conversationId: 'conv-i', messageId: 'i-2', receivedAt: '2026-11-04T15:00:00.000Z', body: 'Confirmed for Friday, the truck is booked for 40123.' });
+    return { m1, m2 };
+  };
+
+  it('case I: later answer closes the question, no item, no notification', async () => {
+    w = phaseCWorld();
+    const notify = vi.fn(() => true);
+    const { m1, m2 } = iCase(w);
+    await w.scan([m1, m2], { _notify: notify });
+    const qs = Object.values(w.stores.load('actions').questions);
+    expect(qs).toHaveLength(1);
+    expect(qs[0]).toMatchObject({ status: 'answered', owner: 'me', answeredBy: { basis: 'later-answer', confidence: 0.9 } });
+    for (const cat of ['reply', 'decision', 'followup', 'review']) expect(w.open(cat), cat).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+    const res = await w.scan([m1, m2], { _notify: notify });                      // a rescan does not resurrect it
+    expect(w.open('reply')).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+    expect(res.emails[0].replySuggested).toBe(false);
+  });
+
+  it('case I across scans: the open Reply Needed item closes automatically when the answer arrives; notified once in total', async () => {
+    w = phaseCWorld();
+    const notify = vi.fn(() => true);
+    const { m1, m2 } = iCase(w);
+    await w.scan([m1], { _notify: notify });
+    const open = w.open('reply');
+    expect(open).toHaveLength(1);
+    expect(open[0]).toMatchObject({ tier: 'required', reasonText: 'Dealer Parts Desk asked you a question about unit 40123', actionText: 'Reply to Dealer Parts Desk (Reply or Reply All)' });
+    expect(notify).toHaveBeenCalledTimes(1);
+    await w.scan([m1, m2], { _notify: notify });
+    expect(w.open('reply')).toEqual([]);
+    expect(w.actions().find((x) => x.actionId === open[0].actionId).state).toBe('done-auto');
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('case I own reply: my later message in the thread answers the question (R4.4)', async () => {
+    w = phaseCWorld();
+    const notify = vi.fn(() => true);
+    const { m1, m2 } = iCase(w, { from: ZILA });
+    await w.scan([m1, m2], { _notify: notify });
+    expect(Object.values(w.stores.load('actions').questions)[0]).toMatchObject({ status: 'answered', answeredBy: { basis: 'own-reply' } });
+    expect(w.open('reply')).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
   });
 });

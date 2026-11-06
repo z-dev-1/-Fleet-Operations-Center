@@ -195,6 +195,154 @@ describe('staged review: get-staged, approve-staged and reject-staged tokens (Ph
   });
 });
 
+describe('Phase D: delete tokens, legacy fail-closed delete, get-actions and action-update', () => {
+  const PHASE_D = { enabled: true, capture: true, multiRecipient: true, actionsView: true };
+  const CK1 = 'cv_00000000000000d1'; const CK2 = 'cv_00000000000000d2'; const CK3 = 'cv_00000000000000d3';
+  let ow; let realDelete;
+  const msg = (key, ck, legacyId, o = {}) => Object.assign({
+    messageKey: key, conversationKey: ck, legacyId, convIdRaw: 'conv/' + legacyId + '=', convIdSource: 'owa', messageIdSource: 'owa-item', folder: 'Inbox',
+    from: { name: 'Shop', address: 'shop@example.test' }, subject: 'Unit status', receivedAt: '2026-11-04T14:30:00.000Z', body: { status: 'complete', newContent: 'x' },
+    analysis: { status: 'ok', result: { questions: [], requests: [], answers: [], commitments: [], units: [] }, deterministic: { units: [] },
+      determinations: { replyRequirement: { value: 'none' }, decisionRequirement: { value: 'none' }, actionOwnership: { items: [] } } },
+  }, o);
+  function seed(extra = {}) {
+    const m1 = msg('mi_d1', CK1, 'em_r1');
+    const m2 = msg('mi_d2', CK2, 'em_r2', { convIdSource: 'derived' });
+    const m3 = msg('mi_d3', CK3, 'em_r3', { analysis: { status: 'ok', deterministic: { units: [] }, determinations: { replyRequirement: { value: 'required' }, decisionRequirement: { value: 'none' }, actionOwnership: { items: [] } } } });
+    const results = { ...RESULTS, emails: RESULTS.emails.concat([{ id: 'em_r3', convId: 'conv/em_r3=', subject: 'Q', unitRefs: [], replyState: 'none', deleteSuggested: true }]) };
+    fx.resetWorld(Object.assign({
+      emailTriageResults: results, emailTriageConfig: { enabled: true, folders: ['Inbox'], readyDmSuggested: true },
+      emailIntelMessages: { version: 1, messages: { mi_d1: m1, mi_d2: m2, mi_d3: m3 }, byConv: { [CK1]: ['mi_d1'], [CK2]: ['mi_d2'], [CK3]: ['mi_d3'] }, aliasIndex: {}, bytesEstimate: 0 },
+    }, extra));
+  }
+  beforeEach(() => {
+    ow = require(path.join(fx.ROOT, 'src/scrapers/owa_reader'));
+    realDelete = ow.deleteMessage;
+    ow.deleteMessage = vi.fn(async () => ({ ok: true }));
+  });
+  afterEach(() => { ow.deleteMessage = realDelete; });
+
+  it('R7.6 delete requires token under flag', async () => {
+    seed();
+    expect(await call('emailIntel:prepare-action', 'delete', { conversationKey: CK1 })).toEqual({ ok: true, enabled: false });       // flags OFF: inert
+    flags._setForTests({ enabled: true, capture: true, multiRecipient: true });
+    expect(await call('emailIntel:prepare-action', 'delete', { conversationKey: CK1 })).toEqual({ ok: true, enabled: false });       // needs actionsView
+    flags._setForTests(PHASE_D);
+    expect(await call('emailIntel:prepare-action', 'delete', { conversationKey: 'cv_' + 'f'.repeat(16) })).toEqual({ ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'unknown-conversation' });
+    expect(await call('emailIntel:prepare-action', 'delete', { conversationKey: CK2 })).toEqual({ ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'no-conversation-id' });   // derived key excluded
+    expect(await call('emailIntel:prepare-action', 'delete', { conversationKey: CK3 })).toEqual({ ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'question-to-me' });
+    fx.resetWorld(Object.assign(JSON.parse(JSON.stringify({ emailTriageResults: RESULTS, emailIntelMessages: fx.doc('emailIntelMessages') })), {
+      emailIntelActions: { version: 1, questions: {}, items: { ac_00000000000000a1: { actionId: 'ac_00000000000000a1', category: 'review', tier: 'suggested', state: 'open', conversationKey: CK1 } } },
+    }));
+    expect(await call('emailIntel:prepare-action', 'delete', { conversationKey: CK1 })).toMatchObject({ ok: false, code: 'BAD_ARG', reason: 'open-action' });
+    expect(confirm._liveCount()).toBe(0);
+    seed();
+    const p0 = await call('emailIntel:prepare-action', 'delete', { conversationKey: CK1 });
+    expect(p0).toMatchObject({ ok: true, token: expect.stringMatching(/^[0-9a-f]{32}$/) });
+    expect(p0.summary.headline).toBe('Delete this email from Shop?');
+    expect(p0.summary.detailText).toContain('It moves to Deleted Items in Outlook (recoverable).');
+    expect(await call('emailIntel:confirm-action', p0.token)).toEqual({ ok: false, code: 'DIALOG_UNAVAILABLE' });        // no native dialog: nothing deleted
+    electronStub.dialog = { showMessageBox: vi.fn(async () => ({ response: 0 })) };
+    const p1 = await call('emailIntel:prepare-action', 'delete', { conversationKey: CK1 });
+    expect(await call('emailIntel:confirm-action', p1.token)).toEqual({ ok: false, code: 'USER_CANCELLED' });
+    expect(ow.deleteMessage).not.toHaveBeenCalled();
+    const dlg = acceptDialog();
+    const p2 = await call('emailIntel:prepare-action', 'delete', { conversationKey: CK1 });
+    expect(await call('emailIntel:confirm-action', p2.token)).toEqual({ ok: true, message: 'Deleted - moved to Deleted Items in Outlook.' });
+    expect(dlg.showMessageBox.mock.calls[0][0]).toMatchObject({ title: 'Delete email', buttons: ['Cancel', 'Delete'], cancelId: 0, defaultId: 0 });
+    expect(ow.deleteMessage).toHaveBeenCalledTimes(1);
+    expect(ow.deleteMessage).toHaveBeenCalledWith({ convId: 'conv/em_r1=', folder: 'Inbox' });
+    expect(fx.doc('emailTriageResults').emails.find((e) => e.id === 'em_r1')).toMatchObject({ deleted: true });
+    expect(await call('emailIntel:confirm-action', p2.token)).toEqual({ ok: false, code: 'TOKEN_USED' });
+    expect(await call('emailIntel:prepare-action', 'delete', { conversationKey: CK1 })).toMatchObject({ ok: false, reason: 'already-deleted' });
+    expect(ow.deleteMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('F2-03 legacy delete and delete-suggested return CONFIRMATION_REQUIRED and call no deleter under actionsView', async () => {
+    seed();
+    flags._setForTests(PHASE_D);
+    const before = fx.doc('emailTriageResults');
+    expect(await call('emailTriage:delete', 'em_r1')).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED' });
+    expect(await call('emailTriage:delete-suggested')).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED' });
+    expect(await call('emailTriage:keep', 'em_r3')).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED' });
+    expect(ow.deleteMessage).not.toHaveBeenCalled();
+    expect(fx.doc('emailTriageResults')).toEqual(before);
+    expect(fx.doc('emailTriageLearning')).toBe('<absent>');
+    // actionsView not effective (capture + multiRecipient only): the legacy channels are the baseline code path
+    flags._setForTests({ enabled: true, capture: true, multiRecipient: true });
+    expect(await call('emailTriage:delete', 'em_r1')).toMatchObject({ ok: true });
+    expect(ow.deleteMessage).toHaveBeenCalledWith({ convId: 'conv/r1=', folder: 'Inbox' });
+    flags._setForTests(null);
+    expect(await call('emailTriage:keep', 'em_r3')).toEqual({ ok: true });
+    expect(await call('emailTriage:delete-suggested')).toMatchObject({ ok: true });
+  });
+
+  it('F-19 prepare-action payload schema matrix: delete, delete-batch, reject-staged', async () => {
+    seed();
+    flags._setForTests(PHASE_D);
+    const rows = [
+      ['delete', 'x', 'payload'], ['delete', {}, 'conversationKey'], ['delete', { conversationKey: 5 }, 'conversationKey'], ['delete', { conversationKey: 'cv_short' }, 'conversationKey'],
+      ['delete', { conversationKey: CK1.toUpperCase() }, 'conversationKey'],
+      ['delete-batch', {}, 'conversationKeys'], ['delete-batch', { conversationKeys: [] }, 'conversationKeys'], ['delete-batch', { conversationKeys: CK1 }, 'conversationKeys'],
+      ['delete-batch', { conversationKeys: [CK1, CK1] }, 'conversationKeys'], ['delete-batch', { conversationKeys: [CK1, 7] }, 'conversationKeys'],
+      ['delete-batch', { conversationKeys: Array.from({ length: 26 }, (_, i) => 'cv_' + String(i).padStart(16, '0')) }, 'conversationKeys'],
+      ['reject-staged', {}, 'stagedId'], ['reject-staged', { stagedId: 'st_nothex' }, 'stagedId'], ['reject-staged', { stagedId: 'st_' + 'a'.repeat(16) }, 'stagedId'],
+    ];
+    for (const [kind, p, field] of rows) {
+      const r = await call('emailIntel:prepare-action', kind, p);
+      expect(r, kind + ' ' + JSON.stringify(p)).toMatchObject({ ok: false, code: 'BAD_ARG', field });
+    }
+    expect(await call('emailIntel:prepare-action', 'delete-batch', { conversationKeys: [CK2, CK3] })).toEqual({ ok: false, code: 'BAD_ARG', field: 'conversationKeys', reason: 'none-deletable' });
+    expect(confirm._liveCount()).toBe(0);
+    // a mixed batch: failing targets are excluded and listed; the rest run one at a time after the native dialog
+    const p = await call('emailIntel:prepare-action', 'delete-batch', { conversationKeys: [CK1, CK2, CK3], extra: 'ignored' });
+    expect(p).toMatchObject({ ok: true, summary: { headline: 'Delete 1 email?', count: 1, excluded: 2 } });
+    expect(p.summary.detailText).toContain('Not included (2): Outlook gave no real conversation id; it has a question or decision for you');
+    acceptDialog();
+    const r = await call('emailIntel:confirm-action', p.token);
+    expect(r).toMatchObject({ ok: true, deleted: 1, total: 1, outcomes: [{ conversationKey: CK1, id: 'em_r1', ok: true }] });
+    expect(r.excluded.map((x) => x.reason)).toEqual(['no-conversation-id', 'question-to-me']);
+    expect(ow.deleteMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('get-actions and action-update validate their inputs and change local state only', async () => {
+    const A = (id, o) => Object.assign({ actionId: id, category: 'reply', tier: 'required', state: 'open', conversationKey: CK1, messageKey: 'mi_d1', latestMessageKey: 'mi_d1', units: ['40123'], reasonText: 'r', actionText: 'a', chips: {}, firstSeenAt: '2026-11-04T15:00:00.000Z', lastChangedAt: '2026-11-04T15:00:00.000Z' }, o);
+    seed({ emailIntelActions: { version: 1, questions: {}, bootstrapped: true, items: { ac_00000000000000a1: A('ac_00000000000000a1'), ac_00000000000000a2: A('ac_00000000000000a2', { category: 'info', tier: 'fyi', conversationKey: CK2, messageKey: 'mi_d2', latestMessageKey: 'mi_d2', chips: { analysisFailed: true } }) } } });
+    expect(await call('emailIntel:get-actions', {})).toEqual({ ok: true, enabled: false });
+    expect(await call('emailIntel:action-update', { actionId: 'ac_00000000000000a1', op: 'done' })).toEqual({ ok: true, enabled: false });
+    flags._setForTests(PHASE_D);
+    const g = await call('emailIntel:get-actions');
+    expect(g).toMatchObject({ ok: true, total: 2, counts: { reply: 1, info: 1, decision: 0 }, timelineWrites: false });
+    expect(g.categories.map((c) => c.label)).toEqual(['Reply Needed', 'Decision / Approval Needed', 'Follow-Up Needed', 'Review Conflicting Information', 'Unit Update Recorded', 'Informational / No Action', 'Out of Scope']);
+    expect((await call('emailIntel:get-actions', { limit: 999 })).ok).toBe(true);                                     // clamped
+    expect((await call('emailIntel:get-actions', { limit: 0.4, category: 'reply' })).items).toHaveLength(1);         // clamped to 1
+    for (const [p, field] of [[{ limit: '5' }, 'limit'], [{ category: 'spam' }, 'category'], [{ includeClosed: 'yes' }, 'includeClosed'], [{ offset: -1 }, 'offset'], ['x', 'payload']]) {
+      expect(await call('emailIntel:get-actions', p)).toEqual({ ok: false, code: 'BAD_ARG', field });
+    }
+    const now = Date.now();
+    for (const [p, field] of [
+      [{ actionId: 'ac_bad', op: 'done' }, 'actionId'], [{ actionId: 'ac_00000000000000a1', op: 'approve' }, 'op'], [{ actionId: 'ac_00000000000000a1', op: 'snooze' }, 'snoozeUntil'],
+      [{ actionId: 'ac_00000000000000a1', op: 'snooze', snoozeUntil: new Date(now - 1000).toISOString() }, 'snoozeUntil'],
+      [{ actionId: 'ac_00000000000000a1', op: 'snooze', snoozeUntil: new Date(now + 31 * 86_400_000).toISOString() }, 'snoozeUntil'],
+      [{ actionId: 'ac_00000000000000a1', op: 'snooze', snoozeUntil: 'tomorrow' }, 'snoozeUntil'], [null, 'payload'],
+    ]) expect(await call('emailIntel:action-update', p)).toEqual({ ok: false, code: 'BAD_ARG', field });
+    expect(await call('emailIntel:action-update', { actionId: 'ac_ffffffffffffffff', op: 'done' })).toEqual({ ok: false, code: 'NOT_FOUND' });
+    const until = new Date(now + 86_400_000).toISOString();
+    expect(await call('emailIntel:action-update', { actionId: 'ac_00000000000000a1', op: 'snooze', snoozeUntil: until })).toEqual({ ok: true, actionId: 'ac_00000000000000a1', state: 'snoozed', snoozeUntil: until });
+    expect(await call('emailIntel:action-update', { actionId: 'ac_00000000000000a1', op: 'dismiss', send: true })).toMatchObject({ ok: true, state: 'dismissed' });
+    expect(fx.doc('emailIntelActions').items.ac_00000000000000a1).toMatchObject({ state: 'dismissed' });
+    // retry-analysis is only for failed-permanent messages (F-16)
+    expect(await call('emailIntel:action-update', { actionId: 'ac_00000000000000a2', op: 'retry-analysis' })).toEqual({ ok: false, code: 'BAD_ARG', field: 'op' });
+    const m = fx.doc('emailIntelMessages');
+    m.messages.mi_d2.analysis = { status: 'failed-permanent', outputAttempts: 3, attempts: 3, error: 'invalid-output' };
+    fx.resetWorld({ emailTriageResults: RESULTS, emailIntelMessages: m, emailIntelActions: fx.doc('emailIntelActions') });
+    expect(await call('emailIntel:action-update', { actionId: 'ac_00000000000000a2', op: 'retry-analysis' })).toMatchObject({ ok: true, retry: 'queued' });
+    expect(fx.doc('emailIntelMessages').messages.mi_d2.analysis).toMatchObject({ status: 'pending', outputAttempts: 0, error: null });
+    expect(ow.deleteMessage).not.toHaveBeenCalled();
+    expect(confirm._liveCount()).toBe(0);
+  });
+});
+
 describe('F-19 scan and config validation', () => {
   it('F-19 scan folders must match configured list', async () => {
     const V = intelIpc.validateScan;
