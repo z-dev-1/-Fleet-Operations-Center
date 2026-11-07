@@ -407,6 +407,17 @@ function _fireWriteHook(key) {
   try { _onWrite(key); } catch (_) { /* never let sync break a write */ }
 }
 
+// ── Per-key write generation (Phase 8 worker isolation) ─────────────────────
+// In-process, per-key monotonic counter bumped AFTER every successful write
+// (save / update / updateAsync / delete). Lets canonical_runner detect that
+// another writer committed to fleetData / canonicalState during an isolated
+// worker's compute round-trip, so a stale worker result is discarded (§2.1 of
+// the design). It is NOT persisted: a fresh process starts every key at 0. A
+// throwing write never bumps (the bump follows the successful write only).
+const _gen = new Map();
+function _bump(key) { _gen.set(key, (_gen.get(key) || 0) + 1); }
+function generation(key) { return _gen.get(key) || 0; }
+
 // True when `name` should be served by SQLite AND the engine is actually
 // available on this runtime. Any failure path falls back to JSON files.
 function _useSqlite(name) {
@@ -483,7 +494,7 @@ function load(key, fallback) {
 function save(key, data) {
   if (_useSqlite(key)) {
     _migrateJsonToSqlite(key);
-    try { _engine().writeDoc(key, data); _fireWriteHook(key); return; }
+    try { _engine().writeDoc(key, data); _bump(key); _fireWriteHook(key); return; }
     catch (e) {
       logger.warn('SQLite save("' + key + '") failed, falling back to JSON: ' + e.message);
       // fall through to the JSON path below
@@ -518,6 +529,7 @@ function save(key, data) {
     try { fs.unlinkSync(tmpPath); } catch (_) {}
     throw e;
   }
+  _bump(key);
   _fireWriteHook(key);
 }
 
@@ -540,6 +552,7 @@ function update(name, mergeFn, defaultValue = {}) {
         const current = (cur === undefined) ? defaultValue : cur;
         const updated = mergeFn(current);
         eng.writeDoc(name, updated);
+        _bump(name);
         return updated;
       });
     } catch (e) {
@@ -607,6 +620,7 @@ function del(name) {
     // Also remove any legacy JSON file so a later fallback can't resurrect it.
   }
   try { fs.unlinkSync(_resolvePath(name)); } catch (_) {}
+  _bump(name);
 }
 
-module.exports = { load, save, update, updateAsync, exists, delete: del, REGISTRY, SQLITE_KEYS, setWriteHook };
+module.exports = { load, save, update, updateAsync, exists, delete: del, REGISTRY, SQLITE_KEYS, setWriteHook, generation };

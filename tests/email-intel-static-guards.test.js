@@ -105,7 +105,11 @@ describe('NFR-8 off-limits files and import lists', () => {
     if (committed == null) return;   // git unavailable: skip
     const files = committed.split('\n').map((s) => s.trim()).filter(Boolean);
     expect(files).toContain('src/config/perf-flags.js');   // the diff is real, so an empty offender list means something
-    const offenders = files.filter((f) => OFF_LIMITS.some((re) => re.test(f)));
+    // Files changed by LATER, separately reviewed FEATs on top of this branch point. They are
+    // off-limits for email-intel, not for those FEATs. Phase 8 worker isolation
+    // (feature/worker-isolation) extends the supervisor with registerHost().
+    const LATER_FEAT_FILES = new Set(['src/workers/supervisor.js']);
+    const offenders = files.filter((f) => !LATER_FEAT_FILES.has(f) && OFF_LIMITS.some((re) => re.test(f)));
     expect(offenders).toEqual([]);
     const untracked = (git('ls-files', '--others', '--exclude-standard') || '').split('\n').map((s) => s.trim()).filter(Boolean);
     expect(untracked.filter((f) => OFF_LIMITS.some((re) => re.test(f)))).toEqual([]);

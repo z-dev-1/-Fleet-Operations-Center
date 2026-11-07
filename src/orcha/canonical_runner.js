@@ -86,27 +86,68 @@ function runCanonicalPass(opts = {}) {
   return require('../telemetry').track('canonical.pass', () => _runCanonicalPassImpl(opts));
 }
 
+// The legacy pass, split into _prepare → _compute → _commit with the exact
+// same statement order (Phase 8). The legacy path has prep.gen === null, so
+// _commit skips the generation check and the whole pass stays synchronous.
 function _runCanonicalPassImpl(opts = {}) {
+  const prep = _prepare(opts, false);
+  if (!prep.ok) return prep.early;
+  const built = _compute(prep);
+  return _commit(prep, built, opts, null);
+}
+
+function _defaultLog() {
+  try { const l = require('../utils/logger')('canonical'); return { info: (m) => l.info(m), warn: (m) => l.warn(m) }; }
+  catch (_) { return { info() {}, warn() {} }; }
+}
+
+/**
+ * _prepare(opts, withGen) — every legacy step up to buildAll: resolve deps,
+ * load fleetData, overlay the deep-scan fields, load canonicalState, compute
+ * the baseline. withGen records the store write generations of both keys right
+ * after loading them (isolated path only).
+ */
+function _prepare(opts, withGen) {
   const deps = opts.deps || {};
   const store = deps.store || require('../store');
   const canonical = deps.canonical || require('./canonical_state');
   const readyNotify = deps.readyNotify || require('../scrapers/ready_pickup_notify');
-  const log = deps.log || (() => {
-    try { const l = require('../utils/logger')('canonical'); return { info: (m) => l.info(m), warn: (m) => l.warn(m) }; }
-    catch (_) { return { info() {}, warn() {} }; }
-  })();
+  const log = deps.log || _defaultLog();
   const now = deps.now ? deps.now() : Date.now();
 
   const fd = store.load('fleetData', {}) || {};
   const rows = Array.isArray(fd.rows) ? fd.rows : [];
-  if (!rows.length) return { ok: false, reason: 'no fleet rows' };
+  if (!rows.length) return { ok: false, early: { ok: false, reason: 'no fleet rows' } };
 
   const overlaid = overlayDeepScanFields(rows, opts.scannedRows);
 
   const prevCanon = store.load('canonicalState', {}) || {};
   const priorUnits = prevCanon.units || {};
+  const gen = withGen ? { fd: store.generation('fleetData'), cs: store.generation('canonicalState') } : null;
   const lastMs = prevCanon.updatedAt ? Date.parse(prevCanon.updatedAt) : NaN;
   const baseline = !Number.isFinite(lastMs) || (now - lastMs) > GAP_MS;
+  return { ok: true, deps, store, canonical, readyNotify, log, now, fd, rows, overlaid, prevCanon, priorUnits, baseline, gen };
+}
+
+function _compute(prep) {
+  const { units, counts } = prep.canonical.buildAll(prep.rows, { decisions: {}, prior: prep.priorUnits });
+  return { units, counts };
+}
+
+const STALE = Object.freeze({ stale: true });
+
+/**
+ * _commit(prep, built, opts, iso) — per-unit baseline, save canonicalState,
+ * mirror, save fleetData, ctx/pushData, notify enqueue, log line. When prep.gen
+ * is set (isolated path), its FIRST statement is the store write-generation
+ * check: if another writer saved fleetData or canonicalState since _prepare
+ * loaded them, it returns STALE without writing. Check and writes sit in one
+ * synchronous block, so nothing can interleave between them.
+ */
+function _commit(prep, built, opts, iso) {
+  if (prep.gen && (prep.store.generation('fleetData') !== prep.gen.fd || prep.store.generation('canonicalState') !== prep.gen.cs)) return STALE;
+  const { deps, store, canonical, readyNotify, log, now, fd, rows, overlaid, prevCanon, priorUnits, baseline } = prep;
+  const tCommit = iso ? _perfNow() : 0;
   // PER-UNIT baseline (FIX 2026-10-28): the file-level updatedAt is NOT enough
   // -- the single-unit refresh (ipc/scrapers.js) saves one unit and stamps the
   // whole file fresh, so a file full of 10-16 records looked current and B12343
@@ -118,7 +159,7 @@ function _runCanonicalPassImpl(opts = {}) {
     return Number.isFinite(t) && (now - t) <= GAP_MS;
   };
 
-  const { units, counts } = canonical.buildAll(rows, { decisions: {}, prior: priorUnits });
+  const { units, counts } = built;
 
   let baselinedUnits = 0;
   for (const id of Object.keys(units)) {
@@ -157,8 +198,137 @@ function _runCanonicalPassImpl(opts = {}) {
   log.info('[canonical] ' + counts.total + ' unit(s) — API mode, ' + (counts.changed || 0) + ' changed'
     + (baseline ? ' — QUIET BASELINE (last run ' + (prevCanon.updatedAt || 'never') + '; no carrier notices this run)' : '')
     + (!baseline && baselinedUnits ? ' — ' + baselinedUnits + ' unit(s) with an old prior record baselined quietly' : '')
-    + (overlaid ? ' | saved deep-scan stage/notes on ' + overlaid + ' row(s)' : ''));
+    + (overlaid ? ' | saved deep-scan stage/notes on ' + overlaid + ' row(s)' : '')
+    + (iso ? ' (isolated: worker ' + Math.round(iso.workerMs || 0) + ' ms, main ' + Math.round((iso.dispatchMs || 0) + (_perfNow() - tCommit)) + ' ms)' : ''));
+  if (iso) return { ok: true, baseline, baselinedUnits, counts, overlaid, notifyQueued, isolated: true, workerMs: iso.workerMs };
   return { ok: true, baseline, baselinedUnits, counts, overlaid, notifyQueued };
 }
 
-module.exports = { runCanonicalPass, overlayDeepScanFields, GAP_MS, DS_FIELDS };
+function _perfNow() {
+  try { return require('perf_hooks').performance.now(); } catch (_) { return Date.now(); }
+}
+
+// ── Phase 8: isolated canonical pass (design §6) ────────────────────────────
+// requestCanonicalPass(opts) is the call-site entry. With isolation inactive
+// (flags off, the default) or an injected store without generation(), it IS
+// runCanonicalPass(opts): synchronous, identical. Otherwise it returns a
+// Promise that ALWAYS resolves with an object (never rejects); the buildAll
+// compute runs in the `canonical` worker and main stays the single writer.
+// Every failure falls back to the legacy in-process pass exactly once.
+
+const ROWS_LIMIT = 20000;   // clone-size guard (live fleet ≈ 253 rows)
+
+function _iso() { return require('../workers/isolation'); }
+
+function _whyFor(code) {
+  return typeof code === 'string' && /^[A-Z_]{1,40}$/.test(code) ? code.toLowerCase().replace(/_/g, '-') : 'internal';
+}
+
+/**
+ * _inProcess(opts, why) — the legacy pass, never throws. Counts the fallback
+ * on the host (host.fallbacks[why]); WARN '[worker:canonical] running
+ * in-process (<why>)' once per host state episode, `stale` at INFO every time.
+ * A throw logs the legacy call-site WARN text and resolves { ok:false, reason:'error' }.
+ */
+function _inProcess(opts, why) {
+  const log = (opts && opts.deps && opts.deps.log) || _defaultLog();
+  let host = null;
+  try { host = _iso().getHost('canonical'); } catch (_) { host = null; }
+  try { if (host) host.noteFallback(why); } catch (_) { /* ignore */ }
+  try {
+    if (why === 'stale') log.info('[worker:canonical] running in-process (stale)');
+    else if (!host || host.warnOnce('fallback')) log.warn('[worker:canonical] running in-process (' + why + ')');
+  } catch (_) { /* ignore */ }
+  try { return runCanonicalPass(opts); } catch (e) {
+    try { log.warn('[canonical] API-mode pass error (non-fatal): ' + e.message); } catch (_) { /* ignore */ }
+    return { ok: false, reason: 'error' };
+  }
+}
+
+async function _isolatedPass(opts) {
+  try {
+    const host = _iso().getHost('canonical');
+    if (!host || host.state !== 'ready') return _inProcess(opts, 'not-ready');
+    const spec = host.spec || {};
+    const telemetry = require('../telemetry');
+    let prep;
+    const t0 = _perfNow();
+    try { prep = telemetry.track('canonical.dispatch', () => _prepare(opts, true)); } catch (_) { return _inProcess(opts, 'prepare-error'); }
+    const dispatchMs = _perfNow() - t0;
+    if (!prep.ok) return prep.early;
+    // Clone-size guard, right after _prepare, with its own fallback key (N3).
+    if (prep.rows.length > ROWS_LIMIT) return _inProcess(opts, 'rows-limit');
+    const r = await host.request('canonical.buildAll', { rows: prep.rows, prior: prep.priorUnits }, { timeoutMs: spec.requestTimeoutMs });
+    if (!r || r.ok !== true) return _inProcess(opts, _whyFor(r && r.code));
+    const t1 = _perfNow();
+    let res;
+    try {
+      res = telemetry.track('canonical.commit', () => _commit(prep, r.result, opts, { workerMs: r.workerMs, dispatchMs }));
+    } catch (e) {
+      // A commit throw (e.g. store EPERM) is not retried: the legacy pass would
+      // have hit the same error. Same WARN text as the call sites log today.
+      try { prep.log.warn('[canonical] API-mode pass error (non-fatal): ' + e.message); } catch (_) { /* ignore */ }
+      return { ok: false, reason: 'error' };
+    }
+    if (res === STALE) return _inProcess(opts, 'stale');
+    try { host.noteTiming({ dispatchMs, commitMs: _perfNow() - t1 }); } catch (_) { /* ignore */ }
+    return res;
+  } catch (_) {
+    return _inProcess(opts, 'internal');
+  }
+}
+
+// Lane (design §6.2): one module-level FIFO, 1 pass in flight, ≤ queueMax waiting.
+const _lane = { busy: false, q: [] };
+
+function _queueMax() {
+  try { const h = _iso().getHost('canonical'); if (h && h.spec && Number.isInteger(h.spec.queueMax)) return h.spec.queueMax; } catch (_) { /* ignore */ }
+  return 4;
+}
+
+function _enqueue(opts) {
+  if (_lane.busy && _lane.q.length >= _queueMax()) {
+    // Overflow (N3): runs in-process IMMEDIATELY, out of FIFO order, ahead of
+    // the queued passes. Its saves bump the fleetData/canonicalState write
+    // generations, so the in-flight isolated pass is then discarded at commit
+    // as stale and re-run in-process on fresh data. Both are counted
+    // (fallbacks.overflow + fallbacks.stale). Costs one extra compute; no pass
+    // is lost or applied twice.
+    return Promise.resolve(_inProcess(opts, 'overflow'));
+  }
+  return new Promise((resolve) => { _lane.q.push({ opts, resolve }); _pump(); });
+}
+
+function _pump() {
+  if (_lane.busy) return;
+  const e = _lane.q.shift();
+  if (!e) return;
+  _lane.busy = true;
+  Promise.resolve()
+    .then(() => _isolatedPass(e.opts))
+    .catch(() => _inProcess(e.opts, 'internal'))
+    .then((res) => e.resolve(res && typeof res === 'object' ? res : { ok: false, reason: 'error' }))
+    .finally(() => { _lane.busy = false; _pump(); });
+}
+
+/**
+ * requestCanonicalPass(opts) → result (sync, isolation inactive) | Promise<result>
+ * Same opts as runCanonicalPass. While isolation is active every call is
+ * tracked as telemetry 'canonical.request' (N7): the 8.1 gate's
+ * passes = count(canonical.request).
+ */
+function requestCanonicalPass(opts = {}) {
+  const iso = _iso();
+  const deps = (opts && opts.deps) || {};
+  const store = deps.store || require('../store');
+  if (!iso.isActive('canonical') || typeof store.generation !== 'function') return runCanonicalPass(opts);
+  return require('../telemetry').track('canonical.request', () => _enqueue(opts));
+}
+
+function _resetLaneForTests() { _lane.busy = false; _lane.q = []; }
+
+module.exports = {
+  runCanonicalPass, overlayDeepScanFields, GAP_MS, DS_FIELDS,
+  requestCanonicalPass, _resetLaneForTests, ROWS_LIMIT,
+  _prepare, _compute, _commit, STALE,
+};

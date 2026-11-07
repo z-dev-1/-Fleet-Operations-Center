@@ -1403,7 +1403,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
           // API load + deep-scan (even if deep-scan failed) and saves the
           // deep-scan's Decisiv case stage so Ready is known. Non-fatal.
           try {
-            require('../orcha/canonical_runner').runCanonicalPass({ scannedRows: rows, pushData, ctx });
+            require('../orcha/canonical_runner').requestCanonicalPass({ scannedRows: rows, pushData, ctx });
           } catch (e) { logger.warn('[canonical] API-mode pass error (non-fatal): ' + e.message); }
         }
       })();

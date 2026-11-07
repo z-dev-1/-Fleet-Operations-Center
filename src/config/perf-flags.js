@@ -53,6 +53,12 @@
  *   settings.jobs.durable.enabled / FLEET_JOBS_DURABLE '0' | '1'
  *   settings.jobs.<type>.durable  / FLEET_JOBS_<UPPER_SNAKE> '0' | '1'
  *
+ * Phase 8 worker isolation (all default OFF; see resolveWorkerIsolationFlags):
+ *
+ *   settings.workers.isolation.enabled   / FLEET_WORKERS_ISOLATION           '0' | '1'
+ *   settings.workers.isolation.canonical / FLEET_WORKERS_ISOLATION_CANONICAL '0' | '1'
+ *   (effective only with settings.workers.supervisor.enabled as well)
+ *
  * Just Me context reader (default OFF; see resolveJustMeContextFlags below):
  *
  *   settings.comms.justMeReadContext / FLEET_JUSTME_READ_CONTEXT '0' | '1'
@@ -439,6 +445,48 @@ function loadJobs(deps = {}) {
   }
 }
 
+// ── Phase 8: worker isolation (all default OFF) ──────────────────────────────
+//   settings.workers.isolation.enabled    boolean (=== true) / FLEET_WORKERS_ISOLATION           '0'|'1'
+//   settings.workers.isolation.canonical  boolean (=== true) / FLEET_WORKERS_ISOLATION_CANONICAL '0'|'1'
+// Effective for a group = workers.supervisor.enabled && enabled && group flag;
+// the supervisor prerequisite is applied by src/workers/isolation init(), so
+// this resolver stays a pure settings/env function. Read once by that init()
+// and memoized (restart to change). 'isolation' is not in WORKER_NAMES, so
+// resolveWorkerFlags ignores it. No new store key: 'settings' is registered.
+const ISOLATION_GROUPS = ['canonical'];
+const ISOLATION_ENV = {
+  enabled: 'FLEET_WORKERS_ISOLATION',
+  canonical: 'FLEET_WORKERS_ISOLATION_CANONICAL',
+};
+
+function resolveWorkerIsolationFlags(settings, env) {
+  const iso = _obj(_obj(_obj(settings).workers).isolation);
+  const flags = { enabled: iso.enabled === true, groups: {} };
+  const eEn = _envBool(env, ISOLATION_ENV.enabled);
+  if (eEn !== null) flags.enabled = eEn;
+  for (const g of ISOLATION_GROUPS) {
+    let on = iso[g] === true;
+    const e = _envBool(env, ISOLATION_ENV[g]);
+    if (e !== null) on = e;
+    flags.groups[g] = on;
+  }
+  return flags;
+}
+
+function loadWorkerIsolation(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveWorkerIsolationFlags(settings, env);
+  } catch (_) {
+    return resolveWorkerIsolationFlags({}, {});
+  }
+}
+
 // ── Just Me context reader (default OFF) ─────────────────────────────────────
 //   settings.comms.justMeReadContext  boolean (=== true) / FLEET_JUSTME_READ_CONTEXT '0'|'1'
 // Read once per Just Me job (slack_channel_watch._runJustMeJob) and once per
@@ -617,6 +665,7 @@ module.exports = {
   resolveAuthCoordFlags, loadAuthCoord, AUTH_COORD_ENV,
   resolveAuthPropagationFlags, loadAuthPropagation, AUTH_PROPAGATION_ENV,
   resolveJobsFlags, loadJobs, JOB_TYPES, JOB_ENV,
+  resolveWorkerIsolationFlags, loadWorkerIsolation, ISOLATION_GROUPS, ISOLATION_ENV,
   resolveJustMeContextFlags, loadJustMeContext,
   resolveDbrLookupFlags, loadDbrLookup,
   resolveRepairIntelFlags, loadRepairIntel, REPAIR_INTEL_ENV,

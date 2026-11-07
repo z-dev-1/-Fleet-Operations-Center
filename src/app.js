@@ -653,6 +653,9 @@ function _startAutoSync() {
     const r = require('./workers/supervisor').init({ notify: (n) => _ctx.pushBubbleNotification(n) });
     if (r.enabled) log.info('[workers] supervisor enabled'); else log.debug('[workers] supervisor disabled (all loops on legacy timers)');
   } catch (e) { log.warn('[workers] init failed (non-fatal, legacy timers keep ownership): ' + e.message); }
+  // Phase 8 worker isolation (settings.workers.isolation.*, default OFF; needs
+  // the supervisor). Off → creates nothing, spawns nothing, logs nothing.
+  try { require('./workers/isolation').init({ notify: (n) => _ctx.pushBubbleNotification(n) }); } catch (e) { log.warn('[workers:isolation] init failed (non-fatal, in-process): ' + e.message); }
   try { require('./jobs').init(); } catch (e) { log.warn('[jobs] init failed (non-fatal, non-durable): ' + e.message); }
   const { registerAllIPC } = require('./ipc');
   registerAllIPC(_ctx);

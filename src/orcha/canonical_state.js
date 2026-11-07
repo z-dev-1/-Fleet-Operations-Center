@@ -1278,3 +1278,4 @@ module.exports = {
   _isSubstantive,
   _lastSubstantiveLine,
 };
+module.exports._normId = _s;

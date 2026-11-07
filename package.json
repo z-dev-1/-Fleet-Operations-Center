@@ -14,7 +14,9 @@
     "launch": "start /min cmd /c npm run dev",
     "launch:hidden": "powershell -WindowStyle Hidden -Command \"npm run dev\"",
     "test:watch": "vitest",
-    "test:smoke:electron": "electron tests/smoke/justme-libs-main.cjs"
+    "test:smoke:electron": "electron tests/smoke/justme-libs-main.cjs && npm run test:smoke:workers",
+    "test:smoke:workers": "electron tests/smoke/worker-host-main.cjs",
+    "test:bench:workers": "node tests/workers-isolation-fixtures/run-bench.cjs"
   },
   "devDependencies": {
     "@types/node": "^22.5.0",

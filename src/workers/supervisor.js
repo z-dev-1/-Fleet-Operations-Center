@@ -19,8 +19,10 @@
  * onBeforeQuit()/onWillQuit()/shutdown() are silent no-ops.
  *
  * The supervisor never spawns or kills Orcha and never runs auth recovery.
- * No setInterval, no threads, no child processes; every handle is a
- * setTimeout that is unref()'d.
+ * No setInterval, no threads. The supervisor itself never spawns child
+ * processes. Isolated worker processes are owned by `src/workers/isolation`,
+ * which registers them here as host rows via `registerHost()`. Every handle
+ * is a setTimeout that is unref()'d.
  *
  * Timers (plan D1, review fix 1 R2): every record has two slots:
  *   slots.next  = { h, at, kind: 'run' | 'cooldown', trigger }
@@ -56,6 +58,7 @@ let _initializedAt = null;
 let _flags = null;
 let _deps = null;           // { setTimeout, clearTimeout, now, random, notify, logger }
 let _records = new Map();   // name → record, in registration order
+let _hosts = new Map();     // name → isolation host handle (Phase 8, registerHost)
 let _shuttingDown = false;
 let _shutdownPromise = null;
 let _shutdownResolve = null;
@@ -343,6 +346,10 @@ function _clearIsolation(rec) {
 
 function reEnable(name, { runNow = false } = {}) {
   if (!_initialized || _shuttingDown) return false;
+  // Phase 8 host rows: looked up only AFTER the shutdown guard (review N5).
+  if (_hosts.has(name)) {
+    try { return _hosts.get(name).reEnable() === true; } catch (_) { return false; }
+  }
   const rec = _records.get(name);
   if (!rec || rec.ownerStopped) return false;
   if (rec.breakerState !== 'isolated' && rec.breakerState !== 'budget-exhausted') return false;
@@ -354,6 +361,36 @@ function reEnable(name, { runNow = false } = {}) {
   if (runNow) _scheduleNext(rec, _now(), 'manual');
   else _scheduleNext(rec, _gridNext(rec, _now()), 'schedule');
   return true;
+}
+
+// ── Isolation host rows (Phase 8, additive) ──────────────────────────────────
+// A host (src/workers/isolation/host.js) is not a timer loop, so it never goes
+// through register()/claim(). It renders its own row in the _workerStatus
+// shape (owner:'host') through handle.getStatusRow(). With no hosts every
+// supervisor output is byte-identical to Phase 5.
+function registerHost(handle) {
+  if (!_initialized) throw Object.assign(new Error('worker supervisor not initialized'), { code: 'NOT_INITIALIZED' });
+  const name = handle && typeof handle === 'object' ? handle.name : undefined;
+  if (typeof name !== 'string' || !NAME_RE.test(name) || name === 'supervisor') throw new TypeError('invalid host name: ' + String(name));
+  if (typeof handle.getStatusRow !== 'function' || typeof handle.reEnable !== 'function') throw new TypeError('host ' + name + ': invalid handle');
+  if (_records.has(name) || _hosts.has(name)) throw _activeError(name);
+  _hosts.set(name, handle);
+  return true;
+}
+
+function unregisterHost(name) { return _hosts.delete(name); }
+
+function _hostRows() {
+  const out = [];
+  for (const h of _hosts.values()) {
+    try { const row = h.getStatusRow(); if (row && typeof row === 'object') out.push(row); } catch (_) { /* skip a broken host row */ }
+  }
+  return out;
+}
+
+function _isolation(method) {
+  if (!_hosts.size) return;
+  try { require('./isolation')[method](); } catch (e) { _log('warn', '[workers] isolation ' + method + ' failed: ' + _errMsg(e)); }
 }
 
 // ── Dependency checks (§6: read-only, fail-open) ─────────────────────────────
@@ -642,6 +679,7 @@ function shutdown({ graceMs = DEFAULT_GRACE_MS } = {}) {
  */
 function onBeforeQuit() {
   if (!_initialized) return undefined;
+  _isolation('onBeforeQuit');   // no-op without hosts; a repeat is a no-op per host
   try {
     const p = shutdown();
     if (_drainLogFor !== p) {
@@ -660,6 +698,7 @@ function onBeforeQuit() {
 
 function onWillQuit() {
   if (!_initialized) return undefined;
+  _isolation('onWillQuit');
   _quitProceeding = true;
   if (_watchdog) { try { _deps.clearTimeout(_watchdog); } catch (_) {} _watchdog = null; }
   return undefined;
@@ -705,6 +744,7 @@ function _resumeAfterCancelledQuit() {
   _finishShutdown({ drained: false, pending: _pendingNames(), cancelled: true });
   _shutdownPromise = null;
   _drainLogFor = null;
+  _isolation('resume');
   _log('info', '[workers] quit was cancelled — resumed ' + n + ' workers');
 }
 
@@ -783,7 +823,7 @@ function getStatus() {
       shuttingDown: _shuttingDown,
       at: _now(),
       process: _processSection(),
-      workers: Array.from(_records.values()).map(_workerStatus),
+      workers: Array.from(_records.values()).map(_workerStatus).concat(_hostRows()),
     };
   } catch (e) {
     return { enabled: true, error: _errMsg(e), workers: [] };
@@ -806,7 +846,14 @@ function getSummary() {
       fails += rec.counts.fail;
       if (rec.lastError && (lastErrorAt == null || rec.lastError.at > lastErrorAt)) lastErrorAt = rec.lastError.at;
     }
-    return { enabled: true, count: _records.size, byState, isolated, waiting, fails, lastErrorAt };
+    for (const row of _hostRows()) {
+      if (Object.prototype.hasOwnProperty.call(byState, row.state)) byState[row.state]++;
+      if (row.state === 'isolated') isolated.push(row.name);
+      if (row.state === 'waiting') waiting.push({ name: row.name, on: Array.isArray(row.waitingOn) ? row.waitingOn.slice() : [] });
+      fails += (row.counts && row.counts.fail) || 0;
+      if (row.lastError && (lastErrorAt == null || row.lastError.at > lastErrorAt)) lastErrorAt = row.lastError.at;
+    }
+    return { enabled: true, count: _records.size + _hosts.size, byState, isolated, waiting, fails, lastErrorAt };
   } catch (_) { return null; }
 }
 
@@ -840,6 +887,7 @@ function _resetForTests() {
   _flags = null;
   _deps = null;
   _records = new Map();
+  _hosts = new Map();
   _shuttingDown = false;
   _shutdownPromise = null;
   _shutdownResolve = null;
@@ -853,4 +901,5 @@ module.exports = {
   init, isEnabled, claim, register, stop, reEnable, getStatus, getSummary,
   shutdown, onBeforeQuit, onWillQuit, _resetForTests,
   wakeDependents,
+  registerHost, unregisterHost,
 };

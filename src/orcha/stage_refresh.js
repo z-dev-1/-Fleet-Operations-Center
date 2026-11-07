@@ -86,7 +86,7 @@ async function refreshStages(opts = {}) {
     const store = deps.store || require('../store');
     const decisiv = deps.decisiv || require('../scrapers/decisiv_api');
     const readyNotify = deps.readyNotify || require('../scrapers/ready_pickup_notify');
-    const runCanonical = deps.runCanonicalPass || require('./canonical_runner').runCanonicalPass;
+    const runCanonical = deps.runCanonicalPass || require('./canonical_runner').requestCanonicalPass;
 
     const startRows = ((store.load('fleetData', {}) || {}).rows) || [];
     const targets = stageTargets(startRows);
@@ -111,8 +111,16 @@ async function refreshStages(opts = {}) {
       store.save('fleetData', fd);
       if (opts.ctx) opts.ctx.lastData = fd;
     }
-    try { runCanonical({ pushData: opts.pushData, ctx: opts.ctx }); }
-    catch (e) { log.warn('[stage-refresh] canonical pass failed (non-fatal): ' + e.message); }
+    // Flags off: requestCanonicalPass is the synchronous legacy pass, nothing
+    // is awaited. Worker isolation on: it returns a promise that we await so
+    // the onStageUpdate loop below still reads the post-commit canonicalState
+    // (no duplicate / early carrier notice). That keeps _running true for the
+    // worker round-trip plus any lane wait, so an overlapping refreshStages()
+    // in that window returns { ran:false, reason:'already running' } (N4).
+    try {
+      const cr = runCanonical({ pushData: opts.pushData, ctx: opts.ctx });
+      if (cr && typeof cr.then === 'function') await cr;
+    } catch (e) { log.warn('[stage-refresh] canonical pass failed (non-fatal): ' + e.message); }
 
     // A case that reached Ready -> the gated, deduped operator notice.
     for (const r of rows) {

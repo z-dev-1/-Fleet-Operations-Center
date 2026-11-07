@@ -108,8 +108,34 @@ function _memoized(key, now, fn) {
 }
 
 // ── Sections ─────────────────────────────────────────────────────────────────
+// Phase 8 isolation host rows carry a `host` sub-object; legacy rows have none
+// and stay byte-identical.
+function _hostSub(h) {
+  const le = h.lastExit;
+  const mm = h.mainMsAvg || {};
+  return {
+    pid: _num(h.pid),
+    hostState: _str(h.hostState, 40),
+    rssMb: _num(h.rssMb),
+    rssCapMb: _num(h.rssCapMb),
+    spawns: _num(h.spawns),
+    crashes: _num(h.crashes),
+    lastExit: le && typeof le === 'object' ? { code: _num(le.code), reason: _str(le.reason, 40), at: _ts(le.at) } : null,
+    fallbacks: _nums(h.fallbacks, 1) || {},
+    staleDiscards: _num(h.staleDiscards),
+    mainMsAvg: { dispatch: _num(mm.dispatch), commit: _num(mm.commit) },
+    workerMsAvg: _num(h.workerMsAvg),
+  };
+}
+
 function _worker(w) {
   w = w || {};
+  const out = _workerBase(w);
+  if (w.host && typeof w.host === 'object') out.host = _hostSub(w.host);
+  return out;
+}
+
+function _workerBase(w) {
   const counts = w.counts || {};
   const sk = w.skipReasons || {};
   const cj = w.currentJob;
@@ -429,4 +455,4 @@ function _resetForTests() {
   _failures = new Map();
 }
 
-module.exports = { buildSnapshot, SLOW_TTL_MS, _clip, _nums, _resetForTests };
+module.exports = { buildSnapshot, SLOW_TTL_MS, _clip, _nums, _resetForTests, _worker };
