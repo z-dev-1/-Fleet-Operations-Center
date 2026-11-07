@@ -489,6 +489,36 @@ function loadDbrLookup(deps = {}) {
   }
 }
 
+// ── Repair Intel history extras ──────────────────────────────────────────────
+//   settings.repairIntel.woSummaries    (=== true, default OFF)  / FLEET_REPAIR_INTEL_WO_SUMMARIES '0'|'1'
+//   settings.repairIntel.dealerBackfill (!== false, default ON)  / FLEET_REPAIR_INTEL_DEALER_BACKFILL '0'|'1'
+// dealerBackfill is the kill switch for the per-WO detail reads on Build / Fetch New.
+// No new store key: 'settings' is registered. Read per IPC call.
+const REPAIR_INTEL_ENV = { woSummaries: 'FLEET_REPAIR_INTEL_WO_SUMMARIES', dealerBackfill: 'FLEET_REPAIR_INTEL_DEALER_BACKFILL' };
+function resolveRepairIntelFlags(settings, env) {
+  const r = _obj(_obj(settings).repairIntel);
+  const flags = { woSummaries: r.woSummaries === true, dealerBackfill: r.dealerBackfill !== false };
+  const w = _envBool(env, REPAIR_INTEL_ENV.woSummaries);
+  if (w !== null) flags.woSummaries = w;
+  const d = _envBool(env, REPAIR_INTEL_ENV.dealerBackfill);
+  if (d !== null) flags.dealerBackfill = d;
+  return flags;
+}
+
+function loadRepairIntel(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveRepairIntelFlags(settings, env);
+  } catch (_) {
+    return resolveRepairIntelFlags({}, {});
+  }
+}
+
 // ── Long Dwell SharePoint sheet preview/write (default OFF) ──────────────────
 // settings.longDwell is distinct from settings.workers.longDwell. The commit
 // flag never works without the master flag. Not memoized: read per IPC call.
@@ -589,6 +619,7 @@ module.exports = {
   resolveJobsFlags, loadJobs, JOB_TYPES, JOB_ENV,
   resolveJustMeContextFlags, loadJustMeContext,
   resolveDbrLookupFlags, loadDbrLookup,
+  resolveRepairIntelFlags, loadRepairIntel, REPAIR_INTEL_ENV,
   resolveLongDwellSpFlags, loadLongDwellSp, LONGDWELL_SP_ENV,
   resolveEmailIntelFlags, loadEmailIntel, EMAIL_INTEL_ENV,
 };

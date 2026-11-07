@@ -372,6 +372,59 @@ export function buildEscalationPayload(unit, { add, remove, comment } = {}) {
   };
 }
 
+// ── History tab "📋 Open" helpers (pure) ────────────────────────────────────
+// Attribute-safe escaper (esc() below does not escape quotes).
+function escAttr(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Only https URLs on the AAP / Decisiv / DTNA hosts may reach the split view
+// (_openInlineSplit writes src unescaped).
+export function isSafeHistoryUrl(url) {
+  if (typeof url !== 'string' || !url || /[\s"'<>]/.test(url)) return false;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase();
+    return h === 'aap-na.corp.amazon.com' || h.endsWith('.decisiv.net') || h === 'dtna.my.site.com';
+  } catch (_) { return false; }
+}
+
+function _isAmazonHost(url) {
+  try { return /(^|\.)amazon\.(com|dev)$/i.test(new URL(url).hostname); } catch (_) { return false; }
+}
+
+// Webview partition for the split view's right pane. Amazon pages need the
+// default (Midway) session → ''. Same chain the split view always used.
+export function splitPartitionFor(url) {
+  const u = String(url || '');
+  if (_isAmazonHost(u)) return '';
+  if (u.indexOf('volvopg') > -1 || u.indexOf('asist.decisiv') > -1) return 'persist:vendor-volvo';
+  if (u.indexOf('dtna') > -1 || u.indexOf('daimlertruck') > -1) return 'persist:vendor-dtna';
+  if (u.indexOf('pssmfleet') > -1) return 'persist:vendor-paccar-pssmfleet';
+  return 'persist:vendor-paccar';
+}
+
+// Which URLs a History WO's Open button puts in the split: Relay left; dealer
+// portal right (stored dealer link → the unit's own offsite when this WO owns
+// it), else the AAP offsite event, else nothing.
+export function historyOpenUrls(entry, unit) {
+  const e = entry || {};
+  const refs = e.sourceRefs || {};
+  const left = isSafeHistoryUrl(refs.relay) ? refs.relay : '';
+  if (isSafeHistoryUrl(refs.dealer) && !_isAmazonHost(refs.dealer)) return { left, right: refs.dealer, rightKind: 'dealer' };
+  const u = unit || null;
+  const wo = String(e.workOrderId || '');
+  if (u && wo) {
+    const owns = u._offsiteWrId ? String(u._offsiteWrId) === wo : String(u.workRequestId || '') === wo;
+    const url = owns ? (u.offsiteShopEventUrl || u.savedOffsiteUrl || u.asistSrUrl || '') : '';
+    if (url && isSafeHistoryUrl(url) && !_isAmazonHost(url)) return { left, right: url, rightKind: 'dealer' };
+  }
+  if (isSafeHistoryUrl(refs.offsite)) return { left, right: refs.offsite, rightKind: 'offsite' };
+  return { left, right: '', rightKind: 'none' };
+}
+
 function _attachSectionHtml(unit) {
   const choices = openWrChoices(unit);
   if (!choices.length) {
@@ -1526,16 +1579,10 @@ function _openInlineSplit(leftUrl, rightUrl, unitId, opts) {
       '<webview id="dp-wv-relay" src="' + leftUrl + '" class="dp-split-webview" allowpopups></webview></div>';
   }
   if (rightUrl) {
-    // Determine correct vendor partition for the offsite URL
-    var vendorPartition = 'persist:vendor-paccar'; // default
-    if (rightUrl.indexOf('volvopg') > -1 || rightUrl.indexOf('asist.decisiv') > -1) vendorPartition = 'persist:vendor-volvo';
-    else if (rightUrl.indexOf('dtna') > -1 || rightUrl.indexOf('daimlertruck') > -1) vendorPartition = 'persist:vendor-dtna';
-    else if (rightUrl.indexOf('pssmfleet') > -1) vendorPartition = 'persist:vendor-paccar-pssmfleet';
-    // AAP offsite-event pages (History tab WOs) are Amazon pages: they need the
-    // default (Midway) session, not a vendor partition.
-    var _rightIsAmazon = false;
-    try { _rightIsAmazon = /(^|\.)amazon\.(com|dev)$/i.test(new URL(rightUrl).hostname); } catch (_) {}
-    var _partAttr = _rightIsAmazon ? '' : ' partition="' + vendorPartition + '"';
+    // Vendor partition for the offsite URL; AAP offsite-event pages (History tab
+    // WOs) are Amazon pages and use the default (Midway) session.
+    var _part = splitPartitionFor(rightUrl);
+    var _partAttr = _part ? ' partition="' + _part + '"' : '';
 
     html += '<div class="dp-split-pane dp-split-pane--offsite">' +
       '<div class="dp-split-pane-label">OFFSITE</div>' +
@@ -3205,9 +3252,13 @@ function _wireRepairIntel(unit) {
       }
       // Open button: same inline split view as the Daily Notes button (Relay WO
       // + offsite event side by side), without AI drafts.
-      var refs = e.sourceRefs || {};
-      var openHtml = (refs.relay || refs.offsite)
-        ? '<button class="dp-ri-open-btn dp-launcher" data-hist-left="' + esc(refs.relay || '') + '" data-hist-right="' + esc(refs.offsite || '') + '" title="Open this work order (Relay + Offsite) in split view">\ud83d\udccb Open</button>'
+      // Right pane = dealer portal when known, else the AAP offsite event.
+      var hu = historyOpenUrls(e, unit);
+      var openTitle = hu.rightKind === 'dealer'
+        ? 'Open this work order (Relay + Dealer portal) in split view'
+        : 'Open this work order (Relay + Offsite) in split view';
+      var openHtml = (hu.left || hu.right)
+        ? '<button class="dp-ri-open-btn dp-launcher" data-hist-left="' + escAttr(hu.left) + '" data-hist-right="' + escAttr(hu.right) + '" title="' + openTitle + '">\ud83d\udccb Open</button>'
         : '';
       rcaHtml = openHtml + rcaHtml;
       return '<div class="dp-ri-tl">' +

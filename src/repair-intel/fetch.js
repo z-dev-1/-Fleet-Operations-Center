@@ -124,6 +124,7 @@ async function syncUnit(equipmentId, opts = {}) {
   //    NOT fetch detail for every WO here (keeps Phase 1 cheap). Structured
   //    fields come from the aggregate itself.
   const partsOnOrderIds = []; // source ids flagged parts-on-order — hydrate for part names
+  const rows = [];            // normalized rows (for the optional detail hydration below)
   for (const wo of aggregates) {
     try {
       const vendor = wo && wo.vendor;
@@ -136,7 +137,57 @@ async function syncUnit(equipmentId, opts = {}) {
       else if (r === 'updated') result.updated++;
       else if (r === 'unchanged') result.unchanged++;
       if (row.parts_on_order && row.source_id) partsOnOrderIds.push(row.source_id);
+      rows.push({ row });
     } catch (e) { result.errors.push('normalize/upsert ' + (wo && (wo.id || wo.workRequestId)) + ': ' + e.message); }
+  }
+
+  // 3a) Per-WO detail hydration (Build / Fetch New only: opts.hydrateDetail ===
+  //     true). One getService per WO whose detail changed since the last read,
+  //     newest first, capped, bounded concurrency, each call time-limited. Stores
+  //     the dealer link from the comment thread + capped 3C evidence. Never fails
+  //     the sync. The parts loop below reuses the detail it fetched.
+  const detailCache = new Map();
+  if (opts.hydrateDetail === true) {
+    const dealerLink = require('./dealer-link');
+    const det = { hydrated: 0, dealerFound: 0, skipped: 0, failed: 0 };
+    try {
+      const storedMap = new Map();
+      for (const ev of (store.eventsForUnit(eq, { includeExcluded: true }) || [])) {
+        if (ev.detail_synced_at) storedMap.set(ev.source_id, ev.detail_modified_at);
+      }
+      const eligible = rows.filter(({ row }) => !row.excluded_vendor);
+      const changed = eligible.filter(({ row }) => !storedMap.has(row.source_id) || storedMap.get(row.source_id) !== row.modified_at)
+        .sort((a, b) => (b.row.reported_at || b.row.created_at || 0) - (a.row.reported_at || a.row.created_at || 0));
+      const candidates = changed.slice(0, opts.detailCap || 40);
+      det.skipped = eligible.length - candidates.length;
+      const detailTimeoutMs = opts.detailTimeoutMs || 20000;
+      await _pool(candidates, opts.detailConcurrency || 2, async ({ row }) => {
+        const sid = row.source_id;
+        let timer = null;
+        try {
+          const detail = await Promise.race([
+            hydrateWoDetail(sid),
+            new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('detail timed out')), detailTimeoutMs); }),
+          ]);
+          if (!detail) { det.failed++; return; }
+          const dealer = dealerLink.dealerFromDetail(detail, mapper);
+          store.setWoDetail(sid, { dealer, evidence: dealerLink.evidenceFromDetail(detail, mapper), modifiedAt: row.modified_at });
+          detailCache.set(sid, detail);
+          det.hydrated++;
+          if (dealer) det.dealerFound++;
+        } catch (e) { det.failed++; }
+        finally { if (timer) clearTimeout(timer); }
+      });
+      if (opts.unitRow) {
+        for (const { row } of rows) {
+          if (!dealerLink.ownsOffsite(opts.unitRow, row.work_order_id)) continue;
+          const d = dealerLink.dealerFromUnitRow(opts.unitRow, row.work_order_id);
+          if (d) store.setDealerUrlIfEmpty(row.source_id, d);
+        }
+      }
+    } catch (e) { result.errors.push('detail hydrate: ' + e.message); }
+    result.detail = det;
+    logger.info('[' + eq + '] detail hydrated=' + det.hydrated + ' dealerFound=' + det.dealerFound + ' skipped=' + det.skipped + ' failed=' + det.failed);
   }
 
   // 3b) Back-ordered PARTS from comments. The API has no structured parts field,
@@ -150,7 +201,7 @@ async function syncUnit(equipmentId, opts = {}) {
     let extracted = 0;
     for (const sid of partsOnOrderIds.slice(0, cap)) {
       try {
-        const detail = await _timed(hydrateWoDetail(sid));
+        const detail = detailCache.has(sid) ? detailCache.get(sid) : await _timed(hydrateWoDetail(sid));
         const comments = (detail && mapper.collectAllComments) ? mapper.collectAllComments(detail) : null;
         if (comments && comments.length) {
           const items = extractBackorderedParts(comments);
@@ -180,6 +231,16 @@ async function syncUnit(equipmentId, opts = {}) {
     ' added=' + result.added + ' updated=' + result.updated + ' unchanged=' + result.unchanged + ' excluded=' + result.excluded +
     (result.errors.length ? ' errors=' + result.errors.length : ''));
   return result;
+}
+
+// Run fn over items with at most n in flight. fn must not throw (callers catch).
+async function _pool(items, n, fn) {
+  let i = 0;
+  const worker = async () => { while (i < items.length) { const it = items[i++]; await fn(it); } };
+  const k = Math.max(1, Math.min(n || 1, items.length));
+  const ws = [];
+  for (let j = 0; j < k; j++) ws.push(worker());
+  await Promise.all(ws);
 }
 
 // Hydrate ONE work order's detail (comment thread) on demand — used by the AI

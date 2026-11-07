@@ -240,6 +240,39 @@ function setBackorderedParts(sourceId, items) {
   if (stmt) stmt.run(json, String(sourceId));
 }
 
+// Store what one getService read produced for a WO: capped 3C evidence (always
+// written, JSON or null), the read time, the row's modified_at at that read, and
+// the dealer link — the dealer columns are written ONLY when a dealer was found,
+// so a later read without one never erases a stored URL. Outside _COLS, so
+// upsertEvent never touches these columns.
+function setWoDetail(sourceId, detail) {
+  if (!ensureSchema() || !sourceId) return;
+  const d = detail || {};
+  const ev = d.evidence ? JSON.stringify(d.evidence) : null;
+  const mod = d.modifiedAt == null ? null : d.modifiedAt;
+  const stmt = engine.prepare('UPDATE ri_repair_event SET wo_evidence = ?, detail_synced_at = ?, detail_modified_at = ? WHERE source_id = ?');
+  if (stmt) stmt.run(ev, Date.now(), mod, String(sourceId));
+  if (d.dealer && d.dealer.url) {
+    const ds = engine.prepare('UPDATE ri_repair_event SET dealer_url = ?, dealer_source = ?, dealer_label = ? WHERE source_id = ?');
+    if (ds) ds.run(String(d.dealer.url), d.dealer.source || null, d.dealer.label || null, String(sourceId));
+  }
+}
+
+// Fallback dealer link (e.g. the unit row's offsite) — only fills an empty slot.
+function setDealerUrlIfEmpty(sourceId, dealer) {
+  if (!ensureSchema() || !sourceId || !dealer || !dealer.url) return;
+  const stmt = engine.prepare("UPDATE ri_repair_event SET dealer_url = ?, dealer_source = ?, dealer_label = ? WHERE source_id = ? AND (dealer_url IS NULL OR dealer_url = '')");
+  if (stmt) stmt.run(String(dealer.url), dealer.source || null, dealer.label || null, String(sourceId));
+}
+
+// Per-WO 3C summary cache (JSON) + the content hash it was built from.
+function setWo3c(sourceId, obj, hash) {
+  if (!ensureSchema() || !sourceId) return;
+  const json = obj == null ? null : (typeof obj === 'string' ? obj : JSON.stringify(obj));
+  const stmt = engine.prepare('UPDATE ri_repair_event SET wo_3c = ?, wo_3c_hash = ? WHERE source_id = ?');
+  if (stmt) stmt.run(json, hash == null ? null : String(hash), String(sourceId));
+}
+
 // Replace the parts for an event (idempotent: delete + insert).
 function setParts(eventId, equipmentId, parts) {
   if (!ensureSchema() || !Array.isArray(parts)) return;
@@ -385,6 +418,7 @@ module.exports = {
   completedSince,
   EXCLUDED_VENDORS, _isExcludedVendor,
   normalizeWorkOrder, upsertEvent, setParts, setBackorderedParts,
+  setWoDetail, setDealerUrlIfEmpty, setWo3c,
   eventsForUnit, getCheckpoint, saveCheckpoint,
   applyAiToEvent, getAiAnalysis, saveAiAnalysis,
   replaceRecommendations, getRecommendations,

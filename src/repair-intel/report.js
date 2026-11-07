@@ -158,7 +158,12 @@ function timeline(events) {
       outcome: e.outcome || null,
       durationHours: e.total_elapsed_ms != null ? Math.round(e.total_elapsed_ms / HOUR_MS) : null,
       estimateCost: _num(e.estimate_cost),
-      sourceRefs: (() => { try { return JSON.parse(e.source_refs || '{}'); } catch (_) { return {}; } })(),
+      sourceRefs: (() => {
+        let refs; try { refs = JSON.parse(e.source_refs || '{}'); } catch (_) { refs = {}; }
+        // Dealer portal link (extra keys only when stored; relay/offsite untouched).
+        if (e.dealer_url) refs = Object.assign({}, refs, { dealer: e.dealer_url, dealerSource: e.dealer_source || null, dealerLabel: e.dealer_label || null });
+        return refs;
+      })(),
     }));
 }
 

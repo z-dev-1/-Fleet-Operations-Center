@@ -57,6 +57,21 @@ function registerRepairIntelIPC(ctx) {
     } catch (_) { return null; }
   }
 
+  // repairIntel flag group (read per call; defaults on failure).
+  function _flags() {
+    try { return require('../config/perf-flags').loadRepairIntel(); }
+    catch (_) { return { woSummaries: false, dealerBackfill: true }; }
+  }
+
+  // The unit's fleet row (for the owned-offsite dealer fallback), or null.
+  function _unitRow(id) {
+    try {
+      const data = require('../store').load('fleetData', { rows: [] }) || {};
+      const rows = Array.isArray(data.rows) ? data.rows : [];
+      return rows.find(r => String(r && r.equipmentId) === id) || null;
+    } catch (_) { return null; }
+  }
+
   // Read the cached deterministic report for a unit (no network). Also returns
   // the sync checkpoint so the UI can show coverage / last-sync status.
   handle('repair-history:get', async (equipmentId) => {
@@ -65,7 +80,7 @@ function registerRepairIntelIPC(ctx) {
     const rep = report.buildUnitReport(id);
     const checkpoint = store.getCheckpoint(id) || null;
     const ai = _cachedAi(id);
-    return { ok: true, report: rep, checkpoint, synced: !!checkpoint, ai };
+    return { ok: true, report: rep, checkpoint, synced: !!checkpoint, ai, woSummaries: _flags().woSummaries };
   });
 
   // Full 365-day build: sync from AAP then return the fresh report. This hits
@@ -73,20 +88,22 @@ function registerRepairIntelIPC(ctx) {
   handle('repair-history:build', async (equipmentId) => {
     const id = String(equipmentId || '').trim();
     if (!id) return { ok: false, error: 'no equipment id' };
-    const sync = await fetch.syncUnit(id, { incremental: false });
+    const f = _flags();
+    const sync = await fetch.syncUnit(id, { incremental: false, hydrateDetail: f.dealerBackfill, unitRow: _unitRow(id) });
     const rep = report.buildUnitReport(id);
     const checkpoint = store.getCheckpoint(id) || null;
-    return { ok: sync.ok, sync, report: rep, checkpoint, synced: !!checkpoint, ai: _cachedAi(id) };
+    return { ok: sync.ok, sync, report: rep, checkpoint, synced: !!checkpoint, ai: _cachedAi(id), woSummaries: f.woSummaries };
   });
 
   // Incremental: only pull work orders modified since the last checkpoint.
   handle('repair-history:fetch-new', async (equipmentId) => {
     const id = String(equipmentId || '').trim();
     if (!id) return { ok: false, error: 'no equipment id' };
-    const sync = await fetch.syncUnit(id, { incremental: true });
+    const f = _flags();
+    const sync = await fetch.syncUnit(id, { incremental: true, hydrateDetail: f.dealerBackfill, unitRow: _unitRow(id) });
     const rep = report.buildUnitReport(id);
     const checkpoint = store.getCheckpoint(id) || null;
-    return { ok: sync.ok, sync, report: rep, checkpoint, synced: !!checkpoint, ai: _cachedAi(id) };
+    return { ok: sync.ok, sync, report: rep, checkpoint, synced: !!checkpoint, ai: _cachedAi(id), woSummaries: f.woSummaries };
   });
 
   // Phase 4 placeholder: AI narrative/classification refresh. Returns a clear

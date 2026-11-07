@@ -213,6 +213,14 @@ function _migrate() {
     "ALTER TABLE ri_repair_event ADD COLUMN delay_reason_codes TEXT",
     "ALTER TABLE ri_repair_event ADD COLUMN parts_on_order INTEGER DEFAULT 0",
     "ALTER TABLE ri_repair_event ADD COLUMN backordered_parts TEXT", // JSON [{part,phrase,at}] from comments
+    "ALTER TABLE ri_repair_event ADD COLUMN dealer_url TEXT",          // dealer portal URL (from AAP comments / owned unit row)
+    "ALTER TABLE ri_repair_event ADD COLUMN dealer_source TEXT",       // estimate | service_request | dtna | unit_row
+    "ALTER TABLE ri_repair_event ADD COLUMN dealer_label TEXT",        // display label for the dealer link
+    "ALTER TABLE ri_repair_event ADD COLUMN detail_synced_at INTEGER", // epoch ms of last getService read
+    "ALTER TABLE ri_repair_event ADD COLUMN detail_modified_at INTEGER", // row modified_at at that read
+    "ALTER TABLE ri_repair_event ADD COLUMN wo_evidence TEXT",         // JSON capped 3C evidence (no authors)
+    "ALTER TABLE ri_repair_event ADD COLUMN wo_3c TEXT",               // JSON per-WO 3C summary
+    "ALTER TABLE ri_repair_event ADD COLUMN wo_3c_hash TEXT",          // content hash wo_3c was built from
   ];
   for (const sql of adds) {
     try { engine.exec(sql); } catch (e) { /* duplicate column name — already migrated */ }
@@ -220,4 +228,4 @@ function _migrate() {
   try { engine.exec('CREATE INDEX IF NOT EXISTS ix_ev_parts_order ON ri_repair_event(parts_on_order)'); } catch (_) {}
 }
 
-module.exports = { ensureSchema, SCHEMA_VERSION, DDL, INDEXES };
+module.exports = { ensureSchema, SCHEMA_VERSION, DDL, INDEXES, _migrate };
