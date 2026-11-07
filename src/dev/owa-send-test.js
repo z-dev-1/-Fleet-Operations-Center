@@ -304,7 +304,9 @@ function getJson(o) {
 }
 
 // ───────────────────────────── verification / reconcile ─────────────────────────────
-const _odFilter = (subject) => "?$filter=" + encodeURIComponent("Subject eq '" + String(subject).replace(/'/g, "''") + "'") + '&$top=5&$select=Id,Subject,HasAttachments,Body&$orderby=ReceivedDateTime desc';
+// No $orderby: Exchange REST rejects $filter=Subject + $orderby=ReceivedDateTime with 400 InefficientFilter
+// unless the sort property leads the filter. The subject is fixed and unique, so $top=5 is enough.
+const _odFilter = (subject) => "?$filter=" + encodeURIComponent("Subject eq '" + String(subject).replace(/'/g, "''") + "'") + '&$top=5&$select=Id,Subject,HasAttachments,Body';
 
 /**
  * findBySubject({ electron, host, headers, subject, folderPath }) -> { found, status, id?, hasAttachments?,
@@ -448,6 +450,13 @@ async function runSendTest(deps) {
         skipped.push(i + 1);
         out.results.push({ test: i + 1, subject, skipped: true, reason: 'already-in-sent-items', bodyContentTypePreserved: pre.bodyContentType || null });
         continue;
+      }
+      // Fail closed: only a successful (200) read that did NOT find the subject permits a send. Any other
+      // pre-check result (4xx/5xx, redirect, timeout) means "unknown" — stop without POSTing.
+      if (pre.status !== 200) {
+        const reason = 'precheck-unavailable:' + (pre.status == null ? 'none' : pre.status);
+        out.results.push({ test: i + 1, subject, failed: true, failureReason: reason, precheckStatus: pre.status });
+        return finish(false, { sent, skipped, stoppedAt: i + 1, failure: { test: i + 1, reason } });
       }
 
       const payload = buildSendPayload(i, selfAddress);

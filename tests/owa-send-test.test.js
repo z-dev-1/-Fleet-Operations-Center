@@ -271,6 +271,54 @@ describe('runSendTest — orchestration with a fake transport', () => {
     expect(out.results[0].skipped).toBe(true);
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it('pre-check / verify GETs filter by subject with NO $orderby (avoids 400 InefficientFilter)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-send-'));
+    const posts = [];
+    const handler = (opts, call, req) => {
+      if (opts.method === 'POST') { posts.push(JSON.parse(call.body).Message.Subject); respond(req, 202); return; }
+      if (opts.url.includes('/attachments')) { respond(req, 200, { value: [] }); return; }
+      const subj = (decodeURIComponent(opts.url).match(/Subject eq '([^']+)'/) || [])[1];
+      if (/sentitems/.test(opts.url) && posts.includes(subj)) { respond(req, 200, { value: [{ Id: 'id', Subject: subj, Body: { ContentType: 'HTML' } }] }); return; }
+      respond(req, 200, { value: [] });
+    };
+    const electron = fakeElectron(handler);
+    await send.runSendTest({ electron, dir, log: recordingLog(), selfAddress: SELF, headers: () => ({}), verifyWindowMs: 5_000, _sleep: async () => {} });
+    const gets = electron._calls.filter((c) => c.opts.method === 'GET' && !c.opts.url.includes('/attachments'));
+    expect(gets.length).toBeGreaterThan(0);
+    for (const g of gets) {
+      const u = decodeURIComponent(g.opts.url);
+      expect(u).toContain("$filter=Subject eq '");
+      expect(u.toLowerCase()).not.toContain('$orderby');
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  for (const [label, preCheck] of [
+    ['returns 400', (req) => respond(req, 400, { error: { code: 'ErrorInefficientFilter' } })],
+    ['returns 401', (req) => respond(req, 401, null)],
+    ['times out', () => { /* never respond -> timeout */ }],
+  ]) {
+    it('fails closed when the pre-check ' + label + ': zero POSTs, stop with precheck-unavailable', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-send-'));
+      let posts = 0;
+      const handler = (opts, call, req) => {
+        if (opts.method === 'POST') { posts++; respond(req, 202); return; }
+        preCheck(req);
+      };
+      const electron = fakeElectron(handler);
+      const logs = recordingLog();
+      const out = await send.runSendTest({ electron, dir, log: logs, selfAddress: SELF, headers: () => ({}), timeoutMs: 20, verifyWindowMs: 60, _sleep: async () => {} });
+      expect(posts).toBe(0);
+      expect(out.ok).toBe(false);
+      expect(out.sent).toBe(0);
+      expect(out.stoppedAt).toBe(1);
+      expect(out.failure.reason).toMatch(/^precheck-unavailable:/);
+      expect(logs.lines.some((l) => l === '[owa-probe] send done')).toBe(true);
+      expect(fs.readdirSync(dir).some((f) => f.startsWith('owa-probe-send-'))).toBe(true);
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+  }
 });
 
 describe('host allow-list', () => {
