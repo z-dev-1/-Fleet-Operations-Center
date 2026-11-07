@@ -425,6 +425,69 @@ export function historyOpenUrls(entry, unit) {
   return { left, right: '', rightKind: 'none' };
 }
 
+// ── History tab repair-timeline card + per-WO AI 3C block (pure) ───────────
+// Same m/d/yy format the Repair timeline has always used.
+function _riFmtDate(ms) {
+  if (!ms) return 'Unknown';
+  try { var d = new Date(ms); return (d.getMonth()+1)+'/'+d.getDate()+'/'+String(d.getFullYear()).slice(2); }
+  catch (_) { return 'Unknown'; }
+}
+
+var _3C_ROWS = [['complaint', 'Complaint'], ['cause', 'Cause'], ['correction', 'Correction']];
+
+// Inner markup of one card's 3C slot. state: 'pending' | 'ready' | 'unavailable'.
+export function render3cInner(threeC, state) {
+  if (state === 'unavailable') return '<div class="dp-ri-3c dp-ri-3c--na">AI summary unavailable \u2014 use Refresh AI Analysis to retry</div>';
+  if (state !== 'ready' || !threeC) return '<div class="dp-ri-3c dp-ri-3c--pending">AI 3C summary: summarizing\u2026</div>';
+  var note = threeC.basis === 'aap+offsite' ? 'AI from AAP + dealer notes' : 'AI from AAP notes';
+  var rows = _3C_ROWS.map(function(kv){
+    var c = threeC[kv[0]] || {};
+    var st = c.status || 'not_recorded';
+    var text = st === 'not_recorded' ? 'Not recorded' : (c.text || 'Not recorded');
+    var badge = (st === 'confirmed' || st === 'suspected')
+      ? '<span class="dp-ri-3c-badge dp-ri-3c-badge--' + st + '">' + st + '</span>'
+      : '';
+    return '<div class="dp-ri-3c-row"><span class="dp-ri-3c-k">' + kv[1] + '</span>' +
+      '<span class="dp-ri-3c-v' + (st === 'not_recorded' ? ' dp-ri-3c-v--none' : '') + '">' + esc(text) + '</span>' + badge + '</div>';
+  }).join('');
+  return '<div class="dp-ri-3c"><div class="dp-ri-3c-title">AI 3C summary <span class="dp-ri-sub-note">(' + note + ', verify before use)</span></div>' + rows + '</div>';
+}
+
+// One Repair timeline card. ctx = { buttonsHtml, woSummaries }. With
+// woSummaries false this is the exact pre-3C markup.
+export function historyTimelineCardHtml(e, ctx) {
+  var c = ctx || {};
+  var dur = e.durationHours != null ? (e.durationHours + 'h') : 'Unknown';
+  var cost = e.estimateCost != null ? (' \u00b7 est $' + e.estimateCost) : '';
+  var slot = c.woSummaries
+    ? '<div class="dp-ri-3c-slot" data-wo3c="' + escAttr(e.workOrderId) + '">' + render3cInner(e.threeC, e.threeC ? 'ready' : 'pending') + '</div>'
+    : '';
+  return '<div class="dp-ri-tl">' +
+    '<div class="dp-ri-tl-head"><span class="dp-ri-tl-date">' + esc(_riFmtDate(e.reportedAt)) + '</span>' +
+      '<span class="dp-ri-tl-vend">' + esc(e.vendor || 'vendor n/a') + '</span>' +
+      '<span class="dp-ri-tl-status dp-ri-status-' + esc(e.status||'') + '">' + esc(e.status||'') + '</span>' + (c.buttonsHtml || '') + '</div>' +
+    '<div class="dp-ri-tl-body">' +
+      '<span class="dp-ri-tl-cat">' + esc(e.category || '') + (e.component ? ' / ' + esc(e.component) : '') + '</span>' +
+      (e.complaint ? '<div class="dp-ri-tl-complaint">' + esc(e.complaint) + '</div>' : '') +
+      '<div class="dp-ri-tl-meta">' + esc(dur) + cost + (e.rootCause ? ' \u00b7 ' + esc(e.rootCause) : '') + '</div>' +
+      slot +
+    '</div>' +
+  '</div>';
+}
+
+// Patch rendered 3C slots in place from a repair-history:wo-3c results map
+// ({ [workOrderId]: { status, threeC? } }). Slots without a result are untouched.
+export function apply3cResults(root, results) {
+  if (!root || typeof root.querySelectorAll !== 'function') return;
+  var res = results || {};
+  Array.prototype.forEach.call(root.querySelectorAll('[data-wo3c]'), function(el){
+    var r = res[el.dataset && el.dataset.wo3c];
+    if (!r) return;
+    if (r.threeC) el.innerHTML = render3cInner(r.threeC, 'ready');
+    else if (r.status === 'timeout' || r.status === 'error') el.innerHTML = render3cInner(null, 'unavailable');
+  });
+}
+
 function _attachSectionHtml(unit) {
   const choices = openWrChoices(unit);
   if (!choices.length) {
@@ -3129,6 +3192,8 @@ function _wireRepairIntel(unit) {
   var btnAi    = document.getElementById('dp-ri-ai');
   if (!reportEl) return;
   var equipmentId = unit.equipmentId || unit.id || '';
+  // repairIntel.woSummaries flag from get/build/fetch-new (refresh-ai keeps it).
+  var woSumOn = false;
   if (!window.repairIntel) {
     reportEl.innerHTML = '<div class="dp-empty" style="color:var(--mut)">Repair intelligence unavailable.</div>';
     return;
@@ -3242,8 +3307,6 @@ function _wireRepairIntel(unit) {
 
     rcaEntries = {};
     var tl = (rep.timeline || []).slice(0, 40).map(function(e){
-      var dur = e.durationHours != null ? (e.durationHours + 'h') : 'Unknown';
-      var cost = e.estimateCost != null ? (' \u00b7 est $' + e.estimateCost) : '';
       // RCA button: completed work orders, completed within the last 9 days.
       var rcaHtml = '';
       if (_rcaEligible(e)) {
@@ -3261,16 +3324,7 @@ function _wireRepairIntel(unit) {
         ? '<button class="dp-ri-open-btn dp-launcher" data-hist-left="' + escAttr(hu.left) + '" data-hist-right="' + escAttr(hu.right) + '" title="' + openTitle + '">\ud83d\udccb Open</button>'
         : '';
       rcaHtml = openHtml + rcaHtml;
-      return '<div class="dp-ri-tl">' +
-        '<div class="dp-ri-tl-head"><span class="dp-ri-tl-date">' + esc(fmtDate(e.reportedAt)) + '</span>' +
-          '<span class="dp-ri-tl-vend">' + esc(e.vendor || 'vendor n/a') + '</span>' +
-          '<span class="dp-ri-tl-status dp-ri-status-' + esc(e.status||'') + '">' + esc(e.status||'') + '</span>' + rcaHtml + '</div>' +
-        '<div class="dp-ri-tl-body">' +
-          '<span class="dp-ri-tl-cat">' + esc(e.category || '') + (e.component ? ' / ' + esc(e.component) : '') + '</span>' +
-          (e.complaint ? '<div class="dp-ri-tl-complaint">' + esc(e.complaint) + '</div>' : '') +
-          '<div class="dp-ri-tl-meta">' + esc(dur) + cost + (e.rootCause ? ' \u00b7 ' + esc(e.rootCause) : '') + '</div>' +
-        '</div>' +
-      '</div>';
+      return historyTimelineCardHtml(e, { buttonsHtml: rcaHtml, woSummaries: woSumOn });
     }).join('');
     var tlBlock = '<div class="dp-ri-sub">Repair timeline <span class="dp-ri-sub-note">(newest first, up to 40)</span></div>' + (tl || '<div class="dp-empty">None.</div>');
 
@@ -3341,11 +3395,37 @@ function _wireRepairIntel(unit) {
     if (busy && statusEl) statusEl.innerHTML = '<span class="dp-ri-status-busy">' + esc(msg || 'Working\u2026') + '</span>';
   }
 
+  // ── Per-WO AI 3C summaries (flag repairIntel.woSummaries; off → no calls) ──
+  function _mark3cSlots(html, onlyPending) {
+    Array.prototype.forEach.call(reportEl.querySelectorAll('[data-wo3c]'), function(el){
+      if (onlyPending && el.innerHTML.indexOf('dp-ri-3c--pending') < 0) return;
+      el.innerHTML = html;
+    });
+  }
+  function fill3c(force) {
+    if (!woSumOn || !window.repairIntel || typeof window.repairIntel.woSummaries !== 'function') return;
+    var forId = equipmentId;
+    window.repairIntel.woSummaries(equipmentId, force ? { force: true } : {}).then(function(r){
+      if (!reportEl.isConnected || forId !== equipmentId) return;
+      if (r && r.ok && r.results) apply3cResults(reportEl, r.results);
+      else _mark3cSlots(render3cInner(null, 'unavailable'), true);
+    }).catch(function(){
+      if (reportEl.isConnected) _mark3cSlots(render3cInner(null, 'unavailable'), true);
+    });
+  }
+  function _maybeFill3c(rep) {
+    if (!woSumOn) return;
+    var tl = ((rep && rep.timeline) || []).slice(0, 40);
+    if (tl.some(function(e){ return !e.threeC; })) fill3c(false);
+  }
+
   function load(initial) {
     window.repairIntel.get(equipmentId).then(function(res){
       res = res || {};
+      woSumOn = !!res.woSummaries;
       renderStatus(res);
       renderReport(res.report, res.ai);
+      _maybeFill3c(res.report);
     }).catch(function(e){
       reportEl.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to load report: ' + esc((e && e.message) || 'error') + '</div>';
     });
@@ -3369,8 +3449,10 @@ function _wireRepairIntel(unit) {
       } else {
         toast.show('info', equipmentId + ': sync returned no data.', 4000);
       }
+      if ('woSummaries' in res) woSumOn = !!res.woSummaries;
       renderStatus(res);
       renderReport(res.report, res.ai);
+      _maybeFill3c(res.report);
     }).catch(function(e){
       setBusy(false);
       toast.show('error', 'Sync failed: ' + ((e && e.message) || 'error'), 4000);
@@ -3389,6 +3471,8 @@ function _wireRepairIntel(unit) {
       else if (res.ok) toast.show('info', 'AI analysis updated for ' + equipmentId, 3000);
       if (res.report) renderReport(res.report, res.ai);
       else load();
+      // Chain the per-WO 3C refresh (forced, normal priority) when enabled.
+      if (woSumOn) { _mark3cSlots(render3cInner(null, 'pending'), false); fill3c(true); }
     }).catch(function(e){ setBusy(false); toast.show('error', 'AI refresh failed: ' + ((e && e.message)||'error'), 4000); });
   });
 

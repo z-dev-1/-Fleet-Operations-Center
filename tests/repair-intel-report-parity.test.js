@@ -102,4 +102,21 @@ describe('repair-intel report parity', () => {
     expect(drill()).toEqual(drillBefore);
     expect(drillBefore.length).toBe(4);
   });
+
+  it('threeC key absent while wo_3c is null; present and parsed after setWo3c', () => {
+    const r1 = report.buildUnitReport(UNIT);
+    for (const t of r1.timeline) expect('threeC' in t).toBe(false);
+    const three = {
+      v: 1, complaint: { text: 'Grinding.', status: 'confirmed' }, cause: { text: 'Not recorded', status: 'not_recorded' },
+      correction: { text: 'Pads replaced.', status: 'suspected' }, basis: 'aap', ai: true, at: 1, model: null,
+    };
+    store.setWo3c('P3', three, 'h1');
+    const r2 = report.buildUnitReport(UNIT);
+    const p3 = r2.timeline.find((t) => t.workOrderId === 'P3');
+    expect(p3.threeC).toEqual(three);
+    for (const t of r2.timeline.filter((x) => x.workOrderId !== 'P3')) expect('threeC' in t).toBe(false);
+    const { threeC: _t, ...rest } = p3;
+    expect(rest).toEqual(r1.timeline.find((t) => t.workOrderId === 'P3'));
+    expect(r2.executiveSummary).toEqual(r1.executiveSummary);
+  });
 });

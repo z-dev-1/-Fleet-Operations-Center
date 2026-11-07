@@ -148,7 +148,7 @@ function executiveSummary(events, parts) {
 // ── Chronological timeline (newest → oldest) ──────────────────────────────────
 function timeline(events) {
   return events.slice().sort((a, b) => (b.reported_at || b.created_at || 0) - (a.reported_at || a.created_at || 0))
-    .map(e => ({
+    .map(e => _withThreeC(e, {
       reportedAt: e.reported_at, completedAt: e.repair_completed_at || null, workOrderId: e.work_order_id, amzId: e.amz_id, vendor: e.vendor,
       category: e.repair_category, component: e.repair_component, status: e.status, woType: e.wo_type,
       complaint: e.reported_complaint,
@@ -165,6 +165,14 @@ function timeline(events) {
         return refs;
       })(),
     }));
+}
+
+// Per-WO AI 3C summary (parsed wo_3c) — key added ONLY when stored, so entries
+// without one are identical to the pre-3C shape.
+function _withThreeC(e, entry) {
+  if (e.wo_3c == null) return entry;
+  try { entry.threeC = JSON.parse(e.wo_3c); } catch (_) {}
+  return entry;
 }
 
 // Build the full deterministic report for one unit. By default it shows ALL

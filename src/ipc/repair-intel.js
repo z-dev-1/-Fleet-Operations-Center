@@ -8,6 +8,7 @@
  *   repair-history:build       full 365-day sync from AAP, then build the report
  *   repair-history:fetch-new   incremental sync (since last checkpoint), then report
  *   repair-history:refresh-ai  (Phase 4) re-run AI narrative/classification — stub for now
+ *   repair-history:wo-3c       per-WO AI 3C summaries (flag repairIntel.woSummaries, default OFF)
  *
  * The report is 100% deterministic (counts/durations/repeat-failures/
  * effectiveness) built from stored ri_repair_event rows. The AI layer (Phase 4)
@@ -121,6 +122,43 @@ function registerRepairIntelIPC(ctx) {
       }
     } catch (err) { logger.warn('analysis load/run failed: ' + err.message); }
     return { ok: false, pending: true, error: 'AI analysis not available yet' };
+  });
+
+  // Per-WO AI 3C summaries (flag repairIntel.woSummaries, default OFF). Lazy
+  // fill = low priority; force (Refresh AI) = normal priority. One run per unit
+  // at a time: a concurrent call shares the running promise; a force call that
+  // arrives during a non-forced run waits for it, then runs forced.
+  const _wo3cInflight = new Map();
+  handle('repair-history:wo-3c', async (equipmentId, opts) => {
+    const id = String(equipmentId || '').trim();
+    if (!id) return { ok: false, error: 'no equipment id' };
+    if (!_flags().woSummaries) return { ok: false, disabled: true };
+    const o = opts || {};
+    const force = !!o.force;
+    const cur = _wo3cInflight.get(id);
+    if (cur) {
+      if (!force || cur.force) return cur.promise;
+      try { await cur.promise; } catch (_) {}
+      const again = _wo3cInflight.get(id);
+      if (again) return again.promise;
+    }
+    const run = (async () => {
+      const ts = (e) => e.reported_at || e.created_at || 0;
+      let events = store.eventsForUnit(id).slice().sort((a, b) => ts(b) - ts(a)).slice(0, 40);
+      if (Array.isArray(o.ids)) { const want = new Set(o.ids.map(String)); events = events.filter(e => want.has(String(e.work_order_id)) || want.has(String(e.source_id))); }
+      const ws = require('../repair-intel/wo-summary');
+      const dealerLink = require('../repair-intel/dealer-link');
+      const row = _unitRow(id);
+      const res = await ws.createWoSummarizer(ws.defaultDeps()).summarize(events, {
+        force, priority: force ? 'normal' : 'low',
+        offsiteFor: e => dealerLink.offsiteNotesFor(row, e.work_order_id),
+      });
+      return { ok: true, results: res.results, counts: res.counts, report: report.buildUnitReport(id) };
+    })();
+    const entry = { promise: run, force };
+    _wo3cInflight.set(id, entry);
+    try { return await run; }
+    finally { if (_wo3cInflight.get(id) === entry) _wo3cInflight.delete(id); }
   });
 
   // ── Trends dashboard (fleet-wide deterministic aggregation) ───────────────
