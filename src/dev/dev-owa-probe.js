@@ -35,11 +35,18 @@ const path = require('path');
 const ENV_DIR = 'FLEET_OWA_PROBE_DIR';
 // A few minutes after startup, after the first warmOwaSession / scheduler start has settled.
 const DEFAULT_DELAY_MS = 150_000;
-// Overall run budget. The hidden window gets slightly less so it closes before we write + Tier 2 runs.
+// Overall run budget, computed ONCE as a single deadline. The window phase ends RESERVE_MS before the
+// deadline so Tier 1(b), Tier 2, the writes and the done log all fit inside the 5 minutes.
 const OVERALL_TIMEOUT_MS = 5 * 60_000;
-const WINDOW_BUDGET_MS = 4 * 60_000;
+const RESERVE_MS = 75_000;
+const WARMUP_MAX_MS = 60_000;
+const SETTLE_WAIT_MS = 10_000;          // after abort, how long we wait for openSession to settle/close
+const NET_TIMEOUT_MS = 20_000;
 const CHILD_TIMEOUT_MS = 20_000;
+const REUSE_DELAY_MS = 20_000;          // refresh-behaviour re-run delay (only if the budget allows)
 const REPLAY_MAX_BYTES = 256 * 1024;
+// Login / SSO hosts (mirrors owa-mailer AUTH_HOST_RE). Used only to classify a redirect; never stored.
+const AUTH_HOST_RE = /login\.microsoftonline\.com|login\.live\.com|login\.windows\.net|msft\.sts|adfs|\/common\/oauth2|\/consent|multifactor|mfa|midway/i;
 
 // Outlook hosts the SPA uses for mail — the ONLY hosts any tier is allowed to contact.
 const OUTLOOK_HOSTS = Object.freeze(['outlook.office365.com', 'outlook.office.com', 'outlook.cloud.microsoft']);
@@ -76,7 +83,11 @@ function maskText(s) {
 function collapsePath(rawUrl) {
   let u;
   try { u = new URL(String(rawUrl || '')); } catch (_) { return '<bad-url>'; }
-  let p = u.pathname
+  // Decode (guarded) so %40-encoded addresses are caught, then replace any '@'-bearing segment
+  // (explicit / shared-mailbox logon, Users('…@…')) with <addr> before any other collapsing.
+  let decoded = u.pathname;
+  try { decoded = decodeURIComponent(u.pathname); } catch (_) { decoded = u.pathname.replace(/%40/gi, '@'); }
+  let p = maskText(decoded.split('/').map((seg) => (seg.includes('@') ? '<addr>' : seg)).join('/'))
     .replace(/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '/<guid>')   // GUIDs first (they also match the base64 rule)
     .replace(/\/[A-Za-z0-9+/=_-]{24,}/g, '/<id>')                 // base64-ish item ids
     .replace(/\/\d{6,}/g, '/<n>');
@@ -186,6 +197,63 @@ function createNetworkRecorder() {
   return { recordRequest, recordResponse, attachBodyShape, finalize, _byReq: byReq };
 }
 
+/**
+ * jwtExpShape(token, nowMs) -> { hasExp, secondsToExpiry, reason? }. Decodes ONLY the JWT payload's
+ * `exp` claim in memory; the token itself is never returned, stored or logged.
+ */
+function jwtExpShape(token, nowMs) {
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const t = String(token || '').replace(/^Bearer\s+/i, '');
+  if (!t) return { hasExp: null, secondsToExpiry: null, reason: 'no-bearer-observed' };
+  const parts = t.split('.');
+  if (parts.length !== 3) return { hasExp: false, secondsToExpiry: null, reason: 'opaque-token' };
+  try {
+    const json = JSON.parse(Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+    if (!json || !Number.isFinite(json.exp)) return { hasExp: false, secondsToExpiry: null, reason: 'no-exp-claim' };
+    return { hasExp: true, secondsToExpiry: Math.round(json.exp - now / 1000) };
+  } catch (_) { return { hasExp: false, secondsToExpiry: null, reason: 'undecodable' }; }
+}
+
+/**
+ * createAuthCapture() — IN-MEMORY ONLY holder for the auth material the SPA sends to Outlook hosts
+ * (authorization bearer, x-owa-canary, x-anchormailbox), observed via CDP requestWillBeSent. It exists
+ * so Tier 1(b)/Tier 2 can test "captured once from the hidden page, reused windowless". Values are
+ * reachable only through headers(); describe() returns names/shape only; clear() drops everything.
+ * Nothing from here is ever written to disk or the logger.
+ */
+function createAuthCapture() {
+  const KEEP = ['authorization', 'x-owa-canary', 'x-anchormailbox'];
+  let vals = {};
+  let host = '';
+  let firstSeenAt = null;
+  function observe(params) {
+    const req = (params && params.request) || {};
+    if (!hostAllowed(req.url)) return;
+    const h = req.headers && typeof req.headers === 'object' ? req.headers : {};
+    let hit = false;
+    for (const k of Object.keys(h)) {
+      const name = String(k).toLowerCase();
+      if (KEEP.includes(name) && typeof h[k] === 'string' && h[k]) { vals[name] = h[k]; hit = true; }
+    }
+    if (hit) {
+      try { host = new URL(req.url).hostname.toLowerCase(); } catch (_) { /* keep previous */ }
+      if (firstSeenAt == null) firstSeenAt = Date.now();
+    }
+  }
+  function headers() { return Object.assign({}, vals); }
+  function names() { return Object.keys(vals).sort(); }
+  function describe(nowMs) {
+    return {
+      namesObserved: names(),
+      host: host || null,
+      bearer: vals.authorization && /^Bearer\s/i.test(vals.authorization) ? jwtExpShape(vals.authorization, nowMs) : { hasExp: null, secondsToExpiry: null, reason: 'no-bearer-observed' },
+      firstSeenAgoSec: firstSeenAt == null ? null : Math.round(((Number.isFinite(nowMs) ? nowMs : Date.now()) - firstSeenAt) / 1000),
+    };
+  }
+  function clear() { vals = {}; host = ''; firstSeenAt = null; }
+  return { observe, headers, names, describe, clear, host: () => host };
+}
+
 // ───────────────────────────── in-page replay scripts ─────────────────────────────
 /**
  * buildReplayScript({ action, max, bytesCap }) — page script (string) that performs ONE read-only
@@ -252,10 +320,13 @@ function buildReplayScript(o) {
     '})()';
 }
 
+// Real attachment-chip elements only — no generic button/anchor fallbacks (review B1).
+const ATT_CHIP_SELECTOR = '[data-attachmentid], [aria-label*="attachment" i]';
+
 // A small probe that reads the DOM to see whether a recent message has an attachment chip (P-ATT gate).
 function buildAttachChipScript() {
   return '(function(){ /*owa-probe:att-chip*/ try {' +
-    ' var sel = \'[aria-label*="attachment" i], [data-attachmentid], button[title*="."]\';' +
+    ' var sel = ' + JSON.stringify(ATT_CHIP_SELECTOR) + ';' +
     ' var chips = document.querySelectorAll(sel); var hrefShapes = [];' +
     ' for (var i=0;i<chips.length && hrefShapes.length<3;i++){ var a = chips[i].tagName === "A" ? chips[i] : chips[i].querySelector("a[href]");' +
     '   if (a && a.getAttribute("href")){ try { var u = new URL(a.getAttribute("href"), location.href); hrefShapes.push({ https: u.protocol === "https:", host: u.hostname, hasQuery: !!u.search }); } catch(e){} } }' +
@@ -333,84 +404,148 @@ async function run(deps) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const summary = { at: new Date().toISOString(), authBlocked: false, partA: 0, partB: null, windowless: [] };
   const recorder = createNetworkRecorder();
+  const auth = createAuthCapture();
+  const overallMs = Number.isFinite(d._overallTimeoutMs) ? d._overallTimeoutMs : OVERALL_TIMEOUT_MS;
+  const reserveMs = Number.isFinite(d._reserveMs) ? d._reserveMs : RESERVE_MS;
+  // ONE deadline for the whole run; every phase is sized from what remains of it.
+  const deadline = Date.now() + overallMs;
+  const remaining = () => Math.max(0, deadline - Date.now());
+  const ac = new AbortController();
+  const win = { ref: null };        // the harness's own hidden window (set by the driver)
   let child = null;
+  let wrote = { intel: false, network: false, api: false };
+  const tiers = [];
 
+  const killChild = () => { try { if (child && typeof child.kill === 'function' && !child.killed) child.kill(); } catch (_) { /* child gone */ } };
+  const closeWin = () => { try { if (win.ref && !win.ref.isDestroyed()) win.ref.close(); } catch (_) { /* closing */ } };
+  const abortAll = () => { try { if (!ac.signal.aborted) ac.abort(); } catch (_) { /* aborted */ } closeWin(); killChild(); };
+
+  // Overall hard stop: abort openSession / domProbe, close our window, kill any child.
+  let hardTimer = null;
   const hardStop = new Promise((resolve) => {
-    const t = setTimeout(() => resolve({ timedOut: true }), OVERALL_TIMEOUT_MS);
-    if (t && typeof t.unref === 'function') t.unref();
+    hardTimer = setTimeout(() => { summary.timedOut = true; abortAll(); resolve({ timedOut: true }); }, overallMs);
+    if (hardTimer && typeof hardTimer.unref === 'function') hardTimer.unref();
   });
 
   try {
-    // ── Part C Tier 1 (a): windowless BEFORE any window is opened. ──
-    const t1before = await _tier1(electron, log, 'before-window');
+    // ── Part C Tier 1 (a): windowless BEFORE any window is opened (cookie store only). ──
+    tiers.push(await Promise.race([_tier1(electron, log, 'before-window', { auth: null, timeoutMs: Math.min(NET_TIMEOUT_MS, remaining()) }), hardStop.then(() => _tierTimeout(1, 'before-window'))]));
 
-    // ── Parts A + B run inside ONE hidden window via openSession. ──
-    const inWindow = await Promise.race([
-      _runInWindow({ electron, openSession, recorder, log, dir, ts, deps: d }),
-      hardStop,
-    ]);
+    // ── Parts A + B run inside ONE hidden window via openSession, bounded by deadline - reserve. ──
+    const windowBudget = Math.max(1_000, remaining() - reserveMs);
+    const warmupMs = Math.max(1_000, Math.min(WARMUP_MAX_MS, Math.floor(windowBudget / 4)));
+    const sessionTimeoutMs = Math.max(1_000, windowBudget - warmupMs);
+    let phaseTimer = null;
+    const phaseStop = new Promise((resolve) => {
+      phaseTimer = setTimeout(() => resolve({ timedOut: true }), windowBudget);
+      if (phaseTimer && typeof phaseTimer.unref === 'function') phaseTimer.unref();
+    });
+    const windowRun = _runInWindow({ electron, openSession, recorder, auth, log, deps: d, signal: ac.signal, warmupMs, sessionTimeoutMs, win, remaining });
+    let inWindow = await Promise.race([windowRun, phaseStop, hardStop]);
+    clearTimeout(phaseTimer);
+    let windowClosedConfirmed = true;
     if (inWindow && inWindow.timedOut) {
-      summary.timedOut = true;
-      log.warn('[owa-probe] window phase hit overall timeout');
+      summary.windowTimedOut = true;
+      log.warn('[owa-probe] window phase hit its budget; aborting and closing the hidden window');
+      abortAll();
+      // Wait (bounded) for openSession to settle, which closes the window on abort.
+      const settled = await Promise.race([windowRun, _sleep(Math.min(SETTLE_WAIT_MS, remaining()))]);
+      closeWin();
+      windowClosedConfirmed = !win.ref || _isDestroyed(win.ref);
+      inWindow = settled && settled.partA ? settled : { partA: { authBlocked: false, probes: [] }, api: { ok: false, reason: 'window-timeout' } };
+    } else {
+      closeWin();
+      windowClosedConfirmed = !win.ref || _isDestroyed(win.ref);
     }
+    summary.windowClosed = windowClosedConfirmed;
     const partA = (inWindow && inWindow.partA) || { authBlocked: true, probes: [] };
     const apiReplay = (inWindow && inWindow.api) || { ok: false, reason: 'no-window' };
     summary.authBlocked = !!partA.authBlocked;
     summary.partA = Array.isArray(partA.probes) ? partA.probes.length : 0;
     summary.partB = apiReplay.ok ? 'ok' : (apiReplay.reason || 'fail');
 
-    _writeJson(dir, 'owa-probe-intel-' + ts + '.json', { at: summary.at, authBlocked: partA.authBlocked, probes: partA.probes });
-    _writeJson(dir, 'owa-probe-network-' + ts + '.json', { at: summary.at, requests: recorder.finalize() });
-    _writeJson(dir, 'owa-probe-api-' + ts + '.json', { at: summary.at, replay: apiReplay, sendCall: _staticSendCallFinding(recorder) });
+    _writeJson(dir, 'owa-probe-intel-' + ts + '.json', { at: summary.at, authBlocked: partA.authBlocked, probes: partA.probes }); wrote.intel = true;
+    _writeJson(dir, 'owa-probe-network-' + ts + '.json', { at: summary.at, requests: recorder.finalize() }); wrote.network = true;
+    _writeJson(dir, 'owa-probe-api-' + ts + '.json', { at: summary.at, replay: apiReplay, authCapture: auth.describe(), sendCall: _staticSendCallFinding(recorder) }); wrote.api = true;
 
-    // ── Part C Tier 1 (b): windowless AFTER the window has been closed. ──
-    const t1after = await _tier1(electron, log, 'after-window-closed');
-    // ── Part C Tier 2: plain Node child (in-memory stdin only). Nothing sensitive is available here,
-    //    so it carries only session cookie NAMES as a presence probe — no values are copied. ──
-    const t2res = await Promise.race([
-      _tier2({ electron, log, spawn: d._spawnChild, onChild: (c) => { child = c; } }),
-      hardStop,
-    ]);
-    const t2 = (t2res && t2res.timedOut) ? { tier: 2, ok: false, reason: 'timeout', authMaterialNeeded: [], obtainableWithoutPage: false, ms: OVERALL_TIMEOUT_MS } : t2res;
+    // ── Part C Tier 1 (b): windowless AFTER the window has been closed (cookies, then captured reuse). ──
+    if (!windowClosedConfirmed) {
+      tiers.push({ tier: 1, ok: false, reason: 'window-not-confirmed-closed', authMaterialNeeded: [], obtainableWithoutPage: false, ms: 0, whenRun: 'after-window-closed' });
+    } else if (ac.signal.aborted && summary.timedOut) {
+      tiers.push(_tierTimeout(1, 'after-window-closed'));
+    } else {
+      tiers.push(await Promise.race([
+        _tier1(electron, log, 'after-window-closed', { auth, timeoutMs: Math.min(NET_TIMEOUT_MS, remaining()), reuseDelayMs: Number.isFinite(d._reuseDelayMs) ? d._reuseDelayMs : REUSE_DELAY_MS, remaining }),
+        hardStop.then(() => _tierTimeout(1, 'after-window-closed')),
+      ]));
+    }
+    // ── Part C Tier 2: plain Node child; auth material copied in memory, stdin ONLY, outlook-scoped. ──
+    if (summary.timedOut) tiers.push(_tierTimeout(2, 'after-window-closed'));
+    else {
+      tiers.push(await Promise.race([
+        _tier2({ electron, log, auth, spawn: d._spawnChild, onChild: (c) => { child = c; }, timeoutMs: Math.min(CHILD_TIMEOUT_MS, remaining()) }),
+        hardStop.then(() => _tierTimeout(2, 'after-window-closed')),
+      ]));
+    }
     // ── Part C Tier 3: reasoning only, never run. ──
-    const t3 = _tier3();
+    tiers.push(_tier3());
 
-    const tiers = [t1before, t1after, t2, t3].filter(Boolean);
-    summary.windowless = tiers.map((t) => ({ tier: t.tier, ok: t.ok, when: t.whenRun }));
+    summary.windowless = tiers.map((t) => ({ tier: t.tier, ok: t.ok, when: t.whenRun, reason: t.reason }));
     _writeJson(dir, 'owa-probe-windowless-' + ts + '.json', { at: summary.at, tiers });
 
+    abortAll();
     log.info('[owa-probe] done ' + JSON.stringify(summary));
     return { ok: true, summary };
   } catch (e) {
+    abortAll();
+    try {
+      if (!wrote.intel) _writeJson(dir, 'owa-probe-intel-' + ts + '.json', { at: summary.at, error: _errName(e), probes: [] });
+      _writeJson(dir, 'owa-probe-windowless-' + ts + '.json', { at: summary.at, error: _errName(e), tiers });
+    } catch (_) { /* best-effort */ }
     log.warn('[owa-probe] done (error) ' + _errName(e) + ' ' + JSON.stringify(summary));
     return { ok: false, reason: _errName(e), summary };
   } finally {
-    try { if (child && typeof child.kill === 'function' && !child.killed) child.kill(); } catch (_) { /* child gone */ }
+    clearTimeout(hardTimer);
+    abortAll();
+    auth.clear();                    // drop captured auth material from memory
     _running = false;
   }
 }
 
+function _tierTimeout(tier, whenRun) {
+  return { tier, ok: false, reason: 'timeout', authMaterialNeeded: [], obtainableWithoutPage: false, ms: 0, whenRun };
+}
+function _sleep(ms) { return new Promise((r) => { const t = setTimeout(r, Math.max(0, ms)); if (t && t.unref) t.unref(); }); }
+function _isDestroyed(w) { try { return !!w.isDestroyed(); } catch (_) { return true; } }
+
 // Part A + Part B inside the hidden window. Uses openSession, so the window is the harness's own,
 // hidden, on defaultSession, and closed when the driver returns.
 async function _runInWindow(o) {
-  const { electron, openSession, recorder, log } = o;
+  const { electron, openSession, recorder, auth, log, signal } = o;
   const deps = o.deps || {};
+  const remaining = typeof o.remaining === 'function' ? o.remaining : () => OVERALL_TIMEOUT_MS;
   if (typeof openSession !== 'function') return { partA: { authBlocked: false, probes: await Promise.all(_partAReadonly(deps, null)) }, api: { ok: false, reason: 'no-openSession' } };
 
   const api = { ok: false };
   const partAProbes = [];
+  const stop = (ctx) => (signal && signal.aborted) || (ctx && typeof ctx.stopped === 'function' && ctx.stopped());
   const driver = async (ctx) => {
-    // Attach CDP network capture for the Part B metadata (names/shapes only).
-    _attachCdp(ctx.win, recorder, log);
+    if (o.win) o.win.ref = ctx.win;   // so the harness can close it itself on timeout
+    // Attach CDP network capture for the Part B metadata (names/shapes only) + in-memory auth capture.
+    _attachCdp(ctx.win, recorder, log, auth);
     // ── Part A read-only probes ──
     for (const p of _partAReadonly(deps, ctx)) partAProbes.push(await p);
-    // P-DOM / P-TZ via the shipped read-only dom-probe (addresses already masked there).
+    if (stop(ctx)) return;
+    // P-DOM / P-TZ via the shipped read-only dom-probe (addresses already masked there). It opens its
+    // own window via openSession, so it gets the SAME abort signal and a budget sized from what remains.
     partAProbes.push(await _timed('P-DOM', async () => {
       const dp = deps._domProbe || _tryDomProbe();
       if (!dp) return { note: 'dom-probe-unavailable' };
-      const r = await dp.domProbe({ n: 3, _electron: electron });
+      const budget = Math.max(1_000, Math.min(120_000, Math.floor(remaining() / 3)));
+      const r = await dp.domProbe({ n: 3, _electron: electron, signal, timeoutMs: budget, warmupTimeoutMs: Math.min(WARMUP_MAX_MS, Math.floor(budget / 3)) });
       return { ok: !!r.ok, authBlocked: !!r.authBlocked, rows: r.rows, messages: r.messages, tz: r.tz };
     }));
+    if (stop(ctx)) return;
     // P-TZ: report the offset only; NEVER call set-tz-verified.
     partAProbes.push(await _timed('P-TZ', async () => {
       const last = partAProbes.find((x) => x.id === 'P-DOM');
@@ -422,9 +557,11 @@ async function _runInWindow(o) {
       const chip = await ctx.execJson(buildAttachChipScript());
       if (!chip || !chip.chipCount) return { skipped: true, reason: 'no-attachment-chip' };
       // read-only reachability of the first chip href via a ranged GET of the first bytes — no save.
+      // Only an href found INSIDE/ON a real chip, on an Outlook host, is ever fetched (in-page check).
       const r = await ctx.execJson(_buildRangedHeadScript());
-      return { chipCount: chip.chipCount, hrefShapes: chip.hrefShapes, reach: r };
+      return { chipCount: chip.chipCount, hrefShapes: chip.hrefShapes, reach: r, note: 'checked in the harness window; P-DOM opens messages in its own window, so a chip is usually absent here' };
     }));
+    if (stop(ctx)) return;
 
     // ── Part B: replay the SPA's own read calls from the OWA origin, read-only. ──
     const list = await _timed('B-list', () => ctx.execJson(buildReplayScript({ action: 'list', max: 5 })));
@@ -439,7 +576,8 @@ async function _runInWindow(o) {
 
   let authBlocked = false;
   try {
-    const session = await openSession({ _electron: electron, timeoutMs: WINDOW_BUDGET_MS }, driver);
+    // Budget sized from the single deadline: warmup + window timer together never pass deadline - reserve.
+    const session = await openSession({ _electron: electron, signal, warmupTimeoutMs: o.warmupMs || WARMUP_MAX_MS, timeoutMs: o.sessionTimeoutMs || 60_000 }, driver);
     authBlocked = !!(session && session.settled && session.settled.authBlocked);
   } catch (e) {
     log.warn('[owa-probe] in-window phase failed: ' + _errName(e));
@@ -523,34 +661,102 @@ function _partAReadonly(deps, ctx) {
 }
 
 // ───────────────────────────── Tier 1 (main-process, no page) ─────────────────────────────
-async function _tier1(electron, log, whenRun) {
+const TIER1_PATH = '/api/v2.0/me/messages?$top=5&$orderby=ReceivedDateTime%20desc&$select=Id,ConversationId';
+
+function _pushUnique(arr, v) { if (!arr.includes(v)) arr.push(v); }
+
+/** Classify one GET outcome (status / redirect) — reason codes only. */
+function _classify(r) {
+  if (r.status === 200 && r.json) return 'ok';
+  if (r.redirect) return r.toLogin ? 'redirect-to-login' : 'redirect-other';
+  if (r.status === 401 || r.status === 403) return 'unauthorized';
+  if (r.status === 429 || r.status === 503) return 'throttled';
+  return 'status-' + r.status + (r.error ? ':' + r.error : '');
+}
+
+/**
+ * _cookieInventory(session) — cookie NAMES per Outlook host (never values) plus the canary cookie
+ * VALUE kept only in the returned closure-local object for the caller's in-memory use.
+ */
+async function _cookieInventory(session) {
+  const byHost = {};
+  let canaryValue = null;
+  for (const h of OUTLOOK_HOSTS) {
+    try {
+      const cookies = await session.cookies.get({ domain: h });
+      const list = (cookies || []).filter((c) => hostAllowed(String(c.domain || h).replace(/^\./, '')));
+      byHost[h] = Array.from(new Set(list.map((c) => String(c.name)))).slice(0, 40).sort();
+      const can = list.find((c) => /canary/i.test(String(c.name)) && c.value);
+      if (can && !canaryValue) canaryValue = String(can.value);
+    } catch (_) { byHost[h] = null; }
+  }
+  return { byHost, canaryValue };
+}
+
+async function _tier1(electron, log, whenRun, opts) {
+  const o = opts || {};
   const t0 = Date.now();
-  const rec = { tier: 1, ok: false, reason: '', authMaterialNeeded: [], obtainableWithoutPage: false, tokenLifetime: { hasExp: null, secondsToExpiry: null }, ms: 0, whenRun };
+  const timeoutMs = Math.max(1, Math.min(NET_TIMEOUT_MS, Number.isFinite(o.timeoutMs) ? o.timeoutMs : NET_TIMEOUT_MS));
+  const remaining = typeof o.remaining === 'function' ? o.remaining : () => OVERALL_TIMEOUT_MS;
+  const rec = { tier: 1, ok: false, reason: '', authMaterialNeeded: [], obtainableWithoutPage: false, tokenLifetime: { hasExp: null, secondsToExpiry: null, reason: 'no-bearer-observed' }, attempts: [], ms: 0, whenRun };
   try {
     if (!electron || !electron.session || !electron.net) { rec.reason = 'electron-unavailable'; rec.ms = Date.now() - t0; return rec; }
     const session = electron.session.defaultSession;
-    // Which auth material is present as a COOKIE (names only), so main could set a canary header itself.
-    let canaryCookie = false;
-    try {
-      const cookies = await session.cookies.get({ domain: 'outlook.office.com' });
-      canaryCookie = (cookies || []).some((c) => /canary/i.test(c.name));
-      if (canaryCookie) rec.authMaterialNeeded.push('x-owa-canary(cookie)');
-    } catch (_) { /* cookie read best-effort */ }
-    // Read-only GET against the v2.0 REST path with session cookies only (no page).
-    const url = 'https://outlook.office.com/api/v2.0/me/messages?$top=5&$orderby=ReceivedDateTime%20desc&$select=Id,ConversationId';
-    const r = await _netGet(electron, session, url);
-    rec.status = r.status;
-    rec.latencyMs = r.latencyMs;
-    if (r.status === 200 && r.json) {
+    // Cookie NAMES for every Outlook host (the live session lands on outlook.cloud.microsoft).
+    const inv = await _cookieInventory(session);
+    rec.cookieNamesByHost = inv.byHost;
+    rec.canaryAsCookie = !!inv.canaryValue;
+    const captured = o.auth ? o.auth.describe() : null;
+    if (captured && captured.bearer) rec.tokenLifetime = captured.bearer;
+    // Prefer the host the SPA was actually observed calling (CDP), else outlook.office.com.
+    const host = (o.auth && o.auth.host() && hostAllowed(o.auth.host())) ? o.auth.host() : 'outlook.office.com';
+    rec.host = host;
+    const url = 'https://' + host + TIER1_PATH;
+
+    // Attempt 1: session cookies only (+ canary header iff the canary came from a cookie).
+    const cookieHeaders = { accept: 'application/json' };
+    if (inv.canaryValue) cookieHeaders['x-owa-canary'] = inv.canaryValue;
+    inv.canaryValue = null;
+    const a1 = await _netGet(electron, session, url, cookieHeaders, timeoutMs);
+    rec.attempts.push(_attemptRecord('cookies-only', a1, cookieHeaders));
+    const c1 = _classify(a1);
+    if (c1 === 'ok') {
       rec.ok = true; rec.reason = 'cookies-sufficient'; rec.obtainableWithoutPage = true;
-      rec.responseShape = shapeOf(r.json, 0);
-    } else if (r.status === 401 || r.status === 403) {
-      rec.reason = 'unauthorized-needs-more-than-cookies'; rec.authMaterialNeeded.push('authorization(bearer)');
-    } else if (r.status >= 300 && r.status < 400) {
-      rec.reason = 'redirect-to-login'; rec.authMaterialNeeded.push('interactive-session');
+      rec.responseShape = shapeOf(a1.json, 0);
+      _pushUnique(rec.authMaterialNeeded, 'cookie');
+      if (rec.canaryAsCookie) _pushUnique(rec.authMaterialNeeded, 'x-owa-canary(cookie)');
     } else {
-      rec.reason = 'status-' + r.status + (r.error ? ':' + r.error : '');
+      rec.reason = c1 === 'unauthorized' ? 'unauthorized-needs-more-than-cookies' : c1;
+      _pushUnique(rec.authMaterialNeeded, 'cookie');
+      if (c1 === 'redirect-to-login') _pushUnique(rec.authMaterialNeeded, 'interactive-session');
+      // Attempt 2: reuse auth material captured ONCE from the hidden page (in memory, never stored).
+      const capHeaders = o.auth ? o.auth.headers() : {};
+      if (Object.keys(capHeaders).length) {
+        const h2 = Object.assign({ accept: 'application/json' }, capHeaders);
+        const a2 = await _netGet(electron, session, url, h2, timeoutMs);
+        rec.attempts.push(_attemptRecord('captured-reuse', a2, h2));
+        for (const k of Object.keys(capHeaders)) _pushUnique(rec.authMaterialNeeded, k === 'authorization' ? 'authorization(bearer)' : k);
+        if (_classify(a2) === 'ok') {
+          rec.ok = true; rec.reason = 'needs-page-captured-material-reusable'; rec.obtainableWithoutPage = false;
+          rec.responseShape = shapeOf(a2.json, 0);
+          // Refresh behaviour: re-run after a delay, only if it fits inside the overall budget.
+          const delay = Number.isFinite(o.reuseDelayMs) ? o.reuseDelayMs : REUSE_DELAY_MS;
+          if (delay > 0 && remaining() > delay + timeoutMs + 5_000) {
+            await _sleep(delay);
+            const a3 = await _netGet(electron, session, url, h2, timeoutMs);
+            rec.attempts.push(_attemptRecord('captured-reuse-after-' + Math.round(delay / 1000) + 's', a3, h2));
+            rec.reuseStillValidAfterDelay = _classify(a3) === 'ok';
+          } else rec.reuseStillValidAfterDelay = null;
+        } else {
+          rec.reason += '+captured-reuse-' + _classify(a2);
+        }
+        for (const k of Object.keys(h2)) h2[k] = null;
+      } else if (c1 === 'unauthorized') {
+        _pushUnique(rec.authMaterialNeeded, 'authorization(bearer)');
+        rec.capturedMaterial = 'none-captured';
+      }
     }
+    for (const k of Object.keys(cookieHeaders)) cookieHeaders[k] = null;
   } catch (e) {
     rec.reason = _errName(e);
   }
@@ -558,21 +764,47 @@ async function _tier1(electron, log, whenRun) {
   return rec;
 }
 
-function _netGet(electron, session, url) {
+function _attemptRecord(mode, r, headers) {
+  return {
+    mode, status: r.status, outcome: _classify(r), redirect: !!r.redirect, toLogin: r.redirect ? !!r.toLogin : null,
+    retryAfterPresent: !!r.retryAfter, headerNamesSent: Object.keys(headers || {}).map((k) => k.toLowerCase()).sort(), latencyMs: r.latencyMs,
+  };
+}
+
+/**
+ * _netGet — one read-only GET via Electron net.request on the given session. redirect:'manual' plus a
+ * 'redirect' listener: a 3xx is recorded as {status, redirect:true, toLogin} (the target URL is
+ * tested against AUTH_HOST_RE and discarded, never stored) and the request is aborted.
+ */
+function _netGet(electron, session, url, headers, timeoutMs) {
   return new Promise((resolve) => {
     const t0 = Date.now();
+    let settled = false;
+    const done = (v) => { if (settled) return; settled = true; clearTimeout(timer); v.latencyMs = Date.now() - t0; resolve(v); };
     let req;
+    let timer = null;
     try {
       req = electron.net.request({ method: 'GET', url, session, useSessionCookies: true, credentials: 'include', redirect: 'manual' });
     } catch (e) { resolve({ status: 0, error: _errName(e), latencyMs: Date.now() - t0 }); return; }
     let data = ''; let n = 0;
-    const timer = setTimeout(() => { try { req.abort(); } catch (_) { /* aborting */ } resolve({ status: 0, error: 'timeout', latencyMs: Date.now() - t0 }); }, 30_000);
-    req.on('response', (res) => {
-      res.on('data', (c) => { n += c.length; if (n <= REPLAY_MAX_BYTES) data += c.toString('utf8'); });
-      res.on('end', () => { clearTimeout(timer); let j = null; try { j = JSON.parse(data); } catch (_) { /* non-json */ } resolve({ status: res.statusCode, json: j, latencyMs: Date.now() - t0 }); });
+    timer = setTimeout(() => { try { req.abort(); } catch (_) { /* aborting */ } done({ status: 0, error: 'timeout' }); }, Math.max(1, timeoutMs || NET_TIMEOUT_MS));
+    req.on('redirect', (statusCode, _method, redirectUrl) => {
+      const toLogin = AUTH_HOST_RE.test(String(redirectUrl || ''));
+      done({ status: Number(statusCode) || 302, redirect: true, toLogin });   // settle first: abort may emit 'abort' synchronously
+      try { req.abort(); } catch (_) { /* aborting */ }
     });
-    req.on('error', (e) => { clearTimeout(timer); resolve({ status: 0, error: _errName(e), latencyMs: Date.now() - t0 }); });
-    req.setHeader('accept', 'application/json');
+    req.on('response', (res) => {
+      const hdrs = (res && res.headers) || {};
+      const retryAfter = Object.keys(hdrs).some((k) => k.toLowerCase() === 'retry-after');
+      res.on('data', (c) => { n += c.length; if (n <= REPLAY_MAX_BYTES) data += c.toString('utf8'); });
+      res.on('end', () => { let j = null; try { j = JSON.parse(data); } catch (_) { /* non-json */ } data = ''; done({ status: res.statusCode, json: j, retryAfter }); });
+    });
+    req.on('abort', () => done({ status: 0, error: 'aborted' }));
+    req.on('error', (e) => done({ status: 0, error: _errName(e) }));
+    const H = headers || { accept: 'application/json' };
+    for (const k of Object.keys(H)) {
+      if (H[k] != null) { try { req.setHeader(k, H[k]); } catch (_) { /* header rejected */ } }
+    }
     req.end();
   });
 }
@@ -588,41 +820,71 @@ async function _tier2(o) {
     passedVia: 'stdin',
   };
   let child = null;
+  const timeoutMs = Math.max(1, Math.min(CHILD_TIMEOUT_MS, Number.isFinite(o.timeoutMs) ? o.timeoutMs : CHILD_TIMEOUT_MS));
   try {
-    const url = 'https://outlook.office.com/api/v2.0/me/messages?$top=5&$orderby=ReceivedDateTime%20desc&$select=Id';
+    const host = (o.auth && o.auth.host() && hostAllowed(o.auth.host())) ? o.auth.host() : 'outlook.office.com';
+    const url = 'https://' + host + TIER1_PATH;
     if (!hostAllowed(url)) { rec.reason = 'host-blocked'; rec.ms = Date.now() - t0; return rec; }
-    // Collect ONLY cookie NAMES present for the outlook host — no values are copied into the child.
-    let cookieNames = [];
-    try {
-      const session = electron && electron.session && electron.session.defaultSession;
-      if (session) { const cookies = await session.cookies.get({ domain: 'outlook.office.com' }); cookieNames = (cookies || []).map((c) => c.name).slice(0, 30); }
-    } catch (_) { /* best-effort */ }
-    rec.authMaterialNeeded = cookieNames.length ? ['cookie'] : [];
+    rec.host = host;
+
+    // Build the auth material IN MEMORY in main: the cookies the session would send to this exact
+    // URL (cookies.get({url})), re-filtered to Outlook-domain cookies, + canary (cookie or captured)
+    // + any bearer / anchor captured from the hidden page. Only NAMES are ever recorded.
+    let headers = { accept: 'application/json' };
+    const session = electron && electron.session && electron.session.defaultSession;
+    let cookiePairs = [];
+    if (session && session.cookies) {
+      try {
+        const cookies = await session.cookies.get({ url });
+        cookiePairs = (cookies || []).filter((c) => c && c.name && hostAllowed(String(c.domain || host).replace(/^\./, '')));
+      } catch (_) { cookiePairs = []; }
+    }
+    if (cookiePairs.length) {
+      headers.cookie = cookiePairs.map((c) => c.name + '=' + c.value).join('; ');
+      _pushUnique(rec.authMaterialNeeded, 'cookie');
+      const can = cookiePairs.find((c) => /canary/i.test(String(c.name)) && c.value);
+      if (can) { headers['x-owa-canary'] = String(can.value); _pushUnique(rec.authMaterialNeeded, 'x-owa-canary(cookie)'); }
+    }
+    rec.cookieNamesTransferred = Array.from(new Set(cookiePairs.map((c) => String(c.name)))).sort().slice(0, 40);
+    cookiePairs = null;
+    const cap = o.auth ? o.auth.headers() : {};
+    for (const k of Object.keys(cap)) {
+      if (k === 'x-owa-canary' && headers['x-owa-canary']) continue;
+      headers[k] = cap[k];
+      _pushUnique(rec.authMaterialNeeded, k === 'authorization' ? 'authorization(bearer)' : k + '(captured)');
+    }
+    rec.headerNamesTransferred = Object.keys(headers).sort();
 
     const spawn = o.spawn || _defaultSpawnChild;
     const res = await new Promise((resolve) => {
       let out = ''; let settled = false;
       const done = (v) => { if (!settled) { settled = true; resolve(v); } };
-      const timer = setTimeout(() => { try { if (child && !child.killed) child.kill(); } catch (_) {} done({ status: 0, error: 'timeout' }); }, CHILD_TIMEOUT_MS);
+      const timer = setTimeout(() => { try { if (child && !child.killed) child.kill(); } catch (_) {} done({ status: 0, error: 'timeout' }); }, timeoutMs);
       try {
+        // The spawner receives ONLY the secret-free source — never the auth material.
         child = spawn(TIER2_CHILD_SOURCE);
       } catch (e) { clearTimeout(timer); done({ status: 0, error: _errName(e) }); return; }
       if (o.onChild) o.onChild(child);
       if (child.stdout) child.stdout.on('data', (c) => { out += c.toString('utf8'); });
       child.on('error', (e) => { clearTimeout(timer); done({ status: 0, error: _errName(e) }); });
       child.on('exit', () => { clearTimeout(timer); let j = null; try { j = JSON.parse(out.trim().split('\n').filter(Boolean).pop() || '{}'); } catch (_) { j = null; } done(j || { status: 0, error: 'no-output' }); });
-      // Pass the probe spec over stdin ONLY — never argv/env/disk. Cookies are applied by the OS cookie
-      // jar? No: a plain Node process has none, so we pass nothing sensitive and expect a 401, which is
-      // the decisive finding (a bare process cannot reuse the Electron session's cookie jar).
-      try { child.stdin.write(JSON.stringify({ url, headerNames: ['accept'] })); child.stdin.end(); } catch (_) { /* child may have exited */ }
+      // The ONE place auth material leaves main: a single stdin write, then the reference is dropped.
+      try { child.stdin.write(JSON.stringify({ url, headers })); child.stdin.end(); } catch (_) { /* child may have exited */ }
+      for (const k of Object.keys(headers)) headers[k] = null;
+      headers = null;
     });
     rec.status = res && res.status;
     rec.latencyMs = res && res.latencyMs;
-    if (res && res.status === 200) { rec.ok = true; rec.reason = 'unexpected-200-without-session'; rec.obtainableWithoutPage = true; }
-    else if (res && (res.status === 401 || res.status === 403)) { rec.reason = 'unauthorized-no-session-cookies-in-plain-node'; rec.authMaterialNeeded.push('cookie', 'authorization(bearer)'); }
-    else if (res && res.status >= 300 && res.status < 400) { rec.reason = 'redirect-to-login'; }
-    else { rec.reason = 'status-' + (res && res.status) + (res && res.error ? ':' + res.error : ''); }
-    rec.conclusion = 'A plain Node child has no access to the Electron session cookie jar; cookies/canary/token would have to be copied in-memory over stdin from main, which is a real credential-handling surface.';
+    if (res && res.status === 200) {
+      rec.ok = true; rec.reason = 'transferred-material-sufficient-in-plain-node';
+      rec.obtainableWithoutPage = !rec.authMaterialNeeded.some((n) => /bearer|\(captured\)/.test(n));
+      if (res.shape) rec.responseShape = res.shape;
+    } else if (res && (res.status === 401 || res.status === 403)) rec.reason = 'unauthorized-with-transferred-material';
+    else if (res && res.status >= 300 && res.status < 400) rec.reason = 'redirect';
+    else if (res && res.error === 'host-blocked') rec.reason = 'host-blocked';
+    else rec.reason = 'status-' + (res && res.status) + (res && res.error ? ':' + res.error : '');
+    if (!rec.authMaterialNeeded.length) rec.reason += '+no-material-available';
+    rec.conclusion = 'A plain Node child has no cookie jar of its own; it only works with session material copied in-memory from main over stdin, which is a real credential-handling surface.';
   } catch (e) {
     rec.reason = _errName(e);
   } finally {
@@ -632,10 +894,11 @@ async function _tier2(o) {
   return rec;
 }
 
-function _defaultSpawnChild(source) {
-  const cp = require('child_process');
-  const os = require('os');
-  const fsx = require('fs');
+function _defaultSpawnChild(source, deps) {
+  const d = deps || {};
+  const cp = d._cp || require('child_process');
+  const os = d._os || require('os');
+  const fsx = d._fs || require('fs');
   // The source holds NO secret; only the secret-free probe body is written. The spec rides stdin.
   const file = path.join(os.tmpdir(), 'owa-probe-tier2-' + process.pid + '-' + Date.now() + '.cjs');
   fsx.writeFileSync(file, source, 'utf8');
@@ -657,7 +920,7 @@ function _tier3() {
 }
 
 // ───────────────────────────── CDP + helpers ─────────────────────────────
-function _attachCdp(win, recorder, log) {
+function _attachCdp(win, recorder, log, auth) {
   try {
     if (!win || !win.webContents) return;
     const dbg = win.webContents.debugger;
@@ -665,22 +928,39 @@ function _attachCdp(win, recorder, log) {
     dbg.sendCommand('Network.enable');
     dbg.on('message', (_e, method, params) => {
       try {
-        if (method === 'Network.requestWillBeSent') recorder.recordRequest(params);
+        if (method === 'Network.requestWillBeSent') {
+          recorder.recordRequest(params);           // names/shapes only (persisted)
+          if (auth) auth.observe(params);           // values in memory only (never persisted)
+        }
         else if (method === 'Network.responseReceived') recorder.recordResponse(params);
       } catch (_) { /* metadata only */ }
     });
   } catch (e) { log.warn('[owa-probe] CDP attach failed: ' + _errName(e)); }
 }
 
-// A ranged GET of only the first bytes of the first attachment chip href (P-ATT reachability).
+/**
+ * A ranged GET of only the first bytes of an attachment-chip href (P-ATT reachability). Only an
+ * anchor that IS a real chip or sits INSIDE one is considered (no generic a[href] / button fallback),
+ * and only if it is https, has no credentials/port, is on an Outlook host, and its path carries no
+ * mutating verb. Anything else is `no-handle` / `bad-host` and is never fetched. Body is cancelled
+ * unread; nothing is saved.
+ */
 function _buildRangedHeadScript() {
+  const cfg = JSON.stringify({ sel: ATT_CHIP_SELECTOR, hosts: OUTLOOK_HOSTS, deny: MUTATION_ACTION_RE.source });
   return '(async function(){ /*owa-probe:att-reach*/ try {' +
-    ' var sel = \'[aria-label*="attachment" i] a[href], [data-attachmentid] a[href], a[href]\';' +
-    ' var a = null; var els = document.querySelectorAll(sel);' +
-    ' for (var i=0;i<els.length;i++){ try { var u = new URL(els[i].getAttribute("href"), location.href); if (u.protocol === "https:") { a = u.href; break; } } catch(e){} }' +
-    ' if (!a) return JSON.stringify({ ok:false, reason:"no-handle" });' +
+    ' var C = ' + cfg + '; var DENY = new RegExp(C.deny, "i");' +
+    ' function hostOk(h){ h = String(h||"").toLowerCase(); for (var k=0;k<C.hosts.length;k++){ if (h === C.hosts[k] || h.slice(-(C.hosts[k].length+1)) === "." + C.hosts[k]) return true; } return false; }' +
+    ' var chips = document.querySelectorAll(C.sel); var a = null; var sawHref = false;' +
+    ' for (var i=0;i<chips.length && !a;i++){ var ch = chips[i]; var cands = [];' +
+    '   if (ch.tagName === "A" && ch.getAttribute("href")) cands.push(ch.getAttribute("href"));' +
+    '   var inner = ch.querySelectorAll("a[href]"); for (var j=0;j<inner.length && cands.length<5;j++) cands.push(inner[j].getAttribute("href"));' +
+    '   for (var c=0;c<cands.length;c++){ sawHref = true; try { var u = new URL(cands[c], location.href);' +
+    '     if (u.protocol !== "https:" || u.username || u.password || u.port || !hostOk(u.hostname) || DENY.test(u.pathname + u.search)) continue;' +
+    '     a = u.href; break; } catch(e){} } }' +
+    ' if (!a) return JSON.stringify({ ok:false, reason: sawHref ? "bad-host" : "no-handle" });' +
     ' var r = await fetch(a, { method:"GET", credentials:"include", redirect:"manual", headers:{ Range:"bytes=0-15" }, cache:"no-store" });' +
-    ' return JSON.stringify({ ok: r.ok || r.status===206, status:r.status, mimetype:String(r.headers.get("content-type")||"").split(";")[0].slice(0,60) });' +
+    ' try { if (r.body && r.body.cancel) r.body.cancel(); } catch(e){}' +
+    ' return JSON.stringify({ ok: r.ok || r.status===206, status:r.status, mimetype:String((r.headers && r.headers.get("content-type"))||"").split(";")[0].slice(0,60) });' +
     ' } catch(e){ return JSON.stringify({ ok:false, reason:String(e&&e.name||"err").slice(0,40) }); } })()';
 }
 
@@ -741,6 +1021,11 @@ module.exports = {
   buildReplayScript,
   buildAttachChipScript,
   TIER2_CHILD_SOURCE,
+  jwtExpShape,
+  createAuthCapture,
+  ATT_CHIP_SELECTOR,
+  _buildRangedHeadScript,
+  _netGet,
   _tier1,
   _tier2,
   _tier3,

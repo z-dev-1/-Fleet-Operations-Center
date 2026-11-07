@@ -12,6 +12,7 @@ import { describe, it, expect, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import vm from 'vm';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 const require = createRequire(import.meta.url);
@@ -75,6 +76,46 @@ describe('redaction / masking', () => {
     expect(p).not.toMatch(/AAMk/);
     const g = probe.collapsePath('https://outlook.office.com/api/v2.0/me/messages/11111111-2222-3333-4444-555555555555');
     expect(g).toContain('/<guid>');
+  });
+  it('collapsePath masks address-bearing path segments, plain and %40-encoded (B5)', () => {
+    const plain = probe.collapsePath('https://outlook.office.com/owa/jane.doe@corp.test/service.svc?action=FindItem');
+    expect(plain).toBe('/owa/<addr>/service.svc?action=FindItem');
+    const enc = probe.collapsePath('https://outlook.office.com/owa/jane.doe%40corp.test/service.svc?action=FindItem');
+    expect(enc).toBe('/owa/<addr>/service.svc?action=FindItem');
+    const users = probe.collapsePath("https://outlook.office.com/api/v2.0/Users('jane.doe%40corp.test')/messages");
+    for (const s of [plain, enc, users]) { expect(s).not.toMatch(/jane|corp\.test|%40|@/i); }
+    // a malformed escape must not throw or leak
+    const bad = probe.collapsePath('https://outlook.office.com/owa/jane%40corp.test%E0%A4%A/x');
+    expect(bad).not.toMatch(/jane|corp\.test/);
+  });
+  it('the network recorder never persists an address from the path (B5)', () => {
+    const rec = probe.createNetworkRecorder();
+    rec.recordRequest({ requestId: 'a', request: { url: 'https://outlook.office.com/owa/jane.doe%40corp.test/service.svc?action=GetItem', method: 'POST', headers: {} } });
+    expect(JSON.stringify(rec.finalize())).not.toMatch(/jane|corp\.test/);
+  });
+  it('jwtExpShape reports only exp presence/seconds — never the token', () => {
+    const tok = fakeJwt(Math.floor(Date.now() / 1000) + 3600);
+    const s = probe.jwtExpShape('Bearer ' + tok, Date.now());
+    expect(s.hasExp).toBe(true);
+    expect(s.secondsToExpiry).toBeGreaterThan(3500);
+    expect(JSON.stringify(s)).not.toContain(tok.split('.')[1]);
+    expect(probe.jwtExpShape('', Date.now())).toEqual({ hasExp: null, secondsToExpiry: null, reason: 'no-bearer-observed' });
+    expect(probe.jwtExpShape('opaqueTOKEN', Date.now()).reason).toBe('opaque-token');
+  });
+  it('createAuthCapture keeps values in memory only; describe() exposes names/shape only', () => {
+    const cap = probe.createAuthCapture();
+    const tok = fakeJwt(Math.floor(Date.now() / 1000) + 600);
+    cap.observe({ request: { url: 'https://outlook.cloud.microsoft/owa/service.svc?action=FindItem', headers: { Authorization: 'Bearer ' + tok, 'X-OWA-CANARY': 'CANARY_SECRET', 'X-AnchorMailbox': 'jane@corp.test' } } });
+    cap.observe({ request: { url: 'https://evil.example/x', headers: { Authorization: 'Bearer EVIL' } } });
+    const d = JSON.stringify(cap.describe());
+    expect(d).not.toContain(tok);
+    expect(d).not.toContain('CANARY_SECRET');
+    expect(d).not.toContain('jane@corp.test');
+    expect(cap.describe().namesObserved).toEqual(['authorization', 'x-anchormailbox', 'x-owa-canary']);
+    expect(cap.host()).toBe('outlook.cloud.microsoft');
+    expect(cap.headers().authorization).toBe('Bearer ' + tok);    // non-outlook host was ignored
+    cap.clear();
+    expect(cap.headers()).toEqual({});
   });
   it('headerNames returns only names of interesting headers — never values', () => {
     const names = probe.headerNames({ Authorization: 'Bearer SECRET.JWT.VALUE', 'X-OWA-CANARY': 'abc123', 'X-AnchorMailbox': 'x@y.com', Referer: 'https://x', cookie: 'a=b' });
@@ -152,46 +193,128 @@ describe('replay layer issues only read-only GETs — never a send/move/flag/del
       expect(s).toContain('wouldMarkRead:false');
     });
   }
-  it('the attachment-chip script is pure DOM read, no fetch verb other than ranged GET', () => {
-    expect(probe.buildAttachChipScript()).not.toMatch(MUTATION);
+  it('the attachment-chip script is a pure DOM read with no fetch and no generic button/anchor fallback', () => {
+    const s = probe.buildAttachChipScript();
+    expect(s).not.toMatch(MUTATION);
+    expect(s).not.toMatch(/fetch\(/);
+    expect(s).not.toContain('button[title');
+  });
+  it('the P-ATT ranged script is GET-only with a Range header and no mutating verb', () => {
+    const s = probe._buildRangedHeadScript();
+    expect(s).toMatch(/method:"GET"/);
+    expect(s).toMatch(/Range:"bytes=0-15"/);
+    expect(s).not.toMatch(/method:\s*["'](POST|PUT|PATCH|DELETE)/i);
+    expect(s).not.toContain('button[title');
+  });
+  it('the Tier 2 child source issues only a GET and touches no fs/argv/env', () => {
+    const src = probe.TIER2_CHILD_SOURCE;
+    expect(src).toMatch(/method:'GET'/);
+    expect(src).not.toMatch(/method:\s*['"](POST|PUT|PATCH|DELETE)/i);
+    expect(src).not.toMatch(/require\('fs'\)|process\.argv|process\.env/);
   });
 });
 
-describe('Tier 2 — auth material only via stdin, host-filtered, child killed', () => {
-  it('passes the spec via stdin only (never argv/env), filters to outlook, and kills the child at the end', async () => {
-    const calls = { argv: null, env: null, stdinData: '', killed: false, ended: false };
+describe('P-ATT ranged fetch only targets real chip hrefs on Outlook hosts (B1)', () => {
+  async function runRanged(chips, pageAnchors) {
+    const queried = [];
+    const fetches = [];
+    const document = {
+      querySelectorAll(sel) {
+        queried.push(sel);
+        if (sel === probe.ATT_CHIP_SELECTOR) return chips;
+        if (sel === 'a[href]') return pageAnchors || [];
+        return [];
+      },
+    };
+    const fetch = async (url, init) => { fetches.push({ url, init }); return { ok: false, status: 206, headers: { get: () => 'application/pdf' }, body: { cancel() {} } }; };
+    const out = await vm.runInNewContext(probe._buildRangedHeadScript(), { document, fetch, URL, location: { href: 'https://outlook.office.com/mail/' } });
+    return { res: JSON.parse(out), fetches, queried };
+  }
+  const anchor = (href) => ({ tagName: 'A', getAttribute: (n) => (n === 'href' ? href : null), querySelectorAll: () => [] });
+  const chip = (inner) => ({ tagName: 'DIV', getAttribute: () => null, querySelectorAll: (s) => (s === 'a[href]' ? inner : []) });
+
+  it('never fetches a page-level (non-chip) anchor', async () => {
+    const { res, fetches, queried } = await runRanged([], [anchor('https://outlook.office.com/owa/unsubscribe')]);
+    expect(fetches).toEqual([]);
+    expect(res.reason).toBe('no-handle');
+    expect(queried).toEqual([probe.ATT_CHIP_SELECTOR]);       // never a document-wide a[href] query
+  });
+  it('never fetches a chip href on a non-Outlook host', async () => {
+    const { res, fetches } = await runRanged([chip([anchor('https://evil.example/approve?id=1')])]);
+    expect(fetches).toEqual([]);
+    expect(res.reason).toBe('bad-host');
+  });
+  it('never fetches a chip href whose path carries a mutating verb', async () => {
+    const { fetches } = await runRanged([chip([anchor('https://outlook.office.com/owa/service.svc?action=DeleteItem')])]);
+    expect(fetches).toEqual([]);
+  });
+  it('fetches an Outlook chip href with a ranged GET only', async () => {
+    const { res, fetches } = await runRanged([chip([anchor('https://attachments.outlook.office.com/owa/x/attachment.pdf')])]);
+    expect(fetches.length).toBe(1);
+    expect(fetches[0].init.method).toBe('GET');
+    expect(fetches[0].init.headers.Range).toBe('bytes=0-15');
+    expect(res.status).toBe(206);
+  });
+});
+
+describe('Tier 2 — auth material only via stdin, host-filtered, child killed (B3)', () => {
+  it('copies outlook-domain cookies + captured material onto stdin only, never argv/env/logs/result', async () => {
+    const calls = { spawnArgs: null, stdinData: '', killed: false, ended: false };
     const child = fakeChild();
     child.stdin.write = (d) => { calls.stdinData += String(d); };
     child.stdin.end = () => { calls.ended = true; };
     child.kill = () => { calls.killed = true; child.killed = true; };
-    const spawn = (source) => {
-      // The spawner is called with ONLY the secret-free source string — no argv, no env object.
-      expect(typeof source).toBe('string');
-      expect(source).not.toContain('FLEET_OWA_PROBE_DIR');
-      // emit a 401 after stdin is wired
-      setTimeout(() => { child.stdout.emit('data', JSON.stringify({ status: 401, latencyMs: 12 })); child.emit('exit', 0); }, 0);
+    const spawn = (...args) => {
+      calls.spawnArgs = args;
+      setTimeout(() => { child.stdout.emit('data', JSON.stringify({ status: 200, shape: { value: '[{…} x5]' }, latencyMs: 12 })); child.emit('exit', 0); }, 0);
       return child;
     };
-    const electron = { session: { defaultSession: { cookies: { get: async () => [{ name: 'OWAAUTH' }, { name: 'X-OWA-CANARY' }] } } } };
-    const rec = await probe._tier2({ electron, log: silentLog(), spawn });
-    expect(rec.tier).toBe(2);
-    expect(rec.passedVia).toBe('stdin');
-    // The spec sent to the child must be a single outlook-host URL, on stdin.
+    const electron = fakeElectron({ cookies: SECRET_COOKIES });
+    const auth = probe.createAuthCapture();
+    auth.observe({ request: { url: 'https://outlook.office.com/owa/service.svc?action=FindItem', headers: { Authorization: 'Bearer BEARER_SECRET' } } });
+    const logs = recordingLog();
+    const rec = await probe._tier2({ electron, log: logs, auth, spawn });
     const sent = JSON.parse(calls.stdinData);
+    // auth material is on stdin, scoped to outlook-domain cookies only
     expect(probe.hostAllowed(sent.url)).toBe(true);
+    expect(sent.headers.cookie).toContain('OWAAUTH=COOKIE_SECRET');
+    expect(sent.headers['x-owa-canary']).toBe('CANARY_SECRET');
+    expect(sent.headers.authorization).toBe('Bearer BEARER_SECRET');
+    expect(sent.headers.cookie).not.toContain('EVIL_SECRET');
+    // ...and nowhere else
+    const elsewhere = JSON.stringify([calls.spawnArgs.slice(1), rec, logs.lines]) + JSON.stringify(process.env);
+    for (const s of ['COOKIE_SECRET', 'CANARY_SECRET', 'BEARER_SECRET', 'EVIL_SECRET']) {
+      expect(elsewhere).not.toContain(s);
+      expect(String(calls.spawnArgs[0])).not.toContain(s);   // the source handed to the spawner
+    }
+    expect(calls.spawnArgs.length).toBe(1);
     expect(calls.ended).toBe(true);
-    expect(calls.killed).toBe(true);                 // killed in the finally
-    expect(rec.ok).toBe(false);                      // 401 — a plain Node process has no session
+    expect(calls.killed).toBe(true);
+    expect(rec.ok).toBe(true);
+    expect(rec.passedVia).toBe('stdin');
+    expect(rec.cookieNamesTransferred).toEqual(['OWAAUTH', 'X-OWA-CANARY']);
+    expect(rec.authMaterialNeeded.filter((n) => n === 'cookie').length).toBe(1);   // no duplicate push
+    expect(rec.obtainableWithoutPage).toBe(false);                                // bearer came from the page
     expect(rec.workerIsolationConflict).toMatch(/FORBIDDEN|isolation/i);
   });
 
-  it('the default spawner writes a secret-free source file and passes NO secret on argv/env', () => {
-    // Inspect the embedded child source: it must read its input from stdin, not argv/env/disk.
+  it('the default spawner forks with empty argv and writes only the secret-free source', () => {
+    const written = []; const forks = [];
+    const fakeCp = { fork: (file, args, opts) => { forks.push({ file, args, opts }); return fakeChild(); } };
+    const fakeFs = { writeFileSync: (f, c) => written.push({ f, c }), unlinkSync() {} };
+    probe._defaultSpawnChild(probe.TIER2_CHILD_SOURCE, { _cp: fakeCp, _fs: fakeFs, _os: os });
+    expect(written.length).toBe(1);
+    expect(written[0].c).toBe(probe.TIER2_CHILD_SOURCE);
+    expect(forks[0].args).toEqual([]);
+    expect(forks[0].opts.env).toBeUndefined();
+    expect(forks[0].opts.stdio[0]).toBe('pipe');
+  });
+
+  it('the embedded child source reads input from stdin and host-filters', () => {
     const src = probe.TIER2_CHILD_SOURCE;
     expect(src).toMatch(/process\.stdin/);
-    expect(src).not.toMatch(/process\.argv\[2\]/);
-    expect(src).not.toMatch(/process\.env\.[A-Z]/);
-    expect(src).toMatch(/outlook\.office/);          // host allow-list baked in
+    expect(src).toMatch(/host-blocked/);
+    expect(src).toMatch(/outlook\.office/);
   });
 });
 
@@ -206,69 +329,152 @@ describe('Tier 3 — reasoning only, no network', () => {
   });
 });
 
-describe('Tier 1 — main-process net.request, read-only, graceful when electron absent', () => {
+describe('Tier 1 — main-process net.request, read-only (B4)', () => {
   it('reports electron-unavailable without throwing when net/session are missing', async () => {
     const rec = await probe._tier1(null, silentLog(), 'before-window');
-    expect(rec.tier).toBe(1);
     expect(rec.ok).toBe(false);
     expect(rec.reason).toBe('electron-unavailable');
   });
+  it('issues GET-only requests on the shared session with cookie jar options', async () => {
+    const electron = fakeElectron({ responses: [{ status: 200, json: { value: [] } }] });
+    await probe._tier1(electron, silentLog(), 'before-window');
+    expect(electron._calls.length).toBe(1);
+    const o = electron._calls[0].opts;
+    expect(o.method).toBe('GET');
+    expect(o.session).toBe(electron.session.defaultSession);
+    expect(o.useSessionCookies).toBe(true);
+    expect(o.redirect).toBe('manual');
+    expect(o.url).not.toMatch(/send|reply|move|delete|update|create/i);
+  });
   it('records a 200 as cookies-sufficient and shape-only response', async () => {
-    const electron = fakeElectronNet(200, { value: [{ Id: 'AAMkSECRET', ConversationId: 'cvSECRET' }] });
+    const electron = fakeElectron({ responses: [{ status: 200, json: { value: [{ Id: 'AAMkSECRET' }] } }] });
     const rec = await probe._tier1(electron, silentLog(), 'after-window-closed');
     expect(rec.ok).toBe(true);
     expect(rec.obtainableWithoutPage).toBe(true);
     expect(JSON.stringify(rec)).not.toContain('AAMkSECRET');
   });
-  it('records a 401 as needing more than cookies', async () => {
-    const electron = fakeElectronNet(401, null);
+  it('handles a manual redirect to login: records status/toLogin, never the URL, and aborts', async () => {
+    const electron = fakeElectron({ responses: [{ redirect: 'https://login.microsoftonline.com/common/oauth2/authorize?login_hint=jane@corp.test', status: 302 }] });
     const rec = await probe._tier1(electron, silentLog(), 'before-window');
-    expect(rec.ok).toBe(false);
-    expect(rec.authMaterialNeeded).toContain('authorization(bearer)');
+    expect(rec.reason).toBe('redirect-to-login');
+    expect(rec.attempts[0]).toMatchObject({ status: 302, redirect: true, toLogin: true });
+    expect(electron._calls[0].aborted).toBe(true);
+    expect(JSON.stringify(rec)).not.toMatch(/login\.microsoftonline|jane/);
+    expect(rec.authMaterialNeeded).toContain('interactive-session');
+  });
+  it('inventories cookie NAMES for every Outlook host and sends a cookie canary as a header, without storing its value', async () => {
+    const electron = fakeElectron({ cookies: SECRET_COOKIES, responses: [{ status: 401 }] });
+    const rec = await probe._tier1(electron, silentLog(), 'before-window');
+    expect(electron._cookieQueries.map((q) => q.domain).sort()).toEqual([...probe.OUTLOOK_HOSTS].sort());
+    expect(rec.canaryAsCookie).toBe(true);
+    expect(electron._calls[0].headers['x-owa-canary']).toBe('CANARY_SECRET');
+    expect(rec.attempts[0].headerNamesSent).toContain('x-owa-canary');
+    expect(rec.reason).toBe('unauthorized-needs-more-than-cookies');
+    expect(rec.tokenLifetime.reason).toBe('no-bearer-observed');
+    const blob = JSON.stringify(rec);
+    for (const s of ['COOKIE_SECRET', 'CANARY_SECRET', 'EVIL_SECRET']) expect(blob).not.toContain(s);
+  });
+  it('reuses page-captured material when cookies fail, records exp shape and refresh re-run, never the token', async () => {
+    const tok = fakeJwt(Math.floor(Date.now() / 1000) + 3600);
+    const auth = probe.createAuthCapture();
+    auth.observe({ request: { url: 'https://outlook.cloud.microsoft/owa/service.svc?action=FindItem', headers: { authorization: 'Bearer ' + tok } } });
+    const electron = fakeElectron({ responses: [{ status: 401 }, { status: 200, json: { value: [] } }, { status: 200, json: { value: [] } }] });
+    const rec = await probe._tier1(electron, silentLog(), 'after-window-closed', { auth, reuseDelayMs: 1, remaining: () => 200_000 });
+    expect(rec.ok).toBe(true);
+    expect(rec.reason).toBe('needs-page-captured-material-reusable');
+    expect(rec.obtainableWithoutPage).toBe(false);
+    expect(rec.host).toBe('outlook.cloud.microsoft');
+    expect(rec.tokenLifetime.hasExp).toBe(true);
+    expect(rec.reuseStillValidAfterDelay).toBe(true);
+    expect(rec.attempts.map((a) => a.mode)).toEqual(['cookies-only', 'captured-reuse', 'captured-reuse-after-0s']);
+    expect(rec.authMaterialNeeded.filter((n) => n === 'cookie').length).toBe(1);
+    expect(JSON.stringify(rec)).not.toContain(tok);
+    for (const c of electron._calls) expect(c.opts.method).toBe('GET');
   });
 });
 
-describe('overall timeout closes the window and kills the child', () => {
-  it('run() closes the openSession window and kills any spawned child when the budget elapses', async () => {
+describe('run() — normal path closes the window, kills the child, writes redacted files', () => {
+  it('writes the four files with no address/secret, closes the window and kills the child', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-probe-'));
-    let windowClosed = false; let childKilled = false;
-    const win = { webContents: { debugger: { isAttached: () => true, sendCommand() {}, on() {}, attach() {} } }, isDestroyed: () => false, close: () => { windowClosed = true; } };
-    // openSession that never resolves its driver quickly — simulate the window being closed by the harness.
+    const win = fakeWin();
+    let openOpts = null;
     const openSession = (opts, driver) => new Promise((resolve) => {
-      const ctx = {
-        win,
-        execJson: async () => ({ ok: true, count: 5, wouldMarkRead: false, status: 200 }),
-        exec: async () => 'yes', sleep: async () => {}, alive: () => true, stopped: () => false,
-        selectFolder: async () => 'selected', waitFor: async () => true, state: {},
-      };
+      openOpts = opts;
+      const ctx = fakeCtx(win, async () => ({ ok: true, count: 5, wouldMarkRead: false, status: 200 }));
       Promise.resolve(driver(ctx)).then(() => { win.close(); resolve({ settled: { authBlocked: false } }); });
     });
     const child = fakeChild();
-    child.kill = () => { childKilled = true; child.killed = true; };
+    let stdin = '';
+    child.stdin.write = (d) => { stdin += String(d); };
     const spawn = () => { setTimeout(() => { child.stdout.emit('data', JSON.stringify({ status: 401 })); child.emit('exit', 0); }, 0); return child; };
-    const electron = fakeElectronNet(401, null);
-    const stubs = {
-      _triage: { loadResults: () => ({ emails: [], ranAt: null, authBlocked: false }), getConfig: () => ({ folders: ['Inbox'], maxEmails: 25, enabled: true }) },
-      _intel: { getStatus: () => ({ owaAuth: { state: 'ok', blockedCount: 0 } }) },
-      _canonAt: { parseCanonicalAt: () => ({ ms: 1 }) },
-      _store: { load: () => ({ units: {} }) },
-      _lane: { probeLane: async () => ({ ok: true }), state: () => ({ state: 'ok', checkedAt: null }) },
-      _status: { gatewayFlags: () => ({ priorities: true, abortOnTimeout: true, dedupe: true, routerDecides: true }) },
-      _domProbe: { domProbe: async () => ({ ok: true, authBlocked: false, rows: [], messages: [], tz: { compared: 0, match: null } }) },
-    };
-    const res = await probe.run(Object.assign({ dir, log: silentLog(), _electron: electron, _openSession: openSession, _spawnChild: spawn }, stubs));
+    const electron = fakeElectron({ cookies: SECRET_COOKIES, responses: [{ status: 401 }, { status: 401 }] });
+    const logs = recordingLog();
+    const res = await probe.run(Object.assign({ dir, log: logs, _electron: electron, _openSession: openSession, _spawnChild: spawn }, STUBS));
     expect(res.ok).toBe(true);
-    expect(windowClosed).toBe(true);
-    expect(childKilled).toBe(true);
-    // the four output files + the done summary
+    expect(win.closed).toBe(true);
+    expect(child.killed).toBe(true);
+    expect(openOpts.signal).toBeDefined();
+    expect(openOpts.warmupTimeoutMs + openOpts.timeoutMs).toBeLessThanOrEqual(5 * 60_000 - 75_000);
+    expect(stdin).toContain('COOKIE_SECRET');                       // secret only ever went to stdin
     const files = fs.readdirSync(dir);
-    expect(files.some((f) => /^owa-probe-intel-/.test(f))).toBe(true);
-    expect(files.some((f) => /^owa-probe-api-/.test(f))).toBe(true);
-    expect(files.some((f) => /^owa-probe-network-/.test(f))).toBe(true);
-    expect(files.some((f) => /^owa-probe-windowless-/.test(f))).toBe(true);
-    // output must not contain any address or long id
-    for (const f of files) expect(fs.readFileSync(path.join(dir, f), 'utf8')).not.toMatch(/@[\w.-]+\.[a-z]{2,}/i);
+    for (const p of ['intel', 'api', 'network', 'windowless']) expect(files.some((f) => f.startsWith('owa-probe-' + p + '-'))).toBe(true);
+    const all = files.map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n') + logs.lines.join('\n');
+    expect(all).not.toMatch(/@[\w.-]+\.[a-z]{2,}/i);
+    for (const s of ['COOKIE_SECRET', 'CANARY_SECRET', 'EVIL_SECRET']) expect(all).not.toContain(s);
+    const wl = JSON.parse(fs.readFileSync(path.join(dir, files.find((f) => f.startsWith('owa-probe-windowless-'))), 'utf8'));
+    expect(wl.tiers.map((t) => t.whenRun)).toEqual(['before-window', 'after-window-closed', 'after-window-closed', 'reasoning-only']);
+    expect(logs.lines.some((l) => l.startsWith('[owa-probe] done'))).toBe(true);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('run() — overall timeout aborts, closes the window and kills the child (B2/B6)', () => {
+  async function runHanging(openSession, extra) {
+    vi.useFakeTimers();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-probe-to-'));
+    const child = fakeChild();                                     // never exits on its own
+    const spawn = () => child;
+    const electron = fakeElectron({ responses: [{ status: 401 }, { status: 401 }] });
+    const logs = recordingLog();
+    const t0 = Date.now();
+    try {
+      let doneAt = null;
+      const p = probe.run(Object.assign({ dir, log: logs, _electron: electron, _openSession: openSession, _spawnChild: spawn }, STUBS, extra || {}));
+      p.then(() => { doneAt = Date.now(); });
+      for (let i = 0; i < 80 && doneAt == null; i++) await vi.advanceTimersByTimeAsync(5_000);
+      const res = await p;
+      return { res, child, logs, elapsed: doneAt - t0, files: fs.readdirSync(dir) };
+    } finally { vi.useRealTimers(); fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+
+  it('aborts openSession via the signal when the window phase overruns, then Tier 1(b) runs with the window closed', async () => {
+    const win = fakeWin();
+    let sawSignal = null;
+    const openSession = (opts, driver) => new Promise((resolve) => {
+      sawSignal = opts.signal;
+      opts.signal.addEventListener('abort', () => { win.close(); resolve({ settled: { aborted: true } }); }, { once: true });
+      driver(fakeCtx(win, () => new Promise(() => {})));          // every page call hangs forever
+    });
+    const { res, child, logs, elapsed, files } = await runHanging(openSession, { _reserveMs: 10_000 });
+    expect(sawSignal.aborted).toBe(true);
+    expect(win.closed).toBe(true);
+    expect(child.killed).toBe(true);
+    expect(res.summary.windowTimedOut).toBe(true);
+    expect(res.summary.windowClosed).toBe(true);
+    expect(elapsed).toBeLessThanOrEqual(5 * 60_000);
+    expect(files.some((f) => f.startsWith('owa-probe-windowless-'))).toBe(true);
+    expect(logs.lines.some((l) => l.startsWith('[owa-probe] done'))).toBe(true);
+  });
+
+  it('closes the window itself when openSession ignores the abort, and still logs done', async () => {
+    const win = fakeWin();
+    const openSession = (_opts, driver) => new Promise(() => { driver(fakeCtx(win, () => new Promise(() => {}))); });
+    const { res, child, logs, elapsed } = await runHanging(openSession);
+    expect(win.closed).toBe(true);                                 // closed by the harness, not by openSession
+    expect(child.killed).toBe(true);
+    expect(res.summary.windowTimedOut).toBe(true);
+    expect(elapsed).toBeLessThanOrEqual(5 * 60_000);
+    expect(logs.lines.some((l) => l.startsWith('[owa-probe] done'))).toBe(true);
   });
 });
 
@@ -286,7 +492,30 @@ describe('app.js wiring', () => {
 });
 
 // ───────────────────────────── fakes ─────────────────────────────
+const SECRET_COOKIES = [
+  { name: 'OWAAUTH', value: 'COOKIE_SECRET', domain: '.outlook.office.com' },
+  { name: 'X-OWA-CANARY', value: 'CANARY_SECRET', domain: 'outlook.office.com' },
+  { name: 'tracker', value: 'EVIL_SECRET', domain: '.evil.example' },
+];
+const STUBS = {
+  _triage: { loadResults: () => ({ emails: [], ranAt: null, authBlocked: false }), getConfig: () => ({ folders: ['Inbox'], maxEmails: 25, enabled: true }) },
+  _intel: { getStatus: () => ({ owaAuth: { state: 'ok', blockedCount: 0 } }) },
+  _canonAt: { parseCanonicalAt: () => ({ ms: 1 }) },
+  _store: { load: () => ({ units: {} }) },
+  _lane: { probeLane: async () => ({ ok: true }), state: () => ({ state: 'ok', checkedAt: null }) },
+  _status: { gatewayFlags: () => ({ priorities: true, abortOnTimeout: true, dedupe: true, routerDecides: true }) },
+  _domProbe: { domProbe: async () => ({ ok: true, authBlocked: false, rows: [], messages: [], tz: { compared: 0, match: null } }) },
+};
 function silentLog() { return { info() {}, warn() {}, error() {}, debug() {} }; }
+function recordingLog() {
+  const lines = [];
+  const push = (m) => lines.push(String(m));
+  return { lines, info: push, warn: push, error: push, debug: push };
+}
+function fakeJwt(exp) {
+  const b = (o) => Buffer.from(JSON.stringify(o)).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return b({ alg: 'none' }) + '.' + b({ exp, aud: 'https://outlook.office.com' }) + '.sig';
+}
 function fakeChild() {
   const { EventEmitter } = require('events');
   const child = new EventEmitter();
@@ -297,32 +526,62 @@ function fakeChild() {
   child.stderr = new EventEmitter();
   return child;
 }
-function fakeElectronNet(status, json) {
-  const { EventEmitter } = require('events');
+function fakeWin() {
+  const win = {
+    closed: false,
+    webContents: { debugger: { isAttached: () => true, sendCommand() {}, on() {}, attach() {} } },
+    isDestroyed: () => win.closed,
+    close: () => { win.closed = true; },
+  };
+  return win;
+}
+function fakeCtx(win, execJson) {
   return {
-    session: { defaultSession: { cookies: { get: async () => [] } } },
+    win, execJson, exec: async () => 'yes', sleep: async () => {}, alive: () => !win.closed, stopped: () => win.closed,
+    selectFolder: async () => 'selected', waitFor: async () => true, state: {},
+  };
+}
+/**
+ * fakeElectron({ cookies, responses }) — session.cookies.get honours {domain}/{url} filters; net.request
+ * records options + headers and replays `responses` in order ({status,json} or {redirect,status}).
+ */
+function fakeElectron(o) {
+  const { EventEmitter } = require('events');
+  const cookies = (o && o.cookies) || [];
+  const responses = ((o && o.responses) || []).slice();
+  const calls = [];
+  const cookieQueries = [];
+  const domainMatch = (cd, host) => { const d = String(cd).replace(/^\./, ''); return host === d || host.endsWith('.' + d); };
+  const defaultSession = {
+    cookies: {
+      get: async (filter) => {
+        cookieQueries.push(filter || {});
+        if (filter && filter.url) { const h = new URL(filter.url).hostname; return cookies.filter((c) => domainMatch(c.domain, h) || /evil/.test(c.domain)); }
+        if (filter && filter.domain) return cookies.filter((c) => domainMatch(c.domain, filter.domain) || domainMatch(filter.domain, String(c.domain).replace(/^\./, '')));
+        return cookies.slice();
+      },
+    },
+  };
+  const electron = {
+    _calls: calls,
+    _cookieQueries: cookieQueries,
+    session: { defaultSession },
     net: {
-      request() {
+      request(opts) {
         const req = new EventEmitter();
-        req.setHeader = () => {};
-        req.abort = () => {};
+        const call = { opts, headers: {}, aborted: false };
+        calls.push(call);
+        req.setHeader = (k, v) => { call.headers[String(k).toLowerCase()] = v; };
+        req.abort = () => { call.aborted = true; req.emit('abort'); };
         req.end = () => {
+          const r = responses.shift() || { status: 401 };
           setTimeout(() => {
+            if (r.redirect) { req.emit('redirect', r.status || 302, 'GET', r.redirect, {}); return; }
             const res = new EventEmitter();
+            res.statusCode = r.status;
+            res.headers = r.headers || {};
             req.emit('response', res);
-            if (json) res.emit('data', Buffer.from(JSON.stringify(json)));
-            res.emit('end');
-          }, 0);
-        };
-        req.statusCode = status;
-        // attach statusCode onto the response emitted above
-        const origEnd = req.end;
-        req.end = () => {
-          setTimeout(() => {
-            const res = new EventEmitter();
-            res.statusCode = status;
-            req.emit('response', res);
-            if (json) res.emit('data', Buffer.from(JSON.stringify(json)));
+            if (r.json) res.emit('data', Buffer.from(JSON.stringify(r.json)));
             res.emit('end');
           }, 0);
         };
@@ -330,4 +589,5 @@ function fakeElectronNet(status, json) {
       },
     },
   };
+  return electron;
 }
