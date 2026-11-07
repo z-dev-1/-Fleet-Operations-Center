@@ -513,6 +513,25 @@ async function run(deps) {
     summary.windowless = tiers.map((t) => ({ tier: t.tier, ok: t.ok, when: t.whenRun, reason: t.reason }));
     _writeJson(dir, 'owa-probe-windowless-' + ts + '.json', { at: summary.at, tiers });
 
+    // ── Optional LIVE self-addressed SEND test (Tier 1), gated on FLEET_OWA_PROBE_SEND=1 as WELL as
+    //    FLEET_OWA_PROBE_DIR. The window is already closed; this reuses the bearer + x-anchormailbox
+    //    captured from it (in memory) plus the session cookies, so every send is windowless-per-call.
+    //    Never any recipient but the user's own address. ──
+    const sendMod = d._sendTest || _trySendTest();
+    if (sendMod && sendMod.engaged(d.env || process.env) && !summary.timedOut) {
+      try {
+        const selfAddress = d._selfAddress || _resolveSelfAddress(d);
+        const host = (auth && typeof auth.host === 'function' && auth.host() && _sendHostAllowed(sendMod, auth.host())) ? auth.host() : undefined;
+        const sendOut = await sendMod.runSendTest({
+          electron, dir, log, selfAddress, host,
+          headers: () => (auth && typeof auth.headers === 'function' ? auth.headers() : {}),
+          timeoutMs: Math.min(30_000, remaining()),
+          verifyWindowMs: Math.min(60_000, Math.max(5_000, remaining())),
+        });
+        summary.send = { ok: !!(sendOut && sendOut.ok), sent: sendOut && sendOut.sent, skipped: sendOut && sendOut.skipped };
+      } catch (e) { log.warn('[owa-probe] send test threw: ' + _errName(e)); summary.send = { ok: false, error: _errName(e) }; }
+    }
+
     abortAll();
     log.info('[owa-probe] done ' + JSON.stringify(summary));
     return { ok: true, summary };
@@ -1031,6 +1050,17 @@ function _errName(e) {
   return (name + ':' + code).replace(/[^A-Za-z0-9_:.-]/g, '').slice(0, 60);
 }
 function _tryElectron() { try { return require('electron'); } catch (_) { return null; } }
+function _trySendTest() { try { return require('./owa-send-test'); } catch (_) { return null; } }
+function _sendHostAllowed(sendMod, host) { try { return typeof sendMod.hostAllowed === 'function' ? sendMod.hostAllowed(host) : false; } catch (_) { return false; } }
+/** Resolve the user's own address (emailIntelConfig me.addresses[0]); masked before any logging. */
+function _resolveSelfAddress(d) {
+  try {
+    const stores = (d && d._stores) || require('../email-intel/stores');
+    const cfg = stores.load('config');
+    const addrs = cfg && cfg.me && Array.isArray(cfg.me.addresses) ? cfg.me.addresses : [];
+    return addrs[0] || '';
+  } catch (_) { return ''; }
+}
 function _tryOpenSession() { try { return require('../email-intel/capture/owa_capture').openSession; } catch (_) { return null; } }
 function _tryDomProbe() { try { return require('../email-intel/capture/dom-probe'); } catch (_) { return null; } }
 function _safeRequire(spec) { try { return require(spec); } catch (_) { return null; } }

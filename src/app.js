@@ -835,7 +835,10 @@ function _startAutoSync() {
   // FLEET_OWA_PROBE_DIR=<dir>. Completely inert unless the env var is set. A few minutes after
   // startup it opens its OWN hidden window on the same session owa_reader uses, runs read-only
   // probes + API-feasibility replay + windowless tiers, writes owa-probe-*.json to the dir and
-  // logs `[owa-probe] done`. Never sends/moves/flags/marks-read/deletes; never touches the scheduler.
+  // logs `[owa-probe] done`. Read-only by default; never touches the scheduler. The LIVE self-
+  // addressed SEND test (3 self-addressed messages: plain text, HTML, HTML+attachments, writing
+  // owa-probe-send-*.json and logging `[owa-probe] send done`) runs ONLY if FLEET_OWA_PROBE_SEND=1
+  // is ALSO set, and only ever sends to the user's own emailIntelConfig address.
   if (process.env.FLEET_OWA_PROBE_DIR) {
     try { require('./dev/dev-owa-probe').start({ log }); }
     catch (e) { log.warn('[owa-probe] could not start: ' + e.message); }
