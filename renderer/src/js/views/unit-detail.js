@@ -3413,10 +3413,13 @@ function _wireRepairIntel(unit) {
       if (reportEl.isConnected) _mark3cSlots(render3cInner(null, 'unavailable'), true);
     });
   }
+  // Always ask when on: the main side's content-hash cache makes unchanged WOs
+  // free ('cached'), while WOs whose evidence/dealer notes changed since their
+  // stored 3C (e.g. after Build / Fetch New hydrated detail) are recomputed.
   function _maybeFill3c(rep) {
     if (!woSumOn) return;
-    var tl = ((rep && rep.timeline) || []).slice(0, 40);
-    if (tl.some(function(e){ return !e.threeC; })) fill3c(false);
+    var tl = (rep && rep.timeline) || [];
+    if (tl.length) fill3c(false);
   }
 
   function load(initial) {
