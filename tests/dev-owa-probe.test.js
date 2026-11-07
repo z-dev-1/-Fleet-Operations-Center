@@ -193,6 +193,21 @@ describe('replay layer issues only read-only GETs — never a send/move/flag/del
       expect(s).toContain('wouldMarkRead:false');
     });
   }
+  it('forwards only allow-listed captured auth headers and reports header NAMES, never values', () => {
+    const s = probe.buildReplayScript({ action: 'list', authHeaders: { Authorization: 'Bearer tok-123', 'x-anchormailbox': 'anchor-1', cookie: 'SECRET=1', 'x-evil': 'no' } });
+    expect(s).toContain('Bearer tok-123');
+    expect(s).toContain('anchor-1');
+    expect(s).not.toContain('SECRET=1');
+    expect(s).not.toContain('x-evil');
+    expect(s).toContain('headers: H');
+    expect(s).toContain('"headerNames":["accept","authorization","x-anchormailbox"]');
+    expect(s).toContain('o.headerNamesSent = C.headerNames');
+    expect(s).not.toMatch(MUTATION);
+  });
+  it('without captured auth the replay sends accept only', () => {
+    const s = probe.buildReplayScript({ action: 'get' });
+    expect(s).toContain('"headerNames":["accept"]');
+  });
   it('the attachment-chip script is a pure DOM read with no fetch and no generic button/anchor fallback', () => {
     const s = probe.buildAttachChipScript();
     expect(s).not.toMatch(MUTATION);
@@ -526,6 +541,20 @@ function fakeChild() {
   child.stderr = new EventEmitter();
   return child;
 }
+describe('_waitClosed — BrowserWindow.close() is async', () => {
+  it('waits for a window that is destroyed shortly after close()', async () => {
+    const w = { d: false, isDestroyed() { return this.d; } };
+    setTimeout(() => { w.d = true; }, 150);
+    expect(await probe._waitClosed(w, 2_000)).toBe(true);
+  });
+  it('returns false when the window never closes within the bound', async () => {
+    const w = { isDestroyed: () => false };
+    expect(await probe._waitClosed(w, 200)).toBe(false);
+  });
+  it('treats no window as closed', async () => {
+    expect(await probe._waitClosed(null, 0)).toBe(true);
+  });
+});
 function fakeWin() {
   const win = {
     closed: false,

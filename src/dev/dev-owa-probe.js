@@ -41,6 +41,8 @@ const OVERALL_TIMEOUT_MS = 5 * 60_000;
 const RESERVE_MS = 75_000;
 const WARMUP_MAX_MS = 60_000;
 const SETTLE_WAIT_MS = 10_000;          // after abort, how long we wait for openSession to settle/close
+const CLOSE_WAIT_MS = 5_000;            // how long we wait for an async BrowserWindow.close() to finish
+const CLOSE_POLL_MS = 100;
 const NET_TIMEOUT_MS = 20_000;
 const CHILD_TIMEOUT_MS = 20_000;
 const REUSE_DELAY_MS = 20_000;          // refresh-behaviour re-run delay (only if the budget allows)
@@ -265,8 +267,25 @@ function createAuthCapture() {
  * SPA exposes on the same origin (outlook.office.com/api/v2.0/me/messages) because it is a pure GET
  * that does not flip IsRead, and reports presence booleans only.
  */
+const REPLAY_AUTH_HEADER_NAMES = ['authorization', 'x-anchormailbox', 'x-owa-canary'];
+function _replayAuthHeaders(h) {
+  const out = {};
+  const src = h && typeof h === 'object' ? h : {};
+  for (const k of Object.keys(src)) {
+    const name = String(k).toLowerCase();
+    if (REPLAY_AUTH_HEADER_NAMES.includes(name) && typeof src[k] === 'string' && src[k]) out[name] = src[k];
+  }
+  return out;
+}
+
 function buildReplayScript(o) {
+  // `authHeaders` (optional): the SPA's own auth headers, captured in memory via CDP from this same
+  // page. The v2.0 REST surface rejects cookie-only calls (401), so the replay must send them too.
+  // Allow-listed names only; the script string lives in memory and is never logged or written.
+  const authHeaders = _replayAuthHeaders(o && o.authHeaders);
+  const hdrs = Object.assign({ accept: 'application/json' }, authHeaders);
   const cfg = JSON.stringify({
+    headerNames: Object.keys(hdrs).sort(),
     action: String((o && o.action) || 'list'),
     max: Math.max(1, Math.min(5, Math.trunc((o && o.max) || 5))),
     bytesCap: Math.max(1024, Math.trunc((o && o.bytesCap) || REPLAY_MAX_BYTES)),
@@ -274,14 +293,14 @@ function buildReplayScript(o) {
     itemHash: String((o && o.itemHash) || ''),
   });
   return '(async function(){ /*owa-probe:replay*/\n' +
-    '  var C = ' + cfg + '; var t0 = (performance && performance.now) ? performance.now() : Date.now();\n' +
-    '  function out(o){ o.latencyMs = Math.round(((performance&&performance.now)?performance.now():Date.now()) - t0); return JSON.stringify(o); }\n' +
+    '  var C = ' + cfg + '; var H = ' + JSON.stringify(hdrs) + '; var t0 = (performance && performance.now) ? performance.now() : Date.now();\n' +
+    '  function out(o){ o.headerNamesSent = C.headerNames; o.latencyMs = Math.round(((performance&&performance.now)?performance.now():Date.now()) - t0); return JSON.stringify(o); }\n' +
     '  var base = location.origin + "/api/v2.0/me";\n' +
     '  function present(v){ return v !== undefined && v !== null && v !== ""; }\n' +
     '  function len(v){ return typeof v === "string" ? v.length : (Array.isArray(v) ? v.length : 0); }\n' +
     '  async function get(url){\n' +
     '    var ac = new AbortController(); var to = setTimeout(function(){ ac.abort(); }, 30000);\n' +
-    '    try { var r = await fetch(url, { method: "GET", credentials: "include", redirect: "manual", cache: "no-store", headers: { accept: "application/json" }, signal: ac.signal });\n' +
+    '    try { var r = await fetch(url, { method: "GET", credentials: "include", redirect: "manual", cache: "no-store", headers: H, signal: ac.signal });\n' +
     '      if (r.type === "opaqueredirect" || (r.status >= 300 && r.status < 400)) return { status: r.status || 302, redirect: true };\n' +
     '      var text = ""; var reader = r.body && r.body.getReader ? r.body.getReader() : null; var n = 0;\n' +
     '      if (reader){ while(true){ var s = await reader.read(); if (s.done) break; n += s.value.length; if (n > C.bytesCap){ ac.abort(); break; } text += new TextDecoder().decode(s.value); } }\n' +
@@ -451,11 +470,12 @@ async function run(deps) {
       // Wait (bounded) for openSession to settle, which closes the window on abort.
       const settled = await Promise.race([windowRun, _sleep(Math.min(SETTLE_WAIT_MS, remaining()))]);
       closeWin();
-      windowClosedConfirmed = !win.ref || _isDestroyed(win.ref);
+      windowClosedConfirmed = await _waitClosed(win.ref, Math.min(CLOSE_WAIT_MS, remaining()));
       inWindow = settled && settled.partA ? settled : { partA: { authBlocked: false, probes: [] }, api: { ok: false, reason: 'window-timeout' } };
     } else {
       closeWin();
-      windowClosedConfirmed = !win.ref || _isDestroyed(win.ref);
+      // BrowserWindow.close() is async: isDestroyed() flips only after 'closed', so poll (bounded).
+      windowClosedConfirmed = await _waitClosed(win.ref, Math.min(CLOSE_WAIT_MS, remaining()));
     }
     summary.windowClosed = windowClosedConfirmed;
     const partA = (inWindow && inWindow.partA) || { authBlocked: true, probes: [] };
@@ -517,6 +537,13 @@ function _tierTimeout(tier, whenRun) {
 }
 function _sleep(ms) { return new Promise((r) => { const t = setTimeout(r, Math.max(0, ms)); if (t && t.unref) t.unref(); }); }
 function _isDestroyed(w) { try { return !!w.isDestroyed(); } catch (_) { return true; } }
+/** Poll until the window reports destroyed (or none was set), up to ms. Returns the final state. */
+async function _waitClosed(w, ms) {
+  if (!w) return true;
+  const until = Date.now() + Math.max(0, ms || 0);
+  while (!_isDestroyed(w) && Date.now() < until) await _sleep(CLOSE_POLL_MS);
+  return _isDestroyed(w);
+}
 
 // Part A + Part B inside the hidden window. Uses openSession, so the window is the harness's own,
 // hidden, on defaultSession, and closed when the driver returns.
@@ -564,10 +591,13 @@ async function _runInWindow(o) {
     if (stop(ctx)) return;
 
     // ── Part B: replay the SPA's own read calls from the OWA origin, read-only. ──
-    const list = await _timed('B-list', () => ctx.execJson(buildReplayScript({ action: 'list', max: 5 })));
-    const get = await _timed('B-get', () => ctx.execJson(buildReplayScript({ action: 'get' })));
-    const conv = await _timed('B-conversation', () => ctx.execJson(buildReplayScript({ action: 'conversation' })));
-    const stab = await _timed('B-stability', () => ctx.execJson(buildReplayScript({ action: 'stability' })));
+    // The SPA authenticates REST calls with its own bearer + x-anchormailbox (cookies alone get 401),
+    // so the replay forwards what CDP captured from this page, in memory only.
+    const authHeaders = () => (auth && typeof auth.headers === 'function' ? auth.headers() : {});
+    const list = await _timed('B-list', () => ctx.execJson(buildReplayScript({ action: 'list', max: 5, authHeaders: authHeaders() })));
+    const get = await _timed('B-get', () => ctx.execJson(buildReplayScript({ action: 'get', authHeaders: authHeaders() })));
+    const conv = await _timed('B-conversation', () => ctx.execJson(buildReplayScript({ action: 'conversation', authHeaders: authHeaders() })));
+    const stab = await _timed('B-stability', () => ctx.execJson(buildReplayScript({ action: 'stability', authHeaders: authHeaders() })));
     api.ok = !!(list.result && list.result.ok);
     api.steps = { list: list.result, get: get.result, conversation: conv.result, stability: stab.result };
     api.anyWouldMarkRead = [list, get, conv, stab].some((s) => s.result && s.result.wouldMarkRead === true);
@@ -1031,4 +1061,5 @@ module.exports = {
   _tier3,
   _defaultSpawnChild,
   _staticSendCallFinding,
+  _waitClosed,
 };
