@@ -146,6 +146,44 @@ describe('perf flags', () => {
   it('resolveCommsFlags output is unchanged by the speedup block', () => {
     expect(resolveCommsFlags(sp({ dmPeerCache: true, laneConcurrency: 3 }), {})).toEqual({ mainProcessPolling: 'off', channelWatchClaims: false });
   });
+  describe('ai.aki flags', () => {
+    const { resolveAiAkiFlags, loadAiAki, AKI_DEFAULTS } = require('../src/config/perf-flags');
+    const ak = (o) => ({ ai: { aki: o } });
+    it('defaults: enabled ON, allowUntrusted off, empty profile/model, concurrency 2, timeout 120 s', () => {
+      expect(resolveAiAkiFlags({}, {})).toEqual({ enabled: true, allowUntrusted: false, profile: '', model: '', concurrency: 2, timeoutMs: 120000 });
+      expect(resolveAiAkiFlags({}, {})).toEqual({ ...AKI_DEFAULTS });
+      expect(resolveAiAkiFlags(null, null)).toEqual({ ...AKI_DEFAULTS });
+    });
+    it('enabled: only === false disables; env \'0\' forces off, \'1\' forces on, junk ignored', () => {
+      expect(resolveAiAkiFlags(ak({ enabled: false }), {}).enabled).toBe(false);
+      for (const v of [true, 'false', 0, null, undefined]) expect(resolveAiAkiFlags(ak({ enabled: v }), {}).enabled).toBe(true);
+      expect(resolveAiAkiFlags({}, { FLEET_AI_AKI: '0' }).enabled).toBe(false);
+      expect(resolveAiAkiFlags(ak({ enabled: false }), { FLEET_AI_AKI: '1' }).enabled).toBe(true);
+      expect(resolveAiAkiFlags(ak({ enabled: false }), { FLEET_AI_AKI: 'yes' }).enabled).toBe(false);
+    });
+    it('allowUntrusted only on === true', () => {
+      expect(resolveAiAkiFlags(ak({ allowUntrusted: true }), {}).allowUntrusted).toBe(true);
+      for (const v of ['true', 1, 'yes', {}, null]) expect(resolveAiAkiFlags(ak({ allowUntrusted: v }), {}).allowUntrusted).toBe(false);
+    });
+    it('concurrency 1..4 and timeoutMs 10000..600000 integers, else defaults', () => {
+      expect(resolveAiAkiFlags(ak({ concurrency: 1, timeoutMs: 10000 }), {})).toMatchObject({ concurrency: 1, timeoutMs: 10000 });
+      expect(resolveAiAkiFlags(ak({ concurrency: 4, timeoutMs: 600000 }), {})).toMatchObject({ concurrency: 4, timeoutMs: 600000 });
+      for (const bad of [0, 5, 2.5, '3', -1, null]) expect(resolveAiAkiFlags(ak({ concurrency: bad }), {}).concurrency).toBe(2);
+      for (const bad of [9999, 600001, 30000.5, '60000', null]) expect(resolveAiAkiFlags(ak({ timeoutMs: bad }), {}).timeoutMs).toBe(120000);
+    });
+    it('profile/model validated, invalid -> \'\'', () => {
+      expect(resolveAiAkiFlags(ak({ profile: 'fleet-specialist', model: 'claude/opus-4.1:v2' }), {}))
+        .toMatchObject({ profile: 'fleet-specialist', model: 'claude/opus-4.1:v2' });
+      for (const bad of ['-x', 'a b', 'a'.repeat(101), '', 'x;rm', 5, null]) {
+        expect(resolveAiAkiFlags(ak({ profile: bad, model: bad }), {})).toMatchObject({ profile: '', model: '' });
+      }
+      expect(resolveAiAkiFlags(ak({ profile: 'a'.repeat(100) }), {}).profile).toBe('a'.repeat(100));
+    });
+    it('loadAiAki uses the injected loader and survives a throwing one', () => {
+      expect(loadAiAki({ load: () => ak({ concurrency: 3 }), env: {} }).concurrency).toBe(3);
+      expect(loadAiAki({ load: () => { throw new Error('boom'); }, env: {} })).toEqual({ ...AKI_DEFAULTS });
+    });
+  });
   it('telemetryRollup is a registered store key (save does not throw, round-trips)', () => {
     const doc = { version: 1, rollups: [{ at: 1 }] };
     expect(() => store.save('telemetryRollup', doc)).not.toThrow();

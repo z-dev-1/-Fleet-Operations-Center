@@ -67,6 +67,15 @@
  *
  *   settings.ai.dbrLookup / FLEET_AI_DBR_LOOKUP '0' | '1'
  *
+ * Aki AI lane (enabled default ON; only used by the Aki preference modes; see
+ * resolveAiAkiFlags below):
+ *
+ *   settings.ai.aki.enabled        (!== false, default ON) / FLEET_AI_AKI '0' | '1'
+ *   settings.ai.aki.allowUntrusted (=== true, default OFF) emails/attachments/links may go to Aki
+ *   settings.ai.aki.profile / model  validated name strings, else '' (Aki default)
+ *   settings.ai.aki.concurrency    integer 1..4 (default 2)
+ *   settings.ai.aki.timeoutMs      integer 10000..600000 (default 120000)
+ *
  * Long Dwell "Preview, then write" SharePoint sheet (default OFF; see
  * resolveLongDwellSpFlags below; read on every IPC call, not memoized):
  *
@@ -537,6 +546,52 @@ function loadDbrLookup(deps = {}) {
   }
 }
 
+// ── Aki AI lane (enabled default ON) ─────────────────────────────────────────
+//   settings.ai.aki.enabled         (!== false)            / FLEET_AI_AKI '0'|'1' (env wins)
+//   settings.ai.aki.allowUntrusted  (=== true, default OFF)
+//   settings.ai.aki.profile / model string matching AKI_NAME_RE, else ''
+//   settings.ai.aki.concurrency     integer 1..4 (default 2)
+//   settings.ai.aki.timeoutMs       integer 10000..600000 (default 120000)
+// The lane is only used when an Aki preference mode is selected, so enabled
+// default ON changes nothing for the other modes. Read by relay.js through a
+// cache. No new store key: 'settings' is registered.
+const AKI_DEFAULTS = Object.freeze({
+  enabled: true, allowUntrusted: false, profile: '', model: '', concurrency: 2, timeoutMs: 120000,
+});
+const AKI_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,99}$/;
+
+function _akiName(v) { return typeof v === 'string' && AKI_NAME_RE.test(v) ? v : ''; }
+function _intIn(v, lo, hi, dflt) { return (Number.isInteger(v) && v >= lo && v <= hi) ? v : dflt; }
+
+function resolveAiAkiFlags(settings, env) {
+  const a = _obj(_obj(_obj(settings).ai).aki);
+  const flags = {
+    enabled: a.enabled !== false,
+    allowUntrusted: a.allowUntrusted === true,
+    profile: _akiName(a.profile),
+    model: _akiName(a.model),
+    concurrency: _intIn(a.concurrency, 1, 4, AKI_DEFAULTS.concurrency),
+    timeoutMs: _intIn(a.timeoutMs, 10000, 600000, AKI_DEFAULTS.timeoutMs),
+  };
+  const e = _envBool(env, 'FLEET_AI_AKI');
+  if (e !== null) flags.enabled = e;
+  return flags;
+}
+
+function loadAiAki(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveAiAkiFlags(settings, env);
+  } catch (_) {
+    return resolveAiAkiFlags({}, {});
+  }
+}
+
 // ── Repair Intel history extras ──────────────────────────────────────────────
 //   settings.repairIntel.woSummaries    (=== true, default OFF)  / FLEET_REPAIR_INTEL_WO_SUMMARIES '0'|'1'
 //   settings.repairIntel.dealerBackfill (!== false, default ON)  / FLEET_REPAIR_INTEL_DEALER_BACKFILL '0'|'1'
@@ -668,6 +723,7 @@ module.exports = {
   resolveWorkerIsolationFlags, loadWorkerIsolation, ISOLATION_GROUPS, ISOLATION_ENV,
   resolveJustMeContextFlags, loadJustMeContext,
   resolveDbrLookupFlags, loadDbrLookup,
+  resolveAiAkiFlags, loadAiAki, AKI_DEFAULTS,
   resolveRepairIntelFlags, loadRepairIntel, REPAIR_INTEL_ENV,
   resolveLongDwellSpFlags, loadLongDwellSp, LONGDWELL_SP_ENV,
   resolveEmailIntelFlags, loadEmailIntel, EMAIL_INTEL_ENV,

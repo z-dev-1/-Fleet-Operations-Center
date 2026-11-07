@@ -19,6 +19,9 @@ for (const k of ['FLEET_AUTH_SINGLE_FLIGHT', 'FLEET_AUTH_SINGLE_OWNER_AEA', 'FLE
 process.env.FLEET_JUSTME_READ_CONTEXT = '0';
 // On-demand DBR lookup forced OFF so legacy suites run the flag-off parity path.
 process.env.FLEET_AI_DBR_LOOKUP = '0';
+// Aki lane forced OFF so legacy suites can never reach Aki (its settings default is ON).
+// Aki tests use relay.__test__.setAkiFlags or pass an explicit env to resolveAiAkiFlags.
+process.env.FLEET_AI_AKI = '0';
 // Auth propagation forced OFF so legacy suites run the flag-off parity path.
 // Flag-on tests use auth-report._setEnabledForTest / supervisor _setDeps({ propagation }).
 process.env.FLEET_AUTH_PROPAGATION = '0';
